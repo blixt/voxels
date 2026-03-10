@@ -2,6 +2,7 @@
 
 This repository keeps the design loop in versioned documents instead of ad-hoc notes.
 
+- `../roadmap.md`: medium- and long-term engine directions beyond the current implementation loop
 - `plan.md`: current implementation plan and next milestones
 - `research.md`: external sources, constraints, and technical decisions
 - `progress.md`: chronological implementation log

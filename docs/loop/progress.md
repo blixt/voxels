@@ -60,3 +60,4 @@
   - TypeScript `5.9.3`
   - `@webgpu/types` `0.1.69`
   - mise `2026.3.7`
+- Added `docs/roadmap.md` to capture longer-horizon directions for larger worlds, streaming, LOD, procedural generation, lighting, physics, tools, and ray-based rendering, and linked it from the main repo docs entry points.

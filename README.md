@@ -10,6 +10,7 @@ Chrome 146 WebGPU voxel engine built from scratch with Bun and TypeScript.
 4. Open `http://localhost:3000/` for the playground and `http://localhost:3000/bench` for the benchmark suite.
 
 The implementation notes, research links, and verification log live under `docs/loop/`.
+Longer-horizon engine directions live in `docs/roadmap.md`.
 
 ## Features
 
