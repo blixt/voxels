@@ -11,12 +11,15 @@
 - `mise exec -- bun test tests/mesher.test.ts tests/camera.test.ts tests/reference-render-fixtures.test.ts`
 - `mise exec -- bun run check`
 - `mise exec -- bun run build`
+- `mise exec -- bun run versions`
+- `mise exec -- bun --eval 'import { buildChunkMesh, rebuildDirtyMeshes } from "./src/engine/mesher.ts"; ...'`
 
 ### Automated checks
 
 - `bun test`: 15 passing tests covering scene roundtrips, greedy meshing, MagicaVoxel import, stress-scene discovery, edit raycasting, reference-render fixtures, and camera depth ordering/drag mapping.
 - `tsc --noEmit`: passing.
 - `bun run build`: passing.
+- `bun run versions`: passing, with all tracked project/global tool versions matching upstream latest releases.
 
 ### Chrome 146 smoke checks
 
@@ -70,3 +73,23 @@
 - Synthetic pointer drag on the benchmark canvas after the orbit change:
   - drag down by `40px`: `pitch -0.61547 -> -0.93547`
   - the more-negative pitch confirms that downward drags now tilt the scene upward rather than lowering the camera
+
+### Meshing optimization probe
+
+- `bun run check`: passing after adding chunk-local voxel sampling and the adjacent-chunk hidden-face regression test.
+- `bun run build`: passing.
+- Local mesher microbench after the chunk-local sampling change:
+  - sparse `2x2x2` chunk: average `0.0165 ms`
+  - dense `32x32x32` chunk: average `1.79 ms`
+- Local scene mesh timings after the change:
+  - `terrain256`: mesh `518.5 ms`
+  - `editStorm256`: mesh `351.8 ms`
+  - `stressDrawCalls512`: mesh `2.0 ms`
+  - `stressMicroCubes256`: mesh `320.4 ms`
+  - `stressScreens256`: mesh `268.2 ms`
+  - `denseCore128`: mesh `120.9 ms`
+- Fresh Chrome 146 `/bench` stress run (`runStress(1, 5)`) after the change:
+  - `editStorm256`: build `137.7 ms`, mesh `309.7 ms`, avg CPU frame `0.48 ms`, avg GPU frame `0.08 ms`
+  - `stressDrawCalls512`: build `2.9 ms`, mesh `2.2 ms`, avg CPU frame `0.90 ms`, avg GPU frame `0.05 ms`
+  - `stressMicroCubes256`: build `12.3 ms`, mesh `268.9 ms`, avg CPU frame `1.40 ms`, avg GPU frame `0.16 ms`
+  - `stressScreens256`: build `9.3 ms`, mesh `246.8 ms`, avg CPU frame `1.00 ms`, avg GPU frame `0.04 ms`

@@ -11,6 +11,8 @@ Date: 2026-03-10
 
 - Chrome desktop stable 146.0.7680.72/.73 rolled out on March 10, 2026.
 - Chrome's WebGPU implementation has recent performance work around faster `GPUQueue.writeBuffer()` / `writeTexture()` uploads, which is relevant for chunk mesh uploads and live edits.
+- Chrome DevTools' runtime-performance workflow remains the right first-party profiling path for this project: record runtime traces for interaction hot paths, then use the Main track, self time, and search to isolate expensive JavaScript work.
+- DevTools also exposes `console.profile()` / `console.profileEnd()` for CPU profiling, which is useful when I need narrower JavaScript call-tree data than the generic page-load insights provide.
 - Chrome 145 exposes the WGSL `subgroup_uniformity` language feature when the adapter supports the `subgroups` feature, but this project does not need subgroups for the first implementation.
 - WebGPU timestamp queries are quantized to 100 microseconds in Chrome for privacy, which is still sufficient for repeated benchmark runs.
 - WebGPU guaranteed limits from the spec are large enough for per-chunk mesh buffers and practical chunked rendering workloads.
@@ -31,6 +33,7 @@ The first engine revision uses chunked sparse voxel storage plus CPU greedy mesh
 
 - Recover reliable browser automation for the real WebGPU path. The current shell cannot clear the tool-owned Chrome DevTools profile lock, so browser verification is partially blocked outside manual runs.
 - Move chunk meshing to a Web Worker if live-edit stalls become visible.
+- Investigate render bundles for repeated per-frame chunk draw encoding if draw-call CPU overhead becomes material again. This is an inference from the WebGPU API surface, not a Chrome-specific recommendation.
 - Evaluate compute-driven culling or GPU-driven meshing after the core renderer is stable.
 - Add fuller `.vox` scene graph support if real-world assets demand it.
 
@@ -42,6 +45,12 @@ The first engine revision uses chunked sparse voxel storage plus CPU greedy mesh
   https://developer.chrome.com/blog/new-in-webgpu-144
 - Chrome WebGPU developer features in 145:
   https://developer.chrome.com/blog/new-in-webgpu-145
+- Chrome DevTools runtime-performance guide:
+  https://developer.chrome.com/docs/devtools/performance
+- Chrome DevTools performance reference:
+  https://developer.chrome.com/docs/devtools/performance/reference
+- Chrome DevTools console profiling utilities:
+  https://developer.chrome.com/docs/devtools/console/utilities/
 - WebGPU specification and guaranteed limits:
   https://gpuweb.github.io/gpuweb/
 - Mise getting started and tool pinning:

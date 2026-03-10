@@ -57,3 +57,34 @@ test("single voxel mesh stays inside that voxel bounds", () => {
     expect(position[2]).toBeLessThanOrEqual(2);
   }
 });
+
+test("removing a boundary voxel recomputes sparse chunk bounds", () => {
+  const world = new VoxelWorld({ width: 8, height: 8, depth: 8 }, 8, [0, 0xff8899aa]);
+  world.setVoxel(1, 1, 1, 1);
+  world.setVoxel(4, 4, 4, 1);
+  world.setVoxel(1, 1, 1, 0);
+
+  const mesh = buildChunkMesh(world, 0, 0, 0);
+  const positions = collectPositions(mesh);
+
+  expect(mesh.bounds.min).toEqual([4, 4, 4]);
+  expect(mesh.bounds.max).toEqual([5, 5, 5]);
+  for (const position of positions) {
+    expect(position[0]).toBeGreaterThanOrEqual(4);
+    expect(position[0]).toBeLessThanOrEqual(5);
+    expect(position[1]).toBeGreaterThanOrEqual(4);
+    expect(position[1]).toBeLessThanOrEqual(5);
+    expect(position[2]).toBeGreaterThanOrEqual(4);
+    expect(position[2]).toBeLessThanOrEqual(5);
+  }
+});
+
+test("meshing skips hidden faces between adjacent chunks", () => {
+  const world = new VoxelWorld({ width: 64, height: 32, depth: 32 }, 32, [0, 0xff8899aa]);
+  world.fillBox(0, 0, 0, 64, 32, 32, 1);
+
+  const leftMesh = buildChunkMesh(world, 0, 0, 0);
+  const rightMesh = buildChunkMesh(world, 1, 0, 0);
+
+  expect(leftMesh.triangleCount + rightMesh.triangleCount).toBe(20);
+});

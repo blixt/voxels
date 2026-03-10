@@ -30,3 +30,14 @@
 - Exposed stress-suite automation through `/bench`, the new "Run Stress Suite" control, and `window.__VOXELS_BENCH__.runStress(...)`.
 - Inverted vertical orbit dragging so dragging downward tilts the scene upward, matching the existing left/right "pull the object" interaction model.
 - Added small guardrail tests for stress-scene discovery and the new drag-to-orbit sign convention.
+- Tightened the greedy mesher again after profiling sparse and dense chunk workloads:
+  - kept the sparse-chunk solid-bounds scan reduction
+  - added chunk-local voxel sampling so in-chunk face checks bypass repeated `world.getVoxel()` address resolution
+  - preserved hidden-face culling across chunk boundaries with a boundary regression test
+- Re-ran the tool/version check and confirmed the current pins are still current against upstream as of March 10, 2026:
+  - Chrome stable `146.0.7680.72`
+  - Bun `1.3.10`
+  - `@types/bun` `1.3.10`
+  - TypeScript `5.9.3`
+  - `@webgpu/types` `0.1.69`
+  - mise `2026.3.7`

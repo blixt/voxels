@@ -48,31 +48,55 @@ export function rebuildDirtyMeshes(world: VoxelWorld): MeshBuildSummary {
 
 export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: number): ChunkMeshData {
   const chunkSize = world.chunkSize;
+  const chunkKey = world.resolveChunkKey(cx, cy, cz);
   const originX = cx * chunkSize;
   const originY = cy * chunkSize;
   const originZ = cz * chunkSize;
+  const chunk = chunkKey === null ? null : world.chunks.get(chunkKey);
+  const solidBounds = world.getChunkSolidBounds(cx, cy, cz);
+  if (!chunk || !solidBounds) {
+    return {
+      vertexData: new ArrayBuffer(0),
+      vertexCount: 0,
+      indexData: new Uint32Array(0),
+      indexCount: 0,
+      triangleCount: 0,
+      bounds: {
+        min: [originX, originY, originZ],
+        max: [originX + chunkSize, originY + chunkSize, originZ + chunkSize],
+      },
+    };
+  }
+  const chunkArea = chunkSize * chunkSize;
+  const chunkData = chunk.data;
   const quads: Quad[] = [];
-  const mask = new Array<FaceCell | null>(chunkSize * chunkSize);
 
   for (let axis = 0; axis < 3; axis += 1) {
     const u = (axis + 1) % 3;
     const v = (axis + 2) % 3;
-    const x = [0, 0, 0];
+    const uSpan = solidBounds.max[u] - solidBounds.min[u];
+    const vSpan = solidBounds.max[v] - solidBounds.min[v];
+    const mask = new Array<FaceCell | null>(uSpan * vSpan);
+    const x = [...solidBounds.min];
     const q = [0, 0, 0];
     q[axis] = 1;
 
-    for (x[axis] = -1; x[axis] < chunkSize; x[axis] += 1) {
+    for (x[axis] = solidBounds.min[axis] - 1; x[axis] < solidBounds.max[axis]; x[axis] += 1) {
       let maskIndex = 0;
-      for (x[v] = 0; x[v] < chunkSize; x[v] += 1) {
-        for (x[u] = 0; x[u] < chunkSize; x[u] += 1) {
+      for (x[v] = solidBounds.min[v]; x[v] < solidBounds.max[v]; x[v] += 1) {
+        for (x[u] = solidBounds.min[u]; x[u] < solidBounds.max[u]; x[u] += 1) {
           const ax = originX + x[0];
           const ay = originY + x[1];
           const az = originZ + x[2];
           const bx = ax + q[0]!;
           const by = ay + q[1]!;
           const bz = az + q[2]!;
-          const a = x[axis] >= 0 ? world.getVoxel(ax, ay, az) : 0;
-          const b = x[axis] < chunkSize - 1 ? world.getVoxel(bx, by, bz) : 0;
+          const a = x[axis] >= 0
+            ? sampleChunkVoxel(chunkData, chunkSize, chunkArea, x[0]!, x[1]!, x[2]!)
+            : world.getVoxel(ax, ay, az);
+          const b = x[axis] + 1 < chunkSize
+            ? sampleChunkVoxel(chunkData, chunkSize, chunkArea, x[0] + q[0]!, x[1] + q[1]!, x[2] + q[2]!)
+            : world.getVoxel(bx, by, bz);
           if ((a !== 0) === (b !== 0)) {
             mask[maskIndex] = null;
           } else if (a !== 0) {
@@ -85,8 +109,8 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
       }
 
       maskIndex = 0;
-      for (let row = 0; row < chunkSize; row += 1) {
-        for (let column = 0; column < chunkSize; ) {
+      for (let row = 0; row < vSpan; row += 1) {
+        for (let column = 0; column < uSpan; ) {
           const current = mask[maskIndex];
           if (!current) {
             column += 1;
@@ -96,7 +120,7 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
 
           let width = 1;
           while (
-            column + width < chunkSize &&
+            column + width < uSpan &&
             isSameFace(mask[maskIndex + width], current)
           ) {
             width += 1;
@@ -104,9 +128,9 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
 
           let height = 1;
           let shouldGrow = true;
-          while (row + height < chunkSize && shouldGrow) {
+          while (row + height < vSpan && shouldGrow) {
             for (let offset = 0; offset < width; offset += 1) {
-              if (!isSameFace(mask[maskIndex + offset + height * chunkSize], current)) {
+              if (!isSameFace(mask[maskIndex + offset + height * uSpan], current)) {
                 shouldGrow = false;
                 break;
               }
@@ -118,8 +142,8 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
 
           const position: [number, number, number] = [originX, originY, originZ];
           position[axis] += x[axis] + 1;
-          position[u] += column;
-          position[v] += row;
+          position[u] += solidBounds.min[u] + column;
+          position[v] += solidBounds.min[v] + row;
 
           const du: [number, number, number] = [0, 0, 0];
           const dv: [number, number, number] = [0, 0, 0];
@@ -137,7 +161,7 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
 
           for (let dy = 0; dy < height; dy += 1) {
             for (let dx = 0; dx < width; dx += 1) {
-              mask[maskIndex + dx + dy * chunkSize] = null;
+              mask[maskIndex + dx + dy * uSpan] = null;
             }
           }
 
@@ -146,20 +170,6 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
         }
       }
     }
-  }
-
-  if (quads.length === 0) {
-    return {
-      vertexData: new ArrayBuffer(0),
-      vertexCount: 0,
-      indexData: new Uint32Array(0),
-      indexCount: 0,
-      triangleCount: 0,
-      bounds: {
-        min: [originX, originY, originZ],
-        max: [originX + chunkSize, originY + chunkSize, originZ + chunkSize],
-      },
-    };
   }
 
   const vertexCount = quads.length * 4;
@@ -244,6 +254,17 @@ function axisNormal(axis: number, direction: 1 | -1): [number, number, number] {
   const out: [number, number, number] = [0, 0, 0];
   out[axis] = direction;
   return out;
+}
+
+function sampleChunkVoxel(
+  chunkData: Uint16Array,
+  chunkSize: number,
+  chunkArea: number,
+  x: number,
+  y: number,
+  z: number,
+): number {
+  return chunkData[x + y * chunkSize + z * chunkArea] ?? 0;
 }
 
 function writeVertex(
