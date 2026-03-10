@@ -17,6 +17,10 @@ run = "bun run check"
 description = "Check pinned tool and package versions against official upstream releases"
 run = "bun run versions"
 
+[tasks.profile]
+description = "Profile local scene build and meshing performance"
+run = "bun run profile"
+
 [tasks.serve]
 description = "Run the server without rebuilding in a loop"
 run = "bun run start"

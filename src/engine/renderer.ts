@@ -49,9 +49,19 @@ interface GpuChunkResources {
   triangleCount: number;
 }
 
+interface PassStats {
+  drawCalls: number;
+  triangles: number;
+}
+
 export interface RenderStats {
   drawCalls: number;
   triangles: number;
+  syncResourcesMs: number;
+  uploadMs: number;
+  uploadChunks: number;
+  uploadBytes: number;
+  encodeMs: number;
 }
 
 interface ReadbackImage {
@@ -229,7 +239,9 @@ export class WebGpuVoxelRenderer {
 
   render(world: VoxelWorld, camera: CameraState, timer: GpuFrameTimer | null = null, frameIndex = 0): RenderStats {
     this.configureCanvas(this.context.canvas as HTMLCanvasElement);
-    this.syncResources(world);
+    const syncStartedAt = performance.now();
+    const syncStats = this.syncResources(world);
+    const syncResourcesMs = performance.now() - syncStartedAt;
     const canvas = this.context.canvas as HTMLCanvasElement;
     this.writeUniforms(camera, canvas.width / canvas.height);
 
@@ -258,7 +270,9 @@ export class WebGpuVoxelRenderer {
       };
     }
 
+    const encodeStartedAt = performance.now();
     const stats = this.encodeRenderPass(world, encoder, passDescriptor);
+    const encodeMs = performance.now() - encodeStartedAt;
 
     if (timer) {
       const resolveOffset = frameIndex * GpuFrameTimer.resolveStride;
@@ -267,7 +281,14 @@ export class WebGpuVoxelRenderer {
     }
 
     this.device.queue.submit([encoder.finish()]);
-    return stats;
+    return {
+      ...stats,
+      syncResourcesMs,
+      uploadMs: syncStats.uploadMs,
+      uploadChunks: syncStats.uploadChunks,
+      uploadBytes: syncStats.uploadBytes,
+      encodeMs,
+    };
   }
 
   async waitForGpuIdle(): Promise<void> {
@@ -362,7 +383,7 @@ export class WebGpuVoxelRenderer {
     world: VoxelWorld,
     encoder: GPUCommandEncoder,
     passDescriptor: GPURenderPassDescriptor,
-  ): RenderStats {
+  ): PassStats {
     const pass = encoder.beginRenderPass(passDescriptor);
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.uniformBindGroup);
@@ -393,7 +414,14 @@ export class WebGpuVoxelRenderer {
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
 
-  private syncResources(world: VoxelWorld): void {
+  private syncResources(world: VoxelWorld): {
+    uploadMs: number;
+    uploadChunks: number;
+    uploadBytes: number;
+  } {
+    let uploadMs = 0;
+    let uploadChunks = 0;
+    let uploadBytes = 0;
     for (const [chunk, resource] of this.resources.entries()) {
       if (!world.chunks.has(world.resolveChunkKey(chunk.coord.x, chunk.coord.y, chunk.coord.z) ?? -1) || chunk.mesh === null) {
         resource.vertexBuffer.destroy();
@@ -416,12 +444,20 @@ export class WebGpuVoxelRenderer {
       if (!chunk.gpuDirty) {
         continue;
       }
-      this.uploadChunkMesh(chunk, mesh);
+      const upload = this.uploadChunkMesh(chunk, mesh);
+      uploadMs += upload.elapsedMs;
+      uploadChunks += 1;
+      uploadBytes += upload.totalBytes;
       chunk.gpuDirty = false;
     }
+    return { uploadMs, uploadChunks, uploadBytes };
   }
 
-  private uploadChunkMesh(chunk: VoxelChunk, mesh: ChunkMeshData): void {
+  private uploadChunkMesh(chunk: VoxelChunk, mesh: ChunkMeshData): {
+    elapsedMs: number;
+    totalBytes: number;
+  } {
+    const startedAt = performance.now();
     const previous = this.resources.get(chunk);
     previous?.vertexBuffer.destroy();
     previous?.indexBuffer.destroy();
@@ -447,6 +483,10 @@ export class WebGpuVoxelRenderer {
       indexCount: mesh.indexCount,
       triangleCount: mesh.triangleCount,
     });
+    return {
+      elapsedMs: performance.now() - startedAt,
+      totalBytes: mesh.vertexData.byteLength + mesh.indexData.byteLength,
+    };
   }
 }
 

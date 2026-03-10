@@ -9,6 +9,7 @@ import {
   zoomCamera,
   type CameraState,
 } from "../engine/camera.ts";
+import { average, averageWarm, firstValue } from "../engine/benchmark-metrics.ts";
 import { rebuildDirtyMeshes } from "../engine/mesher.ts";
 import { createDefaultScene, getSceneDefinitions } from "../engine/scenes.ts";
 import { decodeWorld, encodeWorld, hashWorld } from "../engine/scene-format.ts";
@@ -202,6 +203,11 @@ export class EngineController {
       const roundtripHash = hashWorld(decodeWorld(encodeWorld(this.world)));
       const editPass = this.runSyntheticEditCheck();
       const cpuSamples: number[] = [];
+      const syncSamples: number[] = [];
+      const uploadSamples: number[] = [];
+      const encodeSamples: number[] = [];
+      const uploadChunkSamples: number[] = [];
+      const uploadByteSamples: number[] = [];
       const timer = this.renderer.createFrameTimer(frameCount);
       let drawCalls = 0;
       let triangles = 0;
@@ -211,6 +217,11 @@ export class EngineController {
         const cpuStartedAt = performance.now();
         const frameStats = this.renderer.render(this.world, this.camera, timer, frameIndex);
         cpuSamples.push(performance.now() - cpuStartedAt);
+        syncSamples.push(frameStats.syncResourcesMs);
+        uploadSamples.push(frameStats.uploadMs);
+        encodeSamples.push(frameStats.encodeMs);
+        uploadChunkSamples.push(frameStats.uploadChunks);
+        uploadByteSamples.push(frameStats.uploadBytes);
         drawCalls = frameStats.drawCalls;
         triangles = frameStats.triangles;
       }
@@ -224,8 +235,12 @@ export class EngineController {
         this.lastValidationArtifacts = null;
       }
 
+      const firstFrameCpuMs = firstValue(cpuSamples) ?? 0;
       const avgFrameCpuMs = average(cpuSamples);
+      const avgWarmFrameCpuMs = averageWarm(cpuSamples);
+      const firstFrameGpuMs = gpuSamples ? firstValue(gpuSamples) : null;
       const avgFrameGpuMs = gpuSamples ? average(gpuSamples) : null;
+      const avgWarmFrameGpuMs = gpuSamples ? averageWarm(gpuSamples) : null;
       this.buildMs = buildMs;
       this.meshMs = meshSummary.elapsedMs;
       this.drawCalls = drawCalls;
@@ -240,8 +255,17 @@ export class EngineController {
         iteration: iteration + 1,
         buildMs,
         meshMs: meshSummary.elapsedMs,
+        firstFrameCpuMs,
         avgFrameCpuMs,
+        avgWarmFrameCpuMs,
+        firstFrameGpuMs,
         avgFrameGpuMs,
+        avgWarmFrameGpuMs,
+        firstFrameSyncMs: firstValue(syncSamples) ?? 0,
+        firstFrameUploadMs: firstValue(uploadSamples) ?? 0,
+        firstFrameEncodeMs: firstValue(encodeSamples) ?? 0,
+        firstFrameUploadChunks: firstValue(uploadChunkSamples) ?? 0,
+        firstFrameUploadBytes: firstValue(uploadByteSamples) ?? 0,
         triangles,
         drawCalls,
         solidVoxelCount: this.world.getStats().solidVoxelCount,
@@ -370,13 +394,6 @@ export class EngineController {
       status: this.status,
     });
   }
-}
-
-function average(values: number[]): number {
-  if (values.length === 0) {
-    return 0;
-  }
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function nextFrame(): Promise<number> {

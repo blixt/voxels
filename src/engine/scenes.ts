@@ -124,24 +124,7 @@ export function createDefaultScene(): SceneBuildResult {
       const plateau = fbm(x / 64, z / 64, 3, 9559);
       const height = Math.floor(28 + hill * 26 + ridge * 8 + plateau * 12);
       const shoreline = 34;
-      for (let y = 0; y <= height; y += 1) {
-        if (y < height - 10) {
-          world.setVoxel(x, y, z, deepStone);
-        } else if (y < height - 3) {
-          world.setVoxel(x, y, z, stone);
-        } else if (height < shoreline) {
-          world.setVoxel(x, y, z, sand);
-        } else if (y === height) {
-          world.setVoxel(x, y, z, grass);
-        } else {
-          world.setVoxel(x, y, z, dirt);
-        }
-      }
-      if (height < shoreline) {
-        for (let y = height + 1; y <= shoreline; y += 1) {
-          world.setVoxel(x, y, z, water);
-        }
-      }
+      fillTerrainColumn(world, x, z, height, shoreline, deepStone, stone, sand, dirt, grass, water);
     }
   }
 
@@ -171,6 +154,38 @@ export function createDefaultScene(): SceneBuildResult {
     notes: ["256^3 world", "Procedural terrain", "Isometric camera target"],
     camera: createCameraPreset([128, 52, 128], 90, 420),
   };
+}
+
+function fillTerrainColumn(
+  world: VoxelWorld,
+  x: number,
+  z: number,
+  height: number,
+  shoreline: number,
+  deepStone: number,
+  stone: number,
+  sand: number,
+  dirt: number,
+  grass: number,
+  water: number,
+): void {
+  const stoneStart = Math.max(0, height - 10);
+  const surfaceStart = Math.max(0, height - 3);
+  if (stoneStart > 0) {
+    world.fillColumn(x, z, 0, stoneStart, deepStone);
+  }
+  if (surfaceStart > stoneStart) {
+    world.fillColumn(x, z, stoneStart, surfaceStart, stone);
+  }
+  if (height < shoreline) {
+    world.fillColumn(x, z, surfaceStart, height + 1, sand);
+    world.fillColumn(x, z, height + 1, shoreline + 1, water);
+    return;
+  }
+  if (height > surfaceStart) {
+    world.fillColumn(x, z, surfaceStart, height, dirt);
+  }
+  world.fillColumn(x, z, height, height + 1, grass);
 }
 
 function createScatterScene(): SceneBuildResult {

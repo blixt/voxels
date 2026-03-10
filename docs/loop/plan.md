@@ -2,13 +2,14 @@
 
 ## Current target
 
-Stabilize the Chrome 146 WebGPU voxel engine by tightening primitive-level validation and browser-side correctness checks:
+Improve Chrome 146 voxel-engine performance with repeatable profiling and correctness guardrails:
 
 - keep Bun as the server, bundler entrypoint, and test runner
 - keep `/` as the editable playground
 - keep `/bench` as the repeatable benchmark runner
 - separate tiny validation scenes from large performance scenes
 - keep the 256x256x256 default scene and live-edit workflow healthy
+- prefer measured rewrites of hot paths over additive complexity
 
 ## Completed sequence
 
@@ -21,12 +22,16 @@ Stabilize the Chrome 146 WebGPU voxel engine by tightening primitive-level valid
 7. Diagnosed the first major renderer artifact with a hypothesis grid instead of ad-hoc tweaks.
 8. Fixed the mesher bug where stale loop coordinates displaced emitted quads outside their voxel bounds.
 9. Added primitive guardrails: single-voxel mesh bounds, depth-order tests, and tiny validation scenes.
+10. Added stress scenes and drag-behavior regression coverage.
+11. Reduced mesher cost with chunk-local sampling, packed face masks, and flat quad records.
+12. Reduced terrain-scene build cost with chunk-aware vertical bulk writes.
+13. Expanded the benchmark harness with first-frame vs warm-frame metrics and a repeatable local profiling script.
 
 ## Next steps
 
-- Turn the new stress scenes into explicit regression targets with per-scene baseline notes and acceptable ranges.
 - Restore fully automatic browser-side GPU verification once the tool-owned Chrome profile lock is cleared.
-- Record fresh `/bench` results for the tiny validation scenes, baseline scenes, and the new stress suite after larger renderer changes.
-- Move chunk meshing into a Web Worker to reduce main-thread stalls during heavy edits.
+- Use the new first-frame metrics to profile GPU upload and resource-sync cost on Chrome 146, then decide whether buffer reuse and `queue.writeBuffer()` are worth keeping.
+- Turn the stress scenes into explicit regression targets with per-scene warm-frame and first-frame baseline ranges.
+- Consider a worker-based meshing path only after the current single-thread mesher stops producing worthwhile wins.
 - Add fuller MagicaVoxel scene graph support, especially rotation decoding.
 - Experiment with GPU-driven culling once the current CPU meshing path is profiled more deeply.

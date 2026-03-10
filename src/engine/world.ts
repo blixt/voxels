@@ -85,16 +85,7 @@ export class VoxelWorld {
       return false;
     }
     if (!chunk) {
-      chunk = {
-        coord: { x: cx, y: cy, z: cz },
-        data: new Uint16Array(this.chunkSize * this.chunkSize * this.chunkSize),
-        solidCount: 0,
-        solidBounds: null,
-        meshDirty: true,
-        gpuDirty: true,
-        mesh: null,
-      };
-      this.chunks.set(chunkKey, chunk);
+      chunk = this.createChunk(chunkKey, cx, cy, cz);
     }
 
     const previous = chunk.data[localIndex] ?? EMPTY_VOXEL;
@@ -147,11 +138,96 @@ export class VoxelWorld {
     materialIndex: number,
   ): void {
     for (let z = startZ; z < endZExclusive; z += 1) {
-      for (let y = startY; y < endYExclusive; y += 1) {
-        for (let x = startX; x < endXExclusive; x += 1) {
-          this.setVoxel(x, y, z, materialIndex);
+      for (let x = startX; x < endXExclusive; x += 1) {
+        this.fillColumn(x, z, startY, endYExclusive, materialIndex);
+      }
+    }
+  }
+
+  fillColumn(
+    x: number,
+    z: number,
+    startY: number,
+    endYExclusive: number,
+    materialIndex: number,
+  ): void {
+    if (x < 0 || z < 0 || x >= this.width || z >= this.depth) {
+      return;
+    }
+    const clippedStartY = Math.max(0, startY);
+    const clippedEndY = Math.min(this.height, endYExclusive);
+    if (clippedStartY >= clippedEndY) {
+      return;
+    }
+
+    const cx = Math.floor(x / this.chunkSize);
+    const cz = Math.floor(z / this.chunkSize);
+    const lx = x - cx * this.chunkSize;
+    const lz = z - cz * this.chunkSize;
+    const columnBase = lx + lz * this.chunkSize * this.chunkSize;
+
+    for (let y = clippedStartY; y < clippedEndY; ) {
+      const cy = Math.floor(y / this.chunkSize);
+      const localStartY = y - cy * this.chunkSize;
+      const localEndY = Math.min(this.chunkSize, localStartY + clippedEndY - y);
+      const chunkKey = toChunkKey(cx, cy, cz, this.chunkCountX, this.chunkCountY);
+      let chunk = this.chunks.get(chunkKey);
+      if (!chunk && materialIndex === EMPTY_VOXEL) {
+        y += localEndY - localStartY;
+        continue;
+      }
+      if (!chunk) {
+        chunk = this.createChunk(chunkKey, cx, cy, cz);
+      }
+
+      let chunkChanged = false;
+      let touchedBottomBoundary = false;
+      let touchedTopBoundary = false;
+      for (let ly = localStartY; ly < localEndY; ly += 1) {
+        const localIndex = columnBase + ly * this.chunkSize;
+        const previous = chunk.data[localIndex] ?? EMPTY_VOXEL;
+        if (previous === materialIndex) {
+          continue;
+        }
+        chunk.data[localIndex] = materialIndex;
+        if (previous === EMPTY_VOXEL && materialIndex !== EMPTY_VOXEL) {
+          chunk.solidCount += 1;
+          this.expandChunkSolidBounds(chunk, lx, ly, lz);
+        } else if (previous !== EMPTY_VOXEL && materialIndex === EMPTY_VOXEL) {
+          chunk.solidCount -= 1;
+          this.invalidateChunkBoundsIfNeeded(chunk, lx, ly, lz);
+        }
+        chunkChanged = true;
+        touchedBottomBoundary ||= ly === 0;
+        touchedTopBoundary ||= ly === this.chunkSize - 1;
+      }
+
+      if (chunkChanged) {
+        this.markChunkDirty(chunk);
+        if (lx === 0) {
+          this.markChunkDirtyByCoord(cx - 1, cy, cz);
+        }
+        if (lx === this.chunkSize - 1) {
+          this.markChunkDirtyByCoord(cx + 1, cy, cz);
+        }
+        if (lz === 0) {
+          this.markChunkDirtyByCoord(cx, cy, cz - 1);
+        }
+        if (lz === this.chunkSize - 1) {
+          this.markChunkDirtyByCoord(cx, cy, cz + 1);
+        }
+        if (touchedBottomBoundary) {
+          this.markChunkDirtyByCoord(cx, cy - 1, cz);
+        }
+        if (touchedTopBoundary) {
+          this.markChunkDirtyByCoord(cx, cy + 1, cz);
+        }
+        if (chunk.solidCount === 0) {
+          this.chunks.delete(chunkKey);
         }
       }
+
+      y += localEndY - localStartY;
     }
   }
 
@@ -240,6 +316,20 @@ export class VoxelWorld {
       min: [...chunk.solidBounds.min],
       max: [...chunk.solidBounds.max],
     };
+  }
+
+  private createChunk(chunkKey: number, cx: number, cy: number, cz: number): VoxelChunk {
+    const chunk = {
+      coord: { x: cx, y: cy, z: cz },
+      data: new Uint16Array(this.chunkSize * this.chunkSize * this.chunkSize),
+      solidCount: 0,
+      solidBounds: null,
+      meshDirty: true,
+      gpuDirty: true,
+      mesh: null,
+    };
+    this.chunks.set(chunkKey, chunk);
+    return chunk;
   }
 
   private markChunkDirty(chunk: VoxelChunk): void {

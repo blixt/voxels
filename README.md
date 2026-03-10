@@ -29,3 +29,6 @@ The implementation notes, research links, and verification log live under `docs/
 - `window.__VOXELS_BENCH__.run(sceneId, iterations, frameCount)`
 - `window.__VOXELS_BENCH__.runStress(iterations, frameCount)`
 - `window.__VOXELS_BENCH__.runAll(iterations, frameCount)`
+- `mise run profile -- --iterations=3 --warmup=1 terrain256 stressDrawCalls512`
+
+The benchmark table separates first-frame costs from warm-frame costs and exposes first-frame sync/upload/encode metrics so scene-load and live-edit regressions are visible without manual spreadsheet work.

@@ -34,6 +34,25 @@
   - kept the sparse-chunk solid-bounds scan reduction
   - added chunk-local voxel sampling so in-chunk face checks bypass repeated `world.getVoxel()` address resolution
   - preserved hidden-face culling across chunk boundaries with a boundary regression test
+- Rewrote the mesher's hottest allocation-heavy paths instead of layering on more helpers:
+  - replaced per-cell face-state objects with a packed `Int32Array` mask
+  - flattened quad records into numeric tuples instead of per-quad `{ position, du, dv }` objects
+  - wrote quad corners directly into the vertex buffer to avoid temporary corner arrays
+- Reworked terrain/scenario generation around vertical bulk writes:
+  - added `fillColumn()` so world generation can write whole Y-runs without repeated voxel-address resolution and repeated cross-chunk bookkeeping
+  - rewrote the default terrain column builder to compose columns out of a few bulk spans instead of one `setVoxel()` per block
+- Expanded the benchmark harness so it now separates first-frame costs from warm-frame costs:
+  - first-frame CPU/GPU
+  - warm-frame CPU/GPU
+  - first-frame resource-sync, upload, encode, upload-chunk-count, and upload-byte metrics
+  - added unit tests for the pure benchmark sample summarization helpers
+- Added a repeatable local profiling harness for build/mesh iteration when browser automation is blocked:
+  - `mise run profile -- --iterations=3 --warmup=1 ...`
+  - the script warms up each scene once, then reports JSON summaries for build and mesh timings
+- Tightened the verification rule for performance work:
+  - warmed Bun profiles remain the fast local screen
+  - clean isolated Chrome 146 benchmark runs are now the acceptance gate because the renderer and mesher hot paths execute there in production
+- Re-ran the current performance branch in a clean isolated Chrome 146 tab and confirmed that the bulk-write path, flatter mesher, and richer metrics all hold together under the target runtime.
 - Re-ran the tool/version check and confirmed the current pins are still current against upstream as of March 10, 2026:
   - Chrome stable `146.0.7680.72`
   - Bun `1.3.10`

@@ -151,8 +151,15 @@ function renderResults(target: HTMLElement, results: SceneBenchmarkSample[]): vo
       <td>${sample.iteration}</td>
       <td>${Number(sample.buildMs).toFixed(1)}</td>
       <td>${Number(sample.meshMs).toFixed(1)}</td>
-      <td>${Number(sample.avgFrameCpuMs).toFixed(2)}</td>
-      <td>${sample.avgFrameGpuMs === null ? "n/a" : Number(sample.avgFrameGpuMs).toFixed(2)}</td>
+      <td>${Number(sample.firstFrameCpuMs).toFixed(2)}</td>
+      <td>${formatMetric(sample.avgWarmFrameCpuMs, 2)}</td>
+      <td>${formatMetric(sample.firstFrameGpuMs, 2)}</td>
+      <td>${formatMetric(sample.avgWarmFrameGpuMs, 2)}</td>
+      <td>${Number(sample.firstFrameSyncMs).toFixed(2)}</td>
+      <td>${Number(sample.firstFrameUploadMs).toFixed(2)}</td>
+      <td>${Number(sample.firstFrameEncodeMs).toFixed(2)}</td>
+      <td>${Number(sample.firstFrameUploadChunks).toLocaleString()}</td>
+      <td>${formatBytes(sample.firstFrameUploadBytes)}</td>
       <td>${formatMetric(sample.meanAbsoluteError, 2)}</td>
       <td>${formatPercent(sample.coverageMismatchRatio)}</td>
       <td>${Number(sample.drawCalls).toLocaleString()}</td>
@@ -173,8 +180,15 @@ function renderResults(target: HTMLElement, results: SceneBenchmarkSample[]): vo
           <th>Iter</th>
           <th>Build</th>
           <th>Mesh</th>
-          <th>CPU</th>
-          <th>GPU</th>
+          <th>1st CPU</th>
+          <th>Warm CPU</th>
+          <th>1st GPU</th>
+          <th>Warm GPU</th>
+          <th>Sync</th>
+          <th>Upload</th>
+          <th>Encode</th>
+          <th>Up Chunks</th>
+          <th>Up Bytes</th>
           <th>MAE</th>
           <th>Mask Δ</th>
           <th>Draws</th>
@@ -220,6 +234,13 @@ function formatMetric(value: number | null, digits: number): string {
 
 function formatPercent(value: number | null): string {
   return value === null ? "n/a" : `${(value * 100).toFixed(2)}%`;
+}
+
+function formatBytes(value: number): string {
+  if (value === 0) {
+    return "0";
+  }
+  return `${(value / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 function formatVisualStatus(value: boolean | null): { className: string; label: string } {

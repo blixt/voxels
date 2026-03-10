@@ -73,8 +73,17 @@ export interface SceneBenchmarkSample {
   iteration: number;
   buildMs: number;
   meshMs: number;
+  firstFrameCpuMs: number;
   avgFrameCpuMs: number;
+  avgWarmFrameCpuMs: number | null;
+  firstFrameGpuMs: number | null;
   avgFrameGpuMs: number | null;
+  avgWarmFrameGpuMs: number | null;
+  firstFrameSyncMs: number;
+  firstFrameUploadMs: number;
+  firstFrameEncodeMs: number;
+  firstFrameUploadChunks: number;
+  firstFrameUploadBytes: number;
   triangles: number;
   drawCalls: number;
   solidVoxelCount: number;

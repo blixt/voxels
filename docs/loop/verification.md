@@ -13,10 +13,12 @@
 - `mise exec -- bun run build`
 - `mise exec -- bun run versions`
 - `mise exec -- bun --eval 'import { buildChunkMesh, rebuildDirtyMeshes } from "./src/engine/mesher.ts"; ...'`
+- `mise exec -- bun <temporary A/B mesher harness comparing the working tree against HEAD on identical scene builds>`
+- `mise exec -- bun <temporary A/B scene-build harness comparing the working tree against HEAD on identical scene builds>`
 
 ### Automated checks
 
-- `bun test`: 15 passing tests covering scene roundtrips, greedy meshing, MagicaVoxel import, stress-scene discovery, edit raycasting, reference-render fixtures, and camera depth ordering/drag mapping.
+- `bun test`: 21 passing tests covering scene roundtrips, greedy meshing, MagicaVoxel import, stress-scene discovery, edit raycasting, reference-render fixtures, camera depth ordering/drag mapping, bulk column writes, and benchmark-metric helpers.
 - `tsc --noEmit`: passing.
 - `bun run build`: passing.
 - `bun run versions`: passing, with all tracked project/global tool versions matching upstream latest releases.
@@ -93,3 +95,51 @@
   - `stressDrawCalls512`: build `2.9 ms`, mesh `2.2 ms`, avg CPU frame `0.90 ms`, avg GPU frame `0.05 ms`
   - `stressMicroCubes256`: build `12.3 ms`, mesh `268.9 ms`, avg CPU frame `1.40 ms`, avg GPU frame `0.16 ms`
   - `stressScreens256`: build `9.3 ms`, mesh `246.8 ms`, avg CPU frame `1.00 ms`, avg GPU frame `0.04 ms`
+
+### Meshing allocation rewrite probe
+
+- `bun run check`: passing after flattening face masks and quad records.
+- `bun run build`: passing.
+- Current warmed local Bun profile (`mise run profile -- --iterations=3 --warmup=1 ...`) on the active branch:
+  - `terrain256`: build avg `36.3 ms`, mesh avg `155.1 ms`
+  - `editStorm256`: build avg `39.5 ms`, mesh avg `233.8 ms`
+  - `stressDrawCalls512`: build avg `1.84 ms`, mesh avg `2.38 ms`
+  - `stressMicroCubes256`: build avg `4.74 ms`, mesh avg `850.1 ms`
+  - `stressScreens256`: build avg `3.13 ms`, mesh avg `279.2 ms`
+  - `denseCore128`: build avg `62.0 ms`, mesh avg `61.1 ms`
+- Temporary direct `HEAD` comparison in a detached worktree showed that Bun/JSC does not rank the mesher changes the same way Chrome/V8 does, so Bun-only numbers are now treated as a screening tool rather than the final oracle.
+
+### Scene build rewrite probe
+
+- `bun run check`: passing after adding `fillColumn()` and the cross-chunk column tests.
+- `bun run build`: passing.
+- Current warmed local Bun profile:
+  - `terrain256`: build avg `36.3 ms`
+  - `editStorm256`: build avg `39.5 ms`
+
+### Harness metrics probe
+
+- `tests/benchmark-metrics.test.ts`: passing.
+- `/bench` result rows now expose:
+  - first-frame CPU/GPU cost
+  - warm-frame CPU/GPU cost
+  - first-frame sync/upload/encode cost
+  - first-frame upload chunk count and upload bytes
+
+### Local profile script probe
+
+- `mise run profile -- --iterations=3 --warmup=1 terrain256 stressDrawCalls512`: passing.
+- Sample output:
+  - `terrain256`: build avg `36.3 ms`, mesh avg `155.1 ms`, triangles `100,062`, chunks `136`
+  - `stressDrawCalls512`: build avg `1.84 ms`, mesh avg `2.38 ms`, triangles `6,144`, chunks `512`
+
+### Clean Chrome 146 rerun after the current performance branch
+
+- Fresh isolated Chrome 146 `/bench` page with no overlapping benchmark runs:
+  - `terrain256`: build `53.6 ms`, mesh `168.1 ms`, first CPU `1.10 ms`, warm CPU `0.05 ms`, first upload `0.90 ms`, first upload chunks `136`, first upload bytes `5.20 MB`
+  - `editStorm256`: build `52.9 ms`, mesh `173.0 ms`, first CPU `1.00 ms`, warm CPU `0.15 ms`, first upload `0.90 ms`, first upload chunks `172`, first upload bytes `5.86 MB`
+  - `stressDrawCalls512`: build `1.8 ms`, mesh `1.4 ms`, first CPU `2.90 ms`, warm CPU `0.20 ms`, first upload `2.50 ms`, first upload chunks `512`, first upload bytes `0.30 MB`
+  - `stressMicroCubes256`: build `6.8 ms`, mesh `155.4 ms`, first CPU `3.90 ms`, warm CPU `0.25 ms`, first upload `3.60 ms`, first upload chunks `448`, first upload bytes `9.66 MB`
+  - `stressScreens256`: build `4.1 ms`, mesh `132.5 ms`, first CPU `2.00 ms`, warm CPU `0.15 ms`, first upload `1.60 ms`, first upload chunks `392`, first upload bytes `1.14 MB`
+- Current validation guardrail in the same isolated Chrome 146 context:
+  - `validationBlocks`: build `0.1 ms`, mesh `0.3 ms`, correctness `pass`, visual `pass`, `MAE 1.63`, `coverage mismatch 0.00%`

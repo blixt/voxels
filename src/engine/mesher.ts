@@ -4,20 +4,7 @@ import { VoxelWorld } from "./world.ts";
 const FLOAT32_BYTES = 4;
 const VERTEX_STRIDE = 20;
 const NORMAL_SCALE = 127;
-
-interface FaceCell {
-  material: number;
-  normal: 1 | -1;
-}
-
-interface Quad {
-  position: [number, number, number];
-  du: [number, number, number];
-  dv: [number, number, number];
-  axis: number;
-  normal: 1 | -1;
-  material: number;
-}
+const QUAD_STRIDE = 11;
 
 export interface MeshBuildSummary {
   meshCount: number;
@@ -67,16 +54,17 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
       },
     };
   }
+
   const chunkArea = chunkSize * chunkSize;
   const chunkData = chunk.data;
-  const quads: Quad[] = [];
+  const quads: number[] = [];
 
   for (let axis = 0; axis < 3; axis += 1) {
     const u = (axis + 1) % 3;
     const v = (axis + 2) % 3;
     const uSpan = solidBounds.max[u] - solidBounds.min[u];
     const vSpan = solidBounds.max[v] - solidBounds.min[v];
-    const mask = new Array<FaceCell | null>(uSpan * vSpan);
+    const mask = new Int32Array(uSpan * vSpan);
     const x = [...solidBounds.min];
     const q = [0, 0, 0];
     q[axis] = 1;
@@ -97,13 +85,11 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
           const b = x[axis] + 1 < chunkSize
             ? sampleChunkVoxel(chunkData, chunkSize, chunkArea, x[0] + q[0]!, x[1] + q[1]!, x[2] + q[2]!)
             : world.getVoxel(bx, by, bz);
-          if ((a !== 0) === (b !== 0)) {
-            mask[maskIndex] = null;
-          } else if (a !== 0) {
-            mask[maskIndex] = { material: a, normal: 1 };
-          } else {
-            mask[maskIndex] = { material: b, normal: -1 };
-          }
+          mask[maskIndex] = (a !== 0) === (b !== 0)
+            ? 0
+            : a !== 0
+            ? a
+            : -b;
           maskIndex += 1;
         }
       }
@@ -112,17 +98,14 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
       for (let row = 0; row < vSpan; row += 1) {
         for (let column = 0; column < uSpan; ) {
           const current = mask[maskIndex];
-          if (!current) {
+          if (current === 0) {
             column += 1;
             maskIndex += 1;
             continue;
           }
 
           let width = 1;
-          while (
-            column + width < uSpan &&
-            isSameFace(mask[maskIndex + width], current)
-          ) {
+          while (column + width < uSpan && mask[maskIndex + width] === current) {
             width += 1;
           }
 
@@ -130,7 +113,7 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
           let shouldGrow = true;
           while (row + height < vSpan && shouldGrow) {
             for (let offset = 0; offset < width; offset += 1) {
-              if (!isSameFace(mask[maskIndex + offset + height * uSpan], current)) {
+              if (mask[maskIndex + offset + height * uSpan] !== current) {
                 shouldGrow = false;
                 break;
               }
@@ -140,28 +123,32 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
             }
           }
 
-          const position: [number, number, number] = [originX, originY, originZ];
-          position[axis] += x[axis] + 1;
-          position[u] += solidBounds.min[u] + column;
-          position[v] += solidBounds.min[v] + row;
-
-          const du: [number, number, number] = [0, 0, 0];
-          const dv: [number, number, number] = [0, 0, 0];
-          du[u] = width;
-          dv[v] = height;
-
-          quads.push({
-            position,
-            du,
-            dv,
+          quads.push(
+            originX
+              + (axis === 0 ? x[axis] + 1 : 0)
+              + (u === 0 ? solidBounds.min[u] + column : 0)
+              + (v === 0 ? solidBounds.min[v] + row : 0),
+            originY
+              + (axis === 1 ? x[axis] + 1 : 0)
+              + (u === 1 ? solidBounds.min[u] + column : 0)
+              + (v === 1 ? solidBounds.min[v] + row : 0),
+            originZ
+              + (axis === 2 ? x[axis] + 1 : 0)
+              + (u === 2 ? solidBounds.min[u] + column : 0)
+              + (v === 2 ? solidBounds.min[v] + row : 0),
+            u === 0 ? width : 0,
+            u === 1 ? width : 0,
+            u === 2 ? width : 0,
+            v === 0 ? height : 0,
+            v === 1 ? height : 0,
+            v === 2 ? height : 0,
             axis,
-            normal: current.normal,
-            material: current.material,
-          });
+            current,
+          );
 
           for (let dy = 0; dy < height; dy += 1) {
             for (let dx = 0; dx < width; dx += 1) {
-              mask[maskIndex + dx + dy * uSpan] = null;
+              mask[maskIndex + dx + dy * uSpan] = 0;
             }
           }
 
@@ -172,8 +159,9 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
     }
   }
 
-  const vertexCount = quads.length * 4;
-  const indexCount = quads.length * 6;
+  const quadCount = quads.length / QUAD_STRIDE;
+  const vertexCount = quadCount * 4;
+  const indexCount = quadCount * 6;
   const vertexData = new ArrayBuffer(vertexCount * VERTEX_STRIDE);
   const vertexView = new DataView(vertexData);
   const indexData = new Uint32Array(indexCount);
@@ -188,33 +176,53 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
   let maxY = -Infinity;
   let maxZ = -Infinity;
 
-  for (const quad of quads) {
-    const color = world.getPaletteColor(quad.material);
-    const normal = axisNormal(quad.axis, quad.normal);
-    const corners = quad.normal === 1
-      ? [
-          quad.position,
-          addPoint(quad.position, quad.du),
-          addPoint(addPoint(quad.position, quad.du), quad.dv),
-          addPoint(quad.position, quad.dv),
-        ]
-      : [
-          quad.position,
-          addPoint(quad.position, quad.dv),
-          addPoint(addPoint(quad.position, quad.dv), quad.du),
-          addPoint(quad.position, quad.du),
-        ];
+  for (let quadIndex = 0; quadIndex < quads.length; quadIndex += QUAD_STRIDE) {
+    const positionX = quads[quadIndex]!;
+    const positionY = quads[quadIndex + 1]!;
+    const positionZ = quads[quadIndex + 2]!;
+    const duX = quads[quadIndex + 3]!;
+    const duY = quads[quadIndex + 4]!;
+    const duZ = quads[quadIndex + 5]!;
+    const dvX = quads[quadIndex + 6]!;
+    const dvY = quads[quadIndex + 7]!;
+    const dvZ = quads[quadIndex + 8]!;
+    const axis = quads[quadIndex + 9]!;
+    const face = quads[quadIndex + 10]!;
+    const normal = face > 0 ? 1 : -1;
+    const material = normal === 1 ? face : -face;
+    const color = world.getPaletteColor(material);
+    const normalX = axis === 0 ? normal : 0;
+    const normalY = axis === 1 ? normal : 0;
+    const normalZ = axis === 2 ? normal : 0;
 
-    for (const corner of corners) {
-      minX = Math.min(minX, corner[0]);
-      minY = Math.min(minY, corner[1]);
-      minZ = Math.min(minZ, corner[2]);
-      maxX = Math.max(maxX, corner[0]);
-      maxY = Math.max(maxY, corner[1]);
-      maxZ = Math.max(maxZ, corner[2]);
-      writeVertex(vertexView, vertexOffset, corner, normal, color);
-      vertexOffset += VERTEX_STRIDE;
-    }
+    const corner0X = positionX;
+    const corner0Y = positionY;
+    const corner0Z = positionZ;
+    const corner1X = normal === 1 ? positionX + duX : positionX + dvX;
+    const corner1Y = normal === 1 ? positionY + duY : positionY + dvY;
+    const corner1Z = normal === 1 ? positionZ + duZ : positionZ + dvZ;
+    const corner2X = positionX + duX + dvX;
+    const corner2Y = positionY + duY + dvY;
+    const corner2Z = positionZ + duZ + dvZ;
+    const corner3X = normal === 1 ? positionX + dvX : positionX + duX;
+    const corner3Y = normal === 1 ? positionY + dvY : positionY + duY;
+    const corner3Z = normal === 1 ? positionZ + dvZ : positionZ + duZ;
+
+    minX = Math.min(minX, corner0X, corner1X, corner2X, corner3X);
+    minY = Math.min(minY, corner0Y, corner1Y, corner2Y, corner3Y);
+    minZ = Math.min(minZ, corner0Z, corner1Z, corner2Z, corner3Z);
+    maxX = Math.max(maxX, corner0X, corner1X, corner2X, corner3X);
+    maxY = Math.max(maxY, corner0Y, corner1Y, corner2Y, corner3Y);
+    maxZ = Math.max(maxZ, corner0Z, corner1Z, corner2Z, corner3Z);
+
+    writeVertex(vertexView, vertexOffset, corner0X, corner0Y, corner0Z, normalX, normalY, normalZ, color);
+    vertexOffset += VERTEX_STRIDE;
+    writeVertex(vertexView, vertexOffset, corner1X, corner1Y, corner1Z, normalX, normalY, normalZ, color);
+    vertexOffset += VERTEX_STRIDE;
+    writeVertex(vertexView, vertexOffset, corner2X, corner2Y, corner2Z, normalX, normalY, normalZ, color);
+    vertexOffset += VERTEX_STRIDE;
+    writeVertex(vertexView, vertexOffset, corner3X, corner3Y, corner3Z, normalX, normalY, normalZ, color);
+    vertexOffset += VERTEX_STRIDE;
 
     indexData[indexOffset + 0] = baseVertex;
     indexData[indexOffset + 1] = baseVertex + 1;
@@ -231,29 +239,12 @@ export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: nu
     vertexCount,
     indexData,
     indexCount,
-    triangleCount: quads.length * 2,
+    triangleCount: quadCount * 2,
     bounds: {
       min: [minX, minY, minZ],
       max: [maxX, maxY, maxZ],
     },
   };
-}
-
-function isSameFace(a: FaceCell | null | undefined, b: FaceCell): boolean {
-  return !!a && a.material === b.material && a.normal === b.normal;
-}
-
-function addPoint(
-  a: [number, number, number],
-  b: [number, number, number],
-): [number, number, number] {
-  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
-}
-
-function axisNormal(axis: number, direction: 1 | -1): [number, number, number] {
-  const out: [number, number, number] = [0, 0, 0];
-  out[axis] = direction;
-  return out;
 }
 
 function sampleChunkVoxel(
@@ -264,22 +255,26 @@ function sampleChunkVoxel(
   y: number,
   z: number,
 ): number {
-  return chunkData[x + y * chunkSize + z * chunkArea] ?? 0;
+  return chunkData[x + y * chunkSize + z * chunkArea];
 }
 
 function writeVertex(
   view: DataView,
   byteOffset: number,
-  position: [number, number, number],
-  normal: [number, number, number],
+  x: number,
+  y: number,
+  z: number,
+  normalX: number,
+  normalY: number,
+  normalZ: number,
   color: number,
 ): void {
-  view.setFloat32(byteOffset + 0 * FLOAT32_BYTES, position[0], true);
-  view.setFloat32(byteOffset + 1 * FLOAT32_BYTES, position[1], true);
-  view.setFloat32(byteOffset + 2 * FLOAT32_BYTES, position[2], true);
-  view.setInt8(byteOffset + 12, normal[0] * NORMAL_SCALE);
-  view.setInt8(byteOffset + 13, normal[1] * NORMAL_SCALE);
-  view.setInt8(byteOffset + 14, normal[2] * NORMAL_SCALE);
+  view.setFloat32(byteOffset + 0 * FLOAT32_BYTES, x, true);
+  view.setFloat32(byteOffset + 1 * FLOAT32_BYTES, y, true);
+  view.setFloat32(byteOffset + 2 * FLOAT32_BYTES, z, true);
+  view.setInt8(byteOffset + 12, normalX * NORMAL_SCALE);
+  view.setInt8(byteOffset + 13, normalY * NORMAL_SCALE);
+  view.setInt8(byteOffset + 14, normalZ * NORMAL_SCALE);
   view.setInt8(byteOffset + 15, NORMAL_SCALE);
   view.setUint32(byteOffset + 16, color, true);
 }
