@@ -1,0 +1,20 @@
+{
+  "name": "voxels",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/server.ts",
+    "build": "bun run scripts/build.ts",
+    "start": "NODE_ENV=production bun run src/server.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun test",
+    "versions": "bun run scripts/check-versions.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.10",
+    "@webgpu/types": "0.1.69",
+    "typescript": "5.9.3"
+  }
+}

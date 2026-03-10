@@ -1,0 +1,25 @@
+# Progress Log
+
+## 2026-03-10
+
+- Confirmed the workspace starts empty and is not an existing git repository.
+- Verified local tooling state and moved the workspace onto current stable tool versions: `mise 2026.3.7`, Bun `1.3.10`, TypeScript `5.9.3`, `@webgpu/types 0.1.69`, and Chrome 146.
+- Researched current Chrome stable release status, Bun server/build APIs, Mise tool pinning, and MagicaVoxel `.vox` format references.
+- Chose chunked sparse storage plus greedy meshing for the first engine implementation.
+- Created the repository workflow docs and initial build/test harness.
+- Pinned Bun 1.3.10 with `mise.toml` and installed project-local TypeScript/WebGPU type tooling.
+- Built the Bun server, browser bundles, playground route, benchmark route, and the shared page shell.
+- Implemented chunked sparse voxel storage, deterministic scene generators, VXSC serialization, and MagicaVoxel `.vox` import.
+- Implemented CPU greedy meshing, WebGPU buffer uploads, orthographic isometric rendering, and basic directional/hemi lighting.
+- Added live voxel removal/placement, export/import flows, and browser-exposed automation handles.
+- Added unit tests for scene serialization, meshing, `.vox` import, and edit raycasting.
+- Fixed two browser-found bugs during smoke testing: timestamp query resolve alignment and add-voxel adjacency resolution.
+- Switched renderer debugging to a broad hypothesis grid with tiny verification cases instead of one-off visual guesses.
+- Proved that camera projection and orthographic depth ordering were internally consistent before changing render code.
+- Fixed the greedy-mesher quad-position bug and added a regression test that fails if a single voxel emits vertices outside its own bounds.
+- Added a camera depth regression test and split benchmark scenes into `performance` and `validation` categories.
+- Added tiny validation scenes for a single voxel and a 2x2x2 cube so the harness starts from primitives before larger scenes.
+- Updated the benchmark UI to treat visual metrics as `n/a` on performance scenes instead of pretending those scenes ran image validation.
+- Proved that a later browser-only visual failure was caused by a stale cached `bench.js`, not by the current renderer or reference oracle.
+- Hardened the Bun server against stale client bundles by serving HTML, CSS, and build assets with `no-store` caching and cache-busted module URLs.
+- Re-ran the primitive probes and `validationBlocks` in Chrome 146 after a cache-bypass reload; the browser now matches the current source and the validation pass is green.

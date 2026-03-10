@@ -1,0 +1,17 @@
+# Research / Build / Test Loop
+
+This repository keeps the design loop in versioned documents instead of ad-hoc notes.
+
+- `plan.md`: current implementation plan and next milestones
+- `research.md`: external sources, constraints, and technical decisions
+- `progress.md`: chronological implementation log
+- `hypotheses.md`: hypothesis grid, tiny probes, and outcomes for renderer errors
+- `verification.md`: commands, browser checks, and benchmark runs
+
+Loop:
+
+1. Capture constraints and current browser/runtime facts in `research.md`.
+2. Record the active build plan in `plan.md`.
+3. Implement the next smallest slice and log major decisions in `progress.md`.
+4. Run `mise run test`, exercise `/bench`, and record the outcome in `verification.md`.
+5. Update `plan.md` with follow-up performance or correctness work.
