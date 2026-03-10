@@ -1,16 +1,16 @@
 # Voxels
 
-Chrome 146 WebGPU voxel engine built from scratch with Bun and TypeScript.
+Chrome 146 WebGPU voxel game and engine built from scratch with Bun and TypeScript.
 
 ## Workflow
 
 1. Install tooling with `mise install`.
 2. Install dependencies with `bun install`.
 3. Start the app with `mise run dev`.
-4. Open `http://localhost:3000/` for the playground and `http://localhost:3000/bench` for the benchmark suite.
+4. Open `http://localhost:3000/` for the game and `http://localhost:3000/bench` for the benchmark suite.
 
 The implementation notes, research links, and verification log live under `docs/loop/`.
-Longer-horizon engine directions live in `docs/roadmap.md`.
+The staged game/engine roadmap lives in `docs/roadmap.md`.
 A broader architecture/reference survey lives in `docs/20260311-voxel-research.md`.
 Repo-specific guidance for agent-driven research, implementation, and verification lives in `docs/agent-playbook.md`.
 
@@ -18,12 +18,19 @@ Repo-specific guidance for agent-driven research, implementation, and verificati
 
 - Sparse chunked voxel storage with live edits
 - CPU greedy meshing for WebGPU rendering
-- Orthographic isometric default camera
+- Current orthographic isometric renderer baseline and benchmark scenes
 - Custom `VXSC` scene format with RLE-compressed chunk payloads
 - MagicaVoxel `.vox` import
 - Repeatable benchmark harness with separate primitive validation and performance scenes
 - Targeted stress scenes for draw calls, tiny-surface throughput, overdraw, and edit-heavy workloads
 - Image-diff validation against a software reference renderer
+
+## Current direction
+
+- `/` is being converted from a demo playground into a full-screen voxel game.
+- The world target is procedurally generated, lazily streamed, effectively infinite in `X/Z`, and bounded to `Y = 0..16383`.
+- The architecture is being pushed toward persistence, remote authority, and multiplayer instead of standalone scenes.
+- `/bench` remains the correctness and performance oracle while the game runtime grows.
 
 ## Benchmark automation
 

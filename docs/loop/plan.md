@@ -1,37 +1,107 @@
 # Plan
 
-## Current target
+## Active target
 
-Improve Chrome 146 voxel-engine performance with repeatable profiling and correctness guardrails:
+Turn `/` into the first slice of a real voxel game while preserving `/bench` as the repeatable correctness and performance harness.
 
-- keep Bun as the server, bundler entrypoint, and test runner
-- keep `/` as the editable playground
-- keep `/bench` as the repeatable benchmark runner
-- separate tiny validation scenes from large performance scenes
-- keep the 256x256x256 default scene and live-edit workflow healthy
-- prefer measured rewrites of hot paths over additive complexity
+The game direction is intentionally demanding:
 
-## Completed sequence
+- full-screen WebGPU canvas with click-to-capture cursor
+- Minecraft-inspired interaction model
+- voxel scale around `1 cm^3`
+- procedurally generated world
+- effectively infinite `X/Z`
+- `Y` range `0..16383`
+- lazy generation and streaming on demand
+- architecture that can grow into persistence, remote authority, and multiplayer
+- inventory-driven gather/build loop, starting with color-coded voxels
 
-1. Established Bun + TypeScript + Mise project wiring.
-2. Built chunked storage, scene generators, and persistence.
-3. Implemented greedy meshing and GPU upload lifecycle.
-4. Rendered the world with WebGPU and basic lighting.
-5. Added interactive editing and import/export tools.
-6. Added benchmark automation and correctness checks.
-7. Diagnosed the first major renderer artifact with a hypothesis grid instead of ad-hoc tweaks.
-8. Fixed the mesher bug where stale loop coordinates displaced emitted quads outside their voxel bounds.
-9. Added primitive guardrails: single-voxel mesh bounds, depth-order tests, and tiny validation scenes.
-10. Added stress scenes and drag-behavior regression coverage.
-11. Reduced mesher cost with chunk-local sampling, packed face masks, and flat quad records.
-12. Reduced terrain-scene build cost with chunk-aware vertical bulk writes.
-13. Expanded the benchmark harness with first-frame vs warm-frame metrics and a repeatable local profiling script.
+## Current principles
 
-## Next steps
+- Prefer broad research and broad error-case enumeration before locking onto one fix or design.
+- Prefer tiny verification cases before large integrated scenes.
+- Keep `/bench` as the engine oracle for deterministic validation and performance tracking.
+- Keep work incremental enough that every slice can be researched, implemented, verified, documented, and committed.
+- Prefer rewriting/removing over layering on more abstractions.
+- Keep the repository usable for parallel agent work and worktree-based A/B comparisons.
 
-- Restore fully automatic browser-side GPU verification once the tool-owned Chrome profile lock is cleared.
-- Use the new first-frame metrics to profile GPU upload and resource-sync cost on Chrome 146, then decide whether buffer reuse and `queue.writeBuffer()` are worth keeping.
-- Turn the stress scenes into explicit regression targets with per-scene warm-frame and first-frame baseline ranges.
-- Consider a worker-based meshing path only after the current single-thread mesher stops producing worthwhile wins.
-- Add fuller MagicaVoxel scene graph support, especially rotation decoding.
-- Experiment with GPU-driven culling once the current CPU meshing path is profiled more deeply.
+## Phase status
+
+### Completed foundation
+
+1. Bun + TypeScript + Mise project setup.
+2. Chunked sparse world storage and scene serialization.
+3. WebGPU renderer with greedy-meshed chunk uploads.
+4. Orthographic isometric camera path and default terrain scene.
+5. Import/export support and live voxel edits in the old playground flow.
+6. `/bench` correctness and performance harness with primitive validation scenes and stress scenes.
+7. Repo-local docs for research, progress, verification, and agent workflow.
+
+### Active pivot
+
+1. Replace the `/` playground shell with a dedicated game shell.
+2. Split game input/runtime code away from the orbit/benchmark controller stack.
+3. Establish a first-person camera/input path that does not destabilize the current benchmark renderer.
+4. Reframe the roadmap around an iterative path to a shared persistent world instead of around standalone demo scenes.
+
+## Next slices
+
+### Slice 1: game shell and movement
+
+- Full-screen `/` experience with HUD, crosshair, and click-to-capture pointer lock.
+- Dedicated game controller instead of reusing the orbit playground controller.
+- First-person camera, mouse-look, movement, and a debug API that automation can call.
+- Reuse the current world/renderer stack where possible so the slice stays small.
+
+### Slice 2: world model split
+
+- Separate "authoritative world state" from "currently resident/renderable chunks".
+- Introduce chunk coordinates in world space instead of a single bounded scene volume.
+- Add a generation interface that can lazily provide chunk contents by coordinate.
+- Keep edit overlays separate from generated base terrain.
+
+### Slice 3: infinite world prototype
+
+- Infinite `X/Z` chunk addressing.
+- `Y` domain `0..16383`.
+- Lazy procedural chunk generation near the player only.
+- Initial biome/color distribution aimed at exploration rather than realism.
+- Bench and validation cases for generation boundaries and stream-in churn.
+
+### Slice 4: interaction loop
+
+- Break/place interaction from center-screen picking.
+- Inventory with `32` stacks and `1024` voxels per stack.
+- Destroyed voxels flow into inventory.
+- Color is the first material identity (`#ABC`, `4096` possible values).
+- Unit tests for inventory rules and deterministic interaction cases.
+
+### Slice 5: persistence boundary
+
+- Define region/chunk serialization suitable for browser cache and future remote sync.
+- Add browser-side persistent cache for generated/edited chunks.
+- Define protocol shapes for chunk snapshots, edit deltas, and player state.
+- Keep the single-player path compatible with eventual server authority.
+
+### Slice 6: multiplayer MVP path
+
+- Move to a remote authoritative world service.
+- Multiple clients can connect and edit the same persistent world.
+- Keep protocol and storage binary and chunk-addressable from the start.
+- Add repeatable multi-client verification cases before deeper gameplay systems.
+
+## Immediate research questions
+
+- Which smallest first-person slice proves the `/` pivot without destabilizing `/bench`?
+- Which browser storage path should be treated as the local persistence baseline: OPFS alone, IndexedDB metadata plus OPFS payloads, or something simpler first?
+- When multiplayer arrives, should the first transport be WebSocket or WebTransport for this repo's needs?
+- Which debug/verification endpoints should be added now so future world-streaming work is measurable instead of visual-only?
+- What extra deterministic scenes should `/bench` gain so streaming, picking, and interaction changes can be verified quickly?
+
+## Immediate implementation tasks
+
+- Rewrite the `/` page shell and README language from "playground" to "game".
+- Add a dedicated game controller and first-person camera path.
+- Preserve the current benchmark route and validation scenes while the game path diverges.
+- Add at least one browser-automation-friendly game debug surface.
+- Log the pivot and the first game slice in `progress.md` and `verification.md`.

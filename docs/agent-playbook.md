@@ -61,6 +61,12 @@ It is intentionally practical. It is based on the actual history of this repo so
 - Dead code and abandoned instrumentation should be removed quickly instead of kept around "just in case".
 - Git is the safety net; the worktree should stay lean.
 
+### Split runtime modes instead of forcing one controller to do everything
+
+- The benchmark/orbit controller stack was a useful foundation, but it is the wrong place to bolt on a first-person game mode.
+- A dedicated game controller is safer than turning one controller into a large mode switch.
+- This repo should prefer narrow runtime boundaries over broad "unified" controllers when the interaction model changes fundamentally.
+
 ### Commit every real unit of progress
 
 - Frequent commits made it much easier to compare strategies, explain the history, and keep experimental work bounded.
@@ -222,6 +228,10 @@ Git worktrees deserve to be part of the standard workflow for this repo.
 - Edit add/remove near boundaries
 - Validation image diff
 - First-frame upload behavior
+- First-person camera yaw/pitch invariants
+- Center-screen pick ray sanity
+- Inventory stack-limit rules
+- Deterministic chunk-generation probes
 
 ## Advice that would have helped at the start
 

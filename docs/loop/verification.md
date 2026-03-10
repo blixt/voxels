@@ -143,3 +143,18 @@
   - `stressScreens256`: build `4.1 ms`, mesh `132.5 ms`, first CPU `2.00 ms`, warm CPU `0.15 ms`, first upload `1.60 ms`, first upload chunks `392`, first upload bytes `1.14 MB`
 - Current validation guardrail in the same isolated Chrome 146 context:
   - `validationBlocks`: build `0.1 ms`, mesh `0.3 ms`, correctness `pass`, visual `pass`, `MAE 1.63`, `coverage mismatch 0.00%`
+
+## 2026-03-11
+
+### Docs pivot verification
+
+- Updated only repository documentation and planning files:
+  - `README.md`
+  - `docs/roadmap.md`
+  - `docs/loop/plan.md`
+  - `docs/loop/research.md`
+  - `docs/loop/progress.md`
+  - `docs/loop/README.md`
+  - `docs/agent-playbook.md`
+- No code paths or runtime assets changed in this step.
+- No automated checks were run for this docs-only pivot.

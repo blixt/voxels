@@ -4,7 +4,7 @@ This repository keeps the design loop in versioned documents instead of ad-hoc n
 
 - `../agent-playbook.md`: repo-specific guidance for agent-driven research, parallel work, verification, and worktree usage
 - `../20260311-voxel-research.md`: broader architecture and literature survey for future engine work
-- `../roadmap.md`: medium- and long-term engine directions beyond the current implementation loop
+- `../roadmap.md`: staged path from the current engine baseline to the shared persistent voxel game target
 - `plan.md`: current implementation plan and next milestones
 - `research.md`: external sources, constraints, and technical decisions
 - `progress.md`: chronological implementation log
@@ -18,4 +18,4 @@ Loop:
 3. Implement the next smallest slice and log major decisions in `progress.md`.
 4. Run `mise run test`, exercise `/bench`, and record the outcome in `verification.md`.
 5. Run `mise run profile` when browser automation is unavailable or when I need repeatable local build/mesh timings with an explicit warm-up pass.
-6. Update `plan.md` with follow-up performance or correctness work.
+6. Update `plan.md` with the next smallest verified slice toward the game/runtime target.

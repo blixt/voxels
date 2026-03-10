@@ -71,3 +71,15 @@
   - why clean isolated Chrome runs are the final oracle
   - why git worktrees should be standard for A/B comparisons and multi-agent work
   - concrete server/harness improvements that would make this repo more agent-friendly
+- Pivoted the active repo plan from "editable playground + benchmark harness" toward a staged browser voxel game:
+  - `/` is now treated as the game runtime target rather than a permanent demo playground
+  - the roadmap now leads toward an effectively infinite procedural world, persistence, and multiplayer
+  - `docs/loop/plan.md`, `docs/roadmap.md`, `docs/loop/research.md`, and `README.md` now reflect the new direction
+- Added current browser-platform research for the pivot:
+  - Pointer Lock as the first-person input baseline
+  - OPFS and IndexedDB as the likely local persistence building blocks
+  - Web Workers/OffscreenCanvas as the eventual streaming/off-main-thread execution tools
+  - WebSocket vs WebTransport as the future multiplayer transport question
+- Extended `docs/agent-playbook.md` with two new lessons from the pivot:
+  - split fundamentally different runtime modes instead of building giant mode-switching controllers
+  - keep cheap verification cases for camera, picking, inventory, and generation as the game loop grows
