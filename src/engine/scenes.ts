@@ -48,6 +48,7 @@ export interface SceneDefinition {
   id: string;
   label: string;
   kind: SceneKind;
+  stress: boolean;
   describe(): string;
   build(): SceneBuildResult;
 }
@@ -241,6 +242,81 @@ function createEditStormScene(): SceneBuildResult {
   };
 }
 
+function createStressDrawCallsScene(): SceneBuildResult {
+  const world = new VoxelWorld(
+    { width: DEFAULT_WORLD_SIZE, height: DEFAULT_WORLD_SIZE, depth: DEFAULT_WORLD_SIZE },
+    32,
+    createBasePalette(),
+  );
+  const inset = Math.floor(world.chunkSize * 0.5) - 1;
+  const size = 2;
+  for (let cz = 0; cz < world.chunkCountZ; cz += 1) {
+    for (let cy = 0; cy < world.chunkCountY; cy += 1) {
+      for (let cx = 0; cx < world.chunkCountX; cx += 1) {
+        const material = 2 + ((cx + cy * 2 + cz * 3) % 9);
+        const x = cx * world.chunkSize + inset;
+        const y = cy * world.chunkSize + inset;
+        const z = cz * world.chunkSize + inset;
+        world.fillBox(x, y, z, x + size, y + size, z + size, material);
+      }
+    }
+  }
+  return {
+    name: "stressDrawCalls512",
+    world,
+    notes: ["Stress scene", "One micro-cube per chunk", "Max active chunk draw calls"],
+    camera: createCameraPreset([128, 128, 128], 118, 470),
+  };
+}
+
+function createStressMicroCubesScene(): SceneBuildResult {
+  const world = new VoxelWorld(
+    { width: DEFAULT_WORLD_SIZE, height: DEFAULT_WORLD_SIZE, depth: DEFAULT_WORLD_SIZE },
+    32,
+    createBasePalette(),
+  );
+  const materials = [2, 5, 8, 9, 10, 11];
+  for (let z = 24; z < 232; z += 8) {
+    for (let y = 24; y < 216; y += 8) {
+      for (let x = 24; x < 232; x += 8) {
+        const material = materials[hashUint32(x * 17 + y * 31 + z * 43) % materials.length]!;
+        world.fillBox(x, y, z, x + 2, y + 2, z + 2, material);
+      }
+    }
+  }
+  return {
+    name: "stressMicroCubes256",
+    world,
+    notes: ["Stress scene", "Many isolated 2x2x2 cubes", "Poor greedy-merge case"],
+    camera: createCameraPreset([128, 116, 128], 122, 500),
+  };
+}
+
+function createStressScreensScene(): SceneBuildResult {
+  const world = new VoxelWorld(
+    { width: DEFAULT_WORLD_SIZE, height: DEFAULT_WORLD_SIZE, depth: DEFAULT_WORLD_SIZE },
+    32,
+    createBasePalette(),
+  );
+  const materials = [4, 6, 8, 9, 11];
+  for (let screen = 0; screen < 12; screen += 1) {
+    const material = materials[screen % materials.length]!;
+    const x = 24 + screen * 16;
+    for (let y = 12 + (screen % 3) * 2; y < 196; y += 16) {
+      const yEnd = Math.min(y + 5, 196);
+      for (let z = 20 + ((screen + Math.floor(y / 16)) % 2) * 10; z < 236; z += 28) {
+        world.fillBox(x, y, z, x + 1, yEnd, Math.min(z + 18, 236), material);
+      }
+    }
+  }
+  return {
+    name: "stressScreens256",
+    world,
+    notes: ["Stress scene", "Layered perforated screens", "Depth-overdraw and fill pressure"],
+    camera: createCameraPreset([128, 96, 128], 108, 455),
+  };
+}
+
 function createValidationBlocksScene(): SceneBuildResult {
   const world = new VoxelWorld({ width: 40, height: 32, depth: 40 }, 16, createBasePalette());
   world.fillBox(4, 0, 4, 30, 1, 30, 5);
@@ -316,6 +392,7 @@ export function getSceneDefinitions(): SceneDefinition[] {
       id: "terrain256",
       label: "Terrain 256",
       kind: "performance",
+      stress: false,
       describe: () => "Procedural settlement scene inside a 256x256x256 world.",
       build: createDefaultScene,
     },
@@ -323,6 +400,7 @@ export function getSceneDefinitions(): SceneDefinition[] {
       id: "scatter256",
       label: "Scatter 256",
       kind: "performance",
+      stress: false,
       describe: () => "Many isolated voxels distributed through the full volume.",
       build: createScatterScene,
     },
@@ -330,6 +408,7 @@ export function getSceneDefinitions(): SceneDefinition[] {
       id: "denseCore128",
       label: "Dense Core",
       kind: "performance",
+      stress: false,
       describe: () => "A large solid sphere to stress meshing on dense volumes.",
       build: createDenseCoreScene,
     },
@@ -337,13 +416,39 @@ export function getSceneDefinitions(): SceneDefinition[] {
       id: "editStorm256",
       label: "Edit Storm",
       kind: "performance",
+      stress: true,
       describe: () => "Terrain with a large batch of live-edit style modifications.",
       build: createEditStormScene,
+    },
+    {
+      id: "stressDrawCalls512",
+      label: "Stress: Draw Calls",
+      kind: "performance",
+      stress: true,
+      describe: () => "Maximizes active chunk draw calls with a micro-cube in every chunk.",
+      build: createStressDrawCallsScene,
+    },
+    {
+      id: "stressMicroCubes256",
+      label: "Stress: Micro Cubes",
+      kind: "performance",
+      stress: true,
+      describe: () => "Fills the view with isolated 2x2x2 cubes to stress tiny-surface throughput.",
+      build: createStressMicroCubesScene,
+    },
+    {
+      id: "stressScreens256",
+      label: "Stress: Screens",
+      kind: "performance",
+      stress: true,
+      describe: () => "Stacks perforated screens to stress depth overdraw and fill-heavy views.",
+      build: createStressScreensScene,
     },
     {
       id: "validationSingleVoxel",
       label: "Validation: Single Voxel",
       kind: "validation",
+      stress: false,
       describe: () => "Tiny primitive check for voxel placement, framing, and shading.",
       build: createValidationSingleVoxelScene,
     },
@@ -351,6 +456,7 @@ export function getSceneDefinitions(): SceneDefinition[] {
       id: "validationCube",
       label: "Validation: Cube",
       kind: "validation",
+      stress: false,
       describe: () => "Tiny primitive check for a 2x2x2 cube silhouette and face visibility.",
       build: createValidationCubeScene,
     },
@@ -358,6 +464,7 @@ export function getSceneDefinitions(): SceneDefinition[] {
       id: "validationBlocks",
       label: "Validation: Blocks",
       kind: "validation",
+      stress: false,
       describe: () => "Compact validation scene with clear silhouette, colors, and depth ordering.",
       build: createValidationBlocksScene,
     },
@@ -365,8 +472,13 @@ export function getSceneDefinitions(): SceneDefinition[] {
       id: "validationBridge",
       label: "Validation: Bridge",
       kind: "validation",
+      stress: false,
       describe: () => "Compact validation scene with occlusion and floating geometry checks.",
       build: createValidationBridgeScene,
     },
   ];
+}
+
+export function getStressSceneDefinitions(): SceneDefinition[] {
+  return getSceneDefinitions().filter((definition) => definition.stress);
 }

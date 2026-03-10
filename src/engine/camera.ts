@@ -38,6 +38,9 @@ export interface RayHit {
   normal: Vec3;
 }
 
+const ORBIT_YAW_PER_PIXEL = 0.01;
+const ORBIT_PITCH_PER_PIXEL = 0.008;
+
 export function createDefaultCamera(world: VoxelWorld): CameraState {
   return {
     target: [world.width * 0.5, world.height * 0.2, world.depth * 0.5],
@@ -69,6 +72,14 @@ export function buildCameraMatrices(camera: CameraState, aspect: number): Camera
     view,
     projection,
     viewProjection: multiplyMatrices(projection, view),
+  };
+}
+
+export function orbitDeltaFromDrag(deltaX: number, deltaY: number): { yaw: number; pitch: number } {
+  return {
+    yaw: deltaX * ORBIT_YAW_PER_PIXEL,
+    // Treat dragging like pulling the scene rather than moving the camera.
+    pitch: -deltaY * ORBIT_PITCH_PER_PIXEL,
   };
 }
 

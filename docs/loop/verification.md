@@ -14,7 +14,7 @@
 
 ### Automated checks
 
-- `bun test`: 13 passing tests covering scene roundtrips, greedy meshing, MagicaVoxel import, edit raycasting, reference-render fixtures, and camera depth ordering.
+- `bun test`: 15 passing tests covering scene roundtrips, greedy meshing, MagicaVoxel import, stress-scene discovery, edit raycasting, reference-render fixtures, and camera depth ordering/drag mapping.
 - `tsc --noEmit`: passing.
 - `bun run build`: passing.
 
@@ -34,6 +34,11 @@
   - `scatter256`
   - `denseCore128`
   - `editStorm256`
+- Stress suite (`runStress(1, 3)`) in fresh Chrome 146 tab:
+  - `editStorm256`: build `101.6 ms`, mesh `602.2 ms`, avg CPU frame `0.63 ms`, avg GPU frame `0.42 ms`, triangles `130,928`
+  - `stressDrawCalls512`: build `1.9 ms`, mesh `1709.7 ms`, avg CPU frame `0.90 ms`, avg GPU frame `0.09 ms`, draw calls `512`
+  - `stressMicroCubes256`: build `7.3 ms`, mesh `1523.6 ms`, avg CPU frame `1.57 ms`, avg GPU frame `1.70 ms`, triangles `194,688`
+  - `stressScreens256`: build `5.1 ms`, mesh `1297.7 ms`, avg CPU frame `0.67 ms`, avg GPU frame `0.81 ms`, triangles `27,648`
 
 ### Renderer probe checks after the visual regression investigation
 
@@ -55,3 +60,13 @@
 
 - The Bun server now serves HTML, CSS, and `/build/*` responses with `Cache-Control: no-store`.
 - HTML now appends a cache-busting query string to module bundle URLs so page reloads fetch the latest client code by default.
+- `/bench` now exposes a dedicated stress-suite path:
+  - UI button: `Run Stress Suite`
+  - URL automation: `/bench?auto=1&suite=stress&iterations=1&frames=30`
+  - browser API: `window.__VOXELS_BENCH__.runStress(iterations, frameCount)`
+
+### Camera interaction probe
+
+- Synthetic pointer drag on the benchmark canvas after the orbit change:
+  - drag down by `40px`: `pitch -0.61547 -> -0.93547`
+  - the more-negative pitch confirms that downward drags now tilt the scene upward rather than lowering the camera

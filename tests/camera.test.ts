@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { buildCameraMatrices, raycastWorld } from "../src/engine/camera.ts";
+import { buildCameraMatrices, orbitDeltaFromDrag, raycastWorld } from "../src/engine/camera.ts";
 import { VoxelWorld } from "../src/engine/world.ts";
 
 test("raycast returns the empty adjacent cell before the hit voxel", () => {
@@ -36,6 +36,15 @@ test("camera matrices map nearer points to smaller clip-space depth", () => {
   ] as [number, number, number];
 
   expect(projectDepth(matrices.viewProjection, nearPoint)).toBeLessThan(projectDepth(matrices.viewProjection, farPoint));
+});
+
+test("dragging downward requests an upward scene tilt", () => {
+  const downward = orbitDeltaFromDrag(0, 24);
+  const upward = orbitDeltaFromDrag(0, -24);
+
+  expect(downward.yaw).toBe(0);
+  expect(downward.pitch).toBeLessThan(0);
+  expect(upward.pitch).toBeGreaterThan(0);
 });
 
 function projectDepth(matrix: Float32Array, point: [number, number, number]): number {

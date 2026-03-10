@@ -23,3 +23,10 @@
 - Proved that a later browser-only visual failure was caused by a stale cached `bench.js`, not by the current renderer or reference oracle.
 - Hardened the Bun server against stale client bundles by serving HTML, CSS, and build assets with `no-store` caching and cache-busted module URLs.
 - Re-ran the primitive probes and `validationBlocks` in Chrome 146 after a cache-bypass reload; the browser now matches the current source and the validation pass is green.
+- Added a targeted stress suite instead of relying only on baseline performance scenes:
+  - `stressDrawCalls512` for max active chunk draw calls
+  - `stressMicroCubes256` for tiny isolated-surface throughput
+  - `stressScreens256` for layered overdraw and fill-heavy views
+- Exposed stress-suite automation through `/bench`, the new "Run Stress Suite" control, and `window.__VOXELS_BENCH__.runStress(...)`.
+- Inverted vertical orbit dragging so dragging downward tilts the scene upward, matching the existing left/right "pull the object" interaction model.
+- Added small guardrail tests for stress-scene discovery and the new drag-to-orbit sign convention.

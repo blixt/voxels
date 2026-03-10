@@ -2,6 +2,7 @@ import {
   buildCameraMatrices,
   createDefaultCamera,
   createScreenRay,
+  orbitDeltaFromDrag,
   orbitCamera,
   panCamera,
   raycastWorld,
@@ -24,6 +25,7 @@ import { importMagicaVoxel } from "../engine/vox-format.ts";
 
 const sceneDefinitions = getSceneDefinitions();
 const sceneById = new Map(sceneDefinitions.map((definition) => [definition.id, definition]));
+const stressSceneDefinitions = sceneDefinitions.filter((definition) => definition.stress);
 
 export interface HudSnapshot {
   sceneName: string;
@@ -325,7 +327,8 @@ export class EngineController {
       this.pointerState.x = event.clientX;
       this.pointerState.y = event.clientY;
       if (this.pointerState.button === 0 && !event.shiftKey && !event.altKey) {
-        orbitCamera(this.camera, deltaX * 0.01, deltaY * 0.008);
+        const orbitDelta = orbitDeltaFromDrag(deltaX, deltaY);
+        orbitCamera(this.camera, orbitDelta.yaw, orbitDelta.pitch);
       } else if (this.pointerState.button === 1 || event.altKey) {
         const aspect = this.canvas.width / this.canvas.height;
         const matrices = buildCameraMatrices(this.camera, aspect);
@@ -389,6 +392,14 @@ function applyCameraPreset(world: VoxelWorld, preset?: SceneCameraPreset): Camer
 
 export function getSceneOptions(): Array<{ id: string; label: string; description: string }> {
   return sceneDefinitions.map((definition) => ({
+    id: definition.id,
+    label: definition.label,
+    description: definition.describe(),
+  }));
+}
+
+export function getStressSceneOptions(): Array<{ id: string; label: string; description: string }> {
+  return stressSceneDefinitions.map((definition) => ({
     id: definition.id,
     label: definition.label,
     description: definition.describe(),

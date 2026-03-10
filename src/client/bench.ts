@@ -1,10 +1,11 @@
-import { EngineController, getSceneOptions } from "./engine-controller.ts";
+import { EngineController, getSceneOptions, getStressSceneOptions } from "./engine-controller.ts";
 import type { SceneBenchmarkSample } from "../engine/types.ts";
 
 declare global {
   interface Window {
     __VOXELS_BENCH__?: {
       run: (sceneId: string, iterations: number, frameCount: number) => Promise<unknown>;
+      runStress: (iterations: number, frameCount: number) => Promise<unknown>;
       runAll: (iterations: number, frameCount: number) => Promise<unknown>;
       getLastResults: () => unknown;
       getLastValidationArtifacts: () => unknown;
@@ -23,22 +24,25 @@ const sceneSelect = appRoot.querySelector<HTMLSelectElement>("[data-role='scene-
 const iterationsInput = appRoot.querySelector<HTMLInputElement>("[data-role='iterations']");
 const framesInput = appRoot.querySelector<HTMLInputElement>("[data-role='frames']");
 const runButton = appRoot.querySelector<HTMLButtonElement>("[data-role='run-button']");
+const runStressButton = appRoot.querySelector<HTMLButtonElement>("[data-role='run-stress-button']");
 const runAllButton = appRoot.querySelector<HTMLButtonElement>("[data-role='run-all-button']");
 const statusElement = appRoot.querySelector<HTMLElement>("[data-role='status']");
 const resultsElement = appRoot.querySelector<HTMLElement>("[data-role='results']");
 const previewElement = appRoot.querySelector<HTMLElement>("[data-role='preview']");
 
-if (!canvas || !sceneSelect || !iterationsInput || !framesInput || !runButton || !runAllButton || !statusElement || !resultsElement || !previewElement) {
+if (!canvas || !sceneSelect || !iterationsInput || !framesInput || !runButton || !runStressButton || !runAllButton || !statusElement || !resultsElement || !previewElement) {
   throw new Error("Bench UI is incomplete");
 }
 const sceneField = sceneSelect;
 const iterationsField = iterationsInput;
 const framesField = framesInput;
 const runSceneButton = runButton;
+const runStressSuiteButton = runStressButton;
 const runSuiteButton = runAllButton;
 const statusRoot = statusElement;
 const resultsRoot = resultsElement;
 const previewRoot = previewElement;
+const stressSceneIds = getStressSceneOptions().map((scene) => scene.id);
 
 for (const scene of getSceneOptions()) {
   const option = document.createElement("option");
@@ -65,20 +69,40 @@ async function runScenario(sceneId: string, iterations: number, frames: number):
 }
 
 async function runAll(iterations: number, frames: number): Promise<void> {
+  await runSceneSet(getSceneOptions().map((scene) => scene.id), iterations, frames, "full suite");
+}
+
+async function runStress(iterations: number, frames: number): Promise<void> {
+  await runSceneSet(stressSceneIds, iterations, frames, "stress suite");
+}
+
+async function runSceneSet(sceneIds: string[], iterations: number, frames: number, label: string): Promise<void> {
+  if (sceneIds.length === 0) {
+    statusRoot.textContent = `No scenes available for ${label}`;
+    resultsRoot.innerHTML = "";
+    previewRoot.innerHTML = "<p>No validation preview available yet.</p>";
+    lastResults = [];
+    return;
+  }
   const aggregate = [];
-  for (const scene of getSceneOptions()) {
-    const results = await controller.runBenchmark(scene.id, iterations, frames);
+  statusRoot.textContent = `Running ${label}`;
+  for (const sceneId of sceneIds) {
+    const results = await controller.runBenchmark(sceneId, iterations, frames);
     aggregate.push(...results);
   }
   lastResults = aggregate;
   renderResults(resultsRoot, aggregate);
   renderPreview(previewRoot);
   const allCorrect = aggregate.every((sample) => sample.correctnessPass);
-  statusRoot.textContent = allCorrect ? "Finished full suite" : "Finished suite with correctness failures";
+  statusRoot.textContent = allCorrect ? `Finished ${label}` : `Finished ${label} with correctness failures`;
 }
 
 runSceneButton.addEventListener("click", async () => {
   await runScenario(sceneField.value, readInt(iterationsField.value, 3), readInt(framesField.value, 90));
+});
+
+runStressSuiteButton.addEventListener("click", async () => {
+  await runStress(readInt(iterationsField.value, 3), readInt(framesField.value, 90));
 });
 
 runSuiteButton.addEventListener("click", async () => {
@@ -88,6 +112,10 @@ runSuiteButton.addEventListener("click", async () => {
 window.__VOXELS_BENCH__ = {
   run: async (sceneId, iterations, frameCount) => {
     await runScenario(sceneId, iterations, frameCount);
+    return lastResults;
+  },
+  runStress: async (iterations, frameCount) => {
+    await runStress(iterations, frameCount);
     return lastResults;
   },
   runAll: async (iterations, frameCount) => {
@@ -101,10 +129,13 @@ window.__VOXELS_BENCH__ = {
 const params = new URLSearchParams(window.location.search);
 if (params.get("auto") === "1") {
   const scenario = params.get("scenario");
+  const suite = params.get("suite");
   const iterations = readInt(params.get("iterations"), 2);
   const frames = readInt(params.get("frames"), 60);
   if (scenario) {
     void runScenario(scenario, iterations, frames);
+  } else if (suite === "stress") {
+    void runStress(iterations, frames);
   } else {
     void runAll(iterations, frames);
   }

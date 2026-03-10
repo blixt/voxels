@@ -111,11 +111,13 @@ export function renderBenchPage(assetVersion: string): string {
             <input type="number" min="1" step="1" value="90" data-role="frames" name="bench-frames" />
           </label>
           <button data-role="run-button">Run Selected Scene</button>
+          <button data-role="run-stress-button">Run Stress Suite</button>
           <button data-role="run-all-button">Run Full Suite</button>
           <div class="instructions">
             <h3>Automation</h3>
             <p>Use <code>/bench?auto=1&amp;scenario=terrain256&amp;iterations=2&amp;frames=60</code> to auto-run a scene.</p>
-            <p>The page also exposes <code>window.__VOXELS_BENCH__</code> for scripted control.</p>
+            <p>Use <code>/bench?auto=1&amp;suite=stress&amp;iterations=1&amp;frames=30</code> to run just the stress suite.</p>
+            <p>The page also exposes <code>window.__VOXELS_BENCH__</code> for scripted control, including <code>runStress()</code>.</p>
           </div>
         </aside>
         <section class="viewport-frame">

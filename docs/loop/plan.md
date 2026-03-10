@@ -24,8 +24,9 @@ Stabilize the Chrome 146 WebGPU voxel engine by tightening primitive-level valid
 
 ## Next steps
 
+- Turn the new stress scenes into explicit regression targets with per-scene baseline notes and acceptable ranges.
 - Restore fully automatic browser-side GPU verification once the tool-owned Chrome profile lock is cleared.
-- Record fresh `/bench` results for the new tiny validation scenes and the larger performance scenes.
+- Record fresh `/bench` results for the tiny validation scenes, baseline scenes, and the new stress suite after larger renderer changes.
 - Move chunk meshing into a Web Worker to reduce main-thread stalls during heavy edits.
 - Add fuller MagicaVoxel scene graph support, especially rotation decoding.
 - Experiment with GPU-driven culling once the current CPU meshing path is profiled more deeply.
