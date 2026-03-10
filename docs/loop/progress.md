@@ -62,3 +62,12 @@
   - mise `2026.3.7`
 - Added `docs/roadmap.md` to capture longer-horizon directions for larger worlds, streaming, LOD, procedural generation, lighting, physics, tools, and ray-based rendering, and linked it from the main repo docs entry points.
 - Added the broader external research survey as `docs/20260311-voxel-research.md` and linked it from the main docs entry points so the architecture/literature review is preserved in-repo.
+
+## 2026-03-11
+
+- Added `docs/agent-playbook.md` to capture repo-specific lessons from the build/debug/performance journey so far:
+  - what worked and what did not
+  - how to parallelize research, implementation, and verification more effectively
+  - why clean isolated Chrome runs are the final oracle
+  - why git worktrees should be standard for A/B comparisons and multi-agent work
+  - concrete server/harness improvements that would make this repo more agent-friendly

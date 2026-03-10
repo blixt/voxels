@@ -2,6 +2,7 @@
 
 This repository keeps the design loop in versioned documents instead of ad-hoc notes.
 
+- `../agent-playbook.md`: repo-specific guidance for agent-driven research, parallel work, verification, and worktree usage
 - `../20260311-voxel-research.md`: broader architecture and literature survey for future engine work
 - `../roadmap.md`: medium- and long-term engine directions beyond the current implementation loop
 - `plan.md`: current implementation plan and next milestones

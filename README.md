@@ -12,6 +12,7 @@ Chrome 146 WebGPU voxel engine built from scratch with Bun and TypeScript.
 The implementation notes, research links, and verification log live under `docs/loop/`.
 Longer-horizon engine directions live in `docs/roadmap.md`.
 A broader architecture/reference survey lives in `docs/20260311-voxel-research.md`.
+Repo-specific guidance for agent-driven research, implementation, and verification lives in `docs/agent-playbook.md`.
 
 ## Features
 
