@@ -457,6 +457,52 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - The current hitch is not primarily GPU upload.
 - The current game path is still paying full residency + remesh cost on every one-chunk boundary crossing.
 
+### Stream-anchor hysteresis verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+
+#### Automated checks
+
+- `tests/stream-anchor.test.ts` verifies:
+  - anchor initialization
+  - staying within a one-chunk margin
+  - shifting once the player exceeds that margin
+  - chunk-center anchor positioning
+
+#### Chrome 146 browser checks
+
+- Verified `/` on a fresh page at `http://localhost:3006/`.
+- Fresh idle HUD now reports:
+  - `Stream = 0.0 ms`
+  - `Mesh = 0.0 ms`
+  - `Dirty Resident = 0`
+  - `Stream Anchor = -26, -26`
+- `window.__VOXELS_GAME__.benchmarkChunkCrossing(2, 1)` after the hysteresis change:
+  - `sampleCount = 4`
+  - `changedCount = 0`
+  - average `streamMs = 0`
+  - average `meshMs = 0`
+  - average `uploadChunks = 0`
+  - first sample:
+    - target chunk `[-25, 50, -26]`
+    - `changed = false`
+    - `generatedChunks = 0`
+    - `evictedChunks = 0`
+- `window.__VOXELS_GAME__.benchmarkChunkCrossing(2, 2)` still reports the larger churn path:
+  - `sampleCount = 4`
+  - `changedCount = 4`
+  - average `streamMs = 81.0`
+  - average `meshMs = 179.93`
+  - average `uploadChunks = 99`
+
+#### Conclusion
+
+- The one-chunk hitch path is now removed.
+- The next hitch target is the still-expensive two-chunk update path rather than the already-fixed single-chunk churn case.
+
 #### Automated checks
 
 - `mise run test`: passing after adding `tests/procedural-generator.test.ts`.

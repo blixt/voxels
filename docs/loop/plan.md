@@ -190,6 +190,9 @@ Status:
   - first-frame sync/upload cost
   - how often one-chunk movement is needlessly triggering the full pipeline
 - Apply stream-anchor hysteresis next if the game-path probe confirms that one-chunk crossings are still causing full updates.
+- With hysteresis in place, use the same probe to choose the next hitch slice:
+  - either deeper async streaming
+  - or boundary remesh reduction for the larger jumps that still churn
 - Keep the procedural stream profiler and browser probes aligned so local and Chrome decisions stay comparable.
 - When a micro-optimization is noisy, compare the working tree against a clean committed worktree on a separate port before keeping it.
 - If the next change targets meshing, build or adapt cases that focus on boundary remesh cost rather than only initial chunk creation.

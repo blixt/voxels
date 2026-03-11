@@ -232,3 +232,11 @@
   - fresh Chrome 146 `benchmarkChunkCrossing(2, 1)` showed `changedCount = 4/4`
   - one-chunk crossings still averaged about `48 ms` stream, `195 ms` mesh, and `0.73 ms` upload
   - that baseline says the immediate win is to stop single-chunk movement from triggering residency churn at all, not to chase upload micro-optimizations first
+- Landed stream-anchor hysteresis on the game path:
+  - added a pure `stream-anchor` helper with direct tests
+  - game residency now stays anchored until the player exceeds a one-chunk horizontal margin
+  - the game HUD now exposes the active stream anchor chunk separately from the player chunk
+- Verified the first hitch win in fresh Chrome 146:
+  - `benchmarkChunkCrossing(2, 1)` now reports `changedCount = 0/4`
+  - one-chunk crossings now report `0 ms` stream, `0 ms` mesh, and `0` upload chunks
+  - `benchmarkChunkCrossing(2, 2)` still reports real churn, so the benchmark can still see larger updates instead of being accidentally blinded

@@ -22,11 +22,17 @@ import {
 import { ProceduralResidentWorld, type ResidencyUpdateSummary } from "../engine/procedural-resident-world.ts";
 import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
 import { WebGpuVoxelRenderer, type RenderStats } from "../engine/renderer.ts";
+import {
+  buildStreamAnchorPosition,
+  resolveStreamAnchor,
+  type StreamAnchor,
+} from "../engine/stream-anchor.ts";
 import type { Vec3 } from "../engine/types.ts";
 import type { MeshBuildSummary } from "../engine/mesher.ts";
 
 const MAX_DELTA_SECONDS = 0.05;
 const HUD_PUSH_INTERVAL_MS = 120;
+const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
 
 export interface GameHudSnapshot {
   status: string;
@@ -34,6 +40,7 @@ export interface GameHudSnapshot {
   position: Vec3;
   feetPosition: Vec3;
   playerChunk: [number, number, number];
+  streamAnchorChunk: [number, number];
   grounded: boolean;
   yawDegrees: number;
   pitchDegrees: number;
@@ -158,6 +165,8 @@ export class GameController {
     elapsedMs: 0,
   };
   private lastRenderStats: RenderStats = zeroRenderStats();
+  private lastStreamSummary: ResidencyUpdateSummary = cloneResidencySummary(this.world.lastResidency);
+  private streamAnchor: StreamAnchor | null = null;
 
   private rafId = 0;
   private lastFrameTime = 0;
@@ -226,20 +235,26 @@ export class GameController {
         Math.floor(this.player.feetPosition[1] / this.world.chunkSize),
         Math.floor(this.player.feetPosition[2] / this.world.chunkSize),
       ],
+      streamAnchorChunk: this.streamAnchor
+        ? [this.streamAnchor.chunkX, this.streamAnchor.chunkZ]
+        : [
+            Math.floor(this.player.feetPosition[0] / this.world.chunkSize),
+            Math.floor(this.player.feetPosition[2] / this.world.chunkSize),
+          ],
       grounded: this.player.grounded,
       yawDegrees: toDegrees(this.camera.yaw),
       pitchDegrees: toDegrees(this.camera.pitch),
       solidVoxelCount: stats.solidVoxelCount,
       chunkCount: stats.chunkCount,
       paletteCount: stats.paletteCount,
-      streamMs: this.world.lastResidency.elapsedMs,
-      streamGeneratedChunks: this.world.lastResidency.generatedChunks,
-      streamEvictedChunks: this.world.lastResidency.evictedChunks,
-      streamEmptyChunksSkipped: this.world.lastResidency.emptyChunksSkipped,
-      streamCachedEmptyChunkHits: this.world.lastResidency.cachedEmptyChunkHits,
-      streamDirtyResidentChunks: this.world.lastResidency.dirtyResidentChunks,
-      residencyRadiusChunks: this.world.lastResidency.radiusChunks,
-      surfaceY: this.world.lastResidency.surfaceY,
+      streamMs: this.lastStreamSummary.elapsedMs,
+      streamGeneratedChunks: this.lastStreamSummary.generatedChunks,
+      streamEvictedChunks: this.lastStreamSummary.evictedChunks,
+      streamEmptyChunksSkipped: this.lastStreamSummary.emptyChunksSkipped,
+      streamCachedEmptyChunkHits: this.lastStreamSummary.cachedEmptyChunkHits,
+      streamDirtyResidentChunks: this.lastStreamSummary.dirtyResidentChunks,
+      residencyRadiusChunks: this.lastStreamSummary.radiusChunks,
+      surfaceY: this.lastStreamSummary.surfaceY,
       meshMs: this.meshMs,
       meshNewChunks: this.lastMeshBuildSummary.newMeshCount,
       meshRemeshChunks: this.lastMeshBuildSummary.remeshCount,
@@ -264,15 +279,15 @@ export class GameController {
 
   setResidencyRadiusChunks(radius: number): void {
     this.world.setHorizontalRadiusChunks(radius);
-    this.syncWorldAroundPlayer();
+    this.syncWorldAroundPlayer(true);
     this.pushHud(true);
   }
 
   forceResidencyUpdate(): ResidencyUpdateSummary {
     this.world.setHorizontalRadiusChunks(this.world.horizontalRadiusChunks);
-    this.syncWorldAroundPlayer();
+    this.syncWorldAroundPlayer(true);
     this.pushHud(true);
-    return this.world.lastResidency;
+    return cloneResidencySummary(this.lastStreamSummary);
   }
 
   snapshotResidentWorld(): ResidentWorldProbeSnapshot {
@@ -286,12 +301,13 @@ export class GameController {
     } = {},
   ): Promise<ResidencyTransitionProbe> {
     const before = this.snapshotResidentWorld();
+    const forceResidency = options.radiusChunks !== undefined;
     if (options.radiusChunks !== undefined) {
       this.world.setHorizontalRadiusChunks(options.radiusChunks);
     }
     teleportPlayerToEyePosition(this.player, position);
     this.syncCameraToPlayer();
-    this.syncWorldAroundPlayer();
+    const residency = this.syncWorldAroundPlayer(forceResidency);
     const render = await this.renderProbeFrame();
     const after = this.snapshotResidentWorld();
     const { entered, evicted } = diffChunkCoords(
@@ -304,11 +320,11 @@ export class GameController {
       after,
       enteredChunkCoords: entered.map(toChunkTuple),
       evictedChunkCoords: evicted.map(toChunkTuple),
-      generatedChunkCoords: this.world.lastResidency.generatedChunkCoords.map(toChunkTuple),
+      generatedChunkCoords: residency.generatedChunkCoords.map(toChunkTuple),
       residency: {
-        ...this.world.lastResidency,
-        generatedChunkCoords: this.world.lastResidency.generatedChunkCoords.map((coord) => ({ ...coord })),
-        evictedChunkCoords: this.world.lastResidency.evictedChunkCoords.map((coord) => ({ ...coord })),
+        ...residency,
+        generatedChunkCoords: residency.generatedChunkCoords.map((coord) => ({ ...coord })),
+        evictedChunkCoords: residency.evictedChunkCoords.map((coord) => ({ ...coord })),
       },
       mesh: { ...this.lastMeshBuildSummary },
       render,
@@ -349,6 +365,9 @@ export class GameController {
       far: this.camera.far,
     };
     const savedStatus = this.status;
+    const savedStreamAnchor = this.streamAnchor
+      ? { chunkX: this.streamAnchor.chunkX, chunkZ: this.streamAnchor.chunkZ }
+      : null;
 
     this.stop();
     try {
@@ -401,7 +420,12 @@ export class GameController {
         far: savedCamera.far,
       };
       this.status = savedStatus;
-      this.syncWorldAroundPlayer();
+      if (savedStreamAnchor) {
+        this.syncWorldAroundAnchor(savedStreamAnchor);
+      } else {
+        this.streamAnchor = null;
+        this.syncWorldAroundPlayer(true);
+      }
       await this.renderProbeFrame();
       this.pushHud(true);
       this.start();
@@ -412,7 +436,8 @@ export class GameController {
     const spawn = this.world.getSpawnPosition();
     this.player = createPlayerState(spawn, { grounded: true });
     this.camera = createFirstPersonCamera(getPlayerEyePosition(this.player), 0.8, -0.32);
-    this.syncWorldAroundPlayer();
+    this.streamAnchor = null;
+    this.syncWorldAroundPlayer(true);
     this.status = "Click once to capture cursor";
     this.pushHud(true);
   }
@@ -510,10 +535,39 @@ export class GameController {
     this.pushHud();
   }
 
-  private syncWorldAroundPlayer(): void {
-    const residency = this.world.updateResidencyAround(this.player.feetPosition);
+  private syncWorldAroundPlayer(force = false): ResidencyUpdateSummary {
+    const playerChunkX = Math.floor(this.player.feetPosition[0] / this.world.chunkSize);
+    const playerChunkZ = Math.floor(this.player.feetPosition[2] / this.world.chunkSize);
+    const resolved = force
+      ? {
+          anchor: { chunkX: playerChunkX, chunkZ: playerChunkZ },
+          changed: true,
+        }
+      : resolveStreamAnchor(this.streamAnchor, playerChunkX, playerChunkZ, STREAM_ANCHOR_MARGIN_CHUNKS);
+    if (!force && !resolved.changed) {
+      this.lastMeshBuildSummary = zeroMeshBuildSummary();
+      this.meshMs = 0;
+      this.lastStreamSummary = createIdleResidencySummary(
+        this.lastStreamSummary,
+        this.streamAnchor ?? resolved.anchor,
+        this.world.horizontalRadiusChunks,
+        this.world.getStats().chunkCount,
+      );
+      return cloneResidencySummary(this.lastStreamSummary);
+    }
+    return this.syncWorldAroundAnchor(resolved.anchor);
+  }
+
+  private syncWorldAroundAnchor(anchor: StreamAnchor): ResidencyUpdateSummary {
+    this.streamAnchor = anchor;
+    const residency = this.world.updateResidencyAround(
+      buildStreamAnchorPosition(anchor, this.world.chunkSize, this.player.feetPosition[1]),
+    );
+    this.lastStreamSummary = cloneResidencySummary(residency);
     if (!residency.changed) {
-      return;
+      this.lastMeshBuildSummary = zeroMeshBuildSummary();
+      this.meshMs = 0;
+      return cloneResidencySummary(this.lastStreamSummary);
     }
     const meshSummary = rebuildDirtyMeshes(this.world);
     this.lastMeshBuildSummary = meshSummary;
@@ -521,6 +575,7 @@ export class GameController {
     this.status = residency.generatedChunks > 0 || residency.evictedChunks > 0
       ? `Streamed ${residency.generatedChunks} chunk(s), evicted ${residency.evictedChunks}`
       : "Residency updated";
+    return cloneResidencySummary(this.lastStreamSummary);
   }
 
   private isPressed(...codes: string[]): boolean {
@@ -602,6 +657,16 @@ function zeroRenderStats(): RenderStats {
   };
 }
 
+function zeroMeshBuildSummary(): MeshBuildSummary {
+  return {
+    meshCount: 0,
+    newMeshCount: 0,
+    remeshCount: 0,
+    triangleCount: 0,
+    elapsedMs: 0,
+  };
+}
+
 function zeroGameRenderProbe(): GameRenderProbe {
   return {
     frameCpuMs: 0,
@@ -627,6 +692,41 @@ function buildEyePositionForChunkCenter(
     feetY + eyeHeight,
     chunkZ * chunkSize + chunkSize * 0.5,
   ];
+}
+
+function cloneResidencySummary(summary: ResidencyUpdateSummary): ResidencyUpdateSummary {
+  return {
+    ...summary,
+    generatedChunkCoords: summary.generatedChunkCoords.map((coord) => ({ ...coord })),
+    evictedChunkCoords: summary.evictedChunkCoords.map((coord) => ({ ...coord })),
+    phaseMs: { ...summary.phaseMs },
+  };
+}
+
+function createIdleResidencySummary(
+  summary: ResidencyUpdateSummary,
+  anchor: StreamAnchor,
+  radiusChunks: number,
+  residentChunks: number,
+): ResidencyUpdateSummary {
+  return {
+    ...summary,
+    changed: false,
+    centerChunkX: anchor.chunkX,
+    centerChunkZ: anchor.chunkZ,
+    radiusChunks,
+    generatedChunks: 0,
+    evictedChunks: 0,
+    emptyChunksSkipped: 0,
+    cachedEmptyChunkHits: 0,
+    touchedNeighborChunks: 0,
+    residentChunks,
+    dirtyResidentChunks: 0,
+    elapsedMs: 0,
+    generatedChunkCoords: [],
+    evictedChunkCoords: [],
+    phaseMs: zeroResidencyPhaseMetrics(),
+  };
 }
 
 function summarizeChunkBoundaryBenchmark(samples: readonly ChunkBoundaryBenchmarkSample[]): ChunkBoundaryBenchmarkSummary {
@@ -659,6 +759,17 @@ function summarizeChunkBoundaryBenchmark(samples: readonly ChunkBoundaryBenchmar
     maxUploadChunks: maxValue(uploadChunkSamples),
     avgUploadBytes: average(uploadByteSamples),
     maxUploadBytes: maxValue(uploadByteSamples),
+  };
+}
+
+function zeroResidencyPhaseMetrics(): ResidencyUpdateSummary["phaseMs"] {
+  return {
+    surfaceSampleMs: 0,
+    yRangeMs: 0,
+    chunkGenerationMs: 0,
+    chunkAdoptionMs: 0,
+    evictionMs: 0,
+    neighborDirtyMs: 0,
   };
 }
 

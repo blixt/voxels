@@ -57,6 +57,7 @@ controller.onHudUpdate = (snapshot) => {
     metric("Position", formatPosition(snapshot.position)),
     metric("Feet", formatPosition(snapshot.feetPosition)),
     metric("Player Chunk", snapshot.playerChunk.join(", ")),
+    metric("Stream Anchor", snapshot.streamAnchorChunk.join(", ")),
     metric("Grounded", snapshot.grounded ? "Yes" : "No"),
     metric("Yaw", `${snapshot.yawDegrees.toFixed(1)}°`),
     metric("Pitch", `${snapshot.pitchDegrees.toFixed(1)}°`),
