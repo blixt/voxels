@@ -701,3 +701,31 @@
   - eliminate HUD `innerHTML` churn from the live loop
   - remove the large transient JS-array allocation pattern from far-field mesh construction
   - then re-run the same live/route traces to see whether the next meaningful target is still meshing, generation, or renderer resource sync
+
+### Trace-driven HUD and far-field allocation cleanup
+
+- Kept the trace loop tight instead of guessing:
+  - captured fresh prod/dev route traces on `http://localhost:3022/` and `http://localhost:3023/`
+  - captured a fresh live held-walk dev trace after the code changes
+  - re-ran the local analyzer on all of them before deciding whether the pending changes were worth keeping
+- The HUD fix was worth keeping and simpler than the old path:
+  - deleted the per-frame `innerHTML` rebuild in `src/client/game.ts`
+  - the telemetry DOM is now created once and only changed `textContent` values are updated
+  - this removed a very visible trace hog instead of adding more cache or scheduling complexity around debug UI
+- The far-field allocator rewrite was also worth keeping:
+  - `src/engine/procedural-far-field.ts` no longer builds big transient JS `number[]` vertex/index arrays and then copies them again
+  - far-field band meshes now write directly into pre-sized typed storage and slice only the used region at the end
+  - this keeps the mesh path leaner and avoids the earlier bursty heap growth that was driving GC churn
+- The fresh traces show the two changes materially moved the right numbers:
+  - in the live held-walk trace, `set innerHTML` disappeared from the top exclusive frames entirely
+  - live renderer/HUD overhead dropped enough that `syncResources()` is now the clearest always-on renderer-side CPU bucket
+  - heap max collapsed from the earlier `67.63 MB` live / `168.43 MB` route traces down to about `18.20 MB` live / `19.56 MB` route on the new traces
+  - the biggest heap-rise window dropped from about `+35.13 MB` live and `+33.54 MB` route to about `+14.69 MB` live and `+14.91 MB` route
+  - major GC time also dropped materially on the fresh traces
+- I also improved the trace harness itself so future allocation work is less manual:
+  - `scripts/analyze-chrome-trace.ts` now reports the hottest sampled frames inside the biggest heap-rise and heap-drop windows
+  - that means allocation regressions can now be traced directly to the active code in the critical heap window instead of relying on manual timeline correlation
+- The new trace evidence changed the next target again:
+  - the old HUD and far-field transient-allocation problems are no longer the dominant mystery
+  - the next renderer-side target is `syncResources()` and repeated resident-chunk sweeps
+  - the next world-side targets are still chunk generation and detailed chunk meshing, with `valueNoise2D()`, `generateChunk()`, and `buildChunkMesh()` remaining the biggest CPU buckets

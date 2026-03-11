@@ -2003,3 +2003,109 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - The repo now has a repeatable trace-analysis path, and the current biggest unresolved buckets are no longer guesswork.
 - The next changes should be re-run against the same route and live-walk traces so improvements are measured on both the deterministic harness and the real gameplay loop.
+
+## 2026-03-11 trace-validated HUD and far-field allocation cleanup
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-far-field.test.ts tests/game-route-benchmark.test.ts tests/procedural-lod-coverage.test.ts`
+- `mise run build`
+- `PORT=3022 mise run serve`
+- `PORT=3023 mise run dev`
+- fresh Chrome 146 production page on `http://localhost:3022/`
+- fresh Chrome 146 dev page on `http://localhost:3023/`
+- Chrome performance traces saved to:
+  - `artifacts/trace-route-prod-postfix-20260311.json`
+  - `artifacts/trace-route-dev-postfix-20260311.json`
+  - `artifacts/trace-live-walk-dev-postfix-20260311.json`
+- `mise run analyze-trace -- artifacts/trace-route-prod-postfix-20260311.json --url-prefix=http://localhost:3022/`
+- `mise run analyze-trace -- artifacts/trace-route-dev-postfix-20260311.json --url-prefix=http://localhost:3023/`
+- `mise run analyze-trace -- artifacts/trace-live-walk-dev-postfix-20260311.json --url-prefix=http://localhost:3023/`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing after the HUD DOM update, typed far-field mesh builder rewrite, and analyzer enhancement.
+- Targeted tests:
+  - `25 pass`
+  - `0 fail`
+- `mise run build`: passing.
+
+#### Production route summary
+
+- Deterministic `5 s + settle` route benchmark on `http://localhost:3022/` returned:
+  - `avgGameplayFrameMs = 6.03`
+  - `p95GameplayFrameMs = 16.9`
+  - `maxGameplayFrameMs = 61.4`
+  - `avgStreamMs = 1.50`
+  - `avgMeshMs = 3.39`
+  - `avgFarFieldMs = 0.68`
+  - `maxFarFieldMs = 60.4`
+  - `maxFarFieldSampleCacheMs = 52.7`
+  - `maxFarFieldMeshBuildMs = 43.1`
+  - `framesWithHoleSignals = 0`
+  - `settleFramesUntilComplete = 42`
+
+#### Fresh dev route trace
+
+- `mise run analyze-trace -- artifacts/trace-route-dev-postfix-20260311.json --url-prefix=http://localhost:3023/` reported:
+  - top exclusive CPU remains dominated by actual world work:
+    - `valueNoise2D`: `1615.0 ms`
+    - `buildChunkMesh`: `1057.5 ms`
+    - `fbm2D2`: `670.6 ms`
+    - `generateChunk`: `494.4 ms`
+    - `sampleChunkVoxel`: `355.7 ms`
+  - renderer-side always-on cost is now smaller but still real:
+    - `syncResources`: `39.7 ms`
+    - `buildRenderReadyColumnKeys`: `47.5 ms`
+  - heap and GC:
+    - heap `min 1.31 MB`, `max 19.56 MB`, `start 1.31 MB`, `end 14.43 MB`
+    - biggest rise `+14.91 MB`
+    - biggest drop `-16.72 MB`
+    - `930` minor GCs / `8` major GCs
+  - new heap-window attribution from the analyzer:
+    - the largest rise window is still centered on `buildBandMesh()` plus nearby terrain sampling/boundary work
+    - the hottest exclusive frames in that window were `valueNoise2D`, `buildBandMesh`, `buildColumnContext`, and `writeVertex`
+
+#### Fresh dev live-walk trace
+
+- Held-`W` live-loop trace on `http://localhost:3023/` moved feet position from `[-191.5, 1428, -191.5]` to `[-112, 1453, -191.5]`.
+- `mise run analyze-trace -- artifacts/trace-live-walk-dev-postfix-20260311.json --url-prefix=http://localhost:3023/` reported:
+  - top exclusive live-loop CPU:
+    - `valueNoise2D`: `1247.9 ms`
+    - `buildChunkMesh`: `496.6 ms`
+    - `generateChunk`: `304.0 ms`
+    - `getResidentChunk`: `185.9 ms`
+    - `sampleChunkVoxel`: `159.5 ms`
+    - `syncResources`: `78.8 ms`
+  - important comparison against the earlier live trace:
+    - `set innerHTML` is gone from the top exclusive frames
+    - `pushHud()` / `controller.onHudUpdate()` are no longer dominant live-loop buckets
+  - heap and GC:
+    - heap `min 1.31 MB`, `max 18.20 MB`, `start 1.31 MB`, `end 13.93 MB`
+    - biggest rise `+14.69 MB`
+    - biggest drop `-15.38 MB`
+    - `828` minor GCs / `5` major GCs
+  - the new analyzer again points the remaining allocation burst at far-field band construction plus generator sampling, but without the earlier huge transient array blow-up
+
+#### Before / after deltas
+
+- Compared to the earlier dev live-walk trace on `http://localhost:3021/`:
+  - heap max dropped from `67.63 MB` to `18.20 MB`
+  - biggest heap rise dropped from `+35.13 MB` to `+14.69 MB`
+  - major GC count dropped from `11` to `5`
+  - `set innerHTML` dropped out of the hot-frame list entirely
+  - `syncResources` exclusive cost dropped from `122.0 ms` to `78.8 ms`
+- Compared to the earlier dev route trace:
+  - heap max dropped from `168.43 MB` to `19.56 MB`
+  - biggest heap rise dropped from `+33.54 MB` to `+14.91 MB`
+  - `buildBandMesh()` is still visible in the allocation window, but the pathological transient heap spike is gone
+
+#### Residual
+
+- The trace loop is now doing what it should:
+  - full Chrome traces
+  - real held movement
+  - direct CPU + heap + GC attribution
+  - direct heap-window hot-frame summaries
+- The dominant remaining work is now clearer:
+  - world generation noise and chunk meshing remain the biggest CPU buckets
+  - `syncResources()` is the clearest renderer-side always-on target for the next pass

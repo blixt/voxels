@@ -59,6 +59,20 @@ interface FarFieldBandState extends FarFieldBandRenderable {
   sampleCache: FarFieldBandSampleCache | null;
 }
 
+interface MeshBuilder {
+  vertexBuffer: ArrayBuffer;
+  vertexView: DataView;
+  indexData: Uint32Array;
+  vertexCount: number;
+  indexCount: number;
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+}
+
 export interface FarFieldCoverage {
   readonly label: string;
   readonly sampleStride: number;
@@ -662,9 +676,13 @@ function buildBandMesh(
     waterColors,
   } = sampleCache;
   const states = buildBandStates(band, anchorX, anchorZ, centerX, centerZ, innerRadius, exclusionMask, sampleRadius, sampleSpan);
-
-  const vertices: number[] = [];
-  const indices: number[] = [];
+  let renderedCellCount = 0;
+  for (const state of states) {
+    if (state === CELL_RENDERED) {
+      renderedCellCount += 1;
+    }
+  }
+  const mesh = createMeshBuilder(renderedCellCount * 6);
 
   const renderRadius = sampleRadius - 1;
   for (let cellZ = -renderRadius; cellZ <= renderRadius; cellZ += 1) {
@@ -732,8 +750,7 @@ function buildBandMesh(
       );
 
       pushQuad(
-        vertices,
-        indices,
+        mesh,
         worldX, topY, worldZ,
         worldX, topY, z1,
         x1, topY, z1,
@@ -743,8 +760,7 @@ function buildBandMesh(
       );
 
       pushSideQuad(
-        vertices,
-        indices,
+        mesh,
         eastState,
         eastHeight,
         height,
@@ -756,8 +772,7 @@ function buildBandMesh(
         1, 0, 0,
       );
       pushSideQuad(
-        vertices,
-        indices,
+        mesh,
         westState,
         westHeight,
         height,
@@ -769,8 +784,7 @@ function buildBandMesh(
         -1, 0, 0,
       );
       pushSideQuad(
-        vertices,
-        indices,
+        mesh,
         southState,
         southHeight,
         height,
@@ -782,8 +796,7 @@ function buildBandMesh(
         0, 0, 1,
       );
       pushSideQuad(
-        vertices,
-        indices,
+        mesh,
         northState,
         northHeight,
         height,
@@ -795,11 +808,11 @@ function buildBandMesh(
         0, 0, -1,
       );
 
-      pushWaterTopQuad(vertices, indices, worldX, worldZ, x1, z1, height, waterHeight, waterColor);
+      pushWaterTopQuad(mesh, worldX, worldZ, x1, z1, height, waterHeight, waterColor);
     }
   }
 
-  return buildMeshData(vertices, indices, anchorX, anchorZ);
+  return finishMeshBuilder(mesh, anchorX, anchorZ);
 }
 
 function ensureBandSampleCache(
@@ -1007,61 +1020,55 @@ function buildBandStates(
   return states;
 }
 
-function buildMeshData(
-  vertices: number[],
-  indices: number[],
+function createMeshBuilder(maxQuadCount: number): MeshBuilder {
+  const vertexBuffer = new ArrayBuffer(maxQuadCount * 4 * VERTEX_STRIDE);
+  return {
+    vertexBuffer,
+    vertexView: new DataView(vertexBuffer),
+    indexData: new Uint32Array(maxQuadCount * 6),
+    vertexCount: 0,
+    indexCount: 0,
+    minX: Number.POSITIVE_INFINITY,
+    minY: Number.POSITIVE_INFINITY,
+    minZ: Number.POSITIVE_INFINITY,
+    maxX: Number.NEGATIVE_INFINITY,
+    maxY: Number.NEGATIVE_INFINITY,
+    maxZ: Number.NEGATIVE_INFINITY,
+  };
+}
+
+function finishMeshBuilder(
+  mesh: MeshBuilder,
   anchorX: number,
   anchorZ: number,
 ): ChunkMeshData {
-  const vertexCount = vertices.length / 7;
-  const vertexData = new ArrayBuffer(vertexCount * VERTEX_STRIDE);
-  const view = new DataView(vertexData);
-  let minX = Number.POSITIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let minZ = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
-  let maxZ = Number.NEGATIVE_INFINITY;
-
-  for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex += 1) {
-    const base = vertexIndex * 7;
-    const x = vertices[base]!;
-    const y = vertices[base + 1]!;
-    const z = vertices[base + 2]!;
-    const nx = vertices[base + 3]!;
-    const ny = vertices[base + 4]!;
-    const nz = vertices[base + 5]!;
-    const color = vertices[base + 6]!;
-    minX = Math.min(minX, x);
-    minY = Math.min(minY, y);
-    minZ = Math.min(minZ, z);
-    maxX = Math.max(maxX, x);
-    maxY = Math.max(maxY, y);
-    maxZ = Math.max(maxZ, z);
-    writeVertex(view, vertexIndex * VERTEX_STRIDE, x, y, z, nx, ny, nz, color);
-  }
-
+  const usedVertexBytes = mesh.vertexCount * VERTEX_STRIDE;
+  const vertexData = usedVertexBytes === mesh.vertexBuffer.byteLength
+    ? mesh.vertexBuffer
+    : mesh.vertexBuffer.slice(0, usedVertexBytes);
+  const indexData = mesh.indexCount === mesh.indexData.length
+    ? mesh.indexData
+    : mesh.indexData.slice(0, mesh.indexCount);
   return {
     vertexData,
-    vertexCount,
-    indexData: new Uint32Array(indices),
-    indexCount: indices.length,
-    triangleCount: indices.length / 3,
-    bounds: vertexCount === 0
+    vertexCount: mesh.vertexCount,
+    indexData,
+    indexCount: mesh.indexCount,
+    triangleCount: mesh.indexCount / 3,
+    bounds: mesh.vertexCount === 0
       ? {
           min: [anchorX, 0, anchorZ],
           max: [anchorX, 0, anchorZ],
         }
       : {
-          min: [minX, minY, minZ],
-          max: [maxX, maxY, maxZ],
+          min: [mesh.minX, mesh.minY, mesh.minZ],
+          max: [mesh.maxX, mesh.maxY, mesh.maxZ],
         },
   };
 }
 
 function pushQuad(
-  vertices: number[],
-  indices: number[],
+  mesh: MeshBuilder,
   x0: number,
   y0: number,
   z0: number,
@@ -1079,26 +1086,31 @@ function pushQuad(
   normalZ: number,
   color: number,
 ): void {
-  const baseVertex = vertices.length / 7;
-  vertices.push(
-    x0, y0, z0, normalX, normalY, normalZ, color,
-    x1, y1, z1, normalX, normalY, normalZ, color,
-    x2, y2, z2, normalX, normalY, normalZ, color,
-    x3, y3, z3, normalX, normalY, normalZ, color,
-  );
-  indices.push(
-    baseVertex,
-    baseVertex + 1,
-    baseVertex + 2,
-    baseVertex,
-    baseVertex + 2,
-    baseVertex + 3,
-  );
+  const baseVertex = mesh.vertexCount;
+  writeVertex(mesh.vertexView, baseVertex * VERTEX_STRIDE, x0, y0, z0, normalX, normalY, normalZ, color);
+  writeVertex(mesh.vertexView, (baseVertex + 1) * VERTEX_STRIDE, x1, y1, z1, normalX, normalY, normalZ, color);
+  writeVertex(mesh.vertexView, (baseVertex + 2) * VERTEX_STRIDE, x2, y2, z2, normalX, normalY, normalZ, color);
+  writeVertex(mesh.vertexView, (baseVertex + 3) * VERTEX_STRIDE, x3, y3, z3, normalX, normalY, normalZ, color);
+  mesh.vertexCount += 4;
+
+  mesh.indexData[mesh.indexCount + 0] = baseVertex;
+  mesh.indexData[mesh.indexCount + 1] = baseVertex + 1;
+  mesh.indexData[mesh.indexCount + 2] = baseVertex + 2;
+  mesh.indexData[mesh.indexCount + 3] = baseVertex;
+  mesh.indexData[mesh.indexCount + 4] = baseVertex + 2;
+  mesh.indexData[mesh.indexCount + 5] = baseVertex + 3;
+  mesh.indexCount += 6;
+
+  mesh.minX = Math.min(mesh.minX, x0, x1, x2, x3);
+  mesh.minY = Math.min(mesh.minY, y0, y1, y2, y3);
+  mesh.minZ = Math.min(mesh.minZ, z0, z1, z2, z3);
+  mesh.maxX = Math.max(mesh.maxX, x0, x1, x2, x3);
+  mesh.maxY = Math.max(mesh.maxY, y0, y1, y2, y3);
+  mesh.maxZ = Math.max(mesh.maxZ, z0, z1, z2, z3);
 }
 
 function pushSideQuad(
-  vertices: number[],
-  indices: number[],
+  mesh: MeshBuilder,
   neighborState: number,
   neighborHeight: number,
   height: number,
@@ -1123,8 +1135,7 @@ function pushSideQuad(
     return;
   }
   pushQuad(
-    vertices,
-    indices,
+    mesh,
     x0, y0, z0,
     x1, y1, z1,
     x2, y2, z2,
@@ -1207,8 +1218,7 @@ function getBoundaryMinSurfaceY(
 }
 
 function pushWaterTopQuad(
-  vertices: number[],
-  indices: number[],
+  mesh: MeshBuilder,
   minX: number,
   minZ: number,
   maxX: number,
@@ -1222,8 +1232,7 @@ function pushWaterTopQuad(
   }
   const topY = waterHeight + 1;
   pushQuad(
-    vertices,
-    indices,
+    mesh,
     minX, topY, minZ,
     minX, topY, maxZ,
     maxX, topY, maxZ,

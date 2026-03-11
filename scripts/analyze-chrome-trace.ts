@@ -39,6 +39,17 @@ interface CliOptions {
   longTaskThresholdMs: number;
 }
 
+interface CpuSample {
+  nodeId: number;
+  deltaUs: number;
+  tsUs: number;
+}
+
+interface CpuProfileData {
+  nodes: Map<number, CpuProfileNode>;
+  samples: CpuSample[];
+}
+
 function parseCli(argv: readonly string[]): CliOptions {
   const args = argv.slice(2);
   let tracePath = "";
@@ -125,41 +136,59 @@ function formatFrameKey(node: CpuProfileNode | undefined, urlPrefix: string | nu
   return `${callFrame.functionName || "(anonymous)"} @ ${url}:${line}`;
 }
 
-function summarizeCpuProfile(
+function collectCpuProfile(
   events: readonly TraceEvent[],
   pid: number,
-  urlPrefix: string | null,
-): {
-  topExclusive: Array<{ frame: string; ms: number }>;
-  topInclusive: Array<{ frame: string; ms: number }>;
-} {
+): CpuProfileData {
   const chunks = events
     .filter((event) => event.name === "ProfileChunk" && event.pid === pid)
     .sort((left, right) => left.ts - right.ts);
   const nodes = new Map<number, CpuProfileNode>();
+  const samples: CpuSample[] = [];
   for (const chunk of chunks) {
     for (const node of chunk.args?.data?.cpuProfile?.nodes ?? []) {
       nodes.set(node.id, node);
     }
+    const chunkSamples = chunk.args?.data?.cpuProfile?.samples ?? [];
+    const timeDeltas = chunk.args?.data?.timeDeltas ?? [];
+    let sampleTsUs = chunk.ts;
+    for (let index = 0; index < chunkSamples.length; index += 1) {
+      const deltaUs = timeDeltas[index] ?? 0;
+      sampleTsUs += deltaUs;
+      samples.push({
+        nodeId: chunkSamples[index]!,
+        deltaUs,
+        tsUs: sampleTsUs,
+      });
+    }
   }
+  return { nodes, samples };
+}
+
+function summarizeCpuProfile(
+  cpu: CpuProfileData,
+  urlPrefix: string | null,
+  window: { startUs: number; endUs: number } | null = null,
+): {
+  topExclusive: Array<{ frame: string; ms: number }>;
+  topInclusive: Array<{ frame: string; ms: number }>;
+} {
   const exclusive = new Map<string, number>();
   const inclusive = new Map<string, number>();
-  for (const chunk of chunks) {
-    const samples = chunk.args?.data?.cpuProfile?.samples ?? [];
-    const timeDeltas = chunk.args?.data?.timeDeltas ?? [];
-    for (let index = 0; index < samples.length; index += 1) {
-      const nodeId = samples[index]!;
-      const delta = timeDeltas[index] ?? 0;
-      const exclusiveKey = formatFrameKey(nodes.get(nodeId), urlPrefix);
-      exclusive.set(exclusiveKey, (exclusive.get(exclusiveKey) ?? 0) + delta);
-      let currentNodeId: number | undefined = nodeId;
-      const seen = new Set<number>();
-      while (currentNodeId !== undefined && !seen.has(currentNodeId)) {
-        seen.add(currentNodeId);
-        const inclusiveKey = formatFrameKey(nodes.get(currentNodeId), urlPrefix);
-        inclusive.set(inclusiveKey, (inclusive.get(inclusiveKey) ?? 0) + delta);
-        currentNodeId = nodes.get(currentNodeId)?.parent;
-      }
+  for (const sample of cpu.samples) {
+    if (window && (sample.tsUs < window.startUs || sample.tsUs > window.endUs)) {
+      continue;
+    }
+    const { nodeId, deltaUs } = sample;
+    const exclusiveKey = formatFrameKey(cpu.nodes.get(nodeId), urlPrefix);
+    exclusive.set(exclusiveKey, (exclusive.get(exclusiveKey) ?? 0) + deltaUs);
+    let currentNodeId: number | undefined = nodeId;
+    const seen = new Set<number>();
+    while (currentNodeId !== undefined && !seen.has(currentNodeId)) {
+      seen.add(currentNodeId);
+      const inclusiveKey = formatFrameKey(cpu.nodes.get(currentNodeId), urlPrefix);
+      inclusive.set(inclusiveKey, (inclusive.get(inclusiveKey) ?? 0) + deltaUs);
+      currentNodeId = cpu.nodes.get(currentNodeId)?.parent;
     }
   }
   const toRows = (values: Map<string, number>) => [...values.entries()]
@@ -175,32 +204,25 @@ function summarizeCpuProfile(
   };
 }
 
-function summarizeLongTasks(
-  events: readonly TraceEvent[],
-  pid: number,
-  thresholdMs: number,
-): Array<{ tsMs: number; ms: number }> {
-  const mainThread = events.find((event) =>
-    event.pid === pid
-    && event.ph === "M"
-    && event.name === "thread_name"
-    && event.args?.name === "CrRendererMain");
-  if (!mainThread) {
-    return [];
-  }
-  return events
-    .filter((event) =>
-      event.pid === pid
-      && event.tid === mainThread.tid
-      && event.name === "RunTask"
-      && typeof event.dur === "number"
-      && event.dur >= thresholdMs * 1000)
-    .sort((left, right) => (right.dur ?? 0) - (left.dur ?? 0))
-    .slice(0, 20)
-    .map((event) => ({
-      tsMs: Number((event.ts / 1000).toFixed(1)),
-      ms: Number(((event.dur ?? 0) / 1000).toFixed(1)),
-    }));
+function summarizeCpuProfileWindow(
+  cpu: CpuProfileData,
+  urlPrefix: string | null,
+  startMs: number,
+  endMs: number,
+): {
+  startMs: number;
+  endMs: number;
+  topExclusive: Array<{ frame: string; ms: number }>;
+  topInclusive: Array<{ frame: string; ms: number }>;
+} {
+  return {
+    startMs: Number(startMs.toFixed(1)),
+    endMs: Number(endMs.toFixed(1)),
+    ...summarizeCpuProfile(cpu, urlPrefix, {
+      startUs: startMs * 1000,
+      endUs: endMs * 1000,
+    }),
+  };
 }
 
 function summarizeHeap(
@@ -265,6 +287,68 @@ function summarizeHeap(
   };
 }
 
+function summarizeHeapWindows(
+  cpu: CpuProfileData,
+  heap: ReturnType<typeof summarizeHeap>,
+  urlPrefix: string | null,
+): {
+  biggestRise: {
+    deltaMB: number;
+    startMs: number;
+    endMs: number;
+    topExclusive: Array<{ frame: string; ms: number }>;
+    topInclusive: Array<{ frame: string; ms: number }>;
+  };
+  biggestDrop: {
+    deltaMB: number;
+    startMs: number;
+    endMs: number;
+    topExclusive: Array<{ frame: string; ms: number }>;
+    topInclusive: Array<{ frame: string; ms: number }>;
+  };
+} | null {
+  if (!heap) {
+    return null;
+  }
+  return {
+    biggestRise: {
+      deltaMB: heap.biggestRiseMB,
+      ...summarizeCpuProfileWindow(cpu, urlPrefix, heap.biggestRiseStartMs, heap.biggestRiseEndMs),
+    },
+    biggestDrop: {
+      deltaMB: heap.biggestDropMB,
+      ...summarizeCpuProfileWindow(cpu, urlPrefix, heap.biggestDropStartMs, heap.biggestDropEndMs),
+    },
+  };
+}
+function summarizeLongTasks(
+  events: readonly TraceEvent[],
+  pid: number,
+  thresholdMs: number,
+): Array<{ tsMs: number; ms: number }> {
+  const mainThread = events.find((event) =>
+    event.pid === pid
+    && event.ph === "M"
+    && event.name === "thread_name"
+    && event.args?.name === "CrRendererMain");
+  if (!mainThread) {
+    return [];
+  }
+  return events
+    .filter((event) =>
+      event.pid === pid
+      && event.tid === mainThread.tid
+      && event.name === "RunTask"
+      && typeof event.dur === "number"
+      && event.dur >= thresholdMs * 1000)
+    .sort((left, right) => (right.dur ?? 0) - (left.dur ?? 0))
+    .slice(0, 20)
+    .map((event) => ({
+      tsMs: Number((event.ts / 1000).toFixed(1)),
+      ms: Number(((event.dur ?? 0) / 1000).toFixed(1)),
+    }));
+}
+
 function summarizeGc(events: readonly TraceEvent[], pid: number): Array<{ name: string; count: number; totalMs: number; maxMs: number }> {
   const gcEvents = events.filter((event) =>
     event.pid === pid
@@ -298,8 +382,10 @@ const { tracePath, urlPrefix, longTaskThresholdMs } = parseCli(Bun.argv);
 const traceJson = await Bun.file(tracePath).text();
 const trace = JSON.parse(traceJson) as { traceEvents: TraceEvent[] };
 const selected = selectTargetPid(trace.traceEvents, urlPrefix);
-const cpu = summarizeCpuProfile(trace.traceEvents, selected.pid, urlPrefix);
+const cpuProfile = collectCpuProfile(trace.traceEvents, selected.pid);
+const cpu = summarizeCpuProfile(cpuProfile, urlPrefix);
 const heap = summarizeHeap(trace.traceEvents, selected.pid);
+const heapWindows = summarizeHeapWindows(cpuProfile, heap, urlPrefix);
 const gcSummary = summarizeGc(trace.traceEvents, selected.pid);
 const longTasks = summarizeLongTasks(trace.traceEvents, selected.pid, longTaskThresholdMs);
 
@@ -310,6 +396,7 @@ console.log(JSON.stringify({
   topExclusive: cpu.topExclusive,
   topInclusive: cpu.topInclusive,
   heap,
+  heapWindows,
   gc: gcSummary,
   longTasks,
 }, null, 2));

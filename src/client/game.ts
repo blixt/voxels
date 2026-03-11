@@ -1,4 +1,4 @@
-import { GameController } from "./game-controller.ts";
+import { GameController, type GameHudSnapshot } from "./game-controller.ts";
 import { worldUnitsToMeters } from "../engine/scale.ts";
 
 declare global {
@@ -61,6 +61,46 @@ interface GameRuntime {
   dispose(): void;
 }
 
+const TELEMETRY_LABELS = [
+  "Position",
+  "Feet",
+  "Player Chunk",
+  "Stream Anchor",
+  "Grounded",
+  "Yaw",
+  "Pitch",
+  "Resident Chunks",
+  "Dirty Resident",
+  "Radius",
+  "Surface Y",
+  "Far Field",
+  "Far Build",
+  "Far Bands",
+  "Far Pending",
+  "Far Tris",
+  "Voxels",
+  "Palette",
+  "Stream",
+  "Generated",
+  "Evicted",
+  "Pending",
+  "Empty Skipped",
+  "Empty Cache Hits",
+  "Gen Budget",
+  "Mesh Budget",
+  "Far Budget",
+  "Mesh",
+  "New Meshes",
+  "Remeshes",
+  "Sync",
+  "Upload",
+  "Upload Chunks",
+  "Draw Calls",
+  "Triangles",
+  "Frame CPU",
+  "Avg Frame CPU",
+] as const;
+
 const runtime = mountGame();
 reportAsyncFailure(runtime.ready);
 
@@ -89,47 +129,19 @@ function mountGame(): GameRuntime {
   const handleCaptureClick = async () => {
     await controller.requestPointerLock();
   };
+  const telemetryValues = createTelemetryValues(telemetryElement);
+  const lastTelemetryValues = new Array<string>(telemetryValues.length).fill("");
 
   controller.onHudUpdate = (snapshot) => {
-    telemetryElement.innerHTML = [
-      metric("Position", formatPosition(snapshot.position)),
-      metric("Feet", formatPosition(snapshot.feetPosition)),
-      metric("Player Chunk", snapshot.playerChunk.join(", ")),
-      metric("Stream Anchor", snapshot.streamAnchorChunk.join(", ")),
-      metric("Grounded", snapshot.grounded ? "Yes" : "No"),
-      metric("Yaw", `${snapshot.yawDegrees.toFixed(1)}°`),
-      metric("Pitch", `${snapshot.pitchDegrees.toFixed(1)}°`),
-      metric("Resident Chunks", snapshot.chunkCount.toLocaleString()),
-      metric("Dirty Resident", snapshot.streamDirtyResidentChunks.toLocaleString()),
-      metric("Radius", `${snapshot.residencyRadiusChunks} chunks`),
-      metric("Surface Y", `${worldUnitsToMeters(snapshot.surfaceY).toFixed(1)} m`),
-      metric("Far Field", `${snapshot.farFieldMaxRadiusMeters.toFixed(0)} m`),
-      metric("Far Build", `${snapshot.farFieldMs.toFixed(1)} ms`),
-      metric("Far Bands", snapshot.farFieldBuiltBands.toLocaleString()),
-      metric("Far Pending", snapshot.farFieldPendingBands.toLocaleString()),
-      metric("Far Tris", snapshot.farFieldTriangles.toLocaleString()),
-      metric("Voxels", snapshot.solidVoxelCount.toLocaleString()),
-      metric("Palette", snapshot.paletteCount.toLocaleString()),
-      metric("Stream", `${snapshot.streamMs.toFixed(1)} ms`),
-      metric("Generated", snapshot.streamGeneratedChunks.toLocaleString()),
-      metric("Evicted", snapshot.streamEvictedChunks.toLocaleString()),
-      metric("Pending", snapshot.streamPendingChunks.toLocaleString()),
-      metric("Empty Skipped", snapshot.streamEmptyChunksSkipped.toLocaleString()),
-      metric("Empty Cache Hits", snapshot.streamCachedEmptyChunkHits.toLocaleString()),
-      metric("Gen Budget", snapshot.maxGeneratedChunksPerUpdate.toLocaleString()),
-      metric("Mesh Budget", snapshot.maxMeshRebuildsPerFrame.toLocaleString()),
-      metric("Far Budget", snapshot.maxFarFieldBandRebuildsPerFrame.toLocaleString()),
-      metric("Mesh", `${snapshot.meshMs.toFixed(1)} ms`),
-      metric("New Meshes", snapshot.meshNewChunks.toLocaleString()),
-      metric("Remeshes", snapshot.meshRemeshChunks.toLocaleString()),
-      metric("Sync", `${snapshot.lastFrameSyncMs.toFixed(2)} ms`),
-      metric("Upload", `${snapshot.lastFrameUploadMs.toFixed(2)} ms`),
-      metric("Upload Chunks", snapshot.lastFrameUploadChunks.toLocaleString()),
-      metric("Draw Calls", snapshot.drawCalls.toLocaleString()),
-      metric("Triangles", snapshot.triangles.toLocaleString()),
-      metric("Frame CPU", `${snapshot.lastFrameCpuMs.toFixed(2)} ms`),
-      metric("Avg Frame CPU", `${snapshot.avgFrameCpuMs.toFixed(2)} ms`),
-    ].join("");
+    const nextValues = buildTelemetryValues(snapshot);
+    for (let index = 0; index < nextValues.length; index += 1) {
+      const value = nextValues[index]!;
+      if (value === lastTelemetryValues[index]) {
+        continue;
+      }
+      telemetryValues[index]!.textContent = value;
+      lastTelemetryValues[index] = value;
+    }
     captureButton.hidden = snapshot.pointerLocked;
   };
 
@@ -186,8 +198,63 @@ function reportAsyncFailure(promise: Promise<unknown>): void {
   });
 }
 
-function metric(label: string, value: string): string {
-  return `<div class="game-metric"><span>${label}</span><strong>${value}</strong></div>`;
+function createTelemetryValues(root: HTMLElement): HTMLSpanElement[] {
+  const fragment = document.createDocumentFragment();
+  const values: HTMLSpanElement[] = [];
+  for (const label of TELEMETRY_LABELS) {
+    const metric = document.createElement("div");
+    metric.className = "game-metric";
+    const labelElement = document.createElement("span");
+    labelElement.textContent = label;
+    const valueElement = document.createElement("strong");
+    metric.append(labelElement, valueElement);
+    fragment.append(metric);
+    values.push(valueElement);
+  }
+  root.replaceChildren(fragment);
+  return values;
+}
+
+function buildTelemetryValues(snapshot: GameHudSnapshot): string[] {
+  return [
+    formatPosition(snapshot.position),
+    formatPosition(snapshot.feetPosition),
+    snapshot.playerChunk.join(", "),
+    snapshot.streamAnchorChunk.join(", "),
+    snapshot.grounded ? "Yes" : "No",
+    `${snapshot.yawDegrees.toFixed(1)}°`,
+    `${snapshot.pitchDegrees.toFixed(1)}°`,
+    snapshot.chunkCount.toLocaleString(),
+    snapshot.streamDirtyResidentChunks.toLocaleString(),
+    `${snapshot.residencyRadiusChunks} chunks`,
+    `${worldUnitsToMeters(snapshot.surfaceY).toFixed(1)} m`,
+    `${snapshot.farFieldMaxRadiusMeters.toFixed(0)} m`,
+    `${snapshot.farFieldMs.toFixed(1)} ms`,
+    snapshot.farFieldBuiltBands.toLocaleString(),
+    snapshot.farFieldPendingBands.toLocaleString(),
+    snapshot.farFieldTriangles.toLocaleString(),
+    snapshot.solidVoxelCount.toLocaleString(),
+    snapshot.paletteCount.toLocaleString(),
+    `${snapshot.streamMs.toFixed(1)} ms`,
+    snapshot.streamGeneratedChunks.toLocaleString(),
+    snapshot.streamEvictedChunks.toLocaleString(),
+    snapshot.streamPendingChunks.toLocaleString(),
+    snapshot.streamEmptyChunksSkipped.toLocaleString(),
+    snapshot.streamCachedEmptyChunkHits.toLocaleString(),
+    snapshot.maxGeneratedChunksPerUpdate.toLocaleString(),
+    snapshot.maxMeshRebuildsPerFrame.toLocaleString(),
+    snapshot.maxFarFieldBandRebuildsPerFrame.toLocaleString(),
+    `${snapshot.meshMs.toFixed(1)} ms`,
+    snapshot.meshNewChunks.toLocaleString(),
+    snapshot.meshRemeshChunks.toLocaleString(),
+    `${snapshot.lastFrameSyncMs.toFixed(2)} ms`,
+    `${snapshot.lastFrameUploadMs.toFixed(2)} ms`,
+    snapshot.lastFrameUploadChunks.toLocaleString(),
+    snapshot.drawCalls.toLocaleString(),
+    snapshot.triangles.toLocaleString(),
+    `${snapshot.lastFrameCpuMs.toFixed(2)} ms`,
+    `${snapshot.avgFrameCpuMs.toFixed(2)} ms`,
+  ];
 }
 
 function formatPosition(position: [number, number, number]): string {
