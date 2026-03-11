@@ -171,3 +171,19 @@ This lets the engine keep one compact feature slot while still making:
 - marsh and bloom feel more special through `mangrove`, `cypress`, `glowcap`, and `mega_glowcap`
 
 The broad fixed-seed scan now finds landmark silhouettes up to about `9.7 m`, which is the first point where the world starts reading correctly against the player scale.
+
+Update:
+
+- rare taller mountains now come from a slow shared `peakness` province field plus a smaller ridge-crown term
+- richer biome identity is still being added through regional landmark overlays instead of more top-level biome ids
+- the latest landmark pass added:
+  - `willow`
+  - `giant_flower`
+  - `thorn_tree`
+- the strongest current themed regions are:
+  - verdant old-growth
+  - highland old-growth
+  - tundra denser taiga
+  - marsh willow thickets
+  - bloom flower-grove pockets
+  - steppe thorn scrub

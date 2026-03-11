@@ -341,14 +341,17 @@ test("landmarks appear across the world with multiple distinct families", () => 
     }
   }
 
-  expect(landmarkIds.size).toBeGreaterThanOrEqual(10);
+  expect(landmarkIds.size).toBeGreaterThanOrEqual(13);
   expect(landmarkIds.has("oak")).toBe(true);
   expect(landmarkIds.has("canopy_tree")).toBe(true);
   expect(landmarkIds.has("acacia")).toBe(true);
+  expect(landmarkIds.has("willow")).toBe(true);
   expect(landmarkIds.has("blossom_tree")).toBe(true);
   expect(landmarkIds.has("fruit_tree")).toBe(true);
+  expect(landmarkIds.has("giant_flower")).toBe(true);
   expect(landmarkIds.has("redwood")).toBe(true);
   expect(landmarkIds.has("dead_tree")).toBe(true);
+  expect(landmarkIds.has("thorn_tree")).toBe(true);
   expect(landmarkIds.has("hoodoo")).toBe(true);
   expect(landmarkIds.has("ice_spire")).toBe(true);
   expect(
@@ -384,17 +387,20 @@ test("landmark scale now regularly exceeds player height", () => {
   expect(tallFeatureCount).toBeGreaterThan(100);
 });
 
-test("the world now contains dense forest and orchard-style landmark patches", () => {
+test("the world now contains dense forest plus orchard and flower-grove landmark pockets", () => {
   const generator = new ProceduralWorldGenerator(1337);
-  const forestLandmarks = new Set(["redwood", "tall_fir", "fir", "canopy_tree", "oak"]);
+  const forestLandmarks = new Set(["redwood", "tall_fir", "fir", "canopy_tree", "oak", "willow"]);
   const orchardLandmarks = new Set(["blossom_tree", "fruit_tree", "berry_bush"]);
+  const gladeLandmarks = new Set(["giant_flower", "blossom_tree", "glowcap", "flower_patch"]);
   let maxForestRatio = 0;
   let maxOrchardRatio = 0;
+  let maxGladeRatio = 0;
 
   for (let centerZ = -8192; centerZ <= 8192; centerZ += 192) {
     for (let centerX = -8192; centerX <= 8192; centerX += 192) {
       let forestCount = 0;
       let orchardCount = 0;
+      let gladeCount = 0;
       let total = 0;
       for (let dz = -48; dz <= 48; dz += 8) {
         for (let dx = -48; dx <= 48; dx += 8) {
@@ -406,16 +412,21 @@ test("the world now contains dense forest and orchard-style landmark patches", (
           if (orchardLandmarks.has(probe.landmarkId ?? "") && featureHeight >= 10) {
             orchardCount += 1;
           }
+          if (gladeLandmarks.has(probe.landmarkId ?? "") && featureHeight >= 2) {
+            gladeCount += 1;
+          }
           total += 1;
         }
       }
       maxForestRatio = Math.max(maxForestRatio, forestCount / total);
       maxOrchardRatio = Math.max(maxOrchardRatio, orchardCount / total);
+      maxGladeRatio = Math.max(maxGladeRatio, gladeCount / total);
     }
   }
 
   expect(maxForestRatio).toBeGreaterThanOrEqual(0.30);
   expect(maxOrchardRatio).toBeGreaterThanOrEqual(0.16);
+  expect(maxGladeRatio).toBeGreaterThanOrEqual(0.14);
 });
 
 test("surface materials vary within major biomes to support finer ground detail", () => {
@@ -469,8 +480,11 @@ test("vegetation landmarks do not root inside standing water", () => {
     "oak",
     "canopy_tree",
     "birch",
+    "willow",
     "palm",
     "acacia",
+    "thorn_tree",
+    "giant_flower",
     "cactus",
     "dead_snag",
     "fir",
@@ -513,6 +527,7 @@ test("representative trees keep broad crowns instead of collapsing into poles", 
   const generator = new ProceduralWorldGenerator(1337);
   const shapeExpectations = [
     { landmarkId: "oak", minWidth: 12, minCount: 80 },
+    { landmarkId: "willow", minWidth: 14, minCount: 120 },
     { landmarkId: "fir", minWidth: 10, minCount: 80 },
     { landmarkId: "tall_fir", minWidth: 12, minCount: 120 },
     { landmarkId: "palm", minWidth: 10, minCount: 80 },

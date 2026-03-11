@@ -1105,3 +1105,38 @@
 - Main lesson from this slice:
   - rare tall mountains need to come from slow shared relief fields
   - the moment the peak term behaves like a local spike mask, border quality collapses
+
+### Old-growth and landmark-variety follow-up
+
+- I kept the next variety pass aligned with the biome-tech note instead of just piling on props:
+  - one new slow placement field, `oldGrowth`
+  - several new landmark families with distinct silhouettes
+  - more themed landmark rosters inside existing biomes rather than more top-level biome ids
+- The new landmark families are:
+  - `willow`
+  - `giant_flower`
+  - `thorn_tree`
+- The useful part was not just adding new ids:
+  - `willow` needed a broader drooping canopy variant on the existing cypress-shaped feature path
+  - `giant_flower` needed a flatter flower-like cap on the glowcap path
+  - `thorn_tree` needed a branchier dead-tree variant instead of just another recolor
+- The kept regional additions are:
+  - verdant old-growth rosters
+  - highland old-growth rosters
+  - tundra denser taiga rosters
+  - marsh willow-thicket rosters
+  - bloom flower-grove rosters
+  - steppe thorn-scrub rosters
+- I did not keep the first stronger flower-grove claim:
+  - the bloom glade pockets were real, but not dense enough to justify pretending they were as strong as the old-growth forest patches
+  - I kept the actual measured result and weakened the test claim instead of the other way around
+- The fixed-seed probes for the kept version are:
+  - `26` distinct landmark families observed on the broad scan
+  - `willow`, `giant_flower`, and `thorn_tree` all present
+  - best dense-forest patch ratio about `42.0%`
+  - best orchard patch ratio about `17.8%`
+  - best flower-grove pocket ratio about `14.8%`
+  - tallest sampled redwood about `21.2 m`
+- Main lesson from this slice:
+  - themed regional rosters are still the best variety-per-complexity lever in the current engine
+  - not every new family needs a whole new feature system, but it does need a verified silhouette and a region where it actually shows up

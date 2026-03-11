@@ -13,10 +13,13 @@ export type LandmarkId =
   | "oak"
   | "canopy_tree"
   | "birch"
+  | "willow"
   | "blossom_tree"
   | "fruit_tree"
+  | "giant_flower"
   | "redwood"
   | "dead_tree"
+  | "thorn_tree"
   | "berry_bush"
   | "boulder"
   | "standing_stone"
@@ -115,6 +118,7 @@ interface ColumnFieldSample {
   dune: number;
   mesa: number;
   grove: number;
+  oldGrowth: number;
   orchard: number;
   desolation: number;
   strata: number;
@@ -249,6 +253,7 @@ const CHANNEL_SCALE = 1 / 1200;
 const DUNE_SCALE = 1 / 320;
 const MESA_SCALE = 1 / 900;
 const GROVE_SCALE = 1 / 2100;
+const OLD_GROWTH_SCALE = 1 / 2800;
 const ORCHARD_SCALE = 1 / 1700;
 const DESOLATION_SCALE = 1 / 2400;
 const STRATA_SCALE = 1 / 54;
@@ -311,10 +316,13 @@ const LANDMARKS: Record<LandmarkId, LandmarkProfile> = {
   oak: createLandmark("oak", 176, 11, 0.34, 1.0, 0),
   canopy_tree: createLandmark("canopy_tree", 224, 16, 0.20, 1.2, 2),
   birch: createLandmark("birch", 164, 9, 0.30, 1.0, 1),
+  willow: createLandmark("willow", 188, 14, 0.22, 1.0, 0),
   blossom_tree: createLandmark("blossom_tree", 168, 11, 0.24, 1.0, 7),
   fruit_tree: createLandmark("fruit_tree", 160, 10, 0.20, 1.0, 8),
+  giant_flower: createLandmark("giant_flower", 148, 9, 0.18, 1.0, 1),
   redwood: createLandmark("redwood", 272, 20, 0.18, 1.0, 0),
   dead_tree: createLandmark("dead_tree", 172, 8, 0.20, 1.0, 0),
+  thorn_tree: createLandmark("thorn_tree", 176, 9, 0.18, 1.0, 1),
   berry_bush: createLandmark("berry_bush", 88, 5, 0.42, 1.0, 5),
   boulder: createLandmark("boulder", 120, 5, 0.34, 1.0, 0),
   standing_stone: createLandmark("standing_stone", 160, 5, 0.24, 1.0, 0),
@@ -400,6 +408,7 @@ const SPECIAL_BIOME_LANDMARKS: Record<SpecialBiomeId, readonly LandmarkProfile[]
   ],
   bloom: [
     landmarkPlacement("mega_glowcap", { chance: 0.24, scale: 1.18 }),
+    landmarkPlacement("giant_flower", { chance: 0.20, scale: 1.12, cellSize: 136, radius: 10, variant: 1 }),
     landmarkPlacement("glowcap", { chance: 0.32, scale: 1.08 }),
     landmarkPlacement("crystal_cluster", { chance: 0.20, scale: 1.08, variant: 2 }),
     landmarkPlacement("flower_patch", { chance: 0.28, scale: 1.08, variant: 4 }),
@@ -411,8 +420,18 @@ const VERDANT_GROVE_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("redwood", { chance: 0.34, scale: 1.08, cellSize: 196, radius: 20 }),
   landmarkPlacement("canopy_tree", { chance: 0.82, scale: 1.34, cellSize: 92, radius: 18 }),
   landmarkPlacement("oak", { chance: 0.74, scale: 1.20, cellSize: 84, radius: 12 }),
+  landmarkPlacement("willow", { chance: 0.22, scale: 1.06, cellSize: 156, radius: 14 }),
   landmarkPlacement("berry_bush", { chance: 0.64, scale: 1.10, cellSize: 68, radius: 5 }),
   landmarkPlacement("flower_patch", { chance: 0.44, scale: 1.12, variant: 1, cellSize: 72, radius: 5 }),
+];
+
+const VERDANT_OLD_GROWTH_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("redwood", { chance: 0.42, scale: 1.20, cellSize: 176, radius: 24 }),
+  landmarkPlacement("canopy_tree", { chance: 0.92, scale: 1.40, cellSize: 88, radius: 18 }),
+  landmarkPlacement("oak", { chance: 0.86, scale: 1.26, cellSize: 76, radius: 13 }),
+  landmarkPlacement("willow", { chance: 0.34, scale: 1.12, cellSize: 136, radius: 15 }),
+  landmarkPlacement("berry_bush", { chance: 0.74, scale: 1.14, cellSize: 64, radius: 5 }),
+  landmarkPlacement("flower_patch", { chance: 0.52, scale: 1.12, variant: 1, cellSize: 68, radius: 5 }),
 ];
 
 const VERDANT_ORCHARD_LANDMARKS: readonly LandmarkProfile[] = [
@@ -439,6 +458,14 @@ const STEPPE_DESOLATE_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("boulder", { chance: 0.16, scale: 0.92 }),
 ];
 
+const STEPPE_THORN_SCRUB_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("thorn_tree", { chance: 0.34, scale: 1.10, cellSize: 132, radius: 10 }),
+  landmarkPlacement("acacia", { chance: 0.28, scale: 1.08, cellSize: 144, radius: 12 }),
+  landmarkPlacement("berry_bush", { chance: 0.36, scale: 1.02, cellSize: 82, radius: 5 }),
+  landmarkPlacement("flower_patch", { chance: 0.20, scale: 0.96, variant: 2, cellSize: 76, radius: 5 }),
+  landmarkPlacement("standing_stone", { chance: 0.20, scale: 1.12 }),
+];
+
 const BADLANDS_DESOLATE_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("dead_tree", { chance: 0.34, scale: 1.28, cellSize: 148, radius: 8 }),
   landmarkPlacement("hoodoo", { chance: 0.28, scale: 1.18 }),
@@ -454,6 +481,14 @@ const HIGHLAND_REDWOOD_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("boulder", { chance: 0.18, scale: 1.02 }),
 ];
 
+const HIGHLAND_OLD_GROWTH_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("redwood", { chance: 0.44, scale: 1.22, cellSize: 176, radius: 24 }),
+  landmarkPlacement("tall_fir", { chance: 0.72, scale: 1.26, cellSize: 96, radius: 13 }),
+  landmarkPlacement("fir", { chance: 0.68, scale: 1.18, cellSize: 88, radius: 11 }),
+  landmarkPlacement("berry_bush", { chance: 0.32, scale: 1.00, cellSize: 78, radius: 5 }),
+  landmarkPlacement("boulder", { chance: 0.16, scale: 1.04 }),
+];
+
 const TUNDRA_TAIGA_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("tall_fir", { chance: 0.42, scale: 1.16, cellSize: 124, radius: 12 }),
   landmarkPlacement("fir", { chance: 0.56, scale: 1.10, cellSize: 96, radius: 10 }),
@@ -461,11 +496,26 @@ const TUNDRA_TAIGA_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("boulder", { chance: 0.18, scale: 1.00 }),
 ];
 
+const TUNDRA_OLD_GROWTH_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("tall_fir", { chance: 0.58, scale: 1.22, cellSize: 108, radius: 12 }),
+  landmarkPlacement("fir", { chance: 0.72, scale: 1.14, cellSize: 88, radius: 10 }),
+  landmarkPlacement("frost_shrub", { chance: 0.40, scale: 1.08, cellSize: 78, radius: 4 }),
+  landmarkPlacement("boulder", { chance: 0.16, scale: 1.02 }),
+];
+
 const MARSH_THICKET_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("mangrove", { chance: 0.36, scale: 1.18, cellSize: 160, radius: 15 }),
   landmarkPlacement("cypress", { chance: 0.42, scale: 1.12, cellSize: 128, radius: 10 }),
   landmarkPlacement("reed_cluster", { chance: 0.70, scale: 1.12, cellSize: 68, radius: 4 }),
   landmarkPlacement("flower_patch", { chance: 0.18, scale: 0.96, variant: 3, cellSize: 84, radius: 5 }),
+];
+
+const MARSH_WILLOW_THICKET_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("willow", { chance: 0.34, scale: 1.10, cellSize: 136, radius: 14 }),
+  landmarkPlacement("mangrove", { chance: 0.30, scale: 1.18, cellSize: 154, radius: 15 }),
+  landmarkPlacement("cypress", { chance: 0.40, scale: 1.14, cellSize: 118, radius: 10 }),
+  landmarkPlacement("reed_cluster", { chance: 0.76, scale: 1.14, cellSize: 64, radius: 4 }),
+  landmarkPlacement("flower_patch", { chance: 0.28, scale: 1.00, variant: 3, cellSize: 78, radius: 5 }),
 ];
 
 const EMBER_DEADLAND_LANDMARKS: readonly LandmarkProfile[] = [
@@ -477,10 +527,19 @@ const EMBER_DEADLAND_LANDMARKS: readonly LandmarkProfile[] = [
 
 const BLOOM_ORCHARD_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("mega_glowcap", { chance: 0.18, scale: 1.22 }),
+  landmarkPlacement("giant_flower", { chance: 0.22, scale: 1.18, cellSize: 124, radius: 10, variant: 1 }),
   landmarkPlacement("blossom_tree", { chance: 0.28, scale: 1.18, cellSize: 128, radius: 12 }),
   landmarkPlacement("fruit_tree", { chance: 0.22, scale: 1.10, cellSize: 128, radius: 11 }),
   landmarkPlacement("glowcap", { chance: 0.30, scale: 1.06 }),
   landmarkPlacement("flower_patch", { chance: 0.34, scale: 1.12, variant: 4, cellSize: 72, radius: 5 }),
+];
+
+const BLOOM_FLOWER_GROVE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("giant_flower", { chance: 0.56, scale: 1.34, cellSize: 92, radius: 12, variant: 1 }),
+  landmarkPlacement("blossom_tree", { chance: 0.50, scale: 1.24, cellSize: 98, radius: 13 }),
+  landmarkPlacement("fruit_tree", { chance: 0.26, scale: 1.12, cellSize: 122, radius: 11 }),
+  landmarkPlacement("glowcap", { chance: 0.44, scale: 1.12, cellSize: 132, radius: 12 }),
+  landmarkPlacement("flower_patch", { chance: 0.72, scale: 1.22, variant: 4, cellSize: 56, radius: 6 }),
 ];
 
 const chunkGenerationScratchPool: ChunkGenerationScratch[] = [];
@@ -545,6 +604,7 @@ export class ProceduralWorldGenerator {
   private readonly duneSeed: number;
   private readonly mesaSeed: number;
   private readonly groveSeed: number;
+  private readonly oldGrowthSeed: number;
   private readonly orchardSeed: number;
   private readonly desolationSeed: number;
   private readonly strataSeed: number;
@@ -581,6 +641,7 @@ export class ProceduralWorldGenerator {
     this.duneSeed = seed + 709;
     this.mesaSeed = seed + 761;
     this.groveSeed = seed + 787;
+    this.oldGrowthSeed = seed + 811;
     this.orchardSeed = seed + 829;
     this.desolationSeed = seed + 881;
     this.strataSeed = seed + 809;
@@ -841,6 +902,7 @@ export class ProceduralWorldGenerator {
       dune: 1 - Math.abs(fbm2D2(worldX * DUNE_SCALE, worldZ * DUNE_SCALE, this.duneSeed) * 2 - 1),
       mesa: smoothstep(0.54, 0.84, fbm2D2(worldX * MESA_SCALE, worldZ * MESA_SCALE, this.mesaSeed)),
       grove: fbm2D3(worldX * GROVE_SCALE, worldZ * GROVE_SCALE, this.groveSeed),
+      oldGrowth: fbm2D3(worldX * OLD_GROWTH_SCALE, worldZ * OLD_GROWTH_SCALE, this.oldGrowthSeed),
       orchard: fbm2D3(worldX * ORCHARD_SCALE, worldZ * ORCHARD_SCALE, this.orchardSeed),
       desolation: fbm2D3(worldX * DESOLATION_SCALE, worldZ * DESOLATION_SCALE, this.desolationSeed),
       strata: fbm2D2(worldX * STRATA_SCALE, worldZ * STRATA_SCALE, this.strataSeed),
@@ -1618,6 +1680,9 @@ function pickSubsurfaceMaterial(
 function selectLandmarkRoster(biomeId: BiomeId, fields: ColumnFieldSample): readonly LandmarkProfile[] {
   switch (biomeId) {
     case "verdant":
+      if (fields.oldGrowth > 0.70 && fields.moisture > 0.60 && fields.grove > 0.54) {
+        return VERDANT_OLD_GROWTH_LANDMARKS;
+      }
       if (fields.grove > 0.64 && fields.moisture > 0.62 && fields.drainage > 0.56) {
         return VERDANT_GROVE_LANDMARKS;
       }
@@ -1629,6 +1694,9 @@ function selectLandmarkRoster(biomeId: BiomeId, fields: ColumnFieldSample): read
       if (fields.orchard > 0.70 && fields.moisture > 0.42 && fields.temperature > 0.56) {
         return STEPPE_ORCHARD_LANDMARKS;
       }
+      if (fields.desolation > 0.64 && fields.temperature > 0.56 && fields.moisture < 0.48) {
+        return STEPPE_THORN_SCRUB_LANDMARKS;
+      }
       if (fields.desolation > 0.72 && fields.moisture < 0.42) {
         return STEPPE_DESOLATE_LANDMARKS;
       }
@@ -1636,18 +1704,30 @@ function selectLandmarkRoster(biomeId: BiomeId, fields: ColumnFieldSample): read
     case "badlands":
       return fields.desolation > 0.58 ? BADLANDS_DESOLATE_LANDMARKS : BASE_BIOME_LANDMARKS.badlands;
     case "highland":
+      if (fields.oldGrowth > 0.66 && fields.moisture > 0.48 && fields.uplift > 0.60) {
+        return HIGHLAND_OLD_GROWTH_LANDMARKS;
+      }
       return fields.grove > 0.68 && fields.moisture > 0.50 && fields.uplift > 0.62
         ? HIGHLAND_REDWOOD_LANDMARKS
         : BASE_BIOME_LANDMARKS.highland;
     case "tundra":
+      if (fields.oldGrowth > 0.62 && fields.moisture > 0.34 && fields.uplift > 0.60) {
+        return TUNDRA_OLD_GROWTH_LANDMARKS;
+      }
       return fields.grove > 0.62 && fields.moisture > 0.36
         ? TUNDRA_TAIGA_LANDMARKS
         : BASE_BIOME_LANDMARKS.tundra;
     case "marsh":
+      if (fields.grove > 0.66 && fields.moisture > 0.70) {
+        return MARSH_WILLOW_THICKET_LANDMARKS;
+      }
       return fields.grove > 0.60 ? MARSH_THICKET_LANDMARKS : SPECIAL_BIOME_LANDMARKS.marsh;
     case "ember":
       return fields.desolation > 0.54 ? EMBER_DEADLAND_LANDMARKS : SPECIAL_BIOME_LANDMARKS.ember;
     case "bloom":
+      if (fields.magic > 0.62 && (fields.orchard > 0.52 || fields.grove > 0.56)) {
+        return BLOOM_FLOWER_GROVE_LANDMARKS;
+      }
       return fields.orchard > 0.64 ? BLOOM_ORCHARD_LANDMARKS : SPECIAL_BIOME_LANDMARKS.bloom;
     default:
       return BASE_BIOME_LANDMARKS[biomeId];
@@ -1705,6 +1785,20 @@ function configureLandmarkFeature(
       );
       out.featureExtra = 1;
       return true;
+    case "willow":
+      if (submergedSurface) {
+        return false;
+      }
+      configureTreeFeature(
+        out,
+        FEATURE_CYPRESS,
+        scaledFeatureHeight(34, 20, fields.moisture + fields.drainage * 0.2, profile.scale),
+        scaledFeatureRadius(12, 5, fields.moisture, profile.scale),
+        "#754",
+        "#7A8",
+      );
+      out.featureExtra = 1;
+      return true;
     case "blossom_tree":
       if (submergedSurface) {
         return false;
@@ -1735,6 +1829,20 @@ function configureLandmarkFeature(
       );
       out.featureExtra = 8;
       return true;
+    case "giant_flower":
+      if (submergedSurface) {
+        return false;
+      }
+      configureTreeFeature(
+        out,
+        FEATURE_GLOWCAP,
+        scaledFeatureHeight(18, 18, fields.magic + fields.moisture * 0.2, profile.scale),
+        scaledFeatureRadius(9, 4, fields.magic + fields.moisture * 0.2, profile.scale),
+        "#7A5",
+        profile.variant > 0 ? "#FD7" : "#D7F",
+      );
+      out.featureExtra = 4;
+      return true;
     case "redwood":
       if (submergedSurface) {
         return false;
@@ -1760,6 +1868,20 @@ function configureLandmarkFeature(
         profile.variant > 0 ? "#322" : "#544",
         profile.variant > 0 ? "#655" : "#765",
       );
+      return true;
+    case "thorn_tree":
+      if (submergedSurface) {
+        return false;
+      }
+      configureTreeFeature(
+        out,
+        FEATURE_DEAD_TREE,
+        scaledFeatureHeight(28, 18, fields.temperature + fields.desolation * 0.5, profile.scale),
+        scaledFeatureRadius(8, 4, fields.scatter + fields.temperature * 0.2, profile.scale),
+        "#543",
+        "#875",
+      );
+      out.featureExtra = 2;
       return true;
     case "berry_bush":
       if (submergedSurface) {
@@ -2288,13 +2410,23 @@ function sampleFeatureMaterial(
     case FEATURE_ICE_SPIRE:
       return radial <= Math.max(0.8, featureRadius - relativeY * 0.35) ? materialSecondary : 0;
     case FEATURE_CYPRESS: {
-      const trunkHeight = Math.max(3, Math.round(featureHeight * 0.18));
-      const trunkRadius = Math.min(1.1, 0.72 + featureRadius * 0.04);
+      const willow = featureExtra >= 1;
+      const trunkHeight = willow
+        ? Math.max(4, Math.round(featureHeight * 0.22))
+        : Math.max(3, Math.round(featureHeight * 0.18));
+      const trunkRadius = willow
+        ? Math.min(1.3, 0.78 + featureRadius * 0.04)
+        : Math.min(1.1, 0.72 + featureRadius * 0.04);
       if (relativeY <= trunkHeight) {
         return absX <= trunkRadius && absZ <= trunkRadius ? materialPrimary : 0;
       }
-      const crownCenter = featureHeight * 0.62;
-      const crownRadius = featureRadius - Math.abs(relativeY - crownCenter) * 0.18;
+      const crownCenter = willow ? featureHeight * 0.58 : featureHeight * 0.62;
+      const crownRadius = willow
+        ? featureRadius * 1.04 - Math.abs(relativeY - crownCenter) * 0.12
+        : featureRadius - Math.abs(relativeY - crownCenter) * 0.18;
+      if (willow && relativeY >= crownCenter && radial <= featureRadius + 0.55 && radial >= Math.max(1.8, featureRadius * 0.58)) {
+        return materialSecondary;
+      }
       return radial <= Math.max(1.2, crownRadius)
         ? materialSecondary
         : 0;
@@ -2339,12 +2471,17 @@ function sampleFeatureMaterial(
       if (radial <= trunkRadius) {
         return materialPrimary;
       }
-      const branchStart = Math.max(4, Math.round(featureHeight * 0.36));
+      const thorny = featureExtra >= 2;
+      const branchStart = thorny
+        ? Math.max(3, Math.round(featureHeight * 0.24))
+        : Math.max(4, Math.round(featureHeight * 0.36));
       if (relativeY < branchStart) {
         return 0;
       }
       const branchSeed = (relativeY + featureExtra * 3) % 6;
-      const branchExtent = Math.max(2, Math.round(featureRadius * (relativeY > featureHeight * 0.72 ? 0.55 : 0.40)));
+      const branchExtent = thorny
+        ? Math.max(3, Math.round(featureRadius * (relativeY > featureHeight * 0.60 ? 0.85 : 0.62)))
+        : Math.max(2, Math.round(featureRadius * (relativeY > featureHeight * 0.72 ? 0.55 : 0.40)));
       const branchOnX = branchSeed === 0 || branchSeed === 3;
       const branchOnZ = branchSeed === 1 || branchSeed === 4;
       const branchDiagonal = branchSeed === 2 || branchSeed === 5;
@@ -2360,9 +2497,16 @@ function sampleFeatureMaterial(
       return 0;
     }
     case FEATURE_GLOWCAP:
-      if (relativeY <= featureHeight - (featureExtra >= 3 ? 5 : 3)) {
-        const stemRadius = Math.min(1.2, 0.75 + featureRadius * 0.04);
+      if (relativeY <= featureHeight - (featureExtra >= 4 ? 4 : featureExtra >= 3 ? 5 : 3)) {
+        const stemRadius = featureExtra >= 4
+          ? Math.min(1.0, 0.62 + featureRadius * 0.03)
+          : Math.min(1.2, 0.75 + featureRadius * 0.04);
         return absX <= stemRadius && absZ <= stemRadius ? materialPrimary : 0;
+      }
+      if (featureExtra >= 4) {
+        const petalCenter = featureHeight - 1;
+        const petalRadius = featureRadius + 1.2 - Math.abs(relativeY - petalCenter) * 0.75;
+        return radial <= Math.max(1.8, petalRadius) ? materialSecondary : 0;
       }
       return relativeY <= featureHeight - 1
         ? radial <= Math.max(featureExtra >= 3 ? 3 : 1.5, featureRadius - Math.abs(relativeY - (featureHeight - 2)) * (featureExtra >= 3 ? 0.45 : 0.8))

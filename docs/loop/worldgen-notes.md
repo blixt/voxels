@@ -118,3 +118,11 @@ Update:
 
 - landmark generation now uses per-biome placement profiles instead of only per-biome landmark id sets
 - landmark scale is now treated as first-class worldgen data because object readability at `10 cm` voxels matters just as much as palette choice
+- landmark regions now also use slow overlay fields, not just base-biome identity:
+  - `grove`
+  - `oldGrowth`
+  - `orchard`
+  - `desolation`
+- current landmark expansion is still intentionally compact:
+  - new families like `willow`, `giant_flower`, and `thorn_tree` reuse the existing feature slot
+  - but the reused feature paths now carry silhouette-specific variants so those families are not just recolors

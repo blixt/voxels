@@ -2778,3 +2778,42 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - This slice is worth keeping.
 - It gives the world genuinely taller mountains without reopening the earlier biome-edge cliff problem.
+
+### Old-growth and landmark-variety follow-up
+
+#### Commands
+
+- `mise exec -- bun test tests/procedural-generator.test.ts`
+
+#### Checks
+
+- Focused generator tests: passing
+  - `21 pass`
+  - `0 fail`
+
+#### Numeric probes
+
+- Broad landmark scan (`x/z = -6144..6144 step 16`):
+  - `26` distinct landmark families observed
+  - `willow`, `giant_flower`, and `thorn_tree` all present
+- Regional patch scan (`x/z = -8192..8192`, `192` center spacing, `8` voxel sampling stride):
+  - best dense-forest patch ratio `0.4201`
+  - best orchard patch ratio `0.1775`
+  - best flower-grove pocket ratio `0.1479`
+  - tallest sampled redwood `212` voxels (`21.2 m`)
+
+#### Added verification coverage
+
+- The landmark coverage test now verifies:
+  - the new `willow`, `giant_flower`, and `thorn_tree` families appear in the deterministic world scan
+- The regional patch test now verifies:
+  - dense forest patches still exist
+  - orchard pockets still exist
+  - flower-grove pockets exist
+- The representative tree-shape regression now also checks `willow` so the new family cannot collapse back into a pole silhouette
+
+#### Residual
+
+- This slice is worth keeping.
+- It strengthens old-growth forest identity and overall landmark variety.
+- Bloom flower groves are present but still intentionally weaker than the strongest forest patches.
