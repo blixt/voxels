@@ -240,3 +240,11 @@
   - `benchmarkChunkCrossing(2, 1)` now reports `changedCount = 0/4`
   - one-chunk crossings now report `0 ms` stream, `0 ms` mesh, and `0` upload chunks
   - `benchmarkChunkCrossing(2, 2)` still reports real churn, so the benchmark can still see larger updates instead of being accidentally blinded
+- Retuned the procedural terrain envelope toward an early playable baseline:
+  - replaced biome-owned height stacks with a shared sea-level-centered terrain formula
+  - reduced biome vertical influence to small offsets/scales instead of large absolute height jumps
+  - added deterministic terrain-envelope and biome-edge continuity tests so this stays measurable
+- Verified the terrain retune numerically and in Chrome 146:
+  - fixed-grid probe now reports `min 1298`, `max 1555`, `avg 1424.6`, `25.4%` underwater coverage, `30` max adjacent step, and `30` max biome-edge jump
+  - fresh `/` boot now lands around `surfaceY 1418` instead of the old `1609+` range
+  - the default streamed world now boots with fewer resident chunks and far fewer triangles (`119` chunks, `15,862` triangles in the fresh page smoke)

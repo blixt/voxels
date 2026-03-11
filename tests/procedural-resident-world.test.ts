@@ -97,15 +97,15 @@ test("spawn selection prefers a flatter standing footprint", () => {
 });
 
 test("resident world reuses cached empty chunk knowledge across residency changes", () => {
-  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), {
-    horizontalRadiusChunks: 3,
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    horizontalRadiusChunks: 2,
   });
   const spawn = world.getSpawnPosition();
 
   const bootstrap = world.updateResidencyAround(spawn);
-  world.setHorizontalRadiusChunks(2);
+  world.setHorizontalRadiusChunks(1);
   const shrink = world.updateResidencyAround(spawn);
-  world.setHorizontalRadiusChunks(3);
+  world.setHorizontalRadiusChunks(2);
   const widen = world.updateResidencyAround(spawn);
 
   expect(bootstrap.emptyChunksSkipped).toBeGreaterThan(0);
@@ -122,13 +122,13 @@ test("resident world reuses cached empty chunk knowledge across residency change
 });
 
 test("resident world reuses known-empty chunk results on a repeated anchor refresh", () => {
-  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), {
-    horizontalRadiusChunks: 3,
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    horizontalRadiusChunks: 2,
   });
   const spawn = world.getSpawnPosition();
 
   const first = world.updateResidencyAround(spawn);
-  world.setHorizontalRadiusChunks(3);
+  world.setHorizontalRadiusChunks(2);
   const second = world.updateResidencyAround(spawn);
 
   expect(first.emptyChunksSkipped).toBeGreaterThan(0);

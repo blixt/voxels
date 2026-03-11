@@ -9,10 +9,10 @@ type BiomeId = "verdant" | "dunes" | "badlands" | "tundra" | "ember";
 
 interface BiomeProfile {
   id: BiomeId;
-  baseHeight: number;
-  relief: number;
-  ridge: number;
-  detail: number;
+  heightBias: number;
+  reliefScale: number;
+  ridgeScale: number;
+  detailScale: number;
   snowLine: number;
   surface: number;
   subsurface: number;
@@ -44,11 +44,11 @@ interface ColumnContext {
 }
 
 const BIOMES: BiomeProfile[] = [
-  createBiome("verdant", 1320, 360, 260, 52, 2100, "#6A5", "#754", "#677", "#445", "#E97", "#4BF", "#DDE"),
-  createBiome("dunes", 1180, 190, 80, 36, 2300, "#DB6", "#B85", "#786", "#554", "#F9C", "#3AD", "#EDC"),
-  createBiome("badlands", 1460, 320, 210, 60, 2500, "#C75", "#A54", "#755", "#433", "#FE9", "#49B", "#ECC"),
-  createBiome("tundra", 1620, 380, 460, 48, 1750, "#BCC", "#99A", "#788", "#566", "#8DF", "#7AD", "#EEF"),
-  createBiome("ember", 980, 520, 920, 76, 3000, "#543", "#654", "#433", "#322", "#F63", "#39B", "#DCC"),
+  createBiome("verdant", 20, 1.0, 0.9, 1.0, 1560, "#6A5", "#754", "#677", "#445", "#E97", "#4BF", "#DDE"),
+  createBiome("dunes", -30, 0.55, 0.35, 0.7, 1700, "#DB6", "#B85", "#786", "#554", "#F9C", "#3AD", "#EDC"),
+  createBiome("badlands", 10, 0.8, 0.8, 1.1, 1660, "#C75", "#A54", "#755", "#433", "#FE9", "#49B", "#ECC"),
+  createBiome("tundra", 45, 1.1, 1.05, 0.85, 1480, "#BCC", "#99A", "#788", "#566", "#8DF", "#7AD", "#EEF"),
+  createBiome("ember", -5, 0.9, 1.2, 1.25, 1780, "#543", "#654", "#433", "#322", "#F63", "#39B", "#DCC"),
 ];
 
 export function buildHexColorPalette(): number[] {
@@ -177,17 +177,21 @@ export class ProceduralWorldGenerator {
 
   private buildColumnContext(worldX: number, worldZ: number): ColumnContext {
     const biome = this.sampleBiome(worldX, worldZ);
-    const macro = fbm2D(worldX / 1024, worldZ / 1024, 5, this.seed + 101);
-    const detail = fbm2D(worldX / 144, worldZ / 144, 4, this.seed + 211) - 0.5;
-    const ridge = 1 - Math.abs(fbm2D(worldX / 280, worldZ / 280, 3, this.seed + 307) * 2 - 1);
-    const basin = fbm2D(worldX / 560, worldZ / 560, 3, this.seed + 401) - 0.5;
+    const continent = fbm2D(worldX / 2600, worldZ / 2600, 5, this.seed + 101) - 0.5;
+    const hills = fbm2D(worldX / 900, worldZ / 900, 4, this.seed + 163) - 0.5;
+    const detail = fbm2D(worldX / 180, worldZ / 180, 4, this.seed + 211) - 0.5;
+    const ridge = 1 - Math.abs(fbm2D(worldX / 480, worldZ / 480, 3, this.seed + 307) * 2 - 1);
+    const basin = fbm2D(worldX / 1400, worldZ / 1400, 3, this.seed + 401) - 0.5;
     const surfaceY = clamp(
       Math.floor(
-        biome.baseHeight
-          + macro * biome.relief
-          + ridge * ridge * biome.ridge
-          + detail * biome.detail
-          + basin * 140,
+        this.seaLevel
+          - 30
+          + biome.heightBias
+          + continent * 220
+          + hills * 110 * biome.reliefScale
+          + (ridge * ridge - 0.3) * 95 * biome.ridgeScale
+          + detail * 18 * biome.detailScale
+          + basin * 90,
       ),
       8,
       this.maxYExclusive - 2,
@@ -279,10 +283,10 @@ export class ProceduralWorldGenerator {
 
 function createBiome(
   id: BiomeId,
-  baseHeight: number,
-  relief: number,
-  ridge: number,
-  detail: number,
+  heightBias: number,
+  reliefScale: number,
+  ridgeScale: number,
+  detailScale: number,
   snowLine: number,
   surface: string,
   subsurface: string,
@@ -294,10 +298,10 @@ function createBiome(
 ): BiomeProfile {
   return {
     id,
-    baseHeight,
-    relief,
-    ridge,
-    detail,
+    heightBias,
+    reliefScale,
+    ridgeScale,
+    detailScale,
     snowLine,
     surface: hexColorToMaterial(surface),
     subsurface: hexColorToMaterial(subsurface),

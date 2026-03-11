@@ -76,3 +76,65 @@ test("procedural generator respects the configured Y range", () => {
   expect(generator.sampleMaterial(640, -1, -1280)).toBe(0);
   expect(generator.sampleMaterial(640, PROCEDURAL_WORLD_MAX_Y, -1280)).toBe(0);
 });
+
+test("procedural generator keeps the early terrain envelope near sea level with visible lowlands", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  let minSurfaceY = Infinity;
+  let maxSurfaceY = -Infinity;
+  let totalSurfaceY = 0;
+  let underwaterCount = 0;
+  let sampleCount = 0;
+  let maxAdjacentStep = 0;
+
+  for (let z = -4096; z <= 4096; z += 256) {
+    for (let x = -4096; x <= 4096; x += 256) {
+      const center = generator.sampleColumn(x, z);
+      const right = generator.sampleColumn(x + 1, z);
+      const forward = generator.sampleColumn(x, z + 1);
+      minSurfaceY = Math.min(minSurfaceY, center.surfaceY);
+      maxSurfaceY = Math.max(maxSurfaceY, center.surfaceY);
+      totalSurfaceY += center.surfaceY;
+      sampleCount += 1;
+      if (center.surfaceY < generator.seaLevel) {
+        underwaterCount += 1;
+      }
+      maxAdjacentStep = Math.max(
+        maxAdjacentStep,
+        Math.abs(right.surfaceY - center.surfaceY),
+        Math.abs(forward.surfaceY - center.surfaceY),
+      );
+    }
+  }
+
+  const averageSurfaceY = totalSurfaceY / sampleCount;
+  const underwaterRatio = underwaterCount / sampleCount;
+
+  expect(minSurfaceY).toBeGreaterThanOrEqual(generator.seaLevel - 260);
+  expect(maxSurfaceY).toBeLessThanOrEqual(generator.seaLevel + 320);
+  expect(averageSurfaceY).toBeGreaterThanOrEqual(generator.seaLevel - 40);
+  expect(averageSurfaceY).toBeLessThanOrEqual(generator.seaLevel + 140);
+  expect(underwaterRatio).toBeGreaterThanOrEqual(0.05);
+  expect(underwaterRatio).toBeLessThanOrEqual(0.35);
+  expect(maxAdjacentStep).toBeLessThanOrEqual(72);
+});
+
+test("procedural generator keeps biome-edge height jumps within a walkable starter-world budget", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  let maxBoundaryJump = 0;
+
+  for (let z = -2048; z <= 2048; z += 64) {
+    for (let x = -2048; x <= 2048; x += 64) {
+      const center = generator.sampleColumn(x, z);
+      const right = generator.sampleColumn(x + 1, z);
+      if (center.biomeId !== right.biomeId) {
+        maxBoundaryJump = Math.max(maxBoundaryJump, Math.abs(right.surfaceY - center.surfaceY));
+      }
+      const forward = generator.sampleColumn(x, z + 1);
+      if (center.biomeId !== forward.biomeId) {
+        maxBoundaryJump = Math.max(maxBoundaryJump, Math.abs(forward.surfaceY - center.surfaceY));
+      }
+    }
+  }
+
+  expect(maxBoundaryJump).toBeLessThanOrEqual(96);
+});

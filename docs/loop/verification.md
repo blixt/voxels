@@ -503,6 +503,46 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - The one-chunk hitch path is now removed.
 - The next hitch target is the still-expensive two-chunk update path rather than the already-fixed single-chunk churn case.
 
+### Terrain envelope retune verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+
+#### Automated checks
+
+- `tests/procedural-generator.test.ts` now verifies:
+  - the early terrain envelope stays near sea level
+  - the sampled world exposes visible lowlands and water coverage
+  - adjacent-column steps stay within a walkable budget
+  - biome-edge height jumps stay within a starter-world budget
+
+#### Direct local checks
+
+- Fixed-grid terrain probe on `seed = 1337`:
+  - `minSurfaceY = 1298`
+  - `maxSurfaceY = 1555`
+  - `avgSurfaceY = 1424.58`
+  - `underwaterRatio = 0.254`
+  - `maxAdjacentStep = 30`
+  - `maxBoundaryJump = 30`
+
+#### Chrome 146 browser checks
+
+- Fresh `/` boot on `http://localhost:3006/` now reports:
+  - position `[-255.5, 1588.0, -255.5]`
+  - feet `[-255.5, 1420.0, -255.5]`
+  - surface `1418`
+  - resident chunks `119`
+  - triangles `15,862`
+- The streamed world now boots near sea level instead of in the old `1609+` height range.
+
+#### Conclusion
+
+- The terrain now reads as a much flatter, lower, more traversable starter world.
+- The next remaining visual problem is true far-field draw distance, not the vertical terrain envelope.
+
 #### Automated checks
 
 - `mise run test`: passing after adding `tests/procedural-generator.test.ts`.

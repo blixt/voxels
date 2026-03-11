@@ -193,6 +193,9 @@ Status:
 - With hysteresis in place, use the same probe to choose the next hitch slice:
   - either deeper async streaming
   - or boundary remesh reduction for the larger jumps that still churn
+- Keep pushing the world toward a readable `1 cm` baseline:
+  - tame terrain envelopes before adding more visual complexity
+  - then attack true draw distance with a far-field representation rather than just increasing near-chunk radius
 - Keep the procedural stream profiler and browser probes aligned so local and Chrome decisions stay comparable.
 - When a micro-optimization is noisy, compare the working tree against a clean committed worktree on a separate port before keeping it.
 - If the next change targets meshing, build or adapt cases that focus on boundary remesh cost rather than only initial chunk creation.
