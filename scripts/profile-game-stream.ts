@@ -11,8 +11,8 @@ const iterations = readPositiveInt(readFlag(args, "--iterations"), 3);
 const warmupRuns = readPositiveInt(readFlag(args, "--warmup"), 1);
 const seed = readPositiveInt(readFlag(args, "--seed"), 1337);
 const radiusChunks = readPositiveInt(readFlag(args, "--radius"), 5);
-const generateBudget = readPositiveInt(readFlag(args, "--generate-budget"), 12);
-const meshBudget = readPositiveInt(readFlag(args, "--mesh-budget"), 12);
+const generateBudget = readPositiveInt(readFlag(args, "--generate-budget"), 6);
+const meshBudget = readPositiveInt(readFlag(args, "--mesh-budget"), 4);
 const chunkDelta = readPositiveInt(readFlag(args, "--chunk-delta"), 2);
 const anchorMarginChunks = readPositiveInt(readFlag(args, "--anchor-margin"), 1);
 
@@ -41,6 +41,9 @@ for (const scenario of scenarios) {
   const generatedTotals: number[] = [];
   const remeshTotals: number[] = [];
   const uploadableDirtyTotals: number[] = [];
+  const yRangeTotals: number[] = [];
+  const generationTotals: number[] = [];
+  const emptyChunkTotals: number[] = [];
   let residentChunks = 0;
   let farTriangles = 0;
   let anchorChanged = false;
@@ -56,6 +59,9 @@ for (const scenario of scenarios) {
     generatedTotals.push(result.totalGeneratedChunks);
     remeshTotals.push(result.totalRemeshChunks);
     uploadableDirtyTotals.push(result.maxDirtyResidentChunks);
+    yRangeTotals.push(result.totalYRangeMs);
+    generationTotals.push(result.totalChunkGenerationMs);
+    emptyChunkTotals.push(result.totalEmptyChunksSkipped);
     residentChunks = result.residentChunks;
     farTriangles = result.farTriangles;
     anchorChanged = result.anchorChanged;
@@ -80,6 +86,9 @@ for (const scenario of scenarios) {
     totalGeneratedChunks: summarize(generatedTotals),
     totalRemeshChunks: summarize(remeshTotals),
     maxDirtyResidentChunks: summarize(uploadableDirtyTotals),
+    totalYRangeMs: summarize(yRangeTotals),
+    totalChunkGenerationMs: summarize(generationTotals),
+    totalEmptyChunksSkipped: summarize(emptyChunkTotals),
     residentChunks,
     farTriangles,
   }));
@@ -96,12 +105,18 @@ function simulateChunkCrossing(deltaChunks: number): {
     pendingChunks: number;
     dirtyResidentChunks: number;
     remeshChunks: number;
+    yRangeMs: number;
+    chunkGenerationMs: number;
+    emptyChunksSkipped: number;
   }>;
   totalStreamMs: number;
   totalMeshMs: number;
   totalFarFieldMs: number;
   totalGeneratedChunks: number;
   totalRemeshChunks: number;
+  totalYRangeMs: number;
+  totalChunkGenerationMs: number;
+  totalEmptyChunksSkipped: number;
   maxPendingChunks: number;
   maxDirtyResidentChunks: number;
   maxFrameWorkMs: number;
@@ -135,6 +150,9 @@ function simulateChunkCrossing(deltaChunks: number): {
     pendingChunks: number;
     dirtyResidentChunks: number;
     remeshChunks: number;
+    yRangeMs: number;
+    chunkGenerationMs: number;
+    emptyChunksSkipped: number;
   }> = [];
 
   let totalStreamMs = 0;
@@ -142,6 +160,9 @@ function simulateChunkCrossing(deltaChunks: number): {
   let totalFarFieldMs = 0;
   let totalGeneratedChunks = 0;
   let totalRemeshChunks = 0;
+  let totalYRangeMs = 0;
+  let totalChunkGenerationMs = 0;
+  let totalEmptyChunksSkipped = 0;
   let maxPendingChunks = 0;
   let maxDirtyResidentChunks = 0;
   let maxFrameWorkMs = 0;
@@ -161,6 +182,9 @@ function simulateChunkCrossing(deltaChunks: number): {
           pendingChunks: 0,
           dirtyResidentChunks,
           remeshChunks: 0,
+          yRangeMs: 0,
+          chunkGenerationMs: 0,
+          emptyChunksSkipped: 0,
         },
       ],
       totalStreamMs: 0,
@@ -168,6 +192,9 @@ function simulateChunkCrossing(deltaChunks: number): {
       totalFarFieldMs: farSummary.elapsedMs,
       totalGeneratedChunks: 0,
       totalRemeshChunks: 0,
+      totalYRangeMs: 0,
+      totalChunkGenerationMs: 0,
+      totalEmptyChunksSkipped: 0,
       maxPendingChunks: 0,
       maxDirtyResidentChunks: dirtyResidentChunks,
       maxFrameWorkMs: farSummary.elapsedMs,
@@ -199,12 +226,18 @@ function simulateChunkCrossing(deltaChunks: number): {
       pendingChunks,
       dirtyResidentChunks,
       remeshChunks: mesh.remeshCount,
+      yRangeMs: residency.phaseMs.yRangeMs,
+      chunkGenerationMs: residency.phaseMs.chunkGenerationMs,
+      emptyChunksSkipped: residency.emptyChunksSkipped,
     });
     totalStreamMs += residency.elapsedMs;
     totalMeshMs += mesh.elapsedMs;
     totalFarFieldMs += farSummary.elapsedMs;
     totalGeneratedChunks += residency.generatedChunks;
     totalRemeshChunks += mesh.remeshCount;
+    totalYRangeMs += residency.phaseMs.yRangeMs;
+    totalChunkGenerationMs += residency.phaseMs.chunkGenerationMs;
+    totalEmptyChunksSkipped += residency.emptyChunksSkipped;
     maxPendingChunks = Math.max(maxPendingChunks, pendingChunks);
     maxDirtyResidentChunks = Math.max(maxDirtyResidentChunks, dirtyResidentChunks);
     maxFrameWorkMs = Math.max(maxFrameWorkMs, frameWorkMs);
@@ -218,6 +251,9 @@ function simulateChunkCrossing(deltaChunks: number): {
     totalFarFieldMs,
     totalGeneratedChunks,
     totalRemeshChunks,
+    totalYRangeMs,
+    totalChunkGenerationMs,
+    totalEmptyChunksSkipped,
     maxPendingChunks,
     maxDirtyResidentChunks,
     maxFrameWorkMs,

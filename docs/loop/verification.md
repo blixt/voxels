@@ -1247,3 +1247,23 @@ This line of investigation was screened locally and not kept in the runtime yet.
   - differential residency updates instead of full anchor rescans
   - background workers for generation/meshing
   - buffer reuse or larger merged render units once movement hitch is no longer dominated by CPU chunk work
+
+### Game-stream phase breakdown follow-up
+
+#### Commands
+
+- `mise exec -- bunx tsc --noEmit`
+- `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=5 --generate-budget=6 --mesh-budget=4 --chunk-delta=2`
+
+#### Local profiler result
+
+- `crossing-d2` now also records stream subphases:
+  - total stream `94.4 ms`
+  - total Y-range work `2.8 ms`
+  - total chunk generation `88.9 ms`
+  - total empty chunks skipped `40`
+
+#### Conclusion
+
+- This rejected the “chunk Y-range recomputation is the next big win” hypothesis.
+- Y-range sampling is visible but small; the next meaningful stream-side win must come from generating less or cheaper chunk data, not from memoizing the column-range scan.

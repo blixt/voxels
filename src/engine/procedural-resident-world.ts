@@ -289,8 +289,8 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       const cx = centerChunkX + dx;
       const cz = centerChunkZ + dz;
       const yRangeStartedAt = performance.now();
-      const [minCy, maxCy] = this.computeChunkYRange(cx, cz);
-      yRangeMs += performance.now() - yRangeStartedAt;
+        const [minCy, maxCy] = this.computeChunkYRange(cx, cz);
+        yRangeMs += performance.now() - yRangeStartedAt;
       const preferredCy = dx === 0 && dz === 0
         ? Math.floor(surfaceY / this.chunkSize)
         : Math.floor((minCy + maxCy) * 0.5);

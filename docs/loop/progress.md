@@ -362,3 +362,8 @@
   - `mise run profile-game-stream -- --radius=5 --generate-budget=6 --mesh-budget=4 --chunk-delta=2`
   - local `crossing-d2` now reports about `44` pumped frames, `94.0 ms` total stream, `123.9 ms` total mesh, and `11.7 ms` max per-frame work
   - local `crossing-d1` still correctly reports no anchor change and effectively zero streamed work
+- Used the richer local profiler to reject a tempting local-minimum optimization:
+  - extended `profile-game-stream` with stream phase totals instead of guessing which part of residency was still expensive
+  - the measured result was that `yRangeMs` was only about `2.8 ms` total on `crossing-d2`, while `chunkGenerationMs` was about `88.9 ms`
+  - empty chunk probes were still present (`40` skipped chunks), but the dominant cost remained generation of the `82` real chunks, not the column-range sampling
+  - because of that, I explicitly did not keep a chunk-Y-range cache branch; the profiler improvements stayed, the speculative cache did not
