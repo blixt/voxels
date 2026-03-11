@@ -2330,3 +2330,57 @@ This line of investigation was screened locally and not kept in the runtime yet.
   - `buildChunkMesh()`
   - `sampleChunkVoxel()`
   - `getResidentChunk()`
+
+## 2026-03-11 mesher neighbor/bounds pass
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/mesher.test.ts tests/procedural-resident-world.test.ts tests/procedural-far-field.test.ts tests/game-route-benchmark.test.ts`
+- `mise run build`
+- `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=8 --generate-budget=8 --mesh-budget=6 --far-band-budget=1 --chunk-delta=2`
+- direct A/B mesh microbenchmark against detached worktree `fd59e52`:
+  - current tree `/Users/blixt/src/voxels`
+  - comparison worktree `/tmp/voxels-prev-20260311-a`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing after the mesher neighbor lookup rewrite.
+- Focused tests:
+  - `44 pass`
+  - `0 fail`
+- `mise run build`: passing.
+
+#### Direct worktree A/B mesh microbenchmark
+
+- Current tree result:
+  - `meshMs = 111.881`
+  - `meshCount = 128`
+  - `checksum = 0`
+- Previous worktree `fd59e52` result:
+  - `meshMs = 152.501`
+  - `meshCount = 128`
+  - `checksum = 0`
+- Interpreted result:
+  - raw fixed-workload meshing improved by about `27%`
+  - output checksum stayed identical
+
+#### Local game-stream profiler
+
+- `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=8 --generate-budget=8 --mesh-budget=6 --far-band-budget=1 --chunk-delta=2` returned:
+  - `crossing-d2 frames avg = 63`
+  - `totalStreamMs avg = 99.4`
+  - `totalMeshMs avg = 179.2`
+  - `totalFarFieldMs avg = 82.0`
+  - `maxFrameWorkMs avg = 38.4`
+  - `totalChunkGenerationMs avg = 86.7`
+  - `totalGeneratedChunks avg = 142`
+  - `totalRemeshChunks avg = 236`
+  - `maxPendingChunks avg = 196`
+- Compared to the previous same-args profile after the generator pass:
+  - `totalMeshMs` improved from about `257.3 -> 179.2`
+  - `maxFrameWorkMs` improved slightly from about `39.1 -> 38.4`
+
+#### Residual
+
+- This mesher slice is worth keeping.
+- The local crossing profile is now less mesh-dominated than before.
+- The next likely target is far-field rebuild cost or exclusion-mask lookup cost rather than another immediate mesher cleanup.

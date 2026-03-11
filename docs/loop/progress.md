@@ -800,3 +800,23 @@
 - The next hotspot is now even clearer:
   - the generator is materially leaner
   - the next likely payoffs are detailed meshing math and repeated resident-world lookup overhead rather than more speculative noise caches
+
+### Mesher neighbor lookup and bounds cleanup
+
+- Took the next pass directly where the traces and the explorer report overlapped:
+  - `buildChunkMesh()` was still one of the largest CPU buckets
+  - the best low-risk target was repeated neighbor/world lookup overhead rather than another algorithm rewrite
+- The kept mesher changes stayed small and structural:
+  - `src/engine/mesher.ts` now resolves the current chunk’s six neighbors once per mesh build instead of repeatedly falling back to `world.getVoxel(...)` on boundary samples
+  - the full-occlusion test now reuses those same resolved neighbors instead of redoing resident-chunk lookups and solid-bounds queries
+  - mesh builds now reuse clean in-chunk `solidBounds` directly when possible instead of always cloning bounds through `getChunkSolidBounds()`
+- The direct A/B microbenchmark against the previous commit showed a real step down in raw meshing cost:
+  - current code meshed the fixed `128`-chunk synthetic workload in about `111.9 ms`
+  - the previous commit `fd59e52` took about `152.5 ms` on the same workload
+  - checksum stayed identical
+- The broader warmed stream profiler also moved in the right direction:
+  - with `radius=8`, `generate=8`, `mesh=6`, `far-band=1`, `crossing-d2` mesh time dropped from about `257.3 ms` to about `179.2 ms`
+  - max frame work stayed in the same broad range at about `38.4 ms`, which means the mesher win is real even though far-field work still owns a similar peak envelope
+- The next likely target is now the far-field / exclusion-mask path rather than detailed meshing:
+  - detailed chunk meshing is materially cheaper than it was two slices ago
+  - the remaining local crossing envelope is now split more heavily toward far-field rebuild cost than before
