@@ -14,6 +14,7 @@ declare global {
       setStreamingBudgets(
         maxGeneratedChunksPerUpdate: number,
         maxMeshRebuildsPerFrame: number,
+        maxFarFieldBandRebuildsPerFrame?: number,
       ): ReturnType<GameController["setStreamingBudgets"]>;
       forceResidencyUpdate(): ReturnType<GameController["forceResidencyUpdate"]>;
       teleportAndSettle(
@@ -91,6 +92,7 @@ function mountGame(): GameRuntime {
       metric("Far Field", `${snapshot.farFieldMaxRadiusMeters.toFixed(0)} m`),
       metric("Far Build", `${snapshot.farFieldMs.toFixed(1)} ms`),
       metric("Far Bands", snapshot.farFieldBuiltBands.toLocaleString()),
+      metric("Far Pending", snapshot.farFieldPendingBands.toLocaleString()),
       metric("Far Tris", snapshot.farFieldTriangles.toLocaleString()),
       metric("Voxels", snapshot.solidVoxelCount.toLocaleString()),
       metric("Palette", snapshot.paletteCount.toLocaleString()),
@@ -102,6 +104,7 @@ function mountGame(): GameRuntime {
       metric("Empty Cache Hits", snapshot.streamCachedEmptyChunkHits.toLocaleString()),
       metric("Gen Budget", snapshot.maxGeneratedChunksPerUpdate.toLocaleString()),
       metric("Mesh Budget", snapshot.maxMeshRebuildsPerFrame.toLocaleString()),
+      metric("Far Budget", snapshot.maxFarFieldBandRebuildsPerFrame.toLocaleString()),
       metric("Mesh", `${snapshot.meshMs.toFixed(1)} ms`),
       metric("New Meshes", snapshot.meshNewChunks.toLocaleString()),
       metric("Remeshes", snapshot.meshRemeshChunks.toLocaleString()),
@@ -125,8 +128,12 @@ function mountGame(): GameRuntime {
     teleport: (x, y, z) => controller.teleport([x, y, z]),
     setViewDistance: (chunks) => controller.setResidencyRadiusChunks(chunks),
     getStreamingBudgets: () => controller.getStreamingBudgets(),
-    setStreamingBudgets: (maxGeneratedChunksPerUpdate, maxMeshRebuildsPerFrame) =>
-      controller.setStreamingBudgets(maxGeneratedChunksPerUpdate, maxMeshRebuildsPerFrame),
+    setStreamingBudgets: (maxGeneratedChunksPerUpdate, maxMeshRebuildsPerFrame, maxFarFieldBandRebuildsPerFrame) =>
+      controller.setStreamingBudgets(
+        maxGeneratedChunksPerUpdate,
+        maxMeshRebuildsPerFrame,
+        maxFarFieldBandRebuildsPerFrame,
+      ),
     forceResidencyUpdate: () => controller.forceResidencyUpdate(),
     teleportAndSettle: (x, y, z, options) => controller.teleportAndSettle([x, y, z], options),
     benchmarkChunkCrossing: (iterations, chunkDelta) => controller.benchmarkChunkCrossing(iterations, chunkDelta),

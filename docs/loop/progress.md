@@ -418,3 +418,32 @@
   - the obvious temporary holes during chunk arrival are fixed by the render-ready handoff
   - the far/horizon band handoff around `224 m` still has measurable multi-band overlap
   - the coverage probe still flags some band-boundary artifacts at exact transition radii, which now look like a general coarse-band compositing problem rather than the original near/far seam bug
+- Followed the user report about “near chunks lagging behind so badly that the player can outrun them” by re-profiling the whole movement path instead of assuming the remaining cost was still chunk generation or meshing.
+- Found a major benchmark blind spot:
+  - the browser `benchmarkIncrementalCrossing()` summary was only counting `stream + mesh + frameCpu`
+  - it was completely omitting far-field rebuild time even though `syncWorldAroundPlayer()` was calling `farField.updateAround()` during movement
+  - a direct Chrome 146 monkey-patch probe on the live controller showed the real cost: about `5120.6 ms` total far-field work across `66` calls, about `77.6 ms` average, and about `192.8 ms` max while the old benchmark still looked like low-teens work
+- Reframed the problem as a clipmap/update-policy issue rather than a near-chunk-only issue:
+  - the far field was rebuilding coarse bands on tiny player movements because band centers snapped at effectively per-cell granularity
+  - that work was starving the detailed chunk path and making the “near chunks are late” symptom look like a mesher-only problem
+- Changed the far-field runtime policy to be more experiment-friendly and much less bursty:
+  - added band-specific `centerStride` so default coarse bands move in larger clipmap-style steps instead of following tiny movements
+  - added a per-frame far-field rebuild budget with `pendingBands` tracking, so the runtime can spread coarse-band rebuilds across frames without dropping existing meshes
+  - taught `shouldPumpWorldWork()` to keep draining background work while far-field bands are still pending
+  - exposed the far-field budget and pending-band count through the live HUD/runtime snapshot
+- Fixed the benchmark so it now measures what the player actually pays:
+  - incremental crossing samples now include `farFieldMs`, `farFieldBuiltBands`, and `farFieldPendingBands`
+  - the summary now reports `avg/p95/maxFarFieldMs`
+  - `avg/p95/maxWorkMs` now includes far-field work instead of silently omitting it
+- Added regression coverage for the new policy:
+  - a far-field test now proves the default bands stay stable across a few meters of movement
+  - another far-field test now proves excess band rebuilds can be deferred behind a per-frame budget and then drained on the next update
+  - the stream-work test now proves pending far-field bands keep background work pumping
+- Revalidated in fresh Chrome 146 on `http://localhost:3016/`:
+  - the same monkey-patch probe that originally exposed the hidden cost now reports about `717.4 ms` total far-field work across `66` calls, about `10.9 ms` average, and about `89.4 ms` max
+  - that is roughly a `7.1x` reduction in total far-field rebuild time and a large drop in average per-call cost
+  - the corrected incremental benchmark now reports about `17.5 ms` average total work, `32.7 ms` p95, `112.4 ms` max, and `11.1 ms` average far-field work for `benchmarkIncrementalCrossing(1, 2, 12, 20)`
+- Current residual after this slice:
+  - far-field churn is no longer the hidden dominant cost, but the corrected benchmark still shows real hitch pressure
+  - near detailed chunks are still not prioritized enough once movement creates a backlog
+  - the next likely target is detailed-mesh prioritization or a more radical near renderer experiment, not another blind round of LOD seam tuning

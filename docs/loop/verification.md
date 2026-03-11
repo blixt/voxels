@@ -1388,3 +1388,58 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - The render-ready handoff hole is fixed.
 - There is still measurable inter-band overlap at the far/horizon handoff around `224 m`.
 - The coverage probe still reports some exact-radius band-boundary artifacts, which now appear to be coarse-band compositing issues rather than resident-vs-far handoff failures.
+
+### Corrected movement benchmark and clipmap-style far-field throttling
+
+#### Commands
+
+- `mise exec -- bun test tests/procedural-far-field.test.ts`
+- `mise exec -- bun test tests/procedural-lod-coverage.test.ts tests/stream-work.test.ts`
+- `mise run test`
+- `mise run build`
+- fresh Chrome 146 load on `http://localhost:3016/`
+- browser-side monkey-patch probe around `window.__VOXELS_GAME__.benchmarkIncrementalCrossing(1, 2, 12, 20)`
+
+#### Automated checks
+
+- `tests/procedural-far-field.test.ts` now includes:
+  - default bands stay stable across a few meters of movement
+  - excess band rebuilds can be deferred behind a per-frame budget and drained on the next update
+- `tests/stream-work.test.ts` now includes:
+  - pending far-field bands keep background work pumping
+- `mise run test`: passing
+- `mise run build`: passing
+
+#### Browser heuristic checks
+
+- Before the fix, the browser monkey-patch probe around `benchmarkIncrementalCrossing(1, 2, 12, 20)` showed:
+  - `66` far-field update calls
+  - about `5120.6 ms` total far-field work
+  - about `77.6 ms` average far-field work per call
+  - about `192.8 ms` max far-field work
+  - the old benchmark summary did not include any of that cost
+- After the fix on fresh Chrome 146 `http://localhost:3016/`:
+  - `66` far-field update calls still occurred, but only `57` changed anything
+  - about `717.4 ms` total far-field work
+  - about `10.9 ms` average far-field work per call
+  - about `89.4 ms` max far-field work
+  - `maxPendingBands = 0` on that movement path with the new default center strides and `Far Budget = 1`
+
+#### Corrected browser performance spot-check
+
+- `benchmarkIncrementalCrossing(1, 2, 12, 20)` now reports real total work:
+  - `avgWorkMs = 17.5`
+  - `p95WorkMs = 32.7`
+  - `maxWorkMs = 112.4`
+  - `avgFarFieldMs = 11.1`
+  - `p95FarFieldMs = 19.5`
+  - `maxFarFieldMs = 89.3`
+  - `avgStreamMs = 3.1`
+  - `avgMeshMs = 3.0`
+  - `maxPendingChunks = 114`
+
+#### Residual
+
+- The benchmark now measures the real movement cost instead of hiding far-field rebuilds.
+- Far-field churn is much lower, but corrected total work is still too high for the target feel.
+- The next target should be near-chunk prioritization or a different near renderer path, not more blind tuning against the old misleading metric.

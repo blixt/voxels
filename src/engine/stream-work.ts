@@ -6,6 +6,7 @@ export function shouldPumpWorldWork(
   moved: boolean,
   pendingChunks: number,
   dirtyResidentChunks: number,
+  pendingFarFieldBands = 0,
 ): boolean {
-  return moved || pendingChunks > 0 || dirtyResidentChunks > 0;
+  return moved || pendingChunks > 0 || dirtyResidentChunks > 0 || pendingFarFieldBands > 0;
 }

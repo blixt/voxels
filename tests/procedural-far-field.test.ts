@@ -13,6 +13,7 @@ test("procedural far field covers a few hundred meters with four render bands", 
   expect(summary.changed).toBe(true);
   expect(summary.meshCount).toBe(4);
   expect(summary.builtBands).toBe(4);
+  expect(summary.sampledCellCount).toBeGreaterThan(0);
   expect(summary.maxRadiusMeters).toBeGreaterThanOrEqual(300);
   expect(summary.triangleCount).toBeGreaterThan(0);
   expect(farField.getRenderables().every((band) => band.mesh !== null)).toBe(true);
@@ -26,6 +27,19 @@ test("procedural far field reuses meshes while staying inside the current anchor
 
   expect(summary.changed).toBe(false);
   expect(summary.builtBands).toBe(0);
+  expect(summary.pendingBands).toBe(0);
+  expect(summary.sampledCellCount).toBe(0);
+});
+
+test("procedural far field default bands stay stable across a few meters of movement", () => {
+  const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337));
+  farField.updateAround([0, 0, 0]);
+
+  const summary = farField.updateAround([24, 0, 0]);
+
+  expect(summary.changed).toBe(false);
+  expect(summary.builtBands).toBe(0);
+  expect(summary.pendingBands).toBe(0);
 });
 
 test("procedural far field rebuilds when crossing the nearest anchor stride", () => {
@@ -130,6 +144,48 @@ test("procedural far field exclusion masks remove overlapping top cells", () => 
   expect(maskedCoverage).toBeNull();
   expect(baselineTopCells).toContain("0:0");
   expect(maskedTopCells).not.toContain("0:0");
+});
+
+test("procedural far field reuses sampled terrain when only the exclusion mask changes", () => {
+  const generator = createTestGenerator(() => 4);
+  const farField = new ProceduralFarField(generator, [
+    { label: "test", innerRadius: 0, outerRadius: 16, sampleStride: 8, anchorStride: 32 },
+  ]);
+  const firstMask = {
+    revision: 1,
+    excludesCell: (_minX: number, _maxXExclusive: number, _minZ: number, _maxZExclusive: number) => false,
+  };
+  const secondMask = {
+    revision: 2,
+    excludesCell: (minX: number, _maxXExclusive: number, minZ: number) => minX === 0 && minZ === 0,
+  };
+
+  const initial = farField.updateAround([0, 0, 0], 0, firstMask);
+  const updated = farField.updateAround([0, 0, 0], 0, secondMask);
+
+  expect(initial.sampledCellCount).toBeGreaterThan(0);
+  expect(updated.changed).toBe(true);
+  expect(updated.builtBands).toBe(1);
+  expect(updated.pendingBands).toBe(0);
+  expect(updated.sampledCellCount).toBe(0);
+});
+
+test("procedural far field can defer excess band rebuilds behind a per-frame budget", () => {
+  const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337), [
+    { label: "near", innerRadius: 0, outerRadius: 64, sampleStride: 8, anchorStride: 32, centerStride: 32 },
+    { label: "mid", innerRadius: 64, outerRadius: 128, sampleStride: 16, anchorStride: 64, centerStride: 64 },
+  ]);
+
+  farField.updateAround([0, 0, 0]);
+  const constrained = farField.updateAround([80, 0, 0], 0, null, 1);
+
+  expect(constrained.changed).toBe(true);
+  expect(constrained.builtBands).toBe(1);
+  expect(constrained.pendingBands).toBe(1);
+
+  const settled = farField.updateAround([80, 0, 0], 0, null, 1);
+  expect(settled.builtBands).toBe(1);
+  expect(settled.pendingBands).toBe(0);
 });
 
 test("procedural far field keeps a seam wall against lower masked neighbors", () => {

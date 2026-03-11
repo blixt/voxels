@@ -13,6 +13,7 @@ const seed = readPositiveInt(readFlag(args, "--seed"), 1337);
 const radiusChunks = readPositiveInt(readFlag(args, "--radius"), 5);
 const generateBudget = readPositiveInt(readFlag(args, "--generate-budget"), 6);
 const meshBudget = readPositiveInt(readFlag(args, "--mesh-budget"), 4);
+const farBandBudget = readPositiveInt(readFlag(args, "--far-band-budget"), 1);
 const chunkDelta = readPositiveInt(readFlag(args, "--chunk-delta"), 2);
 const anchorMarginChunks = readPositiveInt(readFlag(args, "--anchor-margin"), 1);
 
@@ -75,6 +76,7 @@ for (const scenario of scenarios) {
     radiusChunks,
     generateBudget,
     meshBudget,
+    farBandBudget,
     anchorMarginChunks,
     anchorChanged,
     frames: summarize(frameCounts),
@@ -173,6 +175,7 @@ function simulateChunkCrossing(deltaChunks: number): {
       targetFeetPosition,
       0,
       world.getFarFieldExclusionMask("render-ready", farFieldMaskRevision),
+      farBandBudget,
     );
     const dirtyResidentChunks = world.countDirtyResidentChunks();
     return {
@@ -210,6 +213,7 @@ function simulateChunkCrossing(deltaChunks: number): {
 
   let step = 0;
   let pendingChunks = 0;
+  let pendingFarFieldBands = 0;
   let dirtyResidentChunks = world.countDirtyResidentChunks();
   do {
     step += 1;
@@ -228,9 +232,11 @@ function simulateChunkCrossing(deltaChunks: number): {
       targetFeetPosition,
       0,
       world.getFarFieldExclusionMask("render-ready", farFieldMaskRevision),
+      farBandBudget,
     );
     dirtyResidentChunks = world.countDirtyResidentChunks();
     pendingChunks = residency.pendingChunks;
+    pendingFarFieldBands = farSummary.pendingBands;
     const frameWorkMs = farSummary.elapsedMs + residency.elapsedMs + mesh.elapsedMs;
     frames.push({
       step,
@@ -256,7 +262,7 @@ function simulateChunkCrossing(deltaChunks: number): {
     maxPendingChunks = Math.max(maxPendingChunks, pendingChunks);
     maxDirtyResidentChunks = Math.max(maxDirtyResidentChunks, dirtyResidentChunks);
     maxFrameWorkMs = Math.max(maxFrameWorkMs, frameWorkMs);
-  } while (shouldPumpWorldWork(false, pendingChunks, dirtyResidentChunks));
+  } while (shouldPumpWorldWork(false, pendingChunks, dirtyResidentChunks, pendingFarFieldBands));
 
   return {
     anchorChanged: true,
@@ -291,7 +297,12 @@ function settleWorld(
   farFieldMaskRevision += 1;
   rebuildDirtyMeshes(world, Number.POSITIVE_INFINITY);
   farFieldMaskRevision += 1;
-  farField.updateAround(feetPosition, 0, world.getFarFieldExclusionMask("render-ready", farFieldMaskRevision));
+  farField.updateAround(
+    feetPosition,
+    0,
+    world.getFarFieldExclusionMask("render-ready", farFieldMaskRevision),
+    Number.POSITIVE_INFINITY,
+  );
 }
 
 function resolveAnchor(feetPosition: Vec3, chunkSize: number): StreamAnchor {

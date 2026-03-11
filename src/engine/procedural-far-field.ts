@@ -13,6 +13,7 @@ interface FarFieldBandConfig {
   readonly outerRadius: number;
   readonly sampleStride: number;
   readonly anchorStride: number;
+  readonly centerStride?: number;
 }
 
 export interface FarFieldExclusionMask {
@@ -26,6 +27,7 @@ export interface FarFieldBandRenderable {
   readonly innerRadius: number;
   readonly outerRadius: number;
   readonly sampleStride: number;
+  readonly centerStride: number;
   anchorX: number;
   anchorZ: number;
   centerX: number;
@@ -35,6 +37,21 @@ export interface FarFieldBandRenderable {
   mesh: ChunkMeshData | null;
   gpuDirty: boolean;
   triangleCount: number;
+}
+
+interface FarFieldBandSampleCache {
+  readonly anchorX: number;
+  readonly anchorZ: number;
+  readonly sampleRadius: number;
+  readonly sampleSpan: number;
+  readonly heights: Int32Array;
+  readonly colors: Uint32Array;
+  readonly waterHeights: Int32Array;
+  readonly waterColors: Uint32Array;
+}
+
+interface FarFieldBandState extends FarFieldBandRenderable {
+  sampleCache: FarFieldBandSampleCache | null;
 }
 
 export interface FarFieldCoverage {
@@ -47,9 +64,11 @@ export interface FarFieldCoverage {
 export interface FarFieldUpdateSummary {
   changed: boolean;
   builtBands: number;
+  pendingBands: number;
   meshCount: number;
   triangleCount: number;
   elapsedMs: number;
+  sampledCellCount: number;
   clearRadiusWorldUnits: number;
   clearRadiusMeters: number;
   maxRadiusWorldUnits: number;
@@ -63,6 +82,7 @@ const DEFAULT_BANDS: readonly FarFieldBandConfig[] = [
     outerRadius: metersToWorldUnits(48),
     sampleStride: metersToWorldUnits(0.8),
     anchorStride: metersToWorldUnits(12.8),
+    centerStride: metersToWorldUnits(12.8),
   },
   {
     label: "mid",
@@ -70,6 +90,7 @@ const DEFAULT_BANDS: readonly FarFieldBandConfig[] = [
     outerRadius: metersToWorldUnits(112),
     sampleStride: metersToWorldUnits(1.6),
     anchorStride: metersToWorldUnits(25.6),
+    centerStride: metersToWorldUnits(25.6),
   },
   {
     label: "far",
@@ -77,6 +98,7 @@ const DEFAULT_BANDS: readonly FarFieldBandConfig[] = [
     outerRadius: metersToWorldUnits(224),
     sampleStride: metersToWorldUnits(4.8),
     anchorStride: metersToWorldUnits(76.8),
+    centerStride: metersToWorldUnits(76.8),
   },
   {
     label: "horizon",
@@ -84,11 +106,12 @@ const DEFAULT_BANDS: readonly FarFieldBandConfig[] = [
     outerRadius: metersToWorldUnits(416),
     sampleStride: metersToWorldUnits(12.8),
     anchorStride: metersToWorldUnits(204.8),
+    centerStride: metersToWorldUnits(204.8),
   },
 ] as const;
 
 export class ProceduralFarField {
-  readonly bands: FarFieldBandRenderable[];
+  private readonly bands: FarFieldBandState[];
   lastUpdate: FarFieldUpdateSummary;
   private readonly bandConfigs: readonly FarFieldBandConfig[];
 
@@ -102,6 +125,7 @@ export class ProceduralFarField {
       innerRadius: config.innerRadius,
       outerRadius: config.outerRadius,
       sampleStride: config.sampleStride,
+      centerStride: config.centerStride ?? config.sampleStride,
       anchorX: Number.NaN,
       anchorZ: Number.NaN,
       centerX: Number.NaN,
@@ -111,13 +135,16 @@ export class ProceduralFarField {
       mesh: null,
       gpuDirty: false,
       triangleCount: 0,
+      sampleCache: null,
     }));
     this.lastUpdate = {
       changed: false,
       builtBands: 0,
+      pendingBands: 0,
       meshCount: this.bands.length,
       triangleCount: 0,
       elapsedMs: 0,
+      sampledCellCount: 0,
       clearRadiusWorldUnits: 0,
       clearRadiusMeters: 0,
       maxRadiusWorldUnits: Math.max(...bandConfigs.map((config) => config.outerRadius)),
@@ -133,12 +160,18 @@ export class ProceduralFarField {
     position: Vec3,
     clearRadiusWorldUnits = 0,
     exclusionMask: FarFieldExclusionMask | null = null,
+    maxBuiltBands = Number.POSITIVE_INFINITY,
   ): FarFieldUpdateSummary {
     const startedAt = performance.now();
     let changed = false;
     let builtBands = 0;
+    let pendingBands = 0;
     let triangleCount = 0;
+    let sampledCellCount = 0;
     const maxAffectedRadiusWorldUnits = exclusionMask?.maxAffectedRadiusWorldUnits ?? Number.POSITIVE_INFINITY;
+    const centerStride = Math.min(...this.bandConfigs.map((config) => config.centerStride ?? config.sampleStride));
+      const centerX = snapToNearestStride(position[0], centerStride);
+      const centerZ = snapToNearestStride(position[2], centerStride);
 
     for (let bandIndex = 0; bandIndex < this.bands.length; bandIndex += 1) {
       const band = this.bands[bandIndex]!;
@@ -146,8 +179,6 @@ export class ProceduralFarField {
       const anchorX = snapToStride(Math.floor(position[0]), config.anchorStride);
       const anchorZ = snapToStride(Math.floor(position[2]), config.anchorStride);
       const effectiveInnerRadius = Math.max(config.innerRadius, clearRadiusWorldUnits);
-      const centerX = snapToNearestStride(position[0], config.sampleStride);
-      const centerZ = snapToNearestStride(position[2], config.sampleStride);
       const maskRevision = effectiveInnerRadius < maxAffectedRadiusWorldUnits
         ? exclusionMask?.revision ?? 0
         : 0;
@@ -163,21 +194,32 @@ export class ProceduralFarField {
         triangleCount += band.triangleCount;
         continue;
       }
+      if (builtBands >= maxBuiltBands && band.mesh) {
+        pendingBands += 1;
+        triangleCount += band.triangleCount;
+        continue;
+      }
       band.anchorX = anchorX;
       band.anchorZ = anchorZ;
       band.centerX = centerX;
       band.centerZ = centerZ;
       band.clearRadiusWorldUnits = effectiveInnerRadius;
       band.maskRevision = maskRevision;
-      band.mesh = buildBandMesh(
-        this.generator,
+      const sampleCache = ensureBandSampleCache(
+        band,
         config,
         anchorX,
         anchorZ,
-        centerX,
-        centerZ,
+        this.generator,
+      );
+      sampledCellCount += sampleCache.sampledCellCount;
+      band.mesh = buildBandMesh(
+        config,
         effectiveInnerRadius,
         exclusionMask,
+        sampleCache.cache,
+        centerX,
+        centerZ,
       );
       band.gpuDirty = true;
       band.triangleCount = band.mesh.triangleCount;
@@ -189,9 +231,11 @@ export class ProceduralFarField {
     this.lastUpdate = {
       changed,
       builtBands,
+      pendingBands,
       meshCount: this.bands.length,
       triangleCount,
       elapsedMs: performance.now() - startedAt,
+      sampledCellCount,
       clearRadiusWorldUnits,
       clearRadiusMeters: worldUnitsToMeters(clearRadiusWorldUnits),
       maxRadiusWorldUnits: Math.max(...this.bands.map((band) => band.outerRadius)),
@@ -248,54 +292,24 @@ export class ProceduralFarField {
 }
 
 function buildBandMesh(
-  generator: ProceduralWorldGenerator,
   band: FarFieldBandConfig,
-  anchorX: number,
-  anchorZ: number,
-  centerX: number,
-  centerZ: number,
   innerRadius: number,
   exclusionMask: FarFieldExclusionMask | null,
+  sampleCache: FarFieldBandSampleCache,
+  centerX: number,
+  centerZ: number,
 ): ChunkMeshData {
-  const outerCells = Math.ceil(band.outerRadius / band.sampleStride);
-  const sampleRadius = outerCells
-    + Math.ceil(Math.max(Math.abs(centerX - anchorX), Math.abs(centerZ - anchorZ)) / band.sampleStride)
-    + 1;
-  const sampleSpan = sampleRadius * 2 + 1;
-  const heights = new Int32Array(sampleSpan * sampleSpan);
-  const colors = new Uint32Array(sampleSpan * sampleSpan);
-  const waterHeights = new Int32Array(sampleSpan * sampleSpan);
-  waterHeights.fill(NO_WATER_HEIGHT);
-  const waterColors = new Uint32Array(sampleSpan * sampleSpan);
-  const states = new Uint8Array(sampleSpan * sampleSpan);
-
-  for (let sampleZ = 0; sampleZ < sampleSpan; sampleZ += 1) {
-    const cellZ = sampleZ - sampleRadius;
-    const cellMinZ = anchorZ + cellZ * band.sampleStride;
-    const rowOffset = sampleZ * sampleSpan;
-    for (let sampleX = 0; sampleX < sampleSpan; sampleX += 1) {
-      const cellX = sampleX - sampleRadius;
-      const cellMinX = anchorX + cellX * band.sampleStride;
-      const sampledCell = sampleFarFieldCell(generator, cellMinX, cellMinZ, band.sampleStride);
-      const sampleIndex = sampleX + rowOffset;
-      heights[sampleIndex] = sampledCell.surfaceY;
-      colors[sampleIndex] = sampledCell.surfaceColor;
-      waterHeights[sampleIndex] = sampledCell.waterTopY ?? NO_WATER_HEIGHT;
-      waterColors[sampleIndex] = sampledCell.waterColor;
-      if (!isCellInBand(cellMinX, cellMinZ, band.sampleStride, centerX, centerZ, innerRadius, band.outerRadius)) {
-        states[sampleIndex] = CELL_OMITTED;
-        continue;
-      }
-      states[sampleIndex] = exclusionMask?.excludesCell(
-        cellMinX,
-        cellMinX + band.sampleStride,
-        cellMinZ,
-        cellMinZ + band.sampleStride,
-      )
-        ? CELL_MASKED
-        : CELL_RENDERED;
-    }
-  }
+  const {
+    anchorX,
+    anchorZ,
+    sampleRadius,
+    sampleSpan,
+    heights,
+    colors,
+    waterHeights,
+    waterColors,
+  } = sampleCache;
+  const states = buildBandStates(band, anchorX, anchorZ, centerX, centerZ, innerRadius, exclusionMask, sampleRadius, sampleSpan);
 
   const vertices: Array<[number, number, number, number, number, number, number]> = [];
   const indices: number[] = [];
@@ -364,6 +378,108 @@ function buildBandMesh(
   }
 
   return buildMeshData(vertices, indices, anchorX, anchorZ);
+}
+
+function ensureBandSampleCache(
+  band: FarFieldBandState,
+  config: FarFieldBandConfig,
+  anchorX: number,
+  anchorZ: number,
+  generator: ProceduralWorldGenerator,
+): {
+  cache: FarFieldBandSampleCache;
+  sampledCellCount: number;
+} {
+  const sampleRadius = computeBandSampleRadius(config);
+  const sampleSpan = sampleRadius * 2 + 1;
+  const cached = band.sampleCache;
+  if (
+    cached
+    && cached.anchorX === anchorX
+    && cached.anchorZ === anchorZ
+    && cached.sampleRadius === sampleRadius
+    && cached.sampleSpan === sampleSpan
+  ) {
+    return {
+      cache: cached,
+      sampledCellCount: 0,
+    };
+  }
+
+  const heights = new Int32Array(sampleSpan * sampleSpan);
+  const colors = new Uint32Array(sampleSpan * sampleSpan);
+  const waterHeights = new Int32Array(sampleSpan * sampleSpan);
+  waterHeights.fill(NO_WATER_HEIGHT);
+  const waterColors = new Uint32Array(sampleSpan * sampleSpan);
+
+  for (let sampleZ = 0; sampleZ < sampleSpan; sampleZ += 1) {
+    const cellZ = sampleZ - sampleRadius;
+    const cellMinZ = anchorZ + cellZ * config.sampleStride;
+    const rowOffset = sampleZ * sampleSpan;
+    for (let sampleX = 0; sampleX < sampleSpan; sampleX += 1) {
+      const cellX = sampleX - sampleRadius;
+      const cellMinX = anchorX + cellX * config.sampleStride;
+      const sampledCell = sampleFarFieldCell(generator, cellMinX, cellMinZ, config.sampleStride);
+      const sampleIndex = sampleX + rowOffset;
+      heights[sampleIndex] = sampledCell.surfaceY;
+      colors[sampleIndex] = sampledCell.surfaceColor;
+      waterHeights[sampleIndex] = sampledCell.waterTopY ?? NO_WATER_HEIGHT;
+      waterColors[sampleIndex] = sampledCell.waterColor;
+    }
+  }
+
+  const sampleCache: FarFieldBandSampleCache = {
+    anchorX,
+    anchorZ,
+    sampleRadius,
+    sampleSpan,
+    heights,
+    colors,
+    waterHeights,
+    waterColors,
+  };
+  band.sampleCache = sampleCache;
+  return {
+    cache: sampleCache,
+    sampledCellCount: sampleSpan * sampleSpan,
+  };
+}
+
+function buildBandStates(
+  band: FarFieldBandConfig,
+  anchorX: number,
+  anchorZ: number,
+  centerX: number,
+  centerZ: number,
+  innerRadius: number,
+  exclusionMask: FarFieldExclusionMask | null,
+  sampleRadius: number,
+  sampleSpan: number,
+): Uint8Array {
+  const states = new Uint8Array(sampleSpan * sampleSpan);
+  for (let sampleZ = 0; sampleZ < sampleSpan; sampleZ += 1) {
+    const cellZ = sampleZ - sampleRadius;
+    const cellMinZ = anchorZ + cellZ * band.sampleStride;
+    const rowOffset = sampleZ * sampleSpan;
+    for (let sampleX = 0; sampleX < sampleSpan; sampleX += 1) {
+      const cellX = sampleX - sampleRadius;
+      const cellMinX = anchorX + cellX * band.sampleStride;
+      const sampleIndex = sampleX + rowOffset;
+      if (!isCellInBand(cellMinX, cellMinZ, band.sampleStride, centerX, centerZ, innerRadius, band.outerRadius)) {
+        states[sampleIndex] = CELL_OMITTED;
+        continue;
+      }
+      states[sampleIndex] = exclusionMask?.excludesCell(
+        cellMinX,
+        cellMinX + band.sampleStride,
+        cellMinZ,
+        cellMinZ + band.sampleStride,
+      )
+        ? CELL_MASKED
+        : CELL_RENDERED;
+    }
+  }
+  return states;
 }
 
 function buildMeshData(
@@ -588,4 +704,9 @@ function snapToStride(worldCoordinate: number, stride: number): number {
 
 function snapToNearestStride(worldCoordinate: number, stride: number): number {
   return Math.round(worldCoordinate / stride) * stride;
+}
+
+function computeBandSampleRadius(band: FarFieldBandConfig): number {
+  const outerCells = Math.ceil(band.outerRadius / band.sampleStride);
+  return outerCells + Math.ceil(band.anchorStride / band.sampleStride) + 1;
 }

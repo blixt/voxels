@@ -38,6 +38,7 @@ const HUD_PUSH_INTERVAL_MS = 120;
 const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
 const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 6;
 const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 4;
+const DEFAULT_MAX_FAR_FIELD_BAND_REBUILDS_PER_FRAME = 1;
 
 export interface GameHudSnapshot {
   status: string;
@@ -63,6 +64,7 @@ export interface GameHudSnapshot {
   surfaceY: number;
   farFieldMs: number;
   farFieldBuiltBands: number;
+  farFieldPendingBands: number;
   farFieldTriangles: number;
   farFieldMaxRadiusMeters: number;
   meshMs: number;
@@ -79,6 +81,7 @@ export interface GameHudSnapshot {
   avgFrameCpuMs: number;
   maxGeneratedChunksPerUpdate: number;
   maxMeshRebuildsPerFrame: number;
+  maxFarFieldBandRebuildsPerFrame: number;
 }
 
 export interface GameRenderProbe {
@@ -166,6 +169,9 @@ export interface IncrementalCrossingSample {
   streamMs: number;
   meshMs: number;
   meshCount: number;
+  farFieldMs: number;
+  farFieldBuiltBands: number;
+  farFieldPendingBands: number;
   frameCpuMs: number;
   syncMs: number;
   uploadMs: number;
@@ -182,6 +188,9 @@ export interface IncrementalCrossingSummary {
   avgWorkMs: number;
   p95WorkMs: number;
   maxWorkMs: number;
+  avgFarFieldMs: number;
+  p95FarFieldMs: number;
+  maxFarFieldMs: number;
   avgStreamMs: number;
   p95StreamMs: number;
   maxStreamMs: number;
@@ -210,6 +219,7 @@ export interface IncrementalCrossingBenchmark {
 export interface StreamingBudgets {
   maxGeneratedChunksPerUpdate: number;
   maxMeshRebuildsPerFrame: number;
+  maxFarFieldBandRebuildsPerFrame: number;
 }
 
 export interface LodCoverageIssueSample {
@@ -272,6 +282,7 @@ export class GameController {
   private streamingBudgets: StreamingBudgets = {
     maxGeneratedChunksPerUpdate: DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE,
     maxMeshRebuildsPerFrame: DEFAULT_MAX_MESH_REBUILDS_PER_FRAME,
+    maxFarFieldBandRebuildsPerFrame: DEFAULT_MAX_FAR_FIELD_BAND_REBUILDS_PER_FRAME,
   };
 
   private rafId = 0;
@@ -324,7 +335,14 @@ export class GameController {
         : Math.min((now - this.lastFrameTime) / 1000, MAX_DELTA_SECONDS);
       this.lastFrameTime = now;
       const moved = this.updateMovement(deltaSeconds);
-      if (shouldPumpWorldWork(moved, this.lastStreamSummary.pendingChunks, this.world.countDirtyResidentChunks())) {
+      if (
+        shouldPumpWorldWork(
+          moved,
+          this.lastStreamSummary.pendingChunks,
+          this.world.countDirtyResidentChunks(),
+          this.lastFarFieldSummary.pendingBands,
+        )
+      ) {
         this.syncWorldAroundPlayer();
       }
       this.renderInteractiveFrame();
@@ -372,6 +390,7 @@ export class GameController {
       surfaceY: this.lastStreamSummary.surfaceY,
       farFieldMs: this.lastFarFieldSummary.elapsedMs,
       farFieldBuiltBands: this.lastFarFieldSummary.builtBands,
+      farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
       farFieldTriangles: this.lastFarFieldSummary.triangleCount,
       farFieldMaxRadiusMeters: this.lastFarFieldSummary.maxRadiusMeters,
       meshMs: this.meshMs,
@@ -388,6 +407,7 @@ export class GameController {
       avgFrameCpuMs: this.avgFrameCpuMs,
       maxGeneratedChunksPerUpdate: this.streamingBudgets.maxGeneratedChunksPerUpdate,
       maxMeshRebuildsPerFrame: this.streamingBudgets.maxMeshRebuildsPerFrame,
+      maxFarFieldBandRebuildsPerFrame: this.streamingBudgets.maxFarFieldBandRebuildsPerFrame,
     };
   }
 
@@ -398,6 +418,7 @@ export class GameController {
   setStreamingBudgets(
     maxGeneratedChunksPerUpdate: number,
     maxMeshRebuildsPerFrame: number,
+    maxFarFieldBandRebuildsPerFrame = this.streamingBudgets.maxFarFieldBandRebuildsPerFrame,
   ): StreamingBudgets {
     this.streamingBudgets = {
       maxGeneratedChunksPerUpdate: clampPositiveInt(
@@ -407,6 +428,10 @@ export class GameController {
       maxMeshRebuildsPerFrame: clampPositiveInt(
         maxMeshRebuildsPerFrame,
         DEFAULT_MAX_MESH_REBUILDS_PER_FRAME,
+      ),
+      maxFarFieldBandRebuildsPerFrame: clampPositiveInt(
+        maxFarFieldBandRebuildsPerFrame,
+        DEFAULT_MAX_FAR_FIELD_BAND_REBUILDS_PER_FRAME,
       ),
     };
     this.pushHud(true);
@@ -730,14 +755,39 @@ export class GameController {
             const residency = this.syncWorldAroundPlayer(false);
             const render = await this.renderProbeFrame();
             frame += 1;
-            samples.push(buildIncrementalSample(frame, "move", legIndex, residency, this.lastMeshBuildSummary, render));
+            samples.push(
+              buildIncrementalSample(
+                frame,
+                "move",
+                legIndex,
+                residency,
+                this.lastMeshBuildSummary,
+                this.lastFarFieldSummary,
+                render,
+              ),
+            );
           }
           for (let settleFrame = 0; settleFrame < normalizedSettleFrames; settleFrame += 1) {
             const residency = this.syncWorldAroundPlayer(false);
             const render = await this.renderProbeFrame();
             frame += 1;
-            samples.push(buildIncrementalSample(frame, "settle", legIndex, residency, this.lastMeshBuildSummary, render));
-            if (residency.complete && residency.pendingChunks === 0 && this.lastMeshBuildSummary.meshCount === 0) {
+            samples.push(
+              buildIncrementalSample(
+                frame,
+                "settle",
+                legIndex,
+                residency,
+                this.lastMeshBuildSummary,
+                this.lastFarFieldSummary,
+                render,
+              ),
+            );
+            if (
+              residency.complete
+              && residency.pendingChunks === 0
+              && this.lastMeshBuildSummary.meshCount === 0
+              && this.lastFarFieldSummary.pendingBands === 0
+            ) {
               break;
             }
           }
@@ -896,6 +946,7 @@ export class GameController {
         this.player.feetPosition,
         0,
         this.getRenderReadyFarFieldMask(),
+        this.streamingBudgets.maxFarFieldBandRebuildsPerFrame,
       );
       this.lastStreamSummary = createIdleResidencySummary(
         this.lastStreamSummary,
@@ -930,6 +981,7 @@ export class GameController {
       this.player.feetPosition,
       0,
       this.getRenderReadyFarFieldMask(),
+      settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxFarFieldBandRebuildsPerFrame,
     );
     this.status = residency.pendingChunks > 0
       ? `Streaming ${residency.pendingChunks} pending chunk(s)`
@@ -1090,6 +1142,7 @@ function buildIncrementalSample(
   leg: number,
   residency: ResidencyUpdateSummary,
   mesh: MeshBuildSummary,
+  farField: FarFieldUpdateSummary,
   render: GameRenderProbe,
 ): IncrementalCrossingSample {
   return {
@@ -1104,6 +1157,9 @@ function buildIncrementalSample(
     streamMs: residency.elapsedMs,
     meshMs: mesh.elapsedMs,
     meshCount: mesh.meshCount,
+    farFieldMs: farField.elapsedMs,
+    farFieldBuiltBands: farField.builtBands,
+    farFieldPendingBands: farField.pendingBands,
     frameCpuMs: render.frameCpuMs,
     syncMs: render.syncResourcesMs,
     uploadMs: render.uploadMs,
@@ -1207,19 +1263,31 @@ function summarizeChunkBoundaryBenchmark(samples: readonly ChunkBoundaryBenchmar
 }
 
 function summarizeIncrementalCrossing(samples: readonly IncrementalCrossingSample[]): IncrementalCrossingSummary {
-  const workSamples = samples.map((sample) => sample.streamMs + sample.meshMs + sample.frameCpuMs);
+  const workSamples = samples.map((sample) => sample.streamMs + sample.meshMs + sample.farFieldMs + sample.frameCpuMs);
+  const farFieldSamples = samples.map((sample) => sample.farFieldMs);
   const streamSamples = samples.map((sample) => sample.streamMs);
   const meshSamples = samples.map((sample) => sample.meshMs);
   const frameCpuSamples = samples.map((sample) => sample.frameCpuMs);
   const uploadSamples = samples.map((sample) => sample.uploadMs);
   return {
     sampleCount: samples.length,
-    workFrameCount: samples.filter((sample) => sample.streamMs > 0 || sample.meshMs > 0 || sample.uploadChunks > 0).length,
+    workFrameCount: samples.filter((sample) =>
+      sample.streamMs > 0
+      || sample.meshMs > 0
+      || sample.farFieldMs > 0
+      || sample.uploadChunks > 0
+      || sample.farFieldPendingBands > 0
+    ).length,
     changedCount: samples.filter((sample) => sample.changed).length,
-    incompleteFrameCount: samples.filter((sample) => !sample.complete || sample.pendingChunks > 0).length,
+    incompleteFrameCount: samples.filter((sample) =>
+      !sample.complete || sample.pendingChunks > 0 || sample.farFieldPendingBands > 0
+    ).length,
     avgWorkMs: average(workSamples),
     p95WorkMs: percentile(workSamples, 0.95),
     maxWorkMs: maxValue(workSamples),
+    avgFarFieldMs: average(farFieldSamples),
+    p95FarFieldMs: percentile(farFieldSamples, 0.95),
+    maxFarFieldMs: maxValue(farFieldSamples),
     avgStreamMs: average(streamSamples),
     p95StreamMs: percentile(streamSamples, 0.95),
     maxStreamMs: maxValue(streamSamples),

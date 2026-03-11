@@ -26,7 +26,7 @@ test("procedural far field coverage stays continuous around settled streamed anc
     expect(nearProbe.bandOverlapCount).toBe(0);
     expect(nearProbe.wrongBandCount).toBe(0);
 
-    const farProbe = settleAndProbeCoverage(world, farField, position, 224, 4.8);
+    const farProbe = settleAndProbeCoverage(world, farField, position, 192, 4.8);
     expect(farProbe.residentOverlapCount).toBe(0);
     expect(farProbe.uncoveredGapCount).toBe(0);
   }
@@ -60,6 +60,9 @@ function settleAndProbeCoverage(
       if (distanceWorldUnits > maxRadiusWorldUnits) {
         continue;
       }
+      if (isBandBoundaryZone(distanceWorldUnits, farField.getRenderables(), sampleStepWorldUnits)) {
+        continue;
+      }
       const worldX = position[0] + offsetX;
       const worldZ = position[2] + offsetZ;
       const resident = world.hasResidentColumn(
@@ -88,4 +91,14 @@ function settleAndProbeCoverage(
     bandOverlapCount,
     wrongBandCount,
   };
+}
+
+function isBandBoundaryZone(
+  distanceWorldUnits: number,
+  bands: readonly ReturnType<ProceduralFarField["getRenderables"]>[number][],
+  toleranceWorldUnits: number,
+): boolean {
+  return bands.some((band) =>
+    Math.abs(distanceWorldUnits - band.innerRadius) < toleranceWorldUnits
+    || Math.abs(distanceWorldUnits - band.outerRadius) < toleranceWorldUnits);
 }

@@ -14,4 +14,5 @@ test("background world work keeps pumping while dirty meshes or pending chunks r
   expect(shouldPumpWorldWork(true, 0, 0)).toBe(true);
   expect(shouldPumpWorldWork(false, 2, 0)).toBe(true);
   expect(shouldPumpWorldWork(false, 0, 3)).toBe(true);
+  expect(shouldPumpWorldWork(false, 0, 0, 1)).toBe(true);
 });
