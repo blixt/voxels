@@ -30,11 +30,10 @@ if (!appRoot) {
 }
 
 const canvas = appRoot.querySelector<HTMLCanvasElement>("[data-role='viewport']");
-const statusElement = appRoot.querySelector<HTMLElement>("[data-role='status']");
 const telemetryElement = appRoot.querySelector<HTMLElement>("[data-role='telemetry']");
 const captureButton = appRoot.querySelector<HTMLButtonElement>("[data-role='capture']");
 
-if (!canvas || !statusElement || !telemetryElement || !captureButton) {
+if (!canvas || !telemetryElement || !captureButton) {
   throw new Error("Game UI is incomplete");
 }
 
@@ -52,7 +51,6 @@ window.__VOXELS_GAME__ = {
 };
 
 controller.onHudUpdate = (snapshot) => {
-  statusElement.textContent = snapshot.status;
   telemetryElement.innerHTML = [
     metric("Position", formatPosition(snapshot.position)),
     metric("Feet", formatPosition(snapshot.feetPosition)),

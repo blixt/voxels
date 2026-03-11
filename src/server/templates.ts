@@ -38,25 +38,11 @@ export function renderGamePage(assetVersion: string): string {
               <h1>Voxels</h1>
               <p class="game-subtitle">First-person runtime slice over the current engine baseline.</p>
             </div>
-            <nav class="hero-links">
-              <a href="/">Game</a>
-              <a href="/bench">Benchmark</a>
-            </nav>
           </header>
           <div class="game-hud">
-            <section class="game-panel game-panel-status">
-              <h2>Status</h2>
-              <p data-role="status">Initializing WebGPU</p>
-            </section>
             <section class="game-panel game-panel-telemetry">
               <h2>Live Telemetry</h2>
               <div class="game-metrics" data-role="telemetry"></div>
-            </section>
-            <section class="game-panel game-panel-controls">
-              <h2>Controls</h2>
-              <p>Click once to capture the cursor.</p>
-              <p><code>WASD</code> move, <code>Space</code> jump, <code>Ctrl</code> sprint, <code>Alt</code> slow.</p>
-              <p>This slice adds a grounded player body over the streaming world; inventory and tools come next.</p>
             </section>
           </div>
           <div class="crosshair" aria-hidden="true"></div>
