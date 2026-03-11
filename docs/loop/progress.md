@@ -658,3 +658,46 @@
 - The broader lesson is worth keeping in the repo memory:
   - diagnostic or correctness scaffolding on the game path must never call “build a full global snapshot” helpers from inside per-cell or per-pixel loops
   - if runtime masking is needed, favor immutable snapshots and tiny cached transfer objects over repeated world queries
+
+### Real Chrome trace harness and first CPU/heap findings
+
+- Added a real trace-analysis step to the repo instead of relying on one-off shell notes:
+  - `scripts/analyze-chrome-trace.ts` now turns a Chrome performance trace into:
+    - top sampled exclusive/inclusive CPU frames
+    - JS heap min/max plus largest rise/drop windows from `UpdateCounters`
+    - GC totals
+    - longest main-thread `RunTask`s
+  - `mise run analyze-trace -- <trace.json> --url-prefix=http://localhost:3021/` is now the standard post-trace summary step
+- Captured and analyzed three real Chrome traces on March 11, 2026:
+  - production deterministic route trace on `http://localhost:3020/`
+  - dev deterministic route trace on `http://localhost:3021/` for readable function names
+  - dev live-walk trace on `http://localhost:3021/` using the real interactive loop with synthetic held movement
+- The traces changed the optimization order materially:
+  - the deterministic route benchmark is still useful for controlled spikes and correctness, but the live-walk trace exposed always-on costs that were easy to underweight before
+  - the repo now has evidence for both “route under controlled stream churn” and “real held movement in the live loop”
+- Main findings from the route traces:
+  - production route summary still showed real long spikes even after the recent fixes:
+    - `maxGameplayFrameMs ~ 65.2`
+    - `maxFarFieldMs ~ 64.3`
+    - `maxMeshMs ~ 8.0` on the sampled production run
+  - the dev route trace gave readable attribution for those spikes:
+    - `buildChunkMesh()` is still the largest exclusive CPU bucket in the benchmarked movement path
+    - `generateChunk()` plus `buildColumnContext()` / `fbm2D()` / `valueNoise2D()` remain the next major stream-side CPU bucket
+    - far-field `buildBandMesh()` is the clear owner of the biggest heap blow-up window
+- Main findings from the live-walk trace:
+  - the live loop still spends substantial time outside pure generation/meshing:
+    - HUD DOM churn is real, not cosmetic noise
+    - renderer resource syncing is a measurable always-on cost
+    - player collision/step handling is visible in the profile, though not yet the top target
+  - specifically, the live trace showed:
+    - `set innerHTML` as a large exclusive cost on the real gameplay path
+    - `pushHud()` / `controller.onHudUpdate()` as a large inclusive cost
+    - `syncResources()` and repeated resident-chunk iteration as a real renderer-side per-frame tax
+- The first high-confidence allocation diagnosis is now concrete:
+  - in the dev route trace, JS heap rose from about `38 MB` to `168 MB` and then collapsed back to about `12 MB`
+  - the sampled hot path in that window was `buildBandMesh()` with `pushQuad()` / `buildMeshData()` / `writeVertex()`
+  - that points directly at far-field mesh construction strategy rather than a vague “Chrome GC issue”
+- The next practical targets are now evidence-driven:
+  - eliminate HUD `innerHTML` churn from the live loop
+  - remove the large transient JS-array allocation pattern from far-field mesh construction
+  - then re-run the same live/route traces to see whether the next meaningful target is still meshing, generation, or renderer resource sync

@@ -29,6 +29,10 @@ run = "bun run profile:stream"
 description = "Profile the incremental game-path streaming loop"
 run = "bun run profile:game-stream"
 
+[tasks.analyze-trace]
+description = "Summarize a Chrome performance trace into top CPU, heap, GC, and long-task findings"
+run = "bun run analyze:trace"
+
 [tasks.serve]
 description = "Run the built production server bundle"
 run = "bun run start"

@@ -1914,3 +1914,92 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - I intentionally stopped at test/build verification for this unit before reopening Chrome again.
 - The next step is a fresh trace-driven Chrome pass on the current code so the browser evidence is captured after the CPU-regression fix, not before it.
+
+## 2026-03-11 Chrome trace capture and analysis harness
+
+- `PORT=3020 mise run serve`
+- `PORT=3021 mise run dev`
+- fresh Chrome 146 production page on `http://localhost:3020/`
+- fresh Chrome 146 dev page on `http://localhost:3021/`
+- Chrome performance traces saved to:
+  - `artifacts/trace-route-20260311.json`
+  - `artifacts/trace-route-dev-20260311.json`
+  - `artifacts/trace-live-walk-dev-20260311-b.json`
+- `mise run analyze-trace -- artifacts/trace-route-dev-20260311.json --url-prefix=http://localhost:3021/`
+- `mise run analyze-trace -- artifacts/trace-live-walk-dev-20260311-b.json --url-prefix=http://localhost:3021/`
+
+#### Production route-trace summary
+
+- Deterministic `5 s + settle` route benchmark on `http://localhost:3020/`:
+  - `avgGameplayFrameMs = 5.23`
+  - `p95GameplayFrameMs = 14.4`
+  - `maxGameplayFrameMs = 65.2`
+  - `avgMeshMs = 3.10`
+  - `maxMeshMs = 8.0`
+  - `avgFarFieldMs = 0.61`
+  - `maxFarFieldMs = 64.3`
+  - `maxFarFieldBandLabel = near-transition`
+  - `maxFarFieldSampleCacheMs = 48.9`
+  - `maxFarFieldMeshBuildMs = 18.1`
+  - `settleFramesUntilComplete = 42`
+
+#### Dev route-trace CPU/heap summary
+
+- `mise run analyze-trace -- artifacts/trace-route-dev-20260311.json --url-prefix=http://localhost:3021/` now reports readable hot frames.
+- Top benchmark-path exclusive CPU frames from the sampled profile:
+  - `buildChunkMesh`: `537.9 ms`
+  - `valueNoise2D`: `260.7 ms`
+  - `sampleChunkVoxel`: `181.5 ms`
+  - `generateChunk`: `158.9 ms`
+  - `rebuildDirtyMeshes2`: `134.3 ms`
+  - `getResidentChunk`: `118.0 ms`
+- Top benchmark-path inclusive frames:
+  - `syncWorldAroundPlayer`: `1276.0 ms`
+  - `flushMeshBuildBudget`: `1027.4 ms`
+  - `rebuildDirtyMeshes2`: `1027.0 ms`
+  - `buildChunkMesh`: `881.4 ms`
+  - `updateResidencyAround`: `659.4 ms`
+  - `generateChunk`: `615.4 ms`
+  - `buildBandMesh`: `203.7 ms`
+- Heap and GC from the same dev route trace:
+  - heap `min 2.30 MB`, `max 168.43 MB`, `start 10.96 MB`, `end 24.40 MB`
+  - biggest rise `+33.54 MB` in about `8.8 ms`
+  - biggest drop `-156.71 MB` in about `4.4 ms`
+  - `71` minor GCs and `7` major GCs
+- Window-specific sampled attribution on the largest heap-growth window:
+  - `buildBandMesh()` dominates that interval
+  - `pushQuad()` is the largest exclusive function inside it
+  - `buildMeshData()` and `writeVertex()` are also present
+
+#### Dev live-walk trace summary
+
+- Live interactive-loop trace on `http://localhost:3021/`:
+  - the player was teleported to a known start point, yaw was forced to `0`, and synthetic held `W` movement advanced feet position from `[-191.5, 1428, -191.5]` to `[-112, 1453, -191.5]`
+- `mise run analyze-trace -- artifacts/trace-live-walk-dev-20260311-b.json --url-prefix=http://localhost:3021/` reported:
+  - top exclusive live-loop frames:
+    - `set innerHTML`: `178.8 ms`
+    - `buildChunkMesh`: `173.7 ms`
+    - `getResidentChunk`: `167.0 ms`
+    - `syncResources`: `122.0 ms`
+    - `iterateResidentChunks`: `94.4 ms`
+  - top inclusive live-loop frames:
+    - `tick`: `2062.3 ms`
+    - `renderInteractiveFrame`: `733.9 ms`
+    - `syncWorldAroundPlayer`: `585.5 ms`
+    - `renderCurrentFrame`: `498.5 ms`
+    - `render`: `451.9 ms`
+    - `flushMeshBuildBudget`: `368.2 ms`
+    - `updateMovement`: `327.5 ms`
+    - `pushHud`: `235.4 ms`
+    - `controller.onHudUpdate`: `233.3 ms`
+    - `syncResources`: `188.4 ms`
+- Heap and GC on the live-walk trace:
+  - heap `min 2.91 MB`, `max 67.63 MB`, `start 21.21 MB`, `end 13.85 MB`
+  - biggest rise `+35.13 MB`
+  - biggest drop `-64.67 MB`
+  - `38` minor GCs and `11` major GCs
+
+#### Residual
+
+- The repo now has a repeatable trace-analysis path, and the current biggest unresolved buckets are no longer guesswork.
+- The next changes should be re-run against the same route and live-walk traces so improvements are measured on both the deterministic harness and the real gameplay loop.
