@@ -44,15 +44,15 @@ export function renderGamePage(assetVersion: string): string {
             </nav>
           </header>
           <div class="game-hud">
-            <section class="game-panel">
+            <section class="game-panel game-panel-status">
               <h2>Status</h2>
               <p data-role="status">Initializing WebGPU</p>
             </section>
-            <section class="game-panel">
+            <section class="game-panel game-panel-telemetry">
               <h2>Live Telemetry</h2>
               <div class="game-metrics" data-role="telemetry"></div>
             </section>
-            <section class="game-panel">
+            <section class="game-panel game-panel-controls">
               <h2>Controls</h2>
               <p>Click once to capture the cursor.</p>
               <p><code>WASD</code> move, <code>Space</code> jump, <code>Ctrl</code> sprint, <code>Alt</code> slow.</p>
