@@ -238,6 +238,68 @@
 - `mise run test`
 - `mise run build`
 
+### Known-empty chunk cache verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `mise run profile-stream -- --iterations=3 --warmup=1`
+
+#### Automated checks
+
+- `mise run test`: passing after adding resident-world cache regression coverage.
+- `mise run build`: passing after exposing cached-empty metrics through the game HUD/debug surface and the local stream profiler.
+
+#### Warmed local stream-profiler results
+
+- `bootstrap-r3`:
+  - stream avg `208.2 ms`
+  - mesh avg `184.1 ms`
+  - generated chunks `239`
+  - empty chunks skipped `58`
+  - cached empty hits `0`
+- `widen-r2-to-r3`:
+  - stream avg `103.2 ms`
+  - mesh avg `148.0 ms`
+  - generated chunks `115`
+  - empty chunks skipped `32 -> 0`
+  - cached empty hits `26`
+  - chunk generation avg `102.0 ms`
+- `shrink-r3-to-r2`:
+  - stream avg `0.2 ms`
+  - mesh avg `56.1 ms`
+  - generated chunks `0`
+  - evicted chunks `115`
+  - cached empty hits `26`
+  - chunk generation avg `0.0 ms`
+
+#### Chrome 146 browser checks on `http://localhost:3001/`
+
+- Reloaded `/` with cache bypass and queried `window.__VOXELS_GAME__`.
+- Same-anchor forced refresh now reports:
+  - generated chunks `0`
+  - empty chunks skipped `0`
+  - cached empty hits `58`
+  - chunk generation `0 ms`
+  - total stream time `0.2 ms`
+- Radius shrink `r3 -> r2` now reports:
+  - generated chunks `0`
+  - evicted chunks `115`
+  - cached empty hits `26`
+  - chunk generation `0 ms`
+  - total stream time `0.4 ms`
+- Radius widen `r2 -> r3` now reports:
+  - generated chunks `115`
+  - cached empty hits `58`
+  - empty chunks skipped `0`
+  - chunk generation `76.5 ms`
+  - total stream time `77.1 ms`
+- Post-widen game snapshot confirms the new HUD/debug field is live:
+  - `streamCachedEmptyChunkHits = 58`
+  - `streamGeneratedChunks = 115`
+  - `streamDirtyResidentChunks = 179`
+
 #### Automated checks
 
 - `mise run test`: passing after adding `tests/procedural-generator.test.ts`.

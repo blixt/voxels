@@ -109,10 +109,14 @@ Status:
 - remesh accounting is now landing:
   - mesh rebuilds separate newly generated chunk meshes from remeshed boundary chunks
   - shrink still spends time on empty-chunk generation checks even when no solid chunks are adopted
+- known-empty chunk caching is now landing:
+  - resident-world updates remember empty chunk coordinates after the first probe
+  - `profile-stream` and the game HUD now expose cached-empty hits separately from first-time empty skips
+  - shrink and forced refresh probes now avoid repeated empty-chunk generation entirely
 - remaining work is to choose between:
   - reducing real boundary remesh cost
-  - avoiding repeated empty-chunk evaluation
   - moving to incremental or worker streaming
+  - reducing solid-chunk generation cost on widen/bootstrap
 
 ### Slice 5: interaction loop
 

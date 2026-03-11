@@ -26,6 +26,7 @@ export interface ResidencyUpdateSummary {
   generatedChunks: number;
   evictedChunks: number;
   emptyChunksSkipped: number;
+  cachedEmptyChunkHits: number;
   touchedNeighborChunks: number;
   residentChunks: number;
   dirtyResidentChunks: number;
@@ -48,6 +49,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
   lastResidency: ResidencyUpdateSummary;
 
   private readonly chunks = new Map<string, VoxelChunk>();
+  private readonly emptyChunkKeys = new Set<string>();
   private lastAnchorSignature = "";
 
   constructor(
@@ -72,6 +74,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       generatedChunks: 0,
       evictedChunks: 0,
       emptyChunksSkipped: 0,
+      cachedEmptyChunkHits: 0,
       touchedNeighborChunks: 0,
       residentChunks: 0,
       dirtyResidentChunks: 0,
@@ -204,6 +207,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
         generatedChunks: 0,
         evictedChunks: 0,
         emptyChunksSkipped: 0,
+        cachedEmptyChunkHits: 0,
         touchedNeighborChunks: 0,
         residentChunks: this.chunks.size,
         dirtyResidentChunks: countDirtyResidentChunks(this.chunks.values()),
@@ -222,6 +226,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     let generatedChunks = 0;
     let evictedChunks = 0;
     let emptyChunksSkipped = 0;
+    let cachedEmptyChunkHits = 0;
     let touchedNeighborChunks = 0;
     const generatedChunkCoords: ChunkCoordinate[] = [];
     const evictedChunkCoords: ChunkCoordinate[] = [];
@@ -247,15 +252,21 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
           if (this.chunks.has(key)) {
             continue;
           }
+          if (this.emptyChunkKeys.has(key)) {
+            cachedEmptyChunkHits += 1;
+            continue;
+          }
           const generationStartedAt = performance.now();
           const generated = this.generator.generateChunk(cx, cy, cz);
           chunkGenerationMs += performance.now() - generationStartedAt;
           if (generated.solidCount === 0) {
             emptyChunksSkipped += 1;
+            this.emptyChunkKeys.add(key);
             continue;
           }
           const adoptionStartedAt = performance.now();
           const chunk = createResidentChunk(generated, this.chunkSize);
+          this.emptyChunkKeys.delete(key);
           this.chunks.set(key, chunk);
           generatedChunks += 1;
           generatedChunkCoords.push({ x: cx, y: cy, z: cz });
@@ -290,6 +301,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       generatedChunks,
       evictedChunks,
       emptyChunksSkipped,
+      cachedEmptyChunkHits,
       touchedNeighborChunks,
       residentChunks: this.chunks.size,
       dirtyResidentChunks: countDirtyResidentChunks(this.chunks.values()),

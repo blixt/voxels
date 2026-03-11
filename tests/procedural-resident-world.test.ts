@@ -74,3 +74,46 @@ test("changing view distance forces a broader residency window", () => {
   expect(after.radiusChunks).toBe(3);
   expect(world.getStats().chunkCount).toBeGreaterThan(before);
 });
+
+test("resident world reuses cached empty chunk knowledge across residency changes", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), {
+    horizontalRadiusChunks: 3,
+  });
+  const spawn = world.getSpawnPosition();
+
+  const bootstrap = world.updateResidencyAround(spawn);
+  world.setHorizontalRadiusChunks(2);
+  const shrink = world.updateResidencyAround(spawn);
+  world.setHorizontalRadiusChunks(3);
+  const widen = world.updateResidencyAround(spawn);
+
+  expect(bootstrap.emptyChunksSkipped).toBeGreaterThan(0);
+  expect(bootstrap.cachedEmptyChunkHits).toBe(0);
+
+  expect(shrink.generatedChunks).toBe(0);
+  expect(shrink.emptyChunksSkipped).toBe(0);
+  expect(shrink.cachedEmptyChunkHits).toBeGreaterThan(0);
+  expect(shrink.phaseMs.chunkGenerationMs).toBe(0);
+
+  expect(widen.generatedChunks).toBeGreaterThan(0);
+  expect(widen.emptyChunksSkipped).toBe(0);
+  expect(widen.cachedEmptyChunkHits).toBe(bootstrap.emptyChunksSkipped);
+});
+
+test("resident world reuses known-empty chunk results on a repeated anchor refresh", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), {
+    horizontalRadiusChunks: 3,
+  });
+  const spawn = world.getSpawnPosition();
+
+  const first = world.updateResidencyAround(spawn);
+  world.setHorizontalRadiusChunks(3);
+  const second = world.updateResidencyAround(spawn);
+
+  expect(first.emptyChunksSkipped).toBeGreaterThan(0);
+  expect(first.cachedEmptyChunkHits).toBe(0);
+  expect(second.generatedChunks).toBe(0);
+  expect(second.emptyChunksSkipped).toBe(0);
+  expect(second.cachedEmptyChunkHits).toBe(first.emptyChunksSkipped);
+  expect(second.phaseMs.chunkGenerationMs).toBe(0);
+});

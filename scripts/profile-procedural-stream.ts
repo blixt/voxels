@@ -26,6 +26,8 @@ const scenarios = [
         meshRemeshChunks: mesh.remeshCount,
         generatedChunks: residency.generatedChunks,
         evictedChunks: residency.evictedChunks,
+        emptyChunksSkipped: residency.emptyChunksSkipped,
+        cachedEmptyChunkHits: residency.cachedEmptyChunkHits,
         dirtyResidentChunks: residency.dirtyResidentChunks,
         phaseMs: residency.phaseMs,
         residentChunks: world.getStats().chunkCount,
@@ -52,6 +54,8 @@ const scenarios = [
         meshRemeshChunks: mesh.remeshCount,
         generatedChunks: residency.generatedChunks,
         evictedChunks: residency.evictedChunks,
+        emptyChunksSkipped: residency.emptyChunksSkipped,
+        cachedEmptyChunkHits: residency.cachedEmptyChunkHits,
         dirtyResidentChunks: residency.dirtyResidentChunks,
         phaseMs: residency.phaseMs,
         residentChunks: world.getStats().chunkCount,
@@ -78,6 +82,8 @@ const scenarios = [
         meshRemeshChunks: mesh.remeshCount,
         generatedChunks: residency.generatedChunks,
         evictedChunks: residency.evictedChunks,
+        emptyChunksSkipped: residency.emptyChunksSkipped,
+        cachedEmptyChunkHits: residency.cachedEmptyChunkHits,
         dirtyResidentChunks: residency.dirtyResidentChunks,
         phaseMs: residency.phaseMs,
         residentChunks: world.getStats().chunkCount,
@@ -96,6 +102,8 @@ for (const scenario of scenarios) {
   const meshSamples: number[] = [];
   const generatedSamples: number[] = [];
   const evictedSamples: number[] = [];
+  const emptySkippedSamples: number[] = [];
+  const cachedEmptyHitSamples: number[] = [];
   const dirtyChunkSamples: number[] = [];
   const meshNewChunkSamples: number[] = [];
   const meshRemeshChunkSamples: number[] = [];
@@ -116,6 +124,8 @@ for (const scenario of scenarios) {
     meshRemeshChunkSamples.push(result.meshRemeshChunks ?? 0);
     generatedSamples.push(result.generatedChunks);
     evictedSamples.push(result.evictedChunks);
+    emptySkippedSamples.push(result.emptyChunksSkipped ?? 0);
+    cachedEmptyHitSamples.push(result.cachedEmptyChunkHits ?? 0);
     dirtyChunkSamples.push(result.dirtyResidentChunks ?? 0);
     surfaceSamples.push(result.phaseMs?.surfaceSampleMs ?? 0);
     yRangeSamples.push(result.phaseMs?.yRangeMs ?? 0);
@@ -140,6 +150,8 @@ for (const scenario of scenarios) {
     meshRemeshChunks: summarize(meshRemeshChunkSamples),
     generatedChunks: summarize(generatedSamples),
     evictedChunks: summarize(evictedSamples),
+    emptyChunksSkipped: summarize(emptySkippedSamples),
+    cachedEmptyChunkHits: summarize(cachedEmptyHitSamples),
     dirtyResidentChunks: summarize(dirtyChunkSamples),
     phases: {
       surfaceSample: summarize(surfaceSamples),

@@ -181,3 +181,13 @@
   - duplicate dirty bookkeeping is not the main remaining cost
   - the extra remesh work is mostly real boundary-chunk work
   - the next worthwhile direction is either reducing actual boundary remesh cost or moving streaming/meshing off the synchronous path
+- Added a deterministic known-empty chunk cache to the resident-world path instead of repeatedly re-running the generator for empty positions that had already been proven empty.
+- Extended the local stream profiler and the game HUD/debug snapshot so cached empty hits are visible separately from first-time empty skips.
+- Added two regression tests for the new cache behavior:
+  - repeated same-anchor refresh now reuses cached empty chunk knowledge
+  - radius shrink/widen churn now reuses cached empty chunk knowledge across residency changes
+- Verified that the cache removes the remaining shrink/refresh generation cost without changing resident-set counts:
+  - local `shrink-r3-to-r2` stream `14.0 ms -> 0.2 ms`
+  - local `shrink-r3-to-r2` `chunkGenerationMs 13.7 -> 0.0`
+  - Chrome 146 same-anchor refresh now reports `58` cached empty hits in `0.2 ms`
+  - Chrome 146 shrink `r3 -> r2` now reports `26` cached empty hits with `0 ms` chunk generation

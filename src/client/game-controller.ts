@@ -37,6 +37,7 @@ export interface GameHudSnapshot {
   streamGeneratedChunks: number;
   streamEvictedChunks: number;
   streamEmptyChunksSkipped: number;
+  streamCachedEmptyChunkHits: number;
   streamDirtyResidentChunks: number;
   residencyRadiusChunks: number;
   surfaceY: number;
@@ -154,6 +155,7 @@ export class GameController {
       streamGeneratedChunks: this.world.lastResidency.generatedChunks,
       streamEvictedChunks: this.world.lastResidency.evictedChunks,
       streamEmptyChunksSkipped: this.world.lastResidency.emptyChunksSkipped,
+      streamCachedEmptyChunkHits: this.world.lastResidency.cachedEmptyChunkHits,
       streamDirtyResidentChunks: this.world.lastResidency.dirtyResidentChunks,
       residencyRadiusChunks: this.world.lastResidency.radiusChunks,
       surfaceY: this.world.lastResidency.surfaceY,

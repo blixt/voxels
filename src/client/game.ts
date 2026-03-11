@@ -63,6 +63,7 @@ controller.onHudUpdate = (snapshot) => {
     metric("Generated", snapshot.streamGeneratedChunks.toLocaleString()),
     metric("Evicted", snapshot.streamEvictedChunks.toLocaleString()),
     metric("Empty Skipped", snapshot.streamEmptyChunksSkipped.toLocaleString()),
+    metric("Empty Cache Hits", snapshot.streamCachedEmptyChunkHits.toLocaleString()),
     metric("Mesh", `${snapshot.meshMs.toFixed(1)} ms`),
     metric("New Meshes", snapshot.meshNewChunks.toLocaleString()),
     metric("Remeshes", snapshot.meshRemeshChunks.toLocaleString()),
