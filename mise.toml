@@ -21,6 +21,10 @@ run = "bun run versions"
 description = "Profile local scene build and meshing performance"
 run = "bun run profile"
 
+[tasks.profile-stream]
+description = "Profile local procedural residency and meshing transitions"
+run = "bun run profile:stream"
+
 [tasks.serve]
 description = "Run the server without rebuilding in a loop"
 run = "bun run start"

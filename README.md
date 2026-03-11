@@ -54,5 +54,6 @@ Repo-specific guidance for agent-driven research, implementation, and verificati
 - `window.__VOXELS_BENCH__.runAll(iterations, frameCount)`
 - `window.__VOXELS_BENCH__.probeGeneration({ seed, chunkCoords, chunkSize })`
 - `mise run profile -- --iterations=3 --warmup=1 terrain256 stressDrawCalls512`
+- `mise run profile-stream -- --iterations=3 --warmup=1`
 
 The benchmark table separates first-frame costs from warm-frame costs and exposes first-frame sync/upload/encode metrics so scene-load and live-edit regressions are visible without manual spreadsheet work.

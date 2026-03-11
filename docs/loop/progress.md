@@ -151,3 +151,4 @@
 - Captured a new repo-process lesson in `docs/agent-playbook.md`:
   - assert the actual page mode and debug surface before trusting any localhost result when multiple Bun servers may be alive
   - prefer machine-readable browser probes over HUD-only verification for streaming work
+- Added `scripts/profile-procedural-stream.ts` plus `mise run profile-stream` so procedural startup/widen/shrink transitions can be measured locally with warm-up passes instead of only through ad hoc browser notes.

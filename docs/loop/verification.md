@@ -366,3 +366,34 @@
   - coverage mismatch `0.00%`
   - visual `pass`
   - correctness `pass`
+
+### Procedural stream profiler baseline
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `mise run profile-stream -- --iterations=2 --warmup=1`
+
+#### Automated checks
+
+- `mise run test`: passing after adding `scripts/profile-procedural-stream.ts`.
+- `mise run build`: passing after exposing the new profile task.
+
+#### Local profiler samples
+
+- `bootstrap-r3`:
+  - stream avg `3673.1 ms`
+  - mesh avg `188.2 ms`
+  - generated chunks `239`
+  - resident chunks `239`
+- `widen-r2-to-r3`:
+  - stream avg `2113.3 ms`
+  - mesh avg `147.0 ms`
+  - generated chunks `115`
+  - resident chunks `239`
+- `shrink-r3-to-r2`:
+  - stream avg `307.5 ms`
+  - mesh avg `57.7 ms`
+  - evicted chunks `115`
+  - resident chunks `124`

@@ -19,5 +19,5 @@ Loop:
 2. Record the active build plan in `plan.md`.
 3. Implement the next smallest slice and log major decisions in `progress.md`.
 4. Run `mise run test`, exercise `/bench`, and record the outcome in `verification.md`.
-5. Run `mise run profile` when browser automation is unavailable or when I need repeatable local build/mesh timings with an explicit warm-up pass.
+5. Run `mise run profile` or `mise run profile-stream` when browser automation is unavailable or when I need repeatable warmed local timings for either scene rendering or procedural residency.
 6. Update `plan.md` with the next smallest verified slice toward the game/runtime target.
