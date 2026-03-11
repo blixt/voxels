@@ -729,3 +729,28 @@
   - the old HUD and far-field transient-allocation problems are no longer the dominant mystery
   - the next renderer-side target is `syncResources()` and repeated resident-chunk sweeps
   - the next world-side targets are still chunk generation and detailed chunk meshing, with `valueNoise2D()`, `generateChunk()`, and `buildChunkMesh()` remaining the biggest CPU buckets
+
+### Renderer resource reuse and cheaper sync passes
+
+- Took the next pass exactly where the fresh traces pointed:
+  - `syncResources()` was still the clearest always-on renderer-side CPU tax
+  - the old path rebuilt a `Set` of desired resources every sync, walked the resident world twice, and destroyed/recreated GPU buffers for dirty meshes even when the same mesh owner was staying resident
+- Reworked `src/engine/renderer.ts` to be more incremental and less wasteful:
+  - resource syncing now tags seen resources by revision instead of building a fresh `Set`
+  - resident meshes are visited once per sync instead of twice
+  - GPU vertex/index buffers are reused in place when capacity is sufficient
+  - buffer growth now happens through explicit size classes instead of exact-size churn
+  - uniform and far-field-mask staging buffers are now persistent instead of being reallocated every frame
+  - far-field mask uploads are skipped entirely when the controller is handing the renderer the same cached mask object
+- This is the right kind of change for the upcoming workload:
+  - trees and richer world detail will increase mesh churn and resident resource count
+  - better lighting will only make per-frame renderer overhead more visible
+  - the renderer must therefore stop paying avoidable fixed CPU costs before we pile on more content systems
+- Fresh measurements on the new code:
+  - production route benchmark on `http://localhost:3025/` improved from about `avgGameplayFrameMs 6.03 -> 5.83`, `p95 16.9 -> 16.2`, and `max 61.4 -> 53.8`
+  - live-walk trace on `http://localhost:3024/` dropped `syncResources()` exclusive CPU from about `78.8 ms` to about `52.8 ms`
+  - the route trace no longer shows `syncResources()` as a top exclusive bucket at the previous level; the hot renderer-side leaf is now mostly the new per-source sync helper and upload path rather than repeated full-set bookkeeping
+- The remaining picture is clearer again:
+  - renderer sync is improved but not “done”
+  - detailed chunk meshing is now the next obvious CPU/heap target
+  - the live trace’s biggest heap-growth window now lands squarely on `buildChunkMesh()` plus generation, which is exactly where the next pass should go

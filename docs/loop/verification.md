@@ -2109,3 +2109,85 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - The dominant remaining work is now clearer:
   - world generation noise and chunk meshing remain the biggest CPU buckets
   - `syncResources()` is the clearest renderer-side always-on target for the next pass
+
+## 2026-03-11 renderer resource reuse pass
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-far-field.test.ts tests/procedural-lod-coverage.test.ts tests/game-route-benchmark.test.ts tests/procedural-resident-world.test.ts`
+- `mise run build`
+- `PORT=3024 mise run dev`
+- `PORT=3025 mise run serve`
+- fresh Chrome 146 dev page on `http://localhost:3024/`
+- fresh Chrome 146 production page on `http://localhost:3025/`
+- `window.__VOXELS_GAME__.benchmarkRouteExperience({ durationSeconds: 5, settleSeconds: 2, captureStrideFrames: 100000, seamProbeStrideFrames: 100000, referenceDiffStrideFrames: 0 }).summary`
+- Chrome traces saved to:
+  - `artifacts/trace-route-dev-renderer-reuse-20260311.json`
+  - `artifacts/trace-live-walk-dev-renderer-reuse-20260311.json`
+- `mise run analyze-trace -- artifacts/trace-route-dev-renderer-reuse-20260311.json --url-prefix=http://localhost:3024/`
+- `mise run analyze-trace -- artifacts/trace-live-walk-dev-renderer-reuse-20260311.json --url-prefix=http://localhost:3024/`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing after the renderer sync/buffer reuse rewrite.
+- Focused tests:
+  - `37 pass`
+  - `0 fail`
+- `mise run build`: passing.
+
+#### Production route summary
+
+- Fresh route benchmark on `http://localhost:3025/` returned:
+  - `avgGameplayFrameMs = 5.83`
+  - `p95GameplayFrameMs = 16.2`
+  - `maxGameplayFrameMs = 53.8`
+  - `avgStreamMs = 1.34`
+  - `avgMeshMs = 3.59`
+  - `avgFarFieldMs = 0.59`
+  - `maxFarFieldMs = 53.2`
+  - `framesWithHoleSignals = 0`
+  - `settleFramesUntilComplete = 42`
+- Compared to the previous production route summary:
+  - `avgGameplayFrameMs` improved from `6.03 -> 5.83`
+  - `p95GameplayFrameMs` improved from `16.9 -> 16.2`
+  - `maxGameplayFrameMs` improved from `61.4 -> 53.8`
+
+#### Dev route trace
+
+- `mise run analyze-trace -- artifacts/trace-route-dev-renderer-reuse-20260311.json --url-prefix=http://localhost:3024/` reported:
+  - top exclusive CPU is still dominated by world work:
+    - `valueNoise2D`: `1620.4 ms`
+    - `buildChunkMesh`: `973.7 ms`
+    - `fbm2D2`: `647.3 ms`
+    - `generateChunk`: `475.4 ms`
+  - renderer-side sync cost improved enough that the old `syncResources()` bucket is no longer at the earlier level:
+    - `syncMeshSourceResource`: `32.1 ms`
+    - `iterateResidentChunks`: `30.9 ms`
+  - heap remained controlled:
+    - heap `min 1.49 MB`, `max 19.33 MB`, `end 11.72 MB`
+    - biggest rise `+15.55 MB`
+    - biggest drop `-16.34 MB`
+
+#### Dev live-walk trace
+
+- Held-`W` live-walk trace on `http://localhost:3024/` again moved feet position from `[-191.5, 1428, -191.5]` to `[-112, 1453, -191.5]`.
+- `mise run analyze-trace -- artifacts/trace-live-walk-dev-renderer-reuse-20260311.json --url-prefix=http://localhost:3024/` reported:
+  - top exclusive live-loop CPU:
+    - `valueNoise2D`: `1221.4 ms`
+    - `buildChunkMesh`: `470.8 ms`
+    - `generateChunk`: `291.7 ms`
+    - `getResidentChunk`: `206.5 ms`
+    - `syncMeshSourceResource`: `57.2 ms`
+    - `syncResources`: `52.8 ms`
+  - compared to the previous live trace:
+    - `syncResources()` exclusive CPU improved from `78.8 ms -> 52.8 ms`
+    - heap stayed in the same low, controlled range (`18.20 MB -> 19.32 MB` max)
+  - biggest live heap-rise window is now centered mainly on `buildChunkMesh()` plus generation rather than renderer churn:
+    - `buildChunkMesh`: `4.5 ms` exclusive inside the biggest rise window
+    - `valueNoise2D`: `3.4 ms`
+    - `generateChunk`: `1.3 ms`
+
+#### Residual
+
+- This renderer slice was worth keeping.
+- The next trace-driven target is detailed chunk meshing:
+  - it is now the clearest CPU and allocation hotspot that will worsen as world detail grows

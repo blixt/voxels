@@ -104,8 +104,11 @@ fn fs_far(input: VertexOutput) -> @location(0) vec4<f32> {
 interface GpuChunkResources {
   vertexBuffer: GPUBuffer;
   indexBuffer: GPUBuffer;
+  vertexCapacity: number;
+  indexCapacity: number;
   indexCount: number;
   triangleCount: number;
+  syncRevision: number;
 }
 
 export interface RenderMeshSource {
@@ -195,8 +198,14 @@ export class WebGpuVoxelRenderer {
   private readonly farFieldMaskBuffer: GPUBuffer;
   private readonly uniformBindGroup: GPUBindGroup;
   private readonly resources = new Map<object, GpuChunkResources>();
+  private readonly uniformData = new Float32Array(36);
+  private readonly farFieldMaskData = new ArrayBuffer(FAR_FIELD_MASK_BUFFER_BYTES);
+  private readonly farFieldMaskMeta = new Int32Array(this.farFieldMaskData, 0, 8);
+  private readonly farFieldMaskWords = new Uint32Array(this.farFieldMaskData, 32, FAR_FIELD_MASK_WORD_COUNT);
   private depthTexture: GPUTexture | null = null;
   private depthView: GPUTextureView | null = null;
+  private resourceSyncRevision = 0;
+  private lastFarFieldMask: FarFieldRenderMask | null | undefined = undefined;
   readonly format: GPUTextureFormat;
   readonly timestampQuerySupported: boolean;
 
@@ -573,25 +582,40 @@ export class WebGpuVoxelRenderer {
       viewProjection = cameraMatrices.viewProjection;
       cameraPosition = cameraMatrices.eye;
     }
-    const uniformData = new Float32Array(36);
+    const uniformData = this.uniformData;
     uniformData.set(viewProjection, 0);
-    uniformData.set([...LIGHT_DIRECTION, 0], 16);
-    uniformData.set([...LIGHTING_TERMS, 0], 20);
-    uniformData.set([cameraPosition[0], cameraPosition[1], cameraPosition[2], 0], 24);
-    uniformData.set([
-      FOG_COLOR_RGBA[0] / 255,
-      FOG_COLOR_RGBA[1] / 255,
-      FOG_COLOR_RGBA[2] / 255,
-      FOG_COLOR_RGBA[3] / 255,
-    ], 28);
-    uniformData.set([FOG_START_DISTANCE, FOG_END_DISTANCE, 0, 0], 32);
+    uniformData[16] = LIGHT_DIRECTION[0];
+    uniformData[17] = LIGHT_DIRECTION[1];
+    uniformData[18] = LIGHT_DIRECTION[2];
+    uniformData[19] = 0;
+    uniformData[20] = LIGHTING_TERMS[0];
+    uniformData[21] = LIGHTING_TERMS[1];
+    uniformData[22] = LIGHTING_TERMS[2];
+    uniformData[23] = 0;
+    uniformData[24] = cameraPosition[0];
+    uniformData[25] = cameraPosition[1];
+    uniformData[26] = cameraPosition[2];
+    uniformData[27] = 0;
+    uniformData[28] = FOG_COLOR_RGBA[0] / 255;
+    uniformData[29] = FOG_COLOR_RGBA[1] / 255;
+    uniformData[30] = FOG_COLOR_RGBA[2] / 255;
+    uniformData[31] = FOG_COLOR_RGBA[3] / 255;
+    uniformData[32] = FOG_START_DISTANCE;
+    uniformData[33] = FOG_END_DISTANCE;
+    uniformData[34] = 0;
+    uniformData[35] = 0;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
 
   private writeFarFieldMask(mask: FarFieldRenderMask | null): void {
-    const buffer = new ArrayBuffer(FAR_FIELD_MASK_BUFFER_BYTES);
-    const meta = new Int32Array(buffer, 0, 8);
-    const words = new Uint32Array(buffer, 32, FAR_FIELD_MASK_WORD_COUNT);
+    if (mask === this.lastFarFieldMask) {
+      return;
+    }
+    this.lastFarFieldMask = mask;
+    const meta = this.farFieldMaskMeta;
+    const words = this.farFieldMaskWords;
+    meta.fill(0);
+    words.fill(0);
     if (mask) {
       meta[0] = mask.originChunkX;
       meta[1] = mask.originChunkZ;
@@ -600,7 +624,7 @@ export class WebGpuVoxelRenderer {
       meta[4] = 1;
       words.set(mask.words.subarray(0, FAR_FIELD_MASK_WORD_COUNT));
     }
-    this.device.queue.writeBuffer(this.farFieldMaskBuffer, 0, buffer);
+    this.device.queue.writeBuffer(this.farFieldMaskBuffer, 0, this.farFieldMaskData);
   }
 
   private syncResources(world: ResidentChunkWorld, extraMeshes: readonly RenderMeshSource[]): {
@@ -608,107 +632,146 @@ export class WebGpuVoxelRenderer {
     uploadChunks: number;
     uploadBytes: number;
   } {
+    this.resourceSyncRevision += 1;
+    const syncRevision = this.resourceSyncRevision;
     let uploadMs = 0;
     let uploadChunks = 0;
     let uploadBytes = 0;
-    const desiredResources = new Set<object>();
+
     for (const chunk of world.iterateResidentChunks()) {
-      desiredResources.add(chunk);
+      const upload = this.syncMeshSourceResource(chunk, chunk.mesh, syncRevision);
+      uploadMs += upload.elapsedMs;
+      uploadChunks += upload.updated ? 1 : 0;
+      uploadBytes += upload.totalBytes;
     }
     for (const extraMesh of extraMeshes) {
-      desiredResources.add(extraMesh);
+      const upload = this.syncMeshSourceResource(extraMesh, extraMesh.mesh, syncRevision);
+      uploadMs += upload.elapsedMs;
+      uploadChunks += upload.updated ? 1 : 0;
+      uploadBytes += upload.totalBytes;
     }
 
     for (const [resourceKey, resource] of this.resources.entries()) {
-      if (!desiredResources.has(resourceKey)) {
-        resource.vertexBuffer.destroy();
-        resource.indexBuffer.destroy();
-        this.resources.delete(resourceKey);
-      }
-    }
-
-    for (const chunk of world.iterateResidentChunks()) {
-      const mesh = chunk.mesh;
-      if (!mesh || mesh.indexCount === 0) {
-        const existing = this.resources.get(chunk);
-        if (existing) {
-          existing.vertexBuffer.destroy();
-          existing.indexBuffer.destroy();
-          this.resources.delete(chunk);
-        }
+      if (resource.syncRevision === syncRevision) {
         continue;
       }
-      if (!chunk.gpuDirty) {
-        continue;
-      }
-      const upload = this.uploadChunkMesh(chunk, mesh);
-      uploadMs += upload.elapsedMs;
-      uploadChunks += 1;
-      uploadBytes += upload.totalBytes;
-      chunk.gpuDirty = false;
-    }
-    for (const extraMesh of extraMeshes) {
-      const mesh = extraMesh.mesh;
-      if (!mesh || mesh.indexCount === 0) {
-        const existing = this.resources.get(extraMesh);
-        if (existing) {
-          existing.vertexBuffer.destroy();
-          existing.indexBuffer.destroy();
-          this.resources.delete(extraMesh);
-        }
-        continue;
-      }
-      if (!extraMesh.gpuDirty) {
-        continue;
-      }
-      const upload = this.uploadChunkMesh(extraMesh, mesh);
-      uploadMs += upload.elapsedMs;
-      uploadChunks += 1;
-      uploadBytes += upload.totalBytes;
-      extraMesh.gpuDirty = false;
+      this.destroyResource(resourceKey, resource);
     }
     return { uploadMs, uploadChunks, uploadBytes };
   }
 
-  private uploadChunkMesh(chunk: RenderMeshSource, mesh: ChunkMeshData): {
+  private syncMeshSourceResource(
+    source: RenderMeshSource,
+    mesh: ChunkMeshData | null,
+    syncRevision: number,
+  ): {
+    elapsedMs: number;
+    totalBytes: number;
+    updated: boolean;
+  } {
+    const existing = this.resources.get(source);
+    if (!mesh || mesh.indexCount === 0) {
+      if (existing) {
+        this.destroyResource(source, existing);
+      }
+      return { elapsedMs: 0, totalBytes: 0, updated: false };
+    }
+
+    if (!existing && !source.gpuDirty) {
+      source.gpuDirty = true;
+    }
+
+    if (!source.gpuDirty) {
+      existing!.syncRevision = syncRevision;
+      return { elapsedMs: 0, totalBytes: 0, updated: false };
+    }
+
+    const upload = this.uploadChunkMesh(source, mesh, existing, syncRevision);
+    source.gpuDirty = false;
+    return {
+      elapsedMs: upload.elapsedMs,
+      totalBytes: upload.totalBytes,
+      updated: true,
+    };
+  }
+
+  private uploadChunkMesh(
+    chunk: RenderMeshSource,
+    mesh: ChunkMeshData,
+    previous: GpuChunkResources | undefined,
+    syncRevision: number,
+  ): {
     elapsedMs: number;
     totalBytes: number;
   } {
     const startedAt = performance.now();
-    const previous = this.resources.get(chunk);
-    previous?.vertexBuffer.destroy();
-    previous?.indexBuffer.destroy();
-    const vertexBuffer = this.device.createBuffer({
-      size: mesh.vertexData.byteLength,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true,
-    });
-    new Uint8Array(vertexBuffer.getMappedRange()).set(new Uint8Array(mesh.vertexData));
-    vertexBuffer.unmap();
+    const vertexCapacity = nextBufferCapacity(mesh.vertexData.byteLength, previous?.vertexCapacity ?? 0);
+    const indexCapacity = nextBufferCapacity(mesh.indexData.byteLength, previous?.indexCapacity ?? 0);
+    const vertexBuffer = !previous || previous.vertexCapacity < mesh.vertexData.byteLength
+      ? this.device.createBuffer({
+          size: vertexCapacity,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        })
+      : previous.vertexBuffer;
+    const indexBuffer = !previous || previous.indexCapacity < mesh.indexData.byteLength
+      ? this.device.createBuffer({
+          size: indexCapacity,
+          usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        })
+      : previous.indexBuffer;
 
-    const indexBuffer = this.device.createBuffer({
-      size: mesh.indexData.byteLength,
-      usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true,
-    });
-    new Uint8Array(indexBuffer.getMappedRange()).set(new Uint8Array(mesh.indexData.buffer));
-    indexBuffer.unmap();
+    if (vertexBuffer !== previous?.vertexBuffer) {
+      previous?.vertexBuffer.destroy();
+    }
+    if (indexBuffer !== previous?.indexBuffer) {
+      previous?.indexBuffer.destroy();
+    }
 
+    this.device.queue.writeBuffer(vertexBuffer, 0, mesh.vertexData);
+    const indexBytes = new Uint8Array(mesh.indexData.buffer, mesh.indexData.byteOffset, mesh.indexData.byteLength);
+    this.device.queue.writeBuffer(
+      indexBuffer,
+      0,
+      indexBytes as unknown as GPUAllowSharedBufferSource,
+    );
     this.resources.set(chunk, {
       vertexBuffer,
       indexBuffer,
+      vertexCapacity,
+      indexCapacity,
       indexCount: mesh.indexCount,
       triangleCount: mesh.triangleCount,
+      syncRevision,
     });
     return {
       elapsedMs: performance.now() - startedAt,
       totalBytes: mesh.vertexData.byteLength + mesh.indexData.byteLength,
     };
   }
+
+  private destroyResource(resourceKey: object, resource: GpuChunkResources): void {
+    resource.vertexBuffer.destroy();
+    resource.indexBuffer.destroy();
+    this.resources.delete(resourceKey);
+  }
 }
 
 function alignTo(value: number, alignment: number): number {
   return Math.ceil(value / alignment) * alignment;
+}
+
+function nextBufferCapacity(requiredBytes: number, currentCapacity: number): number {
+  const minCapacity = Math.max(256, alignTo(requiredBytes, 256));
+  if (currentCapacity >= minCapacity) {
+    return currentCapacity;
+  }
+  let nextCapacity = currentCapacity > 0 ? currentCapacity : 4096;
+  while (nextCapacity < minCapacity) {
+    nextCapacity = nextCapacity < 65536
+      ? nextCapacity * 2
+      : alignTo(Math.ceil(nextCapacity * 1.5), 4096);
+  }
+  return nextCapacity;
 }
 
 function isCameraWithViewProjection(camera: RenderCamera): camera is { viewProjection: Float32Array } {
