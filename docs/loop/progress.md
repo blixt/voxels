@@ -189,5 +189,20 @@
 - Verified that the cache removes the remaining shrink/refresh generation cost without changing resident-set counts:
   - local `shrink-r3-to-r2` stream `14.0 ms -> 0.2 ms`
   - local `shrink-r3-to-r2` `chunkGenerationMs 13.7 -> 0.0`
-  - Chrome 146 same-anchor refresh now reports `58` cached empty hits in `0.2 ms`
-  - Chrome 146 shrink `r3 -> r2` now reports `26` cached empty hits with `0 ms` chunk generation
+  - direct local same-anchor refresh now reports `58` cached empty hits with `0 ms` chunk generation
+  - direct local widen `r2 -> r3` now reports `26` cached empty hits while still generating the expected `115` solid chunks
+- Ran a broader post-cache search before the next game slice:
+  - measured and rejected face-aware neighbor invalidation for the current spawn because it would still touch the same `179` widen neighbors and `64` shrink neighbors
+  - tested chunk-size and radius scaling directly instead of assuming the draw-distance complaint was a small constant issue
+- Turned the user’s first hands-on feedback into hard numbers:
+  - default chunk size `32` with radius `3` only keeps about `96 cm` of horizontal residency
+  - radius `6` still only reaches about `192 cm`, while warmed local costs rise to about `682 ms` stream and `493 ms` mesh
+  - the current camera spawns only `8 cm` above the sampled surface, which explains why voxels read far larger than intended
+  - larger chunks are not a cheap draw-distance fix with the current generator/mesher stack:
+    - `64^3` chunks at radius `3` measured about `982 ms` stream and `875 ms` mesh
+    - `128^3` chunks at radius `3` measured about `5925 ms` stream and `6509 ms` mesh
+- Re-prioritized the plan around the newly grounded problems:
+  - add a real player body with collision and a sensible eye height
+  - tame the early terrain envelope
+  - build a dedicated stream-hitch benchmark path
+  - treat long-distance visibility as an architectural problem rather than a radius tweak

@@ -88,3 +88,26 @@ test("meshing skips hidden faces between adjacent chunks", () => {
 
   expect(leftMesh.triangleCount + rightMesh.triangleCount).toBe(20);
 });
+
+test("meshing skips a fully occluded solid chunk", () => {
+  const world = new VoxelWorld({ width: 96, height: 96, depth: 96 }, 32, [0, 0xff8899aa]);
+  world.fillBox(0, 0, 0, 96, 96, 96, 1);
+
+  const mesh = buildChunkMesh(world, 1, 1, 1);
+
+  expect(mesh.vertexCount).toBe(0);
+  expect(mesh.indexCount).toBe(0);
+  expect(mesh.triangleCount).toBe(0);
+});
+
+test("meshing does not skip a fully solid chunk when a neighbor face has a hole", () => {
+  const world = new VoxelWorld({ width: 96, height: 96, depth: 96 }, 32, [0, 0xff8899aa]);
+  world.fillBox(0, 0, 0, 96, 96, 96, 1);
+  world.setVoxel(31, 32, 32, 0);
+
+  const mesh = buildChunkMesh(world, 1, 1, 1);
+
+  expect(mesh.triangleCount).toBe(2);
+  expect(mesh.bounds.min).toEqual([32, 32, 32]);
+  expect(mesh.bounds.max).toEqual([32, 33, 33]);
+});

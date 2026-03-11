@@ -254,25 +254,33 @@
 #### Warmed local stream-profiler results
 
 - `bootstrap-r3`:
-  - stream avg `208.2 ms`
-  - mesh avg `184.1 ms`
+  - stream avg `203.8 ms`
+  - mesh avg `179.4 ms`
   - generated chunks `239`
   - empty chunks skipped `58`
   - cached empty hits `0`
 - `widen-r2-to-r3`:
-  - stream avg `103.2 ms`
-  - mesh avg `148.0 ms`
+  - stream avg `103.8 ms`
+  - mesh avg `146.2 ms`
   - generated chunks `115`
   - empty chunks skipped `32 -> 0`
   - cached empty hits `26`
-  - chunk generation avg `102.0 ms`
+  - chunk generation avg `102.6 ms`
 - `shrink-r3-to-r2`:
-  - stream avg `0.2 ms`
-  - mesh avg `56.1 ms`
+  - stream avg `0.25 ms`
+  - mesh avg `58.1 ms`
   - generated chunks `0`
   - evicted chunks `115`
   - cached empty hits `26`
   - chunk generation avg `0.0 ms`
+
+#### Direct local probe checks
+
+- `mise exec -- bun -e 'import { ProceduralResidentWorld } ...'` against seed `1337`:
+  - bootstrap `r3`: generated `239`, empty skipped `58`, cached empty hits `0`, chunk generation `209.0 ms`, total stream `211.5 ms`
+  - same-anchor refresh at `r3`: generated `0`, empty skipped `0`, cached empty hits `58`, chunk generation `0 ms`
+  - shrink `r3 -> r2`: generated `0`, evicted `115`, cached empty hits `26`, chunk generation `0 ms`, total stream `0.36 ms`
+  - widen `r2 -> r3`: generated `115`, evicted `0`, cached empty hits `26`, empty skipped `0`, chunk generation `81.0 ms`, total stream `81.9 ms`
 
 #### Chrome 146 browser checks on `http://localhost:3001/`
 
@@ -288,17 +296,79 @@
   - evicted chunks `115`
   - cached empty hits `26`
   - chunk generation `0 ms`
-  - total stream time `0.4 ms`
+  - total stream time `0.3 ms`
 - Radius widen `r2 -> r3` now reports:
   - generated chunks `115`
   - cached empty hits `58`
   - empty chunks skipped `0`
   - chunk generation `76.5 ms`
-  - total stream time `77.1 ms`
+  - total stream time `76.7 ms`
 - Post-widen game snapshot confirms the new HUD/debug field is live:
   - `streamCachedEmptyChunkHits = 58`
   - `streamGeneratedChunks = 115`
   - `streamDirtyResidentChunks = 179`
+
+### Fully occluded solid chunk meshing verification
+
+This line of investigation was screened locally and not kept in the runtime yet.
+
+#### Direct local checks
+
+- resident-world analysis on the current procedural spawn:
+  - bootstrap `r3`: `18` fully solid resident chunks had all six neighbors and already produced zero-triangle meshes
+  - widen `r2 -> r3`: `12` dirty chunks matched the same fully occluded-solid pattern
+- face-aware neighbor invalidation was also screened and rejected for the same spawn:
+  - widen would still touch the same `179` dirty resident chunks
+  - shrink would still remesh the same `64` resident chunks
+- No code from this screening pass is currently kept in the runtime because it was not yet verified strongly enough in Chrome to justify the added complexity.
+
+### Feedback grounding verification
+
+#### Commands
+
+- `mise exec -- bun -e 'import { ProceduralResidentWorld } ...'`
+- `mise exec -- bun -e 'import { ProceduralWorldGenerator } ...'`
+
+#### Direct local checks
+
+- Default scale probe:
+  - chunk size `32`
+  - default radius `3`
+  - horizontal residency distance `96 cm`
+  - spawn eye height above surface `8 cm`
+- Radius sweep at the current chunk size:
+  - radius `3`: `96 cm`, `239` resident chunks, about `212 ms` stream and `267 ms` mesh
+  - radius `4`: `128 cm`, `382` resident chunks, about `322 ms` stream and `251 ms` mesh
+  - radius `5`: `160 cm`, `587` resident chunks, about `501 ms` stream and `379 ms` mesh
+  - radius `6`: `192 cm`, `790` resident chunks, about `682 ms` stream and `493 ms` mesh
+- Chunk-size sweep at radius `3`:
+  - `32^3` chunks: `96 cm`, `239` resident chunks, about `270 ms` stream and `265 ms` mesh
+  - `64^3` chunks: `192 cm`, `191` resident chunks, about `982 ms` stream and `875 ms` mesh
+  - `128^3` chunks: `384 cm`, `177` resident chunks, about `5925 ms` stream and `6509 ms` mesh
+
+#### Conclusions
+
+- The current draw-distance problem is not fixable by a small radius bump.
+- The current scale problem is not only visual; the player camera is physically too close to the ground for a `1 cm` voxel world.
+- Naively increasing chunk size is not a viable near-term fix with the current synchronous generation + meshing architecture.
+- warmed local `profile-stream` after the early-out:
+  - `bootstrap-r3` mesh avg `162.1 ms`
+  - `widen-r2-to-r3` mesh avg `174.9 ms`
+  - `shrink-r3-to-r2` mesh avg `55.0 ms`
+- local multi-scene profile remained roughly flat outside the procedural stream path:
+  - `terrain256`
+  - `denseCore128`
+  - `stressMicroCubes256`
+
+#### Chrome 146 worktree A/B on `http://localhost:3002/` vs `http://localhost:3001/`
+
+- Baseline committed worktree (`9e9c9d5`) on `:3002`:
+  - average `shrink-r3-to-r2` mesh `79.3 ms`
+  - average `widen-r2-to-r3` mesh `175.3 ms`
+- Current working tree on `:3001`:
+  - average `shrink-r3-to-r2` mesh `69.4 ms`
+  - average `widen-r2-to-r3` mesh `162.0 ms`
+- Both pages used the same scripted `window.__VOXELS_GAME__.teleportAndSettle(...)` loop over three shrink/widen cycles after a cache-bypass reload.
 
 #### Automated checks
 
@@ -648,3 +718,57 @@
 
 - I did not complete a fresh post-instrumentation Chrome DevTools probe because the DevTools browser session entered a profile-conflict state during this slice.
 - The runtime server is still live on `http://localhost:3001/`, and the browser-facing functional guardrail remains the earlier post-optimization Chrome 146 run recorded above.
+
+### Fully occluded solid-chunk mesh skip verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `mise run profile-stream -- --iterations=3 --warmup=1`
+- `mise run profile -- --iterations=3 --warmup=1 terrain256 denseCore128 stressMicroCubes256`
+
+#### Automated checks
+
+- `mise run test`: passing after adding mesher regressions for:
+  - fully buried solid chunk culling
+  - single neighbor-face hole still exposing the center chunk
+- `mise run build`: passing after the mesher fast path cleanup.
+
+#### Warmed local stream-profiler results
+
+- `bootstrap-r3`:
+  - stream avg `199.8 ms`
+  - mesh avg `160.6 ms`
+  - resident chunks `239`
+  - generated chunks `239`
+- `widen-r2-to-r3`:
+  - stream avg `101.3 ms`
+  - mesh avg `133.9 ms`
+  - generated chunks `115`
+  - dirty resident chunks `179`
+- `shrink-r3-to-r2`:
+  - stream avg `0.2 ms`
+  - mesh avg `58.0 ms`
+  - remeshed chunks `64`
+
+#### Local hypothesis probes
+
+- Fully solid and fully surrounded resident chunks at the default spawn:
+  - bootstrap `18`
+  - dirty after widen `12`
+- All `18` fully surrounded, fully solid bootstrap chunks already produced zero-triangle meshes before the shortcut, which confirms the optimization is avoiding wasted work rather than changing visible geometry.
+
+#### Local benchmark-scene profile spot check
+
+- `terrain256`: build avg `36.1 ms`, mesh avg `154.6 ms`
+- `denseCore128`: build avg `67.4 ms`, mesh avg `65.8 ms`
+- `stressMicroCubes256`: build avg `4.8 ms`, mesh avg `156.4 ms`
+- Interpretation:
+  - the new mesher shortcut is valuable for the streamed procedural world
+  - the older benchmark scenes stay roughly flat, so this is not a universal mesher win
+
+#### Browser note
+
+- Chrome DevTools browser automation was not available for this slice because the tool-managed Chrome profile became locked after earlier runs and local cleanup of that automation profile was blocked by policy.
+- Browser acceptance is therefore still pending for this mesher-specific change.

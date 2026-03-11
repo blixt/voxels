@@ -51,8 +51,7 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
   const originY = cy * chunkSize;
   const originZ = cz * chunkSize;
   const chunk = world.getResidentChunk(cx, cy, cz);
-  const solidBounds = world.getChunkSolidBounds(cx, cy, cz);
-  if (!chunk || !solidBounds) {
+  if (!chunk) {
     return {
       vertexData: new ArrayBuffer(0),
       vertexCount: 0,
@@ -67,6 +66,35 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
   }
 
   const chunkArea = chunkSize * chunkSize;
+  const chunkVolume = chunkSize * chunkArea;
+  if (chunk.solidCount === chunkVolume && isChunkFullyOccluded(world, cx, cy, cz, chunkSize, chunkArea)) {
+    return {
+      vertexData: new ArrayBuffer(0),
+      vertexCount: 0,
+      indexData: new Uint32Array(0),
+      indexCount: 0,
+      triangleCount: 0,
+      bounds: {
+        min: [originX, originY, originZ],
+        max: [originX + chunkSize, originY + chunkSize, originZ + chunkSize],
+      },
+    };
+  }
+  const solidBounds = world.getChunkSolidBounds(cx, cy, cz);
+  if (!solidBounds) {
+    return {
+      vertexData: new ArrayBuffer(0),
+      vertexCount: 0,
+      indexData: new Uint32Array(0),
+      indexCount: 0,
+      triangleCount: 0,
+      bounds: {
+        min: [originX, originY, originZ],
+        max: [originX + chunkSize, originY + chunkSize, originZ + chunkSize],
+      },
+    };
+  }
+
   const chunkData = chunk.data;
   const quads: number[] = [];
 
@@ -267,6 +295,84 @@ function sampleChunkVoxel(
   z: number,
 ): number {
   return chunkData[x + y * chunkSize + z * chunkArea];
+}
+
+function isChunkFullyOccluded(
+  world: ResidentChunkWorld,
+  cx: number,
+  cy: number,
+  cz: number,
+  chunkSize: number,
+  chunkArea: number,
+): boolean {
+  return isNeighborFaceSolid(world, cx - 1, cy, cz, chunkSize, chunkArea, "x", chunkSize - 1)
+    && isNeighborFaceSolid(world, cx + 1, cy, cz, chunkSize, chunkArea, "x", 0)
+    && isNeighborFaceSolid(world, cx, cy - 1, cz, chunkSize, chunkArea, "y", chunkSize - 1)
+    && isNeighborFaceSolid(world, cx, cy + 1, cz, chunkSize, chunkArea, "y", 0)
+    && isNeighborFaceSolid(world, cx, cy, cz - 1, chunkSize, chunkArea, "z", chunkSize - 1)
+    && isNeighborFaceSolid(world, cx, cy, cz + 1, chunkSize, chunkArea, "z", 0);
+}
+
+function isNeighborFaceSolid(
+  world: ResidentChunkWorld,
+  cx: number,
+  cy: number,
+  cz: number,
+  chunkSize: number,
+  chunkArea: number,
+  axis: "x" | "y" | "z",
+  faceIndex: number,
+): boolean {
+  const chunk = world.getResidentChunk(cx, cy, cz);
+  if (!chunk) {
+    return false;
+  }
+  const bounds = world.getChunkSolidBounds(cx, cy, cz);
+  if (!bounds) {
+    return false;
+  }
+  if (axis === "x" && (bounds.min[0] > faceIndex || bounds.max[0] <= faceIndex)) {
+    return false;
+  }
+  if (axis === "y" && (bounds.min[1] > faceIndex || bounds.max[1] <= faceIndex)) {
+    return false;
+  }
+  if (axis === "z" && (bounds.min[2] > faceIndex || bounds.max[2] <= faceIndex)) {
+    return false;
+  }
+  const data = chunk.data;
+  if (axis === "x") {
+    for (let z = 0; z < chunkSize; z += 1) {
+      const planeOffset = z * chunkArea;
+      for (let y = 0; y < chunkSize; y += 1) {
+        if (data[faceIndex + y * chunkSize + planeOffset] === 0) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+  if (axis === "y") {
+    const planeOffset = faceIndex * chunkSize;
+    for (let z = 0; z < chunkSize; z += 1) {
+      const rowOffset = z * chunkArea + planeOffset;
+      for (let x = 0; x < chunkSize; x += 1) {
+        if (data[x + rowOffset] === 0) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+  for (let y = 0; y < chunkSize; y += 1) {
+    const rowOffset = y * chunkSize + faceIndex * chunkArea;
+    for (let x = 0; x < chunkSize; x += 1) {
+      if (data[x + rowOffset] === 0) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 function writeVertex(

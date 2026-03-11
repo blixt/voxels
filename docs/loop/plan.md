@@ -16,6 +16,29 @@ The game direction is intentionally demanding:
 - architecture that can grow into persistence, remote authority, and multiplayer
 - inventory-driven gather/build loop, starting with color-coded voxels
 
+## Feedback-driven priorities
+
+The first hands-on game pass exposed five immediate problems that now outrank micro-optimizing the current renderer path:
+
+- the player has no collision
+- the camera/body scale does not read as a `1 cm^3` voxel world
+- terrain envelopes feel too extreme for an early exploration baseline
+- the current resident radius is physically tiny at the intended voxel scale
+- synchronous stream-in/remesh work is still hitching visibly during movement
+
+The current numbers explain the feedback:
+
+- default chunk size `32` with radius `3` only keeps about `96 cm` of horizontal residency
+- the camera currently spawns only `8 cm` above the sampled surface
+- increasing radius or chunk size alone will not solve long-distance visibility cleanly with the current synchronous streaming path
+
+So the next slices need to separate:
+
+- immediate scale/collision fixes that make the current world readable
+- terrain-envelope tuning
+- hitch reduction through streaming architecture
+- true long-distance visibility, which will need something stronger than just changing constants
+
 ## Current principles
 
 - Prefer broad research and broad error-case enumeration before locking onto one fix or design.
@@ -113,10 +136,15 @@ Status:
   - resident-world updates remember empty chunk coordinates after the first probe
   - `profile-stream` and the game HUD now expose cached-empty hits separately from first-time empty skips
   - shrink and forced refresh probes now avoid repeated empty-chunk generation entirely
+- occluded-solid chunk skipping is now landing:
+  - the mesher now has a narrow fast path for fully solid chunks whose six adjacent face planes are fully occupied by resident neighbors
+  - new mesher regression cases cover both the fully buried chunk and the "one neighbor-face hole" escape hatch
+  - the win is specific to the streamed procedural world; the older benchmark scenes do not show the same buried-solid-chunk pattern
 - remaining work is to choose between:
-  - reducing real boundary remesh cost
   - moving to incremental or worker streaming
   - reducing solid-chunk generation cost on widen/bootstrap
+  - reducing real boundary remesh cost in cases other than the already-rejected face-aware invalidation path
+  - hardening browser-side verification so acceptance does not depend on the shared DevTools MCP profile
 
 ### Slice 5: interaction loop
 
@@ -151,9 +179,21 @@ Status:
 ## Immediate implementation tasks
 
 - Keep machine-readable generation and residency probes aligned with the game/runtime code.
-- Use the new phase and remesh metrics to decide whether the next narrow optimization is remesh cost, empty-chunk rechecks, or moving residency/meshing off the synchronous path.
+- Add a proper player body:
+  - explicit eye height
+  - grounded movement
+  - gravity
+  - voxel collision
+- Re-tune the early terrain envelope so the first generated world reads as traversable terrain instead of a stress case.
+- Add a dedicated stream-hitch benchmark path so movement-triggered chunk work is measurable without relying on ad hoc game probes.
+- Use the current phase metrics to move residency/meshing off the synchronous movement path instead of chasing only narrow mesher micro-optimizations.
 - Keep the procedural stream profiler and browser probes aligned so local and Chrome decisions stay comparable.
+- When a micro-optimization is noisy, compare the working tree against a clean committed worktree on a separate port before keeping it.
 - If the next change targets meshing, build or adapt cases that focus on boundary remesh cost rather than only initial chunk creation.
 - Add deterministic verification cases for resident-set stability, seam consistency, and stream churn.
 - Keep the game debug API growing alongside `/bench` so browser automation does not depend on visual inspection alone.
+- Add a browser-capable verification path that still works when the shared DevTools MCP profile is stale or unavailable.
+- Treat long-distance visibility as an architectural track:
+  - not just a radius constant
+  - likely involving asynchronous streaming, coarser far representations, or both
 - Log each slice in `progress.md` and `verification.md`.
