@@ -2653,3 +2653,50 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - It does not yet solve:
   - richer multi-voxel trunk branching
   - true water-edge root systems for marsh/mangrove-style vegetation
+
+## 2026-03-11 grove/orchard landmark variety expansion
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-generator.test.ts`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing
+- Focused tests:
+  - `20 pass`
+  - `0 fail`
+
+#### Fixed-seed probes
+
+- Broad new-landmark presence scan:
+  - `redwood = 414`
+  - `blossom_tree = 465`
+  - `fruit_tree = 354`
+  - `dead_tree = 155`
+  - `berry_bush = 413`
+- Tallest sampled redwood:
+  - `204` voxels (`20.4 m`)
+- Best tall-forest patch:
+  - ratio `0.3846`
+  - biome `verdant`
+- Best orchard/blossom patch:
+  - ratio `0.1775`
+  - biome `verdant`
+
+#### Added verification coverage
+
+- New landmark families now have broad-scan coverage through the landmark roster test
+- Redwoods now have an explicit height regression
+- Dense forest and orchard/blossom patches now have fixed-seed density regressions instead of relying on manual walking
+
+#### Residual
+
+- This slice is worth keeping.
+- It adds:
+  - far-visible redwood silhouettes
+  - denser forest pockets
+  - orchard/blossom patches
+  - stronger desolate-tree regions
+- It does not yet add:
+  - multi-chunk authored structure clusters
+  - rivers or local water systems driving vegetation belts

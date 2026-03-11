@@ -1019,3 +1019,40 @@
   - add verification seams before trusting visual judgment
 - Main lesson from this slice:
   - the weird-object bug was mostly in the parametric shape formulas, not in world streaming or placement boundaries
+
+### Grove/orchard landmark variety expansion
+
+- Used `docs/20260311-biomes.md` as the content source and `docs/20260311-biome-tech.md` as the implementation constraint:
+  - add variety through deterministic field-driven subregions
+  - avoid exploding the public biome enum for every local vegetation style
+  - keep the current one-feature-slot generator architecture viable until a larger structure pass is justified
+- Added a few high-signal landmark families instead of many tiny low-value variants:
+  - `redwood`
+  - `blossom_tree`
+  - `fruit_tree`
+  - `dead_tree`
+  - `berry_bush`
+- Also added three new slow-placement fields:
+  - `grove`
+  - `orchard`
+  - `desolation`
+- Those fields now drive local landmark rosters inside the existing biomes:
+  - verdant can become either dense grove or orchard/blossom country
+  - highland can grow true redwood/tall-fir groves
+  - tundra can form much denser taiga pockets
+  - steppe can form orchard/meadow or desolate dead-tree patches
+  - marsh/ember/bloom also get stronger local landmark personalities in the higher-signal pockets
+- The important architectural choice here was to treat these as placement-region overlays, not brand new top-level biome ids:
+  - that fits the "biome as derived classification over continuous fields" rule from the biome-tech note
+  - it also keeps border behavior cleaner than adding many more hard biome transitions
+- I did not keep the first grove/orchard tuning as-is:
+  - the first fixed-seed probe only found about `18.3%` tall-tree coverage in the best forest patch
+  - orchard patches were also slightly too weak at about `14.8%`
+  - I strengthened the dense rosters and lowered the local activation thresholds only after measuring those misses
+- The kept version now produces the first genuinely far-visible landmark silhouettes and patch-scale variation:
+  - redwoods up to about `20.4 m`
+  - dense forest patch ratio about `38.5%`
+  - orchard/blossom patch ratio about `17.8%`
+- Main lesson from this slice:
+  - "more biomes" was not the immediate answer
+  - patch-scale placement fields plus a few stronger landmark families gave a much better variety-per-complexity tradeoff

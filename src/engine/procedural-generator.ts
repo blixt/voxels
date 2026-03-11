@@ -13,6 +13,11 @@ export type LandmarkId =
   | "oak"
   | "canopy_tree"
   | "birch"
+  | "blossom_tree"
+  | "fruit_tree"
+  | "redwood"
+  | "dead_tree"
+  | "berry_bush"
   | "boulder"
   | "standing_stone"
   | "shrub"
@@ -109,6 +114,9 @@ interface ColumnFieldSample {
   channel: number;
   dune: number;
   mesa: number;
+  grove: number;
+  orchard: number;
+  desolation: number;
   strata: number;
   surfacePatch: number;
   surfaceGrain: number;
@@ -156,6 +164,7 @@ interface MutableColumnState {
   featureDeltaZ: number;
   featureMaterialPrimary: number;
   featureMaterialSecondary: number;
+  featureMaterialAccent: number;
 }
 
 export interface ProceduralColumnSample {
@@ -220,6 +229,7 @@ interface ChunkGenerationScratch {
   featureDeltaZ: Int16Array;
   featureMaterialPrimary: Uint16Array;
   featureMaterialSecondary: Uint16Array;
+  featureMaterialAccent: Uint16Array;
 }
 
 const CONTINENT_SCALE = 1 / 5200;
@@ -236,6 +246,9 @@ const MAGIC_SCALE = 1 / 5600;
 const CHANNEL_SCALE = 1 / 1200;
 const DUNE_SCALE = 1 / 320;
 const MESA_SCALE = 1 / 900;
+const GROVE_SCALE = 1 / 2100;
+const ORCHARD_SCALE = 1 / 1700;
+const DESOLATION_SCALE = 1 / 2400;
 const STRATA_SCALE = 1 / 54;
 const SURFACE_PATCH_SCALE = 1 / 48;
 const SURFACE_GRAIN_SCALE = 1 / 14;
@@ -258,6 +271,8 @@ const FEATURE_BUSH = 11;
 const FEATURE_CACTUS = 12;
 const FEATURE_REEDS = 13;
 const FEATURE_CRYSTAL = 14;
+const FEATURE_REDWOOD = 15;
+const FEATURE_DEAD_TREE = 16;
 const CHUNK_GENERATION_SCRATCH_POOL_LIMIT = 4;
 
 const BASE_BIOMES: readonly BaseBiomeProfile[] = [
@@ -294,6 +309,11 @@ const LANDMARKS: Record<LandmarkId, LandmarkProfile> = {
   oak: createLandmark("oak", 176, 11, 0.34, 1.0, 0),
   canopy_tree: createLandmark("canopy_tree", 224, 16, 0.20, 1.2, 2),
   birch: createLandmark("birch", 164, 9, 0.30, 1.0, 1),
+  blossom_tree: createLandmark("blossom_tree", 168, 11, 0.24, 1.0, 7),
+  fruit_tree: createLandmark("fruit_tree", 160, 10, 0.20, 1.0, 8),
+  redwood: createLandmark("redwood", 272, 20, 0.18, 1.0, 0),
+  dead_tree: createLandmark("dead_tree", 172, 8, 0.20, 1.0, 0),
+  berry_bush: createLandmark("berry_bush", 88, 5, 0.42, 1.0, 5),
   boulder: createLandmark("boulder", 120, 5, 0.34, 1.0, 0),
   standing_stone: createLandmark("standing_stone", 160, 5, 0.24, 1.0, 0),
   shrub: createLandmark("shrub", 92, 4, 0.42, 1.0, 0),
@@ -385,6 +405,82 @@ const SPECIAL_BIOME_LANDMARKS: Record<SpecialBiomeId, readonly LandmarkProfile[]
   ],
 };
 
+const VERDANT_GROVE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("redwood", { chance: 0.34, scale: 1.08, cellSize: 196, radius: 20 }),
+  landmarkPlacement("canopy_tree", { chance: 0.82, scale: 1.34, cellSize: 92, radius: 18 }),
+  landmarkPlacement("oak", { chance: 0.74, scale: 1.20, cellSize: 84, radius: 12 }),
+  landmarkPlacement("berry_bush", { chance: 0.64, scale: 1.10, cellSize: 68, radius: 5 }),
+  landmarkPlacement("flower_patch", { chance: 0.44, scale: 1.12, variant: 1, cellSize: 72, radius: 5 }),
+];
+
+const VERDANT_ORCHARD_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("blossom_tree", { chance: 0.48, scale: 1.12, cellSize: 108, radius: 12 }),
+  landmarkPlacement("fruit_tree", { chance: 0.44, scale: 1.10, cellSize: 104, radius: 11 }),
+  landmarkPlacement("berry_bush", { chance: 0.64, scale: 1.12, cellSize: 72, radius: 5 }),
+  landmarkPlacement("flower_patch", { chance: 0.56, scale: 1.18, variant: 4, cellSize: 68, radius: 5 }),
+  landmarkPlacement("shrub", { chance: 0.34, scale: 1.06, cellSize: 84, radius: 4 }),
+];
+
+const STEPPE_ORCHARD_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("fruit_tree", { chance: 0.40, scale: 1.02, cellSize: 112, radius: 11 }),
+  landmarkPlacement("blossom_tree", { chance: 0.34, scale: 1.00, cellSize: 116, radius: 11 }),
+  landmarkPlacement("acacia", { chance: 0.24, scale: 1.06, cellSize: 144, radius: 12 }),
+  landmarkPlacement("flower_patch", { chance: 0.54, scale: 1.08, variant: 2, cellSize: 72, radius: 5 }),
+  landmarkPlacement("berry_bush", { chance: 0.44, scale: 1.04, cellSize: 80, radius: 5 }),
+];
+
+const STEPPE_DESOLATE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("dead_tree", { chance: 0.34, scale: 1.18, cellSize: 132, radius: 8 }),
+  landmarkPlacement("dead_snag", { chance: 0.28, scale: 1.14, cellSize: 140, radius: 4 }),
+  landmarkPlacement("standing_stone", { chance: 0.26, scale: 1.18 }),
+  landmarkPlacement("shrub", { chance: 0.18, scale: 0.94, variant: 2 }),
+  landmarkPlacement("boulder", { chance: 0.16, scale: 0.92 }),
+];
+
+const BADLANDS_DESOLATE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("dead_tree", { chance: 0.34, scale: 1.28, cellSize: 148, radius: 8 }),
+  landmarkPlacement("hoodoo", { chance: 0.28, scale: 1.18 }),
+  landmarkPlacement("standing_stone", { chance: 0.22, scale: 1.20 }),
+  landmarkPlacement("boulder", { chance: 0.20, scale: 0.98, variant: 1 }),
+];
+
+const HIGHLAND_REDWOOD_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("redwood", { chance: 0.38, scale: 1.16, cellSize: 184, radius: 22 }),
+  landmarkPlacement("tall_fir", { chance: 0.54, scale: 1.20, cellSize: 108, radius: 12 }),
+  landmarkPlacement("fir", { chance: 0.52, scale: 1.12, cellSize: 96, radius: 10 }),
+  landmarkPlacement("berry_bush", { chance: 0.28, scale: 1.00, cellSize: 84, radius: 5 }),
+  landmarkPlacement("boulder", { chance: 0.18, scale: 1.02 }),
+];
+
+const TUNDRA_TAIGA_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("tall_fir", { chance: 0.42, scale: 1.16, cellSize: 124, radius: 12 }),
+  landmarkPlacement("fir", { chance: 0.56, scale: 1.10, cellSize: 96, radius: 10 }),
+  landmarkPlacement("frost_shrub", { chance: 0.44, scale: 1.06, cellSize: 84, radius: 4 }),
+  landmarkPlacement("boulder", { chance: 0.18, scale: 1.00 }),
+];
+
+const MARSH_THICKET_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("mangrove", { chance: 0.36, scale: 1.18, cellSize: 160, radius: 15 }),
+  landmarkPlacement("cypress", { chance: 0.42, scale: 1.12, cellSize: 128, radius: 10 }),
+  landmarkPlacement("reed_cluster", { chance: 0.70, scale: 1.12, cellSize: 68, radius: 4 }),
+  landmarkPlacement("flower_patch", { chance: 0.18, scale: 0.96, variant: 3, cellSize: 84, radius: 5 }),
+];
+
+const EMBER_DEADLAND_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("dead_tree", { chance: 0.28, scale: 1.22, cellSize: 156, radius: 8 }),
+  landmarkPlacement("basalt_spire", { chance: 0.28, scale: 1.30 }),
+  landmarkPlacement("crystal_cluster", { chance: 0.26, scale: 1.12, variant: 3 }),
+  landmarkPlacement("boulder", { chance: 0.18, scale: 0.96, variant: 1 }),
+];
+
+const BLOOM_ORCHARD_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("mega_glowcap", { chance: 0.18, scale: 1.22 }),
+  landmarkPlacement("blossom_tree", { chance: 0.28, scale: 1.18, cellSize: 128, radius: 12 }),
+  landmarkPlacement("fruit_tree", { chance: 0.22, scale: 1.10, cellSize: 128, radius: 11 }),
+  landmarkPlacement("glowcap", { chance: 0.30, scale: 1.06 }),
+  landmarkPlacement("flower_patch", { chance: 0.34, scale: 1.12, variant: 4, cellSize: 72, radius: 5 }),
+];
+
 const chunkGenerationScratchPool: ChunkGenerationScratch[] = [];
 
 export function buildHexColorPalette(): number[] {
@@ -445,6 +541,9 @@ export class ProceduralWorldGenerator {
   private readonly channelSeed: number;
   private readonly duneSeed: number;
   private readonly mesaSeed: number;
+  private readonly groveSeed: number;
+  private readonly orchardSeed: number;
+  private readonly desolationSeed: number;
   private readonly strataSeed: number;
   private readonly surfacePatchSeed: number;
   private readonly surfaceGrainSeed: number;
@@ -477,6 +576,9 @@ export class ProceduralWorldGenerator {
     this.channelSeed = seed + 653;
     this.duneSeed = seed + 709;
     this.mesaSeed = seed + 761;
+    this.groveSeed = seed + 787;
+    this.orchardSeed = seed + 829;
+    this.desolationSeed = seed + 881;
     this.strataSeed = seed + 809;
     this.surfacePatchSeed = seed + 863;
     this.surfaceGrainSeed = seed + 911;
@@ -733,6 +835,9 @@ export class ProceduralWorldGenerator {
       channel: 1 - Math.abs(fbm2D2(worldX * CHANNEL_SCALE, worldZ * CHANNEL_SCALE, this.channelSeed) * 2 - 1),
       dune: 1 - Math.abs(fbm2D2(worldX * DUNE_SCALE, worldZ * DUNE_SCALE, this.duneSeed) * 2 - 1),
       mesa: smoothstep(0.54, 0.84, fbm2D2(worldX * MESA_SCALE, worldZ * MESA_SCALE, this.mesaSeed)),
+      grove: fbm2D3(worldX * GROVE_SCALE, worldZ * GROVE_SCALE, this.groveSeed),
+      orchard: fbm2D3(worldX * ORCHARD_SCALE, worldZ * ORCHARD_SCALE, this.orchardSeed),
+      desolation: fbm2D3(worldX * DESOLATION_SCALE, worldZ * DESOLATION_SCALE, this.desolationSeed),
       strata: fbm2D2(worldX * STRATA_SCALE, worldZ * STRATA_SCALE, this.strataSeed),
       surfacePatch: fbm2D3(worldX * SURFACE_PATCH_SCALE, worldZ * SURFACE_PATCH_SCALE, this.surfacePatchSeed),
       surfaceGrain: fbm2D2(worldX * SURFACE_GRAIN_SCALE, worldZ * SURFACE_GRAIN_SCALE, this.surfaceGrainSeed),
@@ -925,7 +1030,8 @@ export class ProceduralWorldGenerator {
     out.featureDeltaZ = 0;
     out.featureMaterialPrimary = 0;
     out.featureMaterialSecondary = 0;
-    const roster = selectLandmarkRoster(biomeId);
+    out.featureMaterialAccent = 0;
+    const roster = selectLandmarkRoster(biomeId, fields);
     if (roster.length === 0) {
       return null;
     }
@@ -993,6 +1099,7 @@ export class ProceduralWorldGenerator {
     scratch.featureDeltaZ[columnIndex] = state.featureDeltaZ;
     scratch.featureMaterialPrimary[columnIndex] = state.featureMaterialPrimary;
     scratch.featureMaterialSecondary[columnIndex] = state.featureMaterialSecondary;
+    scratch.featureMaterialAccent[columnIndex] = state.featureMaterialAccent;
   }
 
   private sampleMaterialFromColumn(context: MutableColumnState, worldY: number): number {
@@ -1005,6 +1112,7 @@ export class ProceduralWorldGenerator {
       context.featureDeltaZ,
       context.featureMaterialPrimary,
       context.featureMaterialSecondary,
+      context.featureMaterialAccent,
       context.surfaceY,
       worldY,
     );
@@ -1230,6 +1338,7 @@ function createMutableColumnState(): MutableColumnState {
     featureDeltaZ: 0,
     featureMaterialPrimary: 0,
     featureMaterialSecondary: 0,
+    featureMaterialAccent: 0,
   };
 }
 
@@ -1491,12 +1600,40 @@ function pickSubsurfaceMaterial(
   return subsurface;
 }
 
-function selectLandmarkRoster(biomeId: BiomeId): readonly LandmarkProfile[] {
+function selectLandmarkRoster(biomeId: BiomeId, fields: ColumnFieldSample): readonly LandmarkProfile[] {
   switch (biomeId) {
+    case "verdant":
+      if (fields.grove > 0.64 && fields.moisture > 0.62 && fields.drainage > 0.56) {
+        return VERDANT_GROVE_LANDMARKS;
+      }
+      if (fields.orchard > 0.68 && fields.temperature > 0.50 && fields.moisture > 0.56) {
+        return VERDANT_ORCHARD_LANDMARKS;
+      }
+      return BASE_BIOME_LANDMARKS.verdant;
+    case "steppe":
+      if (fields.orchard > 0.70 && fields.moisture > 0.42 && fields.temperature > 0.56) {
+        return STEPPE_ORCHARD_LANDMARKS;
+      }
+      if (fields.desolation > 0.72 && fields.moisture < 0.42) {
+        return STEPPE_DESOLATE_LANDMARKS;
+      }
+      return BASE_BIOME_LANDMARKS.steppe;
+    case "badlands":
+      return fields.desolation > 0.58 ? BADLANDS_DESOLATE_LANDMARKS : BASE_BIOME_LANDMARKS.badlands;
+    case "highland":
+      return fields.grove > 0.68 && fields.moisture > 0.50 && fields.uplift > 0.62
+        ? HIGHLAND_REDWOOD_LANDMARKS
+        : BASE_BIOME_LANDMARKS.highland;
+    case "tundra":
+      return fields.grove > 0.62 && fields.moisture > 0.36
+        ? TUNDRA_TAIGA_LANDMARKS
+        : BASE_BIOME_LANDMARKS.tundra;
     case "marsh":
+      return fields.grove > 0.60 ? MARSH_THICKET_LANDMARKS : SPECIAL_BIOME_LANDMARKS.marsh;
     case "ember":
+      return fields.desolation > 0.54 ? EMBER_DEADLAND_LANDMARKS : SPECIAL_BIOME_LANDMARKS.ember;
     case "bloom":
-      return SPECIAL_BIOME_LANDMARKS[biomeId];
+      return fields.orchard > 0.64 ? BLOOM_ORCHARD_LANDMARKS : SPECIAL_BIOME_LANDMARKS.bloom;
     default:
       return BASE_BIOME_LANDMARKS[biomeId];
   }
@@ -1552,6 +1689,77 @@ function configureLandmarkFeature(
         "#9C7",
       );
       out.featureExtra = 1;
+      return true;
+    case "blossom_tree":
+      if (submergedSurface) {
+        return false;
+      }
+      configureTreeFeature(
+        out,
+        FEATURE_OAK,
+        scaledFeatureHeight(28, 16, fields.moisture, profile.scale),
+        scaledFeatureRadius(10, 3, fields.moisture, profile.scale),
+        "#754",
+        "#FCD",
+        "#FFF",
+      );
+      out.featureExtra = 7;
+      return true;
+    case "fruit_tree":
+      if (submergedSurface) {
+        return false;
+      }
+      configureTreeFeature(
+        out,
+        FEATURE_OAK,
+        scaledFeatureHeight(26, 14, fields.moisture, profile.scale),
+        scaledFeatureRadius(9, 3, fields.moisture, profile.scale),
+        "#754",
+        "#7A5",
+        fields.temperature > 0.62 ? "#F84" : "#C33",
+      );
+      out.featureExtra = 8;
+      return true;
+    case "redwood":
+      if (submergedSurface) {
+        return false;
+      }
+      configureTreeFeature(
+        out,
+        FEATURE_REDWOOD,
+        scaledFeatureHeight(118, 52, fields.uplift + fields.moisture * 0.5, profile.scale),
+        scaledFeatureRadius(14, 6, fields.moisture, profile.scale),
+        "#643",
+        "#586",
+      );
+      return true;
+    case "dead_tree":
+      if (submergedSurface) {
+        return false;
+      }
+      configureTreeFeature(
+        out,
+        FEATURE_DEAD_TREE,
+        scaledFeatureHeight(32, 24, fields.uplift + fields.desolation * 0.4, profile.scale),
+        scaledFeatureRadius(7, 3, fields.scatter, profile.scale),
+        profile.variant > 0 ? "#322" : "#544",
+        profile.variant > 0 ? "#655" : "#765",
+      );
+      return true;
+    case "berry_bush":
+      if (submergedSurface) {
+        return false;
+      }
+      configureTreeFeature(
+        out,
+        FEATURE_BUSH,
+        scaledFeatureHeight(4, 4, fields.moisture, profile.scale),
+        scaledFeatureRadius(5, 2, fields.moisture, profile.scale),
+        "#653",
+        "#486",
+        "#C35",
+      );
+      out.featureExtra = 5;
       return true;
     case "boulder":
       configureSpireFeature(
@@ -1820,6 +2028,7 @@ function configureTreeFeature(
   radius: number,
   materialPrimary: string,
   materialSecondary: string,
+  materialAccent?: string,
 ): void {
   out.featureKind = featureKind;
   out.featureHeight = height;
@@ -1827,6 +2036,7 @@ function configureTreeFeature(
   out.featureExtra = 0;
   out.featureMaterialPrimary = hexColorToMaterial(materialPrimary);
   out.featureMaterialSecondary = hexColorToMaterial(materialSecondary);
+  out.featureMaterialAccent = materialAccent ? hexColorToMaterial(materialAccent) : 0;
 }
 
 function configureSpireFeature(
@@ -1843,6 +2053,7 @@ function configureSpireFeature(
   out.featureExtra = 1;
   out.featureMaterialPrimary = hexColorToMaterial(materialPrimary);
   out.featureMaterialSecondary = hexColorToMaterial(materialSecondary);
+  out.featureMaterialAccent = 0;
 }
 
 function scaledFeatureHeight(base: number, jitterRange: number, signal: number, scale: number): number {
@@ -1855,6 +2066,22 @@ function scaledFeatureRadius(base: number, jitterRange: number, signal: number, 
 
 function hasStandingWater(surfaceY: number, waterTopY: number): boolean {
   return waterTopY !== NO_WATER && waterTopY > surfaceY;
+}
+
+function shouldUseFeatureAccent(
+  featureDeltaX: number,
+  featureDeltaZ: number,
+  relativeY: number,
+  featureExtra: number,
+): boolean {
+  const hash = Math.abs(
+    featureDeltaX * 31
+      + featureDeltaZ * 17
+      + relativeY * 13
+      + featureExtra * 19,
+  );
+  const cadence = featureExtra >= 8 ? 7 : featureExtra >= 7 ? 5 : 6;
+  return hash % cadence === 0;
 }
 
 function sampleMaterialFromScratch(
@@ -1873,6 +2100,7 @@ function sampleMaterialFromScratch(
     scratch.featureDeltaZ[columnIndex]!,
     scratch.featureMaterialPrimary[columnIndex]!,
     scratch.featureMaterialSecondary[columnIndex]!,
+    scratch.featureMaterialAccent[columnIndex]!,
     scratch.surfaceY[columnIndex]!,
     worldY,
   );
@@ -1937,6 +2165,7 @@ function sampleFeatureMaterial(
   featureDeltaZ: number,
   materialPrimary: number,
   materialSecondary: number,
+  materialAccent: number,
   surfaceY: number,
   worldY: number,
 ): number {
@@ -1952,7 +2181,7 @@ function sampleFeatureMaterial(
   const radial = Math.hypot(featureDeltaX, featureDeltaZ);
   switch (featureKind) {
     case FEATURE_OAK: {
-      const canopyVariant = featureExtra >= 4 ? 2 : featureExtra >= 2 ? 1 : 0;
+      const canopyVariant = featureExtra >= 7 ? 0 : featureExtra >= 4 ? 2 : featureExtra >= 2 ? 1 : 0;
       const slender = featureExtra === 1;
       const trunkCutoff = canopyVariant === 0
         ? featureHeight - 4
@@ -1964,9 +2193,13 @@ function sampleFeatureMaterial(
       const canopyCenter = canopyVariant === 0 ? featureHeight - 2 : featureHeight - Math.max(2, Math.round(featureHeight * 0.10));
       const canopyFalloff = canopyVariant === 0 ? (slender ? 0.7 : 0.9) : canopyVariant === 1 ? 0.38 : 0.50;
       const canopyBaseRadius = canopyVariant === 0 ? (slender ? 1.25 : 1.5) : featureRadius * (canopyVariant === 1 ? 0.72 : 0.78);
-      return radial <= Math.max(canopyBaseRadius, featureRadius - Math.abs(relativeY - canopyCenter) * canopyFalloff)
-        ? materialSecondary
-        : 0;
+      if (radial > Math.max(canopyBaseRadius, featureRadius - Math.abs(relativeY - canopyCenter) * canopyFalloff)) {
+        return 0;
+      }
+      if (materialAccent !== 0 && featureExtra >= 7 && shouldUseFeatureAccent(featureDeltaX, featureDeltaZ, relativeY, featureExtra)) {
+        return materialAccent;
+      }
+      return materialSecondary;
     }
     case FEATURE_BOULDER: {
       const bodyRadius = Math.max(1.1, featureRadius - Math.abs(relativeY - featureHeight * 0.45) * 0.55);
@@ -1980,7 +2213,13 @@ function sampleFeatureMaterial(
       if (relativeY === 0 && absX <= 0.55 && absZ <= 0.55) {
         return materialPrimary;
       }
-      return radial <= Math.max(1.1, featureRadius - relativeY * 0.6) ? materialSecondary : 0;
+      if (radial > Math.max(1.1, featureRadius - relativeY * 0.6)) {
+        return 0;
+      }
+      if (materialAccent !== 0 && featureExtra >= 5 && shouldUseFeatureAccent(featureDeltaX, featureDeltaZ, relativeY, featureExtra)) {
+        return materialAccent;
+      }
+      return materialSecondary;
     case FEATURE_STANDING_STONE:
       return radial <= Math.max(1.1, featureRadius - relativeY * 0.2) ? materialPrimary : 0;
     case FEATURE_PALM: {
@@ -2066,6 +2305,45 @@ function sampleFeatureMaterial(
         return materialSecondary;
       }
       return radial <= Math.max(0.9, featureRadius - relativeY * 0.55) ? materialPrimary : 0;
+    case FEATURE_REDWOOD: {
+      const trunkHeight = Math.max(16, Math.round(featureHeight * 0.78));
+      const trunkRadius = Math.max(1.6, featureRadius * 0.17);
+      if (relativeY <= trunkHeight) {
+        const buttressRadius = relativeY <= Math.max(5, featureHeight * 0.05)
+          ? trunkRadius + (1 - relativeY / Math.max(1, featureHeight * 0.05)) * Math.max(1.2, featureRadius * 0.08)
+          : trunkRadius;
+        return radial <= buttressRadius ? materialPrimary : 0;
+      }
+      const crownProgress = (relativeY - trunkHeight) / Math.max(1, featureHeight - trunkHeight);
+      const crownRadius = featureRadius * (0.70 - crownProgress * 0.38);
+      const capBias = crownProgress > 0.72 ? (crownProgress - 0.72) * 4.8 : 0;
+      return radial <= Math.max(1.4, crownRadius + capBias) ? materialSecondary : 0;
+    }
+    case FEATURE_DEAD_TREE: {
+      const trunkRadius = Math.max(0.9, featureRadius * 0.16);
+      if (radial <= trunkRadius) {
+        return materialPrimary;
+      }
+      const branchStart = Math.max(4, Math.round(featureHeight * 0.36));
+      if (relativeY < branchStart) {
+        return 0;
+      }
+      const branchSeed = (relativeY + featureExtra * 3) % 6;
+      const branchExtent = Math.max(2, Math.round(featureRadius * (relativeY > featureHeight * 0.72 ? 0.55 : 0.40)));
+      const branchOnX = branchSeed === 0 || branchSeed === 3;
+      const branchOnZ = branchSeed === 1 || branchSeed === 4;
+      const branchDiagonal = branchSeed === 2 || branchSeed === 5;
+      if (branchOnX && absZ <= 0.8 && absX <= trunkRadius + branchExtent) {
+        return materialSecondary;
+      }
+      if (branchOnZ && absX <= 0.8 && absZ <= trunkRadius + branchExtent) {
+        return materialSecondary;
+      }
+      if (branchDiagonal && Math.abs(absX - absZ) <= 0.9 && absX + absZ <= branchExtent + trunkRadius + 1.2) {
+        return materialSecondary;
+      }
+      return 0;
+    }
     case FEATURE_GLOWCAP:
       if (relativeY <= featureHeight - (featureExtra >= 3 ? 5 : 3)) {
         const stemRadius = Math.min(1.2, 0.75 + featureRadius * 0.04);
@@ -2146,6 +2424,7 @@ function acquireChunkGenerationScratch(capacity: number): ChunkGenerationScratch
       featureDeltaZ: new Int16Array(capacity),
       featureMaterialPrimary: new Uint16Array(capacity),
       featureMaterialSecondary: new Uint16Array(capacity),
+      featureMaterialAccent: new Uint16Array(capacity),
     };
   }
   return scratch;

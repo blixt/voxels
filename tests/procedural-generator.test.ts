@@ -317,6 +317,10 @@ test("landmarks appear across the world with multiple distinct families", () => 
   expect(landmarkIds.has("oak")).toBe(true);
   expect(landmarkIds.has("canopy_tree")).toBe(true);
   expect(landmarkIds.has("acacia")).toBe(true);
+  expect(landmarkIds.has("blossom_tree")).toBe(true);
+  expect(landmarkIds.has("fruit_tree")).toBe(true);
+  expect(landmarkIds.has("redwood")).toBe(true);
+  expect(landmarkIds.has("dead_tree")).toBe(true);
   expect(landmarkIds.has("hoodoo")).toBe(true);
   expect(landmarkIds.has("ice_spire")).toBe(true);
   expect(
@@ -331,12 +335,16 @@ test("landmark scale now regularly exceeds player height", () => {
   const generator = new ProceduralWorldGenerator(1337);
   let tallestFeature = 0;
   let tallFeatureCount = 0;
+  let tallestRedwood = 0;
 
   for (let z = -8192; z <= 8192; z += 16) {
     for (let x = -8192; x <= 8192; x += 16) {
       const probe = generator.sampleBiomeProbe(x, z);
       const featureHeight = probe.topY - probe.surfaceY;
       tallestFeature = Math.max(tallestFeature, featureHeight);
+      if (probe.landmarkId === "redwood") {
+        tallestRedwood = Math.max(tallestRedwood, featureHeight);
+      }
       if (featureHeight >= 24) {
         tallFeatureCount += 1;
       }
@@ -344,7 +352,42 @@ test("landmark scale now regularly exceeds player height", () => {
   }
 
   expect(tallestFeature).toBeGreaterThanOrEqual(72);
+  expect(tallestRedwood).toBeGreaterThanOrEqual(160);
   expect(tallFeatureCount).toBeGreaterThan(100);
+});
+
+test("the world now contains dense forest and orchard-style landmark patches", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const forestLandmarks = new Set(["redwood", "tall_fir", "fir", "canopy_tree", "oak"]);
+  const orchardLandmarks = new Set(["blossom_tree", "fruit_tree", "berry_bush"]);
+  let maxForestRatio = 0;
+  let maxOrchardRatio = 0;
+
+  for (let centerZ = -8192; centerZ <= 8192; centerZ += 192) {
+    for (let centerX = -8192; centerX <= 8192; centerX += 192) {
+      let forestCount = 0;
+      let orchardCount = 0;
+      let total = 0;
+      for (let dz = -48; dz <= 48; dz += 8) {
+        for (let dx = -48; dx <= 48; dx += 8) {
+          const probe = generator.sampleBiomeProbe(centerX + dx, centerZ + dz);
+          const featureHeight = probe.topY - probe.surfaceY;
+          if (forestLandmarks.has(probe.landmarkId ?? "") && featureHeight >= 32) {
+            forestCount += 1;
+          }
+          if (orchardLandmarks.has(probe.landmarkId ?? "") && featureHeight >= 10) {
+            orchardCount += 1;
+          }
+          total += 1;
+        }
+      }
+      maxForestRatio = Math.max(maxForestRatio, forestCount / total);
+      maxOrchardRatio = Math.max(maxOrchardRatio, orchardCount / total);
+    }
+  }
+
+  expect(maxForestRatio).toBeGreaterThanOrEqual(0.30);
+  expect(maxOrchardRatio).toBeGreaterThanOrEqual(0.16);
 });
 
 test("surface materials vary within major biomes to support finer ground detail", () => {
