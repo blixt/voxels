@@ -1,6 +1,6 @@
 import { buildCameraMatrices, type CameraState } from "./camera.ts";
 import type { ChunkMeshData } from "./types.ts";
-import type { ResidentChunkWorld, VoxelChunk } from "./world.ts";
+import type { ResidentChunkWorld } from "./world.ts";
 import { CLEAR_COLOR_RGBA, LIGHT_DIRECTION, LIGHTING_TERMS } from "./render-constants.ts";
 
 type RenderCamera = CameraState | { viewProjection: Float32Array };
@@ -49,6 +49,11 @@ interface GpuChunkResources {
   indexBuffer: GPUBuffer;
   indexCount: number;
   triangleCount: number;
+}
+
+export interface RenderMeshSource {
+  mesh: ChunkMeshData | null;
+  gpuDirty: boolean;
 }
 
 interface PassStats {
@@ -119,7 +124,7 @@ export class WebGpuVoxelRenderer {
   private readonly pipeline: GPURenderPipeline;
   private readonly uniformBuffer: GPUBuffer;
   private readonly uniformBindGroup: GPUBindGroup;
-  private readonly resources = new Map<VoxelChunk, GpuChunkResources>();
+  private readonly resources = new Map<object, GpuChunkResources>();
   private depthTexture: GPUTexture | null = null;
   private depthView: GPUTextureView | null = null;
   readonly format: GPUTextureFormat;
@@ -239,10 +244,16 @@ export class WebGpuVoxelRenderer {
     return new GpuFrameTimer(this.device, frameCount);
   }
 
-  render(world: ResidentChunkWorld, camera: RenderCamera, timer: GpuFrameTimer | null = null, frameIndex = 0): RenderStats {
+  render(
+    world: ResidentChunkWorld,
+    camera: RenderCamera,
+    timer: GpuFrameTimer | null = null,
+    frameIndex = 0,
+    extraMeshes: readonly RenderMeshSource[] = [],
+  ): RenderStats {
     this.configureCanvas(this.context.canvas as HTMLCanvasElement);
     const syncStartedAt = performance.now();
-    const syncStats = this.syncResources(world);
+    const syncStats = this.syncResources(world, extraMeshes);
     const syncResourcesMs = performance.now() - syncStartedAt;
     const canvas = this.context.canvas as HTMLCanvasElement;
     this.writeUniforms(camera, canvas.width / canvas.height);
@@ -273,7 +284,7 @@ export class WebGpuVoxelRenderer {
     }
 
     const encodeStartedAt = performance.now();
-    const stats = this.encodeRenderPass(world, encoder, passDescriptor);
+    const stats = this.encodeRenderPass(world, extraMeshes, encoder, passDescriptor);
     const encodeMs = performance.now() - encodeStartedAt;
 
     if (timer) {
@@ -297,8 +308,14 @@ export class WebGpuVoxelRenderer {
     await this.device.queue.onSubmittedWorkDone();
   }
 
-  async captureImage(world: ResidentChunkWorld, camera: RenderCamera, width: number, height: number): Promise<ReadbackImage> {
-    this.syncResources(world);
+  async captureImage(
+    world: ResidentChunkWorld,
+    camera: RenderCamera,
+    width: number,
+    height: number,
+    extraMeshes: readonly RenderMeshSource[] = [],
+  ): Promise<ReadbackImage> {
+    this.syncResources(world, extraMeshes);
     this.writeUniforms(camera, width / height);
 
     const colorTexture = this.device.createTexture({
@@ -318,7 +335,7 @@ export class WebGpuVoxelRenderer {
     });
 
     const encoder = this.device.createCommandEncoder();
-    this.encodeRenderPass(world, encoder, {
+    this.encodeRenderPass(world, extraMeshes, encoder, {
       colorAttachments: [
         {
           view: colorTexture.createView(),
@@ -383,6 +400,7 @@ export class WebGpuVoxelRenderer {
 
   private encodeRenderPass(
     world: ResidentChunkWorld,
+    extraMeshes: readonly RenderMeshSource[],
     encoder: GPUCommandEncoder,
     passDescriptor: GPURenderPassDescriptor,
   ): PassStats {
@@ -394,6 +412,17 @@ export class WebGpuVoxelRenderer {
     let triangles = 0;
     for (const chunk of world.iterateResidentChunks()) {
       const resource = this.resources.get(chunk);
+      if (!resource || resource.indexCount === 0) {
+        continue;
+      }
+      pass.setVertexBuffer(0, resource.vertexBuffer);
+      pass.setIndexBuffer(resource.indexBuffer, "uint32");
+      pass.drawIndexed(resource.indexCount, 1, 0, 0, 0);
+      drawCalls += 1;
+      triangles += resource.triangleCount;
+    }
+    for (const extraMesh of extraMeshes) {
+      const resource = this.resources.get(extraMesh);
       if (!resource || resource.indexCount === 0) {
         continue;
       }
@@ -418,7 +447,7 @@ export class WebGpuVoxelRenderer {
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
 
-  private syncResources(world: ResidentChunkWorld): {
+  private syncResources(world: ResidentChunkWorld, extraMeshes: readonly RenderMeshSource[]): {
     uploadMs: number;
     uploadChunks: number;
     uploadBytes: number;
@@ -426,11 +455,19 @@ export class WebGpuVoxelRenderer {
     let uploadMs = 0;
     let uploadChunks = 0;
     let uploadBytes = 0;
-    for (const [chunk, resource] of this.resources.entries()) {
-      if (!world.hasResidentChunk(chunk.coord.x, chunk.coord.y, chunk.coord.z) || chunk.mesh === null) {
+    const desiredResources = new Set<object>();
+    for (const chunk of world.iterateResidentChunks()) {
+      desiredResources.add(chunk);
+    }
+    for (const extraMesh of extraMeshes) {
+      desiredResources.add(extraMesh);
+    }
+
+    for (const [resourceKey, resource] of this.resources.entries()) {
+      if (!desiredResources.has(resourceKey)) {
         resource.vertexBuffer.destroy();
         resource.indexBuffer.destroy();
-        this.resources.delete(chunk);
+        this.resources.delete(resourceKey);
       }
     }
 
@@ -454,10 +491,30 @@ export class WebGpuVoxelRenderer {
       uploadBytes += upload.totalBytes;
       chunk.gpuDirty = false;
     }
+    for (const extraMesh of extraMeshes) {
+      const mesh = extraMesh.mesh;
+      if (!mesh || mesh.indexCount === 0) {
+        const existing = this.resources.get(extraMesh);
+        if (existing) {
+          existing.vertexBuffer.destroy();
+          existing.indexBuffer.destroy();
+          this.resources.delete(extraMesh);
+        }
+        continue;
+      }
+      if (!extraMesh.gpuDirty) {
+        continue;
+      }
+      const upload = this.uploadChunkMesh(extraMesh, mesh);
+      uploadMs += upload.elapsedMs;
+      uploadChunks += 1;
+      uploadBytes += upload.totalBytes;
+      extraMesh.gpuDirty = false;
+    }
     return { uploadMs, uploadChunks, uploadBytes };
   }
 
-  private uploadChunkMesh(chunk: VoxelChunk, mesh: ChunkMeshData): {
+  private uploadChunkMesh(chunk: RenderMeshSource, mesh: ChunkMeshData): {
     elapsedMs: number;
     totalBytes: number;
   } {

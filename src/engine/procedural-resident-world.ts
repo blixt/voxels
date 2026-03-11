@@ -22,11 +22,13 @@ export interface ResidencyPhaseMetrics {
 
 export interface ResidencyUpdateSummary {
   changed: boolean;
+  complete: boolean;
   centerChunkX: number;
   centerChunkZ: number;
   radiusChunks: number;
   generatedChunks: number;
   evictedChunks: number;
+  pendingChunks: number;
   emptyChunksSkipped: number;
   cachedEmptyChunkHits: number;
   touchedNeighborChunks: number;
@@ -53,6 +55,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
   private readonly chunks = new Map<string, VoxelChunk>();
   private readonly emptyChunkKeys = new Set<string>();
   private lastAnchorSignature = "";
+  private lastAnchorComplete = true;
 
   constructor(
     readonly generator: ProceduralWorldGenerator,
@@ -70,11 +73,13 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     this.airPaddingChunks = options.airPaddingChunks ?? DEFAULT_AIR_PADDING_CHUNKS;
     this.lastResidency = {
       changed: false,
+      complete: true,
       centerChunkX: 0,
       centerChunkZ: 0,
       radiusChunks: this.horizontalRadiusChunks,
       generatedChunks: 0,
       evictedChunks: 0,
+      pendingChunks: 0,
       emptyChunksSkipped: 0,
       cachedEmptyChunkHits: 0,
       touchedNeighborChunks: 0,
@@ -91,6 +96,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
   setHorizontalRadiusChunks(radius: number): void {
     this.horizontalRadiusChunks = Math.max(1, Math.floor(radius));
     this.lastAnchorSignature = "";
+    this.lastAnchorComplete = false;
   }
 
   getStats(): WorldStats {
@@ -217,18 +223,25 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     };
   }
 
-  updateResidencyAround(position: Vec3): ResidencyUpdateSummary {
+  updateResidencyAround(
+    position: Vec3,
+    options: {
+      maxGenerateChunks?: number;
+    } = {},
+  ): ResidencyUpdateSummary {
     const centerChunkX = Math.floor(position[0] / this.chunkSize);
     const centerChunkZ = Math.floor(position[2] / this.chunkSize);
     const radiusChunks = this.horizontalRadiusChunks;
     const anchorSignature = `${centerChunkX}:${centerChunkZ}:${radiusChunks}`;
+    const maxGenerateChunks = options.maxGenerateChunks ?? Number.POSITIVE_INFINITY;
     const surfaceStartedAt = performance.now();
     const surfaceY = this.generator.sampleColumn(Math.floor(position[0]), Math.floor(position[2])).surfaceY;
     const surfaceSampleMs = performance.now() - surfaceStartedAt;
-    if (anchorSignature === this.lastAnchorSignature) {
+    if (anchorSignature === this.lastAnchorSignature && this.lastAnchorComplete) {
       this.lastResidency = {
         ...this.lastResidency,
         changed: false,
+        complete: true,
         centerChunkX,
         centerChunkZ,
         radiusChunks,
@@ -236,6 +249,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
         elapsedMs: 0,
         generatedChunks: 0,
         evictedChunks: 0,
+        pendingChunks: 0,
         emptyChunksSkipped: 0,
         cachedEmptyChunkHits: 0,
         touchedNeighborChunks: 0,
@@ -255,6 +269,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     const neededKeys = new Set<string>();
     let generatedChunks = 0;
     let evictedChunks = 0;
+    let pendingChunks = 0;
     let emptyChunksSkipped = 0;
     let cachedEmptyChunkHits = 0;
     let touchedNeighborChunks = 0;
@@ -266,45 +281,47 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     let evictionMs = 0;
     let neighborDirtyMs = 0;
 
-    for (let dz = -radiusChunks; dz <= radiusChunks; dz += 1) {
-      for (let dx = -radiusChunks; dx <= radiusChunks; dx += 1) {
-        if (dx * dx + dz * dz > radiusChunks * radiusChunks) {
+    for (const [dx, dz] of prioritizedColumnOffsets(radiusChunks)) {
+      const cx = centerChunkX + dx;
+      const cz = centerChunkZ + dz;
+      const yRangeStartedAt = performance.now();
+      const [minCy, maxCy] = this.computeChunkYRange(cx, cz);
+      yRangeMs += performance.now() - yRangeStartedAt;
+      const preferredCy = dx === 0 && dz === 0
+        ? Math.floor(surfaceY / this.chunkSize)
+        : Math.floor((minCy + maxCy) * 0.5);
+      for (const cy of prioritizedChunkYRange(minCy, maxCy, preferredCy)) {
+        const key = toChunkKey(cx, cy, cz);
+        neededKeys.add(key);
+        if (this.chunks.has(key)) {
           continue;
         }
-        const cx = centerChunkX + dx;
-        const cz = centerChunkZ + dz;
-        const yRangeStartedAt = performance.now();
-        const [minCy, maxCy] = this.computeChunkYRange(cx, cz);
-        yRangeMs += performance.now() - yRangeStartedAt;
-        for (let cy = minCy; cy <= maxCy; cy += 1) {
-          const key = toChunkKey(cx, cy, cz);
-          neededKeys.add(key);
-          if (this.chunks.has(key)) {
-            continue;
-          }
-          if (this.emptyChunkKeys.has(key)) {
-            cachedEmptyChunkHits += 1;
-            continue;
-          }
-          const generationStartedAt = performance.now();
-          const generated = this.generator.generateChunk(cx, cy, cz);
-          chunkGenerationMs += performance.now() - generationStartedAt;
-          if (generated.solidCount === 0) {
-            emptyChunksSkipped += 1;
-            this.emptyChunkKeys.add(key);
-            continue;
-          }
-          const adoptionStartedAt = performance.now();
-          const chunk = createResidentChunk(generated, this.chunkSize);
-          this.emptyChunkKeys.delete(key);
-          this.chunks.set(key, chunk);
-          generatedChunks += 1;
-          generatedChunkCoords.push({ x: cx, y: cy, z: cz });
-          chunkAdoptionMs += performance.now() - adoptionStartedAt;
-          const dirtyStartedAt = performance.now();
-          touchedNeighborChunks += this.markAdjacentChunksDirty(cx, cy, cz);
-          neighborDirtyMs += performance.now() - dirtyStartedAt;
+        if (this.emptyChunkKeys.has(key)) {
+          cachedEmptyChunkHits += 1;
+          continue;
         }
+        if (generatedChunks >= maxGenerateChunks) {
+          pendingChunks += 1;
+          continue;
+        }
+        const generationStartedAt = performance.now();
+        const generated = this.generator.generateChunk(cx, cy, cz);
+        chunkGenerationMs += performance.now() - generationStartedAt;
+        if (generated.solidCount === 0) {
+          emptyChunksSkipped += 1;
+          this.emptyChunkKeys.add(key);
+          continue;
+        }
+        const adoptionStartedAt = performance.now();
+        const chunk = createResidentChunk(generated, this.chunkSize);
+        this.emptyChunkKeys.delete(key);
+        this.chunks.set(key, chunk);
+        generatedChunks += 1;
+        generatedChunkCoords.push({ x: cx, y: cy, z: cz });
+        chunkAdoptionMs += performance.now() - adoptionStartedAt;
+        const dirtyStartedAt = performance.now();
+        touchedNeighborChunks += this.markAdjacentChunksDirty(cx, cy, cz);
+        neighborDirtyMs += performance.now() - dirtyStartedAt;
       }
     }
 
@@ -323,13 +340,16 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     }
 
     this.lastAnchorSignature = anchorSignature;
+    this.lastAnchorComplete = pendingChunks === 0;
     this.lastResidency = {
-      changed: true,
+      changed: generatedChunks > 0 || evictedChunks > 0,
+      complete: pendingChunks === 0,
       centerChunkX,
       centerChunkZ,
       radiusChunks,
       generatedChunks,
       evictedChunks,
+      pendingChunks,
       emptyChunksSkipped,
       cachedEmptyChunkHits,
       touchedNeighborChunks,
@@ -398,6 +418,7 @@ const ADJACENT_CHUNK_OFFSETS: ReadonlyArray<readonly [number, number, number]> =
   [0, 0, -1],
   [0, 0, 1],
 ];
+const PRIORITIZED_COLUMN_OFFSETS = new Map<number, Array<[number, number]>>();
 
 function sampleOffsets(chunkSize: number): Array<[number, number]> {
   return [
@@ -432,6 +453,48 @@ function spawnFootprintOffsets(): Array<[number, number]> {
     [SPAWN_FOOTPRINT_RADIUS, -SPAWN_FOOTPRINT_RADIUS],
     [SPAWN_FOOTPRINT_RADIUS, SPAWN_FOOTPRINT_RADIUS],
   ];
+}
+
+function prioritizedColumnOffsets(radiusChunks: number): Array<[number, number]> {
+  const cached = PRIORITIZED_COLUMN_OFFSETS.get(radiusChunks);
+  if (cached) {
+    return cached;
+  }
+  const offsets: Array<[number, number]> = [];
+  for (let dz = -radiusChunks; dz <= radiusChunks; dz += 1) {
+    for (let dx = -radiusChunks; dx <= radiusChunks; dx += 1) {
+      if (dx * dx + dz * dz > radiusChunks * radiusChunks) {
+        continue;
+      }
+      offsets.push([dx, dz]);
+    }
+  }
+  offsets.sort((left, right) => {
+    const leftDistance = left[0] * left[0] + left[1] * left[1];
+    const rightDistance = right[0] * right[0] + right[1] * right[1];
+    return leftDistance - rightDistance || Math.abs(left[1]) - Math.abs(right[1]) || Math.abs(left[0]) - Math.abs(right[0]);
+  });
+  PRIORITIZED_COLUMN_OFFSETS.set(radiusChunks, offsets);
+  return offsets;
+}
+
+function prioritizedChunkYRange(minCy: number, maxCy: number, preferredCy: number): number[] {
+  if (maxCy < minCy) {
+    return [];
+  }
+  const centerCy = Math.min(maxCy, Math.max(minCy, preferredCy));
+  const ordered: number[] = [centerCy];
+  for (let step = 1; centerCy - step >= minCy || centerCy + step <= maxCy; step += 1) {
+    const upper = centerCy + step;
+    if (upper <= maxCy) {
+      ordered.push(upper);
+    }
+    const lower = centerCy - step;
+    if (lower >= minCy) {
+      ordered.push(lower);
+    }
+  }
+  return ordered;
 }
 
 function toChunkKey(cx: number, cy: number, cz: number): string {

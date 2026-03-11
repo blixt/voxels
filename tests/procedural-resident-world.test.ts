@@ -140,3 +140,73 @@ test("resident world reuses known-empty chunk results on a repeated anchor refre
   expect(second.cachedEmptyChunkHits).toBe(first.emptyChunksSkipped);
   expect(second.phaseMs.chunkGenerationMs).toBe(0);
 });
+
+test("resident world can complete a residency window across multiple budgeted updates", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    horizontalRadiusChunks: 2,
+  });
+  const spawn = world.getSpawnPosition();
+
+  const first = world.updateResidencyAround(spawn, { maxGenerateChunks: 4 });
+
+  expect(first.complete).toBe(false);
+  expect(first.pendingChunks).toBeGreaterThan(0);
+  expect(first.generatedChunks).toBeGreaterThan(0);
+  expect(first.generatedChunks).toBeLessThanOrEqual(4);
+
+  let latest = first;
+  for (let attempt = 0; attempt < 24 && !latest.complete; attempt += 1) {
+    latest = world.updateResidencyAround(spawn, { maxGenerateChunks: 4 });
+  }
+
+  expect(latest.complete).toBe(true);
+  expect(latest.pendingChunks).toBe(0);
+  expect(world.getStats().chunkCount).toBeGreaterThan(0);
+
+  const settled = world.updateResidencyAround(spawn, { maxGenerateChunks: 4 });
+  expect(settled.changed).toBe(false);
+  expect(settled.complete).toBe(true);
+  expect(settled.pendingChunks).toBe(0);
+});
+
+test("resident world can stream the same anchor incrementally under a generation budget", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    horizontalRadiusChunks: 3,
+  });
+  const spawn = world.getSpawnPosition();
+
+  const first = world.updateResidencyAround(spawn, { maxGenerateChunks: 4 });
+
+  expect(first.complete).toBe(false);
+  expect(first.pendingChunks).toBeGreaterThan(0);
+  expect(first.generatedChunks).toBeGreaterThan(0);
+  expect(first.generatedChunks).toBeLessThanOrEqual(4);
+
+  let latest = first;
+  for (let iteration = 0; iteration < 64 && !latest.complete; iteration += 1) {
+    latest = world.updateResidencyAround(spawn, { maxGenerateChunks: 4 });
+  }
+
+  expect(latest.complete).toBe(true);
+  expect(latest.pendingChunks).toBe(0);
+  expect(latest.generatedChunks).toBeGreaterThanOrEqual(0);
+
+  const settled = world.updateResidencyAround(spawn, { maxGenerateChunks: 4 });
+  expect(settled.changed).toBe(false);
+  expect(settled.complete).toBe(true);
+  expect(settled.pendingChunks).toBe(0);
+});
+
+test("budgeted residency prioritizes the spawn support chunk first", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    horizontalRadiusChunks: 3,
+  });
+  const spawn = world.getSpawnPosition();
+
+  world.updateResidencyAround(spawn, { maxGenerateChunks: 1 });
+
+  const centerChunkX = Math.floor(spawn[0] / world.chunkSize);
+  const centerChunkZ = Math.floor(spawn[2] / world.chunkSize);
+  const supportChunkY = Math.floor((spawn[1] - 1) / world.chunkSize);
+  expect(world.hasResidentChunk(centerChunkX, supportChunkY, centerChunkZ)).toBe(true);
+});

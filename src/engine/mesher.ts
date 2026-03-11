@@ -14,7 +14,7 @@ export interface MeshBuildSummary {
   elapsedMs: number;
 }
 
-export function rebuildDirtyMeshes(world: ResidentChunkWorld): MeshBuildSummary {
+export function rebuildDirtyMeshes(world: ResidentChunkWorld, maxChunks = Number.POSITIVE_INFINITY): MeshBuildSummary {
   const startedAt = performance.now();
   let meshCount = 0;
   let newMeshCount = 0;
@@ -23,6 +23,9 @@ export function rebuildDirtyMeshes(world: ResidentChunkWorld): MeshBuildSummary 
   for (const chunk of world.iterateResidentChunks()) {
     if (!chunk.meshDirty) {
       continue;
+    }
+    if (meshCount >= maxChunks) {
+      break;
     }
     chunk.mesh = buildChunkMesh(world, chunk.coord.x, chunk.coord.y, chunk.coord.z);
     chunk.meshDirty = false;

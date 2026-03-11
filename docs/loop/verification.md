@@ -1024,3 +1024,101 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - Chrome DevTools browser automation was not available for this slice because the tool-managed Chrome profile became locked after earlier runs and local cleanup of that automation profile was blocked by policy.
 - Browser acceptance is therefore still pending for this mesher-specific change.
+
+### Budgeted streaming and far-field overlap verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `mise run profile-stream -- --iterations=2 --warmup=1 --near-radius=2 --far-radius=3`
+
+#### Automated checks
+
+- `mise run test`: passing after:
+  - adding far-field regression coverage for in-place clear-radius growth
+  - adding resident-world coverage for repeated budgeted updates converging to a complete anchor
+- `mise run build`: passing after wiring the game path onto:
+  - budgeted chunk generation
+  - budgeted dirty meshing
+  - the renderer extra-mesh path for procedural far-field bands
+
+#### Warmed local stream-profiler results
+
+- `bootstrap-r3`:
+  - stream avg `142.1 ms`
+  - mesh avg `94.0 ms`
+  - generated chunks `134`
+  - dirty resident chunks `134`
+- `widen-r2-to-r3`:
+  - stream avg `75.4 ms`
+  - mesh avg `77.3 ms`
+  - generated chunks `73`
+  - dirty resident chunks `108`
+- `shrink-r3-to-r2`:
+  - stream avg `0.21 ms`
+  - mesh avg `31.4 ms`
+  - evicted chunks `73`
+  - dirty resident chunks `35`
+
+#### Notes
+
+- The new `profile-stream` numbers are lower than the earlier full-refresh baseline, but they still measure the non-interactive path that finishes all generation and meshing in one go.
+- The live game path is now intentionally different:
+  - resident-world generation is capped per update
+  - dirty meshing is capped per frame
+  - far-field bands fill the long-distance gap visually
+- This means the current warmed local profiler is still useful for full-refresh cost, but it is no longer a trustworthy proxy for perceived game-path hitch on `/`.
+
+#### Browser note
+
+- I attempted to re-establish a clean local Chrome/CDP verification lane for this slice.
+- The tool-managed DevTools path was still unavailable, and direct local Chrome launch from the current environment failed before exposing a usable debugging endpoint.
+- Because of that, this slice was accepted on:
+  - unit tests
+  - type/build verification
+  - the warmed local stream profiler
+- The existing Bun dev server is still live on `http://localhost:3015/`, so the next slice should either restore a headless Chrome lane or add a dedicated scriptable browser harness before relying on more visual-distance claims.
+
+### Budgeted bootstrap stabilization verification
+
+#### Commands
+
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/player-physics.test.ts tests/procedural-far-field.test.ts`
+- `mise run test`
+- `mise run build`
+- fresh Chrome 146 reload on `http://localhost:3015/`
+
+#### Automated checks
+
+- `mise run test`: passing after:
+  - adding a resident-world test that proves repeated budgeted updates converge
+  - adding a resident-world test that proves a `maxGenerateChunks = 1` update loads the spawn support chunk first
+  - keeping far-field clear-radius coverage green
+- `mise run build`: passing after restoring full-settle behavior on correctness-critical game paths.
+
+#### Browser checks
+
+- Fresh `/` reload now boots grounded instead of falling through the world:
+  - eye position about `144.5 m`
+  - feet position about `142.8 m`
+  - `Grounded = Yes`
+  - `Resident Chunks = 134`
+  - `Pending = 0`
+- The far field remains active after the stabilization fix:
+  - `Far Field = 416 m`
+  - `Far Tris = 94,794`
+- Scripted browser probe:
+  - `window.__VOXELS_GAME__.teleportAndSettle(currentX, currentY, currentZ)` completed with `pending = 0`, `complete = true`, and the player still grounded afterward
+  - `window.__VOXELS_GAME__.benchmarkChunkCrossing(2, 1)` reported:
+    - stream avg `31.2 ms`
+    - mesh avg `81.9 ms`
+    - frame CPU avg `0.55 ms`
+    - upload avg `0.38 ms`
+    - upload chunks avg `83.5`
+
+#### Conclusion
+
+- Bounded streaming is still the right default for ordinary movement.
+- Bootstrap, teleports, and other correctness-oriented probes cannot share the same budgeted path, because they need fully loaded support around the player before the first frame is accepted.
+- The next verification gap is now explicit: add a separate incremental-movement benchmark so the repo measures ordinary hitch and full-settle correctness with different tools instead of conflating them.

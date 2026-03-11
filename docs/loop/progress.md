@@ -286,3 +286,41 @@
   - fixed-grid probe now reports `min 1298`, `max 1555`, `avg 1424.6`, `25.4%` underwater coverage, `30` max adjacent step, and `30` max biome-edge jump
   - fresh `/` boot now lands around `surfaceY 1418` instead of the old `1609+` range
   - the default streamed world now boots with fewer resident chunks and far fewer triangles (`119` chunks, `15,862` triangles in the fresh page smoke)
+- Added a hybrid far-field path instead of trying to brute-force resident radius:
+  - introduced a procedural far-field renderer with three visual-only height bands
+  - wired those bands through the existing renderer as extra mesh sources instead of inflating the authoritative resident world
+  - the HUD now reports far-field radius, rebuild cost, rebuilt bands, and far-field triangle count
+- Made the new far-field path correctness-safe for iterative tuning:
+  - fixed a cache bug where growing the near clear radius could leave stale far meshes in place until the player crossed a far-field anchor
+  - pinned that case down with a direct far-field test that rebuilds in place and verifies the near band sheds triangles when the clear radius grows
+- Added budgeted world-work primitives for the game path:
+  - resident-world updates can now stop after a configurable number of newly generated chunks and resume on repeated updates for the same anchor
+  - dirty chunk meshing can now stop after a configurable per-frame chunk budget instead of forcing a full remesh burst
+  - the game controller now uses those budgets and exposes pending chunk counts through the HUD/debug surface
+- Added correctness coverage for the budgeted streaming model:
+  - repeated same-anchor budgeted updates now have tests proving they eventually reach `complete = true`
+  - once the anchor is complete, repeated budgeted refreshes fall back to a no-op summary instead of redoing work
+- Re-ran the warmed local stream profiler after the far-field/budget slice:
+  - `bootstrap-r3`: stream avg `142.1 ms`, mesh avg `94.0 ms`, generated chunks `134`
+  - `widen-r2-to-r3`: stream avg `75.4 ms`, mesh avg `77.3 ms`, generated chunks `73`
+  - `shrink-r3-to-r2`: stream avg `0.21 ms`, mesh avg `31.4 ms`, evicted chunks `73`
+  - this profile is still useful for full-refresh cost, but it now overstates the actual game path because `/` uses bounded generation and bounded meshing per update
+- Found and fixed a correctness regression introduced by those same budgets:
+  - a fresh Chrome reload showed the player spawning below the world because bootstrap only loaded a partial near field and did not guarantee the support chunk under the player
+  - the HUD made this obvious immediately: negative Y, `Grounded = No`, and only `12` resident chunks after boot
+- Corrected the split between correctness-critical and hitch-sensitive paths:
+  - bootstrap, teleports, forced residency refreshes, and explicit view-distance changes now run a full settle pass again
+  - ordinary play movement still uses bounded chunk generation and bounded meshing per update
+  - this keeps the game responsive while avoiding obviously broken first frames and broken scripted probes
+- Tightened budgeted residency ordering instead of leaving it arbitrary:
+  - column generation is now prioritized by distance from the anchor so the center column comes first
+  - within each column, chunk Y order is now centered on the actual standing surface for the anchor column instead of the old low-to-high scan
+  - a direct unit test now proves a `maxGenerateChunks = 1` update loads the spawn support chunk first
+- Revalidated the stabilized game path in fresh Chrome 146:
+  - fresh `/` boot now lands grounded at about `142.8 m` feet / `144.5 m` eye height
+  - the near field is fully resident again on boot (`134` resident chunks, `0` pending)
+  - far-field visibility is still about `416 m`
+  - `teleportAndSettle()` now stays grounded and completes with `pending = 0`
+- Captured the current post-fix chunk-crossing browser baseline for the next optimization round:
+  - fresh Chrome 146 `benchmarkChunkCrossing(2, 1)` now reports about `31.2 ms` stream and `81.9 ms` mesh on average for the explicit full-settle benchmark path
+  - that benchmark is now clearly measuring correctness-oriented settle work, not ordinary movement hitch, so the next harness slice should add a separate incremental movement probe

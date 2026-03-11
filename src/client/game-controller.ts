@@ -14,6 +14,7 @@ import {
   teleportPlayerToEyePosition,
   type PlayerState,
 } from "../engine/player-physics.ts";
+import { ProceduralFarField, type FarFieldUpdateSummary } from "../engine/procedural-far-field.ts";
 import {
   diffChunkCoords,
   summarizeResidentWorld,
@@ -33,6 +34,8 @@ import type { MeshBuildSummary } from "../engine/mesher.ts";
 const MAX_DELTA_SECONDS = 0.05;
 const HUD_PUSH_INTERVAL_MS = 120;
 const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
+const MAX_GENERATED_CHUNKS_PER_UPDATE = 12;
+const MAX_MESH_REBUILDS_PER_FRAME = 12;
 
 export interface GameHudSnapshot {
   status: string;
@@ -50,11 +53,16 @@ export interface GameHudSnapshot {
   streamMs: number;
   streamGeneratedChunks: number;
   streamEvictedChunks: number;
+  streamPendingChunks: number;
   streamEmptyChunksSkipped: number;
   streamCachedEmptyChunkHits: number;
   streamDirtyResidentChunks: number;
   residencyRadiusChunks: number;
   surfaceY: number;
+  farFieldMs: number;
+  farFieldBuiltBands: number;
+  farFieldTriangles: number;
+  farFieldMaxRadiusMeters: number;
   meshMs: number;
   meshNewChunks: number;
   meshRemeshChunks: number;
@@ -144,7 +152,9 @@ export interface ChunkBoundaryBenchmark {
 
 export class GameController {
   readonly canvas: HTMLCanvasElement;
-  readonly world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337));
+  readonly generator = new ProceduralWorldGenerator(1337);
+  readonly world = new ProceduralResidentWorld(this.generator);
+  readonly farField = new ProceduralFarField(this.generator);
 
   renderer: WebGpuVoxelRenderer | null = null;
   camera: FirstPersonCameraState = createFirstPersonCamera([0.5, 1500, 0.5]);
@@ -166,6 +176,7 @@ export class GameController {
   };
   private lastRenderStats: RenderStats = zeroRenderStats();
   private lastStreamSummary: ResidencyUpdateSummary = cloneResidencySummary(this.world.lastResidency);
+  private lastFarFieldSummary: FarFieldUpdateSummary = this.farField.lastUpdate;
   private streamAnchor: StreamAnchor | null = null;
 
   private rafId = 0;
@@ -255,11 +266,16 @@ export class GameController {
       streamMs: this.lastStreamSummary.elapsedMs,
       streamGeneratedChunks: this.lastStreamSummary.generatedChunks,
       streamEvictedChunks: this.lastStreamSummary.evictedChunks,
+      streamPendingChunks: this.lastStreamSummary.pendingChunks,
       streamEmptyChunksSkipped: this.lastStreamSummary.emptyChunksSkipped,
       streamCachedEmptyChunkHits: this.lastStreamSummary.cachedEmptyChunkHits,
       streamDirtyResidentChunks: this.lastStreamSummary.dirtyResidentChunks,
       residencyRadiusChunks: this.lastStreamSummary.radiusChunks,
       surfaceY: this.lastStreamSummary.surfaceY,
+      farFieldMs: this.lastFarFieldSummary.elapsedMs,
+      farFieldBuiltBands: this.lastFarFieldSummary.builtBands,
+      farFieldTriangles: this.lastFarFieldSummary.triangleCount,
+      farFieldMaxRadiusMeters: this.lastFarFieldSummary.maxRadiusMeters,
       meshMs: this.meshMs,
       meshNewChunks: this.lastMeshBuildSummary.newMeshCount,
       meshRemeshChunks: this.lastMeshBuildSummary.remeshCount,
@@ -306,13 +322,12 @@ export class GameController {
     } = {},
   ): Promise<ResidencyTransitionProbe> {
     const before = this.snapshotResidentWorld();
-    const forceResidency = options.radiusChunks !== undefined;
     if (options.radiusChunks !== undefined) {
       this.world.setHorizontalRadiusChunks(options.radiusChunks);
     }
     teleportPlayerToEyePosition(this.player, position);
     this.syncCameraToPlayer();
-    const residency = this.syncWorldAroundPlayer(forceResidency);
+    const residency = this.syncWorldAroundPlayer(true);
     const render = await this.renderProbeFrame();
     const after = this.snapshotResidentWorld();
     const { entered, evicted } = diffChunkCoords(
@@ -549,9 +564,12 @@ export class GameController {
           changed: true,
         }
       : resolveStreamAnchor(this.streamAnchor, playerChunkX, playerChunkZ, STREAM_ANCHOR_MARGIN_CHUNKS);
+    if (force) {
+      return this.syncWorldAroundAnchor(resolved.anchor, true);
+    }
     if (!force && !resolved.changed) {
-      this.lastMeshBuildSummary = zeroMeshBuildSummary();
-      this.meshMs = 0;
+      this.lastFarFieldSummary = this.farField.updateAround(this.player.feetPosition, this.getNearClearRadiusWorldUnits());
+      this.flushMeshBuildBudget();
       this.lastStreamSummary = createIdleResidencySummary(
         this.lastStreamSummary,
         this.streamAnchor ?? resolved.anchor,
@@ -563,21 +581,18 @@ export class GameController {
     return this.syncWorldAroundAnchor(resolved.anchor);
   }
 
-  private syncWorldAroundAnchor(anchor: StreamAnchor): ResidencyUpdateSummary {
+  private syncWorldAroundAnchor(anchor: StreamAnchor, settle = false): ResidencyUpdateSummary {
     this.streamAnchor = anchor;
+    this.lastFarFieldSummary = this.farField.updateAround(this.player.feetPosition, this.getNearClearRadiusWorldUnits());
     const residency = this.world.updateResidencyAround(
       buildStreamAnchorPosition(anchor, this.world.chunkSize, this.player.feetPosition[1]),
+      { maxGenerateChunks: settle ? Number.POSITIVE_INFINITY : MAX_GENERATED_CHUNKS_PER_UPDATE },
     );
     this.lastStreamSummary = cloneResidencySummary(residency);
-    if (!residency.changed) {
-      this.lastMeshBuildSummary = zeroMeshBuildSummary();
-      this.meshMs = 0;
-      return cloneResidencySummary(this.lastStreamSummary);
-    }
-    const meshSummary = rebuildDirtyMeshes(this.world);
-    this.lastMeshBuildSummary = meshSummary;
-    this.meshMs = meshSummary.elapsedMs;
-    this.status = residency.generatedChunks > 0 || residency.evictedChunks > 0
+    this.flushMeshBuildBudget(settle ? Number.POSITIVE_INFINITY : MAX_MESH_REBUILDS_PER_FRAME);
+    this.status = residency.pendingChunks > 0
+      ? `Streaming ${residency.pendingChunks} pending chunk(s)`
+      : residency.generatedChunks > 0 || residency.evictedChunks > 0
       ? `Streamed ${residency.generatedChunks} chunk(s), evicted ${residency.evictedChunks}`
       : "Residency updated";
     return cloneResidencySummary(this.lastStreamSummary);
@@ -591,6 +606,16 @@ export class GameController {
     this.camera.position = getPlayerEyePosition(this.player);
   }
 
+  private getNearClearRadiusWorldUnits(): number {
+    return (this.world.horizontalRadiusChunks + 1) * this.world.chunkSize;
+  }
+
+  private flushMeshBuildBudget(maxChunks = MAX_MESH_REBUILDS_PER_FRAME): void {
+    const meshSummary = rebuildDirtyMeshes(this.world, maxChunks);
+    this.lastMeshBuildSummary = meshSummary;
+    this.meshMs = meshSummary.elapsedMs;
+  }
+
   private renderCurrentFrame(): {
     frameStats: RenderStats;
     frameCpuMs: number;
@@ -602,7 +627,7 @@ export class GameController {
     const aspect = this.canvas.width / this.canvas.height;
     const cameraMatrices = buildFirstPersonCameraMatrices(this.camera, aspect);
     const cpuStartedAt = performance.now();
-    const frameStats = this.renderer.render(this.world, cameraMatrices);
+    const frameStats = this.renderer.render(this.world, cameraMatrices, null, 0, this.farField.getRenderables());
     const frameCpuMs = performance.now() - cpuStartedAt;
     this.lastRenderStats = frameStats;
     this.lastFrameCpuMs = frameCpuMs;
@@ -662,16 +687,6 @@ function zeroRenderStats(): RenderStats {
   };
 }
 
-function zeroMeshBuildSummary(): MeshBuildSummary {
-  return {
-    meshCount: 0,
-    newMeshCount: 0,
-    remeshCount: 0,
-    triangleCount: 0,
-    elapsedMs: 0,
-  };
-}
-
 function zeroGameRenderProbe(): GameRenderProbe {
   return {
     frameCpuMs: 0,
@@ -717,11 +732,13 @@ function createIdleResidencySummary(
   return {
     ...summary,
     changed: false,
+    complete: true,
     centerChunkX: anchor.chunkX,
     centerChunkZ: anchor.chunkZ,
     radiusChunks,
     generatedChunks: 0,
     evictedChunks: 0,
+    pendingChunks: 0,
     emptyChunksSkipped: 0,
     cachedEmptyChunkHits: 0,
     touchedNeighborChunks: 0,
