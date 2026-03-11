@@ -55,29 +55,82 @@ test("generated chunk data matches direct material sampling", () => {
   }
 });
 
-test("procedural generator produces multiple biome families across distant coordinates", () => {
+test("procedural biome probe is deterministic for surface, fields, and landmarks", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const a = generator.sampleBiomeProbe(1440, -960);
+  const b = generator.sampleBiomeProbe(1440, -960);
+
+  expect(a).toEqual(b);
+});
+
+test("procedural generator produces a broad biome roster across distant coordinates", () => {
   const generator = new ProceduralWorldGenerator(1337);
   const biomeIds = new Set<string>();
-  for (let x = -8192; x <= 8192; x += 2048) {
-    for (let z = -8192; z <= 8192; z += 2048) {
-      biomeIds.add(generator.sampleColumn(x, z).biomeId);
+  const undergroundIds = new Set<string>();
+  for (let x = -8192; x <= 8192; x += 256) {
+    for (let z = -8192; z <= 8192; z += 256) {
+      const probe = generator.sampleBiomeProbe(x, z);
+      biomeIds.add(probe.biomeId);
+      undergroundIds.add(probe.undergroundBiomeId);
     }
   }
 
-  expect(biomeIds.size).toBeGreaterThanOrEqual(4);
+  expect(biomeIds.size).toBeGreaterThanOrEqual(6);
+  expect(undergroundIds.size).toBeGreaterThanOrEqual(4);
 });
 
-test("procedural generator respects the configured Y range", () => {
-  const generator = new ProceduralWorldGenerator(7, { maxYExclusive: PROCEDURAL_WORLD_MAX_Y });
-  const column = generator.sampleColumn(640, -1280);
+test("special biomes obey their host-biome rules", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  let marshCount = 0;
+  let emberCount = 0;
+  let bloomCount = 0;
 
-  expect(column.surfaceY).toBeGreaterThanOrEqual(8);
-  expect(column.surfaceY).toBeLessThan(PROCEDURAL_WORLD_MAX_Y);
-  expect(generator.sampleMaterial(640, -1, -1280)).toBe(0);
-  expect(generator.sampleMaterial(640, PROCEDURAL_WORLD_MAX_Y, -1280)).toBe(0);
+  for (let x = -8192; x <= 8192; x += 64) {
+    for (let z = -8192; z <= 8192; z += 64) {
+      const probe = generator.sampleBiomeProbe(x, z);
+      if (probe.biomeId === "marsh") {
+        marshCount += 1;
+        expect(["verdant", "steppe"]).toContain(probe.hostBiomeId);
+      }
+      if (probe.biomeId === "ember") {
+        emberCount += 1;
+        expect(["badlands", "highland"]).toContain(probe.hostBiomeId);
+      }
+      if (probe.biomeId === "bloom") {
+        bloomCount += 1;
+        expect(["verdant", "highland"]).toContain(probe.hostBiomeId);
+      }
+    }
+  }
+
+  expect(marshCount).toBeGreaterThan(0);
+  expect(emberCount).toBeGreaterThan(0);
+  expect(bloomCount).toBeGreaterThan(0);
 });
 
-test("procedural generator keeps the early terrain envelope near sea level with visible lowlands", () => {
+test("procedural generator avoids forbidden direct biome adjacencies", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const forbiddenPairs = new Set([
+    "dunes|tundra",
+    "badlands|marsh",
+    "ember|marsh",
+    "bloom|dunes",
+  ]);
+
+  for (let x = -4096; x <= 4096; x += 64) {
+    for (let z = -4096; z <= 4096; z += 64) {
+      const center = generator.sampleBiomeProbe(x, z);
+      const right = generator.sampleBiomeProbe(x + 64, z);
+      const forward = generator.sampleBiomeProbe(x, z + 64);
+      const rightPair = [center.biomeId, right.biomeId].sort().join("|");
+      const forwardPair = [center.biomeId, forward.biomeId].sort().join("|");
+      expect(forbiddenPairs.has(rightPair)).toBe(false);
+      expect(forbiddenPairs.has(forwardPair)).toBe(false);
+    }
+  }
+});
+
+test("procedural generator keeps the terrain envelope near sea level with visible lowlands", () => {
   const generator = new ProceduralWorldGenerator(1337);
   let minSurfaceY = Infinity;
   let maxSurfaceY = -Infinity;
@@ -95,7 +148,7 @@ test("procedural generator keeps the early terrain envelope near sea level with 
       maxSurfaceY = Math.max(maxSurfaceY, center.surfaceY);
       totalSurfaceY += center.surfaceY;
       sampleCount += 1;
-      if (center.surfaceY < generator.seaLevel) {
+      if ((center.waterTopY ?? center.surfaceY) > center.surfaceY) {
         underwaterCount += 1;
       }
       maxAdjacentStep = Math.max(
@@ -109,32 +162,92 @@ test("procedural generator keeps the early terrain envelope near sea level with 
   const averageSurfaceY = totalSurfaceY / sampleCount;
   const underwaterRatio = underwaterCount / sampleCount;
 
-  expect(minSurfaceY).toBeGreaterThanOrEqual(generator.seaLevel - 260);
-  expect(maxSurfaceY).toBeLessThanOrEqual(generator.seaLevel + 320);
+  expect(minSurfaceY).toBeGreaterThanOrEqual(generator.seaLevel - 240);
+  expect(maxSurfaceY).toBeLessThanOrEqual(generator.seaLevel + 420);
   expect(averageSurfaceY).toBeGreaterThanOrEqual(generator.seaLevel - 40);
-  expect(averageSurfaceY).toBeLessThanOrEqual(generator.seaLevel + 140);
-  expect(underwaterRatio).toBeGreaterThanOrEqual(0.05);
-  expect(underwaterRatio).toBeLessThanOrEqual(0.35);
+  expect(averageSurfaceY).toBeLessThanOrEqual(generator.seaLevel + 220);
+  expect(underwaterRatio).toBeGreaterThanOrEqual(0.04);
+  expect(underwaterRatio).toBeLessThanOrEqual(0.38);
   expect(maxAdjacentStep).toBeLessThanOrEqual(72);
 });
 
-test("procedural generator keeps biome-edge height jumps within a walkable starter-world budget", () => {
+test("soft biome edges stay within a walkable transition budget", () => {
   const generator = new ProceduralWorldGenerator(1337);
-  let maxBoundaryJump = 0;
+  const softPairs = new Set([
+    "highland|tundra",
+    "steppe|verdant",
+    "dunes|steppe",
+    "highland|verdant",
+    "marsh|steppe",
+    "marsh|verdant",
+    "bloom|highland",
+    "bloom|verdant",
+  ]);
+  let maxSoftBoundaryJump = 0;
+  let sawSoftBoundary = false;
 
-  for (let z = -2048; z <= 2048; z += 64) {
-    for (let x = -2048; x <= 2048; x += 64) {
-      const center = generator.sampleColumn(x, z);
-      const right = generator.sampleColumn(x + 1, z);
-      if (center.biomeId !== right.biomeId) {
-        maxBoundaryJump = Math.max(maxBoundaryJump, Math.abs(right.surfaceY - center.surfaceY));
+  for (let z = -4096; z <= 4096; z += 64) {
+    for (let x = -4096; x <= 4096; x += 64) {
+      const center = generator.sampleBiomeProbe(x, z);
+      const right = generator.sampleBiomeProbe(x + 64, z);
+      const forward = generator.sampleBiomeProbe(x, z + 64);
+      const rightPair = [center.biomeId, right.biomeId].sort().join("|");
+      const forwardPair = [center.biomeId, forward.biomeId].sort().join("|");
+      if (center.biomeId !== right.biomeId && softPairs.has(rightPair)) {
+        sawSoftBoundary = true;
+        maxSoftBoundaryJump = Math.max(maxSoftBoundaryJump, Math.abs(right.surfaceY - center.surfaceY));
       }
-      const forward = generator.sampleColumn(x, z + 1);
-      if (center.biomeId !== forward.biomeId) {
-        maxBoundaryJump = Math.max(maxBoundaryJump, Math.abs(forward.surfaceY - center.surfaceY));
+      if (center.biomeId !== forward.biomeId && softPairs.has(forwardPair)) {
+        sawSoftBoundary = true;
+        maxSoftBoundaryJump = Math.max(maxSoftBoundaryJump, Math.abs(forward.surfaceY - center.surfaceY));
       }
     }
   }
 
-  expect(maxBoundaryJump).toBeLessThanOrEqual(96);
+  expect(sawSoftBoundary).toBe(true);
+  expect(maxSoftBoundaryJump).toBeLessThanOrEqual(56);
+});
+
+test("landmarks appear across the world with multiple distinct families", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const landmarkIds = new Set<string>();
+
+  for (let z = -6144; z <= 6144; z += 16) {
+    for (let x = -6144; x <= 6144; x += 16) {
+      const landmarkId = generator.sampleBiomeProbe(x, z).landmarkId;
+      if (landmarkId) {
+        landmarkIds.add(landmarkId);
+      }
+    }
+  }
+
+  expect(landmarkIds.size).toBeGreaterThanOrEqual(6);
+  expect(landmarkIds.has("oak")).toBe(true);
+  expect(landmarkIds.has("hoodoo")).toBe(true);
+  expect(landmarkIds.has("ice_spire")).toBe(true);
+  expect(landmarkIds.has("palm") || landmarkIds.has("glowcap") || landmarkIds.has("basalt_spire")).toBe(true);
+});
+
+test("below-ground material identity varies across underground biome families", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const deepMaterials = new Set<number>();
+
+  for (let x = -4096; x <= 4096; x += 512) {
+    for (let z = -4096; z <= 4096; z += 512) {
+      const column = generator.sampleBiomeProbe(x, z);
+      deepMaterials.add(generator.sampleMaterial(x, Math.max(24, column.surfaceY - 28), z));
+    }
+  }
+
+  expect(deepMaterials.size).toBeGreaterThanOrEqual(4);
+});
+
+test("procedural generator respects the configured Y range", () => {
+  const generator = new ProceduralWorldGenerator(7, { maxYExclusive: PROCEDURAL_WORLD_MAX_Y });
+  const column = generator.sampleColumn(640, -1280);
+
+  expect(column.surfaceY).toBeGreaterThanOrEqual(8);
+  expect(column.surfaceY).toBeLessThan(PROCEDURAL_WORLD_MAX_Y);
+  expect(generator.sampleMaterial(640, -1, -1280)).toBe(0);
+  expect(generator.sampleMaterial(640, PROCEDURAL_WORLD_MAX_Y, -1280)).toBe(0);
 });

@@ -2419,3 +2419,60 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This fast path is worth keeping because it is tiny and measurably improved the warmed local far-field profile.
 - It is not the big remaining step.
 - The next higher-signal target is still broader far-field rebuild cost or deeper render-ready column representation cleanup.
+
+## 2026-03-11 field-driven biome rehaul
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-generator.test.ts`
+- `mise run test`
+- `mise run build`
+- direct worldgen timing screen:
+  - `mise exec -- bun -e '... sampleColumn() sweep + generateChunk() batch ...'`
+- direct landmark-envelope probe:
+  - `mise exec -- bun -e '... count columns where sampleColumn().topY > surfaceY ...'`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing after the generator rewrite and the `topY` envelope addition.
+- Focused biome tests:
+  - `12 pass`
+  - `0 fail`
+- `mise run test`:
+  - `94 pass`
+  - `0 fail`
+- `mise run build`: passing.
+
+#### Focused worldgen timing screen
+
+- Large `sampleColumn()` sweep:
+  - `sampleMs = 171.883`
+- `24`-chunk direct generation batch:
+  - `chunkMs = 29.351`
+- These are not directly comparable to the older generator benchmarks because the sampled workload changed, but they were good enough as a sanity screen that the richer biome logic had not exploded the hot path.
+
+#### Landmark / residency envelope probe
+
+- Broad sampled-column scan:
+  - `raised = 481`
+- Interpretation:
+  - there are hundreds of sampled columns where the solid top sits above the walkable terrain surface because of landmarks/objects
+  - the resident-world `computeChunkYRange()` path now needs that envelope, which is why this slice added `sampleColumn().topY` and switched vertical residency to `max(surfaceY, topY, waterTopY)`
+
+#### Focused biome-regression outcomes
+
+- Biome probe determinism: passing
+- Broad biome roster coverage: passing
+- Special-biome host rules: passing
+- Forbidden direct adjacencies: passing
+- Soft-edge height budget: passing
+- Landmark-family coverage: passing
+- Underground-family material variation: passing
+- Y-range guard: passing
+
+#### Residual
+
+- This slice is worth keeping.
+- The generator is materially richer and still passes the repo's current correctness/perf screens.
+- The next likely worldgen step is not another selector tweak; it is either:
+  - more deliberate landmark/object generation
+  - or wider world-system integration such as biome-aware spawn traits, route planning, and later persistence

@@ -837,3 +837,56 @@
   - simple
   - measurable
   - no new system to maintain
+
+### Field-driven biome rehaul
+
+- Replaced the old selector-driven five-biome generator with a field-driven biome model in `src/engine/procedural-generator.ts`:
+  - large-scale rule fields now drive the world:
+    - `temperature`
+    - `moisture`
+    - `uplift`
+    - `drainage`
+    - `volcanism`
+    - `magic`
+  - base biomes are now:
+    - `verdant`
+    - `steppe`
+    - `dunes`
+    - `badlands`
+    - `highland`
+    - `tundra`
+  - special/nested biomes are now:
+    - `marsh`
+    - `ember`
+    - `bloom`
+  - underground families are now explicit instead of being implied by one surface-biome palette
+- Kept the generator performant enough for the current engine shape:
+  - generation still runs from one deterministic per-column state pass
+  - chunk generation still writes through typed scratch arrays rather than rebuilding per-voxel biome objects
+  - I accepted some extra scalar work for richer biomes and landmarks, but kept the structure chunk-local and cache-friendly
+- The main qualitative worldgen changes are:
+  - terrain parameters blend between the strongest base-biome influences instead of switching hard at selector borders
+  - special biomes only appear under host-biome / field rules rather than from arbitrary selector noise
+  - landmark/object families now exist:
+    - oak
+    - standing stone
+    - palm
+    - hoodoo
+    - fir
+    - ice spire
+    - cypress
+    - basalt spire
+    - glowcap
+  - the generator now exposes a `topY` column envelope so residency can account for landmark height without changing the meaning of `surfaceY`
+- The new regression suite is much closer to the actual design goals:
+  - special-biome host rules
+  - forbidden direct biome adjacencies
+  - soft-edge height-jump budget
+  - landmark-family coverage
+  - underground-family material variation
+- Raman's performance warning and Nietzsche's compatibility warning were both useful here:
+  - Raman was right that the current generator still needs a compact internal column-state path instead of richer public-object churn
+  - Nietzsche was right that once landmarks exist, vertical residency can no longer rely only on `surfaceY` / `waterTopY`
+- I also cleaned up a stale-doc inconsistency while landing the biome slice:
+  - `docs/loop/plan.md` and `docs/roadmap.md` still had old `1 cm` voxel wording
+  - those references now correctly describe the current `10 cm` baseline

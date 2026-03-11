@@ -8,7 +8,7 @@ The game direction is intentionally demanding:
 
 - full-screen WebGPU canvas with click-to-capture cursor
 - Minecraft-inspired interaction model
-- voxel scale around `1 cm^3`
+- voxel scale around `10 cm^3`
 - procedurally generated world
 - effectively infinite `X/Z`
 - `Y` range `0..16383`
@@ -21,7 +21,7 @@ The game direction is intentionally demanding:
 The first hands-on game pass exposed five immediate problems that now outrank micro-optimizing the current renderer path:
 
 - the player has no collision
-- the camera/body scale does not read as a `1 cm^3` voxel world
+- the camera/body scale does not read as a `10 cm^3` voxel world
 - terrain envelopes feel too extreme for an early exploration baseline
 - the current resident radius is physically tiny at the intended voxel scale
 - synchronous stream-in/remesh work is still hitching visibly during movement
@@ -193,7 +193,7 @@ Status:
 - With hysteresis in place, use the same probe to choose the next hitch slice:
   - either deeper async streaming
   - or boundary remesh reduction for the larger jumps that still churn
-- Keep pushing the world toward a readable `1 cm` baseline:
+- Keep pushing the world toward a readable `10 cm` baseline:
   - tame terrain envelopes before adding more visual complexity
   - then attack true draw distance with a far-field representation rather than just increasing near-chunk radius
 - Keep the procedural stream profiler and browser probes aligned so local and Chrome decisions stay comparable.

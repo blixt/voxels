@@ -231,7 +231,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
   }
 
   getSpawnPosition(): Vec3 {
-    const preferredBiomes = new Set(["verdant", "dunes", "badlands"]);
+    const preferredBiomes = new Set(["verdant", "steppe", "highland", "bloom"]);
     let fallback = this.sampleSpawnCandidate(0, 0);
     let fallbackPosition: Vec3 = [0.5, fallback.standY, 0.5];
     for (let ring = 0; ring <= 24; ring += 1) {
@@ -436,17 +436,19 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     const chunkOriginZ = cz * this.chunkSize;
     let minSurfaceY = Number.POSITIVE_INFINITY;
     let maxSurfaceY = Number.NEGATIVE_INFINITY;
+    let maxTopY = Number.NEGATIVE_INFINITY;
     let maxWaterTopY = Number.NEGATIVE_INFINITY;
     for (const [offsetX, offsetZ] of sampleOffsets(this.chunkSize)) {
       const column = this.generator.sampleColumn(chunkOriginX + offsetX, chunkOriginZ + offsetZ);
       minSurfaceY = Math.min(minSurfaceY, column.surfaceY);
       maxSurfaceY = Math.max(maxSurfaceY, column.surfaceY);
+      maxTopY = Math.max(maxTopY, column.topY);
       maxWaterTopY = Math.max(maxWaterTopY, column.waterTopY ?? column.surfaceY);
     }
     const minWorldY = Math.max(this.minY, minSurfaceY - this.undergroundPaddingChunks * this.chunkSize);
     const maxWorldY = Math.min(
       this.maxYExclusive - 1,
-      Math.max(maxSurfaceY, maxWaterTopY) + this.airPaddingChunks * this.chunkSize,
+      Math.max(maxSurfaceY, maxTopY, maxWaterTopY) + this.airPaddingChunks * this.chunkSize,
     );
     return [
       Math.max(0, Math.floor(minWorldY / this.chunkSize)),

@@ -2,7 +2,8 @@
 
 Date: 2026-03-11
 
-This note captures the first isolated procedural-world slice before it is wired into the live game.
+This note started as the first isolated procedural-world slice before it was wired into the live game.
+The current biome rework is tracked in `biome-rehaul-notes.md`; this file now serves as the concise worldgen baseline plus the delta from that first pass.
 
 ## Goals for the first generator
 
@@ -24,40 +25,61 @@ The generator uses a fixed `#RGB` material palette:
 
 ## Current biome strategy
 
-The first generator deliberately keeps the biome logic simple and testable:
+The current generator is no longer a hard selector over a tiny biome roster.
+It now uses field-driven surface/underground rules:
 
-- low-frequency selector field for coarse biome regions
-- climate fields (`temperature`, `moisture`, `weirdness`) to rebalance or override that selector
-- biome families:
+- large-scale world-rule fields:
+  - `temperature`
+  - `moisture`
+  - `uplift`
+  - `drainage`
+  - `volcanism`
+  - `magic`
+- base biome families:
   - `verdant`
+  - `steppe`
   - `dunes`
   - `badlands`
+  - `highland`
   - `tundra`
+- special / nested biome families:
+  - `marsh`
   - `ember`
-- each biome defines:
-  - surface color
-  - subsurface color
-  - stone/deep-stone colors
-  - accent color
-  - water color
-  - snow color
-  - terrain-height parameters
+  - `bloom`
+- underground families:
+  - `rooted`
+  - `sedimentary`
+  - `sandy`
+  - `granitic`
+  - `froststone`
+  - `basaltic`
+- deterministic landmark families:
+  - oak
+  - standing stone
+  - palm
+  - hoodoo
+  - fir
+  - ice spire
+  - cypress
+  - basalt spire
+  - glowcap
+
+The detailed rules and transition policy live in `biome-rehaul-notes.md`.
 
 ## Terrain strategy
 
-- world height is sampled per column from several low-frequency fields:
-  - macro relief
-  - ridge emphasis
-  - medium detail
-  - basin offset
+- world height is still sampled per column, but now from blended biome terrain parameters driven by the world-rule fields
+- height transitions are softened by blending the strongest base-biome influences instead of switching terrain parameters at a selector border
+- special biomes can still create stronger local identity, but that sharpness is tied to the field system rather than random biome boundaries
 - voxel material is then resolved from:
   - surface level
   - water level
   - shallow subsurface band
   - deeper strata bands
-  - rare accent pockets
+  - underground-family accents
+  - landmark/object voxels above the terrain surface when a column falls inside a deterministic landmark footprint
 
-This is intentionally not trying to solve caves, structures, vegetation, or streaming yet.
+This is still intentionally not trying to solve caves or general structures yet, but it now does solve the first landmark/object pass.
 
 ## Verification added with this slice
 
@@ -65,10 +87,16 @@ This is intentionally not trying to solve caves, structures, vegetation, or stre
 - chunk determinism test
 - chunk data vs direct sampler consistency test
 - biome-distribution test over a large coordinate grid
+- host-rule test for special biomes
+- forbidden-adjacency probe
+- soft-edge height-budget probe
+- landmark-family coverage probe
+- underground-family material-variation probe
 - explicit `Y`-range guard test
+- landmark-aware column-top envelope for resident-world vertical streaming
 
-## Next likely connection point
+## Current next likely connection points
 
-Wire the generator into a resident-world wrapper rather than directly into the renderer or `getVoxel()`.
-
-That keeps generation explicit, testable, and measurable, and avoids accidental chunk creation from meshing or ray traversal.
+- grow landmark/object generation beyond simple single-cell silhouettes
+- add richer biome/landmark-aware spawn heuristics instead of string sets
+- keep worldgen measurements alongside the richer biome system so the new variety does not silently undo the performance work
