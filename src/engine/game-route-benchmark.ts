@@ -47,6 +47,19 @@ export interface BottomCenterVoidProbe {
   suspicious: boolean;
 }
 
+export interface SettledReferenceDiffProbe {
+  sampleCount: number;
+  changedPixelCount: number;
+  changedRatio: number;
+  clearToFilledPixelCount: number;
+  clearToFilledRatio: number;
+  filledToClearPixelCount: number;
+  filledToClearRatio: number;
+  maxClearToFilledRun: number;
+  maxClearToFilledRunRatio: number;
+  suspiciousHole: boolean;
+}
+
 export interface RouteFrameAccountingSample {
   gameplayFrameMs: number;
   movementMs: number;
@@ -233,6 +246,96 @@ export function summarizeRouteFrameAccounting(
     avgMeasuredWorkMs: average(measuredWorkSamples),
     p95MeasuredWorkMs: percentile(measuredWorkSamples, 0.95),
     maxMeasuredWorkMs: maxValue(measuredWorkSamples),
+  };
+}
+
+export function analyzeSettledReferenceDiff(
+  transientImage: {
+    width: number;
+    height: number;
+    pixels: Uint8ClampedArray;
+  },
+  settledImage: {
+    width: number;
+    height: number;
+    pixels: Uint8ClampedArray;
+  },
+  options: {
+    xMinFraction?: number;
+    xMaxFraction?: number;
+    yMinFraction?: number;
+    yMaxFraction?: number;
+    channelDeltaThreshold?: number;
+  } = {},
+): SettledReferenceDiffProbe {
+  if (
+    transientImage.width !== settledImage.width
+    || transientImage.height !== settledImage.height
+  ) {
+    throw new Error("Transient and settled images must have matching dimensions.");
+  }
+
+  const width = transientImage.width;
+  const height = transientImage.height;
+  const xMin = Math.max(0, Math.floor(width * (options.xMinFraction ?? 0.08)));
+  const xMaxExclusive = Math.min(width, Math.ceil(width * (options.xMaxFraction ?? 0.92)));
+  const yMin = Math.max(0, Math.floor(height * (options.yMinFraction ?? 0.42)));
+  const yMaxExclusive = Math.min(height, Math.ceil(height * (options.yMaxFraction ?? 0.96)));
+  const channelDeltaThreshold = Math.max(0, options.channelDeltaThreshold ?? 18);
+  let sampleCount = 0;
+  let changedPixelCount = 0;
+  let clearToFilledPixelCount = 0;
+  let filledToClearPixelCount = 0;
+  let maxClearToFilledRun = 0;
+
+  for (let y = yMin; y < yMaxExclusive; y += 1) {
+    let currentClearToFilledRun = 0;
+    for (let x = xMin; x < xMaxExclusive; x += 1) {
+      const index = (y * width + x) * 4;
+      const transientR = transientImage.pixels[index + 0] ?? 0;
+      const transientG = transientImage.pixels[index + 1] ?? 0;
+      const transientB = transientImage.pixels[index + 2] ?? 0;
+      const settledR = settledImage.pixels[index + 0] ?? 0;
+      const settledG = settledImage.pixels[index + 1] ?? 0;
+      const settledB = settledImage.pixels[index + 2] ?? 0;
+      const delta = Math.abs(transientR - settledR)
+        + Math.abs(transientG - settledG)
+        + Math.abs(transientB - settledB);
+      const transientClear = isClearPixel(transientR, transientG, transientB);
+      const settledClear = isClearPixel(settledR, settledG, settledB);
+      sampleCount += 1;
+      if (delta >= channelDeltaThreshold) {
+        changedPixelCount += 1;
+      }
+      if (transientClear && !settledClear) {
+        clearToFilledPixelCount += 1;
+        currentClearToFilledRun += 1;
+        maxClearToFilledRun = Math.max(maxClearToFilledRun, currentClearToFilledRun);
+      } else {
+        currentClearToFilledRun = 0;
+      }
+      if (!transientClear && settledClear) {
+        filledToClearPixelCount += 1;
+      }
+    }
+  }
+
+  const sampleWindowWidth = Math.max(1, xMaxExclusive - xMin);
+  const changedRatio = sampleCount === 0 ? 0 : changedPixelCount / sampleCount;
+  const clearToFilledRatio = sampleCount === 0 ? 0 : clearToFilledPixelCount / sampleCount;
+  const filledToClearRatio = sampleCount === 0 ? 0 : filledToClearPixelCount / sampleCount;
+  const maxClearToFilledRunRatio = maxClearToFilledRun / sampleWindowWidth;
+  return {
+    sampleCount,
+    changedPixelCount,
+    changedRatio,
+    clearToFilledPixelCount,
+    clearToFilledRatio,
+    filledToClearPixelCount,
+    filledToClearRatio,
+    maxClearToFilledRun,
+    maxClearToFilledRunRatio,
+    suspiciousHole: clearToFilledRatio >= 0.008 || maxClearToFilledRunRatio >= 0.1,
   };
 }
 

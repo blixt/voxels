@@ -1704,3 +1704,125 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - The remaining two problems are now sharper:
   - visible-ground gaps during movement are still unchanged
   - settled mask-only near-transition rebuilds can still cost about `38-40 ms` even when no sample-cache rebuild is needed, so the next far-field win likely has to attack mesh-build cost directly
+
+### Close-range fallback coverage
+
+#### Commands
+
+- `mise exec -- bun test tests/procedural-far-field.test.ts`
+- `mise exec -- bun run typecheck`
+- fresh Chrome 146 on `http://localhost:3000/`:
+  - `window.__VOXELS_GAME__.benchmarkRouteExperience({ durationSeconds: 10, settleSeconds: 4, sampleHz: 60, speedMetersPerSecond: 4.6, seamProbeStrideFrames: 15, captureStrideFrames: 30, captureWidth: 96, captureHeight: 54 })`
+
+#### Automated checks
+
+- `tests/procedural-far-field.test.ts` now includes:
+  - near-transition can cover cells close to the player when the detailed world is not masking them
+- targeted tests: passing
+- `typecheck`: passing
+
+#### Browser route benchmark
+
+- Fresh Chrome 146 route benchmark after removing the forced near-transition inner hole reported:
+  - `framesWithVisibleGroundGaps = 0` down from `64`
+  - `maxVisibleGroundUncoveredCount = 0` down from `24`
+  - `framesWithHoleSignals = 0` down from `64`
+  - `avgGameplayFrameMs = 7.15` versus about `7.07` previously
+  - `p95GameplayFrameMs = 18.7`
+  - `maxGameplayFrameMs = 110.8`
+  - `avgFarFieldMs = 1.28`
+  - `maxFarFieldMs = 93.4`
+  - `settleFramesUntilComplete = 52`
+
+#### Residual
+
+- The close-range visible hole is fixed on the deterministic walking benchmark.
+- The remaining performance issue is now primarily stutter rather than correctness:
+  - frame-time envelope is roughly unchanged
+  - the next meaningful target is still far-field mesh-build cost and/or detailed streaming work, not hole coverage
+
+### Settled-reference visual diff and retained neighbor meshes
+
+#### Commands
+
+- `mise exec -- bun test tests/game-route-benchmark.test.ts tests/procedural-resident-world.test.ts`
+- `mise exec -- bun run typecheck`
+- fresh Chrome 146 on `http://localhost:3000/`:
+  - `window.__VOXELS_GAME__.benchmarkRouteExperience({ durationSeconds: 10, settleSeconds: 4, sampleHz: 60, speedMetersPerSecond: 4.6, seamProbeStrideFrames: 15, captureStrideFrames: 30, captureWidth: 96, captureHeight: 54, referenceDiffStrideFrames: 20, referenceDiffLimit: 12 })`
+  - budget sweep on the same route benchmark for:
+    - `8/6/1`
+    - `8/8/1`
+    - `8/10/1`
+    - `10/8/1`
+    - `10/10/1`
+    - `6/6/1`
+    - `6/8/1`
+    - `6/10/1`
+    - `7/6/1`
+
+#### Automated checks
+
+- `tests/game-route-benchmark.test.ts` now includes:
+  - settled-reference diff flags transient `clear -> filled` terrain holes
+  - settled-reference diff ignores ordinary shading drift without hole pixels
+- `tests/procedural-resident-world.test.ts` now includes:
+  - dirty remesh neighbors retain their existing mesh until rebuilt
+- targeted tests: passing
+- `typecheck`: passing
+
+#### Browser route benchmark
+
+- Before the retained-mesh change, the new same-pose settled-reference diff still found a real transient hole sample:
+  - `framesWithSettledReferenceHoleSignals = 1`
+  - worst sample:
+    - `frame = 180`
+    - `pendingChunks = 28`
+    - `dirtyResidentChunks = 228`
+    - `visibleGroundUncoveredCount = 0`
+    - `settledReferenceClearToFilledRatio = 0.00610`
+    - `settledReferenceMaxClearToFilledRunRatio = 0.1341`
+- After keeping dirty neighbor meshes visible until replacement is ready, fresh Chrome 146 reported:
+  - `framesWithSettledReferenceHoleSignals = 0`
+  - `framesWithHoleSignals = 0`
+  - `maxSettledReferenceClearToFilledRatio = 0`
+  - `maxSettledReferenceClearToFilledRunRatio = 0`
+  - `maxDirtyMeshlessResidentChunks = 20`
+  - `maxDirtyRetainedMeshResidentChunks = 245`
+- After restoring the original `near-transition.innerRadius = 6 m`, the stronger route benchmark still stayed clean:
+  - `framesWithSettledReferenceHoleSignals = 0`
+  - `framesWithHoleSignals = 0`
+  - `maxSettledReferenceClearToFilledRatio = 0`
+  - `maxSettledReferenceClearToFilledRunRatio = 0`
+- With the new default `7/6/1` streaming budgets, the same route benchmark reported:
+  - `avgGameplayFrameMs = 6.84`
+  - `p95GameplayFrameMs = 16.4`
+  - `maxGameplayFrameMs = 107.9`
+  - `avgStreamMs = 1.95`
+  - `avgMeshMs = 3.36`
+  - `avgFarFieldMs = 1.21`
+  - `framesWithSettledReferenceHoleSignals = 0`
+  - `settleFramesUntilComplete = 53`
+
+#### Budget sweep
+
+- Deterministic route sweep result:
+  - `8/6/1`: `avg 7.58 ms`, `p95 17.8 ms`
+  - `8/8/1`: `avg 7.88 ms`, `p95 20.3 ms`
+  - `8/10/1`: `avg 7.96 ms`, `p95 22.3 ms`
+  - `10/8/1`: `avg 7.60 ms`, `p95 22.1 ms`
+  - `10/10/1`: `avg 7.80 ms`, `p95 24.4 ms`
+  - `6/6/1`: `avg 7.93 ms`, `p95 15.9 ms`
+  - `6/8/1`: `avg 8.05 ms`, `p95 18.1 ms`
+  - `6/10/1`: `avg 8.20 ms`, `p95 20.3 ms`
+  - `7/6/1`: `avg 7.42 ms`, `p95 16.3 ms`
+- `7/6/1` was the best overall tradeoff from the sampled search:
+  - lower average than `8/6/1`
+  - lower `p95` than `8/6/1`
+  - no route hole signals under the stronger settled-reference oracle
+
+#### Residual
+
+- The geometry-disappearing complaint is now explained and fixed by a directly visual benchmark, not only by a world-space proxy.
+- The next meaningful bottleneck remains hitch cost rather than visible correctness:
+  - far-field near-transition rebuild spikes still dominate the worst frames
+  - detailed chunk meshing is still the largest sustained non-far-field cost during movement

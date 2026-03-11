@@ -557,3 +557,48 @@
   - the browser route benchmark moved from catastrophic `~419 ms` far-field spikes down to about `94 ms`
   - average gameplay-frame CPU improved materially as well
   - the remaining worst far-field cost is still real, but it is now much smaller and much more attributable
+
+### Close-range fallback coverage
+
+- Followed up directly on the latest walking feedback:
+  - the major remaining user-visible issue was no longer seam correctness or huge far-field spikes
+  - it was the brief hole in the ground while a close detailed chunk had not streamed in yet
+- Used the new route benchmark to check where those holes lived:
+  - they were in nonresident, non-render-ready columns only a few meters ahead of the player
+  - that pointed at the intentionally empty near-transition inner radius rather than a true seam bug
+- Changed the near-transition band to allow fallback coverage all the way to the player for any column that is not masked by render-ready detailed chunks.
+- Added a direct unit guardrail so the near-transition policy is explicit:
+  - unmasked cells at the player position are now coverable by the near-transition band
+- Result:
+  - the deterministic route benchmark now reports zero visible-ground gap frames
+  - the hole complaint is resolved without materially changing the frame-time envelope
+
+### Settled-reference visual diff and retained neighbor meshes
+
+- Re-opened the hole complaint after the user reported that the earlier world-space probe still was not matching what was visible while walking.
+- Added a stronger browser oracle on the real gameplay route:
+  - sampled route frames can now be captured during movement
+  - those same frames are later replayed from the exact same camera pose after the world is fully settled
+  - the benchmark diffs transient-vs-settled images and specifically counts `clear -> filled` pixels in the lower gameplay window
+  - this gives the repo a direct way to detect “terrain was missing on screen and later appeared” without hand-normalizing camera motion
+- The stronger oracle immediately corrected the diagnosis:
+  - the route benchmark still found a real transient hole frame even when `visibleGroundUncoveredCount = 0`
+  - the old forward-ground probe was still useful, but not sufficient by itself
+- Code audit plus the new route sample pointed at a stronger root cause than the far-field inner-radius policy:
+  - newly generated or evicted chunks were marking adjacent resident chunks dirty by clearing their mesh immediately
+  - those neighbor chunks could then disappear for many frames until the remesh budget finally rebuilt them
+  - that matches the user report much better than the earlier proxy explanation
+- Changed the resident-world dirtying path to keep an existing mesh until its replacement is ready:
+  - dirty neighbors stay visible while waiting for remesh
+  - render-ready masking now treats “built with a retained mesh” as present geometry instead of forcing the far field to guess
+- Extended the route benchmark so it now also tracks:
+  - `dirtyMeshlessResidentChunks`
+  - `dirtyRetainedMeshResidentChunks`
+  - this makes it obvious whether the runtime is still dropping already-visible geometry under backlog
+- Ran a deterministic route budget sweep after the visual fix:
+  - throwing more generation or meshing work at each frame did not improve the real-route frame envelope overall
+  - lowering generation pressure slightly to `7/6/1` (`generate/mesh/far`) produced a better deterministic route balance than the old `8/6/1`
+- Result:
+  - the same-pose settled-reference diff now reports zero transient hole frames on the 10-second route
+  - the route benchmark now exposes the remaining issue as hitch cost and backlog policy instead of disappearing geometry
+  - with the stronger oracle in place, the earlier `near-transition.innerRadius = 0` tweak turned out not to be needed anymore, so it was reverted to keep the far-field policy lean

@@ -247,3 +247,26 @@ test("render-ready far-field mask only excludes columns after their meshes are b
     centerChunkZ * world.chunkSize + 1,
   )).toBe(true);
 });
+
+test("dirty remesh neighbors retain their existing mesh until rebuilt", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    horizontalRadiusChunks: 1,
+  });
+  const spawn = world.getSpawnPosition();
+  const centerChunkX = Math.floor(spawn[0] / world.chunkSize);
+  const centerChunkZ = Math.floor(spawn[2] / world.chunkSize);
+  const supportChunkY = Math.floor((spawn[1] - 1) / world.chunkSize);
+
+  world.updateResidencyAround(spawn, { maxGenerateChunks: 1 });
+  rebuildDirtyMeshes(world, Number.POSITIVE_INFINITY);
+  const supportChunk = world.getResidentChunk(centerChunkX, supportChunkY, centerChunkZ);
+  expect(supportChunk?.meshBuilt).toBe(true);
+  expect(supportChunk?.mesh).not.toBeNull();
+
+  world.updateResidencyAround(spawn, { maxGenerateChunks: 1 });
+
+  const dirtySupportChunk = world.getResidentChunk(centerChunkX, supportChunkY, centerChunkZ);
+  expect(dirtySupportChunk?.meshDirty).toBe(true);
+  expect(dirtySupportChunk?.meshBuilt).toBe(true);
+  expect(dirtySupportChunk?.mesh).not.toBeNull();
+});

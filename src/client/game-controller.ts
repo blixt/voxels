@@ -1,5 +1,6 @@
 import { average, maxValue, percentile } from "../engine/benchmark-metrics.ts";
 import {
+  analyzeSettledReferenceDiff,
   analyzeBottomCenterVoid,
   buildDefaultRouteBenchmarkPlan,
   summarizeRouteFrameAccounting,
@@ -43,7 +44,7 @@ import type { MeshBuildSummary } from "../engine/mesher.ts";
 const MAX_DELTA_SECONDS = 0.05;
 const HUD_PUSH_INTERVAL_MS = 120;
 const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
-const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 8;
+const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 7;
 const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 6;
 const DEFAULT_MAX_FAR_FIELD_BAND_REBUILDS_PER_FRAME = 1;
 
@@ -321,6 +322,8 @@ export interface RouteExperienceBenchmarkOptions {
   captureStrideFrames?: number;
   captureWidth?: number;
   captureHeight?: number;
+  referenceDiffStrideFrames?: number;
+  referenceDiffLimit?: number;
 }
 
 export interface RouteExperienceFrameSample {
@@ -335,6 +338,8 @@ export interface RouteExperienceFrameSample {
   complete: boolean;
   pendingChunks: number;
   dirtyResidentChunks: number;
+  dirtyMeshlessResidentChunks: number;
+  dirtyRetainedMeshResidentChunks: number;
   generatedChunks: number;
   evictedChunks: number;
   movementMs: number;
@@ -375,6 +380,10 @@ export interface RouteExperienceFrameSample {
   screenVoidRatio: number | null;
   screenVoidMaxRunRatio: number | null;
   screenVoidSuspicious: boolean;
+  settledReferenceChangedRatio: number | null;
+  settledReferenceClearToFilledRatio: number | null;
+  settledReferenceMaxClearToFilledRunRatio: number | null;
+  settledReferenceSuspiciousHole: boolean;
   suspiciousHole: boolean;
 }
 
@@ -432,10 +441,16 @@ export interface RouteExperienceBenchmarkSummary {
   framesWithVisibleGroundGaps: number;
   framesWithSeamGaps: number;
   framesWithScreenVoidSignals: number;
+  framesWithSettledReferenceHoleSignals: number;
   framesWithHoleSignals: number;
   maxScreenVoidRatio: number;
+  maxSettledReferenceChangedRatio: number;
+  maxSettledReferenceClearToFilledRatio: number;
+  maxSettledReferenceClearToFilledRunRatio: number;
   maxPendingChunks: number;
   maxDirtyResidentChunks: number;
+  maxDirtyMeshlessResidentChunks: number;
+  maxDirtyRetainedMeshResidentChunks: number;
   settleFramesUntilComplete: number | null;
 }
 
@@ -444,6 +459,8 @@ export interface RouteExperienceBenchmark {
   radiusChunks: number;
   captureStrideFrames: number;
   seamProbeStrideFrames: number;
+  referenceDiffStrideFrames: number;
+  referenceDiffLimit: number;
   durationSeconds: number;
   settleSeconds: number;
   totalDistanceMeters: number;
@@ -451,6 +468,17 @@ export interface RouteExperienceBenchmark {
   speedMetersPerSecond: number;
   samples: RouteExperienceFrameSample[];
   summary: RouteExperienceBenchmarkSummary;
+}
+
+interface CapturedBenchmarkFrame {
+  sampleIndex: number;
+  target: Pick<RouteBenchmarkFrameTarget, "frame" | "simTimeSeconds" | "distanceMeters" | "feetPosition" | "yaw" | "pitch">
+    & { phase: "move" | "settle" };
+  image: {
+    width: number;
+    height: number;
+    pixels: Uint8ClampedArray;
+  };
 }
 
 export class GameController {
@@ -1175,6 +1203,8 @@ export class GameController {
     );
     const captureWidth = clampPositiveInt(options.captureWidth ?? 128, 128);
     const captureHeight = clampPositiveInt(options.captureHeight ?? 72, 72);
+    const referenceDiffStrideFrames = Math.max(0, Math.floor(options.referenceDiffStrideFrames ?? 0));
+    const referenceDiffLimit = Math.max(0, Math.floor(options.referenceDiffLimit ?? 24));
     const spawnFeet = this.world.getSpawnPosition();
     const routePlan = buildDefaultRouteBenchmarkPlan(
       spawnFeet,
@@ -1225,20 +1255,29 @@ export class GameController {
       await this.renderer?.waitForGpuIdle();
 
       const samples: RouteExperienceFrameSample[] = [];
+      const capturedFrames: CapturedBenchmarkFrame[] = [];
       for (const target of routePlan.frames) {
-        samples.push(await this.runRouteExperienceFrame(
+        const frameResult = await this.runRouteExperienceFrame(
           target,
           seamProbeStrideFrames,
           captureStrideFrames,
           captureWidth,
           captureHeight,
-        ));
+          referenceDiffStrideFrames,
+          referenceDiffLimit,
+          samples.length,
+          capturedFrames.length,
+        );
+        samples.push(frameResult.sample);
+        if (frameResult.capturedFrame) {
+          capturedFrames.push(frameResult.capturedFrame);
+        }
       }
 
       const finalTarget = routePlan.frames[routePlan.frames.length - 1] ?? initialTarget;
       const maxSettleFrames = Math.max(1, Math.round(settleSeconds * sampleHz));
       for (let settleFrame = 1; settleFrame <= maxSettleFrames; settleFrame += 1) {
-        const sample = await this.runRouteExperienceFrame(
+        const frameResult = await this.runRouteExperienceFrame(
           {
             ...finalTarget,
             frame: routePlan.frames.length + settleFrame,
@@ -1250,8 +1289,16 @@ export class GameController {
           captureStrideFrames,
           captureWidth,
           captureHeight,
+          referenceDiffStrideFrames,
+          referenceDiffLimit,
+          samples.length,
+          capturedFrames.length,
         );
+        const sample = frameResult.sample;
         samples.push(sample);
+        if (frameResult.capturedFrame) {
+          capturedFrames.push(frameResult.capturedFrame);
+        }
         if (
           sample.complete
           && sample.pendingChunks === 0
@@ -1263,11 +1310,17 @@ export class GameController {
         }
       }
 
+      if (capturedFrames.length > 0) {
+        await this.applySettledReferenceDiffs(samples, capturedFrames);
+      }
+
       return {
         seed: this.generator.seed,
         radiusChunks: this.world.horizontalRadiusChunks,
         captureStrideFrames,
         seamProbeStrideFrames,
+        referenceDiffStrideFrames,
+        referenceDiffLimit,
         durationSeconds: routePlan.durationSeconds,
         settleSeconds,
         totalDistanceMeters: routePlan.totalDistanceMeters,
@@ -1527,7 +1580,14 @@ export class GameController {
     captureStrideFrames: number,
     captureWidth: number,
     captureHeight: number,
-  ): Promise<RouteExperienceFrameSample> {
+    referenceDiffStrideFrames: number,
+    referenceDiffLimit: number,
+    sampleIndex: number,
+    capturedFrameCount: number,
+  ): Promise<{
+    sample: RouteExperienceFrameSample;
+    capturedFrame: CapturedBenchmarkFrame | null;
+  }> {
     const gameplayStartedAt = performance.now();
     const movementStartedAt = performance.now();
     teleportPlayerToFeetPosition(this.player, target.feetPosition);
@@ -1539,7 +1599,7 @@ export class GameController {
     const residency = this.syncWorldAroundPlayer(false);
     const render = this.renderCurrentFrame();
     const gameplayFrameMs = performance.now() - gameplayStartedAt;
-    const dirtyResidentChunks = this.world.countDirtyResidentChunks();
+    const dirtyResidentMeshes = summarizeDirtyResidentMeshes(this.world);
     const frameProbe = render ?? {
       frameStats: zeroRenderStats(),
       frameCpuMs: 0,
@@ -1551,10 +1611,31 @@ export class GameController {
       ? this.probeNearFarSeamGaps()
       : null;
     let screenVoid: BottomCenterVoidProbe | null = null;
+    let capturedFrame: CapturedBenchmarkFrame | null = null;
     let captureDiagnosticsMs = 0;
-    if (target.frame % captureStrideFrames === 0 || visibleGround.uncoveredCount > 0) {
+    const shouldCaptureVoid = target.frame % captureStrideFrames === 0 || visibleGround.uncoveredCount > 0;
+    const shouldCaptureReference = referenceDiffStrideFrames > 0
+      && capturedFrameCount < referenceDiffLimit
+      && target.frame % referenceDiffStrideFrames === 0;
+    if (shouldCaptureVoid || shouldCaptureReference) {
       const captureStartedAt = performance.now();
-      screenVoid = await this.captureBottomCenterVoidProbe(captureWidth, captureHeight);
+      const image = await this.captureRouteFrameImage(captureWidth, captureHeight);
+      screenVoid = image ? analyzeBottomCenterVoid(image) : null;
+      if (image && shouldCaptureReference) {
+        capturedFrame = {
+          sampleIndex,
+          target: {
+            frame: target.frame,
+            phase: target.phase,
+            simTimeSeconds: target.simTimeSeconds,
+            distanceMeters: target.distanceMeters,
+            feetPosition: [...target.feetPosition],
+            yaw: target.yaw,
+            pitch: target.pitch,
+          },
+          image,
+        };
+      }
       captureDiagnosticsMs = performance.now() - captureStartedAt;
     }
     const diagnosticsMs = performance.now() - diagnosticsStartedAt;
@@ -1582,74 +1663,126 @@ export class GameController {
       || (screenVoid?.suspicious ?? false);
 
     return {
-      frame: target.frame,
-      phase: target.phase,
-      simTimeSeconds: target.simTimeSeconds,
-      routeDistanceMeters: target.distanceMeters,
-      feetPosition: [...this.player.feetPosition],
-      yaw: this.camera.yaw,
-      pitch: this.camera.pitch,
-      changed: residency.changed,
-      complete: residency.complete,
-      pendingChunks: residency.pendingChunks,
-      dirtyResidentChunks,
-      generatedChunks: residency.generatedChunks,
-      evictedChunks: residency.evictedChunks,
-      movementMs,
-      streamMs: residency.elapsedMs,
-      meshMs: this.lastMeshBuildSummary.elapsedMs,
-      meshCount: this.lastMeshBuildSummary.meshCount,
-      farFieldMs: this.lastFarFieldSummary.elapsedMs,
-      farFieldSampleCacheMs: this.lastFarFieldSummary.sampleCacheMs,
-      farFieldMeshBuildMs: this.lastFarFieldSummary.meshBuildMs,
-      farFieldSampledCellCount: this.lastFarFieldSummary.sampledCellCount,
-      farFieldMaxBandMs: maxFarFieldBand.elapsedMs,
-      farFieldMaxBandLabel: maxFarFieldBand.label,
-      farFieldBuiltBands: this.lastFarFieldSummary.builtBands,
-      farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
-      gameplayFrameMs,
-      accountedFrameMs,
-      unmeasuredFrameMs,
-      diagnosticsMs,
-      captureDiagnosticsMs,
-      renderCpuMs: frameProbe.frameCpuMs,
-      renderSyncMs: frameProbe.frameStats.syncResourcesMs,
-      renderUploadMs: frameProbe.frameStats.uploadMs,
-      renderEncodeMs: frameProbe.frameStats.encodeMs,
-      renderOtherMs,
-      uploadChunks: frameProbe.frameStats.uploadChunks,
-      uploadBytes: frameProbe.frameStats.uploadBytes,
-      drawCalls: frameProbe.frameStats.drawCalls,
-      triangles: frameProbe.frameStats.triangles,
-      residentNearSamples: detailCoverage.residentSampleCount,
-      renderReadyNearSamples: detailCoverage.renderReadySampleCount,
-      residentNotReadyNearSamples: detailCoverage.residentNotReadyCount,
-      visibleGroundSampleCount: visibleGround.sampleCount,
-      visibleGroundUncoveredCount: visibleGround.uncoveredCount,
-      visibleGroundResidentNotReadyCount: visibleGround.residentNotReadyCount,
-      visibleGroundFarOnlyCount: visibleGround.farOnlyCount,
-      seamGapCount: seamProbe?.gapCount ?? 0,
-      maxSeamGapMeters: seamProbe?.maxGapDepthMeters ?? 0,
-      screenVoidRatio: screenVoid?.clearRatio ?? null,
-      screenVoidMaxRunRatio: screenVoid?.maxClearRunRatio ?? null,
-      screenVoidSuspicious: screenVoid?.suspicious ?? false,
-      suspiciousHole,
+      sample: {
+        frame: target.frame,
+        phase: target.phase,
+        simTimeSeconds: target.simTimeSeconds,
+        routeDistanceMeters: target.distanceMeters,
+        feetPosition: [...this.player.feetPosition],
+        yaw: this.camera.yaw,
+        pitch: this.camera.pitch,
+        changed: residency.changed,
+        complete: residency.complete,
+        pendingChunks: residency.pendingChunks,
+        dirtyResidentChunks: dirtyResidentMeshes.dirtyResidentChunks,
+        dirtyMeshlessResidentChunks: dirtyResidentMeshes.dirtyMeshlessResidentChunks,
+        dirtyRetainedMeshResidentChunks: dirtyResidentMeshes.dirtyRetainedMeshResidentChunks,
+        generatedChunks: residency.generatedChunks,
+        evictedChunks: residency.evictedChunks,
+        movementMs,
+        streamMs: residency.elapsedMs,
+        meshMs: this.lastMeshBuildSummary.elapsedMs,
+        meshCount: this.lastMeshBuildSummary.meshCount,
+        farFieldMs: this.lastFarFieldSummary.elapsedMs,
+        farFieldSampleCacheMs: this.lastFarFieldSummary.sampleCacheMs,
+        farFieldMeshBuildMs: this.lastFarFieldSummary.meshBuildMs,
+        farFieldSampledCellCount: this.lastFarFieldSummary.sampledCellCount,
+        farFieldMaxBandMs: maxFarFieldBand.elapsedMs,
+        farFieldMaxBandLabel: maxFarFieldBand.label,
+        farFieldBuiltBands: this.lastFarFieldSummary.builtBands,
+        farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
+        gameplayFrameMs,
+        accountedFrameMs,
+        unmeasuredFrameMs,
+        diagnosticsMs,
+        captureDiagnosticsMs,
+        renderCpuMs: frameProbe.frameCpuMs,
+        renderSyncMs: frameProbe.frameStats.syncResourcesMs,
+        renderUploadMs: frameProbe.frameStats.uploadMs,
+        renderEncodeMs: frameProbe.frameStats.encodeMs,
+        renderOtherMs,
+        uploadChunks: frameProbe.frameStats.uploadChunks,
+        uploadBytes: frameProbe.frameStats.uploadBytes,
+        drawCalls: frameProbe.frameStats.drawCalls,
+        triangles: frameProbe.frameStats.triangles,
+        residentNearSamples: detailCoverage.residentSampleCount,
+        renderReadyNearSamples: detailCoverage.renderReadySampleCount,
+        residentNotReadyNearSamples: detailCoverage.residentNotReadyCount,
+        visibleGroundSampleCount: visibleGround.sampleCount,
+        visibleGroundUncoveredCount: visibleGround.uncoveredCount,
+        visibleGroundResidentNotReadyCount: visibleGround.residentNotReadyCount,
+        visibleGroundFarOnlyCount: visibleGround.farOnlyCount,
+        seamGapCount: seamProbe?.gapCount ?? 0,
+        maxSeamGapMeters: seamProbe?.maxGapDepthMeters ?? 0,
+        screenVoidRatio: screenVoid?.clearRatio ?? null,
+        screenVoidMaxRunRatio: screenVoid?.maxClearRunRatio ?? null,
+        screenVoidSuspicious: screenVoid?.suspicious ?? false,
+        settledReferenceChangedRatio: null,
+        settledReferenceClearToFilledRatio: null,
+        settledReferenceMaxClearToFilledRunRatio: null,
+        settledReferenceSuspiciousHole: false,
+        suspiciousHole,
+      },
+      capturedFrame,
     };
   }
 
-  private async captureBottomCenterVoidProbe(width: number, height: number): Promise<BottomCenterVoidProbe | null> {
+  private async captureRouteFrameImage(width: number, height: number): Promise<{
+    width: number;
+    height: number;
+    pixels: Uint8ClampedArray;
+  } | null> {
     if (!this.renderer) {
       return null;
     }
     const cameraMatrices = buildFirstPersonCameraMatrices(this.camera, width / height);
-    const image = await this.renderer.captureImage(
+    return await this.renderer.captureImage(
       this.world,
       cameraMatrices,
       width,
       height,
       this.farField.getRenderables(),
     );
-    return analyzeBottomCenterVoid(image);
+  }
+
+  private async applySettledReferenceDiffs(
+    samples: RouteExperienceFrameSample[],
+    capturedFrames: readonly CapturedBenchmarkFrame[],
+  ): Promise<void> {
+    for (const capturedFrame of capturedFrames) {
+      const referenceImage = await this.captureSettledReferenceFrame(capturedFrame.target, capturedFrame.image.width, capturedFrame.image.height);
+      if (!referenceImage) {
+        continue;
+      }
+      const diff = analyzeSettledReferenceDiff(capturedFrame.image, referenceImage);
+      const sample = samples[capturedFrame.sampleIndex];
+      if (!sample) {
+        continue;
+      }
+      sample.settledReferenceChangedRatio = diff.changedRatio;
+      sample.settledReferenceClearToFilledRatio = diff.clearToFilledRatio;
+      sample.settledReferenceMaxClearToFilledRunRatio = diff.maxClearToFilledRunRatio;
+      sample.settledReferenceSuspiciousHole = diff.suspiciousHole;
+      sample.suspiciousHole = sample.suspiciousHole || diff.suspiciousHole;
+    }
+  }
+
+  private async captureSettledReferenceFrame(
+    target: CapturedBenchmarkFrame["target"],
+    width: number,
+    height: number,
+  ): Promise<{
+    width: number;
+    height: number;
+    pixels: Uint8ClampedArray;
+  } | null> {
+    teleportPlayerToFeetPosition(this.player, target.feetPosition);
+    this.player.grounded = true;
+    this.camera.yaw = target.yaw;
+    this.camera.pitch = target.pitch;
+    this.syncCameraToPlayer();
+    this.syncWorldAroundPlayer(true);
+    return await this.captureRouteFrameImage(width, height);
   }
 
   private async renderProbeFrame(): Promise<GameRenderProbe> {
@@ -1957,6 +2090,10 @@ function summarizeRouteExperienceBenchmark(
   const visibleGroundResidentNotReadySamples = samples.map((sample) => sample.visibleGroundResidentNotReadyCount);
   const diagnosticsSamples = samples.map((sample) => sample.diagnosticsMs);
   const captureDiagnosticsSamples = samples.map((sample) => sample.captureDiagnosticsMs);
+  const settledReferenceChangedSamples = samples.map((sample) => sample.settledReferenceChangedRatio ?? 0);
+  const settledReferenceClearToFilledSamples = samples.map((sample) => sample.settledReferenceClearToFilledRatio ?? 0);
+  const settledReferenceClearToFilledRunSamples = samples.map((sample) =>
+    sample.settledReferenceMaxClearToFilledRunRatio ?? 0);
   const settleCompletion = samples.find((sample) =>
     sample.phase === "settle"
     && sample.complete
@@ -2030,10 +2167,16 @@ function summarizeRouteExperienceBenchmark(
     framesWithVisibleGroundGaps: samples.filter((sample) => sample.visibleGroundUncoveredCount > 0).length,
     framesWithSeamGaps: samples.filter((sample) => sample.seamGapCount > 0).length,
     framesWithScreenVoidSignals: samples.filter((sample) => sample.screenVoidSuspicious).length,
+    framesWithSettledReferenceHoleSignals: samples.filter((sample) => sample.settledReferenceSuspiciousHole).length,
     framesWithHoleSignals: samples.filter((sample) => sample.suspiciousHole).length,
     maxScreenVoidRatio: maxValue(samples.map((sample) => sample.screenVoidRatio ?? 0)),
+    maxSettledReferenceChangedRatio: maxValue(settledReferenceChangedSamples),
+    maxSettledReferenceClearToFilledRatio: maxValue(settledReferenceClearToFilledSamples),
+    maxSettledReferenceClearToFilledRunRatio: maxValue(settledReferenceClearToFilledRunSamples),
     maxPendingChunks: maxValue(samples.map((sample) => sample.pendingChunks)),
     maxDirtyResidentChunks: maxValue(samples.map((sample) => sample.dirtyResidentChunks)),
+    maxDirtyMeshlessResidentChunks: maxValue(samples.map((sample) => sample.dirtyMeshlessResidentChunks)),
+    maxDirtyRetainedMeshResidentChunks: maxValue(samples.map((sample) => sample.dirtyRetainedMeshResidentChunks)),
     settleFramesUntilComplete: settleCompletion
       ? samples.filter((sample) => sample.phase === "settle" && sample.frame <= settleCompletion.frame).length
       : null,
@@ -2076,6 +2219,32 @@ function pushVisibleGroundIssueSample(
     return;
   }
   target.push(sample);
+}
+
+function summarizeDirtyResidentMeshes(world: ProceduralResidentWorld): {
+  dirtyResidentChunks: number;
+  dirtyMeshlessResidentChunks: number;
+  dirtyRetainedMeshResidentChunks: number;
+} {
+  let dirtyResidentChunks = 0;
+  let dirtyMeshlessResidentChunks = 0;
+  let dirtyRetainedMeshResidentChunks = 0;
+  for (const chunk of world.iterateResidentChunks()) {
+    if (!chunk.meshDirty) {
+      continue;
+    }
+    dirtyResidentChunks += 1;
+    if (chunk.mesh) {
+      dirtyRetainedMeshResidentChunks += 1;
+    } else {
+      dirtyMeshlessResidentChunks += 1;
+    }
+  }
+  return {
+    dirtyResidentChunks,
+    dirtyMeshlessResidentChunks,
+    dirtyRetainedMeshResidentChunks,
+  };
 }
 
 function sumNumbers(values: readonly number[]): number {

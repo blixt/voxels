@@ -463,8 +463,6 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
         continue;
       }
       chunk.meshDirty = true;
-      chunk.gpuDirty = true;
-      chunk.mesh = null;
       touched += 1;
     }
     return touched;
@@ -497,7 +495,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
   private buildRenderReadyColumnKeys(): Set<string> {
     const readyCounts = new Map<string, number>();
     for (const chunk of this.chunks.values()) {
-      if (!chunk.meshBuilt || chunk.meshDirty) {
+      if (!chunk.meshBuilt || !chunk.mesh) {
         continue;
       }
       const columnKey = toColumnKey(chunk.coord.x, chunk.coord.z);

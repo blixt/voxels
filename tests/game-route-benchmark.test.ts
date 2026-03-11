@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import {
+  analyzeSettledReferenceDiff,
   analyzeBottomCenterVoid,
   buildDefaultRouteBenchmarkPlan,
   summarizeRouteFrameAccounting,
@@ -109,4 +110,64 @@ test("route frame accounting exposes measured and unmeasured time explicitly", (
   expect(summary.totalAccountedMs).toBe(17);
   expect(summary.totalUnmeasuredMs).toBe(4);
   expect(summary.maxUnmeasuredMs).toBe(3);
+});
+
+test("settled reference diff flags transient clear holes that later fill with terrain", () => {
+  const width = 20;
+  const height = 20;
+  const transientPixels = new Uint8ClampedArray(width * height * 4).fill(0);
+  const settledPixels = new Uint8ClampedArray(width * height * 4).fill(0);
+  for (let index = 0; index < transientPixels.length; index += 4) {
+    transientPixels[index + 0] = 209;
+    transientPixels[index + 1] = 224;
+    transientPixels[index + 2] = 240;
+    transientPixels[index + 3] = 255;
+    settledPixels[index + 0] = 209;
+    settledPixels[index + 1] = 224;
+    settledPixels[index + 2] = 240;
+    settledPixels[index + 3] = 255;
+  }
+  for (let y = 10; y < 17; y += 1) {
+    for (let x = 6; x < 14; x += 1) {
+      const index = (y * width + x) * 4;
+      settledPixels[index + 0] = 150;
+      settledPixels[index + 1] = 110;
+      settledPixels[index + 2] = 70;
+    }
+  }
+
+  const diff = analyzeSettledReferenceDiff(
+    { width, height, pixels: transientPixels },
+    { width, height, pixels: settledPixels },
+  );
+
+  expect(diff.clearToFilledRatio).toBeGreaterThan(0.08);
+  expect(diff.maxClearToFilledRunRatio).toBeGreaterThan(0.1);
+  expect(diff.suspiciousHole).toBeTrue();
+});
+
+test("settled reference diff ignores ordinary shading deltas without clear holes", () => {
+  const width = 20;
+  const height = 20;
+  const transientPixels = new Uint8ClampedArray(width * height * 4).fill(0);
+  const settledPixels = new Uint8ClampedArray(width * height * 4).fill(0);
+  for (let index = 0; index < transientPixels.length; index += 4) {
+    transientPixels[index + 0] = 70;
+    transientPixels[index + 1] = 90;
+    transientPixels[index + 2] = 110;
+    transientPixels[index + 3] = 255;
+    settledPixels[index + 0] = 78;
+    settledPixels[index + 1] = 98;
+    settledPixels[index + 2] = 118;
+    settledPixels[index + 3] = 255;
+  }
+
+  const diff = analyzeSettledReferenceDiff(
+    { width, height, pixels: transientPixels },
+    { width, height, pixels: settledPixels },
+  );
+
+  expect(diff.clearToFilledRatio).toBe(0);
+  expect(diff.filledToClearRatio).toBe(0);
+  expect(diff.suspiciousHole).toBeFalse();
 });
