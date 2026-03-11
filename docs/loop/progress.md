@@ -152,3 +152,15 @@
   - assert the actual page mode and debug surface before trusting any localhost result when multiple Bun servers may be alive
   - prefer machine-readable browser probes over HUD-only verification for streaming work
 - Added `scripts/profile-procedural-stream.ts` plus `mise run profile-stream` so procedural startup/widen/shrink transitions can be measured locally with warm-up passes instead of only through ad hoc browser notes.
+- Rewrote the procedural chunk generator around cached per-column context instead of per-voxel column resampling:
+  - `generateChunk()` now computes biome/height/strata context once per `x/z` column
+  - per-voxel material sampling now reuses that cached context
+  - generated chunks now carry their solid bounds directly into the resident world instead of forcing an immediate second scan
+- Verified the rewrite against the new probe surfaces and the warmed local stream profiler before keeping it.
+- The measured win was large enough to keep:
+  - local `bootstrap-r3` stream `3673 ms -> 202 ms`
+  - local `widen-r2-to-r3` stream `2113 ms -> 112 ms`
+  - local `shrink-r3-to-r2` stream `307 ms -> 14 ms`
+  - Chrome 146 `/` bootstrap stream `3399 ms -> 206.5 ms`
+  - Chrome 146 `/` widen `1943 ms -> 104.6 ms`
+  - Chrome 146 `/` shrink `275.8 ms -> 13.0 ms`

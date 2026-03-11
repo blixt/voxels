@@ -1,6 +1,6 @@
 import { clamp, packRgba } from "./math.ts";
 import { fbm2D, hashNoise3D } from "./noise.ts";
-import type { ChunkCoordinate } from "./types.ts";
+import type { ChunkBounds, ChunkCoordinate } from "./types.ts";
 
 export const HEX_COLOR_COUNT = 0x1000;
 export const PROCEDURAL_WORLD_MAX_Y = 16_384;
@@ -34,6 +34,13 @@ export interface GeneratedChunk {
   coord: ChunkCoordinate;
   data: Uint16Array;
   solidCount: number;
+  solidBounds: ChunkBounds | null;
+}
+
+interface ColumnContext {
+  biome: BiomeProfile;
+  column: ProceduralColumnSample;
+  strataNoise: number;
 }
 
 const BIOMES: BiomeProfile[] = [
@@ -91,12 +98,90 @@ export class ProceduralWorldGenerator {
   }
 
   sampleColumn(worldX: number, worldZ: number): ProceduralColumnSample {
+    return this.buildColumnContext(worldX, worldZ).column;
+  }
+
+  sampleMaterial(worldX: number, worldY: number, worldZ: number): number {
+    if (worldY < 0 || worldY >= this.maxYExclusive) {
+      return 0;
+    }
+    return this.sampleMaterialFromColumn(this.buildColumnContext(worldX, worldZ), worldX, worldY, worldZ);
+  }
+
+  generateChunk(cx: number, cy: number, cz: number): GeneratedChunk {
+    const chunkArea = this.chunkSize * this.chunkSize;
+    const data = new Uint16Array(this.chunkSize * chunkArea);
+    const originX = cx * this.chunkSize;
+    const originY = cy * this.chunkSize;
+    const originZ = cz * this.chunkSize;
+    const columnContexts = new Array<ColumnContext>(chunkArea);
+    const worldXs = new Int32Array(chunkArea);
+    const worldZs = new Int32Array(chunkArea);
+    for (let z = 0; z < this.chunkSize; z += 1) {
+      const worldZ = originZ + z;
+      const rowOffset = z * this.chunkSize;
+      for (let x = 0; x < this.chunkSize; x += 1) {
+        const columnIndex = x + rowOffset;
+        const worldX = originX + x;
+        columnContexts[columnIndex] = this.buildColumnContext(worldX, worldZ);
+        worldXs[columnIndex] = worldX;
+        worldZs[columnIndex] = worldZ;
+      }
+    }
+    let solidCount = 0;
+    let minX = this.chunkSize;
+    let minY = this.chunkSize;
+    let minZ = this.chunkSize;
+    let maxX = 0;
+    let maxY = 0;
+    let maxZ = 0;
+    for (let z = 0; z < this.chunkSize; z += 1) {
+      const rowOffset = z * this.chunkSize;
+      for (let y = 0; y < this.chunkSize; y += 1) {
+        const worldY = originY + y;
+        const planeOffset = y * this.chunkSize + z * chunkArea;
+        for (let x = 0; x < this.chunkSize; x += 1) {
+          const columnIndex = x + rowOffset;
+          const material = this.sampleMaterialFromColumn(
+            columnContexts[columnIndex]!,
+            worldXs[columnIndex]!,
+            worldY,
+            worldZs[columnIndex]!,
+          );
+          if (material !== 0) {
+            data[x + planeOffset] = material;
+            solidCount += 1;
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            minZ = Math.min(minZ, z);
+            maxX = Math.max(maxX, x + 1);
+            maxY = Math.max(maxY, y + 1);
+            maxZ = Math.max(maxZ, z + 1);
+          }
+        }
+      }
+    }
+    const solidBounds = solidCount === 0
+      ? null
+      : {
+          min: [minX, minY, minZ] as [number, number, number],
+          max: [maxX, maxY, maxZ] as [number, number, number],
+        };
+    return {
+      coord: { x: cx, y: cy, z: cz },
+      data,
+      solidCount,
+      solidBounds,
+    };
+  }
+
+  private buildColumnContext(worldX: number, worldZ: number): ColumnContext {
     const biome = this.sampleBiome(worldX, worldZ);
     const macro = fbm2D(worldX / 1024, worldZ / 1024, 5, this.seed + 101);
     const detail = fbm2D(worldX / 144, worldZ / 144, 4, this.seed + 211) - 0.5;
     const ridge = 1 - Math.abs(fbm2D(worldX / 280, worldZ / 280, 3, this.seed + 307) * 2 - 1);
     const basin = fbm2D(worldX / 560, worldZ / 560, 3, this.seed + 401) - 0.5;
-    const height = clamp(
+    const surfaceY = clamp(
       Math.floor(
         biome.baseHeight
           + macro * biome.relief
@@ -107,21 +192,25 @@ export class ProceduralWorldGenerator {
       8,
       this.maxYExclusive - 2,
     );
-    const surfaceMaterial = height >= biome.snowLine ? biome.snow : biome.surface;
     return {
-      biomeId: biome.id,
-      surfaceY: height,
-      waterTopY: height < this.seaLevel ? this.seaLevel : null,
-      surfaceMaterial,
+      biome,
+      column: {
+        biomeId: biome.id,
+        surfaceY,
+        waterTopY: surfaceY < this.seaLevel ? this.seaLevel : null,
+        surfaceMaterial: surfaceY >= biome.snowLine ? biome.snow : biome.surface,
+      },
+      strataNoise: fbm2D(worldX / 52, worldZ / 52, 2, this.seed + 503),
     };
   }
 
-  sampleMaterial(worldX: number, worldY: number, worldZ: number): number {
-    if (worldY < 0 || worldY >= this.maxYExclusive) {
-      return 0;
-    }
-    const column = this.sampleColumn(worldX, worldZ);
-    const biome = biomeById(column.biomeId);
+  private sampleMaterialFromColumn(
+    context: ColumnContext,
+    worldX: number,
+    worldY: number,
+    worldZ: number,
+  ): number {
+    const { biome, column, strataNoise } = context;
     if (worldY > column.surfaceY) {
       return column.waterTopY !== null && worldY <= column.waterTopY ? biome.water : 0;
     }
@@ -143,7 +232,6 @@ export class ProceduralWorldGenerator {
     if (worldY < column.surfaceY - 18 && accentNoise > 0.992) {
       return biome.accent;
     }
-    const strataNoise = fbm2D(worldX / 52, worldZ / 52, 2, this.seed + 503);
     const band = Math.abs(Math.floor((worldY / 160) + strataNoise * 5)) % 3;
     if (band === 0) {
       return biome.stone;
@@ -152,31 +240,6 @@ export class ProceduralWorldGenerator {
       return biome.deepStone;
     }
     return biome.subsurface;
-  }
-
-  generateChunk(cx: number, cy: number, cz: number): GeneratedChunk {
-    const chunkArea = this.chunkSize * this.chunkSize;
-    const data = new Uint16Array(this.chunkSize * chunkArea);
-    const originX = cx * this.chunkSize;
-    const originY = cy * this.chunkSize;
-    const originZ = cz * this.chunkSize;
-    let solidCount = 0;
-    for (let z = 0; z < this.chunkSize; z += 1) {
-      for (let y = 0; y < this.chunkSize; y += 1) {
-        for (let x = 0; x < this.chunkSize; x += 1) {
-          const material = this.sampleMaterial(originX + x, originY + y, originZ + z);
-          if (material !== 0) {
-            data[x + y * this.chunkSize + z * chunkArea] = material;
-            solidCount += 1;
-          }
-        }
-      }
-    }
-    return {
-      coord: { x: cx, y: cy, z: cz },
-      data,
-      solidCount,
-    };
   }
 
   private sampleBiome(worldX: number, worldZ: number): BiomeProfile {

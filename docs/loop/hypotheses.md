@@ -21,3 +21,12 @@
 - `tests/camera.test.ts` now asserts that nearer points map to smaller clip-space depth values.
 - Validation scenes now include tiny primitive cases before larger correctness scenes.
 - The Bun server now serves HTML, CSS, and bundle responses with `Cache-Control: no-store` and cache-busted module URLs so browser-side probes exercise the current code by default.
+
+## 2026-03-11 streaming performance search
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| The procedural game path is still meshing-bound first | Add `mise run profile-stream`, compare residency time vs mesh time for bootstrap `r3`, widen `r2 -> r3`, and shrink `r3 -> r2` | Rejected. Baseline local timings showed `bootstrap` stream `3673 ms` vs mesh `188 ms`, `widen` stream `2113 ms` vs mesh `147 ms`, and `shrink` stream `307 ms` vs mesh `58 ms` | Rejected |
+| `generateChunk()` is wasting most of its time recomputing `sampleColumn()` and biome data per voxel | Cache per-column context once per chunk, reuse it for every voxel in that column, then rerun the same `profile-stream` cases and the Chrome game probes | Confirmed. Local stream timings dropped to `bootstrap 202 ms`, `widen 112 ms`, and `shrink 14 ms`; Chrome 146 `/` dropped to `bootstrap 206.5 ms`, `widen 104.6 ms`, and `shrink 13.0 ms` while resident-set counts stayed correct | Confirmed |
+| Recomputing chunk solid bounds after generation is a meaningful avoidable cost | Carry chunk-local solid bounds out of `generateChunk()` and initialize resident chunks from them instead of rescanning chunk data | Confirmed as part of the same rewrite. The change is cheap, correct, and removes a full second pass over every streamed chunk | Confirmed |
+| String chunk keys or spawn search are the dominant startup problem | Compare hotspot timings before touching those paths | Rejected for now. The huge win came without touching string keys or spawn search, so those are not the main target at the current scale | Rejected for now |

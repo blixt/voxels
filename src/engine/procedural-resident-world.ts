@@ -341,12 +341,20 @@ function createResidentChunk(generated: GeneratedChunk, chunkSize: number): Voxe
     coord: generated.coord,
     data: generated.data,
     solidCount: generated.solidCount,
-    solidBounds: null,
+    solidBounds: generated.solidBounds
+      ? {
+          min: [...generated.solidBounds.min],
+          max: [...generated.solidBounds.max],
+          dirty: false,
+        }
+      : null,
     meshDirty: true,
     gpuDirty: true,
     mesh: null,
   };
-  recomputeChunkSolidBounds(chunk, chunkSize);
+  if (chunk.solidCount > 0 && !chunk.solidBounds) {
+    recomputeChunkSolidBounds(chunk, chunkSize);
+  }
   return chunk;
 }
 

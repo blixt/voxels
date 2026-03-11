@@ -100,7 +100,10 @@ Status:
 - first machine-readable probe layer is now landing:
   - `/` exposes resident-world snapshots and teleport-and-settle traces
   - `/bench` exposes deterministic generation probes
-- remaining work is to add phase timing and use the probes to screen startup-cost optimizations
+- first hot-path win is now landing:
+  - per-column generator caching removed the worst startup bottleneck
+  - chunk solid bounds now come out of generation instead of being recomputed immediately
+- remaining work is to break down the remaining `~200 ms` bootstrap cost and decide whether the next win is neighbor-remesh batching or incremental/worker streaming
 
 ### Slice 5: interaction loop
 
@@ -136,7 +139,9 @@ Status:
 
 - Add machine-readable generation and residency probes to the game/benchmark automation surfaces.
 - Instrument `generateChunk()` and `updateResidencyAround()` into measurable phases before optimizing them.
-- Cache per-chunk column samples and carry chunk solid bounds out of generation so streamed chunks do less duplicate work.
+- Measure the remaining residency phases so the next optimization is chosen from data instead of guesswork.
+- Reduce neighbor-remesh churn during bulk stream-in.
+- Decide when to move from synchronous residency to incremental or worker-driven streaming.
 - Add deterministic verification cases for resident-set stability, seam consistency, and stream churn.
 - Keep the game debug API growing alongside `/bench` so browser automation does not depend on visual inspection alone.
 - Log each slice in `progress.md` and `verification.md`.

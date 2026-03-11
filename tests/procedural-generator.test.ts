@@ -43,6 +43,16 @@ test("generated chunk data matches direct material sampling", () => {
     const chunkValue = chunk.data[lx + ly * generator.chunkSize + lz * chunkArea];
     expect(chunkValue).toBe(generator.sampleMaterial(worldX, worldY, worldZ));
   }
+
+  if (chunk.solidCount > 0) {
+    expect(chunk.solidBounds).not.toBeNull();
+    expect(chunk.solidBounds!.min[0]).toBeGreaterThanOrEqual(0);
+    expect(chunk.solidBounds!.min[1]).toBeGreaterThanOrEqual(0);
+    expect(chunk.solidBounds!.min[2]).toBeGreaterThanOrEqual(0);
+    expect(chunk.solidBounds!.max[0]).toBeLessThanOrEqual(generator.chunkSize);
+    expect(chunk.solidBounds!.max[1]).toBeLessThanOrEqual(generator.chunkSize);
+    expect(chunk.solidBounds!.max[2]).toBeLessThanOrEqual(generator.chunkSize);
+  }
 });
 
 test("procedural generator produces multiple biome families across distant coordinates", () => {

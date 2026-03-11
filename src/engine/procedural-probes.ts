@@ -38,14 +38,25 @@ export function summarizeGeneratedChunk(
   const centerWorldX = chunk.coord.x * generator.chunkSize + (generator.chunkSize >> 1);
   const centerWorldZ = chunk.coord.z * generator.chunkSize + (generator.chunkSize >> 1);
   return {
-    ...summarizeChunkData(chunk.coord, chunk.data, generator.chunkSize, chunk.solidCount),
+    ...summarizeChunkData(chunk.coord, chunk.data, generator.chunkSize, chunk.solidCount, chunk.solidBounds),
     centerColumn: generator.sampleColumn(centerWorldX, centerWorldZ),
   };
 }
 
 export function summarizeResidentWorld(source: ResidentWorldProbeSource): ResidentWorldProbeSnapshot {
   const chunks = [...source.iterateResidentChunks()]
-    .map((chunk) => summarizeChunkData(chunk.coord, chunk.data, source.chunkSize, chunk.solidCount))
+    .map((chunk) => summarizeChunkData(
+      chunk.coord,
+      chunk.data,
+      source.chunkSize,
+      chunk.solidCount,
+      chunk.solidBounds && !chunk.solidBounds.dirty
+        ? {
+            min: [...chunk.solidBounds.min],
+            max: [...chunk.solidBounds.max],
+          }
+        : undefined,
+    ))
     .sort(compareChunkProbeSummary);
   const stats = source.getStats();
   return {
@@ -79,12 +90,15 @@ function summarizeChunkData(
   data: Uint16Array,
   chunkSize: number,
   solidCount: number,
+  solidBounds?: ChunkBounds | null,
 ): ChunkProbeSummary {
   return {
     coord: { ...coord },
     solidCount,
     checksum: fnv1a(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)),
-    solidBounds: computeWorldSpaceSolidBounds(coord, data, chunkSize),
+    solidBounds: solidBounds
+      ? localBoundsToWorldBounds(coord, chunkSize, solidBounds)
+      : computeWorldSpaceSolidBounds(coord, data, chunkSize),
   };
 }
 
@@ -128,6 +142,24 @@ function computeWorldSpaceSolidBounds(
   return {
     min: [worldOriginX + minX, worldOriginY + minY, worldOriginZ + minZ],
     max: [worldOriginX + maxX, worldOriginY + maxY, worldOriginZ + maxZ],
+  };
+}
+
+function localBoundsToWorldBounds(coord: ChunkCoordinate, chunkSize: number, bounds: ChunkBounds): ChunkBounds {
+  const worldOriginX = coord.x * chunkSize;
+  const worldOriginY = coord.y * chunkSize;
+  const worldOriginZ = coord.z * chunkSize;
+  return {
+    min: [
+      worldOriginX + bounds.min[0],
+      worldOriginY + bounds.min[1],
+      worldOriginZ + bounds.min[2],
+    ],
+    max: [
+      worldOriginX + bounds.max[0],
+      worldOriginY + bounds.max[1],
+      worldOriginZ + bounds.max[2],
+    ],
   };
 }
 

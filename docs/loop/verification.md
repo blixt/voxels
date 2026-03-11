@@ -397,3 +397,60 @@
   - mesh avg `57.7 ms`
   - evicted chunks `115`
   - resident chunks `124`
+
+### Procedural generator hot-path rewrite
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `mise run profile-stream -- --iterations=2 --warmup=1`
+
+#### Automated checks
+
+- `mise run test`: passing after the generator rewrite and the added solid-bounds assertions.
+- `mise run build`: passing after the chunk-generation changes.
+
+#### Local profiler comparison
+
+- `bootstrap-r3`:
+  - stream avg `3673.1 ms -> 202.2 ms`
+  - mesh avg `188.2 ms -> 179.7 ms`
+- `widen-r2-to-r3`:
+  - stream avg `2113.3 ms -> 111.5 ms`
+  - mesh avg `147.0 ms -> 140.2 ms`
+- `shrink-r3-to-r2`:
+  - stream avg `307.5 ms -> 13.7 ms`
+  - mesh avg `57.7 ms -> 55.4 ms`
+
+#### Chrome 146 browser checks
+
+- Reloaded `http://localhost:3001/` and re-ran the procedural game probes after the generator rewrite.
+- Fresh bootstrap snapshot on `/`:
+  - resident chunks `239`
+  - radius `3 chunks`
+  - stream `206.5 ms`
+  - generated `239`
+  - empty skipped `58`
+  - mesh `255.7 ms`
+- `window.__VOXELS_GAME__.teleportAndSettle(-191.5, 1661, -191.5, { radiusChunks: 2 })` returned:
+  - resident chunks `239 -> 124`
+  - stream `13.0 ms`
+  - evicted `115`
+  - generated `0`
+- `window.__VOXELS_GAME__.teleportAndSettle(-191.5, 1661, -191.5, { radiusChunks: 3 })` returned:
+  - resident chunks `124 -> 239`
+  - stream `104.6 ms`
+  - evicted `0`
+  - generated `115`
+- Reloaded `/bench?auto=1&scenario=validationBlocks&iterations=1&frames=3` after the rewrite and confirmed the shared engine guardrail stayed green:
+  - build `0.1 ms`
+  - mesh `0.2 ms`
+  - first CPU `0.80 ms`
+  - warm CPU `0.20 ms`
+  - first GPU `0.09 ms`
+  - warm GPU `0.00 ms`
+  - `MAE 1.63`
+  - coverage mismatch `0.00%`
+  - visual `pass`
+  - correctness `pass`
