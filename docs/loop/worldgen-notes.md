@@ -35,6 +35,9 @@ It now uses field-driven surface/underground rules:
   - `drainage`
   - `volcanism`
   - `magic`
+  - `globalHeight`
+  - `mountainness`
+  - `oceanness`
 - base biome families:
   - `verdant`
   - `steppe`
@@ -55,24 +58,33 @@ It now uses field-driven surface/underground rules:
   - `basaltic`
 - deterministic landmark families:
   - oak
+  - birch
+  - boulder
   - standing stone
+  - shrub
   - palm
+  - cactus
   - hoodoo
   - fir
   - ice spire
   - cypress
+  - reed cluster
   - basalt spire
+  - crystal cluster
   - glowcap
 
 The detailed rules and transition policy live in `biome-rehaul-notes.md`.
 
 ## Terrain strategy
 
-- world height is still sampled per column, but now from blended biome terrain parameters driven by the world-rule fields
+- world height is now built in two layers:
+  - a slower global terrain envelope
+  - biome-local relief that is suppressed near borders
 - height transitions are softened by blending the strongest base-biome influences instead of switching terrain parameters at a selector border
 - special biomes can still create stronger local identity, but that sharpness is tied to the field system rather than random biome boundaries
 - voxel material is then resolved from:
   - surface level
+  - surface patch / grain / scatter variation
   - water level
   - shallow subsurface band
   - deeper strata bands
@@ -91,6 +103,7 @@ This is still intentionally not trying to solve caves or general structures yet,
 - forbidden-adjacency probe
 - soft-edge height-budget probe
 - landmark-family coverage probe
+- surface-material diversity probe
 - underground-family material-variation probe
 - explicit `Y`-range guard test
 - landmark-aware column-top envelope for resident-world vertical streaming

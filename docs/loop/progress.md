@@ -890,3 +890,38 @@
 - I also cleaned up a stale-doc inconsistency while landing the biome slice:
   - `docs/loop/plan.md` and `docs/roadmap.md` still had old `1 cm` voxel wording
   - those references now correctly describe the current `10 cm` baseline
+
+### Global height envelope and biome variety follow-up
+
+- The first biome-rehaul pass still had the exact failure mode the user called out:
+  - the supposed "global" height envelope still included too much fast mountain signal
+  - some lowland biomes could still win on very high terrain
+  - that combination recreated sharp biome-border altitude jumps under a different name
+- Reworked the terrain model so the slow envelope stays slow:
+  - `globalHeight` now comes from slower continental/uplift/basin structure instead of directly baking in strong mountain spikes
+  - mountain intensity stays available as `mountainness`, but it is applied as shared/local relief rather than as the base envelope itself
+  - biome-local relief, dune shaping, mesa shaping, and terraces are now suppressed near borders through a stricter `biomeCore`
+- Tightened biome height suitability so selection itself removes bad matches:
+  - lowland biomes now have narrower preferred altitude bands
+  - `globalHeight` suitability carries more scoring weight
+  - this keeps things like `steppe` or `dunes` from winning on obviously high mountain terrain
+- Expanded surface/object variety in the same slice instead of leaving the world as smooth recolored hills:
+  - added surface and subsurface patch selection driven by `surfacePatch`, `surfaceGrain`, and `scatter`
+  - added biome landmark rosters instead of one hardcoded landmark family per biome
+  - new landmark families:
+    - `birch`
+    - `boulder`
+    - `shrub`
+    - `cactus`
+    - `reed_cluster`
+    - `crystal_cluster`
+- The retuned generator now lands in a much healthier numeric envelope:
+  - sampled surface range `1372..1635`
+  - average sampled surface `1465.5`
+  - underwater ratio `5.5%`
+  - max sampled biome-boundary jump `44`
+  - max sampled soft-boundary jump `43`
+- Added a new regression for surface-material diversity so the 10 cm voxel scale is reflected in actual ground-detail variation rather than only in geometry scale.
+- Raised jump velocity from `3.6 m/s` to `4.2 m/s` and added a regression that the player reaches at least `0.8 m` above the takeoff point.
+- Main lesson from this slice:
+  - if a "global heightmap" contains fast mountain/mesa signal at full strength, it stops being global and biome-border cliffs come back immediately

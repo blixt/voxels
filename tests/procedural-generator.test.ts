@@ -228,6 +228,29 @@ test("landmarks appear across the world with multiple distinct families", () => 
   expect(landmarkIds.has("palm") || landmarkIds.has("glowcap") || landmarkIds.has("basalt_spire")).toBe(true);
 });
 
+test("surface materials vary within major biomes to support finer ground detail", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const materialsByBiome = new Map<string, Set<number>>();
+
+  for (let z = -8192; z <= 8192; z += 32) {
+    for (let x = -8192; x <= 8192; x += 32) {
+      const probe = generator.sampleBiomeProbe(x, z);
+      if (probe.biomeId === "marsh" || probe.biomeId === "ember" || probe.biomeId === "bloom") {
+        continue;
+      }
+      const materials = materialsByBiome.get(probe.biomeId) ?? new Set<number>();
+      materials.add(probe.surfaceMaterial);
+      materialsByBiome.set(probe.biomeId, materials);
+    }
+  }
+
+  expect(materialsByBiome.get("verdant")?.size ?? 0).toBeGreaterThanOrEqual(4);
+  expect(materialsByBiome.get("steppe")?.size ?? 0).toBeGreaterThanOrEqual(4);
+  expect(materialsByBiome.get("dunes")?.size ?? 0).toBeGreaterThanOrEqual(3);
+  expect(materialsByBiome.get("badlands")?.size ?? 0).toBeGreaterThanOrEqual(4);
+  expect(materialsByBiome.get("highland")?.size ?? 0).toBeGreaterThanOrEqual(4);
+});
+
 test("below-ground material identity varies across underground biome families", () => {
   const generator = new ProceduralWorldGenerator(1337);
   const deepMaterials = new Set<number>();

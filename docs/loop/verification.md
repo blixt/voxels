@@ -258,6 +258,43 @@
   - HUD/status panels
   - crosshair
   - click-to-capture overlay
+
+### Global terrain envelope and jump-height follow-up
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-generator.test.ts tests/player-physics.test.ts`
+- `mise exec -- bun -e 'import { ProceduralWorldGenerator } from "./src/engine/procedural-generator.ts"; ... <terrain envelope probe> ...'`
+- `mise exec -- bun -e 'import { ProceduralWorldGenerator } from "./src/engine/procedural-generator.ts"; ... <worldgen timing probe> ...'`
+- `mise run test`
+- `mise run build`
+
+#### Automated checks
+
+- `tsc --noEmit`: passing after the biome/global-height rewrite.
+- Focused generator + physics tests: passing.
+- Full test suite: passing, `96` tests green.
+- Production build: passing.
+
+#### Numeric worldgen probes
+
+- Fixed-seed terrain-envelope probe after the retune:
+  - sampled surface range `1372..1635`
+  - average sampled surface `1465.46`
+  - underwater ratio `0.055`
+  - max sampled biome-boundary jump `44`
+  - max sampled soft-boundary jump `43`
+- Worldgen timing screen after the richer biome/material/object pass:
+  - large probe sweep `75.6 ms`
+  - `24` chunk generation batch `35.3 ms`
+
+#### Regression coverage added
+
+- `tests/procedural-generator.test.ts` now also verifies:
+  - surface-material diversity within major biomes
+- `tests/player-physics.test.ts` now also verifies:
+  - jump height reaches at least `0.8 m` above takeoff
 - Browser-exposed game automation surface is present:
   - `window.__VOXELS_GAME__.snapshot()`
   - `window.__VOXELS_GAME__.teleport(x, y, z)`

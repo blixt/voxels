@@ -9,7 +9,22 @@ export type BaseBiomeId = "verdant" | "steppe" | "dunes" | "badlands" | "highlan
 export type SpecialBiomeId = "marsh" | "ember" | "bloom";
 export type BiomeId = BaseBiomeId | SpecialBiomeId;
 export type UndergroundBiomeId = "rooted" | "sedimentary" | "sandy" | "granitic" | "froststone" | "basaltic";
-export type LandmarkId = "oak" | "standing_stone" | "palm" | "hoodoo" | "fir" | "ice_spire" | "cypress" | "basalt_spire" | "glowcap";
+export type LandmarkId =
+  | "oak"
+  | "birch"
+  | "boulder"
+  | "standing_stone"
+  | "shrub"
+  | "palm"
+  | "cactus"
+  | "hoodoo"
+  | "fir"
+  | "ice_spire"
+  | "cypress"
+  | "reed_cluster"
+  | "basalt_spire"
+  | "crystal_cluster"
+  | "glowcap";
 
 interface BaseBiomeProfile {
   id: BaseBiomeId;
@@ -17,29 +32,38 @@ interface BaseBiomeProfile {
   moisture: number;
   uplift: number;
   drainage: number;
+  heightCenter: number;
+  heightRange: number;
   heightBias: number;
   reliefScale: number;
   ridgeScale: number;
   detailScale: number;
   basinScale: number;
   terraceScale: number;
+  microRelief: number;
   snowLine: number;
   surface: number;
   transitionSurface: number;
+  surfaceVariant: number;
+  surfaceAccent: number;
+  surfaceRock: number;
   subsurface: number;
+  subsurfaceVariant: number;
   water: number;
   snow: number;
-  landmarkId: LandmarkId | null;
 }
 
 interface SpecialBiomeProfile {
   id: SpecialBiomeId;
   surface: number;
   transitionSurface: number;
+  surfaceVariant: number;
+  surfaceAccent: number;
+  surfaceRock: number;
   subsurface: number;
+  subsurfaceVariant: number;
   water: number;
   snow: number;
-  landmarkId: LandmarkId | null;
   softTransition: boolean;
 }
 
@@ -64,6 +88,9 @@ interface ColumnFieldSample {
   drainage: number;
   volcanism: number;
   magic: number;
+  globalHeight: number;
+  mountainness: number;
+  oceanness: number;
   continentalness: number;
   hills: number;
   detail: number;
@@ -73,6 +100,9 @@ interface ColumnFieldSample {
   dune: number;
   mesa: number;
   strata: number;
+  surfacePatch: number;
+  surfaceGrain: number;
+  scatter: number;
 }
 
 interface MutableColumnState {
@@ -87,6 +117,9 @@ interface MutableColumnState {
   drainage: number;
   volcanism: number;
   magic: number;
+  globalHeight: number;
+  mountainness: number;
+  oceanness: number;
   surfaceY: number;
   waterTopY: number;
   surfaceMaterialPrimary: number;
@@ -129,14 +162,17 @@ export interface ProceduralColumnSample {
 export interface ProceduralBiomeProbe extends ProceduralColumnSample {
   secondaryBiomeId: BaseBiomeId;
   transitionThreshold: number;
-      specialStrength: number;
-      fields: {
+  specialStrength: number;
+  fields: {
     temperature: number;
     moisture: number;
     uplift: number;
     drainage: number;
     volcanism: number;
     magic: number;
+    globalHeight: number;
+    mountainness: number;
+    oceanness: number;
   };
 }
 
@@ -191,6 +227,9 @@ const CHANNEL_SCALE = 1 / 1200;
 const DUNE_SCALE = 1 / 320;
 const MESA_SCALE = 1 / 900;
 const STRATA_SCALE = 1 / 54;
+const SURFACE_PATCH_SCALE = 1 / 48;
+const SURFACE_GRAIN_SCALE = 1 / 14;
+const SURFACE_SCATTER_SCALE = 1 / 26;
 const STRATA_BAND_SCALE = 1 / 160;
 const ONE_THIRD = 1 / 3;
 const NO_WATER = -1;
@@ -204,21 +243,26 @@ const FEATURE_ICE_SPIRE = 6;
 const FEATURE_CYPRESS = 7;
 const FEATURE_BASALT_SPIRE = 8;
 const FEATURE_GLOWCAP = 9;
+const FEATURE_BOULDER = 10;
+const FEATURE_BUSH = 11;
+const FEATURE_CACTUS = 12;
+const FEATURE_REEDS = 13;
+const FEATURE_CRYSTAL = 14;
 const CHUNK_GENERATION_SCRATCH_POOL_LIMIT = 4;
 
 const BASE_BIOMES: readonly BaseBiomeProfile[] = [
-  createBaseBiome("verdant", 0.56, 0.78, 0.28, 0.74, -18, 0.50, 0.18, 0.42, 0.30, 0.00, 1548, "#6A5", "#7B6", "#754", "#49B", "#DDE", "oak"),
-  createBaseBiome("steppe", 0.62, 0.42, 0.36, 0.52, -4, 0.58, 0.24, 0.34, 0.18, 0.00, 1608, "#9B6", "#CB7", "#875", "#4AA", "#DDD", "standing_stone"),
-  createBaseBiome("dunes", 0.84, 0.16, 0.18, 0.28, -22, 0.26, 0.12, 0.58, 0.46, 0.00, 1710, "#DB6", "#EC9", "#B85", "#5BC", "#EDC", "palm"),
-  createBaseBiome("badlands", 0.72, 0.20, 0.58, 0.36, 24, 0.76, 0.62, 0.40, 0.06, 0.46, 1670, "#C75", "#D96", "#A54", "#49B", "#EBC", "hoodoo"),
-  createBaseBiome("highland", 0.40, 0.56, 0.72, 0.46, 42, 0.92, 0.66, 0.28, 0.08, 0.06, 1518, "#6B7", "#7C8", "#667", "#5AD", "#EEF", "fir"),
-  createBaseBiome("tundra", 0.18, 0.42, 0.86, 0.40, 72, 1.06, 0.84, 0.18, 0.02, 0.04, 1452, "#BCC", "#CDD", "#99A", "#8CD", "#EEF", "ice_spire"),
+  createBaseBiome("verdant", 0.56, 0.78, 0.28, 0.74, 0.42, 0.18, -10, 0.48, 0.18, 0.40, 0.28, 0.00, 2.0, 1548, "#6A5", "#7B6", "#8B6", "#592", "#677", "#754", "#865", "#49B", "#DDE"),
+  createBaseBiome("steppe", 0.62, 0.42, 0.36, 0.52, 0.48, 0.14, 0, 0.54, 0.22, 0.32, 0.18, 0.00, 1.8, 1608, "#9B6", "#CB7", "#BA6", "#CA7", "#887", "#875", "#986", "#4AA", "#DDD"),
+  createBaseBiome("dunes", 0.84, 0.16, 0.18, 0.28, 0.30, 0.12, -16, 0.32, 0.10, 0.54, 0.42, 0.00, 2.8, 1710, "#DB6", "#EC9", "#EC7", "#CA5", "#B96", "#B85", "#C96", "#5BC", "#EDC"),
+  createBaseBiome("badlands", 0.72, 0.20, 0.58, 0.36, 0.58, 0.16, 18, 0.72, 0.64, 0.38, 0.06, 0.46, 2.4, 1670, "#C75", "#D96", "#D86", "#B54", "#865", "#A54", "#965", "#49B", "#EBC"),
+  createBaseBiome("highland", 0.40, 0.56, 0.72, 0.46, 0.72, 0.16, 44, 0.88, 0.62, 0.24, 0.10, 0.06, 2.6, 1518, "#6B7", "#7C8", "#7A8", "#8C7", "#778", "#667", "#889", "#5AD", "#EEF"),
+  createBaseBiome("tundra", 0.18, 0.42, 0.86, 0.40, 0.82, 0.12, 78, 0.98, 0.82, 0.16, 0.02, 0.04, 2.2, 1452, "#BCC", "#CDD", "#DDE", "#ABB", "#889", "#99A", "#AAB", "#8CD", "#EEF"),
 ] as const;
 
 const SPECIAL_BIOMES: Record<SpecialBiomeId, SpecialBiomeProfile> = {
-  marsh: createSpecialBiome("marsh", "#486", "#5A8", "#564", "#276", "#DDE", "cypress", true),
-  ember: createSpecialBiome("ember", "#543", "#754", "#654", "#36A", "#DCC", "basalt_spire", false),
-  bloom: createSpecialBiome("bloom", "#6A8", "#8CF", "#557", "#4CF", "#EEF", "glowcap", true),
+  marsh: createSpecialBiome("marsh", "#486", "#5A8", "#597", "#2A6", "#576", "#564", "#675", "#276", "#DDE", true),
+  ember: createSpecialBiome("ember", "#543", "#754", "#764", "#F74", "#433", "#654", "#765", "#36A", "#DCC", false),
+  bloom: createSpecialBiome("bloom", "#6A8", "#8CF", "#7BA", "#BDF", "#668", "#557", "#668", "#4CF", "#EEF", true),
 };
 
 const UNDERGROUND_BIOMES: Record<UndergroundBiomeId, UndergroundBiomeProfile> = {
@@ -232,19 +276,37 @@ const UNDERGROUND_BIOMES: Record<UndergroundBiomeId, UndergroundBiomeProfile> = 
 
 const LANDMARKS: Record<LandmarkId, LandmarkProfile> = {
   oak: { id: "oak", cellSize: 88, radius: 5, chance: 0.32 },
+  birch: { id: "birch", cellSize: 84, radius: 4, chance: 0.30 },
+  boulder: { id: "boulder", cellSize: 72, radius: 4, chance: 0.34 },
   standing_stone: { id: "standing_stone", cellSize: 104, radius: 3, chance: 0.24 },
+  shrub: { id: "shrub", cellSize: 64, radius: 3, chance: 0.42 },
   palm: { id: "palm", cellSize: 96, radius: 6, chance: 0.3 },
+  cactus: { id: "cactus", cellSize: 84, radius: 3, chance: 0.34 },
   hoodoo: { id: "hoodoo", cellSize: 104, radius: 5, chance: 0.26 },
   fir: { id: "fir", cellSize: 80, radius: 4, chance: 0.34 },
   ice_spire: { id: "ice_spire", cellSize: 104, radius: 4, chance: 0.24 },
   cypress: { id: "cypress", cellSize: 88, radius: 5, chance: 0.42 },
+  reed_cluster: { id: "reed_cluster", cellSize: 68, radius: 3, chance: 0.48 },
   basalt_spire: { id: "basalt_spire", cellSize: 104, radius: 4, chance: 0.22 },
+  crystal_cluster: { id: "crystal_cluster", cellSize: 76, radius: 3, chance: 0.32 },
   glowcap: { id: "glowcap", cellSize: 80, radius: 6, chance: 0.4 },
 };
 
-const BASE_BIOME_BY_ID: Record<BaseBiomeId, BaseBiomeProfile> = Object.fromEntries(
-  BASE_BIOMES.map((biome) => [biome.id, biome]),
-) as Record<BaseBiomeId, BaseBiomeProfile>;
+const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkId[]> = {
+  verdant: ["oak", "birch", "shrub", "boulder"],
+  steppe: ["standing_stone", "shrub", "boulder", "birch"],
+  dunes: ["palm", "cactus", "boulder"],
+  badlands: ["hoodoo", "standing_stone", "boulder", "cactus"],
+  highland: ["fir", "boulder", "birch", "standing_stone"],
+  tundra: ["ice_spire", "fir", "boulder", "shrub"],
+};
+
+const SPECIAL_BIOME_LANDMARKS: Record<SpecialBiomeId, readonly LandmarkId[]> = {
+  marsh: ["cypress", "reed_cluster", "shrub"],
+  ember: ["basalt_spire", "crystal_cluster", "boulder"],
+  bloom: ["glowcap", "birch", "crystal_cluster", "shrub"],
+};
+
 const chunkGenerationScratchPool: ChunkGenerationScratch[] = [];
 
 export function buildHexColorPalette(): number[] {
@@ -294,6 +356,9 @@ export class ProceduralWorldGenerator {
   private readonly duneSeed: number;
   private readonly mesaSeed: number;
   private readonly strataSeed: number;
+  private readonly surfacePatchSeed: number;
+  private readonly surfaceGrainSeed: number;
+  private readonly surfaceScatterSeed: number;
   private readonly transitionSeed: number;
   private readonly featureSeed: number;
 
@@ -323,8 +388,11 @@ export class ProceduralWorldGenerator {
     this.duneSeed = seed + 709;
     this.mesaSeed = seed + 761;
     this.strataSeed = seed + 809;
-    this.transitionSeed = seed + 863;
-    this.featureSeed = seed + 911;
+    this.surfacePatchSeed = seed + 863;
+    this.surfaceGrainSeed = seed + 911;
+    this.surfaceScatterSeed = seed + 967;
+    this.transitionSeed = seed + 1013;
+    this.featureSeed = seed + 1061;
   }
 
   sampleColumn(worldX: number, worldZ: number): ProceduralColumnSample {
@@ -348,6 +416,9 @@ export class ProceduralWorldGenerator {
         drainage: state.drainage,
         volcanism: state.volcanism,
         magic: state.magic,
+        globalHeight: state.globalHeight,
+        mountainness: state.mountainness,
+        oceanness: state.oceanness,
       },
     };
   }
@@ -434,7 +505,8 @@ export class ProceduralWorldGenerator {
     const fields = this.sampleFields(worldX, worldZ);
     const baseBlend = this.selectBaseBiomes(fields);
     const terrainProfile = blendTerrainProfile(baseBlend.primary, baseBlend.secondary, baseBlend.primaryWeight);
-    let surfaceY = this.sampleSurfaceY(fields, terrainProfile);
+    const biomeCore = smoothstep(0.60, 0.88, baseBlend.primaryWeight);
+    let surfaceY = this.sampleSurfaceY(fields, terrainProfile, biomeCore);
 
     const flatness = saturate(1 - (
       fields.ridge * 0.7
@@ -469,15 +541,15 @@ export class ProceduralWorldGenerator {
     if (marshStrength > 0.40 && marshStrength >= emberStrength && marshStrength >= bloomStrength) {
       biomeId = "marsh";
       specialStrength = marshStrength;
-      surfaceY -= Math.round(lerp(2, 9, marshStrength));
+      surfaceY -= Math.round(lerp(1, 7, marshStrength) * (0.35 + biomeCore * 0.65));
     } else if (bloomStrength > 0.34 && bloomStrength >= emberStrength) {
       biomeId = "bloom";
       specialStrength = bloomStrength;
-      surfaceY += Math.round(lerp(0, 4, bloomStrength) * (fields.magic - 0.5));
+      surfaceY += Math.round(lerp(0, 4, bloomStrength) * (fields.magic - 0.5) * (0.3 + biomeCore * 0.7));
     } else if (emberStrength > 0.54) {
       biomeId = "ember";
       specialStrength = emberStrength;
-      surfaceY += Math.round(lerp(3, 14, emberStrength) * (0.35 + fields.mesa));
+      surfaceY += Math.round(lerp(2, 11, emberStrength) * (0.25 + fields.mesa) * (0.35 + biomeCore * 0.65));
     }
 
     surfaceY = clamp(surfaceY, 8, this.maxYExclusive - 2);
@@ -491,7 +563,10 @@ export class ProceduralWorldGenerator {
       baseBlend.secondary,
       baseBlend.primaryWeight,
       specialStrength,
-    );
+      fields,
+      biomeCore,
+      surfaceY,
+      );
     const waterTopY = this.resolveWaterTopY(biomeId, surfaceY, fields, specialStrength);
     const landmarkId = this.resolveLandmark(worldX, worldZ, biomeId, waterTopY, fields, out);
 
@@ -506,6 +581,9 @@ export class ProceduralWorldGenerator {
     out.drainage = fields.drainage;
     out.volcanism = fields.volcanism;
     out.magic = fields.magic;
+    out.globalHeight = fields.globalHeight;
+    out.mountainness = fields.mountainness;
+    out.oceanness = fields.oceanness;
     out.surfaceY = surfaceY;
     out.waterTopY = waterTopY;
     out.surfaceMaterialPrimary = surfaceY >= snowLine && biomeId !== "ember" ? surfaceMaterials.snow : surfaceMaterials.surfacePrimary;
@@ -527,22 +605,43 @@ export class ProceduralWorldGenerator {
   }
 
   private sampleFields(worldX: number, worldZ: number): ColumnFieldSample {
+    const continentalness = fbm2D5(worldX * CONTINENT_SCALE, worldZ * CONTINENT_SCALE, this.continentSeed) - 0.5;
+    const uplift = fbm2D4(worldX * UPLIFT_SCALE, worldZ * UPLIFT_SCALE, this.upliftSeed);
+    const hills = fbm2D4(worldX * HILLS_SCALE, worldZ * HILLS_SCALE, this.hillsSeed) - 0.5;
+    const detail = fbm2D4(worldX * DETAIL_SCALE, worldZ * DETAIL_SCALE, this.detailSeed) - 0.5;
+    const ridge = 1 - Math.abs(fbm2D3(worldX * RIDGE_SCALE, worldZ * RIDGE_SCALE, this.ridgeSeed) * 2 - 1);
+    const basin = fbm2D3(worldX * BASIN_SCALE, worldZ * BASIN_SCALE, this.basinSeed) - 0.5;
+    const mountainness = smoothstep(0.56, 0.84, uplift) * smoothstep(0.42, 0.78, ridge);
+    const oceanness = smoothstep(-0.40, -0.08, continentalness) * smoothstep(-0.28, 0.06, -basin);
+    const globalHeight = saturate(
+      0.26
+        + (continentalness + 0.5) * 0.34
+        + uplift * 0.14
+        - oceanness * 0.14
+        - smoothstep(0.46, 0.82, -basin) * 0.05,
+    );
     return {
       temperature: fbm2D4(worldX * TEMPERATURE_SCALE, worldZ * TEMPERATURE_SCALE, this.temperatureSeed),
       moisture: fbm2D4(worldX * MOISTURE_SCALE, worldZ * MOISTURE_SCALE, this.moistureSeed),
-      uplift: fbm2D4(worldX * UPLIFT_SCALE, worldZ * UPLIFT_SCALE, this.upliftSeed),
+      uplift,
       drainage: fbm2D3(worldX * DRAINAGE_SCALE, worldZ * DRAINAGE_SCALE, this.drainageSeed),
       volcanism: fbm2D3(worldX * VOLCANISM_SCALE, worldZ * VOLCANISM_SCALE, this.volcanismSeed),
       magic: fbm2D3(worldX * MAGIC_SCALE, worldZ * MAGIC_SCALE, this.magicSeed),
-      continentalness: fbm2D5(worldX * CONTINENT_SCALE, worldZ * CONTINENT_SCALE, this.continentSeed) - 0.5,
-      hills: fbm2D4(worldX * HILLS_SCALE, worldZ * HILLS_SCALE, this.hillsSeed) - 0.5,
-      detail: fbm2D4(worldX * DETAIL_SCALE, worldZ * DETAIL_SCALE, this.detailSeed) - 0.5,
-      ridge: 1 - Math.abs(fbm2D3(worldX * RIDGE_SCALE, worldZ * RIDGE_SCALE, this.ridgeSeed) * 2 - 1),
-      basin: fbm2D3(worldX * BASIN_SCALE, worldZ * BASIN_SCALE, this.basinSeed) - 0.5,
+      globalHeight,
+      mountainness,
+      oceanness,
+      continentalness,
+      hills,
+      detail,
+      ridge,
+      basin,
       channel: 1 - Math.abs(fbm2D2(worldX * CHANNEL_SCALE, worldZ * CHANNEL_SCALE, this.channelSeed) * 2 - 1),
       dune: 1 - Math.abs(fbm2D2(worldX * DUNE_SCALE, worldZ * DUNE_SCALE, this.duneSeed) * 2 - 1),
       mesa: smoothstep(0.54, 0.84, fbm2D2(worldX * MESA_SCALE, worldZ * MESA_SCALE, this.mesaSeed)),
       strata: fbm2D2(worldX * STRATA_SCALE, worldZ * STRATA_SCALE, this.strataSeed),
+      surfacePatch: fbm2D3(worldX * SURFACE_PATCH_SCALE, worldZ * SURFACE_PATCH_SCALE, this.surfacePatchSeed),
+      surfaceGrain: fbm2D2(worldX * SURFACE_GRAIN_SCALE, worldZ * SURFACE_GRAIN_SCALE, this.surfaceGrainSeed),
+      scatter: fbm2D2(worldX * SURFACE_SCATTER_SCALE, worldZ * SURFACE_SCATTER_SCALE, this.surfaceScatterSeed),
     };
   }
 
@@ -584,26 +683,35 @@ export class ProceduralWorldGenerator {
       detailScale: number;
       basinScale: number;
       terraceScale: number;
+      microRelief: number;
       snowLine: number;
     },
+    biomeCore: number,
   ): number {
-    const macroHeight = this.seaLevel
-      - 24
-      + terrainProfile.heightBias
-      + fields.continentalness * 160
-      + (fields.uplift - 0.5) * 160
-      + (fields.moisture - 0.5) * 14
-      + (fields.temperature - 0.5) * 10;
-    const hillHeight = fields.hills * 96 * terrainProfile.reliefScale;
-    const ridgeHeight = (fields.ridge * fields.ridge - 0.28) * 104 * terrainProfile.ridgeScale;
-    const detailHeight = fields.detail * 22 * terrainProfile.detailScale;
-    const basinHeight = fields.basin * 92 * terrainProfile.basinScale;
-    const duneHeight = (fields.dune - 0.45) * 26 * terrainProfile.detailScale;
-    const preTerrace = macroHeight + hillHeight + ridgeHeight + detailHeight + basinHeight + duneHeight;
-    const terraceHeight = terrainProfile.terraceScale <= 0
+    const globalBaseHeight = this.seaLevel
+      - 96
+      + fields.globalHeight * 460
+      - fields.oceanness * 82;
+    const sharedRelief = fields.hills * (28 + fields.globalHeight * 36)
+      + (fields.ridge * fields.ridge - 0.30) * (18 + fields.mountainness * 68)
+      + fields.basin * 26
+      + fields.detail * 8;
+    const localWeight = 0.06 + biomeCore * biomeCore * 0.74;
+    const localHeight = terrainProfile.heightBias * localWeight
+      + fields.hills * 88 * terrainProfile.reliefScale * localWeight
+      + (fields.ridge * fields.ridge - 0.34) * 72 * terrainProfile.ridgeScale * localWeight
+      + fields.detail * 16 * terrainProfile.detailScale * localWeight
+      + fields.basin * 34 * terrainProfile.basinScale * localWeight
+      + (fields.dune - 0.5) * 24 * terrainProfile.detailScale * localWeight
+      + (fields.mesa - 0.5) * 20 * terrainProfile.terraceScale * localWeight;
+    const preTerrace = globalBaseHeight + sharedRelief + localHeight;
+    const terracedHeight = terrainProfile.terraceScale <= 0
       ? preTerrace
-      : lerp(preTerrace, Math.round(preTerrace / 8) * 8, terrainProfile.terraceScale);
-    return Math.floor(clamp(terraceHeight, 8, this.maxYExclusive - 2));
+      : lerp(preTerrace, Math.round(preTerrace / 8) * 8, terrainProfile.terraceScale * localWeight);
+    const microRelief = Math.round(
+      (fields.surfaceGrain - 0.5) * terrainProfile.microRelief * (0.35 + biomeCore * 0.65),
+    );
+    return Math.floor(clamp(terracedHeight + microRelief, 8, this.maxYExclusive - 2));
   }
 
   private resolveSurfaceMaterials(
@@ -612,6 +720,9 @@ export class ProceduralWorldGenerator {
     secondary: BaseBiomeProfile,
     primaryWeight: number,
     specialStrength: number,
+    fields: ColumnFieldSample,
+    biomeCore: number,
+    surfaceY: number,
   ): {
     surfacePrimary: number;
     surfaceSecondary: number;
@@ -622,26 +733,35 @@ export class ProceduralWorldGenerator {
     transitionThreshold: number;
   } {
     if (biomeId === primary.id) {
+      const primarySurface = selectSurfaceMaterial(primary, fields, biomeCore, surfaceY);
+      const primarySubsurface = selectSubsurfaceMaterial(primary, fields, biomeCore, surfaceY);
+      const secondarySurface = selectSurfaceMaterial(secondary, fields, 1 - biomeCore * 0.5, surfaceY);
+      const secondarySubsurface = selectSubsurfaceMaterial(secondary, fields, 1 - biomeCore * 0.5, surfaceY);
       return {
-        surfacePrimary: primary.surface,
-        surfaceSecondary: secondary.transitionSurface,
-        subsurfacePrimary: primary.subsurface,
-        subsurfaceSecondary: secondary.subsurface,
+        surfacePrimary: primarySurface,
+        surfaceSecondary: primary === secondary ? primarySurface : secondarySurface,
+        subsurfacePrimary: primarySubsurface,
+        subsurfaceSecondary: primary === secondary ? primarySubsurface : secondarySubsurface,
         water: primary.water,
         snow: primary.snow,
-        transitionThreshold: primary === secondary ? 1 : clamp(primaryWeight, 0.52, 0.96),
+        transitionThreshold: primary === secondary ? 1 : clamp(0.56 + biomeCore * 0.24 + (primaryWeight - 0.5) * 0.30, 0.52, 0.90),
       };
     }
 
     const special = SPECIAL_BIOMES[biomeId as SpecialBiomeId];
+    const specialBiomeId = biomeId as SpecialBiomeId;
+    const primarySurface = selectSpecialSurfaceMaterial(special, specialBiomeId, fields, biomeCore, specialStrength, surfaceY);
+    const primarySubsurface = selectSpecialSubsurfaceMaterial(special, specialBiomeId, fields, biomeCore, specialStrength);
+    const hostSurface = selectSurfaceMaterial(primary, fields, biomeCore, surfaceY);
+    const hostSubsurface = selectSubsurfaceMaterial(primary, fields, biomeCore, surfaceY);
     const specialThreshold = special.softTransition
-      ? clamp(0.60 + specialStrength * 0.26, 0.60, 0.94)
+      ? clamp(0.58 + specialStrength * 0.24 + biomeCore * 0.10, 0.58, 0.92)
       : 1;
     return {
-      surfacePrimary: special.surface,
-      surfaceSecondary: special.softTransition ? primary.transitionSurface : special.surface,
-      subsurfacePrimary: special.subsurface,
-      subsurfaceSecondary: special.softTransition ? primary.subsurface : special.subsurface,
+      surfacePrimary: primarySurface,
+      surfaceSecondary: special.softTransition ? hostSurface : primarySurface,
+      subsurfacePrimary: primarySubsurface,
+      subsurfaceSecondary: special.softTransition ? hostSubsurface : primarySubsurface,
       water: special.water,
       snow: special.snow,
       transitionThreshold: specialThreshold,
@@ -705,73 +825,43 @@ export class ProceduralWorldGenerator {
     out.featureDeltaZ = 0;
     out.featureMaterialPrimary = 0;
     out.featureMaterialSecondary = 0;
+    const roster = selectLandmarkRoster(biomeId);
+    if (roster.length === 0) {
+      return null;
+    }
 
-    const landmarkId = biomeId === "marsh"
-      ? "cypress"
-      : biomeId === "ember"
-      ? "basalt_spire"
-      : biomeId === "bloom"
-      ? "glowcap"
-      : BASE_BIOME_BY_ID[biomeId].landmarkId;
-    if (!landmarkId) {
-      return null;
+    const selectorCellX = Math.floor(worldX / 64);
+    const selectorCellZ = Math.floor(worldZ / 64);
+    const startIndex = Math.floor(
+      hashNoise3D(selectorCellX, 19, selectorCellZ, this.featureSeed + biomeId.length) * roster.length,
+    );
+    for (let attempt = 0; attempt < roster.length; attempt += 1) {
+      const landmarkId = roster[(startIndex + attempt) % roster.length]!;
+      const profile = LANDMARKS[landmarkId];
+      const cellX = Math.floor(worldX / profile.cellSize);
+      const cellZ = Math.floor(worldZ / profile.cellSize);
+      const chance = hashNoise3D(cellX, 1, cellZ, this.featureSeed + profile.cellSize);
+      if (chance > profile.chance) {
+        continue;
+      }
+      const cellOriginX = cellX * profile.cellSize;
+      const cellOriginZ = cellZ * profile.cellSize;
+      const margin = profile.radius + 2;
+      const span = profile.cellSize - margin * 2;
+      const anchorX = cellOriginX + margin + Math.floor(hashNoise3D(cellX, 2, cellZ, this.featureSeed + profile.radius) * span);
+      const anchorZ = cellOriginZ + margin + Math.floor(hashNoise3D(cellX, 3, cellZ, this.featureSeed + profile.radius * 2) * span);
+      const deltaX = worldX - anchorX;
+      const deltaZ = worldZ - anchorZ;
+      if (Math.abs(deltaX) > profile.radius || Math.abs(deltaZ) > profile.radius) {
+        continue;
+      }
+      out.featureDeltaX = deltaX;
+      out.featureDeltaZ = deltaZ;
+      if (configureLandmarkFeature(landmarkId, waterTopY, fields, out)) {
+        return landmarkId;
+      }
     }
-    const profile = LANDMARKS[landmarkId];
-    const cellOriginX = Math.floor(worldX / profile.cellSize) * profile.cellSize;
-    const cellOriginZ = Math.floor(worldZ / profile.cellSize) * profile.cellSize;
-    const margin = profile.radius + 2;
-    const span = profile.cellSize - margin * 2;
-    const cellX = Math.floor(worldX / profile.cellSize);
-    const cellZ = Math.floor(worldZ / profile.cellSize);
-    const chance = hashNoise3D(cellX, 1, cellZ, this.featureSeed + profile.cellSize);
-    if (chance > profile.chance) {
-      return null;
-    }
-    const anchorX = cellOriginX + margin + Math.floor(hashNoise3D(cellX, 2, cellZ, this.featureSeed + profile.radius) * span);
-    const anchorZ = cellOriginZ + margin + Math.floor(hashNoise3D(cellX, 3, cellZ, this.featureSeed + profile.radius * 2) * span);
-    const deltaX = worldX - anchorX;
-    const deltaZ = worldZ - anchorZ;
-    if (Math.abs(deltaX) > profile.radius || Math.abs(deltaZ) > profile.radius) {
-      return null;
-    }
-    out.featureDeltaX = deltaX;
-    out.featureDeltaZ = deltaZ;
-
-    switch (landmarkId) {
-      case "oak":
-        configureTreeFeature(out, FEATURE_OAK, 8 + Math.floor(fields.moisture * 5), 4, "#653", "#5B4");
-        return landmarkId;
-      case "standing_stone":
-        configureSpireFeature(out, FEATURE_STANDING_STONE, 7 + Math.floor(fields.uplift * 4), 2, "#998", "#CBA");
-        return landmarkId;
-      case "palm":
-        if (waterTopY === NO_WATER && fields.channel < 0.68) {
-          return null;
-        }
-        configureTreeFeature(out, FEATURE_PALM, 9 + Math.floor(fields.temperature * 4), 4, "#864", "#7B6");
-        return landmarkId;
-      case "hoodoo":
-        configureSpireFeature(out, FEATURE_HOODOO, 8 + Math.floor(fields.mesa * 6), 3, "#B75", "#EBA");
-        return landmarkId;
-      case "fir":
-        configureTreeFeature(out, FEATURE_FIR, 10 + Math.floor(fields.uplift * 5), 4, "#764", "#6A7");
-        return landmarkId;
-      case "ice_spire":
-        configureSpireFeature(out, FEATURE_ICE_SPIRE, 8 + Math.floor((1 - fields.temperature) * 5), 3, "#CDE", "#EFF");
-        return landmarkId;
-      case "cypress":
-        configureTreeFeature(out, FEATURE_CYPRESS, 8 + Math.floor(fields.drainage * 4), 3, "#554", "#486");
-        return landmarkId;
-      case "basalt_spire":
-        configureSpireFeature(out, FEATURE_BASALT_SPIRE, 9 + Math.floor(fields.volcanism * 6), 3, "#433", "#F74");
-        return landmarkId;
-      case "glowcap":
-        configureTreeFeature(out, FEATURE_GLOWCAP, 8 + Math.floor(fields.magic * 5), 5, "#79B", "#8CF");
-        out.featureExtra = 2;
-        return landmarkId;
-      default:
-        return null;
-    }
+    return null;
   }
 
   private writeChunkColumnState(
@@ -876,19 +966,25 @@ function createBaseBiome(
   moisture: number,
   uplift: number,
   drainage: number,
+  heightCenter: number,
+  heightRange: number,
   heightBias: number,
   reliefScale: number,
   ridgeScale: number,
   detailScale: number,
   basinScale: number,
   terraceScale: number,
+  microRelief: number,
   snowLine: number,
   surface: string,
   transitionSurface: string,
+  surfaceVariant: string,
+  surfaceAccent: string,
+  surfaceRock: string,
   subsurface: string,
+  subsurfaceVariant: string,
   water: string,
   snow: string,
-  landmarkId: LandmarkId | null,
 ): BaseBiomeProfile {
   return {
     id,
@@ -896,19 +992,25 @@ function createBaseBiome(
     moisture,
     uplift,
     drainage,
+    heightCenter,
+    heightRange,
     heightBias,
     reliefScale,
     ridgeScale,
     detailScale,
     basinScale,
     terraceScale,
+    microRelief,
     snowLine,
     surface: hexColorToMaterial(surface),
     transitionSurface: hexColorToMaterial(transitionSurface),
+    surfaceVariant: hexColorToMaterial(surfaceVariant),
+    surfaceAccent: hexColorToMaterial(surfaceAccent),
+    surfaceRock: hexColorToMaterial(surfaceRock),
     subsurface: hexColorToMaterial(subsurface),
+    subsurfaceVariant: hexColorToMaterial(subsurfaceVariant),
     water: hexColorToMaterial(water),
     snow: hexColorToMaterial(snow),
-    landmarkId,
   };
 }
 
@@ -916,20 +1018,26 @@ function createSpecialBiome(
   id: SpecialBiomeId,
   surface: string,
   transitionSurface: string,
+  surfaceVariant: string,
+  surfaceAccent: string,
+  surfaceRock: string,
   subsurface: string,
+  subsurfaceVariant: string,
   water: string,
   snow: string,
-  landmarkId: LandmarkId | null,
   softTransition: boolean,
 ): SpecialBiomeProfile {
   return {
     id,
     surface: hexColorToMaterial(surface),
     transitionSurface: hexColorToMaterial(transitionSurface),
+    surfaceVariant: hexColorToMaterial(surfaceVariant),
+    surfaceAccent: hexColorToMaterial(surfaceAccent),
+    surfaceRock: hexColorToMaterial(surfaceRock),
     subsurface: hexColorToMaterial(subsurface),
+    subsurfaceVariant: hexColorToMaterial(subsurfaceVariant),
     water: hexColorToMaterial(water),
     snow: hexColorToMaterial(snow),
-    landmarkId,
     softTransition,
   };
 }
@@ -961,6 +1069,9 @@ function createMutableColumnState(): MutableColumnState {
     drainage: 0,
     volcanism: 0,
     magic: 0,
+    globalHeight: 0,
+    mountainness: 0,
+    oceanness: 0,
     surfaceY: 0,
     waterTopY: NO_WATER,
     surfaceMaterialPrimary: 0,
@@ -1005,10 +1116,11 @@ function columnSampleFromState(state: MutableColumnState): ProceduralColumnSampl
 
 function scoreBaseBiome(fields: ColumnFieldSample, biome: BaseBiomeProfile): number {
   let score = (
-    scoreField(fields.temperature, biome.temperature, 0.28) * 0.30
-    + scoreField(fields.moisture, biome.moisture, 0.30) * 0.30
-    + scoreField(fields.uplift, biome.uplift, 0.32) * 0.20
-    + scoreField(fields.drainage, biome.drainage, 0.34) * 0.12
+    scoreField(fields.temperature, biome.temperature, 0.28) * 0.20
+    + scoreField(fields.moisture, biome.moisture, 0.30) * 0.20
+    + scoreField(fields.uplift, biome.uplift, 0.32) * 0.12
+    + scoreField(fields.drainage, biome.drainage, 0.34) * 0.10
+    + scoreField(fields.globalHeight, biome.heightCenter, biome.heightRange) * 0.30
     + scoreField(fields.magic, biome.id === "highland" ? 0.56 : 0.44, 0.56) * 0.04
     + scoreField(fields.volcanism, biome.id === "badlands" ? 0.52 : 0.32, 0.72) * 0.04
   );
@@ -1048,6 +1160,7 @@ function blendTerrainProfile(primary: BaseBiomeProfile, secondary: BaseBiomeProf
   detailScale: number;
   basinScale: number;
   terraceScale: number;
+  microRelief: number;
   snowLine: number;
 } {
   const secondaryWeight = 1 - primaryWeight;
@@ -1058,6 +1171,7 @@ function blendTerrainProfile(primary: BaseBiomeProfile, secondary: BaseBiomeProf
     detailScale: primary.detailScale * primaryWeight + secondary.detailScale * secondaryWeight,
     basinScale: primary.basinScale * primaryWeight + secondary.basinScale * secondaryWeight,
     terraceScale: primary.terraceScale * primaryWeight + secondary.terraceScale * secondaryWeight,
+    microRelief: primary.microRelief * primaryWeight + secondary.microRelief * secondaryWeight,
     snowLine: primary.snowLine * primaryWeight + secondary.snowLine * secondaryWeight,
   };
 }
@@ -1094,6 +1208,235 @@ function resolveHostBiomeId(
     return primary === "verdant" || primary === "highland" ? primary : secondary;
   }
   return primary;
+}
+
+function selectSurfaceMaterial(
+  biome: BaseBiomeProfile,
+  fields: ColumnFieldSample,
+  biomeCore: number,
+  surfaceY: number,
+): number {
+  return pickSurfaceMaterial(
+    biome.surface,
+    biome.transitionSurface,
+    biome.surfaceVariant,
+    biome.surfaceAccent,
+    biome.surfaceRock,
+    fields,
+    biomeCore,
+    surfaceY,
+    0,
+  );
+}
+
+function selectSubsurfaceMaterial(
+  biome: BaseBiomeProfile,
+  fields: ColumnFieldSample,
+  biomeCore: number,
+  surfaceY: number,
+): number {
+  return pickSubsurfaceMaterial(
+    biome.subsurface,
+    biome.subsurfaceVariant,
+    biome.surfaceRock,
+    fields,
+    biomeCore,
+    surfaceY,
+    0,
+  );
+}
+
+function selectSpecialSurfaceMaterial(
+  biome: SpecialBiomeProfile,
+  biomeId: SpecialBiomeId,
+  fields: ColumnFieldSample,
+  biomeCore: number,
+  specialStrength: number,
+  surfaceY: number,
+): number {
+  const extraBias = biomeId === "ember"
+    ? 0.24 + specialStrength * 0.34
+    : biomeId === "marsh"
+    ? -0.10 + fields.moisture * 0.18
+    : fields.magic * 0.18 + specialStrength * 0.16;
+  return pickSurfaceMaterial(
+    biome.surface,
+    biome.transitionSurface,
+    biome.surfaceVariant,
+    biome.surfaceAccent,
+    biome.surfaceRock,
+    fields,
+    biomeCore,
+    surfaceY,
+    extraBias,
+  );
+}
+
+function selectSpecialSubsurfaceMaterial(
+  biome: SpecialBiomeProfile,
+  biomeId: SpecialBiomeId,
+  fields: ColumnFieldSample,
+  biomeCore: number,
+  specialStrength: number,
+): number {
+  const extraBias = biomeId === "ember"
+    ? 0.20 + specialStrength * 0.28
+    : biomeId === "bloom"
+    ? fields.magic * 0.14
+    : fields.moisture * 0.10;
+  return pickSubsurfaceMaterial(
+    biome.subsurface,
+    biome.subsurfaceVariant,
+    biome.surfaceRock,
+    fields,
+    biomeCore,
+    0,
+    extraBias,
+  );
+}
+
+function pickSurfaceMaterial(
+  surface: number,
+  transitionSurface: number,
+  surfaceVariant: number,
+  surfaceAccent: number,
+  surfaceRock: number,
+  fields: ColumnFieldSample,
+  biomeCore: number,
+  surfaceY: number,
+  extraBias: number,
+): number {
+  const shoreBias = smoothstep(
+    0.32,
+    0.84,
+    fields.oceanness + fields.channel * 0.30 + Math.max(0, 0.46 - fields.globalHeight) * 0.55,
+  );
+  const rockyBias = smoothstep(
+    0.44,
+    0.92,
+    fields.mountainness + Math.max(0, surfaceY - 1540) * 0.0012 + extraBias,
+  );
+  const patchBias = smoothstep(0.54, 0.84, fields.surfacePatch);
+  const accentBias = smoothstep(0.58, 0.90, fields.surfaceGrain + fields.scatter * 0.32 + extraBias * 0.35);
+  if (rockyBias > 0.72 && fields.surfaceGrain > 0.48) {
+    return surfaceRock;
+  }
+  if (shoreBias > 0.62 && fields.surfacePatch < 0.60) {
+    return transitionSurface;
+  }
+  if (accentBias > 0.80 && biomeCore > 0.44) {
+    return surfaceAccent;
+  }
+  if (patchBias > 0.70 || fields.scatter > 0.70) {
+    return surfaceVariant;
+  }
+  if (fields.surfacePatch < 0.18 && shoreBias > 0.42) {
+    return transitionSurface;
+  }
+  return surface;
+}
+
+function pickSubsurfaceMaterial(
+  subsurface: number,
+  subsurfaceVariant: number,
+  surfaceRock: number,
+  fields: ColumnFieldSample,
+  biomeCore: number,
+  surfaceY: number,
+  extraBias: number,
+): number {
+  const rockyBias = smoothstep(
+    0.48,
+    0.90,
+    fields.mountainness + Math.max(0, surfaceY - 1560) * 0.001 + extraBias,
+  );
+  if (rockyBias > 0.80 && biomeCore > 0.40) {
+    return surfaceRock;
+  }
+  if (fields.surfacePatch > 0.62 || fields.surfaceGrain > 0.72 || fields.scatter > 0.66) {
+    return subsurfaceVariant;
+  }
+  return subsurface;
+}
+
+function selectLandmarkRoster(biomeId: BiomeId): readonly LandmarkId[] {
+  switch (biomeId) {
+    case "marsh":
+    case "ember":
+    case "bloom":
+      return SPECIAL_BIOME_LANDMARKS[biomeId];
+    default:
+      return BASE_BIOME_LANDMARKS[biomeId];
+  }
+}
+
+function configureLandmarkFeature(
+  landmarkId: LandmarkId,
+  waterTopY: number,
+  fields: ColumnFieldSample,
+  out: MutableColumnState,
+): boolean {
+  switch (landmarkId) {
+    case "oak":
+      configureTreeFeature(out, FEATURE_OAK, 8 + Math.floor(fields.moisture * 5), 4, "#653", "#5B4");
+      return true;
+    case "birch":
+      configureTreeFeature(out, FEATURE_OAK, 9 + Math.floor(fields.moisture * 4), 3, "#EEC", "#9C7");
+      out.featureExtra = 1;
+      return true;
+    case "boulder":
+      configureSpireFeature(out, FEATURE_BOULDER, 2 + Math.floor(fields.scatter * 2), 3, "#889", "#BBC");
+      out.featureExtra = 0;
+      return true;
+    case "standing_stone":
+      configureSpireFeature(out, FEATURE_STANDING_STONE, 7 + Math.floor(fields.uplift * 4), 2, "#998", "#CBA");
+      return true;
+    case "shrub":
+      configureTreeFeature(out, FEATURE_BUSH, 2 + Math.floor(fields.moisture * 2), 2, "#764", "#7B6");
+      return true;
+    case "palm":
+      if (waterTopY === NO_WATER && fields.channel < 0.68) {
+        return false;
+      }
+      configureTreeFeature(out, FEATURE_PALM, 9 + Math.floor(fields.temperature * 4), 4, "#864", "#7B6");
+      return true;
+    case "cactus":
+      configureTreeFeature(out, FEATURE_CACTUS, 5 + Math.floor(fields.temperature * 3), 2, "#596", "#7B8");
+      out.featureExtra = 1 + Math.floor(fields.surfacePatch * 2);
+      return true;
+    case "hoodoo":
+      configureSpireFeature(out, FEATURE_HOODOO, 8 + Math.floor(fields.mesa * 6), 3, "#B75", "#EBA");
+      return true;
+    case "fir":
+      configureTreeFeature(out, FEATURE_FIR, 10 + Math.floor(fields.uplift * 5), 4, "#764", "#6A7");
+      return true;
+    case "ice_spire":
+      configureSpireFeature(out, FEATURE_ICE_SPIRE, 8 + Math.floor((1 - fields.temperature) * 5), 3, "#CDE", "#EFF");
+      return true;
+    case "cypress":
+      configureTreeFeature(out, FEATURE_CYPRESS, 8 + Math.floor(fields.drainage * 4), 3, "#554", "#486");
+      return true;
+    case "reed_cluster":
+      if (waterTopY === NO_WATER && fields.channel < 0.58) {
+        return false;
+      }
+      configureTreeFeature(out, FEATURE_REEDS, 3 + Math.floor(fields.moisture * 2), 2, "#684", "#8A6");
+      out.featureExtra = 1;
+      return true;
+    case "basalt_spire":
+      configureSpireFeature(out, FEATURE_BASALT_SPIRE, 9 + Math.floor(fields.volcanism * 6), 3, "#433", "#F74");
+      return true;
+    case "crystal_cluster":
+      configureSpireFeature(out, FEATURE_CRYSTAL, 4 + Math.floor(fields.magic * 3), 3, "#79B", "#CEF");
+      out.featureExtra = 1;
+      return true;
+    case "glowcap":
+      configureTreeFeature(out, FEATURE_GLOWCAP, 8 + Math.floor(fields.magic * 5), 5, "#79B", "#8CF");
+      out.featureExtra = 2;
+      return true;
+    default:
+      return false;
+  }
 }
 
 function configureTreeFeature(
@@ -1224,11 +1567,22 @@ function sampleFeatureMaterial(
   switch (featureKind) {
     case FEATURE_OAK:
       if (relativeY <= featureHeight - 4) {
-        return absX <= 0.75 && absZ <= 0.75 ? materialPrimary : 0;
+        const trunkRadius = featureExtra > 0 ? 0.55 : 0.75;
+        return absX <= trunkRadius && absZ <= trunkRadius ? materialPrimary : 0;
       }
-      return radial <= Math.max(1.5, featureRadius - Math.abs(relativeY - (featureHeight - 2)) * 0.9)
+      return radial <= Math.max(featureExtra > 0 ? 1.25 : 1.5, featureRadius - Math.abs(relativeY - (featureHeight - 2)) * (featureExtra > 0 ? 0.7 : 0.9))
         ? materialSecondary
         : 0;
+    case FEATURE_BOULDER:
+      if (relativeY === featureHeight && radial <= Math.max(0.8, featureRadius - 0.6)) {
+        return materialSecondary;
+      }
+      return radial <= Math.max(1, featureRadius - relativeY * 0.75) ? materialPrimary : 0;
+    case FEATURE_BUSH:
+      if (relativeY === 0 && absX <= 0.55 && absZ <= 0.55) {
+        return materialPrimary;
+      }
+      return radial <= Math.max(1.1, featureRadius - relativeY * 0.6) ? materialSecondary : 0;
     case FEATURE_STANDING_STONE:
       return radial <= Math.max(1.1, featureRadius - relativeY * 0.2) ? materialPrimary : 0;
     case FEATURE_PALM:
@@ -1238,6 +1592,19 @@ function sampleFeatureMaterial(
       return relativeY === featureHeight - 1
         ? absX + absZ <= featureRadius + 0.5 ? materialSecondary : 0
         : radial <= 1.2 ? materialSecondary : 0;
+    case FEATURE_CACTUS: {
+      const armY = Math.max(2, featureHeight - 2);
+      if (relativeY <= armY) {
+        if (absX <= 0.55 && absZ <= 0.55) {
+          return materialPrimary;
+        }
+        if (featureExtra > 0 && relativeY === armY && ((featureDeltaX === 1 && absZ <= 0.55) || (featureDeltaZ === 1 && absX <= 0.55))) {
+          return materialPrimary;
+        }
+        return 0;
+      }
+      return absX <= 0.55 && absZ <= 0.55 ? materialSecondary : 0;
+    }
     case FEATURE_HOODOO:
       if (relativeY === featureHeight && radial <= featureRadius + 0.7) {
         return materialSecondary;
@@ -1257,11 +1624,27 @@ function sampleFeatureMaterial(
       return radial <= Math.max(1, featureRadius - Math.abs(relativeY - featureHeight * 0.6) * 0.25)
         ? materialSecondary
         : 0;
+    case FEATURE_REEDS:
+      if (relativeY > featureHeight) {
+        return 0;
+      }
+      return (
+        (absX <= 0.45 && absZ <= 0.45)
+        || (featureDeltaX === 1 && absZ <= 0.45)
+        || (featureDeltaZ === 1 && absX <= 0.45)
+      )
+        ? materialSecondary
+        : 0;
     case FEATURE_BASALT_SPIRE:
       if (relativeY <= 1 + featureExtra && radial <= Math.max(1, featureRadius - relativeY * 0.15)) {
         return materialSecondary;
       }
       return radial <= Math.max(1, featureRadius - relativeY * 0.28) ? materialPrimary : 0;
+    case FEATURE_CRYSTAL:
+      if (relativeY >= featureHeight - 1 && radial <= Math.max(0.8, featureRadius - relativeY * 0.25)) {
+        return materialSecondary;
+      }
+      return radial <= Math.max(0.9, featureRadius - relativeY * 0.55) ? materialPrimary : 0;
     case FEATURE_GLOWCAP:
       if (relativeY <= featureHeight - 3) {
         return absX <= 0.75 && absZ <= 0.75 ? materialPrimary : 0;

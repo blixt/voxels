@@ -47,6 +47,24 @@ test("player can only jump while grounded", () => {
   expect(airbornePlayer.velocity[1]).toBeLessThan(0);
 });
 
+test("player jump reaches at least eighty centimeters above the takeoff point", () => {
+  const world = new VoxelWorld({ width: 128, height: 128, depth: 128 }, 32, [0, 0xff8899aa]);
+  world.fillBox(0, 0, 0, 128, 1, 128, 1);
+  const player = createPlayerState([48, 1, 48], { grounded: true });
+  const startY = player.feetPosition[1];
+  let peakY = startY;
+
+  stepPlayer(world, player, 0, { ...idleInput(), jump: true }, 1 / 60);
+  peakY = Math.max(peakY, player.feetPosition[1]);
+
+  for (let frame = 0; frame < 90; frame += 1) {
+    stepPlayer(world, player, 0, idleInput(), 1 / 120);
+    peakY = Math.max(peakY, player.feetPosition[1]);
+  }
+
+  expect(peakY - startY).toBeGreaterThanOrEqual(8);
+});
+
 test("player eye position is derived from feet position", () => {
   const player = createPlayerState([10, 20, 30]);
 

@@ -24,8 +24,12 @@ The new biome sampler is built from a small set of slowly varying fields:
 - `drainage`
 - `volcanism`
 - `magic`
+- `globalHeight`
+- `mountainness`
+- `oceanness`
 
 These are all deterministic noise fields at different scales. They are intended to act more like "laws of the world" than direct biome IDs.
+The important follow-up lesson from implementation is that `globalHeight` must stay genuinely slow; fast mountain/mesa signal belongs in local relief, not in the global envelope itself.
 
 ## Surface biome roster
 
@@ -83,9 +87,11 @@ These are the default:
 
 Soft transitions come from:
 
+- a slower global terrain envelope shared by all biomes
 - blended terrain parameters from the top base-biome influences
 - dithered material mixing when two biome families have similar influence
 - drainage/basin logic that produces local wetlands without forcing a hard biome wall
+- suppressing biome-local relief and terrace strength near borders through a biome-core weight
 
 ### Stronger / intentional transitions
 
@@ -98,19 +104,34 @@ The goal is not random cliffs at a biome boundary. The goal is to let mesa / vol
 
 ## Landmark families
 
-The first distinct landmark set should stay simple and cheap:
+The first distinct landmark set should stay simple and cheap, but each biome should already have a small roster instead of one fixed family:
 
-- `verdant`: oak-like tree
-- `steppe`: standing stone / scrub monolith
-- `dunes`: palm / oasis marker
-- `badlands`: hoodoo spire
-- `highland`: fir
-- `tundra`: ice spire
-- `marsh`: cypress
-- `ember`: basalt vent / spire
-- `bloom`: giant glowcap
+- `verdant`: oak, birch, shrub, boulder
+- `steppe`: standing stone, shrub, boulder, birch
+- `dunes`: palm, cactus, boulder
+- `badlands`: hoodoo, standing stone, boulder, cactus
+- `highland`: fir, boulder, birch, standing stone
+- `tundra`: ice spire, fir, boulder, shrub
+- `marsh`: cypress, reed cluster, shrub
+- `ember`: basalt spire, crystal cluster, boulder
+- `bloom`: glowcap, birch, crystal cluster, shrub
 
 These should be deterministic and cell-local so chunk generation stays cheap and easy to cache.
+
+## Surface detail
+
+The current surface pass also needs to use the `10 cm` voxel scale more aggressively than a single smooth top material.
+The present approach is still cheap and deterministic:
+
+- drive surface/subsurface variants from:
+  - `surfacePatch`
+  - `surfaceGrain`
+  - `scatter`
+- expose:
+  - flatter/wetter transition materials
+  - stronger accent colors
+  - exposed rock materials
+- keep this logic column-local so later persistence/caching can reuse it directly
 
 ## Performance guardrails
 
