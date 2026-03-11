@@ -820,3 +820,20 @@
 - The next likely target is now the far-field / exclusion-mask path rather than detailed meshing:
   - detailed chunk meshing is materially cheaper than it was two slices ago
   - the remaining local crossing envelope is now split more heavily toward far-field rebuild cost than before
+
+### Far-field exclusion single-column fast path
+
+- Took one deliberately tiny pass on the far-field side to avoid another broad rewrite:
+  - both `intersectsResidentColumns()` and `intersectsColumnKeySet()` were still doing the general nested-loop path even when the sampled cell lived inside a single chunk column
+  - that means the hot exclusion path was paying extra looping and string-key work for the overwhelmingly common simple case
+- The kept change is just the cheap special case:
+  - if the queried footprint maps to a single chunk column, the resident path now does one `hasResidentColumn(...)` check
+  - the render-ready path now does one `Set.has(...)` check on the single column key
+- This was small enough that I only kept it because the warmed profile moved in the right direction:
+  - `crossing-d2` with `radius=8`, `generate=8`, `mesh=6`, `far-band=1` dropped from about `82.0 ms` to about `77.2 ms` total far-field time
+  - the same run’s max frame work improved from about `38.4 ms` to about `37.0 ms`
+  - correctness tests covering resident/render-ready masking and LOD coverage stayed green
+- This is not the large remaining step, but it is the right kind of cleanup:
+  - simple
+  - measurable
+  - no new system to maintain

@@ -2384,3 +2384,38 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This mesher slice is worth keeping.
 - The local crossing profile is now less mesh-dominated than before.
 - The next likely target is far-field rebuild cost or exclusion-mask lookup cost rather than another immediate mesher cleanup.
+
+## 2026-03-11 far-field exclusion fast path
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/procedural-far-field.test.ts tests/procedural-lod-coverage.test.ts`
+- `mise run build`
+- `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=8 --generate-budget=8 --mesh-budget=6 --far-band-budget=1 --chunk-delta=2`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing after the exclusion fast path.
+- Focused tests:
+  - `31 pass`
+  - `0 fail`
+- `mise run build`: passing.
+
+#### Local game-stream profiler
+
+- `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=8 --generate-budget=8 --mesh-budget=6 --far-band-budget=1 --chunk-delta=2` returned:
+  - `crossing-d2 frames avg = 63`
+  - `totalStreamMs avg = 95.5`
+  - `totalMeshMs avg = 173.8`
+  - `totalFarFieldMs avg = 77.2`
+  - `maxFrameWorkMs avg = 37.0`
+  - `maxFarFieldBandBuildMs avg = 28.0`
+  - `totalChunkGenerationMs avg = 84.7`
+- Compared to the previous same-args profile after the mesher neighbor pass:
+  - `totalFarFieldMs` improved from about `82.0 -> 77.2`
+  - `maxFrameWorkMs` improved from about `38.4 -> 37.0`
+
+#### Residual
+
+- This fast path is worth keeping because it is tiny and measurably improved the warmed local far-field profile.
+- It is not the big remaining step.
+- The next higher-signal target is still broader far-field rebuild cost or deeper render-ready column representation cleanup.

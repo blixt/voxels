@@ -230,3 +230,11 @@
 | Reusing those same resolved neighbors in the full-occlusion test is worthwhile instead of doing another pass of world lookups | Fold the occlusion test onto the same neighbor resolution and rerun mesher tests plus the A/B benchmark | Confirmed. Correctness stayed green and the same mesher A/B win was large enough to keep the shared neighbor path | Confirmed |
 | Avoiding cloned `solidBounds` on the clean fast path is too small to matter | Let meshing use in-chunk clean bounds directly and compare the same benchmark/profile results instead of dismissing it | Rejected as “too small to care about”. It is cheap to keep, removes allocation churn, and fits naturally into the same mesher cleanup slice | Rejected |
 | The warmed local game-stream profiler will show whether this mesher cleanup matters beyond a synthetic microbenchmark | Re-run `profile-game-stream` on the same `crossing-d2` configuration after the mesher rewrite | Confirmed. `totalMeshMs` improved from about `257.3 -> 179.2` while correctness tests remained green | Confirmed |
+
+## 2026-03-11 far-field exclusion fast-path search
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| The far-field exclusion path is still doing unnecessary work for the common single-column case | Re-read `intersectsResidentColumns()` and `intersectsColumnKeySet()` and compare that logic to how coarse cells are sampled | Confirmed. The hot path was still taking the generic min/max nested-loop route even when one column key was enough | Confirmed |
+| A single-column fast path is too small to matter and should be skipped in favor of a bigger representation rewrite | Add the fast path and rerun the same warmed `crossing-d2` profile before deciding | Rejected. The change is tiny and still improved `totalFarFieldMs` from about `82.0 -> 77.2` and `maxFrameWorkMs` from about `38.4 -> 37.0` | Rejected |
+| The resident-column and render-ready-column paths both need the same fast-path treatment to avoid asymmetry bugs | Apply the fast path to both functions and rerun focused LOD/render-ready tests | Confirmed. Focused masking and LOD coverage tests stayed green after updating both paths together | Confirmed |

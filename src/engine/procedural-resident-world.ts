@@ -132,6 +132,9 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     const maxChunkX = Math.floor((maxXExclusive - 1) / this.chunkSize);
     const minChunkZ = Math.floor(minZ / this.chunkSize);
     const maxChunkZ = Math.floor((maxZExclusive - 1) / this.chunkSize);
+    if (minChunkX === maxChunkX && minChunkZ === maxChunkZ) {
+      return this.hasResidentColumn(minChunkX, minChunkZ);
+    }
     for (let cz = minChunkZ; cz <= maxChunkZ; cz += 1) {
       for (let cx = minChunkX; cx <= maxChunkX; cx += 1) {
         if (this.hasResidentColumn(cx, cz)) {
@@ -615,6 +618,9 @@ function intersectsColumnKeySet(
   const maxChunkX = Math.floor((maxXExclusive - 1) / chunkSize);
   const minChunkZ = Math.floor(minZ / chunkSize);
   const maxChunkZ = Math.floor((maxZExclusive - 1) / chunkSize);
+  if (minChunkX === maxChunkX && minChunkZ === maxChunkZ) {
+    return columnKeys.has(toColumnKey(minChunkX, minChunkZ));
+  }
   for (let cz = minChunkZ; cz <= maxChunkZ; cz += 1) {
     for (let cx = minChunkX; cx <= maxChunkX; cx += 1) {
       if (columnKeys.has(toColumnKey(cx, cz))) {
