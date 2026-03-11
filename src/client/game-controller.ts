@@ -342,6 +342,11 @@ export interface RouteExperienceFrameSample {
   meshMs: number;
   meshCount: number;
   farFieldMs: number;
+  farFieldSampleCacheMs: number;
+  farFieldMeshBuildMs: number;
+  farFieldSampledCellCount: number;
+  farFieldMaxBandMs: number;
+  farFieldMaxBandLabel: string | null;
   farFieldBuiltBands: number;
   farFieldPendingBands: number;
   gameplayFrameMs: number;
@@ -405,6 +410,14 @@ export interface RouteExperienceBenchmarkSummary {
   avgFarFieldMs: number;
   p95FarFieldMs: number;
   maxFarFieldMs: number;
+  avgFarFieldSampleCacheMs: number;
+  maxFarFieldSampleCacheMs: number;
+  avgFarFieldMeshBuildMs: number;
+  maxFarFieldMeshBuildMs: number;
+  avgFarFieldSampledCellCount: number;
+  maxFarFieldSampledCellCount: number;
+  maxFarFieldBandBuildMs: number;
+  maxFarFieldBandLabel: string | null;
   avgRenderCpuMs: number;
   p95RenderCpuMs: number;
   maxRenderCpuMs: number;
@@ -1558,6 +1571,12 @@ export class GameController {
       + this.lastFarFieldSummary.elapsedMs
       + frameProbe.frameCpuMs;
     const unmeasuredFrameMs = Math.max(0, gameplayFrameMs - accountedFrameMs);
+    const maxFarFieldBand = this.lastFarFieldSummary.bandBuilds.reduce<{
+      label: string | null;
+      elapsedMs: number;
+    }>((current, band) => band.elapsedMs > current.elapsedMs
+      ? { label: band.label, elapsedMs: band.elapsedMs }
+      : current, { label: null, elapsedMs: 0 });
     const suspiciousHole = visibleGround.uncoveredCount > 0
       || (seamProbe?.gapCount ?? 0) > 0
       || (screenVoid?.suspicious ?? false);
@@ -1581,6 +1600,11 @@ export class GameController {
       meshMs: this.lastMeshBuildSummary.elapsedMs,
       meshCount: this.lastMeshBuildSummary.meshCount,
       farFieldMs: this.lastFarFieldSummary.elapsedMs,
+      farFieldSampleCacheMs: this.lastFarFieldSummary.sampleCacheMs,
+      farFieldMeshBuildMs: this.lastFarFieldSummary.meshBuildMs,
+      farFieldSampledCellCount: this.lastFarFieldSummary.sampledCellCount,
+      farFieldMaxBandMs: maxFarFieldBand.elapsedMs,
+      farFieldMaxBandLabel: maxFarFieldBand.label,
       farFieldBuiltBands: this.lastFarFieldSummary.builtBands,
       farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
       gameplayFrameMs,
@@ -1923,6 +1947,9 @@ function summarizeRouteExperienceBenchmark(
   const streamSamples = samples.map((sample) => sample.streamMs);
   const meshSamples = samples.map((sample) => sample.meshMs);
   const farFieldSamples = samples.map((sample) => sample.farFieldMs);
+  const farFieldSampleCacheSamples = samples.map((sample) => sample.farFieldSampleCacheMs);
+  const farFieldMeshBuildSamples = samples.map((sample) => sample.farFieldMeshBuildMs);
+  const farFieldSampledCellSamples = samples.map((sample) => sample.farFieldSampledCellCount);
   const renderCpuSamples = samples.map((sample) => sample.renderCpuMs);
   const renderOtherSamples = samples.map((sample) => sample.renderOtherMs);
   const residentNotReadySamples = samples.map((sample) => sample.residentNotReadyNearSamples);
@@ -1976,6 +2003,19 @@ function summarizeRouteExperienceBenchmark(
     avgFarFieldMs: average(farFieldSamples),
     p95FarFieldMs: percentile(farFieldSamples, 0.95),
     maxFarFieldMs: maxValue(farFieldSamples),
+    avgFarFieldSampleCacheMs: average(farFieldSampleCacheSamples),
+    maxFarFieldSampleCacheMs: maxValue(farFieldSampleCacheSamples),
+    avgFarFieldMeshBuildMs: average(farFieldMeshBuildSamples),
+    maxFarFieldMeshBuildMs: maxValue(farFieldMeshBuildSamples),
+    avgFarFieldSampledCellCount: average(farFieldSampledCellSamples),
+    maxFarFieldSampledCellCount: maxValue(farFieldSampledCellSamples),
+    maxFarFieldBandBuildMs: maxValue(samples.map((sample) => sample.farFieldMaxBandMs)),
+    maxFarFieldBandLabel: samples.reduce<{ label: string | null; elapsedMs: number }>(
+      (current, sample) => sample.farFieldMaxBandMs > current.elapsedMs
+        ? { label: sample.farFieldMaxBandLabel, elapsedMs: sample.farFieldMaxBandMs }
+        : current,
+      { label: null, elapsedMs: 0 },
+    ).label,
     avgRenderCpuMs: average(renderCpuSamples),
     p95RenderCpuMs: percentile(renderCpuSamples, 0.95),
     maxRenderCpuMs: maxValue(renderCpuSamples),

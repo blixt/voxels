@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 
+import { fnv1a } from "../src/engine/math.ts";
 import { ProceduralFarField } from "../src/engine/procedural-far-field.ts";
 import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
@@ -170,6 +171,24 @@ test("procedural far field reuses sampled terrain when only the exclusion mask c
   expect(updated.sampledCellCount).toBe(0);
 });
 
+test("procedural far field reuses most sampled cells when shifting one anchor window", () => {
+  const config = [
+    { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32, centerStride: 32 },
+  ] as const;
+  const generator = new ProceduralWorldGenerator(1337);
+  const reused = new ProceduralFarField(generator, config);
+  const fresh = new ProceduralFarField(generator, config);
+
+  const initial = reused.updateAround([0, 0, 0]);
+  const shifted = reused.updateAround([32, 0, 0]);
+  const direct = fresh.updateAround([32, 0, 0]);
+
+  expect(initial.sampledCellCount).toBeGreaterThan(0);
+  expect(shifted.sampledCellCount).toBeGreaterThan(0);
+  expect(shifted.sampledCellCount).toBeLessThan(direct.sampledCellCount);
+  expect(meshChecksum(reused.getRenderables()[0]!.mesh)).toBe(meshChecksum(fresh.getRenderables()[0]!.mesh));
+});
+
 test("procedural far field can defer excess band rebuilds behind a per-frame budget", () => {
   const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337), [
     { label: "near", innerRadius: 0, outerRadius: 64, sampleStride: 8, anchorStride: 32, centerStride: 32 },
@@ -310,6 +329,17 @@ function extractNormalSet(mesh: ChunkMeshData | null): Set<string> {
     ].join(","));
   }
   return normals;
+}
+
+function meshChecksum(mesh: ChunkMeshData | null): string {
+  if (!mesh) {
+    return "null";
+  }
+  return [
+    fnv1a(new Uint8Array(mesh.vertexData.slice(0))),
+    fnv1a(new Uint8Array(mesh.indexData.buffer.slice(0))),
+    String(mesh.triangleCount),
+  ].join(":");
 }
 
 function extractTopCellKeys(mesh: ChunkMeshData | null): string[] {

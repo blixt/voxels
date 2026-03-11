@@ -539,3 +539,21 @@
     - visible-ground gap frames during movement
     - long settle time after movement stops
     - rare but very large far-field spikes that dwarf ordinary stream/mesh work
+
+### Clipmap-style far-field sample reuse
+
+- Re-read the research notes and applied the most relevant piece of LOD wisdom to the current bottleneck:
+  - use geometry-clipmap-style incremental updates instead of rebuilding the whole far-field sample domain whenever the anchor shifts
+- The new route benchmark made the decision easy:
+  - the worst `~400 ms` frames were dominated by far-field work
+  - and that far-field work was mostly sample-cache rebuild time on anchor crossings, not a mysterious render or upload cost
+- Implemented cache shifting for far-field bands:
+  - when a band anchor moves by an integer number of sample cells, the old sampled terrain cache is shifted and only newly exposed rows/columns are re-sampled
+  - if the move is too large or not cell-aligned, the code still falls back to a full rebuild
+- Also improved the local profiler itself:
+  - `profile-game-stream` now includes a `crossing-far-anchor-d8` scenario because the old small crossing case did not hit far-field anchor shifts at all
+  - far-field profiling now reports sample-cache time, mesh-build time, sampled-cell count, and the worst rebuilt band label
+- Result:
+  - the browser route benchmark moved from catastrophic `~419 ms` far-field spikes down to about `94 ms`
+  - average gameplay-frame CPU improved materially as well
+  - the remaining worst far-field cost is still real, but it is now much smaller and much more attributable

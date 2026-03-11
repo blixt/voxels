@@ -71,10 +71,22 @@ export interface FarFieldUpdateSummary {
   triangleCount: number;
   elapsedMs: number;
   sampledCellCount: number;
+  sampleCacheMs: number;
+  meshBuildMs: number;
   clearRadiusWorldUnits: number;
   clearRadiusMeters: number;
   maxRadiusWorldUnits: number;
   maxRadiusMeters: number;
+  bandBuilds: FarFieldBandBuildSummary[];
+}
+
+export interface FarFieldBandBuildSummary {
+  label: string;
+  sampledCellCount: number;
+  sampleCacheMs: number;
+  meshBuildMs: number;
+  elapsedMs: number;
+  triangleCount: number;
 }
 
 export interface FarFieldMaskedSeamProbe {
@@ -170,10 +182,13 @@ export class ProceduralFarField {
       triangleCount: 0,
       elapsedMs: 0,
       sampledCellCount: 0,
+      sampleCacheMs: 0,
+      meshBuildMs: 0,
       clearRadiusWorldUnits: 0,
       clearRadiusMeters: 0,
       maxRadiusWorldUnits: Math.max(...bandConfigs.map((config) => config.outerRadius)),
       maxRadiusMeters: worldUnitsToMeters(Math.max(...bandConfigs.map((config) => config.outerRadius))),
+      bandBuilds: [],
     };
   }
 
@@ -193,6 +208,9 @@ export class ProceduralFarField {
     let pendingBands = 0;
     let triangleCount = 0;
     let sampledCellCount = 0;
+    let sampleCacheMs = 0;
+    let meshBuildMs = 0;
+    const bandBuilds: FarFieldBandBuildSummary[] = [];
     const maxAffectedRadiusWorldUnits = exclusionMask?.maxAffectedRadiusWorldUnits ?? Number.POSITIVE_INFINITY;
     const centerStride = Math.min(...this.bandConfigs.map((config) => config.centerStride ?? config.sampleStride));
       const centerX = snapToNearestStride(position[0], centerStride);
@@ -230,6 +248,8 @@ export class ProceduralFarField {
       band.centerZ = centerZ;
       band.clearRadiusWorldUnits = effectiveInnerRadius;
       band.maskRevision = maskRevision;
+      const bandStartedAt = performance.now();
+      const sampleCacheStartedAt = performance.now();
       const sampleCache = ensureBandSampleCache(
         band,
         config,
@@ -237,7 +257,10 @@ export class ProceduralFarField {
         anchorZ,
         this.generator,
       );
+      const bandSampleCacheMs = performance.now() - sampleCacheStartedAt;
       sampledCellCount += sampleCache.sampledCellCount;
+      sampleCacheMs += bandSampleCacheMs;
+      const meshBuildStartedAt = performance.now();
       band.mesh = buildBandMesh(
         this.generator,
         config,
@@ -247,11 +270,21 @@ export class ProceduralFarField {
         centerX,
         centerZ,
       );
+      const bandMeshBuildMs = performance.now() - meshBuildStartedAt;
+      meshBuildMs += bandMeshBuildMs;
       band.gpuDirty = true;
       band.triangleCount = band.mesh.triangleCount;
       triangleCount += band.triangleCount;
       builtBands += 1;
       changed = true;
+      bandBuilds.push({
+        label: band.label,
+        sampledCellCount: sampleCache.sampledCellCount,
+        sampleCacheMs: bandSampleCacheMs,
+        meshBuildMs: bandMeshBuildMs,
+        elapsedMs: performance.now() - bandStartedAt,
+        triangleCount: band.triangleCount,
+      });
     }
 
     this.lastUpdate = {
@@ -262,10 +295,13 @@ export class ProceduralFarField {
       triangleCount,
       elapsedMs: performance.now() - startedAt,
       sampledCellCount,
+      sampleCacheMs,
+      meshBuildMs,
       clearRadiusWorldUnits,
       clearRadiusMeters: worldUnitsToMeters(clearRadiusWorldUnits),
       maxRadiusWorldUnits: Math.max(...this.bands.map((band) => band.outerRadius)),
       maxRadiusMeters: worldUnitsToMeters(Math.max(...this.bands.map((band) => band.outerRadius))),
+      bandBuilds,
     };
     return this.lastUpdate;
   }
@@ -589,15 +625,20 @@ function ensureBandSampleCache(
   const cached = band.sampleCache;
   if (
     cached
-    && cached.anchorX === anchorX
-    && cached.anchorZ === anchorZ
     && cached.sampleRadius === sampleRadius
     && cached.sampleSpan === sampleSpan
   ) {
-    return {
-      cache: cached,
-      sampledCellCount: 0,
-    };
+    if (cached.anchorX === anchorX && cached.anchorZ === anchorZ) {
+      return {
+        cache: cached,
+        sampledCellCount: 0,
+      };
+    }
+    const shifted = tryShiftBandSampleCache(cached, config, anchorX, anchorZ, generator);
+    if (shifted) {
+      band.sampleCache = shifted.cache;
+      return shifted;
+    }
   }
 
   const heights = new Int32Array(sampleSpan * sampleSpan);
@@ -636,6 +677,90 @@ function ensureBandSampleCache(
   return {
     cache: sampleCache,
     sampledCellCount: sampleSpan * sampleSpan,
+  };
+}
+
+function tryShiftBandSampleCache(
+  cached: FarFieldBandSampleCache,
+  config: FarFieldBandConfig,
+  anchorX: number,
+  anchorZ: number,
+  generator: ProceduralWorldGenerator,
+): {
+  cache: FarFieldBandSampleCache;
+  sampledCellCount: number;
+} | null {
+  const deltaXCells = Math.round((anchorX - cached.anchorX) / config.sampleStride);
+  const deltaZCells = Math.round((anchorZ - cached.anchorZ) / config.sampleStride);
+  if (
+    !Number.isFinite(deltaXCells)
+    || !Number.isFinite(deltaZCells)
+    || Math.abs(deltaXCells) >= cached.sampleSpan
+    || Math.abs(deltaZCells) >= cached.sampleSpan
+  ) {
+    return null;
+  }
+
+  const expectedDeltaX = deltaXCells * config.sampleStride;
+  const expectedDeltaZ = deltaZCells * config.sampleStride;
+  if (
+    Math.abs((anchorX - cached.anchorX) - expectedDeltaX) > 1e-6
+    || Math.abs((anchorZ - cached.anchorZ) - expectedDeltaZ) > 1e-6
+  ) {
+    return null;
+  }
+
+  const heights = new Int32Array(cached.heights.length);
+  const colors = new Uint32Array(cached.colors.length);
+  const waterHeights = new Int32Array(cached.waterHeights.length);
+  waterHeights.fill(NO_WATER_HEIGHT);
+  const waterColors = new Uint32Array(cached.waterColors.length);
+  let sampledCellCount = 0;
+
+  for (let sampleZ = 0; sampleZ < cached.sampleSpan; sampleZ += 1) {
+    const oldSampleZ = sampleZ + deltaZCells;
+    const rowOffset = sampleZ * cached.sampleSpan;
+    for (let sampleX = 0; sampleX < cached.sampleSpan; sampleX += 1) {
+      const sampleIndex = sampleX + rowOffset;
+      const oldSampleX = sampleX + deltaXCells;
+      if (
+        oldSampleX >= 0
+        && oldSampleX < cached.sampleSpan
+        && oldSampleZ >= 0
+        && oldSampleZ < cached.sampleSpan
+      ) {
+        const oldIndex = oldSampleX + oldSampleZ * cached.sampleSpan;
+        heights[sampleIndex] = cached.heights[oldIndex]!;
+        colors[sampleIndex] = cached.colors[oldIndex]!;
+        waterHeights[sampleIndex] = cached.waterHeights[oldIndex]!;
+        waterColors[sampleIndex] = cached.waterColors[oldIndex]!;
+        continue;
+      }
+      const cellX = sampleX - cached.sampleRadius;
+      const cellZ = sampleZ - cached.sampleRadius;
+      const cellMinX = anchorX + cellX * config.sampleStride;
+      const cellMinZ = anchorZ + cellZ * config.sampleStride;
+      const sampledCell = sampleFarFieldCell(generator, cellMinX, cellMinZ, config.sampleStride);
+      heights[sampleIndex] = sampledCell.surfaceY;
+      colors[sampleIndex] = sampledCell.surfaceColor;
+      waterHeights[sampleIndex] = sampledCell.waterTopY ?? NO_WATER_HEIGHT;
+      waterColors[sampleIndex] = sampledCell.waterColor;
+      sampledCellCount += 1;
+    }
+  }
+
+  return {
+    cache: {
+      anchorX,
+      anchorZ,
+      sampleRadius: cached.sampleRadius,
+      sampleSpan: cached.sampleSpan,
+      heights,
+      colors,
+      waterHeights,
+      waterColors,
+    },
+    sampledCellCount,
   };
 }
 

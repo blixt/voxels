@@ -1649,3 +1649,58 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - The next optimization target is clearer:
   - large far-field rebuild spikes are still catastrophic
   - visible-ground holes still occur during realistic movement even when the old near-radius probe stays clean
+
+### Clipmap-style far-field sample reuse
+
+#### Commands
+
+- `mise exec -- bun test tests/procedural-far-field.test.ts tests/game-route-benchmark.test.ts`
+- `mise exec -- bun run typecheck`
+- `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=8 --generate-budget=8 --mesh-budget=6 --far-band-budget=1 --chunk-delta=2 --far-anchor-chunk-delta=8`
+- fresh Chrome 146 on `http://localhost:3000/`:
+  - `window.__VOXELS_GAME__.benchmarkRouteExperience({ durationSeconds: 10, settleSeconds: 4, sampleHz: 60, speedMetersPerSecond: 4.6, seamProbeStrideFrames: 15, captureStrideFrames: 30, captureWidth: 96, captureHeight: 54 })`
+
+#### Automated checks
+
+- `tests/procedural-far-field.test.ts` now includes:
+  - anchor-window sample-cache reuse produces the same mesh as a fresh rebuild
+  - shifted-cache rebuilds resample fewer cells than a cold build
+- targeted tests: passing
+- `typecheck`: passing
+
+#### Local profiler checks
+
+- The improved local profiler now exposes the far-anchor case that the old `crossing-d2` path missed:
+  - `crossing-d2` still reports `0` far-field sampled cells because it does not cross a far-field anchor
+  - `crossing-far-anchor-d8` now reports:
+    - `totalFarFieldMs avg = 394.6`
+    - `totalFarFieldSampleCacheMs avg = 100.1`
+    - `totalFarFieldMeshBuildMs avg = 293.9`
+    - `totalFarFieldSampledCellCount avg = 56,000`
+    - `maxFarFieldBandLabel = near-transition`
+- This is exactly why the new route benchmark and the new far-anchor local case were needed: the old local microbenchmark under-tested the real spike path.
+
+#### Browser route benchmark
+
+- Fresh Chrome 146 route benchmark after cache shifting reported:
+  - `avgGameplayFrameMs = 7.07` down from about `9.47`
+  - `maxGameplayFrameMs = 110.6` down from about `415.0`
+  - `avgFarFieldMs = 1.30` down from about `3.69`
+  - `maxFarFieldMs = 93.7` down from about `419.2`
+  - `avgFarFieldSampleCacheMs = 0.35`
+  - `maxFarFieldSampleCacheMs = 66.4`
+  - `avgFarFieldMeshBuildMs = 0.95`
+  - `maxFarFieldMeshBuildMs = 40.9`
+  - `avgFarFieldSampledCellCount = 137.4`
+  - `maxFarFieldSampledCellCount = 23,744`
+  - `maxFarFieldBandLabel = near-transition`
+  - `framesWithVisibleGroundGaps = 64`
+  - `maxVisibleGroundUncoveredCount = 24`
+  - `settleFramesUntilComplete = 52`
+
+#### Residual
+
+- The cache-shift optimization clearly worked on the real gameplay oracle.
+- The remaining two problems are now sharper:
+  - visible-ground gaps during movement are still unchanged
+  - settled mask-only near-transition rebuilds can still cost about `38-40 ms` even when no sample-cache rebuild is needed, so the next far-field win likely has to attack mesh-build cost directly
