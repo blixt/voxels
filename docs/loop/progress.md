@@ -1082,3 +1082,26 @@
 - Main lesson from this slice:
   - the deep-water visibility issue was not a mystery renderer bug
   - it was mostly the predictable result of using one fixed water alpha plus air fog everywhere
+
+### Rare peak terrain follow-up
+
+- The first "rare peak" attempt was a false positive in design space:
+  - it added a new slow field, but the activation mask was so narrow that the broad probe still topped out around `1652`
+  - that version was not worth keeping conceptually just because it sounded right
+- The second attempt overshot in exactly the wrong way:
+  - the spike math could push terrain above `2000`
+  - soft-biome edge jumps blew up into the hundreds of voxels
+  - that was useful only as a reminder that tall mountains are easy to fake badly
+- The kept version is broader and more principled:
+  - a slow `peakness` field now defines rare mountain provinces
+  - that province adds a broad shared lift plus a smaller ridge crown
+  - the lift is tied to shared world fields (`peakness`, `globalHeight`, `uplift`, `ridge`) instead of a biome-local spike path
+- The fixed-seed broad probe is now where it should be:
+  - sampled terrain range `1356..1762`
+  - `26 / 66049` sampled columns at or above `1700`
+  - `1 / 66049` sampled columns at or above `1760`
+  - max sampled soft-boundary jump stayed at `43`
+  - max adjacent sampled step stayed at `67`
+- Main lesson from this slice:
+  - rare tall mountains need to come from slow shared relief fields
+  - the moment the peak term behaves like a local spike mask, border quality collapses

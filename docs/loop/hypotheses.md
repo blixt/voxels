@@ -305,3 +305,11 @@
 | The "transparent deep water" complaint is mostly because water uses one fixed alpha regardless of depth | Add a depth-tint helper, drive it from near and far water surfaces, and require a test where deeper water emits a larger vertex alpha than shallow water | Confirmed. The focused integration test now sees different alpha values, and the numeric probe shows `176 -> 184 -> 208` alpha across shallow/medium/deep samples | Confirmed |
 | The underwater view problem is a missing render-environment seam, not a reason to rewrite the whole transparency path | Add an explicit underwater render environment with tinted clear/fog color and shorter fog distance, then verify it numerically in a small helper test | Confirmed. Underwater rendering now has its own fog/clear setup and the helper test guards it directly | Confirmed |
 | The first water-depth quantization is probably "good enough" and not worth revisiting | Run the mesher integration test with shallow vs deep water surfaces and see whether they actually produce distinct alphas | Rejected. The first quantization was too coarse, so I tightened it rather than weakening the test | Rejected |
+
+## 2026-03-11 rare peak terrain follow-up
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| A new rare-peak field is automatically worthwhile if it sounds aligned with the roadmap | Add the field, rerun the broad fixed-seed terrain scan, and require a new high-peak regression | Rejected. The first mask was too narrow and left the broad scan unchanged at about `1652` max surface height | Rejected |
+| Stronger spike-style peak math is the fastest way to get tall mountains without real downside | Retune the mask aggressively and rerun the terrain-envelope plus soft-boundary probes | Rejected. The overshoot pass produced `2000+` terrain and huge boundary jumps, so it was discarded | Rejected |
+| The right mountain extension is a broad province lift plus a smaller crown term driven by slow shared fields | Replace the spike mask with a slower `peakness` province, rerun the broad fixed-seed terrain scan, and keep it only if rarity and soft-edge budgets stay healthy | Confirmed. The kept version reaches `1762` max sampled terrain, keeps `1700+` terrain extremely rare, and preserves the existing soft-edge budgets | Confirmed |

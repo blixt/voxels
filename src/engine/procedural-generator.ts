@@ -121,6 +121,7 @@ interface ColumnFieldSample {
   surfacePatch: number;
   surfaceGrain: number;
   scatter: number;
+  peakness: number;
 }
 
 interface MutableColumnState {
@@ -243,6 +244,7 @@ const TEMPERATURE_SCALE = 1 / 4600;
 const MOISTURE_SCALE = 1 / 4200;
 const VOLCANISM_SCALE = 1 / 3400;
 const MAGIC_SCALE = 1 / 5600;
+const PEAK_SCALE = 1 / 11800;
 const CHANNEL_SCALE = 1 / 1200;
 const DUNE_SCALE = 1 / 320;
 const MESA_SCALE = 1 / 900;
@@ -538,6 +540,7 @@ export class ProceduralWorldGenerator {
   private readonly moistureSeed: number;
   private readonly volcanismSeed: number;
   private readonly magicSeed: number;
+  private readonly peakSeed: number;
   private readonly channelSeed: number;
   private readonly duneSeed: number;
   private readonly mesaSeed: number;
@@ -573,6 +576,7 @@ export class ProceduralWorldGenerator {
     this.moistureSeed = seed + 503;
     this.volcanismSeed = seed + 557;
     this.magicSeed = seed + 601;
+    this.peakSeed = seed + 617;
     this.channelSeed = seed + 653;
     this.duneSeed = seed + 709;
     this.mesaSeed = seed + 761;
@@ -808,6 +812,7 @@ export class ProceduralWorldGenerator {
     const detail = fbm2D4(worldX * DETAIL_SCALE, worldZ * DETAIL_SCALE, this.detailSeed) - 0.5;
     const ridge = 1 - Math.abs(fbm2D3(worldX * RIDGE_SCALE, worldZ * RIDGE_SCALE, this.ridgeSeed) * 2 - 1);
     const basin = fbm2D3(worldX * BASIN_SCALE, worldZ * BASIN_SCALE, this.basinSeed) - 0.5;
+    const peakness = fbm2D3(worldX * PEAK_SCALE, worldZ * PEAK_SCALE, this.peakSeed);
     const mountainness = smoothstep(0.56, 0.84, uplift) * smoothstep(0.42, 0.78, ridge);
     const oceanness = smoothstep(-0.40, -0.08, continentalness) * smoothstep(-0.28, 0.06, -basin);
     const globalHeight = saturate(
@@ -842,6 +847,7 @@ export class ProceduralWorldGenerator {
       surfacePatch: fbm2D3(worldX * SURFACE_PATCH_SCALE, worldZ * SURFACE_PATCH_SCALE, this.surfacePatchSeed),
       surfaceGrain: fbm2D2(worldX * SURFACE_GRAIN_SCALE, worldZ * SURFACE_GRAIN_SCALE, this.surfaceGrainSeed),
       scatter: fbm2D2(worldX * SURFACE_SCATTER_SCALE, worldZ * SURFACE_SCATTER_SCALE, this.surfaceScatterSeed),
+      peakness,
     };
   }
 
@@ -895,11 +901,20 @@ export class ProceduralWorldGenerator {
     const massifRelief = smoothstep(0.56, 0.86, fields.globalHeight)
       * smoothstep(0.50, 0.82, fields.uplift)
       * (18 + fields.mountainness * 112 + fields.ridge * 44);
+    const peakProvince = smoothstep(0.54, 0.72, fields.peakness)
+      * smoothstep(0.54, 0.82, fields.globalHeight)
+      * smoothstep(0.56, 0.82, fields.uplift);
+    const peakProvinceLift = 1.25 * peakProvince * (84 + fields.globalHeight * 280 + fields.uplift * 160);
+    const peakCrown = 1.25 * peakProvince
+      * smoothstep(0.62, 0.88, fields.ridge)
+      * (36 + fields.mountainness * 110);
     const sharedRelief = fields.hills * (28 + fields.globalHeight * 36)
       + (fields.ridge * fields.ridge - 0.30) * (18 + fields.mountainness * 68)
       + fields.basin * 26
       + fields.detail * 8
-      + massifRelief;
+      + massifRelief
+      + peakProvinceLift
+      + peakCrown;
     const localWeight = 0.06 + biomeCore * biomeCore * 0.74;
     const localHeight = terrainProfile.heightBias * localWeight
       + fields.hills * 88 * terrainProfile.reliefScale * localWeight

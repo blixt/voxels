@@ -2743,3 +2743,38 @@ This line of investigation was screened locally and not kept in the runtime yet.
   - side-volume water faces
   - caustics
   - underwater particulate or volumetric light scattering
+
+### Rare peak terrain follow-up
+
+#### Commands
+
+- `mise exec -- bun test tests/procedural-generator.test.ts`
+
+#### Checks
+
+- Focused generator tests: passing
+  - `13 pass`
+  - `0 fail`
+
+#### Numeric probes
+
+- Broad fixed-seed terrain scan (`x/z = -8192..8192 step 64`):
+  - sampled terrain range `1356..1762`
+  - `26 / 66049` samples at or above `1700`
+  - `1 / 66049` samples at or above `1760`
+  - `1700+` ratio `0.0003936`
+  - `1760+` ratio `0.0000151`
+  - max sampled soft-boundary jump `43`
+  - max adjacent sampled step `67`
+
+#### Added verification coverage
+
+- New generator coverage now verifies:
+  - rare high peaks exist in the shared terrain envelope
+  - they remain genuinely rare on a broad fixed-seed scan
+  - the old terrain-envelope and soft-edge tests still pass on the same slice
+
+#### Residual
+
+- This slice is worth keeping.
+- It gives the world genuinely taller mountains without reopening the earlier biome-edge cliff problem.

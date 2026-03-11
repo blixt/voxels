@@ -300,6 +300,34 @@ test("soft biome edges stay within a walkable transition budget", () => {
   expect(maxSoftBoundaryJump).toBeLessThanOrEqual(56);
 });
 
+test("rare shared peak fields create tall mountains without dominating the world", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  let maxSurfaceY = -Infinity;
+  let over1700 = 0;
+  let over1760 = 0;
+  let sampleCount = 0;
+
+  for (let z = -8192; z <= 8192; z += 64) {
+    for (let x = -8192; x <= 8192; x += 64) {
+      const surfaceY = generator.sampleColumn(x, z).surfaceY;
+      maxSurfaceY = Math.max(maxSurfaceY, surfaceY);
+      if (surfaceY >= 1700) {
+        over1700 += 1;
+      }
+      if (surfaceY >= 1760) {
+        over1760 += 1;
+      }
+      sampleCount += 1;
+    }
+  }
+
+  expect(maxSurfaceY).toBeGreaterThanOrEqual(1760);
+  expect(over1700).toBeGreaterThan(0);
+  expect(over1760).toBeGreaterThan(0);
+  expect(over1700 / sampleCount).toBeLessThanOrEqual(0.03);
+  expect(over1760 / sampleCount).toBeLessThanOrEqual(0.01);
+});
+
 test("landmarks appear across the world with multiple distinct families", () => {
   const generator = new ProceduralWorldGenerator(1337);
   const landmarkIds = new Set<string>();
