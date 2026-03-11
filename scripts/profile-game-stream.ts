@@ -168,13 +168,14 @@ function simulateChunkCrossing(deltaChunks: number): {
   let maxPendingChunks = 0;
   let maxDirtyResidentChunks = 0;
   let maxFrameWorkMs = 0;
-  let farFieldMaskRevision = 0;
+  let requestedFarFieldMaskRevision = 0;
+  let presentedFarFieldMaskRevision = 0;
 
   if (!resolved.changed) {
     const farSummary = farField.updateAround(
       targetFeetPosition,
       0,
-      world.getFarFieldExclusionMask("render-ready", farFieldMaskRevision),
+      world.getFarFieldExclusionMask("render-ready", presentedFarFieldMaskRevision),
       farBandBudget,
     );
     const dirtyResidentChunks = world.countDirtyResidentChunks();
@@ -221,20 +222,25 @@ function simulateChunkCrossing(deltaChunks: number): {
       buildStreamAnchorPosition(targetAnchor, world.chunkSize, targetFeetPosition[1]),
       { maxGenerateChunks: generateBudget },
     );
-    const mesh = rebuildDirtyMeshes(world, meshBudget);
+    const mesh = rebuildDirtyMeshes(world, meshBudget, {
+      priorityPosition: targetFeetPosition,
+    });
     if (residency.generatedChunks > 0 || residency.evictedChunks > 0 || residency.touchedNeighborChunks > 0) {
-      farFieldMaskRevision += 1;
+      requestedFarFieldMaskRevision += 1;
     }
     if (mesh.meshCount > 0) {
-      farFieldMaskRevision += 1;
+      requestedFarFieldMaskRevision += 1;
+    }
+    dirtyResidentChunks = world.countDirtyResidentChunks();
+    if (residency.pendingChunks === 0 && dirtyResidentChunks === 0) {
+      presentedFarFieldMaskRevision = requestedFarFieldMaskRevision;
     }
     const farSummary = farField.updateAround(
       targetFeetPosition,
       0,
-      world.getFarFieldExclusionMask("render-ready", farFieldMaskRevision),
+      world.getFarFieldExclusionMask("render-ready", presentedFarFieldMaskRevision),
       farBandBudget,
     );
-    dirtyResidentChunks = world.countDirtyResidentChunks();
     pendingChunks = residency.pendingChunks;
     pendingFarFieldBands = farSummary.pendingBands;
     const frameWorkMs = farSummary.elapsedMs + residency.elapsedMs + mesh.elapsedMs;
@@ -295,7 +301,9 @@ function settleWorld(
     { maxGenerateChunks: Number.POSITIVE_INFINITY },
   );
   farFieldMaskRevision += 1;
-  rebuildDirtyMeshes(world, Number.POSITIVE_INFINITY);
+  rebuildDirtyMeshes(world, Number.POSITIVE_INFINITY, {
+    priorityPosition: feetPosition,
+  });
   farFieldMaskRevision += 1;
   farField.updateAround(
     feetPosition,

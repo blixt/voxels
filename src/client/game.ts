@@ -37,6 +37,10 @@ declare global {
         sampleRadiusMeters?: number,
         sampleStepMeters?: number,
       ): ReturnType<GameController["probeLodCoverage"]>;
+      probeRenderReadyCoverage(
+        sampleRadiusMeters?: number,
+        sampleStepMeters?: number,
+      ): ReturnType<GameController["probeRenderReadyCoverage"]>;
     };
   }
 }
@@ -141,6 +145,8 @@ function mountGame(): GameRuntime {
       controller.benchmarkIncrementalCrossing(iterations, chunkDelta, stepsPerLeg, settleFrames),
     probeLodCoverage: (sampleRadiusMeters, sampleStepMeters) =>
       controller.probeLodCoverage(sampleRadiusMeters, sampleStepMeters),
+    probeRenderReadyCoverage: (sampleRadiusMeters, sampleStepMeters) =>
+      controller.probeRenderReadyCoverage(sampleRadiusMeters, sampleStepMeters),
   };
 
   const ready = controller.init();

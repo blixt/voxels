@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { buildChunkMesh } from "../src/engine/mesher.ts";
+import { buildChunkMesh, rebuildDirtyMeshes } from "../src/engine/mesher.ts";
 import { VoxelWorld } from "../src/engine/world.ts";
 
 function collectPositions(mesh: ReturnType<typeof buildChunkMesh>): Array<[number, number, number]> {
@@ -110,4 +110,20 @@ test("meshing does not skip a fully solid chunk when a neighbor face has a hole"
   expect(mesh.triangleCount).toBe(2);
   expect(mesh.bounds.min).toEqual([32, 32, 32]);
   expect(mesh.bounds.max).toEqual([32, 33, 33]);
+});
+
+test("budgeted meshing prioritizes nearby unbuilt chunks around the focus point", () => {
+  const world = new VoxelWorld({ width: 96, height: 32, depth: 32 }, 32, [0, 0xff8899aa]);
+  world.setVoxel(80, 1, 1, 1);
+  world.setVoxel(48, 1, 1, 1);
+  world.setVoxel(16, 1, 1, 1);
+
+  const summary = rebuildDirtyMeshes(world, 1, {
+    priorityPosition: [16, 1, 1],
+  });
+
+  expect(summary.meshCount).toBe(1);
+  expect(world.getResidentChunk(0, 0, 0)?.meshBuilt).toBe(true);
+  expect(world.getResidentChunk(1, 0, 0)?.meshBuilt).toBe(false);
+  expect(world.getResidentChunk(2, 0, 0)?.meshBuilt).toBe(false);
 });

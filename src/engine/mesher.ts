@@ -1,4 +1,4 @@
-import type { ChunkMeshData } from "./types.ts";
+import type { ChunkMeshData, Vec3 } from "./types.ts";
 import type { ResidentChunkWorld } from "./world.ts";
 
 const FLOAT32_BYTES = 4;
@@ -14,16 +14,22 @@ export interface MeshBuildSummary {
   elapsedMs: number;
 }
 
-export function rebuildDirtyMeshes(world: ResidentChunkWorld, maxChunks = Number.POSITIVE_INFINITY): MeshBuildSummary {
+export interface MeshBuildOptions {
+  priorityPosition?: Vec3;
+}
+
+export function rebuildDirtyMeshes(
+  world: ResidentChunkWorld,
+  maxChunks = Number.POSITIVE_INFINITY,
+  options: MeshBuildOptions = {},
+): MeshBuildSummary {
   const startedAt = performance.now();
   let meshCount = 0;
   let newMeshCount = 0;
   let remeshCount = 0;
   let triangleCount = 0;
-  for (const chunk of world.iterateResidentChunks()) {
-    if (!chunk.meshDirty) {
-      continue;
-    }
+  const dirtyChunks = collectDirtyChunks(world, options.priorityPosition);
+  for (const chunk of dirtyChunks) {
     if (meshCount >= maxChunks) {
       break;
     }
@@ -46,6 +52,40 @@ export function rebuildDirtyMeshes(world: ResidentChunkWorld, maxChunks = Number
     triangleCount,
     elapsedMs: performance.now() - startedAt,
   };
+}
+
+function collectDirtyChunks(world: ResidentChunkWorld, priorityPosition?: Vec3) {
+  const dirtyChunks = [...world.iterateResidentChunks()].filter((chunk) => chunk.meshDirty);
+  if (!priorityPosition || dirtyChunks.length <= 1) {
+    return dirtyChunks;
+  }
+  const priorityChunkX = Math.floor(priorityPosition[0] / world.chunkSize);
+  const priorityChunkY = Math.floor(priorityPosition[1] / world.chunkSize);
+  const priorityChunkZ = Math.floor(priorityPosition[2] / world.chunkSize);
+  dirtyChunks.sort((left, right) => {
+    const builtDifference = Number(left.meshBuilt) - Number(right.meshBuilt);
+    if (builtDifference !== 0) {
+      return builtDifference;
+    }
+    const leftPlanarDistance = Math.max(
+      Math.abs(left.coord.x - priorityChunkX),
+      Math.abs(left.coord.z - priorityChunkZ),
+    );
+    const rightPlanarDistance = Math.max(
+      Math.abs(right.coord.x - priorityChunkX),
+      Math.abs(right.coord.z - priorityChunkZ),
+    );
+    if (leftPlanarDistance !== rightPlanarDistance) {
+      return leftPlanarDistance - rightPlanarDistance;
+    }
+    const leftVerticalDistance = Math.abs(left.coord.y - priorityChunkY);
+    const rightVerticalDistance = Math.abs(right.coord.y - priorityChunkY);
+    if (leftVerticalDistance !== rightVerticalDistance) {
+      return leftVerticalDistance - rightVerticalDistance;
+    }
+    return left.coord.x - right.coord.x || left.coord.y - right.coord.y || left.coord.z - right.coord.z;
+  });
+  return dirtyChunks;
 }
 
 export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number, cz: number): ChunkMeshData {

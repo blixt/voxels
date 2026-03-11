@@ -447,3 +447,49 @@
   - far-field churn is no longer the hidden dominant cost, but the corrected benchmark still shows real hitch pressure
   - near detailed chunks are still not prioritized enough once movement creates a backlog
   - the next likely target is detailed-mesh prioritization or a more radical near renderer experiment, not another blind round of LOD seam tuning
+- Followed through on the next bottleneck immediately instead of assuming the corrected benchmark was “good enough”:
+  - changed budgeted meshing to sort dirty chunks around the player
+  - unbuilt chunks now beat remesh work
+  - nearer X/Z chunks beat farther ones
+  - vertical distance is only used as a tie-breaker
+- Added a browser-facing near-detail oracle so this path is measurable without human vision:
+  - `probeRenderReadyCoverage(radiusMeters = 12, stepMeters = 0.8)` now reports resident samples, render-ready samples, resident-but-not-ready samples, and missing-resident samples around the player
+  - incremental crossing samples now capture those near-detail counts per frame
+  - the benchmark summary now exposes `avgResidentNotReadyNearSamples` and `maxResidentNotReadyNearSamples`
+- Revalidated in fresh Chrome 146 on `http://localhost:3016/`:
+  - corrected `benchmarkIncrementalCrossing(1, 2, 12, 20)` improved again from about `17.5 ms` average work and `32.7 ms` p95 to about `9.9 ms` average work and `17.4 ms` p95
+  - `avgFarFieldMs` dropped further from about `11.1 ms` to about `2.45 ms`, which implies the near-detail prioritization also reduced avoidable mask/band churn in practice
+  - `changedCount` dropped from `28` to `22` and `incompleteFrameCount` from `26` to `20`
+  - the new near-detail oracle showed the real remaining weakness clearly: once the move crosses into streaming work, nearby resident-but-not-ready samples still spike as high as `360`
+- Added direct regression coverage for the new meshing policy:
+  - a mesher test now proves a one-chunk budget will choose the chunk nearest the focus point rather than the oldest insertion-order chunk
+- Local profile follow-up with `profile-game-stream`:
+  - `crossing-d2` now comes in around `97.6 ms` stream, `165.9 ms` mesh, `89.7 ms` far field, and `80.6 ms` max combined local work across `53` frames under the current script assumptions
+  - that local script is still useful for relative comparisons, but the browser benchmark remains the real acceptance gate because it measures the actual interactive path and now includes the previously hidden far-field cost
+- Current residual after this slice:
+  - nearby detailed chunks settle noticeably faster than before, but the resident-but-not-ready backlog near the player is still too high
+  - the next clean win is likely a more explicit mesh work queue or a chunk-column-local near renderer experiment rather than another round of passive sorting tweaks
+
+### Render-ready mask presentation and near-mesh prioritization
+
+- Re-profiled the movement path after the corrected far-field benchmark work and separated two different kinds of LOD cost:
+  - layout churn when the far field actually needs to move with the player
+  - mask churn when detailed chunks simply become render-ready and the transition band tries to step aside immediately
+- Confirmed that immediate presentation of every render-ready mask revision was still a major hitch source even after the earlier far-field improvements:
+  - local `crossing-d2` profiles were still spending hundreds of milliseconds rebuilding the transition band even though chunk generation and meshing were no longer the dominant hidden cost
+- Changed the runtime policy so the far field tracks two revisions:
+  - a `requested` render-ready mask revision that advances as residency/meshing progress
+  - a `presented` render-ready mask revision that only catches up once detailed chunks are no longer pending or dirty
+- Kept the far field spatially updating while freezing only the presented mask revision during backlog:
+  - this preserves the coarse world around the player instead of showing holes
+  - it avoids paying transition-band rebuild cost every frame just because a few more detailed columns became render-ready
+- Added a direct near-detail probe to the game runtime:
+  - `probeRenderReadyCoverage()` now measures resident near samples, render-ready near samples, and resident-but-not-ready samples
+  - the incremental benchmark now records those values per frame, so “near chunks are still not ready underfoot” is measurable instead of visual-only
+- Added near-mesh prioritization in the mesher:
+  - budgeted `rebuildDirtyMeshes()` can now sort dirty chunks around a priority position
+  - the game path and the stream profiler both use the player/target position as that priority point so nearby unbuilt chunks get meshed first
+- Raised the default game budgets from `6/4` to `8/6` after the new far-field scheduling reduced the background hitch enough to make the larger near budgets worthwhile
+- Current residual after this slice:
+  - the movement path is materially smoother, but there is still a real anchor-crossing spike when a new far-field anchor has to be sampled and rebuilt
+  - the next likely win is a more incremental transition-band representation or a more radical near/far renderer experiment rather than more tuning of the current immediate mesh path

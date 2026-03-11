@@ -36,8 +36,8 @@ import type { MeshBuildSummary } from "../engine/mesher.ts";
 const MAX_DELTA_SECONDS = 0.05;
 const HUD_PUSH_INTERVAL_MS = 120;
 const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
-const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 6;
-const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 4;
+const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 8;
+const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 6;
 const DEFAULT_MAX_FAR_FIELD_BAND_REBUILDS_PER_FRAME = 1;
 
 export interface GameHudSnapshot {
@@ -172,6 +172,9 @@ export interface IncrementalCrossingSample {
   farFieldMs: number;
   farFieldBuiltBands: number;
   farFieldPendingBands: number;
+  residentNearSamples: number;
+  renderReadyNearSamples: number;
+  residentNotReadyNearSamples: number;
   frameCpuMs: number;
   syncMs: number;
   uploadMs: number;
@@ -191,6 +194,8 @@ export interface IncrementalCrossingSummary {
   avgFarFieldMs: number;
   p95FarFieldMs: number;
   maxFarFieldMs: number;
+  avgResidentNotReadyNearSamples: number;
+  maxResidentNotReadyNearSamples: number;
   avgStreamMs: number;
   p95StreamMs: number;
   maxStreamMs: number;
@@ -250,6 +255,17 @@ export interface LodCoverageProbe {
   wrongBandSamples: LodCoverageIssueSample[];
 }
 
+export interface RenderReadyCoverageProbe {
+  center: Vec3;
+  sampleRadiusMeters: number;
+  sampleStepMeters: number;
+  sampleCount: number;
+  residentSampleCount: number;
+  renderReadySampleCount: number;
+  residentNotReadyCount: number;
+  missingResidentCount: number;
+}
+
 export class GameController {
   readonly canvas: HTMLCanvasElement;
   readonly generator = new ProceduralWorldGenerator(1337);
@@ -279,6 +295,7 @@ export class GameController {
   private lastFarFieldSummary: FarFieldUpdateSummary = this.farField.lastUpdate;
   private streamAnchor: StreamAnchor | null = null;
   private farFieldReadyMaskRevision = 0;
+  private presentedFarFieldReadyMaskRevision = 0;
   private streamingBudgets: StreamingBudgets = {
     maxGeneratedChunksPerUpdate: DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE,
     maxMeshRebuildsPerFrame: DEFAULT_MAX_MESH_REBUILDS_PER_FRAME,
@@ -460,6 +477,57 @@ export class GameController {
 
   snapshotResidentWorld(): ResidentWorldProbeSnapshot {
     return summarizeResidentWorld(this.world);
+  }
+
+  probeRenderReadyCoverage(sampleRadiusMeters = 12, sampleStepMeters = 0.8): RenderReadyCoverageProbe {
+    const normalizedRadius = Math.max(1, sampleRadiusMeters);
+    const normalizedStep = Math.max(0.1, sampleStepMeters);
+    const sampleRadiusWorldUnits = metersToWorldUnits(normalizedRadius);
+    const sampleStepWorldUnits = metersToWorldUnits(normalizedStep);
+    const centerX = this.player.feetPosition[0];
+    const centerZ = this.player.feetPosition[2];
+    const renderReadyMask = this.getRenderReadyFarFieldMask();
+    let sampleCount = 0;
+    let residentSampleCount = 0;
+    let renderReadySampleCount = 0;
+    let residentNotReadyCount = 0;
+
+    for (let offsetZ = -sampleRadiusWorldUnits; offsetZ <= sampleRadiusWorldUnits; offsetZ += sampleStepWorldUnits) {
+      for (let offsetX = -sampleRadiusWorldUnits; offsetX <= sampleRadiusWorldUnits; offsetX += sampleStepWorldUnits) {
+        const worldX = centerX + offsetX;
+        const worldZ = centerZ + offsetZ;
+        const chunkX = Math.floor(worldX / this.world.chunkSize);
+        const chunkZ = Math.floor(worldZ / this.world.chunkSize);
+        const resident = this.world.hasResidentColumn(chunkX, chunkZ);
+        const renderReady = renderReadyMask.excludesCell(
+          chunkX * this.world.chunkSize,
+          (chunkX + 1) * this.world.chunkSize,
+          chunkZ * this.world.chunkSize,
+          (chunkZ + 1) * this.world.chunkSize,
+        );
+        sampleCount += 1;
+        if (resident) {
+          residentSampleCount += 1;
+        }
+        if (renderReady) {
+          renderReadySampleCount += 1;
+        }
+        if (resident && !renderReady) {
+          residentNotReadyCount += 1;
+        }
+      }
+    }
+
+    return {
+      center: [...this.player.feetPosition],
+      sampleRadiusMeters: normalizedRadius,
+      sampleStepMeters: normalizedStep,
+      sampleCount,
+      residentSampleCount,
+      renderReadySampleCount,
+      residentNotReadyCount,
+      missingResidentCount: sampleCount - residentSampleCount,
+    };
   }
 
   probeLodCoverage(sampleRadiusMeters = 48, sampleStepMeters = 0.8): LodCoverageProbe {
@@ -753,6 +821,7 @@ export class GameController {
             this.player.grounded = true;
             this.syncCameraToPlayer();
             const residency = this.syncWorldAroundPlayer(false);
+            const detailCoverage = this.probeRenderReadyCoverage();
             const render = await this.renderProbeFrame();
             frame += 1;
             samples.push(
@@ -763,12 +832,14 @@ export class GameController {
                 residency,
                 this.lastMeshBuildSummary,
                 this.lastFarFieldSummary,
+                detailCoverage,
                 render,
               ),
             );
           }
           for (let settleFrame = 0; settleFrame < normalizedSettleFrames; settleFrame += 1) {
             const residency = this.syncWorldAroundPlayer(false);
+            const detailCoverage = this.probeRenderReadyCoverage();
             const render = await this.renderProbeFrame();
             frame += 1;
             samples.push(
@@ -779,6 +850,7 @@ export class GameController {
                 residency,
                 this.lastMeshBuildSummary,
                 this.lastFarFieldSummary,
+                detailCoverage,
                 render,
               ),
             );
@@ -942,6 +1014,7 @@ export class GameController {
     }
     if (!shouldRefreshResidency(false, resolved.changed, this.lastStreamSummary.pendingChunks)) {
       this.flushMeshBuildBudget();
+      this.syncPresentedFarFieldMaskRevision();
       this.lastFarFieldSummary = this.farField.updateAround(
         this.player.feetPosition,
         0,
@@ -977,6 +1050,7 @@ export class GameController {
     this.flushMeshBuildBudget(
       settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxMeshRebuildsPerFrame,
     );
+    this.syncPresentedFarFieldMaskRevision(settle);
     this.lastFarFieldSummary = this.farField.updateAround(
       this.player.feetPosition,
       0,
@@ -1000,7 +1074,9 @@ export class GameController {
   }
 
   private flushMeshBuildBudget(maxChunks = DEFAULT_MAX_MESH_REBUILDS_PER_FRAME): void {
-    const meshSummary = rebuildDirtyMeshes(this.world, maxChunks);
+    const meshSummary = rebuildDirtyMeshes(this.world, maxChunks, {
+      priorityPosition: this.player.feetPosition,
+    });
     this.lastMeshBuildSummary = meshSummary;
     this.meshMs = meshSummary.elapsedMs;
     if (meshSummary.meshCount > 0) {
@@ -1009,7 +1085,13 @@ export class GameController {
   }
 
   private getRenderReadyFarFieldMask() {
-    return this.world.getFarFieldExclusionMask("render-ready", this.farFieldReadyMaskRevision);
+    return this.world.getFarFieldExclusionMask("render-ready", this.presentedFarFieldReadyMaskRevision);
+  }
+
+  private syncPresentedFarFieldMaskRevision(force = false): void {
+    if (force || (this.lastStreamSummary.pendingChunks === 0 && this.world.countDirtyResidentChunks() === 0)) {
+      this.presentedFarFieldReadyMaskRevision = this.farFieldReadyMaskRevision;
+    }
   }
 
   private renderCurrentFrame(): {
@@ -1143,6 +1225,7 @@ function buildIncrementalSample(
   residency: ResidencyUpdateSummary,
   mesh: MeshBuildSummary,
   farField: FarFieldUpdateSummary,
+  detailCoverage: RenderReadyCoverageProbe,
   render: GameRenderProbe,
 ): IncrementalCrossingSample {
   return {
@@ -1160,6 +1243,9 @@ function buildIncrementalSample(
     farFieldMs: farField.elapsedMs,
     farFieldBuiltBands: farField.builtBands,
     farFieldPendingBands: farField.pendingBands,
+    residentNearSamples: detailCoverage.residentSampleCount,
+    renderReadyNearSamples: detailCoverage.renderReadySampleCount,
+    residentNotReadyNearSamples: detailCoverage.residentNotReadyCount,
     frameCpuMs: render.frameCpuMs,
     syncMs: render.syncResourcesMs,
     uploadMs: render.uploadMs,
@@ -1269,6 +1355,7 @@ function summarizeIncrementalCrossing(samples: readonly IncrementalCrossingSampl
   const meshSamples = samples.map((sample) => sample.meshMs);
   const frameCpuSamples = samples.map((sample) => sample.frameCpuMs);
   const uploadSamples = samples.map((sample) => sample.uploadMs);
+  const residentNotReadySamples = samples.map((sample) => sample.residentNotReadyNearSamples);
   return {
     sampleCount: samples.length,
     workFrameCount: samples.filter((sample) =>
@@ -1288,6 +1375,8 @@ function summarizeIncrementalCrossing(samples: readonly IncrementalCrossingSampl
     avgFarFieldMs: average(farFieldSamples),
     p95FarFieldMs: percentile(farFieldSamples, 0.95),
     maxFarFieldMs: maxValue(farFieldSamples),
+    avgResidentNotReadyNearSamples: average(residentNotReadySamples),
+    maxResidentNotReadyNearSamples: maxValue(residentNotReadySamples),
     avgStreamMs: average(streamSamples),
     p95StreamMs: percentile(streamSamples, 0.95),
     maxStreamMs: maxValue(streamSamples),

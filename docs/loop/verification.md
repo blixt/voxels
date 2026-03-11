@@ -1443,3 +1443,93 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - The benchmark now measures the real movement cost instead of hiding far-field rebuilds.
 - Far-field churn is much lower, but corrected total work is still too high for the target feel.
 - The next target should be near-chunk prioritization or a different near renderer path, not more blind tuning against the old misleading metric.
+
+### Near-detail mesh prioritization follow-up
+
+#### Commands
+
+- `mise exec -- bun test tests/mesher.test.ts tests/stream-work.test.ts tests/procedural-far-field.test.ts`
+- `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=5 --generate-budget=6 --mesh-budget=4 --far-band-budget=1 --chunk-delta=2`
+- fresh Chrome 146 dev load on `http://localhost:3016/`
+- `window.__VOXELS_GAME__.benchmarkIncrementalCrossing(1, 2, 12, 20)`
+- `window.__VOXELS_GAME__.probeRenderReadyCoverage(...)`
+
+#### Automated checks
+
+- `tests/mesher.test.ts` now includes:
+  - budgeted meshing prioritizes the chunk nearest the focus point instead of following raw insertion order
+- targeted tests above: passing
+
+#### Browser heuristic checks
+
+- Fresh Chrome 146 corrected `benchmarkIncrementalCrossing(1, 2, 12, 20)` after player-centered mesh prioritization returned:
+  - `avgWorkMs = 9.93`
+  - `p95WorkMs = 17.4`
+  - `maxWorkMs = 101.4`
+  - `avgFarFieldMs = 2.45`
+  - `avgStreamMs = 2.95`
+  - `avgMeshMs = 4.38`
+  - `changedCount = 22`
+  - `incompleteFrameCount = 20`
+  - `maxPendingChunks = 112`
+- The same benchmark before this slice was at roughly:
+  - `avgWorkMs = 17.5`
+  - `p95WorkMs = 32.7`
+  - `avgFarFieldMs = 11.1`
+  - `changedCount = 28`
+  - `incompleteFrameCount = 26`
+- The new near-detail coverage oracle on that same run showed:
+  - `avgResidentNotReadyNearSamples = 223.8`
+  - `maxResidentNotReadyNearSamples = 360`
+  - this is the clearest current measurement of why the game can still feel behind even after the big far-field fix
+
+#### Local profile spot-check
+
+- `profile-game-stream -- --radius=5 --generate-budget=6 --mesh-budget=4 --far-band-budget=1 --chunk-delta=2` returned:
+  - `crossing-d2 totalStreamMs avg = 97.6`
+  - `crossing-d2 totalMeshMs avg = 165.9`
+  - `crossing-d2 totalFarFieldMs avg = 89.7`
+  - `crossing-d2 maxFrameWorkMs avg = 80.6`
+
+#### Residual
+
+- Near-detail scheduling is better, but the new coverage probe shows there is still too much nearby resident-but-not-ready work during a crossing.
+- The next likely win is a true mesh work queue or a more radical near-render experiment, not more blind sorting changes.
+
+### Render-ready mask presentation and near-mesh prioritization
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `mise run profile-game-stream -- --radius=5 --generate-budget=8 --mesh-budget=6 --far-band-budget=1 --chunk-delta=2 --iterations=2 --warmup=1`
+- focused local policy probes via `mise exec -- bun -e '...'` comparing:
+  - immediate render-ready mask presentation
+  - frozen presented mask revision while detailed chunks are still pending or dirty
+
+#### Automated checks
+
+- `tests/mesher.test.ts` now includes:
+  - budgeted meshing prioritizes nearby unbuilt chunks around a focus point
+- `mise run test`: passing
+- `mise run build`: passing
+
+#### Local profiler checks
+
+- With the old immediate render-ready mask presentation policy, the local `crossing-d2` probe still showed roughly:
+  - `totalFar ≈ 958 ms`
+  - `avgFar ≈ 21.8 ms/frame`
+  - `maxFar ≈ 129.1 ms`
+- Freezing only the presented render-ready mask revision until detailed chunks are settled dropped the same local probe to about:
+  - `totalFar ≈ 97.1 ms`
+  - `avgFar ≈ 2.2 ms/frame`
+  - `maxFar ≈ 73.3 ms`
+- After wiring that policy into the game-path profiler and pairing it with nearby dirty-chunk prioritization plus `8/6` default budgets, `mise run profile-game-stream -- --radius=5 --generate-budget=8 --mesh-budget=6 --far-band-budget=1 --chunk-delta=2 --iterations=2 --warmup=1` reports:
+  - `crossing-d2`: `36` frames, `96.4 ms` total stream, `163.0 ms` total mesh, `91.1 ms` total far field, `83.4 ms` max frame work
+  - `crossing-d1`: `15.2 ms` total far field for the single no-stream movement step
+
+#### Residual
+
+- The main continuous movement hitch is much smaller now because transition-band mask churn no longer rebuilds every frame.
+- A real anchor-crossing spike remains when the far field has to sample and rebuild around a new anchor.
+- The next likely target is an incremental transition-band representation or a more radical renderer experiment, not another blind pass over chunk-generation constants.
