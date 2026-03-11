@@ -1,4 +1,6 @@
 import { EngineController, getSceneOptions, getStressSceneOptions } from "./engine-controller.ts";
+import { summarizeGeneratedChunk } from "../engine/procedural-probes.ts";
+import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
 import type { SceneBenchmarkSample } from "../engine/types.ts";
 
 declare global {
@@ -7,6 +9,13 @@ declare global {
       run: (sceneId: string, iterations: number, frameCount: number) => Promise<unknown>;
       runStress: (iterations: number, frameCount: number) => Promise<unknown>;
       runAll: (iterations: number, frameCount: number) => Promise<unknown>;
+      probeGeneration: (request: {
+        seed?: number;
+        chunkSize?: number;
+        seaLevel?: number;
+        maxYExclusive?: number;
+        chunkCoords: Array<[number, number, number]>;
+      }) => unknown;
       getLastResults: () => unknown;
       getLastValidationArtifacts: () => unknown;
     };
@@ -121,6 +130,20 @@ window.__VOXELS_BENCH__ = {
   runAll: async (iterations, frameCount) => {
     await runAll(iterations, frameCount);
     return lastResults;
+  },
+  probeGeneration: (request) => {
+    const generator = new ProceduralWorldGenerator(request.seed ?? 1337, {
+      chunkSize: request.chunkSize,
+      seaLevel: request.seaLevel,
+      maxYExclusive: request.maxYExclusive,
+    });
+    return {
+      seed: generator.seed,
+      chunkSize: generator.chunkSize,
+      seaLevel: generator.seaLevel,
+      maxYExclusive: generator.maxYExclusive,
+      chunks: request.chunkCoords.map(([x, y, z]) => summarizeGeneratedChunk(generator, generator.generateChunk(x, y, z))),
+    };
   },
   getLastResults: () => lastResults,
   getLastValidationArtifacts: () => controller.getLastValidationArtifacts(),

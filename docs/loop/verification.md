@@ -322,3 +322,47 @@
 - Current conclusion:
   - startup is generation-dominated first, meshing second
   - the next work should instrument chunk-generation and residency phases, then remove duplicate column sampling before deeper architectural changes
+
+### Machine-readable probe verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+
+#### Automated checks
+
+- `mise run test`: passing after adding `tests/procedural-probes.test.ts` and extending the resident-world tests.
+- `mise run build`: passing after exposing new game and benchmark probe APIs.
+
+#### Chrome 146 browser checks
+
+- Reloaded `http://localhost:3001/` and verified the new game probe surface:
+  - `window.__VOXELS_GAME__.snapshotResidentWorld()` returned `239` resident chunks at radius `3`
+  - sample resident chunk probe:
+    - coord `(-9, 47, -6)`
+    - solid count `32,768`
+    - checksum `3eff41cf`
+    - solid bounds `min=[-288,1504,-192]`, `max=[-256,1536,-160]`
+  - `window.__VOXELS_GAME__.teleportAndSettle(-191.5, 1661, -191.5, { radiusChunks: 2 })` returned:
+    - resident chunks `239 -> 124`
+    - entered `0`
+    - evicted `115`
+    - generated `0`
+    - stream `275.8 ms`
+    - radius `2`
+- Reloaded `http://localhost:3001/bench?auto=1&scenario=validationBlocks&iterations=1&frames=3` and verified the new benchmark probe surface:
+  - `window.__VOXELS_BENCH__.probeGeneration({ seed: 1337, chunkSize: 16, chunkCoords: [[0,87,0],[1,87,0]] })` returned deterministic chunk summaries including:
+    - chunk `(0,87,0)`: checksum `2617b1c5`, solid count `4096`, center biome `tundra`, center surface `2162`
+    - chunk `(1,87,0)`: checksum `4127ddc5`, solid count `4096`, center biome `tundra`, center surface `2172`
+- `validationBlocks` remained green after the probe additions:
+  - build `0.1 ms`
+  - mesh `0.3 ms`
+  - first CPU `0.70 ms`
+  - warm CPU `0.20 ms`
+  - first GPU `0.04 ms`
+  - warm GPU `0.07 ms`
+  - `MAE 1.63`
+  - coverage mismatch `0.00%`
+  - visual `pass`
+  - correctness `pass`

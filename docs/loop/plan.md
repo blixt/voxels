@@ -96,6 +96,12 @@ Status:
 - Instrument chunk generation and residency phases before attempting deeper optimizations.
 - Use the new probe data to decide which startup/streaming optimizations actually survive verification.
 
+Status:
+- first machine-readable probe layer is now landing:
+  - `/` exposes resident-world snapshots and teleport-and-settle traces
+  - `/bench` exposes deterministic generation probes
+- remaining work is to add phase timing and use the probes to screen startup-cost optimizations
+
 ### Slice 5: interaction loop
 
 - Break/place interaction from center-screen picking.

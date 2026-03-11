@@ -6,6 +6,11 @@ import {
   type FirstPersonCameraState,
 } from "../engine/first-person-camera.ts";
 import { rebuildDirtyMeshes } from "../engine/mesher.ts";
+import {
+  diffChunkCoords,
+  summarizeResidentWorld,
+  type ResidentWorldProbeSnapshot,
+} from "../engine/procedural-probes.ts";
 import { ProceduralResidentWorld, type ResidencyUpdateSummary } from "../engine/procedural-resident-world.ts";
 import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
 import { WebGpuVoxelRenderer } from "../engine/renderer.ts";
@@ -37,6 +42,16 @@ export interface GameHudSnapshot {
   drawCalls: number;
   triangles: number;
   avgFrameCpuMs: number;
+}
+
+export interface ResidencyTransitionProbe {
+  before: ResidentWorldProbeSnapshot;
+  after: ResidentWorldProbeSnapshot;
+  enteredChunkCoords: Array<[number, number, number]>;
+  evictedChunkCoords: Array<[number, number, number]>;
+  generatedChunkCoords: Array<[number, number, number]>;
+  residency: ResidencyUpdateSummary;
+  meshMs: number;
 }
 
 export class GameController {
@@ -154,6 +169,43 @@ export class GameController {
     this.syncWorldAroundPlayer();
     this.pushHud(true);
     return this.world.lastResidency;
+  }
+
+  snapshotResidentWorld(): ResidentWorldProbeSnapshot {
+    return summarizeResidentWorld(this.world);
+  }
+
+  async teleportAndSettle(
+    position: Vec3,
+    options: {
+      radiusChunks?: number;
+    } = {},
+  ): Promise<ResidencyTransitionProbe> {
+    const before = this.snapshotResidentWorld();
+    if (options.radiusChunks !== undefined) {
+      this.world.setHorizontalRadiusChunks(options.radiusChunks);
+    }
+    this.camera.position = [...position];
+    this.syncWorldAroundPlayer();
+    const after = this.snapshotResidentWorld();
+    const { entered, evicted } = diffChunkCoords(
+      before.chunks.map((chunk) => chunk.coord),
+      after.chunks.map((chunk) => chunk.coord),
+    );
+    this.pushHud(true);
+    return {
+      before,
+      after,
+      enteredChunkCoords: entered.map(toChunkTuple),
+      evictedChunkCoords: evicted.map(toChunkTuple),
+      generatedChunkCoords: this.world.lastResidency.generatedChunkCoords.map(toChunkTuple),
+      residency: {
+        ...this.world.lastResidency,
+        generatedChunkCoords: this.world.lastResidency.generatedChunkCoords.map((coord) => ({ ...coord })),
+        evictedChunkCoords: this.world.lastResidency.evictedChunkCoords.map((coord) => ({ ...coord })),
+      },
+      meshMs: this.meshMs,
+    };
   }
 
   private loadBootstrapWorld(): void {
@@ -288,6 +340,10 @@ export class GameController {
 
 function toDegrees(value: number): number {
   return value * 180 / Math.PI;
+}
+
+function toChunkTuple(coord: { x: number; y: number; z: number }): [number, number, number] {
+  return [coord.x, coord.y, coord.z];
 }
 
 function isMovementKey(code: string): boolean {

@@ -56,6 +56,12 @@ It is intentionally practical. It is based on the actual history of this repo so
 - Stale browser bundles caused a real false debugging trail.
 - Serving HTML, CSS, and bundles with `no-store` and cache-busted URLs was not optional; it was necessary for trustworthy browser verification.
 
+### Assert the actual runtime mode before trusting localhost results
+
+- Once multiple Bun servers were alive at the same time, `http://localhost:3000/` was no longer a reliable synonym for "current code".
+- Acceptance checks should assert page title, debug surface presence, and route mode before trusting any benchmark or game result.
+- If the page says `Voxels Playground` instead of `Voxels Game`, that is an environment problem first, not a renderer problem.
+
 ### Prefer measured rewrites over additive layers
 
 - Performance work improved once the default became "rewrite/remove" rather than "add another helper or wrapper".
@@ -185,6 +191,12 @@ It is intentionally practical. It is based on the actual history of this repo so
 
 - One lane should always preserve the clean comparison point.
 - This is where git worktrees are especially useful.
+
+### Parallelize through machine-readable probes
+
+- Browser automation becomes much more useful once the page exposes exact world and benchmark data instead of only HUD text and screenshots.
+- Generation probes, resident-set snapshots, and teleport-and-settle traces are good parallel surfaces because they let multiple agents compare strategies without depending on subjective visual judgment.
+- Add these narrow probes before building large new systems on top of the current runtime.
 
 ## Git worktrees
 

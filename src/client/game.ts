@@ -5,10 +5,17 @@ declare global {
     __VOXELS_GAME__?: {
       controller: GameController;
       snapshot(): ReturnType<GameController["getDebugSnapshot"]>;
+      snapshotResidentWorld(): ReturnType<GameController["snapshotResidentWorld"]>;
       requestPointerLock(): Promise<void>;
       teleport(x: number, y: number, z: number): void;
       setViewDistance(chunks: number): void;
       forceResidencyUpdate(): ReturnType<GameController["forceResidencyUpdate"]>;
+      teleportAndSettle(
+        x: number,
+        y: number,
+        z: number,
+        options?: { radiusChunks?: number },
+      ): ReturnType<GameController["teleportAndSettle"]>;
     };
   }
 }
@@ -31,10 +38,12 @@ const controller = new GameController(canvas);
 window.__VOXELS_GAME__ = {
   controller,
   snapshot: () => controller.getDebugSnapshot(),
+  snapshotResidentWorld: () => controller.snapshotResidentWorld(),
   requestPointerLock: () => controller.requestPointerLock(),
   teleport: (x, y, z) => controller.teleport([x, y, z]),
   setViewDistance: (chunks) => controller.setResidencyRadiusChunks(chunks),
   forceResidencyUpdate: () => controller.forceResidencyUpdate(),
+  teleportAndSettle: (x, y, z, options) => controller.teleportAndSettle([x, y, z], options),
 };
 
 controller.onHudUpdate = (snapshot) => {

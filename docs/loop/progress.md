@@ -140,3 +140,14 @@
   - fully synchronous residency + meshing during bootstrap and movement
   - duplicate chunk scans when solid bounds are recomputed after generation
   - neighbor-dirty churn during bulk stream-in
+- Added the first machine-readable streaming/generation probes:
+  - `/` now exposes resident-world snapshots plus `teleportAndSettle(...)`
+  - `/bench` now exposes deterministic `probeGeneration(...)`
+  - shared probe summaries now include chunk coordinates, solid counts, checksums, and world-space solid bounds
+- Added probe-focused unit tests for:
+  - generated chunk summary determinism
+  - resident-world snapshot ordering and stat consistency
+  - deterministic chunk-set diffs
+- Captured a new repo-process lesson in `docs/agent-playbook.md`:
+  - assert the actual page mode and debug surface before trusting any localhost result when multiple Bun servers may be alive
+  - prefer machine-readable browser probes over HUD-only verification for streaming work

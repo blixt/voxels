@@ -1,4 +1,4 @@
-import type { Vec3, WorldStats } from "./types.ts";
+import type { ChunkCoordinate, Vec3, WorldStats } from "./types.ts";
 import {
   ProceduralWorldGenerator,
   type GeneratedChunk,
@@ -21,6 +21,8 @@ export interface ResidencyUpdateSummary {
   residentChunks: number;
   surfaceY: number;
   elapsedMs: number;
+  generatedChunkCoords: ChunkCoordinate[];
+  evictedChunkCoords: ChunkCoordinate[];
 }
 
 export class ProceduralResidentWorld implements ResidentChunkWorld {
@@ -63,6 +65,8 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       residentChunks: 0,
       surfaceY: 0,
       elapsedMs: 0,
+      generatedChunkCoords: [],
+      evictedChunkCoords: [],
     };
   }
 
@@ -187,6 +191,8 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
         emptyChunksSkipped: 0,
         touchedNeighborChunks: 0,
         residentChunks: this.chunks.size,
+        generatedChunkCoords: [],
+        evictedChunkCoords: [],
       };
       return this.lastResidency;
     }
@@ -197,6 +203,8 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     let evictedChunks = 0;
     let emptyChunksSkipped = 0;
     let touchedNeighborChunks = 0;
+    const generatedChunkCoords: ChunkCoordinate[] = [];
+    const evictedChunkCoords: ChunkCoordinate[] = [];
 
     for (let dz = -radiusChunks; dz <= radiusChunks; dz += 1) {
       for (let dx = -radiusChunks; dx <= radiusChunks; dx += 1) {
@@ -220,6 +228,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
           const chunk = createResidentChunk(generated, this.chunkSize);
           this.chunks.set(key, chunk);
           generatedChunks += 1;
+          generatedChunkCoords.push({ x: cx, y: cy, z: cz });
           touchedNeighborChunks += this.markAdjacentChunksDirty(cx, cy, cz);
         }
       }
@@ -231,6 +240,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       }
       this.chunks.delete(key);
       evictedChunks += 1;
+      evictedChunkCoords.push({ ...chunk.coord });
       touchedNeighborChunks += this.markAdjacentChunksDirty(chunk.coord.x, chunk.coord.y, chunk.coord.z);
     }
 
@@ -247,6 +257,8 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       residentChunks: this.chunks.size,
       surfaceY,
       elapsedMs: performance.now() - startedAt,
+      generatedChunkCoords,
+      evictedChunkCoords,
     };
     return this.lastResidency;
   }

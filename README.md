@@ -38,7 +38,9 @@ Repo-specific guidance for agent-driven research, implementation, and verificati
 ## Game automation
 
 - `window.__VOXELS_GAME__.snapshot()`
+- `window.__VOXELS_GAME__.snapshotResidentWorld()`
 - `window.__VOXELS_GAME__.teleport(x, y, z)`
+- `window.__VOXELS_GAME__.teleportAndSettle(x, y, z, { radiusChunks })`
 - `window.__VOXELS_GAME__.requestPointerLock()`
 - `window.__VOXELS_GAME__.setViewDistance(chunks)`
 - `window.__VOXELS_GAME__.forceResidencyUpdate()`
@@ -50,6 +52,7 @@ Repo-specific guidance for agent-driven research, implementation, and verificati
 - `window.__VOXELS_BENCH__.run(sceneId, iterations, frameCount)`
 - `window.__VOXELS_BENCH__.runStress(iterations, frameCount)`
 - `window.__VOXELS_BENCH__.runAll(iterations, frameCount)`
+- `window.__VOXELS_BENCH__.probeGeneration({ seed, chunkCoords, chunkSize })`
 - `mise run profile -- --iterations=3 --warmup=1 terrain256 stressDrawCalls512`
 
 The benchmark table separates first-frame costs from warm-frame costs and exposes first-frame sync/upload/encode metrics so scene-load and live-edit regressions are visible without manual spreadsheet work.
