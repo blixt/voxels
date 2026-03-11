@@ -8,6 +8,8 @@ const QUAD_STRIDE = 11;
 
 export interface MeshBuildSummary {
   meshCount: number;
+  newMeshCount: number;
+  remeshCount: number;
   triangleCount: number;
   elapsedMs: number;
 }
@@ -15,6 +17,8 @@ export interface MeshBuildSummary {
 export function rebuildDirtyMeshes(world: ResidentChunkWorld): MeshBuildSummary {
   const startedAt = performance.now();
   let meshCount = 0;
+  let newMeshCount = 0;
+  let remeshCount = 0;
   let triangleCount = 0;
   for (const chunk of world.iterateResidentChunks()) {
     if (!chunk.meshDirty) {
@@ -24,10 +28,18 @@ export function rebuildDirtyMeshes(world: ResidentChunkWorld): MeshBuildSummary 
     chunk.meshDirty = false;
     chunk.gpuDirty = true;
     meshCount += 1;
+    if (chunk.meshBuilt) {
+      remeshCount += 1;
+    } else {
+      newMeshCount += 1;
+      chunk.meshBuilt = true;
+    }
     triangleCount += chunk.mesh?.triangleCount ?? 0;
   }
   return {
     meshCount,
+    newMeshCount,
+    remeshCount,
     triangleCount,
     elapsedMs: performance.now() - startedAt,
   };

@@ -20,14 +20,21 @@ test("fillColumn marks adjacent chunks dirty when a boundary voxel changes", () 
   const world = new VoxelWorld({ width: 64, height: 32, depth: 32 }, 32, [0, 0xffffffff]);
   world.fillColumn(31, 10, 10, 11, 1);
   world.setVoxel(32, 10, 10, 1);
-  rebuildDirtyMeshes(world);
+  const initialMesh = rebuildDirtyMeshes(world);
 
   const rightKey = world.resolveChunkKey(1, 0, 0);
   expect(rightKey).not.toBeNull();
   const rightChunk = world.chunks.get(rightKey!);
   expect(rightChunk?.meshDirty).toBe(false);
+  expect(initialMesh.meshCount).toBe(2);
+  expect(initialMesh.newMeshCount).toBe(2);
+  expect(initialMesh.remeshCount).toBe(0);
 
   world.fillColumn(31, 10, 10, 11, 0);
 
   expect(world.chunks.get(rightKey!)?.meshDirty).toBe(true);
+  const updatedMesh = rebuildDirtyMeshes(world);
+  expect(updatedMesh.meshCount).toBeGreaterThan(0);
+  expect(updatedMesh.newMeshCount).toBe(0);
+  expect(updatedMesh.remeshCount).toBe(updatedMesh.meshCount);
 });

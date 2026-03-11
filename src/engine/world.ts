@@ -12,6 +12,7 @@ export interface VoxelChunk {
     max: [number, number, number];
     dirty: boolean;
   } | null;
+  meshBuilt: boolean;
   meshDirty: boolean;
   gpuDirty: boolean;
   mesh: import("./types.ts").ChunkMeshData | null;
@@ -363,6 +364,7 @@ export class VoxelWorld implements ResidentChunkWorld {
       data: new Uint16Array(this.chunkSize * this.chunkSize * this.chunkSize),
       solidCount: 0,
       solidBounds: null,
+      meshBuilt: false,
       meshDirty: true,
       gpuDirty: true,
       mesh: null,

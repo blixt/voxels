@@ -22,8 +22,12 @@ const scenarios = [
       return {
         streamMs: residency.elapsedMs,
         meshMs: mesh.elapsedMs,
+        meshNewChunks: mesh.newMeshCount,
+        meshRemeshChunks: mesh.remeshCount,
         generatedChunks: residency.generatedChunks,
         evictedChunks: residency.evictedChunks,
+        dirtyResidentChunks: residency.dirtyResidentChunks,
+        phaseMs: residency.phaseMs,
         residentChunks: world.getStats().chunkCount,
         solidVoxelCount: world.getStats().solidVoxelCount,
       };
@@ -44,8 +48,12 @@ const scenarios = [
       return {
         streamMs: residency.elapsedMs,
         meshMs: mesh.elapsedMs,
+        meshNewChunks: mesh.newMeshCount,
+        meshRemeshChunks: mesh.remeshCount,
         generatedChunks: residency.generatedChunks,
         evictedChunks: residency.evictedChunks,
+        dirtyResidentChunks: residency.dirtyResidentChunks,
+        phaseMs: residency.phaseMs,
         residentChunks: world.getStats().chunkCount,
         solidVoxelCount: world.getStats().solidVoxelCount,
       };
@@ -66,8 +74,12 @@ const scenarios = [
       return {
         streamMs: residency.elapsedMs,
         meshMs: mesh.elapsedMs,
+        meshNewChunks: mesh.newMeshCount,
+        meshRemeshChunks: mesh.remeshCount,
         generatedChunks: residency.generatedChunks,
         evictedChunks: residency.evictedChunks,
+        dirtyResidentChunks: residency.dirtyResidentChunks,
+        phaseMs: residency.phaseMs,
         residentChunks: world.getStats().chunkCount,
         solidVoxelCount: world.getStats().solidVoxelCount,
       };
@@ -84,6 +96,15 @@ for (const scenario of scenarios) {
   const meshSamples: number[] = [];
   const generatedSamples: number[] = [];
   const evictedSamples: number[] = [];
+  const dirtyChunkSamples: number[] = [];
+  const meshNewChunkSamples: number[] = [];
+  const meshRemeshChunkSamples: number[] = [];
+  const surfaceSamples: number[] = [];
+  const yRangeSamples: number[] = [];
+  const generationSamples: number[] = [];
+  const adoptionSamples: number[] = [];
+  const evictionSamples: number[] = [];
+  const neighborDirtySamples: number[] = [];
   let residentChunks = 0;
   let solidVoxelCount = 0;
 
@@ -91,8 +112,17 @@ for (const scenario of scenarios) {
     const result = scenario.run();
     streamSamples.push(result.streamMs);
     meshSamples.push(result.meshMs);
+    meshNewChunkSamples.push(result.meshNewChunks ?? 0);
+    meshRemeshChunkSamples.push(result.meshRemeshChunks ?? 0);
     generatedSamples.push(result.generatedChunks);
     evictedSamples.push(result.evictedChunks);
+    dirtyChunkSamples.push(result.dirtyResidentChunks ?? 0);
+    surfaceSamples.push(result.phaseMs?.surfaceSampleMs ?? 0);
+    yRangeSamples.push(result.phaseMs?.yRangeMs ?? 0);
+    generationSamples.push(result.phaseMs?.chunkGenerationMs ?? 0);
+    adoptionSamples.push(result.phaseMs?.chunkAdoptionMs ?? 0);
+    evictionSamples.push(result.phaseMs?.evictionMs ?? 0);
+    neighborDirtySamples.push(result.phaseMs?.neighborDirtyMs ?? 0);
     residentChunks = result.residentChunks;
     solidVoxelCount = result.solidVoxelCount;
   }
@@ -106,8 +136,19 @@ for (const scenario of scenarios) {
     farRadius,
     stream: summarize(streamSamples),
     mesh: summarize(meshSamples),
+    meshNewChunks: summarize(meshNewChunkSamples),
+    meshRemeshChunks: summarize(meshRemeshChunkSamples),
     generatedChunks: summarize(generatedSamples),
     evictedChunks: summarize(evictedSamples),
+    dirtyResidentChunks: summarize(dirtyChunkSamples),
+    phases: {
+      surfaceSample: summarize(surfaceSamples),
+      yRange: summarize(yRangeSamples),
+      chunkGeneration: summarize(generationSamples),
+      chunkAdoption: summarize(adoptionSamples),
+      eviction: summarize(evictionSamples),
+      neighborDirty: summarize(neighborDirtySamples),
+    },
     residentChunks,
     solidVoxelCount,
   }));

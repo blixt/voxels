@@ -15,6 +15,7 @@ import { ProceduralResidentWorld, type ResidencyUpdateSummary } from "../engine/
 import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
 import { WebGpuVoxelRenderer } from "../engine/renderer.ts";
 import type { Vec3 } from "../engine/types.ts";
+import type { MeshBuildSummary } from "../engine/mesher.ts";
 
 const BASE_MOVE_SPEED = 30;
 const FAST_MOVE_MULTIPLIER = 3;
@@ -36,9 +37,12 @@ export interface GameHudSnapshot {
   streamGeneratedChunks: number;
   streamEvictedChunks: number;
   streamEmptyChunksSkipped: number;
+  streamDirtyResidentChunks: number;
   residencyRadiusChunks: number;
   surfaceY: number;
   meshMs: number;
+  meshNewChunks: number;
+  meshRemeshChunks: number;
   drawCalls: number;
   triangles: number;
   avgFrameCpuMs: number;
@@ -51,7 +55,7 @@ export interface ResidencyTransitionProbe {
   evictedChunkCoords: Array<[number, number, number]>;
   generatedChunkCoords: Array<[number, number, number]>;
   residency: ResidencyUpdateSummary;
-  meshMs: number;
+  mesh: MeshBuildSummary;
 }
 
 export class GameController {
@@ -67,6 +71,13 @@ export class GameController {
   status = "Booting";
   pointerLocked = false;
   onHudUpdate: ((snapshot: GameHudSnapshot) => void) | null = null;
+  private lastMeshBuildSummary: MeshBuildSummary = {
+    meshCount: 0,
+    newMeshCount: 0,
+    remeshCount: 0,
+    triangleCount: 0,
+    elapsedMs: 0,
+  };
 
   private rafId = 0;
   private lastFrameTime = 0;
@@ -143,9 +154,12 @@ export class GameController {
       streamGeneratedChunks: this.world.lastResidency.generatedChunks,
       streamEvictedChunks: this.world.lastResidency.evictedChunks,
       streamEmptyChunksSkipped: this.world.lastResidency.emptyChunksSkipped,
+      streamDirtyResidentChunks: this.world.lastResidency.dirtyResidentChunks,
       residencyRadiusChunks: this.world.lastResidency.radiusChunks,
       surfaceY: this.world.lastResidency.surfaceY,
       meshMs: this.meshMs,
+      meshNewChunks: this.lastMeshBuildSummary.newMeshCount,
+      meshRemeshChunks: this.lastMeshBuildSummary.remeshCount,
       drawCalls: this.drawCalls,
       triangles: this.triangles,
       avgFrameCpuMs: this.avgFrameCpuMs,
@@ -204,7 +218,7 @@ export class GameController {
         generatedChunkCoords: this.world.lastResidency.generatedChunkCoords.map((coord) => ({ ...coord })),
         evictedChunkCoords: this.world.lastResidency.evictedChunkCoords.map((coord) => ({ ...coord })),
       },
-      meshMs: this.meshMs,
+      mesh: { ...this.lastMeshBuildSummary },
     };
   }
 
@@ -318,6 +332,7 @@ export class GameController {
       return;
     }
     const meshSummary = rebuildDirtyMeshes(this.world);
+    this.lastMeshBuildSummary = meshSummary;
     this.meshMs = meshSummary.elapsedMs;
     this.status = residency.generatedChunks > 0 || residency.evictedChunks > 0
       ? `Streamed ${residency.generatedChunks} chunk(s), evicted ${residency.evictedChunks}`

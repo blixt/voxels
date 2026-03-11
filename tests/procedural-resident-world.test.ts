@@ -17,6 +17,9 @@ test("resident world loads chunks around the player and exposes generated voxels
   expect(world.getStats().chunkCount).toBeGreaterThan(0);
   expect(residency.generatedChunkCoords.length).toBe(residency.generatedChunks);
   expect(residency.evictedChunkCoords).toHaveLength(0);
+  expect(residency.dirtyResidentChunks).toBeGreaterThanOrEqual(residency.generatedChunks);
+  expect(residency.phaseMs.chunkGenerationMs).toBeGreaterThan(0);
+  expect(residency.phaseMs.yRangeMs).toBeGreaterThan(0);
   expect(world.getVoxel(worldX, column.surfaceY, worldZ)).toBe(generator.sampleMaterial(worldX, column.surfaceY, worldZ));
 });
 
@@ -34,6 +37,8 @@ test("resident world does not churn when the player stays in the same anchor chu
   expect(second.evictedChunks).toBe(0);
   expect(second.generatedChunkCoords).toHaveLength(0);
   expect(second.evictedChunkCoords).toHaveLength(0);
+  expect(second.phaseMs.surfaceSampleMs).toBeGreaterThanOrEqual(0);
+  expect(second.phaseMs.chunkGenerationMs).toBe(0);
 });
 
 test("resident world evicts far chunks and loads new chunks after a large move", () => {
@@ -50,6 +55,7 @@ test("resident world evicts far chunks and loads new chunks after a large move",
   expect(shifted.evictedChunks).toBeGreaterThan(0);
   expect(shifted.generatedChunkCoords.length).toBe(shifted.generatedChunks);
   expect(shifted.evictedChunkCoords.length).toBe(shifted.evictedChunks);
+  expect(shifted.phaseMs.neighborDirtyMs).toBeGreaterThanOrEqual(0);
   expect(world.hasResidentChunk(0, Math.floor(1400 / 16), 0)).toBe(false);
 });
 

@@ -103,7 +103,16 @@ Status:
 - first hot-path win is now landing:
   - per-column generator caching removed the worst startup bottleneck
   - chunk solid bounds now come out of generation instead of being recomputed immediately
-- remaining work is to break down the remaining `~200 ms` bootstrap cost and decide whether the next win is neighbor-remesh batching or incremental/worker streaming
+- phase instrumentation is now landing:
+  - `profile-stream` reports residency phase times and dirty resident chunk counts
+  - the data says neighbor-dirty bookkeeping itself is tiny, so naive batching is not the next win
+- remesh accounting is now landing:
+  - mesh rebuilds separate newly generated chunk meshes from remeshed boundary chunks
+  - shrink still spends time on empty-chunk generation checks even when no solid chunks are adopted
+- remaining work is to choose between:
+  - reducing real boundary remesh cost
+  - avoiding repeated empty-chunk evaluation
+  - moving to incremental or worker streaming
 
 ### Slice 5: interaction loop
 
@@ -137,11 +146,10 @@ Status:
 
 ## Immediate implementation tasks
 
-- Add machine-readable generation and residency probes to the game/benchmark automation surfaces.
-- Instrument `generateChunk()` and `updateResidencyAround()` into measurable phases before optimizing them.
-- Measure the remaining residency phases so the next optimization is chosen from data instead of guesswork.
-- Reduce neighbor-remesh churn during bulk stream-in.
-- Decide when to move from synchronous residency to incremental or worker-driven streaming.
+- Keep machine-readable generation and residency probes aligned with the game/runtime code.
+- Use the new phase and remesh metrics to decide whether the next narrow optimization is remesh cost, empty-chunk rechecks, or moving residency/meshing off the synchronous path.
+- Keep the procedural stream profiler and browser probes aligned so local and Chrome decisions stay comparable.
+- If the next change targets meshing, build or adapt cases that focus on boundary remesh cost rather than only initial chunk creation.
 - Add deterministic verification cases for resident-set stability, seam consistency, and stream churn.
 - Keep the game debug API growing alongside `/bench` so browser automation does not depend on visual inspection alone.
 - Log each slice in `progress.md` and `verification.md`.

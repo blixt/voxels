@@ -454,3 +454,135 @@
   - coverage mismatch `0.00%`
   - visual `pass`
   - correctness `pass`
+
+### Residency phase and remesh instrumentation
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `mise run profile-stream -- --iterations=2 --warmup=1`
+
+#### Automated checks
+
+- `mise run test`: passing after adding dirty-resident phase metrics and new-vs-remesh mesh accounting.
+- `mise run build`: passing after exposing the new metrics through the game route.
+
+#### Local profiler samples
+
+- `bootstrap-r3`:
+  - stream avg `204.6 ms`
+  - mesh avg `180.7 ms`
+  - mesh new chunks `239`
+  - mesh remesh chunks `0`
+  - dirty resident chunks `239`
+  - residency phases:
+    - chunk generation `202.9 ms`
+    - neighbor dirty `0.67 ms`
+- `widen-r2-to-r3`:
+  - stream avg `117.0 ms`
+  - mesh avg `145.0 ms`
+  - mesh new chunks `115`
+  - mesh remesh chunks `64`
+  - dirty resident chunks `179`
+  - residency phases:
+    - chunk generation `115.9 ms`
+    - neighbor dirty `0.31 ms`
+- `shrink-r3-to-r2`:
+  - stream avg `14.0 ms`
+  - mesh avg `55.7 ms`
+  - mesh new chunks `0`
+  - mesh remesh chunks `64`
+  - dirty resident chunks `64`
+  - residency phases:
+    - chunk generation `13.7 ms`
+    - eviction `0.04 ms`
+    - neighbor dirty `0.09 ms`
+
+#### Chrome 146 browser checks
+
+- Reloaded `http://localhost:3001/` and verified the new HUD/debug metrics on the live game route:
+  - fresh bootstrap snapshot:
+    - dirty resident chunks `239`
+    - mesh new chunks `239`
+    - mesh remesh chunks `0`
+    - stream `202.4 ms`
+    - mesh `262.6 ms`
+- `window.__VOXELS_GAME__.teleportAndSettle(-191.5, 1661, -191.5, { radiusChunks: 2 })` returned:
+  - dirty resident chunks `64`
+  - mesh count `64`
+  - new mesh chunks `0`
+  - remesh chunks `64`
+  - stream `12.6 ms`
+  - phases:
+    - chunk generation `12.4 ms`
+    - eviction `0.1 ms`
+- `window.__VOXELS_GAME__.teleportAndSettle(-191.5, 1661, -191.5, { radiusChunks: 3 })` returned:
+  - dirty resident chunks `179`
+  - mesh count `179`
+  - new mesh chunks `115`
+  - remesh chunks `64`
+  - stream `103.9 ms`
+  - phases:
+    - chunk generation `103.4 ms`
+    - chunk adoption `0.2 ms`
+    - neighbor dirty `0.3 ms`
+- Conclusion from the instrumented run:
+  - duplicate dirty bookkeeping is not the current bottleneck
+  - the remaining synchronous cost is split between real boundary remesh work and repeated empty-chunk generation checks
+
+### Residency phase instrumentation
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `mise run profile-stream -- --iterations=2 --warmup=1`
+
+#### Automated checks
+
+- `mise run test`: passing after adding phase metrics and dirty resident-chunk counts to the residency summary.
+- `mise run build`: passing after extending the stream profiler output.
+
+#### Local profiler samples
+
+- `bootstrap-r3`:
+  - stream avg `202.0 ms`
+  - dirty resident chunks `239`
+  - phase breakdown:
+    - surface sample `0.00 ms`
+    - Y-range `0.28 ms`
+    - chunk generation `200.37 ms`
+    - chunk adoption `0.31 ms`
+    - neighbor dirty `0.61 ms`
+- `widen-r2-to-r3`:
+  - stream avg `111.8 ms`
+  - generated chunks `115`
+  - dirty resident chunks `179`
+  - phase breakdown:
+    - surface sample `0.01 ms`
+    - Y-range `0.19 ms`
+    - chunk generation `110.95 ms`
+    - chunk adoption `0.12 ms`
+    - neighbor dirty `0.27 ms`
+- `shrink-r3-to-r2`:
+  - stream avg `13.6 ms`
+  - evicted chunks `115`
+  - dirty resident chunks `64`
+  - phase breakdown:
+    - surface sample `0.01 ms`
+    - Y-range `0.05 ms`
+    - chunk generation `13.34 ms`
+    - eviction `0.04 ms`
+    - neighbor dirty `0.08 ms`
+
+#### Current conclusion
+
+- Neighbor-dirty bookkeeping is measurable now, and it is not the main bottleneck.
+- The next win is unlikely to come from batching `markAdjacentChunksDirty()` alone, because the bookkeeping itself is sub-millisecond.
+- The meaningful remaining cost is real chunk generation plus real boundary remeshing, so the next investigation should target either boundary remesh cost or incremental/worker streaming.
+
+#### Browser note
+
+- I did not complete a fresh post-instrumentation Chrome DevTools probe because the DevTools browser session entered a profile-conflict state during this slice.
+- The runtime server is still live on `http://localhost:3001/`, and the browser-facing functional guardrail remains the earlier post-optimization Chrome 146 run recorded above.

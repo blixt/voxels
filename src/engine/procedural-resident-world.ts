@@ -9,6 +9,15 @@ const DEFAULT_HORIZONTAL_RADIUS_CHUNKS = 3;
 const DEFAULT_UNDERGROUND_PADDING_CHUNKS = 3;
 const DEFAULT_AIR_PADDING_CHUNKS = 2;
 
+export interface ResidencyPhaseMetrics {
+  surfaceSampleMs: number;
+  yRangeMs: number;
+  chunkGenerationMs: number;
+  chunkAdoptionMs: number;
+  evictionMs: number;
+  neighborDirtyMs: number;
+}
+
 export interface ResidencyUpdateSummary {
   changed: boolean;
   centerChunkX: number;
@@ -19,10 +28,12 @@ export interface ResidencyUpdateSummary {
   emptyChunksSkipped: number;
   touchedNeighborChunks: number;
   residentChunks: number;
+  dirtyResidentChunks: number;
   surfaceY: number;
   elapsedMs: number;
   generatedChunkCoords: ChunkCoordinate[];
   evictedChunkCoords: ChunkCoordinate[];
+  phaseMs: ResidencyPhaseMetrics;
 }
 
 export class ProceduralResidentWorld implements ResidentChunkWorld {
@@ -63,10 +74,12 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       emptyChunksSkipped: 0,
       touchedNeighborChunks: 0,
       residentChunks: 0,
+      dirtyResidentChunks: 0,
       surfaceY: 0,
       elapsedMs: 0,
       generatedChunkCoords: [],
       evictedChunkCoords: [],
+      phaseMs: zeroResidencyPhaseMetrics(),
     };
   }
 
@@ -176,7 +189,9 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     const centerChunkZ = Math.floor(position[2] / this.chunkSize);
     const radiusChunks = this.horizontalRadiusChunks;
     const anchorSignature = `${centerChunkX}:${centerChunkZ}:${radiusChunks}`;
+    const surfaceStartedAt = performance.now();
     const surfaceY = this.generator.sampleColumn(Math.floor(position[0]), Math.floor(position[2])).surfaceY;
+    const surfaceSampleMs = performance.now() - surfaceStartedAt;
     if (anchorSignature === this.lastAnchorSignature) {
       this.lastResidency = {
         ...this.lastResidency,
@@ -191,8 +206,13 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
         emptyChunksSkipped: 0,
         touchedNeighborChunks: 0,
         residentChunks: this.chunks.size,
+        dirtyResidentChunks: countDirtyResidentChunks(this.chunks.values()),
         generatedChunkCoords: [],
         evictedChunkCoords: [],
+        phaseMs: {
+          ...zeroResidencyPhaseMetrics(),
+          surfaceSampleMs,
+        },
       };
       return this.lastResidency;
     }
@@ -205,6 +225,11 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     let touchedNeighborChunks = 0;
     const generatedChunkCoords: ChunkCoordinate[] = [];
     const evictedChunkCoords: ChunkCoordinate[] = [];
+    let yRangeMs = 0;
+    let chunkGenerationMs = 0;
+    let chunkAdoptionMs = 0;
+    let evictionMs = 0;
+    let neighborDirtyMs = 0;
 
     for (let dz = -radiusChunks; dz <= radiusChunks; dz += 1) {
       for (let dx = -radiusChunks; dx <= radiusChunks; dx += 1) {
@@ -213,23 +238,31 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
         }
         const cx = centerChunkX + dx;
         const cz = centerChunkZ + dz;
+        const yRangeStartedAt = performance.now();
         const [minCy, maxCy] = this.computeChunkYRange(cx, cz);
+        yRangeMs += performance.now() - yRangeStartedAt;
         for (let cy = minCy; cy <= maxCy; cy += 1) {
           const key = toChunkKey(cx, cy, cz);
           neededKeys.add(key);
           if (this.chunks.has(key)) {
             continue;
           }
+          const generationStartedAt = performance.now();
           const generated = this.generator.generateChunk(cx, cy, cz);
+          chunkGenerationMs += performance.now() - generationStartedAt;
           if (generated.solidCount === 0) {
             emptyChunksSkipped += 1;
             continue;
           }
+          const adoptionStartedAt = performance.now();
           const chunk = createResidentChunk(generated, this.chunkSize);
           this.chunks.set(key, chunk);
           generatedChunks += 1;
           generatedChunkCoords.push({ x: cx, y: cy, z: cz });
+          chunkAdoptionMs += performance.now() - adoptionStartedAt;
+          const dirtyStartedAt = performance.now();
           touchedNeighborChunks += this.markAdjacentChunksDirty(cx, cy, cz);
+          neighborDirtyMs += performance.now() - dirtyStartedAt;
         }
       }
     }
@@ -238,10 +271,14 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       if (neededKeys.has(key)) {
         continue;
       }
+      const evictionStartedAt = performance.now();
       this.chunks.delete(key);
       evictedChunks += 1;
       evictedChunkCoords.push({ ...chunk.coord });
+      evictionMs += performance.now() - evictionStartedAt;
+      const dirtyStartedAt = performance.now();
       touchedNeighborChunks += this.markAdjacentChunksDirty(chunk.coord.x, chunk.coord.y, chunk.coord.z);
+      neighborDirtyMs += performance.now() - dirtyStartedAt;
     }
 
     this.lastAnchorSignature = anchorSignature;
@@ -255,10 +292,19 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       emptyChunksSkipped,
       touchedNeighborChunks,
       residentChunks: this.chunks.size,
+      dirtyResidentChunks: countDirtyResidentChunks(this.chunks.values()),
       surfaceY,
       elapsedMs: performance.now() - startedAt,
       generatedChunkCoords,
       evictedChunkCoords,
+      phaseMs: {
+        surfaceSampleMs,
+        yRangeMs,
+        chunkGenerationMs,
+        chunkAdoptionMs,
+        evictionMs,
+        neighborDirtyMs,
+      },
     };
     return this.lastResidency;
   }
@@ -348,6 +394,7 @@ function createResidentChunk(generated: GeneratedChunk, chunkSize: number): Voxe
           dirty: false,
         }
       : null,
+    meshBuilt: false,
     meshDirty: true,
     gpuDirty: true,
     mesh: null,
@@ -356,6 +403,27 @@ function createResidentChunk(generated: GeneratedChunk, chunkSize: number): Voxe
     recomputeChunkSolidBounds(chunk, chunkSize);
   }
   return chunk;
+}
+
+function countDirtyResidentChunks(chunks: Iterable<VoxelChunk>): number {
+  let dirtyCount = 0;
+  for (const chunk of chunks) {
+    if (chunk.meshDirty) {
+      dirtyCount += 1;
+    }
+  }
+  return dirtyCount;
+}
+
+function zeroResidencyPhaseMetrics(): ResidencyPhaseMetrics {
+  return {
+    surfaceSampleMs: 0,
+    yRangeMs: 0,
+    chunkGenerationMs: 0,
+    chunkAdoptionMs: 0,
+    evictionMs: 0,
+    neighborDirtyMs: 0,
+  };
 }
 
 function recomputeChunkSolidBounds(chunk: VoxelChunk, chunkSize: number): void {

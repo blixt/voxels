@@ -164,3 +164,20 @@
   - Chrome 146 `/` bootstrap stream `3399 ms -> 206.5 ms`
   - Chrome 146 `/` widen `1943 ms -> 104.6 ms`
   - Chrome 146 `/` shrink `275.8 ms -> 13.0 ms`
+- Added a second instrumentation pass focused on the remaining streaming cost:
+  - resident-world updates now expose phase timing and dirty-resident counts
+  - mesh rebuild summaries now separate newly generated chunk meshes from remeshed chunks
+  - the game HUD/debug path exposes dirty-resident counts plus new-vs-remesh mesh counts
+- The new profiler/browser data changed the next target:
+  - neighbor-dirty bookkeeping itself is tiny
+  - widen `2 -> 3` remeshes `64` already-built boundary chunks in addition to meshing `115` new chunks
+  - shrink `3 -> 2` remeshes `64` chunks and still spends about `12-14 ms` rechecking empty chunk positions even though it adopts `0` solid chunks
+- Added residency phase metrics plus dirty resident-chunk counts to `ProceduralResidentWorld` and `profile-stream`.
+- Used that instrumentation to answer the next optimization question before changing more code:
+  - `neighborDirtyMs` is sub-millisecond in the warmed local profiler
+  - widen `r2 -> r3` dirties `179` resident chunks for `115` generated chunks
+  - shrink `r3 -> r2` dirties `64` resident chunks for `115` evictions
+- Current conclusion:
+  - duplicate dirty bookkeeping is not the main remaining cost
+  - the extra remesh work is mostly real boundary-chunk work
+  - the next worthwhile direction is either reducing actual boundary remesh cost or moving streaming/meshing off the synchronous path
