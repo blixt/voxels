@@ -77,6 +77,13 @@ Status:
 - Initial biome/color distribution aimed at exploration rather than realism.
 - Bench and validation cases for generation boundaries and stream-in churn.
 
+Status:
+- procedural generation primitives now exist in isolation:
+  - fixed `#RGB` material palette (`4096` colors)
+  - deterministic per-chunk generator
+  - multi-biome column sampling and chunk generation
+- still not wired into the live resident world yet
+
 ### Slice 4: interaction loop
 
 - Break/place interaction from center-screen picking.

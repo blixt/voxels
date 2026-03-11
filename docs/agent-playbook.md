@@ -19,6 +19,7 @@ It is intentionally practical. It is based on the actual history of this repo so
 - Tiny validation scenes were far more useful than jumping directly into the full terrain scene.
 - Primitive checks such as a single voxel, a small cube, and a compact block arrangement caught renderer issues much faster than looking at a large scene.
 - Small, asymmetric cases are especially valuable because they expose axis swaps, winding mistakes, depth mistakes, and culling errors quickly.
+- The same rule applies to world generation: deterministic per-chunk sampler tests are a better first step than wiring a new generator directly into a live streamed world.
 
 ### Separate correctness work from performance work
 

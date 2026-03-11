@@ -8,6 +8,7 @@ This repository keeps the design loop in versioned documents instead of ad-hoc n
 - `plan.md`: current implementation plan and next milestones
 - `research.md`: external sources, constraints, and technical decisions
 - `world-model-notes.md`: bounded-world scouting notes and the chosen seam toward streaming/infinite worlds
+- `worldgen-notes.md`: initial procedural-generation design notes and verification goals
 - `progress.md`: chronological implementation log
 - `hypotheses.md`: hypothesis grid, tiny probes, and outcomes for renderer errors
 - `verification.md`: commands, browser checks, and benchmark runs

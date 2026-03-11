@@ -230,3 +230,30 @@
   - coverage mismatch `0.00%`
   - visual `pass`
   - correctness `pass`
+
+### Procedural generator primitive verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+
+#### Automated checks
+
+- `mise run test`: passing after adding `tests/procedural-generator.test.ts`.
+- `mise run build`: passing after adding `src/engine/procedural-generator.ts` and `src/engine/noise.ts`.
+
+#### Generator-specific checks
+
+- `#RGB` palette mapping:
+  - palette length `4097`
+  - `#ABC -> material index -> #ABC` roundtrip passes
+- deterministic chunk generation:
+  - generating chunk `(18, 4, -7)` twice under seed `4242` yields identical `solidCount` and identical `fnv1a` checksum
+- direct sampler consistency:
+  - sampled world voxels match generated chunk-local data at multiple coordinates inside a generated chunk
+- biome distribution:
+  - the wide coordinate grid probe now yields at least `4` biome families
+- Y-range guard:
+  - `sampleMaterial(..., -1, ...)` returns `0`
+  - `sampleMaterial(..., 16384, ...)` returns `0`

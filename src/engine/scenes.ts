@@ -1,48 +1,9 @@
 import { clamp, degToRad, hashUint32, packRgba } from "./math.ts";
+import { fbm2D } from "./noise.ts";
 import type { SceneBuildResult, SceneKind } from "./types.ts";
 import { VoxelWorld } from "./world.ts";
 
 const DEFAULT_WORLD_SIZE = 256;
-
-function smoothstep(value: number): number {
-  return value * value * (3 - 2 * value);
-}
-
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
-
-function noise2D(x: number, z: number, seed: number): number {
-  const x0 = Math.floor(x);
-  const z0 = Math.floor(z);
-  const tx = x - x0;
-  const tz = z - z0;
-
-  const h00 = hashUint32(x0 * 374761393 + z0 * 668265263 + seed) / 0xffffffff;
-  const h10 = hashUint32((x0 + 1) * 374761393 + z0 * 668265263 + seed) / 0xffffffff;
-  const h01 = hashUint32(x0 * 374761393 + (z0 + 1) * 668265263 + seed) / 0xffffffff;
-  const h11 = hashUint32((x0 + 1) * 374761393 + (z0 + 1) * 668265263 + seed) / 0xffffffff;
-
-  const sx = smoothstep(tx);
-  const sz = smoothstep(tz);
-  const nx0 = lerp(h00, h10, sx);
-  const nx1 = lerp(h01, h11, sx);
-  return lerp(nx0, nx1, sz);
-}
-
-function fbm(x: number, z: number, octaves: number, seed: number): number {
-  let amplitude = 1;
-  let frequency = 1;
-  let total = 0;
-  let sum = 0;
-  for (let octave = 0; octave < octaves; octave += 1) {
-    total += noise2D(x * frequency, z * frequency, seed + octave * 977) * amplitude;
-    sum += amplitude;
-    amplitude *= 0.5;
-    frequency *= 2;
-  }
-  return total / sum;
-}
 
 export interface SceneDefinition {
   id: string;
@@ -119,9 +80,9 @@ export function createDefaultScene(): SceneBuildResult {
 
   for (let z = 0; z < world.depth; z += 1) {
     for (let x = 0; x < world.width; x += 1) {
-      const hill = fbm(x / 28, z / 28, 4, 1337);
-      const ridge = fbm(x / 11, z / 11, 2, 7331);
-      const plateau = fbm(x / 64, z / 64, 3, 9559);
+      const hill = fbm2D(x / 28, z / 28, 4, 1337);
+      const ridge = fbm2D(x / 11, z / 11, 2, 7331);
+      const plateau = fbm2D(x / 64, z / 64, 3, 9559);
       const height = Math.floor(28 + hill * 26 + ridge * 8 + plateau * 12);
       const shoreline = 34;
       fillTerrainColumn(world, x, z, height, shoreline, deepStone, stone, sand, dirt, grass, water);

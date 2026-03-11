@@ -108,3 +108,16 @@
   - `src/engine/renderer.ts` now syncs and renders resident chunks through the interface instead of through `VoxelWorld.chunks` and `resolveChunkKey()`
   - this keeps `/bench` stable while opening a clean path for a later streaming world implementation
 - Added a small regression test for the new resident-chunk helpers and re-ran tests/build/version checks after the refactor.
+- Added the first isolated procedural-generation slice in `src/engine/procedural-generator.ts`:
+  - deterministic per-chunk generation
+  - fixed `#RGB` material palette with `4096` colors
+  - multi-biome column sampling for `verdant`, `dunes`, `badlands`, `tundra`, and `ember`
+  - explicit `Y` range support up to `16384`
+- Extracted reusable noise helpers into `src/engine/noise.ts` and rewrote the existing demo-scene terrain builder to use them instead of keeping duplicate local noise code.
+- Added generator tests covering:
+  - `#RGB` palette mapping
+  - chunk determinism
+  - chunk sampler consistency
+  - wide biome distribution
+  - `Y`-range guards
+- Captured the generator design decisions in `docs/loop/worldgen-notes.md` so the reasoning survives context compaction before the generator is wired into a resident streaming world.
