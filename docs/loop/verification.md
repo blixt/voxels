@@ -422,6 +422,41 @@ This line of investigation was screened locally and not kept in the runtime yet.
   - average `widen-r2-to-r3` mesh `162.0 ms`
 - Both pages used the same scripted `window.__VOXELS_GAME__.teleportAndSettle(...)` loop over three shrink/widen cycles after a cache-bypass reload.
 
+### Game-path hitch probe verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+
+#### Chrome 146 browser checks
+
+- Verified `/` on a fresh server port at `http://localhost:3006/`.
+- `window.__VOXELS_GAME__.benchmarkChunkCrossing(2, 1)` now returns compact benchmark samples plus summary data instead of dumping full resident-world snapshots.
+- The benchmark restores the live player state after running:
+  - `before.position == after.position`
+  - `before.feetPosition == after.feetPosition`
+  - `before.grounded == after.grounded`
+- Baseline result before stream-anchor hysteresis:
+  - `sampleCount = 4`
+  - `changedCount = 4`
+  - average `streamMs = 48.15`
+  - average `meshMs = 194.55`
+  - average `uploadMs = 0.73`
+  - average `uploadChunks = 99.5`
+- First one-chunk-cross sample:
+  - target chunk `[-25, 50, -26]`
+  - `generatedChunks = 42`
+  - `evictedChunks = 43`
+  - `streamMs = 69`
+  - `meshMs = 242.5`
+  - `uploadMs = 0.8`
+
+#### Conclusion
+
+- The current hitch is not primarily GPU upload.
+- The current game path is still paying full residency + remesh cost on every one-chunk boundary crossing.
+
 #### Automated checks
 
 - `mise run test`: passing after adding `tests/procedural-generator.test.ts`.

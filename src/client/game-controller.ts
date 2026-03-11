@@ -1,3 +1,4 @@
+import { average, maxValue, percentile } from "../engine/benchmark-metrics.ts";
 import {
   buildFirstPersonCameraMatrices,
   createFirstPersonCamera,
@@ -20,7 +21,7 @@ import {
 } from "../engine/procedural-probes.ts";
 import { ProceduralResidentWorld, type ResidencyUpdateSummary } from "../engine/procedural-resident-world.ts";
 import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
-import { WebGpuVoxelRenderer } from "../engine/renderer.ts";
+import { WebGpuVoxelRenderer, type RenderStats } from "../engine/renderer.ts";
 import type { Vec3 } from "../engine/types.ts";
 import type { MeshBuildSummary } from "../engine/mesher.ts";
 
@@ -52,7 +53,24 @@ export interface GameHudSnapshot {
   meshRemeshChunks: number;
   drawCalls: number;
   triangles: number;
+  lastFrameCpuMs: number;
+  lastFrameSyncMs: number;
+  lastFrameUploadMs: number;
+  lastFrameUploadChunks: number;
+  lastFrameUploadBytes: number;
+  lastFrameEncodeMs: number;
   avgFrameCpuMs: number;
+}
+
+export interface GameRenderProbe {
+  frameCpuMs: number;
+  syncResourcesMs: number;
+  uploadMs: number;
+  uploadChunks: number;
+  uploadBytes: number;
+  encodeMs: number;
+  drawCalls: number;
+  triangles: number;
 }
 
 export interface ResidencyTransitionProbe {
@@ -63,6 +81,58 @@ export interface ResidencyTransitionProbe {
   generatedChunkCoords: Array<[number, number, number]>;
   residency: ResidencyUpdateSummary;
   mesh: MeshBuildSummary;
+  render: GameRenderProbe;
+}
+
+export interface ChunkBoundaryBenchmarkSample {
+  step: number;
+  targetEyePosition: Vec3;
+  targetChunk: [number, number, number];
+  changed: boolean;
+  generatedChunks: number;
+  evictedChunks: number;
+  streamMs: number;
+  meshMs: number;
+  meshNewChunks: number;
+  meshRemeshChunks: number;
+  frameCpuMs: number;
+  syncMs: number;
+  uploadMs: number;
+  uploadChunks: number;
+  uploadBytes: number;
+  encodeMs: number;
+}
+
+export interface ChunkBoundaryBenchmarkSummary {
+  sampleCount: number;
+  changedCount: number;
+  avgStreamMs: number;
+  p95StreamMs: number;
+  maxStreamMs: number;
+  avgMeshMs: number;
+  p95MeshMs: number;
+  maxMeshMs: number;
+  avgFrameCpuMs: number;
+  p95FrameCpuMs: number;
+  maxFrameCpuMs: number;
+  avgSyncMs: number;
+  p95SyncMs: number;
+  maxSyncMs: number;
+  avgUploadMs: number;
+  p95UploadMs: number;
+  maxUploadMs: number;
+  avgUploadChunks: number;
+  maxUploadChunks: number;
+  avgUploadBytes: number;
+  maxUploadBytes: number;
+}
+
+export interface ChunkBoundaryBenchmark {
+  iterations: number;
+  chunkDelta: number;
+  radiusChunks: number;
+  samples: ChunkBoundaryBenchmarkSample[];
+  summary: ChunkBoundaryBenchmarkSummary;
 }
 
 export class GameController {
@@ -75,6 +145,7 @@ export class GameController {
   meshMs = 0;
   drawCalls = 0;
   triangles = 0;
+  lastFrameCpuMs = 0;
   avgFrameCpuMs = 0;
   status = "Booting";
   pointerLocked = false;
@@ -86,6 +157,7 @@ export class GameController {
     triangleCount: 0,
     elapsedMs: 0,
   };
+  private lastRenderStats: RenderStats = zeroRenderStats();
 
   private rafId = 0;
   private lastFrameTime = 0;
@@ -173,6 +245,12 @@ export class GameController {
       meshRemeshChunks: this.lastMeshBuildSummary.remeshCount,
       drawCalls: this.drawCalls,
       triangles: this.triangles,
+      lastFrameCpuMs: this.lastFrameCpuMs,
+      lastFrameSyncMs: this.lastRenderStats.syncResourcesMs,
+      lastFrameUploadMs: this.lastRenderStats.uploadMs,
+      lastFrameUploadChunks: this.lastRenderStats.uploadChunks,
+      lastFrameUploadBytes: this.lastRenderStats.uploadBytes,
+      lastFrameEncodeMs: this.lastRenderStats.encodeMs,
       avgFrameCpuMs: this.avgFrameCpuMs,
     };
   }
@@ -214,6 +292,7 @@ export class GameController {
     teleportPlayerToEyePosition(this.player, position);
     this.syncCameraToPlayer();
     this.syncWorldAroundPlayer();
+    const render = await this.renderProbeFrame();
     const after = this.snapshotResidentWorld();
     const { entered, evicted } = diffChunkCoords(
       before.chunks.map((chunk) => chunk.coord),
@@ -232,7 +311,101 @@ export class GameController {
         evictedChunkCoords: this.world.lastResidency.evictedChunkCoords.map((coord) => ({ ...coord })),
       },
       mesh: { ...this.lastMeshBuildSummary },
+      render,
     };
+  }
+
+  async benchmarkChunkCrossing(iterations: number, chunkDelta = 1): Promise<ChunkBoundaryBenchmark> {
+    const normalizedIterations = Math.max(1, Math.floor(iterations));
+    const normalizedChunkDelta = Math.max(1, Math.floor(chunkDelta));
+    const spawn = this.world.getSpawnPosition();
+    const baseChunkX = Math.floor(spawn[0] / this.world.chunkSize);
+    const baseChunkZ = Math.floor(spawn[2] / this.world.chunkSize);
+    const leftTarget = buildEyePositionForChunkCenter(
+      baseChunkX,
+      baseChunkZ,
+      spawn[1],
+      this.world.chunkSize,
+      this.player.eyeHeight,
+    );
+    const rightTarget = buildEyePositionForChunkCenter(
+      baseChunkX + normalizedChunkDelta,
+      baseChunkZ,
+      spawn[1],
+      this.world.chunkSize,
+      this.player.eyeHeight,
+    );
+    const savedPlayer = {
+      feetPosition: [...this.player.feetPosition] as Vec3,
+      velocity: [...this.player.velocity] as Vec3,
+      grounded: this.player.grounded,
+    };
+    const savedCamera = {
+      position: [...this.camera.position] as Vec3,
+      yaw: this.camera.yaw,
+      pitch: this.camera.pitch,
+      fovY: this.camera.fovY,
+      near: this.camera.near,
+      far: this.camera.far,
+    };
+    const savedStatus = this.status;
+
+    this.stop();
+    try {
+      await this.teleportAndSettle(leftTarget);
+      const samples: ChunkBoundaryBenchmarkSample[] = [];
+      for (let iteration = 0; iteration < normalizedIterations; iteration += 1) {
+        for (const target of [rightTarget, leftTarget]) {
+          const transition = await this.teleportAndSettle(target);
+          samples.push({
+            step: samples.length + 1,
+            targetEyePosition: [...target],
+            targetChunk: [
+              Math.floor(target[0] / this.world.chunkSize),
+              Math.floor((target[1] - this.player.eyeHeight) / this.world.chunkSize),
+              Math.floor(target[2] / this.world.chunkSize),
+            ],
+            changed: transition.residency.changed,
+            generatedChunks: transition.residency.generatedChunks,
+            evictedChunks: transition.residency.evictedChunks,
+            streamMs: transition.residency.elapsedMs,
+            meshMs: transition.mesh.elapsedMs,
+            meshNewChunks: transition.mesh.newMeshCount,
+            meshRemeshChunks: transition.mesh.remeshCount,
+            frameCpuMs: transition.render.frameCpuMs,
+            syncMs: transition.render.syncResourcesMs,
+            uploadMs: transition.render.uploadMs,
+            uploadChunks: transition.render.uploadChunks,
+            uploadBytes: transition.render.uploadBytes,
+            encodeMs: transition.render.encodeMs,
+          });
+        }
+      }
+      return {
+        iterations: normalizedIterations,
+        chunkDelta: normalizedChunkDelta,
+        radiusChunks: this.world.horizontalRadiusChunks,
+        samples,
+        summary: summarizeChunkBoundaryBenchmark(samples),
+      };
+    } finally {
+      this.player.feetPosition = savedPlayer.feetPosition;
+      this.player.velocity = savedPlayer.velocity;
+      this.player.grounded = savedPlayer.grounded;
+      this.camera = {
+        position: savedCamera.position,
+        yaw: savedCamera.yaw,
+        pitch: savedCamera.pitch,
+        fovY: savedCamera.fovY,
+        near: savedCamera.near,
+        far: savedCamera.far,
+      };
+      this.status = savedStatus;
+      this.syncWorldAroundPlayer();
+      await this.renderProbeFrame();
+      this.pushHud(true);
+      this.start();
+    }
   }
 
   private loadBootstrapWorld(): void {
@@ -326,17 +499,11 @@ export class GameController {
   }
 
   private renderInteractiveFrame(): void {
-    if (!this.renderer) {
+    const rendered = this.renderCurrentFrame();
+    if (!rendered) {
       return;
     }
-    this.renderer.configureCanvas(this.canvas);
-    const aspect = this.canvas.width / this.canvas.height;
-    const cameraMatrices = buildFirstPersonCameraMatrices(this.camera, aspect);
-    const cpuStartedAt = performance.now();
-    const frameStats = this.renderer.render(this.world, cameraMatrices);
-    const frameCpuMs = performance.now() - cpuStartedAt;
-    this.drawCalls = frameStats.drawCalls;
-    this.triangles = frameStats.triangles;
+    const { frameCpuMs } = rendered;
     this.avgFrameCpuMs = this.avgFrameCpuMs === 0
       ? frameCpuMs
       : this.avgFrameCpuMs * 0.9 + frameCpuMs * 0.1;
@@ -364,6 +531,47 @@ export class GameController {
     this.camera.position = getPlayerEyePosition(this.player);
   }
 
+  private renderCurrentFrame(): {
+    frameStats: RenderStats;
+    frameCpuMs: number;
+  } | null {
+    if (!this.renderer) {
+      return null;
+    }
+    this.renderer.configureCanvas(this.canvas);
+    const aspect = this.canvas.width / this.canvas.height;
+    const cameraMatrices = buildFirstPersonCameraMatrices(this.camera, aspect);
+    const cpuStartedAt = performance.now();
+    const frameStats = this.renderer.render(this.world, cameraMatrices);
+    const frameCpuMs = performance.now() - cpuStartedAt;
+    this.lastRenderStats = frameStats;
+    this.lastFrameCpuMs = frameCpuMs;
+    this.drawCalls = frameStats.drawCalls;
+    this.triangles = frameStats.triangles;
+    return {
+      frameStats,
+      frameCpuMs,
+    };
+  }
+
+  private async renderProbeFrame(): Promise<GameRenderProbe> {
+    const rendered = this.renderCurrentFrame();
+    if (!rendered || !this.renderer) {
+      return zeroGameRenderProbe();
+    }
+    await this.renderer.waitForGpuIdle();
+    return {
+      frameCpuMs: rendered.frameCpuMs,
+      syncResourcesMs: rendered.frameStats.syncResourcesMs,
+      uploadMs: rendered.frameStats.uploadMs,
+      uploadChunks: rendered.frameStats.uploadChunks,
+      uploadBytes: rendered.frameStats.uploadBytes,
+      encodeMs: rendered.frameStats.encodeMs,
+      drawCalls: rendered.frameStats.drawCalls,
+      triangles: rendered.frameStats.triangles,
+    };
+  }
+
   private pushHud(force = false): void {
     const now = performance.now();
     if (!force && now - this.lastHudPushAt < HUD_PUSH_INTERVAL_MS) {
@@ -380,6 +588,78 @@ function toDegrees(value: number): number {
 
 function toChunkTuple(coord: { x: number; y: number; z: number }): [number, number, number] {
   return [coord.x, coord.y, coord.z];
+}
+
+function zeroRenderStats(): RenderStats {
+  return {
+    drawCalls: 0,
+    triangles: 0,
+    syncResourcesMs: 0,
+    uploadMs: 0,
+    uploadChunks: 0,
+    uploadBytes: 0,
+    encodeMs: 0,
+  };
+}
+
+function zeroGameRenderProbe(): GameRenderProbe {
+  return {
+    frameCpuMs: 0,
+    syncResourcesMs: 0,
+    uploadMs: 0,
+    uploadChunks: 0,
+    uploadBytes: 0,
+    encodeMs: 0,
+    drawCalls: 0,
+    triangles: 0,
+  };
+}
+
+function buildEyePositionForChunkCenter(
+  chunkX: number,
+  chunkZ: number,
+  feetY: number,
+  chunkSize: number,
+  eyeHeight: number,
+): Vec3 {
+  return [
+    chunkX * chunkSize + chunkSize * 0.5,
+    feetY + eyeHeight,
+    chunkZ * chunkSize + chunkSize * 0.5,
+  ];
+}
+
+function summarizeChunkBoundaryBenchmark(samples: readonly ChunkBoundaryBenchmarkSample[]): ChunkBoundaryBenchmarkSummary {
+  const streamSamples = samples.map((sample) => sample.streamMs);
+  const meshSamples = samples.map((sample) => sample.meshMs);
+  const frameCpuSamples = samples.map((sample) => sample.frameCpuMs);
+  const syncSamples = samples.map((sample) => sample.syncMs);
+  const uploadSamples = samples.map((sample) => sample.uploadMs);
+  const uploadChunkSamples = samples.map((sample) => sample.uploadChunks);
+  const uploadByteSamples = samples.map((sample) => sample.uploadBytes);
+  return {
+    sampleCount: samples.length,
+    changedCount: samples.filter((sample) => sample.changed).length,
+    avgStreamMs: average(streamSamples),
+    p95StreamMs: percentile(streamSamples, 0.95),
+    maxStreamMs: maxValue(streamSamples),
+    avgMeshMs: average(meshSamples),
+    p95MeshMs: percentile(meshSamples, 0.95),
+    maxMeshMs: maxValue(meshSamples),
+    avgFrameCpuMs: average(frameCpuSamples),
+    p95FrameCpuMs: percentile(frameCpuSamples, 0.95),
+    maxFrameCpuMs: maxValue(frameCpuSamples),
+    avgSyncMs: average(syncSamples),
+    p95SyncMs: percentile(syncSamples, 0.95),
+    maxSyncMs: maxValue(syncSamples),
+    avgUploadMs: average(uploadSamples),
+    p95UploadMs: percentile(uploadSamples, 0.95),
+    maxUploadMs: maxValue(uploadSamples),
+    avgUploadChunks: average(uploadChunkSamples),
+    maxUploadChunks: maxValue(uploadChunkSamples),
+    avgUploadBytes: average(uploadByteSamples),
+    maxUploadBytes: maxValue(uploadByteSamples),
+  };
 }
 
 function isMovementKey(code: string): boolean {

@@ -224,3 +224,11 @@
   - the HUD now reports feet position and grounded state directly
   - scripted idle updates keep the spawned player grounded instead of falling through the world
   - pointer-lock denial in automation still degrades cleanly to a status message instead of throwing
+- Landed a game-path hitch probe instead of relying only on offline stream profiling:
+  - added first-render sync/upload/frame-CPU telemetry to the `/` game debug surface
+  - added `window.__VOXELS_GAME__.benchmarkChunkCrossing(iterations, chunkDelta)` for repeated boundary-cross probes
+  - extended benchmark-metric primitives with deterministic `max` and percentile helpers so the probe can report tails instead of only averages
+- Established the pre-hysteresis Chrome baseline on the real game path:
+  - fresh Chrome 146 `benchmarkChunkCrossing(2, 1)` showed `changedCount = 4/4`
+  - one-chunk crossings still averaged about `48 ms` stream, `195 ms` mesh, and `0.73 ms` upload
+  - that baseline says the immediate win is to stop single-chunk movement from triggering residency churn at all, not to chase upload micro-optimizations first

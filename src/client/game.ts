@@ -16,6 +16,10 @@ declare global {
         z: number,
         options?: { radiusChunks?: number },
       ): ReturnType<GameController["teleportAndSettle"]>;
+      benchmarkChunkCrossing(
+        iterations: number,
+        chunkDelta?: number,
+      ): ReturnType<GameController["benchmarkChunkCrossing"]>;
     };
   }
 }
@@ -44,6 +48,7 @@ window.__VOXELS_GAME__ = {
   setViewDistance: (chunks) => controller.setResidencyRadiusChunks(chunks),
   forceResidencyUpdate: () => controller.forceResidencyUpdate(),
   teleportAndSettle: (x, y, z, options) => controller.teleportAndSettle([x, y, z], options),
+  benchmarkChunkCrossing: (iterations, chunkDelta) => controller.benchmarkChunkCrossing(iterations, chunkDelta),
 };
 
 controller.onHudUpdate = (snapshot) => {
@@ -69,9 +74,13 @@ controller.onHudUpdate = (snapshot) => {
     metric("Mesh", `${snapshot.meshMs.toFixed(1)} ms`),
     metric("New Meshes", snapshot.meshNewChunks.toLocaleString()),
     metric("Remeshes", snapshot.meshRemeshChunks.toLocaleString()),
+    metric("Sync", `${snapshot.lastFrameSyncMs.toFixed(2)} ms`),
+    metric("Upload", `${snapshot.lastFrameUploadMs.toFixed(2)} ms`),
+    metric("Upload Chunks", snapshot.lastFrameUploadChunks.toLocaleString()),
     metric("Draw Calls", snapshot.drawCalls.toLocaleString()),
     metric("Triangles", snapshot.triangles.toLocaleString()),
-    metric("Frame CPU", `${snapshot.avgFrameCpuMs.toFixed(2)} ms`),
+    metric("Frame CPU", `${snapshot.lastFrameCpuMs.toFixed(2)} ms`),
+    metric("Avg Frame CPU", `${snapshot.avgFrameCpuMs.toFixed(2)} ms`),
   ].join("");
   captureButton.hidden = snapshot.pointerLocked;
 };

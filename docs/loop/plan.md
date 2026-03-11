@@ -185,6 +185,11 @@ Status:
 - Re-tune the early terrain envelope so the first generated world reads as traversable terrain instead of a stress case.
 - Add a dedicated stream-hitch benchmark path so movement-triggered chunk work is measurable without relying on ad hoc game probes.
 - Use the current phase metrics to move residency/meshing off the synchronous movement path instead of chasing only narrow mesher micro-optimizations.
+- Use the new game-path boundary-cross probe to separate:
+  - residency and meshing cost
+  - first-frame sync/upload cost
+  - how often one-chunk movement is needlessly triggering the full pipeline
+- Apply stream-anchor hysteresis next if the game-path probe confirms that one-chunk crossings are still causing full updates.
 - Keep the procedural stream profiler and browser probes aligned so local and Chrome decisions stay comparable.
 - When a micro-optimization is noisy, compare the working tree against a clean committed worktree on a separate port before keeping it.
 - If the next change targets meshing, build or adapt cases that focus on boundary remesh cost rather than only initial chunk creation.
