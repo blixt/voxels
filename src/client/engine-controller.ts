@@ -56,6 +56,7 @@ export class EngineController {
   onHudUpdate: ((snapshot: HudSnapshot) => void) | null = null;
   lastValidationArtifacts: RenderValidationArtifacts | null = null;
   private rafId = 0;
+  private interactionsAttached = false;
   private pointerState:
     | {
         button: number;
@@ -82,6 +83,14 @@ export class EngineController {
   dispose(): void {
     cancelAnimationFrame(this.rafId);
     this.renderer?.dispose();
+    if (!this.interactionsAttached) {
+      return;
+    }
+    this.canvas.removeEventListener("pointerdown", this.handlePointerDown);
+    this.canvas.removeEventListener("pointermove", this.handlePointerMove);
+    this.canvas.removeEventListener("pointerup", this.handlePointerUp);
+    this.canvas.removeEventListener("wheel", this.handleWheel);
+    this.interactionsAttached = false;
   }
 
   start(): void {
@@ -337,48 +346,57 @@ export class EngineController {
   }
 
   private attachInteractions(): void {
-    this.canvas.addEventListener("pointerdown", (event) => {
-      this.canvas.setPointerCapture(event.pointerId);
-      this.pointerState = { button: event.button, x: event.clientX, y: event.clientY };
-    });
-
-    this.canvas.addEventListener("pointermove", (event) => {
-      if (!this.pointerState) {
-        return;
-      }
-      const deltaX = event.clientX - this.pointerState.x;
-      const deltaY = event.clientY - this.pointerState.y;
-      this.pointerState.x = event.clientX;
-      this.pointerState.y = event.clientY;
-      if (this.pointerState.button === 0 && !event.shiftKey && !event.altKey) {
-        const orbitDelta = orbitDeltaFromDrag(deltaX, deltaY);
-        orbitCamera(this.camera, orbitDelta.yaw, orbitDelta.pitch);
-      } else if (this.pointerState.button === 1 || event.altKey) {
-        const aspect = this.canvas.width / this.canvas.height;
-        const matrices = buildCameraMatrices(this.camera, aspect);
-        panCamera(this.camera, matrices.right, matrices.up, -deltaX * 0.14, deltaY * 0.14);
-      }
-    });
-
-    this.canvas.addEventListener("pointerup", (event) => {
-      if (!this.pointerState) {
-        return;
-      }
-      const traveled = Math.hypot(event.clientX - this.pointerState.x, event.clientY - this.pointerState.y);
-      const rect = this.canvas.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-      if (traveled < 4) {
-        this.editAtCanvasPoint(x, y, event.shiftKey);
-      }
-      this.pointerState = null;
-    });
-
-    this.canvas.addEventListener("wheel", (event) => {
-      event.preventDefault();
-      zoomCamera(this.camera, Math.sign(event.deltaY) * 6);
-    }, { passive: false });
+    if (this.interactionsAttached) {
+      return;
+    }
+    this.canvas.addEventListener("pointerdown", this.handlePointerDown);
+    this.canvas.addEventListener("pointermove", this.handlePointerMove);
+    this.canvas.addEventListener("pointerup", this.handlePointerUp);
+    this.canvas.addEventListener("wheel", this.handleWheel, { passive: false });
+    this.interactionsAttached = true;
   }
+
+  private readonly handlePointerDown = (event: PointerEvent) => {
+    this.canvas.setPointerCapture(event.pointerId);
+    this.pointerState = { button: event.button, x: event.clientX, y: event.clientY };
+  };
+
+  private readonly handlePointerMove = (event: PointerEvent) => {
+    if (!this.pointerState) {
+      return;
+    }
+    const deltaX = event.clientX - this.pointerState.x;
+    const deltaY = event.clientY - this.pointerState.y;
+    this.pointerState.x = event.clientX;
+    this.pointerState.y = event.clientY;
+    if (this.pointerState.button === 0 && !event.shiftKey && !event.altKey) {
+      const orbitDelta = orbitDeltaFromDrag(deltaX, deltaY);
+      orbitCamera(this.camera, orbitDelta.yaw, orbitDelta.pitch);
+    } else if (this.pointerState.button === 1 || event.altKey) {
+      const aspect = this.canvas.width / this.canvas.height;
+      const matrices = buildCameraMatrices(this.camera, aspect);
+      panCamera(this.camera, matrices.right, matrices.up, -deltaX * 0.14, deltaY * 0.14);
+    }
+  };
+
+  private readonly handlePointerUp = (event: PointerEvent) => {
+    if (!this.pointerState) {
+      return;
+    }
+    const traveled = Math.hypot(event.clientX - this.pointerState.x, event.clientY - this.pointerState.y);
+    const rect = this.canvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    if (traveled < 4) {
+      this.editAtCanvasPoint(x, y, event.shiftKey);
+    }
+    this.pointerState = null;
+  };
+
+  private readonly handleWheel = (event: WheelEvent) => {
+    event.preventDefault();
+    zoomCamera(this.camera, Math.sign(event.deltaY) * 6);
+  };
 
   private pushHud(): void {
     this.onHudUpdate?.({

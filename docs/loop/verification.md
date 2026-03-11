@@ -146,6 +146,61 @@
 
 ## 2026-03-11
 
+### Bun full-stack dev/prod environment verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `PORT=3012 mise run dev`
+- `PORT=3014 mise run serve`
+
+#### Automated checks
+
+- `mise run test`: passing after the HTML-import server switch, HMR-safe client bootstrap refactor, and production-start wrapper.
+- `mise run build`: passing, producing:
+  - `dist/server.js`
+  - `dist/pages/game.html`
+  - `dist/pages/bench.html`
+  - shared hashed CSS/JS chunks
+
+#### Chrome 146 dev-server checks
+
+- `/` on `http://localhost:3012/` now loads through Bun's full-stack dev server with:
+  - `GET /`
+  - `GET /_bun/asset/<hash>.css`
+  - `GET /_bun/client/game-<hash>.js`
+- `/bench` on `http://localhost:3012/bench` now loads through the same Bun-managed asset graph with:
+  - `GET /bench`
+  - `GET /_bun/asset/<hash>.css`
+  - `GET /_bun/client/bench-<hash>.js`
+- Verified live HTML editing without restarting the server:
+  - temporary change to `src/pages/game.html` updated the subtitle on the open `/` page
+- Verified live TypeScript editing without restarting the server:
+  - temporary change to `src/client/game.ts` updated the on-screen `Avg Frame CPU` metric label on the open `/` page
+- Verified browser console forwarding through Bun development mode:
+  - `console.log("dev-console-probe-stable")` emitted `[browser] dev-console-probe-stable` in the dev-server terminal
+- Found and fixed one HMR issue during implementation:
+  - self-accepting async entry modules triggered Bun runtime `TypeError: K.onDispose is not iterable`
+  - refactoring `game.ts` and `bench.ts` to stay synchronous at module level removed the error
+
+#### Chrome 146 production-bundle checks
+
+- `/` on `http://localhost:3014/` loads successfully from the built bundle with:
+  - `GET /`
+  - `GET /chunk-<hash>.css`
+  - `GET /chunk-<hash>.js`
+- `/bench` on `http://localhost:3014/bench` loads successfully from the built bundle with:
+  - `GET /bench`
+  - `GET /chunk-<hash>.css`
+  - `GET /chunk-<hash>.js`
+- Found and fixed one production-start issue during implementation:
+  - starting `dist/server.js` from repo root failed with `Bundled file "./chunk-....js" not found`
+  - starting the bundle from inside `dist/` via `scripts/start.ts` fixed asset resolution
+- Found and fixed one production-mode issue during implementation:
+  - the first built server accidentally inlined development mode because `process.env.NODE_ENV` was read too statically
+  - switching to a runtime-bound env read in `src/server.ts` preserved the correct production/dev split
+
 ### Docs pivot verification
 
 - Updated only repository documentation and planning files:

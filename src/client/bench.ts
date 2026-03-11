@@ -23,145 +23,187 @@ declare global {
   }
 }
 
-const appRoot = document.querySelector<HTMLElement>("[data-app='bench']");
-if (!appRoot) {
-  throw new Error("Bench root not found");
+interface BenchRuntime {
+  ready: Promise<void>;
+  dispose(): void;
 }
 
-const canvas = appRoot.querySelector<HTMLCanvasElement>("canvas");
-const sceneSelect = appRoot.querySelector<HTMLSelectElement>("[data-role='scene-select']");
-const iterationsInput = appRoot.querySelector<HTMLInputElement>("[data-role='iterations']");
-const framesInput = appRoot.querySelector<HTMLInputElement>("[data-role='frames']");
-const runButton = appRoot.querySelector<HTMLButtonElement>("[data-role='run-button']");
-const runStressButton = appRoot.querySelector<HTMLButtonElement>("[data-role='run-stress-button']");
-const runAllButton = appRoot.querySelector<HTMLButtonElement>("[data-role='run-all-button']");
-const statusElement = appRoot.querySelector<HTMLElement>("[data-role='status']");
-const resultsElement = appRoot.querySelector<HTMLElement>("[data-role='results']");
-const previewElement = appRoot.querySelector<HTMLElement>("[data-role='preview']");
+const runtime = mountBench();
+reportAsyncFailure(runtime.ready);
 
-if (!canvas || !sceneSelect || !iterationsInput || !framesInput || !runButton || !runStressButton || !runAllButton || !statusElement || !resultsElement || !previewElement) {
-  throw new Error("Bench UI is incomplete");
-}
-const sceneField = sceneSelect;
-const iterationsField = iterationsInput;
-const framesField = framesInput;
-const runSceneButton = runButton;
-const runStressSuiteButton = runStressButton;
-const runSuiteButton = runAllButton;
-const statusRoot = statusElement;
-const resultsRoot = resultsElement;
-const previewRoot = previewElement;
-const stressSceneIds = getStressSceneOptions().map((scene) => scene.id);
-
-for (const scene of getSceneOptions()) {
-  const option = document.createElement("option");
-  option.value = scene.id;
-  option.textContent = scene.label;
-  option.title = scene.description;
-  sceneSelect.append(option);
+if (import.meta.hot) {
+  import.meta.hot.accept();
+  import.meta.hot.dispose(() => {
+    runtime.dispose();
+  });
 }
 
-const controller = new EngineController(canvas);
-window.__VOXELS_BENCH_CONTROLLER__ = controller;
-await controller.init("terrain256");
-
-let lastResults: unknown = null;
-
-async function runScenario(sceneId: string, iterations: number, frames: number): Promise<void> {
-  statusRoot.textContent = `Running ${sceneId} for ${iterations} iteration(s)`;
-  const results = await controller.runBenchmark(sceneId, iterations, frames);
-  lastResults = results;
-  renderResults(resultsRoot, results);
-  renderPreview(previewRoot);
-  const allCorrect = results.every((sample) => sample.correctnessPass);
-  statusRoot.textContent = allCorrect ? `Finished ${sceneId}` : `Finished ${sceneId} with correctness failures`;
-}
-
-async function runAll(iterations: number, frames: number): Promise<void> {
-  await runSceneSet(getSceneOptions().map((scene) => scene.id), iterations, frames, "full suite");
-}
-
-async function runStress(iterations: number, frames: number): Promise<void> {
-  await runSceneSet(stressSceneIds, iterations, frames, "stress suite");
-}
-
-async function runSceneSet(sceneIds: string[], iterations: number, frames: number, label: string): Promise<void> {
-  if (sceneIds.length === 0) {
-    statusRoot.textContent = `No scenes available for ${label}`;
-    resultsRoot.innerHTML = "";
-    previewRoot.innerHTML = "<p>No validation preview available yet.</p>";
-    lastResults = [];
-    return;
+function mountBench(): BenchRuntime {
+  const appRoot = document.querySelector<HTMLElement>("[data-app='bench']");
+  if (!appRoot) {
+    throw new Error("Bench root not found");
   }
-  const aggregate = [];
-  statusRoot.textContent = `Running ${label}`;
-  for (const sceneId of sceneIds) {
+
+  const canvas = appRoot.querySelector<HTMLCanvasElement>("canvas");
+  const sceneSelect = appRoot.querySelector<HTMLSelectElement>("[data-role='scene-select']");
+  const iterationsInput = appRoot.querySelector<HTMLInputElement>("[data-role='iterations']");
+  const framesInput = appRoot.querySelector<HTMLInputElement>("[data-role='frames']");
+  const runButton = appRoot.querySelector<HTMLButtonElement>("[data-role='run-button']");
+  const runStressButton = appRoot.querySelector<HTMLButtonElement>("[data-role='run-stress-button']");
+  const runAllButton = appRoot.querySelector<HTMLButtonElement>("[data-role='run-all-button']");
+  const statusElement = appRoot.querySelector<HTMLElement>("[data-role='status']");
+  const resultsElement = appRoot.querySelector<HTMLElement>("[data-role='results']");
+  const previewElement = appRoot.querySelector<HTMLElement>("[data-role='preview']");
+
+  if (!canvas || !sceneSelect || !iterationsInput || !framesInput || !runButton || !runStressButton || !runAllButton || !statusElement || !resultsElement || !previewElement) {
+    throw new Error("Bench UI is incomplete");
+  }
+  const sceneField = sceneSelect;
+  const iterationsField = iterationsInput;
+  const framesField = framesInput;
+  const runSceneButton = runButton;
+  const runStressSuiteButton = runStressButton;
+  const runSuiteButton = runAllButton;
+  const statusRoot = statusElement;
+  const resultsRoot = resultsElement;
+  const previewRoot = previewElement;
+  const stressSceneIds = getStressSceneOptions().map((scene) => scene.id);
+
+  sceneSelect.replaceChildren();
+  for (const scene of getSceneOptions()) {
+    const option = document.createElement("option");
+    option.value = scene.id;
+    option.textContent = scene.label;
+    option.title = scene.description;
+    sceneSelect.append(option);
+  }
+
+  const controller = new EngineController(canvas);
+  window.__VOXELS_BENCH_CONTROLLER__ = controller;
+  const ready = controller.init("terrain256");
+
+  let lastResults: unknown = null;
+
+  async function runScenario(sceneId: string, iterations: number, frames: number): Promise<void> {
+    statusRoot.textContent = `Running ${sceneId} for ${iterations} iteration(s)`;
     const results = await controller.runBenchmark(sceneId, iterations, frames);
-    aggregate.push(...results);
+    lastResults = results;
+    renderResults(resultsRoot, results);
+    renderPreview(previewRoot, controller);
+    const allCorrect = results.every((sample) => sample.correctnessPass);
+    statusRoot.textContent = allCorrect ? `Finished ${sceneId}` : `Finished ${sceneId} with correctness failures`;
   }
-  lastResults = aggregate;
-  renderResults(resultsRoot, aggregate);
-  renderPreview(previewRoot);
-  const allCorrect = aggregate.every((sample) => sample.correctnessPass);
-  statusRoot.textContent = allCorrect ? `Finished ${label}` : `Finished ${label} with correctness failures`;
+
+  async function runAll(iterations: number, frames: number): Promise<void> {
+    await runSceneSet(getSceneOptions().map((scene) => scene.id), iterations, frames, "full suite");
+  }
+
+  async function runStress(iterations: number, frames: number): Promise<void> {
+    await runSceneSet(stressSceneIds, iterations, frames, "stress suite");
+  }
+
+  async function runSceneSet(sceneIds: string[], iterations: number, frames: number, label: string): Promise<void> {
+    if (sceneIds.length === 0) {
+      statusRoot.textContent = `No scenes available for ${label}`;
+      resultsRoot.innerHTML = "";
+      previewRoot.innerHTML = "<p>No validation preview available yet.</p>";
+      lastResults = [];
+      return;
+    }
+    const aggregate = [];
+    statusRoot.textContent = `Running ${label}`;
+    for (const sceneId of sceneIds) {
+      const results = await controller.runBenchmark(sceneId, iterations, frames);
+      aggregate.push(...results);
+    }
+    lastResults = aggregate;
+    renderResults(resultsRoot, aggregate);
+    renderPreview(previewRoot, controller);
+    const allCorrect = aggregate.every((sample) => sample.correctnessPass);
+    statusRoot.textContent = allCorrect ? `Finished ${label}` : `Finished ${label} with correctness failures`;
+  }
+
+  const handleRunSceneClick = async () => {
+    await runScenario(sceneField.value, readInt(iterationsField.value, 3), readInt(framesField.value, 90));
+  };
+
+  const handleRunStressClick = async () => {
+    await runStress(readInt(iterationsField.value, 3), readInt(framesField.value, 90));
+  };
+
+  const handleRunAllClick = async () => {
+    await runAll(readInt(iterationsField.value, 3), readInt(framesField.value, 90));
+  };
+
+  runSceneButton.addEventListener("click", handleRunSceneClick);
+  runStressSuiteButton.addEventListener("click", handleRunStressClick);
+  runSuiteButton.addEventListener("click", handleRunAllClick);
+
+  window.__VOXELS_BENCH__ = {
+    run: async (sceneId, iterations, frameCount) => {
+      await runScenario(sceneId, iterations, frameCount);
+      return lastResults;
+    },
+    runStress: async (iterations, frameCount) => {
+      await runStress(iterations, frameCount);
+      return lastResults;
+    },
+    runAll: async (iterations, frameCount) => {
+      await runAll(iterations, frameCount);
+      return lastResults;
+    },
+    probeGeneration: (request) => {
+      const generator = new ProceduralWorldGenerator(request.seed ?? 1337, {
+        chunkSize: request.chunkSize,
+        seaLevel: request.seaLevel,
+        maxYExclusive: request.maxYExclusive,
+      });
+      return {
+        seed: generator.seed,
+        chunkSize: generator.chunkSize,
+        seaLevel: generator.seaLevel,
+        maxYExclusive: generator.maxYExclusive,
+        chunks: request.chunkCoords.map(([x, y, z]) => summarizeGeneratedChunk(generator, generator.generateChunk(x, y, z))),
+      };
+    },
+    getLastResults: () => lastResults,
+    getLastValidationArtifacts: () => controller.getLastValidationArtifacts(),
+  };
+
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("auto") === "1") {
+    const scenario = params.get("scenario");
+    const suite = params.get("suite");
+    const iterations = readInt(params.get("iterations"), 2);
+    const frames = readInt(params.get("frames"), 60);
+    if (scenario) {
+      void runScenario(scenario, iterations, frames);
+    } else if (suite === "stress") {
+      void runStress(iterations, frames);
+    } else {
+      void runAll(iterations, frames);
+    }
+  }
+
+  return {
+    ready,
+    dispose() {
+      runSceneButton.removeEventListener("click", handleRunSceneClick);
+      runStressSuiteButton.removeEventListener("click", handleRunStressClick);
+      runSuiteButton.removeEventListener("click", handleRunAllClick);
+      controller.dispose();
+      delete window.__VOXELS_BENCH__;
+      delete window.__VOXELS_BENCH_CONTROLLER__;
+    },
+  };
 }
 
-runSceneButton.addEventListener("click", async () => {
-  await runScenario(sceneField.value, readInt(iterationsField.value, 3), readInt(framesField.value, 90));
-});
-
-runStressSuiteButton.addEventListener("click", async () => {
-  await runStress(readInt(iterationsField.value, 3), readInt(framesField.value, 90));
-});
-
-runSuiteButton.addEventListener("click", async () => {
-  await runAll(readInt(iterationsField.value, 3), readInt(framesField.value, 90));
-});
-
-window.__VOXELS_BENCH__ = {
-  run: async (sceneId, iterations, frameCount) => {
-    await runScenario(sceneId, iterations, frameCount);
-    return lastResults;
-  },
-  runStress: async (iterations, frameCount) => {
-    await runStress(iterations, frameCount);
-    return lastResults;
-  },
-  runAll: async (iterations, frameCount) => {
-    await runAll(iterations, frameCount);
-    return lastResults;
-  },
-  probeGeneration: (request) => {
-    const generator = new ProceduralWorldGenerator(request.seed ?? 1337, {
-      chunkSize: request.chunkSize,
-      seaLevel: request.seaLevel,
-      maxYExclusive: request.maxYExclusive,
+function reportAsyncFailure(promise: Promise<unknown>): void {
+  promise.catch((error) => {
+    queueMicrotask(() => {
+      throw error;
     });
-    return {
-      seed: generator.seed,
-      chunkSize: generator.chunkSize,
-      seaLevel: generator.seaLevel,
-      maxYExclusive: generator.maxYExclusive,
-      chunks: request.chunkCoords.map(([x, y, z]) => summarizeGeneratedChunk(generator, generator.generateChunk(x, y, z))),
-    };
-  },
-  getLastResults: () => lastResults,
-  getLastValidationArtifacts: () => controller.getLastValidationArtifacts(),
-};
-
-const params = new URLSearchParams(window.location.search);
-if (params.get("auto") === "1") {
-  const scenario = params.get("scenario");
-  const suite = params.get("suite");
-  const iterations = readInt(params.get("iterations"), 2);
-  const frames = readInt(params.get("frames"), 60);
-  if (scenario) {
-    void runScenario(scenario, iterations, frames);
-  } else if (suite === "stress") {
-    void runStress(iterations, frames);
-  } else {
-    void runAll(iterations, frames);
-  }
+  });
 }
 
 function renderResults(target: HTMLElement, results: SceneBenchmarkSample[]): void {
@@ -227,7 +269,7 @@ function renderResults(target: HTMLElement, results: SceneBenchmarkSample[]): vo
   `;
 }
 
-function renderPreview(target: HTMLElement): void {
+function renderPreview(target: HTMLElement, controller: EngineController): void {
   const artifacts = controller.getLastValidationArtifacts();
   if (!artifacts) {
     target.innerHTML = "<p>No validation preview available yet.</p>";

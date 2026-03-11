@@ -65,6 +65,26 @@
 
 ## 2026-03-11
 
+- Replaced the old startup-bundle dev loop with Bun's full-stack HTML-import path:
+  - added `src/pages/game.html` and `src/pages/bench.html`
+  - changed `src/server.ts` to route those HTML imports directly through `Bun.serve()`
+  - enabled `development: { hmr: true, console: true }` in non-production mode
+  - switched `mise run dev` / `bun run dev` to `bun --hot src/server.ts`
+- Removed the now-dead server-side page/bundle plumbing instead of layering on more cache workarounds:
+  - deleted `src/server/templates.ts`
+  - deleted `src/server/build-client.ts`
+  - deleted the old browser-bundle build path into `public/build`
+- Added explicit hot-reload-safe bootstrap/teardown to the browser entrypoints:
+  - `src/client/game.ts` and `src/client/bench.ts` now mount/dispose runtimes explicitly
+  - `src/client/engine-controller.ts` now removes its canvas listeners on dispose instead of leaking anonymous handlers across reloads
+  - `src/client/game-controller.ts` now clears pointer lock/input state on dispose
+- Reworked the production path so it mirrors the new Bun page graph instead of the old `public/build` output:
+  - `scripts/build.ts` now builds `src/server.ts` as a Bun-targeted production bundle into `dist/`
+  - `scripts/start.ts` now starts the built bundle from inside `dist/` so Bun's bundled HTML-import assets resolve correctly
+  - `.gitignore` now ignores `dist/` because production output is generated, not source
+- Captured two Bun-specific implementation gotchas in the repo docs so they do not get rediscovered:
+  - production builds can fold `process.env.NODE_ENV` too early if the read is too static
+  - self-accepting async entry modules triggered Bun HMR runtime errors, while synchronous entry modules with async controller init behaved correctly
 - Researched the current best Bun-native live-edit loop for this repo and documented the outcome in `docs/20260311-bun-hmr-research.md`:
   - `bun --hot` alone is not enough while the repo still manually builds `public/build`
   - the best development path is Bun's HTML-import full-stack dev server with `development: { hmr: true, console: true }`

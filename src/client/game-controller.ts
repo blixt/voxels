@@ -186,6 +186,11 @@ export class GameController {
 
   dispose(): void {
     cancelAnimationFrame(this.rafId);
+    if (document.pointerLockElement === this.canvas) {
+      document.exitPointerLock();
+    }
+    this.pointerLocked = false;
+    this.pressedKeys.clear();
     this.renderer?.dispose();
     this.canvas.removeEventListener("click", this.handleCanvasClick);
     document.removeEventListener("pointerlockchange", this.handlePointerLockChange);

@@ -1,65 +1,13 @@
-function shell(
-  title: string,
-  bodyClass: string,
-  appName: string,
-  content: string,
-  scriptName: string,
-  assetVersion: string,
-): string {
-  return `<!doctype html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${title}</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <title>Voxels Benchmark</title>
+    <link rel="stylesheet" href="../../public/styles.css" />
   </head>
-  <body class="${bodyClass}">
-    <main class="shell" data-app="${appName}">
-      ${content}
-    </main>
-    <script type="module" src="/build/${scriptName}.js?v=${assetVersion}"></script>
-  </body>
-</html>`;
-}
-
-export function renderGamePage(assetVersion: string): string {
-  return shell(
-    "Voxels Game",
-    "page-game",
-    "game",
-    `
-      <section class="game-shell">
-        <canvas class="game-viewport" data-role="viewport"></canvas>
-        <div class="game-overlay">
-          <header class="game-topbar">
-            <div class="game-brand">
-              <p class="eyebrow">Chrome 146 + WebGPU</p>
-              <h1>Voxels</h1>
-              <p class="game-subtitle">First-person runtime slice over the current engine baseline.</p>
-            </div>
-          </header>
-          <div class="game-hud">
-            <section class="game-panel game-panel-telemetry">
-              <div class="game-metrics" data-role="telemetry"></div>
-            </section>
-          </div>
-          <div class="crosshair" aria-hidden="true"></div>
-          <button class="capture-overlay" data-role="capture">Click To Enter The World</button>
-        </div>
-      </section>
-    `,
-    "game",
-    assetVersion,
-  );
-}
-
-export function renderBenchPage(assetVersion: string): string {
-  return shell(
-    "Voxels Benchmark",
-    "page-bench",
-    "bench",
-    `
+  <body class="page-bench">
+    <main class="shell" data-app="bench">
       <section class="hero">
         <div>
           <p class="eyebrow">Repeatable verification</p>
@@ -107,8 +55,7 @@ export function renderBenchPage(assetVersion: string): string {
           <div data-role="preview" class="preview-panel">No validation preview available yet.</div>
         </aside>
       </section>
-    `,
-    "bench",
-    assetVersion,
-  );
-}
+    </main>
+    <script type="module" src="../client/bench.ts"></script>
+  </body>
+</html>

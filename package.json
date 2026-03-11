@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun run src/server.ts",
+    "dev": "bun --hot src/server.ts",
     "build": "bun run scripts/build.ts",
-    "start": "NODE_ENV=production bun run src/server.ts",
+    "start": "NODE_ENV=production bun run scripts/start.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test",

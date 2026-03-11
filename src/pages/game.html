@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voxels Game</title>
+    <link rel="stylesheet" href="../../public/styles.css" />
+  </head>
+  <body class="page-game">
+    <main class="shell" data-app="game">
+      <section class="game-shell">
+        <canvas class="game-viewport" data-role="viewport"></canvas>
+        <div class="game-overlay">
+          <header class="game-topbar">
+            <div class="game-brand">
+              <p class="eyebrow">Chrome 146 + WebGPU</p>
+              <h1>Voxels</h1>
+              <p class="game-subtitle">First-person runtime slice over the current engine baseline.</p>
+            </div>
+          </header>
+          <div class="game-hud">
+            <section class="game-panel game-panel-telemetry">
+              <div class="game-metrics" data-role="telemetry"></div>
+            </section>
+          </div>
+          <div class="crosshair" aria-hidden="true"></div>
+          <button class="capture-overlay" data-role="capture">Click To Enter The World</button>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="../client/game.ts"></script>
+  </body>
+</html>

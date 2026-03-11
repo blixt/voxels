@@ -258,6 +258,14 @@ For this repo, the best Bun-native answer is not "more cache-busting" and not "j
 
 That is the cleanest route to fast live editing without constantly second-guessing whether the browser is running stale code.
 
+## Implementation follow-up
+
+The repo now uses this development model. Three implementation details were worth recording:
+
+- the built Bun server must be started from inside `dist/`, or its bundled HTML-import asset paths will fail to resolve
+- `process.env.NODE_ENV` should be read in a runtime-bound way inside `src/server.ts`; Bun's production build can otherwise fold the expression too early and accidentally leave the built server in development mode
+- self-accepting browser entry modules should stay synchronous at module level; the first `await mount...()` version triggered Bun HMR runtime errors during reload, while a synchronous module plus async controller init worked cleanly
+
 ## Sources
 
 - Bun full-stack dev server: https://bun.sh/docs/bundler/fullstack

@@ -8,6 +8,9 @@ Chrome 146 WebGPU voxel game and engine built from scratch with Bun and TypeScri
 2. Install dependencies with `bun install`.
 3. Start the app with `mise run dev`.
 4. Open `http://localhost:3000/` for the game and `http://localhost:3000/bench` for the benchmark suite.
+5. Build production output with `mise run build`, then run it with `mise run serve`.
+
+`mise run dev` now uses Bun's hot-reload/full-stack dev path instead of the older startup bundle flow, so edits to the server, page shells, CSS, and browser entrypoints should update without manual cache-busting.
 
 The implementation notes, research links, and verification log live under `docs/loop/`.
 The staged game/engine roadmap lives in `docs/roadmap.md`.
