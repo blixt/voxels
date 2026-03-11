@@ -305,6 +305,21 @@
   - `widen-r2-to-r3`: stream avg `75.4 ms`, mesh avg `77.3 ms`, generated chunks `73`
   - `shrink-r3-to-r2`: stream avg `0.21 ms`, mesh avg `31.4 ms`, evicted chunks `73`
   - this profile is still useful for full-refresh cost, but it now overstates the actual game path because `/` uses bounded generation and bounded meshing per update
+- Fixed the actual control-flow bug in the budgeted game path:
+  - same-anchor streaming now keeps refreshing while pending chunks remain instead of stalling after the first partial update
+  - the main game loop now keeps pumping background world work while either pending chunks or dirty resident meshes remain, even if the player stops moving
+  - the HUD now reports the live dirty-resident count instead of a stale summary value
+- Added a dedicated incremental game-path profiler instead of overloading the old full-refresh stream profiler:
+  - `mise run profile-game-stream` now simulates the same budgeted crossing loop the game uses
+  - it reports frame count, max per-frame work, pending-chunk peaks, and generated/remeshed totals for `chunkDelta = 1` and `chunkDelta = 2`
+  - this gives a cheap local accept/reject loop for radius and budget tuning even when Chrome automation is unavailable
+- Tuned the default nearby-detail window against the new incremental profiler:
+  - increased the default resident radius from `3` to `5` chunks so the true voxel ring grows from about `9.6 m` to about `16.0 m`
+  - lowered the default per-frame generation and remesh budgets from `12/12` to `6/6`
+  - the tuned local result for `radius = 5`, `6/6`, `chunkDelta = 2` is about `29` settle frames with a `13.1 ms` worst local frame, while `chunkDelta = 1` still stays a no-work case under hysteresis
+- Added cheap distance fog to the shared render path:
+  - fog now blends lit voxel color toward the sky color from about `96 m` out to the far-field horizon
+  - this is intended to make the far-field transition read as atmosphere instead of a hard stitched edge
 - Found and fixed a correctness regression introduced by those same budgets:
   - a fresh Chrome reload showed the player spawning below the world because bootstrap only loaded a partial near field and did not guarantee the support chunk under the player
   - the HUD made this obvious immediately: negative Y, `Grounded = No`, and only `12` resident chunks after boot
@@ -324,3 +339,26 @@
 - Captured the current post-fix chunk-crossing browser baseline for the next optimization round:
   - fresh Chrome 146 `benchmarkChunkCrossing(2, 1)` now reports about `31.2 ms` stream and `81.9 ms` mesh on average for the explicit full-settle benchmark path
   - that benchmark is now clearly measuring correctness-oriented settle work, not ordinary movement hitch, so the next harness slice should add a separate incremental movement probe
+- Added a separate harness for the real budgeted movement path instead of overloading the full-settle probe:
+  - `/` now exposes `benchmarkIncrementalCrossing(iterations, chunkDelta, stepsPerLeg, settleFrames)`
+  - the summary now reports combined per-frame work (`stream + mesh + render CPU`) in addition to the individual timings
+  - added `scripts/profile-game-stream.ts` plus `mise run profile-game-stream` for a fast local version of the same search
+- Added a tiny policy seam for world-work pumping:
+  - the game loop now keeps streaming/meshing when the player is stationary but pending chunks or dirty resident meshes remain
+  - extracted this into a small `stream-work` helper with direct tests so we can tune policy without burying the logic inside the controller
+- Broadened the default resident radius and visual envelope without trying to brute-force full voxel residency:
+  - default horizontal resident radius is now `5` chunks instead of `3`
+  - the renderer now applies distance fog from about `96 m` to `416 m` so the far field reads intentionally instead of abruptly
+  - this raises the near authoritative radius to about `16 m` at the current `10 cm` voxel scale while still relying on the far-field bands for the few-hundred-meter target
+- Ran a broad budget search instead of assuming “bigger budget = better”:
+  - higher generate budgets reduced backlog but produced much worse combined spikes when generation and meshing lined up in the same frame
+  - lower budgets smoothed hitch significantly but extended how long pending work stayed visible
+  - the measured compromise worth keeping was `generate = 6`, `mesh = 4`
+- Locked in the smoother default operating point from that search:
+  - the game path now defaults to `6` generated chunks per update and `4` mesh rebuilds per pumped frame
+  - browser incremental-crossing p95 combined work dropped to about `12.7 ms`, with p95 stream about `8.1 ms` and p95 mesh about `4.7 ms`
+  - the earlier `12/12` budget regime was much burstier, with combined p95s in the mid-20 ms range in the same search
+- Added a local non-browser profiler for the same question:
+  - `mise run profile-game-stream -- --radius=5 --generate-budget=6 --mesh-budget=4 --chunk-delta=2`
+  - local `crossing-d2` now reports about `44` pumped frames, `94.0 ms` total stream, `123.9 ms` total mesh, and `11.7 ms` max per-frame work
+  - local `crossing-d1` still correctly reports no anchor change and effectively zero streamed work

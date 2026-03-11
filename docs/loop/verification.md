@@ -1080,6 +1080,69 @@ This line of investigation was screened locally and not kept in the runtime yet.
   - the warmed local stream profiler
 - The existing Bun dev server is still live on `http://localhost:3015/`, so the next slice should either restore a headless Chrome lane or add a dedicated scriptable browser harness before relying on more visual-distance claims.
 
+### Incremental game-stream tuning verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=5 --generate-budget=6 --mesh-budget=6 --chunk-delta=2`
+
+#### Automated checks
+
+- `mise run test`: passing after:
+  - adding pure control-flow tests for same-anchor refresh continuation and background work pumping
+  - increasing total passing coverage to `65` tests across `18` files
+- `mise run build`: passing after:
+  - adding distance fog uniforms and shader logic to the shared WebGPU renderer
+  - increasing the default nearby resident radius to `5`
+  - tuning the default per-frame streaming budgets to `6/6`
+
+#### Incremental game-stream profile results
+
+- `crossing-d2`, `radius = 5`, `generate-budget = 6`, `mesh-budget = 6`:
+  - average settle frames `29`
+  - total stream avg `97.7 ms`
+  - total mesh avg `127.5 ms`
+  - max frame work avg `13.13 ms`
+  - max pending chunks `114`
+  - total generated chunks `82`
+  - total remesh chunks `91`
+- `crossing-d1` under the same settings:
+  - anchor changed `false`
+  - total stream `0 ms`
+  - total mesh `0 ms`
+  - max frame work about `0.003 ms`
+
+#### Local tuning sweep notes
+
+- `radius = 5`, `12/12` budgets:
+  - max frame work about `24.5 ms`
+  - rejected as too bursty
+- `radius = 5`, `8/8` budgets:
+  - max frame work about `17.5 ms`
+  - still too close to the budget line
+- `radius = 4`, `8/8` budgets:
+  - max frame work about `16.3 ms`
+  - viable, but gives up too much near voxel detail
+- `radius = 6`, `8/8` budgets:
+  - max frame work about `16.3 ms`
+  - viable, but wider resident churn than needed right now
+- Decision:
+  - keep `radius = 5`
+  - keep per-frame budgets at `6/6`
+
+#### Browser note
+
+- I still do not have a restored Chrome automation lane for visual acceptance of the new fog path.
+- This slice is therefore locally verified for:
+  - correctness and control-flow behavior
+  - buildability of the fog-enabled render path
+  - performance tuning through the new incremental profiler
+- The next browser-facing step should be either:
+  - restore direct Chrome automation
+  - or add a dedicated scriptable screenshot/metric harness that does not depend on the shared DevTools session
+
 ### Budgeted bootstrap stabilization verification
 
 #### Commands
@@ -1122,3 +1185,65 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - Bounded streaming is still the right default for ordinary movement.
 - Bootstrap, teleports, and other correctness-oriented probes cannot share the same budgeted path, because they need fully loaded support around the player before the first frame is accepted.
 - The next verification gap is now explicit: add a separate incremental-movement benchmark so the repo measures ordinary hitch and full-settle correctness with different tools instead of conflating them.
+
+### Incremental movement benchmark and smoother default budgets
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=5 --generate-budget=6 --mesh-budget=4 --chunk-delta=2`
+- fresh Chrome 146 reload on `http://localhost:3015/`
+
+#### Automated checks
+
+- `mise run test`: passing after adding:
+  - `tests/stream-work.test.ts`
+  - the game-path streaming policy seam used by the incremental benchmark loop
+- `mise run build`: passing after widening the default resident radius and adding fog uniforms/shading to the renderer.
+
+#### Warmed local game-stream profiler
+
+- `crossing-d2` with `radius=5`, `generate=6`, `mesh=4`:
+  - frames `44`
+  - total stream `94.0 ms`
+  - total mesh `123.9 ms`
+  - max frame work `11.7 ms`
+  - max pending chunks `114`
+- `crossing-d1` with the same settings:
+  - no anchor change
+  - zero stream and mesh work
+  - only trivial far-field refresh cost
+
+#### Browser checks
+
+- Fresh `/` reload now reports the new default operating point:
+  - `Grounded = Yes`
+  - `Radius = 5 chunks`
+  - `Gen Budget = 6`
+  - `Mesh Budget = 4`
+  - `Far Field = 416 m`
+- Scripted browser benchmark:
+  - `window.__VOXELS_GAME__.benchmarkIncrementalCrossing(2, 2, 12, 20)` returned:
+    - sample count `128`
+    - p95 combined work `12.7 ms`
+    - max combined work `13.8 ms`
+    - p95 stream `8.1 ms`
+    - p95 mesh `4.7 ms`
+    - max pending chunks `114`
+
+#### Search result kept
+
+- A broader Chrome search over budget pairs showed the current smoothness tradeoff clearly:
+  - `12/12` reduced backlog faster but created combined spikes in the mid-20 ms range
+  - `4/4` was even smoother but left too much work pending for too long
+  - `6/4` was the best measured compromise worth keeping right now
+
+#### Conclusion
+
+- The main hitch source on the movement path was not upload; it was synchronous generation plus meshing budgets landing in the same frame.
+- The new incremental harness is now the acceptance gate for ordinary movement smoothness, while `benchmarkChunkCrossing()` stays as the correctness/full-settle probe.
+- The next likely wins are architectural rather than constant-level:
+  - differential residency updates instead of full anchor rescans
+  - background workers for generation/meshing
+  - buffer reuse or larger merged render units once movement hitch is no longer dominated by CPU chunk work

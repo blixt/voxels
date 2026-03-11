@@ -25,6 +25,10 @@ run = "bun run profile"
 description = "Profile local procedural residency and meshing transitions"
 run = "bun run profile:stream"
 
+[tasks.profile-game-stream]
+description = "Profile the incremental game-path streaming loop"
+run = "bun run profile:game-stream"
+
 [tasks.serve]
 description = "Run the built production server bundle"
 run = "bun run start"

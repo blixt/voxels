@@ -23,6 +23,7 @@ import {
 import { ProceduralResidentWorld, type ResidencyUpdateSummary } from "../engine/procedural-resident-world.ts";
 import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
 import { WebGpuVoxelRenderer, type RenderStats } from "../engine/renderer.ts";
+import { shouldPumpWorldWork, shouldRefreshResidency } from "../engine/stream-work.ts";
 import {
   buildStreamAnchorPosition,
   resolveStreamAnchor,
@@ -34,8 +35,8 @@ import type { MeshBuildSummary } from "../engine/mesher.ts";
 const MAX_DELTA_SECONDS = 0.05;
 const HUD_PUSH_INTERVAL_MS = 120;
 const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
-const MAX_GENERATED_CHUNKS_PER_UPDATE = 12;
-const MAX_MESH_REBUILDS_PER_FRAME = 12;
+const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 6;
+const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 4;
 
 export interface GameHudSnapshot {
   status: string;
@@ -75,6 +76,8 @@ export interface GameHudSnapshot {
   lastFrameUploadBytes: number;
   lastFrameEncodeMs: number;
   avgFrameCpuMs: number;
+  maxGeneratedChunksPerUpdate: number;
+  maxMeshRebuildsPerFrame: number;
 }
 
 export interface GameRenderProbe {
@@ -150,6 +153,64 @@ export interface ChunkBoundaryBenchmark {
   summary: ChunkBoundaryBenchmarkSummary;
 }
 
+export interface IncrementalCrossingSample {
+  frame: number;
+  phase: "move" | "settle";
+  leg: number;
+  changed: boolean;
+  complete: boolean;
+  pendingChunks: number;
+  generatedChunks: number;
+  evictedChunks: number;
+  streamMs: number;
+  meshMs: number;
+  meshCount: number;
+  frameCpuMs: number;
+  syncMs: number;
+  uploadMs: number;
+  uploadChunks: number;
+  uploadBytes: number;
+  encodeMs: number;
+}
+
+export interface IncrementalCrossingSummary {
+  sampleCount: number;
+  workFrameCount: number;
+  changedCount: number;
+  incompleteFrameCount: number;
+  avgWorkMs: number;
+  p95WorkMs: number;
+  maxWorkMs: number;
+  avgStreamMs: number;
+  p95StreamMs: number;
+  maxStreamMs: number;
+  avgMeshMs: number;
+  p95MeshMs: number;
+  maxMeshMs: number;
+  avgFrameCpuMs: number;
+  p95FrameCpuMs: number;
+  maxFrameCpuMs: number;
+  avgUploadMs: number;
+  p95UploadMs: number;
+  maxUploadMs: number;
+  maxPendingChunks: number;
+}
+
+export interface IncrementalCrossingBenchmark {
+  iterations: number;
+  chunkDelta: number;
+  stepsPerLeg: number;
+  settleFrames: number;
+  radiusChunks: number;
+  samples: IncrementalCrossingSample[];
+  summary: IncrementalCrossingSummary;
+}
+
+export interface StreamingBudgets {
+  maxGeneratedChunksPerUpdate: number;
+  maxMeshRebuildsPerFrame: number;
+}
+
 export class GameController {
   readonly canvas: HTMLCanvasElement;
   readonly generator = new ProceduralWorldGenerator(1337);
@@ -178,6 +239,10 @@ export class GameController {
   private lastStreamSummary: ResidencyUpdateSummary = cloneResidencySummary(this.world.lastResidency);
   private lastFarFieldSummary: FarFieldUpdateSummary = this.farField.lastUpdate;
   private streamAnchor: StreamAnchor | null = null;
+  private streamingBudgets: StreamingBudgets = {
+    maxGeneratedChunksPerUpdate: DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE,
+    maxMeshRebuildsPerFrame: DEFAULT_MAX_MESH_REBUILDS_PER_FRAME,
+  };
 
   private rafId = 0;
   private lastFrameTime = 0;
@@ -228,7 +293,10 @@ export class GameController {
         ? 1 / 60
         : Math.min((now - this.lastFrameTime) / 1000, MAX_DELTA_SECONDS);
       this.lastFrameTime = now;
-      this.updateMovement(deltaSeconds);
+      const moved = this.updateMovement(deltaSeconds);
+      if (shouldPumpWorldWork(moved, this.lastStreamSummary.pendingChunks, this.world.countDirtyResidentChunks())) {
+        this.syncWorldAroundPlayer();
+      }
       this.renderInteractiveFrame();
       this.rafId = requestAnimationFrame(tick);
     };
@@ -269,7 +337,7 @@ export class GameController {
       streamPendingChunks: this.lastStreamSummary.pendingChunks,
       streamEmptyChunksSkipped: this.lastStreamSummary.emptyChunksSkipped,
       streamCachedEmptyChunkHits: this.lastStreamSummary.cachedEmptyChunkHits,
-      streamDirtyResidentChunks: this.lastStreamSummary.dirtyResidentChunks,
+      streamDirtyResidentChunks: this.world.countDirtyResidentChunks(),
       residencyRadiusChunks: this.lastStreamSummary.radiusChunks,
       surfaceY: this.lastStreamSummary.surfaceY,
       farFieldMs: this.lastFarFieldSummary.elapsedMs,
@@ -288,7 +356,31 @@ export class GameController {
       lastFrameUploadBytes: this.lastRenderStats.uploadBytes,
       lastFrameEncodeMs: this.lastRenderStats.encodeMs,
       avgFrameCpuMs: this.avgFrameCpuMs,
+      maxGeneratedChunksPerUpdate: this.streamingBudgets.maxGeneratedChunksPerUpdate,
+      maxMeshRebuildsPerFrame: this.streamingBudgets.maxMeshRebuildsPerFrame,
     };
+  }
+
+  getStreamingBudgets(): StreamingBudgets {
+    return { ...this.streamingBudgets };
+  }
+
+  setStreamingBudgets(
+    maxGeneratedChunksPerUpdate: number,
+    maxMeshRebuildsPerFrame: number,
+  ): StreamingBudgets {
+    this.streamingBudgets = {
+      maxGeneratedChunksPerUpdate: clampPositiveInt(
+        maxGeneratedChunksPerUpdate,
+        DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE,
+      ),
+      maxMeshRebuildsPerFrame: clampPositiveInt(
+        maxMeshRebuildsPerFrame,
+        DEFAULT_MAX_MESH_REBUILDS_PER_FRAME,
+      ),
+    };
+    this.pushHud(true);
+    return this.getStreamingBudgets();
   }
 
   teleport(position: Vec3): void {
@@ -452,6 +544,113 @@ export class GameController {
     }
   }
 
+  async benchmarkIncrementalCrossing(
+    iterations: number,
+    chunkDelta = 2,
+    stepsPerLeg = 12,
+    settleFrames = 16,
+  ): Promise<IncrementalCrossingBenchmark> {
+    const normalizedIterations = Math.max(1, Math.floor(iterations));
+    const normalizedChunkDelta = Math.max(1, Math.floor(chunkDelta));
+    const normalizedSteps = Math.max(2, Math.floor(stepsPerLeg));
+    const normalizedSettleFrames = Math.max(1, Math.floor(settleFrames));
+    const spawn = this.world.getSpawnPosition();
+    const baseChunkX = Math.floor(spawn[0] / this.world.chunkSize);
+    const baseChunkZ = Math.floor(spawn[2] / this.world.chunkSize);
+    const leftFeet = buildFeetPositionForChunkCenter(baseChunkX, baseChunkZ, spawn[1], this.world.chunkSize);
+    const rightFeet = buildFeetPositionForChunkCenter(
+      baseChunkX + normalizedChunkDelta,
+      baseChunkZ,
+      spawn[1],
+      this.world.chunkSize,
+    );
+    const savedPlayer = {
+      feetPosition: [...this.player.feetPosition] as Vec3,
+      velocity: [...this.player.velocity] as Vec3,
+      grounded: this.player.grounded,
+    };
+    const savedCamera = {
+      position: [...this.camera.position] as Vec3,
+      yaw: this.camera.yaw,
+      pitch: this.camera.pitch,
+      fovY: this.camera.fovY,
+      near: this.camera.near,
+      far: this.camera.far,
+    };
+    const savedStatus = this.status;
+    const savedStreamAnchor = this.streamAnchor
+      ? { chunkX: this.streamAnchor.chunkX, chunkZ: this.streamAnchor.chunkZ }
+      : null;
+
+    this.stop();
+    try {
+      teleportPlayerToFeetPosition(this.player, leftFeet);
+      this.player.grounded = true;
+      this.syncCameraToPlayer();
+      this.syncWorldAroundPlayer(true);
+      await this.renderProbeFrame();
+
+      const samples: IncrementalCrossingSample[] = [];
+      let frame = 0;
+      const legs: Array<readonly [Vec3, Vec3]> = [[leftFeet, rightFeet], [rightFeet, leftFeet]];
+      for (let iteration = 0; iteration < normalizedIterations; iteration += 1) {
+        for (const [startFeet, endFeet] of legs) {
+          const legIndex = samples.length;
+          for (let step = 1; step <= normalizedSteps; step += 1) {
+            const t = step / normalizedSteps;
+            teleportPlayerToFeetPosition(this.player, lerpVec3(startFeet, endFeet, t));
+            this.player.grounded = true;
+            this.syncCameraToPlayer();
+            const residency = this.syncWorldAroundPlayer(false);
+            const render = await this.renderProbeFrame();
+            frame += 1;
+            samples.push(buildIncrementalSample(frame, "move", legIndex, residency, this.lastMeshBuildSummary, render));
+          }
+          for (let settleFrame = 0; settleFrame < normalizedSettleFrames; settleFrame += 1) {
+            const residency = this.syncWorldAroundPlayer(false);
+            const render = await this.renderProbeFrame();
+            frame += 1;
+            samples.push(buildIncrementalSample(frame, "settle", legIndex, residency, this.lastMeshBuildSummary, render));
+            if (residency.complete && residency.pendingChunks === 0 && this.lastMeshBuildSummary.meshCount === 0) {
+              break;
+            }
+          }
+        }
+      }
+      return {
+        iterations: normalizedIterations,
+        chunkDelta: normalizedChunkDelta,
+        stepsPerLeg: normalizedSteps,
+        settleFrames: normalizedSettleFrames,
+        radiusChunks: this.world.horizontalRadiusChunks,
+        samples,
+        summary: summarizeIncrementalCrossing(samples),
+      };
+    } finally {
+      this.player.feetPosition = savedPlayer.feetPosition;
+      this.player.velocity = savedPlayer.velocity;
+      this.player.grounded = savedPlayer.grounded;
+      this.camera = {
+        position: savedCamera.position,
+        yaw: savedCamera.yaw,
+        pitch: savedCamera.pitch,
+        fovY: savedCamera.fovY,
+        near: savedCamera.near,
+        far: savedCamera.far,
+      };
+      this.status = savedStatus;
+      if (savedStreamAnchor) {
+        this.syncWorldAroundAnchor(savedStreamAnchor, true);
+      } else {
+        this.streamAnchor = null;
+        this.syncWorldAroundPlayer(true);
+      }
+      await this.renderProbeFrame();
+      this.pushHud(true);
+      this.start();
+    }
+  }
+
   private loadBootstrapWorld(): void {
     const spawn = this.world.getSpawnPosition();
     this.player = createPlayerState(spawn, { grounded: true });
@@ -514,7 +713,7 @@ export class GameController {
     }
   };
 
-  private updateMovement(deltaSeconds: number): void {
+  private updateMovement(deltaSeconds: number): boolean {
     const input = this.pointerLocked
       ? {
           forward: (this.isPressed("KeyW") ? 1 : 0) - (this.isPressed("KeyS") ? 1 : 0),
@@ -538,9 +737,7 @@ export class GameController {
       deltaSeconds,
     );
     this.syncCameraToPlayer();
-    if (result.moved) {
-      this.syncWorldAroundPlayer();
-    }
+    return result.moved;
   }
 
   private renderInteractiveFrame(): void {
@@ -567,7 +764,7 @@ export class GameController {
     if (force) {
       return this.syncWorldAroundAnchor(resolved.anchor, true);
     }
-    if (!force && !resolved.changed) {
+    if (!shouldRefreshResidency(false, resolved.changed, this.lastStreamSummary.pendingChunks)) {
       this.lastFarFieldSummary = this.farField.updateAround(this.player.feetPosition, this.getNearClearRadiusWorldUnits());
       this.flushMeshBuildBudget();
       this.lastStreamSummary = createIdleResidencySummary(
@@ -575,6 +772,7 @@ export class GameController {
         this.streamAnchor ?? resolved.anchor,
         this.world.horizontalRadiusChunks,
         this.world.getStats().chunkCount,
+        this.world.countDirtyResidentChunks(),
       );
       return cloneResidencySummary(this.lastStreamSummary);
     }
@@ -586,10 +784,16 @@ export class GameController {
     this.lastFarFieldSummary = this.farField.updateAround(this.player.feetPosition, this.getNearClearRadiusWorldUnits());
     const residency = this.world.updateResidencyAround(
       buildStreamAnchorPosition(anchor, this.world.chunkSize, this.player.feetPosition[1]),
-      { maxGenerateChunks: settle ? Number.POSITIVE_INFINITY : MAX_GENERATED_CHUNKS_PER_UPDATE },
+      {
+        maxGenerateChunks: settle
+          ? Number.POSITIVE_INFINITY
+          : this.streamingBudgets.maxGeneratedChunksPerUpdate,
+      },
     );
     this.lastStreamSummary = cloneResidencySummary(residency);
-    this.flushMeshBuildBudget(settle ? Number.POSITIVE_INFINITY : MAX_MESH_REBUILDS_PER_FRAME);
+    this.flushMeshBuildBudget(
+      settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxMeshRebuildsPerFrame,
+    );
     this.status = residency.pendingChunks > 0
       ? `Streaming ${residency.pendingChunks} pending chunk(s)`
       : residency.generatedChunks > 0 || residency.evictedChunks > 0
@@ -610,7 +814,7 @@ export class GameController {
     return (this.world.horizontalRadiusChunks + 1) * this.world.chunkSize;
   }
 
-  private flushMeshBuildBudget(maxChunks = MAX_MESH_REBUILDS_PER_FRAME): void {
+  private flushMeshBuildBudget(maxChunks = DEFAULT_MAX_MESH_REBUILDS_PER_FRAME): void {
     const meshSummary = rebuildDirtyMeshes(this.world, maxChunks);
     this.lastMeshBuildSummary = meshSummary;
     this.meshMs = meshSummary.elapsedMs;
@@ -714,6 +918,61 @@ function buildEyePositionForChunkCenter(
   ];
 }
 
+function buildFeetPositionForChunkCenter(
+  chunkX: number,
+  chunkZ: number,
+  feetY: number,
+  chunkSize: number,
+): Vec3 {
+  return [
+    chunkX * chunkSize + chunkSize * 0.5,
+    feetY,
+    chunkZ * chunkSize + chunkSize * 0.5,
+  ];
+}
+
+function teleportPlayerToFeetPosition(player: PlayerState, feetPosition: Vec3): void {
+  player.feetPosition = [...feetPosition];
+  player.velocity = [0, 0, 0];
+}
+
+function lerpVec3(from: Vec3, to: Vec3, t: number): Vec3 {
+  return [
+    from[0] + (to[0] - from[0]) * t,
+    from[1] + (to[1] - from[1]) * t,
+    from[2] + (to[2] - from[2]) * t,
+  ];
+}
+
+function buildIncrementalSample(
+  frame: number,
+  phase: "move" | "settle",
+  leg: number,
+  residency: ResidencyUpdateSummary,
+  mesh: MeshBuildSummary,
+  render: GameRenderProbe,
+): IncrementalCrossingSample {
+  return {
+    frame,
+    phase,
+    leg,
+    changed: residency.changed,
+    complete: residency.complete,
+    pendingChunks: residency.pendingChunks,
+    generatedChunks: residency.generatedChunks,
+    evictedChunks: residency.evictedChunks,
+    streamMs: residency.elapsedMs,
+    meshMs: mesh.elapsedMs,
+    meshCount: mesh.meshCount,
+    frameCpuMs: render.frameCpuMs,
+    syncMs: render.syncResourcesMs,
+    uploadMs: render.uploadMs,
+    uploadChunks: render.uploadChunks,
+    uploadBytes: render.uploadBytes,
+    encodeMs: render.encodeMs,
+  };
+}
+
 function cloneResidencySummary(summary: ResidencyUpdateSummary): ResidencyUpdateSummary {
   return {
     ...summary,
@@ -728,6 +987,7 @@ function createIdleResidencySummary(
   anchor: StreamAnchor,
   radiusChunks: number,
   residentChunks: number,
+  dirtyResidentChunks: number,
 ): ResidencyUpdateSummary {
   return {
     ...summary,
@@ -743,7 +1003,7 @@ function createIdleResidencySummary(
     cachedEmptyChunkHits: 0,
     touchedNeighborChunks: 0,
     residentChunks,
-    dirtyResidentChunks: 0,
+    dirtyResidentChunks,
     elapsedMs: 0,
     generatedChunkCoords: [],
     evictedChunkCoords: [],
@@ -784,6 +1044,36 @@ function summarizeChunkBoundaryBenchmark(samples: readonly ChunkBoundaryBenchmar
   };
 }
 
+function summarizeIncrementalCrossing(samples: readonly IncrementalCrossingSample[]): IncrementalCrossingSummary {
+  const workSamples = samples.map((sample) => sample.streamMs + sample.meshMs + sample.frameCpuMs);
+  const streamSamples = samples.map((sample) => sample.streamMs);
+  const meshSamples = samples.map((sample) => sample.meshMs);
+  const frameCpuSamples = samples.map((sample) => sample.frameCpuMs);
+  const uploadSamples = samples.map((sample) => sample.uploadMs);
+  return {
+    sampleCount: samples.length,
+    workFrameCount: samples.filter((sample) => sample.streamMs > 0 || sample.meshMs > 0 || sample.uploadChunks > 0).length,
+    changedCount: samples.filter((sample) => sample.changed).length,
+    incompleteFrameCount: samples.filter((sample) => !sample.complete || sample.pendingChunks > 0).length,
+    avgWorkMs: average(workSamples),
+    p95WorkMs: percentile(workSamples, 0.95),
+    maxWorkMs: maxValue(workSamples),
+    avgStreamMs: average(streamSamples),
+    p95StreamMs: percentile(streamSamples, 0.95),
+    maxStreamMs: maxValue(streamSamples),
+    avgMeshMs: average(meshSamples),
+    p95MeshMs: percentile(meshSamples, 0.95),
+    maxMeshMs: maxValue(meshSamples),
+    avgFrameCpuMs: average(frameCpuSamples),
+    p95FrameCpuMs: percentile(frameCpuSamples, 0.95),
+    maxFrameCpuMs: maxValue(frameCpuSamples),
+    avgUploadMs: average(uploadSamples),
+    p95UploadMs: percentile(uploadSamples, 0.95),
+    maxUploadMs: maxValue(uploadSamples),
+    maxPendingChunks: maxValue(samples.map((sample) => sample.pendingChunks)),
+  };
+}
+
 function zeroResidencyPhaseMetrics(): ResidencyUpdateSummary["phaseMs"] {
   return {
     surfaceSampleMs: 0,
@@ -805,4 +1095,9 @@ function isMovementKey(code: string): boolean {
     || code === "ControlRight"
     || code === "AltLeft"
     || code === "AltRight";
+}
+
+function clampPositiveInt(value: number, fallback: number): number {
+  const normalized = Math.floor(value);
+  return Number.isFinite(normalized) && normalized > 0 ? normalized : fallback;
 }

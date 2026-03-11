@@ -1,15 +1,28 @@
 import { buildCameraMatrices, type CameraState } from "./camera.ts";
 import type { ChunkMeshData } from "./types.ts";
 import type { ResidentChunkWorld } from "./world.ts";
-import { CLEAR_COLOR_RGBA, LIGHT_DIRECTION, LIGHTING_TERMS } from "./render-constants.ts";
+import {
+  CLEAR_COLOR_RGBA,
+  FOG_COLOR_RGBA,
+  FOG_END_DISTANCE,
+  FOG_START_DISTANCE,
+  LIGHT_DIRECTION,
+  LIGHTING_TERMS,
+} from "./render-constants.ts";
 
-type RenderCamera = CameraState | { viewProjection: Float32Array };
+type RenderCamera = CameraState | {
+  viewProjection: Float32Array;
+  position?: readonly [number, number, number];
+};
 
 const SHADER_SOURCE = `
 struct Uniforms {
   view_projection: mat4x4<f32>,
   light_direction: vec4<f32>,
   lighting_terms: vec4<f32>,
+  camera_position: vec4<f32>,
+  fog_color: vec4<f32>,
+  fog_params: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -24,6 +37,7 @@ struct VertexOutput {
   @builtin(position) clip_position: vec4<f32>,
   @location(0) normal: vec3<f32>,
   @location(1) color: vec3<f32>,
+  @location(2) world_position: vec3<f32>,
 }
 
 @vertex
@@ -32,6 +46,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
   output.clip_position = uniforms.view_projection * vec4<f32>(input.position, 1.0);
   output.normal = normalize(input.normal.xyz);
   output.color = input.color.rgb;
+  output.world_position = input.position;
   return output;
 }
 
@@ -40,7 +55,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   let directional = max(dot(input.normal, -uniforms.light_direction.xyz), 0.0);
   let hemi = input.normal.y * 0.5 + 0.5;
   let lighting = uniforms.lighting_terms.x + uniforms.lighting_terms.y * directional + uniforms.lighting_terms.z * hemi;
-  return vec4<f32>(input.color * lighting, 1.0);
+  let shaded = input.color * lighting;
+  let fog_distance = distance(input.world_position, uniforms.camera_position.xyz);
+  let fog = smoothstep(uniforms.fog_params.x, uniforms.fog_params.y, fog_distance);
+  return vec4<f32>(shaded * (1.0 - fog) + uniforms.fog_color.rgb * fog, 1.0);
 }
 `;
 
@@ -137,7 +155,7 @@ export class WebGpuVoxelRenderer {
     this.timestampQuerySupported = device.features.has("timestamp-query");
     const shaderModule = device.createShaderModule({ code: SHADER_SOURCE });
     const uniformBuffer = device.createBuffer({
-      size: 96,
+      size: 144,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     const bindGroupLayout = device.createBindGroupLayout({
@@ -437,13 +455,28 @@ export class WebGpuVoxelRenderer {
   }
 
   private writeUniforms(camera: RenderCamera, aspect: number): void {
-    const viewProjection = "viewProjection" in camera
-      ? camera.viewProjection
-      : buildCameraMatrices(camera, aspect).viewProjection;
-    const uniformData = new Float32Array(24);
+    let viewProjection: Float32Array;
+    let cameraPosition: readonly [number, number, number];
+    if (isCameraWithViewProjection(camera)) {
+      viewProjection = camera.viewProjection;
+      cameraPosition = camera.position ?? ([0, 0, 0] as const);
+    } else {
+      const cameraMatrices = buildCameraMatrices(camera, aspect);
+      viewProjection = cameraMatrices.viewProjection;
+      cameraPosition = cameraMatrices.eye;
+    }
+    const uniformData = new Float32Array(36);
     uniformData.set(viewProjection, 0);
     uniformData.set([...LIGHT_DIRECTION, 0], 16);
     uniformData.set([...LIGHTING_TERMS, 0], 20);
+    uniformData.set([cameraPosition[0], cameraPosition[1], cameraPosition[2], 0], 24);
+    uniformData.set([
+      FOG_COLOR_RGBA[0] / 255,
+      FOG_COLOR_RGBA[1] / 255,
+      FOG_COLOR_RGBA[2] / 255,
+      FOG_COLOR_RGBA[3] / 255,
+    ], 28);
+    uniformData.set([FOG_START_DISTANCE, FOG_END_DISTANCE, 0, 0], 32);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
 
@@ -553,6 +586,10 @@ export class WebGpuVoxelRenderer {
 
 function alignTo(value: number, alignment: number): number {
   return Math.ceil(value / alignment) * alignment;
+}
+
+function isCameraWithViewProjection(camera: RenderCamera): camera is { viewProjection: Float32Array } {
+  return "viewProjection" in camera;
 }
 
 function toGpuColor(color: readonly [number, number, number, number]): GPUColor {

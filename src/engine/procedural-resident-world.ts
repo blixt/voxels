@@ -6,7 +6,7 @@ import {
 import { metersToWorldUnits } from "./scale.ts";
 import type { ResidentChunkWorld, VoxelChunk } from "./world.ts";
 
-const DEFAULT_HORIZONTAL_RADIUS_CHUNKS = 3;
+const DEFAULT_HORIZONTAL_RADIUS_CHUNKS = 5;
 const DEFAULT_UNDERGROUND_PADDING_CHUNKS = 3;
 const DEFAULT_AIR_PADDING_CHUNKS = 2;
 const SPAWN_FOOTPRINT_RADIUS = metersToWorldUnits(0.8);
@@ -109,6 +109,10 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       chunkCount: this.chunks.size,
       paletteCount: this.palette.length - 1,
     };
+  }
+
+  countDirtyResidentChunks(): number {
+    return countDirtyResidentChunks(this.chunks.values());
   }
 
   getPaletteColor(materialIndex: number): number {

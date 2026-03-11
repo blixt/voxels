@@ -10,6 +10,11 @@ declare global {
       requestPointerLock(): Promise<void>;
       teleport(x: number, y: number, z: number): void;
       setViewDistance(chunks: number): void;
+      getStreamingBudgets(): ReturnType<GameController["getStreamingBudgets"]>;
+      setStreamingBudgets(
+        maxGeneratedChunksPerUpdate: number,
+        maxMeshRebuildsPerFrame: number,
+      ): ReturnType<GameController["setStreamingBudgets"]>;
       forceResidencyUpdate(): ReturnType<GameController["forceResidencyUpdate"]>;
       teleportAndSettle(
         x: number,
@@ -21,6 +26,12 @@ declare global {
         iterations: number,
         chunkDelta?: number,
       ): ReturnType<GameController["benchmarkChunkCrossing"]>;
+      benchmarkIncrementalCrossing(
+        iterations: number,
+        chunkDelta?: number,
+        stepsPerLeg?: number,
+        settleFrames?: number,
+      ): ReturnType<GameController["benchmarkIncrementalCrossing"]>;
     };
   }
 }
@@ -85,6 +96,8 @@ function mountGame(): GameRuntime {
       metric("Pending", snapshot.streamPendingChunks.toLocaleString()),
       metric("Empty Skipped", snapshot.streamEmptyChunksSkipped.toLocaleString()),
       metric("Empty Cache Hits", snapshot.streamCachedEmptyChunkHits.toLocaleString()),
+      metric("Gen Budget", snapshot.maxGeneratedChunksPerUpdate.toLocaleString()),
+      metric("Mesh Budget", snapshot.maxMeshRebuildsPerFrame.toLocaleString()),
       metric("Mesh", `${snapshot.meshMs.toFixed(1)} ms`),
       metric("New Meshes", snapshot.meshNewChunks.toLocaleString()),
       metric("Remeshes", snapshot.meshRemeshChunks.toLocaleString()),
@@ -107,9 +120,14 @@ function mountGame(): GameRuntime {
     requestPointerLock: () => controller.requestPointerLock(),
     teleport: (x, y, z) => controller.teleport([x, y, z]),
     setViewDistance: (chunks) => controller.setResidencyRadiusChunks(chunks),
+    getStreamingBudgets: () => controller.getStreamingBudgets(),
+    setStreamingBudgets: (maxGeneratedChunksPerUpdate, maxMeshRebuildsPerFrame) =>
+      controller.setStreamingBudgets(maxGeneratedChunksPerUpdate, maxMeshRebuildsPerFrame),
     forceResidencyUpdate: () => controller.forceResidencyUpdate(),
     teleportAndSettle: (x, y, z, options) => controller.teleportAndSettle([x, y, z], options),
     benchmarkChunkCrossing: (iterations, chunkDelta) => controller.benchmarkChunkCrossing(iterations, chunkDelta),
+    benchmarkIncrementalCrossing: (iterations, chunkDelta, stepsPerLeg, settleFrames) =>
+      controller.benchmarkIncrementalCrossing(iterations, chunkDelta, stepsPerLeg, settleFrames),
   };
 
   const ready = controller.init();
