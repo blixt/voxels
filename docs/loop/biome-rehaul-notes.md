@@ -150,3 +150,24 @@ The present approach is still cheap and deterministic:
 - underground families vary across the world and are reflected in sampled materials
 - landmark families appear at deterministic frequencies
 - chunk generation remains deterministic and consistent with direct sampling
+
+## Landmark scale follow-up
+
+The first biome-rehaul landmark pass still made too many props read like shrubs or bonsai relative to a `1.8 m` player. The current rule is:
+
+- scale is now part of the placement profile, not hardcoded only inside the feature switch
+- each biome roster can change:
+  - density
+  - cell spacing
+  - silhouette scale
+  - variant/material look
+
+This lets the engine keep one compact feature slot while still making:
+
+- verdant feel tree-dominant with `oak` and `canopy_tree`
+- steppe feel sparse and woody with `acacia`, `dead_snag`, and stones
+- badlands feel more vertical with larger `hoodoo` and `standing_stone`
+- highland and tundra feel taller through `tall_fir`, `ice_spire`, and larger rock silhouettes
+- marsh and bloom feel more special through `mangrove`, `cypress`, `glowcap`, and `mega_glowcap`
+
+The broad fixed-seed scan now finds landmark silhouettes up to about `9.7 m`, which is the first point where the world starts reading correctly against the player scale.

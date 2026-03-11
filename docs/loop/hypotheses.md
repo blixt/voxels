@@ -259,3 +259,12 @@
 | Ground detail still will not feel like a 10 cm world unless surface material variation is explicitly tested | Add a material-diversity regression over a broad fixed grid instead of trusting visual intuition | Confirmed. The new test proves multiple surface variants exist within major biomes | Confirmed |
 | Richer landmark variety requires a new object system before it is worth doing | Replace the single hardcoded landmark family with deterministic per-biome rosters and extend the existing parametric feature shapes | Rejected. The current one-feature-slot system was enough to add real variety cheaply | Rejected |
 | The jump-height request is too subjective to test cleanly | Add a simple takeoff-to-peak regression in world units and verify the requested increase numerically | Rejected. A direct peak-height test is simple and now guards the new `4.2 m/s` jump | Rejected |
+
+## 2026-03-11 landmark scale and terrain-detail follow-up
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| The remaining object-scale complaint is mostly a profile-data problem, not a missing-geometry-system problem | Expand landmark selection from ids to placement profiles and resample tall landmark envelopes over a broad fixed-seed grid | Confirmed. The broad scan now finds a tallest sampled landmark height of `97` voxels (`9.7 m`) without adding a second object pipeline | Confirmed |
+| More landmark ids alone will not produce the biome variety the user asked for if density and scale stay miniature | Add biome-specific `cellSize/chance/scale/variant` overrides and aggregate landmark counts by biome/id | Confirmed. The first roster rewrite still overproduced small flowers/shrubs; the kept version only became acceptable after density retuning toward larger landmark families | Confirmed |
+| Terrain still will not read as a `10 cm` world if the generator only changes surface materials and keeps geometry too smooth | Raise biome micro-relief and add a slow shared `massifRelief` term, then rerun the fixed-seed terrain envelope probe | Confirmed. The probe kept soft-border jumps bounded while lifting peak sampled terrain to `1652` and adding more geometric relief | Confirmed |
+| A second jump-height increase can be verified objectively instead of argued from feel | Raise jump velocity and rerun the peak-height unit test | Confirmed. The new `4.7 m/s` jump clears the updated `1.0 m` regression | Confirmed |

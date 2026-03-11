@@ -113,3 +113,8 @@ This is still intentionally not trying to solve caves or general structures yet,
 - grow landmark/object generation beyond simple single-cell silhouettes
 - add richer biome/landmark-aware spawn heuristics instead of string sets
 - keep worldgen measurements alongside the richer biome system so the new variety does not silently undo the performance work
+
+Update:
+
+- landmark generation now uses per-biome placement profiles instead of only per-biome landmark id sets
+- landmark scale is now treated as first-class worldgen data because object readability at `10 cm` voxels matters just as much as palette choice

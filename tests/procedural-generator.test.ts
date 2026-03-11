@@ -164,6 +164,7 @@ test("procedural generator keeps the terrain envelope near sea level with visibl
 
   expect(minSurfaceY).toBeGreaterThanOrEqual(generator.seaLevel - 240);
   expect(maxSurfaceY).toBeLessThanOrEqual(generator.seaLevel + 420);
+  expect(maxSurfaceY).toBeGreaterThanOrEqual(generator.seaLevel + 220);
   expect(averageSurfaceY).toBeGreaterThanOrEqual(generator.seaLevel - 40);
   expect(averageSurfaceY).toBeLessThanOrEqual(generator.seaLevel + 220);
   expect(underwaterRatio).toBeGreaterThanOrEqual(0.04);
@@ -221,11 +222,38 @@ test("landmarks appear across the world with multiple distinct families", () => 
     }
   }
 
-  expect(landmarkIds.size).toBeGreaterThanOrEqual(6);
+  expect(landmarkIds.size).toBeGreaterThanOrEqual(10);
   expect(landmarkIds.has("oak")).toBe(true);
+  expect(landmarkIds.has("canopy_tree")).toBe(true);
+  expect(landmarkIds.has("acacia")).toBe(true);
   expect(landmarkIds.has("hoodoo")).toBe(true);
   expect(landmarkIds.has("ice_spire")).toBe(true);
-  expect(landmarkIds.has("palm") || landmarkIds.has("glowcap") || landmarkIds.has("basalt_spire")).toBe(true);
+  expect(
+    landmarkIds.has("palm")
+    || landmarkIds.has("glowcap")
+    || landmarkIds.has("basalt_spire")
+    || landmarkIds.has("mega_glowcap"),
+  ).toBe(true);
+});
+
+test("landmark scale now regularly exceeds player height", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  let tallestFeature = 0;
+  let tallFeatureCount = 0;
+
+  for (let z = -8192; z <= 8192; z += 16) {
+    for (let x = -8192; x <= 8192; x += 16) {
+      const probe = generator.sampleBiomeProbe(x, z);
+      const featureHeight = probe.topY - probe.surfaceY;
+      tallestFeature = Math.max(tallestFeature, featureHeight);
+      if (featureHeight >= 24) {
+        tallFeatureCount += 1;
+      }
+    }
+  }
+
+  expect(tallestFeature).toBeGreaterThanOrEqual(72);
+  expect(tallFeatureCount).toBeGreaterThan(100);
 });
 
 test("surface materials vary within major biomes to support finer ground detail", () => {

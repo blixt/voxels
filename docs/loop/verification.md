@@ -2513,3 +2513,63 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - The next likely worldgen step is not another selector tweak; it is either:
   - more deliberate landmark/object generation
   - or wider world-system integration such as biome-aware spawn traits, route planning, and later persistence
+
+## 2026-03-11 landmark scale and terrain-detail follow-up
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-generator.test.ts tests/player-physics.test.ts`
+- fixed-seed worldgen timing screen:
+  - `mise exec -- bun --eval '... sampleColumn() sweep + 16-chunk generateChunk() batch ...'`
+- fixed-seed landmark variety/count probe:
+  - `mise exec -- bun --eval '... aggregate landmark counts by biome/id ...'`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing
+- Focused tests:
+  - `21 pass`
+  - `0 fail`
+
+#### Fixed-seed timing screen
+
+- Large `sampleColumn()` sweep:
+  - `sampleMs = 74.885`
+- Fixed `16`-chunk generation batch:
+  - `chunkMs = 23.252`
+- Interpretation:
+  - richer landmark placement and larger silhouettes did not blow up the current generator hot path badly enough to reject the slice
+
+#### Fixed-seed landmark / terrain probe
+
+- Tallest sampled landmark silhouette:
+  - `97` voxels (`9.7 m`)
+  - sample: `highland / tall_fir`
+- Distinct landmark ids observed in the broad scan:
+  - `24`
+- Peak sampled surface height:
+  - `1652`
+- Current terrain envelope probe:
+  - `min = 1372`
+  - `max = 1652`
+  - `avg = 1465.54`
+  - `underwaterRatio = 0.055`
+  - `maxStep = 48`
+  - `maxSoft = 43`
+
+#### Landmark-density retune
+
+- The first roster rewrite was not kept as-is:
+  - fixed-seed counts showed `flower_patch` and `shrub` dominating too much in `verdant` / `steppe`
+  - retuned those rosters to surface larger biome-defining objects more often
+- Kept the follow-up after the count probe showed much healthier emphasis on:
+  - `acacia`
+  - `canopy_tree`
+  - `oak`
+  - `standing_stone`
+  - `tall_fir`
+  - `ice_spire`
+
+#### Residual
+
+- This slice is worth keeping.
+- The next worldgen-facing issue is no longer tiny prop scale; it is broader world-system variety such as clustered placement, local water systems, and richer landmark/structure layering.

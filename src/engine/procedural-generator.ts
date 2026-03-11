@@ -11,20 +11,28 @@ export type BiomeId = BaseBiomeId | SpecialBiomeId;
 export type UndergroundBiomeId = "rooted" | "sedimentary" | "sandy" | "granitic" | "froststone" | "basaltic";
 export type LandmarkId =
   | "oak"
+  | "canopy_tree"
   | "birch"
   | "boulder"
   | "standing_stone"
   | "shrub"
+  | "flower_patch"
   | "palm"
+  | "acacia"
   | "cactus"
+  | "dead_snag"
   | "hoodoo"
   | "fir"
+  | "tall_fir"
   | "ice_spire"
+  | "frost_shrub"
   | "cypress"
+  | "mangrove"
   | "reed_cluster"
   | "basalt_spire"
   | "crystal_cluster"
-  | "glowcap";
+  | "glowcap"
+  | "mega_glowcap";
 
 interface BaseBiomeProfile {
   id: BaseBiomeId;
@@ -79,6 +87,8 @@ interface LandmarkProfile {
   cellSize: number;
   radius: number;
   chance: number;
+  scale: number;
+  variant: number;
 }
 
 interface ColumnFieldSample {
@@ -251,12 +261,12 @@ const FEATURE_CRYSTAL = 14;
 const CHUNK_GENERATION_SCRATCH_POOL_LIMIT = 4;
 
 const BASE_BIOMES: readonly BaseBiomeProfile[] = [
-  createBaseBiome("verdant", 0.56, 0.78, 0.28, 0.74, 0.42, 0.18, -10, 0.48, 0.18, 0.40, 0.28, 0.00, 2.0, 1548, "#6A5", "#7B6", "#8B6", "#592", "#677", "#754", "#865", "#49B", "#DDE"),
-  createBaseBiome("steppe", 0.62, 0.42, 0.36, 0.52, 0.48, 0.14, 0, 0.54, 0.22, 0.32, 0.18, 0.00, 1.8, 1608, "#9B6", "#CB7", "#BA6", "#CA7", "#887", "#875", "#986", "#4AA", "#DDD"),
-  createBaseBiome("dunes", 0.84, 0.16, 0.18, 0.28, 0.30, 0.12, -16, 0.32, 0.10, 0.54, 0.42, 0.00, 2.8, 1710, "#DB6", "#EC9", "#EC7", "#CA5", "#B96", "#B85", "#C96", "#5BC", "#EDC"),
-  createBaseBiome("badlands", 0.72, 0.20, 0.58, 0.36, 0.58, 0.16, 18, 0.72, 0.64, 0.38, 0.06, 0.46, 2.4, 1670, "#C75", "#D96", "#D86", "#B54", "#865", "#A54", "#965", "#49B", "#EBC"),
-  createBaseBiome("highland", 0.40, 0.56, 0.72, 0.46, 0.72, 0.16, 44, 0.88, 0.62, 0.24, 0.10, 0.06, 2.6, 1518, "#6B7", "#7C8", "#7A8", "#8C7", "#778", "#667", "#889", "#5AD", "#EEF"),
-  createBaseBiome("tundra", 0.18, 0.42, 0.86, 0.40, 0.82, 0.12, 78, 0.98, 0.82, 0.16, 0.02, 0.04, 2.2, 1452, "#BCC", "#CDD", "#DDE", "#ABB", "#889", "#99A", "#AAB", "#8CD", "#EEF"),
+  createBaseBiome("verdant", 0.56, 0.78, 0.28, 0.74, 0.42, 0.18, -10, 0.48, 0.18, 0.40, 0.28, 0.00, 4.4, 1548, "#6A5", "#7B6", "#8B6", "#592", "#677", "#754", "#865", "#49B", "#DDE"),
+  createBaseBiome("steppe", 0.62, 0.42, 0.36, 0.52, 0.48, 0.14, 0, 0.54, 0.22, 0.32, 0.18, 0.00, 4.8, 1608, "#9B6", "#CB7", "#BA6", "#CA7", "#887", "#875", "#986", "#4AA", "#DDD"),
+  createBaseBiome("dunes", 0.84, 0.16, 0.18, 0.28, 0.30, 0.12, -16, 0.32, 0.10, 0.54, 0.42, 0.00, 8.8, 1710, "#DB6", "#EC9", "#EC7", "#CA5", "#B96", "#B85", "#C96", "#5BC", "#EDC"),
+  createBaseBiome("badlands", 0.72, 0.20, 0.58, 0.36, 0.58, 0.16, 18, 0.72, 0.64, 0.38, 0.06, 0.46, 9.6, 1670, "#C75", "#D96", "#D86", "#B54", "#865", "#A54", "#965", "#49B", "#EBC"),
+  createBaseBiome("highland", 0.40, 0.56, 0.72, 0.46, 0.72, 0.16, 44, 0.88, 0.62, 0.24, 0.10, 0.06, 7.8, 1518, "#6B7", "#7C8", "#7A8", "#8C7", "#778", "#667", "#889", "#5AD", "#EEF"),
+  createBaseBiome("tundra", 0.18, 0.42, 0.86, 0.40, 0.82, 0.12, 78, 0.98, 0.82, 0.16, 0.02, 0.04, 6.2, 1452, "#BCC", "#CDD", "#DDE", "#ABB", "#889", "#99A", "#AAB", "#8CD", "#EEF"),
 ] as const;
 
 const SPECIAL_BIOMES: Record<SpecialBiomeId, SpecialBiomeProfile> = {
@@ -275,36 +285,98 @@ const UNDERGROUND_BIOMES: Record<UndergroundBiomeId, UndergroundBiomeProfile> = 
 };
 
 const LANDMARKS: Record<LandmarkId, LandmarkProfile> = {
-  oak: { id: "oak", cellSize: 88, radius: 5, chance: 0.32 },
-  birch: { id: "birch", cellSize: 84, radius: 4, chance: 0.30 },
-  boulder: { id: "boulder", cellSize: 72, radius: 4, chance: 0.34 },
-  standing_stone: { id: "standing_stone", cellSize: 104, radius: 3, chance: 0.24 },
-  shrub: { id: "shrub", cellSize: 64, radius: 3, chance: 0.42 },
-  palm: { id: "palm", cellSize: 96, radius: 6, chance: 0.3 },
-  cactus: { id: "cactus", cellSize: 84, radius: 3, chance: 0.34 },
-  hoodoo: { id: "hoodoo", cellSize: 104, radius: 5, chance: 0.26 },
-  fir: { id: "fir", cellSize: 80, radius: 4, chance: 0.34 },
-  ice_spire: { id: "ice_spire", cellSize: 104, radius: 4, chance: 0.24 },
-  cypress: { id: "cypress", cellSize: 88, radius: 5, chance: 0.42 },
-  reed_cluster: { id: "reed_cluster", cellSize: 68, radius: 3, chance: 0.48 },
-  basalt_spire: { id: "basalt_spire", cellSize: 104, radius: 4, chance: 0.22 },
-  crystal_cluster: { id: "crystal_cluster", cellSize: 76, radius: 3, chance: 0.32 },
-  glowcap: { id: "glowcap", cellSize: 80, radius: 6, chance: 0.4 },
+  oak: createLandmark("oak", 176, 11, 0.34, 1.0, 0),
+  canopy_tree: createLandmark("canopy_tree", 224, 16, 0.20, 1.2, 2),
+  birch: createLandmark("birch", 164, 9, 0.30, 1.0, 1),
+  boulder: createLandmark("boulder", 120, 5, 0.34, 1.0, 0),
+  standing_stone: createLandmark("standing_stone", 160, 5, 0.24, 1.0, 0),
+  shrub: createLandmark("shrub", 92, 4, 0.42, 1.0, 0),
+  flower_patch: createLandmark("flower_patch", 76, 5, 0.50, 1.0, 0),
+  palm: createLandmark("palm", 184, 12, 0.26, 1.0, 0),
+  acacia: createLandmark("acacia", 168, 12, 0.28, 1.0, 3),
+  cactus: createLandmark("cactus", 128, 4, 0.34, 1.0, 1),
+  dead_snag: createLandmark("dead_snag", 156, 4, 0.24, 1.0, 0),
+  hoodoo: createLandmark("hoodoo", 184, 8, 0.24, 1.0, 0),
+  fir: createLandmark("fir", 156, 9, 0.28, 1.0, 0),
+  tall_fir: createLandmark("tall_fir", 208, 12, 0.18, 1.15, 0),
+  ice_spire: createLandmark("ice_spire", 184, 8, 0.22, 1.0, 0),
+  frost_shrub: createLandmark("frost_shrub", 104, 4, 0.44, 1.0, 0),
+  cypress: createLandmark("cypress", 164, 10, 0.34, 1.0, 0),
+  mangrove: createLandmark("mangrove", 208, 14, 0.24, 1.1, 0),
+  reed_cluster: createLandmark("reed_cluster", 92, 4, 0.54, 1.0, 1),
+  basalt_spire: createLandmark("basalt_spire", 184, 7, 0.18, 1.0, 0),
+  crystal_cluster: createLandmark("crystal_cluster", 132, 5, 0.28, 1.0, 1),
+  glowcap: createLandmark("glowcap", 164, 12, 0.30, 1.0, 2),
+  mega_glowcap: createLandmark("mega_glowcap", 232, 18, 0.16, 1.2, 2),
 };
 
-const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkId[]> = {
-  verdant: ["oak", "birch", "shrub", "boulder"],
-  steppe: ["standing_stone", "shrub", "boulder", "birch"],
-  dunes: ["palm", "cactus", "boulder"],
-  badlands: ["hoodoo", "standing_stone", "boulder", "cactus"],
-  highland: ["fir", "boulder", "birch", "standing_stone"],
-  tundra: ["ice_spire", "fir", "boulder", "shrub"],
+const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
+  verdant: [
+    landmarkPlacement("canopy_tree", { chance: 0.24, scale: 1.26 }),
+    landmarkPlacement("oak", { scale: 1.14, chance: 0.34 }),
+    landmarkPlacement("birch", { chance: 0.28, scale: 0.94 }),
+    landmarkPlacement("flower_patch", { chance: 0.34, scale: 1.08, variant: 1 }),
+    landmarkPlacement("shrub", { chance: 0.30, scale: 1.12 }),
+    landmarkPlacement("boulder", { chance: 0.20, scale: 0.92 }),
+  ],
+  steppe: [
+    landmarkPlacement("acacia", { chance: 0.30, scale: 1.12 }),
+    landmarkPlacement("dead_snag", { chance: 0.24, scale: 1.08 }),
+    landmarkPlacement("shrub", { chance: 0.24, scale: 1.0, variant: 2 }),
+    landmarkPlacement("flower_patch", { chance: 0.16, scale: 0.88, variant: 2 }),
+    landmarkPlacement("standing_stone", { chance: 0.28, scale: 1.12 }),
+    landmarkPlacement("boulder", { chance: 0.18, scale: 0.9 }),
+  ],
+  dunes: [
+    landmarkPlacement("palm", { chance: 0.34, scale: 1.22 }),
+    landmarkPlacement("cactus", { chance: 0.36, scale: 1.12 }),
+    landmarkPlacement("cactus", { chance: 0.24, scale: 1.65, variant: 2, cellSize: 168, radius: 6 }),
+    landmarkPlacement("dead_snag", { chance: 0.18, scale: 0.9 }),
+    landmarkPlacement("boulder", { chance: 0.16, scale: 0.86 }),
+  ],
+  badlands: [
+    landmarkPlacement("hoodoo", { chance: 0.30, scale: 1.22 }),
+    landmarkPlacement("hoodoo", { chance: 0.24, scale: 0.86, variant: 1, cellSize: 156, radius: 6 }),
+    landmarkPlacement("dead_snag", { chance: 0.28, scale: 1.24 }),
+    landmarkPlacement("standing_stone", { chance: 0.20, scale: 1.18 }),
+    landmarkPlacement("cactus", { chance: 0.18, scale: 0.96 }),
+    landmarkPlacement("boulder", { chance: 0.20, scale: 0.94 }),
+  ],
+  highland: [
+    landmarkPlacement("tall_fir", { chance: 0.24, scale: 1.22 }),
+    landmarkPlacement("fir", { chance: 0.32, scale: 1.08 }),
+    landmarkPlacement("standing_stone", { chance: 0.20, scale: 1.26 }),
+    landmarkPlacement("crystal_cluster", { chance: 0.14, scale: 1.08, variant: 2 }),
+    landmarkPlacement("boulder", { chance: 0.28, scale: 1.08 }),
+  ],
+  tundra: [
+    landmarkPlacement("ice_spire", { chance: 0.30, scale: 1.20 }),
+    landmarkPlacement("tall_fir", { chance: 0.20, scale: 1.06 }),
+    landmarkPlacement("frost_shrub", { chance: 0.52, scale: 1.04 }),
+    landmarkPlacement("boulder", { chance: 0.26, scale: 1.04 }),
+  ],
 };
 
-const SPECIAL_BIOME_LANDMARKS: Record<SpecialBiomeId, readonly LandmarkId[]> = {
-  marsh: ["cypress", "reed_cluster", "shrub"],
-  ember: ["basalt_spire", "crystal_cluster", "boulder"],
-  bloom: ["glowcap", "birch", "crystal_cluster", "shrub"],
+const SPECIAL_BIOME_LANDMARKS: Record<SpecialBiomeId, readonly LandmarkProfile[]> = {
+  marsh: [
+    landmarkPlacement("mangrove", { chance: 0.32, scale: 1.14 }),
+    landmarkPlacement("cypress", { chance: 0.28, scale: 1.08 }),
+    landmarkPlacement("reed_cluster", { chance: 0.62, scale: 1.1 }),
+    landmarkPlacement("flower_patch", { chance: 0.24, scale: 0.92, variant: 3 }),
+  ],
+  ember: [
+    landmarkPlacement("basalt_spire", { chance: 0.30, scale: 1.28 }),
+    landmarkPlacement("crystal_cluster", { chance: 0.28, scale: 1.12, variant: 3 }),
+    landmarkPlacement("dead_snag", { chance: 0.26, scale: 1.16, variant: 1 }),
+    landmarkPlacement("boulder", { chance: 0.24, scale: 0.94, variant: 1 }),
+  ],
+  bloom: [
+    landmarkPlacement("mega_glowcap", { chance: 0.24, scale: 1.18 }),
+    landmarkPlacement("glowcap", { chance: 0.32, scale: 1.08 }),
+    landmarkPlacement("crystal_cluster", { chance: 0.20, scale: 1.08, variant: 2 }),
+    landmarkPlacement("flower_patch", { chance: 0.28, scale: 1.08, variant: 4 }),
+    landmarkPlacement("canopy_tree", { chance: 0.16, scale: 1.12, variant: 4 }),
+  ],
 };
 
 const chunkGenerationScratchPool: ChunkGenerationScratch[] = [];
@@ -692,10 +764,14 @@ export class ProceduralWorldGenerator {
       - 96
       + fields.globalHeight * 460
       - fields.oceanness * 82;
+    const massifRelief = smoothstep(0.56, 0.86, fields.globalHeight)
+      * smoothstep(0.50, 0.82, fields.uplift)
+      * (18 + fields.mountainness * 112 + fields.ridge * 44);
     const sharedRelief = fields.hills * (28 + fields.globalHeight * 36)
       + (fields.ridge * fields.ridge - 0.30) * (18 + fields.mountainness * 68)
       + fields.basin * 26
-      + fields.detail * 8;
+      + fields.detail * 8
+      + massifRelief;
     const localWeight = 0.06 + biomeCore * biomeCore * 0.74;
     const localHeight = terrainProfile.heightBias * localWeight
       + fields.hills * 88 * terrainProfile.reliefScale * localWeight
@@ -836,8 +912,7 @@ export class ProceduralWorldGenerator {
       hashNoise3D(selectorCellX, 19, selectorCellZ, this.featureSeed + biomeId.length) * roster.length,
     );
     for (let attempt = 0; attempt < roster.length; attempt += 1) {
-      const landmarkId = roster[(startIndex + attempt) % roster.length]!;
-      const profile = LANDMARKS[landmarkId];
+      const profile = roster[(startIndex + attempt) % roster.length]!;
       const cellX = Math.floor(worldX / profile.cellSize);
       const cellZ = Math.floor(worldZ / profile.cellSize);
       const chance = hashNoise3D(cellX, 1, cellZ, this.featureSeed + profile.cellSize);
@@ -857,8 +932,8 @@ export class ProceduralWorldGenerator {
       }
       out.featureDeltaX = deltaX;
       out.featureDeltaZ = deltaZ;
-      if (configureLandmarkFeature(landmarkId, waterTopY, fields, out)) {
-        return landmarkId;
+      if (configureLandmarkFeature(profile, waterTopY, fields, out)) {
+        return profile.id;
       }
     }
     return null;
@@ -1053,6 +1128,39 @@ function createUndergroundBiome(
     stone: hexColorToMaterial(stone),
     deepStone: hexColorToMaterial(deepStone),
     accent: hexColorToMaterial(accent),
+  };
+}
+
+function createLandmark(
+  id: LandmarkId,
+  cellSize: number,
+  radius: number,
+  chance: number,
+  scale: number,
+  variant: number,
+): LandmarkProfile {
+  return {
+    id,
+    cellSize,
+    radius,
+    chance,
+    scale,
+    variant,
+  };
+}
+
+function landmarkPlacement(
+  id: LandmarkId,
+  overrides: Partial<Omit<LandmarkProfile, "id">> = {},
+): LandmarkProfile {
+  const base = LANDMARKS[id];
+  return {
+    id,
+    cellSize: overrides.cellSize ?? base.cellSize,
+    radius: overrides.radius ?? base.radius,
+    chance: overrides.chance ?? base.chance,
+    scale: overrides.scale ?? base.scale,
+    variant: overrides.variant ?? base.variant,
   };
 }
 
@@ -1359,7 +1467,7 @@ function pickSubsurfaceMaterial(
   return subsurface;
 }
 
-function selectLandmarkRoster(biomeId: BiomeId): readonly LandmarkId[] {
+function selectLandmarkRoster(biomeId: BiomeId): readonly LandmarkProfile[] {
   switch (biomeId) {
     case "marsh":
     case "ember":
@@ -1371,68 +1479,266 @@ function selectLandmarkRoster(biomeId: BiomeId): readonly LandmarkId[] {
 }
 
 function configureLandmarkFeature(
-  landmarkId: LandmarkId,
+  profile: LandmarkProfile,
   waterTopY: number,
   fields: ColumnFieldSample,
   out: MutableColumnState,
 ): boolean {
-  switch (landmarkId) {
+  switch (profile.id) {
     case "oak":
-      configureTreeFeature(out, FEATURE_OAK, 8 + Math.floor(fields.moisture * 5), 4, "#653", "#5B4");
+      configureTreeFeature(
+        out,
+        FEATURE_OAK,
+        scaledFeatureHeight(30, 16, fields.moisture, profile.scale),
+        scaledFeatureRadius(10, 3, fields.moisture, profile.scale),
+        "#653",
+        profile.variant >= 4 ? "#8CF" : "#5B4",
+      );
+      out.featureExtra = profile.variant;
+      return true;
+    case "canopy_tree":
+      configureTreeFeature(
+        out,
+        FEATURE_OAK,
+        scaledFeatureHeight(44, 22, fields.moisture, profile.scale),
+        scaledFeatureRadius(15, 4, fields.moisture, profile.scale),
+        "#653",
+        profile.variant >= 4 ? "#9EF" : "#4A5",
+      );
+      out.featureExtra = profile.variant;
       return true;
     case "birch":
-      configureTreeFeature(out, FEATURE_OAK, 9 + Math.floor(fields.moisture * 4), 3, "#EEC", "#9C7");
+      configureTreeFeature(
+        out,
+        FEATURE_OAK,
+        scaledFeatureHeight(32, 14, fields.moisture, profile.scale),
+        scaledFeatureRadius(8, 2, fields.moisture, profile.scale),
+        "#EEC",
+        "#9C7",
+      );
       out.featureExtra = 1;
       return true;
     case "boulder":
-      configureSpireFeature(out, FEATURE_BOULDER, 2 + Math.floor(fields.scatter * 2), 3, "#889", "#BBC");
+      configureSpireFeature(
+        out,
+        FEATURE_BOULDER,
+        scaledFeatureHeight(4, 4, fields.scatter, profile.scale),
+        scaledFeatureRadius(4, 2, fields.scatter, profile.scale),
+        profile.variant > 0 ? "#665" : "#889",
+        profile.variant > 0 ? "#887" : "#BBC",
+      );
       out.featureExtra = 0;
       return true;
     case "standing_stone":
-      configureSpireFeature(out, FEATURE_STANDING_STONE, 7 + Math.floor(fields.uplift * 4), 2, "#998", "#CBA");
+      configureSpireFeature(
+        out,
+        FEATURE_STANDING_STONE,
+        scaledFeatureHeight(22, 14, fields.uplift, profile.scale),
+        scaledFeatureRadius(3, 2, fields.uplift, profile.scale),
+        "#998",
+        "#CBA",
+      );
       return true;
     case "shrub":
-      configureTreeFeature(out, FEATURE_BUSH, 2 + Math.floor(fields.moisture * 2), 2, "#764", "#7B6");
+      configureTreeFeature(
+        out,
+        FEATURE_BUSH,
+        scaledFeatureHeight(3, 5, fields.moisture, profile.scale),
+        scaledFeatureRadius(4, 2, fields.moisture, profile.scale),
+        profile.variant === 2 ? "#986" : "#764",
+        profile.variant === 2 ? "#BA7" : "#7B6",
+      );
+      return true;
+    case "flower_patch":
+      configureTreeFeature(
+        out,
+        FEATURE_BUSH,
+        scaledFeatureHeight(2, 2, fields.scatter, profile.scale),
+        scaledFeatureRadius(5, 3, fields.moisture + fields.magic * 0.3, profile.scale),
+        "#784",
+        profile.variant === 4
+          ? "#BDF"
+          : profile.variant === 3
+          ? "#6DB"
+          : profile.variant === 2
+          ? "#DA7"
+          : "#D97",
+      );
       return true;
     case "palm":
       if (waterTopY === NO_WATER && fields.channel < 0.68) {
         return false;
       }
-      configureTreeFeature(out, FEATURE_PALM, 9 + Math.floor(fields.temperature * 4), 4, "#864", "#7B6");
+      configureTreeFeature(
+        out,
+        FEATURE_PALM,
+        scaledFeatureHeight(32, 12, fields.temperature, profile.scale),
+        scaledFeatureRadius(8, 3, fields.moisture, profile.scale),
+        "#864",
+        "#7B6",
+      );
+      return true;
+    case "acacia":
+      configureTreeFeature(
+        out,
+        FEATURE_OAK,
+        scaledFeatureHeight(26, 14, fields.temperature, profile.scale),
+        scaledFeatureRadius(13, 4, fields.moisture, profile.scale),
+        "#754",
+        "#8A5",
+      );
+      out.featureExtra = 3;
       return true;
     case "cactus":
-      configureTreeFeature(out, FEATURE_CACTUS, 5 + Math.floor(fields.temperature * 3), 2, "#596", "#7B8");
-      out.featureExtra = 1 + Math.floor(fields.surfacePatch * 2);
+      configureTreeFeature(
+        out,
+        FEATURE_CACTUS,
+        scaledFeatureHeight(14, 18, fields.temperature, profile.scale),
+        scaledFeatureRadius(2, 1, fields.surfacePatch, profile.scale),
+        "#596",
+        "#7B8",
+      );
+      out.featureExtra = profile.variant > 1 ? 2 : 1 + Math.floor(fields.surfacePatch * 2);
+      return true;
+    case "dead_snag":
+      configureSpireFeature(
+        out,
+        FEATURE_STANDING_STONE,
+        scaledFeatureHeight(20, 20, fields.uplift + fields.surfacePatch * 0.5, profile.scale),
+        scaledFeatureRadius(2, 1, fields.scatter, profile.scale),
+        profile.variant > 0 ? "#433" : "#654",
+        profile.variant > 0 ? "#654" : "#876",
+      );
       return true;
     case "hoodoo":
-      configureSpireFeature(out, FEATURE_HOODOO, 8 + Math.floor(fields.mesa * 6), 3, "#B75", "#EBA");
+      configureSpireFeature(
+        out,
+        FEATURE_HOODOO,
+        scaledFeatureHeight(24, 28, fields.mesa, profile.scale),
+        scaledFeatureRadius(6, 4, fields.mesa, profile.scale),
+        profile.variant > 0 ? "#A65" : "#B75",
+        profile.variant > 0 ? "#D97" : "#EBA",
+      );
       return true;
     case "fir":
-      configureTreeFeature(out, FEATURE_FIR, 10 + Math.floor(fields.uplift * 5), 4, "#764", "#6A7");
+      configureTreeFeature(
+        out,
+        FEATURE_FIR,
+        scaledFeatureHeight(36, 24, fields.uplift, profile.scale),
+        scaledFeatureRadius(8, 4, fields.moisture, profile.scale),
+        "#764",
+        "#6A7",
+      );
+      return true;
+    case "tall_fir":
+      configureTreeFeature(
+        out,
+        FEATURE_FIR,
+        scaledFeatureHeight(54, 32, fields.uplift, profile.scale),
+        scaledFeatureRadius(10, 5, fields.moisture, profile.scale),
+        "#654",
+        "#6B7",
+      );
       return true;
     case "ice_spire":
-      configureSpireFeature(out, FEATURE_ICE_SPIRE, 8 + Math.floor((1 - fields.temperature) * 5), 3, "#CDE", "#EFF");
+      configureSpireFeature(
+        out,
+        FEATURE_ICE_SPIRE,
+        scaledFeatureHeight(28, 22, 1 - fields.temperature, profile.scale),
+        scaledFeatureRadius(5, 3, fields.uplift, profile.scale),
+        "#CDE",
+        "#EFF",
+      );
+      return true;
+    case "frost_shrub":
+      configureTreeFeature(
+        out,
+        FEATURE_BUSH,
+        scaledFeatureHeight(3, 4, 1 - fields.temperature, profile.scale),
+        scaledFeatureRadius(4, 2, fields.moisture, profile.scale),
+        "#88A",
+        "#CDE",
+      );
       return true;
     case "cypress":
-      configureTreeFeature(out, FEATURE_CYPRESS, 8 + Math.floor(fields.drainage * 4), 3, "#554", "#486");
+      configureTreeFeature(
+        out,
+        FEATURE_CYPRESS,
+        scaledFeatureHeight(30, 18, fields.drainage, profile.scale),
+        scaledFeatureRadius(7, 4, fields.moisture, profile.scale),
+        "#554",
+        "#486",
+      );
+      return true;
+    case "mangrove":
+      if (waterTopY === NO_WATER && fields.channel < 0.56) {
+        return false;
+      }
+      configureTreeFeature(
+        out,
+        FEATURE_CYPRESS,
+        scaledFeatureHeight(34, 22, fields.moisture, profile.scale),
+        scaledFeatureRadius(10, 5, fields.moisture, profile.scale),
+        "#654",
+        "#597",
+      );
       return true;
     case "reed_cluster":
       if (waterTopY === NO_WATER && fields.channel < 0.58) {
         return false;
       }
-      configureTreeFeature(out, FEATURE_REEDS, 3 + Math.floor(fields.moisture * 2), 2, "#684", "#8A6");
+      configureTreeFeature(
+        out,
+        FEATURE_REEDS,
+        scaledFeatureHeight(8, 8, fields.moisture, profile.scale),
+        scaledFeatureRadius(2, 1, fields.moisture, profile.scale),
+        "#684",
+        "#8A6",
+      );
       out.featureExtra = 1;
       return true;
     case "basalt_spire":
-      configureSpireFeature(out, FEATURE_BASALT_SPIRE, 9 + Math.floor(fields.volcanism * 6), 3, "#433", "#F74");
+      configureSpireFeature(
+        out,
+        FEATURE_BASALT_SPIRE,
+        scaledFeatureHeight(28, 30, fields.volcanism, profile.scale),
+        scaledFeatureRadius(5, 3, fields.volcanism, profile.scale),
+        "#433",
+        "#F74",
+      );
       return true;
     case "crystal_cluster":
-      configureSpireFeature(out, FEATURE_CRYSTAL, 4 + Math.floor(fields.magic * 3), 3, "#79B", "#CEF");
+      configureSpireFeature(
+        out,
+        FEATURE_CRYSTAL,
+        scaledFeatureHeight(14, 18, fields.magic, profile.scale),
+        scaledFeatureRadius(4, 3, fields.magic, profile.scale),
+        profile.variant >= 3 ? "#A7C" : "#79B",
+        profile.variant >= 2 ? "#EFF" : "#CEF",
+      );
       out.featureExtra = 1;
       return true;
     case "glowcap":
-      configureTreeFeature(out, FEATURE_GLOWCAP, 8 + Math.floor(fields.magic * 5), 5, "#79B", "#8CF");
+      configureTreeFeature(
+        out,
+        FEATURE_GLOWCAP,
+        scaledFeatureHeight(20, 20, fields.magic, profile.scale),
+        scaledFeatureRadius(10, 5, fields.magic, profile.scale),
+        "#79B",
+        "#8CF",
+      );
       out.featureExtra = 2;
+      return true;
+    case "mega_glowcap":
+      configureTreeFeature(
+        out,
+        FEATURE_GLOWCAP,
+        scaledFeatureHeight(38, 28, fields.magic, profile.scale),
+        scaledFeatureRadius(16, 6, fields.magic, profile.scale),
+        "#68A",
+        "#AEF",
+      );
+      out.featureExtra = 3;
       return true;
     default:
       return false;
@@ -1469,6 +1775,14 @@ function configureSpireFeature(
   out.featureExtra = 1;
   out.featureMaterialPrimary = hexColorToMaterial(materialPrimary);
   out.featureMaterialSecondary = hexColorToMaterial(materialSecondary);
+}
+
+function scaledFeatureHeight(base: number, jitterRange: number, signal: number, scale: number): number {
+  return Math.max(1, Math.round((base + Math.floor(signal * jitterRange)) * scale));
+}
+
+function scaledFeatureRadius(base: number, jitterRange: number, signal: number, scale: number): number {
+  return Math.max(1, Math.round((base + signal * jitterRange) * scale));
 }
 
 function sampleMaterialFromScratch(
@@ -1565,14 +1879,23 @@ function sampleFeatureMaterial(
   const absZ = Math.abs(featureDeltaZ);
   const radial = Math.hypot(featureDeltaX, featureDeltaZ);
   switch (featureKind) {
-    case FEATURE_OAK:
-      if (relativeY <= featureHeight - 4) {
-        const trunkRadius = featureExtra > 0 ? 0.55 : 0.75;
+    case FEATURE_OAK: {
+      const canopyVariant = featureExtra >= 4 ? 2 : featureExtra >= 2 ? 1 : 0;
+      const slender = featureExtra === 1;
+      const trunkCutoff = canopyVariant === 0
+        ? featureHeight - 4
+        : featureHeight - Math.max(6, Math.round(featureHeight * (canopyVariant === 1 ? 0.24 : 0.28)));
+      if (relativeY <= trunkCutoff) {
+        const trunkRadius = slender ? 0.55 : canopyVariant > 0 ? 0.85 : 0.75;
         return absX <= trunkRadius && absZ <= trunkRadius ? materialPrimary : 0;
       }
-      return radial <= Math.max(featureExtra > 0 ? 1.25 : 1.5, featureRadius - Math.abs(relativeY - (featureHeight - 2)) * (featureExtra > 0 ? 0.7 : 0.9))
+      const canopyCenter = canopyVariant === 0 ? featureHeight - 2 : featureHeight - Math.max(2, Math.round(featureHeight * 0.10));
+      const canopyFalloff = canopyVariant === 0 ? (slender ? 0.7 : 0.9) : canopyVariant === 1 ? 0.38 : 0.50;
+      const canopyBaseRadius = canopyVariant === 0 ? (slender ? 1.25 : 1.5) : featureRadius * (canopyVariant === 1 ? 0.72 : 0.78);
+      return radial <= Math.max(canopyBaseRadius, featureRadius - Math.abs(relativeY - canopyCenter) * canopyFalloff)
         ? materialSecondary
         : 0;
+    }
     case FEATURE_BOULDER:
       if (relativeY === featureHeight && radial <= Math.max(0.8, featureRadius - 0.6)) {
         return materialSecondary;
@@ -1646,14 +1969,14 @@ function sampleFeatureMaterial(
       }
       return radial <= Math.max(0.9, featureRadius - relativeY * 0.55) ? materialPrimary : 0;
     case FEATURE_GLOWCAP:
-      if (relativeY <= featureHeight - 3) {
+      if (relativeY <= featureHeight - (featureExtra >= 3 ? 5 : 3)) {
         return absX <= 0.75 && absZ <= 0.75 ? materialPrimary : 0;
       }
       return relativeY <= featureHeight - 1
-        ? radial <= Math.max(1.5, featureRadius - Math.abs(relativeY - (featureHeight - 2)) * 0.8)
+        ? radial <= Math.max(featureExtra >= 3 ? 3 : 1.5, featureRadius - Math.abs(relativeY - (featureHeight - 2)) * (featureExtra >= 3 ? 0.45 : 0.8))
           ? materialSecondary
           : 0
-        : radial <= featureRadius + 0.5 ? materialSecondary : 0;
+        : radial <= featureRadius + (featureExtra >= 3 ? 2 : 0.5) ? materialSecondary : 0;
     default:
       return 0;
   }

@@ -925,3 +925,38 @@
 - Raised jump velocity from `3.6 m/s` to `4.2 m/s` and added a regression that the player reaches at least `0.8 m` above the takeoff point.
 - Main lesson from this slice:
   - if a "global heightmap" contains fast mountain/mesa signal at full strength, it stops being global and biome-border cliffs come back immediately
+
+### Landmark scale and terrain-detail follow-up
+
+- Used `docs/20260311-biome-tech.md` directly as the constraint for this pass:
+  - keep biome identity field-driven
+  - keep the hot path as one compact per-column state pass
+  - buy most visible variety from deterministic placement descriptors rather than exploding the per-voxel feature switch
+- Reworked landmark selection from `biome -> landmark ids` into `biome -> placement profiles`:
+  - each profile now carries `cellSize`, `chance`, `radius`, `scale`, and `variant`
+  - this makes it cheap to vary density, silhouette size, and look per biome without adding a second object system yet
+- The visible scale problem was real:
+  - trees were still miniature relative to a `1.8 m` player
+  - the new landmark ranges now regularly produce `3 m` to `9+ m` silhouettes instead of mostly sub-player-height props
+- Added more biome-distinct landmark families:
+  - `canopy_tree`
+  - `flower_patch`
+  - `acacia`
+  - `dead_snag`
+  - `tall_fir`
+  - `frost_shrub`
+  - `mangrove`
+  - `mega_glowcap`
+- Also retuned density after a fixed-seed count probe showed the first roster rewrite was still too dominated by small flowers/shrubs in `verdant` and `steppe`:
+  - reduced clutter-only entries there
+  - increased the chance of larger biome-defining silhouettes like `canopy_tree`, `acacia`, `tall_fir`, `hoodoo`, and `ice_spire`
+- The terrain also needed to feel more like a `10 cm` world:
+  - raised biome micro-relief substantially
+  - added a rare slow `massifRelief` term so the shared/global terrain can produce more visible high hills and mountains without reintroducing border cliffs
+- Raised jump velocity again from `4.2 m/s -> 4.7 m/s` so the player now clears at least `1.0 m` above the takeoff point.
+- The fixed-seed measurement screen for this follow-up stayed acceptable:
+  - large `sampleColumn()` sweep: about `74.9 ms`
+  - fixed `16`-chunk generation batch: about `23.3 ms`
+- Main lesson from this slice:
+  - "more landmark ids" was not the real fix
+  - scale, density, and profile-driven placement matter more than adding more geometry cases when the engine still uses one compact feature slot
