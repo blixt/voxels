@@ -1181,3 +1181,70 @@
 - Main lesson from this slice:
   - rare extreme cases are working best as overlays on top of the current field-driven biome system
   - the right failure mode to watch is "dead-code rarity logic", not just "too common"
+
+### Larger biome-family expansion
+
+- This pass finally moved beyond the first six-base-biome world. I kept the expansion aligned with `docs/20260311-biomes.md` by adding real new biome families instead of only adding more palette variants or rare overlays.
+- New base biomes:
+  - `savanna`
+  - `moor`
+- New special biomes:
+  - `firefly`
+  - `saltflat`
+  - `fern`
+  - `fungal`
+  - `shardlands`
+- New landmark families added to support that expansion:
+  - `giant_fern`
+  - `lantern_tree`
+  - `salt_spire`
+- The explored doc ideas that are now actually represented in the generator are:
+  - wildflower savanna
+  - shadowglass/heather moor
+  - firefly fen
+  - giant fern basin
+  - moonlit mushroom / fungal canopy
+  - salt mirror pan
+  - crystal-shard-style barrens through `shardlands`
+- I deliberately kept these as field-derived transforms and host-rule specials rather than exploding the public biome enum even further:
+  - `saltflat` is a lowland evaporite / basin transform
+  - `firefly`, `fern`, and `fungal` are wet/humid transformations over different host conditions
+  - `shardlands` is a high-energy dry transform over crystalline / volcanic / arid terrain
+- I did not keep the first version of this pass:
+  - the initial new-special selectors were too multiplicative again
+  - `firefly`, `fern`, and `fungal` barely appeared or stayed completely absent
+  - after switching those selectors to averaged signals, they became real regions
+- I also rejected the first water policy for the new wet biomes:
+  - `fern` and `firefly` were so waterlogged that they mostly lost their signature vegetation and reduced to reeds/boulders
+  - I kept the version with drier islands and stricter cenote/pool triggers instead
+- Another important verification/process change from this slice:
+  - for `shardlands`, a strict host-biome assertion was less useful than checking the actual selector intent
+  - the kept regression now asserts dry/high-energy field conditions instead of pretending the host label alone is the truth
+- The kept fixed-seed broad scan now shows the expanded world is genuinely broader:
+  - `16` top-level biomes present on the `64`-step scan
+  - new biome counts include:
+    - `savanna`: `13005`
+    - `moor`: `1607`
+    - `firefly`: `1166`
+    - `saltflat`: `911`
+    - `fern`: `2200`
+    - `fungal`: `1675`
+    - `shardlands`: `2602`
+- The new regional overlays that survived this pass are:
+  - `savanna_flowersea`
+  - `moor_shadowglass`
+  - `firefly_lantern`
+  - `saltflat_mirror`
+  - `fern_cenote`
+  - `fungal_moonlit`
+- The strongest distinct biome identities now measured in the deterministic scan are:
+  - `savanna`: `acacia`, `thorn_tree`, `flower_patch`, `fruit_tree`
+  - `moor`: `dead_tree`, `frost_shrub`, `standing_stone`, `lantern_tree`
+  - `firefly`: `lantern_tree`, `glowcap`, `reed_cluster`, `willow`
+  - `fern`: `giant_fern`, `canopy_tree`, `glowcap`
+  - `fungal`: `lantern_tree`, `glowcap`, `giant_flower`
+  - `saltflat`: `salt_spire`, `crystal_cluster`, `standing_stone`
+  - `shardlands`: `salt_spire`, `crystal_cluster`, `hoodoo`, `dead_tree`
+- Main lesson from this slice:
+  - when adding many more biomes to this engine, the highest-value pattern is still "derived transforms over continuous fields"
+  - but the verification target has to be broader than simple presence: I now need to prove the intended landmark identity for each new biome, not just that the biome id appears somewhere

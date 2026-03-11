@@ -203,3 +203,24 @@ Update:
 - current implementation lesson:
   - the selector math for these overlays has to be verified numerically over broad scans
   - overly multiplicative rules look principled but can leave most of the interesting cases effectively unreachable
+- the next kept extension adds more actual biome families from the research notes:
+  - new base biomes:
+    - `savanna`
+    - `moor`
+  - new special biomes:
+    - `firefly`
+    - `saltflat`
+    - `fern`
+    - `fungal`
+    - `shardlands`
+- the current interpretation is:
+  - use a new top-level biome family when the world-rule combination has a meaningfully different terrain/material/object identity
+  - use a regional overlay when the world-rule combination is a rarer mutation inside an existing family
+- new landmark families added for that expansion:
+  - `giant_fern`
+  - `lantern_tree`
+  - `salt_spire`
+- the most important implementation lesson from this larger expansion was not about content:
+  - it was about selector shape
+  - the first new-special pass used multiplicative selectors again and mostly dead-coded `firefly`, `fern`, and `fungal`
+  - the kept pass switched those selectors to averaged signals, then separately tuned water policy so wet biomes did not drown their own landmark identity

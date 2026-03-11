@@ -2861,3 +2861,76 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - It materially increases rare discovery moments without reopening hard biome-boundary cliffs.
 - The main failure mode for future passes is still selectors that are too multiplicative and end up producing attractive dead code.
+
+### Larger biome-family expansion
+
+#### Commands
+
+- `mise exec -- bun test tests/procedural-generator.test.ts`
+- `mise run build`
+- `mise exec -- bun --eval '<fixed-seed biome/variant/landmark distribution probe>'`
+
+#### Checks
+
+- Focused generator tests: passing
+  - `23 pass`
+  - `0 fail`
+- `mise run build`: passing
+
+#### Numeric probes
+
+- Broad biome scan (`x/z = -8192..8192 step 64`):
+  - `16` top-level biomes observed
+  - key new biome counts:
+    - `savanna`: `13005`
+    - `moor`: `1607`
+    - `firefly`: `1166`
+    - `saltflat`: `911`
+    - `fern`: `2200`
+    - `fungal`: `1675`
+    - `shardlands`: `2602`
+- Broad regional-variant scan on the same grid:
+  - `savanna_flowersea`: `252`
+  - `moor_shadowglass`: `9`
+  - `firefly_lantern`: `337`
+  - `saltflat_mirror`: `167`
+  - `fern_cenote`: `106`
+  - `fungal_moonlit`: `106`
+- Broad biome/landmark identity scan (`x/z = -6144..6144 step 16`):
+  - `fern`: `giant_fern`, `canopy_tree`, `glowcap`, `berry_bush`
+  - `firefly`: `lantern_tree`, `glowcap`, `reed_cluster`, `willow`
+  - `fungal`: `lantern_tree`, `glowcap`, `giant_flower`, `berry_bush`
+  - `saltflat`: `salt_spire`, `crystal_cluster`, `standing_stone`
+  - `shardlands`: `salt_spire`, `crystal_cluster`, `hoodoo`, `dead_tree`
+  - `savanna`: `acacia`, `thorn_tree`, `fruit_tree`, `flower_patch`
+  - `moor`: `dead_tree`, `frost_shrub`, `standing_stone`, `lantern_tree`
+
+#### Added verification coverage
+
+- The biome-distribution regression now proves the expanded base roster includes `savanna` and `moor`.
+- The special-biome regression now covers:
+  - `firefly`
+  - `saltflat`
+  - `fern`
+  - `fungal`
+  - `shardlands`
+- The regional-variant regression now covers the new kept overlays:
+  - `savanna_flowersea`
+  - `moor_shadowglass`
+  - `firefly_lantern`
+  - `saltflat_mirror`
+  - `fern_cenote`
+  - `fungal_moonlit`
+- The landmark coverage and identity regressions now require:
+  - `giant_fern`
+  - `lantern_tree`
+  - `salt_spire`
+  - and biome-specific landmark identity for the new biome families
+
+#### Residual
+
+- This slice is worth keeping.
+- The new biomes are no longer dead code and they carry distinct landmark/material identities.
+- Current remaining asymmetry:
+  - `marsh` is still much rarer than the new `firefly` wetland path
+  - `dunes` now occupy less of the broad scan because `saltflat` and `shardlands` claim more of the dry-energy design space

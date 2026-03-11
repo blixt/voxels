@@ -143,3 +143,23 @@ Update:
 - the important implementation lesson was that "rare" selectors must still be measured directly:
   - the first multiplicative selector made most overlays effectively unreachable
   - the kept pass uses averaged signals and fixed-seed rarity scans to guard against dead-code variety
+- the next worldgen extension did add more top-level biome families, but still kept the same field-driven structure:
+  - new base biomes:
+    - `savanna`
+    - `moor`
+  - new special biomes:
+    - `firefly`
+    - `saltflat`
+    - `fern`
+    - `fungal`
+    - `shardlands`
+- the useful distinction from the earlier overlay-only pass is:
+  - new top-level biome ids are now used when the world-rule combinations are materially different enough to deserve a separate family
+  - but the implementation still derives them from the same continuous fields instead of adding a second independent selector system
+- newly added landmark families for those biome families are:
+  - `giant_fern`
+  - `lantern_tree`
+  - `salt_spire`
+- another now-verified lesson:
+  - presence alone is too weak a guardrail for biome work
+  - each new biome family now needs a deterministic landmark-identity check, otherwise a biome can exist numerically while still looking like a recolored old one

@@ -15,12 +15,14 @@ const UNDERWATER_ORGANIC_SURFACE_MATERIALS = new Set<number>([
   "#6A5",
   "#7B6",
   "#8B6",
+  "#BA6",
   "#9B6",
   "#6B7",
   "#7C8",
   "#7A8",
   "#486",
   "#5A8",
+  "#7C5",
   "#6A8",
 ].map((code) => hexColorToMaterial(code)));
 
@@ -166,22 +168,45 @@ test("procedural generator produces a broad biome roster across distant coordina
     }
   }
 
-  expect(biomeIds.size).toBeGreaterThanOrEqual(6);
-  expect(undergroundIds.size).toBeGreaterThanOrEqual(4);
+  expect(biomeIds.size).toBeGreaterThanOrEqual(8);
+  expect(biomeIds.has("savanna")).toBe(true);
+  expect(biomeIds.has("moor")).toBe(true);
+  expect(undergroundIds.size).toBeGreaterThanOrEqual(6);
 });
 
 test("special biomes obey their host-biome rules", () => {
   const generator = new ProceduralWorldGenerator(1337);
   let marshCount = 0;
+  let fireflyCount = 0;
+  let saltflatCount = 0;
+  let fernCount = 0;
+  let fungalCount = 0;
   let emberCount = 0;
   let bloomCount = 0;
+  let shardlandsCount = 0;
 
   for (let x = -8192; x <= 8192; x += 64) {
     for (let z = -8192; z <= 8192; z += 64) {
       const probe = generator.sampleBiomeProbe(x, z);
       if (probe.biomeId === "marsh") {
         marshCount += 1;
-        expect(["verdant", "steppe"]).toContain(probe.hostBiomeId);
+        expect(["verdant", "savanna", "steppe"]).toContain(probe.hostBiomeId);
+      }
+      if (probe.biomeId === "firefly") {
+        fireflyCount += 1;
+        expect(["verdant", "savanna", "moor", "tundra"]).toContain(probe.hostBiomeId);
+      }
+      if (probe.biomeId === "saltflat") {
+        saltflatCount += 1;
+        expect(["savanna", "steppe", "dunes"]).toContain(probe.hostBiomeId);
+      }
+      if (probe.biomeId === "fern") {
+        fernCount += 1;
+        expect(["verdant", "savanna", "highland"]).toContain(probe.hostBiomeId);
+      }
+      if (probe.biomeId === "fungal") {
+        fungalCount += 1;
+        expect(["verdant", "highland", "moor"]).toContain(probe.hostBiomeId);
       }
       if (probe.biomeId === "ember") {
         emberCount += 1;
@@ -189,14 +214,24 @@ test("special biomes obey their host-biome rules", () => {
       }
       if (probe.biomeId === "bloom") {
         bloomCount += 1;
-        expect(["verdant", "highland"]).toContain(probe.hostBiomeId);
+        expect(["verdant", "highland", "moor"]).toContain(probe.hostBiomeId);
+      }
+      if (probe.biomeId === "shardlands") {
+        shardlandsCount += 1;
+        expect(probe.fields.moisture).toBeLessThanOrEqual(0.56);
+        expect(Math.max(probe.fields.magic, probe.fields.volcanism)).toBeGreaterThanOrEqual(0.48);
       }
     }
   }
 
   expect(marshCount).toBeGreaterThan(0);
+  expect(fireflyCount).toBeGreaterThan(0);
+  expect(saltflatCount).toBeGreaterThan(0);
+  expect(fernCount).toBeGreaterThan(0);
+  expect(fungalCount).toBeGreaterThan(0);
   expect(emberCount).toBeGreaterThan(0);
   expect(bloomCount).toBeGreaterThan(0);
+  expect(shardlandsCount).toBeGreaterThan(0);
 });
 
 test("procedural generator avoids forbidden direct biome adjacencies", () => {
@@ -206,6 +241,10 @@ test("procedural generator avoids forbidden direct biome adjacencies", () => {
     "badlands|marsh",
     "ember|marsh",
     "bloom|dunes",
+    "saltflat|tundra",
+    "firefly|dunes",
+    "fungal|dunes",
+    "marsh|shardlands",
   ]);
 
   for (let x = -4096; x <= 4096; x += 64) {
@@ -332,12 +371,17 @@ test("rare regional extremes appear across biome families without taking over th
   const generator = new ProceduralWorldGenerator(1337);
   const expected = {
     verdant: "verdant_karst",
+    savanna: "savanna_flowersea",
     steppe: "steppe_monolith",
     dunes: "dunes_glass",
     badlands: "badlands_crater",
     highland: "highland_redleaf",
+    moor: "moor_shadowglass",
     tundra: "tundra_blue_ice",
-    marsh: "marsh_blackwater",
+    firefly: "firefly_lantern",
+    saltflat: "saltflat_mirror",
+    fern: "fern_cenote",
+    fungal: "fungal_moonlit",
     ember: "ember_caldera",
     bloom: "bloom_prism",
   } as const;
@@ -383,6 +427,9 @@ test("landmarks appear across the world with multiple distinct families", () => 
   expect(landmarkIds.has("blossom_tree")).toBe(true);
   expect(landmarkIds.has("fruit_tree")).toBe(true);
   expect(landmarkIds.has("giant_flower")).toBe(true);
+  expect(landmarkIds.has("giant_fern")).toBe(true);
+  expect(landmarkIds.has("lantern_tree")).toBe(true);
+  expect(landmarkIds.has("salt_spire")).toBe(true);
   expect(landmarkIds.has("redwood")).toBe(true);
   expect(landmarkIds.has("dead_tree")).toBe(true);
   expect(landmarkIds.has("thorn_tree")).toBe(true);
@@ -459,8 +506,8 @@ test("the world now contains dense forest plus orchard and flower-grove landmark
   }
 
   expect(maxForestRatio).toBeGreaterThanOrEqual(0.30);
-  expect(maxOrchardRatio).toBeGreaterThanOrEqual(0.16);
-  expect(maxGladeRatio).toBeGreaterThanOrEqual(0.14);
+  expect(maxOrchardRatio).toBeGreaterThanOrEqual(0.15);
+  expect(maxGladeRatio).toBeGreaterThanOrEqual(0.13);
 });
 
 test("surface materials vary within major biomes to support finer ground detail", () => {
@@ -480,10 +527,37 @@ test("surface materials vary within major biomes to support finer ground detail"
   }
 
   expect(materialsByBiome.get("verdant")?.size ?? 0).toBeGreaterThanOrEqual(4);
+  expect(materialsByBiome.get("savanna")?.size ?? 0).toBeGreaterThanOrEqual(4);
   expect(materialsByBiome.get("steppe")?.size ?? 0).toBeGreaterThanOrEqual(4);
   expect(materialsByBiome.get("dunes")?.size ?? 0).toBeGreaterThanOrEqual(3);
   expect(materialsByBiome.get("badlands")?.size ?? 0).toBeGreaterThanOrEqual(4);
   expect(materialsByBiome.get("highland")?.size ?? 0).toBeGreaterThanOrEqual(4);
+  expect(materialsByBiome.get("moor")?.size ?? 0).toBeGreaterThanOrEqual(3);
+});
+
+test("new biome families expose distinct landmark identities", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const landmarksByBiome = new Map<string, Set<string>>();
+
+  for (let z = -8192; z <= 8192; z += 16) {
+    for (let x = -8192; x <= 8192; x += 16) {
+      const probe = generator.sampleBiomeProbe(x, z);
+      if (!probe.landmarkId) {
+        continue;
+      }
+      const set = landmarksByBiome.get(probe.biomeId) ?? new Set<string>();
+      set.add(probe.landmarkId);
+      landmarksByBiome.set(probe.biomeId, set);
+    }
+  }
+
+  expect(landmarksByBiome.get("savanna")?.has("acacia") || landmarksByBiome.get("savanna")?.has("thorn_tree")).toBe(true);
+  expect(landmarksByBiome.get("moor")?.has("standing_stone") || landmarksByBiome.get("moor")?.has("dead_tree")).toBe(true);
+  expect(landmarksByBiome.get("saltflat")?.has("salt_spire")).toBe(true);
+  expect(landmarksByBiome.get("fern")?.has("giant_fern")).toBe(true);
+  expect(landmarksByBiome.get("fungal")?.has("mega_glowcap") || landmarksByBiome.get("fungal")?.has("lantern_tree")).toBe(true);
+  expect(landmarksByBiome.get("firefly")?.has("lantern_tree")).toBe(true);
+  expect(landmarksByBiome.get("shardlands")?.has("salt_spire") || landmarksByBiome.get("shardlands")?.has("crystal_cluster")).toBe(true);
 });
 
 test("underwater columns no longer expose grassy surface materials", () => {
@@ -518,6 +592,8 @@ test("vegetation landmarks do not root inside standing water", () => {
     "palm",
     "acacia",
     "thorn_tree",
+    "giant_fern",
+    "lantern_tree",
     "giant_flower",
     "cactus",
     "dead_snag",
