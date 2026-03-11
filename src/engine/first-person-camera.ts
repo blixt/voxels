@@ -7,7 +7,6 @@ import {
   degToRad,
   multiplyMatrices,
   normalizeVec3,
-  scaleVec3,
 } from "./math.ts";
 import type { Vec3 } from "./types.ts";
 
@@ -35,12 +34,6 @@ export interface FirstPersonCameraMatrices {
   viewProjection: Float32Array;
 }
 
-export interface FirstPersonMovementInput {
-  forward: number;
-  strafe: number;
-  vertical: number;
-}
-
 export function createFirstPersonCamera(
   position: Vec3,
   yaw = degToRad(45),
@@ -52,7 +45,7 @@ export function createFirstPersonCamera(
     pitch,
     fovY: degToRad(68),
     near: 0.1,
-    far: 1600,
+    far: 20000,
   };
 }
 
@@ -87,30 +80,6 @@ export function rotateFirstPersonCamera(
 ): void {
   camera.yaw += deltaX * LOOK_YAW_PER_PIXEL;
   camera.pitch = clamp(camera.pitch - deltaY * LOOK_PITCH_PER_PIXEL, MIN_PITCH, MAX_PITCH);
-}
-
-export function moveFirstPersonCamera(
-  camera: FirstPersonCameraState,
-  input: FirstPersonMovementInput,
-  deltaSeconds: number,
-  speed: number,
-): void {
-  const horizontalForward = normalizeVec3([
-    Math.cos(camera.yaw),
-    0,
-    Math.sin(camera.yaw),
-  ]);
-  const horizontalRight: Vec3 = [-horizontalForward[2], 0, horizontalForward[0]];
-  let movement = addVec3(
-    scaleVec3(horizontalForward, input.forward),
-    addVec3(scaleVec3(horizontalRight, input.strafe), [0, input.vertical, 0]),
-  );
-  const length = Math.hypot(movement[0], movement[1], movement[2]);
-  if (length === 0) {
-    return;
-  }
-  movement = scaleVec3(movement, (speed * deltaSeconds) / length);
-  camera.position = addVec3(camera.position, movement);
 }
 
 export function createForwardRay(camera: FirstPersonCameraState): {

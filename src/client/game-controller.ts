@@ -1,11 +1,18 @@
 import {
   buildFirstPersonCameraMatrices,
   createFirstPersonCamera,
-  moveFirstPersonCamera,
   rotateFirstPersonCamera,
   type FirstPersonCameraState,
 } from "../engine/first-person-camera.ts";
 import { rebuildDirtyMeshes } from "../engine/mesher.ts";
+import {
+  createPlayerState,
+  getPlayerEyePosition,
+  PLAYER_EYE_HEIGHT,
+  stepPlayer,
+  teleportPlayerToEyePosition,
+  type PlayerState,
+} from "../engine/player-physics.ts";
 import {
   diffChunkCoords,
   summarizeResidentWorld,
@@ -17,9 +24,6 @@ import { WebGpuVoxelRenderer } from "../engine/renderer.ts";
 import type { Vec3 } from "../engine/types.ts";
 import type { MeshBuildSummary } from "../engine/mesher.ts";
 
-const BASE_MOVE_SPEED = 30;
-const FAST_MOVE_MULTIPLIER = 3;
-const SLOW_MOVE_MULTIPLIER = 0.35;
 const MAX_DELTA_SECONDS = 0.05;
 const HUD_PUSH_INTERVAL_MS = 120;
 
@@ -27,7 +31,9 @@ export interface GameHudSnapshot {
   status: string;
   pointerLocked: boolean;
   position: Vec3;
+  feetPosition: Vec3;
   playerChunk: [number, number, number];
+  grounded: boolean;
   yawDegrees: number;
   pitchDegrees: number;
   solidVoxelCount: number;
@@ -65,6 +71,7 @@ export class GameController {
 
   renderer: WebGpuVoxelRenderer | null = null;
   camera: FirstPersonCameraState = createFirstPersonCamera([0.5, 1500, 0.5]);
+  player: PlayerState = createPlayerState([0.5, 1500 - PLAYER_EYE_HEIGHT, 0.5]);
   meshMs = 0;
   drawCalls = 0;
   triangles = 0;
@@ -141,11 +148,13 @@ export class GameController {
       status: this.status,
       pointerLocked: this.pointerLocked,
       position: [...this.camera.position],
+      feetPosition: [...this.player.feetPosition] as Vec3,
       playerChunk: [
-        Math.floor(this.camera.position[0] / this.world.chunkSize),
-        Math.floor(this.camera.position[1] / this.world.chunkSize),
-        Math.floor(this.camera.position[2] / this.world.chunkSize),
+        Math.floor(this.player.feetPosition[0] / this.world.chunkSize),
+        Math.floor(this.player.feetPosition[1] / this.world.chunkSize),
+        Math.floor(this.player.feetPosition[2] / this.world.chunkSize),
       ],
+      grounded: this.player.grounded,
       yawDegrees: toDegrees(this.camera.yaw),
       pitchDegrees: toDegrees(this.camera.pitch),
       solidVoxelCount: stats.solidVoxelCount,
@@ -169,7 +178,8 @@ export class GameController {
   }
 
   teleport(position: Vec3): void {
-    this.camera.position = [...position];
+    teleportPlayerToEyePosition(this.player, position);
+    this.syncCameraToPlayer();
     this.syncWorldAroundPlayer();
     this.pushHud(true);
   }
@@ -201,7 +211,8 @@ export class GameController {
     if (options.radiusChunks !== undefined) {
       this.world.setHorizontalRadiusChunks(options.radiusChunks);
     }
-    this.camera.position = [...position];
+    teleportPlayerToEyePosition(this.player, position);
+    this.syncCameraToPlayer();
     this.syncWorldAroundPlayer();
     const after = this.snapshotResidentWorld();
     const { entered, evicted } = diffChunkCoords(
@@ -226,7 +237,8 @@ export class GameController {
 
   private loadBootstrapWorld(): void {
     const spawn = this.world.getSpawnPosition();
-    this.camera = createFirstPersonCamera(spawn, 0.8, -0.32);
+    this.player = createPlayerState(spawn, { grounded: true });
+    this.camera = createFirstPersonCamera(getPlayerEyePosition(this.player), 0.8, -0.32);
     this.syncWorldAroundPlayer();
     this.status = "Click once to capture cursor";
     this.pushHud(true);
@@ -251,7 +263,7 @@ export class GameController {
   private readonly handlePointerLockChange = () => {
     this.pointerLocked = document.pointerLockElement === this.canvas;
     this.status = this.pointerLocked
-      ? "Pointer locked: WASD move, Space rise, Shift descend, Ctrl sprint"
+      ? "Pointer locked: WASD move, Space jump, Ctrl sprint, Alt slow"
       : "Click once to capture cursor";
     this.pushHud(true);
   };
@@ -285,29 +297,32 @@ export class GameController {
   };
 
   private updateMovement(deltaSeconds: number): void {
-    if (!this.pointerLocked) {
-      return;
-    }
-    const forward = (this.isPressed("KeyW") ? 1 : 0) - (this.isPressed("KeyS") ? 1 : 0);
-    const strafe = (this.isPressed("KeyD") ? 1 : 0) - (this.isPressed("KeyA") ? 1 : 0);
-    const vertical = (this.isPressed("Space") ? 1 : 0) - (this.isPressed("ShiftLeft", "ShiftRight") ? 1 : 0);
-    if (forward === 0 && strafe === 0 && vertical === 0) {
-      return;
-    }
-    let speed = BASE_MOVE_SPEED;
-    if (this.isPressed("ControlLeft", "ControlRight")) {
-      speed *= FAST_MOVE_MULTIPLIER;
-    }
-    if (this.isPressed("AltLeft", "AltRight")) {
-      speed *= SLOW_MOVE_MULTIPLIER;
-    }
-    moveFirstPersonCamera(
-      this.camera,
-      { forward, strafe, vertical },
+    const input = this.pointerLocked
+      ? {
+          forward: (this.isPressed("KeyW") ? 1 : 0) - (this.isPressed("KeyS") ? 1 : 0),
+          strafe: (this.isPressed("KeyD") ? 1 : 0) - (this.isPressed("KeyA") ? 1 : 0),
+          jump: this.isPressed("Space"),
+          sprint: this.isPressed("ControlLeft", "ControlRight"),
+          precision: this.isPressed("AltLeft", "AltRight"),
+        }
+      : {
+          forward: 0,
+          strafe: 0,
+          jump: false,
+          sprint: false,
+          precision: false,
+        };
+    const result = stepPlayer(
+      this.world,
+      this.player,
+      this.camera.yaw,
+      input,
       deltaSeconds,
-      speed,
     );
-    this.syncWorldAroundPlayer();
+    this.syncCameraToPlayer();
+    if (result.moved) {
+      this.syncWorldAroundPlayer();
+    }
   }
 
   private renderInteractiveFrame(): void {
@@ -329,7 +344,7 @@ export class GameController {
   }
 
   private syncWorldAroundPlayer(): void {
-    const residency = this.world.updateResidencyAround(this.camera.position);
+    const residency = this.world.updateResidencyAround(this.player.feetPosition);
     if (!residency.changed) {
       return;
     }
@@ -343,6 +358,10 @@ export class GameController {
 
   private isPressed(...codes: string[]): boolean {
     return codes.some((code) => this.pressedKeys.has(code));
+  }
+
+  private syncCameraToPlayer(): void {
+    this.camera.position = getPlayerEyePosition(this.player);
   }
 
   private pushHud(force = false): void {
@@ -369,8 +388,6 @@ function isMovementKey(code: string): boolean {
     || code === "KeyS"
     || code === "KeyD"
     || code === "Space"
-    || code === "ShiftLeft"
-    || code === "ShiftRight"
     || code === "ControlLeft"
     || code === "ControlRight"
     || code === "AltLeft"

@@ -179,11 +179,9 @@ Status:
 ## Immediate implementation tasks
 
 - Keep machine-readable generation and residency probes aligned with the game/runtime code.
-- Add a proper player body:
-  - explicit eye height
-  - grounded movement
-  - gravity
-  - voxel collision
+- Keep the grounded-player slice honest:
+  - add spawn-footprint regression coverage so player starts remain stable
+  - preserve feet position and grounded state in the game debug surface
 - Re-tune the early terrain envelope so the first generated world reads as traversable terrain instead of a stress case.
 - Add a dedicated stream-hitch benchmark path so movement-triggered chunk work is measurable without relying on ad hoc game probes.
 - Use the current phase metrics to move residency/meshing off the synchronous movement path instead of chasing only narrow mesher micro-optimizations.

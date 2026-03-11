@@ -206,3 +206,21 @@
   - tame the early terrain envelope
   - build a dedicated stream-hitch benchmark path
   - treat long-distance visibility as an architectural problem rather than a radius tweak
+- Landed the first grounded-player slice instead of leaving `/` in free-fly mode:
+  - added `src/engine/player-physics.ts` for player body state, gravity, jump gating, and voxel collision
+  - switched the game controller over to a player body plus derived eye position instead of moving the camera directly
+  - updated the game HUD and controls copy so the runtime now exposes feet position and grounded state
+- Moved the spawn/body baseline closer to the intended scale:
+  - the resident-world spawn now starts at the footprint-aware stand height instead of `surface + 8`
+  - spawn search now prefers flatter `32 cm` footprint candidates instead of dropping the player onto the first preferred biome hit
+  - the camera now derives from a body with `168 cm` eye height over a `180 cm` player height
+  - the perspective far plane was widened so the renderer is no longer the limiting factor on distance
+- Added direct physics coverage for the new slice:
+  - falling onto flat ground
+  - blocking on a solid wall
+  - grounded-only jumping
+  - eye position derivation from feet position
+- Revalidated the grounded slice in fresh Chrome 146 on a fresh server port:
+  - the HUD now reports feet position and grounded state directly
+  - scripted idle updates keep the spawned player grounded instead of falling through the world
+  - pointer-lock denial in automation still degrades cleanly to a status message instead of throwing

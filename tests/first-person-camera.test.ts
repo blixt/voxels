@@ -4,7 +4,6 @@ import {
   buildFirstPersonCameraMatrices,
   createFirstPersonCamera,
   createForwardRay,
-  moveFirstPersonCamera,
   rotateFirstPersonCamera,
 } from "../src/engine/first-person-camera.ts";
 
@@ -15,22 +14,6 @@ test("moving the mouse downward pitches the first-person camera downward", () =>
   rotateFirstPersonCamera(camera, 0, 24);
 
   expect(camera.pitch).toBeLessThan(originalPitch);
-});
-
-test("forward movement stays level even when the camera is pitched", () => {
-  const camera = createFirstPersonCamera([12, 40, 18], 0.9, 1.1);
-
-  moveFirstPersonCamera(camera, { forward: 1, strafe: 0, vertical: 0 }, 1, 10);
-
-  expect(camera.position[1]).toBe(40);
-});
-
-test("diagonal movement is normalized to the requested speed", () => {
-  const camera = createFirstPersonCamera([0, 0, 0], 0);
-
-  moveFirstPersonCamera(camera, { forward: 1, strafe: 1, vertical: 0 }, 0.5, 8);
-
-  expect(Math.hypot(camera.position[0], camera.position[1], camera.position[2])).toBeCloseTo(4, 5);
 });
 
 test("forward ray uses the camera position and a normalized direction", () => {

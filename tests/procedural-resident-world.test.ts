@@ -75,6 +75,27 @@ test("changing view distance forces a broader residency window", () => {
   expect(world.getStats().chunkCount).toBeGreaterThan(before);
 });
 
+test("spawn selection prefers a flatter standing footprint", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337));
+  const spawn = world.getSpawnPosition();
+  const centerX = Math.floor(spawn[0]);
+  const centerZ = Math.floor(spawn[2]);
+  const heights = [
+    world.generator.sampleColumn(centerX, centerZ).surfaceY,
+    world.generator.sampleColumn(centerX - 32, centerZ).surfaceY,
+    world.generator.sampleColumn(centerX + 32, centerZ).surfaceY,
+    world.generator.sampleColumn(centerX, centerZ - 32).surfaceY,
+    world.generator.sampleColumn(centerX, centerZ + 32).surfaceY,
+    world.generator.sampleColumn(centerX - 32, centerZ - 32).surfaceY,
+    world.generator.sampleColumn(centerX - 32, centerZ + 32).surfaceY,
+    world.generator.sampleColumn(centerX + 32, centerZ - 32).surfaceY,
+    world.generator.sampleColumn(centerX + 32, centerZ + 32).surfaceY,
+  ];
+
+  expect(Math.max(...heights) - Math.min(...heights)).toBeLessThanOrEqual(12);
+  expect(spawn[1]).toBe(Math.max(...heights) + 1);
+});
+
 test("resident world reuses cached empty chunk knowledge across residency changes", () => {
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), {
     horizontalRadiusChunks: 3,

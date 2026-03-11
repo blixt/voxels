@@ -351,6 +351,58 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - The current draw-distance problem is not fixable by a small radius bump.
 - The current scale problem is not only visual; the player camera is physically too close to the ground for a `1 cm` voxel world.
 - Naively increasing chunk size is not a viable near-term fix with the current synchronous generation + meshing architecture.
+
+### Grounded player slice verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+
+#### Automated checks
+
+- `mise run test`: passing after adding `tests/player-physics.test.ts`.
+- `mise run build`: passing after switching the game runtime over to a grounded player body.
+
+#### Direct local checks
+
+- `tests/player-physics.test.ts` now verifies:
+  - falling onto flat ground settles the player at `feetY = 1` and sets `grounded = true`
+  - a solid wall blocks forward movement at the expected body radius
+  - jumping only works from the grounded state
+  - eye position is derived from feet position plus `168 cm`
+- `tests/procedural-resident-world.test.ts` now also verifies:
+  - spawn selection keeps the sampled `32 cm` standing footprint within `12 cm` of vertical spread
+  - spawn `y` is set to the highest sampled footprint voxel plus `1`
+- Direct spawn/body probe on the default procedural world:
+  - spawn feet position `[-831.5, 1614, -831.5]`
+  - sampled surface `1609`
+  - derived eye position `[-831.5, 1782, -831.5]`
+  - eye height `168 cm`
+
+#### Chrome 146 browser checks
+
+- Verified `/` on a fresh server port at `http://localhost:3005/` to avoid stale long-lived Bun processes.
+- Fresh page telemetry after load:
+  - position `[-831.5, 1783.0, -831.5]`
+  - feet `[-831.5, 1615.0, -831.5]`
+  - grounded `Yes`
+  - surface `1609`
+- The loaded page has already run its first idle physics step, so the HUD reflects the post-settle body position rather than the raw `getSpawnPosition()` sample.
+- Scripted idle-settle probe through `window.__VOXELS_GAME__.controller`:
+  - forced `pointerLocked = false`
+  - reset the player to `world.getSpawnPosition()`
+  - cleared velocity and grounded state
+  - ran five `updateMovement(1 / 60)` steps
+  - final state:
+    - `feetY = 1615`
+    - `grounded = true`
+    - `eyeMinusFeet = 168`
+    - `feetMinusSurface = 6`
+- Synthetic click on `CLICK TO ENTER THE WORLD` still reports `Pointer lock request was blocked` rather than throwing, which preserves the earlier automation-safe behavior.
+
+### Procedural stream optimization verification
+
 - warmed local `profile-stream` after the early-out:
   - `bootstrap-r3` mesh avg `162.1 ms`
   - `widen-r2-to-r3` mesh avg `174.9 ms`

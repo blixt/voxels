@@ -154,5 +154,8 @@ The near-term repo priority is:
 
 1. turn `/` into a usable full-screen game shell
 2. establish a dedicated game runtime path
-3. introduce a world model that can grow beyond bounded scenes
-4. make world generation, streaming, and player interaction measurable enough that future work is not guesswork
+3. give the player a real physical scale:
+   grounded movement, collision, gravity, and a sensible eye height for `1 cm` voxels
+4. tame the first terrain envelope so the world reads as traversable rather than as a stress test
+5. introduce a world model that can grow beyond bounded scenes
+6. make world generation, streaming, and player interaction measurable enough that future work is not guesswork

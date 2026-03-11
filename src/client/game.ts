@@ -50,7 +50,9 @@ controller.onHudUpdate = (snapshot) => {
   statusElement.textContent = snapshot.status;
   telemetryElement.innerHTML = [
     metric("Position", formatPosition(snapshot.position)),
+    metric("Feet", formatPosition(snapshot.feetPosition)),
     metric("Player Chunk", snapshot.playerChunk.join(", ")),
+    metric("Grounded", snapshot.grounded ? "Yes" : "No"),
     metric("Yaw", `${snapshot.yawDegrees.toFixed(1)}°`),
     metric("Pitch", `${snapshot.pitchDegrees.toFixed(1)}°`),
     metric("Resident Chunks", snapshot.chunkCount.toLocaleString()),

@@ -8,6 +8,7 @@ import type { ResidentChunkWorld, VoxelChunk } from "./world.ts";
 const DEFAULT_HORIZONTAL_RADIUS_CHUNKS = 3;
 const DEFAULT_UNDERGROUND_PADDING_CHUNKS = 3;
 const DEFAULT_AIR_PADDING_CHUNKS = 2;
+const SPAWN_FOOTPRINT_RADIUS = 32;
 
 export interface ResidencyPhaseMetrics {
   surfaceSampleMs: number;
@@ -164,27 +165,55 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
 
   getSpawnPosition(): Vec3 {
     const preferredBiomes = new Set(["verdant", "dunes", "badlands"]);
-    let fallback = this.generator.sampleColumn(0, 0);
-    let fallbackPosition: Vec3 = [0.5, fallback.surfaceY + 8, 0.5];
+    let fallback = this.sampleSpawnCandidate(0, 0);
+    let fallbackPosition: Vec3 = [0.5, fallback.standY, 0.5];
     for (let ring = 0; ring <= 24; ring += 1) {
       for (const [offsetX, offsetZ] of spawnSearchOffsets(ring)) {
         const worldX = offsetX * this.chunkSize * 2;
         const worldZ = offsetZ * this.chunkSize * 2;
-        const column = this.generator.sampleColumn(worldX, worldZ);
+        const candidate = this.sampleSpawnCandidate(worldX, worldZ);
         if (
-          preferredBiomes.has(column.biomeId)
-          && column.surfaceY >= this.generator.seaLevel - 48
-          && column.surfaceY <= this.generator.seaLevel + 320
+          preferredBiomes.has(candidate.column.biomeId)
+          && candidate.column.surfaceY >= this.generator.seaLevel - 48
+          && candidate.column.surfaceY <= this.generator.seaLevel + 320
+          && candidate.surfaceSpread <= 12
         ) {
-          return [worldX + 0.5, column.surfaceY + 8, worldZ + 0.5];
+          return [worldX + 0.5, candidate.standY, worldZ + 0.5];
         }
-        if (Math.abs(column.surfaceY - this.generator.seaLevel) < Math.abs(fallback.surfaceY - this.generator.seaLevel)) {
-          fallback = column;
-          fallbackPosition = [worldX + 0.5, column.surfaceY + 8, worldZ + 0.5];
+        if (
+          candidate.surfaceSpread < fallback.surfaceSpread
+          || (
+            candidate.surfaceSpread === fallback.surfaceSpread
+            && Math.abs(candidate.column.surfaceY - this.generator.seaLevel)
+              < Math.abs(fallback.column.surfaceY - this.generator.seaLevel)
+          )
+        ) {
+          fallback = candidate;
+          fallbackPosition = [worldX + 0.5, candidate.standY, worldZ + 0.5];
         }
       }
     }
     return fallbackPosition;
+  }
+
+  private sampleSpawnCandidate(worldX: number, worldZ: number): {
+    column: ReturnType<ProceduralWorldGenerator["sampleColumn"]>;
+    standY: number;
+    surfaceSpread: number;
+  } {
+    const column = this.generator.sampleColumn(worldX, worldZ);
+    let minSurfaceY = column.surfaceY;
+    let maxSurfaceY = column.surfaceY;
+    for (const [offsetX, offsetZ] of spawnFootprintOffsets()) {
+      const sampled = this.generator.sampleColumn(worldX + offsetX, worldZ + offsetZ);
+      minSurfaceY = Math.min(minSurfaceY, sampled.surfaceY);
+      maxSurfaceY = Math.max(maxSurfaceY, sampled.surfaceY);
+    }
+    return {
+      column,
+      standY: maxSurfaceY + 1,
+      surfaceSpread: maxSurfaceY - minSurfaceY,
+    };
   }
 
   updateResidencyAround(position: Vec3): ResidencyUpdateSummary {
@@ -388,6 +417,20 @@ function spawnSearchOffsets(ring: number): Array<[number, number]> {
     offsets.push([value, -ring], [value, ring], [-ring, value], [ring, value]);
   }
   return offsets;
+}
+
+function spawnFootprintOffsets(): Array<[number, number]> {
+  return [
+    [0, 0],
+    [-SPAWN_FOOTPRINT_RADIUS, 0],
+    [SPAWN_FOOTPRINT_RADIUS, 0],
+    [0, -SPAWN_FOOTPRINT_RADIUS],
+    [0, SPAWN_FOOTPRINT_RADIUS],
+    [-SPAWN_FOOTPRINT_RADIUS, -SPAWN_FOOTPRINT_RADIUS],
+    [-SPAWN_FOOTPRINT_RADIUS, SPAWN_FOOTPRINT_RADIUS],
+    [SPAWN_FOOTPRINT_RADIUS, -SPAWN_FOOTPRINT_RADIUS],
+    [SPAWN_FOOTPRINT_RADIUS, SPAWN_FOOTPRINT_RADIUS],
+  ];
 }
 
 function toChunkKey(cx: number, cy: number, cz: number): string {

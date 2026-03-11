@@ -55,8 +55,8 @@ export function renderGamePage(assetVersion: string): string {
             <section class="game-panel">
               <h2>Controls</h2>
               <p>Click once to capture the cursor.</p>
-              <p><code>WASD</code> move, <code>Space</code> rise, <code>Shift</code> descend, <code>Ctrl</code> sprint, <code>Alt</code> slow.</p>
-              <p>This is the first game slice; streaming, collisions, and inventory come next.</p>
+              <p><code>WASD</code> move, <code>Space</code> jump, <code>Ctrl</code> sprint, <code>Alt</code> slow.</p>
+              <p>This slice adds a grounded player body over the streaming world; inventory and tools come next.</p>
             </section>
           </div>
           <div class="crosshair" aria-hidden="true"></div>
