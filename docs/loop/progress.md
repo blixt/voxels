@@ -1056,3 +1056,29 @@
 - Main lesson from this slice:
   - "more biomes" was not the immediate answer
   - patch-scale placement fields plus a few stronger landmark families gave a much better variety-per-complexity tradeoff
+
+### Water absorption and underwater render environment
+
+- The water complaints split into two different problems:
+  - from above, deep water still looked too see-through because surface opacity did not depend on depth at all
+  - from below, the renderer was still using the normal air fog/clear-color environment, so underwater view range and tint were underdefined
+- I kept the fix narrow instead of reaching for a broader transparency rewrite:
+  - water still renders as the existing separate top-surface pass
+  - but the top-surface color now gains more opacity and a slight darkening as water depth increases
+  - and the camera now switches to a water-specific render environment when the eye is submerged
+- For the near-field mesher, I did not bolt on another staging structure:
+  - water-surface quads now encode a compact depth band together with the material id
+  - the water mesh builder converts that into a depth-tinted packed color directly
+- The far field now uses the same idea:
+  - `pushWaterTopQuad(...)` applies the same depth-tint helper based on `waterHeight - terrainHeight`
+- The underwater view path is explicit now:
+  - render clear color changes to a water-tinted color
+  - fog color changes to the same tint
+  - fog distance is reduced heavily compared to air
+  - the game controller resolves the current eye-water material and passes the matching render environment into the renderer
+- I did not keep the first water-depth quantization as-is:
+  - the first band size was too coarse, so a shallow test pool and a deeper pool still collapsed to the same opacity bucket
+  - I tightened that quantization instead of weakening the test
+- Main lesson from this slice:
+  - the deep-water visibility issue was not a mystery renderer bug
+  - it was mostly the predictable result of using one fixed water alpha plus air fog everywhere

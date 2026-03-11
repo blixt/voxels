@@ -2700,3 +2700,46 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - It does not yet add:
   - multi-chunk authored structure clusters
   - rivers or local water systems driving vegetation belts
+
+## 2026-03-11 water absorption and underwater render environment
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/mesher.test.ts tests/water-visuals.test.ts tests/procedural-generator.test.ts`
+- `mise run build`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing
+- Focused tests:
+  - `32 pass`
+  - `0 fail`
+- `mise run build`: passing
+
+#### Numeric probes
+
+- Water depth-tint sample:
+  - shallow alpha `176`
+  - medium alpha `184`
+  - deep alpha `208`
+- Underwater render environment:
+  - fog start `15` world units (`1.5 m`)
+  - fog end `240` world units (`24 m`)
+  - fog/clear tint `[48, 110, 210, 255]`
+
+#### Added verification coverage
+
+- New helper tests now verify:
+  - deeper water surfaces become less transparent
+  - underwater rendering uses a tinted, shorter-range fog environment
+- Mesher coverage now has an integration test that two water surfaces of different depths emit different vertex alpha values
+
+#### Residual
+
+- This slice is worth keeping.
+- It fixes:
+  - overly transparent deep water from above
+  - missing underwater tint/fog behavior
+- It does not yet add:
+  - side-volume water faces
+  - caustics
+  - underwater particulate or volumetric light scattering

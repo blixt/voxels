@@ -1,4 +1,5 @@
 import type { ChunkMeshData, Vec3 } from "./types.ts";
+import { applyWaterDepthTint } from "./water-visuals.ts";
 import type { ResidentChunkWorld } from "./world.ts";
 
 const FLOAT32_BYTES = 4;
@@ -6,6 +7,9 @@ const VERTEX_STRIDE = 20;
 const NORMAL_SCALE = 127;
 const QUAD_STRIDE = 11;
 const MAX_MESHER_SCRATCH_POOL = 2;
+const WATER_DEPTH_BAND_SHIFT = 16;
+const WATER_DEPTH_BAND_MASK = 0xff;
+const WATER_DEPTH_BAND_WORLD_UNITS = 4;
 
 interface MesherScratch {
   quads: number[];
@@ -284,7 +288,7 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
 
   buildWaterSurfaceQuads(world, chunkData, neighbors, chunkSize, chunkArea, solidBounds, originX, originY, originZ, scratch);
   const opaqueMesh = buildMeshGeometryFromQuads(quads, world);
-  const waterMesh = buildMeshGeometryFromQuads(scratch.waterQuads, world);
+  const waterMesh = buildWaterMeshGeometryFromQuads(scratch.waterQuads, world);
   const mesh = {
     vertexData: opaqueMesh.vertexData,
     vertexCount: opaqueMesh.vertexCount,
@@ -352,7 +356,16 @@ function buildWaterSurfaceQuads(
               chunkSize,
               chunkArea,
             );
-        mask[maskIndex] = world.isWaterMaterial(above) ? 0 : material;
+        if (world.isWaterMaterial(above)) {
+          mask[maskIndex] = 0;
+          maskIndex += 1;
+          continue;
+        }
+        const worldX = originX + x;
+        const worldY = originY + y;
+        const worldZ = originZ + z;
+        const depthBand = quantizeWaterDepthBand(measureWaterDepthWorldUnits(world, worldX, worldY, worldZ));
+        mask[maskIndex] = encodeWaterSurfaceKey(material, depthBand);
         maskIndex += 1;
       }
     }
@@ -489,6 +502,106 @@ function buildMeshGeometryFromQuads(
     writeVertex(vertexView, vertexOffset, corner2X, corner2Y, corner2Z, normalX, normalY, normalZ, color);
     vertexOffset += VERTEX_STRIDE;
     writeVertex(vertexView, vertexOffset, corner3X, corner3Y, corner3Z, normalX, normalY, normalZ, color);
+    vertexOffset += VERTEX_STRIDE;
+
+    indexData[indexOffset + 0] = baseVertex;
+    indexData[indexOffset + 1] = baseVertex + 1;
+    indexData[indexOffset + 2] = baseVertex + 2;
+    indexData[indexOffset + 3] = baseVertex;
+    indexData[indexOffset + 4] = baseVertex + 2;
+    indexData[indexOffset + 5] = baseVertex + 3;
+    baseVertex += 4;
+    indexOffset += 6;
+  }
+
+  return {
+    vertexData,
+    vertexCount,
+    indexData,
+    indexCount,
+    triangleCount: quadCount * 2,
+    bounds: quadCount === 0
+      ? null
+      : {
+          min: [minX, minY, minZ],
+          max: [maxX, maxY, maxZ],
+        },
+  };
+}
+
+function buildWaterMeshGeometryFromQuads(
+  quads: readonly number[],
+  world: ResidentChunkWorld,
+): {
+  vertexData: ArrayBuffer;
+  vertexCount: number;
+  indexData: Uint32Array;
+  indexCount: number;
+  triangleCount: number;
+  bounds: {
+    min: [number, number, number];
+    max: [number, number, number];
+  } | null;
+} {
+  const quadCount = quads.length / QUAD_STRIDE;
+  const vertexCount = quadCount * 4;
+  const indexCount = quadCount * 6;
+  const vertexData = new ArrayBuffer(vertexCount * VERTEX_STRIDE);
+  const vertexView = new DataView(vertexData);
+  const indexData = new Uint32Array(indexCount);
+
+  let vertexOffset = 0;
+  let indexOffset = 0;
+  let baseVertex = 0;
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+
+  for (let quadIndex = 0; quadIndex < quads.length; quadIndex += QUAD_STRIDE) {
+    const positionX = quads[quadIndex]!;
+    const positionY = quads[quadIndex + 1]!;
+    const positionZ = quads[quadIndex + 2]!;
+    const duX = quads[quadIndex + 3]!;
+    const duY = quads[quadIndex + 4]!;
+    const duZ = quads[quadIndex + 5]!;
+    const dvX = quads[quadIndex + 6]!;
+    const dvY = quads[quadIndex + 7]!;
+    const dvZ = quads[quadIndex + 8]!;
+    const packedKey = quads[quadIndex + 10]!;
+    const waterMaterial = decodeWaterSurfaceMaterial(packedKey);
+    const depthWorldUnits = decodeWaterSurfaceDepthWorldUnits(packedKey);
+    const color = applyWaterDepthTint(world.getPaletteColor(waterMaterial), depthWorldUnits);
+
+    const corner0X = positionX;
+    const corner0Y = positionY;
+    const corner0Z = positionZ;
+    const corner1X = positionX + duX;
+    const corner1Y = positionY + duY;
+    const corner1Z = positionZ + duZ;
+    const corner2X = positionX + duX + dvX;
+    const corner2Y = positionY + duY + dvY;
+    const corner2Z = positionZ + duZ + dvZ;
+    const corner3X = positionX + dvX;
+    const corner3Y = positionY + dvY;
+    const corner3Z = positionZ + dvZ;
+
+    minX = Math.min(minX, corner0X, corner1X, corner2X, corner3X);
+    minY = Math.min(minY, corner0Y, corner1Y, corner2Y, corner3Y);
+    minZ = Math.min(minZ, corner0Z, corner1Z, corner2Z, corner3Z);
+    maxX = Math.max(maxX, corner0X, corner1X, corner2X, corner3X);
+    maxY = Math.max(maxY, corner0Y, corner1Y, corner2Y, corner3Y);
+    maxZ = Math.max(maxZ, corner0Z, corner1Z, corner2Z, corner3Z);
+
+    writeVertex(vertexView, vertexOffset, corner0X, corner0Y, corner0Z, 0, 1, 0, color);
+    vertexOffset += VERTEX_STRIDE;
+    writeVertex(vertexView, vertexOffset, corner1X, corner1Y, corner1Z, 0, 1, 0, color);
+    vertexOffset += VERTEX_STRIDE;
+    writeVertex(vertexView, vertexOffset, corner2X, corner2Y, corner2Z, 0, 1, 0, color);
+    vertexOffset += VERTEX_STRIDE;
+    writeVertex(vertexView, vertexOffset, corner3X, corner3Y, corner3Z, 0, 1, 0, color);
     vertexOffset += VERTEX_STRIDE;
 
     indexData[indexOffset + 0] = baseVertex;
@@ -713,6 +826,45 @@ function sampleNeighborVoxel(
   }
   const localZ = negative ? chunkSize - 1 : 0;
   return data[x + y * chunkSize + localZ * chunkArea] ?? 0;
+}
+
+function measureWaterDepthWorldUnits(
+  world: ResidentChunkWorld,
+  worldX: number,
+  worldY: number,
+  worldZ: number,
+): number {
+  let depth = 0;
+  let sampleY = worldY;
+  while (sampleY >= world.minY) {
+    const material = world.getVoxel(worldX, sampleY, worldZ);
+    if (!world.isWaterMaterial(material)) {
+      break;
+    }
+    depth += 1;
+    sampleY -= 1;
+  }
+  return depth;
+}
+
+function quantizeWaterDepthBand(depthWorldUnits: number): number {
+  if (depthWorldUnits <= 0) {
+    return 0;
+  }
+  return Math.min(WATER_DEPTH_BAND_MASK, Math.floor((depthWorldUnits - 1) / WATER_DEPTH_BAND_WORLD_UNITS));
+}
+
+function encodeWaterSurfaceKey(material: number, depthBand: number): number {
+  return material | (depthBand << WATER_DEPTH_BAND_SHIFT);
+}
+
+function decodeWaterSurfaceMaterial(key: number): number {
+  return key & 0xffff;
+}
+
+function decodeWaterSurfaceDepthWorldUnits(key: number): number {
+  const depthBand = (key >>> WATER_DEPTH_BAND_SHIFT) & WATER_DEPTH_BAND_MASK;
+  return depthBand * WATER_DEPTH_BAND_WORLD_UNITS + 1;
 }
 
 function writeVertex(

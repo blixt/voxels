@@ -297,3 +297,11 @@
 | The first grove/orchard tuning might still be too weak to matter while walking | Measure best fixed-seed tall-forest and orchard patch coverage ratios before locking the pass | Confirmed. The first tuning only reached about `18.3%` forest coverage and `14.8%` orchard coverage, so I did not keep it as-is | Confirmed |
 | Stronger rosters plus slightly more permissive patch thresholds will create the dense-forest effect without needing a second object system yet | Retune the rosters, rerun the same fixed-seed patch probes, and require explicit density regressions in tests | Confirmed. The kept version reaches about `38.5%` dense-forest coverage and `17.8%` orchard coverage | Confirmed |
 | Redwoods need an explicit scale regression or they will drift back toward "just another tall tree" | Run a broad fixed-seed scan and assert the tallest sampled redwood exceeds a true far-visible height threshold | Confirmed. The kept slice reaches `204` voxels (`20.4 m`) | Confirmed |
+
+## 2026-03-11 water absorption and underwater render environment
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| The "transparent deep water" complaint is mostly because water uses one fixed alpha regardless of depth | Add a depth-tint helper, drive it from near and far water surfaces, and require a test where deeper water emits a larger vertex alpha than shallow water | Confirmed. The focused integration test now sees different alpha values, and the numeric probe shows `176 -> 184 -> 208` alpha across shallow/medium/deep samples | Confirmed |
+| The underwater view problem is a missing render-environment seam, not a reason to rewrite the whole transparency path | Add an explicit underwater render environment with tinted clear/fog color and shorter fog distance, then verify it numerically in a small helper test | Confirmed. Underwater rendering now has its own fog/clear setup and the helper test guards it directly | Confirmed |
+| The first water-depth quantization is probably "good enough" and not worth revisiting | Run the mesher integration test with shallow vs deep water surfaces and see whether they actually produce distinct alphas | Rejected. The first quantization was too coarse, so I tightened it rather than weakening the test | Rejected |

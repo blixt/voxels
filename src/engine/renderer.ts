@@ -2,13 +2,13 @@ import { buildCameraMatrices, type CameraState } from "./camera.ts";
 import type { ChunkMeshData } from "./types.ts";
 import type { ResidentChunkWorld } from "./world.ts";
 import {
-  CLEAR_COLOR_RGBA,
-  FOG_COLOR_RGBA,
-  FOG_END_DISTANCE,
-  FOG_START_DISTANCE,
   LIGHT_DIRECTION,
   LIGHTING_TERMS,
 } from "./render-constants.ts";
+import {
+  DEFAULT_RENDER_ENVIRONMENT,
+  type RenderEnvironment,
+} from "./water-visuals.ts";
 
 type RenderCamera = CameraState | {
   viewProjection: Float32Array;
@@ -467,13 +467,14 @@ export class WebGpuVoxelRenderer {
     frameIndex = 0,
     extraMeshes: readonly RenderMeshSource[] = [],
     farFieldMask: FarFieldRenderMask | null = null,
+    renderEnvironment: RenderEnvironment = DEFAULT_RENDER_ENVIRONMENT,
   ): RenderStats {
     this.configureCanvas(this.context.canvas as HTMLCanvasElement);
     const syncStartedAt = performance.now();
     const syncStats = this.syncResources(world, extraMeshes);
     const syncResourcesMs = performance.now() - syncStartedAt;
     const canvas = this.context.canvas as HTMLCanvasElement;
-    this.writeUniforms(camera, canvas.width / canvas.height);
+    this.writeUniforms(camera, canvas.width / canvas.height, renderEnvironment);
     this.writeFarFieldMask(farFieldMask);
 
     const encoder = this.device.createCommandEncoder();
@@ -482,7 +483,7 @@ export class WebGpuVoxelRenderer {
         {
           view: this.context.getCurrentTexture().createView(),
           loadOp: "clear",
-          clearValue: toGpuColor(CLEAR_COLOR_RGBA),
+          clearValue: toGpuColor(renderEnvironment.clearColorRgba),
           storeOp: "store",
         },
       ],
@@ -533,9 +534,10 @@ export class WebGpuVoxelRenderer {
     height: number,
     extraMeshes: readonly RenderMeshSource[] = [],
     farFieldMask: FarFieldRenderMask | null = null,
+    renderEnvironment: RenderEnvironment = DEFAULT_RENDER_ENVIRONMENT,
   ): Promise<ReadbackImage> {
     this.syncResources(world, extraMeshes);
-    this.writeUniforms(camera, width / height);
+    this.writeUniforms(camera, width / height, renderEnvironment);
     this.writeFarFieldMask(farFieldMask);
 
     const colorTexture = this.device.createTexture({
@@ -560,7 +562,7 @@ export class WebGpuVoxelRenderer {
         {
           view: colorTexture.createView(),
           loadOp: "clear",
-          clearValue: toGpuColor(CLEAR_COLOR_RGBA),
+          clearValue: toGpuColor(renderEnvironment.clearColorRgba),
           storeOp: "store",
         },
       ],
@@ -682,7 +684,7 @@ export class WebGpuVoxelRenderer {
     return { drawCalls, triangles };
   }
 
-  private writeUniforms(camera: RenderCamera, aspect: number): void {
+  private writeUniforms(camera: RenderCamera, aspect: number, renderEnvironment: RenderEnvironment): void {
     let viewProjection: Float32Array;
     let cameraPosition: readonly [number, number, number];
     if (isCameraWithViewProjection(camera)) {
@@ -707,12 +709,12 @@ export class WebGpuVoxelRenderer {
     uniformData[25] = cameraPosition[1];
     uniformData[26] = cameraPosition[2];
     uniformData[27] = 0;
-    uniformData[28] = FOG_COLOR_RGBA[0] / 255;
-    uniformData[29] = FOG_COLOR_RGBA[1] / 255;
-    uniformData[30] = FOG_COLOR_RGBA[2] / 255;
-    uniformData[31] = FOG_COLOR_RGBA[3] / 255;
-    uniformData[32] = FOG_START_DISTANCE;
-    uniformData[33] = FOG_END_DISTANCE;
+    uniformData[28] = renderEnvironment.fogColorRgba[0] / 255;
+    uniformData[29] = renderEnvironment.fogColorRgba[1] / 255;
+    uniformData[30] = renderEnvironment.fogColorRgba[2] / 255;
+    uniformData[31] = renderEnvironment.fogColorRgba[3] / 255;
+    uniformData[32] = renderEnvironment.fogStartDistance;
+    uniformData[33] = renderEnvironment.fogEndDistance;
     uniformData[34] = 0;
     uniformData[35] = 0;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);

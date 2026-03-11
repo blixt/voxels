@@ -47,6 +47,11 @@ import {
   type StreamAnchor,
 } from "../engine/stream-anchor.ts";
 import type { Vec3 } from "../engine/types.ts";
+import {
+  buildUnderwaterRenderEnvironment,
+  DEFAULT_RENDER_ENVIRONMENT,
+  type RenderEnvironment,
+} from "../engine/water-visuals.ts";
 import type { MeshBuildSummary } from "../engine/mesher.ts";
 
 const MAX_DELTA_SECONDS = 0.05;
@@ -1678,6 +1683,7 @@ export class GameController {
     this.renderer.configureCanvas(this.canvas);
     const aspect = this.canvas.width / this.canvas.height;
     const cameraMatrices = buildFirstPersonCameraMatrices(this.camera, aspect);
+    const renderEnvironment = this.resolveRenderEnvironment();
     const cpuStartedAt = performance.now();
     const frameStats = this.renderer.render(
       this.world,
@@ -1686,6 +1692,7 @@ export class GameController {
       0,
       this.farField.getRenderables(),
       this.buildFarFieldRenderMask(),
+      renderEnvironment,
     );
     const frameCpuMs = performance.now() - cpuStartedAt;
     this.lastRenderStats = frameStats;
@@ -1872,6 +1879,7 @@ export class GameController {
       return null;
     }
     const cameraMatrices = buildFirstPersonCameraMatrices(this.camera, width / height);
+    const renderEnvironment = this.resolveRenderEnvironment();
     return await this.renderer.captureImage(
       this.world,
       cameraMatrices,
@@ -1879,7 +1887,24 @@ export class GameController {
       height,
       this.farField.getRenderables(),
       this.buildFarFieldRenderMask(),
+      renderEnvironment,
     );
+  }
+
+  private resolveRenderEnvironment(): RenderEnvironment {
+    if (!this.player.eyeInWater) {
+      return DEFAULT_RENDER_ENVIRONMENT;
+    }
+    const eye = getPlayerEyePosition(this.player);
+    const material = this.world.getVoxel(
+      Math.floor(eye[0]),
+      Math.floor(eye[1]),
+      Math.floor(eye[2]),
+    );
+    if (!this.world.isWaterMaterial(material)) {
+      return DEFAULT_RENDER_ENVIRONMENT;
+    }
+    return buildUnderwaterRenderEnvironment(this.world.getPaletteColor(material));
   }
 
   private async applySettledReferenceDiffs(

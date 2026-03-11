@@ -17,6 +17,15 @@ function collectPositions(mesh: ReturnType<typeof buildChunkMesh>): Array<[numbe
   return positions;
 }
 
+function collectPackedColors(vertexData: ArrayBuffer): number[] {
+  const view = new DataView(vertexData);
+  const colors: number[] = [];
+  for (let byteOffset = 16; byteOffset < vertexData.byteLength; byteOffset += 20) {
+    colors.push(view.getUint32(byteOffset, true));
+  }
+  return colors;
+}
+
 test("greedy mesher collapses a solid box into six quads", () => {
   const world = new VoxelWorld({ width: 32, height: 32, depth: 32 }, 32, [0, 0xff8899aa]);
   world.fillBox(10, 10, 10, 12, 12, 12, 1);
@@ -140,4 +149,22 @@ test("water is emitted as a separate top-surface mesh", () => {
   expect(mesh.indexCount).toBeGreaterThan(0);
   expect(mesh.waterIndexCount).toBe(6);
   expect(mesh.waterTriangleCount).toBe(2);
+});
+
+test("deeper water surfaces become less transparent than shallow water", () => {
+  const world = new VoxelWorld({ width: 8, height: 12, depth: 8 }, 8, [0, 0xff8899aa, 0xaaee8844]);
+  world.isWaterMaterial = (materialIndex) => materialIndex === 2;
+  world.isCollisionMaterial = (materialIndex) => materialIndex !== 0 && materialIndex !== 2;
+  world.setVoxel(1, 0, 1, 1);
+  world.setVoxel(1, 1, 1, 2);
+  world.setVoxel(5, 0, 1, 1);
+  for (let y = 1; y <= 6; y += 1) {
+    world.setVoxel(5, y, 1, 2);
+  }
+
+  const mesh = buildChunkMesh(world, 0, 0, 0);
+  const alphas = collectPackedColors(mesh.waterVertexData).map((color) => color >>> 24);
+
+  expect(new Set(alphas).size).toBeGreaterThanOrEqual(2);
+  expect(Math.max(...alphas)).toBeGreaterThan(Math.min(...alphas));
 });

@@ -1,6 +1,7 @@
 import { metersToWorldUnits, worldUnitsToMeters } from "./scale.ts";
 import { ProceduralWorldGenerator } from "./procedural-generator.ts";
 import type { ChunkMeshData, Vec3 } from "./types.ts";
+import { applyWaterDepthTint } from "./water-visuals.ts";
 
 const FLOAT32_BYTES = 4;
 const NORMAL_SCALE = 127;
@@ -1301,6 +1302,7 @@ function pushWaterTopQuad(
     return;
   }
   const topY = waterHeight + 1;
+  const tintedWaterColor = applyWaterDepthTint(waterColor, waterHeight - terrainHeight);
   pushQuad(
     mesh,
     minX, topY, minZ,
@@ -1308,7 +1310,7 @@ function pushWaterTopQuad(
     maxX, topY, maxZ,
     maxX, topY, minZ,
     0, 1, 0,
-    waterColor,
+    tintedWaterColor,
   );
 }
 
