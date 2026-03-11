@@ -23,6 +23,7 @@ import {
 import { ProceduralResidentWorld, type ResidencyUpdateSummary } from "../engine/procedural-resident-world.ts";
 import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
 import { WebGpuVoxelRenderer, type RenderStats } from "../engine/renderer.ts";
+import { metersToWorldUnits, worldUnitsToMeters } from "../engine/scale.ts";
 import { shouldPumpWorldWork, shouldRefreshResidency } from "../engine/stream-work.ts";
 import {
   buildStreamAnchorPosition,
@@ -209,6 +210,31 @@ export interface IncrementalCrossingBenchmark {
 export interface StreamingBudgets {
   maxGeneratedChunksPerUpdate: number;
   maxMeshRebuildsPerFrame: number;
+}
+
+export interface LodCoverageIssueSample {
+  worldX: number;
+  worldZ: number;
+  distanceMeters: number;
+  bands: string[];
+  sampleStrideMeters: number[];
+}
+
+export interface LodCoverageProbe {
+  center: Vec3;
+  sampleRadiusMeters: number;
+  sampleStepMeters: number;
+  sampleCount: number;
+  residentSampleCount: number;
+  coveredSampleCount: number;
+  residentOverlapCount: number;
+  uncoveredGapCount: number;
+  bandOverlapCount: number;
+  wrongBandCount: number;
+  residentOverlapSamples: LodCoverageIssueSample[];
+  uncoveredGapSamples: LodCoverageIssueSample[];
+  bandOverlapSamples: LodCoverageIssueSample[];
+  wrongBandSamples: LodCoverageIssueSample[];
 }
 
 export class GameController {
@@ -405,6 +431,85 @@ export class GameController {
 
   snapshotResidentWorld(): ResidentWorldProbeSnapshot {
     return summarizeResidentWorld(this.world);
+  }
+
+  probeLodCoverage(sampleRadiusMeters = 48, sampleStepMeters = 0.8): LodCoverageProbe {
+    const normalizedRadius = Math.max(1, sampleRadiusMeters);
+    const normalizedStep = Math.max(0.1, sampleStepMeters);
+    const sampleRadiusWorldUnits = metersToWorldUnits(normalizedRadius);
+    const sampleStepWorldUnits = metersToWorldUnits(normalizedStep);
+    const centerX = this.player.feetPosition[0];
+    const centerZ = this.player.feetPosition[2];
+    const maxRadiusWorldUnits = this.lastFarFieldSummary.maxRadiusWorldUnits;
+    const exclusionMask = this.world.getFarFieldExclusionMask();
+    const residentOverlapSamples: LodCoverageIssueSample[] = [];
+    const uncoveredGapSamples: LodCoverageIssueSample[] = [];
+    const bandOverlapSamples: LodCoverageIssueSample[] = [];
+    const wrongBandSamples: LodCoverageIssueSample[] = [];
+    let sampleCount = 0;
+    let residentSampleCount = 0;
+    let coveredSampleCount = 0;
+    let residentOverlapCount = 0;
+    let uncoveredGapCount = 0;
+    let bandOverlapCount = 0;
+    let wrongBandCount = 0;
+
+    for (let offsetZ = -sampleRadiusWorldUnits; offsetZ <= sampleRadiusWorldUnits; offsetZ += sampleStepWorldUnits) {
+      for (let offsetX = -sampleRadiusWorldUnits; offsetX <= sampleRadiusWorldUnits; offsetX += sampleStepWorldUnits) {
+        const distanceWorldUnits = Math.max(Math.abs(offsetX), Math.abs(offsetZ));
+        if (distanceWorldUnits > maxRadiusWorldUnits) {
+          continue;
+        }
+        const worldX = centerX + offsetX;
+        const worldZ = centerZ + offsetZ;
+        const chunkX = Math.floor(worldX / this.world.chunkSize);
+        const chunkZ = Math.floor(worldZ / this.world.chunkSize);
+        const resident = this.world.hasResidentColumn(chunkX, chunkZ);
+        const coverage = this.farField.getCoverageAt(worldX, worldZ, exclusionMask);
+        const distanceMeters = worldUnitsToMeters(distanceWorldUnits);
+        const issueSample = coverageToIssueSample(worldX, worldZ, distanceMeters, coverage);
+        sampleCount += 1;
+        if (resident) {
+          residentSampleCount += 1;
+        }
+        if (coverage.length > 0) {
+          coveredSampleCount += 1;
+        }
+        if (resident && coverage.length > 0) {
+          residentOverlapCount += 1;
+          pushIssueSample(residentOverlapSamples, issueSample);
+        }
+        if (!resident && coverage.length === 0) {
+          uncoveredGapCount += 1;
+          pushIssueSample(uncoveredGapSamples, issueSample);
+        }
+        if (coverage.length > 1) {
+          bandOverlapCount += 1;
+          pushIssueSample(bandOverlapSamples, issueSample);
+        }
+        if (coverage.some((band) => distanceWorldUnits < band.innerRadiusWorldUnits || distanceWorldUnits >= band.outerRadiusWorldUnits)) {
+          wrongBandCount += 1;
+          pushIssueSample(wrongBandSamples, issueSample);
+        }
+      }
+    }
+
+    return {
+      center: [...this.player.feetPosition],
+      sampleRadiusMeters: normalizedRadius,
+      sampleStepMeters: normalizedStep,
+      sampleCount,
+      residentSampleCount,
+      coveredSampleCount,
+      residentOverlapCount,
+      uncoveredGapCount,
+      bandOverlapCount,
+      wrongBandCount,
+      residentOverlapSamples,
+      uncoveredGapSamples,
+      bandOverlapSamples,
+      wrongBandSamples,
+    };
   }
 
   async teleportAndSettle(
@@ -765,7 +870,11 @@ export class GameController {
       return this.syncWorldAroundAnchor(resolved.anchor, true);
     }
     if (!shouldRefreshResidency(false, resolved.changed, this.lastStreamSummary.pendingChunks)) {
-      this.lastFarFieldSummary = this.farField.updateAround(this.player.feetPosition, this.getNearClearRadiusWorldUnits());
+      this.lastFarFieldSummary = this.farField.updateAround(
+        this.player.feetPosition,
+        0,
+        this.world.getFarFieldExclusionMask(),
+      );
       this.flushMeshBuildBudget();
       this.lastStreamSummary = createIdleResidencySummary(
         this.lastStreamSummary,
@@ -781,7 +890,6 @@ export class GameController {
 
   private syncWorldAroundAnchor(anchor: StreamAnchor, settle = false): ResidencyUpdateSummary {
     this.streamAnchor = anchor;
-    this.lastFarFieldSummary = this.farField.updateAround(this.player.feetPosition, this.getNearClearRadiusWorldUnits());
     const residency = this.world.updateResidencyAround(
       buildStreamAnchorPosition(anchor, this.world.chunkSize, this.player.feetPosition[1]),
       {
@@ -791,6 +899,11 @@ export class GameController {
       },
     );
     this.lastStreamSummary = cloneResidencySummary(residency);
+    this.lastFarFieldSummary = this.farField.updateAround(
+      this.player.feetPosition,
+      0,
+      this.world.getFarFieldExclusionMask(),
+    );
     this.flushMeshBuildBudget(
       settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxMeshRebuildsPerFrame,
     );
@@ -808,10 +921,6 @@ export class GameController {
 
   private syncCameraToPlayer(): void {
     this.camera.position = getPlayerEyePosition(this.player);
-  }
-
-  private getNearClearRadiusWorldUnits(): number {
-    return (this.world.horizontalRadiusChunks + 1) * this.world.chunkSize;
   }
 
   private flushMeshBuildBudget(maxChunks = DEFAULT_MAX_MESH_REBUILDS_PER_FRAME): void {
@@ -971,6 +1080,28 @@ function buildIncrementalSample(
     uploadBytes: render.uploadBytes,
     encodeMs: render.encodeMs,
   };
+}
+
+function coverageToIssueSample(
+  worldX: number,
+  worldZ: number,
+  distanceMeters: number,
+  coverage: ReturnType<ProceduralFarField["getCoverageAt"]>,
+): LodCoverageIssueSample {
+  return {
+    worldX,
+    worldZ,
+    distanceMeters,
+    bands: coverage.map((band) => band.label),
+    sampleStrideMeters: coverage.map((band) => worldUnitsToMeters(band.sampleStride)),
+  };
+}
+
+function pushIssueSample(target: LodCoverageIssueSample[], sample: LodCoverageIssueSample): void {
+  if (target.length >= 8) {
+    return;
+  }
+  target.push(sample);
 }
 
 function cloneResidencySummary(summary: ResidencyUpdateSummary): ResidencyUpdateSummary {

@@ -168,7 +168,7 @@ function simulateChunkCrossing(deltaChunks: number): {
   let maxFrameWorkMs = 0;
 
   if (!resolved.changed) {
-    const farSummary = farField.updateAround(targetFeetPosition, getNearClearRadiusWorldUnits(world));
+    const farSummary = farField.updateAround(targetFeetPosition, 0, world.getFarFieldExclusionMask());
     const dirtyResidentChunks = world.countDirtyResidentChunks();
     return {
       anchorChanged: false,
@@ -208,11 +208,11 @@ function simulateChunkCrossing(deltaChunks: number): {
   let dirtyResidentChunks = world.countDirtyResidentChunks();
   do {
     step += 1;
-    const farSummary = farField.updateAround(targetFeetPosition, getNearClearRadiusWorldUnits(world));
     const residency = world.updateResidencyAround(
       buildStreamAnchorPosition(targetAnchor, world.chunkSize, targetFeetPosition[1]),
       { maxGenerateChunks: generateBudget },
     );
+    const farSummary = farField.updateAround(targetFeetPosition, 0, world.getFarFieldExclusionMask());
     const mesh = rebuildDirtyMeshes(world, meshBudget);
     dirtyResidentChunks = world.countDirtyResidentChunks();
     pendingChunks = residency.pendingChunks;
@@ -268,11 +268,11 @@ function settleWorld(
   feetPosition: Vec3,
   anchor: StreamAnchor,
 ): void {
-  farField.updateAround(feetPosition, getNearClearRadiusWorldUnits(world));
   world.updateResidencyAround(
     buildStreamAnchorPosition(anchor, world.chunkSize, feetPosition[1]),
     { maxGenerateChunks: Number.POSITIVE_INFINITY },
   );
+  farField.updateAround(feetPosition, 0, world.getFarFieldExclusionMask());
   rebuildDirtyMeshes(world, Number.POSITIVE_INFINITY);
 }
 
@@ -281,10 +281,6 @@ function resolveAnchor(feetPosition: Vec3, chunkSize: number): StreamAnchor {
     chunkX: Math.floor(feetPosition[0] / chunkSize),
     chunkZ: Math.floor(feetPosition[2] / chunkSize),
   };
-}
-
-function getNearClearRadiusWorldUnits(world: ProceduralResidentWorld): number {
-  return (world.horizontalRadiusChunks + 1) * world.chunkSize;
 }
 
 function summarize(values: number[]) {

@@ -367,3 +367,28 @@
   - the measured result was that `yRangeMs` was only about `2.8 ms` total on `crossing-d2`, while `chunkGenerationMs` was about `88.9 ms`
   - empty chunk probes were still present (`40` skipped chunks), but the dominant cost remained generation of the `82` real chunks, not the column-range sampling
   - because of that, I explicitly did not keep a chunk-Y-range cache branch; the profiler improvements stayed, the speculative cache did not
+- Investigated the user-reported LOD seam corruption with a broader correctness search instead of guessing from screenshots:
+  - added/used a runtime `probeLodCoverage()` surface on `/` that counts resident-vs-far overlap, uncovered gaps, band overlap, and wrong-band samples around the player
+  - kept the probe cheap enough to run repeatedly from DevTools during teleports and movement-path sweeps
+- Found three separate far-field correctness failures:
+  - the far-field exclusion zone was based on a generic near clear radius instead of the actual resident chunk columns, which allowed overlap or holes around the true streamed footprint
+  - the far-field shell only emitted some vertical faces, which made coarse terrain look like backfaces were being culled from the wrong side
+  - more fundamentally, the band coverage was effectively centered on a snapped far-field anchor rather than the player, so giant coarse cells or holes could appear near the player while still staying inside one anchor window
+- Fixed the far-field path around the real streamed world instead of papering over it:
+  - resident-world updates now expose a resident-column exclusion mask and the game/profile paths rebuild far-field meshes against that mask
+  - far-field rebuild order now follows residency updates so the mask reflects the current resident set instead of the previous frame's set
+  - the far-field mesh now emits west/north walls in addition to east/south, with corrected winding for all four side directions
+  - band membership is now evaluated around a player-following snapped center while still using the coarser anchor for grid stability/cache locality
+- Added direct regression coverage for those cases:
+  - a far-field test now proves the inner hole stays centered on the player even while remaining inside one anchor window
+  - a geometry-level mesh test now asserts that all four horizontal face normals are present for a stepped column case
+  - an exclusion-mask test now proves masked resident cells disappear from far-field top coverage
+- Revalidated the game path with heuristics rather than vision:
+  - fresh Chrome 146 `probeLodCoverage(48, 0.8)` at settled spawn now reports `0` resident overlaps, `0` uncovered gaps, `0` band overlaps, and `0` wrong-band samples across `14,641` samples
+  - a settled offset sweep from `0 m` through `19.2 m` inside the same broad anchor window stayed at zero for all four issue counts
+  - a budgeted two-chunk movement sweep also stayed at zero for all four issue counts even while pending work peaked at `76` chunks
+- Extended that same probe farther out before declaring victory:
+  - broad `224 m` sampling now reports `0` resident overlaps and `0` uncovered gaps across the full resident-to-horizon span, which means the obvious hole/overlap bug is actually fixed
+  - there is still measurable inter-band overlap right at the far/horizon handoff around `224 m`; that is now recorded as a separate follow-up instead of conflating it with the resident-vs-far seam bug
+- Checked that the correctness fix did not obviously damage the movement path:
+  - fresh Chrome 146 `benchmarkIncrementalCrossing(1, 2, 12, 20)` now reports about `14.0 ms` p95 combined work and `15.2 ms` max combined work, with `8.2 ms` p95 stream and `5.6 ms` p95 mesh

@@ -1267,3 +1267,68 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - This rejected the “chunk Y-range recomputation is the next big win” hypothesis.
 - Y-range sampling is visible but small; the next meaningful stream-side win must come from generating less or cheaper chunk data, not from memoizing the column-range scan.
+
+### Far-field LOD seam correctness follow-up
+
+#### Commands
+
+- `mise exec -- bun test tests/procedural-far-field.test.ts`
+- `mise run test`
+- `mise run build`
+- fresh Chrome 146 reload on `http://localhost:3015/`
+- `window.__VOXELS_GAME__.teleportAndSettle(...)`
+- `window.__VOXELS_GAME__.probeLodCoverage(48, 0.8)`
+- `window.__VOXELS_GAME__.benchmarkIncrementalCrossing(1, 2, 12, 20)`
+
+#### Automated checks
+
+- `tests/procedural-far-field.test.ts`: passing after adding:
+  - inner-hole centering coverage
+  - four-direction vertical-face emission
+  - exclusion-mask overlap removal
+- `mise run test`: passing
+- `mise run build`: passing
+
+#### Browser heuristic checks
+
+- Settled spawn probe:
+  - `sampleCount = 14641`
+  - `residentOverlapCount = 0`
+  - `uncoveredGapCount = 0`
+  - `bandOverlapCount = 0`
+  - `wrongBandCount = 0`
+- Settled offset sweep across the same coarse anchor window:
+  - tested offsets `0.0 m`, `2.4 m`, `6.4 m`, `9.6 m`, `12.8 m`, `16.0 m`, `19.2 m`
+  - every probe stayed at zero for overlaps, gaps, band overlap, and wrong-band coverage
+- Budgeted movement-path sweep:
+  - stepped across a two-chunk move without waiting for full settle on each step
+  - max pending chunks reached `76`
+  - max resident overlap `0`
+  - max uncovered gaps `0`
+  - max band overlap `0`
+  - max wrong-band samples `0`
+- Broad settled probe:
+  - `probeLodCoverage(224, 4.8)` now reports `0` resident overlaps and `0` uncovered gaps across `8,836` samples
+  - current residual: `555` inter-band overlap/wrong-band samples at the far/horizon handoff around `224 m`
+  - that residual is outside the resident-vs-far seam bug the user reported, but it is now measurable and documented
+
+#### Browser performance spot-check
+
+- `benchmarkIncrementalCrossing(1, 2, 12, 20)` after the far-field fix returned:
+  - `sampleCount = 64`
+  - `p95WorkMs = 14.0`
+  - `maxWorkMs = 15.2`
+  - `p95StreamMs = 8.2`
+  - `p95MeshMs = 5.6`
+  - `maxPendingChunks = 114`
+
+#### Conclusion
+
+- The visible LOD corruption was not one bug. It was the combination of:
+  - coverage being centered on a coarse anchor instead of the player
+  - masking against a generic clear radius instead of the actual resident columns
+  - incomplete side-face emission in the coarse mesh
+- The current acceptance gate for this area should stay heuristic-first:
+  - unit tests for coverage centering and face directions
+  - browser `probeLodCoverage()` for resident overlap/gap counts first, then broader inter-band overlap sampling as a secondary check
+  - only then visual spot checks

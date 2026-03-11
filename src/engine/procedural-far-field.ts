@@ -14,6 +14,12 @@ interface FarFieldBandConfig {
   readonly anchorStride: number;
 }
 
+export interface FarFieldExclusionMask {
+  revision: number;
+  maxAffectedRadiusWorldUnits?: number;
+  excludesCell(minX: number, maxXExclusive: number, minZ: number, maxZExclusive: number): boolean;
+}
+
 export interface FarFieldBandRenderable {
   readonly label: string;
   readonly innerRadius: number;
@@ -21,10 +27,20 @@ export interface FarFieldBandRenderable {
   readonly sampleStride: number;
   anchorX: number;
   anchorZ: number;
+  centerX: number;
+  centerZ: number;
   clearRadiusWorldUnits: number;
+  maskRevision: number;
   mesh: ChunkMeshData | null;
   gpuDirty: boolean;
   triangleCount: number;
+}
+
+export interface FarFieldCoverage {
+  readonly label: string;
+  readonly sampleStride: number;
+  readonly innerRadiusWorldUnits: number;
+  readonly outerRadiusWorldUnits: number;
 }
 
 export interface FarFieldUpdateSummary {
@@ -49,14 +65,14 @@ const DEFAULT_BANDS: readonly FarFieldBandConfig[] = [
   },
   {
     label: "far",
-    innerRadius: metersToWorldUnits(80),
+    innerRadius: metersToWorldUnits(96),
     outerRadius: metersToWorldUnits(224),
     sampleStride: metersToWorldUnits(4.8),
     anchorStride: metersToWorldUnits(76.8),
   },
   {
     label: "horizon",
-    innerRadius: metersToWorldUnits(192),
+    innerRadius: metersToWorldUnits(224),
     outerRadius: metersToWorldUnits(416),
     sampleStride: metersToWorldUnits(12.8),
     anchorStride: metersToWorldUnits(204.8),
@@ -80,7 +96,10 @@ export class ProceduralFarField {
       sampleStride: config.sampleStride,
       anchorX: Number.NaN,
       anchorZ: Number.NaN,
+      centerX: Number.NaN,
+      centerZ: Number.NaN,
       clearRadiusWorldUnits: Number.NaN,
+      maskRevision: -1,
       mesh: null,
       gpuDirty: false,
       triangleCount: 0,
@@ -102,11 +121,16 @@ export class ProceduralFarField {
     return this.bands;
   }
 
-  updateAround(position: Vec3, clearRadiusWorldUnits = 0): FarFieldUpdateSummary {
+  updateAround(
+    position: Vec3,
+    clearRadiusWorldUnits = 0,
+    exclusionMask: FarFieldExclusionMask | null = null,
+  ): FarFieldUpdateSummary {
     const startedAt = performance.now();
     let changed = false;
     let builtBands = 0;
     let triangleCount = 0;
+    const maxAffectedRadiusWorldUnits = exclusionMask?.maxAffectedRadiusWorldUnits ?? Number.POSITIVE_INFINITY;
 
     for (let bandIndex = 0; bandIndex < this.bands.length; bandIndex += 1) {
       const band = this.bands[bandIndex]!;
@@ -114,10 +138,18 @@ export class ProceduralFarField {
       const anchorX = snapToStride(Math.floor(position[0]), config.anchorStride);
       const anchorZ = snapToStride(Math.floor(position[2]), config.anchorStride);
       const effectiveInnerRadius = Math.max(config.innerRadius, clearRadiusWorldUnits);
+      const centerX = snapToNearestStride(position[0], config.sampleStride);
+      const centerZ = snapToNearestStride(position[2], config.sampleStride);
+      const maskRevision = effectiveInnerRadius < maxAffectedRadiusWorldUnits
+        ? exclusionMask?.revision ?? 0
+        : 0;
       if (
         band.anchorX === anchorX
         && band.anchorZ === anchorZ
+        && band.centerX === centerX
+        && band.centerZ === centerZ
         && band.clearRadiusWorldUnits === effectiveInnerRadius
+        && band.maskRevision === maskRevision
         && band.mesh
       ) {
         triangleCount += band.triangleCount;
@@ -125,13 +157,19 @@ export class ProceduralFarField {
       }
       band.anchorX = anchorX;
       band.anchorZ = anchorZ;
+      band.centerX = centerX;
+      band.centerZ = centerZ;
       band.clearRadiusWorldUnits = effectiveInnerRadius;
+      band.maskRevision = maskRevision;
       band.mesh = buildBandMesh(
         this.generator,
         config,
         anchorX,
         anchorZ,
+        centerX,
+        centerZ,
         effectiveInnerRadius,
+        exclusionMask,
       );
       band.gpuDirty = true;
       band.triangleCount = band.mesh.triangleCount;
@@ -153,6 +191,52 @@ export class ProceduralFarField {
     };
     return this.lastUpdate;
   }
+
+  classifyCoverageAt(
+    worldX: number,
+    worldZ: number,
+    exclusionMask: FarFieldExclusionMask | null = null,
+  ): FarFieldCoverage | null {
+    return this.getCoverageAt(worldX, worldZ, exclusionMask)[0] ?? null;
+  }
+
+  getCoverageAt(
+    worldX: number,
+    worldZ: number,
+    exclusionMask: FarFieldExclusionMask | null = null,
+  ): FarFieldCoverage[] {
+    const coverage: FarFieldCoverage[] = [];
+    for (const band of this.bands) {
+      if (!band.mesh) {
+        continue;
+      }
+      const cellX = Math.floor((worldX - band.anchorX) / band.sampleStride);
+      const cellZ = Math.floor((worldZ - band.anchorZ) / band.sampleStride);
+      const cellMinX = band.anchorX + cellX * band.sampleStride;
+      const cellMinZ = band.anchorZ + cellZ * band.sampleStride;
+      if (!isCellInBand(
+        cellMinX,
+        cellMinZ,
+        band.sampleStride,
+        band.centerX,
+        band.centerZ,
+        band.clearRadiusWorldUnits,
+        band.outerRadius,
+      )) {
+        continue;
+      }
+      if (exclusionMask?.excludesCell(cellMinX, cellMinX + band.sampleStride, cellMinZ, cellMinZ + band.sampleStride)) {
+        continue;
+      }
+      coverage.push({
+        label: band.label,
+        sampleStride: band.sampleStride,
+        innerRadiusWorldUnits: band.clearRadiusWorldUnits,
+        outerRadiusWorldUnits: band.outerRadius,
+      });
+    }
+    return coverage;
+  }
 }
 
 function buildBandMesh(
@@ -160,35 +244,56 @@ function buildBandMesh(
   band: FarFieldBandConfig,
   anchorX: number,
   anchorZ: number,
+  centerX: number,
+  centerZ: number,
   innerRadius: number,
+  exclusionMask: FarFieldExclusionMask | null,
 ): ChunkMeshData {
   const outerCells = Math.ceil(band.outerRadius / band.sampleStride);
-  const sampleSpan = outerCells * 2 + 1;
+  const sampleRadius = outerCells
+    + Math.ceil(Math.max(Math.abs(centerX - anchorX), Math.abs(centerZ - anchorZ)) / band.sampleStride)
+    + 1;
+  const sampleSpan = sampleRadius * 2 + 1;
   const heights = new Int32Array(sampleSpan * sampleSpan);
   const colors = new Uint32Array(sampleSpan * sampleSpan);
+  const states = new Uint8Array(sampleSpan * sampleSpan);
 
   for (let sampleZ = 0; sampleZ < sampleSpan; sampleZ += 1) {
-    const cellZ = sampleZ - outerCells;
+    const cellZ = sampleZ - sampleRadius;
     const worldZ = anchorZ + cellZ * band.sampleStride;
     const rowOffset = sampleZ * sampleSpan;
     for (let sampleX = 0; sampleX < sampleSpan; sampleX += 1) {
-      const cellX = sampleX - outerCells;
+      const cellX = sampleX - sampleRadius;
       const worldX = anchorX + cellX * band.sampleStride;
       const column = generator.sampleColumn(worldX, worldZ);
-      heights[sampleX + rowOffset] = column.surfaceY;
-      colors[sampleX + rowOffset] = generator.palette[column.surfaceMaterial] ?? 0;
+      const sampleIndex = sampleX + rowOffset;
+      heights[sampleIndex] = column.surfaceY;
+      colors[sampleIndex] = generator.palette[column.surfaceMaterial] ?? 0;
+      if (!isCellInBand(worldX, worldZ, band.sampleStride, centerX, centerZ, innerRadius, band.outerRadius)) {
+        states[sampleIndex] = CELL_OMITTED;
+        continue;
+      }
+      states[sampleIndex] = exclusionMask?.excludesCell(
+        worldX,
+        worldX + band.sampleStride,
+        worldZ,
+        worldZ + band.sampleStride,
+      )
+        ? CELL_MASKED
+        : CELL_RENDERED;
     }
   }
 
   const vertices: Array<[number, number, number, number, number, number, number]> = [];
   const indices: number[] = [];
 
-  for (let cellZ = -outerCells; cellZ < outerCells; cellZ += 1) {
-    for (let cellX = -outerCells; cellX < outerCells; cellX += 1) {
-      if (!isCellInBand(cellX, cellZ, band.sampleStride, innerRadius, band.outerRadius)) {
+  const renderRadius = sampleRadius - 1;
+  for (let cellZ = -renderRadius; cellZ <= renderRadius; cellZ += 1) {
+    for (let cellX = -renderRadius; cellX <= renderRadius; cellX += 1) {
+      const sampleIndex = cellX + sampleRadius + (cellZ + sampleRadius) * sampleSpan;
+      if (states[sampleIndex] !== CELL_RENDERED) {
         continue;
       }
-      const sampleIndex = cellX + outerCells + (cellZ + outerCells) * sampleSpan;
       const height = heights[sampleIndex]!;
       const color = colors[sampleIndex]!;
       const worldX = anchorX + cellX * band.sampleStride;
@@ -196,6 +301,10 @@ function buildBandMesh(
       const topY = height + 1;
       const x1 = worldX + band.sampleStride;
       const z1 = worldZ + band.sampleStride;
+      const eastBottomY = bottomYForNeighbor(states[sampleIndex + 1]!, heights[sampleIndex + 1]!, height);
+      const westBottomY = bottomYForNeighbor(states[sampleIndex - 1]!, heights[sampleIndex - 1]!, height);
+      const southBottomY = bottomYForNeighbor(states[sampleIndex + sampleSpan]!, heights[sampleIndex + sampleSpan]!, height);
+      const northBottomY = bottomYForNeighbor(states[sampleIndex - sampleSpan]!, heights[sampleIndex - sampleSpan]!, height);
 
       pushQuad(
         vertices,
@@ -210,43 +319,30 @@ function buildBandMesh(
         color,
       );
 
-      if (isCellInBand(cellX + 1, cellZ, band.sampleStride, innerRadius, band.outerRadius)) {
-        const eastHeight = heights[sampleIndex + 1]!;
-        if (eastHeight < height) {
-          const bottomY = eastHeight + 1;
-          pushQuad(
-            vertices,
-            indices,
-            [
-              [x1, bottomY, worldZ],
-              [x1, topY, worldZ],
-              [x1, topY, z1],
-              [x1, bottomY, z1],
-            ],
-            [1, 0, 0],
-            color,
-          );
-        }
-      }
-
-      if (isCellInBand(cellX, cellZ + 1, band.sampleStride, innerRadius, band.outerRadius)) {
-        const southHeight = heights[sampleIndex + sampleSpan]!;
-        if (southHeight < height) {
-          const bottomY = southHeight + 1;
-          pushQuad(
-            vertices,
-            indices,
-            [
-              [worldX, bottomY, z1],
-              [x1, bottomY, z1],
-              [x1, topY, z1],
-              [worldX, topY, z1],
-            ],
-            [0, 0, 1],
-            color,
-          );
-        }
-      }
+      pushSideQuad(vertices, indices, states[sampleIndex + 1]!, heights[sampleIndex + 1]!, height, color, [
+        [x1, eastBottomY, worldZ],
+        [x1, topY, worldZ],
+        [x1, topY, z1],
+        [x1, eastBottomY, z1],
+      ], [1, 0, 0]);
+      pushSideQuad(vertices, indices, states[sampleIndex - 1]!, heights[sampleIndex - 1]!, height, color, [
+        [worldX, westBottomY, worldZ],
+        [worldX, westBottomY, z1],
+        [worldX, topY, z1],
+        [worldX, topY, worldZ],
+      ], [-1, 0, 0]);
+      pushSideQuad(vertices, indices, states[sampleIndex + sampleSpan]!, heights[sampleIndex + sampleSpan]!, height, color, [
+        [worldX, southBottomY, z1],
+        [x1, southBottomY, z1],
+        [x1, topY, z1],
+        [worldX, topY, z1],
+      ], [0, 0, 1]);
+      pushSideQuad(vertices, indices, states[sampleIndex - sampleSpan]!, heights[sampleIndex - sampleSpan]!, height, color, [
+        [worldX, northBottomY, worldZ],
+        [worldX, topY, worldZ],
+        [x1, topY, worldZ],
+        [x1, northBottomY, worldZ],
+      ], [0, 0, -1]);
     }
   }
 
@@ -323,6 +419,37 @@ function pushQuad(
   );
 }
 
+function pushSideQuad(
+  vertices: Array<[number, number, number, number, number, number, number]>,
+  indices: number[],
+  neighborState: number,
+  neighborHeight: number,
+  height: number,
+  color: number,
+  corners: [
+    [number, number, number],
+    [number, number, number],
+    [number, number, number],
+    [number, number, number],
+  ],
+  normal: [number, number, number],
+): void {
+  if (neighborState === CELL_MASKED) {
+    return;
+  }
+  if (neighborHeight >= height) {
+    return;
+  }
+  pushQuad(vertices, indices, corners, normal, color);
+}
+
+function bottomYForNeighbor(neighborState: number, neighborHeight: number, height: number): number {
+  if (neighborState === CELL_MASKED || neighborHeight >= height) {
+    return height + 1;
+  }
+  return neighborHeight + 1;
+}
+
 function writeVertex(
   view: DataView,
   byteOffset: number,
@@ -345,19 +472,29 @@ function writeVertex(
 }
 
 function isCellInBand(
-  cellX: number,
-  cellZ: number,
+  cellMinX: number,
+  cellMinZ: number,
   sampleStride: number,
+  centerX: number,
+  centerZ: number,
   innerRadius: number,
   outerRadius: number,
 ): boolean {
   const distance = Math.max(
-    Math.abs((cellX + 0.5) * sampleStride),
-    Math.abs((cellZ + 0.5) * sampleStride),
+    Math.abs(cellMinX + sampleStride * 0.5 - centerX),
+    Math.abs(cellMinZ + sampleStride * 0.5 - centerZ),
   );
-  return distance > innerRadius && distance <= outerRadius;
+  return distance >= innerRadius && distance < outerRadius;
 }
+
+const CELL_OMITTED = 0;
+const CELL_MASKED = 1;
+const CELL_RENDERED = 2;
 
 function snapToStride(worldCoordinate: number, stride: number): number {
   return Math.floor(worldCoordinate / stride) * stride;
+}
+
+function snapToNearestStride(worldCoordinate: number, stride: number): number {
+  return Math.round(worldCoordinate / stride) * stride;
 }

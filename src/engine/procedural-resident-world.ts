@@ -3,6 +3,7 @@ import {
   ProceduralWorldGenerator,
   type GeneratedChunk,
 } from "./procedural-generator.ts";
+import type { FarFieldExclusionMask } from "./procedural-far-field.ts";
 import { metersToWorldUnits } from "./scale.ts";
 import type { ResidentChunkWorld, VoxelChunk } from "./world.ts";
 
@@ -54,6 +55,8 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
 
   private readonly chunks = new Map<string, VoxelChunk>();
   private readonly emptyChunkKeys = new Set<string>();
+  private readonly residentColumnCounts = new Map<string, number>();
+  private residentColumnRevision = 0;
   private lastAnchorSignature = "";
   private lastAnchorComplete = true;
 
@@ -113,6 +116,39 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
 
   countDirtyResidentChunks(): number {
     return countDirtyResidentChunks(this.chunks.values());
+  }
+
+  hasResidentColumn(cx: number, cz: number): boolean {
+    return (this.residentColumnCounts.get(toColumnKey(cx, cz)) ?? 0) > 0;
+  }
+
+  intersectsResidentColumns(
+    minX: number,
+    maxXExclusive: number,
+    minZ: number,
+    maxZExclusive: number,
+  ): boolean {
+    const minChunkX = Math.floor(minX / this.chunkSize);
+    const maxChunkX = Math.floor((maxXExclusive - 1) / this.chunkSize);
+    const minChunkZ = Math.floor(minZ / this.chunkSize);
+    const maxChunkZ = Math.floor((maxZExclusive - 1) / this.chunkSize);
+    for (let cz = minChunkZ; cz <= maxChunkZ; cz += 1) {
+      for (let cx = minChunkX; cx <= maxChunkX; cx += 1) {
+        if (this.hasResidentColumn(cx, cz)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  getFarFieldExclusionMask(): FarFieldExclusionMask {
+    return {
+      revision: this.residentColumnRevision,
+      maxAffectedRadiusWorldUnits: (this.horizontalRadiusChunks + 1) * this.chunkSize,
+      excludesCell: (minX, maxXExclusive, minZ, maxZExclusive) =>
+        this.intersectsResidentColumns(minX, maxXExclusive, minZ, maxZExclusive),
+    };
   }
 
   getPaletteColor(materialIndex: number): number {
@@ -289,8 +325,8 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       const cx = centerChunkX + dx;
       const cz = centerChunkZ + dz;
       const yRangeStartedAt = performance.now();
-        const [minCy, maxCy] = this.computeChunkYRange(cx, cz);
-        yRangeMs += performance.now() - yRangeStartedAt;
+      const [minCy, maxCy] = this.computeChunkYRange(cx, cz);
+      yRangeMs += performance.now() - yRangeStartedAt;
       const preferredCy = dx === 0 && dz === 0
         ? Math.floor(surfaceY / this.chunkSize)
         : Math.floor((minCy + maxCy) * 0.5);
@@ -319,7 +355,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
         const adoptionStartedAt = performance.now();
         const chunk = createResidentChunk(generated, this.chunkSize);
         this.emptyChunkKeys.delete(key);
-        this.chunks.set(key, chunk);
+        this.adoptResidentChunk(key, chunk);
         generatedChunks += 1;
         generatedChunkCoords.push({ x: cx, y: cy, z: cz });
         chunkAdoptionMs += performance.now() - adoptionStartedAt;
@@ -334,7 +370,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
         continue;
       }
       const evictionStartedAt = performance.now();
-      this.chunks.delete(key);
+      this.evictResidentChunk(key, chunk);
       evictedChunks += 1;
       evictedChunkCoords.push({ ...chunk.coord });
       evictionMs += performance.now() - evictionStartedAt;
@@ -411,6 +447,30 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       touched += 1;
     }
     return touched;
+  }
+
+  private adoptResidentChunk(key: string, chunk: VoxelChunk): void {
+    this.chunks.set(key, chunk);
+    const columnKey = toColumnKey(chunk.coord.x, chunk.coord.z);
+    const previous = this.residentColumnCounts.get(columnKey) ?? 0;
+    this.residentColumnCounts.set(columnKey, previous + 1);
+    if (previous === 0) {
+      this.residentColumnRevision += 1;
+    }
+  }
+
+  private evictResidentChunk(key: string, chunk: VoxelChunk): void {
+    this.chunks.delete(key);
+    const columnKey = toColumnKey(chunk.coord.x, chunk.coord.z);
+    const previous = this.residentColumnCounts.get(columnKey) ?? 0;
+    if (previous <= 1) {
+      this.residentColumnCounts.delete(columnKey);
+      if (previous === 1) {
+        this.residentColumnRevision += 1;
+      }
+      return;
+    }
+    this.residentColumnCounts.set(columnKey, previous - 1);
   }
 }
 
@@ -503,6 +563,10 @@ function prioritizedChunkYRange(minCy: number, maxCy: number, preferredCy: numbe
 
 function toChunkKey(cx: number, cy: number, cz: number): string {
   return `${cx}:${cy}:${cz}`;
+}
+
+function toColumnKey(cx: number, cz: number): string {
+  return `${cx}:${cz}`;
 }
 
 function createResidentChunk(generated: GeneratedChunk, chunkSize: number): VoxelChunk {

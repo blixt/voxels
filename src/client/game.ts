@@ -32,6 +32,10 @@ declare global {
         stepsPerLeg?: number,
         settleFrames?: number,
       ): ReturnType<GameController["benchmarkIncrementalCrossing"]>;
+      probeLodCoverage(
+        sampleRadiusMeters?: number,
+        sampleStepMeters?: number,
+      ): ReturnType<GameController["probeLodCoverage"]>;
     };
   }
 }
@@ -128,6 +132,8 @@ function mountGame(): GameRuntime {
     benchmarkChunkCrossing: (iterations, chunkDelta) => controller.benchmarkChunkCrossing(iterations, chunkDelta),
     benchmarkIncrementalCrossing: (iterations, chunkDelta, stepsPerLeg, settleFrames) =>
       controller.benchmarkIncrementalCrossing(iterations, chunkDelta, stepsPerLeg, settleFrames),
+    probeLodCoverage: (sampleRadiusMeters, sampleStepMeters) =>
+      controller.probeLodCoverage(sampleRadiusMeters, sampleStepMeters),
   };
 
   const ready = controller.init();
