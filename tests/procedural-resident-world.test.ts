@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 
+import { rebuildDirtyMeshes } from "../src/engine/mesher.ts";
 import { ProceduralResidentWorld } from "../src/engine/procedural-resident-world.ts";
 import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
@@ -209,4 +210,40 @@ test("budgeted residency prioritizes the spawn support chunk first", () => {
   const centerChunkZ = Math.floor(spawn[2] / world.chunkSize);
   const supportChunkY = Math.floor((spawn[1] - 1) / world.chunkSize);
   expect(world.hasResidentChunk(centerChunkX, supportChunkY, centerChunkZ)).toBe(true);
+});
+
+test("render-ready far-field mask only excludes columns after their meshes are built", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    horizontalRadiusChunks: 1,
+  });
+  const spawn = world.getSpawnPosition();
+  const centerChunkX = Math.floor(spawn[0] / world.chunkSize);
+  const centerChunkZ = Math.floor(spawn[2] / world.chunkSize);
+
+  world.updateResidencyAround(spawn, { maxGenerateChunks: 1 });
+
+  const residentMask = world.getFarFieldExclusionMask("resident", 1);
+  const renderReadyBefore = world.getFarFieldExclusionMask("render-ready", 1);
+  expect(residentMask.excludesCell(
+    centerChunkX * world.chunkSize,
+    centerChunkX * world.chunkSize + 1,
+    centerChunkZ * world.chunkSize,
+    centerChunkZ * world.chunkSize + 1,
+  )).toBe(true);
+  expect(renderReadyBefore.excludesCell(
+    centerChunkX * world.chunkSize,
+    centerChunkX * world.chunkSize + 1,
+    centerChunkZ * world.chunkSize,
+    centerChunkZ * world.chunkSize + 1,
+  )).toBe(false);
+
+  rebuildDirtyMeshes(world, Number.POSITIVE_INFINITY);
+
+  const renderReadyAfter = world.getFarFieldExclusionMask("render-ready", 2);
+  expect(renderReadyAfter.excludesCell(
+    centerChunkX * world.chunkSize,
+    centerChunkX * world.chunkSize + 1,
+    centerChunkZ * world.chunkSize,
+    centerChunkZ * world.chunkSize + 1,
+  )).toBe(true);
 });

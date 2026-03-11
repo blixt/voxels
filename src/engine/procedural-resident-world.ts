@@ -122,6 +122,10 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     return (this.residentColumnCounts.get(toColumnKey(cx, cz)) ?? 0) > 0;
   }
 
+  hasRenderReadyColumn(cx: number, cz: number): boolean {
+    return this.buildRenderReadyColumnKeys().has(toColumnKey(cx, cz));
+  }
+
   intersectsResidentColumns(
     minX: number,
     maxXExclusive: number,
@@ -142,12 +146,29 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     return false;
   }
 
-  getFarFieldExclusionMask(): FarFieldExclusionMask {
+  getFarFieldExclusionMask(
+    mode: "resident" | "render-ready" = "resident",
+    revisionOverride?: number,
+  ): FarFieldExclusionMask {
+    const renderReadyColumnKeys = mode === "render-ready"
+      ? this.buildRenderReadyColumnKeys()
+      : null;
     return {
-      revision: this.residentColumnRevision,
+      revision: revisionOverride ?? this.residentColumnRevision,
       maxAffectedRadiusWorldUnits: (this.horizontalRadiusChunks + 1) * this.chunkSize,
-      excludesCell: (minX, maxXExclusive, minZ, maxZExclusive) =>
-        this.intersectsResidentColumns(minX, maxXExclusive, minZ, maxZExclusive),
+      excludesCell: (minX, maxXExclusive, minZ, maxZExclusive) => {
+        if (mode === "render-ready" && renderReadyColumnKeys) {
+          return intersectsColumnKeySet(
+            renderReadyColumnKeys,
+            minX,
+            maxXExclusive,
+            minZ,
+            maxZExclusive,
+            this.chunkSize,
+          );
+        }
+        return this.intersectsResidentColumns(minX, maxXExclusive, minZ, maxZExclusive);
+      },
     };
   }
 
@@ -472,6 +493,25 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     }
     this.residentColumnCounts.set(columnKey, previous - 1);
   }
+
+  private buildRenderReadyColumnKeys(): Set<string> {
+    const readyCounts = new Map<string, number>();
+    for (const chunk of this.chunks.values()) {
+      if (!chunk.meshBuilt || chunk.meshDirty) {
+        continue;
+      }
+      const columnKey = toColumnKey(chunk.coord.x, chunk.coord.z);
+      readyCounts.set(columnKey, (readyCounts.get(columnKey) ?? 0) + 1);
+    }
+
+    const readyKeys = new Set<string>();
+    for (const [columnKey, residentCount] of this.residentColumnCounts) {
+      if ((readyCounts.get(columnKey) ?? 0) === residentCount) {
+        readyKeys.add(columnKey);
+      }
+    }
+    return readyKeys;
+  }
 }
 
 const ADJACENT_CHUNK_OFFSETS: ReadonlyArray<readonly [number, number, number]> = [
@@ -567,6 +607,28 @@ function toChunkKey(cx: number, cy: number, cz: number): string {
 
 function toColumnKey(cx: number, cz: number): string {
   return `${cx}:${cz}`;
+}
+
+function intersectsColumnKeySet(
+  columnKeys: ReadonlySet<string>,
+  minX: number,
+  maxXExclusive: number,
+  minZ: number,
+  maxZExclusive: number,
+  chunkSize: number,
+): boolean {
+  const minChunkX = Math.floor(minX / chunkSize);
+  const maxChunkX = Math.floor((maxXExclusive - 1) / chunkSize);
+  const minChunkZ = Math.floor(minZ / chunkSize);
+  const maxChunkZ = Math.floor((maxZExclusive - 1) / chunkSize);
+  for (let cz = minChunkZ; cz <= maxChunkZ; cz += 1) {
+    for (let cx = minChunkX; cx <= maxChunkX; cx += 1) {
+      if (columnKeys.has(toColumnKey(cx, cz))) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function createResidentChunk(generated: GeneratedChunk, chunkSize: number): VoxelChunk {

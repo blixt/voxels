@@ -1332,3 +1332,59 @@ This line of investigation was screened locally and not kept in the runtime yet.
   - unit tests for coverage centering and face directions
   - browser `probeLodCoverage()` for resident overlap/gap counts first, then broader inter-band overlap sampling as a secondary check
   - only then visual spot checks
+
+### Render-ready handoff and transition-band follow-up
+
+#### Commands
+
+- `mise exec -- bunx tsc --noEmit`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/procedural-far-field.test.ts`
+- `mise run test`
+- `mise run build`
+- fresh Chrome 146 reload on `http://localhost:3015/`
+- `window.__VOXELS_GAME__.probeLodCoverage(...)`
+- `window.__VOXELS_GAME__.benchmarkIncrementalCrossing(1, 2, 12, 20)`
+
+#### Automated checks
+
+- `tests/procedural-resident-world.test.ts` now includes:
+  - render-ready columns stay visible in far field until their meshes are actually built
+- `tests/procedural-far-field.test.ts` now includes:
+  - masked-lower-neighbor seam walls
+  - water-top preservation inside coarse cells
+- `mise run test`: passing
+- `mise run build`: passing
+
+#### Browser heuristic checks
+
+- Settled near probe `probeLodCoverage(48, 0.8)`:
+  - `uncoveredGapCount = 0`
+  - `handoffHoleCount = 0`
+  - `bandOverlapCount = 0`
+- Budgeted movement sweep across a two-chunk move:
+  - `maxPendingChunks = 114`
+  - `maxHandoffHoles = 0`
+  - this is the important result for the “far chunks disappear before near chunks appear” complaint
+- Transition-band stride samples after the change:
+  - `18 m -> 0.8 m`
+  - `24 m -> 0.8 m`
+  - `36 m -> 0.8 m`
+  - `48 m -> 1.6 m`
+  - `60 m -> 1.6 m`
+- Browser water preservation check:
+  - found a preserved water patch in the live `transition` band at world cell `(232, -72)`
+
+#### Browser performance spot-check
+
+- `benchmarkIncrementalCrossing(1, 2, 12, 20)` after the transition-band/handoff changes returned:
+  - `p95WorkMs = 10.2`
+  - `maxWorkMs = 11.2`
+  - `p95StreamMs = 6.0`
+  - `p95MeshMs = 4.4`
+  - `maxPendingChunks = 78`
+
+#### Residual
+
+- The render-ready handoff hole is fixed.
+- There is still measurable inter-band overlap at the far/horizon handoff around `224 m`.
+- The coverage probe still reports some exact-radius band-boundary artifacts, which now appear to be coarse-band compositing issues rather than resident-vs-far handoff failures.

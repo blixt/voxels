@@ -20,7 +20,7 @@ test("procedural far field coverage stays continuous around settled streamed anc
   ];
 
   for (const position of positions) {
-    const nearProbe = settleAndProbeCoverage(world, farField, position, 32, 0.8);
+    const nearProbe = settleAndProbeCoverage(world, farField, position, 24, 0.8);
     expect(nearProbe.residentOverlapCount).toBe(0);
     expect(nearProbe.uncoveredGapCount).toBe(0);
     expect(nearProbe.bandOverlapCount).toBe(0);

@@ -5,6 +5,7 @@ import type { ChunkMeshData, Vec3 } from "./types.ts";
 const FLOAT32_BYTES = 4;
 const NORMAL_SCALE = 127;
 const VERTEX_STRIDE = 20;
+const NO_WATER_HEIGHT = -0x7fff_ffff;
 
 interface FarFieldBandConfig {
   readonly label: string;
@@ -57,15 +58,22 @@ export interface FarFieldUpdateSummary {
 
 const DEFAULT_BANDS: readonly FarFieldBandConfig[] = [
   {
-    label: "mid",
+    label: "transition",
     innerRadius: metersToWorldUnits(6),
-    outerRadius: metersToWorldUnits(96),
+    outerRadius: metersToWorldUnits(48),
+    sampleStride: metersToWorldUnits(0.8),
+    anchorStride: metersToWorldUnits(12.8),
+  },
+  {
+    label: "mid",
+    innerRadius: metersToWorldUnits(48),
+    outerRadius: metersToWorldUnits(112),
     sampleStride: metersToWorldUnits(1.6),
     anchorStride: metersToWorldUnits(25.6),
   },
   {
     label: "far",
-    innerRadius: metersToWorldUnits(96),
+    innerRadius: metersToWorldUnits(112),
     outerRadius: metersToWorldUnits(224),
     sampleStride: metersToWorldUnits(4.8),
     anchorStride: metersToWorldUnits(76.8),
@@ -256,28 +264,33 @@ function buildBandMesh(
   const sampleSpan = sampleRadius * 2 + 1;
   const heights = new Int32Array(sampleSpan * sampleSpan);
   const colors = new Uint32Array(sampleSpan * sampleSpan);
+  const waterHeights = new Int32Array(sampleSpan * sampleSpan);
+  waterHeights.fill(NO_WATER_HEIGHT);
+  const waterColors = new Uint32Array(sampleSpan * sampleSpan);
   const states = new Uint8Array(sampleSpan * sampleSpan);
 
   for (let sampleZ = 0; sampleZ < sampleSpan; sampleZ += 1) {
     const cellZ = sampleZ - sampleRadius;
-    const worldZ = anchorZ + cellZ * band.sampleStride;
+    const cellMinZ = anchorZ + cellZ * band.sampleStride;
     const rowOffset = sampleZ * sampleSpan;
     for (let sampleX = 0; sampleX < sampleSpan; sampleX += 1) {
       const cellX = sampleX - sampleRadius;
-      const worldX = anchorX + cellX * band.sampleStride;
-      const column = generator.sampleColumn(worldX, worldZ);
+      const cellMinX = anchorX + cellX * band.sampleStride;
+      const sampledCell = sampleFarFieldCell(generator, cellMinX, cellMinZ, band.sampleStride);
       const sampleIndex = sampleX + rowOffset;
-      heights[sampleIndex] = column.surfaceY;
-      colors[sampleIndex] = generator.palette[column.surfaceMaterial] ?? 0;
-      if (!isCellInBand(worldX, worldZ, band.sampleStride, centerX, centerZ, innerRadius, band.outerRadius)) {
+      heights[sampleIndex] = sampledCell.surfaceY;
+      colors[sampleIndex] = sampledCell.surfaceColor;
+      waterHeights[sampleIndex] = sampledCell.waterTopY ?? NO_WATER_HEIGHT;
+      waterColors[sampleIndex] = sampledCell.waterColor;
+      if (!isCellInBand(cellMinX, cellMinZ, band.sampleStride, centerX, centerZ, innerRadius, band.outerRadius)) {
         states[sampleIndex] = CELL_OMITTED;
         continue;
       }
       states[sampleIndex] = exclusionMask?.excludesCell(
-        worldX,
-        worldX + band.sampleStride,
-        worldZ,
-        worldZ + band.sampleStride,
+        cellMinX,
+        cellMinX + band.sampleStride,
+        cellMinZ,
+        cellMinZ + band.sampleStride,
       )
         ? CELL_MASKED
         : CELL_RENDERED;
@@ -301,6 +314,8 @@ function buildBandMesh(
       const topY = height + 1;
       const x1 = worldX + band.sampleStride;
       const z1 = worldZ + band.sampleStride;
+      const waterHeight = waterHeights[sampleIndex]!;
+      const waterColor = waterColors[sampleIndex]!;
       const eastBottomY = bottomYForNeighbor(states[sampleIndex + 1]!, heights[sampleIndex + 1]!, height);
       const westBottomY = bottomYForNeighbor(states[sampleIndex - 1]!, heights[sampleIndex - 1]!, height);
       const southBottomY = bottomYForNeighbor(states[sampleIndex + sampleSpan]!, heights[sampleIndex + sampleSpan]!, height);
@@ -343,6 +358,8 @@ function buildBandMesh(
         [x1, topY, worldZ],
         [x1, northBottomY, worldZ],
       ], [0, 0, -1]);
+
+      pushWaterTopQuad(vertices, indices, worldX, worldZ, x1, z1, height, waterHeight, waterColor);
     }
   }
 
@@ -422,7 +439,7 @@ function pushQuad(
 function pushSideQuad(
   vertices: Array<[number, number, number, number, number, number, number]>,
   indices: number[],
-  neighborState: number,
+  _neighborState: number,
   neighborHeight: number,
   height: number,
   color: number,
@@ -434,20 +451,88 @@ function pushSideQuad(
   ],
   normal: [number, number, number],
 ): void {
-  if (neighborState === CELL_MASKED) {
-    return;
-  }
   if (neighborHeight >= height) {
     return;
   }
   pushQuad(vertices, indices, corners, normal, color);
 }
 
-function bottomYForNeighbor(neighborState: number, neighborHeight: number, height: number): number {
-  if (neighborState === CELL_MASKED || neighborHeight >= height) {
+function bottomYForNeighbor(_neighborState: number, neighborHeight: number, height: number): number {
+  if (neighborHeight >= height) {
     return height + 1;
   }
   return neighborHeight + 1;
+}
+
+function pushWaterTopQuad(
+  vertices: Array<[number, number, number, number, number, number, number]>,
+  indices: number[],
+  minX: number,
+  minZ: number,
+  maxX: number,
+  maxZ: number,
+  terrainHeight: number,
+  waterHeight: number,
+  waterColor: number,
+): void {
+  if (waterHeight === NO_WATER_HEIGHT || waterHeight <= terrainHeight || waterColor === 0) {
+    return;
+  }
+  const topY = waterHeight + 1;
+  pushQuad(
+    vertices,
+    indices,
+    [
+      [minX, topY, minZ],
+      [minX, topY, maxZ],
+      [maxX, topY, maxZ],
+      [maxX, topY, minZ],
+    ],
+    [0, 1, 0],
+    waterColor,
+  );
+}
+
+function sampleFarFieldCell(
+  generator: ProceduralWorldGenerator,
+  cellMinX: number,
+  cellMinZ: number,
+  sampleStride: number,
+): {
+  surfaceY: number;
+  surfaceColor: number;
+  waterTopY: number | null;
+  waterColor: number;
+} {
+  const centerX = cellMinX + sampleStride * 0.5;
+  const centerZ = cellMinZ + sampleStride * 0.5;
+  const centerColumn = generator.sampleColumn(centerX, centerZ);
+  let waterTopY: number | null = centerColumn.waterTopY;
+  let waterColor = waterTopY !== null
+    ? generator.palette[generator.sampleMaterial(centerX, waterTopY, centerZ)] ?? 0
+    : 0;
+
+  if (sampleStride <= metersToWorldUnits(1.6)) {
+    for (const [offsetX, offsetZ] of FEATURE_SAMPLE_OFFSETS) {
+      const sampleX = cellMinX + sampleStride * offsetX;
+      const sampleZ = cellMinZ + sampleStride * offsetZ;
+      const column = generator.sampleColumn(sampleX, sampleZ);
+      if (column.waterTopY === null) {
+        continue;
+      }
+      if (waterTopY === null || column.waterTopY > waterTopY) {
+        waterTopY = column.waterTopY;
+        waterColor = generator.palette[generator.sampleMaterial(sampleX, column.waterTopY, sampleZ)] ?? waterColor;
+      }
+    }
+  }
+
+  return {
+    surfaceY: centerColumn.surfaceY,
+    surfaceColor: generator.palette[centerColumn.surfaceMaterial] ?? 0,
+    waterTopY,
+    waterColor,
+  };
 }
 
 function writeVertex(
@@ -490,6 +575,12 @@ function isCellInBand(
 const CELL_OMITTED = 0;
 const CELL_MASKED = 1;
 const CELL_RENDERED = 2;
+const FEATURE_SAMPLE_OFFSETS: ReadonlyArray<readonly [number, number]> = [
+  [0.2, 0.2],
+  [0.8, 0.2],
+  [0.2, 0.8],
+  [0.8, 0.8],
+];
 
 function snapToStride(worldCoordinate: number, stride: number): number {
   return Math.floor(worldCoordinate / stride) * stride;

@@ -166,9 +166,14 @@ function simulateChunkCrossing(deltaChunks: number): {
   let maxPendingChunks = 0;
   let maxDirtyResidentChunks = 0;
   let maxFrameWorkMs = 0;
+  let farFieldMaskRevision = 0;
 
   if (!resolved.changed) {
-    const farSummary = farField.updateAround(targetFeetPosition, 0, world.getFarFieldExclusionMask());
+    const farSummary = farField.updateAround(
+      targetFeetPosition,
+      0,
+      world.getFarFieldExclusionMask("render-ready", farFieldMaskRevision),
+    );
     const dirtyResidentChunks = world.countDirtyResidentChunks();
     return {
       anchorChanged: false,
@@ -212,8 +217,18 @@ function simulateChunkCrossing(deltaChunks: number): {
       buildStreamAnchorPosition(targetAnchor, world.chunkSize, targetFeetPosition[1]),
       { maxGenerateChunks: generateBudget },
     );
-    const farSummary = farField.updateAround(targetFeetPosition, 0, world.getFarFieldExclusionMask());
     const mesh = rebuildDirtyMeshes(world, meshBudget);
+    if (residency.generatedChunks > 0 || residency.evictedChunks > 0 || residency.touchedNeighborChunks > 0) {
+      farFieldMaskRevision += 1;
+    }
+    if (mesh.meshCount > 0) {
+      farFieldMaskRevision += 1;
+    }
+    const farSummary = farField.updateAround(
+      targetFeetPosition,
+      0,
+      world.getFarFieldExclusionMask("render-ready", farFieldMaskRevision),
+    );
     dirtyResidentChunks = world.countDirtyResidentChunks();
     pendingChunks = residency.pendingChunks;
     const frameWorkMs = farSummary.elapsedMs + residency.elapsedMs + mesh.elapsedMs;
@@ -268,12 +283,15 @@ function settleWorld(
   feetPosition: Vec3,
   anchor: StreamAnchor,
 ): void {
+  let farFieldMaskRevision = 0;
   world.updateResidencyAround(
     buildStreamAnchorPosition(anchor, world.chunkSize, feetPosition[1]),
     { maxGenerateChunks: Number.POSITIVE_INFINITY },
   );
-  farField.updateAround(feetPosition, 0, world.getFarFieldExclusionMask());
+  farFieldMaskRevision += 1;
   rebuildDirtyMeshes(world, Number.POSITIVE_INFINITY);
+  farFieldMaskRevision += 1;
+  farField.updateAround(feetPosition, 0, world.getFarFieldExclusionMask("render-ready", farFieldMaskRevision));
 }
 
 function resolveAnchor(feetPosition: Vec3, chunkSize: number): StreamAnchor {

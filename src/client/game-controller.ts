@@ -226,13 +226,16 @@ export interface LodCoverageProbe {
   sampleStepMeters: number;
   sampleCount: number;
   residentSampleCount: number;
+  renderReadySampleCount: number;
   coveredSampleCount: number;
   residentOverlapCount: number;
   uncoveredGapCount: number;
+  handoffHoleCount: number;
   bandOverlapCount: number;
   wrongBandCount: number;
   residentOverlapSamples: LodCoverageIssueSample[];
   uncoveredGapSamples: LodCoverageIssueSample[];
+  handoffHoleSamples: LodCoverageIssueSample[];
   bandOverlapSamples: LodCoverageIssueSample[];
   wrongBandSamples: LodCoverageIssueSample[];
 }
@@ -265,6 +268,7 @@ export class GameController {
   private lastStreamSummary: ResidencyUpdateSummary = cloneResidencySummary(this.world.lastResidency);
   private lastFarFieldSummary: FarFieldUpdateSummary = this.farField.lastUpdate;
   private streamAnchor: StreamAnchor | null = null;
+  private farFieldReadyMaskRevision = 0;
   private streamingBudgets: StreamingBudgets = {
     maxGeneratedChunksPerUpdate: DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE,
     maxMeshRebuildsPerFrame: DEFAULT_MAX_MESH_REBUILDS_PER_FRAME,
@@ -441,16 +445,19 @@ export class GameController {
     const centerX = this.player.feetPosition[0];
     const centerZ = this.player.feetPosition[2];
     const maxRadiusWorldUnits = this.lastFarFieldSummary.maxRadiusWorldUnits;
-    const exclusionMask = this.world.getFarFieldExclusionMask();
+    const renderReadyMask = this.getRenderReadyFarFieldMask();
     const residentOverlapSamples: LodCoverageIssueSample[] = [];
     const uncoveredGapSamples: LodCoverageIssueSample[] = [];
+    const handoffHoleSamples: LodCoverageIssueSample[] = [];
     const bandOverlapSamples: LodCoverageIssueSample[] = [];
     const wrongBandSamples: LodCoverageIssueSample[] = [];
     let sampleCount = 0;
     let residentSampleCount = 0;
+    let renderReadySampleCount = 0;
     let coveredSampleCount = 0;
     let residentOverlapCount = 0;
     let uncoveredGapCount = 0;
+    let handoffHoleCount = 0;
     let bandOverlapCount = 0;
     let wrongBandCount = 0;
 
@@ -465,29 +472,40 @@ export class GameController {
         const chunkX = Math.floor(worldX / this.world.chunkSize);
         const chunkZ = Math.floor(worldZ / this.world.chunkSize);
         const resident = this.world.hasResidentColumn(chunkX, chunkZ);
-        const coverage = this.farField.getCoverageAt(worldX, worldZ, exclusionMask);
+        const renderReady = renderReadyMask.excludesCell(worldX, worldX + 1, worldZ, worldZ + 1);
+        const coverage = this.farField.getCoverageAt(worldX, worldZ, renderReadyMask);
         const distanceMeters = worldUnitsToMeters(distanceWorldUnits);
         const issueSample = coverageToIssueSample(worldX, worldZ, distanceMeters, coverage);
         sampleCount += 1;
         if (resident) {
           residentSampleCount += 1;
         }
+        if (renderReady) {
+          renderReadySampleCount += 1;
+        }
         if (coverage.length > 0) {
           coveredSampleCount += 1;
         }
-        if (resident && coverage.length > 0) {
+        if (renderReady && coverage.length > 0) {
           residentOverlapCount += 1;
           pushIssueSample(residentOverlapSamples, issueSample);
         }
-        if (!resident && coverage.length === 0) {
+        if (!renderReady && coverage.length === 0) {
           uncoveredGapCount += 1;
           pushIssueSample(uncoveredGapSamples, issueSample);
+        }
+        if (resident && !renderReady && coverage.length === 0) {
+          handoffHoleCount += 1;
+          pushIssueSample(handoffHoleSamples, issueSample);
         }
         if (coverage.length > 1) {
           bandOverlapCount += 1;
           pushIssueSample(bandOverlapSamples, issueSample);
         }
-        if (coverage.some((band) => distanceWorldUnits < band.innerRadiusWorldUnits || distanceWorldUnits >= band.outerRadiusWorldUnits)) {
+        if (
+          coverage.length > 1
+          || coverage.some((band) => distanceWorldUnits < band.innerRadiusWorldUnits || distanceWorldUnits >= band.outerRadiusWorldUnits)
+        ) {
           wrongBandCount += 1;
           pushIssueSample(wrongBandSamples, issueSample);
         }
@@ -500,13 +518,16 @@ export class GameController {
       sampleStepMeters: normalizedStep,
       sampleCount,
       residentSampleCount,
+      renderReadySampleCount,
       coveredSampleCount,
       residentOverlapCount,
       uncoveredGapCount,
+      handoffHoleCount,
       bandOverlapCount,
       wrongBandCount,
       residentOverlapSamples,
       uncoveredGapSamples,
+      handoffHoleSamples,
       bandOverlapSamples,
       wrongBandSamples,
     };
@@ -870,12 +891,12 @@ export class GameController {
       return this.syncWorldAroundAnchor(resolved.anchor, true);
     }
     if (!shouldRefreshResidency(false, resolved.changed, this.lastStreamSummary.pendingChunks)) {
+      this.flushMeshBuildBudget();
       this.lastFarFieldSummary = this.farField.updateAround(
         this.player.feetPosition,
         0,
-        this.world.getFarFieldExclusionMask(),
+        this.getRenderReadyFarFieldMask(),
       );
-      this.flushMeshBuildBudget();
       this.lastStreamSummary = createIdleResidencySummary(
         this.lastStreamSummary,
         this.streamAnchor ?? resolved.anchor,
@@ -899,13 +920,16 @@ export class GameController {
       },
     );
     this.lastStreamSummary = cloneResidencySummary(residency);
+    if (residency.generatedChunks > 0 || residency.evictedChunks > 0 || residency.touchedNeighborChunks > 0) {
+      this.farFieldReadyMaskRevision += 1;
+    }
+    this.flushMeshBuildBudget(
+      settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxMeshRebuildsPerFrame,
+    );
     this.lastFarFieldSummary = this.farField.updateAround(
       this.player.feetPosition,
       0,
-      this.world.getFarFieldExclusionMask(),
-    );
-    this.flushMeshBuildBudget(
-      settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxMeshRebuildsPerFrame,
+      this.getRenderReadyFarFieldMask(),
     );
     this.status = residency.pendingChunks > 0
       ? `Streaming ${residency.pendingChunks} pending chunk(s)`
@@ -927,6 +951,13 @@ export class GameController {
     const meshSummary = rebuildDirtyMeshes(this.world, maxChunks);
     this.lastMeshBuildSummary = meshSummary;
     this.meshMs = meshSummary.elapsedMs;
+    if (meshSummary.meshCount > 0) {
+      this.farFieldReadyMaskRevision += 1;
+    }
+  }
+
+  private getRenderReadyFarFieldMask() {
+    return this.world.getFarFieldExclusionMask("render-ready", this.farFieldReadyMaskRevision);
   }
 
   private renderCurrentFrame(): {

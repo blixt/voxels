@@ -5,14 +5,14 @@ import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts"
 import { metersToWorldUnits } from "../src/engine/scale.ts";
 import type { ChunkMeshData } from "../src/engine/types.ts";
 
-test("procedural far field covers a few hundred meters with three render bands", () => {
+test("procedural far field covers a few hundred meters with four render bands", () => {
   const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337));
 
   const summary = farField.updateAround([0, 0, 0]);
 
   expect(summary.changed).toBe(true);
-  expect(summary.meshCount).toBe(3);
-  expect(summary.builtBands).toBe(3);
+  expect(summary.meshCount).toBe(4);
+  expect(summary.builtBands).toBe(4);
   expect(summary.maxRadiusMeters).toBeGreaterThanOrEqual(300);
   expect(summary.triangleCount).toBeGreaterThan(0);
   expect(farField.getRenderables().every((band) => band.mesh !== null)).toBe(true);
@@ -22,7 +22,7 @@ test("procedural far field reuses meshes while staying inside the current anchor
   const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337));
   farField.updateAround([0, 0, 0]);
 
-  const summary = farField.updateAround([4, 0, 4]);
+  const summary = farField.updateAround([3, 0, 3]);
 
   expect(summary.changed).toBe(false);
   expect(summary.builtBands).toBe(0);
@@ -92,7 +92,7 @@ test("procedural far field default bands are ordered without overlap", () => {
 
 test("procedural far field emits vertical faces in all four directions", () => {
   const farField = new ProceduralFarField(
-    createTestGenerator((worldX, worldZ) => (worldX === 0 && worldZ === 0 ? 8 : 1)),
+    createTestGenerator((worldX, worldZ) => (worldX >= 0 && worldX < 8 && worldZ >= 0 && worldZ < 8 ? 8 : 1)),
     [
       { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32 },
     ],
@@ -132,6 +132,60 @@ test("procedural far field exclusion masks remove overlapping top cells", () => 
   expect(maskedTopCells).not.toContain("0:0");
 });
 
+test("procedural far field keeps a seam wall against lower masked neighbors", () => {
+  const farField = new ProceduralFarField(
+    createTestGenerator((worldX, worldZ) => (worldX < 8 && worldZ < 8 ? 8 : 1)),
+    [
+      { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32 },
+    ],
+  );
+  const exclusionMask = {
+    revision: 1,
+    excludesCell: (minX: number, _maxXExclusive: number, minZ: number) => minX === 8 && minZ === 0,
+  };
+
+  farField.updateAround([0, 0, 0], 0, exclusionMask);
+
+  const quads = extractQuads(farField.getRenderables()[0]!.mesh);
+  expect(quads.some((quad) =>
+    quad.normal.join(",") === "1,0,0"
+    && quad.min[0] === 8
+    && quad.min[1] === 2
+    && quad.min[2] === 0
+    && quad.max[1] === 9
+    && quad.max[2] === 8)).toBe(true);
+});
+
+test("procedural far field can preserve water tops inside coarse cells", () => {
+  const terrainColor = 0xff_aa_88_ff;
+  const waterColor = 0xff_44_aa_ff;
+  const farField = new ProceduralFarField({
+    palette: [0, terrainColor, waterColor],
+    sampleColumn(worldX: number, worldZ: number) {
+      const hasWater = worldX >= 2 && worldX <= 6 && worldZ >= 2 && worldZ <= 6;
+      return {
+        biomeId: "verdant",
+        surfaceY: hasWater ? 2 : 6,
+        waterTopY: hasWater ? 6 : null,
+        surfaceMaterial: 1,
+      };
+    },
+    sampleMaterial(_worldX: number, worldY: number) {
+      return worldY >= 6 ? 2 : 1;
+    },
+  } as unknown as ProceduralWorldGenerator, [
+    { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32 },
+  ]);
+
+  farField.updateAround([0, 0, 0]);
+
+  const topColors = extractQuads(farField.getRenderables()[0]!.mesh)
+    .filter((quad) => quad.normal.join(",") === "0,1,0")
+    .map((quad) => quad.color);
+  expect(topColors).toContain(terrainColor);
+  expect(topColors).toContain(waterColor);
+});
+
 function createTestGenerator(
   surfaceYForWorldPosition: (worldX: number, worldZ: number) => number,
 ): ProceduralWorldGenerator {
@@ -168,21 +222,58 @@ function extractTopCellKeys(mesh: ChunkMeshData | null): string[] {
   if (!mesh) {
     return [];
   }
-  const view = new DataView(mesh.vertexData);
-  const keys: string[] = [];
-  for (let vertexIndex = 0; vertexIndex < mesh.vertexCount; vertexIndex += 4) {
-    const normalY = Math.sign(view.getInt8(vertexIndex * 20 + 13));
-    if (normalY !== 1) {
-      continue;
-    }
-    let minX = Number.POSITIVE_INFINITY;
-    let minZ = Number.POSITIVE_INFINITY;
-    for (let corner = 0; corner < 4; corner += 1) {
-      const byteOffset = (vertexIndex + corner) * 20;
-      minX = Math.min(minX, view.getFloat32(byteOffset, true));
-      minZ = Math.min(minZ, view.getFloat32(byteOffset + 8, true));
-    }
-    keys.push(`${minX}:${minZ}`);
+  return extractQuads(mesh)
+    .filter((quad) => quad.normal[1] === 1)
+    .map((quad) => `${quad.min[0]}:${quad.min[2]}`);
+}
+
+function extractQuads(mesh: ChunkMeshData | null): Array<{
+  normal: [number, number, number];
+  min: [number, number, number];
+  max: [number, number, number];
+  color: number;
+}> {
+  if (!mesh) {
+    return [];
   }
-  return keys;
+  const view = new DataView(mesh.vertexData);
+  const quads: Array<{
+    normal: [number, number, number];
+    min: [number, number, number];
+    max: [number, number, number];
+    color: number;
+  }> = [];
+  for (let vertexIndex = 0; vertexIndex < mesh.vertexCount; vertexIndex += 4) {
+    const byteOffset = vertexIndex * 20;
+    const normal: [number, number, number] = [
+      Math.sign(view.getInt8(byteOffset + 12)),
+      Math.sign(view.getInt8(byteOffset + 13)),
+      Math.sign(view.getInt8(byteOffset + 14)),
+    ];
+    let minX = Number.POSITIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let minZ = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    let maxZ = Number.NEGATIVE_INFINITY;
+    for (let corner = 0; corner < 4; corner += 1) {
+      const cornerOffset = (vertexIndex + corner) * 20;
+      const x = view.getFloat32(cornerOffset, true);
+      const y = view.getFloat32(cornerOffset + 4, true);
+      const z = view.getFloat32(cornerOffset + 8, true);
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      minZ = Math.min(minZ, z);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+      maxZ = Math.max(maxZ, z);
+    }
+    quads.push({
+      normal,
+      min: [minX, minY, minZ],
+      max: [maxX, maxY, maxZ],
+      color: view.getUint32(byteOffset + 16, true),
+    });
+  }
+  return quads;
 }

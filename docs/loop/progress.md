@@ -392,3 +392,29 @@
   - there is still measurable inter-band overlap right at the far/horizon handoff around `224 m`; that is now recorded as a separate follow-up instead of conflating it with the resident-vs-far seam bug
 - Checked that the correctness fix did not obviously damage the movement path:
   - fresh Chrome 146 `benchmarkIncrementalCrossing(1, 2, 12, 20)` now reports about `14.0 ms` p95 combined work and `15.2 ms` max combined work, with `8.2 ms` p95 stream and `5.6 ms` p95 mesh
+- Followed up on the next set of user-visible LOD complaints instead of assuming the previous seam fix solved them:
+  - the important distinction turned out to be `resident` columns versus `render-ready` columns
+  - chunks were becoming resident before they were meshed, so the far field could step aside too early and expose temporary holes
+- Fixed the near/far handoff policy:
+  - the resident world now exposes a `render-ready` far-field mask in addition to the raw resident-column mask
+  - the game path now updates residency first, then builds detailed meshes, and only then rebuilds the far field against that render-ready mask
+  - the stream profiler was updated to match the same order so local profiling still reflects the real runtime path
+- Improved the coarse representation itself:
+  - added a new `transition` band so the first visible coarse detail outside the resident voxel window uses `0.8 m` cells instead of jumping straight to `1.6 m`
+  - moved that first coarse-band handoff out to about `48 m`, so the obvious resolution cliff is no longer right outside the detailed world
+  - coarse cells now sample at cell centers instead of corners
+  - for the nearer coarse bands, the far field now probes extra sample points to preserve small water features inside coarse cells
+  - far-field cells now emit seam walls against lower masked neighbors instead of leaving the masked side fully open
+- Added direct coverage for those changes:
+  - a resident-world test now proves the render-ready mask does not exclude a column until meshing has actually completed
+  - a far-field seam test now proves a masked lower neighbor still gets a closing wall
+  - a far-field water test now proves water-colored top quads can survive inside coarse cells
+- Revalidated the updated behavior in Chrome 146:
+  - the movement-path probe now reports `handoffHoleCount = 0` even on a pending-stream step where `pendingChunks = 114`
+  - the first visible coarse ring stays at `0.8 m` cells through `18 m`, `24 m`, and `36 m`, and only switches to `1.6 m` at `48 m`
+  - a live browser scan found an actual preserved water patch in the `transition` band at world cell `(232, -72)`
+  - `benchmarkIncrementalCrossing(1, 2, 12, 20)` improved to about `10.2 ms` p95 combined work and `11.2 ms` max combined work
+- Current residual after this slice:
+  - the obvious temporary holes during chunk arrival are fixed by the render-ready handoff
+  - the far/horizon band handoff around `224 m` still has measurable multi-band overlap
+  - the coverage probe still flags some band-boundary artifacts at exact transition radii, which now look like a general coarse-band compositing problem rather than the original near/far seam bug
