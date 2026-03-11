@@ -98,6 +98,22 @@ test("player does not auto-step onto obstacles higher than 3 voxels", () => {
   expect(player.feetPosition[1]).toBe(1);
 });
 
+test("player can move into water and submerge without colliding", () => {
+  const world = new VoxelWorld({ width: 64, height: 64, depth: 64 }, 16, [0, 0xff8899aa, 0xaaee8844]);
+  world.fillBox(0, 0, 0, 64, 1, 64, 1);
+  world.fillBox(8, 1, 8, 32, 24, 32, 2);
+  world.isWaterMaterial = (materialIndex) => materialIndex === 2;
+  world.isCollisionMaterial = (materialIndex) => materialIndex !== 0 && materialIndex !== 2;
+  const player = createPlayerState([6, 1, 16], { grounded: true });
+
+  const result = stepPlayer(world, player, 0, { ...idleInput(), forward: 1 }, 0.2);
+
+  expect(result.collidedX).toBe(false);
+  expect(player.feetPosition[0]).toBeGreaterThan(8);
+  expect(player.bodyInWater).toBe(true);
+  expect(player.eyeInWater).toBe(true);
+});
+
 function idleInput() {
   return {
     forward: 0,

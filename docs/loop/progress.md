@@ -960,3 +960,30 @@
 - Main lesson from this slice:
   - "more landmark ids" was not the real fix
   - scale, density, and profile-driven placement matter more than adding more geometry cases when the engine still uses one compact feature slot
+
+### Transparent water and submersion seam
+
+- Took Volta's recommendation and kept the first water pass narrow:
+  - treat water as a special material class
+  - render it in a separate blended pass
+  - start with transparent water surfaces instead of a full generic transparency system
+- Added an explicit material seam instead of letting water keep pretending to be terrain:
+  - `ResidentChunkWorld` now exposes `isCollisionMaterial(...)` and `isWaterMaterial(...)`
+  - procedural worlds classify generator water materials through `isProceduralWaterMaterial(...)`
+  - the procedural palette now gives water materials a reduced alpha channel instead of relying on opaque `#RGB` colors
+- Physics now treats water as non-colliding:
+  - the player can enter and submerge into water
+  - player state now tracks `bodyInWater` and `eyeInWater`
+  - the HUD exposes both flags so browser verification later does not rely only on visual judgment
+- Near-field chunk meshing no longer mixes water into the opaque terrain pass:
+  - opaque greedy meshing now treats water as empty space so terrain faces against water stay visible
+  - water is emitted as a separate top-surface mesh
+  - this is intentionally the smallest useful step and keeps us compatible with future local water systems
+- Far-field water uses the same separation idea:
+  - terrain stays in the opaque far-field pass
+  - water tops are emitted into a separate far-field water mesh and rendered with blending
+- I explicitly did not pretend this solves "all water":
+  - it supports the current global water level well enough for submersion and transparent viewing
+  - it does not yet add rivers, local lakes, flowing water, underwater fog, or shoreline side volumes
+- Main lesson from this slice:
+  - once water got its own material class, both collision and rendering became simpler than trying to special-case opaque voxels everywhere

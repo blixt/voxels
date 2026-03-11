@@ -682,7 +682,8 @@ function buildBandMesh(
       renderedCellCount += 1;
     }
   }
-  const mesh = createMeshBuilder(renderedCellCount * 6);
+  const mesh = createMeshBuilder(renderedCellCount * 5);
+  const waterMesh = createMeshBuilder(renderedCellCount);
 
   const renderRadius = sampleRadius - 1;
   for (let cellZ = -renderRadius; cellZ <= renderRadius; cellZ += 1) {
@@ -808,11 +809,11 @@ function buildBandMesh(
         0, 0, -1,
       );
 
-      pushWaterTopQuad(mesh, worldX, worldZ, x1, z1, height, waterHeight, waterColor);
+      pushWaterTopQuad(waterMesh, worldX, worldZ, x1, z1, height, waterHeight, waterColor);
     }
   }
 
-  return finishMeshBuilder(mesh, anchorX, anchorZ);
+  return finishCombinedMeshBuilders(mesh, waterMesh, anchorX, anchorZ);
 }
 
 function ensureBandSampleCache(
@@ -1039,9 +1040,17 @@ function createMeshBuilder(maxQuadCount: number): MeshBuilder {
 
 function finishMeshBuilder(
   mesh: MeshBuilder,
-  anchorX: number,
-  anchorZ: number,
-): ChunkMeshData {
+): {
+  vertexData: ArrayBuffer;
+  vertexCount: number;
+  indexData: Uint32Array;
+  indexCount: number;
+  triangleCount: number;
+  bounds: {
+    min: [number, number, number];
+    max: [number, number, number];
+  } | null;
+} {
   const usedVertexBytes = mesh.vertexCount * VERTEX_STRIDE;
   const vertexData = usedVertexBytes === mesh.vertexBuffer.byteLength
     ? mesh.vertexBuffer
@@ -1056,14 +1065,75 @@ function finishMeshBuilder(
     indexCount: mesh.indexCount,
     triangleCount: mesh.indexCount / 3,
     bounds: mesh.vertexCount === 0
-      ? {
-          min: [anchorX, 0, anchorZ],
-          max: [anchorX, 0, anchorZ],
-        }
+      ? null
       : {
           min: [mesh.minX, mesh.minY, mesh.minZ],
           max: [mesh.maxX, mesh.maxY, mesh.maxZ],
         },
+  };
+}
+
+function finishCombinedMeshBuilders(
+  opaqueMesh: MeshBuilder,
+  waterMesh: MeshBuilder,
+  anchorX: number,
+  anchorZ: number,
+): ChunkMeshData {
+  const opaque = finishMeshBuilder(opaqueMesh);
+  const water = finishMeshBuilder(waterMesh);
+  return {
+    vertexData: opaque.vertexData,
+    vertexCount: opaque.vertexCount,
+    indexData: opaque.indexData,
+    indexCount: opaque.indexCount,
+    waterVertexData: water.vertexData,
+    waterVertexCount: water.vertexCount,
+    waterIndexData: water.indexData,
+    waterIndexCount: water.indexCount,
+    waterTriangleCount: water.triangleCount,
+    triangleCount: opaque.triangleCount + water.triangleCount,
+    bounds: opaque.bounds || water.bounds
+      ? combineBounds(
+          opaque.bounds,
+          water.bounds,
+        )
+      : {
+          min: [anchorX, 0, anchorZ],
+          max: [anchorX, 0, anchorZ],
+        }
+  };
+}
+
+function combineBounds(
+  opaqueBounds: {
+    min: [number, number, number];
+    max: [number, number, number];
+  } | null,
+  waterBounds: {
+    min: [number, number, number];
+    max: [number, number, number];
+  } | null,
+): {
+  min: [number, number, number];
+  max: [number, number, number];
+} {
+  if (!opaqueBounds) {
+    return waterBounds!;
+  }
+  if (!waterBounds) {
+    return opaqueBounds;
+  }
+  return {
+    min: [
+      Math.min(opaqueBounds.min[0], waterBounds.min[0]),
+      Math.min(opaqueBounds.min[1], waterBounds.min[1]),
+      Math.min(opaqueBounds.min[2], waterBounds.min[2]),
+    ],
+    max: [
+      Math.max(opaqueBounds.max[0], waterBounds.max[0]),
+      Math.max(opaqueBounds.max[1], waterBounds.max[1]),
+      Math.max(opaqueBounds.max[2], waterBounds.max[2]),
+    ],
   };
 }
 

@@ -275,6 +275,12 @@ const SPECIAL_BIOMES: Record<SpecialBiomeId, SpecialBiomeProfile> = {
   bloom: createSpecialBiome("bloom", "#6A8", "#8CF", "#7BA", "#BDF", "#668", "#557", "#668", "#4CF", "#EEF", true),
 };
 
+const PROCEDURAL_WATER_ALPHA = 168;
+const PROCEDURAL_WATER_MATERIALS = new Set<number>([
+  ...BASE_BIOMES.map((biome) => biome.water),
+  ...Object.values(SPECIAL_BIOMES).map((biome) => biome.water),
+]);
+
 const UNDERGROUND_BIOMES: Record<UndergroundBiomeId, UndergroundBiomeProfile> = {
   rooted: createUndergroundBiome("rooted", "#586", "#354", "#9C6"),
   sedimentary: createUndergroundBiome("sedimentary", "#866", "#644", "#DA7"),
@@ -393,6 +399,18 @@ export function buildHexColorPalette(): number[] {
   return palette;
 }
 
+export function buildProceduralPalette(): number[] {
+  const palette = buildHexColorPalette();
+  for (const material of PROCEDURAL_WATER_MATERIALS) {
+    palette[material] = (palette[material]! & 0x00ff_ffff) | (PROCEDURAL_WATER_ALPHA << 24);
+  }
+  return palette;
+}
+
+export function isProceduralWaterMaterial(materialIndex: number): boolean {
+  return PROCEDURAL_WATER_MATERIALS.has(materialIndex);
+}
+
 export function hexColorToMaterial(code: string): number {
   const clean = code.startsWith("#") ? code.slice(1) : code;
   if (!/^[0-9a-fA-F]{3}$/.test(clean)) {
@@ -409,7 +427,7 @@ export function materialToHexColor(materialIndex: number): string {
 }
 
 export class ProceduralWorldGenerator {
-  readonly palette = buildHexColorPalette();
+  readonly palette = buildProceduralPalette();
   readonly seaLevel: number;
   readonly chunkSize: number;
   readonly maxYExclusive: number;

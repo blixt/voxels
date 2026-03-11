@@ -127,3 +127,17 @@ test("budgeted meshing prioritizes nearby unbuilt chunks around the focus point"
   expect(world.getResidentChunk(1, 0, 0)?.meshBuilt).toBe(false);
   expect(world.getResidentChunk(2, 0, 0)?.meshBuilt).toBe(false);
 });
+
+test("water is emitted as a separate top-surface mesh", () => {
+  const world = new VoxelWorld({ width: 8, height: 8, depth: 8 }, 8, [0, 0xff8899aa, 0xaaee8844]);
+  world.isWaterMaterial = (materialIndex) => materialIndex === 2;
+  world.isCollisionMaterial = (materialIndex) => materialIndex !== 0 && materialIndex !== 2;
+  world.setVoxel(1, 0, 1, 1);
+  world.setVoxel(1, 1, 1, 2);
+
+  const mesh = buildChunkMesh(world, 0, 0, 0);
+
+  expect(mesh.indexCount).toBeGreaterThan(0);
+  expect(mesh.waterIndexCount).toBe(6);
+  expect(mesh.waterTriangleCount).toBe(2);
+});

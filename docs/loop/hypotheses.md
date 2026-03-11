@@ -268,3 +268,12 @@
 | More landmark ids alone will not produce the biome variety the user asked for if density and scale stay miniature | Add biome-specific `cellSize/chance/scale/variant` overrides and aggregate landmark counts by biome/id | Confirmed. The first roster rewrite still overproduced small flowers/shrubs; the kept version only became acceptable after density retuning toward larger landmark families | Confirmed |
 | Terrain still will not read as a `10 cm` world if the generator only changes surface materials and keeps geometry too smooth | Raise biome micro-relief and add a slow shared `massifRelief` term, then rerun the fixed-seed terrain envelope probe | Confirmed. The probe kept soft-border jumps bounded while lifting peak sampled terrain to `1652` and adding more geometric relief | Confirmed |
 | A second jump-height increase can be verified objectively instead of argued from feel | Raise jump velocity and rerun the peak-height unit test | Confirmed. The new `4.7 m/s` jump clears the updated `1.0 m` regression | Confirmed |
+
+## 2026-03-11 transparent water and submersion seam
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| Water should stop being treated like generic solid terrain before either collision or rendering will feel correct | Add explicit `isCollisionMaterial(...)` / `isWaterMaterial(...)` seams and rerun focused physics + mesher tests | Confirmed. Once water was classified explicitly, physics and meshing became straightforward and the focused suite stayed green | Confirmed |
+| A first usable water pass does not need full generic transparency or full voxel-volume water meshing | Split water into a separate top-surface mesh and render it in a blended pass, then verify terrain remains visible below water in the unit seams | Confirmed. The engine now emits water into a separate mesh and keeps terrain in the opaque pass without needing a generic OIT system | Confirmed |
+| Global-water submersion can be verified without opening a heavy browser session | Add a player-physics regression for entering water and checking `bodyInWater` / `eyeInWater` | Confirmed. The new regression catches submersion numerically without relying on a human visual check | Confirmed |
+| Keeping water palette alpha implicit in the renderer is too fragile for future work | Encode translucency directly in the procedural palette for water-class materials and verify it with a direct palette test | Confirmed. The procedural-water palette test now guards the alpha seam directly | Confirmed |

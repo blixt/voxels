@@ -2573,3 +2573,36 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - This slice is worth keeping.
 - The next worldgen-facing issue is no longer tiny prop scale; it is broader world-system variety such as clustered placement, local water systems, and richer landmark/structure layering.
+
+## 2026-03-11 transparent water and submersion seam
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-generator.test.ts tests/player-physics.test.ts tests/mesher.test.ts`
+- `mise run build`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing
+- Focused tests:
+  - `32 pass`
+  - `0 fail`
+- `mise run build`: passing
+
+#### Added verification coverage
+
+- Procedural water materials are explicitly classified and use translucent palette entries
+- Player physics now has a regression for entering water and submerging without collision
+- Meshing now has a regression that water is emitted into a separate top-surface mesh instead of the opaque terrain mesh
+
+#### Residual
+
+- This slice is worth keeping.
+- It solves:
+  - transparent global-water surfaces
+  - visible terrain below water
+  - submersion without collision
+- It does not yet solve:
+  - local water bodies
+  - rivers/flow
+  - underwater fog/tint
+  - volumetric shoreline side faces

@@ -66,6 +66,8 @@ export interface GameHudSnapshot {
   playerChunk: [number, number, number];
   streamAnchorChunk: [number, number];
   grounded: boolean;
+  bodyInWater: boolean;
+  eyeInWater: boolean;
   yawDegrees: number;
   pitchDegrees: number;
   solidVoxelCount: number;
@@ -650,6 +652,8 @@ export class GameController {
             Math.floor(this.player.feetPosition[2] / this.world.chunkSize),
           ],
       grounded: this.player.grounded,
+      bodyInWater: this.player.bodyInWater,
+      eyeInWater: this.player.eyeInWater,
       yawDegrees: toDegrees(this.camera.yaw),
       pitchDegrees: toDegrees(this.camera.pitch),
       solidVoxelCount: stats.solidVoxelCount,

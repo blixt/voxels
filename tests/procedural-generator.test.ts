@@ -3,7 +3,9 @@ import { expect, test } from "bun:test";
 import { fnv1a } from "../src/engine/math.ts";
 import {
   buildHexColorPalette,
+  buildProceduralPalette,
   hexColorToMaterial,
+  isProceduralWaterMaterial,
   materialToHexColor,
   ProceduralWorldGenerator,
   PROCEDURAL_WORLD_MAX_Y,
@@ -16,6 +18,14 @@ test("hex color palette covers all #RGB materials", () => {
   expect(palette).toHaveLength(4097);
   expect(materialToHexColor(material)).toBe("#ABC");
   expect(palette[material]).toBe(0xffccbbaa);
+});
+
+test("procedural water materials are classified and use translucent palette entries", () => {
+  const palette = buildProceduralPalette();
+  const material = hexColorToMaterial("#49B");
+
+  expect(isProceduralWaterMaterial(material)).toBe(true);
+  expect((palette[material]! >>> 24)).toBeLessThan(0xff);
 });
 
 test("procedural generator is deterministic per chunk coordinate", () => {

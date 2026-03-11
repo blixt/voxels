@@ -1,6 +1,7 @@
 import type { ChunkCoordinate, Vec3, WorldStats } from "./types.ts";
 import {
   ProceduralWorldGenerator,
+  isProceduralWaterMaterial,
   type GeneratedChunk,
 } from "./procedural-generator.ts";
 import type { FarFieldExclusionMask } from "./procedural-far-field.ts";
@@ -173,6 +174,14 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
 
   getPaletteColor(materialIndex: number): number {
     return this.palette[materialIndex] ?? 0;
+  }
+
+  isCollisionMaterial(materialIndex: number): boolean {
+    return materialIndex !== 0 && !isProceduralWaterMaterial(materialIndex);
+  }
+
+  isWaterMaterial(materialIndex: number): boolean {
+    return isProceduralWaterMaterial(materialIndex);
   }
 
   getVoxel(x: number, y: number, z: number): number {

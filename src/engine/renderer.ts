@@ -44,7 +44,7 @@ struct VertexInput {
 struct VertexOutput {
   @builtin(position) clip_position: vec4<f32>,
   @location(0) normal: vec3<f32>,
-  @location(1) color: vec3<f32>,
+  @location(1) color: vec4<f32>,
   @location(2) world_position: vec3<f32>,
 }
 
@@ -53,7 +53,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
   var output: VertexOutput;
   output.clip_position = uniforms.view_projection * vec4<f32>(input.position, 1.0);
   output.normal = normalize(input.normal.xyz);
-  output.color = input.color.rgb;
+  output.color = input.color;
   output.world_position = input.position;
   return output;
 }
@@ -62,10 +62,10 @@ fn shade_fragment(input: VertexOutput) -> vec4<f32> {
   let directional = max(dot(input.normal, -uniforms.light_direction.xyz), 0.0);
   let hemi = input.normal.y * 0.5 + 0.5;
   let lighting = uniforms.lighting_terms.x + uniforms.lighting_terms.y * directional + uniforms.lighting_terms.z * hemi;
-  let shaded = input.color * lighting;
+  let shaded = input.color.rgb * lighting;
   let fog_distance = distance(input.world_position, uniforms.camera_position.xyz);
   let fog = smoothstep(uniforms.fog_params.x, uniforms.fog_params.y, fog_distance);
-  return vec4<f32>(shaded * (1.0 - fog) + uniforms.fog_color.rgb * fog, 1.0);
+  return vec4<f32>(shaded * (1.0 - fog) + uniforms.fog_color.rgb * fog, input.color.a);
 }
 
 fn far_field_mask_contains(world_position: vec3<f32>) -> bool {
@@ -108,6 +108,12 @@ interface GpuChunkResources {
   indexCapacity: number;
   indexCount: number;
   triangleCount: number;
+  waterVertexBuffer: GPUBuffer | null;
+  waterIndexBuffer: GPUBuffer | null;
+  waterVertexCapacity: number;
+  waterIndexCapacity: number;
+  waterIndexCount: number;
+  waterTriangleCount: number;
   syncRevision: number;
 }
 
@@ -194,6 +200,8 @@ export class WebGpuVoxelRenderer {
   private readonly device: GPUDevice;
   private readonly pipeline: GPURenderPipeline;
   private readonly farFieldPipeline: GPURenderPipeline;
+  private readonly waterPipeline: GPURenderPipeline;
+  private readonly farFieldWaterPipeline: GPURenderPipeline;
   private readonly uniformBuffer: GPUBuffer;
   private readonly farFieldMaskBuffer: GPUBuffer;
   private readonly uniformBindGroup: GPUBindGroup;
@@ -238,6 +246,18 @@ export class WebGpuVoxelRenderer {
       ],
     });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+    const waterBlend: GPUBlendState = {
+      color: {
+        srcFactor: "src-alpha",
+        dstFactor: "one-minus-src-alpha",
+        operation: "add",
+      },
+      alpha: {
+        srcFactor: "one",
+        dstFactor: "one-minus-src-alpha",
+        operation: "add",
+      },
+    };
     this.pipeline = device.createRenderPipeline({
       layout: pipelineLayout,
       vertex: {
@@ -270,6 +290,38 @@ export class WebGpuVoxelRenderer {
         depthCompare: "less",
       },
     });
+    this.waterPipeline = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: {
+        module: shaderModule,
+        entryPoint: "vs_main",
+        buffers: [
+          {
+            arrayStride: 20,
+            attributes: [
+              { shaderLocation: 0, format: "float32x3", offset: 0 },
+              { shaderLocation: 1, format: "snorm8x4", offset: 12 },
+              { shaderLocation: 2, format: "unorm8x4", offset: 16 },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: "fs_main",
+        targets: [{ format, blend: waterBlend }],
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none",
+        frontFace: "ccw",
+      },
+      depthStencil: {
+        format: "depth24plus",
+        depthWriteEnabled: false,
+        depthCompare: "less",
+      },
+    });
     this.farFieldPipeline = device.createRenderPipeline({
       layout: pipelineLayout,
       vertex: {
@@ -299,6 +351,41 @@ export class WebGpuVoxelRenderer {
       depthStencil: {
         format: "depth24plus",
         depthWriteEnabled: true,
+        depthCompare: "less",
+        depthBias: 2,
+        depthBiasSlopeScale: 1,
+        depthBiasClamp: 0,
+      },
+    });
+    this.farFieldWaterPipeline = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: {
+        module: shaderModule,
+        entryPoint: "vs_main",
+        buffers: [
+          {
+            arrayStride: 20,
+            attributes: [
+              { shaderLocation: 0, format: "float32x3", offset: 0 },
+              { shaderLocation: 1, format: "snorm8x4", offset: 12 },
+              { shaderLocation: 2, format: "unorm8x4", offset: 16 },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: "fs_far",
+        targets: [{ format, blend: waterBlend }],
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none",
+        frontFace: "ccw",
+      },
+      depthStencil: {
+        format: "depth24plus",
+        depthWriteEnabled: false,
         depthCompare: "less",
         depthBias: 2,
         depthBiasSlopeScale: 1,
@@ -567,6 +654,30 @@ export class WebGpuVoxelRenderer {
       drawCalls += 1;
       triangles += resource.triangleCount;
     }
+    pass.setPipeline(this.farFieldWaterPipeline);
+    for (const extraMesh of extraMeshes) {
+      const resource = this.resources.get(extraMesh);
+      if (!resource || resource.waterIndexCount === 0 || !resource.waterVertexBuffer || !resource.waterIndexBuffer) {
+        continue;
+      }
+      pass.setVertexBuffer(0, resource.waterVertexBuffer);
+      pass.setIndexBuffer(resource.waterIndexBuffer, "uint32");
+      pass.drawIndexed(resource.waterIndexCount, 1, 0, 0, 0);
+      drawCalls += 1;
+      triangles += resource.waterTriangleCount;
+    }
+    pass.setPipeline(this.waterPipeline);
+    for (const chunk of world.iterateResidentChunks()) {
+      const resource = this.resources.get(chunk);
+      if (!resource || resource.waterIndexCount === 0 || !resource.waterVertexBuffer || !resource.waterIndexBuffer) {
+        continue;
+      }
+      pass.setVertexBuffer(0, resource.waterVertexBuffer);
+      pass.setIndexBuffer(resource.waterIndexBuffer, "uint32");
+      pass.drawIndexed(resource.waterIndexCount, 1, 0, 0, 0);
+      drawCalls += 1;
+      triangles += resource.waterTriangleCount;
+    }
     pass.end();
     return { drawCalls, triangles };
   }
@@ -670,7 +781,7 @@ export class WebGpuVoxelRenderer {
     updated: boolean;
   } {
     const existing = this.resources.get(source);
-    if (!mesh || mesh.indexCount === 0) {
+    if (!mesh || (mesh.indexCount === 0 && mesh.waterIndexCount === 0)) {
       if (existing) {
         this.destroyResource(source, existing);
       }
@@ -707,6 +818,12 @@ export class WebGpuVoxelRenderer {
     const startedAt = performance.now();
     const vertexCapacity = nextBufferCapacity(mesh.vertexData.byteLength, previous?.vertexCapacity ?? 0);
     const indexCapacity = nextBufferCapacity(mesh.indexData.byteLength, previous?.indexCapacity ?? 0);
+    const waterVertexCapacity = mesh.waterVertexData.byteLength > 0
+      ? nextBufferCapacity(mesh.waterVertexData.byteLength, previous?.waterVertexCapacity ?? 0)
+      : 0;
+    const waterIndexCapacity = mesh.waterIndexData.byteLength > 0
+      ? nextBufferCapacity(mesh.waterIndexData.byteLength, previous?.waterIndexCapacity ?? 0)
+      : 0;
     const vertexBuffer = !previous || previous.vertexCapacity < mesh.vertexData.byteLength
       ? this.device.createBuffer({
           size: vertexCapacity,
@@ -719,6 +836,22 @@ export class WebGpuVoxelRenderer {
           usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
         })
       : previous.indexBuffer;
+    const waterVertexBuffer = mesh.waterVertexData.byteLength === 0
+      ? null
+      : !previous || !previous.waterVertexBuffer || previous.waterVertexCapacity < mesh.waterVertexData.byteLength
+      ? this.device.createBuffer({
+          size: waterVertexCapacity,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        })
+      : previous.waterVertexBuffer;
+    const waterIndexBuffer = mesh.waterIndexData.byteLength === 0
+      ? null
+      : !previous || !previous.waterIndexBuffer || previous.waterIndexCapacity < mesh.waterIndexData.byteLength
+      ? this.device.createBuffer({
+          size: waterIndexCapacity,
+          usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        })
+      : previous.waterIndexBuffer;
 
     if (vertexBuffer !== previous?.vertexBuffer) {
       previous?.vertexBuffer.destroy();
@@ -726,32 +859,68 @@ export class WebGpuVoxelRenderer {
     if (indexBuffer !== previous?.indexBuffer) {
       previous?.indexBuffer.destroy();
     }
+    if (waterVertexBuffer !== previous?.waterVertexBuffer) {
+      previous?.waterVertexBuffer?.destroy();
+    }
+    if (waterIndexBuffer !== previous?.waterIndexBuffer) {
+      previous?.waterIndexBuffer?.destroy();
+    }
 
-    this.device.queue.writeBuffer(vertexBuffer, 0, mesh.vertexData);
-    const indexBytes = new Uint8Array(mesh.indexData.buffer, mesh.indexData.byteOffset, mesh.indexData.byteLength);
-    this.device.queue.writeBuffer(
-      indexBuffer,
-      0,
-      indexBytes as unknown as GPUAllowSharedBufferSource,
-    );
+    if (mesh.vertexData.byteLength > 0) {
+      this.device.queue.writeBuffer(vertexBuffer, 0, mesh.vertexData);
+    }
+    if (mesh.indexData.byteLength > 0) {
+      const indexBytes = new Uint8Array(mesh.indexData.buffer, mesh.indexData.byteOffset, mesh.indexData.byteLength);
+      this.device.queue.writeBuffer(
+        indexBuffer,
+        0,
+        indexBytes as unknown as GPUAllowSharedBufferSource,
+      );
+    }
+    if (waterVertexBuffer && mesh.waterVertexData.byteLength > 0) {
+      this.device.queue.writeBuffer(waterVertexBuffer, 0, mesh.waterVertexData);
+    }
+    if (waterIndexBuffer && mesh.waterIndexData.byteLength > 0) {
+      const waterIndexBytes = new Uint8Array(
+        mesh.waterIndexData.buffer,
+        mesh.waterIndexData.byteOffset,
+        mesh.waterIndexData.byteLength,
+      );
+      this.device.queue.writeBuffer(
+        waterIndexBuffer,
+        0,
+        waterIndexBytes as unknown as GPUAllowSharedBufferSource,
+      );
+    }
     this.resources.set(chunk, {
       vertexBuffer,
       indexBuffer,
       vertexCapacity,
       indexCapacity,
       indexCount: mesh.indexCount,
-      triangleCount: mesh.triangleCount,
+      triangleCount: mesh.triangleCount - mesh.waterTriangleCount,
+      waterVertexBuffer,
+      waterIndexBuffer,
+      waterVertexCapacity,
+      waterIndexCapacity,
+      waterIndexCount: mesh.waterIndexCount,
+      waterTriangleCount: mesh.waterTriangleCount,
       syncRevision,
     });
     return {
       elapsedMs: performance.now() - startedAt,
-      totalBytes: mesh.vertexData.byteLength + mesh.indexData.byteLength,
+      totalBytes: mesh.vertexData.byteLength
+        + mesh.indexData.byteLength
+        + mesh.waterVertexData.byteLength
+        + mesh.waterIndexData.byteLength,
     };
   }
 
   private destroyResource(resourceKey: object, resource: GpuChunkResources): void {
     resource.vertexBuffer.destroy();
     resource.indexBuffer.destroy();
+    resource.waterVertexBuffer?.destroy();
+    resource.waterIndexBuffer?.destroy();
     this.resources.delete(resourceKey);
   }
 }

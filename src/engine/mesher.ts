@@ -9,6 +9,7 @@ const MAX_MESHER_SCRATCH_POOL = 2;
 
 interface MesherScratch {
   quads: number[];
+  waterQuads: number[];
   mask: Int32Array;
 }
 
@@ -21,6 +22,22 @@ interface ResolvedChunkNeighbor {
 }
 
 const mesherScratchPool: MesherScratch[] = [];
+
+function createEmptyChunkMesh(bounds: { min: [number, number, number]; max: [number, number, number] }): ChunkMeshData {
+  return {
+    vertexData: new ArrayBuffer(0),
+    vertexCount: 0,
+    indexData: new Uint32Array(0),
+    indexCount: 0,
+    waterVertexData: new ArrayBuffer(0),
+    waterVertexCount: 0,
+    waterIndexData: new Uint32Array(0),
+    waterIndexCount: 0,
+    waterTriangleCount: 0,
+    triangleCount: 0,
+    bounds,
+  };
+}
 
 export interface MeshBuildSummary {
   meshCount: number;
@@ -117,48 +134,27 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
   const originZ = cz * chunkSize;
   const chunk = world.getResidentChunk(cx, cy, cz);
   if (!chunk) {
-    return {
-      vertexData: new ArrayBuffer(0),
-      vertexCount: 0,
-      indexData: new Uint32Array(0),
-      indexCount: 0,
-      triangleCount: 0,
-      bounds: {
-        min: [originX, originY, originZ],
-        max: [originX + chunkSize, originY + chunkSize, originZ + chunkSize],
-      },
-    };
+    return createEmptyChunkMesh({
+      min: [originX, originY, originZ],
+      max: [originX + chunkSize, originY + chunkSize, originZ + chunkSize],
+    });
   }
 
   const neighbors = resolveChunkNeighbors(world, cx, cy, cz);
   const chunkArea = chunkSize * chunkSize;
   const chunkVolume = chunkSize * chunkArea;
   if (chunk.solidCount === chunkVolume && isChunkFullyOccluded(neighbors, chunkSize, chunkArea)) {
-    return {
-      vertexData: new ArrayBuffer(0),
-      vertexCount: 0,
-      indexData: new Uint32Array(0),
-      indexCount: 0,
-      triangleCount: 0,
-      bounds: {
-        min: [originX, originY, originZ],
-        max: [originX + chunkSize, originY + chunkSize, originZ + chunkSize],
-      },
-    };
+    return createEmptyChunkMesh({
+      min: [originX, originY, originZ],
+      max: [originX + chunkSize, originY + chunkSize, originZ + chunkSize],
+    });
   }
   const solidBounds = resolveChunkSolidBounds(world, chunk, cx, cy, cz);
   if (!solidBounds) {
-    return {
-      vertexData: new ArrayBuffer(0),
-      vertexCount: 0,
-      indexData: new Uint32Array(0),
-      indexCount: 0,
-      triangleCount: 0,
-      bounds: {
-        min: [originX, originY, originZ],
-        max: [originX + chunkSize, originY + chunkSize, originZ + chunkSize],
-      },
-    };
+    return createEmptyChunkMesh({
+      min: [originX, originY, originZ],
+      max: [originX + chunkSize, originY + chunkSize, originZ + chunkSize],
+    });
   }
 
   const chunkData = chunk.data;
@@ -210,11 +206,13 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
                 chunkSize,
                 chunkArea,
               );
-          mask[maskIndex] = (a !== 0) === (b !== 0)
+          const opaqueA = isOpaqueMaterial(world, a) ? a : 0;
+          const opaqueB = isOpaqueMaterial(world, b) ? b : 0;
+          mask[maskIndex] = (opaqueA !== 0) === (opaqueB !== 0)
             ? 0
-            : a !== 0
-            ? a
-            : -b;
+            : opaqueA !== 0
+            ? opaqueA
+            : -opaqueB;
           maskIndex += 1;
         }
       }
@@ -284,6 +282,150 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
     }
   }
 
+  buildWaterSurfaceQuads(world, chunkData, neighbors, chunkSize, chunkArea, solidBounds, originX, originY, originZ, scratch);
+  const opaqueMesh = buildMeshGeometryFromQuads(quads, world);
+  const waterMesh = buildMeshGeometryFromQuads(scratch.waterQuads, world);
+  const mesh = {
+    vertexData: opaqueMesh.vertexData,
+    vertexCount: opaqueMesh.vertexCount,
+    indexData: opaqueMesh.indexData,
+    indexCount: opaqueMesh.indexCount,
+    waterVertexData: waterMesh.vertexData,
+    waterVertexCount: waterMesh.vertexCount,
+    waterIndexData: waterMesh.indexData,
+    waterIndexCount: waterMesh.indexCount,
+    waterTriangleCount: waterMesh.triangleCount,
+    triangleCount: opaqueMesh.triangleCount + waterMesh.triangleCount,
+    bounds: combineMeshBounds(
+      opaqueMesh.bounds,
+      waterMesh.bounds,
+      {
+        min: [originX, originY, originZ],
+        max: [originX + chunkSize, originY + chunkSize, originZ + chunkSize],
+      },
+    ),
+  };
+  releaseMesherScratch(scratch);
+  return mesh;
+}
+
+function buildWaterSurfaceQuads(
+  world: ResidentChunkWorld,
+  chunkData: Uint16Array,
+  neighbors: ReadonlyArray<[ResolvedChunkNeighbor, ResolvedChunkNeighbor]>,
+  chunkSize: number,
+  chunkArea: number,
+  solidBounds: {
+    min: [number, number, number];
+    max: [number, number, number];
+  },
+  originX: number,
+  originY: number,
+  originZ: number,
+  scratch: MesherScratch,
+): void {
+  const mask = scratch.mask;
+  const quads = scratch.waterQuads;
+  const width = solidBounds.max[0] - solidBounds.min[0];
+  const depth = solidBounds.max[2] - solidBounds.min[2];
+  const positiveYNeighbor = neighbors[1]![1];
+
+  for (let y = solidBounds.min[1]; y < solidBounds.max[1]; y += 1) {
+    let maskIndex = 0;
+    for (let z = solidBounds.min[2]; z < solidBounds.max[2]; z += 1) {
+      for (let x = solidBounds.min[0]; x < solidBounds.max[0]; x += 1) {
+        const material = sampleChunkVoxel(chunkData, chunkSize, chunkArea, x, y, z);
+        if (!world.isWaterMaterial(material)) {
+          mask[maskIndex] = 0;
+          maskIndex += 1;
+          continue;
+        }
+        const above = y + 1 < chunkSize
+          ? sampleChunkVoxel(chunkData, chunkSize, chunkArea, x, y + 1, z)
+          : sampleNeighborVoxel(
+              positiveYNeighbor.data,
+              1,
+              false,
+              x,
+              y + 1,
+              z,
+              chunkSize,
+              chunkArea,
+            );
+        mask[maskIndex] = world.isWaterMaterial(above) ? 0 : material;
+        maskIndex += 1;
+      }
+    }
+
+    maskIndex = 0;
+    for (let row = 0; row < depth; row += 1) {
+      for (let column = 0; column < width; ) {
+        const current = mask[maskIndex];
+        if (current === 0) {
+          column += 1;
+          maskIndex += 1;
+          continue;
+        }
+        let quadWidth = 1;
+        while (column + quadWidth < width && mask[maskIndex + quadWidth] === current) {
+          quadWidth += 1;
+        }
+
+        let quadDepth = 1;
+        let shouldGrow = true;
+        while (row + quadDepth < depth && shouldGrow) {
+          for (let offset = 0; offset < quadWidth; offset += 1) {
+            if (mask[maskIndex + offset + quadDepth * width] !== current) {
+              shouldGrow = false;
+              break;
+            }
+          }
+          if (shouldGrow) {
+            quadDepth += 1;
+          }
+        }
+
+        quads.push(
+          originX + solidBounds.min[0] + column,
+          originY + y + 1,
+          originZ + solidBounds.min[2] + row,
+          quadWidth,
+          0,
+          0,
+          0,
+          0,
+          quadDepth,
+          1,
+          current,
+        );
+
+        for (let dz = 0; dz < quadDepth; dz += 1) {
+          for (let dx = 0; dx < quadWidth; dx += 1) {
+            mask[maskIndex + dx + dz * width] = 0;
+          }
+        }
+
+        column += quadWidth;
+        maskIndex += quadWidth;
+      }
+    }
+  }
+}
+
+function buildMeshGeometryFromQuads(
+  quads: readonly number[],
+  world: ResidentChunkWorld,
+): {
+  vertexData: ArrayBuffer;
+  vertexCount: number;
+  indexData: Uint32Array;
+  indexCount: number;
+  triangleCount: number;
+  bounds: {
+    min: [number, number, number];
+    max: [number, number, number];
+  } | null;
+} {
   const quadCount = quads.length / QUAD_STRIDE;
   const vertexCount = quadCount * 4;
   const indexCount = quadCount * 6;
@@ -359,19 +501,54 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
     indexOffset += 6;
   }
 
-  const mesh = {
+  return {
     vertexData,
     vertexCount,
     indexData,
     indexCount,
     triangleCount: quadCount * 2,
-    bounds: {
-      min: [minX, minY, minZ] as [number, number, number],
-      max: [maxX, maxY, maxZ] as [number, number, number],
-    },
+    bounds: quadCount === 0
+      ? null
+      : {
+          min: [minX, minY, minZ],
+          max: [maxX, maxY, maxZ],
+        },
   };
-  releaseMesherScratch(scratch);
-  return mesh;
+}
+
+function combineMeshBounds(
+  opaqueBounds: { min: [number, number, number]; max: [number, number, number] } | null,
+  waterBounds: { min: [number, number, number]; max: [number, number, number] } | null,
+  fallback: { min: [number, number, number]; max: [number, number, number] },
+): {
+  min: [number, number, number];
+  max: [number, number, number];
+} {
+  if (!opaqueBounds && !waterBounds) {
+    return fallback;
+  }
+  if (!opaqueBounds) {
+    return waterBounds!;
+  }
+  if (!waterBounds) {
+    return opaqueBounds;
+  }
+  return {
+    min: [
+      Math.min(opaqueBounds.min[0], waterBounds.min[0]),
+      Math.min(opaqueBounds.min[1], waterBounds.min[1]),
+      Math.min(opaqueBounds.min[2], waterBounds.min[2]),
+    ],
+    max: [
+      Math.max(opaqueBounds.max[0], waterBounds.max[0]),
+      Math.max(opaqueBounds.max[1], waterBounds.max[1]),
+      Math.max(opaqueBounds.max[2], waterBounds.max[2]),
+    ],
+  };
+}
+
+function isOpaqueMaterial(world: ResidentChunkWorld, material: number): boolean {
+  return material !== 0 && !world.isWaterMaterial(material);
 }
 
 function sampleChunkVoxel(
@@ -562,9 +739,11 @@ function writeVertex(
 function acquireMesherScratch(requiredMaskLength: number): MesherScratch {
   const scratch = mesherScratchPool.pop() ?? {
     quads: [],
+    waterQuads: [],
     mask: new Int32Array(requiredMaskLength),
   };
   scratch.quads.length = 0;
+  scratch.waterQuads.length = 0;
   if (scratch.mask.length < requiredMaskLength) {
     scratch.mask = new Int32Array(requiredMaskLength);
   }
@@ -573,6 +752,7 @@ function acquireMesherScratch(requiredMaskLength: number): MesherScratch {
 
 function releaseMesherScratch(scratch: MesherScratch): void {
   scratch.quads.length = 0;
+  scratch.waterQuads.length = 0;
   if (mesherScratchPool.length >= MAX_MESHER_SCRATCH_POOL) {
     return;
   }

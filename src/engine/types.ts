@@ -23,6 +23,11 @@ export interface ChunkMeshData {
   vertexCount: number;
   indexData: Uint32Array;
   indexCount: number;
+  waterVertexData: ArrayBuffer;
+  waterVertexCount: number;
+  waterIndexData: Uint32Array;
+  waterIndexCount: number;
+  waterTriangleCount: number;
   triangleCount: number;
   bounds: ChunkBounds;
 }

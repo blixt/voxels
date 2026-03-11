@@ -24,6 +24,8 @@ export interface ResidentChunkWorld {
   readonly maxYExclusive: number;
   getVoxel(x: number, y: number, z: number): number;
   getPaletteColor(materialIndex: number): PackedColor;
+  isCollisionMaterial(materialIndex: number): boolean;
+  isWaterMaterial(materialIndex: number): boolean;
   getResidentChunk(cx: number, cy: number, cz: number): VoxelChunk | null;
   hasResidentChunk(cx: number, cy: number, cz: number): boolean;
   iterateResidentChunks(): Iterable<VoxelChunk>;
@@ -82,6 +84,14 @@ export class VoxelWorld implements ResidentChunkWorld {
 
   getPaletteColor(materialIndex: number): PackedColor {
     return this.palette[materialIndex] ?? 0;
+  }
+
+  isCollisionMaterial(materialIndex: number): boolean {
+    return materialIndex !== EMPTY_VOXEL;
+  }
+
+  isWaterMaterial(_materialIndex: number): boolean {
+    return false;
   }
 
   get maxYExclusive(): number {

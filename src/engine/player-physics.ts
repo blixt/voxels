@@ -21,6 +21,8 @@ export interface PlayerBodyState {
   height: number;
   eyeHeight: number;
   grounded: boolean;
+  bodyInWater: boolean;
+  eyeInWater: boolean;
 }
 
 export interface PlayerPhysicsCommand {
@@ -57,6 +59,8 @@ export function createPlayerBody(
     height: options.height ?? PLAYER_HEIGHT,
     eyeHeight: options.eyeHeight ?? PLAYER_EYE_HEIGHT,
     grounded: options.grounded ?? false,
+    bodyInWater: false,
+    eyeInWater: false,
   };
 }
 
@@ -83,6 +87,8 @@ export function setPlayerEyePosition(body: PlayerBodyState, eyePosition: Vec3): 
   ];
   body.velocity = [0, 0, 0];
   body.grounded = false;
+  body.bodyInWater = false;
+  body.eyeInWater = false;
 }
 
 export function teleportPlayerToEyePosition(body: PlayerState, eyePosition: Vec3): void {
@@ -90,7 +96,7 @@ export function teleportPlayerToEyePosition(body: PlayerState, eyePosition: Vec3
 }
 
 export function stepPlayerBody(
-  world: Pick<ResidentChunkWorld, "getVoxel">,
+  world: Pick<ResidentChunkWorld, "getVoxel" | "isCollisionMaterial" | "isWaterMaterial">,
   body: PlayerBodyState,
   command: PlayerPhysicsCommand,
   deltaSeconds: number,
@@ -123,6 +129,7 @@ export function stepPlayerBody(
   const steppedZ = collidedZ && body.grounded
     ? tryStepUp(world, body, 2, body.velocity[2] * deltaSeconds)
     : false;
+  updateWaterState(world, body);
   return {
     collidedX: collidedX && !steppedX,
     collidedY,
@@ -131,7 +138,7 @@ export function stepPlayerBody(
 }
 
 export function stepPlayer(
-  world: Pick<ResidentChunkWorld, "getVoxel">,
+  world: Pick<ResidentChunkWorld, "getVoxel" | "isCollisionMaterial" | "isWaterMaterial">,
   body: PlayerState,
   yaw: number,
   input: PlayerStepInput,
@@ -154,7 +161,7 @@ export function stepPlayer(
 }
 
 function moveAlongAxis(
-  world: Pick<ResidentChunkWorld, "getVoxel">,
+  world: Pick<ResidentChunkWorld, "getVoxel" | "isCollisionMaterial">,
   body: PlayerBodyState,
   axis: 0 | 1 | 2,
   delta: number,
@@ -178,7 +185,8 @@ function moveAlongAxis(
   for (let z = minZ; z <= maxZ; z += 1) {
     for (let y = minY; y <= maxY; y += 1) {
       for (let x = minX; x <= maxX; x += 1) {
-        if (world.getVoxel(x, y, z) === 0) {
+        const material = world.getVoxel(x, y, z);
+        if (!world.isCollisionMaterial(material)) {
           continue;
         }
         collided = true;
@@ -197,7 +205,7 @@ function moveAlongAxis(
 }
 
 function tryStepUp(
-  world: Pick<ResidentChunkWorld, "getVoxel">,
+  world: Pick<ResidentChunkWorld, "getVoxel" | "isCollisionMaterial">,
   body: PlayerBodyState,
   axis: 0 | 2,
   delta: number,
@@ -233,7 +241,7 @@ function tryStepUp(
 }
 
 function settleStepDown(
-  world: Pick<ResidentChunkWorld, "getVoxel">,
+  world: Pick<ResidentChunkWorld, "getVoxel" | "isCollisionMaterial">,
   body: PlayerBodyState,
   maxDrop: number,
 ): boolean {
@@ -250,7 +258,7 @@ function settleStepDown(
 }
 
 function collidesAt(
-  world: Pick<ResidentChunkWorld, "getVoxel">,
+  world: Pick<ResidentChunkWorld, "getVoxel" | "isCollisionMaterial">,
   feetPosition: Vec3,
   radius: number,
   height: number,
@@ -265,7 +273,7 @@ function collidesAt(
   for (let z = minZ; z <= maxZ; z += 1) {
     for (let y = minY; y <= maxY; y += 1) {
       for (let x = minX; x <= maxX; x += 1) {
-        if (world.getVoxel(x, y, z) !== 0) {
+        if (world.isCollisionMaterial(world.getVoxel(x, y, z))) {
           return true;
         }
       }
@@ -294,6 +302,26 @@ function getPlayerBounds(
       feetPosition[2] + radius,
     ],
   };
+}
+
+function updateWaterState(
+  world: Pick<ResidentChunkWorld, "getVoxel" | "isWaterMaterial">,
+  body: PlayerBodyState,
+): void {
+  const bodySampleY = body.feetPosition[1] + Math.max(1, body.height * 0.35);
+  const eyePosition = getPlayerEyePosition(body);
+  body.bodyInWater = isWaterAt(world, body.feetPosition[0], bodySampleY, body.feetPosition[2]);
+  body.eyeInWater = isWaterAt(world, eyePosition[0], eyePosition[1], eyePosition[2]);
+}
+
+function isWaterAt(
+  world: Pick<ResidentChunkWorld, "getVoxel" | "isWaterMaterial">,
+  x: number,
+  y: number,
+  z: number,
+): boolean {
+  const material = world.getVoxel(Math.floor(x), Math.floor(y), Math.floor(z));
+  return world.isWaterMaterial(material);
 }
 
 function buildWishVelocity(yaw: number, input: PlayerStepInput): Vec3 {
