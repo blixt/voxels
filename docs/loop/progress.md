@@ -83,3 +83,20 @@
 - Extended `docs/agent-playbook.md` with two new lessons from the pivot:
   - split fundamentally different runtime modes instead of building giant mode-switching controllers
   - keep cheap verification cases for camera, picking, inventory, and generation as the game loop grows
+- Implemented the first dedicated `/` game slice instead of continuing to mutate the old playground:
+  - replaced the old page shell with a full-screen game canvas, HUD, crosshair, and capture overlay
+  - deleted the old `src/client/playground.ts` entry and replaced it with a dedicated `src/client/game.ts` bootstrap
+  - added `src/client/game-controller.ts` for pointer lock, first-person movement, and game debug state
+  - added `src/engine/first-person-camera.ts` plus perspective-matrix support
+  - generalized the renderer just enough to accept a precomputed `viewProjection` matrix so the benchmark/orbit path stayed intact
+- Added first-person camera unit tests for:
+  - pitch direction from mouse movement
+  - level forward motion
+  - normalized diagonal movement
+  - forward-ray sanity
+  - perspective depth ordering
+- Verified the new route in Chrome 146:
+  - `/` now loads as a full-screen first-person game shell over the existing terrain bootstrap world
+  - `window.__VOXELS_GAME__` exposes a snapshot and teleport surface for automation
+  - synthetic DevTools clicks still cannot satisfy Pointer Lock, but the page now reports "Pointer lock request was blocked" without uncaught errors
+  - `/bench` remained healthy after the renderer generalization and still passes `validationBlocks`

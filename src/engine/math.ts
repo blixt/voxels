@@ -95,6 +95,22 @@ export function createOrthographicMatrix(
   return out;
 }
 
+export function createPerspectiveMatrix(
+  fovYRadians: number,
+  aspect: number,
+  near: number,
+  far: number,
+): Float32Array {
+  const f = 1 / Math.tan(fovYRadians * 0.5);
+  const out = new Float32Array(16);
+  out[0] = f / aspect;
+  out[5] = f;
+  out[10] = far / (near - far);
+  out[11] = -1;
+  out[14] = (near * far) / (near - far);
+  return out;
+}
+
 export function createLookAtMatrix(eye: Vec3, target: Vec3, up: Vec3): Float32Array {
   const zAxis = normalizeVec3(subVec3(eye, target));
   const xAxis = normalizeVec3(crossVec3(up, zAxis));

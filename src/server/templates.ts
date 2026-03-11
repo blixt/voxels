@@ -23,57 +23,48 @@ function shell(
 </html>`;
 }
 
-export function renderPlaygroundPage(assetVersion: string): string {
+export function renderGamePage(assetVersion: string): string {
   return shell(
-    "Voxels Playground",
-    "page-playground",
-    "playground",
+    "Voxels Game",
+    "page-game",
+    "game",
     `
-      <section class="hero">
-        <div>
-          <p class="eyebrow">Chrome 146 + WebGPU</p>
-          <h1>Voxel Playground</h1>
-          <p class="lede">Chunked, editable voxel rendering from scratch with Bun, TypeScript, and a WebGPU pipeline tuned for lots of small voxels.</p>
-        </div>
-        <nav class="hero-links">
-          <a href="/">Playground</a>
-          <a href="/bench">Benchmark</a>
-        </nav>
-      </section>
-      <section class="layout">
-        <aside class="panel controls">
-          <h2>Scene</h2>
-          <label>
-            <span>Preset</span>
-            <select data-role="scene-select" name="scene"></select>
-          </label>
-          <label>
-            <span>Import .vxsc / .vox</span>
-            <input type="file" data-role="file-input" name="scene-file" accept=".vxsc,.vox" />
-          </label>
-          <label>
-            <span>Import URL</span>
-            <input type="url" data-role="import-url" name="scene-url" placeholder="https://example.com/model.vox" />
-          </label>
-          <button data-role="import-url-button">Load Remote Scene</button>
-          <button data-role="export-button">Export .vxsc</button>
-          <div class="instructions">
-            <h3>Controls</h3>
-            <p>Drag to orbit. Alt-drag or middle-drag to pan. Wheel to zoom.</p>
-            <p>Click removes a voxel. Shift-click places one.</p>
+      <section class="game-shell">
+        <canvas class="game-viewport" data-role="viewport"></canvas>
+        <div class="game-overlay">
+          <header class="game-topbar">
+            <div class="game-brand">
+              <p class="eyebrow">Chrome 146 + WebGPU</p>
+              <h1>Voxels</h1>
+              <p class="game-subtitle">First-person runtime slice over the current engine baseline.</p>
+            </div>
+            <nav class="hero-links">
+              <a href="/">Game</a>
+              <a href="/bench">Benchmark</a>
+            </nav>
+          </header>
+          <div class="game-hud">
+            <section class="game-panel">
+              <h2>Status</h2>
+              <p data-role="status">Initializing WebGPU</p>
+            </section>
+            <section class="game-panel">
+              <h2>Live Telemetry</h2>
+              <div class="game-metrics" data-role="telemetry"></div>
+            </section>
+            <section class="game-panel">
+              <h2>Controls</h2>
+              <p>Click once to capture the cursor.</p>
+              <p><code>WASD</code> move, <code>Space</code> rise, <code>Shift</code> descend, <code>Ctrl</code> sprint, <code>Alt</code> slow.</p>
+              <p>This is the first game slice; streaming, collisions, and inventory come next.</p>
+            </section>
           </div>
-        </aside>
-        <section class="viewport-frame">
-          <canvas class="viewport"></canvas>
-          <div class="status-bar" data-role="status">Initializing WebGPU</div>
-        </section>
-        <aside class="panel stats-panel">
-          <h2>Live Stats</h2>
-          <div class="stats-grid" data-role="stats"></div>
-        </aside>
+          <div class="crosshair" aria-hidden="true"></div>
+          <button class="capture-overlay" data-role="capture">Click To Enter The World</button>
+        </div>
       </section>
     `,
-    "playground",
+    "game",
     assetVersion,
   );
 }
@@ -91,7 +82,7 @@ export function renderBenchPage(assetVersion: string): string {
           <p class="lede">Run repeatable scene suites against the current renderer and capture build, mesh, frame, and correctness data from tiny primitives through full 256^3 worlds.</p>
         </div>
         <nav class="hero-links">
-          <a href="/">Playground</a>
+          <a href="/">Game</a>
           <a href="/bench">Benchmark</a>
         </nav>
       </section>

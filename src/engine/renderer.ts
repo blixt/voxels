@@ -3,6 +3,8 @@ import type { ChunkMeshData } from "./types.ts";
 import { VoxelWorld, type VoxelChunk } from "./world.ts";
 import { CLEAR_COLOR_RGBA, LIGHT_DIRECTION, LIGHTING_TERMS } from "./render-constants.ts";
 
+type RenderCamera = CameraState | { viewProjection: Float32Array };
+
 const SHADER_SOURCE = `
 struct Uniforms {
   view_projection: mat4x4<f32>,
@@ -237,7 +239,7 @@ export class WebGpuVoxelRenderer {
     return new GpuFrameTimer(this.device, frameCount);
   }
 
-  render(world: VoxelWorld, camera: CameraState, timer: GpuFrameTimer | null = null, frameIndex = 0): RenderStats {
+  render(world: VoxelWorld, camera: RenderCamera, timer: GpuFrameTimer | null = null, frameIndex = 0): RenderStats {
     this.configureCanvas(this.context.canvas as HTMLCanvasElement);
     const syncStartedAt = performance.now();
     const syncStats = this.syncResources(world);
@@ -295,7 +297,7 @@ export class WebGpuVoxelRenderer {
     await this.device.queue.onSubmittedWorkDone();
   }
 
-  async captureImage(world: VoxelWorld, camera: CameraState, width: number, height: number): Promise<ReadbackImage> {
+  async captureImage(world: VoxelWorld, camera: RenderCamera, width: number, height: number): Promise<ReadbackImage> {
     this.syncResources(world);
     this.writeUniforms(camera, width / height);
 
@@ -405,10 +407,12 @@ export class WebGpuVoxelRenderer {
     return { drawCalls, triangles };
   }
 
-  private writeUniforms(camera: CameraState, aspect: number): void {
-    const matrices = buildCameraMatrices(camera, aspect);
+  private writeUniforms(camera: RenderCamera, aspect: number): void {
+    const viewProjection = "viewProjection" in camera
+      ? camera.viewProjection
+      : buildCameraMatrices(camera, aspect).viewProjection;
     const uniformData = new Float32Array(24);
-    uniformData.set(matrices.viewProjection, 0);
+    uniformData.set(viewProjection, 0);
     uniformData.set([...LIGHT_DIRECTION, 0], 16);
     uniformData.set([...LIGHTING_TERMS, 0], 20);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);

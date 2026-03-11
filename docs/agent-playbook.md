@@ -99,6 +99,12 @@ It is intentionally practical. It is based on the actual history of this repo so
 - Running different scenarios back-to-back in the same page without resetting state produced confusing results.
 - Reusing a page should be treated as suspicious unless the harness explicitly guarantees clean state.
 
+### Trusting privileged browser APIs to automation
+
+- Synthetic automation is not a reliable oracle for privileged browser features such as Pointer Lock.
+- The right response is not to guess that the feature works; it is to expose a debug/status surface so the success path and failure path are both inspectable.
+- Game and benchmark routes should keep scriptable state surfaces even when a real human gesture is still required for the final interaction.
+
 ### Letting instrumentation drift half-finished
 
 - Partially wired metrics created type drift and verification friction.
@@ -252,6 +258,7 @@ Git worktrees deserve to be part of the standard workflow for this repo.
 - Add run IDs, commit SHAs, bundle version, Chrome version, and scenario metadata to benchmark output.
 - Add an explicit "page ready" signal for automation so agents do not guess when the harness is initialized.
 - Add artifact output directories for screenshot diffs, benchmark JSON, and trace summaries.
+- Expose game-state JSON and deterministic debug hooks on `/` the same way `/bench` exposes benchmark APIs.
 - Add a scenario manifest file so scenes, validation scenes, and stress scenes are discoverable without parsing UI code.
 - Add a headless Chrome runner script for repeatable browser verification outside interactive sessions.
 - Add benchmark modes for:

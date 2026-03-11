@@ -1,5 +1,5 @@
 import { buildClientBundles } from "./server/build-client.ts";
-import { renderBenchPage, renderPlaygroundPage } from "./server/templates.ts";
+import { renderBenchPage, renderGamePage } from "./server/templates.ts";
 
 await buildClientBundles();
 
@@ -25,7 +25,7 @@ function htmlResponse(markup: string): Response {
 const server = Bun.serve({
   port: Number.parseInt(process.env.PORT ?? "3000", 10),
   routes: {
-    "/": () => htmlResponse(renderPlaygroundPage(assetVersion())),
+    "/": () => htmlResponse(renderGamePage(assetVersion())),
     "/bench": () => htmlResponse(renderBenchPage(assetVersion())),
     "/styles.css": () => new Response(Bun.file("public/styles.css"), { headers: NO_STORE_HEADERS }),
     "/favicon.ico": () => new Response(null, { status: 204 }),

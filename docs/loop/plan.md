@@ -53,6 +53,11 @@ The game direction is intentionally demanding:
 - First-person camera, mouse-look, movement, and a debug API that automation can call.
 - Reuse the current world/renderer stack where possible so the slice stays small.
 
+Status:
+- delivered over the existing `terrain256` bootstrap world
+- pointer-lock failure is surfaced cleanly in automation instead of crashing the page
+- next work moves to the world model split rather than polishing the old playground path further
+
 ### Slice 2: world model split
 
 - Separate "authoritative world state" from "currently resident/renderable chunks".
@@ -100,8 +105,8 @@ The game direction is intentionally demanding:
 
 ## Immediate implementation tasks
 
-- Rewrite the `/` page shell and README language from "playground" to "game".
-- Add a dedicated game controller and first-person camera path.
-- Preserve the current benchmark route and validation scenes while the game path diverges.
-- Add at least one browser-automation-friendly game debug surface.
-- Log the pivot and the first game slice in `progress.md` and `verification.md`.
+- Split the world model into world-space chunk coordinates and resident/renderable chunks.
+- Add the first generation/residency interfaces before introducing infinite-world traversal.
+- Add deterministic verification cases for first-person pick rays and movement-related invariants.
+- Keep the game debug API growing alongside `/bench` so browser automation does not depend on visual inspection alone.
+- Log each slice in `progress.md` and `verification.md`.

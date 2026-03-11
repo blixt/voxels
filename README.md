@@ -16,6 +16,7 @@ Repo-specific guidance for agent-driven research, implementation, and verificati
 
 ## Features
 
+- Full-screen `/` game shell with a first-person camera bootstrap
 - Sparse chunked voxel storage with live edits
 - CPU greedy meshing for WebGPU rendering
 - Current orthographic isometric renderer baseline and benchmark scenes
@@ -24,13 +25,20 @@ Repo-specific guidance for agent-driven research, implementation, and verificati
 - Repeatable benchmark harness with separate primitive validation and performance scenes
 - Targeted stress scenes for draw calls, tiny-surface throughput, overdraw, and edit-heavy workloads
 - Image-diff validation against a software reference renderer
+- Browser-exposed debug surfaces for both the game and benchmark paths
 
 ## Current direction
 
-- `/` is being converted from a demo playground into a full-screen voxel game.
+- `/` now boots into the first dedicated game slice instead of the old demo playground UI.
 - The world target is procedurally generated, lazily streamed, effectively infinite in `X/Z`, and bounded to `Y = 0..16383`.
 - The architecture is being pushed toward persistence, remote authority, and multiplayer instead of standalone scenes.
 - `/bench` remains the correctness and performance oracle while the game runtime grows.
+
+## Game automation
+
+- `window.__VOXELS_GAME__.snapshot()`
+- `window.__VOXELS_GAME__.teleport(x, y, z)`
+- `window.__VOXELS_GAME__.requestPointerLock()`
 
 ## Benchmark automation
 

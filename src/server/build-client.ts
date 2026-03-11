@@ -1,4 +1,4 @@
-const entrypoints = ["src/client/playground.ts", "src/client/bench.ts"];
+const entrypoints = ["src/client/game.ts", "src/client/bench.ts"];
 
 export async function buildClientBundles(): Promise<void> {
   const result = await Bun.build({

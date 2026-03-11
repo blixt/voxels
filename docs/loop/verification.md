@@ -158,3 +158,40 @@
   - `docs/agent-playbook.md`
 - No code paths or runtime assets changed in this step.
 - No automated checks were run for this docs-only pivot.
+
+### First game slice verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `PORT=3001 mise exec -- bun run src/server.ts`
+
+#### Automated checks
+
+- `mise run test`: passing after adding the first-person camera module and tests.
+- `mise run build`: passing after replacing the old playground entry with the game entry.
+
+#### Chrome 146 browser checks
+
+- `/` on `http://localhost:3001/` now loads as a full-screen game shell with:
+  - game canvas
+  - HUD/status panels
+  - crosshair
+  - click-to-capture overlay
+- Browser-exposed game automation surface is present:
+  - `window.__VOXELS_GAME__.snapshot()`
+  - `window.__VOXELS_GAME__.teleport(x, y, z)`
+  - `window.__VOXELS_GAME__.requestPointerLock()`
+- DevTools automation can verify the failure path for Pointer Lock, but not grant it:
+  - synthetic click on the capture overlay changes status to `Pointer lock request was blocked`
+  - no console errors are emitted
+- Browser-side game debug probe:
+  - initial snapshot position: `[128.5, 55.0, 128.5]`
+  - teleport probe result: `[140, 70, 90]`
+- `/bench?auto=1&scenario=validationBlocks&iterations=1&frames=3` still completes successfully after the renderer change:
+  - `validationBlocks`: build `0.1 ms`, mesh `0.3 ms`
+  - first CPU `0.90 ms`, warm CPU `0.10 ms`
+  - first GPU `0.07 ms`, warm GPU `0.72 ms`
+  - `MAE 1.63`, coverage mismatch `0.00%`
+  - visual `pass`, correctness `pass`
