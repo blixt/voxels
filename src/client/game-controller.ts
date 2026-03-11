@@ -30,9 +30,17 @@ import {
 } from "../engine/procedural-probes.ts";
 import { ProceduralResidentWorld, type ResidencyUpdateSummary } from "../engine/procedural-resident-world.ts";
 import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
-import { WebGpuVoxelRenderer, type RenderStats } from "../engine/renderer.ts";
+import {
+  WebGpuVoxelRenderer,
+  type FarFieldRenderMask,
+  type RenderStats,
+} from "../engine/renderer.ts";
 import { metersToWorldUnits, worldUnitsToMeters } from "../engine/scale.ts";
-import { shouldPumpWorldWork, shouldRefreshResidency } from "../engine/stream-work.ts";
+import {
+  shouldAllowFarFieldCatchupWhileMoving,
+  shouldPumpWorldWork,
+  shouldRefreshResidency,
+} from "../engine/stream-work.ts";
 import {
   buildStreamAnchorPosition,
   resolveStreamAnchor,
@@ -47,6 +55,8 @@ const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
 const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 7;
 const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 6;
 const DEFAULT_MAX_FAR_FIELD_BAND_REBUILDS_PER_FRAME = 1;
+const MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES = 6;
+const FAR_FIELD_RENDER_MASK_SPAN_CHUNKS = 32;
 
 export interface GameHudSnapshot {
   status: string;
@@ -536,6 +546,11 @@ export class GameController {
   private rafId = 0;
   private lastFrameTime = 0;
   private lastHudPushAt = 0;
+  private interactiveFrameNumber = 0;
+  private cachedFarFieldRenderMaskRevision = -1;
+  private cachedFarFieldRenderMaskOriginChunkX = Number.NaN;
+  private cachedFarFieldRenderMaskOriginChunkZ = Number.NaN;
+  private cachedFarFieldRenderMask: FarFieldRenderMask | null = null;
   private readonly pressedKeys = new Set<string>();
 
   constructor(canvas: HTMLCanvasElement) {
@@ -582,17 +597,29 @@ export class GameController {
         ? 1 / 60
         : Math.min((now - this.lastFrameTime) / 1000, MAX_DELTA_SECONDS);
       this.lastFrameTime = now;
+      this.interactiveFrameNumber += 1;
       const hasMovementIntent = this.hasMovementIntent();
       const moved = this.updateMovement(deltaSeconds);
+      const dirtyResidentChunks = this.world.countDirtyResidentChunks();
       if (
         shouldPumpWorldWork(
           hasMovementIntent || moved,
           this.lastStreamSummary.pendingChunks,
-          this.world.countDirtyResidentChunks(),
+          dirtyResidentChunks,
           this.lastFarFieldSummary.pendingBands,
         )
       ) {
-        this.syncWorldAroundPlayer(false, !hasMovementIntent);
+        this.syncWorldAroundPlayer(
+          false,
+          shouldAllowFarFieldCatchupWhileMoving(
+            hasMovementIntent,
+            this.lastStreamSummary.pendingChunks,
+            dirtyResidentChunks,
+            this.lastFarFieldSummary.pendingBands,
+            this.interactiveFrameNumber,
+            MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES,
+          ),
+        );
       }
       this.renderInteractiveFrame();
       this.rafId = requestAnimationFrame(tick);
@@ -1502,7 +1529,7 @@ export class GameController {
       this.lastFarFieldSummary = this.farField.updateAround(
         this.player.feetPosition,
         0,
-        this.getRenderReadyFarFieldMask(),
+        null,
         this.resolveFarFieldRebuildBudget(false, allowFarFieldRebuild),
       );
       this.lastStreamSummary = createIdleResidencySummary(
@@ -1538,7 +1565,7 @@ export class GameController {
     this.lastFarFieldSummary = this.farField.updateAround(
       this.player.feetPosition,
       0,
-      this.getRenderReadyFarFieldMask(),
+      null,
       this.resolveFarFieldRebuildBudget(settle, allowFarFieldRebuild),
     );
     this.status = residency.pendingChunks > 0
@@ -1572,6 +1599,52 @@ export class GameController {
     return this.world.getFarFieldExclusionMask("render-ready", this.presentedFarFieldReadyMaskRevision);
   }
 
+  private buildFarFieldRenderMask(): FarFieldRenderMask {
+    const playerChunkX = Math.floor(this.player.feetPosition[0] / this.world.chunkSize);
+    const playerChunkZ = Math.floor(this.player.feetPosition[2] / this.world.chunkSize);
+    const halfSpan = FAR_FIELD_RENDER_MASK_SPAN_CHUNKS / 2;
+    const originChunkX = playerChunkX - halfSpan;
+    const originChunkZ = playerChunkZ - halfSpan;
+    if (
+      this.cachedFarFieldRenderMask
+      && this.cachedFarFieldRenderMaskRevision === this.farFieldReadyMaskRevision
+      && this.cachedFarFieldRenderMaskOriginChunkX === originChunkX
+      && this.cachedFarFieldRenderMaskOriginChunkZ === originChunkZ
+    ) {
+      return this.cachedFarFieldRenderMask;
+    }
+    const renderReadyMask = this.world.getFarFieldExclusionMask("render-ready");
+    const words = new Uint32Array((FAR_FIELD_RENDER_MASK_SPAN_CHUNKS * FAR_FIELD_RENDER_MASK_SPAN_CHUNKS) / 32);
+    for (let localZ = 0; localZ < FAR_FIELD_RENDER_MASK_SPAN_CHUNKS; localZ += 1) {
+      const chunkZ = originChunkZ + localZ;
+      for (let localX = 0; localX < FAR_FIELD_RENDER_MASK_SPAN_CHUNKS; localX += 1) {
+        const chunkX = originChunkX + localX;
+        if (!renderReadyMask.excludesCell(
+          chunkX * this.world.chunkSize,
+          (chunkX + 1) * this.world.chunkSize,
+          chunkZ * this.world.chunkSize,
+          (chunkZ + 1) * this.world.chunkSize,
+        )) {
+          continue;
+        }
+        const bitIndex = localX + localZ * FAR_FIELD_RENDER_MASK_SPAN_CHUNKS;
+        words[bitIndex >>> 5] |= (1 << (bitIndex & 31)) >>> 0;
+      }
+    }
+    const mask = {
+      originChunkX,
+      originChunkZ,
+      spanChunks: FAR_FIELD_RENDER_MASK_SPAN_CHUNKS,
+      chunkSizeWorldUnits: this.world.chunkSize,
+      words,
+    };
+    this.cachedFarFieldRenderMaskRevision = this.farFieldReadyMaskRevision;
+    this.cachedFarFieldRenderMaskOriginChunkX = originChunkX;
+    this.cachedFarFieldRenderMaskOriginChunkZ = originChunkZ;
+    this.cachedFarFieldRenderMask = mask;
+    return mask;
+  }
+
   private resolveFarFieldRebuildBudget(settle: boolean, allowFarFieldRebuild: boolean): number {
     if (settle) {
       return Number.POSITIVE_INFINITY;
@@ -1602,7 +1675,14 @@ export class GameController {
     const aspect = this.canvas.width / this.canvas.height;
     const cameraMatrices = buildFirstPersonCameraMatrices(this.camera, aspect);
     const cpuStartedAt = performance.now();
-    const frameStats = this.renderer.render(this.world, cameraMatrices, null, 0, this.farField.getRenderables());
+    const frameStats = this.renderer.render(
+      this.world,
+      cameraMatrices,
+      null,
+      0,
+      this.farField.getRenderables(),
+      this.buildFarFieldRenderMask(),
+    );
     const frameCpuMs = performance.now() - cpuStartedAt;
     this.lastRenderStats = frameStats;
     this.lastFrameCpuMs = frameCpuMs;
@@ -1637,7 +1717,18 @@ export class GameController {
     this.camera.pitch = target.pitch;
     this.syncCameraToPlayer();
     const movementMs = performance.now() - movementStartedAt;
-    const residency = this.syncWorldAroundPlayer(false, target.phase !== "move");
+    const dirtyResidentChunks = this.world.countDirtyResidentChunks();
+    const residency = this.syncWorldAroundPlayer(
+      false,
+      shouldAllowFarFieldCatchupWhileMoving(
+        target.phase !== "move",
+        this.lastStreamSummary.pendingChunks,
+        dirtyResidentChunks,
+        this.lastFarFieldSummary.pendingBands,
+        target.frame,
+        MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES,
+      ),
+    );
     const render = this.renderCurrentFrame();
     const gameplayFrameMs = performance.now() - gameplayStartedAt;
     const dirtyResidentMeshes = summarizeDirtyResidentMeshes(this.world);
@@ -1783,6 +1874,7 @@ export class GameController {
       width,
       height,
       this.farField.getRenderables(),
+      this.buildFarFieldRenderMask(),
     );
   }
 

@@ -122,10 +122,6 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     return (this.residentColumnCounts.get(toColumnKey(cx, cz)) ?? 0) > 0;
   }
 
-  hasRenderReadyColumn(cx: number, cz: number): boolean {
-    return this.buildRenderReadyColumnKeys().has(toColumnKey(cx, cz));
-  }
-
   intersectsResidentColumns(
     minX: number,
     maxXExclusive: number,

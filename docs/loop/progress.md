@@ -632,3 +632,29 @@
   - the downhill far-field seam probe is now clean in tests and in Chrome
   - live held-`W` walking no longer produces meaningful far-field rebuild cost while input is still active
   - the remaining walking spikes are now stream + detailed meshing work, not far-field rebuild work
+
+### Runtime far-field masking without per-frame column-set rebuilds
+
+- Re-opened the latest overlap/lingering-LOD complaint with the user’s new CPU warning in mind:
+  - the previous “catch up far field while moving” tweak was not enough
+  - there was still too much coupling between far-field rebuild policy and the detailed render-ready footprint
+- Tried a small scheduler-only refinement first:
+  - far-field catch-up while moving is now allowed only on quiet cadence frames
+  - the helper lives in `src/engine/stream-work.ts`
+  - this was worth keeping as a policy seam, but it did not solve the real regression by itself
+- The real CPU failure came from the new render-mask path, not from the scheduler:
+  - the first implementation rebuilt the full render-ready column set inside every cell test while constructing the far-field mask
+  - that turned one per-frame mask build into thousands of full set rebuilds
+  - this exactly matched the “closed the tab because CPU was terrible” report
+- Reworked the runtime overlap solution so it is cheaper and cleaner:
+  - far-field meshes are now built without the dynamic render-ready exclusion mask
+  - a compact chunk-column bitmask is built once per relevant revision/origin and sent to the GPU
+  - the far-field fragment shader discards fragments that land inside render-ready detailed chunk columns
+  - far-field geometry renders on its own pipeline before detailed chunk meshes, so detailed geometry wins without needing constant coarse-mesh rebuild churn
+- Tightened the CPU path at the same time:
+  - deleted the now-dead `hasRenderReadyColumn()` helper that rebuilt the whole ready set on each query
+  - `buildFarFieldRenderMask()` now snapshots the render-ready exclusion mask once, fills a fixed-size bitset, and caches the result by mask revision plus chunk origin
+  - reduced the runtime mask span from the earlier larger experiment to a leaner `32 x 32` chunk window
+- The broader lesson is worth keeping in the repo memory:
+  - diagnostic or correctness scaffolding on the game path must never call “build a full global snapshot” helpers from inside per-cell or per-pixel loops
+  - if runtime masking is needed, favor immutable snapshots and tiny cached transfer objects over repeated world queries

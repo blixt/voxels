@@ -1888,3 +1888,29 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - The user-reported far-field hitch while actively walking is now explained and fixed in the live loop.
 - The remaining walking spikes come from chunk generation + detailed meshing work, which is the next optimization target.
+
+## 2026-03-11 runtime far-field masking regression fix
+
+- `mise run test`
+- `mise run build`
+
+#### Automated checks
+
+- `mise run test`: passing after moving runtime far-field overlap handling onto a cached GPU mask path.
+- `mise run build`: passing.
+- Full suite result:
+  - `89 pass`
+  - `0 fail`
+
+#### Focused validation
+
+- `tests/stream-work.test.ts` now also covers the new “quiet cadence” far-field catch-up helper used while movement input is held.
+- The current runtime far-field mask path now avoids the prior catastrophic behavior:
+  - the render-ready exclusion snapshot is built once per mask build
+  - the previous repeated whole-set rebuild helper was removed
+  - the controller caches the final `32 x 32` chunk bitmask by render-ready revision and chunk origin
+
+#### Residual
+
+- I intentionally stopped at test/build verification for this unit before reopening Chrome again.
+- The next step is a fresh trace-driven Chrome pass on the current code so the browser evidence is captured after the CPU-regression fix, not before it.
