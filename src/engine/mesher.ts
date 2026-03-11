@@ -1,5 +1,5 @@
 import type { ChunkMeshData } from "./types.ts";
-import { VoxelWorld } from "./world.ts";
+import type { ResidentChunkWorld } from "./world.ts";
 
 const FLOAT32_BYTES = 4;
 const VERTEX_STRIDE = 20;
@@ -12,11 +12,11 @@ export interface MeshBuildSummary {
   elapsedMs: number;
 }
 
-export function rebuildDirtyMeshes(world: VoxelWorld): MeshBuildSummary {
+export function rebuildDirtyMeshes(world: ResidentChunkWorld): MeshBuildSummary {
   const startedAt = performance.now();
   let meshCount = 0;
   let triangleCount = 0;
-  for (const chunk of world.chunks.values()) {
+  for (const chunk of world.iterateResidentChunks()) {
     if (!chunk.meshDirty) {
       continue;
     }
@@ -33,13 +33,12 @@ export function rebuildDirtyMeshes(world: VoxelWorld): MeshBuildSummary {
   };
 }
 
-export function buildChunkMesh(world: VoxelWorld, cx: number, cy: number, cz: number): ChunkMeshData {
+export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number, cz: number): ChunkMeshData {
   const chunkSize = world.chunkSize;
-  const chunkKey = world.resolveChunkKey(cx, cy, cz);
   const originX = cx * chunkSize;
   const originY = cy * chunkSize;
   const originZ = cz * chunkSize;
-  const chunk = chunkKey === null ? null : world.chunks.get(chunkKey);
+  const chunk = world.getResidentChunk(cx, cy, cz);
   const solidBounds = world.getChunkSolidBounds(cx, cy, cz);
   if (!chunk || !solidBounds) {
     return {

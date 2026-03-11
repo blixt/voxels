@@ -17,14 +17,34 @@ export interface VoxelChunk {
   mesh: import("./types.ts").ChunkMeshData | null;
 }
 
+export interface ResidentChunkWorld {
+  readonly chunkSize: number;
+  readonly minY: number;
+  readonly maxYExclusive: number;
+  getVoxel(x: number, y: number, z: number): number;
+  getPaletteColor(materialIndex: number): PackedColor;
+  getResidentChunk(cx: number, cy: number, cz: number): VoxelChunk | null;
+  hasResidentChunk(cx: number, cy: number, cz: number): boolean;
+  iterateResidentChunks(): Iterable<VoxelChunk>;
+  getChunkSolidBounds(
+    cx: number,
+    cy: number,
+    cz: number,
+  ): {
+    min: [number, number, number];
+    max: [number, number, number];
+  } | null;
+}
+
 function toChunkKey(cx: number, cy: number, cz: number, sizeX: number, sizeY: number): number {
   return cx + cy * sizeX + cz * sizeX * sizeY;
 }
 
-export class VoxelWorld {
+export class VoxelWorld implements ResidentChunkWorld {
   readonly width: number;
   readonly height: number;
   readonly depth: number;
+  readonly minY = 0;
   readonly chunkSize: number;
   readonly chunkCountX: number;
   readonly chunkCountY: number;
@@ -61,6 +81,10 @@ export class VoxelWorld {
 
   getPaletteColor(materialIndex: number): PackedColor {
     return this.palette[materialIndex] ?? 0;
+  }
+
+  get maxYExclusive(): number {
+    return this.height;
   }
 
   getVoxel(x: number, y: number, z: number): number {
@@ -233,6 +257,21 @@ export class VoxelWorld {
 
   clear(): void {
     this.chunks.clear();
+  }
+
+  getResidentChunk(cx: number, cy: number, cz: number): VoxelChunk | null {
+    const key = this.resolveChunkKey(cx, cy, cz);
+    return key === null ? null : this.chunks.get(key) ?? null;
+  }
+
+  hasResidentChunk(cx: number, cy: number, cz: number): boolean {
+    return this.getResidentChunk(cx, cy, cz) !== null;
+  }
+
+  *iterateResidentChunks(): Iterable<VoxelChunk> {
+    for (const chunk of this.chunks.values()) {
+      yield chunk;
+    }
   }
 
   getStats(): WorldStats {

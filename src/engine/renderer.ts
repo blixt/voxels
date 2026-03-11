@@ -1,6 +1,6 @@
 import { buildCameraMatrices, type CameraState } from "./camera.ts";
 import type { ChunkMeshData } from "./types.ts";
-import { VoxelWorld, type VoxelChunk } from "./world.ts";
+import type { ResidentChunkWorld, VoxelChunk } from "./world.ts";
 import { CLEAR_COLOR_RGBA, LIGHT_DIRECTION, LIGHTING_TERMS } from "./render-constants.ts";
 
 type RenderCamera = CameraState | { viewProjection: Float32Array };
@@ -239,7 +239,7 @@ export class WebGpuVoxelRenderer {
     return new GpuFrameTimer(this.device, frameCount);
   }
 
-  render(world: VoxelWorld, camera: RenderCamera, timer: GpuFrameTimer | null = null, frameIndex = 0): RenderStats {
+  render(world: ResidentChunkWorld, camera: RenderCamera, timer: GpuFrameTimer | null = null, frameIndex = 0): RenderStats {
     this.configureCanvas(this.context.canvas as HTMLCanvasElement);
     const syncStartedAt = performance.now();
     const syncStats = this.syncResources(world);
@@ -297,7 +297,7 @@ export class WebGpuVoxelRenderer {
     await this.device.queue.onSubmittedWorkDone();
   }
 
-  async captureImage(world: VoxelWorld, camera: RenderCamera, width: number, height: number): Promise<ReadbackImage> {
+  async captureImage(world: ResidentChunkWorld, camera: RenderCamera, width: number, height: number): Promise<ReadbackImage> {
     this.syncResources(world);
     this.writeUniforms(camera, width / height);
 
@@ -382,7 +382,7 @@ export class WebGpuVoxelRenderer {
   }
 
   private encodeRenderPass(
-    world: VoxelWorld,
+    world: ResidentChunkWorld,
     encoder: GPUCommandEncoder,
     passDescriptor: GPURenderPassDescriptor,
   ): PassStats {
@@ -392,7 +392,7 @@ export class WebGpuVoxelRenderer {
 
     let drawCalls = 0;
     let triangles = 0;
-    for (const chunk of world.chunks.values()) {
+    for (const chunk of world.iterateResidentChunks()) {
       const resource = this.resources.get(chunk);
       if (!resource || resource.indexCount === 0) {
         continue;
@@ -418,7 +418,7 @@ export class WebGpuVoxelRenderer {
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
 
-  private syncResources(world: VoxelWorld): {
+  private syncResources(world: ResidentChunkWorld): {
     uploadMs: number;
     uploadChunks: number;
     uploadBytes: number;
@@ -427,14 +427,14 @@ export class WebGpuVoxelRenderer {
     let uploadChunks = 0;
     let uploadBytes = 0;
     for (const [chunk, resource] of this.resources.entries()) {
-      if (!world.chunks.has(world.resolveChunkKey(chunk.coord.x, chunk.coord.y, chunk.coord.z) ?? -1) || chunk.mesh === null) {
+      if (!world.hasResidentChunk(chunk.coord.x, chunk.coord.y, chunk.coord.z) || chunk.mesh === null) {
         resource.vertexBuffer.destroy();
         resource.indexBuffer.destroy();
         this.resources.delete(chunk);
       }
     }
 
-    for (const chunk of world.chunks.values()) {
+    for (const chunk of world.iterateResidentChunks()) {
       const mesh = chunk.mesh;
       if (!mesh || mesh.indexCount === 0) {
         const existing = this.resources.get(chunk);

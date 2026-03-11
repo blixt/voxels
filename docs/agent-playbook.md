@@ -67,6 +67,12 @@ It is intentionally practical. It is based on the actual history of this repo so
 - A dedicated game controller is safer than turning one controller into a large mode switch.
 - This repo should prefer narrow runtime boundaries over broad "unified" controllers when the interaction model changes fundamentally.
 
+### Cut architectural seams before adding the harder feature
+
+- For the infinite-world pivot, the correct first refactor was the world-access boundary, not a premature streaming implementation.
+- Refactoring meshing and rendering onto a resident-chunk interface keeps the benchmark path stable and narrows the next problem.
+- When a system has a hard future requirement, prefer the seam that reduces coupling first and the feature second.
+
 ### Commit every real unit of progress
 
 - Frequent commits made it much easier to compare strategies, explain the history, and keep experimental work bounded.

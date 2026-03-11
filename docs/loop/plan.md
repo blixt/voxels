@@ -65,6 +65,10 @@ Status:
 - Add a generation interface that can lazily provide chunk contents by coordinate.
 - Keep edit overlays separate from generated base terrain.
 
+Status:
+- first seam landed: mesher and renderer now depend on a resident-chunk world interface instead of directly depending on `VoxelWorld` internals
+- remaining work is the actual streaming/generation implementation behind that seam
+
 ### Slice 3: infinite world prototype
 
 - Infinite `X/Z` chunk addressing.

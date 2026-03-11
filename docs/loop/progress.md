@@ -100,3 +100,11 @@
   - `window.__VOXELS_GAME__` exposes a snapshot and teleport surface for automation
   - synthetic DevTools clicks still cannot satisfy Pointer Lock, but the page now reports "Pointer lock request was blocked" without uncaught errors
   - `/bench` remained healthy after the renderer generalization and still passes `validationBlocks`
+- Mapped the next architectural seam for infinite-world work and documented it in `docs/loop/world-model-notes.md`:
+  - the smallest safe seam is the world-access boundary, not the renderer
+  - `VoxelWorld` is still finite, but the mesher/renderer no longer need to know about its dense finite-grid internals
+- Added a `ResidentChunkWorld` interface in `src/engine/world.ts` and moved the hot render/mesh paths onto it:
+  - `src/engine/mesher.ts` now rebuilds meshes by iterating resident chunks through the interface
+  - `src/engine/renderer.ts` now syncs and renders resident chunks through the interface instead of through `VoxelWorld.chunks` and `resolveChunkKey()`
+  - this keeps `/bench` stable while opening a clean path for a later streaming world implementation
+- Added a small regression test for the new resident-chunk helpers and re-ran tests/build/version checks after the refactor.

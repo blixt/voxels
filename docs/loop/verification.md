@@ -195,3 +195,38 @@
   - first GPU `0.07 ms`, warm GPU `0.72 ms`
   - `MAE 1.63`, coverage mismatch `0.00%`
   - visual `pass`, correctness `pass`
+
+### Resident-chunk interface seam verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `mise run versions`
+
+#### Automated checks
+
+- `mise run test`: passing after introducing `ResidentChunkWorld` and the new `tests/world-access.test.ts`.
+- `mise run build`: passing after the mesher/renderer refactor.
+- `mise run versions`: passing, with all tracked tools still up to date:
+  - Chrome stable `146.0.7680.72`
+  - Bun `1.3.10`
+  - `@types/bun` `1.3.10`
+  - TypeScript `5.9.3`
+  - `@webgpu/types` `0.1.69`
+  - mise `2026.3.7`
+
+#### Chrome 146 browser checks
+
+- Reloaded `/bench?auto=1&scenario=validationBlocks&iterations=1&frames=3` after the interface refactor.
+- `validationBlocks` still passes:
+  - build `0.1 ms`
+  - mesh `0.3 ms`
+  - first CPU `1.00 ms`
+  - warm CPU `0.20 ms`
+  - first GPU `0.07 ms`
+  - warm GPU `0.20 ms`
+  - `MAE 1.63`
+  - coverage mismatch `0.00%`
+  - visual `pass`
+  - correctness `pass`
