@@ -4,6 +4,7 @@ This repository keeps the design loop in versioned documents instead of ad-hoc n
 
 - `../agent-playbook.md`: repo-specific guidance for agent-driven research, parallel work, verification, and worktree usage
 - `../20260311-voxel-research.md`: broader architecture and literature survey for future engine work
+- `../20260311-bun-hmr-research.md`: Bun-native dev-server/HMR guidance for this repo's live-edit loop
 - `../roadmap.md`: staged path from the current engine baseline to the shared persistent voxel game target
 - `plan.md`: current implementation plan and next milestones
 - `research.md`: external sources, constraints, and technical decisions

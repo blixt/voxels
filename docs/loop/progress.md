@@ -65,6 +65,10 @@
 
 ## 2026-03-11
 
+- Researched the current best Bun-native live-edit loop for this repo and documented the outcome in `docs/20260311-bun-hmr-research.md`:
+  - `bun --hot` alone is not enough while the repo still manually builds `public/build`
+  - the best development path is Bun's HTML-import full-stack dev server with `development: { hmr: true, console: true }`
+  - the clean repo direction is to move `/` and `/bench` onto HTML imports in dev, add explicit `import.meta.hot` cleanup to the WebGPU entrypoints, and keep production on an ahead-of-time `bun build --target=bun --production` path
 - Added `docs/agent-playbook.md` to capture repo-specific lessons from the build/debug/performance journey so far:
   - what worked and what did not
   - how to parallelize research, implementation, and verification more effectively

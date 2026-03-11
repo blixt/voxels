@@ -12,6 +12,7 @@ Chrome 146 WebGPU voxel game and engine built from scratch with Bun and TypeScri
 The implementation notes, research links, and verification log live under `docs/loop/`.
 The staged game/engine roadmap lives in `docs/roadmap.md`.
 A broader architecture/reference survey lives in `docs/20260311-voxel-research.md`.
+The Bun live-edit/HMR research note lives in `docs/20260311-bun-hmr-research.md`.
 Repo-specific guidance for agent-driven research, implementation, and verification lives in `docs/agent-playbook.md`.
 
 ## Features
