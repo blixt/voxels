@@ -328,6 +328,39 @@ test("rare shared peak fields create tall mountains without dominating the world
   expect(over1760 / sampleCount).toBeLessThanOrEqual(0.01);
 });
 
+test("rare regional extremes appear across biome families without taking over the world", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const expected = {
+    verdant: "verdant_karst",
+    steppe: "steppe_monolith",
+    dunes: "dunes_glass",
+    badlands: "badlands_crater",
+    highland: "highland_redleaf",
+    tundra: "tundra_blue_ice",
+    marsh: "marsh_blackwater",
+    ember: "ember_caldera",
+    bloom: "bloom_prism",
+  } as const;
+  const totalSamples = { count: 0 };
+  const counts = new Map<string, number>();
+
+  for (let z = -8192; z <= 8192; z += 64) {
+    for (let x = -8192; x <= 8192; x += 64) {
+      const probe = generator.sampleBiomeProbe(x, z);
+      if (probe.regionalVariantId) {
+        counts.set(probe.regionalVariantId, (counts.get(probe.regionalVariantId) ?? 0) + 1);
+      }
+      totalSamples.count += 1;
+    }
+  }
+
+  for (const regionalVariantId of Object.values(expected)) {
+    const count = counts.get(regionalVariantId) ?? 0;
+    expect(count).toBeGreaterThan(0);
+    expect(count / totalSamples.count).toBeLessThanOrEqual(0.02);
+  }
+});
+
 test("landmarks appear across the world with multiple distinct families", () => {
   const generator = new ProceduralWorldGenerator(1337);
   const landmarkIds = new Set<string>();
@@ -345,6 +378,7 @@ test("landmarks appear across the world with multiple distinct families", () => 
   expect(landmarkIds.has("oak")).toBe(true);
   expect(landmarkIds.has("canopy_tree")).toBe(true);
   expect(landmarkIds.has("acacia")).toBe(true);
+  expect(landmarkIds.has("redleaf_tree")).toBe(true);
   expect(landmarkIds.has("willow")).toBe(true);
   expect(landmarkIds.has("blossom_tree")).toBe(true);
   expect(landmarkIds.has("fruit_tree")).toBe(true);

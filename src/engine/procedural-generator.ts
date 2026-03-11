@@ -9,10 +9,21 @@ export type BaseBiomeId = "verdant" | "steppe" | "dunes" | "badlands" | "highlan
 export type SpecialBiomeId = "marsh" | "ember" | "bloom";
 export type BiomeId = BaseBiomeId | SpecialBiomeId;
 export type UndergroundBiomeId = "rooted" | "sedimentary" | "sandy" | "granitic" | "froststone" | "basaltic";
+export type RegionalVariantId =
+  | "verdant_karst"
+  | "steppe_monolith"
+  | "dunes_glass"
+  | "badlands_crater"
+  | "highland_redleaf"
+  | "tundra_blue_ice"
+  | "marsh_blackwater"
+  | "ember_caldera"
+  | "bloom_prism";
 export type LandmarkId =
   | "oak"
   | "canopy_tree"
   | "birch"
+  | "redleaf_tree"
   | "willow"
   | "blossom_tree"
   | "fruit_tree"
@@ -133,6 +144,8 @@ interface MutableColumnState {
   hostBiomeId: BaseBiomeId;
   secondaryBiomeId: BaseBiomeId;
   undergroundBiomeId: UndergroundBiomeId;
+  regionalVariantId: RegionalVariantId | null;
+  regionalVariantStrength: number;
   landmarkId: LandmarkId | null;
   temperature: number;
   moisture: number;
@@ -176,6 +189,7 @@ export interface ProceduralColumnSample {
   biomeId: BiomeId;
   hostBiomeId: BaseBiomeId;
   undergroundBiomeId: UndergroundBiomeId;
+  regionalVariantId: RegionalVariantId | null;
   landmarkId: LandmarkId | null;
   surfaceY: number;
   topY: number;
@@ -187,6 +201,7 @@ export interface ProceduralBiomeProbe extends ProceduralColumnSample {
   secondaryBiomeId: BaseBiomeId;
   transitionThreshold: number;
   specialStrength: number;
+  regionalVariantStrength: number;
   fields: {
     temperature: number;
     moisture: number;
@@ -235,6 +250,11 @@ interface ChunkGenerationScratch {
   featureMaterialPrimary: Uint16Array;
   featureMaterialSecondary: Uint16Array;
   featureMaterialAccent: Uint16Array;
+}
+
+interface RegionalVariantSelection {
+  id: RegionalVariantId;
+  strength: number;
 }
 
 const CONTINENT_SCALE = 1 / 5200;
@@ -316,6 +336,7 @@ const LANDMARKS: Record<LandmarkId, LandmarkProfile> = {
   oak: createLandmark("oak", 176, 11, 0.34, 1.0, 0),
   canopy_tree: createLandmark("canopy_tree", 224, 16, 0.20, 1.2, 2),
   birch: createLandmark("birch", 164, 9, 0.30, 1.0, 1),
+  redleaf_tree: createLandmark("redleaf_tree", 184, 12, 0.22, 1.0, 9),
   willow: createLandmark("willow", 188, 14, 0.22, 1.0, 0),
   blossom_tree: createLandmark("blossom_tree", 168, 11, 0.24, 1.0, 7),
   fruit_tree: createLandmark("fruit_tree", 160, 10, 0.20, 1.0, 8),
@@ -434,6 +455,14 @@ const VERDANT_OLD_GROWTH_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("flower_patch", { chance: 0.52, scale: 1.12, variant: 1, cellSize: 68, radius: 5 }),
 ];
 
+const VERDANT_KARST_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("willow", { chance: 0.26, scale: 1.04, cellSize: 148, radius: 14 }),
+  landmarkPlacement("birch", { chance: 0.42, scale: 1.04, cellSize: 116, radius: 9 }),
+  landmarkPlacement("standing_stone", { chance: 0.34, scale: 1.18 }),
+  landmarkPlacement("boulder", { chance: 0.30, scale: 1.08 }),
+  landmarkPlacement("flower_patch", { chance: 0.24, scale: 1.06, variant: 1, cellSize: 84, radius: 5 }),
+];
+
 const VERDANT_ORCHARD_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("blossom_tree", { chance: 0.48, scale: 1.12, cellSize: 108, radius: 12 }),
   landmarkPlacement("fruit_tree", { chance: 0.44, scale: 1.10, cellSize: 104, radius: 11 }),
@@ -466,11 +495,34 @@ const STEPPE_THORN_SCRUB_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("standing_stone", { chance: 0.20, scale: 1.12 }),
 ];
 
+const STEPPE_MONOLITH_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("standing_stone", { chance: 0.44, scale: 1.28, cellSize: 132, radius: 6 }),
+  landmarkPlacement("thorn_tree", { chance: 0.28, scale: 1.12, cellSize: 140, radius: 10 }),
+  landmarkPlacement("acacia", { chance: 0.26, scale: 1.08, cellSize: 152, radius: 12 }),
+  landmarkPlacement("flower_patch", { chance: 0.22, scale: 0.92, variant: 2, cellSize: 76, radius: 5 }),
+  landmarkPlacement("boulder", { chance: 0.18, scale: 0.96 }),
+];
+
+const DUNES_GLASS_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("crystal_cluster", { chance: 0.36, scale: 1.18, variant: 2 }),
+  landmarkPlacement("palm", { chance: 0.28, scale: 1.18, cellSize: 176, radius: 13 }),
+  landmarkPlacement("cactus", { chance: 0.34, scale: 1.08 }),
+  landmarkPlacement("standing_stone", { chance: 0.18, scale: 1.08 }),
+  landmarkPlacement("boulder", { chance: 0.12, scale: 0.90 }),
+];
+
 const BADLANDS_DESOLATE_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("dead_tree", { chance: 0.34, scale: 1.28, cellSize: 148, radius: 8 }),
   landmarkPlacement("hoodoo", { chance: 0.28, scale: 1.18 }),
   landmarkPlacement("standing_stone", { chance: 0.22, scale: 1.20 }),
   landmarkPlacement("boulder", { chance: 0.20, scale: 0.98, variant: 1 }),
+];
+
+const BADLANDS_CRATER_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("hoodoo", { chance: 0.34, scale: 1.24 }),
+  landmarkPlacement("standing_stone", { chance: 0.26, scale: 1.22 }),
+  landmarkPlacement("dead_tree", { chance: 0.30, scale: 1.18, cellSize: 156, radius: 8 }),
+  landmarkPlacement("boulder", { chance: 0.20, scale: 1.04, variant: 1 }),
 ];
 
 const HIGHLAND_REDWOOD_LANDMARKS: readonly LandmarkProfile[] = [
@@ -489,6 +541,14 @@ const HIGHLAND_OLD_GROWTH_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("boulder", { chance: 0.16, scale: 1.04 }),
 ];
 
+const HIGHLAND_REDLEAF_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("redleaf_tree", { chance: 0.42, scale: 1.12, cellSize: 108, radius: 12 }),
+  landmarkPlacement("birch", { chance: 0.28, scale: 1.00, cellSize: 128, radius: 9 }),
+  landmarkPlacement("standing_stone", { chance: 0.26, scale: 1.20 }),
+  landmarkPlacement("boulder", { chance: 0.24, scale: 1.06 }),
+  landmarkPlacement("flower_patch", { chance: 0.20, scale: 1.00, variant: 2, cellSize: 80, radius: 5 }),
+];
+
 const TUNDRA_TAIGA_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("tall_fir", { chance: 0.42, scale: 1.16, cellSize: 124, radius: 12 }),
   landmarkPlacement("fir", { chance: 0.56, scale: 1.10, cellSize: 96, radius: 10 }),
@@ -501,6 +561,13 @@ const TUNDRA_OLD_GROWTH_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("fir", { chance: 0.72, scale: 1.14, cellSize: 88, radius: 10 }),
   landmarkPlacement("frost_shrub", { chance: 0.40, scale: 1.08, cellSize: 78, radius: 4 }),
   landmarkPlacement("boulder", { chance: 0.16, scale: 1.02 }),
+];
+
+const TUNDRA_BLUE_ICE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("ice_spire", { chance: 0.44, scale: 1.26 }),
+  landmarkPlacement("tall_fir", { chance: 0.18, scale: 1.08, cellSize: 132, radius: 12 }),
+  landmarkPlacement("frost_shrub", { chance: 0.52, scale: 1.08 }),
+  landmarkPlacement("boulder", { chance: 0.24, scale: 1.02 }),
 ];
 
 const MARSH_THICKET_LANDMARKS: readonly LandmarkProfile[] = [
@@ -518,11 +585,25 @@ const MARSH_WILLOW_THICKET_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("flower_patch", { chance: 0.28, scale: 1.00, variant: 3, cellSize: 78, radius: 5 }),
 ];
 
+const MARSH_BLACKWATER_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("willow", { chance: 0.40, scale: 1.14, cellSize: 128, radius: 14 }),
+  landmarkPlacement("cypress", { chance: 0.44, scale: 1.16, cellSize: 118, radius: 10 }),
+  landmarkPlacement("reed_cluster", { chance: 0.80, scale: 1.16, cellSize: 60, radius: 4 }),
+  landmarkPlacement("glowcap", { chance: 0.18, scale: 0.98, cellSize: 144, radius: 10 }),
+];
+
 const EMBER_DEADLAND_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("dead_tree", { chance: 0.28, scale: 1.22, cellSize: 156, radius: 8 }),
   landmarkPlacement("basalt_spire", { chance: 0.28, scale: 1.30 }),
   landmarkPlacement("crystal_cluster", { chance: 0.26, scale: 1.12, variant: 3 }),
   landmarkPlacement("boulder", { chance: 0.18, scale: 0.96, variant: 1 }),
+];
+
+const EMBER_CALDERA_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("basalt_spire", { chance: 0.38, scale: 1.34 }),
+  landmarkPlacement("crystal_cluster", { chance: 0.34, scale: 1.16, variant: 3 }),
+  landmarkPlacement("dead_tree", { chance: 0.24, scale: 1.18, cellSize: 164, radius: 8 }),
+  landmarkPlacement("boulder", { chance: 0.18, scale: 1.00, variant: 1 }),
 ];
 
 const BLOOM_ORCHARD_LANDMARKS: readonly LandmarkProfile[] = [
@@ -540,6 +621,14 @@ const BLOOM_FLOWER_GROVE_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("fruit_tree", { chance: 0.26, scale: 1.12, cellSize: 122, radius: 11 }),
   landmarkPlacement("glowcap", { chance: 0.44, scale: 1.12, cellSize: 132, radius: 12 }),
   landmarkPlacement("flower_patch", { chance: 0.72, scale: 1.22, variant: 4, cellSize: 56, radius: 6 }),
+];
+
+const BLOOM_PRISM_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("giant_flower", { chance: 0.34, scale: 1.26, cellSize: 116, radius: 11, variant: 1 }),
+  landmarkPlacement("crystal_cluster", { chance: 0.42, scale: 1.18, variant: 2 }),
+  landmarkPlacement("glowcap", { chance: 0.36, scale: 1.12 }),
+  landmarkPlacement("blossom_tree", { chance: 0.24, scale: 1.14, cellSize: 122, radius: 12 }),
+  landmarkPlacement("flower_patch", { chance: 0.44, scale: 1.18, variant: 4, cellSize: 64, radius: 5 }),
 ];
 
 const chunkGenerationScratchPool: ChunkGenerationScratch[] = [];
@@ -666,6 +755,7 @@ export class ProceduralWorldGenerator {
       secondaryBiomeId: state.secondaryBiomeId,
       transitionThreshold: state.transitionThreshold,
       specialStrength: state.specialStrength,
+      regionalVariantStrength: state.regionalVariantStrength,
       fields: {
         temperature: state.temperature,
         moisture: state.moisture,
@@ -809,6 +899,10 @@ export class ProceduralWorldGenerator {
       surfaceY += Math.round(lerp(2, 11, emberStrength) * (0.25 + fields.mesa) * (0.35 + biomeCore * 0.65));
     }
 
+    const regionalVariant = selectRegionalVariant(biomeId, fields);
+    if (regionalVariant) {
+      surfaceY += sampleRegionalVariantSurfaceDelta(regionalVariant.id, regionalVariant.strength, fields, biomeCore);
+    }
     surfaceY = clamp(surfaceY, 8, this.maxYExclusive - 2);
     const hostBiomeId = resolveHostBiomeId(biomeId, baseBlend.primary.id, baseBlend.secondary.id);
     const snowLine = terrainProfile.snowLine - Math.round((fields.temperature - 0.5) * 90);
@@ -823,19 +917,40 @@ export class ProceduralWorldGenerator {
       fields,
       biomeCore,
       surfaceY,
-      );
-    const waterTopY = this.resolveWaterTopY(biomeId, surfaceY, fields, specialStrength);
+    );
+    if (regionalVariant) {
+      applyRegionalVariantMaterialOverrides(surfaceMaterials, regionalVariant.id);
+    }
+    const waterTopY = this.resolveWaterTopY(
+      biomeId,
+      surfaceY,
+      fields,
+      specialStrength,
+      regionalVariant?.id ?? null,
+      regionalVariant?.strength ?? 0,
+    );
     const submergedSurface = hasStandingWater(surfaceY, waterTopY);
     if (submergedSurface) {
       surfaceMaterials.surfacePrimary = surfaceMaterials.subsurfacePrimary;
       surfaceMaterials.surfaceSecondary = surfaceMaterials.subsurfaceSecondary;
     }
-    const landmarkId = this.resolveLandmark(worldX, worldZ, biomeId, surfaceY, waterTopY, fields, out);
+    const landmarkId = this.resolveLandmark(
+      worldX,
+      worldZ,
+      biomeId,
+      regionalVariant?.id ?? null,
+      surfaceY,
+      waterTopY,
+      fields,
+      out,
+    );
 
     out.biomeId = biomeId;
     out.hostBiomeId = hostBiomeId;
     out.secondaryBiomeId = baseBlend.secondary.id;
     out.undergroundBiomeId = undergroundBiomeId;
+    out.regionalVariantId = regionalVariant?.id ?? null;
+    out.regionalVariantStrength = regionalVariant?.strength ?? 0;
     out.landmarkId = landmarkId;
     out.temperature = fields.temperature;
     out.moisture = fields.moisture;
@@ -1054,6 +1169,8 @@ export class ProceduralWorldGenerator {
     surfaceY: number,
     fields: ColumnFieldSample,
     specialStrength: number,
+    regionalVariantId: RegionalVariantId | null,
+    regionalVariantStrength: number,
   ): number {
     let waterTopY = surfaceY < this.seaLevel ? this.seaLevel : NO_WATER;
     if (biomeId === "marsh") {
@@ -1062,6 +1179,11 @@ export class ProceduralWorldGenerator {
     } else if (biomeId === "dunes" && fields.channel > 0.78 && fields.basin < -0.08) {
       waterTopY = Math.max(waterTopY, surfaceY + 1);
     } else if (biomeId === "bloom" && fields.magic > 0.82 && fields.moisture > 0.62) {
+      waterTopY = Math.max(waterTopY, surfaceY + 1);
+    }
+    if (regionalVariantId === "marsh_blackwater") {
+      waterTopY = Math.max(waterTopY, surfaceY + Math.max(2, Math.round(lerp(2, 4, regionalVariantStrength))));
+    } else if (regionalVariantId === "bloom_prism" && fields.magic > 0.76) {
       waterTopY = Math.max(waterTopY, surfaceY + 1);
     }
     return waterTopY;
@@ -1094,6 +1216,7 @@ export class ProceduralWorldGenerator {
     worldX: number,
     worldZ: number,
     biomeId: BiomeId,
+    regionalVariantId: RegionalVariantId | null,
     surfaceY: number,
     waterTopY: number,
     fields: ColumnFieldSample,
@@ -1108,7 +1231,7 @@ export class ProceduralWorldGenerator {
     out.featureMaterialPrimary = 0;
     out.featureMaterialSecondary = 0;
     out.featureMaterialAccent = 0;
-    const roster = selectLandmarkRoster(biomeId, fields);
+    const roster = selectLandmarkRoster(biomeId, regionalVariantId, fields);
     if (roster.length === 0) {
       return null;
     }
@@ -1379,6 +1502,8 @@ function createMutableColumnState(): MutableColumnState {
     hostBiomeId: "verdant",
     secondaryBiomeId: "steppe",
     undergroundBiomeId: "rooted",
+    regionalVariantId: null,
+    regionalVariantStrength: 0,
     landmarkId: null,
     temperature: 0,
     moisture: 0,
@@ -1424,6 +1549,7 @@ function columnSampleFromState(state: MutableColumnState): ProceduralColumnSampl
     biomeId: state.biomeId,
     hostBiomeId: state.hostBiomeId,
     undergroundBiomeId: state.undergroundBiomeId,
+    regionalVariantId: state.regionalVariantId,
     landmarkId: state.landmarkId,
     surfaceY: state.surfaceY,
     topY: Math.max(state.surfaceY, state.surfaceY + state.featureHeight + (state.featureKind === FEATURE_NONE ? 0 : 1)),
@@ -1677,7 +1803,33 @@ function pickSubsurfaceMaterial(
   return subsurface;
 }
 
-function selectLandmarkRoster(biomeId: BiomeId, fields: ColumnFieldSample): readonly LandmarkProfile[] {
+function selectLandmarkRoster(
+  biomeId: BiomeId,
+  regionalVariantId: RegionalVariantId | null,
+  fields: ColumnFieldSample,
+): readonly LandmarkProfile[] {
+  switch (regionalVariantId) {
+    case "verdant_karst":
+      return VERDANT_KARST_LANDMARKS;
+    case "steppe_monolith":
+      return STEPPE_MONOLITH_LANDMARKS;
+    case "dunes_glass":
+      return DUNES_GLASS_LANDMARKS;
+    case "badlands_crater":
+      return BADLANDS_CRATER_LANDMARKS;
+    case "highland_redleaf":
+      return HIGHLAND_REDLEAF_LANDMARKS;
+    case "tundra_blue_ice":
+      return TUNDRA_BLUE_ICE_LANDMARKS;
+    case "marsh_blackwater":
+      return MARSH_BLACKWATER_LANDMARKS;
+    case "ember_caldera":
+      return EMBER_CALDERA_LANDMARKS;
+    case "bloom_prism":
+      return BLOOM_PRISM_LANDMARKS;
+    default:
+      break;
+  }
   switch (biomeId) {
     case "verdant":
       if (fields.oldGrowth > 0.70 && fields.moisture > 0.60 && fields.grove > 0.54) {
@@ -1734,6 +1886,197 @@ function selectLandmarkRoster(biomeId: BiomeId, fields: ColumnFieldSample): read
   }
 }
 
+function selectRegionalVariant(biomeId: BiomeId, fields: ColumnFieldSample): RegionalVariantSelection | null {
+  let strength = 0;
+  let id: RegionalVariantId | null = null;
+  switch (biomeId) {
+    case "verdant":
+      strength = averageSignal(
+        smoothstep(0.68, 0.84, fields.oldGrowth),
+        smoothstep(0.58, 0.78, fields.drainage),
+        smoothstep(0.48, 0.74, fields.globalHeight),
+        smoothstep(0.52, 0.80, fields.channel),
+      );
+      id = strength > 0.56 ? "verdant_karst" : null;
+      break;
+    case "steppe":
+      strength = averageSignal(
+        smoothstep(0.58, 0.80, fields.uplift),
+        smoothstep(0.56, 0.82, fields.ridge),
+        smoothstep(0.50, 0.76, fields.peakness),
+        smoothstep(0.48, 0.76, fields.temperature),
+      );
+      id = strength > 0.82 ? "steppe_monolith" : null;
+      break;
+    case "dunes":
+      strength = averageSignal(
+        smoothstep(0.76, 0.90, fields.temperature),
+        smoothstep(0.64, 0.88, fields.dune),
+        smoothstep(0.48, 0.78, fields.volcanism + fields.magic * 0.2),
+        smoothstep(0.56, 0.84, 1 - fields.moisture),
+      );
+      id = strength > 0.64 ? "dunes_glass" : null;
+      break;
+    case "badlands":
+      strength = averageSignal(
+        smoothstep(0.54, 0.80, fields.uplift),
+        smoothstep(0.54, 0.82, fields.mesa),
+        smoothstep(0.48, 0.80, fields.volcanism),
+        smoothstep(0.48, 0.78, fields.peakness),
+      );
+      id = strength > 0.62 ? "badlands_crater" : null;
+      break;
+    case "highland":
+      strength = averageSignal(
+        smoothstep(0.64, 0.84, fields.oldGrowth),
+        scoreField(fields.temperature, 0.54, 0.18),
+        smoothstep(0.46, 0.76, fields.moisture),
+        smoothstep(0.54, 0.80, fields.uplift),
+      );
+      id = strength > 0.56 ? "highland_redleaf" : null;
+      break;
+    case "tundra":
+      strength = averageSignal(
+        smoothstep(0.70, 0.88, fields.uplift),
+        smoothstep(0.56, 0.82, fields.peakness + fields.ridge * 0.2),
+        smoothstep(0.52, 0.84, 1 - fields.temperature),
+      );
+      id = strength > 0.78 ? "tundra_blue_ice" : null;
+      break;
+    case "marsh":
+      strength = averageSignal(
+        smoothstep(0.70, 0.88, fields.moisture),
+        smoothstep(0.66, 0.88, fields.channel),
+        smoothstep(0.54, 0.80, fields.grove),
+      );
+      id = strength > 0.64 ? "marsh_blackwater" : null;
+      break;
+    case "ember":
+      strength = averageSignal(
+        smoothstep(0.66, 0.86, fields.volcanism),
+        smoothstep(0.58, 0.82, fields.peakness + fields.mesa * 0.3),
+        smoothstep(0.50, 0.80, fields.ridge),
+      );
+      id = strength > 0.56 ? "ember_caldera" : null;
+      break;
+    case "bloom":
+      strength = averageSignal(
+        smoothstep(0.68, 0.86, fields.magic),
+        smoothstep(0.50, 0.78, fields.orchard + fields.grove * 0.2),
+        smoothstep(0.44, 0.74, fields.moisture),
+      );
+      id = strength > 0.64 ? "bloom_prism" : null;
+      break;
+  }
+  return id === null ? null : { id, strength };
+}
+
+function sampleRegionalVariantSurfaceDelta(
+  regionalVariantId: RegionalVariantId,
+  strength: number,
+  fields: ColumnFieldSample,
+  biomeCore: number,
+): number {
+  const weight = 0.28 + biomeCore * 0.72;
+  switch (regionalVariantId) {
+    case "verdant_karst":
+      return -Math.round(lerp(6, 18, strength) * (0.6 + fields.channel * 0.4) * weight);
+    case "steppe_monolith":
+      return Math.round(lerp(4, 14, strength) * (0.5 + fields.ridge * 0.5) * weight);
+    case "dunes_glass":
+      return Math.round((fields.dune - 0.52) * (12 + strength * 18) * weight);
+    case "badlands_crater":
+      return Math.round((fields.mesa - 0.52) * (16 + strength * 20) * weight);
+    case "highland_redleaf":
+      return Math.round(lerp(4, 12, strength) * (0.55 + fields.hills * 0.15 + 0.30) * weight);
+    case "tundra_blue_ice":
+      return Math.round(lerp(6, 18, strength) * (0.5 + fields.ridge * 0.5) * weight);
+    case "marsh_blackwater":
+      return -Math.round(lerp(4, 12, strength) * (0.65 + fields.channel * 0.35) * weight);
+    case "ember_caldera":
+      return Math.round(lerp(6, 18, strength) * (0.45 + fields.volcanism * 0.55) * weight);
+    case "bloom_prism":
+      return Math.round(lerp(2, 8, strength) * (0.45 + fields.magic * 0.55) * weight);
+    default:
+      return 0;
+  }
+}
+
+function applyRegionalVariantMaterialOverrides(
+  materials: {
+    surfacePrimary: number;
+    surfaceSecondary: number;
+    subsurfacePrimary: number;
+    subsurfaceSecondary: number;
+    water: number;
+    snow: number;
+    transitionThreshold: number;
+  },
+  regionalVariantId: RegionalVariantId,
+): void {
+  switch (regionalVariantId) {
+    case "verdant_karst":
+      materials.surfacePrimary = hexColorToMaterial("#8B7");
+      materials.surfaceSecondary = hexColorToMaterial("#BBC");
+      materials.subsurfacePrimary = hexColorToMaterial("#887");
+      materials.subsurfaceSecondary = hexColorToMaterial("#998");
+      break;
+    case "steppe_monolith":
+      materials.surfacePrimary = hexColorToMaterial("#BA7");
+      materials.surfaceSecondary = hexColorToMaterial("#CBA");
+      materials.subsurfacePrimary = hexColorToMaterial("#987");
+      materials.subsurfaceSecondary = hexColorToMaterial("#A98");
+      break;
+    case "dunes_glass":
+      materials.surfacePrimary = hexColorToMaterial("#EDC");
+      materials.surfaceSecondary = hexColorToMaterial("#CDD");
+      materials.subsurfacePrimary = hexColorToMaterial("#BAA");
+      materials.subsurfaceSecondary = hexColorToMaterial("#CBB");
+      break;
+    case "badlands_crater":
+      materials.surfacePrimary = hexColorToMaterial("#965");
+      materials.surfaceSecondary = hexColorToMaterial("#B75");
+      materials.subsurfacePrimary = hexColorToMaterial("#754");
+      materials.subsurfaceSecondary = hexColorToMaterial("#965");
+      break;
+    case "highland_redleaf":
+      materials.surfacePrimary = hexColorToMaterial("#A86");
+      materials.surfaceSecondary = hexColorToMaterial("#C97");
+      materials.subsurfacePrimary = hexColorToMaterial("#875");
+      materials.subsurfaceSecondary = hexColorToMaterial("#986");
+      break;
+    case "tundra_blue_ice":
+      materials.surfacePrimary = hexColorToMaterial("#CDD");
+      materials.surfaceSecondary = hexColorToMaterial("#DFF");
+      materials.subsurfacePrimary = hexColorToMaterial("#AAB");
+      materials.subsurfaceSecondary = hexColorToMaterial("#BCD");
+      materials.water = hexColorToMaterial("#9DF");
+      break;
+    case "marsh_blackwater":
+      materials.surfacePrimary = hexColorToMaterial("#354");
+      materials.surfaceSecondary = hexColorToMaterial("#465");
+      materials.subsurfacePrimary = hexColorToMaterial("#243");
+      materials.subsurfaceSecondary = hexColorToMaterial("#354");
+      materials.water = hexColorToMaterial("#134");
+      break;
+    case "ember_caldera":
+      materials.surfacePrimary = hexColorToMaterial("#433");
+      materials.surfaceSecondary = hexColorToMaterial("#654");
+      materials.subsurfacePrimary = hexColorToMaterial("#322");
+      materials.subsurfaceSecondary = hexColorToMaterial("#433");
+      break;
+    case "bloom_prism":
+      materials.surfacePrimary = hexColorToMaterial("#8CF");
+      materials.surfaceSecondary = hexColorToMaterial("#BDF");
+      materials.subsurfacePrimary = hexColorToMaterial("#668");
+      materials.subsurfaceSecondary = hexColorToMaterial("#79B");
+      materials.water = hexColorToMaterial("#6DF");
+      break;
+    default:
+      break;
+  }
+}
+
 function configureLandmarkFeature(
   profile: LandmarkProfile,
   surfaceY: number,
@@ -1784,6 +2127,21 @@ function configureLandmarkFeature(
         "#9C7",
       );
       out.featureExtra = 1;
+      return true;
+    case "redleaf_tree":
+      if (submergedSurface) {
+        return false;
+      }
+      configureTreeFeature(
+        out,
+        FEATURE_OAK,
+        scaledFeatureHeight(32, 18, fields.moisture + fields.temperature * 0.2, profile.scale),
+        scaledFeatureRadius(11, 3, fields.moisture, profile.scale),
+        "#754",
+        "#C75",
+        "#E97",
+      );
+      out.featureExtra = 9;
       return true;
     case "willow":
       if (submergedSurface) {
@@ -2539,6 +2897,17 @@ function scoreField(value: number, target: number, spread: number): number {
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
+}
+
+function averageSignal(...values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  let total = 0;
+  for (const value of values) {
+    total += value;
+  }
+  return total / values.length;
 }
 
 function saturate(value: number): number {

@@ -2817,3 +2817,47 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - It strengthens old-growth forest identity and overall landmark variety.
 - Bloom flower groves are present but still intentionally weaker than the strongest forest patches.
+
+### Rare regional-extremes overlay pass
+
+#### Commands
+
+- `mise exec -- bun test tests/procedural-generator.test.ts`
+- `mise run build`
+
+#### Checks
+
+- Focused generator tests: passing
+  - `22 pass`
+  - `0 fail`
+- `mise run build`: passing
+
+#### Numeric probes
+
+- Broad regional-extreme scan (`x/z = -8192..8192 step 64`):
+  - total samples `66049`
+  - `verdant_karst`: `5` (`0.0000757`)
+  - `steppe_monolith`: `130` (`0.0019682`)
+  - `dunes_glass`: `20` (`0.0003028`)
+  - `badlands_crater`: `16` (`0.0002422`)
+  - `highland_redleaf`: `6` (`0.0000908`)
+  - `tundra_blue_ice`: `21` (`0.0003179`)
+  - `marsh_blackwater`: `3` (`0.0000454`)
+  - `ember_caldera`: `4` (`0.0000606`)
+  - `bloom_prism`: `20` (`0.0003028`)
+- Broad landmark scan (`x/z = -6144..6144 step 16`):
+  - `28` distinct landmark families observed
+  - `redleaf_tree` present
+
+#### Added verification coverage
+
+- Landmark-family coverage now also requires `redleaf_tree`.
+- A new regional-extremes regression now verifies:
+  - all expected rare regional variants appear in a broad deterministic scan
+  - each stays below a `2%` global share so the new extremes do not take over the world
+
+#### Residual
+
+- This slice is worth keeping.
+- It materially increases rare discovery moments without reopening hard biome-boundary cliffs.
+- The main failure mode for future passes is still selectors that are too multiplicative and end up producing attractive dead code.

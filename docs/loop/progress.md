@@ -1140,3 +1140,44 @@
 - Main lesson from this slice:
   - themed regional rosters are still the best variety-per-complexity lever in the current engine
   - not every new family needs a whole new feature system, but it does need a verified silhouette and a region where it actually shows up
+
+### Rare regional-extremes overlay pass
+
+- I kept the next variety step aligned with both `docs/20260311-biomes.md` and `docs/20260311-biome-tech.md` by adding rare regional overlays instead of expanding the top-level biome enum again.
+- The new regional extremes are:
+  - `verdant_karst`
+  - `steppe_monolith`
+  - `dunes_glass`
+  - `badlands_crater`
+  - `highland_redleaf`
+  - `tundra_blue_ice`
+  - `marsh_blackwater`
+  - `ember_caldera`
+  - `bloom_prism`
+- The first selector pass was wrong:
+  - I used overly multiplicative field gates
+  - that left most variants effectively unreachable
+  - I did not keep that version just because the idea itself was good
+- The kept selector uses averaged world-rule signals per host biome plus explicit rarity thresholds tuned from measured maxima instead of guesswork.
+- These regional extremes now influence:
+  - landmark rosters
+  - surface and subsurface materials
+  - small local surface deltas
+  - special water handling for cases like `marsh_blackwater` and `bloom_prism`
+- I also added `redleaf_tree` as a dedicated landmark family so `highland_redleaf` is not just a palette swap on an existing tree roster.
+- The broad fixed-seed rarity scan over `66049` sampled columns now finds every extreme while keeping them genuinely rare:
+  - `verdant_karst`: `5`
+  - `steppe_monolith`: `130`
+  - `dunes_glass`: `20`
+  - `badlands_crater`: `16`
+  - `highland_redleaf`: `6`
+  - `tundra_blue_ice`: `21`
+  - `marsh_blackwater`: `3`
+  - `ember_caldera`: `4`
+  - `bloom_prism`: `20`
+- The landmark side also widened again:
+  - a broad fixed-seed landmark scan now finds `28` families
+  - `redleaf_tree` is present in that scan
+- Main lesson from this slice:
+  - rare extreme cases are working best as overlays on top of the current field-driven biome system
+  - the right failure mode to watch is "dead-code rarity logic", not just "too common"

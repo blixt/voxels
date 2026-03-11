@@ -187,3 +187,19 @@ Update:
   - marsh willow thickets
   - bloom flower-grove pockets
   - steppe thorn scrub
+- the latest extension keeps the same principle for rarer/extreme world moments:
+  - add regional extremes as overlays on host biomes instead of flattening them into the biome enum
+  - let those overlays touch multiple generation outputs, not just landmark choice
+- current rare regional extremes:
+  - `verdant_karst`
+  - `steppe_monolith`
+  - `dunes_glass`
+  - `badlands_crater`
+  - `highland_redleaf`
+  - `tundra_blue_ice`
+  - `marsh_blackwater`
+  - `ember_caldera`
+  - `bloom_prism`
+- current implementation lesson:
+  - the selector math for these overlays has to be verified numerically over broad scans
+  - overly multiplicative rules look principled but can leave most of the interesting cases effectively unreachable

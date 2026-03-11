@@ -126,3 +126,20 @@ Update:
 - current landmark expansion is still intentionally compact:
   - new families like `willow`, `giant_flower`, and `thorn_tree` reuse the existing feature slot
   - but the reused feature paths now carry silhouette-specific variants so those families are not just recolors
+- the latest variety pass pushed this same idea one step further with rare regional-extreme overlays:
+  - they are still derived from the same world-rule fields
+  - they do not become new top-level biome ids
+  - they can influence local relief, palette, water behavior, and landmark rosters together
+- current regional-extreme overlays are:
+  - `verdant_karst`
+  - `steppe_monolith`
+  - `dunes_glass`
+  - `badlands_crater`
+  - `highland_redleaf`
+  - `tundra_blue_ice`
+  - `marsh_blackwater`
+  - `ember_caldera`
+  - `bloom_prism`
+- the important implementation lesson was that "rare" selectors must still be measured directly:
+  - the first multiplicative selector made most overlays effectively unreachable
+  - the kept pass uses averaged signals and fixed-seed rarity scans to guard against dead-code variety
