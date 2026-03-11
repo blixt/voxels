@@ -493,3 +493,24 @@
 - Current residual after this slice:
   - the movement path is materially smoother, but there is still a real anchor-crossing spike when a new far-field anchor has to be sampled and rebuilt
   - the next likely win is a more incremental transition-band representation or a more radical near/far renderer experiment rather than more tuning of the current immediate mesh path
+
+### Wider near range and masked seam closure
+
+- Revisited the user-visible LOD complaints with two concrete goals:
+  - push the first coarse band materially farther away from the player
+  - stop the tiny “see the void under the ground” gaps still visible at the render-ready boundary
+- Widened the detailed resident ring from `5` chunks to `8` chunks in the procedural resident world.
+- Rebalanced the default far-field bands to keep high-detail coarse cells farther out:
+  - `near-transition`: `6 m -> 48 m` at `0.4 m`
+  - `transition`: `48 m -> 96 m` at `0.8 m`
+  - `mid`: `96 m -> 160 m` at `1.6 m`
+  - `far`: `160 m -> 272 m` at `3.2 m`
+  - `horizon`: `272 m -> 416 m` at `6.4 m`
+- Raised the nearest band anchor/center stride from `12.8 m` to `25.6 m` so small player movement no longer forces excessive near-transition churn.
+- Added a stronger seam oracle directly on the far-field mesh:
+  - `probeNearFarSeamGaps()` now inspects masked seam boundaries, samples the true detailed boundary surface from the generator, and reports any geometric gap depth instead of only reporting mask-level coverage
+- Changed masked seam wall generation so masked boundaries always emit a closing wall and extend downward using the sampled boundary minimum plus a small skirt, instead of assuming the neighboring detailed side is already present.
+- Result:
+  - the browser seam probe now reports `0` masked-edge gaps after settling
+  - the first visible coarse band now starts materially farther away from the player than before
+  - the remaining problem is sustained movement under load, not the masked seam geometry itself

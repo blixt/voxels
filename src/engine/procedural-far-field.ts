@@ -6,6 +6,8 @@ const FLOAT32_BYTES = 4;
 const NORMAL_SCALE = 127;
 const VERTEX_STRIDE = 20;
 const NO_WATER_HEIGHT = -0x7fff_ffff;
+const MASKED_SEAM_SKIRT_FACTOR = 0.5;
+const MIN_MASKED_SEAM_SKIRT_DEPTH = metersToWorldUnits(0.2);
 
 interface FarFieldBandConfig {
   readonly label: string;
@@ -75,36 +77,59 @@ export interface FarFieldUpdateSummary {
   maxRadiusMeters: number;
 }
 
+export interface FarFieldMaskedSeamProbe {
+  boundaryCount: number;
+  gapCount: number;
+  maxGapDepthWorldUnits: number;
+  maxGapDepthMeters: number;
+  samples: Array<{
+    band: string;
+    direction: "east" | "west" | "south" | "north";
+    worldX: number;
+    worldZ: number;
+    gapDepthWorldUnits: number;
+    gapDepthMeters: number;
+  }>;
+}
+
 const DEFAULT_BANDS: readonly FarFieldBandConfig[] = [
   {
-    label: "transition",
+    label: "near-transition",
     innerRadius: metersToWorldUnits(6),
     outerRadius: metersToWorldUnits(48),
-    sampleStride: metersToWorldUnits(0.8),
-    anchorStride: metersToWorldUnits(12.8),
-    centerStride: metersToWorldUnits(12.8),
-  },
-  {
-    label: "mid",
-    innerRadius: metersToWorldUnits(48),
-    outerRadius: metersToWorldUnits(112),
-    sampleStride: metersToWorldUnits(1.6),
+    sampleStride: metersToWorldUnits(0.4),
     anchorStride: metersToWorldUnits(25.6),
     centerStride: metersToWorldUnits(25.6),
   },
   {
+    label: "transition",
+    innerRadius: metersToWorldUnits(48),
+    outerRadius: metersToWorldUnits(96),
+    sampleStride: metersToWorldUnits(0.8),
+    anchorStride: metersToWorldUnits(25.6),
+    centerStride: metersToWorldUnits(25.6),
+  },
+  {
+    label: "mid",
+    innerRadius: metersToWorldUnits(96),
+    outerRadius: metersToWorldUnits(160),
+    sampleStride: metersToWorldUnits(1.6),
+    anchorStride: metersToWorldUnits(51.2),
+    centerStride: metersToWorldUnits(51.2),
+  },
+  {
     label: "far",
-    innerRadius: metersToWorldUnits(112),
-    outerRadius: metersToWorldUnits(224),
-    sampleStride: metersToWorldUnits(4.8),
-    anchorStride: metersToWorldUnits(76.8),
-    centerStride: metersToWorldUnits(76.8),
+    innerRadius: metersToWorldUnits(160),
+    outerRadius: metersToWorldUnits(272),
+    sampleStride: metersToWorldUnits(3.2),
+    anchorStride: metersToWorldUnits(102.4),
+    centerStride: metersToWorldUnits(102.4),
   },
   {
     label: "horizon",
-    innerRadius: metersToWorldUnits(224),
+    innerRadius: metersToWorldUnits(272),
     outerRadius: metersToWorldUnits(416),
-    sampleStride: metersToWorldUnits(12.8),
+    sampleStride: metersToWorldUnits(6.4),
     anchorStride: metersToWorldUnits(204.8),
     centerStride: metersToWorldUnits(204.8),
   },
@@ -214,6 +239,7 @@ export class ProceduralFarField {
       );
       sampledCellCount += sampleCache.sampledCellCount;
       band.mesh = buildBandMesh(
+        this.generator,
         config,
         effectiveInnerRadius,
         exclusionMask,
@@ -289,9 +315,141 @@ export class ProceduralFarField {
     }
     return coverage;
   }
+
+  probeMaskedSeamGaps(exclusionMask: FarFieldExclusionMask | null = null): FarFieldMaskedSeamProbe {
+    let boundaryCount = 0;
+    let gapCount = 0;
+    let maxGapDepthWorldUnits = 0;
+    const samples: FarFieldMaskedSeamProbe["samples"] = [];
+
+    for (let bandIndex = 0; bandIndex < this.bands.length; bandIndex += 1) {
+      const band = this.bands[bandIndex]!;
+      const config = this.bandConfigs[bandIndex]!;
+      const sampleCache = band.sampleCache;
+      if (!band.mesh || !sampleCache) {
+        continue;
+      }
+      const states = buildBandStates(
+        config,
+        sampleCache.anchorX,
+        sampleCache.anchorZ,
+        band.centerX,
+        band.centerZ,
+        band.clearRadiusWorldUnits,
+        exclusionMask,
+        sampleCache.sampleRadius,
+        sampleCache.sampleSpan,
+      );
+      const renderRadius = sampleCache.sampleRadius - 1;
+      for (let cellZ = -renderRadius; cellZ <= renderRadius; cellZ += 1) {
+        for (let cellX = -renderRadius; cellX <= renderRadius; cellX += 1) {
+          const sampleIndex = cellX + sampleCache.sampleRadius + (cellZ + sampleCache.sampleRadius) * sampleCache.sampleSpan;
+          if (states[sampleIndex] !== CELL_RENDERED) {
+            continue;
+          }
+          const height = sampleCache.heights[sampleIndex]!;
+          const worldX = sampleCache.anchorX + cellX * config.sampleStride;
+          const worldZ = sampleCache.anchorZ + cellZ * config.sampleStride;
+          evaluateMaskedSeamGap(
+            this.generator,
+            band.label,
+            "east",
+            worldX,
+            worldZ,
+            config.sampleStride,
+            states[sampleIndex + 1]!,
+            sampleCache.heights[sampleIndex + 1]!,
+            height,
+            (gapDepthWorldUnits, sample) => {
+              boundaryCount += 1;
+              if (gapDepthWorldUnits > 0) {
+                gapCount += 1;
+                maxGapDepthWorldUnits = Math.max(maxGapDepthWorldUnits, gapDepthWorldUnits);
+                if (samples.length < 8) {
+                  samples.push(sample);
+                }
+              }
+            },
+          );
+          evaluateMaskedSeamGap(
+            this.generator,
+            band.label,
+            "west",
+            worldX,
+            worldZ,
+            config.sampleStride,
+            states[sampleIndex - 1]!,
+            sampleCache.heights[sampleIndex - 1]!,
+            height,
+            (gapDepthWorldUnits, sample) => {
+              boundaryCount += 1;
+              if (gapDepthWorldUnits > 0) {
+                gapCount += 1;
+                maxGapDepthWorldUnits = Math.max(maxGapDepthWorldUnits, gapDepthWorldUnits);
+                if (samples.length < 8) {
+                  samples.push(sample);
+                }
+              }
+            },
+          );
+          evaluateMaskedSeamGap(
+            this.generator,
+            band.label,
+            "south",
+            worldX,
+            worldZ,
+            config.sampleStride,
+            states[sampleIndex + sampleCache.sampleSpan]!,
+            sampleCache.heights[sampleIndex + sampleCache.sampleSpan]!,
+            height,
+            (gapDepthWorldUnits, sample) => {
+              boundaryCount += 1;
+              if (gapDepthWorldUnits > 0) {
+                gapCount += 1;
+                maxGapDepthWorldUnits = Math.max(maxGapDepthWorldUnits, gapDepthWorldUnits);
+                if (samples.length < 8) {
+                  samples.push(sample);
+                }
+              }
+            },
+          );
+          evaluateMaskedSeamGap(
+            this.generator,
+            band.label,
+            "north",
+            worldX,
+            worldZ,
+            config.sampleStride,
+            states[sampleIndex - sampleCache.sampleSpan]!,
+            sampleCache.heights[sampleIndex - sampleCache.sampleSpan]!,
+            height,
+            (gapDepthWorldUnits, sample) => {
+              boundaryCount += 1;
+              if (gapDepthWorldUnits > 0) {
+                gapCount += 1;
+                maxGapDepthWorldUnits = Math.max(maxGapDepthWorldUnits, gapDepthWorldUnits);
+                if (samples.length < 8) {
+                  samples.push(sample);
+                }
+              }
+            },
+          );
+        }
+      }
+    }
+
+    return {
+      boundaryCount,
+      gapCount,
+      maxGapDepthWorldUnits,
+      maxGapDepthMeters: worldUnitsToMeters(maxGapDepthWorldUnits),
+      samples,
+    };
+  }
 }
 
 function buildBandMesh(
+  generator: ProceduralWorldGenerator,
   band: FarFieldBandConfig,
   innerRadius: number,
   exclusionMask: FarFieldExclusionMask | null,
@@ -330,10 +488,46 @@ function buildBandMesh(
       const z1 = worldZ + band.sampleStride;
       const waterHeight = waterHeights[sampleIndex]!;
       const waterColor = waterColors[sampleIndex]!;
-      const eastBottomY = bottomYForNeighbor(states[sampleIndex + 1]!, heights[sampleIndex + 1]!, height);
-      const westBottomY = bottomYForNeighbor(states[sampleIndex - 1]!, heights[sampleIndex - 1]!, height);
-      const southBottomY = bottomYForNeighbor(states[sampleIndex + sampleSpan]!, heights[sampleIndex + sampleSpan]!, height);
-      const northBottomY = bottomYForNeighbor(states[sampleIndex - sampleSpan]!, heights[sampleIndex - sampleSpan]!, height);
+      const eastBottomY = bottomYForBoundary(
+        generator,
+        "east",
+        worldX,
+        worldZ,
+        band.sampleStride,
+        states[sampleIndex + 1]!,
+        heights[sampleIndex + 1]!,
+        height,
+      );
+      const westBottomY = bottomYForBoundary(
+        generator,
+        "west",
+        worldX,
+        worldZ,
+        band.sampleStride,
+        states[sampleIndex - 1]!,
+        heights[sampleIndex - 1]!,
+        height,
+      );
+      const southBottomY = bottomYForBoundary(
+        generator,
+        "south",
+        worldX,
+        worldZ,
+        band.sampleStride,
+        states[sampleIndex + sampleSpan]!,
+        heights[sampleIndex + sampleSpan]!,
+        height,
+      );
+      const northBottomY = bottomYForBoundary(
+        generator,
+        "north",
+        worldX,
+        worldZ,
+        band.sampleStride,
+        states[sampleIndex - sampleSpan]!,
+        heights[sampleIndex - sampleSpan]!,
+        height,
+      );
 
       pushQuad(
         vertices,
@@ -555,7 +749,7 @@ function pushQuad(
 function pushSideQuad(
   vertices: Array<[number, number, number, number, number, number, number]>,
   indices: number[],
-  _neighborState: number,
+  neighborState: number,
   neighborHeight: number,
   height: number,
   color: number,
@@ -567,17 +761,31 @@ function pushSideQuad(
   ],
   normal: [number, number, number],
 ): void {
-  if (neighborHeight >= height) {
+  if (neighborState !== CELL_MASKED && neighborHeight >= height) {
     return;
   }
   pushQuad(vertices, indices, corners, normal, color);
 }
 
-function bottomYForNeighbor(_neighborState: number, neighborHeight: number, height: number): number {
-  if (neighborHeight >= height) {
-    return height + 1;
+function bottomYForBoundary(
+  generator: ProceduralWorldGenerator,
+  direction: "east" | "west" | "south" | "north",
+  worldX: number,
+  worldZ: number,
+  sampleStride: number,
+  neighborState: number,
+  neighborHeight: number,
+  height: number,
+): number {
+  let bottomY = neighborHeight >= height ? height + 1 : neighborHeight + 1;
+  if (neighborState === CELL_MASKED) {
+    bottomY = Math.min(
+      bottomY,
+      sampleMaskedBoundaryMinSurfaceY(generator, direction, worldX, worldZ, sampleStride) + 1,
+    );
+    bottomY = Math.max(0, bottomY - computeMaskedSeamSkirtDepth(sampleStride));
   }
-  return neighborHeight + 1;
+  return bottomY;
 }
 
 function pushWaterTopQuad(
@@ -686,6 +894,77 @@ function isCellInBand(
     Math.abs(cellMinZ + sampleStride * 0.5 - centerZ),
   );
   return distance >= innerRadius && distance < outerRadius;
+}
+
+function computeMaskedSeamSkirtDepth(sampleStride: number): number {
+  return Math.max(MIN_MASKED_SEAM_SKIRT_DEPTH, sampleStride * MASKED_SEAM_SKIRT_FACTOR);
+}
+
+function evaluateMaskedSeamGap(
+  generator: ProceduralWorldGenerator,
+  bandLabel: string,
+  direction: "east" | "west" | "south" | "north",
+  worldX: number,
+  worldZ: number,
+  sampleStride: number,
+  neighborState: number,
+  neighborHeight: number,
+  height: number,
+  record: (
+    gapDepthWorldUnits: number,
+    sample: FarFieldMaskedSeamProbe["samples"][number],
+  ) => void,
+): void {
+  if (neighborState !== CELL_MASKED) {
+    return;
+  }
+  const wallBottomY = bottomYForBoundary(
+    generator,
+    direction,
+    worldX,
+    worldZ,
+    sampleStride,
+    neighborState,
+    neighborHeight,
+    height,
+  );
+  const boundaryMinSurfaceY = sampleMaskedBoundaryMinSurfaceY(generator, direction, worldX, worldZ, sampleStride);
+  const gapDepthWorldUnits = wallBottomY - (boundaryMinSurfaceY + 1);
+  record(gapDepthWorldUnits, {
+    band: bandLabel,
+    direction,
+    worldX,
+    worldZ,
+    gapDepthWorldUnits,
+    gapDepthMeters: worldUnitsToMeters(gapDepthWorldUnits),
+  });
+}
+
+function sampleMaskedBoundaryMinSurfaceY(
+  generator: ProceduralWorldGenerator,
+  direction: "east" | "west" | "south" | "north",
+  worldX: number,
+  worldZ: number,
+  sampleStride: number,
+): number {
+  const sampleStep = 1;
+  let minSurfaceY = Number.POSITIVE_INFINITY;
+  const sampleCount = Math.max(1, Math.floor(sampleStride / sampleStep));
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+    const offset = Math.min(sampleStride - 0.5, sampleIndex + 0.5);
+    const sampleX = direction === "east"
+      ? worldX + sampleStride + 0.5
+      : direction === "west"
+      ? worldX - 0.5
+      : worldX + offset;
+    const sampleZ = direction === "south"
+      ? worldZ + sampleStride + 0.5
+      : direction === "north"
+      ? worldZ - 0.5
+      : worldZ + offset;
+    minSurfaceY = Math.min(minSurfaceY, generator.sampleColumn(sampleX, sampleZ).surfaceY);
+  }
+  return minSurfaceY;
 }
 
 const CELL_OMITTED = 0;

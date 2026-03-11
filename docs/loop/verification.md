@@ -1533,3 +1533,54 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - The main continuous movement hitch is much smaller now because transition-band mask churn no longer rebuilds every frame.
 - A real anchor-crossing spike remains when the far field has to sample and rebuild around a new anchor.
 - The next likely target is an incremental transition-band representation or a more radical renderer experiment, not another blind pass over chunk-generation constants.
+
+### Wider near range and masked seam closure
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- fresh Chrome 146 probes on `http://localhost:3016/`:
+  - `window.__VOXELS_GAME__.probeNearFarSeamGaps()`
+  - `window.__VOXELS_GAME__.probeRenderReadyCoverage(20, 0.8)`
+  - `window.__VOXELS_GAME__.probeLodCoverage(48, 0.1)`
+  - `window.__VOXELS_GAME__.benchmarkIncrementalCrossing(1, 2, 12, 20)`
+
+#### Automated checks
+
+- `tests/procedural-far-field.test.ts` now includes:
+  - a masked seam probe case on a flat boundary that reports zero geometric seam gaps
+  - a masked seam wall case that proves the far field emits a downward closing skirt even when the detailed side is masked
+- `mise run test`: passing
+- `mise run build`: passing
+
+#### Browser heuristic checks
+
+- Fresh Chrome 146 after widening the near ring and reworking masked seam closure reported:
+  - `probeNearFarSeamGaps()`:
+    - `boundaryCount = 544`
+    - `gapCount = 0`
+    - `maxGapDepthMeters = 0`
+  - `probeRenderReadyCoverage(20, 0.8)` at rest:
+    - `residentNotReadyCount = 0`
+    - `missingResidentCount = 81`
+  - first visible coarse coverage samples:
+    - `28 m -> near-transition @ 0.4 m`
+    - `56 m -> transition @ 0.8 m`
+    - `128 m -> mid @ 1.6 m`
+    - `192 m -> far @ 3.2 m`
+  - `benchmarkIncrementalCrossing(1, 2, 12, 20)`:
+    - `avgWorkMs = 13.41`
+    - `p95WorkMs = 38.7`
+    - `maxWorkMs = 49.4`
+    - `avgFarFieldMs = 3.49`
+    - `avgStreamMs = 4.63`
+    - `avgMeshMs = 4.99`
+    - `avgResidentNotReadyNearSamples = 2.97`
+    - `maxResidentNotReadyNearSamples = 6`
+    - `maxPendingChunks = 148`
+
+#### Residual
+
+- The masked seam gap itself is fixed by the stronger boundary wall generation.
+- The remaining user-visible failure is sustained movement backlog: the render-ready handoff can still lag behind the player badly enough to feel late under continuous movement.

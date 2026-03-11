@@ -5,14 +5,14 @@ import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts"
 import { metersToWorldUnits } from "../src/engine/scale.ts";
 import type { ChunkMeshData } from "../src/engine/types.ts";
 
-test("procedural far field covers a few hundred meters with four render bands", () => {
+test("procedural far field covers a few hundred meters with five render bands", () => {
   const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337));
 
   const summary = farField.updateAround([0, 0, 0]);
 
   expect(summary.changed).toBe(true);
-  expect(summary.meshCount).toBe(4);
-  expect(summary.builtBands).toBe(4);
+  expect(summary.meshCount).toBe(5);
+  expect(summary.builtBands).toBe(5);
   expect(summary.sampledCellCount).toBeGreaterThan(0);
   expect(summary.maxRadiusMeters).toBeGreaterThanOrEqual(300);
   expect(summary.triangleCount).toBeGreaterThan(0);
@@ -206,10 +206,48 @@ test("procedural far field keeps a seam wall against lower masked neighbors", ()
   expect(quads.some((quad) =>
     quad.normal.join(",") === "1,0,0"
     && quad.min[0] === 8
-    && quad.min[1] === 2
+    && quad.min[1] <= 0
     && quad.min[2] === 0
     && quad.max[1] === 9
     && quad.max[2] === 8)).toBe(true);
+});
+
+test("procedural far field adds a downward skirt against flat masked seams", () => {
+  const farField = new ProceduralFarField(createTestGenerator(() => 8), [
+    { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32 },
+  ]);
+  const exclusionMask = {
+    revision: 1,
+    excludesCell: (minX: number, _maxXExclusive: number, minZ: number) => minX === 8 && minZ === 0,
+  };
+
+  farField.updateAround([0, 0, 0], 0, exclusionMask);
+
+  const quads = extractQuads(farField.getRenderables()[0]!.mesh);
+  expect(quads.some((quad) =>
+    quad.normal.join(",") === "1,0,0"
+    && quad.min[0] === 8
+    && quad.min[1] < 9
+    && quad.max[1] === 9
+    && quad.min[2] === 0
+    && quad.max[2] === 8)).toBe(true);
+});
+
+test("procedural far field seam probe reports no masked-edge terrain gaps on a flat seam", () => {
+  const farField = new ProceduralFarField(createTestGenerator(() => 8), [
+    { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32 },
+  ]);
+  const exclusionMask = {
+    revision: 1,
+    excludesCell: (minX: number, _maxXExclusive: number, minZ: number) => minX === 8 && minZ === 0,
+  };
+
+  farField.updateAround([0, 0, 0], 0, exclusionMask);
+  const seamProbe = farField.probeMaskedSeamGaps(exclusionMask);
+
+  expect(seamProbe.boundaryCount).toBeGreaterThan(0);
+  expect(seamProbe.gapCount).toBe(0);
+  expect(seamProbe.maxGapDepthWorldUnits).toBe(0);
 });
 
 test("procedural far field can preserve water tops inside coarse cells", () => {

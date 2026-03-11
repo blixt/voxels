@@ -266,6 +266,21 @@ export interface RenderReadyCoverageProbe {
   missingResidentCount: number;
 }
 
+export interface NearFarSeamProbe {
+  boundaryCount: number;
+  gapCount: number;
+  maxGapDepthWorldUnits: number;
+  maxGapDepthMeters: number;
+  samples: Array<{
+    band: string;
+    direction: "east" | "west" | "south" | "north";
+    worldX: number;
+    worldZ: number;
+    gapDepthWorldUnits: number;
+    gapDepthMeters: number;
+  }>;
+}
+
 export class GameController {
   readonly canvas: HTMLCanvasElement;
   readonly generator = new ProceduralWorldGenerator(1337);
@@ -528,6 +543,10 @@ export class GameController {
       residentNotReadyCount,
       missingResidentCount: sampleCount - residentSampleCount,
     };
+  }
+
+  probeNearFarSeamGaps(): NearFarSeamProbe {
+    return this.farField.probeMaskedSeamGaps(this.getRenderReadyFarFieldMask());
   }
 
   probeLodCoverage(sampleRadiusMeters = 48, sampleStepMeters = 0.8): LodCoverageProbe {

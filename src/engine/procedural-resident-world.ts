@@ -7,7 +7,7 @@ import type { FarFieldExclusionMask } from "./procedural-far-field.ts";
 import { metersToWorldUnits } from "./scale.ts";
 import type { ResidentChunkWorld, VoxelChunk } from "./world.ts";
 
-const DEFAULT_HORIZONTAL_RADIUS_CHUNKS = 5;
+const DEFAULT_HORIZONTAL_RADIUS_CHUNKS = 8;
 const DEFAULT_UNDERGROUND_PADDING_CHUNKS = 3;
 const DEFAULT_AIR_PADDING_CHUNKS = 2;
 const SPAWN_FOOTPRINT_RADIUS = metersToWorldUnits(0.8);
