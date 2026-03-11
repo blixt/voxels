@@ -146,6 +146,30 @@
 
 ## 2026-03-11
 
+### 10 cm scale and step-up verification
+
+#### Commands
+
+- `mise exec -- bun test tests/player-physics.test.ts`
+- `mise run test`
+- `mise run build`
+
+#### Automated checks
+
+- Focused player-physics file: passing after rescaling the player/body constants and adding `0.3 m` auto-step coverage.
+- Full test suite: passing after updating the spawn-footprint test to match the new physical scale.
+- Production build: passing.
+
+#### Chrome 146 browser checks on `http://localhost:3015/`
+
+- `/` HUD now reports gameplay position in meters instead of raw voxel units:
+  - sample snapshot showed `Position -19.2m, 144.5m, -19.2m`
+  - sample snapshot showed `Feet -19.2m, 142.8m, -19.2m`
+  - sample snapshot showed `Surface Y 143.3 m`
+- Browser snapshot after the hot reload confirms the new scaled player body:
+  - eye-to-feet difference is `16.8` voxel units, matching `1.68 m`
+  - the game remained grounded after reload with no runtime errors
+
 ### Bun full-stack dev/prod environment verification
 
 #### Commands

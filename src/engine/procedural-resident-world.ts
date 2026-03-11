@@ -3,12 +3,13 @@ import {
   ProceduralWorldGenerator,
   type GeneratedChunk,
 } from "./procedural-generator.ts";
+import { metersToWorldUnits } from "./scale.ts";
 import type { ResidentChunkWorld, VoxelChunk } from "./world.ts";
 
 const DEFAULT_HORIZONTAL_RADIUS_CHUNKS = 3;
 const DEFAULT_UNDERGROUND_PADDING_CHUNKS = 3;
 const DEFAULT_AIR_PADDING_CHUNKS = 2;
-const SPAWN_FOOTPRINT_RADIUS = 32;
+const SPAWN_FOOTPRINT_RADIUS = metersToWorldUnits(0.8);
 
 export interface ResidencyPhaseMetrics {
   surfaceSampleMs: number;

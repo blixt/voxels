@@ -65,6 +65,20 @@
 
 ## 2026-03-11
 
+- Rebased the runtime onto an explicit `10 cm` voxel scale instead of the old implicit `1 cm` assumption:
+  - added `src/engine/scale.ts` with shared `meters <-> voxel units` helpers
+  - rescaled player body, eye height, gravity, jump velocity, and movement speed in `src/engine/player-physics.ts`
+  - tightened the spawn flatness footprint in `src/engine/procedural-resident-world.ts` so spawn selection matches the new player/world scale instead of sampling a multi-meter footprint
+  - updated the game HUD in `src/client/game.ts` to present position and surface altitude in meters instead of raw voxel units
+- Added pragmatic stair/step handling to the current player collision model:
+  - the player can now auto-step up obstacles up to `0.3 m` (`3` voxel units) while walking
+  - obstacles above that threshold still block movement
+  - kept the change local to the current axis-separated body solver instead of rewriting movement wholesale
+- Expanded the direct physics coverage for the new scale:
+  - grounded fall on the rescaled world
+  - blocking on a wall at the rescaled move speed
+  - auto-stepping a `0.3 m` ledge
+  - refusing to auto-step a taller obstacle
 - Replaced the old startup-bundle dev loop with Bun's full-stack HTML-import path:
   - added `src/pages/game.html` and `src/pages/bench.html`
   - changed `src/server.ts` to route those HTML imports directly through `Bun.serve()`

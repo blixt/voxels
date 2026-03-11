@@ -1,14 +1,16 @@
 import type { ResidentChunkWorld } from "./world.ts";
 import type { Vec3 } from "./types.ts";
+import { metersToWorldUnits } from "./scale.ts";
 
-export const PLAYER_RADIUS = 30;
-export const PLAYER_HEIGHT = 180;
-export const PLAYER_EYE_HEIGHT = 168;
-export const PLAYER_GRAVITY = 1000;
-export const PLAYER_JUMP_VELOCITY = 360;
-export const PLAYER_BASE_MOVE_SPEED = 460;
+export const PLAYER_RADIUS = metersToWorldUnits(0.3);
+export const PLAYER_HEIGHT = metersToWorldUnits(1.8);
+export const PLAYER_EYE_HEIGHT = metersToWorldUnits(1.68);
+export const PLAYER_GRAVITY = metersToWorldUnits(10);
+export const PLAYER_JUMP_VELOCITY = metersToWorldUnits(3.6);
+export const PLAYER_BASE_MOVE_SPEED = metersToWorldUnits(4.6);
 export const PLAYER_FAST_MOVE_MULTIPLIER = 1.57;
 export const PLAYER_SLOW_MOVE_MULTIPLIER = 0.4;
+export const PLAYER_MAX_STEP_HEIGHT = metersToWorldUnits(0.3);
 
 const SKIN_WIDTH = 0.001;
 
@@ -114,11 +116,17 @@ export function stepPlayerBody(
     body.grounded = false;
   }
   const collidedX = moveAlongAxis(world, body, 0, body.velocity[0] * deltaSeconds);
+  const steppedX = collidedX && body.grounded
+    ? tryStepUp(world, body, 0, body.velocity[0] * deltaSeconds)
+    : false;
   const collidedZ = moveAlongAxis(world, body, 2, body.velocity[2] * deltaSeconds);
+  const steppedZ = collidedZ && body.grounded
+    ? tryStepUp(world, body, 2, body.velocity[2] * deltaSeconds)
+    : false;
   return {
-    collidedX,
+    collidedX: collidedX && !steppedX,
     collidedY,
-    collidedZ,
+    collidedZ: collidedZ && !steppedZ,
   };
 }
 
@@ -186,6 +194,84 @@ function moveAlongAxis(
   }
   body.feetPosition[axis] = resolved;
   return collided;
+}
+
+function tryStepUp(
+  world: Pick<ResidentChunkWorld, "getVoxel">,
+  body: PlayerBodyState,
+  axis: 0 | 2,
+  delta: number,
+): boolean {
+  if (delta === 0) {
+    return false;
+  }
+  const originalPosition: Vec3 = [...body.feetPosition];
+  for (let stepHeight = 1; stepHeight <= PLAYER_MAX_STEP_HEIGHT; stepHeight += 1) {
+    const steppedBody: PlayerBodyState = {
+      ...body,
+      feetPosition: [
+        originalPosition[0],
+        originalPosition[1] + stepHeight,
+        originalPosition[2],
+      ],
+      velocity: [...body.velocity],
+    };
+    if (collidesAt(world, steppedBody.feetPosition, steppedBody.radius, steppedBody.height)) {
+      continue;
+    }
+    if (moveAlongAxis(world, steppedBody, axis, delta)) {
+      continue;
+    }
+    if (!settleStepDown(world, steppedBody, stepHeight)) {
+      continue;
+    }
+    body.feetPosition = steppedBody.feetPosition;
+    body.grounded = true;
+    return true;
+  }
+  return false;
+}
+
+function settleStepDown(
+  world: Pick<ResidentChunkWorld, "getVoxel">,
+  body: PlayerBodyState,
+  maxDrop: number,
+): boolean {
+  const startY = body.feetPosition[1];
+  for (let drop = 1; drop <= maxDrop; drop += 1) {
+    const loweredPosition: Vec3 = [body.feetPosition[0], startY - drop, body.feetPosition[2]];
+    if (!collidesAt(world, loweredPosition, body.radius, body.height)) {
+      continue;
+    }
+    body.feetPosition[1] = loweredPosition[1] + 1;
+    return true;
+  }
+  return false;
+}
+
+function collidesAt(
+  world: Pick<ResidentChunkWorld, "getVoxel">,
+  feetPosition: Vec3,
+  radius: number,
+  height: number,
+): boolean {
+  const bounds = getPlayerBounds(feetPosition, radius, height);
+  const minX = Math.floor(bounds.min[0] + SKIN_WIDTH);
+  const maxX = Math.floor(bounds.max[0] - SKIN_WIDTH);
+  const minY = Math.floor(bounds.min[1] + SKIN_WIDTH);
+  const maxY = Math.floor(bounds.max[1] - SKIN_WIDTH);
+  const minZ = Math.floor(bounds.min[2] + SKIN_WIDTH);
+  const maxZ = Math.floor(bounds.max[2] - SKIN_WIDTH);
+  for (let z = minZ; z <= maxZ; z += 1) {
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        if (world.getVoxel(x, y, z) !== 0) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 function getPlayerBounds(

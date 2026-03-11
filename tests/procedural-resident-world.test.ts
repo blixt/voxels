@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import { ProceduralResidentWorld } from "../src/engine/procedural-resident-world.ts";
 import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
+import { metersToWorldUnits } from "../src/engine/scale.ts";
 
 test("resident world loads chunks around the player and exposes generated voxels", () => {
   const generator = new ProceduralWorldGenerator(1337, { chunkSize: 16 });
@@ -80,16 +81,17 @@ test("spawn selection prefers a flatter standing footprint", () => {
   const spawn = world.getSpawnPosition();
   const centerX = Math.floor(spawn[0]);
   const centerZ = Math.floor(spawn[2]);
+  const footprintRadius = metersToWorldUnits(0.8);
   const heights = [
     world.generator.sampleColumn(centerX, centerZ).surfaceY,
-    world.generator.sampleColumn(centerX - 32, centerZ).surfaceY,
-    world.generator.sampleColumn(centerX + 32, centerZ).surfaceY,
-    world.generator.sampleColumn(centerX, centerZ - 32).surfaceY,
-    world.generator.sampleColumn(centerX, centerZ + 32).surfaceY,
-    world.generator.sampleColumn(centerX - 32, centerZ - 32).surfaceY,
-    world.generator.sampleColumn(centerX - 32, centerZ + 32).surfaceY,
-    world.generator.sampleColumn(centerX + 32, centerZ - 32).surfaceY,
-    world.generator.sampleColumn(centerX + 32, centerZ + 32).surfaceY,
+    world.generator.sampleColumn(centerX - footprintRadius, centerZ).surfaceY,
+    world.generator.sampleColumn(centerX + footprintRadius, centerZ).surfaceY,
+    world.generator.sampleColumn(centerX, centerZ - footprintRadius).surfaceY,
+    world.generator.sampleColumn(centerX, centerZ + footprintRadius).surfaceY,
+    world.generator.sampleColumn(centerX - footprintRadius, centerZ - footprintRadius).surfaceY,
+    world.generator.sampleColumn(centerX - footprintRadius, centerZ + footprintRadius).surfaceY,
+    world.generator.sampleColumn(centerX + footprintRadius, centerZ - footprintRadius).surfaceY,
+    world.generator.sampleColumn(centerX + footprintRadius, centerZ + footprintRadius).surfaceY,
   ];
 
   expect(Math.max(...heights) - Math.min(...heights)).toBeLessThanOrEqual(12);

@@ -1,4 +1,5 @@
 import { GameController } from "./game-controller.ts";
+import { worldUnitsToMeters } from "../engine/scale.ts";
 
 declare global {
   interface Window {
@@ -71,7 +72,7 @@ function mountGame(): GameRuntime {
       metric("Resident Chunks", snapshot.chunkCount.toLocaleString()),
       metric("Dirty Resident", snapshot.streamDirtyResidentChunks.toLocaleString()),
       metric("Radius", `${snapshot.residencyRadiusChunks} chunks`),
-      metric("Surface Y", snapshot.surfaceY.toLocaleString()),
+      metric("Surface Y", `${worldUnitsToMeters(snapshot.surfaceY).toFixed(1)} m`),
       metric("Voxels", snapshot.solidVoxelCount.toLocaleString()),
       metric("Palette", snapshot.paletteCount.toLocaleString()),
       metric("Stream", `${snapshot.streamMs.toFixed(1)} ms`),
@@ -133,5 +134,5 @@ function metric(label: string, value: string): string {
 }
 
 function formatPosition(position: [number, number, number]): string {
-  return position.map((value) => value.toFixed(1)).join(", ");
+  return position.map((value) => `${worldUnitsToMeters(value).toFixed(1)}m`).join(", ");
 }
