@@ -514,3 +514,28 @@
   - the browser seam probe now reports `0` masked-edge gaps after settling
   - the first visible coarse band now starts materially farther away from the player than before
   - the remaining problem is sustained movement under load, not the masked seam geometry itself
+
+### Deterministic route benchmark and hole diagnostics
+
+- Added a new deterministic game-path benchmark instead of relying only on chunk-crossing microbenchmarks.
+- The new route harness is built around a fixed seed and a fixed 10-second kinematic route at realistic run speed:
+  - seed stays at `1337`
+  - route speed defaults to `4.6 m/s`
+  - route length is about `46 m`
+  - route uses a repeatable serpentine movement plan so both `X` and `Z` streaming are exercised
+  - a settle phase continues after movement stops so “seconds to recover after you stop” is measurable
+- Added explicit frame accounting so the game path now reports:
+  - total gameplay-frame CPU time
+  - accounted work for movement, residency, meshing, far field, and render CPU
+  - the remaining unmeasured gap instead of silently hiding it
+- Added two new browser-side correctness heuristics to reduce dependence on visual judgment:
+  - `probeVisibleGroundCoverage()` samples a forward ground window and counts cells that are neither render-ready nor covered by the far field
+  - the route benchmark can also capture low-resolution viewport snapshots and scan the lower-center image for clear-color slits
+- Kept the new benchmark route-specific logic small and testable:
+  - route generation, bottom-center void analysis, and accounting summary live in a separate helper module with unit tests
+- Result from fresh Chrome 146 on the first full `10 s + settle` route run:
+  - only about `1.1%` of gameplay-frame time is still unaccounted for, so the benchmark now has good visibility into where the time is going
+  - the main bad experience is now directly measurable as:
+    - visible-ground gap frames during movement
+    - long settle time after movement stops
+    - rare but very large far-field spikes that dwarf ordinary stream/mesh work

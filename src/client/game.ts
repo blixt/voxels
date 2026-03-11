@@ -33,6 +33,9 @@ declare global {
         stepsPerLeg?: number,
         settleFrames?: number,
       ): ReturnType<GameController["benchmarkIncrementalCrossing"]>;
+      benchmarkRouteExperience(
+        options?: Parameters<GameController["benchmarkRouteExperience"]>[0],
+      ): ReturnType<GameController["benchmarkRouteExperience"]>;
       probeLodCoverage(
         sampleRadiusMeters?: number,
         sampleStepMeters?: number,
@@ -41,6 +44,11 @@ declare global {
         sampleRadiusMeters?: number,
         sampleStepMeters?: number,
       ): ReturnType<GameController["probeRenderReadyCoverage"]>;
+      probeVisibleGroundCoverage(
+        sampleForwardMeters?: number,
+        sampleLateralMeters?: number,
+        sampleStepMeters?: number,
+      ): ReturnType<GameController["probeVisibleGroundCoverage"]>;
       probeNearFarSeamGaps(): ReturnType<GameController["probeNearFarSeamGaps"]>;
     };
   }
@@ -144,10 +152,13 @@ function mountGame(): GameRuntime {
     benchmarkChunkCrossing: (iterations, chunkDelta) => controller.benchmarkChunkCrossing(iterations, chunkDelta),
     benchmarkIncrementalCrossing: (iterations, chunkDelta, stepsPerLeg, settleFrames) =>
       controller.benchmarkIncrementalCrossing(iterations, chunkDelta, stepsPerLeg, settleFrames),
+    benchmarkRouteExperience: (options) => controller.benchmarkRouteExperience(options),
     probeLodCoverage: (sampleRadiusMeters, sampleStepMeters) =>
       controller.probeLodCoverage(sampleRadiusMeters, sampleStepMeters),
     probeRenderReadyCoverage: (sampleRadiusMeters, sampleStepMeters) =>
       controller.probeRenderReadyCoverage(sampleRadiusMeters, sampleStepMeters),
+    probeVisibleGroundCoverage: (sampleForwardMeters, sampleLateralMeters, sampleStepMeters) =>
+      controller.probeVisibleGroundCoverage(sampleForwardMeters, sampleLateralMeters, sampleStepMeters),
     probeNearFarSeamGaps: () => controller.probeNearFarSeamGaps(),
   };
 

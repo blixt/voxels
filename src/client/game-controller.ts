@@ -1,5 +1,12 @@
 import { average, maxValue, percentile } from "../engine/benchmark-metrics.ts";
 import {
+  analyzeBottomCenterVoid,
+  buildDefaultRouteBenchmarkPlan,
+  summarizeRouteFrameAccounting,
+  type BottomCenterVoidProbe,
+  type RouteBenchmarkFrameTarget,
+} from "../engine/game-route-benchmark.ts";
+import {
   buildFirstPersonCameraMatrices,
   createFirstPersonCamera,
   rotateFirstPersonCamera,
@@ -281,6 +288,158 @@ export interface NearFarSeamProbe {
   }>;
 }
 
+export interface VisibleGroundCoverageIssueSample {
+  worldX: number;
+  worldZ: number;
+  forwardMeters: number;
+  lateralMeters: number;
+  resident: boolean;
+  renderReady: boolean;
+  farCovered: boolean;
+}
+
+export interface VisibleGroundCoverageProbe {
+  center: Vec3;
+  yawRadians: number;
+  sampleForwardMeters: number;
+  sampleLateralMeters: number;
+  sampleStepMeters: number;
+  sampleCount: number;
+  renderReadyCount: number;
+  farOnlyCount: number;
+  uncoveredCount: number;
+  residentNotReadyCount: number;
+  uncoveredSamples: VisibleGroundCoverageIssueSample[];
+}
+
+export interface RouteExperienceBenchmarkOptions {
+  durationSeconds?: number;
+  settleSeconds?: number;
+  sampleHz?: number;
+  speedMetersPerSecond?: number;
+  seamProbeStrideFrames?: number;
+  captureStrideFrames?: number;
+  captureWidth?: number;
+  captureHeight?: number;
+}
+
+export interface RouteExperienceFrameSample {
+  frame: number;
+  phase: "move" | "settle";
+  simTimeSeconds: number;
+  routeDistanceMeters: number;
+  feetPosition: Vec3;
+  yaw: number;
+  pitch: number;
+  changed: boolean;
+  complete: boolean;
+  pendingChunks: number;
+  dirtyResidentChunks: number;
+  generatedChunks: number;
+  evictedChunks: number;
+  movementMs: number;
+  streamMs: number;
+  meshMs: number;
+  meshCount: number;
+  farFieldMs: number;
+  farFieldBuiltBands: number;
+  farFieldPendingBands: number;
+  gameplayFrameMs: number;
+  accountedFrameMs: number;
+  unmeasuredFrameMs: number;
+  diagnosticsMs: number;
+  captureDiagnosticsMs: number;
+  renderCpuMs: number;
+  renderSyncMs: number;
+  renderUploadMs: number;
+  renderEncodeMs: number;
+  renderOtherMs: number;
+  uploadChunks: number;
+  uploadBytes: number;
+  drawCalls: number;
+  triangles: number;
+  residentNearSamples: number;
+  renderReadyNearSamples: number;
+  residentNotReadyNearSamples: number;
+  visibleGroundSampleCount: number;
+  visibleGroundUncoveredCount: number;
+  visibleGroundResidentNotReadyCount: number;
+  visibleGroundFarOnlyCount: number;
+  seamGapCount: number;
+  maxSeamGapMeters: number;
+  screenVoidRatio: number | null;
+  screenVoidMaxRunRatio: number | null;
+  screenVoidSuspicious: boolean;
+  suspiciousHole: boolean;
+}
+
+export interface RouteExperienceBenchmarkSummary {
+  sampleCount: number;
+  moveFrameCount: number;
+  settleFrameCount: number;
+  incompleteFrameCount: number;
+  totalDistanceMeters: number;
+  sampleHz: number;
+  speedMetersPerSecond: number;
+  totalGameplayFrameMs: number;
+  totalAccountedFrameMs: number;
+  totalUnmeasuredFrameMs: number;
+  unmeasuredFrameRatio: number;
+  totalDiagnosticsMs: number;
+  totalCaptureDiagnosticsMs: number;
+  avgGameplayFrameMs: number;
+  p95GameplayFrameMs: number;
+  maxGameplayFrameMs: number;
+  avgMeasuredWorkMs: number;
+  p95MeasuredWorkMs: number;
+  maxMeasuredWorkMs: number;
+  avgUnmeasuredFrameMs: number;
+  p95UnmeasuredFrameMs: number;
+  maxUnmeasuredFrameMs: number;
+  avgStreamMs: number;
+  p95StreamMs: number;
+  maxStreamMs: number;
+  avgMeshMs: number;
+  p95MeshMs: number;
+  maxMeshMs: number;
+  avgFarFieldMs: number;
+  p95FarFieldMs: number;
+  maxFarFieldMs: number;
+  avgRenderCpuMs: number;
+  p95RenderCpuMs: number;
+  maxRenderCpuMs: number;
+  avgRenderOtherMs: number;
+  maxRenderOtherMs: number;
+  avgResidentNotReadyNearSamples: number;
+  maxResidentNotReadyNearSamples: number;
+  avgVisibleGroundUncoveredCount: number;
+  maxVisibleGroundUncoveredCount: number;
+  avgVisibleGroundResidentNotReadyCount: number;
+  maxVisibleGroundResidentNotReadyCount: number;
+  framesWithVisibleGroundGaps: number;
+  framesWithSeamGaps: number;
+  framesWithScreenVoidSignals: number;
+  framesWithHoleSignals: number;
+  maxScreenVoidRatio: number;
+  maxPendingChunks: number;
+  maxDirtyResidentChunks: number;
+  settleFramesUntilComplete: number | null;
+}
+
+export interface RouteExperienceBenchmark {
+  seed: number;
+  radiusChunks: number;
+  captureStrideFrames: number;
+  seamProbeStrideFrames: number;
+  durationSeconds: number;
+  settleSeconds: number;
+  totalDistanceMeters: number;
+  sampleHz: number;
+  speedMetersPerSecond: number;
+  samples: RouteExperienceFrameSample[];
+  summary: RouteExperienceBenchmarkSummary;
+}
+
 export class GameController {
   readonly canvas: HTMLCanvasElement;
   readonly generator = new ProceduralWorldGenerator(1337);
@@ -547,6 +706,74 @@ export class GameController {
 
   probeNearFarSeamGaps(): NearFarSeamProbe {
     return this.farField.probeMaskedSeamGaps(this.getRenderReadyFarFieldMask());
+  }
+
+  probeVisibleGroundCoverage(
+    sampleForwardMeters = 16,
+    sampleLateralMeters = 6,
+    sampleStepMeters = 0.8,
+  ): VisibleGroundCoverageProbe {
+    const normalizedForward = Math.max(1, sampleForwardMeters);
+    const normalizedLateral = Math.max(1, sampleLateralMeters);
+    const normalizedStep = Math.max(0.1, sampleStepMeters);
+    const renderReadyMask = this.getRenderReadyFarFieldMask();
+    const forwardAxis = [Math.cos(this.camera.yaw), Math.sin(this.camera.yaw)] as const;
+    const rightAxis = [-forwardAxis[1], forwardAxis[0]] as const;
+    const forwardWorldUnits = metersToWorldUnits(normalizedForward);
+    const lateralWorldUnits = metersToWorldUnits(normalizedLateral);
+    const stepWorldUnits = metersToWorldUnits(normalizedStep);
+    const uncoveredSamples: VisibleGroundCoverageIssueSample[] = [];
+    let sampleCount = 0;
+    let renderReadyCount = 0;
+    let farOnlyCount = 0;
+    let uncoveredCount = 0;
+    let residentNotReadyCount = 0;
+
+    for (let forward = stepWorldUnits; forward <= forwardWorldUnits; forward += stepWorldUnits) {
+      for (let lateral = -lateralWorldUnits; lateral <= lateralWorldUnits; lateral += stepWorldUnits) {
+        const worldX = this.player.feetPosition[0] + forwardAxis[0] * forward + rightAxis[0] * lateral;
+        const worldZ = this.player.feetPosition[2] + forwardAxis[1] * forward + rightAxis[1] * lateral;
+        const chunkX = Math.floor(worldX / this.world.chunkSize);
+        const chunkZ = Math.floor(worldZ / this.world.chunkSize);
+        const resident = this.world.hasResidentColumn(chunkX, chunkZ);
+        const renderReady = renderReadyMask.excludesCell(worldX, worldX + 1, worldZ, worldZ + 1);
+        const farCovered = this.farField.getCoverageAt(worldX, worldZ, renderReadyMask).length > 0;
+        sampleCount += 1;
+        if (renderReady) {
+          renderReadyCount += 1;
+        } else if (farCovered) {
+          farOnlyCount += 1;
+        } else {
+          uncoveredCount += 1;
+          pushVisibleGroundIssueSample(uncoveredSamples, {
+            worldX,
+            worldZ,
+            forwardMeters: worldUnitsToMeters(forward),
+            lateralMeters: worldUnitsToMeters(lateral),
+            resident,
+            renderReady,
+            farCovered,
+          });
+        }
+        if (resident && !renderReady) {
+          residentNotReadyCount += 1;
+        }
+      }
+    }
+
+    return {
+      center: [...this.player.feetPosition],
+      yawRadians: this.camera.yaw,
+      sampleForwardMeters: normalizedForward,
+      sampleLateralMeters: normalizedLateral,
+      sampleStepMeters: normalizedStep,
+      sampleCount,
+      renderReadyCount,
+      farOnlyCount,
+      uncoveredCount,
+      residentNotReadyCount,
+      uncoveredSamples,
+    };
   }
 
   probeLodCoverage(sampleRadiusMeters = 48, sampleStepMeters = 0.8): LodCoverageProbe {
@@ -918,6 +1145,150 @@ export class GameController {
     }
   }
 
+  async benchmarkRouteExperience(
+    options: RouteExperienceBenchmarkOptions = {},
+  ): Promise<RouteExperienceBenchmark> {
+    const durationSeconds = Math.max(1, options.durationSeconds ?? 10);
+    const settleSeconds = Math.max(1, options.settleSeconds ?? 4);
+    const sampleHz = Math.max(1, Math.floor(options.sampleHz ?? 60));
+    const speedMetersPerSecond = Math.max(0.1, options.speedMetersPerSecond ?? 4.6);
+    const seamProbeStrideFrames = clampPositiveInt(
+      options.seamProbeStrideFrames ?? Math.max(1, Math.round(sampleHz / 4)),
+      Math.max(1, Math.round(sampleHz / 4)),
+    );
+    const captureStrideFrames = clampPositiveInt(
+      options.captureStrideFrames ?? Math.max(1, Math.round(sampleHz / 2)),
+      Math.max(1, Math.round(sampleHz / 2)),
+    );
+    const captureWidth = clampPositiveInt(options.captureWidth ?? 128, 128);
+    const captureHeight = clampPositiveInt(options.captureHeight ?? 72, 72);
+    const spawnFeet = this.world.getSpawnPosition();
+    const routePlan = buildDefaultRouteBenchmarkPlan(
+      spawnFeet,
+      (worldX, worldZ) => this.generator.sampleColumn(worldX, worldZ).surfaceY + 1,
+      {
+        durationSeconds,
+        sampleHz,
+        speedMetersPerSecond,
+      },
+    );
+    const savedPlayer = {
+      feetPosition: [...this.player.feetPosition] as Vec3,
+      velocity: [...this.player.velocity] as Vec3,
+      grounded: this.player.grounded,
+    };
+    const savedCamera = {
+      position: [...this.camera.position] as Vec3,
+      yaw: this.camera.yaw,
+      pitch: this.camera.pitch,
+      fovY: this.camera.fovY,
+      near: this.camera.near,
+      far: this.camera.far,
+    };
+    const savedStatus = this.status;
+    const savedStreamAnchor = this.streamAnchor
+      ? { chunkX: this.streamAnchor.chunkX, chunkZ: this.streamAnchor.chunkZ }
+      : null;
+
+    this.stop();
+    try {
+      const initialTarget = routePlan.frames[0] ?? {
+        frame: 1,
+        phase: "move" as const,
+        simTimeSeconds: 0,
+        distanceMeters: 0,
+        feetPosition: spawnFeet,
+        yaw: this.camera.yaw,
+        pitch: this.camera.pitch,
+        segmentIndex: 0,
+      };
+      teleportPlayerToFeetPosition(this.player, initialTarget.feetPosition);
+      this.player.grounded = true;
+      this.camera.yaw = initialTarget.yaw;
+      this.camera.pitch = initialTarget.pitch;
+      this.syncCameraToPlayer();
+      this.syncWorldAroundPlayer(true);
+      this.renderCurrentFrame();
+      await this.renderer?.waitForGpuIdle();
+
+      const samples: RouteExperienceFrameSample[] = [];
+      for (const target of routePlan.frames) {
+        samples.push(await this.runRouteExperienceFrame(
+          target,
+          seamProbeStrideFrames,
+          captureStrideFrames,
+          captureWidth,
+          captureHeight,
+        ));
+      }
+
+      const finalTarget = routePlan.frames[routePlan.frames.length - 1] ?? initialTarget;
+      const maxSettleFrames = Math.max(1, Math.round(settleSeconds * sampleHz));
+      for (let settleFrame = 1; settleFrame <= maxSettleFrames; settleFrame += 1) {
+        const sample = await this.runRouteExperienceFrame(
+          {
+            ...finalTarget,
+            frame: routePlan.frames.length + settleFrame,
+            phase: "settle",
+            simTimeSeconds: routePlan.durationSeconds + settleFrame / sampleHz,
+            distanceMeters: routePlan.totalDistanceMeters,
+          },
+          seamProbeStrideFrames,
+          captureStrideFrames,
+          captureWidth,
+          captureHeight,
+        );
+        samples.push(sample);
+        if (
+          sample.complete
+          && sample.pendingChunks === 0
+          && sample.dirtyResidentChunks === 0
+          && sample.farFieldPendingBands === 0
+          && sample.visibleGroundUncoveredCount === 0
+        ) {
+          break;
+        }
+      }
+
+      return {
+        seed: this.generator.seed,
+        radiusChunks: this.world.horizontalRadiusChunks,
+        captureStrideFrames,
+        seamProbeStrideFrames,
+        durationSeconds: routePlan.durationSeconds,
+        settleSeconds,
+        totalDistanceMeters: routePlan.totalDistanceMeters,
+        sampleHz: routePlan.sampleHz,
+        speedMetersPerSecond: routePlan.speedMetersPerSecond,
+        samples,
+        summary: summarizeRouteExperienceBenchmark(samples, routePlan),
+      };
+    } finally {
+      this.player.feetPosition = savedPlayer.feetPosition;
+      this.player.velocity = savedPlayer.velocity;
+      this.player.grounded = savedPlayer.grounded;
+      this.camera = {
+        position: savedCamera.position,
+        yaw: savedCamera.yaw,
+        pitch: savedCamera.pitch,
+        fovY: savedCamera.fovY,
+        near: savedCamera.near,
+        far: savedCamera.far,
+      };
+      this.status = savedStatus;
+      if (savedStreamAnchor) {
+        this.syncWorldAroundAnchor(savedStreamAnchor, true);
+      } else {
+        this.streamAnchor = null;
+        this.syncWorldAroundPlayer(true);
+      }
+      this.renderCurrentFrame();
+      await this.renderer?.waitForGpuIdle();
+      this.pushHud(true);
+      this.start();
+    }
+  }
+
   private loadBootstrapWorld(): void {
     const spawn = this.world.getSpawnPosition();
     this.player = createPlayerState(spawn, { grounded: true });
@@ -1134,6 +1505,127 @@ export class GameController {
       frameStats,
       frameCpuMs,
     };
+  }
+
+  private async runRouteExperienceFrame(
+    target: Pick<RouteBenchmarkFrameTarget, "frame" | "simTimeSeconds" | "distanceMeters" | "feetPosition" | "yaw" | "pitch">
+      & { phase: "move" | "settle" },
+    seamProbeStrideFrames: number,
+    captureStrideFrames: number,
+    captureWidth: number,
+    captureHeight: number,
+  ): Promise<RouteExperienceFrameSample> {
+    const gameplayStartedAt = performance.now();
+    const movementStartedAt = performance.now();
+    teleportPlayerToFeetPosition(this.player, target.feetPosition);
+    this.player.grounded = true;
+    this.camera.yaw = target.yaw;
+    this.camera.pitch = target.pitch;
+    this.syncCameraToPlayer();
+    const movementMs = performance.now() - movementStartedAt;
+    const residency = this.syncWorldAroundPlayer(false);
+    const render = this.renderCurrentFrame();
+    const gameplayFrameMs = performance.now() - gameplayStartedAt;
+    const dirtyResidentChunks = this.world.countDirtyResidentChunks();
+    const frameProbe = render ?? {
+      frameStats: zeroRenderStats(),
+      frameCpuMs: 0,
+    };
+    const diagnosticsStartedAt = performance.now();
+    const detailCoverage = this.probeRenderReadyCoverage();
+    const visibleGround = this.probeVisibleGroundCoverage();
+    const seamProbe = target.frame % seamProbeStrideFrames === 0 || visibleGround.uncoveredCount > 0
+      ? this.probeNearFarSeamGaps()
+      : null;
+    let screenVoid: BottomCenterVoidProbe | null = null;
+    let captureDiagnosticsMs = 0;
+    if (target.frame % captureStrideFrames === 0 || visibleGround.uncoveredCount > 0) {
+      const captureStartedAt = performance.now();
+      screenVoid = await this.captureBottomCenterVoidProbe(captureWidth, captureHeight);
+      captureDiagnosticsMs = performance.now() - captureStartedAt;
+    }
+    const diagnosticsMs = performance.now() - diagnosticsStartedAt;
+    const renderOtherMs = Math.max(
+      0,
+      frameProbe.frameCpuMs
+        - frameProbe.frameStats.syncResourcesMs
+        - frameProbe.frameStats.uploadMs
+        - frameProbe.frameStats.encodeMs,
+    );
+    const accountedFrameMs = movementMs
+      + residency.elapsedMs
+      + this.lastMeshBuildSummary.elapsedMs
+      + this.lastFarFieldSummary.elapsedMs
+      + frameProbe.frameCpuMs;
+    const unmeasuredFrameMs = Math.max(0, gameplayFrameMs - accountedFrameMs);
+    const suspiciousHole = visibleGround.uncoveredCount > 0
+      || (seamProbe?.gapCount ?? 0) > 0
+      || (screenVoid?.suspicious ?? false);
+
+    return {
+      frame: target.frame,
+      phase: target.phase,
+      simTimeSeconds: target.simTimeSeconds,
+      routeDistanceMeters: target.distanceMeters,
+      feetPosition: [...this.player.feetPosition],
+      yaw: this.camera.yaw,
+      pitch: this.camera.pitch,
+      changed: residency.changed,
+      complete: residency.complete,
+      pendingChunks: residency.pendingChunks,
+      dirtyResidentChunks,
+      generatedChunks: residency.generatedChunks,
+      evictedChunks: residency.evictedChunks,
+      movementMs,
+      streamMs: residency.elapsedMs,
+      meshMs: this.lastMeshBuildSummary.elapsedMs,
+      meshCount: this.lastMeshBuildSummary.meshCount,
+      farFieldMs: this.lastFarFieldSummary.elapsedMs,
+      farFieldBuiltBands: this.lastFarFieldSummary.builtBands,
+      farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
+      gameplayFrameMs,
+      accountedFrameMs,
+      unmeasuredFrameMs,
+      diagnosticsMs,
+      captureDiagnosticsMs,
+      renderCpuMs: frameProbe.frameCpuMs,
+      renderSyncMs: frameProbe.frameStats.syncResourcesMs,
+      renderUploadMs: frameProbe.frameStats.uploadMs,
+      renderEncodeMs: frameProbe.frameStats.encodeMs,
+      renderOtherMs,
+      uploadChunks: frameProbe.frameStats.uploadChunks,
+      uploadBytes: frameProbe.frameStats.uploadBytes,
+      drawCalls: frameProbe.frameStats.drawCalls,
+      triangles: frameProbe.frameStats.triangles,
+      residentNearSamples: detailCoverage.residentSampleCount,
+      renderReadyNearSamples: detailCoverage.renderReadySampleCount,
+      residentNotReadyNearSamples: detailCoverage.residentNotReadyCount,
+      visibleGroundSampleCount: visibleGround.sampleCount,
+      visibleGroundUncoveredCount: visibleGround.uncoveredCount,
+      visibleGroundResidentNotReadyCount: visibleGround.residentNotReadyCount,
+      visibleGroundFarOnlyCount: visibleGround.farOnlyCount,
+      seamGapCount: seamProbe?.gapCount ?? 0,
+      maxSeamGapMeters: seamProbe?.maxGapDepthMeters ?? 0,
+      screenVoidRatio: screenVoid?.clearRatio ?? null,
+      screenVoidMaxRunRatio: screenVoid?.maxClearRunRatio ?? null,
+      screenVoidSuspicious: screenVoid?.suspicious ?? false,
+      suspiciousHole,
+    };
+  }
+
+  private async captureBottomCenterVoidProbe(width: number, height: number): Promise<BottomCenterVoidProbe | null> {
+    if (!this.renderer) {
+      return null;
+    }
+    const cameraMatrices = buildFirstPersonCameraMatrices(this.camera, width / height);
+    const image = await this.renderer.captureImage(
+      this.world,
+      cameraMatrices,
+      width,
+      height,
+      this.farField.getRenderables(),
+    );
+    return analyzeBottomCenterVoid(image);
   }
 
   private async renderProbeFrame(): Promise<GameRenderProbe> {
@@ -1412,6 +1904,102 @@ function summarizeIncrementalCrossing(samples: readonly IncrementalCrossingSampl
   };
 }
 
+function summarizeRouteExperienceBenchmark(
+  samples: readonly RouteExperienceFrameSample[],
+  plan: {
+    totalDistanceMeters: number;
+    sampleHz: number;
+    speedMetersPerSecond: number;
+  },
+): RouteExperienceBenchmarkSummary {
+  const accounting = summarizeRouteFrameAccounting(samples.map((sample) => ({
+    gameplayFrameMs: sample.gameplayFrameMs,
+    movementMs: sample.movementMs,
+    streamMs: sample.streamMs,
+    meshMs: sample.meshMs,
+    farFieldMs: sample.farFieldMs,
+    renderCpuMs: sample.renderCpuMs,
+  })));
+  const streamSamples = samples.map((sample) => sample.streamMs);
+  const meshSamples = samples.map((sample) => sample.meshMs);
+  const farFieldSamples = samples.map((sample) => sample.farFieldMs);
+  const renderCpuSamples = samples.map((sample) => sample.renderCpuMs);
+  const renderOtherSamples = samples.map((sample) => sample.renderOtherMs);
+  const residentNotReadySamples = samples.map((sample) => sample.residentNotReadyNearSamples);
+  const visibleGroundUncoveredSamples = samples.map((sample) => sample.visibleGroundUncoveredCount);
+  const visibleGroundResidentNotReadySamples = samples.map((sample) => sample.visibleGroundResidentNotReadyCount);
+  const diagnosticsSamples = samples.map((sample) => sample.diagnosticsMs);
+  const captureDiagnosticsSamples = samples.map((sample) => sample.captureDiagnosticsMs);
+  const settleCompletion = samples.find((sample) =>
+    sample.phase === "settle"
+    && sample.complete
+    && sample.pendingChunks === 0
+    && sample.dirtyResidentChunks === 0
+    && sample.farFieldPendingBands === 0
+    && sample.visibleGroundUncoveredCount === 0);
+
+  return {
+    sampleCount: samples.length,
+    moveFrameCount: samples.filter((sample) => sample.phase === "move").length,
+    settleFrameCount: samples.filter((sample) => sample.phase === "settle").length,
+    incompleteFrameCount: samples.filter((sample) =>
+      !sample.complete
+      || sample.pendingChunks > 0
+      || sample.dirtyResidentChunks > 0
+      || sample.farFieldPendingBands > 0).length,
+    totalDistanceMeters: plan.totalDistanceMeters,
+    sampleHz: plan.sampleHz,
+    speedMetersPerSecond: plan.speedMetersPerSecond,
+    totalGameplayFrameMs: accounting.totalGameplayFrameMs,
+    totalAccountedFrameMs: accounting.totalAccountedMs,
+    totalUnmeasuredFrameMs: accounting.totalUnmeasuredMs,
+    unmeasuredFrameRatio: accounting.totalGameplayFrameMs === 0
+      ? 0
+      : accounting.totalUnmeasuredMs / accounting.totalGameplayFrameMs,
+    totalDiagnosticsMs: sumNumbers(diagnosticsSamples),
+    totalCaptureDiagnosticsMs: sumNumbers(captureDiagnosticsSamples),
+    avgGameplayFrameMs: accounting.avgGameplayFrameMs,
+    p95GameplayFrameMs: accounting.p95GameplayFrameMs,
+    maxGameplayFrameMs: accounting.maxGameplayFrameMs,
+    avgMeasuredWorkMs: accounting.avgMeasuredWorkMs,
+    p95MeasuredWorkMs: accounting.p95MeasuredWorkMs,
+    maxMeasuredWorkMs: accounting.maxMeasuredWorkMs,
+    avgUnmeasuredFrameMs: accounting.avgUnmeasuredMs,
+    p95UnmeasuredFrameMs: accounting.p95UnmeasuredMs,
+    maxUnmeasuredFrameMs: accounting.maxUnmeasuredMs,
+    avgStreamMs: average(streamSamples),
+    p95StreamMs: percentile(streamSamples, 0.95),
+    maxStreamMs: maxValue(streamSamples),
+    avgMeshMs: average(meshSamples),
+    p95MeshMs: percentile(meshSamples, 0.95),
+    maxMeshMs: maxValue(meshSamples),
+    avgFarFieldMs: average(farFieldSamples),
+    p95FarFieldMs: percentile(farFieldSamples, 0.95),
+    maxFarFieldMs: maxValue(farFieldSamples),
+    avgRenderCpuMs: average(renderCpuSamples),
+    p95RenderCpuMs: percentile(renderCpuSamples, 0.95),
+    maxRenderCpuMs: maxValue(renderCpuSamples),
+    avgRenderOtherMs: average(renderOtherSamples),
+    maxRenderOtherMs: maxValue(renderOtherSamples),
+    avgResidentNotReadyNearSamples: average(residentNotReadySamples),
+    maxResidentNotReadyNearSamples: maxValue(residentNotReadySamples),
+    avgVisibleGroundUncoveredCount: average(visibleGroundUncoveredSamples),
+    maxVisibleGroundUncoveredCount: maxValue(visibleGroundUncoveredSamples),
+    avgVisibleGroundResidentNotReadyCount: average(visibleGroundResidentNotReadySamples),
+    maxVisibleGroundResidentNotReadyCount: maxValue(visibleGroundResidentNotReadySamples),
+    framesWithVisibleGroundGaps: samples.filter((sample) => sample.visibleGroundUncoveredCount > 0).length,
+    framesWithSeamGaps: samples.filter((sample) => sample.seamGapCount > 0).length,
+    framesWithScreenVoidSignals: samples.filter((sample) => sample.screenVoidSuspicious).length,
+    framesWithHoleSignals: samples.filter((sample) => sample.suspiciousHole).length,
+    maxScreenVoidRatio: maxValue(samples.map((sample) => sample.screenVoidRatio ?? 0)),
+    maxPendingChunks: maxValue(samples.map((sample) => sample.pendingChunks)),
+    maxDirtyResidentChunks: maxValue(samples.map((sample) => sample.dirtyResidentChunks)),
+    settleFramesUntilComplete: settleCompletion
+      ? samples.filter((sample) => sample.phase === "settle" && sample.frame <= settleCompletion.frame).length
+      : null,
+  };
+}
+
 function zeroResidencyPhaseMetrics(): ResidencyUpdateSummary["phaseMs"] {
   return {
     surfaceSampleMs: 0,
@@ -1438,4 +2026,22 @@ function isMovementKey(code: string): boolean {
 function clampPositiveInt(value: number, fallback: number): number {
   const normalized = Math.floor(value);
   return Number.isFinite(normalized) && normalized > 0 ? normalized : fallback;
+}
+
+function pushVisibleGroundIssueSample(
+  target: VisibleGroundCoverageIssueSample[],
+  sample: VisibleGroundCoverageIssueSample,
+): void {
+  if (target.length >= 8) {
+    return;
+  }
+  target.push(sample);
+}
+
+function sumNumbers(values: readonly number[]): number {
+  let total = 0;
+  for (const value of values) {
+    total += value;
+  }
+  return total;
 }

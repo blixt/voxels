@@ -1584,3 +1584,68 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - The masked seam gap itself is fixed by the stronger boundary wall generation.
 - The remaining user-visible failure is sustained movement backlog: the render-ready handoff can still lag behind the player badly enough to feel late under continuous movement.
+
+### Deterministic route benchmark and hole diagnostics
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- fresh Chrome 146 on `http://localhost:3000/`:
+  - `window.__VOXELS_GAME__.benchmarkRouteExperience({ durationSeconds: 10, settleSeconds: 4, sampleHz: 60, speedMetersPerSecond: 4.6, seamProbeStrideFrames: 15, captureStrideFrames: 30, captureWidth: 96, captureHeight: 54 })`
+
+#### Automated checks
+
+- `tests/game-route-benchmark.test.ts` now covers:
+  - deterministic route generation that respects the requested per-frame travel budget
+  - bottom-center void detection behavior on synthetic images
+  - explicit accounted-vs-unmeasured frame totals
+- `mise run test`: passing
+- `mise run build`: passing
+
+#### Browser route benchmark
+
+- Fresh Chrome 146 route benchmark summary reported:
+  - `sampleCount = 652`
+  - `moveFrameCount = 600`
+  - `settleFrameCount = 52`
+  - `totalDistanceMeters = 46.0`
+  - `speedMetersPerSecond = 4.6`
+  - `totalGameplayFrameMs = 6174.8`
+  - `totalAccountedFrameMs = 6103.1`
+  - `totalUnmeasuredFrameMs = 71.7`
+  - `unmeasuredFrameRatio = 0.0116`
+  - `avgGameplayFrameMs = 9.47`
+  - `p95GameplayFrameMs = 17.6`
+  - `maxGameplayFrameMs = 415.0`
+  - `avgStreamMs = 1.55`
+  - `avgMeshMs = 4.24`
+  - `avgFarFieldMs = 3.30`
+  - `maxFarFieldMs = 397.5`
+  - `framesWithVisibleGroundGaps = 64`
+  - `framesWithHoleSignals = 64`
+  - `framesWithSeamGaps = 0`
+  - `maxVisibleGroundUncoveredCount = 24`
+  - `maxPendingChunks = 134`
+  - `maxDirtyResidentChunks = 267`
+  - `settleFramesUntilComplete = 52`
+
+#### Browser worst-case samples
+
+- The new benchmark now makes the dominant hitch source concrete instead of anecdotal:
+  - worst gameplay frames were dominated by far-field spikes, not by render CPU
+  - example movement frames:
+    - frame `253`: `413.9 ms` gameplay, `8.6 ms` stream, `7.1 ms` mesh, `397.5 ms` far field
+    - frame `592`: `415.0 ms` gameplay, `8.7 ms` stream, `8.0 ms` mesh, `397.1 ms` far field
+- The hole diagnostics also expose a separate failure mode during ordinary movement:
+  - frames `83-92` showed `4-11` visible-ground uncovered samples with `pendingChunks` still between `62` and `134`
+  - those frames had `residentNotReadyNearSamples = 0`, which means the benchmark is now catching a broader forward-ground coverage failure than the older near-radius probe alone
+
+#### Residual
+
+- The benchmark harness itself now has good enough accounting to trust:
+  - nearly all gameplay-frame CPU time is explicitly attributed
+  - hole diagnostics are deterministic and route-based instead of eyeballing the screen
+- The next optimization target is clearer:
+  - large far-field rebuild spikes are still catastrophic
+  - visible-ground holes still occur during realistic movement even when the old near-radius probe stays clean
