@@ -987,3 +987,35 @@
   - it does not yet add rivers, local lakes, flowing water, underwater fog, or shoreline side volumes
 - Main lesson from this slice:
   - once water got its own material class, both collision and rendering became simpler than trying to special-case opaque voxels everywhere
+
+### Landmark shape and underwater placement cleanup
+
+- Started this slice from a broad fixed-seed probe instead of a browser-only pass:
+  - underwater columns were still exposing grassy surface materials in large numbers
+  - tree/rock complaints lined up with actual generator issues, not just subjective appearance
+- Kept the underwater surface-material fix:
+  - when a column has standing water above the surface, the exposed top layer now uses the subsurface material pair instead of grass-like topsoil
+- Also tightened landmark placement rules:
+  - dry vegetation families no longer generate on submerged surfaces
+  - `reed_cluster` remains the explicit shallow-water exception
+- Rejected an unnecessary detour:
+  - I had briefly started widening landmark placement footprints to chase clipped canopies
+  - Raman's review plus the generator probe showed that was mostly the wrong diagnosis for the current complaints
+  - I removed that speculative footprint expansion instead of carrying extra complexity forward
+- The real tree issue was mostly silhouette math:
+  - several tree families still used nearly fixed `1`-voxel trunks, which reads as "pole in the ground" at `10 cm` voxels
+  - `fir` / `tall_fir` foliage started too close to the ground and tapered too aggressively
+  - `palm` crowns were too flat and too small relative to trunk height
+- The rock issue was also real:
+  - `boulder` had a top-cap rule that could flare wider than the layer below it, creating a mushroom-lip profile
+- Kept the simpler, direct fixes:
+  - tree trunk width now scales modestly with feature size
+  - `fir`, `tall_fir`, and `cypress` now reserve more visible trunk before crown volume begins
+  - palm crowns now have broader fronds/crown spread instead of only a tiny flat cap
+  - boulders now use a rounded body profile and the cap can no longer exceed the body width below it
+- Used `docs/20260311-biome-tech.md` as a guardrail for the approach:
+  - keep generation deterministic
+  - keep structure rules compact and field-driven
+  - add verification seams before trusting visual judgment
+- Main lesson from this slice:
+  - the weird-object bug was mostly in the parametric shape formulas, not in world streaming or placement boundaries

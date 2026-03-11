@@ -11,6 +11,87 @@ import {
   PROCEDURAL_WORLD_MAX_Y,
 } from "../src/engine/procedural-generator.ts";
 
+const UNDERWATER_ORGANIC_SURFACE_MATERIALS = new Set<number>([
+  "#6A5",
+  "#7B6",
+  "#8B6",
+  "#9B6",
+  "#6B7",
+  "#7C8",
+  "#7A8",
+  "#486",
+  "#5A8",
+  "#6A8",
+].map((code) => hexColorToMaterial(code)));
+
+function findRepresentativeLandmarkRoot(
+  generator: ProceduralWorldGenerator,
+  landmarkId: string,
+): { x: number; z: number; probe: ReturnType<ProceduralWorldGenerator["sampleBiomeProbe"]> } | null {
+  for (let coarseZ = -8192; coarseZ <= 8192; coarseZ += 32) {
+    for (let coarseX = -8192; coarseX <= 8192; coarseX += 32) {
+      const coarseProbe = generator.sampleBiomeProbe(coarseX, coarseZ);
+      if (coarseProbe.landmarkId !== landmarkId) {
+        continue;
+      }
+      for (let z = coarseZ - 24; z <= coarseZ + 24; z += 1) {
+        for (let x = coarseX - 24; x <= coarseX + 24; x += 1) {
+          const probe = generator.sampleBiomeProbe(x, z);
+          if (probe.landmarkId !== landmarkId) {
+            continue;
+          }
+          if (generator.sampleMaterial(x, probe.surfaceY + 1, z) !== 0) {
+            return { x, z, probe };
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function measureMaxCrossSection(
+  generator: ProceduralWorldGenerator,
+  x: number,
+  z: number,
+  yStart: number,
+  yEnd: number,
+  radius: number,
+): {
+  maxCount: number;
+  maxWidthX: number;
+  maxWidthZ: number;
+} {
+  let maxCount = 0;
+  let maxWidthX = 0;
+  let maxWidthZ = 0;
+  for (let y = yStart; y <= yEnd; y += 1) {
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    let count = 0;
+    for (let dz = -radius; dz <= radius; dz += 1) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        if (generator.sampleMaterial(x + dx, y, z + dz) === 0) {
+          continue;
+        }
+        count += 1;
+        minX = Math.min(minX, dx);
+        maxX = Math.max(maxX, dx);
+        minZ = Math.min(minZ, dz);
+        maxZ = Math.max(maxZ, dz);
+      }
+    }
+    if (count > maxCount) {
+      maxCount = count;
+      maxWidthX = count === 0 ? 0 : maxX - minX + 1;
+      maxWidthZ = count === 0 ? 0 : maxZ - minZ + 1;
+    }
+  }
+  return { maxCount, maxWidthX, maxWidthZ };
+}
+
 test("hex color palette covers all #RGB materials", () => {
   const palette = buildHexColorPalette();
   const material = hexColorToMaterial("#ABC");
@@ -287,6 +368,105 @@ test("surface materials vary within major biomes to support finer ground detail"
   expect(materialsByBiome.get("dunes")?.size ?? 0).toBeGreaterThanOrEqual(3);
   expect(materialsByBiome.get("badlands")?.size ?? 0).toBeGreaterThanOrEqual(4);
   expect(materialsByBiome.get("highland")?.size ?? 0).toBeGreaterThanOrEqual(4);
+});
+
+test("underwater columns no longer expose grassy surface materials", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  let underwaterColumns = 0;
+  let underwaterOrganicSurfaceColumns = 0;
+
+  for (let z = -8192; z <= 8192; z += 16) {
+    for (let x = -8192; x <= 8192; x += 16) {
+      const probe = generator.sampleBiomeProbe(x, z);
+      if ((probe.waterTopY ?? probe.surfaceY) <= probe.surfaceY) {
+        continue;
+      }
+      underwaterColumns += 1;
+      if (UNDERWATER_ORGANIC_SURFACE_MATERIALS.has(probe.surfaceMaterial)) {
+        underwaterOrganicSurfaceColumns += 1;
+      }
+    }
+  }
+
+  expect(underwaterColumns).toBeGreaterThan(1000);
+  expect(underwaterOrganicSurfaceColumns).toBe(0);
+});
+
+test("vegetation landmarks do not root inside standing water", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const vegetationLandmarks = new Set([
+    "oak",
+    "canopy_tree",
+    "birch",
+    "palm",
+    "acacia",
+    "cactus",
+    "dead_snag",
+    "fir",
+    "tall_fir",
+    "frost_shrub",
+    "cypress",
+    "mangrove",
+    "glowcap",
+    "mega_glowcap",
+    "shrub",
+    "flower_patch",
+  ]);
+  let underwaterColumns = 0;
+  let rootedInWater = 0;
+
+  for (let z = -4096; z <= 4096; z += 16) {
+    for (let x = -4096; x <= 4096; x += 16) {
+      const probe = generator.sampleBiomeProbe(x, z);
+      if ((probe.waterTopY ?? probe.surfaceY) <= probe.surfaceY) {
+        continue;
+      }
+      underwaterColumns += 1;
+      if (!probe.landmarkId || !vegetationLandmarks.has(probe.landmarkId)) {
+        continue;
+      }
+      for (let y = probe.surfaceY + 1; y <= Math.min(probe.surfaceY + 3, probe.topY); y += 1) {
+        if (generator.sampleMaterial(x, y, z) !== 0) {
+          rootedInWater += 1;
+          break;
+        }
+      }
+    }
+  }
+
+  expect(underwaterColumns).toBeGreaterThan(500);
+  expect(rootedInWater).toBe(0);
+});
+
+test("representative trees keep broad crowns instead of collapsing into poles", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const shapeExpectations = [
+    { landmarkId: "oak", minWidth: 12, minCount: 80 },
+    { landmarkId: "fir", minWidth: 10, minCount: 80 },
+    { landmarkId: "tall_fir", minWidth: 12, minCount: 120 },
+    { landmarkId: "palm", minWidth: 10, minCount: 80 },
+  ] as const;
+
+  for (const expectation of shapeExpectations) {
+    const root = findRepresentativeLandmarkRoot(generator, expectation.landmarkId);
+    expect(root).not.toBeNull();
+    const crownStart = root!.probe.surfaceY + Math.max(3, Math.floor((root!.probe.topY - root!.probe.surfaceY) * 0.65));
+    const crown = measureMaxCrossSection(generator, root!.x, root!.z, crownStart, root!.probe.topY, 12);
+    expect(Math.max(crown.maxWidthX, crown.maxWidthZ)).toBeGreaterThanOrEqual(expectation.minWidth);
+    expect(crown.maxCount).toBeGreaterThanOrEqual(expectation.minCount);
+  }
+});
+
+test("representative boulders stay rounded instead of flaring at the cap", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const root = findRepresentativeLandmarkRoot(generator, "boulder");
+
+  expect(root).not.toBeNull();
+  const body = measureMaxCrossSection(generator, root!.x, root!.z, root!.probe.surfaceY + 1, root!.probe.topY - 1, 10);
+  const cap = measureMaxCrossSection(generator, root!.x, root!.z, root!.probe.topY, root!.probe.topY, 10);
+  expect(cap.maxCount).toBeGreaterThan(0);
+  expect(cap.maxWidthX).toBeLessThanOrEqual(body.maxWidthX);
+  expect(cap.maxWidthZ).toBeLessThanOrEqual(body.maxWidthZ);
 });
 
 test("below-ground material identity varies across underground biome families", () => {

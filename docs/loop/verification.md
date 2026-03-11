@@ -2606,3 +2606,50 @@ This line of investigation was screened locally and not kept in the runtime yet.
   - rivers/flow
   - underwater fog/tint
   - volumetric shoreline side faces
+
+## 2026-03-11 landmark shape and underwater placement cleanup
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-generator.test.ts`
+- `mise run build`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing
+- Focused tests:
+  - `19 pass`
+  - `0 fail`
+- `mise run build`: passing
+
+#### Fixed-seed probes
+
+- Underwater surface-material scan:
+  - `underwaterTotal = 198303`
+  - `underwaterGrass = 0`
+- Underwater vegetation-root scan:
+  - `underwaterColumns = 14253`
+  - `rootedInWater = 0`
+- Representative landmark crown probe:
+  - `oak`: height `45`, crown width `23 x 23`, crown voxels `440`
+  - `fir`: height `59`, crown width `14 x 14`, crown voxels `149`
+  - `tall_fir`: height `95`, crown width `19 x 18`, crown voxels `271`
+  - `palm`: height `51`, crown width `22 x 11`, crown voxels `126`
+
+#### Added verification coverage
+
+- Underwater columns now have a regression that they do not expose grassy top-surface materials
+- Vegetation landmarks now have a regression that they do not root inside standing water
+- Representative tree families now have a fixed-seed silhouette regression so they cannot collapse back into pole-like crowns silently
+- Representative boulders now have a regression that their cap cannot flare wider than the body below it
+
+#### Residual
+
+- This slice is worth keeping.
+- It fixes:
+  - grassy underwater terrain
+  - dry vegetation rooted in submerged columns
+  - pole-like fir/palm/oak silhouettes
+  - top-heavy boulder caps
+- It does not yet solve:
+  - richer multi-voxel trunk branching
+  - true water-edge root systems for marsh/mangrove-style vegetation

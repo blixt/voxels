@@ -658,7 +658,12 @@ export class ProceduralWorldGenerator {
       surfaceY,
       );
     const waterTopY = this.resolveWaterTopY(biomeId, surfaceY, fields, specialStrength);
-    const landmarkId = this.resolveLandmark(worldX, worldZ, biomeId, waterTopY, fields, out);
+    const submergedSurface = hasStandingWater(surfaceY, waterTopY);
+    if (submergedSurface) {
+      surfaceMaterials.surfacePrimary = surfaceMaterials.subsurfacePrimary;
+      surfaceMaterials.surfaceSecondary = surfaceMaterials.subsurfaceSecondary;
+    }
+    const landmarkId = this.resolveLandmark(worldX, worldZ, biomeId, surfaceY, waterTopY, fields, out);
 
     out.biomeId = biomeId;
     out.hostBiomeId = hostBiomeId;
@@ -907,6 +912,7 @@ export class ProceduralWorldGenerator {
     worldX: number,
     worldZ: number,
     biomeId: BiomeId,
+    surfaceY: number,
     waterTopY: number,
     fields: ColumnFieldSample,
     out: MutableColumnState,
@@ -940,7 +946,7 @@ export class ProceduralWorldGenerator {
       const cellOriginX = cellX * profile.cellSize;
       const cellOriginZ = cellZ * profile.cellSize;
       const margin = profile.radius + 2;
-      const span = profile.cellSize - margin * 2;
+      const span = Math.max(1, profile.cellSize - margin * 2);
       const anchorX = cellOriginX + margin + Math.floor(hashNoise3D(cellX, 2, cellZ, this.featureSeed + profile.radius) * span);
       const anchorZ = cellOriginZ + margin + Math.floor(hashNoise3D(cellX, 3, cellZ, this.featureSeed + profile.radius * 2) * span);
       const deltaX = worldX - anchorX;
@@ -950,7 +956,7 @@ export class ProceduralWorldGenerator {
       }
       out.featureDeltaX = deltaX;
       out.featureDeltaZ = deltaZ;
-      if (configureLandmarkFeature(profile, waterTopY, fields, out)) {
+      if (configureLandmarkFeature(profile, surfaceY, waterTopY, fields, out)) {
         return profile.id;
       }
     }
@@ -1498,12 +1504,17 @@ function selectLandmarkRoster(biomeId: BiomeId): readonly LandmarkProfile[] {
 
 function configureLandmarkFeature(
   profile: LandmarkProfile,
+  surfaceY: number,
   waterTopY: number,
   fields: ColumnFieldSample,
   out: MutableColumnState,
 ): boolean {
+  const submergedSurface = hasStandingWater(surfaceY, waterTopY);
   switch (profile.id) {
     case "oak":
+      if (submergedSurface) {
+        return false;
+      }
       configureTreeFeature(
         out,
         FEATURE_OAK,
@@ -1515,6 +1526,9 @@ function configureLandmarkFeature(
       out.featureExtra = profile.variant;
       return true;
     case "canopy_tree":
+      if (submergedSurface) {
+        return false;
+      }
       configureTreeFeature(
         out,
         FEATURE_OAK,
@@ -1526,6 +1540,9 @@ function configureLandmarkFeature(
       out.featureExtra = profile.variant;
       return true;
     case "birch":
+      if (submergedSurface) {
+        return false;
+      }
       configureTreeFeature(
         out,
         FEATURE_OAK,
@@ -1558,6 +1575,9 @@ function configureLandmarkFeature(
       );
       return true;
     case "shrub":
+      if (submergedSurface) {
+        return false;
+      }
       configureTreeFeature(
         out,
         FEATURE_BUSH,
@@ -1568,6 +1588,9 @@ function configureLandmarkFeature(
       );
       return true;
     case "flower_patch":
+      if (submergedSurface) {
+        return false;
+      }
       configureTreeFeature(
         out,
         FEATURE_BUSH,
@@ -1584,7 +1607,7 @@ function configureLandmarkFeature(
       );
       return true;
     case "palm":
-      if (waterTopY === NO_WATER && fields.channel < 0.68) {
+      if (submergedSurface || (waterTopY === NO_WATER && fields.channel < 0.68)) {
         return false;
       }
       configureTreeFeature(
@@ -1597,6 +1620,9 @@ function configureLandmarkFeature(
       );
       return true;
     case "acacia":
+      if (submergedSurface) {
+        return false;
+      }
       configureTreeFeature(
         out,
         FEATURE_OAK,
@@ -1608,6 +1634,9 @@ function configureLandmarkFeature(
       out.featureExtra = 3;
       return true;
     case "cactus":
+      if (submergedSurface) {
+        return false;
+      }
       configureTreeFeature(
         out,
         FEATURE_CACTUS,
@@ -1619,6 +1648,9 @@ function configureLandmarkFeature(
       out.featureExtra = profile.variant > 1 ? 2 : 1 + Math.floor(fields.surfacePatch * 2);
       return true;
     case "dead_snag":
+      if (submergedSurface) {
+        return false;
+      }
       configureSpireFeature(
         out,
         FEATURE_STANDING_STONE,
@@ -1639,6 +1671,9 @@ function configureLandmarkFeature(
       );
       return true;
     case "fir":
+      if (submergedSurface) {
+        return false;
+      }
       configureTreeFeature(
         out,
         FEATURE_FIR,
@@ -1649,6 +1684,9 @@ function configureLandmarkFeature(
       );
       return true;
     case "tall_fir":
+      if (submergedSurface) {
+        return false;
+      }
       configureTreeFeature(
         out,
         FEATURE_FIR,
@@ -1669,6 +1707,9 @@ function configureLandmarkFeature(
       );
       return true;
     case "frost_shrub":
+      if (submergedSurface) {
+        return false;
+      }
       configureTreeFeature(
         out,
         FEATURE_BUSH,
@@ -1679,6 +1720,9 @@ function configureLandmarkFeature(
       );
       return true;
     case "cypress":
+      if (submergedSurface) {
+        return false;
+      }
       configureTreeFeature(
         out,
         FEATURE_CYPRESS,
@@ -1689,7 +1733,7 @@ function configureLandmarkFeature(
       );
       return true;
     case "mangrove":
-      if (waterTopY === NO_WATER && fields.channel < 0.56) {
+      if (submergedSurface || (waterTopY === NO_WATER && fields.channel < 0.56)) {
         return false;
       }
       configureTreeFeature(
@@ -1737,6 +1781,9 @@ function configureLandmarkFeature(
       out.featureExtra = 1;
       return true;
     case "glowcap":
+      if (submergedSurface) {
+        return false;
+      }
       configureTreeFeature(
         out,
         FEATURE_GLOWCAP,
@@ -1748,6 +1795,9 @@ function configureLandmarkFeature(
       out.featureExtra = 2;
       return true;
     case "mega_glowcap":
+      if (submergedSurface) {
+        return false;
+      }
       configureTreeFeature(
         out,
         FEATURE_GLOWCAP,
@@ -1801,6 +1851,10 @@ function scaledFeatureHeight(base: number, jitterRange: number, signal: number, 
 
 function scaledFeatureRadius(base: number, jitterRange: number, signal: number, scale: number): number {
   return Math.max(1, Math.round((base + signal * jitterRange) * scale));
+}
+
+function hasStandingWater(surfaceY: number, waterTopY: number): boolean {
+  return waterTopY !== NO_WATER && waterTopY > surfaceY;
 }
 
 function sampleMaterialFromScratch(
@@ -1904,7 +1958,7 @@ function sampleFeatureMaterial(
         ? featureHeight - 4
         : featureHeight - Math.max(6, Math.round(featureHeight * (canopyVariant === 1 ? 0.24 : 0.28)));
       if (relativeY <= trunkCutoff) {
-        const trunkRadius = slender ? 0.55 : canopyVariant > 0 ? 0.85 : 0.75;
+        const trunkRadius = slender ? 0.75 : Math.min(1.45, 0.85 + featureRadius * 0.06 + canopyVariant * 0.12);
         return absX <= trunkRadius && absZ <= trunkRadius ? materialPrimary : 0;
       }
       const canopyCenter = canopyVariant === 0 ? featureHeight - 2 : featureHeight - Math.max(2, Math.round(featureHeight * 0.10));
@@ -1914,11 +1968,14 @@ function sampleFeatureMaterial(
         ? materialSecondary
         : 0;
     }
-    case FEATURE_BOULDER:
-      if (relativeY === featureHeight && radial <= Math.max(0.8, featureRadius - 0.6)) {
+    case FEATURE_BOULDER: {
+      const bodyRadius = Math.max(1.1, featureRadius - Math.abs(relativeY - featureHeight * 0.45) * 0.55);
+      const topCapRadius = Math.min(bodyRadius, Math.max(0.9, featureRadius * 0.58));
+      if (relativeY === featureHeight && radial <= topCapRadius) {
         return materialSecondary;
       }
-      return radial <= Math.max(1, featureRadius - relativeY * 0.75) ? materialPrimary : 0;
+      return radial <= bodyRadius ? materialPrimary : 0;
+    }
     case FEATURE_BUSH:
       if (relativeY === 0 && absX <= 0.55 && absZ <= 0.55) {
         return materialPrimary;
@@ -1926,13 +1983,25 @@ function sampleFeatureMaterial(
       return radial <= Math.max(1.1, featureRadius - relativeY * 0.6) ? materialSecondary : 0;
     case FEATURE_STANDING_STONE:
       return radial <= Math.max(1.1, featureRadius - relativeY * 0.2) ? materialPrimary : 0;
-    case FEATURE_PALM:
-      if (relativeY <= featureHeight - 2) {
-        return absX <= 0.75 && absZ <= 0.75 ? materialPrimary : 0;
+    case FEATURE_PALM: {
+      const trunkHeight = Math.max(4, featureHeight - Math.max(4, Math.round(featureHeight * 0.20)));
+      const trunkRadius = Math.min(1.15, 0.75 + featureRadius * 0.05);
+      if (relativeY <= trunkHeight) {
+        return absX <= trunkRadius && absZ <= trunkRadius ? materialPrimary : 0;
       }
-      return relativeY === featureHeight - 1
-        ? absX + absZ <= featureRadius + 0.5 ? materialSecondary : 0
-        : radial <= 1.2 ? materialSecondary : 0;
+      const crownOffset = featureHeight - relativeY;
+      if (crownOffset === 1) {
+        return absX + absZ <= featureRadius + 0.9 || radial <= Math.max(1.8, featureRadius * 0.42)
+          ? materialSecondary
+          : 0;
+      }
+      if (crownOffset === 0) {
+        return radial <= Math.max(1.6, featureRadius * 0.34) ? materialSecondary : 0;
+      }
+      return absX + absZ <= Math.max(1.8, featureRadius * 0.55) && radial <= featureRadius + 0.45
+        ? materialSecondary
+        : 0;
+    }
     case FEATURE_CACTUS: {
       const armY = Math.max(2, featureHeight - 2);
       if (relativeY <= armY) {
@@ -1951,20 +2020,31 @@ function sampleFeatureMaterial(
         return materialSecondary;
       }
       return radial <= Math.max(1.1, featureRadius - relativeY * 0.22) ? materialPrimary : 0;
-    case FEATURE_FIR:
-      if (relativeY <= 2) {
-        return absX <= 0.75 && absZ <= 0.75 ? materialPrimary : 0;
+    case FEATURE_FIR: {
+      const trunkHeight = Math.max(4, Math.round(featureHeight * 0.22));
+      const trunkRadius = Math.min(1.2, 0.7 + featureRadius * 0.05);
+      if (relativeY <= trunkHeight) {
+        return absX <= trunkRadius && absZ <= trunkRadius ? materialPrimary : 0;
       }
-      return radial <= Math.max(1, featureRadius - (relativeY - 2) * 0.45) ? materialSecondary : 0;
+      const crownProgress = (relativeY - trunkHeight) / Math.max(1, featureHeight - trunkHeight);
+      const crownRadius = featureRadius * (1 - crownProgress * 0.82);
+      const lowerSkirt = smoothstep(0, 0.28, 1 - crownProgress) * 0.8;
+      return radial <= Math.max(1.2, crownRadius + lowerSkirt) ? materialSecondary : 0;
+    }
     case FEATURE_ICE_SPIRE:
       return radial <= Math.max(0.8, featureRadius - relativeY * 0.35) ? materialSecondary : 0;
-    case FEATURE_CYPRESS:
-      if (relativeY <= 2) {
-        return absX <= 0.75 && absZ <= 0.75 ? materialPrimary : 0;
+    case FEATURE_CYPRESS: {
+      const trunkHeight = Math.max(3, Math.round(featureHeight * 0.18));
+      const trunkRadius = Math.min(1.1, 0.72 + featureRadius * 0.04);
+      if (relativeY <= trunkHeight) {
+        return absX <= trunkRadius && absZ <= trunkRadius ? materialPrimary : 0;
       }
-      return radial <= Math.max(1, featureRadius - Math.abs(relativeY - featureHeight * 0.6) * 0.25)
+      const crownCenter = featureHeight * 0.62;
+      const crownRadius = featureRadius - Math.abs(relativeY - crownCenter) * 0.18;
+      return radial <= Math.max(1.2, crownRadius)
         ? materialSecondary
         : 0;
+    }
     case FEATURE_REEDS:
       if (relativeY > featureHeight) {
         return 0;
@@ -1988,7 +2068,8 @@ function sampleFeatureMaterial(
       return radial <= Math.max(0.9, featureRadius - relativeY * 0.55) ? materialPrimary : 0;
     case FEATURE_GLOWCAP:
       if (relativeY <= featureHeight - (featureExtra >= 3 ? 5 : 3)) {
-        return absX <= 0.75 && absZ <= 0.75 ? materialPrimary : 0;
+        const stemRadius = Math.min(1.2, 0.75 + featureRadius * 0.04);
+        return absX <= stemRadius && absZ <= stemRadius ? materialPrimary : 0;
       }
       return relativeY <= featureHeight - 1
         ? radial <= Math.max(featureExtra >= 3 ? 3 : 1.5, featureRadius - Math.abs(relativeY - (featureHeight - 2)) * (featureExtra >= 3 ? 0.45 : 0.8))
