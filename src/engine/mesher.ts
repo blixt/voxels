@@ -5,6 +5,14 @@ const FLOAT32_BYTES = 4;
 const VERTEX_STRIDE = 20;
 const NORMAL_SCALE = 127;
 const QUAD_STRIDE = 11;
+const MAX_MESHER_SCRATCH_POOL = 2;
+
+interface MesherScratch {
+  quads: number[];
+  mask: Int32Array;
+}
+
+const mesherScratchPool: MesherScratch[] = [];
 
 export interface MeshBuildSummary {
   meshCount: number;
@@ -55,7 +63,13 @@ export function rebuildDirtyMeshes(
 }
 
 function collectDirtyChunks(world: ResidentChunkWorld, priorityPosition?: Vec3) {
-  const dirtyChunks = [...world.iterateResidentChunks()].filter((chunk) => chunk.meshDirty);
+  const dirtyChunks = [];
+  for (const chunk of world.iterateResidentChunks()) {
+    if (!chunk.meshDirty) {
+      continue;
+    }
+    dirtyChunks.push(chunk);
+  }
   if (!priorityPosition || dirtyChunks.length <= 1) {
     return dirtyChunks;
   }
@@ -139,14 +153,20 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
   }
 
   const chunkData = chunk.data;
-  const quads: number[] = [];
+  const maxMaskLength = Math.max(
+    (solidBounds.max[1] - solidBounds.min[1]) * (solidBounds.max[2] - solidBounds.min[2]),
+    (solidBounds.max[0] - solidBounds.min[0]) * (solidBounds.max[2] - solidBounds.min[2]),
+    (solidBounds.max[0] - solidBounds.min[0]) * (solidBounds.max[1] - solidBounds.min[1]),
+  );
+  const scratch = acquireMesherScratch(maxMaskLength);
+  const quads = scratch.quads;
 
   for (let axis = 0; axis < 3; axis += 1) {
     const u = (axis + 1) % 3;
     const v = (axis + 2) % 3;
     const uSpan = solidBounds.max[u] - solidBounds.min[u];
     const vSpan = solidBounds.max[v] - solidBounds.min[v];
-    const mask = new Int32Array(uSpan * vSpan);
+    const mask = scratch.mask;
     const x = [...solidBounds.min];
     const q = [0, 0, 0];
     q[axis] = 1;
@@ -316,17 +336,19 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
     indexOffset += 6;
   }
 
-  return {
+  const mesh = {
     vertexData,
     vertexCount,
     indexData,
     indexCount,
     triangleCount: quadCount * 2,
     bounds: {
-      min: [minX, minY, minZ],
-      max: [maxX, maxY, maxZ],
+      min: [minX, minY, minZ] as [number, number, number],
+      max: [maxX, maxY, maxZ] as [number, number, number],
     },
   };
+  releaseMesherScratch(scratch);
+  return mesh;
 }
 
 function sampleChunkVoxel(
@@ -437,4 +459,24 @@ function writeVertex(
   view.setInt8(byteOffset + 14, normalZ * NORMAL_SCALE);
   view.setInt8(byteOffset + 15, NORMAL_SCALE);
   view.setUint32(byteOffset + 16, color, true);
+}
+
+function acquireMesherScratch(requiredMaskLength: number): MesherScratch {
+  const scratch = mesherScratchPool.pop() ?? {
+    quads: [],
+    mask: new Int32Array(requiredMaskLength),
+  };
+  scratch.quads.length = 0;
+  if (scratch.mask.length < requiredMaskLength) {
+    scratch.mask = new Int32Array(requiredMaskLength);
+  }
+  return scratch;
+}
+
+function releaseMesherScratch(scratch: MesherScratch): void {
+  scratch.quads.length = 0;
+  if (mesherScratchPool.length >= MAX_MESHER_SCRATCH_POOL) {
+    return;
+  }
+  mesherScratchPool.push(scratch);
 }

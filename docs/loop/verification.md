@@ -2191,3 +2191,70 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This renderer slice was worth keeping.
 - The next trace-driven target is detailed chunk meshing:
   - it is now the clearest CPU and allocation hotspot that will worsen as world detail grows
+
+## 2026-03-11 mesher scratch reuse pass
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/mesher.test.ts tests/procedural-resident-world.test.ts tests/game-route-benchmark.test.ts`
+- `mise run build`
+- fresh Chrome 146 dev page reload on `http://localhost:3024/`
+- `window.__VOXELS_GAME__.benchmarkRouteExperience({ durationSeconds: 5, settleSeconds: 2, captureStrideFrames: 100000, seamProbeStrideFrames: 100000, referenceDiffStrideFrames: 0 }).summary`
+- Chrome trace saved to:
+  - `artifacts/trace-live-walk-dev-mesher-scratch-20260311.json`
+- `mise run analyze-trace -- artifacts/trace-live-walk-dev-mesher-scratch-20260311.json --url-prefix=http://localhost:3024/`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing after the mesher scratch pool changes.
+- Focused tests:
+  - `26 pass`
+  - `0 fail`
+- `mise run build`: passing.
+
+#### Dev route benchmark
+
+- Fresh route benchmark on the reloaded dev build returned:
+  - `avgGameplayFrameMs = 5.51`
+  - `p95GameplayFrameMs = 16.3`
+  - `maxGameplayFrameMs = 74.0`
+  - `avgMeshMs = 2.78`
+  - `p95MeshMs = 6.60`
+  - `maxMeshMs = 8.30`
+  - `framesWithHoleSignals = 0`
+- Compared to the previous dev route benchmark on the renderer-only slice:
+  - `avgGameplayFrameMs` improved from `6.03 -> 5.51`
+  - `avgMeshMs` improved from `3.02 -> 2.78`
+  - `maxMeshMs` improved from `9.10 -> 8.30`
+
+#### Dev live-walk trace
+
+- Held-`W` live-walk trace on `http://localhost:3024/` again moved feet position from `[-191.5, 1428, -191.5]` to `[-112, 1453, -191.5]`.
+- `mise run analyze-trace -- artifacts/trace-live-walk-dev-mesher-scratch-20260311.json --url-prefix=http://localhost:3024/` reported:
+  - top exclusive live-loop CPU:
+    - `valueNoise2D`: `1212.4 ms`
+    - `buildChunkMesh`: `459.8 ms`
+    - `generateChunk`: `284.2 ms`
+    - `getResidentChunk`: `201.1 ms`
+    - `syncMeshSourceResource`: `48.5 ms`
+    - `syncResources`: `42.5 ms`
+  - compared to the previous live trace on the renderer-only slice:
+    - `buildChunkMesh` improved from `470.8 ms -> 459.8 ms`
+    - `syncResources` improved from `52.8 ms -> 42.5 ms`
+    - heap end-state improved from `9.90 MB -> 6.64 MB`
+  - heap and GC:
+    - heap `min 1.31 MB`, `max 19.04 MB`, `start 1.74 MB`, `end 6.64 MB`
+    - biggest rise `+15.31 MB`
+    - biggest drop `-15.85 MB`
+    - `818` minor GCs / `6` major GCs
+  - the biggest heap-rise window still points primarily at meshing and generation:
+    - `buildChunkMesh`: `3.0 ms` exclusive inside the window
+    - `valueNoise2D`: `2.4 ms`
+    - `generateChunk`: `1.8 ms`
+
+#### Residual
+
+- This mesher slice is a real but incremental win, not a step-function rewrite.
+- The next strongest targets are still:
+  - generator noise sampling
+  - chunk meshing math itself
+  - and only then broader workerization or representation changes if these smaller wins stop paying off

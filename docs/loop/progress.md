@@ -754,3 +754,25 @@
   - renderer sync is improved but not “done”
   - detailed chunk meshing is now the next obvious CPU/heap target
   - the live trace’s biggest heap-growth window now lands squarely on `buildChunkMesh()` plus generation, which is exactly where the next pass should go
+
+### Mesher scratch reuse and lower rebuild overhead
+
+- Followed the new trace signal directly instead of broad refactoring:
+  - after the renderer pass, the biggest live heap-growth window had shifted onto `buildChunkMesh()`
+  - the route benchmark was still spending about `3.0 ms` per sampled frame in meshing
+- The next slice stayed deliberately small and low-risk:
+  - `collectDirtyChunks()` now gathers dirty chunks directly instead of spreading the whole resident set and then filtering it
+  - the greedy mesher now reuses its `mask` and `quads` scratch storage across builds instead of reallocating those large temporaries for every chunk
+  - the scratch pool is tiny and bounded so it reduces churn without turning into an unbounded memory cache
+- The measured outcome is good enough to keep:
+  - fresh dev route benchmark improved from about `avgGameplayFrameMs 6.03 -> 5.51`
+  - `avgMeshMs` improved from about `3.02 -> 2.78`
+  - live-walk `buildChunkMesh()` exclusive CPU improved from about `470.8 ms -> 459.8 ms`
+  - live-walk `syncResources()` also improved further from about `52.8 ms -> 42.5 ms`, likely because the mesher slice reduced downstream upload churn slightly as well
+  - live-walk heap end-state dropped from about `9.90 MB -> 6.64 MB`
+- The important qualitative lesson is that we are now getting compound wins from keeping transient allocations down:
+  - first in far-field building
+  - then in the renderer
+  - now in chunk meshing
+- The next large target remains world-generation noise plus chunk meshing math itself:
+  - scratch reuse helped, but `valueNoise2D()`, `generateChunk()`, and `buildChunkMesh()` still dominate the live loop
