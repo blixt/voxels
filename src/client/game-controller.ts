@@ -6,10 +6,10 @@ import {
   type FirstPersonCameraState,
 } from "../engine/first-person-camera.ts";
 import { rebuildDirtyMeshes } from "../engine/mesher.ts";
-import { createDefaultScene } from "../engine/scenes.ts";
+import { ProceduralResidentWorld, type ResidencyUpdateSummary } from "../engine/procedural-resident-world.ts";
+import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
 import { WebGpuVoxelRenderer } from "../engine/renderer.ts";
 import type { Vec3 } from "../engine/types.ts";
-import { VoxelWorld } from "../engine/world.ts";
 
 const BASE_MOVE_SPEED = 30;
 const FAST_MOVE_MULTIPLIER = 3;
@@ -21,12 +21,18 @@ export interface GameHudSnapshot {
   status: string;
   pointerLocked: boolean;
   position: Vec3;
+  playerChunk: [number, number, number];
   yawDegrees: number;
   pitchDegrees: number;
   solidVoxelCount: number;
   chunkCount: number;
   paletteCount: number;
-  buildMs: number;
+  streamMs: number;
+  streamGeneratedChunks: number;
+  streamEvictedChunks: number;
+  streamEmptyChunksSkipped: number;
+  residencyRadiusChunks: number;
+  surfaceY: number;
   meshMs: number;
   drawCalls: number;
   triangles: number;
@@ -35,10 +41,10 @@ export interface GameHudSnapshot {
 
 export class GameController {
   readonly canvas: HTMLCanvasElement;
+  readonly world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337));
+
   renderer: WebGpuVoxelRenderer | null = null;
-  world: VoxelWorld = createDefaultScene().world;
-  camera: FirstPersonCameraState = createFirstPersonCamera([128, 72, 128]);
-  buildMs = 0;
+  camera: FirstPersonCameraState = createFirstPersonCamera([0.5, 1500, 0.5]);
   meshMs = 0;
   drawCalls = 0;
   triangles = 0;
@@ -108,12 +114,22 @@ export class GameController {
       status: this.status,
       pointerLocked: this.pointerLocked,
       position: [...this.camera.position],
+      playerChunk: [
+        Math.floor(this.camera.position[0] / this.world.chunkSize),
+        Math.floor(this.camera.position[1] / this.world.chunkSize),
+        Math.floor(this.camera.position[2] / this.world.chunkSize),
+      ],
       yawDegrees: toDegrees(this.camera.yaw),
       pitchDegrees: toDegrees(this.camera.pitch),
       solidVoxelCount: stats.solidVoxelCount,
       chunkCount: stats.chunkCount,
       paletteCount: stats.paletteCount,
-      buildMs: this.buildMs,
+      streamMs: this.world.lastResidency.elapsedMs,
+      streamGeneratedChunks: this.world.lastResidency.generatedChunks,
+      streamEvictedChunks: this.world.lastResidency.evictedChunks,
+      streamEmptyChunksSkipped: this.world.lastResidency.emptyChunksSkipped,
+      residencyRadiusChunks: this.world.lastResidency.radiusChunks,
+      surfaceY: this.world.lastResidency.surfaceY,
       meshMs: this.meshMs,
       drawCalls: this.drawCalls,
       triangles: this.triangles,
@@ -123,18 +139,27 @@ export class GameController {
 
   teleport(position: Vec3): void {
     this.camera.position = [...position];
+    this.syncWorldAroundPlayer();
     this.pushHud(true);
   }
 
+  setResidencyRadiusChunks(radius: number): void {
+    this.world.setHorizontalRadiusChunks(radius);
+    this.syncWorldAroundPlayer();
+    this.pushHud(true);
+  }
+
+  forceResidencyUpdate(): ResidencyUpdateSummary {
+    this.world.setHorizontalRadiusChunks(this.world.horizontalRadiusChunks);
+    this.syncWorldAroundPlayer();
+    this.pushHud(true);
+    return this.world.lastResidency;
+  }
+
   private loadBootstrapWorld(): void {
-    const startedAt = performance.now();
-    const build = createDefaultScene();
-    this.world = build.world;
-    this.buildMs = performance.now() - startedAt;
-    const meshSummary = rebuildDirtyMeshes(this.world);
-    this.meshMs = meshSummary.elapsedMs;
-    const spawn = findSpawnPoint(this.world);
-    this.camera = createFirstPersonCamera(spawn);
+    const spawn = this.world.getSpawnPosition();
+    this.camera = createFirstPersonCamera(spawn, 0.8, -0.32);
+    this.syncWorldAroundPlayer();
     this.status = "Click once to capture cursor";
     this.pushHud(true);
   }
@@ -214,6 +239,7 @@ export class GameController {
       deltaSeconds,
       speed,
     );
+    this.syncWorldAroundPlayer();
   }
 
   private renderInteractiveFrame(): void {
@@ -234,6 +260,18 @@ export class GameController {
     this.pushHud();
   }
 
+  private syncWorldAroundPlayer(): void {
+    const residency = this.world.updateResidencyAround(this.camera.position);
+    if (!residency.changed) {
+      return;
+    }
+    const meshSummary = rebuildDirtyMeshes(this.world);
+    this.meshMs = meshSummary.elapsedMs;
+    this.status = residency.generatedChunks > 0 || residency.evictedChunks > 0
+      ? `Streamed ${residency.generatedChunks} chunk(s), evicted ${residency.evictedChunks}`
+      : "Residency updated";
+  }
+
   private isPressed(...codes: string[]): boolean {
     return codes.some((code) => this.pressedKeys.has(code));
   }
@@ -246,22 +284,6 @@ export class GameController {
     this.lastHudPushAt = now;
     this.onHudUpdate?.(this.getDebugSnapshot());
   }
-}
-
-function findSpawnPoint(world: VoxelWorld): Vec3 {
-  const x = Math.floor(world.width * 0.5);
-  const z = Math.floor(world.depth * 0.5);
-  const surfaceY = findSurface(world, x, z);
-  return [x + 0.5, surfaceY + 12, z + 0.5];
-}
-
-function findSurface(world: VoxelWorld, x: number, z: number): number {
-  for (let y = world.height - 1; y >= 0; y -= 1) {
-    if (world.getVoxel(x, y, z) !== 0) {
-      return y;
-    }
-  }
-  return 0;
 }
 
 function toDegrees(value: number): number {

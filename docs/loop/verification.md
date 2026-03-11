@@ -257,3 +257,68 @@
 - Y-range guard:
   - `sampleMaterial(..., -1, ...)` returns `0`
   - `sampleMaterial(..., 16384, ...)` returns `0`
+
+### Procedural resident-world game-path verification
+
+#### Commands
+
+- `mise run test`
+- `mise run build`
+- `mise run versions`
+
+#### Automated checks
+
+- `mise run test`: passing after adding `tests/procedural-resident-world.test.ts`.
+- `mise run build`: passing after wiring the game path onto `ProceduralResidentWorld`.
+- `mise run versions`: passing, with all tracked tools still current:
+  - Chrome stable `146.0.7680.72`
+  - Bun `1.3.10`
+  - `@types/bun` `1.3.10`
+  - TypeScript `5.9.3`
+  - `@webgpu/types` `0.1.69`
+  - mise `2026.3.7`
+
+#### Chrome 146 browser checks
+
+- Verified `/` against `http://localhost:3001/` because `http://localhost:3000/` was occupied by another Bun server that still served the old playground shell.
+- `/` now loads as `Voxels Game` and exposes `window.__VOXELS_GAME__`.
+- Browser-side snapshot probe on the procedural resident world:
+  - position `[-191.5, 1661.0, -191.5]`
+  - player chunk `[-6, 51, -6]`
+  - resident chunks `124`
+  - radius `2 chunks`
+  - surface Y `1653`
+  - stream `273.9 ms`
+  - generated `0`
+  - evicted `115`
+  - empty skipped `26`
+  - mesh `69.3 ms`
+  - draw calls `118`
+  - triangles `40,608`
+- Game API residency probe:
+  - `setViewDistance(3)` grows resident chunks `124 -> 239`
+  - the widen step generated `115` chunks in about `1943.0 ms`
+  - `setViewDistance(2)` then shrank resident chunks `239 -> 124`
+  - the shrink step evicted `115` chunks in about `274.4 ms`
+- `/bench?auto=1&scenario=validationBlocks&iterations=1&frames=3` still passes after the game-path change:
+  - build `0.1 ms`
+  - mesh `0.3 ms`
+  - first CPU `0.60 ms`
+  - warm CPU `0.00 ms`
+  - first GPU `0.07 ms`
+  - warm GPU `0.29 ms`
+  - `MAE 1.63`
+  - coverage mismatch `0.00%`
+  - visual `pass`
+  - correctness `pass`
+
+#### Startup/streaming hotspot screen
+
+- Local hotspot ranking from the resident-world path:
+  - `sampleColumn()` `5000` calls: about `5.7 ms`
+  - `generateChunk()` for full terrain chunks: about `14-17 ms` each
+  - initial `updateResidencyAround(spawn)`: about `3683 ms` for `239` generated chunks
+  - `rebuildDirtyMeshes()` over that resident set: about `256 ms`
+- Current conclusion:
+  - startup is generation-dominated first, meshing second
+  - the next work should instrument chunk-generation and residency phases, then remove duplicate column sampling before deeper architectural changes

@@ -82,9 +82,21 @@ Status:
   - fixed `#RGB` material palette (`4096` colors)
   - deterministic per-chunk generator
   - multi-biome column sampling and chunk generation
-- still not wired into the live resident world yet
+- `/` now boots from a procedural resident world instead of from the old finite demo scene
+- resident chunk radius can be changed through the game debug API for repeatable stream churn probes
+- remaining work is now verification and cost control:
+  - add machine-readable generation/stream probes
+  - reduce synchronous startup stream cost
+  - keep the resident-world seam compatible with later edit overlays and persistence
 
-### Slice 4: interaction loop
+### Slice 4: streaming verification and hot-path instrumentation
+
+- Add machine-readable generation and residency probes instead of relying on HUD text or screenshots.
+- Expose resident chunk sets, per-chunk hashes, and stream traces to automation.
+- Instrument chunk generation and residency phases before attempting deeper optimizations.
+- Use the new probe data to decide which startup/streaming optimizations actually survive verification.
+
+### Slice 5: interaction loop
 
 - Break/place interaction from center-screen picking.
 - Inventory with `32` stacks and `1024` voxels per stack.
@@ -92,14 +104,14 @@ Status:
 - Color is the first material identity (`#ABC`, `4096` possible values).
 - Unit tests for inventory rules and deterministic interaction cases.
 
-### Slice 5: persistence boundary
+### Slice 6: persistence boundary
 
 - Define region/chunk serialization suitable for browser cache and future remote sync.
 - Add browser-side persistent cache for generated/edited chunks.
 - Define protocol shapes for chunk snapshots, edit deltas, and player state.
 - Keep the single-player path compatible with eventual server authority.
 
-### Slice 6: multiplayer MVP path
+### Slice 7: multiplayer MVP path
 
 - Move to a remote authoritative world service.
 - Multiple clients can connect and edit the same persistent world.
@@ -116,8 +128,9 @@ Status:
 
 ## Immediate implementation tasks
 
-- Split the world model into world-space chunk coordinates and resident/renderable chunks.
-- Add the first generation/residency interfaces before introducing infinite-world traversal.
-- Add deterministic verification cases for first-person pick rays and movement-related invariants.
+- Add machine-readable generation and residency probes to the game/benchmark automation surfaces.
+- Instrument `generateChunk()` and `updateResidencyAround()` into measurable phases before optimizing them.
+- Cache per-chunk column samples and carry chunk solid bounds out of generation so streamed chunks do less duplicate work.
+- Add deterministic verification cases for resident-set stability, seam consistency, and stream churn.
 - Keep the game debug API growing alongside `/bench` so browser automation does not depend on visual inspection alone.
 - Log each slice in `progress.md` and `verification.md`.

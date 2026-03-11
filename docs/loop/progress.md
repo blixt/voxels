@@ -121,3 +121,22 @@
   - wide biome distribution
   - `Y`-range guards
 - Captured the generator design decisions in `docs/loop/worldgen-notes.md` so the reasoning survives context compaction before the generator is wired into a resident streaming world.
+- Wired `/` onto the first procedural resident-world implementation:
+  - `src/engine/procedural-resident-world.ts` now owns resident chunk loading/eviction around the player
+  - the game controller now boots from procedural spawn selection instead of the old finite bootstrap scene
+  - the game HUD/debug surface now exposes resident chunk counts, stream timings, generated/evicted counts, and view-distance controls
+- Added resident-world regression tests for:
+  - initial chunk residency around spawn
+  - no churn while staying inside the same anchor chunk
+  - eviction/generation after a large teleport
+  - radius-change expansion of the resident window
+- Re-ran browser verification against `http://localhost:3001/` because `:3000` was occupied by another Bun server still serving the old playground shell.
+- Used the first resident-world browser probes to narrow the next optimization search:
+  - widening radius `2 -> 3` grows resident chunks `124 -> 239`
+  - that wider stream generated `115` chunks in about `1943 ms`
+  - shrinking back to radius `2` evicted `115` chunks in about `274 ms`
+- Ranked the main startup/streaming hot spots before changing more code:
+  - per-voxel `sampleColumn()` recomputation inside `generateChunk()`
+  - fully synchronous residency + meshing during bootstrap and movement
+  - duplicate chunk scans when solid bounds are recomputed after generation
+  - neighbor-dirty churn during bulk stream-in

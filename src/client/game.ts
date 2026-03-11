@@ -7,6 +7,8 @@ declare global {
       snapshot(): ReturnType<GameController["getDebugSnapshot"]>;
       requestPointerLock(): Promise<void>;
       teleport(x: number, y: number, z: number): void;
+      setViewDistance(chunks: number): void;
+      forceResidencyUpdate(): ReturnType<GameController["forceResidencyUpdate"]>;
     };
   }
 }
@@ -31,18 +33,26 @@ window.__VOXELS_GAME__ = {
   snapshot: () => controller.getDebugSnapshot(),
   requestPointerLock: () => controller.requestPointerLock(),
   teleport: (x, y, z) => controller.teleport([x, y, z]),
+  setViewDistance: (chunks) => controller.setResidencyRadiusChunks(chunks),
+  forceResidencyUpdate: () => controller.forceResidencyUpdate(),
 };
 
 controller.onHudUpdate = (snapshot) => {
   statusElement.textContent = snapshot.status;
   telemetryElement.innerHTML = [
     metric("Position", formatPosition(snapshot.position)),
+    metric("Player Chunk", snapshot.playerChunk.join(", ")),
     metric("Yaw", `${snapshot.yawDegrees.toFixed(1)}°`),
     metric("Pitch", `${snapshot.pitchDegrees.toFixed(1)}°`),
-    metric("Chunks", snapshot.chunkCount.toLocaleString()),
+    metric("Resident Chunks", snapshot.chunkCount.toLocaleString()),
+    metric("Radius", `${snapshot.residencyRadiusChunks} chunks`),
+    metric("Surface Y", snapshot.surfaceY.toLocaleString()),
     metric("Voxels", snapshot.solidVoxelCount.toLocaleString()),
     metric("Palette", snapshot.paletteCount.toLocaleString()),
-    metric("Build", `${snapshot.buildMs.toFixed(1)} ms`),
+    metric("Stream", `${snapshot.streamMs.toFixed(1)} ms`),
+    metric("Generated", snapshot.streamGeneratedChunks.toLocaleString()),
+    metric("Evicted", snapshot.streamEvictedChunks.toLocaleString()),
+    metric("Empty Skipped", snapshot.streamEmptyChunksSkipped.toLocaleString()),
     metric("Mesh", `${snapshot.meshMs.toFixed(1)} ms`),
     metric("Draw Calls", snapshot.drawCalls.toLocaleString()),
     metric("Triangles", snapshot.triangles.toLocaleString()),

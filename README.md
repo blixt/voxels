@@ -17,6 +17,7 @@ Repo-specific guidance for agent-driven research, implementation, and verificati
 ## Features
 
 - Full-screen `/` game shell with a first-person camera bootstrap
+- Procedural resident-world bootstrap with lazy chunk streaming around the player
 - Sparse chunked voxel storage with live edits
 - CPU greedy meshing for WebGPU rendering
 - Current orthographic isometric renderer baseline and benchmark scenes
@@ -39,6 +40,8 @@ Repo-specific guidance for agent-driven research, implementation, and verificati
 - `window.__VOXELS_GAME__.snapshot()`
 - `window.__VOXELS_GAME__.teleport(x, y, z)`
 - `window.__VOXELS_GAME__.requestPointerLock()`
+- `window.__VOXELS_GAME__.setViewDistance(chunks)`
+- `window.__VOXELS_GAME__.forceResidencyUpdate()`
 
 ## Benchmark automation
 
