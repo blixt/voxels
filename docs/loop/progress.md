@@ -776,3 +776,27 @@
   - now in chunk meshing
 - The next large target remains world-generation noise plus chunk meshing math itself:
   - scratch reuse helped, but `valueNoise2D()`, `generateChunk()`, and `buildChunkMesh()` still dominate the live loop
+
+### Procedural generator hot-path cleanup
+
+- Kept the generator pass evidence-first and deleted a bad idea instead of defending it:
+  - I first tried a direct-mapped `valueNoise2D()` cell cache
+  - the route summary moved slightly, but the live trace grew a brand-new `valueNoiseCellCacheIndex()` hotspot and made the traced `valueNoise2D()` path worse
+  - that cache was therefore reverted rather than layered into the engine as complexity debt
+- The kept noise/math work is the simpler version:
+  - `src/engine/noise.ts` now uses straight-line `Math.imul(...)` hashing, inline interpolation math, and fixed-arity `fbm2D2/3/4/5` helpers
+  - `src/engine/procedural-generator.ts` now uses cached seed fields, reciprocal scales, and direct biome lookup without repeated `find(...)`
+- The larger win came from flattening the chunk-generation column path:
+  - deleted the old per-chunk `ColumnContext[]` plus nested `column` object allocation path
+  - chunk generation now fills a bounded scratch struct-of-arrays with just the scalar state the inner voxel loop actually needs
+  - the inner voxel loop now hoists per-y invariants like `floor(worldY / 3)` and the strata-band base
+  - `sampleColumn()` and `sampleMaterial()` also no longer route through the old nested `buildColumnContext()` shape
+- Verification-wise, the strongest result came from a clean A/B against a detached worktree at `36ba50a` rather than relying on the stale Chrome session:
+  - current code generated `384` chunks in about `177.9 ms` versus about `317.4 ms` on the old worktree
+  - current code sampled `789,507` columns in about `246.4 ms` versus about `340.4 ms` on the old worktree
+  - both paths returned the same checksums, so the rewrite improved speed without changing output
+- The warmed local game-stream profiler also stayed healthy on the new code:
+  - `crossing-d2` with `radius=8`, `generate=8`, `mesh=6`, `far-band=1` now reports about `94.0 ms` total stream, `257.3 ms` total mesh, `79.3 ms` total far field, and `39.1 ms` max frame work
+- The next hotspot is now even clearer:
+  - the generator is materially leaner
+  - the next likely payoffs are detailed meshing math and repeated resident-world lookup overhead rather than more speculative noise caches

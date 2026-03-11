@@ -2258,3 +2258,75 @@ This line of investigation was screened locally and not kept in the runtime yet.
   - generator noise sampling
   - chunk meshing math itself
   - and only then broader workerization or representation changes if these smaller wins stop paying off
+
+## 2026-03-11 procedural generator hot-path pass
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-generator.test.ts tests/procedural-resident-world.test.ts tests/procedural-far-field.test.ts tests/game-route-benchmark.test.ts`
+- `mise run build`
+- `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=8 --generate-budget=8 --mesh-budget=6 --far-band-budget=1 --chunk-delta=2`
+- direct A/B microbenchmark against detached worktree `36ba50a` using the same `mise` Bun binary:
+  - current tree `/Users/blixt/src/voxels`
+  - comparison worktree `/tmp/voxels-prev-20260311-a`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing after the generator/noise rewrite.
+- Focused tests:
+  - `43 pass`
+  - `0 fail`
+- `mise run build`: passing.
+
+#### Kept vs rejected changes
+
+- Kept:
+  - inline `Math.imul(...)` noise math
+  - fixed-arity `fbm2D2/3/4/5`
+  - cached generator seed fields and reciprocal scales
+  - flattened chunk-generation scratch arrays and hoisted per-y invariants
+- Rejected:
+  - the direct-mapped `valueNoise2D()` cell cache
+  - reason: it created a visible `valueNoiseCellCacheIndex()` hot bucket in the live trace and was not a clear enough real-world win to justify the extra complexity
+
+#### Direct worktree A/B microbenchmark
+
+- Current tree result:
+  - `chunkMs = 177.918`
+  - `sampleColumnMs = 246.426`
+  - `chunkCount = 384`
+  - `columnCount = 789507`
+  - `checksum = 379`
+  - `columnChecksum = 3563`
+- Previous worktree `36ba50a` result:
+  - `chunkMs = 317.419`
+  - `sampleColumnMs = 340.383`
+  - `chunkCount = 384`
+  - `columnCount = 789507`
+  - `checksum = 379`
+  - `columnChecksum = 3563`
+- Interpreted result:
+  - chunk generation improved by about `44%`
+  - column sampling improved by about `28%`
+  - outputs matched exactly on the sampled workload
+
+#### Local game-stream profiler
+
+- `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=8 --generate-budget=8 --mesh-budget=6 --far-band-budget=1 --chunk-delta=2` returned:
+  - `crossing-d2 frames avg = 63`
+  - `totalStreamMs avg = 94.0`
+  - `totalMeshMs avg = 257.3`
+  - `totalFarFieldMs avg = 79.3`
+  - `maxFrameWorkMs avg = 39.1`
+  - `totalChunkGenerationMs avg = 83.0`
+  - `totalGeneratedChunks avg = 142`
+  - `totalRemeshChunks avg = 236`
+  - `maxPendingChunks avg = 196`
+
+#### Residual
+
+- The generator slice is worth keeping based on the direct worktree A/B.
+- I did not record a new trustworthy Chrome trace for this exact slice because the active DevTools session lost transport mid-run.
+- The next trace-guided target is meshing and world lookup overhead:
+  - `buildChunkMesh()`
+  - `sampleChunkVoxel()`
+  - `getResidentChunk()`
