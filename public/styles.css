@@ -113,7 +113,7 @@ body::before {
   position: absolute;
   top: 14px;
   right: 16px;
-  width: min(640px, calc(100vw - 32px));
+  width: min(380px, calc(100vw - 32px));
   pointer-events: auto;
 }
 
@@ -127,16 +127,17 @@ body::before {
   min-width: 0;
 }
 
-.game-panel h2 {
-  margin: 0 0 4px;
-  font-family: "Iowan Old Style", "Palatino Linotype", serif;
-  font-size: 0.9rem;
+.game-panel-telemetry {
+  max-height: calc(100vh - 28px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .game-metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  column-gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 10px;
   row-gap: 5px;
 }
 
@@ -470,11 +471,9 @@ code {
   }
 
   .game-hud {
-    top: auto;
+    top: 10px;
     right: 10px;
-    bottom: 10px;
     width: calc(100vw - 20px);
-    left: 10px;
   }
 
   .game-metrics {

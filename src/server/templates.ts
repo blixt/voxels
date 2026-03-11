@@ -41,7 +41,6 @@ export function renderGamePage(assetVersion: string): string {
           </header>
           <div class="game-hud">
             <section class="game-panel game-panel-telemetry">
-              <h2>Live Telemetry</h2>
               <div class="game-metrics" data-role="telemetry"></div>
             </section>
           </div>
