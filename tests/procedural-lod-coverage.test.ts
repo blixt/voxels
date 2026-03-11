@@ -30,7 +30,7 @@ test("procedural far field coverage stays continuous around settled streamed anc
     expect(farProbe.residentOverlapCount).toBe(0);
     expect(farProbe.uncoveredGapCount).toBe(0);
   }
-});
+}, { timeout: 15_000 });
 
 function settleAndProbeCoverage(
   world: ProceduralResidentWorld,

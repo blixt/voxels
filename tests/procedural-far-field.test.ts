@@ -5,6 +5,7 @@ import { ProceduralFarField } from "../src/engine/procedural-far-field.ts";
 import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
 import type { ChunkMeshData } from "../src/engine/types.ts";
+import { applyWaterDepthTint } from "../src/engine/water-visuals.ts";
 
 test("procedural far field covers a few hundred meters with five render bands", () => {
   const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337));
@@ -302,6 +303,7 @@ test("procedural far field surface probe reports no downward slope gaps on sampl
 test("procedural far field can preserve water tops inside coarse cells", () => {
   const terrainColor = 0xff_aa_88_ff;
   const waterColor = 0xff_44_aa_ff;
+  const tintedWaterColor = applyWaterDepthTint(waterColor, 4);
   const farField = new ProceduralFarField({
     palette: [0, terrainColor, waterColor],
     sampleColumn(worldX: number, worldZ: number) {
@@ -322,11 +324,15 @@ test("procedural far field can preserve water tops inside coarse cells", () => {
 
   farField.updateAround([0, 0, 0]);
 
-  const topColors = extractQuads(farField.getRenderables()[0]!.mesh)
+  const mesh = farField.getRenderables()[0]!.mesh;
+  const topColors = extractQuads(mesh)
+    .filter((quad) => quad.normal.join(",") === "0,1,0")
+    .map((quad) => quad.color);
+  const waterTopColors = extractWaterQuads(mesh)
     .filter((quad) => quad.normal.join(",") === "0,1,0")
     .map((quad) => quad.color);
   expect(topColors).toContain(terrainColor);
-  expect(topColors).toContain(waterColor);
+  expect(waterTopColors).toContain(tintedWaterColor);
 });
 
 function createTestGenerator(
@@ -390,14 +396,35 @@ function extractQuads(mesh: ChunkMeshData | null): Array<{
   if (!mesh) {
     return [];
   }
-  const view = new DataView(mesh.vertexData);
+  return extractQuadBuffer(mesh.vertexData, mesh.vertexCount);
+}
+
+function extractWaterQuads(mesh: ChunkMeshData | null): Array<{
+  normal: [number, number, number];
+  min: [number, number, number];
+  max: [number, number, number];
+  color: number;
+}> {
+  if (!mesh) {
+    return [];
+  }
+  return extractQuadBuffer(mesh.waterVertexData, mesh.waterVertexCount);
+}
+
+function extractQuadBuffer(vertexData: ArrayBuffer, vertexCount: number): Array<{
+  normal: [number, number, number];
+  min: [number, number, number];
+  max: [number, number, number];
+  color: number;
+}> {
+  const view = new DataView(vertexData);
   const quads: Array<{
     normal: [number, number, number];
     min: [number, number, number];
     max: [number, number, number];
     color: number;
   }> = [];
-  for (let vertexIndex = 0; vertexIndex < mesh.vertexCount; vertexIndex += 4) {
+  for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex += 4) {
     const byteOffset = vertexIndex * 20;
     const normal: [number, number, number] = [
       Math.sign(view.getInt8(byteOffset + 12)),

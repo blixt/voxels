@@ -44,6 +44,8 @@ So the next slices need to separate:
 - Prefer broad research and broad error-case enumeration before locking onto one fix or design.
 - Prefer tiny verification cases before large integrated scenes.
 - Keep `/bench` as the engine oracle for deterministic validation and performance tracking.
+- Run the repo as an alternating `feature -> performance/harness` loop instead of a pile of unrelated slices.
+- Treat `mise run cycle-bench` as the default multi-front command-line acceptance gate.
 - Keep work incremental enough that every slice can be researched, implemented, verified, documented, and committed.
 - Prefer rewriting/removing over layering on more abstractions.
 - Keep the repository usable for parallel agent work and worktree-based A/B comparisons.
@@ -205,4 +207,8 @@ Status:
 - Treat long-distance visibility as an architectural track:
   - not just a radius constant
   - likely involving asynchronous streaming, coarser far representations, or both
+- Keep the recursive task list fresh:
+  - finish one feature slice
+  - finish one performance/harness slice
+  - then rewrite the next cycle instead of letting the backlog drift
 - Log each slice in `progress.md` and `verification.md`.

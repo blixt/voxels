@@ -1897,23 +1897,6 @@ function blendTerrainProfile(primary: BaseBiomeProfile, secondary: BaseBiomeProf
   };
 }
 
-function hostBlendStrength(
-  primary: BaseBiomeId,
-  secondary: BaseBiomeId,
-  primaryWeight: number,
-  a: BaseBiomeId,
-  b: BaseBiomeId,
-): number {
-  let strength = 0;
-  if (primary === a || primary === b) {
-    strength += primaryWeight;
-  }
-  if (secondary === a || secondary === b) {
-    strength += 1 - primaryWeight;
-  }
-  return strength;
-}
-
 function hostSetStrength(
   primary: BaseBiomeId,
   secondary: BaseBiomeId,

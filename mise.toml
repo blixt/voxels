@@ -33,6 +33,10 @@ run = "bun run profile:game-stream"
 description = "Summarize a Chrome performance trace into top CPU, heap, GC, and long-task findings"
 run = "bun run analyze:trace"
 
+[tasks.cycle-bench]
+description = "Run the standard command-line quality and performance battery and store a timestamped report"
+run = "bun run cycle:bench"
+
 [tasks.serve]
 description = "Run the built production server bundle"
 run = "bun run start"

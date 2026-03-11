@@ -1248,3 +1248,47 @@
 - Main lesson from this slice:
   - when adding many more biomes to this engine, the highest-value pattern is still "derived transforms over continuous fields"
   - but the verification target has to be broader than simple presence: I now need to prove the intended landmark identity for each new biome, not just that the biome id appears somewhere
+
+### Recursive task-loop bootstrap
+
+- I turned the user's "keep going" request into a repo-native workflow instead of keeping it as an informal instruction.
+- New durable loop doc:
+  - `recursive-task-list.md`
+  - the loop now explicitly alternates `feature -> performance/harness`
+  - the last task is a refresh task so the list rewrites itself instead of going stale
+- New standard command-line acceptance path:
+  - `mise run cycle-bench`
+  - implemented in `scripts/run-cycle-bench.ts`
+  - writes timestamped JSON reports under `artifacts/cycle-bench/`
+  - runs:
+    - `check`
+    - `build`
+    - scene profile
+    - residency profile
+    - game-stream profile
+- I also updated the visible repo entrypoints so this loop is discoverable instead of hidden in one doc:
+  - `README.md`
+  - `docs/loop/README.md`
+  - `docs/loop/plan.md`
+  - `docs/loop/research.md`
+- The first run of the new acceptance gate immediately paid for itself:
+  - it exposed a dead unused helper in the biome generator (`hostBlendStrength`)
+  - it exposed a stale full-suite timeout in `procedural-lod-coverage.test.ts`
+  - it exposed a stale far-field water regression that still assumed water lived in the opaque mesh instead of the separate water mesh
+- I removed the dead generator helper rather than tolerating it.
+- I kept the test fixes because they made the acceptance gate honest again:
+  - the heavy settled-anchor coverage test now carries an explicit `15 s` timeout
+  - the water-preservation regression now validates the separate water mesh and the depth-tinted water color, which matches the current engine design
+- I also folded in a small research refresh to steer future loop items:
+  - Chrome 144/146 WebGPU notes
+  - geometry clipmaps as a stronger far-field direction
+  - Transvoxel as the serious multiresolution seam reference if ad hoc LOD stitching keeps failing
+  - open-world exploration references that reinforce measurable discovery loops over vague "more content" goals
+- The first committed cycle queue is now:
+  - feature: exploration/discovery tracking
+  - perf/harness: automated browser route + trace run
+  - feature: denser canopy / below-ground biome identity
+  - perf/harness: lower-main-thread streaming experiment
+  - feature: gather/build loop
+  - perf/harness: stronger LOD experiment
+  - refresh

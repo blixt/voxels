@@ -2934,3 +2934,50 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - Current remaining asymmetry:
   - `marsh` is still much rarer than the new `firefly` wetland path
   - `dunes` now occupy less of the broad scan because `saltflat` and `shardlands` claim more of the dry-energy design space
+
+### Recursive task-loop bootstrap
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-lod-coverage.test.ts tests/procedural-far-field.test.ts`
+- `mise run cycle-bench -- --label=loop-bootstrap`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing
+- Focused far-field regressions: passing
+  - `19 pass`
+  - `0 fail`
+- `mise run cycle-bench`: passing
+  - report: `artifacts/cycle-bench/20260311T235404Z-loop-bootstrap.json`
+
+#### Numeric probes
+
+- `cycle-bench` total elapsed:
+  - `73739.95 ms`
+- Scene profile:
+  - `terrain256`: build `31.90 ms`, mesh `265.79 ms`
+  - `stressMicroCubes256`: build `4.23 ms`, mesh `110.15 ms`
+  - `stressScreens256`: build `3.11 ms`, mesh `88.87 ms`
+- Residency profile:
+  - `bootstrap-r3`: stream `336.36 ms`, mesh `104.68 ms`
+  - `widen-r2-to-r3`: stream `172.23 ms`, mesh `71.13 ms`
+  - `shrink-r3-to-r2`: stream `0.21 ms`, mesh `28.54 ms`
+- Game-stream profile:
+  - `crossing-d2`: stream `212.37 ms`, mesh `137.44 ms`, far field `18.85 ms`, avg max-frame-work `27.55 ms`
+  - `crossing-far-anchor-d8`: stream `803.24 ms`, mesh `300.06 ms`, far field `386.32 ms`, avg max-frame-work `181.03 ms`
+  - `crossing-d1`: far field `8.83 ms`, no stream or near-mesh churn
+
+#### Added verification coverage
+
+- The repo now has one standard command-line acceptance command for mixed slices:
+  - `mise run cycle-bench`
+- The settled-anchor LOD coverage test now has an explicit timeout so the full suite reflects intended cost rather than tripping the default `5 s` ceiling.
+- The far-field water-preservation regression now checks the actual separate water mesh and the depth-tinted color path.
+
+#### Residual
+
+- This slice is worth keeping.
+- The acceptance gate is already finding real maintenance issues instead of passing silently.
+- The next performance slice should focus on browser-route and trace automation, because `cycle-bench` is strong on local CPU-side coverage but still does not replace full Chrome movement traces.

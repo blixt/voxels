@@ -57,6 +57,22 @@ Date: 2026-03-11
 - Keep the current renderer and benchmark harness stable while the new game path is established.
 - Add automation-friendly game debug surfaces early so future interaction and streaming work can be verified without human-only inspection.
 
+## 2026-03-12 loop and experimentation additions
+
+- Chrome 146 added `TRANSIENT_ATTACHMENT`, which is relevant for future temporary render targets and post-processing passes. This is not an immediate win for the current terrain renderer, but it matters if the lighting/fog stack grows.
+- Chrome 144 improved `writeBuffer()` and `writeTexture()` performance in Dawn, so the repo should stay on current Chrome before drawing conclusions about upload bottlenecks. This reduces one class of false-positive "engine regressions" that are really browser-version effects.
+- Geometry clipmaps remain one of the strongest architectural references for large outdoor terrain:
+  - incremental window shifts instead of whole-mesh rebuilds
+  - constant topology
+  - explicit transition regions for visual continuity
+  - GPU-friendly data updates instead of CPU-owned irregular mesh rebuilds
+- For true multiresolution voxel seams, Transvoxel is still the strongest referenced seam-stitching technique. If ad hoc seam walls and band-masking keep failing, the next serious LOD experiment should treat transition cells as a first-class system instead of patch logic.
+- The open-world/game-design sources reinforce that this game should be built as layered systems rather than as handcrafted spaces. The most relevant practical consequences for this repo are:
+  - keep world exploration measurable as a system, not as a vague visual goal
+  - treat every region as a mini open world with its own identity
+  - reward discovery of alternate paths, landmarks, and collectible/material differences
+  - expect content layering and specialization rather than a single monolithic "worldgen pass"
+
 ## Source links
 
 - Chrome Stable channel update for `146.0.7680.72/.73`:
@@ -85,3 +101,15 @@ Date: 2026-03-11
   https://bun.sh/docs/api/http
 - Bun build API:
   https://bun.sh/docs/bundler
+- What's New in WebGPU (Chrome 146):
+  https://developer.chrome.com/blog/new-in-webgpu-146
+- What's New in WebGPU (Chrome 144):
+  https://developer.chrome.com/blog/new-in-webgpu-144
+- GPU Gems 2, geometry clipmaps:
+  https://developer.nvidia.com/gpugems/gpugems2/part-i-geometric-complexity/chapter-2-terrain-rendering-using-gpu-based-geometry
+- Transvoxel Algorithm overview:
+  https://transvoxel.org/
+- Transitioning From Linear to Open World Design:
+  https://media.gdcvault.com/gdc2015/presentations/England_Liz_TransitioningFromLinear.pdf
+- Rewarding Exploration with Collectables and Gatherables:
+  https://media.gdcvault.com/gdc2019/presentations/Miller_Leah_Rewarding_Exploration_With.pdf

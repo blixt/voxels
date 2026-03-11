@@ -8,7 +8,8 @@ Chrome 146 WebGPU voxel game and engine built from scratch with Bun and TypeScri
 2. Install dependencies with `bun install`.
 3. Start the app with `mise run dev`.
 4. Open `http://localhost:3000/` for the game and `http://localhost:3000/bench` for the benchmark suite.
-5. Build production output with `mise run build`, then run it with `mise run serve`.
+5. Run `mise run cycle-bench` for the standard command-line quality/performance battery.
+6. Build production output with `mise run build`, then run it with `mise run serve`.
 
 `mise run dev` now uses Bun's hot-reload/full-stack dev path instead of the older startup bundle flow, so edits to the server, page shells, CSS, and browser entrypoints should update without manual cache-busting.
 
@@ -17,6 +18,7 @@ The staged game/engine roadmap lives in `docs/roadmap.md`.
 A broader architecture/reference survey lives in `docs/20260311-voxel-research.md`.
 The Bun live-edit/HMR research note lives in `docs/20260311-bun-hmr-research.md`.
 Repo-specific guidance for agent-driven research, implementation, and verification lives in `docs/agent-playbook.md`.
+The durable alternating feature/performance loop lives in `docs/loop/recursive-task-list.md`.
 
 ## Features
 
@@ -60,5 +62,6 @@ Repo-specific guidance for agent-driven research, implementation, and verificati
 - `mise run profile -- --iterations=3 --warmup=1 terrain256 stressDrawCalls512`
 - `mise run profile-stream -- --iterations=3 --warmup=1`
 - `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=5 --generate-budget=6 --mesh-budget=4 --chunk-delta=2`
+- `mise run cycle-bench`
 
 The benchmark table separates first-frame costs from warm-frame costs and exposes first-frame sync/upload/encode metrics so scene-load and live-edit regressions are visible without manual spreadsheet work.

@@ -7,6 +7,7 @@ This repository keeps the design loop in versioned documents instead of ad-hoc n
 - `../20260311-bun-hmr-research.md`: Bun-native dev-server/HMR guidance for this repo's live-edit loop
 - `../roadmap.md`: staged path from the current engine baseline to the shared persistent voxel game target
 - `plan.md`: current implementation plan and next milestones
+- `recursive-task-list.md`: durable alternating feature/performance loop that always ends with a fresh refresh task
 - `research.md`: external sources, constraints, and technical decisions
 - `world-model-notes.md`: bounded-world scouting notes and the chosen seam toward streaming/infinite worlds
 - `worldgen-notes.md`: initial procedural-generation design notes and verification goals
@@ -22,4 +23,5 @@ Loop:
 3. Implement the next smallest slice and log major decisions in `progress.md`.
 4. Run `mise run test`, exercise `/bench`, and record the outcome in `verification.md`.
 5. Run `mise run profile`, `mise run profile-stream`, or `mise run profile-game-stream` when browser automation is unavailable or when I need repeatable warmed local timings for scene rendering, bulk residency work, or the incremental game-path streaming loop.
-6. Update `plan.md` with the next smallest verified slice toward the game/runtime target.
+6. Run `mise run cycle-bench` for a standard multi-front command-line acceptance pass when a slice touches more than one subsystem.
+7. Update `plan.md` with the next smallest verified slice toward the game/runtime target.
