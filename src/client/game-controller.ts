@@ -289,6 +289,22 @@ export interface NearFarSeamProbe {
   }>;
 }
 
+export interface FarFieldSurfaceGapProbe {
+  boundaryCount: number;
+  gapCount: number;
+  maxGapDepthWorldUnits: number;
+  maxGapDepthMeters: number;
+  samples: Array<{
+    band: string;
+    kind: "masked" | "downward";
+    direction: "east" | "west" | "south" | "north";
+    worldX: number;
+    worldZ: number;
+    gapDepthWorldUnits: number;
+    gapDepthMeters: number;
+  }>;
+}
+
 export interface VisibleGroundCoverageIssueSample {
   worldX: number;
   worldZ: number;
@@ -566,16 +582,17 @@ export class GameController {
         ? 1 / 60
         : Math.min((now - this.lastFrameTime) / 1000, MAX_DELTA_SECONDS);
       this.lastFrameTime = now;
+      const hasMovementIntent = this.hasMovementIntent();
       const moved = this.updateMovement(deltaSeconds);
       if (
         shouldPumpWorldWork(
-          moved,
+          hasMovementIntent || moved,
           this.lastStreamSummary.pendingChunks,
           this.world.countDirtyResidentChunks(),
           this.lastFarFieldSummary.pendingBands,
         )
       ) {
-        this.syncWorldAroundPlayer();
+        this.syncWorldAroundPlayer(false, !hasMovementIntent);
       }
       this.renderInteractiveFrame();
       this.rafId = requestAnimationFrame(tick);
@@ -747,6 +764,10 @@ export class GameController {
 
   probeNearFarSeamGaps(): NearFarSeamProbe {
     return this.farField.probeMaskedSeamGaps(this.getRenderReadyFarFieldMask());
+  }
+
+  probeFarFieldSurfaceGaps(): FarFieldSurfaceGapProbe {
+    return this.farField.probeSurfaceGaps(this.getRenderReadyFarFieldMask());
   }
 
   probeVisibleGroundCoverage(
@@ -1107,7 +1128,7 @@ export class GameController {
             teleportPlayerToFeetPosition(this.player, lerpVec3(startFeet, endFeet, t));
             this.player.grounded = true;
             this.syncCameraToPlayer();
-            const residency = this.syncWorldAroundPlayer(false);
+            const residency = this.syncWorldAroundPlayer(false, false);
             const detailCoverage = this.probeRenderReadyCoverage();
             const render = await this.renderProbeFrame();
             frame += 1;
@@ -1125,7 +1146,7 @@ export class GameController {
             );
           }
           for (let settleFrame = 0; settleFrame < normalizedSettleFrames; settleFrame += 1) {
-            const residency = this.syncWorldAroundPlayer(false);
+            const residency = this.syncWorldAroundPlayer(false, true);
             const detailCoverage = this.probeRenderReadyCoverage();
             const render = await this.renderProbeFrame();
             frame += 1;
@@ -1444,6 +1465,13 @@ export class GameController {
     return result.moved;
   }
 
+  private hasMovementIntent(): boolean {
+    if (!this.pointerLocked) {
+      return false;
+    }
+    return this.isPressed("KeyW", "KeyS", "KeyA", "KeyD", "Space", "ControlLeft", "ControlRight");
+  }
+
   private renderInteractiveFrame(): void {
     const rendered = this.renderCurrentFrame();
     if (!rendered) {
@@ -1456,7 +1484,7 @@ export class GameController {
     this.pushHud();
   }
 
-  private syncWorldAroundPlayer(force = false): ResidencyUpdateSummary {
+  private syncWorldAroundPlayer(force = false, allowFarFieldRebuild = true): ResidencyUpdateSummary {
     const playerChunkX = Math.floor(this.player.feetPosition[0] / this.world.chunkSize);
     const playerChunkZ = Math.floor(this.player.feetPosition[2] / this.world.chunkSize);
     const resolved = force
@@ -1475,7 +1503,7 @@ export class GameController {
         this.player.feetPosition,
         0,
         this.getRenderReadyFarFieldMask(),
-        this.streamingBudgets.maxFarFieldBandRebuildsPerFrame,
+        this.resolveFarFieldRebuildBudget(false, allowFarFieldRebuild),
       );
       this.lastStreamSummary = createIdleResidencySummary(
         this.lastStreamSummary,
@@ -1486,10 +1514,10 @@ export class GameController {
       );
       return cloneResidencySummary(this.lastStreamSummary);
     }
-    return this.syncWorldAroundAnchor(resolved.anchor);
+    return this.syncWorldAroundAnchor(resolved.anchor, false, allowFarFieldRebuild);
   }
 
-  private syncWorldAroundAnchor(anchor: StreamAnchor, settle = false): ResidencyUpdateSummary {
+  private syncWorldAroundAnchor(anchor: StreamAnchor, settle = false, allowFarFieldRebuild = true): ResidencyUpdateSummary {
     this.streamAnchor = anchor;
     const residency = this.world.updateResidencyAround(
       buildStreamAnchorPosition(anchor, this.world.chunkSize, this.player.feetPosition[1]),
@@ -1511,7 +1539,7 @@ export class GameController {
       this.player.feetPosition,
       0,
       this.getRenderReadyFarFieldMask(),
-      settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxFarFieldBandRebuildsPerFrame,
+      this.resolveFarFieldRebuildBudget(settle, allowFarFieldRebuild),
     );
     this.status = residency.pendingChunks > 0
       ? `Streaming ${residency.pendingChunks} pending chunk(s)`
@@ -1542,6 +1570,19 @@ export class GameController {
 
   private getRenderReadyFarFieldMask() {
     return this.world.getFarFieldExclusionMask("render-ready", this.presentedFarFieldReadyMaskRevision);
+  }
+
+  private resolveFarFieldRebuildBudget(settle: boolean, allowFarFieldRebuild: boolean): number {
+    if (settle) {
+      return Number.POSITIVE_INFINITY;
+    }
+    if (!allowFarFieldRebuild) {
+      return 0;
+    }
+    if (this.lastStreamSummary.pendingChunks > 0 || this.world.countDirtyResidentChunks() > 0) {
+      return 0;
+    }
+    return this.streamingBudgets.maxFarFieldBandRebuildsPerFrame;
   }
 
   private syncPresentedFarFieldMaskRevision(force = false): void {
@@ -1596,7 +1637,7 @@ export class GameController {
     this.camera.pitch = target.pitch;
     this.syncCameraToPlayer();
     const movementMs = performance.now() - movementStartedAt;
-    const residency = this.syncWorldAroundPlayer(false);
+    const residency = this.syncWorldAroundPlayer(false, target.phase !== "move");
     const render = this.renderCurrentFrame();
     const gameplayFrameMs = performance.now() - gameplayStartedAt;
     const dirtyResidentMeshes = summarizeDirtyResidentMeshes(this.world);

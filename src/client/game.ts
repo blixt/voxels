@@ -50,6 +50,7 @@ declare global {
         sampleStepMeters?: number,
       ): ReturnType<GameController["probeVisibleGroundCoverage"]>;
       probeNearFarSeamGaps(): ReturnType<GameController["probeNearFarSeamGaps"]>;
+      probeFarFieldSurfaceGaps(): ReturnType<GameController["probeFarFieldSurfaceGaps"]>;
     };
   }
 }
@@ -160,6 +161,7 @@ function mountGame(): GameRuntime {
     probeVisibleGroundCoverage: (sampleForwardMeters, sampleLateralMeters, sampleStepMeters) =>
       controller.probeVisibleGroundCoverage(sampleForwardMeters, sampleLateralMeters, sampleStepMeters),
     probeNearFarSeamGaps: () => controller.probeNearFarSeamGaps(),
+    probeFarFieldSurfaceGaps: () => controller.probeFarFieldSurfaceGaps(),
   };
 
   const ready = controller.init();

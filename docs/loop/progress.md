@@ -602,3 +602,33 @@
   - the same-pose settled-reference diff now reports zero transient hole frames on the 10-second route
   - the route benchmark now exposes the remaining issue as hitch cost and backlog policy instead of disappearing geometry
   - with the stronger oracle in place, the earlier `near-transition.innerRadius = 0` tweak turned out not to be needed anymore, so it was reverted to keep the far-field policy lean
+
+### Downhill far-field seam probe and movement-intent far-field scheduling
+
+- Re-opened the two remaining user complaints directly:
+  - rare tiny far-field slits on downward slopes
+  - `Far Build` spikes still showing up while the player was actively holding movement input
+- Added a stronger far-field geometry oracle:
+  - `ProceduralFarField` now has `probeSurfaceGaps(...)`
+  - the probe checks both masked seams and downhill rendered-neighbor boundaries against generator-sampled boundary minima
+  - the browser now exposes this through `window.__VOXELS_GAME__.probeFarFieldSurfaceGaps()`
+- The slope-gap fix itself was straightforward once the probe existed:
+  - far-field boundary bottoms now cache and reuse sampled boundary minima
+  - downhill side walls now extend to the actual sampled boundary minimum instead of only the coarse neighbor cell height
+  - the far-field hot path also stopped building tuple arrays per vertex and now writes flat numeric vertex data instead
+- The more important performance lesson came from the live walking loop, not the teleport route benchmark:
+  - the deterministic route benchmark was already suppressing far-field rebuilds on move frames
+  - but the real game loop was still keying that decision off `moved`
+  - when the player kept holding `W` but got momentarily blocked by terrain or step resolution, `moved` flipped false and the runtime treated that frame like a settle frame
+  - that allowed pending far-field rebuilds to run during active walking input, which matches the user report much better than the earlier summary metrics did
+- Fixed the live policy to use movement intent instead of actual displacement:
+  - active movement keys now suppress far-field rebuilds even if the player advances `0` distance on a given frame
+  - this keeps far-field backlog from spending a frame budget just because the body briefly stalled against terrain
+- Also checked a tempting far-field optimization and rejected it:
+  - letting each band honor its own coarser `centerStride` does reduce rebuild churn
+  - but it broke the settled LOD coverage oracle by creating real uncovered far-field gaps
+  - I reverted that instead of layering extra seam complexity on top
+- Result:
+  - the downhill far-field seam probe is now clean in tests and in Chrome
+  - live held-`W` walking no longer produces meaningful far-field rebuild cost while input is still active
+  - the remaining walking spikes are now stream + detailed meshing work, not far-field rebuild work

@@ -1826,3 +1826,65 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - The next meaningful bottleneck remains hitch cost rather than visible correctness:
   - far-field near-transition rebuild spikes still dominate the worst frames
   - detailed chunk meshing is still the largest sustained non-far-field cost during movement
+
+## 2026-03-11 downhill seam probe and live-walk far-field scheduling
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-far-field.test.ts tests/game-route-benchmark.test.ts tests/procedural-resident-world.test.ts`
+- `mise exec -- bun run build`
+- fresh Chrome 146 on `http://localhost:3000/`:
+  - `window.__VOXELS_GAME__.probeFarFieldSurfaceGaps()`
+  - ad-hoc live held-`W` walking benchmark via DevTools using the real interactive loop
+  - short live budget sweeps on that held-`W` benchmark
+
+#### Automated checks
+
+- `tests/procedural-far-field.test.ts` now also includes:
+  - `procedural far field surface probe reports no downward slope gaps on sampled boundaries`
+- targeted tests: passing
+- `typecheck`: passing
+- `build`: passing
+
+#### Browser probes
+
+- fresh Chrome 146 far-field surface-gap probe:
+  - `boundaryCount = 213,668`
+  - `gapCount = 0`
+  - `maxGapDepthWorldUnits = 0`
+  - `maxGapDepthMeters = 0`
+- fresh Chrome 146 near/far seam probe after the same reload:
+  - `gapCount = 0`
+
+#### Live walking benchmark
+
+- A live held-`W` benchmark that sampled the real interactive loop for `600` frames before the movement-intent scheduling fix reported:
+  - `maxFarFieldMs = 18.3`
+  - `avgFarFieldMs = 4.71`
+  - far-field spikes appeared only once the player briefly stopped advancing even though movement input was still held
+- After switching the live scheduler to suppress far-field rebuilds based on movement intent instead of `moved`, the same held-`W` benchmark reported:
+  - `maxFarFieldMs = 0.2`
+  - `avgFarFieldMs = 0.0037`
+  - no meaningful far-field rebuild frames while movement input remained active
+- A second held-`W` pass measuring approximate combined walking work (`stream + mesh + far-field + render CPU`) reported:
+  - `maxWorkMs = 23.8`
+  - `p95WorkMs = 8.0`
+  - `maxFrameCpuMs = 1.6`
+  - the top walking spikes were now entirely stream + mesh work, not far-field work
+
+#### Live budget sweep
+
+- Short held-`W` sweeps over `7/6/1`, `6/4/1`, `5/3/1`, `4/2/1`, `3/2/1`, and `2/2/1` showed:
+  - no visible-ground uncovered samples in the sampled forward-ground probe
+  - only small movement in max work, with the best sampled configuration landing around `22.8 ms` max combined work
+- Tried a separate far-field rebuild optimization by honoring each band's own `centerStride`:
+  - it reduced rebuild churn
+  - but `mise run test` then failed `tests/procedural-lod-coverage.test.ts` with `302` uncovered far-field samples on a settled coverage probe
+  - that optimization was reverted
+- I did not change default stream budgets from this sweep:
+  - it was useful for attribution
+  - but it did not produce a strong enough improvement to justify changing defaults yet
+
+#### Residual
+
+- The user-reported far-field hitch while actively walking is now explained and fixed in the live loop.
+- The remaining walking spikes come from chunk generation + detailed meshing work, which is the next optimization target.

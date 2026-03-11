@@ -269,6 +269,36 @@ test("procedural far field seam probe reports no masked-edge terrain gaps on a f
   expect(seamProbe.maxGapDepthWorldUnits).toBe(0);
 });
 
+test("procedural far field surface probe reports no downward slope gaps on sampled boundaries", () => {
+  const farField = new ProceduralFarField(
+    createTestGenerator((worldX, worldZ) => {
+      if (worldZ < 0 || worldZ >= 8) {
+        return 1;
+      }
+      if (worldX < 8) {
+        return 8;
+      }
+      if (worldX < 9) {
+        return 0;
+      }
+      if (worldX < 16) {
+        return 4;
+      }
+      return 1;
+    }),
+    [
+      { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32 },
+    ],
+  );
+
+  farField.updateAround([0, 0, 0]);
+  const surfaceProbe = farField.probeSurfaceGaps();
+
+  expect(surfaceProbe.boundaryCount).toBeGreaterThan(0);
+  expect(surfaceProbe.gapCount).toBe(0);
+  expect(surfaceProbe.maxGapDepthWorldUnits).toBe(0);
+});
+
 test("procedural far field can preserve water tops inside coarse cells", () => {
   const terrainColor = 0xff_aa_88_ff;
   const waterColor = 0xff_44_aa_ff;
