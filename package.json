@@ -15,7 +15,8 @@
     "profile:stream": "bun run scripts/profile-procedural-stream.ts",
     "profile:game-stream": "bun run scripts/profile-game-stream.ts",
     "analyze:trace": "bun run scripts/analyze-chrome-trace.ts",
-    "cycle:bench": "bun run scripts/run-cycle-bench.ts"
+    "cycle:bench": "bun run scripts/run-cycle-bench.ts",
+    "trace:route": "bun run scripts/run-browser-route-trace.ts"
   },
   "devDependencies": {
     "@types/bun": "1.3.10",

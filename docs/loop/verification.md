@@ -3030,3 +3030,61 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - The discovery layer is useful, but it is still only a progression seam; it does not yet pay off with inventory, points of interest, or rewards.
 - The next loop item should stay on the planned performance side: browser route + trace automation.
+
+### Browser route trace harness
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise run build`
+- `mise run trace-route -- --label=smoke`
+- `mise run trace-route -- --label=smoke-short --duration=2 --settle=1 --sample-hz=30`
+
+#### Checks
+
+- `mise exec -- bun run typecheck`: passing
+- `mise run build`: passing
+- `mise run trace-route -- --label=smoke`: passing
+  - report: `artifacts/browser-route-trace/20260312T001037Z-smoke/report.json`
+  - trace: `artifacts/browser-route-trace/20260312T001037Z-smoke/trace.json`
+- `mise run trace-route -- --label=smoke-short --duration=2 --settle=1 --sample-hz=30`: passing
+  - report: `artifacts/browser-route-trace/20260312T001214Z-smoke-short/report.json`
+
+#### Numeric probes
+
+- Main smoke route trace:
+  - avg gameplay frame `12.28 ms`
+  - p95 gameplay frame `36.30 ms`
+  - max gameplay frame `182.5 ms`
+  - total gameplay frame time `8005.5 ms`
+  - unmeasured-frame ratio `0.16%`
+  - avg stream `4.91 ms`
+  - avg mesh `5.98 ms`
+  - avg far field `1.07 ms`
+  - max far field `174.6 ms`
+  - max far-field band label `near-transition`
+  - frames with hole signals `0`
+  - max pending chunks `200`
+  - max dirty resident chunks `265`
+- Short parameterized smoke route:
+  - avg gameplay frame `10.13 ms`
+  - p95 gameplay frame `35.00 ms`
+  - frames with hole signals `0`
+- Trace summary highlights from the main smoke run:
+  - clear named hot frames include `generateChunk`, `fillColumnState`, `sampleFields`, `resolveLandmark`, and `buildRenderReadyColumnKeys`
+  - the heaviest inclusive stack is `benchmarkRouteExperience -> runRouteExperienceFrame -> syncWorldAroundPlayer -> updateResidencyAround -> flushMeshBuildBudget`
+
+#### Added verification coverage
+
+- The repo now has a one-command live-browser route oracle that does not depend on a pre-existing manual browser session.
+- The saved report now combines:
+  - route benchmark summary
+  - discovery snapshot
+  - trace-analysis summary
+  - artifact paths
+
+#### Residual
+
+- This slice is worth keeping.
+- Headless Chrome WebGPU tracing works on this machine, which is the main success criterion.
+- The next harness improvement should make trace symbols easier to read; some of the hottest frames are still minified.

@@ -1330,3 +1330,55 @@
 - I also used the new loop discipline for this slice instead of only talking about it:
   - after the focused tests passed, I ran `mise run cycle-bench`
   - the standard battery stayed effectively flat, so the discovery layer is worth keeping
+
+### Browser route trace harness
+
+- I completed the next loop item by adding a real browser-route trace command:
+  - `mise run trace-route`
+  - implemented in `scripts/run-browser-route-trace.ts`
+- The new harness does the whole path in one repo-native command:
+  - optional production build
+  - fresh production server on a free port
+  - fresh Chrome instance on a fresh profile with remote debugging
+  - CDP-driven route benchmark execution
+  - Chrome trace capture
+  - trace analysis through `scripts/analyze-chrome-trace.ts`
+  - combined JSON report under `artifacts/browser-route-trace/`
+- Important validation result:
+  - latest local Chrome works headless for this repo's WebGPU route benchmark path
+  - that means I no longer need to rely only on shared DevTools MCP sessions to get real trace evidence
+- The first kept smoke run is:
+  - `artifacts/browser-route-trace/20260312T001037Z-smoke/report.json`
+  - it captured a `14 MB` trace and a full route summary
+- The first useful findings from that real trace are consistent with the local profiles but more actionable:
+  - route summary:
+    - avg gameplay frame `12.28 ms`
+    - p95 gameplay frame `36.30 ms`
+    - max gameplay frame `182.5 ms`
+    - unmeasured-frame ratio only `0.16%`
+    - visible-ground / seam / reference hole frames all `0`
+  - trace hot spots:
+    - `generateChunk`
+    - `fillColumnState`
+    - `sampleFields`
+    - `resolveLandmark`
+    - `buildRenderReadyColumnKeys`
+  - inclusive stack:
+    - `benchmarkRouteExperience`
+    - `runRouteExperienceFrame`
+    - `syncWorldAroundPlayer`
+    - `updateResidencyAround`
+    - `flushMeshBuildBudget`
+- I also made the harness configurable instead of keeping it as a one-off smoke command:
+  - duration
+  - settle time
+  - sample rate
+  - speed
+  - seam stride
+  - capture stride
+  - reference-diff stride and limit
+- The short parameterized smoke run also passed:
+  - `mise run trace-route -- --label=smoke-short --duration=2 --settle=1 --sample-hz=30`
+- The main limitation surfaced by this slice is important:
+  - production tracing still leaves several hot frames minified (`$o`, `a`, `U1`, ...)
+  - enough names survive to guide work now, but the next harness improvement should be a trace-friendly build/report mode with stronger symbol fidelity

@@ -9,7 +9,8 @@ Chrome 146 WebGPU voxel game and engine built from scratch with Bun and TypeScri
 3. Start the app with `mise run dev`.
 4. Open `http://localhost:3000/` for the game and `http://localhost:3000/bench` for the benchmark suite.
 5. Run `mise run cycle-bench` for the standard command-line quality/performance battery.
-6. Build production output with `mise run build`, then run it with `mise run serve`.
+6. Run `mise run trace-route` for a fresh Chrome route benchmark + performance trace artifact.
+7. Build production output with `mise run build`, then run it with `mise run serve`.
 
 `mise run dev` now uses Bun's hot-reload/full-stack dev path instead of the older startup bundle flow, so edits to the server, page shells, CSS, and browser entrypoints should update without manual cache-busting.
 
@@ -65,5 +66,6 @@ The durable alternating feature/performance loop lives in `docs/loop/recursive-t
 - `mise run profile-stream -- --iterations=3 --warmup=1`
 - `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=5 --generate-budget=6 --mesh-budget=4 --chunk-delta=2`
 - `mise run cycle-bench`
+- `mise run trace-route -- --label=smoke`
 
 The benchmark table separates first-frame costs from warm-frame costs and exposes first-frame sync/upload/encode metrics so scene-load and live-edit regressions are visible without manual spreadsheet work.

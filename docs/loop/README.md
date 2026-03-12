@@ -24,4 +24,5 @@ Loop:
 4. Run `mise run test`, exercise `/bench`, and record the outcome in `verification.md`.
 5. Run `mise run profile`, `mise run profile-stream`, or `mise run profile-game-stream` when browser automation is unavailable or when I need repeatable warmed local timings for scene rendering, bulk residency work, or the incremental game-path streaming loop.
 6. Run `mise run cycle-bench` for a standard multi-front command-line acceptance pass when a slice touches more than one subsystem.
-7. Update `plan.md` with the next smallest verified slice toward the game/runtime target.
+7. Run `mise run trace-route` when a slice needs real Chrome route-level CPU/heap/long-task evidence or when the command-line profiles are not enough.
+8. Update `plan.md` with the next smallest verified slice toward the game/runtime target.

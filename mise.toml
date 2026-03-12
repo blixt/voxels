@@ -37,6 +37,10 @@ run = "bun run analyze:trace"
 description = "Run the standard command-line quality and performance battery and store a timestamped report"
 run = "bun run cycle:bench"
 
+[tasks.trace-route]
+description = "Launch a fresh production server and Chrome route benchmark trace run, then save the trace and analyzed report"
+run = "bun run trace:route"
+
 [tasks.serve]
 description = "Run the built production server bundle"
 run = "bun run start"
