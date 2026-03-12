@@ -283,6 +283,22 @@ interface BaseBiomeBlendSelection {
   primaryWeight: number;
 }
 
+interface BiomeClassificationSelection {
+  biomeId: BiomeId;
+  specialStrength: number;
+  biomeCore: number;
+}
+
+interface ResolvedSurfaceMaterials {
+  surfacePrimary: number;
+  surfaceSecondary: number;
+  subsurfacePrimary: number;
+  subsurfaceSecondary: number;
+  water: number;
+  snow: number;
+  transitionThreshold: number;
+}
+
 interface ChunkGenerationScratch {
   capacity: number;
   surfaceY: Int32Array;
@@ -980,6 +996,20 @@ export class ProceduralWorldGenerator {
   private readonly biomeProbeState = createMutableColumnState();
   private readonly surfaceSampleState = createMutableColumnState();
   private readonly materialSampleState = createMutableColumnState();
+  private readonly biomeClassificationState: BiomeClassificationSelection = {
+    biomeId: "verdant",
+    specialStrength: 0,
+    biomeCore: 0,
+  };
+  private readonly resolvedSurfaceMaterials: ResolvedSurfaceMaterials = {
+    surfacePrimary: 0,
+    surfaceSecondary: 0,
+    subsurfacePrimary: 0,
+    subsurfaceSecondary: 0,
+    water: 0,
+    snow: 0,
+    transitionThreshold: 1,
+  };
 
   constructor(
     readonly seed = 1337,
@@ -1346,11 +1376,7 @@ export class ProceduralWorldGenerator {
   private selectBiomeClassification(
     fields: SurfaceFieldSample,
     baseBlend: BaseBiomeBlendSelection,
-  ): {
-    biomeId: BiomeId;
-    specialStrength: number;
-    biomeCore: number;
-  } {
+  ): BiomeClassificationSelection {
     const biomeCore = smoothstep(0.60, 0.88, baseBlend.primaryWeight);
     const flatness = saturate(1 - (
       fields.ridge * 0.7
@@ -1445,30 +1471,43 @@ export class ProceduralWorldGenerator {
 
     let biomeId: BiomeId = baseBlend.primary.id;
     let specialStrength = 0;
-    const specialCandidates = [
-      { id: "marsh" as const, strength: marshStrength, threshold: 0.30 },
-      { id: "firefly" as const, strength: fireflyStrength, threshold: 0.56 },
-      { id: "saltflat" as const, strength: saltflatStrength, threshold: 0.78 },
-      { id: "fern" as const, strength: fernStrength, threshold: 0.58 },
-      { id: "fungal" as const, strength: fungalStrength, threshold: 0.58 },
-      { id: "ember" as const, strength: emberStrength, threshold: 0.54 },
-      { id: "bloom" as const, strength: bloomStrength, threshold: 0.42 },
-      { id: "shardlands" as const, strength: shardlandsStrength, threshold: 0.76 },
-    ];
-    let selectedSpecial: (typeof specialCandidates)[number] | null = null;
-    for (const candidate of specialCandidates) {
-      if (candidate.strength <= candidate.threshold) {
-        continue;
-      }
-      if (selectedSpecial === null || candidate.strength > selectedSpecial.strength) {
-        selectedSpecial = candidate;
-      }
+    if (marshStrength > 0.30) {
+      biomeId = "marsh";
+      specialStrength = marshStrength;
     }
-    if (selectedSpecial) {
-      biomeId = selectedSpecial.id;
-      specialStrength = selectedSpecial.strength;
+    if (fireflyStrength > 0.56 && fireflyStrength > specialStrength) {
+      biomeId = "firefly";
+      specialStrength = fireflyStrength;
     }
-    return { biomeId, specialStrength, biomeCore };
+    if (saltflatStrength > 0.78 && saltflatStrength > specialStrength) {
+      biomeId = "saltflat";
+      specialStrength = saltflatStrength;
+    }
+    if (fernStrength > 0.58 && fernStrength > specialStrength) {
+      biomeId = "fern";
+      specialStrength = fernStrength;
+    }
+    if (fungalStrength > 0.58 && fungalStrength > specialStrength) {
+      biomeId = "fungal";
+      specialStrength = fungalStrength;
+    }
+    if (emberStrength > 0.54 && emberStrength > specialStrength) {
+      biomeId = "ember";
+      specialStrength = emberStrength;
+    }
+    if (bloomStrength > 0.42 && bloomStrength > specialStrength) {
+      biomeId = "bloom";
+      specialStrength = bloomStrength;
+    }
+    if (shardlandsStrength > 0.76 && shardlandsStrength > specialStrength) {
+      biomeId = "shardlands";
+      specialStrength = shardlandsStrength;
+    }
+    const result = this.biomeClassificationState;
+    result.biomeId = biomeId;
+    result.specialStrength = specialStrength;
+    result.biomeCore = biomeCore;
+    return result;
   }
 
   private sampleSurfaceY(
@@ -1533,29 +1572,23 @@ export class ProceduralWorldGenerator {
     fields: SurfaceFieldSample,
     biomeCore: number,
     surfaceY: number,
-  ): {
-    surfacePrimary: number;
-    surfaceSecondary: number;
-    subsurfacePrimary: number;
-    subsurfaceSecondary: number;
-    water: number;
-    snow: number;
-    transitionThreshold: number;
-  } {
+  ): ResolvedSurfaceMaterials {
+    const materials = this.resolvedSurfaceMaterials;
     if (biomeId === primary.id) {
       const primarySurface = selectSurfaceMaterial(primary, fields, biomeCore, surfaceY);
       const primarySubsurface = selectSubsurfaceMaterial(primary, fields, biomeCore, surfaceY);
       const secondarySurface = selectSurfaceMaterial(secondary, fields, 1 - biomeCore * 0.5, surfaceY);
       const secondarySubsurface = selectSubsurfaceMaterial(secondary, fields, 1 - biomeCore * 0.5, surfaceY);
-      return {
-        surfacePrimary: primarySurface,
-        surfaceSecondary: primary === secondary ? primarySurface : secondarySurface,
-        subsurfacePrimary: primarySubsurface,
-        subsurfaceSecondary: primary === secondary ? primarySubsurface : secondarySubsurface,
-        water: primary.water,
-        snow: primary.snow,
-        transitionThreshold: primary === secondary ? 1 : clamp(0.56 + biomeCore * 0.24 + (primaryWeight - 0.5) * 0.30, 0.52, 0.90),
-      };
+      materials.surfacePrimary = primarySurface;
+      materials.surfaceSecondary = primary === secondary ? primarySurface : secondarySurface;
+      materials.subsurfacePrimary = primarySubsurface;
+      materials.subsurfaceSecondary = primary === secondary ? primarySubsurface : secondarySubsurface;
+      materials.water = primary.water;
+      materials.snow = primary.snow;
+      materials.transitionThreshold = primary === secondary
+        ? 1
+        : clamp(0.56 + biomeCore * 0.24 + (primaryWeight - 0.5) * 0.30, 0.52, 0.90);
+      return materials;
     }
 
     const special = SPECIAL_BIOMES[biomeId as SpecialBiomeId];
@@ -1567,15 +1600,14 @@ export class ProceduralWorldGenerator {
     const specialThreshold = special.softTransition
       ? clamp(0.58 + specialStrength * 0.24 + biomeCore * 0.10, 0.58, 0.92)
       : 1;
-    return {
-      surfacePrimary: primarySurface,
-      surfaceSecondary: special.softTransition ? hostSurface : primarySurface,
-      subsurfacePrimary: primarySubsurface,
-      subsurfaceSecondary: special.softTransition ? hostSubsurface : primarySubsurface,
-      water: special.water,
-      snow: special.snow,
-      transitionThreshold: specialThreshold,
-    };
+    materials.surfacePrimary = primarySurface;
+    materials.surfaceSecondary = special.softTransition ? hostSurface : primarySurface;
+    materials.subsurfacePrimary = primarySubsurface;
+    materials.subsurfaceSecondary = special.softTransition ? hostSubsurface : primarySubsurface;
+    materials.water = special.water;
+    materials.snow = special.snow;
+    materials.transitionThreshold = specialThreshold;
+    return materials;
   }
 
   private resolveWaterTopY(

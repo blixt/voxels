@@ -4380,3 +4380,70 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - It materially reduces surface-only generator work and keeps the live walk fully interactive.
 - The next generator hotspot to attack is the Y-range path, which still uses the full surface/material/landmark sampler when it only needs the column height envelope.
+
+## 2026-03-12 generator allocation cuts after rejecting the envelope path
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-generator.test.ts`
+- `mise exec -- bun -e 'import { ProceduralWorldGenerator } from "./src/engine/procedural-generator.ts"; ...'`
+- `mise run bench-browser-game -- --label=surface-selection-scratch --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=1 --walk-duration=10 --walk-settle=4 --walk-sample-hz=60`
+- `mise run trace-route -- --benchmark=live-forward --label=surface-selection-scratch-trace --duration=10 --settle=4 --sample-hz=60`
+
+#### Numeric probes
+
+- Focused verification:
+  - `28` pass
+  - `0` fail
+- Generator microbench before the kept allocation-cut slice:
+  - `generateBatchMs = 829.558`
+  - `sampleColumnGridMs = 21.827`
+  - `checksum = 6202546`
+- Generator microbench after the kept allocation-cut slice:
+  - `generateBatchMs = 797.016`
+  - `sampleColumnGridMs = 20.653`
+  - `checksum = 6202546`
+- Rejected envelope experiment notes:
+  - first envelope microbench: `fullMs = 26.666`, `envelopeMs = 20.320`
+  - refined envelope microbench: `fullMs = 26.930`, `envelopeMs = 20.044`
+  - but the live-walk benchmark regressed to about `1.398 ms` average gameplay frame and `3620.115 ms` delta-task duration, so I discarded that code
+- Walk benchmark output for the kept slice:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-b3Wyh8/report.json`
+  - benchmark elapsed `14156.715 ms`
+  - avg gameplay frame `1.290 ms`
+  - p95 gameplay frame `3.4 ms`
+  - max gameplay frame `10.2 ms`
+  - hole-signal frames `0`
+  - peak JS heap used `14542300 bytes`
+  - `avg_deltaTaskDurationMs = 3406.150`
+- Previous comparable walk benchmark:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-NLE1p0/report.json`
+  - avg gameplay frame `1.292 ms`
+  - p95 gameplay frame `3.5 ms`
+  - max gameplay frame `9.6 ms`
+  - hole-signal frames `0`
+  - `avg_deltaTaskDurationMs = 3422.525`
+- Live-forward Chrome trace for the kept slice:
+  - report: `artifacts/browser-route-trace/20260312T230103Z-surface-selection-scratch-trace/report.json`
+  - avg gameplay frame `1.3735556879023698 ms`
+  - p95 gameplay frame `3.599999964237213 ms`
+  - max gameplay frame `14.5 ms`
+  - hole-signal frames `0`
+- Previous comparable live-forward trace:
+  - report: `artifacts/browser-route-trace/20260312T224131Z-surface-field-split-trace/report.json`
+  - avg gameplay frame `1.4690476187283084 ms`
+  - p95 gameplay frame `3.800000011920929 ms`
+  - max gameplay frame `10.800000011920929 ms`
+  - hole-signal frames `0`
+- Trace hotspot comparison:
+  - before the kept slice, reported exclusive hotspots still included:
+    - `selectBiomeClassification @ assets/procedural-generation-worker.js:0`
+    - `resolveSurfaceMaterials @ assets/procedural-generation-worker.js:0`
+  - after the kept slice, neither appears in the reported top exclusive hotspot list
+
+#### Residual
+
+- This slice is worth keeping.
+- It removes real generator-side allocation churn and improves the steady-state live-forward trace without regressing holes.
+- The next likely generator target is surface shaping math such as `sampleSurfaceY(...)`, while the next broader engine target is chunk-meshing worker cost.

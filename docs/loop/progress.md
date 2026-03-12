@@ -2194,3 +2194,30 @@
 - Residual:
   - the trace hotspot now points more clearly at surface classification/material work and the Y-range path
   - the next clean generator step is a true surface-envelope sampler for residency Y-range estimation, so we stop paying landmark/material resolution when only `surfaceY / topY / waterTopY` are needed
+
+## 2026-03-12 generator allocation cuts after rejecting the envelope path
+
+- I explicitly tried the obvious follow-up after the surface/cave split:
+  - add a lightweight column-envelope sampler and route residency Y-range work through it
+  - the idea was sound on paper, but the first real version still paid too much landmark logic and made the live walk worse
+  - I refined it once with a cheaper landmark-height estimate and reran the 10-second walk
+  - it was still worse than the committed baseline, so I removed the whole slice instead of keeping another “optimization” that only looked good in a microbench
+- That rejection clarified the real next target:
+  - the accepted trace after `f59a6ec` still showed `selectBiomeClassification(...)` and `resolveSurfaceMaterials(...)` as meaningful worker hotspots
+  - both still allocated fresh per-column objects
+  - this was a much better place to cut than adding another sampling mode
+- The kept change removes those hot-path allocations directly:
+  - `selectBiomeClassification(...)` no longer creates a candidate array or selected-candidate object every column
+  - it now does direct threshold comparisons and writes into one reusable selection scratch
+  - `resolveSurfaceMaterials(...)` no longer allocates a fresh material bundle every column
+  - it now writes into one reusable `ResolvedSurfaceMaterials` scratch and reuses the existing override path
+- The fixed generator probe moved again in the right direction with the same checksum:
+  - pre-slice committed state: about `829.558 ms` chunk batch and `21.827 ms` sample-column grid
+  - kept allocation-cut state: about `797.016 ms` chunk batch and `20.653 ms` sample-column grid
+- The browser acceptance is modest but real, and importantly it stayed on the right side of the previous live-walk baseline:
+  - the 10-second forward-walk benchmark moved to about `1.290 ms` average gameplay frame, `3.4 ms` p95, and `3406.150 ms` delta-task duration
+  - the live-forward trace moved to about `1.374 ms` average gameplay frame and `3.6 ms` p95 with `0` hole-signal frames
+  - the reported exclusive hotspot list no longer calls out `selectBiomeClassification(...)` or `resolveSurfaceMaterials(...)`
+- Residual:
+  - generator-side surface shaping is still hot, especially `sampleSurfaceY(...)` and nearby field math
+  - chunk meshing worker cost is also now clearer again once the surface allocation noise is reduced
