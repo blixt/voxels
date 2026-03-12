@@ -14,6 +14,7 @@ interface WorkerReadyMessage {
 interface WorkerGeneratedMessage {
   type: "generated";
   requestId: number;
+  source: "cache" | "generated";
   chunk: TransferredGeneratedChunk;
 }
 
@@ -54,6 +55,8 @@ export function createAsyncProceduralChunkGeneration(
   const pendingRequests = new Map<number, PendingRequest>();
   const pendingKeys = new Set<string>();
   const completedChunks: GeneratedChunk[] = [];
+  let completedCacheHits = 0;
+  let completedGenerated = 0;
   let nextRequestId = 1;
 
   const handleMessage = (slotIndex: number, event: MessageEvent<WorkerMessage>) => {
@@ -68,6 +71,11 @@ export function createAsyncProceduralChunkGeneration(
     pendingRequests.delete(message.requestId);
     pendingKeys.delete(pending.key);
     workerSlots[slotIndex]!.pendingCount = Math.max(0, workerSlots[slotIndex]!.pendingCount - 1);
+    if (message.source === "cache") {
+      completedCacheHits += 1;
+    } else {
+      completedGenerated += 1;
+    }
     completedChunks.push(deserializeGeneratedChunk(message.chunk));
   };
 
@@ -129,6 +137,15 @@ export function createAsyncProceduralChunkGeneration(
       }
       return completedChunks.splice(0, completedChunks.length);
     },
+    drainCompletionStats() {
+      const stats = {
+        cacheHits: completedCacheHits,
+        generated: completedGenerated,
+      };
+      completedCacheHits = 0;
+      completedGenerated = 0;
+      return stats;
+    },
     dispose(): void {
       for (const slot of workerSlots) {
         slot.worker.terminate();
@@ -137,6 +154,8 @@ export function createAsyncProceduralChunkGeneration(
       pendingRequests.clear();
       pendingKeys.clear();
       completedChunks.length = 0;
+      completedCacheHits = 0;
+      completedGenerated = 0;
     },
   };
 }

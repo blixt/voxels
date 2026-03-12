@@ -225,6 +225,22 @@ test("generated chunk data matches direct material sampling", () => {
   }
 });
 
+test("surface column sampling matches the full column fields used by far-field rendering", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  for (const [x, z] of [
+    [0, 0],
+    [512, -384],
+    [-1440, 960],
+    [4096, 2048],
+  ] as const) {
+    const full = generator.sampleColumn(x, z);
+    const surface = generator.sampleSurfaceColumn(x, z);
+    expect(surface.surfaceY).toBe(full.surfaceY);
+    expect(surface.waterTopY).toBe(full.waterTopY);
+    expect(surface.surfaceMaterial).toBe(full.surfaceMaterial);
+  }
+});
+
 test("procedural biome probe is deterministic for surface, fields, and landmarks", () => {
   const generator = new ProceduralWorldGenerator(1337);
   const a = generator.sampleBiomeProbe(1440, -960);

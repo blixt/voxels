@@ -137,6 +137,8 @@ export interface GameHudSnapshot {
   streamPendingChunks: number;
   streamEmptyChunksSkipped: number;
   streamCachedEmptyChunkHits: number;
+  streamCompletedChunkCacheHits: number;
+  streamCompletedGeneratedChunks: number;
   streamDirtyResidentChunks: number;
   residencyRadiusChunks: number;
   surfaceY: number;
@@ -756,6 +758,8 @@ export class GameController {
       streamPendingChunks: this.lastStreamSummary.pendingChunks,
       streamEmptyChunksSkipped: this.lastStreamSummary.emptyChunksSkipped,
       streamCachedEmptyChunkHits: this.lastStreamSummary.cachedEmptyChunkHits,
+      streamCompletedChunkCacheHits: this.lastStreamSummary.phaseMs.completedChunkCacheHits,
+      streamCompletedGeneratedChunks: this.lastStreamSummary.phaseMs.completedGeneratedChunks,
       streamDirtyResidentChunks: this.world.countDirtyResidentChunks(),
       residencyRadiusChunks: this.lastStreamSummary.radiusChunks,
       surfaceY: this.lastStreamSummary.surfaceY,
@@ -2754,6 +2758,8 @@ function zeroResidencyPhaseMetrics(): ResidencyUpdateSummary["phaseMs"] {
     evictionMs: 0,
     neighborDirtyMs: 0,
     inFlightChunks: 0,
+    completedChunkCacheHits: 0,
+    completedGeneratedChunks: 0,
   };
 }
 

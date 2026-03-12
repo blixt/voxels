@@ -4,6 +4,7 @@ import type { ChunkBounds, ChunkCoordinate } from "./types.ts";
 
 export const HEX_COLOR_COUNT = 0x1000;
 export const PROCEDURAL_WORLD_MAX_Y = 16_384;
+export const PROCEDURAL_WORLD_GENERATION_VERSION = "20260312-persist-v1";
 
 export type BaseBiomeId = "verdant" | "savanna" | "steppe" | "dunes" | "badlands" | "highland" | "moor" | "tundra";
 export type SpecialBiomeId = "marsh" | "firefly" | "saltflat" | "fern" | "fungal" | "ember" | "bloom" | "shardlands";
@@ -232,6 +233,13 @@ export interface ProceduralColumnSample {
   topY: number;
   waterTopY: number | null;
   surfaceMaterial: number;
+}
+
+export interface ProceduralSurfaceColumnSample {
+  surfaceY: number;
+  waterTopY: number | null;
+  surfaceMaterial: number;
+  waterMaterial: number | null;
 }
 
 export interface ProceduralBiomeProbe extends ProceduralColumnSample {
@@ -1003,13 +1011,13 @@ export class ProceduralWorldGenerator {
 
   sampleColumn(worldX: number, worldZ: number): ProceduralColumnSample {
     const state = createMutableColumnState();
-    this.fillColumnState(worldX, worldZ, state);
+    this.fillColumnState(worldX, worldZ, state, false);
     return columnSampleFromState(state);
   }
 
   sampleBiomeProbe(worldX: number, worldZ: number): ProceduralBiomeProbe {
     const state = createMutableColumnState();
-    this.fillColumnState(worldX, worldZ, state);
+    this.fillColumnState(worldX, worldZ, state, false);
     return {
       ...columnSampleFromState(state),
       secondaryBiomeId: state.secondaryBiomeId,
@@ -1030,12 +1038,60 @@ export class ProceduralWorldGenerator {
     };
   }
 
+  sampleSurfaceColumn(worldX: number, worldZ: number): ProceduralSurfaceColumnSample {
+    const fields = this.sampleFields(worldX, worldZ);
+    const baseBlend = this.selectBaseBiomes(fields);
+    const terrainProfile = blendTerrainProfile(baseBlend.primary, baseBlend.secondary, baseBlend.primaryWeight);
+    const biomeSelection = this.selectBiomeClassification(fields, baseBlend);
+    const biomeId = biomeSelection.biomeId;
+    const specialStrength = biomeSelection.specialStrength;
+    const biomeCore = biomeSelection.biomeCore;
+    let surfaceY = this.sampleSurfaceY(fields, terrainProfile, biomeCore);
+    surfaceY = adjustSpecialBiomeSurfaceY(this.seaLevel, biomeId, specialStrength, fields, biomeCore, surfaceY);
+    const regionalVariant = selectRegionalVariant(biomeId, fields);
+    if (regionalVariant) {
+      surfaceY += sampleRegionalVariantSurfaceDelta(regionalVariant.id, regionalVariant.strength, fields, biomeCore);
+    }
+    surfaceY = clamp(surfaceY, 8, this.maxYExclusive - 2);
+    const snowLine = terrainProfile.snowLine - Math.round((fields.temperature - 0.5) * 90);
+    const surfaceMaterials = this.resolveSurfaceMaterials(
+      biomeId,
+      baseBlend.primary,
+      baseBlend.secondary,
+      baseBlend.primaryWeight,
+      specialStrength,
+      fields,
+      biomeCore,
+      surfaceY,
+    );
+    if (regionalVariant) {
+      applyRegionalVariantMaterialOverrides(surfaceMaterials, regionalVariant.id);
+    }
+    const waterTopY = this.resolveWaterTopY(
+      biomeId,
+      surfaceY,
+      fields,
+      specialStrength,
+      regionalVariant?.id ?? null,
+      regionalVariant?.strength ?? 0,
+    );
+    if (hasStandingWater(surfaceY, waterTopY)) {
+      surfaceMaterials.surfacePrimary = surfaceMaterials.subsurfacePrimary;
+    }
+    return {
+      surfaceY,
+      waterTopY: waterTopY !== NO_WATER ? waterTopY : null,
+      surfaceMaterial: surfaceY >= snowLine && biomeId !== "ember" ? surfaceMaterials.snow : surfaceMaterials.surfacePrimary,
+      waterMaterial: waterTopY !== NO_WATER ? surfaceMaterials.water : null,
+    };
+  }
+
   sampleMaterial(worldX: number, worldY: number, worldZ: number): number {
     if (worldY < 0 || worldY >= this.maxYExclusive) {
       return 0;
     }
     const state = createMutableColumnState();
-    this.fillColumnState(worldX, worldZ, state);
+    this.fillColumnState(worldX, worldZ, state, true);
     return this.sampleMaterialFromColumn(state, worldY);
   }
 
@@ -1051,7 +1107,7 @@ export class ProceduralWorldGenerator {
       const worldZ = originZ + z;
       const rowOffset = z * this.chunkSize;
       for (let x = 0; x < this.chunkSize; x += 1) {
-        this.fillColumnState(originX + x, worldZ, columnState);
+        this.fillColumnState(originX + x, worldZ, columnState, true);
         this.writeChunkColumnState(scratch, x + rowOffset, columnState);
       }
     }
@@ -1108,7 +1164,12 @@ export class ProceduralWorldGenerator {
     };
   }
 
-  private fillColumnState(worldX: number, worldZ: number, out: MutableColumnState): void {
+  private fillColumnState(
+    worldX: number,
+    worldZ: number,
+    out: MutableColumnState,
+    includeCaveState: boolean,
+  ): void {
     const fields = this.sampleFields(worldX, worldZ);
     const baseBlend = this.selectBaseBiomes(fields);
     const terrainProfile = blendTerrainProfile(baseBlend.primary, baseBlend.secondary, baseBlend.primaryWeight);
@@ -1117,36 +1178,7 @@ export class ProceduralWorldGenerator {
     let surfaceY = this.sampleSurfaceY(fields, terrainProfile, biomeCore);
     const biomeId = biomeSelection.biomeId;
     const specialStrength = biomeSelection.specialStrength;
-    switch (biomeId) {
-      case "marsh":
-        surfaceY -= Math.round(lerp(1, 7, specialStrength) * (0.35 + biomeCore * 0.65));
-        break;
-      case "firefly":
-        surfaceY -= Math.round(lerp(0, 4, specialStrength) * (0.30 + biomeCore * 0.50));
-        break;
-      case "saltflat": {
-        const saltTarget = this.seaLevel - 10 + Math.round((fields.surfacePatch - 0.5) * 6);
-        surfaceY = Math.round(lerp(surfaceY, saltTarget, clamp(0.36 + specialStrength * 0.42, 0, 0.86)));
-        break;
-      }
-      case "fern":
-        surfaceY -= Math.round(lerp(0, 3, specialStrength) * (0.25 + biomeCore * 0.55));
-        break;
-      case "fungal":
-        surfaceY += Math.round((fields.detail - 0.5) * lerp(6, 14, specialStrength) * (0.30 + biomeCore * 0.70));
-        break;
-      case "bloom":
-        surfaceY += Math.round(lerp(0, 4, specialStrength) * (fields.magic - 0.5) * (0.3 + biomeCore * 0.7));
-        break;
-      case "ember":
-        surfaceY += Math.round(lerp(2, 11, specialStrength) * (0.25 + fields.mesa) * (0.35 + biomeCore * 0.65));
-        break;
-      case "shardlands":
-        surfaceY += Math.round(lerp(3, 12, specialStrength) * (0.35 + fields.ridge * 0.65) * (0.30 + biomeCore * 0.70));
-        break;
-      default:
-        break;
-    }
+    surfaceY = adjustSpecialBiomeSurfaceY(this.seaLevel, biomeId, specialStrength, fields, biomeCore, surfaceY);
 
     const regionalVariant = selectRegionalVariant(biomeId, fields);
     if (regionalVariant) {
@@ -1241,6 +1273,21 @@ export class ProceduralWorldGenerator {
     out.worldZDiv3 = Math.floor(worldZ * ONE_THIRD);
     out.ditherSeed = this.transitionSeed + baseBlend.primary.surface + baseBlend.secondary.surface;
     out.accentSeed = this.seed + underground.accent;
+    if (!includeCaveState) {
+      out.caveMainField = 0;
+      out.caveMainStrength = 0;
+      out.caveMainCenterY = 0;
+      out.caveMainHalfHeight = 0;
+      out.caveUpperField = 0;
+      out.caveUpperStrength = 0;
+      out.caveUpperCenterY = 0;
+      out.caveUpperHalfHeight = 0;
+      out.caveEntranceField = 0;
+      out.caveEntranceStrength = 0;
+      out.caveEntranceCenterY = 0;
+      out.caveEntranceHalfHeight = 0;
+      return;
+    }
     this.configureCaveState(
       worldX,
       worldZ,
@@ -2997,6 +3044,38 @@ function selectRegionalVariant(biomeId: BiomeId, fields: ColumnFieldSample): Reg
       break;
   }
   return id === null ? null : { id, strength };
+}
+
+function adjustSpecialBiomeSurfaceY(
+  seaLevel: number,
+  biomeId: BiomeId,
+  specialStrength: number,
+  fields: ColumnFieldSample,
+  biomeCore: number,
+  surfaceY: number,
+): number {
+  switch (biomeId) {
+    case "marsh":
+      return surfaceY - Math.round(lerp(1, 7, specialStrength) * (0.35 + biomeCore * 0.65));
+    case "firefly":
+      return surfaceY - Math.round(lerp(0, 4, specialStrength) * (0.30 + biomeCore * 0.50));
+    case "saltflat": {
+      const saltTarget = seaLevel - 10 + Math.round((fields.surfacePatch - 0.5) * 6);
+      return Math.round(lerp(surfaceY, saltTarget, clamp(0.36 + specialStrength * 0.42, 0, 0.86)));
+    }
+    case "fern":
+      return surfaceY - Math.round(lerp(0, 3, specialStrength) * (0.25 + biomeCore * 0.55));
+    case "fungal":
+      return surfaceY + Math.round((fields.detail - 0.5) * lerp(6, 14, specialStrength) * (0.30 + biomeCore * 0.70));
+    case "bloom":
+      return surfaceY + Math.round(lerp(0, 4, specialStrength) * (fields.magic - 0.5) * (0.3 + biomeCore * 0.7));
+    case "ember":
+      return surfaceY + Math.round(lerp(2, 11, specialStrength) * (0.25 + fields.mesa) * (0.35 + biomeCore * 0.65));
+    case "shardlands":
+      return surfaceY + Math.round(lerp(3, 12, specialStrength) * (0.35 + fields.ridge * 0.65) * (0.30 + biomeCore * 0.70));
+    default:
+      return surfaceY;
+  }
 }
 
 function sampleRegionalVariantSurfaceDelta(

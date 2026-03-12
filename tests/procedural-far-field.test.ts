@@ -331,8 +331,14 @@ test("procedural far field can preserve water tops inside coarse cells", () => {
         surfaceMaterial: 1,
       };
     },
-    sampleMaterial(_worldX: number, worldY: number) {
-      return worldY >= 6 ? 2 : 1;
+    sampleSurfaceColumn(worldX: number, worldZ: number) {
+      const hasWater = worldX >= 2 && worldX <= 6 && worldZ >= 2 && worldZ <= 6;
+      return {
+        surfaceY: hasWater ? 2 : 6,
+        waterTopY: hasWater ? 6 : null,
+        surfaceMaterial: 1,
+        waterMaterial: hasWater ? 2 : null,
+      };
     },
   } as unknown as ProceduralWorldGenerator, [
     { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32 },
@@ -362,6 +368,14 @@ function createTestGenerator(
         surfaceY: surfaceYForWorldPosition(worldX, worldZ),
         waterTopY: null,
         surfaceMaterial: 1,
+      };
+    },
+    sampleSurfaceColumn(worldX: number, worldZ: number) {
+      return {
+        surfaceY: surfaceYForWorldPosition(worldX, worldZ),
+        waterTopY: null,
+        surfaceMaterial: 1,
+        waterMaterial: null,
       };
     },
   } as unknown as ProceduralWorldGenerator;

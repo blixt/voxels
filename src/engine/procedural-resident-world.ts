@@ -24,6 +24,8 @@ export interface ResidencyPhaseMetrics {
   evictionMs: number;
   neighborDirtyMs: number;
   inFlightChunks: number;
+  completedChunkCacheHits: number;
+  completedGeneratedChunks: number;
 }
 
 export interface ResidencyUpdateSummary {
@@ -452,6 +454,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     let inFlightChunks = this.asyncChunkGeneration?.getPendingCount() ?? 0;
     const drainStartedAt = performance.now();
     const completedGeneratedChunks = this.asyncChunkGeneration?.drainCompletedChunks() ?? [];
+    const completedGenerationStats = this.asyncChunkGeneration?.drainCompletionStats() ?? { cacheHits: 0, generated: 0 };
     chunkDrainMs = performance.now() - drainStartedAt;
     const completedGeneratedChunksByKey = new Map<string, GeneratedChunk>();
     for (const generated of completedGeneratedChunks) {
@@ -594,6 +597,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         evictionMs,
         neighborDirtyMs,
         inFlightChunks,
+        completedChunkCacheHits: completedGenerationStats.cacheHits,
+        completedGeneratedChunks: completedGenerationStats.generated,
       },
     };
     return this.lastResidency;
@@ -946,6 +951,8 @@ function zeroResidencyPhaseMetrics(): ResidencyPhaseMetrics {
     evictionMs: 0,
     neighborDirtyMs: 0,
     inFlightChunks: 0,
+    completedChunkCacheHits: 0,
+    completedGeneratedChunks: 0,
   };
 }
 

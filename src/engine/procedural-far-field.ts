@@ -1326,23 +1326,25 @@ function sampleFarFieldCell(
 } {
   const centerX = cellMinX + sampleStride * 0.5;
   const centerZ = cellMinZ + sampleStride * 0.5;
-  const centerColumn = generator.sampleColumn(centerX, centerZ);
+  const centerColumn = generator.sampleSurfaceColumn(centerX, centerZ);
   let waterTopY: number | null = centerColumn.waterTopY;
-  let waterColor = waterTopY !== null
-    ? generator.palette[generator.sampleMaterial(centerX, waterTopY, centerZ)] ?? 0
+  let waterColor = centerColumn.waterMaterial !== null
+    ? generator.palette[centerColumn.waterMaterial] ?? 0
     : 0;
 
   if (sampleStride <= metersToWorldUnits(1.6)) {
     for (const [offsetX, offsetZ] of FEATURE_SAMPLE_OFFSETS) {
       const sampleX = cellMinX + sampleStride * offsetX;
       const sampleZ = cellMinZ + sampleStride * offsetZ;
-      const column = generator.sampleColumn(sampleX, sampleZ);
+      const column = generator.sampleSurfaceColumn(sampleX, sampleZ);
       if (column.waterTopY === null) {
         continue;
       }
       if (waterTopY === null || column.waterTopY > waterTopY) {
         waterTopY = column.waterTopY;
-        waterColor = generator.palette[generator.sampleMaterial(sampleX, column.waterTopY, sampleZ)] ?? waterColor;
+        waterColor = column.waterMaterial !== null
+          ? generator.palette[column.waterMaterial] ?? waterColor
+          : waterColor;
       }
     }
   }
@@ -1506,7 +1508,7 @@ function sampleBoundaryMinSurfaceY(
       : direction === "north"
       ? worldZ - 0.5
       : worldZ + offset;
-    minSurfaceY = Math.min(minSurfaceY, generator.sampleColumn(sampleX, sampleZ).surfaceY);
+    minSurfaceY = Math.min(minSurfaceY, generator.sampleSurfaceColumn(sampleX, sampleZ).surfaceY);
   }
   return minSurfaceY;
 }
