@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { fnv1a } from "../src/engine/math.ts";
+import type { FarFieldSurfaceSource } from "../src/engine/far-field-source.ts";
 import { ProceduralFarField } from "../src/engine/procedural-far-field.ts";
 import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
@@ -8,7 +9,7 @@ import type { ChunkMeshData } from "../src/engine/types.ts";
 import { applyWaterDepthTint } from "../src/engine/water-visuals.ts";
 
 test("procedural far field covers a few hundred meters with five render bands", () => {
-  const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337));
+  const farField = new ProceduralFarField(createGeneratorBackedSource(new ProceduralWorldGenerator(1337)));
 
   const summary = farField.updateAround([0, 0, 0]);
 
@@ -22,7 +23,7 @@ test("procedural far field covers a few hundred meters with five render bands", 
 });
 
 test("procedural far field reuses meshes while staying inside the current anchor window", () => {
-  const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337));
+  const farField = new ProceduralFarField(createGeneratorBackedSource(new ProceduralWorldGenerator(1337)));
   farField.updateAround([0, 0, 0]);
 
   const summary = farField.updateAround([3, 0, 3]);
@@ -34,7 +35,7 @@ test("procedural far field reuses meshes while staying inside the current anchor
 });
 
 test("procedural far field default bands stay stable across a few meters of movement", () => {
-  const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337));
+  const farField = new ProceduralFarField(createGeneratorBackedSource(new ProceduralWorldGenerator(1337)));
   farField.updateAround([0, 0, 0]);
 
   const summary = farField.updateAround([24, 0, 0]);
@@ -45,7 +46,7 @@ test("procedural far field default bands stay stable across a few meters of move
 });
 
 test("procedural far field rebuilds when crossing the nearest anchor stride", () => {
-  const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337));
+  const farField = new ProceduralFarField(createGeneratorBackedSource(new ProceduralWorldGenerator(1337)));
   farField.updateAround([0, 0, 0]);
 
   const summary = farField.updateAround([320, 0, 0]);
@@ -55,7 +56,7 @@ test("procedural far field rebuilds when crossing the nearest anchor stride", ()
 });
 
 test("procedural far field rebuilds the near band when the clear radius grows in place", () => {
-  const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337));
+  const farField = new ProceduralFarField(createGeneratorBackedSource(new ProceduralWorldGenerator(1337)));
   farField.updateAround([0, 0, 0]);
   const midBand = farField.getRenderables()[0]!;
   const initialTriangleCount = midBand.triangleCount;
@@ -69,7 +70,7 @@ test("procedural far field rebuilds the near band when the clear radius grows in
 });
 
 test("procedural far field clears out the near resident radius to avoid overlap", () => {
-  const generator = new ProceduralWorldGenerator(1337);
+  const generator = createGeneratorBackedSource(new ProceduralWorldGenerator(1337));
   const baseline = new ProceduralFarField(generator, [
     { label: "near", innerRadius: 0, outerRadius: 96, sampleStride: 8, anchorStride: 128 },
   ]);
@@ -87,7 +88,7 @@ test("procedural far field clears out the near resident radius to avoid overlap"
 });
 
 test("procedural far field keeps the inner hole centered on the player inside one anchor window", () => {
-  const farField = new ProceduralFarField(createTestGenerator(() => 12), [
+  const farField = new ProceduralFarField(createTestSource(() => 12), [
     { label: "near", innerRadius: 64, outerRadius: 192, sampleStride: 16, anchorStride: 256 },
   ]);
 
@@ -98,7 +99,7 @@ test("procedural far field keeps the inner hole centered on the player inside on
 });
 
 test("procedural far field default bands are ordered without overlap", () => {
-  const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337));
+  const farField = new ProceduralFarField(createGeneratorBackedSource(new ProceduralWorldGenerator(1337)));
   const bands = farField.getRenderables();
 
   for (let index = 1; index < bands.length; index += 1) {
@@ -108,7 +109,7 @@ test("procedural far field default bands are ordered without overlap", () => {
 
 test("procedural far field emits vertical faces in all four directions", () => {
   const farField = new ProceduralFarField(
-    createTestGenerator((worldX, worldZ) => (worldX >= 0 && worldX < 8 && worldZ >= 0 && worldZ < 8 ? 8 : 1)),
+    createTestSource((worldX, worldZ) => (worldX >= 0 && worldX < 8 && worldZ >= 0 && worldZ < 8 ? 8 : 1)),
     [
       { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32 },
     ],
@@ -124,7 +125,7 @@ test("procedural far field emits vertical faces in all four directions", () => {
 });
 
 test("procedural far field exclusion masks remove overlapping top cells", () => {
-  const generator = createTestGenerator(() => 4);
+  const generator = createTestSource(() => 4);
   const farField = new ProceduralFarField(generator, [
     { label: "test", innerRadius: 0, outerRadius: 16, sampleStride: 8, anchorStride: 32 },
   ]);
@@ -149,7 +150,7 @@ test("procedural far field exclusion masks remove overlapping top cells", () => 
 });
 
 test("procedural far field reuses sampled terrain when only the exclusion mask changes", () => {
-  const generator = createTestGenerator(() => 4);
+  const generator = createTestSource(() => 4);
   const farField = new ProceduralFarField(generator, [
     { label: "test", innerRadius: 0, outerRadius: 16, sampleStride: 8, anchorStride: 32 },
   ]);
@@ -176,7 +177,7 @@ test("procedural far field reuses most sampled cells when shifting one anchor wi
   const config = [
     { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32, centerStride: 32 },
   ] as const;
-  const generator = new ProceduralWorldGenerator(1337);
+  const generator = createGeneratorBackedSource(new ProceduralWorldGenerator(1337));
   const reused = new ProceduralFarField(generator, config);
   const fresh = new ProceduralFarField(generator, config);
 
@@ -191,7 +192,7 @@ test("procedural far field reuses most sampled cells when shifting one anchor wi
 });
 
 test("procedural far field can defer excess band rebuilds behind a per-frame budget", () => {
-  const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337), [
+  const farField = new ProceduralFarField(createGeneratorBackedSource(new ProceduralWorldGenerator(1337)), [
     { label: "near", innerRadius: 0, outerRadius: 64, sampleStride: 8, anchorStride: 32, centerStride: 32 },
     { label: "mid", innerRadius: 64, outerRadius: 128, sampleStride: 16, anchorStride: 64, centerStride: 64 },
   ]);
@@ -209,7 +210,7 @@ test("procedural far field can defer excess band rebuilds behind a per-frame bud
 });
 
 test("procedural far field only recenters bands when crossing their own center stride", () => {
-  const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337), [
+  const farField = new ProceduralFarField(createGeneratorBackedSource(new ProceduralWorldGenerator(1337)), [
     { label: "near", innerRadius: 0, outerRadius: 64, sampleStride: 8, anchorStride: 128, centerStride: 32 },
     { label: "mid", innerRadius: 64, outerRadius: 128, sampleStride: 16, anchorStride: 128, centerStride: 64 },
   ]);
@@ -226,7 +227,7 @@ test("procedural far field only recenters bands when crossing their own center s
 
 test("procedural far field keeps a seam wall against lower masked neighbors", () => {
   const farField = new ProceduralFarField(
-    createTestGenerator((worldX, worldZ) => (worldX < 8 && worldZ < 8 ? 8 : 1)),
+    createTestSource((worldX, worldZ) => (worldX < 8 && worldZ < 8 ? 8 : 1)),
     [
       { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32 },
     ],
@@ -249,7 +250,7 @@ test("procedural far field keeps a seam wall against lower masked neighbors", ()
 });
 
 test("procedural far field adds a downward skirt against flat masked seams", () => {
-  const farField = new ProceduralFarField(createTestGenerator(() => 8), [
+  const farField = new ProceduralFarField(createTestSource(() => 8), [
     { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32 },
   ]);
   const exclusionMask = {
@@ -270,7 +271,7 @@ test("procedural far field adds a downward skirt against flat masked seams", () 
 });
 
 test("procedural far field seam probe reports no masked-edge terrain gaps on a flat seam", () => {
-  const farField = new ProceduralFarField(createTestGenerator(() => 8), [
+  const farField = new ProceduralFarField(createTestSource(() => 8), [
     { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32 },
   ]);
   const exclusionMask = {
@@ -288,7 +289,7 @@ test("procedural far field seam probe reports no masked-edge terrain gaps on a f
 
 test("procedural far field surface probe reports no downward slope gaps on sampled boundaries", () => {
   const farField = new ProceduralFarField(
-    createTestGenerator((worldX, worldZ) => {
+    createTestSource((worldX, worldZ) => {
       if (worldZ < 0 || worldZ >= 8) {
         return 1;
       }
@@ -322,16 +323,7 @@ test("procedural far field can preserve water tops inside coarse cells", () => {
   const tintedWaterColor = applyWaterDepthTint(waterColor, 4);
   const farField = new ProceduralFarField({
     palette: [0, terrainColor, waterColor],
-    sampleColumn(worldX: number, worldZ: number) {
-      const hasWater = worldX >= 2 && worldX <= 6 && worldZ >= 2 && worldZ <= 6;
-      return {
-        biomeId: "verdant",
-        surfaceY: hasWater ? 2 : 6,
-        waterTopY: hasWater ? 6 : null,
-        surfaceMaterial: 1,
-      };
-    },
-    sampleSurfaceColumn(worldX: number, worldZ: number) {
+    sampleFarFieldColumn(worldX: number, worldZ: number) {
       const hasWater = worldX >= 2 && worldX <= 6 && worldZ >= 2 && worldZ <= 6;
       return {
         surfaceY: hasWater ? 2 : 6,
@@ -340,7 +332,7 @@ test("procedural far field can preserve water tops inside coarse cells", () => {
         waterMaterial: hasWater ? 2 : null,
       };
     },
-  } as unknown as ProceduralWorldGenerator, [
+  } as FarFieldSurfaceSource, [
     { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32 },
   ]);
 
@@ -357,20 +349,12 @@ test("procedural far field can preserve water tops inside coarse cells", () => {
   expect(waterTopColors).toContain(tintedWaterColor);
 });
 
-function createTestGenerator(
+function createTestSource(
   surfaceYForWorldPosition: (worldX: number, worldZ: number) => number,
-): ProceduralWorldGenerator {
+): FarFieldSurfaceSource {
   return {
     palette: [0, 0xff_aa_88_ff],
-    sampleColumn(worldX: number, worldZ: number) {
-      return {
-        biomeId: "verdant",
-        surfaceY: surfaceYForWorldPosition(worldX, worldZ),
-        waterTopY: null,
-        surfaceMaterial: 1,
-      };
-    },
-    sampleSurfaceColumn(worldX: number, worldZ: number) {
+    sampleFarFieldColumn(worldX: number, worldZ: number) {
       return {
         surfaceY: surfaceYForWorldPosition(worldX, worldZ),
         waterTopY: null,
@@ -378,7 +362,22 @@ function createTestGenerator(
         waterMaterial: null,
       };
     },
-  } as unknown as ProceduralWorldGenerator;
+  };
+}
+
+function createGeneratorBackedSource(generator: ProceduralWorldGenerator): FarFieldSurfaceSource {
+  return {
+    palette: generator.palette,
+    sampleFarFieldColumn(worldX: number, worldZ: number) {
+      const sample = generator.sampleSurfaceColumn(worldX, worldZ);
+      return {
+        surfaceY: sample.surfaceY,
+        waterTopY: sample.waterTopY,
+        surfaceMaterial: sample.surfaceMaterial,
+        waterMaterial: sample.waterMaterial,
+      };
+    },
+  };
 }
 
 function extractNormalSet(mesh: ChunkMeshData | null): Set<string> {

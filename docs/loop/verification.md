@@ -3465,3 +3465,35 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - This slice is worth keeping for code health and spawn correctness.
 - The profile does not show a clear stream-speed win from the refactor by itself, so I explicitly did not keep the “surface probe is cheaper everywhere” assumption.
+
+## 2026-03-12 generated-chunk-only far-field rendering
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/generated-chunk-codec.test.ts tests/procedural-far-field.test.ts tests/procedural-lod-coverage.test.ts tests/procedural-resident-world.test.ts`
+- `mise run build`
+- `mise run trace-route -- --label=summary-backed-smoke --duration=2 --settle=1 --sample-hz=20`
+
+#### Added verification coverage
+
+- `tests/generated-chunk-codec.test.ts`
+  - generated chunk codec round-trips persisted surface summaries
+- `tests/procedural-resident-world.test.ts`
+  - far-field sampling stays `null` until actual chunks are pre-generated
+  - far-field sampling updates after resident voxel edits instead of staying pinned to generator output
+- `tests/procedural-lod-coverage.test.ts`
+  - summary-backed far-field coverage stays continuous around settled anchors with bounded pre-generation
+
+#### Numeric probes
+
+- Headless Chrome route smoke:
+  - report: `artifacts/browser-route-trace/20260312T161252Z-summary-backed-smoke/report.json`
+  - avg gameplay frame `4.98 ms`
+  - p95 gameplay frame `12.90 ms`
+  - frames with hole signals `0`
+
+#### Residual
+
+- This slice is worth keeping.
+- The new far-surface prefetch is intentionally conservative and prioritizes resident work first, so very distant coverage still ramps in over time instead of appearing all at once.

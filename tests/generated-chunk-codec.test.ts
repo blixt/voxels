@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 
 import { decodeGeneratedChunk, encodeGeneratedChunk } from "../src/engine/generated-chunk-codec.ts";
+import { summarizeGeneratedChunkSurface } from "../src/engine/generated-chunk-surface-summary.ts";
 import type { GeneratedChunk } from "../src/engine/procedural-generator.ts";
-import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
+import { isProceduralWaterMaterial, ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
 
 test("generated chunk codec round-trips procedural chunk data", () => {
   const generator = new ProceduralWorldGenerator(1337, { chunkSize: 16 });
@@ -14,6 +15,7 @@ test("generated chunk codec round-trips procedural chunk data", () => {
   expect(decoded.coord).toEqual(chunk.coord);
   expect(decoded.solidCount).toBe(chunk.solidCount);
   expect(decoded.solidBounds).toEqual(chunk.solidBounds);
+  expect(decoded.surfaceSummary?.coveredColumnCount).toBe(chunk.surfaceSummary?.coveredColumnCount ?? 0);
   expect(Array.from(decoded.data)).toEqual(Array.from(chunk.data));
 });
 
@@ -35,6 +37,7 @@ test("generated chunk codec compresses uniform chunks well", () => {
   expect(encoded.stats.uniformSubchunkCount).toBe(64);
   expect(encoded.stats.byteLength).toBeLessThan(chunk.data.byteLength / 4);
   expect(Array.from(decoded.data)).toEqual(Array.from(chunk.data));
+  expect(decoded.surfaceSummary?.coveredColumnCount).toBe(chunk.surfaceSummary?.coveredColumnCount ?? 0);
 });
 
 function createUniformChunk(chunkSize: number, coord: { x: number; y: number; z: number }, material: number): GeneratedChunk {
@@ -51,5 +54,6 @@ function createUniformChunk(chunkSize: number, coord: { x: number; y: number; z:
           min: [0, 0, 0],
           max: [chunkSize, chunkSize, chunkSize],
         },
+    surfaceSummary: summarizeGeneratedChunkSurface(coord, data, chunkSize, isProceduralWaterMaterial),
   };
 }

@@ -1,10 +1,14 @@
 import { clamp, packRgba } from "./math.ts";
 import { fbm2D2, fbm2D3, fbm2D4, fbm2D5, hashNoise3D } from "./noise.ts";
+import {
+  summarizeGeneratedChunkSurface,
+  type GeneratedChunkSurfaceSummary,
+} from "./generated-chunk-surface-summary.ts";
 import type { ChunkBounds, ChunkCoordinate } from "./types.ts";
 
 export const HEX_COLOR_COUNT = 0x1000;
 export const PROCEDURAL_WORLD_MAX_Y = 16_384;
-export const PROCEDURAL_WORLD_GENERATION_VERSION = "20260312-persist-v1";
+export const PROCEDURAL_WORLD_GENERATION_VERSION = "20260312-persist-v2";
 
 export type BaseBiomeId = "verdant" | "savanna" | "steppe" | "dunes" | "badlands" | "highland" | "moor" | "tundra";
 export type SpecialBiomeId = "marsh" | "firefly" | "saltflat" | "fern" | "fungal" | "ember" | "bloom" | "shardlands";
@@ -267,6 +271,7 @@ export interface GeneratedChunk {
   data: Uint16Array;
   solidCount: number;
   solidBounds: ChunkBounds | null;
+  surfaceSummary: GeneratedChunkSurfaceSummary | null;
 }
 
 interface BaseBiomeBlendSelection {
@@ -1125,6 +1130,12 @@ export class ProceduralWorldGenerator {
             min: [minX, minY, minZ],
             max: [maxX, maxY, maxZ],
           },
+      surfaceSummary: summarizeGeneratedChunkSurface(
+        { x: cx, y: cy, z: cz },
+        data,
+        this.chunkSize,
+        isProceduralWaterMaterial,
+      ),
     };
   }
 

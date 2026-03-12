@@ -1,8 +1,13 @@
 import type { GeneratedChunk } from "./procedural-generator.ts";
+import {
+  NO_GENERATED_SURFACE_HEIGHT,
+  NO_GENERATED_WATER_HEIGHT,
+  type GeneratedChunkSurfaceSummary,
+} from "./generated-chunk-surface-summary.ts";
 import type { ChunkCoordinate } from "./types.ts";
 
 const CODEC_MAGIC = 0x3158_4356;
-const CODEC_VERSION = 1;
+const CODEC_VERSION = 2;
 const SUBCHUNK_SIZE = 8;
 const SUBCHUNK_VOLUME = SUBCHUNK_SIZE * SUBCHUNK_SIZE * SUBCHUNK_SIZE;
 const HEADER_BYTES = 34;
@@ -33,7 +38,13 @@ export function encodeGeneratedChunk(chunk: GeneratedChunk): EncodedGeneratedChu
   }
   const subchunksPerAxis = chunkSize / SUBCHUNK_SIZE;
   const subchunkCount = subchunksPerAxis * subchunksPerAxis * subchunksPerAxis;
-  const maxBytes = HEADER_BYTES + subchunkCount * (1 + SUBCHUNK_VOLUME * 2);
+  const chunkArea = chunkSize * chunkSize;
+  const maxBytes = HEADER_BYTES
+    + subchunkCount * (1 + SUBCHUNK_VOLUME * 2)
+    + 1
+    + 2
+    + Math.ceil(chunkArea / 8)
+    + chunkArea * 12;
   const buffer = new ArrayBuffer(maxBytes);
   const byteView = new Uint8Array(buffer);
   const view = new DataView(buffer);
@@ -75,6 +86,12 @@ export function encodeGeneratedChunk(chunk: GeneratedChunk): EncodedGeneratedChu
         }
       }
     }
+  }
+
+  byteView[byteOffset] = chunk.surfaceSummary ? 1 : 0;
+  byteOffset += 1;
+  if (chunk.surfaceSummary) {
+    byteOffset = writeSurfaceSummary(view, byteView, byteOffset, chunk.surfaceSummary, chunkSize);
   }
 
   return {
@@ -126,11 +143,21 @@ export function decodeGeneratedChunk(buffer: ArrayBuffer): GeneratedChunk {
     }
   }
 
+  const hasSurfaceSummary = view.getUint8(byteOffset) !== 0;
+  byteOffset += 1;
+  const decodedSurfaceSummary = hasSurfaceSummary
+    ? readSurfaceSummary(view, byteOffset, header.coord, header.chunkSize)
+    : null;
+  if (decodedSurfaceSummary) {
+    byteOffset = decodedSurfaceSummary.byteOffset;
+  }
+
   return {
     coord: header.coord,
     data,
     solidCount: header.solidCount,
     solidBounds: header.solidBounds,
+    surfaceSummary: decodedSurfaceSummary?.summary ?? null,
   };
 }
 
@@ -235,6 +262,87 @@ function readSubchunkMaterials(
     }
   }
   return subchunk;
+}
+
+function writeSurfaceSummary(
+  view: DataView,
+  byteView: Uint8Array,
+  byteOffset: number,
+  summary: GeneratedChunkSurfaceSummary,
+  chunkSize: number,
+): number {
+  const chunkArea = chunkSize * chunkSize;
+  view.setUint16(byteOffset, summary.coveredColumnCount, true);
+  byteOffset += 2;
+  const maskOffset = byteOffset;
+  const maskByteLength = Math.ceil(chunkArea / 8);
+  byteView.fill(0, maskOffset, maskOffset + maskByteLength);
+  byteOffset += maskByteLength;
+  for (let columnIndex = 0; columnIndex < chunkArea; columnIndex += 1) {
+    const surfaceY = summary.surfaceY[columnIndex] ?? NO_GENERATED_SURFACE_HEIGHT;
+    const waterTopY = summary.waterTopY[columnIndex] ?? NO_GENERATED_WATER_HEIGHT;
+    if (surfaceY === NO_GENERATED_SURFACE_HEIGHT && waterTopY === NO_GENERATED_WATER_HEIGHT) {
+      continue;
+    }
+    byteView[maskOffset + (columnIndex >>> 3)]! |= 1 << (columnIndex & 7);
+    view.setInt32(byteOffset, surfaceY, true);
+    byteOffset += 4;
+    view.setUint16(byteOffset, summary.surfaceMaterial[columnIndex] ?? 0, true);
+    byteOffset += 2;
+    view.setInt32(byteOffset, waterTopY, true);
+    byteOffset += 4;
+    view.setUint16(byteOffset, summary.waterMaterial[columnIndex] ?? 0, true);
+    byteOffset += 2;
+  }
+  return byteOffset;
+}
+
+function readSurfaceSummary(
+  view: DataView,
+  byteOffset: number,
+  coord: ChunkCoordinate,
+  chunkSize: number,
+): {
+  byteOffset: number;
+  summary: GeneratedChunkSurfaceSummary;
+} {
+  const chunkArea = chunkSize * chunkSize;
+  const coveredColumnCount = view.getUint16(byteOffset, true);
+  byteOffset += 2;
+  const maskByteLength = Math.ceil(chunkArea / 8);
+  const maskOffset = byteOffset;
+  byteOffset += maskByteLength;
+  const surfaceY = new Int32Array(chunkArea);
+  const surfaceMaterial = new Uint16Array(chunkArea);
+  const waterTopY = new Int32Array(chunkArea);
+  const waterMaterial = new Uint16Array(chunkArea);
+  surfaceY.fill(NO_GENERATED_SURFACE_HEIGHT);
+  waterTopY.fill(NO_GENERATED_WATER_HEIGHT);
+  for (let columnIndex = 0; columnIndex < chunkArea; columnIndex += 1) {
+    const masked = (view.getUint8(maskOffset + (columnIndex >>> 3)) & (1 << (columnIndex & 7))) !== 0;
+    if (!masked) {
+      continue;
+    }
+    surfaceY[columnIndex] = view.getInt32(byteOffset, true);
+    byteOffset += 4;
+    surfaceMaterial[columnIndex] = view.getUint16(byteOffset, true);
+    byteOffset += 2;
+    waterTopY[columnIndex] = view.getInt32(byteOffset, true);
+    byteOffset += 4;
+    waterMaterial[columnIndex] = view.getUint16(byteOffset, true);
+    byteOffset += 2;
+  }
+  return {
+    byteOffset,
+    summary: {
+      coord: { ...coord },
+      coveredColumnCount,
+      surfaceY,
+      surfaceMaterial,
+      waterTopY,
+      waterMaterial,
+    },
+  };
 }
 
 function writeUniformSubchunk(

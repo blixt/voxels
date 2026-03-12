@@ -155,7 +155,7 @@ function simulateChunkCrossing(deltaChunks: number): {
 } {
   const generator = new ProceduralWorldGenerator(seed);
   const world = new ProceduralResidentWorld(generator, { horizontalRadiusChunks: radiusChunks });
-  const farField = new ProceduralFarField(generator);
+  const farField = new ProceduralFarField(world);
   const spawn = world.getSpawnPosition();
   const initialAnchor = resolveAnchor(spawn, world.chunkSize);
 
@@ -359,6 +359,7 @@ function settleWorld(
     buildStreamAnchorPosition(anchor, world.chunkSize, feetPosition[1]),
     { maxGenerateChunks: Number.POSITIVE_INFINITY },
   );
+  world.prefetchFarFieldSurfaceAround(feetPosition, farField.getMaxRadiusWorldUnits(), Number.POSITIVE_INFINITY);
   farFieldMaskRevision += 1;
   rebuildDirtyMeshes(world, Number.POSITIVE_INFINITY, {
     priorityPosition: feetPosition,

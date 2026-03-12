@@ -1664,3 +1664,25 @@
   - dead duplicate surface logic is gone
   - the resident-world hot path no longer relies on the wrong “lightweight” assumption
   - spawn selection is now guarded by a regression test against unsupported cave-mouth footprints
+
+## 2026-03-12 generated-chunk-only far-field rendering
+
+- I then enforced the stronger architectural boundary you asked for:
+  - far-field rendering no longer imports or samples `ProceduralWorldGenerator`
+  - it now depends on a narrow `FarFieldSurfaceSource` interface and the live game passes the resident world as that source
+- To make that possible without losing data after chunk eviction:
+  - generated chunks now carry a compact top-surface summary derived from the actual chunk voxels
+  - the chunk codec persists that summary alongside the compressed chunk payload
+  - the resident world retains those summaries after chunks leave residency, so the far field can still render already-generated terrain
+- The important design decision in this slice was to derive the summary from chunk bytes, not from another generator callback:
+  - summaries track the top visible solid and water per local column in each generated chunk slab
+  - resident voxel edits immediately refresh the affected slab summary
+  - render-time far-field sampling therefore reads generated/editable world state, not procedural worldgen
+- I also added a generation-side bridge so the horizon can still fill in:
+  - the resident world now has a conservative far-surface prefetch pass
+  - it schedules real chunk generation for non-resident columns ahead of the player
+  - the far renderer only shows columns once those chunks have actually been generated and summarized
+- The kept result is the architectural one:
+  - render/LOD code no longer calls the generator
+  - far-field data now travels with generated chunks and survives cache round-trips
+  - the live browser route smoke stayed hole-free after the change

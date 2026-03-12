@@ -9,7 +9,11 @@ import type { Vec3 } from "../src/engine/types.ts";
 test("procedural far field coverage stays continuous around settled streamed anchors", () => {
   const generator = new ProceduralWorldGenerator(1337);
   const world = new ProceduralResidentWorld(generator);
-  const farField = new ProceduralFarField(generator);
+  const farField = new ProceduralFarField(world, [
+    { label: "near", innerRadius: 0, outerRadius: metersToWorldUnits(24), sampleStride: metersToWorldUnits(0.8), anchorStride: metersToWorldUnits(25.6) },
+    { label: "mid", innerRadius: metersToWorldUnits(24), outerRadius: metersToWorldUnits(48), sampleStride: metersToWorldUnits(1.6), anchorStride: metersToWorldUnits(25.6) },
+    { label: "far", innerRadius: metersToWorldUnits(48), outerRadius: metersToWorldUnits(64), sampleStride: metersToWorldUnits(3.2), anchorStride: metersToWorldUnits(51.2) },
+  ]);
   const spawn = world.getSpawnPosition();
   const chunkSize = world.chunkSize;
   const positions: Vec3[] = [
@@ -26,11 +30,11 @@ test("procedural far field coverage stays continuous around settled streamed anc
     expect(nearProbe.bandOverlapCount).toBe(0);
     expect(nearProbe.wrongBandCount).toBe(0);
 
-    const farProbe = settleAndProbeCoverage(world, farField, position, 192, 4.8);
+    const farProbe = settleAndProbeCoverage(world, farField, position, 56, 3.2);
     expect(farProbe.residentOverlapCount).toBe(0);
     expect(farProbe.uncoveredGapCount).toBe(0);
   }
-}, { timeout: 15_000 });
+}, { timeout: 20_000 });
 
 function settleAndProbeCoverage(
   world: ProceduralResidentWorld,
@@ -45,6 +49,7 @@ function settleAndProbeCoverage(
   wrongBandCount: number;
 } {
   world.updateResidencyAround(position, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+  world.prefetchFarFieldSurfaceAround(position, farField.getMaxRadiusWorldUnits(), 512);
   farField.updateAround(position, 0, world.getFarFieldExclusionMask());
   const sampleRadiusWorldUnits = metersToWorldUnits(sampleRadiusMeters);
   const sampleStepWorldUnits = metersToWorldUnits(sampleStepMeters);

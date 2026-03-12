@@ -93,6 +93,7 @@ const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
 const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 7;
 const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 6;
 const DEFAULT_MAX_FAR_FIELD_BAND_REBUILDS_PER_FRAME = 1;
+const DEFAULT_MAX_FAR_FIELD_SURFACE_PREFETCH_CHUNKS_PER_FRAME = 8;
 const MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME = 6;
 const SYNC_NEAR_MESH_RADIUS_CHUNKS = 3;
 const MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES = 6;
@@ -616,7 +617,7 @@ export class GameController {
   readonly asyncChunkMeshing = createAsyncChunkMeshing(
     createMeshMaterialLut(this.world.palette, (materialIndex) => this.world.isWaterMaterial(materialIndex)),
   );
-  readonly farField = new ProceduralFarField(this.generator);
+  readonly farField = new ProceduralFarField(this.world);
   readonly explorationJournal = new ExplorationJournal();
   readonly inventory: InventoryState = createInventoryState();
 
@@ -1891,6 +1892,7 @@ export class GameController {
       return this.syncWorldAroundAnchor(resolved.anchor, true);
     }
     if (!shouldRefreshResidency(false, resolved.changed, this.lastStreamSummary.pendingChunks)) {
+      this.prefetchFarFieldSurface(false);
       this.flushMeshBuildBudget();
       this.syncPresentedFarFieldMaskRevision();
       this.lastFarFieldSummary = this.farField.updateAround(
@@ -1925,6 +1927,7 @@ export class GameController {
     if (residency.generatedChunks > 0 || residency.evictedChunks > 0 || residency.touchedNeighborChunks > 0) {
       this.farFieldReadyMaskRevision += 1;
     }
+    this.prefetchFarFieldSurface(settle);
     this.flushMeshBuildBudget(
       settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxMeshRebuildsPerFrame,
     );
@@ -1941,6 +1944,22 @@ export class GameController {
       ? `Streamed ${residency.generatedChunks} chunk(s), evicted ${residency.evictedChunks}`
       : "Residency updated";
     return cloneResidencySummary(this.lastStreamSummary);
+  }
+
+  private prefetchFarFieldSurface(settle: boolean): void {
+    const maxGenerateChunks = settle
+      ? Number.POSITIVE_INFINITY
+      : this.lastStreamSummary.pendingChunks > 0
+      ? 0
+      : DEFAULT_MAX_FAR_FIELD_SURFACE_PREFETCH_CHUNKS_PER_FRAME;
+    if (maxGenerateChunks <= 0) {
+      return;
+    }
+    this.world.prefetchFarFieldSurfaceAround(
+      this.player.feetPosition,
+      this.farField.getMaxRadiusWorldUnits(),
+      maxGenerateChunks,
+    );
   }
 
   private isPressed(...codes: string[]): boolean {

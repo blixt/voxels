@@ -1,5 +1,6 @@
 import { metersToWorldUnits, worldUnitsToMeters } from "./scale.ts";
-import { ProceduralWorldGenerator } from "./procedural-generator.ts";
+import { NO_GENERATED_SURFACE_HEIGHT } from "./generated-chunk-surface-summary.ts";
+import type { FarFieldSurfaceSource } from "./far-field-source.ts";
 import type { ChunkMeshData, Vec3 } from "./types.ts";
 import { applyWaterDepthTint } from "./water-visuals.ts";
 
@@ -187,7 +188,7 @@ export class ProceduralFarField {
   private readonly bandConfigs: readonly FarFieldBandConfig[];
 
   constructor(
-    readonly generator: ProceduralWorldGenerator,
+    readonly source: FarFieldSurfaceSource,
     bandConfigs: readonly FarFieldBandConfig[] = DEFAULT_BANDS,
   ) {
     this.bandConfigs = bandConfigs;
@@ -228,6 +229,10 @@ export class ProceduralFarField {
 
   getRenderables(): readonly FarFieldBandRenderable[] {
     return this.bands;
+  }
+
+  getMaxRadiusWorldUnits(): number {
+    return Math.max(...this.bands.map((band) => band.outerRadius));
   }
 
   updateAround(
@@ -288,14 +293,14 @@ export class ProceduralFarField {
         config,
         anchorX,
         anchorZ,
-        this.generator,
+        this.source,
       );
       const bandSampleCacheMs = performance.now() - sampleCacheStartedAt;
       sampledCellCount += sampleCache.sampledCellCount;
       sampleCacheMs += bandSampleCacheMs;
       const meshBuildStartedAt = performance.now();
       band.mesh = buildBandMesh(
-        this.generator,
+        this.source,
         config,
         effectiveInnerRadius,
         exclusionMask,
@@ -408,6 +413,7 @@ export class ProceduralFarField {
         exclusionMask,
         sampleCache.sampleRadius,
         sampleCache.sampleSpan,
+        sampleCache.heights,
       );
       const renderRadius = sampleCache.sampleRadius - 1;
       for (let cellZ = -renderRadius; cellZ <= renderRadius; cellZ += 1) {
@@ -420,7 +426,7 @@ export class ProceduralFarField {
           const worldX = sampleCache.anchorX + cellX * config.sampleStride;
           const worldZ = sampleCache.anchorZ + cellZ * config.sampleStride;
           evaluateMaskedSeamGap(
-            this.generator,
+            this.source,
             band.label,
             "east",
             worldX,
@@ -441,7 +447,7 @@ export class ProceduralFarField {
             },
           );
           evaluateMaskedSeamGap(
-            this.generator,
+            this.source,
             band.label,
             "west",
             worldX,
@@ -462,7 +468,7 @@ export class ProceduralFarField {
             },
           );
           evaluateMaskedSeamGap(
-            this.generator,
+            this.source,
             band.label,
             "south",
             worldX,
@@ -483,7 +489,7 @@ export class ProceduralFarField {
             },
           );
           evaluateMaskedSeamGap(
-            this.generator,
+            this.source,
             band.label,
             "north",
             worldX,
@@ -539,6 +545,7 @@ export class ProceduralFarField {
         exclusionMask,
         sampleCache.sampleRadius,
         sampleCache.sampleSpan,
+        sampleCache.heights,
       );
       const renderRadius = sampleCache.sampleRadius - 1;
       for (let cellZ = -renderRadius; cellZ <= renderRadius; cellZ += 1) {
@@ -552,7 +559,7 @@ export class ProceduralFarField {
           const worldZ = sampleCache.anchorZ + cellZ * config.sampleStride;
           evaluateSurfaceGap(
             sampleCache,
-            this.generator,
+            this.source,
             band.label,
             "east",
             worldX,
@@ -575,7 +582,7 @@ export class ProceduralFarField {
           );
           evaluateSurfaceGap(
             sampleCache,
-            this.generator,
+            this.source,
             band.label,
             "west",
             worldX,
@@ -598,7 +605,7 @@ export class ProceduralFarField {
           );
           evaluateSurfaceGap(
             sampleCache,
-            this.generator,
+            this.source,
             band.label,
             "south",
             worldX,
@@ -621,7 +628,7 @@ export class ProceduralFarField {
           );
           evaluateSurfaceGap(
             sampleCache,
-            this.generator,
+            this.source,
             band.label,
             "north",
             worldX,
@@ -657,7 +664,7 @@ export class ProceduralFarField {
 }
 
 function buildBandMesh(
-  generator: ProceduralWorldGenerator,
+  source: FarFieldSurfaceSource,
   band: FarFieldBandConfig,
   innerRadius: number,
   exclusionMask: FarFieldExclusionMask | null,
@@ -675,7 +682,18 @@ function buildBandMesh(
     waterHeights,
     waterColors,
   } = sampleCache;
-  const states = buildBandStates(band, anchorX, anchorZ, centerX, centerZ, innerRadius, exclusionMask, sampleRadius, sampleSpan);
+  const states = buildBandStates(
+    band,
+    anchorX,
+    anchorZ,
+    centerX,
+    centerZ,
+    innerRadius,
+    exclusionMask,
+    sampleRadius,
+    sampleSpan,
+    heights,
+  );
   let renderedCellCount = 0;
   for (const state of states) {
     if (state === CELL_RENDERED) {
@@ -710,16 +728,16 @@ function buildBandMesh(
       const northState = states[sampleIndex - sampleSpan]!;
       const northHeight = heights[sampleIndex - sampleSpan]!;
       const eastBoundaryMinSurfaceY = eastState === CELL_MASKED || eastHeight < height
-        ? getBoundaryMinSurfaceY(sampleCache, generator, "east", sampleIndex, worldX, worldZ, band.sampleStride)
+        ? getBoundaryMinSurfaceY(sampleCache, source, "east", sampleIndex, worldX, worldZ, band.sampleStride)
         : null;
       const westBoundaryMinSurfaceY = westState === CELL_MASKED || westHeight < height
-        ? getBoundaryMinSurfaceY(sampleCache, generator, "west", sampleIndex, worldX, worldZ, band.sampleStride)
+        ? getBoundaryMinSurfaceY(sampleCache, source, "west", sampleIndex, worldX, worldZ, band.sampleStride)
         : null;
       const southBoundaryMinSurfaceY = southState === CELL_MASKED || southHeight < height
-        ? getBoundaryMinSurfaceY(sampleCache, generator, "south", sampleIndex, worldX, worldZ, band.sampleStride)
+        ? getBoundaryMinSurfaceY(sampleCache, source, "south", sampleIndex, worldX, worldZ, band.sampleStride)
         : null;
       const northBoundaryMinSurfaceY = northState === CELL_MASKED || northHeight < height
-        ? getBoundaryMinSurfaceY(sampleCache, generator, "north", sampleIndex, worldX, worldZ, band.sampleStride)
+        ? getBoundaryMinSurfaceY(sampleCache, source, "north", sampleIndex, worldX, worldZ, band.sampleStride)
         : null;
       const eastBottomY = bottomYForBoundary(
         band.sampleStride,
@@ -821,7 +839,7 @@ function ensureBandSampleCache(
   config: FarFieldBandConfig,
   anchorX: number,
   anchorZ: number,
-  generator: ProceduralWorldGenerator,
+  source: FarFieldSurfaceSource,
 ): {
   cache: FarFieldBandSampleCache;
   sampledCellCount: number;
@@ -840,7 +858,7 @@ function ensureBandSampleCache(
         sampledCellCount: 0,
       };
     }
-    const shifted = tryShiftBandSampleCache(cached, config, anchorX, anchorZ, generator);
+    const shifted = tryShiftBandSampleCache(cached, config, anchorX, anchorZ, source);
     if (shifted) {
       band.sampleCache = shifted.cache;
       return shifted;
@@ -848,6 +866,7 @@ function ensureBandSampleCache(
   }
 
   const heights = new Int32Array(sampleSpan * sampleSpan);
+  heights.fill(NO_GENERATED_SURFACE_HEIGHT);
   const colors = new Uint32Array(sampleSpan * sampleSpan);
   const waterHeights = new Int32Array(sampleSpan * sampleSpan);
   waterHeights.fill(NO_WATER_HEIGHT);
@@ -864,7 +883,7 @@ function ensureBandSampleCache(
     for (let sampleX = 0; sampleX < sampleSpan; sampleX += 1) {
       const cellX = sampleX - sampleRadius;
       const cellMinX = anchorX + cellX * config.sampleStride;
-      const sampledCell = sampleFarFieldCell(generator, cellMinX, cellMinZ, config.sampleStride);
+      const sampledCell = sampleFarFieldCell(source, cellMinX, cellMinZ, config.sampleStride);
       const sampleIndex = sampleX + rowOffset;
       heights[sampleIndex] = sampledCell.surfaceY;
       colors[sampleIndex] = sampledCell.surfaceColor;
@@ -897,7 +916,7 @@ function tryShiftBandSampleCache(
   config: FarFieldBandConfig,
   anchorX: number,
   anchorZ: number,
-  generator: ProceduralWorldGenerator,
+  source: FarFieldSurfaceSource,
 ): {
   cache: FarFieldBandSampleCache;
   sampledCellCount: number;
@@ -923,6 +942,7 @@ function tryShiftBandSampleCache(
   }
 
   const heights = new Int32Array(cached.heights.length);
+  heights.fill(NO_GENERATED_SURFACE_HEIGHT);
   const colors = new Uint32Array(cached.colors.length);
   const waterHeights = new Int32Array(cached.waterHeights.length);
   waterHeights.fill(NO_WATER_HEIGHT);
@@ -958,7 +978,7 @@ function tryShiftBandSampleCache(
       const cellZ = sampleZ - cached.sampleRadius;
       const cellMinX = anchorX + cellX * config.sampleStride;
       const cellMinZ = anchorZ + cellZ * config.sampleStride;
-      const sampledCell = sampleFarFieldCell(generator, cellMinX, cellMinZ, config.sampleStride);
+      const sampledCell = sampleFarFieldCell(source, cellMinX, cellMinZ, config.sampleStride);
       heights[sampleIndex] = sampledCell.surfaceY;
       colors[sampleIndex] = sampledCell.surfaceColor;
       waterHeights[sampleIndex] = sampledCell.waterTopY ?? NO_WATER_HEIGHT;
@@ -994,6 +1014,7 @@ function buildBandStates(
   exclusionMask: FarFieldExclusionMask | null,
   sampleRadius: number,
   sampleSpan: number,
+  heights: Int32Array,
 ): Uint8Array {
   const states = new Uint8Array(sampleSpan * sampleSpan);
   for (let sampleZ = 0; sampleZ < sampleSpan; sampleZ += 1) {
@@ -1004,6 +1025,10 @@ function buildBandStates(
       const cellX = sampleX - sampleRadius;
       const cellMinX = anchorX + cellX * band.sampleStride;
       const sampleIndex = sampleX + rowOffset;
+      if (heights[sampleIndex] === NO_GENERATED_SURFACE_HEIGHT) {
+        states[sampleIndex] = CELL_OMITTED;
+        continue;
+      }
       if (!isCellInBand(cellMinX, cellMinZ, band.sampleStride, centerX, centerZ, innerRadius, band.outerRadius)) {
         states[sampleIndex] = CELL_OMITTED;
         continue;
@@ -1236,7 +1261,7 @@ function bottomYForBoundary(
 
 function getBoundaryMinSurfaceY(
   sampleCache: FarFieldBandSampleCache,
-  generator: ProceduralWorldGenerator,
+  source: FarFieldSurfaceSource,
   direction: "east" | "west" | "south" | "north",
   sampleIndex: number,
   worldX: number,
@@ -1247,10 +1272,10 @@ function getBoundaryMinSurfaceY(
     case "east": {
       let cached = sampleCache.eastBoundaryMinSurfaceY[sampleIndex]!;
       if (cached === UNKNOWN_BOUNDARY_MIN_SURFACE_Y) {
-        cached = sampleBoundaryMinSurfaceY(generator, "east", worldX, worldZ, sampleStride);
+        cached = sampleBoundaryMinSurfaceY(source, "east", worldX, worldZ, sampleStride) ?? NO_GENERATED_SURFACE_HEIGHT;
         sampleCache.eastBoundaryMinSurfaceY[sampleIndex] = cached;
       }
-      return cached;
+      return cached === NO_GENERATED_SURFACE_HEIGHT ? null : cached;
     }
     case "west": {
       const westIndex = sampleIndex - 1;
@@ -1259,18 +1284,18 @@ function getBoundaryMinSurfaceY(
       }
       let cached = sampleCache.eastBoundaryMinSurfaceY[westIndex]!;
       if (cached === UNKNOWN_BOUNDARY_MIN_SURFACE_Y) {
-        cached = sampleBoundaryMinSurfaceY(generator, "west", worldX, worldZ, sampleStride);
+        cached = sampleBoundaryMinSurfaceY(source, "west", worldX, worldZ, sampleStride) ?? NO_GENERATED_SURFACE_HEIGHT;
         sampleCache.eastBoundaryMinSurfaceY[westIndex] = cached;
       }
-      return cached;
+      return cached === NO_GENERATED_SURFACE_HEIGHT ? null : cached;
     }
     case "south": {
       let cached = sampleCache.southBoundaryMinSurfaceY[sampleIndex]!;
       if (cached === UNKNOWN_BOUNDARY_MIN_SURFACE_Y) {
-        cached = sampleBoundaryMinSurfaceY(generator, "south", worldX, worldZ, sampleStride);
+        cached = sampleBoundaryMinSurfaceY(source, "south", worldX, worldZ, sampleStride) ?? NO_GENERATED_SURFACE_HEIGHT;
         sampleCache.southBoundaryMinSurfaceY[sampleIndex] = cached;
       }
-      return cached;
+      return cached === NO_GENERATED_SURFACE_HEIGHT ? null : cached;
     }
     case "north": {
       const northIndex = sampleIndex - sampleCache.sampleSpan;
@@ -1279,10 +1304,10 @@ function getBoundaryMinSurfaceY(
       }
       let cached = sampleCache.southBoundaryMinSurfaceY[northIndex]!;
       if (cached === UNKNOWN_BOUNDARY_MIN_SURFACE_Y) {
-        cached = sampleBoundaryMinSurfaceY(generator, "north", worldX, worldZ, sampleStride);
+        cached = sampleBoundaryMinSurfaceY(source, "north", worldX, worldZ, sampleStride) ?? NO_GENERATED_SURFACE_HEIGHT;
         sampleCache.southBoundaryMinSurfaceY[northIndex] = cached;
       }
-      return cached;
+      return cached === NO_GENERATED_SURFACE_HEIGHT ? null : cached;
     }
   }
 }
@@ -1314,7 +1339,7 @@ function pushWaterTopQuad(
 }
 
 function sampleFarFieldCell(
-  generator: ProceduralWorldGenerator,
+  source: FarFieldSurfaceSource,
   cellMinX: number,
   cellMinZ: number,
   sampleStride: number,
@@ -1326,24 +1351,32 @@ function sampleFarFieldCell(
 } {
   const centerX = cellMinX + sampleStride * 0.5;
   const centerZ = cellMinZ + sampleStride * 0.5;
-  const centerColumn = generator.sampleSurfaceColumn(centerX, centerZ);
+  const centerColumn = source.sampleFarFieldColumn(centerX, centerZ);
+  if (!centerColumn) {
+    return {
+      surfaceY: NO_GENERATED_SURFACE_HEIGHT,
+      surfaceColor: 0,
+      waterTopY: null,
+      waterColor: 0,
+    };
+  }
   let waterTopY: number | null = centerColumn.waterTopY;
   let waterColor = centerColumn.waterMaterial !== null
-    ? generator.palette[centerColumn.waterMaterial] ?? 0
+    ? source.palette[centerColumn.waterMaterial] ?? 0
     : 0;
 
   if (sampleStride <= metersToWorldUnits(1.6)) {
     for (const [offsetX, offsetZ] of FEATURE_SAMPLE_OFFSETS) {
       const sampleX = cellMinX + sampleStride * offsetX;
       const sampleZ = cellMinZ + sampleStride * offsetZ;
-      const column = generator.sampleSurfaceColumn(sampleX, sampleZ);
-      if (column.waterTopY === null) {
+      const column = source.sampleFarFieldColumn(sampleX, sampleZ);
+      if (!column || column.waterTopY === null) {
         continue;
       }
       if (waterTopY === null || column.waterTopY > waterTopY) {
         waterTopY = column.waterTopY;
         waterColor = column.waterMaterial !== null
-          ? generator.palette[column.waterMaterial] ?? waterColor
+          ? source.palette[column.waterMaterial] ?? waterColor
           : waterColor;
       }
     }
@@ -1351,7 +1384,7 @@ function sampleFarFieldCell(
 
   return {
     surfaceY: centerColumn.surfaceY,
-    surfaceColor: generator.palette[centerColumn.surfaceMaterial] ?? 0,
+    surfaceColor: source.palette[centerColumn.surfaceMaterial] ?? 0,
     waterTopY,
     waterColor,
   };
@@ -1399,7 +1432,7 @@ function computeMaskedSeamSkirtDepth(sampleStride: number): number {
 }
 
 function evaluateMaskedSeamGap(
-  generator: ProceduralWorldGenerator,
+  source: FarFieldSurfaceSource,
   bandLabel: string,
   direction: "east" | "west" | "south" | "north",
   worldX: number,
@@ -1416,7 +1449,10 @@ function evaluateMaskedSeamGap(
   if (neighborState !== CELL_MASKED) {
     return;
   }
-  const boundaryMinSurfaceY = sampleBoundaryMinSurfaceY(generator, direction, worldX, worldZ, sampleStride);
+  const boundaryMinSurfaceY = sampleBoundaryMinSurfaceY(source, direction, worldX, worldZ, sampleStride);
+  if (boundaryMinSurfaceY === null) {
+    return;
+  }
   const wallBottomY = bottomYForBoundary(
     sampleStride,
     neighborState,
@@ -1437,7 +1473,7 @@ function evaluateMaskedSeamGap(
 
 function evaluateSurfaceGap(
   sampleCache: FarFieldBandSampleCache,
-  generator: ProceduralWorldGenerator,
+  source: FarFieldSurfaceSource,
   bandLabel: string,
   direction: "east" | "west" | "south" | "north",
   worldX: number,
@@ -1457,7 +1493,7 @@ function evaluateSurfaceGap(
   }
   const boundaryMinSurfaceY = getBoundaryMinSurfaceY(
     sampleCache,
-    generator,
+    source,
     direction,
     sampleIndex,
     worldX,
@@ -1487,12 +1523,12 @@ function evaluateSurfaceGap(
 }
 
 function sampleBoundaryMinSurfaceY(
-  generator: ProceduralWorldGenerator,
+  source: FarFieldSurfaceSource,
   direction: "east" | "west" | "south" | "north",
   worldX: number,
   worldZ: number,
   sampleStride: number,
-): number {
+): number | null {
   let minSurfaceY = Number.POSITIVE_INFINITY;
   const sampleOffsets = sampleStride <= 4
     ? [0.5]
@@ -1508,9 +1544,13 @@ function sampleBoundaryMinSurfaceY(
       : direction === "north"
       ? worldZ - 0.5
       : worldZ + offset;
-    minSurfaceY = Math.min(minSurfaceY, generator.sampleSurfaceColumn(sampleX, sampleZ).surfaceY);
+    const sample = source.sampleFarFieldColumn(sampleX, sampleZ);
+    if (!sample) {
+      continue;
+    }
+    minSurfaceY = Math.min(minSurfaceY, sample.surfaceY);
   }
-  return minSurfaceY;
+  return Number.isFinite(minSurfaceY) ? minSurfaceY : null;
 }
 
 const CELL_OMITTED = 0;

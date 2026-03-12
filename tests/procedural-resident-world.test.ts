@@ -335,3 +335,39 @@ test("dirty remesh neighbors retain their existing mesh until rebuilt", () => {
   expect(dirtySupportChunk?.meshBuilt).toBe(true);
   expect(dirtySupportChunk?.mesh).not.toBeNull();
 });
+
+test("far-field sampling only becomes available after actual chunk pre-generation", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    horizontalRadiusChunks: 1,
+  });
+  const spawn = world.getSpawnPosition();
+  const farWorldX = Math.floor(spawn[0] + world.chunkSize * 4);
+  const farWorldZ = Math.floor(spawn[2]);
+
+  expect(world.sampleFarFieldColumn(farWorldX, farWorldZ)).toBeNull();
+
+  const generated = world.prefetchFarFieldSurfaceAround(spawn, world.chunkSize * 6, 64);
+
+  expect(generated).toBeGreaterThan(0);
+  expect(world.sampleFarFieldColumn(farWorldX, farWorldZ)).not.toBeNull();
+});
+
+test("far-field sampling follows resident voxel edits instead of stale generator output", () => {
+  const generator = new ProceduralWorldGenerator(1337, { chunkSize: 16 });
+  const world = new ProceduralResidentWorld(generator, { horizontalRadiusChunks: 1 });
+  const spawn = world.getSpawnPosition();
+  world.updateResidencyAround(spawn, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+
+  const worldX = Math.floor(spawn[0]);
+  const worldZ = Math.floor(spawn[2]);
+  const sampledBefore = world.sampleFarFieldColumn(worldX, worldZ);
+  expect(sampledBefore).not.toBeNull();
+  const targetY = sampledBefore!.surfaceY;
+  const replacementMaterial = 0x0abc;
+
+  expect(world.setVoxel(worldX, targetY, worldZ, replacementMaterial)).toBe(true);
+
+  const sampledAfter = world.sampleFarFieldColumn(worldX, worldZ);
+  expect(sampledAfter).not.toBeNull();
+  expect(sampledAfter!.surfaceMaterial).toBe(replacementMaterial);
+});
