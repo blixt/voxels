@@ -80,6 +80,36 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
   if (!generator) {
     throw new Error("Procedural generation worker received a request before initialization");
   }
+  if (message.type === "summarize") {
+    let cachedSummary: TransferredGeneratedChunkRenderSummary | null = null;
+    try {
+      cachedSummary = await chunkCache?.getChunkSummary(message.coord) ?? null;
+    } catch (error) {
+      reportCacheFailure("read", error);
+      chunkCache?.close();
+      chunkCache = null;
+      cachedSummary = null;
+    }
+    if (cachedSummary) {
+      const response: WorkerResponse = {
+        type: "summarized",
+        requestId: message.requestId,
+        source: "cache",
+        summary: cachedSummary,
+      };
+      self.postMessage(response, {
+        transfer: [
+          cachedSummary.surfaceY.buffer,
+          cachedSummary.surfaceMaterial.buffer,
+          cachedSummary.waterTopY.buffer,
+          cachedSummary.waterMaterial.buffer,
+          cachedSummary.macroCellStates.buffer,
+          cachedSummary.faceOpenMask.buffer,
+        ],
+      });
+      return;
+    }
+  }
   let cachedChunk: TransferredGeneratedChunk | null = null;
   try {
     cachedChunk = await chunkCache?.getChunk(message.coord) ?? null;
@@ -101,6 +131,13 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
       return;
     }
     const summary = serializeGeneratedChunkRenderSummary(decodeGeneratedChunkSummary(cachedChunk.encodedBuffer).renderSummary);
+    try {
+      await chunkCache?.putChunkSummary(message.coord, summary.summary);
+    } catch (error) {
+      reportCacheFailure("write", error);
+      chunkCache?.close();
+      chunkCache = null;
+    }
     const response: WorkerResponse = {
       type: "summarized",
       requestId: message.requestId,
@@ -112,8 +149,9 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
   }
   const generated = generator.generateChunk(message.coord.x, message.coord.y, message.coord.z);
   const serialized = serializeGeneratedChunk(generated);
+  const summary = serializeGeneratedChunkRenderSummary(generated.renderSummary);
   try {
-    await chunkCache?.putChunk(message.coord, serialized.chunk);
+    await chunkCache?.putChunk(message.coord, serialized.chunk, summary.summary);
   } catch (error) {
     reportCacheFailure("write", error);
     chunkCache?.close();
@@ -129,7 +167,6 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
     self.postMessage(response, { transfer: serialized.transfer });
     return;
   }
-  const summary = serializeGeneratedChunkRenderSummary(generated.renderSummary);
   const response: WorkerResponse = {
     type: "summarized",
     requestId: message.requestId,

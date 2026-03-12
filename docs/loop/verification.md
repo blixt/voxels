@@ -3563,3 +3563,24 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - The worker/cache seam can now deliver summary-only far metadata, but the current far renderer still consumes only the surface half of that metadata.
 - The next real rendering step is a general volumetric interior/void far path over chunk summaries, not more generator-coupled prefetch logic.
+
+## 2026-03-12 persisted summary records
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise run build`
+- `mise run trace-route -- --label=summary-cache-smoke --duration=1 --settle=1 --sample-hz=20`
+
+#### Numeric probes
+
+- Headless Chrome route smoke after adding the dedicated summary store:
+  - report: `artifacts/browser-route-trace/20260312T170841Z-summary-cache-smoke/report.json`
+  - avg gameplay frame `5.66 ms`
+  - p95 gameplay frame `15.60 ms`
+  - hole signals `0`
+
+#### Residual
+
+- This slice is worth keeping.
+- We now persist chunk summaries independently, but we still do not have a higher-level region/column summary index for deciding what distant summaries to load first.

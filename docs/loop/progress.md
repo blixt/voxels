@@ -1738,3 +1738,21 @@
 - I deliberately did not pretend the current surface clipmap is the final general renderer:
   - this slice only changes how summary data arrives
   - the next real rendering slice is still a general volumetric far/interior path over chunk summaries
+
+## 2026-03-12 persisted chunk-summary cache records
+
+- I then pushed the persistence seam one step further so the summary bubble stops piggybacking entirely on stored full chunk payloads:
+  - the IndexedDB cache now has a dedicated `chunk_summaries` store in addition to the chunk payload store
+  - writes persist both the encoded chunk and the chunk render summary together
+  - summary requests can now hit the summary store directly instead of fetching an encoded chunk just to recover metadata
+- The worker fallback path still stays coherent:
+  - if an older or missing summary record is encountered but the chunk payload exists, the worker decodes the summary once from the encoded chunk
+  - it then backfills the summary store so later summary requests stay summary-only
+- This keeps the architectural direction clean:
+  - full chunks are still for gameplay, edits, collision, and detailed rendering
+  - persisted summaries are increasingly first-class data for far rendering and future streaming/index decisions
+  - the renderer remains fully generator-disjoint at runtime
+- The headless route smoke after this cache split came back down to a healthier envelope than the previous interim summary-prefetch smoke:
+  - avg gameplay frame `5.66 ms`
+  - p95 gameplay frame `15.60 ms`
+  - hole signals `0`

@@ -466,3 +466,10 @@
 | --- | --- | --- | --- |
 | Far prefetch should keep requesting full generated chunks because the worker/cache path already exists and the extra summary mode is needless complexity | Add a summary-only worker/request path and keep it only if the build, route smoke, and focused chunk/LOD suites stay clean | Rejected. The summary-only path is the better seam because far work no longer needs to decode/adopt full chunks just to archive render metadata | Rejected |
 | “For caves” is an acceptable framing for the upcoming volumetric far renderer | Re-read the architecture docs against the edited-world requirement before keeping that language | Rejected. The kept wording is now arbitrary large interior/void spaces in an edited world, not generator-known caves | Rejected |
+
+## 2026-03-12 persisted summary records
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| A separate persisted summary store is premature because summary requests can always decode from the cached chunk payload | Add a dedicated summary store and keep it only if the build and browser route smoke stay clean | Rejected. Persisted summaries are the better long-term seam because summary-only requests can now stay summary-only all the way to storage | Rejected |
+| Splitting chunk payloads and summary records in IndexedDB will complicate the worker too much for the value | Keep the chunk store as fallback, backfill missing summaries on demand, and validate the route smoke before deciding | Rejected. The fallback/backfill path stayed simple enough and the smoke stayed healthy | Rejected |

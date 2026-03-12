@@ -55,13 +55,14 @@ The far-field path no longer samples the generator at render time. It now reads 
 - Resident chunks are still dense in RAM once adopted.
 - We are using IndexedDB directly today; OPFS payload files plus IndexedDB metadata are still the stronger next storage split.
 - Stored chunks are generated-base chunks only; edit overlays are not persisted yet.
-- Render summaries are still archived in memory after generation/eviction; they are not yet loaded independently as persisted region/summary data.
+- Chunk render summaries are now persisted alongside chunk payloads in IndexedDB and can be loaded independently on the worker path.
+- Render summaries are still archived in memory after generation/eviction on the main thread; there is not yet a dedicated region-summary stream/index on top of the persisted summary records.
 - The current far renderer is still surface-oriented; the new render summary seam now supports a future volumetric interior/void renderer for arbitrary edited spaces, but that second renderer is not implemented yet.
 - The new cache-reuse benchmark seam exists, but the first headless proof attempt exposed that its runtime-ready gate still needs tightening before it becomes a trustworthy automated acceptance check.
 
 ## Next practical steps
 
-1. Persist chunk/region render summaries so far-field and visibility work stop depending on recent in-memory generation history.
+1. Add region/column summary indexes on top of the persisted chunk-summary records so far-field and visibility work stop scanning unknown chunk columns blindly.
 2. Split browser persistence into:
    - OPFS payload files
    - IndexedDB manifest / LRU / version metadata
