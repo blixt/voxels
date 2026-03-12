@@ -48,6 +48,9 @@ declare global {
       benchmarkForwardWalkExperience(
         options?: Parameters<GameController["benchmarkForwardWalkExperience"]>[0],
       ): ReturnType<GameController["benchmarkForwardWalkExperience"]>;
+      benchmarkLiveForwardWalkExperience(
+        options?: Parameters<GameController["benchmarkLiveForwardWalkExperience"]>[0],
+      ): ReturnType<GameController["benchmarkLiveForwardWalkExperience"]>;
       getBootstrapBenchmark(): ReturnType<GameController["getBootstrapBenchmark"]>;
       probeLodCoverage(
         sampleRadiusMeters?: number,
@@ -281,6 +284,7 @@ function mountGame(): GameRuntime {
       controller.benchmarkIncrementalCrossing(iterations, chunkDelta, stepsPerLeg, settleFrames),
     benchmarkRouteExperience: (options) => controller.benchmarkRouteExperience(options),
     benchmarkForwardWalkExperience: (options) => controller.benchmarkForwardWalkExperience(options),
+    benchmarkLiveForwardWalkExperience: (options) => controller.benchmarkLiveForwardWalkExperience(options),
     getBootstrapBenchmark: () => controller.getBootstrapBenchmark(),
     probeLodCoverage: (sampleRadiusMeters, sampleStepMeters) =>
       controller.probeLodCoverage(sampleRadiusMeters, sampleStepMeters),

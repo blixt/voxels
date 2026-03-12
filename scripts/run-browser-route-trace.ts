@@ -10,6 +10,7 @@ interface CliOptions {
   outputDir: string;
   chromeBinary: string;
   headless: boolean;
+  benchmarkMode: "route" | "live-forward";
   appPort: number | null;
   viewportWidth: number;
   viewportHeight: number;
@@ -39,7 +40,8 @@ interface BrowserRouteTraceReport {
   chromeBinary: string;
   tracePath: string;
   benchmarkSamplesPath: string;
-  routeOptions: Record<string, number>;
+  routeOptions: Record<string, number | string>;
+  benchmarkMode: string;
   build: CommandResult | null;
   benchmark: Record<string, unknown>;
   discovery: Record<string, unknown>;
@@ -172,8 +174,11 @@ try {
     referenceDiffStrideFrames: options.referenceDiffStrideFrames,
     referenceDiffLimit: options.referenceDiffLimit,
   };
+  const benchmarkMethod = options.benchmarkMode === "live-forward"
+    ? "benchmarkLiveForwardWalkExperience"
+    : "benchmarkRouteExperience";
   const benchmarkResult = await cdp.evaluate<Record<string, unknown>>(`(async () => {
-    const result = await window.__VOXELS_GAME__.benchmarkRouteExperience(${JSON.stringify(routeOptions)});
+    const result = await window.__VOXELS_GAME__.${benchmarkMethod}(${JSON.stringify(routeOptions)});
     return result;
   })()`);
   await Bun.write(benchmarkSamplesPath, `${JSON.stringify((benchmarkResult.samples ?? []) as unknown[], null, 2)}\n`);
@@ -222,6 +227,7 @@ try {
     tracePath,
     benchmarkSamplesPath,
     routeOptions,
+    benchmarkMode: options.benchmarkMode,
     build,
     benchmark,
     discovery,
@@ -246,6 +252,7 @@ function parseCli(argv: readonly string[]): CliOptions {
     outputDir: readFlag(args, "--output-dir") ?? "artifacts/browser-route-trace",
     chromeBinary: readFlag(args, "--chrome-binary") ?? resolveChromeBinary(),
     headless: readBooleanFlag(args, "--headless", true),
+    benchmarkMode: readBenchmarkMode(readFlag(args, "--benchmark")),
     appPort: readOptionalPositiveInt(readFlag(args, "--port")),
     viewportWidth: readPositiveInt(readFlag(args, "--width"), 1440),
     viewportHeight: readPositiveInt(readFlag(args, "--height"), 900),
@@ -259,6 +266,16 @@ function parseCli(argv: readonly string[]): CliOptions {
     referenceDiffStrideFrames: readNonNegativeInt(readFlag(args, "--reference-diff-stride"), 0),
     referenceDiffLimit: readNonNegativeInt(readFlag(args, "--reference-diff-limit"), 0),
   };
+}
+
+function readBenchmarkMode(value: string | null): "route" | "live-forward" {
+  if (value === null || value === "route") {
+    return "route";
+  }
+  if (value === "live-forward") {
+    return "live-forward";
+  }
+  throw new Error(`Unsupported --benchmark value: ${value}`);
 }
 
 function readFlag(args: readonly string[], flag: string): string | null {

@@ -4153,3 +4153,52 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - It reduced steady-state dirty-mesh bookkeeping cost without making startup worse in any meaningful way.
 - The next dominant cost is now generation worker work, not dirty chunk rediscovery on the main thread.
+
+## 2026-03-12 live-walk benchmark and movement-phase far-prefetch fix
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/game-route-benchmark.test.ts tests/game-bootstrap-benchmark.test.ts tests/procedural-resident-world.test.ts`
+- `mise run bench-browser-game -- --label=live-walk-current --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=1 --walk-duration=10 --walk-settle=4 --walk-sample-hz=60`
+- `mise run trace-route -- --benchmark=live-forward --label=live-walk-trace-current --duration=10 --settle=4 --sample-hz=60`
+- `mise run bench-browser-game -- --label=live-walk-no-move-prefetch --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=1 --walk-duration=10 --walk-settle=4 --walk-sample-hz=60`
+- `mise run trace-route -- --benchmark=live-forward --label=live-walk-no-move-prefetch-trace --duration=10 --settle=4 --sample-hz=60`
+
+#### Numeric probes
+
+- Before the runtime fix:
+  - walk benchmark report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-qK66Kg/report.json`
+  - trace report: `artifacts/browser-route-trace/20260312T220253Z-live-walk-trace-current/report.json`
+  - walk aggregate gameplay average `13.033 ms`
+  - walk aggregate max gameplay frame `8021.7 ms`
+  - move-phase far-field prefetch from benchmark samples:
+    - max `8285 ms`
+    - avg `25.35168195682199 ms`
+  - move-phase gameplay frames from benchmark samples:
+    - max `8286.899999976158 ms`
+    - p95 `5.600000023841858 ms`
+- After the runtime fix:
+  - walk benchmark report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-mKa1ll/report.json`
+  - trace report: `artifacts/browser-route-trace/20260312T220548Z-live-walk-no-move-prefetch-trace/report.json`
+  - walk aggregate gameplay average `1.287 ms`
+  - walk aggregate max gameplay frame `11.6 ms`
+  - move-phase far-field prefetch from benchmark samples:
+    - max `0`
+    - avg `0`
+  - move-phase gameplay frames from benchmark samples:
+    - max `12.099999964237213 ms`
+    - p95 `3.900000035762787 ms`
+  - route trace summary:
+    - avg gameplay frame `1.4357142851111435 ms`
+    - p95 gameplay frame `3.699999988079071 ms`
+    - max gameplay frame `12.099999964237213 ms`
+    - avg far-field prefetch `0 ms`
+    - total far-field prefetch requested chunks `0`
+    - hole-signal frames `0`
+
+#### Residual
+
+- This slice is worth keeping.
+- It reproduces the real held-`W` regression and removes the catastrophic move-phase stall.
+- The far-summary prefetch algorithm is still too expensive in non-movement parts of the session, so that remains a follow-up optimization target.

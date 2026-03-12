@@ -759,38 +759,7 @@ export class GameController {
   start(): void {
     cancelAnimationFrame(this.rafId);
     const tick = (now: number) => {
-      const gameplayStartedAt = performance.now();
-      const deltaSeconds = this.lastFrameTime === 0
-        ? 1 / 60
-        : Math.min((now - this.lastFrameTime) / 1000, MAX_DELTA_SECONDS);
-      this.lastFrameTime = now;
-      this.interactiveFrameNumber += 1;
-      const hasMovementIntent = this.hasMovementIntent();
-      const moved = this.updateMovement(deltaSeconds);
-      const dirtyResidentChunks = this.world.countDirtyResidentChunks();
-      if (
-        shouldPumpWorldWork(
-          hasMovementIntent || moved,
-          this.lastStreamSummary.pendingChunks,
-          dirtyResidentChunks,
-          this.lastFarFieldSummary.pendingBands,
-        )
-      ) {
-        this.syncWorldAroundPlayer(
-          false,
-          shouldAllowFarFieldCatchupWhileMoving(
-            hasMovementIntent,
-            this.lastStreamSummary.pendingChunks,
-            dirtyResidentChunks,
-            this.lastFarFieldSummary.pendingBands,
-            this.interactiveFrameNumber,
-            MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES,
-          ),
-        );
-      }
-      this.renderInteractiveFrame();
-      this.lastGameplayFrameMs = performance.now() - gameplayStartedAt;
-      this.recordBootstrapBenchmarkSample(this.lastGameplayFrameMs);
+      this.advanceInteractiveFrame(now);
       this.rafId = requestAnimationFrame(tick);
     };
     this.rafId = requestAnimationFrame(tick);
@@ -1632,6 +1601,170 @@ export class GameController {
     return this.runRouteExperienceBenchmark(routePlan, options);
   }
 
+  async benchmarkLiveForwardWalkExperience(
+    options: RouteExperienceBenchmarkOptions & {
+      yawRadians?: number;
+    } = {},
+  ): Promise<RouteExperienceBenchmark> {
+    const normalizedOptions = normalizeRouteBenchmarkPlanOptions(options);
+    const durationSeconds = normalizedOptions.durationSeconds;
+    const settleSeconds = Math.max(1, options.settleSeconds ?? 4);
+    const seamProbeStrideFrames = clampPositiveInt(
+      options.seamProbeStrideFrames ?? Math.max(1, Math.round((normalizedOptions.sampleHz ?? 60) / 4)),
+      Math.max(1, Math.round((normalizedOptions.sampleHz ?? 60) / 4)),
+    );
+    const captureStrideFrames = clampPositiveInt(
+      options.captureStrideFrames ?? 999999,
+      999999,
+    );
+    const captureWidth = clampPositiveInt(options.captureWidth ?? 128, 128);
+    const captureHeight = clampPositiveInt(options.captureHeight ?? 72, 72);
+    const referenceDiffStrideFrames = Math.max(0, Math.floor(options.referenceDiffStrideFrames ?? 0));
+    const referenceDiffLimit = Math.max(0, Math.floor(options.referenceDiffLimit ?? 24));
+    const yaw = options.yawRadians ?? 0;
+    const pitch = -0.34;
+    const savedPlayer = {
+      feetPosition: [...this.player.feetPosition] as Vec3,
+      velocity: [...this.player.velocity] as Vec3,
+      grounded: this.player.grounded,
+    };
+    const savedCamera = {
+      position: [...this.camera.position] as Vec3,
+      yaw: this.camera.yaw,
+      pitch: this.camera.pitch,
+      fovY: this.camera.fovY,
+      near: this.camera.near,
+      far: this.camera.far,
+    };
+    const savedStatus = this.status;
+    const savedPointerLocked = this.pointerLocked;
+    const savedPressedKeys = [...this.pressedKeys];
+    const savedStreamAnchor = this.streamAnchor
+      ? { chunkX: this.streamAnchor.chunkX, chunkZ: this.streamAnchor.chunkZ }
+      : null;
+
+    this.stop();
+    try {
+      const spawnFeet = this.world.getSpawnPosition();
+      teleportPlayerToFeetPosition(this.player, spawnFeet);
+      this.player.velocity = [0, 0, 0];
+      this.player.grounded = true;
+      this.camera.yaw = yaw;
+      this.camera.pitch = pitch;
+      this.syncCameraToPlayer();
+      this.pointerLocked = true;
+      this.pressedKeys.clear();
+      this.pressedKeys.add("KeyW");
+      this.lastFrameTime = 0;
+      this.syncWorldAroundPlayer(true);
+      this.renderCurrentFrame();
+      await this.renderer?.waitForGpuIdle();
+
+      const samples: RouteExperienceFrameSample[] = [];
+      const capturedFrames: CapturedBenchmarkFrame[] = [];
+      let totalDistanceMeters = 0;
+      const startedAt = performance.now();
+      let frame = 0;
+      let lastFeetPosition: Vec3 = [...this.player.feetPosition];
+      while (true) {
+        const now = await nextAnimationFrame();
+        const elapsedSeconds = (performance.now() - startedAt) / 1000;
+        const phase: "move" | "settle" = elapsedSeconds < durationSeconds ? "move" : "settle";
+        if (phase === "settle") {
+          this.pressedKeys.delete("KeyW");
+        }
+        const interactiveFrame = this.advanceInteractiveFrame(now);
+        frame += 1;
+        totalDistanceMeters += worldUnitsToMeters(Math.hypot(
+          this.player.feetPosition[0] - lastFeetPosition[0],
+          this.player.feetPosition[2] - lastFeetPosition[2],
+        ));
+        lastFeetPosition = [...this.player.feetPosition];
+        const frameResult = await this.captureRouteExperienceFrameSample(
+          {
+            frame,
+            phase,
+            simTimeSeconds: elapsedSeconds,
+            distanceMeters: totalDistanceMeters,
+          },
+          interactiveFrame.movementMs,
+          interactiveFrame.gameplayFrameMs,
+          seamProbeStrideFrames,
+          captureStrideFrames,
+          captureWidth,
+          captureHeight,
+          referenceDiffStrideFrames,
+          referenceDiffLimit,
+          samples.length,
+          capturedFrames.length,
+        );
+        samples.push(frameResult.sample);
+        if (frameResult.capturedFrame) {
+          capturedFrames.push(frameResult.capturedFrame);
+        }
+        if (
+          phase === "settle"
+          && elapsedSeconds >= durationSeconds + settleSeconds
+        ) {
+          break;
+        }
+      }
+
+      if (capturedFrames.length > 0) {
+        await this.applySettledReferenceDiffs(samples, capturedFrames);
+      }
+
+      return {
+        seed: this.generator.seed,
+        radiusChunks: this.world.horizontalRadiusChunks,
+        captureStrideFrames,
+        seamProbeStrideFrames,
+        referenceDiffStrideFrames,
+        referenceDiffLimit,
+        durationSeconds,
+        settleSeconds,
+        totalDistanceMeters,
+        sampleHz: durationSeconds <= 0 ? samples.length : samples.length / Math.max(durationSeconds + settleSeconds, 0.001),
+        speedMetersPerSecond: durationSeconds <= 0 ? 0 : totalDistanceMeters / durationSeconds,
+        samples,
+        summary: summarizeRouteExperienceBenchmark(samples, {
+          totalDistanceMeters,
+          sampleHz: durationSeconds <= 0 ? samples.length : samples.length / Math.max(durationSeconds + settleSeconds, 0.001),
+          speedMetersPerSecond: durationSeconds <= 0 ? 0 : totalDistanceMeters / durationSeconds,
+        }),
+      };
+    } finally {
+      this.pressedKeys.clear();
+      for (const code of savedPressedKeys) {
+        this.pressedKeys.add(code);
+      }
+      this.pointerLocked = savedPointerLocked;
+      this.player.feetPosition = savedPlayer.feetPosition;
+      this.player.velocity = savedPlayer.velocity;
+      this.player.grounded = savedPlayer.grounded;
+      this.camera = {
+        position: savedCamera.position,
+        yaw: savedCamera.yaw,
+        pitch: savedCamera.pitch,
+        fovY: savedCamera.fovY,
+        near: savedCamera.near,
+        far: savedCamera.far,
+      };
+      this.status = savedStatus;
+      this.lastFrameTime = 0;
+      if (savedStreamAnchor) {
+        this.syncWorldAroundAnchor(savedStreamAnchor, true);
+      } else {
+        this.streamAnchor = null;
+        this.syncWorldAroundPlayer(true);
+      }
+      this.renderCurrentFrame();
+      await this.renderer?.waitForGpuIdle();
+      this.pushHud(true);
+      this.start();
+    }
+  }
+
   private async runRouteExperienceBenchmark(
     routePlan: ReturnType<typeof buildDefaultRouteBenchmarkPlan>,
     options: RouteExperienceBenchmarkOptions,
@@ -2030,7 +2163,57 @@ export class GameController {
     this.pushHud();
   }
 
-  private syncWorldAroundPlayer(force = false, allowFarFieldRebuild = true): ResidencyUpdateSummary {
+  private advanceInteractiveFrame(now: number): {
+    movementMs: number;
+    gameplayFrameMs: number;
+  } {
+    const gameplayStartedAt = performance.now();
+    const deltaSeconds = this.lastFrameTime === 0
+      ? 1 / 60
+      : Math.min((now - this.lastFrameTime) / 1000, MAX_DELTA_SECONDS);
+    this.lastFrameTime = now;
+    this.interactiveFrameNumber += 1;
+    const hasMovementIntent = this.hasMovementIntent();
+    const movementStartedAt = performance.now();
+    const moved = this.updateMovement(deltaSeconds);
+    const movementMs = performance.now() - movementStartedAt;
+    const dirtyResidentChunks = this.world.countDirtyResidentChunks();
+    if (
+      shouldPumpWorldWork(
+        hasMovementIntent || moved,
+        this.lastStreamSummary.pendingChunks,
+        dirtyResidentChunks,
+        this.lastFarFieldSummary.pendingBands,
+      )
+    ) {
+      this.syncWorldAroundPlayer(
+        false,
+        shouldAllowFarFieldCatchupWhileMoving(
+          hasMovementIntent,
+          this.lastStreamSummary.pendingChunks,
+          dirtyResidentChunks,
+          this.lastFarFieldSummary.pendingBands,
+          this.interactiveFrameNumber,
+          MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES,
+        ),
+        !hasMovementIntent,
+      );
+    }
+    this.renderInteractiveFrame();
+    const gameplayFrameMs = performance.now() - gameplayStartedAt;
+    this.lastGameplayFrameMs = gameplayFrameMs;
+    this.recordBootstrapBenchmarkSample(gameplayFrameMs);
+    return {
+      movementMs,
+      gameplayFrameMs,
+    };
+  }
+
+  private syncWorldAroundPlayer(
+    force = false,
+    allowFarFieldRebuild = true,
+    allowFarFieldPrefetch = true,
+  ): ResidencyUpdateSummary {
     const playerChunkX = Math.floor(this.player.feetPosition[0] / this.world.chunkSize);
     const playerChunkZ = Math.floor(this.player.feetPosition[2] / this.world.chunkSize);
     const resolved = force
@@ -2040,10 +2223,10 @@ export class GameController {
         }
       : resolveStreamAnchor(this.streamAnchor, playerChunkX, playerChunkZ, STREAM_ANCHOR_MARGIN_CHUNKS);
     if (force) {
-      return this.syncWorldAroundAnchor(resolved.anchor, true);
+      return this.syncWorldAroundAnchor(resolved.anchor, true, allowFarFieldRebuild, allowFarFieldPrefetch);
     }
     if (!shouldRefreshResidency(false, resolved.changed, this.lastStreamSummary.pendingChunks)) {
-      this.prefetchFarFieldSummaries(false);
+      this.prefetchFarFieldSummaries(false, allowFarFieldPrefetch);
       this.flushMeshBuildBudget();
       this.syncPresentedFarFieldMaskRevision();
       this.lastFarFieldSummary = this.farField.updateAround(
@@ -2061,10 +2244,15 @@ export class GameController {
       );
       return cloneResidencySummary(this.lastStreamSummary);
     }
-    return this.syncWorldAroundAnchor(resolved.anchor, false, allowFarFieldRebuild);
+    return this.syncWorldAroundAnchor(resolved.anchor, false, allowFarFieldRebuild, allowFarFieldPrefetch);
   }
 
-  private syncWorldAroundAnchor(anchor: StreamAnchor, settle = false, allowFarFieldRebuild = true): ResidencyUpdateSummary {
+  private syncWorldAroundAnchor(
+    anchor: StreamAnchor,
+    settle = false,
+    allowFarFieldRebuild = true,
+    allowFarFieldPrefetch = true,
+  ): ResidencyUpdateSummary {
     this.streamAnchor = anchor;
     const residency = this.world.updateResidencyAround(
       buildStreamAnchorPosition(anchor, this.world.chunkSize, this.player.feetPosition[1]),
@@ -2078,7 +2266,7 @@ export class GameController {
     if (residency.generatedChunks > 0 || residency.evictedChunks > 0 || residency.touchedNeighborChunks > 0) {
       this.farFieldReadyMaskRevision += 1;
     }
-    this.prefetchFarFieldSummaries(settle);
+    this.prefetchFarFieldSummaries(settle, allowFarFieldPrefetch);
     this.flushMeshBuildBudget(
       settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxMeshRebuildsPerFrame,
     );
@@ -2097,8 +2285,8 @@ export class GameController {
     return cloneResidencySummary(this.lastStreamSummary);
   }
 
-  private prefetchFarFieldSummaries(settle: boolean): void {
-    const maxGenerateChunks = this.resolveFarFieldPrefetchBudget(settle);
+  private prefetchFarFieldSummaries(settle: boolean, allowFarFieldPrefetch: boolean): void {
+    const maxGenerateChunks = this.resolveFarFieldPrefetchBudget(settle, allowFarFieldPrefetch);
     if (maxGenerateChunks <= 0) {
       this.lastFarFieldPrefetchMs = 0;
       this.lastFarFieldPrefetchRequestedChunks = 0;
@@ -2113,7 +2301,10 @@ export class GameController {
     this.lastFarFieldPrefetchMs = performance.now() - startedAt;
   }
 
-  private resolveFarFieldPrefetchBudget(settle: boolean): number {
+  private resolveFarFieldPrefetchBudget(settle: boolean, allowFarFieldPrefetch: boolean): number {
+    if (!allowFarFieldPrefetch) {
+      return 0;
+    }
     if (!this.bootstrapPlayableReady) {
       return 0;
     }
@@ -2380,7 +2571,7 @@ export class GameController {
     this.syncCameraToPlayer();
     const movementMs = performance.now() - movementStartedAt;
     const dirtyResidentChunks = this.world.countDirtyResidentChunks();
-    const residency = this.syncWorldAroundPlayer(
+    this.syncWorldAroundPlayer(
       false,
       shouldAllowFarFieldCatchupWhileMoving(
         target.phase !== "move",
@@ -2390,9 +2581,52 @@ export class GameController {
         target.frame,
         MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES,
       ),
+      target.phase !== "move",
     );
     const render = this.renderCurrentFrame();
     const gameplayFrameMs = performance.now() - gameplayStartedAt;
+    return this.captureRouteExperienceFrameSample(
+      target,
+      movementMs,
+      gameplayFrameMs,
+      seamProbeStrideFrames,
+      captureStrideFrames,
+      captureWidth,
+      captureHeight,
+      referenceDiffStrideFrames,
+      referenceDiffLimit,
+      sampleIndex,
+      capturedFrameCount,
+      render,
+    );
+  }
+
+  private async captureRouteExperienceFrameSample(
+    target: {
+      frame: number;
+      phase: "move" | "settle";
+      simTimeSeconds: number;
+      distanceMeters: number;
+    },
+    movementMs: number,
+    gameplayFrameMs: number,
+    seamProbeStrideFrames: number,
+    captureStrideFrames: number,
+    captureWidth: number,
+    captureHeight: number,
+    referenceDiffStrideFrames: number,
+    referenceDiffLimit: number,
+    sampleIndex: number,
+    capturedFrameCount: number,
+    render: {
+      frameStats: RenderStats;
+      frameCpuMs: number;
+    } | null = null,
+  ): Promise<{
+    sample: RouteExperienceFrameSample;
+    capturedFrame: CapturedBenchmarkFrame | null;
+  }> {
+    const residency = this.lastStreamSummary;
     const dirtyResidentMeshes = summarizeDirtyResidentMeshes(this.world);
     const frameProbe = render ?? {
       frameStats: zeroRenderStats(),
@@ -2423,9 +2657,9 @@ export class GameController {
             phase: target.phase,
             simTimeSeconds: target.simTimeSeconds,
             distanceMeters: target.distanceMeters,
-            feetPosition: [...target.feetPosition],
-            yaw: target.yaw,
-            pitch: target.pitch,
+            feetPosition: [...this.player.feetPosition],
+            yaw: this.camera.yaw,
+            pitch: this.camera.pitch,
           },
           image,
         };
@@ -3289,6 +3523,12 @@ function countUrgentDirtyMeshlessChunks(
     }
   }
   return urgentDirtyMeshlessChunks;
+}
+
+function nextAnimationFrame(): Promise<number> {
+  return new Promise((resolve) => {
+    requestAnimationFrame((now) => resolve(now));
+  });
 }
 
 function sumNumbers(values: readonly number[]): number {

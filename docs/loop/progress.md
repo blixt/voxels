@@ -2075,3 +2075,37 @@
 - Residual:
   - the next dominant runtime cost is no longer dirty-chunk discovery
   - generation worker hot paths are now more clearly the next place to look if I want another material win
+
+## 2026-03-12 live-walk benchmark and movement-phase far-prefetch fix
+
+- The next regression report from manual play did not match the existing benchmarks at all:
+  - synthetic route/walk benchmarks still looked fast
+  - real held-`W` walking could freeze almost immediately
+- That turned out to be a benchmark-design bug first:
+  - the existing “walk” benchmark stopped the live RAF loop
+  - teleported the player along a deterministic path
+  - and therefore bypassed the exact path where real-time worker completions and live movement interact
+- I added a real-time live-walk benchmark on the actual interactive path:
+  - real RAF frames
+  - real `stepPlayer(...)`
+  - real held `KeyW`
+  - same per-frame diagnostics and CSV/report output as the existing benchmark harness
+- That new benchmark immediately found the real problem:
+  - before the fix, one move-phase frame spent about `8285 ms` in far-summary prefetch
+  - move-phase gameplay frames reached about `8286.9 ms`
+  - move-phase far-summary prefetch averaged about `25.35 ms`
+- The culprit was not near-field chunk generation itself:
+  - movement frames were still allowed to pay for far-summary prefetch
+  - that path is non-urgent horizon seeding
+  - and in live play it could scan far enough to stall the frame catastrophically
+- The kept runtime fix is simple and deliberate:
+  - held-movement frames no longer allow far-summary prefetch
+  - settle/idle frames can still do that work
+  - deterministic route frames now follow the same policy during their `move` phase too
+- The live benchmark win was decisive:
+  - move-phase far-summary prefetch went from `max 8285 ms / avg 25.35 ms` to `0`
+  - move-phase gameplay frames dropped from about `8286.9 ms max / 5.6 ms p95` to about `12.1 ms max / 3.9 ms p95`
+  - the browser harness aggregate moved to about `1.287 ms` average gameplay frame with no hole signals
+- Residual:
+  - the trace still shows far-summary prefetch in non-movement portions of the session, so the algorithm itself is still too expensive
+  - the next far-field task should be to make summary prefetch incremental/stateful so even idle/settle work cannot produce multi-second scans

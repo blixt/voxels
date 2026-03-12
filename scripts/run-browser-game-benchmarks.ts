@@ -200,7 +200,7 @@ await withBrowserGameSession({
     const walkTokens = new Map<number, string>();
     walkResults = await runBrowserBenchmarkScenario(session, {
       id: "forward-walk-10s",
-      description: "Fresh-load deterministic 10-second forward walk through streaming terrain",
+      description: "Fresh-load real-time 10-second held-forward walk through streaming terrain",
       warmupIterations: options.walkWarmup,
       measuredIterations: options.walkIterations,
       timeoutMs: options.walkTimeoutMs,
@@ -210,7 +210,7 @@ await withBrowserGameSession({
         await benchmarkSession.waitForBootstrapBenchmarkComplete(options.startupTimeoutMs);
         await benchmarkSession.waitForGameReady(options.startupTimeoutMs);
         const token = await benchmarkSession.startAsyncWindowBenchmark(
-          `window.__VOXELS_GAME__.benchmarkForwardWalkExperience(${JSON.stringify({
+          `window.__VOXELS_GAME__.benchmarkLiveForwardWalkExperience(${JSON.stringify({
             durationSeconds: options.walkDurationSeconds,
             settleSeconds: options.walkSettleSeconds,
             sampleHz: options.walkSampleHz,
