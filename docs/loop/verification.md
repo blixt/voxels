@@ -4024,3 +4024,44 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - The acceptance is trace-driven; I did not keep the startup-only browser benchmark run as evidence because that harness run got stuck during teardown.
 - The next visible CPU buckets are no longer repeated Y-range sampling, so the next pass should focus on remaining column-state/spawn work or worker meshing cost.
+
+## 2026-03-12 cached and simplified spawn search
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts`
+- `mise run build`
+- `mise run bench-browser-game -- --label=spawn-cache --startup-warmup=0 --startup-iterations=1 --walk-warmup=0 --walk-iterations=0`
+- `mise run trace-route -- --label=spawn-cache-smoke --duration=2 --settle=1 --sample-hz=20`
+- `mise exec -- bun -e 'import { ProceduralResidentWorld } from "./src/engine/procedural-resident-world.ts"; import { ProceduralWorldGenerator } from "./src/engine/procedural-generator.ts"; class Counting extends ProceduralWorldGenerator { sampleColumnCalls=0; override sampleColumn(x,z){ this.sampleColumnCalls++; return super.sampleColumn(x,z);} } const generator=new Counting(1337); const world=new ProceduralResidentWorld(generator); const spawn1=world.getSpawnPosition(); const first=generator.sampleColumnCalls; generator.sampleColumnCalls=0; const spawn2=world.getSpawnPosition(); console.log(JSON.stringify({spawn1, spawn2, first, second: generator.sampleColumnCalls}));'`
+
+#### Numeric probes
+
+- Deterministic spawn probe:
+  - first spawn search `450` `sampleColumn()` calls
+  - second spawn search `0` `sampleColumn()` calls
+  - spawn remained `[192.5, 1419, 128.5]`
+- Startup benchmark output:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-RSLxmJ/report.json`
+  - startup iteration CSV: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-RSLxmJ/startup-entry-iterations.csv`
+  - startup sample CSV: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-RSLxmJ/startup-entry-samples.csv`
+  - startup memory CSV: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-RSLxmJ/startup-entry-memory.csv`
+  - benchmark elapsed `1052.48 ms`
+  - playable-ready `947.6 ms`
+  - visual-ready `947.6 ms`
+- Compared against the previous kept startup benchmark:
+  - previous report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-iah4HE/report.json`
+  - previous playable-ready `1427.2 ms`
+  - previous visual-ready `1427.2 ms`
+- 2-second route smoke:
+  - report: `artifacts/browser-route-trace/20260312T213419Z-spawn-cache-smoke/report.json`
+  - avg gameplay frame `1.32 ms`
+  - p95 gameplay frame `6.10 ms`
+  - hole-signal frames `0`
+
+#### Residual
+
+- This slice is worth keeping.
+- It fixed repeated startup work without narrowing the correctness envelope of spawn search.
+- There is still more cold-start work left after spawn search, but the bootstrap path is no longer paying for this same query over and over.

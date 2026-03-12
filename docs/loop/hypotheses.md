@@ -563,3 +563,11 @@
 | Repeated `computeChunkYRange()` calls are still wasting CPU on deterministic column work across frames | Add a focused resident-world regression that repeats the same anchor update and only keep the cache if `sampleColumn()` calls collapse on the second update | Confirmed. The second update now only pays the center surface probe | Confirmed |
 | This cache is too speculative to matter after the playable-ready bootstrap change | Keep the runtime change only if a full 10-second route trace moves materially, not just a micro test | Rejected. The route trace moved hard enough to justify the cache | Rejected |
 | A startup-only browser benchmark should be the acceptance oracle for this slice too | Run it once and keep it if it behaves | Rejected. That harness run got stuck during teardown, so I did not count it as evidence | Rejected |
+
+## 2026-03-12 cached and simplified spawn search
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| The next startup hotspot is the spawn search itself, not only the later bootstrap residency work | Inspect the trace hot path, then directly count `sampleColumn()` calls for one `getSpawnPosition()` on a deterministic seed | Confirmed. One spawn search was costing about `580` `sampleColumn()` calls before this slice | Confirmed |
+| The right fix is to search fewer rings around the origin | Try the reduced-ring patch first and compare it to the broader spawn requirements before keeping it | Rejected. That narrows correctness margin for a small gain and does not address repeated lookups | Rejected |
+| A safer win is to cache the resolved spawn and remove obvious duplicate spawn-search sampling | Cache `getSpawnPosition()`, dedupe `spawnSearchOffsets(...)`, skip re-sampling the footprint center, then rerun the startup benchmark | Confirmed. The first spawn search dropped to about `450` `sampleColumn()` calls, later spawn lookups became free, and startup playable-ready improved to about `947.6 ms` | Confirmed |

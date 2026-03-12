@@ -2006,3 +2006,23 @@
   - that harness run got stuck during teardown, so I treated it as untrustworthy instead of pretending it confirmed anything
 - Residual:
   - the remaining heavy trace buckets now lean more toward spawn/column-state work and worker meshing than repeated Y-range sampling
+
+## 2026-03-12 cached and simplified spawn search
+
+- The next cold-start hotspot was smaller but still real:
+  - `getSpawnPosition()` was expensive enough to show up in startup traces
+  - the game/controller path was also asking for it multiple times per world instance
+- I rejected the half-started “search fewer rings” tweak because it traded correctness margin for speed without addressing the repeated-work problem.
+- The kept fix was safer and cleaner:
+  - cache the resolved spawn position per resident-world instance
+  - remove duplicate corner visits from `spawnSearchOffsets(...)`
+  - stop resampling the footprint center inside `sampleSpawnCandidate(...)`
+- That changed the first spawn search materially:
+  - deterministic probe on seed `1337` dropped from about `580` `sampleColumn()` calls to about `450`
+  - every later `getSpawnPosition()` call on the same world now reuses the cached result
+- The browser startup benchmark moved enough to justify keeping it:
+  - playable-ready dropped from about `1427.2 ms` to about `947.6 ms`
+  - the short route smoke also stayed clean and fast
+- Residual:
+  - startup is much better again, but cold-start still deserves more work than just spawn search
+  - the next likely targets are remaining bootstrap column-state work and anything still coupling initial entry to non-urgent generation

@@ -171,6 +171,21 @@ test("spawn selection avoids unsupported cave-breached footprint columns", () =>
   }
 });
 
+test("spawn position is cached after the first search", () => {
+  const generator = new CountingProceduralWorldGenerator(1337);
+  const world = new ProceduralResidentWorld(generator);
+
+  const first = world.getSpawnPosition();
+  const firstSampleColumnCalls = generator.sampleColumnCalls;
+
+  generator.sampleColumnCalls = 0;
+  const second = world.getSpawnPosition();
+
+  expect(first).toEqual(second);
+  expect(firstSampleColumnCalls).toBeGreaterThan(0);
+  expect(generator.sampleColumnCalls).toBe(0);
+});
+
 test("resident world reuses cached empty chunk knowledge across residency changes", () => {
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
     horizontalRadiusChunks: 2,

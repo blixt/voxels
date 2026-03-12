@@ -115,6 +115,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   private readonly pendingFarFieldColumnRanges = new Map<string, ChunkYRange>();
   private readonly missingPersistedFarFieldRegionSummaries = new Set<string>();
   private readonly asyncChunkGeneration: AsyncChunkGenerationQueue | null;
+  private cachedSpawnPosition: Vec3 | null = null;
   private residentColumnRevision = 0;
   private lastAnchorSignature = "";
   private lastAnchorComplete = true;
@@ -415,6 +416,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   }
 
   getSpawnPosition(): Vec3 {
+    if (this.cachedSpawnPosition) {
+      return [...this.cachedSpawnPosition];
+    }
     const preferredBiomes = new Set(["verdant", "steppe", "highland", "bloom"]);
     let fallback = this.sampleSpawnCandidate(0, 0);
     let fallbackPosition: Vec3 = [0.5, fallback.standY, 0.5];
@@ -430,7 +434,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
           && candidate.column.surfaceY <= this.generator.seaLevel + 320
           && candidate.surfaceSpread <= 12
         ) {
-          return [worldX + 0.5, candidate.standY, worldZ + 0.5];
+          this.cachedSpawnPosition = [worldX + 0.5, candidate.standY, worldZ + 0.5];
+          return [...this.cachedSpawnPosition];
         }
         if (
           candidate.unsupportedSamples < fallback.unsupportedSamples
@@ -450,7 +455,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
         }
       }
     }
-    return fallbackPosition;
+    this.cachedSpawnPosition = fallbackPosition;
+    return [...this.cachedSpawnPosition];
   }
 
   private sampleSpawnCandidate(worldX: number, worldZ: number): {
@@ -1132,14 +1138,16 @@ function spawnSearchOffsets(ring: number): Array<[number, number]> {
   }
   const offsets: Array<[number, number]> = [];
   for (let value = -ring; value <= ring; value += 1) {
-    offsets.push([value, -ring], [value, ring], [-ring, value], [ring, value]);
+    offsets.push([value, -ring], [value, ring]);
+  }
+  for (let value = -ring + 1; value <= ring - 1; value += 1) {
+    offsets.push([-ring, value], [ring, value]);
   }
   return offsets;
 }
 
 function spawnFootprintOffsets(): Array<[number, number]> {
   return [
-    [0, 0],
     [-SPAWN_FOOTPRINT_RADIUS, 0],
     [SPAWN_FOOTPRINT_RADIUS, 0],
     [0, -SPAWN_FOOTPRINT_RADIUS],
