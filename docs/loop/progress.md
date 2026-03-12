@@ -2053,3 +2053,25 @@
 - Residual:
   - the next cold-start work should come from the new explicit benchmark fields and fresh traces, not guesses
   - if startup is still worth chasing after this, the remaining cost is likely the local playable-bubble generation/meshing itself rather than misplaced far-summary work
+
+## 2026-03-12 tracked dirty-chunk sets for meshing
+
+- After the far-summary prefetch fix, the route trace moved enough that the next real main-thread seam was easier to trust:
+  - `flushMeshBuildBudget(...)` was still high in the trace
+  - the implementation was still collecting and sorting dirty chunks by rescanning the full resident chunk set
+  - several gameplay/bootstrap helpers were also rescanning all resident chunks just to count dirty ones
+- I treated that as structural waste rather than a tuning problem:
+  - the engine already knows exactly when a chunk becomes dirty
+  - so it should track that state directly instead of redetecting it every frame
+- The kept refactor:
+  - added tracked dirty-chunk sets to `ProceduralResidentWorld` and `VoxelWorld`
+  - switched mesh rebuild paths to clear tracked dirty state explicitly
+  - made `collectDirtyChunks(...)`, dirty-mesh summaries, and urgent-meshless checks iterate dirty chunks directly
+  - removed the now-dead helper that rescanned all resident chunks to count dirty ones
+- The result was modest but real:
+  - startup stayed effectively flat, so the bookkeeping did not add cold-start tax
+  - the short route smoke improved again
+  - and the `flushMeshBuildBudget(...)` hotspot dropped out of the top trace frames, which is the main reason this slice is worth keeping
+- Residual:
+  - the next dominant runtime cost is no longer dirty-chunk discovery
+  - generation worker hot paths are now more clearly the next place to look if I want another material win

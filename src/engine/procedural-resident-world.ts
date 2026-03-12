@@ -23,7 +23,7 @@ import {
   type GeneratedRenderSummaryRegion,
 } from "./generated-render-summary-region.ts";
 import { metersToWorldUnits } from "./scale.ts";
-import type { MutableResidentChunkWorld, VoxelChunk } from "./world.ts";
+import { setChunkMeshDirtyState, type MutableResidentChunkWorld, type VoxelChunk } from "./world.ts";
 
 const DEFAULT_HORIZONTAL_RADIUS_CHUNKS = 8;
 const DEFAULT_UNDERGROUND_PADDING_CHUNKS = 3;
@@ -111,6 +111,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   private readonly generatedRenderChunkKeysByColumn = new Map<string, Set<string>>();
   private readonly generatedRenderColumnSummaries = new Map<string, GeneratedRenderColumnSummary>();
   private readonly columnChunkYRanges = new Map<string, ChunkYRange>();
+  private readonly dirtyChunkKeys = new Set<string>();
   private readonly readyGeneratedChunks = new Map<string, GeneratedChunk>();
   private readonly pendingFarFieldColumnRanges = new Map<string, ChunkYRange>();
   private readonly missingPersistedFarFieldRegionSummaries = new Set<string>();
@@ -178,7 +179,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   }
 
   countDirtyResidentChunks(): number {
-    return countDirtyResidentChunks(this.chunks.values());
+    return this.dirtyChunkKeys.size;
   }
 
   hasResidentColumn(cx: number, cz: number): boolean {
@@ -335,7 +336,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     const residentChunk = this.getResidentChunk(cx, cy, cz);
     if (residentChunk) {
       updateResidentChunkVoxel(residentChunk, localIndex, lx, ly, lz, materialIndex);
-      markResidentChunkDirty(residentChunk);
+      markResidentChunkDirty(this, residentChunk);
       this.recordResidentChunkRenderSummary(residentChunk);
       if (lx === 0) {
         this.markChunkDirtyByCoord(cx - 1, cy, cz);
@@ -389,6 +390,24 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     for (const chunk of this.chunks.values()) {
       yield chunk;
     }
+  }
+
+  *iterateDirtyResidentChunks(): Iterable<VoxelChunk> {
+    for (const key of this.dirtyChunkKeys) {
+      const chunk = this.chunks.get(key);
+      if (chunk) {
+        yield chunk;
+      }
+    }
+  }
+
+  noteResidentChunkMeshDirtyState(chunk: VoxelChunk, dirty: boolean): void {
+    const key = toChunkKey(chunk.coord.x, chunk.coord.y, chunk.coord.z);
+    if (dirty) {
+      this.dirtyChunkKeys.add(key);
+      return;
+    }
+    this.dirtyChunkKeys.delete(key);
   }
 
   getChunkSolidBounds(
@@ -543,7 +562,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
         cachedEmptyChunkHits: 0,
         touchedNeighborChunks: 0,
         residentChunks: this.chunks.size,
-        dirtyResidentChunks: countDirtyResidentChunks(this.chunks.values()),
+        dirtyResidentChunks: this.dirtyChunkKeys.size,
         generatedChunkCoords: [],
         evictedChunkCoords: [],
         phaseMs: {
@@ -728,7 +747,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
       cachedEmptyChunkHits,
       touchedNeighborChunks,
       residentChunks: this.chunks.size,
-      dirtyResidentChunks: countDirtyResidentChunks(this.chunks.values()),
+      dirtyResidentChunks: this.dirtyChunkKeys.size,
       surfaceY,
       elapsedMs: performance.now() - startedAt,
       generatedChunkCoords,
@@ -897,7 +916,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
       if (!chunk) {
         continue;
       }
-      markResidentChunkDirty(chunk);
+      markResidentChunkDirty(this, chunk);
       touched += 1;
     }
     return touched;
@@ -905,6 +924,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
 
   private adoptResidentChunk(key: string, chunk: VoxelChunk): void {
     this.chunks.set(key, chunk);
+    this.noteResidentChunkMeshDirtyState(chunk, chunk.meshDirty);
     const columnKey = toColumnKey(chunk.coord.x, chunk.coord.z);
     const previous = this.residentColumnCounts.get(columnKey) ?? 0;
     this.residentColumnCounts.set(columnKey, previous + 1);
@@ -915,6 +935,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
 
   private evictResidentChunk(key: string, chunk: VoxelChunk): void {
     this.chunks.delete(key);
+    this.dirtyChunkKeys.delete(key);
     const columnKey = toColumnKey(chunk.coord.x, chunk.coord.z);
     const previous = this.residentColumnCounts.get(columnKey) ?? 0;
     if (previous <= 1) {
@@ -971,7 +992,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     if (!chunk) {
       return;
     }
-    markResidentChunkDirty(chunk);
+    markResidentChunkDirty(this, chunk);
   }
 
   private recordGeneratedChunkRenderSummary(key: string, generated: GeneratedChunk): void {
@@ -1293,8 +1314,8 @@ function createResidentChunk(generated: GeneratedChunk, chunkSize: number): Voxe
   return chunk;
 }
 
-function markResidentChunkDirty(chunk: VoxelChunk): void {
-  chunk.meshDirty = true;
+function markResidentChunkDirty(world: MutableResidentChunkWorld, chunk: VoxelChunk): void {
+  setChunkMeshDirtyState(world, chunk, true);
   chunk.meshRevision += 1;
   chunk.pendingMeshRevision = null;
 }
@@ -1356,16 +1377,6 @@ function invalidateResidentChunkBoundsIfNeeded(chunk: VoxelChunk, lx: number, ly
   ) {
     chunk.solidBounds.dirty = true;
   }
-}
-
-function countDirtyResidentChunks(chunks: Iterable<VoxelChunk>): number {
-  let dirtyCount = 0;
-  for (const chunk of chunks) {
-    if (chunk.meshDirty) {
-      dirtyCount += 1;
-    }
-  }
-  return dirtyCount;
 }
 
 function zeroResidencyPhaseMetrics(): ResidencyPhaseMetrics {

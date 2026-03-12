@@ -4108,3 +4108,48 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - The new explicit prefetch metrics line up with the behavioral change: non-urgent far-summary work is gone from the pre-entry path.
 - The remaining startup cost is now mostly the actual local playable bubble, not hidden far-summary churn.
+
+## 2026-03-12 tracked dirty-chunk sets for meshing
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/game-bootstrap-benchmark.test.ts tests/game-route-benchmark.test.ts`
+- `mise run build`
+- `mise run bench-browser-game -- --label=dirty-set --startup-warmup=0 --startup-iterations=1 --walk-warmup=0 --walk-iterations=0`
+- `mise run trace-route -- --label=dirty-set-smoke --duration=2 --settle=1 --sample-hz=20`
+
+#### Numeric probes
+
+- Focused regression suite:
+  - `31` pass
+  - `0` fail
+- Startup benchmark output:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-qeIOsa/report.json`
+  - benchmark elapsed `417.386 ms`
+  - playable-ready `281.6 ms`
+  - visual-ready `281.6 ms`
+- Compared against the previous kept startup benchmark:
+  - previous report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-FjVVOd/report.json`
+  - previous benchmark elapsed `426.742 ms`
+  - previous playable-ready `273 ms`
+  - previous visual-ready `273 ms`
+- 2-second route smoke:
+  - report: `artifacts/browser-route-trace/20260312T215203Z-dirty-set-smoke/report.json`
+  - avg gameplay frame `1.005 ms`
+  - p95 gameplay frame `2.90 ms`
+  - max gameplay frame `9.2 ms`
+  - avg mesh `0.347 ms`
+  - p95 mesh `2.20 ms`
+  - hole-signal frames `0`
+- Trace hotspot comparison:
+  - previous report: `artifacts/browser-route-trace/20260312T214235Z-bootstrap-no-prefetch-smoke/report.json`
+  - `flushMeshBuildBudget(...)` was a top inclusive trace frame there
+  - current report: `artifacts/browser-route-trace/20260312T215203Z-dirty-set-smoke/report.json`
+  - `flushMeshBuildBudget(...)` dropped out of the top reported inclusive frames
+
+#### Residual
+
+- This slice is worth keeping.
+- It reduced steady-state dirty-mesh bookkeeping cost without making startup worse in any meaningful way.
+- The next dominant cost is now generation worker work, not dirty chunk rediscovery on the main thread.

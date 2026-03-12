@@ -5,7 +5,7 @@ import {
   type OpaqueChunkMeshGeometry,
 } from "./opaque-chunk-mesher.ts";
 import { applyWaterDepthTint } from "./water-visuals.ts";
-import type { ResidentChunkWorld } from "./world.ts";
+import { setChunkMeshDirtyState, type ResidentChunkWorld } from "./world.ts";
 
 const FLOAT32_BYTES = 4;
 const VERTEX_STRIDE = 20;
@@ -76,7 +76,7 @@ export function rebuildDirtyMeshes(
       break;
     }
     chunk.mesh = buildChunkMesh(world, chunk.coord.x, chunk.coord.y, chunk.coord.z);
-    chunk.meshDirty = false;
+    setChunkMeshDirtyState(world, chunk, false);
     chunk.pendingMeshRevision = null;
     chunk.gpuDirty = true;
     meshCount += 1;
@@ -99,7 +99,7 @@ export function rebuildDirtyMeshes(
 
 export function collectDirtyChunks(world: ResidentChunkWorld, priorityPosition?: Vec3) {
   const dirtyChunks = [];
-  for (const chunk of world.iterateResidentChunks()) {
+  for (const chunk of world.iterateDirtyResidentChunks?.() ?? world.iterateResidentChunks()) {
     if (!chunk.meshDirty) {
       continue;
     }

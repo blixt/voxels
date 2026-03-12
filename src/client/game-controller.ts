@@ -73,6 +73,7 @@ import {
   type FarFieldRenderMask,
   type RenderStats,
 } from "../engine/renderer.ts";
+import { setChunkMeshDirtyState } from "../engine/world.ts";
 import { metersToWorldUnits, worldUnitsToMeters } from "../engine/scale.ts";
 import {
   shouldAllowFarFieldCatchupWhileMoving,
@@ -2157,7 +2158,7 @@ export class GameController {
           completed.coord.z,
           completed.opaqueMesh,
         );
-        chunk.meshDirty = false;
+        setChunkMeshDirtyState(this.world, chunk, false);
         chunk.pendingMeshRevision = null;
         chunk.gpuDirty = true;
         meshCount += 1;
@@ -2184,7 +2185,7 @@ export class GameController {
         const hasPendingJob = this.asyncChunkMeshing.hasPendingChunk(chunk.coord.x, chunk.coord.y, chunk.coord.z);
         const wasBuilt = chunk.meshBuilt;
         chunk.mesh = buildChunkMesh(this.world, chunk.coord.x, chunk.coord.y, chunk.coord.z);
-        chunk.meshDirty = false;
+        setChunkMeshDirtyState(this.world, chunk, false);
         chunk.gpuDirty = true;
         if (hasPendingJob) {
           chunk.pendingMeshRevision = chunk.meshRevision;
@@ -3234,7 +3235,7 @@ function summarizeDirtyResidentMeshes(world: ProceduralResidentWorld): {
   let dirtyResidentChunks = 0;
   let dirtyMeshlessResidentChunks = 0;
   let dirtyRetainedMeshResidentChunks = 0;
-  for (const chunk of world.iterateResidentChunks()) {
+  for (const chunk of world.iterateDirtyResidentChunks()) {
     if (!chunk.meshDirty) {
       continue;
     }
@@ -3279,7 +3280,7 @@ function countUrgentDirtyMeshlessChunks(
   priorityChunkZ: number,
 ): number {
   let urgentDirtyMeshlessChunks = 0;
-  for (const chunk of world.iterateResidentChunks()) {
+  for (const chunk of world.iterateDirtyResidentChunks()) {
     if (!chunk.meshDirty || chunk.mesh) {
       continue;
     }

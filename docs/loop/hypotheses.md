@@ -579,3 +579,11 @@
 | Far-summary prefetch is still doing measurable CPU work during startup, but the benchmarks do not isolate it clearly enough yet | Add explicit far-summary prefetch timing/request counters to startup and route benchmark samples before changing policy | Confirmed. The new metrics are now part of the benchmark payloads and CSVs | Confirmed |
 | It is worth doing far-summary prefetch before the world is even playable because the horizon needs to be ready immediately | Block prefetch until `bootstrapPlayableReady`, rerun startup and route smokes, and keep it only if entry time improves without reintroducing hole signals | Rejected. Prefetch before entry was wasting startup budget; deferring it cut playable-ready from about `947.6 ms` to about `273 ms` while route hole signals stayed at `0` | Rejected |
 | Even after entry, far-summary prefetch should still compete with chunk adoption backlog | Gate prefetch off when the resident-world ready backlog is non-zero and observe the startup/route behavior | Confirmed. The kept policy avoids piling horizon work on top of already-finished nearby chunk adoption | Confirmed |
+
+## 2026-03-12 tracked dirty-chunk sets for meshing
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| The next meaningful main-thread meshing tax is not the mesh math itself but rediscovering dirty chunks every frame by scanning the full resident set | Re-read the trace, then replace dirty-chunk rescans with a tracked dirty set and rerun focused tests plus a route smoke | Confirmed. The route smoke improved and `flushMeshBuildBudget(...)` dropped out of the top trace frames | Confirmed |
+| This bookkeeping refactor will probably hurt startup enough that it is not worth the steady-state win | Re-run the startup benchmark after the dirty-set change instead of assuming it is free | Rejected. Startup stayed roughly flat, so the bookkeeping seam is worth keeping | Rejected |
+| Dirty-mesh summaries and urgent-meshless checks can keep rescanning all resident chunks because only the mesher itself is hot | Switch those helpers to the tracked dirty iterator too and keep it only if tests and route smoke stay clean | Confirmed. The helpers now follow the same tracked-dirty path and the runtime stayed healthy | Confirmed |

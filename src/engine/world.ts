@@ -31,6 +31,8 @@ export interface ResidentChunkWorld {
   getResidentChunk(cx: number, cy: number, cz: number): VoxelChunk | null;
   hasResidentChunk(cx: number, cy: number, cz: number): boolean;
   iterateResidentChunks(): Iterable<VoxelChunk>;
+  iterateDirtyResidentChunks?(): Iterable<VoxelChunk>;
+  noteResidentChunkMeshDirtyState?(chunk: VoxelChunk, dirty: boolean): void;
   getChunkSolidBounds(
     cx: number,
     cy: number,
@@ -43,6 +45,14 @@ export interface ResidentChunkWorld {
 
 export interface MutableResidentChunkWorld extends ResidentChunkWorld {
   setVoxel(x: number, y: number, z: number, materialIndex: number): boolean;
+}
+
+export function setChunkMeshDirtyState(world: ResidentChunkWorld, chunk: VoxelChunk, dirty: boolean): void {
+  if (chunk.meshDirty === dirty) {
+    return;
+  }
+  chunk.meshDirty = dirty;
+  world.noteResidentChunkMeshDirtyState?.(chunk, dirty);
 }
 
 function toChunkKey(cx: number, cy: number, cz: number, sizeX: number, sizeY: number): number {
@@ -61,6 +71,7 @@ export class VoxelWorld implements ResidentChunkWorld {
   readonly palette: PackedColor[];
   readonly colorToIndex = new Map<PackedColor, number>();
   readonly chunks = new Map<number, VoxelChunk>();
+  readonly dirtyChunkKeys = new Set<number>();
 
   constructor(dimensions: WorldDimensions, chunkSize = DEFAULT_CHUNK_SIZE, palette: PackedColor[] = [0]) {
     this.width = dimensions.width;
@@ -165,6 +176,7 @@ export class VoxelWorld implements ResidentChunkWorld {
 
     if (chunk.solidCount === 0) {
       this.chunks.delete(chunkKey);
+      this.dirtyChunkKeys.delete(chunkKey);
     }
     return true;
   }
@@ -265,6 +277,7 @@ export class VoxelWorld implements ResidentChunkWorld {
         }
         if (chunk.solidCount === 0) {
           this.chunks.delete(chunkKey);
+          this.dirtyChunkKeys.delete(chunkKey);
         }
       }
 
@@ -274,6 +287,7 @@ export class VoxelWorld implements ResidentChunkWorld {
 
   clear(): void {
     this.chunks.clear();
+    this.dirtyChunkKeys.clear();
   }
 
   getResidentChunk(cx: number, cy: number, cz: number): VoxelChunk | null {
@@ -289,6 +303,24 @@ export class VoxelWorld implements ResidentChunkWorld {
     for (const chunk of this.chunks.values()) {
       yield chunk;
     }
+  }
+
+  *iterateDirtyResidentChunks(): Iterable<VoxelChunk> {
+    for (const chunkKey of this.dirtyChunkKeys) {
+      const chunk = this.chunks.get(chunkKey);
+      if (chunk) {
+        yield chunk;
+      }
+    }
+  }
+
+  noteResidentChunkMeshDirtyState(chunk: VoxelChunk, dirty: boolean): void {
+    const chunkKey = toChunkKey(chunk.coord.x, chunk.coord.y, chunk.coord.z, this.chunkCountX, this.chunkCountY);
+    if (dirty) {
+      this.dirtyChunkKeys.add(chunkKey);
+      return;
+    }
+    this.dirtyChunkKeys.delete(chunkKey);
   }
 
   getStats(): WorldStats {
@@ -388,11 +420,12 @@ export class VoxelWorld implements ResidentChunkWorld {
       mesh: null,
     };
     this.chunks.set(chunkKey, chunk);
+    this.dirtyChunkKeys.add(chunkKey);
     return chunk;
   }
 
   private markChunkDirty(chunk: VoxelChunk): void {
-    chunk.meshDirty = true;
+    setChunkMeshDirtyState(this, chunk, true);
     chunk.meshRevision += 1;
     chunk.pendingMeshRevision = null;
   }

@@ -229,6 +229,24 @@ test("resident world reuses known-empty chunk results on a repeated anchor refre
   expect(second.phaseMs.chunkGenerationMs).toBe(0);
 });
 
+test("resident world tracks dirty chunks without rescanning the full resident set", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    horizontalRadiusChunks: 2,
+  });
+  const spawn = world.getSpawnPosition();
+
+  world.updateResidencyAround(spawn, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+  const dirtyBefore = Array.from(world.iterateDirtyResidentChunks());
+
+  expect(dirtyBefore.length).toBeGreaterThan(0);
+  expect(dirtyBefore.length).toBe(world.countDirtyResidentChunks());
+
+  rebuildDirtyMeshes(world, Number.POSITIVE_INFINITY, { priorityPosition: spawn });
+
+  expect(Array.from(world.iterateDirtyResidentChunks())).toHaveLength(0);
+  expect(world.countDirtyResidentChunks()).toBe(0);
+});
+
 test("resident world caches column y-range sampling across repeated updates", () => {
   const generator = new CountingProceduralWorldGenerator(1337, { chunkSize: 16 });
   const world = new ProceduralResidentWorld(generator, {
