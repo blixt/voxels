@@ -4253,3 +4253,56 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - It removes the remaining trace-visible far-summary scan hotspot without regressing live walk correctness.
 - The next dominant work is now more clearly in generation/meshing/persistence rather than broad far-summary rescanning.
+
+## 2026-03-12 summary-only deferred persistence for far-field requests
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-deferred-persistence.test.ts tests/procedural-resident-world.test.ts`
+- `mise run build`
+- `mise run bench-browser-game -- --label=summary-only-persist-rerun --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=1 --walk-duration=10 --walk-settle=4 --walk-sample-hz=60`
+- `mise run trace-route -- --benchmark=live-forward --label=summary-only-persist-trace --duration=10 --settle=4 --sample-hz=60`
+
+#### Numeric probes
+
+- Focused verification:
+  - `28` pass
+  - `0` fail
+- Walk benchmark output:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-oIrbNh/report.json`
+  - benchmark elapsed `14116.939 ms`
+  - avg gameplay frame `1.265 ms`
+  - p95 gameplay frame `3.4 ms`
+  - max gameplay frame `9.5 ms`
+  - hole-signal frames `0`
+  - peak JS heap used `14458840 bytes`
+- Previous comparable walk benchmark:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-PFnXJK/report.json`
+  - benchmark elapsed `14117.159 ms`
+  - avg gameplay frame `1.333 ms`
+  - p95 gameplay frame `3.5 ms`
+  - max gameplay frame `11.9 ms`
+  - hole-signal frames `0`
+- Delta-task comparison:
+  - previous `avg_deltaTaskDurationMs = 3546.928`
+  - current `avg_deltaTaskDurationMs = 3357.013`
+- Live-forward Chrome trace:
+  - report: `artifacts/browser-route-trace/20260312T222702Z-summary-only-persist-trace/report.json`
+  - avg gameplay frame `1.461501787189079 ms`
+  - p95 gameplay frame `3.699999988079071 ms`
+  - max gameplay frame `14.799999952316284 ms`
+  - hole-signal frames `0`
+- Trace hotspot comparison versus the previous trace:
+  - previous report: `artifacts/browser-route-trace/20260312T222007Z-far-prefetch-frontier-trace/report.json`
+  - previous top exclusive frames included:
+    - `postMessage @ :`
+    - `transaction @ :`
+  - current report: `artifacts/browser-route-trace/20260312T222702Z-summary-only-persist-trace/report.json`
+  - current reported top exclusive frames no longer include either of those persistence hotspots
+
+#### Residual
+
+- This slice is worth keeping.
+- It reduces worker-side persistence pressure for far summary requests and keeps live walk fully interactive.
+- The next dominant work is still generator/mesher compute, not persistence queue overhead.

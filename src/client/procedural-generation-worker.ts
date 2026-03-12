@@ -5,6 +5,13 @@ import {
   type CachedEncodedGeneratedChunk,
   type ProceduralGeneratedChunkCache,
 } from "./procedural-generated-chunk-cache.ts";
+import {
+  clearDeferredProceduralPersistenceQueue,
+  countDeferredProceduralPersistenceJobs,
+  createDeferredProceduralPersistenceQueue,
+  enqueueDeferredProceduralPersistenceJob,
+  shiftDeferredProceduralPersistenceJob,
+} from "./procedural-deferred-persistence.ts";
 import { decodeGeneratedChunk, decodeGeneratedChunkSummary, encodeGeneratedChunk } from "../engine/generated-chunk-codec.ts";
 import { ProceduralWorldGenerator, type GeneratedChunk } from "../engine/procedural-generator.ts";
 import {
@@ -69,11 +76,8 @@ let chunkCache: ProceduralGeneratedChunkCache | null = null;
 const reportedCacheFailures = new Set<string>();
 const DEFERRED_PERSISTENCE_FLUSH_DELAY_MS = 250;
 const MAX_PERSISTENCE_JOBS_PER_FLUSH = 2;
-type PendingPersistenceJob =
-  | { type: "chunk"; chunk: GeneratedChunk }
-  | { type: "summary"; coord: ChunkCoordinate; summary: TransferredGeneratedChunkRenderSummary };
 
-const pendingPersistenceJobs: PendingPersistenceJob[] = [];
+const pendingPersistenceJobs = createDeferredProceduralPersistenceQueue();
 let persistenceFlushTimer = 0;
 let persistenceFlushInProgress = false;
 
@@ -183,7 +187,7 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
     }
     const summary = serializeGeneratedChunkRenderSummary(decodeGeneratedChunkSummary(cachedChunk.buffer).renderSummary);
     if (chunkCache) {
-      pendingPersistenceJobs.push({
+      enqueueDeferredProceduralPersistenceJob(pendingPersistenceJobs, {
         type: "summary",
         coord: { ...message.coord },
         summary: cloneTransferredSummary(summary.summary),
@@ -202,9 +206,10 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
   const generated = generator.generateChunk(message.coord.x, message.coord.y, message.coord.z);
   if (message.type === "generate") {
     if (chunkCache) {
-      pendingPersistenceJobs.push({
+      enqueueDeferredProceduralPersistenceJob(pendingPersistenceJobs, {
         type: "chunk",
-        chunk: cloneGeneratedChunkForDeferredPersistence(generated, true),
+        chunk: cloneGeneratedChunkForDeferredPersistence(generated),
+        coord: { ...generated.coord },
       });
       scheduleDeferredPersistenceFlush();
     }
@@ -220,9 +225,10 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
   }
   const summary = serializeGeneratedChunkRenderSummary(generated.renderSummary);
   if (chunkCache) {
-    pendingPersistenceJobs.push({
-      type: "chunk",
-      chunk: cloneGeneratedChunkForDeferredPersistence(generated, false),
+    enqueueDeferredProceduralPersistenceJob(pendingPersistenceJobs, {
+      type: "summary",
+      coord: { ...generated.coord },
+      summary: cloneTransferredSummary(summary.summary),
     });
     scheduleDeferredPersistenceFlush();
   }
@@ -244,7 +250,7 @@ function reportCacheFailure(stage: "open" | "read" | "write", error: unknown): v
 }
 
 function scheduleDeferredPersistenceFlush(): void {
-  if (!chunkCache || persistenceFlushTimer !== 0 || persistenceFlushInProgress || pendingPersistenceJobs.length === 0) {
+  if (!chunkCache || persistenceFlushTimer !== 0 || persistenceFlushInProgress || countDeferredProceduralPersistenceJobs(pendingPersistenceJobs) === 0) {
     return;
   }
   persistenceFlushTimer = self.setTimeout(() => {
@@ -254,14 +260,17 @@ function scheduleDeferredPersistenceFlush(): void {
 }
 
 async function flushDeferredPersistenceJobs(): Promise<void> {
-  if (!chunkCache || persistenceFlushInProgress || pendingPersistenceJobs.length === 0) {
+  if (!chunkCache || persistenceFlushInProgress || countDeferredProceduralPersistenceJobs(pendingPersistenceJobs) === 0) {
     return;
   }
   persistenceFlushInProgress = true;
   try {
     let processedJobs = 0;
-    while (chunkCache && pendingPersistenceJobs.length > 0 && processedJobs < MAX_PERSISTENCE_JOBS_PER_FLUSH) {
-      const job = pendingPersistenceJobs.shift()!;
+    while (chunkCache && countDeferredProceduralPersistenceJobs(pendingPersistenceJobs) > 0 && processedJobs < MAX_PERSISTENCE_JOBS_PER_FLUSH) {
+      const job = shiftDeferredProceduralPersistenceJob(pendingPersistenceJobs);
+      if (!job) {
+        break;
+      }
       if (job.type === "summary") {
         await chunkCache.putChunkSummary(job.coord, job.summary);
       } else {
@@ -274,20 +283,17 @@ async function flushDeferredPersistenceJobs(): Promise<void> {
     reportCacheFailure("write", error);
     chunkCache?.close();
     chunkCache = null;
-    pendingPersistenceJobs.length = 0;
+    clearDeferredProceduralPersistenceQueue(pendingPersistenceJobs);
   } finally {
     persistenceFlushInProgress = false;
     scheduleDeferredPersistenceFlush();
   }
 }
 
-function cloneGeneratedChunkForDeferredPersistence(
-  chunk: GeneratedChunk,
-  copyData: boolean,
-): GeneratedChunk {
+function cloneGeneratedChunkForDeferredPersistence(chunk: GeneratedChunk): GeneratedChunk {
   return {
     coord: { ...chunk.coord },
-    data: copyData ? chunk.data.slice() : chunk.data,
+    data: chunk.data.slice(),
     solidCount: chunk.solidCount,
     solidBounds: chunk.solidBounds
       ? {

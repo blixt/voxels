@@ -2137,3 +2137,30 @@
 - Residual:
   - with prefetch scanning cooled down, the next clearly dominant costs are worker-side generation/meshing and summary/persistence churn
   - the strongest next candidate is incremental column-summary application or lighter summary-only persistence, not more broad far-field scanning changes
+
+## 2026-03-12 summary-only deferred persistence for far-field requests
+
+- With the far-summary scan hotspot removed, the next trace cluster shifted where I expected:
+  - procedural-generation worker frames were still prominent
+  - the old trace still showed `transaction @ :` and `postMessage @ :` as reported worker hotspots
+  - and the worker code still had an obvious mismatch with the intended architecture:
+    - a summary-only request would still generate a full chunk
+    - then queue full-chunk persistence even when only far-field summary data was needed
+- I treated that as both a performance issue and an architectural cleanup:
+  - far-field summary requests should stay summary-only unless a real chunk request arrives
+  - deferred persistence should dedupe by coordinate so repeated summary writes do not stack up
+  - if a later full chunk write arrives for the same coord, it should supersede the summary write
+- The kept change has two parts:
+  - a small pure deferred-persistence queue with explicit precedence rules
+  - the procedural-generation worker now persists only chunk summaries for summary-only requests, instead of encoding and writing full chunks
+- I also removed the superseded worker branch that cloned partial chunks for summary-only persistence, since that path no longer exists
+- The measured effect is modest in frame averages but real in the right place:
+  - the 10-second live forward-walk benchmark improved from about `1.333 ms` average gameplay frame and `11.9 ms` max to about `1.265 ms` average and `9.5 ms` max
+  - benchmark elapsed stayed flat, which is fine here because the main point was reducing hidden worker overhead, not changing the route itself
+  - `avg_deltaTaskDurationMs` improved from about `3546.928 ms` to about `3357.013 ms`
+- The trace evidence is the more important acceptance signal:
+  - in the previous trace, `transaction @ :` and `postMessage @ :` both appeared in the reported top exclusive worker frames
+  - in the new trace, neither appears in the reported top exclusive hotspot list
+- Residual:
+  - worker-side generation math is still dominant
+  - the next likely win is either lighter summary application on the main thread or direct generator hot-path work such as field sampling / column-state writes
