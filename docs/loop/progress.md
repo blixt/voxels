@@ -1928,3 +1928,29 @@
   - deferred persistence helped enough to keep
   - but startup is still slower than the old fully encoded-transfer baseline
   - the next likely target is reducing total encode/write volume or batching persisted chunk records better, not changing the delivery seam again
+
+## 2026-03-12 bounded async chunk adoption backlog
+
+- The next manual regression report was much more specific than the automated route traces:
+  - after the worker/persistence changes, walking a couple of steps could still freeze the game for seconds
+  - the deterministic route trace did not reproduce that, so I looked at the residency code directly instead of trying to guess from averages
+- The real bug was simpler than the broad “worker overhead” suspicion:
+  - async chunk completions were drained up front
+  - then every completed near chunk was adopted immediately
+  - that adoption path did **not** respect `maxGenerateChunks`
+  - so a burst of completed worker jobs could still collapse into one main-thread residency spike
+- I fixed the seam by making completed generated chunks behave like a bounded ready backlog:
+  - completed chunks are now overlaid and summarized once when they arrive
+  - they sit in `readyGeneratedChunks` until the residency walk reaches them
+  - promotion from that ready backlog into live resident chunks now obeys the same per-update budget as direct generation
+  - ready chunks that are no longer needed after the player moves away are dropped, while their derived summaries stay behind
+- I added a direct regression for the actual failure mode:
+  - `procedural-resident-world.test.ts` now forces a large async completion backlog
+  - the test only passes if the world adopts those chunks across multiple updates instead of all at once
+- The kept result is exactly the behavior I wanted from the worker seam:
+  - route-trace gameplay stays smooth
+  - hole signals stay at `0`
+  - and there is now a concrete guardrail against “workers finish in parallel, main thread freezes later”
+- Residual:
+  - startup is still too slow and still has a giant pre-playable long task
+  - this slice fixes bursty walking hitches, not cold-start latency

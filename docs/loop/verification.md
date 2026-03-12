@@ -3908,3 +3908,36 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - Startup improved materially and the route trace improved slightly with a much lower worst-case spike, which is enough to justify the deferred writer.
 - The tiny one-second walk microbenchmark is noisier and not uniformly better, so I did not treat it as the primary acceptance signal.
 - Startup is still slower than the old `1e8b74d` baseline, so the next likely chunk-generation target is reducing total persistence encode/write volume or batching records better rather than revisiting the delivery handoff again.
+
+## 2026-03-12 bounded async chunk adoption backlog
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts`
+- `mise run build`
+- `mise run trace-route -- --label=bounded-adoption-10s --duration=10 --settle=2 --sample-hz=60`
+
+#### Numeric probes
+
+- Focused regression suite:
+  - `20` pass
+  - `0` fail
+- Production route trace:
+  - report: `artifacts/browser-route-trace/20260312T205505Z-bounded-adoption-10s/report.json`
+  - avg gameplay frame `3.04 ms`
+  - p95 gameplay frame `3.90 ms`
+  - max gameplay frame `12.2 ms`
+  - avg stream `2.85 ms`
+  - max stream `5.5 ms`
+  - avg mesh `0.10 ms`
+  - max mesh `8.2 ms`
+  - hole-signal frames `0`
+  - max pending chunks `1237`
+  - max dirty resident chunks `119`
+
+#### Residual
+
+- This slice is worth keeping.
+- The route trace stayed comfortably interactive and the new regression test now covers the specific backlog burst that could previously bypass the residency budget.
+- The trace still contains a very large pre-playable long task outside the benchmark window, so cold start remains a separate unsolved problem.

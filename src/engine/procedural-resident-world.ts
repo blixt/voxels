@@ -51,6 +51,7 @@ export interface ResidencyPhaseMetrics {
   completedGeneratedSummaries: number;
   completedRegionSummaryCacheHits: number;
   missingRegionSummaries: number;
+  readyGeneratedChunkBacklog: number;
 }
 
 export interface ResidencyUpdateSummary {
@@ -109,6 +110,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   private readonly generatedRenderSummaries = new Map<string, GeneratedChunkRenderSummary>();
   private readonly generatedRenderChunkKeysByColumn = new Map<string, Set<string>>();
   private readonly generatedRenderColumnSummaries = new Map<string, GeneratedRenderColumnSummary>();
+  private readonly readyGeneratedChunks = new Map<string, GeneratedChunk>();
   private readonly pendingFarFieldColumnRanges = new Map<string, ChunkYRange>();
   private readonly missingPersistedFarFieldRegionSummaries = new Set<string>();
   private readonly asyncChunkGeneration: AsyncChunkGenerationQueue | null;
@@ -573,7 +575,6 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     summaryDrainMs = performance.now() - summaryDrainStartedAt;
     const completedRegionSummaries = this.asyncChunkGeneration?.drainCompletedRegionSummaries() ?? [];
     const missingRegionSummaries = this.asyncChunkGeneration?.drainMissingRegionSummaries() ?? [];
-    const completedGeneratedChunksByKey = new Map<string, GeneratedChunk>();
     for (const summary of completedRegionSummaries) {
       this.recordPersistedRegionRenderSummary(summary);
     }
@@ -584,8 +585,10 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
       this.recordChunkRenderSummary(toChunkKey(summary.coord.x, summary.coord.y, summary.coord.z), summary);
     }
     for (const generated of completedGeneratedChunks) {
-      this.recordGeneratedChunkRenderSummary(toChunkKey(generated.coord.x, generated.coord.y, generated.coord.z), generated);
-      completedGeneratedChunksByKey.set(toChunkKey(generated.coord.x, generated.coord.y, generated.coord.z), generated);
+      const key = toChunkKey(generated.coord.x, generated.coord.y, generated.coord.z);
+      this.applyOverlayToGeneratedChunk(key, generated);
+      this.recordGeneratedChunkRenderSummary(key, generated);
+      this.readyGeneratedChunks.set(key, generated);
     }
     let scheduledChunks = 0;
 
@@ -604,17 +607,20 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
         if (this.chunks.has(key)) {
           continue;
         }
-        const completed = completedGeneratedChunksByKey.get(key);
-        if (completed) {
-          completedGeneratedChunksByKey.delete(key);
-          this.applyOverlayToGeneratedChunk(key, completed);
-          if (completed.solidCount === 0) {
+        const readyGenerated = this.readyGeneratedChunks.get(key);
+        if (readyGenerated) {
+          if (generatedChunks >= maxGenerateChunks) {
+            pendingChunks += 1;
+            continue;
+          }
+          this.readyGeneratedChunks.delete(key);
+          if (readyGenerated.solidCount === 0) {
             emptyChunksSkipped += 1;
             this.emptyChunkKeys.add(key);
             continue;
           }
           const adoptionStartedAt = performance.now();
-          const chunk = createResidentChunk(completed, this.chunkSize);
+          const chunk = createResidentChunk(readyGenerated, this.chunkSize);
           this.emptyChunkKeys.delete(key);
           this.adoptResidentChunk(key, chunk);
           generatedChunks += 1;
@@ -674,7 +680,11 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
       }
     }
 
-    for (const [key, generated] of completedGeneratedChunksByKey) {
+    for (const [key, generated] of this.readyGeneratedChunks) {
+      if (neededKeys.has(key)) {
+        continue;
+      }
+      this.readyGeneratedChunks.delete(key);
       if (generated.solidCount === 0) {
         this.emptyChunkKeys.add(key);
       }
@@ -732,6 +742,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
         completedGeneratedSummaries: completedSummaryStats.generated,
         completedRegionSummaryCacheHits: completedRegionSummaries.length,
         missingRegionSummaries: missingRegionSummaries.length,
+        readyGeneratedChunkBacklog: this.readyGeneratedChunks.size,
       },
     };
     return this.lastResidency;
@@ -1344,6 +1355,7 @@ function zeroResidencyPhaseMetrics(): ResidencyPhaseMetrics {
     completedGeneratedSummaries: 0,
     completedRegionSummaryCacheHits: 0,
     missingRegionSummaries: 0,
+    readyGeneratedChunkBacklog: 0,
   };
 }
 

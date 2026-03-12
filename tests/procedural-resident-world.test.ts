@@ -270,6 +270,75 @@ test("resident world can stream the same anchor incrementally under a generation
   expect(settled.pendingChunks).toBe(0);
 });
 
+test("resident world budgets adoption of completed async chunks across frames", () => {
+  const generator = new ProceduralWorldGenerator(1337, { chunkSize: 16 });
+  const requestedCoords: Array<{ x: number; y: number; z: number }> = [];
+  const requestedKeys = new Set<string>();
+  const discoveryWorld = new ProceduralResidentWorld(generator, {
+    horizontalRadiusChunks: 2,
+    asyncChunkGeneration: createFakeAsyncQueue({
+      requestChunk(cx, cy, cz) {
+        const key = `${cx}:${cy}:${cz}`;
+        if (requestedKeys.has(key)) {
+          return false;
+        }
+        requestedKeys.add(key);
+        requestedCoords.push({ x: cx, y: cy, z: cz });
+        return true;
+      },
+      hasPendingChunk(cx, cy, cz) {
+        return requestedKeys.has(`${cx}:${cy}:${cz}`);
+      },
+      getPendingCount() {
+        return requestedKeys.size;
+      },
+    }),
+  });
+  const spawn = discoveryWorld.getSpawnPosition();
+
+  discoveryWorld.updateResidencyAround(spawn, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+
+  expect(requestedCoords.length).toBeGreaterThan(0);
+
+  const completedChunks = requestedCoords.map((coord) => generator.generateChunk(coord.x, coord.y, coord.z));
+  let drained = false;
+  let unexpectedRequests = 0;
+  const world = new ProceduralResidentWorld(generator, {
+    horizontalRadiusChunks: 2,
+    asyncChunkGeneration: createFakeAsyncQueue({
+      drainCompletedChunks() {
+        if (drained) {
+          return [];
+        }
+        drained = true;
+        return completedChunks;
+      },
+      requestChunk() {
+        unexpectedRequests += 1;
+        return false;
+      },
+    }),
+  });
+
+  const first = world.updateResidencyAround(spawn, { maxGenerateChunks: 4 });
+
+  expect(unexpectedRequests).toBe(0);
+  expect(first.generatedChunks).toBeLessThanOrEqual(4);
+  expect(first.complete).toBe(false);
+  expect(first.pendingChunks).toBeGreaterThan(0);
+  expect(first.phaseMs.readyGeneratedChunkBacklog).toBeGreaterThan(0);
+
+  let latest = first;
+  for (let iteration = 0; iteration < 64 && !latest.complete; iteration += 1) {
+    latest = world.updateResidencyAround(spawn, { maxGenerateChunks: 4 });
+  }
+
+  expect(latest.complete).toBe(true);
+  expect(latest.pendingChunks).toBe(0);
+  expect(latest.phaseMs.readyGeneratedChunkBacklog).toBe(0);
+  expect(unexpectedRequests).toBe(0);
+});
+
 test("budgeted residency prioritizes the spawn support chunk first", () => {
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
     horizontalRadiusChunks: 3,

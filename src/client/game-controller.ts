@@ -3118,6 +3118,7 @@ function zeroResidencyPhaseMetrics(): ResidencyUpdateSummary["phaseMs"] {
     completedGeneratedSummaries: 0,
     completedRegionSummaryCacheHits: 0,
     missingRegionSummaries: 0,
+    readyGeneratedChunkBacklog: 0,
   };
 }
 
