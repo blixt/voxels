@@ -1,5 +1,9 @@
 import type { GeneratedChunkRenderSummary } from "./generated-chunk-render-summary.ts";
 import type { GeneratedRenderColumnSummary } from "./generated-render-column-summary.ts";
+import type {
+  GeneratedRenderSummaryRegion,
+  GeneratedRenderSummaryRegionColumn,
+} from "./generated-render-summary-region.ts";
 import type { GeneratedChunk } from "./procedural-generator.ts";
 import { decodeGeneratedChunk, encodeGeneratedChunk, type GeneratedChunkCodecStats } from "./generated-chunk-codec.ts";
 
@@ -34,6 +38,19 @@ export interface TransferredGeneratedRenderColumnSummary {
   maxKnownCy: number;
   minNonEmptyCy: number | null;
   maxNonEmptyCy: number | null;
+}
+
+export interface TransferredGeneratedRenderSummaryRegionColumn {
+  chunkX: number;
+  chunkZ: number;
+  summary: TransferredGeneratedRenderColumnSummary;
+}
+
+export interface TransferredGeneratedRenderSummaryRegion {
+  regionX: number;
+  regionZ: number;
+  regionSizeChunks: number;
+  columns: TransferredGeneratedRenderSummaryRegionColumn[];
 }
 
 export function serializeGeneratedChunk(chunk: GeneratedChunk): {
@@ -142,5 +159,47 @@ export function deserializeGeneratedRenderColumnSummary(
     maxKnownCy: summary.maxKnownCy,
     minNonEmptyCy: summary.minNonEmptyCy,
     maxNonEmptyCy: summary.maxNonEmptyCy,
+  };
+}
+
+export function serializeGeneratedRenderSummaryRegion(region: GeneratedRenderSummaryRegion): {
+  summary: TransferredGeneratedRenderSummaryRegion;
+  transfer: Transferable[];
+} {
+  const columns: TransferredGeneratedRenderSummaryRegionColumn[] = [];
+  const transfer: Transferable[] = [];
+  for (const entry of region.columns) {
+    const serialized = serializeGeneratedRenderColumnSummary(entry.summary);
+    columns.push({
+      chunkX: entry.chunkX,
+      chunkZ: entry.chunkZ,
+      summary: serialized.summary,
+    });
+    transfer.push(...serialized.transfer);
+  }
+  return {
+    summary: {
+      regionX: region.regionX,
+      regionZ: region.regionZ,
+      regionSizeChunks: region.regionSizeChunks,
+      columns,
+    },
+    transfer,
+  };
+}
+
+export function deserializeGeneratedRenderSummaryRegion(
+  region: TransferredGeneratedRenderSummaryRegion,
+): GeneratedRenderSummaryRegion {
+  const columns: GeneratedRenderSummaryRegionColumn[] = region.columns.map((entry) => ({
+    chunkX: entry.chunkX,
+    chunkZ: entry.chunkZ,
+    summary: deserializeGeneratedRenderColumnSummary(entry.summary),
+  }));
+  return {
+    regionX: region.regionX,
+    regionZ: region.regionZ,
+    regionSizeChunks: region.regionSizeChunks,
+    columns,
   };
 }

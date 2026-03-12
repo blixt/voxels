@@ -142,8 +142,8 @@ export interface GameHudSnapshot {
   streamCompletedGeneratedChunks: number;
   streamCompletedSummaryCacheHits: number;
   streamCompletedGeneratedSummaries: number;
-  streamCompletedColumnSummaryCacheHits: number;
-  streamMissingColumnSummaries: number;
+  streamCompletedRegionSummaryCacheHits: number;
+  streamMissingRegionSummaries: number;
   streamDirtyResidentChunks: number;
   residencyRadiusChunks: number;
   surfaceY: number;
@@ -268,8 +268,8 @@ export interface ChunkCacheReuseLegSummary {
   totalGeneratedChunks: number;
   totalPersistedChunkHits: number;
   totalPersistedSummaryHits: number;
-  totalPersistedColumnSummaryHits: number;
-  totalMissingColumnSummaries: number;
+  totalPersistedRegionSummaryHits: number;
+  totalMissingRegionSummaries: number;
   totalWorkerGeneratedChunks: number;
   maxPendingChunks: number;
   residentChunks: number;
@@ -793,8 +793,8 @@ export class GameController {
       streamCompletedGeneratedChunks: this.lastStreamSummary.phaseMs.completedGeneratedChunks,
       streamCompletedSummaryCacheHits: this.lastStreamSummary.phaseMs.completedSummaryCacheHits,
       streamCompletedGeneratedSummaries: this.lastStreamSummary.phaseMs.completedGeneratedSummaries,
-      streamCompletedColumnSummaryCacheHits: this.lastStreamSummary.phaseMs.completedColumnSummaryCacheHits,
-      streamMissingColumnSummaries: this.lastStreamSummary.phaseMs.missingColumnSummaries,
+      streamCompletedRegionSummaryCacheHits: this.lastStreamSummary.phaseMs.completedRegionSummaryCacheHits,
+      streamMissingRegionSummaries: this.lastStreamSummary.phaseMs.missingRegionSummaries,
       streamDirtyResidentChunks: this.world.countDirtyResidentChunks(),
       residencyRadiusChunks: this.lastStreamSummary.radiusChunks,
       surfaceY: this.lastStreamSummary.surfaceY,
@@ -1727,8 +1727,8 @@ export class GameController {
     let totalGeneratedChunks = 0;
     let totalPersistedChunkHits = 0;
     let totalPersistedSummaryHits = 0;
-    let totalPersistedColumnSummaryHits = 0;
-    let totalMissingColumnSummaries = 0;
+    let totalPersistedRegionSummaryHits = 0;
+    let totalMissingRegionSummaries = 0;
     let totalWorkerGeneratedChunks = 0;
     let maxPendingChunks = 0;
     for (; frameCount < maxFrames; frameCount += 1) {
@@ -1740,8 +1740,8 @@ export class GameController {
       totalGeneratedChunks += residency.generatedChunks;
       totalPersistedChunkHits += residency.phaseMs.completedChunkCacheHits;
       totalPersistedSummaryHits += residency.phaseMs.completedSummaryCacheHits;
-      totalPersistedColumnSummaryHits += residency.phaseMs.completedColumnSummaryCacheHits;
-      totalMissingColumnSummaries += residency.phaseMs.missingColumnSummaries;
+      totalPersistedRegionSummaryHits += residency.phaseMs.completedRegionSummaryCacheHits;
+      totalMissingRegionSummaries += residency.phaseMs.missingRegionSummaries;
       totalWorkerGeneratedChunks += residency.phaseMs.completedGeneratedChunks;
       maxPendingChunks = Math.max(maxPendingChunks, residency.pendingChunks);
       if (
@@ -1767,8 +1767,8 @@ export class GameController {
       totalGeneratedChunks,
       totalPersistedChunkHits,
       totalPersistedSummaryHits,
-      totalPersistedColumnSummaryHits,
-      totalMissingColumnSummaries,
+      totalPersistedRegionSummaryHits,
+      totalMissingRegionSummaries,
       totalWorkerGeneratedChunks,
       maxPendingChunks,
       residentChunks: this.world.getStats().chunkCount,
@@ -2973,8 +2973,8 @@ function zeroResidencyPhaseMetrics(): ResidencyUpdateSummary["phaseMs"] {
     completedGeneratedChunks: 0,
     completedSummaryCacheHits: 0,
     completedGeneratedSummaries: 0,
-    completedColumnSummaryCacheHits: 0,
-    missingColumnSummaries: 0,
+    completedRegionSummaryCacheHits: 0,
+    missingRegionSummaries: 0,
   };
 }
 

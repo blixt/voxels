@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test";
 
+import type { AsyncChunkGenerationQueue } from "../src/engine/async-chunk-generation.ts";
 import { rebuildDirtyMeshes } from "../src/engine/mesher.ts";
 import { ProceduralResidentWorld } from "../src/engine/procedural-resident-world.ts";
 import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
+import { summarizeGeneratedRenderColumn } from "../src/engine/generated-render-column-summary.ts";
+import { upsertGeneratedRenderSummaryRegion } from "../src/engine/generated-render-summary-region.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
 
 class CountingProceduralWorldGenerator extends ProceduralWorldGenerator {
@@ -12,6 +15,25 @@ class CountingProceduralWorldGenerator extends ProceduralWorldGenerator {
     this.sampleColumnCalls += 1;
     return super.sampleColumn(worldX, worldZ);
   }
+}
+
+function createFakeAsyncQueue(overrides: Partial<AsyncChunkGenerationQueue> = {}): AsyncChunkGenerationQueue {
+  return {
+    requestChunk: () => false,
+    requestSummary: () => false,
+    requestRegionSummary: () => false,
+    hasPendingChunk: () => false,
+    hasPendingRegionSummary: () => false,
+    getPendingCount: () => 0,
+    drainCompletedChunks: () => [],
+    drainCompletedSummaries: () => [],
+    drainCompletedRegionSummaries: () => [],
+    drainMissingRegionSummaries: () => [],
+    drainCompletionStats: () => ({ cacheHits: 0, generated: 0 }),
+    drainSummaryCompletionStats: () => ({ cacheHits: 0, generated: 0 }),
+    dispose: () => {},
+    ...overrides,
+  };
 }
 
 test("resident world loads chunks around the player and exposes generated voxels", () => {
@@ -375,6 +397,52 @@ test("far-field summary prefetch grows from actual summary frontier instead of p
 
   expect(generated).toBeGreaterThan(0);
   expect(generator.sampleColumnCalls).toBe(0);
+});
+
+test("far-field summary prefetch requests persisted summary regions before any live frontier exists", () => {
+  const generator = new CountingProceduralWorldGenerator(1337, { chunkSize: 16 });
+  const requestedRegions: Array<[number, number]> = [];
+  const world = new ProceduralResidentWorld(generator, {
+    horizontalRadiusChunks: 1,
+    asyncChunkGeneration: createFakeAsyncQueue({
+      requestRegionSummary(regionX, regionZ) {
+        requestedRegions.push([regionX, regionZ]);
+        return true;
+      },
+    }),
+  });
+  const spawn = world.getSpawnPosition();
+  generator.sampleColumnCalls = 0;
+
+  const generated = world.prefetchFarFieldSummariesAround(spawn, world.chunkSize * 6, 64);
+
+  expect(generated).toBe(0);
+  expect(requestedRegions.length).toBeGreaterThan(0);
+  expect(generator.sampleColumnCalls).toBe(0);
+});
+
+test("resident world adopts completed persisted region summaries for far-field sampling", () => {
+  const generator = new ProceduralWorldGenerator(1337, { chunkSize: 16 });
+  const farChunkX = 4;
+  const farChunkZ = -3;
+  const farChunkY = 0;
+  const generated = generator.generateChunk(farChunkX, farChunkY, farChunkZ);
+  const columnSummary = summarizeGeneratedRenderColumn(farChunkX, farChunkZ, [generated.renderSummary], generator.chunkSize);
+
+  expect(columnSummary).not.toBeNull();
+
+  const world = new ProceduralResidentWorld(generator, {
+    horizontalRadiusChunks: 1,
+    asyncChunkGeneration: createFakeAsyncQueue({
+      drainCompletedRegionSummaries: () => [upsertGeneratedRenderSummaryRegion(null, columnSummary!)],
+    }),
+  });
+
+  world.updateResidencyAround(world.getSpawnPosition(), { maxGenerateChunks: 0 });
+
+  const sampled = world.sampleFarFieldColumn(farChunkX * generator.chunkSize + 1, farChunkZ * generator.chunkSize + 1);
+  expect(sampled).not.toBeNull();
+  expect(sampled!.surfaceY).toBeGreaterThanOrEqual(0);
 });
 
 test("far-field sampling follows resident voxel edits instead of stale generator output", () => {

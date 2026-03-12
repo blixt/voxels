@@ -5,6 +5,33 @@
 ### Commands
 
 - `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/generated-render-summary-region.test.ts tests/generated-chunk-transfer.test.ts tests/procedural-resident-world.test.ts`
+- `mise run build`
+- `mise run trace-route -- --label=region-summary-smoke --duration=1 --settle=1 --sample-hz=20`
+
+### Automated checks
+
+- `tsc --noEmit`: passing.
+- Focused render-summary-region / transfer / resident-world tests: passing.
+- Production build: passing.
+
+### Route trace
+
+- `artifacts/browser-route-trace/20260312T183003Z-region-summary-smoke/report.json`
+- Summary:
+  - avg gameplay frame: `5.86 ms`
+  - `p95` gameplay frame: `22.00 ms`
+  - hole-signal frames: `0`
+
+### Notes
+
+- This slice intentionally replaced the async single-column far-summary request path instead of adding a second batching layer beside it.
+- The smoke proves the new persisted region-summary protocol is runtime-safe in Chrome and does not reopen visual holes.
+- It does not yet prove cold/wide region-summary reuse quantitatively; that should be the next persistence acceptance harness improvement.
+
+### Commands
+
+- `mise exec -- bun run typecheck`
 - `mise exec -- bun test tests/procedural-resident-world.test.ts tests/generated-render-column-summary.test.ts tests/generated-chunk-transfer.test.ts tests/generated-chunk-codec.test.ts`
 - `mise run build`
 - Temporary fixed-origin Chrome CDP cache-reuse probe against `http://127.0.0.1:3035/`

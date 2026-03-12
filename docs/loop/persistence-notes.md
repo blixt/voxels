@@ -1,15 +1,15 @@
 # Persistence Notes
 
-## 2026-03-12 column-summary layer
+## 2026-03-12 region-summary layer
 
 - The generated cache now persists three levels of data:
   - chunk payloads
   - per-chunk render summaries
-  - per-column render summaries
-- The column summary is still derived metadata, not authoritative world state.
-- The main reason to persist it separately is to let far rendering and visibility bootstrap from disk-backed chunk-derived metadata without reopening generator coupling or forcing full chunk decode just to learn a column’s coarse extent and top surface.
+  - persisted region batches of chunk-derived column summaries
+- The region summary is still derived metadata, not authoritative world state.
+- The main reason to persist it separately is to let far rendering and visibility bootstrap from disk-backed chunk-derived metadata in larger batches without reopening generator coupling or forcing full chunk decode just to learn a column’s coarse extent and top surface.
 - Current limitation:
-  - the generated cache can merge column summaries incrementally because generated chunks are deterministic and effectively append-only in this cache
+  - the generated cache can merge chunk-derived column summaries incrementally into region batches because generated chunks are deterministic and effectively append-only in this cache
   - a future authoritative edited-world store should treat column/region summaries as versioned derived data and rebuild or replace them when chunk contents change, not just monotonically merge them
 
 ## Current seam
@@ -68,13 +68,14 @@ The far-field path no longer samples the generator at render time. It now reads 
 - We are using IndexedDB directly today; OPFS payload files plus IndexedDB metadata are still the stronger next storage split.
 - Stored chunks are generated-base chunks only; edit overlays are not persisted yet.
 - Chunk render summaries are now persisted alongside chunk payloads in IndexedDB and can be loaded independently on the worker path.
-- Render summaries are still archived in memory after generation/eviction on the main thread; there is not yet a dedicated region-summary stream/index on top of the persisted summary records.
+- Region-summary batches can now be loaded independently on the worker path and seeded into the far bubble without column-by-column async requests.
+- Render summaries are still archived in memory after generation/eviction on the main thread; there is not yet a wider manifest/index layer above the persisted region-summary records.
 - The current far renderer is still surface-oriented; the new render summary seam now supports a future volumetric interior/void renderer for arbitrary edited spaces, but that second renderer is not implemented yet.
 - The new cache-reuse benchmark seam exists, but the first headless proof attempt exposed that its runtime-ready gate still needs tightening before it becomes a trustworthy automated acceptance check.
 
 ## Next practical steps
 
-1. Add region/column summary indexes on top of the persisted chunk-summary records so far-field and visibility work stop scanning unknown chunk columns blindly.
+1. Add a wider manifest/index layer on top of the persisted region-summary records so far-field and visibility work stop depending on frontier growth or one-region-at-a-time discovery alone.
 2. Split browser persistence into:
    - OPFS payload files
    - IndexedDB manifest / LRU / version metadata

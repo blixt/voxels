@@ -2,6 +2,27 @@
 
 ## 2026-03-12
 
+- Replaced the short-lived persisted single-column async far-summary path with persisted region-summary batching:
+  - added `src/engine/generated-render-summary-region.ts`
+  - the generated cache now persists `render_summary_regions` instead of a separate `column_summaries` store
+  - the worker/async queue now answer `summarize-region` requests and return batches of chunk-derived column summaries
+  - `ProceduralResidentWorld` now requests region summaries for missing far columns, records them in batches, and no longer carries separate column-summary request plumbing
+- Removed superseded code instead of keeping both paths:
+  - deleted the async single-column summary request mode and its pending/miss bookkeeping
+  - removed the generated-cache `column_summaries` store from the live schema path and upgrade path
+  - renamed HUD/cache-reuse metrics from column-summary hits/misses to region-summary hits/misses so the runtime reflects the real batching unit
+- Added regression coverage around the new batching seam:
+  - `tests/generated-render-summary-region.test.ts` locks fixed-region bucketing and replacement semantics
+  - `tests/generated-chunk-transfer.test.ts` now round-trips nested region summaries
+  - `tests/procedural-resident-world.test.ts` now verifies far prefetch requests persisted regions without probing the generator and that completed persisted regions become live far-field samples
+- Verified the browser runtime still behaves after the batching rewrite:
+  - `region-summary-smoke` stayed hole-free
+  - average gameplay frame was about `5.86 ms`, `p95` about `22.0 ms`, and hole-signal frames stayed at `0`
+- The kept result is architectural, not just cosmetic:
+  - the far bubble now asks storage for chunk-derived metadata in a batched form that can later grow into real region manifests/indexes
+  - the generator remains out of render-time far queries
+  - the next persistence/harness target is to measure cold/wide region-summary reuse explicitly rather than infer it from same-session chunk reuse
+
 - Fixed a benchmark/harness lie that would have made the new persistence metrics useless:
   - `teleportAndSettle()` in `src/client/game-controller.ts` now actually settles across multiple frames instead of doing one update/render pair and returning immediately
   - `scripts/run-browser-route-trace.ts` now waits for `snapshot().chunkCount > 0` before treating the game as ready

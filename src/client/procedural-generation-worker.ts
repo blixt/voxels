@@ -8,9 +8,9 @@ import {
   serializeGeneratedChunkRenderSummary,
   type TransferredGeneratedChunk,
   type TransferredGeneratedChunkRenderSummary,
-  type TransferredGeneratedRenderColumnSummary,
+  type TransferredGeneratedRenderSummaryRegion,
 } from "../engine/generated-chunk-transfer.ts";
-import type { ChunkCoordinate, ColumnCoordinate } from "../engine/types.ts";
+import type { ChunkCoordinate, RenderSummaryRegionCoordinate } from "../engine/types.ts";
 
 type WorkerRequest =
   | {
@@ -31,9 +31,9 @@ type WorkerRequest =
       coord: ChunkCoordinate;
     }
   | {
-      type: "summarize-column";
+      type: "summarize-region";
       requestId: number;
-      coord: ColumnCoordinate;
+      coord: RenderSummaryRegionCoordinate;
     };
 
 type WorkerResponse =
@@ -53,11 +53,11 @@ type WorkerResponse =
       summary: TransferredGeneratedChunkRenderSummary;
     }
   | {
-      type: "column-summarized";
+      type: "region-summarized";
       requestId: number;
       source: "cache" | "missing";
-      coord: ColumnCoordinate;
-      summary: TransferredGeneratedRenderColumnSummary | null;
+      coord: RenderSummaryRegionCoordinate;
+      summary: TransferredGeneratedRenderSummaryRegion | null;
     };
 
 let generator: ProceduralWorldGenerator | null = null;
@@ -93,31 +93,26 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
   if (!generator) {
     throw new Error("Procedural generation worker received a request before initialization");
   }
-  if (message.type === "summarize-column") {
-    let cachedColumnSummary: TransferredGeneratedRenderColumnSummary | null = null;
+  if (message.type === "summarize-region") {
+    let cachedRegionSummary: TransferredGeneratedRenderSummaryRegion | null = null;
     try {
-      cachedColumnSummary = await chunkCache?.getColumnSummary(message.coord) ?? null;
+      cachedRegionSummary = await chunkCache?.getRegionSummary(message.coord) ?? null;
     } catch (error) {
       reportCacheFailure("read", error);
       chunkCache?.close();
       chunkCache = null;
-      cachedColumnSummary = null;
+      cachedRegionSummary = null;
     }
     const response: WorkerResponse = {
-      type: "column-summarized",
+      type: "region-summarized",
       requestId: message.requestId,
-      source: cachedColumnSummary ? "cache" : "missing",
+      source: cachedRegionSummary ? "cache" : "missing",
       coord: { ...message.coord },
-      summary: cachedColumnSummary,
+      summary: cachedRegionSummary,
     };
     self.postMessage(response, {
-      transfer: cachedColumnSummary
-        ? [
-            cachedColumnSummary.surfaceY.buffer,
-            cachedColumnSummary.surfaceMaterial.buffer,
-            cachedColumnSummary.waterTopY.buffer,
-            cachedColumnSummary.waterMaterial.buffer,
-          ]
+      transfer: cachedRegionSummary
+        ? serializeGeneratedRenderSummaryRegionTransfer(cachedRegionSummary)
         : [],
     });
     return;
@@ -224,6 +219,17 @@ function reportCacheFailure(stage: "open" | "read" | "write", error: unknown): v
   }
   reportedCacheFailures.add(stage);
   console.warn(`[procedural-generation-worker] persistent chunk cache ${stage} failed; disabling cache`, error);
+}
+
+function serializeGeneratedRenderSummaryRegionTransfer(
+  summary: TransferredGeneratedRenderSummaryRegion,
+): Transferable[] {
+  return summary.columns.flatMap((entry) => [
+    entry.summary.surfaceY.buffer,
+    entry.summary.surfaceMaterial.buffer,
+    entry.summary.waterTopY.buffer,
+    entry.summary.waterMaterial.buffer,
+  ]);
 }
 
 export {};

@@ -1,5 +1,13 @@
 # Renderer Hypotheses
 
+## 2026-03-12 region-summary batching search
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| Persisted per-column summary requests are still the right batching unit now that far rendering is driven by real chunk-derived data | Replace the async single-column summary request path with persisted region-summary requests, keep the browser smoke and resident-world regressions green, and compare the resulting architecture against the old path | Rejected. The single-column path worked as a stepping stone, but region batching is the cleaner long-term seam and let us delete the overlapping request/miss plumbing instead of keeping both | Rejected |
+| Introducing region batching means we should keep the old column-summary request path around as a fallback | Wire region batching in parallel with the existing path and inspect whether both survive with a clear role | Rejected. Keeping both would only duplicate pending/miss bookkeeping and cache protocol complexity. The kept change removes the old async column path entirely while preserving chunk-derived column summaries inside each region payload | Rejected |
+| A persisted region-summary batch still risks reopening the earlier far-field hole problems because summaries now arrive in larger bursts | Re-run focused resident-world tests plus a short Chrome route trace after the rewrite | Rejected. The tests stayed green and `region-summary-smoke` stayed at `0` hole-signal frames | Rejected |
+
 ## 2026-03-12 persistence-metric harness search
 
 | Hypothesis | Tiny verification case | Result | Status |

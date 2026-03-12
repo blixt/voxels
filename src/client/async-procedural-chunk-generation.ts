@@ -1,17 +1,17 @@
 import type { AsyncChunkGenerationQueue } from "../engine/async-chunk-generation.ts";
-import { toAsyncChunkGenerationKey, toAsyncColumnSummaryKey } from "../engine/async-chunk-generation.ts";
+import { toAsyncChunkGenerationKey, toAsyncRegionSummaryKey } from "../engine/async-chunk-generation.ts";
 import {
   deserializeGeneratedChunk,
   deserializeGeneratedChunkRenderSummary,
-  deserializeGeneratedRenderColumnSummary,
   type TransferredGeneratedChunk,
   type TransferredGeneratedChunkRenderSummary,
-  type TransferredGeneratedRenderColumnSummary,
+  deserializeGeneratedRenderSummaryRegion,
+  type TransferredGeneratedRenderSummaryRegion,
 } from "../engine/generated-chunk-transfer.ts";
 import type { GeneratedChunkRenderSummary } from "../engine/generated-chunk-render-summary.ts";
-import type { GeneratedRenderColumnSummary } from "../engine/generated-render-column-summary.ts";
+import type { GeneratedRenderSummaryRegion } from "../engine/generated-render-summary-region.ts";
 import type { GeneratedChunk, ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
-import type { ChunkCoordinate, ColumnCoordinate } from "../engine/types.ts";
+import type { ChunkCoordinate, RenderSummaryRegionCoordinate } from "../engine/types.ts";
 
 interface WorkerReadyMessage {
   type: "ready";
@@ -31,21 +31,21 @@ interface WorkerSummarizedMessage {
   summary: TransferredGeneratedChunkRenderSummary;
 }
 
-interface WorkerColumnSummarizedMessage {
-  type: "column-summarized";
+interface WorkerRegionSummarizedMessage {
+  type: "region-summarized";
   requestId: number;
   source: "cache" | "missing";
-  coord: ColumnCoordinate;
-  summary: TransferredGeneratedRenderColumnSummary | null;
+  coord: RenderSummaryRegionCoordinate;
+  summary: TransferredGeneratedRenderSummaryRegion | null;
 }
 
 type WorkerMessage =
   | WorkerReadyMessage
   | WorkerGeneratedMessage
   | WorkerSummarizedMessage
-  | WorkerColumnSummarizedMessage;
+  | WorkerRegionSummarizedMessage;
 
-type PendingRequestMode = "chunk" | "summary" | "column-summary";
+type PendingRequestMode = "chunk" | "summary" | "region-summary";
 
 interface PendingRequest {
   key: string;
@@ -84,8 +84,8 @@ export function createAsyncProceduralChunkGeneration(
   const pendingKeys = new Set<string>();
   const completedChunks: GeneratedChunk[] = [];
   const completedSummaries: GeneratedChunkRenderSummary[] = [];
-  const completedColumnSummaries: GeneratedRenderColumnSummary[] = [];
-  const missingColumnSummaries: ColumnCoordinate[] = [];
+  const completedRegionSummaries: GeneratedRenderSummaryRegion[] = [];
+  const missingRegionSummaries: RenderSummaryRegionCoordinate[] = [];
   let completedCacheHits = 0;
   let completedGenerated = 0;
   let completedSummaryCacheHits = 0;
@@ -104,14 +104,14 @@ export function createAsyncProceduralChunkGeneration(
     pendingRequests.delete(message.requestId);
     pendingKeys.delete(pending.key);
     workerSlots[slotIndex]!.pendingCount = Math.max(0, workerSlots[slotIndex]!.pendingCount - 1);
-    if (pending.mode === "column-summary") {
-      if (message.type !== "column-summarized") {
-        throw new Error(`Expected column summary response for ${pending.key}, received ${message.type}`);
+    if (pending.mode === "region-summary") {
+      if (message.type !== "region-summarized") {
+        throw new Error(`Expected region summary response for ${pending.key}, received ${message.type}`);
       }
       if (message.source === "cache" && message.summary) {
-        completedColumnSummaries.push(deserializeGeneratedRenderColumnSummary(message.summary));
+        completedRegionSummaries.push(deserializeGeneratedRenderSummaryRegion(message.summary));
       } else {
-        missingColumnSummaries.push({ ...message.coord });
+        missingRegionSummaries.push({ ...message.coord });
       }
       return;
     }
@@ -164,14 +164,14 @@ export function createAsyncProceduralChunkGeneration(
     requestSummary(cx: number, cy: number, cz: number): boolean {
       return request("summary", cx, cy, cz);
     },
-    requestColumnSummary(cx: number, cz: number): boolean {
-      return requestColumnSummary(cx, cz);
+    requestRegionSummary(regionX: number, regionZ: number): boolean {
+      return requestRegionSummary(regionX, regionZ);
     },
     hasPendingChunk(cx: number, cy: number, cz: number): boolean {
       return pendingKeys.has(toAsyncChunkGenerationKey(cx, cy, cz));
     },
-    hasPendingColumnSummary(cx: number, cz: number): boolean {
-      return pendingKeys.has(toAsyncColumnSummaryKey(cx, cz));
+    hasPendingRegionSummary(regionX: number, regionZ: number): boolean {
+      return pendingKeys.has(toAsyncRegionSummaryKey(regionX, regionZ));
     },
     getPendingCount(): number {
       return pendingKeys.size;
@@ -188,17 +188,17 @@ export function createAsyncProceduralChunkGeneration(
       }
       return completedSummaries.splice(0, completedSummaries.length);
     },
-    drainCompletedColumnSummaries(): GeneratedRenderColumnSummary[] {
-      if (completedColumnSummaries.length === 0) {
+    drainCompletedRegionSummaries(): GeneratedRenderSummaryRegion[] {
+      if (completedRegionSummaries.length === 0) {
         return [];
       }
-      return completedColumnSummaries.splice(0, completedColumnSummaries.length);
+      return completedRegionSummaries.splice(0, completedRegionSummaries.length);
     },
-    drainMissingColumnSummaries(): ColumnCoordinate[] {
-      if (missingColumnSummaries.length === 0) {
+    drainMissingRegionSummaries(): RenderSummaryRegionCoordinate[] {
+      if (missingRegionSummaries.length === 0) {
         return [];
       }
-      return missingColumnSummaries.splice(0, missingColumnSummaries.length);
+      return missingRegionSummaries.splice(0, missingRegionSummaries.length);
     },
     drainCompletionStats() {
       const stats = {
@@ -227,8 +227,8 @@ export function createAsyncProceduralChunkGeneration(
       pendingKeys.clear();
       completedChunks.length = 0;
       completedSummaries.length = 0;
-      completedColumnSummaries.length = 0;
-      missingColumnSummaries.length = 0;
+      completedRegionSummaries.length = 0;
+      missingRegionSummaries.length = 0;
       completedCacheHits = 0;
       completedGenerated = 0;
       completedSummaryCacheHits = 0;
@@ -263,8 +263,8 @@ export function createAsyncProceduralChunkGeneration(
     return true;
   }
 
-  function requestColumnSummary(cx: number, cz: number): boolean {
-    const key = toAsyncColumnSummaryKey(cx, cz);
+  function requestRegionSummary(regionX: number, regionZ: number): boolean {
+    const key = toAsyncRegionSummaryKey(regionX, regionZ);
     if (pendingKeys.has(key) || pendingKeys.size >= maxPendingJobs) {
       return false;
     }
@@ -279,12 +279,12 @@ export function createAsyncProceduralChunkGeneration(
     }
     const requestId = nextRequestId++;
     pendingKeys.add(key);
-    pendingRequests.set(requestId, { key, workerIndex: bestWorkerIndex, mode: "column-summary" });
+    pendingRequests.set(requestId, { key, workerIndex: bestWorkerIndex, mode: "region-summary" });
     workerSlots[bestWorkerIndex]!.pendingCount += 1;
     workerSlots[bestWorkerIndex]!.worker.postMessage({
-      type: "summarize-column",
+      type: "summarize-region",
       requestId,
-      coord: { x: cx, z: cz } satisfies ColumnCoordinate,
+      coord: { x: regionX, z: regionZ } satisfies RenderSummaryRegionCoordinate,
     });
     return true;
   }

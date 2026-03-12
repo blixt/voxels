@@ -17,6 +17,11 @@ import {
   summarizeGeneratedRenderColumn,
   type GeneratedRenderColumnSummary,
 } from "./generated-render-column-summary.ts";
+import {
+  GENERATED_RENDER_SUMMARY_REGION_SIZE_CHUNKS,
+  getGeneratedRenderSummaryRegionCoord,
+  type GeneratedRenderSummaryRegion,
+} from "./generated-render-summary-region.ts";
 import { metersToWorldUnits } from "./scale.ts";
 import type { MutableResidentChunkWorld, VoxelChunk } from "./world.ts";
 
@@ -44,8 +49,8 @@ export interface ResidencyPhaseMetrics {
   completedGeneratedChunks: number;
   completedSummaryCacheHits: number;
   completedGeneratedSummaries: number;
-  completedColumnSummaryCacheHits: number;
-  missingColumnSummaries: number;
+  completedRegionSummaryCacheHits: number;
+  missingRegionSummaries: number;
 }
 
 export interface ResidencyUpdateSummary {
@@ -105,7 +110,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   private readonly generatedRenderChunkKeysByColumn = new Map<string, Set<string>>();
   private readonly generatedRenderColumnSummaries = new Map<string, GeneratedRenderColumnSummary>();
   private readonly pendingFarFieldColumnRanges = new Map<string, ChunkYRange>();
-  private readonly missingPersistedFarFieldColumnSummaries = new Set<string>();
+  private readonly missingPersistedFarFieldRegionSummaries = new Set<string>();
   private readonly asyncChunkGeneration: AsyncChunkGenerationQueue | null;
   private residentColumnRevision = 0;
   private lastAnchorSignature = "";
@@ -566,14 +571,14 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     const completedRenderSummaries = this.asyncChunkGeneration?.drainCompletedSummaries() ?? [];
     const completedSummaryStats = this.asyncChunkGeneration?.drainSummaryCompletionStats() ?? { cacheHits: 0, generated: 0 };
     summaryDrainMs = performance.now() - summaryDrainStartedAt;
-    const completedColumnSummaries = this.asyncChunkGeneration?.drainCompletedColumnSummaries() ?? [];
-    const missingColumnSummaries = this.asyncChunkGeneration?.drainMissingColumnSummaries() ?? [];
+    const completedRegionSummaries = this.asyncChunkGeneration?.drainCompletedRegionSummaries() ?? [];
+    const missingRegionSummaries = this.asyncChunkGeneration?.drainMissingRegionSummaries() ?? [];
     const completedGeneratedChunksByKey = new Map<string, GeneratedChunk>();
-    for (const summary of completedColumnSummaries) {
-      this.recordPersistedColumnRenderSummary(summary);
+    for (const summary of completedRegionSummaries) {
+      this.recordPersistedRegionRenderSummary(summary);
     }
-    for (const coord of missingColumnSummaries) {
-      this.missingPersistedFarFieldColumnSummaries.add(toColumnKey(coord.x, coord.z));
+    for (const coord of missingRegionSummaries) {
+      this.missingPersistedFarFieldRegionSummaries.add(toRegionKey(coord.x, coord.z));
     }
     for (const summary of completedRenderSummaries) {
       this.recordChunkRenderSummary(toChunkKey(summary.coord.x, summary.coord.y, summary.coord.z), summary);
@@ -725,8 +730,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
         completedGeneratedChunks: completedGenerationStats.generated,
         completedSummaryCacheHits: completedSummaryStats.cacheHits,
         completedGeneratedSummaries: completedSummaryStats.generated,
-        completedColumnSummaryCacheHits: completedColumnSummaries.length,
-        missingColumnSummaries: missingColumnSummaries.length,
+        completedRegionSummaryCacheHits: completedRegionSummaries.length,
+        missingRegionSummaries: missingRegionSummaries.length,
       },
     };
     return this.lastResidency;
@@ -756,7 +761,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
       const cx = centerChunkX + dx;
       const cz = centerChunkZ + dz;
       if (!this.generatedRenderColumnSummaries.has(toColumnKey(cx, cz)) && !this.pendingFarFieldColumnRanges.has(toColumnKey(cx, cz))) {
-        this.requestPersistedFarFieldColumnSummary(cx, cz);
+        this.requestPersistedFarFieldRegionSummaryForColumn(cx, cz);
       }
       const estimatedRange = this.estimateFarFieldSummaryChunkYRange(cx, cz);
       if (!estimatedRange) {
@@ -944,10 +949,23 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   private recordChunkRenderSummary(key: string, summary: GeneratedChunkRenderSummary): void {
     this.generatedRenderSummaries.set(key, summary);
     const columnKey = toColumnKey(summary.coord.x, summary.coord.z);
+    const regionCoord = getGeneratedRenderSummaryRegionCoord(
+      summary.coord.x,
+      summary.coord.z,
+      GENERATED_RENDER_SUMMARY_REGION_SIZE_CHUNKS,
+    );
+    this.missingPersistedFarFieldRegionSummaries.delete(toRegionKey(regionCoord.x, regionCoord.z));
     const chunkKeys = this.generatedRenderChunkKeysByColumn.get(columnKey) ?? new Set<string>();
     chunkKeys.add(key);
     this.generatedRenderChunkKeysByColumn.set(columnKey, chunkKeys);
     this.rebuildColumnRenderSummary(summary.coord.x, summary.coord.z);
+  }
+
+  private recordPersistedRegionRenderSummary(region: GeneratedRenderSummaryRegion): void {
+    this.missingPersistedFarFieldRegionSummaries.delete(toRegionKey(region.regionX, region.regionZ));
+    for (const entry of region.columns) {
+      this.recordPersistedColumnRenderSummary(entry.summary);
+    }
   }
 
   private recordPersistedColumnRenderSummary(summary: GeneratedRenderColumnSummary): void {
@@ -1025,20 +1043,19 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     existing.maxCy = Math.max(existing.maxCy, cy);
   }
 
-  private requestPersistedFarFieldColumnSummary(cx: number, cz: number): void {
+  private requestPersistedFarFieldRegionSummaryForColumn(cx: number, cz: number): void {
     if (!this.asyncChunkGeneration) {
       return;
     }
-    const columnKey = toColumnKey(cx, cz);
+    const regionCoord = getGeneratedRenderSummaryRegionCoord(cx, cz, GENERATED_RENDER_SUMMARY_REGION_SIZE_CHUNKS);
+    const regionKey = toRegionKey(regionCoord.x, regionCoord.z);
     if (
-      this.generatedRenderColumnSummaries.has(columnKey)
-      || this.pendingFarFieldColumnRanges.has(columnKey)
-      || this.missingPersistedFarFieldColumnSummaries.has(columnKey)
-      || this.asyncChunkGeneration.hasPendingColumnSummary(cx, cz)
+      this.missingPersistedFarFieldRegionSummaries.has(regionKey)
+      || this.asyncChunkGeneration.hasPendingRegionSummary(regionCoord.x, regionCoord.z)
     ) {
       return;
     }
-    this.asyncChunkGeneration.requestColumnSummary(cx, cz);
+    this.asyncChunkGeneration.requestRegionSummary(regionCoord.x, regionCoord.z);
   }
 }
 
@@ -1175,6 +1192,10 @@ function toLocalVoxelIndex(
 
 function toColumnKey(cx: number, cz: number): string {
   return `${cx}:${cz}`;
+}
+
+function toRegionKey(regionX: number, regionZ: number): string {
+  return `${regionX}:${regionZ}`;
 }
 
 function intersectsColumnKeySet(
@@ -1318,8 +1339,8 @@ function zeroResidencyPhaseMetrics(): ResidencyPhaseMetrics {
     completedGeneratedChunks: 0,
     completedSummaryCacheHits: 0,
     completedGeneratedSummaries: 0,
-    completedColumnSummaryCacheHits: 0,
-    missingColumnSummaries: 0,
+    completedRegionSummaryCacheHits: 0,
+    missingRegionSummaries: 0,
   };
 }
 

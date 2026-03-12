@@ -1,22 +1,26 @@
 import type {
   TransferredGeneratedChunk,
   TransferredGeneratedChunkRenderSummary,
-  TransferredGeneratedRenderColumnSummary,
+  TransferredGeneratedRenderSummaryRegion,
 } from "../engine/generated-chunk-transfer.ts";
 import {
   deserializeGeneratedChunkRenderSummary,
-  deserializeGeneratedRenderColumnSummary,
-  serializeGeneratedRenderColumnSummary,
+  deserializeGeneratedRenderSummaryRegion,
+  serializeGeneratedRenderSummaryRegion,
 } from "../engine/generated-chunk-transfer.ts";
 import { mergeGeneratedRenderColumnSummary } from "../engine/generated-render-column-summary.ts";
+import {
+  GENERATED_RENDER_SUMMARY_REGION_SIZE_CHUNKS,
+  upsertGeneratedRenderSummaryRegion,
+} from "../engine/generated-render-summary-region.ts";
 import { PROCEDURAL_WORLD_GENERATION_VERSION } from "../engine/procedural-generator.ts";
-import type { ChunkCoordinate, ColumnCoordinate } from "../engine/types.ts";
+import type { ChunkCoordinate, RenderSummaryRegionCoordinate } from "../engine/types.ts";
 
 const DATABASE_NAME = "voxels-procedural-generated-chunks";
-const DATABASE_VERSION = 3;
+const DATABASE_VERSION = 4;
 const CHUNK_STORE_NAME = "chunks";
 const SUMMARY_STORE_NAME = "chunk_summaries";
-const COLUMN_SUMMARY_STORE_NAME = "column_summaries";
+const REGION_SUMMARY_STORE_NAME = "render_summary_regions";
 
 interface StoredGeneratedChunkRecord {
   key: string;
@@ -31,23 +35,22 @@ interface StoredGeneratedChunkSummaryRecord {
   storedAt: number;
 }
 
-interface StoredGeneratedRenderColumnSummaryRecord {
+interface StoredGeneratedRenderSummaryRegionRecord {
   key: string;
-  summary: TransferredGeneratedRenderColumnSummary;
+  summary: TransferredGeneratedRenderSummaryRegion;
   storedAt: number;
 }
 
 export interface ProceduralGeneratedChunkCache {
   getChunk(coord: ChunkCoordinate): Promise<TransferredGeneratedChunk | null>;
   getChunkSummary(coord: ChunkCoordinate): Promise<TransferredGeneratedChunkRenderSummary | null>;
-  getColumnSummary(coord: ColumnCoordinate): Promise<TransferredGeneratedRenderColumnSummary | null>;
+  getRegionSummary(coord: RenderSummaryRegionCoordinate): Promise<TransferredGeneratedRenderSummaryRegion | null>;
   putChunk(
     coord: ChunkCoordinate,
     chunk: TransferredGeneratedChunk,
     summary: TransferredGeneratedChunkRenderSummary,
   ): Promise<void>;
   putChunkSummary(coord: ChunkCoordinate, summary: TransferredGeneratedChunkRenderSummary): Promise<void>;
-  putColumnSummary(coord: ColumnCoordinate, summary: TransferredGeneratedRenderColumnSummary): Promise<void>;
   close(): void;
 }
 
@@ -93,17 +96,17 @@ export async function openProceduralGeneratedChunkCache(context: {
       );
       return record?.summary ?? null;
     },
-    async getColumnSummary(coord) {
-      const record = await requestToPromise<StoredGeneratedRenderColumnSummaryRecord | undefined>(
+    async getRegionSummary(coord) {
+      const record = await requestToPromise<StoredGeneratedRenderSummaryRegionRecord | undefined>(
         database
-          .transaction(COLUMN_SUMMARY_STORE_NAME, "readonly")
-          .objectStore(COLUMN_SUMMARY_STORE_NAME)
-          .get(toColumnKey(keyPrefix, coord)),
+          .transaction(REGION_SUMMARY_STORE_NAME, "readonly")
+          .objectStore(REGION_SUMMARY_STORE_NAME)
+          .get(toRegionKey(keyPrefix, coord)),
       );
       return record?.summary ?? null;
     },
     async putChunk(coord, chunk, summary) {
-      const transaction = database.transaction([CHUNK_STORE_NAME, SUMMARY_STORE_NAME, COLUMN_SUMMARY_STORE_NAME], "readwrite");
+      const transaction = database.transaction([CHUNK_STORE_NAME, SUMMARY_STORE_NAME, REGION_SUMMARY_STORE_NAME], "readwrite");
       const key = toChunkKey(keyPrefix, coord);
       const storedAt = Date.now();
       transaction.objectStore(CHUNK_STORE_NAME).put({
@@ -117,19 +120,11 @@ export async function openProceduralGeneratedChunkCache(context: {
         summary: cloneTransferredSummary(summary),
         storedAt,
       } satisfies StoredGeneratedChunkSummaryRecord);
-      const columnStore = transaction.objectStore(COLUMN_SUMMARY_STORE_NAME);
-      const existingColumnRecord = await requestToPromise<StoredGeneratedRenderColumnSummaryRecord | undefined>(
-        columnStore.get(toColumnKey(keyPrefix, coord)),
-      );
-      columnStore.put({
-        key: toColumnKey(keyPrefix, coord),
-        summary: mergeTransferredColumnSummary(existingColumnRecord?.summary ?? null, summary),
-        storedAt,
-      } satisfies StoredGeneratedRenderColumnSummaryRecord);
+      await putMergedRegionSummary(transaction.objectStore(REGION_SUMMARY_STORE_NAME), keyPrefix, summary, storedAt);
       await transactionToPromise(transaction);
     },
     async putChunkSummary(coord, summary) {
-      const transaction = database.transaction([SUMMARY_STORE_NAME, COLUMN_SUMMARY_STORE_NAME], "readwrite");
+      const transaction = database.transaction([SUMMARY_STORE_NAME, REGION_SUMMARY_STORE_NAME], "readwrite");
       const key = toChunkKey(keyPrefix, coord);
       const storedAt = Date.now();
       transaction.objectStore(SUMMARY_STORE_NAME).put({
@@ -137,28 +132,8 @@ export async function openProceduralGeneratedChunkCache(context: {
         summary: cloneTransferredSummary(summary),
         storedAt,
       } satisfies StoredGeneratedChunkSummaryRecord);
-      const columnStore = transaction.objectStore(COLUMN_SUMMARY_STORE_NAME);
-      const existingColumnRecord = await requestToPromise<StoredGeneratedRenderColumnSummaryRecord | undefined>(
-        columnStore.get(toColumnKey(keyPrefix, coord)),
-      );
-      columnStore.put({
-        key: toColumnKey(keyPrefix, coord),
-        summary: mergeTransferredColumnSummary(existingColumnRecord?.summary ?? null, summary),
-        storedAt,
-      } satisfies StoredGeneratedRenderColumnSummaryRecord);
+      await putMergedRegionSummary(transaction.objectStore(REGION_SUMMARY_STORE_NAME), keyPrefix, summary, storedAt);
       await transactionToPromise(transaction);
-    },
-    async putColumnSummary(coord, summary) {
-      await requestToPromise(
-        database
-          .transaction(COLUMN_SUMMARY_STORE_NAME, "readwrite")
-          .objectStore(COLUMN_SUMMARY_STORE_NAME)
-          .put({
-            key: toColumnKey(keyPrefix, coord),
-            summary: cloneTransferredColumnSummary(summary),
-            storedAt: Date.now(),
-          } satisfies StoredGeneratedRenderColumnSummaryRecord),
-      );
     },
     close() {
       database.close();
@@ -178,8 +153,11 @@ function openDatabase(): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains(SUMMARY_STORE_NAME)) {
         database.createObjectStore(SUMMARY_STORE_NAME, { keyPath: "key" });
       }
-      if (!database.objectStoreNames.contains(COLUMN_SUMMARY_STORE_NAME)) {
-        database.createObjectStore(COLUMN_SUMMARY_STORE_NAME, { keyPath: "key" });
+      if (database.objectStoreNames.contains("column_summaries")) {
+        database.deleteObjectStore("column_summaries");
+      }
+      if (!database.objectStoreNames.contains(REGION_SUMMARY_STORE_NAME)) {
+        database.createObjectStore(REGION_SUMMARY_STORE_NAME, { keyPath: "key" });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -205,7 +183,7 @@ function toChunkKey(prefix: string, coord: ChunkCoordinate): string {
   return `${prefix}:${coord.x}:${coord.y}:${coord.z}`;
 }
 
-function toColumnKey(prefix: string, coord: ColumnCoordinate): string {
+function toRegionKey(prefix: string, coord: RenderSummaryRegionCoordinate): string {
   return `${prefix}:${coord.x}:${coord.z}`;
 }
 
@@ -224,35 +202,70 @@ function cloneTransferredSummary(summary: TransferredGeneratedChunkRenderSummary
   };
 }
 
-function cloneTransferredColumnSummary(
-  summary: TransferredGeneratedRenderColumnSummary,
-): TransferredGeneratedRenderColumnSummary {
-  return {
-    chunkX: summary.chunkX,
-    chunkZ: summary.chunkZ,
-    coveredColumnCount: summary.coveredColumnCount,
-    surfaceY: summary.surfaceY.slice(),
-    surfaceMaterial: summary.surfaceMaterial.slice(),
-    waterTopY: summary.waterTopY.slice(),
-    waterMaterial: summary.waterMaterial.slice(),
-    minKnownCy: summary.minKnownCy,
-    maxKnownCy: summary.maxKnownCy,
-    minNonEmptyCy: summary.minNonEmptyCy,
-    maxNonEmptyCy: summary.maxNonEmptyCy,
-  };
-}
-
-function mergeTransferredColumnSummary(
-  existing: TransferredGeneratedRenderColumnSummary | null,
+async function putMergedRegionSummary(
+  regionStore: IDBObjectStore,
+  keyPrefix: string,
   summary: TransferredGeneratedChunkRenderSummary,
-): TransferredGeneratedRenderColumnSummary {
+  storedAt: number,
+): Promise<void> {
+  const regionCoord = getRegionCoord(summary);
+  const existingRecord = await requestToPromise<StoredGeneratedRenderSummaryRegionRecord | undefined>(
+    regionStore.get(toRegionKey(keyPrefix, regionCoord)),
+  );
   const chunkSize = summary.surfaceY.length > 0
     ? Math.round(Math.sqrt(summary.surfaceY.length))
     : summary.macroCellSize * summary.macroCellsPerAxis;
-  const merged = mergeGeneratedRenderColumnSummary(
-    existing ? deserializeGeneratedRenderColumnSummary(existing) : null,
+  const existingRegion = existingRecord ? deserializeGeneratedRenderSummaryRegion(existingRecord.summary) : null;
+  const existingColumnSummary = existingRegion?.columns.find(
+    (entry) => entry.chunkX === summary.coord.x && entry.chunkZ === summary.coord.z,
+  )?.summary ?? null;
+  const mergedColumnSummary = mergeGeneratedRenderColumnSummary(
+    existingColumnSummary,
     deserializeGeneratedChunkRenderSummary(summary),
     chunkSize,
   );
-  return serializeGeneratedRenderColumnSummary(merged).summary;
+  const mergedRegion = upsertGeneratedRenderSummaryRegion(
+    existingRegion,
+    mergedColumnSummary,
+    GENERATED_RENDER_SUMMARY_REGION_SIZE_CHUNKS,
+  );
+  regionStore.put({
+    key: toRegionKey(keyPrefix, regionCoord),
+    summary: cloneTransferredRegionSummary(serializeGeneratedRenderSummaryRegion(mergedRegion).summary),
+    storedAt,
+  } satisfies StoredGeneratedRenderSummaryRegionRecord);
+}
+
+function cloneTransferredRegionSummary(
+  summary: TransferredGeneratedRenderSummaryRegion,
+): TransferredGeneratedRenderSummaryRegion {
+  return {
+    regionX: summary.regionX,
+    regionZ: summary.regionZ,
+    regionSizeChunks: summary.regionSizeChunks,
+    columns: summary.columns.map((entry) => ({
+      chunkX: entry.chunkX,
+      chunkZ: entry.chunkZ,
+      summary: {
+        chunkX: entry.summary.chunkX,
+        chunkZ: entry.summary.chunkZ,
+        coveredColumnCount: entry.summary.coveredColumnCount,
+        surfaceY: entry.summary.surfaceY.slice(),
+        surfaceMaterial: entry.summary.surfaceMaterial.slice(),
+        waterTopY: entry.summary.waterTopY.slice(),
+        waterMaterial: entry.summary.waterMaterial.slice(),
+        minKnownCy: entry.summary.minKnownCy,
+        maxKnownCy: entry.summary.maxKnownCy,
+        minNonEmptyCy: entry.summary.minNonEmptyCy,
+        maxNonEmptyCy: entry.summary.maxNonEmptyCy,
+      },
+    })),
+  };
+}
+
+function getRegionCoord(summary: TransferredGeneratedChunkRenderSummary): RenderSummaryRegionCoordinate {
+  return {
+    x: Math.floor(summary.coord.x / GENERATED_RENDER_SUMMARY_REGION_SIZE_CHUNKS),
+    z: Math.floor(summary.coord.z / GENERATED_RENDER_SUMMARY_REGION_SIZE_CHUNKS),
+  };
 }

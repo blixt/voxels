@@ -18,6 +18,11 @@ export interface ColumnCoordinate {
   z: number;
 }
 
+export interface RenderSummaryRegionCoordinate {
+  x: number;
+  z: number;
+}
+
 export interface ChunkBounds {
   min: Vec3;
   max: Vec3;
