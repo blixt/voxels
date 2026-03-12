@@ -1870,3 +1870,34 @@
   - avg gameplay frame `5.66 ms`
   - p95 gameplay frame `15.60 ms`
   - hole signals `0`
+
+## 2026-03-12 off-main-thread generated chunk adoption without main-thread decode
+
+- I revisited the procedural generation worker boundary because the old design was only half-workerized:
+  - chunk generation and cache lookup were in workers
+  - but chunk completions still came back as encoded buffers
+  - the main thread then decoded them during residency drain
+- I changed that seam so worker completions now arrive as ready-to-adopt chunk payloads:
+  - persistence still keeps encoded chunk bytes
+  - workers now decode cached chunks before returning them
+  - freshly generated chunks return typed voxel data directly
+  - the main thread no longer spends residency time decoding chunk payloads
+- I also widened the benchmark context slightly:
+  - the game snapshot now reports generation worker count
+  - browser memory CSVs now capture that worker count so later A/Bs can explain their concurrency level
+- The first version of that change was not acceptable:
+  - I raised the default generation pool to `4`
+  - cold start regressed badly because worker-side generation plus decode saturated the machine
+  - the kept version backs the default pool down to `2`
+- I then found the more important transfer bug:
+  - empty chunks were being shipped as full dense zero-filled `Uint16Array`s
+  - that was pure waste because the main thread only needs their render summary and the fact that they are empty
+  - empty chunk transfers now omit dense voxel payloads entirely
+  - if an edit overlay later touches such a chunk, the dense array is materialized lazily on the main thread before the overlay is applied
+- The kept result is mixed but still worth keeping:
+  - cold start is still slower than the old encoded-transfer baseline, so this is not a blanket throughput win
+  - but the route-trace streaming path improved materially, which matches the original goal of reducing gameplay disruption from chunk generation
+- The next obvious follow-up is no longer “more workers”:
+  - the route trace says the delivery/adoption path improved
+  - the startup benchmark says worker-side CPU is still too tightly coupled to immediate cache persistence
+  - the next clean target is to decouple persistence encode/write work from chunk delivery instead of letting cache writes sit on the gameplay-critical worker path

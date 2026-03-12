@@ -16,6 +16,7 @@ test("summarizeMemorySamples reports peaks and metric deltas", () => {
       recalcStyleDurationSeconds: 0.05,
       documents: 1,
       nodes: 10,
+      generationWorkerCount: 4,
       residentChunks: 12,
       pendingChunks: 8,
       dirtyResidentChunks: 5,
@@ -34,6 +35,7 @@ test("summarizeMemorySamples reports peaks and metric deltas", () => {
       recalcStyleDurationSeconds: 0.08,
       documents: 1,
       nodes: 10,
+      generationWorkerCount: 4,
       residentChunks: 20,
       pendingChunks: 3,
       dirtyResidentChunks: 2,
@@ -47,6 +49,7 @@ test("summarizeMemorySamples reports peaks and metric deltas", () => {
   expect(summary.lastElapsedMs).toBe(40);
   expect(summary.peakJsHeapUsedSizeBytes).toBe(160);
   expect(summary.peakRuntimeHeapUsedBytes).toBe(480);
+  expect(summary.peakGenerationWorkerCount).toBe(4);
   expect(summary.peakResidentChunks).toBe(20);
   expect(summary.peakPendingChunks).toBe(8);
   expect(summary.deltaTaskDurationMs).toBe(350);

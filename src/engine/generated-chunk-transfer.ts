@@ -5,12 +5,14 @@ import type {
   GeneratedRenderSummaryRegionColumn,
 } from "./generated-render-summary-region.ts";
 import type { GeneratedChunk } from "./procedural-generator.ts";
-import { decodeGeneratedChunk, encodeGeneratedChunk, type GeneratedChunkCodecStats } from "./generated-chunk-codec.ts";
+import type { ChunkBounds } from "./types.ts";
 
 export interface TransferredGeneratedChunk {
-  encodedBuffer: ArrayBuffer;
-  encodedByteLength: number;
-  codecStats?: GeneratedChunkCodecStats;
+  coord: GeneratedChunk["coord"];
+  data: Uint16Array | null;
+  solidCount: number;
+  solidBounds: ChunkBounds | null;
+  renderSummary: TransferredGeneratedChunkRenderSummary;
 }
 
 export interface TransferredGeneratedChunkRenderSummary {
@@ -57,19 +59,28 @@ export function serializeGeneratedChunk(chunk: GeneratedChunk): {
   chunk: TransferredGeneratedChunk;
   transfer: Transferable[];
 } {
-  const encoded = encodeGeneratedChunk(chunk);
+  const serializedSummary = serializeGeneratedChunkRenderSummary(chunk.renderSummary);
+  const data = chunk.solidCount === 0 ? null : chunk.data;
   return {
     chunk: {
-      encodedBuffer: encoded.buffer,
-      encodedByteLength: encoded.stats.byteLength,
-      codecStats: encoded.stats,
+      coord: { ...chunk.coord },
+      data,
+      solidCount: chunk.solidCount,
+      solidBounds: cloneChunkBounds(chunk.solidBounds),
+      renderSummary: serializedSummary.summary,
     },
-    transfer: [encoded.buffer],
+    transfer: data ? [data.buffer, ...serializedSummary.transfer] : serializedSummary.transfer,
   };
 }
 
 export function deserializeGeneratedChunk(chunk: TransferredGeneratedChunk): GeneratedChunk {
-  return decodeGeneratedChunk(chunk.encodedBuffer);
+  return {
+    coord: { ...chunk.coord },
+    data: chunk.data ?? new Uint16Array(0),
+    solidCount: chunk.solidCount,
+    solidBounds: cloneChunkBounds(chunk.solidBounds),
+    renderSummary: deserializeGeneratedChunkRenderSummary(chunk.renderSummary),
+  };
 }
 
 export function serializeGeneratedChunkRenderSummary(summary: GeneratedChunkRenderSummary): {
@@ -201,5 +212,15 @@ export function deserializeGeneratedRenderSummaryRegion(
     regionZ: region.regionZ,
     regionSizeChunks: region.regionSizeChunks,
     columns,
+  };
+}
+
+function cloneChunkBounds(bounds: ChunkBounds | null): ChunkBounds | null {
+  if (!bounds) {
+    return null;
+  }
+  return {
+    min: [...bounds.min],
+    max: [...bounds.max],
   };
 }

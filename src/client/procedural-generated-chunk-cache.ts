@@ -1,5 +1,4 @@
 import type {
-  TransferredGeneratedChunk,
   TransferredGeneratedChunkRenderSummary,
   TransferredGeneratedRenderSummaryRegion,
 } from "../engine/generated-chunk-transfer.ts";
@@ -13,6 +12,7 @@ import {
   GENERATED_RENDER_SUMMARY_REGION_SIZE_CHUNKS,
   upsertGeneratedRenderSummaryRegion,
 } from "../engine/generated-render-summary-region.ts";
+import type { EncodedGeneratedChunk } from "../engine/generated-chunk-codec.ts";
 import { PROCEDURAL_WORLD_GENERATION_VERSION } from "../engine/procedural-generator.ts";
 import type { ChunkCoordinate, RenderSummaryRegionCoordinate } from "../engine/types.ts";
 
@@ -29,6 +29,11 @@ interface StoredGeneratedChunkRecord {
   storedAt: number;
 }
 
+export interface CachedEncodedGeneratedChunk {
+  buffer: ArrayBuffer;
+  byteLength: number;
+}
+
 interface StoredGeneratedChunkSummaryRecord {
   key: string;
   summary: TransferredGeneratedChunkRenderSummary;
@@ -42,12 +47,12 @@ interface StoredGeneratedRenderSummaryRegionRecord {
 }
 
 export interface ProceduralGeneratedChunkCache {
-  getChunk(coord: ChunkCoordinate): Promise<TransferredGeneratedChunk | null>;
+  getChunk(coord: ChunkCoordinate): Promise<CachedEncodedGeneratedChunk | null>;
   getChunkSummary(coord: ChunkCoordinate): Promise<TransferredGeneratedChunkRenderSummary | null>;
   getRegionSummary(coord: RenderSummaryRegionCoordinate): Promise<TransferredGeneratedRenderSummaryRegion | null>;
   putChunk(
     coord: ChunkCoordinate,
-    chunk: TransferredGeneratedChunk,
+    chunk: EncodedGeneratedChunk,
     summary: TransferredGeneratedChunkRenderSummary,
   ): Promise<void>;
   putChunkSummary(coord: ChunkCoordinate, summary: TransferredGeneratedChunkRenderSummary): Promise<void>;
@@ -83,8 +88,8 @@ export async function openProceduralGeneratedChunkCache(context: {
         return null;
       }
       return {
-        encodedBuffer: record.encodedBuffer,
-        encodedByteLength: record.encodedByteLength,
+        buffer: record.encodedBuffer,
+        byteLength: record.encodedByteLength,
       };
     },
     async getChunkSummary(coord) {
@@ -111,8 +116,8 @@ export async function openProceduralGeneratedChunkCache(context: {
       const storedAt = Date.now();
       transaction.objectStore(CHUNK_STORE_NAME).put({
         key,
-        encodedBuffer: chunk.encodedBuffer.slice(0),
-        encodedByteLength: chunk.encodedByteLength,
+        encodedBuffer: chunk.buffer.slice(0),
+        encodedByteLength: chunk.stats.byteLength,
         storedAt,
       } satisfies StoredGeneratedChunkRecord);
       transaction.objectStore(SUMMARY_STORE_NAME).put({

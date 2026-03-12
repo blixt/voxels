@@ -19,6 +19,7 @@ export interface AsyncChunkGenerationQueue {
   requestRegionSummary(regionX: number, regionZ: number): boolean;
   hasPendingChunk(cx: number, cy: number, cz: number): boolean;
   hasPendingRegionSummary(regionX: number, regionZ: number): boolean;
+  getWorkerCount?(): number;
   getPendingCount(): number;
   drainCompletedChunks(): GeneratedChunk[];
   drainCompletedSummaries(): GeneratedChunkRenderSummary[];

@@ -922,6 +922,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     if (!overlay || overlay.size === 0) {
       return;
     }
+    if (generated.data.length === 0) {
+      generated.data = new Uint16Array(this.chunkSize ** 3);
+    }
     for (const [localIndex, material] of overlay) {
       generated.data[localIndex] = material;
     }

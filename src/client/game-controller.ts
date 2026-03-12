@@ -146,6 +146,7 @@ export interface GameHudSnapshot {
   streamCachedEmptyChunkHits: number;
   streamCompletedChunkCacheHits: number;
   streamCompletedGeneratedChunks: number;
+  generationWorkerCount: number;
   streamCompletedSummaryCacheHits: number;
   streamCompletedGeneratedSummaries: number;
   streamCompletedRegionSummaryCacheHits: number;
@@ -820,6 +821,7 @@ export class GameController {
       streamCachedEmptyChunkHits: this.lastStreamSummary.cachedEmptyChunkHits,
       streamCompletedChunkCacheHits: this.lastStreamSummary.phaseMs.completedChunkCacheHits,
       streamCompletedGeneratedChunks: this.lastStreamSummary.phaseMs.completedGeneratedChunks,
+      generationWorkerCount: this.asyncChunkGeneration?.getWorkerCount?.() ?? 0,
       streamCompletedSummaryCacheHits: this.lastStreamSummary.phaseMs.completedSummaryCacheHits,
       streamCompletedGeneratedSummaries: this.lastStreamSummary.phaseMs.completedGeneratedSummaries,
       streamCompletedRegionSummaryCacheHits: this.lastStreamSummary.phaseMs.completedRegionSummaryCacheHits,

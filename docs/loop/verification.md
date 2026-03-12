@@ -3795,3 +3795,67 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - This slice is worth keeping.
 - We now persist chunk summaries independently, but we still do not have a higher-level region/column summary index for deciding what distant summaries to load first.
+
+## 2026-03-12 off-main-thread generated chunk adoption
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/generated-chunk-transfer.test.ts tests/browser-game-benchmark-harness.test.ts tests/procedural-resident-world.test.ts`
+- `mise run build`
+- `mise run bench-browser-game -- --label=multi-gen-workers --startup-warmup=0 --startup-iterations=1 --walk-warmup=0 --walk-iterations=1 --walk-duration=1 --walk-sample-hz=10`
+- `mise run bench-browser-game -- --label=multi-gen-workers-v3 --startup-warmup=0 --startup-iterations=1 --walk-warmup=0 --walk-iterations=1 --walk-duration=1 --walk-sample-hz=10`
+- `mise run trace-route -- --label=gen-worker-current --duration=2 --settle=1 --sample-hz=20`
+
+#### Added verification coverage
+
+- `tests/generated-chunk-transfer.test.ts`
+  - ready-to-adopt chunk payload transfers round-trip without codec decode
+  - empty chunks omit dense voxel payloads entirely
+- `tests/browser-game-benchmark-harness.test.ts`
+  - memory summarization now includes generation worker count
+- `tests/procedural-resident-world.test.ts`
+  - existing overlay/regeneration coverage stayed green after lazy empty-chunk data materialization
+
+#### Numeric probes
+
+- Rejected `4`-worker startup/walk benchmark:
+  - output dir: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-JXFQ3S`
+  - startup visual ready `152509.7 ms`
+  - walk setup `102062.165 ms`
+  - walk p95 gameplay frame `0.9 ms`
+- Kept `2`-worker benchmark after empty-chunk elision:
+  - output dir: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-p5o8CT`
+  - startup visual ready `112325.6 ms`
+  - startup total gameplay-frame CPU `111702.7 ms`
+  - startup total stream `349.4 ms`
+  - startup total mesh `923.6 ms`
+  - walk setup `23609.569 ms`
+  - walk benchmark elapsed `10355.308 ms`
+  - walk p95 gameplay frame `0.8 ms`
+  - walk hole-signal frames `0`
+  - peak generation workers recorded in CSV `2`
+- Previous baseline from `1e8b74d` for the same short browser benchmark:
+  - startup visual ready `74277.4 ms`
+  - walk setup `18180.725 ms`
+  - walk p95 gameplay frame `0.8 ms`
+- Gameplay-path keep signal from the route trace:
+  - current report: `artifacts/browser-route-trace/20260312T201911Z-gen-worker-current/report.json`
+  - avg gameplay frame `4.67 ms`
+  - p95 gameplay frame `4.30 ms`
+  - avg mesh `0.84 ms`
+  - p95 mesh `0.10 ms`
+  - hole-signal frames `0`
+- Compared against the last comparable smoke report:
+  - previous report: `artifacts/browser-route-trace/20260312T183003Z-region-summary-smoke/report.json`
+  - avg gameplay frame `5.86 ms`
+  - p95 gameplay frame `22.0 ms`
+  - avg mesh `1.85 ms`
+  - p95 mesh `17.2 ms`
+  - hole-signal frames `0`
+
+#### Residual
+
+- This slice is worth keeping for gameplay-path performance, but not as a cold-start win.
+- The worker boundary is cleaner and the route trace improved, yet the startup benchmark is still slower than the old encoded-transfer baseline.
+- The current evidence points at cache encode/write work remaining too tightly coupled to chunk delivery, so the next clean target is deferring or separating persistence writes instead of increasing worker count again.

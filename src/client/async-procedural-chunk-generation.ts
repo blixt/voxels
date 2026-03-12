@@ -49,7 +49,6 @@ type PendingRequestMode = "chunk" | "summary" | "region-summary";
 
 interface PendingRequest {
   key: string;
-  workerIndex: number;
   mode: PendingRequestMode;
 }
 
@@ -59,6 +58,8 @@ interface WorkerSlot {
 }
 
 const DEFAULT_MAX_PENDING_JOBS = 128;
+const DEFAULT_MAX_WORKERS = 2;
+const DEFAULT_RESERVED_THREADS = 2;
 const PROCEDURAL_WORKER_ASSET_URL = "/assets/procedural-generation-worker.js";
 
 export function createAsyncProceduralChunkGeneration(
@@ -71,13 +72,7 @@ export function createAsyncProceduralChunkGeneration(
   if (typeof Worker === "undefined") {
     return null;
   }
-  const workerCount = Math.max(
-    1,
-    Math.min(
-      2,
-      Math.floor(options.workerCount ?? Math.max(1, (globalThis.navigator?.hardwareConcurrency ?? 4) - 1)),
-    ),
-  );
+  const workerCount = resolveProceduralGenerationWorkerCount(options.workerCount);
   const maxPendingJobs = options.maxPendingJobs ?? DEFAULT_MAX_PENDING_JOBS;
   const workerSlots: WorkerSlot[] = [];
   const pendingRequests = new Map<number, PendingRequest>();
@@ -173,6 +168,9 @@ export function createAsyncProceduralChunkGeneration(
     hasPendingRegionSummary(regionX: number, regionZ: number): boolean {
       return pendingKeys.has(toAsyncRegionSummaryKey(regionX, regionZ));
     },
+    getWorkerCount(): number {
+      return workerSlots.length;
+    },
     getPendingCount(): number {
       return pendingKeys.size;
     },
@@ -252,7 +250,7 @@ export function createAsyncProceduralChunkGeneration(
     }
     const requestId = nextRequestId++;
     pendingKeys.add(key);
-    pendingRequests.set(requestId, { key, workerIndex: bestWorkerIndex, mode });
+    pendingRequests.set(requestId, { key, mode });
     workerSlots[bestWorkerIndex]!.pendingCount += 1;
     const coord: ChunkCoordinate = { x: cx, y: cy, z: cz };
     workerSlots[bestWorkerIndex]!.worker.postMessage({
@@ -279,7 +277,7 @@ export function createAsyncProceduralChunkGeneration(
     }
     const requestId = nextRequestId++;
     pendingKeys.add(key);
-    pendingRequests.set(requestId, { key, workerIndex: bestWorkerIndex, mode: "region-summary" });
+    pendingRequests.set(requestId, { key, mode: "region-summary" });
     workerSlots[bestWorkerIndex]!.pendingCount += 1;
     workerSlots[bestWorkerIndex]!.worker.postMessage({
       type: "summarize-region",
@@ -288,4 +286,13 @@ export function createAsyncProceduralChunkGeneration(
     });
     return true;
   }
+}
+
+function resolveProceduralGenerationWorkerCount(requestedWorkerCount?: number): number {
+  if (requestedWorkerCount !== undefined) {
+    const normalized = Number.isFinite(requestedWorkerCount) ? Math.floor(requestedWorkerCount) : 1;
+    return Math.max(1, normalized);
+  }
+  const hardwareConcurrency = Math.max(1, Math.floor(globalThis.navigator?.hardwareConcurrency ?? 4));
+  return Math.max(1, Math.min(DEFAULT_MAX_WORKERS, hardwareConcurrency - DEFAULT_RESERVED_THREADS));
 }

@@ -32,6 +32,7 @@ export interface BrowserMemorySample {
   recalcStyleDurationSeconds: number | null;
   documents: number | null;
   nodes: number | null;
+  generationWorkerCount: number | null;
   residentChunks: number | null;
   pendingChunks: number | null;
   dirtyResidentChunks: number | null;
@@ -81,6 +82,7 @@ export interface BrowserMemorySummary {
   peakJsHeapTotalSizeBytes: number | null;
   peakRuntimeHeapUsedBytes: number | null;
   peakRuntimeHeapTotalBytes: number | null;
+  peakGenerationWorkerCount: number | null;
   peakResidentChunks: number | null;
   peakPendingChunks: number | null;
   peakDirtyResidentChunks: number | null;
@@ -305,6 +307,7 @@ export function summarizeMemorySamples(samples: readonly BrowserMemorySample[]):
     peakJsHeapTotalSizeBytes: maxNullable(samples.map((sample) => sample.jsHeapTotalSizeBytes)),
     peakRuntimeHeapUsedBytes: maxNullable(samples.map((sample) => sample.runtimeHeapUsedBytes)),
     peakRuntimeHeapTotalBytes: maxNullable(samples.map((sample) => sample.runtimeHeapTotalBytes)),
+    peakGenerationWorkerCount: maxNullable(samples.map((sample) => sample.generationWorkerCount)),
     peakResidentChunks: maxNullable(samples.map((sample) => sample.residentChunks)),
     peakPendingChunks: maxNullable(samples.map((sample) => sample.pendingChunks)),
     peakDirtyResidentChunks: maxNullable(samples.map((sample) => sample.dirtyResidentChunks)),
@@ -756,6 +759,7 @@ class BrowserGameSessionImpl implements BrowserGameSession {
         const snapshot = game.snapshot();
         return {
           chunkCount: snapshot.chunkCount,
+          generationWorkerCount: snapshot.generationWorkerCount,
           pendingChunks: snapshot.streamPendingChunks,
           dirtyResidentChunks: snapshot.streamDirtyResidentChunks,
           farFieldPendingBands: snapshot.farFieldPendingBands,
@@ -779,6 +783,7 @@ class BrowserGameSessionImpl implements BrowserGameSession {
       recalcStyleDurationSeconds: metricValues.get("RecalcStyleDuration") ?? null,
       documents: metricValues.get("Documents") ?? null,
       nodes: metricValues.get("Nodes") ?? null,
+      generationWorkerCount: typeof snapshot?.generationWorkerCount === "number" ? snapshot.generationWorkerCount : null,
       residentChunks: typeof snapshot?.chunkCount === "number" ? snapshot.chunkCount : null,
       pendingChunks: typeof snapshot?.pendingChunks === "number" ? snapshot.pendingChunks : null,
       dirtyResidentChunks: typeof snapshot?.dirtyResidentChunks === "number" ? snapshot.dirtyResidentChunks : null,

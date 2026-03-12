@@ -521,3 +521,12 @@
 | --- | --- | --- | --- |
 | A separate persisted summary store is premature because summary requests can always decode from the cached chunk payload | Add a dedicated summary store and keep it only if the build and browser route smoke stay clean | Rejected. Persisted summaries are the better long-term seam because summary-only requests can now stay summary-only all the way to storage | Rejected |
 | Splitting chunk payloads and summary records in IndexedDB will complicate the worker too much for the value | Keep the chunk store as fallback, backfill missing summaries on demand, and validate the route smoke before deciding | Rejected. The fallback/backfill path stayed simple enough and the smoke stayed healthy | Rejected |
+
+## 2026-03-12 off-main-thread generated chunk adoption
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| The highest-signal gameplay hitch seam in procedural generation is the main-thread decode that happens when generated chunks drain into residency | Replace encoded chunk completions with worker-decoded typed-array completions and keep the change only if browser streaming traces improve without hole regressions | Confirmed, but only as a gameplay-path win. The kept route trace improved while staying hole-free | Confirmed |
+| A more aggressive default generation worker pool should be a free win once chunk decode leaves the main thread | Raise the default pool to `4` workers and rerun the startup + short walk browser benchmark | Rejected. Cold start regressed hard because the worker pool saturated the machine | Rejected |
+| The cold-start regression after raw chunk transfer is mostly because empty chunks are now crossing the worker boundary as dense zero-filled buffers | Omit dense voxel payloads for empty chunks, rerun the same startup + walk benchmark, and keep the change only if the regression shrinks without hurting route traces | Confirmed. Empty-chunk elision materially reduced the regression and is worth keeping even though startup is still slower than the old encoded baseline | Confirmed |
+| If startup is still slower after the empty-chunk fix, then “more worker threads” is the wrong next move | Compare the current browser startup benchmark to the current browser route trace instead of averaging them together | Confirmed. Startup is still worse, but the route trace improved enough to justify the gameplay-focused slice and points clearly at cache persistence as the remaining coupling | Confirmed |

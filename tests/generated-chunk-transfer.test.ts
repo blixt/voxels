@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
 
 import {
+  deserializeGeneratedChunk,
   deserializeGeneratedChunkRenderSummary,
   deserializeGeneratedRenderColumnSummary,
   deserializeGeneratedRenderSummaryRegion,
+  serializeGeneratedChunk,
   serializeGeneratedChunkRenderSummary,
   serializeGeneratedRenderColumnSummary,
   serializeGeneratedRenderSummaryRegion,
@@ -12,6 +14,54 @@ import { summarizeGeneratedChunkRender } from "../src/engine/generated-chunk-ren
 import { summarizeGeneratedRenderColumn } from "../src/engine/generated-render-column-summary.ts";
 import { upsertGeneratedRenderSummaryRegion } from "../src/engine/generated-render-summary-region.ts";
 import { isProceduralWaterMaterial } from "../src/engine/procedural-generator.ts";
+
+test("generated chunk transfer round-trips ready-to-adopt chunk payloads", () => {
+  const chunkSize = 32;
+  const data = new Uint16Array(chunkSize ** 3);
+  data[1] = 7;
+  data[2 + chunkSize + chunkSize * chunkSize] = 11;
+  const chunk = {
+    coord: { x: 2, y: 3, z: 4 },
+    data,
+    solidCount: 2,
+    solidBounds: {
+      min: [1, 0, 0] as [number, number, number],
+      max: [3, 2, 2] as [number, number, number],
+    },
+    renderSummary: summarizeGeneratedChunkRender({ x: 2, y: 3, z: 4 }, data, chunkSize, isProceduralWaterMaterial),
+  };
+
+  const transferred = serializeGeneratedChunk(chunk);
+  const restored = deserializeGeneratedChunk(transferred.chunk);
+
+  expect(restored.coord).toEqual(chunk.coord);
+  expect(restored.solidCount).toBe(chunk.solidCount);
+  expect(restored.solidBounds).toEqual(chunk.solidBounds);
+  expect(Array.from(restored.data)).toEqual(Array.from(chunk.data));
+  expect(Array.from(restored.renderSummary.surfaceY)).toEqual(Array.from(chunk.renderSummary.surfaceY));
+  expect(Array.from(restored.renderSummary.faceOpenMask)).toEqual(Array.from(chunk.renderSummary.faceOpenMask));
+});
+
+test("empty generated chunk transfer omits dense voxel payload", () => {
+  const chunkSize = 32;
+  const data = new Uint16Array(chunkSize ** 3);
+  const chunk = {
+    coord: { x: 0, y: 12, z: -4 },
+    data,
+    solidCount: 0,
+    solidBounds: null,
+    renderSummary: summarizeGeneratedChunkRender({ x: 0, y: 12, z: -4 }, data, chunkSize, isProceduralWaterMaterial),
+  };
+
+  const transferred = serializeGeneratedChunk(chunk);
+  const restored = deserializeGeneratedChunk(transferred.chunk);
+
+  expect(transferred.chunk.data).toBeNull();
+  expect(restored.data.length).toBe(0);
+  expect(restored.solidCount).toBe(0);
+  expect(restored.solidBounds).toBeNull();
+  expect(restored.renderSummary.coveredColumnCount).toBe(0);
+});
 
 test("generated chunk render summary transfer round-trips typed summary payloads", () => {
   const chunkSize = 32;
