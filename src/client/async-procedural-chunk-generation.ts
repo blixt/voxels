@@ -1,14 +1,17 @@
 import type { AsyncChunkGenerationQueue } from "../engine/async-chunk-generation.ts";
-import { toAsyncChunkGenerationKey } from "../engine/async-chunk-generation.ts";
+import { toAsyncChunkGenerationKey, toAsyncColumnSummaryKey } from "../engine/async-chunk-generation.ts";
 import {
   deserializeGeneratedChunk,
   deserializeGeneratedChunkRenderSummary,
+  deserializeGeneratedRenderColumnSummary,
   type TransferredGeneratedChunk,
   type TransferredGeneratedChunkRenderSummary,
+  type TransferredGeneratedRenderColumnSummary,
 } from "../engine/generated-chunk-transfer.ts";
 import type { GeneratedChunkRenderSummary } from "../engine/generated-chunk-render-summary.ts";
+import type { GeneratedRenderColumnSummary } from "../engine/generated-render-column-summary.ts";
 import type { GeneratedChunk, ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
-import type { ChunkCoordinate } from "../engine/types.ts";
+import type { ChunkCoordinate, ColumnCoordinate } from "../engine/types.ts";
 
 interface WorkerReadyMessage {
   type: "ready";
@@ -28,9 +31,21 @@ interface WorkerSummarizedMessage {
   summary: TransferredGeneratedChunkRenderSummary;
 }
 
-type WorkerMessage = WorkerReadyMessage | WorkerGeneratedMessage | WorkerSummarizedMessage;
+interface WorkerColumnSummarizedMessage {
+  type: "column-summarized";
+  requestId: number;
+  source: "cache" | "missing";
+  coord: ColumnCoordinate;
+  summary: TransferredGeneratedRenderColumnSummary | null;
+}
 
-type PendingRequestMode = "chunk" | "summary";
+type WorkerMessage =
+  | WorkerReadyMessage
+  | WorkerGeneratedMessage
+  | WorkerSummarizedMessage
+  | WorkerColumnSummarizedMessage;
+
+type PendingRequestMode = "chunk" | "summary" | "column-summary";
 
 interface PendingRequest {
   key: string;
@@ -69,6 +84,8 @@ export function createAsyncProceduralChunkGeneration(
   const pendingKeys = new Set<string>();
   const completedChunks: GeneratedChunk[] = [];
   const completedSummaries: GeneratedChunkRenderSummary[] = [];
+  const completedColumnSummaries: GeneratedRenderColumnSummary[] = [];
+  const missingColumnSummaries: ColumnCoordinate[] = [];
   let completedCacheHits = 0;
   let completedGenerated = 0;
   let completedSummaryCacheHits = 0;
@@ -87,6 +104,17 @@ export function createAsyncProceduralChunkGeneration(
     pendingRequests.delete(message.requestId);
     pendingKeys.delete(pending.key);
     workerSlots[slotIndex]!.pendingCount = Math.max(0, workerSlots[slotIndex]!.pendingCount - 1);
+    if (pending.mode === "column-summary") {
+      if (message.type !== "column-summarized") {
+        throw new Error(`Expected column summary response for ${pending.key}, received ${message.type}`);
+      }
+      if (message.source === "cache" && message.summary) {
+        completedColumnSummaries.push(deserializeGeneratedRenderColumnSummary(message.summary));
+      } else {
+        missingColumnSummaries.push({ ...message.coord });
+      }
+      return;
+    }
     if (pending.mode === "chunk") {
       if (message.source === "cache") {
         completedCacheHits += 1;
@@ -136,8 +164,14 @@ export function createAsyncProceduralChunkGeneration(
     requestSummary(cx: number, cy: number, cz: number): boolean {
       return request("summary", cx, cy, cz);
     },
+    requestColumnSummary(cx: number, cz: number): boolean {
+      return requestColumnSummary(cx, cz);
+    },
     hasPendingChunk(cx: number, cy: number, cz: number): boolean {
       return pendingKeys.has(toAsyncChunkGenerationKey(cx, cy, cz));
+    },
+    hasPendingColumnSummary(cx: number, cz: number): boolean {
+      return pendingKeys.has(toAsyncColumnSummaryKey(cx, cz));
     },
     getPendingCount(): number {
       return pendingKeys.size;
@@ -153,6 +187,18 @@ export function createAsyncProceduralChunkGeneration(
         return [];
       }
       return completedSummaries.splice(0, completedSummaries.length);
+    },
+    drainCompletedColumnSummaries(): GeneratedRenderColumnSummary[] {
+      if (completedColumnSummaries.length === 0) {
+        return [];
+      }
+      return completedColumnSummaries.splice(0, completedColumnSummaries.length);
+    },
+    drainMissingColumnSummaries(): ColumnCoordinate[] {
+      if (missingColumnSummaries.length === 0) {
+        return [];
+      }
+      return missingColumnSummaries.splice(0, missingColumnSummaries.length);
     },
     drainCompletionStats() {
       const stats = {
@@ -181,6 +227,8 @@ export function createAsyncProceduralChunkGeneration(
       pendingKeys.clear();
       completedChunks.length = 0;
       completedSummaries.length = 0;
+      completedColumnSummaries.length = 0;
+      missingColumnSummaries.length = 0;
       completedCacheHits = 0;
       completedGenerated = 0;
       completedSummaryCacheHits = 0;
@@ -211,6 +259,32 @@ export function createAsyncProceduralChunkGeneration(
       type: mode === "chunk" ? "generate" : "summarize",
       requestId,
       coord,
+    });
+    return true;
+  }
+
+  function requestColumnSummary(cx: number, cz: number): boolean {
+    const key = toAsyncColumnSummaryKey(cx, cz);
+    if (pendingKeys.has(key) || pendingKeys.size >= maxPendingJobs) {
+      return false;
+    }
+    let bestWorkerIndex = 0;
+    let bestPendingCount = workerSlots[0]!.pendingCount;
+    for (let index = 1; index < workerSlots.length; index += 1) {
+      const pendingCount = workerSlots[index]!.pendingCount;
+      if (pendingCount < bestPendingCount) {
+        bestPendingCount = pendingCount;
+        bestWorkerIndex = index;
+      }
+    }
+    const requestId = nextRequestId++;
+    pendingKeys.add(key);
+    pendingRequests.set(requestId, { key, workerIndex: bestWorkerIndex, mode: "column-summary" });
+    workerSlots[bestWorkerIndex]!.pendingCount += 1;
+    workerSlots[bestWorkerIndex]!.worker.postMessage({
+      type: "summarize-column",
+      requestId,
+      coord: { x: cx, z: cz } satisfies ColumnCoordinate,
     });
     return true;
   }

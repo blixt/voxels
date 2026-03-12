@@ -2,6 +2,26 @@
 
 ## 2026-03-12
 
+- Extended the generated-chunk persistence layer with derived per-column render summaries:
+  - `src/client/procedural-generated-chunk-cache.ts` now maintains a `column_summaries` store alongside chunk payloads and per-chunk render summaries
+  - the worker can now answer `summarize-column` requests from persisted chunk-derived metadata without regenerating or decoding full chunk payloads
+  - the async generation queue now transports completed persisted column summaries and cache misses back to the main thread explicitly
+- Wired the resident world to use persisted column summaries as a seeding layer:
+  - `ProceduralResidentWorld` now opportunistically requests a persisted column summary for unseen far columns
+  - persisted column summaries are only used when the world does not already hold actual in-memory chunk summaries for that column
+  - once actual chunk summaries exist, they still overwrite the column view, so edited/live chunk state remains the stronger truth inside the current session
+- Added support and regression coverage for the new metadata seam:
+  - `GeneratedRenderColumnSummary` now has an incremental merge path so the generated cache can build column summaries chunk-by-chunk
+  - transfer tests now cover both chunk render summaries and column render summaries
+  - column-summary tests now cover incremental merge equivalence against a full recompute
+- Verified the browser runtime still behaves after the worker/cache protocol change:
+  - `column-cache-smoke` stayed hole-free
+  - average gameplay frame remained about `2.69 ms` with `0` hole-signal frames
+- This slice is deliberately a persistence seam, not the end-state visibility system:
+  - it gives the far-summary frontier a disk-backed seed
+  - it does not yet add explicit metrics for persisted column-summary hits versus misses
+  - the next harness improvement should expose those numbers so cache reuse is measurable instead of inferred
+
 - Removed the remaining generator-backed far-summary discovery leak from the live runtime:
   - `prefetchFarFieldSummariesAround()` in `src/engine/procedural-resident-world.ts` no longer probes `generator.sampleColumn()` to guess unseen far-column Y ranges
   - far-summary discovery now grows from actual generated/resident column summaries plus pending far-summary requests

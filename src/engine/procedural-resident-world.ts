@@ -103,6 +103,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   private readonly generatedRenderChunkKeysByColumn = new Map<string, Set<string>>();
   private readonly generatedRenderColumnSummaries = new Map<string, GeneratedRenderColumnSummary>();
   private readonly pendingFarFieldColumnRanges = new Map<string, ChunkYRange>();
+  private readonly missingPersistedFarFieldColumnSummaries = new Set<string>();
   private readonly asyncChunkGeneration: AsyncChunkGenerationQueue | null;
   private residentColumnRevision = 0;
   private lastAnchorSignature = "";
@@ -563,7 +564,15 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     const completedRenderSummaries = this.asyncChunkGeneration?.drainCompletedSummaries() ?? [];
     const completedSummaryStats = this.asyncChunkGeneration?.drainSummaryCompletionStats() ?? { cacheHits: 0, generated: 0 };
     summaryDrainMs = performance.now() - summaryDrainStartedAt;
+    const completedColumnSummaries = this.asyncChunkGeneration?.drainCompletedColumnSummaries() ?? [];
+    const missingColumnSummaries = this.asyncChunkGeneration?.drainMissingColumnSummaries() ?? [];
     const completedGeneratedChunksByKey = new Map<string, GeneratedChunk>();
+    for (const summary of completedColumnSummaries) {
+      this.recordPersistedColumnRenderSummary(summary);
+    }
+    for (const coord of missingColumnSummaries) {
+      this.missingPersistedFarFieldColumnSummaries.add(toColumnKey(coord.x, coord.z));
+    }
     for (const summary of completedRenderSummaries) {
       this.recordChunkRenderSummary(toChunkKey(summary.coord.x, summary.coord.y, summary.coord.z), summary);
     }
@@ -742,6 +751,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
       }
       const cx = centerChunkX + dx;
       const cz = centerChunkZ + dz;
+      if (!this.generatedRenderColumnSummaries.has(toColumnKey(cx, cz)) && !this.pendingFarFieldColumnRanges.has(toColumnKey(cx, cz))) {
+        this.requestPersistedFarFieldColumnSummary(cx, cz);
+      }
       const estimatedRange = this.estimateFarFieldSummaryChunkYRange(cx, cz);
       if (!estimatedRange) {
         continue;
@@ -934,6 +946,14 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     this.rebuildColumnRenderSummary(summary.coord.x, summary.coord.z);
   }
 
+  private recordPersistedColumnRenderSummary(summary: GeneratedRenderColumnSummary): void {
+    const columnKey = toColumnKey(summary.chunkX, summary.chunkZ);
+    if (this.generatedRenderChunkKeysByColumn.has(columnKey)) {
+      return;
+    }
+    this.generatedRenderColumnSummaries.set(columnKey, summary);
+  }
+
   private recordResidentChunkRenderSummary(chunk: VoxelChunk): void {
     const key = toChunkKey(chunk.coord.x, chunk.coord.y, chunk.coord.z);
     this.recordGeneratedChunkRenderSummary(key, {
@@ -999,6 +1019,22 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     }
     existing.minCy = Math.min(existing.minCy, cy);
     existing.maxCy = Math.max(existing.maxCy, cy);
+  }
+
+  private requestPersistedFarFieldColumnSummary(cx: number, cz: number): void {
+    if (!this.asyncChunkGeneration) {
+      return;
+    }
+    const columnKey = toColumnKey(cx, cz);
+    if (
+      this.generatedRenderColumnSummaries.has(columnKey)
+      || this.pendingFarFieldColumnRanges.has(columnKey)
+      || this.missingPersistedFarFieldColumnSummaries.has(columnKey)
+      || this.asyncChunkGeneration.hasPendingColumnSummary(cx, cz)
+    ) {
+      return;
+    }
+    this.asyncChunkGeneration.requestColumnSummary(cx, cz);
   }
 }
 

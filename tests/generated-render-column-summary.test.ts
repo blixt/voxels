@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import { summarizeGeneratedChunkRender } from "../src/engine/generated-chunk-render-summary.ts";
 import {
+  mergeGeneratedRenderColumnSummary,
   sampleGeneratedRenderColumnSummary,
   summarizeGeneratedRenderColumn,
 } from "../src/engine/generated-render-column-summary.ts";
@@ -48,4 +49,29 @@ test("generated render column summary tracks empty known ranges separately from 
   expect(summary!.maxKnownCy).toBe(5);
   expect(summary!.minNonEmptyCy).toBe(5);
   expect(summary!.maxNonEmptyCy).toBe(5);
+});
+
+test("generated render column summary can be merged incrementally from chunk summaries", () => {
+  const chunkSize = 32;
+  const lower = new Uint16Array(chunkSize ** 3);
+  const upper = new Uint16Array(chunkSize ** 3);
+  lower[4 + 6 * chunkSize + 3 * chunkSize * chunkSize] = 123;
+  upper[4 + 8 * chunkSize + 3 * chunkSize * chunkSize] = 456;
+
+  const lowerSummary = summarizeGeneratedChunkRender({ x: 7, y: 12, z: -5 }, lower, chunkSize, isProceduralWaterMaterial);
+  const upperSummary = summarizeGeneratedChunkRender({ x: 7, y: 13, z: -5 }, upper, chunkSize, isProceduralWaterMaterial);
+  const merged = mergeGeneratedRenderColumnSummary(
+    mergeGeneratedRenderColumnSummary(null, lowerSummary, chunkSize),
+    upperSummary,
+    chunkSize,
+  );
+  const recomputed = summarizeGeneratedRenderColumn(7, -5, [lowerSummary, upperSummary], chunkSize);
+
+  expect(merged.coveredColumnCount).toBe(recomputed!.coveredColumnCount);
+  expect(Array.from(merged.surfaceY)).toEqual(Array.from(recomputed!.surfaceY));
+  expect(Array.from(merged.surfaceMaterial)).toEqual(Array.from(recomputed!.surfaceMaterial));
+  expect(merged.minKnownCy).toBe(recomputed!.minKnownCy);
+  expect(merged.maxKnownCy).toBe(recomputed!.maxKnownCy);
+  expect(merged.minNonEmptyCy).toBe(recomputed!.minNonEmptyCy);
+  expect(merged.maxNonEmptyCy).toBe(recomputed!.maxNonEmptyCy);
 });

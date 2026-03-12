@@ -1,5 +1,13 @@
 # Renderer Hypotheses
 
+## 2026-03-12 persisted column-summary search
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| Chunk-derived render summaries are enough in memory; persisting per-column summaries separately is unnecessary duplication | Add a cache/worker path for persisted column summaries, keep them strictly derived from chunk summaries, and verify the browser runtime still behaves correctly after the protocol change | Rejected. The extra store gives the far-summary frontier a disk-backed seed without reintroducing generator coupling, and the browser smoke stayed clean | Rejected |
+| Persisted column summaries should overwrite any current in-memory column view for the same `x/z` column | Wire persisted summaries directly into the live world regardless of whether actual chunk summaries for that column already exist | Rejected. In-memory chunk summaries from resident/edited chunks are the stronger truth within the current session, so persisted summaries are only used when the live world has no actual chunk-summary set for that column | Rejected |
+| The current verification surface already proves whether persisted column-summary reuse is happening, so no further harness work is needed | Re-run the browser smoke after the protocol change and inspect whether it exposes cache-hit details for column summaries | Rejected. The smoke proves safety, not quantitative reuse. The next harness step should expose column-summary hit/miss counters explicitly | Rejected |
+
 ## 2026-03-12 far-summary frontier search
 
 | Hypothesis | Tiny verification case | Result | Status |

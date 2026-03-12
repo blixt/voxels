@@ -8,8 +8,9 @@ import {
   serializeGeneratedChunkRenderSummary,
   type TransferredGeneratedChunk,
   type TransferredGeneratedChunkRenderSummary,
+  type TransferredGeneratedRenderColumnSummary,
 } from "../engine/generated-chunk-transfer.ts";
-import type { ChunkCoordinate } from "../engine/types.ts";
+import type { ChunkCoordinate, ColumnCoordinate } from "../engine/types.ts";
 
 type WorkerRequest =
   | {
@@ -28,6 +29,11 @@ type WorkerRequest =
       type: "summarize";
       requestId: number;
       coord: ChunkCoordinate;
+    }
+  | {
+      type: "summarize-column";
+      requestId: number;
+      coord: ColumnCoordinate;
     };
 
 type WorkerResponse =
@@ -45,6 +51,13 @@ type WorkerResponse =
       requestId: number;
       source: "cache" | "generated";
       summary: TransferredGeneratedChunkRenderSummary;
+    }
+  | {
+      type: "column-summarized";
+      requestId: number;
+      source: "cache" | "missing";
+      coord: ColumnCoordinate;
+      summary: TransferredGeneratedRenderColumnSummary | null;
     };
 
 let generator: ProceduralWorldGenerator | null = null;
@@ -79,6 +92,35 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
   }
   if (!generator) {
     throw new Error("Procedural generation worker received a request before initialization");
+  }
+  if (message.type === "summarize-column") {
+    let cachedColumnSummary: TransferredGeneratedRenderColumnSummary | null = null;
+    try {
+      cachedColumnSummary = await chunkCache?.getColumnSummary(message.coord) ?? null;
+    } catch (error) {
+      reportCacheFailure("read", error);
+      chunkCache?.close();
+      chunkCache = null;
+      cachedColumnSummary = null;
+    }
+    const response: WorkerResponse = {
+      type: "column-summarized",
+      requestId: message.requestId,
+      source: cachedColumnSummary ? "cache" : "missing",
+      coord: { ...message.coord },
+      summary: cachedColumnSummary,
+    };
+    self.postMessage(response, {
+      transfer: cachedColumnSummary
+        ? [
+            cachedColumnSummary.surfaceY.buffer,
+            cachedColumnSummary.surfaceMaterial.buffer,
+            cachedColumnSummary.waterTopY.buffer,
+            cachedColumnSummary.waterMaterial.buffer,
+          ]
+        : [],
+    });
+    return;
   }
   if (message.type === "summarize") {
     let cachedSummary: TransferredGeneratedChunkRenderSummary | null = null;

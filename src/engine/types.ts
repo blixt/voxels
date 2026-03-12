@@ -13,6 +13,11 @@ export interface ChunkCoordinate {
   z: number;
 }
 
+export interface ColumnCoordinate {
+  x: number;
+  z: number;
+}
+
 export interface ChunkBounds {
   min: Vec3;
   max: Vec3;

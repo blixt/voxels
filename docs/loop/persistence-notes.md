@@ -1,5 +1,17 @@
 # Persistence Notes
 
+## 2026-03-12 column-summary layer
+
+- The generated cache now persists three levels of data:
+  - chunk payloads
+  - per-chunk render summaries
+  - per-column render summaries
+- The column summary is still derived metadata, not authoritative world state.
+- The main reason to persist it separately is to let far rendering and visibility bootstrap from disk-backed chunk-derived metadata without reopening generator coupling or forcing full chunk decode just to learn a column’s coarse extent and top surface.
+- Current limitation:
+  - the generated cache can merge column summaries incrementally because generated chunks are deterministic and effectively append-only in this cache
+  - a future authoritative edited-world store should treat column/region summaries as versioned derived data and rebuild or replace them when chunk contents change, not just monotonically merge them
+
 ## Current seam
 
 The procedural world now has a first real persistence-oriented boundary:

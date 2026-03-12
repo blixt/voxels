@@ -1,4 +1,5 @@
 import type { GeneratedChunkRenderSummary } from "./generated-chunk-render-summary.ts";
+import type { GeneratedRenderColumnSummary } from "./generated-render-column-summary.ts";
 import type { GeneratedChunk } from "./procedural-generator.ts";
 import { decodeGeneratedChunk, encodeGeneratedChunk, type GeneratedChunkCodecStats } from "./generated-chunk-codec.ts";
 
@@ -19,6 +20,20 @@ export interface TransferredGeneratedChunkRenderSummary {
   macroCellsPerAxis: number;
   macroCellStates: Uint8Array;
   faceOpenMask: Uint8Array;
+}
+
+export interface TransferredGeneratedRenderColumnSummary {
+  chunkX: number;
+  chunkZ: number;
+  coveredColumnCount: number;
+  surfaceY: Int32Array;
+  surfaceMaterial: Uint16Array;
+  waterTopY: Int32Array;
+  waterMaterial: Uint16Array;
+  minKnownCy: number;
+  maxKnownCy: number;
+  minNonEmptyCy: number | null;
+  maxNonEmptyCy: number | null;
 }
 
 export function serializeGeneratedChunk(chunk: GeneratedChunk): {
@@ -82,5 +97,50 @@ export function deserializeGeneratedChunkRenderSummary(
     macroCellsPerAxis: summary.macroCellsPerAxis,
     macroCellStates: summary.macroCellStates,
     faceOpenMask: summary.faceOpenMask,
+  };
+}
+
+export function serializeGeneratedRenderColumnSummary(summary: GeneratedRenderColumnSummary): {
+  summary: TransferredGeneratedRenderColumnSummary;
+  transfer: Transferable[];
+} {
+  return {
+    summary: {
+      chunkX: summary.chunkX,
+      chunkZ: summary.chunkZ,
+      coveredColumnCount: summary.coveredColumnCount,
+      surfaceY: summary.surfaceY,
+      surfaceMaterial: summary.surfaceMaterial,
+      waterTopY: summary.waterTopY,
+      waterMaterial: summary.waterMaterial,
+      minKnownCy: summary.minKnownCy,
+      maxKnownCy: summary.maxKnownCy,
+      minNonEmptyCy: summary.minNonEmptyCy,
+      maxNonEmptyCy: summary.maxNonEmptyCy,
+    },
+    transfer: [
+      summary.surfaceY.buffer,
+      summary.surfaceMaterial.buffer,
+      summary.waterTopY.buffer,
+      summary.waterMaterial.buffer,
+    ],
+  };
+}
+
+export function deserializeGeneratedRenderColumnSummary(
+  summary: TransferredGeneratedRenderColumnSummary,
+): GeneratedRenderColumnSummary {
+  return {
+    chunkX: summary.chunkX,
+    chunkZ: summary.chunkZ,
+    coveredColumnCount: summary.coveredColumnCount,
+    surfaceY: summary.surfaceY,
+    surfaceMaterial: summary.surfaceMaterial,
+    waterTopY: summary.waterTopY,
+    waterMaterial: summary.waterMaterial,
+    minKnownCy: summary.minKnownCy,
+    maxKnownCy: summary.maxKnownCy,
+    minNonEmptyCy: summary.minNonEmptyCy,
+    maxNonEmptyCy: summary.maxNonEmptyCy,
   };
 }

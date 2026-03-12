@@ -5,6 +5,36 @@
 ### Commands
 
 - `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/generated-render-column-summary.test.ts tests/generated-chunk-transfer.test.ts tests/generated-chunk-codec.test.ts`
+- `mise run build`
+- `mise run trace-route -- --label=column-cache-smoke --duration=1 --settle=1 --sample-hz=20`
+
+### Automated checks
+
+- `tsc --noEmit`: passing.
+- Focused resident-world / column-summary / transfer / codec tests: passing.
+- Production build: passing.
+
+### Route trace
+
+- `artifacts/browser-route-trace/20260312T173153Z-column-cache-smoke/report.json`
+- Summary:
+  - avg gameplay frame: `2.69 ms`
+  - `p95` gameplay frame: `2.90 ms`
+  - max gameplay frame: `3.10 ms`
+  - avg stream: `2.62 ms`
+  - avg mesh: `0.00 ms`
+  - avg far field: `0.00 ms`
+  - hole-signal frames: `0`
+
+### Notes
+
+- This verification proves the worker/cache/protocol change is runtime-safe in Chrome.
+- It does not by itself prove warm persisted column-summary reuse quantitatively, because the current benchmark surface does not yet expose column-summary cache-hit counters. That should be the next harness upgrade.
+
+### Commands
+
+- `mise exec -- bun run typecheck`
 - `mise exec -- bun test tests/procedural-resident-world.test.ts tests/generated-render-column-summary.test.ts tests/generated-chunk-codec.test.ts`
 - `mise run build`
 - `mise run trace-route -- --label=frontier-smoke --duration=1 --settle=1 --sample-hz=20`
