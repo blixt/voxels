@@ -1,4 +1,9 @@
 import type { ChunkMeshData, Vec3 } from "./types.ts";
+import {
+  cloneOpaqueChunkMeshingInput,
+  type OpaqueChunkMeshingInput,
+  type OpaqueChunkMeshGeometry,
+} from "./opaque-chunk-mesher.ts";
 import { applyWaterDepthTint } from "./water-visuals.ts";
 import type { ResidentChunkWorld } from "./world.ts";
 
@@ -72,6 +77,7 @@ export function rebuildDirtyMeshes(
     }
     chunk.mesh = buildChunkMesh(world, chunk.coord.x, chunk.coord.y, chunk.coord.z);
     chunk.meshDirty = false;
+    chunk.pendingMeshRevision = null;
     chunk.gpuDirty = true;
     meshCount += 1;
     if (chunk.meshBuilt) {
@@ -91,7 +97,7 @@ export function rebuildDirtyMeshes(
   };
 }
 
-function collectDirtyChunks(world: ResidentChunkWorld, priorityPosition?: Vec3) {
+export function collectDirtyChunks(world: ResidentChunkWorld, priorityPosition?: Vec3) {
   const dirtyChunks = [];
   for (const chunk of world.iterateResidentChunks()) {
     if (!chunk.meshDirty) {
@@ -129,6 +135,61 @@ function collectDirtyChunks(world: ResidentChunkWorld, priorityPosition?: Vec3) 
     return left.coord.x - right.coord.x || left.coord.y - right.coord.y || left.coord.z - right.coord.z;
   });
   return dirtyChunks;
+}
+
+export function createOpaqueChunkMeshingInput(
+  world: ResidentChunkWorld,
+  cx: number,
+  cy: number,
+  cz: number,
+  options: { cloneData?: boolean } = {},
+): OpaqueChunkMeshingInput | null {
+  const chunk = world.getResidentChunk(cx, cy, cz);
+  if (!chunk) {
+    return null;
+  }
+  const neighbors = resolveChunkNeighbors(world, cx, cy, cz);
+  const input: OpaqueChunkMeshingInput = {
+    chunkSize: world.chunkSize,
+    coord: { x: cx, y: cy, z: cz },
+    chunkData: chunk.data,
+    solidCount: chunk.solidCount,
+    solidBounds: cloneLocalBounds(resolveChunkSolidBounds(world, chunk, cx, cy, cz)),
+    neighbors: [
+      [toOpaqueChunkNeighbor(neighbors[0]![0]), toOpaqueChunkNeighbor(neighbors[0]![1])],
+      [toOpaqueChunkNeighbor(neighbors[1]![0]), toOpaqueChunkNeighbor(neighbors[1]![1])],
+      [toOpaqueChunkNeighbor(neighbors[2]![0]), toOpaqueChunkNeighbor(neighbors[2]![1])],
+    ],
+  };
+  return options.cloneData ? cloneOpaqueChunkMeshingInput(input) : input;
+}
+
+export function buildChunkMeshFromOpaqueGeometry(
+  world: ResidentChunkWorld,
+  cx: number,
+  cy: number,
+  cz: number,
+  opaqueMesh: OpaqueChunkMeshGeometry,
+): ChunkMeshData {
+  const chunkSize = world.chunkSize;
+  const fallbackBounds = {
+    min: [cx * chunkSize, cy * chunkSize, cz * chunkSize] as [number, number, number],
+    max: [(cx + 1) * chunkSize, (cy + 1) * chunkSize, (cz + 1) * chunkSize] as [number, number, number],
+  };
+  const waterMesh = buildWaterOnlyChunkMesh(world, cx, cy, cz);
+  return {
+    vertexData: opaqueMesh.vertexData,
+    vertexCount: opaqueMesh.vertexCount,
+    indexData: opaqueMesh.indexData,
+    indexCount: opaqueMesh.indexCount,
+    waterVertexData: waterMesh.vertexData,
+    waterVertexCount: waterMesh.vertexCount,
+    waterIndexData: waterMesh.indexData,
+    waterIndexCount: waterMesh.indexCount,
+    waterTriangleCount: waterMesh.triangleCount,
+    triangleCount: opaqueMesh.triangleCount + waterMesh.triangleCount,
+    bounds: combineMeshBounds(opaqueMesh.bounds, waterMesh.bounds, fallbackBounds),
+  };
 }
 
 export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number, cz: number): ChunkMeshData {
@@ -629,6 +690,53 @@ function buildWaterMeshGeometryFromQuads(
   };
 }
 
+function buildWaterOnlyChunkMesh(
+  world: ResidentChunkWorld,
+  cx: number,
+  cy: number,
+  cz: number,
+): ReturnType<typeof buildWaterMeshGeometryFromQuads> {
+  const chunk = world.getResidentChunk(cx, cy, cz);
+  if (!chunk) {
+    return createEmptyWaterMesh();
+  }
+  const solidBounds = resolveChunkSolidBounds(world, chunk, cx, cy, cz);
+  if (!solidBounds) {
+    return createEmptyWaterMesh();
+  }
+  const chunkSize = world.chunkSize;
+  const chunkArea = chunkSize * chunkSize;
+  const scratch = acquireMesherScratch(
+    (solidBounds.max[0] - solidBounds.min[0]) * (solidBounds.max[2] - solidBounds.min[2]),
+  );
+  buildWaterSurfaceQuads(
+    world,
+    chunk.data,
+    resolveChunkNeighbors(world, cx, cy, cz),
+    chunkSize,
+    chunkArea,
+    solidBounds,
+    cx * chunkSize,
+    cy * chunkSize,
+    cz * chunkSize,
+    scratch,
+  );
+  const mesh = buildWaterMeshGeometryFromQuads(scratch.waterQuads, world);
+  releaseMesherScratch(scratch);
+  return mesh;
+}
+
+function createEmptyWaterMesh(): ReturnType<typeof buildWaterMeshGeometryFromQuads> {
+  return {
+    vertexData: new ArrayBuffer(0),
+    vertexCount: 0,
+    indexData: new Uint32Array(0),
+    indexCount: 0,
+    triangleCount: 0,
+    bounds: null,
+  };
+}
+
 function combineMeshBounds(
   opaqueBounds: { min: [number, number, number]; max: [number, number, number] } | null,
   waterBounds: { min: [number, number, number]; max: [number, number, number] } | null,
@@ -781,6 +889,25 @@ function resolveNeighbor(
   return {
     data: chunk.data,
     solidBounds: resolveChunkSolidBounds(world, chunk, cx, cy, cz),
+  };
+}
+
+function toOpaqueChunkNeighbor(neighbor: ResolvedChunkNeighbor) {
+  return {
+    data: neighbor.data,
+    solidBounds: cloneLocalBounds(neighbor.solidBounds),
+  };
+}
+
+function cloneLocalBounds(
+  bounds: { min: [number, number, number]; max: [number, number, number] } | null,
+): { min: [number, number, number]; max: [number, number, number] } | null {
+  if (!bounds) {
+    return null;
+  }
+  return {
+    min: [...bounds.min],
+    max: [...bounds.max],
   };
 }
 

@@ -631,7 +631,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       if (!chunk) {
         continue;
       }
-      chunk.meshDirty = true;
+      markResidentChunkDirty(chunk);
       touched += 1;
     }
     return touched;
@@ -849,6 +849,8 @@ function createResidentChunk(generated: GeneratedChunk, chunkSize: number): Voxe
       : null,
     meshBuilt: false,
     meshDirty: true,
+    meshRevision: 1,
+    pendingMeshRevision: null,
     gpuDirty: true,
     mesh: null,
   };
@@ -860,8 +862,8 @@ function createResidentChunk(generated: GeneratedChunk, chunkSize: number): Voxe
 
 function markResidentChunkDirty(chunk: VoxelChunk): void {
   chunk.meshDirty = true;
-  chunk.gpuDirty = true;
-  chunk.mesh = null;
+  chunk.meshRevision += 1;
+  chunk.pendingMeshRevision = null;
 }
 
 function updateResidentChunkVoxel(

@@ -38,6 +38,7 @@ interface BrowserRouteTraceReport {
   appUrl: string;
   chromeBinary: string;
   tracePath: string;
+  benchmarkSamplesPath: string;
   routeOptions: Record<string, number>;
   build: CommandResult | null;
   benchmark: Record<string, unknown>;
@@ -90,6 +91,7 @@ const runName = `${runStamp}${options.label ? `-${sanitizeFileStem(options.label
 const outputDir = join(options.outputDir, runName);
 const tracePath = join(outputDir, "trace.json");
 const reportPath = join(outputDir, "report.json");
+const benchmarkSamplesPath = join(outputDir, "benchmark-samples.json");
 const appPort = options.appPort ?? await findFreePort();
 const devToolsPort = await findFreePort();
 const appUrl = `http://127.0.0.1:${appPort}/`;
@@ -170,20 +172,22 @@ try {
     referenceDiffStrideFrames: options.referenceDiffStrideFrames,
     referenceDiffLimit: options.referenceDiffLimit,
   };
-  const benchmark = await cdp.evaluate<Record<string, unknown>>(`(async () => {
+  const benchmarkResult = await cdp.evaluate<Record<string, unknown>>(`(async () => {
     const result = await window.__VOXELS_GAME__.benchmarkRouteExperience(${JSON.stringify(routeOptions)});
-    return {
-      seed: result.seed,
-      radiusChunks: result.radiusChunks,
-      durationSeconds: result.durationSeconds,
-      settleSeconds: result.settleSeconds,
-      totalDistanceMeters: result.totalDistanceMeters,
-      sampleHz: result.sampleHz,
-      speedMetersPerSecond: result.speedMetersPerSecond,
-      sampleCount: result.samples.length,
-      summary: result.summary,
-    };
+    return result;
   })()`);
+  await Bun.write(benchmarkSamplesPath, `${JSON.stringify((benchmarkResult.samples ?? []) as unknown[], null, 2)}\n`);
+  const benchmark = {
+    seed: benchmarkResult.seed,
+    radiusChunks: benchmarkResult.radiusChunks,
+    durationSeconds: benchmarkResult.durationSeconds,
+    settleSeconds: benchmarkResult.settleSeconds,
+    totalDistanceMeters: benchmarkResult.totalDistanceMeters,
+    sampleHz: benchmarkResult.sampleHz,
+    speedMetersPerSecond: benchmarkResult.speedMetersPerSecond,
+    sampleCount: Array.isArray(benchmarkResult.samples) ? benchmarkResult.samples.length : 0,
+    summary: benchmarkResult.summary,
+  };
   const discovery = await cdp.evaluate<Record<string, unknown>>(
     "window.__VOXELS_GAME__.getDiscoveryJournal()",
   );
@@ -216,6 +220,7 @@ try {
     appUrl,
     chromeBinary: options.chromeBinary,
     tracePath,
+    benchmarkSamplesPath,
     routeOptions,
     build,
     benchmark,

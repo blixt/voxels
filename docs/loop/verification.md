@@ -3213,3 +3213,68 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - This slice is worth keeping.
 - Verification stayed command-line only for this round; the next harness pass should add a lightweight browser interaction smoke so break/place can be exercised through the live page without relying on manual play.
+
+## 2026-03-12 async detailed chunk meshing with near-field continuity
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/opaque-chunk-mesher.test.ts tests/mesher.test.ts tests/procedural-resident-world.test.ts`
+- `mise exec -- bun test tests/procedural-far-field.test.ts tests/procedural-lod-coverage.test.ts tests/mesher.test.ts`
+- `mise run build`
+- `mise run trace-route -- --label=async-mesh-worker --duration=4 --settle=1 --sample-hz=30`
+- `mise run trace-route -- --label=async-mesh-worker-v2 --duration=4 --settle=1 --sample-hz=30`
+- `mise run trace-route -- --label=async-mesh-worker-v3 --duration=4 --settle=1 --sample-hz=30`
+- `mise run trace-route -- --label=async-mesh-worker-v4 --duration=4 --settle=1 --sample-hz=30`
+- `mise run trace-route -- --label=async-mesh-worker-v5 --duration=4 --settle=1 --sample-hz=30`
+- `mise run trace-route -- --label=async-mesh-worker-v6 --duration=4 --settle=1 --sample-hz=30`
+- `mise run trace-route -- --label=async-mesh-worker-harness-smoke --duration=2 --settle=1 --sample-hz=20`
+- `mise run cycle-bench -- --label=async-mesh-worker`
+- `mise run test`
+
+#### Numeric probes
+
+- Baseline route trace (`artifacts/browser-route-trace/20260312T123504Z-post-gather-build/report.json`):
+  - avg gameplay frame `4.245999995867411`
+  - p95 gameplay frame `17.900000035762787`
+  - avg mesh `1.8326666673024496`
+  - p95 mesh `15`
+  - hole signals `0`
+- First rejected async-mesh pass (`artifacts/browser-route-trace/20260312T125731Z-async-mesh-worker/report.json`):
+  - avg gameplay frame `2.8146666618188223`
+  - p95 gameplay frame `4.800000011920929`
+  - hole signals `16`
+  - max dirty meshless resident chunks `159`
+  - diagnosis: main-thread meshing was gone, but near-field continuity was not preserved
+- Final kept async-mesh pass (`artifacts/browser-route-trace/20260312T130547Z-async-mesh-worker-v6/report.json`):
+  - avg gameplay frame `3.294000000158946`
+  - p95 gameplay frame `5.899999976158142`
+  - max gameplay frame `34.799999952316284`
+  - avg mesh `0.7813333332538605`
+  - p95 mesh `3.099999964237213`
+  - hole signals `0`
+  - max pending chunks `1073`
+  - max pending mesh jobs `60`
+  - max dirty meshless resident chunks `76`
+- Harness smoke after sample persistence (`artifacts/browser-route-trace/20260312T130752Z-async-mesh-worker-harness-smoke/report.json`):
+  - avg gameplay frame `4.27 ms`
+  - p95 gameplay frame `15.90 ms`
+  - hole signals `0`
+  - `benchmark-samples.json` saved with `60` samples
+- Cycle bench (`artifacts/cycle-bench/20260312T130620Z-async-mesh-worker.json`):
+  - `failedStepIds = []`
+  - `crossing-d2` max frame work `30.398229499999616`
+  - `crossing-far-anchor-d8` max frame work `189.93791750000128`
+  - this command-line battery regressed slightly, which matches the fact that it does not measure the browser worker path and does pay the restored near-transition fallback cost
+
+#### Added verification coverage
+
+- `tests/opaque-chunk-mesher.test.ts`
+- Route traces now persist `benchmark-samples.json` next to the report and trace artifact.
+- Route summaries now expose `maxPendingMeshJobs`, which makes async meshing backlog explicit.
+
+#### Residual
+
+- This slice is worth keeping.
+- The next pressure point is not main-thread meshing anymore; it is async-path transfer/GC cost plus main-thread residency/Y-range work.
+- The browser trace still mixes worker and main-thread CPU inside one process view, so a later harness slice should separate those more cleanly.

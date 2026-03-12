@@ -16,7 +16,10 @@ if (!result.success) {
 }
 
 const workerResult = await Bun.build({
-  entrypoints: ["./src/client/procedural-generation-worker.ts"],
+  entrypoints: [
+    "./src/client/procedural-generation-worker.ts",
+    "./src/client/chunk-meshing-worker.ts",
+  ],
   outdir: "./dist/assets",
   target: "browser",
   format: "esm",

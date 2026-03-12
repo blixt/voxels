@@ -31,7 +31,15 @@ import {
   selectInventorySlot,
   type InventoryState,
 } from "../engine/inventory.ts";
-import { rebuildDirtyMeshes } from "../engine/mesher.ts";
+import {
+  buildChunkMesh,
+  buildChunkMeshFromOpaqueGeometry,
+  collectDirtyChunks,
+  createOpaqueChunkMeshingInput,
+  rebuildDirtyMeshes,
+} from "../engine/mesher.ts";
+import { createMeshMaterialLut } from "../engine/opaque-chunk-mesher.ts";
+import { createAsyncChunkMeshing } from "./async-chunk-meshing.ts";
 import { createAsyncProceduralChunkGeneration } from "./async-procedural-chunk-generation.ts";
 import {
   createPlayerState,
@@ -83,6 +91,8 @@ const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
 const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 7;
 const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 6;
 const DEFAULT_MAX_FAR_FIELD_BAND_REBUILDS_PER_FRAME = 1;
+const MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME = 6;
+const SYNC_NEAR_MESH_RADIUS_CHUNKS = 3;
 const MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES = 6;
 const FAR_FIELD_RENDER_MASK_SPAN_CHUNKS = 32;
 const DISCOVERY_SAMPLE_INTERVAL_MS = 250;
@@ -424,6 +434,7 @@ export interface RouteExperienceFrameSample {
   changed: boolean;
   complete: boolean;
   pendingChunks: number;
+  pendingMeshJobs: number;
   dirtyResidentChunks: number;
   dirtyMeshlessResidentChunks: number;
   dirtyRetainedMeshResidentChunks: number;
@@ -535,6 +546,7 @@ export interface RouteExperienceBenchmarkSummary {
   maxSettledReferenceClearToFilledRatio: number;
   maxSettledReferenceClearToFilledRunRatio: number;
   maxPendingChunks: number;
+  maxPendingMeshJobs: number;
   maxDirtyResidentChunks: number;
   maxDirtyMeshlessResidentChunks: number;
   maxDirtyRetainedMeshResidentChunks: number;
@@ -575,6 +587,9 @@ export class GameController {
   readonly world = new ProceduralResidentWorld(this.generator, {
     asyncChunkGeneration: this.asyncChunkGeneration,
   });
+  readonly asyncChunkMeshing = createAsyncChunkMeshing(
+    createMeshMaterialLut(this.world.palette, (materialIndex) => this.world.isWaterMaterial(materialIndex)),
+  );
   readonly farField = new ProceduralFarField(this.generator);
   readonly explorationJournal = new ExplorationJournal();
   readonly inventory: InventoryState = createInventoryState();
@@ -641,6 +656,7 @@ export class GameController {
     this.pointerLocked = false;
     this.pressedKeys.clear();
     this.asyncChunkGeneration?.dispose();
+    this.asyncChunkMeshing?.dispose();
     this.renderer?.dispose();
     this.canvas.removeEventListener("click", this.handleCanvasClick);
     this.canvas.removeEventListener("mousedown", this.handleCanvasMouseDown);
@@ -1780,6 +1796,116 @@ export class GameController {
   }
 
   private flushMeshBuildBudget(maxChunks = DEFAULT_MAX_MESH_REBUILDS_PER_FRAME): void {
+    if (this.asyncChunkMeshing) {
+      const startedAt = performance.now();
+      let meshCount = 0;
+      let newMeshCount = 0;
+      let remeshCount = 0;
+      let triangleCount = 0;
+      const dirtyChunks = collectDirtyChunks(this.world, this.player.feetPosition);
+      const priorityChunkX = Math.floor(this.player.feetPosition[0] / this.world.chunkSize);
+      const priorityChunkY = Math.floor(this.player.feetPosition[1] / this.world.chunkSize);
+      const priorityChunkZ = Math.floor(this.player.feetPosition[2] / this.world.chunkSize);
+
+      for (const completed of this.asyncChunkMeshing.drainCompletedMeshes()) {
+        const chunk = this.world.getResidentChunk(completed.coord.x, completed.coord.y, completed.coord.z);
+        if (!chunk || chunk.meshRevision !== completed.meshRevision) {
+          continue;
+        }
+        chunk.mesh = buildChunkMeshFromOpaqueGeometry(
+          this.world,
+          completed.coord.x,
+          completed.coord.y,
+          completed.coord.z,
+          completed.opaqueMesh,
+        );
+        chunk.meshDirty = false;
+        chunk.pendingMeshRevision = null;
+        chunk.gpuDirty = true;
+        meshCount += 1;
+        if (chunk.meshBuilt) {
+          remeshCount += 1;
+        } else {
+          newMeshCount += 1;
+          chunk.meshBuilt = true;
+        }
+        triangleCount += chunk.mesh?.triangleCount ?? 0;
+      }
+
+      let syncBuiltCount = 0;
+      for (const chunk of dirtyChunks) {
+        if (syncBuiltCount >= Math.min(MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME, maxChunks)) {
+          break;
+        }
+        if (!chunk.meshDirty) {
+          continue;
+        }
+        if (!shouldSyncBuildUrgentChunk(chunk, priorityChunkX, priorityChunkY, priorityChunkZ)) {
+          continue;
+        }
+        const hasPendingJob = this.asyncChunkMeshing.hasPendingChunk(chunk.coord.x, chunk.coord.y, chunk.coord.z);
+        const wasBuilt = chunk.meshBuilt;
+        chunk.mesh = buildChunkMesh(this.world, chunk.coord.x, chunk.coord.y, chunk.coord.z);
+        chunk.meshDirty = false;
+        chunk.gpuDirty = true;
+        if (hasPendingJob) {
+          chunk.pendingMeshRevision = chunk.meshRevision;
+        } else {
+          chunk.pendingMeshRevision = null;
+        }
+        syncBuiltCount += 1;
+        meshCount += 1;
+        if (wasBuilt) {
+          remeshCount += 1;
+        } else {
+          newMeshCount += 1;
+          chunk.meshBuilt = true;
+        }
+        triangleCount += chunk.mesh?.triangleCount ?? 0;
+      }
+
+      let scheduledCount = 0;
+      for (const chunk of dirtyChunks) {
+        if (scheduledCount >= maxChunks) {
+          break;
+        }
+        if (!chunk.meshDirty) {
+          continue;
+        }
+        if (chunk.pendingMeshRevision === chunk.meshRevision) {
+          continue;
+        }
+        const input = createOpaqueChunkMeshingInput(
+          this.world,
+          chunk.coord.x,
+          chunk.coord.y,
+          chunk.coord.z,
+          { cloneData: true },
+        );
+        if (!input) {
+          continue;
+        }
+        if (!this.asyncChunkMeshing.requestChunk(input, chunk.meshRevision)) {
+          break;
+        }
+        chunk.pendingMeshRevision = chunk.meshRevision;
+        scheduledCount += 1;
+      }
+
+      const elapsedMs = performance.now() - startedAt;
+      this.lastMeshBuildSummary = {
+        meshCount,
+        newMeshCount,
+        remeshCount,
+        triangleCount,
+        elapsedMs,
+      };
+      this.meshMs = elapsedMs;
+      if (meshCount > 0) {
+        this.farFieldReadyMaskRevision += 1;
+      }
+      return;
+    }
     const meshSummary = rebuildDirtyMeshes(this.world, maxChunks, {
       priorityPosition: this.player.feetPosition,
     });
@@ -2003,6 +2129,7 @@ export class GameController {
         changed: residency.changed,
         complete: residency.complete,
         pendingChunks: residency.pendingChunks,
+        pendingMeshJobs: this.asyncChunkMeshing?.getPendingCount() ?? 0,
         dirtyResidentChunks: dirtyResidentMeshes.dirtyResidentChunks,
         dirtyMeshlessResidentChunks: dirtyResidentMeshes.dirtyMeshlessResidentChunks,
         dirtyRetainedMeshResidentChunks: dirtyResidentMeshes.dirtyRetainedMeshResidentChunks,
@@ -2247,6 +2374,25 @@ function formatInventoryMaterial(material: number | null): string {
     return "Empty";
   }
   return materialToHexColor(material);
+}
+
+function shouldSyncBuildUrgentChunk(
+  chunk: { coord: { x: number; y: number; z: number }; meshBuilt: boolean },
+  priorityChunkX: number,
+  priorityChunkY: number,
+  priorityChunkZ: number,
+): boolean {
+  if (chunk.meshBuilt) {
+    return false;
+  }
+  const planarDistance = Math.max(
+    Math.abs(chunk.coord.x - priorityChunkX),
+    Math.abs(chunk.coord.z - priorityChunkZ),
+  );
+  if (planarDistance > SYNC_NEAR_MESH_RADIUS_CHUNKS) {
+    return false;
+  }
+  return Math.abs(chunk.coord.y - priorityChunkY) <= 1;
 }
 
 function buildEyePositionForChunkCenter(
@@ -2577,6 +2723,7 @@ function summarizeRouteExperienceBenchmark(
     maxSettledReferenceClearToFilledRatio: maxValue(settledReferenceClearToFilledSamples),
     maxSettledReferenceClearToFilledRunRatio: maxValue(settledReferenceClearToFilledRunSamples),
     maxPendingChunks: maxValue(samples.map((sample) => sample.pendingChunks)),
+    maxPendingMeshJobs: maxValue(samples.map((sample) => sample.pendingMeshJobs)),
     maxDirtyResidentChunks: maxValue(samples.map((sample) => sample.dirtyResidentChunks)),
     maxDirtyMeshlessResidentChunks: maxValue(samples.map((sample) => sample.dirtyMeshlessResidentChunks)),
     maxDirtyRetainedMeshResidentChunks: maxValue(samples.map((sample) => sample.dirtyRetainedMeshResidentChunks)),

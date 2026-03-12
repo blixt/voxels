@@ -1493,3 +1493,52 @@
   - no server protocol
   - no hotbar UI beyond telemetry
   - the goal here was to make the core edit seam real and testable first
+
+## 2026-03-12 async detailed chunk meshing with near-field continuity
+
+- The next performance slice attacked the remaining movement-path bottleneck directly:
+  - detailed chunk meshing was still the dominant main-thread cost after async chunk generation
+  - the goal was to move the heavy opaque meshing work off the main thread without reintroducing visible holes
+- I added a worker-friendly opaque-mesh seam:
+  - pure opaque meshing now lives in `src/engine/opaque-chunk-mesher.ts`
+  - browser queue/worker glue is in:
+    - `src/engine/async-chunk-meshing.ts`
+    - `src/client/async-chunk-meshing.ts`
+    - `src/client/chunk-meshing-worker.ts`
+  - production/dev worker asset serving is now extended in:
+    - `scripts/build.ts`
+    - `src/server.ts`
+- The first raw async-meshing pass was another ghost win and is worth remembering:
+  - route frames dropped hard
+  - but `dirty meshless` chunks exploded and hole signals returned
+  - the missing idea was continuity, not raw throughput
+- The kept version is deliberately hybrid:
+  - dirty chunks keep their existing mesh instead of being blanked immediately
+  - the async worker builds the opaque mesh for the backlog
+  - the main thread keeps a small synchronous safety budget for nearby meshless chunks
+  - the near-transition far-field band is allowed to fall back all the way to the player again, so unready detailed columns are not forced to show a `6 m` empty moat
+- That combination is what actually worked:
+  - pure async meshing alone was too optimistic and failed the hole oracle
+  - wider sync-only safety helped but did not eliminate the holes
+  - reopening near-transition fallback to `0 m` is what restored continuity while keeping the async meshing win
+- The kept browser result is strong enough to keep:
+  - baseline route trace (`20260312T123504Z-post-gather-build`):
+    - avg gameplay frame `4.25 ms`
+    - p95 gameplay frame `17.9 ms`
+    - avg mesh `1.83 ms`
+    - p95 mesh `15.0 ms`
+    - hole signals `0`
+  - kept async-mesh route trace (`20260312T130547Z-async-mesh-worker-v6`):
+    - avg gameplay frame `3.29 ms`
+    - p95 gameplay frame `5.9 ms`
+    - avg mesh `0.78 ms`
+    - p95 mesh `3.1 ms`
+    - hole signals `0`
+- The tradeoff is visible too:
+  - `maxPendingChunks` rose from `981 -> 1073`
+  - the route trace now clearly shows worker/postMessage/GC cost as the next async-path pressure point
+  - command-line `cycle-bench` did not improve because it does not exercise the browser worker path, and the restored near-transition fallback slightly increases coarse-band work in the local non-browser profile
+- I also tightened the harness while I was here:
+  - route traces now record `maxPendingMeshJobs`
+  - `scripts/run-browser-route-trace.ts` now persists full per-frame benchmark samples to `benchmark-samples.json`
+  - that makes future spike investigation less dependent on re-running Chrome manually

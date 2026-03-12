@@ -2,18 +2,19 @@ import benchPage from "./pages/bench.html";
 import gamePage from "./pages/game.html";
 
 const PROCEDURAL_WORKER_ROUTE = "/assets/procedural-generation-worker.js";
-const DEVELOPMENT_WORKER_OUTDIR = `${process.cwd()}/.tmp/procedural-worker`;
-let devWorkerAssetPathPromise: Promise<string> | null = null;
+const CHUNK_MESHING_WORKER_ROUTE = "/assets/chunk-meshing-worker.js";
+const DEVELOPMENT_WORKER_OUTDIR = `${process.cwd()}/.tmp/worker-assets`;
+const devWorkerAssetPathPromises = new Map<string, Promise<string>>();
 
 function isDevelopmentMode(): boolean {
   const nodeEnvKey = "NODE_ENV";
   return process.env[nodeEnvKey] !== "production";
 }
 
-async function buildDevelopmentWorkerAsset(): Promise<string> {
+async function buildDevelopmentWorkerAsset(entrypoint: string, assetName: string): Promise<string> {
   const result = await Bun.build({
-    entrypoints: ["./src/client/procedural-generation-worker.ts"],
-    outdir: DEVELOPMENT_WORKER_OUTDIR,
+    entrypoints: [entrypoint],
+    outdir: `${DEVELOPMENT_WORKER_OUTDIR}/${assetName}`,
     target: "browser",
     format: "esm",
     splitting: false,
@@ -30,10 +31,14 @@ async function buildDevelopmentWorkerAsset(): Promise<string> {
   return outputPath;
 }
 
-async function serveProceduralWorker(): Promise<Response> {
+async function serveWorkerAsset(routePath: string, entrypoint: string, assetFileName: string): Promise<Response> {
   if (isDevelopmentMode()) {
-    devWorkerAssetPathPromise ??= buildDevelopmentWorkerAsset();
-    const filePath = await devWorkerAssetPathPromise;
+    let assetPathPromise = devWorkerAssetPathPromises.get(routePath);
+    if (!assetPathPromise) {
+      assetPathPromise = buildDevelopmentWorkerAsset(entrypoint, assetFileName);
+      devWorkerAssetPathPromises.set(routePath, assetPathPromise);
+    }
+    const filePath = await assetPathPromise;
     return new Response(Bun.file(filePath), {
       headers: {
         "Content-Type": "text/javascript; charset=utf-8",
@@ -41,7 +46,7 @@ async function serveProceduralWorker(): Promise<Response> {
       },
     });
   }
-  return new Response(Bun.file(new URL("./assets/procedural-generation-worker.js", import.meta.url)), {
+  return new Response(Bun.file(new URL(`./assets/${assetFileName}`, import.meta.url)), {
     headers: {
       "Content-Type": "text/javascript; charset=utf-8",
       "Cache-Control": "public, max-age=31536000, immutable",
@@ -60,7 +65,10 @@ const server = Bun.serve({
   routes: {
     "/": gamePage,
     "/bench": benchPage,
-    [PROCEDURAL_WORKER_ROUTE]: serveProceduralWorker,
+    [PROCEDURAL_WORKER_ROUTE]: () =>
+      serveWorkerAsset(PROCEDURAL_WORKER_ROUTE, "./src/client/procedural-generation-worker.ts", "procedural-generation-worker.js"),
+    [CHUNK_MESHING_WORKER_ROUTE]: () =>
+      serveWorkerAsset(CHUNK_MESHING_WORKER_ROUTE, "./src/client/chunk-meshing-worker.ts", "chunk-meshing-worker.js"),
     "/favicon.ico": () => new Response(null, { status: 204 }),
   },
   fetch() {

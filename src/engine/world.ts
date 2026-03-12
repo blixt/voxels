@@ -14,6 +14,8 @@ export interface VoxelChunk {
   } | null;
   meshBuilt: boolean;
   meshDirty: boolean;
+  meshRevision: number;
+  pendingMeshRevision: number | null;
   gpuDirty: boolean;
   mesh: import("./types.ts").ChunkMeshData | null;
 }
@@ -380,6 +382,8 @@ export class VoxelWorld implements ResidentChunkWorld {
       solidBounds: null,
       meshBuilt: false,
       meshDirty: true,
+      meshRevision: 1,
+      pendingMeshRevision: null,
       gpuDirty: true,
       mesh: null,
     };
@@ -389,8 +393,8 @@ export class VoxelWorld implements ResidentChunkWorld {
 
   private markChunkDirty(chunk: VoxelChunk): void {
     chunk.meshDirty = true;
-    chunk.gpuDirty = true;
-    chunk.mesh = null;
+    chunk.meshRevision += 1;
+    chunk.pendingMeshRevision = null;
   }
 
   private expandChunkSolidBounds(chunk: VoxelChunk, lx: number, ly: number, lz: number): void {

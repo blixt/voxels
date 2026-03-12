@@ -141,7 +141,7 @@ export interface FarFieldSurfaceGapProbe {
 const DEFAULT_BANDS: readonly FarFieldBandConfig[] = [
   {
     label: "near-transition",
-    innerRadius: metersToWorldUnits(6),
+    innerRadius: 0,
     outerRadius: metersToWorldUnits(48),
     sampleStride: metersToWorldUnits(0.4),
     anchorStride: metersToWorldUnits(25.6),
