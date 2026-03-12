@@ -2221,3 +2221,28 @@
 - Residual:
   - generator-side surface shaping is still hot, especially `sampleSurfaceY(...)` and nearby field math
   - chunk meshing worker cost is also now clearer again once the surface allocation noise is reduced
+
+## 2026-03-12 typed opaque-mesher staging
+
+- The next trace-driven target was not speculative anymore:
+  - the latest live-forward trace still showed the chunk-meshing worker as the dominant exclusive hotspot cluster
+  - but a quick reality check showed the expensive part was not worker input cloning
+  - on representative probes, cloning `createOpaqueChunkMeshingInput(..., { cloneData: true })` was tiny compared to `buildOpaqueChunkMeshFromInput(...)`
+- That changed the optimization direction:
+  - I did not chase another transfer-boundary cleanup first
+  - I targeted JS staging overhead inside the opaque mesher itself
+  - the hot path was still using a dynamic `number[]` quad list plus a `DataView`-driven vertex write pass
+- The kept rewrite stays narrow and removes no-longer-useful staging patterns:
+  - `opaque-chunk-mesher.ts` now keeps quads in reusable typed scratch storage instead of pushing JS numbers into a growable array
+  - the geometry pass now writes through `Float32Array` and `Uint32Array` views over the final vertex buffer instead of repeated `DataView.set*` calls
+  - I also removed a dead constant and a couple of pointless `?? 0` fallback branches in the in-bounds voxel readers
+- The acceptance signal is strongest in the mesher microbenches:
+  - dense synthetic opaque meshing moved from about `136.379 ms` to `125.902 ms` for the same 30-build workload
+  - a representative procedural chunk moved from about `138.637 ms` to `130.315 ms` for the same 200-build workload
+- The browser acceptance stayed on the right side too:
+  - the 10-second live forward-walk benchmark improved to about `1.265 ms` average gameplay frame with `0` hole-signal frames
+  - the matching live-forward Chrome trace came out around `1.360 ms` average gameplay frame, `3.6 ms` p95, and `0` hole-signal frames
+  - `avg_deltaTaskDurationMs` improved from about `3406.150 ms` to `3331.823 ms`
+- The trace still shows chunk meshing as a real hotspot, so this is not “finished,” but the slice is worth keeping:
+  - worker meshing got cheaper without reintroducing holes or changing rendered output
+  - the next likely wins are either a faster opaque meshing algorithm for dynamic chunks or more generator-side surface shaping work such as `sampleSurfaceY(...)`

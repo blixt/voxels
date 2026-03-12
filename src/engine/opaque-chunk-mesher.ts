@@ -1,13 +1,13 @@
 import type { ChunkBounds, ChunkCoordinate } from "./types.ts";
 
-const FLOAT32_BYTES = 4;
 const VERTEX_STRIDE = 20;
 const NORMAL_SCALE = 127;
 const QUAD_STRIDE = 11;
 const MAX_MESHER_SCRATCH_POOL = 2;
 
 interface MesherScratch {
-  quads: number[];
+  quads: Int32Array;
+  quadLength: number;
   mask: Int32Array;
 }
 
@@ -105,7 +105,6 @@ export function buildOpaqueChunkMeshFromInput(
     (input.solidBounds.max[0] - input.solidBounds.min[0]) * (input.solidBounds.max[2] - input.solidBounds.min[2]),
     (input.solidBounds.max[0] - input.solidBounds.min[0]) * (input.solidBounds.max[1] - input.solidBounds.min[1]),
   ));
-  const quads = scratch.quads;
   const mask = scratch.mask;
 
   for (let axis = 0; axis < 3; axis += 1) {
@@ -187,7 +186,8 @@ export function buildOpaqueChunkMeshFromInput(
             }
           }
 
-          quads.push(
+          appendQuad(
+            scratch,
             originX
               + (axis === 0 ? x[axis] + 1 : 0)
               + (u === 0 ? input.solidBounds.min[u] + column : 0)
@@ -223,7 +223,7 @@ export function buildOpaqueChunkMeshFromInput(
     }
   }
 
-  const geometry = buildMeshGeometryFromQuads(quads, materialLut);
+  const geometry = buildMeshGeometryFromQuads(scratch.quads, scratch.quadLength, materialLut);
   releaseMesherScratch(scratch);
   return geometry.bounds
     ? geometry
@@ -270,7 +270,7 @@ function sampleChunkVoxel(
   y: number,
   z: number,
 ): number {
-  return chunkData[x + y * chunkSize + z * chunkArea] ?? 0;
+  return chunkData[x + y * chunkSize + z * chunkArea]!;
 }
 
 function isChunkFullyOccluded(
@@ -356,28 +356,30 @@ function sampleNeighborVoxel(
   }
   if (axis === 0) {
     const localX = negative ? chunkSize - 1 : 0;
-    return data[localX + y * chunkSize + z * chunkArea] ?? 0;
+    return data[localX + y * chunkSize + z * chunkArea]!;
   }
   if (axis === 1) {
     const localY = negative ? chunkSize - 1 : 0;
-    return data[x + localY * chunkSize + z * chunkArea] ?? 0;
+    return data[x + localY * chunkSize + z * chunkArea]!;
   }
   const localZ = negative ? chunkSize - 1 : 0;
-  return data[x + y * chunkSize + localZ * chunkArea] ?? 0;
+  return data[x + y * chunkSize + localZ * chunkArea]!;
 }
 
 function buildMeshGeometryFromQuads(
-  quads: readonly number[],
+  quads: Int32Array,
+  quadLength: number,
   materialLut: MeshMaterialLut,
 ): OpaqueChunkMeshGeometry {
-  const quadCount = quads.length / QUAD_STRIDE;
+  const quadCount = quadLength / QUAD_STRIDE;
   const vertexCount = quadCount * 4;
   const indexCount = quadCount * 6;
   const vertexData = new ArrayBuffer(vertexCount * VERTEX_STRIDE);
-  const vertexView = new DataView(vertexData);
+  const vertexFloatView = new Float32Array(vertexData);
+  const vertexUintView = new Uint32Array(vertexData);
   const indexData = new Uint32Array(indexCount);
 
-  let vertexOffset = 0;
+  let vertexWordOffset = 0;
   let indexOffset = 0;
   let baseVertex = 0;
   let minX = Infinity;
@@ -387,7 +389,7 @@ function buildMeshGeometryFromQuads(
   let maxY = -Infinity;
   let maxZ = -Infinity;
 
-  for (let quadIndex = 0; quadIndex < quads.length; quadIndex += QUAD_STRIDE) {
+  for (let quadIndex = 0; quadIndex < quadLength; quadIndex += QUAD_STRIDE) {
     const positionX = quads[quadIndex]!;
     const positionY = quads[quadIndex + 1]!;
     const positionZ = quads[quadIndex + 2]!;
@@ -401,10 +403,11 @@ function buildMeshGeometryFromQuads(
     const face = quads[quadIndex + 10]!;
     const normal = face > 0 ? 1 : -1;
     const material = normal === 1 ? face : -face;
-    const color = materialLut.colors[material] ?? 0;
+    const color = materialLut.colors[material]!;
     const normalX = axis === 0 ? normal : 0;
     const normalY = axis === 1 ? normal : 0;
     const normalZ = axis === 2 ? normal : 0;
+    const packedNormal = packVertexNormal(normalX, normalY, normalZ);
 
     const corner0X = positionX;
     const corner0Y = positionY;
@@ -426,14 +429,14 @@ function buildMeshGeometryFromQuads(
     maxY = Math.max(maxY, corner0Y, corner1Y, corner2Y, corner3Y);
     maxZ = Math.max(maxZ, corner0Z, corner1Z, corner2Z, corner3Z);
 
-    writeVertex(vertexView, vertexOffset, corner0X, corner0Y, corner0Z, normalX, normalY, normalZ, color);
-    vertexOffset += VERTEX_STRIDE;
-    writeVertex(vertexView, vertexOffset, corner1X, corner1Y, corner1Z, normalX, normalY, normalZ, color);
-    vertexOffset += VERTEX_STRIDE;
-    writeVertex(vertexView, vertexOffset, corner2X, corner2Y, corner2Z, normalX, normalY, normalZ, color);
-    vertexOffset += VERTEX_STRIDE;
-    writeVertex(vertexView, vertexOffset, corner3X, corner3Y, corner3Z, normalX, normalY, normalZ, color);
-    vertexOffset += VERTEX_STRIDE;
+    writeVertex(vertexFloatView, vertexUintView, vertexWordOffset, corner0X, corner0Y, corner0Z, packedNormal, color);
+    vertexWordOffset += 5;
+    writeVertex(vertexFloatView, vertexUintView, vertexWordOffset, corner1X, corner1Y, corner1Z, packedNormal, color);
+    vertexWordOffset += 5;
+    writeVertex(vertexFloatView, vertexUintView, vertexWordOffset, corner2X, corner2Y, corner2Z, packedNormal, color);
+    vertexWordOffset += 5;
+    writeVertex(vertexFloatView, vertexUintView, vertexWordOffset, corner3X, corner3Y, corner3Z, packedNormal, color);
+    vertexWordOffset += 5;
 
     indexData[indexOffset + 0] = baseVertex;
     indexData[indexOffset + 1] = baseVertex + 1;
@@ -461,32 +464,71 @@ function buildMeshGeometryFromQuads(
 }
 
 function writeVertex(
-  view: DataView,
-  byteOffset: number,
+  floatView: Float32Array,
+  uintView: Uint32Array,
+  wordOffset: number,
   x: number,
   y: number,
   z: number,
-  normalX: number,
-  normalY: number,
-  normalZ: number,
+  packedNormal: number,
   color: number,
 ): void {
-  view.setFloat32(byteOffset + 0 * FLOAT32_BYTES, x, true);
-  view.setFloat32(byteOffset + 1 * FLOAT32_BYTES, y, true);
-  view.setFloat32(byteOffset + 2 * FLOAT32_BYTES, z, true);
-  view.setInt8(byteOffset + 12, normalX * NORMAL_SCALE);
-  view.setInt8(byteOffset + 13, normalY * NORMAL_SCALE);
-  view.setInt8(byteOffset + 14, normalZ * NORMAL_SCALE);
-  view.setInt8(byteOffset + 15, NORMAL_SCALE);
-  view.setUint32(byteOffset + 16, color, true);
+  floatView[wordOffset] = x;
+  floatView[wordOffset + 1] = y;
+  floatView[wordOffset + 2] = z;
+  uintView[wordOffset + 3] = packedNormal;
+  uintView[wordOffset + 4] = color;
+}
+
+function packVertexNormal(normalX: number, normalY: number, normalZ: number): number {
+  const packedX = (normalX * NORMAL_SCALE) & 0xff;
+  const packedY = (normalY * NORMAL_SCALE) & 0xff;
+  const packedZ = (normalZ * NORMAL_SCALE) & 0xff;
+  return (packedX | (packedY << 8) | (packedZ << 16) | (NORMAL_SCALE << 24)) >>> 0;
+}
+
+function appendQuad(
+  scratch: MesherScratch,
+  positionX: number,
+  positionY: number,
+  positionZ: number,
+  duX: number,
+  duY: number,
+  duZ: number,
+  dvX: number,
+  dvY: number,
+  dvZ: number,
+  axis: number,
+  face: number,
+): void {
+  const nextQuadLength = scratch.quadLength + QUAD_STRIDE;
+  if (nextQuadLength > scratch.quads.length) {
+    const grownQuads = new Int32Array(Math.max(nextQuadLength, scratch.quads.length * 2, QUAD_STRIDE * 64));
+    grownQuads.set(scratch.quads.subarray(0, scratch.quadLength));
+    scratch.quads = grownQuads;
+  }
+  const offset = scratch.quadLength;
+  scratch.quads[offset] = positionX;
+  scratch.quads[offset + 1] = positionY;
+  scratch.quads[offset + 2] = positionZ;
+  scratch.quads[offset + 3] = duX;
+  scratch.quads[offset + 4] = duY;
+  scratch.quads[offset + 5] = duZ;
+  scratch.quads[offset + 6] = dvX;
+  scratch.quads[offset + 7] = dvY;
+  scratch.quads[offset + 8] = dvZ;
+  scratch.quads[offset + 9] = axis;
+  scratch.quads[offset + 10] = face;
+  scratch.quadLength = nextQuadLength;
 }
 
 function acquireMesherScratch(requiredMaskLength: number): MesherScratch {
   const scratch = mesherScratchPool.pop() ?? {
-    quads: [],
+    quads: new Int32Array(QUAD_STRIDE * 64),
+    quadLength: 0,
     mask: new Int32Array(requiredMaskLength),
   };
-  scratch.quads.length = 0;
+  scratch.quadLength = 0;
   if (scratch.mask.length < requiredMaskLength) {
     scratch.mask = new Int32Array(requiredMaskLength);
   }
@@ -494,7 +536,7 @@ function acquireMesherScratch(requiredMaskLength: number): MesherScratch {
 }
 
 function releaseMesherScratch(scratch: MesherScratch): void {
-  scratch.quads.length = 0;
+  scratch.quadLength = 0;
   if (mesherScratchPool.length >= MAX_MESHER_SCRATCH_POOL) {
     return;
   }

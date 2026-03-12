@@ -4447,3 +4447,81 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - It removes real generator-side allocation churn and improves the steady-state live-forward trace without regressing holes.
 - The next likely generator target is surface shaping math such as `sampleSurfaceY(...)`, while the next broader engine target is chunk-meshing worker cost.
+
+## 2026-03-12 typed opaque-mesher staging
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/opaque-chunk-mesher.test.ts tests/mesher.test.ts`
+- `mise exec -- bun -e 'import { VoxelWorld } from "./src/engine/world.ts"; ...'`
+- `mise exec -- bun -e 'import { ProceduralWorldGenerator } from "./src/engine/procedural-generator.ts"; ...'`
+- `mise run build`
+- `mise run bench-browser-game -- --label=typed-opaque-mesher --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=1 --walk-duration=10 --walk-settle=4 --walk-sample-hz=60`
+- `mise run trace-route -- --benchmark=live-forward --label=typed-opaque-mesher-trace --duration=10 --settle=4 --sample-hz=60`
+
+#### Numeric probes
+
+- Focused verification:
+  - `12` pass
+  - `0` fail
+- Dense opaque mesher microbench before the kept slice:
+  - `inputMs = 1.077`
+  - `meshMs = 136.379`
+  - `vertexCount = 118176`
+  - `triangleCount = 59088`
+- Dense opaque mesher microbench after the kept slice:
+  - `inputMs = 1.241`
+  - `meshMs = 125.902`
+  - `vertexCount = 118176`
+  - `triangleCount = 59088`
+- Procedural opaque mesher microbench before the kept slice:
+  - coord `{ x: 6, y: 44, z: 4 }`
+  - `inputMs = 5.123`
+  - `meshMs = 138.637`
+  - `vertexCount = 3480`
+  - `triangleCount = 1740`
+- Procedural opaque mesher microbench after the kept slice:
+  - coord `{ x: 6, y: 44, z: 4 }`
+  - `inputMs = 6.001`
+  - `meshMs = 130.315`
+  - `vertexCount = 3480`
+  - `triangleCount = 1740`
+- Walk benchmark output:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-W13JDs/report.json`
+  - benchmark elapsed `14133.756 ms`
+  - avg gameplay frame `1.265 ms`
+  - p95 gameplay frame `3.4 ms`
+  - max gameplay frame `9.2 ms`
+  - hole-signal frames `0`
+  - peak JS heap used `15012596 bytes`
+  - `avg_deltaTaskDurationMs = 3331.823`
+- Previous comparable walk benchmark:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-b3Wyh8/report.json`
+  - avg gameplay frame `1.290 ms`
+  - p95 gameplay frame `3.4 ms`
+  - max gameplay frame `10.2 ms`
+  - hole-signal frames `0`
+  - `avg_deltaTaskDurationMs = 3406.150`
+- Live-forward Chrome trace:
+  - report: `artifacts/browser-route-trace/20260312T231145Z-typed-opaque-mesher-trace/report.json`
+  - avg gameplay frame `1.3598809529982863 ms`
+  - p95 gameplay frame `3.600000023841858 ms`
+  - max gameplay frame `15.5 ms`
+  - avg mesh `0.3871428574834551 ms`
+  - max mesh `13.800000011920929 ms`
+  - hole-signal frames `0`
+- Previous comparable live-forward trace:
+  - report: `artifacts/browser-route-trace/20260312T230103Z-surface-selection-scratch-trace/report.json`
+  - avg gameplay frame `1.3735556879023698 ms`
+  - p95 gameplay frame `3.599999964237213 ms`
+  - max gameplay frame `14.5 ms`
+  - avg mesh `0.3901727216594485 ms`
+  - max mesh `12.900000035762787 ms`
+  - hole-signal frames `0`
+
+#### Residual
+
+- This slice is worth keeping.
+- The mesher microbenches improved materially, and the real 10-second walk benchmark improved without visual regressions.
+- The chunk-meshing worker is still a first-order hotspot in the trace, so the next meshing step likely needs a more structural algorithm/data-flow change than another tiny staging tweak.
