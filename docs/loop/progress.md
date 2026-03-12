@@ -2,6 +2,21 @@
 
 ## 2026-03-12
 
+- Added a true per-column far-summary index derived from actual generated chunk summaries instead of scanning all known chunk slabs every time the far renderer samples one `x/z` column:
+  - added `src/engine/generated-render-column-summary.ts`
+  - `ProceduralResidentWorld.sampleFarFieldColumn()` now reads an aggregated column summary in O(1)
+  - the far-summary prefetch path now reuses known non-empty chunk-slab bounds from the column summary before falling back to any estimate
+- Removed dead code that became obsolete after the column-summary refactor:
+  - deleted the old `sampleGeneratedChunkRenderSurface()` helper because the runtime no longer samples per-chunk surface summaries directly
+- Added focused regression coverage for the new aggregation seam:
+  - `tests/generated-render-column-summary.test.ts` verifies top-of-column aggregation across chunk slabs
+  - the same test also locks the distinction between known chunk-Y range and non-empty chunk-Y range
+- Verified the new seam against a fresh route trace:
+  - the new `column-summary-smoke` route run stayed hole-free
+  - average gameplay frame moved to about `5.79 ms`, `p95` to about `12.3 ms`, and the far-field work bucket stayed at `0 ms` for the short smoke route
+  - the trace makes the remaining architectural leak explicit: `prefetchFarFieldSummariesAround()` is still paying for generator-based Y-range estimation when a column has no summary yet
+- The next step is therefore not another cache layer on top of the current leak; it is to remove generator-based far-summary discovery and replace it with summary-frontier discovery from actual chunk data.
+
 - Fixed the exploration journal so underground families are no longer discovered just by walking above them on the surface:
   - added `src/engine/underground-discovery.ts`
   - underground discovery now requires a candidate underground biome, the eye to be meaningfully below the local surface, and actual overhead collision material within a short vertical scan

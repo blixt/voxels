@@ -1,5 +1,13 @@
 # Renderer Hypotheses
 
+## 2026-03-12 far-column summary search
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| Reconstructing a far-rendered `x/z` column by scanning every known chunk summary slab in that column is still cheap enough, so a dedicated aggregated column summary would just be extra state | Add a derived `GeneratedRenderColumnSummary`, switch `sampleFarFieldColumn()` to it, and compare the route trace plus far-column behavior against the pre-change path | Rejected. The dedicated column summary is simpler at the call site, makes far-column sampling O(1), and the short route smoke stayed clean | Rejected |
+| A single aggregated column summary should track both “known vertical extent” and “non-empty vertical extent” so the far-prefetcher can distinguish empty-known slabs from unknown slabs | Build a pure helper, feed it mixed empty and non-empty chunk summaries, and lock the result in tests | Confirmed. The helper now tracks `min/maxKnownCy` and `min/maxNonEmptyCy`, and the regression test covers the distinction directly | Confirmed |
+| Once the runtime has a per-column summary, generator-driven Y-range probing is no longer a meaningful architectural leak | Re-run a fresh route trace and inspect whether the old generator-backed far-summary range path still appears in the trace | Rejected. The new column summary helps once a column exists, but the trace still shows `computeFarFieldSummaryChunkYRange()` doing generator-backed work for unseen columns | Rejected |
+
 ## 2026-03-12 underground discovery and cave-opening search
 
 | Hypothesis | Tiny verification case | Result | Status |

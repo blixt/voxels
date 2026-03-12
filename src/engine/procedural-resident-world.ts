@@ -8,12 +8,15 @@ import {
 import type { FarFieldColumnSample, FarFieldSource } from "./far-field-source.ts";
 import type { FarFieldExclusionMask } from "./procedural-far-field.ts";
 import {
-  NO_GENERATED_SURFACE_HEIGHT,
   NO_GENERATED_WATER_HEIGHT,
-  sampleGeneratedChunkRenderSurface,
   summarizeGeneratedChunkRender,
   type GeneratedChunkRenderSummary,
 } from "./generated-chunk-render-summary.ts";
+import {
+  sampleGeneratedRenderColumnSummary,
+  summarizeGeneratedRenderColumn,
+  type GeneratedRenderColumnSummary,
+} from "./generated-render-column-summary.ts";
 import { metersToWorldUnits } from "./scale.ts";
 import type { MutableResidentChunkWorld, VoxelChunk } from "./world.ts";
 
@@ -92,6 +95,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   private readonly residentColumnCounts = new Map<string, number>();
   private readonly generatedRenderSummaries = new Map<string, GeneratedChunkRenderSummary>();
   private readonly generatedRenderChunkKeysByColumn = new Map<string, Set<string>>();
+  private readonly generatedRenderColumnSummaries = new Map<string, GeneratedRenderColumnSummary>();
   private readonly asyncChunkGeneration: AsyncChunkGenerationQueue | null;
   private residentColumnRevision = 0;
   private lastAnchorSignature = "";
@@ -228,37 +232,20 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     const voxelZ = Math.floor(worldZ);
     const cx = Math.floor(voxelX / this.chunkSize);
     const cz = Math.floor(voxelZ / this.chunkSize);
-    const columnChunkKeys = this.generatedRenderChunkKeysByColumn.get(toColumnKey(cx, cz));
-    if (!columnChunkKeys || columnChunkKeys.size === 0) {
+    const columnSummary = this.generatedRenderColumnSummaries.get(toColumnKey(cx, cz));
+    if (!columnSummary) {
       return null;
     }
     const localX = voxelX - cx * this.chunkSize;
     const localZ = voxelZ - cz * this.chunkSize;
-    let surfaceY = NO_GENERATED_SURFACE_HEIGHT;
-    let surfaceMaterial = 0;
-    let waterTopY = NO_GENERATED_WATER_HEIGHT;
-    let waterMaterial = 0;
-    for (const chunkKey of columnChunkKeys) {
-      const summary = this.generatedRenderSummaries.get(chunkKey);
-      if (!summary) {
-        continue;
-      }
-      const sampled = sampleGeneratedChunkRenderSurface(summary, localX, localZ, this.chunkSize);
-      if (!sampled) {
-        continue;
-      }
-      if (sampled.surfaceY > surfaceY) {
-        surfaceY = sampled.surfaceY;
-        surfaceMaterial = sampled.surfaceMaterial;
-      }
-      if (sampled.waterTopY !== null && sampled.waterTopY > waterTopY) {
-        waterTopY = sampled.waterTopY;
-        waterMaterial = sampled.waterMaterial ?? 0;
-      }
-    }
-    if (surfaceY === NO_GENERATED_SURFACE_HEIGHT) {
+    const sampled = sampleGeneratedRenderColumnSummary(columnSummary, localX, localZ, this.chunkSize);
+    if (!sampled) {
       return null;
     }
+    let waterTopY = sampled.waterTopY ?? NO_GENERATED_WATER_HEIGHT;
+    let waterMaterial = sampled.waterMaterial ?? 0;
+    const surfaceY = sampled.surfaceY;
+    const surfaceMaterial = sampled.surfaceMaterial;
     if (waterTopY <= surfaceY) {
       waterTopY = NO_GENERATED_WATER_HEIGHT;
       waterMaterial = 0;
@@ -748,7 +735,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
       }
       const cx = centerChunkX + dx;
       const cz = centerChunkZ + dz;
-      const [minCy, maxCy] = this.computeFarFieldSurfaceChunkYRange(cx, cz);
+      const [minCy, maxCy] = this.computeFarFieldSummaryChunkYRange(cx, cz);
       for (const cy of prioritizeFarFieldSurfaceChunkYRange(minCy, maxCy)) {
         if (requestedChunks >= maxGenerateChunks) {
           break;
@@ -806,7 +793,11 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     ];
   }
 
-  private computeFarFieldSurfaceChunkYRange(cx: number, cz: number): [number, number] {
+  private computeFarFieldSummaryChunkYRange(cx: number, cz: number): [number, number] {
+    const existingSummary = this.generatedRenderColumnSummaries.get(toColumnKey(cx, cz));
+    if (existingSummary && existingSummary.minNonEmptyCy !== null && existingSummary.maxNonEmptyCy !== null) {
+      return [existingSummary.minNonEmptyCy, existingSummary.maxNonEmptyCy];
+    }
     const chunkOriginX = cx * this.chunkSize;
     const chunkOriginZ = cz * this.chunkSize;
     let minSupportCy = Number.POSITIVE_INFINITY;
@@ -916,6 +907,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     const chunkKeys = this.generatedRenderChunkKeysByColumn.get(columnKey) ?? new Set<string>();
     chunkKeys.add(key);
     this.generatedRenderChunkKeysByColumn.set(columnKey, chunkKeys);
+    this.rebuildColumnRenderSummary(summary.coord.x, summary.coord.z);
   }
 
   private recordResidentChunkRenderSummary(chunk: VoxelChunk): void {
@@ -937,6 +929,28 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
         isProceduralWaterMaterial,
       ),
     });
+  }
+
+  private rebuildColumnRenderSummary(cx: number, cz: number): void {
+    const columnKey = toColumnKey(cx, cz);
+    const chunkKeys = this.generatedRenderChunkKeysByColumn.get(columnKey);
+    if (!chunkKeys || chunkKeys.size === 0) {
+      this.generatedRenderColumnSummaries.delete(columnKey);
+      return;
+    }
+    const summaries: GeneratedChunkRenderSummary[] = [];
+    for (const chunkKey of chunkKeys) {
+      const summary = this.generatedRenderSummaries.get(chunkKey);
+      if (summary) {
+        summaries.push(summary);
+      }
+    }
+    const columnSummary = summarizeGeneratedRenderColumn(cx, cz, summaries, this.chunkSize);
+    if (!columnSummary) {
+      this.generatedRenderColumnSummaries.delete(columnKey);
+      return;
+    }
+    this.generatedRenderColumnSummaries.set(columnKey, columnSummary);
   }
 }
 

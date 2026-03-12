@@ -183,29 +183,6 @@ export function summarizeGeneratedChunkRender(
   };
 }
 
-export function sampleGeneratedChunkRenderSurface(
-  summary: GeneratedChunkRenderSummary,
-  localX: number,
-  localZ: number,
-  chunkSize: number,
-): GeneratedRenderColumnSample | null {
-  if (summary.coveredColumnCount === 0) {
-    return null;
-  }
-  const columnIndex = localX + localZ * chunkSize;
-  const sampledSurfaceY = summary.surfaceY[columnIndex] ?? NO_GENERATED_SURFACE_HEIGHT;
-  const sampledWaterTopY = summary.waterTopY[columnIndex] ?? NO_GENERATED_WATER_HEIGHT;
-  if (sampledSurfaceY === NO_GENERATED_SURFACE_HEIGHT) {
-    return null;
-  }
-  return {
-    surfaceY: sampledSurfaceY,
-    surfaceMaterial: summary.surfaceMaterial[columnIndex] ?? 0,
-    waterTopY: sampledWaterTopY === NO_GENERATED_WATER_HEIGHT ? null : sampledWaterTopY,
-    waterMaterial: sampledWaterTopY === NO_GENERATED_WATER_HEIGHT ? null : (summary.waterMaterial[columnIndex] ?? 0),
-  };
-}
-
 export function getGeneratedChunkRenderCellState(
   summary: GeneratedChunkRenderSummary,
   cellX: number,

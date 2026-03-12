@@ -4,6 +4,38 @@
 
 ### Commands
 
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/generated-render-column-summary.test.ts tests/procedural-resident-world.test.ts tests/generated-chunk-codec.test.ts`
+- `mise run build`
+- `mise run trace-route -- --label=column-summary-smoke --duration=1 --settle=1 --sample-hz=20`
+
+### Automated checks
+
+- `tsc --noEmit`: passing.
+- Focused column-summary / resident-world / codec tests: passing.
+- Production build: passing.
+
+### Route trace
+
+- `artifacts/browser-route-trace/20260312T171236Z-column-summary-smoke/report.json`
+- Summary:
+  - avg gameplay frame: `5.79 ms`
+  - `p95` gameplay frame: `12.3 ms`
+  - max gameplay frame: `36.0 ms`
+  - avg stream: `2.54 ms`
+  - avg mesh: `3.05 ms`
+  - avg far field: `0.00 ms`
+  - hole-signal frames: `0`
+- Trace hotspot note:
+  - the route stayed clean, but the trace still shows `prefetchFarFieldSummariesAround()` and `computeFarFieldSummaryChunkYRange()` as real runtime work when a column summary does not already exist
+
+### Notes
+
+- The column-summary seam is worth keeping because it removes repeated per-column scans over all known summary slabs and gives the world an explicit `x/z`-column render-summary object.
+- The route trace also exposed the next required cleanup: far-summary discovery still falls back to procedural Y-range probing when a column has not yet been summarized.
+
+### Commands
+
 - `mise exec -- bun test tests/underground-discovery.test.ts tests/exploration-journal.test.ts tests/procedural-generator.test.ts`
 - `mise exec -- bun run typecheck`
 - `mise run build`
