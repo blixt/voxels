@@ -246,13 +246,12 @@ export class ProceduralFarField {
     let meshBuildMs = 0;
     const bandBuilds: FarFieldBandBuildSummary[] = [];
     const maxAffectedRadiusWorldUnits = exclusionMask?.maxAffectedRadiusWorldUnits ?? Number.POSITIVE_INFINITY;
-    const centerStride = Math.min(...this.bandConfigs.map((config) => config.centerStride ?? config.sampleStride));
-
     for (let bandIndex = 0; bandIndex < this.bands.length; bandIndex += 1) {
       const band = this.bands[bandIndex]!;
       const config = this.bandConfigs[bandIndex]!;
       const anchorX = snapToStride(Math.floor(position[0]), config.anchorStride);
       const anchorZ = snapToStride(Math.floor(position[2]), config.anchorStride);
+      const centerStride = config.centerStride ?? config.sampleStride;
       const centerX = snapToNearestStride(position[0], centerStride);
       const centerZ = snapToNearestStride(position[2], centerStride);
       const effectiveInnerRadius = Math.max(config.innerRadius, clearRadiusWorldUnits);

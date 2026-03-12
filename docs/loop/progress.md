@@ -1575,3 +1575,14 @@
 - I also made the state durable:
   - collapsed/open state is stored in local storage
   - the default remains collapsed if no preference has been written yet
+
+## 2026-03-12 far-field metric meaning and band recenter bug
+
+- The player report about `Far` jumping from `~10 ms` to `~0 ms` after moving `1 m` was partly expected and partly a bug.
+- Expected part:
+  - the compact `Far` number is rebuild cost, not steady-state far rendering cost
+  - when no far band rebuild happens, it should drop near zero
+- Real bug:
+  - `ProceduralFarField.updateAround(...)` was recentering every band using the smallest center stride in the whole stack
+  - that meant distant bands could rebuild far more often than intended, which made the metric more position-sensitive than the band config claimed
+- I fixed that by recentering each band on its own configured `centerStride`, and I renamed the compact label to `Far Build` so the HUD stops implying this is some constant background render tax.

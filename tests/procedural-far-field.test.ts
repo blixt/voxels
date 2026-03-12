@@ -208,6 +208,22 @@ test("procedural far field can defer excess band rebuilds behind a per-frame bud
   expect(settled.pendingBands).toBe(0);
 });
 
+test("procedural far field only recenters bands when crossing their own center stride", () => {
+  const farField = new ProceduralFarField(new ProceduralWorldGenerator(1337), [
+    { label: "near", innerRadius: 0, outerRadius: 64, sampleStride: 8, anchorStride: 128, centerStride: 32 },
+    { label: "mid", innerRadius: 64, outerRadius: 128, sampleStride: 16, anchorStride: 128, centerStride: 64 },
+  ]);
+
+  farField.updateAround([0, 0, 0]);
+  const summary = farField.updateAround([20, 0, 0]);
+
+  expect(summary.changed).toBe(true);
+  expect(summary.builtBands).toBe(1);
+  expect(summary.pendingBands).toBe(0);
+  expect(farField.getRenderables()[0]!.centerX).toBe(32);
+  expect(farField.getRenderables()[1]!.centerX).toBe(0);
+});
+
 test("procedural far field keeps a seam wall against lower masked neighbors", () => {
   const farField = new ProceduralFarField(
     createTestGenerator((worldX, worldZ) => (worldX < 8 && worldZ < 8 ? 8 : 1)),

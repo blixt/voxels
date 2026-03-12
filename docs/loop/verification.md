@@ -3325,3 +3325,20 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - This slice is worth keeping.
 - The compact chart is intentionally simple and draw-call-cheap; if later we need deeper spike inspection in-game, that should probably live in a dedicated diagnostics route instead of bloating this always-on summary.
+
+## 2026-03-12 far-field metric meaning and band recenter bug
+
+#### Commands
+
+- `mise exec -- bun test tests/procedural-far-field.test.ts`
+- `mise exec -- bun run typecheck`
+- `mise run build`
+
+#### Added verification coverage
+
+- `tests/procedural-far-field.test.ts` now verifies that bands only recenter when crossing their own configured `centerStride`.
+
+#### Residual
+
+- This slice is worth keeping.
+- The `Far Build` metric is still a last-update cost, not a rolling average. That is now labeled more honestly, but if we later want a smoother player-facing perf readout, we should add an averaged companion instead of overloading this one.

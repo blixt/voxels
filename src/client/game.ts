@@ -95,7 +95,7 @@ const ACHIEVEMENT_VISIBLE_MS = 3400;
 const ACHIEVEMENT_EXIT_MS = 320;
 const TELEMETRY_HISTORY_LIMIT = 64;
 const TELEMETRY_STORAGE_KEY = "voxels.telemetry.collapsed";
-const TELEMETRY_SUMMARY_LABELS = ["FPS", "Frame", "Stream", "Mesh", "Far", "Render"] as const;
+const TELEMETRY_SUMMARY_LABELS = ["FPS", "Frame", "Stream", "Mesh", "Far Build", "Render"] as const;
 
 const TELEMETRY_LABELS = [
   "Position",
