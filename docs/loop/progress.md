@@ -1285,10 +1285,48 @@
   - Transvoxel as the serious multiresolution seam reference if ad hoc LOD stitching keeps failing
   - open-world exploration references that reinforce measurable discovery loops over vague "more content" goals
 - The first committed cycle queue is now:
-  - feature: exploration/discovery tracking
   - perf/harness: automated browser route + trace run
   - feature: denser canopy / below-ground biome identity
   - perf/harness: lower-main-thread streaming experiment
   - feature: gather/build loop
   - perf/harness: stronger LOD experiment
+  - feature: biome-aware points of interest and cave setpieces
   - refresh
+
+### Exploration journal feature slice
+
+- I implemented the first real exploration-loop mechanic instead of only adding more scenery.
+- New pure gameplay seam:
+  - `src/engine/exploration-journal.ts`
+  - tracks discovered biome ids
+  - discovered underground biome ids
+  - discovered regional variants
+  - discovered landmark families
+  - recent discoveries and current local context
+- I kept the journal itself pure and testable instead of mixing the bookkeeping directly into `GameController`.
+- Runtime integration landed in the game path:
+  - `GameController` now samples the current biome context on a throttled cadence
+  - nearby landmark discovery uses a small local search pattern instead of only checking the exact feet position
+  - `/` HUD now shows:
+    - current biome
+    - current underground biome
+    - current regional variant
+    - current landmark
+    - compact discovery counts
+    - last discovery label
+  - game automation now exposes:
+    - `getDiscoveryJournal()`
+    - `resetDiscoveryJournal()`
+- I deliberately did not make this system depend on a browser-only integration test first.
+  - the journal logic is now unit-testable in isolation
+  - the runtime seam is small enough that typecheck + build + cycle-bench are a good first acceptance gate
+- The one extra numeric probe I kept for this slice is a deterministic pseudo-walk across the fixed seed:
+  - over a `400 m` serpentine path the journal discovers:
+    - `4` biome families
+    - `3` underground biome families
+    - `2` regional variants
+    - `7` landmark families
+  - the last sampled discovery on that path was `Variant: savanna_flowersea`
+- I also used the new loop discipline for this slice instead of only talking about it:
+  - after the focused tests passed, I ran `mise run cycle-bench`
+  - the standard battery stayed effectively flat, so the discovery layer is worth keeping

@@ -1,5 +1,6 @@
 import { GameController, type GameHudSnapshot } from "./game-controller.ts";
 import { worldUnitsToMeters } from "../engine/scale.ts";
+import type { ExplorationJournalSnapshot } from "../engine/exploration-journal.ts";
 
 declare global {
   interface Window {
@@ -51,6 +52,8 @@ declare global {
       ): ReturnType<GameController["probeVisibleGroundCoverage"]>;
       probeNearFarSeamGaps(): ReturnType<GameController["probeNearFarSeamGaps"]>;
       probeFarFieldSurfaceGaps(): ReturnType<GameController["probeFarFieldSurfaceGaps"]>;
+      getDiscoveryJournal(): ExplorationJournalSnapshot;
+      resetDiscoveryJournal(): ExplorationJournalSnapshot;
     };
   }
 }
@@ -88,6 +91,12 @@ const TELEMETRY_LABELS = [
   "Pending",
   "Empty Skipped",
   "Empty Cache Hits",
+  "Biome",
+  "Underground",
+  "Variant",
+  "Landmark",
+  "Discoveries",
+  "Last Discovery",
   "Gen Budget",
   "Mesh Budget",
   "Far Budget",
@@ -176,6 +185,8 @@ function mountGame(): GameRuntime {
       controller.probeVisibleGroundCoverage(sampleForwardMeters, sampleLateralMeters, sampleStepMeters),
     probeNearFarSeamGaps: () => controller.probeNearFarSeamGaps(),
     probeFarFieldSurfaceGaps: () => controller.probeFarFieldSurfaceGaps(),
+    getDiscoveryJournal: () => controller.getDiscoveryJournalSnapshot(),
+    resetDiscoveryJournal: () => controller.resetDiscoveryJournal(),
   };
 
   const ready = controller.init();
@@ -245,6 +256,12 @@ function buildTelemetryValues(snapshot: GameHudSnapshot): string[] {
     snapshot.streamPendingChunks.toLocaleString(),
     snapshot.streamEmptyChunksSkipped.toLocaleString(),
     snapshot.streamCachedEmptyChunkHits.toLocaleString(),
+    snapshot.biomeId ?? "Unknown",
+    snapshot.undergroundBiomeId ?? "Unknown",
+    snapshot.regionalVariantId ?? "None",
+    snapshot.landmarkId ?? "None",
+    `B ${snapshot.discoveredBiomeCount} / U ${snapshot.discoveredUndergroundBiomeCount} / V ${snapshot.discoveredRegionalVariantCount} / L ${snapshot.discoveredLandmarkCount}`,
+    snapshot.lastDiscoveryLabel,
     snapshot.maxGeneratedChunksPerUpdate.toLocaleString(),
     snapshot.maxMeshRebuildsPerFrame.toLocaleString(),
     snapshot.maxFarFieldBandRebuildsPerFrame.toLocaleString(),

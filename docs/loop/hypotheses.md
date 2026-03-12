@@ -354,3 +354,12 @@
 | The settled-anchor LOD coverage test failure was a real engine regression | Re-run the focused file and inspect the failure mode before changing runtime code | Rejected. The failure was the default `5 s` suite timeout, not a new coverage bug, so I fixed the test contract instead of touching runtime code | Rejected |
 | The far-field water preservation regression should still inspect the opaque mesh only | Compare the failing expectation to the current far-field mesh format after the separate water-mesh split | Rejected. The test had become stale after water moved into its own blended mesh and depth tint path | Rejected |
 | Updating the water-preservation regression to read the water mesh and tinted water color will better match the actual renderer contract | Adjust the test to inspect `waterVertexData` and compare against `applyWaterDepthTint(...)`, then rerun the focused far-field suite | Confirmed. The focused suite now passes and the regression once again tests the current behavior rather than an obsolete path | Confirmed |
+
+## 2026-03-12 exploration journal feature slice
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| A first exploration mechanic can be useful without inventing inventory, quests, or rewards yet | Add a pure exploration journal with deterministic bookkeeping and wire it into the game HUD/debug surface | Confirmed. The journal adds measurable progression immediately and stays small enough to test directly | Confirmed |
+| The bookkeeping should live directly inside `GameController` because the runtime is the only caller today | Try the pure-state implementation first and keep it only if the journal remains easy to test and easy to integrate | Rejected. The pure helper is cleaner and gave immediate unit-test coverage without browser coupling | Rejected |
+| Sampling only the exact player column is enough to discover landmark families in a satisfying way | Inspect generator semantics while wiring the journal and compare them to landmark placement patterns before freezing the implementation | Rejected. Landmark ids often live on nearby feature roots, so a tiny local sampling pattern is a better first seam than feet-only detection | Rejected |
+| Throttled local discovery sampling will show up as a meaningful command-line regression | Run `mise run cycle-bench` after the runtime integration and compare it to the loop-bootstrap baseline | Rejected. The cycle battery stayed effectively flat, so the journal sampling is worth keeping | Rejected |

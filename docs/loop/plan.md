@@ -181,6 +181,7 @@ Status:
 ## Immediate implementation tasks
 
 - Keep machine-readable generation and residency probes aligned with the game/runtime code.
+- Use the new discovery journal as the first measurable exploration seam, then add browser route + trace automation so feature and performance slices share a live-game oracle.
 - Keep the grounded-player slice honest:
   - add spawn-footprint regression coverage so player starts remain stable
   - preserve feet position and grounded state in the game debug surface

@@ -50,6 +50,8 @@ The durable alternating feature/performance loop lives in `docs/loop/recursive-t
 - `window.__VOXELS_GAME__.requestPointerLock()`
 - `window.__VOXELS_GAME__.setViewDistance(chunks)`
 - `window.__VOXELS_GAME__.forceResidencyUpdate()`
+- `window.__VOXELS_GAME__.getDiscoveryJournal()`
+- `window.__VOXELS_GAME__.resetDiscoveryJournal()`
 
 ## Benchmark automation
 

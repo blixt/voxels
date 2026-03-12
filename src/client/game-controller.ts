@@ -13,6 +13,11 @@ import {
   rotateFirstPersonCamera,
   type FirstPersonCameraState,
 } from "../engine/first-person-camera.ts";
+import {
+  ExplorationJournal,
+  type ExplorationJournalSnapshot,
+  type ExplorationObservation,
+} from "../engine/exploration-journal.ts";
 import { rebuildDirtyMeshes } from "../engine/mesher.ts";
 import {
   createPlayerState,
@@ -62,6 +67,23 @@ const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 6;
 const DEFAULT_MAX_FAR_FIELD_BAND_REBUILDS_PER_FRAME = 1;
 const MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES = 6;
 const FAR_FIELD_RENDER_MASK_SPAN_CHUNKS = 32;
+const DISCOVERY_SAMPLE_INTERVAL_MS = 250;
+const DISCOVERY_SAMPLE_MOVE_THRESHOLD_WORLD_UNITS = metersToWorldUnits(0.8);
+const DISCOVERY_LANDMARK_SAMPLE_OFFSETS: ReadonlyArray<readonly [number, number]> = [
+  [0, 0],
+  [metersToWorldUnits(1.2), 0],
+  [-metersToWorldUnits(1.2), 0],
+  [0, metersToWorldUnits(1.2)],
+  [0, -metersToWorldUnits(1.2)],
+  [metersToWorldUnits(1.2), metersToWorldUnits(1.2)],
+  [metersToWorldUnits(1.2), -metersToWorldUnits(1.2)],
+  [-metersToWorldUnits(1.2), metersToWorldUnits(1.2)],
+  [-metersToWorldUnits(1.2), -metersToWorldUnits(1.2)],
+  [metersToWorldUnits(2.4), 0],
+  [-metersToWorldUnits(2.4), 0],
+  [0, metersToWorldUnits(2.4)],
+  [0, -metersToWorldUnits(2.4)],
+];
 
 export interface GameHudSnapshot {
   status: string;
@@ -87,6 +109,15 @@ export interface GameHudSnapshot {
   streamDirtyResidentChunks: number;
   residencyRadiusChunks: number;
   surfaceY: number;
+  biomeId: string | null;
+  undergroundBiomeId: string | null;
+  regionalVariantId: string | null;
+  landmarkId: string | null;
+  discoveredBiomeCount: number;
+  discoveredUndergroundBiomeCount: number;
+  discoveredRegionalVariantCount: number;
+  discoveredLandmarkCount: number;
+  lastDiscoveryLabel: string;
   farFieldMs: number;
   farFieldBuiltBands: number;
   farFieldPendingBands: number;
@@ -519,6 +550,7 @@ export class GameController {
   readonly generator = new ProceduralWorldGenerator(1337);
   readonly world = new ProceduralResidentWorld(this.generator);
   readonly farField = new ProceduralFarField(this.generator);
+  readonly explorationJournal = new ExplorationJournal();
 
   renderer: WebGpuVoxelRenderer | null = null;
   camera: FirstPersonCameraState = createFirstPersonCamera([0.5, 1500, 0.5]);
@@ -559,6 +591,9 @@ export class GameController {
   private cachedFarFieldRenderMaskOriginChunkZ = Number.NaN;
   private cachedFarFieldRenderMask: FarFieldRenderMask | null = null;
   private readonly pressedKeys = new Set<string>();
+  private lastDiscoverySampleAt = 0;
+  private lastDiscoverySampleFeetPosition: Vec3 | null = null;
+  private lastDiscoverySnapshot: ExplorationJournalSnapshot = this.explorationJournal.getSnapshot();
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -640,6 +675,7 @@ export class GameController {
 
   getDebugSnapshot(): GameHudSnapshot {
     const stats = this.world.getStats();
+    const discovery = this.refreshDiscoveryJournal();
     return {
       status: this.status,
       pointerLocked: this.pointerLocked,
@@ -673,6 +709,15 @@ export class GameController {
       streamDirtyResidentChunks: this.world.countDirtyResidentChunks(),
       residencyRadiusChunks: this.lastStreamSummary.radiusChunks,
       surfaceY: this.lastStreamSummary.surfaceY,
+      biomeId: discovery.currentBiomeId,
+      undergroundBiomeId: discovery.currentUndergroundBiomeId,
+      regionalVariantId: discovery.currentRegionalVariantId,
+      landmarkId: discovery.currentLandmarkId,
+      discoveredBiomeCount: discovery.discoveredBiomeIds.length,
+      discoveredUndergroundBiomeCount: discovery.discoveredUndergroundBiomeIds.length,
+      discoveredRegionalVariantCount: discovery.discoveredRegionalVariantIds.length,
+      discoveredLandmarkCount: discovery.discoveredLandmarkIds.length,
+      lastDiscoveryLabel: discovery.lastDiscovery?.label ?? "None",
       farFieldMs: this.lastFarFieldSummary.elapsedMs,
       farFieldBuiltBands: this.lastFarFieldSummary.builtBands,
       farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
@@ -745,6 +790,19 @@ export class GameController {
 
   snapshotResidentWorld(): ResidentWorldProbeSnapshot {
     return summarizeResidentWorld(this.world);
+  }
+
+  getDiscoveryJournalSnapshot(): ExplorationJournalSnapshot {
+    return this.refreshDiscoveryJournal(true);
+  }
+
+  resetDiscoveryJournal(): ExplorationJournalSnapshot {
+    this.explorationJournal.reset();
+    this.lastDiscoverySampleFeetPosition = null;
+    this.lastDiscoverySampleAt = 0;
+    const snapshot = this.refreshDiscoveryJournal(true);
+    this.pushHud(true);
+    return snapshot;
   }
 
   probeRenderReadyCoverage(sampleRadiusMeters = 12, sampleStepMeters = 0.8): RenderReadyCoverageProbe {
@@ -1972,6 +2030,54 @@ export class GameController {
     }
     this.lastHudPushAt = now;
     this.onHudUpdate?.(this.getDebugSnapshot());
+  }
+
+  private refreshDiscoveryJournal(force = false): ExplorationJournalSnapshot {
+    const now = performance.now();
+    const currentFeetPosition = this.player.feetPosition;
+    if (!force && this.lastDiscoverySampleFeetPosition) {
+      const deltaX = currentFeetPosition[0] - this.lastDiscoverySampleFeetPosition[0];
+      const deltaZ = currentFeetPosition[2] - this.lastDiscoverySampleFeetPosition[2];
+      const movedFarEnough = Math.hypot(deltaX, deltaZ) >= DISCOVERY_SAMPLE_MOVE_THRESHOLD_WORLD_UNITS;
+      if (!movedFarEnough && now - this.lastDiscoverySampleAt < DISCOVERY_SAMPLE_INTERVAL_MS) {
+        return this.lastDiscoverySnapshot;
+      }
+    }
+    this.lastDiscoverySampleAt = now;
+    this.lastDiscoverySampleFeetPosition = [...currentFeetPosition] as Vec3;
+    this.lastDiscoverySnapshot = this.explorationJournal.observe(this.sampleExplorationObservation());
+    return this.lastDiscoverySnapshot;
+  }
+
+  private sampleExplorationObservation(): ExplorationObservation {
+    const centerX = Math.floor(this.player.feetPosition[0]);
+    const centerZ = Math.floor(this.player.feetPosition[2]);
+    const centerProbe = this.generator.sampleBiomeProbe(centerX, centerZ);
+    const landmarkIds: string[] = [];
+    let currentLandmarkId: string | null = centerProbe.landmarkId;
+    if (centerProbe.landmarkId) {
+      landmarkIds.push(centerProbe.landmarkId);
+    }
+    for (const [offsetX, offsetZ] of DISCOVERY_LANDMARK_SAMPLE_OFFSETS) {
+      if (offsetX === 0 && offsetZ === 0) {
+        continue;
+      }
+      const probe = this.generator.sampleBiomeProbe(centerX + offsetX, centerZ + offsetZ);
+      if (!probe.landmarkId) {
+        continue;
+      }
+      if (currentLandmarkId === null) {
+        currentLandmarkId = probe.landmarkId;
+      }
+      landmarkIds.push(probe.landmarkId);
+    }
+    return {
+      biomeId: centerProbe.biomeId,
+      undergroundBiomeId: centerProbe.undergroundBiomeId,
+      regionalVariantId: centerProbe.regionalVariantId,
+      landmarkIds,
+      currentLandmarkId,
+    };
   }
 }
 

@@ -2981,3 +2981,52 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - The acceptance gate is already finding real maintenance issues instead of passing silently.
 - The next performance slice should focus on browser-route and trace automation, because `cycle-bench` is strong on local CPU-side coverage but still does not replace full Chrome movement traces.
+
+### Exploration journal feature slice
+
+#### Commands
+
+- `mise exec -- bun test tests/exploration-journal.test.ts`
+- `mise exec -- bun run typecheck`
+- `mise run build`
+- `mise run cycle-bench -- --label=exploration-journal`
+- `mise exec -- bun --eval '<deterministic exploration-journal walk probe>'`
+
+#### Checks
+
+- Focused exploration-journal tests: passing
+  - `2 pass`
+  - `0 fail`
+- `mise exec -- bun run typecheck`: passing
+- `mise run build`: passing
+- `mise run cycle-bench -- --label=exploration-journal`: passing
+  - report: `artifacts/cycle-bench/20260312T000221Z-exploration-journal.json`
+
+#### Numeric probes
+
+- Deterministic exploration walk probe (`200` steps at `2.0 m` each with a small nearby-landmark sampling pattern):
+  - discovered biomes: `4`
+  - discovered underground biomes: `3`
+  - discovered regional variants: `2`
+  - discovered landmark families: `7`
+  - last discovery: `Variant: savanna_flowersea`
+- `cycle-bench` total elapsed:
+  - `72529.14 ms`
+- Key `cycle-bench` comparison point:
+  - the discovery slice stayed essentially flat against the loop-bootstrap run
+  - `terrain256` mesh moved from about `265.79 ms` to `264.11 ms`
+  - `crossing-d2` avg max-frame-work moved from about `27.55 ms` to `27.95 ms`
+  - nothing suggests the throttled discovery sampling is a meaningful command-line regression
+
+#### Added verification coverage
+
+- The repo now has focused unit coverage for the pure exploration journal:
+  - unique discovery recording
+  - reset semantics
+- The game automation surface now exposes journal read/reset methods so future browser tests can verify exploration progression without scraping HUD text.
+
+#### Residual
+
+- This slice is worth keeping.
+- The discovery layer is useful, but it is still only a progression seam; it does not yet pay off with inventory, points of interest, or rewards.
+- The next loop item should stay on the planned performance side: browser route + trace automation.
