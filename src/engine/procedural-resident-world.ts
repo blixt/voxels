@@ -110,6 +110,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   private readonly generatedRenderSummaries = new Map<string, GeneratedChunkRenderSummary>();
   private readonly generatedRenderChunkKeysByColumn = new Map<string, Set<string>>();
   private readonly generatedRenderColumnSummaries = new Map<string, GeneratedRenderColumnSummary>();
+  private readonly columnChunkYRanges = new Map<string, ChunkYRange>();
   private readonly readyGeneratedChunks = new Map<string, GeneratedChunk>();
   private readonly pendingFarFieldColumnRanges = new Map<string, ChunkYRange>();
   private readonly missingPersistedFarFieldRegionSummaries = new Set<string>();
@@ -327,6 +328,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     } else if (!this.editOverlays.has(key)) {
       this.editOverlays.set(key, overlay);
     }
+    this.noteColumnChunkYRange(cx, cz, cy);
     this.emptyChunkKeys.delete(key);
 
     const residentChunk = this.getResidentChunk(cx, cy, cz);
@@ -813,6 +815,11 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   }
 
   private computeChunkYRange(cx: number, cz: number): [number, number] {
+    const columnKey = toColumnKey(cx, cz);
+    const cached = this.columnChunkYRanges.get(columnKey);
+    if (cached) {
+      return [cached.minCy, cached.maxCy];
+    }
     const chunkOriginX = cx * this.chunkSize;
     const chunkOriginZ = cz * this.chunkSize;
     let minSurfaceY = Number.POSITIVE_INFINITY;
@@ -831,10 +838,15 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
       this.maxYExclusive - 1,
       Math.max(maxSurfaceY, maxTopY, maxWaterTopY) + this.airPaddingChunks * this.chunkSize,
     );
-    return [
+    const range: [number, number] = [
       Math.max(0, Math.floor(minWorldY / this.chunkSize)),
       Math.max(0, Math.floor(maxWorldY / this.chunkSize)),
     ];
+    this.columnChunkYRanges.set(columnKey, {
+      minCy: range[0],
+      maxCy: range[1],
+    });
+    return range;
   }
 
   private estimateFarFieldSummaryChunkYRange(cx: number, cz: number): ChunkYRange | null {
@@ -1051,6 +1063,17 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     const existing = this.pendingFarFieldColumnRanges.get(columnKey);
     if (!existing) {
       this.pendingFarFieldColumnRanges.set(columnKey, { minCy: cy, maxCy: cy });
+      return;
+    }
+    existing.minCy = Math.min(existing.minCy, cy);
+    existing.maxCy = Math.max(existing.maxCy, cy);
+  }
+
+  private noteColumnChunkYRange(cx: number, cz: number, cy: number): void {
+    const columnKey = toColumnKey(cx, cz);
+    const existing = this.columnChunkYRanges.get(columnKey);
+    if (!existing) {
+      this.columnChunkYRanges.set(columnKey, { minCy: cy, maxCy: cy });
       return;
     }
     existing.minCy = Math.min(existing.minCy, cy);

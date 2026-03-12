@@ -1986,3 +1986,23 @@
 - Residual:
   - the full trace still contains a large startup long task, so there is still cold-start CPU worth chasing
   - but that long task is no longer blocking “enter the world” in the way it was before
+
+## 2026-03-12 cached column y-ranges for residency streaming
+
+- After the startup gate fix, the next trace-driven hotspot was clear again:
+  - `computeChunkYRange()` / `sampleColumn()` were still eating too much residency time
+  - the world was recomputing the same deterministic column height envelope across repeated updates
+- I kept this slice deliberately narrow:
+  - added a resident-world column Y-range cache keyed by chunk column
+  - `computeChunkYRange()` now reuses that range instead of resampling the generator every update
+  - local voxel edits widen the cached range conservatively for the edited column
+- I only kept it after adding a direct regression first:
+  - the new resident-world test proves a repeated same-anchor update only spends one `sampleColumn()` call on the center surface probe, not on every streamed column again
+- The payoff was larger than expected:
+  - the 10-second route trace average gameplay frame dropped from about `3.03 ms` to about `0.79 ms`
+  - average stream work dropped from about `2.81 ms` to about `0.65 ms`
+  - the biggest long task in the full trace dropped from about `2498.6 ms` to about `868.0 ms`
+- I did **not** count the startup-only browser benchmark as an oracle for this slice:
+  - that harness run got stuck during teardown, so I treated it as untrustworthy instead of pretending it confirmed anything
+- Residual:
+  - the remaining heavy trace buckets now lean more toward spawn/column-state work and worker meshing than repeated Y-range sampling

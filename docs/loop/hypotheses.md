@@ -555,3 +555,11 @@
 | Even after fixing the benchmark definition, `loadBootstrapWorld()` is still doing too much synchronous work up front | Inspect the startup call path directly and compare `syncWorldAroundPlayer(true)` versus the budgeted path | Confirmed. Bootstrap was forcing an infinite settle pass on page load | Confirmed |
 | The right startup model is a bounded local bubble plus progressive streaming, not an eager full settle | Switch bootstrap to the normal budgeted sync path and keep it only if startup entry time collapses without introducing hole regressions in route traces | Confirmed. Playable-ready dropped to about `1.43 s` and route traces stayed hole-free | Confirmed |
 | A good “enter the world” gate should still wait for every pending chunk in the full residency radius | Re-evaluate readiness using a local support/column/urgent-mesh bubble around the player instead of global pending counts | Rejected. Global pending counts are the wrong readiness gate for gameplay entry | Rejected |
+
+## 2026-03-12 cached column y-ranges for residency streaming
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| Repeated `computeChunkYRange()` calls are still wasting CPU on deterministic column work across frames | Add a focused resident-world regression that repeats the same anchor update and only keep the cache if `sampleColumn()` calls collapse on the second update | Confirmed. The second update now only pays the center surface probe | Confirmed |
+| This cache is too speculative to matter after the playable-ready bootstrap change | Keep the runtime change only if a full 10-second route trace moves materially, not just a micro test | Rejected. The route trace moved hard enough to justify the cache | Rejected |
+| A startup-only browser benchmark should be the acceptance oracle for this slice too | Run it once and keep it if it behaves | Rejected. That harness run got stuck during teardown, so I did not count it as evidence | Rejected |

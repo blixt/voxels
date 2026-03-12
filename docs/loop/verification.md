@@ -3984,3 +3984,43 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - The startup benchmark now measures the right thing and the runtime reaches a playable local bubble quickly.
 - The full trace still shows a large startup long task, so there is still cold-start CPU work left after this correctness fix.
+
+## 2026-03-12 cached column y-ranges for residency streaming
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts`
+- `mise run build`
+- `mise run trace-route -- --label=yrange-cache-10s --duration=10 --settle=2 --sample-hz=60`
+
+#### Numeric probes
+
+- Focused regression suite:
+  - `21` pass
+  - `0` fail
+- 10-second route trace:
+  - report: `artifacts/browser-route-trace/20260312T212257Z-yrange-cache-10s/report.json`
+  - avg gameplay frame `0.79 ms`
+  - p95 gameplay frame `1.00 ms`
+  - max gameplay frame `12.3 ms`
+  - avg stream `0.65 ms`
+  - max stream `2.3 ms`
+  - hole-signal frames `0`
+- Compared against the previous kept 10-second trace:
+  - previous report: `artifacts/browser-route-trace/20260312T211756Z-bootstrap-budgeted-10s/report.json`
+  - avg gameplay frame `3.03 ms`
+  - p95 gameplay frame `3.50 ms`
+  - max gameplay frame `12.6 ms`
+  - avg stream `2.81 ms`
+  - max stream `4.5 ms`
+  - hole-signal frames `0`
+- Full-trace long-task comparison:
+  - previous max long task `2498.6 ms`
+  - current max long task `868.0 ms`
+
+#### Residual
+
+- This slice is worth keeping.
+- The acceptance is trace-driven; I did not keep the startup-only browser benchmark run as evidence because that harness run got stuck during teardown.
+- The next visible CPU buckets are no longer repeated Y-range sampling, so the next pass should focus on remaining column-state/spawn work or worker meshing cost.

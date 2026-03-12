@@ -214,6 +214,22 @@ test("resident world reuses known-empty chunk results on a repeated anchor refre
   expect(second.phaseMs.chunkGenerationMs).toBe(0);
 });
 
+test("resident world caches column y-range sampling across repeated updates", () => {
+  const generator = new CountingProceduralWorldGenerator(1337, { chunkSize: 16 });
+  const world = new ProceduralResidentWorld(generator, {
+    horizontalRadiusChunks: 2,
+  });
+  const spawn = world.getSpawnPosition();
+
+  world.updateResidencyAround(spawn, { maxGenerateChunks: 4 });
+  expect(generator.sampleColumnCalls).toBeGreaterThan(1);
+
+  generator.sampleColumnCalls = 0;
+  world.updateResidencyAround(spawn, { maxGenerateChunks: 4 });
+
+  expect(generator.sampleColumnCalls).toBe(1);
+});
+
 test("resident world can complete a residency window across multiple budgeted updates", () => {
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
     horizontalRadiusChunks: 2,
