@@ -156,6 +156,50 @@ export function buildDefaultRouteBenchmarkPlan(
   };
 }
 
+export function buildForwardRouteBenchmarkPlan(
+  startFeetPosition: Vec3,
+  sampleFeetYAt: (worldX: number, worldZ: number) => number,
+  options: RouteBenchmarkPlanOptions & {
+    yawRadians?: number;
+  } = {},
+): RouteBenchmarkPlan {
+  const durationSeconds = clampPositive(options.durationSeconds ?? 10, 10);
+  const sampleHz = clampPositive(options.sampleHz ?? 60, 60);
+  const speedMetersPerSecond = clampPositive(options.speedMetersPerSecond ?? 4.6, 4.6);
+  const pitch = options.pitchRadians ?? -0.34;
+  const yaw = options.yawRadians ?? 0;
+  const frameCount = Math.max(1, Math.round(durationSeconds * sampleHz));
+  const distancePerFrameWorldUnits = metersToWorldUnits(speedMetersPerSecond) / sampleHz;
+  let totalDistanceMeters = 0;
+  let worldX = startFeetPosition[0];
+  let worldZ = startFeetPosition[2];
+  const frames: RouteBenchmarkFrameTarget[] = [];
+
+  for (let frame = 1; frame <= frameCount; frame += 1) {
+    worldX += Math.cos(yaw) * distancePerFrameWorldUnits;
+    worldZ += Math.sin(yaw) * distancePerFrameWorldUnits;
+    totalDistanceMeters += speedMetersPerSecond / sampleHz;
+    frames.push({
+      frame,
+      phase: "move",
+      simTimeSeconds: frame / sampleHz,
+      distanceMeters: totalDistanceMeters,
+      feetPosition: [worldX, sampleFeetYAt(worldX, worldZ), worldZ],
+      yaw,
+      pitch,
+      segmentIndex: 0,
+    });
+  }
+
+  return {
+    durationSeconds,
+    sampleHz,
+    speedMetersPerSecond,
+    totalDistanceMeters,
+    frames,
+  };
+}
+
 export function analyzeBottomCenterVoid(
   image: {
     width: number;

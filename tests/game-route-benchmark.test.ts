@@ -4,6 +4,7 @@ import {
   analyzeSettledReferenceDiff,
   analyzeBottomCenterVoid,
   buildDefaultRouteBenchmarkPlan,
+  buildForwardRouteBenchmarkPlan,
   summarizeRouteFrameAccounting,
 } from "../src/engine/game-route-benchmark.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
@@ -31,6 +32,33 @@ test("default route benchmark plan stays within the requested per-frame travel b
     );
     expect(delta).toBeLessThanOrEqual(maxStepWorldUnits + 1e-6);
     expect(frame.feetPosition[1]).toBe(250);
+    previous = frame.feetPosition;
+  }
+});
+
+test("forward route benchmark plan walks straight at the requested speed", () => {
+  const start: [number, number, number] = [0, 250, 0];
+  const plan = buildForwardRouteBenchmarkPlan(
+    start,
+    () => 250,
+    {
+      durationSeconds: 2,
+      sampleHz: 20,
+      speedMetersPerSecond: 4,
+      yawRadians: Math.PI / 2,
+    },
+  );
+
+  expect(plan.frames).toHaveLength(40);
+  expect(plan.totalDistanceMeters).toBeCloseTo(8, 6);
+  const maxStepWorldUnits = metersToWorldUnits(4 / 20);
+  let previous = start;
+  for (const frame of plan.frames) {
+    const deltaX = Math.abs(frame.feetPosition[0] - previous[0]);
+    const deltaZ = frame.feetPosition[2] - previous[2];
+    expect(deltaX).toBeLessThanOrEqual(1e-6);
+    expect(deltaZ).toBeGreaterThan(0);
+    expect(Math.abs(deltaZ)).toBeLessThanOrEqual(maxStepWorldUnits + 1e-6);
     previous = frame.feetPosition;
   }
 });

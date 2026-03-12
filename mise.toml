@@ -41,6 +41,10 @@ run = "bun run cycle:bench"
 description = "Launch a fresh production server and Chrome route benchmark trace run, then save the trace and analyzed report"
 run = "bun run trace:route"
 
+[tasks.bench-browser-game]
+description = "Run browser startup and forward-walk benchmark suites and write CSV detail to /tmp"
+run = "bun run bench:browser-game"
+
 [tasks.serve]
 description = "Run the built production server bundle"
 run = "bun run start"

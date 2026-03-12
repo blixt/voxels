@@ -3,10 +3,16 @@ import {
   analyzeSettledReferenceDiff,
   analyzeBottomCenterVoid,
   buildDefaultRouteBenchmarkPlan,
+  buildForwardRouteBenchmarkPlan,
   summarizeRouteFrameAccounting,
   type BottomCenterVoidProbe,
   type RouteBenchmarkFrameTarget,
 } from "../engine/game-route-benchmark.ts";
+import {
+  summarizeBootstrapBenchmark,
+  type BootstrapBenchmarkSample,
+  type BootstrapBenchmarkSummary,
+} from "../engine/game-bootstrap-benchmark.ts";
 import {
   buildFirstPersonCameraMatrices,
   createFirstPersonCamera,
@@ -605,6 +611,17 @@ export interface RouteExperienceBenchmark {
   summary: RouteExperienceBenchmarkSummary;
 }
 
+export interface BootstrapExperienceBenchmark {
+  completed: boolean;
+  startedAtMs: number;
+  samples: BootstrapBenchmarkSample[];
+  summary: BootstrapBenchmarkSummary;
+}
+
+interface GameControllerOptions {
+  eagerBootstrapBenchmark?: boolean;
+}
+
 interface CapturedBenchmarkFrame {
   sampleIndex: number;
   target: Pick<RouteBenchmarkFrameTarget, "frame" | "simTimeSeconds" | "distanceMeters" | "feetPosition" | "yaw" | "pitch">
@@ -637,6 +654,7 @@ export class GameController {
   drawCalls = 0;
   triangles = 0;
   lastFrameCpuMs = 0;
+  lastGameplayFrameMs = 0;
   avgFrameCpuMs = 0;
   status = "Booting";
   pointerLocked = false;
@@ -672,15 +690,23 @@ export class GameController {
   private lastDiscoverySampleAt = 0;
   private lastDiscoverySampleFeetPosition: Vec3 | null = null;
   private lastDiscoverySnapshot: ExplorationJournalSnapshot = this.explorationJournal.getSnapshot();
+  private readonly bootstrapBenchmarkStartedAt = performance.now();
+  private readonly bootstrapBenchmarkSamples: BootstrapBenchmarkSample[] = [];
+  private bootstrapBenchmarkComplete = false;
+  private readonly eagerBootstrapBenchmark: boolean;
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement, options: GameControllerOptions = {}) {
     this.canvas = canvas;
+    this.eagerBootstrapBenchmark = options.eagerBootstrapBenchmark ?? false;
   }
 
   async init(): Promise<void> {
     this.renderer = await WebGpuVoxelRenderer.create(this.canvas);
     this.loadBootstrapWorld();
     this.attachInteractions();
+    if (this.eagerBootstrapBenchmark) {
+      await this.drainBootstrapBenchmark();
+    }
     this.start();
   }
 
@@ -718,6 +744,7 @@ export class GameController {
   start(): void {
     cancelAnimationFrame(this.rafId);
     const tick = (now: number) => {
+      const gameplayStartedAt = performance.now();
       const deltaSeconds = this.lastFrameTime === 0
         ? 1 / 60
         : Math.min((now - this.lastFrameTime) / 1000, MAX_DELTA_SECONDS);
@@ -747,6 +774,8 @@ export class GameController {
         );
       }
       this.renderInteractiveFrame();
+      this.lastGameplayFrameMs = performance.now() - gameplayStartedAt;
+      this.recordBootstrapBenchmarkSample(this.lastGameplayFrameMs);
       this.rafId = requestAnimationFrame(tick);
     };
     this.rafId = requestAnimationFrame(tick);
@@ -832,6 +861,16 @@ export class GameController {
       maxGeneratedChunksPerUpdate: this.streamingBudgets.maxGeneratedChunksPerUpdate,
       maxMeshRebuildsPerFrame: this.streamingBudgets.maxMeshRebuildsPerFrame,
       maxFarFieldBandRebuildsPerFrame: this.streamingBudgets.maxFarFieldBandRebuildsPerFrame,
+    };
+  }
+
+  getBootstrapBenchmark(): BootstrapExperienceBenchmark {
+    const samples = this.bootstrapBenchmarkSamples.map((sample) => ({ ...sample }));
+    return {
+      completed: this.bootstrapBenchmarkComplete,
+      startedAtMs: this.bootstrapBenchmarkStartedAt,
+      samples,
+      summary: summarizeBootstrapBenchmark(samples),
     };
   }
 
@@ -1547,10 +1586,38 @@ export class GameController {
   async benchmarkRouteExperience(
     options: RouteExperienceBenchmarkOptions = {},
   ): Promise<RouteExperienceBenchmark> {
-    const durationSeconds = Math.max(1, options.durationSeconds ?? 10);
+    const spawnFeet = this.world.getSpawnPosition();
+    const routePlan = buildDefaultRouteBenchmarkPlan(
+      spawnFeet,
+      (worldX, worldZ) => this.generator.sampleColumn(worldX, worldZ).surfaceY + 1,
+      normalizeRouteBenchmarkPlanOptions(options),
+    );
+    return this.runRouteExperienceBenchmark(routePlan, options);
+  }
+
+  async benchmarkForwardWalkExperience(
+    options: RouteExperienceBenchmarkOptions & {
+      yawRadians?: number;
+    } = {},
+  ): Promise<RouteExperienceBenchmark> {
+    const spawnFeet = this.world.getSpawnPosition();
+    const routePlan = buildForwardRouteBenchmarkPlan(
+      spawnFeet,
+      (worldX, worldZ) => this.generator.sampleColumn(worldX, worldZ).surfaceY + 1,
+      {
+        ...normalizeRouteBenchmarkPlanOptions(options),
+        yawRadians: options.yawRadians,
+      },
+    );
+    return this.runRouteExperienceBenchmark(routePlan, options);
+  }
+
+  private async runRouteExperienceBenchmark(
+    routePlan: ReturnType<typeof buildDefaultRouteBenchmarkPlan>,
+    options: RouteExperienceBenchmarkOptions,
+  ): Promise<RouteExperienceBenchmark> {
     const settleSeconds = Math.max(1, options.settleSeconds ?? 4);
-    const sampleHz = Math.max(1, Math.floor(options.sampleHz ?? 60));
-    const speedMetersPerSecond = Math.max(0.1, options.speedMetersPerSecond ?? 4.6);
+    const sampleHz = routePlan.sampleHz;
     const seamProbeStrideFrames = clampPositiveInt(
       options.seamProbeStrideFrames ?? Math.max(1, Math.round(sampleHz / 4)),
       Math.max(1, Math.round(sampleHz / 4)),
@@ -1563,16 +1630,6 @@ export class GameController {
     const captureHeight = clampPositiveInt(options.captureHeight ?? 72, 72);
     const referenceDiffStrideFrames = Math.max(0, Math.floor(options.referenceDiffStrideFrames ?? 0));
     const referenceDiffLimit = Math.max(0, Math.floor(options.referenceDiffLimit ?? 24));
-    const spawnFeet = this.world.getSpawnPosition();
-    const routePlan = buildDefaultRouteBenchmarkPlan(
-      spawnFeet,
-      (worldX, worldZ) => this.generator.sampleColumn(worldX, worldZ).surfaceY + 1,
-      {
-        durationSeconds,
-        sampleHz,
-        speedMetersPerSecond,
-      },
-    );
     const savedPlayer = {
       feetPosition: [...this.player.feetPosition] as Vec3,
       velocity: [...this.player.velocity] as Vec3,
@@ -1590,6 +1647,7 @@ export class GameController {
     const savedStreamAnchor = this.streamAnchor
       ? { chunkX: this.streamAnchor.chunkX, chunkZ: this.streamAnchor.chunkZ }
       : null;
+    const spawnFeet = this.world.getSpawnPosition();
 
     this.stop();
     try {
@@ -1780,9 +1838,39 @@ export class GameController {
     this.player = createPlayerState(spawn, { grounded: true });
     this.camera = createFirstPersonCamera(getPlayerEyePosition(this.player), 0.8, -0.32);
     this.streamAnchor = null;
+    const bootstrapStartedAt = performance.now();
     this.syncWorldAroundPlayer(true);
+    this.lastGameplayFrameMs = performance.now() - bootstrapStartedAt;
+    this.recordBootstrapBenchmarkSample(this.lastGameplayFrameMs);
     this.status = "Click once to capture cursor";
     this.pushHud(true);
+  }
+
+  private async drainBootstrapBenchmark(maxFrames = 600): Promise<void> {
+    if (this.bootstrapBenchmarkComplete) {
+      return;
+    }
+    const normalizedMaxFrames = Math.max(1, Math.floor(maxFrames));
+    for (let frame = 0; frame < normalizedMaxFrames; frame += 1) {
+      const gameplayStartedAt = performance.now();
+      if (
+        this.lastStreamSummary.pendingChunks > 0
+        || this.world.countDirtyResidentChunks() > 0
+        || this.lastFarFieldSummary.pendingBands > 0
+      ) {
+        this.syncWorldAroundPlayer(true);
+      }
+      this.renderCurrentFrame();
+      this.lastGameplayFrameMs = performance.now() - gameplayStartedAt;
+      this.recordBootstrapBenchmarkSample(this.lastGameplayFrameMs);
+      if (this.bootstrapBenchmarkComplete) {
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    }
+    throw new Error("Bootstrap benchmark did not complete within the allotted deterministic drain frames");
   }
 
   private attachInteractions(): void {
@@ -2496,6 +2584,47 @@ export class GameController {
     };
   }
 
+  private recordBootstrapBenchmarkSample(gameplayFrameMs: number): void {
+    if (this.bootstrapBenchmarkComplete) {
+      return;
+    }
+    const dirtyResidentMeshes = summarizeDirtyResidentMeshes(this.world);
+    const pendingMeshJobs = this.asyncChunkMeshing?.getPendingCount() ?? 0;
+    const playableReady = this.lastStreamSummary.pendingChunks === 0
+      && dirtyResidentMeshes.dirtyResidentChunks === 0
+      && dirtyResidentMeshes.dirtyMeshlessResidentChunks === 0;
+    const visualReady = playableReady && this.lastFarFieldSummary.pendingBands === 0;
+    this.bootstrapBenchmarkSamples.push({
+      frame: this.bootstrapBenchmarkSamples.length,
+      elapsedMs: performance.now() - this.bootstrapBenchmarkStartedAt,
+      gameplayFrameMs,
+      renderCpuMs: this.lastFrameCpuMs,
+      renderSyncMs: this.lastRenderStats.syncResourcesMs,
+      renderUploadMs: this.lastRenderStats.uploadMs,
+      renderEncodeMs: this.lastRenderStats.encodeMs,
+      uploadChunks: this.lastRenderStats.uploadChunks,
+      uploadBytes: this.lastRenderStats.uploadBytes,
+      drawCalls: this.drawCalls,
+      triangles: this.triangles,
+      streamMs: this.lastStreamSummary.elapsedMs,
+      meshMs: this.lastMeshBuildSummary.elapsedMs,
+      farFieldMs: this.lastFarFieldSummary.elapsedMs,
+      pendingChunks: this.lastStreamSummary.pendingChunks,
+      pendingMeshJobs,
+      dirtyResidentChunks: dirtyResidentMeshes.dirtyResidentChunks,
+      dirtyMeshlessResidentChunks: dirtyResidentMeshes.dirtyMeshlessResidentChunks,
+      dirtyRetainedMeshResidentChunks: dirtyResidentMeshes.dirtyRetainedMeshResidentChunks,
+      generatedChunks: this.lastStreamSummary.generatedChunks,
+      evictedChunks: this.lastStreamSummary.evictedChunks,
+      farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
+      playableReady,
+      visualReady,
+    });
+    if (visualReady) {
+      this.bootstrapBenchmarkComplete = true;
+    }
+  }
+
   private pushHud(force = false): void {
     const now = performance.now();
     if (!force && now - this.lastHudPushAt < HUD_PUSH_INTERVAL_MS) {
@@ -2954,6 +3083,18 @@ function summarizeRouteExperienceBenchmark(
     settleFramesUntilComplete: settleCompletion
       ? samples.filter((sample) => sample.phase === "settle" && sample.frame <= settleCompletion.frame).length
       : null,
+  };
+}
+
+function normalizeRouteBenchmarkPlanOptions(options: RouteExperienceBenchmarkOptions): {
+  durationSeconds: number;
+  sampleHz: number;
+  speedMetersPerSecond: number;
+} {
+  return {
+    durationSeconds: Math.max(1, options.durationSeconds ?? 10),
+    sampleHz: Math.max(1, Math.floor(options.sampleHz ?? 60)),
+    speedMetersPerSecond: Math.max(0.1, options.speedMetersPerSecond ?? 4.6),
   };
 }
 

@@ -1,5 +1,13 @@
 # Renderer Hypotheses
 
+## 2026-03-12 browser benchmark harness search
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| The live `requestAnimationFrame` bootstrap loop is a trustworthy startup benchmark oracle in headless Chrome | Build the new browser benchmark harness on top of `getBootstrapBenchmark()` directly and run a cold-start smoke | Rejected. Headless automation needs a deterministic bootstrap drain path; relying on the live RAF loop kept the benchmark from finishing reliably enough to use as the harness baseline | Rejected |
+| The startup benchmark can safely treat `chunkCount = 0` plus zero pending counters as “ready” | Run the first startup smoke and inspect whether the resulting CSV has meaningful chunk/sample counts | Rejected. The first pass went green in about `90 ms` with `chunkCount = 0`, `0` generated chunks, and no sample CSV. The kept gate now requires actual world entry plus zero pending/dirty/far backlog | Rejected |
+| The internal bootstrap `completed` flag is the right browser-side acceptance gate for startup and for walk-benchmark setup | Compare it against the live snapshot state during the first headless startup and walk runs | Rejected. The internal flag stayed too strict for harness purposes because it waited on non-visual async meshing cleanup. The kept browser harness now uses a live world-state gate based on actual enterable/visually-ready conditions | Rejected |
+
 ## 2026-03-12 region-summary batching search
 
 | Hypothesis | Tiny verification case | Result | Status |

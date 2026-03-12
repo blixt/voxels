@@ -45,6 +45,10 @@ declare global {
       benchmarkRouteExperience(
         options?: Parameters<GameController["benchmarkRouteExperience"]>[0],
       ): ReturnType<GameController["benchmarkRouteExperience"]>;
+      benchmarkForwardWalkExperience(
+        options?: Parameters<GameController["benchmarkForwardWalkExperience"]>[0],
+      ): ReturnType<GameController["benchmarkForwardWalkExperience"]>;
+      getBootstrapBenchmark(): ReturnType<GameController["getBootstrapBenchmark"]>;
       probeLodCoverage(
         sampleRadiusMeters?: number,
         sampleStepMeters?: number,
@@ -170,6 +174,7 @@ if (import.meta.hot) {
 }
 
 function mountGame(): GameRuntime {
+  const searchParams = new URLSearchParams(window.location.search);
   const appRoot = document.querySelector<HTMLElement>("[data-app='game']");
   if (!appRoot) {
     throw new Error("Game root not found");
@@ -201,7 +206,9 @@ function mountGame(): GameRuntime {
     throw new Error("Game UI is incomplete");
   }
 
-  const controller = new GameController(canvas);
+  const controller = new GameController(canvas, {
+    eagerBootstrapBenchmark: searchParams.get("benchmarkBootstrap") === "1",
+  });
   const handleCaptureClick = async () => {
     await controller.requestPointerLock();
   };
@@ -263,6 +270,8 @@ function mountGame(): GameRuntime {
     benchmarkIncrementalCrossing: (iterations, chunkDelta, stepsPerLeg, settleFrames) =>
       controller.benchmarkIncrementalCrossing(iterations, chunkDelta, stepsPerLeg, settleFrames),
     benchmarkRouteExperience: (options) => controller.benchmarkRouteExperience(options),
+    benchmarkForwardWalkExperience: (options) => controller.benchmarkForwardWalkExperience(options),
+    getBootstrapBenchmark: () => controller.getBootstrapBenchmark(),
     probeLodCoverage: (sampleRadiusMeters, sampleStepMeters) =>
       controller.probeLodCoverage(sampleRadiusMeters, sampleStepMeters),
     probeRenderReadyCoverage: (sampleRadiusMeters, sampleStepMeters) =>

@@ -2,6 +2,33 @@
 
 ## 2026-03-12
 
+- Built a real browser game benchmark harness instead of piling on one-off scripts:
+  - added `scripts/lib/browser-game-benchmark-harness.ts` as the shared Chrome/CDP/session runner
+  - the shared harness now owns build/startup, Chrome launch, storage clearing, sampled memory polling, warmup/measured iteration loops, and CSV writing
+  - added `scripts/run-browser-game-benchmarks.ts` on top of that utility for two concrete scenarios:
+    - `startup-entry`: cold-start generation until the world is visually enterable
+    - `forward-walk-10s`: deterministic forward movement with frame, hole, and memory tracking
+- Tightened the page-side seams so the browser runner is measuring actual game-state milestones instead of guessing:
+  - added `src/engine/game-bootstrap-benchmark.ts` plus `tests/game-bootstrap-benchmark.test.ts`
+  - exposed `getBootstrapBenchmark()` and `benchmarkForwardWalkExperience(...)` from `window.__VOXELS_GAME__`
+  - split the old route benchmark planner into a reusable shared path plus a straight-line forward-walk plan
+- Fixed two benchmark-local minima instead of accepting misleading green runs:
+  - the first startup harness pass was false-green because it treated `chunkCount = 0` + `0 pending` as “ready”; the kept gate now requires actual world entry plus live zeroed stream/dirty/far backlog
+  - the first headless startup pass also relied on the live RAF loop and then on the internal `completed` flag alone; the kept version adds an eager benchmark bootstrap mode for `/` and uses the live world-state gate in the harness
+- Added harness coverage and flexibility that should survive future engine rewrites:
+  - `tests/browser-game-benchmark-harness.test.ts` now locks the shared memory-summary delta/peak logic
+  - `scripts/run-browser-game-benchmarks.ts` now allows `0` iterations per scenario so startup-only and walk-only probes are possible without editing code
+  - the script writes iteration CSV, detailed sample CSV, and memory CSV files into a fresh `/tmp/voxels-browser-game-bench-*` directory and prints the paths
+- Verified both benchmark classes with real artifacts:
+  - startup-only smoke completed via `startup-long` and wrote CSVs under `/tmp/.../voxels-browser-game-bench-0QoHCY/`
+  - the kept startup artifact shows the current real cost clearly instead of hiding it: visual-ready was about `74.3 s`, total benchmark elapsed about `81.9 s`, and peak JS heap about `45.2 MB`
+  - a low-Hz walk smoke (`1 s`, `10 Hz`) completed and wrote CSVs under `/tmp/.../voxels-browser-game-bench-QlCIuC/`
+  - that walk smoke reported about `10.3 s` benchmark elapsed, `0` hole-signal frames, and separate memory/task-duration CSV rows
+- Wired the new harness into the normal repo workflow:
+  - added `bench:browser-game` to `package.json`
+  - added `mise run bench-browser-game`
+  - documented the command in `README.md` and `docs/loop/README.md`
+
 - Replaced the short-lived persisted single-column async far-summary path with persisted region-summary batching:
   - added `src/engine/generated-render-summary-region.ts`
   - the generated cache now persists `render_summary_regions` instead of a separate `column_summaries` store

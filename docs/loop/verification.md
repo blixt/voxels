@@ -5,6 +5,59 @@
 ### Commands
 
 - `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/browser-game-benchmark-harness.test.ts tests/game-bootstrap-benchmark.test.ts tests/game-route-benchmark.test.ts`
+- `mise run build`
+- `mise exec -- bun run bench:browser-game -- --startup-warmup=0 --startup-iterations=1 --walk-warmup=0 --walk-iterations=0 --startup-timeout-ms=180000 --label=startup-long`
+- `mise exec -- bun run bench:browser-game -- --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=1 --walk-duration=1 --walk-settle=1 --walk-sample-hz=10 --startup-timeout-ms=180000 --walk-timeout-ms=120000 --label=walk-smoke-lowhz`
+
+### Automated checks
+
+- `tsc --noEmit`: passing.
+- Focused harness / bootstrap / route tests: passing.
+- Production build: passing.
+
+### Browser benchmark artifacts
+
+- Startup-only artifact root:
+  - `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-0QoHCY`
+  - iteration CSV: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-0QoHCY/startup-entry-iterations.csv`
+  - sample CSV: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-0QoHCY/startup-entry-samples.csv`
+  - memory CSV: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-0QoHCY/startup-entry-memory.csv`
+- Startup summary from the kept smoke:
+  - benchmark elapsed: about `81,944.5 ms`
+  - visual-ready elapsed: about `74,277.4 ms`
+  - total generated chunks: `831`
+  - peak JS heap used: about `45.2 MB`
+  - peak runtime heap used: about `45.2 MB`
+  - peak pending chunks: `1242`
+- Walk smoke artifact root:
+  - `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-QlCIuC`
+  - iteration CSV: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-QlCIuC/forward-walk-10s-iterations.csv`
+  - sample CSV: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-QlCIuC/forward-walk-10s-samples.csv`
+  - memory CSV: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-QlCIuC/forward-walk-10s-memory.csv`
+- Low-Hz walk smoke summary:
+  - setup elapsed: about `18,180.7 ms`
+  - benchmark elapsed: about `10,307.3 ms`
+  - `p95` gameplay frame: about `0.8 ms`
+  - hole-signal frames: `0`
+  - peak JS heap used: about `12.9 MB`
+  - peak runtime heap used: about `26.9 MB`
+
+### Notes
+
+- The startup benchmark needed a stronger readiness definition than the old internal `completed` flag:
+  - the kept harness waits for actual world entry plus `0` pending chunks, `0` dirty resident chunks, and `0` far-field pending bands
+  - this avoids the earlier false-green `chunkCount = 0` result
+- The deterministic startup drain also needed two benchmark-specific corrections:
+  - do not block completion on leftover async meshing jobs once the world is already visually ready
+  - do not pay a full GPU-idle wait every bootstrap step when the benchmark is targeting CPU, chunk, and heap behavior
+- `walk-smoke-lowhz` is intentionally a harness proof, not the final acceptance profile:
+  - it proves the scenario, CSV writing, and per-frame sample export work end to end
+  - use the default `60 Hz`, `10 s` forward-walk benchmark for real regression comparisons
+
+### Commands
+
+- `mise exec -- bun run typecheck`
 - `mise exec -- bun test tests/generated-render-summary-region.test.ts tests/generated-chunk-transfer.test.ts tests/procedural-resident-world.test.ts`
 - `mise run build`
 - `mise run trace-route -- --label=region-summary-smoke --duration=1 --settle=1 --sample-hz=20`
