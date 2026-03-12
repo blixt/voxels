@@ -4202,3 +4202,54 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - It reproduces the real held-`W` regression and removes the catastrophic move-phase stall.
 - The far-summary prefetch algorithm is still too expensive in non-movement parts of the session, so that remains a follow-up optimization target.
+
+## 2026-03-12 incremental far-summary frontier prefetch
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/game-route-benchmark.test.ts`
+- `mise run build`
+- `mise run bench-browser-game -- --label=far-prefetch-frontier --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=1 --walk-duration=10 --walk-settle=4 --walk-sample-hz=60`
+- `mise run trace-route -- --benchmark=live-forward --label=far-prefetch-frontier-trace --duration=10 --settle=4 --sample-hz=60`
+
+#### Numeric probes
+
+- Focused verification:
+  - `24` pass
+  - `0` fail
+- Walk benchmark output:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-PFnXJK/report.json`
+  - benchmark elapsed `14117.159 ms`
+  - avg gameplay frame `1.333 ms`
+  - p95 gameplay frame `3.5 ms`
+  - max gameplay frame `11.9 ms`
+  - hole-signal frames `0`
+  - peak JS heap used `14365528 bytes`
+- Previous comparable live-walk benchmark:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-mKa1ll/report.json`
+  - benchmark elapsed `20204.107 ms`
+  - avg gameplay frame `1.287 ms`
+  - max gameplay frame `11.6 ms`
+  - hole-signal frames `0`
+- Delta-task comparison from benchmark reports:
+  - previous `avg_deltaTaskDurationMs = 9511`
+  - current `avg_deltaTaskDurationMs = 3546.928`
+- Live-forward Chrome trace:
+  - report: `artifacts/browser-route-trace/20260312T222007Z-far-prefetch-frontier-trace/report.json`
+  - avg gameplay frame `1.42555092206805 ms`
+  - p95 gameplay frame `3.600000023841858 ms`
+  - max gameplay frame `15.699999988079071 ms`
+  - hole-signal frames `0`
+- Trace hotspot comparison versus the previous live-forward trace:
+  - previous report: `artifacts/browser-route-trace/20260312T220548Z-live-walk-no-move-prefetch-trace/report.json`
+  - previous reported exclusive prefetch hotspot time:
+    - `prefetchFarFieldSummariesAround(...) + prefetchFarFieldSummaries(...) = 4461.1 ms`
+  - current reported exclusive prefetch hotspot time:
+    - `0 ms` in the reported top exclusive frames
+
+#### Residual
+
+- This slice is worth keeping.
+- It removes the remaining trace-visible far-summary scan hotspot without regressing live walk correctness.
+- The next dominant work is now more clearly in generation/meshing/persistence rather than broad far-summary rescanning.

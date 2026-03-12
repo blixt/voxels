@@ -496,7 +496,10 @@ test("far-field sampling only becomes available after actual chunk pre-generatio
 
   expect(world.sampleFarFieldColumn(farWorldX, farWorldZ)).toBeNull();
 
-  const generated = world.prefetchFarFieldSummariesAround(spawn, world.chunkSize * 6, 64);
+  let generated = 0;
+  for (let attempt = 0; attempt < 32 && world.sampleFarFieldColumn(farWorldX, farWorldZ) === null; attempt += 1) {
+    generated += world.prefetchFarFieldSummariesAround(spawn, world.chunkSize * 6, 64);
+  }
 
   expect(generated).toBeGreaterThan(0);
   expect(world.sampleFarFieldColumn(farWorldX, farWorldZ)).not.toBeNull();
@@ -561,6 +564,49 @@ test("resident world adopts completed persisted region summaries for far-field s
   const sampled = world.sampleFarFieldColumn(farChunkX * generator.chunkSize + 1, farChunkZ * generator.chunkSize + 1);
   expect(sampled).not.toBeNull();
   expect(sampled!.surfaceY).toBeGreaterThanOrEqual(0);
+});
+
+test("persisted region summaries seed incremental far-field chunk-summary discovery", () => {
+  const generator = new CountingProceduralWorldGenerator(1337, { chunkSize: 16 });
+  const spawnProbeWorld = new ProceduralResidentWorld(generator, { horizontalRadiusChunks: 1 });
+  const spawn = spawnProbeWorld.getSpawnPosition();
+  const centerChunkX = Math.floor(spawn[0] / generator.chunkSize);
+  const centerChunkZ = Math.floor(spawn[2] / generator.chunkSize);
+  const farChunkX = centerChunkX + 4;
+  const farChunkZ = centerChunkZ - 3;
+  const farChunkY = 0;
+  const generated = generator.generateChunk(farChunkX, farChunkY, farChunkZ);
+  const columnSummary = summarizeGeneratedRenderColumn(farChunkX, farChunkZ, [generated.renderSummary], generator.chunkSize);
+  const requestedSummaries: Array<{ x: number; y: number; z: number }> = [];
+  let drainedRegionSummary = false;
+
+  expect(columnSummary).not.toBeNull();
+
+  const world = new ProceduralResidentWorld(generator, {
+    horizontalRadiusChunks: 1,
+    asyncChunkGeneration: createFakeAsyncQueue({
+      drainCompletedRegionSummaries: () => {
+        if (drainedRegionSummary) {
+          return [];
+        }
+        drainedRegionSummary = true;
+        return [upsertGeneratedRenderSummaryRegion(null, columnSummary!)];
+      },
+      requestSummary(cx, cy, cz) {
+        requestedSummaries.push({ x: cx, y: cy, z: cz });
+        return true;
+      },
+    }),
+  });
+
+  world.updateResidencyAround(spawn, { maxGenerateChunks: 0 });
+  generator.sampleColumnCalls = 0;
+
+  const requested = world.prefetchFarFieldSummariesAround(spawn, world.chunkSize * 8, 4);
+
+  expect(requested).toBeGreaterThan(0);
+  expect(requestedSummaries).toContainEqual({ x: farChunkX, y: farChunkY, z: farChunkZ });
+  expect(generator.sampleColumnCalls).toBe(0);
 });
 
 test("far-field sampling follows resident voxel edits instead of stale generator output", () => {

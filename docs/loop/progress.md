@@ -2109,3 +2109,31 @@
 - Residual:
   - the trace still shows far-summary prefetch in non-movement portions of the session, so the algorithm itself is still too expensive
   - the next far-field task should be to make summary prefetch incremental/stateful so even idle/settle work cannot produce multi-second scans
+
+## 2026-03-12 incremental far-summary frontier prefetch
+
+- The next trace-driven hypothesis came directly from the residual after the live-walk fix:
+  - movement was now interactive
+  - but non-movement trace time still showed `prefetchFarFieldSummariesAround(...)` as a real CPU hotspot
+  - the shape of the code matched that trace: the prefetch path was still re-walking a large prioritized column search space and only doing localized work accidentally
+- I used the research notes as the design constraint here:
+  - geometry-clipmap-style streaming should be incremental, not full-rescan
+  - chunked voxel streaming should turn newly available data into localized follow-up work
+  - that means a frontier queue and bounded progress, not “start from the center again”
+- The kept refactor in `ProceduralResidentWorld` does three things:
+  - keeps a stateful far-summary scan cursor instead of restarting the prioritized outer-radius column walk every call
+  - adds a localized candidate-column queue so newly completed chunk/region summaries seed nearby follow-up work directly
+  - caps per-call column visits, so idle/settle frames cannot burn time just proving that hundreds of already-visited columns still have no immediate work
+- I also kept the change honest with a new regression:
+  - persisted region summaries now have a direct test proving they seed incremental far-field chunk-summary discovery without generator probing
+- The important result is not a dramatic average-frame win; it is that the trace-level hotspot is gone:
+  - in the previous live-forward trace, `prefetchFarFieldSummariesAround(...)` and `prefetchFarFieldSummaries(...)` together accounted for about `4461.1 ms` exclusive time in the reported hot frames
+  - in the new live-forward trace, those frames dropped to `0 ms` in the reported exclusive hotspot set
+  - the walk benchmark also stopped dragging out with long background work: total benchmark elapsed dropped from about `20204.107 ms` to about `14117.159 ms`
+- The gameplay path stayed healthy while doing this:
+  - walk average gameplay frame stayed low at about `1.333 ms`
+  - walk max gameplay frame stayed at about `11.9 ms`
+  - hole-signal frames stayed at `0`
+- Residual:
+  - with prefetch scanning cooled down, the next clearly dominant costs are worker-side generation/meshing and summary/persistence churn
+  - the strongest next candidate is incremental column-summary application or lighter summary-only persistence, not more broad far-field scanning changes

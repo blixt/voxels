@@ -29,6 +29,7 @@ const DEFAULT_HORIZONTAL_RADIUS_CHUNKS = 8;
 const DEFAULT_UNDERGROUND_PADDING_CHUNKS = 3;
 const DEFAULT_AIR_PADDING_CHUNKS = 2;
 const FAR_FIELD_SUMMARY_DISCOVERY_VERTICAL_PADDING_CHUNKS = 1;
+const FAR_FIELD_PREFETCH_MAX_COLUMN_VISITS_PER_CALL = 64;
 const SPAWN_FOOTPRINT_RADIUS = metersToWorldUnits(0.8);
 const SPAWN_SCAN_DEPTH = metersToWorldUnits(3.2);
 const SPAWN_MAX_SURFACE_DROP = metersToWorldUnits(1.2);
@@ -91,6 +92,13 @@ interface ChunkYRange {
   maxCy: number;
 }
 
+interface FarFieldPrefetchCursor {
+  anchorChunkX: number;
+  anchorChunkZ: number;
+  outerRadiusChunks: number;
+  nextColumnOffsetIndex: number;
+}
+
 export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFieldSource {
   readonly chunkSize: number;
   readonly minY = 0;
@@ -115,12 +123,15 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   private readonly readyGeneratedChunks = new Map<string, GeneratedChunk>();
   private readonly pendingFarFieldColumnRanges = new Map<string, ChunkYRange>();
   private readonly missingPersistedFarFieldRegionSummaries = new Set<string>();
+  private readonly queuedFarFieldPrefetchColumnKeys: string[] = [];
+  private readonly queuedFarFieldPrefetchColumnKeySet = new Set<string>();
   private readonly asyncChunkGeneration: AsyncChunkGenerationQueue | null;
   private cachedSpawnPosition: Vec3 | null = null;
   private residentColumnRevision = 0;
   private lastAnchorSignature = "";
   private lastAnchorComplete = true;
   private nextEditSequence = 1;
+  private farFieldPrefetchCursor: FarFieldPrefetchCursor | null = null;
 
   constructor(
     readonly generator: ProceduralWorldGenerator,
@@ -787,53 +798,151 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     const centerChunkZ = Math.floor(position[2] / this.chunkSize);
     const outerRadiusChunks = Math.max(this.horizontalRadiusChunks, Math.ceil(outerRadiusWorldUnits / this.chunkSize));
     const residentRadiusSquared = this.horizontalRadiusChunks * this.horizontalRadiusChunks;
+    this.syncFarFieldPrefetchCursor(centerChunkX, centerChunkZ, outerRadiusChunks);
     let requestedChunks = 0;
 
-    for (const [dx, dz] of prioritizedColumnOffsets(outerRadiusChunks)) {
-      if (requestedChunks >= maxGenerateChunks) {
-        break;
-      }
+    requestedChunks += this.drainQueuedFarFieldPrefetchColumns(
+      centerChunkX,
+      centerChunkZ,
+      outerRadiusChunks,
+      residentRadiusSquared,
+      maxGenerateChunks - requestedChunks,
+    );
+
+    let visitedColumns = 0;
+    const offsets = prioritizedColumnOffsets(outerRadiusChunks);
+    while (
+      requestedChunks < maxGenerateChunks
+      && visitedColumns < FAR_FIELD_PREFETCH_MAX_COLUMN_VISITS_PER_CALL
+      && this.farFieldPrefetchCursor
+      && this.farFieldPrefetchCursor.nextColumnOffsetIndex < offsets.length
+    ) {
+      const [dx, dz] = offsets[this.farFieldPrefetchCursor.nextColumnOffsetIndex++]!;
+      visitedColumns += 1;
       if (dx * dx + dz * dz <= residentRadiusSquared) {
         continue;
       }
-      const cx = centerChunkX + dx;
-      const cz = centerChunkZ + dz;
-      if (!this.generatedRenderColumnSummaries.has(toColumnKey(cx, cz)) && !this.pendingFarFieldColumnRanges.has(toColumnKey(cx, cz))) {
-        this.requestPersistedFarFieldRegionSummaryForColumn(cx, cz);
-      }
-      const estimatedRange = this.estimateFarFieldSummaryChunkYRange(cx, cz);
-      if (!estimatedRange) {
+      requestedChunks += this.requestFarFieldSummaryChunksForColumn(
+        centerChunkX + dx,
+        centerChunkZ + dz,
+        maxGenerateChunks - requestedChunks,
+      );
+    }
+
+    return requestedChunks;
+  }
+
+  private syncFarFieldPrefetchCursor(centerChunkX: number, centerChunkZ: number, outerRadiusChunks: number): void {
+    if (
+      this.farFieldPrefetchCursor
+      && this.farFieldPrefetchCursor.anchorChunkX === centerChunkX
+      && this.farFieldPrefetchCursor.anchorChunkZ === centerChunkZ
+      && this.farFieldPrefetchCursor.outerRadiusChunks === outerRadiusChunks
+    ) {
+      return;
+    }
+    this.farFieldPrefetchCursor = {
+      anchorChunkX: centerChunkX,
+      anchorChunkZ: centerChunkZ,
+      outerRadiusChunks,
+      nextColumnOffsetIndex: 0,
+    };
+    this.seedQueuedFarFieldPrefetchColumns(centerChunkX, centerChunkZ, outerRadiusChunks);
+  }
+
+  private seedQueuedFarFieldPrefetchColumns(centerChunkX: number, centerChunkZ: number, outerRadiusChunks: number): void {
+    const outerRadiusSquared = outerRadiusChunks * outerRadiusChunks;
+    const residentRadiusSquared = this.horizontalRadiusChunks * this.horizontalRadiusChunks;
+    for (const columnKey of this.pendingFarFieldColumnRanges.keys()) {
+      const [cx, cz] = parseColumnKey(columnKey);
+      const dx = cx - centerChunkX;
+      const dz = cz - centerChunkZ;
+      const distanceSquared = dx * dx + dz * dz;
+      if (distanceSquared <= residentRadiusSquared || distanceSquared > outerRadiusSquared) {
         continue;
       }
-      const { minCy, maxCy } = estimatedRange;
-      for (const cy of prioritizeFarFieldSurfaceChunkYRange(minCy, maxCy)) {
-        if (requestedChunks >= maxGenerateChunks) {
-          break;
-        }
-        const key = toChunkKey(cx, cy, cz);
-        if (
-          this.chunks.has(key)
-          || this.generatedRenderSummaries.has(key)
-          || this.emptyChunkKeys.has(key)
-          || this.asyncChunkGeneration?.hasPendingChunk(cx, cy, cz)
-        ) {
-          continue;
-        }
-        this.notePendingFarFieldColumnRange(cx, cz, cy);
-        if (this.asyncChunkGeneration) {
-          if (this.asyncChunkGeneration.requestSummary(cx, cy, cz)) {
-            requestedChunks += 1;
-          }
-          continue;
-        }
-        const generated = this.generator.generateChunk(cx, cy, cz);
-        this.applyOverlayToGeneratedChunk(key, generated);
-        this.recordGeneratedChunkRenderSummary(key, generated);
-        if (generated.solidCount === 0) {
-          this.emptyChunkKeys.add(key);
-        }
-        requestedChunks += 1;
+      this.enqueueFarFieldPrefetchColumn(cx, cz);
+    }
+  }
+
+  private drainQueuedFarFieldPrefetchColumns(
+    centerChunkX: number,
+    centerChunkZ: number,
+    outerRadiusChunks: number,
+    residentRadiusSquared: number,
+    maxGenerateChunks: number,
+  ): number {
+    if (maxGenerateChunks <= 0) {
+      return 0;
+    }
+    let requestedChunks = 0;
+    let visitedColumns = 0;
+    const outerRadiusSquared = outerRadiusChunks * outerRadiusChunks;
+    while (
+      requestedChunks < maxGenerateChunks
+      && visitedColumns < FAR_FIELD_PREFETCH_MAX_COLUMN_VISITS_PER_CALL
+      && this.queuedFarFieldPrefetchColumnKeys.length > 0
+    ) {
+      const columnKey = this.queuedFarFieldPrefetchColumnKeys.shift()!;
+      this.queuedFarFieldPrefetchColumnKeySet.delete(columnKey);
+      const [cx, cz] = parseColumnKey(columnKey);
+      const dx = cx - centerChunkX;
+      const dz = cz - centerChunkZ;
+      const distanceSquared = dx * dx + dz * dz;
+      if (distanceSquared <= residentRadiusSquared || distanceSquared > outerRadiusSquared) {
+        continue;
       }
+      visitedColumns += 1;
+      requestedChunks += this.requestFarFieldSummaryChunksForColumn(cx, cz, maxGenerateChunks - requestedChunks);
+    }
+    return requestedChunks;
+  }
+
+  private requestFarFieldSummaryChunksForColumn(cx: number, cz: number, maxGenerateChunks: number): number {
+    const columnKey = toColumnKey(cx, cz);
+    if (!this.generatedRenderColumnSummaries.has(columnKey) && !this.pendingFarFieldColumnRanges.has(columnKey)) {
+      this.requestPersistedFarFieldRegionSummaryForColumn(cx, cz);
+    }
+    const estimatedRange = this.estimateFarFieldSummaryChunkYRange(cx, cz);
+    if (!estimatedRange) {
+      return 0;
+    }
+
+    let requestedChunks = 0;
+    let hasOutstandingMissingChunks = false;
+    const { minCy, maxCy } = estimatedRange;
+    for (const cy of prioritizeFarFieldSurfaceChunkYRange(minCy, maxCy)) {
+      const key = toChunkKey(cx, cy, cz);
+      if (
+        this.chunks.has(key)
+        || this.generatedRenderSummaries.has(key)
+        || this.emptyChunkKeys.has(key)
+        || this.asyncChunkGeneration?.hasPendingChunk(cx, cy, cz)
+      ) {
+        continue;
+      }
+      hasOutstandingMissingChunks = true;
+      if (requestedChunks >= maxGenerateChunks) {
+        continue;
+      }
+      this.notePendingFarFieldColumnRange(cx, cz, cy);
+      if (this.asyncChunkGeneration) {
+        if (this.asyncChunkGeneration.requestSummary(cx, cy, cz)) {
+          requestedChunks += 1;
+        }
+        continue;
+      }
+      const generated = this.generator.generateChunk(cx, cy, cz);
+      this.applyOverlayToGeneratedChunk(key, generated);
+      this.recordGeneratedChunkRenderSummary(key, generated);
+      if (generated.solidCount === 0) {
+        this.emptyChunkKeys.add(key);
+      }
+      requestedChunks += 1;
+    }
+
+    if (hasOutstandingMissingChunks) {
+      this.enqueueFarFieldPrefetchColumn(cx, cz);
     }
 
     return requestedChunks;
@@ -1012,6 +1121,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     chunkKeys.add(key);
     this.generatedRenderChunkKeysByColumn.set(columnKey, chunkKeys);
     this.rebuildColumnRenderSummary(summary.coord.x, summary.coord.z);
+    this.enqueueFarFieldPrefetchColumnNeighbors(summary.coord.x, summary.coord.z);
   }
 
   private recordPersistedRegionRenderSummary(region: GeneratedRenderSummaryRegion): void {
@@ -1027,6 +1137,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
       return;
     }
     this.generatedRenderColumnSummaries.set(columnKey, summary);
+    this.enqueueFarFieldPrefetchColumnNeighbors(summary.chunkX, summary.chunkZ);
   }
 
   private recordResidentChunkRenderSummary(chunk: VoxelChunk): void {
@@ -1090,10 +1201,27 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     const existing = this.pendingFarFieldColumnRanges.get(columnKey);
     if (!existing) {
       this.pendingFarFieldColumnRanges.set(columnKey, { minCy: cy, maxCy: cy });
+      this.enqueueFarFieldPrefetchColumn(cx, cz);
       return;
     }
     existing.minCy = Math.min(existing.minCy, cy);
     existing.maxCy = Math.max(existing.maxCy, cy);
+    this.enqueueFarFieldPrefetchColumn(cx, cz);
+  }
+
+  private enqueueFarFieldPrefetchColumnNeighbors(cx: number, cz: number): void {
+    for (const [offsetX, offsetZ] of FAR_FIELD_DISCOVERY_NEIGHBOR_OFFSETS_WITH_SELF) {
+      this.enqueueFarFieldPrefetchColumn(cx + offsetX, cz + offsetZ);
+    }
+  }
+
+  private enqueueFarFieldPrefetchColumn(cx: number, cz: number): void {
+    const columnKey = toColumnKey(cx, cz);
+    if (this.queuedFarFieldPrefetchColumnKeySet.has(columnKey)) {
+      return;
+    }
+    this.queuedFarFieldPrefetchColumnKeySet.add(columnKey);
+    this.queuedFarFieldPrefetchColumnKeys.push(columnKey);
   }
 
   private noteColumnChunkYRange(cx: number, cz: number, cy: number): void {
@@ -1140,6 +1268,10 @@ const FAR_FIELD_DISCOVERY_NEIGHBOR_OFFSETS: ReadonlyArray<readonly [number, numb
   [-1, 1],
   [0, 1],
   [1, 1],
+];
+const FAR_FIELD_DISCOVERY_NEIGHBOR_OFFSETS_WITH_SELF: ReadonlyArray<readonly [number, number]> = [
+  [0, 0],
+  ...FAR_FIELD_DISCOVERY_NEIGHBOR_OFFSETS,
 ];
 const PRIORITIZED_COLUMN_OFFSETS = new Map<number, Array<[number, number]>>();
 
@@ -1239,6 +1371,14 @@ function prioritizeFarFieldSurfaceChunkYRange(minCy: number, maxCy: number): num
 
 function toChunkKey(cx: number, cy: number, cz: number): string {
   return `${cx}:${cy}:${cz}`;
+}
+
+function parseColumnKey(columnKey: string): [number, number] {
+  const separator = columnKey.indexOf(":");
+  return [
+    Number.parseInt(columnKey.slice(0, separator), 10),
+    Number.parseInt(columnKey.slice(separator + 1), 10),
+  ];
 }
 
 function toLocalVoxelIndex(
