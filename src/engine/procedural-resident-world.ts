@@ -1,4 +1,5 @@
 import type { ChunkCoordinate, Vec3, WorldStats } from "./types.ts";
+import type { AsyncChunkGenerationQueue } from "./async-chunk-generation.ts";
 import {
   ProceduralWorldGenerator,
   isProceduralWaterMaterial,
@@ -17,9 +18,12 @@ export interface ResidencyPhaseMetrics {
   surfaceSampleMs: number;
   yRangeMs: number;
   chunkGenerationMs: number;
+  chunkDispatchMs: number;
+  chunkDrainMs: number;
   chunkAdoptionMs: number;
   evictionMs: number;
   neighborDirtyMs: number;
+  inFlightChunks: number;
 }
 
 export interface ResidencyUpdateSummary {
@@ -57,6 +61,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
   private readonly chunks = new Map<string, VoxelChunk>();
   private readonly emptyChunkKeys = new Set<string>();
   private readonly residentColumnCounts = new Map<string, number>();
+  private readonly asyncChunkGeneration: AsyncChunkGenerationQueue | null;
   private residentColumnRevision = 0;
   private lastAnchorSignature = "";
   private lastAnchorComplete = true;
@@ -67,6 +72,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       horizontalRadiusChunks?: number;
       undergroundPaddingChunks?: number;
       airPaddingChunks?: number;
+      asyncChunkGeneration?: AsyncChunkGenerationQueue | null;
     } = {},
   ) {
     this.chunkSize = generator.chunkSize;
@@ -75,6 +81,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     this.horizontalRadiusChunks = options.horizontalRadiusChunks ?? DEFAULT_HORIZONTAL_RADIUS_CHUNKS;
     this.undergroundPaddingChunks = options.undergroundPaddingChunks ?? DEFAULT_UNDERGROUND_PADDING_CHUNKS;
     this.airPaddingChunks = options.airPaddingChunks ?? DEFAULT_AIR_PADDING_CHUNKS;
+    this.asyncChunkGeneration = options.asyncChunkGeneration ?? null;
     this.lastResidency = {
       changed: false,
       complete: true,
@@ -346,9 +353,20 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     const evictedChunkCoords: ChunkCoordinate[] = [];
     let yRangeMs = 0;
     let chunkGenerationMs = 0;
+    let chunkDispatchMs = 0;
+    let chunkDrainMs = 0;
     let chunkAdoptionMs = 0;
     let evictionMs = 0;
     let neighborDirtyMs = 0;
+    let inFlightChunks = this.asyncChunkGeneration?.getPendingCount() ?? 0;
+    const drainStartedAt = performance.now();
+    const completedGeneratedChunks = this.asyncChunkGeneration?.drainCompletedChunks() ?? [];
+    chunkDrainMs = performance.now() - drainStartedAt;
+    const completedGeneratedChunksByKey = new Map<string, GeneratedChunk>();
+    for (const generated of completedGeneratedChunks) {
+      completedGeneratedChunksByKey.set(toChunkKey(generated.coord.x, generated.coord.y, generated.coord.z), generated);
+    }
+    let scheduledChunks = 0;
 
     for (const [dx, dz] of prioritizedColumnOffsets(radiusChunks)) {
       const cx = centerChunkX + dx;
@@ -365,8 +383,46 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
         if (this.chunks.has(key)) {
           continue;
         }
+        const completed = completedGeneratedChunksByKey.get(key);
+        if (completed) {
+          completedGeneratedChunksByKey.delete(key);
+          if (completed.solidCount === 0) {
+            emptyChunksSkipped += 1;
+            this.emptyChunkKeys.add(key);
+            continue;
+          }
+          const adoptionStartedAt = performance.now();
+          const chunk = createResidentChunk(completed, this.chunkSize);
+          this.emptyChunkKeys.delete(key);
+          this.adoptResidentChunk(key, chunk);
+          generatedChunks += 1;
+          generatedChunkCoords.push({ x: cx, y: cy, z: cz });
+          chunkAdoptionMs += performance.now() - adoptionStartedAt;
+          const dirtyStartedAt = performance.now();
+          touchedNeighborChunks += this.markAdjacentChunksDirty(cx, cy, cz);
+          neighborDirtyMs += performance.now() - dirtyStartedAt;
+          continue;
+        }
         if (this.emptyChunkKeys.has(key)) {
           cachedEmptyChunkHits += 1;
+          continue;
+        }
+        if (this.asyncChunkGeneration) {
+          if (this.asyncChunkGeneration.hasPendingChunk(cx, cy, cz)) {
+            pendingChunks += 1;
+            continue;
+          }
+          if (scheduledChunks >= maxGenerateChunks) {
+            pendingChunks += 1;
+            continue;
+          }
+          const dispatchStartedAt = performance.now();
+          const requested = this.asyncChunkGeneration.requestChunk(cx, cy, cz);
+          chunkDispatchMs += performance.now() - dispatchStartedAt;
+          if (requested) {
+            scheduledChunks += 1;
+          }
+          pendingChunks += 1;
           continue;
         }
         if (generatedChunks >= maxGenerateChunks) {
@@ -394,6 +450,12 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
       }
     }
 
+    for (const [key, generated] of completedGeneratedChunksByKey) {
+      if (generated.solidCount === 0) {
+        this.emptyChunkKeys.add(key);
+      }
+    }
+
     for (const [key, chunk] of [...this.chunks.entries()]) {
       if (neededKeys.has(key)) {
         continue;
@@ -410,6 +472,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
 
     this.lastAnchorSignature = anchorSignature;
     this.lastAnchorComplete = pendingChunks === 0;
+    inFlightChunks = this.asyncChunkGeneration?.getPendingCount() ?? 0;
     this.lastResidency = {
       changed: generatedChunks > 0 || evictedChunks > 0,
       complete: pendingChunks === 0,
@@ -432,9 +495,12 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
         surfaceSampleMs,
         yRangeMs,
         chunkGenerationMs,
+        chunkDispatchMs,
+        chunkDrainMs,
         chunkAdoptionMs,
         evictionMs,
         neighborDirtyMs,
+        inFlightChunks,
       },
     };
     return this.lastResidency;
@@ -680,9 +746,12 @@ function zeroResidencyPhaseMetrics(): ResidencyPhaseMetrics {
     surfaceSampleMs: 0,
     yRangeMs: 0,
     chunkGenerationMs: 0,
+    chunkDispatchMs: 0,
+    chunkDrainMs: 0,
     chunkAdoptionMs: 0,
     evictionMs: 0,
     neighborDirtyMs: 0,
+    inFlightChunks: 0,
   };
 }
 

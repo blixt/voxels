@@ -1418,3 +1418,47 @@
   - orchard pockets stayed present at `0.160`
 - The key lesson from this slice:
   - distinct world identity comes more from clustered placement regimes and cross-layer relationships than from constantly minting new biome names
+
+## 2026-03-12 off-main-thread chunk generation
+
+- The next performance slice was a genuine architecture experiment, not a micro-optimization:
+  - move chunk generation off the main thread
+  - keep residency decisions and meshing on the main thread for now
+  - accept the experiment only if browser route traces improve without reintroducing hole signals
+- I implemented a browser-side async generation queue:
+  - `src/client/async-procedural-chunk-generation.ts`
+  - `src/client/procedural-generation-worker.ts`
+  - shared transfer helpers in:
+    - `src/engine/async-chunk-generation.ts`
+    - `src/engine/generated-chunk-transfer.ts`
+  - `ProceduralResidentWorld` can now opportunistically drain completed generated chunks and schedule missing chunks onto a worker queue
+- The most important false lead in this slice is worth recording:
+  - the first implementation used `new Worker(new URL("./procedural-generation-worker.ts", import.meta.url), ...)`
+  - Bun's current full-stack path did not emit a browser worker asset from that pattern in this repo
+  - the route trace made the failure obvious:
+    - main-thread frame time looked fantastic
+    - `maxPendingChunks` exploded
+    - no detailed meshes were built
+    - hole signals reappeared
+- The kept fix is explicit worker asset serving/building:
+  - dev server now builds and serves `/assets/procedural-generation-worker.js`
+  - production build now emits `dist/assets/procedural-generation-worker.js`
+  - the browser queue uses that stable asset URL instead of assuming automatic worker bundling
+- The resulting A/B is strong enough to keep:
+  - baseline route trace (`c7c51cd` worktree):
+    - avg gameplay frame `12.33 ms`
+    - p95 gameplay frame `35.00 ms`
+    - max gameplay frame `38.5 ms`
+    - hole signals `0`
+  - kept worker route trace:
+    - avg gameplay frame `4.08 ms`
+    - p95 gameplay frame `16.70 ms`
+    - max gameplay frame `19.30 ms`
+    - hole signals `0`
+- The main-thread improvement is real because the route trace also dropped:
+  - avg stream `6.28 ms -> 2.23 ms`
+  - avg mesh `5.74 ms -> 1.75 ms`
+- The current tradeoff is also real:
+  - `maxPendingChunks` increased a lot (`200 -> 981`)
+  - this means throughput is now partly hidden behind async generation instead of disappearing
+  - but the route benchmark stayed hole-free, so this is a good trade for now

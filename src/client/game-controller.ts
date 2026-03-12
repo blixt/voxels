@@ -19,6 +19,7 @@ import {
   type ExplorationObservation,
 } from "../engine/exploration-journal.ts";
 import { rebuildDirtyMeshes } from "../engine/mesher.ts";
+import { createAsyncProceduralChunkGeneration } from "./async-procedural-chunk-generation.ts";
 import {
   createPlayerState,
   getPlayerEyePosition,
@@ -548,7 +549,10 @@ interface CapturedBenchmarkFrame {
 export class GameController {
   readonly canvas: HTMLCanvasElement;
   readonly generator = new ProceduralWorldGenerator(1337);
-  readonly world = new ProceduralResidentWorld(this.generator);
+  readonly asyncChunkGeneration = createAsyncProceduralChunkGeneration(this.generator);
+  readonly world = new ProceduralResidentWorld(this.generator, {
+    asyncChunkGeneration: this.asyncChunkGeneration,
+  });
   readonly farField = new ProceduralFarField(this.generator);
   readonly explorationJournal = new ExplorationJournal();
 
@@ -613,6 +617,7 @@ export class GameController {
     }
     this.pointerLocked = false;
     this.pressedKeys.clear();
+    this.asyncChunkGeneration?.dispose();
     this.renderer?.dispose();
     this.canvas.removeEventListener("click", this.handleCanvasClick);
     document.removeEventListener("pointerlockchange", this.handlePointerLockChange);
@@ -2456,9 +2461,12 @@ function zeroResidencyPhaseMetrics(): ResidencyUpdateSummary["phaseMs"] {
     surfaceSampleMs: 0,
     yRangeMs: 0,
     chunkGenerationMs: 0,
+    chunkDispatchMs: 0,
+    chunkDrainMs: 0,
     chunkAdoptionMs: 0,
     evictionMs: 0,
     neighborDirtyMs: 0,
+    inFlightChunks: 0,
   };
 }
 

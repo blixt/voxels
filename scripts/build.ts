@@ -15,4 +15,18 @@ if (!result.success) {
   throw new Error(`Production build failed:\n${messages}`);
 }
 
+const workerResult = await Bun.build({
+  entrypoints: ["./src/client/procedural-generation-worker.ts"],
+  outdir: "./dist/assets",
+  target: "browser",
+  format: "esm",
+  splitting: false,
+  minify: true,
+});
+
+if (!workerResult.success) {
+  const messages = workerResult.logs.map((log) => `[${log.level}] ${log.message}`).join("\n");
+  throw new Error(`Production worker build failed:\n${messages}`);
+}
+
 console.log("Built production server bundle into dist/");

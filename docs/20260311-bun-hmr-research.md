@@ -265,6 +265,7 @@ The repo now uses this development model. Three implementation details were wort
 - the built Bun server must be started from inside `dist/`, or its bundled HTML-import asset paths will fail to resolve
 - `process.env.NODE_ENV` should be read in a runtime-bound way inside `src/server.ts`; Bun's production build can otherwise fold the expression too early and accidentally leave the built server in development mode
 - self-accepting browser entry modules should stay synchronous at module level; the first `await mount...()` version triggered Bun HMR runtime errors during reload, while a synchronous module plus async controller init worked cleanly
+- browser worker assets in this repo needed an explicit route/build path; the first `new Worker(new URL("./worker.ts", import.meta.url), ...)` attempt did not emit a usable browser worker asset under the current Bun full-stack setup, so the kept solution serves a dedicated built worker file at `/assets/procedural-generation-worker.js`
 
 ## Sources
 

@@ -3129,3 +3129,51 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - This slice is worth keeping.
 - The landmark/underground signal is now measurably present, but there is still room to make cave-side and below-ground identity richer than “surface cues plus material palette”.
+
+## 2026-03-12 off-main-thread chunk generation
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/generated-chunk-transfer.test.ts`
+- `mise run build`
+- `mise run trace-route -- --label=baseline-async-gen --duration=4 --settle=1 --sample-hz=30`
+  - run from temporary worktree at commit `c7c51cd`
+- `mise run trace-route -- --label=async-gen-worker-v2 --duration=4 --settle=1 --sample-hz=30`
+
+#### Numeric probes
+
+- Baseline route trace:
+  - report: `/tmp/voxels-c7c51cd/artifacts/browser-route-trace/20260312T062902Z-baseline-async-gen/report.json`
+  - avg gameplay frame `12.331333332061767`
+  - p95 gameplay frame `35`
+  - max gameplay frame `38.5`
+  - avg stream `6.275333331425984`
+  - avg mesh `5.738666664361954`
+  - hole signals `0`
+- First rejected worker attempt:
+  - report: `artifacts/browser-route-trace/20260312T062918Z-async-gen-worker/report.json`
+  - avg gameplay frame `2.1053333310286204`
+  - hole signals `35`
+  - max pending chunks `1237`
+  - avg mesh `0`
+  - diagnosis: the browser worker asset was not actually loading, so this was a ghost win
+- Kept worker route trace:
+  - report: `artifacts/browser-route-trace/20260312T063321Z-async-gen-worker-v2/report.json`
+  - avg gameplay frame `4.083333336114883`
+  - p95 gameplay frame `16.69999998807907`
+  - max gameplay frame `19.30000001192093`
+  - avg stream `2.229333336353302`
+  - avg mesh `1.745333333015442`
+  - hole signals `0`
+  - max pending chunks `981`
+
+#### Added verification coverage
+
+- `tests/generated-chunk-transfer.test.ts` now verifies chunk transfer round-tripping for the worker seam.
+- The kept performance decision is backed by a real same-parameters browser route A/B using a temporary git worktree baseline.
+
+#### Residual
+
+- This slice is worth keeping.
+- The async generation seam improved player-frame cost a lot, but the high pending-chunk count means throughput is still the next pressure point.
