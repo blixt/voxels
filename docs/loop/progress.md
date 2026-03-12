@@ -1610,3 +1610,39 @@
   - `ProceduralFarField.updateAround(...)` was recentering every band using the smallest center stride in the whole stack
   - that meant distant bands could rebuild far more often than intended, which made the metric more position-sensitive than the band config claimed
 - I fixed that by recentering each band on its own configured `centerStride`, and I renamed the compact label to `Far Build` so the HUD stops implying this is some constant background render tax.
+
+## 2026-03-12 persistence-oriented generated chunk storage
+
+- I stopped treating generated chunks as “always transfer/store a raw dense `Uint16Array`”.
+- The new `generated-chunk-codec` moves generated chunks toward the research-backed sparse-outer / dense-local model:
+  - chunks are still `32^3` today
+  - the persistent/transfer format is split into `8^3` subchunks
+  - each subchunk becomes `empty`, `uniform`, `palette-packed`, or `dense16`
+- The first concrete payoff is at the worker boundary:
+  - async procedural generation no longer posts dense chunk payloads back to the main thread
+  - it posts the compressed payload and decodes on adoption
+  - that same compressed payload is what the browser cache stores
+- I kept the world model coherent instead of forking it:
+  - nearby detailed chunks still come from `generateChunk(...)`
+  - far-field now uses `sampleSurfaceColumn(...)`, which is a lighter query mode of the same generator, not a custom far-field terrain path
+- I added the first browser persistence seam directly where it buys the most:
+  - the procedural-generation worker now checks IndexedDB before generating a chunk
+  - on a miss it generates, compresses, stores, and returns the result
+  - on a later hit it returns the stored payload without rerunning worldgen
+- I also tightened the failure policy after spotting the first lazy catches:
+  - cache open/read/write failures are now treated as external-API degradations, not silent no-ops
+  - the worker logs a warning once per failure stage and disables the cache instead of hiding the problem
+- The runtime now exposes the persistence path enough to measure it:
+  - residency metrics carry `completedChunkCacheHits` and `completedGeneratedChunks`
+  - the debug HUD shows those values
+  - the game page now exposes `benchmarkChunkCacheReuse(...)` for future browser acceptance work
+- The first headless proof attempt against that benchmark was not trustworthy enough to keep as evidence:
+  - it exposed that our “ready” assumption for this specific benchmark path is still too loose in headless mode
+  - I kept the benchmark seam because it is useful, but I am not pretending that the first automated cache-reuse proof is solved yet
+- The trustworthy kept result from this slice is:
+  - focused codec/generator/far-field tests stay green
+  - production build stays green
+  - the standard Chrome route-trace harness still works after the storage/worker changes
+- The next high-signal persistence step is not “persist more dense chunks”; it is:
+  - region/column summaries for far-field and Y-range work
+  - then OPFS payloads + IndexedDB manifest metadata

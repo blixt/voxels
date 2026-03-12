@@ -32,6 +32,10 @@ declare global {
         iterations: number,
         chunkDelta?: number,
       ): ReturnType<GameController["benchmarkChunkCrossing"]>;
+      benchmarkChunkCacheReuse(
+        chunkDelta?: number,
+        maxFramesPerLeg?: number,
+      ): ReturnType<GameController["benchmarkChunkCacheReuse"]>;
       benchmarkIncrementalCrossing(
         iterations: number,
         chunkDelta?: number,
@@ -250,6 +254,8 @@ function mountGame(): GameRuntime {
     forceResidencyUpdate: () => controller.forceResidencyUpdate(),
     teleportAndSettle: (x, y, z, options) => controller.teleportAndSettle([x, y, z], options),
     benchmarkChunkCrossing: (iterations, chunkDelta) => controller.benchmarkChunkCrossing(iterations, chunkDelta),
+    benchmarkChunkCacheReuse: (chunkDelta, maxFramesPerLeg) =>
+      controller.benchmarkChunkCacheReuse(chunkDelta, maxFramesPerLeg),
     benchmarkIncrementalCrossing: (iterations, chunkDelta, stepsPerLeg, settleFrames) =>
       controller.benchmarkIncrementalCrossing(iterations, chunkDelta, stepsPerLeg, settleFrames),
     benchmarkRouteExperience: (options) => controller.benchmarkRouteExperience(options),

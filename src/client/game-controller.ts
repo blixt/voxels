@@ -251,6 +251,27 @@ export interface ChunkBoundaryBenchmark {
   summary: ChunkBoundaryBenchmarkSummary;
 }
 
+export interface ChunkCacheReuseLegSummary {
+  targetChunk: [number, number, number];
+  frameCount: number;
+  settled: boolean;
+  totalStreamMs: number;
+  totalMeshMs: number;
+  totalFarFieldMs: number;
+  totalGeneratedChunks: number;
+  totalPersistedChunkHits: number;
+  totalWorkerGeneratedChunks: number;
+  maxPendingChunks: number;
+  residentChunks: number;
+}
+
+export interface ChunkCacheReuseBenchmark {
+  chunkDelta: number;
+  radiusChunks: number;
+  populate: ChunkCacheReuseLegSummary;
+  revisit: ChunkCacheReuseLegSummary;
+}
+
 export interface IncrementalCrossingSample {
   frame: number;
   phase: "move" | "settle";
@@ -1278,6 +1299,80 @@ export class GameController {
     }
   }
 
+  async benchmarkChunkCacheReuse(chunkDelta = 24, maxFramesPerLeg = 240): Promise<ChunkCacheReuseBenchmark> {
+    const normalizedChunkDelta = Math.max(1, Math.floor(chunkDelta));
+    const normalizedMaxFrames = Math.max(1, Math.floor(maxFramesPerLeg));
+    const spawn = this.world.getSpawnPosition();
+    const baseChunkX = Math.floor(spawn[0] / this.world.chunkSize);
+    const baseChunkZ = Math.floor(spawn[2] / this.world.chunkSize);
+    const originTarget = buildEyePositionForChunkCenter(
+      baseChunkX,
+      baseChunkZ,
+      spawn[1],
+      this.world.chunkSize,
+      this.player.eyeHeight,
+    );
+    const farTarget = buildEyePositionForChunkCenter(
+      baseChunkX + normalizedChunkDelta,
+      baseChunkZ,
+      spawn[1],
+      this.world.chunkSize,
+      this.player.eyeHeight,
+    );
+    const savedPlayer = {
+      feetPosition: [...this.player.feetPosition] as Vec3,
+      velocity: [...this.player.velocity] as Vec3,
+      grounded: this.player.grounded,
+    };
+    const savedCamera = {
+      position: [...this.camera.position] as Vec3,
+      yaw: this.camera.yaw,
+      pitch: this.camera.pitch,
+      fovY: this.camera.fovY,
+      near: this.camera.near,
+      far: this.camera.far,
+    };
+    const savedStatus = this.status;
+    const savedStreamAnchor = this.streamAnchor
+      ? { chunkX: this.streamAnchor.chunkX, chunkZ: this.streamAnchor.chunkZ }
+      : null;
+
+    this.stop();
+    try {
+      await this.teleportAndSettle(originTarget, { radiusChunks: this.world.horizontalRadiusChunks });
+      const populate = await this.measureChunkCacheReuseLeg(farTarget, normalizedMaxFrames);
+      const revisit = await this.measureChunkCacheReuseLeg(originTarget, normalizedMaxFrames);
+      return {
+        chunkDelta: normalizedChunkDelta,
+        radiusChunks: this.world.horizontalRadiusChunks,
+        populate,
+        revisit,
+      };
+    } finally {
+      this.player.feetPosition = savedPlayer.feetPosition;
+      this.player.velocity = savedPlayer.velocity;
+      this.player.grounded = savedPlayer.grounded;
+      this.camera = {
+        position: savedCamera.position,
+        yaw: savedCamera.yaw,
+        pitch: savedCamera.pitch,
+        fovY: savedCamera.fovY,
+        near: savedCamera.near,
+        far: savedCamera.far,
+      };
+      this.status = savedStatus;
+      if (savedStreamAnchor) {
+        this.syncWorldAroundAnchor(savedStreamAnchor, true);
+      } else {
+        this.streamAnchor = null;
+        this.syncWorldAroundPlayer(true);
+      }
+      await this.renderProbeFrame();
+      this.pushHud(true);
+      this.start();
+    }
+  }
+
   async benchmarkIncrementalCrossing(
     iterations: number,
     chunkDelta = 2,
@@ -1581,6 +1676,59 @@ export class GameController {
       this.pushHud(true);
       this.start();
     }
+  }
+
+  private async measureChunkCacheReuseLeg(
+    targetEyePosition: Vec3,
+    maxFrames: number,
+  ): Promise<ChunkCacheReuseLegSummary> {
+    teleportPlayerToEyePosition(this.player, targetEyePosition);
+    this.player.grounded = true;
+    this.syncCameraToPlayer();
+    let frameCount = 0;
+    let totalStreamMs = 0;
+    let totalMeshMs = 0;
+    let totalFarFieldMs = 0;
+    let totalGeneratedChunks = 0;
+    let totalPersistedChunkHits = 0;
+    let totalWorkerGeneratedChunks = 0;
+    let maxPendingChunks = 0;
+    for (; frameCount < maxFrames; frameCount += 1) {
+      const residency = this.syncWorldAroundPlayer(frameCount === 0, true);
+      await this.renderProbeFrame();
+      totalStreamMs += residency.elapsedMs;
+      totalMeshMs += this.lastMeshBuildSummary.elapsedMs;
+      totalFarFieldMs += this.lastFarFieldSummary.elapsedMs;
+      totalGeneratedChunks += residency.generatedChunks;
+      totalPersistedChunkHits += residency.phaseMs.completedChunkCacheHits;
+      totalWorkerGeneratedChunks += residency.phaseMs.completedGeneratedChunks;
+      maxPendingChunks = Math.max(maxPendingChunks, residency.pendingChunks);
+      if (
+        residency.complete
+        && residency.pendingChunks === 0
+        && this.lastMeshBuildSummary.meshCount === 0
+        && this.lastFarFieldSummary.pendingBands === 0
+      ) {
+        break;
+      }
+    }
+    return {
+      targetChunk: [
+        Math.floor(targetEyePosition[0] / this.world.chunkSize),
+        Math.floor((targetEyePosition[1] - this.player.eyeHeight) / this.world.chunkSize),
+        Math.floor(targetEyePosition[2] / this.world.chunkSize),
+      ],
+      frameCount: frameCount + 1,
+      settled: frameCount < maxFrames,
+      totalStreamMs,
+      totalMeshMs,
+      totalFarFieldMs,
+      totalGeneratedChunks,
+      totalPersistedChunkHits,
+      totalWorkerGeneratedChunks,
+      maxPendingChunks,
+      residentChunks: this.world.getStats().chunkCount,
+    };
   }
 
   private loadBootstrapWorld(): void {

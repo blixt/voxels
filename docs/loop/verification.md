@@ -3380,3 +3380,54 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - This slice is worth keeping.
 - The `Far Build` metric is still a last-update cost, not a rolling average. That is now labeled more honestly, but if we later want a smoother player-facing perf readout, we should add an averaged companion instead of overloading this one.
+
+## 2026-03-12 persistence-oriented generated chunk storage
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/generated-chunk-codec.test.ts tests/procedural-generator.test.ts tests/procedural-far-field.test.ts`
+- `mise run build`
+- `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=8 --generate-budget=8 --mesh-budget=6 --far-band-budget=1 --chunk-delta=2`
+- `mise run trace-route -- --label=persist-smoke --duration=1 --settle=1 --sample-hz=20`
+
+#### Added verification coverage
+
+- `tests/generated-chunk-codec.test.ts`
+  - generated chunk codec round-trip
+  - empty chunk compression
+  - uniform chunk compression
+- `tests/procedural-generator.test.ts`
+  - `sampleSurfaceColumn(...)` matches the full-column fields used by far-field rendering
+- `tests/procedural-far-field.test.ts`
+  - updated lightweight generator stubs for the new surface-sampling path
+
+#### Numeric probes
+
+- Chunk codec focused checks:
+  - empty `32^3` chunk encoded size: `< 256 bytes`
+  - uniform `32^3` chunk encoded size: `< 16 KiB`
+- Local warmed stream profile still works after the storage changes:
+  - `crossing-d2`
+    - total stream `~453.95 ms`
+    - total mesh `~267.89 ms`
+    - total far field `~19.49 ms`
+    - max frame work `~40.87 ms`
+  - `crossing-far-anchor-d8`
+    - total stream `~1668.01 ms`
+    - total mesh `~659.68 ms`
+    - total far field `~393.37 ms`
+    - max frame work `~194.85 ms`
+  - `crossing-d1`
+    - total far field `~8.46 ms`
+- Chrome route-trace smoke stayed healthy after the worker/storage changes:
+  - report: `artifacts/browser-route-trace/20260312T152428Z-persist-smoke/report.json`
+  - avg gameplay frame `2.76 ms`
+  - p95 gameplay frame `3.10 ms`
+  - hole signals `0`
+
+#### Residual
+
+- This slice is worth keeping.
+- The browser chunk-cache seam is implemented and instrumented, but the first headless `benchmarkChunkCacheReuse(...)` proof was not reliable enough to count as acceptance yet.
+- The next harness step should be to tighten the benchmark-ready gate or add a dedicated browser cache-reuse script instead of hand-driving it.

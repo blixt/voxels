@@ -16,11 +16,11 @@ This file is the durable "keep going" loop for the repo. It exists so a future s
 ## Current cycle
 
 1. Feature: add biome-aware points of interest and cave-side setpieces that make the discovery journal pay off beyond counts alone.
-2. Performance/harness: use the new saved route samples to separate main-thread vs worker cost more cleanly, then attack async transfer/GC pressure or residency/Y-range sampling if the data supports it.
+2. Performance/harness: tighten the new browser chunk-cache reuse benchmark until it becomes a trustworthy acceptance check, then add persisted column/region summaries for far-field and Y-range work.
 3. Feature: deepen caves and below-ground progression so underground biome families matter beyond surface hints.
-4. Performance/harness: extend the off-main-thread path with smarter adoption batching or dirty-queue handling only if route A/B traces improve again without reopening holes.
+4. Performance/harness: split browser persistence into OPFS payloads plus IndexedDB metadata only if the benchmarked cache-reuse path is stable enough to measure cold vs warm behavior.
 5. Feature: build the next interaction layer on top of the new edit seam with lightweight persistence-ready tooling such as inventory-aware interaction smoke probes, structured edit snapshots, or early gather/build affordances beyond raw break/place.
-6. Performance/harness: revisit renderer sync/upload and async mesh worker sizing after the new route-sample artifacts make spike attribution less lossy.
+6. Performance/harness: revisit renderer sync/upload, async mesh worker sizing, and summary-driven far-field inputs after the persistence/surface-summary path is measurable.
 7. Refresh this file with a fresh six-task list that still alternates `feature -> performance/harness` and still ends with another refresh task.
 
 ## Acceptance checklist per slice
