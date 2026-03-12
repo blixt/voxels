@@ -99,6 +99,11 @@ interface TelemetryHistorySample {
   otherMs: number;
 }
 
+interface CaptureOverlayState {
+  label: string;
+  loading: boolean;
+}
+
 const ACHIEVEMENT_VISIBLE_MS = 3400;
 const ACHIEVEMENT_EXIT_MS = 320;
 const TELEMETRY_HISTORY_LIMIT = 64;
@@ -244,6 +249,10 @@ function mountGame(): GameRuntime {
     }
     telemetrySummaryView.update(snapshot);
     achievementPresenter.observe(snapshot.recentDiscoveries);
+    const captureState = buildCaptureOverlayState(snapshot);
+    captureButton.textContent = captureState.label;
+    captureButton.disabled = captureState.loading;
+    captureButton.classList.toggle("is-loading", captureState.loading);
     captureButton.hidden = snapshot.pointerLocked;
   };
 
@@ -311,6 +320,23 @@ function reportAsyncFailure(promise: Promise<unknown>): void {
       throw error;
     });
   });
+}
+
+function buildCaptureOverlayState(snapshot: GameHudSnapshot): CaptureOverlayState {
+  if (snapshot.bootstrapPlayableReady) {
+    return {
+      label: "Click To Enter The World",
+      loading: false,
+    };
+  }
+  return {
+    label: [
+      "Preparing World",
+      `${snapshot.streamPendingChunks.toLocaleString()} pending`,
+      `${snapshot.streamDirtyResidentChunks.toLocaleString()} dirty`,
+    ].join(" • "),
+    loading: true,
+  };
 }
 
 function createTelemetryValues(root: HTMLElement): HTMLSpanElement[] {

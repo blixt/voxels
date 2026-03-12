@@ -102,6 +102,7 @@ const DEFAULT_MAX_FAR_FIELD_BAND_REBUILDS_PER_FRAME = 1;
 const DEFAULT_MAX_FAR_FIELD_SURFACE_PREFETCH_CHUNKS_PER_FRAME = 8;
 const MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME = 6;
 const SYNC_NEAR_MESH_RADIUS_CHUNKS = 3;
+const BOOTSTRAP_PLAYABLE_COLUMN_RADIUS_CHUNKS = 2;
 const MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES = 6;
 const FAR_FIELD_RENDER_MASK_SPAN_CHUNKS = 32;
 const DISCOVERY_SAMPLE_INTERVAL_MS = 250;
@@ -168,6 +169,9 @@ export interface GameHudSnapshot {
   selectedInventoryMaterial: string;
   selectedInventoryCount: number;
   usedInventoryStacks: number;
+  bootstrapPlayableReady: boolean;
+  bootstrapVisualReady: boolean;
+  bootstrapElapsedMs: number;
   farFieldMs: number;
   farFieldBuiltBands: number;
   farFieldPendingBands: number;
@@ -693,6 +697,7 @@ export class GameController {
   private lastDiscoverySnapshot: ExplorationJournalSnapshot = this.explorationJournal.getSnapshot();
   private readonly bootstrapBenchmarkStartedAt = performance.now();
   private readonly bootstrapBenchmarkSamples: BootstrapBenchmarkSample[] = [];
+  private bootstrapPlayableReady = false;
   private bootstrapBenchmarkComplete = false;
   private readonly eagerBootstrapBenchmark: boolean;
 
@@ -789,6 +794,7 @@ export class GameController {
   getDebugSnapshot(): GameHudSnapshot {
     const stats = this.world.getStats();
     const discovery = this.refreshDiscoveryJournal();
+    const bootstrap = this.getBootstrapReadiness();
     return {
       status: this.status,
       pointerLocked: this.pointerLocked,
@@ -843,6 +849,9 @@ export class GameController {
       selectedInventoryMaterial: formatInventoryMaterial(getSelectedInventoryStack(this.inventory)?.material ?? null),
       selectedInventoryCount: getSelectedInventoryStack(this.inventory)?.count ?? 0,
       usedInventoryStacks: countUsedInventoryStacks(this.inventory),
+      bootstrapPlayableReady: bootstrap.playableReady,
+      bootstrapVisualReady: bootstrap.visualReady,
+      bootstrapElapsedMs: performance.now() - this.bootstrapBenchmarkStartedAt,
       farFieldMs: this.lastFarFieldSummary.elapsedMs,
       farFieldBuiltBands: this.lastFarFieldSummary.builtBands,
       farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
@@ -1841,15 +1850,15 @@ export class GameController {
     this.camera = createFirstPersonCamera(getPlayerEyePosition(this.player), 0.8, -0.32);
     this.streamAnchor = null;
     const bootstrapStartedAt = performance.now();
-    this.syncWorldAroundPlayer(true);
+    this.syncWorldAroundPlayer(false);
     this.lastGameplayFrameMs = performance.now() - bootstrapStartedAt;
     this.recordBootstrapBenchmarkSample(this.lastGameplayFrameMs);
-    this.status = "Click once to capture cursor";
+    this.status = this.bootstrapPlayableReady ? "Click once to capture cursor" : "Preparing world";
     this.pushHud(true);
   }
 
   private async drainBootstrapBenchmark(maxFrames = 600): Promise<void> {
-    if (this.bootstrapBenchmarkComplete) {
+    if (this.bootstrapPlayableReady) {
       return;
     }
     const normalizedMaxFrames = Math.max(1, Math.floor(maxFrames));
@@ -1865,7 +1874,7 @@ export class GameController {
       this.renderCurrentFrame();
       this.lastGameplayFrameMs = performance.now() - gameplayStartedAt;
       this.recordBootstrapBenchmarkSample(this.lastGameplayFrameMs);
-      if (this.bootstrapBenchmarkComplete) {
+      if (this.bootstrapPlayableReady) {
         return;
       }
       await new Promise<void>((resolve) => {
@@ -2590,12 +2599,7 @@ export class GameController {
     if (this.bootstrapBenchmarkComplete) {
       return;
     }
-    const dirtyResidentMeshes = summarizeDirtyResidentMeshes(this.world);
-    const pendingMeshJobs = this.asyncChunkMeshing?.getPendingCount() ?? 0;
-    const playableReady = this.lastStreamSummary.pendingChunks === 0
-      && dirtyResidentMeshes.dirtyResidentChunks === 0
-      && dirtyResidentMeshes.dirtyMeshlessResidentChunks === 0;
-    const visualReady = playableReady && this.lastFarFieldSummary.pendingBands === 0;
+    const bootstrap = this.getBootstrapReadiness();
     this.bootstrapBenchmarkSamples.push({
       frame: this.bootstrapBenchmarkSamples.length,
       elapsedMs: performance.now() - this.bootstrapBenchmarkStartedAt,
@@ -2612,19 +2616,60 @@ export class GameController {
       meshMs: this.lastMeshBuildSummary.elapsedMs,
       farFieldMs: this.lastFarFieldSummary.elapsedMs,
       pendingChunks: this.lastStreamSummary.pendingChunks,
-      pendingMeshJobs,
-      dirtyResidentChunks: dirtyResidentMeshes.dirtyResidentChunks,
-      dirtyMeshlessResidentChunks: dirtyResidentMeshes.dirtyMeshlessResidentChunks,
-      dirtyRetainedMeshResidentChunks: dirtyResidentMeshes.dirtyRetainedMeshResidentChunks,
+      pendingMeshJobs: bootstrap.pendingMeshJobs,
+      dirtyResidentChunks: bootstrap.dirtyResidentMeshes.dirtyResidentChunks,
+      dirtyMeshlessResidentChunks: bootstrap.dirtyResidentMeshes.dirtyMeshlessResidentChunks,
+      dirtyRetainedMeshResidentChunks: bootstrap.dirtyResidentMeshes.dirtyRetainedMeshResidentChunks,
       generatedChunks: this.lastStreamSummary.generatedChunks,
       evictedChunks: this.lastStreamSummary.evictedChunks,
       farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
-      playableReady,
-      visualReady,
+      playableReady: bootstrap.playableReady,
+      visualReady: bootstrap.visualReady,
     });
-    if (visualReady) {
+    if (bootstrap.playableReady) {
+      this.bootstrapPlayableReady = true;
+    }
+    if (bootstrap.visualReady) {
       this.bootstrapBenchmarkComplete = true;
     }
+  }
+
+  private getBootstrapReadiness(): {
+    dirtyResidentMeshes: ReturnType<typeof summarizeDirtyResidentMeshes>;
+    pendingMeshJobs: number;
+    playableReady: boolean;
+    visualReady: boolean;
+  } {
+    const dirtyResidentMeshes = summarizeDirtyResidentMeshes(this.world);
+    const pendingMeshJobs = this.asyncChunkMeshing?.getPendingCount() ?? 0;
+    const hasResidentChunks = this.world.getStats().chunkCount > 0;
+    const playerChunkX = Math.floor(this.player.feetPosition[0] / this.world.chunkSize);
+    const playerChunkY = Math.floor(this.player.feetPosition[1] / this.world.chunkSize);
+    const playerChunkZ = Math.floor(this.player.feetPosition[2] / this.world.chunkSize);
+    const localMissingColumns = countMissingResidentColumnsAround(
+      this.world,
+      playerChunkX,
+      playerChunkZ,
+      BOOTSTRAP_PLAYABLE_COLUMN_RADIUS_CHUNKS,
+    );
+    const urgentDirtyMeshlessChunks = countUrgentDirtyMeshlessChunks(
+      this.world,
+      playerChunkX,
+      playerChunkY,
+      playerChunkZ,
+    );
+    const supportChunk = this.world.getResidentChunk(playerChunkX, Math.floor((this.player.feetPosition[1] - 1) / this.world.chunkSize), playerChunkZ);
+    const playableReady = hasResidentChunks
+      && supportChunk !== null
+      && localMissingColumns === 0
+      && urgentDirtyMeshlessChunks === 0;
+    const visualReady = playableReady && this.lastFarFieldSummary.pendingBands === 0;
+    return {
+      dirtyResidentMeshes,
+      pendingMeshJobs,
+      playableReady,
+      visualReady,
+    };
   }
 
   private pushHud(force = false): void {
@@ -3173,6 +3218,44 @@ function summarizeDirtyResidentMeshes(world: ProceduralResidentWorld): {
     dirtyMeshlessResidentChunks,
     dirtyRetainedMeshResidentChunks,
   };
+}
+
+function countMissingResidentColumnsAround(
+  world: ProceduralResidentWorld,
+  centerChunkX: number,
+  centerChunkZ: number,
+  radiusChunks: number,
+): number {
+  let missingColumns = 0;
+  for (let dz = -radiusChunks; dz <= radiusChunks; dz += 1) {
+    for (let dx = -radiusChunks; dx <= radiusChunks; dx += 1) {
+      if (dx * dx + dz * dz > radiusChunks * radiusChunks) {
+        continue;
+      }
+      if (!world.hasResidentColumn(centerChunkX + dx, centerChunkZ + dz)) {
+        missingColumns += 1;
+      }
+    }
+  }
+  return missingColumns;
+}
+
+function countUrgentDirtyMeshlessChunks(
+  world: ProceduralResidentWorld,
+  priorityChunkX: number,
+  priorityChunkY: number,
+  priorityChunkZ: number,
+): number {
+  let urgentDirtyMeshlessChunks = 0;
+  for (const chunk of world.iterateResidentChunks()) {
+    if (!chunk.meshDirty || chunk.mesh) {
+      continue;
+    }
+    if (shouldSyncBuildUrgentChunk(chunk, priorityChunkX, priorityChunkY, priorityChunkZ)) {
+      urgentDirtyMeshlessChunks += 1;
+    }
+  }
+  return urgentDirtyMeshlessChunks;
 }
 
 function sumNumbers(values: readonly number[]): number {

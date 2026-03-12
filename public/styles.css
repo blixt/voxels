@@ -384,6 +384,14 @@ body::before {
   display: none;
 }
 
+.capture-overlay.is-loading,
+.capture-overlay:disabled {
+  cursor: progress;
+  color: rgba(255, 246, 214, 0.82);
+  background:
+    radial-gradient(circle at center, rgba(13, 19, 22, 0.16) 0%, rgba(13, 19, 22, 0.78) 100%);
+}
+
 @keyframes discovery-achievement-pop {
   0% {
     opacity: 0;

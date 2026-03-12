@@ -89,7 +89,7 @@ await withBrowserGameSession({
   if (options.startupWarmup + options.startupIterations > 0) {
     startupResults = await runBrowserBenchmarkScenario(session, {
       id: "startup-entry",
-      description: "Cold-start bootstrap until the player can enter the world visually",
+      description: "Cold-start bootstrap until the player can enter the world",
       warmupIterations: options.startupWarmup,
       measuredIterations: options.startupIterations,
       timeoutMs: options.startupTimeoutMs,
@@ -115,20 +115,9 @@ await withBrowserGameSession({
             }
             const benchmark = game.getBootstrapBenchmark();
             const snapshot = game.snapshot();
-            const hasEnteredWorld = benchmark.samples.length > 0 || snapshot.chunkCount > 0;
-            const ready = hasEnteredWorld
-              && snapshot.chunkCount > 0
-              && snapshot.streamPendingChunks === 0
-              && snapshot.streamDirtyResidentChunks === 0
-              && snapshot.farFieldPendingBands === 0;
-            if (ready && benchmark.summary.playableReadyElapsedMs === null) {
-              const fallbackElapsedMs = benchmark.samples[benchmark.samples.length - 1]?.elapsedMs ?? 0;
-              benchmark.summary.playableReadyElapsedMs = fallbackElapsedMs;
-              benchmark.summary.visualReadyElapsedMs = fallbackElapsedMs;
-            }
-            if (ready) {
-              benchmark.completed = true;
-            }
+            const ready = snapshot.chunkCount > 0
+              && snapshot.bootstrapPlayableReady === true
+              && benchmark.summary.playableReadyElapsedMs !== null;
             return { benchmark, ready };
           })()
         `);
@@ -185,7 +174,7 @@ await withBrowserGameSession({
     );
 
     scenarioReports["startup-entry"] = {
-      description: "Cold-start bootstrap until the player can enter the world visually",
+      description: "Cold-start bootstrap until the player can enter the world",
       iterationCount: startupResults.length,
       measuredIterationCount: countMeasuredIterations(startupResults),
       csvPaths: startupArtifacts,
@@ -649,7 +638,8 @@ function printSummary(
 ): void {
   const startupMeasured = startupResults.filter((iteration) => !iteration.warmup);
   const walkMeasured = walkResults.filter((iteration) => !iteration.warmup);
-  const startupAvg = averageNumber(startupMeasured.map((iteration) => iteration.result.summary.visualReadyElapsedMs));
+  const startupPlayableAvg = averageNumber(startupMeasured.map((iteration) => iteration.result.summary.playableReadyElapsedMs));
+  const startupVisualAvg = averageNumber(startupMeasured.map((iteration) => iteration.result.summary.visualReadyElapsedMs));
   const walkP95 = averageNumber(walkMeasured.map((iteration) => iteration.result.summary.p95GameplayFrameMs));
   const walkHoles = sumNumbers(walkMeasured.map((iteration) => iteration.result.summary.framesWithHoleSignals));
   console.log(`Output directory: ${outputDir}`);
@@ -658,7 +648,8 @@ function printSummary(
     console.log(`Startup iteration CSV: ${startupArtifacts.iterationCsvPath}`);
     console.log(`Startup sample CSV: ${startupArtifacts.samplesCsvPath ?? "n/a"}`);
     console.log(`Startup memory CSV: ${startupArtifacts.memoryCsvPath}`);
-    console.log(`Startup avg visual-ready ms: ${startupAvg ?? "n/a"}`);
+    console.log(`Startup avg playable-ready ms: ${startupPlayableAvg ?? "n/a"}`);
+    console.log(`Startup avg visual-ready ms: ${startupVisualAvg ?? "n/a"}`);
   }
   if (walkArtifacts) {
     console.log(`Walk iteration CSV: ${walkArtifacts.iterationCsvPath}`);

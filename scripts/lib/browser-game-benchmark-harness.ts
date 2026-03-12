@@ -674,13 +674,12 @@ class BrowserGameSessionImpl implements BrowserGameSession {
           const snapshot = game.snapshot();
           return (benchmark.samples.length > 0 || snapshot.chunkCount > 0)
             && snapshot.chunkCount > 0
-            && snapshot.streamPendingChunks === 0
-            && snapshot.streamDirtyResidentChunks === 0
-            && snapshot.farFieldPendingBands === 0;
+            && snapshot.bootstrapPlayableReady === true
+            && benchmark.summary.playableReadyElapsedMs !== null;
         })()
       `);
       if (!ready) {
-        throw new Error("Bootstrap benchmark is not complete yet");
+        throw new Error("Bootstrap benchmark is not playable yet");
       }
     }, timeoutMs, 50);
   }
@@ -690,8 +689,9 @@ class BrowserGameSessionImpl implements BrowserGameSession {
     await pollUntil(async () => {
       const snapshot = await this.evaluate<Record<string, unknown>>("window.__VOXELS_GAME__.snapshot()");
       const chunkCount = typeof snapshot.chunkCount === "number" ? snapshot.chunkCount : 0;
-      if (chunkCount <= 0) {
-        throw new Error("Game snapshot did not report resident chunks yet");
+      const playableReady = snapshot.bootstrapPlayableReady === true;
+      if (chunkCount <= 0 || !playableReady) {
+        throw new Error("Game snapshot is not playable yet");
       }
     }, timeoutMs, 50);
   }

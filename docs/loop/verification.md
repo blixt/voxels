@@ -3941,3 +3941,46 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - The route trace stayed comfortably interactive and the new regression test now covers the specific backlog burst that could previously bypass the residency budget.
 - The trace still contains a very large pre-playable long task outside the benchmark window, so cold start remains a separate unsolved problem.
+
+## 2026-03-12 budgeted bootstrap and playable-ready startup gate
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/game-bootstrap-benchmark.test.ts tests/browser-game-benchmark-harness.test.ts`
+- `mise run build`
+- `mise run bench-browser-game -- --label=bootstrap-playable-v2 --startup-warmup=0 --startup-iterations=1 --walk-warmup=0 --walk-iterations=0`
+- `mise run trace-route -- --label=bootstrap-budgeted-smoke --duration=2 --settle=1 --sample-hz=20`
+- `mise run trace-route -- --label=bootstrap-budgeted-10s --duration=10 --settle=2 --sample-hz=60`
+
+#### Numeric probes
+
+- Startup benchmark output:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-iah4HE/report.json`
+  - benchmark elapsed `1513.435 ms`
+  - playable-ready `1427.2 ms`
+  - visual-ready `1427.2 ms`
+  - total generated chunks `287`
+  - peak generation workers `2`
+- Compared against the previous startup-only browser benchmark:
+  - previous playable/visual gate was effectively `66781.559 ms` on the same harness after the first bootstrap-budget change but before the new local readiness gate
+  - older baseline before that had drifted as high as `97175.1 ms`
+- 2-second route smoke:
+  - report: `artifacts/browser-route-trace/20260312T211745Z-bootstrap-budgeted-smoke/report.json`
+  - avg gameplay frame `5.60 ms`
+  - p95 gameplay frame `13.90 ms`
+  - hole-signal frames `0`
+- 10-second route trace:
+  - report: `artifacts/browser-route-trace/20260312T211756Z-bootstrap-budgeted-10s/report.json`
+  - avg gameplay frame `3.03 ms`
+  - p95 gameplay frame `3.50 ms`
+  - max gameplay frame `12.6 ms`
+  - avg stream `2.81 ms`
+  - avg mesh `0.10 ms`
+  - hole-signal frames `0`
+
+#### Residual
+
+- This slice is worth keeping.
+- The startup benchmark now measures the right thing and the runtime reaches a playable local bubble quickly.
+- The full trace still shows a large startup long task, so there is still cold-start CPU work left after this correctness fix.

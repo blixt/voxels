@@ -1954,3 +1954,35 @@
 - Residual:
   - startup is still too slow and still has a giant pre-playable long task
   - this slice fixes bursty walking hitches, not cold-start latency
+
+## 2026-03-12 budgeted bootstrap and playable-ready startup gate
+
+- The next startup pass split one real bug from one benchmark bug:
+  - real bug: `loadBootstrapWorld()` was forcing a full settle pass on page load
+  - benchmark bug: “startup complete” still meant the entire radius-8 residency window had finished, which is not the same thing as “the player can enter the world”
+- The bootstrap bug was severe:
+  - page load called `syncWorldAroundPlayer(true)`
+  - that path means infinite chunk generation budget, infinite mesh budget, and full far-field catch-up
+  - so the first interactive frame was paying for far more than a local playable bubble
+- I removed that local-optimum behavior instead of trying to tune around it:
+  - bootstrap now starts with the normal budgeted streaming path
+  - the local world bubble becomes playable first
+  - far summaries and the outer residency bubble continue progressively after entry
+- I also tightened the startup readiness definition to something closer to actual player experience:
+  - a support chunk under the player must exist
+  - nearby resident columns around the player must exist
+  - urgent near-player meshless chunks must be gone
+  - far-field catch-up is no longer part of the “can enter the world” gate
+- The benchmark harness was updated to match that reality:
+  - `startup-entry` now means playable-ready, not full-horizon settle
+  - the old fallback logic that silently rewrote readiness times is gone
+  - route-trace startup wait now also uses the same playable-ready signal
+- I added a simple loading-state overlay using the existing capture button:
+  - before the world is playable it shows `Preparing World`
+  - once the local bubble is ready it switches back to `Click To Enter The World`
+- The result was not subtle:
+  - startup playable-ready collapsed from absurd `~66-97 s` benchmark results down to about `1.43 s`
+  - the 10-second route trace stayed smooth and hole-free after the change
+- Residual:
+  - the full trace still contains a large startup long task, so there is still cold-start CPU worth chasing
+  - but that long task is no longer blocking “enter the world” in the way it was before
