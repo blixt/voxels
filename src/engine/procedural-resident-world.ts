@@ -44,6 +44,8 @@ export interface ResidencyPhaseMetrics {
   completedGeneratedChunks: number;
   completedSummaryCacheHits: number;
   completedGeneratedSummaries: number;
+  completedColumnSummaryCacheHits: number;
+  missingColumnSummaries: number;
 }
 
 export interface ResidencyUpdateSummary {
@@ -723,6 +725,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
         completedGeneratedChunks: completedGenerationStats.generated,
         completedSummaryCacheHits: completedSummaryStats.cacheHits,
         completedGeneratedSummaries: completedSummaryStats.generated,
+        completedColumnSummaryCacheHits: completedColumnSummaries.length,
+        missingColumnSummaries: missingColumnSummaries.length,
       },
     };
     return this.lastResidency;
@@ -1314,6 +1318,8 @@ function zeroResidencyPhaseMetrics(): ResidencyPhaseMetrics {
     completedGeneratedChunks: 0,
     completedSummaryCacheHits: 0,
     completedGeneratedSummaries: 0,
+    completedColumnSummaryCacheHits: 0,
+    missingColumnSummaries: 0,
   };
 }
 

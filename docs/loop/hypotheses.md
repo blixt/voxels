@@ -1,5 +1,13 @@
 # Renderer Hypotheses
 
+## 2026-03-12 persistence-metric harness search
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| The new persisted summary counters can be trusted immediately because the existing cache-reuse benchmark already settles the world correctly | Run the fixed-origin cache-reuse probe after adding the counters and inspect whether the numbers are plausible | Rejected. The first run returned pathological zeros because `teleportAndSettle()` only advanced a single frame and the browser-ready gate allowed `chunkCount = 0` | Rejected |
+| Fixing `teleportAndSettle()` and the ready gate is enough to make the cache-reuse benchmark trustworthy again | Re-run the same fixed-origin probe after the harness fix and compare the resulting chunk/summary hit counts | Confirmed. The rerun produced strong non-zero persisted summary hits outbound and strong persisted chunk hits on revisit | Confirmed |
+| Persisted column-summary hits would already dominate the same-session cache-reuse path as soon as the metric existed | Inspect the fixed-origin cache-reuse probe after wiring the metric | Rejected. The counter is wired, but it stayed at `0` in this same-session scenario, which means the current path is still dominated by resident/frontier growth plus chunk-summary and chunk-payload reuse | Rejected |
+
 ## 2026-03-12 persisted column-summary search
 
 | Hypothesis | Tiny verification case | Result | Status |

@@ -140,6 +140,10 @@ export interface GameHudSnapshot {
   streamCachedEmptyChunkHits: number;
   streamCompletedChunkCacheHits: number;
   streamCompletedGeneratedChunks: number;
+  streamCompletedSummaryCacheHits: number;
+  streamCompletedGeneratedSummaries: number;
+  streamCompletedColumnSummaryCacheHits: number;
+  streamMissingColumnSummaries: number;
   streamDirtyResidentChunks: number;
   residencyRadiusChunks: number;
   surfaceY: number;
@@ -199,6 +203,8 @@ export interface ResidencyTransitionProbe {
   residency: ResidencyUpdateSummary;
   mesh: MeshBuildSummary;
   render: GameRenderProbe;
+  settleFrames: number;
+  settled: boolean;
 }
 
 export interface ChunkBoundaryBenchmarkSample {
@@ -261,6 +267,9 @@ export interface ChunkCacheReuseLegSummary {
   totalFarFieldMs: number;
   totalGeneratedChunks: number;
   totalPersistedChunkHits: number;
+  totalPersistedSummaryHits: number;
+  totalPersistedColumnSummaryHits: number;
+  totalMissingColumnSummaries: number;
   totalWorkerGeneratedChunks: number;
   maxPendingChunks: number;
   residentChunks: number;
@@ -782,6 +791,10 @@ export class GameController {
       streamCachedEmptyChunkHits: this.lastStreamSummary.cachedEmptyChunkHits,
       streamCompletedChunkCacheHits: this.lastStreamSummary.phaseMs.completedChunkCacheHits,
       streamCompletedGeneratedChunks: this.lastStreamSummary.phaseMs.completedGeneratedChunks,
+      streamCompletedSummaryCacheHits: this.lastStreamSummary.phaseMs.completedSummaryCacheHits,
+      streamCompletedGeneratedSummaries: this.lastStreamSummary.phaseMs.completedGeneratedSummaries,
+      streamCompletedColumnSummaryCacheHits: this.lastStreamSummary.phaseMs.completedColumnSummaryCacheHits,
+      streamMissingColumnSummaries: this.lastStreamSummary.phaseMs.missingColumnSummaries,
       streamDirtyResidentChunks: this.world.countDirtyResidentChunks(),
       residencyRadiusChunks: this.lastStreamSummary.radiusChunks,
       surfaceY: this.lastStreamSummary.surfaceY,
@@ -1167,6 +1180,7 @@ export class GameController {
     position: Vec3,
     options: {
       radiusChunks?: number;
+      maxFrames?: number;
     } = {},
   ): Promise<ResidencyTransitionProbe> {
     const before = this.snapshotResidentWorld();
@@ -1175,8 +1189,23 @@ export class GameController {
     }
     teleportPlayerToEyePosition(this.player, position);
     this.syncCameraToPlayer();
-    const residency = this.syncWorldAroundPlayer(true);
-    const render = await this.renderProbeFrame();
+    const maxFrames = Math.max(1, Math.floor(options.maxFrames ?? 240));
+    let residency = this.syncWorldAroundPlayer(true);
+    let render = await this.renderProbeFrame();
+    let settleFrames = 1;
+    while (
+      settleFrames < maxFrames
+      && (
+        !residency.complete
+        || residency.pendingChunks > 0
+        || this.lastMeshBuildSummary.meshCount > 0
+        || this.lastFarFieldSummary.pendingBands > 0
+      )
+    ) {
+      residency = this.syncWorldAroundPlayer(true);
+      render = await this.renderProbeFrame();
+      settleFrames += 1;
+    }
     const after = this.snapshotResidentWorld();
     const { entered, evicted } = diffChunkCoords(
       before.chunks.map((chunk) => chunk.coord),
@@ -1191,11 +1220,16 @@ export class GameController {
       generatedChunkCoords: residency.generatedChunkCoords.map(toChunkTuple),
       residency: {
         ...residency,
-        generatedChunkCoords: residency.generatedChunkCoords.map((coord) => ({ ...coord })),
-        evictedChunkCoords: residency.evictedChunkCoords.map((coord) => ({ ...coord })),
+      generatedChunkCoords: residency.generatedChunkCoords.map((coord) => ({ ...coord })),
+      evictedChunkCoords: residency.evictedChunkCoords.map((coord) => ({ ...coord })),
       },
       mesh: { ...this.lastMeshBuildSummary },
       render,
+      settleFrames,
+      settled: residency.complete
+        && residency.pendingChunks === 0
+        && this.lastMeshBuildSummary.meshCount === 0
+        && this.lastFarFieldSummary.pendingBands === 0,
     };
   }
 
@@ -1692,6 +1726,9 @@ export class GameController {
     let totalFarFieldMs = 0;
     let totalGeneratedChunks = 0;
     let totalPersistedChunkHits = 0;
+    let totalPersistedSummaryHits = 0;
+    let totalPersistedColumnSummaryHits = 0;
+    let totalMissingColumnSummaries = 0;
     let totalWorkerGeneratedChunks = 0;
     let maxPendingChunks = 0;
     for (; frameCount < maxFrames; frameCount += 1) {
@@ -1702,6 +1739,9 @@ export class GameController {
       totalFarFieldMs += this.lastFarFieldSummary.elapsedMs;
       totalGeneratedChunks += residency.generatedChunks;
       totalPersistedChunkHits += residency.phaseMs.completedChunkCacheHits;
+      totalPersistedSummaryHits += residency.phaseMs.completedSummaryCacheHits;
+      totalPersistedColumnSummaryHits += residency.phaseMs.completedColumnSummaryCacheHits;
+      totalMissingColumnSummaries += residency.phaseMs.missingColumnSummaries;
       totalWorkerGeneratedChunks += residency.phaseMs.completedGeneratedChunks;
       maxPendingChunks = Math.max(maxPendingChunks, residency.pendingChunks);
       if (
@@ -1726,6 +1766,9 @@ export class GameController {
       totalFarFieldMs,
       totalGeneratedChunks,
       totalPersistedChunkHits,
+      totalPersistedSummaryHits,
+      totalPersistedColumnSummaryHits,
+      totalMissingColumnSummaries,
       totalWorkerGeneratedChunks,
       maxPendingChunks,
       residentChunks: this.world.getStats().chunkCount,
@@ -2930,6 +2973,8 @@ function zeroResidencyPhaseMetrics(): ResidencyUpdateSummary["phaseMs"] {
     completedGeneratedChunks: 0,
     completedSummaryCacheHits: 0,
     completedGeneratedSummaries: 0,
+    completedColumnSummaryCacheHits: 0,
+    missingColumnSummaries: 0,
   };
 }
 

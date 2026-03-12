@@ -7,6 +7,39 @@
 - `mise exec -- bun run typecheck`
 - `mise exec -- bun test tests/procedural-resident-world.test.ts tests/generated-render-column-summary.test.ts tests/generated-chunk-transfer.test.ts tests/generated-chunk-codec.test.ts`
 - `mise run build`
+- Temporary fixed-origin Chrome CDP cache-reuse probe against `http://127.0.0.1:3035/`
+
+### Automated checks
+
+- `tsc --noEmit`: passing.
+- Focused resident-world / column-summary / transfer / codec tests: passing.
+- Production build: passing.
+
+### Fixed-origin cache-reuse probe
+
+- Kept after fixing `teleportAndSettle()` and the browser-ready gate:
+  - `populate.totalPersistedSummaryHits = 724`
+  - `populate.totalPersistedChunkHits = 0`
+  - `populate.totalPersistedColumnSummaryHits = 0`
+  - `revisit.totalPersistedChunkHits = 831`
+  - `revisit.totalPersistedSummaryHits = 0`
+  - `revisit.totalPersistedColumnSummaryHits = 0`
+- Interpretation:
+  - the new counters are wired correctly and non-trivial
+  - same-session outbound travel is still leaning on persisted per-chunk render summaries
+  - same-session revisit is strongly leveraging persisted chunk payload reuse
+  - persisted column-summary hits did not trigger in this scenario
+
+### Notes
+
+- The earlier zeroed cache-reuse result was rejected because `teleportAndSettle()` was not actually settling and the browser-ready gate allowed `chunkCount = 0`.
+- The kept benchmark now produces believable non-zero persistence metrics again.
+
+### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/generated-render-column-summary.test.ts tests/generated-chunk-transfer.test.ts tests/generated-chunk-codec.test.ts`
+- `mise run build`
 - `mise run trace-route -- --label=column-cache-smoke --duration=1 --settle=1 --sample-hz=20`
 
 ### Automated checks

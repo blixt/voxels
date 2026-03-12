@@ -2,6 +2,21 @@
 
 ## 2026-03-12
 
+- Fixed a benchmark/harness lie that would have made the new persistence metrics useless:
+  - `teleportAndSettle()` in `src/client/game-controller.ts` now actually settles across multiple frames instead of doing one update/render pair and returning immediately
+  - `scripts/run-browser-route-trace.ts` now waits for `snapshot().chunkCount > 0` before treating the game as ready
+- Extended the live metrics and cache-reuse benchmark to expose summary-layer reuse explicitly:
+  - `ResidencyPhaseMetrics` now reports persisted column-summary hits and misses per update
+  - the HUD/debug snapshot now exposes chunk-summary, column-summary, and missing-column counts
+  - `benchmarkChunkCacheReuse()` now reports persisted chunk hits, persisted chunk-summary hits, and persisted column-summary hits separately
+- Verified the new persistence counters on a fixed-origin production run:
+  - outbound `benchmarkChunkCacheReuse(24, 240)` leg showed strong persisted chunk-summary reuse (`724` summary hits, `0` chunk hits)
+  - revisit leg showed strong persisted chunk reuse (`831` chunk hits)
+  - persisted column-summary hits stayed at `0` in this same-session scenario, which means the metric is wired but this particular path is still mostly served by resident/frontier growth and chunk-summary cache reuse
+- That result is useful rather than disappointing:
+  - the new counter proved the column-summary store is not yet the dominant path in same-session cache reuse
+  - the next meaningful persistence/visibility question is when persisted column summaries help across wider or colder revisits, not whether the metric exists
+
 - Extended the generated-chunk persistence layer with derived per-column render summaries:
   - `src/client/procedural-generated-chunk-cache.ts` now maintains a `column_summaries` store alongside chunk payloads and per-chunk render summaries
   - the worker can now answer `summarize-column` requests from persisted chunk-derived metadata without regenerating or decoding full chunk payloads

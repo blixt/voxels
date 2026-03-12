@@ -438,7 +438,7 @@ async function waitForGameReady(cdp: CdpConnection, timeoutMs: number): Promise<
       "  }",
       "  try {",
       "    const snapshot = window.__VOXELS_GAME__.snapshot();",
-      "    return Boolean(snapshot && typeof snapshot.chunkCount === 'number');",
+      "    return Boolean(snapshot && typeof snapshot.chunkCount === 'number' && snapshot.chunkCount > 0);",
       "  } catch {",
       "    return false;",
       "  }",
