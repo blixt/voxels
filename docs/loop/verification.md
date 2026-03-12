@@ -3278,3 +3278,21 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - The next pressure point is not main-thread meshing anymore; it is async-path transfer/GC cost plus main-thread residency/Y-range work.
 - The browser trace still mixes worker and main-thread CPU inside one process view, so a later harness slice should separate those more cleanly.
+
+## 2026-03-12 discovery names and achievement presentation
+
+#### Commands
+
+- `mise exec -- bun test tests/discovery-catalog.test.ts tests/exploration-journal.test.ts`
+- `mise exec -- bun run typecheck`
+- `mise run build`
+
+#### Added verification coverage
+
+- `tests/discovery-catalog.test.ts`
+- `tests/exploration-journal.test.ts` now asserts the richer discovery event payload and stable sequencing.
+
+#### Residual
+
+- This slice is worth keeping.
+- I have not done the browser smoke yet because the next telemetry-collapse slice will touch the same HUD path; I will verify both together against a single fresh game-page run.

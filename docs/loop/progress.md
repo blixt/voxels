@@ -1542,3 +1542,19 @@
   - route traces now record `maxPendingMeshJobs`
   - `scripts/run-browser-route-trace.ts` now persists full per-frame benchmark samples to `benchmark-samples.json`
   - that makes future spike investigation less dependent on re-running Chrome manually
+
+## 2026-03-12 discovery names and achievement presentation
+
+- I tightened the discovery seam before touching the HUD:
+  - a new `discovery-catalog` is now the single source of truth for player-facing names for biomes, underground families, regional variants, and landmarks
+  - journal events now carry stable sequence numbers plus `name`, `identifier`, and category metadata instead of only a raw concatenated label
+- That let me improve the UI without adding another translation layer:
+  - full telemetry now shows readable names with the stable identifier preserved in brackets
+  - the game page can queue unseen journal events directly and render a centered achievement banner instead of trying to infer discoveries from changing strings
+- The important cleanup in this slice was not to overfit the journal:
+  - I briefly added extra snapshot fields that the UI did not actually need
+  - I removed them immediately and kept the contract to `recentDiscoveries` with per-event sequences
+- The effect is intentionally ornamental but lean:
+  - no new polling
+  - no extra world sampling
+  - no HUD-side string heuristics

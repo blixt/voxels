@@ -31,7 +31,9 @@ test("exploration journal records biome, underground, variant, and landmark disc
   expect(snapshot.discoveredRegionalVariantIds).toEqual(["verdant_karst"]);
   expect(snapshot.discoveredLandmarkIds).toEqual(["berry_bush", "redwood"]);
   expect(snapshot.recentDiscoveries).toHaveLength(5);
-  expect(snapshot.lastDiscovery?.label).toBe("Landmark: berry_bush");
+  expect(snapshot.lastDiscovery?.label).toBe("Landmark: Berry Bush [berry_bush]");
+  expect(snapshot.lastDiscovery?.name).toBe("Berry Bush");
+  expect(snapshot.lastDiscovery?.sequence).toBe(5);
 });
 
 test("exploration journal reset clears discovered state", () => {

@@ -117,6 +117,76 @@ body::before {
   pointer-events: auto;
 }
 
+.discovery-achievement-layer {
+  position: absolute;
+  left: 50%;
+  top: 20px;
+  width: min(520px, calc(100vw - 120px));
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.discovery-achievement {
+  position: relative;
+  overflow: hidden;
+  padding: 15px 26px 17px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 230, 165, 0.34);
+  background:
+    linear-gradient(180deg, rgba(58, 42, 19, 0.88), rgba(20, 16, 10, 0.88)),
+    radial-gradient(circle at top, rgba(255, 216, 126, 0.18), transparent 60%);
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.44),
+    inset 0 1px 0 rgba(255, 240, 190, 0.2);
+  opacity: 0;
+  transform: translateY(-18px) scale(0.98);
+}
+
+.discovery-achievement::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(110deg, transparent 0 36%, rgba(255, 240, 190, 0.04) 42%, rgba(255, 240, 190, 0.28) 50%, rgba(255, 240, 190, 0.04) 58%, transparent 64%);
+  transform: translateX(-115%);
+  opacity: 0.92;
+}
+
+.discovery-achievement.is-active {
+  animation: discovery-achievement-pop 3720ms cubic-bezier(0.2, 0.8, 0.16, 1) forwards;
+}
+
+.discovery-achievement.is-active::before {
+  animation: discovery-achievement-shine 3720ms ease-out forwards;
+}
+
+.discovery-achievement-category,
+.discovery-achievement-identifier {
+  margin: 0;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+}
+
+.discovery-achievement-category {
+  color: rgba(255, 228, 166, 0.74);
+  font-size: 0.66rem;
+}
+
+.discovery-achievement-name {
+  margin: 6px 0 5px;
+  color: #fff5dc;
+  text-align: center;
+  font-family: "Iowan Old Style", "Palatino Linotype", serif;
+  font-size: clamp(1.35rem, 2vw, 1.9rem);
+  line-height: 1.02;
+}
+
+.discovery-achievement-identifier {
+  color: rgba(255, 241, 205, 0.52);
+  font-size: 0.62rem;
+}
+
 .game-panel {
   backdrop-filter: blur(18px);
   background: rgba(13, 19, 22, 0.48);
@@ -220,6 +290,35 @@ body::before {
 
 .capture-overlay[hidden] {
   display: none;
+}
+
+@keyframes discovery-achievement-pop {
+  0% {
+    opacity: 0;
+    transform: translateY(-18px) scale(0.98);
+  }
+  10%,
+  82% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.99);
+  }
+}
+
+@keyframes discovery-achievement-shine {
+  0%,
+  8% {
+    transform: translateX(-115%);
+  }
+  28% {
+    transform: translateX(115%);
+  }
+  100% {
+    transform: translateX(115%);
+  }
 }
 
 .hero {

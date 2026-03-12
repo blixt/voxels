@@ -1,4 +1,7 @@
-export type DiscoveryCategory = "biome" | "underground" | "regional-variant" | "landmark";
+import {
+  describeDiscovery,
+  type DiscoveryCategory,
+} from "./discovery-catalog.ts";
 
 export interface ExplorationObservation {
   biomeId: string;
@@ -11,7 +14,11 @@ export interface ExplorationObservation {
 export interface DiscoveryEvent {
   category: DiscoveryCategory;
   id: string;
+  name: string;
+  identifier: string;
+  categoryLabel: string;
   label: string;
+  sequence: number;
 }
 
 export interface ExplorationJournalSnapshot {
@@ -39,6 +46,7 @@ export class ExplorationJournal {
   private currentUndergroundBiomeId: string | null = null;
   private currentRegionalVariantId: string | null = null;
   private currentLandmarkId: string | null = null;
+  private nextDiscoverySequence = 1;
 
   observe(observation: ExplorationObservation): ExplorationJournalSnapshot {
     this.currentBiomeId = observation.biomeId;
@@ -98,28 +106,20 @@ export class ExplorationJournal {
       return;
     }
     registry.add(id);
+    const presentation = describeDiscovery(category, id);
     const event = {
       category,
       id,
-      label: `${categoryLabel(category)}: ${id}`,
+      name: presentation.name,
+      identifier: id,
+      categoryLabel: presentation.categoryLabel,
+      label: presentation.fullLabel,
+      sequence: this.nextDiscoverySequence++,
     } satisfies DiscoveryEvent;
     this.recentDiscoveries.unshift(event);
     if (this.recentDiscoveries.length > MAX_RECENT_DISCOVERIES) {
       this.recentDiscoveries.length = MAX_RECENT_DISCOVERIES;
     }
-  }
-}
-
-function categoryLabel(category: DiscoveryCategory): string {
-  switch (category) {
-    case "biome":
-      return "Biome";
-    case "underground":
-      return "Underground";
-    case "regional-variant":
-      return "Variant";
-    case "landmark":
-      return "Landmark";
   }
 }
 

@@ -1,6 +1,10 @@
 import { GameController, type GameHudSnapshot } from "./game-controller.ts";
+import { formatDiscoveryInline } from "../engine/discovery-catalog.ts";
 import { worldUnitsToMeters } from "../engine/scale.ts";
-import type { ExplorationJournalSnapshot } from "../engine/exploration-journal.ts";
+import type {
+  DiscoveryEvent,
+  ExplorationJournalSnapshot,
+} from "../engine/exploration-journal.ts";
 
 declare global {
   interface Window {
@@ -67,6 +71,14 @@ interface GameRuntime {
   ready: Promise<void>;
   dispose(): void;
 }
+
+interface AchievementPresenter {
+  observe(recentDiscoveries: readonly DiscoveryEvent[]): void;
+  dispose(): void;
+}
+
+const ACHIEVEMENT_VISIBLE_MS = 3400;
+const ACHIEVEMENT_EXIT_MS = 320;
 
 const TELEMETRY_LABELS = [
   "Position",
@@ -139,8 +151,9 @@ function mountGame(): GameRuntime {
   const canvas = appRoot.querySelector<HTMLCanvasElement>("[data-role='viewport']");
   const telemetryElement = appRoot.querySelector<HTMLElement>("[data-role='telemetry']");
   const captureButton = appRoot.querySelector<HTMLButtonElement>("[data-role='capture']");
+  const achievementElement = appRoot.querySelector<HTMLElement>("[data-role='discovery-achievements']");
 
-  if (!canvas || !telemetryElement || !captureButton) {
+  if (!canvas || !telemetryElement || !captureButton || !achievementElement) {
     throw new Error("Game UI is incomplete");
   }
 
@@ -150,6 +163,7 @@ function mountGame(): GameRuntime {
   };
   const telemetryValues = createTelemetryValues(telemetryElement);
   const lastTelemetryValues = new Array<string>(telemetryValues.length).fill("");
+  const achievementPresenter = createAchievementPresenter(achievementElement);
 
   controller.onHudUpdate = (snapshot) => {
     const nextValues = buildTelemetryValues(snapshot);
@@ -161,6 +175,7 @@ function mountGame(): GameRuntime {
       telemetryValues[index]!.textContent = value;
       lastTelemetryValues[index] = value;
     }
+    achievementPresenter.observe(snapshot.recentDiscoveries);
     captureButton.hidden = snapshot.pointerLocked;
   };
 
@@ -209,6 +224,7 @@ function mountGame(): GameRuntime {
     dispose() {
       captureButton.removeEventListener("click", handleCaptureClick);
       controller.onHudUpdate = null;
+      achievementPresenter.dispose();
       controller.dispose();
       delete window.__VOXELS_GAME__;
     },
@@ -240,6 +256,82 @@ function createTelemetryValues(root: HTMLElement): HTMLSpanElement[] {
   return values;
 }
 
+function createAchievementPresenter(root: HTMLElement): AchievementPresenter {
+  const categoryElement = document.createElement("p");
+  categoryElement.className = "discovery-achievement-category";
+  const nameElement = document.createElement("h2");
+  nameElement.className = "discovery-achievement-name";
+  const identifierElement = document.createElement("p");
+  identifierElement.className = "discovery-achievement-identifier";
+  const card = document.createElement("section");
+  card.className = "discovery-achievement";
+  card.hidden = true;
+  card.append(categoryElement, nameElement, identifierElement);
+  root.replaceChildren(card);
+
+  const queuedSequences = new Set<number>();
+  const queue: DiscoveryEvent[] = [];
+  let lastSeenSequence = 0;
+  let activeSequence = 0;
+  let timerId = 0;
+  let exitTimerId = 0;
+
+  const scheduleNext = () => {
+    if (activeSequence !== 0 || queue.length === 0) {
+      return;
+    }
+    const event = queue.shift()!;
+    activeSequence = event.sequence;
+    card.hidden = false;
+    categoryElement.textContent = `${event.categoryLabel} Discovered`;
+    nameElement.textContent = event.name;
+    identifierElement.textContent = `[${event.identifier}]`;
+    card.classList.remove("is-active");
+    void card.offsetWidth;
+    card.classList.add("is-active");
+    timerId = window.setTimeout(() => {
+      card.classList.remove("is-active");
+      exitTimerId = window.setTimeout(() => {
+        activeSequence = 0;
+        if (queue.length === 0) {
+          card.hidden = true;
+        }
+        scheduleNext();
+      }, ACHIEVEMENT_EXIT_MS);
+    }, ACHIEVEMENT_VISIBLE_MS);
+  };
+
+  return {
+    observe(recentDiscoveries) {
+      const unseen = recentDiscoveries
+        .filter((event) => event.sequence > lastSeenSequence && !queuedSequences.has(event.sequence))
+        .sort((left, right) => left.sequence - right.sequence);
+      if (unseen.length === 0) {
+        return;
+      }
+      lastSeenSequence = Math.max(lastSeenSequence, unseen[unseen.length - 1]!.sequence);
+      for (const event of unseen) {
+        queuedSequences.add(event.sequence);
+        queue.push(event);
+      }
+      scheduleNext();
+    },
+    dispose() {
+      if (timerId !== 0) {
+        window.clearTimeout(timerId);
+      }
+      if (exitTimerId !== 0) {
+        window.clearTimeout(exitTimerId);
+      }
+      queue.length = 0;
+      queuedSequences.clear();
+      activeSequence = 0;
+      card.hidden = true;
+      card.classList.remove("is-active");
+    },
+  };
+}
+
 function buildTelemetryValues(snapshot: GameHudSnapshot): string[] {
   return [
     formatPosition(snapshot.position),
@@ -268,10 +360,10 @@ function buildTelemetryValues(snapshot: GameHudSnapshot): string[] {
     snapshot.streamPendingChunks.toLocaleString(),
     snapshot.streamEmptyChunksSkipped.toLocaleString(),
     snapshot.streamCachedEmptyChunkHits.toLocaleString(),
-    snapshot.biomeId ?? "Unknown",
-    snapshot.undergroundBiomeId ?? "Unknown",
-    snapshot.regionalVariantId ?? "None",
-    snapshot.landmarkId ?? "None",
+    formatDiscoveryInline("biome", snapshot.biomeId, "Unknown"),
+    formatDiscoveryInline("underground", snapshot.undergroundBiomeId, "Unknown"),
+    formatDiscoveryInline("regional-variant", snapshot.regionalVariantId),
+    formatDiscoveryInline("landmark", snapshot.landmarkId),
     `B ${snapshot.discoveredBiomeCount} / U ${snapshot.discoveredUndergroundBiomeCount} / V ${snapshot.discoveredRegionalVariantCount} / L ${snapshot.discoveredLandmarkCount}`,
     snapshot.lastDiscoveryLabel,
     snapshot.selectedInventorySlot.toLocaleString(),

@@ -16,6 +16,7 @@ import {
 } from "../engine/first-person-camera.ts";
 import {
   ExplorationJournal,
+  type DiscoveryEvent,
   type ExplorationJournalSnapshot,
   type ExplorationObservation,
 } from "../engine/exploration-journal.ts";
@@ -146,6 +147,7 @@ export interface GameHudSnapshot {
   discoveredUndergroundBiomeCount: number;
   discoveredRegionalVariantCount: number;
   discoveredLandmarkCount: number;
+  recentDiscoveries: DiscoveryEvent[];
   lastDiscoveryLabel: string;
   selectedInventorySlot: number;
   selectedInventoryMaterial: string;
@@ -764,6 +766,7 @@ export class GameController {
       discoveredUndergroundBiomeCount: discovery.discoveredUndergroundBiomeIds.length,
       discoveredRegionalVariantCount: discovery.discoveredRegionalVariantIds.length,
       discoveredLandmarkCount: discovery.discoveredLandmarkIds.length,
+      recentDiscoveries: discovery.recentDiscoveries.map((event) => ({ ...event })),
       lastDiscoveryLabel: discovery.lastDiscovery?.label ?? "None",
       selectedInventorySlot: this.inventory.selectedSlot,
       selectedInventoryMaterial: formatInventoryMaterial(getSelectedInventoryStack(this.inventory)?.material ?? null),
