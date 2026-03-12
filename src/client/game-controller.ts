@@ -10,6 +10,7 @@ import {
 import {
   buildFirstPersonCameraMatrices,
   createFirstPersonCamera,
+  createForwardRay,
   rotateFirstPersonCamera,
   type FirstPersonCameraState,
 } from "../engine/first-person-camera.ts";
@@ -18,6 +19,18 @@ import {
   type ExplorationJournalSnapshot,
   type ExplorationObservation,
 } from "../engine/exploration-journal.ts";
+import {
+  breakVoxelAlongRay,
+  placeSelectedVoxelAlongRay,
+} from "../engine/interaction-loop.ts";
+import {
+  countUsedInventoryStacks,
+  createInventoryState,
+  cycleInventorySlot,
+  getSelectedInventoryStack,
+  selectInventorySlot,
+  type InventoryState,
+} from "../engine/inventory.ts";
 import { rebuildDirtyMeshes } from "../engine/mesher.ts";
 import { createAsyncProceduralChunkGeneration } from "./async-procedural-chunk-generation.ts";
 import {
@@ -34,8 +47,12 @@ import {
   summarizeResidentWorld,
   type ResidentWorldProbeSnapshot,
 } from "../engine/procedural-probes.ts";
-import { ProceduralResidentWorld, type ResidencyUpdateSummary } from "../engine/procedural-resident-world.ts";
-import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
+import {
+  ProceduralResidentWorld,
+  type ResidencyUpdateSummary,
+  type WorldEditRecord,
+} from "../engine/procedural-resident-world.ts";
+import { ProceduralWorldGenerator, materialToHexColor } from "../engine/procedural-generator.ts";
 import {
   WebGpuVoxelRenderer,
   type FarFieldRenderMask,
@@ -70,6 +87,7 @@ const MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES = 6;
 const FAR_FIELD_RENDER_MASK_SPAN_CHUNKS = 32;
 const DISCOVERY_SAMPLE_INTERVAL_MS = 250;
 const DISCOVERY_SAMPLE_MOVE_THRESHOLD_WORLD_UNITS = metersToWorldUnits(0.8);
+const INTERACTION_REACH_WORLD_UNITS = metersToWorldUnits(5);
 const DISCOVERY_LANDMARK_SAMPLE_OFFSETS: ReadonlyArray<readonly [number, number]> = [
   [0, 0],
   [metersToWorldUnits(1.2), 0],
@@ -119,6 +137,10 @@ export interface GameHudSnapshot {
   discoveredRegionalVariantCount: number;
   discoveredLandmarkCount: number;
   lastDiscoveryLabel: string;
+  selectedInventorySlot: number;
+  selectedInventoryMaterial: string;
+  selectedInventoryCount: number;
+  usedInventoryStacks: number;
   farFieldMs: number;
   farFieldBuiltBands: number;
   farFieldPendingBands: number;
@@ -555,6 +577,7 @@ export class GameController {
   });
   readonly farField = new ProceduralFarField(this.generator);
   readonly explorationJournal = new ExplorationJournal();
+  readonly inventory: InventoryState = createInventoryState();
 
   renderer: WebGpuVoxelRenderer | null = null;
   camera: FirstPersonCameraState = createFirstPersonCamera([0.5, 1500, 0.5]);
@@ -620,6 +643,9 @@ export class GameController {
     this.asyncChunkGeneration?.dispose();
     this.renderer?.dispose();
     this.canvas.removeEventListener("click", this.handleCanvasClick);
+    this.canvas.removeEventListener("mousedown", this.handleCanvasMouseDown);
+    this.canvas.removeEventListener("contextmenu", this.handleCanvasContextMenu);
+    this.canvas.removeEventListener("wheel", this.handleCanvasWheel);
     document.removeEventListener("pointerlockchange", this.handlePointerLockChange);
     document.removeEventListener("mousemove", this.handleMouseMove);
     window.removeEventListener("keydown", this.handleKeyDown);
@@ -723,6 +749,10 @@ export class GameController {
       discoveredRegionalVariantCount: discovery.discoveredRegionalVariantIds.length,
       discoveredLandmarkCount: discovery.discoveredLandmarkIds.length,
       lastDiscoveryLabel: discovery.lastDiscovery?.label ?? "None",
+      selectedInventorySlot: this.inventory.selectedSlot,
+      selectedInventoryMaterial: formatInventoryMaterial(getSelectedInventoryStack(this.inventory)?.material ?? null),
+      selectedInventoryCount: getSelectedInventoryStack(this.inventory)?.count ?? 0,
+      usedInventoryStacks: countUsedInventoryStacks(this.inventory),
       farFieldMs: this.lastFarFieldSummary.elapsedMs,
       farFieldBuiltBands: this.lastFarFieldSummary.builtBands,
       farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
@@ -748,6 +778,60 @@ export class GameController {
 
   getStreamingBudgets(): StreamingBudgets {
     return { ...this.streamingBudgets };
+  }
+
+  getInventorySnapshot(): {
+    selectedSlot: number;
+    usedStacks: number;
+    slots: Array<{ material: number; count: number } | null>;
+  } {
+    return {
+      selectedSlot: this.inventory.selectedSlot,
+      usedStacks: countUsedInventoryStacks(this.inventory),
+      slots: this.inventory.slots.map((stack) => stack ? { ...stack } : null),
+    };
+  }
+
+  getEditLogSnapshot(): WorldEditRecord[] {
+    return this.world.getEditLogSnapshot();
+  }
+
+  breakTargetVoxel(): boolean {
+    const ray = createForwardRay(this.camera);
+    const result = breakVoxelAlongRay(
+      this.world,
+      this.inventory,
+      ray.origin,
+      ray.direction,
+      INTERACTION_REACH_WORLD_UNITS,
+    );
+    if (!result.changed || !result.material) {
+      return false;
+    }
+    this.farFieldReadyMaskRevision += 1;
+    this.flushMeshBuildBudget(1);
+    this.status = `Collected ${formatInventoryMaterial(result.material)}`;
+    this.pushHud(true);
+    return true;
+  }
+
+  placeSelectedVoxel(): boolean {
+    const ray = createForwardRay(this.camera);
+    const result = placeSelectedVoxelAlongRay(
+      this.world,
+      this.inventory,
+      ray.origin,
+      ray.direction,
+      INTERACTION_REACH_WORLD_UNITS,
+    );
+    if (!result.changed || !result.material) {
+      return false;
+    }
+    this.farFieldReadyMaskRevision += 1;
+    this.flushMeshBuildBudget(1);
+    this.status = `Placed ${formatInventoryMaterial(result.material)}`;
+    this.pushHud(true);
+    return true;
   }
 
   setStreamingBudgets(
@@ -1487,6 +1571,9 @@ export class GameController {
 
   private attachInteractions(): void {
     this.canvas.addEventListener("click", this.handleCanvasClick);
+    this.canvas.addEventListener("mousedown", this.handleCanvasMouseDown);
+    this.canvas.addEventListener("contextmenu", this.handleCanvasContextMenu);
+    this.canvas.addEventListener("wheel", this.handleCanvasWheel, { passive: false });
     document.addEventListener("pointerlockchange", this.handlePointerLockChange);
     document.addEventListener("mousemove", this.handleMouseMove);
     window.addEventListener("keydown", this.handleKeyDown);
@@ -1499,6 +1586,35 @@ export class GameController {
     if (!this.pointerLocked) {
       void this.requestPointerLock();
     }
+  };
+
+  private readonly handleCanvasMouseDown = (event: MouseEvent) => {
+    if (!this.pointerLocked) {
+      if (event.button === 0) {
+        void this.requestPointerLock();
+      }
+      return;
+    }
+    if (event.button === 0) {
+      event.preventDefault();
+      this.breakTargetVoxel();
+    } else if (event.button === 2) {
+      event.preventDefault();
+      this.placeSelectedVoxel();
+    }
+  };
+
+  private readonly handleCanvasContextMenu = (event: MouseEvent) => {
+    event.preventDefault();
+  };
+
+  private readonly handleCanvasWheel = (event: WheelEvent) => {
+    if (!this.pointerLocked) {
+      return;
+    }
+    event.preventDefault();
+    cycleInventorySlot(this.inventory, event.deltaY > 0 ? 1 : -1);
+    this.pushHud(true);
   };
 
   private readonly handlePointerLockChange = () => {
@@ -1519,6 +1635,13 @@ export class GameController {
   private readonly handleKeyDown = (event: KeyboardEvent) => {
     if (this.pointerLocked && isMovementKey(event.code)) {
       event.preventDefault();
+    }
+    if (event.code.startsWith("Digit")) {
+      const digit = Number.parseInt(event.code.slice(5), 10);
+      if (digit >= 1 && digit <= 9) {
+        selectInventorySlot(this.inventory, digit - 1);
+        this.pushHud(true);
+      }
     }
     this.pressedKeys.add(event.code);
   };
@@ -2117,6 +2240,13 @@ function zeroGameRenderProbe(): GameRenderProbe {
     drawCalls: 0,
     triangles: 0,
   };
+}
+
+function formatInventoryMaterial(material: number | null): string {
+  if (!material) {
+    return "Empty";
+  }
+  return materialToHexColor(material);
 }
 
 function buildEyePositionForChunkCenter(

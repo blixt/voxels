@@ -1462,3 +1462,34 @@
   - `maxPendingChunks` increased a lot (`200 -> 981`)
   - this means throughput is now partly hidden behind async generation instead of disappearing
   - but the route benchmark stayed hole-free, so this is a good trade for now
+
+## 2026-03-12 gather/build loop and persistence-ready edit overlays
+
+- I completed the next feature slice by adding the first real world-edit loop:
+  - deterministic inventory state
+  - voxel breaking and placement
+  - persistence-ready edit overlays layered on top of procedural generation
+- The key structural choice is that edits do not rewrite generator logic:
+  - `ProceduralResidentWorld` now keeps chunk-local overlay maps and an append-only edit log
+  - generated chunks are still produced from the seed and then patched by overlays on adoption
+  - that keeps the runtime compatible with future persistence and multiplayer replication instead of mixing authored edits into worldgen code
+- The new interaction seam is intentionally lean:
+  - `32` inventory stacks
+  - `1024` voxels per stack
+  - left-click break, right-click place, wheel cycle, digit select
+  - selected-stack placement only
+- The important runtime behavior is now correct for streamed worlds:
+  - resident chunks mutate immediately when edited
+  - boundary edits dirty neighboring chunk meshes
+  - the same edits survive chunk eviction and regeneration
+- The most useful correction during the slice:
+  - my first inventory-capacity test assumed “selected stack capacity”
+  - the runtime helper correctly reports total remaining capacity for that material across the whole inventory
+  - I fixed the test instead of weakening the pickup primitive
+- I deliberately did not add more gameplay layers yet:
+  - no crafting
+  - no dropped item entities
+  - no persistence backend
+  - no server protocol
+  - no hotbar UI beyond telemetry
+  - the goal here was to make the core edit seam real and testable first

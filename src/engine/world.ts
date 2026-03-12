@@ -39,6 +39,10 @@ export interface ResidentChunkWorld {
   } | null;
 }
 
+export interface MutableResidentChunkWorld extends ResidentChunkWorld {
+  setVoxel(x: number, y: number, z: number, materialIndex: number): boolean;
+}
+
 function toChunkKey(cx: number, cy: number, cz: number, sizeX: number, sizeY: number): number {
   return cx + cy * sizeX + cz * sizeX * sizeY;
 }

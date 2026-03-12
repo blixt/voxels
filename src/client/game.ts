@@ -54,6 +54,10 @@ declare global {
       probeFarFieldSurfaceGaps(): ReturnType<GameController["probeFarFieldSurfaceGaps"]>;
       getDiscoveryJournal(): ExplorationJournalSnapshot;
       resetDiscoveryJournal(): ExplorationJournalSnapshot;
+      getInventory(): ReturnType<GameController["getInventorySnapshot"]>;
+      getEditLog(): ReturnType<GameController["getEditLogSnapshot"]>;
+      breakTargetVoxel(): ReturnType<GameController["breakTargetVoxel"]>;
+      placeSelectedVoxel(): ReturnType<GameController["placeSelectedVoxel"]>;
     };
   }
 }
@@ -97,6 +101,10 @@ const TELEMETRY_LABELS = [
   "Landmark",
   "Discoveries",
   "Last Discovery",
+  "Selected Slot",
+  "Selected Material",
+  "Selected Count",
+  "Used Stacks",
   "Gen Budget",
   "Mesh Budget",
   "Far Budget",
@@ -187,6 +195,10 @@ function mountGame(): GameRuntime {
     probeFarFieldSurfaceGaps: () => controller.probeFarFieldSurfaceGaps(),
     getDiscoveryJournal: () => controller.getDiscoveryJournalSnapshot(),
     resetDiscoveryJournal: () => controller.resetDiscoveryJournal(),
+    getInventory: () => controller.getInventorySnapshot(),
+    getEditLog: () => controller.getEditLogSnapshot(),
+    breakTargetVoxel: () => controller.breakTargetVoxel(),
+    placeSelectedVoxel: () => controller.placeSelectedVoxel(),
   };
 
   const ready = controller.init();
@@ -262,6 +274,10 @@ function buildTelemetryValues(snapshot: GameHudSnapshot): string[] {
     snapshot.landmarkId ?? "None",
     `B ${snapshot.discoveredBiomeCount} / U ${snapshot.discoveredUndergroundBiomeCount} / V ${snapshot.discoveredRegionalVariantCount} / L ${snapshot.discoveredLandmarkCount}`,
     snapshot.lastDiscoveryLabel,
+    snapshot.selectedInventorySlot.toLocaleString(),
+    snapshot.selectedInventoryMaterial,
+    snapshot.selectedInventoryCount.toLocaleString(),
+    snapshot.usedInventoryStacks.toLocaleString(),
     snapshot.maxGeneratedChunksPerUpdate.toLocaleString(),
     snapshot.maxMeshRebuildsPerFrame.toLocaleString(),
     snapshot.maxFarFieldBandRebuildsPerFrame.toLocaleString(),

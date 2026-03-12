@@ -7,7 +7,7 @@ import {
 } from "./procedural-generator.ts";
 import type { FarFieldExclusionMask } from "./procedural-far-field.ts";
 import { metersToWorldUnits } from "./scale.ts";
-import type { ResidentChunkWorld, VoxelChunk } from "./world.ts";
+import type { MutableResidentChunkWorld, VoxelChunk } from "./world.ts";
 
 const DEFAULT_HORIZONTAL_RADIUS_CHUNKS = 8;
 const DEFAULT_UNDERGROUND_PADDING_CHUNKS = 3;
@@ -47,7 +47,18 @@ export interface ResidencyUpdateSummary {
   phaseMs: ResidencyPhaseMetrics;
 }
 
-export class ProceduralResidentWorld implements ResidentChunkWorld {
+export interface WorldEditRecord {
+  sequence: number;
+  x: number;
+  y: number;
+  z: number;
+  material: number;
+  previousMaterial: number;
+  chunk: ChunkCoordinate;
+  localIndex: number;
+}
+
+export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   readonly chunkSize: number;
   readonly minY = 0;
   readonly maxYExclusive: number;
@@ -60,11 +71,14 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
 
   private readonly chunks = new Map<string, VoxelChunk>();
   private readonly emptyChunkKeys = new Set<string>();
+  private readonly editOverlays = new Map<string, Map<number, number>>();
+  private readonly editLog: WorldEditRecord[] = [];
   private readonly residentColumnCounts = new Map<string, number>();
   private readonly asyncChunkGeneration: AsyncChunkGenerationQueue | null;
   private residentColumnRevision = 0;
   private lastAnchorSignature = "";
   private lastAnchorComplete = true;
+  private nextEditSequence = 1;
 
   constructor(
     readonly generator: ProceduralWorldGenerator,
@@ -198,14 +212,91 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     const cx = Math.floor(x / this.chunkSize);
     const cy = Math.floor(y / this.chunkSize);
     const cz = Math.floor(z / this.chunkSize);
+    const localIndex = toLocalVoxelIndex(x, y, z, cx, cy, cz, this.chunkSize);
+    const overlay = this.editOverlays.get(toChunkKey(cx, cy, cz));
+    if (overlay?.has(localIndex)) {
+      return overlay.get(localIndex) ?? 0;
+    }
     const chunk = this.getResidentChunk(cx, cy, cz);
     if (!chunk) {
       return 0;
     }
+    return chunk.data[localIndex] ?? 0;
+  }
+
+  setVoxel(x: number, y: number, z: number, materialIndex: number): boolean {
+    if (y < this.minY || y >= this.maxYExclusive) {
+      return false;
+    }
+    const cx = Math.floor(x / this.chunkSize);
+    const cy = Math.floor(y / this.chunkSize);
+    const cz = Math.floor(z / this.chunkSize);
+    const key = toChunkKey(cx, cy, cz);
     const lx = x - cx * this.chunkSize;
     const ly = y - cy * this.chunkSize;
     const lz = z - cz * this.chunkSize;
-    return chunk.data[lx + ly * this.chunkSize + lz * this.chunkSize * this.chunkSize] ?? 0;
+    const localIndex = lx + ly * this.chunkSize + lz * this.chunkSize * this.chunkSize;
+    const previousMaterial = this.getVoxel(x, y, z);
+    if (previousMaterial === materialIndex) {
+      return false;
+    }
+
+    const overlay = this.editOverlays.get(key) ?? new Map<number, number>();
+    const baseMaterial = this.generator.sampleMaterial(x, y, z);
+    if (materialIndex === baseMaterial) {
+      overlay.delete(localIndex);
+    } else {
+      overlay.set(localIndex, materialIndex);
+    }
+    if (overlay.size === 0) {
+      this.editOverlays.delete(key);
+    } else if (!this.editOverlays.has(key)) {
+      this.editOverlays.set(key, overlay);
+    }
+    this.emptyChunkKeys.delete(key);
+
+    const residentChunk = this.getResidentChunk(cx, cy, cz);
+    if (residentChunk) {
+      updateResidentChunkVoxel(residentChunk, localIndex, lx, ly, lz, materialIndex);
+      markResidentChunkDirty(residentChunk);
+      if (lx === 0) {
+        this.markChunkDirtyByCoord(cx - 1, cy, cz);
+      }
+      if (ly === 0) {
+        this.markChunkDirtyByCoord(cx, cy - 1, cz);
+      }
+      if (lz === 0) {
+        this.markChunkDirtyByCoord(cx, cy, cz - 1);
+      }
+      if (lx === this.chunkSize - 1) {
+        this.markChunkDirtyByCoord(cx + 1, cy, cz);
+      }
+      if (ly === this.chunkSize - 1) {
+        this.markChunkDirtyByCoord(cx, cy + 1, cz);
+      }
+      if (lz === this.chunkSize - 1) {
+        this.markChunkDirtyByCoord(cx, cy, cz + 1);
+      }
+    }
+
+    this.editLog.push({
+      sequence: this.nextEditSequence++,
+      x,
+      y,
+      z,
+      material: materialIndex,
+      previousMaterial,
+      chunk: { x: cx, y: cy, z: cz },
+      localIndex,
+    });
+    return true;
+  }
+
+  getEditLogSnapshot(): WorldEditRecord[] {
+    return this.editLog.map((record) => ({
+      ...record,
+      chunk: { ...record.chunk },
+    }));
   }
 
   getResidentChunk(cx: number, cy: number, cz: number): VoxelChunk | null {
@@ -386,6 +477,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
         const completed = completedGeneratedChunksByKey.get(key);
         if (completed) {
           completedGeneratedChunksByKey.delete(key);
+          this.applyOverlayToGeneratedChunk(key, completed);
           if (completed.solidCount === 0) {
             emptyChunksSkipped += 1;
             this.emptyChunkKeys.add(key);
@@ -431,6 +523,7 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
         }
         const generationStartedAt = performance.now();
         const generated = this.generator.generateChunk(cx, cy, cz);
+        this.applyOverlayToGeneratedChunk(key, generated);
         chunkGenerationMs += performance.now() - generationStartedAt;
         if (generated.solidCount === 0) {
           emptyChunksSkipped += 1;
@@ -586,6 +679,25 @@ export class ProceduralResidentWorld implements ResidentChunkWorld {
     }
     return readyKeys;
   }
+
+  private applyOverlayToGeneratedChunk(key: string, generated: GeneratedChunk): void {
+    const overlay = this.editOverlays.get(key);
+    if (!overlay || overlay.size === 0) {
+      return;
+    }
+    for (const [localIndex, material] of overlay) {
+      generated.data[localIndex] = material;
+    }
+    recomputeGeneratedChunkSolidBounds(generated, this.chunkSize);
+  }
+
+  private markChunkDirtyByCoord(cx: number, cy: number, cz: number): void {
+    const chunk = this.getResidentChunk(cx, cy, cz);
+    if (!chunk) {
+      return;
+    }
+    markResidentChunkDirty(chunk);
+  }
 }
 
 const ADJACENT_CHUNK_OFFSETS: ReadonlyArray<readonly [number, number, number]> = [
@@ -679,6 +791,21 @@ function toChunkKey(cx: number, cy: number, cz: number): string {
   return `${cx}:${cy}:${cz}`;
 }
 
+function toLocalVoxelIndex(
+  x: number,
+  y: number,
+  z: number,
+  cx: number,
+  cy: number,
+  cz: number,
+  chunkSize: number,
+): number {
+  const lx = x - cx * chunkSize;
+  const ly = y - cy * chunkSize;
+  const lz = z - cz * chunkSize;
+  return lx + ly * chunkSize + lz * chunkSize * chunkSize;
+}
+
 function toColumnKey(cx: number, cz: number): string {
   return `${cx}:${cz}`;
 }
@@ -729,6 +856,71 @@ function createResidentChunk(generated: GeneratedChunk, chunkSize: number): Voxe
     recomputeChunkSolidBounds(chunk, chunkSize);
   }
   return chunk;
+}
+
+function markResidentChunkDirty(chunk: VoxelChunk): void {
+  chunk.meshDirty = true;
+  chunk.gpuDirty = true;
+  chunk.mesh = null;
+}
+
+function updateResidentChunkVoxel(
+  chunk: VoxelChunk,
+  localIndex: number,
+  lx: number,
+  ly: number,
+  lz: number,
+  materialIndex: number,
+): void {
+  const previous = chunk.data[localIndex] ?? 0;
+  if (previous === materialIndex) {
+    return;
+  }
+  chunk.data[localIndex] = materialIndex;
+  if (previous === 0 && materialIndex !== 0) {
+    chunk.solidCount += 1;
+    expandResidentChunkSolidBounds(chunk, lx, ly, lz);
+  } else if (previous !== 0 && materialIndex === 0) {
+    chunk.solidCount -= 1;
+    invalidateResidentChunkBoundsIfNeeded(chunk, lx, ly, lz);
+  }
+}
+
+function expandResidentChunkSolidBounds(chunk: VoxelChunk, lx: number, ly: number, lz: number): void {
+  if (!chunk.solidBounds) {
+    chunk.solidBounds = {
+      min: [lx, ly, lz],
+      max: [lx + 1, ly + 1, lz + 1],
+      dirty: false,
+    };
+    return;
+  }
+  chunk.solidBounds.min[0] = Math.min(chunk.solidBounds.min[0], lx);
+  chunk.solidBounds.min[1] = Math.min(chunk.solidBounds.min[1], ly);
+  chunk.solidBounds.min[2] = Math.min(chunk.solidBounds.min[2], lz);
+  chunk.solidBounds.max[0] = Math.max(chunk.solidBounds.max[0], lx + 1);
+  chunk.solidBounds.max[1] = Math.max(chunk.solidBounds.max[1], ly + 1);
+  chunk.solidBounds.max[2] = Math.max(chunk.solidBounds.max[2], lz + 1);
+}
+
+function invalidateResidentChunkBoundsIfNeeded(chunk: VoxelChunk, lx: number, ly: number, lz: number): void {
+  if (!chunk.solidBounds) {
+    return;
+  }
+  if (chunk.solidCount === 0) {
+    chunk.solidBounds = null;
+    return;
+  }
+  if (
+    lx === chunk.solidBounds.min[0]
+    || ly === chunk.solidBounds.min[1]
+    || lz === chunk.solidBounds.min[2]
+    || lx + 1 === chunk.solidBounds.max[0]
+    || ly + 1 === chunk.solidBounds.max[1]
+    || lz + 1 === chunk.solidBounds.max[2]
+  ) {
+    chunk.solidBounds.dirty = true;
+  }
 }
 
 function countDirtyResidentChunks(chunks: Iterable<VoxelChunk>): number {
@@ -786,4 +978,41 @@ function recomputeChunkSolidBounds(chunk: VoxelChunk, chunkSize: number): void {
     max: [maxX, maxY, maxZ],
     dirty: false,
   };
+}
+
+function recomputeGeneratedChunkSolidBounds(chunk: GeneratedChunk, chunkSize: number): void {
+  let solidCount = 0;
+  let minX = chunkSize;
+  let minY = chunkSize;
+  let minZ = chunkSize;
+  let maxX = 0;
+  let maxY = 0;
+  let maxZ = 0;
+  const chunkArea = chunkSize * chunkSize;
+
+  for (let lz = 0; lz < chunkSize; lz += 1) {
+    for (let ly = 0; ly < chunkSize; ly += 1) {
+      for (let lx = 0; lx < chunkSize; lx += 1) {
+        const localIndex = lx + ly * chunkSize + lz * chunkArea;
+        if (chunk.data[localIndex] === 0) {
+          continue;
+        }
+        solidCount += 1;
+        minX = Math.min(minX, lx);
+        minY = Math.min(minY, ly);
+        minZ = Math.min(minZ, lz);
+        maxX = Math.max(maxX, lx + 1);
+        maxY = Math.max(maxY, ly + 1);
+        maxZ = Math.max(maxZ, lz + 1);
+      }
+    }
+  }
+
+  chunk.solidCount = solidCount;
+  chunk.solidBounds = solidCount === 0
+    ? null
+    : {
+        min: [minX, minY, minZ],
+        max: [maxX, maxY, maxZ],
+      };
 }

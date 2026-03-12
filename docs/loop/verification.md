@@ -3177,3 +3177,39 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - This slice is worth keeping.
 - The async generation seam improved player-frame cost a lot, but the high pending-chunk count means throughput is still the next pressure point.
+
+## 2026-03-12 gather/build loop and persistence-ready edit overlays
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/inventory.test.ts tests/interaction-loop.test.ts tests/procedural-resident-world.test.ts`
+- `mise run build`
+- `mise run test`
+
+#### Numeric probes
+
+- Focused interaction/edit verification:
+  - `18` tests
+  - `0` failures
+  - `96` expectations
+- Full repo verification after integration:
+  - `121` tests
+  - `0` failures
+  - `46637` expectations
+
+#### Added verification coverage
+
+- `tests/inventory.test.ts`
+- `tests/interaction-loop.test.ts`
+- `tests/procedural-resident-world.test.ts`
+- The new regressions cover:
+  - edit overlays surviving chunk eviction/regeneration
+  - inventory insert/merge/remove behavior
+  - break interaction failing cleanly when inventory is full
+  - placement consuming the selected stack and writing back into the world
+
+#### Residual
+
+- This slice is worth keeping.
+- Verification stayed command-line only for this round; the next harness pass should add a lightweight browser interaction smoke so break/place can be exercised through the live page without relying on manual play.

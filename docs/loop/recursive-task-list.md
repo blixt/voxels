@@ -15,12 +15,12 @@ This file is the durable "keep going" loop for the repo. It exists so a future s
 
 ## Current cycle
 
-1. Feature: implement the first real gather/build loop with inventory pickup, placement, and persistence-ready edit records.
-2. Performance/harness: replace more of the ad hoc far-field path with a more principled LOD experiment inspired by clipmaps and seam-stitching research, and keep it only if the route benchmark and seam probes improve.
-3. Feature: add biome-aware points of interest and cave-side setpieces that make the new discovery journal pay off beyond counts alone.
-4. Performance/harness: add a trace-friendly build/report mode so browser route traces keep meaningful symbol names and can be folded into a broader acceptance battery.
-5. Feature: deepen caves and below-ground progression so underground biome families matter beyond surface hints.
-6. Performance/harness: extend the off-main-thread path from generation into meshing prep or chunk-adoption batching, but only if route A/B traces improve again.
+1. Performance/harness: attack the post-worker throughput bottleneck by measuring and reducing detailed chunk adoption/meshing latency while the player moves, and keep it only if route traces or cycle-bench data improve without reopening hole signals.
+2. Feature: add biome-aware points of interest and cave-side setpieces that make the discovery journal pay off beyond counts alone.
+3. Performance/harness: add a trace-friendly build/report mode so browser route traces keep meaningful symbol names and can be folded into a broader acceptance battery.
+4. Feature: deepen caves and below-ground progression so underground biome families matter beyond surface hints.
+5. Performance/harness: extend the off-main-thread path from generation into meshing prep or chunk-adoption batching, but only if route A/B traces improve again.
+6. Feature: build the next interaction layer on top of the new edit seam with lightweight persistence-ready tooling such as inventory-aware interaction smoke probes, structured edit snapshots, or early gather/build affordances beyond raw break/place.
 7. Refresh this file with a fresh six-task list that still alternates `feature -> performance/harness` and still ends with another refresh task.
 
 ## Acceptance checklist per slice

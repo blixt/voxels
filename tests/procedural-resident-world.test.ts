@@ -212,6 +212,30 @@ test("budgeted residency prioritizes the spawn support chunk first", () => {
   expect(world.hasResidentChunk(centerChunkX, supportChunkY, centerChunkZ)).toBe(true);
 });
 
+test("resident world reapplies edit overlays after chunk eviction and regeneration", () => {
+  const generator = new ProceduralWorldGenerator(1337, { chunkSize: 16 });
+  const world = new ProceduralResidentWorld(generator, { horizontalRadiusChunks: 1 });
+  const spawn = world.getSpawnPosition();
+  world.updateResidencyAround(spawn, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+
+  const targetX = Math.floor(spawn[0]);
+  const targetZ = Math.floor(spawn[2]);
+  const targetY = generator.sampleColumn(targetX, targetZ).surfaceY;
+  const previous = world.getVoxel(targetX, targetY, targetZ);
+
+  expect(previous).not.toBe(0);
+  expect(world.setVoxel(targetX, targetY, targetZ, 0)).toBe(true);
+  expect(world.getVoxel(targetX, targetY, targetZ)).toBe(0);
+
+  const farPosition: [number, number, number] = [spawn[0] + generator.chunkSize * 8, spawn[1], spawn[2]];
+  world.updateResidencyAround(farPosition, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+  world.updateResidencyAround(spawn, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+
+  expect(world.getVoxel(targetX, targetY, targetZ)).toBe(0);
+  expect(world.getEditLogSnapshot()).toHaveLength(1);
+  expect(world.getEditLogSnapshot()[0]?.previousMaterial).toBe(previous);
+});
+
 test("render-ready far-field mask only excludes columns after their meshes are built", () => {
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
     horizontalRadiusChunks: 1,
