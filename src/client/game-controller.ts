@@ -492,6 +492,8 @@ export interface RouteExperienceFrameSample {
   meshMs: number;
   meshCount: number;
   farFieldMs: number;
+  farFieldPrefetchMs: number;
+  farFieldPrefetchRequestedChunks: number;
   farFieldSampleCacheMs: number;
   farFieldMeshBuildMs: number;
   farFieldSampledCellCount: number;
@@ -564,6 +566,10 @@ export interface RouteExperienceBenchmarkSummary {
   avgFarFieldMs: number;
   p95FarFieldMs: number;
   maxFarFieldMs: number;
+  avgFarFieldPrefetchMs: number;
+  p95FarFieldPrefetchMs: number;
+  maxFarFieldPrefetchMs: number;
+  totalFarFieldPrefetchRequestedChunks: number;
   avgFarFieldSampleCacheMs: number;
   maxFarFieldSampleCacheMs: number;
   avgFarFieldMeshBuildMs: number;
@@ -674,6 +680,8 @@ export class GameController {
   private lastRenderStats: RenderStats = zeroRenderStats();
   private lastStreamSummary: ResidencyUpdateSummary = cloneResidencySummary(this.world.lastResidency);
   private lastFarFieldSummary: FarFieldUpdateSummary = this.farField.lastUpdate;
+  private lastFarFieldPrefetchMs = 0;
+  private lastFarFieldPrefetchRequestedChunks = 0;
   private streamAnchor: StreamAnchor | null = null;
   private farFieldReadyMaskRevision = 0;
   private presentedFarFieldReadyMaskRevision = 0;
@@ -2089,19 +2097,32 @@ export class GameController {
   }
 
   private prefetchFarFieldSummaries(settle: boolean): void {
-    const maxGenerateChunks = settle
-      ? Number.POSITIVE_INFINITY
-      : this.lastStreamSummary.pendingChunks > 0
-      ? 0
-      : DEFAULT_MAX_FAR_FIELD_SURFACE_PREFETCH_CHUNKS_PER_FRAME;
+    const maxGenerateChunks = this.resolveFarFieldPrefetchBudget(settle);
     if (maxGenerateChunks <= 0) {
+      this.lastFarFieldPrefetchMs = 0;
+      this.lastFarFieldPrefetchRequestedChunks = 0;
       return;
     }
-    this.world.prefetchFarFieldSummariesAround(
+    const startedAt = performance.now();
+    this.lastFarFieldPrefetchRequestedChunks = this.world.prefetchFarFieldSummariesAround(
       this.player.feetPosition,
       this.farField.getMaxRadiusWorldUnits(),
       maxGenerateChunks,
     );
+    this.lastFarFieldPrefetchMs = performance.now() - startedAt;
+  }
+
+  private resolveFarFieldPrefetchBudget(settle: boolean): number {
+    if (!this.bootstrapPlayableReady) {
+      return 0;
+    }
+    if (settle) {
+      return Number.POSITIVE_INFINITY;
+    }
+    if (this.lastStreamSummary.pendingChunks > 0 || this.lastStreamSummary.phaseMs.readyGeneratedChunkBacklog > 0) {
+      return 0;
+    }
+    return DEFAULT_MAX_FAR_FIELD_SURFACE_PREFETCH_CHUNKS_PER_FRAME;
   }
 
   private isPressed(...codes: string[]): boolean {
@@ -2422,6 +2443,7 @@ export class GameController {
       + residency.elapsedMs
       + this.lastMeshBuildSummary.elapsedMs
       + this.lastFarFieldSummary.elapsedMs
+      + this.lastFarFieldPrefetchMs
       + frameProbe.frameCpuMs;
     const unmeasuredFrameMs = Math.max(0, gameplayFrameMs - accountedFrameMs);
     const maxFarFieldBand = this.lastFarFieldSummary.bandBuilds.reduce<{
@@ -2457,6 +2479,8 @@ export class GameController {
         meshMs: this.lastMeshBuildSummary.elapsedMs,
         meshCount: this.lastMeshBuildSummary.meshCount,
         farFieldMs: this.lastFarFieldSummary.elapsedMs,
+        farFieldPrefetchMs: this.lastFarFieldPrefetchMs,
+        farFieldPrefetchRequestedChunks: this.lastFarFieldPrefetchRequestedChunks,
         farFieldSampleCacheMs: this.lastFarFieldSummary.sampleCacheMs,
         farFieldMeshBuildMs: this.lastFarFieldSummary.meshBuildMs,
         farFieldSampledCellCount: this.lastFarFieldSummary.sampledCellCount,
@@ -2615,6 +2639,8 @@ export class GameController {
       streamMs: this.lastStreamSummary.elapsedMs,
       meshMs: this.lastMeshBuildSummary.elapsedMs,
       farFieldMs: this.lastFarFieldSummary.elapsedMs,
+      farFieldPrefetchMs: this.lastFarFieldPrefetchMs,
+      farFieldPrefetchRequestedChunks: this.lastFarFieldPrefetchRequestedChunks,
       pendingChunks: this.lastStreamSummary.pendingChunks,
       pendingMeshJobs: bootstrap.pendingMeshJobs,
       dirtyResidentChunks: bootstrap.dirtyResidentMeshes.dirtyResidentChunks,
@@ -3024,11 +3050,13 @@ function summarizeRouteExperienceBenchmark(
     streamMs: sample.streamMs,
     meshMs: sample.meshMs,
     farFieldMs: sample.farFieldMs,
+    farFieldPrefetchMs: sample.farFieldPrefetchMs,
     renderCpuMs: sample.renderCpuMs,
   })));
   const streamSamples = samples.map((sample) => sample.streamMs);
   const meshSamples = samples.map((sample) => sample.meshMs);
   const farFieldSamples = samples.map((sample) => sample.farFieldMs);
+  const farFieldPrefetchSamples = samples.map((sample) => sample.farFieldPrefetchMs);
   const farFieldSampleCacheSamples = samples.map((sample) => sample.farFieldSampleCacheMs);
   const farFieldMeshBuildSamples = samples.map((sample) => sample.farFieldMeshBuildMs);
   const farFieldSampledCellSamples = samples.map((sample) => sample.farFieldSampledCellCount);
@@ -3089,6 +3117,10 @@ function summarizeRouteExperienceBenchmark(
     avgFarFieldMs: average(farFieldSamples),
     p95FarFieldMs: percentile(farFieldSamples, 0.95),
     maxFarFieldMs: maxValue(farFieldSamples),
+    avgFarFieldPrefetchMs: average(farFieldPrefetchSamples),
+    p95FarFieldPrefetchMs: percentile(farFieldPrefetchSamples, 0.95),
+    maxFarFieldPrefetchMs: maxValue(farFieldPrefetchSamples),
+    totalFarFieldPrefetchRequestedChunks: sumNumbers(samples.map((sample) => sample.farFieldPrefetchRequestedChunks)),
     avgFarFieldSampleCacheMs: average(farFieldSampleCacheSamples),
     maxFarFieldSampleCacheMs: maxValue(farFieldSampleCacheSamples),
     avgFarFieldMeshBuildMs: average(farFieldMeshBuildSamples),

@@ -571,3 +571,11 @@
 | The next startup hotspot is the spawn search itself, not only the later bootstrap residency work | Inspect the trace hot path, then directly count `sampleColumn()` calls for one `getSpawnPosition()` on a deterministic seed | Confirmed. One spawn search was costing about `580` `sampleColumn()` calls before this slice | Confirmed |
 | The right fix is to search fewer rings around the origin | Try the reduced-ring patch first and compare it to the broader spawn requirements before keeping it | Rejected. That narrows correctness margin for a small gain and does not address repeated lookups | Rejected |
 | A safer win is to cache the resolved spawn and remove obvious duplicate spawn-search sampling | Cache `getSpawnPosition()`, dedupe `spawnSearchOffsets(...)`, skip re-sampling the footprint center, then rerun the startup benchmark | Confirmed. The first spawn search dropped to about `450` `sampleColumn()` calls, later spawn lookups became free, and startup playable-ready improved to about `947.6 ms` | Confirmed |
+
+## 2026-03-12 defer far-summary prefetch until after world entry
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| Far-summary prefetch is still doing measurable CPU work during startup, but the benchmarks do not isolate it clearly enough yet | Add explicit far-summary prefetch timing/request counters to startup and route benchmark samples before changing policy | Confirmed. The new metrics are now part of the benchmark payloads and CSVs | Confirmed |
+| It is worth doing far-summary prefetch before the world is even playable because the horizon needs to be ready immediately | Block prefetch until `bootstrapPlayableReady`, rerun startup and route smokes, and keep it only if entry time improves without reintroducing hole signals | Rejected. Prefetch before entry was wasting startup budget; deferring it cut playable-ready from about `947.6 ms` to about `273 ms` while route hole signals stayed at `0` | Rejected |
+| Even after entry, far-summary prefetch should still compete with chunk adoption backlog | Gate prefetch off when the resident-world ready backlog is non-zero and observe the startup/route behavior | Confirmed. The kept policy avoids piling horizon work on top of already-finished nearby chunk adoption | Confirmed |

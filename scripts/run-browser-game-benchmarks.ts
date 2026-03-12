@@ -515,6 +515,8 @@ function serializeRouteSample(
     meshMs: sample.meshMs,
     meshCount: sample.meshCount,
     farFieldMs: sample.farFieldMs,
+    farFieldPrefetchMs: sample.farFieldPrefetchMs,
+    farFieldPrefetchRequestedChunks: sample.farFieldPrefetchRequestedChunks,
     farFieldSampleCacheMs: sample.farFieldSampleCacheMs,
     farFieldMeshBuildMs: sample.farFieldMeshBuildMs,
     farFieldSampledCellCount: sample.farFieldSampledCellCount,

@@ -122,6 +122,7 @@ test("route frame accounting exposes measured and unmeasured time explicitly", (
       streamMs: 2,
       meshMs: 3,
       farFieldMs: 1,
+      farFieldPrefetchMs: 0.5,
       renderCpuMs: 4,
     },
     {
@@ -130,13 +131,15 @@ test("route frame accounting exposes measured and unmeasured time explicitly", (
       streamMs: 1,
       meshMs: 1,
       farFieldMs: 1,
+      farFieldPrefetchMs: 0,
       renderCpuMs: 2,
     },
   ]);
 
   expect(summary.totalGameplayFrameMs).toBe(21);
-  expect(summary.totalAccountedMs).toBe(17);
-  expect(summary.totalUnmeasuredMs).toBe(4);
+  expect(summary.totalFarFieldPrefetchMs).toBe(0.5);
+  expect(summary.totalAccountedMs).toBe(17.5);
+  expect(summary.totalUnmeasuredMs).toBe(3.5);
   expect(summary.maxUnmeasuredMs).toBe(3);
 });
 

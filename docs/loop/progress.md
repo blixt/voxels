@@ -2026,3 +2026,30 @@
 - Residual:
   - startup is much better again, but cold-start still deserves more work than just spawn search
   - the next likely targets are remaining bootstrap column-state work and anything still coupling initial entry to non-urgent generation
+
+## 2026-03-12 defer far-summary prefetch until after world entry
+
+- After the spawn-search cleanup, the next trace looked strange in a useful way:
+  - startup was already much faster
+  - but the route/startup trace still showed `prefetchFarFieldSummariesAround(...)` doing real CPU work
+  - and that work was not visible enough in the benchmark summaries
+- I treated that as both a measurement gap and an architecture smell:
+  - far-summary prefetch is non-urgent horizon work
+  - so it should not compete with the first playable bubble
+- The kept change had two parts:
+  - add explicit far-summary prefetch timing/request counters to the startup and route benchmark samples
+  - block far-summary prefetch until `bootstrapPlayableReady` is true, and continue blocking it while chunk adoption backlog is non-zero
+- That made the startup path much cleaner:
+  - before world entry, the engine now focuses on the playable bubble only
+  - summary-backed horizon growth starts after entry instead of during entry
+- The browser benchmark win was very large:
+  - playable-ready dropped from about `947.6 ms` to about `273 ms`
+  - benchmark elapsed dropped from about `1052.48 ms` to about `426.74 ms`
+  - generated chunks during startup also dropped sharply because the bootstrap path stopped driving extra far-summary work
+- The route smoke stayed healthy:
+  - average gameplay frame dropped again
+  - hole signals stayed at `0`
+  - the new route metrics also showed `avgFarFieldPrefetchMs = 0` during the short movement smoke, which matches the intended gating
+- Residual:
+  - the next cold-start work should come from the new explicit benchmark fields and fresh traces, not guesses
+  - if startup is still worth chasing after this, the remaining cost is likely the local playable-bubble generation/meshing itself rather than misplaced far-summary work

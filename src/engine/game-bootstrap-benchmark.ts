@@ -15,6 +15,8 @@ export interface BootstrapBenchmarkSample {
   streamMs: number;
   meshMs: number;
   farFieldMs: number;
+  farFieldPrefetchMs: number;
+  farFieldPrefetchRequestedChunks: number;
   pendingChunks: number;
   pendingMeshJobs: number;
   dirtyResidentChunks: number;
@@ -36,6 +38,8 @@ export interface BootstrapBenchmarkSummary {
   totalStreamMs: number;
   totalMeshMs: number;
   totalFarFieldMs: number;
+  totalFarFieldPrefetchMs: number;
+  totalFarFieldPrefetchRequestedChunks: number;
   totalRenderCpuMs: number;
   totalRenderSyncMs: number;
   totalRenderUploadMs: number;
@@ -54,6 +58,9 @@ export interface BootstrapBenchmarkSummary {
   avgFarFieldMs: number;
   p95FarFieldMs: number;
   maxFarFieldMs: number;
+  avgFarFieldPrefetchMs: number;
+  p95FarFieldPrefetchMs: number;
+  maxFarFieldPrefetchMs: number;
   avgRenderCpuMs: number;
   p95RenderCpuMs: number;
   maxRenderCpuMs: number;
@@ -74,6 +81,8 @@ export function summarizeBootstrapBenchmark(
   const streamMs = samples.map((sample) => sample.streamMs);
   const meshMs = samples.map((sample) => sample.meshMs);
   const farFieldMs = samples.map((sample) => sample.farFieldMs);
+  const farFieldPrefetchMs = samples.map((sample) => sample.farFieldPrefetchMs);
+  const farFieldPrefetchRequestedChunks = samples.map((sample) => sample.farFieldPrefetchRequestedChunks);
   const renderCpuMs = samples.map((sample) => sample.renderCpuMs);
   const renderSyncMs = samples.map((sample) => sample.renderSyncMs);
   const renderUploadMs = samples.map((sample) => sample.renderUploadMs);
@@ -89,6 +98,8 @@ export function summarizeBootstrapBenchmark(
     totalStreamMs: sumNumbers(streamMs),
     totalMeshMs: sumNumbers(meshMs),
     totalFarFieldMs: sumNumbers(farFieldMs),
+    totalFarFieldPrefetchMs: sumNumbers(farFieldPrefetchMs),
+    totalFarFieldPrefetchRequestedChunks: sumNumbers(farFieldPrefetchRequestedChunks),
     totalRenderCpuMs: sumNumbers(renderCpuMs),
     totalRenderSyncMs: sumNumbers(renderSyncMs),
     totalRenderUploadMs: sumNumbers(renderUploadMs),
@@ -107,6 +118,9 @@ export function summarizeBootstrapBenchmark(
     avgFarFieldMs: average(farFieldMs),
     p95FarFieldMs: percentile(farFieldMs, 0.95),
     maxFarFieldMs: maxValue(farFieldMs),
+    avgFarFieldPrefetchMs: average(farFieldPrefetchMs),
+    p95FarFieldPrefetchMs: percentile(farFieldPrefetchMs, 0.95),
+    maxFarFieldPrefetchMs: maxValue(farFieldPrefetchMs),
     avgRenderCpuMs: average(renderCpuMs),
     p95RenderCpuMs: percentile(renderCpuMs, 0.95),
     maxRenderCpuMs: maxValue(renderCpuMs),
