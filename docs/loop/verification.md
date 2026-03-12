@@ -3296,3 +3296,32 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - This slice is worth keeping.
 - I have not done the browser smoke yet because the next telemetry-collapse slice will touch the same HUD path; I will verify both together against a single fresh game-page run.
+
+## 2026-03-12 collapsible telemetry summary with inline history chart
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise run build`
+- Production serve smoke on `http://127.0.0.1:3030/`
+- Ad hoc Bun + headless Chrome CDP smoke against the live page
+
+#### Numeric probes
+
+- Headless Chrome UI smoke confirmed:
+  - collapsed by default: `true`
+  - details hidden by default: `true`
+  - toggle label: `Show Debug`
+  - compact summary metrics: `6`
+  - compact chart bounds: `380 x 92`
+  - discovery achievement visible on boot with a named title (`Crownfall Highlands`) and category (`Biome Discovered`)
+  - after one toggle click:
+    - collapsed: `false`
+    - details hidden: `false`
+    - toggle label: `Hide Debug`
+    - expanded metric count: `49`
+
+#### Residual
+
+- This slice is worth keeping.
+- The compact chart is intentionally simple and draw-call-cheap; if later we need deeper spike inspection in-game, that should probably live in a dedicated diagnostics route instead of bloating this always-on summary.

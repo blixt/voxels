@@ -77,8 +77,25 @@ interface AchievementPresenter {
   dispose(): void;
 }
 
+interface TelemetrySummaryView {
+  update(snapshot: GameHudSnapshot): void;
+}
+
+interface TelemetryHistorySample {
+  fps: number;
+  frameMs: number;
+  streamMs: number;
+  meshMs: number;
+  farFieldMs: number;
+  renderMs: number;
+  otherMs: number;
+}
+
 const ACHIEVEMENT_VISIBLE_MS = 3400;
 const ACHIEVEMENT_EXIT_MS = 320;
+const TELEMETRY_HISTORY_LIMIT = 64;
+const TELEMETRY_STORAGE_KEY = "voxels.telemetry.collapsed";
+const TELEMETRY_SUMMARY_LABELS = ["FPS", "Frame", "Stream", "Mesh", "Far", "Render"] as const;
 
 const TELEMETRY_LABELS = [
   "Position",
@@ -149,11 +166,28 @@ function mountGame(): GameRuntime {
   }
 
   const canvas = appRoot.querySelector<HTMLCanvasElement>("[data-role='viewport']");
+  const telemetryPanel = appRoot.querySelector<HTMLElement>("[data-role='telemetry-panel']");
+  const telemetryToggle = appRoot.querySelector<HTMLButtonElement>("[data-role='telemetry-toggle']");
+  const telemetryToggleLabel = appRoot.querySelector<HTMLElement>("[data-role='telemetry-toggle-label']");
+  const telemetrySummaryElement = appRoot.querySelector<HTMLElement>("[data-role='telemetry-summary']");
+  const telemetryChart = appRoot.querySelector<HTMLCanvasElement>("[data-role='telemetry-chart']");
+  const telemetryDetails = appRoot.querySelector<HTMLElement>("[data-role='telemetry-details']");
   const telemetryElement = appRoot.querySelector<HTMLElement>("[data-role='telemetry']");
   const captureButton = appRoot.querySelector<HTMLButtonElement>("[data-role='capture']");
   const achievementElement = appRoot.querySelector<HTMLElement>("[data-role='discovery-achievements']");
 
-  if (!canvas || !telemetryElement || !captureButton || !achievementElement) {
+  if (
+    !canvas
+    || !telemetryPanel
+    || !telemetryToggle
+    || !telemetryToggleLabel
+    || !telemetrySummaryElement
+    || !telemetryChart
+    || !telemetryDetails
+    || !telemetryElement
+    || !captureButton
+    || !achievementElement
+  ) {
     throw new Error("Game UI is incomplete");
   }
 
@@ -163,7 +197,22 @@ function mountGame(): GameRuntime {
   };
   const telemetryValues = createTelemetryValues(telemetryElement);
   const lastTelemetryValues = new Array<string>(telemetryValues.length).fill("");
+  const telemetrySummaryView = createTelemetrySummaryView(telemetrySummaryElement, telemetryChart);
   const achievementPresenter = createAchievementPresenter(achievementElement);
+  let telemetryCollapsed = loadTelemetryCollapsed();
+
+  const applyTelemetryCollapsed = () => {
+    telemetryPanel.classList.toggle("is-collapsed", telemetryCollapsed);
+    telemetryDetails.hidden = telemetryCollapsed;
+    telemetryToggle.setAttribute("aria-expanded", telemetryCollapsed ? "false" : "true");
+    telemetryToggleLabel.textContent = telemetryCollapsed ? "Show Debug" : "Hide Debug";
+    storeTelemetryCollapsed(telemetryCollapsed);
+  };
+  const handleTelemetryToggle = () => {
+    telemetryCollapsed = !telemetryCollapsed;
+    applyTelemetryCollapsed();
+  };
+  applyTelemetryCollapsed();
 
   controller.onHudUpdate = (snapshot) => {
     const nextValues = buildTelemetryValues(snapshot);
@@ -175,11 +224,13 @@ function mountGame(): GameRuntime {
       telemetryValues[index]!.textContent = value;
       lastTelemetryValues[index] = value;
     }
+    telemetrySummaryView.update(snapshot);
     achievementPresenter.observe(snapshot.recentDiscoveries);
     captureButton.hidden = snapshot.pointerLocked;
   };
 
   captureButton.addEventListener("click", handleCaptureClick);
+  telemetryToggle.addEventListener("click", handleTelemetryToggle);
   window.__VOXELS_GAME__ = {
     controller,
     snapshot: () => controller.getDebugSnapshot(),
@@ -223,6 +274,7 @@ function mountGame(): GameRuntime {
     ready,
     dispose() {
       captureButton.removeEventListener("click", handleCaptureClick);
+      telemetryToggle.removeEventListener("click", handleTelemetryToggle);
       controller.onHudUpdate = null;
       achievementPresenter.dispose();
       controller.dispose();
@@ -332,6 +384,65 @@ function createAchievementPresenter(root: HTMLElement): AchievementPresenter {
   };
 }
 
+function createTelemetrySummaryView(root: HTMLElement, canvas: HTMLCanvasElement): TelemetrySummaryView {
+  const fragment = document.createDocumentFragment();
+  const valueElements: HTMLSpanElement[] = [];
+  for (const label of TELEMETRY_SUMMARY_LABELS) {
+    const metric = document.createElement("div");
+    metric.className = "game-telemetry-summary-metric";
+    const labelElement = document.createElement("span");
+    labelElement.textContent = label;
+    const valueElement = document.createElement("strong");
+    metric.append(labelElement, valueElement);
+    fragment.append(metric);
+    valueElements.push(valueElement);
+  }
+  root.replaceChildren(fragment);
+
+  const lastValues = new Array<string>(valueElements.length).fill("");
+  const history: TelemetryHistorySample[] = [];
+
+  return {
+    update(snapshot) {
+      const renderMs = snapshot.lastFrameSyncMs + snapshot.lastFrameUploadMs + snapshot.lastFrameEncodeMs;
+      const frameMs = Math.max(0, snapshot.lastFrameCpuMs);
+      const fps = frameMs > 0 ? Math.min(240, 1000 / frameMs) : 0;
+      const historySample: TelemetryHistorySample = {
+        fps,
+        frameMs,
+        streamMs: Math.max(0, snapshot.streamMs),
+        meshMs: Math.max(0, snapshot.meshMs),
+        farFieldMs: Math.max(0, snapshot.farFieldMs),
+        renderMs: Math.max(0, renderMs),
+        otherMs: Math.max(0, frameMs - snapshot.streamMs - snapshot.meshMs - snapshot.farFieldMs - renderMs),
+      };
+      history.push(historySample);
+      if (history.length > TELEMETRY_HISTORY_LIMIT) {
+        history.shift();
+      }
+
+      const summaryValues = [
+        formatSummaryFps(snapshot.avgFrameCpuMs > 0 ? 1000 / snapshot.avgFrameCpuMs : fps),
+        formatSummaryMs(frameMs),
+        formatSummaryMs(snapshot.streamMs),
+        formatSummaryMs(snapshot.meshMs),
+        formatSummaryMs(snapshot.farFieldMs),
+        formatSummaryMs(renderMs),
+      ];
+      for (let index = 0; index < summaryValues.length; index += 1) {
+        const value = summaryValues[index]!;
+        if (value === lastValues[index]) {
+          continue;
+        }
+        valueElements[index]!.textContent = value;
+        lastValues[index] = value;
+      }
+
+      drawTelemetrySummaryChart(canvas, history);
+    },
+  };
+}
+
 function buildTelemetryValues(snapshot: GameHudSnapshot): string[] {
   return [
     formatPosition(snapshot.position),
@@ -388,4 +499,124 @@ function buildTelemetryValues(snapshot: GameHudSnapshot): string[] {
 
 function formatPosition(position: [number, number, number]): string {
   return position.map((value) => `${worldUnitsToMeters(value).toFixed(1)}m`).join(", ");
+}
+
+function loadTelemetryCollapsed(): boolean {
+  try {
+    const stored = window.localStorage.getItem(TELEMETRY_STORAGE_KEY);
+    return stored === null ? true : stored === "true";
+  } catch {
+    return true;
+  }
+}
+
+function storeTelemetryCollapsed(collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(TELEMETRY_STORAGE_KEY, collapsed ? "true" : "false");
+  } catch {
+    // Ignore storage failures; the default collapsed behavior still works.
+  }
+}
+
+function formatSummaryFps(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0";
+  }
+  return value >= 100 ? value.toFixed(0) : value.toFixed(1);
+}
+
+function formatSummaryMs(value: number): string {
+  return `${Math.max(0, value).toFixed(1)} ms`;
+}
+
+function drawTelemetrySummaryChart(
+  canvas: HTMLCanvasElement,
+  samples: readonly TelemetryHistorySample[],
+): void {
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const devicePixelRatio = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.round(rect.width * devicePixelRatio));
+  const height = Math.max(1, Math.round(rect.height * devicePixelRatio));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+
+  context.clearRect(0, 0, width, height);
+  context.fillStyle = "rgba(6, 10, 12, 0.6)";
+  context.fillRect(0, 0, width, height);
+
+  if (samples.length === 0) {
+    return;
+  }
+
+  const plotBottom = height - 6 * devicePixelRatio;
+  const plotTop = 24 * devicePixelRatio;
+  const plotHeight = Math.max(1, plotBottom - plotTop);
+  const frameScaleMax = Math.max(16.7, ...samples.map((sample) => sample.frameMs));
+  const columnWidth = width / samples.length;
+  const colors = {
+    stream: "rgba(92, 144, 154, 0.7)",
+    mesh: "rgba(168, 133, 84, 0.74)",
+    far: "rgba(118, 102, 152, 0.68)",
+    render: "rgba(98, 128, 98, 0.68)",
+    other: "rgba(82, 86, 98, 0.6)",
+  } as const;
+
+  context.strokeStyle = "rgba(255, 244, 213, 0.12)";
+  context.lineWidth = 1 * devicePixelRatio;
+  context.beginPath();
+  context.moveTo(0, plotTop + plotHeight * 0.5);
+  context.lineTo(width, plotTop + plotHeight * 0.5);
+  context.stroke();
+
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = samples[index]!;
+    const x = index * columnWidth;
+    let top = plotBottom;
+    const segments = [
+      [sample.otherMs, colors.other],
+      [sample.renderMs, colors.render],
+      [sample.farFieldMs, colors.far],
+      [sample.meshMs, colors.mesh],
+      [sample.streamMs, colors.stream],
+    ] as const;
+    for (const [value, color] of segments) {
+      if (value <= 0) {
+        continue;
+      }
+      const segmentHeight = Math.max(1, (Math.min(value, frameScaleMax) / frameScaleMax) * plotHeight);
+      const nextTop = Math.max(plotTop, top - segmentHeight);
+      const visibleHeight = top - nextTop;
+      top = nextTop;
+      if (visibleHeight <= 0) {
+        continue;
+      }
+      context.fillStyle = color;
+      context.fillRect(x, top, Math.max(1, columnWidth - devicePixelRatio * 0.5), visibleHeight);
+    }
+  }
+
+  const fpsScaleMax = Math.max(60, ...samples.map((sample) => sample.fps));
+  context.strokeStyle = "#fff4d5";
+  context.lineWidth = Math.max(1.5, devicePixelRatio * 1.2);
+  context.beginPath();
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = samples[index]!;
+    const x = samples.length === 1
+      ? width / 2
+      : (index / (samples.length - 1)) * width;
+    const clampedFps = Math.max(0, Math.min(sample.fps, fpsScaleMax));
+    const y = plotBottom - (clampedFps / fpsScaleMax) * plotHeight;
+    if (index === 0) {
+      context.moveTo(x, y);
+    } else {
+      context.lineTo(x, y);
+    }
+  }
+  context.stroke();
 }

@@ -1558,3 +1558,20 @@
   - no new polling
   - no extra world sampling
   - no HUD-side string heuristics
+
+## 2026-03-12 collapsible telemetry summary with inline history chart
+
+- I then reworked the right-side debug surface instead of adding another panel:
+  - the telemetry panel is now collapsed by default
+  - the closed state only shows a compact performance summary
+  - the detailed grid still exists behind the same panel and opens on demand
+- The compact view is built to stay cheap:
+  - summary metrics are persistent DOM nodes with text updates only
+  - the history chart is a single canvas, redrawn only on the existing HUD push cadence
+  - no additional per-frame polling or timers were added
+- The chart now exposes the “shape” of performance instead of only text:
+  - muted stacked bars show frame-time composition
+  - a brighter FPS sparkline runs over the top for quick trend reading
+- I also made the state durable:
+  - collapsed/open state is stored in local storage
+  - the default remains collapsed if no preference has been written yet
