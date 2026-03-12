@@ -2246,3 +2246,30 @@
 - The trace still shows chunk meshing as a real hotspot, so this is not “finished,” but the slice is worth keeping:
   - worker meshing got cheaper without reintroducing holes or changing rendered output
   - the next likely wins are either a faster opaque meshing algorithm for dynamic chunks or more generator-side surface shaping work such as `sampleSurfaceY(...)`
+
+## 2026-03-12 neighbor-face-only async meshing inputs
+
+- I used the next clean baseline trace before touching code again:
+  - the walk path was already healthy, but the worker trace still had one obviously bad structural smell
+  - `postMessage @ :` was still near the top of the exclusive hotspot list at about `12316.4 ms`
+  - the async meshing input was still transferring the current chunk plus six full neighboring chunks to the worker
+- That is not what the worker mesher actually needs:
+  - `buildOpaqueChunkMeshFromInput(...)` only samples neighbor boundary faces
+  - it never reads interior neighbor voxels
+  - so shipping whole neighbor chunks was pure transfer overhead and extra heap churn
+- The kept rewrite removes that dead payload:
+  - async opaque meshing inputs now carry the current chunk plus six extracted neighbor face planes instead of six full neighbor chunks
+  - the worker mesher now samples those face planes directly
+  - I kept the synchronous mesher untouched, so the near-render truth path remains the same
+  - I also extended the worker-friendly meshing test so cloned inputs prove the face-plane data is stable after the world mutates
+- This was a real win, not just a code cleanup:
+  - the 10-second forward-walk benchmark improved from about `1.265 ms` to `1.206 ms` average gameplay frame
+  - `avg_deltaTaskDurationMs` improved from about `3331.823 ms` to `3207.367 ms`
+  - the live-forward trace improved from about `1.370 ms` to `1.319 ms` average gameplay frame and from `3.6 ms` to `3.4 ms` p95
+  - the big structural proof is the trace hotspot collapse:
+    - `postMessage @ :` exclusive time dropped from about `12316.4 ms` to about `193.1 ms`
+    - the top chunk-meshing-worker exclusive frame dropped from about `38829.5 ms` to about `12733.4 ms`
+- The slice is worth keeping because it removes real waste without changing visible output:
+  - hole-signal frames stayed at `0`
+  - the worker boundary is now much closer to the actual data dependency surface
+  - the next meshing target is now more likely inside the mesher math itself than in the cross-thread payload size

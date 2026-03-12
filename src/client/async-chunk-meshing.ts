@@ -154,11 +154,11 @@ export function createAsyncChunkMeshing(
 function collectMeshingInputTransferables(input: OpaqueChunkMeshingInput): Transferable[] {
   const transferables: Transferable[] = [input.chunkData.buffer];
   for (const [negativeNeighbor, positiveNeighbor] of input.neighbors) {
-    if (negativeNeighbor.data) {
-      transferables.push(negativeNeighbor.data.buffer);
+    if (negativeNeighbor.faceData) {
+      transferables.push(negativeNeighbor.faceData.buffer);
     }
-    if (positiveNeighbor.data) {
-      transferables.push(positiveNeighbor.data.buffer);
+    if (positiveNeighbor.faceData) {
+      transferables.push(positiveNeighbor.faceData.buffer);
     }
   }
   return transferables;

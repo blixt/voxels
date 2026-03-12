@@ -12,15 +12,20 @@ import {
 import { VoxelWorld } from "../src/engine/world.ts";
 
 test("opaque chunk meshing input clones chunk data when requested", () => {
-  const world = new VoxelWorld({ width: 16, height: 16, depth: 16 }, 16, [0, 0xff88aa44]);
+  const world = new VoxelWorld({ width: 32, height: 16, depth: 16 }, 16, [0, 0xff88aa44]);
   world.setVoxel(1, 1, 1, 1);
+  world.setVoxel(16, 1, 1, 1);
 
   const input = createOpaqueChunkMeshingInput(world, 0, 0, 0, { cloneData: true });
   expect(input).not.toBeNull();
 
   world.setVoxel(1, 1, 1, 0);
+  world.setVoxel(16, 1, 1, 0);
 
   expect(input?.chunkData[1 + 1 * 16 + 1 * 16 * 16]).toBe(1);
+  expect(input?.neighbors[0][1].faceData).not.toBeNull();
+  expect(input?.neighbors[0][1].faceData?.length).toBe(16 * 16);
+  expect(input?.neighbors[0][1].faceData?.[1 + 1 * 16]).toBe(1);
 });
 
 test("worker-friendly opaque meshing matches the synchronous opaque mesh", () => {

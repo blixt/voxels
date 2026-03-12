@@ -4525,3 +4525,61 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - The mesher microbenches improved materially, and the real 10-second walk benchmark improved without visual regressions.
 - The chunk-meshing worker is still a first-order hotspot in the trace, so the next meshing step likely needs a more structural algorithm/data-flow change than another tiny staging tweak.
+
+## 2026-03-12 neighbor-face-only async meshing inputs
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/opaque-chunk-mesher.test.ts tests/mesher.test.ts`
+- `mise run build`
+- `mise run bench-browser-game -- --label=neighbor-face-transfer --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=1 --walk-duration=10 --walk-settle=4 --walk-sample-hz=60`
+- `mise run trace-route -- --benchmark=live-forward --label=neighbor-face-transfer-trace --duration=10 --settle=4 --sample-hz=60`
+
+#### Numeric probes
+
+- Focused verification:
+  - `12` pass
+  - `0` fail
+- Walk benchmark output:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-QlDTED/report.json`
+  - benchmark elapsed `14150.055 ms`
+  - avg gameplay frame `1.206 ms`
+  - p95 gameplay frame `3.2 ms`
+  - max gameplay frame `10 ms`
+  - hole-signal frames `0`
+  - peak JS heap used `14550392 bytes`
+  - `avg_deltaTaskDurationMs = 3207.367`
+- Previous comparable walk benchmark:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-W13JDs/report.json`
+  - avg gameplay frame `1.265 ms`
+  - p95 gameplay frame `3.4 ms`
+  - max gameplay frame `9.2 ms`
+  - hole-signal frames `0`
+  - `avg_deltaTaskDurationMs = 3331.823`
+- Live-forward Chrome trace:
+  - report: `artifacts/browser-route-trace/20260312T234559Z-neighbor-face-transfer-trace/report.json`
+  - avg gameplay frame `1.3193452388402962 ms`
+  - p95 gameplay frame `3.400000035762787 ms`
+  - max gameplay frame `12.899999976158142 ms`
+  - avg mesh `0.3634523806827409 ms`
+  - max mesh `11.100000023841858 ms`
+  - `postMessage @ :` exclusive `193.1 ms`
+  - top chunk-meshing-worker exclusive frame `12733.4 ms`
+  - hole-signal frames `0`
+- Previous comparable live-forward trace:
+  - report: `artifacts/browser-route-trace/20260312T234034Z-next-opt-baseline/report.json`
+  - avg gameplay frame `1.3702380957702796 ms`
+  - p95 gameplay frame `3.600000023841858 ms`
+  - max gameplay frame `10.400000035762787 ms`
+  - avg mesh `0.38291666667376245 ms`
+  - max mesh `8.399999976158142 ms`
+  - `postMessage @ :` exclusive `12316.4 ms`
+  - top chunk-meshing-worker exclusive frame `38829.5 ms`
+  - hole-signal frames `0`
+
+#### Residual
+
+- This slice is worth keeping.
+- Shrinking async meshing inputs to the actual six neighbor faces produced a real walk/trace win and collapsed cross-thread transfer overhead in the trace.
+- The next meshing win is more likely to come from the worker mesher’s internal algorithm or data layout than from another large payload reduction, because the worst transfer hotspot is now mostly gone.

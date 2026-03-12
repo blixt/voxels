@@ -16,8 +16,8 @@ export interface LocalChunkBounds {
   max: [number, number, number];
 }
 
-export interface OpaqueChunkNeighborSnapshot {
-  data: Uint16Array | null;
+export interface OpaqueChunkNeighborFaceSnapshot {
+  faceData: Uint16Array | null;
   solidBounds: LocalChunkBounds | null;
 }
 
@@ -28,9 +28,9 @@ export interface OpaqueChunkMeshingInput {
   solidCount: number;
   solidBounds: LocalChunkBounds | null;
   neighbors: [
-    [OpaqueChunkNeighborSnapshot, OpaqueChunkNeighborSnapshot],
-    [OpaqueChunkNeighborSnapshot, OpaqueChunkNeighborSnapshot],
-    [OpaqueChunkNeighborSnapshot, OpaqueChunkNeighborSnapshot],
+    [OpaqueChunkNeighborFaceSnapshot, OpaqueChunkNeighborFaceSnapshot],
+    [OpaqueChunkNeighborFaceSnapshot, OpaqueChunkNeighborFaceSnapshot],
+    [OpaqueChunkNeighborFaceSnapshot, OpaqueChunkNeighborFaceSnapshot],
   ];
 }
 
@@ -96,7 +96,7 @@ export function buildOpaqueChunkMeshFromInput(
 
   const chunkArea = chunkSize * chunkSize;
   const chunkVolume = chunkSize * chunkArea;
-  if (input.solidCount === chunkVolume && isChunkFullyOccluded(input.neighbors, chunkSize, chunkArea)) {
+  if (input.solidCount === chunkVolume && isChunkFullyOccluded(input.neighbors, chunkSize)) {
     return createEmptyOpaqueChunkMesh(null);
   }
 
@@ -125,26 +125,22 @@ export function buildOpaqueChunkMeshFromInput(
           const a = x[axis] >= 0
             ? sampleChunkVoxel(input.chunkData, chunkSize, chunkArea, x[0]!, x[1]!, x[2]!)
             : sampleNeighborVoxel(
-                negativeNeighbor.data,
+                negativeNeighbor.faceData,
                 axis,
-                true,
                 x[0]!,
                 x[1]!,
                 x[2]!,
                 chunkSize,
-                chunkArea,
               );
           const b = x[axis] + 1 < chunkSize
             ? sampleChunkVoxel(input.chunkData, chunkSize, chunkArea, x[0] + q[0]!, x[1] + q[1]!, x[2] + q[2]!)
             : sampleNeighborVoxel(
-                positiveNeighbor.data,
+                positiveNeighbor.faceData,
                 axis,
-                false,
                 x[0] + q[0]!,
                 x[1] + q[1]!,
                 x[2] + q[2]!,
                 chunkSize,
-                chunkArea,
               );
           const opaqueA = isOpaqueMaterial(materialLut, a) ? a : 0;
           const opaqueB = isOpaqueMaterial(materialLut, b) ? b : 0;
@@ -241,9 +237,9 @@ function createEmptyOpaqueChunkMesh(bounds: ChunkBounds | null): OpaqueChunkMesh
   };
 }
 
-function cloneNeighbor(neighbor: OpaqueChunkNeighborSnapshot): OpaqueChunkNeighborSnapshot {
+function cloneNeighbor(neighbor: OpaqueChunkNeighborFaceSnapshot): OpaqueChunkNeighborFaceSnapshot {
   return {
-    data: neighbor.data?.slice() ?? null,
+    faceData: neighbor.faceData?.slice() ?? null,
     solidBounds: cloneLocalBounds(neighbor.solidBounds),
   };
 }
@@ -276,24 +272,21 @@ function sampleChunkVoxel(
 function isChunkFullyOccluded(
   neighbors: OpaqueChunkMeshingInput["neighbors"],
   chunkSize: number,
-  chunkArea: number,
 ): boolean {
-  return isNeighborFaceSolid(neighbors[0][0], chunkSize, chunkArea, "x", chunkSize - 1)
-    && isNeighborFaceSolid(neighbors[0][1], chunkSize, chunkArea, "x", 0)
-    && isNeighborFaceSolid(neighbors[1][0], chunkSize, chunkArea, "y", chunkSize - 1)
-    && isNeighborFaceSolid(neighbors[1][1], chunkSize, chunkArea, "y", 0)
-    && isNeighborFaceSolid(neighbors[2][0], chunkSize, chunkArea, "z", chunkSize - 1)
-    && isNeighborFaceSolid(neighbors[2][1], chunkSize, chunkArea, "z", 0);
+  return isNeighborFaceSolid(neighbors[0][0], "x", chunkSize - 1)
+    && isNeighborFaceSolid(neighbors[0][1], "x", 0)
+    && isNeighborFaceSolid(neighbors[1][0], "y", chunkSize - 1)
+    && isNeighborFaceSolid(neighbors[1][1], "y", 0)
+    && isNeighborFaceSolid(neighbors[2][0], "z", chunkSize - 1)
+    && isNeighborFaceSolid(neighbors[2][1], "z", 0);
 }
 
 function isNeighborFaceSolid(
-  neighbor: OpaqueChunkNeighborSnapshot,
-  chunkSize: number,
-  chunkArea: number,
+  neighbor: OpaqueChunkNeighborFaceSnapshot,
   axis: "x" | "y" | "z",
   faceIndex: number,
 ): boolean {
-  if (!neighbor.data || !neighbor.solidBounds) {
+  if (!neighbor.faceData || !neighbor.solidBounds) {
     return false;
   }
   const bounds = neighbor.solidBounds;
@@ -306,64 +299,32 @@ function isNeighborFaceSolid(
   if (axis === "z" && (bounds.min[2] > faceIndex || bounds.max[2] <= faceIndex)) {
     return false;
   }
-  const data = neighbor.data;
-  if (axis === "x") {
-    for (let z = 0; z < chunkSize; z += 1) {
-      const planeOffset = z * chunkArea;
-      for (let y = 0; y < chunkSize; y += 1) {
-        if (data[faceIndex + y * chunkSize + planeOffset] === 0) {
-          return false;
-        }
-      }
-    }
-    return true;
-  }
-  if (axis === "y") {
-    const planeOffset = faceIndex * chunkSize;
-    for (let z = 0; z < chunkSize; z += 1) {
-      const rowOffset = z * chunkArea + planeOffset;
-      for (let x = 0; x < chunkSize; x += 1) {
-        if (data[x + rowOffset] === 0) {
-          return false;
-        }
-      }
-    }
-    return true;
-  }
-  for (let y = 0; y < chunkSize; y += 1) {
-    const rowOffset = y * chunkSize + faceIndex * chunkArea;
-    for (let x = 0; x < chunkSize; x += 1) {
-      if (data[x + rowOffset] === 0) {
-        return false;
-      }
+  for (let index = 0; index < neighbor.faceData.length; index += 1) {
+    if (neighbor.faceData[index] === 0) {
+      return false;
     }
   }
   return true;
 }
 
 function sampleNeighborVoxel(
-  data: Uint16Array | null,
+  faceData: Uint16Array | null,
   axis: number,
-  negative: boolean,
   x: number,
   y: number,
   z: number,
   chunkSize: number,
-  chunkArea: number,
 ): number {
-  if (!data) {
+  if (!faceData) {
     return 0;
   }
   if (axis === 0) {
-    const localX = negative ? chunkSize - 1 : 0;
-    return data[localX + y * chunkSize + z * chunkArea]!;
+    return faceData[y + z * chunkSize]!;
   }
   if (axis === 1) {
-    const localY = negative ? chunkSize - 1 : 0;
-    return data[x + localY * chunkSize + z * chunkArea]!;
+    return faceData[x + z * chunkSize]!;
   }
-  const localZ = negative ? chunkSize - 1 : 0;
-  return data[x + y * chunkSize + localZ * chunkArea]!;
+  return faceData[x + y * chunkSize]!;
 }
 
 function buildMeshGeometryFromQuads(

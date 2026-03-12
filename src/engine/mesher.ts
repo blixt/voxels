@@ -156,9 +156,18 @@ export function createOpaqueChunkMeshingInput(
     solidCount: chunk.solidCount,
     solidBounds: cloneLocalBounds(resolveChunkSolidBounds(world, chunk, cx, cy, cz)),
     neighbors: [
-      [toOpaqueChunkNeighbor(neighbors[0]![0]), toOpaqueChunkNeighbor(neighbors[0]![1])],
-      [toOpaqueChunkNeighbor(neighbors[1]![0]), toOpaqueChunkNeighbor(neighbors[1]![1])],
-      [toOpaqueChunkNeighbor(neighbors[2]![0]), toOpaqueChunkNeighbor(neighbors[2]![1])],
+      [
+        toOpaqueChunkNeighbor(neighbors[0]![0], 0, true, world.chunkSize),
+        toOpaqueChunkNeighbor(neighbors[0]![1], 0, false, world.chunkSize),
+      ],
+      [
+        toOpaqueChunkNeighbor(neighbors[1]![0], 1, true, world.chunkSize),
+        toOpaqueChunkNeighbor(neighbors[1]![1], 1, false, world.chunkSize),
+      ],
+      [
+        toOpaqueChunkNeighbor(neighbors[2]![0], 2, true, world.chunkSize),
+        toOpaqueChunkNeighbor(neighbors[2]![1], 2, false, world.chunkSize),
+      ],
     ],
   };
   return options.cloneData ? cloneOpaqueChunkMeshingInput(input) : input;
@@ -892,11 +901,62 @@ function resolveNeighbor(
   };
 }
 
-function toOpaqueChunkNeighbor(neighbor: ResolvedChunkNeighbor) {
+function toOpaqueChunkNeighbor(
+  neighbor: ResolvedChunkNeighbor,
+  axis: number,
+  negative: boolean,
+  chunkSize: number,
+) {
   return {
-    data: neighbor.data,
+    faceData: extractNeighborFaceData(neighbor.data, axis, negative, chunkSize),
     solidBounds: cloneLocalBounds(neighbor.solidBounds),
   };
+}
+
+function extractNeighborFaceData(
+  data: Uint16Array | null,
+  axis: number,
+  negative: boolean,
+  chunkSize: number,
+): Uint16Array | null {
+  if (!data) {
+    return null;
+  }
+  const chunkArea = chunkSize * chunkSize;
+  const faceData = new Uint16Array(chunkArea);
+  if (axis === 0) {
+    const localX = negative ? chunkSize - 1 : 0;
+    for (let z = 0; z < chunkSize; z += 1) {
+      const sourcePlaneOffset = localX + z * chunkArea;
+      const faceRowOffset = z * chunkSize;
+      for (let y = 0; y < chunkSize; y += 1) {
+        faceData[y + faceRowOffset] = data[sourcePlaneOffset + y * chunkSize]!;
+      }
+    }
+    return faceData;
+  }
+  if (axis === 1) {
+    const localY = negative ? chunkSize - 1 : 0;
+    const sourceRowOffset = localY * chunkSize;
+    for (let z = 0; z < chunkSize; z += 1) {
+      const sourcePlaneOffset = z * chunkArea + sourceRowOffset;
+      const faceRowOffset = z * chunkSize;
+      for (let x = 0; x < chunkSize; x += 1) {
+        faceData[x + faceRowOffset] = data[sourcePlaneOffset + x]!;
+      }
+    }
+    return faceData;
+  }
+  const localZ = negative ? chunkSize - 1 : 0;
+  const sourcePlaneOffset = localZ * chunkArea;
+  for (let y = 0; y < chunkSize; y += 1) {
+    const sourceRowOffset = sourcePlaneOffset + y * chunkSize;
+    const faceRowOffset = y * chunkSize;
+    for (let x = 0; x < chunkSize; x += 1) {
+      faceData[x + faceRowOffset] = data[sourceRowOffset + x]!;
+    }
+  }
+  return faceData;
 }
 
 function cloneLocalBounds(
