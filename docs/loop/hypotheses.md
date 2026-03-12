@@ -1,5 +1,13 @@
 # Renderer Hypotheses
 
+## 2026-03-12 far-summary frontier search
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| Far-summary discovery still needs generator-backed Y-range probing even after chunk render summaries exist, otherwise the horizon cannot grow at all | Remove the generator fallback, grow prefetch only from resident/generated summary columns plus pending summary requests, and rerun the resident-world tests and a short Chrome route smoke | Rejected. The frontier now grows from actual summary data, the focused test proves `sampleColumn()` is not called by far-summary prefetch, and the route smoke stayed clean | Rejected |
+| The old “far sampling becomes available after pre-generation” smoke already described the right contract | Re-run it under the summary-frontier model without changing the test | Rejected. The old test was still assuming generator-bootstrapped far discovery. The kept contract now requires the resident bubble to exist first, which is the correct architecture | Rejected |
+| Once generator-backed far-summary discovery is removed, the remaining `sampleColumn()` hotspot in the route trace should disappear entirely | Rerun a short Chrome route trace and inspect whether any `sampleColumn()` inclusive cost remains | Rejected. `sampleColumn()` still appears via `computeChunkYRange()` for actual near-chunk generation, which is acceptable; the far-summary leak itself is gone | Rejected |
+
 ## 2026-03-12 far-column summary search
 
 | Hypothesis | Tiny verification case | Result | Status |

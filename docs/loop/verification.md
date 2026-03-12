@@ -5,6 +5,42 @@
 ### Commands
 
 - `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/generated-render-column-summary.test.ts tests/generated-chunk-codec.test.ts`
+- `mise run build`
+- `mise run trace-route -- --label=frontier-smoke --duration=1 --settle=1 --sample-hz=20`
+
+### Automated checks
+
+- `tsc --noEmit`: passing.
+- Focused resident-world / column-summary / codec tests: passing.
+- Production build: passing.
+
+### Route trace
+
+- `artifacts/browser-route-trace/20260312T172317Z-frontier-smoke/report.json`
+- Summary:
+  - avg gameplay frame: `2.67 ms`
+  - `p95` gameplay frame: `3.0 ms`
+  - max gameplay frame: `3.3 ms`
+  - avg stream: `2.60 ms`
+  - avg mesh: `0.01 ms`
+  - avg far field: `0.00 ms`
+  - hole-signal frames: `0`
+- Trace hotspot note:
+  - `estimateFarFieldSummaryChunkYRange()` is still a live CPU bucket, but it no longer contains procedural `sampleColumn()` work
+  - the remaining `sampleColumn()` hotspot is now attributable to `computeChunkYRange()` for actual resident chunk generation, not far-summary discovery
+
+### Notes
+
+- The runtime far-summary path is now chunk-data-driven end to end:
+  - far rendering reads chunk-derived summaries
+  - far-summary discovery grows from generated/resident summaries and pending summary requests
+  - the procedural generator is still used to create actual chunks, but not to answer render-time or far-summary range queries
+- The short route smoke is intentionally not the whole performance story; it is the proof that the architectural leak is gone without reopening holes.
+
+### Commands
+
+- `mise exec -- bun run typecheck`
 - `mise exec -- bun test tests/generated-render-column-summary.test.ts tests/procedural-resident-world.test.ts tests/generated-chunk-codec.test.ts`
 - `mise run build`
 - `mise run trace-route -- --label=column-summary-smoke --duration=1 --settle=1 --sample-hz=20`

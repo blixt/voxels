@@ -5,6 +5,15 @@ import { ProceduralResidentWorld } from "../src/engine/procedural-resident-world
 import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
 
+class CountingProceduralWorldGenerator extends ProceduralWorldGenerator {
+  sampleColumnCalls = 0;
+
+  override sampleColumn(worldX: number, worldZ: number) {
+    this.sampleColumnCalls += 1;
+    return super.sampleColumn(worldX, worldZ);
+  }
+}
+
 test("resident world loads chunks around the player and exposes generated voxels", () => {
   const generator = new ProceduralWorldGenerator(1337, { chunkSize: 16 });
   const world = new ProceduralResidentWorld(generator, { horizontalRadiusChunks: 2 });
@@ -341,8 +350,9 @@ test("far-field sampling only becomes available after actual chunk pre-generatio
     horizontalRadiusChunks: 1,
   });
   const spawn = world.getSpawnPosition();
-  const farWorldX = Math.floor(spawn[0] + world.chunkSize * 4);
+  const farWorldX = Math.floor(spawn[0] + world.chunkSize * 2);
   const farWorldZ = Math.floor(spawn[2]);
+  world.updateResidencyAround(spawn, { maxGenerateChunks: Number.POSITIVE_INFINITY });
 
   expect(world.sampleFarFieldColumn(farWorldX, farWorldZ)).toBeNull();
 
@@ -350,6 +360,21 @@ test("far-field sampling only becomes available after actual chunk pre-generatio
 
   expect(generated).toBeGreaterThan(0);
   expect(world.sampleFarFieldColumn(farWorldX, farWorldZ)).not.toBeNull();
+});
+
+test("far-field summary prefetch grows from actual summary frontier instead of probing generator columns", () => {
+  const generator = new CountingProceduralWorldGenerator(1337, { chunkSize: 16 });
+  const world = new ProceduralResidentWorld(generator, {
+    horizontalRadiusChunks: 1,
+  });
+  const spawn = world.getSpawnPosition();
+  world.updateResidencyAround(spawn, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+
+  generator.sampleColumnCalls = 0;
+  const generated = world.prefetchFarFieldSummariesAround(spawn, world.chunkSize * 6, 64);
+
+  expect(generated).toBeGreaterThan(0);
+  expect(generator.sampleColumnCalls).toBe(0);
 });
 
 test("far-field sampling follows resident voxel edits instead of stale generator output", () => {

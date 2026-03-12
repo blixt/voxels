@@ -2,6 +2,22 @@
 
 ## 2026-03-12
 
+- Removed the remaining generator-backed far-summary discovery leak from the live runtime:
+  - `prefetchFarFieldSummariesAround()` in `src/engine/procedural-resident-world.ts` no longer probes `generator.sampleColumn()` to guess unseen far-column Y ranges
+  - far-summary discovery now grows from actual generated/resident column summaries plus pending far-summary requests
+  - the kept seam is a summary frontier, not a procedural height probe
+- Added a focused regression to lock the new contract:
+  - `tests/procedural-resident-world.test.ts` now verifies far-summary prefetch grows from already-generated summary data and does not call `sampleColumn()`
+  - the older “far sampling becomes available after pre-generation” test now explicitly seeds the resident bubble first, because the far frontier is no longer allowed to bootstrap itself from generator metadata
+- The short Chrome route smoke moved sharply in the right direction after the change:
+  - `frontier-smoke` average gameplay frame: `2.67 ms`
+  - `p95` gameplay frame: `3.0 ms`
+  - hole-signal frames: `0`
+- The route trace also clarified what is left:
+  - the old generator probe is gone from far-summary discovery
+  - the remaining `sampleColumn()` hotspot is now the resident-world chunk-Y range path for actual near-chunk generation, which is acceptable for the authoritative generation path
+  - the next clean persistence step is to store and load column/region summary indexes directly, so revisits can seed the far-summary frontier from disk/server without waiting to regrow it from nearby resident columns
+
 - Added a true per-column far-summary index derived from actual generated chunk summaries instead of scanning all known chunk slabs every time the far renderer samples one `x/z` column:
   - added `src/engine/generated-render-column-summary.ts`
   - `ProceduralResidentWorld.sampleFarFieldColumn()` now reads an aggregated column summary in O(1)

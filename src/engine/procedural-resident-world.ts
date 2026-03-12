@@ -23,6 +23,7 @@ import type { MutableResidentChunkWorld, VoxelChunk } from "./world.ts";
 const DEFAULT_HORIZONTAL_RADIUS_CHUNKS = 8;
 const DEFAULT_UNDERGROUND_PADDING_CHUNKS = 3;
 const DEFAULT_AIR_PADDING_CHUNKS = 2;
+const FAR_FIELD_SUMMARY_DISCOVERY_VERTICAL_PADDING_CHUNKS = 1;
 const SPAWN_FOOTPRINT_RADIUS = metersToWorldUnits(0.8);
 const SPAWN_SCAN_DEPTH = metersToWorldUnits(3.2);
 const SPAWN_MAX_SURFACE_DROP = metersToWorldUnits(1.2);
@@ -77,6 +78,11 @@ export interface WorldEditRecord {
   localIndex: number;
 }
 
+interface ChunkYRange {
+  minCy: number;
+  maxCy: number;
+}
+
 export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFieldSource {
   readonly chunkSize: number;
   readonly minY = 0;
@@ -96,6 +102,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   private readonly generatedRenderSummaries = new Map<string, GeneratedChunkRenderSummary>();
   private readonly generatedRenderChunkKeysByColumn = new Map<string, Set<string>>();
   private readonly generatedRenderColumnSummaries = new Map<string, GeneratedRenderColumnSummary>();
+  private readonly pendingFarFieldColumnRanges = new Map<string, ChunkYRange>();
   private readonly asyncChunkGeneration: AsyncChunkGenerationQueue | null;
   private residentColumnRevision = 0;
   private lastAnchorSignature = "";
@@ -735,7 +742,11 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
       }
       const cx = centerChunkX + dx;
       const cz = centerChunkZ + dz;
-      const [minCy, maxCy] = this.computeFarFieldSummaryChunkYRange(cx, cz);
+      const estimatedRange = this.estimateFarFieldSummaryChunkYRange(cx, cz);
+      if (!estimatedRange) {
+        continue;
+      }
+      const { minCy, maxCy } = estimatedRange;
       for (const cy of prioritizeFarFieldSurfaceChunkYRange(minCy, maxCy)) {
         if (requestedChunks >= maxGenerateChunks) {
           break;
@@ -749,6 +760,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
         ) {
           continue;
         }
+        this.notePendingFarFieldColumnRange(cx, cz, cy);
         if (this.asyncChunkGeneration) {
           if (this.asyncChunkGeneration.requestSummary(cx, cy, cz)) {
             requestedChunks += 1;
@@ -793,27 +805,39 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     ];
   }
 
-  private computeFarFieldSummaryChunkYRange(cx: number, cz: number): [number, number] {
-    const existingSummary = this.generatedRenderColumnSummaries.get(toColumnKey(cx, cz));
-    if (existingSummary && existingSummary.minNonEmptyCy !== null && existingSummary.maxNonEmptyCy !== null) {
-      return [existingSummary.minNonEmptyCy, existingSummary.maxNonEmptyCy];
+  private estimateFarFieldSummaryChunkYRange(cx: number, cz: number): ChunkYRange | null {
+    const columnKey = toColumnKey(cx, cz);
+    let minCy = Number.POSITIVE_INFINITY;
+    let maxCy = Number.NEGATIVE_INFINITY;
+
+    const existingRange = this.getKnownFarFieldColumnRange(cx, cz);
+    if (existingRange) {
+      minCy = Math.min(minCy, existingRange.minCy);
+      maxCy = Math.max(maxCy, existingRange.maxCy);
     }
-    const chunkOriginX = cx * this.chunkSize;
-    const chunkOriginZ = cz * this.chunkSize;
-    let minSupportCy = Number.POSITIVE_INFINITY;
-    let maxSupportCy = Number.NEGATIVE_INFINITY;
-    for (const [offsetX, offsetZ] of sampleOffsets(this.chunkSize)) {
-      const column = this.generator.sampleColumn(chunkOriginX + offsetX, chunkOriginZ + offsetZ);
-      minSupportCy = Math.min(minSupportCy, Math.floor(column.surfaceY / this.chunkSize));
-      maxSupportCy = Math.max(
-        maxSupportCy,
-        Math.floor(Math.max(column.topY, column.waterTopY ?? column.surfaceY) / this.chunkSize),
-      );
+
+    for (const [offsetX, offsetZ] of FAR_FIELD_DISCOVERY_NEIGHBOR_OFFSETS) {
+      const neighborRange = this.getKnownFarFieldColumnRange(cx + offsetX, cz + offsetZ);
+      if (!neighborRange) {
+        continue;
+      }
+      minCy = Math.min(minCy, neighborRange.minCy - FAR_FIELD_SUMMARY_DISCOVERY_VERTICAL_PADDING_CHUNKS);
+      maxCy = Math.max(maxCy, neighborRange.maxCy + FAR_FIELD_SUMMARY_DISCOVERY_VERTICAL_PADDING_CHUNKS);
     }
-    if (!Number.isFinite(minSupportCy) || !Number.isFinite(maxSupportCy)) {
-      return [0, 0];
+
+    const pendingRange = this.pendingFarFieldColumnRanges.get(columnKey);
+    if (pendingRange) {
+      minCy = Math.min(minCy, pendingRange.minCy);
+      maxCy = Math.max(maxCy, pendingRange.maxCy);
     }
-    return [Math.max(0, minSupportCy), Math.max(Math.max(0, minSupportCy), maxSupportCy)];
+
+    if (!Number.isFinite(minCy) || !Number.isFinite(maxCy)) {
+      return null;
+    }
+    return {
+      minCy: clampChunkY(Math.min(minCy, maxCy), this.maxYExclusive, this.chunkSize),
+      maxCy: clampChunkY(Math.max(minCy, maxCy), this.maxYExclusive, this.chunkSize),
+    };
   }
 
   private markAdjacentChunksDirty(cx: number, cy: number, cz: number): number {
@@ -952,6 +976,30 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     }
     this.generatedRenderColumnSummaries.set(columnKey, columnSummary);
   }
+
+  private getKnownFarFieldColumnRange(cx: number, cz: number): ChunkYRange | null {
+    const summary = this.generatedRenderColumnSummaries.get(toColumnKey(cx, cz));
+    if (summary) {
+      const preferredMinCy = summary.minNonEmptyCy ?? summary.minKnownCy;
+      const preferredMaxCy = summary.maxNonEmptyCy ?? summary.maxKnownCy;
+      return {
+        minCy: preferredMinCy,
+        maxCy: preferredMaxCy,
+      };
+    }
+    return this.pendingFarFieldColumnRanges.get(toColumnKey(cx, cz)) ?? null;
+  }
+
+  private notePendingFarFieldColumnRange(cx: number, cz: number, cy: number): void {
+    const columnKey = toColumnKey(cx, cz);
+    const existing = this.pendingFarFieldColumnRanges.get(columnKey);
+    if (!existing) {
+      this.pendingFarFieldColumnRanges.set(columnKey, { minCy: cy, maxCy: cy });
+      return;
+    }
+    existing.minCy = Math.min(existing.minCy, cy);
+    existing.maxCy = Math.max(existing.maxCy, cy);
+  }
 }
 
 const ADJACENT_CHUNK_OFFSETS: ReadonlyArray<readonly [number, number, number]> = [
@@ -961,6 +1009,16 @@ const ADJACENT_CHUNK_OFFSETS: ReadonlyArray<readonly [number, number, number]> =
   [0, 1, 0],
   [0, 0, -1],
   [0, 0, 1],
+];
+const FAR_FIELD_DISCOVERY_NEIGHBOR_OFFSETS: ReadonlyArray<readonly [number, number]> = [
+  [-1, -1],
+  [0, -1],
+  [1, -1],
+  [-1, 0],
+  [1, 0],
+  [-1, 1],
+  [0, 1],
+  [1, 1],
 ];
 const PRIORITIZED_COLUMN_OFFSETS = new Map<number, Array<[number, number]>>();
 
@@ -1039,6 +1097,10 @@ function prioritizedChunkYRange(minCy: number, maxCy: number, preferredCy: numbe
     }
   }
   return ordered;
+}
+
+function clampChunkY(cy: number, maxYExclusive: number, chunkSize: number): number {
+  return Math.max(0, Math.min(Math.floor((maxYExclusive - 1) / chunkSize), cy));
 }
 
 function prioritizeFarFieldSurfaceChunkYRange(minCy: number, maxCy: number): number[] {
