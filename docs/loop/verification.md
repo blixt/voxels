@@ -3497,3 +3497,35 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - This slice is worth keeping.
 - The new far-surface prefetch is intentionally conservative and prioritizes resident work first, so very distant coverage still ramps in over time instead of appearing all at once.
+
+## 2026-03-12 chunk-derived render summary architecture
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/generated-chunk-render-summary.test.ts tests/generated-chunk-codec.test.ts`
+- `mise exec -- bun test tests/generated-chunk-codec.test.ts tests/procedural-far-field.test.ts tests/procedural-resident-world.test.ts`
+
+#### Added verification coverage
+
+- `tests/generated-chunk-render-summary.test.ts`
+  - empty chunks keep explicit render summaries for future volumetric far rendering
+  - macro cells classify as empty / mixed / solid
+- `tests/generated-chunk-codec.test.ts`
+  - render-summary round-trip now includes macro-cell states, not only surface columns
+  - render summaries can be decoded from stored chunk payloads without full voxel decode
+
+#### Numeric probes
+
+- `GeneratedChunkRenderSummary` keeps the current codec lean enough to keep:
+  - empty `32^3` chunk encoded size: `< 512 bytes`
+  - uniform `32^3` chunk still encodes below one quarter of dense payload size
+- Focused repo suites after the refactor:
+  - `5` / `5` passing in the new render-summary + codec suite
+  - `38` / `38` passing in the codec + far-field + resident-world suite
+
+#### Residual
+
+- This slice is worth keeping.
+- The current far renderer still only consumes the surface half of the new summary.
+- The next real architectural step is to persist/load render summaries independently and add a volumetric far path for caves and other large voids.

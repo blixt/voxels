@@ -1,9 +1,9 @@
 import { clamp, packRgba } from "./math.ts";
 import { fbm2D2, fbm2D3, fbm2D4, fbm2D5, hashNoise3D } from "./noise.ts";
 import {
-  summarizeGeneratedChunkSurface,
-  type GeneratedChunkSurfaceSummary,
-} from "./generated-chunk-surface-summary.ts";
+  summarizeGeneratedChunkRender,
+  type GeneratedChunkRenderSummary,
+} from "./generated-chunk-render-summary.ts";
 import type { ChunkBounds, ChunkCoordinate } from "./types.ts";
 
 export const HEX_COLOR_COUNT = 0x1000;
@@ -271,7 +271,7 @@ export interface GeneratedChunk {
   data: Uint16Array;
   solidCount: number;
   solidBounds: ChunkBounds | null;
-  surfaceSummary: GeneratedChunkSurfaceSummary | null;
+  renderSummary: GeneratedChunkRenderSummary;
 }
 
 interface BaseBiomeBlendSelection {
@@ -1130,7 +1130,7 @@ export class ProceduralWorldGenerator {
             min: [minX, minY, minZ],
             max: [maxX, maxY, maxZ],
           },
-      surfaceSummary: summarizeGeneratedChunkSurface(
+      renderSummary: summarizeGeneratedChunkRender(
         { x: cx, y: cy, z: cz },
         data,
         this.chunkSize,

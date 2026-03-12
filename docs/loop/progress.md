@@ -1669,7 +1669,7 @@
 
 - I then enforced the stronger architectural boundary you asked for:
   - far-field rendering no longer imports or samples `ProceduralWorldGenerator`
-  - it now depends on a narrow `FarFieldSurfaceSource` interface and the live game passes the resident world as that source
+  - it now depends on a narrow source interface and the live game passes the resident world as that source
 - To make that possible without losing data after chunk eviction:
   - generated chunks now carry a compact top-surface summary derived from the actual chunk voxels
   - the chunk codec persists that summary alongside the compressed chunk payload
@@ -1686,3 +1686,34 @@
   - render/LOD code no longer calls the generator
   - far-field data now travels with generated chunks and survives cache round-trips
   - the live browser route smoke stayed hole-free after the change
+
+## 2026-03-12 chunk-derived render summaries instead of surface-only summaries
+
+- I revisited the long-term architecture instead of treating the surface-summary seam as “done”.
+- The main conclusion is strong:
+  - a surface-only summary is a tactical seam for the current far renderer
+  - it is not the right long-term representation if the world must render correctly in huge underground caverns after edits
+- I changed the summary layer accordingly:
+  - `GeneratedChunkSurfaceSummary` is gone
+  - generated chunks now carry `GeneratedChunkRenderSummary`
+  - that summary still carries top-surface/water columns for the current surface clipmap
+  - but it also carries coarse `8x8x8` macro-cell occupancy states and boundary face-open masks derived from chunk bytes
+- The important design correction was to keep empty chunks in the summary model too:
+  - empty chunks used to look like “no summary”
+  - that would have been a dead end for any future underground/portal-aware far renderer because empty space is part of the world state too
+  - summaries now exist for empty chunks as well, with empty macro cells and open boundary air masks
+- I also widened the far-field contract:
+  - the source interface is no longer surface-only in name
+  - the resident world now exposes per-chunk render summaries in addition to the legacy surface-column sample used by the current clipmap renderer
+- I added one more storage-side bridge toward the eventual persisted-summary path:
+  - the chunk codec can now read a chunk render summary without decoding the full dense voxel payload
+  - that is the right seam for future region-summary loading from disk/server instead of mandatory full chunk adoption
+- I deliberately did not bolt on a second far renderer yet:
+  - the current `ProceduralFarField` still behaves as a surface clipmap
+  - the new summary seam is the migration step that makes a future volumetric cave/void far path possible without another world-truth fork
+- I documented the stronger opinion explicitly in `docs/loop/far-render-architecture.md`:
+  - one authoritative chunk truth
+  - derived render summaries
+  - surface clipmaps above ground
+  - volumetric/portal-aware far rendering underground
+  - summary-bubble streaming larger than the resident gameplay bubble

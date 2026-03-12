@@ -451,3 +451,11 @@
 | Once far-field reads generated summaries, the world does not need to keep any post-eviction summary archive | Switch the far-field source to the world without persisting generated summaries beyond residency and look for missing coverage | Rejected. The world must retain chunk summaries after eviction or the far field immediately loses already-generated terrain | Rejected |
 | A summary-backed far-field path can rely on existing resident generation alone and does not need a separate pre-generation bridge | Wire the world source directly and inspect coverage before adding any prefetch behavior | Rejected. The far field needs conservative non-resident surface prefetch or the horizon collapses to resident-only data | Rejected |
 | The old broad LOD continuity integration test is still the right oracle after the source architecture changes | Re-run it unchanged first | Rejected. The kept oracle is now a bounded summary-backed continuity test plus direct world-summary tests, which match the new contract much better | Rejected |
+
+## 2026-03-12 chunk-derived render summary architecture
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| A top-surface summary is sufficient as the permanent far-field seam once rendering no longer samples the generator | Re-evaluate the repo architecture against the research docs and the current chunk/persistence goals, especially huge edited caverns | Rejected. Surface-only summaries are a tactical seam, not the end state | Rejected |
+| The right long-term derived chunk metadata should include volumetric occupancy information even before a volumetric far renderer exists | Extend the chunk summary to carry coarse occupancy states and boundary air openings, then keep it only if codec/tests still stay lean | Confirmed. The new `GeneratedChunkRenderSummary` keeps the current surface path working while adding the missing volumetric seam | Confirmed |
+| Empty chunks can continue to be modeled as “no summary” because they do not render today | Add focused tests for empty-chunk render summaries and evaluate the underground/cavern implications before freezing the contract | Rejected. Empty chunks are part of the authoritative visibility state and now keep explicit empty summaries | Rejected |

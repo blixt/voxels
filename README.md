@@ -20,6 +20,7 @@ A broader architecture/reference survey lives in `docs/20260311-voxel-research.m
 The Bun live-edit/HMR research note lives in `docs/20260311-bun-hmr-research.md`.
 Repo-specific guidance for agent-driven research, implementation, and verification lives in `docs/agent-playbook.md`.
 The durable alternating feature/performance loop lives in `docs/loop/recursive-task-list.md`.
+The current strong opinion for long-term far rendering and LOD lives in `docs/loop/far-render-architecture.md`.
 
 ## Features
 

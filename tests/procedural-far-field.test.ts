@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { fnv1a } from "../src/engine/math.ts";
-import type { FarFieldSurfaceSource } from "../src/engine/far-field-source.ts";
+import type { FarFieldSource } from "../src/engine/far-field-source.ts";
 import { ProceduralFarField } from "../src/engine/procedural-far-field.ts";
 import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
@@ -332,7 +332,10 @@ test("procedural far field can preserve water tops inside coarse cells", () => {
         waterMaterial: hasWater ? 2 : null,
       };
     },
-  } as FarFieldSurfaceSource, [
+    getFarFieldChunkSummary() {
+      return null;
+    },
+  } as FarFieldSource, [
     { label: "test", innerRadius: 0, outerRadius: 24, sampleStride: 8, anchorStride: 32 },
   ]);
 
@@ -351,7 +354,7 @@ test("procedural far field can preserve water tops inside coarse cells", () => {
 
 function createTestSource(
   surfaceYForWorldPosition: (worldX: number, worldZ: number) => number,
-): FarFieldSurfaceSource {
+): FarFieldSource {
   return {
     palette: [0, 0xff_aa_88_ff],
     sampleFarFieldColumn(worldX: number, worldZ: number) {
@@ -362,10 +365,13 @@ function createTestSource(
         waterMaterial: null,
       };
     },
+    getFarFieldChunkSummary() {
+      return null;
+    },
   };
 }
 
-function createGeneratorBackedSource(generator: ProceduralWorldGenerator): FarFieldSurfaceSource {
+function createGeneratorBackedSource(generator: ProceduralWorldGenerator): FarFieldSource {
   return {
     palette: generator.palette,
     sampleFarFieldColumn(worldX: number, worldZ: number) {
@@ -376,6 +382,9 @@ function createGeneratorBackedSource(generator: ProceduralWorldGenerator): FarFi
         surfaceMaterial: sample.surfaceMaterial,
         waterMaterial: sample.waterMaterial,
       };
+    },
+    getFarFieldChunkSummary() {
+      return null;
     },
   };
 }

@@ -11,6 +11,7 @@ This repository keeps the design loop in versioned documents instead of ad-hoc n
 - `research.md`: external sources, constraints, and technical decisions
 - `world-model-notes.md`: bounded-world scouting notes and the chosen seam toward streaming/infinite worlds
 - `persistence-notes.md`: generated-chunk compression, browser persistence, and the current storage/summary direction
+- `far-render-architecture.md`: strong long-term opinion for chunk-derived far rendering, LOD, and underground visibility
 - `worldgen-notes.md`: initial procedural-generation design notes and verification goals
 - `biome-rehaul-notes.md`: current biome-field, transition, underground, and landmark design for the procedural world
 - `progress.md`: chronological implementation log

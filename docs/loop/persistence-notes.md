@@ -16,6 +16,7 @@ The procedural world now has a first real persistence-oriented boundary:
   - chunk coordinate
 
 This keeps one world-generation truth while still letting non-resident chunks become small, durable payloads.
+It also keeps the generator in the right place: generation is a producer of pristine chunks, not a render-time source of far terrain.
 
 ## Chunk payload direction
 
@@ -35,6 +36,7 @@ That gives us:
 - cheap storage for very uniform chunks
 - smaller transfer/persistence cost for sparse or low-material-variety chunks
 - a path toward later resident-memory compaction without changing the durable format again
+- a place to persist chunk-derived render summaries alongside chunk payloads
 
 ## Why this shape
 
@@ -45,7 +47,7 @@ This follows the repo research rather than fighting it:
 - separate authoritative voxel data from derived runtime structures
 - avoid a separate far-field world generator
 
-The far-field path now consumes `sampleSurfaceColumn(...)`, which is a lighter query mode of the same generator, not a second terrain system.
+The far-field path no longer samples the generator at render time. It now reads chunk-derived render summaries instead. Those summaries are derived from actual chunk bytes and are the right place to grow both surface and volumetric far visibility over time.
 
 ## Current limitations
 
@@ -53,15 +55,17 @@ The far-field path now consumes `sampleSurfaceColumn(...)`, which is a lighter q
 - Resident chunks are still dense in RAM once adopted.
 - We are using IndexedDB directly today; OPFS payload files plus IndexedDB metadata are still the stronger next storage split.
 - Stored chunks are generated-base chunks only; edit overlays are not persisted yet.
-- Far-field still samples procedural surface queries directly; it does not yet consume a persisted column-tile or region-summary cache.
+- Render summaries are still archived in memory after generation/eviction; they are not yet loaded independently as persisted region/summary data.
+- The current far renderer is still surface-oriented; the new render summary seam now supports a future volumetric cave/void renderer, but that second renderer is not implemented yet.
 - The new cache-reuse benchmark seam exists, but the first headless proof attempt exposed that its runtime-ready gate still needs tightening before it becomes a trustworthy automated acceptance check.
 
 ## Next practical steps
 
-1. Add persistent column/region summaries for surface/water/top bounds so far-field and Y-range work stop paying repeated procedural sampling.
+1. Persist chunk/region render summaries so far-field and visibility work stop depending on recent in-memory generation history.
 2. Split browser persistence into:
    - OPFS payload files
    - IndexedDB manifest / LRU / version metadata
 3. Persist edit overlays separately from generated base chunks.
 4. Add a clean browser acceptance harness for chunk-cache reuse and revisit latency.
-5. Decide whether resident chunks should adopt the same sparse subchunk representation or stay dense-hot / sparse-cold.
+5. Add a volumetric far-visibility path that consumes chunk render summaries for underground/cavern views.
+6. Decide whether resident chunks should adopt the same sparse subchunk representation or stay dense-hot / sparse-cold.

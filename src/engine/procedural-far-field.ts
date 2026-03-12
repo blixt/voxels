@@ -1,6 +1,6 @@
 import { metersToWorldUnits, worldUnitsToMeters } from "./scale.ts";
-import { NO_GENERATED_SURFACE_HEIGHT } from "./generated-chunk-surface-summary.ts";
-import type { FarFieldSurfaceSource } from "./far-field-source.ts";
+import { NO_GENERATED_SURFACE_HEIGHT } from "./generated-chunk-render-summary.ts";
+import type { FarFieldSource } from "./far-field-source.ts";
 import type { ChunkMeshData, Vec3 } from "./types.ts";
 import { applyWaterDepthTint } from "./water-visuals.ts";
 
@@ -188,7 +188,7 @@ export class ProceduralFarField {
   private readonly bandConfigs: readonly FarFieldBandConfig[];
 
   constructor(
-    readonly source: FarFieldSurfaceSource,
+    readonly source: FarFieldSource,
     bandConfigs: readonly FarFieldBandConfig[] = DEFAULT_BANDS,
   ) {
     this.bandConfigs = bandConfigs;
@@ -664,7 +664,7 @@ export class ProceduralFarField {
 }
 
 function buildBandMesh(
-  source: FarFieldSurfaceSource,
+  source: FarFieldSource,
   band: FarFieldBandConfig,
   innerRadius: number,
   exclusionMask: FarFieldExclusionMask | null,
@@ -839,7 +839,7 @@ function ensureBandSampleCache(
   config: FarFieldBandConfig,
   anchorX: number,
   anchorZ: number,
-  source: FarFieldSurfaceSource,
+  source: FarFieldSource,
 ): {
   cache: FarFieldBandSampleCache;
   sampledCellCount: number;
@@ -916,7 +916,7 @@ function tryShiftBandSampleCache(
   config: FarFieldBandConfig,
   anchorX: number,
   anchorZ: number,
-  source: FarFieldSurfaceSource,
+  source: FarFieldSource,
 ): {
   cache: FarFieldBandSampleCache;
   sampledCellCount: number;
@@ -1261,7 +1261,7 @@ function bottomYForBoundary(
 
 function getBoundaryMinSurfaceY(
   sampleCache: FarFieldBandSampleCache,
-  source: FarFieldSurfaceSource,
+  source: FarFieldSource,
   direction: "east" | "west" | "south" | "north",
   sampleIndex: number,
   worldX: number,
@@ -1339,7 +1339,7 @@ function pushWaterTopQuad(
 }
 
 function sampleFarFieldCell(
-  source: FarFieldSurfaceSource,
+  source: FarFieldSource,
   cellMinX: number,
   cellMinZ: number,
   sampleStride: number,
@@ -1432,7 +1432,7 @@ function computeMaskedSeamSkirtDepth(sampleStride: number): number {
 }
 
 function evaluateMaskedSeamGap(
-  source: FarFieldSurfaceSource,
+  source: FarFieldSource,
   bandLabel: string,
   direction: "east" | "west" | "south" | "north",
   worldX: number,
@@ -1473,7 +1473,7 @@ function evaluateMaskedSeamGap(
 
 function evaluateSurfaceGap(
   sampleCache: FarFieldBandSampleCache,
-  source: FarFieldSurfaceSource,
+  source: FarFieldSource,
   bandLabel: string,
   direction: "east" | "west" | "south" | "north",
   worldX: number,
@@ -1523,7 +1523,7 @@ function evaluateSurfaceGap(
 }
 
 function sampleBoundaryMinSurfaceY(
-  source: FarFieldSurfaceSource,
+  source: FarFieldSource,
   direction: "east" | "west" | "south" | "north",
   worldX: number,
   worldZ: number,

@@ -5,15 +5,15 @@ import {
   isProceduralWaterMaterial,
   type GeneratedChunk,
 } from "./procedural-generator.ts";
-import type { FarFieldColumnSample, FarFieldSurfaceSource } from "./far-field-source.ts";
+import type { FarFieldColumnSample, FarFieldSource } from "./far-field-source.ts";
 import type { FarFieldExclusionMask } from "./procedural-far-field.ts";
 import {
   NO_GENERATED_SURFACE_HEIGHT,
   NO_GENERATED_WATER_HEIGHT,
-  sampleGeneratedChunkSurface,
-  summarizeGeneratedChunkSurface,
-  type GeneratedChunkSurfaceSummary,
-} from "./generated-chunk-surface-summary.ts";
+  sampleGeneratedChunkRenderSurface,
+  summarizeGeneratedChunkRender,
+  type GeneratedChunkRenderSummary,
+} from "./generated-chunk-render-summary.ts";
 import { metersToWorldUnits } from "./scale.ts";
 import type { MutableResidentChunkWorld, VoxelChunk } from "./world.ts";
 
@@ -71,7 +71,7 @@ export interface WorldEditRecord {
   localIndex: number;
 }
 
-export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFieldSurfaceSource {
+export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFieldSource {
   readonly chunkSize: number;
   readonly minY = 0;
   readonly maxYExclusive: number;
@@ -87,8 +87,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   private readonly editOverlays = new Map<string, Map<number, number>>();
   private readonly editLog: WorldEditRecord[] = [];
   private readonly residentColumnCounts = new Map<string, number>();
-  private readonly generatedSurfaceSummaries = new Map<string, GeneratedChunkSurfaceSummary>();
-  private readonly generatedSurfaceChunkKeysByColumn = new Map<string, Set<string>>();
+  private readonly generatedRenderSummaries = new Map<string, GeneratedChunkRenderSummary>();
+  private readonly generatedRenderChunkKeysByColumn = new Map<string, Set<string>>();
   private readonly asyncChunkGeneration: AsyncChunkGenerationQueue | null;
   private residentColumnRevision = 0;
   private lastAnchorSignature = "";
@@ -225,7 +225,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     const voxelZ = Math.floor(worldZ);
     const cx = Math.floor(voxelX / this.chunkSize);
     const cz = Math.floor(voxelZ / this.chunkSize);
-    const columnChunkKeys = this.generatedSurfaceChunkKeysByColumn.get(toColumnKey(cx, cz));
+    const columnChunkKeys = this.generatedRenderChunkKeysByColumn.get(toColumnKey(cx, cz));
     if (!columnChunkKeys || columnChunkKeys.size === 0) {
       return null;
     }
@@ -236,11 +236,11 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     let waterTopY = NO_GENERATED_WATER_HEIGHT;
     let waterMaterial = 0;
     for (const chunkKey of columnChunkKeys) {
-      const summary = this.generatedSurfaceSummaries.get(chunkKey);
+      const summary = this.generatedRenderSummaries.get(chunkKey);
       if (!summary) {
         continue;
       }
-      const sampled = sampleGeneratedChunkSurface(summary, localX, localZ, this.chunkSize);
+      const sampled = sampleGeneratedChunkRenderSurface(summary, localX, localZ, this.chunkSize);
       if (!sampled) {
         continue;
       }
@@ -266,6 +266,10 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
       waterTopY: waterTopY === NO_GENERATED_WATER_HEIGHT ? null : waterTopY,
       waterMaterial: waterTopY === NO_GENERATED_WATER_HEIGHT ? null : waterMaterial,
     };
+  }
+
+  getFarFieldChunkSummary(cx: number, cy: number, cz: number): GeneratedChunkRenderSummary | null {
+    return this.generatedRenderSummaries.get(toChunkKey(cx, cy, cz)) ?? null;
   }
 
   getVoxel(x: number, y: number, z: number): number {
@@ -322,7 +326,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     if (residentChunk) {
       updateResidentChunkVoxel(residentChunk, localIndex, lx, ly, lz, materialIndex);
       markResidentChunkDirty(residentChunk);
-      this.recordResidentChunkSurfaceSummary(residentChunk);
+      this.recordResidentChunkRenderSummary(residentChunk);
       if (lx === 0) {
         this.markChunkDirtyByCoord(cx - 1, cy, cz);
       }
@@ -559,7 +563,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     chunkDrainMs = performance.now() - drainStartedAt;
     const completedGeneratedChunksByKey = new Map<string, GeneratedChunk>();
     for (const generated of completedGeneratedChunks) {
-      this.recordGeneratedChunkSurfaceSummary(toChunkKey(generated.coord.x, generated.coord.y, generated.coord.z), generated);
+      this.recordGeneratedChunkRenderSummary(toChunkKey(generated.coord.x, generated.coord.y, generated.coord.z), generated);
       completedGeneratedChunksByKey.set(toChunkKey(generated.coord.x, generated.coord.y, generated.coord.z), generated);
     }
     let scheduledChunks = 0;
@@ -629,7 +633,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
         const generationStartedAt = performance.now();
         const generated = this.generator.generateChunk(cx, cy, cz);
         this.applyOverlayToGeneratedChunk(key, generated);
-        this.recordGeneratedChunkSurfaceSummary(key, generated);
+        this.recordGeneratedChunkRenderSummary(key, generated);
         chunkGenerationMs += performance.now() - generationStartedAt;
         if (generated.solidCount === 0) {
           emptyChunksSkipped += 1;
@@ -738,7 +742,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
         const key = toChunkKey(cx, cy, cz);
         if (
           this.chunks.has(key)
-          || this.generatedSurfaceSummaries.has(key)
+          || this.generatedRenderSummaries.has(key)
           || this.emptyChunkKeys.has(key)
           || this.asyncChunkGeneration?.hasPendingChunk(cx, cy, cz)
         ) {
@@ -752,7 +756,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
         }
         const generated = this.generator.generateChunk(cx, cy, cz);
         this.applyOverlayToGeneratedChunk(key, generated);
-        this.recordGeneratedChunkSurfaceSummary(key, generated);
+        this.recordGeneratedChunkRenderSummary(key, generated);
         if (generated.solidCount === 0) {
           this.emptyChunkKeys.add(key);
         }
@@ -872,7 +876,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
       generated.data[localIndex] = material;
     }
     recomputeGeneratedChunkSolidBounds(generated, this.chunkSize);
-    generated.surfaceSummary = summarizeGeneratedChunkSurface(
+    generated.renderSummary = summarizeGeneratedChunkRender(
       generated.coord,
       generated.data,
       this.chunkSize,
@@ -888,27 +892,17 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     markResidentChunkDirty(chunk);
   }
 
-  private recordGeneratedChunkSurfaceSummary(key: string, generated: GeneratedChunk): void {
-    if (generated.surfaceSummary) {
-      this.generatedSurfaceSummaries.set(key, generated.surfaceSummary);
-      const columnKey = toColumnKey(generated.coord.x, generated.coord.z);
-      const chunkKeys = this.generatedSurfaceChunkKeysByColumn.get(columnKey) ?? new Set<string>();
-      chunkKeys.add(key);
-      this.generatedSurfaceChunkKeysByColumn.set(columnKey, chunkKeys);
-      return;
-    }
-    this.generatedSurfaceSummaries.delete(key);
+  private recordGeneratedChunkRenderSummary(key: string, generated: GeneratedChunk): void {
+    this.generatedRenderSummaries.set(key, generated.renderSummary);
     const columnKey = toColumnKey(generated.coord.x, generated.coord.z);
-    const chunkKeys = this.generatedSurfaceChunkKeysByColumn.get(columnKey);
-    chunkKeys?.delete(key);
-    if (chunkKeys && chunkKeys.size === 0) {
-      this.generatedSurfaceChunkKeysByColumn.delete(columnKey);
-    }
+    const chunkKeys = this.generatedRenderChunkKeysByColumn.get(columnKey) ?? new Set<string>();
+    chunkKeys.add(key);
+    this.generatedRenderChunkKeysByColumn.set(columnKey, chunkKeys);
   }
 
-  private recordResidentChunkSurfaceSummary(chunk: VoxelChunk): void {
+  private recordResidentChunkRenderSummary(chunk: VoxelChunk): void {
     const key = toChunkKey(chunk.coord.x, chunk.coord.y, chunk.coord.z);
-    this.recordGeneratedChunkSurfaceSummary(key, {
+    this.recordGeneratedChunkRenderSummary(key, {
       coord: chunk.coord,
       data: chunk.data,
       solidCount: chunk.solidCount,
@@ -918,7 +912,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
             max: [...chunk.solidBounds.max],
           }
         : null,
-      surfaceSummary: summarizeGeneratedChunkSurface(
+      renderSummary: summarizeGeneratedChunkRender(
         chunk.coord,
         chunk.data,
         this.chunkSize,
