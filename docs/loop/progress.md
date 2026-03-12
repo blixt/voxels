@@ -1646,3 +1646,21 @@
 - The next high-signal persistence step is not “persist more dense chunks”; it is:
   - region/column summaries for far-field and Y-range work
   - then OPFS payloads + IndexedDB manifest metadata
+
+## 2026-03-12 shared surface summary cleanup and spawn support fix
+
+- I used this slice to remove superseded generator logic instead of adding another rendering layer:
+  - `sampleSurfaceColumn(...)` and the surface half of `fillColumnState(...)` were both independently running the same biome/material/landmark pipeline
+  - that duplication is now collapsed behind one shared surface-summary path in `ProceduralWorldGenerator`
+- The important correction was to avoid turning that cleanup into a stealth hot-path regression:
+  - after the refactor, `sampleSurfaceColumn(...)` was no longer the obviously cheaper generic probe
+  - a direct microbench showed it was actually slower than `sampleColumn(...)` for non-far-field callers
+  - so I kept the deduplicated generator logic, but moved resident-world spawn/y-range/game-route callers back to `sampleColumn(...)`
+- The runtime bug this surfaced was real and worth fixing:
+  - spawn search was happy to accept “surface” columns that were actually cave-breached and unsupported
+  - spawn selection now scans for a real standable floor with headroom inside the spawn footprint instead of trusting the surface sample blindly
+  - that restored the spawn-support residency behavior and gives the engine a more coherent initial world bubble
+- This slice is primarily a correctness + maintainability win:
+  - dead duplicate surface logic is gone
+  - the resident-world hot path no longer relies on the wrong “lightweight” assumption
+  - spawn selection is now guarded by a regression test against unsupported cave-mouth footprints

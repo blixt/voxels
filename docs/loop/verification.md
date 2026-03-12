@@ -3431,3 +3431,37 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - The browser chunk-cache seam is implemented and instrumented, but the first headless `benchmarkChunkCacheReuse(...)` proof was not reliable enough to count as acceptance yet.
 - The next harness step should be to tighten the benchmark-ready gate or add a dedicated browser cache-reuse script instead of hand-driving it.
+
+## 2026-03-12 shared surface summary cleanup and spawn support fix
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-generator.test.ts tests/procedural-resident-world.test.ts tests/procedural-far-field.test.ts`
+- `mise run build`
+- `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=8 --generate-budget=8 --mesh-budget=6 --far-band-budget=1 --chunk-delta=2`
+- `mise exec -- bun -e '...microbench sampleSurfaceColumn vs sampleColumn...'`
+
+#### Added verification coverage
+
+- `tests/procedural-resident-world.test.ts`
+  - spawn selection avoids unsupported cave-breached footprint columns
+
+#### Numeric probes
+
+- Shared-sampling microbench on `4096` deterministic columns:
+  - `sampleSurfaceColumn(...)` `~16.16 ms`
+  - `sampleColumn(...)` `~8.88 ms`
+  - conclusion: after deduplication, `sampleSurfaceColumn(...)` should stay a far-field-specific probe, not the generic resident-world hot-path probe
+- Warmed local stream profile after the cleanup:
+  - `crossing-d2`
+    - total stream `~424.54 ms`
+    - total mesh `~285.56 ms`
+    - total far field `~315.52 ms`
+    - total Y-range `~22.48 ms`
+    - max frame work `~183.73 ms`
+
+#### Residual
+
+- This slice is worth keeping for code health and spawn correctness.
+- The profile does not show a clear stream-speed win from the refactor by itself, so I explicitly did not keep the “surface probe is cheaper everywhere” assumption.

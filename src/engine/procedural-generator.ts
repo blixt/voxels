@@ -236,7 +236,9 @@ export interface ProceduralColumnSample {
 }
 
 export interface ProceduralSurfaceColumnSample {
+  biomeId: BiomeId;
   surfaceY: number;
+  topY: number;
   waterTopY: number | null;
   surfaceMaterial: number;
   waterMaterial: number | null;
@@ -966,6 +968,10 @@ export class ProceduralWorldGenerator {
   private readonly caveOpeningSeed: number;
   private readonly transitionSeed: number;
   private readonly featureSeed: number;
+  private readonly columnSampleState = createMutableColumnState();
+  private readonly biomeProbeState = createMutableColumnState();
+  private readonly surfaceSampleState = createMutableColumnState();
+  private readonly materialSampleState = createMutableColumnState();
 
   constructor(
     readonly seed = 1337,
@@ -1010,14 +1016,14 @@ export class ProceduralWorldGenerator {
   }
 
   sampleColumn(worldX: number, worldZ: number): ProceduralColumnSample {
-    const state = createMutableColumnState();
-    this.fillColumnState(worldX, worldZ, state, false);
+    const state = this.columnSampleState;
+    this.fillSurfaceColumnState(worldX, worldZ, state);
     return columnSampleFromState(state);
   }
 
   sampleBiomeProbe(worldX: number, worldZ: number): ProceduralBiomeProbe {
-    const state = createMutableColumnState();
-    this.fillColumnState(worldX, worldZ, state, false);
+    const state = this.biomeProbeState;
+    this.fillSurfaceColumnState(worldX, worldZ, state);
     return {
       ...columnSampleFromState(state),
       secondaryBiomeId: state.secondaryBiomeId,
@@ -1039,59 +1045,17 @@ export class ProceduralWorldGenerator {
   }
 
   sampleSurfaceColumn(worldX: number, worldZ: number): ProceduralSurfaceColumnSample {
-    const fields = this.sampleFields(worldX, worldZ);
-    const baseBlend = this.selectBaseBiomes(fields);
-    const terrainProfile = blendTerrainProfile(baseBlend.primary, baseBlend.secondary, baseBlend.primaryWeight);
-    const biomeSelection = this.selectBiomeClassification(fields, baseBlend);
-    const biomeId = biomeSelection.biomeId;
-    const specialStrength = biomeSelection.specialStrength;
-    const biomeCore = biomeSelection.biomeCore;
-    let surfaceY = this.sampleSurfaceY(fields, terrainProfile, biomeCore);
-    surfaceY = adjustSpecialBiomeSurfaceY(this.seaLevel, biomeId, specialStrength, fields, biomeCore, surfaceY);
-    const regionalVariant = selectRegionalVariant(biomeId, fields);
-    if (regionalVariant) {
-      surfaceY += sampleRegionalVariantSurfaceDelta(regionalVariant.id, regionalVariant.strength, fields, biomeCore);
-    }
-    surfaceY = clamp(surfaceY, 8, this.maxYExclusive - 2);
-    const snowLine = terrainProfile.snowLine - Math.round((fields.temperature - 0.5) * 90);
-    const surfaceMaterials = this.resolveSurfaceMaterials(
-      biomeId,
-      baseBlend.primary,
-      baseBlend.secondary,
-      baseBlend.primaryWeight,
-      specialStrength,
-      fields,
-      biomeCore,
-      surfaceY,
-    );
-    if (regionalVariant) {
-      applyRegionalVariantMaterialOverrides(surfaceMaterials, regionalVariant.id);
-    }
-    const waterTopY = this.resolveWaterTopY(
-      biomeId,
-      surfaceY,
-      fields,
-      specialStrength,
-      regionalVariant?.id ?? null,
-      regionalVariant?.strength ?? 0,
-    );
-    if (hasStandingWater(surfaceY, waterTopY)) {
-      surfaceMaterials.surfacePrimary = surfaceMaterials.subsurfacePrimary;
-    }
-    return {
-      surfaceY,
-      waterTopY: waterTopY !== NO_WATER ? waterTopY : null,
-      surfaceMaterial: surfaceY >= snowLine && biomeId !== "ember" ? surfaceMaterials.snow : surfaceMaterials.surfacePrimary,
-      waterMaterial: waterTopY !== NO_WATER ? surfaceMaterials.water : null,
-    };
+    const state = this.surfaceSampleState;
+    this.fillSurfaceColumnState(worldX, worldZ, state);
+    return surfaceColumnSampleFromState(state);
   }
 
   sampleMaterial(worldX: number, worldY: number, worldZ: number): number {
     if (worldY < 0 || worldY >= this.maxYExclusive) {
       return 0;
     }
-    const state = createMutableColumnState();
-    this.fillColumnState(worldX, worldZ, state, true);
+    const state = this.materialSampleState;
+    this.fillColumnState(worldX, worldZ, state);
     return this.sampleMaterialFromColumn(state, worldY);
   }
 
@@ -1104,10 +1068,10 @@ export class ProceduralWorldGenerator {
     const scratch = acquireChunkGenerationScratch(chunkArea);
     const columnState = createMutableColumnState();
     for (let z = 0; z < this.chunkSize; z += 1) {
-      const worldZ = originZ + z;
-      const rowOffset = z * this.chunkSize;
+        const worldZ = originZ + z;
+        const rowOffset = z * this.chunkSize;
       for (let x = 0; x < this.chunkSize; x += 1) {
-        this.fillColumnState(originX + x, worldZ, columnState, true);
+        this.fillColumnState(originX + x, worldZ, columnState);
         this.writeChunkColumnState(scratch, x + rowOffset, columnState);
       }
     }
@@ -1164,12 +1128,11 @@ export class ProceduralWorldGenerator {
     };
   }
 
-  private fillColumnState(
+  private fillSurfaceColumnState(
     worldX: number,
     worldZ: number,
     out: MutableColumnState,
-    includeCaveState: boolean,
-  ): void {
+  ): { fields: ColumnFieldSample; biomePrimaryWeight: number } {
     const fields = this.sampleFields(worldX, worldZ);
     const baseBlend = this.selectBaseBiomes(fields);
     const terrainProfile = blendTerrainProfile(baseBlend.primary, baseBlend.secondary, baseBlend.primaryWeight);
@@ -1273,32 +1236,38 @@ export class ProceduralWorldGenerator {
     out.worldZDiv3 = Math.floor(worldZ * ONE_THIRD);
     out.ditherSeed = this.transitionSeed + baseBlend.primary.surface + baseBlend.secondary.surface;
     out.accentSeed = this.seed + underground.accent;
-    if (!includeCaveState) {
-      out.caveMainField = 0;
-      out.caveMainStrength = 0;
-      out.caveMainCenterY = 0;
-      out.caveMainHalfHeight = 0;
-      out.caveUpperField = 0;
-      out.caveUpperStrength = 0;
-      out.caveUpperCenterY = 0;
-      out.caveUpperHalfHeight = 0;
-      out.caveEntranceField = 0;
-      out.caveEntranceStrength = 0;
-      out.caveEntranceCenterY = 0;
-      out.caveEntranceHalfHeight = 0;
-      return;
-    }
+    return { fields, biomePrimaryWeight: baseBlend.primaryWeight };
+  }
+
+  private fillColumnState(
+    worldX: number,
+    worldZ: number,
+    out: MutableColumnState,
+  ): void {
+    const surfaceContext = this.fillSurfaceColumnState(worldX, worldZ, out);
+    out.caveMainField = 0;
+    out.caveMainStrength = 0;
+    out.caveMainCenterY = 0;
+    out.caveMainHalfHeight = 0;
+    out.caveUpperField = 0;
+    out.caveUpperStrength = 0;
+    out.caveUpperCenterY = 0;
+    out.caveUpperHalfHeight = 0;
+    out.caveEntranceField = 0;
+    out.caveEntranceStrength = 0;
+    out.caveEntranceCenterY = 0;
+    out.caveEntranceHalfHeight = 0;
     this.configureCaveState(
       worldX,
       worldZ,
-      biomeId,
-      hostBiomeId,
-      undergroundBiomeId,
-      regionalVariant?.id ?? null,
-      surfaceY,
-      waterTopY,
-      fields,
-      baseBlend.primaryWeight,
+      out.biomeId,
+      out.hostBiomeId,
+      out.undergroundBiomeId,
+      out.regionalVariantId,
+      out.surfaceY,
+      out.waterTopY,
+      surfaceContext.fields,
+      surfaceContext.biomePrimaryWeight,
       out,
     );
   }
@@ -2241,6 +2210,14 @@ function createMutableColumnState(): MutableColumnState {
   };
 }
 
+function topYFromState(state: MutableColumnState): number {
+  return Math.max(state.surfaceY, state.surfaceY + state.featureHeight + (state.featureKind === FEATURE_NONE ? 0 : 1));
+}
+
+function nullableWaterTopY(waterTopY: number): number | null {
+  return waterTopY === NO_WATER ? null : waterTopY;
+}
+
 function columnSampleFromState(state: MutableColumnState): ProceduralColumnSample {
   return {
     biomeId: state.biomeId,
@@ -2249,9 +2226,20 @@ function columnSampleFromState(state: MutableColumnState): ProceduralColumnSampl
     regionalVariantId: state.regionalVariantId,
     landmarkId: state.landmarkId,
     surfaceY: state.surfaceY,
-    topY: Math.max(state.surfaceY, state.surfaceY + state.featureHeight + (state.featureKind === FEATURE_NONE ? 0 : 1)),
-    waterTopY: state.waterTopY === NO_WATER ? null : state.waterTopY,
+    topY: topYFromState(state),
+    waterTopY: nullableWaterTopY(state.waterTopY),
     surfaceMaterial: state.surfaceMaterialPrimary,
+  };
+}
+
+function surfaceColumnSampleFromState(state: MutableColumnState): ProceduralSurfaceColumnSample {
+  return {
+    biomeId: state.biomeId,
+    surfaceY: state.surfaceY,
+    topY: topYFromState(state),
+    waterTopY: nullableWaterTopY(state.waterTopY),
+    surfaceMaterial: state.surfaceMaterialPrimary,
+    waterMaterial: state.waterTopY === NO_WATER ? null : state.waterMaterial,
   };
 }
 

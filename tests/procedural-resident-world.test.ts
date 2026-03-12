@@ -99,6 +99,47 @@ test("spawn selection prefers a flatter standing footprint", () => {
   expect(spawn[1]).toBe(Math.max(...heights) + 1);
 });
 
+test("spawn selection avoids unsupported cave-breached footprint columns", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337));
+  const spawn = world.getSpawnPosition();
+  const centerX = Math.floor(spawn[0]);
+  const centerZ = Math.floor(spawn[2]);
+  const footprintRadius = metersToWorldUnits(0.8);
+  const maxSurfaceDrop = metersToWorldUnits(1.2);
+  const headroom = metersToWorldUnits(1.8);
+
+  for (const [offsetX, offsetZ] of [
+    [0, 0],
+    [-footprintRadius, 0],
+    [footprintRadius, 0],
+    [0, -footprintRadius],
+    [0, footprintRadius],
+    [-footprintRadius, -footprintRadius],
+    [-footprintRadius, footprintRadius],
+    [footprintRadius, -footprintRadius],
+    [footprintRadius, footprintRadius],
+  ] as const) {
+    const worldX = centerX + offsetX;
+    const worldZ = centerZ + offsetZ;
+    const column = world.generator.sampleSurfaceColumn(worldX, worldZ);
+    let supported = false;
+    for (let worldY = column.surfaceY; worldY >= column.surfaceY - maxSurfaceDrop; worldY -= 1) {
+      if (!world.isCollisionMaterial(world.generator.sampleMaterial(worldX, worldY, worldZ))) {
+        continue;
+      }
+      if (world.generator.sampleMaterial(worldX, worldY + 1, worldZ) !== 0) {
+        continue;
+      }
+      if (world.generator.sampleMaterial(worldX, worldY + headroom - 1, worldZ) !== 0) {
+        continue;
+      }
+      supported = true;
+      break;
+    }
+    expect(supported).toBe(true);
+  }
+});
+
 test("resident world reuses cached empty chunk knowledge across residency changes", () => {
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
     horizontalRadiusChunks: 2,

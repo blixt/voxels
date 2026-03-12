@@ -13,6 +13,9 @@ const DEFAULT_HORIZONTAL_RADIUS_CHUNKS = 8;
 const DEFAULT_UNDERGROUND_PADDING_CHUNKS = 3;
 const DEFAULT_AIR_PADDING_CHUNKS = 2;
 const SPAWN_FOOTPRINT_RADIUS = metersToWorldUnits(0.8);
+const SPAWN_SCAN_DEPTH = metersToWorldUnits(3.2);
+const SPAWN_MAX_SURFACE_DROP = metersToWorldUnits(1.2);
+const SPAWN_HEADROOM = metersToWorldUnits(1.8);
 
 export interface ResidencyPhaseMetrics {
   surfaceSampleMs: number;
@@ -350,6 +353,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         const candidate = this.sampleSpawnCandidate(worldX, worldZ);
         if (
           preferredBiomes.has(candidate.column.biomeId)
+          && candidate.unsupportedSamples === 0
           && candidate.column.surfaceY >= this.generator.seaLevel - 48
           && candidate.column.surfaceY <= this.generator.seaLevel + 320
           && candidate.surfaceSpread <= 12
@@ -357,9 +361,14 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           return [worldX + 0.5, candidate.standY, worldZ + 0.5];
         }
         if (
-          candidate.surfaceSpread < fallback.surfaceSpread
+          candidate.unsupportedSamples < fallback.unsupportedSamples
           || (
-            candidate.surfaceSpread === fallback.surfaceSpread
+            candidate.unsupportedSamples === fallback.unsupportedSamples
+            && candidate.surfaceSpread < fallback.surfaceSpread
+          )
+          || (
+            candidate.unsupportedSamples === fallback.unsupportedSamples
+            && candidate.surfaceSpread === fallback.surfaceSpread
             && Math.abs(candidate.column.surfaceY - this.generator.seaLevel)
               < Math.abs(fallback.column.surfaceY - this.generator.seaLevel)
           )
@@ -376,20 +385,53 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     column: ReturnType<ProceduralWorldGenerator["sampleColumn"]>;
     standY: number;
     surfaceSpread: number;
+    unsupportedSamples: number;
   } {
     const column = this.generator.sampleColumn(worldX, worldZ);
-    let minSurfaceY = column.surfaceY;
-    let maxSurfaceY = column.surfaceY;
+    const standableSurfaceY = this.findSpawnStandableSurfaceY(worldX, worldZ, column);
+    let minStandableY = standableSurfaceY ?? column.surfaceY;
+    let maxStandableY = standableSurfaceY ?? column.surfaceY;
+    let unsupportedSamples = standableSurfaceY === null ? 1 : 0;
     for (const [offsetX, offsetZ] of spawnFootprintOffsets()) {
-      const sampled = this.generator.sampleColumn(worldX + offsetX, worldZ + offsetZ);
-      minSurfaceY = Math.min(minSurfaceY, sampled.surfaceY);
-      maxSurfaceY = Math.max(maxSurfaceY, sampled.surfaceY);
+      const sampledColumn = this.generator.sampleColumn(worldX + offsetX, worldZ + offsetZ);
+      const sampledStandableY = this.findSpawnStandableSurfaceY(worldX + offsetX, worldZ + offsetZ, sampledColumn);
+      if (sampledStandableY === null) {
+        unsupportedSamples += 1;
+        continue;
+      }
+      minStandableY = Math.min(minStandableY, sampledStandableY);
+      maxStandableY = Math.max(maxStandableY, sampledStandableY);
     }
     return {
       column,
-      standY: maxSurfaceY + 1,
-      surfaceSpread: maxSurfaceY - minSurfaceY,
+      standY: (unsupportedSamples === 0 ? maxStandableY : (standableSurfaceY ?? column.surfaceY)) + 1,
+      surfaceSpread: unsupportedSamples === 0 ? maxStandableY - minStandableY : Number.POSITIVE_INFINITY,
+      unsupportedSamples,
     };
+  }
+
+  private findSpawnStandableSurfaceY(
+    worldX: number,
+    worldZ: number,
+    column: Pick<ReturnType<ProceduralWorldGenerator["sampleColumn"]>, "surfaceY">,
+  ): number | null {
+    const minWorldY = Math.max(this.minY, column.surfaceY - SPAWN_SCAN_DEPTH);
+    for (let worldY = column.surfaceY; worldY >= minWorldY; worldY -= 1) {
+      if (!this.isCollisionMaterial(this.generator.sampleMaterial(worldX, worldY, worldZ))) {
+        continue;
+      }
+      if (worldY < column.surfaceY - SPAWN_MAX_SURFACE_DROP) {
+        return null;
+      }
+      if (this.generator.sampleMaterial(worldX, worldY + 1, worldZ) !== 0) {
+        continue;
+      }
+      if (this.generator.sampleMaterial(worldX, worldY + SPAWN_HEADROOM - 1, worldZ) !== 0) {
+        continue;
+      }
+      return worldY;
+    }
+    return null;
   }
 
   updateResidencyAround(
