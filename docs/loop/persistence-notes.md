@@ -56,7 +56,7 @@ The far-field path no longer samples the generator at render time. It now reads 
 - We are using IndexedDB directly today; OPFS payload files plus IndexedDB metadata are still the stronger next storage split.
 - Stored chunks are generated-base chunks only; edit overlays are not persisted yet.
 - Render summaries are still archived in memory after generation/eviction; they are not yet loaded independently as persisted region/summary data.
-- The current far renderer is still surface-oriented; the new render summary seam now supports a future volumetric cave/void renderer, but that second renderer is not implemented yet.
+- The current far renderer is still surface-oriented; the new render summary seam now supports a future volumetric interior/void renderer for arbitrary edited spaces, but that second renderer is not implemented yet.
 - The new cache-reuse benchmark seam exists, but the first headless proof attempt exposed that its runtime-ready gate still needs tightening before it becomes a trustworthy automated acceptance check.
 
 ## Next practical steps
@@ -67,5 +67,5 @@ The far-field path no longer samples the generator at render time. It now reads 
    - IndexedDB manifest / LRU / version metadata
 3. Persist edit overlays separately from generated base chunks.
 4. Add a clean browser acceptance harness for chunk-cache reuse and revisit latency.
-5. Add a volumetric far-visibility path that consumes chunk render summaries for underground/cavern views.
+5. Add a volumetric far-visibility path that consumes chunk render summaries for arbitrary large interior/void views.
 6. Decide whether resident chunks should adopt the same sparse subchunk representation or stay dense-hot / sparse-cold.

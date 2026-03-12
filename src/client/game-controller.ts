@@ -1892,7 +1892,7 @@ export class GameController {
       return this.syncWorldAroundAnchor(resolved.anchor, true);
     }
     if (!shouldRefreshResidency(false, resolved.changed, this.lastStreamSummary.pendingChunks)) {
-      this.prefetchFarFieldSurface(false);
+      this.prefetchFarFieldSummaries(false);
       this.flushMeshBuildBudget();
       this.syncPresentedFarFieldMaskRevision();
       this.lastFarFieldSummary = this.farField.updateAround(
@@ -1927,7 +1927,7 @@ export class GameController {
     if (residency.generatedChunks > 0 || residency.evictedChunks > 0 || residency.touchedNeighborChunks > 0) {
       this.farFieldReadyMaskRevision += 1;
     }
-    this.prefetchFarFieldSurface(settle);
+    this.prefetchFarFieldSummaries(settle);
     this.flushMeshBuildBudget(
       settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxMeshRebuildsPerFrame,
     );
@@ -1946,7 +1946,7 @@ export class GameController {
     return cloneResidencySummary(this.lastStreamSummary);
   }
 
-  private prefetchFarFieldSurface(settle: boolean): void {
+  private prefetchFarFieldSummaries(settle: boolean): void {
     const maxGenerateChunks = settle
       ? Number.POSITIVE_INFINITY
       : this.lastStreamSummary.pendingChunks > 0
@@ -1955,7 +1955,7 @@ export class GameController {
     if (maxGenerateChunks <= 0) {
       return;
     }
-    this.world.prefetchFarFieldSurfaceAround(
+    this.world.prefetchFarFieldSummariesAround(
       this.player.feetPosition,
       this.farField.getMaxRadiusWorldUnits(),
       maxGenerateChunks,
@@ -2921,12 +2921,15 @@ function zeroResidencyPhaseMetrics(): ResidencyUpdateSummary["phaseMs"] {
     chunkGenerationMs: 0,
     chunkDispatchMs: 0,
     chunkDrainMs: 0,
+    summaryDrainMs: 0,
     chunkAdoptionMs: 0,
     evictionMs: 0,
     neighborDirtyMs: 0,
     inFlightChunks: 0,
     completedChunkCacheHits: 0,
     completedGeneratedChunks: 0,
+    completedSummaryCacheHits: 0,
+    completedGeneratedSummaries: 0,
   };
 }
 

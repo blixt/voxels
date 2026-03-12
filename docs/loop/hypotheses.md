@@ -459,3 +459,10 @@
 | A top-surface summary is sufficient as the permanent far-field seam once rendering no longer samples the generator | Re-evaluate the repo architecture against the research docs and the current chunk/persistence goals, especially huge edited caverns | Rejected. Surface-only summaries are a tactical seam, not the end state | Rejected |
 | The right long-term derived chunk metadata should include volumetric occupancy information even before a volumetric far renderer exists | Extend the chunk summary to carry coarse occupancy states and boundary air openings, then keep it only if codec/tests still stay lean | Confirmed. The new `GeneratedChunkRenderSummary` keeps the current surface path working while adding the missing volumetric seam | Confirmed |
 | Empty chunks can continue to be modeled as “no summary” because they do not render today | Add focused tests for empty-chunk render summaries and evaluate the underground/cavern implications before freezing the contract | Rejected. Empty chunks are part of the authoritative visibility state and now keep explicit empty summaries | Rejected |
+
+## 2026-03-12 summary-only far prefetch
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| Far prefetch should keep requesting full generated chunks because the worker/cache path already exists and the extra summary mode is needless complexity | Add a summary-only worker/request path and keep it only if the build, route smoke, and focused chunk/LOD suites stay clean | Rejected. The summary-only path is the better seam because far work no longer needs to decode/adopt full chunks just to archive render metadata | Rejected |
+| “For caves” is an acceptable framing for the upcoming volumetric far renderer | Re-read the architecture docs against the edited-world requirement before keeping that language | Rejected. The kept wording is now arbitrary large interior/void spaces in an edited world, not generator-known caves | Rejected |

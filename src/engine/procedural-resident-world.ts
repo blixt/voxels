@@ -31,12 +31,15 @@ export interface ResidencyPhaseMetrics {
   chunkGenerationMs: number;
   chunkDispatchMs: number;
   chunkDrainMs: number;
+  summaryDrainMs: number;
   chunkAdoptionMs: number;
   evictionMs: number;
   neighborDirtyMs: number;
   inFlightChunks: number;
   completedChunkCacheHits: number;
   completedGeneratedChunks: number;
+  completedSummaryCacheHits: number;
+  completedGeneratedSummaries: number;
 }
 
 export interface ResidencyUpdateSummary {
@@ -553,6 +556,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     let chunkGenerationMs = 0;
     let chunkDispatchMs = 0;
     let chunkDrainMs = 0;
+    let summaryDrainMs = 0;
     let chunkAdoptionMs = 0;
     let evictionMs = 0;
     let neighborDirtyMs = 0;
@@ -561,7 +565,14 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     const completedGeneratedChunks = this.asyncChunkGeneration?.drainCompletedChunks() ?? [];
     const completedGenerationStats = this.asyncChunkGeneration?.drainCompletionStats() ?? { cacheHits: 0, generated: 0 };
     chunkDrainMs = performance.now() - drainStartedAt;
+    const summaryDrainStartedAt = performance.now();
+    const completedRenderSummaries = this.asyncChunkGeneration?.drainCompletedSummaries() ?? [];
+    const completedSummaryStats = this.asyncChunkGeneration?.drainSummaryCompletionStats() ?? { cacheHits: 0, generated: 0 };
+    summaryDrainMs = performance.now() - summaryDrainStartedAt;
     const completedGeneratedChunksByKey = new Map<string, GeneratedChunk>();
+    for (const summary of completedRenderSummaries) {
+      this.recordChunkRenderSummary(toChunkKey(summary.coord.x, summary.coord.y, summary.coord.z), summary);
+    }
     for (const generated of completedGeneratedChunks) {
       this.recordGeneratedChunkRenderSummary(toChunkKey(generated.coord.x, generated.coord.y, generated.coord.z), generated);
       completedGeneratedChunksByKey.set(toChunkKey(generated.coord.x, generated.coord.y, generated.coord.z), generated);
@@ -700,18 +711,21 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
         chunkGenerationMs,
         chunkDispatchMs,
         chunkDrainMs,
+        summaryDrainMs,
         chunkAdoptionMs,
         evictionMs,
         neighborDirtyMs,
         inFlightChunks,
         completedChunkCacheHits: completedGenerationStats.cacheHits,
         completedGeneratedChunks: completedGenerationStats.generated,
+        completedSummaryCacheHits: completedSummaryStats.cacheHits,
+        completedGeneratedSummaries: completedSummaryStats.generated,
       },
     };
     return this.lastResidency;
   }
 
-  prefetchFarFieldSurfaceAround(
+  prefetchFarFieldSummariesAround(
     position: Vec3,
     outerRadiusWorldUnits: number,
     maxGenerateChunks: number,
@@ -749,7 +763,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
           continue;
         }
         if (this.asyncChunkGeneration) {
-          if (this.asyncChunkGeneration.requestChunk(cx, cy, cz)) {
+          if (this.asyncChunkGeneration.requestSummary(cx, cy, cz)) {
             requestedChunks += 1;
           }
           continue;
@@ -893,8 +907,12 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   }
 
   private recordGeneratedChunkRenderSummary(key: string, generated: GeneratedChunk): void {
-    this.generatedRenderSummaries.set(key, generated.renderSummary);
-    const columnKey = toColumnKey(generated.coord.x, generated.coord.z);
+    this.recordChunkRenderSummary(key, generated.renderSummary);
+  }
+
+  private recordChunkRenderSummary(key: string, summary: GeneratedChunkRenderSummary): void {
+    this.generatedRenderSummaries.set(key, summary);
+    const columnKey = toColumnKey(summary.coord.x, summary.coord.z);
     const chunkKeys = this.generatedRenderChunkKeysByColumn.get(columnKey) ?? new Set<string>();
     chunkKeys.add(key);
     this.generatedRenderChunkKeysByColumn.set(columnKey, chunkKeys);
@@ -1175,12 +1193,15 @@ function zeroResidencyPhaseMetrics(): ResidencyPhaseMetrics {
     chunkGenerationMs: 0,
     chunkDispatchMs: 0,
     chunkDrainMs: 0,
+    summaryDrainMs: 0,
     chunkAdoptionMs: 0,
     evictionMs: 0,
     neighborDirtyMs: 0,
     inFlightChunks: 0,
     completedChunkCacheHits: 0,
     completedGeneratedChunks: 0,
+    completedSummaryCacheHits: 0,
+    completedGeneratedSummaries: 0,
   };
 }
 

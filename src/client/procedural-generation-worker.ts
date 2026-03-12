@@ -1,8 +1,14 @@
 /// <reference lib="webworker" />
 
 import { openProceduralGeneratedChunkCache, type ProceduralGeneratedChunkCache } from "./procedural-generated-chunk-cache.ts";
+import { decodeGeneratedChunkSummary } from "../engine/generated-chunk-codec.ts";
 import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
-import { serializeGeneratedChunk, type TransferredGeneratedChunk } from "../engine/generated-chunk-transfer.ts";
+import {
+  serializeGeneratedChunk,
+  serializeGeneratedChunkRenderSummary,
+  type TransferredGeneratedChunk,
+  type TransferredGeneratedChunkRenderSummary,
+} from "../engine/generated-chunk-transfer.ts";
 import type { ChunkCoordinate } from "../engine/types.ts";
 
 type WorkerRequest =
@@ -17,6 +23,11 @@ type WorkerRequest =
       type: "generate";
       requestId: number;
       coord: ChunkCoordinate;
+    }
+  | {
+      type: "summarize";
+      requestId: number;
+      coord: ChunkCoordinate;
     };
 
 type WorkerResponse =
@@ -28,6 +39,12 @@ type WorkerResponse =
       requestId: number;
       source: "cache" | "generated";
       chunk: TransferredGeneratedChunk;
+    }
+  | {
+      type: "summarized";
+      requestId: number;
+      source: "cache" | "generated";
+      summary: TransferredGeneratedChunkRenderSummary;
     };
 
 let generator: ProceduralWorldGenerator | null = null;
@@ -61,7 +78,7 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
     return;
   }
   if (!generator) {
-    throw new Error("Procedural generation worker received a generate request before initialization");
+    throw new Error("Procedural generation worker received a request before initialization");
   }
   let cachedChunk: TransferredGeneratedChunk | null = null;
   try {
@@ -73,13 +90,24 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
     cachedChunk = null;
   }
   if (cachedChunk) {
+    if (message.type === "generate") {
+      const response: WorkerResponse = {
+        type: "generated",
+        requestId: message.requestId,
+        source: "cache",
+        chunk: cachedChunk,
+      };
+      self.postMessage(response, { transfer: [cachedChunk.encodedBuffer] });
+      return;
+    }
+    const summary = serializeGeneratedChunkRenderSummary(decodeGeneratedChunkSummary(cachedChunk.encodedBuffer).renderSummary);
     const response: WorkerResponse = {
-      type: "generated",
+      type: "summarized",
       requestId: message.requestId,
       source: "cache",
-      chunk: cachedChunk,
+      summary: summary.summary,
     };
-    self.postMessage(response, { transfer: [cachedChunk.encodedBuffer] });
+    self.postMessage(response, { transfer: summary.transfer });
     return;
   }
   const generated = generator.generateChunk(message.coord.x, message.coord.y, message.coord.z);
@@ -91,13 +119,24 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
     chunkCache?.close();
     chunkCache = null;
   }
+  if (message.type === "generate") {
+    const response: WorkerResponse = {
+      type: "generated",
+      requestId: message.requestId,
+      source: "generated",
+      chunk: serialized.chunk,
+    };
+    self.postMessage(response, { transfer: serialized.transfer });
+    return;
+  }
+  const summary = serializeGeneratedChunkRenderSummary(generated.renderSummary);
   const response: WorkerResponse = {
-    type: "generated",
+    type: "summarized",
     requestId: message.requestId,
     source: "generated",
-    chunk: serialized.chunk,
+    summary: summary.summary,
   };
-  self.postMessage(response, { transfer: serialized.transfer });
+  self.postMessage(response, { transfer: summary.transfer });
 }
 
 function reportCacheFailure(stage: "open" | "read" | "write", error: unknown): void {

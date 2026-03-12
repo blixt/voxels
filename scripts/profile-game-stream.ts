@@ -359,7 +359,7 @@ function settleWorld(
     buildStreamAnchorPosition(anchor, world.chunkSize, feetPosition[1]),
     { maxGenerateChunks: Number.POSITIVE_INFINITY },
   );
-  world.prefetchFarFieldSurfaceAround(feetPosition, farField.getMaxRadiusWorldUnits(), Number.POSITIVE_INFINITY);
+  world.prefetchFarFieldSummariesAround(feetPosition, farField.getMaxRadiusWorldUnits(), Number.POSITIVE_INFINITY);
   farFieldMaskRevision += 1;
   rebuildDirtyMeshes(world, Number.POSITIVE_INFINITY, {
     priorityPosition: feetPosition,

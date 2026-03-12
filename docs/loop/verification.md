@@ -3528,4 +3528,38 @@ This line of investigation was screened locally and not kept in the runtime yet.
 
 - This slice is worth keeping.
 - The current far renderer still only consumes the surface half of the new summary.
-- The next real architectural step is to persist/load render summaries independently and add a volumetric far path for caves and other large voids.
+- The next real architectural step is to persist/load render summaries independently and add a general volumetric far path for arbitrary large interior/void spaces.
+
+## 2026-03-12 summary-only far prefetch
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/generated-chunk-codec.test.ts tests/generated-chunk-render-summary.test.ts tests/procedural-resident-world.test.ts tests/procedural-lod-coverage.test.ts`
+- `mise run build`
+- `mise run trace-route -- --label=summary-prefetch-smoke --duration=1 --settle=1 --sample-hz=20`
+
+#### Added verification coverage
+
+- focused suites now cover the renamed summary-prefetch seam through:
+  - `tests/procedural-resident-world.test.ts`
+  - `tests/procedural-lod-coverage.test.ts`
+- `tests/generated-chunk-transfer.test.ts`
+  - summary-only worker payloads round-trip as typed render-summary transfers
+- the async generation boundary now still passes the existing resident/far continuity cases after adding the separate summary-completion path
+
+#### Numeric probes
+
+- Headless Chrome route smoke after the summary-only worker change:
+  - report: `artifacts/browser-route-trace/20260312T170323Z-summary-prefetch-smoke/report.json`
+  - avg gameplay frame `15.09 ms`
+  - p95 gameplay frame `31.50 ms`
+  - hole signals `0`
+- Focused repo suites after the async summary path:
+  - `23` / `23` passing across render-summary, codec, resident-world, and LOD coverage suites
+
+#### Residual
+
+- This slice is worth keeping.
+- The worker/cache seam can now deliver summary-only far metadata, but the current far renderer still consumes only the surface half of that metadata.
+- The next real rendering step is a general volumetric interior/void far path over chunk summaries, not more generator-coupled prefetch logic.

@@ -1,22 +1,26 @@
 import { expect, test } from "bun:test";
 
-import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
 import {
-  deserializeGeneratedChunk,
-  serializeGeneratedChunk,
+  deserializeGeneratedChunkRenderSummary,
+  serializeGeneratedChunkRenderSummary,
 } from "../src/engine/generated-chunk-transfer.ts";
+import { summarizeGeneratedChunkRender } from "../src/engine/generated-chunk-render-summary.ts";
+import { isProceduralWaterMaterial } from "../src/engine/procedural-generator.ts";
 
-test("generated chunk transfer preserves coord, payload, and bounds", () => {
-  const generator = new ProceduralWorldGenerator(1337);
-  const generated = generator.generateChunk(0, Math.floor(generator.seaLevel / generator.chunkSize), 0);
-  const serialized = serializeGeneratedChunk(generated);
-  const restored = deserializeGeneratedChunk(serialized.chunk);
+test("generated chunk render summary transfer round-trips typed summary payloads", () => {
+  const chunkSize = 32;
+  const data = new Uint16Array(chunkSize ** 3);
+  data.fill(7);
+  data[0] = 0;
+  const summary = summarizeGeneratedChunkRender({ x: 2, y: 3, z: 4 }, data, chunkSize, isProceduralWaterMaterial);
 
-  expect(restored.coord).toEqual(generated.coord);
-  expect(restored.solidCount).toBe(generated.solidCount);
-  expect(restored.solidBounds).toEqual(generated.solidBounds);
-  expect(restored.data.length).toBe(generated.data.length);
-  expect(restored.data[0]).toBe(generated.data[0]);
-  expect(restored.data[Math.floor(restored.data.length / 2)]).toBe(generated.data[Math.floor(generated.data.length / 2)]);
-  expect(restored.data[restored.data.length - 1]).toBe(generated.data[generated.data.length - 1]);
+  const transferred = serializeGeneratedChunkRenderSummary(summary);
+  const restored = deserializeGeneratedChunkRenderSummary(transferred.summary);
+
+  expect(restored.coord).toEqual(summary.coord);
+  expect(restored.coveredColumnCount).toBe(summary.coveredColumnCount);
+  expect(restored.macroCellSize).toBe(summary.macroCellSize);
+  expect(restored.macroCellsPerAxis).toBe(summary.macroCellsPerAxis);
+  expect(Array.from(restored.macroCellStates)).toEqual(Array.from(summary.macroCellStates));
+  expect(Array.from(restored.faceOpenMask)).toEqual(Array.from(summary.faceOpenMask));
 });

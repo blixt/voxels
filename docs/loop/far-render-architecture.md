@@ -35,11 +35,11 @@ Use two far representations, both derived from chunk summaries:
 - Build it from chunk-derived surface columns only.
 - Promote the current far path into the explicit “surface far renderer”, not the whole far-render architecture.
 
-2. Underground / large voids: volumetric visibility
-- Do not try to fake huge caverns with top-surface data.
-- Traverse coarse occupancy cells and face-open masks from the current air cell or from known cave-mouth/frontier cells.
+2. Interior / large voids: volumetric visibility
+- Do not try to fake arbitrary large interior spaces with top-surface data.
+- Traverse coarse occupancy cells and face-open masks from the current air cell or from known visibility frontier cells.
 - Render only reachable coarse shell geometry or a cheap voxel DDA/ray style representation, not every hidden distant chunk.
-- Use portal-style propagation across summary face openings so underground visibility follows actual air connectivity instead of generator heuristics.
+- Use portal-style propagation across summary face openings so visibility follows actual air connectivity in the edited world instead of generator heuristics.
 
 ## LOD
 
@@ -56,7 +56,7 @@ The important detail is that LOD is derived from actual chunk state. If a player
 Split world streaming into two bubbles:
 
 - resident bubble: full chunks needed for gameplay, collision, edits, and detailed rendering
-- summary bubble: much larger chunk/region summaries needed for horizon, cavern visibility, and streaming decisions
+- summary bubble: much larger chunk/region summaries needed for horizon rendering, interior visibility, and streaming decisions
 
 Initial load should:
 
@@ -93,5 +93,5 @@ That gives one consistent contract for single-player, multiplayer, and revisits 
 1. Keep the current surface clipmap working, but only over chunk-derived summaries.
 2. Persist chunk render summaries explicitly instead of relying on in-memory post-eviction archives.
 3. Introduce region-level summary indexes so far rendering and Y-range/visibility work stop scanning individual chunks blindly.
-4. Add volumetric far visibility for caves/voids from chunk summaries.
+4. Add volumetric far visibility for arbitrary large voids and interiors from chunk summaries.
 5. Move full far streaming decisions onto summary visibility/frontier logic rather than procedural estimates.

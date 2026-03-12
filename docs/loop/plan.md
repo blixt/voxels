@@ -186,7 +186,7 @@ Status:
 - Treat the new chunk-derived render summary as the durable far-render seam:
   - keep surface clipmaps as the current above-ground renderer
   - add persisted region/summary loading next
-  - then add volumetric cave/void far visibility from chunk summaries instead of generator sampling
+  - then add general volumetric interior/void far visibility from chunk summaries instead of generator sampling
 - Keep the grounded-player slice honest:
   - add spawn-footprint regression coverage so player starts remain stable
   - preserve feet position and grounded state in the game debug surface

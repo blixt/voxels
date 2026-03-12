@@ -346,7 +346,7 @@ test("far-field sampling only becomes available after actual chunk pre-generatio
 
   expect(world.sampleFarFieldColumn(farWorldX, farWorldZ)).toBeNull();
 
-  const generated = world.prefetchFarFieldSurfaceAround(spawn, world.chunkSize * 6, 64);
+  const generated = world.prefetchFarFieldSummariesAround(spawn, world.chunkSize * 6, 64);
 
   expect(generated).toBeGreaterThan(0);
   expect(world.sampleFarFieldColumn(farWorldX, farWorldZ)).not.toBeNull();

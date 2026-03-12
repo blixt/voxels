@@ -1692,7 +1692,7 @@
 - I revisited the long-term architecture instead of treating the surface-summary seam as “done”.
 - The main conclusion is strong:
   - a surface-only summary is a tactical seam for the current far renderer
-  - it is not the right long-term representation if the world must render correctly in huge underground caverns after edits
+  - it is not the right long-term representation if the world must render correctly in arbitrary large edited interior/void spaces
 - I changed the summary layer accordingly:
   - `GeneratedChunkSurfaceSummary` is gone
   - generated chunks now carry `GeneratedChunkRenderSummary`
@@ -1710,10 +1710,31 @@
   - that is the right seam for future region-summary loading from disk/server instead of mandatory full chunk adoption
 - I deliberately did not bolt on a second far renderer yet:
   - the current `ProceduralFarField` still behaves as a surface clipmap
-  - the new summary seam is the migration step that makes a future volumetric cave/void far path possible without another world-truth fork
+  - the new summary seam is the migration step that makes a future general volumetric interior/void far path possible without another world-truth fork
 - I documented the stronger opinion explicitly in `docs/loop/far-render-architecture.md`:
   - one authoritative chunk truth
   - derived render summaries
   - surface clipmaps above ground
-  - volumetric/portal-aware far rendering underground
+  - volumetric/portal-aware far rendering for arbitrary interior spaces
   - summary-bubble streaming larger than the resident gameplay bubble
+
+## 2026-03-12 summary-only far prefetch from the async generation boundary
+
+- I took the next step toward a renderer that consumes chunk-derived data without dragging full chunks through the near pipeline:
+  - the procedural generation worker now supports `summarize` requests in addition to full `generate` requests
+  - cache hits decode only the persisted render summary from the stored encoded chunk payload
+  - cache misses still generate a full chunk once, persist it, and then return only the render summary for far work
+- The important architectural change is on the main thread:
+  - `prefetchFarFieldSurfaceAround(...)` is gone
+  - the world now asks for far-field summaries, not far-field surface chunks
+  - `ProceduralResidentWorld` drains completed render summaries separately from completed full chunks and records them into the summary archive without resident adoption
+- This keeps the direction honest:
+  - near gameplay/detailed rendering still depends on full chunk generation/adoption
+  - far rendering is moving toward a summary bubble backed by persisted chunk data
+  - the renderer still never samples the generator at runtime
+- I also tightened the wording across the loop docs:
+  - the next volumetric far path is no longer framed as “for caves”
+  - it is explicitly about arbitrary large interior/void spaces in an edited persistent world
+- I deliberately did not pretend the current surface clipmap is the final general renderer:
+  - this slice only changes how summary data arrives
+  - the next real rendering slice is still a general volumetric far/interior path over chunk summaries

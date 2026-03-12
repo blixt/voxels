@@ -49,7 +49,7 @@ function settleAndProbeCoverage(
   wrongBandCount: number;
 } {
   world.updateResidencyAround(position, { maxGenerateChunks: Number.POSITIVE_INFINITY });
-  world.prefetchFarFieldSurfaceAround(position, farField.getMaxRadiusWorldUnits(), 512);
+  world.prefetchFarFieldSummariesAround(position, farField.getMaxRadiusWorldUnits(), 512);
   farField.updateAround(position, 0, world.getFarFieldExclusionMask());
   const sampleRadiusWorldUnits = metersToWorldUnits(sampleRadiusMeters);
   const sampleStepWorldUnits = metersToWorldUnits(sampleStepMeters);
