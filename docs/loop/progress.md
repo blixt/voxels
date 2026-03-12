@@ -1382,3 +1382,39 @@
 - The main limitation surfaced by this slice is important:
   - production tracing still leaves several hot frames minified (`$o`, `a`, `U1`, ...)
   - enough names survive to guide work now, but the next harness improvement should be a trace-friendly build/report mode with stronger symbol fidelity
+
+## 2026-03-12 denser landmark stands and underground surface signatures
+
+- I kept the next feature slice deliberately narrow:
+  - do not add another pile of top-level biome ids
+  - instead make existing biomes read more strongly through denser stand-scale landmark rosters
+  - and let underground biome families leak onto the surface through distinct landmark signatures
+- The important design change is in `src/engine/procedural-generator.ts`:
+  - added two new landmark silhouettes:
+    - `root_stump`
+    - `stone_tor`
+  - added denser special rosters:
+    - `VERDANT_CANOPY_SEA_LANDMARKS`
+    - `HIGHLAND_REDWOOD_BASIN_LANDMARKS`
+    - `FERN_OVERGROWN_LANDMARKS`
+    - `FUNGAL_SPORE_GROVE_LANDMARKS`
+  - added underground-surface rosters:
+    - `ROOTED_SURFACE_LANDMARKS`
+    - `PEATY_SURFACE_LANDMARKS`
+    - `GRANITIC_TOR_LANDMARKS`
+    - `SALINE_CRUST_LANDMARKS`
+    - `MYCELIAL_SURFACE_LANDMARKS`
+    - `CRYSTALLINE_SURFACE_LANDMARKS`
+    - `BASALTIC_SURFACE_LANDMARKS`
+- The most useful part was threading `undergroundBiomeId` into landmark roster selection instead of trying to bolt underground flavor onto material-only changes.
+- The kept slice makes the world read more coherently:
+  - rooted underground now tends to surface as stumps / dense canopy cues
+  - granitic underground now surfaces as tors / standing stones
+  - mycelial underground now leaks glowcap-heavy signatures upward
+  - crystalline / saline / basaltic undergrounds now have their own visible surface cues
+- The stand-density result is stronger than the earlier “just add more families” passes:
+  - best dense forest patch ratio now reaches `0.479`
+  - best fern-jungle patch ratio now reaches `0.402`
+  - orchard pockets stayed present at `0.160`
+- The key lesson from this slice:
+  - distinct world identity comes more from clustered placement regimes and cross-layer relationships than from constantly minting new biome names

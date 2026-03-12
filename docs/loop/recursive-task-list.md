@@ -15,12 +15,12 @@ This file is the durable "keep going" loop for the repo. It exists so a future s
 
 ## Current cycle
 
-1. Feature: deepen biome identity with denser local forest canopies, more dramatic landmark clustering, and stronger below-ground biome/object signatures.
-2. Performance/harness: prototype a lower-main-thread streaming path, starting with workerized or staged chunk generation/meshing experiments that can be A/B tested against the route benchmark.
-3. Feature: implement the first real gather/build loop with inventory pickup, placement, and persistence-ready edit records.
-4. Performance/harness: replace more of the ad hoc far-field path with a more principled LOD experiment inspired by clipmaps and seam-stitching research, and keep it only if the route benchmark and seam probes improve.
-5. Feature: add biome-aware points of interest and cave-side setpieces that make the new discovery journal pay off beyond counts alone.
-6. Performance/harness: add a trace-friendly build/report mode so browser route traces keep meaningful symbol names and can be folded into a broader acceptance battery.
+1. Performance/harness: prototype a lower-main-thread streaming path, starting with workerized or staged chunk generation/meshing experiments that can be A/B tested against the route benchmark.
+2. Feature: implement the first real gather/build loop with inventory pickup, placement, and persistence-ready edit records.
+3. Performance/harness: replace more of the ad hoc far-field path with a more principled LOD experiment inspired by clipmaps and seam-stitching research, and keep it only if the route benchmark and seam probes improve.
+4. Feature: add biome-aware points of interest and cave-side setpieces that make the new discovery journal pay off beyond counts alone.
+5. Performance/harness: add a trace-friendly build/report mode so browser route traces keep meaningful symbol names and can be folded into a broader acceptance battery.
+6. Feature: deepen caves and below-ground progression so underground biome families matter beyond surface hints.
 7. Refresh this file with a fresh six-task list that still alternates `feature -> performance/harness` and still ends with another refresh task.
 
 ## Acceptance checklist per slice

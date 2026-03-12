@@ -433,6 +433,8 @@ test("landmarks appear across the world with multiple distinct families", () => 
   expect(landmarkIds.has("redwood")).toBe(true);
   expect(landmarkIds.has("dead_tree")).toBe(true);
   expect(landmarkIds.has("thorn_tree")).toBe(true);
+  expect(landmarkIds.has("root_stump")).toBe(true);
+  expect(landmarkIds.has("stone_tor")).toBe(true);
   expect(landmarkIds.has("hoodoo")).toBe(true);
   expect(landmarkIds.has("ice_spire")).toBe(true);
   expect(
@@ -476,12 +478,14 @@ test("the world now contains dense forest plus orchard and flower-grove landmark
   let maxForestRatio = 0;
   let maxOrchardRatio = 0;
   let maxGladeRatio = 0;
+  let maxFernJungleRatio = 0;
 
   for (let centerZ = -8192; centerZ <= 8192; centerZ += 192) {
     for (let centerX = -8192; centerX <= 8192; centerX += 192) {
       let forestCount = 0;
       let orchardCount = 0;
       let gladeCount = 0;
+      let fernJungleCount = 0;
       let total = 0;
       for (let dz = -48; dz <= 48; dz += 8) {
         for (let dx = -48; dx <= 48; dx += 8) {
@@ -496,18 +500,53 @@ test("the world now contains dense forest plus orchard and flower-grove landmark
           if (gladeLandmarks.has(probe.landmarkId ?? "") && featureHeight >= 2) {
             gladeCount += 1;
           }
+          if ((probe.landmarkId === "giant_fern" || probe.landmarkId === "canopy_tree") && featureHeight >= 18) {
+            fernJungleCount += 1;
+          }
           total += 1;
         }
       }
       maxForestRatio = Math.max(maxForestRatio, forestCount / total);
       maxOrchardRatio = Math.max(maxOrchardRatio, orchardCount / total);
       maxGladeRatio = Math.max(maxGladeRatio, gladeCount / total);
+      maxFernJungleRatio = Math.max(maxFernJungleRatio, fernJungleCount / total);
     }
   }
 
-  expect(maxForestRatio).toBeGreaterThanOrEqual(0.30);
+  expect(maxForestRatio).toBeGreaterThanOrEqual(0.38);
   expect(maxOrchardRatio).toBeGreaterThanOrEqual(0.15);
   expect(maxGladeRatio).toBeGreaterThanOrEqual(0.13);
+  expect(maxFernJungleRatio).toBeGreaterThanOrEqual(0.24);
+});
+
+test("underground families leak distinct landmark signatures onto the surface", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const landmarksByUnderground = new Map<string, Set<string>>();
+
+  for (let z = -8192; z <= 8192; z += 16) {
+    for (let x = -8192; x <= 8192; x += 16) {
+      const probe = generator.sampleBiomeProbe(x, z);
+      if (!probe.landmarkId) {
+        continue;
+      }
+      const set = landmarksByUnderground.get(probe.undergroundBiomeId) ?? new Set<string>();
+      set.add(probe.landmarkId);
+      landmarksByUnderground.set(probe.undergroundBiomeId, set);
+    }
+  }
+
+  expect(landmarksByUnderground.get("rooted")?.has("root_stump")).toBe(true);
+  expect(
+    (landmarksByUnderground.get("granitic")?.has("stone_tor") ?? false)
+    || (landmarksByUnderground.get("granitic")?.has("standing_stone") ?? false),
+  ).toBe(true);
+  expect(landmarksByUnderground.get("saline")?.has("salt_spire")).toBe(true);
+  expect(
+    (landmarksByUnderground.get("mycelial")?.has("mega_glowcap") ?? false)
+    || (landmarksByUnderground.get("mycelial")?.has("glowcap") ?? false),
+  ).toBe(true);
+  expect(landmarksByUnderground.get("crystalline")?.has("crystal_cluster")).toBe(true);
+  expect(landmarksByUnderground.get("basaltic")?.has("basalt_spire")).toBe(true);
 });
 
 test("surface materials vary within major biomes to support finer ground detail", () => {

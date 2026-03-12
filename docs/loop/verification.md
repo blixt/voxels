@@ -3088,3 +3088,44 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - Headless Chrome WebGPU tracing works on this machine, which is the main success criterion.
 - The next harness improvement should make trace symbols easier to read; some of the hottest frames are still minified.
+
+## 2026-03-12 denser landmark stands and underground surface signatures
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-generator.test.ts`
+- `mise run build`
+- `mise exec -- bun --eval '...fixed-seed landmark density / underground signature probe...'`
+- `mise run cycle-bench -- --label=underground-signatures`
+
+#### Numeric probes
+
+- Dense landmark cluster probe:
+  - max forest ratio `0.47928994082840237`
+  - max fern-jungle ratio `0.40236686390532544`
+  - max orchard ratio `0.15976331360946747`
+- Underground signature probe highlights:
+  - `rooted` includes `root_stump`
+  - `granitic` includes `stone_tor`
+  - `saline` includes `salt_spire`
+  - `mycelial` includes `mega_glowcap` / `glowcap`
+  - `crystalline` includes `crystal_cluster`
+  - `basaltic` includes `basalt_spire`
+- Cycle bench report:
+  - `artifacts/cycle-bench/20260312T061952Z-underground-signatures.json`
+  - `terrain256` mesh `263.95 ms`
+  - `crossing-d2` max frame work `26.92 ms`
+  - `crossing-far-anchor-d8` max frame work `171.49 ms`
+
+#### Added verification coverage
+
+- `tests/procedural-generator.test.ts` now also verifies:
+  - `root_stump` and `stone_tor` appear in the fixed-seed world
+  - dense fern-jungle pockets exist, not only orchard / flower glades
+  - underground biome families leak distinct landmark signatures onto the surface
+
+#### Residual
+
+- This slice is worth keeping.
+- The landmark/underground signal is now measurably present, but there is still room to make cave-side and below-ground identity richer than “surface cues plus material palette”.

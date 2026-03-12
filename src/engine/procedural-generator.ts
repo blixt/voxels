@@ -70,7 +70,9 @@ export type LandmarkId =
   | "basalt_spire"
   | "crystal_cluster"
   | "glowcap"
-  | "mega_glowcap";
+  | "mega_glowcap"
+  | "root_stump"
+  | "stone_tor";
 
 interface BaseBiomeProfile {
   id: BaseBiomeId;
@@ -398,6 +400,8 @@ const LANDMARKS: Record<LandmarkId, LandmarkProfile> = {
   crystal_cluster: createLandmark("crystal_cluster", 132, 5, 0.28, 1.0, 1),
   glowcap: createLandmark("glowcap", 164, 12, 0.30, 1.0, 2),
   mega_glowcap: createLandmark("mega_glowcap", 232, 18, 0.16, 1.2, 2),
+  root_stump: createLandmark("root_stump", 132, 7, 0.22, 1.0, 0),
+  stone_tor: createLandmark("stone_tor", 176, 7, 0.18, 1.0, 0),
 };
 
 const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
@@ -537,6 +541,15 @@ const VERDANT_OLD_GROWTH_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("flower_patch", { chance: 0.52, scale: 1.12, variant: 1, cellSize: 68, radius: 5 }),
 ];
 
+const VERDANT_CANOPY_SEA_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("redwood", { chance: 0.48, scale: 1.28, cellSize: 156, radius: 26 }),
+  landmarkPlacement("canopy_tree", { chance: 0.96, scale: 1.48, cellSize: 72, radius: 20 }),
+  landmarkPlacement("oak", { chance: 0.90, scale: 1.32, cellSize: 68, radius: 13 }),
+  landmarkPlacement("willow", { chance: 0.28, scale: 1.08, cellSize: 124, radius: 16 }),
+  landmarkPlacement("root_stump", { chance: 0.18, scale: 1.08, cellSize: 136, radius: 9 }),
+  landmarkPlacement("berry_bush", { chance: 0.76, scale: 1.12, cellSize: 60, radius: 5 }),
+];
+
 const VERDANT_KARST_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("willow", { chance: 0.26, scale: 1.04, cellSize: 148, radius: 14 }),
   landmarkPlacement("birch", { chance: 0.42, scale: 1.04, cellSize: 116, radius: 9 }),
@@ -621,6 +634,14 @@ const HIGHLAND_REDWOOD_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("fir", { chance: 0.52, scale: 1.12, cellSize: 96, radius: 10 }),
   landmarkPlacement("berry_bush", { chance: 0.28, scale: 1.00, cellSize: 84, radius: 5 }),
   landmarkPlacement("boulder", { chance: 0.18, scale: 1.02 }),
+];
+
+const HIGHLAND_REDWOOD_BASIN_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("redwood", { chance: 0.56, scale: 1.30, cellSize: 152, radius: 26 }),
+  landmarkPlacement("tall_fir", { chance: 0.88, scale: 1.30, cellSize: 84, radius: 13 }),
+  landmarkPlacement("fir", { chance: 0.82, scale: 1.20, cellSize: 76, radius: 11 }),
+  landmarkPlacement("stone_tor", { chance: 0.16, scale: 1.08, cellSize: 144, radius: 8 }),
+  landmarkPlacement("berry_bush", { chance: 0.34, scale: 1.02, cellSize: 72, radius: 5 }),
 ];
 
 const HIGHLAND_OLD_GROWTH_LANDMARKS: readonly LandmarkProfile[] = [
@@ -711,11 +732,78 @@ const FERN_CENOTE_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("flower_patch", { chance: 0.30, scale: 1.06, variant: 1, cellSize: 68, radius: 5 }),
 ];
 
+const FERN_OVERGROWN_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("giant_fern", { chance: 0.66, scale: 1.34, cellSize: 96, radius: 15 }),
+  landmarkPlacement("canopy_tree", { chance: 0.48, scale: 1.26, cellSize: 112, radius: 18 }),
+  landmarkPlacement("root_stump", { chance: 0.20, scale: 1.10, cellSize: 132, radius: 9 }),
+  landmarkPlacement("glowcap", { chance: 0.30, scale: 1.06, cellSize: 124, radius: 12 }),
+  landmarkPlacement("berry_bush", { chance: 0.64, scale: 1.10, cellSize: 60, radius: 5 }),
+  landmarkPlacement("flower_patch", { chance: 0.34, scale: 1.08, variant: 1, cellSize: 64, radius: 5 }),
+];
+
 const FUNGAL_MOONLIT_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("mega_glowcap", { chance: 0.32, scale: 1.20 }),
   landmarkPlacement("glowcap", { chance: 0.48, scale: 1.14 }),
   landmarkPlacement("lantern_tree", { chance: 0.24, scale: 1.02, cellSize: 136, radius: 12 }),
   landmarkPlacement("giant_flower", { chance: 0.24, scale: 1.14, cellSize: 120, radius: 10, variant: 1 }),
+];
+
+const FUNGAL_SPORE_GROVE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("mega_glowcap", { chance: 0.40, scale: 1.24, cellSize: 140, radius: 20 }),
+  landmarkPlacement("glowcap", { chance: 0.64, scale: 1.16, cellSize: 104, radius: 13 }),
+  landmarkPlacement("lantern_tree", { chance: 0.34, scale: 1.08, cellSize: 120, radius: 13 }),
+  landmarkPlacement("giant_flower", { chance: 0.28, scale: 1.18, cellSize: 116, radius: 11, variant: 1 }),
+  landmarkPlacement("berry_bush", { chance: 0.34, scale: 1.04, cellSize: 76, radius: 5 }),
+];
+
+const ROOTED_SURFACE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("root_stump", { chance: 0.38, scale: 1.16, cellSize: 112, radius: 9 }),
+  landmarkPlacement("canopy_tree", { chance: 0.54, scale: 1.18, cellSize: 116, radius: 17 }),
+  landmarkPlacement("willow", { chance: 0.32, scale: 1.08, cellSize: 132, radius: 15 }),
+  landmarkPlacement("berry_bush", { chance: 0.60, scale: 1.10, cellSize: 64, radius: 5 }),
+];
+
+const PEATY_SURFACE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("root_stump", { chance: 0.26, scale: 1.04, cellSize: 128, radius: 8 }),
+  landmarkPlacement("willow", { chance: 0.40, scale: 1.12, cellSize: 132, radius: 15 }),
+  landmarkPlacement("dead_tree", { chance: 0.30, scale: 1.12, cellSize: 140, radius: 8 }),
+  landmarkPlacement("reed_cluster", { chance: 0.82, scale: 1.14, cellSize: 60, radius: 4 }),
+  landmarkPlacement("glowcap", { chance: 0.22, scale: 1.00, cellSize: 132, radius: 11 }),
+];
+
+const GRANITIC_TOR_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("stone_tor", { chance: 0.34, scale: 1.18, cellSize: 128, radius: 8 }),
+  landmarkPlacement("standing_stone", { chance: 0.36, scale: 1.20, cellSize: 140, radius: 6 }),
+  landmarkPlacement("boulder", { chance: 0.26, scale: 1.08, cellSize: 104, radius: 5 }),
+  landmarkPlacement("fir", { chance: 0.20, scale: 1.02, cellSize: 124, radius: 10 }),
+];
+
+const SALINE_CRUST_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("salt_spire", { chance: 0.50, scale: 1.22, cellSize: 132, radius: 7 }),
+  landmarkPlacement("stone_tor", { chance: 0.22, scale: 1.08, cellSize: 148, radius: 7 }),
+  landmarkPlacement("crystal_cluster", { chance: 0.22, scale: 1.10, cellSize: 116, radius: 5 }),
+  landmarkPlacement("shrub", { chance: 0.16, scale: 0.86, variant: 2, cellSize: 92, radius: 4 }),
+];
+
+const MYCELIAL_SURFACE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("mega_glowcap", { chance: 0.36, scale: 1.22, cellSize: 144, radius: 19 }),
+  landmarkPlacement("glowcap", { chance: 0.52, scale: 1.14, cellSize: 112, radius: 12 }),
+  landmarkPlacement("lantern_tree", { chance: 0.26, scale: 1.06, cellSize: 128, radius: 12 }),
+  landmarkPlacement("berry_bush", { chance: 0.30, scale: 1.00, cellSize: 80, radius: 5 }),
+];
+
+const CRYSTALLINE_SURFACE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("crystal_cluster", { chance: 0.52, scale: 1.20, cellSize: 116, radius: 5, variant: 2 }),
+  landmarkPlacement("salt_spire", { chance: 0.26, scale: 1.10, cellSize: 140, radius: 7, variant: 1 }),
+  landmarkPlacement("stone_tor", { chance: 0.24, scale: 1.10, cellSize: 144, radius: 7 }),
+  landmarkPlacement("boulder", { chance: 0.14, scale: 0.98, cellSize: 108, radius: 5 }),
+];
+
+const BASALTIC_SURFACE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("basalt_spire", { chance: 0.44, scale: 1.30, cellSize: 140, radius: 7 }),
+  landmarkPlacement("dead_snag", { chance: 0.32, scale: 1.14, cellSize: 144, radius: 4, variant: 1 }),
+  landmarkPlacement("stone_tor", { chance: 0.18, scale: 1.08, cellSize: 156, radius: 7 }),
+  landmarkPlacement("boulder", { chance: 0.20, scale: 1.00, cellSize: 108, radius: 5, variant: 1 }),
 ];
 
 const EMBER_DEADLAND_LANDMARKS: readonly LandmarkProfile[] = [
@@ -1167,6 +1255,7 @@ export class ProceduralWorldGenerator {
       worldX,
       worldZ,
       biomeId,
+      undergroundBiomeId,
       regionalVariant?.id ?? null,
       surfaceY,
       waterTopY,
@@ -1483,6 +1572,7 @@ export class ProceduralWorldGenerator {
     worldX: number,
     worldZ: number,
     biomeId: BiomeId,
+    undergroundBiomeId: UndergroundBiomeId,
     regionalVariantId: RegionalVariantId | null,
     surfaceY: number,
     waterTopY: number,
@@ -1498,7 +1588,7 @@ export class ProceduralWorldGenerator {
     out.featureMaterialPrimary = 0;
     out.featureMaterialSecondary = 0;
     out.featureMaterialAccent = 0;
-    const roster = selectLandmarkRoster(biomeId, regionalVariantId, fields);
+    const roster = selectLandmarkRoster(biomeId, undergroundBiomeId, regionalVariantId, fields);
     if (roster.length === 0) {
       return null;
     }
@@ -2096,6 +2186,7 @@ function pickSubsurfaceMaterial(
 
 function selectLandmarkRoster(
   biomeId: BiomeId,
+  undergroundBiomeId: UndergroundBiomeId,
   regionalVariantId: RegionalVariantId | null,
   fields: ColumnFieldSample,
 ): readonly LandmarkProfile[] {
@@ -2133,8 +2224,12 @@ function selectLandmarkRoster(
     default:
       break;
   }
+  const undergroundSurfaceRoster = selectUndergroundSurfaceRoster(undergroundBiomeId, biomeId, fields);
   switch (biomeId) {
     case "verdant":
+      if (fields.oldGrowth > 0.78 && fields.grove > 0.66 && fields.moisture > 0.68) {
+        return VERDANT_CANOPY_SEA_LANDMARKS;
+      }
       if (fields.oldGrowth > 0.70 && fields.moisture > 0.60 && fields.grove > 0.54) {
         return VERDANT_OLD_GROWTH_LANDMARKS;
       }
@@ -2143,6 +2238,9 @@ function selectLandmarkRoster(
       }
       if (fields.orchard > 0.68 && fields.temperature > 0.50 && fields.moisture > 0.56) {
         return VERDANT_ORCHARD_LANDMARKS;
+      }
+      if (undergroundSurfaceRoster) {
+        return undergroundSurfaceRoster;
       }
       return BASE_BIOME_LANDMARKS.verdant;
     case "savanna":
@@ -2163,8 +2261,14 @@ function selectLandmarkRoster(
     case "badlands":
       return fields.desolation > 0.58 ? BADLANDS_DESOLATE_LANDMARKS : BASE_BIOME_LANDMARKS.badlands;
     case "highland":
+      if (fields.oldGrowth > 0.74 && fields.grove > 0.62 && fields.uplift > 0.72) {
+        return HIGHLAND_REDWOOD_BASIN_LANDMARKS;
+      }
       if (fields.oldGrowth > 0.66 && fields.moisture > 0.48 && fields.uplift > 0.60) {
         return HIGHLAND_OLD_GROWTH_LANDMARKS;
+      }
+      if (undergroundSurfaceRoster) {
+        return undergroundSurfaceRoster;
       }
       return fields.grove > 0.68 && fields.moisture > 0.50 && fields.uplift > 0.62
         ? HIGHLAND_REDWOOD_LANDMARKS
@@ -2190,28 +2294,96 @@ function selectLandmarkRoster(
         ? FIREFLY_LANTERN_LANDMARKS
         : SPECIAL_BIOME_LANDMARKS.firefly;
     case "saltflat":
+      if (undergroundSurfaceRoster) {
+        return undergroundSurfaceRoster;
+      }
       return fields.surfacePatch > 0.66 || fields.channel > 0.62
         ? SALTFLAT_MIRROR_LANDMARKS
         : SPECIAL_BIOME_LANDMARKS.saltflat;
     case "fern":
+      if (fields.grove > 0.62 && fields.moisture > 0.72 && fields.channel > 0.54) {
+        return FERN_OVERGROWN_LANDMARKS;
+      }
+      if (undergroundSurfaceRoster) {
+        return undergroundSurfaceRoster;
+      }
       return fields.channel > 0.64 || fields.basin < -0.10
         ? FERN_CENOTE_LANDMARKS
         : SPECIAL_BIOME_LANDMARKS.fern;
     case "fungal":
+      if (fields.magic > 0.74 && fields.moisture > 0.62) {
+        return FUNGAL_SPORE_GROVE_LANDMARKS;
+      }
+      if (undergroundSurfaceRoster) {
+        return undergroundSurfaceRoster;
+      }
       return fields.magic > 0.68
         ? FUNGAL_MOONLIT_LANDMARKS
         : SPECIAL_BIOME_LANDMARKS.fungal;
     case "ember":
+      if (undergroundSurfaceRoster) {
+        return undergroundSurfaceRoster;
+      }
       return fields.desolation > 0.54 ? EMBER_DEADLAND_LANDMARKS : SPECIAL_BIOME_LANDMARKS.ember;
     case "bloom":
       if (fields.magic > 0.62 && (fields.orchard > 0.52 || fields.grove > 0.56)) {
         return BLOOM_FLOWER_GROVE_LANDMARKS;
       }
+      if (undergroundSurfaceRoster) {
+        return undergroundSurfaceRoster;
+      }
       return fields.orchard > 0.64 ? BLOOM_ORCHARD_LANDMARKS : SPECIAL_BIOME_LANDMARKS.bloom;
     case "shardlands":
+      if (undergroundSurfaceRoster) {
+        return undergroundSurfaceRoster;
+      }
       return fields.magic > 0.62 ? SALTFLAT_MIRROR_LANDMARKS : SPECIAL_BIOME_LANDMARKS.shardlands;
     default:
       return BASE_BIOME_LANDMARKS[biomeId];
+  }
+}
+
+function selectUndergroundSurfaceRoster(
+  undergroundBiomeId: UndergroundBiomeId,
+  biomeId: BiomeId,
+  fields: ColumnFieldSample,
+): readonly LandmarkProfile[] | null {
+  switch (undergroundBiomeId) {
+    case "rooted":
+      if (
+        (biomeId === "verdant" || biomeId === "fern" || biomeId === "bloom")
+        && fields.oldGrowth > 0.66
+        && fields.moisture > 0.62
+      ) {
+        return ROOTED_SURFACE_LANDMARKS;
+      }
+      return null;
+    case "peaty":
+      return fields.moisture > 0.68 && (fields.channel > 0.50 || fields.grove > 0.56)
+        ? PEATY_SURFACE_LANDMARKS
+        : null;
+    case "granitic":
+      return fields.uplift > 0.64 && fields.scatter > 0.44
+        ? GRANITIC_TOR_LANDMARKS
+        : null;
+    case "saline":
+      return fields.surfacePatch > 0.64 || fields.channel > 0.60
+        ? SALINE_CRUST_LANDMARKS
+        : null;
+    case "mycelial":
+      return fields.magic > 0.64 && fields.moisture > 0.54
+        ? MYCELIAL_SURFACE_LANDMARKS
+        : null;
+    case "crystalline":
+      return fields.magic > 0.60 || fields.scatter > 0.54
+        ? CRYSTALLINE_SURFACE_LANDMARKS
+        : null;
+    case "basaltic":
+      return fields.volcanism > 0.60 || fields.desolation > 0.56
+        ? BASALTIC_SURFACE_LANDMARKS
+        : null;
+    default:
+      return null;
   }
 }
 
@@ -2980,6 +3152,30 @@ function configureLandmarkFeature(
         "#AEF",
       );
       out.featureExtra = 3;
+      return true;
+    case "root_stump":
+      if (submergedSurface) {
+        return false;
+      }
+      configureSpireFeature(
+        out,
+        FEATURE_BOULDER,
+        scaledFeatureHeight(7, 6, fields.oldGrowth + fields.moisture * 0.2, profile.scale),
+        scaledFeatureRadius(6, 2, fields.oldGrowth + fields.scatter * 0.2, profile.scale),
+        "#654",
+        "#875",
+      );
+      out.featureExtra = 0;
+      return true;
+    case "stone_tor":
+      configureSpireFeature(
+        out,
+        FEATURE_HOODOO,
+        scaledFeatureHeight(18, 18, fields.uplift + fields.scatter * 0.25, profile.scale),
+        scaledFeatureRadius(5, 3, fields.uplift + fields.scatter * 0.2, profile.scale),
+        "#889",
+        "#BBC",
+      );
       return true;
     default:
       return false;

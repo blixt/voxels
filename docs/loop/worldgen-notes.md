@@ -1,5 +1,21 @@
 # Worldgen Notes
 
+## 2026-03-12 cross-layer landmark identity
+
+- The more convincing next step after adding many biome families was not more ids.
+- The better lever was to make the same world rules show up at multiple layers:
+  - surface biome / regional variant
+  - underground biome family
+  - landmark roster
+- The first kept version of that idea now lets underground families leak visible cues upward:
+  - `rooted` -> stumps / canopy-heavy surface clusters
+  - `granitic` -> tors / standing stones
+  - `mycelial` -> glowcap / lantern signatures
+  - `crystalline` / `saline` / `basaltic` -> stronger mineral / harsh-landmark surface signals
+- The other big lesson is clustering:
+  - world identity improves more when landmark density changes by stand or basin than when everything is uniformly “a bit more varied”
+  - dense local regimes like canopy seas, redwood basins, fern overgrowth, and spore groves read much more strongly than sparse scatter
+
 Date: 2026-03-11
 
 This note started as the first isolated procedural-world slice before it was wired into the live game.
