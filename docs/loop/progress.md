@@ -1,5 +1,29 @@
 # Progress Log
 
+## 2026-03-12
+
+- Fixed the exploration journal so underground families are no longer discovered just by walking above them on the surface:
+  - added `src/engine/underground-discovery.ts`
+  - underground discovery now requires a candidate underground biome, the eye to be meaningfully below the local surface, and actual overhead collision material within a short vertical scan
+  - the game HUD now reports `Surface` instead of a fake underground family while above ground
+- Added the first actual cave-system pass to the procedural generator instead of only varying underground material stacks:
+  - deep cave band for broader subterranean voids
+  - upper cave band for shallower voids
+  - explicit entrance band for overworld openings
+  - surface-breach support so rugged biome interiors can expose real sinkholes / broken-roof cave entrances
+- Kept the cave behavior biome-driven and boundary-aware:
+  - cave propensity is still derived from world-rule fields plus surface/underground biome identity
+  - rugged/cave-prone biomes (`highland`, `badlands`, `fern`, `ember`, `shardlands`) now expose substantially more openings than flatter biomes
+  - entrance intensity is now explicitly damped using nearby biome classifications so biome-specific cave mouths do not cluster at direct biome borders
+- Refactored biome classification into a reusable helper inside `src/engine/procedural-generator.ts` so the generator can cheaply query neighboring biome IDs without recursively running full column generation.
+- Added focused regression coverage for the new behavior:
+  - `tests/underground-discovery.test.ts` covers surface-vs-underground observation rules
+  - `tests/procedural-generator.test.ts` now covers subterranean void prevalence, overworld cave openings, and boundary suppression
+- Rejected two dead ends while getting cave entrances to work:
+  - only retuning the old shallow cave layer was not enough because the “opening” field was effectively placing the band too deep to create actual overworld entrances
+  - measuring neighboring surface heights directly did create openings, but it was too expensive and caused unrelated generator tests to time out
+- The kept version uses a dedicated entrance layer plus cheap nearby-biome suppression instead of expensive per-column terrain-neighbor surface sampling.
+
 ## 2026-03-10
 
 - Confirmed the workspace starts empty and is not an existing git repository.

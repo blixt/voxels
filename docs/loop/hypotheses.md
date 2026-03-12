@@ -1,5 +1,16 @@
 # Renderer Hypotheses
 
+## 2026-03-12 underground discovery and cave-opening search
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| Underground discovery should require actual underground play context instead of just sampling the column metadata under the player | Add a pure helper that checks eye depth below the local surface plus overhead collision cover, then unit-test surface and cave eye positions | Confirmed. Surface walking no longer unlocks underground families, while realistic cave eye positions still do | Confirmed |
+| Retuning the old shallow cave band is enough to create visible overworld entrances | Measure near-surface air and exposed opening counts after only shifting the upper cave band shallower | Rejected. The generator produced deep voids but still no real cave mouths | Rejected |
+| Sampling neighboring terrain surface heights per column is the cleanest way to align cave mouths with slopes | Add a temporary local-relief probe using neighboring surface-height evaluation and compare opening counts plus generator-heavy test runtime | Rejected. It produced openings, but the extra work was expensive enough to push unrelated generator tests into timeouts | Rejected |
+| A dedicated near-surface entrance band plus direct surface-breach support can create discoverable overworld cave openings without the expensive neighbor-surface path | Add an explicit entrance layer, count rugged-vs-flat cave-mouth ratios, and re-run the cave regression tests | Confirmed. The kept entrance layer produces real openings and passes the cave-mouth tests | Confirmed |
+| Weight-curve tuning alone is enough to keep biome-specific cave mouths away from direct biome boundaries | Compare interior-vs-boundary opening ratios while only tuning biome-weight curves | Rejected. The ratios stayed inverted or collapsed to zero depending on the curve, so the approach was too brittle | Rejected |
+| The generator needs an explicit nearby-biome suppression check for cave entrances, not just a generic biome-weight heuristic | Reuse biome classification in a cheap helper, query neighboring biome IDs, and damp entrance strength when direct neighbors disagree | Confirmed. Interior rugged-biome opening ratio now exceeds boundary ratio while keeping rugged caves much richer than flat-biome caves | Confirmed |
+
 ## 2026-03-10 visual error search
 
 | Hypothesis | Tiny verification case | Result | Status |

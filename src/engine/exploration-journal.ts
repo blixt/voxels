@@ -5,7 +5,7 @@ import {
 
 export interface ExplorationObservation {
   biomeId: string;
-  undergroundBiomeId: string;
+  undergroundBiomeId: string | null;
   regionalVariantId: string | null;
   landmarkIds: readonly string[];
   currentLandmarkId: string | null;
@@ -55,7 +55,9 @@ export class ExplorationJournal {
     this.currentLandmarkId = observation.currentLandmarkId;
 
     this.recordDiscovery("biome", observation.biomeId, this.discoveredBiomeIds);
-    this.recordDiscovery("underground", observation.undergroundBiomeId, this.discoveredUndergroundBiomeIds);
+    if (observation.undergroundBiomeId) {
+      this.recordDiscovery("underground", observation.undergroundBiomeId, this.discoveredUndergroundBiomeIds);
+    }
     if (observation.regionalVariantId) {
       this.recordDiscovery(
         "regional-variant",

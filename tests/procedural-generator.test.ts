@@ -94,6 +94,83 @@ function measureMaxCrossSection(
   return { maxCount, maxWidthX, maxWidthZ };
 }
 
+function hasSubsurfaceVoid(
+  generator: ProceduralWorldGenerator,
+  x: number,
+  z: number,
+  minDepth = 8,
+  maxDepth = 96,
+): boolean {
+  const column = generator.sampleColumn(x, z);
+  for (let depth = minDepth; depth <= maxDepth; depth += 2) {
+    const worldY = column.surfaceY - depth;
+    if (worldY <= 24) {
+      break;
+    }
+    if (generator.sampleMaterial(x, worldY, z) === 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasExposedCaveOpening(
+  generator: ProceduralWorldGenerator,
+  x: number,
+  z: number,
+  minDepth = 4,
+  maxDepth = 28,
+): boolean {
+  const column = generator.sampleColumn(x, z);
+  if (generator.sampleMaterial(x, column.surfaceY, z) === 0) {
+    return true;
+  }
+  const neighborOffsets = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+    [2, 0],
+    [-2, 0],
+    [0, 2],
+    [0, -2],
+  ] as const;
+
+  for (let depth = minDepth; depth <= maxDepth; depth += 2) {
+    const worldY = column.surfaceY - depth;
+    if (worldY <= 24 || generator.sampleMaterial(x, worldY, z) !== 0) {
+      continue;
+    }
+    for (const [offsetX, offsetZ] of neighborOffsets) {
+      const neighborSurfaceY = generator.sampleColumn(x + offsetX, z + offsetZ).surfaceY;
+      if (neighborSurfaceY <= worldY + 1) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isNearBiomeBoundary(
+  generator: ProceduralWorldGenerator,
+  x: number,
+  z: number,
+  step = 32,
+): boolean {
+  const centerBiome = generator.sampleBiomeProbe(x, z).biomeId;
+  for (const [offsetX, offsetZ] of [
+    [step, 0],
+    [-step, 0],
+    [0, step],
+    [0, -step],
+  ] as const) {
+    if (generator.sampleBiomeProbe(x + offsetX, z + offsetZ).biomeId !== centerBiome) {
+      return true;
+    }
+  }
+  return false;
+}
+
 test("hex color palette covers all #RGB materials", () => {
   const palette = buildHexColorPalette();
   const material = hexColorToMaterial("#ABC");
@@ -716,6 +793,92 @@ test("below-ground material identity varies across underground biome families", 
   }
 
   expect(deepMaterials.size).toBeGreaterThanOrEqual(4);
+});
+
+test("procedural generator now creates subterranean voids across the world", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  let voidColumns = 0;
+  let sampledColumns = 0;
+
+  for (let z = -4096; z <= 4096; z += 48) {
+    for (let x = -4096; x <= 4096; x += 48) {
+      sampledColumns += 1;
+      if (hasSubsurfaceVoid(generator, x, z)) {
+        voidColumns += 1;
+      }
+    }
+  }
+
+  expect(voidColumns).toBeGreaterThan(3000);
+  expect(voidColumns / sampledColumns).toBeGreaterThanOrEqual(0.08);
+});
+
+test("rugged and cave-prone biomes expose more natural cave mouths than flatter biomes", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const ruggedBiomes = new Set(["highland", "badlands", "fern", "ember", "shardlands"]);
+  const flatterBiomes = new Set(["savanna", "steppe", "marsh", "saltflat"]);
+  let ruggedSamples = 0;
+  let ruggedOpenings = 0;
+  let flatSamples = 0;
+  let flatOpenings = 0;
+
+  for (let z = -6144; z <= 6144; z += 32) {
+    for (let x = -6144; x <= 6144; x += 32) {
+      const probe = generator.sampleBiomeProbe(x, z);
+      if (ruggedBiomes.has(probe.biomeId)) {
+        ruggedSamples += 1;
+        if (hasExposedCaveOpening(generator, x, z)) {
+          ruggedOpenings += 1;
+        }
+      } else if (flatterBiomes.has(probe.biomeId)) {
+        flatSamples += 1;
+        if (hasExposedCaveOpening(generator, x, z)) {
+          flatOpenings += 1;
+        }
+      }
+    }
+  }
+
+  const ruggedRatio = ruggedOpenings / ruggedSamples;
+  const flatRatio = flatOpenings / flatSamples;
+
+  expect(ruggedSamples).toBeGreaterThan(2000);
+  expect(flatSamples).toBeGreaterThan(2000);
+  expect(ruggedRatio).toBeGreaterThanOrEqual(0.04);
+  expect(ruggedRatio).toBeGreaterThan(flatRatio * 1.6);
+});
+
+test("biome-specific cave mouths are suppressed near direct biome boundaries", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const caveBiomes = new Set(["highland", "badlands", "fern", "ember", "shardlands"]);
+  let interiorSamples = 0;
+  let interiorOpenings = 0;
+  let boundarySamples = 0;
+  let boundaryOpenings = 0;
+
+  for (let z = -4096; z <= 4096; z += 32) {
+    for (let x = -4096; x <= 4096; x += 32) {
+      const probe = generator.sampleBiomeProbe(x, z);
+      if (!caveBiomes.has(probe.biomeId)) {
+        continue;
+      }
+      if (isNearBiomeBoundary(generator, x, z, 32)) {
+        boundarySamples += 1;
+        if (hasExposedCaveOpening(generator, x, z)) {
+          boundaryOpenings += 1;
+        }
+      } else {
+        interiorSamples += 1;
+        if (hasExposedCaveOpening(generator, x, z)) {
+          interiorOpenings += 1;
+        }
+      }
+    }
+  }
+
+  expect(interiorSamples).toBeGreaterThan(1000);
+  expect(boundarySamples).toBeGreaterThan(200);
+  expect(interiorOpenings / interiorSamples).toBeGreaterThan(boundaryOpenings / boundarySamples);
 });
 
 test("procedural generator respects the configured Y range", () => {

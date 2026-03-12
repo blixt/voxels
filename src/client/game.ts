@@ -472,7 +472,7 @@ function buildTelemetryValues(snapshot: GameHudSnapshot): string[] {
     snapshot.streamEmptyChunksSkipped.toLocaleString(),
     snapshot.streamCachedEmptyChunkHits.toLocaleString(),
     formatDiscoveryInline("biome", snapshot.biomeId, "Unknown"),
-    formatDiscoveryInline("underground", snapshot.undergroundBiomeId, "Unknown"),
+    formatDiscoveryInline("underground", snapshot.undergroundBiomeId, "Surface"),
     formatDiscoveryInline("regional-variant", snapshot.regionalVariantId),
     formatDiscoveryInline("landmark", snapshot.landmarkId),
     `B ${snapshot.discoveredBiomeCount} / U ${snapshot.discoveredUndergroundBiomeCount} / V ${snapshot.discoveredRegionalVariantCount} / L ${snapshot.discoveredLandmarkCount}`,

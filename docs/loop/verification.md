@@ -1,5 +1,43 @@
 # Verification Log
 
+## 2026-03-12
+
+### Commands
+
+- `mise exec -- bun test tests/underground-discovery.test.ts tests/exploration-journal.test.ts tests/procedural-generator.test.ts`
+- `mise exec -- bun run typecheck`
+- `mise run build`
+- `mise exec -- bun - <<'BUN' ... BUN` cave-opening / boundary-ratio probe
+
+### Automated checks
+
+- Focused cave/discovery test suite: passing.
+- `tsc --noEmit`: passing.
+- Production build: passing.
+
+### Generator probes
+
+- Underground observation gate:
+  - surface-eye probe: no underground biome reported
+  - cave-eye probe with overhead cover: underground biome reported
+- Kept cave-opening probe on seed `1337`, sampled every `32` voxels across `[-4096, 4096]`:
+  - rugged cave-biome opening ratio: `0.3956`
+  - flatter-biome opening ratio: `0.0000`
+  - rugged-biome interior opening ratio: `0.4207`
+  - rugged-biome boundary opening ratio: `0.3140`
+- The cave-opening heuristic now counts both:
+  - direct surface breaches / sinkholes
+  - side-exposed openings below the local surface
+
+### Notes
+
+- An intermediate implementation that sampled neighboring surface heights directly did create openings, but it was rejected because it slowed generator-heavy tests enough to trigger timeouts.
+- The kept implementation uses:
+  - deep + upper + entrance cave layers
+  - explicit surface-breach support
+  - nearby-biome suppression based on quick neighboring biome classification
+  - no browser tab was opened for this slice
+
 ## 2026-03-10
 
 ### Commands

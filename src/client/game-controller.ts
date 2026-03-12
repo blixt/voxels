@@ -84,6 +84,7 @@ import {
   DEFAULT_RENDER_ENVIRONMENT,
   type RenderEnvironment,
 } from "../engine/water-visuals.ts";
+import { resolveObservedUndergroundBiomeId } from "../engine/underground-discovery.ts";
 import type { MeshBuildSummary } from "../engine/mesher.ts";
 
 const MAX_DELTA_SECONDS = 0.05;
@@ -2311,6 +2312,12 @@ export class GameController {
     const centerX = Math.floor(this.player.feetPosition[0]);
     const centerZ = Math.floor(this.player.feetPosition[2]);
     const centerProbe = this.generator.sampleBiomeProbe(centerX, centerZ);
+    const observedUndergroundBiomeId = resolveObservedUndergroundBiomeId(
+      this.world,
+      this.camera.position,
+      centerProbe.surfaceY,
+      centerProbe.undergroundBiomeId,
+    );
     const landmarkIds: string[] = [];
     let currentLandmarkId: string | null = centerProbe.landmarkId;
     if (centerProbe.landmarkId) {
@@ -2331,7 +2338,7 @@ export class GameController {
     }
     return {
       biomeId: centerProbe.biomeId,
-      undergroundBiomeId: centerProbe.undergroundBiomeId,
+      undergroundBiomeId: observedUndergroundBiomeId,
       regionalVariantId: centerProbe.regionalVariantId,
       landmarkIds,
       currentLandmarkId,
