@@ -3859,3 +3859,52 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping for gameplay-path performance, but not as a cold-start win.
 - The worker boundary is cleaner and the route trace improved, yet the startup benchmark is still slower than the old encoded-transfer baseline.
 - The current evidence points at cache encode/write work remaining too tightly coupled to chunk delivery, so the next clean target is deferring or separating persistence writes instead of increasing worker count again.
+
+## 2026-03-12 deferred chunk-cache persistence
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/generated-chunk-transfer.test.ts tests/procedural-resident-world.test.ts tests/browser-game-benchmark-harness.test.ts`
+- `mise run build`
+- `mise run bench-browser-game -- --label=deferred-persist --startup-warmup=0 --startup-iterations=1 --walk-warmup=0 --walk-iterations=1 --walk-duration=1 --walk-sample-hz=10`
+- `mise run trace-route -- --label=deferred-persist-current --duration=2 --settle=1 --sample-hz=20`
+
+#### Numeric probes
+
+- Startup/walk benchmark output:
+  - output dir: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-TN3eSP`
+- Compared against the previous committed worker slice (`p5o8CT`):
+  - startup visual ready `112325.6 ms -> 97175.1 ms`
+  - startup setup `358.966 ms -> 95.277 ms`
+  - startup total gameplay-frame CPU `111702.7 ms -> 96922.3 ms`
+  - startup total stream `349.4 ms -> 152.9 ms`
+  - startup total mesh `923.6 ms -> 560.3 ms`
+  - startup total far field `107.9 ms -> 44.0 ms`
+  - walk benchmark elapsed `10355.308 ms -> 9327.584 ms`
+  - walk setup `23609.569 ms -> 28719.375 ms`
+  - walk p95 gameplay frame `0.8 ms -> 1.6 ms`
+  - walk hole-signal frames stayed `0`
+- Current route trace:
+  - report: `artifacts/browser-route-trace/20260312T203147Z-deferred-persist-current/report.json`
+  - avg gameplay frame `4.53 ms`
+  - p95 gameplay frame `5.70 ms`
+  - max gameplay frame `18.5 ms`
+  - avg stream `3.49 ms`
+  - avg mesh `0.83 ms`
+  - hole-signal frames `0`
+- Compared against the previous committed route trace:
+  - previous report: `artifacts/browser-route-trace/20260312T201911Z-gen-worker-current/report.json`
+  - avg gameplay frame `4.67 ms`
+  - p95 gameplay frame `4.30 ms`
+  - max gameplay frame `39.1 ms`
+  - avg stream `3.68 ms`
+  - avg mesh `0.84 ms`
+  - hole-signal frames `0`
+
+#### Residual
+
+- This slice is worth keeping.
+- Startup improved materially and the route trace improved slightly with a much lower worst-case spike, which is enough to justify the deferred writer.
+- The tiny one-second walk microbenchmark is noisier and not uniformly better, so I did not treat it as the primary acceptance signal.
+- Startup is still slower than the old `1e8b74d` baseline, so the next likely chunk-generation target is reducing total persistence encode/write volume or batching records better rather than revisiting the delivery handoff again.

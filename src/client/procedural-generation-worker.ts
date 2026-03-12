@@ -6,7 +6,7 @@ import {
   type ProceduralGeneratedChunkCache,
 } from "./procedural-generated-chunk-cache.ts";
 import { decodeGeneratedChunk, decodeGeneratedChunkSummary, encodeGeneratedChunk } from "../engine/generated-chunk-codec.ts";
-import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
+import { ProceduralWorldGenerator, type GeneratedChunk } from "../engine/procedural-generator.ts";
 import {
   serializeGeneratedChunk,
   serializeGeneratedChunkRenderSummary,
@@ -67,6 +67,15 @@ type WorkerResponse =
 let generator: ProceduralWorldGenerator | null = null;
 let chunkCache: ProceduralGeneratedChunkCache | null = null;
 const reportedCacheFailures = new Set<string>();
+const DEFERRED_PERSISTENCE_FLUSH_DELAY_MS = 250;
+const MAX_PERSISTENCE_JOBS_PER_FLUSH = 2;
+type PendingPersistenceJob =
+  | { type: "chunk"; chunk: GeneratedChunk }
+  | { type: "summary"; coord: ChunkCoordinate; summary: TransferredGeneratedChunkRenderSummary };
+
+const pendingPersistenceJobs: PendingPersistenceJob[] = [];
+let persistenceFlushTimer = 0;
+let persistenceFlushInProgress = false;
 
 self.onmessage = (event: MessageEvent<WorkerRequest>) => {
   void handleMessage(event.data);
@@ -173,12 +182,13 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
       return;
     }
     const summary = serializeGeneratedChunkRenderSummary(decodeGeneratedChunkSummary(cachedChunk.buffer).renderSummary);
-    try {
-      await chunkCache?.putChunkSummary(message.coord, summary.summary);
-    } catch (error) {
-      reportCacheFailure("write", error);
-      chunkCache?.close();
-      chunkCache = null;
+    if (chunkCache) {
+      pendingPersistenceJobs.push({
+        type: "summary",
+        coord: { ...message.coord },
+        summary: cloneTransferredSummary(summary.summary),
+      });
+      scheduleDeferredPersistenceFlush();
     }
     const response: WorkerResponse = {
       type: "summarized",
@@ -190,17 +200,14 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
     return;
   }
   const generated = generator.generateChunk(message.coord.x, message.coord.y, message.coord.z);
-  const summary = serializeGeneratedChunkRenderSummary(generated.renderSummary);
-  if (chunkCache) {
-    try {
-      await chunkCache.putChunk(message.coord, encodeGeneratedChunk(generated), summary.summary);
-    } catch (error) {
-      reportCacheFailure("write", error);
-      chunkCache.close();
-      chunkCache = null;
-    }
-  }
   if (message.type === "generate") {
+    if (chunkCache) {
+      pendingPersistenceJobs.push({
+        type: "chunk",
+        chunk: cloneGeneratedChunkForDeferredPersistence(generated, true),
+      });
+      scheduleDeferredPersistenceFlush();
+    }
     const transferredChunk = serializeGeneratedChunk(generated);
     const response: WorkerResponse = {
       type: "generated",
@@ -210,6 +217,14 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
     };
     self.postMessage(response, { transfer: transferredChunk.transfer });
     return;
+  }
+  const summary = serializeGeneratedChunkRenderSummary(generated.renderSummary);
+  if (chunkCache) {
+    pendingPersistenceJobs.push({
+      type: "chunk",
+      chunk: cloneGeneratedChunkForDeferredPersistence(generated, false),
+    });
+    scheduleDeferredPersistenceFlush();
   }
   const response: WorkerResponse = {
     type: "summarized",
@@ -226,6 +241,94 @@ function reportCacheFailure(stage: "open" | "read" | "write", error: unknown): v
   }
   reportedCacheFailures.add(stage);
   console.warn(`[procedural-generation-worker] persistent chunk cache ${stage} failed; disabling cache`, error);
+}
+
+function scheduleDeferredPersistenceFlush(): void {
+  if (!chunkCache || persistenceFlushTimer !== 0 || persistenceFlushInProgress || pendingPersistenceJobs.length === 0) {
+    return;
+  }
+  persistenceFlushTimer = self.setTimeout(() => {
+    persistenceFlushTimer = 0;
+    void flushDeferredPersistenceJobs();
+  }, DEFERRED_PERSISTENCE_FLUSH_DELAY_MS);
+}
+
+async function flushDeferredPersistenceJobs(): Promise<void> {
+  if (!chunkCache || persistenceFlushInProgress || pendingPersistenceJobs.length === 0) {
+    return;
+  }
+  persistenceFlushInProgress = true;
+  try {
+    let processedJobs = 0;
+    while (chunkCache && pendingPersistenceJobs.length > 0 && processedJobs < MAX_PERSISTENCE_JOBS_PER_FLUSH) {
+      const job = pendingPersistenceJobs.shift()!;
+      if (job.type === "summary") {
+        await chunkCache.putChunkSummary(job.coord, job.summary);
+      } else {
+        const summary = cloneTransferredSummary(serializeGeneratedChunkRenderSummary(job.chunk.renderSummary).summary);
+        await chunkCache.putChunk(job.chunk.coord, encodeGeneratedChunk(job.chunk), summary);
+      }
+      processedJobs += 1;
+    }
+  } catch (error) {
+    reportCacheFailure("write", error);
+    chunkCache?.close();
+    chunkCache = null;
+    pendingPersistenceJobs.length = 0;
+  } finally {
+    persistenceFlushInProgress = false;
+    scheduleDeferredPersistenceFlush();
+  }
+}
+
+function cloneGeneratedChunkForDeferredPersistence(
+  chunk: GeneratedChunk,
+  copyData: boolean,
+): GeneratedChunk {
+  return {
+    coord: { ...chunk.coord },
+    data: copyData ? chunk.data.slice() : chunk.data,
+    solidCount: chunk.solidCount,
+    solidBounds: chunk.solidBounds
+      ? {
+          min: [...chunk.solidBounds.min],
+          max: [...chunk.solidBounds.max],
+        }
+      : null,
+    renderSummary: cloneGeneratedChunkRenderSummary(chunk.renderSummary),
+  };
+}
+
+function cloneGeneratedChunkRenderSummary(
+  summary: import("../engine/generated-chunk-render-summary.ts").GeneratedChunkRenderSummary,
+): import("../engine/generated-chunk-render-summary.ts").GeneratedChunkRenderSummary {
+  return {
+    coord: { ...summary.coord },
+    coveredColumnCount: summary.coveredColumnCount,
+    surfaceY: summary.surfaceY.slice(),
+    surfaceMaterial: summary.surfaceMaterial.slice(),
+    waterTopY: summary.waterTopY.slice(),
+    waterMaterial: summary.waterMaterial.slice(),
+    macroCellSize: summary.macroCellSize,
+    macroCellsPerAxis: summary.macroCellsPerAxis,
+    macroCellStates: summary.macroCellStates.slice(),
+    faceOpenMask: summary.faceOpenMask.slice(),
+  };
+}
+
+function cloneTransferredSummary(summary: TransferredGeneratedChunkRenderSummary): TransferredGeneratedChunkRenderSummary {
+  return {
+    coord: { ...summary.coord },
+    coveredColumnCount: summary.coveredColumnCount,
+    surfaceY: summary.surfaceY.slice(),
+    surfaceMaterial: summary.surfaceMaterial.slice(),
+    waterTopY: summary.waterTopY.slice(),
+    waterMaterial: summary.waterMaterial.slice(),
+    macroCellSize: summary.macroCellSize,
+    macroCellsPerAxis: summary.macroCellsPerAxis,
+    macroCellStates: summary.macroCellStates.slice(),
+    faceOpenMask: summary.faceOpenMask.slice(),
+  };
 }
 
 function serializeGeneratedRenderSummaryRegionTransfer(

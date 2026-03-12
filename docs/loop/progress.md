@@ -1901,3 +1901,30 @@
   - the route trace says the delivery/adoption path improved
   - the startup benchmark says worker-side CPU is still too tightly coupled to immediate cache persistence
   - the next clean target is to decouple persistence encode/write work from chunk delivery instead of letting cache writes sit on the gameplay-critical worker path
+
+## 2026-03-12 deferred chunk-cache persistence behind chunk delivery
+
+- I followed that last conclusion directly and moved fresh chunk persistence off the critical delivery path:
+  - generated chunks are now returned to the main thread immediately
+  - cache encode + IndexedDB writes now go through one small delayed background queue inside each procedural generation worker
+  - summary backfills from cached chunk payloads use the same queue, so there is only one persistence scheduling path
+- The important implementation detail is buffer ownership:
+  - a `generate` response transfers the original chunk payload to the main thread
+  - so if the worker still wants to persist that chunk later, it must keep its own copy first
+  - `generate` requests therefore clone the generated chunk for deferred persistence and transfer the original
+  - `summarize` requests only transfer the summary, so the dense voxel data can stay in the worker and only the summary needs cloning
+- I kept the flush bounded and delayed on purpose:
+  - only a small number of persistence jobs flush in one pass
+  - the queue waits briefly before flushing so bursty startup and movement periods prioritize chunk delivery over cache writes
+  - this is explicitly a gameplay-first tradeoff
+- The result is the first real cold-start improvement since the raw-transfer rewrite:
+  - the one-iteration browser startup benchmark improved from about `112325.6 ms` visual-ready to about `97175.1 ms`
+  - startup setup also dropped from about `359.0 ms` to about `95.3 ms`
+  - route tracing improved a bit further too, from about `4.67 ms` avg gameplay frame to about `4.53 ms`
+- I did not overclaim the slice:
+  - the tiny one-second forward-walk microbench got noisier and somewhat worse on p95 frame time
+  - I treated the route trace plus startup benchmark as the real acceptance oracles instead
+- The remaining startup gap is now narrower and better localized:
+  - deferred persistence helped enough to keep
+  - but startup is still slower than the old fully encoded-transfer baseline
+  - the next likely target is reducing total encode/write volume or batching persisted chunk records better, not changing the delivery seam again
