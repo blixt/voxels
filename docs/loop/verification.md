@@ -4306,3 +4306,77 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - It reduces worker-side persistence pressure for far summary requests and keeps live walk fully interactive.
 - The next dominant work is still generator/mesher compute, not persistence queue overhead.
+
+## 2026-03-12 split surface and cave field sampling
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-generator.test.ts`
+- `mise exec -- bun -e 'import { ProceduralWorldGenerator } from "./src/engine/procedural-generator.ts"; ...'`
+- `mise run bench-browser-game -- --label=surface-field-split --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=1 --walk-duration=10 --walk-settle=4 --walk-sample-hz=60`
+- `mise run trace-route -- --benchmark=live-forward --label=surface-field-split-trace --duration=10 --settle=4 --sample-hz=60`
+
+#### Numeric probes
+
+- Focused verification:
+  - `28` pass
+  - `0` fail
+- Generator microbench baseline before this slice:
+  - `generateBatchMs = 1119.860`
+  - `sampleColumnGridMs = 98.429`
+- After the cheap cave-boundary suppression change:
+  - `generateBatchMs = 813.663`
+  - `sampleColumnGridMs = 22.954`
+  - `checksum = 6202546`
+- After the full surface/cave field split:
+  - `generateBatchMs = 829.558`
+  - `sampleColumnGridMs = 21.827`
+  - `checksum = 6202546`
+- Walk benchmark output:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-NLE1p0/report.json`
+  - benchmark elapsed `14129.846 ms`
+  - avg gameplay frame `1.292 ms`
+  - p95 gameplay frame `3.5 ms`
+  - max gameplay frame `9.6 ms`
+  - hole-signal frames `0`
+  - peak JS heap used `14509468 bytes`
+  - `avg_deltaTaskDurationMs = 3422.525`
+- Previous comparable walk benchmark:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-EeyH06/report.json`
+  - benchmark elapsed `14200.853 ms`
+  - avg gameplay frame `1.314 ms`
+  - p95 gameplay frame `3.5 ms`
+  - max gameplay frame `10.3 ms`
+  - hole-signal frames `0`
+  - `avg_deltaTaskDurationMs = 3572.956`
+- Live-forward Chrome trace:
+  - report: `artifacts/browser-route-trace/20260312T224131Z-surface-field-split-trace/report.json`
+  - avg gameplay frame `1.4690476187283084 ms`
+  - p95 gameplay frame `3.800000011920929 ms`
+  - max gameplay frame `10.800000011920929 ms`
+  - hole-signal frames `0`
+- Previous comparable live-forward trace:
+  - report: `artifacts/browser-route-trace/20260312T223636Z-biome-boundary-cheap-trace/report.json`
+  - avg gameplay frame `1.4182629386347578 ms`
+  - p95 gameplay frame `3.600000023841858 ms`
+  - max gameplay frame `12.5 ms`
+  - hole-signal frames `0`
+- Trace hotspot comparison:
+  - previous reported top exclusive frames still included:
+    - `fillSurfaceColumnState @ assets/procedural-generation-worker.js:0`
+    - `configureCaveState @ assets/procedural-generation-worker.js:0`
+  - current report’s top exclusive frames no longer include either of those names
+
+#### Notes
+
+- I initially tried to run the browser benchmark and route trace in parallel and hit a real harness race:
+  - `scripts/build.ts` failed with `rm: dist: Directory not empty`
+  - I did not count those failed runs as evidence
+  - all accepted browser numbers above came from sequential reruns
+
+#### Residual
+
+- This slice is worth keeping.
+- It materially reduces surface-only generator work and keeps the live walk fully interactive.
+- The next generator hotspot to attack is the Y-range path, which still uses the full surface/material/landmark sampler when it only needs the column height envelope.

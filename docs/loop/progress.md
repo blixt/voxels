@@ -2164,3 +2164,33 @@
 - Residual:
   - worker-side generation math is still dominant
   - the next likely win is either lighter summary application on the main thread or direct generator hot-path work such as field sampling / column-state writes
+
+## 2026-03-12 split surface and cave field sampling
+
+- The next generator-side hypothesis came from two places that lined up:
+  - the live-forward traces still showed worker-side generator math as the dominant cluster
+  - code inspection showed that surface-only column reads were still doing cave-only work
+- I first removed the redundant cave-boundary reclassification path in `configureCaveState(...)`:
+  - the old path re-sampled nearby biome ids just to decide whether cave mouths should be softened near boundaries
+  - that meant extra `sampleFields -> selectBaseBiomes -> selectBiomeClassification` work inside cave setup
+  - the kept replacement derives boundary suppression directly from `biomePrimaryWeight`, which already encodes whether the column is interior or blended
+- I then took the larger structural step:
+  - `sampleColumn()` / `sampleSurfaceColumn()` / `sampleBiomeProbe()` only need surface-biome-terrain-landmark data
+  - but the old `sampleFields(...)` still computed `caveRibbon`, `cavePocket`, `caveDepth`, and `caveOpenings` for all of those paths
+  - I split that into `sampleSurfaceFields(...)` and `sampleCaveFields(...)`, so cave noise is now only paid on the full voxel-generation path
+  - while I was there, I also removed the double cave-field zeroing in `fillSurfaceColumnState(...)` and `fillColumnState(...)` because `configureCaveState(...)` already writes all cave outputs directly
+- The strongest acceptance signal is the fixed microbench against the same seed and coordinate set:
+  - before these changes, the chunk batch + column-sample probe was about `1119.860 ms / 98.429 ms`
+  - after the cheap boundary suppression change it moved to about `813.663 ms / 22.954 ms`
+  - after the full surface/cave split it landed around `829.558 ms / 21.827 ms` with the same checksum
+- The browser acceptance is less dramatic but still worth keeping:
+  - the 10-second forward-walk benchmark stayed fully interactive and hole-free
+  - `avg_deltaTaskDurationMs` improved from about `3572.956 ms` to `3422.525 ms`
+  - max gameplay frame stayed sub-`10 ms` at about `9.6 ms`
+  - the live-forward trace remained hole-free and dropped `fillSurfaceColumnState(...)` / `configureCaveState(...)` out of the reported top exclusive hotspot set
+- I also learned something about the harness itself:
+  - trying to run the build-based browser benchmark and the build-based trace harness in parallel caused a real `dist/` removal race
+  - I did not keep that hidden; I reran the acceptance sequentially and am treating that as a tooling limitation to fix separately
+- Residual:
+  - the trace hotspot now points more clearly at surface classification/material work and the Y-range path
+  - the next clean generator step is a true surface-envelope sampler for residency Y-range estimation, so we stop paying landmark/material resolution when only `surfaceY / topY / waterTopY` are needed

@@ -136,7 +136,7 @@ interface LandmarkProfile {
   variant: number;
 }
 
-interface ColumnFieldSample {
+interface SurfaceFieldSample {
   temperature: number;
   moisture: number;
   uplift: number;
@@ -163,6 +163,9 @@ interface ColumnFieldSample {
   surfaceGrain: number;
   scatter: number;
   peakness: number;
+}
+
+interface CaveFieldSample {
   caveRibbon: number;
   cavePocket: number;
   caveDepth: number;
@@ -1143,8 +1146,8 @@ export class ProceduralWorldGenerator {
     worldX: number,
     worldZ: number,
     out: MutableColumnState,
-  ): { fields: ColumnFieldSample; biomePrimaryWeight: number } {
-    const fields = this.sampleFields(worldX, worldZ);
+  ): { fields: SurfaceFieldSample; biomePrimaryWeight: number } {
+    const fields = this.sampleSurfaceFields(worldX, worldZ);
     const baseBlend = this.selectBaseBiomes(fields);
     const terrainProfile = blendTerrainProfile(baseBlend.primary, baseBlend.secondary, baseBlend.primaryWeight);
     const biomeSelection = this.selectBiomeClassification(fields, baseBlend);
@@ -1230,18 +1233,6 @@ export class ProceduralWorldGenerator {
     out.accentMaterial = underground.accent;
     out.transitionThreshold = surfaceMaterials.transitionThreshold;
     out.specialStrength = specialStrength;
-    out.caveMainField = 0;
-    out.caveMainStrength = 0;
-    out.caveMainCenterY = 0;
-    out.caveMainHalfHeight = 0;
-    out.caveUpperField = 0;
-    out.caveUpperStrength = 0;
-    out.caveUpperCenterY = 0;
-    out.caveUpperHalfHeight = 0;
-    out.caveEntranceField = 0;
-    out.caveEntranceStrength = 0;
-    out.caveEntranceCenterY = 0;
-    out.caveEntranceHalfHeight = 0;
     out.strataOffset = fields.strata * 5;
     out.worldXDiv3 = Math.floor(worldX * ONE_THIRD);
     out.worldZDiv3 = Math.floor(worldZ * ONE_THIRD);
@@ -1256,21 +1247,8 @@ export class ProceduralWorldGenerator {
     out: MutableColumnState,
   ): void {
     const surfaceContext = this.fillSurfaceColumnState(worldX, worldZ, out);
-    out.caveMainField = 0;
-    out.caveMainStrength = 0;
-    out.caveMainCenterY = 0;
-    out.caveMainHalfHeight = 0;
-    out.caveUpperField = 0;
-    out.caveUpperStrength = 0;
-    out.caveUpperCenterY = 0;
-    out.caveUpperHalfHeight = 0;
-    out.caveEntranceField = 0;
-    out.caveEntranceStrength = 0;
-    out.caveEntranceCenterY = 0;
-    out.caveEntranceHalfHeight = 0;
+    const caveFields = this.sampleCaveFields(worldX, worldZ);
     this.configureCaveState(
-      worldX,
-      worldZ,
       out.biomeId,
       out.hostBiomeId,
       out.undergroundBiomeId,
@@ -1278,12 +1256,13 @@ export class ProceduralWorldGenerator {
       out.surfaceY,
       out.waterTopY,
       surfaceContext.fields,
+      caveFields,
       surfaceContext.biomePrimaryWeight,
       out,
     );
   }
 
-  private sampleFields(worldX: number, worldZ: number): ColumnFieldSample {
+  private sampleSurfaceFields(worldX: number, worldZ: number): SurfaceFieldSample {
     const continentalness = fbm2D5(worldX * CONTINENT_SCALE, worldZ * CONTINENT_SCALE, this.continentSeed) - 0.5;
     const uplift = fbm2D4(worldX * UPLIFT_SCALE, worldZ * UPLIFT_SCALE, this.upliftSeed);
     const hills = fbm2D4(worldX * HILLS_SCALE, worldZ * HILLS_SCALE, this.hillsSeed) - 0.5;
@@ -1327,6 +1306,11 @@ export class ProceduralWorldGenerator {
       surfaceGrain: fbm2D2(worldX * SURFACE_GRAIN_SCALE, worldZ * SURFACE_GRAIN_SCALE, this.surfaceGrainSeed),
       scatter: fbm2D2(worldX * SURFACE_SCATTER_SCALE, worldZ * SURFACE_SCATTER_SCALE, this.surfaceScatterSeed),
       peakness,
+    };
+  }
+
+  private sampleCaveFields(worldX: number, worldZ: number): CaveFieldSample {
+    return {
       caveRibbon: 1 - Math.abs(fbm2D2(worldX * CAVE_RIBBON_SCALE, worldZ * CAVE_RIBBON_SCALE, this.caveRibbonSeed) * 2 - 1),
       cavePocket: fbm2D3(worldX * CAVE_POCKET_SCALE, worldZ * CAVE_POCKET_SCALE, this.cavePocketSeed),
       caveDepth: fbm2D3(worldX * CAVE_DEPTH_SCALE, worldZ * CAVE_DEPTH_SCALE, this.caveDepthSeed),
@@ -1334,7 +1318,7 @@ export class ProceduralWorldGenerator {
     };
   }
 
-  private selectBaseBiomes(fields: ColumnFieldSample): BaseBiomeBlendSelection {
+  private selectBaseBiomes(fields: SurfaceFieldSample): BaseBiomeBlendSelection {
     let primary = BASE_BIOMES[0]!;
     let secondary = BASE_BIOMES[1]!;
     let primaryScore = -1;
@@ -1360,7 +1344,7 @@ export class ProceduralWorldGenerator {
   }
 
   private selectBiomeClassification(
-    fields: ColumnFieldSample,
+    fields: SurfaceFieldSample,
     baseBlend: BaseBiomeBlendSelection,
   ): {
     biomeId: BiomeId;
@@ -1487,39 +1471,8 @@ export class ProceduralWorldGenerator {
     return { biomeId, specialStrength, biomeCore };
   }
 
-  private sampleBiomeIdQuick(worldX: number, worldZ: number): BiomeId {
-    const fields = this.sampleFields(worldX, worldZ);
-    const baseBlend = this.selectBaseBiomes(fields);
-    return this.selectBiomeClassification(fields, baseBlend).biomeId;
-  }
-
-  private measureBiomeBoundarySuppression(worldX: number, worldZ: number, biomeId: BiomeId): number {
-    const step = 32;
-    let mismatches = 0;
-    for (const [offsetX, offsetZ] of [
-      [step, 0],
-      [-step, 0],
-      [0, step],
-      [0, -step],
-    ] as const) {
-      if (this.sampleBiomeIdQuick(worldX + offsetX, worldZ + offsetZ) !== biomeId) {
-        mismatches += 1;
-      }
-    }
-    if (mismatches === 0) {
-      return 1;
-    }
-    if (mismatches === 1) {
-      return 0.45;
-    }
-    if (mismatches === 2) {
-      return 0.2;
-    }
-    return 0.08;
-  }
-
   private sampleSurfaceY(
-    fields: ColumnFieldSample,
+    fields: SurfaceFieldSample,
     terrainProfile: {
       heightBias: number;
       reliefScale: number;
@@ -1577,7 +1530,7 @@ export class ProceduralWorldGenerator {
     secondary: BaseBiomeProfile,
     primaryWeight: number,
     specialStrength: number,
-    fields: ColumnFieldSample,
+    fields: SurfaceFieldSample,
     biomeCore: number,
     surfaceY: number,
   ): {
@@ -1628,7 +1581,7 @@ export class ProceduralWorldGenerator {
   private resolveWaterTopY(
     biomeId: BiomeId,
     surfaceY: number,
-    fields: ColumnFieldSample,
+    fields: SurfaceFieldSample,
     specialStrength: number,
     regionalVariantId: RegionalVariantId | null,
     regionalVariantStrength: number,
@@ -1674,7 +1627,7 @@ export class ProceduralWorldGenerator {
   private selectUndergroundBiome(
     biomeId: BiomeId,
     hostBiomeId: BaseBiomeId,
-    fields: ColumnFieldSample,
+    fields: SurfaceFieldSample,
   ): UndergroundBiomeId {
     if (biomeId === "saltflat") {
       return "saline";
@@ -1719,7 +1672,7 @@ export class ProceduralWorldGenerator {
     regionalVariantId: RegionalVariantId | null,
     surfaceY: number,
     waterTopY: number,
-    fields: ColumnFieldSample,
+    fields: SurfaceFieldSample,
     out: MutableColumnState,
   ): LandmarkId | null {
     out.featureKind = FEATURE_NONE;
@@ -1770,15 +1723,14 @@ export class ProceduralWorldGenerator {
   }
 
   private configureCaveState(
-    worldX: number,
-    worldZ: number,
     biomeId: BiomeId,
     hostBiomeId: BaseBiomeId,
     undergroundBiomeId: UndergroundBiomeId,
     regionalVariantId: RegionalVariantId | null,
     surfaceY: number,
     waterTopY: number,
-    fields: ColumnFieldSample,
+    fields: SurfaceFieldSample,
+    caveFields: CaveFieldSample,
     biomePrimaryWeight: number,
     out: MutableColumnState,
   ): void {
@@ -1804,20 +1756,20 @@ export class ProceduralWorldGenerator {
     const deepAffinity = resolveDeepCaveAffinity(biomeId, hostBiomeId, undergroundBiomeId, regionalVariantId);
     const upperAffinity = resolveUpperCaveAffinity(biomeId, hostBiomeId, undergroundBiomeId, regionalVariantId);
     const mainField = averageSignal(
-      smoothstep(0.52, 0.82, fields.caveRibbon),
-      smoothstep(0.42, 0.78, fields.cavePocket),
-      smoothstep(0.34, 0.72, fields.caveDepth + fields.drainage * 0.18 + basinness * 0.20),
+      smoothstep(0.52, 0.82, caveFields.caveRibbon),
+      smoothstep(0.42, 0.78, caveFields.cavePocket),
+      smoothstep(0.34, 0.72, caveFields.caveDepth + fields.drainage * 0.18 + basinness * 0.20),
       smoothstep(0.24, 0.72, subterraneanDryness + ruggedness * 0.18),
     );
     const upperField = averageSignal(
-      smoothstep(0.56, 0.84, fields.caveOpenings),
+      smoothstep(0.56, 0.84, caveFields.caveOpenings),
       smoothstep(0.36, 0.76, ruggedness + basinness * 0.22 + fields.channel * 0.16),
-      smoothstep(0.36, 0.74, fields.caveRibbon + fields.cavePocket * 0.18),
+      smoothstep(0.36, 0.74, caveFields.caveRibbon + caveFields.cavePocket * 0.18),
     );
     const entranceField = averageSignal(
-      smoothstep(0.50, 0.82, fields.caveOpenings),
+      smoothstep(0.50, 0.82, caveFields.caveOpenings),
       smoothstep(0.42, 0.80, ruggedness + fields.channel * 0.22 + basinness * 0.12),
-      smoothstep(0.34, 0.72, fields.caveRibbon + fields.cavePocket * 0.24),
+      smoothstep(0.34, 0.72, caveFields.caveRibbon + caveFields.cavePocket * 0.24),
     );
     const mainStrength = saturate(mainField * (0.62 + deepAffinity * 0.58) * waterSuppression);
     const upperStrength = saturate(
@@ -1826,9 +1778,7 @@ export class ProceduralWorldGenerator {
         + ruggedness * 0.18 * caveInterior
       ) * waterSuppression,
     );
-    const boundaryFactor = biomePrimaryWeight > 0.72
-      ? this.measureBiomeBoundarySuppression(worldX, worldZ, biomeId)
-      : 0.25;
+    const boundaryFactor = resolveBiomeBoundarySuppression(biomePrimaryWeight);
     const entranceStrength = saturate(
       entranceField
       * caveEntranceCliff
@@ -1837,18 +1787,18 @@ export class ProceduralWorldGenerator {
       * waterSuppression,
     );
     const mainCenterY = clamp(
-      surfaceY - Math.round(lerp(20, 104, fields.caveDepth) + fields.globalHeight * 12 + deepAffinity * 14),
+      surfaceY - Math.round(lerp(20, 104, caveFields.caveDepth) + fields.globalHeight * 12 + deepAffinity * 14),
       36,
       surfaceY - 10,
     );
     const mainHalfHeight = clamp(
-      Math.round(lerp(4, 18, fields.cavePocket) + deepAffinity * 8 + fields.magic * 2),
+      Math.round(lerp(4, 18, caveFields.cavePocket) + deepAffinity * 8 + fields.magic * 2),
       0,
       30,
     );
     const upperDepth = clamp(
       Math.round(
-        lerp(12, 2, fields.caveOpenings)
+        lerp(12, 2, caveFields.caveOpenings)
         + (1 - ruggedness) * 4
         + (1 - upperAffinity) * 3
         - caveInterior * 2,
@@ -1858,14 +1808,14 @@ export class ProceduralWorldGenerator {
     );
     const upperCenterY = clamp(surfaceY - upperDepth, 20, surfaceY - 2);
     const upperHalfHeight = clamp(
-      Math.round(lerp(6, 14, fields.cavePocket) + upperAffinity * 6 + ruggedness * 4),
+      Math.round(lerp(6, 14, caveFields.cavePocket) + upperAffinity * 6 + ruggedness * 4),
       0,
       22,
     );
     const entranceDepth = clamp(
       Math.round(
         lerp(10, 3, caveEntranceCliff)
-        + (1 - fields.caveOpenings) * 2
+        + (1 - caveFields.caveOpenings) * 2
         + (1 - upperAffinity) * 2
         - caveInterior,
       ),
@@ -1874,7 +1824,7 @@ export class ProceduralWorldGenerator {
     );
     const entranceCenterY = clamp(surfaceY - entranceDepth, 20, surfaceY - 2);
     const entranceHalfHeight = clamp(
-      Math.round(lerp(5, 9, fields.cavePocket) + upperAffinity * 4 + ruggedness * 2 + caveEntranceCliff * 5),
+      Math.round(lerp(5, 9, caveFields.cavePocket) + upperAffinity * 4 + ruggedness * 2 + caveEntranceCliff * 5),
       0,
       16,
     );
@@ -2254,7 +2204,7 @@ function surfaceColumnSampleFromState(state: MutableColumnState): ProceduralSurf
   };
 }
 
-function scoreBaseBiome(fields: ColumnFieldSample, biome: BaseBiomeProfile): number {
+function scoreBaseBiome(fields: SurfaceFieldSample, biome: BaseBiomeProfile): number {
   let score = (
     scoreField(fields.temperature, biome.temperature, 0.28) * 0.20
     + scoreField(fields.moisture, biome.moisture, 0.30) * 0.20
@@ -2374,9 +2324,13 @@ function resolveHostBiomeId(
   return primary;
 }
 
+function resolveBiomeBoundarySuppression(biomePrimaryWeight: number): number {
+  return 0.25 + smoothstep(0.72, 0.92, biomePrimaryWeight) * 0.75;
+}
+
 function selectSurfaceMaterial(
   biome: BaseBiomeProfile,
-  fields: ColumnFieldSample,
+  fields: SurfaceFieldSample,
   biomeCore: number,
   surfaceY: number,
 ): number {
@@ -2395,7 +2349,7 @@ function selectSurfaceMaterial(
 
 function selectSubsurfaceMaterial(
   biome: BaseBiomeProfile,
-  fields: ColumnFieldSample,
+  fields: SurfaceFieldSample,
   biomeCore: number,
   surfaceY: number,
 ): number {
@@ -2413,7 +2367,7 @@ function selectSubsurfaceMaterial(
 function selectSpecialSurfaceMaterial(
   biome: SpecialBiomeProfile,
   biomeId: SpecialBiomeId,
-  fields: ColumnFieldSample,
+  fields: SurfaceFieldSample,
   biomeCore: number,
   specialStrength: number,
   surfaceY: number,
@@ -2439,7 +2393,7 @@ function selectSpecialSurfaceMaterial(
 function selectSpecialSubsurfaceMaterial(
   biome: SpecialBiomeProfile,
   biomeId: SpecialBiomeId,
-  fields: ColumnFieldSample,
+  fields: SurfaceFieldSample,
   biomeCore: number,
   specialStrength: number,
 ): number {
@@ -2465,7 +2419,7 @@ function pickSurfaceMaterial(
   surfaceVariant: number,
   surfaceAccent: number,
   surfaceRock: number,
-  fields: ColumnFieldSample,
+  fields: SurfaceFieldSample,
   biomeCore: number,
   surfaceY: number,
   extraBias: number,
@@ -2504,7 +2458,7 @@ function pickSubsurfaceMaterial(
   subsurface: number,
   subsurfaceVariant: number,
   surfaceRock: number,
-  fields: ColumnFieldSample,
+  fields: SurfaceFieldSample,
   biomeCore: number,
   surfaceY: number,
   extraBias: number,
@@ -2527,7 +2481,7 @@ function selectLandmarkRoster(
   biomeId: BiomeId,
   undergroundBiomeId: UndergroundBiomeId,
   regionalVariantId: RegionalVariantId | null,
-  fields: ColumnFieldSample,
+  fields: SurfaceFieldSample,
 ): readonly LandmarkProfile[] {
   switch (regionalVariantId) {
     case "verdant_karst":
@@ -2685,7 +2639,7 @@ function selectLandmarkRoster(
 function selectUndergroundSurfaceRoster(
   undergroundBiomeId: UndergroundBiomeId,
   biomeId: BiomeId,
-  fields: ColumnFieldSample,
+  fields: SurfaceFieldSample,
 ): readonly LandmarkProfile[] | null {
   switch (undergroundBiomeId) {
     case "rooted":
@@ -2911,7 +2865,7 @@ function resolveUpperCaveAffinity(
   return saturate(affinity);
 }
 
-function selectRegionalVariant(biomeId: BiomeId, fields: ColumnFieldSample): RegionalVariantSelection | null {
+function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): RegionalVariantSelection | null {
   let strength = 0;
   let id: RegionalVariantId | null = null;
   switch (biomeId) {
@@ -3049,7 +3003,7 @@ function adjustSpecialBiomeSurfaceY(
   seaLevel: number,
   biomeId: BiomeId,
   specialStrength: number,
-  fields: ColumnFieldSample,
+  fields: SurfaceFieldSample,
   biomeCore: number,
   surfaceY: number,
 ): number {
@@ -3080,7 +3034,7 @@ function adjustSpecialBiomeSurfaceY(
 function sampleRegionalVariantSurfaceDelta(
   regionalVariantId: RegionalVariantId,
   strength: number,
-  fields: ColumnFieldSample,
+  fields: SurfaceFieldSample,
   biomeCore: number,
 ): number {
   const weight = 0.28 + biomeCore * 0.72;
@@ -3240,7 +3194,7 @@ function configureLandmarkFeature(
   profile: LandmarkProfile,
   surfaceY: number,
   waterTopY: number,
-  fields: ColumnFieldSample,
+  fields: SurfaceFieldSample,
   out: MutableColumnState,
 ): boolean {
   const submergedSurface = hasStandingWater(surfaceY, waterTopY);
