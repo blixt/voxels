@@ -2359,6 +2359,7 @@ export class GameController {
           newMeshCount += 1;
           chunk.meshBuilt = true;
         }
+        this.world.noteResidentChunkRenderReadyState(chunk, chunk.meshBuilt && chunk.mesh !== null);
         triangleCount += chunk.mesh?.triangleCount ?? 0;
       }
 
@@ -2391,6 +2392,7 @@ export class GameController {
           newMeshCount += 1;
           chunk.meshBuilt = true;
         }
+        this.world.noteResidentChunkRenderReadyState(chunk, chunk.meshBuilt && chunk.mesh !== null);
         triangleCount += chunk.mesh?.triangleCount ?? 0;
       }
 

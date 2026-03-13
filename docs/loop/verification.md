@@ -4756,3 +4756,59 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping based on the non-profiled gameplay-path benchmark.
 - The profile traces were mixed rather than uniformly better, but they stayed hole-free and showed lower peak mesh backlog.
 - The next optimization pass should continue to treat the worker mesher as hot, while also considering generator-side costs like `sampleSurfaceY(...)` and per-column scratch writes.
+
+## 2026-03-13 incremental render-ready column tracking
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/mesher.test.ts`
+- `mise exec -- bun -e '... repeated getFarFieldExclusionMask(\"render-ready\") microprobe ...'`
+- `mise run build`
+- `mise run bench-browser-game -- --label=render-ready-incremental --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=1 --walk-duration=10 --walk-settle=4 --walk-sample-hz=120`
+- `mise run trace-route -- --benchmark=live-forward --label=render-ready-incremental-trace --duration=10 --settle=4 --sample-hz=120`
+
+#### Numeric probes
+
+- Focused verification:
+  - `34` pass
+  - `0` fail
+- Render-ready mask microprobe:
+  - `300` repeated mask queries before building meshes: `0.240 ms`
+  - `300` repeated mask queries after building meshes with incremental tracking: `0.097 ms`
+- Walk benchmark:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-OysY4V/report.json`
+  - benchmark elapsed `14100.731 ms`
+  - avg gameplay frame `1.190 ms`
+  - p95 gameplay frame `3.2 ms`
+  - max gameplay frame `11.1 ms`
+  - hole-signal frames `0`
+  - peak JS heap used `14757684 bytes`
+  - `avg_deltaTaskDurationMs = 2923.470`
+- Previous comparable walk benchmark:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-tDgBBD/report.json`
+  - avg gameplay frame `1.198 ms`
+  - p95 gameplay frame `3.2 ms`
+  - max gameplay frame `9.9 ms`
+  - hole-signal frames `0`
+  - `avg_deltaTaskDurationMs = 3173.050`
+- Clean live-forward trace:
+  - report: `artifacts/browser-route-trace/20260313T003915Z-render-ready-incremental-trace/report.json`
+  - avg gameplay frame `1.3017282479212877 ms`
+  - p95 gameplay frame `3.400000035762787 ms`
+  - avg mesh `0.3828367099290241 ms`
+  - `maxPendingMeshJobs = 10`
+  - hole-signal frames `0`
+- Previous comparable clean live-forward trace:
+  - report: `artifacts/browser-route-trace/20260313T003236Z-axis-mask-specialization-trace-rerun2/report.json`
+  - avg gameplay frame `1.3196545557084007 ms`
+  - p95 gameplay frame `3.400000035762787 ms`
+  - avg mesh `0.38266825523313985 ms`
+  - `maxPendingMeshJobs = 17`
+  - hole-signal frames `0`
+
+#### Residual
+
+- This slice is worth keeping.
+- Incremental render-ready bookkeeping removes a real main-thread scan and improves both the walk benchmark and the clean route trace.
+- The next high-signal target is back in the worker/generator hot paths rather than resident-column bookkeeping.

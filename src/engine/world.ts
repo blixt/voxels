@@ -14,6 +14,7 @@ export interface VoxelChunk {
   } | null;
   meshBuilt: boolean;
   meshDirty: boolean;
+  renderReady: boolean;
   meshRevision: number;
   pendingMeshRevision: number | null;
   gpuDirty: boolean;
@@ -33,6 +34,7 @@ export interface ResidentChunkWorld {
   iterateResidentChunks(): Iterable<VoxelChunk>;
   iterateDirtyResidentChunks?(): Iterable<VoxelChunk>;
   noteResidentChunkMeshDirtyState?(chunk: VoxelChunk, dirty: boolean): void;
+  noteResidentChunkRenderReadyState?(chunk: VoxelChunk, renderReady: boolean): void;
   getChunkSolidBounds(
     cx: number,
     cy: number,
@@ -414,6 +416,7 @@ export class VoxelWorld implements ResidentChunkWorld {
       solidBounds: null,
       meshBuilt: false,
       meshDirty: true,
+      renderReady: false,
       meshRevision: 1,
       pendingMeshRevision: null,
       gpuDirty: true,

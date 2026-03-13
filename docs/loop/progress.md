@@ -2333,3 +2333,24 @@
 - Residual:
   - chunk-meshing worker CPU is still a first-order hotspot
   - the next best target is likely either another structural worker-meshing reduction or a generator-side cut around `sampleSurfaceY(...)` / column-state handling
+
+## 2026-03-13 incremental render-ready column tracking
+
+- The next clean trace-driven target was on the main thread, not in workers:
+  - `buildRenderReadyColumnKeys()` was rebuilding the full render-ready column set by scanning all resident chunks
+  - that is unnecessary bookkeeping because render-ready status only changes at a small set of state transitions: chunk adoption, eviction, and first mesh completion
+- I replaced the full rebuild with incremental tracking in `procedural-resident-world.ts`:
+  - resident column counts and render-ready column counts now stay in sync incrementally
+  - `getFarFieldExclusionMask("render-ready")` now reads the maintained ready-column set directly
+  - I also wired render-ready state updates through both the generic `rebuildDirtyMeshes()` path and the game controller’s async/sync mesh-completion paths
+- The tiny direct probe moved exactly the way it should:
+  - `300` repeated `getFarFieldExclusionMask("render-ready")` calls on a built resident window dropped from about `0.240 ms` to `0.097 ms`
+- The browser gates also improved, so this slice is worth keeping:
+  - the 10-second walk benchmark moved from about `1.198 ms` to `1.190 ms` average gameplay frame
+  - `avg_deltaTaskDurationMs` improved from about `3173.050` to `2923.470`
+  - the clean live-forward trace moved from about `1.320 ms` to `1.302 ms` average gameplay frame
+  - `maxPendingMeshJobs` improved from `17` to `10`
+  - hole-signal frames stayed at `0`
+- Residual:
+  - worker meshing and generation are still the dominant cost centers
+  - but the render-ready mask path is no longer a good candidate for further work, so the next pass should go back to worker meshing or generator hot spots like `resolveSurfaceMaterials(...)`, `sampleSurfaceY(...)`, or chunk-cache persistence

@@ -86,6 +86,7 @@ export function rebuildDirtyMeshes(
       newMeshCount += 1;
       chunk.meshBuilt = true;
     }
+    world.noteResidentChunkRenderReadyState?.(chunk, chunk.meshBuilt && chunk.mesh !== null);
     triangleCount += chunk.mesh?.triangleCount ?? 0;
   }
   return {

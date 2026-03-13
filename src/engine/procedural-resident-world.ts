@@ -115,6 +115,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   private readonly editOverlays = new Map<string, Map<number, number>>();
   private readonly editLog: WorldEditRecord[] = [];
   private readonly residentColumnCounts = new Map<string, number>();
+  private readonly renderReadyColumnCounts = new Map<string, number>();
+  private readonly renderReadyColumnKeys = new Set<string>();
   private readonly generatedRenderSummaries = new Map<string, GeneratedChunkRenderSummary>();
   private readonly generatedRenderChunkKeysByColumn = new Map<string, Set<string>>();
   private readonly generatedRenderColumnSummaries = new Map<string, GeneratedRenderColumnSummary>();
@@ -224,16 +226,13 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     mode: "resident" | "render-ready" = "resident",
     revisionOverride?: number,
   ): FarFieldExclusionMask {
-    const renderReadyColumnKeys = mode === "render-ready"
-      ? this.buildRenderReadyColumnKeys()
-      : null;
     return {
       revision: revisionOverride ?? this.residentColumnRevision,
       maxAffectedRadiusWorldUnits: (this.horizontalRadiusChunks + 1) * this.chunkSize,
       excludesCell: (minX, maxXExclusive, minZ, maxZExclusive) => {
-        if (mode === "render-ready" && renderReadyColumnKeys) {
+        if (mode === "render-ready") {
           return intersectsColumnKeySet(
-            renderReadyColumnKeys,
+            this.renderReadyColumnKeys,
             minX,
             maxXExclusive,
             minZ,
@@ -1037,6 +1036,10 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     const columnKey = toColumnKey(chunk.coord.x, chunk.coord.z);
     const previous = this.residentColumnCounts.get(columnKey) ?? 0;
     this.residentColumnCounts.set(columnKey, previous + 1);
+    if (chunk.renderReady) {
+      this.renderReadyColumnCounts.set(columnKey, (this.renderReadyColumnCounts.get(columnKey) ?? 0) + 1);
+    }
+    this.syncRenderReadyColumnKey(columnKey);
     if (previous === 0) {
       this.residentColumnRevision += 1;
     }
@@ -1046,34 +1049,57 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     this.chunks.delete(key);
     this.dirtyChunkKeys.delete(key);
     const columnKey = toColumnKey(chunk.coord.x, chunk.coord.z);
+    if (chunk.renderReady) {
+      const previousRenderReady = this.renderReadyColumnCounts.get(columnKey) ?? 0;
+      if (previousRenderReady <= 1) {
+        this.renderReadyColumnCounts.delete(columnKey);
+      } else {
+        this.renderReadyColumnCounts.set(columnKey, previousRenderReady - 1);
+      }
+    }
     const previous = this.residentColumnCounts.get(columnKey) ?? 0;
     if (previous <= 1) {
       this.residentColumnCounts.delete(columnKey);
+      this.renderReadyColumnKeys.delete(columnKey);
       if (previous === 1) {
         this.residentColumnRevision += 1;
       }
       return;
     }
     this.residentColumnCounts.set(columnKey, previous - 1);
+    this.syncRenderReadyColumnKey(columnKey);
   }
 
-  private buildRenderReadyColumnKeys(): Set<string> {
-    const readyCounts = new Map<string, number>();
-    for (const chunk of this.chunks.values()) {
-      if (!chunk.meshBuilt || !chunk.mesh) {
-        continue;
-      }
-      const columnKey = toColumnKey(chunk.coord.x, chunk.coord.z);
-      readyCounts.set(columnKey, (readyCounts.get(columnKey) ?? 0) + 1);
+  noteResidentChunkRenderReadyState(chunk: VoxelChunk, renderReady: boolean): void {
+    if (chunk.renderReady === renderReady) {
+      return;
     }
+    chunk.renderReady = renderReady;
+    const columnKey = toColumnKey(chunk.coord.x, chunk.coord.z);
+    if (renderReady) {
+      this.renderReadyColumnCounts.set(columnKey, (this.renderReadyColumnCounts.get(columnKey) ?? 0) + 1);
+    } else {
+      const previous = this.renderReadyColumnCounts.get(columnKey) ?? 0;
+      if (previous <= 1) {
+        this.renderReadyColumnCounts.delete(columnKey);
+      } else {
+        this.renderReadyColumnCounts.set(columnKey, previous - 1);
+      }
+    }
+    this.syncRenderReadyColumnKey(columnKey);
+  }
 
-    const readyKeys = new Set<string>();
-    for (const [columnKey, residentCount] of this.residentColumnCounts) {
-      if ((readyCounts.get(columnKey) ?? 0) === residentCount) {
-        readyKeys.add(columnKey);
-      }
+  private syncRenderReadyColumnKey(columnKey: string): void {
+    const residentCount = this.residentColumnCounts.get(columnKey) ?? 0;
+    if (residentCount === 0) {
+      this.renderReadyColumnKeys.delete(columnKey);
+      return;
     }
-    return readyKeys;
+    if ((this.renderReadyColumnCounts.get(columnKey) ?? 0) === residentCount) {
+      this.renderReadyColumnKeys.add(columnKey);
+      return;
+    }
+    this.renderReadyColumnKeys.delete(columnKey);
   }
 
   private applyOverlayToGeneratedChunk(key: string, generated: GeneratedChunk): void {
@@ -1443,6 +1469,7 @@ function createResidentChunk(generated: GeneratedChunk, chunkSize: number): Voxe
       : null,
     meshBuilt: false,
     meshDirty: true,
+    renderReady: false,
     meshRevision: 1,
     pendingMeshRevision: null,
     gpuDirty: true,
