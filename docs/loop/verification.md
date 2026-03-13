@@ -5050,3 +5050,49 @@ This line of investigation was screened locally and not kept in the runtime yet.
   - inventory management now reads like a real player-facing system instead of a debug-derived hotbar
   - the slot-window logic is now explicit and unit tested
   - the short trace stayed healthy, so the extra clarity did not come with an obvious runtime regression
+
+## 2026-03-13 full inventory panel pass
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/hotbar-layout.test.ts tests/targeting-overlay.test.ts`
+- `mise run build`
+- ad hoc browser smoke via `scripts/lib/browser-game-benchmark-harness.ts` helpers against a fresh production server
+- `mise run trace-route -- --benchmark=live-forward --label=inventory-panel-smoke --duration=2 --settle=1 --sample-hz=20`
+
+#### Result
+
+- `typecheck`
+  - pass
+- focused tests
+  - `6` pass
+  - `0` fail
+- `build`
+  - pass
+- browser smoke
+  - pass
+- live-forward trace
+  - pass
+  - `avg gameplay frame = 3.09 ms`
+  - `p95 gameplay frame = 5.50 ms`
+  - `frames with hole signals = 0`
+
+#### Browser smoke findings
+
+- Before toggle:
+  - `getInventoryPanelOpen() = false`
+  - panel root had `hidden`
+- After one toggle:
+  - `getInventoryPanelOpen() = true`
+  - panel root no longer had `hidden`
+  - rendered `32` inventory slots
+  - exactly `1` slot had the selected state
+  - summary text was `Used 0 / 32 stacks • Selected slot 1 • Selected empty`
+
+#### Outcome
+
+- The slice is worth keeping:
+  - the player now has a real read-only management view over the full inventory instead of only a sliding hotbar
+  - the controller owns panel state, so automation and UI stay aligned
+  - the short trace stayed healthy, so the panel did not introduce an obvious gameplay-path regression

@@ -2447,3 +2447,22 @@
   - before breaking a voxel, the summary read `Slots 1-9 of 32 • Stacks 0 / 32 • Selected empty`
   - after breaking one voxel, it switched to `Slots 1-9 of 32 • Stacks 1 / 32 • Selected #7C8 1 / 1,024`
   - the selected slot fill bar changed from `scaleX(0)` to `scaleX(0.000976562)`
+
+## 2026-03-13 full inventory panel pass
+
+- After improving the hotbar, the remaining inventory-management gap was obvious:
+  - the player could read the selected stack better
+  - but still had no clean way to inspect the full `32`-slot inventory as a system
+- I kept this on the same non-destructive UI seam:
+  - added controller-owned inventory panel state with an `I` toggle
+  - exposed explicit automation hooks for inventory-panel open state
+  - rendered a read-only `32`-slot inventory sheet from the same authoritative inventory snapshot as the hotbar
+- The browser smoke verified the real management outcome:
+  - panel starts closed
+  - toggling it opens a `32`-slot grid
+  - exactly one slot is marked selected
+  - the summary line reads `Used 0 / 32 stacks • Selected slot 1 • Selected empty`
+- I deliberately kept this pass read-only:
+  - no second pointer/input mode
+  - no click interaction inside the panel
+  - no new inventory state model to keep in sync

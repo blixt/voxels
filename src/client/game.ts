@@ -78,6 +78,9 @@ declare global {
       getDiscoveryJournal(): ExplorationJournalSnapshot;
       resetDiscoveryJournal(): ExplorationJournalSnapshot;
       getInventory(): ReturnType<GameController["getInventorySnapshot"]>;
+      getInventoryPanelOpen(): ReturnType<GameController["getInventoryPanelOpen"]>;
+      setInventoryPanelOpen(open: boolean): ReturnType<GameController["setInventoryPanelOpen"]>;
+      toggleInventoryPanel(): ReturnType<GameController["toggleInventoryPanel"]>;
       getTargeting(): ReturnType<GameController["getTargetingSnapshot"]>;
       getTargetingOverlay(
         viewportWidth?: number,
@@ -103,6 +106,10 @@ interface AchievementPresenter {
 
 interface InteractionHudView {
   update(snapshot: GameHudSnapshot, inventory: ReturnType<GameController["getInventorySnapshot"]>, targeting: TargetingSnapshot): void;
+}
+
+interface InventoryPanelView {
+  update(snapshot: GameHudSnapshot, inventory: ReturnType<GameController["getInventorySnapshot"]>): void;
 }
 
 interface TargetingOverlayView {
@@ -232,6 +239,7 @@ function mountGame(): GameRuntime {
   const captureProgressBar = appRoot.querySelector<HTMLElement>("[data-role='capture-progress-bar']");
   const achievementElement = appRoot.querySelector<HTMLElement>("[data-role='discovery-achievements']");
   const interactionHudRoot = appRoot.querySelector<HTMLElement>("[data-role='interaction-hud']");
+  const inventoryPanelRoot = appRoot.querySelector<HTMLElement>("[data-role='inventory-panel']");
   const targetOverlayRoot = appRoot.querySelector<SVGSVGElement>("[data-role='target-overlay']");
 
   if (
@@ -252,6 +260,7 @@ function mountGame(): GameRuntime {
     || !captureProgressBar
     || !achievementElement
     || !interactionHudRoot
+    || !inventoryPanelRoot
     || !targetOverlayRoot
   ) {
     throw new Error("Game UI is incomplete");
@@ -268,6 +277,7 @@ function mountGame(): GameRuntime {
   const telemetrySummaryView = createTelemetrySummaryView(telemetrySummaryElement, telemetryChart);
   const achievementPresenter = createAchievementPresenter(achievementElement);
   const interactionHudView = createInteractionHudView(interactionHudRoot);
+  const inventoryPanelView = createInventoryPanelView(inventoryPanelRoot);
   const targetingOverlayView = createTargetingOverlayView(targetOverlayRoot);
   let telemetryCollapsed = loadTelemetryCollapsed();
   let targetingOverlayFrameId = 0;
@@ -297,7 +307,9 @@ function mountGame(): GameRuntime {
     }
     telemetrySummaryView.update(snapshot);
     achievementPresenter.observe(snapshot.recentDiscoveries);
-    interactionHudView.update(snapshot, controller.getInventorySnapshot(), controller.getTargetingSnapshot());
+    const inventorySnapshot = controller.getInventorySnapshot();
+    interactionHudView.update(snapshot, inventorySnapshot, controller.getTargetingSnapshot());
+    inventoryPanelView.update(snapshot, inventorySnapshot);
     const captureState = buildCaptureOverlayState(snapshot);
     captureStatus.textContent = captureState.status;
     captureTitle.textContent = captureState.title;
@@ -357,6 +369,9 @@ function mountGame(): GameRuntime {
     getDiscoveryJournal: () => controller.getDiscoveryJournalSnapshot(),
     resetDiscoveryJournal: () => controller.resetDiscoveryJournal(),
     getInventory: () => controller.getInventorySnapshot(),
+    getInventoryPanelOpen: () => controller.getInventoryPanelOpen(),
+    setInventoryPanelOpen: (open) => controller.setInventoryPanelOpen(open),
+    toggleInventoryPanel: () => controller.toggleInventoryPanel(),
     getTargeting: () => controller.getTargetingSnapshot(),
     getTargetingOverlay: (viewportWidth = canvas.clientWidth || canvas.width || 1, viewportHeight = canvas.clientHeight || canvas.height || 1) =>
       controller.getTargetingOverlaySnapshot(viewportWidth, viewportHeight),
@@ -535,6 +550,76 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
         slot.count.textContent = stack ? stack.count.toLocaleString() : "";
         slot.fill.style.transform = `scaleX(${stack ? stack.count / INVENTORY_STACK_SIZE : 0})`;
         slot.swatch.style.background = stack ? materialToCssColor(materialHex) : "rgba(255, 246, 214, 0.08)";
+      }
+    },
+  };
+}
+
+function createInventoryPanelView(root: HTMLElement): InventoryPanelView {
+  const title = document.createElement("h2");
+  title.className = "game-inventory-panel-title";
+  title.textContent = "Inventory";
+  const summary = document.createElement("p");
+  summary.className = "game-inventory-panel-summary";
+  const help = document.createElement("p");
+  help.className = "game-inventory-panel-help";
+  help.textContent = "Press I to toggle • Wheel or 1-9 still changes the selected slot";
+  const grid = document.createElement("div");
+  grid.className = "game-inventory-grid";
+
+  const slots: Array<{
+    root: HTMLElement;
+    index: HTMLElement;
+    swatch: HTMLElement;
+    material: HTMLElement;
+    count: HTMLElement;
+    fill: HTMLElement;
+  }> = [];
+
+  for (let slotIndex = 0; slotIndex < 32; slotIndex += 1) {
+    const index = document.createElement("span");
+    index.className = "game-inventory-slot-index";
+    const swatch = document.createElement("span");
+    swatch.className = "game-inventory-slot-swatch";
+    const material = document.createElement("strong");
+    material.className = "game-inventory-slot-material";
+    const count = document.createElement("span");
+    count.className = "game-inventory-slot-count";
+    const fill = document.createElement("span");
+    fill.className = "game-inventory-slot-fill";
+    const slot = document.createElement("div");
+    slot.className = "game-inventory-slot";
+    slot.append(index, swatch, material, count, fill);
+    grid.append(slot);
+    slots.push({ root: slot, index, swatch, material, count, fill });
+  }
+
+  root.replaceChildren(title, summary, help, grid);
+
+  return {
+    update(snapshot, inventory) {
+      root.toggleAttribute("hidden", !snapshot.inventoryPanelOpen);
+      if (!snapshot.inventoryPanelOpen) {
+        return;
+      }
+      summary.textContent = [
+        `Used ${inventory.usedStacks.toLocaleString()} / ${inventory.slots.length} stacks`,
+        `Selected slot ${inventory.selectedSlot + 1}`,
+        snapshot.selectedInventoryMaterial === "Empty"
+          ? "Selected empty"
+          : `${snapshot.selectedInventoryMaterial} ${snapshot.selectedInventoryCount.toLocaleString()} / ${INVENTORY_STACK_SIZE.toLocaleString()}`,
+      ].join(" • ");
+      for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
+        const slotView = slots[slotIndex]!;
+        const stack = inventory.slots[slotIndex];
+        const materialHex = stack ? materialToHexColor(stack.material) : "Empty";
+        slotView.root.classList.toggle("is-selected", slotIndex === inventory.selectedSlot);
+        slotView.root.classList.toggle("is-empty", stack === null);
+        slotView.index.textContent = String(slotIndex + 1);
+        slotView.material.textContent = materialHex;
+        slotView.count.textContent = stack ? stack.count.toLocaleString() : "";
+        slotView.fill.style.transform = `scaleX(${stack ? stack.count / INVENTORY_STACK_SIZE : 0})`;
+        slotView.swatch.style.background = stack ? materialToCssColor(materialHex) : "rgba(255, 246, 214, 0.08)";
       }
     },
   };

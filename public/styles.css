@@ -128,6 +128,106 @@ body::before {
   pointer-events: none;
 }
 
+.game-inventory-panel {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  width: min(520px, calc(100vw - 36px));
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  pointer-events: none;
+  border-radius: 16px;
+  border: 1px solid rgba(244, 239, 227, 0.12);
+  backdrop-filter: blur(18px);
+  background: rgba(13, 19, 22, 0.72);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.24);
+}
+
+.game-inventory-panel[hidden] {
+  display: none;
+}
+
+.game-inventory-panel-title,
+.game-inventory-panel-summary,
+.game-inventory-panel-help {
+  margin: 0;
+}
+
+.game-inventory-panel-title {
+  font-size: 1rem;
+}
+
+.game-inventory-panel-summary,
+.game-inventory-panel-help {
+  color: rgba(244, 239, 227, 0.72);
+  font-size: 0.74rem;
+}
+
+.game-inventory-grid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.game-inventory-slot {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 8px;
+  border-radius: 11px;
+  border: 1px solid rgba(244, 239, 227, 0.08);
+  background: rgba(7, 11, 14, 0.58);
+}
+
+.game-inventory-slot.is-selected {
+  border-color: rgba(255, 225, 144, 0.56);
+  background: rgba(58, 42, 19, 0.52);
+}
+
+.game-inventory-slot-index,
+.game-inventory-slot-count {
+  color: rgba(244, 239, 227, 0.62);
+  font-size: 0.62rem;
+  line-height: 1;
+}
+
+.game-inventory-slot-swatch {
+  display: block;
+  width: 100%;
+  height: 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.game-inventory-slot-material {
+  display: block;
+  min-width: 0;
+  font-size: 0.72rem;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.game-inventory-slot-count {
+  text-align: right;
+}
+
+.game-inventory-slot-fill {
+  display: block;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  transform-origin: left center;
+  background: linear-gradient(90deg, rgba(255, 227, 145, 0.92), rgba(109, 208, 244, 0.92));
+  box-shadow: 0 0 12px rgba(122, 189, 227, 0.16);
+}
+
+.game-inventory-slot.is-empty .game-inventory-slot-fill {
+  background: rgba(255, 246, 214, 0.08);
+}
+
 .target-overlay {
   position: absolute;
   inset: 0;

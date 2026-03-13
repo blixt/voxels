@@ -135,6 +135,7 @@ const DISCOVERY_LANDMARK_SAMPLE_OFFSETS: ReadonlyArray<readonly [number, number]
 export interface GameHudSnapshot {
   status: string;
   pointerLocked: boolean;
+  inventoryPanelOpen: boolean;
   position: Vec3;
   feetPosition: Vec3;
   playerChunk: [number, number, number];
@@ -714,6 +715,7 @@ export class GameController {
   avgFrameCpuMs = 0;
   status = "Booting";
   pointerLocked = false;
+  inventoryPanelOpen = false;
   onHudUpdate: ((snapshot: GameHudSnapshot) => void) | null = null;
   private lastMeshBuildSummary: MeshBuildSummary = {
     meshCount: 0,
@@ -820,6 +822,7 @@ export class GameController {
     return {
       status: this.status,
       pointerLocked: this.pointerLocked,
+      inventoryPanelOpen: this.inventoryPanelOpen,
       position: [...this.camera.position],
       feetPosition: [...this.player.feetPosition] as Vec3,
       playerChunk: [
@@ -929,6 +932,24 @@ export class GameController {
 
   getEditLogSnapshot(): WorldEditRecord[] {
     return this.world.getEditLogSnapshot();
+  }
+
+  getInventoryPanelOpen(): boolean {
+    return this.inventoryPanelOpen;
+  }
+
+  setInventoryPanelOpen(open: boolean): boolean {
+    const next = Boolean(open);
+    if (this.inventoryPanelOpen === next) {
+      return this.inventoryPanelOpen;
+    }
+    this.inventoryPanelOpen = next;
+    this.pushHud(true);
+    return this.inventoryPanelOpen;
+  }
+
+  toggleInventoryPanel(): boolean {
+    return this.setInventoryPanelOpen(!this.inventoryPanelOpen);
   }
 
   getTargetingSnapshot(): TargetingSnapshot {
@@ -2189,6 +2210,13 @@ export class GameController {
   private readonly handleKeyDown = (event: KeyboardEvent) => {
     if (this.pointerLocked && isMovementKey(event.code)) {
       event.preventDefault();
+    }
+    if (event.code === "KeyI") {
+      if (!event.repeat) {
+        event.preventDefault();
+        this.toggleInventoryPanel();
+      }
+      return;
     }
     if (event.code.startsWith("Digit")) {
       const digit = Number.parseInt(event.code.slice(5), 10);
