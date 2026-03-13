@@ -258,9 +258,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     return isProceduralWaterMaterial(materialIndex);
   }
 
-  private farFieldColumnCacheCx = NaN;
-  private farFieldColumnCacheCz = NaN;
-  private farFieldColumnCacheSummary: GeneratedRenderColumnSummary | null = null;
+  private static readonly FAR_FIELD_COLUMN_CACHE_SIZE = 4;
+  private readonly farFieldColumnCacheKeys = new Int32Array(ProceduralResidentWorld.FAR_FIELD_COLUMN_CACHE_SIZE * 2).fill(0x7fffffff);
+  private readonly farFieldColumnCacheSummaries: (GeneratedRenderColumnSummary | null)[] = new Array(ProceduralResidentWorld.FAR_FIELD_COLUMN_CACHE_SIZE).fill(null);
   private farFieldColumnCacheRevision = -1;
 
   sampleFarFieldColumn(worldX: number, worldZ: number): FarFieldColumnSample | null {
@@ -269,14 +269,19 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     const cx = Math.floor(voxelX / this.chunkSize);
     const cz = Math.floor(voxelZ / this.chunkSize);
     let columnSummary: GeneratedRenderColumnSummary | null | undefined;
-    if (cx === this.farFieldColumnCacheCx && cz === this.farFieldColumnCacheCz && this.farFieldColumnCacheRevision === this.farFieldDataRevision) {
-      columnSummary = this.farFieldColumnCacheSummary;
+    if (this.farFieldColumnCacheRevision !== this.farFieldDataRevision) {
+      this.farFieldColumnCacheKeys.fill(0x7fffffff);
+      this.farFieldColumnCacheRevision = this.farFieldDataRevision;
+    }
+    const cacheSlot = (((cx * 73856093) ^ (cz * 19349669)) & 0x7fffffff) % ProceduralResidentWorld.FAR_FIELD_COLUMN_CACHE_SIZE;
+    const cacheKeyOffset = cacheSlot * 2;
+    if (this.farFieldColumnCacheKeys[cacheKeyOffset] === cx && this.farFieldColumnCacheKeys[cacheKeyOffset + 1] === cz) {
+      columnSummary = this.farFieldColumnCacheSummaries[cacheSlot];
     } else {
       columnSummary = this.generatedRenderColumnSummaries.get(toColumnKey(cx, cz)) ?? null;
-      this.farFieldColumnCacheCx = cx;
-      this.farFieldColumnCacheCz = cz;
-      this.farFieldColumnCacheSummary = columnSummary;
-      this.farFieldColumnCacheRevision = this.farFieldDataRevision;
+      this.farFieldColumnCacheKeys[cacheKeyOffset] = cx;
+      this.farFieldColumnCacheKeys[cacheKeyOffset + 1] = cz;
+      this.farFieldColumnCacheSummaries[cacheSlot] = columnSummary;
     }
     if (!columnSummary) {
       return null;

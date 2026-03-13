@@ -1114,6 +1114,22 @@ export class ProceduralWorldGenerator {
       }
     }
 
+    // Compute per-column max Y to enable early exit in the voxel loop.
+    // For columns entirely below originY, or entirely above originY + chunkSize,
+    // we can skip Y iterations.
+    let columnMaxTopY = 0;
+    for (let i = 0; i < chunkArea; i += 1) {
+      const surfY = scratch.surfaceY[i]!;
+      const waterY = scratch.waterTopY[i]!;
+      const featureH = scratch.featureHeight[i]!;
+      let topY = surfY;
+      if (waterY !== NO_WATER && waterY > topY) topY = waterY;
+      if (featureH > 0) topY = surfY + featureH;
+      if (topY > columnMaxTopY) columnMaxTopY = topY;
+    }
+    // If the entire chunk is above the maximum column top, skip the voxel loop
+    const maxRelevantY = Math.min(originY + this.chunkSize - 1, columnMaxTopY);
+
     let solidCount = 0;
     let minX = this.chunkSize;
     let minY = this.chunkSize;
@@ -1125,6 +1141,7 @@ export class ProceduralWorldGenerator {
       const rowOffset = z * this.chunkSize;
       for (let y = 0; y < this.chunkSize; y += 1) {
         const worldY = originY + y;
+        if (worldY > maxRelevantY) break;
         const worldYDiv3 = Math.floor(worldY * ONE_THIRD);
         const worldYBandBase = worldY * STRATA_BAND_SCALE;
         const planeOffset = y * this.chunkSize + z * chunkArea;
@@ -1142,12 +1159,12 @@ export class ProceduralWorldGenerator {
           }
           data[x + planeOffset] = material;
           solidCount += 1;
-          minX = Math.min(minX, x);
-          minY = Math.min(minY, y);
-          minZ = Math.min(minZ, z);
-          maxX = Math.max(maxX, x + 1);
-          maxY = Math.max(maxY, y + 1);
-          maxZ = Math.max(maxZ, z + 1);
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (z < minZ) minZ = z;
+          if (x + 1 > maxX) maxX = x + 1;
+          if (y + 1 > maxY) maxY = y + 1;
+          if (z + 1 > maxZ) maxZ = z + 1;
         }
       }
     }
