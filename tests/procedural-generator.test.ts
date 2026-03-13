@@ -26,30 +26,137 @@ const UNDERWATER_ORGANIC_SURFACE_MATERIALS = new Set<number>([
   "#6A8",
 ].map((code) => hexColorToMaterial(code)));
 
-function findRepresentativeLandmarkRoot(
-  generator: ProceduralWorldGenerator,
-  landmarkId: string,
-): { x: number; z: number; probe: ReturnType<ProceduralWorldGenerator["sampleBiomeProbe"]> } | null {
-  for (let coarseZ = -8192; coarseZ <= 8192; coarseZ += 32) {
-    for (let coarseX = -8192; coarseX <= 8192; coarseX += 32) {
+const SURFACE_BIOME_IDS = [
+  "verdant",
+  "savanna",
+  "steppe",
+  "dunes",
+  "badlands",
+  "highland",
+  "moor",
+  "tundra",
+  "marsh",
+  "firefly",
+  "saltflat",
+  "fern",
+  "fungal",
+  "ember",
+  "bloom",
+  "shardlands",
+] as const;
+
+const AUDITED_SURFACE_LANDMARK_IDS = [
+  "oak",
+  "canopy_tree",
+  "birch",
+  "redleaf_tree",
+  "willow",
+  "blossom_tree",
+  "fruit_tree",
+  "giant_flower",
+  "redwood",
+  "dead_tree",
+  "thorn_tree",
+  "berry_bush",
+  "giant_fern",
+  "lantern_tree",
+  "salt_spire",
+  "boulder",
+  "standing_stone",
+  "shrub",
+  "flower_patch",
+  "palm",
+  "acacia",
+  "cactus",
+  "dead_snag",
+  "hoodoo",
+  "fir",
+  "tall_fir",
+  "ice_spire",
+  "frost_shrub",
+  "cypress",
+  "mangrove",
+  "reed_cluster",
+  "basalt_spire",
+  "crystal_cluster",
+  "glowcap",
+  "mega_glowcap",
+  "root_stump",
+  "stone_tor",
+] as const;
+
+const TRUNKED_LANDMARK_IDS = [
+  "oak",
+  "canopy_tree",
+  "birch",
+  "redleaf_tree",
+  "willow",
+  "blossom_tree",
+  "fruit_tree",
+  "redwood",
+  "dead_tree",
+  "thorn_tree",
+  "lantern_tree",
+  "palm",
+  "acacia",
+  "fir",
+  "tall_fir",
+  "cypress",
+  "mangrove",
+  "giant_fern",
+  "giant_flower",
+] as const;
+
+type LandmarkRoot = { x: number; z: number; probe: ReturnType<ProceduralWorldGenerator["sampleBiomeProbe"]> };
+
+let landmarkRootCache: Map<string, LandmarkRoot | null> | null = null;
+
+function ensureLandmarkRootCache(generator: ProceduralWorldGenerator): Map<string, LandmarkRoot | null> {
+  if (landmarkRootCache) {
+    return landmarkRootCache;
+  }
+  const cache = new Map<string, LandmarkRoot | null>();
+  const pending = new Set<string>(AUDITED_SURFACE_LANDMARK_IDS);
+
+  for (let coarseZ = -32768; coarseZ <= 32768 && pending.size > 0; coarseZ += 64) {
+    for (let coarseX = -32768; coarseX <= 32768 && pending.size > 0; coarseX += 64) {
       const coarseProbe = generator.sampleBiomeProbe(coarseX, coarseZ);
-      if (coarseProbe.landmarkId !== landmarkId) {
+      const landmarkId = coarseProbe.landmarkId;
+      if (!landmarkId || !pending.has(landmarkId)) {
         continue;
       }
-      for (let z = coarseZ - 24; z <= coarseZ + 24; z += 1) {
-        for (let x = coarseX - 24; x <= coarseX + 24; x += 1) {
+      for (let z = coarseZ - 48; z <= coarseZ + 48; z += 1) {
+        for (let x = coarseX - 48; x <= coarseX + 48; x += 1) {
           const probe = generator.sampleBiomeProbe(x, z);
           if (probe.landmarkId !== landmarkId) {
             continue;
           }
-          if (generator.sampleMaterial(x, probe.surfaceY + 1, z) !== 0) {
-            return { x, z, probe };
+          if (generator.sampleMaterial(x, probe.surfaceY + 1, z) === 0) {
+            continue;
           }
+          cache.set(landmarkId, { x, z, probe });
+          pending.delete(landmarkId);
+          z = coarseZ + 49;
+          break;
         }
       }
     }
   }
-  return null;
+
+  for (const landmarkId of AUDITED_SURFACE_LANDMARK_IDS) {
+    if (!cache.has(landmarkId)) {
+      cache.set(landmarkId, null);
+    }
+  }
+  landmarkRootCache = cache;
+  return cache;
+}
+
+function findRepresentativeLandmarkRoot(
+  generator: ProceduralWorldGenerator,
+  landmarkId: string,
+): LandmarkRoot | null {
+  return ensureLandmarkRootCache(generator).get(landmarkId) ?? null;
 }
 
 function measureMaxCrossSection(
@@ -92,6 +199,206 @@ function measureMaxCrossSection(
     }
   }
   return { maxCount, maxWidthX, maxWidthZ };
+}
+
+function measureCrossSection(
+  generator: ProceduralWorldGenerator,
+  x: number,
+  z: number,
+  y: number,
+  radius: number,
+): {
+  count: number;
+  widthX: number;
+  widthZ: number;
+} {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+  let count = 0;
+  for (let dz = -radius; dz <= radius; dz += 1) {
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      if (generator.sampleMaterial(x + dx, y, z + dz) === 0) {
+        continue;
+      }
+      count += 1;
+      minX = Math.min(minX, dx);
+      maxX = Math.max(maxX, dx);
+      minZ = Math.min(minZ, dz);
+      maxZ = Math.max(maxZ, dz);
+    }
+  }
+  return {
+    count,
+    widthX: count === 0 ? 0 : maxX - minX + 1,
+    widthZ: count === 0 ? 0 : maxZ - minZ + 1,
+  };
+}
+
+function measureContiguousVerticalSupport(
+  generator: ProceduralWorldGenerator,
+  x: number,
+  z: number,
+  startY: number,
+  endY: number,
+): number {
+  let support = 0;
+  for (let y = startY; y <= endY; y += 1) {
+    if (generator.sampleMaterial(x, y, z) === 0) {
+      break;
+    }
+    support += 1;
+  }
+  return support;
+}
+
+function findBestVerticalSupportAnchor(
+  generator: ProceduralWorldGenerator,
+  root: LandmarkRoot,
+  radius = 6,
+): {
+  x: number;
+  z: number;
+  supportHeight: number;
+  baseWidthX: number;
+  baseWidthZ: number;
+} {
+  let best = {
+    x: root.x,
+    z: root.z,
+    supportHeight: 0,
+    baseWidthX: 0,
+    baseWidthZ: 0,
+  };
+
+  for (let z = root.z - radius; z <= root.z + radius; z += 1) {
+    for (let x = root.x - radius; x <= root.x + radius; x += 1) {
+      const supportHeight = measureContiguousVerticalSupport(
+        generator,
+        x,
+        z,
+        root.probe.surfaceY + 1,
+        root.probe.topY,
+      );
+      if (supportHeight === 0) {
+        continue;
+      }
+      const base = measureCrossSection(generator, x, z, root.probe.surfaceY + 1, 6);
+      if (
+        supportHeight > best.supportHeight
+        || (supportHeight === best.supportHeight && base.count > best.baseWidthX * best.baseWidthZ)
+      ) {
+        best = {
+          x,
+          z,
+          supportHeight,
+          baseWidthX: base.widthX,
+          baseWidthZ: base.widthZ,
+        };
+      }
+    }
+  }
+
+  return best;
+}
+
+function collectBiomePatchStats(
+  generator: ProceduralWorldGenerator,
+  minCoord: number,
+  maxCoord: number,
+  step: number,
+): Map<string, {
+  cells: number;
+  decentCells: number;
+  maxWidthM: number;
+  maxHeightM: number;
+  componentCount: number;
+}> {
+  const width = Math.floor((maxCoord - minCoord) / step) + 1;
+  const biomes = Array.from({ length: width * width }, () => "");
+  for (let gz = 0; gz < width; gz += 1) {
+    const z = minCoord + gz * step;
+    for (let gx = 0; gx < width; gx += 1) {
+      const x = minCoord + gx * step;
+      biomes[gx + gz * width] = generator.sampleBiomeProbe(x, z).biomeId;
+    }
+  }
+
+  const visited = new Uint8Array(width * width);
+  const stats = new Map<string, {
+    cells: number;
+    decentCells: number;
+    maxWidthM: number;
+    maxHeightM: number;
+    componentCount: number;
+  }>();
+
+  for (let gz = 0; gz < width; gz += 1) {
+    for (let gx = 0; gx < width; gx += 1) {
+      const index = gx + gz * width;
+      if (visited[index]) {
+        continue;
+      }
+      visited[index] = 1;
+      const biomeId = biomes[index]!;
+      const queue = [index];
+      let queueIndex = 0;
+      let count = 0;
+      let minGX = gx;
+      let maxGX = gx;
+      let minGZ = gz;
+      let maxGZ = gz;
+
+      while (queueIndex < queue.length) {
+        const current = queue[queueIndex++]!;
+        const cx = current % width;
+        const cz = (current / width) | 0;
+        count += 1;
+        minGX = Math.min(minGX, cx);
+        maxGX = Math.max(maxGX, cx);
+        minGZ = Math.min(minGZ, cz);
+        maxGZ = Math.max(maxGZ, cz);
+
+        for (const [nx, nz] of [
+          [cx - 1, cz],
+          [cx + 1, cz],
+          [cx, cz - 1],
+          [cx, cz + 1],
+        ] as const) {
+          if (nx < 0 || nz < 0 || nx >= width || nz >= width) {
+            continue;
+          }
+          const neighborIndex = nx + nz * width;
+          if (visited[neighborIndex] || biomes[neighborIndex] !== biomeId) {
+            continue;
+          }
+          visited[neighborIndex] = 1;
+          queue.push(neighborIndex);
+        }
+      }
+
+      const widthM = (maxGX - minGX + 1) * step * 0.1;
+      const heightM = (maxGZ - minGZ + 1) * step * 0.1;
+      const entry = stats.get(biomeId) ?? {
+        cells: 0,
+        decentCells: 0,
+        maxWidthM: 0,
+        maxHeightM: 0,
+        componentCount: 0,
+      };
+      entry.cells += count;
+      entry.componentCount += 1;
+      entry.maxWidthM = Math.max(entry.maxWidthM, widthM);
+      entry.maxHeightM = Math.max(entry.maxHeightM, heightM);
+      if (widthM >= 10 && heightM >= 10) {
+        entry.decentCells += count;
+      }
+      stats.set(biomeId, entry);
+    }
+  }
+
+  return stats;
 }
 
 function hasSubsurfaceVoid(
@@ -327,6 +634,19 @@ test("special biomes obey their host-biome rules", () => {
   expect(shardlandsCount).toBeGreaterThan(0);
 });
 
+test("surface biomes mostly occupy patches at least 10m by 10m", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const stats = collectBiomePatchStats(generator, -16384, 16384, 64);
+
+  for (const biomeId of SURFACE_BIOME_IDS) {
+    const entry = stats.get(biomeId);
+    expect(entry).toBeDefined();
+    expect(entry!.maxWidthM).toBeGreaterThanOrEqual(10);
+    expect(entry!.maxHeightM).toBeGreaterThanOrEqual(10);
+    expect(entry!.decentCells / entry!.cells).toBeGreaterThanOrEqual(0.8);
+  }
+});
+
 test("procedural generator avoids forbidden direct biome adjacencies", () => {
   const generator = new ProceduralWorldGenerator(1337);
   const forbiddenPairs = new Set([
@@ -536,6 +856,14 @@ test("landmarks appear across the world with multiple distinct families", () => 
     || landmarkIds.has("basalt_spire")
     || landmarkIds.has("mega_glowcap"),
   ).toBe(true);
+});
+
+test("audited surface landmarks all appear in the generated world", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+
+  for (const landmarkId of AUDITED_SURFACE_LANDMARK_IDS) {
+    expect(findRepresentativeLandmarkRoot(generator, landmarkId)).not.toBeNull();
+  }
 });
 
 test("landmark scale now regularly exceeds player height", () => {
@@ -782,6 +1110,20 @@ test("representative trees keep broad crowns instead of collapsing into poles", 
     const crown = measureMaxCrossSection(generator, root!.x, root!.z, crownStart, root!.probe.topY, 12);
     expect(Math.max(crown.maxWidthX, crown.maxWidthZ)).toBeGreaterThanOrEqual(expectation.minWidth);
     expect(crown.maxCount).toBeGreaterThanOrEqual(expectation.minCount);
+  }
+});
+
+test("tree-like landmarks keep a continuous trunk or stem from the ground", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+
+  for (const landmarkId of TRUNKED_LANDMARK_IDS) {
+    const root = findRepresentativeLandmarkRoot(generator, landmarkId);
+    expect(root).not.toBeNull();
+    const anchor = findBestVerticalSupportAnchor(generator, root!);
+    const minSupportHeight = Math.max(6, Math.min(24, Math.floor((root!.probe.topY - root!.probe.surfaceY) * 0.18)));
+
+    expect(anchor.supportHeight).toBeGreaterThanOrEqual(minSupportHeight);
+    expect(Math.max(anchor.baseWidthX, anchor.baseWidthZ)).toBeGreaterThanOrEqual(1);
   }
 });
 

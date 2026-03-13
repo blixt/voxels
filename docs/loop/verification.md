@@ -4812,3 +4812,52 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - Incremental render-ready bookkeeping removes a real main-thread scan and improves both the walk benchmark and the clean route trace.
 - The next high-signal target is back in the worker/generator hot paths rather than resident-column bookkeeping.
+
+## 2026-03-13 biome and landmark audit hardening
+
+#### Commands
+
+- `mise exec -- bun test tests/procedural-generator.test.ts`
+- `mise exec -- bun run typecheck`
+- `mise run build`
+
+#### Result
+
+- `tests/procedural-generator.test.ts`
+  - `31` pass
+  - `0` fail
+- `typecheck`
+  - pass
+- `build`
+  - pass
+
+#### Key audit measurements
+
+- Coarse contiguous biome patch audit over `[-16384, 16384]` at `6.4 m` sampling:
+  - `marsh` decent-patch ratio improved from about `0.5882` to about `0.9793`
+  - all audited surface biomes now stay above the `0.8` decent-patch ratio floor
+  - representative post-fix ratios:
+    - `badlands 0.9523`
+    - `bloom 0.9964`
+    - `dunes 0.9414`
+    - `ember 1.0000`
+    - `fern 0.9871`
+    - `firefly 0.9778`
+    - `fungal 0.9900`
+    - `highland 0.9839`
+    - `marsh 0.9793`
+    - `moor 0.9955`
+    - `saltflat 0.8764`
+    - `savanna 0.9979`
+    - `shardlands 0.9094`
+    - `steppe 0.9928`
+    - `tundra 0.9491`
+    - `verdant 0.9967`
+- Audited landmark reachability:
+  - all surface landmark families in the audit set now resolve to a real representative root
+  - the previously missing `cypress` and `mangrove` families now appear
+- Structural landmark audit:
+  - all audited tree-like landmark families now satisfy the continuous support-column test from ground to trunk/stem height
+- Regression checks revalidated after the marsh changes:
+  - forbidden direct biome adjacency scan passed, including no `marsh|shardlands`
+  - rare regional variant scan passed, including `verdant_karst` and `tundra_blue_ice`

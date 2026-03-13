@@ -2354,3 +2354,29 @@
 - Residual:
   - worker meshing and generation are still the dominant cost centers
   - but the render-ready mask path is no longer a good candidate for further work, so the next pass should go back to worker meshing or generator hot spots like `resolveSurfaceMaterials(...)`, `sampleSurfaceY(...)`, or chunk-cache persistence
+
+## 2026-03-13 biome and landmark audit hardening
+
+- I turned the biome/landmark audit into real generator guardrails instead of relying on visual spot-checks:
+  - surface biomes are now measured for contiguous patch size, with a floor of roughly `10 m x 10 m`
+  - audited surface landmark families must all actually appear somewhere in the generated world
+  - tree-like landmarks now need a continuous vertical support column from the ground instead of just “looking tree-shaped” in a screenshot
+- The audit immediately found two real issues:
+  - `marsh` patches were too fragmented, with only about `58.8%` of sampled marsh cells belonging to components at least `10 m x 10 m`
+  - `cypress` and `mangrove` were effectively unreachable because marsh water logic submerged every marsh surface cell, leaving no dry footing for those landmarks
+- I fixed this by changing the marsh system in `procedural-generator.ts`, not by weakening the tests:
+  - marsh biome selection now depends more on broad wet lowland conditions and less on the faster `channel` field
+  - tundra was removed from the marsh host set so marsh does not steal cold-region identity
+  - marsh strength now suppresses high magic/volcanism edges, which also prevents the forbidden `marsh|shardlands` adjacency that showed up during the first fix attempt
+  - marsh water is now pocketed rather than universal, so marsh terrain keeps wet basins but also leaves dry hummocks for cypress and mangrove placement
+- The kept verification numbers moved the right way:
+  - marsh patch ratio improved from about `0.5882` to about `0.9793`
+  - all audited surface landmark families, including `cypress` and `mangrove`, are now reachable again
+  - the rare regional variants that briefly disappeared during the first marsh pass, notably `verdant_karst` and `tundra_blue_ice`, are present again after tightening marsh host/suppression logic
+- I also kept the audit clean by fixing the tests themselves where needed:
+  - there is now a dedicated cross-section helper for single-slice trunk/base measurements
+  - landmark root lookup is cached across the audit so the test suite stays practical even with broader world scans
+- Net result:
+  - biome continuity and landmark implementation are now being enforced programmatically
+  - the marsh biome is more coherent and more believable
+  - tree-like landmark families are covered by a structural invariant instead of only crown-width heuristics

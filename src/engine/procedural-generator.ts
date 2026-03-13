@@ -1388,7 +1388,6 @@ export class ProceduralWorldGenerator {
       "verdant",
       "savanna",
       "steppe",
-      "tundra",
     ]);
     const warmLushHost = hostSetStrength(baseBlend.primary.id, baseBlend.secondary.id, baseBlend.primaryWeight, [
       "verdant",
@@ -1415,13 +1414,13 @@ export class ProceduralWorldGenerator {
       "highland",
       "tundra",
     ]);
-    const marshStrength = saturate(
-      wetLowlandHost
-      * smoothstep(0.50, 0.74, fields.moisture)
-      * smoothstep(0.44, 0.68, fields.drainage)
-      * smoothstep(0.32, 0.72, fields.channel)
-      * smoothstep(0.18, 0.82, flatness),
-    );
+    const marshStrength = averageSignal(
+      wetLowlandHost,
+      smoothstep(0.56, 0.82, fields.moisture),
+      smoothstep(0.48, 0.80, fields.drainage + Math.max(0, -fields.basin) * 0.38),
+      smoothstep(0.36, 0.76, fields.oceanness + Math.max(0, -fields.basin) * 0.42 + fields.channel * 0.12),
+      smoothstep(0.22, 0.82, flatness),
+    ) * smoothstep(0.34, 0.78, 1 - (fields.magic * 0.58 + fields.volcanism * 0.36));
     const fireflyStrength = averageSignal(
       wetLowlandHost,
       smoothstep(0.56, 0.80, fields.moisture),
@@ -1471,7 +1470,7 @@ export class ProceduralWorldGenerator {
 
     let biomeId: BiomeId = baseBlend.primary.id;
     let specialStrength = 0;
-    if (marshStrength > 0.30) {
+    if (marshStrength > 0.56) {
       biomeId = "marsh";
       specialStrength = marshStrength;
     }
@@ -1620,8 +1619,17 @@ export class ProceduralWorldGenerator {
   ): number {
     let waterTopY = surfaceY < this.seaLevel ? this.seaLevel : NO_WATER;
     if (biomeId === "marsh") {
-      const extraWaterDepth = Math.round(lerp(1, 3, specialStrength));
-      waterTopY = Math.max(waterTopY, surfaceY + extraWaterDepth);
+      const marshWetPocket = averageSignal(
+        smoothstep(0.58, 0.84, fields.moisture),
+        smoothstep(0.50, 0.82, fields.channel),
+        smoothstep(0.38, 0.76, Math.max(0, -fields.basin) + fields.oceanness * 0.28),
+      );
+      if (marshWetPocket > 0.58) {
+        const extraWaterDepth = 1 + Math.round(
+          lerp(0, 2, clamp((marshWetPocket - 0.58) / 0.42, 0, 1) * (0.42 + specialStrength * 0.58)),
+        );
+        waterTopY = Math.max(waterTopY, surfaceY + extraWaterDepth);
+      }
     } else if (biomeId === "firefly") {
       if (fields.channel > 0.68 || fields.basin < -0.14) {
         const extraWaterDepth = Math.round(lerp(1, 2, specialStrength));
