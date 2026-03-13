@@ -8,10 +8,10 @@ bun run typecheck 2>&1 >/dev/null
 bun test 2>&1 | tail -5
 
 # Run the game-stream profile benchmark (crossing-d2 scenario)
-# Uses 3 iterations after 1 warmup for stable numbers
+# Uses 5 iterations after 2 warmup for stable numbers
 OUTPUT=$(bun run scripts/profile-game-stream.ts \
-  --iterations=3 \
-  --warmup=1 \
+  --iterations=5 \
+  --warmup=2 \
   --seed=1337 \
   --radius=5 \
   --generate-budget=6 \

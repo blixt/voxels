@@ -1063,6 +1063,23 @@ function packFarFieldNormal(normalX: number, normalY: number, normalZ: number): 
   return (packedX | (packedY << 8) | (packedZ << 16) | (NORMAL_SCALE << 24)) >>> 0;
 }
 
+// Precomputed packed normals for the 6 axis-aligned directions
+const PACKED_NORMAL_POS_X = packFarFieldNormal(1, 0, 0);
+const PACKED_NORMAL_NEG_X = packFarFieldNormal(-1, 0, 0);
+const PACKED_NORMAL_POS_Y = packFarFieldNormal(0, 1, 0);
+const PACKED_NORMAL_NEG_Y = packFarFieldNormal(0, -1, 0);
+const PACKED_NORMAL_POS_Z = packFarFieldNormal(0, 0, 1);
+const PACKED_NORMAL_NEG_Z = packFarFieldNormal(0, 0, -1);
+
+function lookupPackedNormal(normalX: number, normalY: number, normalZ: number): number {
+  if (normalY === 1) return PACKED_NORMAL_POS_Y;
+  if (normalY === -1) return PACKED_NORMAL_NEG_Y;
+  if (normalX === 1) return PACKED_NORMAL_POS_X;
+  if (normalX === -1) return PACKED_NORMAL_NEG_X;
+  if (normalZ === 1) return PACKED_NORMAL_POS_Z;
+  return PACKED_NORMAL_NEG_Z;
+}
+
 function createMeshBuilder(maxQuadCount: number): MeshBuilder {
   const vertexBuffer = new ArrayBuffer(maxQuadCount * 4 * VERTEX_STRIDE);
   return {
@@ -1200,7 +1217,7 @@ function pushQuad(
   color: number,
 ): void {
   const baseVertex = mesh.vertexCount;
-  const packedNormal = packFarFieldNormal(normalX, normalY, normalZ);
+  const packedNormal = lookupPackedNormal(normalX, normalY, normalZ);
   const floats = mesh.vertexFloatView;
   const uints = mesh.vertexUintView;
   // VERTEX_STRIDE = 20 bytes = 5 uint32/float32 words

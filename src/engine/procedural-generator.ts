@@ -1147,6 +1147,53 @@ export class ProceduralWorldGenerator {
         const planeOffset = y * this.chunkSize + z * chunkArea;
         for (let x = 0; x < this.chunkSize; x += 1) {
           const columnIndex = x + rowOffset;
+          const surfaceY = scratch.surfaceY[columnIndex]!;
+          // Fast path: above surface with no water
+          if (worldY > surfaceY) {
+            const waterTopY = scratch.waterTopY[columnIndex]!;
+            if (waterTopY === NO_WATER || worldY > waterTopY) {
+              // Check feature above surface
+              if (scratch.featureKind[columnIndex] !== FEATURE_NONE) {
+                const relativeY = worldY - (surfaceY + 1);
+                if (relativeY >= 0 && relativeY <= scratch.featureHeight[columnIndex]!) {
+                  const featureMat = sampleFeatureMaterial(
+                    scratch.featureKind[columnIndex]!,
+                    scratch.featureHeight[columnIndex]!,
+                    scratch.featureRadius[columnIndex]!,
+                    scratch.featureExtra[columnIndex]!,
+                    scratch.featureDeltaX[columnIndex]!,
+                    scratch.featureDeltaZ[columnIndex]!,
+                    scratch.featureMaterialPrimary[columnIndex]!,
+                    scratch.featureMaterialSecondary[columnIndex]!,
+                    scratch.featureMaterialAccent[columnIndex]!,
+                    surfaceY,
+                    worldY,
+                  );
+                  if (featureMat !== 0) {
+                    data[x + planeOffset] = featureMat;
+                    solidCount += 1;
+                    if (x < minX) minX = x;
+                    if (y < minY) minY = y;
+                    if (z < minZ) minZ = z;
+                    if (x + 1 > maxX) maxX = x + 1;
+                    if (y + 1 > maxY) maxY = y + 1;
+                    if (z + 1 > maxZ) maxZ = z + 1;
+                  }
+                }
+              }
+              continue;
+            }
+            // Water above surface
+            data[x + planeOffset] = scratch.waterMaterial[columnIndex]!;
+            solidCount += 1;
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (z < minZ) minZ = z;
+            if (x + 1 > maxX) maxX = x + 1;
+            if (y + 1 > maxY) maxY = y + 1;
+            if (z + 1 > maxZ) maxZ = z + 1;
+            continue;
+          }
           const material = sampleMaterialFromScratch(
             scratch,
             columnIndex,
