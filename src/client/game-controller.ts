@@ -34,6 +34,7 @@ import {
   countUsedInventoryStacks,
   createInventoryState,
   cycleInventorySlot,
+  getInventoryInsertCapacity,
   getSelectedInventoryStack,
   selectInventorySlot,
   type InventoryState,
@@ -86,6 +87,7 @@ import {
   type StreamAnchor,
 } from "../engine/stream-anchor.ts";
 import type { Vec3 } from "../engine/types.ts";
+import { raycastResidentWorld, type VoxelRayHit } from "../engine/voxel-raycast.ts";
 import {
   buildUnderwaterRenderEnvironment,
   DEFAULT_RENDER_ENVIRONMENT,
@@ -173,6 +175,10 @@ export interface GameHudSnapshot {
   bootstrapPlayableReady: boolean;
   bootstrapVisualReady: boolean;
   bootstrapElapsedMs: number;
+  bootstrapRequiredColumns: number;
+  bootstrapReadyColumns: number;
+  bootstrapUrgentDirtyMeshlessChunks: number;
+  bootstrapPendingMeshJobs: number;
   farFieldMs: number;
   farFieldBuiltBands: number;
   farFieldPendingBands: number;
@@ -193,6 +199,27 @@ export interface GameHudSnapshot {
   maxGeneratedChunksPerUpdate: number;
   maxMeshRebuildsPerFrame: number;
   maxFarFieldBandRebuildsPerFrame: number;
+}
+
+export interface TargetingSnapshot {
+  hit: boolean;
+  voxel: [number, number, number] | null;
+  adjacent: [number, number, number] | null;
+  distanceMeters: number;
+  targetMaterial: string;
+  breakable: boolean;
+  placeMaterial: string;
+  placeable: boolean;
+}
+
+interface BootstrapReadiness {
+  dirtyResidentMeshes: ReturnType<typeof summarizeDirtyResidentMeshes>;
+  pendingMeshJobs: number;
+  playableReady: boolean;
+  visualReady: boolean;
+  requiredColumns: number;
+  readyColumns: number;
+  urgentDirtyMeshlessChunks: number;
 }
 
 export interface GameRenderProbe {
@@ -830,6 +857,10 @@ export class GameController {
       bootstrapPlayableReady: bootstrap.playableReady,
       bootstrapVisualReady: bootstrap.visualReady,
       bootstrapElapsedMs: performance.now() - this.bootstrapBenchmarkStartedAt,
+      bootstrapRequiredColumns: bootstrap.requiredColumns,
+      bootstrapReadyColumns: bootstrap.readyColumns,
+      bootstrapUrgentDirtyMeshlessChunks: bootstrap.urgentDirtyMeshlessChunks,
+      bootstrapPendingMeshJobs: bootstrap.pendingMeshJobs,
       farFieldMs: this.lastFarFieldSummary.elapsedMs,
       farFieldBuiltBands: this.lastFarFieldSummary.builtBands,
       farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
@@ -881,6 +912,25 @@ export class GameController {
 
   getEditLogSnapshot(): WorldEditRecord[] {
     return this.world.getEditLogSnapshot();
+  }
+
+  getTargetingSnapshot(): TargetingSnapshot {
+    const selected = getSelectedInventoryStack(this.inventory);
+    const ray = createForwardRay(this.camera);
+    const hit = raycastResidentWorld(this.world, ray.origin, ray.direction, INTERACTION_REACH_WORLD_UNITS);
+    if (!hit) {
+      return {
+        hit: false,
+        voxel: null,
+        adjacent: null,
+        distanceMeters: 0,
+        targetMaterial: "Out of reach",
+        breakable: false,
+        placeMaterial: formatInventoryMaterial(selected?.material ?? null),
+        placeable: false,
+      };
+    }
+    return buildTargetingSnapshot(this.world, this.inventory, hit);
   }
 
   breakTargetVoxel(): boolean {
@@ -2861,6 +2911,8 @@ export class GameController {
       return;
     }
     const bootstrap = this.getBootstrapReadiness();
+    const becamePlayableReady = !this.bootstrapPlayableReady && bootstrap.playableReady;
+    const becameVisualReady = !this.bootstrapBenchmarkComplete && bootstrap.visualReady;
     this.bootstrapBenchmarkSamples.push({
       frame: this.bootstrapBenchmarkSamples.length,
       elapsedMs: performance.now() - this.bootstrapBenchmarkStartedAt,
@@ -2895,14 +2947,15 @@ export class GameController {
     if (bootstrap.visualReady) {
       this.bootstrapBenchmarkComplete = true;
     }
+    if (becamePlayableReady || becameVisualReady) {
+      this.status = this.pointerLocked
+        ? "Pointer locked: WASD move, Space jump, Ctrl sprint, Alt slow"
+        : "Click once to capture cursor";
+      this.pushHud(true);
+    }
   }
 
-  private getBootstrapReadiness(): {
-    dirtyResidentMeshes: ReturnType<typeof summarizeDirtyResidentMeshes>;
-    pendingMeshJobs: number;
-    playableReady: boolean;
-    visualReady: boolean;
-  } {
+  private getBootstrapReadiness(): BootstrapReadiness {
     const dirtyResidentMeshes = summarizeDirtyResidentMeshes(this.world);
     const pendingMeshJobs = this.asyncChunkMeshing?.getPendingCount() ?? 0;
     const hasResidentChunks = this.world.getStats().chunkCount > 0;
@@ -2915,6 +2968,7 @@ export class GameController {
       playerChunkZ,
       BOOTSTRAP_PLAYABLE_COLUMN_RADIUS_CHUNKS,
     );
+    const requiredColumns = countColumnsWithinRadius(BOOTSTRAP_PLAYABLE_COLUMN_RADIUS_CHUNKS);
     const urgentDirtyMeshlessChunks = countUrgentDirtyMeshlessChunks(
       this.world,
       playerChunkX,
@@ -2932,6 +2986,9 @@ export class GameController {
       pendingMeshJobs,
       playableReady,
       visualReady,
+      requiredColumns,
+      readyColumns: Math.max(0, requiredColumns - localMissingColumns),
+      urgentDirtyMeshlessChunks,
     };
   }
 
@@ -3037,6 +3094,29 @@ function formatInventoryMaterial(material: number | null): string {
     return "Empty";
   }
   return materialToHexColor(material);
+}
+
+function buildTargetingSnapshot(
+  world: ProceduralResidentWorld,
+  inventory: InventoryState,
+  hit: VoxelRayHit,
+): TargetingSnapshot {
+  const targetMaterial = world.getVoxel(hit.voxel[0], hit.voxel[1], hit.voxel[2]);
+  const selected = getSelectedInventoryStack(inventory);
+  const canBreak = targetMaterial !== 0 && getInventoryInsertCapacity(inventory, targetMaterial) > 0;
+  const canPlace = selected !== null
+    && selected.count > 0
+    && world.getVoxel(hit.adjacent[0], hit.adjacent[1], hit.adjacent[2]) === 0;
+  return {
+    hit: true,
+    voxel: [...hit.voxel],
+    adjacent: [...hit.adjacent],
+    distanceMeters: worldUnitsToMeters(hit.distance),
+    targetMaterial: formatInventoryMaterial(targetMaterial || null),
+    breakable: canBreak,
+    placeMaterial: formatInventoryMaterial(selected?.material ?? null),
+    placeable: canPlace,
+  };
 }
 
 function shouldSyncBuildUrgentChunk(
@@ -3507,6 +3587,19 @@ function countMissingResidentColumnsAround(
     }
   }
   return missingColumns;
+}
+
+function countColumnsWithinRadius(radiusChunks: number): number {
+  let columns = 0;
+  for (let dz = -radiusChunks; dz <= radiusChunks; dz += 1) {
+    for (let dx = -radiusChunks; dx <= radiusChunks; dx += 1) {
+      if (dx * dx + dz * dz > radiusChunks * radiusChunks) {
+        continue;
+      }
+      columns += 1;
+    }
+  }
+  return columns;
 }
 
 function countUrgentDirtyMeshlessChunks(

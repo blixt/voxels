@@ -117,6 +117,119 @@ body::before {
   pointer-events: auto;
 }
 
+.game-bottom-hud {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  width: min(760px, calc(100vw - 36px));
+  display: grid;
+  gap: 10px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.game-target-card,
+.game-hotbar {
+  backdrop-filter: blur(18px);
+  background: rgba(13, 19, 22, 0.52);
+  border: 1px solid rgba(244, 239, 227, 0.12);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.24);
+}
+
+.game-target-card {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+}
+
+.game-target-label,
+.game-target-meta,
+.game-target-actions {
+  margin: 0;
+}
+
+.game-target-label {
+  color: rgba(244, 239, 227, 0.64);
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.game-target-title {
+  margin: 0;
+  font-size: 0.98rem;
+  line-height: 1.15;
+}
+
+.game-target-meta {
+  color: rgba(244, 239, 227, 0.72);
+  font-size: 0.74rem;
+}
+
+.game-target-actions {
+  color: rgba(255, 232, 180, 0.86);
+  font-size: 0.73rem;
+}
+
+.game-hotbar {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px;
+}
+
+.game-hotbar-slot {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  padding: 8px 8px 9px;
+  border-radius: 11px;
+  border: 1px solid rgba(244, 239, 227, 0.08);
+  background: rgba(7, 11, 14, 0.5);
+  transition:
+    border-color 120ms ease,
+    transform 120ms ease,
+    background 120ms ease;
+}
+
+.game-hotbar-slot.is-selected {
+  border-color: rgba(255, 225, 144, 0.56);
+  background: rgba(58, 42, 19, 0.52);
+  transform: translateY(-2px);
+}
+
+.game-hotbar-slot-index,
+.game-hotbar-slot-count {
+  color: rgba(244, 239, 227, 0.62);
+  font-size: 0.65rem;
+  line-height: 1;
+}
+
+.game-hotbar-slot-swatch {
+  display: block;
+  width: 100%;
+  height: 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.14);
+}
+
+.game-hotbar-slot-material {
+  display: block;
+  min-width: 0;
+  font-size: 0.78rem;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.game-hotbar-slot-count {
+  display: block;
+  text-align: right;
+}
+
 .discovery-achievement-layer {
   position: absolute;
   left: 50%;
@@ -380,6 +493,68 @@ body::before {
   pointer-events: auto;
 }
 
+.capture-card {
+  width: min(560px, calc(100vw - 40px));
+  display: grid;
+  gap: 10px;
+  padding: 22px 24px 24px;
+  border-radius: 18px;
+  border: 1px solid rgba(244, 239, 227, 0.12);
+  background:
+    linear-gradient(180deg, rgba(10, 14, 18, 0.88), rgba(8, 12, 15, 0.92)),
+    radial-gradient(circle at top, rgba(148, 187, 213, 0.12), transparent 54%);
+  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.38);
+}
+
+.capture-status,
+.capture-subtitle,
+.capture-detail {
+  margin: 0;
+}
+
+.capture-status {
+  color: rgba(244, 239, 227, 0.62);
+  font-size: 0.7rem;
+  letter-spacing: 0.16em;
+}
+
+.capture-title {
+  display: block;
+  font-size: clamp(1.15rem, 1.8vw, 1.55rem);
+  line-height: 1.08;
+}
+
+.capture-subtitle,
+.capture-detail {
+  color: rgba(244, 239, 227, 0.8);
+  font-size: 0.84rem;
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
+.capture-detail {
+  color: rgba(244, 239, 227, 0.62);
+  font-size: 0.74rem;
+}
+
+.capture-progress {
+  overflow: hidden;
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(244, 239, 227, 0.08);
+  background: rgba(255, 246, 214, 0.08);
+}
+
+.capture-progress-bar {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: left center;
+  background:
+    linear-gradient(90deg, rgba(122, 189, 227, 0.92), rgba(255, 214, 124, 0.92));
+  box-shadow: 0 0 24px rgba(122, 189, 227, 0.18);
+}
+
 .capture-overlay[hidden] {
   display: none;
 }
@@ -390,6 +565,10 @@ body::before {
   color: rgba(255, 246, 214, 0.82);
   background:
     radial-gradient(circle at center, rgba(13, 19, 22, 0.16) 0%, rgba(13, 19, 22, 0.78) 100%);
+}
+
+.capture-overlay.is-loading .capture-card {
+  border-color: rgba(122, 189, 227, 0.16);
 }
 
 @keyframes discovery-achievement-pop {

@@ -15,7 +15,7 @@
             <div class="game-brand">
               <p class="eyebrow">Chrome 146 + WebGPU</p>
               <h1>Voxels</h1>
-              <p class="game-subtitle">First-person runtime slice over the current engine baseline.</p>
+              <p class="game-subtitle">Explore, gather, and build across the current procedural world prototype.</p>
             </div>
           </header>
           <div class="game-hud">
@@ -50,8 +50,19 @@
             aria-live="polite"
             aria-atomic="true"
           ></div>
+          <div class="game-bottom-hud" data-role="interaction-hud"></div>
           <div class="crosshair" aria-hidden="true"></div>
-          <button class="capture-overlay" data-role="capture">Click To Enter The World</button>
+          <button class="capture-overlay" data-role="capture">
+            <div class="capture-card">
+              <p class="capture-status" data-role="capture-status">Preparing World</p>
+              <strong class="capture-title" data-role="capture-title">Loading nearby terrain</strong>
+              <p class="capture-subtitle" data-role="capture-subtitle"></p>
+              <div class="capture-progress" data-role="capture-progress" aria-hidden="true">
+                <span class="capture-progress-bar" data-role="capture-progress-bar"></span>
+              </div>
+              <p class="capture-detail" data-role="capture-detail"></p>
+            </div>
+          </button>
         </div>
       </section>
     </main>

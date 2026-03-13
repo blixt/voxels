@@ -4861,3 +4861,52 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - Regression checks revalidated after the marsh changes:
   - forbidden direct biome adjacency scan passed, including no `marsh|shardlands`
   - rare regional variant scan passed, including `verdant_karst` and `tundra_blue_ice`
+
+## 2026-03-13 game UX review against roadmap/docs
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise run build`
+- `mise run test`
+- ad hoc browser smoke via `scripts/lib/browser-game-benchmark-harness.ts` helpers against a fresh production server
+
+#### Result
+
+- `typecheck`
+  - pass
+- `build`
+  - pass
+- `test`
+  - `170` pass
+  - `0` fail
+- browser smoke
+  - first pass found one real stale-overlay bug
+  - second pass passed after the readiness-refresh fix
+
+#### Browser smoke findings
+
+- First smoke:
+  - `getBootstrapBenchmark().summary.visualReady === true`
+  - but the capture overlay still showed loading text
+  - root cause was that bootstrap readiness could flip inside `recordBootstrapBenchmarkSample(...)` without forcing a HUD refresh
+- Final smoke after the fix:
+  - capture overlay:
+    - `captureTitle = "Click To Enter The World"`
+    - `captureSubtitle = "WASD move • Space jump • Left break • Right place • Wheel or 1-9 switch slots"`
+    - progress hidden once ready
+  - interaction HUD:
+    - target title rendered as live material + reach distance
+    - target meta rendered voxel + adjacent coordinates
+    - action line reflected actual break/place legality
+    - hotbar rendered `9` visible slots with selected-slot highlight
+  - interaction API:
+    - `breakTargetVoxel()` returned `true`
+    - `placeSelectedVoxel()` returned `true`
+
+#### Outcome
+
+- The kept slice is worth it:
+  - roadmap-expected interaction state is now surfaced to the player instead of being trapped in the debug panel
+  - bootstrap/enter-world flow now uses real readiness state with progress instead of a generic loading curtain
+  - the smoke found and verified a real readiness/HUD bug rather than only checking visuals superficially

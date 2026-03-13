@@ -2380,3 +2380,21 @@
   - biome continuity and landmark implementation are now being enforced programmatically
   - the marsh biome is more coherent and more believable
   - tree-like landmark families are covered by a structural invariant instead of only crown-width heuristics
+
+## 2026-03-13 game UX review against roadmap/docs
+
+- I did a focused review of the live game against the roadmap and loop docs instead of looking for arbitrary polish:
+  - `docs/roadmap.md` already expected center-screen interaction and inventory management to be part of the basic interaction loop
+  - the code had the interaction and inventory rules, but most of that state was only visible through the debug panel
+  - the bootstrap path also had real readiness state, but the full-screen overlay still behaved like a generic loading curtain rather than a meaningful “enter world” flow
+- The highest-ROI fixes were therefore player-facing UX, not deeper engine rewrites:
+  - added a real bootstrap card with readiness text, progress, and control hints
+  - added a bottom-center interaction HUD that shows the currently targeted voxel, reach distance, break/place affordances, and a 9-slot sliding hotbar window over the 32-slot inventory
+  - exposed a dedicated targeting snapshot from the controller so the HUD reads the same break/place truth as gameplay instead of duplicating selection logic in the DOM
+- The browser smoke uncovered one real bug after the first pass:
+  - bootstrap readiness could become true inside `recordBootstrapBenchmarkSample(...)` without forcing a HUD refresh, so the overlay text could stay visually stale even though the underlying snapshot had already flipped to ready
+  - I fixed that by forcing a HUD/status refresh on the playable-ready and visual-ready transitions instead of relying on the regular throttled HUD push cadence
+- I deliberately did not keep this as “UI only” hand-waving:
+  - the review was compared against the docs/roadmap mismatch first
+  - the fix path reused existing authoritative game state instead of inventing a second UI-only state model
+  - no old interaction or overlay code paths were left behind

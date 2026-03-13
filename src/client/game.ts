@@ -1,5 +1,10 @@
-import { GameController, type GameHudSnapshot } from "./game-controller.ts";
+import {
+  GameController,
+  type GameHudSnapshot,
+  type TargetingSnapshot,
+} from "./game-controller.ts";
 import { formatDiscoveryInline } from "../engine/discovery-catalog.ts";
+import { materialToHexColor } from "../engine/procedural-generator.ts";
 import { worldUnitsToMeters } from "../engine/scale.ts";
 import type {
   DiscoveryEvent,
@@ -70,6 +75,7 @@ declare global {
       getDiscoveryJournal(): ExplorationJournalSnapshot;
       resetDiscoveryJournal(): ExplorationJournalSnapshot;
       getInventory(): ReturnType<GameController["getInventorySnapshot"]>;
+      getTargeting(): ReturnType<GameController["getTargetingSnapshot"]>;
       getEditLog(): ReturnType<GameController["getEditLogSnapshot"]>;
       breakTargetVoxel(): ReturnType<GameController["breakTargetVoxel"]>;
       placeSelectedVoxel(): ReturnType<GameController["placeSelectedVoxel"]>;
@@ -88,6 +94,10 @@ interface AchievementPresenter {
   dispose(): void;
 }
 
+interface InteractionHudView {
+  update(snapshot: GameHudSnapshot, inventory: ReturnType<GameController["getInventorySnapshot"]>, targeting: TargetingSnapshot): void;
+}
+
 interface TelemetrySummaryView {
   update(snapshot: GameHudSnapshot): void;
 }
@@ -103,7 +113,11 @@ interface TelemetryHistorySample {
 }
 
 interface CaptureOverlayState {
-  label: string;
+  status: string;
+  title: string;
+  subtitle: string;
+  detail: string;
+  progressRatio: number;
   loading: boolean;
 }
 
@@ -112,6 +126,7 @@ const ACHIEVEMENT_EXIT_MS = 320;
 const TELEMETRY_HISTORY_LIMIT = 64;
 const TELEMETRY_STORAGE_KEY = "voxels.telemetry.collapsed";
 const TELEMETRY_SUMMARY_LABELS = ["FPS", "Frame", "Stream", "Mesh", "Far Build", "Render"] as const;
+const HOTBAR_VISIBLE_SLOT_COUNT = 9;
 
 const TELEMETRY_LABELS = [
   "Position",
@@ -198,7 +213,14 @@ function mountGame(): GameRuntime {
   const telemetryDetails = appRoot.querySelector<HTMLElement>("[data-role='telemetry-details']");
   const telemetryElement = appRoot.querySelector<HTMLElement>("[data-role='telemetry']");
   const captureButton = appRoot.querySelector<HTMLButtonElement>("[data-role='capture']");
+  const captureStatus = appRoot.querySelector<HTMLElement>("[data-role='capture-status']");
+  const captureTitle = appRoot.querySelector<HTMLElement>("[data-role='capture-title']");
+  const captureSubtitle = appRoot.querySelector<HTMLElement>("[data-role='capture-subtitle']");
+  const captureDetail = appRoot.querySelector<HTMLElement>("[data-role='capture-detail']");
+  const captureProgress = appRoot.querySelector<HTMLElement>("[data-role='capture-progress']");
+  const captureProgressBar = appRoot.querySelector<HTMLElement>("[data-role='capture-progress-bar']");
   const achievementElement = appRoot.querySelector<HTMLElement>("[data-role='discovery-achievements']");
+  const interactionHudRoot = appRoot.querySelector<HTMLElement>("[data-role='interaction-hud']");
 
   if (
     !canvas
@@ -210,7 +232,14 @@ function mountGame(): GameRuntime {
     || !telemetryDetails
     || !telemetryElement
     || !captureButton
+    || !captureStatus
+    || !captureTitle
+    || !captureSubtitle
+    || !captureDetail
+    || !captureProgress
+    || !captureProgressBar
     || !achievementElement
+    || !interactionHudRoot
   ) {
     throw new Error("Game UI is incomplete");
   }
@@ -225,6 +254,7 @@ function mountGame(): GameRuntime {
   const lastTelemetryValues = new Array<string>(telemetryValues.length).fill("");
   const telemetrySummaryView = createTelemetrySummaryView(telemetrySummaryElement, telemetryChart);
   const achievementPresenter = createAchievementPresenter(achievementElement);
+  const interactionHudView = createInteractionHudView(interactionHudRoot);
   let telemetryCollapsed = loadTelemetryCollapsed();
 
   const applyTelemetryCollapsed = () => {
@@ -252,8 +282,14 @@ function mountGame(): GameRuntime {
     }
     telemetrySummaryView.update(snapshot);
     achievementPresenter.observe(snapshot.recentDiscoveries);
+    interactionHudView.update(snapshot, controller.getInventorySnapshot(), controller.getTargetingSnapshot());
     const captureState = buildCaptureOverlayState(snapshot);
-    captureButton.textContent = captureState.label;
+    captureStatus.textContent = captureState.status;
+    captureTitle.textContent = captureState.title;
+    captureSubtitle.textContent = captureState.subtitle;
+    captureDetail.textContent = captureState.detail;
+    captureProgressBar.style.transform = `scaleX(${captureState.progressRatio})`;
+    captureProgress.hidden = !captureState.loading;
     captureButton.disabled = captureState.loading;
     captureButton.classList.toggle("is-loading", captureState.loading);
     captureButton.hidden = snapshot.pointerLocked;
@@ -297,6 +333,7 @@ function mountGame(): GameRuntime {
     getDiscoveryJournal: () => controller.getDiscoveryJournalSnapshot(),
     resetDiscoveryJournal: () => controller.resetDiscoveryJournal(),
     getInventory: () => controller.getInventorySnapshot(),
+    getTargeting: () => controller.getTargetingSnapshot(),
     getEditLog: () => controller.getEditLogSnapshot(),
     breakTargetVoxel: () => controller.breakTargetVoxel(),
     placeSelectedVoxel: () => controller.placeSelectedVoxel(),
@@ -327,19 +364,124 @@ function reportAsyncFailure(promise: Promise<unknown>): void {
 }
 
 function buildCaptureOverlayState(snapshot: GameHudSnapshot): CaptureOverlayState {
+  const readyColumns = Math.max(0, snapshot.bootstrapReadyColumns);
+  const requiredColumns = Math.max(1, snapshot.bootstrapRequiredColumns);
+  const columnRatio = readyColumns / requiredColumns;
+  const urgentMeshRatio = snapshot.bootstrapUrgentDirtyMeshlessChunks === 0
+    ? 1
+    : Math.max(0, 1 - snapshot.bootstrapUrgentDirtyMeshlessChunks / requiredColumns);
+  const farRatio = snapshot.bootstrapVisualReady
+    ? 1
+    : snapshot.bootstrapPlayableReady
+    ? Math.max(0.82, 1 - snapshot.farFieldPendingBands / Math.max(snapshot.farFieldPendingBands + snapshot.farFieldBuiltBands, 1))
+    : 0;
+  const progressRatio = snapshot.bootstrapVisualReady
+    ? 1
+    : snapshot.bootstrapPlayableReady
+    ? 0.85 + farRatio * 0.15
+    : Math.min(0.82, columnRatio * 0.68 + urgentMeshRatio * 0.18 + (snapshot.bootstrapPendingMeshJobs === 0 ? 0.14 : 0));
   if (snapshot.bootstrapPlayableReady) {
     return {
-      label: "Click To Enter The World",
+      status: snapshot.bootstrapVisualReady ? "World Ready" : "Finishing Horizon",
+      title: "Click To Enter The World",
+      subtitle: "WASD move • Space jump • Left break • Right place • Wheel or 1-9 switch slots",
+      detail: snapshot.bootstrapVisualReady
+        ? `${snapshot.chunkCount.toLocaleString()} resident chunks • ${snapshot.farFieldTriangles.toLocaleString()} far tris`
+        : `${snapshot.farFieldPendingBands.toLocaleString()} far band(s) still settling`,
+      progressRatio,
       loading: false,
     };
   }
   return {
-    label: [
-      "Preparing World",
-      `${snapshot.streamPendingChunks.toLocaleString()} pending`,
-      `${snapshot.streamDirtyResidentChunks.toLocaleString()} dirty`,
+    status: "Preparing World",
+    title: `${readyColumns.toLocaleString()} / ${requiredColumns.toLocaleString()} nearby columns ready`,
+    subtitle: [
+      `${snapshot.streamPendingChunks.toLocaleString()} stream pending`,
+      `${snapshot.bootstrapPendingMeshJobs.toLocaleString()} mesh job(s)`,
+      `${snapshot.farFieldPendingBands.toLocaleString()} far band(s)`,
     ].join(" • "),
+    detail: [
+      `Urgent meshless ${snapshot.bootstrapUrgentDirtyMeshlessChunks.toLocaleString()}`,
+      `Elapsed ${snapshot.bootstrapElapsedMs.toFixed(0)} ms`,
+    ].join(" • "),
+    progressRatio: Math.max(0.04, Math.min(0.99, progressRatio)),
     loading: true,
+  };
+}
+
+function createInteractionHudView(root: HTMLElement): InteractionHudView {
+  const targetLabel = document.createElement("p");
+  targetLabel.className = "game-target-label";
+  const targetTitle = document.createElement("h2");
+  targetTitle.className = "game-target-title";
+  const targetMeta = document.createElement("p");
+  targetMeta.className = "game-target-meta";
+  const targetActions = document.createElement("p");
+  targetActions.className = "game-target-actions";
+  const targetCard = document.createElement("section");
+  targetCard.className = "game-target-card";
+  targetCard.append(targetLabel, targetTitle, targetMeta, targetActions);
+
+  const hotbarElement = document.createElement("div");
+  hotbarElement.className = "game-hotbar";
+  const hotbarSlots: Array<{
+    root: HTMLElement;
+    index: HTMLElement;
+    swatch: HTMLElement;
+    material: HTMLElement;
+    count: HTMLElement;
+  }> = [];
+  for (let slotIndex = 0; slotIndex < HOTBAR_VISIBLE_SLOT_COUNT; slotIndex += 1) {
+    const index = document.createElement("span");
+    index.className = "game-hotbar-slot-index";
+    const swatch = document.createElement("span");
+    swatch.className = "game-hotbar-slot-swatch";
+    const material = document.createElement("strong");
+    material.className = "game-hotbar-slot-material";
+    const count = document.createElement("span");
+    count.className = "game-hotbar-slot-count";
+    const slot = document.createElement("div");
+    slot.className = "game-hotbar-slot";
+    slot.append(index, swatch, material, count);
+    hotbarElement.append(slot);
+    hotbarSlots.push({ root: slot, index, swatch, material, count });
+  }
+
+  root.replaceChildren(targetCard, hotbarElement);
+
+  return {
+    update(snapshot, inventory, targeting) {
+      if (!targeting.hit) {
+        targetLabel.textContent = snapshot.pointerLocked ? "Target" : "Targeting";
+        targetTitle.textContent = "No voxel in reach";
+        targetMeta.textContent = "Look at a nearby block to break it or place against it.";
+      } else {
+        targetLabel.textContent = "Target";
+        targetTitle.textContent = `${targeting.targetMaterial} • ${targeting.distanceMeters.toFixed(1)} m`;
+        targetMeta.textContent = [
+          `Voxel ${formatCoords(targeting.voxel)}`,
+          `Adjacent ${formatCoords(targeting.adjacent)}`,
+        ].join(" • ");
+      }
+      targetActions.textContent = [
+        targeting.breakable ? `LMB Break ${targeting.targetMaterial}` : "LMB Break unavailable",
+        targeting.placeable ? `RMB Place ${targeting.placeMaterial}` : `RMB Place ${targeting.placeMaterial === "Empty" ? "select a stack" : "blocked"}`,
+      ].join(" • ");
+
+      const visibleStart = computeHotbarStartSlot(inventory.selectedSlot, inventory.slots.length, HOTBAR_VISIBLE_SLOT_COUNT);
+      for (let slotOffset = 0; slotOffset < HOTBAR_VISIBLE_SLOT_COUNT; slotOffset += 1) {
+        const slotIndex = visibleStart + slotOffset;
+        const slot = hotbarSlots[slotOffset]!;
+        const stack = inventory.slots[slotIndex];
+        const materialHex = stack ? materialToHexColor(stack.material) : "Empty";
+        slot.root.classList.toggle("is-selected", slotIndex === inventory.selectedSlot);
+        slot.root.classList.toggle("is-empty", stack === null);
+        slot.index.textContent = String(slotIndex + 1);
+        slot.material.textContent = materialHex;
+        slot.count.textContent = stack ? stack.count.toLocaleString() : "";
+        slot.swatch.style.background = stack ? materialToCssColor(materialHex) : "rgba(255, 246, 214, 0.08)";
+      }
+    },
   };
 }
 
@@ -358,6 +500,29 @@ function createTelemetryValues(root: HTMLElement): HTMLSpanElement[] {
   }
   root.replaceChildren(fragment);
   return values;
+}
+
+function computeHotbarStartSlot(selectedSlot: number, slotCount: number, visibleCount: number): number {
+  if (slotCount <= visibleCount) {
+    return 0;
+  }
+  const centered = selectedSlot - Math.floor(visibleCount / 2);
+  return Math.max(0, Math.min(slotCount - visibleCount, centered));
+}
+
+function materialToCssColor(hex: string): string {
+  if (!/^#[0-9A-F]{3}$/i.test(hex)) {
+    return "rgba(255, 246, 214, 0.08)";
+  }
+  const [r, g, b] = hex.slice(1).split("").map((digit) => Number.parseInt(digit + digit, 16));
+  return `rgb(${r} ${g} ${b})`;
+}
+
+function formatCoords(coords: readonly number[] | null): string {
+  if (!coords) {
+    return "none";
+  }
+  return `${coords[0]}, ${coords[1]}, ${coords[2]}`;
 }
 
 function createAchievementPresenter(root: HTMLElement): AchievementPresenter {
