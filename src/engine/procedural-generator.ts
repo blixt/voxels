@@ -172,6 +172,20 @@ interface CaveFieldSample {
   caveOpenings: number;
 }
 
+function createSurfaceFieldSample(): SurfaceFieldSample {
+  return {
+    temperature: 0, moisture: 0, uplift: 0, drainage: 0, volcanism: 0, magic: 0,
+    globalHeight: 0, mountainness: 0, oceanness: 0, continentalness: 0, hills: 0,
+    detail: 0, ridge: 0, basin: 0, channel: 0, dune: 0, mesa: 0, grove: 0,
+    oldGrowth: 0, orchard: 0, desolation: 0, strata: 0, surfacePatch: 0,
+    surfaceGrain: 0, scatter: 0, peakness: 0,
+  };
+}
+
+function createCaveFieldSample(): CaveFieldSample {
+  return { caveRibbon: 0, cavePocket: 0, caveDepth: 0, caveOpenings: 0 };
+}
+
 interface MutableColumnState {
   biomeId: BiomeId;
   hostBiomeId: BaseBiomeId;
@@ -996,6 +1010,8 @@ export class ProceduralWorldGenerator {
   private readonly biomeProbeState = createMutableColumnState();
   private readonly surfaceSampleState = createMutableColumnState();
   private readonly materialSampleState = createMutableColumnState();
+  private readonly reusableSurfaceFields = createSurfaceFieldSample();
+  private readonly reusableCaveFields = createCaveFieldSample();
   private readonly biomeClassificationState: BiomeClassificationSelection = {
     biomeId: "verdant",
     specialStrength: 0,
@@ -1240,7 +1256,7 @@ export class ProceduralWorldGenerator {
     worldX: number,
     worldZ: number,
     out: MutableColumnState,
-  ): { fields: SurfaceFieldSample; biomePrimaryWeight: number } {
+  ): void {
     const fields = this.sampleSurfaceFields(worldX, worldZ);
     const baseBlend = this.selectBaseBiomes(fields);
     const terrainProfile = blendTerrainProfile(baseBlend.primary, baseBlend.secondary, baseBlend.primaryWeight);
@@ -1332,15 +1348,19 @@ export class ProceduralWorldGenerator {
     out.worldZDiv3 = Math.floor(worldZ * ONE_THIRD);
     out.ditherSeed = this.transitionSeed + baseBlend.primary.surface + baseBlend.secondary.surface;
     out.accentSeed = this.seed + underground.accent;
-    return { fields, biomePrimaryWeight: baseBlend.primaryWeight };
+    this.lastFillSurfaceFields = fields;
+    this.lastFillSurfaceBiomePrimaryWeight = baseBlend.primaryWeight;
   }
+
+  private lastFillSurfaceFields: SurfaceFieldSample = createSurfaceFieldSample();
+  private lastFillSurfaceBiomePrimaryWeight = 1;
 
   private fillColumnState(
     worldX: number,
     worldZ: number,
     out: MutableColumnState,
   ): void {
-    const surfaceContext = this.fillSurfaceColumnState(worldX, worldZ, out);
+    this.fillSurfaceColumnState(worldX, worldZ, out);
     const caveFields = this.sampleCaveFields(worldX, worldZ);
     this.configureCaveState(
       out.biomeId,
@@ -1349,14 +1369,15 @@ export class ProceduralWorldGenerator {
       out.regionalVariantId,
       out.surfaceY,
       out.waterTopY,
-      surfaceContext.fields,
+      this.lastFillSurfaceFields,
       caveFields,
-      surfaceContext.biomePrimaryWeight,
+      this.lastFillSurfaceBiomePrimaryWeight,
       out,
     );
   }
 
   private sampleSurfaceFields(worldX: number, worldZ: number): SurfaceFieldSample {
+    const out = this.reusableSurfaceFields;
     const continentalness = fbm2D5(worldX * CONTINENT_SCALE, worldZ * CONTINENT_SCALE, this.continentSeed) - 0.5;
     const uplift = fbm2D4(worldX * UPLIFT_SCALE, worldZ * UPLIFT_SCALE, this.upliftSeed);
     const hills = fbm2D4(worldX * HILLS_SCALE, worldZ * HILLS_SCALE, this.hillsSeed) - 0.5;
@@ -1373,43 +1394,42 @@ export class ProceduralWorldGenerator {
         - oceanness * 0.14
         - smoothstep(0.46, 0.82, -basin) * 0.05,
     );
-    return {
-      temperature: fbm2D4(worldX * TEMPERATURE_SCALE, worldZ * TEMPERATURE_SCALE, this.temperatureSeed),
-      moisture: fbm2D4(worldX * MOISTURE_SCALE, worldZ * MOISTURE_SCALE, this.moistureSeed),
-      uplift,
-      drainage: fbm2D3(worldX * DRAINAGE_SCALE, worldZ * DRAINAGE_SCALE, this.drainageSeed),
-      volcanism: fbm2D3(worldX * VOLCANISM_SCALE, worldZ * VOLCANISM_SCALE, this.volcanismSeed),
-      magic: fbm2D3(worldX * MAGIC_SCALE, worldZ * MAGIC_SCALE, this.magicSeed),
-      globalHeight,
-      mountainness,
-      oceanness,
-      continentalness,
-      hills,
-      detail,
-      ridge,
-      basin,
-      channel: 1 - Math.abs(fbm2D2(worldX * CHANNEL_SCALE, worldZ * CHANNEL_SCALE, this.channelSeed) * 2 - 1),
-      dune: 1 - Math.abs(fbm2D2(worldX * DUNE_SCALE, worldZ * DUNE_SCALE, this.duneSeed) * 2 - 1),
-      mesa: smoothstep(0.54, 0.84, fbm2D2(worldX * MESA_SCALE, worldZ * MESA_SCALE, this.mesaSeed)),
-      grove: fbm2D3(worldX * GROVE_SCALE, worldZ * GROVE_SCALE, this.groveSeed),
-      oldGrowth: fbm2D3(worldX * OLD_GROWTH_SCALE, worldZ * OLD_GROWTH_SCALE, this.oldGrowthSeed),
-      orchard: fbm2D3(worldX * ORCHARD_SCALE, worldZ * ORCHARD_SCALE, this.orchardSeed),
-      desolation: fbm2D3(worldX * DESOLATION_SCALE, worldZ * DESOLATION_SCALE, this.desolationSeed),
-      strata: fbm2D2(worldX * STRATA_SCALE, worldZ * STRATA_SCALE, this.strataSeed),
-      surfacePatch: fbm2D3(worldX * SURFACE_PATCH_SCALE, worldZ * SURFACE_PATCH_SCALE, this.surfacePatchSeed),
-      surfaceGrain: fbm2D2(worldX * SURFACE_GRAIN_SCALE, worldZ * SURFACE_GRAIN_SCALE, this.surfaceGrainSeed),
-      scatter: fbm2D2(worldX * SURFACE_SCATTER_SCALE, worldZ * SURFACE_SCATTER_SCALE, this.surfaceScatterSeed),
-      peakness,
-    };
+    out.temperature = fbm2D4(worldX * TEMPERATURE_SCALE, worldZ * TEMPERATURE_SCALE, this.temperatureSeed);
+    out.moisture = fbm2D4(worldX * MOISTURE_SCALE, worldZ * MOISTURE_SCALE, this.moistureSeed);
+    out.uplift = uplift;
+    out.drainage = fbm2D3(worldX * DRAINAGE_SCALE, worldZ * DRAINAGE_SCALE, this.drainageSeed);
+    out.volcanism = fbm2D3(worldX * VOLCANISM_SCALE, worldZ * VOLCANISM_SCALE, this.volcanismSeed);
+    out.magic = fbm2D3(worldX * MAGIC_SCALE, worldZ * MAGIC_SCALE, this.magicSeed);
+    out.globalHeight = globalHeight;
+    out.mountainness = mountainness;
+    out.oceanness = oceanness;
+    out.continentalness = continentalness;
+    out.hills = hills;
+    out.detail = detail;
+    out.ridge = ridge;
+    out.basin = basin;
+    out.channel = 1 - Math.abs(fbm2D2(worldX * CHANNEL_SCALE, worldZ * CHANNEL_SCALE, this.channelSeed) * 2 - 1);
+    out.dune = 1 - Math.abs(fbm2D2(worldX * DUNE_SCALE, worldZ * DUNE_SCALE, this.duneSeed) * 2 - 1);
+    out.mesa = smoothstep(0.54, 0.84, fbm2D2(worldX * MESA_SCALE, worldZ * MESA_SCALE, this.mesaSeed));
+    out.grove = fbm2D3(worldX * GROVE_SCALE, worldZ * GROVE_SCALE, this.groveSeed);
+    out.oldGrowth = fbm2D3(worldX * OLD_GROWTH_SCALE, worldZ * OLD_GROWTH_SCALE, this.oldGrowthSeed);
+    out.orchard = fbm2D3(worldX * ORCHARD_SCALE, worldZ * ORCHARD_SCALE, this.orchardSeed);
+    out.desolation = fbm2D3(worldX * DESOLATION_SCALE, worldZ * DESOLATION_SCALE, this.desolationSeed);
+    out.strata = fbm2D2(worldX * STRATA_SCALE, worldZ * STRATA_SCALE, this.strataSeed);
+    out.surfacePatch = fbm2D3(worldX * SURFACE_PATCH_SCALE, worldZ * SURFACE_PATCH_SCALE, this.surfacePatchSeed);
+    out.surfaceGrain = fbm2D2(worldX * SURFACE_GRAIN_SCALE, worldZ * SURFACE_GRAIN_SCALE, this.surfaceGrainSeed);
+    out.scatter = fbm2D2(worldX * SURFACE_SCATTER_SCALE, worldZ * SURFACE_SCATTER_SCALE, this.surfaceScatterSeed);
+    out.peakness = peakness;
+    return out;
   }
 
   private sampleCaveFields(worldX: number, worldZ: number): CaveFieldSample {
-    return {
-      caveRibbon: 1 - Math.abs(fbm2D2(worldX * CAVE_RIBBON_SCALE, worldZ * CAVE_RIBBON_SCALE, this.caveRibbonSeed) * 2 - 1),
-      cavePocket: fbm2D3(worldX * CAVE_POCKET_SCALE, worldZ * CAVE_POCKET_SCALE, this.cavePocketSeed),
-      caveDepth: fbm2D3(worldX * CAVE_DEPTH_SCALE, worldZ * CAVE_DEPTH_SCALE, this.caveDepthSeed),
-      caveOpenings: fbm2D2(worldX * CAVE_OPENING_SCALE, worldZ * CAVE_OPENING_SCALE, this.caveOpeningSeed),
-    };
+    const out = this.reusableCaveFields;
+    out.caveRibbon = 1 - Math.abs(fbm2D2(worldX * CAVE_RIBBON_SCALE, worldZ * CAVE_RIBBON_SCALE, this.caveRibbonSeed) * 2 - 1);
+    out.cavePocket = fbm2D3(worldX * CAVE_POCKET_SCALE, worldZ * CAVE_POCKET_SCALE, this.cavePocketSeed);
+    out.caveDepth = fbm2D3(worldX * CAVE_DEPTH_SCALE, worldZ * CAVE_DEPTH_SCALE, this.caveDepthSeed);
+    out.caveOpenings = fbm2D2(worldX * CAVE_OPENING_SCALE, worldZ * CAVE_OPENING_SCALE, this.caveOpeningSeed);
+    return out;
   }
 
   private selectBaseBiomes(fields: SurfaceFieldSample): BaseBiomeBlendSelection {
