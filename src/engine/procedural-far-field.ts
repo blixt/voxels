@@ -4,7 +4,6 @@ import type { FarFieldSource } from "./far-field-source.ts";
 import type { ChunkMeshData, Vec3 } from "./types.ts";
 import { applyWaterDepthTint } from "./water-visuals.ts";
 
-const FLOAT32_BYTES = 4;
 const NORMAL_SCALE = 127;
 const VERTEX_STRIDE = 20;
 const NO_WATER_HEIGHT = -0x7fff_ffff;
@@ -64,7 +63,8 @@ interface FarFieldBandState extends FarFieldBandRenderable {
 
 interface MeshBuilder {
   vertexBuffer: ArrayBuffer;
-  vertexView: DataView;
+  vertexFloatView: Float32Array;
+  vertexUintView: Uint32Array;
   indexData: Uint32Array;
   vertexCount: number;
   indexCount: number;
@@ -1056,11 +1056,19 @@ function buildBandStates(
   return states;
 }
 
+function packFarFieldNormal(normalX: number, normalY: number, normalZ: number): number {
+  const packedX = (normalX * NORMAL_SCALE) & 0xff;
+  const packedY = (normalY * NORMAL_SCALE) & 0xff;
+  const packedZ = (normalZ * NORMAL_SCALE) & 0xff;
+  return (packedX | (packedY << 8) | (packedZ << 16) | (NORMAL_SCALE << 24)) >>> 0;
+}
+
 function createMeshBuilder(maxQuadCount: number): MeshBuilder {
   const vertexBuffer = new ArrayBuffer(maxQuadCount * 4 * VERTEX_STRIDE);
   return {
     vertexBuffer,
-    vertexView: new DataView(vertexBuffer),
+    vertexFloatView: new Float32Array(vertexBuffer),
+    vertexUintView: new Uint32Array(vertexBuffer),
     indexData: new Uint32Array(maxQuadCount * 6),
     vertexCount: 0,
     indexCount: 0,
@@ -1192,10 +1200,18 @@ function pushQuad(
   color: number,
 ): void {
   const baseVertex = mesh.vertexCount;
-  writeVertex(mesh.vertexView, baseVertex * VERTEX_STRIDE, x0, y0, z0, normalX, normalY, normalZ, color);
-  writeVertex(mesh.vertexView, (baseVertex + 1) * VERTEX_STRIDE, x1, y1, z1, normalX, normalY, normalZ, color);
-  writeVertex(mesh.vertexView, (baseVertex + 2) * VERTEX_STRIDE, x2, y2, z2, normalX, normalY, normalZ, color);
-  writeVertex(mesh.vertexView, (baseVertex + 3) * VERTEX_STRIDE, x3, y3, z3, normalX, normalY, normalZ, color);
+  const packedNormal = packFarFieldNormal(normalX, normalY, normalZ);
+  const floats = mesh.vertexFloatView;
+  const uints = mesh.vertexUintView;
+  // VERTEX_STRIDE = 20 bytes = 5 uint32/float32 words
+  let wo = baseVertex * 5;
+  floats[wo] = x0; floats[wo + 1] = y0; floats[wo + 2] = z0; uints[wo + 3] = packedNormal; uints[wo + 4] = color;
+  wo += 5;
+  floats[wo] = x1; floats[wo + 1] = y1; floats[wo + 2] = z1; uints[wo + 3] = packedNormal; uints[wo + 4] = color;
+  wo += 5;
+  floats[wo] = x2; floats[wo + 1] = y2; floats[wo + 2] = z2; uints[wo + 3] = packedNormal; uints[wo + 4] = color;
+  wo += 5;
+  floats[wo] = x3; floats[wo + 1] = y3; floats[wo + 2] = z3; uints[wo + 3] = packedNormal; uints[wo + 4] = color;
   mesh.vertexCount += 4;
 
   mesh.indexData[mesh.indexCount + 0] = baseVertex;
@@ -1400,26 +1416,7 @@ function sampleFarFieldCell(
   };
 }
 
-function writeVertex(
-  view: DataView,
-  byteOffset: number,
-  x: number,
-  y: number,
-  z: number,
-  normalX: number,
-  normalY: number,
-  normalZ: number,
-  color: number,
-): void {
-  view.setFloat32(byteOffset + 0 * FLOAT32_BYTES, x, true);
-  view.setFloat32(byteOffset + 1 * FLOAT32_BYTES, y, true);
-  view.setFloat32(byteOffset + 2 * FLOAT32_BYTES, z, true);
-  view.setInt8(byteOffset + 12, normalX * NORMAL_SCALE);
-  view.setInt8(byteOffset + 13, normalY * NORMAL_SCALE);
-  view.setInt8(byteOffset + 14, normalZ * NORMAL_SCALE);
-  view.setInt8(byteOffset + 15, NORMAL_SCALE);
-  view.setUint32(byteOffset + 16, color, true);
-}
+
 
 function isCellInBand(
   cellMinX: number,

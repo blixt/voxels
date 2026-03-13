@@ -1,5 +1,3 @@
-import { hashUint32 } from "./math.ts";
-
 const HASH_UINT32_INV = 1 / 0xffffffff;
 const NOISE_X_PRIME = 374761393;
 const NOISE_Y_PRIME = 668265263;
@@ -9,6 +7,17 @@ const FBM_TWO_OCTAVE_NORMALIZER = 1 / 1.5;
 const FBM_THREE_OCTAVE_NORMALIZER = 1 / 1.75;
 const FBM_FOUR_OCTAVE_NORMALIZER = 1 / 1.875;
 const FBM_FIVE_OCTAVE_NORMALIZER = 1 / 1.9375;
+const HASH_MULT = 0x45d9f3b;
+
+function inlineHash(value: number): number {
+  let h = value >>> 0;
+  h ^= h >>> 16;
+  h = Math.imul(h, HASH_MULT);
+  h ^= h >>> 16;
+  h = Math.imul(h, HASH_MULT);
+  h ^= h >>> 16;
+  return (h >>> 0) * HASH_UINT32_INV;
+}
 
 export function valueNoise2D(x: number, z: number, seed: number): number {
   const x0 = Math.floor(x);
@@ -17,11 +26,11 @@ export function valueNoise2D(x: number, z: number, seed: number): number {
   const tz = z - z0;
   const xBase = Math.imul(x0, NOISE_X_PRIME);
   const zBase = Math.imul(z0, NOISE_Y_PRIME);
-  const cornerBase = xBase + zBase + seed;
-  const h00 = hashUint32(cornerBase) * HASH_UINT32_INV;
-  const h10 = hashUint32(cornerBase + NOISE_X_PRIME) * HASH_UINT32_INV;
-  const h01 = hashUint32(cornerBase + NOISE_Y_PRIME) * HASH_UINT32_INV;
-  const h11 = hashUint32(cornerBase + NOISE_X_PRIME + NOISE_Y_PRIME) * HASH_UINT32_INV;
+  const cornerBase = (xBase + zBase + seed) | 0;
+  const h00 = inlineHash(cornerBase);
+  const h10 = inlineHash(cornerBase + NOISE_X_PRIME);
+  const h01 = inlineHash(cornerBase + NOISE_Y_PRIME);
+  const h11 = inlineHash((cornerBase + NOISE_X_PRIME + NOISE_Y_PRIME) | 0);
 
   const sx = tx * tx * (3 - 2 * tx);
   const sz = tz * tz * (3 - 2 * tz);
@@ -93,10 +102,10 @@ export function fbm2D(x: number, z: number, octaves: number, seed: number): numb
 }
 
 export function hashNoise3D(x: number, y: number, z: number, seed: number): number {
-  return hashUint32(
-    Math.imul(x, NOISE_X_PRIME)
+  return inlineHash(
+    (Math.imul(x, NOISE_X_PRIME)
       + Math.imul(y, NOISE_Y_PRIME)
       + Math.imul(z, NOISE_Z_PRIME)
-      + seed,
-  ) * HASH_UINT32_INV;
+      + seed) | 0,
+  );
 }

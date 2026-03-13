@@ -7,7 +7,6 @@ import {
 import { applyWaterDepthTint } from "./water-visuals.ts";
 import { setChunkMeshDirtyState, type ResidentChunkWorld } from "./world.ts";
 
-const FLOAT32_BYTES = 4;
 const VERTEX_STRIDE = 20;
 const NORMAL_SCALE = 127;
 const QUAD_STRIDE = 11;
@@ -496,6 +495,13 @@ function buildWaterSurfaceQuads(
   }
 }
 
+function packNormal(normalX: number, normalY: number, normalZ: number): number {
+  const packedX = (normalX * NORMAL_SCALE) & 0xff;
+  const packedY = (normalY * NORMAL_SCALE) & 0xff;
+  const packedZ = (normalZ * NORMAL_SCALE) & 0xff;
+  return (packedX | (packedY << 8) | (packedZ << 16) | (NORMAL_SCALE << 24)) >>> 0;
+}
+
 function buildMeshGeometryFromQuads(
   quads: readonly number[],
   world: ResidentChunkWorld,
@@ -514,10 +520,11 @@ function buildMeshGeometryFromQuads(
   const vertexCount = quadCount * 4;
   const indexCount = quadCount * 6;
   const vertexData = new ArrayBuffer(vertexCount * VERTEX_STRIDE);
-  const vertexView = new DataView(vertexData);
+  const vertexFloatView = new Float32Array(vertexData);
+  const vertexUintView = new Uint32Array(vertexData);
   const indexData = new Uint32Array(indexCount);
 
-  let vertexOffset = 0;
+  let vertexWordOffset = 0;
   let indexOffset = 0;
   let baseVertex = 0;
   let minX = Infinity;
@@ -545,6 +552,7 @@ function buildMeshGeometryFromQuads(
     const normalX = axis === 0 ? normal : 0;
     const normalY = axis === 1 ? normal : 0;
     const normalZ = axis === 2 ? normal : 0;
+    const packedNormal = packNormal(normalX, normalY, normalZ);
 
     const corner0X = positionX;
     const corner0Y = positionY;
@@ -566,14 +574,30 @@ function buildMeshGeometryFromQuads(
     maxY = Math.max(maxY, corner0Y, corner1Y, corner2Y, corner3Y);
     maxZ = Math.max(maxZ, corner0Z, corner1Z, corner2Z, corner3Z);
 
-    writeVertex(vertexView, vertexOffset, corner0X, corner0Y, corner0Z, normalX, normalY, normalZ, color);
-    vertexOffset += VERTEX_STRIDE;
-    writeVertex(vertexView, vertexOffset, corner1X, corner1Y, corner1Z, normalX, normalY, normalZ, color);
-    vertexOffset += VERTEX_STRIDE;
-    writeVertex(vertexView, vertexOffset, corner2X, corner2Y, corner2Z, normalX, normalY, normalZ, color);
-    vertexOffset += VERTEX_STRIDE;
-    writeVertex(vertexView, vertexOffset, corner3X, corner3Y, corner3Z, normalX, normalY, normalZ, color);
-    vertexOffset += VERTEX_STRIDE;
+    vertexFloatView[vertexWordOffset] = corner0X;
+    vertexFloatView[vertexWordOffset + 1] = corner0Y;
+    vertexFloatView[vertexWordOffset + 2] = corner0Z;
+    vertexUintView[vertexWordOffset + 3] = packedNormal;
+    vertexUintView[vertexWordOffset + 4] = color;
+    vertexWordOffset += 5;
+    vertexFloatView[vertexWordOffset] = corner1X;
+    vertexFloatView[vertexWordOffset + 1] = corner1Y;
+    vertexFloatView[vertexWordOffset + 2] = corner1Z;
+    vertexUintView[vertexWordOffset + 3] = packedNormal;
+    vertexUintView[vertexWordOffset + 4] = color;
+    vertexWordOffset += 5;
+    vertexFloatView[vertexWordOffset] = corner2X;
+    vertexFloatView[vertexWordOffset + 1] = corner2Y;
+    vertexFloatView[vertexWordOffset + 2] = corner2Z;
+    vertexUintView[vertexWordOffset + 3] = packedNormal;
+    vertexUintView[vertexWordOffset + 4] = color;
+    vertexWordOffset += 5;
+    vertexFloatView[vertexWordOffset] = corner3X;
+    vertexFloatView[vertexWordOffset + 1] = corner3Y;
+    vertexFloatView[vertexWordOffset + 2] = corner3Z;
+    vertexUintView[vertexWordOffset + 3] = packedNormal;
+    vertexUintView[vertexWordOffset + 4] = color;
+    vertexWordOffset += 5;
 
     indexData[indexOffset + 0] = baseVertex;
     indexData[indexOffset + 1] = baseVertex + 1;
@@ -618,10 +642,12 @@ function buildWaterMeshGeometryFromQuads(
   const vertexCount = quadCount * 4;
   const indexCount = quadCount * 6;
   const vertexData = new ArrayBuffer(vertexCount * VERTEX_STRIDE);
-  const vertexView = new DataView(vertexData);
+  const vertexFloatView = new Float32Array(vertexData);
+  const vertexUintView = new Uint32Array(vertexData);
   const indexData = new Uint32Array(indexCount);
+  const waterNormal = packNormal(0, 1, 0);
 
-  let vertexOffset = 0;
+  let vertexWordOffset = 0;
   let indexOffset = 0;
   let baseVertex = 0;
   let minX = Infinity;
@@ -666,14 +692,30 @@ function buildWaterMeshGeometryFromQuads(
     maxY = Math.max(maxY, corner0Y, corner1Y, corner2Y, corner3Y);
     maxZ = Math.max(maxZ, corner0Z, corner1Z, corner2Z, corner3Z);
 
-    writeVertex(vertexView, vertexOffset, corner0X, corner0Y, corner0Z, 0, 1, 0, color);
-    vertexOffset += VERTEX_STRIDE;
-    writeVertex(vertexView, vertexOffset, corner1X, corner1Y, corner1Z, 0, 1, 0, color);
-    vertexOffset += VERTEX_STRIDE;
-    writeVertex(vertexView, vertexOffset, corner2X, corner2Y, corner2Z, 0, 1, 0, color);
-    vertexOffset += VERTEX_STRIDE;
-    writeVertex(vertexView, vertexOffset, corner3X, corner3Y, corner3Z, 0, 1, 0, color);
-    vertexOffset += VERTEX_STRIDE;
+    vertexFloatView[vertexWordOffset] = corner0X;
+    vertexFloatView[vertexWordOffset + 1] = corner0Y;
+    vertexFloatView[vertexWordOffset + 2] = corner0Z;
+    vertexUintView[vertexWordOffset + 3] = waterNormal;
+    vertexUintView[vertexWordOffset + 4] = color;
+    vertexWordOffset += 5;
+    vertexFloatView[vertexWordOffset] = corner1X;
+    vertexFloatView[vertexWordOffset + 1] = corner1Y;
+    vertexFloatView[vertexWordOffset + 2] = corner1Z;
+    vertexUintView[vertexWordOffset + 3] = waterNormal;
+    vertexUintView[vertexWordOffset + 4] = color;
+    vertexWordOffset += 5;
+    vertexFloatView[vertexWordOffset] = corner2X;
+    vertexFloatView[vertexWordOffset + 1] = corner2Y;
+    vertexFloatView[vertexWordOffset + 2] = corner2Z;
+    vertexUintView[vertexWordOffset + 3] = waterNormal;
+    vertexUintView[vertexWordOffset + 4] = color;
+    vertexWordOffset += 5;
+    vertexFloatView[vertexWordOffset] = corner3X;
+    vertexFloatView[vertexWordOffset + 1] = corner3Y;
+    vertexFloatView[vertexWordOffset + 2] = corner3Z;
+    vertexUintView[vertexWordOffset + 3] = waterNormal;
+    vertexUintView[vertexWordOffset + 4] = color;
+    vertexWordOffset += 5;
 
     indexData[indexOffset + 0] = baseVertex;
     indexData[indexOffset + 1] = baseVertex + 1;
@@ -1055,26 +1097,7 @@ function decodeWaterSurfaceDepthWorldUnits(key: number): number {
   return depthBand * WATER_DEPTH_BAND_WORLD_UNITS + 1;
 }
 
-function writeVertex(
-  view: DataView,
-  byteOffset: number,
-  x: number,
-  y: number,
-  z: number,
-  normalX: number,
-  normalY: number,
-  normalZ: number,
-  color: number,
-): void {
-  view.setFloat32(byteOffset + 0 * FLOAT32_BYTES, x, true);
-  view.setFloat32(byteOffset + 1 * FLOAT32_BYTES, y, true);
-  view.setFloat32(byteOffset + 2 * FLOAT32_BYTES, z, true);
-  view.setInt8(byteOffset + 12, normalX * NORMAL_SCALE);
-  view.setInt8(byteOffset + 13, normalY * NORMAL_SCALE);
-  view.setInt8(byteOffset + 14, normalZ * NORMAL_SCALE);
-  view.setInt8(byteOffset + 15, NORMAL_SCALE);
-  view.setUint32(byteOffset + 16, color, true);
-}
+
 
 function acquireMesherScratch(requiredMaskLength: number): MesherScratch {
   const scratch = mesherScratchPool.pop() ?? {
