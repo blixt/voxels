@@ -58,3 +58,52 @@ test("worker-friendly opaque meshing matches the synchronous opaque mesh", () =>
   expect(combinedMesh.triangleCount).toBe(syncMesh.triangleCount);
   expect(combinedMesh.bounds).toEqual(syncMesh.bounds);
 });
+
+test("worker-friendly opaque meshing matches the synchronous mesh for fully solid chunks", () => {
+  const world = new VoxelWorld({ width: 48, height: 16, depth: 48 }, 16, [0, 0xff88aa44]);
+  for (let z = 16; z < 32; z += 1) {
+    for (let y = 0; y < 16; y += 1) {
+      for (let x = 16; x < 32; x += 1) {
+        world.setVoxel(x, y, z, 1);
+      }
+    }
+  }
+  for (let z = 16; z < 32; z += 1) {
+    for (let y = 0; y < 16; y += 1) {
+      for (let x = 0; x < 16; x += 1) {
+        world.setVoxel(x, y, z, 1);
+      }
+    }
+  }
+  for (let z = 16; z < 32; z += 1) {
+    for (let y = 0; y < 16; y += 1) {
+      for (let x = 32; x < 48; x += 1) {
+        world.setVoxel(x, y, z, 1);
+      }
+    }
+  }
+  for (let z = 20; z < 24; z += 1) {
+    for (let y = 4; y < 8; y += 1) {
+      world.setVoxel(32, y, z, 0);
+    }
+  }
+
+  const syncMesh = buildChunkMesh(world, 1, 0, 1);
+  const input = createOpaqueChunkMeshingInput(world, 1, 0, 1, { cloneData: true });
+  expect(input).not.toBeNull();
+  expect(input?.solidCount).toBe(16 * 16 * 16);
+
+  const opaqueMesh = buildOpaqueChunkMeshFromInput(
+    input!,
+    createMeshMaterialLut(world.palette, (materialIndex) => world.isWaterMaterial(materialIndex)),
+  );
+  const combinedMesh = buildChunkMeshFromOpaqueGeometry(world, 1, 0, 1, opaqueMesh);
+
+  expect(opaqueMesh.vertexCount).toBe(syncMesh.vertexCount);
+  expect(opaqueMesh.indexCount).toBe(syncMesh.indexCount);
+  expect(opaqueMesh.triangleCount).toBe(syncMesh.triangleCount);
+  expect(new Uint8Array(opaqueMesh.vertexData)).toEqual(new Uint8Array(syncMesh.vertexData));
+  expect(opaqueMesh.indexData).toEqual(syncMesh.indexData);
+  expect(combinedMesh.triangleCount).toBe(syncMesh.triangleCount);
+  expect(combinedMesh.bounds).toEqual(syncMesh.bounds);
+});

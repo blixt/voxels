@@ -651,3 +651,18 @@
 | The worker might still need full neighbor chunks for occlusion checks, so shrinking the payload could break hidden-face or fully-occluded-solid logic | Keep the synchronous mesher untouched, update only the async meshing input path, and rerun the worker-equivalence plus mesher focused tests | Confirmed. Focused tests stayed green and hole-signal frames remained `0` | Confirmed |
 | `postMessage @ :` being high in the trace might be incidental noise rather than real transfer cost | Compare the reported trace hotspot sets directly after the payload shrink, not just average frame numbers | Confirmed. `postMessage @ :` exclusive dropped from about `12316.4 ms` to about `193.1 ms`, so the transfer payload really was the problem | Confirmed |
 | The next async meshing win is probably another transfer-path cleanup after this slice | Re-read the new trace before assuming that | Rejected. Once the neighbor payload shrank, the dominant remaining cost stayed inside the chunk-meshing worker itself, so the next pass should target mesher-internal work rather than another large boundary-payload rewrite | Rejected |
+
+## 2026-03-13 rejected inline render-summary generation
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| The post-generation `summarizeGeneratedChunkRender(...)` pass is still enough wasted work that inlining render-summary construction into `generateChunk(...)` will improve real gameplay, not just generator microbenches | Build the summary inline, then compare the generator batch microbench, 10-second walk benchmark, and live-forward Chrome trace before keeping the extra scratch state | Rejected. The generator microbench improved slightly, but the walk benchmark and live-forward trace both regressed, so the whole slice was reverted | Rejected |
+| The extra render-summary scratch arrays and helper functions are acceptable complexity if the generator microbench moves the right way | Keep the change only if the browser gates also move the right way | Rejected. This was a local optimum, not a player-path win | Rejected |
+
+## 2026-03-13 fully solid opaque chunk fast path
+
+| Hypothesis | Tiny verification case | Result | Status |
+| --- | --- | --- | --- |
+| A large share of streamed chunks are fully opaque filled volumes, and those chunks should bypass the full 3D greedy sweep in the async opaque mesher | Sample representative gameplay chunks first, then add a fully-solid face-only fast path and compare a targeted full-solid mesher microbench plus the browser walk/trace gates | Confirmed. About `26.1%` of sampled chunks were fully filled and fully opaque, the targeted mesher microbench dropped from about `208.448 ms` to `37.774 ms`, and the browser walk/trace metrics improved | Confirmed |
+| A face-only fast path for filled chunks is too specialized and will become invalid once edits create stranger worlds | Keep it generic by keying only off actual chunk data plus real neighbor face snapshots, then rerun worker-equivalence tests on a fully solid chunk with partial neighbor-face exposure | Confirmed. The new focused test stayed green, so the fast path remains valid for edited worlds as long as the chunk is actually fully opaque-filled | Confirmed |
+| The remaining meshing hotspot is still probably transfer or queue overhead, not mesher-internal work | Re-read the trace and compare it against the new fast-path browser runs instead of assuming that | Rejected. The route still improves when mesher internals get cheaper, so the next likely win remains inside worker meshing math/data flow rather than at the transfer boundary | Rejected |

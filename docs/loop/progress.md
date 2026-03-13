@@ -2273,3 +2273,38 @@
   - hole-signal frames stayed at `0`
   - the worker boundary is now much closer to the actual data dependency surface
   - the next meshing target is now more likely inside the mesher math itself than in the cross-thread payload size
+
+## 2026-03-13 rejected inline render-summary generation
+
+- I briefly tried the obvious “remove the second summary pass” idea in `procedural-generator.ts`:
+  - build `GeneratedChunkRenderSummary` inline during `generateChunk(...)` instead of calling `summarizeGeneratedChunkRender(...)` afterward
+  - the narrow generator microbench did improve slightly, from about `640.661 ms` to `631.370 ms` for the same 24-chunk batch
+- That was a local optimum, not a real win:
+  - the 10-second walk benchmark regressed from about `1.206 ms` to `1.228 ms` average gameplay frame
+  - `avg_deltaTaskDurationMs` regressed from about `3207.367` to `3227.199`
+  - the live-forward trace regressed slightly too, from about `1.319 ms` to `1.322 ms` average gameplay frame
+- I rejected that whole slice and restored the tree to the committed baseline instead of keeping extra scratch state and helper code that the browser gates did not justify
+
+## 2026-03-13 fully solid opaque chunk fast path
+
+- The broad hotspot pass still pointed at chunk-meshing worker CPU, so I checked whether there was a structural case we were treating expensively:
+  - in a representative gameplay band, about `26.1%` of generated chunks were completely filled
+  - all of those sampled filled chunks were fully opaque, not water-filled
+  - those chunks do not need the full 3D greedy sweep because only their boundary faces can ever be visible
+- That led to a narrower worker-side fast path:
+  - `opaque-chunk-mesher.ts` now detects fully opaque filled chunks and builds their mesh from the six boundary face masks only
+  - the fast path still uses real neighbor face data, so it stays correct for edited worlds and partial face exposure
+  - I did not add a second renderer or any generator-specific assumptions; this is purely a different meshing path over authoritative chunk data
+- The targeted microbench proved the direction before I spent time on browser validation:
+  - a fully solid exposed-chunk mesher probe dropped from about `208.448 ms` to `37.774 ms` for the same 200-build workload
+- The real browser gates also moved the right way, so this slice is worth keeping:
+  - 10-second walk benchmark moved from about `1.265 ms` to `1.253 ms` average gameplay frame
+  - p95 gameplay frame improved from `3.4 ms` to `3.3 ms`
+  - `avg_deltaTaskDurationMs` improved from about `3357.013` to `3341.627`
+  - the live-forward trace moved from about `1.319 ms` to `1.303 ms` average gameplay frame
+  - `avgMeshMs` improved from about `0.363 ms` to `0.355 ms`
+  - `maxPendingMeshJobs` improved from `28` to `22`
+  - hole-signal frames stayed at `0`
+- Residual:
+  - chunk-meshing worker CPU is still the dominant cluster in the trace
+  - the next clean target is probably another structural meshing-path reduction, not generator/render-summary fusion or more transfer-path work

@@ -4583,3 +4583,105 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - Shrinking async meshing inputs to the actual six neighbor faces produced a real walk/trace win and collapsed cross-thread transfer overhead in the trace.
 - The next meshing win is more likely to come from the worker mesher’s internal algorithm or data layout than from another large payload reduction, because the worst transfer hotspot is now mostly gone.
+
+## 2026-03-13 rejected inline render-summary generation
+
+#### Commands
+
+- `git status --short`
+- `git diff -- src/engine/procedural-generator.ts tests/procedural-generator.test.ts`
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-generator.test.ts tests/generated-chunk-render-summary.test.ts tests/generated-chunk-transfer.test.ts tests/generated-chunk-codec.test.ts`
+- `mise exec -- bun -e '... ProceduralWorldGenerator.generateChunk(...) batch microbench ...'`
+- `mise run bench-browser-game -- --label=generated-summary-inline --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=1 --walk-duration=10 --walk-settle=4 --walk-sample-hz=120`
+- `mise run trace-route -- --benchmark=live-forward --label=generated-summary-inline-trace --duration=10 --settle=4 --sample-hz=120`
+
+#### Numeric probes
+
+- Generator microbench:
+  - baseline batch `640.661 ms`
+  - inline-summary batch `631.370 ms`
+  - checksum unchanged at `3148920`
+- Walk benchmark:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-bHezjE/report.json`
+  - avg gameplay frame `1.228 ms`
+  - p95 gameplay frame `3.3 ms`
+  - `avg_deltaTaskDurationMs = 3227.199`
+  - hole-signal frames `0`
+- Live-forward trace:
+  - report: `artifacts/browser-route-trace/20260313T000651Z-generated-summary-inline-trace/report.json`
+  - avg gameplay frame `1.3220 ms`
+  - p95 gameplay frame `3.5 ms`
+  - avg mesh `0.3844 ms`
+  - hole-signal frames `0`
+
+#### Residual
+
+- This slice was rejected and reverted before continuing.
+- The generator-only microbench improvement did not survive the real browser gates, so the extra summary scratch state was not worth keeping.
+
+## 2026-03-13 fully solid opaque chunk fast path
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/opaque-chunk-mesher.test.ts tests/mesher.test.ts`
+- `mise exec -- bun -e '... full solid chunk worker mesher microbench ...'`
+- `mise run build`
+- `mise run bench-browser-game -- --label=solid-face-fastpath --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=1 --walk-duration=10 --walk-settle=4 --walk-sample-hz=120`
+- `mise run trace-route -- --benchmark=live-forward --label=solid-face-fastpath-trace --duration=10 --settle=4 --sample-hz=120`
+
+#### Numeric probes
+
+- Filled-chunk prevalence probe:
+  - sampled chunks `2601`
+  - fully filled chunks `679`
+  - fully filled ratio `26.1%`
+  - fully opaque among filled chunks `679 / 679`
+- Focused verification:
+  - `13` pass
+  - `0` fail
+- Full-solid worker mesher microbench:
+  - baseline `208.448 ms`
+  - fast-path `37.774 ms`
+  - checksum `14400`
+- Walk benchmark:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-igKH5R/report.json`
+  - benchmark elapsed `14112.366 ms`
+  - avg gameplay frame `1.253 ms`
+  - p95 gameplay frame `3.3 ms`
+  - max gameplay frame `9.6 ms`
+  - hole-signal frames `0`
+  - peak JS heap used `14298136 bytes`
+  - `avg_deltaTaskDurationMs = 3341.627`
+- Previous comparable walk benchmark:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-oIrbNh/report.json`
+  - avg gameplay frame `1.265 ms`
+  - p95 gameplay frame `3.4 ms`
+  - max gameplay frame `9.5 ms`
+  - hole-signal frames `0`
+  - `avg_deltaTaskDurationMs = 3357.013`
+- Live-forward trace:
+  - report: `artifacts/browser-route-trace/20260313T001827Z-solid-face-fastpath-trace/report.json`
+  - avg gameplay frame `1.302561048243002 ms`
+  - p95 gameplay frame `3.399999976158142 ms`
+  - max gameplay frame `14.899999976158142 ms`
+  - avg mesh `0.3553305538798316 ms`
+  - max mesh `13 ms`
+  - `maxPendingMeshJobs = 22`
+  - hole-signal frames `0`
+- Previous comparable live-forward trace:
+  - report: `artifacts/browser-route-trace/20260312T234559Z-neighbor-face-transfer-trace/report.json`
+  - avg gameplay frame `1.3193452388402962 ms`
+  - p95 gameplay frame `3.400000035762787 ms`
+  - max gameplay frame `12.899999976158142 ms`
+  - avg mesh `0.3634523806827409 ms`
+  - max mesh `11.100000023841858 ms`
+  - `maxPendingMeshJobs = 28`
+  - hole-signal frames `0`
+
+#### Residual
+
+- This slice is worth keeping.
+- The fully solid chunk fast path is a real win in both the targeted mesher probe and the browser route.
+- Worker meshing is still the dominant trace cluster, so the next pass should stay structural rather than chasing tiny transfer wins.

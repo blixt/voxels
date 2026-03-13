@@ -99,6 +99,9 @@ export function buildOpaqueChunkMeshFromInput(
   if (input.solidCount === chunkVolume && isChunkFullyOccluded(input.neighbors, chunkSize)) {
     return createEmptyOpaqueChunkMesh(null);
   }
+  if (input.solidCount === chunkVolume && isChunkFullyOpaque(input.chunkData, materialLut)) {
+    return buildFullyOpaqueChunkBoundaryMesh(input, materialLut, fallbackBounds);
+  }
 
   const scratch = acquireMesherScratch(Math.max(
     (input.solidBounds.max[1] - input.solidBounds.min[1]) * (input.solidBounds.max[2] - input.solidBounds.min[2]),
@@ -258,6 +261,15 @@ function isOpaqueMaterial(materialLut: MeshMaterialLut, material: number): boole
   return materialLut.opaqueMask[material] === 1;
 }
 
+function isChunkFullyOpaque(chunkData: Uint16Array, materialLut: MeshMaterialLut): boolean {
+  for (let index = 0; index < chunkData.length; index += 1) {
+    if (!isOpaqueMaterial(materialLut, chunkData[index]!)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function sampleChunkVoxel(
   chunkData: Uint16Array,
   chunkSize: number,
@@ -325,6 +337,143 @@ function sampleNeighborVoxel(
     return faceData[x + z * chunkSize]!;
   }
   return faceData[x + y * chunkSize]!;
+}
+
+function buildFullyOpaqueChunkBoundaryMesh(
+  input: OpaqueChunkMeshingInput,
+  materialLut: MeshMaterialLut,
+  fallbackBounds: ChunkBounds,
+): OpaqueChunkMeshGeometry {
+  const chunkSize = input.chunkSize;
+  const chunkArea = chunkSize * chunkSize;
+  const scratch = acquireMesherScratch(chunkArea);
+  const originX = input.coord.x * chunkSize;
+  const originY = input.coord.y * chunkSize;
+  const originZ = input.coord.z * chunkSize;
+  const mask = scratch.mask;
+
+  for (let axis = 0; axis < 3; axis += 1) {
+    const u = (axis + 1) % 3;
+    const v = (axis + 2) % 3;
+    for (let faceDirection = 0; faceDirection < 2; faceDirection += 1) {
+      const faceCoordinate = faceDirection === 0 ? 0 : chunkSize - 1;
+      const faceSign = faceDirection === 0 ? -1 : 1;
+      const neighbor = input.neighbors[axis][faceDirection]!;
+      let maskIndex = 0;
+      for (let row = 0; row < chunkSize; row += 1) {
+        for (let column = 0; column < chunkSize; column += 1) {
+          const position = [0, 0, 0];
+          position[axis] = faceCoordinate;
+          position[u] = column;
+          position[v] = row;
+          const material = sampleChunkVoxel(
+            input.chunkData,
+            chunkSize,
+            chunkArea,
+            position[0]!,
+            position[1]!,
+            position[2]!,
+          );
+          const neighborMaterial = sampleNeighborVoxel(
+            neighbor.faceData,
+            axis,
+            position[0]!,
+            position[1]!,
+            position[2]!,
+            chunkSize,
+          );
+          mask[maskIndex] = isOpaqueMaterial(materialLut, neighborMaterial) ? 0 : faceSign * material;
+          maskIndex += 1;
+        }
+      }
+      appendGreedyFaceMaskQuads(
+        scratch,
+        mask,
+        chunkSize,
+        originX,
+        originY,
+        originZ,
+        axis,
+        u,
+        v,
+        faceDirection === 0 ? 0 : chunkSize,
+      );
+    }
+  }
+
+  const geometry = buildMeshGeometryFromQuads(scratch.quads, scratch.quadLength, materialLut);
+  releaseMesherScratch(scratch);
+  return geometry.bounds
+    ? geometry
+    : createEmptyOpaqueChunkMesh(fallbackBounds);
+}
+
+function appendGreedyFaceMaskQuads(
+  scratch: MesherScratch,
+  mask: Int32Array,
+  span: number,
+  originX: number,
+  originY: number,
+  originZ: number,
+  axis: number,
+  u: number,
+  v: number,
+  axisOffset: number,
+): void {
+  let maskIndex = 0;
+  for (let row = 0; row < span; row += 1) {
+    for (let column = 0; column < span; ) {
+      const current = mask[maskIndex];
+      if (current === 0) {
+        column += 1;
+        maskIndex += 1;
+        continue;
+      }
+
+      let width = 1;
+      while (column + width < span && mask[maskIndex + width] === current) {
+        width += 1;
+      }
+
+      let height = 1;
+      let shouldGrow = true;
+      while (row + height < span && shouldGrow) {
+        for (let offset = 0; offset < width; offset += 1) {
+          if (mask[maskIndex + offset + height * span] !== current) {
+            shouldGrow = false;
+            break;
+          }
+        }
+        if (shouldGrow) {
+          height += 1;
+        }
+      }
+
+      appendQuad(
+        scratch,
+        originX + (axis === 0 ? axisOffset : 0) + (u === 0 ? column : 0) + (v === 0 ? row : 0),
+        originY + (axis === 1 ? axisOffset : 0) + (u === 1 ? column : 0) + (v === 1 ? row : 0),
+        originZ + (axis === 2 ? axisOffset : 0) + (u === 2 ? column : 0) + (v === 2 ? row : 0),
+        u === 0 ? width : 0,
+        u === 1 ? width : 0,
+        u === 2 ? width : 0,
+        v === 0 ? height : 0,
+        v === 1 ? height : 0,
+        v === 2 ? height : 0,
+        axis,
+        current,
+      );
+
+      for (let dy = 0; dy < height; dy += 1) {
+        for (let dx = 0; dx < width; dx += 1) {
+          mask[maskIndex + dx + dy * span] = 0;
+        }
+      }
+
+      column += width;
+      maskIndex += width;
+    }
+  }
 }
 
 function buildMeshGeometryFromQuads(
