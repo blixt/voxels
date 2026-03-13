@@ -227,6 +227,13 @@ body::before {
   padding: 8px;
 }
 
+.game-hotbar-summary {
+  margin: 0;
+  padding: 0 8px;
+  color: rgba(244, 239, 227, 0.72);
+  font-size: 0.74rem;
+}
+
 .game-hotbar-slot {
   min-width: 0;
   display: grid;
@@ -276,6 +283,20 @@ body::before {
 .game-hotbar-slot-count {
   display: block;
   text-align: right;
+}
+
+.game-hotbar-slot-fill {
+  display: block;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  transform-origin: left center;
+  background: linear-gradient(90deg, rgba(255, 227, 145, 0.92), rgba(109, 208, 244, 0.92));
+  box-shadow: 0 0 12px rgba(122, 189, 227, 0.16);
+}
+
+.game-hotbar-slot.is-empty .game-hotbar-slot-fill {
+  background: rgba(255, 246, 214, 0.08);
 }
 
 .discovery-achievement-layer {

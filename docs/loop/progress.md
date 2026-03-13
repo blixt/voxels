@@ -2433,3 +2433,17 @@
 - I also fixed one easy-to-miss visual ambiguity during implementation:
   - the earlier overlay class structure would have recolored the targeted voxel itself whenever placement was possible
   - I removed that coupling so the break target stays visually distinct from the placement preview
+
+## 2026-03-13 inventory management readability pass
+
+- After the interaction affordances were in place, the next mismatch with the roadmap was inventory usability:
+  - the `32`-slot / `1024`-per-stack rules existed
+  - but the hotbar still made the player infer overall inventory state from scattered slot numbers
+- I kept this as a pure presentation slice over authoritative inventory truth:
+  - extracted a small hotbar window helper so the visible slot range logic is explicit and testable
+  - added a hotbar summary line with visible range, used-stack count, and selected-stack state
+  - added per-slot fill bars so stack fullness reads immediately instead of only through raw numbers
+- The browser smoke used the real interaction loop again:
+  - before breaking a voxel, the summary read `Slots 1-9 of 32 • Stacks 0 / 32 • Selected empty`
+  - after breaking one voxel, it switched to `Slots 1-9 of 32 • Stacks 1 / 32 • Selected #7C8 1 / 1,024`
+  - the selected slot fill bar changed from `scaleX(0)` to `scaleX(0.000976562)`

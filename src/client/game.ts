@@ -5,6 +5,8 @@ import {
   type TargetingSnapshot,
 } from "./game-controller.ts";
 import { formatDiscoveryInline } from "../engine/discovery-catalog.ts";
+import { describeHotbarWindow } from "../engine/hotbar-layout.ts";
+import { INVENTORY_STACK_SIZE } from "../engine/inventory.ts";
 import { materialToHexColor } from "../engine/procedural-generator.ts";
 import { worldUnitsToMeters } from "../engine/scale.ts";
 import type {
@@ -447,6 +449,9 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
   targetCard.className = "game-target-card";
   targetCard.append(targetLabel, targetTitle, targetMeta, targetActions);
 
+  const hotbarSummary = document.createElement("p");
+  hotbarSummary.className = "game-hotbar-summary";
+
   const hotbarElement = document.createElement("div");
   hotbarElement.className = "game-hotbar";
   const hotbarSlots: Array<{
@@ -455,6 +460,7 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
     swatch: HTMLElement;
     material: HTMLElement;
     count: HTMLElement;
+    fill: HTMLElement;
   }> = [];
   for (let slotIndex = 0; slotIndex < HOTBAR_VISIBLE_SLOT_COUNT; slotIndex += 1) {
     const index = document.createElement("span");
@@ -465,14 +471,16 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
     material.className = "game-hotbar-slot-material";
     const count = document.createElement("span");
     count.className = "game-hotbar-slot-count";
+    const fill = document.createElement("span");
+    fill.className = "game-hotbar-slot-fill";
     const slot = document.createElement("div");
     slot.className = "game-hotbar-slot";
-    slot.append(index, swatch, material, count);
+    slot.append(index, swatch, material, count, fill);
     hotbarElement.append(slot);
-    hotbarSlots.push({ root: slot, index, swatch, material, count });
+    hotbarSlots.push({ root: slot, index, swatch, material, count, fill });
   }
 
-  root.replaceChildren(targetCard, hotbarElement);
+  root.replaceChildren(targetCard, hotbarSummary, hotbarElement);
 
   return {
     update(snapshot, inventory, targeting) {
@@ -495,17 +503,37 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
         targeting.placeActionLabel,
       ].join(" • ");
 
-      const visibleStart = computeHotbarStartSlot(inventory.selectedSlot, inventory.slots.length, HOTBAR_VISIBLE_SLOT_COUNT);
+      const windowLayout = describeHotbarWindow(
+        inventory.selectedSlot,
+        inventory.slots.length,
+        HOTBAR_VISIBLE_SLOT_COUNT,
+      );
+      const selectedStack = inventory.slots[inventory.selectedSlot];
+      const selectedLabel = selectedStack
+        ? `Selected ${materialToHexColor(selectedStack.material)} ${selectedStack.count.toLocaleString()} / ${INVENTORY_STACK_SIZE.toLocaleString()}`
+        : "Selected empty";
+      hotbarSummary.textContent = [
+        `Slots ${windowLayout.startSlot + 1}-${windowLayout.endSlotExclusive} of ${inventory.slots.length}`,
+        `Stacks ${inventory.usedStacks.toLocaleString()} / ${inventory.slots.length}`,
+        selectedLabel,
+      ].join(" • ");
+
       for (let slotOffset = 0; slotOffset < HOTBAR_VISIBLE_SLOT_COUNT; slotOffset += 1) {
-        const slotIndex = visibleStart + slotOffset;
+        const slotIndex = windowLayout.startSlot + slotOffset;
         const slot = hotbarSlots[slotOffset]!;
         const stack = inventory.slots[slotIndex];
         const materialHex = stack ? materialToHexColor(stack.material) : "Empty";
+        if (slotIndex >= inventory.slots.length) {
+          slot.root.setAttribute("hidden", "");
+          continue;
+        }
+        slot.root.removeAttribute("hidden");
         slot.root.classList.toggle("is-selected", slotIndex === inventory.selectedSlot);
         slot.root.classList.toggle("is-empty", stack === null);
         slot.index.textContent = String(slotIndex + 1);
         slot.material.textContent = materialHex;
         slot.count.textContent = stack ? stack.count.toLocaleString() : "";
+        slot.fill.style.transform = `scaleX(${stack ? stack.count / INVENTORY_STACK_SIZE : 0})`;
         slot.swatch.style.background = stack ? materialToCssColor(materialHex) : "rgba(255, 246, 214, 0.08)";
       }
     },
@@ -601,14 +629,6 @@ function createTelemetryValues(root: HTMLElement): HTMLSpanElement[] {
   }
   root.replaceChildren(fragment);
   return values;
-}
-
-function computeHotbarStartSlot(selectedSlot: number, slotCount: number, visibleCount: number): number {
-  if (slotCount <= visibleCount) {
-    return 0;
-  }
-  const centered = selectedSlot - Math.floor(visibleCount / 2);
-  return Math.max(0, Math.min(slotCount - visibleCount, centered));
 }
 
 function materialToCssColor(hex: string): string {

@@ -5006,3 +5006,47 @@ This line of investigation was screened locally and not kept in the runtime yet.
   - interaction failure/success is clearer without relying on the debug panel
   - placement now has a concrete ghost preview driven from actual gameplay state
   - the short trace stayed effectively flat, so this did not buy clarity by quietly regressing the runtime
+
+## 2026-03-13 inventory management readability pass
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/hotbar-layout.test.ts tests/targeting-overlay.test.ts`
+- `mise run build`
+- ad hoc browser smoke via `scripts/lib/browser-game-benchmark-harness.ts` helpers against a fresh production server
+- `mise run trace-route -- --benchmark=live-forward --label=hotbar-summary-smoke --duration=2 --settle=1 --sample-hz=20`
+
+#### Result
+
+- `typecheck`
+  - pass
+- focused tests
+  - `6` pass
+  - `0` fail
+- `build`
+  - pass
+- browser smoke
+  - pass
+- live-forward trace
+  - pass
+  - `avg gameplay frame = 3.07 ms`
+  - `p95 gameplay frame = 6.10 ms`
+  - `frames with hole signals = 0`
+
+#### Browser smoke findings
+
+- Before collecting any voxel:
+  - summary text was `Slots 1-9 of 32 • Stacks 0 / 32 • Selected empty`
+  - selected-slot fill bar was `scaleX(0)`
+- After breaking one voxel:
+  - `breakTargetVoxel() = true`
+  - summary text became `Slots 1-9 of 32 • Stacks 1 / 32 • Selected #7C8 1 / 1,024`
+  - selected-slot fill bar became `scaleX(0.000976562)`
+
+#### Outcome
+
+- The slice is worth keeping:
+  - inventory management now reads like a real player-facing system instead of a debug-derived hotbar
+  - the slot-window logic is now explicit and unit tested
+  - the short trace stayed healthy, so the extra clarity did not come with an obvious runtime regression
