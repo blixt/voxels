@@ -15,12 +15,16 @@ const WATER_DEPTH_BAND_SHIFT = 16;
 const WATER_DEPTH_BAND_MASK = 0xff;
 const WATER_DEPTH_BAND_WORLD_UNITS = 4;
 
+const MAX_MATERIAL_INDEX = 0x1001;
+
 interface MesherScratch {
   quads: Int32Array;
   quadLength: number;
   waterQuads: Int32Array;
   waterQuadLength: number;
   mask: Int32Array;
+  opaqueMask: Uint8Array | null;
+  opaqueMaskWorld: ResidentChunkWorld | null;
 }
 
 interface ResolvedChunkNeighbor {
@@ -240,6 +244,7 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
     (solidBounds.max[0] - solidBounds.min[0]) * (solidBounds.max[1] - solidBounds.min[1]),
   );
   const scratch = acquireMesherScratch(maxMaskLength);
+  const opaqueMask = ensureOpaqueMask(scratch, world);
 
   for (let axis = 0; axis < 3; axis += 1) {
     const u = (axis + 1) % 3;
@@ -281,8 +286,8 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
                 chunkSize,
                 chunkArea,
               );
-          const opaqueA = isOpaqueMaterial(world, a) ? a : 0;
-          const opaqueB = isOpaqueMaterial(world, b) ? b : 0;
+          const opaqueA = opaqueMask[a] ? a : 0;
+          const opaqueB = opaqueMask[b] ? b : 0;
           mask[maskIndex] = (opaqueA !== 0) === (opaqueB !== 0)
             ? 0
             : opaqueA !== 0
@@ -826,8 +831,17 @@ function combineMeshBounds(
   };
 }
 
-function isOpaqueMaterial(world: ResidentChunkWorld, material: number): boolean {
-  return material !== 0 && !world.isWaterMaterial(material);
+function ensureOpaqueMask(scratch: MesherScratch, world: ResidentChunkWorld): Uint8Array {
+  if (scratch.opaqueMask && scratch.opaqueMaskWorld === world) {
+    return scratch.opaqueMask;
+  }
+  const mask = scratch.opaqueMask ?? new Uint8Array(MAX_MATERIAL_INDEX);
+  for (let i = 0; i < MAX_MATERIAL_INDEX; i += 1) {
+    mask[i] = (i !== 0 && !world.isWaterMaterial(i)) ? 1 : 0;
+  }
+  scratch.opaqueMask = mask;
+  scratch.opaqueMaskWorld = world;
+  return mask;
 }
 
 function sampleChunkVoxel(
@@ -1151,6 +1165,8 @@ function acquireMesherScratch(requiredMaskLength: number): MesherScratch {
     waterQuads: new Int32Array(QUAD_STRIDE * 64),
     waterQuadLength: 0,
     mask: new Int32Array(requiredMaskLength),
+    opaqueMask: null,
+    opaqueMaskWorld: null,
   };
   scratch.quadLength = 0;
   scratch.waterQuadLength = 0;
