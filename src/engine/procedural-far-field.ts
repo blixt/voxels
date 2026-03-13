@@ -893,12 +893,12 @@ function ensureBandSampleCache(
     for (let sampleX = 0; sampleX < sampleSpan; sampleX += 1) {
       const cellX = sampleX - sampleRadius;
       const cellMinX = anchorX + cellX * config.sampleStride;
-      const sampledCell = sampleFarFieldCell(source, cellMinX, cellMinZ, config.sampleStride);
+      sampleFarFieldCellInto(farFieldCellScratch, source, cellMinX, cellMinZ, config.sampleStride);
       const sampleIndex = sampleX + rowOffset;
-      heights[sampleIndex] = sampledCell.surfaceY;
-      colors[sampleIndex] = sampledCell.surfaceColor;
-      waterHeights[sampleIndex] = sampledCell.waterTopY ?? NO_WATER_HEIGHT;
-      waterColors[sampleIndex] = sampledCell.waterColor;
+      heights[sampleIndex] = farFieldCellScratch.surfaceY;
+      colors[sampleIndex] = farFieldCellScratch.surfaceColor;
+      waterHeights[sampleIndex] = farFieldCellScratch.waterTopY;
+      waterColors[sampleIndex] = farFieldCellScratch.waterColor;
     }
   }
 
@@ -988,11 +988,11 @@ function tryShiftBandSampleCache(
       const cellZ = sampleZ - cached.sampleRadius;
       const cellMinX = anchorX + cellX * config.sampleStride;
       const cellMinZ = anchorZ + cellZ * config.sampleStride;
-      const sampledCell = sampleFarFieldCell(source, cellMinX, cellMinZ, config.sampleStride);
-      heights[sampleIndex] = sampledCell.surfaceY;
-      colors[sampleIndex] = sampledCell.surfaceColor;
-      waterHeights[sampleIndex] = sampledCell.waterTopY ?? NO_WATER_HEIGHT;
-      waterColors[sampleIndex] = sampledCell.waterColor;
+      sampleFarFieldCellInto(farFieldCellScratch, source, cellMinX, cellMinZ, config.sampleStride);
+      heights[sampleIndex] = farFieldCellScratch.surfaceY;
+      colors[sampleIndex] = farFieldCellScratch.surfaceColor;
+      waterHeights[sampleIndex] = farFieldCellScratch.waterTopY;
+      waterColors[sampleIndex] = farFieldCellScratch.waterColor;
       sampledCellCount += 1;
     }
   }
@@ -1364,29 +1364,38 @@ function pushWaterTopQuad(
   );
 }
 
-function sampleFarFieldCell(
+interface FarFieldCellScratch {
+  surfaceY: number;
+  surfaceColor: number;
+  waterTopY: number;
+  waterColor: number;
+}
+
+const farFieldCellScratch: FarFieldCellScratch = {
+  surfaceY: NO_GENERATED_SURFACE_HEIGHT,
+  surfaceColor: 0,
+  waterTopY: NO_WATER_HEIGHT,
+  waterColor: 0,
+};
+
+function sampleFarFieldCellInto(
+  out: FarFieldCellScratch,
   source: FarFieldSource,
   cellMinX: number,
   cellMinZ: number,
   sampleStride: number,
-): {
-  surfaceY: number;
-  surfaceColor: number;
-  waterTopY: number | null;
-  waterColor: number;
-} {
+): boolean {
   const centerX = cellMinX + sampleStride * 0.5;
   const centerZ = cellMinZ + sampleStride * 0.5;
   const centerColumn = source.sampleFarFieldColumn(centerX, centerZ);
   if (!centerColumn) {
-    return {
-      surfaceY: NO_GENERATED_SURFACE_HEIGHT,
-      surfaceColor: 0,
-      waterTopY: null,
-      waterColor: 0,
-    };
+    out.surfaceY = NO_GENERATED_SURFACE_HEIGHT;
+    out.surfaceColor = 0;
+    out.waterTopY = NO_WATER_HEIGHT;
+    out.waterColor = 0;
+    return false;
   }
-  let waterTopY: number | null = centerColumn.waterTopY;
+  let waterTopY = centerColumn.waterTopY;
   let waterColor = centerColumn.waterMaterial !== null
     ? source.palette[centerColumn.waterMaterial] ?? 0
     : 0;
@@ -1408,12 +1417,11 @@ function sampleFarFieldCell(
     }
   }
 
-  return {
-    surfaceY: centerColumn.surfaceY,
-    surfaceColor: source.palette[centerColumn.surfaceMaterial] ?? 0,
-    waterTopY,
-    waterColor,
-  };
+  out.surfaceY = centerColumn.surfaceY;
+  out.surfaceColor = source.palette[centerColumn.surfaceMaterial] ?? 0;
+  out.waterTopY = waterTopY ?? NO_WATER_HEIGHT;
+  out.waterColor = waterColor;
+  return true;
 }
 
 

@@ -16,8 +16,10 @@ const WATER_DEPTH_BAND_MASK = 0xff;
 const WATER_DEPTH_BAND_WORLD_UNITS = 4;
 
 interface MesherScratch {
-  quads: number[];
-  waterQuads: number[];
+  quads: Int32Array;
+  quadLength: number;
+  waterQuads: Int32Array;
+  waterQuadLength: number;
   mask: Int32Array;
 }
 
@@ -238,7 +240,6 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
     (solidBounds.max[0] - solidBounds.min[0]) * (solidBounds.max[1] - solidBounds.min[1]),
   );
   const scratch = acquireMesherScratch(maxMaskLength);
-  const quads = scratch.quads;
 
   for (let axis = 0; axis < 3; axis += 1) {
     const u = (axis + 1) % 3;
@@ -320,7 +321,9 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
             }
           }
 
-          quads.push(
+          appendQuadToArray(
+            scratch,
+            "quads",
             originX
               + (axis === 0 ? x[axis] + 1 : 0)
               + (u === 0 ? solidBounds.min[u] + column : 0)
@@ -357,8 +360,8 @@ export function buildChunkMesh(world: ResidentChunkWorld, cx: number, cy: number
   }
 
   buildWaterSurfaceQuads(world, chunkData, neighbors, chunkSize, chunkArea, solidBounds, originX, originY, originZ, scratch);
-  const opaqueMesh = buildMeshGeometryFromQuads(quads, world);
-  const waterMesh = buildWaterMeshGeometryFromQuads(scratch.waterQuads, world);
+  const opaqueMesh = buildMeshGeometryFromQuads(scratch.quads, scratch.quadLength, world);
+  const waterMesh = buildWaterMeshGeometryFromQuads(scratch.waterQuads, scratch.waterQuadLength, world);
   const mesh = {
     vertexData: opaqueMesh.vertexData,
     vertexCount: opaqueMesh.vertexCount,
@@ -399,7 +402,6 @@ function buildWaterSurfaceQuads(
   scratch: MesherScratch,
 ): void {
   const mask = scratch.mask;
-  const quads = scratch.waterQuads;
   const width = solidBounds.max[0] - solidBounds.min[0];
   const depth = solidBounds.max[2] - solidBounds.min[2];
   const positiveYNeighbor = neighbors[1]![1];
@@ -468,7 +470,9 @@ function buildWaterSurfaceQuads(
           }
         }
 
-        quads.push(
+        appendQuadToArray(
+          scratch,
+          "waterQuads",
           originX + solidBounds.min[0] + column,
           originY + y + 1,
           originZ + solidBounds.min[2] + row,
@@ -503,7 +507,8 @@ function packNormal(normalX: number, normalY: number, normalZ: number): number {
 }
 
 function buildMeshGeometryFromQuads(
-  quads: readonly number[],
+  quads: Int32Array,
+  quadLength: number,
   world: ResidentChunkWorld,
 ): {
   vertexData: ArrayBuffer;
@@ -516,7 +521,7 @@ function buildMeshGeometryFromQuads(
     max: [number, number, number];
   } | null;
 } {
-  const quadCount = quads.length / QUAD_STRIDE;
+  const quadCount = quadLength / QUAD_STRIDE;
   const vertexCount = quadCount * 4;
   const indexCount = quadCount * 6;
   const vertexData = new ArrayBuffer(vertexCount * VERTEX_STRIDE);
@@ -534,7 +539,7 @@ function buildMeshGeometryFromQuads(
   let maxY = -Infinity;
   let maxZ = -Infinity;
 
-  for (let quadIndex = 0; quadIndex < quads.length; quadIndex += QUAD_STRIDE) {
+  for (let quadIndex = 0; quadIndex < quadLength; quadIndex += QUAD_STRIDE) {
     const positionX = quads[quadIndex]!;
     const positionY = quads[quadIndex + 1]!;
     const positionZ = quads[quadIndex + 2]!;
@@ -625,7 +630,8 @@ function buildMeshGeometryFromQuads(
 }
 
 function buildWaterMeshGeometryFromQuads(
-  quads: readonly number[],
+  quads: Int32Array,
+  quadLength: number,
   world: ResidentChunkWorld,
 ): {
   vertexData: ArrayBuffer;
@@ -638,7 +644,7 @@ function buildWaterMeshGeometryFromQuads(
     max: [number, number, number];
   } | null;
 } {
-  const quadCount = quads.length / QUAD_STRIDE;
+  const quadCount = quadLength / QUAD_STRIDE;
   const vertexCount = quadCount * 4;
   const indexCount = quadCount * 6;
   const vertexData = new ArrayBuffer(vertexCount * VERTEX_STRIDE);
@@ -657,7 +663,7 @@ function buildWaterMeshGeometryFromQuads(
   let maxY = -Infinity;
   let maxZ = -Infinity;
 
-  for (let quadIndex = 0; quadIndex < quads.length; quadIndex += QUAD_STRIDE) {
+  for (let quadIndex = 0; quadIndex < quadLength; quadIndex += QUAD_STRIDE) {
     const positionX = quads[quadIndex]!;
     const positionY = quads[quadIndex + 1]!;
     const positionZ = quads[quadIndex + 2]!;
@@ -773,7 +779,7 @@ function buildWaterOnlyChunkMesh(
     cz * chunkSize,
     scratch,
   );
-  const mesh = buildWaterMeshGeometryFromQuads(scratch.waterQuads, world);
+  const mesh = buildWaterMeshGeometryFromQuads(scratch.waterQuads, scratch.waterQuadLength, world);
   releaseMesherScratch(scratch);
   return mesh;
 }
@@ -1099,14 +1105,55 @@ function decodeWaterSurfaceDepthWorldUnits(key: number): number {
 
 
 
+function appendQuadToArray(
+  scratch: MesherScratch,
+  target: "quads" | "waterQuads",
+  positionX: number,
+  positionY: number,
+  positionZ: number,
+  duX: number,
+  duY: number,
+  duZ: number,
+  dvX: number,
+  dvY: number,
+  dvZ: number,
+  axis: number,
+  face: number,
+): void {
+  const lengthKey = target === "quads" ? "quadLength" : "waterQuadLength";
+  const nextLength = scratch[lengthKey] + QUAD_STRIDE;
+  let arr = scratch[target];
+  if (nextLength > arr.length) {
+    const grown = new Int32Array(Math.max(nextLength, arr.length * 2, QUAD_STRIDE * 64));
+    grown.set(arr.subarray(0, scratch[lengthKey]));
+    scratch[target] = grown;
+    arr = grown;
+  }
+  const offset = scratch[lengthKey];
+  arr[offset] = positionX;
+  arr[offset + 1] = positionY;
+  arr[offset + 2] = positionZ;
+  arr[offset + 3] = duX;
+  arr[offset + 4] = duY;
+  arr[offset + 5] = duZ;
+  arr[offset + 6] = dvX;
+  arr[offset + 7] = dvY;
+  arr[offset + 8] = dvZ;
+  arr[offset + 9] = axis;
+  arr[offset + 10] = face;
+  scratch[lengthKey] = nextLength;
+}
+
 function acquireMesherScratch(requiredMaskLength: number): MesherScratch {
   const scratch = mesherScratchPool.pop() ?? {
-    quads: [],
-    waterQuads: [],
+    quads: new Int32Array(QUAD_STRIDE * 64),
+    quadLength: 0,
+    waterQuads: new Int32Array(QUAD_STRIDE * 64),
+    waterQuadLength: 0,
     mask: new Int32Array(requiredMaskLength),
   };
-  scratch.quads.length = 0;
-  scratch.waterQuads.length = 0;
+  scratch.quadLength = 0;
+  scratch.waterQuadLength = 0;
   if (scratch.mask.length < requiredMaskLength) {
     scratch.mask = new Int32Array(requiredMaskLength);
   }
@@ -1114,8 +1161,8 @@ function acquireMesherScratch(requiredMaskLength: number): MesherScratch {
 }
 
 function releaseMesherScratch(scratch: MesherScratch): void {
-  scratch.quads.length = 0;
-  scratch.waterQuads.length = 0;
+  scratch.quadLength = 0;
+  scratch.waterQuadLength = 0;
   if (mesherScratchPool.length >= MAX_MESHER_SCRATCH_POOL) {
     return;
   }

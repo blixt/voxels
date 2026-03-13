@@ -8,12 +8,12 @@ import {
 import type { FarFieldColumnSample, FarFieldSource } from "./far-field-source.ts";
 import type { FarFieldExclusionMask } from "./procedural-far-field.ts";
 import {
+  NO_GENERATED_SURFACE_HEIGHT,
   NO_GENERATED_WATER_HEIGHT,
   summarizeGeneratedChunkRender,
   type GeneratedChunkRenderSummary,
 } from "./generated-chunk-render-summary.ts";
 import {
-  sampleGeneratedRenderColumnSummary,
   summarizeGeneratedRenderColumn,
   type GeneratedRenderColumnSummary,
 } from "./generated-render-column-summary.ts";
@@ -258,26 +258,40 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     return isProceduralWaterMaterial(materialIndex);
   }
 
+  private farFieldColumnCacheCx = NaN;
+  private farFieldColumnCacheCz = NaN;
+  private farFieldColumnCacheSummary: GeneratedRenderColumnSummary | null = null;
+  private farFieldColumnCacheRevision = -1;
+
   sampleFarFieldColumn(worldX: number, worldZ: number): FarFieldColumnSample | null {
     const voxelX = Math.floor(worldX);
     const voxelZ = Math.floor(worldZ);
     const cx = Math.floor(voxelX / this.chunkSize);
     const cz = Math.floor(voxelZ / this.chunkSize);
-    const columnSummary = this.generatedRenderColumnSummaries.get(toColumnKey(cx, cz));
+    let columnSummary: GeneratedRenderColumnSummary | null | undefined;
+    if (cx === this.farFieldColumnCacheCx && cz === this.farFieldColumnCacheCz && this.farFieldColumnCacheRevision === this.farFieldDataRevision) {
+      columnSummary = this.farFieldColumnCacheSummary;
+    } else {
+      columnSummary = this.generatedRenderColumnSummaries.get(toColumnKey(cx, cz)) ?? null;
+      this.farFieldColumnCacheCx = cx;
+      this.farFieldColumnCacheCz = cz;
+      this.farFieldColumnCacheSummary = columnSummary;
+      this.farFieldColumnCacheRevision = this.farFieldDataRevision;
+    }
     if (!columnSummary) {
       return null;
     }
     const localX = voxelX - cx * this.chunkSize;
     const localZ = voxelZ - cz * this.chunkSize;
-    const sampled = sampleGeneratedRenderColumnSummary(columnSummary, localX, localZ, this.chunkSize);
-    if (!sampled) {
+    const columnIndex = localX + localZ * this.chunkSize;
+    const surfaceY = columnSummary.surfaceY[columnIndex] ?? NO_GENERATED_SURFACE_HEIGHT;
+    if (surfaceY === NO_GENERATED_SURFACE_HEIGHT) {
       return null;
     }
-    let waterTopY = sampled.waterTopY ?? NO_GENERATED_WATER_HEIGHT;
-    let waterMaterial = sampled.waterMaterial ?? 0;
-    const surfaceY = sampled.surfaceY;
-    const surfaceMaterial = sampled.surfaceMaterial;
-    if (waterTopY <= surfaceY) {
+    const surfaceMaterial = columnSummary.surfaceMaterial[columnIndex] ?? 0;
+    let waterTopY = columnSummary.waterTopY[columnIndex] ?? NO_GENERATED_WATER_HEIGHT;
+    let waterMaterial = columnSummary.waterMaterial[columnIndex] ?? 0;
+    if (waterTopY === NO_GENERATED_WATER_HEIGHT || waterTopY <= surfaceY) {
       waterTopY = NO_GENERATED_WATER_HEIGHT;
       waterMaterial = 0;
     }
