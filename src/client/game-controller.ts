@@ -89,6 +89,10 @@ import {
 import type { Vec3 } from "../engine/types.ts";
 import { raycastResidentWorld, type VoxelRayHit } from "../engine/voxel-raycast.ts";
 import {
+  buildTargetingOverlayGeometry,
+  type TargetingOverlayGeometry,
+} from "../engine/targeting-overlay.ts";
+import {
   buildUnderwaterRenderEnvironment,
   DEFAULT_RENDER_ENVIRONMENT,
   type RenderEnvironment,
@@ -209,6 +213,11 @@ export interface TargetingSnapshot {
   targetMaterial: string;
   breakable: boolean;
   placeMaterial: string;
+  placeable: boolean;
+}
+
+export interface TargetingOverlaySnapshot extends TargetingOverlayGeometry {
+  breakable: boolean;
   placeable: boolean;
 }
 
@@ -931,6 +940,26 @@ export class GameController {
       };
     }
     return buildTargetingSnapshot(this.world, this.inventory, hit);
+  }
+
+  getTargetingOverlaySnapshot(
+    viewportWidth: number,
+    viewportHeight: number,
+  ): TargetingOverlaySnapshot {
+    if (viewportWidth <= 0 || viewportHeight <= 0) {
+      return hiddenTargetingOverlaySnapshot(viewportWidth, viewportHeight);
+    }
+    const ray = createForwardRay(this.camera);
+    const hit = raycastResidentWorld(this.world, ray.origin, ray.direction, INTERACTION_REACH_WORLD_UNITS);
+    if (!hit) {
+      return hiddenTargetingOverlaySnapshot(viewportWidth, viewportHeight);
+    }
+    const targeting = buildTargetingSnapshot(this.world, this.inventory, hit);
+    return {
+      ...buildTargetingOverlayGeometry(this.camera, hit, viewportWidth, viewportHeight),
+      breakable: targeting.breakable,
+      placeable: targeting.placeable,
+    };
   }
 
   breakTargetVoxel(): boolean {
@@ -3116,6 +3145,21 @@ function buildTargetingSnapshot(
     breakable: canBreak,
     placeMaterial: formatInventoryMaterial(selected?.material ?? null),
     placeable: canPlace,
+  };
+}
+
+function hiddenTargetingOverlaySnapshot(
+  viewportWidth: number,
+  viewportHeight: number,
+): TargetingOverlaySnapshot {
+  return {
+    visible: false,
+    viewportWidth,
+    viewportHeight,
+    outlineSegments: [],
+    facePolygon: [],
+    breakable: false,
+    placeable: false,
   };
 }
 

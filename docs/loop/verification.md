@@ -4910,3 +4910,52 @@ This line of investigation was screened locally and not kept in the runtime yet.
   - roadmap-expected interaction state is now surfaced to the player instead of being trapped in the debug panel
   - bootstrap/enter-world flow now uses real readiness state with progress instead of a generic loading curtain
   - the smoke found and verified a real readiness/HUD bug rather than only checking visuals superficially
+
+## 2026-03-13 projected targeting affordance pass
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/targeting-overlay.test.ts`
+- `mise run build`
+- ad hoc browser smoke via `scripts/lib/browser-game-benchmark-harness.ts` helpers against a fresh production server
+- `mise run trace-route -- --benchmark=live-forward --label=target-overlay-smoke --duration=2 --settle=1 --sample-hz=20`
+
+#### Result
+
+- `typecheck`
+  - pass
+- `tests/targeting-overlay.test.ts`
+  - `2` pass
+  - `0` fail
+- `build`
+  - pass
+- browser smoke
+  - first pass found one real pointer-lock gating mistake
+  - second pass passed after removing that gate
+- live-forward trace
+  - pass
+  - `avg gameplay frame = 3.04 ms`
+  - `p95 gameplay frame = 5.50 ms`
+  - `frames with hole signals = 0`
+
+#### Browser smoke findings
+
+- First smoke:
+  - overlay stayed hidden because `getTargetingOverlaySnapshot(...)` unnecessarily required pointer lock
+  - this was not a valid gameplay requirement because the full-screen capture overlay already covers pre-entry rendering
+- Final smoke after the fix:
+  - `overlayVisible = true`
+  - `overlayBreakable = true`
+  - `overlayPlaceable = false`
+  - `overlaySegments = 9`
+  - `overlayFacePoints = 4`
+  - DOM overlay was not hidden
+  - `9` line segments were visible in the live SVG
+
+#### Outcome
+
+- The slice is worth keeping:
+  - break/place now has a real visual affordance without pulling UI logic into the renderer
+  - the geometry path is pure enough to unit test directly
+  - the browser smoke confirms the overlay is driven by real gameplay targeting, not a fake DOM approximation

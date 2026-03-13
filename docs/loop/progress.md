@@ -2398,3 +2398,22 @@
   - the review was compared against the docs/roadmap mismatch first
   - the fix path reused existing authoritative game state instead of inventing a second UI-only state model
   - no old interaction or overlay code paths were left behind
+
+## 2026-03-13 projected targeting affordance pass
+
+- After the bootstrap/hotbar slice, the next obvious interaction mismatch was affordance:
+  - the game could already break/place voxels from the center ray
+  - but the player still had to infer the exact target cube from the crosshair alone
+  - that was out of line with the roadmap’s “interaction affordances” direction and was an obvious quality gap in actual play
+- I chose the narrowest path that did not touch the renderer hot path:
+  - added a projected target outline and hit-face highlight as an SVG overlay above the canvas
+  - kept the geometry math pure and testable in a new helper instead of mixing DOM work into the renderer
+  - exposed a controller targeting-overlay snapshot so the page still consumes authoritative game state instead of re-implementing camera/raycast logic in the DOM
+- The first browser smoke found one real issue:
+  - I had unnecessarily gated the overlay on pointer lock
+  - that added no real gameplay value because the capture overlay already covers the screen before entry, and it made automation weaker
+  - I removed that gate and kept the overlay driven purely by actual hit visibility
+- I also screened one tempting but invalid measurement path:
+  - I tried a same-session A/B by monkey-patching the overlay snapshot method off after one live-forward benchmark run
+  - the second run looked much faster, but it was obviously cache-warmed and therefore not a valid attribution of overlay cost
+  - I did not use that as evidence; the kept acceptance signal is the fresh browser smoke plus a short clean live-forward trace

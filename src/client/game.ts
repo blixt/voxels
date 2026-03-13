@@ -1,6 +1,7 @@
 import {
   GameController,
   type GameHudSnapshot,
+  type TargetingOverlaySnapshot,
   type TargetingSnapshot,
 } from "./game-controller.ts";
 import { formatDiscoveryInline } from "../engine/discovery-catalog.ts";
@@ -76,6 +77,10 @@ declare global {
       resetDiscoveryJournal(): ExplorationJournalSnapshot;
       getInventory(): ReturnType<GameController["getInventorySnapshot"]>;
       getTargeting(): ReturnType<GameController["getTargetingSnapshot"]>;
+      getTargetingOverlay(
+        viewportWidth?: number,
+        viewportHeight?: number,
+      ): ReturnType<GameController["getTargetingOverlaySnapshot"]>;
       getEditLog(): ReturnType<GameController["getEditLogSnapshot"]>;
       breakTargetVoxel(): ReturnType<GameController["breakTargetVoxel"]>;
       placeSelectedVoxel(): ReturnType<GameController["placeSelectedVoxel"]>;
@@ -96,6 +101,10 @@ interface AchievementPresenter {
 
 interface InteractionHudView {
   update(snapshot: GameHudSnapshot, inventory: ReturnType<GameController["getInventorySnapshot"]>, targeting: TargetingSnapshot): void;
+}
+
+interface TargetingOverlayView {
+  update(snapshot: TargetingOverlaySnapshot): void;
 }
 
 interface TelemetrySummaryView {
@@ -221,6 +230,7 @@ function mountGame(): GameRuntime {
   const captureProgressBar = appRoot.querySelector<HTMLElement>("[data-role='capture-progress-bar']");
   const achievementElement = appRoot.querySelector<HTMLElement>("[data-role='discovery-achievements']");
   const interactionHudRoot = appRoot.querySelector<HTMLElement>("[data-role='interaction-hud']");
+  const targetOverlayRoot = appRoot.querySelector<SVGSVGElement>("[data-role='target-overlay']");
 
   if (
     !canvas
@@ -240,6 +250,7 @@ function mountGame(): GameRuntime {
     || !captureProgressBar
     || !achievementElement
     || !interactionHudRoot
+    || !targetOverlayRoot
   ) {
     throw new Error("Game UI is incomplete");
   }
@@ -255,7 +266,9 @@ function mountGame(): GameRuntime {
   const telemetrySummaryView = createTelemetrySummaryView(telemetrySummaryElement, telemetryChart);
   const achievementPresenter = createAchievementPresenter(achievementElement);
   const interactionHudView = createInteractionHudView(interactionHudRoot);
+  const targetingOverlayView = createTargetingOverlayView(targetOverlayRoot);
   let telemetryCollapsed = loadTelemetryCollapsed();
+  let targetingOverlayFrameId = 0;
 
   const applyTelemetryCollapsed = () => {
     telemetryPanel.classList.toggle("is-collapsed", telemetryCollapsed);
@@ -297,6 +310,15 @@ function mountGame(): GameRuntime {
 
   captureButton.addEventListener("click", handleCaptureClick);
   telemetryToggle.addEventListener("click", handleTelemetryToggle);
+
+  const updateTargetingOverlay = () => {
+    const viewportWidth = Math.max(1, canvas.clientWidth || canvas.width || 1);
+    const viewportHeight = Math.max(1, canvas.clientHeight || canvas.height || 1);
+    targetingOverlayView.update(controller.getTargetingOverlaySnapshot(viewportWidth, viewportHeight));
+    targetingOverlayFrameId = requestAnimationFrame(updateTargetingOverlay);
+  };
+  targetingOverlayFrameId = requestAnimationFrame(updateTargetingOverlay);
+
   window.__VOXELS_GAME__ = {
     controller,
     snapshot: () => controller.getDebugSnapshot(),
@@ -334,6 +356,8 @@ function mountGame(): GameRuntime {
     resetDiscoveryJournal: () => controller.resetDiscoveryJournal(),
     getInventory: () => controller.getInventorySnapshot(),
     getTargeting: () => controller.getTargetingSnapshot(),
+    getTargetingOverlay: (viewportWidth = canvas.clientWidth || canvas.width || 1, viewportHeight = canvas.clientHeight || canvas.height || 1) =>
+      controller.getTargetingOverlaySnapshot(viewportWidth, viewportHeight),
     getEditLog: () => controller.getEditLogSnapshot(),
     breakTargetVoxel: () => controller.breakTargetVoxel(),
     placeSelectedVoxel: () => controller.placeSelectedVoxel(),
@@ -347,6 +371,7 @@ function mountGame(): GameRuntime {
     dispose() {
       captureButton.removeEventListener("click", handleCaptureClick);
       telemetryToggle.removeEventListener("click", handleTelemetryToggle);
+      cancelAnimationFrame(targetingOverlayFrameId);
       controller.onHudUpdate = null;
       achievementPresenter.dispose();
       controller.dispose();
@@ -480,6 +505,49 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
         slot.material.textContent = materialHex;
         slot.count.textContent = stack ? stack.count.toLocaleString() : "";
         slot.swatch.style.background = stack ? materialToCssColor(materialHex) : "rgba(255, 246, 214, 0.08)";
+      }
+    },
+  };
+}
+
+function createTargetingOverlayView(root: SVGSVGElement): TargetingOverlayView {
+  const namespace = "http://www.w3.org/2000/svg";
+  const face = document.createElementNS(namespace, "polygon");
+  face.setAttribute("class", "target-overlay-face");
+  const lines = Array.from({ length: 12 }, () => {
+    const line = document.createElementNS(namespace, "line");
+    line.setAttribute("class", "target-overlay-line");
+    root.append(line);
+    return line;
+  });
+  root.replaceChildren(face, ...lines);
+
+  return {
+    update(snapshot) {
+      root.toggleAttribute("hidden", !snapshot.visible);
+      root.classList.toggle("is-breakable", snapshot.breakable);
+      root.classList.toggle("is-placeable", snapshot.placeable);
+      root.setAttribute("viewBox", `0 0 ${snapshot.viewportWidth} ${snapshot.viewportHeight}`);
+      if (!snapshot.visible) {
+        face.setAttribute("points", "");
+        for (const line of lines) {
+          line.setAttribute("visibility", "hidden");
+        }
+        return;
+      }
+      face.setAttribute("points", snapshot.facePolygon.map(([x, y]) => `${x},${y}`).join(" "));
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index]!;
+        const segment = snapshot.outlineSegments[index];
+        if (!segment) {
+          line.setAttribute("visibility", "hidden");
+          continue;
+        }
+        line.setAttribute("x1", segment.from[0].toFixed(2));
+        line.setAttribute("y1", segment.from[1].toFixed(2));
+        line.setAttribute("x2", segment.to[0].toFixed(2));
+        line.setAttribute("y2", segment.to[1].toFixed(2));
+        line.setAttribute("visibility", "visible");
       }
     },
   };
