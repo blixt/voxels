@@ -58,6 +58,7 @@ interface FarFieldBandSampleCache {
 }
 
 interface FarFieldBandState extends FarFieldBandRenderable {
+  sourceRevision: number;
   sampleCache: FarFieldBandSampleCache | null;
 }
 
@@ -207,6 +208,7 @@ export class ProceduralFarField {
       mesh: null,
       gpuDirty: false,
       triangleCount: 0,
+      sourceRevision: -1,
       sampleCache: null,
     }));
     this.lastUpdate = {
@@ -251,6 +253,7 @@ export class ProceduralFarField {
     let meshBuildMs = 0;
     const bandBuilds: FarFieldBandBuildSummary[] = [];
     const maxAffectedRadiusWorldUnits = exclusionMask?.maxAffectedRadiusWorldUnits ?? Number.POSITIVE_INFINITY;
+    const sourceRevision = this.source.getFarFieldDataRevision();
     for (let bandIndex = 0; bandIndex < this.bands.length; bandIndex += 1) {
       const band = this.bands[bandIndex]!;
       const config = this.bandConfigs[bandIndex]!;
@@ -270,6 +273,7 @@ export class ProceduralFarField {
         && band.centerZ === centerZ
         && band.clearRadiusWorldUnits === effectiveInnerRadius
         && band.maskRevision === maskRevision
+        && band.sourceRevision === sourceRevision
         && band.mesh
       ) {
         triangleCount += band.triangleCount;
@@ -280,12 +284,18 @@ export class ProceduralFarField {
         triangleCount += band.triangleCount;
         continue;
       }
+      // Invalidate the sample cache when source data changed (not just
+      // anchor/mask), so ensureBandSampleCache re-samples fresh data.
+      if (band.sourceRevision !== sourceRevision) {
+        band.sampleCache = null;
+      }
       band.anchorX = anchorX;
       band.anchorZ = anchorZ;
       band.centerX = centerX;
       band.centerZ = centerZ;
       band.clearRadiusWorldUnits = effectiveInnerRadius;
       band.maskRevision = maskRevision;
+      band.sourceRevision = sourceRevision;
       const bandStartedAt = performance.now();
       const sampleCacheStartedAt = performance.now();
       const sampleCache = ensureBandSampleCache(

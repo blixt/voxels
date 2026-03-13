@@ -2307,6 +2307,7 @@ export class GameController {
     const moved = this.updateMovement(deltaSeconds);
     const movementMs = performance.now() - movementStartedAt;
     const dirtyResidentChunks = this.world.countDirtyResidentChunks();
+    const allowFarFieldCatchup = this.shouldAllowFarFieldCatchup(hasMovementIntent, dirtyResidentChunks);
     if (
       shouldPumpWorldWork(
         hasMovementIntent || moved,
@@ -2317,15 +2318,8 @@ export class GameController {
     ) {
       this.syncWorldAroundPlayer(
         false,
-        shouldAllowFarFieldCatchupWhileMoving(
-          hasMovementIntent,
-          this.lastStreamSummary.pendingChunks,
-          dirtyResidentChunks,
-          this.lastFarFieldSummary.pendingBands,
-          this.interactiveFrameNumber,
-          MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES,
-        ),
-        !hasMovementIntent,
+        allowFarFieldCatchup,
+        !hasMovementIntent || allowFarFieldCatchup,
       );
     }
     this.renderInteractiveFrame();
@@ -2439,6 +2433,9 @@ export class GameController {
     }
     if (settle) {
       return Number.POSITIVE_INFINITY;
+    }
+    if (this.needsFarFieldBootstrap()) {
+      return Math.min(2, DEFAULT_MAX_FAR_FIELD_SURFACE_PREFETCH_CHUNKS_PER_FRAME);
     }
     if (this.lastStreamSummary.pendingChunks > 0 || this.lastStreamSummary.phaseMs.readyGeneratedChunkBacklog > 0) {
       return 0;
@@ -2634,10 +2631,33 @@ export class GameController {
     if (!allowFarFieldRebuild) {
       return 0;
     }
+    if (this.needsFarFieldBootstrap()) {
+      return Math.min(1, this.streamingBudgets.maxFarFieldBandRebuildsPerFrame);
+    }
     if (this.lastStreamSummary.pendingChunks > 0 || this.world.countDirtyResidentChunks() > 0) {
       return 0;
     }
     return this.streamingBudgets.maxFarFieldBandRebuildsPerFrame;
+  }
+
+  private needsFarFieldBootstrap(): boolean {
+    return this.lastFarFieldSummary.triangleCount === 0 || this.lastFarFieldSummary.pendingBands > 0;
+  }
+
+  private shouldAllowFarFieldCatchup(
+    movementIntent: boolean,
+    dirtyResidentChunks: number,
+    frameNumber = this.interactiveFrameNumber,
+  ): boolean {
+    return shouldAllowFarFieldCatchupWhileMoving(
+      movementIntent,
+      this.lastStreamSummary.pendingChunks,
+      dirtyResidentChunks,
+      this.lastFarFieldSummary.pendingBands,
+      frameNumber,
+      MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES,
+      this.lastFarFieldSummary.triangleCount > 0,
+    );
   }
 
   private syncPresentedFarFieldMaskRevision(force = false): void {
@@ -2702,17 +2722,15 @@ export class GameController {
     this.syncCameraToPlayer();
     const movementMs = performance.now() - movementStartedAt;
     const dirtyResidentChunks = this.world.countDirtyResidentChunks();
+    const allowFarFieldCatchup = this.shouldAllowFarFieldCatchup(
+      target.phase !== "move",
+      dirtyResidentChunks,
+      target.frame,
+    );
     this.syncWorldAroundPlayer(
       false,
-      shouldAllowFarFieldCatchupWhileMoving(
-        target.phase !== "move",
-        this.lastStreamSummary.pendingChunks,
-        dirtyResidentChunks,
-        this.lastFarFieldSummary.pendingBands,
-        target.frame,
-        MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES,
-      ),
-      target.phase !== "move",
+      allowFarFieldCatchup,
+      target.phase !== "move" || allowFarFieldCatchup,
     );
     const render = this.renderCurrentFrame();
     const gameplayFrameMs = performance.now() - gameplayStartedAt;

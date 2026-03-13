@@ -34,6 +34,39 @@ test("procedural far field reuses meshes while staying inside the current anchor
   expect(summary.sampledCellCount).toBe(0);
 });
 
+test("procedural far field rebuilds when source summary data changes in place", () => {
+  let revision = 0;
+  const farField = new ProceduralFarField({
+    palette: [0, 0xff_aa_88_ff],
+    getFarFieldDataRevision: () => revision,
+    sampleFarFieldColumn() {
+      if (revision === 0) {
+        return null;
+      }
+      return {
+        surfaceY: 12,
+        waterTopY: null,
+        surfaceMaterial: 1,
+        waterMaterial: null,
+      };
+    },
+    getFarFieldChunkSummary() {
+      return null;
+    },
+  }, [
+    { label: "test", innerRadius: 0, outerRadius: 16, sampleStride: 8, anchorStride: 32 },
+  ]);
+
+  const initial = farField.updateAround([0, 0, 0]);
+  revision += 1;
+  const updated = farField.updateAround([0, 0, 0]);
+
+  expect(initial.triangleCount).toBe(0);
+  expect(updated.changed).toBe(true);
+  expect(updated.builtBands).toBe(1);
+  expect(updated.triangleCount).toBeGreaterThan(0);
+});
+
 test("procedural far field default bands stay stable across a few meters of movement", () => {
   const farField = new ProceduralFarField(createGeneratorBackedSource(new ProceduralWorldGenerator(1337)));
   farField.updateAround([0, 0, 0]);
@@ -323,6 +356,9 @@ test("procedural far field can preserve water tops inside coarse cells", () => {
   const tintedWaterColor = applyWaterDepthTint(waterColor, 4);
   const farField = new ProceduralFarField({
     palette: [0, terrainColor, waterColor],
+    getFarFieldDataRevision() {
+      return 0;
+    },
     sampleFarFieldColumn(worldX: number, worldZ: number) {
       const hasWater = worldX >= 2 && worldX <= 6 && worldZ >= 2 && worldZ <= 6;
       return {
@@ -357,6 +393,9 @@ function createTestSource(
 ): FarFieldSource {
   return {
     palette: [0, 0xff_aa_88_ff],
+    getFarFieldDataRevision() {
+      return 0;
+    },
     sampleFarFieldColumn(worldX: number, worldZ: number) {
       return {
         surfaceY: surfaceYForWorldPosition(worldX, worldZ),
@@ -374,6 +413,9 @@ function createTestSource(
 function createGeneratorBackedSource(generator: ProceduralWorldGenerator): FarFieldSource {
   return {
     palette: generator.palette,
+    getFarFieldDataRevision() {
+      return 0;
+    },
     sampleFarFieldColumn(worldX: number, worldZ: number) {
       const sample = generator.sampleSurfaceColumn(worldX, worldZ);
       return {

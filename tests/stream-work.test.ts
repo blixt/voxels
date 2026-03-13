@@ -28,4 +28,6 @@ test("far-field catch-up while moving is throttled to quiet frames on a cadence"
   expect(shouldAllowFarFieldCatchupWhileMoving(true, 0, 0, 0, 6)).toBe(false);
   expect(shouldAllowFarFieldCatchupWhileMoving(true, 0, 0, 5, 5)).toBe(false);
   expect(shouldAllowFarFieldCatchupWhileMoving(true, 0, 0, 5, 6)).toBe(true);
+  expect(shouldAllowFarFieldCatchupWhileMoving(true, 9, 4, 0, 5, 6, false)).toBe(false);
+  expect(shouldAllowFarFieldCatchupWhileMoving(true, 9, 4, 0, 6, 6, false)).toBe(true);
 });

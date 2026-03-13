@@ -9,6 +9,7 @@ export interface FarFieldColumnSample {
 
 export interface FarFieldSource {
   readonly palette: readonly number[];
+  getFarFieldDataRevision(): number;
   sampleFarFieldColumn(worldX: number, worldZ: number): FarFieldColumnSample | null;
   getFarFieldChunkSummary(cx: number, cy: number, cz: number): GeneratedChunkRenderSummary | null;
 }

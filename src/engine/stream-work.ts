@@ -9,9 +9,13 @@ export function shouldAllowFarFieldCatchupWhileMoving(
   pendingFarFieldBands: number,
   frameNumber: number,
   cadenceFrames = 6,
+  hasFarFieldCoverage = true,
 ): boolean {
   if (!movementIntent) {
     return true;
+  }
+  if (!hasFarFieldCoverage) {
+    return cadenceFrames <= 1 || frameNumber % cadenceFrames === 0;
   }
   if (pendingChunks > 0 || dirtyResidentChunks > 0 || pendingFarFieldBands === 0) {
     return false;

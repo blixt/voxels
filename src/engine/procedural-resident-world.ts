@@ -120,6 +120,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
   private readonly generatedRenderSummaries = new Map<string, GeneratedChunkRenderSummary>();
   private readonly generatedRenderChunkKeysByColumn = new Map<string, Set<string>>();
   private readonly generatedRenderColumnSummaries = new Map<string, GeneratedRenderColumnSummary>();
+  private farFieldDataRevision = 0;
   private readonly columnChunkYRanges = new Map<string, ChunkYRange>();
   private readonly dirtyChunkKeys = new Set<string>();
   private readonly readyGeneratedChunks = new Map<string, GeneratedChunk>();
@@ -290,6 +291,10 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
 
   getFarFieldChunkSummary(cx: number, cy: number, cz: number): GeneratedChunkRenderSummary | null {
     return this.generatedRenderSummaries.get(toChunkKey(cx, cy, cz)) ?? null;
+  }
+
+  getFarFieldDataRevision(): number {
+    return this.farFieldDataRevision;
   }
 
   getVoxel(x: number, y: number, z: number): number {
@@ -1148,6 +1153,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     this.generatedRenderChunkKeysByColumn.set(columnKey, chunkKeys);
     this.rebuildColumnRenderSummary(summary.coord.x, summary.coord.z);
     this.enqueueFarFieldPrefetchColumnNeighbors(summary.coord.x, summary.coord.z);
+    this.farFieldDataRevision += 1;
   }
 
   private recordPersistedRegionRenderSummary(region: GeneratedRenderSummaryRegion): void {
@@ -1164,6 +1170,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     }
     this.generatedRenderColumnSummaries.set(columnKey, summary);
     this.enqueueFarFieldPrefetchColumnNeighbors(summary.chunkX, summary.chunkZ);
+    this.farFieldDataRevision += 1;
   }
 
   private recordResidentChunkRenderSummary(chunk: VoxelChunk): void {
