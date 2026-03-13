@@ -1012,6 +1012,11 @@ export class ProceduralWorldGenerator {
   private readonly materialSampleState = createMutableColumnState();
   private readonly reusableSurfaceFields = createSurfaceFieldSample();
   private readonly reusableCaveFields = createCaveFieldSample();
+  private readonly reusableBaseBiomeBlend: BaseBiomeBlendSelection = {
+    primary: BASE_BIOMES[0]!,
+    secondary: BASE_BIOMES[1]!,
+    primaryWeight: 1,
+  };
   private readonly biomeClassificationState: BiomeClassificationSelection = {
     biomeId: "verdant",
     specialStrength: 0,
@@ -1450,11 +1455,11 @@ export class ProceduralWorldGenerator {
       }
     }
     const total = primaryScore + secondaryScore;
-    return {
-      primary,
-      secondary,
-      primaryWeight: total <= 0 ? 1 : primaryScore / total,
-    };
+    const out = this.reusableBaseBiomeBlend;
+    out.primary = primary;
+    out.secondary = secondary;
+    out.primaryWeight = total <= 0 ? 1 : primaryScore / total;
+    return out;
   }
 
   private selectBiomeClassification(
