@@ -2308,3 +2308,28 @@
 - Residual:
   - chunk-meshing worker CPU is still the dominant cluster in the trace
   - the next clean target is probably another structural meshing-path reduction, not generator/render-summary fusion or more transfer-path work
+
+## 2026-03-13 specialized worker mask fill by axis
+
+- The next hypothesis stayed inside the same hotspot cluster, but targeted a more generic case than fully solid chunks:
+  - the async opaque mesher was still filling masks through generic coordinate arrays plus `sampleChunkVoxel(...)` / `sampleNeighborVoxel(...)` helper calls for every sampled cell
+  - the output shape was already correct, so I did not change the greedy algorithm
+  - I only specialized the hot mask-fill stage by axis to remove the generic per-voxel helper/branch overhead
+- This was a meaningful microbench win:
+  - a representative procedural terrain chunk moved from about `130.372 ms` to `44.410 ms` for the same 200-build workload
+  - the fully solid fast-path probe stayed in the same range, about `37.911 ms` to `41.897 ms`, which is acceptable because the big gain target was the generic partial-terrain path
+- The exact-output tests stayed green, so this is not a “different but hopefully similar” renderer:
+  - worker-friendly opaque meshing still matches the synchronous opaque mesh
+  - the fully solid worker fast path test still matches the synchronous mesh too
+- The non-profiled live-walk acceptance gate improved clearly:
+  - the 10-second walk benchmark moved from about `1.253 ms` to `1.198 ms` average gameplay frame
+  - p95 moved from `3.3 ms` to `3.2 ms`
+  - `avg_deltaTaskDurationMs` improved from about `3341.627` to `3173.050`
+  - hole-signal frames stayed at `0`
+- The profiled route-trace runs were mixed rather than cleanly monotonic:
+  - average gameplay frame landed around `1.320-1.335 ms`, roughly flat-to-slightly-worse than the prior `1.303 ms` trace baseline
+  - but mesh backlog indicators improved, with `maxPendingMeshJobs` dropping as low as `10-17` versus the prior `22`
+  - because the user-facing non-profiled walk benchmark improved materially and the exact-output tests stayed green, I kept the slice and documented the trace ambiguity instead of discarding a real gameplay-path win
+- Residual:
+  - chunk-meshing worker CPU is still a first-order hotspot
+  - the next best target is likely either another structural worker-meshing reduction or a generator-side cut around `sampleSurfaceY(...)` / column-state handling

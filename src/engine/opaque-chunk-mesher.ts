@@ -109,6 +109,7 @@ export function buildOpaqueChunkMeshFromInput(
     (input.solidBounds.max[0] - input.solidBounds.min[0]) * (input.solidBounds.max[1] - input.solidBounds.min[1]),
   ));
   const mask = scratch.mask;
+  const opaqueMask = materialLut.opaqueMask;
 
   for (let axis = 0; axis < 3; axis += 1) {
     const u = (axis + 1) % 3;
@@ -120,43 +121,22 @@ export function buildOpaqueChunkMeshFromInput(
     q[axis] = 1;
 
     for (x[axis] = input.solidBounds.min[axis] - 1; x[axis] < input.solidBounds.max[axis]; x[axis] += 1) {
-      let maskIndex = 0;
       const negativeNeighbor = input.neighbors[axis][0];
       const positiveNeighbor = input.neighbors[axis][1];
-      for (x[v] = input.solidBounds.min[v]; x[v] < input.solidBounds.max[v]; x[v] += 1) {
-        for (x[u] = input.solidBounds.min[u]; x[u] < input.solidBounds.max[u]; x[u] += 1) {
-          const a = x[axis] >= 0
-            ? sampleChunkVoxel(input.chunkData, chunkSize, chunkArea, x[0]!, x[1]!, x[2]!)
-            : sampleNeighborVoxel(
-                negativeNeighbor.faceData,
-                axis,
-                x[0]!,
-                x[1]!,
-                x[2]!,
-                chunkSize,
-              );
-          const b = x[axis] + 1 < chunkSize
-            ? sampleChunkVoxel(input.chunkData, chunkSize, chunkArea, x[0] + q[0]!, x[1] + q[1]!, x[2] + q[2]!)
-            : sampleNeighborVoxel(
-                positiveNeighbor.faceData,
-                axis,
-                x[0] + q[0]!,
-                x[1] + q[1]!,
-                x[2] + q[2]!,
-                chunkSize,
-              );
-          const opaqueA = isOpaqueMaterial(materialLut, a) ? a : 0;
-          const opaqueB = isOpaqueMaterial(materialLut, b) ? b : 0;
-          mask[maskIndex] = (opaqueA !== 0) === (opaqueB !== 0)
-            ? 0
-            : opaqueA !== 0
-            ? opaqueA
-            : -opaqueB;
-          maskIndex += 1;
-        }
-      }
+      fillAxisMask(
+        mask,
+        input.chunkData,
+        chunkSize,
+        chunkArea,
+        input.solidBounds,
+        axis,
+        x[axis]!,
+        negativeNeighbor.faceData,
+        positiveNeighbor.faceData,
+        opaqueMask,
+      );
 
-      maskIndex = 0;
+      let maskIndex = 0;
       for (let row = 0; row < vSpan; row += 1) {
         for (let column = 0; column < uSpan; ) {
           const current = mask[maskIndex];
@@ -268,6 +248,177 @@ function isChunkFullyOpaque(chunkData: Uint16Array, materialLut: MeshMaterialLut
     }
   }
   return true;
+}
+
+function fillAxisMask(
+  mask: Int32Array,
+  chunkData: Uint16Array,
+  chunkSize: number,
+  chunkArea: number,
+  solidBounds: LocalChunkBounds,
+  axis: number,
+  axisPosition: number,
+  negativeNeighborFace: Uint16Array | null,
+  positiveNeighborFace: Uint16Array | null,
+  opaqueMask: Uint8Array,
+): void {
+  if (axis === 0) {
+    fillXAxisMask(
+      mask,
+      chunkData,
+      chunkSize,
+      chunkArea,
+      solidBounds,
+      axisPosition,
+      negativeNeighborFace,
+      positiveNeighborFace,
+      opaqueMask,
+    );
+    return;
+  }
+  if (axis === 1) {
+    fillYAxisMask(
+      mask,
+      chunkData,
+      chunkSize,
+      chunkArea,
+      solidBounds,
+      axisPosition,
+      negativeNeighborFace,
+      positiveNeighborFace,
+      opaqueMask,
+    );
+    return;
+  }
+  fillZAxisMask(
+    mask,
+    chunkData,
+    chunkSize,
+    chunkArea,
+    solidBounds,
+    axisPosition,
+    negativeNeighborFace,
+    positiveNeighborFace,
+    opaqueMask,
+  );
+}
+
+function fillXAxisMask(
+  mask: Int32Array,
+  chunkData: Uint16Array,
+  chunkSize: number,
+  chunkArea: number,
+  solidBounds: LocalChunkBounds,
+  axisPosition: number,
+  negativeNeighborFace: Uint16Array | null,
+  positiveNeighborFace: Uint16Array | null,
+  opaqueMask: Uint8Array,
+): void {
+  const nextAxisPosition = axisPosition + 1;
+  let maskIndex = 0;
+  for (let z = solidBounds.min[2]; z < solidBounds.max[2]; z += 1) {
+    const zChunkOffset = z * chunkArea;
+    const zFaceOffset = z * chunkSize;
+    for (let y = solidBounds.min[1]; y < solidBounds.max[1]; y += 1) {
+      const rowOffset = y * chunkSize + zChunkOffset;
+      const a = axisPosition >= 0
+        ? chunkData[axisPosition + rowOffset]!
+        : negativeNeighborFace
+        ? negativeNeighborFace[y + zFaceOffset]!
+        : 0;
+      const b = nextAxisPosition < chunkSize
+        ? chunkData[nextAxisPosition + rowOffset]!
+        : positiveNeighborFace
+        ? positiveNeighborFace[y + zFaceOffset]!
+        : 0;
+      const opaqueA = opaqueMask[a] === 1 ? a : 0;
+      const opaqueB = opaqueMask[b] === 1 ? b : 0;
+      mask[maskIndex] = (opaqueA !== 0) === (opaqueB !== 0)
+        ? 0
+        : opaqueA !== 0
+        ? opaqueA
+        : -opaqueB;
+      maskIndex += 1;
+    }
+  }
+}
+
+function fillYAxisMask(
+  mask: Int32Array,
+  chunkData: Uint16Array,
+  chunkSize: number,
+  chunkArea: number,
+  solidBounds: LocalChunkBounds,
+  axisPosition: number,
+  negativeNeighborFace: Uint16Array | null,
+  positiveNeighborFace: Uint16Array | null,
+  opaqueMask: Uint8Array,
+): void {
+  const planeOffset = axisPosition * chunkSize;
+  const nextPlaneOffset = (axisPosition + 1) * chunkSize;
+  let maskIndex = 0;
+  for (let x = solidBounds.min[0]; x < solidBounds.max[0]; x += 1) {
+    for (let z = solidBounds.min[2]; z < solidBounds.max[2]; z += 1) {
+      const zChunkOffset = z * chunkArea;
+      const a = axisPosition >= 0
+        ? chunkData[x + planeOffset + zChunkOffset]!
+        : negativeNeighborFace
+        ? negativeNeighborFace[x + z * chunkSize]!
+        : 0;
+      const b = axisPosition + 1 < chunkSize
+        ? chunkData[x + nextPlaneOffset + zChunkOffset]!
+        : positiveNeighborFace
+        ? positiveNeighborFace[x + z * chunkSize]!
+        : 0;
+      const opaqueA = opaqueMask[a] === 1 ? a : 0;
+      const opaqueB = opaqueMask[b] === 1 ? b : 0;
+      mask[maskIndex] = (opaqueA !== 0) === (opaqueB !== 0)
+        ? 0
+        : opaqueA !== 0
+        ? opaqueA
+        : -opaqueB;
+      maskIndex += 1;
+    }
+  }
+}
+
+function fillZAxisMask(
+  mask: Int32Array,
+  chunkData: Uint16Array,
+  chunkSize: number,
+  chunkArea: number,
+  solidBounds: LocalChunkBounds,
+  axisPosition: number,
+  negativeNeighborFace: Uint16Array | null,
+  positiveNeighborFace: Uint16Array | null,
+  opaqueMask: Uint8Array,
+): void {
+  const planeOffset = axisPosition * chunkArea;
+  const nextPlaneOffset = (axisPosition + 1) * chunkArea;
+  let maskIndex = 0;
+  for (let y = solidBounds.min[1]; y < solidBounds.max[1]; y += 1) {
+    const rowOffset = y * chunkSize;
+    for (let x = solidBounds.min[0]; x < solidBounds.max[0]; x += 1) {
+      const a = axisPosition >= 0
+        ? chunkData[x + rowOffset + planeOffset]!
+        : negativeNeighborFace
+        ? negativeNeighborFace[x + y * chunkSize]!
+        : 0;
+      const b = axisPosition + 1 < chunkSize
+        ? chunkData[x + rowOffset + nextPlaneOffset]!
+        : positiveNeighborFace
+        ? positiveNeighborFace[x + y * chunkSize]!
+        : 0;
+      const opaqueA = opaqueMask[a] === 1 ? a : 0;
+      const opaqueB = opaqueMask[b] === 1 ? b : 0;
+      mask[maskIndex] = (opaqueA !== 0) === (opaqueB !== 0)
+        ? 0
+        : opaqueA !== 0
+        ? opaqueA
+        : -opaqueB;
+      maskIndex += 1;
+    }
+  }
 }
 
 function sampleChunkVoxel(

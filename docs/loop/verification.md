@@ -4685,3 +4685,74 @@ This line of investigation was screened locally and not kept in the runtime yet.
 - This slice is worth keeping.
 - The fully solid chunk fast path is a real win in both the targeted mesher probe and the browser route.
 - Worker meshing is still the dominant trace cluster, so the next pass should stay structural rather than chasing tiny transfer wins.
+
+## 2026-03-13 specialized worker mask fill by axis
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/opaque-chunk-mesher.test.ts tests/mesher.test.ts`
+- `mise exec -- bun -e '... procedural terrain worker mesher microbench ...'`
+- `mise exec -- bun -e '... full solid worker mesher microbench ...'`
+- `mise run build`
+- `mise run bench-browser-game -- --label=axis-mask-specialization --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=1 --walk-duration=10 --walk-settle=4 --walk-sample-hz=120`
+- `mise run trace-route -- --benchmark=live-forward --label=axis-mask-specialization-trace-rerun --duration=10 --settle=4 --sample-hz=120`
+- `mise run trace-route -- --benchmark=live-forward --label=axis-mask-specialization-trace-rerun2 --duration=10 --settle=4 --sample-hz=120`
+
+#### Numeric probes
+
+- Focused verification:
+  - `13` pass
+  - `0` fail
+- Procedural terrain worker mesher microbench:
+  - baseline `130.372 ms`
+  - specialized mask fill `44.410 ms`
+  - checksum `2088000`
+  - triangles `1740`
+- Full-solid worker mesher microbench:
+  - previous `37.911 ms`
+  - after specialization `41.897 ms`
+  - checksum `14400`
+- Walk benchmark:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-tDgBBD/report.json`
+  - benchmark elapsed `14118.995 ms`
+  - avg gameplay frame `1.198 ms`
+  - p95 gameplay frame `3.2 ms`
+  - max gameplay frame `9.9 ms`
+  - hole-signal frames `0`
+  - peak JS heap used `14321584 bytes`
+  - `avg_deltaTaskDurationMs = 3173.050`
+- Previous comparable walk benchmark:
+  - report: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-igKH5R/report.json`
+  - avg gameplay frame `1.253 ms`
+  - p95 gameplay frame `3.3 ms`
+  - max gameplay frame `9.6 ms`
+  - hole-signal frames `0`
+  - `avg_deltaTaskDurationMs = 3341.627`
+- Clean live-forward trace rerun 1:
+  - report: `artifacts/browser-route-trace/20260313T003147Z-axis-mask-specialization-trace-rerun/report.json`
+  - avg gameplay frame `1.3353571424526827 ms`
+  - p95 gameplay frame `3.5 ms`
+  - avg mesh `0.3807142857284773 ms`
+  - `maxPendingMeshJobs = 10`
+  - hole-signal frames `0`
+- Clean live-forward trace rerun 2:
+  - report: `artifacts/browser-route-trace/20260313T003236Z-axis-mask-specialization-trace-rerun2/report.json`
+  - avg gameplay frame `1.3196545557084007 ms`
+  - p95 gameplay frame `3.400000035762787 ms`
+  - avg mesh `0.38266825523313985 ms`
+  - `maxPendingMeshJobs = 17`
+  - hole-signal frames `0`
+- Previous comparable live-forward trace baseline:
+  - report: `artifacts/browser-route-trace/20260313T001827Z-solid-face-fastpath-trace/report.json`
+  - avg gameplay frame `1.302561048243002 ms`
+  - p95 gameplay frame `3.399999976158142 ms`
+  - avg mesh `0.3553305538798316 ms`
+  - `maxPendingMeshJobs = 22`
+  - hole-signal frames `0`
+
+#### Residual
+
+- This slice is worth keeping based on the non-profiled gameplay-path benchmark.
+- The profile traces were mixed rather than uniformly better, but they stayed hole-free and showed lower peak mesh backlog.
+- The next optimization pass should continue to treat the worker mesher as hot, while also considering generator-side costs like `sampleSurfaceY(...)` and per-column scratch writes.
