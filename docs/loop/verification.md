@@ -4959,3 +4959,50 @@ This line of investigation was screened locally and not kept in the runtime yet.
   - break/place now has a real visual affordance without pulling UI logic into the renderer
   - the geometry path is pure enough to unit test directly
   - the browser smoke confirms the overlay is driven by real gameplay targeting, not a fake DOM approximation
+
+## 2026-03-13 interaction reason and placement-preview pass
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/targeting-overlay.test.ts`
+- `mise run build`
+- ad hoc browser smoke via `scripts/lib/browser-game-benchmark-harness.ts` helpers against a fresh production server
+- `mise run trace-route -- --benchmark=live-forward --label=placement-preview-smoke --duration=2 --settle=1 --sample-hz=20`
+
+#### Result
+
+- `typecheck`
+  - pass
+- `tests/targeting-overlay.test.ts`
+  - `3` pass
+  - `0` fail
+- `build`
+  - pass
+- browser smoke
+  - pass
+- live-forward trace
+  - pass
+  - `avg gameplay frame = 3.01 ms`
+  - `p95 gameplay frame = 5.40 ms`
+  - `frames with hole signals = 0`
+
+#### Browser smoke findings
+
+- Before breaking any voxel:
+  - `breakActionLabel = "LMB Break #7C8"`
+  - `placeActionLabel = "RMB Place select a stack"`
+  - placement preview hidden
+- After breaking one voxel:
+  - `breakTargetVoxel() = true`
+  - `placeMaterial = "#7C8"`
+  - `placeActionLabel = "RMB Place #7C8 at 215, 1423, 151"`
+  - `placePreviewVoxel = [215, 1423, 151]`
+  - preview visible with `9` outline segments and `4` face points
+
+#### Outcome
+
+- The slice is worth keeping:
+  - interaction failure/success is clearer without relying on the debug panel
+  - placement now has a concrete ghost preview driven from actual gameplay state
+  - the short trace stayed effectively flat, so this did not buy clarity by quietly regressing the runtime

@@ -479,7 +479,9 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
       if (!targeting.hit) {
         targetLabel.textContent = snapshot.pointerLocked ? "Target" : "Targeting";
         targetTitle.textContent = "No voxel in reach";
-        targetMeta.textContent = "Look at a nearby block to break it or place against it.";
+        targetMeta.textContent = targeting.placeMaterial === "Empty"
+          ? "Look at a nearby block to break it or select a stack to place."
+          : `Selected ${targeting.placeMaterial} • look at a nearby surface to place.`;
       } else {
         targetLabel.textContent = "Target";
         targetTitle.textContent = `${targeting.targetMaterial} • ${targeting.distanceMeters.toFixed(1)} m`;
@@ -489,8 +491,8 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
         ].join(" • ");
       }
       targetActions.textContent = [
-        targeting.breakable ? `LMB Break ${targeting.targetMaterial}` : "LMB Break unavailable",
-        targeting.placeable ? `RMB Place ${targeting.placeMaterial}` : `RMB Place ${targeting.placeMaterial === "Empty" ? "select a stack" : "blocked"}`,
+        targeting.breakActionLabel,
+        targeting.placeActionLabel,
       ].join(" • ");
 
       const visibleStart = computeHotbarStartSlot(inventory.selectedSlot, inventory.slots.length, HOTBAR_VISIBLE_SLOT_COUNT);
@@ -514,35 +516,66 @@ function createTargetingOverlayView(root: SVGSVGElement): TargetingOverlayView {
   const namespace = "http://www.w3.org/2000/svg";
   const face = document.createElementNS(namespace, "polygon");
   face.setAttribute("class", "target-overlay-face");
+  const previewFace = document.createElementNS(namespace, "polygon");
+  previewFace.setAttribute("class", "target-overlay-preview-face");
   const lines = Array.from({ length: 12 }, () => {
     const line = document.createElementNS(namespace, "line");
     line.setAttribute("class", "target-overlay-line");
-    root.append(line);
     return line;
   });
-  root.replaceChildren(face, ...lines);
+  const previewLines = Array.from({ length: 12 }, () => {
+    const line = document.createElementNS(namespace, "line");
+    line.setAttribute("class", "target-overlay-preview-line");
+    return line;
+  });
+  root.replaceChildren(previewFace, face, ...previewLines, ...lines);
 
   return {
     update(snapshot) {
-      root.toggleAttribute("hidden", !snapshot.visible);
+      root.toggleAttribute("hidden", !snapshot.visible && !snapshot.previewVisible);
       root.classList.toggle("is-breakable", snapshot.breakable);
-      root.classList.toggle("is-placeable", snapshot.placeable);
       root.setAttribute("viewBox", `0 0 ${snapshot.viewportWidth} ${snapshot.viewportHeight}`);
-      if (!snapshot.visible) {
+      if (!snapshot.visible && !snapshot.previewVisible) {
         face.setAttribute("points", "");
+        previewFace.setAttribute("points", "");
         for (const line of lines) {
+          line.setAttribute("visibility", "hidden");
+        }
+        for (const line of previewLines) {
           line.setAttribute("visibility", "hidden");
         }
         return;
       }
-      face.setAttribute("points", snapshot.facePolygon.map(([x, y]) => `${x},${y}`).join(" "));
+      face.setAttribute("points", snapshot.visible
+        ? snapshot.facePolygon.map(([x, y]) => `${x},${y}`).join(" ")
+        : "");
       for (let index = 0; index < lines.length; index += 1) {
         const line = lines[index]!;
-        const segment = snapshot.outlineSegments[index];
+        const segment = snapshot.visible ? snapshot.outlineSegments[index] : undefined;
         if (!segment) {
           line.setAttribute("visibility", "hidden");
           continue;
         }
+        line.setAttribute("x1", segment.from[0].toFixed(2));
+        line.setAttribute("y1", segment.from[1].toFixed(2));
+        line.setAttribute("x2", segment.to[0].toFixed(2));
+        line.setAttribute("y2", segment.to[1].toFixed(2));
+        line.setAttribute("visibility", "visible");
+      }
+      previewFace.setAttribute("points", snapshot.previewVisible
+        ? snapshot.previewFacePolygon.map(([x, y]) => `${x},${y}`).join(" ")
+        : "");
+      const previewColor = materialToCssColor(snapshot.previewMaterial);
+      previewFace.style.fill = snapshot.previewVisible ? colorWithAlpha(previewColor, 0.12) : "transparent";
+      previewFace.style.stroke = snapshot.previewVisible ? colorWithAlpha(previewColor, 0.72) : "transparent";
+      for (let index = 0; index < previewLines.length; index += 1) {
+        const line = previewLines[index]!;
+        const segment = snapshot.previewVisible ? snapshot.previewOutlineSegments[index] : undefined;
+        if (!segment) {
+          line.setAttribute("visibility", "hidden");
+          continue;
+        }
+        line.style.stroke = colorWithAlpha(previewColor, 0.95);
         line.setAttribute("x1", segment.from[0].toFixed(2));
         line.setAttribute("y1", segment.from[1].toFixed(2));
         line.setAttribute("x2", segment.to[0].toFixed(2));
@@ -584,6 +617,14 @@ function materialToCssColor(hex: string): string {
   }
   const [r, g, b] = hex.slice(1).split("").map((digit) => Number.parseInt(digit + digit, 16));
   return `rgb(${r} ${g} ${b})`;
+}
+
+function colorWithAlpha(color: string, alpha: number): string {
+  const match = color.match(/^rgb\((\d+) (\d+) (\d+)\)$/);
+  if (!match) {
+    return color;
+  }
+  return `rgba(${match[1]}, ${match[2]}, ${match[3]}, ${alpha})`;
 }
 
 function formatCoords(coords: readonly number[] | null): string {

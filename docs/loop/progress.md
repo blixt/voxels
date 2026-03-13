@@ -2417,3 +2417,19 @@
   - I tried a same-session A/B by monkey-patching the overlay snapshot method off after one live-forward benchmark run
   - the second run looked much faster, but it was obviously cache-warmed and therefore not a valid attribution of overlay cost
   - I did not use that as evidence; the kept acceptance signal is the fresh browser smoke plus a short clean live-forward trace
+
+## 2026-03-13 interaction reason and placement-preview pass
+
+- The next small interaction gap after the target outline was decision clarity:
+  - the player could see which voxel they were aiming at
+  - but not exactly why a click would fail or where the next placed voxel would appear
+- I kept this slice on the same authoritative path instead of creating a second UI-only interaction model:
+  - `TargetingSnapshot` now carries explicit break/place action labels
+  - the adjacent placement voxel is surfaced directly as gameplay truth
+  - the SVG overlay now renders a ghost placement cube, tinted by the selected material, when placement is actually possible
+- The real browser smoke exercised the exact player flow:
+  - before breaking a voxel, the HUD showed `RMB Place select a stack` and there was no placement preview
+  - after breaking one voxel, the HUD switched to `RMB Place #7C8 at ...` and the ghost placement cube appeared with real geometry
+- I also fixed one easy-to-miss visual ambiguity during implementation:
+  - the earlier overlay class structure would have recolored the targeted voxel itself whenever placement was possible
+  - I removed that coupling so the break target stays visually distinct from the placement preview

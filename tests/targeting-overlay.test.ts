@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 
 import { createFirstPersonCamera } from "../src/engine/first-person-camera.ts";
-import { buildTargetingOverlayGeometry } from "../src/engine/targeting-overlay.ts";
+import {
+  buildTargetingOverlayGeometry,
+  buildVoxelOverlayGeometry,
+} from "../src/engine/targeting-overlay.ts";
 import type { VoxelRayHit } from "../src/engine/voxel-raycast.ts";
 
 test("targeting overlay projects a reachable front face into screen space", () => {
@@ -40,4 +43,14 @@ test("targeting overlay hides voxels that are behind the camera", () => {
   expect(overlay.visible).toBe(false);
   expect(overlay.outlineSegments).toHaveLength(0);
   expect(overlay.facePolygon).toHaveLength(0);
+});
+
+test("voxel overlay can project a neighboring placement preview cube", () => {
+  const camera = createFirstPersonCamera([0.5, 0.5, -4], Math.PI * 0.5, 0);
+
+  const overlay = buildVoxelOverlayGeometry(camera, [0, 0, -1], [0, 0, -1], 1000, 800);
+
+  expect(overlay.visible).toBe(true);
+  expect(overlay.outlineSegments.length).toBeGreaterThanOrEqual(4);
+  expect(overlay.facePolygon).toHaveLength(4);
 });

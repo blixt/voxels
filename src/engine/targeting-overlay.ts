@@ -92,6 +92,16 @@ export function buildTargetingOverlayGeometry(
   viewportWidth: number,
   viewportHeight: number,
 ): TargetingOverlayGeometry {
+  return buildVoxelOverlayGeometry(camera, hit.voxel, hit.normal, viewportWidth, viewportHeight);
+}
+
+export function buildVoxelOverlayGeometry(
+  camera: FirstPersonCameraState,
+  voxel: readonly [number, number, number],
+  faceNormal: Vec3,
+  viewportWidth: number,
+  viewportHeight: number,
+): TargetingOverlayGeometry {
   if (viewportWidth <= 0 || viewportHeight <= 0) {
     return hiddenTargetingOverlayGeometry(viewportWidth, viewportHeight);
   }
@@ -99,9 +109,9 @@ export function buildTargetingOverlayGeometry(
   const matrices = buildFirstPersonCameraMatrices(camera, viewportWidth / viewportHeight);
   const worldCorners = CUBE_CORNERS.map(([offsetX, offsetY, offsetZ]) => {
     return [
-      hit.voxel[0] + offsetX,
-      hit.voxel[1] + offsetY,
-      hit.voxel[2] + offsetZ,
+      voxel[0] + offsetX,
+      voxel[1] + offsetY,
+      voxel[2] + offsetZ,
     ] as Vec3;
   });
   const projectedCorners = worldCorners.map((point) =>
@@ -135,7 +145,7 @@ export function buildTargetingOverlayGeometry(
     };
   });
 
-  const hitFace = CUBE_FACES.find((face) => sameNormal(face.normal, hit.normal));
+  const hitFace = CUBE_FACES.find((face) => sameNormal(face.normal, faceNormal));
   if (!hitFace) {
     return hiddenTargetingOverlayGeometry(viewportWidth, viewportHeight);
   }

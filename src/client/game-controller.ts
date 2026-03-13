@@ -90,6 +90,7 @@ import type { Vec3 } from "../engine/types.ts";
 import { raycastResidentWorld, type VoxelRayHit } from "../engine/voxel-raycast.ts";
 import {
   buildTargetingOverlayGeometry,
+  buildVoxelOverlayGeometry,
   type TargetingOverlayGeometry,
 } from "../engine/targeting-overlay.ts";
 import {
@@ -212,13 +213,20 @@ export interface TargetingSnapshot {
   distanceMeters: number;
   targetMaterial: string;
   breakable: boolean;
+  breakActionLabel: string;
   placeMaterial: string;
   placeable: boolean;
+  placeActionLabel: string;
+  placePreviewVoxel: [number, number, number] | null;
 }
 
 export interface TargetingOverlaySnapshot extends TargetingOverlayGeometry {
   breakable: boolean;
   placeable: boolean;
+  previewVisible: boolean;
+  previewOutlineSegments: TargetingOverlayGeometry["outlineSegments"];
+  previewFacePolygon: TargetingOverlayGeometry["facePolygon"];
+  previewMaterial: string;
 }
 
 interface BootstrapReadiness {
@@ -935,8 +943,11 @@ export class GameController {
         distanceMeters: 0,
         targetMaterial: "Out of reach",
         breakable: false,
+        breakActionLabel: "LMB Break look at a voxel",
         placeMaterial: formatInventoryMaterial(selected?.material ?? null),
         placeable: false,
+        placeActionLabel: selected ? "RMB Place look at a surface" : "RMB Place select a stack",
+        placePreviewVoxel: null,
       };
     }
     return buildTargetingSnapshot(this.world, this.inventory, hit);
@@ -955,10 +966,17 @@ export class GameController {
       return hiddenTargetingOverlaySnapshot(viewportWidth, viewportHeight);
     }
     const targeting = buildTargetingSnapshot(this.world, this.inventory, hit);
+    const previewGeometry = targeting.placeable && targeting.placePreviewVoxel
+      ? buildVoxelOverlayGeometry(this.camera, targeting.placePreviewVoxel, hit.normal, viewportWidth, viewportHeight)
+      : null;
     return {
       ...buildTargetingOverlayGeometry(this.camera, hit, viewportWidth, viewportHeight),
       breakable: targeting.breakable,
       placeable: targeting.placeable,
+      previewVisible: previewGeometry?.visible ?? false,
+      previewOutlineSegments: previewGeometry?.outlineSegments ?? [],
+      previewFacePolygon: previewGeometry?.facePolygon ?? [],
+      previewMaterial: targeting.placeMaterial,
     };
   }
 
@@ -3132,19 +3150,39 @@ function buildTargetingSnapshot(
 ): TargetingSnapshot {
   const targetMaterial = world.getVoxel(hit.voxel[0], hit.voxel[1], hit.voxel[2]);
   const selected = getSelectedInventoryStack(inventory);
+  const targetMaterialLabel = formatInventoryMaterial(targetMaterial || null);
+  const placeMaterialLabel = formatInventoryMaterial(selected?.material ?? null);
   const canBreak = targetMaterial !== 0 && getInventoryInsertCapacity(inventory, targetMaterial) > 0;
+  const adjacentWithinY = hit.adjacent[1] >= world.minY && hit.adjacent[1] < world.maxYExclusive;
+  const adjacentEmpty = adjacentWithinY
+    && world.getVoxel(hit.adjacent[0], hit.adjacent[1], hit.adjacent[2]) === 0;
   const canPlace = selected !== null
     && selected.count > 0
-    && world.getVoxel(hit.adjacent[0], hit.adjacent[1], hit.adjacent[2]) === 0;
+    && adjacentEmpty;
+  const breakActionLabel = canBreak
+    ? `LMB Break ${targetMaterialLabel}`
+    : targetMaterial === 0
+    ? "LMB Break unavailable"
+    : `LMB Break blocked inventory full for ${targetMaterialLabel}`;
+  const placeActionLabel = canPlace
+    ? `RMB Place ${placeMaterialLabel} at ${hit.adjacent[0]}, ${hit.adjacent[1]}, ${hit.adjacent[2]}`
+    : selected === null || selected.count <= 0
+    ? "RMB Place select a stack"
+    : !adjacentWithinY
+    ? "RMB Place outside world bounds"
+    : "RMB Place blocked by terrain";
   return {
     hit: true,
     voxel: [...hit.voxel],
     adjacent: [...hit.adjacent],
     distanceMeters: worldUnitsToMeters(hit.distance),
-    targetMaterial: formatInventoryMaterial(targetMaterial || null),
+    targetMaterial: targetMaterialLabel,
     breakable: canBreak,
-    placeMaterial: formatInventoryMaterial(selected?.material ?? null),
+    breakActionLabel,
+    placeMaterial: placeMaterialLabel,
     placeable: canPlace,
+    placeActionLabel,
+    placePreviewVoxel: canPlace ? [...hit.adjacent] : null,
   };
 }
 
@@ -3160,6 +3198,10 @@ function hiddenTargetingOverlaySnapshot(
     facePolygon: [],
     breakable: false,
     placeable: false,
+    previewVisible: false,
+    previewOutlineSegments: [],
+    previewFacePolygon: [],
+    previewMaterial: "Empty",
   };
 }
 

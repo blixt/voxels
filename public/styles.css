@@ -148,9 +148,11 @@ body::before {
   vector-effect: non-scaling-stroke;
 }
 
-.target-overlay.is-placeable .target-overlay-face {
-  fill: rgba(109, 208, 244, 0.16);
+.target-overlay-preview-face {
+  fill: rgba(109, 208, 244, 0.12);
   stroke: rgba(185, 243, 255, 0.72);
+  stroke-width: 1.6px;
+  vector-effect: non-scaling-stroke;
 }
 
 .target-overlay-line {
@@ -161,12 +163,17 @@ body::before {
   vector-effect: non-scaling-stroke;
 }
 
-.target-overlay.is-breakable .target-overlay-line {
-  stroke: rgba(255, 227, 145, 0.98);
+.target-overlay-preview-line {
+  stroke: rgba(186, 244, 255, 0.98);
+  stroke-width: 1.8px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  stroke-dasharray: 6 4;
 }
 
-.target-overlay.is-placeable .target-overlay-line {
-  stroke: rgba(186, 244, 255, 0.98);
+.target-overlay.is-breakable .target-overlay-line {
+  stroke: rgba(255, 227, 145, 0.98);
 }
 
 .game-target-card,
