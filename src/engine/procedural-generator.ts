@@ -1503,35 +1503,35 @@ export class ProceduralWorldGenerator {
       "highland",
       "tundra",
     ]);
-    const marshStrength = averageSignal(
+    const marshStrength = avg5(
       wetLowlandHost,
       smoothstep(0.56, 0.82, fields.moisture),
       smoothstep(0.48, 0.80, fields.drainage + Math.max(0, -fields.basin) * 0.38),
       smoothstep(0.36, 0.76, fields.oceanness + Math.max(0, -fields.basin) * 0.42 + fields.channel * 0.12),
       smoothstep(0.22, 0.82, flatness),
     ) * smoothstep(0.34, 0.78, 1 - (fields.magic * 0.58 + fields.volcanism * 0.36));
-    const fireflyStrength = averageSignal(
+    const fireflyStrength = avg5(
       wetLowlandHost,
       smoothstep(0.56, 0.80, fields.moisture),
       smoothstep(0.48, 0.74, fields.magic),
       smoothstep(0.42, 0.74, fields.grove + fields.channel * 0.25),
       smoothstep(0.20, 0.82, flatness),
     );
-    const saltflatStrength = averageSignal(
+    const saltflatStrength = avg5(
       dryLowlandHost,
       smoothstep(0.34, 0.72, fields.oceanness + Math.max(0, -fields.basin) * 0.45 + fields.channel * 0.18),
       smoothstep(0.42, 0.74, 1 - fields.moisture),
       smoothstep(0.18, 0.82, flatness),
       smoothstep(0.36, 0.72, 1 - fields.globalHeight + fields.oceanness * 0.35),
     );
-    const fernStrength = averageSignal(
+    const fernStrength = avg5(
       warmLushHost,
       smoothstep(0.50, 0.76, fields.temperature),
       smoothstep(0.56, 0.82, fields.moisture),
       smoothstep(0.42, 0.76, 1 - fields.drainage + Math.max(0, -fields.basin) * 0.55 + fields.channel * 0.15),
       smoothstep(0.24, 0.84, flatness),
     );
-    const fungalStrength = averageSignal(
+    const fungalStrength = avg5(
       moorBloomHost,
       smoothstep(0.46, 0.74, fields.magic),
       smoothstep(0.56, 0.82, fields.moisture),
@@ -1549,7 +1549,7 @@ export class ProceduralWorldGenerator {
       * smoothstep(0.38, 0.62, fields.moisture)
       * (0.55 + smoothstep(0.14, 0.66, 1 - fields.volcanism) * 0.45),
     );
-    const shardlandsStrength = averageSignal(
+    const shardlandsStrength = avg5(
       aridShardHost,
       smoothstep(0.40, 0.72, fields.magic + fields.volcanism * 0.20),
       smoothstep(0.46, 0.78, fields.volcanism + fields.ridge * 0.16),
@@ -1708,7 +1708,7 @@ export class ProceduralWorldGenerator {
   ): number {
     let waterTopY = surfaceY < this.seaLevel ? this.seaLevel : NO_WATER;
     if (biomeId === "marsh") {
-      const marshWetPocket = averageSignal(
+      const marshWetPocket = avg3(
         smoothstep(0.58, 0.84, fields.moisture),
         smoothstep(0.50, 0.82, fields.channel),
         smoothstep(0.38, 0.76, Math.max(0, -fields.basin) + fields.oceanness * 0.28),
@@ -1884,18 +1884,18 @@ export class ProceduralWorldGenerator {
     );
     const deepAffinity = resolveDeepCaveAffinity(biomeId, hostBiomeId, undergroundBiomeId, regionalVariantId);
     const upperAffinity = resolveUpperCaveAffinity(biomeId, hostBiomeId, undergroundBiomeId, regionalVariantId);
-    const mainField = averageSignal(
+    const mainField = avg4(
       smoothstep(0.52, 0.82, caveFields.caveRibbon),
       smoothstep(0.42, 0.78, caveFields.cavePocket),
       smoothstep(0.34, 0.72, caveFields.caveDepth + fields.drainage * 0.18 + basinness * 0.20),
       smoothstep(0.24, 0.72, subterraneanDryness + ruggedness * 0.18),
     );
-    const upperField = averageSignal(
+    const upperField = avg3(
       smoothstep(0.56, 0.84, caveFields.caveOpenings),
       smoothstep(0.36, 0.76, ruggedness + basinness * 0.22 + fields.channel * 0.16),
       smoothstep(0.36, 0.74, caveFields.caveRibbon + caveFields.cavePocket * 0.18),
     );
-    const entranceField = averageSignal(
+    const entranceField = avg3(
       smoothstep(0.50, 0.82, caveFields.caveOpenings),
       smoothstep(0.42, 0.80, ruggedness + fields.channel * 0.22 + basinness * 0.12),
       smoothstep(0.34, 0.72, caveFields.caveRibbon + caveFields.cavePocket * 0.24),
@@ -2999,7 +2999,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
   let id: RegionalVariantId | null = null;
   switch (biomeId) {
     case "verdant":
-      strength = averageSignal(
+      strength = avg4(
         smoothstep(0.68, 0.84, fields.oldGrowth),
         smoothstep(0.58, 0.78, fields.drainage),
         smoothstep(0.48, 0.74, fields.globalHeight),
@@ -3008,7 +3008,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.56 ? "verdant_karst" : null;
       break;
     case "savanna":
-      strength = averageSignal(
+      strength = avg4(
         smoothstep(0.62, 0.84, fields.temperature),
         smoothstep(0.58, 0.84, fields.scatter),
         smoothstep(0.48, 0.72, fields.moisture),
@@ -3017,7 +3017,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.60 ? "savanna_flowersea" : null;
       break;
     case "steppe":
-      strength = averageSignal(
+      strength = avg4(
         smoothstep(0.58, 0.80, fields.uplift),
         smoothstep(0.56, 0.82, fields.ridge),
         smoothstep(0.50, 0.76, fields.peakness),
@@ -3026,7 +3026,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.82 ? "steppe_monolith" : null;
       break;
     case "dunes":
-      strength = averageSignal(
+      strength = avg4(
         smoothstep(0.76, 0.90, fields.temperature),
         smoothstep(0.64, 0.88, fields.dune),
         smoothstep(0.48, 0.78, fields.volcanism + fields.magic * 0.2),
@@ -3035,7 +3035,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.64 ? "dunes_glass" : null;
       break;
     case "badlands":
-      strength = averageSignal(
+      strength = avg4(
         smoothstep(0.54, 0.80, fields.uplift),
         smoothstep(0.54, 0.82, fields.mesa),
         smoothstep(0.48, 0.80, fields.volcanism),
@@ -3044,7 +3044,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.62 ? "badlands_crater" : null;
       break;
     case "highland":
-      strength = averageSignal(
+      strength = avg4(
         smoothstep(0.64, 0.84, fields.oldGrowth),
         scoreField(fields.temperature, 0.54, 0.18),
         smoothstep(0.46, 0.76, fields.moisture),
@@ -3053,7 +3053,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.50 ? "highland_redleaf" : null;
       break;
     case "moor":
-      strength = averageSignal(
+      strength = avg3(
         smoothstep(0.58, 0.82, fields.magic),
         smoothstep(0.54, 0.80, fields.desolation + fields.scatter * 0.15),
         smoothstep(0.58, 0.84, fields.moisture),
@@ -3061,7 +3061,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.50 ? "moor_shadowglass" : null;
       break;
     case "tundra":
-      strength = averageSignal(
+      strength = avg3(
         smoothstep(0.70, 0.88, fields.uplift),
         smoothstep(0.56, 0.82, fields.peakness + fields.ridge * 0.2),
         smoothstep(0.52, 0.84, 1 - fields.temperature),
@@ -3069,7 +3069,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.78 ? "tundra_blue_ice" : null;
       break;
     case "marsh":
-      strength = averageSignal(
+      strength = avg3(
         smoothstep(0.70, 0.88, fields.moisture),
         smoothstep(0.66, 0.88, fields.channel),
         smoothstep(0.54, 0.80, fields.grove),
@@ -3077,7 +3077,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.46 ? "marsh_blackwater" : null;
       break;
     case "firefly":
-      strength = averageSignal(
+      strength = avg3(
         smoothstep(0.66, 0.86, fields.magic),
         smoothstep(0.70, 0.90, fields.moisture),
         smoothstep(0.58, 0.84, fields.channel + fields.grove * 0.2),
@@ -3085,7 +3085,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.46 ? "firefly_lantern" : null;
       break;
     case "saltflat":
-      strength = averageSignal(
+      strength = avg3(
         smoothstep(0.60, 0.84, fields.oceanness + Math.max(0, -fields.basin) * 0.25),
         smoothstep(0.56, 0.82, fields.surfacePatch),
         smoothstep(0.58, 0.84, 1 - fields.moisture),
@@ -3093,7 +3093,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.52 ? "saltflat_mirror" : null;
       break;
     case "fern":
-      strength = averageSignal(
+      strength = avg3(
         smoothstep(0.64, 0.86, fields.temperature),
         smoothstep(0.68, 0.88, fields.moisture),
         smoothstep(0.58, 0.86, fields.channel + Math.max(0, -fields.basin) * 0.30),
@@ -3101,7 +3101,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.52 ? "fern_cenote" : null;
       break;
     case "fungal":
-      strength = averageSignal(
+      strength = avg3(
         smoothstep(0.68, 0.88, fields.magic),
         smoothstep(0.68, 0.88, fields.moisture),
         smoothstep(0.56, 0.82, fields.oldGrowth + fields.grove * 0.2),
@@ -3109,7 +3109,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.46 ? "fungal_moonlit" : null;
       break;
     case "ember":
-      strength = averageSignal(
+      strength = avg3(
         smoothstep(0.66, 0.86, fields.volcanism),
         smoothstep(0.58, 0.82, fields.peakness + fields.mesa * 0.3),
         smoothstep(0.50, 0.80, fields.ridge),
@@ -3117,7 +3117,7 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.52 ? "ember_caldera" : null;
       break;
     case "bloom":
-      strength = averageSignal(
+      strength = avg3(
         smoothstep(0.68, 0.86, fields.magic),
         smoothstep(0.50, 0.78, fields.orchard + fields.grove * 0.2),
         smoothstep(0.44, 0.74, fields.moisture),
@@ -3125,8 +3125,13 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
       id = strength > 0.64 ? "bloom_prism" : null;
       break;
   }
-  return id === null ? null : { id, strength };
+  if (id === null) return null;
+  reusableRegionalVariant.id = id;
+  reusableRegionalVariant.strength = strength;
+  return reusableRegionalVariant;
 }
+
+const reusableRegionalVariant: RegionalVariantSelection = { id: "verdant_karst", strength: 0 };
 
 function adjustSpecialBiomeSurfaceY(
   seaLevel: number,
@@ -4334,15 +4339,16 @@ function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
-function averageSignal(...values: number[]): number {
-  if (values.length === 0) {
-    return 0;
-  }
-  let total = 0;
-  for (const value of values) {
-    total += value;
-  }
-  return total / values.length;
+function avg3(a: number, b: number, c: number): number {
+  return (a + b + c) * (1 / 3);
+}
+
+function avg4(a: number, b: number, c: number, d: number): number {
+  return (a + b + c + d) * 0.25;
+}
+
+function avg5(a: number, b: number, c: number, d: number, e: number): number {
+  return (a + b + c + d + e) * 0.2;
 }
 
 function saturate(value: number): number {
