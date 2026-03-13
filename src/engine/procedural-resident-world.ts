@@ -258,10 +258,13 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     return isProceduralWaterMaterial(materialIndex);
   }
 
-  private static readonly FAR_FIELD_COLUMN_CACHE_SIZE = 4;
-  private readonly farFieldColumnCacheKeys = new Int32Array(ProceduralResidentWorld.FAR_FIELD_COLUMN_CACHE_SIZE * 2).fill(0x7fffffff);
-  private readonly farFieldColumnCacheSummaries: (GeneratedRenderColumnSummary | null)[] = new Array(ProceduralResidentWorld.FAR_FIELD_COLUMN_CACHE_SIZE).fill(null);
+  private farFieldColumnCacheCx = NaN;
+  private farFieldColumnCacheCz = NaN;
+  private farFieldColumnCacheSummary: GeneratedRenderColumnSummary | null = null;
   private farFieldColumnCacheRevision = -1;
+  private readonly reusableFarFieldColumn: { surfaceY: number; surfaceMaterial: number; waterTopY: number | null; waterMaterial: number | null } = {
+    surfaceY: 0, surfaceMaterial: 0, waterTopY: null, waterMaterial: null,
+  };
 
   sampleFarFieldColumn(worldX: number, worldZ: number): FarFieldColumnSample | null {
     const voxelX = Math.floor(worldX);
@@ -269,19 +272,14 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
     const cx = Math.floor(voxelX / this.chunkSize);
     const cz = Math.floor(voxelZ / this.chunkSize);
     let columnSummary: GeneratedRenderColumnSummary | null | undefined;
-    if (this.farFieldColumnCacheRevision !== this.farFieldDataRevision) {
-      this.farFieldColumnCacheKeys.fill(0x7fffffff);
-      this.farFieldColumnCacheRevision = this.farFieldDataRevision;
-    }
-    const cacheSlot = (((cx * 73856093) ^ (cz * 19349669)) & 0x7fffffff) % ProceduralResidentWorld.FAR_FIELD_COLUMN_CACHE_SIZE;
-    const cacheKeyOffset = cacheSlot * 2;
-    if (this.farFieldColumnCacheKeys[cacheKeyOffset] === cx && this.farFieldColumnCacheKeys[cacheKeyOffset + 1] === cz) {
-      columnSummary = this.farFieldColumnCacheSummaries[cacheSlot];
+    if (cx === this.farFieldColumnCacheCx && cz === this.farFieldColumnCacheCz && this.farFieldColumnCacheRevision === this.farFieldDataRevision) {
+      columnSummary = this.farFieldColumnCacheSummary;
     } else {
       columnSummary = this.generatedRenderColumnSummaries.get(toColumnKey(cx, cz)) ?? null;
-      this.farFieldColumnCacheKeys[cacheKeyOffset] = cx;
-      this.farFieldColumnCacheKeys[cacheKeyOffset + 1] = cz;
-      this.farFieldColumnCacheSummaries[cacheSlot] = columnSummary;
+      this.farFieldColumnCacheCx = cx;
+      this.farFieldColumnCacheCz = cz;
+      this.farFieldColumnCacheSummary = columnSummary;
+      this.farFieldColumnCacheRevision = this.farFieldDataRevision;
     }
     if (!columnSummary) {
       return null;
@@ -300,12 +298,12 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld, FarFi
       waterTopY = NO_GENERATED_WATER_HEIGHT;
       waterMaterial = 0;
     }
-    return {
-      surfaceY,
-      surfaceMaterial,
-      waterTopY: waterTopY === NO_GENERATED_WATER_HEIGHT ? null : waterTopY,
-      waterMaterial: waterTopY === NO_GENERATED_WATER_HEIGHT ? null : waterMaterial,
-    };
+    const result = this.reusableFarFieldColumn;
+    result.surfaceY = surfaceY;
+    result.surfaceMaterial = surfaceMaterial;
+    result.waterTopY = waterTopY === NO_GENERATED_WATER_HEIGHT ? null : waterTopY;
+    result.waterMaterial = waterTopY === NO_GENERATED_WATER_HEIGHT ? null : waterMaterial;
+    return result;
   }
 
   getFarFieldChunkSummary(cx: number, cy: number, cz: number): GeneratedChunkRenderSummary | null {
