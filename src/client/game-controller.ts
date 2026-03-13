@@ -178,6 +178,7 @@ export interface GameHudSnapshot {
   selectedInventoryMaterial: string;
   selectedInventoryCount: number;
   usedInventoryStacks: number;
+  collectedMaterialCount: number;
   bootstrapPlayableReady: boolean;
   bootstrapVisualReady: boolean;
   bootstrapElapsedMs: number;
@@ -703,6 +704,7 @@ export class GameController {
   readonly farField = new ProceduralFarField(this.world);
   readonly explorationJournal = new ExplorationJournal();
   readonly inventory: InventoryState = createInventoryState();
+  readonly collectedMaterialIds = new Set<number>();
 
   renderer: WebGpuVoxelRenderer | null = null;
   camera: FirstPersonCameraState = createFirstPersonCamera([0.5, 1500, 0.5]);
@@ -874,6 +876,7 @@ export class GameController {
       selectedInventoryMaterial: formatInventoryMaterial(getSelectedInventoryStack(this.inventory)?.material ?? null),
       selectedInventoryCount: getSelectedInventoryStack(this.inventory)?.count ?? 0,
       usedInventoryStacks: countUsedInventoryStacks(this.inventory),
+      collectedMaterialCount: this.collectedMaterialIds.size,
       bootstrapPlayableReady: bootstrap.playableReady,
       bootstrapVisualReady: bootstrap.visualReady,
       bootstrapElapsedMs: performance.now() - this.bootstrapBenchmarkStartedAt,
@@ -1013,6 +1016,7 @@ export class GameController {
     if (!result.changed || !result.material) {
       return false;
     }
+    this.collectedMaterialIds.add(result.material);
     this.farFieldReadyMaskRevision += 1;
     this.flushMeshBuildBudget(1);
     this.status = `Collected ${formatInventoryMaterial(result.material)}`;

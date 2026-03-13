@@ -5096,3 +5096,48 @@ This line of investigation was screened locally and not kept in the runtime yet.
   - the player now has a real read-only management view over the full inventory instead of only a sliding hotbar
   - the controller owns panel state, so automation and UI stay aligned
   - the short trace stayed healthy, so the panel did not introduce an obvious gameplay-path regression
+
+## 2026-03-13 exploration objective panel pass
+
+#### Commands
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/exploration-objectives.test.ts tests/hotbar-layout.test.ts tests/targeting-overlay.test.ts`
+- `mise run build`
+- ad hoc browser smoke via `scripts/lib/browser-game-benchmark-harness.ts` helpers against a fresh production server
+- `mise run trace-route -- --benchmark=live-forward --label=objective-panel-smoke --duration=2 --settle=1 --sample-hz=20`
+
+#### Result
+
+- `typecheck`
+  - pass
+- focused tests
+  - `9` pass
+  - `0` fail
+- `build`
+  - pass
+- browser smoke
+  - pass
+- live-forward trace
+  - pass
+  - `avg gameplay frame = 3.03 ms`
+  - `p95 gameplay frame = 5.80 ms`
+  - `frames with hole signals = 0`
+
+#### Browser smoke findings
+
+- On load:
+  - `getExplorationObjectives().stageId = "surface-survey"`
+  - panel title was `Surface Survey • 0/3`
+  - `3` objective rows were visible
+- After breaking one voxel:
+  - `breakTargetVoxel() = true`
+  - the `colors-4` objective progressed to `1 / 4`
+  - the stage stayed `surface-survey`, which is correct because the stage counts completed objectives, not partial progress
+
+#### Outcome
+
+- The slice is worth keeping:
+  - the game now has a real immediate exploration/progression surface instead of only raw discovery toasts
+  - the objective logic is pure and tested
+  - the short trace stayed healthy, so the progression panel did not introduce an obvious gameplay-path regression

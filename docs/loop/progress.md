@@ -2466,3 +2466,20 @@
   - no second pointer/input mode
   - no click interaction inside the panel
   - no new inventory state model to keep in sync
+
+## 2026-03-13 exploration objective panel pass
+
+- After the inventory panel, the next missing product layer was intent:
+  - the player could now see target, placement, hotbar, and full inventory state
+  - but the game still did very little to tell them what kind of exploration/build progress mattered next
+- I built this on top of existing discovery and collection truth instead of inventing a separate quest system:
+  - added a small pure objective helper with staged milestones
+  - started tracking cumulative collected material colors from successful break actions
+  - rendered a top-left expedition panel with current stage, subtitle, and progress bars
+- The browser smoke confirmed the loop actually moves:
+  - initial stage was `surface-survey`
+  - the panel rendered `3` visible objectives
+  - after breaking the first voxel, the color objective advanced to `1 / 4`
+- One useful observation from the smoke:
+  - the title stayed `Surface Survey • 0/3` after the first collected color because none of the three stage-one objectives were fully complete yet
+  - that is correct, and it makes the completed-count meaning clearer than trying to force every partial objective into the title

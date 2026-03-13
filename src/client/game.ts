@@ -5,6 +5,10 @@ import {
   type TargetingSnapshot,
 } from "./game-controller.ts";
 import { formatDiscoveryInline } from "../engine/discovery-catalog.ts";
+import {
+  describeExplorationObjectives,
+  type ExplorationObjectiveSnapshot,
+} from "../engine/exploration-objectives.ts";
 import { describeHotbarWindow } from "../engine/hotbar-layout.ts";
 import { INVENTORY_STACK_SIZE } from "../engine/inventory.ts";
 import { materialToHexColor } from "../engine/procedural-generator.ts";
@@ -77,6 +81,7 @@ declare global {
       probeFarFieldSurfaceGaps(): ReturnType<GameController["probeFarFieldSurfaceGaps"]>;
       getDiscoveryJournal(): ExplorationJournalSnapshot;
       resetDiscoveryJournal(): ExplorationJournalSnapshot;
+      getExplorationObjectives(): ExplorationObjectiveSnapshot;
       getInventory(): ReturnType<GameController["getInventorySnapshot"]>;
       getInventoryPanelOpen(): ReturnType<GameController["getInventoryPanelOpen"]>;
       setInventoryPanelOpen(open: boolean): ReturnType<GameController["setInventoryPanelOpen"]>;
@@ -110,6 +115,10 @@ interface InteractionHudView {
 
 interface InventoryPanelView {
   update(snapshot: GameHudSnapshot, inventory: ReturnType<GameController["getInventorySnapshot"]>): void;
+}
+
+interface ObjectivePanelView {
+  update(snapshot: GameHudSnapshot): void;
 }
 
 interface TargetingOverlayView {
@@ -238,6 +247,7 @@ function mountGame(): GameRuntime {
   const captureProgress = appRoot.querySelector<HTMLElement>("[data-role='capture-progress']");
   const captureProgressBar = appRoot.querySelector<HTMLElement>("[data-role='capture-progress-bar']");
   const achievementElement = appRoot.querySelector<HTMLElement>("[data-role='discovery-achievements']");
+  const objectivePanelRoot = appRoot.querySelector<HTMLElement>("[data-role='objective-panel']");
   const interactionHudRoot = appRoot.querySelector<HTMLElement>("[data-role='interaction-hud']");
   const inventoryPanelRoot = appRoot.querySelector<HTMLElement>("[data-role='inventory-panel']");
   const targetOverlayRoot = appRoot.querySelector<SVGSVGElement>("[data-role='target-overlay']");
@@ -259,6 +269,7 @@ function mountGame(): GameRuntime {
     || !captureProgress
     || !captureProgressBar
     || !achievementElement
+    || !objectivePanelRoot
     || !interactionHudRoot
     || !inventoryPanelRoot
     || !targetOverlayRoot
@@ -276,6 +287,7 @@ function mountGame(): GameRuntime {
   const lastTelemetryValues = new Array<string>(telemetryValues.length).fill("");
   const telemetrySummaryView = createTelemetrySummaryView(telemetrySummaryElement, telemetryChart);
   const achievementPresenter = createAchievementPresenter(achievementElement);
+  const objectivePanelView = createObjectivePanelView(objectivePanelRoot);
   const interactionHudView = createInteractionHudView(interactionHudRoot);
   const inventoryPanelView = createInventoryPanelView(inventoryPanelRoot);
   const targetingOverlayView = createTargetingOverlayView(targetOverlayRoot);
@@ -307,6 +319,7 @@ function mountGame(): GameRuntime {
     }
     telemetrySummaryView.update(snapshot);
     achievementPresenter.observe(snapshot.recentDiscoveries);
+    objectivePanelView.update(snapshot);
     const inventorySnapshot = controller.getInventorySnapshot();
     interactionHudView.update(snapshot, inventorySnapshot, controller.getTargetingSnapshot());
     inventoryPanelView.update(snapshot, inventorySnapshot);
@@ -368,6 +381,7 @@ function mountGame(): GameRuntime {
     probeFarFieldSurfaceGaps: () => controller.probeFarFieldSurfaceGaps(),
     getDiscoveryJournal: () => controller.getDiscoveryJournalSnapshot(),
     resetDiscoveryJournal: () => controller.resetDiscoveryJournal(),
+    getExplorationObjectives: () => describeExplorationObjectives(snapshotToObjectiveSource(controller.getDebugSnapshot())),
     getInventory: () => controller.getInventorySnapshot(),
     getInventoryPanelOpen: () => controller.getInventoryPanelOpen(),
     setInventoryPanelOpen: (open) => controller.setInventoryPanelOpen(open),
@@ -625,6 +639,56 @@ function createInventoryPanelView(root: HTMLElement): InventoryPanelView {
   };
 }
 
+function createObjectivePanelView(root: HTMLElement): ObjectivePanelView {
+  const eyebrow = document.createElement("p");
+  eyebrow.className = "game-objective-panel-eyebrow";
+  eyebrow.textContent = "Expedition";
+  const title = document.createElement("h2");
+  title.className = "game-objective-panel-title";
+  const subtitle = document.createElement("p");
+  subtitle.className = "game-objective-panel-subtitle";
+  const objectiveList = document.createElement("div");
+  objectiveList.className = "game-objective-list";
+  const objectiveRows = Array.from({ length: 5 }, () => {
+    const label = document.createElement("strong");
+    label.className = "game-objective-label";
+    const progress = document.createElement("span");
+    progress.className = "game-objective-progress";
+    const fill = document.createElement("span");
+    fill.className = "game-objective-fill";
+    const bar = document.createElement("span");
+    bar.className = "game-objective-bar";
+    bar.append(fill);
+    const row = document.createElement("div");
+    row.className = "game-objective-row";
+    row.append(label, progress, bar);
+    objectiveList.append(row);
+    return { row, label, progress, fill };
+  });
+  root.replaceChildren(eyebrow, title, subtitle, objectiveList);
+
+  return {
+    update(snapshot) {
+      const objectiveSnapshot = describeExplorationObjectives(snapshotToObjectiveSource(snapshot));
+      title.textContent = `${objectiveSnapshot.title} • ${objectiveSnapshot.completedCount}/${objectiveSnapshot.totalCount}`;
+      subtitle.textContent = objectiveSnapshot.subtitle;
+      for (let index = 0; index < objectiveRows.length; index += 1) {
+        const row = objectiveRows[index]!;
+        const objective = objectiveSnapshot.objectives[index];
+        if (!objective) {
+          row.row.setAttribute("hidden", "");
+          continue;
+        }
+        row.row.removeAttribute("hidden");
+        row.row.classList.toggle("is-complete", objective.completed);
+        row.label.textContent = objective.label;
+        row.progress.textContent = `${objective.progress} / ${objective.target}`;
+        row.fill.style.transform = `scaleX(${objective.target > 0 ? objective.progress / objective.target : 0})`;
+      }
+    },
+  };
+}
+
 function createTargetingOverlayView(root: SVGSVGElement): TargetingOverlayView {
   const namespace = "http://www.w3.org/2000/svg";
   const face = document.createElementNS(namespace, "polygon");
@@ -730,6 +794,16 @@ function colorWithAlpha(color: string, alpha: number): string {
     return color;
   }
   return `rgba(${match[1]}, ${match[2]}, ${match[3]}, ${alpha})`;
+}
+
+function snapshotToObjectiveSource(snapshot: GameHudSnapshot) {
+  return {
+    discoveredBiomeCount: snapshot.discoveredBiomeCount,
+    discoveredUndergroundBiomeCount: snapshot.discoveredUndergroundBiomeCount,
+    discoveredRegionalVariantCount: snapshot.discoveredRegionalVariantCount,
+    discoveredLandmarkCount: snapshot.discoveredLandmarkCount,
+    collectedMaterialCount: snapshot.collectedMaterialCount,
+  };
 }
 
 function formatCoords(coords: readonly number[] | null): string {
