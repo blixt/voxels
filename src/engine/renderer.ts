@@ -27,14 +27,6 @@ struct Uniforms {
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
-struct FarFieldMask {
-  meta0: vec4<i32>,
-  meta1: vec4<i32>,
-  words: array<u32, 32>,
-}
-
-@group(0) @binding(1) var<storage, read> far_field_mask: FarFieldMask;
-
 struct VertexInput {
   @location(0) position: vec3<f32>,
   @location(1) normal: vec4<f32>,
@@ -68,35 +60,8 @@ fn shade_fragment(input: VertexOutput) -> vec4<f32> {
   return vec4<f32>(shaded * (1.0 - fog) + uniforms.fog_color.rgb * fog, input.color.a);
 }
 
-fn far_field_mask_contains(world_position: vec3<f32>) -> bool {
-  if (far_field_mask.meta1.x == 0) {
-    return false;
-  }
-  let span_chunks = far_field_mask.meta0.z;
-  let chunk_size = f32(far_field_mask.meta0.w);
-  let chunk_x = i32(floor(world_position.x / chunk_size));
-  let chunk_z = i32(floor(world_position.z / chunk_size));
-  let local_x = chunk_x - far_field_mask.meta0.x;
-  let local_z = chunk_z - far_field_mask.meta0.y;
-  if (local_x < 0 || local_z < 0 || local_x >= span_chunks || local_z >= span_chunks) {
-    return false;
-  }
-  let bit_index = u32(local_x + local_z * span_chunks);
-  let word_index = bit_index / 32u;
-  let bit_offset = bit_index % 32u;
-  return (far_field_mask.words[word_index] & (1u << bit_offset)) != 0u;
-}
-
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-  return shade_fragment(input);
-}
-
-@fragment
-fn fs_far(input: VertexOutput) -> @location(0) vec4<f32> {
-  if (far_field_mask_contains(input.world_position)) {
-    discard;
-  }
   return shade_fragment(input);
 }
 `;
@@ -121,17 +86,6 @@ export interface RenderMeshSource {
   mesh: ChunkMeshData | null;
   gpuDirty: boolean;
 }
-
-export interface FarFieldRenderMask {
-  originChunkX: number;
-  originChunkZ: number;
-  spanChunks: number;
-  chunkSizeWorldUnits: number;
-  words: Uint32Array;
-}
-
-const FAR_FIELD_MASK_WORD_COUNT = 32;
-const FAR_FIELD_MASK_BUFFER_BYTES = 32 + FAR_FIELD_MASK_WORD_COUNT * 4;
 
 interface PassStats {
   drawCalls: number;
@@ -195,25 +149,56 @@ export class GpuFrameTimer {
   }
 }
 
+function extractFrustumPlanes(vp: Float32Array): Float32Array {
+  const planes = new Float32Array(24); // 6 planes × (nx, ny, nz, d)
+  for (let i = 0; i < 6; i++) {
+    const sign = (i & 1) === 0 ? 1 : -1;
+    const row = i >> 1; // 0=X, 1=Y, 2=Z
+    planes[i * 4 + 0] = vp[3]! + sign * vp[row]!;
+    planes[i * 4 + 1] = vp[7]! + sign * vp[4 + row]!;
+    planes[i * 4 + 2] = vp[11]! + sign * vp[8 + row]!;
+    planes[i * 4 + 3] = vp[15]! + sign * vp[12 + row]!;
+    const len = Math.hypot(planes[i * 4]!, planes[i * 4 + 1]!, planes[i * 4 + 2]!);
+    if (len > 0) {
+      planes[i * 4] /= len;
+      planes[i * 4 + 1] /= len;
+      planes[i * 4 + 2] /= len;
+      planes[i * 4 + 3] /= len;
+    }
+  }
+  return planes;
+}
+
+function isAabbVisible(
+  planes: Float32Array,
+  minX: number, minY: number, minZ: number,
+  maxX: number, maxY: number, maxZ: number,
+): boolean {
+  for (let i = 0; i < 6; i++) {
+    const nx = planes[i * 4]!;
+    const ny = planes[i * 4 + 1]!;
+    const nz = planes[i * 4 + 2]!;
+    const d = planes[i * 4 + 3]!;
+    if ((nx > 0 ? maxX : minX) * nx + (ny > 0 ? maxY : minY) * ny + (nz > 0 ? maxZ : minZ) * nz + d < 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export class WebGpuVoxelRenderer {
   private readonly context: GPUCanvasContext;
   private readonly device: GPUDevice;
   private readonly pipeline: GPURenderPipeline;
-  private readonly farFieldPipeline: GPURenderPipeline;
   private readonly waterPipeline: GPURenderPipeline;
-  private readonly farFieldWaterPipeline: GPURenderPipeline;
   private readonly uniformBuffer: GPUBuffer;
-  private readonly farFieldMaskBuffer: GPUBuffer;
   private readonly uniformBindGroup: GPUBindGroup;
   private readonly resources = new Map<object, GpuChunkResources>();
   private readonly uniformData = new Float32Array(36);
-  private readonly farFieldMaskData = new ArrayBuffer(FAR_FIELD_MASK_BUFFER_BYTES);
-  private readonly farFieldMaskMeta = new Int32Array(this.farFieldMaskData, 0, 8);
-  private readonly farFieldMaskWords = new Uint32Array(this.farFieldMaskData, 32, FAR_FIELD_MASK_WORD_COUNT);
   private depthTexture: GPUTexture | null = null;
   private depthView: GPUTextureView | null = null;
   private resourceSyncRevision = 0;
-  private lastFarFieldMask: FarFieldRenderMask | null | undefined = undefined;
+  private lastViewProjection: Float32Array | null = null;
   readonly format: GPUTextureFormat;
   readonly timestampQuerySupported: boolean;
 
@@ -227,21 +212,12 @@ export class WebGpuVoxelRenderer {
       size: 144,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    const farFieldMaskBuffer = device.createBuffer({
-      size: FAR_FIELD_MASK_BUFFER_BYTES,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
     const bindGroupLayout = device.createBindGroupLayout({
       entries: [
         {
           binding: 0,
           visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
           buffer: { type: "uniform" },
-        },
-        {
-          binding: 1,
-          visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: "read-only-storage" },
         },
       ],
     });
@@ -322,86 +298,13 @@ export class WebGpuVoxelRenderer {
         depthCompare: "less",
       },
     });
-    this.farFieldPipeline = device.createRenderPipeline({
-      layout: pipelineLayout,
-      vertex: {
-        module: shaderModule,
-        entryPoint: "vs_main",
-        buffers: [
-          {
-            arrayStride: 20,
-            attributes: [
-              { shaderLocation: 0, format: "float32x3", offset: 0 },
-              { shaderLocation: 1, format: "snorm8x4", offset: 12 },
-              { shaderLocation: 2, format: "unorm8x4", offset: 16 },
-            ],
-          },
-        ],
-      },
-      fragment: {
-        module: shaderModule,
-        entryPoint: "fs_far",
-        targets: [{ format }],
-      },
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "back",
-        frontFace: "ccw",
-      },
-      depthStencil: {
-        format: "depth24plus",
-        depthWriteEnabled: true,
-        depthCompare: "less",
-        depthBias: 2,
-        depthBiasSlopeScale: 1,
-        depthBiasClamp: 0,
-      },
-    });
-    this.farFieldWaterPipeline = device.createRenderPipeline({
-      layout: pipelineLayout,
-      vertex: {
-        module: shaderModule,
-        entryPoint: "vs_main",
-        buffers: [
-          {
-            arrayStride: 20,
-            attributes: [
-              { shaderLocation: 0, format: "float32x3", offset: 0 },
-              { shaderLocation: 1, format: "snorm8x4", offset: 12 },
-              { shaderLocation: 2, format: "unorm8x4", offset: 16 },
-            ],
-          },
-        ],
-      },
-      fragment: {
-        module: shaderModule,
-        entryPoint: "fs_far",
-        targets: [{ format, blend: waterBlend }],
-      },
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "none",
-        frontFace: "ccw",
-      },
-      depthStencil: {
-        format: "depth24plus",
-        depthWriteEnabled: false,
-        depthCompare: "less",
-        depthBias: 2,
-        depthBiasSlopeScale: 1,
-        depthBiasClamp: 0,
-      },
-    });
     this.uniformBuffer = uniformBuffer;
-    this.farFieldMaskBuffer = farFieldMaskBuffer;
     this.uniformBindGroup = device.createBindGroup({
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: uniformBuffer } },
-        { binding: 1, resource: { buffer: farFieldMaskBuffer } },
       ],
     });
-    this.writeFarFieldMask(null);
     this.configureCanvas(canvas);
   }
 
@@ -465,17 +368,18 @@ export class WebGpuVoxelRenderer {
     camera: RenderCamera,
     timer: GpuFrameTimer | null = null,
     frameIndex = 0,
-    extraMeshes: readonly RenderMeshSource[] = [],
-    farFieldMask: FarFieldRenderMask | null = null,
     renderEnvironment: RenderEnvironment = DEFAULT_RENDER_ENVIRONMENT,
   ): RenderStats {
     this.configureCanvas(this.context.canvas as HTMLCanvasElement);
     const syncStartedAt = performance.now();
-    const syncStats = this.syncResources(world, extraMeshes);
+    const syncStats = this.syncResources(world);
     const syncResourcesMs = performance.now() - syncStartedAt;
     const canvas = this.context.canvas as HTMLCanvasElement;
     this.writeUniforms(camera, canvas.width / canvas.height, renderEnvironment);
-    this.writeFarFieldMask(farFieldMask);
+
+    const frustumPlanes = this.lastViewProjection
+      ? extractFrustumPlanes(this.lastViewProjection)
+      : null;
 
     const encoder = this.device.createCommandEncoder();
     const passDescriptor: GPURenderPassDescriptor = {
@@ -503,7 +407,7 @@ export class WebGpuVoxelRenderer {
     }
 
     const encodeStartedAt = performance.now();
-    const stats = this.encodeRenderPass(world, extraMeshes, encoder, passDescriptor);
+    const stats = this.encodeRenderPass(world, encoder, passDescriptor, frustumPlanes);
     const encodeMs = performance.now() - encodeStartedAt;
 
     if (timer) {
@@ -532,13 +436,14 @@ export class WebGpuVoxelRenderer {
     camera: RenderCamera,
     width: number,
     height: number,
-    extraMeshes: readonly RenderMeshSource[] = [],
-    farFieldMask: FarFieldRenderMask | null = null,
     renderEnvironment: RenderEnvironment = DEFAULT_RENDER_ENVIRONMENT,
   ): Promise<ReadbackImage> {
-    this.syncResources(world, extraMeshes);
+    this.syncResources(world);
     this.writeUniforms(camera, width / height, renderEnvironment);
-    this.writeFarFieldMask(farFieldMask);
+
+    const frustumPlanes = this.lastViewProjection
+      ? extractFrustumPlanes(this.lastViewProjection)
+      : null;
 
     const colorTexture = this.device.createTexture({
       size: [width, height, 1],
@@ -557,7 +462,7 @@ export class WebGpuVoxelRenderer {
     });
 
     const encoder = this.device.createCommandEncoder();
-    this.encodeRenderPass(world, extraMeshes, encoder, {
+    this.encodeRenderPass(world, encoder, {
       colorAttachments: [
         {
           view: colorTexture.createView(),
@@ -572,7 +477,7 @@ export class WebGpuVoxelRenderer {
         depthClearValue: 1,
         depthStoreOp: "store",
       },
-    });
+    }, frustumPlanes);
     encoder.copyTextureToBuffer(
       { texture: colorTexture },
       { buffer: readback, bytesPerRow, rowsPerImage: height },
@@ -618,68 +523,56 @@ export class WebGpuVoxelRenderer {
     this.resources.clear();
     this.depthTexture?.destroy();
     this.uniformBuffer.destroy();
-    this.farFieldMaskBuffer.destroy();
   }
 
   private encodeRenderPass(
     world: ResidentChunkWorld,
-    extraMeshes: readonly RenderMeshSource[],
     encoder: GPUCommandEncoder,
     passDescriptor: GPURenderPassDescriptor,
+    frustumPlanes: Float32Array | null,
   ): PassStats {
     const pass = encoder.beginRenderPass(passDescriptor);
     pass.setBindGroup(0, this.uniformBindGroup);
 
     let drawCalls = 0;
     let triangles = 0;
-    pass.setPipeline(this.farFieldPipeline);
-    for (const extraMesh of extraMeshes) {
-      const resource = this.resources.get(extraMesh);
-      if (!resource || resource.indexCount === 0) {
-        continue;
-      }
-      pass.setVertexBuffer(0, resource.vertexBuffer);
-      pass.setIndexBuffer(resource.indexBuffer, "uint32");
-      pass.drawIndexed(resource.indexCount, 1, 0, 0, 0);
-      drawCalls += 1;
-      triangles += resource.triangleCount;
-    }
+
+    // Opaque pass (all LOD levels — coarser drawn first via iterateResidentChunks order)
     pass.setPipeline(this.pipeline);
     for (const chunk of world.iterateResidentChunks()) {
       const resource = this.resources.get(chunk);
       if (!resource || resource.indexCount === 0) {
         continue;
       }
+      const b = chunk.mesh?.bounds;
+      if (b && frustumPlanes && !isAabbVisible(frustumPlanes, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
+        continue;
+      }
       pass.setVertexBuffer(0, resource.vertexBuffer);
       pass.setIndexBuffer(resource.indexBuffer, "uint32");
       pass.drawIndexed(resource.indexCount, 1, 0, 0, 0);
       drawCalls += 1;
       triangles += resource.triangleCount;
     }
-    pass.setPipeline(this.farFieldWaterPipeline);
-    for (const extraMesh of extraMeshes) {
-      const resource = this.resources.get(extraMesh);
-      if (!resource || resource.waterIndexCount === 0 || !resource.waterVertexBuffer || !resource.waterIndexBuffer) {
-        continue;
-      }
-      pass.setVertexBuffer(0, resource.waterVertexBuffer);
-      pass.setIndexBuffer(resource.waterIndexBuffer, "uint32");
-      pass.drawIndexed(resource.waterIndexCount, 1, 0, 0, 0);
-      drawCalls += 1;
-      triangles += resource.waterTriangleCount;
-    }
+
+    // Water pass
     pass.setPipeline(this.waterPipeline);
     for (const chunk of world.iterateResidentChunks()) {
       const resource = this.resources.get(chunk);
       if (!resource || resource.waterIndexCount === 0 || !resource.waterVertexBuffer || !resource.waterIndexBuffer) {
         continue;
       }
+      const b = chunk.mesh?.bounds;
+      if (b && frustumPlanes && !isAabbVisible(frustumPlanes, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
+        continue;
+      }
       pass.setVertexBuffer(0, resource.waterVertexBuffer);
       pass.setIndexBuffer(resource.waterIndexBuffer, "uint32");
       pass.drawIndexed(resource.waterIndexCount, 1, 0, 0, 0);
       drawCalls += 1;
       triangles += resource.waterTriangleCount;
     }
+
     pass.end();
     return { drawCalls, triangles };
   }
@@ -695,6 +588,7 @@ export class WebGpuVoxelRenderer {
       viewProjection = cameraMatrices.viewProjection;
       cameraPosition = cameraMatrices.eye;
     }
+    this.lastViewProjection = viewProjection;
     const uniformData = this.uniformData;
     uniformData.set(viewProjection, 0);
     uniformData[16] = LIGHT_DIRECTION[0];
@@ -720,27 +614,7 @@ export class WebGpuVoxelRenderer {
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
 
-  private writeFarFieldMask(mask: FarFieldRenderMask | null): void {
-    if (mask === this.lastFarFieldMask) {
-      return;
-    }
-    this.lastFarFieldMask = mask;
-    const meta = this.farFieldMaskMeta;
-    const words = this.farFieldMaskWords;
-    meta.fill(0);
-    words.fill(0);
-    if (mask) {
-      meta[0] = mask.originChunkX;
-      meta[1] = mask.originChunkZ;
-      meta[2] = mask.spanChunks;
-      meta[3] = mask.chunkSizeWorldUnits;
-      meta[4] = 1;
-      words.set(mask.words.subarray(0, FAR_FIELD_MASK_WORD_COUNT));
-    }
-    this.device.queue.writeBuffer(this.farFieldMaskBuffer, 0, this.farFieldMaskData);
-  }
-
-  private syncResources(world: ResidentChunkWorld, extraMeshes: readonly RenderMeshSource[]): {
+  private syncResources(world: ResidentChunkWorld): {
     uploadMs: number;
     uploadChunks: number;
     uploadBytes: number;
@@ -753,12 +627,6 @@ export class WebGpuVoxelRenderer {
 
     for (const chunk of world.iterateResidentChunks()) {
       const upload = this.syncMeshSourceResource(chunk, chunk.mesh, syncRevision);
-      uploadMs += upload.elapsedMs;
-      uploadChunks += upload.updated ? 1 : 0;
-      uploadBytes += upload.totalBytes;
-    }
-    for (const extraMesh of extraMeshes) {
-      const upload = this.syncMeshSourceResource(extraMesh, extraMesh.mesh, syncRevision);
       uploadMs += upload.elapsedMs;
       uploadChunks += upload.updated ? 1 : 0;
       uploadBytes += upload.totalBytes;

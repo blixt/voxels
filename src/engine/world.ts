@@ -5,6 +5,8 @@ export const DEFAULT_CHUNK_SIZE = 32;
 
 export interface VoxelChunk {
   coord: ChunkCoordinate;
+  lodLevel: number;
+  voxelStride: number;
   data: Uint16Array;
   solidCount: number;
   solidBounds: {
@@ -411,6 +413,8 @@ export class VoxelWorld implements ResidentChunkWorld {
   private createChunk(chunkKey: number, cx: number, cy: number, cz: number): VoxelChunk {
     const chunk = {
       coord: { x: cx, y: cy, z: cz },
+      lodLevel: 0,
+      voxelStride: 1,
       data: new Uint16Array(this.chunkSize * this.chunkSize * this.chunkSize),
       solidCount: 0,
       solidBounds: null,
