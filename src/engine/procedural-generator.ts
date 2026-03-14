@@ -391,6 +391,11 @@ const STRATA_BAND_SCALE = 1 / 160;
 const ONE_THIRD = 1 / 3;
 const NO_WATER = -1;
 const FEATURE_NONE = 0;
+// Sample points for LOD max-height pre-scan: 4 corners + center
+// Each entry is [xFrac, zFrac] where 0=min, 1=mid, 2=max
+const LOD_CORNER_SAMPLES: ReadonlyArray<readonly [number, number]> = [
+  [0, 0], [2, 0], [0, 2], [2, 2], [1, 1],
+];
 const FEATURE_OAK = 1;
 const FEATURE_STANDING_STONE = 2;
 const FEATURE_PALM = 3;
@@ -1271,11 +1276,35 @@ export class ProceduralWorldGenerator {
     const columnState = createMutableColumnState();
     const scratch = acquireChunkGenerationScratch(chunkArea);
 
+    // Max-height sampling: for each LOD column, sample the 4 corners of
+    // the stride x stride footprint to find the point with the highest
+    // surface, then use that column's full state. This prevents terrain
+    // features from disappearing at coarser LOD levels.
+    const surfaceSampleState = this.surfaceSampleState;
     for (let z = 0; z < this.chunkSize; z += 1) {
-      const worldZ = originZ + z * stride;
+      const baseWorldZ = originZ + z * stride;
       const rowOffset = z * this.chunkSize;
       for (let x = 0; x < this.chunkSize; x += 1) {
-        this.fillColumnState(originX + x * stride, worldZ, columnState);
+        const baseWorldX = originX + x * stride;
+        // Sample 4 corners + center (5 points) to find max surface height
+        let bestSurfaceY = -Infinity;
+        let bestSX = baseWorldX;
+        let bestSZ = baseWorldZ;
+        const endX = baseWorldX + stride - 1;
+        const endZ = baseWorldZ + stride - 1;
+        const midX = baseWorldX + (stride >> 1);
+        const midZ = baseWorldZ + (stride >> 1);
+        for (const [sx, sz] of LOD_CORNER_SAMPLES) {
+          const sampleX = sx === 0 ? baseWorldX : sx === 1 ? midX : endX;
+          const sampleZ = sz === 0 ? baseWorldZ : sz === 1 ? midZ : endZ;
+          this.fillSurfaceColumnState(sampleX, sampleZ, surfaceSampleState);
+          if (surfaceSampleState.surfaceY > bestSurfaceY) {
+            bestSurfaceY = surfaceSampleState.surfaceY;
+            bestSX = sampleX;
+            bestSZ = sampleZ;
+          }
+        }
+        this.fillColumnState(bestSX, bestSZ, columnState);
         this.writeChunkColumnState(scratch, x + rowOffset, columnState);
       }
     }

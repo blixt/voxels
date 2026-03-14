@@ -2186,6 +2186,7 @@ export class GameController {
     }
     if (!shouldRefreshResidency(false, resolved.changed, this.lastStreamSummary.pendingChunks)) {
       this.flushMeshBuildBudget();
+      this.world.updateLodResidencyAround(this.player.feetPosition, { maxGenerateLodChunks: 2 });
       this.lastStreamSummary = createIdleResidencySummary(
         this.lastStreamSummary,
         this.streamAnchor ?? resolved.anchor,
@@ -2215,7 +2216,9 @@ export class GameController {
     this.flushMeshBuildBudget(
       settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxMeshRebuildsPerFrame,
     );
-    this.world.updateLodResidencyAround(this.player.feetPosition);
+    this.world.updateLodResidencyAround(this.player.feetPosition, {
+      maxGenerateLodChunks: settle ? Number.POSITIVE_INFINITY : 4,
+    });
     this.status = residency.pendingChunks > 0
       ? `Streaming ${residency.pendingChunks} pending chunk(s)`
       : residency.generatedChunks > 0 || residency.evictedChunks > 0

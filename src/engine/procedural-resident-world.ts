@@ -110,8 +110,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
   private readonly chunks = new Map<string, VoxelChunk>();
   private readonly lodChunks = new Map<string, VoxelChunk>();
+  private readonly emptyLodKeys = new Set<string>();
   private meshMaterialLut: MeshMaterialLut | null = null;
-  private lastLodAnchorSignature = "";
   private readonly emptyChunkKeys = new Set<string>();
   private readonly editOverlays = new Map<string, Map<number, number>>();
   private readonly editLog: WorldEditRecord[] = [];
@@ -703,32 +703,48 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     return this.lastResidency;
   }
 
-  updateLodResidencyAround(position: Vec3): void {
-    const sig = `${Math.floor(position[0] / (this.chunkSize * 2))}:${Math.floor(position[2] / (this.chunkSize * 2))}`;
-    if (sig === this.lastLodAnchorSignature) {
-      return;
-    }
-    this.lastLodAnchorSignature = sig;
+  updateLodResidencyAround(
+    position: Vec3,
+    options?: { maxGenerateLodChunks?: number },
+  ): { generated: number; pending: number } {
+    const maxGenerate = options?.maxGenerateLodChunks ?? 4;
 
     if (!this.meshMaterialLut) {
       this.meshMaterialLut = createMeshMaterialLut(this.palette, isProceduralWaterMaterial);
     }
 
+    // Phase 1: compute all needed LOD chunk keys (cheap — just Y-range sampling)
     const neededKeys = new Set<string>();
 
-    let previousCoverage = this.horizontalRadiusChunks * this.chunkSize;
+    // LOD 0 covers a square of (2*radius+1) chunks centered on the player.
+    // We track the conservative half-width in world units from the player.
+    let coveredHalfWidth = this.horizontalRadiusChunks * this.chunkSize;
+
     for (const ring of LOD_RINGS) {
       const stride = 1 << ring.level;
       const worldSize = this.chunkSize * stride;
       const lcx = Math.floor(position[0] / worldSize);
       const lcz = Math.floor(position[2] / worldSize);
-      const innerExclusion = previousCoverage / worldSize;
+      // Player offset within the center LOD chunk
+      const offsetInChunkX = position[0] - lcx * worldSize;
+      const offsetInChunkZ = position[2] - lcz * worldSize;
 
       for (let dz = -ring.radiusChunks; dz <= ring.radiusChunks; dz += 1) {
         for (let dx = -ring.radiusChunks; dx <= ring.radiusChunks; dx += 1) {
-          if (Math.abs(dx) <= innerExclusion && Math.abs(dz) <= innerExclusion) {
+          // Check if this LOD chunk is entirely inside the already-covered area.
+          // A chunk at offset (dx,dz) spans world region relative to player:
+          //   [dx*worldSize - offsetInChunk, (dx+1)*worldSize - offsetInChunk)
+          // It's fully covered if its farthest edge is within coveredHalfWidth.
+          const chunkMinX = dx * worldSize - offsetInChunkX;
+          const chunkMaxX = (dx + 1) * worldSize - offsetInChunkX;
+          const chunkMinZ = dz * worldSize - offsetInChunkZ;
+          const chunkMaxZ = (dz + 1) * worldSize - offsetInChunkZ;
+          const farthestX = Math.max(Math.abs(chunkMinX), Math.abs(chunkMaxX));
+          const farthestZ = Math.max(Math.abs(chunkMinZ), Math.abs(chunkMaxZ));
+          if (farthestX <= coveredHalfWidth && farthestZ <= coveredHalfWidth) {
             continue;
           }
+
           const cx = lcx + dx;
           const cz = lcz + dz;
 
@@ -746,35 +762,67 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           const maxCy = Math.max(0, Math.floor(maxWorldY / worldSize));
 
           for (let cy = minCy; cy <= maxCy; cy += 1) {
-            const key = `L${ring.level}:${cx}:${cy}:${cz}`;
-            neededKeys.add(key);
-            if (this.lodChunks.has(key)) {
-              continue;
-            }
-            const generated = this.generator.generateChunkAtLod(cx, cy, cz, ring.level);
-            if (generated.solidCount === 0) {
-              continue;
-            }
-            const chunk = createLodResidentChunk(generated, ring.level, stride);
-            const mesh = this.buildLodChunkMesh(chunk, cx, cy, cz, stride, worldSize);
-            chunk.mesh = mesh;
-            chunk.meshBuilt = true;
-            chunk.meshDirty = false;
-            chunk.renderReady = true;
-            chunk.gpuDirty = true;
-            this.lodChunks.set(key, chunk);
+            neededKeys.add(`L${ring.level}:${cx}:${cy}:${cz}`);
           }
         }
       }
-      previousCoverage += ring.radiusChunks * worldSize;
+      // Extend coverage to include this ring's area
+      coveredHalfWidth = Math.max(
+        coveredHalfWidth,
+        ring.radiusChunks * worldSize + Math.max(offsetInChunkX, worldSize - offsetInChunkX),
+      );
     }
 
-    // Evict LOD chunks no longer needed
+    // Phase 2: generate and mesh LOD chunks with a budget
+    let generated = 0;
+    let pending = 0;
+    for (const key of neededKeys) {
+      if (this.lodChunks.has(key) || this.emptyLodKeys.has(key)) {
+        continue;
+      }
+      if (generated >= maxGenerate) {
+        pending++;
+        continue;
+      }
+      // Parse key: "L{level}:{cx}:{cy}:{cz}"
+      const parts = key.split(":");
+      const level = parseInt(parts[0]!.substring(1));
+      const cx = parseInt(parts[1]!);
+      const cy = parseInt(parts[2]!);
+      const cz = parseInt(parts[3]!);
+      const stride = 1 << level;
+      const worldSize = this.chunkSize * stride;
+
+      const genChunk = this.generator.generateChunkAtLod(cx, cy, cz, level);
+      if (genChunk.solidCount === 0) {
+        this.emptyLodKeys.add(key);
+        generated++;
+        continue;
+      }
+      const chunk = createLodResidentChunk(genChunk, level, stride);
+      const mesh = this.buildLodChunkMesh(chunk, cx, cy, cz, stride, worldSize);
+      chunk.mesh = mesh;
+      chunk.meshBuilt = true;
+      chunk.meshDirty = false;
+      chunk.renderReady = true;
+      chunk.gpuDirty = true;
+      this.lodChunks.set(key, chunk);
+      generated++;
+    }
+
+    // Phase 3: evict LOD chunks no longer needed
     for (const key of this.lodChunks.keys()) {
       if (!neededKeys.has(key)) {
         this.lodChunks.delete(key);
       }
     }
+    for (const key of this.emptyLodKeys) {
+      if (!neededKeys.has(key)) {
+        this.emptyLodKeys.delete(key);
+      }
+    }
+
+    return { generated, pending };
   }
 
   private buildLodChunkMesh(
