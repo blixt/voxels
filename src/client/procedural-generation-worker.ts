@@ -35,7 +35,6 @@ type WorkerRequest =
       type: "generate";
       requestId: number;
       coord: ChunkCoordinate;
-      lodLevel?: number;
     }
   | {
       type: "summarize";
@@ -204,8 +203,7 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
     self.postMessage(response, { transfer: summary.transfer });
     return;
   }
-  const lodLevel = message.type === "generate" ? (message.lodLevel ?? 0) : 0;
-  const generated = generator.generateChunkAtLod(message.coord.x, message.coord.y, message.coord.z, lodLevel);
+  const generated = generator.generateChunk(message.coord.x, message.coord.y, message.coord.z);
   if (message.type === "generate") {
     if (chunkCache) {
       enqueueDeferredProceduralPersistenceJob(pendingPersistenceJobs, {

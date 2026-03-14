@@ -11,7 +11,7 @@ Optimize the total CPU time for the game-stream crossing-d2 scenario: a 2-chunk 
 `./autoresearch.sh` — outputs `METRIC name=number` lines.
 
 ## Files in Scope
-- `src/engine/procedural-generator.ts` — Procedural terrain generation. Generates chunk voxel data from noise. **Biggest CPU cost** (~240ms of stream time). Also provides `generateChunkAtLod()` for multi-LOD chunk generation.
+- `src/engine/procedural-generator.ts` — Procedural terrain generation. Generates chunk voxel data from noise. **Biggest CPU cost** (~240ms of stream time).
 - `src/engine/mesher.ts` — Greedy mesher producing vertex/index buffers from chunk data (~1100 lines). ~180ms.
 - `src/engine/opaque-chunk-mesher.ts` — Standalone opaque mesher with Int32Array quad buffer (~805 lines). Used for async path and LOD chunk meshing.
 - `src/engine/procedural-resident-world.ts` — Manages chunk residency, generation budgets, eviction, and multi-LOD chunk management.

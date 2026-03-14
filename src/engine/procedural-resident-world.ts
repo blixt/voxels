@@ -805,41 +805,45 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       );
     }
 
-    // Phase 2: generate and mesh LOD chunks with a budget
+    // Phase 2: downsample and mesh LOD chunks with a budget.
+    // Process levels in ascending order so LOD N-1 is available when building LOD N.
     let generated = 0;
     let pending = 0;
-    for (const key of neededKeys) {
-      if (this.lodChunks.has(key) || this.emptyLodKeys.has(key)) {
-        continue;
-      }
-      if (generated >= maxGenerate) {
-        pending++;
-        continue;
-      }
-      // Parse key: "L{level}:{cx}:{cy}:{cz}"
-      const parts = key.split(":");
-      const level = parseInt(parts[0]!.substring(1));
-      const cx = parseInt(parts[1]!);
-      const cy = parseInt(parts[2]!);
-      const cz = parseInt(parts[3]!);
-      const stride = 1 << level;
+    for (const ring of LOD_RINGS) {
+      const stride = 1 << ring.level;
       const worldSize = this.chunkSize * stride;
+      const keyPrefix = `L${ring.level}:`;
+      for (const key of neededKeys) {
+        if (!key.startsWith(keyPrefix)) continue;
+        if (this.lodChunks.has(key) || this.emptyLodKeys.has(key)) continue;
+        if (generated >= maxGenerate) {
+          pending++;
+          continue;
+        }
+        const parts = key.split(":");
+        const cx = parseInt(parts[1]!);
+        const cy = parseInt(parts[2]!);
+        const cz = parseInt(parts[3]!);
 
-      const genChunk = this.generator.generateChunkAtLod(cx, cy, cz, level);
-      if (genChunk.solidCount === 0) {
-        this.emptyLodKeys.add(key);
+        const data = this.downsampleLodChunkData(cx, cy, cz, ring.level, stride, worldSize);
+        if (!data || data.solidCount === 0) {
+          this.emptyLodKeys.add(key);
+          generated++;
+          continue;
+        }
+        const chunk = createLodResidentChunk(
+          { coord: { x: cx, y: cy, z: cz }, data: data.data, solidCount: data.solidCount, solidBounds: data.solidBounds, renderSummary: null! },
+          ring.level, stride,
+        );
+        const mesh = this.buildLodChunkMesh(chunk, cx, cy, cz, stride, worldSize);
+        chunk.mesh = mesh;
+        chunk.meshBuilt = true;
+        chunk.meshDirty = false;
+        chunk.renderReady = true;
+        chunk.gpuDirty = true;
+        this.lodChunks.set(key, chunk);
         generated++;
-        continue;
       }
-      const chunk = createLodResidentChunk(genChunk, level, stride);
-      const mesh = this.buildLodChunkMesh(chunk, cx, cy, cz, stride, worldSize);
-      chunk.mesh = mesh;
-      chunk.meshBuilt = true;
-      chunk.meshDirty = false;
-      chunk.renderReady = true;
-      chunk.gpuDirty = true;
-      this.lodChunks.set(key, chunk);
-      generated++;
     }
 
     // Phase 3: evict LOD chunks no longer needed
@@ -855,6 +859,105 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
 
     return { generated, pending };
+  }
+
+  private downsampleLodChunkData(
+    lodCx: number,
+    lodCy: number,
+    lodCz: number,
+    level: number,
+    stride: number,
+    worldSize: number,
+  ): { data: Uint16Array; solidCount: number; solidBounds: { min: [number, number, number]; max: [number, number, number] } | null } | null {
+    const cs = this.chunkSize;
+    const chunkArea = cs * cs;
+    const data = new Uint16Array(cs * chunkArea);
+
+    // World-space origin of this LOD chunk
+    const originX = lodCx * worldSize;
+    const originY = lodCy * worldSize;
+    const originZ = lodCz * worldSize;
+
+    // Source lookup: LOD 1 reads from LOD 0 chunks, LOD 2+ from LOD (level-1) chunks.
+    const sourceStride = level === 1 ? 1 : (1 << (level - 1));
+    const sourceWorldSize = cs * sourceStride;
+    const lookupSource = level === 1
+      ? (cx: number, cy: number, cz: number) => this.chunks.get(toChunkKey(cx, cy, cz))?.data ?? null
+      : (cx: number, cy: number, cz: number) => this.lodChunks.get(`L${level - 1}:${cx}:${cy}:${cz}`)?.data ?? null;
+
+    let solidCount = 0;
+    let minX = cs, minY = cs, minZ = cs;
+    let maxX = 0, maxY = 0, maxZ = 0;
+
+    // The downsample factor relative to source: always 2 (each LOD level halves resolution)
+    const ds = 2;
+
+    for (let oz = 0; oz < cs; oz++) {
+      for (let oy = 0; oy < cs; oy++) {
+        for (let ox = 0; ox < cs; ox++) {
+          // World position of this output voxel
+          const wx = originX + ox * stride;
+          const wy = originY + oy * stride;
+          const wz = originZ + oz * stride;
+
+          // Find the source chunk and local coordinates
+          const srcCx = Math.floor(wx / sourceWorldSize);
+          const srcCy = Math.floor(wy / sourceWorldSize);
+          const srcCz = Math.floor(wz / sourceWorldSize);
+          const srcData = lookupSource(srcCx, srcCy, srcCz);
+
+          if (!srcData) {
+            // Source chunk not available — treat as air
+            continue;
+          }
+
+          // Local coordinate within source chunk
+          const srcLx = Math.floor((wx - srcCx * sourceWorldSize) / sourceStride);
+          const srcLy = Math.floor((wy - srcCy * sourceWorldSize) / sourceStride);
+          const srcLz = Math.floor((wz - srcCz * sourceWorldSize) / sourceStride);
+
+          // Downsample: scan the ds×ds×ds block starting at the source local coord,
+          // pick highest opaque voxel (top-down Y scan)
+          let bestMaterial = 0;
+          outer: for (let dy = ds - 1; dy >= 0; dy--) {
+            for (let dz = 0; dz < ds; dz++) {
+              for (let dx = 0; dx < ds; dx++) {
+                const lx = srcLx + dx;
+                const ly = srcLy + dy;
+                const lz = srcLz + dz;
+                if (lx >= cs || ly >= cs || lz >= cs) continue;
+                const mat = srcData[lx + ly * cs + lz * chunkArea]!;
+                if (mat !== 0 && !isProceduralWaterMaterial(mat)) {
+                  bestMaterial = mat;
+                  break outer;
+                }
+                if (mat !== 0 && bestMaterial === 0) {
+                  bestMaterial = mat; // water fallback
+                }
+              }
+            }
+          }
+
+          if (bestMaterial !== 0) {
+            data[ox + oy * cs + oz * chunkArea] = bestMaterial;
+            solidCount++;
+            if (ox < minX) minX = ox;
+            if (oy < minY) minY = oy;
+            if (oz < minZ) minZ = oz;
+            if (ox + 1 > maxX) maxX = ox + 1;
+            if (oy + 1 > maxY) maxY = oy + 1;
+            if (oz + 1 > maxZ) maxZ = oz + 1;
+          }
+        }
+      }
+    }
+
+    if (solidCount === 0) return null;
+    return {
+      data,
+      solidCount,
+      solidBounds: { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
+    };
   }
 
   private invalidateLodChunksAt(worldX: number, worldY: number, worldZ: number): void {

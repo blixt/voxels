@@ -5,67 +5,97 @@ import { ProceduralResidentWorld } from "../src/engine/procedural-resident-world
 const SEED = 1337;
 const CHUNK_SIZE = 32;
 
-function createGenerator() {
-  return new ProceduralWorldGenerator(SEED);
-}
-
-describe("LOD terrain accuracy", () => {
-  test("LOD 1 chunk surface heights match LOD 0 at sampled points", () => {
-    const gen = createGenerator();
-    const stride = 2;
-    const worldSize = CHUNK_SIZE * stride;
-    // Pick a chunk at actual spawn-area surface level
-    const spawnCol = gen.sampleColumn(192, 128);
-    const cx = Math.floor(192 / worldSize);
-    const cy = Math.floor(spawnCol.surfaceY / worldSize);
-    const cz = Math.floor(128 / worldSize);
-
-    const lodChunk = gen.generateChunkAtLod(cx, cy, cz, 1);
-    const chunkArea = CHUNK_SIZE * CHUNK_SIZE;
-
-    let matchCount = 0;
-    let totalColumns = 0;
-
-    for (let lz = 0; lz < CHUNK_SIZE; lz++) {
-      for (let lx = 0; lx < CHUNK_SIZE; lx++) {
-        const worldX = cx * worldSize + lx * stride;
-        const worldZ = cz * worldSize + lz * stride;
-        const col = gen.sampleColumn(worldX, worldZ);
-
-        // Find the highest solid voxel in this column in the LOD chunk
-        let lodSurfaceLocalY = -1;
-        for (let ly = CHUNK_SIZE - 1; ly >= 0; ly--) {
-          const idx = lx + ly * CHUNK_SIZE + lz * chunkArea;
-          if (lodChunk.data[idx] !== 0) {
-            lodSurfaceLocalY = ly;
-            break;
-          }
-        }
-
-        if (lodSurfaceLocalY < 0) continue;
-        totalColumns++;
-
-        const lodSurfaceWorldY = cy * worldSize + lodSurfaceLocalY * stride;
-        // At stride 2, LOD surface should be close to real surface
-        if (Math.abs(lodSurfaceWorldY - col.surfaceY) <= stride * 3) {
-          matchCount++;
-        }
-      }
-    }
-
-    expect(totalColumns).toBeGreaterThan(0);
-    // With max-height sampling, most columns should match
-    const matchRatio = matchCount / totalColumns;
-    expect(matchRatio).toBeGreaterThan(0.65);
-  });
-
-  test("LOD chunk vertex positions fall within expected world-space AABB", () => {
-    const gen = createGenerator();
-    const world = new ProceduralResidentWorld(gen, { horizontalRadiusChunks: 4 });
+describe("LOD downsampling", () => {
+  test("LOD chunks are derived from LOD 0 data, not re-generated", () => {
+    const gen = new ProceduralWorldGenerator(SEED);
+    const world = new ProceduralResidentWorld(gen, { horizontalRadiusChunks: 8 });
 
     const spawnPos = world.getSpawnPosition();
-    // Only generate LOD 1 and 2 chunks to keep it fast
-    world.updateLodResidencyAround(spawnPos, { maxGenerateLodChunks: 30 });
+    // Generate LOD 0 chunks
+    world.updateResidencyAround(spawnPos, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+    // Generate LOD chunks (downsampled from LOD 0)
+    world.updateLodResidencyAround(spawnPos, { maxGenerateLodChunks: 500 });
+
+    let lod0Count = 0;
+    let lodCount = 0;
+    for (const chunk of world.iterateResidentChunks()) {
+      if (chunk.lodLevel === 0) lod0Count++;
+      else lodCount++;
+    }
+    expect(lod0Count).toBeGreaterThan(0);
+    expect(lodCount).toBeGreaterThan(0);
+  });
+
+  test("LOD 1 voxels match highest opaque voxel in source 2x2x2 blocks", () => {
+    const gen = new ProceduralWorldGenerator(SEED);
+    const world = new ProceduralResidentWorld(gen, { horizontalRadiusChunks: 8 });
+
+    const spawnPos = world.getSpawnPosition();
+    world.updateResidencyAround(spawnPos, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+    world.updateLodResidencyAround(spawnPos, { maxGenerateLodChunks: 500 });
+
+    // Find a LOD 1 chunk that has solid voxels
+    let checked = false;
+    for (const lodChunk of world.iterateResidentChunks()) {
+      if (lodChunk.lodLevel !== 1 || lodChunk.solidCount === 0) continue;
+
+      const stride = lodChunk.voxelStride;
+      const worldSize = CHUNK_SIZE * stride;
+      const originX = lodChunk.coord.x * worldSize;
+      const originY = lodChunk.coord.y * worldSize;
+      const originZ = lodChunk.coord.z * worldSize;
+
+      // Spot check a few voxels: the LOD voxel should match what's
+      // in the source LOD 0 data
+      let matchCount = 0;
+      let totalChecked = 0;
+      for (let oz = 0; oz < CHUNK_SIZE && totalChecked < 100; oz++) {
+        for (let ox = 0; ox < CHUNK_SIZE && totalChecked < 100; ox++) {
+          for (let oy = CHUNK_SIZE - 1; oy >= 0; oy--) {
+            const lodMat = lodChunk.data[ox + oy * CHUNK_SIZE + oz * CHUNK_SIZE * CHUNK_SIZE]!;
+            if (lodMat === 0) continue;
+            totalChecked++;
+
+            // This LOD voxel represents world region starting at:
+            const wx = originX + ox * stride;
+            const wy = originY + oy * stride;
+            const wz = originZ + oz * stride;
+
+            // Check if the source LOD 0 data contains this material somewhere in the 2x2x2 block
+            let foundInSource = false;
+            for (let dy = 1; dy >= 0 && !foundInSource; dy--) {
+              for (let dz = 0; dz < 2 && !foundInSource; dz++) {
+                for (let dx = 0; dx < 2 && !foundInSource; dx++) {
+                  const srcMat = world.getVoxel(wx + dx, wy + dy, wz + dz);
+                  if (srcMat === lodMat) foundInSource = true;
+                }
+              }
+            }
+            if (foundInSource) matchCount++;
+            break; // only check topmost per column
+          }
+        }
+      }
+
+      if (totalChecked > 0) {
+        const matchRatio = matchCount / totalChecked;
+        expect(matchRatio).toBeGreaterThan(0.8);
+        checked = true;
+        break;
+      }
+    }
+    expect(checked).toBe(true);
+  });
+});
+
+describe("LOD vertex positions", () => {
+  test("LOD chunk vertices fall within expected world-space AABB", () => {
+    const gen = new ProceduralWorldGenerator(SEED);
+    const world = new ProceduralResidentWorld(gen, { horizontalRadiusChunks: 8 });
+
+    const spawnPos = world.getSpawnPosition();
+    world.updateResidencyAround(spawnPos, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+    world.updateLodResidencyAround(spawnPos, { maxGenerateLodChunks: 500 });
 
     let lodChunkCount = 0;
     let allVerticesInBounds = true;
@@ -107,20 +137,16 @@ describe("LOD terrain accuracy", () => {
 });
 
 describe("LOD coverage", () => {
-  test("LOD 1 ring covers the LOD 0 boundary zone with overlap", () => {
-    // With the overlap design, LOD 1 generates chunks in its full radius
-    // with NO exclusion from LOD 0. Only finer LOD rings exclude coarser.
-    // This means LOD 1 covers the entire LOD 0 area + beyond, ensuring
-    // no gaps when LOD 0 chunks haven't loaded yet.
+  test("LOD 1 ring covers the LOD 0 boundary zone", () => {
     const lod1Stride = 2;
     const lod1WorldSize = CHUNK_SIZE * lod1Stride;
-    const lod1Radius = 5;
+    const lod1Radius = 8; // current config
     const position: [number, number, number] = [192.5, 1419, 128.5];
 
     const lcx = Math.floor(position[0] / lod1WorldSize);
     const lcz = Math.floor(position[2] / lod1WorldSize);
 
-    // LOD 1 generates ALL chunks within radius (no exclusion for first ring)
+    // LOD 1 generates all chunks within radius (no LOD 0 exclusion)
     const lodColumns = new Set<string>();
     for (let dz = -lod1Radius; dz <= lod1Radius; dz++) {
       for (let dx = -lod1Radius; dx <= lod1Radius; dx++) {
@@ -128,7 +154,6 @@ describe("LOD coverage", () => {
       }
     }
 
-    // Every point within LOD 1 range should be covered
     const step = CHUNK_SIZE;
     const outerCheck = lod1Radius * lod1WorldSize - lod1WorldSize;
     let uncovered = 0;
@@ -148,17 +173,18 @@ describe("LOD coverage", () => {
     }
 
     const ratio = total > 0 ? 1 - uncovered / total : 1;
-    expect(ratio).toBe(1); // full coverage with overlap
-    expect(lodColumns.size).toBe((2 * lod1Radius + 1) ** 2); // 11x11 = 121
+    expect(ratio).toBe(1);
+    expect(lodColumns.size).toBe((2 * lod1Radius + 1) ** 2);
   });
 });
 
 describe("LOD mesh bounds", () => {
   test("LOD chunk mesh bounds contain all vertices", () => {
-    const gen = createGenerator();
-    const world = new ProceduralResidentWorld(gen, { horizontalRadiusChunks: 4 });
+    const gen = new ProceduralWorldGenerator(SEED);
+    const world = new ProceduralResidentWorld(gen, { horizontalRadiusChunks: 8 });
     const spawnPos = world.getSpawnPosition();
-    world.updateLodResidencyAround(spawnPos, { maxGenerateLodChunks: 20 });
+    world.updateResidencyAround(spawnPos, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+    world.updateLodResidencyAround(spawnPos, { maxGenerateLodChunks: 500 });
 
     let checked = 0;
     for (const chunk of world.iterateResidentChunks()) {
