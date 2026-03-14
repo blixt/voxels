@@ -107,11 +107,11 @@ describe("LOD terrain accuracy", () => {
 });
 
 describe("LOD coverage", () => {
-  test("LOD 1 ring covers the boundary zone outside LOD 0", () => {
-    // Verify the coverage math: for a given position and LOD config,
-    // check that every XZ point beyond LOD 0 radius but within LOD 1 is
-    // covered by at least one LOD chunk column.
-    const lod0Radius = 8; // default
+  test("LOD 1 ring covers the LOD 0 boundary zone with overlap", () => {
+    // With the overlap design, LOD 1 generates chunks in its full radius
+    // with NO exclusion from LOD 0. Only finer LOD rings exclude coarser.
+    // This means LOD 1 covers the entire LOD 0 area + beyond, ensuring
+    // no gaps when LOD 0 chunks haven't loaded yet.
     const lod1Stride = 2;
     const lod1WorldSize = CHUNK_SIZE * lod1Stride;
     const lod1Radius = 5;
@@ -119,59 +119,26 @@ describe("LOD coverage", () => {
 
     const lcx = Math.floor(position[0] / lod1WorldSize);
     const lcz = Math.floor(position[2] / lod1WorldSize);
-    const offsetInChunkX = position[0] - lcx * lod1WorldSize;
-    const offsetInChunkZ = position[2] - lcz * lod1WorldSize;
-    const coveredHalfWidth = lod0Radius * CHUNK_SIZE;
 
-    // Collect all LOD 1 chunk columns that would be generated
+    // LOD 1 generates ALL chunks within radius (no exclusion for first ring)
     const lodColumns = new Set<string>();
     for (let dz = -lod1Radius; dz <= lod1Radius; dz++) {
       for (let dx = -lod1Radius; dx <= lod1Radius; dx++) {
-        const chunkMinX = dx * lod1WorldSize - offsetInChunkX;
-        const chunkMaxX = (dx + 1) * lod1WorldSize - offsetInChunkX;
-        const chunkMinZ = dz * lod1WorldSize - offsetInChunkZ;
-        const chunkMaxZ = (dz + 1) * lod1WorldSize - offsetInChunkZ;
-        const farthestX = Math.max(Math.abs(chunkMinX), Math.abs(chunkMaxX));
-        const farthestZ = Math.max(Math.abs(chunkMinZ), Math.abs(chunkMaxZ));
-        if (farthestX <= coveredHalfWidth && farthestZ <= coveredHalfWidth) {
-          continue; // fully inside LOD 0 coverage
-        }
         lodColumns.add(`${lcx + dx}:${lcz + dz}`);
       }
     }
 
-    // Now check: every world XZ point in the LOD 0 → LOD 1 band should
-    // be covered by either an LOD 0 column or an LOD 1 column
+    // Every point within LOD 1 range should be covered
     const step = CHUNK_SIZE;
-    // LOD 1 ring extends lod1Radius * lod1WorldSize from center = 5*64 = 320
-    // Only check within what LOD 1 should cover
     const outerCheck = lod1Radius * lod1WorldSize - lod1WorldSize;
     let uncovered = 0;
     let total = 0;
 
     for (let dz = -outerCheck; dz <= outerCheck; dz += step) {
       for (let dx = -outerCheck; dx <= outerCheck; dx += step) {
-        const dist = Math.max(Math.abs(dx), Math.abs(dz));
-        if (dist < (lod0Radius - 1) * CHUNK_SIZE) continue;
-        if (dist > outerCheck) continue;
         total++;
-
         const worldX = position[0] + dx;
         const worldZ = position[2] + dz;
-
-        // Check LOD 0 coverage
-        const cx0 = Math.floor(worldX / CHUNK_SIZE);
-        const cz0 = Math.floor(worldZ / CHUNK_SIZE);
-        const playerCx = Math.floor(position[0] / CHUNK_SIZE);
-        const playerCz = Math.floor(position[2] / CHUNK_SIZE);
-        if (
-          Math.abs(cx0 - playerCx) <= lod0Radius &&
-          Math.abs(cz0 - playerCz) <= lod0Radius
-        ) {
-          continue; // covered by LOD 0
-        }
-
-        // Check LOD 1 coverage
         const lx = Math.floor(worldX / lod1WorldSize);
         const lz = Math.floor(worldZ / lod1WorldSize);
         if (!lodColumns.has(`${lx}:${lz}`)) {
@@ -181,8 +148,8 @@ describe("LOD coverage", () => {
     }
 
     const ratio = total > 0 ? 1 - uncovered / total : 1;
-    expect(ratio).toBeGreaterThan(0.95);
-    expect(lodColumns.size).toBeGreaterThan(0);
+    expect(ratio).toBe(1); // full coverage with overlap
+    expect(lodColumns.size).toBe((2 * lod1Radius + 1) ** 2); // 11x11 = 121
   });
 });
 

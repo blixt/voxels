@@ -713,49 +713,71 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       this.meshMaterialLut = createMeshMaterialLut(this.palette, isProceduralWaterMaterial);
     }
 
-    // Phase 1: compute all needed LOD chunk keys (cheap — just Y-range sampling)
+    // Phase 1: compute all needed LOD chunk keys (cheap — just Y-range sampling).
+    //
+    // Key design principle from Lay of the Land: LOD rings OVERLAP with the
+    // finer level. LOD 1 renders in its full radius including the area covered
+    // by LOD 0 — depth testing lets LOD 0 win where its meshes exist, but LOD 1
+    // fills in seamlessly wherever LOD 0 hasn't loaded yet. Between LOD rings
+    // (1→2, 2→3, etc.), exclusion IS safe because all rings are generated together.
+    //
+    // This eliminates the "holes at LOD boundary" problem completely.
     const neededKeys = new Set<string>();
 
-    // LOD 0 covers a square of (2*radius+1) chunks centered on the player.
-    // We track the conservative half-width in world units from the player.
-    let coveredHalfWidth = this.horizontalRadiusChunks * this.chunkSize;
+    // Start with zero coverage — LOD 1 is NOT excluded by LOD 0.
+    // Only exclude based on finer LOD rings (which are always co-generated).
+    let coveredHalfWidth = 0;
 
     for (const ring of LOD_RINGS) {
       const stride = 1 << ring.level;
       const worldSize = this.chunkSize * stride;
       const lcx = Math.floor(position[0] / worldSize);
       const lcz = Math.floor(position[2] / worldSize);
-      // Player offset within the center LOD chunk
       const offsetInChunkX = position[0] - lcx * worldSize;
       const offsetInChunkZ = position[2] - lcz * worldSize;
 
       for (let dz = -ring.radiusChunks; dz <= ring.radiusChunks; dz += 1) {
         for (let dx = -ring.radiusChunks; dx <= ring.radiusChunks; dx += 1) {
-          // Check if this LOD chunk is entirely inside the already-covered area.
-          // A chunk at offset (dx,dz) spans world region relative to player:
-          //   [dx*worldSize - offsetInChunk, (dx+1)*worldSize - offsetInChunk)
-          // It's fully covered if its farthest edge is within coveredHalfWidth.
-          const chunkMinX = dx * worldSize - offsetInChunkX;
-          const chunkMaxX = (dx + 1) * worldSize - offsetInChunkX;
-          const chunkMinZ = dz * worldSize - offsetInChunkZ;
-          const chunkMaxZ = (dz + 1) * worldSize - offsetInChunkZ;
-          const farthestX = Math.max(Math.abs(chunkMinX), Math.abs(chunkMaxX));
-          const farthestZ = Math.max(Math.abs(chunkMinZ), Math.abs(chunkMaxZ));
-          if (farthestX <= coveredHalfWidth && farthestZ <= coveredHalfWidth) {
-            continue;
+          // Exclude only if fully inside a finer LOD ring's coverage
+          if (coveredHalfWidth > 0) {
+            const chunkMinX = dx * worldSize - offsetInChunkX;
+            const chunkMaxX = (dx + 1) * worldSize - offsetInChunkX;
+            const chunkMinZ = dz * worldSize - offsetInChunkZ;
+            const chunkMaxZ = (dz + 1) * worldSize - offsetInChunkZ;
+            const farthestX = Math.max(Math.abs(chunkMinX), Math.abs(chunkMaxX));
+            const farthestZ = Math.max(Math.abs(chunkMinZ), Math.abs(chunkMaxZ));
+            if (farthestX <= coveredHalfWidth && farthestZ <= coveredHalfWidth) {
+              continue;
+            }
           }
 
           const cx = lcx + dx;
           const cz = lcz + dz;
 
-          // Estimate Y range by sampling center of LOD column
-          const centerWorldX = cx * worldSize + worldSize / 2;
-          const centerWorldZ = cz * worldSize + worldSize / 2;
-          const column = this.generator.sampleColumn(centerWorldX, centerWorldZ);
-          const minWorldY = Math.max(0, column.surfaceY - this.undergroundPaddingChunks * this.chunkSize);
+          // Estimate Y range: sample multiple points across the LOD column
+          // to avoid missing terrain that's between the center sample point
+          const points = [
+            [cx * worldSize, cz * worldSize],
+            [cx * worldSize + worldSize - 1, cz * worldSize],
+            [cx * worldSize, cz * worldSize + worldSize - 1],
+            [cx * worldSize + worldSize - 1, cz * worldSize + worldSize - 1],
+            [cx * worldSize + (worldSize >> 1), cz * worldSize + (worldSize >> 1)],
+          ];
+          let minSurfaceY = Infinity;
+          let maxSurfaceY = -Infinity;
+          let maxTopY = -Infinity;
+          let maxWaterY = -Infinity;
+          for (const [px, pz] of points) {
+            const col = this.generator.sampleColumn(px!, pz!);
+            if (col.surfaceY < minSurfaceY) minSurfaceY = col.surfaceY;
+            if (col.surfaceY > maxSurfaceY) maxSurfaceY = col.surfaceY;
+            if (col.topY > maxTopY) maxTopY = col.topY;
+            if ((col.waterTopY ?? col.surfaceY) > maxWaterY) maxWaterY = col.waterTopY ?? col.surfaceY;
+          }
+          const minWorldY = Math.max(0, minSurfaceY - this.undergroundPaddingChunks * this.chunkSize);
           const maxWorldY = Math.min(
             this.maxYExclusive - 1,
-            Math.max(column.surfaceY, column.topY, column.waterTopY ?? column.surfaceY)
+            Math.max(maxSurfaceY, maxTopY, maxWaterY)
               + this.airPaddingChunks * this.chunkSize,
           );
           const minCy = Math.max(0, Math.floor(minWorldY / worldSize));
@@ -766,7 +788,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           }
         }
       }
-      // Extend coverage to include this ring's area
+      // Accumulate coverage from this ring for excluding coarser rings
       coveredHalfWidth = Math.max(
         coveredHalfWidth,
         ring.radiusChunks * worldSize + Math.max(offsetInChunkX, worldSize - offsetInChunkX),
