@@ -804,19 +804,29 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       this.meshMaterialLut!,
     );
 
-    // Scale vertex positions from local chunk coords to world coords
+    // Scale vertex positions from mesher-local coords to world coords.
+    // The mesher places vertices at (cx*chunkSize .. (cx+1)*chunkSize).
+    // We need them at (cx*worldSize .. (cx+1)*worldSize).
     if (stride > 1 && opaqueMesh.vertexCount > 0) {
-      const originX = cx * worldSize;
-      const originY = cy * worldSize;
-      const originZ = cz * worldSize;
-      scaleLodVertexPositions(opaqueMesh.vertexData, opaqueMesh.vertexCount, originX, originY, originZ, stride);
+      const mesherOriginX = cx * this.chunkSize;
+      const mesherOriginY = cy * this.chunkSize;
+      const mesherOriginZ = cz * this.chunkSize;
+      const worldOriginX = cx * worldSize;
+      const worldOriginY = cy * worldSize;
+      const worldOriginZ = cz * worldSize;
+      scaleLodVertexPositions(
+        opaqueMesh.vertexData, opaqueMesh.vertexCount,
+        mesherOriginX, mesherOriginY, mesherOriginZ,
+        worldOriginX, worldOriginY, worldOriginZ,
+        stride,
+      );
       if (opaqueMesh.bounds) {
-        opaqueMesh.bounds.min[0] = originX + (opaqueMesh.bounds.min[0] - cx * this.chunkSize) * stride;
-        opaqueMesh.bounds.min[1] = originY + (opaqueMesh.bounds.min[1] - cy * this.chunkSize) * stride;
-        opaqueMesh.bounds.min[2] = originZ + (opaqueMesh.bounds.min[2] - cz * this.chunkSize) * stride;
-        opaqueMesh.bounds.max[0] = originX + (opaqueMesh.bounds.max[0] - cx * this.chunkSize) * stride;
-        opaqueMesh.bounds.max[1] = originY + (opaqueMesh.bounds.max[1] - cy * this.chunkSize) * stride;
-        opaqueMesh.bounds.max[2] = originZ + (opaqueMesh.bounds.max[2] - cz * this.chunkSize) * stride;
+        opaqueMesh.bounds.min[0] = worldOriginX + (opaqueMesh.bounds.min[0] - mesherOriginX) * stride;
+        opaqueMesh.bounds.min[1] = worldOriginY + (opaqueMesh.bounds.min[1] - mesherOriginY) * stride;
+        opaqueMesh.bounds.min[2] = worldOriginZ + (opaqueMesh.bounds.min[2] - mesherOriginZ) * stride;
+        opaqueMesh.bounds.max[0] = worldOriginX + (opaqueMesh.bounds.max[0] - mesherOriginX) * stride;
+        opaqueMesh.bounds.max[1] = worldOriginY + (opaqueMesh.bounds.max[1] - mesherOriginY) * stride;
+        opaqueMesh.bounds.max[2] = worldOriginZ + (opaqueMesh.bounds.max[2] - mesherOriginZ) * stride;
       }
     }
 
@@ -1393,16 +1403,19 @@ function createLodResidentChunk(generated: GeneratedChunk, lodLevel: number, vox
 function scaleLodVertexPositions(
   vertexData: ArrayBuffer,
   vertexCount: number,
-  originX: number,
-  originY: number,
-  originZ: number,
+  mesherOriginX: number,
+  mesherOriginY: number,
+  mesherOriginZ: number,
+  worldOriginX: number,
+  worldOriginY: number,
+  worldOriginZ: number,
   stride: number,
 ): void {
   const floats = new Float32Array(vertexData);
   for (let i = 0; i < vertexCount; i++) {
     const base = i * 5; // 20 bytes = 5 float32s per vertex
-    floats[base + 0] = originX + (floats[base + 0]! - originX) * stride;
-    floats[base + 1] = originY + (floats[base + 1]! - originY) * stride;
-    floats[base + 2] = originZ + (floats[base + 2]! - originZ) * stride;
+    floats[base + 0] = worldOriginX + (floats[base + 0]! - mesherOriginX) * stride;
+    floats[base + 1] = worldOriginY + (floats[base + 1]! - mesherOriginY) * stride;
+    floats[base + 2] = worldOriginZ + (floats[base + 2]! - mesherOriginZ) * stride;
   }
 }
