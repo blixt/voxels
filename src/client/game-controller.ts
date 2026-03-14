@@ -57,7 +57,6 @@ import {
   teleportPlayerToEyePosition,
   type PlayerState,
 } from "../engine/player-physics.ts";
-import { ProceduralFarField, type FarFieldUpdateSummary } from "../engine/procedural-far-field.ts";
 import {
   diffChunkCoords,
   summarizeResidentWorld,
@@ -71,13 +70,11 @@ import {
 import { ProceduralWorldGenerator, materialToHexColor } from "../engine/procedural-generator.ts";
 import {
   WebGpuVoxelRenderer,
-  type FarFieldRenderMask,
   type RenderStats,
 } from "../engine/renderer.ts";
 import { setChunkMeshDirtyState } from "../engine/world.ts";
 import { metersToWorldUnits, worldUnitsToMeters } from "../engine/scale.ts";
 import {
-  shouldAllowFarFieldCatchupWhileMoving,
   shouldPumpWorldWork,
   shouldRefreshResidency,
 } from "../engine/stream-work.ts";
@@ -106,13 +103,9 @@ const HUD_PUSH_INTERVAL_MS = 120;
 const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
 const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 7;
 const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 6;
-const DEFAULT_MAX_FAR_FIELD_BAND_REBUILDS_PER_FRAME = 1;
-const DEFAULT_MAX_FAR_FIELD_SURFACE_PREFETCH_CHUNKS_PER_FRAME = 8;
 const MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME = 6;
 const SYNC_NEAR_MESH_RADIUS_CHUNKS = 3;
 const BOOTSTRAP_PLAYABLE_COLUMN_RADIUS_CHUNKS = 2;
-const MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES = 6;
-const FAR_FIELD_RENDER_MASK_SPAN_CHUNKS = 32;
 const DISCOVERY_SAMPLE_INTERVAL_MS = 250;
 const DISCOVERY_SAMPLE_MOVE_THRESHOLD_WORLD_UNITS = metersToWorldUnits(0.8);
 const INTERACTION_REACH_WORLD_UNITS = metersToWorldUnits(5);
@@ -186,11 +179,6 @@ export interface GameHudSnapshot {
   bootstrapReadyColumns: number;
   bootstrapUrgentDirtyMeshlessChunks: number;
   bootstrapPendingMeshJobs: number;
-  farFieldMs: number;
-  farFieldBuiltBands: number;
-  farFieldPendingBands: number;
-  farFieldTriangles: number;
-  farFieldMaxRadiusMeters: number;
   meshMs: number;
   meshNewChunks: number;
   meshRemeshChunks: number;
@@ -205,7 +193,6 @@ export interface GameHudSnapshot {
   avgFrameCpuMs: number;
   maxGeneratedChunksPerUpdate: number;
   maxMeshRebuildsPerFrame: number;
-  maxFarFieldBandRebuildsPerFrame: number;
 }
 
 export interface TargetingSnapshot {
@@ -322,7 +309,6 @@ export interface ChunkCacheReuseLegSummary {
   settled: boolean;
   totalStreamMs: number;
   totalMeshMs: number;
-  totalFarFieldMs: number;
   totalGeneratedChunks: number;
   totalPersistedChunkHits: number;
   totalPersistedSummaryHits: number;
@@ -352,9 +338,6 @@ export interface IncrementalCrossingSample {
   streamMs: number;
   meshMs: number;
   meshCount: number;
-  farFieldMs: number;
-  farFieldBuiltBands: number;
-  farFieldPendingBands: number;
   residentNearSamples: number;
   renderReadyNearSamples: number;
   residentNotReadyNearSamples: number;
@@ -374,9 +357,6 @@ export interface IncrementalCrossingSummary {
   avgWorkMs: number;
   p95WorkMs: number;
   maxWorkMs: number;
-  avgFarFieldMs: number;
-  p95FarFieldMs: number;
-  maxFarFieldMs: number;
   avgResidentNotReadyNearSamples: number;
   maxResidentNotReadyNearSamples: number;
   avgStreamMs: number;
@@ -407,7 +387,6 @@ export interface IncrementalCrossingBenchmark {
 export interface StreamingBudgets {
   maxGeneratedChunksPerUpdate: number;
   maxMeshRebuildsPerFrame: number;
-  maxFarFieldBandRebuildsPerFrame: number;
 }
 
 export interface LodCoverageIssueSample {
@@ -449,37 +428,6 @@ export interface RenderReadyCoverageProbe {
   missingResidentCount: number;
 }
 
-export interface NearFarSeamProbe {
-  boundaryCount: number;
-  gapCount: number;
-  maxGapDepthWorldUnits: number;
-  maxGapDepthMeters: number;
-  samples: Array<{
-    band: string;
-    direction: "east" | "west" | "south" | "north";
-    worldX: number;
-    worldZ: number;
-    gapDepthWorldUnits: number;
-    gapDepthMeters: number;
-  }>;
-}
-
-export interface FarFieldSurfaceGapProbe {
-  boundaryCount: number;
-  gapCount: number;
-  maxGapDepthWorldUnits: number;
-  maxGapDepthMeters: number;
-  samples: Array<{
-    band: string;
-    kind: "masked" | "downward";
-    direction: "east" | "west" | "south" | "north";
-    worldX: number;
-    worldZ: number;
-    gapDepthWorldUnits: number;
-    gapDepthMeters: number;
-  }>;
-}
-
 export interface VisibleGroundCoverageIssueSample {
   worldX: number;
   worldZ: number;
@@ -487,7 +435,6 @@ export interface VisibleGroundCoverageIssueSample {
   lateralMeters: number;
   resident: boolean;
   renderReady: boolean;
-  farCovered: boolean;
 }
 
 export interface VisibleGroundCoverageProbe {
@@ -498,7 +445,6 @@ export interface VisibleGroundCoverageProbe {
   sampleStepMeters: number;
   sampleCount: number;
   renderReadyCount: number;
-  farOnlyCount: number;
   uncoveredCount: number;
   residentNotReadyCount: number;
   uncoveredSamples: VisibleGroundCoverageIssueSample[];
@@ -538,16 +484,6 @@ export interface RouteExperienceFrameSample {
   streamMs: number;
   meshMs: number;
   meshCount: number;
-  farFieldMs: number;
-  farFieldPrefetchMs: number;
-  farFieldPrefetchRequestedChunks: number;
-  farFieldSampleCacheMs: number;
-  farFieldMeshBuildMs: number;
-  farFieldSampledCellCount: number;
-  farFieldMaxBandMs: number;
-  farFieldMaxBandLabel: string | null;
-  farFieldBuiltBands: number;
-  farFieldPendingBands: number;
   gameplayFrameMs: number;
   accountedFrameMs: number;
   unmeasuredFrameMs: number;
@@ -568,7 +504,6 @@ export interface RouteExperienceFrameSample {
   visibleGroundSampleCount: number;
   visibleGroundUncoveredCount: number;
   visibleGroundResidentNotReadyCount: number;
-  visibleGroundFarOnlyCount: number;
   seamGapCount: number;
   maxSeamGapMeters: number;
   screenVoidRatio: number | null;
@@ -610,21 +545,6 @@ export interface RouteExperienceBenchmarkSummary {
   avgMeshMs: number;
   p95MeshMs: number;
   maxMeshMs: number;
-  avgFarFieldMs: number;
-  p95FarFieldMs: number;
-  maxFarFieldMs: number;
-  avgFarFieldPrefetchMs: number;
-  p95FarFieldPrefetchMs: number;
-  maxFarFieldPrefetchMs: number;
-  totalFarFieldPrefetchRequestedChunks: number;
-  avgFarFieldSampleCacheMs: number;
-  maxFarFieldSampleCacheMs: number;
-  avgFarFieldMeshBuildMs: number;
-  maxFarFieldMeshBuildMs: number;
-  avgFarFieldSampledCellCount: number;
-  maxFarFieldSampledCellCount: number;
-  maxFarFieldBandBuildMs: number;
-  maxFarFieldBandLabel: string | null;
   avgRenderCpuMs: number;
   p95RenderCpuMs: number;
   maxRenderCpuMs: number;
@@ -701,7 +621,6 @@ export class GameController {
   readonly asyncChunkMeshing = createAsyncChunkMeshing(
     createMeshMaterialLut(this.world.palette, (materialIndex) => this.world.isWaterMaterial(materialIndex)),
   );
-  readonly farField = new ProceduralFarField(this.world);
   readonly explorationJournal = new ExplorationJournal();
   readonly inventory: InventoryState = createInventoryState();
   readonly collectedMaterialIds = new Set<number>();
@@ -728,26 +647,16 @@ export class GameController {
   };
   private lastRenderStats: RenderStats = zeroRenderStats();
   private lastStreamSummary: ResidencyUpdateSummary = cloneResidencySummary(this.world.lastResidency);
-  private lastFarFieldSummary: FarFieldUpdateSummary = this.farField.lastUpdate;
-  private lastFarFieldPrefetchMs = 0;
-  private lastFarFieldPrefetchRequestedChunks = 0;
   private streamAnchor: StreamAnchor | null = null;
-  private farFieldReadyMaskRevision = 0;
-  private presentedFarFieldReadyMaskRevision = 0;
   private streamingBudgets: StreamingBudgets = {
     maxGeneratedChunksPerUpdate: DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE,
     maxMeshRebuildsPerFrame: DEFAULT_MAX_MESH_REBUILDS_PER_FRAME,
-    maxFarFieldBandRebuildsPerFrame: DEFAULT_MAX_FAR_FIELD_BAND_REBUILDS_PER_FRAME,
   };
 
   private rafId = 0;
   private lastFrameTime = 0;
   private lastHudPushAt = 0;
   private interactiveFrameNumber = 0;
-  private cachedFarFieldRenderMaskRevision = -1;
-  private cachedFarFieldRenderMaskOriginChunkX = Number.NaN;
-  private cachedFarFieldRenderMaskOriginChunkZ = Number.NaN;
-  private cachedFarFieldRenderMask: FarFieldRenderMask | null = null;
   private readonly pressedKeys = new Set<string>();
   private lastDiscoverySampleAt = 0;
   private lastDiscoverySampleFeetPosition: Vec3 | null = null;
@@ -884,11 +793,6 @@ export class GameController {
       bootstrapReadyColumns: bootstrap.readyColumns,
       bootstrapUrgentDirtyMeshlessChunks: bootstrap.urgentDirtyMeshlessChunks,
       bootstrapPendingMeshJobs: bootstrap.pendingMeshJobs,
-      farFieldMs: this.lastFarFieldSummary.elapsedMs,
-      farFieldBuiltBands: this.lastFarFieldSummary.builtBands,
-      farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
-      farFieldTriangles: this.lastFarFieldSummary.triangleCount,
-      farFieldMaxRadiusMeters: this.lastFarFieldSummary.maxRadiusMeters,
       meshMs: this.meshMs,
       meshNewChunks: this.lastMeshBuildSummary.newMeshCount,
       meshRemeshChunks: this.lastMeshBuildSummary.remeshCount,
@@ -903,7 +807,6 @@ export class GameController {
       avgFrameCpuMs: this.avgFrameCpuMs,
       maxGeneratedChunksPerUpdate: this.streamingBudgets.maxGeneratedChunksPerUpdate,
       maxMeshRebuildsPerFrame: this.streamingBudgets.maxMeshRebuildsPerFrame,
-      maxFarFieldBandRebuildsPerFrame: this.streamingBudgets.maxFarFieldBandRebuildsPerFrame,
     };
   }
 
@@ -1017,7 +920,6 @@ export class GameController {
       return false;
     }
     this.collectedMaterialIds.add(result.material);
-    this.farFieldReadyMaskRevision += 1;
     this.flushMeshBuildBudget(1);
     this.status = `Collected ${formatInventoryMaterial(result.material)}`;
     this.pushHud(true);
@@ -1036,7 +938,6 @@ export class GameController {
     if (!result.changed || !result.material) {
       return false;
     }
-    this.farFieldReadyMaskRevision += 1;
     this.flushMeshBuildBudget(1);
     this.status = `Placed ${formatInventoryMaterial(result.material)}`;
     this.pushHud(true);
@@ -1046,7 +947,6 @@ export class GameController {
   setStreamingBudgets(
     maxGeneratedChunksPerUpdate: number,
     maxMeshRebuildsPerFrame: number,
-    maxFarFieldBandRebuildsPerFrame = this.streamingBudgets.maxFarFieldBandRebuildsPerFrame,
   ): StreamingBudgets {
     this.streamingBudgets = {
       maxGeneratedChunksPerUpdate: clampPositiveInt(
@@ -1056,10 +956,6 @@ export class GameController {
       maxMeshRebuildsPerFrame: clampPositiveInt(
         maxMeshRebuildsPerFrame,
         DEFAULT_MAX_MESH_REBUILDS_PER_FRAME,
-      ),
-      maxFarFieldBandRebuildsPerFrame: clampPositiveInt(
-        maxFarFieldBandRebuildsPerFrame,
-        DEFAULT_MAX_FAR_FIELD_BAND_REBUILDS_PER_FRAME,
       ),
     };
     this.pushHud(true);
@@ -1110,7 +1006,6 @@ export class GameController {
     const sampleStepWorldUnits = metersToWorldUnits(normalizedStep);
     const centerX = this.player.feetPosition[0];
     const centerZ = this.player.feetPosition[2];
-    const renderReadyMask = this.getRenderReadyFarFieldMask();
     let sampleCount = 0;
     let residentSampleCount = 0;
     let renderReadySampleCount = 0;
@@ -1123,12 +1018,7 @@ export class GameController {
         const chunkX = Math.floor(worldX / this.world.chunkSize);
         const chunkZ = Math.floor(worldZ / this.world.chunkSize);
         const resident = this.world.hasResidentColumn(chunkX, chunkZ);
-        const renderReady = renderReadyMask.excludesCell(
-          chunkX * this.world.chunkSize,
-          (chunkX + 1) * this.world.chunkSize,
-          chunkZ * this.world.chunkSize,
-          (chunkZ + 1) * this.world.chunkSize,
-        );
+        const renderReady = this.world.isColumnRenderReady(chunkX, chunkZ);
         sampleCount += 1;
         if (resident) {
           residentSampleCount += 1;
@@ -1154,14 +1044,6 @@ export class GameController {
     };
   }
 
-  probeNearFarSeamGaps(): NearFarSeamProbe {
-    return this.farField.probeMaskedSeamGaps(this.getRenderReadyFarFieldMask());
-  }
-
-  probeFarFieldSurfaceGaps(): FarFieldSurfaceGapProbe {
-    return this.farField.probeSurfaceGaps(this.getRenderReadyFarFieldMask());
-  }
-
   probeVisibleGroundCoverage(
     sampleForwardMeters = 16,
     sampleLateralMeters = 6,
@@ -1170,7 +1052,6 @@ export class GameController {
     const normalizedForward = Math.max(1, sampleForwardMeters);
     const normalizedLateral = Math.max(1, sampleLateralMeters);
     const normalizedStep = Math.max(0.1, sampleStepMeters);
-    const renderReadyMask = this.getRenderReadyFarFieldMask();
     const forwardAxis = [Math.cos(this.camera.yaw), Math.sin(this.camera.yaw)] as const;
     const rightAxis = [-forwardAxis[1], forwardAxis[0]] as const;
     const forwardWorldUnits = metersToWorldUnits(normalizedForward);
@@ -1179,7 +1060,6 @@ export class GameController {
     const uncoveredSamples: VisibleGroundCoverageIssueSample[] = [];
     let sampleCount = 0;
     let renderReadyCount = 0;
-    let farOnlyCount = 0;
     let uncoveredCount = 0;
     let residentNotReadyCount = 0;
 
@@ -1190,13 +1070,10 @@ export class GameController {
         const chunkX = Math.floor(worldX / this.world.chunkSize);
         const chunkZ = Math.floor(worldZ / this.world.chunkSize);
         const resident = this.world.hasResidentColumn(chunkX, chunkZ);
-        const renderReady = renderReadyMask.excludesCell(worldX, worldX + 1, worldZ, worldZ + 1);
-        const farCovered = this.farField.getCoverageAt(worldX, worldZ, renderReadyMask).length > 0;
+        const renderReady = this.world.isColumnRenderReady(chunkX, chunkZ);
         sampleCount += 1;
         if (renderReady) {
           renderReadyCount += 1;
-        } else if (farCovered) {
-          farOnlyCount += 1;
         } else {
           uncoveredCount += 1;
           pushVisibleGroundIssueSample(uncoveredSamples, {
@@ -1206,7 +1083,6 @@ export class GameController {
             lateralMeters: worldUnitsToMeters(lateral),
             resident,
             renderReady,
-            farCovered,
           });
         }
         if (resident && !renderReady) {
@@ -1223,7 +1099,6 @@ export class GameController {
       sampleStepMeters: normalizedStep,
       sampleCount,
       renderReadyCount,
-      farOnlyCount,
       uncoveredCount,
       residentNotReadyCount,
       uncoveredSamples,
@@ -1237,13 +1112,8 @@ export class GameController {
     const sampleStepWorldUnits = metersToWorldUnits(normalizedStep);
     const centerX = this.player.feetPosition[0];
     const centerZ = this.player.feetPosition[2];
-    const maxRadiusWorldUnits = this.lastFarFieldSummary.maxRadiusWorldUnits;
-    const renderReadyMask = this.getRenderReadyFarFieldMask();
-    const residentOverlapSamples: LodCoverageIssueSample[] = [];
     const uncoveredGapSamples: LodCoverageIssueSample[] = [];
     const handoffHoleSamples: LodCoverageIssueSample[] = [];
-    const bandOverlapSamples: LodCoverageIssueSample[] = [];
-    const wrongBandSamples: LodCoverageIssueSample[] = [];
     let sampleCount = 0;
     let residentSampleCount = 0;
     let renderReadySampleCount = 0;
@@ -1256,51 +1126,36 @@ export class GameController {
 
     for (let offsetZ = -sampleRadiusWorldUnits; offsetZ <= sampleRadiusWorldUnits; offsetZ += sampleStepWorldUnits) {
       for (let offsetX = -sampleRadiusWorldUnits; offsetX <= sampleRadiusWorldUnits; offsetX += sampleStepWorldUnits) {
-        const distanceWorldUnits = Math.max(Math.abs(offsetX), Math.abs(offsetZ));
-        if (distanceWorldUnits > maxRadiusWorldUnits) {
-          continue;
-        }
         const worldX = centerX + offsetX;
         const worldZ = centerZ + offsetZ;
         const chunkX = Math.floor(worldX / this.world.chunkSize);
         const chunkZ = Math.floor(worldZ / this.world.chunkSize);
         const resident = this.world.hasResidentColumn(chunkX, chunkZ);
-        const renderReady = renderReadyMask.excludesCell(worldX, worldX + 1, worldZ, worldZ + 1);
-        const coverage = this.farField.getCoverageAt(worldX, worldZ, renderReadyMask);
+        const renderReady = this.world.isColumnRenderReady(chunkX, chunkZ);
+        const distanceWorldUnits = Math.max(Math.abs(offsetX), Math.abs(offsetZ));
         const distanceMeters = worldUnitsToMeters(distanceWorldUnits);
-        const issueSample = coverageToIssueSample(worldX, worldZ, distanceMeters, coverage);
+        const issueSample: LodCoverageIssueSample = {
+          worldX,
+          worldZ,
+          distanceMeters,
+          bands: [],
+          sampleStrideMeters: [],
+        };
         sampleCount += 1;
         if (resident) {
           residentSampleCount += 1;
         }
         if (renderReady) {
           renderReadySampleCount += 1;
-        }
-        if (coverage.length > 0) {
           coveredSampleCount += 1;
         }
-        if (renderReady && coverage.length > 0) {
-          residentOverlapCount += 1;
-          pushIssueSample(residentOverlapSamples, issueSample);
-        }
-        if (!renderReady && coverage.length === 0) {
+        if (!renderReady) {
           uncoveredGapCount += 1;
           pushIssueSample(uncoveredGapSamples, issueSample);
         }
-        if (resident && !renderReady && coverage.length === 0) {
+        if (resident && !renderReady) {
           handoffHoleCount += 1;
           pushIssueSample(handoffHoleSamples, issueSample);
-        }
-        if (coverage.length > 1) {
-          bandOverlapCount += 1;
-          pushIssueSample(bandOverlapSamples, issueSample);
-        }
-        if (
-          coverage.length > 1
-          || coverage.some((band) => distanceWorldUnits < band.innerRadiusWorldUnits || distanceWorldUnits >= band.outerRadiusWorldUnits)
-        ) {
-          wrongBandCount += 1;
-          pushIssueSample(wrongBandSamples, issueSample);
         }
       }
     }
@@ -1318,11 +1173,11 @@ export class GameController {
       handoffHoleCount,
       bandOverlapCount,
       wrongBandCount,
-      residentOverlapSamples,
+      residentOverlapSamples: [],
       uncoveredGapSamples,
       handoffHoleSamples,
-      bandOverlapSamples,
-      wrongBandSamples,
+      bandOverlapSamples: [],
+      wrongBandSamples: [],
     };
   }
 
@@ -1349,7 +1204,6 @@ export class GameController {
         !residency.complete
         || residency.pendingChunks > 0
         || this.lastMeshBuildSummary.meshCount > 0
-        || this.lastFarFieldSummary.pendingBands > 0
       )
     ) {
       residency = this.syncWorldAroundPlayer(true);
@@ -1378,8 +1232,7 @@ export class GameController {
       settleFrames,
       settled: residency.complete
         && residency.pendingChunks === 0
-        && this.lastMeshBuildSummary.meshCount === 0
-        && this.lastFarFieldSummary.pendingBands === 0,
+        && this.lastMeshBuildSummary.meshCount === 0,
     };
   }
 
@@ -1615,7 +1468,7 @@ export class GameController {
             teleportPlayerToFeetPosition(this.player, lerpVec3(startFeet, endFeet, t));
             this.player.grounded = true;
             this.syncCameraToPlayer();
-            const residency = this.syncWorldAroundPlayer(false, false);
+            const residency = this.syncWorldAroundPlayer(false);
             const detailCoverage = this.probeRenderReadyCoverage();
             const render = await this.renderProbeFrame();
             frame += 1;
@@ -1626,14 +1479,13 @@ export class GameController {
                 legIndex,
                 residency,
                 this.lastMeshBuildSummary,
-                this.lastFarFieldSummary,
                 detailCoverage,
                 render,
               ),
             );
           }
           for (let settleFrame = 0; settleFrame < normalizedSettleFrames; settleFrame += 1) {
-            const residency = this.syncWorldAroundPlayer(false, true);
+            const residency = this.syncWorldAroundPlayer(false);
             const detailCoverage = this.probeRenderReadyCoverage();
             const render = await this.renderProbeFrame();
             frame += 1;
@@ -1644,7 +1496,6 @@ export class GameController {
                 legIndex,
                 residency,
                 this.lastMeshBuildSummary,
-                this.lastFarFieldSummary,
                 detailCoverage,
                 render,
               ),
@@ -1653,7 +1504,6 @@ export class GameController {
               residency.complete
               && residency.pendingChunks === 0
               && this.lastMeshBuildSummary.meshCount === 0
-              && this.lastFarFieldSummary.pendingBands === 0
             ) {
               break;
             }
@@ -1994,7 +1844,6 @@ export class GameController {
           sample.complete
           && sample.pendingChunks === 0
           && sample.dirtyResidentChunks === 0
-          && sample.farFieldPendingBands === 0
           && sample.visibleGroundUncoveredCount === 0
         ) {
           break;
@@ -2056,7 +1905,6 @@ export class GameController {
     let frameCount = 0;
     let totalStreamMs = 0;
     let totalMeshMs = 0;
-    let totalFarFieldMs = 0;
     let totalGeneratedChunks = 0;
     let totalPersistedChunkHits = 0;
     let totalPersistedSummaryHits = 0;
@@ -2065,11 +1913,10 @@ export class GameController {
     let totalWorkerGeneratedChunks = 0;
     let maxPendingChunks = 0;
     for (; frameCount < maxFrames; frameCount += 1) {
-      const residency = this.syncWorldAroundPlayer(frameCount === 0, true);
+      const residency = this.syncWorldAroundPlayer(frameCount === 0);
       await this.renderProbeFrame();
       totalStreamMs += residency.elapsedMs;
       totalMeshMs += this.lastMeshBuildSummary.elapsedMs;
-      totalFarFieldMs += this.lastFarFieldSummary.elapsedMs;
       totalGeneratedChunks += residency.generatedChunks;
       totalPersistedChunkHits += residency.phaseMs.completedChunkCacheHits;
       totalPersistedSummaryHits += residency.phaseMs.completedSummaryCacheHits;
@@ -2081,7 +1928,6 @@ export class GameController {
         residency.complete
         && residency.pendingChunks === 0
         && this.lastMeshBuildSummary.meshCount === 0
-        && this.lastFarFieldSummary.pendingBands === 0
       ) {
         break;
       }
@@ -2096,7 +1942,6 @@ export class GameController {
       settled: frameCount < maxFrames,
       totalStreamMs,
       totalMeshMs,
-      totalFarFieldMs,
       totalGeneratedChunks,
       totalPersistedChunkHits,
       totalPersistedSummaryHits,
@@ -2131,7 +1976,6 @@ export class GameController {
       if (
         this.lastStreamSummary.pendingChunks > 0
         || this.world.countDirtyResidentChunks() > 0
-        || this.lastFarFieldSummary.pendingBands > 0
       ) {
         this.syncWorldAroundPlayer(true);
       }
@@ -2307,20 +2151,14 @@ export class GameController {
     const moved = this.updateMovement(deltaSeconds);
     const movementMs = performance.now() - movementStartedAt;
     const dirtyResidentChunks = this.world.countDirtyResidentChunks();
-    const allowFarFieldCatchup = this.shouldAllowFarFieldCatchup(hasMovementIntent, dirtyResidentChunks);
     if (
       shouldPumpWorldWork(
         hasMovementIntent || moved,
         this.lastStreamSummary.pendingChunks,
         dirtyResidentChunks,
-        this.lastFarFieldSummary.pendingBands,
       )
     ) {
-      this.syncWorldAroundPlayer(
-        false,
-        allowFarFieldCatchup,
-        !hasMovementIntent || allowFarFieldCatchup,
-      );
+      this.syncWorldAroundPlayer(false);
     }
     this.renderInteractiveFrame();
     const gameplayFrameMs = performance.now() - gameplayStartedAt;
@@ -2334,8 +2172,6 @@ export class GameController {
 
   private syncWorldAroundPlayer(
     force = false,
-    allowFarFieldRebuild = true,
-    allowFarFieldPrefetch = true,
   ): ResidencyUpdateSummary {
     const playerChunkX = Math.floor(this.player.feetPosition[0] / this.world.chunkSize);
     const playerChunkZ = Math.floor(this.player.feetPosition[2] / this.world.chunkSize);
@@ -2346,18 +2182,10 @@ export class GameController {
         }
       : resolveStreamAnchor(this.streamAnchor, playerChunkX, playerChunkZ, STREAM_ANCHOR_MARGIN_CHUNKS);
     if (force) {
-      return this.syncWorldAroundAnchor(resolved.anchor, true, allowFarFieldRebuild, allowFarFieldPrefetch);
+      return this.syncWorldAroundAnchor(resolved.anchor, true);
     }
     if (!shouldRefreshResidency(false, resolved.changed, this.lastStreamSummary.pendingChunks)) {
-      this.prefetchFarFieldSummaries(false, allowFarFieldPrefetch);
       this.flushMeshBuildBudget();
-      this.syncPresentedFarFieldMaskRevision();
-      this.lastFarFieldSummary = this.farField.updateAround(
-        this.player.feetPosition,
-        0,
-        null,
-        this.resolveFarFieldRebuildBudget(false, allowFarFieldRebuild),
-      );
       this.lastStreamSummary = createIdleResidencySummary(
         this.lastStreamSummary,
         this.streamAnchor ?? resolved.anchor,
@@ -2367,14 +2195,12 @@ export class GameController {
       );
       return cloneResidencySummary(this.lastStreamSummary);
     }
-    return this.syncWorldAroundAnchor(resolved.anchor, false, allowFarFieldRebuild, allowFarFieldPrefetch);
+    return this.syncWorldAroundAnchor(resolved.anchor, false);
   }
 
   private syncWorldAroundAnchor(
     anchor: StreamAnchor,
     settle = false,
-    allowFarFieldRebuild = true,
-    allowFarFieldPrefetch = true,
   ): ResidencyUpdateSummary {
     this.streamAnchor = anchor;
     const residency = this.world.updateResidencyAround(
@@ -2386,61 +2212,16 @@ export class GameController {
       },
     );
     this.lastStreamSummary = cloneResidencySummary(residency);
-    if (residency.generatedChunks > 0 || residency.evictedChunks > 0 || residency.touchedNeighborChunks > 0) {
-      this.farFieldReadyMaskRevision += 1;
-    }
-    this.prefetchFarFieldSummaries(settle, allowFarFieldPrefetch);
     this.flushMeshBuildBudget(
       settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxMeshRebuildsPerFrame,
     );
-    this.syncPresentedFarFieldMaskRevision(settle);
-    this.lastFarFieldSummary = this.farField.updateAround(
-      this.player.feetPosition,
-      0,
-      null,
-      this.resolveFarFieldRebuildBudget(settle, allowFarFieldRebuild),
-    );
+    this.world.updateLodResidencyAround(this.player.feetPosition);
     this.status = residency.pendingChunks > 0
       ? `Streaming ${residency.pendingChunks} pending chunk(s)`
       : residency.generatedChunks > 0 || residency.evictedChunks > 0
       ? `Streamed ${residency.generatedChunks} chunk(s), evicted ${residency.evictedChunks}`
       : "Residency updated";
     return cloneResidencySummary(this.lastStreamSummary);
-  }
-
-  private prefetchFarFieldSummaries(settle: boolean, allowFarFieldPrefetch: boolean): void {
-    const maxGenerateChunks = this.resolveFarFieldPrefetchBudget(settle, allowFarFieldPrefetch);
-    if (maxGenerateChunks <= 0) {
-      this.lastFarFieldPrefetchMs = 0;
-      this.lastFarFieldPrefetchRequestedChunks = 0;
-      return;
-    }
-    const startedAt = performance.now();
-    this.lastFarFieldPrefetchRequestedChunks = this.world.prefetchFarFieldSummariesAround(
-      this.player.feetPosition,
-      this.farField.getMaxRadiusWorldUnits(),
-      maxGenerateChunks,
-    );
-    this.lastFarFieldPrefetchMs = performance.now() - startedAt;
-  }
-
-  private resolveFarFieldPrefetchBudget(settle: boolean, allowFarFieldPrefetch: boolean): number {
-    if (!allowFarFieldPrefetch) {
-      return 0;
-    }
-    if (!this.bootstrapPlayableReady) {
-      return 0;
-    }
-    if (settle) {
-      return Number.POSITIVE_INFINITY;
-    }
-    if (this.needsFarFieldBootstrap()) {
-      return Math.min(2, DEFAULT_MAX_FAR_FIELD_SURFACE_PREFETCH_CHUNKS_PER_FRAME);
-    }
-    if (this.lastStreamSummary.pendingChunks > 0 || this.lastStreamSummary.phaseMs.readyGeneratedChunkBacklog > 0) {
-      return 0;
-    }
-    return DEFAULT_MAX_FAR_FIELD_SURFACE_PREFETCH_CHUNKS_PER_FRAME;
   }
 
   private isPressed(...codes: string[]): boolean {
@@ -2559,9 +2340,6 @@ export class GameController {
         elapsedMs,
       };
       this.meshMs = elapsedMs;
-      if (meshCount > 0) {
-        this.farFieldReadyMaskRevision += 1;
-      }
       return;
     }
     const meshSummary = rebuildDirtyMeshes(this.world, maxChunks, {
@@ -2569,101 +2347,6 @@ export class GameController {
     });
     this.lastMeshBuildSummary = meshSummary;
     this.meshMs = meshSummary.elapsedMs;
-    if (meshSummary.meshCount > 0) {
-      this.farFieldReadyMaskRevision += 1;
-    }
-  }
-
-  private getRenderReadyFarFieldMask() {
-    return this.world.getFarFieldExclusionMask("render-ready", this.presentedFarFieldReadyMaskRevision);
-  }
-
-  private buildFarFieldRenderMask(): FarFieldRenderMask {
-    const playerChunkX = Math.floor(this.player.feetPosition[0] / this.world.chunkSize);
-    const playerChunkZ = Math.floor(this.player.feetPosition[2] / this.world.chunkSize);
-    const halfSpan = FAR_FIELD_RENDER_MASK_SPAN_CHUNKS / 2;
-    const originChunkX = playerChunkX - halfSpan;
-    const originChunkZ = playerChunkZ - halfSpan;
-    if (
-      this.cachedFarFieldRenderMask
-      && this.cachedFarFieldRenderMaskRevision === this.farFieldReadyMaskRevision
-      && this.cachedFarFieldRenderMaskOriginChunkX === originChunkX
-      && this.cachedFarFieldRenderMaskOriginChunkZ === originChunkZ
-    ) {
-      return this.cachedFarFieldRenderMask;
-    }
-    const renderReadyMask = this.world.getFarFieldExclusionMask("render-ready");
-    const words = new Uint32Array((FAR_FIELD_RENDER_MASK_SPAN_CHUNKS * FAR_FIELD_RENDER_MASK_SPAN_CHUNKS) / 32);
-    for (let localZ = 0; localZ < FAR_FIELD_RENDER_MASK_SPAN_CHUNKS; localZ += 1) {
-      const chunkZ = originChunkZ + localZ;
-      for (let localX = 0; localX < FAR_FIELD_RENDER_MASK_SPAN_CHUNKS; localX += 1) {
-        const chunkX = originChunkX + localX;
-        if (!renderReadyMask.excludesCell(
-          chunkX * this.world.chunkSize,
-          (chunkX + 1) * this.world.chunkSize,
-          chunkZ * this.world.chunkSize,
-          (chunkZ + 1) * this.world.chunkSize,
-        )) {
-          continue;
-        }
-        const bitIndex = localX + localZ * FAR_FIELD_RENDER_MASK_SPAN_CHUNKS;
-        words[bitIndex >>> 5] |= (1 << (bitIndex & 31)) >>> 0;
-      }
-    }
-    const mask = {
-      originChunkX,
-      originChunkZ,
-      spanChunks: FAR_FIELD_RENDER_MASK_SPAN_CHUNKS,
-      chunkSizeWorldUnits: this.world.chunkSize,
-      words,
-    };
-    this.cachedFarFieldRenderMaskRevision = this.farFieldReadyMaskRevision;
-    this.cachedFarFieldRenderMaskOriginChunkX = originChunkX;
-    this.cachedFarFieldRenderMaskOriginChunkZ = originChunkZ;
-    this.cachedFarFieldRenderMask = mask;
-    return mask;
-  }
-
-  private resolveFarFieldRebuildBudget(settle: boolean, allowFarFieldRebuild: boolean): number {
-    if (settle) {
-      return Number.POSITIVE_INFINITY;
-    }
-    if (!allowFarFieldRebuild) {
-      return 0;
-    }
-    if (this.needsFarFieldBootstrap()) {
-      return Math.min(1, this.streamingBudgets.maxFarFieldBandRebuildsPerFrame);
-    }
-    if (this.lastStreamSummary.pendingChunks > 0 || this.world.countDirtyResidentChunks() > 0) {
-      return 0;
-    }
-    return this.streamingBudgets.maxFarFieldBandRebuildsPerFrame;
-  }
-
-  private needsFarFieldBootstrap(): boolean {
-    return this.lastFarFieldSummary.triangleCount === 0 || this.lastFarFieldSummary.pendingBands > 0;
-  }
-
-  private shouldAllowFarFieldCatchup(
-    movementIntent: boolean,
-    dirtyResidentChunks: number,
-    frameNumber = this.interactiveFrameNumber,
-  ): boolean {
-    return shouldAllowFarFieldCatchupWhileMoving(
-      movementIntent,
-      this.lastStreamSummary.pendingChunks,
-      dirtyResidentChunks,
-      this.lastFarFieldSummary.pendingBands,
-      frameNumber,
-      MOVEMENT_FAR_FIELD_CATCHUP_CADENCE_FRAMES,
-      this.lastFarFieldSummary.triangleCount > 0,
-    );
-  }
-
-  private syncPresentedFarFieldMaskRevision(force = false): void {
-    if (force || (this.lastStreamSummary.pendingChunks === 0 && this.world.countDirtyResidentChunks() === 0)) {
-      this.presentedFarFieldReadyMaskRevision = this.farFieldReadyMaskRevision;
-    }
   }
 
   private renderCurrentFrame(): {
@@ -2683,8 +2366,6 @@ export class GameController {
       cameraMatrices,
       null,
       0,
-      this.farField.getRenderables(),
-      this.buildFarFieldRenderMask(),
       renderEnvironment,
     );
     const frameCpuMs = performance.now() - cpuStartedAt;
@@ -2721,17 +2402,7 @@ export class GameController {
     this.camera.pitch = target.pitch;
     this.syncCameraToPlayer();
     const movementMs = performance.now() - movementStartedAt;
-    const dirtyResidentChunks = this.world.countDirtyResidentChunks();
-    const allowFarFieldCatchup = this.shouldAllowFarFieldCatchup(
-      target.phase !== "move",
-      dirtyResidentChunks,
-      target.frame,
-    );
-    this.syncWorldAroundPlayer(
-      false,
-      allowFarFieldCatchup,
-      target.phase !== "move" || allowFarFieldCatchup,
-    );
+    this.syncWorldAroundPlayer(false);
     const render = this.renderCurrentFrame();
     const gameplayFrameMs = performance.now() - gameplayStartedAt;
     return this.captureRouteExperienceFrameSample(
@@ -2759,7 +2430,7 @@ export class GameController {
     },
     movementMs: number,
     gameplayFrameMs: number,
-    seamProbeStrideFrames: number,
+    _seamProbeStrideFrames: number,
     captureStrideFrames: number,
     captureWidth: number,
     captureHeight: number,
@@ -2784,9 +2455,6 @@ export class GameController {
     const diagnosticsStartedAt = performance.now();
     const detailCoverage = this.probeRenderReadyCoverage();
     const visibleGround = this.probeVisibleGroundCoverage();
-    const seamProbe = target.frame % seamProbeStrideFrames === 0 || visibleGround.uncoveredCount > 0
-      ? this.probeNearFarSeamGaps()
-      : null;
     let screenVoid: BottomCenterVoidProbe | null = null;
     let capturedFrame: CapturedBenchmarkFrame | null = null;
     let captureDiagnosticsMs = 0;
@@ -2826,18 +2494,9 @@ export class GameController {
     const accountedFrameMs = movementMs
       + residency.elapsedMs
       + this.lastMeshBuildSummary.elapsedMs
-      + this.lastFarFieldSummary.elapsedMs
-      + this.lastFarFieldPrefetchMs
       + frameProbe.frameCpuMs;
     const unmeasuredFrameMs = Math.max(0, gameplayFrameMs - accountedFrameMs);
-    const maxFarFieldBand = this.lastFarFieldSummary.bandBuilds.reduce<{
-      label: string | null;
-      elapsedMs: number;
-    }>((current, band) => band.elapsedMs > current.elapsedMs
-      ? { label: band.label, elapsedMs: band.elapsedMs }
-      : current, { label: null, elapsedMs: 0 });
     const suspiciousHole = visibleGround.uncoveredCount > 0
-      || (seamProbe?.gapCount ?? 0) > 0
       || (screenVoid?.suspicious ?? false);
 
     return {
@@ -2862,16 +2521,6 @@ export class GameController {
         streamMs: residency.elapsedMs,
         meshMs: this.lastMeshBuildSummary.elapsedMs,
         meshCount: this.lastMeshBuildSummary.meshCount,
-        farFieldMs: this.lastFarFieldSummary.elapsedMs,
-        farFieldPrefetchMs: this.lastFarFieldPrefetchMs,
-        farFieldPrefetchRequestedChunks: this.lastFarFieldPrefetchRequestedChunks,
-        farFieldSampleCacheMs: this.lastFarFieldSummary.sampleCacheMs,
-        farFieldMeshBuildMs: this.lastFarFieldSummary.meshBuildMs,
-        farFieldSampledCellCount: this.lastFarFieldSummary.sampledCellCount,
-        farFieldMaxBandMs: maxFarFieldBand.elapsedMs,
-        farFieldMaxBandLabel: maxFarFieldBand.label,
-        farFieldBuiltBands: this.lastFarFieldSummary.builtBands,
-        farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
         gameplayFrameMs,
         accountedFrameMs,
         unmeasuredFrameMs,
@@ -2892,9 +2541,8 @@ export class GameController {
         visibleGroundSampleCount: visibleGround.sampleCount,
         visibleGroundUncoveredCount: visibleGround.uncoveredCount,
         visibleGroundResidentNotReadyCount: visibleGround.residentNotReadyCount,
-        visibleGroundFarOnlyCount: visibleGround.farOnlyCount,
-        seamGapCount: seamProbe?.gapCount ?? 0,
-        maxSeamGapMeters: seamProbe?.maxGapDepthMeters ?? 0,
+        seamGapCount: 0,
+        maxSeamGapMeters: 0,
         screenVoidRatio: screenVoid?.clearRatio ?? null,
         screenVoidMaxRunRatio: screenVoid?.maxClearRunRatio ?? null,
         screenVoidSuspicious: screenVoid?.suspicious ?? false,
@@ -2923,8 +2571,6 @@ export class GameController {
       cameraMatrices,
       width,
       height,
-      this.farField.getRenderables(),
-      this.buildFarFieldRenderMask(),
       renderEnvironment,
     );
   }
@@ -3024,9 +2670,6 @@ export class GameController {
       triangles: this.triangles,
       streamMs: this.lastStreamSummary.elapsedMs,
       meshMs: this.lastMeshBuildSummary.elapsedMs,
-      farFieldMs: this.lastFarFieldSummary.elapsedMs,
-      farFieldPrefetchMs: this.lastFarFieldPrefetchMs,
-      farFieldPrefetchRequestedChunks: this.lastFarFieldPrefetchRequestedChunks,
       pendingChunks: this.lastStreamSummary.pendingChunks,
       pendingMeshJobs: bootstrap.pendingMeshJobs,
       dirtyResidentChunks: bootstrap.dirtyResidentMeshes.dirtyResidentChunks,
@@ -3034,7 +2677,6 @@ export class GameController {
       dirtyRetainedMeshResidentChunks: bootstrap.dirtyResidentMeshes.dirtyRetainedMeshResidentChunks,
       generatedChunks: this.lastStreamSummary.generatedChunks,
       evictedChunks: this.lastStreamSummary.evictedChunks,
-      farFieldPendingBands: this.lastFarFieldSummary.pendingBands,
       playableReady: bootstrap.playableReady,
       visualReady: bootstrap.visualReady,
     });
@@ -3077,7 +2719,7 @@ export class GameController {
       && supportChunk !== null
       && localMissingColumns === 0
       && urgentDirtyMeshlessChunks === 0;
-    const visualReady = playableReady && this.lastFarFieldSummary.pendingBands === 0;
+    const visualReady = playableReady;
     return {
       dirtyResidentMeshes,
       pendingMeshJobs,
@@ -3320,7 +2962,6 @@ function buildIncrementalSample(
   leg: number,
   residency: ResidencyUpdateSummary,
   mesh: MeshBuildSummary,
-  farField: FarFieldUpdateSummary,
   detailCoverage: RenderReadyCoverageProbe,
   render: GameRenderProbe,
 ): IncrementalCrossingSample {
@@ -3336,9 +2977,6 @@ function buildIncrementalSample(
     streamMs: residency.elapsedMs,
     meshMs: mesh.elapsedMs,
     meshCount: mesh.meshCount,
-    farFieldMs: farField.elapsedMs,
-    farFieldBuiltBands: farField.builtBands,
-    farFieldPendingBands: farField.pendingBands,
     residentNearSamples: detailCoverage.residentSampleCount,
     renderReadyNearSamples: detailCoverage.renderReadySampleCount,
     residentNotReadyNearSamples: detailCoverage.residentNotReadyCount,
@@ -3348,21 +2986,6 @@ function buildIncrementalSample(
     uploadChunks: render.uploadChunks,
     uploadBytes: render.uploadBytes,
     encodeMs: render.encodeMs,
-  };
-}
-
-function coverageToIssueSample(
-  worldX: number,
-  worldZ: number,
-  distanceMeters: number,
-  coverage: ReturnType<ProceduralFarField["getCoverageAt"]>,
-): LodCoverageIssueSample {
-  return {
-    worldX,
-    worldZ,
-    distanceMeters,
-    bands: coverage.map((band) => band.label),
-    sampleStrideMeters: coverage.map((band) => worldUnitsToMeters(band.sampleStride)),
   };
 }
 
@@ -3445,8 +3068,7 @@ function summarizeChunkBoundaryBenchmark(samples: readonly ChunkBoundaryBenchmar
 }
 
 function summarizeIncrementalCrossing(samples: readonly IncrementalCrossingSample[]): IncrementalCrossingSummary {
-  const workSamples = samples.map((sample) => sample.streamMs + sample.meshMs + sample.farFieldMs + sample.frameCpuMs);
-  const farFieldSamples = samples.map((sample) => sample.farFieldMs);
+  const workSamples = samples.map((sample) => sample.streamMs + sample.meshMs + sample.frameCpuMs);
   const streamSamples = samples.map((sample) => sample.streamMs);
   const meshSamples = samples.map((sample) => sample.meshMs);
   const frameCpuSamples = samples.map((sample) => sample.frameCpuMs);
@@ -3457,20 +3079,15 @@ function summarizeIncrementalCrossing(samples: readonly IncrementalCrossingSampl
     workFrameCount: samples.filter((sample) =>
       sample.streamMs > 0
       || sample.meshMs > 0
-      || sample.farFieldMs > 0
       || sample.uploadChunks > 0
-      || sample.farFieldPendingBands > 0
     ).length,
     changedCount: samples.filter((sample) => sample.changed).length,
     incompleteFrameCount: samples.filter((sample) =>
-      !sample.complete || sample.pendingChunks > 0 || sample.farFieldPendingBands > 0
+      !sample.complete || sample.pendingChunks > 0
     ).length,
     avgWorkMs: average(workSamples),
     p95WorkMs: percentile(workSamples, 0.95),
     maxWorkMs: maxValue(workSamples),
-    avgFarFieldMs: average(farFieldSamples),
-    p95FarFieldMs: percentile(farFieldSamples, 0.95),
-    maxFarFieldMs: maxValue(farFieldSamples),
     avgResidentNotReadyNearSamples: average(residentNotReadySamples),
     maxResidentNotReadyNearSamples: maxValue(residentNotReadySamples),
     avgStreamMs: average(streamSamples),
@@ -3502,17 +3119,10 @@ function summarizeRouteExperienceBenchmark(
     movementMs: sample.movementMs,
     streamMs: sample.streamMs,
     meshMs: sample.meshMs,
-    farFieldMs: sample.farFieldMs,
-    farFieldPrefetchMs: sample.farFieldPrefetchMs,
     renderCpuMs: sample.renderCpuMs,
   })));
   const streamSamples = samples.map((sample) => sample.streamMs);
   const meshSamples = samples.map((sample) => sample.meshMs);
-  const farFieldSamples = samples.map((sample) => sample.farFieldMs);
-  const farFieldPrefetchSamples = samples.map((sample) => sample.farFieldPrefetchMs);
-  const farFieldSampleCacheSamples = samples.map((sample) => sample.farFieldSampleCacheMs);
-  const farFieldMeshBuildSamples = samples.map((sample) => sample.farFieldMeshBuildMs);
-  const farFieldSampledCellSamples = samples.map((sample) => sample.farFieldSampledCellCount);
   const renderCpuSamples = samples.map((sample) => sample.renderCpuMs);
   const renderOtherSamples = samples.map((sample) => sample.renderOtherMs);
   const residentNotReadySamples = samples.map((sample) => sample.residentNotReadyNearSamples);
@@ -3529,7 +3139,6 @@ function summarizeRouteExperienceBenchmark(
     && sample.complete
     && sample.pendingChunks === 0
     && sample.dirtyResidentChunks === 0
-    && sample.farFieldPendingBands === 0
     && sample.visibleGroundUncoveredCount === 0);
 
   return {
@@ -3539,8 +3148,7 @@ function summarizeRouteExperienceBenchmark(
     incompleteFrameCount: samples.filter((sample) =>
       !sample.complete
       || sample.pendingChunks > 0
-      || sample.dirtyResidentChunks > 0
-      || sample.farFieldPendingBands > 0).length,
+      || sample.dirtyResidentChunks > 0).length,
     totalDistanceMeters: plan.totalDistanceMeters,
     sampleHz: plan.sampleHz,
     speedMetersPerSecond: plan.speedMetersPerSecond,
@@ -3567,26 +3175,6 @@ function summarizeRouteExperienceBenchmark(
     avgMeshMs: average(meshSamples),
     p95MeshMs: percentile(meshSamples, 0.95),
     maxMeshMs: maxValue(meshSamples),
-    avgFarFieldMs: average(farFieldSamples),
-    p95FarFieldMs: percentile(farFieldSamples, 0.95),
-    maxFarFieldMs: maxValue(farFieldSamples),
-    avgFarFieldPrefetchMs: average(farFieldPrefetchSamples),
-    p95FarFieldPrefetchMs: percentile(farFieldPrefetchSamples, 0.95),
-    maxFarFieldPrefetchMs: maxValue(farFieldPrefetchSamples),
-    totalFarFieldPrefetchRequestedChunks: sumNumbers(samples.map((sample) => sample.farFieldPrefetchRequestedChunks)),
-    avgFarFieldSampleCacheMs: average(farFieldSampleCacheSamples),
-    maxFarFieldSampleCacheMs: maxValue(farFieldSampleCacheSamples),
-    avgFarFieldMeshBuildMs: average(farFieldMeshBuildSamples),
-    maxFarFieldMeshBuildMs: maxValue(farFieldMeshBuildSamples),
-    avgFarFieldSampledCellCount: average(farFieldSampledCellSamples),
-    maxFarFieldSampledCellCount: maxValue(farFieldSampledCellSamples),
-    maxFarFieldBandBuildMs: maxValue(samples.map((sample) => sample.farFieldMaxBandMs)),
-    maxFarFieldBandLabel: samples.reduce<{ label: string | null; elapsedMs: number }>(
-      (current, sample) => sample.farFieldMaxBandMs > current.elapsedMs
-        ? { label: sample.farFieldMaxBandLabel, elapsedMs: sample.farFieldMaxBandMs }
-        : current,
-      { label: null, elapsedMs: 0 },
-    ).label,
     avgRenderCpuMs: average(renderCpuSamples),
     p95RenderCpuMs: percentile(renderCpuSamples, 0.95),
     maxRenderCpuMs: maxValue(renderCpuSamples),

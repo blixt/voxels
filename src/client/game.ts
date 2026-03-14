@@ -31,7 +31,6 @@ declare global {
       setStreamingBudgets(
         maxGeneratedChunksPerUpdate: number,
         maxMeshRebuildsPerFrame: number,
-        maxFarFieldBandRebuildsPerFrame?: number,
       ): ReturnType<GameController["setStreamingBudgets"]>;
       forceResidencyUpdate(): ReturnType<GameController["forceResidencyUpdate"]>;
       teleportAndSettle(
@@ -77,8 +76,6 @@ declare global {
         sampleLateralMeters?: number,
         sampleStepMeters?: number,
       ): ReturnType<GameController["probeVisibleGroundCoverage"]>;
-      probeNearFarSeamGaps(): ReturnType<GameController["probeNearFarSeamGaps"]>;
-      probeFarFieldSurfaceGaps(): ReturnType<GameController["probeFarFieldSurfaceGaps"]>;
       getDiscoveryJournal(): ExplorationJournalSnapshot;
       resetDiscoveryJournal(): ExplorationJournalSnapshot;
       getExplorationObjectives(): ExplorationObjectiveSnapshot;
@@ -134,7 +131,6 @@ interface TelemetryHistorySample {
   frameMs: number;
   streamMs: number;
   meshMs: number;
-  farFieldMs: number;
   renderMs: number;
   otherMs: number;
 }
@@ -152,7 +148,7 @@ const ACHIEVEMENT_VISIBLE_MS = 3400;
 const ACHIEVEMENT_EXIT_MS = 320;
 const TELEMETRY_HISTORY_LIMIT = 64;
 const TELEMETRY_STORAGE_KEY = "voxels.telemetry.collapsed";
-const TELEMETRY_SUMMARY_LABELS = ["FPS", "Frame", "Stream", "Mesh", "Far Build", "Render"] as const;
+const TELEMETRY_SUMMARY_LABELS = ["FPS", "Frame", "Stream", "Mesh", "Render"] as const;
 const HOTBAR_VISIBLE_SLOT_COUNT = 9;
 
 const TELEMETRY_LABELS = [
@@ -169,11 +165,6 @@ const TELEMETRY_LABELS = [
   "Dirty Resident",
   "Radius",
   "Surface Y",
-  "Far Field",
-  "Far Build",
-  "Far Bands",
-  "Far Pending",
-  "Far Tris",
   "Voxels",
   "Palette",
   "Stream",
@@ -201,7 +192,6 @@ const TELEMETRY_LABELS = [
   "Used Stacks",
   "Gen Budget",
   "Mesh Budget",
-  "Far Budget",
   "Mesh",
   "New Meshes",
   "Remeshes",
@@ -354,11 +344,10 @@ function mountGame(): GameRuntime {
     teleport: (x, y, z) => controller.teleport([x, y, z]),
     setViewDistance: (chunks) => controller.setResidencyRadiusChunks(chunks),
     getStreamingBudgets: () => controller.getStreamingBudgets(),
-    setStreamingBudgets: (maxGeneratedChunksPerUpdate, maxMeshRebuildsPerFrame, maxFarFieldBandRebuildsPerFrame) =>
+    setStreamingBudgets: (maxGeneratedChunksPerUpdate, maxMeshRebuildsPerFrame) =>
       controller.setStreamingBudgets(
         maxGeneratedChunksPerUpdate,
         maxMeshRebuildsPerFrame,
-        maxFarFieldBandRebuildsPerFrame,
       ),
     forceResidencyUpdate: () => controller.forceResidencyUpdate(),
     teleportAndSettle: (x, y, z, options) => controller.teleportAndSettle([x, y, z], options),
@@ -377,8 +366,6 @@ function mountGame(): GameRuntime {
       controller.probeRenderReadyCoverage(sampleRadiusMeters, sampleStepMeters),
     probeVisibleGroundCoverage: (sampleForwardMeters, sampleLateralMeters, sampleStepMeters) =>
       controller.probeVisibleGroundCoverage(sampleForwardMeters, sampleLateralMeters, sampleStepMeters),
-    probeNearFarSeamGaps: () => controller.probeNearFarSeamGaps(),
-    probeFarFieldSurfaceGaps: () => controller.probeFarFieldSurfaceGaps(),
     getDiscoveryJournal: () => controller.getDiscoveryJournalSnapshot(),
     resetDiscoveryJournal: () => controller.resetDiscoveryJournal(),
     getExplorationObjectives: () => describeExplorationObjectives(snapshotToObjectiveSource(controller.getDebugSnapshot())),
@@ -426,24 +413,15 @@ function buildCaptureOverlayState(snapshot: GameHudSnapshot): CaptureOverlayStat
   const urgentMeshRatio = snapshot.bootstrapUrgentDirtyMeshlessChunks === 0
     ? 1
     : Math.max(0, 1 - snapshot.bootstrapUrgentDirtyMeshlessChunks / requiredColumns);
-  const farRatio = snapshot.bootstrapVisualReady
-    ? 1
-    : snapshot.bootstrapPlayableReady
-    ? Math.max(0.82, 1 - snapshot.farFieldPendingBands / Math.max(snapshot.farFieldPendingBands + snapshot.farFieldBuiltBands, 1))
-    : 0;
   const progressRatio = snapshot.bootstrapVisualReady
     ? 1
-    : snapshot.bootstrapPlayableReady
-    ? 0.85 + farRatio * 0.15
     : Math.min(0.82, columnRatio * 0.68 + urgentMeshRatio * 0.18 + (snapshot.bootstrapPendingMeshJobs === 0 ? 0.14 : 0));
   if (snapshot.bootstrapPlayableReady) {
     return {
       status: snapshot.bootstrapVisualReady ? "World Ready" : "Finishing Horizon",
       title: "Click To Enter The World",
       subtitle: "WASD move • Space jump • Left break • Right place • Wheel or 1-9 switch slots",
-      detail: snapshot.bootstrapVisualReady
-        ? `${snapshot.chunkCount.toLocaleString()} resident chunks • ${snapshot.farFieldTriangles.toLocaleString()} far tris`
-        : `${snapshot.farFieldPendingBands.toLocaleString()} far band(s) still settling`,
+      detail: `${snapshot.chunkCount.toLocaleString()} resident chunks`,
       progressRatio,
       loading: false,
     };
@@ -454,7 +432,6 @@ function buildCaptureOverlayState(snapshot: GameHudSnapshot): CaptureOverlayStat
     subtitle: [
       `${snapshot.streamPendingChunks.toLocaleString()} stream pending`,
       `${snapshot.bootstrapPendingMeshJobs.toLocaleString()} mesh job(s)`,
-      `${snapshot.farFieldPendingBands.toLocaleString()} far band(s)`,
     ].join(" • "),
     detail: [
       `Urgent meshless ${snapshot.bootstrapUrgentDirtyMeshlessChunks.toLocaleString()}`,
@@ -917,9 +894,8 @@ function createTelemetrySummaryView(root: HTMLElement, canvas: HTMLCanvasElement
         frameMs,
         streamMs: Math.max(0, snapshot.streamMs),
         meshMs: Math.max(0, snapshot.meshMs),
-        farFieldMs: Math.max(0, snapshot.farFieldMs),
         renderMs: Math.max(0, renderMs),
-        otherMs: Math.max(0, frameMs - snapshot.streamMs - snapshot.meshMs - snapshot.farFieldMs - renderMs),
+        otherMs: Math.max(0, frameMs - snapshot.streamMs - snapshot.meshMs - renderMs),
       };
       history.push(historySample);
       if (history.length > TELEMETRY_HISTORY_LIMIT) {
@@ -931,7 +907,6 @@ function createTelemetrySummaryView(root: HTMLElement, canvas: HTMLCanvasElement
         formatSummaryMs(frameMs),
         formatSummaryMs(snapshot.streamMs),
         formatSummaryMs(snapshot.meshMs),
-        formatSummaryMs(snapshot.farFieldMs),
         formatSummaryMs(renderMs),
       ];
       for (let index = 0; index < summaryValues.length; index += 1) {
@@ -963,11 +938,6 @@ function buildTelemetryValues(snapshot: GameHudSnapshot): string[] {
     snapshot.streamDirtyResidentChunks.toLocaleString(),
     `${snapshot.residencyRadiusChunks} chunks`,
     `${worldUnitsToMeters(snapshot.surfaceY).toFixed(1)} m`,
-    `${snapshot.farFieldMaxRadiusMeters.toFixed(0)} m`,
-    `${snapshot.farFieldMs.toFixed(1)} ms`,
-    snapshot.farFieldBuiltBands.toLocaleString(),
-    snapshot.farFieldPendingBands.toLocaleString(),
-    snapshot.farFieldTriangles.toLocaleString(),
     snapshot.solidVoxelCount.toLocaleString(),
     snapshot.paletteCount.toLocaleString(),
     `${snapshot.streamMs.toFixed(1)} ms`,
@@ -995,7 +965,6 @@ function buildTelemetryValues(snapshot: GameHudSnapshot): string[] {
     snapshot.usedInventoryStacks.toLocaleString(),
     snapshot.maxGeneratedChunksPerUpdate.toLocaleString(),
     snapshot.maxMeshRebuildsPerFrame.toLocaleString(),
-    snapshot.maxFarFieldBandRebuildsPerFrame.toLocaleString(),
     `${snapshot.meshMs.toFixed(1)} ms`,
     snapshot.meshNewChunks.toLocaleString(),
     snapshot.meshRemeshChunks.toLocaleString(),
@@ -1074,7 +1043,6 @@ function drawTelemetrySummaryChart(
   const colors = {
     stream: "rgba(92, 144, 154, 0.7)",
     mesh: "rgba(168, 133, 84, 0.74)",
-    far: "rgba(118, 102, 152, 0.68)",
     render: "rgba(98, 128, 98, 0.68)",
     other: "rgba(82, 86, 98, 0.6)",
   } as const;
@@ -1093,7 +1061,6 @@ function drawTelemetrySummaryChart(
     const segments = [
       [sample.otherMs, colors.other],
       [sample.renderMs, colors.render],
-      [sample.farFieldMs, colors.far],
       [sample.meshMs, colors.mesh],
       [sample.streamMs, colors.stream],
     ] as const;
