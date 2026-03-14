@@ -713,19 +713,21 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       this.meshMaterialLut = createMeshMaterialLut(this.palette, isProceduralWaterMaterial);
     }
 
-    // Phase 1: compute all needed LOD chunk keys (cheap — just Y-range sampling).
+    // Phase 1: compute all needed LOD chunk keys.
     //
-    // Key design principle from Lay of the Land: LOD rings OVERLAP with the
-    // finer level. LOD 1 renders in its full radius including the area covered
-    // by LOD 0 — depth testing lets LOD 0 win where its meshes exist, but LOD 1
-    // fills in seamlessly wherever LOD 0 hasn't loaded yet. Between LOD rings
-    // (1→2, 2→3, etc.), exclusion IS safe because all rings are generated together.
+    // LOD chunks are excluded in two cases:
+    // 1. For LOD 1: excluded when ALL LOD 0 columns within the chunk's
+    //    footprint are render-ready. This uses actual state, not theoretical
+    //    radius, so there are never holes during loading.
+    // 2. For LOD 2+: excluded when fully inside the previous LOD ring's
+    //    coverage (those rings are co-generated, always complete).
     //
-    // This eliminates the "holes at LOD boundary" problem completely.
+    // LOD chunks use a depth-biased pipeline so where they DO overlap with
+    // LOD 0 at boundaries, LOD 0 always wins cleanly. No z-fighting.
     const neededKeys = new Set<string>();
 
-    // Start with zero coverage — LOD 1 is NOT excluded by LOD 0.
-    // Only exclude based on finer LOD rings (which are always co-generated).
+    // Between LOD rings, track coverage from finer LOD rings.
+    // Start from 0 — LOD 1 uses render-ready checks, not coverage half-width.
     let coveredHalfWidth = 0;
 
     for (const ring of LOD_RINGS) {
@@ -738,8 +740,17 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
       for (let dz = -ring.radiusChunks; dz <= ring.radiusChunks; dz += 1) {
         for (let dx = -ring.radiusChunks; dx <= ring.radiusChunks; dx += 1) {
-          // Exclude only if fully inside a finer LOD ring's coverage
-          if (coveredHalfWidth > 0) {
+          const cx = lcx + dx;
+          const cz = lcz + dz;
+
+          if (ring.level === 1) {
+            // LOD 1: exclude only if ALL LOD 0 columns within this chunk
+            // are render-ready (actually meshed, not just in-radius).
+            if (this.isLodChunkFullyCoveredByRenderReadyColumns(cx, cz, stride)) {
+              continue;
+            }
+          } else if (coveredHalfWidth > 0) {
+            // LOD 2+: exclude if fully inside the finer LOD ring's coverage
             const chunkMinX = dx * worldSize - offsetInChunkX;
             const chunkMaxX = (dx + 1) * worldSize - offsetInChunkX;
             const chunkMinZ = dz * worldSize - offsetInChunkZ;
@@ -750,9 +761,6 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
               continue;
             }
           }
-
-          const cx = lcx + dx;
-          const cz = lcz + dz;
 
           // Estimate Y range: sample multiple points across the LOD column
           // to avoid missing terrain that's between the center sample point
@@ -845,6 +853,26 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
 
     return { generated, pending };
+  }
+
+  private isLodChunkFullyCoveredByRenderReadyColumns(
+    lodCx: number,
+    lodCz: number,
+    stride: number,
+  ): boolean {
+    // Check if ALL LOD 0 columns within this LOD chunk's XZ footprint are render-ready.
+    const minCol0X = lodCx * stride;
+    const maxCol0X = minCol0X + stride - 1;
+    const minCol0Z = lodCz * stride;
+    const maxCol0Z = minCol0Z + stride - 1;
+    for (let cz = minCol0Z; cz <= maxCol0Z; cz++) {
+      for (let cx = minCol0X; cx <= maxCol0X; cx++) {
+        if (!this.isColumnRenderReady(cx, cz)) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   private buildLodChunkMesh(

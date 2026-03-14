@@ -190,6 +190,7 @@ export class WebGpuVoxelRenderer {
   private readonly context: GPUCanvasContext;
   private readonly device: GPUDevice;
   private readonly pipeline: GPURenderPipeline;
+  private readonly lodPipeline: GPURenderPipeline;
   private readonly waterPipeline: GPURenderPipeline;
   private readonly uniformBuffer: GPUBuffer;
   private readonly uniformBindGroup: GPUBindGroup;
@@ -264,6 +265,41 @@ export class WebGpuVoxelRenderer {
         format: "depth24plus",
         depthWriteEnabled: true,
         depthCompare: "less",
+      },
+    });
+    this.lodPipeline = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: {
+        module: shaderModule,
+        entryPoint: "vs_main",
+        buffers: [
+          {
+            arrayStride: 20,
+            attributes: [
+              { shaderLocation: 0, format: "float32x3", offset: 0 },
+              { shaderLocation: 1, format: "snorm8x4", offset: 12 },
+              { shaderLocation: 2, format: "unorm8x4", offset: 16 },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: "fs_main",
+        targets: [{ format }],
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "back",
+        frontFace: "ccw",
+      },
+      depthStencil: {
+        format: "depth24plus",
+        depthWriteEnabled: true,
+        depthCompare: "less",
+        depthBias: 4,
+        depthBiasSlopeScale: 2,
+        depthBiasClamp: 0,
       },
     });
     this.waterPipeline = device.createRenderPipeline({
@@ -536,9 +572,11 @@ export class WebGpuVoxelRenderer {
 
     let drawCalls = 0;
     let triangles = 0;
+    let currentPipeline: GPURenderPipeline | null = null;
 
-    // Opaque pass (all LOD levels — coarser drawn first via iterateResidentChunks order)
-    pass.setPipeline(this.pipeline);
+    // Opaque pass: LOD chunks first (depth-biased), then LOD 0 (standard).
+    // iterateResidentChunks yields LOD chunks before LOD 0 chunks.
+    // LOD pipeline has depthBias so LOD 0 always wins where both exist.
     for (const chunk of world.iterateResidentChunks()) {
       const resource = this.resources.get(chunk);
       if (!resource || resource.indexCount === 0) {
@@ -548,6 +586,11 @@ export class WebGpuVoxelRenderer {
       if (b && frustumPlanes && !isAabbVisible(frustumPlanes, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
         continue;
       }
+      const pipeline = chunk.lodLevel > 0 ? this.lodPipeline : this.pipeline;
+      if (pipeline !== currentPipeline) {
+        pass.setPipeline(pipeline);
+        currentPipeline = pipeline;
+      }
       pass.setVertexBuffer(0, resource.vertexBuffer);
       pass.setIndexBuffer(resource.indexBuffer, "uint32");
       pass.drawIndexed(resource.indexCount, 1, 0, 0, 0);
@@ -555,7 +598,7 @@ export class WebGpuVoxelRenderer {
       triangles += resource.triangleCount;
     }
 
-    // Water pass
+    // Water pass (LOD 0 only — LOD chunks skip water)
     pass.setPipeline(this.waterPipeline);
     for (const chunk of world.iterateResidentChunks()) {
       const resource = this.resources.get(chunk);
