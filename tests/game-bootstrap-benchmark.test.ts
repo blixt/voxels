@@ -18,9 +18,6 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       triangles: 0,
       streamMs: 5,
       meshMs: 0,
-      farFieldMs: 0,
-      farFieldPrefetchMs: 0,
-      farFieldPrefetchRequestedChunks: 0,
       pendingChunks: 8,
       pendingMeshJobs: 4,
       dirtyResidentChunks: 6,
@@ -28,7 +25,6 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       dirtyRetainedMeshResidentChunks: 0,
       generatedChunks: 8,
       evictedChunks: 0,
-      farFieldPendingBands: 2,
       playableReady: false,
       visualReady: false,
     },
@@ -46,9 +42,6 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       triangles: 120,
       streamMs: 8,
       meshMs: 4,
-      farFieldMs: 1,
-      farFieldPrefetchMs: 0.5,
-      farFieldPrefetchRequestedChunks: 4,
       pendingChunks: 2,
       pendingMeshJobs: 1,
       dirtyResidentChunks: 1,
@@ -56,7 +49,6 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       dirtyRetainedMeshResidentChunks: 0,
       generatedChunks: 4,
       evictedChunks: 0,
-      farFieldPendingBands: 1,
       playableReady: false,
       visualReady: false,
     },
@@ -74,9 +66,6 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       triangles: 240,
       streamMs: 6,
       meshMs: 5,
-      farFieldMs: 2,
-      farFieldPrefetchMs: 0,
-      farFieldPrefetchRequestedChunks: 0,
       pendingChunks: 0,
       pendingMeshJobs: 0,
       dirtyResidentChunks: 0,
@@ -84,7 +73,6 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       dirtyRetainedMeshResidentChunks: 0,
       generatedChunks: 1,
       evictedChunks: 0,
-      farFieldPendingBands: 1,
       playableReady: true,
       visualReady: false,
     },
@@ -102,9 +90,6 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       triangles: 280,
       streamMs: 1,
       meshMs: 1,
-      farFieldMs: 1,
-      farFieldPrefetchMs: 0,
-      farFieldPrefetchRequestedChunks: 0,
       pendingChunks: 0,
       pendingMeshJobs: 0,
       dirtyResidentChunks: 0,
@@ -112,7 +97,6 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       dirtyRetainedMeshResidentChunks: 0,
       generatedChunks: 0,
       evictedChunks: 0,
-      farFieldPendingBands: 0,
       playableReady: true,
       visualReady: true,
     },
@@ -125,9 +109,6 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
   expect(summary.totalGameplayFrameMs).toBe(58);
   expect(summary.totalStreamMs).toBe(20);
   expect(summary.totalMeshMs).toBe(10);
-  expect(summary.totalFarFieldMs).toBe(4);
-  expect(summary.totalFarFieldPrefetchMs).toBe(0.5);
-  expect(summary.totalFarFieldPrefetchRequestedChunks).toBe(4);
   expect(summary.totalRenderCpuMs).toBe(7.5);
   expect(summary.totalRenderSyncMs).toBe(1.5);
   expect(summary.totalRenderUploadMs).toBeCloseTo(0.7, 6);

@@ -1,5 +1,4 @@
 import { rebuildDirtyMeshes } from "../src/engine/mesher.ts";
-import { ProceduralFarField } from "../src/engine/procedural-far-field.ts";
 import { ProceduralResidentWorld } from "../src/engine/procedural-resident-world.ts";
 import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
 import { shouldPumpWorldWork } from "../src/engine/stream-work.ts";
@@ -13,7 +12,6 @@ const seed = readPositiveInt(readFlag(args, "--seed"), 1337);
 const radiusChunks = readPositiveInt(readFlag(args, "--radius"), 5);
 const generateBudget = readPositiveInt(readFlag(args, "--generate-budget"), 6);
 const meshBudget = readPositiveInt(readFlag(args, "--mesh-budget"), 4);
-const farBandBudget = readPositiveInt(readFlag(args, "--far-band-budget"), 1);
 const chunkDelta = readPositiveInt(readFlag(args, "--chunk-delta"), 2);
 const anchorMarginChunks = readPositiveInt(readFlag(args, "--anchor-margin"), 1);
 const farAnchorDeltaChunks = readPositiveInt(readFlag(args, "--far-anchor-chunk-delta"), 8);
@@ -41,11 +39,6 @@ for (const scenario of scenarios) {
   const frameCounts: number[] = [];
   const streamTotals: number[] = [];
   const meshTotals: number[] = [];
-  const farTotals: number[] = [];
-  const farSampleCacheTotals: number[] = [];
-  const farMeshBuildTotals: number[] = [];
-  const farSampledCellTotals: number[] = [];
-  const maxFarBandBuild: Array<{ elapsedMs: number; label: string | null }> = [];
   const maxFrameWork: number[] = [];
   const maxPending: number[] = [];
   const generatedTotals: number[] = [];
@@ -55,7 +48,6 @@ for (const scenario of scenarios) {
   const generationTotals: number[] = [];
   const emptyChunkTotals: number[] = [];
   let residentChunks = 0;
-  let farTriangles = 0;
   let anchorChanged = false;
 
   for (let run = 0; run < iterations; run += 1) {
@@ -63,11 +55,6 @@ for (const scenario of scenarios) {
     frameCounts.push(result.frames.length);
     streamTotals.push(result.totalStreamMs);
     meshTotals.push(result.totalMeshMs);
-    farTotals.push(result.totalFarFieldMs);
-    farSampleCacheTotals.push(result.totalFarFieldSampleCacheMs);
-    farMeshBuildTotals.push(result.totalFarFieldMeshBuildMs);
-    farSampledCellTotals.push(result.totalFarFieldSampledCellCount);
-    maxFarBandBuild.push(result.maxFarFieldBandBuild);
     maxFrameWork.push(result.maxFrameWorkMs);
     maxPending.push(result.maxPendingChunks);
     generatedTotals.push(result.totalGeneratedChunks);
@@ -77,7 +64,6 @@ for (const scenario of scenarios) {
     generationTotals.push(result.totalChunkGenerationMs);
     emptyChunkTotals.push(result.totalEmptyChunksSkipped);
     residentChunks = result.residentChunks;
-    farTriangles = result.farTriangles;
     anchorChanged = result.anchorChanged;
   }
 
@@ -89,21 +75,11 @@ for (const scenario of scenarios) {
     radiusChunks,
     generateBudget,
     meshBudget,
-    farBandBudget,
     anchorMarginChunks,
     anchorChanged,
     frames: summarize(frameCounts),
     totalStreamMs: summarize(streamTotals),
     totalMeshMs: summarize(meshTotals),
-    totalFarFieldMs: summarize(farTotals),
-    totalFarFieldSampleCacheMs: summarize(farSampleCacheTotals),
-    totalFarFieldMeshBuildMs: summarize(farMeshBuildTotals),
-    totalFarFieldSampledCellCount: summarize(farSampledCellTotals),
-    maxFarFieldBandBuildMs: summarize(maxFarBandBuild.map((entry) => entry.elapsedMs)),
-    maxFarFieldBandLabel: maxFarBandBuild.reduce<{ label: string | null; elapsedMs: number }>(
-      (current, entry) => entry.elapsedMs > current.elapsedMs ? entry : current,
-      { label: null, elapsedMs: 0 },
-    ).label,
     maxFrameWorkMs: summarize(maxFrameWork),
     maxPendingChunks: summarize(maxPending),
     totalGeneratedChunks: summarize(generatedTotals),
@@ -113,7 +89,6 @@ for (const scenario of scenarios) {
     totalChunkGenerationMs: summarize(generationTotals),
     totalEmptyChunksSkipped: summarize(emptyChunkTotals),
     residentChunks,
-    farTriangles,
   }));
 }
 
@@ -123,7 +98,6 @@ function simulateChunkCrossing(deltaChunks: number): {
     step: number;
     streamMs: number;
     meshMs: number;
-    farFieldMs: number;
     generatedChunks: number;
     pendingChunks: number;
     dirtyResidentChunks: number;
@@ -134,10 +108,6 @@ function simulateChunkCrossing(deltaChunks: number): {
   }>;
   totalStreamMs: number;
   totalMeshMs: number;
-  totalFarFieldMs: number;
-  totalFarFieldSampleCacheMs: number;
-  totalFarFieldMeshBuildMs: number;
-  totalFarFieldSampledCellCount: number;
   totalGeneratedChunks: number;
   totalRemeshChunks: number;
   totalYRangeMs: number;
@@ -146,20 +116,14 @@ function simulateChunkCrossing(deltaChunks: number): {
   maxPendingChunks: number;
   maxDirtyResidentChunks: number;
   maxFrameWorkMs: number;
-  maxFarFieldBandBuild: {
-    elapsedMs: number;
-    label: string | null;
-  };
   residentChunks: number;
-  farTriangles: number;
 } {
   const generator = new ProceduralWorldGenerator(seed);
   const world = new ProceduralResidentWorld(generator, { horizontalRadiusChunks: radiusChunks });
-  const farField = new ProceduralFarField(world);
   const spawn = world.getSpawnPosition();
   const initialAnchor = resolveAnchor(spawn, world.chunkSize);
 
-  settleWorld(world, farField, spawn, initialAnchor);
+  settleWorld(world, spawn, initialAnchor);
 
   const targetFeetPosition: Vec3 = [
     spawn[0] + deltaChunks * world.chunkSize,
@@ -175,7 +139,6 @@ function simulateChunkCrossing(deltaChunks: number): {
     step: number;
     streamMs: number;
     meshMs: number;
-    farFieldMs: number;
     generatedChunks: number;
     pendingChunks: number;
     dirtyResidentChunks: number;
@@ -187,10 +150,6 @@ function simulateChunkCrossing(deltaChunks: number): {
 
   let totalStreamMs = 0;
   let totalMeshMs = 0;
-  let totalFarFieldMs = 0;
-  let totalFarFieldSampleCacheMs = 0;
-  let totalFarFieldMeshBuildMs = 0;
-  let totalFarFieldSampledCellCount = 0;
   let totalGeneratedChunks = 0;
   let totalRemeshChunks = 0;
   let totalYRangeMs = 0;
@@ -199,20 +158,8 @@ function simulateChunkCrossing(deltaChunks: number): {
   let maxPendingChunks = 0;
   let maxDirtyResidentChunks = 0;
   let maxFrameWorkMs = 0;
-  let maxFarFieldBandBuild = {
-    elapsedMs: 0,
-    label: null as string | null,
-  };
-  let requestedFarFieldMaskRevision = 0;
-  let presentedFarFieldMaskRevision = 0;
 
   if (!resolved.changed) {
-    const farSummary = farField.updateAround(
-      targetFeetPosition,
-      0,
-      world.getFarFieldExclusionMask("render-ready", presentedFarFieldMaskRevision),
-      farBandBudget,
-    );
     const dirtyResidentChunks = world.countDirtyResidentChunks();
     return {
       anchorChanged: false,
@@ -221,7 +168,6 @@ function simulateChunkCrossing(deltaChunks: number): {
           step: 1,
           streamMs: 0,
           meshMs: 0,
-          farFieldMs: farSummary.elapsedMs,
           generatedChunks: 0,
           pendingChunks: 0,
           dirtyResidentChunks,
@@ -233,10 +179,6 @@ function simulateChunkCrossing(deltaChunks: number): {
       ],
       totalStreamMs: 0,
       totalMeshMs: 0,
-      totalFarFieldMs: farSummary.elapsedMs,
-      totalFarFieldSampleCacheMs: farSummary.sampleCacheMs,
-      totalFarFieldMeshBuildMs: farSummary.meshBuildMs,
-      totalFarFieldSampledCellCount: farSummary.sampledCellCount,
       totalGeneratedChunks: 0,
       totalRemeshChunks: 0,
       totalYRangeMs: 0,
@@ -244,21 +186,13 @@ function simulateChunkCrossing(deltaChunks: number): {
       totalEmptyChunksSkipped: 0,
       maxPendingChunks: 0,
       maxDirtyResidentChunks: dirtyResidentChunks,
-      maxFrameWorkMs: farSummary.elapsedMs,
-      maxFarFieldBandBuild: farSummary.bandBuilds.reduce(
-        (current, band) => band.elapsedMs > current.elapsedMs
-          ? { elapsedMs: band.elapsedMs, label: band.label }
-          : current,
-        { elapsedMs: 0, label: null as string | null },
-      ),
+      maxFrameWorkMs: 0,
       residentChunks: world.getStats().chunkCount,
-      farTriangles: farField.lastUpdate.triangleCount,
     };
   }
 
   let step = 0;
   let pendingChunks = 0;
-  let pendingFarFieldBands = 0;
   let dirtyResidentChunks = world.countDirtyResidentChunks();
   do {
     step += 1;
@@ -269,30 +203,13 @@ function simulateChunkCrossing(deltaChunks: number): {
     const mesh = rebuildDirtyMeshes(world, meshBudget, {
       priorityPosition: targetFeetPosition,
     });
-    if (residency.generatedChunks > 0 || residency.evictedChunks > 0 || residency.touchedNeighborChunks > 0) {
-      requestedFarFieldMaskRevision += 1;
-    }
-    if (mesh.meshCount > 0) {
-      requestedFarFieldMaskRevision += 1;
-    }
     dirtyResidentChunks = world.countDirtyResidentChunks();
-    if (residency.pendingChunks === 0 && dirtyResidentChunks === 0) {
-      presentedFarFieldMaskRevision = requestedFarFieldMaskRevision;
-    }
-    const farSummary = farField.updateAround(
-      targetFeetPosition,
-      0,
-      world.getFarFieldExclusionMask("render-ready", presentedFarFieldMaskRevision),
-      farBandBudget,
-    );
     pendingChunks = residency.pendingChunks;
-    pendingFarFieldBands = farSummary.pendingBands;
-    const frameWorkMs = farSummary.elapsedMs + residency.elapsedMs + mesh.elapsedMs;
+    const frameWorkMs = residency.elapsedMs + mesh.elapsedMs;
     frames.push({
       step,
       streamMs: residency.elapsedMs,
       meshMs: mesh.elapsedMs,
-      farFieldMs: farSummary.elapsedMs,
       generatedChunks: residency.generatedChunks,
       pendingChunks,
       dirtyResidentChunks,
@@ -303,10 +220,6 @@ function simulateChunkCrossing(deltaChunks: number): {
     });
     totalStreamMs += residency.elapsedMs;
     totalMeshMs += mesh.elapsedMs;
-    totalFarFieldMs += farSummary.elapsedMs;
-    totalFarFieldSampleCacheMs += farSummary.sampleCacheMs;
-    totalFarFieldMeshBuildMs += farSummary.meshBuildMs;
-    totalFarFieldSampledCellCount += farSummary.sampledCellCount;
     totalGeneratedChunks += residency.generatedChunks;
     totalRemeshChunks += mesh.remeshCount;
     totalYRangeMs += residency.phaseMs.yRangeMs;
@@ -315,25 +228,13 @@ function simulateChunkCrossing(deltaChunks: number): {
     maxPendingChunks = Math.max(maxPendingChunks, pendingChunks);
     maxDirtyResidentChunks = Math.max(maxDirtyResidentChunks, dirtyResidentChunks);
     maxFrameWorkMs = Math.max(maxFrameWorkMs, frameWorkMs);
-    for (const bandBuild of farSummary.bandBuilds) {
-      if (bandBuild.elapsedMs > maxFarFieldBandBuild.elapsedMs) {
-        maxFarFieldBandBuild = {
-          elapsedMs: bandBuild.elapsedMs,
-          label: bandBuild.label,
-        };
-      }
-    }
-  } while (shouldPumpWorldWork(false, pendingChunks, dirtyResidentChunks, pendingFarFieldBands));
+  } while (shouldPumpWorldWork(false, pendingChunks, dirtyResidentChunks));
 
   return {
     anchorChanged: true,
     frames,
     totalStreamMs,
     totalMeshMs,
-    totalFarFieldMs,
-    totalFarFieldSampleCacheMs,
-    totalFarFieldMeshBuildMs,
-    totalFarFieldSampledCellCount,
     totalGeneratedChunks,
     totalRemeshChunks,
     totalYRangeMs,
@@ -342,35 +243,22 @@ function simulateChunkCrossing(deltaChunks: number): {
     maxPendingChunks,
     maxDirtyResidentChunks,
     maxFrameWorkMs,
-    maxFarFieldBandBuild,
     residentChunks: world.getStats().chunkCount,
-    farTriangles: farField.lastUpdate.triangleCount,
   };
 }
 
 function settleWorld(
   world: ProceduralResidentWorld,
-  farField: ProceduralFarField,
   feetPosition: Vec3,
   anchor: StreamAnchor,
 ): void {
-  let farFieldMaskRevision = 0;
   world.updateResidencyAround(
     buildStreamAnchorPosition(anchor, world.chunkSize, feetPosition[1]),
     { maxGenerateChunks: Number.POSITIVE_INFINITY },
   );
-  world.prefetchFarFieldSummariesAround(feetPosition, farField.getMaxRadiusWorldUnits(), Number.POSITIVE_INFINITY);
-  farFieldMaskRevision += 1;
   rebuildDirtyMeshes(world, Number.POSITIVE_INFINITY, {
     priorityPosition: feetPosition,
   });
-  farFieldMaskRevision += 1;
-  farField.updateAround(
-    feetPosition,
-    0,
-    world.getFarFieldExclusionMask("render-ready", farFieldMaskRevision),
-    Number.POSITIVE_INFINITY,
-  );
 }
 
 function resolveAnchor(feetPosition: Vec3, chunkSize: number): StreamAnchor {

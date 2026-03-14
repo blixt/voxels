@@ -36,7 +36,6 @@ export interface BrowserMemorySample {
   residentChunks: number | null;
   pendingChunks: number | null;
   dirtyResidentChunks: number | null;
-  farFieldPendingBands: number | null;
   solidVoxelCount: number | null;
 }
 
@@ -86,7 +85,6 @@ export interface BrowserMemorySummary {
   peakResidentChunks: number | null;
   peakPendingChunks: number | null;
   peakDirtyResidentChunks: number | null;
-  peakFarFieldPendingBands: number | null;
   peakSolidVoxelCount: number | null;
   deltaTaskDurationMs: number | null;
   deltaScriptDurationMs: number | null;
@@ -311,7 +309,6 @@ export function summarizeMemorySamples(samples: readonly BrowserMemorySample[]):
     peakResidentChunks: maxNullable(samples.map((sample) => sample.residentChunks)),
     peakPendingChunks: maxNullable(samples.map((sample) => sample.pendingChunks)),
     peakDirtyResidentChunks: maxNullable(samples.map((sample) => sample.dirtyResidentChunks)),
-    peakFarFieldPendingBands: maxNullable(samples.map((sample) => sample.farFieldPendingBands)),
     peakSolidVoxelCount: maxNullable(samples.map((sample) => sample.solidVoxelCount)),
     deltaTaskDurationMs: deltaSecondsToMs(samples, "taskDurationSeconds"),
     deltaScriptDurationMs: deltaSecondsToMs(samples, "scriptDurationSeconds"),
@@ -762,7 +759,6 @@ class BrowserGameSessionImpl implements BrowserGameSession {
           generationWorkerCount: snapshot.generationWorkerCount,
           pendingChunks: snapshot.streamPendingChunks,
           dirtyResidentChunks: snapshot.streamDirtyResidentChunks,
-          farFieldPendingBands: snapshot.farFieldPendingBands,
           solidVoxelCount: snapshot.solidVoxelCount,
         };
       })()
@@ -787,7 +783,6 @@ class BrowserGameSessionImpl implements BrowserGameSession {
       residentChunks: typeof snapshot?.chunkCount === "number" ? snapshot.chunkCount : null,
       pendingChunks: typeof snapshot?.pendingChunks === "number" ? snapshot.pendingChunks : null,
       dirtyResidentChunks: typeof snapshot?.dirtyResidentChunks === "number" ? snapshot.dirtyResidentChunks : null,
-      farFieldPendingBands: typeof snapshot?.farFieldPendingBands === "number" ? snapshot.farFieldPendingBands : null,
       solidVoxelCount: typeof snapshot?.solidVoxelCount === "number" ? snapshot.solidVoxelCount : null,
     };
   }

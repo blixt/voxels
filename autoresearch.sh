@@ -16,7 +16,6 @@ OUTPUT=$(bun run scripts/profile-game-stream.ts \
   --radius=5 \
   --generate-budget=6 \
   --mesh-budget=4 \
-  --far-band-budget=1 \
   --chunk-delta=2 2>&1)
 
 # Extract crossing-d2 scenario (first JSON line)
@@ -31,13 +30,10 @@ fi
 # Extract metrics using bun for reliable JSON parsing
 bun -e "
 const data = $CROSSING_D2;
-const totalMs = data.totalStreamMs.avg + data.totalMeshMs.avg + data.totalFarFieldMs.avg;
+const totalMs = data.totalStreamMs.avg + data.totalMeshMs.avg;
 console.log('METRIC total_ms=' + totalMs.toFixed(2));
 console.log('METRIC stream_ms=' + data.totalStreamMs.avg.toFixed(2));
 console.log('METRIC mesh_ms=' + data.totalMeshMs.avg.toFixed(2));
-console.log('METRIC far_field_ms=' + data.totalFarFieldMs.avg.toFixed(2));
 console.log('METRIC chunk_gen_ms=' + data.totalChunkGenerationMs.avg.toFixed(2));
 console.log('METRIC max_frame_ms=' + data.maxFrameWorkMs.avg.toFixed(2));
-console.log('METRIC far_sample_cache_ms=' + data.totalFarFieldSampleCacheMs.avg.toFixed(2));
-console.log('METRIC far_mesh_build_ms=' + data.totalFarFieldMeshBuildMs.avg.toFixed(2));
 "

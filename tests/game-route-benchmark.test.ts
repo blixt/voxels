@@ -121,8 +121,6 @@ test("route frame accounting exposes measured and unmeasured time explicitly", (
       movementMs: 1,
       streamMs: 2,
       meshMs: 3,
-      farFieldMs: 1,
-      farFieldPrefetchMs: 0.5,
       renderCpuMs: 4,
     },
     {
@@ -130,17 +128,14 @@ test("route frame accounting exposes measured and unmeasured time explicitly", (
       movementMs: 1,
       streamMs: 1,
       meshMs: 1,
-      farFieldMs: 1,
-      farFieldPrefetchMs: 0,
       renderCpuMs: 2,
     },
   ]);
 
   expect(summary.totalGameplayFrameMs).toBe(21);
-  expect(summary.totalFarFieldPrefetchMs).toBe(0.5);
-  expect(summary.totalAccountedMs).toBe(17.5);
-  expect(summary.totalUnmeasuredMs).toBe(3.5);
-  expect(summary.maxUnmeasuredMs).toBe(3);
+  expect(summary.totalAccountedMs).toBe(15);
+  expect(summary.totalUnmeasuredMs).toBe(6);
+  expect(summary.maxUnmeasuredMs).toBe(4);
 });
 
 test("settled reference diff flags transient clear holes that later fill with terrain", () => {

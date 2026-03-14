@@ -65,8 +65,6 @@ export interface RouteFrameAccountingSample {
   movementMs: number;
   streamMs: number;
   meshMs: number;
-  farFieldMs: number;
-  farFieldPrefetchMs: number;
   renderCpuMs: number;
 }
 
@@ -76,8 +74,6 @@ export interface RouteFrameAccountingSummary {
   totalMovementMs: number;
   totalStreamMs: number;
   totalMeshMs: number;
-  totalFarFieldMs: number;
-  totalFarFieldPrefetchMs: number;
   totalRenderCpuMs: number;
   totalAccountedMs: number;
   totalUnmeasuredMs: number;
@@ -263,15 +259,11 @@ export function summarizeRouteFrameAccounting(
   const movementSamples = samples.map((sample) => sample.movementMs);
   const streamSamples = samples.map((sample) => sample.streamMs);
   const meshSamples = samples.map((sample) => sample.meshMs);
-  const farFieldSamples = samples.map((sample) => sample.farFieldMs);
-  const farFieldPrefetchSamples = samples.map((sample) => sample.farFieldPrefetchMs);
   const renderCpuSamples = samples.map((sample) => sample.renderCpuMs);
   const measuredWorkSamples = samples.map((sample) =>
     sample.movementMs
     + sample.streamMs
     + sample.meshMs
-    + sample.farFieldMs
-    + sample.farFieldPrefetchMs
     + sample.renderCpuMs);
   const unmeasuredSamples = gameplayFrameSamples.map((value, index) =>
     Math.max(0, value - (measuredWorkSamples[index] ?? 0)));
@@ -281,8 +273,6 @@ export function summarizeRouteFrameAccounting(
     totalMovementMs: sum(movementSamples),
     totalStreamMs: sum(streamSamples),
     totalMeshMs: sum(meshSamples),
-    totalFarFieldMs: sum(farFieldSamples),
-    totalFarFieldPrefetchMs: sum(farFieldPrefetchSamples),
     totalRenderCpuMs: sum(renderCpuSamples),
     totalAccountedMs: sum(measuredWorkSamples),
     totalUnmeasuredMs: sum(unmeasuredSamples),

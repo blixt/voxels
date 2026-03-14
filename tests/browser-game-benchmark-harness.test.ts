@@ -20,7 +20,6 @@ test("summarizeMemorySamples reports peaks and metric deltas", () => {
       residentChunks: 12,
       pendingChunks: 8,
       dirtyResidentChunks: 5,
-      farFieldPendingBands: 2,
       solidVoxelCount: 1000,
     },
     {
@@ -39,7 +38,6 @@ test("summarizeMemorySamples reports peaks and metric deltas", () => {
       residentChunks: 20,
       pendingChunks: 3,
       dirtyResidentChunks: 2,
-      farFieldPendingBands: 1,
       solidVoxelCount: 1800,
     },
   ]);
