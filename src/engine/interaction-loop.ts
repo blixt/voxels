@@ -15,6 +15,8 @@ export interface VoxelInteractionResult {
   material: number | null;
 }
 
+const BREAK_SPHERE_RADIUS = 5;
+
 export function breakVoxelAlongRay(
   world: MutableResidentChunkWorld,
   inventory: InventoryState,
@@ -26,20 +28,38 @@ export function breakVoxelAlongRay(
   if (!hit) {
     return { changed: false, hit: null, material: null };
   }
-  const material = world.getVoxel(hit.voxel[0], hit.voxel[1], hit.voxel[2]);
-  if (material === 0) {
+  const centerX = hit.voxel[0];
+  const centerY = hit.voxel[1];
+  const centerZ = hit.voxel[2];
+  const centerMaterial = world.getVoxel(centerX, centerY, centerZ);
+  if (centerMaterial === 0) {
     return { changed: false, hit, material: null };
   }
-  if (getInventoryInsertCapacity(inventory, material) < 1) {
-    return { changed: false, hit, material };
+  // Break a sphere of voxels around the hit point
+  const r = BREAK_SPHERE_RADIUS;
+  const r2 = r * r;
+  let changed = false;
+  for (let dz = -r; dz <= r; dz++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy + dz * dz > r2) continue;
+        const vx = centerX + dx;
+        const vy = centerY + dy;
+        const vz = centerZ + dz;
+        const material = world.getVoxel(vx, vy, vz);
+        if (material === 0 || world.isWaterMaterial(material)) continue;
+        if (getInventoryInsertCapacity(inventory, material) < 1) continue;
+        if (world.setVoxel(vx, vy, vz, 0)) {
+          insertInventoryMaterial(inventory, material, 1);
+          changed = true;
+        }
+      }
+    }
   }
-  const changed = world.setVoxel(hit.voxel[0], hit.voxel[1], hit.voxel[2], 0);
-  if (!changed) {
-    return { changed: false, hit, material };
-  }
-  insertInventoryMaterial(inventory, material, 1);
-  return { changed: true, hit, material };
+  return { changed, hit, material: centerMaterial };
 }
+
+const PLACE_SPHERE_RADIUS = 5;
 
 export function placeSelectedVoxelAlongRay(
   world: MutableResidentChunkWorld,
@@ -56,14 +76,28 @@ export function placeSelectedVoxelAlongRay(
   if (!hit) {
     return { changed: false, hit: null, material: null };
   }
-  const target = hit.adjacent;
-  if (world.getVoxel(target[0], target[1], target[2]) !== 0) {
-    return { changed: false, hit, material: selected.material };
+  const centerX = hit.adjacent[0];
+  const centerY = hit.adjacent[1];
+  const centerZ = hit.adjacent[2];
+  // Place a sphere of voxels around the adjacent point
+  const r = PLACE_SPHERE_RADIUS;
+  const r2 = r * r;
+  let changed = false;
+  for (let dz = -r; dz <= r; dz++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy + dz * dz > r2) continue;
+        const vx = centerX + dx;
+        const vy = centerY + dy;
+        const vz = centerZ + dz;
+        if (world.getVoxel(vx, vy, vz) !== 0) continue;
+        if (selected.count <= 0) break;
+        if (world.setVoxel(vx, vy, vz, selected.material)) {
+          removeSelectedInventoryMaterial(inventory, 1);
+          changed = true;
+        }
+      }
+    }
   }
-  const changed = world.setVoxel(target[0], target[1], target[2], selected.material);
-  if (!changed) {
-    return { changed: false, hit, material: selected.material };
-  }
-  removeSelectedInventoryMaterial(inventory, 1);
-  return { changed: true, hit, material: selected.material };
+  return { changed, hit, material: selected.material };
 }

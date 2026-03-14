@@ -30,9 +30,9 @@ const DEFAULT_UNDERGROUND_PADDING_CHUNKS = 3;
 const DEFAULT_AIR_PADDING_CHUNKS = 2;
 
 const LOD_RINGS = [
-  { level: 1, radiusChunks: 5 },
-  { level: 2, radiusChunks: 4 },
-  { level: 3, radiusChunks: 3 },
+  { level: 1, radiusChunks: 8 },
+  { level: 2, radiusChunks: 5 },
+  { level: 3, radiusChunks: 4 },
   { level: 4, radiusChunks: 3 },
 ] as const;
 const SPAWN_FOOTPRINT_RADIUS = metersToWorldUnits(0.8);
@@ -296,6 +296,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       chunk: { x: cx, y: cy, z: cz },
       localIndex,
     });
+    // Invalidate LOD chunks covering this world position
+    this.invalidateLodChunksAt(x, y, z);
     return true;
   }
 
@@ -853,6 +855,23 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
 
     return { generated, pending };
+  }
+
+  private invalidateLodChunksAt(worldX: number, worldY: number, worldZ: number): void {
+    for (const [key, chunk] of this.lodChunks) {
+      const stride = chunk.voxelStride;
+      const worldSize = this.chunkSize * stride;
+      const minX = chunk.coord.x * worldSize;
+      const minY = chunk.coord.y * worldSize;
+      const minZ = chunk.coord.z * worldSize;
+      if (worldX >= minX && worldX < minX + worldSize &&
+          worldY >= minY && worldY < minY + worldSize &&
+          worldZ >= minZ && worldZ < minZ + worldSize) {
+        // Remove so it gets regenerated on next updateLodResidencyAround
+        this.lodChunks.delete(key);
+        this.emptyLodKeys.delete(key);
+      }
+    }
   }
 
   private isLodChunkFullyCoveredByRenderReadyColumns(

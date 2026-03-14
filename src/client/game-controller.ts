@@ -2106,6 +2106,7 @@ export class GameController {
           sprint: false,
           precision: false,
         };
+    const prevFeet: [number, number, number] = [...this.player.feetPosition];
     const result = stepPlayer(
       this.world,
       this.player,
@@ -2113,6 +2114,16 @@ export class GameController {
       input,
       deltaSeconds,
     );
+    // Prevent player from entering chunks without collision data (LOD-only territory).
+    // Check if the target position has a resident LOD 0 chunk column.
+    const targetCx = Math.floor(this.player.feetPosition[0] / this.world.chunkSize);
+    const targetCz = Math.floor(this.player.feetPosition[2] / this.world.chunkSize);
+    if (!this.world.hasResidentColumn(targetCx, targetCz)) {
+      this.player.feetPosition[0] = prevFeet[0];
+      this.player.feetPosition[2] = prevFeet[2];
+      this.player.velocity[0] = 0;
+      this.player.velocity[2] = 0;
+    }
     this.syncCameraToPlayer();
     return result.moved;
   }
