@@ -29,11 +29,15 @@ const DEFAULT_HORIZONTAL_RADIUS_CHUNKS = 8;
 const DEFAULT_UNDERGROUND_PADDING_CHUNKS = 3;
 const DEFAULT_AIR_PADDING_CHUNKS = 2;
 
+// LOD rings must cover the full fog distance (4160 world units).
+// Each ring's outer edge in world units = radiusChunks * chunkSize * stride.
+// LOD 1: 8 * 32 * 2  =   512   LOD 2: 8 * 32 * 4  = 1024
+// LOD 3: 6 * 32 * 8  = 1536   LOD 4: 10 * 32 * 16 = 5120 (covers fog end)
 const LOD_RINGS = [
   { level: 1, radiusChunks: 8 },
-  { level: 2, radiusChunks: 5 },
-  { level: 3, radiusChunks: 4 },
-  { level: 4, radiusChunks: 3 },
+  { level: 2, radiusChunks: 8 },
+  { level: 3, radiusChunks: 6 },
+  { level: 4, radiusChunks: 10 },
 ] as const;
 const SPAWN_FOOTPRINT_RADIUS = metersToWorldUnits(0.8);
 const SPAWN_SCAN_DEPTH = metersToWorldUnits(3.2);
@@ -79,6 +83,16 @@ export interface ResidencyUpdateSummary {
   generatedChunkCoords: ChunkCoordinate[];
   evictedChunkCoords: ChunkCoordinate[];
   phaseMs: ResidencyPhaseMetrics;
+}
+
+export interface LodResidencyUpdateSummary {
+  generated: number;
+  pending: number;
+  totalChunks: number;
+  elapsedMs: number;
+  yRangeMs: number;
+  downsampleMs: number;
+  meshMs: number;
 }
 
 export interface WorldEditRecord {
@@ -317,8 +331,13 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   }
 
   *iterateResidentChunks(): Iterable<VoxelChunk> {
-    for (const chunk of this.lodChunks.values()) {
-      yield chunk;
+    // Yield LOD chunks coarsest-first so depth bias resolves correctly:
+    // LOD 4 (most biased) draws first, then LOD 3, 2, 1, then LOD 0 (no bias).
+    // Finer levels always win via lower depth bias.
+    for (let level = 4; level >= 1; level--) {
+      for (const chunk of this.lodChunks.values()) {
+        if (chunk.lodLevel === level) yield chunk;
+      }
     }
     for (const chunk of this.chunks.values()) {
       yield chunk;
@@ -708,8 +727,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   updateLodResidencyAround(
     position: Vec3,
     options?: { maxGenerateLodChunks?: number },
-  ): { generated: number; pending: number } {
-    const maxGenerate = options?.maxGenerateLodChunks ?? 4;
+  ): LodResidencyUpdateSummary {
+    const startedAt = performance.now();
+    const maxGenerate = options?.maxGenerateLodChunks ?? 32;
 
     if (!this.meshMaterialLut) {
       this.meshMaterialLut = createMeshMaterialLut(this.palette, isProceduralWaterMaterial);
@@ -731,6 +751,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     // Between LOD rings, track coverage from finer LOD rings.
     // Start from 0 — LOD 1 uses render-ready checks, not coverage half-width.
     let coveredHalfWidth = 0;
+    let yRangeMs = 0;
 
     for (const ring of LOD_RINGS) {
       const stride = 1 << ring.level;
@@ -764,36 +785,12 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
             }
           }
 
-          // Estimate Y range: sample multiple points across the LOD column
-          // to avoid missing terrain that's between the center sample point
-          const points = [
-            [cx * worldSize, cz * worldSize],
-            [cx * worldSize + worldSize - 1, cz * worldSize],
-            [cx * worldSize, cz * worldSize + worldSize - 1],
-            [cx * worldSize + worldSize - 1, cz * worldSize + worldSize - 1],
-            [cx * worldSize + (worldSize >> 1), cz * worldSize + (worldSize >> 1)],
-          ];
-          let minSurfaceY = Infinity;
-          let maxSurfaceY = -Infinity;
-          let maxTopY = -Infinity;
-          let maxWaterY = -Infinity;
-          for (const [px, pz] of points) {
-            const col = this.generator.sampleColumn(px!, pz!);
-            if (col.surfaceY < minSurfaceY) minSurfaceY = col.surfaceY;
-            if (col.surfaceY > maxSurfaceY) maxSurfaceY = col.surfaceY;
-            if (col.topY > maxTopY) maxTopY = col.topY;
-            if ((col.waterTopY ?? col.surfaceY) > maxWaterY) maxWaterY = col.waterTopY ?? col.surfaceY;
-          }
-          const minWorldY = Math.max(0, minSurfaceY - this.undergroundPaddingChunks * this.chunkSize);
-          const maxWorldY = Math.min(
-            this.maxYExclusive - 1,
-            Math.max(maxSurfaceY, maxTopY, maxWaterY)
-              + this.airPaddingChunks * this.chunkSize,
-          );
-          const minCy = Math.max(0, Math.floor(minWorldY / worldSize));
-          const maxCy = Math.max(0, Math.floor(maxWorldY / worldSize));
+          const yRangeStartedAt = performance.now();
+          const yRange = this.estimateLodColumnYRange(cx, cz, ring.level, stride, worldSize);
+          yRangeMs += performance.now() - yRangeStartedAt;
+          if (!yRange) continue;
 
-          for (let cy = minCy; cy <= maxCy; cy += 1) {
+          for (let cy = yRange.minCy; cy <= yRange.maxCy; cy += 1) {
             neededKeys.add(`L${ring.level}:${cx}:${cy}:${cz}`);
           }
         }
@@ -809,6 +806,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     // Process levels in ascending order so LOD N-1 is available when building LOD N.
     let generated = 0;
     let pending = 0;
+    let downsampleMs = 0;
+    let meshMs = 0;
     for (const ring of LOD_RINGS) {
       const stride = 1 << ring.level;
       const worldSize = this.chunkSize * stride;
@@ -825,7 +824,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         const cy = parseInt(parts[2]!);
         const cz = parseInt(parts[3]!);
 
+        const dsStartedAt = performance.now();
         const data = this.downsampleLodChunkData(cx, cy, cz, ring.level, stride, worldSize);
+        downsampleMs += performance.now() - dsStartedAt;
         if (!data || data.solidCount === 0) {
           this.emptyLodKeys.add(key);
           generated++;
@@ -835,7 +836,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           { coord: { x: cx, y: cy, z: cz }, data: data.data, solidCount: data.solidCount, solidBounds: data.solidBounds, renderSummary: null! },
           ring.level, stride,
         );
+        const meshStartedAt = performance.now();
         const mesh = this.buildLodChunkMesh(chunk, cx, cy, cz, stride, worldSize);
+        meshMs += performance.now() - meshStartedAt;
         chunk.mesh = mesh;
         chunk.meshBuilt = true;
         chunk.meshDirty = false;
@@ -846,19 +849,157 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       }
     }
 
-    // Phase 3: evict LOD chunks no longer needed
-    for (const key of this.lodChunks.keys()) {
-      if (!neededKeys.has(key)) {
-        this.lodChunks.delete(key);
+    // Phase 3: evict LOD chunks no longer needed.
+    // Only evict when there's no pending work — otherwise old LOD chunks
+    // provide coverage while new ones are still being generated.
+    if (pending === 0) {
+      for (const key of this.lodChunks.keys()) {
+        if (!neededKeys.has(key)) {
+          this.lodChunks.delete(key);
+        }
       }
-    }
-    for (const key of this.emptyLodKeys) {
-      if (!neededKeys.has(key)) {
-        this.emptyLodKeys.delete(key);
+      for (const key of this.emptyLodKeys) {
+        if (!neededKeys.has(key)) {
+          this.emptyLodKeys.delete(key);
+        }
       }
     }
 
-    return { generated, pending };
+    return {
+      generated,
+      pending,
+      totalChunks: this.lodChunks.size,
+      elapsedMs: performance.now() - startedAt,
+      yRangeMs,
+      downsampleMs,
+      meshMs,
+    };
+  }
+
+  private estimateLodColumnYRange(
+    cx: number,
+    cz: number,
+    level: number,
+    stride: number,
+    worldSize: number,
+  ): { minCy: number; maxCy: number } | null {
+    // For LOD 1, derive Y range from source LOD 0 chunks' solidBounds
+    // when available — avoids expensive generator.sampleColumn() calls.
+    if (level === 1) {
+      const yRange = this.estimateYRangeFromSolidBounds(cx, cz, stride, worldSize);
+      if (yRange) return yRange;
+    } else {
+      // For LOD 2+, derive from LOD N-1 chunks' solidBounds
+      const yRange = this.estimateYRangeFromLodSolidBounds(cx, cz, level, stride, worldSize);
+      if (yRange) return yRange;
+    }
+    // Fallback: sample the generator
+    const points = [
+      [cx * worldSize, cz * worldSize],
+      [cx * worldSize + worldSize - 1, cz * worldSize],
+      [cx * worldSize, cz * worldSize + worldSize - 1],
+      [cx * worldSize + worldSize - 1, cz * worldSize + worldSize - 1],
+      [cx * worldSize + (worldSize >> 1), cz * worldSize + (worldSize >> 1)],
+    ];
+    let minSurfaceY = Infinity;
+    let maxSurfaceY = -Infinity;
+    let maxTopY = -Infinity;
+    let maxWaterY = -Infinity;
+    for (const [px, pz] of points) {
+      const col = this.generator.sampleColumn(px!, pz!);
+      if (col.surfaceY < minSurfaceY) minSurfaceY = col.surfaceY;
+      if (col.surfaceY > maxSurfaceY) maxSurfaceY = col.surfaceY;
+      if (col.topY > maxTopY) maxTopY = col.topY;
+      if ((col.waterTopY ?? col.surfaceY) > maxWaterY) maxWaterY = col.waterTopY ?? col.surfaceY;
+    }
+    const minWorldY = Math.max(0, minSurfaceY - this.undergroundPaddingChunks * this.chunkSize);
+    const maxWorldY = Math.min(
+      this.maxYExclusive - 1,
+      Math.max(maxSurfaceY, maxTopY, maxWaterY)
+        + this.airPaddingChunks * this.chunkSize,
+    );
+    const minCy = Math.max(0, Math.floor(minWorldY / worldSize));
+    const maxCy = Math.max(0, Math.floor(maxWorldY / worldSize));
+    return { minCy, maxCy };
+  }
+
+  private estimateYRangeFromSolidBounds(
+    lodCx: number,
+    lodCz: number,
+    stride: number,
+    worldSize: number,
+  ): { minCy: number; maxCy: number } | null {
+    // Scan all LOD 0 columns in this LOD chunk's footprint
+    const minCol0X = lodCx * stride;
+    const maxCol0X = minCol0X + stride - 1;
+    const minCol0Z = lodCz * stride;
+    const maxCol0Z = minCol0Z + stride - 1;
+    let globalMinY = Infinity;
+    let globalMaxY = -Infinity;
+    let foundAny = false;
+    for (let cz = minCol0Z; cz <= maxCol0Z; cz++) {
+      for (let cx = minCol0X; cx <= maxCol0X; cx++) {
+        const yRange = this.columnChunkYRanges.get(toColumnKey(cx, cz));
+        if (!yRange) continue;
+        // Scan resident chunks in this column for solidBounds
+        for (let cy = yRange.minCy; cy <= yRange.maxCy; cy++) {
+          const chunk = this.getResidentChunk(cx, cy, cz);
+          if (!chunk || chunk.solidCount === 0 || !chunk.solidBounds) continue;
+          const worldMinY = cy * this.chunkSize + chunk.solidBounds.min[1];
+          const worldMaxY = cy * this.chunkSize + chunk.solidBounds.max[1];
+          globalMinY = Math.min(globalMinY, worldMinY);
+          globalMaxY = Math.max(globalMaxY, worldMaxY);
+          foundAny = true;
+        }
+      }
+    }
+    if (!foundAny) return null;
+    const paddedMinY = Math.max(0, globalMinY - this.undergroundPaddingChunks * this.chunkSize);
+    const paddedMaxY = Math.min(this.maxYExclusive - 1, globalMaxY + this.airPaddingChunks * this.chunkSize);
+    return {
+      minCy: Math.max(0, Math.floor(paddedMinY / worldSize)),
+      maxCy: Math.max(0, Math.floor(paddedMaxY / worldSize)),
+    };
+  }
+
+  private estimateYRangeFromLodSolidBounds(
+    lodCx: number,
+    lodCz: number,
+    level: number,
+    _stride: number,
+    worldSize: number,
+  ): { minCy: number; maxCy: number } | null {
+    // Scan LOD (level-1) chunks that overlap this LOD chunk's XZ footprint
+    const sourceStride = 1 << (level - 1);
+    const sourceWorldSize = this.chunkSize * sourceStride;
+    const srcMinCx = Math.floor((lodCx * worldSize) / sourceWorldSize);
+    const srcMaxCx = Math.floor(((lodCx + 1) * worldSize - 1) / sourceWorldSize);
+    const srcMinCz = Math.floor((lodCz * worldSize) / sourceWorldSize);
+    const srcMaxCz = Math.floor(((lodCz + 1) * worldSize - 1) / sourceWorldSize);
+    let globalMinY = Infinity;
+    let globalMaxY = -Infinity;
+    let foundAny = false;
+    for (let scz = srcMinCz; scz <= srcMaxCz; scz++) {
+      for (let scx = srcMinCx; scx <= srcMaxCx; scx++) {
+        // Scan a reasonable Y range for source LOD chunks
+        for (let scy = 0; scy < Math.ceil(this.maxYExclusive / sourceWorldSize); scy++) {
+          const srcChunk = this.lodChunks.get(`L${level - 1}:${scx}:${scy}:${scz}`);
+          if (!srcChunk || srcChunk.solidCount === 0 || !srcChunk.solidBounds) continue;
+          const worldMinY = scy * sourceWorldSize + srcChunk.solidBounds.min[1] * sourceStride;
+          const worldMaxY = scy * sourceWorldSize + srcChunk.solidBounds.max[1] * sourceStride;
+          globalMinY = Math.min(globalMinY, worldMinY);
+          globalMaxY = Math.max(globalMaxY, worldMaxY);
+          foundAny = true;
+        }
+      }
+    }
+    if (!foundAny) return null;
+    const paddedMinY = Math.max(0, globalMinY - this.undergroundPaddingChunks * this.chunkSize);
+    const paddedMaxY = Math.min(this.maxYExclusive - 1, globalMaxY + this.airPaddingChunks * this.chunkSize);
+    return {
+      minCy: Math.max(0, Math.floor(paddedMinY / worldSize)),
+      maxCy: Math.max(0, Math.floor(paddedMaxY / worldSize)),
+    };
   }
 
   private downsampleLodChunkData(

@@ -50,6 +50,12 @@ for (const scenario of scenarios) {
   let residentChunks = 0;
   let anchorChanged = false;
 
+  const lodGeneratedTotals: number[] = [];
+  const lodDownsampleTotals: number[] = [];
+  const lodMeshTotals: number[] = [];
+  const lodTotalChunksTotals: number[] = [];
+  const lodPendingTotals: number[] = [];
+
   for (let run = 0; run < iterations; run += 1) {
     const result = scenario.run();
     frameCounts.push(result.frames.length);
@@ -65,6 +71,11 @@ for (const scenario of scenarios) {
     emptyChunkTotals.push(result.totalEmptyChunksSkipped);
     residentChunks = result.residentChunks;
     anchorChanged = result.anchorChanged;
+    lodGeneratedTotals.push(result.totalLodGeneratedChunks);
+    lodDownsampleTotals.push(result.totalLodDownsampleMs);
+    lodMeshTotals.push(result.totalLodMeshMs);
+    lodTotalChunksTotals.push(result.lodTotalChunks);
+    lodPendingTotals.push(result.maxLodPendingChunks);
   }
 
   console.log(JSON.stringify({
@@ -89,6 +100,11 @@ for (const scenario of scenarios) {
     totalChunkGenerationMs: summarize(generationTotals),
     totalEmptyChunksSkipped: summarize(emptyChunkTotals),
     residentChunks,
+    totalLodGeneratedChunks: summarize(lodGeneratedTotals),
+    totalLodDownsampleMs: summarize(lodDownsampleTotals),
+    totalLodMeshMs: summarize(lodMeshTotals),
+    lodTotalChunks: summarize(lodTotalChunksTotals),
+    maxLodPendingChunks: summarize(lodPendingTotals),
   }));
 }
 
@@ -105,6 +121,11 @@ function simulateChunkCrossing(deltaChunks: number): {
     yRangeMs: number;
     chunkGenerationMs: number;
     emptyChunksSkipped: number;
+    lodGeneratedChunks: number;
+    lodDownsampleMs: number;
+    lodMeshMs: number;
+    lodTotalChunks: number;
+    lodPendingChunks: number;
   }>;
   totalStreamMs: number;
   totalMeshMs: number;
@@ -113,9 +134,14 @@ function simulateChunkCrossing(deltaChunks: number): {
   totalYRangeMs: number;
   totalChunkGenerationMs: number;
   totalEmptyChunksSkipped: number;
+  totalLodGeneratedChunks: number;
+  totalLodDownsampleMs: number;
+  totalLodMeshMs: number;
   maxPendingChunks: number;
   maxDirtyResidentChunks: number;
   maxFrameWorkMs: number;
+  maxLodPendingChunks: number;
+  lodTotalChunks: number;
   residentChunks: number;
 } {
   const generator = new ProceduralWorldGenerator(seed);
@@ -124,6 +150,7 @@ function simulateChunkCrossing(deltaChunks: number): {
   const initialAnchor = resolveAnchor(spawn, world.chunkSize);
 
   settleWorld(world, spawn, initialAnchor);
+  world.updateLodResidencyAround(spawn, { maxGenerateLodChunks: Number.POSITIVE_INFINITY });
 
   const targetFeetPosition: Vec3 = [
     spawn[0] + deltaChunks * world.chunkSize,
@@ -146,6 +173,11 @@ function simulateChunkCrossing(deltaChunks: number): {
     yRangeMs: number;
     chunkGenerationMs: number;
     emptyChunksSkipped: number;
+    lodGeneratedChunks: number;
+    lodDownsampleMs: number;
+    lodMeshMs: number;
+    lodTotalChunks: number;
+    lodPendingChunks: number;
   }> = [];
 
   let totalStreamMs = 0;
@@ -155,9 +187,14 @@ function simulateChunkCrossing(deltaChunks: number): {
   let totalYRangeMs = 0;
   let totalChunkGenerationMs = 0;
   let totalEmptyChunksSkipped = 0;
+  let totalLodGeneratedChunks = 0;
+  let totalLodDownsampleMs = 0;
+  let totalLodMeshMs = 0;
   let maxPendingChunks = 0;
   let maxDirtyResidentChunks = 0;
   let maxFrameWorkMs = 0;
+  let maxLodPendingChunks = 0;
+  let lodTotalChunks = 0;
 
   if (!resolved.changed) {
     const dirtyResidentChunks = world.countDirtyResidentChunks();
@@ -175,6 +212,11 @@ function simulateChunkCrossing(deltaChunks: number): {
           yRangeMs: 0,
           chunkGenerationMs: 0,
           emptyChunksSkipped: 0,
+          lodGeneratedChunks: 0,
+          lodDownsampleMs: 0,
+          lodMeshMs: 0,
+          lodTotalChunks: 0,
+          lodPendingChunks: 0,
         },
       ],
       totalStreamMs: 0,
@@ -184,9 +226,14 @@ function simulateChunkCrossing(deltaChunks: number): {
       totalYRangeMs: 0,
       totalChunkGenerationMs: 0,
       totalEmptyChunksSkipped: 0,
+      totalLodGeneratedChunks: 0,
+      totalLodDownsampleMs: 0,
+      totalLodMeshMs: 0,
       maxPendingChunks: 0,
       maxDirtyResidentChunks: dirtyResidentChunks,
       maxFrameWorkMs: 0,
+      maxLodPendingChunks: 0,
+      lodTotalChunks: 0,
       residentChunks: world.getStats().chunkCount,
     };
   }
@@ -203,9 +250,10 @@ function simulateChunkCrossing(deltaChunks: number): {
     const mesh = rebuildDirtyMeshes(world, meshBudget, {
       priorityPosition: targetFeetPosition,
     });
+    const lodResult = world.updateLodResidencyAround(targetFeetPosition);
     dirtyResidentChunks = world.countDirtyResidentChunks();
     pendingChunks = residency.pendingChunks;
-    const frameWorkMs = residency.elapsedMs + mesh.elapsedMs;
+    const frameWorkMs = residency.elapsedMs + mesh.elapsedMs + lodResult.elapsedMs;
     frames.push({
       step,
       streamMs: residency.elapsedMs,
@@ -217,6 +265,11 @@ function simulateChunkCrossing(deltaChunks: number): {
       yRangeMs: residency.phaseMs.yRangeMs,
       chunkGenerationMs: residency.phaseMs.chunkGenerationMs,
       emptyChunksSkipped: residency.emptyChunksSkipped,
+      lodGeneratedChunks: lodResult.generated,
+      lodDownsampleMs: lodResult.downsampleMs,
+      lodMeshMs: lodResult.meshMs,
+      lodTotalChunks: lodResult.totalChunks,
+      lodPendingChunks: lodResult.pending,
     });
     totalStreamMs += residency.elapsedMs;
     totalMeshMs += mesh.elapsedMs;
@@ -225,9 +278,14 @@ function simulateChunkCrossing(deltaChunks: number): {
     totalYRangeMs += residency.phaseMs.yRangeMs;
     totalChunkGenerationMs += residency.phaseMs.chunkGenerationMs;
     totalEmptyChunksSkipped += residency.emptyChunksSkipped;
+    totalLodGeneratedChunks += lodResult.generated;
+    totalLodDownsampleMs += lodResult.downsampleMs;
+    totalLodMeshMs += lodResult.meshMs;
     maxPendingChunks = Math.max(maxPendingChunks, pendingChunks);
     maxDirtyResidentChunks = Math.max(maxDirtyResidentChunks, dirtyResidentChunks);
     maxFrameWorkMs = Math.max(maxFrameWorkMs, frameWorkMs);
+    maxLodPendingChunks = Math.max(maxLodPendingChunks, lodResult.pending);
+    lodTotalChunks = lodResult.totalChunks;
   } while (shouldPumpWorldWork(false, pendingChunks, dirtyResidentChunks));
 
   return {
@@ -240,9 +298,14 @@ function simulateChunkCrossing(deltaChunks: number): {
     totalYRangeMs,
     totalChunkGenerationMs,
     totalEmptyChunksSkipped,
+    totalLodGeneratedChunks,
+    totalLodDownsampleMs,
+    totalLodMeshMs,
     maxPendingChunks,
     maxDirtyResidentChunks,
     maxFrameWorkMs,
+    maxLodPendingChunks,
+    lodTotalChunks,
     residentChunks: world.getStats().chunkCount,
   };
 }

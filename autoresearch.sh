@@ -31,9 +31,13 @@ fi
 bun -e "
 const data = $CROSSING_D2;
 const totalMs = data.totalStreamMs.avg + data.totalMeshMs.avg;
+const lodMs = (data.totalLodDownsampleMs?.avg ?? 0) + (data.totalLodMeshMs?.avg ?? 0);
 console.log('METRIC total_ms=' + totalMs.toFixed(2));
 console.log('METRIC stream_ms=' + data.totalStreamMs.avg.toFixed(2));
 console.log('METRIC mesh_ms=' + data.totalMeshMs.avg.toFixed(2));
 console.log('METRIC chunk_gen_ms=' + data.totalChunkGenerationMs.avg.toFixed(2));
 console.log('METRIC max_frame_ms=' + data.maxFrameWorkMs.avg.toFixed(2));
+console.log('METRIC lod_ms=' + lodMs.toFixed(2));
+console.log('METRIC lod_chunks=' + (data.lodTotalChunks?.avg ?? 0).toFixed(0));
+console.log('METRIC lod_pending=' + (data.maxLodPendingChunks?.avg ?? 0).toFixed(0));
 "

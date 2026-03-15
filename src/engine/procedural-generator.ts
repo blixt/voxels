@@ -4030,7 +4030,7 @@ function sampleCaveVoid(
     caveEntranceStrength,
     caveEntranceCenterY,
     caveEntranceHalfHeight,
-    1,
+    5,
     -0.24,
   ) || sampleCaveLayer(
     surfaceY,
@@ -4039,7 +4039,7 @@ function sampleCaveVoid(
     caveUpperStrength,
     caveUpperCenterY,
     caveUpperHalfHeight,
-    1,
+    5,
     -0.12,
   );
 }

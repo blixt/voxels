@@ -23,6 +23,11 @@ export interface BootstrapBenchmarkSample {
   evictedChunks: number;
   playableReady: boolean;
   visualReady: boolean;
+  lodChunkCount: number;
+  lodPendingChunks: number;
+  lodComplete: boolean;
+  frustumCulledChunks: number;
+  lodDrawCalls: number;
 }
 
 export interface BootstrapBenchmarkSummary {
@@ -30,6 +35,7 @@ export interface BootstrapBenchmarkSummary {
   totalElapsedMs: number;
   playableReadyElapsedMs: number | null;
   visualReadyElapsedMs: number | null;
+  lodCompleteElapsedMs: number | null;
   totalGameplayFrameMs: number;
   totalStreamMs: number;
   totalMeshMs: number;
@@ -57,6 +63,10 @@ export interface BootstrapBenchmarkSummary {
   maxPendingMeshJobs: number;
   maxDirtyResidentChunks: number;
   maxDirtyMeshlessResidentChunks: number;
+  maxLodChunkCount: number;
+  maxLodPendingChunks: number;
+  maxFrustumCulledChunks: number;
+  maxLodDrawCalls: number;
   framesOver16_67Ms: number;
   framesOver33_33Ms: number;
 }
@@ -99,12 +109,17 @@ export function summarizeBootstrapBenchmark(
     avgRenderCpuMs: average(renderCpuMs),
     p95RenderCpuMs: percentile(renderCpuMs, 0.95),
     maxRenderCpuMs: maxValue(renderCpuMs),
+    lodCompleteElapsedMs: firstElapsed(samples, "lodComplete"),
     totalGeneratedChunks: samples.reduce((sum, sample) => sum + sample.generatedChunks, 0),
     totalEvictedChunks: samples.reduce((sum, sample) => sum + sample.evictedChunks, 0),
     maxPendingChunks: maxValue(samples.map((sample) => sample.pendingChunks)),
     maxPendingMeshJobs: maxValue(samples.map((sample) => sample.pendingMeshJobs)),
     maxDirtyResidentChunks: maxValue(samples.map((sample) => sample.dirtyResidentChunks)),
     maxDirtyMeshlessResidentChunks: maxValue(samples.map((sample) => sample.dirtyMeshlessResidentChunks)),
+    maxLodChunkCount: maxValue(samples.map((sample) => sample.lodChunkCount)),
+    maxLodPendingChunks: maxValue(samples.map((sample) => sample.lodPendingChunks)),
+    maxFrustumCulledChunks: maxValue(samples.map((sample) => sample.frustumCulledChunks)),
+    maxLodDrawCalls: maxValue(samples.map((sample) => sample.lodDrawCalls)),
     framesOver16_67Ms: samples.filter((sample) => sample.gameplayFrameMs > 16.67).length,
     framesOver33_33Ms: samples.filter((sample) => sample.gameplayFrameMs > 33.33).length,
   };
@@ -116,7 +131,7 @@ function sumNumbers(values: readonly number[]): number {
 
 function firstElapsed(
   samples: readonly BootstrapBenchmarkSample[],
-  key: "playableReady" | "visualReady",
+  key: "playableReady" | "visualReady" | "lodComplete",
 ): number | null {
   for (const sample of samples) {
     if (sample[key]) {

@@ -27,6 +27,11 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       evictedChunks: 0,
       playableReady: false,
       visualReady: false,
+      lodChunkCount: 0,
+      lodPendingChunks: 10,
+      lodComplete: false,
+      frustumCulledChunks: 0,
+      lodDrawCalls: 0,
     },
     {
       frame: 1,
@@ -51,6 +56,11 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       evictedChunks: 0,
       playableReady: false,
       visualReady: false,
+      lodChunkCount: 5,
+      lodPendingChunks: 8,
+      lodComplete: false,
+      frustumCulledChunks: 1,
+      lodDrawCalls: 3,
     },
     {
       frame: 2,
@@ -75,6 +85,11 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       evictedChunks: 0,
       playableReady: true,
       visualReady: false,
+      lodChunkCount: 20,
+      lodPendingChunks: 5,
+      lodComplete: false,
+      frustumCulledChunks: 2,
+      lodDrawCalls: 8,
     },
     {
       frame: 3,
@@ -99,6 +114,11 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       evictedChunks: 0,
       playableReady: true,
       visualReady: true,
+      lodChunkCount: 30,
+      lodPendingChunks: 0,
+      lodComplete: true,
+      frustumCulledChunks: 3,
+      lodDrawCalls: 12,
     },
   ]);
 

@@ -90,6 +90,8 @@ export interface RenderMeshSource {
 interface PassStats {
   drawCalls: number;
   triangles: number;
+  frustumCulledChunks: number;
+  lodDrawCalls: number;
 }
 
 export interface RenderStats {
@@ -100,6 +102,8 @@ export interface RenderStats {
   uploadChunks: number;
   uploadBytes: number;
   encodeMs: number;
+  frustumCulledChunks: number;
+  lodDrawCalls: number;
 }
 
 interface ReadbackImage {
@@ -190,7 +194,7 @@ export class WebGpuVoxelRenderer {
   private readonly context: GPUCanvasContext;
   private readonly device: GPUDevice;
   private readonly pipeline: GPURenderPipeline;
-  private readonly lodPipeline: GPURenderPipeline;
+  private readonly lodPipelines: GPURenderPipeline[];
   private readonly waterPipeline: GPURenderPipeline;
   private readonly uniformBuffer: GPUBuffer;
   private readonly uniformBindGroup: GPUBindGroup;
@@ -267,41 +271,47 @@ export class WebGpuVoxelRenderer {
         depthCompare: "less",
       },
     });
-    this.lodPipeline = device.createRenderPipeline({
-      layout: pipelineLayout,
-      vertex: {
-        module: shaderModule,
-        entryPoint: "vs_main",
-        buffers: [
-          {
-            arrayStride: 20,
-            attributes: [
-              { shaderLocation: 0, format: "float32x3", offset: 0 },
-              { shaderLocation: 1, format: "snorm8x4", offset: 12 },
-              { shaderLocation: 2, format: "unorm8x4", offset: 16 },
-            ],
-          },
-        ],
-      },
-      fragment: {
-        module: shaderModule,
-        entryPoint: "fs_main",
-        targets: [{ format }],
-      },
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "back",
-        frontFace: "ccw",
-      },
-      depthStencil: {
-        format: "depth24plus",
-        depthWriteEnabled: true,
-        depthCompare: "less",
-        depthBias: 4,
-        depthBiasSlopeScale: 2,
-        depthBiasClamp: 0,
-      },
-    });
+    // Per-LOD-level pipelines with increasing depth bias so finer LOD
+    // levels always win over coarser ones in overlapping regions.
+    // LOD 1 (index 0) has the least bias, LOD 4 (index 3) has the most.
+    this.lodPipelines = [];
+    for (let level = 1; level <= 4; level++) {
+      this.lodPipelines.push(device.createRenderPipeline({
+        layout: pipelineLayout,
+        vertex: {
+          module: shaderModule,
+          entryPoint: "vs_main",
+          buffers: [
+            {
+              arrayStride: 20,
+              attributes: [
+                { shaderLocation: 0, format: "float32x3", offset: 0 },
+                { shaderLocation: 1, format: "snorm8x4", offset: 12 },
+                { shaderLocation: 2, format: "unorm8x4", offset: 16 },
+              ],
+            },
+          ],
+        },
+        fragment: {
+          module: shaderModule,
+          entryPoint: "fs_main",
+          targets: [{ format }],
+        },
+        primitive: {
+          topology: "triangle-list",
+          cullMode: "back",
+          frontFace: "ccw",
+        },
+        depthStencil: {
+          format: "depth24plus",
+          depthWriteEnabled: true,
+          depthCompare: "less",
+          depthBias: level * 8,
+          depthBiasSlopeScale: level * 4,
+          depthBiasClamp: 0,
+        },
+      }));
+    }
     this.waterPipeline = device.createRenderPipeline({
       layout: pipelineLayout,
       vertex: {
@@ -572,6 +582,8 @@ export class WebGpuVoxelRenderer {
 
     let drawCalls = 0;
     let triangles = 0;
+    let frustumCulledChunks = 0;
+    let lodDrawCalls = 0;
     let currentPipeline: GPURenderPipeline | null = null;
 
     // Opaque pass: LOD chunks first (depth-biased), then LOD 0 (standard).
@@ -584,9 +596,12 @@ export class WebGpuVoxelRenderer {
       }
       const b = chunk.mesh?.bounds;
       if (b && frustumPlanes && !isAabbVisible(frustumPlanes, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
+        frustumCulledChunks++;
         continue;
       }
-      const pipeline = chunk.lodLevel > 0 ? this.lodPipeline : this.pipeline;
+      const pipeline = chunk.lodLevel > 0
+        ? this.lodPipelines[Math.min(chunk.lodLevel - 1, this.lodPipelines.length - 1)]!
+        : this.pipeline;
       if (pipeline !== currentPipeline) {
         pass.setPipeline(pipeline);
         currentPipeline = pipeline;
@@ -596,6 +611,7 @@ export class WebGpuVoxelRenderer {
       pass.drawIndexed(resource.indexCount, 1, 0, 0, 0);
       drawCalls += 1;
       triangles += resource.triangleCount;
+      if (chunk.lodLevel > 0) lodDrawCalls += 1;
     }
 
     // Water pass (LOD 0 only — LOD chunks skip water)
@@ -607,6 +623,7 @@ export class WebGpuVoxelRenderer {
       }
       const b = chunk.mesh?.bounds;
       if (b && frustumPlanes && !isAabbVisible(frustumPlanes, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
+        frustumCulledChunks++;
         continue;
       }
       pass.setVertexBuffer(0, resource.waterVertexBuffer);
@@ -617,7 +634,7 @@ export class WebGpuVoxelRenderer {
     }
 
     pass.end();
-    return { drawCalls, triangles };
+    return { drawCalls, triangles, frustumCulledChunks, lodDrawCalls };
   }
 
   private writeUniforms(camera: RenderCamera, aspect: number, renderEnvironment: RenderEnvironment): void {

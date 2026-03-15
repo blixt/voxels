@@ -64,6 +64,7 @@ import {
 } from "../engine/procedural-probes.ts";
 import {
   ProceduralResidentWorld,
+  type LodResidencyUpdateSummary,
   type ResidencyUpdateSummary,
   type WorldEditRecord,
 } from "../engine/procedural-resident-world.ts";
@@ -193,6 +194,13 @@ export interface GameHudSnapshot {
   avgFrameCpuMs: number;
   maxGeneratedChunksPerUpdate: number;
   maxMeshRebuildsPerFrame: number;
+  lodChunkCount: number;
+  lodPendingChunks: number;
+  lodElapsedMs: number;
+  lodDownsampleMs: number;
+  lodMeshMs: number;
+  lodDrawCalls: number;
+  frustumCulledChunks: number;
 }
 
 export interface TargetingSnapshot {
@@ -646,6 +654,7 @@ export class GameController {
     elapsedMs: 0,
   };
   private lastRenderStats: RenderStats = zeroRenderStats();
+  private lastLodSummary: LodResidencyUpdateSummary = { generated: 0, pending: 0, totalChunks: 0, elapsedMs: 0, yRangeMs: 0, downsampleMs: 0, meshMs: 0 };
   private lastStreamSummary: ResidencyUpdateSummary = cloneResidencySummary(this.world.lastResidency);
   private streamAnchor: StreamAnchor | null = null;
   private streamingBudgets: StreamingBudgets = {
@@ -807,6 +816,13 @@ export class GameController {
       avgFrameCpuMs: this.avgFrameCpuMs,
       maxGeneratedChunksPerUpdate: this.streamingBudgets.maxGeneratedChunksPerUpdate,
       maxMeshRebuildsPerFrame: this.streamingBudgets.maxMeshRebuildsPerFrame,
+      lodChunkCount: this.lastLodSummary.totalChunks,
+      lodPendingChunks: this.lastLodSummary.pending,
+      lodElapsedMs: this.lastLodSummary.elapsedMs,
+      lodDownsampleMs: this.lastLodSummary.downsampleMs,
+      lodMeshMs: this.lastLodSummary.meshMs,
+      lodDrawCalls: this.lastRenderStats.lodDrawCalls,
+      frustumCulledChunks: this.lastRenderStats.frustumCulledChunks,
     };
   }
 
@@ -2197,7 +2213,7 @@ export class GameController {
     }
     if (!shouldRefreshResidency(false, resolved.changed, this.lastStreamSummary.pendingChunks)) {
       this.flushMeshBuildBudget();
-      this.world.updateLodResidencyAround(this.player.feetPosition, { maxGenerateLodChunks: 2 });
+      this.lastLodSummary = this.world.updateLodResidencyAround(this.player.feetPosition, { maxGenerateLodChunks: 2 });
       this.lastStreamSummary = createIdleResidencySummary(
         this.lastStreamSummary,
         this.streamAnchor ?? resolved.anchor,
@@ -2227,8 +2243,8 @@ export class GameController {
     this.flushMeshBuildBudget(
       settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxMeshRebuildsPerFrame,
     );
-    this.world.updateLodResidencyAround(this.player.feetPosition, {
-      maxGenerateLodChunks: settle ? Number.POSITIVE_INFINITY : 4,
+    this.lastLodSummary = this.world.updateLodResidencyAround(this.player.feetPosition, {
+      maxGenerateLodChunks: settle ? Number.POSITIVE_INFINITY : 32,
     });
     this.status = residency.pendingChunks > 0
       ? `Streaming ${residency.pendingChunks} pending chunk(s)`
@@ -2693,6 +2709,11 @@ export class GameController {
       evictedChunks: this.lastStreamSummary.evictedChunks,
       playableReady: bootstrap.playableReady,
       visualReady: bootstrap.visualReady,
+      lodChunkCount: this.lastLodSummary.totalChunks,
+      lodPendingChunks: this.lastLodSummary.pending,
+      lodComplete: this.lastLodSummary.pending === 0 && this.lastLodSummary.totalChunks > 0,
+      frustumCulledChunks: this.lastRenderStats.frustumCulledChunks,
+      lodDrawCalls: this.lastRenderStats.lodDrawCalls,
     });
     if (bootstrap.playableReady) {
       this.bootstrapPlayableReady = true;
@@ -2826,6 +2847,8 @@ function zeroRenderStats(): RenderStats {
     uploadChunks: 0,
     uploadBytes: 0,
     encodeMs: 0,
+    frustumCulledChunks: 0,
+    lodDrawCalls: 0,
   };
 }
 
