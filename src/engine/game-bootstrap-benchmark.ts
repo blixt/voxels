@@ -14,6 +14,10 @@ export interface BootstrapBenchmarkSample {
   triangles: number;
   streamMs: number;
   meshMs: number;
+  lodMs: number;
+  lodYRangeMs: number;
+  lodDownsampleMs: number;
+  lodMeshMs: number;
   pendingChunks: number;
   pendingMeshJobs: number;
   dirtyResidentChunks: number;
@@ -27,6 +31,7 @@ export interface BootstrapBenchmarkSample {
   lodPendingChunks: number;
   lodComplete: boolean;
   frustumCulledChunks: number;
+  fogCulledChunks: number;
   lodDrawCalls: number;
 }
 
@@ -39,6 +44,10 @@ export interface BootstrapBenchmarkSummary {
   totalGameplayFrameMs: number;
   totalStreamMs: number;
   totalMeshMs: number;
+  totalLodMs: number;
+  totalLodYRangeMs: number;
+  totalLodDownsampleMs: number;
+  totalLodMeshMs: number;
   totalRenderCpuMs: number;
   totalRenderSyncMs: number;
   totalRenderUploadMs: number;
@@ -54,6 +63,9 @@ export interface BootstrapBenchmarkSummary {
   avgMeshMs: number;
   p95MeshMs: number;
   maxMeshMs: number;
+  avgLodMs: number;
+  p95LodMs: number;
+  maxLodMs: number;
   avgRenderCpuMs: number;
   p95RenderCpuMs: number;
   maxRenderCpuMs: number;
@@ -66,6 +78,7 @@ export interface BootstrapBenchmarkSummary {
   maxLodChunkCount: number;
   maxLodPendingChunks: number;
   maxFrustumCulledChunks: number;
+  maxFogCulledChunks: number;
   maxLodDrawCalls: number;
   framesOver16_67Ms: number;
   framesOver33_33Ms: number;
@@ -77,6 +90,10 @@ export function summarizeBootstrapBenchmark(
   const gameplayFrameMs = samples.map((sample) => sample.gameplayFrameMs);
   const streamMs = samples.map((sample) => sample.streamMs);
   const meshMs = samples.map((sample) => sample.meshMs);
+  const lodMs = samples.map((sample) => sample.lodMs);
+  const lodYRangeMs = samples.map((sample) => sample.lodYRangeMs);
+  const lodDownsampleMs = samples.map((sample) => sample.lodDownsampleMs);
+  const lodMeshMs = samples.map((sample) => sample.lodMeshMs);
   const renderCpuMs = samples.map((sample) => sample.renderCpuMs);
   const renderSyncMs = samples.map((sample) => sample.renderSyncMs);
   const renderUploadMs = samples.map((sample) => sample.renderUploadMs);
@@ -91,6 +108,10 @@ export function summarizeBootstrapBenchmark(
     totalGameplayFrameMs: sumNumbers(gameplayFrameMs),
     totalStreamMs: sumNumbers(streamMs),
     totalMeshMs: sumNumbers(meshMs),
+    totalLodMs: sumNumbers(lodMs),
+    totalLodYRangeMs: sumNumbers(lodYRangeMs),
+    totalLodDownsampleMs: sumNumbers(lodDownsampleMs),
+    totalLodMeshMs: sumNumbers(lodMeshMs),
     totalRenderCpuMs: sumNumbers(renderCpuMs),
     totalRenderSyncMs: sumNumbers(renderSyncMs),
     totalRenderUploadMs: sumNumbers(renderUploadMs),
@@ -106,6 +127,9 @@ export function summarizeBootstrapBenchmark(
     avgMeshMs: average(meshMs),
     p95MeshMs: percentile(meshMs, 0.95),
     maxMeshMs: maxValue(meshMs),
+    avgLodMs: average(lodMs),
+    p95LodMs: percentile(lodMs, 0.95),
+    maxLodMs: maxValue(lodMs),
     avgRenderCpuMs: average(renderCpuMs),
     p95RenderCpuMs: percentile(renderCpuMs, 0.95),
     maxRenderCpuMs: maxValue(renderCpuMs),
@@ -119,6 +143,7 @@ export function summarizeBootstrapBenchmark(
     maxLodChunkCount: maxValue(samples.map((sample) => sample.lodChunkCount)),
     maxLodPendingChunks: maxValue(samples.map((sample) => sample.lodPendingChunks)),
     maxFrustumCulledChunks: maxValue(samples.map((sample) => sample.frustumCulledChunks)),
+    maxFogCulledChunks: maxValue(samples.map((sample) => sample.fogCulledChunks)),
     maxLodDrawCalls: maxValue(samples.map((sample) => sample.lodDrawCalls)),
     framesOver16_67Ms: samples.filter((sample) => sample.gameplayFrameMs > 16.67).length,
     framesOver33_33Ms: samples.filter((sample) => sample.gameplayFrameMs > 33.33).length,

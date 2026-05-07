@@ -12,6 +12,7 @@ test("discovery catalog exposes player-facing names with identifiers", () => {
     categoryLabel: "Biome",
     id: "verdant",
     name: "Verdant Reach",
+    flavorText: null,
     inlineLabel: "Verdant Reach [verdant]",
     fullLabel: "Biome: Verdant Reach [verdant]",
   });
@@ -20,6 +21,9 @@ test("discovery catalog exposes player-facing names with identifiers", () => {
   );
   expect(formatDiscoveryLabel("landmark", "redwood")).toBe(
     "Landmark: Skyroot Redwood [redwood]",
+  );
+  expect(describeDiscovery("landmark", "velothi_shrine").flavorText).toBe(
+    "A small shrine watches the road with worn amber light.",
   );
 });
 

@@ -18,6 +18,10 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       triangles: 0,
       streamMs: 5,
       meshMs: 0,
+      lodMs: 0,
+      lodYRangeMs: 0,
+      lodDownsampleMs: 0,
+      lodMeshMs: 0,
       pendingChunks: 8,
       pendingMeshJobs: 4,
       dirtyResidentChunks: 6,
@@ -31,6 +35,7 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       lodPendingChunks: 10,
       lodComplete: false,
       frustumCulledChunks: 0,
+      fogCulledChunks: 0,
       lodDrawCalls: 0,
     },
     {
@@ -47,6 +52,10 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       triangles: 120,
       streamMs: 8,
       meshMs: 4,
+      lodMs: 3,
+      lodYRangeMs: 0.5,
+      lodDownsampleMs: 1,
+      lodMeshMs: 1.5,
       pendingChunks: 2,
       pendingMeshJobs: 1,
       dirtyResidentChunks: 1,
@@ -60,6 +69,7 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       lodPendingChunks: 8,
       lodComplete: false,
       frustumCulledChunks: 1,
+      fogCulledChunks: 2,
       lodDrawCalls: 3,
     },
     {
@@ -76,6 +86,10 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       triangles: 240,
       streamMs: 6,
       meshMs: 5,
+      lodMs: 4,
+      lodYRangeMs: 0.8,
+      lodDownsampleMs: 1.2,
+      lodMeshMs: 2,
       pendingChunks: 0,
       pendingMeshJobs: 0,
       dirtyResidentChunks: 0,
@@ -89,6 +103,7 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       lodPendingChunks: 5,
       lodComplete: false,
       frustumCulledChunks: 2,
+      fogCulledChunks: 4,
       lodDrawCalls: 8,
     },
     {
@@ -105,6 +120,10 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       triangles: 280,
       streamMs: 1,
       meshMs: 1,
+      lodMs: 2,
+      lodYRangeMs: 0.2,
+      lodDownsampleMs: 0.8,
+      lodMeshMs: 1,
       pendingChunks: 0,
       pendingMeshJobs: 0,
       dirtyResidentChunks: 0,
@@ -118,6 +137,7 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       lodPendingChunks: 0,
       lodComplete: true,
       frustumCulledChunks: 3,
+      fogCulledChunks: 5,
       lodDrawCalls: 12,
     },
   ]);
@@ -129,6 +149,11 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
   expect(summary.totalGameplayFrameMs).toBe(58);
   expect(summary.totalStreamMs).toBe(20);
   expect(summary.totalMeshMs).toBe(10);
+  expect(summary.totalLodMs).toBe(9);
+  expect(summary.totalLodYRangeMs).toBeCloseTo(1.5, 6);
+  expect(summary.totalLodDownsampleMs).toBe(3);
+  expect(summary.totalLodMeshMs).toBe(4.5);
+  expect(summary.maxLodMs).toBe(4);
   expect(summary.totalRenderCpuMs).toBe(7.5);
   expect(summary.totalRenderSyncMs).toBe(1.5);
   expect(summary.totalRenderUploadMs).toBeCloseTo(0.7, 6);
@@ -138,6 +163,7 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
   expect(summary.totalGeneratedChunks).toBe(13);
   expect(summary.maxPendingChunks).toBe(8);
   expect(summary.maxPendingMeshJobs).toBe(4);
+  expect(summary.maxFogCulledChunks).toBe(5);
   expect(summary.framesOver16_67Ms).toBe(3);
   expect(summary.framesOver33_33Ms).toBe(0);
   expect(summary.maxGameplayFrameMs).toBe(19);

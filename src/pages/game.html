@@ -9,42 +9,10 @@
   <body class="page-game">
     <main class="shell" data-app="game">
       <section class="game-shell">
-        <canvas class="game-viewport" data-role="viewport"></canvas>
+        <canvas class="game-viewport" data-role="viewport" tabindex="-1"></canvas>
         <div class="game-overlay">
-          <header class="game-topbar">
-            <div class="game-brand">
-              <p class="eyebrow">Chrome 146 + WebGPU</p>
-              <h1>Voxels</h1>
-              <p class="game-subtitle">Explore, gather, and build across the current procedural world prototype.</p>
-            </div>
-          </header>
-          <aside class="game-objective-panel" data-role="objective-panel"></aside>
-          <div class="game-hud">
-            <section class="game-panel game-panel-telemetry is-collapsed" data-role="telemetry-panel">
-              <button
-                class="game-telemetry-toggle"
-                type="button"
-                data-role="telemetry-toggle"
-                aria-expanded="false"
-                aria-controls="game-telemetry-details"
-              >
-                <div class="game-telemetry-summary">
-                  <canvas
-                    class="game-telemetry-chart"
-                    data-role="telemetry-chart"
-                    width="360"
-                    height="92"
-                    aria-hidden="true"
-                  ></canvas>
-                  <div class="game-telemetry-summary-metrics" data-role="telemetry-summary"></div>
-                </div>
-                <span class="game-telemetry-toggle-label" data-role="telemetry-toggle-label">Show Debug</span>
-              </button>
-              <div class="game-telemetry-details" id="game-telemetry-details" data-role="telemetry-details" hidden>
-                <div class="game-metrics" data-role="telemetry"></div>
-              </div>
-            </section>
-          </div>
+          <div class="game-status-strip" data-role="objective-panel"></div>
+          <div class="game-performance-strip" data-role="performance-strip"></div>
           <div
             class="discovery-achievement-layer"
             data-role="discovery-achievements"
@@ -55,8 +23,8 @@
           <svg class="target-overlay" data-role="target-overlay" aria-hidden="true"></svg>
           <div class="game-bottom-hud" data-role="interaction-hud"></div>
           <div class="crosshair" aria-hidden="true"></div>
-          <button class="capture-overlay" data-role="capture">
-            <div class="capture-card">
+          <button class="capture-overlay" data-role="capture" type="button" aria-label="Click to play">
+            <span class="capture-card">
               <p class="capture-status" data-role="capture-status">Preparing World</p>
               <strong class="capture-title" data-role="capture-title">Loading nearby terrain</strong>
               <p class="capture-subtitle" data-role="capture-subtitle"></p>
@@ -64,7 +32,7 @@
                 <span class="capture-progress-bar" data-role="capture-progress-bar"></span>
               </div>
               <p class="capture-detail" data-role="capture-detail"></p>
-            </div>
+            </span>
           </button>
         </div>
       </section>

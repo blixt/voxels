@@ -5,6 +5,7 @@ import {
   buildDefaultRouteBenchmarkPlan,
   buildForwardRouteBenchmarkPlan,
   summarizeRouteFrameAccounting,
+  summarizeRouteSeamCoverage,
   type BottomCenterVoidProbe,
   type RouteBenchmarkFrameTarget,
 } from "../engine/game-route-benchmark.ts";
@@ -23,9 +24,20 @@ import {
 import {
   ExplorationJournal,
   type DiscoveryEvent,
+  type ExplorationJournalState,
   type ExplorationJournalSnapshot,
   type ExplorationObservation,
 } from "../engine/exploration-journal.ts";
+import {
+  SkillJournal,
+  type SkillId,
+  type SkillJournalState,
+  type SkillJournalSnapshot,
+} from "../engine/skill-journal.ts";
+import {
+  describeExplorationSkillEffects,
+  type ExplorationSkillEffects,
+} from "../engine/exploration-skill-effects.ts";
 import {
   breakVoxelAlongRay,
   placeSelectedVoxelAlongRay,
@@ -92,8 +104,12 @@ import {
   type TargetingOverlayGeometry,
 } from "../engine/targeting-overlay.ts";
 import {
+  buildAmbientRenderEnvironment,
+  resolveAmbientWorldProfile,
+  type AmbientWorldProfile,
+} from "../engine/ambient-environment.ts";
+import {
   buildUnderwaterRenderEnvironment,
-  DEFAULT_RENDER_ENVIRONMENT,
   type RenderEnvironment,
 } from "../engine/water-visuals.ts";
 import { resolveObservedUndergroundBiomeId } from "../engine/underground-discovery.ts";
@@ -104,27 +120,25 @@ const HUD_PUSH_INTERVAL_MS = 120;
 const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
 const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 7;
 const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 6;
+const DEFAULT_MAX_LOD_CHUNKS_PER_FRAME = 2;
+const DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME = 3;
 const MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME = 6;
 const SYNC_NEAR_MESH_RADIUS_CHUNKS = 3;
 const BOOTSTRAP_PLAYABLE_COLUMN_RADIUS_CHUNKS = 2;
 const DISCOVERY_SAMPLE_INTERVAL_MS = 250;
 const DISCOVERY_SAMPLE_MOVE_THRESHOLD_WORLD_UNITS = metersToWorldUnits(0.8);
+const TRAVEL_CONTEXT_SAMPLE_INTERVAL_MS = 250;
+const TRAVEL_CONTEXT_SAMPLE_MOVE_THRESHOLD_WORLD_UNITS = metersToWorldUnits(0.8);
 const INTERACTION_REACH_WORLD_UNITS = metersToWorldUnits(5);
-const DISCOVERY_LANDMARK_SAMPLE_OFFSETS: ReadonlyArray<readonly [number, number]> = [
-  [0, 0],
-  [metersToWorldUnits(1.2), 0],
-  [-metersToWorldUnits(1.2), 0],
-  [0, metersToWorldUnits(1.2)],
-  [0, -metersToWorldUnits(1.2)],
-  [metersToWorldUnits(1.2), metersToWorldUnits(1.2)],
-  [metersToWorldUnits(1.2), -metersToWorldUnits(1.2)],
-  [-metersToWorldUnits(1.2), metersToWorldUnits(1.2)],
-  [-metersToWorldUnits(1.2), -metersToWorldUnits(1.2)],
-  [metersToWorldUnits(2.4), 0],
-  [-metersToWorldUnits(2.4), 0],
-  [0, metersToWorldUnits(2.4)],
-  [0, -metersToWorldUnits(2.4)],
-];
+const ANCIENT_LANDMARK_IDS = new Set([
+  "ancestor_pillar",
+  "ash_marker",
+  "glass_cairn",
+  "silt_shell",
+  "velothi_shrine",
+  "pilgrim_cairn",
+]);
+const LANDMARK_SAMPLE_OFFSET_CACHE = new Map<string, ReadonlyArray<readonly [number, number]>>();
 
 export interface GameHudSnapshot {
   status: string;
@@ -162,12 +176,25 @@ export interface GameHudSnapshot {
   undergroundBiomeId: string | null;
   regionalVariantId: string | null;
   landmarkId: string | null;
+  ambientProfileId: string;
+  ambientProfileLabel: string;
+  ambientFogEndMeters: number;
   discoveredBiomeCount: number;
   discoveredUndergroundBiomeCount: number;
   discoveredRegionalVariantCount: number;
   discoveredLandmarkCount: number;
+  discoveredAncientLandmarkCount: number;
+  landmarkScanRadiusMeters: number;
+  landmarkScanSampleCount: number;
+  surfaceTravelSpeedMultiplier: number;
+  undergroundTravelSpeedMultiplier: number;
   recentDiscoveries: DiscoveryEvent[];
   lastDiscoveryLabel: string;
+  focusSkillName: string;
+  focusSkillLevel: number;
+  focusSkillProgressRatio: number;
+  totalSkillTravelMeters: number;
+  totalSkillLevel: number;
   selectedInventorySlot: number;
   selectedInventoryMaterial: string;
   selectedInventoryCount: number;
@@ -185,7 +212,9 @@ export interface GameHudSnapshot {
   meshRemeshChunks: number;
   drawCalls: number;
   triangles: number;
+  lastFrameWallMs: number;
   lastFrameCpuMs: number;
+  avgFrameWallMs: number;
   lastFrameSyncMs: number;
   lastFrameUploadMs: number;
   lastFrameUploadChunks: number;
@@ -196,11 +225,16 @@ export interface GameHudSnapshot {
   maxMeshRebuildsPerFrame: number;
   lodChunkCount: number;
   lodPendingChunks: number;
+  lodGeneratedChunks: number;
   lodElapsedMs: number;
+  lodYRangeMs: number;
   lodDownsampleMs: number;
   lodMeshMs: number;
+  lodNeededKeyCount: number;
+  lodNeededKeyCacheHit: boolean;
   lodDrawCalls: number;
   frustumCulledChunks: number;
+  fogCulledChunks: number;
 }
 
 export interface TargetingSnapshot {
@@ -224,6 +258,13 @@ export interface TargetingOverlaySnapshot extends TargetingOverlayGeometry {
   previewOutlineSegments: TargetingOverlayGeometry["outlineSegments"];
   previewFacePolygon: TargetingOverlayGeometry["facePolygon"];
   previewMaterial: string;
+}
+
+export interface ProgressStateSnapshot {
+  version: 1;
+  discovery: ExplorationJournalState;
+  skills: SkillJournalState;
+  collectedMaterialIds: number[];
 }
 
 interface BootstrapReadiness {
@@ -425,6 +466,15 @@ export interface LodCoverageProbe {
   wrongBandSamples: LodCoverageIssueSample[];
 }
 
+interface LodCoverageSpan {
+  label: string;
+  strideMeters: number;
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
 export interface RenderReadyCoverageProbe {
   center: Vec3;
   sampleRadiusMeters: number;
@@ -512,6 +562,9 @@ export interface RouteExperienceFrameSample {
   visibleGroundSampleCount: number;
   visibleGroundUncoveredCount: number;
   visibleGroundResidentNotReadyCount: number;
+  lodMs: number;
+  lodGeneratedChunks: number;
+  lodPendingChunks: number;
   seamGapCount: number;
   maxSeamGapMeters: number;
   screenVoidRatio: number | null;
@@ -541,6 +594,9 @@ export interface RouteExperienceBenchmarkSummary {
   avgGameplayFrameMs: number;
   p95GameplayFrameMs: number;
   maxGameplayFrameMs: number;
+  avgMovementMs: number;
+  p95MovementMs: number;
+  maxMovementMs: number;
   avgMeasuredWorkMs: number;
   p95MeasuredWorkMs: number;
   maxMeasuredWorkMs: number;
@@ -553,6 +609,9 @@ export interface RouteExperienceBenchmarkSummary {
   avgMeshMs: number;
   p95MeshMs: number;
   maxMeshMs: number;
+  avgLodMs: number;
+  p95LodMs: number;
+  maxLodMs: number;
   avgRenderCpuMs: number;
   p95RenderCpuMs: number;
   maxRenderCpuMs: number;
@@ -566,6 +625,8 @@ export interface RouteExperienceBenchmarkSummary {
   maxVisibleGroundResidentNotReadyCount: number;
   framesWithVisibleGroundGaps: number;
   framesWithSeamGaps: number;
+  maxSeamGapMeters: number;
+  screenVoidCaptureCount: number;
   framesWithScreenVoidSignals: number;
   framesWithSettledReferenceHoleSignals: number;
   framesWithHoleSignals: number;
@@ -630,6 +691,7 @@ export class GameController {
     createMeshMaterialLut(this.world.palette, (materialIndex) => this.world.isWaterMaterial(materialIndex)),
   );
   readonly explorationJournal = new ExplorationJournal();
+  readonly skillJournal = new SkillJournal();
   readonly inventory: InventoryState = createInventoryState();
   readonly collectedMaterialIds = new Set<number>();
 
@@ -640,12 +702,17 @@ export class GameController {
   drawCalls = 0;
   triangles = 0;
   lastFrameCpuMs = 0;
+  lastFrameWallMs = 0;
   lastGameplayFrameMs = 0;
+  lastFrameLodMs = 0;
+  avgFrameWallMs = 0;
   avgFrameCpuMs = 0;
   status = "Booting";
   pointerLocked = false;
   inventoryPanelOpen = false;
   onHudUpdate: ((snapshot: GameHudSnapshot) => void) | null = null;
+  private readonly pointerLockTargets = new Set<HTMLElement>();
+  private pointerLockFallbackActive = false;
   private lastMeshBuildSummary: MeshBuildSummary = {
     meshCount: 0,
     newMeshCount: 0,
@@ -654,7 +721,17 @@ export class GameController {
     elapsedMs: 0,
   };
   private lastRenderStats: RenderStats = zeroRenderStats();
-  private lastLodSummary: LodResidencyUpdateSummary = { generated: 0, pending: 0, totalChunks: 0, elapsedMs: 0, yRangeMs: 0, downsampleMs: 0, meshMs: 0 };
+  private lastLodSummary: LodResidencyUpdateSummary = {
+    generated: 0,
+    pending: 0,
+    totalChunks: 0,
+    elapsedMs: 0,
+    yRangeMs: 0,
+    downsampleMs: 0,
+    meshMs: 0,
+    neededKeyCount: 0,
+    neededKeyCacheHit: false,
+  };
   private lastStreamSummary: ResidencyUpdateSummary = cloneResidencySummary(this.world.lastResidency);
   private streamAnchor: StreamAnchor | null = null;
   private streamingBudgets: StreamingBudgets = {
@@ -670,6 +747,9 @@ export class GameController {
   private lastDiscoverySampleAt = 0;
   private lastDiscoverySampleFeetPosition: Vec3 | null = null;
   private lastDiscoverySnapshot: ExplorationJournalSnapshot = this.explorationJournal.getSnapshot();
+  private lastTravelContextSampleAt = 0;
+  private lastTravelContextFeetPosition: Vec3 | null = null;
+  private lastTravelContext: "surface" | "underground" = "surface";
   private readonly bootstrapBenchmarkStartedAt = performance.now();
   private readonly bootstrapBenchmarkSamples: BootstrapBenchmarkSample[] = [];
   private bootstrapPlayableReady = false;
@@ -679,6 +759,14 @@ export class GameController {
   constructor(canvas: HTMLCanvasElement, options: GameControllerOptions = {}) {
     this.canvas = canvas;
     this.eagerBootstrapBenchmark = options.eagerBootstrapBenchmark ?? false;
+    this.pointerLockTargets.add(canvas);
+  }
+
+  registerPointerLockTarget(target: HTMLElement): () => void {
+    this.pointerLockTargets.add(target);
+    return () => {
+      this.pointerLockTargets.delete(target);
+    };
   }
 
   async init(): Promise<void> {
@@ -693,18 +781,19 @@ export class GameController {
 
   dispose(): void {
     cancelAnimationFrame(this.rafId);
-    if (document.pointerLockElement === this.canvas) {
+    if (this.ownsPointerLockElement(document.pointerLockElement)) {
       document.exitPointerLock();
     }
     this.pointerLocked = false;
+    this.pointerLockFallbackActive = false;
     this.pressedKeys.clear();
     this.asyncChunkGeneration?.dispose();
     this.asyncChunkMeshing?.dispose();
     this.renderer?.dispose();
     this.canvas.removeEventListener("click", this.handleCanvasClick);
-    this.canvas.removeEventListener("mousedown", this.handleCanvasMouseDown);
-    this.canvas.removeEventListener("contextmenu", this.handleCanvasContextMenu);
-    this.canvas.removeEventListener("wheel", this.handleCanvasWheel);
+    document.removeEventListener("mousedown", this.handleDocumentMouseDown);
+    document.removeEventListener("contextmenu", this.handleDocumentContextMenu);
+    document.removeEventListener("wheel", this.handleDocumentWheel);
     document.removeEventListener("pointerlockchange", this.handlePointerLockChange);
     document.removeEventListener("mousemove", this.handleMouseMove);
     window.removeEventListener("keydown", this.handleKeyDown);
@@ -713,12 +802,12 @@ export class GameController {
     document.removeEventListener("visibilitychange", this.handleVisibilityChange);
   }
 
-  async requestPointerLock(): Promise<void> {
+  async requestPointerLock(target: HTMLElement = this.canvas): Promise<void> {
     try {
-      await this.canvas.requestPointerLock();
-    } catch {
-      this.status = "Pointer lock request was blocked";
-      this.pushHud(true);
+      target.focus({ preventScroll: true });
+      await target.requestPointerLock();
+    } catch (error) {
+      this.activatePointerLockFallback(error);
     }
   }
 
@@ -738,7 +827,10 @@ export class GameController {
   getDebugSnapshot(): GameHudSnapshot {
     const stats = this.world.getStats();
     const discovery = this.refreshDiscoveryJournal();
+    const skills = this.skillJournal.observeDiscoveries(this.explorationJournal.drainPendingSkillDiscoveries());
+    const explorationSkillEffects = resolveExplorationSkillEffects(skills);
     const bootstrap = this.getBootstrapReadiness();
+    const ambientProfile = this.resolveCurrentAmbientProfile();
     return {
       status: this.status,
       pointerLocked: this.pointerLocked,
@@ -784,12 +876,27 @@ export class GameController {
       undergroundBiomeId: discovery.currentUndergroundBiomeId,
       regionalVariantId: discovery.currentRegionalVariantId,
       landmarkId: discovery.currentLandmarkId,
+      ambientProfileId: ambientProfile.id,
+      ambientProfileLabel: ambientProfile.label,
+      ambientFogEndMeters: worldUnitsToMeters(ambientProfile.fogEndDistance),
       discoveredBiomeCount: discovery.discoveredBiomeIds.length,
       discoveredUndergroundBiomeCount: discovery.discoveredUndergroundBiomeIds.length,
       discoveredRegionalVariantCount: discovery.discoveredRegionalVariantIds.length,
       discoveredLandmarkCount: discovery.discoveredLandmarkIds.length,
+      discoveredAncientLandmarkCount: discovery.discoveredLandmarkIds
+        .filter((landmarkId) => ANCIENT_LANDMARK_IDS.has(landmarkId))
+        .length,
+      landmarkScanRadiusMeters: explorationSkillEffects.landmarkScanRadiusMeters,
+      landmarkScanSampleCount: buildLandmarkSampleOffsets(explorationSkillEffects).length,
+      surfaceTravelSpeedMultiplier: explorationSkillEffects.surfaceTravelSpeedMultiplier,
+      undergroundTravelSpeedMultiplier: explorationSkillEffects.undergroundTravelSpeedMultiplier,
       recentDiscoveries: discovery.recentDiscoveries.map((event) => ({ ...event })),
       lastDiscoveryLabel: discovery.lastDiscovery?.label ?? "None",
+      focusSkillName: skills.focusSkill.name,
+      focusSkillLevel: skills.focusSkill.level,
+      focusSkillProgressRatio: skills.focusSkill.progressRatio,
+      totalSkillTravelMeters: skills.travelMeters,
+      totalSkillLevel: skills.totalLevel,
       selectedInventorySlot: this.inventory.selectedSlot,
       selectedInventoryMaterial: formatInventoryMaterial(getSelectedInventoryStack(this.inventory)?.material ?? null),
       selectedInventoryCount: getSelectedInventoryStack(this.inventory)?.count ?? 0,
@@ -807,7 +914,9 @@ export class GameController {
       meshRemeshChunks: this.lastMeshBuildSummary.remeshCount,
       drawCalls: this.drawCalls,
       triangles: this.triangles,
+      lastFrameWallMs: this.lastFrameWallMs,
       lastFrameCpuMs: this.lastFrameCpuMs,
+      avgFrameWallMs: this.avgFrameWallMs,
       lastFrameSyncMs: this.lastRenderStats.syncResourcesMs,
       lastFrameUploadMs: this.lastRenderStats.uploadMs,
       lastFrameUploadChunks: this.lastRenderStats.uploadChunks,
@@ -818,11 +927,16 @@ export class GameController {
       maxMeshRebuildsPerFrame: this.streamingBudgets.maxMeshRebuildsPerFrame,
       lodChunkCount: this.lastLodSummary.totalChunks,
       lodPendingChunks: this.lastLodSummary.pending,
+      lodGeneratedChunks: this.lastLodSummary.generated,
       lodElapsedMs: this.lastLodSummary.elapsedMs,
+      lodYRangeMs: this.lastLodSummary.yRangeMs,
       lodDownsampleMs: this.lastLodSummary.downsampleMs,
       lodMeshMs: this.lastLodSummary.meshMs,
+      lodNeededKeyCount: this.lastLodSummary.neededKeyCount,
+      lodNeededKeyCacheHit: this.lastLodSummary.neededKeyCacheHit,
       lodDrawCalls: this.lastRenderStats.lodDrawCalls,
       frustumCulledChunks: this.lastRenderStats.frustumCulledChunks,
+      fogCulledChunks: this.lastRenderStats.fogCulledChunks,
     };
   }
 
@@ -937,7 +1051,7 @@ export class GameController {
     }
     this.collectedMaterialIds.add(result.material);
     this.flushMeshBuildBudget(1);
-    this.status = `Collected ${formatInventoryMaterial(result.material)}`;
+    this.status = `Sampled ${formatInventoryMaterial(result.material)}`;
     this.pushHud(true);
     return true;
   }
@@ -1006,13 +1120,46 @@ export class GameController {
     return this.refreshDiscoveryJournal(true);
   }
 
+  getSkillJournalSnapshot(): SkillJournalSnapshot {
+    const discovery = this.refreshDiscoveryJournal(true);
+    void discovery;
+    return this.skillJournal.observeDiscoveries(this.explorationJournal.drainPendingSkillDiscoveries());
+  }
+
   resetDiscoveryJournal(): ExplorationJournalSnapshot {
     this.explorationJournal.reset();
+    this.skillJournal.reset();
     this.lastDiscoverySampleFeetPosition = null;
     this.lastDiscoverySampleAt = 0;
     const snapshot = this.refreshDiscoveryJournal(true);
     this.pushHud(true);
     return snapshot;
+  }
+
+  exportProgressState(): ProgressStateSnapshot {
+    this.refreshDiscoveryJournal(true);
+    this.skillJournal.observeDiscoveries(this.explorationJournal.drainPendingSkillDiscoveries());
+    return {
+      version: 1,
+      discovery: this.explorationJournal.exportState(),
+      skills: this.skillJournal.exportState(),
+      collectedMaterialIds: [...this.collectedMaterialIds].sort((left, right) => left - right),
+    };
+  }
+
+  importProgressState(state: Partial<ProgressStateSnapshot>): ProgressStateSnapshot {
+    this.explorationJournal.importState(state.discovery ?? {});
+    this.skillJournal.importState(state.skills ?? {});
+    this.collectedMaterialIds.clear();
+    for (const material of readMaterialIdArray(state.collectedMaterialIds)) {
+      this.collectedMaterialIds.add(material);
+    }
+    this.lastDiscoverySampleFeetPosition = null;
+    this.lastDiscoverySampleAt = 0;
+    this.refreshDiscoveryJournal(true);
+    this.skillJournal.observeDiscoveries(this.explorationJournal.drainPendingSkillDiscoveries());
+    this.pushHud(true);
+    return this.exportProgressState();
   }
 
   probeRenderReadyCoverage(sampleRadiusMeters = 12, sampleStepMeters = 0.8): RenderReadyCoverageProbe {
@@ -1022,6 +1169,7 @@ export class GameController {
     const sampleStepWorldUnits = metersToWorldUnits(normalizedStep);
     const centerX = this.player.feetPosition[0];
     const centerZ = this.player.feetPosition[2];
+    const lodSpans = this.collectRenderableLodCoverageSpans();
     let sampleCount = 0;
     let residentSampleCount = 0;
     let renderReadySampleCount = 0;
@@ -1033,8 +1181,10 @@ export class GameController {
         const worldZ = centerZ + offsetZ;
         const chunkX = Math.floor(worldX / this.world.chunkSize);
         const chunkZ = Math.floor(worldZ / this.world.chunkSize);
-        const resident = this.world.hasResidentColumn(chunkX, chunkZ);
-        const renderReady = this.world.isColumnRenderReady(chunkX, chunkZ);
+        const groundReadiness = this.resolveVisibleGroundReadiness(worldX, worldZ, chunkX, chunkZ);
+        const lodCovered = isCoveredByLodSpans(worldX, worldZ, lodSpans);
+        const resident = groundReadiness.resident || lodCovered;
+        const renderReady = groundReadiness.renderReady || lodCovered;
         sampleCount += 1;
         if (resident) {
           residentSampleCount += 1;
@@ -1073,6 +1223,7 @@ export class GameController {
     const forwardWorldUnits = metersToWorldUnits(normalizedForward);
     const lateralWorldUnits = metersToWorldUnits(normalizedLateral);
     const stepWorldUnits = metersToWorldUnits(normalizedStep);
+    const lodSpans = this.collectRenderableLodCoverageSpans();
     const uncoveredSamples: VisibleGroundCoverageIssueSample[] = [];
     let sampleCount = 0;
     let renderReadyCount = 0;
@@ -1085,8 +1236,10 @@ export class GameController {
         const worldZ = this.player.feetPosition[2] + forwardAxis[1] * forward + rightAxis[1] * lateral;
         const chunkX = Math.floor(worldX / this.world.chunkSize);
         const chunkZ = Math.floor(worldZ / this.world.chunkSize);
-        const resident = this.world.hasResidentColumn(chunkX, chunkZ);
-        const renderReady = this.world.isColumnRenderReady(chunkX, chunkZ);
+        const groundReadiness = this.resolveVisibleGroundReadiness(worldX, worldZ, chunkX, chunkZ);
+        const lodCovered = isCoveredByLodSpans(worldX, worldZ, lodSpans);
+        const resident = groundReadiness.resident || lodCovered;
+        const renderReady = groundReadiness.renderReady || lodCovered;
         sampleCount += 1;
         if (renderReady) {
           renderReadyCount += 1;
@@ -1121,6 +1274,33 @@ export class GameController {
     };
   }
 
+  private resolveVisibleGroundReadiness(
+    worldX: number,
+    worldZ: number,
+    chunkX = Math.floor(worldX / this.world.chunkSize),
+    chunkZ = Math.floor(worldZ / this.world.chunkSize),
+  ): { resident: boolean; renderReady: boolean } {
+    const surfaceY = this.generator.sampleColumn(worldX, worldZ).surfaceY;
+    const centerChunkY = Math.floor(surfaceY / this.world.chunkSize);
+    const chunkYs = new Set([
+      centerChunkY,
+      Math.floor((surfaceY + 1) / this.world.chunkSize),
+      Math.floor((surfaceY - 1) / this.world.chunkSize),
+    ]);
+    let resident = false;
+    for (const chunkY of chunkYs) {
+      const chunk = this.world.getResidentChunk(chunkX, chunkY, chunkZ);
+      if (!chunk) {
+        continue;
+      }
+      resident = true;
+      if (chunk.renderReady && chunk.mesh) {
+        return { resident: true, renderReady: true };
+      }
+    }
+    return { resident, renderReady: false };
+  }
+
   probeLodCoverage(sampleRadiusMeters = 48, sampleStepMeters = 0.8): LodCoverageProbe {
     const normalizedRadius = Math.max(1, sampleRadiusMeters);
     const normalizedStep = Math.max(0.1, sampleStepMeters);
@@ -1128,8 +1308,11 @@ export class GameController {
     const sampleStepWorldUnits = metersToWorldUnits(normalizedStep);
     const centerX = this.player.feetPosition[0];
     const centerZ = this.player.feetPosition[2];
+    const lodSpans = this.collectRenderableLodCoverageSpans();
     const uncoveredGapSamples: LodCoverageIssueSample[] = [];
     const handoffHoleSamples: LodCoverageIssueSample[] = [];
+    const residentOverlapSamples: LodCoverageIssueSample[] = [];
+    const bandOverlapSamples: LodCoverageIssueSample[] = [];
     let sampleCount = 0;
     let residentSampleCount = 0;
     let renderReadySampleCount = 0;
@@ -1148,14 +1331,24 @@ export class GameController {
         const chunkZ = Math.floor(worldZ / this.world.chunkSize);
         const resident = this.world.hasResidentColumn(chunkX, chunkZ);
         const renderReady = this.world.isColumnRenderReady(chunkX, chunkZ);
+        const lodBandStrideMeters = new Map<string, number>();
+        for (const span of lodSpans) {
+          if (worldX >= span.minX && worldX < span.maxX && worldZ >= span.minZ && worldZ < span.maxZ) {
+            lodBandStrideMeters.set(span.label, span.strideMeters);
+          }
+        }
+        const lodBands = [...lodBandStrideMeters.keys()];
+        const sampleStrideMeters = [...lodBandStrideMeters.values()];
+        const bands = renderReady ? ["LOD0", ...lodBands] : lodBands;
+        const strides = renderReady ? [worldUnitsToMeters(1), ...sampleStrideMeters] : sampleStrideMeters;
         const distanceWorldUnits = Math.max(Math.abs(offsetX), Math.abs(offsetZ));
         const distanceMeters = worldUnitsToMeters(distanceWorldUnits);
         const issueSample: LodCoverageIssueSample = {
           worldX,
           worldZ,
           distanceMeters,
-          bands: [],
-          sampleStrideMeters: [],
+          bands,
+          sampleStrideMeters: strides,
         };
         sampleCount += 1;
         if (resident) {
@@ -1163,13 +1356,23 @@ export class GameController {
         }
         if (renderReady) {
           renderReadySampleCount += 1;
+        }
+        if (bands.length > 0) {
           coveredSampleCount += 1;
         }
-        if (!renderReady) {
+        if (renderReady && lodBands.length > 0) {
+          residentOverlapCount += 1;
+          pushIssueSample(residentOverlapSamples, issueSample);
+        }
+        if (lodBands.length > 1) {
+          bandOverlapCount += 1;
+          pushIssueSample(bandOverlapSamples, issueSample);
+        }
+        if (bands.length === 0) {
           uncoveredGapCount += 1;
           pushIssueSample(uncoveredGapSamples, issueSample);
         }
-        if (resident && !renderReady) {
+        if (resident && !renderReady && lodBands.length === 0) {
           handoffHoleCount += 1;
           pushIssueSample(handoffHoleSamples, issueSample);
         }
@@ -1189,12 +1392,36 @@ export class GameController {
       handoffHoleCount,
       bandOverlapCount,
       wrongBandCount,
-      residentOverlapSamples: [],
+      residentOverlapSamples,
       uncoveredGapSamples,
       handoffHoleSamples,
-      bandOverlapSamples: [],
+      bandOverlapSamples,
       wrongBandSamples: [],
     };
+  }
+
+  private collectRenderableLodCoverageSpans(): LodCoverageSpan[] {
+    const spans: LodCoverageSpan[] = [];
+    for (const chunk of this.world.iterateResidentChunks()) {
+      if (
+        chunk.lodLevel <= 0 ||
+        !chunk.renderReady ||
+        !chunk.mesh ||
+        (chunk.mesh.indexCount === 0 && chunk.mesh.waterIndexCount === 0)
+      ) {
+        continue;
+      }
+      const worldSize = this.world.chunkSize * chunk.voxelStride;
+      spans.push({
+        label: `LOD${chunk.lodLevel}`,
+        strideMeters: worldUnitsToMeters(chunk.voxelStride),
+        minX: chunk.coord.x * worldSize,
+        maxX: (chunk.coord.x + 1) * worldSize,
+        minZ: chunk.coord.z * worldSize,
+        maxZ: (chunk.coord.z + 1) * worldSize,
+      });
+    }
+    return spans;
   }
 
   async teleportAndSettle(
@@ -1592,6 +1819,9 @@ export class GameController {
   async benchmarkLiveForwardWalkExperience(
     options: RouteExperienceBenchmarkOptions & {
       yawRadians?: number;
+      yawDriftRadians?: number;
+      yawDriftPeriodSeconds?: number;
+      sprint?: boolean;
     } = {},
   ): Promise<RouteExperienceBenchmark> {
     const normalizedOptions = normalizeRouteBenchmarkPlanOptions(options);
@@ -1610,6 +1840,8 @@ export class GameController {
     const referenceDiffStrideFrames = Math.max(0, Math.floor(options.referenceDiffStrideFrames ?? 0));
     const referenceDiffLimit = Math.max(0, Math.floor(options.referenceDiffLimit ?? 24));
     const yaw = options.yawRadians ?? 0;
+    const yawDriftRadians = Math.max(0, options.yawDriftRadians ?? 0);
+    const yawDriftPeriodSeconds = Math.max(0.1, options.yawDriftPeriodSeconds ?? Math.max(1, durationSeconds));
     const pitch = -0.34;
     const savedPlayer = {
       feetPosition: [...this.player.feetPosition] as Vec3,
@@ -1643,6 +1875,9 @@ export class GameController {
       this.pointerLocked = true;
       this.pressedKeys.clear();
       this.pressedKeys.add("KeyW");
+      if (options.sprint === true) {
+        this.pressedKeys.add("ControlLeft");
+      }
       this.lastFrameTime = 0;
       this.syncWorldAroundPlayer(true);
       this.renderCurrentFrame();
@@ -1660,7 +1895,13 @@ export class GameController {
         const phase: "move" | "settle" = elapsedSeconds < durationSeconds ? "move" : "settle";
         if (phase === "settle") {
           this.pressedKeys.delete("KeyW");
+          this.pressedKeys.delete("ControlLeft");
         }
+        this.camera.yaw = yaw + resolveBenchmarkYawDrift(
+          elapsedSeconds,
+          yawDriftRadians,
+          yawDriftPeriodSeconds,
+        );
         const interactiveFrame = this.advanceInteractiveFrame(now);
         frame += 1;
         totalDistanceMeters += worldUnitsToMeters(Math.hypot(
@@ -1685,6 +1926,21 @@ export class GameController {
           referenceDiffLimit,
           samples.length,
           capturedFrames.length,
+          {
+            frameStats: {
+              drawCalls: interactiveFrame.render.drawCalls,
+              triangles: interactiveFrame.render.triangles,
+              syncResourcesMs: interactiveFrame.render.syncResourcesMs,
+              uploadMs: interactiveFrame.render.uploadMs,
+              uploadChunks: interactiveFrame.render.uploadChunks,
+              uploadBytes: interactiveFrame.render.uploadBytes,
+              encodeMs: interactiveFrame.render.encodeMs,
+              frustumCulledChunks: this.lastRenderStats.frustumCulledChunks,
+              fogCulledChunks: this.lastRenderStats.fogCulledChunks,
+              lodDrawCalls: this.lastRenderStats.lodDrawCalls,
+            },
+            frameCpuMs: interactiveFrame.render.frameCpuMs,
+          },
         );
         samples.push(frameResult.sample);
         if (frameResult.capturedFrame) {
@@ -1992,8 +2248,9 @@ export class GameController {
       if (
         this.lastStreamSummary.pendingChunks > 0
         || this.world.countDirtyResidentChunks() > 0
+        || this.lastLodSummary.pending > 0
       ) {
-        this.syncWorldAroundPlayer(true);
+        this.syncWorldAroundPlayer(false);
       }
       this.renderCurrentFrame();
       this.lastGameplayFrameMs = performance.now() - gameplayStartedAt;
@@ -2010,9 +2267,9 @@ export class GameController {
 
   private attachInteractions(): void {
     this.canvas.addEventListener("click", this.handleCanvasClick);
-    this.canvas.addEventListener("mousedown", this.handleCanvasMouseDown);
-    this.canvas.addEventListener("contextmenu", this.handleCanvasContextMenu);
-    this.canvas.addEventListener("wheel", this.handleCanvasWheel, { passive: false });
+    document.addEventListener("mousedown", this.handleDocumentMouseDown);
+    document.addEventListener("contextmenu", this.handleDocumentContextMenu);
+    document.addEventListener("wheel", this.handleDocumentWheel, { passive: false });
     document.addEventListener("pointerlockchange", this.handlePointerLockChange);
     document.addEventListener("mousemove", this.handleMouseMove);
     window.addEventListener("keydown", this.handleKeyDown);
@@ -2027,9 +2284,9 @@ export class GameController {
     }
   };
 
-  private readonly handleCanvasMouseDown = (event: MouseEvent) => {
+  private readonly handleDocumentMouseDown = (event: MouseEvent) => {
     if (!this.pointerLocked) {
-      if (event.button === 0) {
+      if (event.button === 0 && event.target === this.canvas) {
         void this.requestPointerLock();
       }
       return;
@@ -2043,11 +2300,13 @@ export class GameController {
     }
   };
 
-  private readonly handleCanvasContextMenu = (event: MouseEvent) => {
-    event.preventDefault();
+  private readonly handleDocumentContextMenu = (event: MouseEvent) => {
+    if (this.pointerLocked || event.target === this.canvas) {
+      event.preventDefault();
+    }
   };
 
-  private readonly handleCanvasWheel = (event: WheelEvent) => {
+  private readonly handleDocumentWheel = (event: WheelEvent) => {
     if (!this.pointerLocked) {
       return;
     }
@@ -2057,12 +2316,31 @@ export class GameController {
   };
 
   private readonly handlePointerLockChange = () => {
-    this.pointerLocked = document.pointerLockElement === this.canvas;
-    this.status = this.pointerLocked
+    const browserPointerLocked = this.ownsPointerLockElement(document.pointerLockElement);
+    if (browserPointerLocked) {
+      this.pointerLockFallbackActive = false;
+    }
+    this.pointerLocked = browserPointerLocked || this.pointerLockFallbackActive;
+    this.status = browserPointerLocked
       ? "Pointer locked: WASD move, Space jump, Ctrl sprint, Alt slow"
+      : this.pointerLockFallbackActive
+      ? "Input captured: WASD move, click blocks"
       : "Click once to capture cursor";
     this.pushHud(true);
   };
+
+  private ownsPointerLockElement(element: Element | null): boolean {
+    return element instanceof HTMLElement && this.pointerLockTargets.has(element);
+  }
+
+  private activatePointerLockFallback(error: unknown): void {
+    this.pointerLockFallbackActive = true;
+    this.pointerLocked = true;
+    this.status = error instanceof Error
+      ? `Input captured; browser pointer lock unavailable (${error.name})`
+      : "Input captured; browser pointer lock unavailable";
+    this.pushHud(true);
+  }
 
   private readonly handleMouseMove = (event: MouseEvent) => {
     if (!this.pointerLocked) {
@@ -2072,6 +2350,15 @@ export class GameController {
   };
 
   private readonly handleKeyDown = (event: KeyboardEvent) => {
+    if (event.code === "Escape" && this.pointerLockFallbackActive) {
+      event.preventDefault();
+      this.pointerLockFallbackActive = false;
+      this.pointerLocked = false;
+      this.pressedKeys.clear();
+      this.status = "Click once to capture cursor";
+      this.pushHud(true);
+      return;
+    }
     if (this.pointerLocked && isMovementKey(event.code)) {
       event.preventDefault();
     }
@@ -2106,7 +2393,9 @@ export class GameController {
     }
   };
 
-  private updateMovement(deltaSeconds: number): boolean {
+  private updateMovement(deltaSeconds: number): { moved: boolean; distanceMeters: number; travelContext: "surface" | "underground" } {
+    const travelContext = this.resolveTravelSkillContext();
+    const explorationSkillEffects = resolveExplorationSkillEffects(this.skillJournal.getSnapshot());
     const input = this.pointerLocked
       ? {
           forward: (this.isPressed("KeyW") ? 1 : 0) - (this.isPressed("KeyS") ? 1 : 0),
@@ -2114,6 +2403,9 @@ export class GameController {
           jump: this.isPressed("Space"),
           sprint: this.isPressed("ControlLeft", "ControlRight"),
           precision: this.isPressed("AltLeft", "AltRight"),
+          speedMultiplier: travelContext === "underground"
+            ? explorationSkillEffects.undergroundTravelSpeedMultiplier
+            : explorationSkillEffects.surfaceTravelSpeedMultiplier,
         }
       : {
           forward: 0,
@@ -2121,6 +2413,7 @@ export class GameController {
           jump: false,
           sprint: false,
           precision: false,
+          speedMultiplier: 1,
         };
     const prevFeet: [number, number, number] = [...this.player.feetPosition];
     const result = stepPlayer(
@@ -2141,7 +2434,13 @@ export class GameController {
       this.player.velocity[2] = 0;
     }
     this.syncCameraToPlayer();
-    return result.moved;
+    const deltaX = this.player.feetPosition[0] - prevFeet[0];
+    const deltaZ = this.player.feetPosition[2] - prevFeet[2];
+    return {
+      moved: result.moved,
+      distanceMeters: worldUnitsToMeters(Math.hypot(deltaX, deltaZ)),
+      travelContext,
+    };
   }
 
   private hasMovementIntent(): boolean {
@@ -2151,54 +2450,103 @@ export class GameController {
     return this.isPressed("KeyW", "KeyS", "KeyA", "KeyD", "Space", "ControlLeft", "ControlRight");
   }
 
-  private renderInteractiveFrame(): void {
+  private renderInteractiveFrame(): GameRenderProbe {
     const rendered = this.renderCurrentFrame();
     if (!rendered) {
-      return;
+      return zeroGameRenderProbe();
     }
     const { frameCpuMs } = rendered;
     this.avgFrameCpuMs = this.avgFrameCpuMs === 0
       ? frameCpuMs
       : this.avgFrameCpuMs * 0.9 + frameCpuMs * 0.1;
     this.pushHud();
+    return {
+      frameCpuMs: rendered.frameCpuMs,
+      syncResourcesMs: rendered.frameStats.syncResourcesMs,
+      uploadMs: rendered.frameStats.uploadMs,
+      uploadChunks: rendered.frameStats.uploadChunks,
+      uploadBytes: rendered.frameStats.uploadBytes,
+      encodeMs: rendered.frameStats.encodeMs,
+      drawCalls: rendered.frameStats.drawCalls,
+      triangles: rendered.frameStats.triangles,
+    };
   }
 
   private advanceInteractiveFrame(now: number): {
     movementMs: number;
+    render: GameRenderProbe;
     gameplayFrameMs: number;
   } {
     const gameplayStartedAt = performance.now();
-    const deltaSeconds = this.lastFrameTime === 0
-      ? 1 / 60
-      : Math.min((now - this.lastFrameTime) / 1000, MAX_DELTA_SECONDS);
+    const rawDeltaMs = this.lastFrameTime === 0
+      ? 1000 / 60
+      : Math.max(0, now - this.lastFrameTime);
+    this.lastFrameWallMs = rawDeltaMs;
+    this.avgFrameWallMs = this.avgFrameWallMs === 0
+      ? rawDeltaMs
+      : this.avgFrameWallMs * 0.9 + rawDeltaMs * 0.1;
+    const deltaSeconds = Math.min(rawDeltaMs / 1000, MAX_DELTA_SECONDS);
     this.lastFrameTime = now;
     this.interactiveFrameNumber += 1;
+    this.lastFrameLodMs = 0;
     const hasMovementIntent = this.hasMovementIntent();
     const movementStartedAt = performance.now();
-    const moved = this.updateMovement(deltaSeconds);
+    const movement = this.updateMovement(deltaSeconds);
+    if (movement.distanceMeters > 0) {
+      this.skillJournal.observeTravel(movement.distanceMeters, movement.travelContext);
+    }
     const movementMs = performance.now() - movementStartedAt;
     const dirtyResidentChunks = this.world.countDirtyResidentChunks();
     if (
       shouldPumpWorldWork(
-        hasMovementIntent || moved,
+        hasMovementIntent || movement.moved,
         this.lastStreamSummary.pendingChunks,
         dirtyResidentChunks,
+        this.lastLodSummary.pending,
       )
     ) {
-      this.syncWorldAroundPlayer(false);
+      this.syncWorldAroundPlayer(false, !hasMovementIntent && !movement.moved);
     }
-    this.renderInteractiveFrame();
+    const render = this.renderInteractiveFrame();
     const gameplayFrameMs = performance.now() - gameplayStartedAt;
     this.lastGameplayFrameMs = gameplayFrameMs;
     this.recordBootstrapBenchmarkSample(gameplayFrameMs);
     return {
       movementMs,
+      render,
       gameplayFrameMs,
     };
   }
 
+  private resolveTravelSkillContext(): "surface" | "underground" {
+    const now = performance.now();
+    const currentFeetPosition = this.player.feetPosition;
+    if (this.lastTravelContextFeetPosition) {
+      const deltaX = currentFeetPosition[0] - this.lastTravelContextFeetPosition[0];
+      const deltaZ = currentFeetPosition[2] - this.lastTravelContextFeetPosition[2];
+      const movedFarEnough = Math.hypot(deltaX, deltaZ) >= TRAVEL_CONTEXT_SAMPLE_MOVE_THRESHOLD_WORLD_UNITS;
+      if (!movedFarEnough && now - this.lastTravelContextSampleAt < TRAVEL_CONTEXT_SAMPLE_INTERVAL_MS) {
+        return this.lastTravelContext;
+      }
+    }
+    this.lastTravelContextSampleAt = now;
+    this.lastTravelContextFeetPosition = [...currentFeetPosition] as Vec3;
+    const centerX = Math.floor(this.player.feetPosition[0]);
+    const centerZ = Math.floor(this.player.feetPosition[2]);
+    const probe = this.generator.sampleBiomeProbe(centerX, centerZ);
+    const observedUndergroundBiomeId = resolveObservedUndergroundBiomeId(
+      this.world,
+      this.camera.position,
+      probe.surfaceY,
+      probe.undergroundBiomeId,
+    );
+    this.lastTravelContext = observedUndergroundBiomeId ? "underground" : "surface";
+    return this.lastTravelContext;
+  }
+
   private syncWorldAroundPlayer(
     force = false,
+    allowLodUpdate = true,
   ): ResidencyUpdateSummary {
     const playerChunkX = Math.floor(this.player.feetPosition[0] / this.world.chunkSize);
     const playerChunkZ = Math.floor(this.player.feetPosition[2] / this.world.chunkSize);
@@ -2209,11 +2557,19 @@ export class GameController {
         }
       : resolveStreamAnchor(this.streamAnchor, playerChunkX, playerChunkZ, STREAM_ANCHOR_MARGIN_CHUNKS);
     if (force) {
-      return this.syncWorldAroundAnchor(resolved.anchor, true);
+      return this.syncWorldAroundAnchor(resolved.anchor, true, true);
     }
     if (!shouldRefreshResidency(false, resolved.changed, this.lastStreamSummary.pendingChunks)) {
       this.flushMeshBuildBudget();
-      this.lastLodSummary = this.world.updateLodResidencyAround(this.player.feetPosition, { maxGenerateLodChunks: 2 });
+      if (allowLodUpdate) {
+        this.lastLodSummary = this.world.updateLodResidencyAround(this.player.feetPosition, {
+          maxGenerateLodChunks: DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
+          maxPlanMs: DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME,
+        });
+        this.lastFrameLodMs = this.lastLodSummary.elapsedMs;
+      } else {
+        this.deferLodWork();
+      }
       this.lastStreamSummary = createIdleResidencySummary(
         this.lastStreamSummary,
         this.streamAnchor ?? resolved.anchor,
@@ -2223,12 +2579,13 @@ export class GameController {
       );
       return cloneResidencySummary(this.lastStreamSummary);
     }
-    return this.syncWorldAroundAnchor(resolved.anchor, false);
+    return this.syncWorldAroundAnchor(resolved.anchor, false, allowLodUpdate);
   }
 
   private syncWorldAroundAnchor(
     anchor: StreamAnchor,
     settle = false,
+    allowLodUpdate = true,
   ): ResidencyUpdateSummary {
     this.streamAnchor = anchor;
     const residency = this.world.updateResidencyAround(
@@ -2243,15 +2600,35 @@ export class GameController {
     this.flushMeshBuildBudget(
       settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxMeshRebuildsPerFrame,
     );
-    this.lastLodSummary = this.world.updateLodResidencyAround(this.player.feetPosition, {
-      maxGenerateLodChunks: settle ? Number.POSITIVE_INFINITY : 32,
-    });
+    if (settle || allowLodUpdate) {
+      this.lastLodSummary = this.world.updateLodResidencyAround(this.player.feetPosition, {
+        maxGenerateLodChunks: settle ? Number.POSITIVE_INFINITY : DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
+        maxPlanMs: settle ? Number.POSITIVE_INFINITY : DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME,
+      });
+      this.lastFrameLodMs = this.lastLodSummary.elapsedMs;
+    } else {
+      this.deferLodWork();
+    }
     this.status = residency.pendingChunks > 0
       ? `Streaming ${residency.pendingChunks} pending chunk(s)`
       : residency.generatedChunks > 0 || residency.evictedChunks > 0
       ? `Streamed ${residency.generatedChunks} chunk(s), evicted ${residency.evictedChunks}`
       : "Residency updated";
     return cloneResidencySummary(this.lastStreamSummary);
+  }
+
+  private deferLodWork(): void {
+    this.lastFrameLodMs = 0;
+    this.lastLodSummary = {
+      ...this.lastLodSummary,
+      generated: 0,
+      pending: Math.max(1, this.lastLodSummary.pending),
+      elapsedMs: 0,
+      yRangeMs: 0,
+      downsampleMs: 0,
+      meshMs: 0,
+      neededKeyCacheHit: false,
+    };
   }
 
   private isPressed(...codes: string[]): boolean {
@@ -2460,7 +2837,7 @@ export class GameController {
     },
     movementMs: number,
     gameplayFrameMs: number,
-    _seamProbeStrideFrames: number,
+    seamProbeStrideFrames: number,
     captureStrideFrames: number,
     captureWidth: number,
     captureHeight: number,
@@ -2489,6 +2866,9 @@ export class GameController {
     let capturedFrame: CapturedBenchmarkFrame | null = null;
     let captureDiagnosticsMs = 0;
     const shouldCaptureVoid = target.frame % captureStrideFrames === 0 || visibleGround.uncoveredCount > 0;
+    const seamCoverage = target.frame % seamProbeStrideFrames === 0
+      ? summarizeRouteSeamCoverage(this.probeLodCoverage(48, 1.6))
+      : { seamGapCount: 0, maxSeamGapMeters: 0 };
     const shouldCaptureReference = referenceDiffStrideFrames > 0
       && capturedFrameCount < referenceDiffLimit
       && target.frame % referenceDiffStrideFrames === 0;
@@ -2524,6 +2904,7 @@ export class GameController {
     const accountedFrameMs = movementMs
       + residency.elapsedMs
       + this.lastMeshBuildSummary.elapsedMs
+      + this.lastFrameLodMs
       + frameProbe.frameCpuMs;
     const unmeasuredFrameMs = Math.max(0, gameplayFrameMs - accountedFrameMs);
     const suspiciousHole = visibleGround.uncoveredCount > 0
@@ -2551,6 +2932,9 @@ export class GameController {
         streamMs: residency.elapsedMs,
         meshMs: this.lastMeshBuildSummary.elapsedMs,
         meshCount: this.lastMeshBuildSummary.meshCount,
+        lodMs: this.lastFrameLodMs,
+        lodGeneratedChunks: this.lastLodSummary.generated,
+        lodPendingChunks: this.lastLodSummary.pending,
         gameplayFrameMs,
         accountedFrameMs,
         unmeasuredFrameMs,
@@ -2571,8 +2955,8 @@ export class GameController {
         visibleGroundSampleCount: visibleGround.sampleCount,
         visibleGroundUncoveredCount: visibleGround.uncoveredCount,
         visibleGroundResidentNotReadyCount: visibleGround.residentNotReadyCount,
-        seamGapCount: 0,
-        maxSeamGapMeters: 0,
+        seamGapCount: seamCoverage.seamGapCount,
+        maxSeamGapMeters: seamCoverage.maxSeamGapMeters,
         screenVoidRatio: screenVoid?.clearRatio ?? null,
         screenVoidMaxRunRatio: screenVoid?.maxClearRunRatio ?? null,
         screenVoidSuspicious: screenVoid?.suspicious ?? false,
@@ -2606,8 +2990,9 @@ export class GameController {
   }
 
   private resolveRenderEnvironment(): RenderEnvironment {
+    const ambientEnvironment = buildAmbientRenderEnvironment(this.resolveCurrentAmbientProfile());
     if (!this.player.eyeInWater) {
-      return DEFAULT_RENDER_ENVIRONMENT;
+      return ambientEnvironment;
     }
     const eye = getPlayerEyePosition(this.player);
     const material = this.world.getVoxel(
@@ -2616,9 +3001,22 @@ export class GameController {
       Math.floor(eye[2]),
     );
     if (!this.world.isWaterMaterial(material)) {
-      return DEFAULT_RENDER_ENVIRONMENT;
+      return ambientEnvironment;
     }
     return buildUnderwaterRenderEnvironment(this.world.getPaletteColor(material));
+  }
+
+  private resolveCurrentAmbientProfile(): AmbientWorldProfile {
+    const centerX = Math.floor(this.player.feetPosition[0]);
+    const centerZ = Math.floor(this.player.feetPosition[2]);
+    const probe = this.generator.sampleBiomeProbe(centerX, centerZ);
+    const observedUndergroundBiomeId = resolveObservedUndergroundBiomeId(
+      this.world,
+      this.camera.position,
+      probe.surfaceY,
+      probe.undergroundBiomeId,
+    );
+    return resolveAmbientWorldProfile(probe, { observedUndergroundBiomeId });
   }
 
   private async applySettledReferenceDiffs(
@@ -2700,6 +3098,10 @@ export class GameController {
       triangles: this.triangles,
       streamMs: this.lastStreamSummary.elapsedMs,
       meshMs: this.lastMeshBuildSummary.elapsedMs,
+      lodMs: this.lastLodSummary.elapsedMs,
+      lodYRangeMs: this.lastLodSummary.yRangeMs,
+      lodDownsampleMs: this.lastLodSummary.downsampleMs,
+      lodMeshMs: this.lastLodSummary.meshMs,
       pendingChunks: this.lastStreamSummary.pendingChunks,
       pendingMeshJobs: bootstrap.pendingMeshJobs,
       dirtyResidentChunks: bootstrap.dirtyResidentMeshes.dirtyResidentChunks,
@@ -2713,6 +3115,7 @@ export class GameController {
       lodPendingChunks: this.lastLodSummary.pending,
       lodComplete: this.lastLodSummary.pending === 0 && this.lastLodSummary.totalChunks > 0,
       frustumCulledChunks: this.lastRenderStats.frustumCulledChunks,
+      fogCulledChunks: this.lastRenderStats.fogCulledChunks,
       lodDrawCalls: this.lastRenderStats.lodDrawCalls,
     });
     if (bootstrap.playableReady) {
@@ -2802,12 +3205,13 @@ export class GameController {
       centerProbe.surfaceY,
       centerProbe.undergroundBiomeId,
     );
+    const explorationSkillEffects = resolveExplorationSkillEffects(this.skillJournal.getSnapshot());
     const landmarkIds: string[] = [];
     let currentLandmarkId: string | null = centerProbe.landmarkId;
     if (centerProbe.landmarkId) {
       landmarkIds.push(centerProbe.landmarkId);
     }
-    for (const [offsetX, offsetZ] of DISCOVERY_LANDMARK_SAMPLE_OFFSETS) {
+    for (const [offsetX, offsetZ] of buildLandmarkSampleOffsets(explorationSkillEffects)) {
       if (offsetX === 0 && offsetZ === 0) {
         continue;
       }
@@ -2834,6 +3238,42 @@ function toDegrees(value: number): number {
   return value * 180 / Math.PI;
 }
 
+function resolveExplorationSkillEffects(snapshot: SkillJournalSnapshot): ExplorationSkillEffects {
+  return describeExplorationSkillEffects({
+    cartographyLevel: readSkillLevel(snapshot, "cartography"),
+    naturalistLevel: readSkillLevel(snapshot, "naturalist"),
+    spelunkingLevel: readSkillLevel(snapshot, "spelunking"),
+  });
+}
+
+function readSkillLevel(snapshot: SkillJournalSnapshot, skillId: SkillId): number {
+  return snapshot.skills.find((skill) => skill.id === skillId)?.level ?? 1;
+}
+
+function buildLandmarkSampleOffsets(effects: ExplorationSkillEffects): ReadonlyArray<readonly [number, number]> {
+  const cacheKey = `${effects.landmarkScanRadiusMeters.toFixed(3)}:${effects.landmarkScanSampleStepMeters.toFixed(3)}`;
+  const cached = LANDMARK_SAMPLE_OFFSET_CACHE.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const radiusWorldUnits = metersToWorldUnits(effects.landmarkScanRadiusMeters);
+  const stepWorldUnits = metersToWorldUnits(effects.landmarkScanSampleStepMeters);
+  const maxStep = Math.max(0, Math.ceil(radiusWorldUnits / Math.max(1, stepWorldUnits)));
+  const offsets: Array<readonly [number, number]> = [];
+  for (let zStep = -maxStep; zStep <= maxStep; zStep += 1) {
+    for (let xStep = -maxStep; xStep <= maxStep; xStep += 1) {
+      const offsetX = xStep * stepWorldUnits;
+      const offsetZ = zStep * stepWorldUnits;
+      if (Math.hypot(offsetX, offsetZ) <= radiusWorldUnits + 0.001) {
+        offsets.push([offsetX, offsetZ]);
+      }
+    }
+  }
+  const sorted = offsets.sort((left, right) => Math.hypot(left[0], left[1]) - Math.hypot(right[0], right[1]));
+  LANDMARK_SAMPLE_OFFSET_CACHE.set(cacheKey, sorted);
+  return sorted;
+}
+
 function toChunkTuple(coord: { x: number; y: number; z: number }): [number, number, number] {
   return [coord.x, coord.y, coord.z];
 }
@@ -2848,6 +3288,7 @@ function zeroRenderStats(): RenderStats {
     uploadBytes: 0,
     encodeMs: 0,
     frustumCulledChunks: 0,
+    fogCulledChunks: 0,
     lodDrawCalls: 0,
   };
 }
@@ -3033,6 +3474,19 @@ function pushIssueSample(target: LodCoverageIssueSample[], sample: LodCoverageIs
   target.push(sample);
 }
 
+function isCoveredByLodSpans(
+  worldX: number,
+  worldZ: number,
+  lodSpans: readonly LodCoverageSpan[],
+): boolean {
+  for (const span of lodSpans) {
+    if (worldX >= span.minX && worldX < span.maxX && worldZ >= span.minZ && worldZ < span.maxZ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function cloneResidencySummary(summary: ResidencyUpdateSummary): ResidencyUpdateSummary {
   return {
     ...summary,
@@ -3156,10 +3610,12 @@ function summarizeRouteExperienceBenchmark(
     movementMs: sample.movementMs,
     streamMs: sample.streamMs,
     meshMs: sample.meshMs,
+    lodMs: sample.lodMs,
     renderCpuMs: sample.renderCpuMs,
   })));
   const streamSamples = samples.map((sample) => sample.streamMs);
   const meshSamples = samples.map((sample) => sample.meshMs);
+  const lodSamples = samples.map((sample) => sample.lodMs);
   const renderCpuSamples = samples.map((sample) => sample.renderCpuMs);
   const renderOtherSamples = samples.map((sample) => sample.renderOtherMs);
   const residentNotReadySamples = samples.map((sample) => sample.residentNotReadyNearSamples);
@@ -3200,6 +3656,9 @@ function summarizeRouteExperienceBenchmark(
     avgGameplayFrameMs: accounting.avgGameplayFrameMs,
     p95GameplayFrameMs: accounting.p95GameplayFrameMs,
     maxGameplayFrameMs: accounting.maxGameplayFrameMs,
+    avgMovementMs: accounting.avgMovementMs,
+    p95MovementMs: accounting.p95MovementMs,
+    maxMovementMs: accounting.maxMovementMs,
     avgMeasuredWorkMs: accounting.avgMeasuredWorkMs,
     p95MeasuredWorkMs: accounting.p95MeasuredWorkMs,
     maxMeasuredWorkMs: accounting.maxMeasuredWorkMs,
@@ -3212,6 +3671,9 @@ function summarizeRouteExperienceBenchmark(
     avgMeshMs: average(meshSamples),
     p95MeshMs: percentile(meshSamples, 0.95),
     maxMeshMs: maxValue(meshSamples),
+    avgLodMs: average(lodSamples),
+    p95LodMs: percentile(lodSamples, 0.95),
+    maxLodMs: maxValue(lodSamples),
     avgRenderCpuMs: average(renderCpuSamples),
     p95RenderCpuMs: percentile(renderCpuSamples, 0.95),
     maxRenderCpuMs: maxValue(renderCpuSamples),
@@ -3225,6 +3687,8 @@ function summarizeRouteExperienceBenchmark(
     maxVisibleGroundResidentNotReadyCount: maxValue(visibleGroundResidentNotReadySamples),
     framesWithVisibleGroundGaps: samples.filter((sample) => sample.visibleGroundUncoveredCount > 0).length,
     framesWithSeamGaps: samples.filter((sample) => sample.seamGapCount > 0).length,
+    maxSeamGapMeters: maxValue(samples.map((sample) => sample.maxSeamGapMeters)),
+    screenVoidCaptureCount: samples.filter((sample) => sample.screenVoidRatio !== null).length,
     framesWithScreenVoidSignals: samples.filter((sample) => sample.screenVoidSuspicious).length,
     framesWithSettledReferenceHoleSignals: samples.filter((sample) => sample.settledReferenceSuspiciousHole).length,
     framesWithHoleSignals: samples.filter((sample) => sample.suspiciousHole).length,
@@ -3253,6 +3717,19 @@ function normalizeRouteBenchmarkPlanOptions(options: RouteExperienceBenchmarkOpt
     sampleHz: Math.max(1, Math.floor(options.sampleHz ?? 60)),
     speedMetersPerSecond: Math.max(0.1, options.speedMetersPerSecond ?? 4.6),
   };
+}
+
+function resolveBenchmarkYawDrift(
+  elapsedSeconds: number,
+  amplitudeRadians: number,
+  periodSeconds: number,
+): number {
+  if (amplitudeRadians <= 0) {
+    return 0;
+  }
+  const phase = (elapsedSeconds / periodSeconds) * Math.PI * 2;
+  return Math.sin(phase) * amplitudeRadians
+    + Math.sin(phase * 0.43) * amplitudeRadians * 0.35;
 }
 
 function zeroResidencyPhaseMetrics(): ResidencyUpdateSummary["phaseMs"] {
@@ -3292,6 +3769,16 @@ function isMovementKey(code: string): boolean {
 function clampPositiveInt(value: number, fallback: number): number {
   const normalized = Math.floor(value);
   return Number.isFinite(normalized) && normalized > 0 ? normalized : fallback;
+}
+
+function readMaterialIdArray(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is number =>
+    typeof entry === "number"
+    && Number.isInteger(entry)
+    && entry > 0);
 }
 
 function pushVisibleGroundIssueSample(

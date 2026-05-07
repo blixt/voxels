@@ -12,6 +12,7 @@ export interface DiscoveryPresentation {
   categoryLabel: string;
   id: string;
   name: string;
+  flavorText: string | null;
   inlineLabel: string;
   fullLabel: string;
 }
@@ -111,17 +112,36 @@ const LANDMARK_NAMES = {
   mega_glowcap: "Great Glowcap",
   root_stump: "Root Stump",
   stone_tor: "Stone Tor",
+  ancestor_pillar: "Ancestor Pillar",
+  ash_marker: "Ash Marker",
+  glass_cairn: "Glass Cairn",
+  silt_shell: "Silt Strider Shell",
+  velothi_shrine: "Velothi Wayshrine",
+  kwama_mound: "Kwama Egg Mound",
+  pilgrim_cairn: "Pilgrim Cairn",
 } satisfies Record<LandmarkId, string>;
+
+const LANDMARK_FLAVOR_TEXT: Partial<Record<LandmarkId, string>> = {
+  ancestor_pillar: "Weathered stonework suggests old roads beneath the grass.",
+  ash_marker: "Charred stones point toward a harsher volcanic country.",
+  glass_cairn: "Pale shards catch the fog like frozen lightning.",
+  silt_shell: "A hollow carapace rests half-buried in windblown dust.",
+  velothi_shrine: "A small shrine watches the road with worn amber light.",
+  kwama_mound: "Packed clay rises around a clutch of amber-shelled hollows.",
+  pilgrim_cairn: "Stacked stones mark a footpath older than the ash.",
+};
 
 export function describeDiscovery(category: DiscoveryCategory, id: string): DiscoveryPresentation {
   const categoryLabel = DISCOVERY_CATEGORY_LABELS[category];
   const name = resolveDiscoveryName(category, id);
+  const flavorText = resolveDiscoveryFlavorText(category, id);
   const inlineLabel = `${name} [${id}]`;
   return {
     category,
     categoryLabel,
     id,
     name,
+    flavorText,
     inlineLabel,
     fullLabel: `${categoryLabel}: ${inlineLabel}`,
   };
@@ -149,6 +169,13 @@ function resolveDiscoveryName(category: DiscoveryCategory, id: string): string {
     case "landmark":
       return LANDMARK_NAMES[id as LandmarkId] ?? titleCaseIdentifier(id);
   }
+}
+
+function resolveDiscoveryFlavorText(category: DiscoveryCategory, id: string): string | null {
+  if (category !== "landmark") {
+    return null;
+  }
+  return LANDMARK_FLAVOR_TEXT[id as LandmarkId] ?? null;
 }
 
 function titleCaseIdentifier(value: string): string {

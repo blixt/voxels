@@ -36,6 +36,7 @@ export interface PlayerStepInput {
   jump: boolean;
   sprint: boolean;
   precision: boolean;
+  speedMultiplier?: number;
 }
 
 export interface PlayerStepResult {
@@ -121,14 +122,28 @@ export function stepPlayerBody(
   } else if (!collidedY) {
     body.grounded = false;
   }
+  const beforeX: Vec3 = [...body.feetPosition];
   const collidedX = moveAlongAxis(world, body, 0, body.velocity[0] * deltaSeconds);
-  const steppedX = collidedX && body.grounded
-    ? tryStepUp(world, body, 0, body.velocity[0] * deltaSeconds)
-    : false;
+  const resolvedX: Vec3 = [...body.feetPosition];
+  let steppedX = false;
+  if (collidedX && body.grounded) {
+    body.feetPosition = beforeX;
+    steppedX = tryStepUp(world, body, 0, body.velocity[0] * deltaSeconds);
+    if (!steppedX) {
+      body.feetPosition = resolvedX;
+    }
+  }
+  const beforeZ: Vec3 = [...body.feetPosition];
   const collidedZ = moveAlongAxis(world, body, 2, body.velocity[2] * deltaSeconds);
-  const steppedZ = collidedZ && body.grounded
-    ? tryStepUp(world, body, 2, body.velocity[2] * deltaSeconds)
-    : false;
+  const resolvedZ: Vec3 = [...body.feetPosition];
+  let steppedZ = false;
+  if (collidedZ && body.grounded) {
+    body.feetPosition = beforeZ;
+    steppedZ = tryStepUp(world, body, 2, body.velocity[2] * deltaSeconds);
+    if (!steppedZ) {
+      body.feetPosition = resolvedZ;
+    }
+  }
   updateWaterState(world, body);
   return {
     collidedX: collidedX && !steppedX,
@@ -335,6 +350,7 @@ function buildWishVelocity(yaw: number, input: PlayerStepInput): Vec3 {
   if (input.precision) {
     speed *= PLAYER_SLOW_MOVE_MULTIPLIER;
   }
+  speed *= readSpeedMultiplier(input.speedMultiplier);
   const forwardX = Math.cos(yaw);
   const forwardZ = Math.sin(yaw);
   const rightX = -forwardZ;
@@ -348,4 +364,10 @@ function buildWishVelocity(yaw: number, input: PlayerStepInput): Vec3 {
   velocityX = velocityX / length * speed;
   velocityZ = velocityZ / length * speed;
   return [velocityX, 0, velocityZ];
+}
+
+function readSpeedMultiplier(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.min(1.5, value)
+    : 1;
 }

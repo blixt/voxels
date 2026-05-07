@@ -5,6 +5,7 @@ import {
   analyzeBottomCenterVoid,
   buildDefaultRouteBenchmarkPlan,
   buildForwardRouteBenchmarkPlan,
+  summarizeRouteSeamCoverage,
   summarizeRouteFrameAccounting,
 } from "../src/engine/game-route-benchmark.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
@@ -121,6 +122,7 @@ test("route frame accounting exposes measured and unmeasured time explicitly", (
       movementMs: 1,
       streamMs: 2,
       meshMs: 3,
+      lodMs: 5,
       renderCpuMs: 4,
     },
     {
@@ -128,14 +130,34 @@ test("route frame accounting exposes measured and unmeasured time explicitly", (
       movementMs: 1,
       streamMs: 1,
       meshMs: 1,
+      lodMs: 0,
       renderCpuMs: 2,
     },
   ]);
 
   expect(summary.totalGameplayFrameMs).toBe(21);
-  expect(summary.totalAccountedMs).toBe(15);
-  expect(summary.totalUnmeasuredMs).toBe(6);
+  expect(summary.totalLodMs).toBe(5);
+  expect(summary.totalAccountedMs).toBe(20);
+  expect(summary.totalUnmeasuredMs).toBe(4);
   expect(summary.maxUnmeasuredMs).toBe(4);
+  expect(summary.p95MovementMs).toBe(1);
+});
+
+test("route seam coverage summarizes LOD holes with max sampled distance", () => {
+  const summary = summarizeRouteSeamCoverage({
+    uncoveredGapCount: 2,
+    handoffHoleCount: 1,
+    uncoveredGapSamples: [
+      { distanceMeters: 12.4 },
+      { distanceMeters: 18.8 },
+    ],
+    handoffHoleSamples: [
+      { distanceMeters: 9.2 },
+    ],
+  });
+
+  expect(summary.seamGapCount).toBe(3);
+  expect(summary.maxSeamGapMeters).toBe(18.8);
 });
 
 test("settled reference diff flags transient clear holes that later fill with terrain", () => {

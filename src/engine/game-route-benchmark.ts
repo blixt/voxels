@@ -65,6 +65,7 @@ export interface RouteFrameAccountingSample {
   movementMs: number;
   streamMs: number;
   meshMs: number;
+  lodMs?: number;
   renderCpuMs: number;
 }
 
@@ -74,18 +75,38 @@ export interface RouteFrameAccountingSummary {
   totalMovementMs: number;
   totalStreamMs: number;
   totalMeshMs: number;
+  totalLodMs: number;
   totalRenderCpuMs: number;
   totalAccountedMs: number;
   totalUnmeasuredMs: number;
   avgGameplayFrameMs: number;
   p95GameplayFrameMs: number;
   maxGameplayFrameMs: number;
+  avgMovementMs: number;
+  p95MovementMs: number;
+  maxMovementMs: number;
   avgUnmeasuredMs: number;
   p95UnmeasuredMs: number;
   maxUnmeasuredMs: number;
   avgMeasuredWorkMs: number;
   p95MeasuredWorkMs: number;
   maxMeasuredWorkMs: number;
+}
+
+export interface RouteSeamCoverageIssue {
+  distanceMeters: number;
+}
+
+export interface RouteSeamCoverageProbe {
+  uncoveredGapCount: number;
+  handoffHoleCount: number;
+  uncoveredGapSamples?: readonly RouteSeamCoverageIssue[];
+  handoffHoleSamples?: readonly RouteSeamCoverageIssue[];
+}
+
+export interface RouteSeamCoverageSummary {
+  seamGapCount: number;
+  maxSeamGapMeters: number;
 }
 
 export function buildDefaultRouteBenchmarkPlan(
@@ -259,11 +280,13 @@ export function summarizeRouteFrameAccounting(
   const movementSamples = samples.map((sample) => sample.movementMs);
   const streamSamples = samples.map((sample) => sample.streamMs);
   const meshSamples = samples.map((sample) => sample.meshMs);
+  const lodSamples = samples.map((sample) => sample.lodMs ?? 0);
   const renderCpuSamples = samples.map((sample) => sample.renderCpuMs);
   const measuredWorkSamples = samples.map((sample) =>
     sample.movementMs
     + sample.streamMs
     + sample.meshMs
+    + (sample.lodMs ?? 0)
     + sample.renderCpuMs);
   const unmeasuredSamples = gameplayFrameSamples.map((value, index) =>
     Math.max(0, value - (measuredWorkSamples[index] ?? 0)));
@@ -273,18 +296,35 @@ export function summarizeRouteFrameAccounting(
     totalMovementMs: sum(movementSamples),
     totalStreamMs: sum(streamSamples),
     totalMeshMs: sum(meshSamples),
+    totalLodMs: sum(lodSamples),
     totalRenderCpuMs: sum(renderCpuSamples),
     totalAccountedMs: sum(measuredWorkSamples),
     totalUnmeasuredMs: sum(unmeasuredSamples),
     avgGameplayFrameMs: average(gameplayFrameSamples),
     p95GameplayFrameMs: percentile(gameplayFrameSamples, 0.95),
     maxGameplayFrameMs: maxValue(gameplayFrameSamples),
+    avgMovementMs: average(movementSamples),
+    p95MovementMs: percentile(movementSamples, 0.95),
+    maxMovementMs: maxValue(movementSamples),
     avgUnmeasuredMs: average(unmeasuredSamples),
     p95UnmeasuredMs: percentile(unmeasuredSamples, 0.95),
     maxUnmeasuredMs: maxValue(unmeasuredSamples),
     avgMeasuredWorkMs: average(measuredWorkSamples),
     p95MeasuredWorkMs: percentile(measuredWorkSamples, 0.95),
     maxMeasuredWorkMs: maxValue(measuredWorkSamples),
+  };
+}
+
+export function summarizeRouteSeamCoverage(
+  probe: RouteSeamCoverageProbe,
+): RouteSeamCoverageSummary {
+  const issueSamples = [
+    ...(probe.uncoveredGapSamples ?? []),
+    ...(probe.handoffHoleSamples ?? []),
+  ];
+  return {
+    seamGapCount: Math.max(0, probe.uncoveredGapCount) + Math.max(0, probe.handoffHoleCount),
+    maxSeamGapMeters: maxValue(issueSamples.map((sample) => sample.distanceMeters)),
   };
 }
 

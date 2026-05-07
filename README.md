@@ -11,7 +11,9 @@ Chrome 146 WebGPU voxel game and engine built from scratch with Bun and TypeScri
 5. Run `mise run cycle-bench` for the standard command-line quality/performance battery.
 6. Run `mise run trace-route` for a fresh Chrome route benchmark + performance trace artifact.
 7. Run `mise run bench-browser-game` for browser CSV artifacts covering startup and forward-walk performance in `/tmp`.
-8. Build production output with `mise run build`, then run it with `mise run serve`.
+8. Run `mise run browser-lab` for the owned browser screenshot + JSON correctness probe.
+9. Run `mise run profile-lod-residency` for a local LOD generation and mesh profile.
+10. Build production output with `mise run build`, then run it with `mise run serve`.
 
 `mise run dev` now uses Bun's hot-reload/full-stack dev path instead of the older startup bundle flow, so edits to the server, page shells, CSS, and browser entrypoints should update without manual cache-busting.
 
@@ -67,11 +69,15 @@ The current strong opinion for long-term far rendering and LOD lives in `docs/lo
 - `mise run profile -- --iterations=3 --warmup=1 terrain256 stressDrawCalls512`
 - `mise run profile-stream -- --iterations=3 --warmup=1`
 - `mise run profile-game-stream -- --iterations=2 --warmup=1 --radius=5 --generate-budget=6 --mesh-budget=4 --chunk-delta=2`
+- `mise run profile-lod-residency -- --label=smoke --max-lod-chunks=all`
 - `mise run cycle-bench`
 - `mise run trace-route -- --label=smoke`
 - `mise run bench-browser-game -- --startup-iterations=1 --walk-iterations=1`
 - `mise run bench-browser-game -- --startup-iterations=1 --walk-iterations=0`
 - `mise run bench-browser-game -- --startup-iterations=0 --walk-iterations=1 --walk-duration=1 --walk-sample-hz=10`
+- `mise run browser-lab -- --label=smoke`
 
 The benchmark table separates first-frame costs from warm-frame costs and exposes first-frame sync/upload/encode metrics so scene-load and live-edit regressions are visible without manual spreadsheet work.
 `mise run bench-browser-game` writes per-iteration CSV, detailed sample CSV, and memory CSV files into a fresh `/tmp/voxels-browser-game-bench-*` directory and prints the paths at the end of the run.
+`mise run browser-lab` writes an independently driven browser screenshot and JSON report under `artifacts/owned-browser-lab/`.
+`mise run profile-lod-residency` writes a local LOD residency profile under `artifacts/lod-residency-profile/`.

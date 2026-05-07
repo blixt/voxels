@@ -50,14 +50,32 @@ fn vs_main(input: VertexInput) -> VertexOutput {
   return output;
 }
 
+fn hash_grain(cell: vec3<f32>) -> f32 {
+  return fract(sin(dot(cell, vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
 fn shade_fragment(input: VertexOutput) -> vec4<f32> {
   let directional = max(dot(input.normal, -uniforms.light_direction.xyz), 0.0);
   let hemi = input.normal.y * 0.5 + 0.5;
   let lighting = uniforms.lighting_terms.x + uniforms.lighting_terms.y * directional + uniforms.lighting_terms.z * hemi;
-  let shaded = input.color.rgb * lighting;
+  let albedo_luma = dot(input.color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+  let broad_grain = hash_grain(floor(input.world_position * 0.18));
+  let fine_grain = hash_grain(floor(input.world_position * 0.73 + vec3<f32>(19.0, 7.0, 31.0)));
+  let grain = (broad_grain - 0.5) * 0.16 + (fine_grain - 0.5) * 0.06;
+  let top_bias = abs(input.normal.y);
+  let grain_strength = mix(0.045, 0.11, top_bias);
+  let grounded_albedo = mix(vec3<f32>(albedo_luma), input.color.rgb, 0.78) * (1.0 + grain * grain_strength);
+  let light_tint = mix(
+    vec3<f32>(0.82, 0.86, 0.92),
+    vec3<f32>(1.08, 1.02, 0.92),
+    clamp(directional * 0.78 + hemi * 0.22, 0.0, 1.0),
+  );
+  let shaded = grounded_albedo * lighting * light_tint;
   let fog_distance = distance(input.world_position, uniforms.camera_position.xyz);
   let fog = smoothstep(uniforms.fog_params.x, uniforms.fog_params.y, fog_distance);
-  return vec4<f32>(shaded * (1.0 - fog) + uniforms.fog_color.rgb * fog, input.color.a);
+  let distance_luma = dot(shaded, vec3<f32>(0.2126, 0.7152, 0.0722));
+  let distance_muted = mix(shaded, vec3<f32>(distance_luma), fog * 0.22);
+  return vec4<f32>(distance_muted * (1.0 - fog) + uniforms.fog_color.rgb * fog, input.color.a);
 }
 
 @fragment
@@ -91,6 +109,7 @@ interface PassStats {
   drawCalls: number;
   triangles: number;
   frustumCulledChunks: number;
+  fogCulledChunks: number;
   lodDrawCalls: number;
 }
 
@@ -103,6 +122,7 @@ export interface RenderStats {
   uploadBytes: number;
   encodeMs: number;
   frustumCulledChunks: number;
+  fogCulledChunks: number;
   lodDrawCalls: number;
 }
 
@@ -190,6 +210,18 @@ function isAabbVisible(
   return true;
 }
 
+function isAabbBeyondDistance(
+  point: readonly [number, number, number],
+  maxDistance: number,
+  minX: number, minY: number, minZ: number,
+  maxX: number, maxY: number, maxZ: number,
+): boolean {
+  const dx = point[0] < minX ? minX - point[0] : point[0] > maxX ? point[0] - maxX : 0;
+  const dy = point[1] < minY ? minY - point[1] : point[1] > maxY ? point[1] - maxY : 0;
+  const dz = point[2] < minZ ? minZ - point[2] : point[2] > maxZ ? point[2] - maxZ : 0;
+  return dx * dx + dy * dy + dz * dz > maxDistance * maxDistance;
+}
+
 export class WebGpuVoxelRenderer {
   private readonly context: GPUCanvasContext;
   private readonly device: GPUDevice;
@@ -204,6 +236,7 @@ export class WebGpuVoxelRenderer {
   private depthView: GPUTextureView | null = null;
   private resourceSyncRevision = 0;
   private lastViewProjection: Float32Array | null = null;
+  private lastCameraPosition: readonly [number, number, number] = [0, 0, 0];
   readonly format: GPUTextureFormat;
   readonly timestampQuerySupported: boolean;
 
@@ -453,7 +486,14 @@ export class WebGpuVoxelRenderer {
     }
 
     const encodeStartedAt = performance.now();
-    const stats = this.encodeRenderPass(world, encoder, passDescriptor, frustumPlanes);
+    const stats = this.encodeRenderPass(
+      world,
+      encoder,
+      passDescriptor,
+      frustumPlanes,
+      this.lastCameraPosition,
+      renderEnvironment.fogEndDistance,
+    );
     const encodeMs = performance.now() - encodeStartedAt;
 
     if (timer) {
@@ -523,7 +563,7 @@ export class WebGpuVoxelRenderer {
         depthClearValue: 1,
         depthStoreOp: "store",
       },
-    }, frustumPlanes);
+    }, frustumPlanes, this.lastCameraPosition, renderEnvironment.fogEndDistance);
     encoder.copyTextureToBuffer(
       { texture: colorTexture },
       { buffer: readback, bytesPerRow, rowsPerImage: height },
@@ -576,6 +616,8 @@ export class WebGpuVoxelRenderer {
     encoder: GPUCommandEncoder,
     passDescriptor: GPURenderPassDescriptor,
     frustumPlanes: Float32Array | null,
+    cameraPosition: readonly [number, number, number],
+    fogEndDistance: number,
   ): PassStats {
     const pass = encoder.beginRenderPass(passDescriptor);
     pass.setBindGroup(0, this.uniformBindGroup);
@@ -583,6 +625,7 @@ export class WebGpuVoxelRenderer {
     let drawCalls = 0;
     let triangles = 0;
     let frustumCulledChunks = 0;
+    let fogCulledChunks = 0;
     let lodDrawCalls = 0;
     let currentPipeline: GPURenderPipeline | null = null;
 
@@ -597,6 +640,10 @@ export class WebGpuVoxelRenderer {
       const b = chunk.mesh?.bounds;
       if (b && frustumPlanes && !isAabbVisible(frustumPlanes, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
         frustumCulledChunks++;
+        continue;
+      }
+      if (b && isAabbBeyondDistance(cameraPosition, fogEndDistance, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
+        fogCulledChunks++;
         continue;
       }
       const pipeline = chunk.lodLevel > 0
@@ -614,7 +661,7 @@ export class WebGpuVoxelRenderer {
       if (chunk.lodLevel > 0) lodDrawCalls += 1;
     }
 
-    // Water pass (LOD 0 only — LOD chunks skip water)
+    // Water pass.
     pass.setPipeline(this.waterPipeline);
     for (const chunk of world.iterateResidentChunks()) {
       const resource = this.resources.get(chunk);
@@ -626,15 +673,20 @@ export class WebGpuVoxelRenderer {
         frustumCulledChunks++;
         continue;
       }
+      if (b && isAabbBeyondDistance(cameraPosition, fogEndDistance, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
+        fogCulledChunks++;
+        continue;
+      }
       pass.setVertexBuffer(0, resource.waterVertexBuffer);
       pass.setIndexBuffer(resource.waterIndexBuffer, "uint32");
       pass.drawIndexed(resource.waterIndexCount, 1, 0, 0, 0);
       drawCalls += 1;
       triangles += resource.waterTriangleCount;
+      if (chunk.lodLevel > 0) lodDrawCalls += 1;
     }
 
     pass.end();
-    return { drawCalls, triangles, frustumCulledChunks, lodDrawCalls };
+    return { drawCalls, triangles, frustumCulledChunks, fogCulledChunks, lodDrawCalls };
   }
 
   private writeUniforms(camera: RenderCamera, aspect: number, renderEnvironment: RenderEnvironment): void {
@@ -649,6 +701,7 @@ export class WebGpuVoxelRenderer {
       cameraPosition = cameraMatrices.eye;
     }
     this.lastViewProjection = viewProjection;
+    this.lastCameraPosition = cameraPosition;
     const uniformData = this.uniformData;
     uniformData.set(viewProjection, 0);
     uniformData[16] = LIGHT_DIRECTION[0];

@@ -8,6 +8,7 @@ test("exploration objectives start in the surface survey stage", () => {
     discoveredUndergroundBiomeCount: 0,
     discoveredRegionalVariantCount: 0,
     discoveredLandmarkCount: 1,
+    discoveredAncientLandmarkCount: 0,
     collectedMaterialCount: 0,
   });
 
@@ -26,6 +27,7 @@ test("exploration objectives advance to frontier atlas after the first survey st
     discoveredUndergroundBiomeCount: 0,
     discoveredRegionalVariantCount: 0,
     discoveredLandmarkCount: 4,
+    discoveredAncientLandmarkCount: 1,
     collectedMaterialCount: 5,
   });
 
@@ -33,6 +35,7 @@ test("exploration objectives advance to frontier atlas after the first survey st
   expect(snapshot.objectives.map((objective) => objective.id)).toEqual([
     "biomes-6",
     "variants-2",
+    "ancient-signs-2",
     "colors-8",
     "underground-1",
   ]);
@@ -44,10 +47,11 @@ test("exploration objectives eventually settle into the deep expedition stage", 
     discoveredUndergroundBiomeCount: 2,
     discoveredRegionalVariantCount: 3,
     discoveredLandmarkCount: 8,
+    discoveredAncientLandmarkCount: 3,
     collectedMaterialCount: 12,
   });
 
   expect(snapshot.stageId).toBe("deep-expedition");
-  expect(snapshot.objectives).toHaveLength(5);
+  expect(snapshot.objectives).toHaveLength(6);
   expect(snapshot.completedCount).toBe(1);
 });

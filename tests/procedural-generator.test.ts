@@ -83,6 +83,13 @@ const AUDITED_SURFACE_LANDMARK_IDS = [
   "mega_glowcap",
   "root_stump",
   "stone_tor",
+  "ancestor_pillar",
+  "ash_marker",
+  "glass_cairn",
+  "silt_shell",
+  "velothi_shrine",
+  "kwama_mound",
+  "pilgrim_cairn",
 ] as const;
 
 const TRUNKED_LANDMARK_IDS = [
@@ -1018,6 +1025,43 @@ test("new biome families expose distinct landmark identities", () => {
   expect(landmarksByBiome.get("fungal")?.has("mega_glowcap") || landmarksByBiome.get("fungal")?.has("lantern_tree")).toBe(true);
   expect(landmarksByBiome.get("firefly")?.has("lantern_tree")).toBe(true);
   expect(landmarksByBiome.get("shardlands")?.has("salt_spire") || landmarksByBiome.get("shardlands")?.has("crystal_cluster")).toBe(true);
+});
+
+test("ancient route landmarks appear in harsh and uncanny regions", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const seen = new Set<string>();
+
+  for (let z = -12288; z <= 12288; z += 24) {
+    for (let x = -12288; x <= 12288; x += 24) {
+      const landmarkId = generator.sampleBiomeProbe(x, z).landmarkId;
+      if (landmarkId) {
+        seen.add(landmarkId);
+      }
+    }
+  }
+
+  expect(seen.has("ancestor_pillar")).toBe(true);
+  expect(seen.has("ash_marker")).toBe(true);
+  expect(seen.has("glass_cairn")).toBe(true);
+});
+
+test("ashland exploration landmarks add Morrowind-like silhouettes", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const seen = new Set<string>();
+
+  for (let z = -24_000; z <= 24_000; z += 32) {
+    for (let x = -24_000; x <= 24_000; x += 32) {
+      const landmarkId = generator.sampleBiomeProbe(x, z).landmarkId;
+      if (landmarkId) {
+        seen.add(landmarkId);
+      }
+    }
+  }
+
+  expect(seen.has("silt_shell")).toBe(true);
+  expect(seen.has("velothi_shrine")).toBe(true);
+  expect(seen.has("kwama_mound")).toBe(true);
+  expect(seen.has("pilgrim_cairn")).toBe(true);
 });
 
 test("underwater columns no longer expose grassy surface materials", () => {

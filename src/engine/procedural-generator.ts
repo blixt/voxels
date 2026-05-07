@@ -77,7 +77,14 @@ export type LandmarkId =
   | "glowcap"
   | "mega_glowcap"
   | "root_stump"
-  | "stone_tor";
+  | "stone_tor"
+  | "ancestor_pillar"
+  | "ash_marker"
+  | "glass_cairn"
+  | "silt_shell"
+  | "velothi_shrine"
+  | "kwama_mound"
+  | "pilgrim_cairn";
 
 interface BaseBiomeProfile {
   id: BaseBiomeId;
@@ -389,6 +396,7 @@ const CAVE_DEPTH_SCALE = 1 / 1700;
 const CAVE_OPENING_SCALE = 1 / 760;
 const STRATA_BAND_SCALE = 1 / 160;
 const ONE_THIRD = 1 / 3;
+const SURFACE_MATERIAL_DITHER_SCALE = 1 / 7;
 const NO_WATER = -1;
 const FEATURE_NONE = 0;
 const FEATURE_OAK = 1;
@@ -488,6 +496,13 @@ const LANDMARKS: Record<LandmarkId, LandmarkProfile> = {
   mega_glowcap: createLandmark("mega_glowcap", 232, 18, 0.16, 1.2, 2),
   root_stump: createLandmark("root_stump", 132, 7, 0.22, 1.0, 0),
   stone_tor: createLandmark("stone_tor", 176, 7, 0.18, 1.0, 0),
+  ancestor_pillar: createLandmark("ancestor_pillar", 192, 6, 0.18, 1.0, 0),
+  ash_marker: createLandmark("ash_marker", 160, 5, 0.20, 1.0, 0),
+  glass_cairn: createLandmark("glass_cairn", 128, 5, 0.24, 1.0, 2),
+  silt_shell: createLandmark("silt_shell", 176, 8, 0.18, 1.0, 1),
+  velothi_shrine: createLandmark("velothi_shrine", 164, 5, 0.18, 1.0, 1),
+  kwama_mound: createLandmark("kwama_mound", 132, 6, 0.26, 1.0, 1),
+  pilgrim_cairn: createLandmark("pilgrim_cairn", 144, 5, 0.22, 1.0, 1),
 };
 
 const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
@@ -513,12 +528,16 @@ const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
     landmarkPlacement("shrub", { chance: 0.24, scale: 1.0, variant: 2 }),
     landmarkPlacement("flower_patch", { chance: 0.16, scale: 0.88, variant: 2 }),
     landmarkPlacement("standing_stone", { chance: 0.28, scale: 1.12 }),
+    landmarkPlacement("ancestor_pillar", { chance: 0.14, scale: 1.10, cellSize: 176, radius: 6 }),
+    landmarkPlacement("pilgrim_cairn", { chance: 0.12, scale: 1.06, cellSize: 168, radius: 5 }),
     landmarkPlacement("boulder", { chance: 0.18, scale: 0.9 }),
   ],
   dunes: [
     landmarkPlacement("palm", { chance: 0.34, scale: 1.22 }),
     landmarkPlacement("cactus", { chance: 0.36, scale: 1.12 }),
     landmarkPlacement("cactus", { chance: 0.24, scale: 1.65, variant: 2, cellSize: 168, radius: 6 }),
+    landmarkPlacement("silt_shell", { chance: 0.14, scale: 1.04, cellSize: 188, radius: 8 }),
+    landmarkPlacement("kwama_mound", { chance: 0.12, scale: 1.06, cellSize: 172, radius: 6 }),
     landmarkPlacement("dead_snag", { chance: 0.18, scale: 0.9 }),
     landmarkPlacement("boulder", { chance: 0.16, scale: 0.86 }),
   ],
@@ -527,6 +546,10 @@ const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
     landmarkPlacement("hoodoo", { chance: 0.24, scale: 0.86, variant: 1, cellSize: 156, radius: 6 }),
     landmarkPlacement("dead_snag", { chance: 0.28, scale: 1.24 }),
     landmarkPlacement("standing_stone", { chance: 0.20, scale: 1.18 }),
+    landmarkPlacement("ash_marker", { chance: 0.16, scale: 1.12, cellSize: 168, radius: 5 }),
+    landmarkPlacement("velothi_shrine", { chance: 0.14, scale: 1.12, cellSize: 184, radius: 5 }),
+    landmarkPlacement("kwama_mound", { chance: 0.14, scale: 1.10, cellSize: 164, radius: 6 }),
+    landmarkPlacement("pilgrim_cairn", { chance: 0.12, scale: 1.08, cellSize: 172, radius: 5 }),
     landmarkPlacement("cactus", { chance: 0.18, scale: 0.96 }),
     landmarkPlacement("boulder", { chance: 0.20, scale: 0.94 }),
   ],
@@ -542,6 +565,7 @@ const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
     landmarkPlacement("willow", { chance: 0.24, scale: 0.98, cellSize: 148, radius: 14 }),
     landmarkPlacement("frost_shrub", { chance: 0.40, scale: 1.04 }),
     landmarkPlacement("standing_stone", { chance: 0.32, scale: 1.18 }),
+    landmarkPlacement("ancestor_pillar", { chance: 0.16, scale: 1.08, cellSize: 172, radius: 6 }),
     landmarkPlacement("glowcap", { chance: 0.14, scale: 0.96, cellSize: 156, radius: 12 }),
     landmarkPlacement("boulder", { chance: 0.22, scale: 1.00 }),
   ],
@@ -570,6 +594,9 @@ const SPECIAL_BIOME_LANDMARKS: Record<SpecialBiomeId, readonly LandmarkProfile[]
   saltflat: [
     landmarkPlacement("salt_spire", { chance: 0.36, scale: 1.10 }),
     landmarkPlacement("crystal_cluster", { chance: 0.20, scale: 1.04, variant: 2 }),
+    landmarkPlacement("glass_cairn", { chance: 0.16, scale: 1.08, cellSize: 152, radius: 5 }),
+    landmarkPlacement("silt_shell", { chance: 0.16, scale: 1.06, cellSize: 184, radius: 8 }),
+    landmarkPlacement("kwama_mound", { chance: 0.12, scale: 1.04, cellSize: 176, radius: 6 }),
     landmarkPlacement("dead_snag", { chance: 0.12, scale: 0.90 }),
     landmarkPlacement("shrub", { chance: 0.12, scale: 0.82, variant: 2 }),
   ],
@@ -589,6 +616,9 @@ const SPECIAL_BIOME_LANDMARKS: Record<SpecialBiomeId, readonly LandmarkProfile[]
   ],
   ember: [
     landmarkPlacement("basalt_spire", { chance: 0.30, scale: 1.28 }),
+    landmarkPlacement("ash_marker", { chance: 0.22, scale: 1.20, cellSize: 152, radius: 5 }),
+    landmarkPlacement("kwama_mound", { chance: 0.14, scale: 1.12, cellSize: 164, radius: 6 }),
+    landmarkPlacement("pilgrim_cairn", { chance: 0.12, scale: 1.10, cellSize: 168, radius: 5 }),
     landmarkPlacement("crystal_cluster", { chance: 0.28, scale: 1.12, variant: 3 }),
     landmarkPlacement("dead_snag", { chance: 0.26, scale: 1.16, variant: 1 }),
     landmarkPlacement("boulder", { chance: 0.24, scale: 0.94, variant: 1 }),
@@ -604,6 +634,9 @@ const SPECIAL_BIOME_LANDMARKS: Record<SpecialBiomeId, readonly LandmarkProfile[]
   shardlands: [
     landmarkPlacement("salt_spire", { chance: 0.34, scale: 1.12, variant: 1 }),
     landmarkPlacement("crystal_cluster", { chance: 0.38, scale: 1.16, variant: 2 }),
+    landmarkPlacement("glass_cairn", { chance: 0.20, scale: 1.12, cellSize: 144, radius: 5, variant: 2 }),
+    landmarkPlacement("velothi_shrine", { chance: 0.16, scale: 1.14, cellSize: 176, radius: 5 }),
+    landmarkPlacement("pilgrim_cairn", { chance: 0.14, scale: 1.10, cellSize: 164, radius: 5 }),
     landmarkPlacement("hoodoo", { chance: 0.20, scale: 1.02, variant: 1 }),
     landmarkPlacement("dead_tree", { chance: 0.18, scale: 1.02, cellSize: 156, radius: 8 }),
   ],
@@ -686,6 +719,7 @@ const STEPPE_THORN_SCRUB_LANDMARKS: readonly LandmarkProfile[] = [
 
 const STEPPE_MONOLITH_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("standing_stone", { chance: 0.44, scale: 1.28, cellSize: 132, radius: 6 }),
+  landmarkPlacement("ancestor_pillar", { chance: 0.30, scale: 1.22, cellSize: 148, radius: 6 }),
   landmarkPlacement("thorn_tree", { chance: 0.28, scale: 1.12, cellSize: 140, radius: 10 }),
   landmarkPlacement("acacia", { chance: 0.26, scale: 1.08, cellSize: 152, radius: 12 }),
   landmarkPlacement("flower_patch", { chance: 0.22, scale: 0.92, variant: 2, cellSize: 76, radius: 5 }),
@@ -694,6 +728,7 @@ const STEPPE_MONOLITH_LANDMARKS: readonly LandmarkProfile[] = [
 
 const DUNES_GLASS_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("crystal_cluster", { chance: 0.36, scale: 1.18, variant: 2 }),
+  landmarkPlacement("glass_cairn", { chance: 0.28, scale: 1.14, cellSize: 136, radius: 5, variant: 2 }),
   landmarkPlacement("palm", { chance: 0.28, scale: 1.18, cellSize: 176, radius: 13 }),
   landmarkPlacement("cactus", { chance: 0.34, scale: 1.08 }),
   landmarkPlacement("standing_stone", { chance: 0.18, scale: 1.08 }),
@@ -709,6 +744,7 @@ const BADLANDS_DESOLATE_LANDMARKS: readonly LandmarkProfile[] = [
 
 const BADLANDS_CRATER_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("hoodoo", { chance: 0.34, scale: 1.24 }),
+  landmarkPlacement("ash_marker", { chance: 0.26, scale: 1.22, cellSize: 148, radius: 5 }),
   landmarkPlacement("standing_stone", { chance: 0.26, scale: 1.22 }),
   landmarkPlacement("dead_tree", { chance: 0.30, scale: 1.18, cellSize: 156, radius: 8 }),
   landmarkPlacement("boulder", { chance: 0.20, scale: 1.04, variant: 1 }),
@@ -750,6 +786,7 @@ const MOOR_SHADOWGLASS_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("lantern_tree", { chance: 0.26, scale: 1.00, cellSize: 144, radius: 12 }),
   landmarkPlacement("dead_tree", { chance: 0.34, scale: 1.16, cellSize: 144, radius: 8 }),
   landmarkPlacement("standing_stone", { chance: 0.38, scale: 1.22 }),
+  landmarkPlacement("ancestor_pillar", { chance: 0.24, scale: 1.14, cellSize: 156, radius: 6 }),
   landmarkPlacement("glowcap", { chance: 0.26, scale: 1.02, cellSize: 128, radius: 12 }),
   landmarkPlacement("frost_shrub", { chance: 0.36, scale: 1.04 }),
 ];
@@ -807,6 +844,7 @@ const FIREFLY_LANTERN_LANDMARKS: readonly LandmarkProfile[] = [
 const SALTFLAT_MIRROR_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("salt_spire", { chance: 0.44, scale: 1.18 }),
   landmarkPlacement("crystal_cluster", { chance: 0.28, scale: 1.08, variant: 2 }),
+  landmarkPlacement("glass_cairn", { chance: 0.24, scale: 1.12, cellSize: 136, radius: 5, variant: 2 }),
   landmarkPlacement("standing_stone", { chance: 0.18, scale: 1.06 }),
 ];
 
@@ -895,12 +933,16 @@ const BASALTIC_SURFACE_LANDMARKS: readonly LandmarkProfile[] = [
 const EMBER_DEADLAND_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("dead_tree", { chance: 0.28, scale: 1.22, cellSize: 156, radius: 8 }),
   landmarkPlacement("basalt_spire", { chance: 0.28, scale: 1.30 }),
+  landmarkPlacement("ash_marker", { chance: 0.24, scale: 1.22, cellSize: 144, radius: 5 }),
+  landmarkPlacement("kwama_mound", { chance: 0.16, scale: 1.12, cellSize: 156, radius: 6 }),
   landmarkPlacement("crystal_cluster", { chance: 0.26, scale: 1.12, variant: 3 }),
   landmarkPlacement("boulder", { chance: 0.18, scale: 0.96, variant: 1 }),
 ];
 
 const EMBER_CALDERA_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("basalt_spire", { chance: 0.38, scale: 1.34 }),
+  landmarkPlacement("ash_marker", { chance: 0.34, scale: 1.28, cellSize: 132, radius: 5 }),
+  landmarkPlacement("pilgrim_cairn", { chance: 0.18, scale: 1.14, cellSize: 152, radius: 5 }),
   landmarkPlacement("crystal_cluster", { chance: 0.34, scale: 1.16, variant: 3 }),
   landmarkPlacement("dead_tree", { chance: 0.24, scale: 1.18, cellSize: 164, radius: 8 }),
   landmarkPlacement("boulder", { chance: 0.18, scale: 1.00, variant: 1 }),
@@ -1349,8 +1391,8 @@ export class ProceduralWorldGenerator {
     out.transitionThreshold = surfaceMaterials.transitionThreshold;
     out.specialStrength = specialStrength;
     out.strataOffset = fields.strata * 5;
-    out.worldXDiv3 = Math.floor(worldX * ONE_THIRD);
-    out.worldZDiv3 = Math.floor(worldZ * ONE_THIRD);
+    out.worldXDiv3 = Math.floor(worldX * SURFACE_MATERIAL_DITHER_SCALE);
+    out.worldZDiv3 = Math.floor(worldZ * SURFACE_MATERIAL_DITHER_SCALE);
     out.ditherSeed = this.transitionSeed + baseBlend.primary.surface + baseBlend.secondary.surface;
     out.accentSeed = this.seed + underground.accent;
     this.lastFillSurfaceFields = fields;
@@ -3563,6 +3605,17 @@ function configureLandmarkFeature(
         "#CBA",
       );
       return true;
+    case "ancestor_pillar":
+      configureSpireFeature(
+        out,
+        FEATURE_STANDING_STONE,
+        scaledFeatureHeight(28, 18, fields.uplift + fields.magic * 0.2, profile.scale),
+        scaledFeatureRadius(4, 2, fields.uplift + fields.scatter * 0.2, profile.scale),
+        "#776",
+        "#DBC",
+      );
+      out.featureExtra = 1;
+      return true;
     case "shrub":
       if (submergedSurface) {
         return false;
@@ -3758,6 +3811,17 @@ function configureLandmarkFeature(
         "#F74",
       );
       return true;
+    case "ash_marker":
+      configureSpireFeature(
+        out,
+        FEATURE_BASALT_SPIRE,
+        scaledFeatureHeight(20, 22, fields.volcanism + fields.desolation * 0.2, profile.scale),
+        scaledFeatureRadius(3, 2, fields.volcanism + fields.scatter * 0.2, profile.scale),
+        "#544",
+        "#C86",
+      );
+      out.featureExtra = 1;
+      return true;
     case "crystal_cluster":
       configureSpireFeature(
         out,
@@ -3766,6 +3830,61 @@ function configureLandmarkFeature(
         scaledFeatureRadius(4, 3, fields.magic, profile.scale),
         profile.variant >= 3 ? "#A7C" : "#79B",
         profile.variant >= 2 ? "#EFF" : "#CEF",
+      );
+      out.featureExtra = 1;
+      return true;
+    case "glass_cairn":
+      configureSpireFeature(
+        out,
+        FEATURE_CRYSTAL,
+        scaledFeatureHeight(8, 12, fields.magic + fields.surfacePatch * 0.2, profile.scale),
+        scaledFeatureRadius(5, 2, fields.magic + fields.surfacePatch * 0.3, profile.scale),
+        "#8AC",
+        "#EFF",
+      );
+      out.featureExtra = 2;
+      return true;
+    case "silt_shell":
+      configureSpireFeature(
+        out,
+        FEATURE_HOODOO,
+        scaledFeatureHeight(10, 10, fields.desolation + fields.surfacePatch * 0.3, profile.scale),
+        scaledFeatureRadius(8, 4, fields.scatter + fields.desolation * 0.2, profile.scale),
+        "#876",
+        "#CBA",
+      );
+      out.featureExtra = 2;
+      return true;
+    case "velothi_shrine":
+      configureSpireFeature(
+        out,
+        FEATURE_STANDING_STONE,
+        scaledFeatureHeight(18, 14, fields.uplift + fields.magic * 0.25, profile.scale),
+        scaledFeatureRadius(4, 2, fields.surfacePatch + fields.magic * 0.2, profile.scale),
+        "#665",
+        "#DA8",
+      );
+      out.featureExtra = 1;
+      return true;
+    case "kwama_mound":
+      configureSpireFeature(
+        out,
+        FEATURE_BOULDER,
+        scaledFeatureHeight(6, 8, fields.desolation + fields.surfacePatch * 0.3, profile.scale),
+        scaledFeatureRadius(7, 3, fields.scatter + fields.surfacePatch * 0.3, profile.scale),
+        "#765",
+        "#DB8",
+      );
+      out.featureExtra = 1;
+      return true;
+    case "pilgrim_cairn":
+      configureSpireFeature(
+        out,
+        FEATURE_STANDING_STONE,
+        scaledFeatureHeight(12, 10, fields.uplift + fields.magic * 0.2, profile.scale),
+        scaledFeatureRadius(5, 2, fields.scatter + fields.surfacePatch * 0.2, profile.scale),
+        "#776",
+        "#EDB",
       );
       out.featureExtra = 1;
       return true;
