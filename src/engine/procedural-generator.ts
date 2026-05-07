@@ -3741,14 +3741,15 @@ function configureLandmarkFeature(
       if (submergedSurface) {
         return false;
       }
-      configureSpireFeature(
+      configureTreeFeature(
         out,
-        FEATURE_STANDING_STONE,
-        scaledFeatureHeight(20, 20, fields.uplift + fields.surfacePatch * 0.5, profile.scale),
-        scaledFeatureRadius(2, 1, fields.scatter, profile.scale),
+        FEATURE_DEAD_TREE,
+        scaledFeatureHeight(22, 18, fields.uplift + fields.surfacePatch * 0.5, profile.scale),
+        scaledFeatureRadius(6, 3, fields.scatter + fields.desolation * 0.3, profile.scale),
         profile.variant > 0 ? "#433" : "#654",
         profile.variant > 0 ? "#654" : "#876",
       );
+      out.featureExtra = profile.variant > 0 ? 3 : 1;
       return true;
     case "hoodoo":
       configureSpireFeature(
@@ -3923,7 +3924,7 @@ function configureLandmarkFeature(
         "#765",
         "#DB8",
       );
-      out.featureExtra = 1;
+      out.featureExtra = 2;
       return true;
     case "pilgrim_cairn":
       configureSpireFeature(
@@ -4304,6 +4305,30 @@ function sampleFeatureMaterial(
       return materialSecondary;
     }
     case FEATURE_BOULDER: {
+      if (featureExtra >= 2) {
+        const moundHeight = Math.max(3, Math.round(featureHeight * 0.76));
+        if (relativeY > moundHeight) {
+          return 0;
+        }
+        const yProgress = relativeY / Math.max(1, moundHeight);
+        const layerWidthX = Math.max(1.6, featureRadius * (1.18 - yProgress * 0.58));
+        const layerWidthZ = Math.max(1.2, featureRadius * (0.78 - yProgress * 0.38));
+        const oval = Math.hypot(featureDeltaX / layerWidthX, featureDeltaZ / layerWidthZ);
+        if (oval > 1) {
+          return 0;
+        }
+        const eggY = Math.max(1, Math.round(featureHeight * 0.36));
+        const leftEgg = Math.hypot((featureDeltaX + featureRadius * 0.32) / 1.7, (featureDeltaZ - featureRadius * 0.18) / 1.25);
+        const rightEgg = Math.hypot((featureDeltaX - featureRadius * 0.36) / 1.55, (featureDeltaZ + featureRadius * 0.14) / 1.2);
+        const centerEgg = Math.hypot(featureDeltaX / 1.45, (featureDeltaZ + featureRadius * 0.34) / 1.15);
+        if (Math.abs(relativeY - eggY) <= 1 && (leftEgg <= 1 || rightEgg <= 1 || centerEgg <= 1)) {
+          return materialSecondary;
+        }
+        if (relativeY >= moundHeight - 1 && oval <= 0.62) {
+          return materialSecondary;
+        }
+        return materialPrimary;
+      }
       const bodyRadius = Math.max(1.1, featureRadius - Math.abs(relativeY - featureHeight * 0.45) * 0.55);
       const topCapRadius = Math.min(bodyRadius, Math.max(0.9, featureRadius * 0.58));
       if (relativeY === featureHeight && radial <= topCapRadius) {

@@ -1076,3 +1076,27 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint the water audit
   - add direct surface-continuity probes for the remaining broad seam candidates
   - keep using object lab for individual ashland silhouettes before another broad worldgen pass
+
+### 2026-05-07 - Ashland Prop Silhouette Pass
+
+- Integrated the object-lab worker's targeted ashland prop polish.
+- Changes:
+  - `dead_snag` now uses the dead-tree branch silhouette instead of a thin stone-column shape
+  - `kwama_mound` now has a dedicated squat oval mound shape with amber egg pockets and lower monochrome dominance
+  - object-lab tests now lock branch/material diagnostics for dead snags and squat/accent diagnostics for kwama mounds
+- Object-lab evidence:
+  - dead snag after: `artifacts/object-lab/2026-05-07-235058941Z-dead-snag-after/contact-sheet.svg`
+  - dead snag metrics: `544` solid voxels, `2` materials, dominant material `67.8%`, front/side occupied pixels `214/214`
+  - kwama mound after: `artifacts/object-lab/2026-05-07-235150101Z-kwama-mound-after-2/contact-sheet.svg`
+  - kwama metrics: `1055` solid voxels, `2` materials, dominant material `88.8%`, front aspect `1.300`, front normalized height `55.6%`
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun test tests/object-lab.test.ts tests/procedural-generator.test.ts`: pass, `37` tests.
+- Honest assessment:
+  - This is a narrow visual-quality improvement, not a renderer/performance change.
+  - The object-lab workflow is already useful: it caught the old column-like dead snag and gives quantitative signals for future prop iteration.
+- Rubric movement:
+  - Visual/world definition: `3.25 -> 3.35` because two ashland props now have stronger silhouettes and artifact-backed regression coverage.
+- Next:
+  - commit and push this small prop checkpoint
+  - continue renderer correctness with a direct surface-continuity seam probe

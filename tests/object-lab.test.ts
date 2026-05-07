@@ -47,3 +47,41 @@ test("object lab finds a representative landmark and writes isolated artifacts",
   expect(await readFile(report.artifacts.frontProjection, "utf8")).toStartWith("P3\n");
   expect(await readFile(report.artifacts.sideProjection, "utf8")).toStartWith("P3\n");
 });
+
+test("ashland prop lab diagnostics keep snag branches and squat kwama mound accents", async () => {
+  const outputDir = await mkdtemp(join(tmpdir(), "voxels-object-lab-ashland-"));
+  const deadSnag = await runObjectLab({
+    landmarkId: "dead_snag",
+    seed: 1337,
+    outputDir,
+    label: "Dead Snag Shape Test",
+    timestamp: new Date("2026-05-08T12:35:00.000Z"),
+    scanRadius: 4096,
+    coarseStep: 32,
+    sampleRadius: 14,
+    heightPadding: 4,
+  });
+  const kwamaMound = await runObjectLab({
+    landmarkId: "kwama_mound",
+    seed: 1337,
+    outputDir,
+    label: "Kwama Mound Shape Test",
+    timestamp: new Date("2026-05-08T12:35:01.000Z"),
+    scanRadius: 4096,
+    coarseStep: 32,
+    sampleRadius: 18,
+    heightPadding: 4,
+  });
+
+  expect(deadSnag.sample.solidVoxelCount).toBeGreaterThan(450);
+  expect(deadSnag.sample.diagnostics.materialVariety).toBeGreaterThanOrEqual(2);
+  expect(deadSnag.sample.diagnostics.dominantMaterialShare).toBeLessThan(0.8);
+  expect(deadSnag.sample.diagnostics.silhouette.front.occupiedPixels).toBeGreaterThan(180);
+  expect(deadSnag.sample.diagnostics.silhouette.side.occupiedPixels).toBeGreaterThan(180);
+
+  expect(kwamaMound.sample.solidVoxelCount).toBeGreaterThan(900);
+  expect(kwamaMound.sample.diagnostics.materialVariety).toBeGreaterThanOrEqual(2);
+  expect(kwamaMound.sample.diagnostics.dominantMaterialShare).toBeLessThan(0.9);
+  expect(kwamaMound.sample.diagnostics.silhouette.front.normalizedHeight).toBeLessThan(0.65);
+  expect(kwamaMound.sample.diagnostics.silhouette.front.aspectRatio).toBeGreaterThan(1.1);
+});
