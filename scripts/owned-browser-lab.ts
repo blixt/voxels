@@ -1173,11 +1173,15 @@ function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<stri
   const handoffHoleCount = readNumber(lodCoverage, "handoffHoleCount") ?? 0;
   const residentOverlapCount = readNumber(lodCoverage, "residentOverlapCount") ?? 0;
   const bandOverlapCount = readNumber(lodCoverage, "bandOverlapCount") ?? 0;
+  const waterOverlapCount = readNumber(lodCoverage, "waterOverlapCount") ?? 0;
   if (residentOverlapCount > 0) {
     failures.push(`LOD coverage renders over ${residentOverlapCount} sampled render-ready LOD0 columns`);
   }
   if (bandOverlapCount > 0) {
     failures.push(`LOD coverage has ${bandOverlapCount} sampled overlapping LOD bands`);
+  }
+  if (waterOverlapCount > 0) {
+    failures.push(`LOD water coverage has ${waterOverlapCount} sampled overlapping transparent water bands`);
   }
   if (uncoveredGapCount > 0) {
     failures.push(`LOD coverage has ${uncoveredGapCount} uncovered sampled gaps`);
@@ -1244,6 +1248,7 @@ function printSummary(reportPath: string, report: {
   }
   console.log(`route screen captures: ${formatNumber(readNumber(routeBudget, "screenVoidCaptureCount"))}`);
   console.log(`LOD overlap LOD0/bands: ${formatNumber(readNumber(lodCoverage, "residentOverlapCount"))}/${formatNumber(readNumber(lodCoverage, "bandOverlapCount"))}`);
+  console.log(`LOD water overlap: ${formatNumber(readNumber(lodCoverage, "waterOverlapCount"))}`);
   console.log(`LOD gaps: ${formatNumber(readNumber(lodCoverage, "uncoveredGapCount"))}`);
   console.log(`LOD handoff holes: ${formatNumber(readNumber(lodCoverage, "handoffHoleCount"))}`);
   console.log(`render-ready near samples: ${formatNumber(readNumber(renderReady, "renderReadySampleCount"))}/${formatNumber(readNumber(renderReady, "sampleCount"))}`);

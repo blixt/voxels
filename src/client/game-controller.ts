@@ -66,7 +66,7 @@ import {
   type ResidencyUpdateSummary,
   type WorldEditRecord,
 } from "../engine/procedural-resident-world.ts";
-import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
+import { isProceduralWaterMaterial, ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
 import {
   WebGpuVoxelRenderer,
   type RenderStats,
@@ -408,11 +408,13 @@ export interface LodCoverageProbe {
   uncoveredGapCount: number;
   handoffHoleCount: number;
   bandOverlapCount: number;
+  waterOverlapCount: number;
   wrongBandCount: number;
   residentOverlapSamples: LodCoverageIssueSample[];
   uncoveredGapSamples: LodCoverageIssueSample[];
   handoffHoleSamples: LodCoverageIssueSample[];
   bandOverlapSamples: LodCoverageIssueSample[];
+  waterOverlapSamples: LodCoverageIssueSample[];
   wrongBandSamples: LodCoverageIssueSample[];
 }
 
@@ -1142,6 +1144,7 @@ export class GameController {
     const handoffHoleSamples: LodCoverageIssueSample[] = [];
     const residentOverlapSamples: LodCoverageIssueSample[] = [];
     const bandOverlapSamples: LodCoverageIssueSample[] = [];
+    const waterOverlapSamples: LodCoverageIssueSample[] = [];
     let sampleCount = 0;
     let residentSampleCount = 0;
     let renderReadySampleCount = 0;
@@ -1150,6 +1153,7 @@ export class GameController {
     let uncoveredGapCount = 0;
     let handoffHoleCount = 0;
     let bandOverlapCount = 0;
+    let waterOverlapCount = 0;
     let wrongBandCount = 0;
 
     for (let offsetZ = -sampleRadiusWorldUnits; offsetZ <= sampleRadiusWorldUnits; offsetZ += sampleStepWorldUnits) {
@@ -1160,16 +1164,25 @@ export class GameController {
         const chunkZ = Math.floor(worldZ / this.world.chunkSize);
         const resident = this.world.hasResidentColumn(chunkX, chunkZ);
         const renderReady = this.world.isColumnRenderReady(chunkX, chunkZ);
+        const renderReadyWater = renderReady
+          ? this.isRenderReadyWaterColumn(worldX, worldZ, chunkX, chunkZ)
+          : false;
         const lodBandStrideMeters = new Map<string, number>();
+        const waterBands: string[] = renderReadyWater ? ["LOD0"] : [];
         for (const span of lodSpans) {
-          if (
-            worldX >= span.minX
+          const lodColumn = worldX >= span.minX
             && worldX < span.maxX
             && worldZ >= span.minZ
             && worldZ < span.maxZ
-            && isWorldColumnCoveredByLodChunk(span.chunk, worldX, worldZ, this.world.chunkSize)
+            ? classifyWorldColumnInLodChunk(span.chunk, worldX, worldZ, this.world.chunkSize)
+            : { covered: false, water: false };
+          if (
+            lodColumn.covered
           ) {
             lodBandStrideMeters.set(span.label, span.strideMeters);
+            if (lodColumn.water) {
+              waterBands.push(span.label);
+            }
           }
         }
         const lodBands = [...lodBandStrideMeters.keys()];
@@ -1203,6 +1216,13 @@ export class GameController {
           bandOverlapCount += 1;
           pushIssueSample(bandOverlapSamples, issueSample);
         }
+        if (waterBands.length > 1) {
+          waterOverlapCount += 1;
+          pushIssueSample(waterOverlapSamples, {
+            ...issueSample,
+            bands: waterBands,
+          });
+        }
         if (bands.length === 0) {
           uncoveredGapCount += 1;
           pushIssueSample(uncoveredGapSamples, issueSample);
@@ -1226,13 +1246,54 @@ export class GameController {
       uncoveredGapCount,
       handoffHoleCount,
       bandOverlapCount,
+      waterOverlapCount,
       wrongBandCount,
       residentOverlapSamples,
       uncoveredGapSamples,
       handoffHoleSamples,
       bandOverlapSamples,
+      waterOverlapSamples,
       wrongBandSamples: [],
     };
+  }
+
+  private isRenderReadyWaterColumn(
+    worldX: number,
+    worldZ: number,
+    chunkX: number,
+    chunkZ: number,
+  ): boolean {
+    const column = this.generator.sampleColumn(worldX, worldZ);
+    if (column.waterTopY === null) {
+      return false;
+    }
+    const minCy = Math.floor((column.surfaceY + 1) / this.world.chunkSize);
+    const maxCy = Math.floor(column.waterTopY / this.world.chunkSize);
+    const localX = positiveModulo(Math.floor(worldX), this.world.chunkSize);
+    const localZ = positiveModulo(Math.floor(worldZ), this.world.chunkSize);
+    const chunkArea = this.world.chunkSize * this.world.chunkSize;
+    for (let cy = minCy; cy <= maxCy; cy += 1) {
+      const chunk = this.world.getResidentChunk(chunkX, cy, chunkZ);
+      if (!chunk || !chunk.renderReady) {
+        continue;
+      }
+      for (let localY = 0; localY < this.world.chunkSize; localY += 1) {
+        const material = chunk.data[localX + localY * this.world.chunkSize + localZ * chunkArea]!;
+        if (!isProceduralWaterMaterial(material)) {
+          continue;
+        }
+        const above = localY + 1 < this.world.chunkSize
+          ? chunk.data[localX + (localY + 1) * this.world.chunkSize + localZ * chunkArea]!
+          : 0;
+        const worldTopY = cy * this.world.chunkSize + localY + 1;
+        const waterContinuesAboveChunk = localY + 1 >= this.world.chunkSize
+          && column.waterTopY >= worldTopY;
+        if (!isProceduralWaterMaterial(above) && !waterContinuesAboveChunk) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   private collectRenderableLodCoverageSpans(): LodCoverageSpan[] {
@@ -3246,20 +3307,42 @@ function isWorldColumnCoveredByLodChunk(
   worldZ: number,
   chunkSize: number,
 ): boolean {
+  return classifyWorldColumnInLodChunk(chunk, worldX, worldZ, chunkSize).covered;
+}
+
+function classifyWorldColumnInLodChunk(
+  chunk: VoxelChunk,
+  worldX: number,
+  worldZ: number,
+  chunkSize: number,
+): { covered: boolean; water: boolean } {
   const stride = Math.max(1, chunk.voxelStride);
   const worldSize = chunkSize * stride;
   const localX = Math.floor((worldX - chunk.coord.x * worldSize) / stride);
   const localZ = Math.floor((worldZ - chunk.coord.z * worldSize) / stride);
   if (localX < 0 || localX >= chunkSize || localZ < 0 || localZ >= chunkSize) {
-    return false;
+    return { covered: false, water: false };
   }
   const chunkArea = chunkSize * chunkSize;
+  let covered = false;
+  let water = false;
   for (let localY = 0; localY < chunkSize; localY += 1) {
-    if (chunk.data[localX + localY * chunkSize + localZ * chunkArea] !== 0) {
-      return true;
+    const material = chunk.data[localX + localY * chunkSize + localZ * chunkArea]!;
+    if (material !== 0) {
+      covered = true;
+      if (isProceduralWaterMaterial(material)) {
+        const above = localY + 1 < chunkSize
+          ? chunk.data[localX + (localY + 1) * chunkSize + localZ * chunkArea]!
+          : material;
+        water ||= !isProceduralWaterMaterial(above);
+      }
     }
   }
-  return false;
+  return { covered, water };
+}
+
+function positiveModulo(value: number, divisor: number): number {
+  return ((value % divisor) + divisor) % divisor;
 }
 
 function cloneResidencySummary(summary: ResidencyUpdateSummary): ResidencyUpdateSummary {

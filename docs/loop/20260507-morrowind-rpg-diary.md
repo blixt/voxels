@@ -1049,3 +1049,30 @@ Build the first "place identity" slice without regressing performance or input:
   - add water-specific overlap diagnostics, since transparent water can still double-blend even when opaque LOD overlap is zero
   - use object lab to iterate on individual ashland objects before broadening the biome again
   - replace broad route seam candidates with a direct surface-continuity probe
+
+### 2026-05-07 - Transparent Water Overlap Audit
+
+- Followed the z-fighting audit into transparent water after opaque LOD overlap and far coverage were clean.
+- Added a browser-lab gate for sampled overlapping transparent water surfaces.
+- First water audit failed:
+  - artifact: `artifacts/owned-browser-lab/20260507T234324Z-water-overlap-audit-smoke/report.json`
+  - result: `LOD water overlap 2`, `LOD gaps 0`, `LOD overlap LOD0/bands 0/0`
+- Root cause:
+  - LOD water meshing treated the top of a vertical chunk as air because it had no same-chunk `y + 1` voxel
+  - when water continued into the chunk above, the lower chunk emitted an internal water top surface
+  - these were transparent surfaces, so the old opaque overlap probe could not identify the remaining shimmer risk
+- Fix:
+  - LOD water top meshing now suppresses a chunk-boundary top face when the procedural water column continues above that boundary
+  - the coverage probe now distinguishes water surfaces from water volume, so vertical water columns are not counted as overlap unless they expose multiple transparent top surfaces
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun test tests/lod-system.test.ts tests/game-route-benchmark.test.ts tests/game-bootstrap-benchmark.test.ts`: pass, `36` tests.
+  - Direct browser lab: `artifacts/owned-browser-lab/20260507T234616Z-water-overlap-fixed-smoke/report.json`, failures none.
+  - Browser result: `LOD water overlap 0`, `LOD gaps 0`, `LOD overlap LOD0/bands 0/0`, route p95/max `4.90/31.50 ms`, traversal p95/max `4.90/26.70 ms`.
+- Rubric movement:
+  - Rendering correctness: `5.2 -> 5.35` because transparent water now has its own overlap signal and the first detected issue is fixed.
+  - Harness maturity: `6.15 -> 6.25` because the browser lab no longer conflates opaque terrain coverage with transparent-water correctness.
+- Next:
+  - checkpoint the water audit
+  - add direct surface-continuity probes for the remaining broad seam candidates
+  - keep using object lab for individual ashland silhouettes before another broad worldgen pass

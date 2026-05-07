@@ -1557,7 +1557,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           }
           const above = y + 1 < cs
             ? chunk.data[x + (y + 1) * cs + z * chunkArea]!
-            : 0;
+            : this.isLodWaterContinuingAboveChunk(cx, cy, cz, x, z, y, stride, worldSize)
+              ? material
+              : 0;
           mask[maskIndex++] = isProceduralWaterMaterial(above) ? 0 : material;
         }
       }
@@ -1677,6 +1679,23 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       triangleCount: quadCount * 2,
       bounds: { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
     };
+  }
+
+  private isLodWaterContinuingAboveChunk(
+    cx: number,
+    cy: number,
+    cz: number,
+    localX: number,
+    localZ: number,
+    localY: number,
+    stride: number,
+    worldSize: number,
+  ): boolean {
+    const worldX = cx * worldSize + localX * stride;
+    const worldZ = cz * worldSize + localZ * stride;
+    const topPlaneY = cy * worldSize + (localY + 1) * stride;
+    const column = this.generator.sampleSurfaceColumn(worldX, worldZ);
+    return column.waterTopY !== null && column.waterTopY >= topPlaneY;
   }
 
   private computeChunkYRange(cx: number, cz: number): [number, number] {
