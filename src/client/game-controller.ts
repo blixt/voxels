@@ -71,7 +71,7 @@ import {
   WebGpuVoxelRenderer,
   type RenderStats,
 } from "../engine/renderer.ts";
-import { setChunkMeshDirtyState } from "../engine/world.ts";
+import { setChunkMeshDirtyState, type VoxelChunk } from "../engine/world.ts";
 import { metersToWorldUnits, worldUnitsToMeters } from "../engine/scale.ts";
 import {
   shouldPumpWorldWork,
@@ -418,6 +418,8 @@ export interface LodCoverageProbe {
 interface LodCoverageSpan {
   label: string;
   strideMeters: number;
+  chunk: VoxelChunk;
+  chunkSize: number;
   minX: number;
   maxX: number;
   minZ: number;
@@ -1150,7 +1152,13 @@ export class GameController {
         const renderReady = this.world.isColumnRenderReady(chunkX, chunkZ);
         const lodBandStrideMeters = new Map<string, number>();
         for (const span of lodSpans) {
-          if (worldX >= span.minX && worldX < span.maxX && worldZ >= span.minZ && worldZ < span.maxZ) {
+          if (
+            worldX >= span.minX
+            && worldX < span.maxX
+            && worldZ >= span.minZ
+            && worldZ < span.maxZ
+            && isWorldColumnCoveredByLodChunk(span.chunk, worldX, worldZ, this.world.chunkSize)
+          ) {
             lodBandStrideMeters.set(span.label, span.strideMeters);
           }
         }
@@ -1232,6 +1240,8 @@ export class GameController {
       spans.push({
         label: `LOD${chunk.lodLevel}`,
         strideMeters: worldUnitsToMeters(chunk.voxelStride),
+        chunk,
+        chunkSize: this.world.chunkSize,
         minX: chunk.coord.x * worldSize,
         maxX: (chunk.coord.x + 1) * worldSize,
         minZ: chunk.coord.z * worldSize,
@@ -1264,6 +1274,7 @@ export class GameController {
         !residency.complete
         || residency.pendingChunks > 0
         || this.lastMeshBuildSummary.meshCount > 0
+        || this.lastLodSummary.pending > 0
       )
     ) {
       residency = this.syncWorldAroundPlayer(true);
@@ -3187,7 +3198,35 @@ function isCoveredByLodSpans(
   lodSpans: readonly LodCoverageSpan[],
 ): boolean {
   for (const span of lodSpans) {
-    if (worldX >= span.minX && worldX < span.maxX && worldZ >= span.minZ && worldZ < span.maxZ) {
+    if (
+      worldX >= span.minX
+      && worldX < span.maxX
+      && worldZ >= span.minZ
+      && worldZ < span.maxZ
+      && isWorldColumnCoveredByLodChunk(span.chunk, worldX, worldZ, span.chunkSize)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isWorldColumnCoveredByLodChunk(
+  chunk: VoxelChunk,
+  worldX: number,
+  worldZ: number,
+  chunkSize: number,
+): boolean {
+  const stride = Math.max(1, chunk.voxelStride);
+  const worldSize = chunkSize * stride;
+  const localX = Math.floor((worldX - chunk.coord.x * worldSize) / stride);
+  const localZ = Math.floor((worldZ - chunk.coord.z * worldSize) / stride);
+  if (localX < 0 || localX >= chunkSize || localZ < 0 || localZ >= chunkSize) {
+    return false;
+  }
+  const chunkArea = chunkSize * chunkSize;
+  for (let localY = 0; localY < chunkSize; localY += 1) {
+    if (chunk.data[localX + localY * chunkSize + localZ * chunkArea] !== 0) {
       return true;
     }
   }

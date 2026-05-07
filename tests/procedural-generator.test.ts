@@ -1064,6 +1064,27 @@ test("ashland exploration landmarks add Morrowind-like silhouettes", () => {
   expect(seen.has("pilgrim_cairn")).toBe(true);
 });
 
+test("ashland and old-road landmarks render shaped caps instead of block columns", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+
+  for (const landmarkId of ["ash_marker", "velothi_shrine"] as const) {
+    const root = findRepresentativeLandmarkRoot(generator, landmarkId);
+    expect(root).not.toBeNull();
+    expect(generator.sampleMaterial(root!.x, root!.probe.surfaceY + 1, root!.z)).not.toBe(0);
+
+    const featureHeight = root!.probe.topY - root!.probe.surfaceY;
+    const shaftY = root!.probe.surfaceY + 1 + Math.floor(featureHeight * 0.45);
+    const capY = root!.probe.surfaceY + 1 + Math.floor(featureHeight * 0.88);
+    const shaft = measureCrossSection(generator, root!.x, root!.z, shaftY, 10);
+    const cap = measureCrossSection(generator, root!.x, root!.z, capY, 10);
+
+    expect(shaft.count).toBeGreaterThan(0);
+    expect(cap.count).toBeGreaterThan(shaft.count);
+    expect(cap.widthX).toBeGreaterThanOrEqual(shaft.widthX + 4);
+    expect(cap.widthX).toBeGreaterThan(cap.widthZ);
+  }
+});
+
 test("underwater columns no longer expose grassy surface materials", () => {
   const generator = new ProceduralWorldGenerator(1337);
   let underwaterColumns = 0;

@@ -88,6 +88,26 @@ function downsample2x2x2FromSource(
   return bestMaterial;
 }
 
+function lodVoxelFootprintOverlapsRenderReadyLod0(
+  world: ProceduralResidentWorld,
+  worldX: number,
+  worldZ: number,
+  stride: number,
+): boolean {
+  const minChunkX = Math.floor(worldX / CHUNK_SIZE);
+  const maxChunkX = Math.floor((worldX + stride - 1) / CHUNK_SIZE);
+  const minChunkZ = Math.floor(worldZ / CHUNK_SIZE);
+  const maxChunkZ = Math.floor((worldZ + stride - 1) / CHUNK_SIZE);
+  for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
+    for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
+      if (world.isColumnRenderReady(chunkX, chunkZ)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Downsample correctness
 // ---------------------------------------------------------------------------
@@ -142,12 +162,14 @@ describe("LOD downsampling", () => {
               continue;
             }
 
-            const expectedMat = downsample2x2x2FromSource(
-              srcChunk.data,
-              wx - srcCx * sourceWorldSize,
-              wy - srcCy * sourceWorldSize,
-              wz - srcCz * sourceWorldSize,
-            );
+            const expectedMat = world.isColumnRenderReady(srcCx, srcCz)
+              ? 0
+              : downsample2x2x2FromSource(
+                  srcChunk.data,
+                  wx - srcCx * sourceWorldSize,
+                  wy - srcCy * sourceWorldSize,
+                  wz - srcCz * sourceWorldSize,
+                );
 
             if (lodMat !== expectedMat) {
               throw new Error(
@@ -176,10 +198,10 @@ describe("LOD downsampling", () => {
     // Build a lookup map for LOD 1 chunk data
     const srcStride = 1 << (level - 1); // 2
     const srcWorldSize = CHUNK_SIZE * srcStride; // 64
-    const srcMap = new Map<string, Uint16Array>();
+    const srcMap = new Map<string, VoxelChunk>();
     for (const chunk of world.iterateResidentChunks()) {
       if (chunk.lodLevel === level - 1) {
-        srcMap.set(`${chunk.coord.x}:${chunk.coord.y}:${chunk.coord.z}`, chunk.data);
+        srcMap.set(`${chunk.coord.x}:${chunk.coord.y}:${chunk.coord.z}`, chunk);
       }
     }
 
@@ -206,15 +228,19 @@ describe("LOD downsampling", () => {
             const srcCx = Math.floor(wx / srcWorldSize);
             const srcCy = Math.floor(wy / srcWorldSize);
             const srcCz = Math.floor(wz / srcWorldSize);
-            const srcData = srcMap.get(`${srcCx}:${srcCy}:${srcCz}`) ?? null;
-            if (!srcData) {
+            const srcChunk = srcMap.get(`${srcCx}:${srcCy}:${srcCz}`) ?? null;
+            if (!srcChunk) {
               continue;
             }
 
             const sLx = Math.floor((wx - srcCx * srcWorldSize) / srcStride);
             const sLy = Math.floor((wy - srcCy * srcWorldSize) / srcStride);
             const sLz = Math.floor((wz - srcCz * srcWorldSize) / srcStride);
-            const expectedMat = downsample2x2x2FromSource(srcData, sLx, sLy, sLz);
+            const expectedMat = lodVoxelFootprintOverlapsRenderReadyLod0(world, wx, wz, stride)
+              ? 0
+              : srcChunk.renderReady
+              ? 0
+              : downsample2x2x2FromSource(srcChunk.data, sLx, sLy, sLz);
 
             if (lodMat !== expectedMat) {
               throw new Error(
@@ -246,10 +272,10 @@ describe("LOD downsampling", () => {
       const srcLevel = targetLevel - 1;
       const srcStride = 1 << srcLevel;
       const srcWorldSize = CHUNK_SIZE * srcStride;
-      const srcMap = new Map<string, Uint16Array>();
+      const srcMap = new Map<string, VoxelChunk>();
       for (const chunk of world.iterateResidentChunks()) {
         if (chunk.lodLevel === srcLevel) {
-          srcMap.set(`${chunk.coord.x}:${chunk.coord.y}:${chunk.coord.z}`, chunk.data);
+          srcMap.set(`${chunk.coord.x}:${chunk.coord.y}:${chunk.coord.z}`, chunk);
         }
       }
 
@@ -272,15 +298,19 @@ describe("LOD downsampling", () => {
               const sCx = Math.floor(wx / srcWorldSize);
               const sCy = Math.floor(wy / srcWorldSize);
               const sCz = Math.floor(wz / srcWorldSize);
-              const srcData = srcMap.get(`${sCx}:${sCy}:${sCz}`) ?? null;
-              if (!srcData) {
+              const srcChunk = srcMap.get(`${sCx}:${sCy}:${sCz}`) ?? null;
+              if (!srcChunk) {
                 continue;
               }
 
               const sLx = Math.floor((wx - sCx * srcWorldSize) / srcStride);
               const sLy = Math.floor((wy - sCy * srcWorldSize) / srcStride);
               const sLz = Math.floor((wz - sCz * srcWorldSize) / srcStride);
-              const expectedMat = downsample2x2x2FromSource(srcData, sLx, sLy, sLz);
+              const expectedMat = lodVoxelFootprintOverlapsRenderReadyLod0(world, wx, wz, stride)
+                ? 0
+                : srcChunk.renderReady
+                ? 0
+                : downsample2x2x2FromSource(srcChunk.data, sLx, sLy, sLz);
 
               if (lodMat !== expectedMat) {
                 throw new Error(
@@ -302,10 +332,10 @@ describe("LOD downsampling", () => {
 
     const srcStride = 2;
     const srcWorldSize = CHUNK_SIZE * srcStride;
-    const lod1Map = new Map<string, Uint16Array>();
+    const lod1Map = new Map<string, VoxelChunk>();
     for (const chunk of world.iterateResidentChunks()) {
       if (chunk.lodLevel === 1) {
-        lod1Map.set(`${chunk.coord.x}:${chunk.coord.y}:${chunk.coord.z}`, chunk.data);
+        lod1Map.set(`${chunk.coord.x}:${chunk.coord.y}:${chunk.coord.z}`, chunk);
       }
     }
 
@@ -334,15 +364,19 @@ describe("LOD downsampling", () => {
             const srcCx = Math.floor(wx / srcWorldSize);
             const srcCy = Math.floor(wy / srcWorldSize);
             const srcCz = Math.floor(wz / srcWorldSize);
-            const srcData = lod1Map.get(`${srcCx}:${srcCy}:${srcCz}`) ?? null;
-            if (!srcData) {
+            const srcChunk = lod1Map.get(`${srcCx}:${srcCy}:${srcCz}`) ?? null;
+            if (!srcChunk) {
               continue;
             }
 
             const sLx = Math.floor((wx - srcCx * srcWorldSize) / srcStride);
             const sLy = Math.floor((wy - srcCy * srcWorldSize) / srcStride);
             const sLz = Math.floor((wz - srcCz * srcWorldSize) / srcStride);
-            const expected = downsample2x2x2FromSource(srcData, sLx, sLy, sLz);
+            const expected = lodVoxelFootprintOverlapsRenderReadyLod0(world, wx, wz, lod2Stride)
+              ? 0
+              : srcChunk.renderReady
+              ? 0
+              : downsample2x2x2FromSource(srcChunk.data, sLx, sLy, sLz);
 
             expect(actual).toBe(expected);
           }

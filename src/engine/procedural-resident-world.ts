@@ -840,7 +840,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         const data = this.downsampleLodChunkData(cx, cy, cz, ring.level, stride, worldSize);
         downsampleMs += performance.now() - dsStartedAt;
         if (data.solidCount === 0) {
-          this.emptyLodKeys.add(key);
+          if (!data.skippedFinerCoverage) {
+            this.emptyLodKeys.add(key);
+          }
           this.invalidateCoarserLodChunksForSourceChunk(ring.level, cx, cy, cz, {
             clearNeededKeyCache: false,
           });
@@ -1145,6 +1147,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     solidCount: number;
     solidBounds: { min: [number, number, number]; max: [number, number, number] } | null;
     sourceComplete: boolean;
+    skippedFinerCoverage: boolean;
   } {
     const cs = this.chunkSize;
     const chunkArea = cs * cs;
@@ -1178,6 +1181,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     let minX = cs, minY = cs, minZ = cs;
     let maxX = 0, maxY = 0, maxZ = 0;
     let sourceComplete = true;
+    let skippedFinerCoverage = false;
     let fallbackColumns: Array<ProceduralSurfaceColumnSample | null> | null = null;
     const recordMaterial = (ox: number, oy: number, oz: number, material: number): void => {
       data[ox + oy * cs + oz * chunkArea] = material;
@@ -1199,12 +1203,34 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       }
       return column;
     };
+    const isOutputColumnCoveredByRenderReadyLod0 = (ox: number, oz: number): boolean => {
+      const minWorldX = originX + ox * stride;
+      const maxWorldX = minWorldX + stride - 1;
+      const minWorldZ = originZ + oz * stride;
+      const maxWorldZ = minWorldZ + stride - 1;
+      const minChunkX = Math.floor(minWorldX / this.chunkSize);
+      const maxChunkX = Math.floor(maxWorldX / this.chunkSize);
+      const minChunkZ = Math.floor(minWorldZ / this.chunkSize);
+      const maxChunkZ = Math.floor(maxWorldZ / this.chunkSize);
+      for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
+        for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
+          if (this.isColumnRenderReady(chunkX, chunkZ)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
     const fillGeneratedFallbackColumn = (
       ox: number,
       oz: number,
       minOy: number,
       maxOyExclusive: number,
     ): void => {
+      if (isOutputColumnCoveredByRenderReadyLod0(ox, oz)) {
+        skippedFinerCoverage = true;
+        return;
+      }
       const column = sampleGeneratedFallbackColumn(ox, oz);
       let wroteWater = false;
       if (column.waterTopY !== null) {
@@ -1242,6 +1268,15 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           const srcCx = lodCx * ds + blockX;
           const minOx = blockX * outputBlockSize;
           const maxOx = minOx + outputBlockSize;
+
+          const coveredByFiner = level === 1
+            ? this.isColumnRenderReady(srcCx, srcCz)
+            : (this.lodChunks.get(`L${level - 1}:${srcCx}:${srcCy}:${srcCz}`)?.renderReady ?? false);
+          if (coveredByFiner) {
+            skippedFinerCoverage = true;
+            continue;
+          }
+
           const source = lookupSource(srcCx, srcCy, srcCz);
 
           if (!source.data) {
@@ -1261,6 +1296,10 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
             for (let oy = minOy; oy < maxOy; oy += 1) {
               const srcLy = (oy - minOy) * ds;
               for (let ox = minOx; ox < maxOx; ox += 1) {
+                if (isOutputColumnCoveredByRenderReadyLod0(ox, oz)) {
+                  skippedFinerCoverage = true;
+                  continue;
+                }
                 const srcLx = (ox - minOx) * ds;
 
                 // Downsample: scan the ds×ds×ds block starting at the source local coord,
@@ -1299,6 +1338,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       solidCount,
       solidBounds: solidCount === 0 ? null : { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
       sourceComplete,
+      skippedFinerCoverage,
     };
   }
 
@@ -1730,6 +1770,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       }
     }
     this.syncRenderReadyColumnKey(columnKey);
+    this.invalidateCoarserLodChunksForSourceColumn(0, chunk.coord.x, chunk.coord.z);
   }
 
   private syncRenderReadyColumnKey(columnKey: string): void {
@@ -1747,6 +1788,49 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     if (wasReady !== isReady) {
       this.renderReadyColumnRevision += 1;
       this.clearLodNeededKeyCache();
+    }
+  }
+
+  private invalidateCoarserLodChunksForSourceColumn(
+    sourceLevel: number,
+    sourceCx: number,
+    sourceCz: number,
+    options: { clearNeededKeyCache?: boolean } = {},
+  ): void {
+    if (options.clearNeededKeyCache !== false) {
+      this.clearLodNeededKeyCache();
+    }
+    const sourceStride = 1 << sourceLevel;
+    const sourceWorldSize = this.chunkSize * sourceStride;
+    const sourceWorldX = sourceCx * sourceWorldSize;
+    const sourceWorldZ = sourceCz * sourceWorldSize;
+    for (const ring of LOD_RINGS) {
+      if (ring.level <= sourceLevel) {
+        continue;
+      }
+      const stride = 1 << ring.level;
+      const worldSize = this.chunkSize * stride;
+      const lodCx = Math.floor(sourceWorldX / worldSize);
+      const lodCz = Math.floor(sourceWorldZ / worldSize);
+      const keyPrefix = `L${ring.level}:${lodCx}:`;
+      for (const key of [...this.lodChunks.keys()]) {
+        if (!key.startsWith(keyPrefix)) {
+          continue;
+        }
+        const parts = key.split(":");
+        if (Number.parseInt(parts[3]!, 10) === lodCz) {
+          this.lodChunks.delete(key);
+        }
+      }
+      for (const key of [...this.emptyLodKeys]) {
+        if (!key.startsWith(keyPrefix)) {
+          continue;
+        }
+        const parts = key.split(":");
+        if (Number.parseInt(parts[3]!, 10) === lodCz) {
+          this.emptyLodKeys.delete(key);
+        }
+      }
     }
   }
 

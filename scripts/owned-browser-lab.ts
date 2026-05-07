@@ -65,11 +65,14 @@ const PERFORMANCE_BUDGETS = {
   maxDrawCalls: 1_200,
   maxTriangles: 1_500_000,
   maxTraversalP95GameplayFrameMs: 120,
+  maxTraversalMaxGameplayFrameMs: 66,
   maxTraversalP95MeasuredWorkMs: 24,
   maxTraversalP95RenderCpuMs: 12,
   maxTraversalP95StreamMs: 12,
   maxTraversalP95MeshMs: 12,
   maxTraversalP95LodMs: 12,
+  maxRouteP95GameplayFrameMs: 120,
+  maxRouteMaxGameplayFrameMs: 66,
   maxRouteP95MeasuredWorkMs: 24,
   maxRouteP95RenderCpuMs: 12,
   maxRouteP95StreamMs: 12,
@@ -1018,6 +1021,7 @@ function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<stri
   }
   const traversalDistance = readNumber(traversalBudget, "totalDistanceMeters") ?? 0;
   const traversalP95GameplayFrameMs = readNumber(traversalBudget, "p95GameplayFrameMs") ?? 0;
+  const traversalMaxGameplayFrameMs = readNumber(traversalBudget, "maxGameplayFrameMs") ?? 0;
   const traversalP95MeasuredWorkMs = readNumber(traversalBudget, "p95MeasuredWorkMs") ?? 0;
   const traversalP95RenderCpuMs = readNumber(traversalBudget, "p95RenderCpuMs") ?? 0;
   const traversalP95StreamMs = readNumber(traversalBudget, "p95StreamMs") ?? 0;
@@ -1028,6 +1032,9 @@ function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<stri
   }
   if (traversalP95GameplayFrameMs > PERFORMANCE_BUDGETS.maxTraversalP95GameplayFrameMs) {
     failures.push(`traversal p95 gameplay frame ${traversalP95GameplayFrameMs.toFixed(2)} ms exceeds ${PERFORMANCE_BUDGETS.maxTraversalP95GameplayFrameMs} ms`);
+  }
+  if (traversalMaxGameplayFrameMs > PERFORMANCE_BUDGETS.maxTraversalMaxGameplayFrameMs) {
+    failures.push(`traversal max gameplay frame ${traversalMaxGameplayFrameMs.toFixed(2)} ms exceeds ${PERFORMANCE_BUDGETS.maxTraversalMaxGameplayFrameMs} ms`);
   }
   if (traversalP95MeasuredWorkMs > PERFORMANCE_BUDGETS.maxTraversalP95MeasuredWorkMs) {
     failures.push(`traversal p95 measured work ${traversalP95MeasuredWorkMs.toFixed(2)} ms exceeds ${PERFORMANCE_BUDGETS.maxTraversalP95MeasuredWorkMs} ms`);
@@ -1058,6 +1065,8 @@ function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<stri
     failures.push(`traversal benchmark captured ${traversalScreenCaptures} screen frames, expected at least ${PERFORMANCE_BUDGETS.minTraversalScreenCaptures}`);
   }
   const routeDistance = readNumber(routeBudget, "totalDistanceMeters") ?? 0;
+  const routeP95GameplayFrameMs = readNumber(routeBudget, "p95GameplayFrameMs") ?? 0;
+  const routeMaxGameplayFrameMs = readNumber(routeBudget, "maxGameplayFrameMs") ?? 0;
   const routeP95MeasuredWorkMs = readNumber(routeBudget, "p95MeasuredWorkMs") ?? 0;
   const routeP95RenderCpuMs = readNumber(routeBudget, "p95RenderCpuMs") ?? 0;
   const routeP95StreamMs = readNumber(routeBudget, "p95StreamMs") ?? 0;
@@ -1071,6 +1080,12 @@ function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<stri
   }
   if ((readNumber(routeBudget, "settleFrameCount") ?? 0) <= 0) {
     failures.push("route benchmark did not collect settle frames");
+  }
+  if (routeP95GameplayFrameMs > PERFORMANCE_BUDGETS.maxRouteP95GameplayFrameMs) {
+    failures.push(`route p95 gameplay frame ${routeP95GameplayFrameMs.toFixed(2)} ms exceeds ${PERFORMANCE_BUDGETS.maxRouteP95GameplayFrameMs} ms`);
+  }
+  if (routeMaxGameplayFrameMs > PERFORMANCE_BUDGETS.maxRouteMaxGameplayFrameMs) {
+    failures.push(`route max gameplay frame ${routeMaxGameplayFrameMs.toFixed(2)} ms exceeds ${PERFORMANCE_BUDGETS.maxRouteMaxGameplayFrameMs} ms`);
   }
   if (routeP95MeasuredWorkMs > PERFORMANCE_BUDGETS.maxRouteP95MeasuredWorkMs) {
     failures.push(`route p95 measured work ${routeP95MeasuredWorkMs.toFixed(2)} ms exceeds ${PERFORMANCE_BUDGETS.maxRouteP95MeasuredWorkMs} ms`);
@@ -1105,6 +1120,14 @@ function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<stri
   }
   const uncoveredGapCount = readNumber(lodCoverage, "uncoveredGapCount") ?? 0;
   const handoffHoleCount = readNumber(lodCoverage, "handoffHoleCount") ?? 0;
+  const residentOverlapCount = readNumber(lodCoverage, "residentOverlapCount") ?? 0;
+  const bandOverlapCount = readNumber(lodCoverage, "bandOverlapCount") ?? 0;
+  if (residentOverlapCount > 0) {
+    failures.push(`LOD coverage renders over ${residentOverlapCount} sampled render-ready LOD0 columns`);
+  }
+  if (bandOverlapCount > 0) {
+    failures.push(`LOD coverage has ${bandOverlapCount} sampled overlapping LOD bands`);
+  }
   if (uncoveredGapCount > 0) {
     failures.push(`LOD coverage has ${uncoveredGapCount} uncovered sampled gaps`);
   }
@@ -1168,6 +1191,7 @@ function printSummary(reportPath: string, report: {
     console.log(`route seam sample: ${JSON.stringify(routeBudget.seamGapSamples[0])}`);
   }
   console.log(`route screen captures: ${formatNumber(readNumber(routeBudget, "screenVoidCaptureCount"))}`);
+  console.log(`LOD overlap LOD0/bands: ${formatNumber(readNumber(lodCoverage, "residentOverlapCount"))}/${formatNumber(readNumber(lodCoverage, "bandOverlapCount"))}`);
   console.log(`LOD gaps: ${formatNumber(readNumber(lodCoverage, "uncoveredGapCount"))}`);
   console.log(`LOD handoff holes: ${formatNumber(readNumber(lodCoverage, "handoffHoleCount"))}`);
   console.log(`render-ready near samples: ${formatNumber(readNumber(renderReady, "renderReadySampleCount"))}/${formatNumber(readNumber(renderReady, "sampleCount"))}`);

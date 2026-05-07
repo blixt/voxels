@@ -3820,7 +3820,7 @@ function configureLandmarkFeature(
         "#544",
         "#C86",
       );
-      out.featureExtra = 1;
+      out.featureExtra = 2;
       return true;
     case "crystal_cluster":
       configureSpireFeature(
@@ -3864,7 +3864,7 @@ function configureLandmarkFeature(
         "#665",
         "#DA8",
       );
-      out.featureExtra = 1;
+      out.featureExtra = 2;
       return true;
     case "kwama_mound":
       configureSpireFeature(
@@ -4275,6 +4275,26 @@ function sampleFeatureMaterial(
       }
       return materialSecondary;
     case FEATURE_STANDING_STONE:
+      if (featureExtra >= 2) {
+        const baseHeight = Math.min(4, Math.max(2, Math.round(featureHeight * 0.16)));
+        if (relativeY <= baseHeight) {
+          const baseRadius = featureRadius + 1.25 - relativeY * 0.28;
+          return radial <= Math.max(1.4, baseRadius) ? materialPrimary : 0;
+        }
+        const roofBaseY = Math.max(baseHeight + 3, featureHeight - 3);
+        if (relativeY >= roofBaseY) {
+          const roofStep = relativeY - roofBaseY;
+          const roofHalfX = Math.max(1.8, featureRadius + 1.35 - roofStep * 0.65);
+          const roofHalfZ = Math.max(1.1, featureRadius * 0.48 - roofStep * 0.20);
+          return absX <= roofHalfX && absZ <= roofHalfZ ? materialSecondary : 0;
+        }
+        const doorwayHeight = Math.min(6, Math.max(3, Math.round(featureHeight * 0.26)));
+        if (relativeY <= baseHeight + doorwayHeight && absX <= 0.65 && featureDeltaZ < 0) {
+          return 0;
+        }
+        const columnRadius = Math.max(1.0, featureRadius * 0.48 - (relativeY - baseHeight) * 0.025);
+        return radial <= columnRadius ? materialPrimary : 0;
+      }
       return radial <= Math.max(1.1, featureRadius - relativeY * 0.2) ? materialPrimary : 0;
     case FEATURE_PALM: {
       const trunkHeight = Math.max(4, featureHeight - Math.max(4, Math.round(featureHeight * 0.20)));
@@ -4360,6 +4380,23 @@ function sampleFeatureMaterial(
         ? materialSecondary
         : 0;
     case FEATURE_BASALT_SPIRE:
+      if (featureExtra >= 2) {
+        const plinthHeight = Math.min(4, Math.max(2, Math.round(featureHeight * 0.12)));
+        if (relativeY <= plinthHeight) {
+          return radial <= Math.max(1.2, featureRadius + 1.4 - relativeY * 0.30) ? materialSecondary : 0;
+        }
+        const capBaseY = Math.max(plinthHeight + 4, featureHeight - 4);
+        if (relativeY >= capBaseY) {
+          const capStep = relativeY - capBaseY;
+          const capHalfX = Math.max(1.5, featureRadius + 1.1 - capStep * 0.55);
+          const capHalfZ = Math.max(1.0, featureRadius * 0.42 - capStep * 0.10);
+          if (absX <= capHalfX && absZ <= capHalfZ) {
+            return materialSecondary;
+          }
+        }
+        const shaftRadius = Math.max(0.9, featureRadius * 0.66 - (relativeY - plinthHeight) * 0.045);
+        return radial <= shaftRadius ? materialPrimary : 0;
+      }
       if (relativeY <= 1 + featureExtra && radial <= Math.max(1, featureRadius - relativeY * 0.15)) {
         return materialSecondary;
       }

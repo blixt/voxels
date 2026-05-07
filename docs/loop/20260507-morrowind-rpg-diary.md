@@ -909,3 +909,58 @@ Build the first "place identity" slice without regressing performance or input:
   - address the still-very-blocky terrain read with structural worldgen/silhouette work
   - tighten route budget gates and seam probes that subagents flagged as remaining harness risks
   - continue checkpoint commits after each validated slice; push still requires configuring a git remote in this worktree
+
+### 2026-05-07 - Browser Lab Max-Frame Gates
+
+- Hardened the owned browser lab against the class of regression the user observed: movement feeling like `10 FPS` while a summary metric looks acceptable.
+- Added explicit max gameplay frame gates:
+  - traversal max frame budget: `66 ms`
+  - route max frame budget: `66 ms`
+  - route p95 gameplay frame budget is now also explicit
+- Rationale:
+  - p95 and measured-work gates are useful but can miss isolated movement spikes
+  - max-frame gates make stop-walking / LOD / streaming hitches harder to hide in averages
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - Direct browser lab: `artifacts/owned-browser-lab/20260507T223129Z-max-frame-gate-smoke/report.json`, failures none.
+  - Direct result: traversal p95/max `4.50/18.40 ms`, route p95/max `4.50/27.60 ms`, holes/seams/blocking seams `0/54/0`, LOD gaps `0`, HUD smoke passed.
+- Rubric movement:
+  - Harness maturity: `5.3 -> 5.4` because movement hitches now fail a deterministic browser smoke instead of only appearing in printed summaries.
+- Next:
+  - add a real seam probe for the route samples instead of treating seam counts as mostly diagnostic
+  - integrate or review the parallel landmark/model polish worker result
+
+### 2026-05-07 - Exclusive LOD Coverage and Landmark Shape Checkpoint
+
+- Fixed a correctness/performance issue the user spotted visually: coarse LOD chunks could overlap render-ready fine chunks, creating z-fighting risk and extra draw cost.
+- New invariant: every sampled world column should be covered by one visible representation, not both a fine chunk and a coarser LOD band.
+- Implementation:
+  - coarser LOD generation now punches out columns whose footprint overlaps render-ready LOD0 columns
+  - coarser LOD invalidation now covers the whole source column across chunk heights so stale overlap meshes are regenerated after fine chunks become render-ready
+  - the client-side LOD coverage probe now checks actual non-empty data columns rather than treating a chunk footprint as fully covered
+  - the owned browser lab now fails on sampled LOD0/LOD overlap or overlapping LOD bands
+  - teleport-and-settle now waits for LOD pending work to reach zero before judging the scene
+- Integrated the parallel landmark polish:
+  - ash markers and old-road shrines now render shaped plinths/caps instead of simple block columns
+  - generator regression tests assert the shaped caps
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun test tests/lod-system.test.ts tests/game-route-benchmark.test.ts`: pass, `33` tests.
+  - `mise exec -- bun test tests/procedural-generator.test.ts tests/exploration-objectives.test.ts`: pass, `37` tests.
+  - Direct browser lab: `artifacts/owned-browser-lab/20260507T225016Z-lod-exclusive-coverage-smoke-6/report.json`, failures none.
+  - Full wrapper: `mise exec -- bun run scripts/verify-smoke.ts --label=lod-exclusive-landmark-wrapper`: pass.
+  - Summary artifact: `artifacts/verify-smoke/20260507T225132Z-lod-exclusive-landmark-wrapper/report.json`.
+  - Browser lab artifact: `artifacts/owned-browser-lab/20260507T225134Z-lod-exclusive-landmark-wrapper/report.json`.
+  - Wrapper result: `LOD pending 0`, `LOD overlap LOD0/bands 0/0`, `LOD gaps 0`, `LOD handoff holes 0`, traversal p95/max `4.50/18.90 ms`, route p95/max `4.30/31.10 ms`, draw/triangles `499/383470`, visual identity `0.40/0.68/109`, HUD smoke passed.
+- Honest assessment:
+  - This is a meaningful rendering correctness improvement and should directly address the reported LOD z-fighting class.
+  - The route seam diagnostic still reports non-blocking seam candidates, so the next correctness work should turn that into a more precise terrain-continuity probe rather than relying on the current broad counter.
+  - Visual identity is still too block/grid dominated at `0.68`; this checkpoint makes the renderer more correct, not yet less Minecraft-like.
+- Rubric movement:
+  - Rendering correctness: `4.2 -> 4.65` because the harness now proves no sampled fine/coarse LOD overlap or LOD band overlap after settling.
+  - Performance/playability: `4.15 -> 4.3` because overlap draw work is eliminated and max-frame gates stayed comfortably below budget.
+  - Harness maturity: `5.4 -> 5.65` because LOD z-fighting is now represented as a deterministic browser-lab failure condition.
+- Next:
+  - checkpoint this validated LOD/landmark slice in git
+  - build a sharper seam-continuity probe for route samples
+  - continue larger visual-structure work to reduce the blocky foreground read
