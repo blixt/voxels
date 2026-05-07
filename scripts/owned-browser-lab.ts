@@ -368,7 +368,6 @@ function buildPageProbeExpression(options: CliOptions): string {
           id,
           stageId: objectives.stageId,
           oldRoadObjective: summarizeObjective(objectives, oldRoadObjectiveId),
-          materialCount: imported.collectedMaterialIds.length,
           discoveredBiomeCount: imported.discovery.discoveredBiomeIds.length,
           discoveredLandmarkCount: imported.discovery.discoveredLandmarkIds.length,
           discoveredAncientLandmarkCount: snapshot.discoveredAncientLandmarkCount,
@@ -448,7 +447,6 @@ function buildPageProbeExpression(options: CliOptions): string {
         discoveredUndergroundBiomeCount: progress.discovery.discoveredUndergroundBiomeIds.length,
         discoveredRegionalVariantCount: progress.discovery.discoveredRegionalVariantIds.length,
         discoveredLandmarkCount: progress.discovery.discoveredLandmarkIds.length,
-        collectedMaterialIds: Array.isArray(progress.collectedMaterialIds) ? [...progress.collectedMaterialIds].sort((left, right) => left - right) : [],
         recentDiscoveries: progress.discovery.recentDiscoveries.map((discovery) => ({
           category: discovery.category,
           id: discovery.id,
@@ -529,10 +527,9 @@ function buildPageProbeExpression(options: CliOptions): string {
           spelunking: 0,
           lore: 0,
         };
-        fixture.collectedMaterialIds = rangeInclusive(1, 5);
         fixture.discovery.discoveredBiomeIds = sortedUnique(["verdant", "savanna", "dunes"]);
         fixture.discovery.discoveredUndergroundBiomeIds = [];
-        fixture.discovery.discoveredRegionalVariantIds = [];
+        fixture.discovery.discoveredRegionalVariantIds = ["savanna_flowersea"];
         fixture.discovery.discoveredLandmarkIds = sortedUnique(["oak", "standing_stone", "ancestor_pillar"]);
         return fixture;
       }
@@ -542,7 +539,6 @@ function buildPageProbeExpression(options: CliOptions): string {
         spelunking: 700,
         lore: 700,
       };
-      fixture.collectedMaterialIds = rangeInclusive(1, 16);
       fixture.discovery.discoveredBiomeIds = sortedUnique([
         "badlands",
         "bloom",
@@ -573,14 +569,6 @@ function buildPageProbeExpression(options: CliOptions): string {
         "glass_cairn",
       ]);
       return fixture;
-    }
-
-    function rangeInclusive(start: number, end: number) {
-      const values: number[] = [];
-      for (let value = start; value <= end; value += 1) {
-        values.push(value);
-      }
-      return values;
     }
 
     function progressSummariesMatch(left: ReturnType<typeof summarizeProgress>, right: ReturnType<typeof summarizeProgress>) {
@@ -966,17 +954,11 @@ function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<stri
   if ((readNumber(frontierOldRoad, "progress") ?? -1) !== 1 || (readNumber(frontierOldRoad, "target") ?? -1) !== 2) {
     failures.push(`frontier progress fixture old-road objective was ${formatNumber(readNumber(frontierOldRoad, "progress"))}/${formatNumber(readNumber(frontierOldRoad, "target"))}, expected 1/2`);
   }
-  if ((readNumber(frontierFixture, "materialCount") ?? 0) < 5) {
-    failures.push("frontier progress fixture did not preserve collected material IDs");
-  }
   if (readStringField(deepFixture, "stageId") !== "deep-expedition") {
     failures.push(`deep progress fixture reached ${readStringField(deepFixture, "stageId") ?? "unknown"} instead of deep-expedition`);
   }
   if ((readNumber(deepOldRoad, "progress") ?? -1) !== 3 || (readNumber(deepOldRoad, "target") ?? -1) !== 4) {
     failures.push(`deep progress fixture old-road objective was ${formatNumber(readNumber(deepOldRoad, "progress"))}/${formatNumber(readNumber(deepOldRoad, "target"))}, expected 3/4`);
-  }
-  if ((readNumber(deepFixture, "materialCount") ?? 0) < 16) {
-    failures.push("deep progress fixture did not preserve collected material IDs");
   }
   const frontierScanRadius = readNumber(frontierFixture, "landmarkScanRadiusMeters");
   const deepScanRadius = readNumber(deepFixture, "landmarkScanRadiusMeters");
@@ -1408,7 +1390,10 @@ async function runHudSmoke(cdp: CdpConnection): Promise<Record<string, unknown>>
       capturePresent: capture instanceof HTMLElement,
       promptVisible: capture instanceof HTMLElement && capture.innerText.includes("Click to play"),
       canvasPresent: canvas instanceof HTMLCanvasElement,
-      legacyTextFound: /Show Debug|Hide Debug|No voxel in reach|Targeting/.test(text),
+      legacyTextFound: /Show Debug|Hide Debug|No voxel in reach|Targeting|Inventory|Hotbar/.test(text),
+      minecraftHudFound: Boolean(
+        document.querySelector(".game-hotbar, .game-inventory-panel, .target-overlay"),
+      ),
       clickX: Math.round(window.innerWidth / 2),
       clickY: Math.round(window.innerHeight / 2),
     };
@@ -1452,7 +1437,10 @@ async function runHudSmoke(cdp: CdpConnection): Promise<Record<string, unknown>>
         : null,
       pointerEvents: style?.pointerEvents ?? null,
       opacity: style?.opacity ?? null,
-      legacyTextFound: /Show Debug|Hide Debug|No voxel in reach|Targeting/.test(document.body.innerText),
+      legacyTextFound: /Show Debug|Hide Debug|No voxel in reach|Targeting|Inventory|Hotbar/.test(document.body.innerText),
+      minecraftHudFound: Boolean(
+        document.querySelector(".game-hotbar, .game-inventory-panel, .target-overlay"),
+      ),
       requestPointerLockCalled: probe.called === true,
       requestPointerLockTargetRole: probe.targetRole ?? null,
       requestPointerLockRejected: probe.rejected === true,
@@ -1500,6 +1488,8 @@ async function runHudSmoke(cdp: CdpConnection): Promise<Record<string, unknown>>
   })()`);
   const passed = before.legacyTextFound !== true
     && after.legacyTextFound !== true
+    && before.minecraftHudFound !== true
+    && after.minecraftHudFound !== true
     && after.requestPointerLockCalled === true
     && (after.requestPointerLockTargetRole === "capture" || after.requestPointerLockTargetRole === "canvas")
     && (

@@ -4,7 +4,6 @@ export interface ExplorationObjectiveSource {
   discoveredRegionalVariantCount: number;
   discoveredLandmarkCount: number;
   discoveredAncientLandmarkCount: number;
-  collectedMaterialCount: number;
 }
 
 export interface ExplorationObjective {
@@ -30,7 +29,7 @@ export function describeExplorationObjectives(
   const surveyObjectives = [
     buildObjective("biomes-3", "Survey 3 surface biomes", source.discoveredBiomeCount, 3),
     buildObjective("landmarks-3", "Catalog 3 landmarks", source.discoveredLandmarkCount, 3),
-    buildObjective("colors-4", "Identify 4 field materials", source.collectedMaterialCount, 4),
+    buildObjective("variants-1", "Find a regional variant", source.discoveredRegionalVariantCount, 1),
   ];
   if (!allObjectivesComplete(surveyObjectives)) {
     return buildSnapshot(
@@ -45,7 +44,7 @@ export function describeExplorationObjectives(
     buildObjective("biomes-6", "Survey 6 surface biomes", source.discoveredBiomeCount, 6),
     buildObjective("variants-2", "Find 2 regional variants", source.discoveredRegionalVariantCount, 2),
     buildObjective("ancient-signs-2", "Trace 2 old road signs", source.discoveredAncientLandmarkCount, 2),
-    buildObjective("colors-8", "Identify 8 field materials", source.collectedMaterialCount, 8),
+    buildObjective("landmarks-6", "Catalog 6 landmarks", source.discoveredLandmarkCount, 6),
     buildObjective("underground-1", "Enter the first underground biome", source.discoveredUndergroundBiomeCount, 1),
   ];
   if (!allObjectivesComplete(frontierObjectives)) {
@@ -63,7 +62,7 @@ export function describeExplorationObjectives(
     buildObjective("variants-4", "Find 4 regional variants", source.discoveredRegionalVariantCount, 4),
     buildObjective("ancient-signs-4", "Trace 4 old road signs", source.discoveredAncientLandmarkCount, 4),
     buildObjective("underground-3", "Enter 3 underground biomes", source.discoveredUndergroundBiomeCount, 3),
-    buildObjective("colors-16", "Identify 16 field materials", source.collectedMaterialCount, 16),
+    buildObjective("landmarks-12", "Catalog 12 landmarks", source.discoveredLandmarkCount, 12),
   ];
   return buildSnapshot(
     "deep-expedition",

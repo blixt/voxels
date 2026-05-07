@@ -79,9 +79,7 @@ body::before {
 
 .game-status-strip,
 .game-performance-strip,
-.game-hotbar,
-.game-target-card,
-.game-inventory-panel,
+.game-rpg-hud,
 .discovery-achievement,
 .capture-card {
   color: #f6f1e6;
@@ -166,265 +164,53 @@ body::before {
   position: absolute;
   left: 50%;
   bottom: max(12px, env(safe-area-inset-bottom));
-  width: min(520px, calc(100vw - 24px));
-  display: grid;
-  gap: 6px;
-  justify-items: center;
+  max-width: calc(100vw - 24px);
   transform: translateX(-50%);
   pointer-events: none;
 }
 
-.game-target-card {
+.game-rpg-hud {
   display: flex;
-  gap: 8px;
-  align-items: baseline;
-  max-width: min(320px, calc(100vw - 24px));
-  padding: 6px 10px;
-}
-
-.game-target-card[hidden] {
-  display: none;
-}
-
-.game-target-title,
-.game-target-meta {
-  margin: 0;
-  min-width: 0;
-  line-height: 1;
-}
-
-.game-target-title {
-  max-width: 22ch;
-  overflow: hidden;
-  color: #fff6d7;
-  font-size: 0.76rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.game-target-meta {
-  color: rgba(246, 241, 230, 0.64);
-  font-size: 0.68rem;
-  white-space: nowrap;
-}
-
-.game-hotbar {
-  display: grid;
-  grid-template-columns: repeat(9, 42px);
-  gap: 4px;
-  padding: 5px;
-}
-
-.game-hotbar-slot {
-  position: relative;
-  width: 42px;
-  height: 42px;
-  display: grid;
-  place-items: center;
-  padding: 4px;
-  border: 1px solid rgba(246, 241, 230, 0.1);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.03);
-  transition:
-    border-color 120ms ease,
-    background 120ms ease,
-    transform 120ms ease;
-}
-
-.game-hotbar-slot[hidden] {
-  display: none;
-}
-
-.game-hotbar-slot.is-selected {
-  border-color: rgba(244, 207, 114, 0.86);
-  background: rgba(244, 207, 114, 0.16);
-  transform: translateY(-2px);
-}
-
-.game-hotbar-slot-index,
-.game-hotbar-slot-count {
-  position: absolute;
-  z-index: 1;
-  color: rgba(246, 241, 230, 0.68);
-  font-size: 0.58rem;
-  line-height: 1;
-}
-
-.game-hotbar-slot-index {
-  top: 4px;
-  left: 4px;
-}
-
-.game-hotbar-slot-count {
-  right: 4px;
-  bottom: 4px;
-  max-width: 24px;
-  overflow: hidden;
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.game-hotbar-slot-swatch {
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.12);
-}
-
-.game-hotbar-slot-material {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
-.game-hotbar-slot-fill {
-  position: absolute;
-  left: 4px;
-  right: 4px;
-  bottom: 2px;
-  height: 2px;
-  transform-origin: left center;
-  border-radius: 999px;
-  background: #f0cf72;
-}
-
-.game-hotbar-slot.is-empty .game-hotbar-slot-fill {
-  opacity: 0.18;
-}
-
-.game-inventory-panel {
-  position: absolute;
-  left: 14px;
-  bottom: 14px;
-  width: min(450px, calc(100vw - 28px));
-  display: grid;
-  gap: 8px;
-  padding: 10px;
-}
-
-.game-inventory-panel[hidden] {
-  display: none;
-}
-
-.game-inventory-panel-title,
-.game-inventory-panel-summary {
-  margin: 0;
-}
-
-.game-inventory-panel-title {
-  font-size: 0.9rem;
-  line-height: 1.1;
-}
-
-.game-inventory-panel-summary {
-  color: rgba(246, 241, 230, 0.66);
+  gap: 10px;
+  align-items: center;
+  width: fit-content;
+  max-width: calc(100vw - 24px);
+  padding: 7px 10px;
+  color: rgba(246, 241, 230, 0.76);
   font-size: 0.72rem;
 }
 
-.game-inventory-grid {
-  display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
-  gap: 5px;
-}
-
-.game-inventory-slot {
-  position: relative;
+.game-rpg-region,
+.game-rpg-landmark,
+.game-rpg-skill,
+.game-rpg-discovery {
   min-width: 0;
-  height: 38px;
-  display: grid;
-  place-items: center;
-  padding: 4px;
-  border: 1px solid rgba(246, 241, 230, 0.09);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.03);
+  overflow: hidden;
+  line-height: 1.05;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.game-inventory-slot.is-selected {
-  border-color: rgba(244, 207, 114, 0.82);
-  background: rgba(244, 207, 114, 0.16);
+.game-rpg-region {
+  color: #fff6d7;
+  font-size: 0.84rem;
 }
 
-.game-inventory-slot-index,
-.game-inventory-slot-count {
-  position: absolute;
-  color: rgba(246, 241, 230, 0.58);
-  font-size: 0.56rem;
-  line-height: 1;
+.game-rpg-landmark,
+.game-rpg-discovery {
+  color: rgba(246, 241, 230, 0.68);
 }
 
-.game-inventory-slot-index {
-  top: 4px;
-  left: 4px;
+.game-rpg-skill {
+  color: #f0cf72;
+  font-weight: 700;
 }
 
-.game-inventory-slot-count {
-  right: 4px;
-  bottom: 4px;
-}
-
-.game-inventory-slot-swatch {
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-}
-
-.game-inventory-slot-material,
-.game-inventory-slot-fill {
-  display: none;
-}
-
-.target-overlay {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
-  pointer-events: none;
-}
-
-.target-overlay[hidden] {
-  display: none;
-}
-
-.target-overlay-face {
-  fill: rgba(244, 207, 114, 0.1);
-  stroke: rgba(255, 246, 215, 0.58);
-  stroke-width: 1.5px;
-  vector-effect: non-scaling-stroke;
-}
-
-.target-overlay-preview-face {
-  fill: rgba(129, 212, 232, 0.1);
-  stroke: rgba(166, 235, 250, 0.72);
-  stroke-width: 1.5px;
-  vector-effect: non-scaling-stroke;
-}
-
-.target-overlay-line {
-  stroke: rgba(255, 246, 215, 0.95);
-  stroke-width: 2px;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  vector-effect: non-scaling-stroke;
-}
-
-.target-overlay-preview-line {
-  stroke: rgba(166, 235, 250, 0.95);
-  stroke-width: 1.6px;
-  stroke-dasharray: 6 4;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  vector-effect: non-scaling-stroke;
-}
-
-.target-overlay.is-breakable .target-overlay-line {
-  stroke: rgba(244, 207, 114, 0.98);
+.game-rpg-landmark,
+.game-rpg-skill,
+.game-rpg-discovery {
+  padding-left: 10px;
+  border-left: 1px solid rgba(246, 241, 230, 0.14);
 }
 
 .crosshair {
@@ -891,12 +677,8 @@ code {
     display: none;
   }
 
-  .game-hotbar {
-    grid-template-columns: repeat(9, 34px);
-  }
-
-  .game-hotbar-slot {
-    width: 34px;
-    height: 38px;
+  .game-rpg-landmark,
+  .game-rpg-discovery {
+    display: none;
   }
 }

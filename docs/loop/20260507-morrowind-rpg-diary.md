@@ -868,3 +868,44 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint this validated work in git and push it
   - remove Minecraft-like material gathering/placement UI in favor of a sparse RPG HUD
   - use the visual identity probe to judge the next structural visual pass instead of guessing from a single screenshot
+
+### 2026-05-07 - Removed Player-Facing Block Tools and Tightened RPG HUD
+
+- Removed the Minecraft-like player loop from the live game surface:
+  - no hotbar DOM
+  - no inventory panel DOM
+  - no block targeting/placement SVG overlay
+  - no click-to-break or right-click-to-place input binding
+  - no wheel/digit inventory slot controls
+  - `window.__VOXELS_GAME__` no longer exposes player gather/place or inventory UI APIs
+- Kept low-level inventory/interaction modules and tests intact for tooling and regression fixtures; this change removes the player-facing mechanic, not every engine edit primitive.
+- Reworked objectives away from material collection:
+  - surface survey now asks for a regional variant instead of field materials
+  - frontier/deep objectives use landmarks, variants, old-road signs, and underground discovery
+  - old save imports tolerate obsolete material fields by ignoring them
+- HUD/UI:
+  - replaced the long hotbar and target card with a compact RPG readout for region, nearby landmark/ambience, focus skill, and last discovery
+  - tightened the bottom HUD after screenshot inspection because the first version used too much surface for too little information
+  - changed the top-right performance readout from derived FPS to frame time in milliseconds so hitches are represented more honestly
+- Harness updates:
+  - owned browser lab now rejects old hotbar/inventory/target-overlay DOM if it reappears
+  - removed stale material-ID fixture gates from progress smoke
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun run build`: pass.
+  - `mise exec -- bun test tests/exploration-objectives.test.ts tests/ambient-environment.test.ts tests/game-bootstrap-benchmark.test.ts`: pass, `7` tests.
+  - `mise exec -- bun test tests/interaction-loop.test.ts tests/inventory.test.ts tests/hotbar-layout.test.ts tests/targeting-overlay.test.ts tests/exploration-journal.test.ts tests/skill-journal.test.ts`: pass, `21` tests.
+  - Direct browser lab: `artifacts/owned-browser-lab/20260507T222735Z-rpg-hud-compact-smoke/report.json`, failures none.
+  - Direct screenshot: `artifacts/owned-browser-lab/20260507T222735Z-rpg-hud-compact-smoke/settled-page.png`.
+  - Full wrapper: `mise exec -- bun run scripts/verify-smoke.ts --label=rpg-hud-no-material-tools-wrapper`: pass.
+  - Summary artifact: `artifacts/verify-smoke/20260507T222846Z-rpg-hud-no-material-tools-wrapper/report.json`.
+  - Browser lab artifact: `artifacts/owned-browser-lab/20260507T222851Z-rpg-hud-no-material-tools-wrapper/report.json`.
+  - Wrapper result: bootstrap playable/visual `279.60/279.60 ms`, bootstrap p95/max `24.90/24.90 ms`, traversal p95/max `5.10/16.20 ms`, route p95/max `5.00/27.40 ms`, holes/seams/blocking seams `0/53/0`, LOD gaps `0`, handoff holes `0`, HUD smoke passed.
+- Rubric movement:
+  - UI/RPG framing: `2.6 -> 3.25` because the visible interface no longer centers block gathering/placement and now presents exploration identity.
+  - Harness maturity: `5.2 -> 5.3` because the browser smoke now catches regression to the old Minecraft-style DOM.
+  - Performance/playability: stays `4.15`; the UI removal did not regress route/traversal budgets.
+- Next:
+  - address the still-very-blocky terrain read with structural worldgen/silhouette work
+  - tighten route budget gates and seam probes that subagents flagged as remaining harness risks
+  - continue checkpoint commits after each validated slice; push still requires configuring a git remote in this worktree

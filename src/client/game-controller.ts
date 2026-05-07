@@ -17,7 +17,6 @@ import {
 import {
   buildFirstPersonCameraMatrices,
   createFirstPersonCamera,
-  createForwardRay,
   rotateFirstPersonCamera,
   type FirstPersonCameraState,
 } from "../engine/first-person-camera.ts";
@@ -38,19 +37,6 @@ import {
   describeExplorationSkillEffects,
   type ExplorationSkillEffects,
 } from "../engine/exploration-skill-effects.ts";
-import {
-  breakVoxelAlongRay,
-  placeSelectedVoxelAlongRay,
-} from "../engine/interaction-loop.ts";
-import {
-  countUsedInventoryStacks,
-  createInventoryState,
-  cycleInventorySlot,
-  getInventoryInsertCapacity,
-  getSelectedInventoryStack,
-  selectInventorySlot,
-  type InventoryState,
-} from "../engine/inventory.ts";
 import {
   buildChunkMesh,
   buildChunkMeshFromOpaqueGeometry,
@@ -80,7 +66,7 @@ import {
   type ResidencyUpdateSummary,
   type WorldEditRecord,
 } from "../engine/procedural-resident-world.ts";
-import { ProceduralWorldGenerator, materialToHexColor } from "../engine/procedural-generator.ts";
+import { ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
 import {
   WebGpuVoxelRenderer,
   type RenderStats,
@@ -97,12 +83,6 @@ import {
   type StreamAnchor,
 } from "../engine/stream-anchor.ts";
 import type { Vec3 } from "../engine/types.ts";
-import { raycastResidentWorld, type VoxelRayHit } from "../engine/voxel-raycast.ts";
-import {
-  buildTargetingOverlayGeometry,
-  buildVoxelOverlayGeometry,
-  type TargetingOverlayGeometry,
-} from "../engine/targeting-overlay.ts";
 import {
   buildAmbientRenderEnvironment,
   resolveAmbientWorldProfile,
@@ -129,7 +109,6 @@ const DISCOVERY_SAMPLE_INTERVAL_MS = 250;
 const DISCOVERY_SAMPLE_MOVE_THRESHOLD_WORLD_UNITS = metersToWorldUnits(0.8);
 const TRAVEL_CONTEXT_SAMPLE_INTERVAL_MS = 250;
 const TRAVEL_CONTEXT_SAMPLE_MOVE_THRESHOLD_WORLD_UNITS = metersToWorldUnits(0.8);
-const INTERACTION_REACH_WORLD_UNITS = metersToWorldUnits(5);
 const ANCIENT_LANDMARK_IDS = new Set([
   "ancestor_pillar",
   "ash_marker",
@@ -143,7 +122,6 @@ const LANDMARK_SAMPLE_OFFSET_CACHE = new Map<string, ReadonlyArray<readonly [num
 export interface GameHudSnapshot {
   status: string;
   pointerLocked: boolean;
-  inventoryPanelOpen: boolean;
   position: Vec3;
   feetPosition: Vec3;
   playerChunk: [number, number, number];
@@ -195,11 +173,6 @@ export interface GameHudSnapshot {
   focusSkillProgressRatio: number;
   totalSkillTravelMeters: number;
   totalSkillLevel: number;
-  selectedInventorySlot: number;
-  selectedInventoryMaterial: string;
-  selectedInventoryCount: number;
-  usedInventoryStacks: number;
-  collectedMaterialCount: number;
   bootstrapPlayableReady: boolean;
   bootstrapVisualReady: boolean;
   bootstrapElapsedMs: number;
@@ -237,34 +210,10 @@ export interface GameHudSnapshot {
   fogCulledChunks: number;
 }
 
-export interface TargetingSnapshot {
-  hit: boolean;
-  voxel: [number, number, number] | null;
-  adjacent: [number, number, number] | null;
-  distanceMeters: number;
-  targetMaterial: string;
-  breakable: boolean;
-  breakActionLabel: string;
-  placeMaterial: string;
-  placeable: boolean;
-  placeActionLabel: string;
-  placePreviewVoxel: [number, number, number] | null;
-}
-
-export interface TargetingOverlaySnapshot extends TargetingOverlayGeometry {
-  breakable: boolean;
-  placeable: boolean;
-  previewVisible: boolean;
-  previewOutlineSegments: TargetingOverlayGeometry["outlineSegments"];
-  previewFacePolygon: TargetingOverlayGeometry["facePolygon"];
-  previewMaterial: string;
-}
-
 export interface ProgressStateSnapshot {
   version: 1;
   discovery: ExplorationJournalState;
   skills: SkillJournalState;
-  collectedMaterialIds: number[];
 }
 
 interface BootstrapReadiness {
@@ -692,8 +641,6 @@ export class GameController {
   );
   readonly explorationJournal = new ExplorationJournal();
   readonly skillJournal = new SkillJournal();
-  readonly inventory: InventoryState = createInventoryState();
-  readonly collectedMaterialIds = new Set<number>();
 
   renderer: WebGpuVoxelRenderer | null = null;
   camera: FirstPersonCameraState = createFirstPersonCamera([0.5, 1500, 0.5]);
@@ -709,7 +656,6 @@ export class GameController {
   avgFrameCpuMs = 0;
   status = "Booting";
   pointerLocked = false;
-  inventoryPanelOpen = false;
   onHudUpdate: ((snapshot: GameHudSnapshot) => void) | null = null;
   private readonly pointerLockTargets = new Set<HTMLElement>();
   private pointerLockFallbackActive = false;
@@ -791,9 +737,7 @@ export class GameController {
     this.asyncChunkMeshing?.dispose();
     this.renderer?.dispose();
     this.canvas.removeEventListener("click", this.handleCanvasClick);
-    document.removeEventListener("mousedown", this.handleDocumentMouseDown);
     document.removeEventListener("contextmenu", this.handleDocumentContextMenu);
-    document.removeEventListener("wheel", this.handleDocumentWheel);
     document.removeEventListener("pointerlockchange", this.handlePointerLockChange);
     document.removeEventListener("mousemove", this.handleMouseMove);
     window.removeEventListener("keydown", this.handleKeyDown);
@@ -834,7 +778,6 @@ export class GameController {
     return {
       status: this.status,
       pointerLocked: this.pointerLocked,
-      inventoryPanelOpen: this.inventoryPanelOpen,
       position: [...this.camera.position],
       feetPosition: [...this.player.feetPosition] as Vec3,
       playerChunk: [
@@ -897,11 +840,6 @@ export class GameController {
       focusSkillProgressRatio: skills.focusSkill.progressRatio,
       totalSkillTravelMeters: skills.travelMeters,
       totalSkillLevel: skills.totalLevel,
-      selectedInventorySlot: this.inventory.selectedSlot,
-      selectedInventoryMaterial: formatInventoryMaterial(getSelectedInventoryStack(this.inventory)?.material ?? null),
-      selectedInventoryCount: getSelectedInventoryStack(this.inventory)?.count ?? 0,
-      usedInventoryStacks: countUsedInventoryStacks(this.inventory),
-      collectedMaterialCount: this.collectedMaterialIds.size,
       bootstrapPlayableReady: bootstrap.playableReady,
       bootstrapVisualReady: bootstrap.visualReady,
       bootstrapElapsedMs: performance.now() - this.bootstrapBenchmarkStartedAt,
@@ -954,124 +892,8 @@ export class GameController {
     return { ...this.streamingBudgets };
   }
 
-  getInventorySnapshot(): {
-    selectedSlot: number;
-    usedStacks: number;
-    slots: Array<{ material: number; count: number } | null>;
-  } {
-    return {
-      selectedSlot: this.inventory.selectedSlot,
-      usedStacks: countUsedInventoryStacks(this.inventory),
-      slots: this.inventory.slots.map((stack) => stack ? { ...stack } : null),
-    };
-  }
-
   getEditLogSnapshot(): WorldEditRecord[] {
     return this.world.getEditLogSnapshot();
-  }
-
-  getInventoryPanelOpen(): boolean {
-    return this.inventoryPanelOpen;
-  }
-
-  setInventoryPanelOpen(open: boolean): boolean {
-    const next = Boolean(open);
-    if (this.inventoryPanelOpen === next) {
-      return this.inventoryPanelOpen;
-    }
-    this.inventoryPanelOpen = next;
-    this.pushHud(true);
-    return this.inventoryPanelOpen;
-  }
-
-  toggleInventoryPanel(): boolean {
-    return this.setInventoryPanelOpen(!this.inventoryPanelOpen);
-  }
-
-  getTargetingSnapshot(): TargetingSnapshot {
-    const selected = getSelectedInventoryStack(this.inventory);
-    const ray = createForwardRay(this.camera);
-    const hit = raycastResidentWorld(this.world, ray.origin, ray.direction, INTERACTION_REACH_WORLD_UNITS);
-    if (!hit) {
-      return {
-        hit: false,
-        voxel: null,
-        adjacent: null,
-        distanceMeters: 0,
-        targetMaterial: "Out of reach",
-        breakable: false,
-        breakActionLabel: "LMB Break look at a voxel",
-        placeMaterial: formatInventoryMaterial(selected?.material ?? null),
-        placeable: false,
-        placeActionLabel: selected ? "RMB Place look at a surface" : "RMB Place select a stack",
-        placePreviewVoxel: null,
-      };
-    }
-    return buildTargetingSnapshot(this.world, this.inventory, hit);
-  }
-
-  getTargetingOverlaySnapshot(
-    viewportWidth: number,
-    viewportHeight: number,
-  ): TargetingOverlaySnapshot {
-    if (viewportWidth <= 0 || viewportHeight <= 0) {
-      return hiddenTargetingOverlaySnapshot(viewportWidth, viewportHeight);
-    }
-    const ray = createForwardRay(this.camera);
-    const hit = raycastResidentWorld(this.world, ray.origin, ray.direction, INTERACTION_REACH_WORLD_UNITS);
-    if (!hit) {
-      return hiddenTargetingOverlaySnapshot(viewportWidth, viewportHeight);
-    }
-    const targeting = buildTargetingSnapshot(this.world, this.inventory, hit);
-    const previewGeometry = targeting.placeable && targeting.placePreviewVoxel
-      ? buildVoxelOverlayGeometry(this.camera, targeting.placePreviewVoxel, hit.normal, viewportWidth, viewportHeight)
-      : null;
-    return {
-      ...buildTargetingOverlayGeometry(this.camera, hit, viewportWidth, viewportHeight),
-      breakable: targeting.breakable,
-      placeable: targeting.placeable,
-      previewVisible: previewGeometry?.visible ?? false,
-      previewOutlineSegments: previewGeometry?.outlineSegments ?? [],
-      previewFacePolygon: previewGeometry?.facePolygon ?? [],
-      previewMaterial: targeting.placeMaterial,
-    };
-  }
-
-  breakTargetVoxel(): boolean {
-    const ray = createForwardRay(this.camera);
-    const result = breakVoxelAlongRay(
-      this.world,
-      this.inventory,
-      ray.origin,
-      ray.direction,
-      INTERACTION_REACH_WORLD_UNITS,
-    );
-    if (!result.changed || !result.material) {
-      return false;
-    }
-    this.collectedMaterialIds.add(result.material);
-    this.flushMeshBuildBudget(1);
-    this.status = `Sampled ${formatInventoryMaterial(result.material)}`;
-    this.pushHud(true);
-    return true;
-  }
-
-  placeSelectedVoxel(): boolean {
-    const ray = createForwardRay(this.camera);
-    const result = placeSelectedVoxelAlongRay(
-      this.world,
-      this.inventory,
-      ray.origin,
-      ray.direction,
-      INTERACTION_REACH_WORLD_UNITS,
-    );
-    if (!result.changed || !result.material) {
-      return false;
-    }
-    this.flushMeshBuildBudget(1);
-    this.status = `Placed ${formatInventoryMaterial(result.material)}`;
-    this.pushHud(true);
-    return true;
   }
 
   setStreamingBudgets(
@@ -1143,17 +965,12 @@ export class GameController {
       version: 1,
       discovery: this.explorationJournal.exportState(),
       skills: this.skillJournal.exportState(),
-      collectedMaterialIds: [...this.collectedMaterialIds].sort((left, right) => left - right),
     };
   }
 
   importProgressState(state: Partial<ProgressStateSnapshot>): ProgressStateSnapshot {
     this.explorationJournal.importState(state.discovery ?? {});
     this.skillJournal.importState(state.skills ?? {});
-    this.collectedMaterialIds.clear();
-    for (const material of readMaterialIdArray(state.collectedMaterialIds)) {
-      this.collectedMaterialIds.add(material);
-    }
     this.lastDiscoverySampleFeetPosition = null;
     this.lastDiscoverySampleAt = 0;
     this.refreshDiscoveryJournal(true);
@@ -2267,9 +2084,7 @@ export class GameController {
 
   private attachInteractions(): void {
     this.canvas.addEventListener("click", this.handleCanvasClick);
-    document.addEventListener("mousedown", this.handleDocumentMouseDown);
     document.addEventListener("contextmenu", this.handleDocumentContextMenu);
-    document.addEventListener("wheel", this.handleDocumentWheel, { passive: false });
     document.addEventListener("pointerlockchange", this.handlePointerLockChange);
     document.addEventListener("mousemove", this.handleMouseMove);
     window.addEventListener("keydown", this.handleKeyDown);
@@ -2284,35 +2099,10 @@ export class GameController {
     }
   };
 
-  private readonly handleDocumentMouseDown = (event: MouseEvent) => {
-    if (!this.pointerLocked) {
-      if (event.button === 0 && event.target === this.canvas) {
-        void this.requestPointerLock();
-      }
-      return;
-    }
-    if (event.button === 0) {
-      event.preventDefault();
-      this.breakTargetVoxel();
-    } else if (event.button === 2) {
-      event.preventDefault();
-      this.placeSelectedVoxel();
-    }
-  };
-
   private readonly handleDocumentContextMenu = (event: MouseEvent) => {
     if (this.pointerLocked || event.target === this.canvas) {
       event.preventDefault();
     }
-  };
-
-  private readonly handleDocumentWheel = (event: WheelEvent) => {
-    if (!this.pointerLocked) {
-      return;
-    }
-    event.preventDefault();
-    cycleInventorySlot(this.inventory, event.deltaY > 0 ? 1 : -1);
-    this.pushHud(true);
   };
 
   private readonly handlePointerLockChange = () => {
@@ -2322,9 +2112,9 @@ export class GameController {
     }
     this.pointerLocked = browserPointerLocked || this.pointerLockFallbackActive;
     this.status = browserPointerLocked
-      ? "Pointer locked: WASD move, Space jump, Ctrl sprint, Alt slow"
+      ? "Exploring: WASD move, Space jump, Ctrl sprint, Alt slow"
       : this.pointerLockFallbackActive
-      ? "Input captured: WASD move, click blocks"
+      ? "Input captured: WASD move"
       : "Click once to capture cursor";
     this.pushHud(true);
   };
@@ -2361,20 +2151,6 @@ export class GameController {
     }
     if (this.pointerLocked && isMovementKey(event.code)) {
       event.preventDefault();
-    }
-    if (event.code === "KeyI") {
-      if (!event.repeat) {
-        event.preventDefault();
-        this.toggleInventoryPanel();
-      }
-      return;
-    }
-    if (event.code.startsWith("Digit")) {
-      const digit = Number.parseInt(event.code.slice(5), 10);
-      if (digit >= 1 && digit <= 9) {
-        selectInventorySlot(this.inventory, digit - 1);
-        this.pushHud(true);
-      }
     }
     this.pressedKeys.add(event.code);
   };
@@ -3306,75 +3082,6 @@ function zeroGameRenderProbe(): GameRenderProbe {
   };
 }
 
-function formatInventoryMaterial(material: number | null): string {
-  if (!material) {
-    return "Empty";
-  }
-  return materialToHexColor(material);
-}
-
-function buildTargetingSnapshot(
-  world: ProceduralResidentWorld,
-  inventory: InventoryState,
-  hit: VoxelRayHit,
-): TargetingSnapshot {
-  const targetMaterial = world.getVoxel(hit.voxel[0], hit.voxel[1], hit.voxel[2]);
-  const selected = getSelectedInventoryStack(inventory);
-  const targetMaterialLabel = formatInventoryMaterial(targetMaterial || null);
-  const placeMaterialLabel = formatInventoryMaterial(selected?.material ?? null);
-  const canBreak = targetMaterial !== 0 && getInventoryInsertCapacity(inventory, targetMaterial) > 0;
-  const adjacentWithinY = hit.adjacent[1] >= world.minY && hit.adjacent[1] < world.maxYExclusive;
-  const adjacentEmpty = adjacentWithinY
-    && world.getVoxel(hit.adjacent[0], hit.adjacent[1], hit.adjacent[2]) === 0;
-  const canPlace = selected !== null
-    && selected.count > 0
-    && adjacentEmpty;
-  const breakActionLabel = canBreak
-    ? `LMB Break ${targetMaterialLabel}`
-    : targetMaterial === 0
-    ? "LMB Break unavailable"
-    : `LMB Break blocked inventory full for ${targetMaterialLabel}`;
-  const placeActionLabel = canPlace
-    ? `RMB Place ${placeMaterialLabel} at ${hit.adjacent[0]}, ${hit.adjacent[1]}, ${hit.adjacent[2]}`
-    : selected === null || selected.count <= 0
-    ? "RMB Place select a stack"
-    : !adjacentWithinY
-    ? "RMB Place outside world bounds"
-    : "RMB Place blocked by terrain";
-  return {
-    hit: true,
-    voxel: [...hit.voxel],
-    adjacent: [...hit.adjacent],
-    distanceMeters: worldUnitsToMeters(hit.distance),
-    targetMaterial: targetMaterialLabel,
-    breakable: canBreak,
-    breakActionLabel,
-    placeMaterial: placeMaterialLabel,
-    placeable: canPlace,
-    placeActionLabel,
-    placePreviewVoxel: canPlace ? [...hit.adjacent] : null,
-  };
-}
-
-function hiddenTargetingOverlaySnapshot(
-  viewportWidth: number,
-  viewportHeight: number,
-): TargetingOverlaySnapshot {
-  return {
-    visible: false,
-    viewportWidth,
-    viewportHeight,
-    outlineSegments: [],
-    facePolygon: [],
-    breakable: false,
-    placeable: false,
-    previewVisible: false,
-    previewOutlineSegments: [],
-    previewFacePolygon: [],
-    previewMaterial: "Empty",
-  };
-}
-
 function shouldSyncBuildUrgentChunk(
   chunk: { coord: { x: number; y: number; z: number }; meshBuilt: boolean },
   priorityChunkX: number,
@@ -3769,16 +3476,6 @@ function isMovementKey(code: string): boolean {
 function clampPositiveInt(value: number, fallback: number): number {
   const normalized = Math.floor(value);
   return Number.isFinite(normalized) && normalized > 0 ? normalized : fallback;
-}
-
-function readMaterialIdArray(value: unknown): number[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((entry): entry is number =>
-    typeof entry === "number"
-    && Number.isInteger(entry)
-    && entry > 0);
 }
 
 function pushVisibleGroundIssueSample(

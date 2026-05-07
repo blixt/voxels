@@ -1,16 +1,11 @@
 import {
   GameController,
   type GameHudSnapshot,
-  type TargetingOverlaySnapshot,
-  type TargetingSnapshot,
 } from "./game-controller.ts";
 import {
   describeExplorationObjectives,
   type ExplorationObjectiveSnapshot,
 } from "../engine/exploration-objectives.ts";
-import { describeHotbarWindow } from "../engine/hotbar-layout.ts";
-import { INVENTORY_STACK_SIZE } from "../engine/inventory.ts";
-import { materialToHexColor } from "../engine/procedural-generator.ts";
 import type {
   DiscoveryEvent,
   ExplorationJournalSnapshot,
@@ -83,18 +78,7 @@ declare global {
       loadProgressState(): boolean;
       clearProgressState(): boolean;
       getExplorationObjectives(): ExplorationObjectiveSnapshot;
-      getInventory(): ReturnType<GameController["getInventorySnapshot"]>;
-      getInventoryPanelOpen(): ReturnType<GameController["getInventoryPanelOpen"]>;
-      setInventoryPanelOpen(open: boolean): ReturnType<GameController["setInventoryPanelOpen"]>;
-      toggleInventoryPanel(): ReturnType<GameController["toggleInventoryPanel"]>;
-      getTargeting(): ReturnType<GameController["getTargetingSnapshot"]>;
-      getTargetingOverlay(
-        viewportWidth?: number,
-        viewportHeight?: number,
-      ): ReturnType<GameController["getTargetingOverlaySnapshot"]>;
       getEditLog(): ReturnType<GameController["getEditLogSnapshot"]>;
-      breakTargetVoxel(): ReturnType<GameController["breakTargetVoxel"]>;
-      placeSelectedVoxel(): ReturnType<GameController["placeSelectedVoxel"]>;
     };
   }
 }
@@ -111,19 +95,11 @@ interface AchievementPresenter {
 }
 
 interface InteractionHudView {
-  update(snapshot: GameHudSnapshot, inventory: ReturnType<GameController["getInventorySnapshot"]>, targeting: TargetingSnapshot): void;
-}
-
-interface InventoryPanelView {
-  update(snapshot: GameHudSnapshot, inventory: ReturnType<GameController["getInventorySnapshot"]>): void;
+  update(snapshot: GameHudSnapshot): void;
 }
 
 interface ObjectivePanelView {
   update(snapshot: GameHudSnapshot): void;
-}
-
-interface TargetingOverlayView {
-  update(snapshot: TargetingOverlaySnapshot): void;
 }
 
 interface PerformanceStripView {
@@ -141,7 +117,6 @@ interface CaptureOverlayState {
 
 const ACHIEVEMENT_VISIBLE_MS = 3400;
 const ACHIEVEMENT_EXIT_MS = 320;
-const HOTBAR_VISIBLE_SLOT_COUNT = 9;
 const PROGRESS_STORAGE_KEY = "voxels.progress.v1";
 
 const runtime = mountGame();
@@ -173,8 +148,6 @@ function mountGame(): GameRuntime {
   const objectivePanelRoot = appRoot.querySelector<HTMLElement>("[data-role='objective-panel']");
   const performanceStripRoot = appRoot.querySelector<HTMLElement>("[data-role='performance-strip']");
   const interactionHudRoot = appRoot.querySelector<HTMLElement>("[data-role='interaction-hud']");
-  const inventoryPanelRoot = appRoot.querySelector<HTMLElement>("[data-role='inventory-panel']");
-  const targetOverlayRoot = appRoot.querySelector<SVGSVGElement>("[data-role='target-overlay']");
 
   if (
     !canvas
@@ -189,8 +162,6 @@ function mountGame(): GameRuntime {
     || !objectivePanelRoot
     || !performanceStripRoot
     || !interactionHudRoot
-    || !inventoryPanelRoot
-    || !targetOverlayRoot
   ) {
     throw new Error("Game UI is incomplete");
   }
@@ -219,18 +190,13 @@ function mountGame(): GameRuntime {
   const objectivePanelView = createObjectivePanelView(objectivePanelRoot);
   const performanceStripView = createPerformanceStripView(performanceStripRoot);
   const interactionHudView = createInteractionHudView(interactionHudRoot);
-  const inventoryPanelView = createInventoryPanelView(inventoryPanelRoot);
-  const targetingOverlayView = createTargetingOverlayView(targetOverlayRoot);
-  let targetingOverlayFrameId = 0;
   let lastProgressSignature = "";
 
   controller.onHudUpdate = (snapshot) => {
     achievementPresenter.observe(snapshot.recentDiscoveries);
     objectivePanelView.update(snapshot);
     performanceStripView.update(snapshot);
-    const inventorySnapshot = controller.getInventorySnapshot();
-    interactionHudView.update(snapshot, inventorySnapshot, controller.getTargetingSnapshot());
-    inventoryPanelView.update(snapshot, inventorySnapshot);
+    interactionHudView.update(snapshot);
     const captureState = buildCaptureOverlayState(snapshot);
     captureStatus.textContent = captureState.status;
     captureTitle.textContent = captureState.title;
@@ -256,14 +222,6 @@ function mountGame(): GameRuntime {
 
   captureButton.addEventListener("pointerdown", handleCapturePointerDown);
   captureButton.addEventListener("click", handleCaptureClick);
-
-  const updateTargetingOverlay = () => {
-    const viewportWidth = Math.max(1, canvas.clientWidth || canvas.width || 1);
-    const viewportHeight = Math.max(1, canvas.clientHeight || canvas.height || 1);
-    targetingOverlayView.update(controller.getTargetingOverlaySnapshot(viewportWidth, viewportHeight));
-    targetingOverlayFrameId = requestAnimationFrame(updateTargetingOverlay);
-  };
-  targetingOverlayFrameId = requestAnimationFrame(updateTargetingOverlay);
 
   window.__VOXELS_GAME__ = {
     controller,
@@ -304,16 +262,7 @@ function mountGame(): GameRuntime {
     loadProgressState: () => loadProgressState(controller),
     clearProgressState: () => clearProgressState(),
     getExplorationObjectives: () => describeExplorationObjectives(snapshotToObjectiveSource(controller.getDebugSnapshot())),
-    getInventory: () => controller.getInventorySnapshot(),
-    getInventoryPanelOpen: () => controller.getInventoryPanelOpen(),
-    setInventoryPanelOpen: (open) => controller.setInventoryPanelOpen(open),
-    toggleInventoryPanel: () => controller.toggleInventoryPanel(),
-    getTargeting: () => controller.getTargetingSnapshot(),
-    getTargetingOverlay: (viewportWidth = canvas.clientWidth || canvas.width || 1, viewportHeight = canvas.clientHeight || canvas.height || 1) =>
-      controller.getTargetingOverlaySnapshot(viewportWidth, viewportHeight),
     getEditLog: () => controller.getEditLogSnapshot(),
-    breakTargetVoxel: () => controller.breakTargetVoxel(),
-    placeSelectedVoxel: () => controller.placeSelectedVoxel(),
   };
 
   const ready = controller.init().then(() => {
@@ -326,7 +275,6 @@ function mountGame(): GameRuntime {
     dispose() {
       captureButton.removeEventListener("pointerdown", handleCapturePointerDown);
       captureButton.removeEventListener("click", handleCaptureClick);
-      cancelAnimationFrame(targetingOverlayFrameId);
       controller.onHudUpdate = null;
       achievementPresenter.dispose();
       unregisterCapturePointerLockTarget();
@@ -438,149 +386,41 @@ function buildCaptureOverlayState(snapshot: GameHudSnapshot): CaptureOverlayStat
 }
 
 function createInteractionHudView(root: HTMLElement): InteractionHudView {
-  const targetTitle = document.createElement("h2");
-  targetTitle.className = "game-target-title";
-  const targetMeta = document.createElement("p");
-  targetMeta.className = "game-target-meta";
-  const targetCard = document.createElement("section");
-  targetCard.className = "game-target-card";
-  targetCard.hidden = true;
-  targetCard.append(targetTitle, targetMeta);
-
-  const hotbarElement = document.createElement("div");
-  hotbarElement.className = "game-hotbar";
-  const hotbarSlots: Array<{
-    root: HTMLElement;
-    index: HTMLElement;
-    swatch: HTMLElement;
-    material: HTMLElement;
-    count: HTMLElement;
-    fill: HTMLElement;
-  }> = [];
-  for (let slotIndex = 0; slotIndex < HOTBAR_VISIBLE_SLOT_COUNT; slotIndex += 1) {
-    const index = document.createElement("span");
-    index.className = "game-hotbar-slot-index";
-    const swatch = document.createElement("span");
-    swatch.className = "game-hotbar-slot-swatch";
-    const material = document.createElement("strong");
-    material.className = "game-hotbar-slot-material";
-    const count = document.createElement("span");
-    count.className = "game-hotbar-slot-count";
-    const fill = document.createElement("span");
-    fill.className = "game-hotbar-slot-fill";
-    const slot = document.createElement("div");
-    slot.className = "game-hotbar-slot";
-    slot.append(index, swatch, material, count, fill);
-    hotbarElement.append(slot);
-    hotbarSlots.push({ root: slot, index, swatch, material, count, fill });
-  }
-
-  root.replaceChildren(targetCard, hotbarElement);
+  const region = document.createElement("strong");
+  region.className = "game-rpg-region";
+  const landmark = document.createElement("span");
+  landmark.className = "game-rpg-landmark";
+  const skill = document.createElement("span");
+  skill.className = "game-rpg-skill";
+  const discovery = document.createElement("span");
+  discovery.className = "game-rpg-discovery";
+  const card = document.createElement("section");
+  card.className = "game-rpg-hud";
+  card.append(region, landmark, skill, discovery);
+  root.replaceChildren(card);
 
   return {
-    update(_snapshot, inventory, targeting) {
-      if (!targeting.hit) {
-        targetCard.hidden = true;
-      } else {
-        targetCard.hidden = false;
-        targetTitle.textContent = targeting.targetMaterial;
-        targetMeta.textContent = `${targeting.distanceMeters.toFixed(1)} m`;
-      }
-
-      const windowLayout = describeHotbarWindow(
-        inventory.selectedSlot,
-        inventory.slots.length,
-        HOTBAR_VISIBLE_SLOT_COUNT,
-      );
-
-      for (let slotOffset = 0; slotOffset < HOTBAR_VISIBLE_SLOT_COUNT; slotOffset += 1) {
-        const slotIndex = windowLayout.startSlot + slotOffset;
-        const slot = hotbarSlots[slotOffset]!;
-        const stack = inventory.slots[slotIndex];
-        const materialHex = stack ? materialToHexColor(stack.material) : "Empty";
-        if (slotIndex >= inventory.slots.length) {
-          slot.root.setAttribute("hidden", "");
-          continue;
-        }
-        slot.root.removeAttribute("hidden");
-        slot.root.classList.toggle("is-selected", slotIndex === inventory.selectedSlot);
-        slot.root.classList.toggle("is-empty", stack === null);
-        slot.index.textContent = String(slotIndex + 1);
-        slot.material.textContent = materialHex;
-        slot.count.textContent = stack ? stack.count.toLocaleString() : "";
-        slot.fill.style.transform = `scaleX(${stack ? stack.count / INVENTORY_STACK_SIZE : 0})`;
-        slot.swatch.style.background = stack ? materialToCssColor(materialHex) : "rgba(255, 246, 214, 0.08)";
-        slot.root.title = stack
-          ? `Slot ${slotIndex + 1}: ${materialHex}, ${stack.count} / ${INVENTORY_STACK_SIZE}`
-          : `Slot ${slotIndex + 1}: empty`;
-      }
-    },
-  };
-}
-
-function createInventoryPanelView(root: HTMLElement): InventoryPanelView {
-  const title = document.createElement("h2");
-  title.className = "game-inventory-panel-title";
-  title.textContent = "Inventory";
-  const summary = document.createElement("p");
-  summary.className = "game-inventory-panel-summary";
-  const grid = document.createElement("div");
-  grid.className = "game-inventory-grid";
-
-  const slots: Array<{
-    root: HTMLElement;
-    index: HTMLElement;
-    swatch: HTMLElement;
-    material: HTMLElement;
-    count: HTMLElement;
-    fill: HTMLElement;
-  }> = [];
-
-  for (let slotIndex = 0; slotIndex < 32; slotIndex += 1) {
-    const index = document.createElement("span");
-    index.className = "game-inventory-slot-index";
-    const swatch = document.createElement("span");
-    swatch.className = "game-inventory-slot-swatch";
-    const material = document.createElement("strong");
-    material.className = "game-inventory-slot-material";
-    const count = document.createElement("span");
-    count.className = "game-inventory-slot-count";
-    const fill = document.createElement("span");
-    fill.className = "game-inventory-slot-fill";
-    const slot = document.createElement("div");
-    slot.className = "game-inventory-slot";
-    slot.append(index, swatch, material, count, fill);
-    grid.append(slot);
-    slots.push({ root: slot, index, swatch, material, count, fill });
-  }
-
-  root.replaceChildren(title, summary, grid);
-
-  return {
-    update(snapshot, inventory) {
-      root.toggleAttribute("hidden", !snapshot.inventoryPanelOpen);
-      if (!snapshot.inventoryPanelOpen) {
-        return;
-      }
-      summary.textContent = [
-        `Used ${inventory.usedStacks.toLocaleString()} / ${inventory.slots.length} stacks`,
-        `Selected slot ${inventory.selectedSlot + 1}`,
-        snapshot.selectedInventoryMaterial === "Empty"
-          ? "Selected empty"
-          : `${snapshot.selectedInventoryMaterial} ${snapshot.selectedInventoryCount.toLocaleString()} / ${INVENTORY_STACK_SIZE.toLocaleString()}`,
+    update(snapshot) {
+      region.textContent = snapshot.regionalVariantId
+        ?? snapshot.biomeId
+        ?? snapshot.ambientProfileLabel;
+      landmark.textContent = snapshot.landmarkId
+        ? `Near ${formatDisplayId(snapshot.landmarkId)}`
+        : snapshot.undergroundBiomeId
+        ? formatDisplayId(snapshot.undergroundBiomeId)
+        : snapshot.ambientProfileLabel;
+      skill.textContent = `${snapshot.focusSkillName} ${snapshot.focusSkillLevel}`;
+      discovery.textContent = snapshot.lastDiscoveryLabel === "None"
+        ? `${snapshot.discoveredLandmarkCount.toLocaleString()} landmarks cataloged`
+        : snapshot.lastDiscoveryLabel;
+      card.classList.toggle("is-captured", snapshot.pointerLocked);
+      card.title = [
+        snapshot.status,
+        `Surface ${snapshot.discoveredBiomeCount}`,
+        `Variants ${snapshot.discoveredRegionalVariantCount}`,
+        `Landmarks ${snapshot.discoveredLandmarkCount}`,
+        `${snapshot.focusSkillName} ${(snapshot.focusSkillProgressRatio * 100).toFixed(0)}%`,
       ].join(" • ");
-      for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
-        const slotView = slots[slotIndex]!;
-        const stack = inventory.slots[slotIndex];
-        const materialHex = stack ? materialToHexColor(stack.material) : "Empty";
-        slotView.root.classList.toggle("is-selected", slotIndex === inventory.selectedSlot);
-        slotView.root.classList.toggle("is-empty", stack === null);
-        slotView.index.textContent = String(slotIndex + 1);
-        slotView.material.textContent = materialHex;
-        slotView.count.textContent = stack ? stack.count.toLocaleString() : "";
-        slotView.fill.style.transform = `scaleX(${stack ? stack.count / INVENTORY_STACK_SIZE : 0})`;
-        slotView.swatch.style.background = stack ? materialToCssColor(materialHex) : "rgba(255, 246, 214, 0.08)";
-      }
     },
   };
 }
@@ -621,96 +461,6 @@ function createObjectivePanelView(root: HTMLElement): ObjectivePanelView {
   };
 }
 
-function createTargetingOverlayView(root: SVGSVGElement): TargetingOverlayView {
-  const namespace = "http://www.w3.org/2000/svg";
-  const face = document.createElementNS(namespace, "polygon");
-  face.setAttribute("class", "target-overlay-face");
-  const previewFace = document.createElementNS(namespace, "polygon");
-  previewFace.setAttribute("class", "target-overlay-preview-face");
-  const lines = Array.from({ length: 12 }, () => {
-    const line = document.createElementNS(namespace, "line");
-    line.setAttribute("class", "target-overlay-line");
-    return line;
-  });
-  const previewLines = Array.from({ length: 12 }, () => {
-    const line = document.createElementNS(namespace, "line");
-    line.setAttribute("class", "target-overlay-preview-line");
-    return line;
-  });
-  root.replaceChildren(previewFace, face, ...previewLines, ...lines);
-
-  return {
-    update(snapshot) {
-      root.toggleAttribute("hidden", !snapshot.visible && !snapshot.previewVisible);
-      root.classList.toggle("is-breakable", snapshot.breakable);
-      root.setAttribute("viewBox", `0 0 ${snapshot.viewportWidth} ${snapshot.viewportHeight}`);
-      if (!snapshot.visible && !snapshot.previewVisible) {
-        face.setAttribute("points", "");
-        previewFace.setAttribute("points", "");
-        for (const line of lines) {
-          line.setAttribute("visibility", "hidden");
-        }
-        for (const line of previewLines) {
-          line.setAttribute("visibility", "hidden");
-        }
-        return;
-      }
-      face.setAttribute("points", snapshot.visible
-        ? snapshot.facePolygon.map(([x, y]) => `${x},${y}`).join(" ")
-        : "");
-      for (let index = 0; index < lines.length; index += 1) {
-        const line = lines[index]!;
-        const segment = snapshot.visible ? snapshot.outlineSegments[index] : undefined;
-        if (!segment) {
-          line.setAttribute("visibility", "hidden");
-          continue;
-        }
-        line.setAttribute("x1", segment.from[0].toFixed(2));
-        line.setAttribute("y1", segment.from[1].toFixed(2));
-        line.setAttribute("x2", segment.to[0].toFixed(2));
-        line.setAttribute("y2", segment.to[1].toFixed(2));
-        line.setAttribute("visibility", "visible");
-      }
-      previewFace.setAttribute("points", snapshot.previewVisible
-        ? snapshot.previewFacePolygon.map(([x, y]) => `${x},${y}`).join(" ")
-        : "");
-      const previewColor = materialToCssColor(snapshot.previewMaterial);
-      previewFace.style.fill = snapshot.previewVisible ? colorWithAlpha(previewColor, 0.12) : "transparent";
-      previewFace.style.stroke = snapshot.previewVisible ? colorWithAlpha(previewColor, 0.72) : "transparent";
-      for (let index = 0; index < previewLines.length; index += 1) {
-        const line = previewLines[index]!;
-        const segment = snapshot.previewVisible ? snapshot.previewOutlineSegments[index] : undefined;
-        if (!segment) {
-          line.setAttribute("visibility", "hidden");
-          continue;
-        }
-        line.style.stroke = colorWithAlpha(previewColor, 0.95);
-        line.setAttribute("x1", segment.from[0].toFixed(2));
-        line.setAttribute("y1", segment.from[1].toFixed(2));
-        line.setAttribute("x2", segment.to[0].toFixed(2));
-        line.setAttribute("y2", segment.to[1].toFixed(2));
-        line.setAttribute("visibility", "visible");
-      }
-    },
-  };
-}
-
-function materialToCssColor(hex: string): string {
-  if (!/^#[0-9A-F]{3}$/i.test(hex)) {
-    return "rgba(255, 246, 214, 0.08)";
-  }
-  const [r, g, b] = hex.slice(1).split("").map((digit) => Number.parseInt(digit + digit, 16));
-  return `rgb(${r} ${g} ${b})`;
-}
-
-function colorWithAlpha(color: string, alpha: number): string {
-  const match = color.match(/^rgb\((\d+) (\d+) (\d+)\)$/);
-  if (!match) {
-    return color;
-  }
-  return `rgba(${match[1]}, ${match[2]}, ${match[3]}, ${alpha})`;
-}
-
 function snapshotToObjectiveSource(snapshot: GameHudSnapshot) {
   return {
     discoveredBiomeCount: snapshot.discoveredBiomeCount,
@@ -718,7 +468,6 @@ function snapshotToObjectiveSource(snapshot: GameHudSnapshot) {
     discoveredRegionalVariantCount: snapshot.discoveredRegionalVariantCount,
     discoveredLandmarkCount: snapshot.discoveredLandmarkCount,
     discoveredAncientLandmarkCount: snapshot.discoveredAncientLandmarkCount,
-    collectedMaterialCount: snapshot.collectedMaterialCount,
   };
 }
 
@@ -815,7 +564,7 @@ function createPerformanceStripView(root: HTMLElement): PerformanceStripView {
   return {
     update(snapshot) {
       const nextValues = [
-        `${formatFps(snapshot.avgFrameWallMs)} FPS`,
+        `${formatFrameMs(snapshot.lastFrameWallMs)}`,
         `${formatCompactCount(snapshot.chunkCount)} chunks`,
         `${formatCompactCount(snapshot.drawCalls)} draws`,
       ];
@@ -838,12 +587,11 @@ function createPerformanceStripView(root: HTMLElement): PerformanceStripView {
   };
 }
 
-function formatFps(avgFrameWallMs: number): string {
-  if (!Number.isFinite(avgFrameWallMs) || avgFrameWallMs <= 0) {
-    return "0";
+function formatFrameMs(frameWallMs: number): string {
+  if (!Number.isFinite(frameWallMs) || frameWallMs < 0) {
+    return "0.0 ms";
   }
-  const value = 1000 / avgFrameWallMs;
-  return value >= 100 ? value.toFixed(0) : value.toFixed(1);
+  return `${frameWallMs.toFixed(frameWallMs >= 100 ? 0 : 1)} ms`;
 }
 
 function formatCompactCount(value: number): string {
@@ -858,4 +606,12 @@ function formatCompactCount(value: number): string {
     return `${(value / 1_000).toFixed(1)}k`;
   }
   return value.toLocaleString();
+}
+
+function formatDisplayId(value: string): string {
+  return value
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
