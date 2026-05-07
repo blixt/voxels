@@ -147,6 +147,8 @@ test("route seam coverage summarizes LOD holes with max sampled distance", () =>
   const summary = summarizeRouteSeamCoverage({
     uncoveredGapCount: 2,
     handoffHoleCount: 1,
+    residentOverlapCount: 4,
+    bandOverlapCount: 2,
     uncoveredGapSamples: [
       { distanceMeters: 12.4 },
       { distanceMeters: 18.8 },
@@ -154,10 +156,23 @@ test("route seam coverage summarizes LOD holes with max sampled distance", () =>
     handoffHoleSamples: [
       { distanceMeters: 9.2 },
     ],
+    residentOverlapSamples: [
+      { distanceMeters: 7.1 },
+      { distanceMeters: 22.5 },
+    ],
+    bandOverlapSamples: [
+      { distanceMeters: 14.2 },
+    ],
   });
 
   expect(summary.seamGapCount).toBe(3);
+  expect(summary.uncoveredGapCount).toBe(2);
+  expect(summary.handoffHoleCount).toBe(1);
+  expect(summary.lodOverlapCount).toBe(6);
+  expect(summary.residentOverlapCount).toBe(4);
+  expect(summary.bandOverlapCount).toBe(2);
   expect(summary.maxSeamGapMeters).toBe(18.8);
+  expect(summary.maxLodOverlapMeters).toBe(22.5);
 });
 
 test("settled reference diff flags transient clear holes that later fill with terrain", () => {

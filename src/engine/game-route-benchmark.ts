@@ -100,13 +100,23 @@ export interface RouteSeamCoverageIssue {
 export interface RouteSeamCoverageProbe {
   uncoveredGapCount: number;
   handoffHoleCount: number;
+  residentOverlapCount?: number;
+  bandOverlapCount?: number;
   uncoveredGapSamples?: readonly RouteSeamCoverageIssue[];
   handoffHoleSamples?: readonly RouteSeamCoverageIssue[];
+  residentOverlapSamples?: readonly RouteSeamCoverageIssue[];
+  bandOverlapSamples?: readonly RouteSeamCoverageIssue[];
 }
 
 export interface RouteSeamCoverageSummary {
   seamGapCount: number;
+  uncoveredGapCount: number;
+  handoffHoleCount: number;
+  lodOverlapCount: number;
+  residentOverlapCount: number;
+  bandOverlapCount: number;
   maxSeamGapMeters: number;
+  maxLodOverlapMeters: number;
 }
 
 export function buildDefaultRouteBenchmarkPlan(
@@ -318,13 +328,27 @@ export function summarizeRouteFrameAccounting(
 export function summarizeRouteSeamCoverage(
   probe: RouteSeamCoverageProbe,
 ): RouteSeamCoverageSummary {
-  const issueSamples = [
+  const gapSamples = [
     ...(probe.uncoveredGapSamples ?? []),
     ...(probe.handoffHoleSamples ?? []),
   ];
+  const overlapSamples = [
+    ...(probe.residentOverlapSamples ?? []),
+    ...(probe.bandOverlapSamples ?? []),
+  ];
+  const uncoveredGapCount = Math.max(0, probe.uncoveredGapCount);
+  const handoffHoleCount = Math.max(0, probe.handoffHoleCount);
+  const residentOverlapCount = Math.max(0, probe.residentOverlapCount ?? 0);
+  const bandOverlapCount = Math.max(0, probe.bandOverlapCount ?? 0);
   return {
-    seamGapCount: Math.max(0, probe.uncoveredGapCount) + Math.max(0, probe.handoffHoleCount),
-    maxSeamGapMeters: maxValue(issueSamples.map((sample) => sample.distanceMeters)),
+    seamGapCount: uncoveredGapCount + handoffHoleCount,
+    uncoveredGapCount,
+    handoffHoleCount,
+    lodOverlapCount: residentOverlapCount + bandOverlapCount,
+    residentOverlapCount,
+    bandOverlapCount,
+    maxSeamGapMeters: maxValue(gapSamples.map((sample) => sample.distanceMeters)),
+    maxLodOverlapMeters: maxValue(overlapSamples.map((sample) => sample.distanceMeters)),
   };
 }
 

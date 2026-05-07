@@ -601,8 +601,11 @@ function buildPageProbeExpression(options: CliOptions): string {
         framesWithHoleSignals: benchmark.summary.framesWithHoleSignals,
         framesWithVisibleGroundGaps: benchmark.summary.framesWithVisibleGroundGaps,
         framesWithSeamGaps: benchmark.summary.framesWithSeamGaps,
+        framesWithLodOverlaps: benchmark.summary.framesWithLodOverlaps,
         blockingSeamGapCount: countBlockingSeamGaps(benchmark.samples),
+        blockingLodOverlapCount: countBlockingLodOverlaps(benchmark.samples),
         maxSeamGapMeters: benchmark.summary.maxSeamGapMeters,
+        maxLodOverlapMeters: benchmark.summary.maxLodOverlapMeters,
         screenVoidCaptureCount: benchmark.summary.screenVoidCaptureCount,
         framesWithScreenVoidSignals: benchmark.summary.framesWithScreenVoidSignals,
         maxPendingChunks: benchmark.summary.maxPendingChunks,
@@ -664,8 +667,11 @@ function buildPageProbeExpression(options: CliOptions): string {
         framesWithHoleSignals: benchmark.summary.framesWithHoleSignals,
         framesWithVisibleGroundGaps: benchmark.summary.framesWithVisibleGroundGaps,
         framesWithSeamGaps: benchmark.summary.framesWithSeamGaps,
+        framesWithLodOverlaps: benchmark.summary.framesWithLodOverlaps,
         blockingSeamGapCount: countBlockingSeamGaps(benchmark.samples),
+        blockingLodOverlapCount: countBlockingLodOverlaps(benchmark.samples),
         maxSeamGapMeters: benchmark.summary.maxSeamGapMeters,
+        maxLodOverlapMeters: benchmark.summary.maxLodOverlapMeters,
         screenVoidCaptureCount: benchmark.summary.screenVoidCaptureCount,
         framesWithScreenVoidSignals: benchmark.summary.framesWithScreenVoidSignals,
         framesWithSettledReferenceHoleSignals: benchmark.summary.framesWithSettledReferenceHoleSignals,
@@ -690,7 +696,13 @@ function buildPageProbeExpression(options: CliOptions): string {
       dirtyResidentChunks: number;
       lodPendingChunks: number;
       seamGapCount: number;
+      uncoveredLodGapCount: number;
+      handoffLodHoleCount: number;
       maxSeamGapMeters: number;
+      lodOverlapCount: number;
+      lodResidentOverlapCount: number;
+      lodBandOverlapCount: number;
+      maxLodOverlapMeters: number;
       visibleGroundUncoveredCount: number;
       screenVoidSuspicious: boolean;
     }[]) {
@@ -708,7 +720,13 @@ function buildPageProbeExpression(options: CliOptions): string {
           dirtyResidentChunks: sample.dirtyResidentChunks,
           lodPendingChunks: sample.lodPendingChunks,
           seamGapCount: sample.seamGapCount,
+          uncoveredLodGapCount: sample.uncoveredLodGapCount,
+          handoffLodHoleCount: sample.handoffLodHoleCount,
           maxSeamGapMeters: sample.maxSeamGapMeters,
+          lodOverlapCount: sample.lodOverlapCount,
+          lodResidentOverlapCount: sample.lodResidentOverlapCount,
+          lodBandOverlapCount: sample.lodBandOverlapCount,
+          maxLodOverlapMeters: sample.maxLodOverlapMeters,
           visibleGroundUncoveredCount: sample.visibleGroundUncoveredCount,
           screenVoidSuspicious: sample.screenVoidSuspicious,
         }));
@@ -721,6 +739,7 @@ function buildPageProbeExpression(options: CliOptions): string {
       dirtyResidentChunks: number;
       lodPendingChunks: number;
       seamGapCount: number;
+      lodOverlapCount: number;
       visibleGroundUncoveredCount: number;
       screenVoidSuspicious: boolean;
     }[]) {
@@ -736,6 +755,24 @@ function buildPageProbeExpression(options: CliOptions): string {
           )
           || sample.visibleGroundUncoveredCount > 0
           || sample.screenVoidSuspicious
+        )).length;
+    }
+
+    function countBlockingLodOverlaps(samples: readonly {
+      phase: "move" | "settle";
+      pendingChunks: number;
+      pendingMeshJobs: number;
+      dirtyResidentChunks: number;
+      lodPendingChunks: number;
+      lodOverlapCount: number;
+    }[]) {
+      return samples.filter((sample) =>
+        sample.lodOverlapCount > 0
+        && (
+          sample.pendingChunks === 0
+          && sample.pendingMeshJobs === 0
+          && sample.dirtyResidentChunks === 0
+          && sample.lodPendingChunks === 0
         )).length;
     }
 
@@ -1060,6 +1097,9 @@ function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<stri
   if ((readNumber(traversalBudget, "blockingSeamGapCount") ?? 0) > 0) {
     failures.push(`traversal benchmark had ${readNumber(traversalBudget, "blockingSeamGapCount")} visible or settled seam-gap frames`);
   }
+  if ((readNumber(traversalBudget, "blockingLodOverlapCount") ?? 0) > 0) {
+    failures.push(`traversal benchmark had ${readNumber(traversalBudget, "blockingLodOverlapCount")} settled LOD-overlap frames`);
+  }
   const traversalScreenCaptures = readNumber(traversalBudget, "screenVoidCaptureCount") ?? 0;
   if (traversalScreenCaptures < PERFORMANCE_BUDGETS.minTraversalScreenCaptures) {
     failures.push(`traversal benchmark captured ${traversalScreenCaptures} screen frames, expected at least ${PERFORMANCE_BUDGETS.minTraversalScreenCaptures}`);
@@ -1110,6 +1150,9 @@ function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<stri
   }
   if ((readNumber(routeBudget, "blockingSeamGapCount") ?? 0) > 0) {
     failures.push(`route benchmark had ${readNumber(routeBudget, "blockingSeamGapCount")} visible or settled seam-gap frames`);
+  }
+  if ((readNumber(routeBudget, "blockingLodOverlapCount") ?? 0) > 0) {
+    failures.push(`route benchmark had ${readNumber(routeBudget, "blockingLodOverlapCount")} settled LOD-overlap frames`);
   }
   const routeScreenCaptures = readNumber(routeBudget, "screenVoidCaptureCount") ?? 0;
   if (routeScreenCaptures < PERFORMANCE_BUDGETS.minRouteScreenCaptures) {
@@ -1181,12 +1224,12 @@ function printSummary(reportPath: string, report: {
   console.log(`traversal p95/max frame: ${formatNumber(readNumber(traversalBudget, "p95GameplayFrameMs"))}/${formatNumber(readNumber(traversalBudget, "maxGameplayFrameMs"))} ms`);
   console.log(`traversal p95 work/move/render/stream/mesh/LOD: ${formatNumber(readNumber(traversalBudget, "p95MeasuredWorkMs"))}/${formatNumber(readNumber(traversalBudget, "p95MovementMs"))}/${formatNumber(readNumber(traversalBudget, "p95RenderCpuMs"))}/${formatNumber(readNumber(traversalBudget, "p95StreamMs"))}/${formatNumber(readNumber(traversalBudget, "p95MeshMs"))}/${formatNumber(readNumber(traversalBudget, "p95LodMs"))} ms`);
   console.log(`traversal diagnostics avg/total/capture: ${formatNumber(readNumber(traversalBudget, "avgDiagnosticsMs"))}/${formatNumber(readNumber(traversalBudget, "totalDiagnosticsMs"))}/${formatNumber(readNumber(traversalBudget, "totalCaptureDiagnosticsMs"))} ms`);
-  console.log(`traversal distance: ${formatNumber(readNumber(traversalBudget, "totalDistanceMeters"))} m, holes/seams/blocking seams: ${formatNumber(readNumber(traversalBudget, "framesWithHoleSignals"))}/${formatNumber(readNumber(traversalBudget, "framesWithSeamGaps"))}/${formatNumber(readNumber(traversalBudget, "blockingSeamGapCount"))}`);
+  console.log(`traversal distance: ${formatNumber(readNumber(traversalBudget, "totalDistanceMeters"))} m, holes/seams/blocking seams/overlaps: ${formatNumber(readNumber(traversalBudget, "framesWithHoleSignals"))}/${formatNumber(readNumber(traversalBudget, "framesWithSeamGaps"))}/${formatNumber(readNumber(traversalBudget, "blockingSeamGapCount"))}/${formatNumber(readNumber(traversalBudget, "blockingLodOverlapCount"))}`);
   console.log(`traversal screen captures: ${formatNumber(readNumber(traversalBudget, "screenVoidCaptureCount"))}`);
   console.log(`route p95/max frame: ${formatNumber(readNumber(routeBudget, "p95GameplayFrameMs"))}/${formatNumber(readNumber(routeBudget, "maxGameplayFrameMs"))} ms`);
   console.log(`route p95 work/move/render/stream/mesh/LOD: ${formatNumber(readNumber(routeBudget, "p95MeasuredWorkMs"))}/${formatNumber(readNumber(routeBudget, "p95MovementMs"))}/${formatNumber(readNumber(routeBudget, "p95RenderCpuMs"))}/${formatNumber(readNumber(routeBudget, "p95StreamMs"))}/${formatNumber(readNumber(routeBudget, "p95MeshMs"))}/${formatNumber(readNumber(routeBudget, "p95LodMs"))} ms`);
   console.log(`route diagnostics avg/total/capture: ${formatNumber(readNumber(routeBudget, "avgDiagnosticsMs"))}/${formatNumber(readNumber(routeBudget, "totalDiagnosticsMs"))}/${formatNumber(readNumber(routeBudget, "totalCaptureDiagnosticsMs"))} ms`);
-  console.log(`route distance: ${formatNumber(readNumber(routeBudget, "totalDistanceMeters"))} m, holes/seams/blocking seams: ${formatNumber(readNumber(routeBudget, "framesWithHoleSignals"))}/${formatNumber(readNumber(routeBudget, "framesWithSeamGaps"))}/${formatNumber(readNumber(routeBudget, "blockingSeamGapCount"))}`);
+  console.log(`route distance: ${formatNumber(readNumber(routeBudget, "totalDistanceMeters"))} m, holes/seams/blocking seams/overlaps: ${formatNumber(readNumber(routeBudget, "framesWithHoleSignals"))}/${formatNumber(readNumber(routeBudget, "framesWithSeamGaps"))}/${formatNumber(readNumber(routeBudget, "blockingSeamGapCount"))}/${formatNumber(readNumber(routeBudget, "blockingLodOverlapCount"))}`);
   if (Array.isArray(routeBudget.seamGapSamples) && routeBudget.seamGapSamples.length > 0) {
     console.log(`route seam sample: ${JSON.stringify(routeBudget.seamGapSamples[0])}`);
   }

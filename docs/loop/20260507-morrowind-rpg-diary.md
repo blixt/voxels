@@ -964,3 +964,35 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint this validated LOD/landmark slice in git
   - build a sharper seam-continuity probe for route samples
   - continue larger visual-structure work to reduce the blocky foreground read
+
+### 2026-05-07 - Route LOD Overlap and Seam Signal Split
+
+- Followed up the LOD z-fighting fix by making route movement samples distinguish:
+  - uncovered LOD gaps
+  - resident handoff holes
+  - fine/coarse resident overlaps
+  - overlapping coarser LOD bands
+- Rationale:
+  - the previous route seam number was too broad and could not tell a true hole from a z-fighting overlap
+  - route runs now fail on settled LOD overlap frames, so the user-reported class is guarded during movement and after settling
+  - the old seam count remains as non-blocking context while a more precise terrain-continuity probe is developed
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun test tests/game-route-benchmark.test.ts tests/lod-system.test.ts`: pass, `33` tests.
+  - Direct browser lab: `artifacts/owned-browser-lab/20260507T225620Z-route-lod-overlap-split-smoke/report.json`, failures none.
+  - Direct result: traversal holes/seams/blocking seams/overlaps `0/15/0/0`, route `0/54/0/0`, `LOD overlap LOD0/bands 0/0`.
+  - Full wrapper: `mise exec -- bun run scripts/verify-smoke.ts --label=route-lod-overlap-split-wrapper`: pass.
+  - Summary artifact: `artifacts/verify-smoke/20260507T225728Z-route-lod-overlap-split-wrapper/report.json`.
+  - Browser lab artifact: `artifacts/owned-browser-lab/20260507T225730Z-route-lod-overlap-split-wrapper/report.json`.
+  - Wrapper result: traversal p95/max `4.70/19.30 ms`, route p95/max `4.30/32.10 ms`, route holes/seams/blocking seams/overlaps `0/54/0/0`, `LOD pending 0`, `LOD overlap LOD0/bands 0/0`, HUD smoke passed.
+- Honest assessment:
+  - This does not eliminate the broad transient seam candidate counter; it makes the counter explain what it is seeing.
+  - The remaining `uncoveredLodGapCount` samples happen during movement while LOD work is still pending and have no visible-ground or screen-hole signal, so they are tracked but not treated as a correctness failure yet.
+  - Next harness step should sample terrain surface continuity directly along chunk and LOD boundaries instead of relying on coverage membership alone.
+- Rubric movement:
+  - Harness maturity: `5.65 -> 5.8` because route samples now expose and gate overlap separately from holes.
+  - Rendering correctness: stays `4.65`; the invariant did not change, but it is now checked in a harder movement path.
+- Next:
+  - commit this harness split
+  - use the subagent worldgen notes for a harsh-region Morrowind visual pass
+  - add direct surface-continuity checks for chunk/LOD seams

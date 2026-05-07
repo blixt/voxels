@@ -517,7 +517,13 @@ export interface RouteExperienceFrameSample {
   lodGeneratedChunks: number;
   lodPendingChunks: number;
   seamGapCount: number;
+  uncoveredLodGapCount: number;
+  handoffLodHoleCount: number;
   maxSeamGapMeters: number;
+  lodOverlapCount: number;
+  lodResidentOverlapCount: number;
+  lodBandOverlapCount: number;
+  maxLodOverlapMeters: number;
   screenVoidRatio: number | null;
   screenVoidMaxRunRatio: number | null;
   screenVoidSuspicious: boolean;
@@ -576,7 +582,9 @@ export interface RouteExperienceBenchmarkSummary {
   maxVisibleGroundResidentNotReadyCount: number;
   framesWithVisibleGroundGaps: number;
   framesWithSeamGaps: number;
+  framesWithLodOverlaps: number;
   maxSeamGapMeters: number;
+  maxLodOverlapMeters: number;
   screenVoidCaptureCount: number;
   framesWithScreenVoidSignals: number;
   framesWithSettledReferenceHoleSignals: number;
@@ -2655,7 +2663,16 @@ export class GameController {
     const shouldCaptureVoid = target.frame % captureStrideFrames === 0 || visibleGround.uncoveredCount > 0;
     const seamCoverage = target.frame % seamProbeStrideFrames === 0
       ? summarizeRouteSeamCoverage(this.probeLodCoverage(48, 1.6))
-      : { seamGapCount: 0, maxSeamGapMeters: 0 };
+      : {
+          seamGapCount: 0,
+          uncoveredGapCount: 0,
+          handoffHoleCount: 0,
+          lodOverlapCount: 0,
+          residentOverlapCount: 0,
+          bandOverlapCount: 0,
+          maxSeamGapMeters: 0,
+          maxLodOverlapMeters: 0,
+        };
     const shouldCaptureReference = referenceDiffStrideFrames > 0
       && capturedFrameCount < referenceDiffLimit
       && target.frame % referenceDiffStrideFrames === 0;
@@ -2743,7 +2760,13 @@ export class GameController {
         visibleGroundUncoveredCount: visibleGround.uncoveredCount,
         visibleGroundResidentNotReadyCount: visibleGround.residentNotReadyCount,
         seamGapCount: seamCoverage.seamGapCount,
+        uncoveredLodGapCount: seamCoverage.uncoveredGapCount,
+        handoffLodHoleCount: seamCoverage.handoffHoleCount,
         maxSeamGapMeters: seamCoverage.maxSeamGapMeters,
+        lodOverlapCount: seamCoverage.lodOverlapCount,
+        lodResidentOverlapCount: seamCoverage.residentOverlapCount,
+        lodBandOverlapCount: seamCoverage.bandOverlapCount,
+        maxLodOverlapMeters: seamCoverage.maxLodOverlapMeters,
         screenVoidRatio: screenVoid?.clearRatio ?? null,
         screenVoidMaxRunRatio: screenVoid?.maxClearRunRatio ?? null,
         screenVoidSuspicious: screenVoid?.suspicious ?? false,
@@ -3433,7 +3456,9 @@ function summarizeRouteExperienceBenchmark(
     maxVisibleGroundResidentNotReadyCount: maxValue(visibleGroundResidentNotReadySamples),
     framesWithVisibleGroundGaps: samples.filter((sample) => sample.visibleGroundUncoveredCount > 0).length,
     framesWithSeamGaps: samples.filter((sample) => sample.seamGapCount > 0).length,
+    framesWithLodOverlaps: samples.filter((sample) => sample.lodOverlapCount > 0).length,
     maxSeamGapMeters: maxValue(samples.map((sample) => sample.maxSeamGapMeters)),
+    maxLodOverlapMeters: maxValue(samples.map((sample) => sample.maxLodOverlapMeters)),
     screenVoidCaptureCount: samples.filter((sample) => sample.screenVoidRatio !== null).length,
     framesWithScreenVoidSignals: samples.filter((sample) => sample.screenVoidSuspicious).length,
     framesWithSettledReferenceHoleSignals: samples.filter((sample) => sample.settledReferenceSuspiciousHole).length,
