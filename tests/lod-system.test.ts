@@ -108,6 +108,27 @@ function lodVoxelFootprintOverlapsRenderReadyLod0(
   return false;
 }
 
+function isWorldColumnCoveredByLodChunk(
+  chunk: VoxelChunk,
+  worldX: number,
+  worldZ: number,
+): boolean {
+  const stride = Math.max(1, chunk.voxelStride);
+  const worldSize = CHUNK_SIZE * stride;
+  const localX = Math.floor((worldX - chunk.coord.x * worldSize) / stride);
+  const localZ = Math.floor((worldZ - chunk.coord.z * worldSize) / stride);
+  if (localX < 0 || localX >= CHUNK_SIZE || localZ < 0 || localZ >= CHUNK_SIZE) {
+    return false;
+  }
+  const chunkArea = CHUNK_SIZE * CHUNK_SIZE;
+  for (let localY = 0; localY < CHUNK_SIZE; localY += 1) {
+    if (chunk.data[localX + localY * CHUNK_SIZE + localZ * chunkArea] !== 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Downsample correctness
 // ---------------------------------------------------------------------------
@@ -815,6 +836,38 @@ describe("LOD coverage", () => {
     expect(uncovered).toBe(0);
   });
 
+  test("actual generated LOD data covers the full fog-range sample grid", () => {
+    const { world, spawnPos } = getWorld();
+    const lodChunks: VoxelChunk[] = [];
+    for (const chunk of world.iterateResidentChunks()) {
+      if (chunk.lodLevel > 0 && chunk.renderReady && chunk.solidCount > 0) {
+        lodChunks.push(chunk);
+      }
+    }
+
+    const radiusWorldUnits = 4160;
+    const stepWorldUnits = 80;
+    let uncovered = 0;
+    let total = 0;
+    for (let dz = -radiusWorldUnits; dz <= radiusWorldUnits; dz += stepWorldUnits) {
+      for (let dx = -radiusWorldUnits; dx <= radiusWorldUnits; dx += stepWorldUnits) {
+        const worldX = spawnPos[0] + dx;
+        const worldZ = spawnPos[2] + dz;
+        const chunkX = Math.floor(worldX / CHUNK_SIZE);
+        const chunkZ = Math.floor(worldZ / CHUNK_SIZE);
+        const covered = world.isColumnRenderReady(chunkX, chunkZ)
+          || lodChunks.some((chunk) => isWorldColumnCoveredByLodChunk(chunk, worldX, worldZ));
+        if (!covered) {
+          uncovered += 1;
+        }
+        total += 1;
+      }
+    }
+
+    expect(total).toBeGreaterThan(0);
+    expect(uncovered).toBe(0);
+  });
+
   test("LOD 1 chunks that exist fill gaps where LOD 0 is not render-ready", () => {
     const { world } = getWorld();
 
@@ -890,6 +943,37 @@ describe("LOD coverage", () => {
     });
     expect(third.neededKeyCacheHit).toBe(true);
     expect(third.yRangeMs).toBe(0);
+  });
+
+  test("budgeted LOD generation does not starve far rings on punched-out coverage", () => {
+    const gen = new ProceduralWorldGenerator(SEED);
+    const world = new ProceduralResidentWorld(gen, { horizontalRadiusChunks: 4 });
+    const spawnPos = world.getSpawnPosition();
+    world.updateResidencyAround(spawnPos, {
+      maxGenerateChunks: Number.POSITIVE_INFINITY,
+    });
+
+    let summary = world.updateLodResidencyAround(spawnPos, {
+      maxGenerateLodChunks: 2,
+    });
+    const initialPending = summary.pending;
+    expect(initialPending).toBeGreaterThan(0);
+
+    for (let frame = 0; frame < 1_300 && summary.pending > 0; frame += 1) {
+      summary = world.updateLodResidencyAround(spawnPos, {
+        maxGenerateLodChunks: 2,
+      });
+    }
+
+    expect(summary.pending).toBe(0);
+    expect(summary.totalChunks).toBeGreaterThan(0);
+    expect(summary.neededKeyCacheHit).toBe(true);
+
+    const levels = chunksByLevel(world);
+    expect(levels.get(1)?.length ?? 0).toBeGreaterThan(0);
+    expect(levels.get(2)?.length ?? 0).toBeGreaterThan(0);
+    expect(levels.get(3)?.length ?? 0).toBeGreaterThan(0);
+    expect(levels.get(4)?.length ?? 0).toBeGreaterThan(0);
   });
 });
 

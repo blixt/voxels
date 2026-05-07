@@ -30,6 +30,7 @@ export type RegionalVariantId =
   | "steppe_monolith"
   | "dunes_glass"
   | "badlands_crater"
+  | "ash_wastes"
   | "highland_redleaf"
   | "moor_shadowglass"
   | "tundra_blue_ice"
@@ -748,6 +749,16 @@ const BADLANDS_CRATER_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("standing_stone", { chance: 0.26, scale: 1.22 }),
   landmarkPlacement("dead_tree", { chance: 0.30, scale: 1.18, cellSize: 156, radius: 8 }),
   landmarkPlacement("boulder", { chance: 0.20, scale: 1.04, variant: 1 }),
+];
+
+const ASH_WASTES_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("ash_marker", { chance: 0.46, scale: 1.28, cellSize: 120, radius: 5 }),
+  landmarkPlacement("velothi_shrine", { chance: 0.28, scale: 1.18, cellSize: 148, radius: 5 }),
+  landmarkPlacement("pilgrim_cairn", { chance: 0.26, scale: 1.14, cellSize: 136, radius: 5 }),
+  landmarkPlacement("kwama_mound", { chance: 0.24, scale: 1.14, cellSize: 132, radius: 6 }),
+  landmarkPlacement("silt_shell", { chance: 0.18, scale: 1.08, cellSize: 164, radius: 8 }),
+  landmarkPlacement("basalt_spire", { chance: 0.24, scale: 1.22, cellSize: 148, radius: 7 }),
+  landmarkPlacement("dead_snag", { chance: 0.18, scale: 1.08, variant: 1, cellSize: 152, radius: 4 }),
 ];
 
 const HIGHLAND_REDWOOD_LANDMARKS: readonly LandmarkProfile[] = [
@@ -2665,6 +2676,8 @@ function selectLandmarkRoster(
       return DUNES_GLASS_LANDMARKS;
     case "badlands_crater":
       return BADLANDS_CRATER_LANDMARKS;
+    case "ash_wastes":
+      return ASH_WASTES_LANDMARKS;
     case "highland_redleaf":
       return HIGHLAND_REDLEAF_LANDMARKS;
     case "moor_shadowglass":
@@ -3083,7 +3096,20 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
         smoothstep(0.48, 0.80, fields.volcanism),
         smoothstep(0.48, 0.78, fields.peakness),
       );
-      id = strength > 0.62 ? "badlands_crater" : null;
+      {
+        const ashStrength = avg4(
+          smoothstep(0.50, 0.78, fields.volcanism),
+          smoothstep(0.40, 0.76, fields.desolation),
+          smoothstep(0.36, 0.74, fields.mesa),
+          smoothstep(0.48, 0.78, 1 - fields.moisture),
+        );
+        if (ashStrength > 0.56) {
+          strength = ashStrength;
+          id = "ash_wastes";
+        } else {
+          id = strength > 0.62 ? "badlands_crater" : null;
+        }
+      }
       break;
     case "highland":
       strength = avg4(
@@ -3156,7 +3182,20 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
         smoothstep(0.58, 0.82, fields.peakness + fields.mesa * 0.3),
         smoothstep(0.50, 0.80, fields.ridge),
       );
-      id = strength > 0.52 ? "ember_caldera" : null;
+      {
+        const ashStrength = avg4(
+          smoothstep(0.54, 0.82, fields.volcanism),
+          smoothstep(0.44, 0.78, fields.desolation),
+          smoothstep(0.42, 0.76, fields.surfacePatch + fields.scatter * 0.2),
+          smoothstep(0.48, 0.78, 1 - fields.moisture),
+        );
+        if (ashStrength > 0.58 && strength < 0.72) {
+          strength = ashStrength;
+          id = "ash_wastes";
+        } else {
+          id = strength > 0.52 ? "ember_caldera" : null;
+        }
+      }
       break;
     case "bloom":
       strength = avg3(
@@ -3225,6 +3264,9 @@ function sampleRegionalVariantSurfaceDelta(
       return Math.round((fields.dune - 0.52) * (12 + strength * 18) * weight);
     case "badlands_crater":
       return Math.round((fields.mesa - 0.52) * (16 + strength * 20) * weight);
+    case "ash_wastes":
+      return Math.round((fields.mesa - 0.58) * (6 + strength * 10) * weight)
+        - Math.round(lerp(2, 7, strength) * (0.45 + Math.max(0, fields.desolation - 0.5)) * weight);
     case "highland_redleaf":
       return Math.round(lerp(4, 12, strength) * (0.55 + fields.hills * 0.15 + 0.30) * weight);
     case "moor_shadowglass":
@@ -3292,6 +3334,12 @@ function applyRegionalVariantMaterialOverrides(
       materials.surfaceSecondary = hexColorToMaterial("#B75");
       materials.subsurfacePrimary = hexColorToMaterial("#754");
       materials.subsurfaceSecondary = hexColorToMaterial("#965");
+      break;
+    case "ash_wastes":
+      materials.surfacePrimary = hexColorToMaterial("#655");
+      materials.surfaceSecondary = hexColorToMaterial("#887");
+      materials.subsurfacePrimary = hexColorToMaterial("#433");
+      materials.subsurfaceSecondary = hexColorToMaterial("#544");
       break;
     case "highland_redleaf":
       materials.surfacePrimary = hexColorToMaterial("#A86");
@@ -4281,10 +4329,10 @@ function sampleFeatureMaterial(
           const baseRadius = featureRadius + 1.25 - relativeY * 0.28;
           return radial <= Math.max(1.4, baseRadius) ? materialPrimary : 0;
         }
-        const roofBaseY = Math.max(baseHeight + 3, featureHeight - 3);
+        const roofBaseY = Math.max(baseHeight + 3, featureHeight - 5);
         if (relativeY >= roofBaseY) {
           const roofStep = relativeY - roofBaseY;
-          const roofHalfX = Math.max(1.8, featureRadius + 1.35 - roofStep * 0.65);
+          const roofHalfX = Math.max(2.6, featureRadius + 2.25 - roofStep * 0.65);
           const roofHalfZ = Math.max(1.1, featureRadius * 0.48 - roofStep * 0.20);
           return absX <= roofHalfX && absZ <= roofHalfZ ? materialSecondary : 0;
         }

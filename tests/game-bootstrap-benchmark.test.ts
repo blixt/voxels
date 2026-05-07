@@ -37,6 +37,7 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       frustumCulledChunks: 0,
       fogCulledChunks: 0,
       lodDrawCalls: 0,
+      lodDrawCallsByLevel: [0, 0, 0, 0, 0],
     },
     {
       frame: 1,
@@ -71,6 +72,7 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       frustumCulledChunks: 1,
       fogCulledChunks: 2,
       lodDrawCalls: 3,
+      lodDrawCallsByLevel: [0, 2, 1, 0, 0],
     },
     {
       frame: 2,
@@ -105,6 +107,7 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       frustumCulledChunks: 2,
       fogCulledChunks: 4,
       lodDrawCalls: 8,
+      lodDrawCallsByLevel: [0, 2, 3, 3, 0],
     },
     {
       frame: 3,
@@ -139,6 +142,7 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
       frustumCulledChunks: 3,
       fogCulledChunks: 5,
       lodDrawCalls: 12,
+      lodDrawCallsByLevel: [0, 2, 3, 4, 3],
     },
   ]);
 
@@ -164,6 +168,7 @@ test("bootstrap benchmark summary captures readiness, totals, and dropped frames
   expect(summary.maxPendingChunks).toBe(8);
   expect(summary.maxPendingMeshJobs).toBe(4);
   expect(summary.maxFogCulledChunks).toBe(5);
+  expect(summary.maxLodDrawCallsByLevel).toEqual([0, 2, 3, 4, 3]);
   expect(summary.framesOver16_67Ms).toBe(3);
   expect(summary.framesOver33_33Ms).toBe(0);
   expect(summary.maxGameplayFrameMs).toBe(19);

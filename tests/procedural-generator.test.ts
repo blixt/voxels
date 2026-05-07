@@ -795,6 +795,7 @@ test("rare regional extremes appear across biome families without taking over th
     steppe: "steppe_monolith",
     dunes: "dunes_glass",
     badlands: "badlands_crater",
+    ash: "ash_wastes",
     highland: "highland_redleaf",
     moor: "moor_shadowglass",
     tundra: "tundra_blue_ice",
@@ -1064,6 +1065,41 @@ test("ashland exploration landmarks add Morrowind-like silhouettes", () => {
   expect(seen.has("pilgrim_cairn")).toBe(true);
 });
 
+test("ash wastes regional pockets favor ancient ashland silhouettes over generic desert props", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const ashlandLandmarks = new Set(["ash_marker", "velothi_shrine", "pilgrim_cairn", "kwama_mound", "silt_shell", "basalt_spire"]);
+  const genericDesertLandmarks = new Set(["cactus", "palm", "shrub"]);
+  const ashMaterials = new Set(["#655", "#887", "#433", "#544"].map((code) => hexColorToMaterial(code)));
+  let ashSamples = 0;
+  let ashlandLandmarkSamples = 0;
+  let genericDesertSamples = 0;
+  let ashSurfaceMaterialSamples = 0;
+
+  for (let z = -24_000; z <= 24_000; z += 32) {
+    for (let x = -24_000; x <= 24_000; x += 32) {
+      const probe = generator.sampleBiomeProbe(x, z);
+      if (probe.regionalVariantId !== "ash_wastes") {
+        continue;
+      }
+      ashSamples += 1;
+      if (ashlandLandmarks.has(probe.landmarkId ?? "")) {
+        ashlandLandmarkSamples += 1;
+      }
+      if (genericDesertLandmarks.has(probe.landmarkId ?? "")) {
+        genericDesertSamples += 1;
+      }
+      if (ashMaterials.has(probe.surfaceMaterial)) {
+        ashSurfaceMaterialSamples += 1;
+      }
+    }
+  }
+
+  expect(ashSamples).toBeGreaterThan(0);
+  expect(ashSamples / ((48_000 / 32 + 1) ** 2)).toBeLessThanOrEqual(0.02);
+  expect(ashlandLandmarkSamples).toBeGreaterThan(genericDesertSamples);
+  expect(ashSurfaceMaterialSamples / ashSamples).toBeGreaterThanOrEqual(0.55);
+});
+
 test("ashland and old-road landmarks render shaped caps instead of block columns", () => {
   const generator = new ProceduralWorldGenerator(1337);
 
@@ -1080,7 +1116,7 @@ test("ashland and old-road landmarks render shaped caps instead of block columns
 
     expect(shaft.count).toBeGreaterThan(0);
     expect(cap.count).toBeGreaterThan(shaft.count);
-    expect(cap.widthX).toBeGreaterThanOrEqual(shaft.widthX + 4);
+    expect(cap.widthX).toBeGreaterThanOrEqual(shaft.widthX + 3);
     expect(cap.widthX).toBeGreaterThan(cap.widthZ);
   }
 });

@@ -62,6 +62,7 @@ const REGIONAL_VARIANT_NAMES = {
   steppe_monolith: "Monolith March",
   dunes_glass: "Glasswind Basin",
   badlands_crater: "Crater Maze",
+  ash_wastes: "Ash Wastes",
   highland_redleaf: "Redleaf Crown",
   moor_shadowglass: "Shadowglass Bog",
   tundra_blue_ice: "Blue-Ice Shelf",

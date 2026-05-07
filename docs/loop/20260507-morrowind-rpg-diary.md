@@ -996,3 +996,56 @@ Build the first "place identity" slice without regressing performance or input:
   - commit this harness split
   - use the subagent worldgen notes for a harsh-region Morrowind visual pass
   - add direct surface-continuity checks for chunk/LOD seams
+
+### 2026-05-07 - Far LOD Coverage, Object Lab, and Ash Wastes
+
+- Followed up on the user's report that z-fighting remained and distant LOD seemed gone.
+- Browser evidence:
+  - first widened LOD smoke failed with `60` far coverage gaps and per-level draw calls `0/85/60/41/82`
+  - conservative ring planning alone failed with `56` gaps
+  - resident fine-chunk eviction invalidation reduced this to `55` gaps
+  - splitting covered-empty LOD cache reduced this to `3` gaps
+  - invalidating coarser LOD when intermediate LOD chunks are evicted reached `0` gaps
+- Root causes fixed:
+  - coarser ring planning was trusting theoretical finer-ring coverage and could skip chunks that were not actually filled
+  - LOD chunks that were empty only because finer coverage existed were cached like genuinely empty terrain and survived movement
+  - evicted LOD1 chunks did not invalidate LOD2 chunks that had punched out columns because of those LOD1 chunks
+  - settle now treats pending LOD invalidation after eviction as real pending work instead of stopping on a stale frame
+- Harness improvements:
+  - owned browser lab now samples the full `416 m` fog range by default instead of the old local `48 m` radius
+  - browser lab now fails if no far LOD levels are drawn and prints draw calls by LOD level
+  - renderer/controller/bootstrap benchmark now expose `lodDrawCallsByLevel`
+  - added LOD tests for full fog-range generated coverage and budgeted far-ring starvation
+- Object-lab tooling:
+  - added `scripts/object-lab.ts` for isolated landmark review without opening the full renderer
+  - added top/front/side PPM projections, SVG contact sheet, silhouette diagnostics, material dominance, and a docs workflow
+  - smoke artifact: `artifacts/object-lab/2026-05-07-233939666Z-ash-marker-check/contact-sheet.svg`
+- World definition:
+  - added an `ash_wastes` regional variant inspired by the attached salt-marsh/ashen-badlands references
+  - ash wastes favor ash markers, Velothi shrines, pilgrim cairns, kwama mounds, silt shells, basalt spires, and dead snags over generic desert props
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun test tests/lod-system.test.ts tests/game-bootstrap-benchmark.test.ts tests/object-lab.test.ts`: pass, `29` tests.
+  - `mise exec -- bun test tests/procedural-generator.test.ts tests/exploration-journal.test.ts tests/exploration-objectives.test.ts`: pass, `42` tests.
+  - Direct browser lab: `artifacts/owned-browser-lab/20260507T233631Z-far-lod-lod-eviction-invalidation-smoke/report.json`, failures none.
+  - Full wrapper: `mise exec -- bun run scripts/verify-smoke.ts --label=far-lod-object-lab-ash-wastes-wrapper`: pass.
+  - Summary artifact: `artifacts/verify-smoke/20260507T233801Z-far-lod-object-lab-ash-wastes-wrapper/report.json`.
+  - Browser artifact: `artifacts/owned-browser-lab/20260507T233803Z-far-lod-object-lab-ash-wastes-wrapper/report.json`.
+  - Wrapper result: `LOD gaps 0`, `LOD overlap LOD0/bands 0/0`, `LOD pending 0`, `render-ready near samples 961/961`, route p95/max `4.90/31.50 ms`, traversal p95/max `4.80/18.90 ms`, draw/triangles `509/390648`, HUD smoke passed.
+  - Object lab smoke: `mise exec -- bun run scripts/object-lab.ts --id ash_marker --seed 1337 --label=ash-marker-check --scan-radius=4096 --coarse-step=32 --sample-radius=16 --height-padding=4`: pass, `1323` solid object voxels.
+- Browser limitation:
+  - the Browser Use `iab` backend was attempted first but no in-app browser backend was discovered, so the visual validation used the repo-owned browser lab instead of the exact user-facing tab.
+- Honest assessment:
+  - The reported class of LOD overlap and far coverage gaps is now covered by a much stricter browser smoke and currently passes.
+  - Movement still logs transient non-blocking seam candidates while LOD work is pending; they do not show visible-ground or screen-hole signals, but the next harness pass should replace this broad counter with direct terrain-continuity checks.
+  - The scene still reads too block/grid dominated (`visual identity grid 0.68`), so the next quality push should reshape terrain tiles, silhouettes, and large landmarks rather than adding more small props.
+- Rubric movement:
+  - Rendering correctness: `4.65 -> 5.2` because the harness now proves settled fog-range LOD coverage has no sampled holes or overlap after movement and teleport settling.
+  - Performance/playability: `4.3 -> 4.45` because the stricter far LOD coverage keeps route max under `33 ms` while drawing far levels.
+  - Harness maturity: `5.8 -> 6.15` because far-distance visibility, per-level LOD draw calls, and isolated object review now have repeatable scripts.
+  - Visual/world definition: `3.0 -> 3.25` because ash wastes introduce a more Morrowind-like regional roster, though the overall shape language still needs major work.
+- Next:
+  - commit and attempt push; this worktree still has no configured `origin`
+  - add water-specific overlap diagnostics, since transparent water can still double-blend even when opaque LOD overlap is zero
+  - use object lab to iterate on individual ashland objects before broadening the biome again
+  - replace broad route seam candidates with a direct surface-continuity probe

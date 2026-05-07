@@ -33,6 +33,7 @@ export interface BootstrapBenchmarkSample {
   frustumCulledChunks: number;
   fogCulledChunks: number;
   lodDrawCalls: number;
+  lodDrawCallsByLevel: readonly number[];
 }
 
 export interface BootstrapBenchmarkSummary {
@@ -80,6 +81,7 @@ export interface BootstrapBenchmarkSummary {
   maxFrustumCulledChunks: number;
   maxFogCulledChunks: number;
   maxLodDrawCalls: number;
+  maxLodDrawCallsByLevel: readonly number[];
   framesOver16_67Ms: number;
   framesOver33_33Ms: number;
 }
@@ -145,9 +147,21 @@ export function summarizeBootstrapBenchmark(
     maxFrustumCulledChunks: maxValue(samples.map((sample) => sample.frustumCulledChunks)),
     maxFogCulledChunks: maxValue(samples.map((sample) => sample.fogCulledChunks)),
     maxLodDrawCalls: maxValue(samples.map((sample) => sample.lodDrawCalls)),
+    maxLodDrawCallsByLevel: summarizeMaxLodDrawCallsByLevel(samples),
     framesOver16_67Ms: samples.filter((sample) => sample.gameplayFrameMs > 16.67).length,
     framesOver33_33Ms: samples.filter((sample) => sample.gameplayFrameMs > 33.33).length,
   };
+}
+
+function summarizeMaxLodDrawCallsByLevel(samples: readonly BootstrapBenchmarkSample[]): number[] {
+  const maxLevels = Math.max(5, ...samples.map((sample) => sample.lodDrawCallsByLevel.length));
+  const out = new Array<number>(maxLevels).fill(0);
+  for (const sample of samples) {
+    for (let index = 0; index < sample.lodDrawCallsByLevel.length; index += 1) {
+      out[index] = Math.max(out[index]!, sample.lodDrawCallsByLevel[index] ?? 0);
+    }
+  }
+  return out;
 }
 
 function sumNumbers(values: readonly number[]): number {

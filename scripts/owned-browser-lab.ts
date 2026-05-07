@@ -936,6 +936,14 @@ function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<stri
   if ((readNumber(after, "lodChunkCount") ?? 0) <= 0) {
     failures.push("settled page has no renderable LOD chunks");
   }
+  const lodDrawCallsByLevel = readNumberArray(after, "lodDrawCallsByLevel");
+  const farLodDrawCalls = lodDrawCallsByLevel.slice(2).reduce((sum, value) => sum + value, 0);
+  if ((readNumber(after, "lodDrawCalls") ?? 0) <= 0) {
+    failures.push("settled page drew no LOD chunks");
+  }
+  if (farLodDrawCalls <= 0) {
+    failures.push(`settled page drew no far LOD levels (per-level ${lodDrawCallsByLevel.join("/") || "missing"})`);
+  }
   if ((readNumber(after, "lodPendingChunks") ?? 0) > 0) {
     failures.push(`settled page still has ${readNumber(after, "lodPendingChunks")} pending LOD chunks`);
   }
@@ -1204,6 +1212,7 @@ function printSummary(reportPath: string, report: {
   }
   console.log(`chunks: ${formatNumber(readNumber(after, "chunkCount"))}`);
   console.log(`LOD chunks: ${formatNumber(readNumber(after, "lodChunkCount"))}`);
+  console.log(`LOD draw calls by level: ${readNumberArray(after, "lodDrawCallsByLevel").join("/") || "missing"}`);
   console.log(`LOD pending: ${formatNumber(readNumber(after, "lodPendingChunks"))}`);
   console.log(`ambient: ${readStringField(after, "ambientProfileId") ?? "unknown"} (${formatNumber(readNumber(after, "ambientFogEndMeters"))} m fog)`);
   console.log(`focus skill: ${readStringField(after, "focusSkillName") ?? "unknown"} ${formatNumber(readNumber(after, "focusSkillLevel"))}`);
@@ -1256,8 +1265,8 @@ function parseCli(argv: readonly string[]): CliOptions {
     chromeBinary: readFlag(args, "--chrome-binary") ?? resolveChromeBinary(),
     headless: readBooleanFlag(args, "--headless", true),
     settleMaxFrames: readPositiveInt(readFlag(args, "--settle-max-frames"), 300),
-    lodRadiusMeters: readPositiveFloat(readFlag(args, "--lod-radius"), 48),
-    lodStepMeters: readPositiveFloat(readFlag(args, "--lod-step"), 1.6),
+    lodRadiusMeters: readPositiveFloat(readFlag(args, "--lod-radius"), 416),
+    lodStepMeters: readPositiveFloat(readFlag(args, "--lod-step"), 8),
     renderRadiusMeters: readPositiveFloat(readFlag(args, "--render-radius"), 12),
     renderStepMeters: readPositiveFloat(readFlag(args, "--render-step"), 0.8),
     visibleForwardMeters: readPositiveFloat(readFlag(args, "--visible-forward"), 16),
@@ -1949,6 +1958,14 @@ function quantizeRgb(rgb: readonly [number, number, number]): number {
 function readNumber(record: Record<string, unknown>, key: string): number | null {
   const value = record[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readNumberArray(record: Record<string, unknown>, key: string): number[] {
+  const value = record[key];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((entry) => typeof entry === "number" && Number.isFinite(entry) ? entry : 0);
 }
 
 function readStringField(record: Record<string, unknown>, key: string): string | null {

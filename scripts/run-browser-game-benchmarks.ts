@@ -135,6 +135,7 @@ await withBrowserGameSession({
       {
         buildIterationRow(iteration, memory) {
           const drops = countFrameDrops(iteration.result.samples.map((sample) => sample.gameplayFrameMs));
+          const { maxLodDrawCallsByLevel, ...summary } = iteration.result.summary;
           return {
             scenarioId: iteration.scenarioId,
             warmup: iteration.warmup,
@@ -142,7 +143,8 @@ await withBrowserGameSession({
             globalIndex: iteration.globalIndex,
             setupElapsedMs: iteration.setupElapsedMs,
             benchmarkElapsedMs: iteration.benchmarkElapsedMs,
-            ...iteration.result.summary,
+            ...summary,
+            maxLodDrawCallsByLevel: maxLodDrawCallsByLevel.join("/"),
             framesOver16_67Ms: drops.framesOver16_67Ms,
             framesOver33_33Ms: drops.framesOver33_33Ms,
             framesOver50Ms: drops.framesOver50Ms,
@@ -472,12 +474,14 @@ function serializeBootstrapSample(
   iteration: BrowserBenchmarkIterationResult<BootstrapExperienceBenchmark>,
   sample: BootstrapBenchmarkSample,
 ): Record<string, string | number | boolean | null | undefined> {
+  const { lodDrawCallsByLevel, ...serializableSample } = sample;
   return {
     scenarioId: iteration.scenarioId,
     warmup: iteration.warmup,
     iteration: iteration.iteration,
     globalIndex: iteration.globalIndex,
-    ...sample,
+    ...serializableSample,
+    lodDrawCallsByLevel: lodDrawCallsByLevel.join("/"),
   };
 }
 

@@ -1,0 +1,672 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+import {
+  materialToHexColor,
+  ProceduralWorldGenerator,
+  type LandmarkId,
+  type ProceduralBiomeProbe,
+} from "../src/engine/procedural-generator.ts";
+
+export const OBJECT_LAB_LANDMARK_IDS = [
+  "oak",
+  "canopy_tree",
+  "birch",
+  "redleaf_tree",
+  "willow",
+  "blossom_tree",
+  "fruit_tree",
+  "giant_flower",
+  "redwood",
+  "dead_tree",
+  "thorn_tree",
+  "berry_bush",
+  "giant_fern",
+  "lantern_tree",
+  "salt_spire",
+  "boulder",
+  "standing_stone",
+  "shrub",
+  "flower_patch",
+  "palm",
+  "acacia",
+  "cactus",
+  "dead_snag",
+  "hoodoo",
+  "fir",
+  "tall_fir",
+  "ice_spire",
+  "frost_shrub",
+  "cypress",
+  "mangrove",
+  "reed_cluster",
+  "basalt_spire",
+  "crystal_cluster",
+  "glowcap",
+  "mega_glowcap",
+  "root_stump",
+  "stone_tor",
+  "ancestor_pillar",
+  "ash_marker",
+  "glass_cairn",
+  "silt_shell",
+  "velothi_shrine",
+  "kwama_mound",
+  "pilgrim_cairn",
+] as const satisfies readonly LandmarkId[];
+
+export interface LandmarkRoot {
+  x: number;
+  z: number;
+  probe: ProceduralBiomeProbe;
+}
+
+export interface ObjectLabOptions {
+  landmarkId: LandmarkId;
+  seed?: number;
+  outputDir?: string;
+  label?: string;
+  timestamp?: Date;
+  scanRadius?: number;
+  coarseStep?: number;
+  refineRadius?: number;
+  sampleRadius?: number;
+  heightPadding?: number;
+  worldX?: number;
+  worldZ?: number;
+}
+
+export interface ObjectLabReport {
+  generatedAt: string;
+  landmarkId: LandmarkId;
+  seed: number;
+  runDir: string;
+  root: {
+    x: number;
+    z: number;
+    probe: ProceduralBiomeProbe;
+  };
+  sample: {
+    radius: number;
+    yMin: number;
+    yMax: number;
+    solidVoxelCount: number;
+    bounds: {
+      min: [number, number, number];
+      max: [number, number, number];
+    } | null;
+    materialCounts: Array<{
+      material: number;
+      hex: string;
+      count: number;
+    }>;
+    diagnostics: ObjectLabDiagnostics;
+  };
+  artifacts: {
+    report: string;
+    summary: string;
+    contactSheet: string;
+    topProjection: string;
+    frontProjection: string;
+    sideProjection: string;
+  };
+}
+
+export interface ObjectLabDiagnostics {
+  materialVariety: number;
+  dominantMaterialShare: number;
+  silhouette: {
+    top: ProjectionDiagnostics;
+    front: ProjectionDiagnostics;
+    side: ProjectionDiagnostics;
+  };
+}
+
+export interface ProjectionDiagnostics {
+  occupiedPixels: number;
+  coverage: number;
+  bounds: {
+    min: [number, number];
+    max: [number, number];
+  } | null;
+  normalizedWidth: number;
+  normalizedHeight: number;
+  aspectRatio: number | null;
+}
+
+interface SampledObject {
+  radius: number;
+  yMin: number;
+  yMax: number;
+  solidVoxelCount: number;
+  bounds: ObjectLabReport["sample"]["bounds"];
+  materialCounts: Map<number, number>;
+  topProjection: Projection;
+  frontProjection: Projection;
+  sideProjection: Projection;
+}
+
+interface Projection {
+  width: number;
+  height: number;
+  pixels: number[];
+}
+
+const DEFAULT_SEED = 1337;
+const DEFAULT_OUTPUT_DIR = "artifacts/object-lab";
+const DEFAULT_SCAN_RADIUS = 32_768;
+const DEFAULT_COARSE_STEP = 64;
+const DEFAULT_REFINE_RADIUS = 48;
+const DEFAULT_SAMPLE_RADIUS = 32;
+const DEFAULT_HEIGHT_PADDING = 8;
+const BACKGROUND = 0xf4f4f4;
+const LANDMARK_ID_SET = new Set<string>(OBJECT_LAB_LANDMARK_IDS);
+
+if (import.meta.main) {
+  try {
+    const options = readOptions(Bun.argv.slice(2));
+    const report = await runObjectLab(options);
+    console.log(`object-lab report: ${report.artifacts.report}`);
+    console.log(`summary: ${report.artifacts.summary}`);
+    console.log(`contact sheet: ${report.artifacts.contactSheet}`);
+    console.log(`root: ${report.root.x},${report.root.z} (${report.root.probe.biomeId})`);
+    console.log(`solid object voxels: ${report.sample.solidVoxelCount}`);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
+export async function runObjectLab(options: ObjectLabOptions): Promise<ObjectLabReport> {
+  const seed = options.seed ?? DEFAULT_SEED;
+  const generator = new ProceduralWorldGenerator(seed);
+  const root = options.worldX !== undefined || options.worldZ !== undefined
+    ? resolveRequestedRoot(generator, options)
+    : findRepresentativeLandmarkRoot(generator, options.landmarkId, {
+      scanRadius: options.scanRadius ?? DEFAULT_SCAN_RADIUS,
+      coarseStep: options.coarseStep ?? DEFAULT_COARSE_STEP,
+      refineRadius: options.refineRadius ?? DEFAULT_REFINE_RADIUS,
+    });
+
+  if (!root) {
+    throw new Error(
+      `Could not find landmark '${options.landmarkId}' within scan radius ${options.scanRadius ?? DEFAULT_SCAN_RADIUS}.`,
+    );
+  }
+
+  const timestamp = options.timestamp ?? new Date();
+  const label = sanitizeFileStem(options.label ?? options.landmarkId);
+  const runName = `${timestampForFile(timestamp)}-${label}`;
+  const runDir = join(options.outputDir ?? DEFAULT_OUTPUT_DIR, runName);
+  await mkdir(runDir, { recursive: true });
+
+  const sample = sampleObject(generator, root, {
+    radius: options.sampleRadius ?? DEFAULT_SAMPLE_RADIUS,
+    heightPadding: options.heightPadding ?? DEFAULT_HEIGHT_PADDING,
+  });
+  const reportPath = join(runDir, "report.json");
+  const summaryPath = join(runDir, "summary.md");
+  const contactSheetPath = join(runDir, "contact-sheet.svg");
+  const topPath = join(runDir, "top.ppm");
+  const frontPath = join(runDir, "front.ppm");
+  const sidePath = join(runDir, "side.ppm");
+  const diagnostics = buildDiagnostics(sample);
+  const report: ObjectLabReport = {
+    generatedAt: timestamp.toISOString(),
+    landmarkId: options.landmarkId,
+    seed,
+    runDir,
+    root: {
+      x: root.x,
+      z: root.z,
+      probe: root.probe,
+    },
+    sample: {
+      radius: sample.radius,
+      yMin: sample.yMin,
+      yMax: sample.yMax,
+      solidVoxelCount: sample.solidVoxelCount,
+      bounds: sample.bounds,
+      materialCounts: [...sample.materialCounts.entries()]
+        .map(([material, count]) => ({ material, hex: materialToHexColor(material), count }))
+        .sort((a, b) => b.count - a.count || a.material - b.material),
+      diagnostics,
+    },
+    artifacts: {
+      report: reportPath,
+      summary: summaryPath,
+      contactSheet: contactSheetPath,
+      topProjection: topPath,
+      frontProjection: frontPath,
+      sideProjection: sidePath,
+    },
+  };
+
+  await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  await writeFile(summaryPath, buildMarkdownSummary(report));
+  await writeFile(contactSheetPath, buildContactSheetSvg(report, sample));
+  await writeFile(topPath, encodePpm(sample.topProjection));
+  await writeFile(frontPath, encodePpm(sample.frontProjection));
+  await writeFile(sidePath, encodePpm(sample.sideProjection));
+  return report;
+}
+
+export function findRepresentativeLandmarkRoot(
+  generator: ProceduralWorldGenerator,
+  landmarkId: LandmarkId,
+  options: {
+    scanRadius?: number;
+    coarseStep?: number;
+    refineRadius?: number;
+  } = {},
+): LandmarkRoot | null {
+  const scanRadius = options.scanRadius ?? DEFAULT_SCAN_RADIUS;
+  const coarseStep = options.coarseStep ?? DEFAULT_COARSE_STEP;
+  const refineRadius = options.refineRadius ?? DEFAULT_REFINE_RADIUS;
+  for (let coarseZ = -scanRadius; coarseZ <= scanRadius; coarseZ += coarseStep) {
+    for (let coarseX = -scanRadius; coarseX <= scanRadius; coarseX += coarseStep) {
+      if (generator.sampleBiomeProbe(coarseX, coarseZ).landmarkId !== landmarkId) {
+        continue;
+      }
+      const root = refineLandmarkRoot(generator, landmarkId, coarseX, coarseZ, refineRadius);
+      if (root) {
+        return root;
+      }
+    }
+  }
+  return null;
+}
+
+function refineLandmarkRoot(
+  generator: ProceduralWorldGenerator,
+  landmarkId: LandmarkId,
+  coarseX: number,
+  coarseZ: number,
+  refineRadius: number,
+): LandmarkRoot | null {
+  for (let z = coarseZ - refineRadius; z <= coarseZ + refineRadius; z += 1) {
+    for (let x = coarseX - refineRadius; x <= coarseX + refineRadius; x += 1) {
+      const probe = generator.sampleBiomeProbe(x, z);
+      if (probe.landmarkId !== landmarkId || generator.sampleMaterial(x, probe.surfaceY + 1, z) === 0) {
+        continue;
+      }
+      return { x, z, probe };
+    }
+  }
+  return null;
+}
+
+function resolveRequestedRoot(generator: ProceduralWorldGenerator, options: ObjectLabOptions): LandmarkRoot {
+  if (options.worldX === undefined || options.worldZ === undefined) {
+    throw new Error("--world-x and --world-z must be provided together.");
+  }
+  const probe = generator.sampleBiomeProbe(options.worldX, options.worldZ);
+  if (probe.landmarkId !== options.landmarkId) {
+    throw new Error(
+      `Requested coordinate has landmark '${probe.landmarkId ?? "none"}', not '${options.landmarkId}'.`,
+    );
+  }
+  return { x: options.worldX, z: options.worldZ, probe };
+}
+
+function sampleObject(
+  generator: ProceduralWorldGenerator,
+  root: LandmarkRoot,
+  options: {
+    radius: number;
+    heightPadding: number;
+  },
+): SampledObject {
+  const width = options.radius * 2 + 1;
+  const yMin = root.probe.surfaceY + 1;
+  const yMax = root.probe.topY + options.heightPadding;
+  const height = yMax - yMin + 1;
+  const topProjection = createProjection(width, width);
+  const frontProjection = createProjection(width, height);
+  const sideProjection = createProjection(width, height);
+  const materialCounts = new Map<number, number>();
+  let solidVoxelCount = 0;
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+
+  for (let dz = -options.radius; dz <= options.radius; dz += 1) {
+    for (let dx = -options.radius; dx <= options.radius; dx += 1) {
+      const worldX = root.x + dx;
+      const worldZ = root.z + dz;
+      if (generator.sampleBiomeProbe(worldX, worldZ).landmarkId !== root.probe.landmarkId) {
+        continue;
+      }
+      const localSurfaceY = generator.sampleColumn(worldX, worldZ).surfaceY;
+      for (let y = Math.max(yMin, localSurfaceY + 1); y <= yMax; y += 1) {
+        const material = generator.sampleMaterial(worldX, y, worldZ);
+        if (material === 0) {
+          continue;
+        }
+        solidVoxelCount += 1;
+        materialCounts.set(material, (materialCounts.get(material) ?? 0) + 1);
+        minX = Math.min(minX, worldX);
+        minY = Math.min(minY, y);
+        minZ = Math.min(minZ, worldZ);
+        maxX = Math.max(maxX, worldX + 1);
+        maxY = Math.max(maxY, y + 1);
+        maxZ = Math.max(maxZ, worldZ + 1);
+        const color = rgbIntFromMaterial(material);
+        const px = dx + options.radius;
+        const pz = dz + options.radius;
+        const py = yMax - y;
+        setPixel(topProjection, px, pz, color);
+        setPixel(frontProjection, px, py, color);
+        setPixel(sideProjection, pz, py, color);
+      }
+    }
+  }
+
+  return {
+    radius: options.radius,
+    yMin,
+    yMax,
+    solidVoxelCount,
+    bounds: solidVoxelCount === 0 ? null : { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
+    materialCounts,
+    topProjection,
+    frontProjection,
+    sideProjection,
+  };
+}
+
+function createProjection(width: number, height: number): Projection {
+  return {
+    width,
+    height,
+    pixels: Array.from({ length: width * height }, () => BACKGROUND),
+  };
+}
+
+function setPixel(projection: Projection, x: number, y: number, color: number): void {
+  if (x < 0 || y < 0 || x >= projection.width || y >= projection.height) {
+    return;
+  }
+  projection.pixels[x + y * projection.width] = color;
+}
+
+function encodePpm(projection: Projection): string {
+  const lines = [`P3`, `${projection.width} ${projection.height}`, `255`];
+  for (let y = 0; y < projection.height; y += 1) {
+    const row: string[] = [];
+    for (let x = 0; x < projection.width; x += 1) {
+      const color = projection.pixels[x + y * projection.width] ?? BACKGROUND;
+      row.push(`${(color >> 16) & 0xff} ${(color >> 8) & 0xff} ${color & 0xff}`);
+    }
+    lines.push(row.join(" "));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function buildDiagnostics(sample: SampledObject): ObjectLabDiagnostics {
+  const materialCounts = [...sample.materialCounts.values()];
+  const dominantCount = materialCounts.length === 0 ? 0 : Math.max(...materialCounts);
+  return {
+    materialVariety: sample.materialCounts.size,
+    dominantMaterialShare: sample.solidVoxelCount === 0 ? 0 : roundRatio(dominantCount / sample.solidVoxelCount),
+    silhouette: {
+      top: inspectProjection(sample.topProjection),
+      front: inspectProjection(sample.frontProjection),
+      side: inspectProjection(sample.sideProjection),
+    },
+  };
+}
+
+function inspectProjection(projection: Projection): ProjectionDiagnostics {
+  let occupiedPixels = 0;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (let y = 0; y < projection.height; y += 1) {
+    for (let x = 0; x < projection.width; x += 1) {
+      if (projection.pixels[x + y * projection.width] === BACKGROUND) {
+        continue;
+      }
+      occupiedPixels += 1;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x + 1);
+      maxY = Math.max(maxY, y + 1);
+    }
+  }
+  const pixelCount = projection.width * projection.height;
+  if (occupiedPixels === 0) {
+    return {
+      occupiedPixels: 0,
+      coverage: 0,
+      bounds: null,
+      normalizedWidth: 0,
+      normalizedHeight: 0,
+      aspectRatio: null,
+    };
+  }
+  const width = maxX - minX;
+  const height = maxY - minY;
+  return {
+    occupiedPixels,
+    coverage: roundRatio(occupiedPixels / pixelCount),
+    bounds: { min: [minX, minY], max: [maxX, maxY] },
+    normalizedWidth: roundRatio(width / projection.width),
+    normalizedHeight: roundRatio(height / projection.height),
+    aspectRatio: roundRatio(width / height),
+  };
+}
+
+function roundRatio(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+function rgbIntFromMaterial(material: number): number {
+  const hex = materialToHexColor(material);
+  const r = Number.parseInt(hex[1]!, 16) * 17;
+  const g = Number.parseInt(hex[2]!, 16) * 17;
+  const b = Number.parseInt(hex[3]!, 16) * 17;
+  return (r << 16) | (g << 8) | b;
+}
+
+function buildMarkdownSummary(report: ObjectLabReport): string {
+  const bounds = report.sample.bounds
+    ? `${report.sample.bounds.min.join(", ")} -> ${report.sample.bounds.max.join(", ")}`
+    : "none";
+  const materialRows = report.sample.materialCounts
+    .slice(0, 12)
+    .map((entry) => `| ${entry.hex} | ${entry.material} | ${entry.count} |`)
+    .join("\n");
+  return [
+    `# Object Lab: ${report.landmarkId}`,
+    ``,
+    `- Seed: ${report.seed}`,
+    `- Root: ${report.root.x}, ${report.root.z}`,
+    `- Biome: ${report.root.probe.biomeId}`,
+    `- Regional variant: ${report.root.probe.regionalVariantId ?? "none"}`,
+    `- Surface Y: ${report.root.probe.surfaceY}`,
+    `- Probe top Y: ${report.root.probe.topY}`,
+    `- Sample radius: ${report.sample.radius}`,
+    `- Solid object voxels: ${report.sample.solidVoxelCount}`,
+    `- Bounds: ${bounds}`,
+    `- Material variety: ${report.sample.diagnostics.materialVariety}`,
+    `- Dominant material share: ${formatPercent(report.sample.diagnostics.dominantMaterialShare)}`,
+    ``,
+    `## Projection Artifacts`,
+    ``,
+    `- Contact sheet: ${report.artifacts.contactSheet}`,
+    `- Top: ${report.artifacts.topProjection}`,
+    `- Front: ${report.artifacts.frontProjection}`,
+    `- Side: ${report.artifacts.sideProjection}`,
+    ``,
+    `## Silhouette Diagnostics`,
+    ``,
+    `| View | Coverage | Width | Height | Aspect | Occupied Pixels |`,
+    `| --- | ---: | ---: | ---: | ---: | ---: |`,
+    silhouetteRow("Top", report.sample.diagnostics.silhouette.top),
+    silhouetteRow("Front", report.sample.diagnostics.silhouette.front),
+    silhouetteRow("Side", report.sample.diagnostics.silhouette.side),
+    ``,
+    `## Materials`,
+    ``,
+    `| Hex | Material | Count |`,
+    `| --- | ---: | ---: |`,
+    materialRows || `| none | 0 | 0 |`,
+    ``,
+  ].join("\n");
+}
+
+function silhouetteRow(label: string, diagnostics: ProjectionDiagnostics): string {
+  return [
+    `| ${label}`,
+    formatPercent(diagnostics.coverage),
+    formatPercent(diagnostics.normalizedWidth),
+    formatPercent(diagnostics.normalizedHeight),
+    diagnostics.aspectRatio === null ? "n/a" : diagnostics.aspectRatio.toFixed(3),
+    diagnostics.occupiedPixels.toString(),
+  ].join(" | ") + " |";
+}
+
+function buildContactSheetSvg(report: ObjectLabReport, sample: SampledObject): string {
+  const cellSize = 6;
+  const gap = 28;
+  const labelHeight = 26;
+  const panelPadding = 10;
+  const legendWidth = 240;
+  const panels = [
+    { label: "Top", projection: sample.topProjection, diagnostics: report.sample.diagnostics.silhouette.top },
+    { label: "Front", projection: sample.frontProjection, diagnostics: report.sample.diagnostics.silhouette.front },
+    { label: "Side", projection: sample.sideProjection, diagnostics: report.sample.diagnostics.silhouette.side },
+  ];
+  const panelWidth = Math.max(...panels.map((panel) => panel.projection.width * cellSize + panelPadding * 2));
+  const panelHeights = panels.map((panel) => panel.projection.height * cellSize + labelHeight + panelPadding * 2);
+  const width = panelWidth * panels.length + gap * (panels.length - 1) + legendWidth;
+  const height = Math.max(...panelHeights, 260);
+  const materialRows = report.sample.materialCounts.slice(0, 12);
+  const parts = [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Object lab contact sheet for ${escapeXml(report.landmarkId)}">`,
+    `<rect width="100%" height="100%" fill="#f8f8f6"/>`,
+    `<style>text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#202020}.title{font-size:15px;font-weight:700}.meta{font-size:11px}.legend{font-size:12px}</style>`,
+  ];
+  let x = 0;
+  for (const panel of panels) {
+    const panelHeight = panel.projection.height * cellSize + labelHeight + panelPadding * 2;
+    parts.push(`<rect x="${x}" y="0" width="${panelWidth}" height="${panelHeight}" fill="#ffffff" stroke="#d6d2c8"/>`);
+    parts.push(
+      `<text class="title" x="${x + panelPadding}" y="18">${panel.label}</text>`,
+      `<text class="meta" x="${x + panelPadding + 58}" y="18">coverage ${formatPercent(panel.diagnostics.coverage)} | aspect ${
+        panel.diagnostics.aspectRatio === null ? "n/a" : panel.diagnostics.aspectRatio.toFixed(3)
+      }</text>`,
+    );
+    parts.push(projectSvg(panel.projection, x + panelPadding, labelHeight + panelPadding, cellSize));
+    x += panelWidth + gap;
+  }
+  parts.push(`<g transform="translate(${x}, 0)">`);
+  parts.push(`<text class="title" x="0" y="18">${escapeXml(report.landmarkId)}</text>`);
+  parts.push(`<text class="meta" x="0" y="40">seed ${report.seed} | root ${report.root.x}, ${report.root.z}</text>`);
+  parts.push(`<text class="meta" x="0" y="58">voxels ${report.sample.solidVoxelCount} | materials ${report.sample.diagnostics.materialVariety}</text>`);
+  parts.push(`<text class="legend" x="0" y="88">Material legend</text>`);
+  materialRows.forEach((entry, index) => {
+    const y = 108 + index * 18;
+    parts.push(`<rect x="0" y="${y - 10}" width="12" height="12" fill="${entry.hex}"/>`);
+    parts.push(`<text class="meta" x="20" y="${y}">${entry.hex} material ${entry.material} (${entry.count})</text>`);
+  });
+  parts.push(`</g>`);
+  parts.push(`</svg>`);
+  return `${parts.join("\n")}\n`;
+}
+
+function projectSvg(projection: Projection, offsetX: number, offsetY: number, cellSize: number): string {
+  const parts: string[] = [];
+  for (let y = 0; y < projection.height; y += 1) {
+    for (let x = 0; x < projection.width; x += 1) {
+      const color = projection.pixels[x + y * projection.width] ?? BACKGROUND;
+      if (color === BACKGROUND) {
+        continue;
+      }
+      parts.push(
+        `<rect x="${offsetX + x * cellSize}" y="${offsetY + y * cellSize}" width="${cellSize}" height="${cellSize}" fill="${hexFromRgbInt(color)}"/>`,
+      );
+    }
+  }
+  return parts.join("\n");
+}
+
+function hexFromRgbInt(color: number): string {
+  return `#${color.toString(16).padStart(6, "0")}`;
+}
+
+function formatPercent(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function escapeXml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+function readOptions(args: string[]): ObjectLabOptions {
+  const rawId = readFlag(args, "--id") ?? args.find((arg) => !arg.startsWith("--"));
+  if (!rawId || !isLandmarkId(rawId)) {
+    throw new Error(`Usage: bun run scripts/object-lab.ts --id <landmark-id> [--seed 1337]`);
+  }
+  return {
+    landmarkId: rawId,
+    seed: readPositiveInt(readFlag(args, "--seed"), DEFAULT_SEED),
+    outputDir: readFlag(args, "--output-dir") ?? DEFAULT_OUTPUT_DIR,
+    label: readFlag(args, "--label") ?? rawId,
+    scanRadius: readPositiveInt(readFlag(args, "--scan-radius"), DEFAULT_SCAN_RADIUS),
+    coarseStep: readPositiveInt(readFlag(args, "--coarse-step"), DEFAULT_COARSE_STEP),
+    refineRadius: readPositiveInt(readFlag(args, "--refine-radius"), DEFAULT_REFINE_RADIUS),
+    sampleRadius: readPositiveInt(readFlag(args, "--sample-radius"), DEFAULT_SAMPLE_RADIUS),
+    heightPadding: readNonNegativeInt(readFlag(args, "--height-padding"), DEFAULT_HEIGHT_PADDING),
+    worldX: readOptionalInt(readFlag(args, "--world-x")),
+    worldZ: readOptionalInt(readFlag(args, "--world-z")),
+  };
+}
+
+function isLandmarkId(value: string): value is LandmarkId {
+  return LANDMARK_ID_SET.has(value);
+}
+
+function readFlag(args: string[], flag: string): string | null {
+  const exact = args.find((arg) => arg.startsWith(`${flag}=`));
+  if (exact) {
+    return exact.slice(flag.length + 1);
+  }
+  const index = args.indexOf(flag);
+  if (index === -1) {
+    return null;
+  }
+  return args[index + 1] ?? null;
+}
+
+function readPositiveInt(raw: string | null, fallback: number): number {
+  const parsed = Number.parseInt(raw ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readNonNegativeInt(raw: string | null, fallback: number): number {
+  const parsed = Number.parseInt(raw ?? "", 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function readOptionalInt(raw: string | null): number | undefined {
+  if (raw === null) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function timestampForFile(date: Date): string {
+  return date.toISOString().replace(/[:.]/g, "").replace("T", "-").replace("Z", "Z");
+}
+
+function sanitizeFileStem(value: string): string {
+  const sanitized = value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  return sanitized || "object";
+}

@@ -206,6 +206,7 @@ export interface GameHudSnapshot {
   lodNeededKeyCount: number;
   lodNeededKeyCacheHit: boolean;
   lodDrawCalls: number;
+  lodDrawCallsByLevel: readonly number[];
   frustumCulledChunks: number;
   fogCulledChunks: number;
 }
@@ -883,6 +884,7 @@ export class GameController {
       lodNeededKeyCount: this.lastLodSummary.neededKeyCount,
       lodNeededKeyCacheHit: this.lastLodSummary.neededKeyCacheHit,
       lodDrawCalls: this.lastRenderStats.lodDrawCalls,
+      lodDrawCallsByLevel: [...this.lastRenderStats.lodDrawCallsByLevel],
       frustumCulledChunks: this.lastRenderStats.frustumCulledChunks,
       fogCulledChunks: this.lastRenderStats.fogCulledChunks,
     };
@@ -1311,7 +1313,8 @@ export class GameController {
       settleFrames,
       settled: residency.complete
         && residency.pendingChunks === 0
-        && this.lastMeshBuildSummary.meshCount === 0,
+        && this.lastMeshBuildSummary.meshCount === 0
+        && this.lastLodSummary.pending === 0,
     };
   }
 
@@ -1774,6 +1777,7 @@ export class GameController {
               frustumCulledChunks: this.lastRenderStats.frustumCulledChunks,
               fogCulledChunks: this.lastRenderStats.fogCulledChunks,
               lodDrawCalls: this.lastRenderStats.lodDrawCalls,
+              lodDrawCallsByLevel: this.lastRenderStats.lodDrawCallsByLevel,
             },
             frameCpuMs: interactiveFrame.render.frameCpuMs,
           },
@@ -2927,6 +2931,7 @@ export class GameController {
       frustumCulledChunks: this.lastRenderStats.frustumCulledChunks,
       fogCulledChunks: this.lastRenderStats.fogCulledChunks,
       lodDrawCalls: this.lastRenderStats.lodDrawCalls,
+      lodDrawCallsByLevel: this.lastRenderStats.lodDrawCallsByLevel,
     });
     if (bootstrap.playableReady) {
       this.bootstrapPlayableReady = true;
@@ -3100,6 +3105,7 @@ function zeroRenderStats(): RenderStats {
     frustumCulledChunks: 0,
     fogCulledChunks: 0,
     lodDrawCalls: 0,
+    lodDrawCallsByLevel: [0, 0, 0, 0, 0],
   };
 }
 

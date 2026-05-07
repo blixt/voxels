@@ -111,6 +111,7 @@ interface PassStats {
   frustumCulledChunks: number;
   fogCulledChunks: number;
   lodDrawCalls: number;
+  lodDrawCallsByLevel: readonly number[];
 }
 
 export interface RenderStats {
@@ -124,6 +125,7 @@ export interface RenderStats {
   frustumCulledChunks: number;
   fogCulledChunks: number;
   lodDrawCalls: number;
+  lodDrawCallsByLevel: readonly number[];
 }
 
 interface ReadbackImage {
@@ -627,6 +629,7 @@ export class WebGpuVoxelRenderer {
     let frustumCulledChunks = 0;
     let fogCulledChunks = 0;
     let lodDrawCalls = 0;
+    const lodDrawCallsByLevel = [0, 0, 0, 0, 0];
     let currentPipeline: GPURenderPipeline | null = null;
 
     // Opaque pass: LOD chunks first (depth-biased), then LOD 0 (standard).
@@ -658,7 +661,10 @@ export class WebGpuVoxelRenderer {
       pass.drawIndexed(resource.indexCount, 1, 0, 0, 0);
       drawCalls += 1;
       triangles += resource.triangleCount;
-      if (chunk.lodLevel > 0) lodDrawCalls += 1;
+      if (chunk.lodLevel > 0) {
+        lodDrawCalls += 1;
+        lodDrawCallsByLevel[Math.min(chunk.lodLevel, lodDrawCallsByLevel.length - 1)] += 1;
+      }
     }
 
     // Water pass.
@@ -682,11 +688,14 @@ export class WebGpuVoxelRenderer {
       pass.drawIndexed(resource.waterIndexCount, 1, 0, 0, 0);
       drawCalls += 1;
       triangles += resource.waterTriangleCount;
-      if (chunk.lodLevel > 0) lodDrawCalls += 1;
+      if (chunk.lodLevel > 0) {
+        lodDrawCalls += 1;
+        lodDrawCallsByLevel[Math.min(chunk.lodLevel, lodDrawCallsByLevel.length - 1)] += 1;
+      }
     }
 
     pass.end();
-    return { drawCalls, triangles, frustumCulledChunks, fogCulledChunks, lodDrawCalls };
+    return { drawCalls, triangles, frustumCulledChunks, fogCulledChunks, lodDrawCalls, lodDrawCallsByLevel };
   }
 
   private writeUniforms(camera: RenderCamera, aspect: number, renderEnvironment: RenderEnvironment): void {
