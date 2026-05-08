@@ -42,6 +42,7 @@ test("discovery catalog keeps sensible fallbacks for unknown ids", () => {
 test("discovery catalog gives old-road landmarks journal flavor and progression hints", () => {
   const ashMarker = describeDiscovery("landmark", "ash_marker");
   const causeway = describeDiscovery("landmark", "old_road_causeway");
+  const boneChimes = describeDiscovery("landmark", "bone_chimes");
   const ziggurat = describeDiscovery("landmark", "velothi_ziggurat");
 
   expect(ashMarker.role).toBe("old-road");
@@ -50,5 +51,8 @@ test("discovery catalog gives old-road landmarks journal flavor and progression 
   expect(ashMarker.progressionHint).toBe("Landmark discovery trains Naturalist.");
   expect(causeway.name).toBe("Old Road Causeway");
   expect(causeway.role).toBe("old-road");
+  expect(boneChimes.name).toBe("Bone Wind Chimes");
+  expect(boneChimes.role).toBe("old-road");
+  expect(boneChimes.flavorText).toContain("pale bones");
   expect(ziggurat.roleLabel).toBe("Shrine");
 });

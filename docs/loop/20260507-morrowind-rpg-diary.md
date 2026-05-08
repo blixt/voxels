@@ -1649,3 +1649,41 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - commit and push the screenshot diagnostic
   - attack the horizon/center composition specifically, likely through safer atmospheric occlusion or route-camera framing rather than fragment contact shading
+
+### 2026-05-08 - View Atlas Harness And Bone Chime Route Prop
+
+- Trigger:
+  - The user called out that barely visible tweaks were not enough and asked for bolder ROI-driven work.
+  - The screenshot diagnostic showed the persistent grid read is a horizon/center composition problem, but a single settled browser screenshot is too weak for judging multi-location world changes.
+- Delegation:
+  - A tooling worker built the view-atlas sidequest while I worked on the runtime/worldgen slice.
+  - A read-only audit independently ranked foreground/midground vista composition, lower-fill skyline props, and screenshot atlas verification as the highest current ROI.
+- Changes:
+  - Added `bun run atlas:views`, which captures deterministic multi-view screenshots through the real browser/game API, writes per-view PNGs, and reports per-region luma/color/grid metrics plus markdown thumbnails.
+  - Added `GameController.setCameraPoseAndSettle` and exposed it through `window.__VOXELS_GAME__` so browser tools can place a camera honestly without reaching through private runtime state.
+  - Added `bone_chimes`, a three-material old-road route prop with an upper rack, hanging cords, and pale bone blades. It is placed in the old-route skyline director and ash-wastes roster.
+  - Added discovery catalog entries and focused shape/material tests for the new landmark.
+- Validation:
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Focused tests: `mise exec -- bun test tests/discovery-catalog.test.ts tests/object-lab.test.ts tests/procedural-generator.test.ts`, pass, `45` tests.
+  - Focused object-lab for the new prop: `artifacts/object-lab/2026-05-08-043856805Z-bone-chimes-route-prop/batch-report.json`, `bone_chimes` warning-free, `1453` voxels, `3` materials, dominant share `0.712`.
+  - Route object-lab batch: `artifacts/object-lab/2026-05-08-044027879Z-bone-chimes-route-landmarks/batch-report.json`, `10` route landmark runs. `bone_chimes` is warning-free; remaining warning queue includes the intentionally huge `velothi_ziggurat`/`ash_obelisk` and sample-fit issues for `rib_arch`/`rib_remains`.
+  - Route atlas: `artifacts/route-atlas/20260508T044008Z-bone-chimes-route-vistas/report.json`, failures none, `+35` landmark hits, `+1` distinct landmark, max notable gap still `108.0 m`, strong silhouette coverage still `87.7%`.
+  - View atlas: `artifacts/view-atlas/20260508T044057Z-bone-chimes-view-atlas/report.json`, failures none, five fixed screenshots captured.
+  - Live-forward trace: `artifacts/browser-route-trace/20260508T044057Z-bone-chimes-live-forward/report.json`, avg/p95/max gameplay `3.22/5.70/14.10 ms`, p95 stream/mesh/LOD `1.10/1.80/3.50 ms`.
+  - Owned browser lab: `artifacts/owned-browser-lab/20260508T044248Z-bone-chimes-view-atlas-browser/report.json`, failures none.
+  - Browser result: traversal p95/max `4.50/7.20 ms`, route p95/max `4.70/9.60 ms`, draw/triangles `512/383634`, `LOD overlap LOD0/bands 0/0`, water overlap `0`, LOD gaps `0`, handoff holes `0`, render-ready near samples `961/961`, HUD smoke passed.
+- Honest assessment:
+  - The view atlas is the main win. It makes future visual work faster and less subjective, and it gives screenshots from several fixed world positions instead of one accidental settled view.
+  - `bone_chimes` is a meaningful route prop, not a palette tweak: it adds a new old-road silhouette family and route-atlas proves it is actually seen.
+  - The prop does not solve the global browser grid metric; owned browser still reports saturation/grid/color `0.37/0.68/94`. This confirms the next visual win must be camera-scale horizon/terrain composition or a safer depth/lighting path, not more isolated props alone.
+  - The atlas comparison is only partially useful this time because the prior baseline had one view. The next view-atlas run should compare against this full five-view report.
+- Rubric movement:
+  - Harness maturity: `9.00 -> 9.30` because fixed multi-view screenshot capture is now scriptable, repeatable, and tied to browser/runtime correctness.
+  - Visual/world definition: `5.75 -> 5.85` because the old road now has a new distinctive bone-rack silhouette, but the screen-grid blocker remains.
+  - Performance/playability: unchanged at `6.20`; route/traversal budgets held with the new prop.
+  - Rendering correctness: `6.25 -> 6.30` because the new browser/camera harness and full browser lab agree on no LOD overlaps, gaps, handoff holes, or visual blank-frame failures.
+- Next:
+  - checkpoint and push this harness/prop slice
+  - use `artifacts/view-atlas/20260508T044057Z-bone-chimes-view-atlas/report.json` as the first full view-atlas baseline
+  - next highest ROI remains a bolder horizon/foreground composition pass, likely reducing huge rectilinear ziggurat fill and adding larger non-rectangular ground interrupters rather than another small prop

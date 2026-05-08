@@ -59,6 +59,7 @@ export const OBJECT_LAB_LANDMARK_IDS = [
   "rib_arch",
   "old_road_causeway",
   "pilgrim_lantern",
+  "bone_chimes",
   "crystal_reeds",
   "fungal_bridge",
   "rib_remains",
@@ -67,6 +68,7 @@ export const OBJECT_LAB_LANDMARK_IDS = [
 export const OBJECT_LAB_ROUTE_LANDMARK_IDS = [
   "ash_marker",
   "pilgrim_lantern",
+  "bone_chimes",
   "old_road_causeway",
   "velothi_ziggurat",
   "ash_obelisk",
@@ -272,6 +274,7 @@ const CENTERED_ROOT_LANDMARK_IDS = new Set<LandmarkId>([
   "velothi_ziggurat",
   "ash_obelisk",
   "rib_arch",
+  "bone_chimes",
   "silt_shell",
   "crystal_reeds",
   "fungal_bridge",

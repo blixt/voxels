@@ -91,6 +91,7 @@ export type LandmarkId =
   | "rib_arch"
   | "old_road_causeway"
   | "pilgrim_lantern"
+  | "bone_chimes"
   | "crystal_reeds"
   | "fungal_bridge"
   | "rib_remains";
@@ -553,6 +554,7 @@ const LANDMARKS: Record<LandmarkId, LandmarkProfile> = {
   rib_arch: createLandmark("rib_arch", 196, 13, 0.18, 1.0, 1),
   old_road_causeway: createLandmark("old_road_causeway", 128, 13, 0.30, 1.0, 1),
   pilgrim_lantern: createLandmark("pilgrim_lantern", 124, 5, 0.28, 1.0, 4),
+  bone_chimes: createLandmark("bone_chimes", 156, 7, 0.24, 1.0, 5),
   crystal_reeds: createLandmark("crystal_reeds", 112, 5, 0.34, 1.0, 2),
   fungal_bridge: createLandmark("fungal_bridge", 156, 16, 0.26, 1.0, 1),
   rib_remains: createLandmark("rib_remains", 152, 10, 0.24, 1.0, 1),
@@ -789,6 +791,7 @@ const STEPPE_MONOLITH_LANDMARKS: readonly LandmarkProfile[] = [
 const PILGRIM_ROUTE_SKYLINE_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("old_road_causeway", { chance: 0.46, scale: 1.20, cellSize: 104, radius: 14 }),
   landmarkPlacement("pilgrim_lantern", { chance: 0.40, scale: 1.22, cellSize: 104, radius: 5 }),
+  landmarkPlacement("bone_chimes", { chance: 0.34, scale: 1.18, cellSize: 124, radius: 7 }),
   landmarkPlacement("ash_obelisk", { chance: 0.30, scale: 1.30, cellSize: 164, radius: 8 }),
   landmarkPlacement("rib_arch", { chance: 0.24, scale: 1.24, cellSize: 164, radius: 14 }),
   landmarkPlacement("ancestor_pillar", { chance: 0.26, scale: 1.22, cellSize: 140, radius: 6 }),
@@ -831,6 +834,7 @@ const ASH_WASTES_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("rib_arch", { chance: 0.28, scale: 1.24, cellSize: 160, radius: 14 }),
   landmarkPlacement("old_road_causeway", { chance: 0.38, scale: 1.16, cellSize: 104, radius: 14 }),
   landmarkPlacement("pilgrim_lantern", { chance: 0.42, scale: 1.22, cellSize: 108, radius: 5 }),
+  landmarkPlacement("bone_chimes", { chance: 0.30, scale: 1.18, cellSize: 132, radius: 7 }),
   landmarkPlacement("ash_marker", { chance: 0.46, scale: 1.28, cellSize: 120, radius: 5 }),
   landmarkPlacement("velothi_shrine", { chance: 0.28, scale: 1.18, cellSize: 148, radius: 5 }),
   landmarkPlacement("pilgrim_cairn", { chance: 0.26, scale: 1.14, cellSize: 136, radius: 5 }),
@@ -4094,6 +4098,18 @@ function configureLandmarkFeature(
       );
       out.featureExtra = 4;
       return true;
+    case "bone_chimes":
+      configureSpireFeature(
+        out,
+        FEATURE_BASALT_SPIRE,
+        scaledFeatureHeight(28, 20, fields.desolation + fields.magic * 0.2, profile.scale),
+        scaledFeatureRadius(6, 3, fields.scatter + fields.surfacePatch * 0.2, profile.scale),
+        "#322",
+        "#CBA",
+        "#DA8",
+      );
+      out.featureExtra = 5;
+      return true;
     case "ash_obelisk":
       configureSpireFeature(
         out,
@@ -4893,6 +4909,59 @@ function sampleFeatureMaterial(
         ? materialSecondary
         : 0;
     case FEATURE_BASALT_SPIRE:
+      if (featureExtra >= 5) {
+        const baseHeight = Math.min(4, Math.max(2, Math.round(featureHeight * 0.11)));
+        if (relativeY <= baseHeight) {
+          const baseRadius = featureRadius + 1.9 - relativeY * 0.35;
+          const lip = relativeY === baseHeight || radial > baseRadius - 0.85;
+          return radial <= Math.max(1.7, baseRadius) ? (lip ? materialSecondary : materialPrimary) : 0;
+        }
+
+        const crossbarY = Math.max(baseHeight + 10, featureHeight - 8);
+        const shoulderY = Math.max(baseHeight + 5, crossbarY - 6);
+        const supportOffset = Math.max(3.6, featureRadius * 0.72);
+        const postHeight = Math.min(featureHeight, crossbarY + 2);
+        const leftPost = Math.abs(featureDeltaX + supportOffset) <= 0.95 && absZ <= 0.85 && relativeY <= postHeight;
+        const rightPost = Math.abs(featureDeltaX - supportOffset) <= 0.95 && absZ <= 0.85 && relativeY <= postHeight;
+        const centerPost = absX <= 0.72 && absZ <= 0.72 && relativeY <= crossbarY + 3;
+        if (leftPost || rightPost || centerPost) {
+          const banded = (relativeY - baseHeight) % 6 === 0;
+          return banded ? materialSecondary : materialPrimary;
+        }
+
+        const crossbarHalf = featureRadius + 3.8;
+        const topCrossbar = Math.abs(relativeY - crossbarY) <= 1 && absX <= crossbarHalf && absZ <= 0.85;
+        const lowerCrossbar = relativeY === shoulderY && absX <= crossbarHalf * 0.82 && absZ <= 0.65;
+        if (topCrossbar || lowerCrossbar) {
+          return materialSecondary;
+        }
+
+        const hangerOffsets = [-5.2, -2.8, -0.8, 1.7, 4.5] as const;
+        for (const offsetX of hangerOffsets) {
+          const localX = featureDeltaX - offsetX;
+          const localAbsX = Math.abs(localX);
+          const hangerTop = crossbarY - 1;
+          const hangerBottom = Math.max(baseHeight + 3, crossbarY - 10 - Math.round(Math.abs(offsetX) * 0.35));
+          const nearString = localAbsX <= 0.42 && absZ <= 0.42;
+          if (nearString && relativeY >= hangerBottom && relativeY <= hangerTop) {
+            const bead = materialAccent !== 0 && relativeY % 4 === 0;
+            return bead ? materialAccent : materialSecondary;
+          }
+          const boneY = hangerBottom + Math.round(Math.abs(offsetX) % 3);
+          const boneBlade = Math.abs(relativeY - boneY) <= 2 && localAbsX <= 0.82 && absZ <= 0.58;
+          if (boneBlade) {
+            const edge = localAbsX > 0.55 || Math.abs(relativeY - boneY) === 2;
+            return edge && materialAccent !== 0 ? materialAccent : materialSecondary;
+          }
+        }
+
+        const windTornCord = Math.abs(absX - absZ) <= 0.45
+          && absX <= featureRadius * 0.72
+          && relativeY >= shoulderY - 3
+          && relativeY <= crossbarY - 1
+          && (Math.round(absX + relativeY) % 4 === 0);
+        return windTornCord ? materialSecondary : 0;
+      }
       if (featureExtra >= 4) {
         const baseHeight = Math.min(4, Math.max(2, Math.round(featureHeight * 0.12)));
         if (relativeY <= baseHeight) {

@@ -127,6 +127,7 @@ const ANCIENT_LANDMARK_IDS = new Set([
   "rib_arch",
   "old_road_causeway",
   "pilgrim_lantern",
+  "bone_chimes",
 ]);
 const LANDMARK_SAMPLE_OFFSET_CACHE = new Map<string, ReadonlyArray<readonly [number, number]>>();
 
@@ -1544,6 +1545,32 @@ export class GameController {
         && residency.pendingChunks === 0
         && this.lastMeshBuildSummary.meshCount === 0
         && this.lastLodSummary.pending === 0,
+    };
+  }
+
+  async setCameraPoseAndSettle(
+    position: Vec3,
+    yawRadians: number,
+    pitchRadians: number,
+    options: {
+      radiusChunks?: number;
+      maxFrames?: number;
+    } = {},
+  ): Promise<ResidencyTransitionProbe & {
+    snapshot: GameHudSnapshot;
+  }> {
+    const transition = await this.teleportAndSettle(position, options);
+    this.camera.yaw = Number.isFinite(yawRadians) ? yawRadians : this.camera.yaw;
+    this.camera.pitch = Number.isFinite(pitchRadians)
+      ? Math.max(-Math.PI * 0.49, Math.min(Math.PI * 0.49, pitchRadians))
+      : this.camera.pitch;
+    this.syncCameraToPlayer();
+    const render = await this.renderProbeFrame();
+    this.pushHud(true);
+    return {
+      ...transition,
+      render,
+      snapshot: this.getDebugSnapshot(),
     };
   }
 

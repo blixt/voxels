@@ -145,6 +145,7 @@ const LANDMARK_NAMES = {
   ash_obelisk: "Ash Obelisk",
   old_road_causeway: "Old Road Causeway",
   pilgrim_lantern: "Pilgrim Lantern",
+  bone_chimes: "Bone Wind Chimes",
   crystal_reeds: "Crystal Reeds",
   fungal_bridge: "Fungal Bridge",
   rib_remains: "Rib Remains",
@@ -163,6 +164,7 @@ const LANDMARK_FLAVOR_TEXT: Partial<Record<LandmarkId, string>> & Partial<Record
   ash_obelisk: "A black obelisk leans into the ash wind and refuses to fall.",
   old_road_causeway: "Raised stones cross the low ground, worn smooth by pilgrim feet.",
   pilgrim_lantern: "A hooded lantern keeps its watch over a road almost lost.",
+  bone_chimes: "A wind rack of black posts and pale bones clatters over the pilgrim stones.",
   crystal_reeds: "Glass-bright reeds grow from brackish pools and hum in the silt wind.",
   fungal_bridge: "A shelf of old fungus spans the wet ground like a living footbridge.",
   rib_remains: "Low bones break the blackwater, more warning than shelter.",
@@ -178,6 +180,7 @@ const OLD_ROAD_LANDMARK_IDS = new Set<string>([
   "ash_obelisk",
   "old_road_causeway",
   "pilgrim_lantern",
+  "bone_chimes",
 ]);
 
 const SHRINE_LANDMARK_IDS = new Set<string>([

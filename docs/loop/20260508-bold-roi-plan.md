@@ -194,3 +194,23 @@ The next decision should be based on the stubborn grid read. Silhouettes, prop q
 | 4 | Object-lab distinctiveness score | 4 | 5 | 3 | 6.7 | Warning-free does not guarantee distinctive; add asymmetry/negative-space gates | object-lab tests and comparison report |
 | 5 | Discovery gameplay pass using route and terrain tokens | 4 | 4 | 3 | 5.3 | Visual route identity is now better; gameplay can start rewarding it | objective tests, browser objective probe |
 | 6 | Far-view distance experiment | 4 | 3 | 4 | 3.0 | Wait until screenshot harness shows far composition is worth exposing | owned-browser LOD/fps/gap gates |
+
+## Re-Rank After View Atlas And Bone Chimes
+
+Completed since the screenshot diagnostic:
+
+- `bun run atlas:views` now captures five deterministic browser screenshots and reports per-region visual metrics.
+- `bone_chimes` adds a warning-free old-road prop family and route-atlas credits it with `+35` route landmark hits.
+- Browser performance and correctness held: owned-browser route p95/max `4.70/9.60 ms`, LOD overlap/gaps/handoff holes `0/0/0`.
+- The old global browser grid metric still did not move: saturation/grid/color `0.37/0.68/94`.
+
+This confirms the next pass must change camera-scale composition, not add another small route object. Use the five-view atlas as the comparison baseline.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Ziggurat/obelisk lower-fill silhouette rewrite: cut solid mass, add broken steps/door voids/side towers | 5 | 5 | 3 | 8.3 | View/object-lab show the skyline props are visible but still rectilinear and huge | object-lab batch, view-atlas center/horizon grid, draw/triangle budget |
+| 2 | Ground interrupter set: large non-rectangular ash drifts, salt cracks, scree fans near route cameras | 5 | 4 | 4 | 5.0 | Lower-ground color/grid remains weak; this attacks the foreground read directly | view-atlas lower-ground grid/color, route physics continuity, browser route budget |
+| 3 | View-atlas comparison gate: require full-baseline deltas and fail blank/low-color fixed views | 4 | 5 | 2 | 10.0 | The tool exists; now make it a reliable guard against barely visible tweaks | `bun run atlas:views -- --compare-to=<baseline>` |
+| 4 | Stronger atmospheric horizon separation without fragment-contact risk | 4 | 4 | 3 | 5.3 | Horizon is still the grid driver, but previous fragment shader attempts black-framed | view-atlas horizon grid/luma, browser black-frame gates |
+| 5 | Object-lab distinctiveness score: asymmetry, negative space, generic-envelope comparison | 4 | 5 | 3 | 6.7 | Warning-free props can still be generic; distinctiveness needs a numeric gate | object-lab tests and comparison report |
+| 6 | Discovery gameplay pass using route and terrain tokens | 4 | 4 | 3 | 5.3 | Valuable, but place identity and view correctness still lead | objective tests, browser objective probe |

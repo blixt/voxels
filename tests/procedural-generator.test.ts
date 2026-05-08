@@ -97,6 +97,7 @@ const AUDITED_SURFACE_LANDMARK_IDS = [
   "rib_arch",
   "old_road_causeway",
   "pilgrim_lantern",
+  "bone_chimes",
   "crystal_reeds",
   "fungal_bridge",
   "rib_remains",
@@ -1197,6 +1198,7 @@ test("ancient route landmarks appear in harsh and uncanny regions", () => {
   expect(seen.has("glass_cairn")).toBe(true);
   expect(seen.has("old_road_causeway")).toBe(true);
   expect(seen.has("pilgrim_lantern")).toBe(true);
+  expect(seen.has("bone_chimes")).toBe(true);
 });
 
 test("ashland exploration landmarks add Morrowind-like silhouettes", () => {
@@ -1221,6 +1223,7 @@ test("ashland exploration landmarks add Morrowind-like silhouettes", () => {
   expect(seen.has("rib_arch")).toBe(true);
   expect(seen.has("old_road_causeway")).toBe(true);
   expect(seen.has("pilgrim_lantern")).toBe(true);
+  expect(seen.has("bone_chimes")).toBe(true);
 });
 
 test("ash wastes regional pockets favor ancient ashland silhouettes over generic desert props", () => {
@@ -1237,6 +1240,7 @@ test("ash wastes regional pockets favor ancient ashland silhouettes over generic
     "rib_arch",
     "old_road_causeway",
     "pilgrim_lantern",
+    "bone_chimes",
   ]);
   const genericDesertLandmarks = new Set(["cactus", "palm", "shrub"]);
   const ashMaterials = new Set(["#655", "#887", "#433", "#544"].map((code) => hexColorToMaterial(code)));
@@ -1325,6 +1329,25 @@ test("ashland and old-road landmarks render shaped caps instead of block columns
   expect(lanternUpper.maxWidthX).toBeGreaterThanOrEqual(lanternShaft.widthX + 2);
   expect(lanternCage.count).toBeGreaterThan(0);
   expect(lanternCage.widthX).toBeGreaterThanOrEqual(lanternShaft.widthX);
+
+  const boneChimes = findRepresentativeLandmarkRoot(generator, "bone_chimes");
+  expect(boneChimes).not.toBeNull();
+  expect(generator.sampleMaterial(boneChimes!.x, boneChimes!.probe.surfaceY + 1, boneChimes!.z)).not.toBe(0);
+  const chimesHeight = boneChimes!.probe.topY - boneChimes!.probe.surfaceY;
+  const chimesBaseHeight = Math.min(4, Math.max(2, Math.round(chimesHeight * 0.11)));
+  const chimesShaftY = boneChimes!.probe.surfaceY + 1 + Math.floor(chimesHeight * 0.42);
+  const chimesCrossbarY = boneChimes!.probe.surfaceY + 1 + Math.max(chimesBaseHeight + 10, chimesHeight - 8);
+  const chimesShaft = measureCrossSection(generator, boneChimes!.x, boneChimes!.z, chimesShaftY, 14);
+  const chimesCrossbar = measureCrossSection(generator, boneChimes!.x, boneChimes!.z, chimesCrossbarY, 16);
+  const chimesObject = measureLandmarkObject(generator, boneChimes!, 18, 6);
+
+  expect(chimesShaft.count).toBeGreaterThan(0);
+  expect(chimesCrossbar.widthX).toBeGreaterThanOrEqual(12);
+  expect(chimesCrossbar.widthX).toBeGreaterThanOrEqual(chimesShaft.widthX);
+  expect(chimesCrossbar.widthZ).toBeLessThanOrEqual(4);
+  expect(chimesObject.solidVoxelCount).toBeGreaterThanOrEqual(450);
+  expect(chimesObject.materialVariety).toBeGreaterThanOrEqual(3);
+  expect(chimesObject.dominantMaterialShare).toBeLessThan(0.80);
 });
 
 test("ashland megastructures have distinctive large silhouettes", () => {

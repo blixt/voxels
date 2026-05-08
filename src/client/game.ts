@@ -35,8 +35,16 @@ declare global {
         x: number,
         y: number,
         z: number,
-        options?: { radiusChunks?: number },
+        options?: { radiusChunks?: number; maxFrames?: number },
       ): ReturnType<GameController["teleportAndSettle"]>;
+      setCameraPoseAndSettle(
+        x: number,
+        y: number,
+        z: number,
+        yawRadians: number,
+        pitchRadians: number,
+        options?: { radiusChunks?: number; maxFrames?: number },
+      ): ReturnType<GameController["setCameraPoseAndSettle"]>;
       benchmarkChunkCrossing(
         iterations: number,
         chunkDelta?: number,
@@ -243,6 +251,8 @@ function mountGame(): GameRuntime {
       ),
     forceResidencyUpdate: () => controller.forceResidencyUpdate(),
     teleportAndSettle: (x, y, z, options) => controller.teleportAndSettle([x, y, z], options),
+    setCameraPoseAndSettle: (x, y, z, yawRadians, pitchRadians, options) =>
+      controller.setCameraPoseAndSettle([x, y, z], yawRadians, pitchRadians, options),
     benchmarkChunkCrossing: (iterations, chunkDelta) => controller.benchmarkChunkCrossing(iterations, chunkDelta),
     benchmarkChunkCacheReuse: (chunkDelta, maxFramesPerLeg) =>
       controller.benchmarkChunkCacheReuse(chunkDelta, maxFramesPerLeg),

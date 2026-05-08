@@ -177,6 +177,7 @@ test("object lab batch writes route landmark comparison diagnostics", async () =
   expect(OBJECT_LAB_ROUTE_LANDMARK_IDS).toEqual([
     "ash_marker",
     "pilgrim_lantern",
+    "bone_chimes",
     "old_road_causeway",
     "velothi_ziggurat",
     "ash_obelisk",
