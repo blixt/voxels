@@ -462,3 +462,22 @@ Completed since the LOD planning checkpoint:
 | 3 | Composition director for actual route camera sightlines | 5 | 3 | 4 | 3.8 | Farther fog helps only if route cameras see strong foreground/midground silhouettes | route-atlas vista scan, view-atlas deltas, draw/triangle budget |
 | 4 | Water/shoreline far-LOD correctness pass for marsh/saltflat horizons | 4 | 4 | 3 | 5.3 | Longer fog exposes more water horizon; useful, but current water overlap is already `0` | extended `probeLodCoverage`, marsh/salt view atlas, owned-browser water overlap |
 | 5 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Useful RPG feel after the visual/verification backlog moves | UI tests, browser HUD smoke |
+
+## Re-Rank After Depth Precision and Handoff Fix
+
+Completed since the gap-classification checkpoint:
+
+- First-person depth precision is now tied to gameplay scale instead of a `0.1..20000` projection range.
+- Unmeshed resident LOD0 adoption now keeps coarser LOD coverage until the finer mesh is render-ready.
+- Fog culling has a small full-fog cushion so far chunks do not disappear at the exact shader fog boundary.
+- Owned browser stayed clean: route holes/far-LOD gaps/transition/blocking/overlaps `0/48/48/0/0`, settled LOD overlap/gaps/handoff holes `0/0/0`, route p95/max `5.30/11.80 ms`.
+
+The user’s rendering blockers now have direct fixes and tests. The highest ROI should shift hard toward visible world/game progress while keeping the new regression gates in the loop.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Composition director for actual route camera sightlines: guarantee large ziggurat, fungal tower, rib arch, and lantern silhouettes on common travel paths | 5 | 4 | 4 | 5.0 | User still cannot see the biome/prop work; route-level composition beats small prop tweaks | route-atlas vista scan, owned-browser draw budget, view-atlas silhouette metrics |
+| 2 | Foreground terrain shape breakup with camera-visible ash slabs, salt flats, blackwater edges, and ruin-road negative space | 5 | 3 | 4 | 3.8 | The world still reads too blocky/minecrafty at ground scale | terrain lab compare, world atlas lower-ground grid, route continuity |
+| 3 | Route-aware exploration beats: old-road markers, shrine approaches, and journal discoveries that guide the player without HUD clutter | 4 | 4 | 3 | 5.3 | Game feel is behind renderer work; this can make travel feel like exploration instead of benchmarking | UI tests, browser HUD smoke, route discovery fixtures |
+| 4 | Object prominence metric and prop pass for close-route assets | 4 | 4 | 3 | 5.3 | Useful for delegated prop quality, but less important than placing big readable forms in the player path | prop atlas region metrics, object-lab links |
+| 5 | Water/shoreline far-LOD correctness pass for marsh/saltflat horizons | 4 | 4 | 3 | 5.3 | Keep in reserve if water artifacts reappear; current water overlap is `0` | extended `probeLodCoverage`, marsh/salt view atlas, owned-browser water overlap |

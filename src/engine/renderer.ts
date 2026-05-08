@@ -7,6 +7,7 @@ import {
   LIGHTING_TERMS,
   type SkyWeatherEnvironment,
 } from "./render-constants.ts";
+import { metersToWorldUnits } from "./scale.ts";
 import {
   DEFAULT_RENDER_ENVIRONMENT,
   type RenderEnvironment,
@@ -16,6 +17,8 @@ type RenderCamera = CameraState | {
   viewProjection: Float32Array;
   position?: readonly [number, number, number];
 };
+
+const FOG_CULL_MARGIN_DISTANCE = metersToWorldUnits(32);
 
 const SHADER_SOURCE = `
 struct Uniforms {
@@ -751,6 +754,7 @@ export class WebGpuVoxelRenderer {
     let lodDrawCalls = 0;
     const lodDrawCallsByLevel = [0, 0, 0, 0, 0];
     let currentPipeline: GPURenderPipeline | null = null;
+    const fogCullDistance = fogEndDistance + FOG_CULL_MARGIN_DISTANCE;
 
     // Opaque pass: LOD chunks first (depth-biased), then LOD 0 (standard).
     // iterateResidentChunks yields LOD chunks before LOD 0 chunks.
@@ -765,7 +769,7 @@ export class WebGpuVoxelRenderer {
         frustumCulledChunks++;
         continue;
       }
-      if (b && isAabbBeyondDistance(cameraPosition, fogEndDistance, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
+      if (b && isAabbBeyondDistance(cameraPosition, fogCullDistance, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
         fogCulledChunks++;
         continue;
       }
@@ -799,7 +803,7 @@ export class WebGpuVoxelRenderer {
         frustumCulledChunks++;
         continue;
       }
-      if (b && isAabbBeyondDistance(cameraPosition, fogEndDistance, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
+      if (b && isAabbBeyondDistance(cameraPosition, fogCullDistance, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
         fogCulledChunks++;
         continue;
       }

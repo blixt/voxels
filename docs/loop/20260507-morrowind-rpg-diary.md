@@ -2157,3 +2157,44 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - checkpoint and push this diagnostic slice
   - resume higher-ROI visual work: object prominence, foreground composition, and route-camera silhouettes, while keeping blocking seam gaps at `0`
+
+### 2026-05-08 - Depth Precision and Deterministic LOD0 Handoff
+
+- Trigger:
+  - The user reported flickering individual voxel faces at all LODs, likely between diagonal stair-step faces rather than whole overlapping LOD meshes.
+  - The user also saw brief blanking when a low-detail chunk switched to higher detail, and noticed the far fog no longer hid the furthest chunk cutoff cleanly.
+- Findings:
+  - The first-person projection still used `near: 0.1` and `far: 20000`.
+  - At the fog edge, a one-voxel depth separation had less than `0.1` of a 24-bit depth-buffer step, which is not enough to keep diagonal terrain faces stable.
+  - Resident LOD0 chunks were adopted as `renderReady=false`, but adoption immediately invalidated coarser LOD coverage. That meant the low-detail mesh could disappear before the high-detail mesh existed.
+  - Renderer fog culling happened exactly at `fogEndDistance`, so geometry could be culled at the same boundary where the shader just reached full fog.
+- Changes:
+  - First-person camera depth range is now tied to gameplay scale: `0.4 m` near plane and `FOG_END_DISTANCE + 96 m` far plane.
+  - Added a depth-precision regression test that requires a one-voxel separation near the fog edge to exceed two 24-bit depth steps.
+  - Resident chunk adoption now keeps coarser LOD coverage until the resident chunk is actually render-ready; the render-ready transition still invalidates coarser LOD so the replacement can become authoritative.
+  - Added a focused LOD handoff regression test for the unmeshed resident adoption path.
+  - Renderer fog culling now has a `32 m` margin beyond the fog end so distant chunks fade fully before being culled.
+- Validation:
+  - Focused tests: `mise exec -- bun test tests/lod-handoff.test.ts tests/first-person-camera.test.ts`, pass, `5` tests.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Build: `mise exec -- bun run build`, pass.
+  - Owned browser lab: `artifacts/owned-browser-lab/20260508T092056Z-depth-handoff-fog/report.json`, failures none.
+  - Browser result:
+    - route p95/max frame `5.30/11.80 ms`
+    - route holes/far-LOD gaps/transition/blocking/overlaps `0/48/48/0/0`
+    - settled LOD overlap/gaps/handoff holes `0/0/0`
+    - LOD draw calls by level `0/86/60/49/110`
+    - fog profile still reports ashfall at `395.89 m`, with the new cull cushion hidden behind full fog
+- Honest assessment:
+  - This directly addresses the reported depth-buffer flicker mechanism and the concrete LOD0 adoption blanking bug.
+  - The browser lab still reports transition far-gap samples, but none are blocking holes or overlap samples. The handoff fix is for visible blanking during resident adoption, not for removing every conservative transition counter.
+  - The in-app browser backend was not discoverable from Codex for this check, so I did not claim a user-tab visual inspection; the accepted evidence is the owned browser lab report and saved screenshot.
+- Rubric movement:
+  - Rendering correctness/quality: `6.83 -> 7.05` because depth precision is now quantified and LOD0 handoff no longer deletes coarser coverage before the replacement mesh is ready.
+  - Performance/playability: `6.48 -> 6.50` because route max remains under budget despite the fog cull cushion; this is mostly correctness, not a speed win.
+  - Harness maturity: `9.985 -> 9.99` because the two reported failure modes now have focused regression tests.
+  - Visual/world definition: unchanged at `6.56`.
+- Next:
+  - checkpoint and push this render-correctness slice
+  - stop spending more cycles on low-level LOD unless a blocking hole or overlap reappears
+  - move to visible world/game progress: large silhouettes, route composition, and more characteristic Morrowind-like exploration beats

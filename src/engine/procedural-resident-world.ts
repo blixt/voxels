@@ -1832,7 +1832,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     if (previous === 0) {
       this.residentColumnRevision += 1;
     }
-    this.invalidateCoarserLodChunksForSourceChunk(0, chunk.coord.x, chunk.coord.y, chunk.coord.z);
+    if (chunk.renderReady) {
+      this.invalidateCoarserLodChunksForSourceChunk(0, chunk.coord.x, chunk.coord.y, chunk.coord.z);
+    }
   }
 
   private evictResidentChunk(key: string, chunk: VoxelChunk): void {
