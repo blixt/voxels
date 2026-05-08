@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import {
+  buildAmbientRenderEnvironment,
   resolveAmbientWorldProfile,
   type AmbientProfileId,
   type AmbientWorldProbe,
@@ -56,6 +57,42 @@ test("underground ambience is stronger but still bounded for culling", () => {
   expect(rooted.fogEndDistance).toBeLessThan(surface.fogEndDistance);
   expect(rooted.fogEndDistance).toBeGreaterThanOrEqual(metersToWorldUnits(64));
   expect(rooted.fogEndDistance).toBeLessThanOrEqual(metersToWorldUnits(192));
+});
+
+test("ashland and fungal ambience carry cheap sky/weather shader controls", () => {
+  const ash = resolveAmbientWorldProfile(buildProbe({
+    biomeId: "steppe",
+    regionalVariantId: "ember_caldera",
+    regionalVariantStrength: 1,
+    specialStrength: 1,
+    fields: {
+      ...BASE_FIELDS,
+      volcanism: 0.92,
+    },
+  }));
+  const fungal = resolveAmbientWorldProfile(buildProbe({
+    biomeId: "fungal",
+    regionalVariantId: "fungal_moonlit",
+    regionalVariantStrength: 1,
+    specialStrength: 0.8,
+    fields: {
+      ...BASE_FIELDS,
+      magic: 0.90,
+      moisture: 0.72,
+    },
+  }));
+  const ashEnvironment = buildAmbientRenderEnvironment(ash);
+
+  expect(ash.id).toBe("ashfall");
+  expect(ash.label).toBe("Ash Storm");
+  expect(ash.skyTopColorRgba[0]).toBeLessThan(ash.skyHorizonColorRgba[0]);
+  expect(ash.skyTopColorRgba[2]).toBeLessThan(90);
+  expect(ash.skyCloudCoverage).toBeGreaterThan(0.78);
+  expect(ash.ashfallIntensity).toBeGreaterThan(0.78);
+  expect(ashEnvironment.ashfallIntensity).toBe(ash.ashfallIntensity);
+  expect(fungal.id).toBe("fungal-lantern");
+  expect(fungal.fungalGlowIntensity).toBeGreaterThan(0.65);
+  expect(fungal.ashfallIntensity).toBeLessThan(ash.ashfallIntensity);
 });
 
 test("procedural ambient profiles are deterministic and varied across the world", () => {

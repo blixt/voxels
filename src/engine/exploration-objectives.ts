@@ -9,6 +9,7 @@ export interface ExplorationObjectiveSource {
 export interface ExplorationObjective {
   id: string;
   label: string;
+  journalText: string;
   progress: number;
   target: number;
   completed: boolean;
@@ -18,6 +19,8 @@ export interface ExplorationObjectiveSnapshot {
   stageId: string;
   title: string;
   subtitle: string;
+  journalText: string;
+  progressionHint: string;
   completedCount: number;
   totalCount: number;
   objectives: ExplorationObjective[];
@@ -27,56 +30,139 @@ export function describeExplorationObjectives(
   source: ExplorationObjectiveSource,
 ): ExplorationObjectiveSnapshot {
   const surveyObjectives = [
-    buildObjective("biomes-3", "Survey 3 surface biomes", source.discoveredBiomeCount, 3),
-    buildObjective("landmarks-3", "Catalog 3 landmarks", source.discoveredLandmarkCount, 3),
-    buildObjective("variants-1", "Find a regional variant", source.discoveredRegionalVariantCount, 1),
+    buildObjective(
+      "biomes-3",
+      "Map 3 regions",
+      "Make a first map from the land, not a menu.",
+      source.discoveredBiomeCount,
+      3,
+    ),
+    buildObjective(
+      "old-road-1",
+      "Find an old road sign",
+      "Look for causeways, lanterns, shrines, cairns, and ash markers.",
+      source.discoveredAncientLandmarkCount,
+      1,
+    ),
+    buildObjective(
+      "landmarks-3",
+      "Catalog 3 landmarks",
+      "Every landmark fixes another point on the route.",
+      source.discoveredLandmarkCount,
+      3,
+    ),
   ];
   if (!allObjectivesComplete(surveyObjectives)) {
     return buildSnapshot(
-      "surface-survey",
-      "Surface Survey",
-      "Build your first mental map of the world.",
+      "first-bearings",
+      "First Bearings",
+      "Read the land by roads, shrines, and landmarks.",
+      "The first useful map is a chain of remembered places.",
+      "Travel trains Cartography; discoveries train exploration skills.",
       surveyObjectives,
     );
   }
 
   const frontierObjectives = [
-    buildObjective("biomes-6", "Survey 6 surface biomes", source.discoveredBiomeCount, 6),
-    buildObjective("variants-2", "Find 2 regional variants", source.discoveredRegionalVariantCount, 2),
-    buildObjective("ancient-signs-2", "Trace 2 old road signs", source.discoveredAncientLandmarkCount, 2),
-    buildObjective("landmarks-6", "Catalog 6 landmarks", source.discoveredLandmarkCount, 6),
-    buildObjective("underground-1", "Enter the first underground biome", source.discoveredUndergroundBiomeCount, 1),
+    buildObjective(
+      "old-road-2",
+      "Trace 2 old road signs",
+      "Follow ziggurats, arches, and road stones until they form a route.",
+      source.discoveredAncientLandmarkCount,
+      2,
+    ),
+    buildObjective(
+      "landmarks-6",
+      "Catalog 6 landmarks",
+      "Landmarks are the fast-travel system before fast travel.",
+      source.discoveredLandmarkCount,
+      6,
+    ),
+    buildObjective(
+      "variants-2",
+      "Find 2 strange regions",
+      "Odd borders often hide older paths.",
+      source.discoveredRegionalVariantCount,
+      2,
+    ),
+    buildObjective(
+      "underground-1",
+      "Enter an undercroft",
+      "Some roads continue below the surface.",
+      source.discoveredUndergroundBiomeCount,
+      1,
+    ),
   ];
   if (!allObjectivesComplete(frontierObjectives)) {
     return buildSnapshot(
-      "frontier-atlas",
-      "Frontier Atlas",
-      "Push outward and start tracing the world's stranger edges.",
+      "pilgrim-road",
+      "Pilgrim Road",
+      "Use old signs to push past familiar ground.",
+      "Shrines and cairns turn wandering into a route.",
+      "Landmark discoveries train Naturalist; strange regions train Lore.",
       frontierObjectives,
     );
   }
 
   const deepObjectives = [
-    buildObjective("biomes-10", "Survey 10 surface biomes", source.discoveredBiomeCount, 10),
-    buildObjective("landmarks-8", "Catalog 8 landmarks", source.discoveredLandmarkCount, 8),
-    buildObjective("variants-4", "Find 4 regional variants", source.discoveredRegionalVariantCount, 4),
-    buildObjective("ancient-signs-4", "Trace 4 old road signs", source.discoveredAncientLandmarkCount, 4),
-    buildObjective("underground-3", "Enter 3 underground biomes", source.discoveredUndergroundBiomeCount, 3),
-    buildObjective("landmarks-12", "Catalog 12 landmarks", source.discoveredLandmarkCount, 12),
+    buildObjective(
+      "old-road-4",
+      "Trace 4 pilgrim signs",
+      "The old road is a story told in missing stones.",
+      source.discoveredAncientLandmarkCount,
+      4,
+    ),
+    buildObjective(
+      "biomes-10",
+      "Map 10 regions",
+      "Range far enough for the world to stop repeating itself.",
+      source.discoveredBiomeCount,
+      10,
+    ),
+    buildObjective(
+      "variants-4",
+      "Find 4 strange regions",
+      "Record the places that do not match their neighbors.",
+      source.discoveredRegionalVariantCount,
+      4,
+    ),
+    buildObjective(
+      "underground-3",
+      "Enter 3 underground biomes",
+      "Descend until the underground map has its own regions.",
+      source.discoveredUndergroundBiomeCount,
+      3,
+    ),
+    buildObjective(
+      "landmarks-12",
+      "Catalog 12 landmarks",
+      "A full journal should read like a route across the island.",
+      source.discoveredLandmarkCount,
+      12,
+    ),
   ];
   return buildSnapshot(
-    "deep-expedition",
-    "Deep Expedition",
-    "Range farther, descend deeper, and broaden the palette.",
+    "deep-pilgrimage",
+    "Deep Pilgrimage",
+    "Connect roads, ruins, caves, and distant landmarks.",
+    "The route is no longer a line; it is a memory palace.",
+    "Cartography, Naturalist, Lore, and Spelunking all grow through use.",
     deepObjectives,
   );
 }
 
-function buildObjective(id: string, label: string, progress: number, target: number): ExplorationObjective {
+function buildObjective(
+  id: string,
+  label: string,
+  journalText: string,
+  progress: number,
+  target: number,
+): ExplorationObjective {
   const clampedProgress = Math.max(0, Math.min(progress, target));
   return {
     id,
     label,
+    journalText,
     progress: clampedProgress,
     target,
     completed: clampedProgress >= target,
@@ -87,6 +173,8 @@ function buildSnapshot(
   stageId: string,
   title: string,
   subtitle: string,
+  journalText: string,
+  progressionHint: string,
   objectives: ExplorationObjective[],
 ): ExplorationObjectiveSnapshot {
   const completedCount = objectives.reduce((count, objective) => count + (objective.completed ? 1 : 0), 0);
@@ -94,6 +182,8 @@ function buildSnapshot(
     stageId,
     title,
     subtitle,
+    journalText,
+    progressionHint,
     completedCount,
     totalCount: objectives.length,
     objectives,

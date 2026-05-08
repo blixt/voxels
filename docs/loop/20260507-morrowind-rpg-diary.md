@@ -1190,3 +1190,58 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint and push
   - add render-side ownership or culling if future probes find true fine/coarse overlap during pending movement
   - start a terrain/material pass to reduce the remaining block-grid read
+
+### 2026-05-08 - Bold ROI Pivot: Megastructures, Roads, Sky Ambience
+
+- Trigger:
+  - User called out that small polish was not enough: the world still looked like generic block terrain with weak props.
+  - I wrote `docs/loop/20260508-bold-roi-plan.md` and ranked work by `impact * confidence / effort`.
+  - Highest ROI became route-visible silhouettes and old-road composition before further color tweaks.
+- Delegation:
+  - World-composition explorer confirmed the highest-leverage path was additive landmarks plus route/object verification.
+  - RPG-loop worker added compact pilgrimage objectives, discovery roles, names, and HUD/journal text for the new road/ruin IDs.
+  - Sky/weather worker added ambient sky/weather parameters and cheap terrain tint hooks.
+- Changes:
+  - Added five bold landmarks:
+    - `velothi_ziggurat`
+    - `ash_obelisk`
+    - `rib_arch`
+    - `old_road_causeway`
+    - `pilgrim_lantern`
+  - Added large silhouette feature paths for stepped ziggurats, obelisks, rib arches, and causeway slabs.
+  - Increased ash-wastes/badlands/ember rosters so old roads and ruins show up as actual composition, not rare trivia.
+  - Added the new IDs to discovery catalog, ancient-road progress counting, procedural tests, and object-lab tooling.
+  - Added ash/fungal sky-weather environment fields. I initially tried a fullscreen sky shader, but owned-browser screenshot review caught a black-frame regression. I backed that down to a sky-colored clear plus terrain tint until the sky pass can be made correct.
+  - Added browser-lab visual gates for average luma, contrast, and color bucket count so a mostly black screenshot cannot pass again.
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun run build`: pass.
+  - `mise exec -- bun test`: pass, `206` tests.
+  - Focused tests before full suite: procedural/discovery/objective/ambient/object-lab `49` tests passed.
+  - Route atlas: `artifacts/route-atlas/20260508T005329Z-bold-world-composition/report.json`, failures none, definition score `5.00/5`, landmark hits `46` (`+3`), added route landmark `old_road_causeway`, max notable gap `504.0 m`.
+  - Object lab:
+    - `artifacts/object-lab/2026-05-08-005448932Z-ziggurat-wide-sample/contact-sheet.svg`, warnings none with wider sample.
+    - `artifacts/object-lab/2026-05-08-005416115Z-ash_obelisk/contact-sheet.svg`.
+    - `artifacts/object-lab/2026-05-08-005416136Z-rib_arch/contact-sheet.svg`.
+    - `artifacts/object-lab/2026-05-08-005415962Z-old_road_causeway/contact-sheet.svg`.
+    - `artifacts/object-lab/2026-05-08-005416004Z-pilgrim_lantern/contact-sheet.svg`.
+  - Owned browser lab: `artifacts/owned-browser-lab/20260508T011132Z-bold-world-composition-final/report.json`, failures none.
+  - Browser screenshot after the visual-gate fix: `artifacts/owned-browser-lab/20260508T011132Z-bold-world-composition-final/settled-page.png`.
+  - Browser result: route p95/max `5.00/31.30 ms`, traversal p95/max `4.90/19.00 ms`, draw/triangles `501/382172`, visual identity saturation/grid/color `0.38/0.68/89`, `LOD overlap LOD0/bands 0/0`, water overlap `0`, gaps `0`, handoff holes `0`.
+  - Live-forward trace: `artifacts/browser-route-trace/20260508T010837Z-bold-world-composition-visible-live-forward/report.json`, avg/p95 frame `3.98/5.80 ms`.
+- Honest assessment:
+  - Big readability improvement: screenshots now include large ruins/road objects immediately, and discovery/objectives talk about roads/shrines instead of generic surveying.
+  - The fullscreen sky shader attempt was not correct; the new luma/contrast gate caught the kind of blank image that the old harness missed. Current sky is a safe colored clear, not the final dramatic cloud shelf.
+  - Route atlas only saw `+1` distinct route landmark because its fixed routes still do not intentionally visit all new megastructures. The generator tests and object-lab prove the objects exist; route-atlas needs visible-nearby landmark scanning next.
+  - Live-forward trace still reports transient hole-signal frames during active movement, even though owned-browser lab reports no blocking holes, no LOD overlap, and no surface continuity gaps. This remains a harness/streaming investigation target.
+  - Visual identity still has high grid dominance (`0.68`), so terrain macro shaping and material breakup remain high ROI.
+- Rubric movement:
+  - Visual/world definition: `3.45 -> 4.15` because the world now has distinctive ashland megastructures, causeways, lanterns, and route-flavored HUD/objectives.
+  - Harness maturity: `6.65 -> 6.90` because browser-lab now fails blank/too-dark screenshots and object-lab covers the new landmark IDs.
+  - Rendering correctness: `5.55 -> 5.60` because the black-frame regression was found and prevented, but the sky shader itself is deferred.
+  - Performance/playability: `4.50 -> 4.60` because the heavier scene stayed under route/live-forward p95 frame budgets.
+- Next:
+  - commit and push this checkpoint
+  - add route-atlas visible-nearby landmark requirements for ziggurat/obelisk/rib/causeway routes
+  - revisit sky shader only with screenshot luma/color gates active
+  - start terrain macro/material breakup to reduce the block-grid read

@@ -90,6 +90,11 @@ const AUDITED_SURFACE_LANDMARK_IDS = [
   "velothi_shrine",
   "kwama_mound",
   "pilgrim_cairn",
+  "velothi_ziggurat",
+  "ash_obelisk",
+  "rib_arch",
+  "old_road_causeway",
+  "pilgrim_lantern",
 ] as const;
 
 const TRUNKED_LANDMARK_IDS = [
@@ -1044,6 +1049,8 @@ test("ancient route landmarks appear in harsh and uncanny regions", () => {
   expect(seen.has("ancestor_pillar")).toBe(true);
   expect(seen.has("ash_marker")).toBe(true);
   expect(seen.has("glass_cairn")).toBe(true);
+  expect(seen.has("old_road_causeway")).toBe(true);
+  expect(seen.has("pilgrim_lantern")).toBe(true);
 });
 
 test("ashland exploration landmarks add Morrowind-like silhouettes", () => {
@@ -1063,11 +1070,28 @@ test("ashland exploration landmarks add Morrowind-like silhouettes", () => {
   expect(seen.has("velothi_shrine")).toBe(true);
   expect(seen.has("kwama_mound")).toBe(true);
   expect(seen.has("pilgrim_cairn")).toBe(true);
+  expect(seen.has("velothi_ziggurat")).toBe(true);
+  expect(seen.has("ash_obelisk")).toBe(true);
+  expect(seen.has("rib_arch")).toBe(true);
+  expect(seen.has("old_road_causeway")).toBe(true);
+  expect(seen.has("pilgrim_lantern")).toBe(true);
 });
 
 test("ash wastes regional pockets favor ancient ashland silhouettes over generic desert props", () => {
   const generator = new ProceduralWorldGenerator(1337);
-  const ashlandLandmarks = new Set(["ash_marker", "velothi_shrine", "pilgrim_cairn", "kwama_mound", "silt_shell", "basalt_spire"]);
+  const ashlandLandmarks = new Set([
+    "ash_marker",
+    "velothi_shrine",
+    "pilgrim_cairn",
+    "kwama_mound",
+    "silt_shell",
+    "basalt_spire",
+    "velothi_ziggurat",
+    "ash_obelisk",
+    "rib_arch",
+    "old_road_causeway",
+    "pilgrim_lantern",
+  ]);
   const genericDesertLandmarks = new Set(["cactus", "palm", "shrub"]);
   const ashMaterials = new Set(["#655", "#887", "#433", "#544"].map((code) => hexColorToMaterial(code)));
   let ashSamples = 0;
@@ -1103,7 +1127,7 @@ test("ash wastes regional pockets favor ancient ashland silhouettes over generic
 test("ashland and old-road landmarks render shaped caps instead of block columns", () => {
   const generator = new ProceduralWorldGenerator(1337);
 
-  for (const landmarkId of ["ash_marker", "velothi_shrine"] as const) {
+  for (const landmarkId of ["ash_marker", "velothi_shrine", "pilgrim_lantern"] as const) {
     const root = findRepresentativeLandmarkRoot(generator, landmarkId);
     expect(root).not.toBeNull();
     expect(generator.sampleMaterial(root!.x, root!.probe.surfaceY + 1, root!.z)).not.toBe(0);
@@ -1119,6 +1143,38 @@ test("ashland and old-road landmarks render shaped caps instead of block columns
     expect(cap.widthX).toBeGreaterThanOrEqual(shaft.widthX + 3);
     expect(cap.widthX).toBeGreaterThan(cap.widthZ);
   }
+});
+
+test("ashland megastructures have distinctive large silhouettes", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+
+  const ziggurat = findRepresentativeLandmarkRoot(generator, "velothi_ziggurat");
+  const obelisk = findRepresentativeLandmarkRoot(generator, "ash_obelisk");
+  const ribArch = findRepresentativeLandmarkRoot(generator, "rib_arch");
+  const causeway = findRepresentativeLandmarkRoot(generator, "old_road_causeway");
+
+  expect(ziggurat).not.toBeNull();
+  expect(obelisk).not.toBeNull();
+  expect(ribArch).not.toBeNull();
+  expect(causeway).not.toBeNull();
+
+  const zigguratHeight = ziggurat!.probe.topY - ziggurat!.probe.surfaceY;
+  const obeliskHeight = obelisk!.probe.topY - obelisk!.probe.surfaceY;
+  const zigguratBase = measureCrossSection(generator, ziggurat!.x, ziggurat!.z, ziggurat!.probe.surfaceY + 2, 24);
+  const obeliskMid = measureCrossSection(generator, obelisk!.x, obelisk!.z, obelisk!.probe.surfaceY + Math.floor(obeliskHeight * 0.55), 18);
+  const ribTop = measureMaxCrossSection(generator, ribArch!.x, ribArch!.z, ribArch!.probe.surfaceY + 4, ribArch!.probe.topY, 18);
+  const causewaySlab = measureCrossSection(generator, causeway!.x, causeway!.z, causeway!.probe.surfaceY + 1, 24);
+
+  expect(zigguratHeight).toBeGreaterThanOrEqual(50);
+  expect(obeliskHeight).toBeGreaterThanOrEqual(48);
+  expect(zigguratBase.widthX).toBeGreaterThanOrEqual(24);
+  expect(zigguratBase.widthZ).toBeGreaterThanOrEqual(14);
+  expect(obeliskMid.widthX).toBeLessThan(zigguratBase.widthX);
+  expect(obeliskMid.widthZ).toBeGreaterThan(0);
+  expect(ribTop.maxWidthX).toBeGreaterThanOrEqual(12);
+  expect(ribTop.maxCount).toBeGreaterThanOrEqual(12);
+  expect(causewaySlab.widthX).toBeGreaterThanOrEqual(18);
+  expect(causewaySlab.widthZ).toBeGreaterThanOrEqual(4);
 });
 
 test("underwater columns no longer expose grassy surface materials", () => {

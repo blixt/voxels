@@ -85,7 +85,12 @@ export type LandmarkId =
   | "silt_shell"
   | "velothi_shrine"
   | "kwama_mound"
-  | "pilgrim_cairn";
+  | "pilgrim_cairn"
+  | "velothi_ziggurat"
+  | "ash_obelisk"
+  | "rib_arch"
+  | "old_road_causeway"
+  | "pilgrim_lantern";
 
 interface BaseBiomeProfile {
   id: BaseBiomeId;
@@ -416,6 +421,9 @@ const FEATURE_REEDS = 13;
 const FEATURE_CRYSTAL = 14;
 const FEATURE_REDWOOD = 15;
 const FEATURE_DEAD_TREE = 16;
+const FEATURE_MEGASTRUCTURE = 17;
+const FEATURE_RIB_ARCH = 18;
+const FEATURE_CAUSEWAY = 19;
 const CHUNK_GENERATION_SCRATCH_POOL_LIMIT = 4;
 
 const BASE_BIOMES: readonly BaseBiomeProfile[] = [
@@ -504,6 +512,11 @@ const LANDMARKS: Record<LandmarkId, LandmarkProfile> = {
   velothi_shrine: createLandmark("velothi_shrine", 164, 5, 0.18, 1.0, 1),
   kwama_mound: createLandmark("kwama_mound", 132, 6, 0.26, 1.0, 1),
   pilgrim_cairn: createLandmark("pilgrim_cairn", 144, 5, 0.22, 1.0, 1),
+  velothi_ziggurat: createLandmark("velothi_ziggurat", 292, 15, 0.14, 1.0, 1),
+  ash_obelisk: createLandmark("ash_obelisk", 212, 8, 0.18, 1.0, 2),
+  rib_arch: createLandmark("rib_arch", 196, 13, 0.18, 1.0, 1),
+  old_road_causeway: createLandmark("old_road_causeway", 128, 13, 0.30, 1.0, 1),
+  pilgrim_lantern: createLandmark("pilgrim_lantern", 124, 5, 0.28, 1.0, 4),
 };
 
 const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
@@ -531,6 +544,8 @@ const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
     landmarkPlacement("standing_stone", { chance: 0.28, scale: 1.12 }),
     landmarkPlacement("ancestor_pillar", { chance: 0.14, scale: 1.10, cellSize: 176, radius: 6 }),
     landmarkPlacement("pilgrim_cairn", { chance: 0.12, scale: 1.06, cellSize: 168, radius: 5 }),
+    landmarkPlacement("old_road_causeway", { chance: 0.16, scale: 1.04, cellSize: 152, radius: 12 }),
+    landmarkPlacement("pilgrim_lantern", { chance: 0.12, scale: 1.04, cellSize: 148, radius: 5 }),
     landmarkPlacement("boulder", { chance: 0.18, scale: 0.9 }),
   ],
   dunes: [
@@ -547,6 +562,11 @@ const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
     landmarkPlacement("hoodoo", { chance: 0.24, scale: 0.86, variant: 1, cellSize: 156, radius: 6 }),
     landmarkPlacement("dead_snag", { chance: 0.28, scale: 1.24 }),
     landmarkPlacement("standing_stone", { chance: 0.20, scale: 1.18 }),
+    landmarkPlacement("velothi_ziggurat", { chance: 0.08, scale: 1.08, cellSize: 280, radius: 15 }),
+    landmarkPlacement("ash_obelisk", { chance: 0.12, scale: 1.10, cellSize: 204, radius: 8 }),
+    landmarkPlacement("rib_arch", { chance: 0.14, scale: 1.08, cellSize: 184, radius: 13 }),
+    landmarkPlacement("old_road_causeway", { chance: 0.22, scale: 1.06, cellSize: 132, radius: 13 }),
+    landmarkPlacement("pilgrim_lantern", { chance: 0.16, scale: 1.10, cellSize: 128, radius: 5 }),
     landmarkPlacement("ash_marker", { chance: 0.16, scale: 1.12, cellSize: 168, radius: 5 }),
     landmarkPlacement("velothi_shrine", { chance: 0.14, scale: 1.12, cellSize: 184, radius: 5 }),
     landmarkPlacement("kwama_mound", { chance: 0.14, scale: 1.10, cellSize: 164, radius: 6 }),
@@ -744,6 +764,10 @@ const BADLANDS_DESOLATE_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const BADLANDS_CRATER_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("velothi_ziggurat", { chance: 0.14, scale: 1.16, cellSize: 264, radius: 15 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.18, scale: 1.22, cellSize: 188, radius: 8 }),
+  landmarkPlacement("rib_arch", { chance: 0.16, scale: 1.18, cellSize: 176, radius: 13 }),
+  landmarkPlacement("old_road_causeway", { chance: 0.24, scale: 1.10, cellSize: 128, radius: 13 }),
   landmarkPlacement("hoodoo", { chance: 0.34, scale: 1.24 }),
   landmarkPlacement("ash_marker", { chance: 0.26, scale: 1.22, cellSize: 148, radius: 5 }),
   landmarkPlacement("standing_stone", { chance: 0.26, scale: 1.22 }),
@@ -752,6 +776,11 @@ const BADLANDS_CRATER_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const ASH_WASTES_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("velothi_ziggurat", { chance: 0.22, scale: 1.22, cellSize: 252, radius: 16 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.30, scale: 1.28, cellSize: 172, radius: 8 }),
+  landmarkPlacement("rib_arch", { chance: 0.28, scale: 1.24, cellSize: 160, radius: 14 }),
+  landmarkPlacement("old_road_causeway", { chance: 0.38, scale: 1.16, cellSize: 104, radius: 14 }),
+  landmarkPlacement("pilgrim_lantern", { chance: 0.42, scale: 1.22, cellSize: 108, radius: 5 }),
   landmarkPlacement("ash_marker", { chance: 0.46, scale: 1.28, cellSize: 120, radius: 5 }),
   landmarkPlacement("velothi_shrine", { chance: 0.28, scale: 1.18, cellSize: 148, radius: 5 }),
   landmarkPlacement("pilgrim_cairn", { chance: 0.26, scale: 1.14, cellSize: 136, radius: 5 }),
@@ -942,6 +971,8 @@ const BASALTIC_SURFACE_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const EMBER_DEADLAND_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("ash_obelisk", { chance: 0.26, scale: 1.30, cellSize: 176, radius: 8 }),
+  landmarkPlacement("pilgrim_lantern", { chance: 0.24, scale: 1.16, cellSize: 132, radius: 5 }),
   landmarkPlacement("dead_tree", { chance: 0.28, scale: 1.22, cellSize: 156, radius: 8 }),
   landmarkPlacement("basalt_spire", { chance: 0.28, scale: 1.30 }),
   landmarkPlacement("ash_marker", { chance: 0.24, scale: 1.22, cellSize: 144, radius: 5 }),
@@ -951,6 +982,9 @@ const EMBER_DEADLAND_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const EMBER_CALDERA_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("velothi_ziggurat", { chance: 0.12, scale: 1.20, cellSize: 276, radius: 16 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.32, scale: 1.34, cellSize: 164, radius: 8 }),
+  landmarkPlacement("old_road_causeway", { chance: 0.18, scale: 1.08, cellSize: 136, radius: 13 }),
   landmarkPlacement("basalt_spire", { chance: 0.38, scale: 1.34 }),
   landmarkPlacement("ash_marker", { chance: 0.34, scale: 1.28, cellSize: 132, radius: 5 }),
   landmarkPlacement("pilgrim_cairn", { chance: 0.18, scale: 1.14, cellSize: 152, radius: 5 }),
@@ -3871,6 +3905,28 @@ function configureLandmarkFeature(
       );
       out.featureExtra = 3;
       return true;
+    case "pilgrim_lantern":
+      configureSpireFeature(
+        out,
+        FEATURE_BASALT_SPIRE,
+        scaledFeatureHeight(22, 18, fields.volcanism + fields.magic * 0.25, profile.scale),
+        scaledFeatureRadius(3, 2, fields.scatter + fields.magic * 0.2, profile.scale),
+        "#544",
+        "#DA8",
+      );
+      out.featureExtra = 4;
+      return true;
+    case "ash_obelisk":
+      configureSpireFeature(
+        out,
+        FEATURE_MEGASTRUCTURE,
+        scaledFeatureHeight(42, 24, fields.volcanism + fields.uplift * 0.25, profile.scale),
+        scaledFeatureRadius(8, 3, fields.volcanism + fields.surfacePatch * 0.2, profile.scale),
+        "#322",
+        "#F74",
+      );
+      out.featureExtra = 2;
+      return true;
     case "crystal_cluster":
       configureSpireFeature(
         out,
@@ -3904,6 +3960,17 @@ function configureLandmarkFeature(
       );
       out.featureExtra = 2;
       return true;
+    case "rib_arch":
+      configureSpireFeature(
+        out,
+        FEATURE_RIB_ARCH,
+        scaledFeatureHeight(20, 16, fields.desolation + fields.surfacePatch * 0.25, profile.scale),
+        scaledFeatureRadius(12, 5, fields.scatter + fields.desolation * 0.2, profile.scale),
+        "#665",
+        "#CBA",
+      );
+      out.featureExtra = 1;
+      return true;
     case "velothi_shrine":
       configureSpireFeature(
         out,
@@ -3914,6 +3981,17 @@ function configureLandmarkFeature(
         "#DA8",
       );
       out.featureExtra = 2;
+      return true;
+    case "velothi_ziggurat":
+      configureSpireFeature(
+        out,
+        FEATURE_MEGASTRUCTURE,
+        scaledFeatureHeight(46, 32, fields.uplift + fields.magic * 0.25, profile.scale),
+        scaledFeatureRadius(14, 5, fields.surfacePatch + fields.scatter * 0.2, profile.scale),
+        "#433",
+        "#DA8",
+      );
+      out.featureExtra = 1;
       return true;
     case "kwama_mound":
       configureSpireFeature(
@@ -3936,6 +4014,17 @@ function configureLandmarkFeature(
         "#EDB",
       );
       out.featureExtra = 1;
+      return true;
+    case "old_road_causeway":
+      configureSpireFeature(
+        out,
+        FEATURE_CAUSEWAY,
+        scaledFeatureHeight(3, 3, fields.surfacePatch + fields.scatter * 0.2, profile.scale),
+        scaledFeatureRadius(12, 5, fields.scatter + fields.uplift * 0.15, profile.scale),
+        "#766",
+        "#BA8",
+      );
+      out.featureExtra = profile.variant;
       return true;
     case "glowcap":
       if (submergedSurface) {
@@ -4335,6 +4424,87 @@ function sampleFeatureMaterial(
         return materialSecondary;
       }
       return radial <= bodyRadius ? materialPrimary : 0;
+    }
+    case FEATURE_MEGASTRUCTURE: {
+      if (featureExtra >= 2) {
+        const plinthHeight = Math.max(4, Math.round(featureHeight * 0.16));
+        if (relativeY <= plinthHeight) {
+          const plinthRadius = featureRadius + 2.4 - relativeY * 0.34;
+          return radial <= Math.max(2.2, plinthRadius) ? materialPrimary : 0;
+        }
+        const towerY = relativeY - plinthHeight;
+        const towerProgress = towerY / Math.max(1, featureHeight - plinthHeight);
+        const towerRadius = Math.max(1.15, featureRadius * (0.50 - towerProgress * 0.32));
+        if (radial > towerRadius) {
+          return 0;
+        }
+        const glyphBand = towerY % 9 === 0 && absX <= towerRadius && absZ <= 0.72;
+        const crown = relativeY >= featureHeight - 3;
+        return glyphBand || crown ? materialSecondary : materialPrimary;
+      }
+
+      const baseHeight = Math.max(10, Math.round(featureHeight * 0.46));
+      if (relativeY <= baseHeight) {
+        const stepHeight = Math.max(2, Math.round(baseHeight / 6));
+        const step = Math.min(6, Math.floor(relativeY / stepHeight));
+        const tierHalfX = Math.max(3.2, featureRadius + 3.4 - step * 1.9);
+        const tierHalfZ = Math.max(2.4, featureRadius * 0.72 + 2.4 - step * 1.25);
+        if (absX > tierHalfX || absZ > tierHalfZ) {
+          return 0;
+        }
+        const edgeCourse = Math.abs(absX - tierHalfX) <= 0.65 || Math.abs(absZ - tierHalfZ) <= 0.65;
+        const stairCut = featureDeltaZ < 0 && absX <= Math.max(1.1, 1.8 + step * 0.35) && relativeY > stepHeight;
+        if (stairCut) {
+          return 0;
+        }
+        return edgeCourse || relativeY % stepHeight === 0 ? materialSecondary : materialPrimary;
+      }
+
+      const towerY = relativeY - baseHeight;
+      const towerHalfX = Math.max(1.9, featureRadius * 0.34 - towerY * 0.030);
+      const towerHalfZ = Math.max(1.4, featureRadius * 0.24 - towerY * 0.024);
+      if (absX <= towerHalfX && absZ <= towerHalfZ) {
+        const slit = absX <= 0.55 && featureDeltaZ < 0 && towerY > 4 && towerY < Math.max(7, featureHeight * 0.18);
+        if (slit) {
+          return 0;
+        }
+        const crown = relativeY >= featureHeight - 4;
+        const glyphBand = towerY % 8 === 0 && (absX <= 0.75 || absZ <= 0.75);
+        return crown || glyphBand ? materialSecondary : materialPrimary;
+      }
+      return 0;
+    }
+    case FEATURE_RIB_ARCH: {
+      const pillarOffset = Math.max(4.2, featureRadius * 0.72);
+      const archBaseY = Math.max(5, Math.round(featureHeight * 0.54));
+      const archRise = Math.max(4, featureHeight - archBaseY);
+      const leftPillar = Math.abs(featureDeltaX + pillarOffset) <= 1.05 && absZ <= 1.25 && relativeY <= archBaseY + 1;
+      const rightPillar = Math.abs(featureDeltaX - pillarOffset) <= 1.05 && absZ <= 1.25 && relativeY <= archBaseY + 1;
+      if (leftPillar || rightPillar) {
+        return materialPrimary;
+      }
+      const normalizedX = Math.min(1, absX / Math.max(1, pillarOffset));
+      const archY = archBaseY + Math.round((1 - normalizedX * normalizedX) * archRise);
+      const onArch = absX <= pillarOffset + 1.65 && absZ <= 1.65 && Math.abs(relativeY - archY) <= 1;
+      if (onArch) {
+        return materialSecondary;
+      }
+      const brokenRib = absZ <= 0.75 && relativeY <= archBaseY && absX < pillarOffset - 2.2 && (Math.round(absX) + relativeY) % 7 === 0;
+      return brokenRib ? materialPrimary : 0;
+    }
+    case FEATURE_CAUSEWAY: {
+      const slabHeight = Math.max(1, Math.min(featureHeight, 4));
+      if (relativeY > slabHeight) {
+        return 0;
+      }
+      const longAxis = absX <= featureRadius + 1.5 && absZ <= 2.4;
+      const crossAxis = absZ <= Math.max(4.0, featureRadius * 0.42) && absX <= 2.0;
+      if (!longAxis && !crossAxis) {
+        return 0;
+      }
+      const edge = absZ > 1.6 || absX > featureRadius - 1 || (crossAxis && absX > 1.2);
+      const brokenJoint = (Math.floor(featureDeltaX / 3) + Math.floor(featureDeltaZ / 3)) % 3 === 0;
+      return edge || (relativeY === slabHeight && brokenJoint) ? materialSecondary : materialPrimary;
     }
     case FEATURE_BUSH:
       if (relativeY === 0 && absX <= 0.55 && absZ <= 0.55) {

@@ -119,6 +119,11 @@ const ANCIENT_LANDMARK_IDS = new Set([
   "silt_shell",
   "velothi_shrine",
   "pilgrim_cairn",
+  "velothi_ziggurat",
+  "ash_obelisk",
+  "rib_arch",
+  "old_road_causeway",
+  "pilgrim_lantern",
 ]);
 const LANDMARK_SAMPLE_OFFSET_CACHE = new Map<string, ReadonlyArray<readonly [number, number]>>();
 

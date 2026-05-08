@@ -10,6 +10,11 @@ import type {
   DiscoveryEvent,
   ExplorationJournalSnapshot,
 } from "../engine/exploration-journal.ts";
+import {
+  describeDiscovery,
+  formatDiscoveryName,
+  type DiscoveryCategory,
+} from "../engine/discovery-catalog.ts";
 
 declare global {
   interface Window {
@@ -401,26 +406,28 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
 
   return {
     update(snapshot) {
-      region.textContent = snapshot.regionalVariantId
-        ?? snapshot.biomeId
-        ?? snapshot.ambientProfileLabel;
+      const recentDiscovery = snapshot.recentDiscoveries[0] ?? null;
+      region.textContent = formatCurrentRegionName(snapshot);
       landmark.textContent = snapshot.landmarkId
-        ? `Near ${formatDisplayId(snapshot.landmarkId)}`
+        ? `Near ${formatDiscoveryName("landmark", snapshot.landmarkId)}`
         : snapshot.undergroundBiomeId
-        ? formatDisplayId(snapshot.undergroundBiomeId)
+        ? formatDiscoveryName("underground", snapshot.undergroundBiomeId)
         : snapshot.ambientProfileLabel;
       skill.textContent = `${snapshot.focusSkillName} ${snapshot.focusSkillLevel}`;
-      discovery.textContent = snapshot.lastDiscoveryLabel === "None"
+      discovery.textContent = recentDiscovery
+        ? `Found ${recentDiscovery.name}`
+        : snapshot.lastDiscoveryLabel === "None"
         ? `${snapshot.discoveredLandmarkCount.toLocaleString()} landmarks cataloged`
         : snapshot.lastDiscoveryLabel;
       card.classList.toggle("is-captured", snapshot.pointerLocked);
       card.title = [
         snapshot.status,
-        `Surface ${snapshot.discoveredBiomeCount}`,
-        `Variants ${snapshot.discoveredRegionalVariantCount}`,
-        `Landmarks ${snapshot.discoveredLandmarkCount}`,
+        `${snapshot.discoveredBiomeCount} regions`,
+        `${snapshot.discoveredRegionalVariantCount} strange regions`,
+        `${snapshot.discoveredAncientLandmarkCount} old road signs`,
         `${snapshot.focusSkillName} ${(snapshot.focusSkillProgressRatio * 100).toFixed(0)}%`,
-      ].join(" • ");
+        recentDiscovery?.flavorText ?? null,
+      ].filter(Boolean).join(" • ");
     },
   };
 }
@@ -443,13 +450,16 @@ function createObjectivePanelView(root: HTMLElement): ObjectivePanelView {
       const currentObjective = objectiveSnapshot.objectives.find((objective) => !objective.completed)
         ?? objectiveSnapshot.objectives[objectiveSnapshot.objectives.length - 1]
         ?? null;
-      stage.textContent = `${snapshot.ambientProfileLabel} • ${objectiveSnapshot.completedCount}/${objectiveSnapshot.totalCount}`;
+      stage.textContent = `${objectiveSnapshot.title} • ${objectiveSnapshot.completedCount}/${objectiveSnapshot.totalCount}`;
       root.title = [
         objectiveSnapshot.subtitle,
+        objectiveSnapshot.journalText,
+        currentObjective?.journalText ?? null,
+        objectiveSnapshot.progressionHint,
         `${objectiveSnapshot.title}: ${objectiveSnapshot.completedCount}/${objectiveSnapshot.totalCount}`,
         `${snapshot.focusSkillName} ${snapshot.focusSkillLevel}`,
         `Fog ${snapshot.ambientFogEndMeters.toFixed(0)} m`,
-      ].join(" • ");
+      ].filter(Boolean).join(" • ");
       if (!currentObjective) {
         task.textContent = "Expedition complete";
         fill.style.transform = "scaleX(1)";
@@ -500,7 +510,7 @@ function createAchievementPresenter(root: HTMLElement): AchievementPresenter {
     const event = queue.shift()!;
     activeSequence = event.sequence;
     card.hidden = false;
-    categoryElement.textContent = `${event.categoryLabel} Discovered`;
+    categoryElement.textContent = `${formatDiscoveryCategoryLabel(event.category, event.id)} Discovered`;
     nameElement.textContent = event.name;
     flavorElement.textContent = event.flavorText ?? "";
     flavorElement.hidden = !event.flavorText;
@@ -608,10 +618,20 @@ function formatCompactCount(value: number): string {
   return value.toLocaleString();
 }
 
-function formatDisplayId(value: string): string {
-  return value
-    .split(/[_-]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
+function formatCurrentRegionName(snapshot: GameHudSnapshot): string {
+  if (snapshot.regionalVariantId) {
+    return formatDiscoveryName("regional-variant", snapshot.regionalVariantId);
+  }
+  if (snapshot.undergroundBiomeId) {
+    return formatDiscoveryName("underground", snapshot.undergroundBiomeId);
+  }
+  if (snapshot.biomeId) {
+    return formatDiscoveryName("biome", snapshot.biomeId);
+  }
+  return snapshot.ambientProfileLabel;
+}
+
+function formatDiscoveryCategoryLabel(category: DiscoveryCategory, id: string): string {
+  const presentation = describeDiscovery(category, id);
+  return presentation.role === "landmark" ? presentation.categoryLabel : presentation.roleLabel;
 }

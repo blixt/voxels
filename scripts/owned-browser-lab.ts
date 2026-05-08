@@ -83,6 +83,9 @@ const PERFORMANCE_BUDGETS = {
   maxBootstrapPlayableMs: 3_000,
   maxBootstrapVisualMs: 3_000,
   maxBootstrapP95GameplayFrameMs: 220,
+  minVisualAvgLuma: 8,
+  minVisualLumaStdDev: 6,
+  minVisualQuantizedColors: 8,
 } as const;
 
 const options = parseCli(Bun.argv);
@@ -162,7 +165,7 @@ try {
     visualIdentity = analyzeScreenshotVisualIdentity(screenshotBytes);
   }
 
-  const failures = findFailures(pageReport, hudSmoke);
+  const failures = findFailures(pageReport, hudSmoke, visualIdentity);
   const report = {
     generatedAt: new Date().toISOString(),
     commit: readGitShortHead(),
@@ -346,12 +349,12 @@ function buildPageProbeExpression(options: CliOptions): string {
         summarizeFixtureCase(
           "frontier-old-road-1",
           gameApi.importProgressState(createExplorationProgressFixture(exported, "frontier-old-road-1")),
-          "ancient-signs-2",
+          "old-road-2",
         ),
         summarizeFixtureCase(
           "deep-old-road-3",
           gameApi.importProgressState(createExplorationProgressFixture(exported, "deep-old-road-3")),
-          "ancient-signs-4",
+          "old-road-4",
         ),
       ];
       gameApi.importProgressState(exported);
@@ -487,8 +490,8 @@ function buildPageProbeExpression(options: CliOptions): string {
         beforeAncient,
         afterAncient: afterSnapshot.discoveredAncientLandmarkCount,
         currentLandmarkId: afterSnapshot.landmarkId,
-        beforeObjective: summarizeObjective(beforeObjectives, "ancient-signs-2"),
-        afterObjective: summarizeObjective(afterObjectives, "ancient-signs-2"),
+        beforeObjective: summarizeObjective(beforeObjectives, "old-road-2"),
+        afterObjective: summarizeObjective(afterObjectives, "old-road-2"),
       };
     }
 
@@ -898,10 +901,30 @@ function buildPageProbeExpression(options: CliOptions): string {
   })})`;
 }
 
-function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<string, unknown>): string[] {
+function findFailures(
+  pageReport: Record<string, unknown>,
+  hudSmoke: Record<string, unknown>,
+  visualIdentity: Record<string, unknown> | null,
+): string[] {
   const failures: string[] = [];
   if (hudSmoke.passed !== true) {
     failures.push(`HUD smoke failed: ${String(hudSmoke.reason ?? "unknown")}`);
+  }
+  if (!visualIdentity || typeof visualIdentity.error === "string") {
+    failures.push(`settled screenshot visual analysis failed: ${String(visualIdentity?.error ?? "missing screenshot")}`);
+  } else {
+    const avgLuma = readNumber(visualIdentity, "avgLuma") ?? 0;
+    const lumaStdDev = readNumber(visualIdentity, "lumaStdDev") ?? 0;
+    const quantizedColorCount = readNumber(visualIdentity, "quantizedColorCount") ?? 0;
+    if (avgLuma < PERFORMANCE_BUDGETS.minVisualAvgLuma) {
+      failures.push(`settled screenshot is too dark or blank (avg luma ${avgLuma.toFixed(2)})`);
+    }
+    if (lumaStdDev < PERFORMANCE_BUDGETS.minVisualLumaStdDev) {
+      failures.push(`settled screenshot has too little visible contrast (luma stddev ${lumaStdDev.toFixed(2)})`);
+    }
+    if (quantizedColorCount < PERFORMANCE_BUDGETS.minVisualQuantizedColors) {
+      failures.push(`settled screenshot has too few visible color buckets (${quantizedColorCount})`);
+    }
   }
   if (pageReport.hasGameApi !== true) {
     failures.push("window.__VOXELS_GAME__ was not available");
@@ -1012,14 +1035,14 @@ function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<stri
   if (stagedProgressFixtures.restoredMatches !== true) {
     failures.push("staged progress fixture probe did not restore the original progress state");
   }
-  if (readStringField(frontierFixture, "stageId") !== "frontier-atlas") {
-    failures.push(`frontier progress fixture reached ${readStringField(frontierFixture, "stageId") ?? "unknown"} instead of frontier-atlas`);
+  if (readStringField(frontierFixture, "stageId") !== "pilgrim-road") {
+    failures.push(`frontier progress fixture reached ${readStringField(frontierFixture, "stageId") ?? "unknown"} instead of pilgrim-road`);
   }
   if ((readNumber(frontierOldRoad, "progress") ?? -1) !== 1 || (readNumber(frontierOldRoad, "target") ?? -1) !== 2) {
     failures.push(`frontier progress fixture old-road objective was ${formatNumber(readNumber(frontierOldRoad, "progress"))}/${formatNumber(readNumber(frontierOldRoad, "target"))}, expected 1/2`);
   }
-  if (readStringField(deepFixture, "stageId") !== "deep-expedition") {
-    failures.push(`deep progress fixture reached ${readStringField(deepFixture, "stageId") ?? "unknown"} instead of deep-expedition`);
+  if (readStringField(deepFixture, "stageId") !== "deep-pilgrimage") {
+    failures.push(`deep progress fixture reached ${readStringField(deepFixture, "stageId") ?? "unknown"} instead of deep-pilgrimage`);
   }
   if ((readNumber(deepOldRoad, "progress") ?? -1) !== 3 || (readNumber(deepOldRoad, "target") ?? -1) !== 4) {
     failures.push(`deep progress fixture old-road objective was ${formatNumber(readNumber(deepOldRoad, "progress"))}/${formatNumber(readNumber(deepOldRoad, "target"))}, expected 3/4`);

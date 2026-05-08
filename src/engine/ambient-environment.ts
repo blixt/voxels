@@ -1,6 +1,11 @@
 import { clamp } from "./math.ts";
 import { metersToWorldUnits } from "./scale.ts";
 import {
+  DEFAULT_SKY_WEATHER_ENVIRONMENT,
+  type Rgba,
+  type SkyWeatherEnvironment,
+} from "./render-constants.ts";
+import {
   DEFAULT_RENDER_ENVIRONMENT,
   type RenderEnvironment,
 } from "./water-visuals.ts";
@@ -20,9 +25,7 @@ export type AmbientProfileId =
   | "cold-glass"
   | "subterranean";
 
-type Rgba = readonly [number, number, number, number];
-
-export interface AmbientWorldProfile extends RenderEnvironment {
+export interface AmbientWorldProfile extends RenderEnvironment, SkyWeatherEnvironment {
   id: AmbientProfileId;
   label: string;
   intensity: number;
@@ -38,7 +41,7 @@ export interface AmbientWorldProbe {
   fields: ProceduralBiomeProbe["fields"];
 }
 
-interface AmbientProfileDefinition {
+interface AmbientProfileDefinition extends SkyWeatherEnvironment {
   id: AmbientProfileId;
   label: string;
   clearColorRgba: Rgba;
@@ -60,6 +63,13 @@ const PROFILE_DEFINITIONS: Record<AmbientProfileId, AmbientProfileDefinition> = 
     fogColorRgba: [209, 224, 240, 255],
     fogStartDistance: metersToWorldUnits(96),
     fogEndDistance: metersToWorldUnits(416),
+    skyTopColorRgba: [93, 132, 169, 255],
+    skyHorizonColorRgba: [209, 224, 240, 255],
+    skyCloudColorRgba: [219, 228, 233, 255],
+    skyCloudCoverage: 0.16,
+    skyCloudBand: 0.70,
+    ashfallIntensity: 0,
+    fungalGlowIntensity: 0,
   },
   "green-canopy": {
     id: "green-canopy",
@@ -68,6 +78,13 @@ const PROFILE_DEFINITIONS: Record<AmbientProfileId, AmbientProfileDefinition> = 
     fogColorRgba: [177, 204, 184, 255],
     fogStartDistance: metersToWorldUnits(78),
     fogEndDistance: metersToWorldUnits(360),
+    skyTopColorRgba: [91, 129, 137, 255],
+    skyHorizonColorRgba: [188, 220, 198, 255],
+    skyCloudColorRgba: [199, 219, 206, 255],
+    skyCloudCoverage: 0.26,
+    skyCloudBand: 0.64,
+    ashfallIntensity: 0,
+    fungalGlowIntensity: 0.10,
   },
   "dry-haze": {
     id: "dry-haze",
@@ -76,14 +93,28 @@ const PROFILE_DEFINITIONS: Record<AmbientProfileId, AmbientProfileDefinition> = 
     fogColorRgba: [215, 197, 164, 255],
     fogStartDistance: metersToWorldUnits(88),
     fogEndDistance: metersToWorldUnits(396),
+    skyTopColorRgba: [130, 137, 144, 255],
+    skyHorizonColorRgba: [225, 207, 177, 255],
+    skyCloudColorRgba: [190, 178, 157, 255],
+    skyCloudCoverage: 0.22,
+    skyCloudBand: 0.56,
+    ashfallIntensity: 0.10,
+    fungalGlowIntensity: 0,
   },
   ashfall: {
     id: "ashfall",
-    label: "Ashfall",
-    clearColorRgba: [191, 181, 168, 255],
-    fogColorRgba: [163, 143, 127, 255],
-    fogStartDistance: metersToWorldUnits(58),
-    fogEndDistance: metersToWorldUnits(320),
+    label: "Ash Storm",
+    clearColorRgba: [132, 119, 108, 255],
+    fogColorRgba: [122, 105, 95, 255],
+    fogStartDistance: metersToWorldUnits(44),
+    fogEndDistance: metersToWorldUnits(288),
+    skyTopColorRgba: [43, 47, 51, 255],
+    skyHorizonColorRgba: [133, 101, 84, 255],
+    skyCloudColorRgba: [73, 70, 68, 255],
+    skyCloudCoverage: 0.88,
+    skyCloudBand: 0.50,
+    ashfallIntensity: 0.88,
+    fungalGlowIntensity: 0,
   },
   "silt-mist": {
     id: "silt-mist",
@@ -92,6 +123,13 @@ const PROFILE_DEFINITIONS: Record<AmbientProfileId, AmbientProfileDefinition> = 
     fogColorRgba: [157, 178, 171, 255],
     fogStartDistance: metersToWorldUnits(54),
     fogEndDistance: metersToWorldUnits(300),
+    skyTopColorRgba: [74, 96, 103, 255],
+    skyHorizonColorRgba: [166, 191, 182, 255],
+    skyCloudColorRgba: [116, 139, 132, 255],
+    skyCloudCoverage: 0.58,
+    skyCloudBand: 0.46,
+    ashfallIntensity: 0.18,
+    fungalGlowIntensity: 0.10,
   },
   "fungal-lantern": {
     id: "fungal-lantern",
@@ -100,6 +138,13 @@ const PROFILE_DEFINITIONS: Record<AmbientProfileId, AmbientProfileDefinition> = 
     fogColorRgba: [143, 170, 191, 255],
     fogStartDistance: metersToWorldUnits(56),
     fogEndDistance: metersToWorldUnits(304),
+    skyTopColorRgba: [47, 63, 88, 255],
+    skyHorizonColorRgba: [122, 163, 183, 255],
+    skyCloudColorRgba: [72, 103, 123, 255],
+    skyCloudCoverage: 0.52,
+    skyCloudBand: 0.42,
+    ashfallIntensity: 0.05,
+    fungalGlowIntensity: 0.72,
   },
   "cold-glass": {
     id: "cold-glass",
@@ -108,6 +153,13 @@ const PROFILE_DEFINITIONS: Record<AmbientProfileId, AmbientProfileDefinition> = 
     fogColorRgba: [180, 209, 228, 255],
     fogStartDistance: metersToWorldUnits(74),
     fogEndDistance: metersToWorldUnits(384),
+    skyTopColorRgba: [80, 113, 148, 255],
+    skyHorizonColorRgba: [196, 222, 236, 255],
+    skyCloudColorRgba: [176, 204, 222, 255],
+    skyCloudCoverage: 0.34,
+    skyCloudBand: 0.62,
+    ashfallIntensity: 0,
+    fungalGlowIntensity: 0.04,
   },
   subterranean: {
     id: "subterranean",
@@ -116,6 +168,13 @@ const PROFILE_DEFINITIONS: Record<AmbientProfileId, AmbientProfileDefinition> = 
     fogColorRgba: [48, 58, 58, 255],
     fogStartDistance: metersToWorldUnits(18),
     fogEndDistance: metersToWorldUnits(128),
+    skyTopColorRgba: [20, 28, 30, 255],
+    skyHorizonColorRgba: [44, 52, 51, 255],
+    skyCloudColorRgba: [32, 39, 39, 255],
+    skyCloudCoverage: 0.30,
+    skyCloudBand: 0.36,
+    ashfallIntensity: 0.12,
+    fungalGlowIntensity: 0.28,
   },
 };
 
@@ -150,15 +209,29 @@ export function resolveAmbientWorldProfile(
     fogColorRgba: mixRgba(DEFAULT_RENDER_ENVIRONMENT.fogColorRgba, definition.fogColorRgba, intensity),
     fogStartDistance,
     fogEndDistance,
+    skyTopColorRgba: mixRgba(DEFAULT_SKY_WEATHER_ENVIRONMENT.skyTopColorRgba, definition.skyTopColorRgba, intensity),
+    skyHorizonColorRgba: mixRgba(DEFAULT_SKY_WEATHER_ENVIRONMENT.skyHorizonColorRgba, definition.skyHorizonColorRgba, intensity),
+    skyCloudColorRgba: mixRgba(DEFAULT_SKY_WEATHER_ENVIRONMENT.skyCloudColorRgba, definition.skyCloudColorRgba, intensity),
+    skyCloudCoverage: blend(DEFAULT_SKY_WEATHER_ENVIRONMENT.skyCloudCoverage, definition.skyCloudCoverage, intensity),
+    skyCloudBand: blend(DEFAULT_SKY_WEATHER_ENVIRONMENT.skyCloudBand, definition.skyCloudBand, intensity),
+    ashfallIntensity: blend(DEFAULT_SKY_WEATHER_ENVIRONMENT.ashfallIntensity, definition.ashfallIntensity, intensity),
+    fungalGlowIntensity: blend(DEFAULT_SKY_WEATHER_ENVIRONMENT.fungalGlowIntensity, definition.fungalGlowIntensity, intensity),
   };
 }
 
-export function buildAmbientRenderEnvironment(profile: AmbientWorldProfile): RenderEnvironment {
+export function buildAmbientRenderEnvironment(profile: AmbientWorldProfile): RenderEnvironment & SkyWeatherEnvironment {
   return {
     clearColorRgba: profile.clearColorRgba,
     fogColorRgba: profile.fogColorRgba,
     fogStartDistance: profile.fogStartDistance,
     fogEndDistance: profile.fogEndDistance,
+    skyTopColorRgba: profile.skyTopColorRgba,
+    skyHorizonColorRgba: profile.skyHorizonColorRgba,
+    skyCloudColorRgba: profile.skyCloudColorRgba,
+    skyCloudCoverage: profile.skyCloudCoverage,
+    skyCloudBand: profile.skyCloudBand,
+    ashfallIntensity: profile.ashfallIntensity,
+    fungalGlowIntensity: profile.fungalGlowIntensity,
   };
 }
 

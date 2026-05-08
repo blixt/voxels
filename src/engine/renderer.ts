@@ -2,8 +2,10 @@ import { buildCameraMatrices, type CameraState } from "./camera.ts";
 import type { ChunkMeshData } from "./types.ts";
 import type { ResidentChunkWorld } from "./world.ts";
 import {
+  DEFAULT_SKY_WEATHER_ENVIRONMENT,
   LIGHT_DIRECTION,
   LIGHTING_TERMS,
+  type SkyWeatherEnvironment,
 } from "./render-constants.ts";
 import {
   DEFAULT_RENDER_ENVIRONMENT,
@@ -23,6 +25,10 @@ struct Uniforms {
   camera_position: vec4<f32>,
   fog_color: vec4<f32>,
   fog_params: vec4<f32>,
+  sky_top_color: vec4<f32>,
+  sky_horizon_color: vec4<f32>,
+  sky_cloud_color: vec4<f32>,
+  sky_params: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -64,13 +70,19 @@ fn shade_fragment(input: VertexOutput) -> vec4<f32> {
   let grain = (broad_grain - 0.5) * 0.16 + (fine_grain - 0.5) * 0.06;
   let top_bias = abs(input.normal.y);
   let grain_strength = mix(0.045, 0.11, top_bias);
-  let grounded_albedo = mix(vec3<f32>(albedo_luma), input.color.rgb, 0.78) * (1.0 + grain * grain_strength);
+  let ashfall = clamp(uniforms.sky_params.z, 0.0, 1.0);
+  let fungal_glow = clamp(uniforms.sky_params.w, 0.0, 1.0);
+  let grounded_base = mix(vec3<f32>(albedo_luma), input.color.rgb, 0.78) * (1.0 + grain * grain_strength);
+  let ash_deposit = ashfall * smoothstep(0.12, 0.92, input.normal.y) * (0.16 + broad_grain * 0.24);
+  let grounded_albedo = mix(grounded_base, uniforms.sky_cloud_color.rgb, clamp(ash_deposit, 0.0, 0.38));
   let light_tint = mix(
     vec3<f32>(0.82, 0.86, 0.92),
     vec3<f32>(1.08, 1.02, 0.92),
     clamp(directional * 0.78 + hemi * 0.22, 0.0, 1.0),
   );
-  let shaded = grounded_albedo * lighting * light_tint;
+  let overcast = 1.0 - ashfall * 0.18;
+  let fungal_shadow = vec3<f32>(0.04, 0.16, 0.18) * fungal_glow * (1.0 - directional) * (1.0 - hemi * 0.46);
+  let shaded = grounded_albedo * lighting * light_tint * overcast + fungal_shadow;
   let fog_distance = distance(input.world_position, uniforms.camera_position.xyz);
   let fog = smoothstep(uniforms.fog_params.x, uniforms.fog_params.y, fog_distance);
   let distance_luma = dot(shaded, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -233,7 +245,7 @@ export class WebGpuVoxelRenderer {
   private readonly uniformBuffer: GPUBuffer;
   private readonly uniformBindGroup: GPUBindGroup;
   private readonly resources = new Map<object, GpuChunkResources>();
-  private readonly uniformData = new Float32Array(36);
+  private readonly uniformData = new Float32Array(52);
   private depthTexture: GPUTexture | null = null;
   private depthView: GPUTextureView | null = null;
   private resourceSyncRevision = 0;
@@ -249,7 +261,7 @@ export class WebGpuVoxelRenderer {
     this.timestampQuerySupported = device.features.has("timestamp-query");
     const shaderModule = device.createShaderModule({ code: SHADER_SOURCE });
     const uniformBuffer = device.createBuffer({
-      size: 144,
+      size: 208,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     const bindGroupLayout = device.createBindGroupLayout({
@@ -463,12 +475,13 @@ export class WebGpuVoxelRenderer {
       : null;
 
     const encoder = this.device.createCommandEncoder();
+    const skyWeather = resolveSkyWeatherEnvironment(renderEnvironment);
     const passDescriptor: GPURenderPassDescriptor = {
       colorAttachments: [
         {
           view: this.context.getCurrentTexture().createView(),
           loadOp: "clear",
-          clearValue: toGpuColor(renderEnvironment.clearColorRgba),
+          clearValue: toGpuColor(skyWeather.skyHorizonColorRgba),
           storeOp: "store",
         },
       ],
@@ -550,12 +563,13 @@ export class WebGpuVoxelRenderer {
     });
 
     const encoder = this.device.createCommandEncoder();
+    const skyWeather = resolveSkyWeatherEnvironment(renderEnvironment);
     this.encodeRenderPass(world, encoder, {
       colorAttachments: [
         {
           view: colorTexture.createView(),
           loadOp: "clear",
-          clearValue: toGpuColor(renderEnvironment.clearColorRgba),
+          clearValue: toGpuColor(skyWeather.skyHorizonColorRgba),
           storeOp: "store",
         },
       ],
@@ -733,6 +747,23 @@ export class WebGpuVoxelRenderer {
     uniformData[33] = renderEnvironment.fogEndDistance;
     uniformData[34] = 0;
     uniformData[35] = 0;
+    const skyWeather = resolveSkyWeatherEnvironment(renderEnvironment);
+    uniformData[36] = skyWeather.skyTopColorRgba[0] / 255;
+    uniformData[37] = skyWeather.skyTopColorRgba[1] / 255;
+    uniformData[38] = skyWeather.skyTopColorRgba[2] / 255;
+    uniformData[39] = skyWeather.skyTopColorRgba[3] / 255;
+    uniformData[40] = skyWeather.skyHorizonColorRgba[0] / 255;
+    uniformData[41] = skyWeather.skyHorizonColorRgba[1] / 255;
+    uniformData[42] = skyWeather.skyHorizonColorRgba[2] / 255;
+    uniformData[43] = skyWeather.skyHorizonColorRgba[3] / 255;
+    uniformData[44] = skyWeather.skyCloudColorRgba[0] / 255;
+    uniformData[45] = skyWeather.skyCloudColorRgba[1] / 255;
+    uniformData[46] = skyWeather.skyCloudColorRgba[2] / 255;
+    uniformData[47] = skyWeather.skyCloudColorRgba[3] / 255;
+    uniformData[48] = skyWeather.skyCloudCoverage;
+    uniformData[49] = skyWeather.skyCloudBand;
+    uniformData[50] = skyWeather.ashfallIntensity;
+    uniformData[51] = skyWeather.fungalGlowIntensity;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
 
@@ -937,6 +968,26 @@ function nextBufferCapacity(requiredBytes: number, currentCapacity: number): num
 
 function isCameraWithViewProjection(camera: RenderCamera): camera is { viewProjection: Float32Array } {
   return "viewProjection" in camera;
+}
+
+function resolveSkyWeatherEnvironment(renderEnvironment: RenderEnvironment): SkyWeatherEnvironment {
+  const atmosphere = renderEnvironment as RenderEnvironment & Partial<SkyWeatherEnvironment>;
+  const skyTopColorRgba = atmosphere.skyTopColorRgba ?? renderEnvironment.clearColorRgba;
+  const skyHorizonColorRgba = atmosphere.skyHorizonColorRgba ?? renderEnvironment.clearColorRgba;
+  const skyCloudColorRgba = atmosphere.skyCloudColorRgba ?? renderEnvironment.fogColorRgba;
+  return {
+    skyTopColorRgba,
+    skyHorizonColorRgba,
+    skyCloudColorRgba,
+    skyCloudCoverage: clamp01(atmosphere.skyCloudCoverage ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.skyCloudCoverage),
+    skyCloudBand: clamp01(atmosphere.skyCloudBand ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.skyCloudBand),
+    ashfallIntensity: clamp01(atmosphere.ashfallIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.ashfallIntensity),
+    fungalGlowIntensity: clamp01(atmosphere.fungalGlowIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.fungalGlowIntensity),
+  };
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
 }
 
 function toGpuColor(color: readonly [number, number, number, number]): GPUColor {

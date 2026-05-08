@@ -53,6 +53,11 @@ export const OBJECT_LAB_LANDMARK_IDS = [
   "velothi_shrine",
   "kwama_mound",
   "pilgrim_cairn",
+  "velothi_ziggurat",
+  "ash_obelisk",
+  "rib_arch",
+  "old_road_causeway",
+  "pilgrim_lantern",
 ] as const satisfies readonly LandmarkId[];
 
 export interface LandmarkRoot {
