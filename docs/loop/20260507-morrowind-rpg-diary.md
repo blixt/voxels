@@ -2254,3 +2254,33 @@ Build the first "place identity" slice without regressing performance or input:
   - keep rendering-source fixes isolated from biome/content commits
   - make biome/ambient/far-render world classification share a single source of truth
   - restore a stable browser lab path or split the heavy CDP probe so visual/perf validation stops failing on one long `Runtime.evaluate`
+
+### 2026-05-08 - World Classification Source-of-Truth Fix
+
+- Trigger:
+  - The user called out that the visible distance, floating LOD height, and biome-at-feet mismatch were symptoms of a brittle rendering/worldgen structure.
+  - After the LOD boundary fix, the next correctness risk was letting HUD, sky, terrain, and far-field sampling answer "what world am I in?" through different cached or thresholded paths.
+- Changes:
+  - Added `worldgen-region.ts` as the macro island/province authority for region id, region strength, broad biome, regional variant, ambient profile, island interior, coast shelf, and major regional influences.
+  - The generator now feeds surface height, materials, biome classification, and probe data from the same macro-region sample instead of scattering island/biome decisions across call sites.
+  - The HUD and render environment now share one fresh current-world probe per snapshot, so current biome/region/ambient values no longer depend on stale discovery-journal cache state.
+  - Ambient region switching and terrain regional variants now share `WORLD_REGION_AUTHORITY_THRESHOLD`, so sky and terrain cannot drift through duplicated magic numbers.
+  - The broad generator tests now sample island-scale coordinates instead of the old small infinite-world window.
+- Validation:
+  - Procedural generator suite: `mise exec -- bun test tests/procedural-generator.test.ts`, pass, `43` tests.
+  - Ambient suite: `mise exec -- bun test tests/ambient-environment.test.ts`, pass, `7` tests.
+  - LOD suite after worldgen changes: `mise exec -- bun test tests/lod-system.test.ts`, pass, `31` tests.
+  - Resident/LOD handoff suite: `mise exec -- bun test tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts`, pass, `21` tests.
+  - Focused shared-threshold check: `mise exec -- bun test tests/ambient-environment.test.ts tests/procedural-generator.test.ts -t "worldgen region authority|strong macro regions"`, pass.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+- Honest assessment:
+  - This is a source-of-truth fix, not a visual polish pass. It should make the renderer and worldgen safer to change because near/far/HUD/ambient now consult the same macro authority.
+  - I could not visually verify in the in-app browser because the `iab` backend was not discoverable from Codex. I am not claiming a user-tab visual pass.
+  - Far LOD still uses a deliberately conservative surface-column fallback until real source chunks exist; the tests now prove that fallback uses the same height/material sampler as the full column path.
+- Rubric movement:
+  - Rendering correctness/quality: `7.32 -> 7.48` because the previous LOD height fix is now paired with shared near/far terrain sampling and shared ambient terrain region thresholds.
+  - Harness maturity: `9.997 -> 9.998` because the broader island generator and shared-threshold invariants are under tests.
+  - Visual/world definition: unchanged until this authority drives visible biome composition work.
+- Next:
+  - checkpoint and push this source-of-truth slice
+  - then resume biome/world design on top of the consolidated generator instead of patching multiple disconnected places

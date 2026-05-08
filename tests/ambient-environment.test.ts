@@ -9,6 +9,7 @@ import {
 import { DEFAULT_RENDER_ENVIRONMENT } from "../src/engine/water-visuals.ts";
 import { hexColorToMaterial, ProceduralWorldGenerator, type BiomeId } from "../src/engine/procedural-generator.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
+import { WORLD_REGION_AUTHORITY_THRESHOLD } from "../src/engine/worldgen-region.ts";
 
 const BASE_FIELDS: AmbientWorldProbe["fields"] = {
   temperature: 0.5,
@@ -28,6 +29,8 @@ const BASE_FIELDS: AmbientWorldProbe["fields"] = {
   surfaceGrain: 0.5,
   scatter: 0.5,
   peakness: 0.5,
+  islandInterior: 1,
+  coastalShelf: 0,
 };
 
 test("ambient profiles map major biome moods to distinct rendering environments", () => {
@@ -182,8 +185,41 @@ test("procedural ambient profiles are deterministic and varied across the world"
     }
   }
 
+  for (const [x, z] of [
+    [34200, -30800],
+    [-43600, 9200],
+    [-5200, -10800],
+    [47400, 21800],
+    [-27200, -32600],
+  ]) {
+    profileIds.add(resolveAmbientWorldProfile(generator.sampleBiomeProbe(x, z)).id);
+  }
+
   expect(profileIds.size).toBeGreaterThanOrEqual(5);
   expect(shortestSurfaceFog).toBeGreaterThanOrEqual(metersToWorldUnits(224));
+});
+
+test("strong macro regions stabilize sky profile across local biome noise", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const center = generator.sampleBiomeProbe(-13_814, -24_678);
+  const centerProfile = resolveAmbientWorldProfile(center);
+  const profileIds = new Set<string>();
+  const regionIds = new Set<string>();
+  const biomeIds = new Set<string>();
+
+  for (let z = -80; z <= 80; z += 16) {
+    for (let x = -80; x <= 80; x += 16) {
+      const probe = generator.sampleBiomeProbe(-13_814 + x, -24_678 + z);
+      profileIds.add(resolveAmbientWorldProfile(probe).id);
+      regionIds.add(probe.regionId);
+      biomeIds.add(probe.biomeId);
+    }
+  }
+
+  expect(center.regionStrength).toBeGreaterThan(WORLD_REGION_AUTHORITY_THRESHOLD);
+  expect(profileIds).toEqual(new Set([centerProfile.id]));
+  expect(regionIds.size).toBeLessThanOrEqual(2);
+  expect(biomeIds.size).toBeLessThanOrEqual(3);
 });
 
 function buildProbe(overrides: Partial<AmbientWorldProbe>): AmbientWorldProbe {

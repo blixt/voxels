@@ -67,7 +67,11 @@ import {
   type ResidencyUpdateSummary,
   type WorldEditRecord,
 } from "../engine/procedural-resident-world.ts";
-import { isProceduralWaterMaterial, ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
+import {
+  isProceduralWaterMaterial,
+  ProceduralWorldGenerator,
+  type ProceduralBiomeProbe,
+} from "../engine/procedural-generator.ts";
 import {
   WebGpuVoxelRenderer,
   type RenderStats,
@@ -163,6 +167,8 @@ export interface GameHudSnapshot {
   streamDirtyResidentChunks: number;
   residencyRadiusChunks: number;
   surfaceY: number;
+  worldRegionId: string | null;
+  worldRegionStrength: number;
   biomeId: string | null;
   undergroundBiomeId: string | null;
   regionalVariantId: string | null;
@@ -223,6 +229,12 @@ export interface GameHudSnapshot {
   lodDrawCallsByLevel: readonly number[];
   frustumCulledChunks: number;
   fogCulledChunks: number;
+}
+
+interface CurrentWorldProbeContext {
+  probe: ProceduralBiomeProbe;
+  observedUndergroundBiomeId: string | null;
+  ambientProfile: AmbientWorldProfile;
 }
 
 export interface ProgressStateSnapshot {
@@ -844,11 +856,12 @@ export class GameController {
 
   getDebugSnapshot(): GameHudSnapshot {
     const stats = this.world.getStats();
+    const currentWorld = this.sampleCurrentWorldContext();
     const discovery = this.refreshDiscoveryJournal();
     const skills = this.skillJournal.observeDiscoveries(this.explorationJournal.drainPendingSkillDiscoveries());
     const explorationSkillEffects = resolveExplorationSkillEffects(skills);
     const bootstrap = this.getBootstrapReadiness();
-    const ambientProfile = this.resolveCurrentAmbientProfile();
+    const ambientProfile = currentWorld.ambientProfile;
     return {
       status: this.status,
       pointerLocked: this.pointerLocked,
@@ -888,11 +901,13 @@ export class GameController {
       streamMissingRegionSummaries: this.lastStreamSummary.phaseMs.missingRegionSummaries,
       streamDirtyResidentChunks: this.world.countDirtyResidentChunks(),
       residencyRadiusChunks: this.lastStreamSummary.radiusChunks,
-      surfaceY: this.lastStreamSummary.surfaceY,
-      biomeId: discovery.currentBiomeId,
-      undergroundBiomeId: discovery.currentUndergroundBiomeId,
-      regionalVariantId: discovery.currentRegionalVariantId,
-      landmarkId: discovery.currentLandmarkId,
+      surfaceY: currentWorld.probe.surfaceY,
+      worldRegionId: currentWorld.probe.regionId ?? null,
+      worldRegionStrength: currentWorld.probe.regionStrength ?? 0,
+      biomeId: currentWorld.probe.biomeId,
+      undergroundBiomeId: currentWorld.observedUndergroundBiomeId,
+      regionalVariantId: currentWorld.probe.regionalVariantId,
+      landmarkId: currentWorld.probe.landmarkId ?? discovery.currentLandmarkId,
       ambientProfileId: ambientProfile.id,
       ambientProfileLabel: ambientProfile.label,
       ambientFogEndMeters: worldUnitsToMeters(ambientProfile.fogEndDistance),
@@ -3148,7 +3163,7 @@ export class GameController {
   }
 
   private resolveRenderEnvironment(): RenderEnvironment {
-    const ambientEnvironment = buildAmbientRenderEnvironment(this.resolveCurrentAmbientProfile());
+    const ambientEnvironment = buildAmbientRenderEnvironment(this.sampleCurrentWorldContext().ambientProfile);
     if (!this.player.eyeInWater) {
       return ambientEnvironment;
     }
@@ -3164,7 +3179,7 @@ export class GameController {
     return buildUnderwaterRenderEnvironment(this.world.getPaletteColor(material));
   }
 
-  private resolveCurrentAmbientProfile(): AmbientWorldProfile {
+  private sampleCurrentWorldContext(): CurrentWorldProbeContext {
     const centerX = Math.floor(this.player.feetPosition[0]);
     const centerZ = Math.floor(this.player.feetPosition[2]);
     const probe = this.generator.sampleBiomeProbe(centerX, centerZ);
@@ -3174,7 +3189,11 @@ export class GameController {
       probe.surfaceY,
       probe.undergroundBiomeId,
     );
-    return resolveAmbientWorldProfile(probe, { observedUndergroundBiomeId });
+    return {
+      probe,
+      observedUndergroundBiomeId,
+      ambientProfile: resolveAmbientWorldProfile(probe, { observedUndergroundBiomeId }),
+    };
   }
 
   private async applySettledReferenceDiffs(

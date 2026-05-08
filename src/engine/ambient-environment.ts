@@ -16,6 +16,7 @@ import {
   type ProceduralBiomeProbe,
   type RegionalVariantId,
 } from "./procedural-generator.ts";
+import { WORLD_REGION_AUTHORITY_THRESHOLD } from "./worldgen-region.ts";
 
 export type AmbientProfileId =
   | "open-air"
@@ -34,6 +35,8 @@ export interface AmbientWorldProfile extends RenderEnvironment, SkyWeatherEnviro
 }
 
 export interface AmbientWorldProbe {
+  regionAmbientProfileId?: AmbientProfileId;
+  regionStrength?: number;
   biomeId: BiomeId;
   undergroundBiomeId: string | null;
   regionalVariantId: RegionalVariantId | null;
@@ -260,6 +263,9 @@ function resolveSurfaceProfileId(probe: AmbientWorldProbe): AmbientProfileId {
   if (routeHaze && probe.biomeId !== "marsh" && probe.biomeId !== "saltflat" && probe.biomeId !== "fungal") {
     return "ashfall";
   }
+  if ((probe.regionStrength ?? 0) > WORLD_REGION_AUTHORITY_THRESHOLD && probe.regionAmbientProfileId) {
+    return probe.regionAmbientProfileId;
+  }
   switch (probe.regionalVariantId) {
     case "badlands_crater":
     case "ember_caldera":
@@ -350,7 +356,8 @@ function resolveProfileIntensity(probe: AmbientWorldProbe, underground: boolean)
     + Math.max(0, probe.fields.oceanness - 0.50) * 0.08
   );
   const routePressure = !underground && isPilgrimRouteHazeProbe(probe) ? 0.18 : 0;
-  const profilePressure = probe.specialStrength * 0.22 + probe.regionalVariantStrength * 0.20 + routePressure;
+  const regionPressure = (probe.regionStrength ?? 0) * 0.18;
+  const profilePressure = regionPressure + probe.specialStrength * 0.22 + probe.regionalVariantStrength * 0.20 + routePressure;
   return clamp((underground ? 0.84 : 0.58) + fieldPressure + profilePressure, 0.48, 1);
 }
 
