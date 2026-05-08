@@ -3289,11 +3289,15 @@ function samplePilgrimRouteSurfaceInfluence(
   biomeId: BiomeId,
   fields: SurfaceFieldSample,
 ): PilgrimRouteSurfaceInfluence | null {
+  const wetlandRoute = isWetlandPilgrimRouteField(fields);
   if (
-    biomeId === "verdant"
-    || biomeId === "fern"
-    || biomeId === "bloom"
-    || (biomeId === "highland" && fields.oldGrowth > 0.62 && fields.moisture > 0.48)
+    !wetlandRoute
+    && (
+      biomeId === "verdant"
+      || biomeId === "fern"
+      || biomeId === "bloom"
+      || (biomeId === "highland" && fields.oldGrowth > 0.62 && fields.moisture > 0.48)
+    )
   ) {
     return null;
   }
@@ -3409,11 +3413,15 @@ function selectPilgrimRouteRoster(
   biomeId: BiomeId,
   fields: SurfaceFieldSample,
 ): readonly LandmarkProfile[] | null {
+  const wetlandRoute = isWetlandPilgrimRouteField(fields);
   if (
-    biomeId === "verdant"
-    || biomeId === "fern"
-    || biomeId === "bloom"
-    || (biomeId === "highland" && fields.oldGrowth > 0.62 && fields.moisture > 0.48)
+    !wetlandRoute
+    && (
+      biomeId === "verdant"
+      || biomeId === "fern"
+      || biomeId === "bloom"
+      || (biomeId === "highland" && fields.oldGrowth > 0.62 && fields.moisture > 0.48)
+    )
   ) {
     return null;
   }
@@ -3454,7 +3462,8 @@ function samplePilgrimRouteSetPiece(
   biomeId: BiomeId,
   fields: SurfaceFieldSample,
 ): PilgrimRouteSetPiece | null {
-  if (biomeId === "verdant" || biomeId === "bloom") {
+  const wetlandRoute = isWetlandPilgrimRouteField(fields);
+  if (!wetlandRoute && (biomeId === "verdant" || biomeId === "bloom")) {
     return null;
   }
   let best: PilgrimRouteSetPiece | null = null;
@@ -3464,16 +3473,19 @@ function samplePilgrimRouteSetPiece(
     const deltaX = worldX - band.startX;
     const deltaZ = worldZ - band.startZ;
     const along = deltaX * band.directionX + deltaZ * band.directionZ;
+    const earlyWetlandCadence = wetlandRoute && bandIndex === 8;
+    const setPieceStart = earlyWetlandCadence ? 48 * WORLD_UNITS_PER_METER : PILGRIM_ROUTE_SET_PIECE_START;
+    const setPieceSpacing = earlyWetlandCadence ? 180 * WORLD_UNITS_PER_METER : PILGRIM_ROUTE_SET_PIECE_SPACING;
     if (
-      along < PILGRIM_ROUTE_SET_PIECE_START - band.halfWidth
+      along < setPieceStart - band.halfWidth
       || along > band.length - PILGRIM_ROUTE_SET_PIECE_END_MARGIN + band.halfWidth
     ) {
       continue;
     }
     const rawLateral = deltaX * -band.directionZ + deltaZ * band.directionX;
     const lateral = rawLateral - samplePilgrimRouteLateralWarp(along, band, fields);
-    const anchorIndex = Math.max(0, Math.round((along - PILGRIM_ROUTE_SET_PIECE_START) / PILGRIM_ROUTE_SET_PIECE_SPACING));
-    const anchorAlong = PILGRIM_ROUTE_SET_PIECE_START + anchorIndex * PILGRIM_ROUTE_SET_PIECE_SPACING;
+    const anchorIndex = Math.max(0, Math.round((along - setPieceStart) / setPieceSpacing));
+    const anchorAlong = setPieceStart + anchorIndex * setPieceSpacing;
     if (anchorAlong > band.length - PILGRIM_ROUTE_SET_PIECE_END_MARGIN) {
       continue;
     }
@@ -3493,6 +3505,10 @@ function samplePilgrimRouteSetPiece(
     }
   }
   return best;
+}
+
+function isWetlandPilgrimRouteField(fields: SurfaceFieldSample): boolean {
+  return fields.regionId === "bitter-coast" || fields.westWetlands > 0.48;
 }
 
 function selectPilgrimRouteSetPieceProfile(
@@ -3574,12 +3590,15 @@ function selectPilgrimRouteSetPieceProfile(
       return landmarkPlacement("ash_obelisk", { chance: 1, scale: 1.42, cellSize: 1, radius: 9 });
     }
   }
-  if (fields.westWetlands > 0.50 || fields.magic > 0.62) {
+  if (fields.regionId === "bitter-coast" || fields.westWetlands > 0.50 || fields.magic > 0.62) {
     if (fields.regionId === "bitter-coast" && (sequence === 0 || sequence === 4)) {
-      return landmarkPlacement("mega_glowcap", { chance: 1, scale: 1.42, cellSize: 1, radius: 21 });
+      return landmarkPlacement("rib_arch", { chance: 1, scale: 1.70, cellSize: 1, radius: 17 });
     }
-    if (fields.regionId === "bitter-coast" && sequence === 2) {
-      return landmarkPlacement("rib_arch", { chance: 1, scale: 1.36, cellSize: 1, radius: 15 });
+    if (fields.regionId === "bitter-coast" && (sequence === 2 || sequence === 6)) {
+      return landmarkPlacement("crystal_reeds", { chance: 1, scale: 1.66, cellSize: 1, radius: 8 });
+    }
+    if (fields.regionId === "bitter-coast" && sequence === 5) {
+      return landmarkPlacement("rib_remains", { chance: 1, scale: 1.58, cellSize: 1, radius: 12 });
     }
     if (sequence === 1 || sequence === 6) {
       return landmarkPlacement("fungal_bridge", { chance: 1, scale: 1.34, cellSize: 1, radius: 18 });

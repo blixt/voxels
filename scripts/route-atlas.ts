@@ -285,6 +285,8 @@ const thresholds = {
   maxTokenlessRouteStretches: 0,
   minStrongSilhouetteStretchCoverageRatio: 0.80,
   maxStrongSilhouettelessRouteStretches: 35,
+  minRouteStrongSilhouetteStretchCoverageRatio: 0.88,
+  maxRouteStrongSilhouettelessStretches: 4,
 } as const;
 
 const landmarkVistaScan = {
@@ -820,6 +822,12 @@ function findFailures(
     }
     if (route.tokenlessRouteStretchCount > 0) {
       failures.push(`${route.label} has ${route.tokenlessRouteStretchCount} tokenless route stretch window(s)`);
+    }
+    if (route.strongSilhouetteStretchCoverageRatio < thresholds.minRouteStrongSilhouetteStretchCoverageRatio) {
+      failures.push(`${route.label} strong silhouette coverage ${formatPercent(route.strongSilhouetteStretchCoverageRatio)} is below ${formatPercent(thresholds.minRouteStrongSilhouetteStretchCoverageRatio)}`);
+    }
+    if (route.strongSilhouettelessStretchCount > thresholds.maxRouteStrongSilhouettelessStretches) {
+      failures.push(`${route.label} has ${route.strongSilhouettelessStretchCount} strong-silhouetteless route window(s)`);
     }
   }
   return failures;
