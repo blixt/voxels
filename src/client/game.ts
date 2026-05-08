@@ -586,7 +586,7 @@ function createPerformanceStripView(root: HTMLElement): PerformanceStripView {
       const wallFrameMs = snapshot.avgFrameWallMs > 0 ? snapshot.avgFrameWallMs : snapshot.lastFrameWallMs;
       const nextValues = [
         `${formatWallFrameRate(wallFrameMs)} / ${formatFrameMs(snapshot.frameTiming.worstRecentFrameMs)} max`,
-        `${snapshot.frameTiming.recentHitchCount} hitch`,
+        `${snapshot.frameTiming.recentHitchCount} hitch ${snapshot.lastHitchAttribution.cause}`,
         `${formatCompactCount(snapshot.chunkCount)} chunks`,
       ];
       for (let index = 0; index < nextValues.length; index += 1) {
@@ -602,6 +602,15 @@ function createPerformanceStripView(root: HTMLElement): PerformanceStripView {
         `Worst recent wall frame ${snapshot.frameTiming.worstRecentFrameMs.toFixed(1)} ms`,
         `Recent hitches ${snapshot.frameTiming.recentHitchCount.toLocaleString()}`,
         `Estimated dropped frames ${snapshot.frameTiming.recentDroppedFrameEstimate.toLocaleString()}`,
+        `Last hitch cause ${snapshot.lastHitchAttribution.cause}`,
+        `Last hitch frame ${snapshot.lastHitchAttribution.frame.toLocaleString()}`,
+        `Last hitch wall ${snapshot.lastHitchAttribution.wallMs.toFixed(1)} ms`,
+        `Last hitch gameplay ${snapshot.lastHitchAttribution.gameplayMs.toFixed(1)} ms`,
+        `Last hitch stream ${snapshot.lastHitchAttribution.streamMs.toFixed(1)} ms`,
+        `Last hitch mesh ${snapshot.lastHitchAttribution.meshMs.toFixed(1)} ms`,
+        `Last hitch LOD ${snapshot.lastHitchAttribution.lodMs.toFixed(1)} ms`,
+        `Last hitch render ${snapshot.lastHitchAttribution.renderCpuMs.toFixed(1)} ms`,
+        `Last hitch upload ${snapshot.lastHitchAttribution.renderUploadMs.toFixed(1)} ms`,
         `Gameplay work ${snapshot.lastGameplayFrameMs.toFixed(1)} ms`,
         `Render CPU ${snapshot.lastFrameCpuMs.toFixed(1)} ms`,
         `Stream ${snapshot.streamMs.toFixed(1)} ms`,

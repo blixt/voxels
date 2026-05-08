@@ -793,11 +793,12 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
   updateLodResidencyAround(
     position: Vec3,
-    options?: { maxGenerateLodChunks?: number; maxPlanMs?: number },
+    options?: { maxGenerateLodChunks?: number; maxPlanMs?: number; maxWorkMs?: number },
   ): LodResidencyUpdateSummary {
     const startedAt = performance.now();
     const maxGenerate = options?.maxGenerateLodChunks ?? 32;
     const maxPlanMs = options?.maxPlanMs ?? Number.POSITIVE_INFINITY;
+    const maxWorkMs = options?.maxWorkMs ?? Number.POSITIVE_INFINITY;
 
     if (!this.meshMaterialLut) {
       this.meshMaterialLut = createMeshMaterialLut(this.palette, isProceduralWaterMaterial);
@@ -852,6 +853,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     let pending = 0;
     let downsampleMs = 0;
     let meshMs = 0;
+    let workBudgetExhausted = false;
     for (const ring of LOD_RINGS) {
       const stride = 1 << ring.level;
       const worldSize = this.chunkSize * stride;
@@ -864,8 +866,13 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           this.emptyLodKeys.has(key) ||
           this.coveredEmptyLodKeys.has(key)
         ) continue;
-        if (generated >= maxGenerate) {
+        if (
+          workBudgetExhausted ||
+          generated >= maxGenerate ||
+          (generated > 0 && performance.now() - startedAt >= maxWorkMs)
+        ) {
           pending++;
+          workBudgetExhausted = true;
           continue;
         }
         const parts = key.split(":");
@@ -916,6 +923,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           clearNeededKeyCache: false,
         });
         generated++;
+        if (performance.now() - startedAt >= maxWorkMs) {
+          workBudgetExhausted = true;
+        }
       }
     }
     this.commitPreparedLodChunks();
@@ -1604,10 +1614,17 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   }
 
   private commitPreparedLodChunks(): void {
+    if (this.preparedLodChunks.size === 0) {
+      return;
+    }
     let changed = true;
     while (changed) {
       changed = false;
+      const coarserCandidateKeys = this.collectPreparedCoarserCandidateKeys();
       for (const [coarserKey, coarser] of [...this.lodChunks.entries()].sort((left, right) => right[1].lodLevel - left[1].lodLevel)) {
+        if (!coarserCandidateKeys.has(coarserKey)) {
+          continue;
+        }
         if (coarser.lodLevel <= 0 || coarser.solidCount === 0) {
           continue;
         }
@@ -1640,6 +1657,21 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         changed = true;
       }
     }
+  }
+
+  private collectPreparedCoarserCandidateKeys(): Set<string> {
+    const candidates = new Set<string>();
+    for (const prepared of this.preparedLodChunks.values()) {
+      for (const [coarserKey, coarser] of this.lodChunks.entries()) {
+        if (coarser.lodLevel <= prepared.lodLevel || coarser.solidCount === 0) {
+          continue;
+        }
+        if (lodChunkFootprintsOverlap(coarser, prepared, this.chunkSize)) {
+          candidates.add(coarserKey);
+        }
+      }
+    }
+    return candidates;
   }
 
   private isLodChunkFullyCoveredByFinerCandidates(coarser: VoxelChunk): boolean {

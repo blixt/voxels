@@ -710,5 +710,6 @@ code {
   background: rgb(8 9 11 / 78%);
   color: #f7f3df;
   font: 600 12px/1.4 ui-monospace, "SFMono-Regular", Consolas, monospace;
+  white-space: pre;
   box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
 }

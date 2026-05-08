@@ -109,14 +109,16 @@ const HUD_PUSH_INTERVAL_MS = 120;
 const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
 const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 7;
 const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 6;
-const DEFAULT_MAX_LOD_CHUNKS_PER_FRAME = 2;
+const DEFAULT_MAX_LOD_CHUNKS_PER_FRAME = 1;
 const DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME = 3;
+const DEFAULT_MAX_LOD_WORK_MS_PER_FRAME = 8;
 const MOVING_LOD_UPDATE_INTERVAL_FRAMES = 4;
 const MOVING_MAX_RESIDENCY_PLAN_MS_PER_FRAME = 5;
 const MOVING_MAX_EVICT_CHUNKS_PER_FRAME = 32;
 const MOVING_MAX_MESH_REBUILDS_PER_FRAME = 4;
 const MOVING_MAX_LOD_CHUNKS_PER_FRAME = 1;
 const MOVING_MAX_LOD_PLAN_MS_PER_FRAME = 0.75;
+const MOVING_MAX_LOD_WORK_MS_PER_FRAME = 4;
 const MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME = 6;
 const SYNC_NEAR_MESH_RADIUS_CHUNKS = 3;
 const BOOTSTRAP_PLAYABLE_COLUMN_RADIUS_CHUNKS = 2;
@@ -210,6 +212,7 @@ export interface GameHudSnapshot {
   triangles: number;
   lastFrameWallMs: number;
   frameTiming: FrameTimingSnapshot;
+  lastHitchAttribution: GameFrameAttribution;
   lastGameplayFrameMs: number;
   lastFrameCpuMs: number;
   avgFrameWallMs: number;
@@ -234,6 +237,21 @@ export interface GameHudSnapshot {
   lodDrawCallsByLevel: readonly number[];
   frustumCulledChunks: number;
   fogCulledChunks: number;
+}
+
+export interface GameFrameAttribution {
+  frame: number;
+  wallMs: number;
+  gameplayMs: number;
+  movementMs: number;
+  streamMs: number;
+  meshMs: number;
+  lodMs: number;
+  renderCpuMs: number;
+  renderSyncMs: number;
+  renderUploadMs: number;
+  renderEncodeMs: number;
+  cause: string;
 }
 
 interface CurrentWorldProbeContext {
@@ -422,6 +440,7 @@ export interface StreamingBudgets {
 interface LodUpdateBudget {
   maxGenerateLodChunks: number;
   maxPlanMs: number;
+  maxWorkMs: number;
 }
 
 export interface LodCoverageIssueSample {
@@ -746,6 +765,8 @@ export class GameController {
   avgFrameWallMs = 0;
   avgFrameCpuMs = 0;
   private readonly frameTimingBuckets = new FrameTimingBuckets(125, 50, 96);
+  private lastCompletedFrameAttribution: GameFrameAttribution = createZeroFrameAttribution();
+  private lastHitchAttribution: GameFrameAttribution = createZeroFrameAttribution();
   status = "Booting";
   pointerLocked = false;
   onHudUpdate: ((snapshot: GameHudSnapshot) => void) | null = null;
@@ -949,6 +970,7 @@ export class GameController {
       triangles: this.triangles,
       lastFrameWallMs: this.lastFrameWallMs,
       frameTiming: this.frameTimingBuckets.snapshot(),
+      lastHitchAttribution: { ...this.lastHitchAttribution },
       lastGameplayFrameMs: this.lastGameplayFrameMs,
       lastFrameCpuMs: this.lastFrameCpuMs,
       avgFrameWallMs: this.avgFrameWallMs,
@@ -2588,7 +2610,16 @@ export class GameController {
     const rawDeltaMs = this.lastFrameTime === 0
       ? 1000 / 60
       : Math.max(0, now - this.lastFrameTime);
-    this.frameTimingBuckets.record(now);
+    const frameTiming = this.frameTimingBuckets.record(now);
+    if (rawDeltaMs >= frameTiming.hitchThresholdMs) {
+      this.lastHitchAttribution = {
+        ...this.lastCompletedFrameAttribution,
+        wallMs: rawDeltaMs,
+        cause: this.lastCompletedFrameAttribution.cause === "none"
+          ? "browser or idle"
+          : this.lastCompletedFrameAttribution.cause,
+      };
+    }
     this.lastFrameWallMs = rawDeltaMs;
     this.avgFrameWallMs = this.avgFrameWallMs === 0
       ? rawDeltaMs
@@ -2606,9 +2637,13 @@ export class GameController {
     const movementMs = performance.now() - movementStartedAt;
     const dirtyResidentChunks = this.world.countDirtyResidentChunks();
     const movementActive = hasMovementIntent || movement.moved;
+    let streamMs = 0;
+    let meshMs = 0;
+    let lodMs = 0;
     const movingLodBudget: LodUpdateBudget = {
       maxGenerateLodChunks: MOVING_MAX_LOD_CHUNKS_PER_FRAME,
       maxPlanMs: MOVING_MAX_LOD_PLAN_MS_PER_FRAME,
+      maxWorkMs: MOVING_MAX_LOD_WORK_MS_PER_FRAME,
     };
     const shouldRunMovingLodUpdate = movementActive
       && this.interactiveFrameNumber % MOVING_LOD_UPDATE_INTERVAL_FRAMES === 0
@@ -2624,7 +2659,7 @@ export class GameController {
         this.lastLodSummary.pending,
       )
     ) {
-      this.syncWorldAroundPlayer(
+      const residency = this.syncWorldAroundPlayer(
         false,
         allowLodUpdate,
         lodBudget,
@@ -2636,10 +2671,26 @@ export class GameController {
           : undefined,
         movementActive ? MOVING_MAX_MESH_REBUILDS_PER_FRAME : undefined,
       );
+      streamMs = residency.elapsedMs;
+      meshMs = this.meshMs;
+      lodMs = this.lastFrameLodMs;
     }
     const render = this.renderInteractiveFrame();
     const gameplayFrameMs = performance.now() - gameplayStartedAt;
     this.lastGameplayFrameMs = gameplayFrameMs;
+    this.lastCompletedFrameAttribution = createFrameAttribution({
+      frame: this.interactiveFrameNumber,
+      wallMs: rawDeltaMs,
+      gameplayMs: gameplayFrameMs,
+      movementMs,
+      streamMs,
+      meshMs,
+      lodMs,
+      renderCpuMs: render.frameCpuMs,
+      renderSyncMs: render.syncResourcesMs,
+      renderUploadMs: render.uploadMs,
+      renderEncodeMs: render.encodeMs,
+    });
     this.recordBootstrapBenchmarkSample(gameplayFrameMs);
     return {
       movementMs,
@@ -2698,6 +2749,7 @@ export class GameController {
         this.lastLodSummary = this.world.updateLodResidencyAround(this.player.feetPosition, {
           maxGenerateLodChunks: lodBudget?.maxGenerateLodChunks ?? DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
           maxPlanMs: lodBudget?.maxPlanMs ?? DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME,
+          maxWorkMs: lodBudget?.maxWorkMs ?? DEFAULT_MAX_LOD_WORK_MS_PER_FRAME,
         });
         this.lastFrameLodMs = this.lastLodSummary.elapsedMs;
       } else {
@@ -2750,6 +2802,9 @@ export class GameController {
         maxPlanMs: settle
           ? Number.POSITIVE_INFINITY
           : lodBudget?.maxPlanMs ?? DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME,
+        maxWorkMs: settle
+          ? Number.POSITIVE_INFINITY
+          : lodBudget?.maxWorkMs ?? DEFAULT_MAX_LOD_WORK_MS_PER_FRAME,
       });
       this.lastFrameLodMs = this.lastLodSummary.elapsedMs;
     } else {
@@ -3490,6 +3545,40 @@ function zeroGameRenderProbe(): GameRenderProbe {
     encodeMs: 0,
     drawCalls: 0,
     triangles: 0,
+  };
+}
+
+function createZeroFrameAttribution(): GameFrameAttribution {
+  return createFrameAttribution({
+    frame: 0,
+    wallMs: 0,
+    gameplayMs: 0,
+    movementMs: 0,
+    streamMs: 0,
+    meshMs: 0,
+    lodMs: 0,
+    renderCpuMs: 0,
+    renderSyncMs: 0,
+    renderUploadMs: 0,
+    renderEncodeMs: 0,
+  });
+}
+
+function createFrameAttribution(input: Omit<GameFrameAttribution, "cause">): GameFrameAttribution {
+  const candidates: Array<[cause: string, ms: number]> = [
+    ["stream", input.streamMs],
+    ["mesh", input.meshMs],
+    ["LOD", input.lodMs],
+    ["render", input.renderCpuMs],
+    ["GPU upload", input.renderUploadMs],
+    ["GPU sync", input.renderSyncMs],
+    ["movement", input.movementMs],
+  ];
+  candidates.sort((left, right) => right[1] - left[1]);
+  const [cause, ms] = candidates[0] ?? ["none", 0];
+  return {
+    ...input,
+    cause: ms > 0.05 ? cause : "none",
   };
 }
 

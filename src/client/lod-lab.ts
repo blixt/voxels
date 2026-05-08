@@ -17,6 +17,8 @@ interface LodLabSnapshot {
   drawCalls: number;
   triangles: number;
   timing: FrameTimingSnapshot;
+  timingStrip: string;
+  worstBucketSummary: string;
 }
 
 const canvas = document.querySelector<HTMLCanvasElement>('[data-role="viewport"]');
@@ -51,6 +53,7 @@ let fps = 0;
 let animationId = 0;
 let nextSweepFrame = 0;
 const frameTimings = new FrameTimingBuckets(125, 50, 96);
+const timingStripBucketCount = 48;
 
 void boot();
 
@@ -110,13 +113,18 @@ function tick(timestamp: number): void {
     position: matrices.eye,
   });
   const snapshot = buildSnapshot(stats.drawCalls, stats.triangles);
-  hudElement.textContent = `LOD Lab | ${snapshot.fps.toFixed(1)} fps | max ${timing.worstRecentFrameMs.toFixed(0)}ms | hitches ${timing.recentHitchCount} | dropped ${timing.recentDroppedFrameEstimate} | chunks ${snapshot.activeChunks} pending ${snapshot.pendingChunks} | gaps ${snapshot.gaps} overlaps ${snapshot.overlaps} | draws ${snapshot.drawCalls}`;
+  hudElement.textContent = [
+    `LOD Lab | ${snapshot.fps.toFixed(1)} fps | max ${timing.worstRecentFrameMs.toFixed(0)}ms | hitches ${timing.recentHitchCount} | dropped ${timing.recentDroppedFrameEstimate}`,
+    `8Hz buckets ${snapshot.timingStrip} | ${snapshot.worstBucketSummary}`,
+    `chunks ${snapshot.activeChunks} pending ${snapshot.pendingChunks} | gaps ${snapshot.gaps} overlaps ${snapshot.overlaps} | draws ${snapshot.drawCalls}`,
+  ].join("\n");
 
   animationId = requestAnimationFrame(tick);
 }
 
 function buildSnapshot(drawCalls: number, triangles: number): LodLabSnapshot {
   const report = world.reportCoverage(visibleRequest);
+  const timing = frameTimings.snapshot();
   return {
     frame,
     fps,
@@ -126,8 +134,49 @@ function buildSnapshot(drawCalls: number, triangles: number): LodLabSnapshot {
     overlaps: report.overlaps,
     drawCalls,
     triangles,
-    timing: frameTimings.snapshot(),
+    timing,
+    timingStrip: formatTimingStrip(timing),
+    worstBucketSummary: formatWorstBucketSummary(timing),
   };
+}
+
+function formatTimingStrip(timing: FrameTimingSnapshot): string {
+  const buckets = [...timing.recent, timing.current].slice(-timingStripBucketCount);
+  return buckets.map(formatTimingBucketGlyph).join("");
+}
+
+function formatTimingBucketGlyph(bucket: { maxFrameMs: number; hitchCount: number }): string {
+  if (bucket.hitchCount > 0 && bucket.maxFrameMs >= 250) {
+    return "!";
+  }
+  if (bucket.hitchCount > 0) {
+    return "#";
+  }
+  if (bucket.maxFrameMs >= 34) {
+    return "*";
+  }
+  if (bucket.maxFrameMs >= 20) {
+    return "+";
+  }
+  if (bucket.maxFrameMs > 0) {
+    return ".";
+  }
+  return " ";
+}
+
+function formatWorstBucketSummary(timing: FrameTimingSnapshot): string {
+  const buckets = [...timing.recent, timing.current];
+  let worstBucket = buckets[0];
+  for (const bucket of buckets) {
+    if (!worstBucket || bucket.maxFrameMs > worstBucket.maxFrameMs) {
+      worstBucket = bucket;
+    }
+  }
+  if (!worstBucket) {
+    return "worst bucket none";
+  }
+  const secondsAgo = Math.max(0, (timing.current.endMs - worstBucket.endMs) / 1000);
+  return `worst bucket ${worstBucket.maxFrameMs.toFixed(0)}ms ${secondsAgo.toFixed(1)}s ago (${worstBucket.hitchCount} hitch)`;
 }
 
 function handlePointerDown(): void {
