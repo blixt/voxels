@@ -43,6 +43,7 @@ test("discovery catalog gives old-road landmarks journal flavor and progression 
   const ashMarker = describeDiscovery("landmark", "ash_marker");
   const causeway = describeDiscovery("landmark", "old_road_causeway");
   const boneChimes = describeDiscovery("landmark", "bone_chimes");
+  const travelPack = describeDiscovery("landmark", "ashlander_travel_pack");
   const ziggurat = describeDiscovery("landmark", "velothi_ziggurat");
 
   expect(ashMarker.role).toBe("old-road");
@@ -54,5 +55,8 @@ test("discovery catalog gives old-road landmarks journal flavor and progression 
   expect(boneChimes.name).toBe("Bone Wind Chimes");
   expect(boneChimes.role).toBe("old-road");
   expect(boneChimes.flavorText).toContain("pale bones");
+  expect(travelPack.name).toBe("Ashlander Travel Pack");
+  expect(travelPack.role).toBe("old-road");
+  expect(travelPack.flavorText).toContain("bedroll");
   expect(ziggurat.roleLabel).toBe("Shrine");
 });

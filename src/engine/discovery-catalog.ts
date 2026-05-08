@@ -150,6 +150,7 @@ const LANDMARK_NAMES = {
   buried_ribs: "Half-Buried Ribs",
   pilgrim_lantern: "Pilgrim Lantern",
   bone_chimes: "Bone Wind Chimes",
+  ashlander_travel_pack: "Ashlander Travel Pack",
   crystal_reeds: "Crystal Reeds",
   fungal_bridge: "Fungal Bridge",
   rib_remains: "Rib Remains",
@@ -173,6 +174,7 @@ const LANDMARK_FLAVOR_TEXT: Partial<Record<LandmarkId, string>> & Partial<Record
   buried_ribs: "White ribs surface from the ash in low arcs, as if the road was built over a giant carcass.",
   pilgrim_lantern: "A hooded lantern keeps its watch over a road almost lost.",
   bone_chimes: "A wind rack of black posts and pale bones clatters over the pilgrim stones.",
+  ashlander_travel_pack: "A bedroll, frame pack, and ash-dark cooking pot wait beside the pilgrim road.",
   crystal_reeds: "Glass-bright reeds grow from brackish pools and hum in the silt wind.",
   fungal_bridge: "A shelf of old fungus spans the wet ground like a living footbridge.",
   rib_remains: "Low bones break the blackwater, more warning than shelter.",
@@ -193,6 +195,7 @@ const OLD_ROAD_LANDMARK_IDS = new Set<string>([
   "buried_ribs",
   "pilgrim_lantern",
   "bone_chimes",
+  "ashlander_travel_pack",
 ]);
 
 const SHRINE_LANDMARK_IDS = new Set<string>([

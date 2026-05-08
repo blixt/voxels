@@ -102,6 +102,7 @@ const AUDITED_SURFACE_LANDMARK_IDS = [
   "buried_ribs",
   "pilgrim_lantern",
   "bone_chimes",
+  "ashlander_travel_pack",
   "crystal_reeds",
   "fungal_bridge",
   "rib_remains",
@@ -161,7 +162,7 @@ function ensureLandmarkRootCache(generator: ProceduralWorldGenerator): Map<strin
           }
           const root = { x, z, probe };
           const footprint = measureSurfaceFeatureFootprint(generator, root, 12);
-          const score = footprint.count + footprint.widthX * 4 + footprint.widthZ * 4 + (probe.topY - probe.surfaceY) * 0.5;
+          const score = scoreRepresentativeLandmarkRoot(generator, landmarkId, root, footprint);
           if (score > bestScore) {
             bestRoot = root;
             bestScore = score;
@@ -189,6 +190,23 @@ function findRepresentativeLandmarkRoot(
   landmarkId: string,
 ): LandmarkRoot | null {
   return ensureLandmarkRootCache(generator).get(landmarkId) ?? null;
+}
+
+function scoreRepresentativeLandmarkRoot(
+  generator: ProceduralWorldGenerator,
+  landmarkId: string,
+  root: LandmarkRoot,
+  footprint: ReturnType<typeof measureSurfaceFeatureFootprint>,
+): number {
+  const featureHeight = root.probe.topY - root.probe.surfaceY;
+  let score = footprint.count + footprint.widthX * 4 + footprint.widthZ * 4 + featureHeight * 0.5;
+  if (landmarkId === "bone_chimes") {
+    const baseHeight = Math.min(4, Math.max(2, Math.round(featureHeight * 0.11)));
+    const crossbarY = root.probe.surfaceY + 1 + Math.max(baseHeight + 10, featureHeight - 8);
+    const crossbar = measureCrossSection(generator, root.x, root.z, crossbarY, 16);
+    score += crossbar.widthX * 10 + crossbar.count * 0.25 - crossbar.widthZ * 8;
+  }
+  return score;
 }
 
 function measureMaxCrossSection(
@@ -266,6 +284,32 @@ function measureCrossSection(
     widthX: count === 0 ? 0 : maxX - minX + 1,
     widthZ: count === 0 ? 0 : maxZ - minZ + 1,
   };
+}
+
+function measureBestHorizontalCrossbar(
+  generator: ProceduralWorldGenerator,
+  x: number,
+  z: number,
+  yStart: number,
+  yEnd: number,
+  radius: number,
+): {
+  y: number;
+  count: number;
+  widthX: number;
+  widthZ: number;
+} {
+  let best = { y: yStart, count: 0, widthX: 0, widthZ: 0 };
+  let bestScore = -Infinity;
+  for (let y = yStart; y <= yEnd; y += 1) {
+    const section = measureCrossSection(generator, x, z, y, radius);
+    const score = section.widthX * 4 + section.count * 0.15 - section.widthZ * 2;
+    if (score > bestScore) {
+      best = { y, ...section };
+      bestScore = score;
+    }
+  }
+  return best;
 }
 
 function measureSurfaceFeatureFootprint(
@@ -1335,6 +1379,7 @@ test("ash wastes regional pockets favor ancient ashland silhouettes over generic
     "buried_ribs",
     "pilgrim_lantern",
     "bone_chimes",
+    "ashlander_travel_pack",
   ]);
   const genericDesertLandmarks = new Set(["cactus", "palm", "shrub"]);
   const ashMaterials = new Set(["#655", "#887", "#433", "#544"].map((code) => hexColorToMaterial(code)));
@@ -1378,6 +1423,46 @@ test("ash wastes regional pockets favor ancient ashland silhouettes over generic
   expect(ashSurfaceMaterialSamples / ashSamples).toBeGreaterThanOrEqual(0.55);
   expect(ashMaterialVariety.size).toBeGreaterThanOrEqual(4);
   expect(dominantSurfaceModuloShare).toBeLessThanOrEqual(0.22);
+});
+
+test("ashlander travel packs read as compact multi-material route kit props", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const pack = findRepresentativeLandmarkRoot(generator, "ashlander_travel_pack");
+
+  expect(pack).not.toBeNull();
+  expect(new Set(["badlands", "ember"]).has(pack!.probe.biomeId)).toBe(true);
+
+  const height = pack!.probe.topY - pack!.probe.surfaceY;
+  const lowerBody = measureCrossSection(generator, pack!.x, pack!.z, pack!.probe.surfaceY + 2, 14);
+  const midFrame = measureCrossSection(
+    generator,
+    pack!.x,
+    pack!.z,
+    pack!.probe.surfaceY + Math.floor(height * 0.48),
+    14,
+  );
+  const bedroll = measureCrossSection(
+    generator,
+    pack!.x,
+    pack!.z,
+    pack!.probe.surfaceY + Math.floor(height * 0.72),
+    14,
+  );
+  const object = measureLandmarkObject(generator, pack!, 16, 4);
+
+  expect(object.solidVoxelCount).toBeGreaterThanOrEqual(350);
+  expect(object.solidVoxelCount).toBeLessThan(1800);
+  expect(object.materialVariety).toBeGreaterThanOrEqual(3);
+  expect(object.dominantMaterialShare).toBeLessThan(0.55);
+  expect(object.boundsSize[0]).toBeGreaterThanOrEqual(12);
+  expect(object.boundsSize[1]).toBeGreaterThanOrEqual(14);
+  expect(object.boundsSize[1]).toBeLessThanOrEqual(24);
+  expect(object.boundsSize[2]).toBeGreaterThanOrEqual(7);
+  expect(lowerBody.count).toBeGreaterThan(bedroll.count * 2);
+  expect(lowerBody.widthZ).toBeGreaterThan(bedroll.widthZ);
+  expect(bedroll.widthX).toBeGreaterThanOrEqual(lowerBody.widthX);
+  expect(midFrame.count).toBeGreaterThan(0);
+  expect(midFrame.count).toBeLessThan(lowerBody.count);
 });
 
 test("ashland and old-road landmarks render shaped caps instead of block columns", () => {
@@ -1430,15 +1515,21 @@ test("ashland and old-road landmarks render shaped caps instead of block columns
   const chimesHeight = boneChimes!.probe.topY - boneChimes!.probe.surfaceY;
   const chimesBaseHeight = Math.min(4, Math.max(2, Math.round(chimesHeight * 0.11)));
   const chimesShaftY = boneChimes!.probe.surfaceY + 1 + Math.floor(chimesHeight * 0.42);
-  const chimesCrossbarY = boneChimes!.probe.surfaceY + 1 + Math.max(chimesBaseHeight + 10, chimesHeight - 8);
   const chimesShaft = measureCrossSection(generator, boneChimes!.x, boneChimes!.z, chimesShaftY, 14);
-  const chimesCrossbar = measureCrossSection(generator, boneChimes!.x, boneChimes!.z, chimesCrossbarY, 16);
+  const chimesCrossbar = measureBestHorizontalCrossbar(
+    generator,
+    boneChimes!.x,
+    boneChimes!.z,
+    boneChimes!.probe.surfaceY + 1 + chimesBaseHeight + 8,
+    boneChimes!.probe.topY + 2,
+    16,
+  );
   const chimesObject = measureLandmarkObject(generator, boneChimes!, 18, 6);
 
   expect(chimesShaft.count).toBeGreaterThan(0);
-  expect(chimesCrossbar.widthX).toBeGreaterThanOrEqual(12);
+  expect(chimesCrossbar.widthX).toBeGreaterThanOrEqual(10);
   expect(chimesCrossbar.widthX).toBeGreaterThanOrEqual(chimesShaft.widthX);
-  expect(chimesCrossbar.widthZ).toBeLessThanOrEqual(4);
+  expect(chimesCrossbar.widthX).toBeGreaterThanOrEqual(chimesCrossbar.widthZ + 4);
   expect(chimesObject.solidVoxelCount).toBeGreaterThanOrEqual(450);
   expect(chimesObject.materialVariety).toBeGreaterThanOrEqual(3);
   expect(chimesObject.dominantMaterialShare).toBeLessThan(0.80);

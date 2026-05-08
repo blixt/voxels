@@ -96,6 +96,7 @@ export type LandmarkId =
   | "buried_ribs"
   | "pilgrim_lantern"
   | "bone_chimes"
+  | "ashlander_travel_pack"
   | "crystal_reeds"
   | "fungal_bridge"
   | "rib_remains";
@@ -446,6 +447,7 @@ const FEATURE_RIB_ARCH = 18;
 const FEATURE_CAUSEWAY = 19;
 const FEATURE_ROAD_DEBRIS = 20;
 const FEATURE_BURIED_RIBS = 21;
+const FEATURE_TRAVEL_PACK = 22;
 const CHUNK_GENERATION_SCRATCH_POOL_LIMIT = 4;
 
 interface PilgrimRouteBand {
@@ -589,6 +591,7 @@ const LANDMARKS: Record<LandmarkId, LandmarkProfile> = {
   buried_ribs: createLandmark("buried_ribs", 144, 12, 0.24, 1.0, 3),
   pilgrim_lantern: createLandmark("pilgrim_lantern", 124, 5, 0.28, 1.0, 4),
   bone_chimes: createLandmark("bone_chimes", 156, 7, 0.24, 1.0, 5),
+  ashlander_travel_pack: createLandmark("ashlander_travel_pack", 132, 7, 0.14, 1.0, 1),
   crystal_reeds: createLandmark("crystal_reeds", 112, 5, 0.34, 1.0, 2),
   fungal_bridge: createLandmark("fungal_bridge", 156, 16, 0.26, 1.0, 1),
   rib_remains: createLandmark("rib_remains", 152, 10, 0.24, 1.0, 1),
@@ -715,6 +718,7 @@ const SPECIAL_BIOME_LANDMARKS: Record<SpecialBiomeId, readonly LandmarkProfile[]
     landmarkPlacement("ash_marker", { chance: 0.22, scale: 1.20, cellSize: 152, radius: 5 }),
     landmarkPlacement("kwama_mound", { chance: 0.14, scale: 1.12, cellSize: 164, radius: 6 }),
     landmarkPlacement("pilgrim_cairn", { chance: 0.12, scale: 1.10, cellSize: 168, radius: 5 }),
+    landmarkPlacement("ashlander_travel_pack", { chance: 0.16, scale: 1.04, cellSize: 148, radius: 7 }),
     landmarkPlacement("crystal_cluster", { chance: 0.28, scale: 1.12, variant: 3 }),
     landmarkPlacement("dead_snag", { chance: 0.26, scale: 1.16, variant: 1 }),
     landmarkPlacement("boulder", { chance: 0.24, scale: 0.94, variant: 1 }),
@@ -851,6 +855,7 @@ const BADLANDS_DESOLATE_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("dead_tree", { chance: 0.34, scale: 1.28, cellSize: 148, radius: 8 }),
   landmarkPlacement("hoodoo", { chance: 0.28, scale: 1.18 }),
   landmarkPlacement("standing_stone", { chance: 0.22, scale: 1.20 }),
+  landmarkPlacement("ashlander_travel_pack", { chance: 0.12, scale: 1.04, cellSize: 148, radius: 7 }),
   landmarkPlacement("boulder", { chance: 0.20, scale: 0.98, variant: 1 }),
 ];
 
@@ -863,6 +868,7 @@ const BADLANDS_CRATER_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("buried_ribs", { chance: 0.18, scale: 1.10, cellSize: 156, radius: 12 }),
   landmarkPlacement("hoodoo", { chance: 0.34, scale: 1.24 }),
   landmarkPlacement("ash_marker", { chance: 0.26, scale: 1.22, cellSize: 148, radius: 5 }),
+  landmarkPlacement("ashlander_travel_pack", { chance: 0.12, scale: 1.08, cellSize: 148, radius: 7 }),
   landmarkPlacement("standing_stone", { chance: 0.26, scale: 1.22 }),
   landmarkPlacement("dead_tree", { chance: 0.30, scale: 1.18, cellSize: 156, radius: 8 }),
   landmarkPlacement("boulder", { chance: 0.20, scale: 1.04, variant: 1 }),
@@ -1088,6 +1094,7 @@ const EMBER_DEADLAND_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("basalt_spire", { chance: 0.28, scale: 1.30 }),
   landmarkPlacement("ash_marker", { chance: 0.24, scale: 1.22, cellSize: 144, radius: 5 }),
   landmarkPlacement("kwama_mound", { chance: 0.16, scale: 1.12, cellSize: 156, radius: 6 }),
+  landmarkPlacement("ashlander_travel_pack", { chance: 0.10, scale: 1.04, cellSize: 152, radius: 7 }),
   landmarkPlacement("crystal_cluster", { chance: 0.26, scale: 1.12, variant: 3 }),
   landmarkPlacement("boulder", { chance: 0.18, scale: 0.96, variant: 1 }),
 ];
@@ -1099,6 +1106,7 @@ const EMBER_CALDERA_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("basalt_spire", { chance: 0.38, scale: 1.34 }),
   landmarkPlacement("ash_marker", { chance: 0.34, scale: 1.28, cellSize: 132, radius: 5 }),
   landmarkPlacement("pilgrim_cairn", { chance: 0.18, scale: 1.14, cellSize: 152, radius: 5 }),
+  landmarkPlacement("ashlander_travel_pack", { chance: 0.18, scale: 1.08, cellSize: 144, radius: 7 }),
   landmarkPlacement("crystal_cluster", { chance: 0.34, scale: 1.16, variant: 3 }),
   landmarkPlacement("dead_tree", { chance: 0.24, scale: 1.18, cellSize: 164, radius: 8 }),
   landmarkPlacement("boulder", { chance: 0.18, scale: 1.00, variant: 1 }),
@@ -4282,6 +4290,21 @@ function configureLandmarkFeature(
       );
       out.featureExtra = 5;
       return true;
+    case "ashlander_travel_pack":
+      if (submergedSurface) {
+        return false;
+      }
+      configureSpireFeature(
+        out,
+        FEATURE_TRAVEL_PACK,
+        scaledFeatureHeight(12, 8, fields.desolation + fields.surfacePatch * 0.35, profile.scale),
+        scaledFeatureRadius(6, 2, fields.scatter + fields.desolation * 0.22, profile.scale),
+        "#764",
+        "#BA8",
+        "#322",
+      );
+      out.featureExtra = profile.variant;
+      return true;
     case "paver_debris":
       if (submergedSurface) {
         return false;
@@ -5210,6 +5233,66 @@ function sampleFeatureMaterial(
         return materialAccent;
       }
       return relativeY === top || paverJoint ? materialSecondary : materialPrimary;
+    }
+    case FEATURE_TRAVEL_PACK: {
+      const bodyHeight = Math.max(4, Math.round(featureHeight * 0.46));
+      const bedrollY = Math.max(bodyHeight + 2, Math.round(featureHeight * 0.66));
+      const frameTopY = Math.max(bedrollY + 2, featureHeight - 1);
+      const bodyProgress = relativeY / Math.max(1, bodyHeight);
+      const bodyHalfX = Math.max(2.6, featureRadius * (0.98 - bodyProgress * 0.24));
+      const bodyHalfZ = Math.max(1.9, featureRadius * (0.58 - bodyProgress * 0.18));
+      const bodyOval = Math.hypot(featureDeltaX / bodyHalfX, (featureDeltaZ + featureRadius * 0.05) / bodyHalfZ);
+
+      if (relativeY <= bodyHeight && bodyOval <= 1) {
+        const bottomMat = relativeY <= 1 || bodyOval > 0.76;
+        const strap = materialAccent !== 0
+          && (
+            Math.abs(featureDeltaX) <= 0.55
+            || Math.abs(featureDeltaX - featureRadius * 0.42) <= 0.48
+            || (Math.abs(featureDeltaZ) <= 0.48 && relativeY >= 2)
+          );
+        return strap ? materialAccent : bottomMat ? materialPrimary : materialSecondary;
+      }
+
+      const frameOffsetX = Math.max(3.2, featureRadius * 0.66);
+      const frameZ = Math.max(1.4, featureRadius * 0.36);
+      const leftFrame = Math.abs(featureDeltaX + frameOffsetX) <= 0.58
+        && Math.abs(featureDeltaZ - frameZ) <= 0.58
+        && relativeY <= frameTopY;
+      const rightFrame = Math.abs(featureDeltaX - frameOffsetX) <= 0.58
+        && Math.abs(featureDeltaZ - frameZ) <= 0.58
+        && relativeY <= frameTopY;
+      const topFrame = Math.abs(relativeY - frameTopY) <= 0
+        && absX <= frameOffsetX + 0.8
+        && Math.abs(featureDeltaZ - frameZ) <= 0.58;
+      if (leftFrame || rightFrame || topFrame) {
+        return materialAccent || materialPrimary;
+      }
+
+      const bedrollTube = absX <= featureRadius + 1.2
+        && Math.hypot((featureDeltaZ + featureRadius * 0.18) / 1.75, (relativeY - bedrollY) / 2.15) <= 1;
+      if (bedrollTube) {
+        const rolledEnd = absX > featureRadius - 0.8;
+        const lash = materialAccent !== 0
+          && (Math.abs(featureDeltaX) <= 0.48 || Math.abs(absX - featureRadius * 0.52) <= 0.48);
+        return lash ? materialAccent : rolledEnd ? materialPrimary : materialSecondary;
+      }
+
+      const potX = featureRadius * 0.78;
+      const potY = Math.max(3, Math.round(bodyHeight * 0.64));
+      const sidePot = Math.hypot((featureDeltaX - potX) / 1.45, (featureDeltaZ + 1.2) / 1.15) <= 1
+        && Math.abs(relativeY - potY) <= 2;
+      if (sidePot) {
+        const rim = Math.abs(relativeY - potY) === 2 || Math.abs(featureDeltaX - potX) > 1.05;
+        return rim ? materialAccent || materialPrimary : materialSecondary;
+      }
+
+      const bedrollCord = materialAccent !== 0
+        && relativeY > bodyHeight
+        && relativeY < bedrollY
+        && absZ <= 0.55
+        && (Math.abs(featureDeltaX + featureRadius * 0.36) <= 0.48 || Math.abs(featureDeltaX - featureRadius * 0.28) <= 0.48);
+      return bedrollCord ? materialAccent : 0;
     }
     case FEATURE_BURIED_RIBS: {
       const lowHeight = Math.max(4, Math.min(featureHeight, 14));

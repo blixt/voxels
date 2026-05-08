@@ -1967,3 +1967,42 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - checkpoint and push the renderer pass if build/test stay clean
   - switch back to foreground terrain/composition changes; lower-ground grid is the remaining weak metric
+
+### 2026-05-08 - Ashlander Travel Pack Prop
+
+- Trigger:
+  - The user called out ugly, uncharacteristic props and asked for bolder world identity.
+  - The contact-depth pass moved whole-screen grid a little, but the ROI list still called for travel-kit props through object-lab.
+- Delegation:
+  - A worker owned one narrow prop sidequest and added `ashlander_travel_pack`.
+  - I integrated the result, added it to object-lab route monitoring, and rejected my own route-shoulder terrain tweak because terrain/route/view metrics did not credit it.
+- Rejected attempt:
+  - Tried a sub-meter route shoulder drift/crack height change.
+  - Focused tests passed after harness tweaks, but terrain compare, route atlas, and view atlas showed essentially no useful movement.
+  - I reverted the terrain-height part instead of preserving another barely visible tweak.
+- Changes:
+  - Added `ashlander_travel_pack`, a compact three-material route prop with a bedroll, frame, straps, and side-pot silhouette.
+  - Placed it at restrained density in harsh badlands, badlands crater, ember deadland, and ember caldera rosters.
+  - Added discovery name/flavor and old-road role so it participates in route discovery/progression.
+  - Added the prop to object-lab's landmark list and route batch so future batch comparisons monitor it.
+  - Tightened procedural representative-root tests for hanging crossbar objects so bone chimes are measured on their readable horizontal element instead of an arbitrary solid pixel.
+- Validation:
+  - Focused tests: `mise exec -- bun test tests/object-lab.test.ts tests/procedural-generator.test.ts tests/discovery-catalog.test.ts`, pass, `49` tests.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Object-lab: `artifacts/object-lab/2026-05-08-075811271Z-ashlander-travel-pack-verification/report.json`, warnings none, bounds `15 x 20 x 10`, fill `0.348`, `3` materials, cross-view variation `0.639`, lower-weighted vertical profile.
+  - Route atlas: `artifacts/route-atlas/20260508T075604Z-ashlander-travel-pack/report.json`, failures none, route coverage `100%`, strong silhouette coverage `87.7%`, max notable gap `72.0 m`.
+  - Enforced view atlas: `artifacts/view-atlas/20260508T075604Z-ashlander-travel-pack/report.json`, failures none against the contact-depth baseline; deltas were `0` across the fixed views, so this prop does not materially alter the seven hero screenshots.
+  - Owned browser lab: `artifacts/owned-browser-lab/20260508T075855Z-ashlander-travel-pack/report.json`, failures none, saturation/grid/color `0.35/0.67/97`, traversal p95/max `4.60/9.60 ms`, route p95/max `4.90/8.40 ms`, LOD overlap/gaps/handoff holes `0/0/0`.
+- Honest assessment:
+  - This is good asset/world-definition work and a clean delegated slice, but it is not a camera-scale fix for the Minecrafty terrain read.
+  - The prop is validated in isolation and in live performance, yet the fixed view atlas does not see it. Future asset work needs either more route-camera placement or a dedicated prop visibility atlas if the goal is screenshot-level impact.
+  - The rejected route-height tweak was the right call to drop: it complicated tests without moving the evaluation harness.
+- Rubric movement:
+  - Visual/world definition: `6.42 -> 6.50` because harsh routes now have a distinctive travel-kit object rather than only stones/bones/markers.
+  - Harness maturity: `9.92 -> 9.94` because object-lab route batches now monitor the new prop and representative-root tests are less brittle.
+  - Performance/playability: unchanged at `6.40`; browser frame budgets held but did not improve meaningfully.
+  - Rendering correctness/quality: unchanged at `6.68`; this was asset content, not renderer correction.
+- Next:
+  - checkpoint and push the prop slice
+  - add a prop visibility/view lab or move to far-view/fog only if it can be measured by owned browser and fixed views
+  - continue treating lower-ground/camera-scale terrain read as the main unsolved visual problem

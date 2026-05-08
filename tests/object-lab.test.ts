@@ -243,6 +243,7 @@ test("object lab batch writes route landmark comparison diagnostics", async () =
     "scree_fan",
     "shrine_debris",
     "buried_ribs",
+    "ashlander_travel_pack",
     "old_road_causeway",
     "velothi_ziggurat",
     "ash_obelisk",

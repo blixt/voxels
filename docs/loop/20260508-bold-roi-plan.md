@@ -373,3 +373,22 @@ The next work should not keep darkening. The renderer now has a small depth cue;
 | 3 | Ashland travel-kit pack delegated through improved object-lab: masks, travel packs, water collectors | 4 | 4 | 3 | 5.3 | Cross-view/vertical diagnostics now make isolated prop work less subjective | object-lab contact sheets, route atlas, browser draw budget |
 | 4 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Skill hooks exist; player-facing journal can now explain them without clutter | UI tests, browser HUD smoke |
 | 5 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Useful cost cleanup, but not what the current view metrics identify | object-lab target `<18000`, route coverage |
+
+## Re-Rank After Ashlander Travel Pack
+
+Completed since the contact-depth checkpoint:
+
+- Added a warning-free `ashlander_travel_pack` prop with object-lab validation and restrained harsh-biome placement.
+- Rejected a route-shoulder height tweak because terrain, route, and view metrics did not move enough to justify the complexity.
+- View atlas stayed unchanged across the seven fixed views, which is useful evidence: isolated prop quality does not automatically become screenshot-level world identity.
+- Browser performance and LOD correctness held cleanly.
+
+The asset pipeline is working, but the next visible-progress bottleneck is measurement and camera-scale composition. Either make prop visibility measurable in route cameras, or move to a far-view/fog scale experiment with strict LOD gates.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Prop visibility atlas: fixed close route cameras for travel-kit/debris/shrine props, with object-lab links | 4 | 5 | 2 | 10.0 | Current fixed view atlas misses small props, so prop work lacks camera-scale feedback | new/extended atlas report, object-lab artifacts, browser frame budget |
+| 2 | Foreground terrain shape breakup, third attempt only with a stronger camera-visible design | 5 | 3 | 4 | 3.8 | Lower-ground grid remains weak, but small height tweaks failed to move metrics | terrain lab compare, enforced view-atlas lower-ground grid, route continuity |
+| 3 | Far-view/fog cushion experiment with strict LOD ownership gate | 4 | 4 | 3 | 5.3 | LOD correctness and frame time are healthy; user wants farther views | owned-browser LOD overlap/gap/fps, view-atlas horizon grid |
+| 4 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Skill hooks exist and could make discoveries feel less like raw IDs | UI tests, browser HUD smoke |
+| 5 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Useful cost cleanup, but not the main visual blocker | object-lab target `<18000`, route coverage |
