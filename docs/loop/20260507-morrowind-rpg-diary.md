@@ -1468,3 +1468,39 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - commit and push this performance checkpoint
   - proceed to terrain/composition grid-breaker work with the new movement budgets in place
+
+### 2026-05-08 - Terrain Grid-Breaker And Route Stretch Density
+
+- Trigger:
+  - User called out that the world still read as Minecrafty, with ugly props and weak characteristic identity despite recent landmark work.
+  - The ROI plan and browser artifacts agreed that visual grid dominance was still the main visible blocker after movement performance improved.
+- Delegation:
+  - Route-density worker added a 300 m route-stretch scan to `scripts/route-atlas.ts`. The first run failed honestly with `3` tokenless windows on `ash-glass-traverse` (`1900-2200 m`, `1950-2250 m`, `2000-2300 m`), proving the new gate was useful.
+  - Object worker improved `pilgrim_lantern` in isolation using object-lab: the integrated report has `728` solid object voxels, `3` materials, and no warnings.
+- Changes:
+  - Exposed extra deterministic surface fields through `sampleBiomeProbe` so route and ambiance harnesses can reason about terrain identity without resampling private generator state.
+  - Added diagonal surface-crust material blending for top surfaces. This creates non-axis fracture bands in material transitions while keeping the same voxel mesh topology.
+  - Added a small, gated terrain crust-breakup height term driven by strata, patch, scatter, desolation, and terrace host. This is intentionally modest to avoid breaking route physics and LOD handoff.
+  - Strengthened ash-waste surface/subsurface mixing and transition thresholds so ashland crust reads less like a single flat slab.
+  - Added route stretch terrain tokens (`wind-cut-steppe`, `salt-crust`, `ash-crust`) so the atlas can distinguish long visually meaningful terrain stretches from truly empty route stretches.
+  - Integrated the delegated `pilgrim_lantern` shape: ash plinth, banded post, crossbar, hanging amber cage, and rear counterweight. Added object-lab and procedural shape checks for it.
+- Validation so far:
+  - `mise exec -- bun run typecheck`: pass.
+  - Route atlas: `artifacts/route-atlas/20260508T030031Z-terrain-gridbreaker-final-atlas/report.json`, failures none, route stretch coverage `100.0%` (`221/221` tokenized, `0` tokenless), max notable gap `360.0 m`, definition score `5.00 / 5`.
+  - Object lab: `artifacts/object-lab/2026-05-08-025942266Z-pilgrim-lantern-integrated/report.json`, `728` solid voxels, `3` materials.
+  - Focused tests: `mise exec -- bun test tests/procedural-generator.test.ts tests/object-lab.test.ts tests/ambient-environment.test.ts`, pass, `45` tests.
+  - Final owned browser lab: `artifacts/owned-browser-lab/20260508T031451Z-terrain-gridbreaker-browser-prod/report.json`, failures none.
+  - Browser result: traversal p95/max `5.00/9.50 ms`, route p95/max `4.60/9.10 ms`, draw/triangles `551/387372`, `LOD overlap LOD0/bands 0/0`, water overlap `0`, gaps `0`, handoff holes `0`, render-ready near samples `961/961`, HUD smoke passed.
+  - Browser visual identity: saturation/grid/color `0.38/0.68/92`.
+- Honest assessment:
+  - The route-density harness improved materially: it caught real empty route windows, and the final atlas is now clean without over-broadening rare regional variants.
+  - The terrain breakup is conservative and safe, but it did not move the screenshot grid metric: grid dominance stayed `0.68`. The next pass needs stronger composition-level changes rather than more micro breakup.
+  - The first attempt to fix route density by making `steppe_monolith` more common was rejected because it made a rare regional variant cover about `6.1%` of scanned samples and broke a fixed pilgrim-lantern route. The accepted solution keeps rarity intact and measures terrain tokens directly.
+- Rubric movement:
+  - Harness maturity: `8.05 -> 8.30` because route stretches now have a hard density gate and expose empty 300 m windows.
+  - Visual/world definition: `4.80 -> 4.95` because route identity and ashland props improved, but the screen-level grid metric did not.
+  - Rendering correctness: `5.95 -> 6.05` because browser LOD/water/handoff checks stayed clean after terrain/material changes.
+  - Performance/playability: `5.90 -> 6.00` because browser route/traversal max frames stayed under `10 ms` and live-forward max was `9.50 ms`.
+- Next:
+  - commit and push only if browser correctness and performance hold
+  - next high-ROI candidate is a bolder composition density director; the browser screenshot metric says micro terrain breakup is not enough

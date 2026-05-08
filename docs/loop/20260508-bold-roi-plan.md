@@ -132,3 +132,23 @@ The performance foundation is much safer for the next visual push. The strongest
 | 3 | Ashland travel-kit props delegated through object-lab | 4 | 4 | 3 | 5.3 | Object-lab root selection is now good enough for parallel asset work | object-lab contact sheets and warnings |
 | 4 | Stronger sky/weather iteration | 4 | 3 | 3 | 4.0 | Useful mood multiplier, but not the main blocker while grid dominance is unchanged | owned-browser luma/color/grid and route frame budget |
 | 5 | Far-view distance increase | 4 | 3 | 4 | 3.0 | Performance now supports experimentation, but far content/composition should improve first | owned-browser LOD/fps/gap gates |
+
+## Re-Rank During Terrain Grid-Breaker Checkpoint
+
+Completed or in progress since the movement budget checkpoint:
+
+- Route-atlas now enforces 300 m route-stretch coverage and reports tokenless windows.
+- The new gate initially failed with `3` tokenless `ash-glass-traverse` windows, then passed after adding terrain-route tokens for wind-cut steppe, salt crust, and ash crust.
+- Terrain now has diagonal top-surface fracture blending and small eroded crust height breakup.
+- `pilgrim_lantern` was delegated through object-lab and now has a three-material hanging-cage silhouette.
+
+The browser visual metric did not move: the final browser lab still reports grid dominance `0.68` with failures none. Stop adding micro surface noise and switch to composition-scale changes.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Composition density director: guarantee foreground/midground silhouettes near route views, not just sampled route tokens | 5 | 4 | 3 | 6.7 | Route stretch coverage is now measured; the next visible issue is whether the camera actually sees strong forms | route-atlas vista gaps, owned-browser screenshot grid/edge metric, draw budget |
+| 2 | Stronger terrain breakup, third attempt, only if browser grid improves this pass | 4 | 3 | 4 | 3.0 | Continue only if the browser proves surface breakup moves the metric | owned-browser grid dominance and route physics |
+| 3 | Stronger sky/weather: ash streak motion, lightning shelf, horizon glow | 4 | 4 | 3 | 5.3 | Whole-screen ambiance can reduce block focus with low geometry cost | owned-browser luma/color/grid and frame budget |
+| 4 | Ashland travel-kit pack: masks, bone chimes, travel packs, water collector | 4 | 4 | 3 | 5.3 | Object-lab workflow is working for delegated prop upgrades | object-lab warnings/materials/contact sheets |
+| 5 | Far-view distance experiment with fixed route/vista screenshots | 4 | 3 | 4 | 3.0 | Worth trying only after visible far content density is stronger | LOD overlap/gap/fps gates |
+| 6 | Discovery gameplay pass around route tokens and shrine blessings | 4 | 4 | 3 | 5.3 | The route atlas now has meaningful terrain and silhouette events that can feed RPG progression | unit tests, browser objective probe |

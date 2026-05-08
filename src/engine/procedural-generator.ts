@@ -296,6 +296,14 @@ export interface ProceduralBiomeProbe extends ProceduralColumnSample {
     globalHeight: number;
     mountainness: number;
     oceanness: number;
+    ridge: number;
+    mesa: number;
+    desolation: number;
+    strata: number;
+    surfacePatch: number;
+    surfaceGrain: number;
+    scatter: number;
+    peakness: number;
   };
 }
 
@@ -1212,6 +1220,14 @@ export class ProceduralWorldGenerator {
         globalHeight: state.globalHeight,
         mountainness: state.mountainness,
         oceanness: state.oceanness,
+        ridge: this.lastFillSurfaceFields.ridge,
+        mesa: this.lastFillSurfaceFields.mesa,
+        desolation: this.lastFillSurfaceFields.desolation,
+        strata: this.lastFillSurfaceFields.strata,
+        surfacePatch: this.lastFillSurfaceFields.surfacePatch,
+        surfaceGrain: this.lastFillSurfaceFields.surfaceGrain,
+        scatter: this.lastFillSurfaceFields.scatter,
+        peakness: this.lastFillSurfaceFields.peakness,
       },
     };
   }
@@ -1767,7 +1783,8 @@ export class ProceduralWorldGenerator {
     const microRelief = Math.round(
       (fields.surfaceGrain - 0.5) * terrainProfile.microRelief * (0.35 + biomeCore * 0.65),
     );
-    return Math.floor(clamp(terracedHeight + microRelief, 8, this.maxYExclusive - 2));
+    const crustBreakup = sampleTerrainCrustBreakup(fields, terrainProfile, biomeCore);
+    return Math.floor(clamp(terracedHeight + microRelief + crustBreakup, 8, this.maxYExclusive - 2));
   }
 
   private resolveSurfaceMaterials(
@@ -2168,7 +2185,7 @@ export class ProceduralWorldGenerator {
       ) {
         return 0;
       }
-      return resolveTransitionMaterial(
+      return resolveSurfaceTransitionMaterial(
         context.surfaceMaterialPrimary,
         context.surfaceMaterialSecondary,
         context.transitionThreshold,
@@ -3280,6 +3297,34 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
 
 const reusableRegionalVariant: RegionalVariantSelection = { id: "verdant_karst", strength: 0 };
 
+function sampleTerrainCrustBreakup(
+  fields: SurfaceFieldSample,
+  terrainProfile: { terraceScale: number; microRelief: number },
+  biomeCore: number,
+): number {
+  const terraceHost = smoothstep(0.18, 0.70, terrainProfile.terraceScale);
+  const harshSurface = avg4(
+    smoothstep(0.46, 0.82, fields.surfacePatch),
+    smoothstep(0.44, 0.82, fields.scatter),
+    smoothstep(0.44, 0.84, fields.strata),
+    smoothstep(0.40, 0.82, fields.desolation + fields.mesa * 0.20),
+  );
+  const diagonalLift = (
+    (fields.strata - 0.5) * 2.0
+    + (fields.surfacePatch - 0.5) * 1.2
+    - (fields.scatter - 0.5) * 0.9
+  );
+  const erodedLip = (
+    smoothstep(0.56, 0.86, fields.surfacePatch + fields.mesa * 0.18)
+    - smoothstep(0.52, 0.84, fields.channel + fields.basin * 0.14)
+  );
+  const amplitude = (1.2 + terrainProfile.microRelief * 0.18)
+    * (0.22 + biomeCore * 0.48)
+    * (0.45 + terraceHost * 0.55)
+    * (0.50 + harshSurface * 0.50);
+  return Math.round((diagonalLift * 0.62 + erodedLip * 0.72) * amplitude);
+}
+
 function adjustSpecialBiomeSurfaceY(
   seaLevel: number,
   biomeId: BiomeId,
@@ -3325,7 +3370,8 @@ function sampleRegionalVariantSurfaceDelta(
     case "savanna_flowersea":
       return Math.round((fields.hills - 0.2) * (8 + strength * 10) * weight);
     case "steppe_monolith":
-      return Math.round(lerp(4, 14, strength) * (0.5 + fields.ridge * 0.5) * weight);
+      return Math.round(lerp(4, 16, strength) * (0.46 + fields.ridge * 0.42 + fields.surfacePatch * 0.12) * weight)
+        + Math.round(((fields.strata - 0.5) * 5 + (fields.scatter - 0.5) * 3) * weight);
     case "dunes_glass":
       return Math.round((fields.dune - 0.52) * (12 + strength * 18) * weight);
     case "badlands_crater":
@@ -3333,7 +3379,7 @@ function sampleRegionalVariantSurfaceDelta(
     case "ash_wastes":
       return Math.round((fields.mesa - 0.58) * (6 + strength * 10) * weight)
         - Math.round(lerp(2, 7, strength) * (0.45 + Math.max(0, fields.desolation - 0.5)) * weight)
-        + Math.round(((fields.strata - 0.5) * 8 + (fields.surfaceGrain - 0.5) * 4) * weight);
+        + Math.round(((fields.strata - 0.5) * 12 + (fields.surfaceGrain - 0.5) * 6 + (fields.scatter - 0.5) * 5) * weight);
     case "highland_redleaf":
       return Math.round(lerp(4, 12, strength) * (0.55 + fields.hills * 0.15 + 0.30) * weight);
     case "moor_shadowglass":
@@ -3407,6 +3453,7 @@ function applyRegionalVariantMaterialOverrides(
       materials.surfaceSecondary = hexColorToMaterial("#887");
       materials.subsurfacePrimary = hexColorToMaterial("#433");
       materials.subsurfaceSecondary = hexColorToMaterial("#544");
+      materials.transitionThreshold = Math.min(materials.transitionThreshold, 0.66);
       break;
     case "highland_redleaf":
       materials.surfacePrimary = hexColorToMaterial("#A86");
@@ -3961,6 +4008,7 @@ function configureLandmarkFeature(
         scaledFeatureRadius(3, 2, fields.scatter + fields.magic * 0.2, profile.scale),
         "#544",
         "#DA8",
+        "#FC6",
       );
       out.featureExtra = 4;
       return true;
@@ -4258,7 +4306,7 @@ function sampleMaterialFromScratch(
     ) {
       return 0;
     }
-    return resolveTransitionMaterial(
+    return resolveSurfaceTransitionMaterial(
       scratch.surfacePrimary[columnIndex]!,
       scratch.surfaceSecondary[columnIndex]!,
       scratch.transitionThreshold[columnIndex]!,
@@ -4719,6 +4767,54 @@ function sampleFeatureMaterial(
         ? materialSecondary
         : 0;
     case FEATURE_BASALT_SPIRE:
+      if (featureExtra >= 4) {
+        const baseHeight = Math.min(4, Math.max(2, Math.round(featureHeight * 0.12)));
+        if (relativeY <= baseHeight) {
+          const baseRadius = featureRadius + 1.7 - relativeY * 0.32;
+          const ashLip = relativeY === baseHeight || radial > baseRadius - 0.75;
+          return radial <= Math.max(1.5, baseRadius) ? (ashLip ? materialSecondary : materialPrimary) : 0;
+        }
+
+        const crossbarY = Math.max(baseHeight + 7, featureHeight - 7);
+        const postTopY = Math.min(featureHeight, crossbarY + 2);
+        const pole = relativeY <= postTopY && absX <= 1.05 && absZ <= 1.05;
+        if (pole) {
+          const metalBand = (relativeY - baseHeight) % 5 === 0;
+          return metalBand ? materialSecondary : materialPrimary;
+        }
+
+        const crossbarHalf = featureRadius + 3.2;
+        if (relativeY === crossbarY && absX <= crossbarHalf && absZ <= 1.05) {
+          return materialSecondary;
+        }
+        if (
+          relativeY >= crossbarY - 3
+          && relativeY < crossbarY
+          && absZ <= 0.85
+          && Math.abs(absX - Math.max(1.6, featureRadius + 1.4)) <= 0.58
+        ) {
+          return materialSecondary;
+        }
+
+        const lanternX = featureRadius + 1.6;
+        const lanternY = crossbarY - 5;
+        const localX = featureDeltaX - lanternX;
+        const localAbsX = Math.abs(localX);
+        const localAbsZ = absZ;
+        if (Math.abs(relativeY - (crossbarY - 2)) <= 1 && localAbsX <= 0.85 && localAbsZ <= 0.85) {
+          return materialSecondary;
+        }
+        if (Math.abs(relativeY - lanternY) <= 2 && localAbsX <= 1.85 && localAbsZ <= 1.35) {
+          const frame = localAbsX >= 1.55 || localAbsZ >= 1.15 || Math.abs(relativeY - lanternY) === 2;
+          return frame ? materialSecondary : materialAccent || materialSecondary;
+        }
+
+        const rearCounterweight = Math.abs(featureDeltaX + featureRadius * 0.9) <= 0.75
+          && absZ <= 0.75
+          && relativeY >= crossbarY - 4
+          && relativeY <= crossbarY - 2;
+        return rearCounterweight ? materialSecondary : 0;
+      }
       if (featureExtra >= 2) {
         const plinthHeight = Math.min(4, Math.max(2, Math.round(featureHeight * 0.12)));
         if (relativeY <= plinthHeight) {
@@ -4886,6 +4982,48 @@ function resolveTransitionMaterial(
     return primary;
   }
   return hashNoise3D(worldXDiv3, worldYDiv3, worldZDiv3, seed) <= threshold ? primary : secondary;
+}
+
+function resolveSurfaceTransitionMaterial(
+  primary: number,
+  secondary: number,
+  threshold: number,
+  worldXDiv3: number,
+  worldYDiv3: number,
+  worldZDiv3: number,
+  seed: number,
+): number {
+  if (primary === secondary || threshold >= 0.999) {
+    return primary;
+  }
+  const diagonalA = diagonalStripeStrength(worldXDiv3, worldZDiv3, seed, 23, 5, 3);
+  const diagonalB = diagonalStripeStrength(worldXDiv3, worldZDiv3, seed + 37, 31, -4, 7);
+  const fracture = Math.max(
+    smoothstep(0.70, 0.96, diagonalA),
+    smoothstep(0.76, 0.98, diagonalB) * 0.82,
+  );
+  const grain = hashNoise3D(worldXDiv3, worldYDiv3 + 11, worldZDiv3, seed + 101);
+  if (fracture > 0.68 && grain > 0.22) {
+    return secondary;
+  }
+  const adjustedThreshold = clamp(threshold - fracture * 0.20, 0.30, 0.96);
+  return hashNoise3D(worldXDiv3, worldYDiv3, worldZDiv3, seed) <= adjustedThreshold ? primary : secondary;
+}
+
+function diagonalStripeStrength(
+  worldXDiv3: number,
+  worldZDiv3: number,
+  seed: number,
+  period: number,
+  xWeight: number,
+  zWeight: number,
+): number {
+  const phase = positiveModulo(worldXDiv3 * xWeight + worldZDiv3 * zWeight + seed, period) / period;
+  return 1 - Math.abs(phase * 2 - 1);
+}
+
+function positiveModulo(value: number, modulus: number): number {
+  return ((value % modulus) + modulus) % modulus;
 }
 
 function scoreField(value: number, target: number, spread: number): number {

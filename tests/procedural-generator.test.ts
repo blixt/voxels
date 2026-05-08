@@ -1244,7 +1244,7 @@ test("ash wastes regional pockets favor ancient ashland silhouettes over generic
 test("ashland and old-road landmarks render shaped caps instead of block columns", () => {
   const generator = new ProceduralWorldGenerator(1337);
 
-  for (const landmarkId of ["ash_marker", "velothi_shrine", "pilgrim_lantern"] as const) {
+  for (const landmarkId of ["ash_marker", "velothi_shrine"] as const) {
     const root = findRepresentativeLandmarkRoot(generator, landmarkId);
     expect(root).not.toBeNull();
     expect(generator.sampleMaterial(root!.x, root!.probe.surfaceY + 1, root!.z)).not.toBe(0);
@@ -1260,6 +1260,30 @@ test("ashland and old-road landmarks render shaped caps instead of block columns
     expect(cap.widthX).toBeGreaterThanOrEqual(shaft.widthX + 3);
     expect(cap.widthX).toBeGreaterThan(cap.widthZ);
   }
+
+  const lantern = findRepresentativeLandmarkRoot(generator, "pilgrim_lantern");
+  expect(lantern).not.toBeNull();
+  expect(generator.sampleMaterial(lantern!.x, lantern!.probe.surfaceY + 1, lantern!.z)).not.toBe(0);
+  const lanternHeight = lantern!.probe.topY - lantern!.probe.surfaceY;
+  const lanternBaseHeight = Math.min(4, Math.max(2, Math.round(lanternHeight * 0.12)));
+  const lanternCageY = lantern!.probe.surfaceY + 1 + Math.max(lanternBaseHeight + 2, lanternHeight - 13);
+  const lanternShaftY = lantern!.probe.surfaceY + 1 + Math.floor(lanternHeight * 0.45);
+  const lanternShaft = measureCrossSection(generator, lantern!.x, lantern!.z, lanternShaftY, 10);
+  const lanternUpper = measureMaxCrossSection(
+    generator,
+    lantern!.x,
+    lantern!.z,
+    lantern!.probe.surfaceY + 1 + lanternBaseHeight,
+    lantern!.probe.topY,
+    12,
+  );
+  const lanternCage = measureCrossSection(generator, lantern!.x, lantern!.z, lanternCageY, 10);
+
+  expect(lanternShaft.count).toBeGreaterThan(0);
+  expect(lanternUpper.maxCount).toBeGreaterThan(lanternShaft.count);
+  expect(lanternUpper.maxWidthX).toBeGreaterThanOrEqual(lanternShaft.widthX + 2);
+  expect(lanternCage.count).toBeGreaterThan(0);
+  expect(lanternCage.widthX).toBeGreaterThanOrEqual(lanternShaft.widthX);
 });
 
 test("ashland megastructures have distinctive large silhouettes", () => {

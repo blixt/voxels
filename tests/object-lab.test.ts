@@ -101,6 +101,17 @@ test("ashland prop lab diagnostics keep snag branches and squat kwama mound acce
     sampleRadius: 18,
     heightPadding: 4,
   });
+  const pilgrimLantern = await runObjectLab({
+    landmarkId: "pilgrim_lantern",
+    seed: 1337,
+    outputDir,
+    label: "Pilgrim Lantern Shape Test",
+    timestamp: new Date("2026-05-08T12:35:03.000Z"),
+    scanRadius: 4096,
+    coarseStep: 32,
+    sampleRadius: 18,
+    heightPadding: 4,
+  });
 
   expect(deadSnag.sample.solidVoxelCount).toBeGreaterThan(450);
   expect(deadSnag.sample.diagnostics.materialVariety).toBeGreaterThanOrEqual(2);
@@ -123,6 +134,15 @@ test("ashland prop lab diagnostics keep snag branches and squat kwama mound acce
   expect(ashMarker.sample.diagnostics.silhouette.front.occupiedRows).toBeGreaterThan(35);
   expect(ashMarker.sample.diagnostics.silhouette.front.occupiedPixels).toBeGreaterThan(270);
   expect(ashMarker.sample.diagnostics.warnings).not.toContain("sample-touches-horizontal-edge");
+
+  expect(pilgrimLantern.sample.solidVoxelCount).toBeGreaterThan(350);
+  expect(pilgrimLantern.sample.diagnostics.materialVariety).toBe(3);
+  expect(pilgrimLantern.sample.diagnostics.dominantMaterialShare).toBeLessThan(0.75);
+  expect(pilgrimLantern.sample.diagnostics.sampleFit.touchesSampleEdge).toBe(false);
+  expect(pilgrimLantern.sample.diagnostics.sampleFit.touchesTop).toBe(false);
+  expect(pilgrimLantern.sample.diagnostics.silhouette.front.occupiedRows).toBeGreaterThan(20);
+  expect(pilgrimLantern.sample.diagnostics.silhouette.front.occupiedPixels).toBeGreaterThan(100);
+  expect(pilgrimLantern.sample.diagnostics.warnings).not.toContain("sample-touches-horizontal-edge");
 });
 
 test("representative roots prefer centered salt-marsh set piece columns", async () => {

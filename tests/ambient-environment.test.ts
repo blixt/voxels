@@ -20,6 +20,14 @@ const BASE_FIELDS: AmbientWorldProbe["fields"] = {
   globalHeight: 0.5,
   mountainness: 0.5,
   oceanness: 0.5,
+  ridge: 0.5,
+  mesa: 0.5,
+  desolation: 0.5,
+  strata: 0.5,
+  surfacePatch: 0.5,
+  surfaceGrain: 0.5,
+  scatter: 0.5,
+  peakness: 0.5,
 };
 
 test("ambient profiles map major biome moods to distinct rendering environments", () => {
