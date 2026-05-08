@@ -59,6 +59,49 @@ test("edit invalidation keeps active LOD visible while marking it for regenerati
   expect(worldWithInternals.staleLodKeys.has("L1:0:0:0")).toBe(true);
 });
 
+test("prepared finer LOD chunks do not become visible until they fully replace the covered coarser chunk", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
+  const coarserChunk = createTestChunk(0, 0, 0, 2, 4, true, true);
+  const worldWithInternals = world as unknown as {
+    lodChunks: Map<string, VoxelChunk>;
+    preparedLodChunks: Map<string, VoxelChunk>;
+    commitPreparedLodChunks(): void;
+  };
+
+  worldWithInternals.lodChunks.set("L2:0:0:0", coarserChunk);
+  worldWithInternals.preparedLodChunks.set("L1:0:0:0", createTestChunk(0, 0, 0, 1, 2, true, true));
+
+  worldWithInternals.commitPreparedLodChunks();
+
+  expect(worldWithInternals.lodChunks.has("L2:0:0:0")).toBe(true);
+  expect(worldWithInternals.lodChunks.has("L1:0:0:0")).toBe(false);
+  expect(worldWithInternals.preparedLodChunks.has("L1:0:0:0")).toBe(true);
+});
+
+test("prepared finer LOD chunks atomically replace the covered coarser chunk once complete", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
+  const worldWithInternals = world as unknown as {
+    lodChunks: Map<string, VoxelChunk>;
+    preparedLodChunks: Map<string, VoxelChunk>;
+    commitPreparedLodChunks(): void;
+  };
+
+  worldWithInternals.lodChunks.set("L2:0:0:0", createTestChunk(0, 0, 0, 2, 4, true, true));
+  worldWithInternals.preparedLodChunks.set("L1:0:0:0", createTestChunk(0, 0, 0, 1, 2, true, true));
+  worldWithInternals.preparedLodChunks.set("L1:1:0:0", createTestChunk(1, 0, 0, 1, 2, true, true));
+  worldWithInternals.preparedLodChunks.set("L1:0:0:1", createTestChunk(0, 0, 1, 1, 2, true, true));
+  worldWithInternals.preparedLodChunks.set("L1:1:0:1", createTestChunk(1, 0, 1, 1, 2, true, true));
+
+  worldWithInternals.commitPreparedLodChunks();
+
+  expect(worldWithInternals.lodChunks.has("L2:0:0:0")).toBe(false);
+  expect(worldWithInternals.preparedLodChunks.size).toBe(0);
+  expect(worldWithInternals.lodChunks.has("L1:0:0:0")).toBe(true);
+  expect(worldWithInternals.lodChunks.has("L1:1:0:0")).toBe(true);
+  expect(worldWithInternals.lodChunks.has("L1:0:0:1")).toBe(true);
+  expect(worldWithInternals.lodChunks.has("L1:1:0:1")).toBe(true);
+});
+
 function createTestChunk(
   cx: number,
   cy: number,
@@ -66,14 +109,21 @@ function createTestChunk(
   lodLevel: number,
   voxelStride: number,
   renderReady: boolean,
+  solid = false,
 ): VoxelChunk {
+  const data = new Uint16Array(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
+  if (solid) {
+    data.fill(1);
+  }
   return {
     coord: { x: cx, y: cy, z: cz },
     lodLevel,
     voxelStride,
-    data: new Uint16Array(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE),
-    solidCount: 0,
-    solidBounds: null,
+    data,
+    solidCount: solid ? data.length : 0,
+    solidBounds: solid
+      ? { min: [0, 0, 0], max: [CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], dirty: false }
+      : null,
     meshBuilt: renderReady,
     meshDirty: !renderReady,
     renderReady,

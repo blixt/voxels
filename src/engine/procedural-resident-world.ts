@@ -150,6 +150,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
   private readonly chunks = new Map<string, VoxelChunk>();
   private readonly lodChunks = new Map<string, VoxelChunk>();
+  private readonly preparedLodChunks = new Map<string, VoxelChunk>();
   private readonly staleLodKeys = new Set<string>();
   private readonly emptyLodKeys = new Set<string>();
   private readonly coveredEmptyLodKeys = new Set<string>();
@@ -859,6 +860,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         if (!key.startsWith(keyPrefix)) continue;
         if (
           (this.lodChunks.has(key) && !this.staleLodKeys.has(key)) ||
+          this.preparedLodChunks.has(key) ||
           this.emptyLodKeys.has(key) ||
           this.coveredEmptyLodKeys.has(key)
         ) continue;
@@ -881,6 +883,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
             this.emptyLodKeys.add(key);
           }
           this.lodChunks.delete(key);
+          this.preparedLodChunks.delete(key);
           this.staleLodKeys.delete(key);
           this.invalidateCoarserLodChunksForSourceChunk(ring.level, cx, cy, cz, {
             clearNeededKeyCache: false,
@@ -900,8 +903,12 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         chunk.meshDirty = false;
         chunk.renderReady = true;
         chunk.gpuDirty = true;
-        this.lodChunks.set(key, chunk);
-        this.staleLodKeys.delete(key);
+        if (this.lodChunkHasCoveredActiveCoarserOverlap(chunk)) {
+          this.preparedLodChunks.set(key, chunk);
+        } else {
+          this.lodChunks.set(key, chunk);
+          this.staleLodKeys.delete(key);
+        }
         const neighborRemeshStartedAt = performance.now();
         this.remeshAdjacentLodChunks(ring.level, cx, cy, cz);
         meshMs += performance.now() - neighborRemeshStartedAt;
@@ -911,6 +918,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         generated++;
       }
     }
+    this.commitPreparedLodChunks();
 
     // Phase 3: evict LOD chunks no longer needed.
     // Only evict when there's no pending work — otherwise old LOD chunks
@@ -925,6 +933,11 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
             clearNeededKeyCache: false,
           });
           invalidatedCoarserDuringEviction = true;
+        }
+      }
+      for (const [key] of [...this.preparedLodChunks.entries()]) {
+        if (!neededKeys.has(key)) {
+          this.preparedLodChunks.delete(key);
         }
       }
       for (const key of [...this.emptyLodKeys]) {
@@ -955,6 +968,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     if (invalidatedCoarserDuringEviction) {
       pending += 1;
     }
+    pending += this.preparedLodChunks.size;
     if (!neededKeyCacheHit) {
       this.lodNeededKeyCache = {
         signature: neededKeySignature,
@@ -1446,6 +1460,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       if (this.lodChunks.has(key)) {
         this.staleLodKeys.add(key);
       }
+      this.preparedLodChunks.delete(key);
       this.emptyLodKeys.delete(key);
       this.coveredEmptyLodKeys.delete(key);
     }
@@ -1476,6 +1491,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       if (this.lodChunks.has(key)) {
         this.staleLodKeys.add(key);
       }
+      this.preparedLodChunks.delete(key);
       this.emptyLodKeys.delete(key);
       this.coveredEmptyLodKeys.delete(key);
     }
@@ -1569,6 +1585,98 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       }
     }
     this.lodWorldColumnCoverageCache.set(cacheKey, false);
+    return false;
+  }
+
+  private lodChunkHasCoveredActiveCoarserOverlap(chunk: VoxelChunk): boolean {
+    if (chunk.lodLevel <= 0 || chunk.solidCount === 0) {
+      return false;
+    }
+    for (const coarser of this.lodChunks.values()) {
+      if (coarser.lodLevel <= chunk.lodLevel || coarser.solidCount === 0) {
+        continue;
+      }
+      if (lodChunksHaveCoveredColumnOverlap(coarser, chunk, this.chunkSize)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private commitPreparedLodChunks(): void {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [coarserKey, coarser] of [...this.lodChunks.entries()].sort((left, right) => right[1].lodLevel - left[1].lodLevel)) {
+        if (coarser.lodLevel <= 0 || coarser.solidCount === 0) {
+          continue;
+        }
+        if (!this.isLodChunkFullyCoveredByFinerCandidates(coarser)) {
+          continue;
+        }
+        for (const [preparedKey, prepared] of [...this.preparedLodChunks.entries()]) {
+          if (
+            prepared.lodLevel < coarser.lodLevel &&
+            lodChunkFootprintsOverlap(coarser, prepared, this.chunkSize) &&
+            lodChunksHaveCoveredColumnOverlap(coarser, prepared, this.chunkSize)
+          ) {
+            this.preparedLodChunks.delete(preparedKey);
+            this.lodChunks.set(preparedKey, prepared);
+            this.staleLodKeys.delete(preparedKey);
+          }
+        }
+        this.lodChunks.delete(coarserKey);
+        this.staleLodKeys.delete(coarserKey);
+        changed = true;
+      }
+
+      for (const [preparedKey, prepared] of [...this.preparedLodChunks.entries()]) {
+        if (this.lodChunkHasCoveredActiveCoarserOverlap(prepared)) {
+          continue;
+        }
+        this.preparedLodChunks.delete(preparedKey);
+        this.lodChunks.set(preparedKey, prepared);
+        this.staleLodKeys.delete(preparedKey);
+        changed = true;
+      }
+    }
+  }
+
+  private isLodChunkFullyCoveredByFinerCandidates(coarser: VoxelChunk): boolean {
+    const coarserStride = Math.max(1, coarser.voxelStride);
+    const coarserWorldSize = this.chunkSize * coarserStride;
+    for (let localZ = 0; localZ < this.chunkSize; localZ += 1) {
+      for (let localX = 0; localX < this.chunkSize; localX += 1) {
+        if (!lodChunkCoversLocalColumn(coarser, localX, localZ, this.chunkSize)) {
+          continue;
+        }
+        const worldX = coarser.coord.x * coarserWorldSize + localX * coarserStride;
+        const worldZ = coarser.coord.z * coarserWorldSize + localZ * coarserStride;
+        if (!this.isWorldColumnCoveredByFinerLodCandidate(coarser.lodLevel, worldX, worldZ)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  private isWorldColumnCoveredByFinerLodCandidate(coarserLevel: number, worldX: number, worldZ: number): boolean {
+    for (const chunk of this.lodChunks.values()) {
+      if (chunk.lodLevel >= coarserLevel) {
+        continue;
+      }
+      if (lodChunkCoversWorldColumn(chunk, worldX, worldZ, this.chunkSize)) {
+        return true;
+      }
+    }
+    for (const chunk of this.preparedLodChunks.values()) {
+      if (chunk.lodLevel >= coarserLevel) {
+        continue;
+      }
+      if (lodChunkCoversWorldColumn(chunk, worldX, worldZ, this.chunkSize)) {
+        return true;
+      }
+    }
     return false;
   }
 
@@ -2043,6 +2151,15 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           this.staleLodKeys.add(key);
         }
       }
+      for (const key of [...this.preparedLodChunks.keys()]) {
+        if (!key.startsWith(keyPrefix)) {
+          continue;
+        }
+        const parts = key.split(":");
+        if (Number.parseInt(parts[3]!, 10) === lodCz) {
+          this.preparedLodChunks.delete(key);
+        }
+      }
       for (const key of [...this.emptyLodKeys]) {
         if (!key.startsWith(keyPrefix)) {
           continue;
@@ -2270,6 +2387,65 @@ function toChunkKey(cx: number, cy: number, cz: number): string {
 
 function toLodChunkKey(level: number, cx: number, cy: number, cz: number): string {
   return `L${level}:${cx}:${cy}:${cz}`;
+}
+
+function lodChunkFootprintsOverlap(left: VoxelChunk, right: VoxelChunk, chunkSize: number): boolean {
+  const leftStride = Math.max(1, left.voxelStride);
+  const rightStride = Math.max(1, right.voxelStride);
+  const leftWorldSize = chunkSize * leftStride;
+  const rightWorldSize = chunkSize * rightStride;
+  const leftMinX = left.coord.x * leftWorldSize;
+  const leftMaxX = (left.coord.x + 1) * leftWorldSize;
+  const leftMinZ = left.coord.z * leftWorldSize;
+  const leftMaxZ = (left.coord.z + 1) * leftWorldSize;
+  const rightMinX = right.coord.x * rightWorldSize;
+  const rightMaxX = (right.coord.x + 1) * rightWorldSize;
+  const rightMinZ = right.coord.z * rightWorldSize;
+  const rightMaxZ = (right.coord.z + 1) * rightWorldSize;
+  return leftMinX < rightMaxX && leftMaxX > rightMinX && leftMinZ < rightMaxZ && leftMaxZ > rightMinZ;
+}
+
+function lodChunksHaveCoveredColumnOverlap(coarser: VoxelChunk, finer: VoxelChunk, chunkSize: number): boolean {
+  if (!lodChunkFootprintsOverlap(coarser, finer, chunkSize)) {
+    return false;
+  }
+  const finerStride = Math.max(1, finer.voxelStride);
+  const finerWorldSize = chunkSize * finerStride;
+  for (let localZ = 0; localZ < chunkSize; localZ += 1) {
+    for (let localX = 0; localX < chunkSize; localX += 1) {
+      if (!lodChunkCoversLocalColumn(finer, localX, localZ, chunkSize)) {
+        continue;
+      }
+      const worldX = finer.coord.x * finerWorldSize + localX * finerStride;
+      const worldZ = finer.coord.z * finerWorldSize + localZ * finerStride;
+      if (lodChunkCoversWorldColumn(coarser, worldX, worldZ, chunkSize)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function lodChunkCoversWorldColumn(chunk: VoxelChunk, worldX: number, worldZ: number, chunkSize: number): boolean {
+  const stride = Math.max(1, chunk.voxelStride);
+  const worldSize = chunkSize * stride;
+  const localX = Math.floor((worldX - chunk.coord.x * worldSize) / stride);
+  const localZ = Math.floor((worldZ - chunk.coord.z * worldSize) / stride);
+  if (localX < 0 || localX >= chunkSize || localZ < 0 || localZ >= chunkSize) {
+    return false;
+  }
+  return lodChunkCoversLocalColumn(chunk, localX, localZ, chunkSize);
+}
+
+function lodChunkCoversLocalColumn(chunk: VoxelChunk, localX: number, localZ: number, chunkSize: number): boolean {
+  const chunkArea = chunkSize * chunkSize;
+  const columnOffset = localX + localZ * chunkArea;
+  for (let localY = 0; localY < chunkSize; localY += 1) {
+    if (chunk.data[columnOffset + localY * chunkSize] !== 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function toLocalVoxelIndex(
