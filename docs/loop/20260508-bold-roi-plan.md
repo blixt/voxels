@@ -446,3 +446,19 @@ Completed since the far-view checkpoint:
 | 4 | Foreground terrain shape breakup with a camera-visible design | 5 | 3 | 4 | 3.8 | The global grid metric remains `0.67`; this still needs real geometry/composition, not fog | terrain lab compare, enforced world atlas lower-ground grid, route continuity |
 | 5 | Composition director for actual route camera sightlines | 5 | 3 | 4 | 3.8 | Farther views matter more when the camera has strong foreground/midground silhouettes | route-atlas vista scan, view-atlas deltas, draw/triangle budget |
 | 6 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Useful RPG feel, but rendering diagnostics are still the sharper blocker | UI tests, browser HUD smoke |
+
+## Re-Rank After Far-LOD Gap Classification
+
+Completed since the LOD planning checkpoint:
+
+- Raw far-gap frames are now classified as transition or blocking.
+- Owned browser shows the current route gaps are `50` transition frames and `0` blocking frames, with `0` visible holes and `0` overlaps.
+- This clears the path back to player-visible world work without ignoring LOD correctness.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Object prominence metric for prop atlas | 4 | 4 | 3 | 5.3 | Prop screenshots exist, but target readability is still not quantified; this helps delegated asset work become self-monitoring | prop atlas region metrics, object-lab links, tests |
+| 2 | Foreground terrain shape breakup with a camera-visible design | 5 | 3 | 4 | 3.8 | The global grid metric remains `0.67`; now LOD blocking risk is not the immediate blocker | terrain lab compare, enforced world atlas lower-ground grid, route continuity |
+| 3 | Composition director for actual route camera sightlines | 5 | 3 | 4 | 3.8 | Farther fog helps only if route cameras see strong foreground/midground silhouettes | route-atlas vista scan, view-atlas deltas, draw/triangle budget |
+| 4 | Water/shoreline far-LOD correctness pass for marsh/saltflat horizons | 4 | 4 | 3 | 5.3 | Longer fog exposes more water horizon; useful, but current water overlap is already `0` | extended `probeLodCoverage`, marsh/salt view atlas, owned-browser water overlap |
+| 5 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Useful RPG feel after the visual/verification backlog moves | UI tests, browser HUD smoke |

@@ -4,6 +4,7 @@ import {
   analyzeBottomCenterVoid,
   buildDefaultRouteBenchmarkPlan,
   buildForwardRouteBenchmarkPlan,
+  countRouteSeamFrameClasses,
   summarizeRouteFrameAccounting,
   summarizeRouteSeamCoverage,
   type BottomCenterVoidProbe,
@@ -641,6 +642,8 @@ export interface RouteExperienceBenchmarkSummary {
   framesWithSurfaceContinuityGaps: number;
   framesWithFarLodCoverageGaps: number;
   framesWithSeamGaps: number;
+  framesWithBlockingSeamGaps: number;
+  framesWithTransitionSeamGaps: number;
   framesWithLodOverlaps: number;
   maxSeamGapMeters: number;
   maxSurfaceContinuityStepMeters: number;
@@ -3772,6 +3775,7 @@ function summarizeRouteExperienceBenchmark(
   const settledReferenceClearToFilledSamples = samples.map((sample) => sample.settledReferenceClearToFilledRatio ?? 0);
   const settledReferenceClearToFilledRunSamples = samples.map((sample) =>
     sample.settledReferenceMaxClearToFilledRunRatio ?? 0);
+  const seamFrameClasses = countRouteSeamFrameClasses(samples);
   const settleCompletion = samples.find((sample) =>
     sample.phase === "settle"
     && sample.complete
@@ -3835,6 +3839,8 @@ function summarizeRouteExperienceBenchmark(
     framesWithSurfaceContinuityGaps: samples.filter((sample) => sample.surfaceContinuityGapCount > 0).length,
     framesWithFarLodCoverageGaps: samples.filter((sample) => sample.farLodCoverageGapCount > 0).length,
     framesWithSeamGaps: samples.filter((sample) => sample.seamGapCount > 0).length,
+    framesWithBlockingSeamGaps: seamFrameClasses.framesWithBlockingSeamGaps,
+    framesWithTransitionSeamGaps: seamFrameClasses.framesWithTransitionSeamGaps,
     framesWithLodOverlaps: samples.filter((sample) => sample.lodOverlapCount > 0).length,
     maxSeamGapMeters: maxValue(samples.map((sample) => sample.maxSeamGapMeters)),
     maxSurfaceContinuityStepMeters: maxValue(surfaceContinuityStepSamples),

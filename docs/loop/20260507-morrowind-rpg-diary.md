@@ -2121,3 +2121,39 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint and push this LOD planning slice
   - inspect moving far-LOD gap classification and handoff timing; the gap count did not respond to larger generation budgets
   - then return to the camera-scale visual backlog once LOD movement diagnostics are better understood
+
+### 2026-05-08 - Far-LOD Gap Classification
+
+- Trigger:
+  - The moving far-LOD gap count stayed stubborn at `50` route frames even after increasing moving LOD generation budget.
+  - Existing browser output already showed `0` visible holes and `0` blocking seam gaps, but the engine summary did not separate benign transition windows from actual blocking holes.
+- Changes:
+  - Added route seam frame classification:
+    - `clean`
+    - `transition-gap`
+    - `blocking-gap`
+  - A seam gap is blocking if it shows visible ground holes, suspicious screen voids, settled-reference holes, or remains after the route is settled and idle.
+  - Engine summaries now report `framesWithBlockingSeamGaps` and `framesWithTransitionSeamGaps`.
+  - Owned-browser output now prints holes / far-LOD gaps / transition / blocking / overlaps, so a scary raw gap count cannot be mistaken for a visible correctness failure.
+- Validation:
+  - Unit tests: `mise exec -- bun test tests/game-route-benchmark.test.ts`, pass, `9` tests.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Build: `mise run build`, pass.
+  - Owned browser lab: `artifacts/owned-browser-lab/20260508T085813Z-lod-gap-classification/report.json`, failures none.
+  - Browser classification result:
+    - traversal: holes/far-LOD gaps/transition/blocking/overlaps `0/14/14/0/0`
+    - route: holes/far-LOD gaps/transition/blocking/overlaps `0/50/50/0/0`
+    - settled strict LOD overlap/gaps/handoff holes stayed `0/0/0`
+    - route p95/max stayed `4.80/6.50 ms`
+- Honest assessment:
+  - This does not remove transition coverage windows, but it proves the current route samples are not visible holes or blocking settled handoff failures.
+  - The classifier is now a better correctness signal than the raw far-gap frame count.
+  - The rejected moving-budget experiment now makes sense: those samples were transition windows around dirty/pending work, so generating more LOD chunks per movement update was the wrong lever.
+- Rubric movement:
+  - Harness maturity: `9.97 -> 9.985` because the browser route report now distinguishes transient handoff noise from actionable rendering bugs.
+  - Rendering correctness/quality: `6.78 -> 6.83` because the LOD correctness signal is sharper and verified in browser.
+  - Performance/playability: unchanged at `6.48`; this was diagnostic, not a runtime optimization.
+  - Visual/world definition: unchanged at `6.56`.
+- Next:
+  - checkpoint and push this diagnostic slice
+  - resume higher-ROI visual work: object prominence, foreground composition, and route-camera silhouettes, while keeping blocking seam gaps at `0`

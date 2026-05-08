@@ -119,6 +119,25 @@ export interface RouteSeamCoverageSummary {
   maxLodOverlapMeters: number;
 }
 
+export interface RouteSeamFrameClassificationSample {
+  phase: "move" | "settle";
+  pendingChunks: number;
+  pendingMeshJobs: number;
+  dirtyResidentChunks: number;
+  lodPendingChunks: number;
+  seamGapCount: number;
+  visibleGroundUncoveredCount: number;
+  screenVoidSuspicious: boolean;
+  settledReferenceSuspiciousHole?: boolean;
+}
+
+export type RouteSeamFrameClassification = "clean" | "transition-gap" | "blocking-gap";
+
+export interface RouteSeamFrameClassCounts {
+  framesWithBlockingSeamGaps: number;
+  framesWithTransitionSeamGaps: number;
+}
+
 export function buildDefaultRouteBenchmarkPlan(
   startFeetPosition: Vec3,
   sampleFeetYAt: (worldX: number, worldZ: number) => number,
@@ -349,6 +368,48 @@ export function summarizeRouteSeamCoverage(
     bandOverlapCount,
     maxSeamGapMeters: maxValue(gapSamples.map((sample) => sample.distanceMeters)),
     maxLodOverlapMeters: maxValue(overlapSamples.map((sample) => sample.distanceMeters)),
+  };
+}
+
+export function classifyRouteSeamFrame(
+  sample: RouteSeamFrameClassificationSample,
+): RouteSeamFrameClassification {
+  if (sample.seamGapCount <= 0) {
+    return "clean";
+  }
+  if (
+    sample.visibleGroundUncoveredCount > 0
+    || sample.screenVoidSuspicious
+    || (sample.settledReferenceSuspiciousHole ?? false)
+  ) {
+    return "blocking-gap";
+  }
+  const settledAndIdle = sample.phase === "settle"
+    && sample.pendingChunks === 0
+    && sample.pendingMeshJobs === 0
+    && sample.dirtyResidentChunks === 0
+    && sample.lodPendingChunks === 0;
+  return settledAndIdle ? "blocking-gap" : "transition-gap";
+}
+
+export function countRouteSeamFrameClasses(
+  samples: readonly RouteSeamFrameClassificationSample[],
+): RouteSeamFrameClassCounts {
+  let framesWithBlockingSeamGaps = 0;
+  let framesWithTransitionSeamGaps = 0;
+  for (const sample of samples) {
+    switch (classifyRouteSeamFrame(sample)) {
+      case "blocking-gap":
+        framesWithBlockingSeamGaps += 1;
+        break;
+      case "transition-gap":
+        framesWithTransitionSeamGaps += 1;
+        break;
+    }
+  }
+  return {
+    framesWithBlockingSeamGaps,
+    framesWithTransitionSeamGaps,
   };
 }
 
