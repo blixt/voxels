@@ -342,3 +342,34 @@ Rejected scheduler experiment:
 - A naive coarse-first budgeted pass generated `0` chunks because it hit partial L3/L4 work first under the frame-time budget.
 - An L2-first budgeted pass generated `278` L2 chunks and kept coverage clean, but far downsample time rose to `7389.3ms` for only a small pending reduction (`817` to `807`).
 - Both scheduler experiments were backed out. The useful conclusion is that reordering main-thread derivation cannot solve this cleanly; LOD2+ derivation needs a worker/canonical-source path or much cheaper derived inputs.
+
+### Follow-up Checkpoint - Canonical LOD Derivation Boundary
+
+Extracted the LOD voxel-data derivation loop into a pure engine module:
+
+- New module: `src/engine/lod-chunk-derivation.ts`.
+- `ProceduralResidentWorld.downsampleLodChunkData` now supplies explicit callbacks for:
+  - source material sampling,
+  - generated top-material fallback,
+  - generated column fallback,
+  - surface Y range,
+  - finer-coverage ownership checks.
+- This does not move work to a worker yet, but it creates the boundary needed for that migration without changing activation, handoff, disk persistence, or rendering ownership.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/lod-chunk-derivation.test.ts tests/procedural-resident-world.test.ts tests/lod-handoff.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-default-derivation-boundary`
+
+Browser verifier artifact:
+
+- Default persistence: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-Nks6mW/lod-idb-persistence-reload.json`
+  - Result: pass, with `32` reload disk hits and `32` cumulative reload disk hits.
+  - Coverage remained clean with `0` gaps and `0` overlaps.
+
+Next target:
+
+1. Add a worker request that derives a LOD chunk through this same boundary using canonical generated chunk data and edit deltas.
+2. Keep the existing derived LOD disk cache as a disposable cache, not a source of truth.
+3. Move only LOD2+ far derivation first; LOD1 should remain resident-source-sensitive until edit and near-field behavior are better isolated.

@@ -32,6 +32,7 @@ import {
   getGeneratedRenderSummaryRegionCoord,
   type GeneratedRenderSummaryRegion,
 } from "./generated-render-summary-region.ts";
+import { deriveLodChunkData } from "./lod-chunk-derivation.ts";
 import { FOG_END_DISTANCE } from "./render-constants.ts";
 import { metersToWorldUnits } from "./scale.ts";
 import { setChunkMeshDirtyState, type MutableResidentChunkWorld, type VoxelChunk } from "./world.ts";
@@ -2043,7 +2044,6 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   } {
     const cs = this.chunkSize;
     const chunkArea = cs * cs;
-    const data = new Uint16Array(cs * chunkArea);
 
     // World-space origin of this LOD chunk
     const originX = lodCx * worldSize;
@@ -2054,21 +2054,6 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     const sourceWorldSize = cs * sourceStride;
     const sourceVoxelSpan = Math.max(1, Math.floor(stride / sourceStride));
 
-    let solidCount = 0;
-    let minX = cs, minY = cs, minZ = cs;
-    let maxX = 0, maxY = 0, maxZ = 0;
-    let sourceComplete = true;
-    let skippedFinerCoverage = false;
-    const recordMaterial = (ox: number, oy: number, oz: number, material: number): void => {
-      data[ox + oy * cs + oz * chunkArea] = material;
-      solidCount++;
-      if (ox < minX) minX = ox;
-      if (oy < minY) minY = oy;
-      if (oz < minZ) minZ = oz;
-      if (ox + 1 > maxX) maxX = ox + 1;
-      if (oy + 1 > maxY) maxY = oy + 1;
-      if (oz + 1 > maxZ) maxZ = oz + 1;
-    };
     const isOutputColumnCoveredByFiner = (ox: number, oz: number): boolean => {
       const minWorldX = originX + ox * stride;
       const maxWorldX = minWorldX + stride - 1;
@@ -2161,90 +2146,49 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       }
       return { material: waterMaterial, complete };
     };
-    const fillGeneratedFallbackColumn = (
-      ox: number,
-      oz: number,
-      minOy: number,
-      maxOyExclusive: number,
-    ): void => {
-      if (isOutputColumnCoveredByFiner(ox, oz)) {
-        skippedFinerCoverage = true;
-        return;
-      }
-      const worldX = originX + ox * stride;
-      const worldZ = originZ + oz * stride;
-      const shellPaddingY = stride * 3;
-      if (level >= 2 && this.editOverlays.size === 0) {
-        const topBucket = this.generator.sampleTopColumnMaterialBucket(
+    return deriveLodChunkData({
+      chunkSize: cs,
+      originX,
+      originY,
+      originZ,
+      level,
+      stride,
+      useGeneratedTopMaterial: level >= 2 && this.editOverlays.size === 0,
+      sampleSourceMaterial,
+      isOutputColumnCoveredByFiner,
+      sampleGeneratedTopMaterial: (ox, oz, minOy, maxOyExclusive) => {
+        const worldX = originX + ox * stride;
+        const worldZ = originZ + oz * stride;
+        return this.generator.sampleTopColumnMaterialBucket(
           worldX,
           worldZ,
           originY + minOy * stride,
           stride,
           maxOyExclusive - minOy,
-          shellPaddingY,
+          stride * 3,
         );
-        if (!topBucket) {
-          return;
-        }
-        recordMaterial(ox, minOy + topBucket.bucketIndex, oz, topBucket.material);
-        return;
-      }
-      const column = this.generator.sampleSurfaceColumn(worldX, worldZ);
-      const maxSurfaceWorldY = Math.max(column.topY, column.waterTopY ?? column.surfaceY);
-      const minSurfaceWorldY = column.surfaceY - shellPaddingY;
-      const startOy = Math.max(minOy, Math.floor((minSurfaceWorldY - originY) / stride));
-      const endOy = Math.min(maxOyExclusive - 1, Math.floor((maxSurfaceWorldY - originY) / stride));
-      if (startOy > endOy) {
-        return;
-      }
-      if (level === 1 || this.editOverlays.size > 0) {
-        let sourceColumnComplete = true;
-        for (let oy = endOy; oy >= startOy; oy -= 1) {
-          const source = sampleSourceMaterial(ox, oy, oz);
-          if (!source.complete) {
-            sourceColumnComplete = false;
-          }
-          if (source.material !== 0) {
-            recordMaterial(ox, oy, oz, source.material);
-            return;
-          }
-        }
-        if (sourceColumnComplete) {
-          return;
-        }
-        sourceComplete = false;
-      }
-      const materials = this.generator.sampleColumnMaterialBuckets(
-        worldX,
-        worldZ,
-        originY + startOy * stride,
-        stride,
-        endOy - startOy + 1,
-      );
-      for (let oy = endOy; oy >= startOy; oy -= 1) {
-        const material = materials[oy - startOy] ?? 0;
-        if (material === 0) {
-          continue;
-        }
-        recordMaterial(ox, oy, oz, material);
-        return;
-      }
-    };
-
-    for (let oz = 0; oz < cs; oz += 1) {
-      for (let ox = 0; ox < cs; ox += 1) {
-        fillGeneratedFallbackColumn(ox, oz, 0, cs);
-      }
-    }
-
-    return {
-      data,
-      solidCount,
-      solidBounds: solidCount === 0 ? null : { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
-      sourceComplete,
-      skippedFinerCoverage,
-    };
-
+      },
+      sampleSurfaceYRange: (ox, oz) => {
+        const worldX = originX + ox * stride;
+        const worldZ = originZ + oz * stride;
+        const column = this.generator.sampleSurfaceColumn(worldX, worldZ);
+        return {
+          minY: column.surfaceY,
+          maxY: Math.max(column.topY, column.waterTopY ?? column.surfaceY),
+        };
+      },
+      sampleGeneratedColumnMaterials: (ox, oz, startOy, endOyInclusive) => {
+        const worldX = originX + ox * stride;
+        const worldZ = originZ + oz * stride;
+        return this.generator.sampleColumnMaterialBuckets(
+          worldX,
+          worldZ,
+          originY + startOy * stride,
+          stride,
+          endOyInclusive - startOy + 1,
+        );
+      },
+    });
   }
 
   private invalidateLodChunksAt(worldX: number, worldY: number, worldZ: number): void {
