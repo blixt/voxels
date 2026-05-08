@@ -609,6 +609,9 @@ export interface RouteExperienceFrameSample {
   lodMs: number;
   lodGeneratedChunks: number;
   lodPendingChunks: number;
+  lodMaxChunkMs: number;
+  lodMaxChunkLevel: number;
+  lodMaxChunkKey: string | null;
   farLodCoverageGapCount: number;
   uncoveredFarLodGapCount: number;
   handoffFarLodHoleCount: number;
@@ -648,6 +651,11 @@ export interface RouteExperienceBenchmarkSummary {
   avgGameplayFrameMs: number;
   p95GameplayFrameMs: number;
   maxGameplayFrameMs: number;
+  framesOver16_67Ms: number;
+  framesOver33_33Ms: number;
+  framesOver50Ms: number;
+  moveFramesOver50Ms: number;
+  settleFramesOver50Ms: number;
   avgMovementMs: number;
   p95MovementMs: number;
   maxMovementMs: number;
@@ -666,6 +674,8 @@ export interface RouteExperienceBenchmarkSummary {
   avgLodMs: number;
   p95LodMs: number;
   maxLodMs: number;
+  p95LodChunkMs: number;
+  maxLodChunkMs: number;
   avgRenderCpuMs: number;
   p95RenderCpuMs: number;
   maxRenderCpuMs: number;
@@ -3198,6 +3208,9 @@ export class GameController {
         abruptSurfaceEdgeCount: surfaceContinuity.abruptEdgeCount,
         maxSurfaceContinuityStepMeters: surfaceContinuity.maxExpectedStepMeters,
         farLodCoverageGapCount: seamCoverage.seamGapCount,
+        lodMaxChunkMs: this.lastLodSummary.maxChunkMs,
+        lodMaxChunkLevel: this.lastLodSummary.maxChunkLevel,
+        lodMaxChunkKey: this.lastLodSummary.maxChunkKey,
         uncoveredFarLodGapCount: seamCoverage.uncoveredGapCount,
         handoffFarLodHoleCount: seamCoverage.handoffHoleCount,
         maxFarLodCoverageGapMeters: seamCoverage.maxSeamGapMeters,
@@ -3893,6 +3906,7 @@ function summarizeRouteExperienceBenchmark(
   const streamSamples = samples.map((sample) => sample.streamMs);
   const meshSamples = samples.map((sample) => sample.meshMs);
   const lodSamples = samples.map((sample) => sample.lodMs);
+  const lodChunkSamples = samples.map((sample) => sample.lodMaxChunkMs);
   const renderCpuSamples = samples.map((sample) => sample.renderCpuMs);
   const renderOtherSamples = samples.map((sample) => sample.renderOtherMs);
   const residentNotReadySamples = samples.map((sample) => sample.residentNotReadyNearSamples);
@@ -3937,6 +3951,11 @@ function summarizeRouteExperienceBenchmark(
     avgGameplayFrameMs: accounting.avgGameplayFrameMs,
     p95GameplayFrameMs: accounting.p95GameplayFrameMs,
     maxGameplayFrameMs: accounting.maxGameplayFrameMs,
+    framesOver16_67Ms: samples.filter((sample) => sample.gameplayFrameMs > 16.67).length,
+    framesOver33_33Ms: samples.filter((sample) => sample.gameplayFrameMs > 33.33).length,
+    framesOver50Ms: samples.filter((sample) => sample.gameplayFrameMs > 50).length,
+    moveFramesOver50Ms: samples.filter((sample) => sample.phase === "move" && sample.gameplayFrameMs > 50).length,
+    settleFramesOver50Ms: samples.filter((sample) => sample.phase === "settle" && sample.gameplayFrameMs > 50).length,
     avgMovementMs: accounting.avgMovementMs,
     p95MovementMs: accounting.p95MovementMs,
     maxMovementMs: accounting.maxMovementMs,
@@ -3955,6 +3974,8 @@ function summarizeRouteExperienceBenchmark(
     avgLodMs: average(lodSamples),
     p95LodMs: percentile(lodSamples, 0.95),
     maxLodMs: maxValue(lodSamples),
+    p95LodChunkMs: percentile(lodChunkSamples, 0.95),
+    maxLodChunkMs: maxValue(lodChunkSamples),
     avgRenderCpuMs: average(renderCpuSamples),
     p95RenderCpuMs: percentile(renderCpuSamples, 0.95),
     maxRenderCpuMs: maxValue(renderCpuSamples),
