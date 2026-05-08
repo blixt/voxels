@@ -481,3 +481,19 @@ The user’s rendering blockers now have direct fixes and tests. The highest ROI
 | 3 | Route-aware exploration beats: old-road markers, shrine approaches, and journal discoveries that guide the player without HUD clutter | 4 | 4 | 3 | 5.3 | Game feel is behind renderer work; this can make travel feel like exploration instead of benchmarking | UI tests, browser HUD smoke, route discovery fixtures |
 | 4 | Object prominence metric and prop pass for close-route assets | 4 | 4 | 3 | 5.3 | Useful for delegated prop quality, but less important than placing big readable forms in the player path | prop atlas region metrics, object-lab links |
 | 5 | Water/shoreline far-LOD correctness pass for marsh/saltflat horizons | 4 | 4 | 3 | 5.3 | Keep in reserve if water artifacts reappear; current water overlap is `0` | extended `probeLodCoverage`, marsh/salt view atlas, owned-browser water overlap |
+
+## Re-Rank After Prop Prominence Gate
+
+Completed since the depth/handoff checkpoint:
+
+- The prop atlas now measures whether a target object is prominent in its intended frame, not just whether the screenshot is nonblank.
+- The new gate passed on `artifacts/view-atlas/20260508T092559Z-prop-prominence-check/report.json`.
+
+This supports delegated object work, but the user-visible bottleneck remains route-scale composition and silhouettes.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Composition director for actual route camera sightlines: guarantee large ziggurat, fungal tower, rib arch, and lantern silhouettes on common travel paths | 5 | 4 | 4 | 5.0 | Still the fastest path to visible non-Minecraft identity | route-atlas vista scan, owned-browser draw budget, view-atlas silhouette metrics |
+| 2 | Foreground terrain shape breakup with camera-visible ash slabs, salt flats, blackwater edges, and ruin-road negative space | 5 | 3 | 4 | 3.8 | The ground plane still dominates first impression | terrain lab compare, world atlas lower-ground grid, route continuity |
+| 3 | Route-aware exploration beats: old-road markers, shrine approaches, and journal discoveries that guide the player without HUD clutter | 4 | 4 | 3 | 5.3 | Adds game feel on top of the now-stable route/render loop | UI tests, browser HUD smoke, route discovery fixtures |
+| 4 | Close-route prop pass using target prominence as a merge gate | 4 | 4 | 3 | 5.3 | The metric is ready, but props should support larger route compositions | prop atlas region metrics, object-lab links |

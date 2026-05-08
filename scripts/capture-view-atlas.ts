@@ -20,6 +20,7 @@ interface ViewSpec {
   eyeMeters: readonly [number, number];
   lookAtMeters: readonly [number, number];
   pitchDegrees: number;
+  targetRegion?: RegionSpecRatio;
 }
 
 interface CliOptions {
@@ -53,6 +54,13 @@ interface RegionSpec {
   y1: number;
 }
 
+interface RegionSpecRatio {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
 interface RegionMetrics {
   id: string;
   label: string;
@@ -72,6 +80,22 @@ interface RegionMetrics {
   gridRiskScore: number;
 }
 
+interface TargetProminenceMetrics {
+  bounds: {
+    x: [number, number];
+    y: [number, number];
+  };
+  contextSampleCount: number;
+  target: RegionMetrics;
+  contextAvgLuma: number;
+  contextAvgSaturation: number;
+  lumaContrast: number;
+  saturationContrast: number;
+  detailScore: number;
+  prominenceScore: number;
+  readable: boolean;
+}
+
 interface ViewCapture {
   id: string;
   label: string;
@@ -87,6 +111,7 @@ interface ViewCapture {
     width: number;
     height: number;
     regions: RegionMetrics[];
+    targetProminence: TargetProminenceMetrics | null;
     diagnosis: {
       avgLuma: number;
       lumaStdDev: number;
@@ -174,6 +199,7 @@ const PROP_VIEW_SPECS: ViewSpec[] = [
     eyeMeters: [-1445.7, -2638.4],
     lookAtMeters: [-1439.7, -2630.4],
     pitchDegrees: -20,
+    targetRegion: { x0: 0.34, y0: 0.40, x1: 0.66, y1: 0.80 },
   },
   {
     id: "bone-chimes-close",
@@ -181,6 +207,7 @@ const PROP_VIEW_SPECS: ViewSpec[] = [
     eyeMeters: [-1518.8, -1859.9],
     lookAtMeters: [-1510.8, -1849.3],
     pitchDegrees: -14,
+    targetRegion: { x0: 0.34, y0: 0.22, x1: 0.66, y1: 0.72 },
   },
   {
     id: "pilgrim-lantern-close",
@@ -188,6 +215,7 @@ const PROP_VIEW_SPECS: ViewSpec[] = [
     eyeMeters: [12.6, -3253.3],
     lookAtMeters: [18.6, -3245.3],
     pitchDegrees: -14,
+    targetRegion: { x0: 0.36, y0: 0.22, x1: 0.64, y1: 0.70 },
   },
   {
     id: "shrine-debris-close",
@@ -195,6 +223,7 @@ const PROP_VIEW_SPECS: ViewSpec[] = [
     eyeMeters: [2457, -3259.4],
     lookAtMeters: [2463, -3251.4],
     pitchDegrees: -22,
+    targetRegion: { x0: 0.32, y0: 0.40, x1: 0.68, y1: 0.84 },
   },
   {
     id: "paver-debris-close",
@@ -202,6 +231,7 @@ const PROP_VIEW_SPECS: ViewSpec[] = [
     eyeMeters: [-1701.3, -2543.2],
     lookAtMeters: [-1695.3, -2535.2],
     pitchDegrees: -22,
+    targetRegion: { x0: 0.30, y0: 0.42, x1: 0.70, y1: 0.86 },
   },
 ];
 
@@ -246,6 +276,7 @@ const captures = await withBrowserGameSession(
       await Bun.write(screenshotPath, screenshotBytes);
       const image = decodePng(screenshotBytes);
       const regions = buildRegionSpecs().map((region) => analyzeRegion(image, region));
+      const targetProminence = view.targetRegion ? analyzeTargetProminence(image, view.targetRegion) : null;
       const snapshot = readObject(settled.snapshot);
       viewCaptures.push({
         id: view.id,
@@ -262,6 +293,7 @@ const captures = await withBrowserGameSession(
           width: image.width,
           height: image.height,
           regions,
+          targetProminence,
           diagnosis: diagnoseVisual(regions),
         },
       });
@@ -274,6 +306,17 @@ const comparison = baselinePath ? await compareWithBaseline(baselinePath, captur
 const failures = captures
   .filter((capture) => capture.visual.diagnosis.blankish)
   .map((capture) => `${capture.id} looks blankish: luma=${capture.visual.diagnosis.avgLuma.toFixed(1)}, colors=${capture.visual.diagnosis.quantizedColorCount}`);
+if (options.preset === "props") {
+  for (const capture of captures) {
+    const prominence = capture.visual.targetProminence;
+    if (prominence && !prominence.readable) {
+      failures.push(
+        `${capture.id} target prominence is weak: score=${prominence.prominenceScore.toFixed(1)}, `
+          + `stddev=${prominence.target.lumaStdDev.toFixed(1)}, colors=${prominence.target.quantizedColorCount}`,
+      );
+    }
+  }
+}
 if (options.enforceComparisonBudgets) {
   if (!comparison) {
     failures.push("comparison budgets requested but no baseline comparison was available");
@@ -461,6 +504,62 @@ function analyzeRegion(image: PngImage, region: RegionSpec): RegionMetrics {
   };
 }
 
+function analyzeTargetProminence(image: PngImage, target: RegionSpecRatio): TargetProminenceMetrics {
+  const targetRegion: RegionSpec = {
+    id: "target",
+    label: "Target",
+    ...target,
+  };
+  const targetMetrics = analyzeRegion(image, targetRegion);
+  const xStart = targetMetrics.bounds.x[0];
+  const xEnd = targetMetrics.bounds.x[1];
+  const yStart = targetMetrics.bounds.y[0];
+  const yEnd = targetMetrics.bounds.y[1];
+  const expanded = {
+    x0: Math.max(0, Math.floor(image.width * Math.max(0, target.x0 - 0.14))),
+    x1: Math.min(image.width, Math.ceil(image.width * Math.min(1, target.x1 + 0.14))),
+    y0: Math.max(0, Math.floor(image.height * Math.max(0, target.y0 - 0.14))),
+    y1: Math.min(image.height, Math.ceil(image.height * Math.min(1, target.y1 + 0.14))),
+  };
+  let contextSampleCount = 0;
+  let contextLumaTotal = 0;
+  let contextSaturationTotal = 0;
+  for (let y = expanded.y0; y < expanded.y1; y += 2) {
+    for (let x = expanded.x0; x < expanded.x1; x += 2) {
+      if (x >= xStart && x < xEnd && y >= yStart && y < yEnd) {
+        continue;
+      }
+      const rgb = readRgb(image, x, y);
+      contextLumaTotal += luminance(rgb);
+      contextSaturationTotal += rgbSaturation(rgb);
+      contextSampleCount += 1;
+    }
+  }
+  const contextAvgLuma = roundMetric(ratio(contextLumaTotal, contextSampleCount));
+  const contextAvgSaturation = roundMetric(ratio(contextSaturationTotal, contextSampleCount));
+  const lumaContrast = roundMetric(Math.abs(targetMetrics.avgLuma - contextAvgLuma));
+  const saturationContrast = roundMetric(Math.abs(targetMetrics.avgSaturation - contextAvgSaturation));
+  const detailScore = roundMetric(
+    targetMetrics.lumaStdDev
+      + targetMetrics.avgSaturation * 45
+      + Math.min(80, targetMetrics.quantizedColorCount) * 0.20
+      + targetMetrics.colorEdgeRate * 120,
+  );
+  const prominenceScore = roundMetric(detailScore + lumaContrast * 0.55 + saturationContrast * 35);
+  return {
+    bounds: targetMetrics.bounds,
+    contextSampleCount,
+    target: targetMetrics,
+    contextAvgLuma,
+    contextAvgSaturation,
+    lumaContrast,
+    saturationContrast,
+    detailScore,
+    prominenceScore,
+    readable: prominenceScore >= 38 && targetMetrics.quantizedColorCount >= 14 && targetMetrics.lumaStdDev >= 12,
+  };
+}
+
 function diagnoseVisual(regions: readonly RegionMetrics[]): ViewCapture["visual"]["diagnosis"] {
   const full = regionById(regions, "full");
   const center = regionById(regions, "center");
@@ -504,6 +603,21 @@ function buildMarkdownSummary(report: ViewAtlasReport): string {
       ...report.comparison.viewDeltas.map((delta) =>
         `| ${delta.id} | ${delta.baselinePresent ? "yes" : "no"} | ${formatSigned(delta.avgLuma, 1)} | ${formatSigned(delta.lumaStdDev, 1)} | ${formatSigned(delta.quantizedColorCount)} | ${formatSigned(delta.horizonGridRiskScore, 3)} | ${formatSigned(delta.centerGridRiskScore, 3)} | ${formatSigned(delta.lowerGroundGridRiskScore, 3)} |`
       ),
+      "",
+    );
+  }
+  if (report.views.some((view) => view.visual.targetProminence)) {
+    lines.push(
+      "## Target Prominence",
+      "",
+      "| View | Score | Detail | Luma contrast | Sat contrast | Target stddev | Target colors | Readable |",
+      "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+      ...report.views
+        .filter((view) => view.visual.targetProminence)
+        .map((view) => {
+          const prominence = view.visual.targetProminence!;
+          return `| ${view.id} | ${prominence.prominenceScore.toFixed(1)} | ${prominence.detailScore.toFixed(1)} | ${prominence.lumaContrast.toFixed(1)} | ${prominence.saturationContrast.toFixed(3)} | ${prominence.target.lumaStdDev.toFixed(1)} | ${prominence.target.quantizedColorCount} | ${prominence.readable ? "yes" : "no"} |`;
+        }),
       "",
     );
   }

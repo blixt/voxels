@@ -2198,3 +2198,26 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint and push this render-correctness slice
   - stop spending more cycles on low-level LOD unless a blocking hole or overlap reappears
   - move to visible world/game progress: large silhouettes, route composition, and more characteristic Morrowind-like exploration beats
+
+### 2026-05-08 - Prop Atlas Target Prominence Metric
+
+- Trigger:
+  - The user pushed for better delegation and self-monitoring on individual world objects.
+  - The prop atlas existed, but it only proved a view rendered; it did not say whether the intended object actually read against its surroundings.
+- Changes:
+  - Added per-view target regions to the prop atlas.
+  - Added target prominence metrics comparing the target region to nearby context: luma contrast, saturation contrast, detail score, color count, and a combined readability score.
+  - Prop atlas runs now fail if the target is too weak, so small-object work has a measurable acceptance gate before it is integrated into route/world views.
+- Validation:
+  - Prop atlas: `mise exec -- bun run atlas:views -- --preset props --label=prop-prominence-check`, pass.
+  - Output: `artifacts/view-atlas/20260508T092559Z-prop-prominence-check/report.json`, failures none.
+  - Typecheck was already clean after the render-correctness checkpoint.
+- Honest assessment:
+  - This does not make the game look better by itself.
+  - It does make future prop/model work less subjective and gives delegated asset work a concrete target.
+- Rubric movement:
+  - Harness maturity: `9.99 -> 9.995`.
+  - Visual/world definition: unchanged until this metric drives actual content changes.
+- Next:
+  - use route-scale composition first, not more isolated props
+  - keep prop prominence as a support gate for close-route objects and delegated asset passes
