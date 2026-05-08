@@ -150,7 +150,7 @@ function tick(timestamp: number): void {
   const snapshot = buildSnapshot(stats.drawCalls, stats.triangles);
   const hudStartedAt = performance.now();
   hudElement.textContent = [
-    `LOD Lab | ${snapshot.fps.toFixed(1)} fps | max ${timing.worstRecentFrameMs.toFixed(0)}ms | hitches ${timing.recentHitchCount} | dropped ${timing.recentDroppedFrameEstimate}`,
+    `LOD Lab | ${snapshot.fps.toFixed(1)} fps | max ${timing.worstRecentFrameMs.toFixed(0)}ms | hitches ${timing.recentHitchCount} | stalled ${timing.recentStalledMs.toFixed(0)}ms | dropped ${timing.recentDroppedFrameEstimate}`,
     `8Hz buckets ${snapshot.timingStrip} | ${snapshot.worstBucketSummary}`,
     formatHitchAttribution(snapshot),
     `chunks ${snapshot.activeChunks} pending ${snapshot.pendingChunks} | gaps ${snapshot.gaps} overlaps ${snapshot.overlaps} | draws ${snapshot.drawCalls}`,
@@ -196,20 +196,21 @@ function formatTimingStrip(timing: FrameTimingSnapshot): string {
   return buckets.map(formatTimingBucketGlyph).join("");
 }
 
-function formatTimingBucketGlyph(bucket: { maxFrameMs: number; hitchCount: number }): string {
-  if (bucket.hitchCount > 0 && bucket.maxFrameMs >= 250) {
+function formatTimingBucketGlyph(bucket: { maxFrameMs: number; stalledMs: number; hitchCount: number }): string {
+  const blockedMs = Math.max(bucket.maxFrameMs, bucket.stalledMs);
+  if (blockedMs >= 250) {
     return "!";
   }
-  if (bucket.hitchCount > 0) {
+  if (bucket.hitchCount > 0 || bucket.stalledMs > 0) {
     return "#";
   }
-  if (bucket.maxFrameMs >= 34) {
+  if (blockedMs >= 34) {
     return "*";
   }
-  if (bucket.maxFrameMs >= 20) {
+  if (blockedMs >= 20) {
     return "+";
   }
-  if (bucket.maxFrameMs > 0) {
+  if (blockedMs > 0) {
     return ".";
   }
   return " ";
@@ -219,7 +220,7 @@ function formatWorstBucketSummary(timing: FrameTimingSnapshot): string {
   const buckets = [...timing.recent, timing.current];
   let worstBucket = buckets[0];
   for (const bucket of buckets) {
-    if (!worstBucket || bucket.maxFrameMs > worstBucket.maxFrameMs) {
+    if (!worstBucket || Math.max(bucket.maxFrameMs, bucket.stalledMs) > Math.max(worstBucket.maxFrameMs, worstBucket.stalledMs)) {
       worstBucket = bucket;
     }
   }
@@ -227,7 +228,8 @@ function formatWorstBucketSummary(timing: FrameTimingSnapshot): string {
     return "worst bucket none";
   }
   const secondsAgo = Math.max(0, (timing.current.endMs - worstBucket.endMs) / 1000);
-  return `worst bucket ${worstBucket.maxFrameMs.toFixed(0)}ms ${secondsAgo.toFixed(1)}s ago (${worstBucket.hitchCount} hitch)`;
+  const blockedMs = Math.max(worstBucket.maxFrameMs, worstBucket.stalledMs);
+  return `worst bucket ${blockedMs.toFixed(0)}ms ${secondsAgo.toFixed(1)}s ago (${worstBucket.hitchCount} hitch, ${worstBucket.stalledMs.toFixed(0)}ms stalled)`;
 }
 
 function formatHitchAttribution(snapshot: LodLabSnapshot): string {

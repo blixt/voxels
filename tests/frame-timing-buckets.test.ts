@@ -29,5 +29,11 @@ test("frame timing buckets preserve hitches and dropped-frame estimates", () => 
 
   expect(snapshot.recentHitchCount).toBe(1);
   expect(snapshot.worstRecentFrameMs).toBe(416);
+  expect(snapshot.recentStalledMs).toBe(416);
   expect(snapshot.recentDroppedFrameEstimate).toBeGreaterThanOrEqual(24);
+
+  const buckets = [...snapshot.recent, snapshot.current];
+  const stalledBuckets = buckets.filter((bucket) => bucket.stalledMs > 0);
+  expect(stalledBuckets.length).toBeGreaterThanOrEqual(4);
+  expect(stalledBuckets.some((bucket) => bucket.frameCount === 0 && bucket.stalledMs > 0)).toBe(true);
 });

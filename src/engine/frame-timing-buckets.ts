@@ -4,6 +4,7 @@ export interface FrameTimingBucket {
   frameCount: number;
   totalFrameMs: number;
   maxFrameMs: number;
+  stalledMs: number;
   hitchCount: number;
   droppedFrameEstimate: number;
 }
@@ -14,6 +15,7 @@ export interface FrameTimingSnapshot {
   current: FrameTimingBucket;
   recent: readonly FrameTimingBucket[];
   worstRecentFrameMs: number;
+  recentStalledMs: number;
   recentHitchCount: number;
   recentDroppedFrameEstimate: number;
 }
@@ -37,15 +39,14 @@ export class FrameTimingBuckets {
       return this.snapshot();
     }
 
-    const frameMs = Math.max(0, timestampMs - (this.lastTimestampMs ?? timestampMs));
+    const previousTimestampMs = this.lastTimestampMs ?? timestampMs;
+    const frameMs = Math.max(0, timestampMs - previousTimestampMs);
     this.lastTimestampMs = timestampMs;
-    while (timestampMs >= this.current.endMs) {
-      this.buckets.push(this.current);
-      if (this.buckets.length > this.maxBuckets) {
-        this.buckets.shift();
-      }
-      this.current = createBucket(this.current.endMs, this.bucketMs);
+
+    if (frameMs >= this.hitchThresholdMs) {
+      this.recordStallSpan(previousTimestampMs, timestampMs);
     }
+    this.advanceCurrentTo(timestampMs);
 
     this.current.frameCount += 1;
     this.current.totalFrameMs += frameMs;
@@ -61,10 +62,12 @@ export class FrameTimingBuckets {
   snapshot(): FrameTimingSnapshot {
     const current = this.current ?? createBucket(0, this.bucketMs);
     let worstRecentFrameMs = current.maxFrameMs;
+    let recentStalledMs = current.stalledMs;
     let recentHitchCount = current.hitchCount;
     let recentDroppedFrameEstimate = current.droppedFrameEstimate;
     for (const bucket of this.buckets) {
       worstRecentFrameMs = Math.max(worstRecentFrameMs, bucket.maxFrameMs);
+      recentStalledMs += bucket.stalledMs;
       recentHitchCount += bucket.hitchCount;
       recentDroppedFrameEstimate += bucket.droppedFrameEstimate;
     }
@@ -74,9 +77,34 @@ export class FrameTimingBuckets {
       current: cloneBucket(current),
       recent: this.buckets.map(cloneBucket),
       worstRecentFrameMs,
+      recentStalledMs,
       recentHitchCount,
       recentDroppedFrameEstimate,
     };
+  }
+
+  private recordStallSpan(startMs: number, endMs: number): void {
+    let cursorMs = startMs;
+    while (cursorMs < endMs) {
+      this.advanceCurrentTo(cursorMs);
+      const bucket = this.current;
+      if (!bucket) {
+        return;
+      }
+      const overlapEndMs = Math.min(endMs, bucket.endMs);
+      bucket.stalledMs += Math.max(0, overlapEndMs - cursorMs);
+      cursorMs = overlapEndMs;
+    }
+  }
+
+  private advanceCurrentTo(timestampMs: number): void {
+    while (this.current && timestampMs >= this.current.endMs) {
+      this.buckets.push(this.current);
+      if (this.buckets.length > this.maxBuckets) {
+        this.buckets.shift();
+      }
+      this.current = createBucket(this.current.endMs, this.bucketMs);
+    }
   }
 }
 
@@ -87,6 +115,7 @@ function createBucket(startMs: number, bucketMs: number): FrameTimingBucket {
     frameCount: 0,
     totalFrameMs: 0,
     maxFrameMs: 0,
+    stalledMs: 0,
     hitchCount: 0,
     droppedFrameEstimate: 0,
   };
@@ -99,6 +128,7 @@ function cloneBucket(bucket: FrameTimingBucket): FrameTimingBucket {
     frameCount: bucket.frameCount,
     totalFrameMs: bucket.totalFrameMs,
     maxFrameMs: bucket.maxFrameMs,
+    stalledMs: bucket.stalledMs,
     hitchCount: bucket.hitchCount,
     droppedFrameEstimate: bucket.droppedFrameEstimate,
   };
