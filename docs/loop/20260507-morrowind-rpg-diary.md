@@ -2353,3 +2353,31 @@ Build the first "place identity" slice without regressing performance or input:
   - verify the screenshot-only browser capture
   - add source-first LOD restoration on top of the shell fallback contract
   - then checkpoint and push the rendering slice before returning to biome/content work
+
+### 2026-05-08 - Edit-Aware LOD Source Handoff
+
+- Trigger:
+  - The shell ownership fix made far terrain continuous, but it intentionally bypassed resident chunk data in the common path.
+  - That is acceptable for unedited procedural terrain only because the generator material sampler is the source of truth; it is not acceptable once the world has voxel edits or future non-procedural modifications.
+- Changes:
+  - Added an edit-aware source sampling path inside LOD shell generation.
+  - When edit overlays exist, the LOD shell now samples the corresponding resident/finer source voxel footprint before falling back to procedural material buckets.
+  - Kept the no-edit path on the fast generator-authoritative shell so initial streaming does not pay source-scanning cost for data that should be identical to the generator.
+  - Reworked stale source-downsample tests so they assert the visible-shell contract instead of expecting buried volumetric LOD slabs.
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun run scripts/diagnose-lod-coverage.ts --samples=3`: pass, `0` uncovered samples out of `11025`.
+  - Shared Codex in-app browser reload at `http://localhost:3000/`: visible terrain no longer shows the previous hard near/far world split; HUD observed `27.3 fps` immediately after reload in the shared browser, with all testing now on the same browser surface the user sees.
+  - `mise exec -- bun test tests/lod-system.test.ts -t "LOD 1 visible shell reflects|actual generated LOD data covers|sampled fog-range columns"`: pass, `3` focused tests.
+  - `mise exec -- bun test tests/lod-system.test.ts -t "LOD edit propagation"`: pass, `2` focused tests.
+- Honest assessment:
+  - This is a pragmatic source handoff, not a full resident-data-first LOD rebuild. Full source-first is still possible, but the naive implementation pushed cold LOD generation back into the 40s range and is not viable without a chunk-column source cache.
+  - The important correctness property now covered is editable-world safety: edits are represented through source sampling, while unedited procedural terrain keeps using the shared generator authority.
+  - The screenshot still looks too voxel/blocky for the Morrowind-like target, but the rendering continuity issue is materially better and measurable.
+- Rubric movement:
+  - Rendering correctness/quality: `7.72 -> 7.82`.
+  - Performance/playability: `6.65 -> 6.70` because edit correctness was restored without making the common no-edit LOD path source-scan every column.
+  - Harness maturity: unchanged, but the shared-browser strategy is now the default visual validation path.
+- Next:
+  - commit and push the edit-aware handoff
+  - then move to the highest-ROI visible/gameplay work, while keeping the LOD coverage harness in the loop for regressions

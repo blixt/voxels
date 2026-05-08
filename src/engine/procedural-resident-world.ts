@@ -1246,6 +1246,10 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     const originX = lodCx * worldSize;
     const originY = lodCy * worldSize;
     const originZ = lodCz * worldSize;
+    const sourceLevel = level - 1;
+    const sourceStride = 1 << sourceLevel;
+    const sourceWorldSize = cs * sourceStride;
+    const sourceVoxelSpan = Math.max(1, Math.floor(stride / sourceStride));
 
     let solidCount = 0;
     let minX = cs, minY = cs, minZ = cs;
@@ -1262,29 +1266,19 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       if (oy + 1 > maxY) maxY = oy + 1;
       if (oz + 1 > maxZ) maxZ = oz + 1;
     };
-    const isOutputVoxelCoveredByFiner = (ox: number, oy: number, oz: number): boolean => {
+    const isOutputColumnCoveredByFiner = (ox: number, oz: number): boolean => {
       const minWorldX = originX + ox * stride;
       const maxWorldX = minWorldX + stride - 1;
-      const minWorldY = originY + oy * stride;
-      const maxWorldY = minWorldY + stride - 1;
       const minWorldZ = originZ + oz * stride;
       const maxWorldZ = minWorldZ + stride - 1;
       const minChunkX = Math.floor(minWorldX / this.chunkSize);
       const maxChunkX = Math.floor(maxWorldX / this.chunkSize);
-      const minChunkY = Math.floor(minWorldY / this.chunkSize);
-      const maxChunkY = Math.floor(maxWorldY / this.chunkSize);
       const minChunkZ = Math.floor(minWorldZ / this.chunkSize);
       const maxChunkZ = Math.floor(maxWorldZ / this.chunkSize);
       for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
         for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
-          if (!this.isColumnRenderReady(chunkX, chunkZ)) {
-            continue;
-          }
-          for (let chunkY = minChunkY; chunkY <= maxChunkY; chunkY += 1) {
-            const chunk = this.getResidentChunk(chunkX, chunkY, chunkZ);
-            if (chunk?.renderReady && chunk.solidCount > 0) {
-              return true;
-            }
+          if (this.isColumnRenderReady(chunkX, chunkZ)) {
+            return true;
           }
         }
       }
@@ -1313,6 +1307,57 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       }
       return false;
     };
+    const sampleSourceMaterial = (
+      ox: number,
+      oy: number,
+      oz: number,
+    ): { material: number; complete: boolean } => {
+      const baseWorldX = originX + ox * stride;
+      const baseWorldY = originY + oy * stride;
+      const baseWorldZ = originZ + oz * stride;
+      let complete = true;
+      let waterMaterial = 0;
+
+      for (let dy = sourceVoxelSpan - 1; dy >= 0; dy -= 1) {
+        for (let dz = 0; dz < sourceVoxelSpan; dz += 1) {
+          for (let dx = 0; dx < sourceVoxelSpan; dx += 1) {
+            const sourceWorldX = baseWorldX + dx * sourceStride;
+            const sourceWorldY = baseWorldY + dy * sourceStride;
+            const sourceWorldZ = baseWorldZ + dz * sourceStride;
+            const sourceCx = Math.floor(sourceWorldX / sourceWorldSize);
+            const sourceCy = Math.floor(sourceWorldY / sourceWorldSize);
+            const sourceCz = Math.floor(sourceWorldZ / sourceWorldSize);
+            const sourceChunk = sourceLevel === 0
+              ? this.chunks.get(toChunkKey(sourceCx, sourceCy, sourceCz))
+              : this.lodChunks.get(`L${sourceLevel}:${sourceCx}:${sourceCy}:${sourceCz}`);
+            if (!sourceChunk) {
+              const sourceKnownEmpty = sourceLevel === 0
+                ? this.emptyChunkKeys.has(toChunkKey(sourceCx, sourceCy, sourceCz))
+                : this.emptyLodKeys.has(`L${sourceLevel}:${sourceCx}:${sourceCy}:${sourceCz}`)
+                  || this.coveredEmptyLodKeys.has(`L${sourceLevel}:${sourceCx}:${sourceCy}:${sourceCz}`);
+              if (!sourceKnownEmpty) {
+                complete = false;
+              }
+              continue;
+            }
+            const localX = Math.floor((sourceWorldX - sourceCx * sourceWorldSize) / sourceStride);
+            const localY = Math.floor((sourceWorldY - sourceCy * sourceWorldSize) / sourceStride);
+            const localZ = Math.floor((sourceWorldZ - sourceCz * sourceWorldSize) / sourceStride);
+            const material = sourceChunk.data[localX + localY * cs + localZ * chunkArea] ?? 0;
+            if (material === 0) {
+              continue;
+            }
+            if (!isProceduralWaterMaterial(material)) {
+              return { material, complete };
+            }
+            if (waterMaterial === 0) {
+              waterMaterial = material;
+            }
+          }
+        }
+      }
+      return { material: waterMaterial, complete };
+    };
     const fillGeneratedFallbackColumn = (
       ox: number,
       oz: number,
@@ -1329,6 +1374,27 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       if (startOy > endOy) {
         return;
       }
+      if (isOutputColumnCoveredByFiner(ox, oz)) {
+        skippedFinerCoverage = true;
+        return;
+      }
+      if (this.editOverlays.size > 0) {
+        let sourceColumnComplete = true;
+        for (let oy = endOy; oy >= startOy; oy -= 1) {
+          const source = sampleSourceMaterial(ox, oy, oz);
+          if (!source.complete) {
+            sourceColumnComplete = false;
+          }
+          if (source.material !== 0) {
+            recordMaterial(ox, oy, oz, source.material);
+            return;
+          }
+        }
+        if (sourceColumnComplete) {
+          return;
+        }
+        sourceComplete = false;
+      }
       const materials = this.generator.sampleColumnMaterialBuckets(
         worldX,
         worldZ,
@@ -1340,10 +1406,6 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         const material = materials[oy - startOy] ?? 0;
         if (material === 0) {
           continue;
-        }
-        if (isOutputVoxelCoveredByFiner(ox, oy, oz)) {
-          skippedFinerCoverage = true;
-          return;
         }
         recordMaterial(ox, oy, oz, material);
         return;
