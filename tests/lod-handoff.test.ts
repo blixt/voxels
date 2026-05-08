@@ -12,6 +12,7 @@ test("adopting an unmeshed resident chunk keeps coarser LOD coverage until the r
   const lodChunk = createTestChunk(0, 0, 0, 1, 2, true);
   const worldWithInternals = world as unknown as {
     lodChunks: Map<string, VoxelChunk>;
+    staleLodKeys: Set<string>;
     adoptResidentChunk(key: string, chunk: VoxelChunk): void;
   };
 
@@ -22,7 +23,40 @@ test("adopting an unmeshed resident chunk keeps coarser LOD coverage until the r
 
   world.noteResidentChunkRenderReadyState(residentChunk, true);
 
-  expect(worldWithInternals.lodChunks.has("L1:0:0:0")).toBe(false);
+  expect(worldWithInternals.lodChunks.has("L1:0:0:0")).toBe(true);
+  expect(worldWithInternals.staleLodKeys.has("L1:0:0:0")).toBe(true);
+});
+
+test("coarser LOD source invalidation keeps stale chunks visible until replacement is ready", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
+  const lodChunk = createTestChunk(0, 0, 0, 2, 4, true);
+  const worldWithInternals = world as unknown as {
+    lodChunks: Map<string, VoxelChunk>;
+    staleLodKeys: Set<string>;
+    invalidateCoarserLodChunksForSourceChunk(sourceLevel: number, sourceCx: number, sourceCy: number, sourceCz: number): void;
+  };
+
+  worldWithInternals.lodChunks.set("L2:0:0:0", lodChunk);
+  worldWithInternals.invalidateCoarserLodChunksForSourceChunk(1, 0, 0, 0);
+
+  expect(worldWithInternals.lodChunks.has("L2:0:0:0")).toBe(true);
+  expect(worldWithInternals.staleLodKeys.has("L2:0:0:0")).toBe(true);
+});
+
+test("edit invalidation keeps active LOD visible while marking it for regeneration", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
+  const lodChunk = createTestChunk(0, 0, 0, 1, 2, true);
+  const worldWithInternals = world as unknown as {
+    lodChunks: Map<string, VoxelChunk>;
+    staleLodKeys: Set<string>;
+    invalidateLodChunksAt(worldX: number, worldY: number, worldZ: number): void;
+  };
+
+  worldWithInternals.lodChunks.set("L1:0:0:0", lodChunk);
+  worldWithInternals.invalidateLodChunksAt(1, 1, 1);
+
+  expect(worldWithInternals.lodChunks.has("L1:0:0:0")).toBe(true);
+  expect(worldWithInternals.staleLodKeys.has("L1:0:0:0")).toBe(true);
 });
 
 function createTestChunk(

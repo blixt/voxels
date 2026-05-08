@@ -150,6 +150,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
   private readonly chunks = new Map<string, VoxelChunk>();
   private readonly lodChunks = new Map<string, VoxelChunk>();
+  private readonly staleLodKeys = new Set<string>();
   private readonly emptyLodKeys = new Set<string>();
   private readonly coveredEmptyLodKeys = new Set<string>();
   private coveredEmptyLodSignature: string | null = null;
@@ -856,7 +857,11 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       const keyPrefix = `L${ring.level}:`;
       for (const key of neededKeys) {
         if (!key.startsWith(keyPrefix)) continue;
-        if (this.lodChunks.has(key) || this.emptyLodKeys.has(key) || this.coveredEmptyLodKeys.has(key)) continue;
+        if (
+          (this.lodChunks.has(key) && !this.staleLodKeys.has(key)) ||
+          this.emptyLodKeys.has(key) ||
+          this.coveredEmptyLodKeys.has(key)
+        ) continue;
         if (generated >= maxGenerate) {
           pending++;
           continue;
@@ -875,6 +880,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           } else {
             this.emptyLodKeys.add(key);
           }
+          this.lodChunks.delete(key);
+          this.staleLodKeys.delete(key);
           this.invalidateCoarserLodChunksForSourceChunk(ring.level, cx, cy, cz, {
             clearNeededKeyCache: false,
           });
@@ -894,6 +901,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         chunk.renderReady = true;
         chunk.gpuDirty = true;
         this.lodChunks.set(key, chunk);
+        this.staleLodKeys.delete(key);
         const neighborRemeshStartedAt = performance.now();
         this.remeshAdjacentLodChunks(ring.level, cx, cy, cz);
         meshMs += performance.now() - neighborRemeshStartedAt;
@@ -912,6 +920,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       for (const [key, chunk] of [...this.lodChunks.entries()]) {
         if (!neededKeys.has(key)) {
           this.lodChunks.delete(key);
+          this.staleLodKeys.delete(key);
           this.invalidateCoarserLodChunksForSourceChunk(chunk.lodLevel, chunk.coord.x, chunk.coord.y, chunk.coord.z, {
             clearNeededKeyCache: false,
           });
@@ -1434,7 +1443,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       const stride = 1 << ring.level;
       const worldSize = this.chunkSize * stride;
       const key = `L${ring.level}:${Math.floor(worldX / worldSize)}:${Math.floor(worldY / worldSize)}:${Math.floor(worldZ / worldSize)}`;
-      this.lodChunks.delete(key);
+      if (this.lodChunks.has(key)) {
+        this.staleLodKeys.add(key);
+      }
       this.emptyLodKeys.delete(key);
       this.coveredEmptyLodKeys.delete(key);
     }
@@ -1462,7 +1473,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       const stride = 1 << ring.level;
       const worldSize = this.chunkSize * stride;
       const key = `L${ring.level}:${Math.floor(sourceWorldX / worldSize)}:${Math.floor(sourceWorldY / worldSize)}:${Math.floor(sourceWorldZ / worldSize)}`;
-      this.lodChunks.delete(key);
+      if (this.lodChunks.has(key)) {
+        this.staleLodKeys.add(key);
+      }
       this.emptyLodKeys.delete(key);
       this.coveredEmptyLodKeys.delete(key);
     }
@@ -2027,7 +2040,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         }
         const parts = key.split(":");
         if (Number.parseInt(parts[3]!, 10) === lodCz) {
-          this.lodChunks.delete(key);
+          this.staleLodKeys.add(key);
         }
       }
       for (const key of [...this.emptyLodKeys]) {
