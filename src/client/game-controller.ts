@@ -231,6 +231,10 @@ export interface GameHudSnapshot {
   lodYRangeMs: number;
   lodDownsampleMs: number;
   lodMeshMs: number;
+  lodCommitMs: number;
+  lodMaxChunkMs: number;
+  lodMaxChunkLevel: number;
+  lodMaxChunkKey: string | null;
   lodNeededKeyCount: number;
   lodNeededKeyCacheHit: boolean;
   lodDrawCalls: number;
@@ -788,6 +792,10 @@ export class GameController {
     yRangeMs: 0,
     downsampleMs: 0,
     meshMs: 0,
+    commitMs: 0,
+    maxChunkMs: 0,
+    maxChunkLevel: 0,
+    maxChunkKey: null,
     neededKeyCount: 0,
     neededKeyCacheHit: false,
   };
@@ -989,6 +997,10 @@ export class GameController {
       lodYRangeMs: this.lastLodSummary.yRangeMs,
       lodDownsampleMs: this.lastLodSummary.downsampleMs,
       lodMeshMs: this.lastLodSummary.meshMs,
+      lodCommitMs: this.lastLodSummary.commitMs,
+      lodMaxChunkMs: this.lastLodSummary.maxChunkMs,
+      lodMaxChunkLevel: this.lastLodSummary.maxChunkLevel,
+      lodMaxChunkKey: this.lastLodSummary.maxChunkKey,
       lodNeededKeyCount: this.lastLodSummary.neededKeyCount,
       lodNeededKeyCacheHit: this.lastLodSummary.neededKeyCacheHit,
       lodDrawCalls: this.lastRenderStats.lodDrawCalls,
@@ -2828,6 +2840,10 @@ export class GameController {
       yRangeMs: 0,
       downsampleMs: 0,
       meshMs: 0,
+      commitMs: 0,
+      maxChunkMs: 0,
+      maxChunkLevel: 0,
+      maxChunkKey: null,
       neededKeyCacheHit: false,
     };
   }

@@ -103,6 +103,10 @@ export interface LodResidencyUpdateSummary {
   yRangeMs: number;
   downsampleMs: number;
   meshMs: number;
+  commitMs: number;
+  maxChunkMs: number;
+  maxChunkLevel: number;
+  maxChunkKey: string | null;
   neededKeyCount: number;
   neededKeyCacheHit: boolean;
 }
@@ -137,6 +141,27 @@ interface ChunkYRange {
   maxCy: number;
 }
 
+interface PartialLodChunkBuild {
+  key: string;
+  cx: number;
+  cy: number;
+  cz: number;
+  level: number;
+  stride: number;
+  worldSize: number;
+  data: Uint16Array;
+  solidCount: number;
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+  sourceComplete: boolean;
+  skippedFinerCoverage: boolean;
+  nextColumn: number;
+}
+
 export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   readonly chunkSize: number;
   readonly minY = 0;
@@ -155,6 +180,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   private readonly emptyLodKeys = new Set<string>();
   private readonly coveredEmptyLodKeys = new Set<string>();
   private coveredEmptyLodSignature: string | null = null;
+  private activeLodBuildJob: PartialLodChunkBuild | null = null;
   private meshMaterialLut: MeshMaterialLut | null = null;
   private readonly emptyChunkKeys = new Set<string>();
   private readonly editOverlays = new Map<string, Map<number, number>>();
@@ -838,6 +864,10 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           yRangeMs,
           downsampleMs: 0,
           meshMs: 0,
+          commitMs: 0,
+          maxChunkMs: 0,
+          maxChunkLevel: 0,
+          maxChunkKey: null,
           neededKeyCount: planning.neededKeyCount,
           neededKeyCacheHit,
         };
@@ -853,7 +883,14 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     let pending = 0;
     let downsampleMs = 0;
     let meshMs = 0;
+    let commitMs = 0;
+    let maxChunkMs = 0;
+    let maxChunkLevel = 0;
+    let maxChunkKey: string | null = null;
     let workBudgetExhausted = false;
+    if (this.activeLodBuildJob && !neededKeys.has(this.activeLodBuildJob.key)) {
+      this.activeLodBuildJob = null;
+    }
     for (const ring of LOD_RINGS) {
       const stride = 1 << ring.level;
       const worldSize = this.chunkSize * stride;
@@ -880,9 +917,43 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         const cy = parseInt(parts[2]!);
         const cz = parseInt(parts[3]!);
 
+        const chunkStartedAt = performance.now();
         const dsStartedAt = performance.now();
-        const data = this.downsampleLodChunkData(cx, cy, cz, ring.level, stride, worldSize);
-        downsampleMs += performance.now() - dsStartedAt;
+        const partialBuildAllowed = ring.level >= 3 && this.editOverlays.size === 0;
+        let data: {
+          data: Uint16Array;
+          solidCount: number;
+          solidBounds: { min: [number, number, number]; max: [number, number, number] } | null;
+          sourceComplete: boolean;
+          skippedFinerCoverage: boolean;
+        } | null = null;
+        if (partialBuildAllowed) {
+          if (this.activeLodBuildJob && this.activeLodBuildJob.key !== key) {
+            pending++;
+            workBudgetExhausted = true;
+            continue;
+          }
+          const job = this.activeLodBuildJob ?? this.createPartialLodChunkBuild(key, cx, cy, cz, ring.level, stride, worldSize);
+          this.activeLodBuildJob = job;
+          const complete = this.processPartialLodChunkBuild(job, startedAt + maxWorkMs);
+          downsampleMs += performance.now() - dsStartedAt;
+          if (!complete) {
+            const chunkMs = performance.now() - chunkStartedAt;
+            if (chunkMs > maxChunkMs) {
+              maxChunkMs = chunkMs;
+              maxChunkLevel = ring.level;
+              maxChunkKey = key;
+            }
+            pending++;
+            workBudgetExhausted = true;
+            continue;
+          }
+          data = this.finalizePartialLodChunkBuild(job);
+          this.activeLodBuildJob = null;
+        } else {
+          data = this.downsampleLodChunkData(cx, cy, cz, ring.level, stride, worldSize);
+          downsampleMs += performance.now() - dsStartedAt;
+        }
         if (data.solidCount === 0) {
           if (data.skippedFinerCoverage) {
             this.coveredEmptyLodKeys.add(key);
@@ -896,6 +967,12 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
             clearNeededKeyCache: false,
           });
           generated++;
+          const chunkMs = performance.now() - chunkStartedAt;
+          if (chunkMs > maxChunkMs) {
+            maxChunkMs = chunkMs;
+            maxChunkLevel = ring.level;
+            maxChunkKey = key;
+          }
           continue;
         }
         const chunk = createLodResidentChunk(
@@ -923,12 +1000,20 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           clearNeededKeyCache: false,
         });
         generated++;
+        const chunkMs = performance.now() - chunkStartedAt;
+        if (chunkMs > maxChunkMs) {
+          maxChunkMs = chunkMs;
+          maxChunkLevel = ring.level;
+          maxChunkKey = key;
+        }
         if (performance.now() - startedAt >= maxWorkMs) {
           workBudgetExhausted = true;
         }
       }
     }
+    const commitStartedAt = performance.now();
     this.commitPreparedLodChunks();
+    commitMs = performance.now() - commitStartedAt;
 
     // Phase 3: evict LOD chunks no longer needed.
     // Only evict when there's no pending work — otherwise old LOD chunks
@@ -994,6 +1079,10 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       yRangeMs,
       downsampleMs,
       meshMs,
+      commitMs,
+      maxChunkMs,
+      maxChunkLevel,
+      maxChunkKey,
       neededKeyCount: neededKeys.size,
       neededKeyCacheHit,
     };
@@ -1257,6 +1346,157 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     };
   }
 
+  private createPartialLodChunkBuild(
+    key: string,
+    cx: number,
+    cy: number,
+    cz: number,
+    level: number,
+    stride: number,
+    worldSize: number,
+  ): PartialLodChunkBuild {
+    const cs = this.chunkSize;
+    return {
+      key,
+      cx,
+      cy,
+      cz,
+      level,
+      stride,
+      worldSize,
+      data: new Uint16Array(cs * cs * cs),
+      solidCount: 0,
+      minX: cs,
+      minY: cs,
+      minZ: cs,
+      maxX: 0,
+      maxY: 0,
+      maxZ: 0,
+      sourceComplete: true,
+      skippedFinerCoverage: false,
+      nextColumn: 0,
+    };
+  }
+
+  private processPartialLodChunkBuild(job: PartialLodChunkBuild, deadlineMs: number): boolean {
+    const cs = this.chunkSize;
+    const totalColumns = cs * cs;
+    const originX = job.cx * job.worldSize;
+    const originY = job.cy * job.worldSize;
+    const originZ = job.cz * job.worldSize;
+    while (job.nextColumn < totalColumns) {
+      const column = job.nextColumn;
+      job.nextColumn += 1;
+      const ox = column % cs;
+      const oz = Math.floor(column / cs);
+      if (this.isOutputLodColumnCoveredByFiner(job.level, originX, originZ, job.stride, ox, oz)) {
+        job.skippedFinerCoverage = true;
+      } else {
+        const topBucket = this.generator.sampleTopColumnMaterialBucket(
+          originX + ox * job.stride,
+          originZ + oz * job.stride,
+          originY,
+          job.stride,
+          cs,
+          job.stride * 3,
+        );
+        if (topBucket) {
+          this.recordPartialLodMaterial(job, ox, topBucket.bucketIndex, oz, topBucket.material);
+        }
+      }
+      if (job.nextColumn < totalColumns && performance.now() >= deadlineMs) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private recordPartialLodMaterial(
+    job: PartialLodChunkBuild,
+    ox: number,
+    oy: number,
+    oz: number,
+    material: number,
+  ): void {
+    const cs = this.chunkSize;
+    const chunkArea = cs * cs;
+    job.data[ox + oy * cs + oz * chunkArea] = material;
+    job.solidCount += 1;
+    if (ox < job.minX) job.minX = ox;
+    if (oy < job.minY) job.minY = oy;
+    if (oz < job.minZ) job.minZ = oz;
+    if (ox + 1 > job.maxX) job.maxX = ox + 1;
+    if (oy + 1 > job.maxY) job.maxY = oy + 1;
+    if (oz + 1 > job.maxZ) job.maxZ = oz + 1;
+  }
+
+  private finalizePartialLodChunkBuild(job: PartialLodChunkBuild): {
+    data: Uint16Array;
+    solidCount: number;
+    solidBounds: { min: [number, number, number]; max: [number, number, number] } | null;
+    sourceComplete: boolean;
+    skippedFinerCoverage: boolean;
+  } {
+    return {
+      data: job.data,
+      solidCount: job.solidCount,
+      solidBounds: job.solidCount === 0
+        ? null
+        : { min: [job.minX, job.minY, job.minZ], max: [job.maxX, job.maxY, job.maxZ] },
+      sourceComplete: job.sourceComplete,
+      skippedFinerCoverage: job.skippedFinerCoverage,
+    };
+  }
+
+  private isOutputLodColumnCoveredByFiner(
+    level: number,
+    originX: number,
+    originZ: number,
+    stride: number,
+    ox: number,
+    oz: number,
+  ): boolean {
+    const minWorldX = originX + ox * stride;
+    const maxWorldX = minWorldX + stride - 1;
+    const minWorldZ = originZ + oz * stride;
+    const maxWorldZ = minWorldZ + stride - 1;
+    const minChunkX = Math.floor(minWorldX / this.chunkSize);
+    const maxChunkX = Math.floor(maxWorldX / this.chunkSize);
+    const minChunkZ = Math.floor(minWorldZ / this.chunkSize);
+    const maxChunkZ = Math.floor(maxWorldZ / this.chunkSize);
+    for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
+      for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
+        if (this.isColumnRenderReady(chunkX, chunkZ)) {
+          return true;
+        }
+      }
+    }
+    for (let finerLevel = 1; finerLevel < level; finerLevel += 1) {
+      const finerStride = 1 << finerLevel;
+      const finerWorldSize = this.chunkSize * finerStride;
+      const minLodX = Math.floor(minWorldX / finerWorldSize);
+      const maxLodX = Math.floor(maxWorldX / finerWorldSize);
+      const minLodZ = Math.floor(minWorldZ / finerWorldSize);
+      const maxLodZ = Math.floor(maxWorldZ / finerWorldSize);
+      for (let lodZ = minLodZ; lodZ <= maxLodZ; lodZ += 1) {
+        for (let lodX = minLodX; lodX <= maxLodX; lodX += 1) {
+          if (this.isLodWorldColumnCovered(
+            finerLevel,
+            lodX,
+            lodZ,
+            minWorldX,
+            maxWorldX,
+            minWorldZ,
+            maxWorldZ,
+          )) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
   private downsampleLodChunkData(
     lodCx: number,
     lodCy: number,
@@ -1397,21 +1637,37 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       minOy: number,
       maxOyExclusive: number,
     ): void => {
+      if (isOutputColumnCoveredByFiner(ox, oz)) {
+        skippedFinerCoverage = true;
+        return;
+      }
       const worldX = originX + ox * stride;
       const worldZ = originZ + oz * stride;
+      const shellPaddingY = stride * 3;
+      if (level >= 3 && this.editOverlays.size === 0) {
+        const topBucket = this.generator.sampleTopColumnMaterialBucket(
+          worldX,
+          worldZ,
+          originY + minOy * stride,
+          stride,
+          maxOyExclusive - minOy,
+          shellPaddingY,
+        );
+        if (!topBucket) {
+          return;
+        }
+        recordMaterial(ox, minOy + topBucket.bucketIndex, oz, topBucket.material);
+        return;
+      }
       const column = this.generator.sampleSurfaceColumn(worldX, worldZ);
       const maxSurfaceWorldY = Math.max(column.topY, column.waterTopY ?? column.surfaceY);
-      const minSurfaceWorldY = column.surfaceY - stride * 3;
+      const minSurfaceWorldY = column.surfaceY - shellPaddingY;
       const startOy = Math.max(minOy, Math.floor((minSurfaceWorldY - originY) / stride));
       const endOy = Math.min(maxOyExclusive - 1, Math.floor((maxSurfaceWorldY - originY) / stride));
       if (startOy > endOy) {
         return;
       }
-      if (isOutputColumnCoveredByFiner(ox, oz)) {
-        skippedFinerCoverage = true;
-        return;
-      }
-      if (this.editOverlays.size > 0) {
+      if (level === 1 || this.editOverlays.size > 0) {
         let sourceColumnComplete = true;
         for (let oy = endOy; oy >= startOy; oy -= 1) {
           const source = sampleSourceMaterial(ox, oy, oz);

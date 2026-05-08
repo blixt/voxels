@@ -584,9 +584,12 @@ function createPerformanceStripView(root: HTMLElement): PerformanceStripView {
   return {
     update(snapshot) {
       const wallFrameMs = snapshot.avgFrameWallMs > 0 ? snapshot.avgFrameWallMs : snapshot.lastFrameWallMs;
+      const hitchLabel = snapshot.lastHitchAttribution.cause === "LOD" && snapshot.lodMaxChunkMs > 0
+        ? `${snapshot.frameTiming.recentHitchCount} hitch LOD ${snapshot.lodMaxChunkMs.toFixed(0)}ms`
+        : `${snapshot.frameTiming.recentHitchCount} hitch ${snapshot.lastHitchAttribution.cause}`;
       const nextValues = [
         `${formatWallFrameRate(wallFrameMs)} / ${formatFrameMs(snapshot.frameTiming.worstRecentFrameMs)} max`,
-        `${snapshot.frameTiming.recentHitchCount} hitch ${snapshot.lastHitchAttribution.cause}`,
+        hitchLabel,
         `${formatCompactCount(snapshot.chunkCount)} chunks`,
       ];
       for (let index = 0; index < nextValues.length; index += 1) {
@@ -615,6 +618,14 @@ function createPerformanceStripView(root: HTMLElement): PerformanceStripView {
         `Render CPU ${snapshot.lastFrameCpuMs.toFixed(1)} ms`,
         `Stream ${snapshot.streamMs.toFixed(1)} ms`,
         `Mesh ${snapshot.meshMs.toFixed(1)} ms`,
+        `LOD elapsed ${snapshot.lodElapsedMs.toFixed(1)} ms`,
+        `LOD y-range ${snapshot.lodYRangeMs.toFixed(1)} ms`,
+        `LOD downsample ${snapshot.lodDownsampleMs.toFixed(1)} ms`,
+        `LOD mesh ${snapshot.lodMeshMs.toFixed(1)} ms`,
+        `LOD commit ${snapshot.lodCommitMs.toFixed(1)} ms`,
+        `LOD max chunk ${snapshot.lodMaxChunkMs.toFixed(1)} ms L${snapshot.lodMaxChunkLevel} ${snapshot.lodMaxChunkKey ?? ""}`,
+        `LOD pending ${snapshot.lodPendingChunks.toLocaleString()}`,
+        `LOD generated ${snapshot.lodGeneratedChunks.toLocaleString()}`,
         `Pending ${snapshot.streamPendingChunks.toLocaleString()}`,
         `Dirty ${snapshot.streamDirtyResidentChunks.toLocaleString()}`,
         `Draws ${snapshot.drawCalls.toLocaleString()}`,

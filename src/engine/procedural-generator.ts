@@ -320,6 +320,11 @@ export interface ProceduralSurfaceColumnSample {
   waterMaterial: number | null;
 }
 
+export interface ProceduralTopColumnMaterialBucketSample extends ProceduralSurfaceColumnSample {
+  bucketIndex: number;
+  material: number;
+}
+
 export interface ProceduralBiomeProbe extends ProceduralColumnSample {
   regionId: WorldRegionId;
   secondaryRegionId: WorldRegionId;
@@ -1461,6 +1466,76 @@ export class ProceduralWorldGenerator {
     }
     const state = this.materialSampleState;
     this.fillColumnState(worldX, worldZ, state);
+    return this.sampleMaterialBucketsFromColumnState(state, firstBucketMinY, bucketSize, count);
+  }
+
+  sampleTopColumnMaterialBucket(
+    worldX: number,
+    worldZ: number,
+    firstBucketMinY: number,
+    bucketSize: number,
+    bucketCount: number,
+    shellPaddingY: number,
+  ): ProceduralTopColumnMaterialBucketSample | null {
+    const count = Math.max(0, Math.floor(bucketCount));
+    if (count === 0) {
+      return null;
+    }
+    const state = this.materialSampleState;
+    this.fillColumnState(worldX, worldZ, state);
+    const stride = Math.max(1, Math.floor(bucketSize));
+    const minSurfaceWorldY = state.surfaceY - Math.max(0, Math.floor(shellPaddingY));
+    const maxSurfaceWorldY = Math.max(topYFromState(state), nullableWaterTopY(state.waterTopY) ?? state.surfaceY);
+    const startBucket = Math.max(0, Math.floor((minSurfaceWorldY - firstBucketMinY) / stride));
+    const endBucket = Math.min(count - 1, Math.floor((maxSurfaceWorldY - firstBucketMinY) / stride));
+    if (startBucket > endBucket) {
+      return null;
+    }
+    for (let bucketIndex = endBucket; bucketIndex >= startBucket; bucketIndex -= 1) {
+      const minWorldY = Math.max(0, Math.floor(firstBucketMinY + bucketIndex * stride));
+      const maxWorldY = Math.min(this.maxYExclusive - 1, minWorldY + stride - 1);
+      if (maxWorldY < minWorldY) {
+        continue;
+      }
+      let waterMaterial = 0;
+      for (let worldY = maxWorldY; worldY >= minWorldY; worldY -= 1) {
+        const material = this.sampleMaterialFromColumn(state, worldY);
+        if (material === 0) {
+          continue;
+        }
+        if (!isProceduralWaterMaterial(material)) {
+          return {
+            ...surfaceColumnSampleFromState(state),
+            bucketIndex,
+            material,
+          };
+        }
+        if (waterMaterial === 0) {
+          waterMaterial = material;
+        }
+      }
+      if (waterMaterial !== 0) {
+        return {
+          ...surfaceColumnSampleFromState(state),
+          bucketIndex,
+          material: waterMaterial,
+        };
+      }
+    }
+    return null;
+  }
+
+  private sampleMaterialBucketsFromColumnState(
+    state: MutableColumnState,
+    firstBucketMinY: number,
+    bucketSize: number,
+    bucketCount: number,
+  ): Uint16Array {
+    const count = Math.max(0, Math.floor(bucketCount));
+    const materials = new Uint16Array(count);
+    if (count === 0) {
+      return materials;
+    }
     const stride = Math.max(1, Math.floor(bucketSize));
     for (let bucketIndex = 0; bucketIndex < count; bucketIndex += 1) {
       const minWorldY = Math.max(0, Math.floor(firstBucketMinY + bucketIndex * stride));
