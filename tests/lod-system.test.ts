@@ -192,10 +192,135 @@ function isRenderReadyWaterColumn(
   return false;
 }
 
+function decodePackedNormalComponent(packed: number, shift: number): number {
+  const byte = (packed >> shift) & 0xff;
+  return byte > 127 ? byte - 256 : byte;
+}
+
+function lodChunkKey(chunk: VoxelChunk): string {
+  return `${chunk.lodLevel}:${chunk.coord.x}:${chunk.coord.y}:${chunk.coord.z}`;
+}
+
+function adjacentLodChunkKey(chunk: VoxelChunk, axis: 0 | 1 | 2): string {
+  const x = chunk.coord.x + (axis === 0 ? 1 : 0);
+  const y = chunk.coord.y + (axis === 1 ? 1 : 0);
+  const z = chunk.coord.z + (axis === 2 ? 1 : 0);
+  return `${chunk.lodLevel}:${x}:${y}:${z}`;
+}
+
+function collectOpaqueBoundaryFaceCells(
+  chunk: VoxelChunk,
+  axis: 0 | 1 | 2,
+  positive: boolean,
+): Set<string> {
+  const cells = new Set<string>();
+  if (!chunk.mesh || chunk.mesh.vertexCount === 0) {
+    return cells;
+  }
+  const stride = chunk.voxelStride;
+  const worldSize = CHUNK_SIZE * stride;
+  const origin = [
+    chunk.coord.x * worldSize,
+    chunk.coord.y * worldSize,
+    chunk.coord.z * worldSize,
+  ];
+  const yBias = chunk.lodLevel > 0 ? stride : 0;
+  const floats = new Float32Array(chunk.mesh.vertexData);
+  const uints = new Uint32Array(chunk.mesh.vertexData);
+  const normalShift = axis * 8;
+  const expectedNormal = positive ? 127 : -127;
+  const expectedPlane = positive ? CHUNK_SIZE : 0;
+
+  for (let vertexIndex = 0; vertexIndex < chunk.mesh.vertexCount; vertexIndex += 4) {
+    const packedNormal = uints[vertexIndex * 5 + 3]!;
+    if (decodePackedNormalComponent(packedNormal, normalShift) !== expectedNormal) {
+      continue;
+    }
+    const localCoords: Array<[number, number, number]> = [];
+    for (let corner = 0; corner < 4; corner += 1) {
+      const base = (vertexIndex + corner) * 5;
+      localCoords.push([
+        (floats[base]! - origin[0]!) / stride,
+        (floats[base + 1]! + yBias - origin[1]!) / stride,
+        (floats[base + 2]! - origin[2]!) / stride,
+      ]);
+    }
+    const planeValues = localCoords.map((coord) => coord[axis]);
+    if (!planeValues.every((value) => Math.abs(value - expectedPlane) <= 0.01)) {
+      continue;
+    }
+    const uAxis = (axis + 1) % 3;
+    const vAxis = (axis + 2) % 3;
+    const minU = Math.round(Math.min(...localCoords.map((coord) => coord[uAxis]!)));
+    const maxU = Math.round(Math.max(...localCoords.map((coord) => coord[uAxis]!)));
+    const minV = Math.round(Math.min(...localCoords.map((coord) => coord[vAxis]!)));
+    const maxV = Math.round(Math.max(...localCoords.map((coord) => coord[vAxis]!)));
+    for (let v = minV; v < maxV; v += 1) {
+      for (let u = minU; u < maxU; u += 1) {
+        cells.add(`${u}:${v}`);
+      }
+    }
+  }
+
+  return cells;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Downsample correctness
 // ---------------------------------------------------------------------------
 describe("LOD downsampling", () => {
+  test("generated fallback LOD terrain preserves authoritative coarse surface cells", () => {
+    const generator = new ProceduralWorldGenerator(SEED);
+    const world = new ProceduralResidentWorld(generator, { horizontalRadiusChunks: 0 });
+    const level = 4;
+    const stride = 1 << level;
+    const worldSize = CHUNK_SIZE * stride;
+    const lodCx = Math.floor(-13_814 / worldSize);
+    const lodCz = Math.floor(-24_678 / worldSize);
+    const lodCy = Math.floor(generator.sampleSurfaceColumn(-13_814, -24_678).surfaceY / worldSize);
+    const data = (world as unknown as {
+      downsampleLodChunkData(
+        lodCx: number,
+        lodCy: number,
+        lodCz: number,
+        level: number,
+        stride: number,
+        worldSize: number,
+      ): { data: Uint16Array; solidCount: number };
+    }).downsampleLodChunkData(lodCx, lodCy, lodCz, level, stride, worldSize);
+
+    const originX = lodCx * worldSize;
+    const originY = lodCy * worldSize;
+    const originZ = lodCz * worldSize;
+    const chunkArea = CHUNK_SIZE * CHUNK_SIZE;
+    let checked = 0;
+    for (let oz = 0; oz < CHUNK_SIZE; oz += 1) {
+      for (let ox = 0; ox < CHUNK_SIZE; ox += 1) {
+        let topOy = -1;
+        let topMaterial = 0;
+        for (let oy = CHUNK_SIZE - 1; oy >= 0; oy -= 1) {
+          const material = data.data[ox + oy * CHUNK_SIZE + oz * chunkArea]!;
+          if (material !== 0) {
+            topOy = oy;
+            topMaterial = material;
+            break;
+          }
+        }
+        if (topOy < 0 || isProceduralWaterMaterial(topMaterial)) {
+          continue;
+        }
+        const worldX = originX + ox * stride;
+        const worldZ = originZ + oz * stride;
+        const surfaceY = generator.sampleSurfaceColumn(worldX, worldZ).surfaceY;
+        expect(topOy).toBe(Math.floor((surfaceY - originY) / stride));
+        checked += 1;
+      }
+    }
+
+    expect(data.solidCount).toBeGreaterThan(0);
+    expect(checked).toBeGreaterThan(0);
+  });
+
   test("LOD 0 and LOD chunks are both generated", () => {
     const { world } = getWorld();
     const byLevel = chunksByLevel(world);
@@ -625,7 +750,7 @@ describe("LOD vertex positions", () => {
       const stride = chunk.voxelStride;
       const worldSize = CHUNK_SIZE * stride;
       const expectedMinX = chunk.coord.x * worldSize;
-      const expectedMinY = chunk.coord.y * worldSize;
+      const expectedMinY = chunk.coord.y * worldSize - stride;
       const expectedMinZ = chunk.coord.z * worldSize;
       const expectedMaxX = (chunk.coord.x + 1) * worldSize;
       const expectedMaxY = (chunk.coord.y + 1) * worldSize;
@@ -685,8 +810,11 @@ describe("LOD vertex positions", () => {
 
       const floats = new Float32Array(chunk.mesh.vertexData);
 
-      // The scaling formula is: worldPos = worldOrigin + (mesherPos - mesherOrigin) * stride
-      // So mesherPos = (worldPos - worldOrigin) / stride + mesherOrigin
+      // Opaque LOD Y is biased down by one full stride so coarse voxels are
+      // conservative and never float above their represented source bucket.
+      const yBias = stride;
+      // The scaling formula is: worldPos = worldOrigin + (mesherPos - mesherOrigin) * stride - yBias.
+      // So mesherPos = (worldPos + yBias - worldOrigin) / stride + mesherOrigin
       // And mesherPos must be in [mesherOrigin, mesherOrigin + CHUNK_SIZE]
       for (let i = 0; i < chunk.mesh.vertexCount; i++) {
         const vx = floats[i * 5]!;
@@ -694,7 +822,7 @@ describe("LOD vertex positions", () => {
         const vz = floats[i * 5 + 2]!;
 
         const mesherX = (vx - worldOriginX) / stride + mesherOriginX;
-        const mesherY = (vy - worldOriginY) / stride + mesherOriginY;
+        const mesherY = (vy + yBias - worldOriginY) / stride + mesherOriginY;
         const mesherZ = (vz - worldOriginZ) / stride + mesherOriginZ;
 
         expect(mesherX).toBeGreaterThanOrEqual(mesherOriginX - 0.01);
@@ -710,6 +838,97 @@ describe("LOD vertex positions", () => {
 
     // Verify we tested at least LOD level 1
     expect(checkedLevels.has(1)).toBe(true);
+  });
+
+  test("opaque LOD top faces do not float above authoritative generated columns", () => {
+    const { world } = getWorld();
+    let checkedFaces = 0;
+    let checkedChunks = 0;
+
+    for (const chunk of world.iterateResidentChunks()) {
+      if (chunk.lodLevel === 0 || !chunk.mesh || chunk.mesh.vertexCount === 0) {
+        continue;
+      }
+      checkedChunks += 1;
+      const stride = chunk.voxelStride;
+      const floats = new Float32Array(chunk.mesh.vertexData);
+      const uints = new Uint32Array(chunk.mesh.vertexData);
+      const quadStep = Math.max(1, Math.floor((chunk.mesh.vertexCount / 4) / 160));
+      for (let vertexIndex = 0; vertexIndex < chunk.mesh.vertexCount; vertexIndex += quadStep * 4) {
+        const packedNormal = uints[vertexIndex * 5 + 3]!;
+        if (decodePackedNormalComponent(packedNormal, 8) !== 127) {
+          continue;
+        }
+        const xs = [
+          floats[vertexIndex * 5]!,
+          floats[(vertexIndex + 1) * 5]!,
+          floats[(vertexIndex + 2) * 5]!,
+          floats[(vertexIndex + 3) * 5]!,
+        ];
+        const zs = [
+          floats[vertexIndex * 5 + 2]!,
+          floats[(vertexIndex + 1) * 5 + 2]!,
+          floats[(vertexIndex + 2) * 5 + 2]!,
+          floats[(vertexIndex + 3) * 5 + 2]!,
+        ];
+        const faceY = floats[vertexIndex * 5 + 1]!;
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const minZ = Math.min(...zs);
+        const maxZ = Math.max(...zs);
+        let authoritativeTopY = Number.NEGATIVE_INFINITY;
+        for (let z = minZ; z < maxZ; z += stride) {
+          for (let x = minX; x < maxX; x += stride) {
+            authoritativeTopY = Math.max(
+              authoritativeTopY,
+              world.generator.sampleSurfaceColumn(Math.floor(x), Math.floor(z)).topY + 1,
+              world.generator.sampleSurfaceColumn(Math.floor(x + stride - 1), Math.floor(z)).topY + 1,
+              world.generator.sampleSurfaceColumn(Math.floor(x), Math.floor(z + stride - 1)).topY + 1,
+              world.generator.sampleSurfaceColumn(Math.floor(x + stride - 1), Math.floor(z + stride - 1)).topY + 1,
+              world.generator.sampleSurfaceColumn(Math.floor(x + stride * 0.5), Math.floor(z + stride * 0.5)).topY + 1,
+            );
+          }
+        }
+        expect(faceY).toBeLessThanOrEqual(authoritativeTopY + 0.01);
+        checkedFaces += 1;
+      }
+      if (checkedChunks >= 12) {
+        break;
+      }
+    }
+
+    expect(checkedChunks).toBeGreaterThan(0);
+    expect(checkedFaces).toBeGreaterThan(0);
+  });
+
+  test("same-level LOD neighbors do not both render shared opaque boundary faces", () => {
+    const { world } = getWorld();
+    const chunks = new Map<string, VoxelChunk>();
+    for (const chunk of world.iterateResidentChunks()) {
+      if (chunk.lodLevel > 0 && chunk.renderReady && chunk.mesh && chunk.mesh.vertexCount > 0) {
+        chunks.set(lodChunkKey(chunk), chunk);
+      }
+    }
+
+    let checkedPairs = 0;
+    for (const chunk of chunks.values()) {
+      for (const axis of [0, 1, 2] as const) {
+        const neighbor = chunks.get(adjacentLodChunkKey(chunk, axis));
+        if (!neighbor) {
+          continue;
+        }
+        checkedPairs += 1;
+        const positiveFaces = collectOpaqueBoundaryFaceCells(chunk, axis, true);
+        const negativeFaces = collectOpaqueBoundaryFaceCells(neighbor, axis, false);
+        const smallerSet = positiveFaces.size <= negativeFaces.size ? positiveFaces : negativeFaces;
+        const largerSet = positiveFaces.size <= negativeFaces.size ? negativeFaces : positiveFaces;
+        for (const cell of smallerSet) {
+          expect(largerSet.has(cell)).toBe(false);
+        }
+      }
+    }
+
+    expect(checkedPairs).toBeGreaterThan(0);
   });
 
   test("mesh vertex data has correct 20-byte stride (5 float32s per vertex)", () => {
@@ -1343,7 +1562,7 @@ describe("LOD mesh bounds", () => {
       const stride = chunk.voxelStride;
       const worldSize = CHUNK_SIZE * stride;
       const chunkMinX = chunk.coord.x * worldSize;
-      const chunkMinY = chunk.coord.y * worldSize;
+      const chunkMinY = chunk.coord.y * worldSize - stride;
       const chunkMinZ = chunk.coord.z * worldSize;
       const chunkMaxX = (chunk.coord.x + 1) * worldSize;
       const chunkMaxY = (chunk.coord.y + 1) * worldSize;

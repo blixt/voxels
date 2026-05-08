@@ -885,7 +885,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           ring.level, stride,
         );
         const meshStartedAt = performance.now();
-        const mesh = this.buildLodChunkMesh(chunk, cx, cy, cz, stride, worldSize);
+        const mesh = this.buildLodChunkMesh(chunk, cx, cy, cz, ring.level, stride, worldSize);
         meshMs += performance.now() - meshStartedAt;
         chunk.mesh = mesh;
         chunk.meshBuilt = true;
@@ -893,6 +893,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         chunk.renderReady = true;
         chunk.gpuDirty = true;
         this.lodChunks.set(key, chunk);
+        const neighborRemeshStartedAt = performance.now();
+        this.remeshAdjacentLodChunks(ring.level, cx, cy, cz);
+        meshMs += performance.now() - neighborRemeshStartedAt;
         this.invalidateCoarserLodChunksForSourceChunk(ring.level, cx, cy, cz, {
           clearNeededKeyCache: false,
         });
@@ -1517,10 +1520,10 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     cx: number,
     cy: number,
     cz: number,
+    level: number,
     stride: number,
     worldSize: number,
   ): ChunkMeshData {
-    const nullFace: OpaqueChunkNeighborFaceSnapshot = { faceData: null, solidBounds: null };
     const opaqueMesh = buildOpaqueChunkMeshFromInput(
       {
         chunkSize: this.chunkSize,
@@ -1531,9 +1534,18 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           ? { min: [...chunk.solidBounds.min], max: [...chunk.solidBounds.max] }
           : null,
         neighbors: [
-          [nullFace, nullFace],
-          [nullFace, nullFace],
-          [nullFace, nullFace],
+          [
+            this.resolveLodOpaqueNeighborFace(level, cx - 1, cy, cz, 0, true),
+            this.resolveLodOpaqueNeighborFace(level, cx + 1, cy, cz, 0, false),
+          ],
+          [
+            this.resolveLodOpaqueNeighborFace(level, cx, cy - 1, cz, 1, true),
+            this.resolveLodOpaqueNeighborFace(level, cx, cy + 1, cz, 1, false),
+          ],
+          [
+            this.resolveLodOpaqueNeighborFace(level, cx, cy, cz - 1, 2, true),
+            this.resolveLodOpaqueNeighborFace(level, cx, cy, cz + 1, 2, false),
+          ],
         ],
       },
       this.meshMaterialLut!,
@@ -1542,6 +1554,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     // Scale vertex positions from mesher-local coords to world coords.
     // The mesher places vertices at (cx*chunkSize .. (cx+1)*chunkSize).
     // We need them at (cx*worldSize .. (cx+1)*worldSize).
+    // Opaque LOD voxels use a full-stride downward Y bias so a coarse cell
+    // never renders above the detailed bucket it represents.
     if (stride > 1 && opaqueMesh.vertexCount > 0) {
       const mesherOriginX = cx * this.chunkSize;
       const mesherOriginY = cy * this.chunkSize;
@@ -1554,13 +1568,14 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         mesherOriginX, mesherOriginY, mesherOriginZ,
         worldOriginX, worldOriginY, worldOriginZ,
         stride,
+        stride,
       );
       if (opaqueMesh.bounds) {
         opaqueMesh.bounds.min[0] = worldOriginX + (opaqueMesh.bounds.min[0] - mesherOriginX) * stride;
-        opaqueMesh.bounds.min[1] = worldOriginY + (opaqueMesh.bounds.min[1] - mesherOriginY) * stride;
+        opaqueMesh.bounds.min[1] = worldOriginY + (opaqueMesh.bounds.min[1] - mesherOriginY) * stride - stride;
         opaqueMesh.bounds.min[2] = worldOriginZ + (opaqueMesh.bounds.min[2] - mesherOriginZ) * stride;
         opaqueMesh.bounds.max[0] = worldOriginX + (opaqueMesh.bounds.max[0] - mesherOriginX) * stride;
-        opaqueMesh.bounds.max[1] = worldOriginY + (opaqueMesh.bounds.max[1] - mesherOriginY) * stride;
+        opaqueMesh.bounds.max[1] = worldOriginY + (opaqueMesh.bounds.max[1] - mesherOriginY) * stride - stride;
         opaqueMesh.bounds.max[2] = worldOriginZ + (opaqueMesh.bounds.max[2] - mesherOriginZ) * stride;
       }
     }
@@ -1585,6 +1600,44 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           max: [(cx + 1) * worldSize, (cy + 1) * worldSize, (cz + 1) * worldSize],
         },
       ),
+    };
+  }
+
+  private remeshAdjacentLodChunks(level: number, cx: number, cy: number, cz: number): void {
+    const stride = 1 << level;
+    const worldSize = this.chunkSize * stride;
+    for (const [dx, dy, dz] of ADJACENT_CHUNK_OFFSETS) {
+      const neighborCx = cx + dx;
+      const neighborCy = cy + dy;
+      const neighborCz = cz + dz;
+      const neighbor = this.lodChunks.get(toLodChunkKey(level, neighborCx, neighborCy, neighborCz));
+      if (!neighbor || !neighbor.renderReady || neighbor.solidCount === 0) {
+        continue;
+      }
+      neighbor.mesh = this.buildLodChunkMesh(neighbor, neighborCx, neighborCy, neighborCz, level, stride, worldSize);
+      neighbor.meshBuilt = true;
+      neighbor.meshDirty = false;
+      neighbor.gpuDirty = true;
+    }
+  }
+
+  private resolveLodOpaqueNeighborFace(
+    level: number,
+    cx: number,
+    cy: number,
+    cz: number,
+    axis: number,
+    negativeSide: boolean,
+  ): OpaqueChunkNeighborFaceSnapshot {
+    const chunk = this.lodChunks.get(toLodChunkKey(level, cx, cy, cz));
+    if (!chunk || chunk.solidCount === 0) {
+      return { faceData: null, solidBounds: null };
+    }
+    return {
+      faceData: extractLodNeighborFaceData(chunk.data, axis, negativeSide, this.chunkSize),
+      solidBounds: chunk.solidBounds
+        ? { min: [...chunk.solidBounds.min], max: [...chunk.solidBounds.max] }
+        : null,
     };
   }
 
@@ -2158,6 +2211,10 @@ function toChunkKey(cx: number, cy: number, cz: number): string {
   return `${cx}:${cy}:${cz}`;
 }
 
+function toLodChunkKey(level: number, cx: number, cy: number, cz: number): string {
+  return `L${level}:${cx}:${cy}:${cz}`;
+}
+
 function toLocalVoxelIndex(
   x: number,
   y: number,
@@ -2175,6 +2232,49 @@ function toLocalVoxelIndex(
 
 function toColumnKey(cx: number, cz: number): string {
   return `${cx}:${cz}`;
+}
+
+function extractLodNeighborFaceData(
+  data: Uint16Array,
+  axis: number,
+  negativeSide: boolean,
+  chunkSize: number,
+): Uint16Array {
+  const chunkArea = chunkSize * chunkSize;
+  const faceData = new Uint16Array(chunkArea);
+  if (axis === 0) {
+    const localX = negativeSide ? chunkSize - 1 : 0;
+    for (let z = 0; z < chunkSize; z += 1) {
+      const sourcePlaneOffset = localX + z * chunkArea;
+      const faceRowOffset = z * chunkSize;
+      for (let y = 0; y < chunkSize; y += 1) {
+        faceData[y + faceRowOffset] = data[sourcePlaneOffset + y * chunkSize]!;
+      }
+    }
+    return faceData;
+  }
+  if (axis === 1) {
+    const localY = negativeSide ? chunkSize - 1 : 0;
+    const sourceRowOffset = localY * chunkSize;
+    for (let z = 0; z < chunkSize; z += 1) {
+      const sourcePlaneOffset = z * chunkArea + sourceRowOffset;
+      const faceRowOffset = z * chunkSize;
+      for (let x = 0; x < chunkSize; x += 1) {
+        faceData[x + faceRowOffset] = data[sourcePlaneOffset + x]!;
+      }
+    }
+    return faceData;
+  }
+  const localZ = negativeSide ? chunkSize - 1 : 0;
+  const sourcePlaneOffset = localZ * chunkArea;
+  for (let y = 0; y < chunkSize; y += 1) {
+    const sourceRowOffset = sourcePlaneOffset + y * chunkSize;
+    const faceRowOffset = y * chunkSize;
+    for (let x = 0; x < chunkSize; x += 1) {
+      faceData[x + faceRowOffset] = data[sourceRowOffset + x]!;
+    }
+  }
+  return faceData;
 }
 
 function createResidentChunk(generated: GeneratedChunk, chunkSize: number): VoxelChunk {
@@ -2438,12 +2538,13 @@ function scaleLodVertexPositions(
   worldOriginY: number,
   worldOriginZ: number,
   stride: number,
+  yBias: number,
 ): void {
   const floats = new Float32Array(vertexData);
   for (let i = 0; i < vertexCount; i++) {
     const base = i * 5; // 20 bytes = 5 float32s per vertex
     floats[base + 0] = worldOriginX + (floats[base + 0]! - mesherOriginX) * stride;
-    floats[base + 1] = worldOriginY + (floats[base + 1]! - mesherOriginY) * stride;
+    floats[base + 1] = worldOriginY + (floats[base + 1]! - mesherOriginY) * stride - yBias;
     floats[base + 2] = worldOriginZ + (floats[base + 2]! - mesherOriginZ) * stride;
   }
 }

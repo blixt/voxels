@@ -2221,3 +2221,36 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - use route-scale composition first, not more isolated props
   - keep prop prominence as a support gate for close-route objects and delegated asset passes
+
+### 2026-05-08 - LOD Boundary Z-Fighting and Conservative Height Fix
+
+- Trigger:
+  - The user correctly pushed back on content work before the renderer was structurally correct.
+  - Reported symptoms were floating distant LOD chunks, biome/height disagreement between near and far views, and flickering that looked like voxel-face z-fighting rather than only whole-LOD overlap.
+- Findings:
+  - The LOD opaque mesher was fed null neighbors for every side, so same-level adjacent LOD chunks could both emit boundary faces on the exact same plane. That is a direct z-fighting path and wastes triangles.
+  - Coarse opaque LOD cubes also rendered at the optimistic top of their vertical bucket. When the representative source surface was lower inside that bucket, distant terrain could appear raised or floating relative to detailed terrain.
+  - A naive per-vertex height check was too broad because side-face vertices legitimately sit above nearby lower columns; the correct invariant is top-face and shared-boundary ownership.
+- Changes:
+  - LOD opaque meshing now resolves same-level neighbor face snapshots before building a mesh, matching the normal chunk meshing contract.
+  - When a new LOD chunk becomes render-ready, existing same-level adjacent LOD chunks are remeshed so shared internal faces are removed deterministically instead of depending on generation order.
+  - Opaque LOD vertex scaling now uses a full-stride downward Y bias, making coarse terrain conservative rather than floating above its represented source bucket. Water LOD remains exact and separate.
+  - Added regression coverage for conservative top faces and same-level LOD neighbor boundary faces.
+- Validation:
+  - Full LOD suite: `mise exec -- bun test tests/lod-system.test.ts`, pass, `31` tests.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - In-app browser backend was not discoverable from Codex in this session. I attempted it first, then fell back to the owned browser lab.
+  - Owned browser lab fallback crashed on `Runtime.evaluate` timeout again: `artifacts/owned-browser-lab/20260508T112221Z/report.json`. I am not treating that as a rendering pass; the reliable evidence for this slice is the deterministic LOD suite.
+- Honest assessment:
+  - This fixes a real structural z-fighting source: duplicate same-level LOD boundary planes.
+  - The conservative Y bias should remove floating far LOD terrain at the cost of making very coarse opaque LOD slightly lower. This is preferable to optimistic floating and can later be replaced by a real heightfield/impostor LOD if needed.
+  - This does not yet resolve biome/ambient source-of-truth divergence; that remains blocked behind rendering correctness and should be tackled next by making world classification a single sampled authority for near and far systems.
+- Rubric movement:
+  - Rendering correctness/quality: `7.05 -> 7.32`.
+  - Harness maturity: `9.995 -> 9.997` because shared-boundary z-fighting and top-face height now have deterministic regressions.
+  - Performance/playability: `6.50 -> 6.53` because internal duplicate LOD boundary faces are removed, although I did not claim a browser perf win without a passing browser lab.
+  - Visual/world definition: unchanged.
+- Next:
+  - keep rendering-source fixes isolated from biome/content commits
+  - make biome/ambient/far-render world classification share a single source of truth
+  - restore a stable browser lab path or split the heavy CDP probe so visual/perf validation stops failing on one long `Runtime.evaluate`
