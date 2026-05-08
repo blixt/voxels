@@ -257,6 +257,7 @@ export interface GameHudSnapshot {
   lodNeededKeyCacheHit: boolean;
   lodScheduledRegionSummaryRequests: number;
   lodDiskCacheHits: number;
+  lodDiskCacheHitsByLevel: readonly number[];
   lodDiskCacheMisses: number;
   lodScheduledDiskRequests: number;
   lodScheduledDiskStores: number;
@@ -784,9 +785,13 @@ export interface BenchmarkWorldPumpSummary {
   settled: boolean;
   elapsedMs: number;
   totalGenerated: number;
+  totalGeneratedByLevel: readonly number[];
   totalMemoryCacheHits: number;
+  totalMemoryCacheHitsByLevel: readonly number[];
   totalEmptyCacheHits: number;
+  totalEmptyCacheHitsByLevel: readonly number[];
   totalDiskCacheHits: number;
+  totalDiskCacheHitsByLevel: readonly number[];
   totalDiskCacheMisses: number;
   totalScheduledDiskRequests: number;
   totalScheduledDiskStores: number;
@@ -890,6 +895,7 @@ export class GameController {
     neededKeyCacheHit: false,
     scheduledRegionSummaryRequests: 0,
     lodDiskCacheHits: 0,
+    lodDiskCacheHitsByLevel: [0, 0, 0, 0, 0],
     lodDiskCacheMisses: 0,
     scheduledLodDiskRequests: 0,
     scheduledLodDiskStores: 0,
@@ -1125,6 +1131,7 @@ export class GameController {
       lodNeededKeyCacheHit: this.lastLodSummary.neededKeyCacheHit,
       lodScheduledRegionSummaryRequests: this.lastLodSummary.scheduledRegionSummaryRequests,
       lodDiskCacheHits: this.lastLodSummary.lodDiskCacheHits,
+      lodDiskCacheHitsByLevel: [...this.lastLodSummary.lodDiskCacheHitsByLevel],
       lodDiskCacheMisses: this.lastLodSummary.lodDiskCacheMisses,
       lodScheduledDiskRequests: this.lastLodSummary.scheduledLodDiskRequests,
       lodScheduledDiskStores: this.lastLodSummary.scheduledLodDiskStores,
@@ -2565,9 +2572,13 @@ export class GameController {
     const startedAt = performance.now();
     let frameCount = 0;
     let totalGenerated = 0;
+    const totalGeneratedByLevel = [0, 0, 0, 0, 0];
     let totalMemoryCacheHits = 0;
+    const totalMemoryCacheHitsByLevel = [0, 0, 0, 0, 0];
     let totalEmptyCacheHits = 0;
+    const totalEmptyCacheHitsByLevel = [0, 0, 0, 0, 0];
     let totalDiskCacheHits = 0;
+    const totalDiskCacheHitsByLevel = [0, 0, 0, 0, 0];
     let totalDiskCacheMisses = 0;
     let totalScheduledDiskRequests = 0;
     let totalScheduledDiskStores = 0;
@@ -2587,9 +2598,13 @@ export class GameController {
       await this.renderProbeFrame();
       finalSnapshot = this.getDebugSnapshot();
       totalGenerated += this.lastLodSummary.generated;
+      addLodLevelCounts(totalGeneratedByLevel, this.lastLodSummary.generatedByLevel);
       totalMemoryCacheHits += this.lastLodSummary.cacheHits;
+      addLodLevelCounts(totalMemoryCacheHitsByLevel, this.lastLodSummary.cacheHitsByLevel);
       totalEmptyCacheHits += this.lastLodSummary.emptyCacheHits;
+      addLodLevelCounts(totalEmptyCacheHitsByLevel, this.lastLodSummary.emptyCacheHitsByLevel);
       totalDiskCacheHits += this.lastLodSummary.lodDiskCacheHits;
+      addLodLevelCounts(totalDiskCacheHitsByLevel, this.lastLodSummary.lodDiskCacheHitsByLevel);
       totalDiskCacheMisses += this.lastLodSummary.lodDiskCacheMisses;
       totalScheduledDiskRequests += this.lastLodSummary.scheduledLodDiskRequests;
       totalScheduledDiskStores += this.lastLodSummary.scheduledLodDiskStores;
@@ -2620,9 +2635,13 @@ export class GameController {
       settled,
       elapsedMs: performance.now() - startedAt,
       totalGenerated,
+      totalGeneratedByLevel,
       totalMemoryCacheHits,
+      totalMemoryCacheHitsByLevel,
       totalEmptyCacheHits,
+      totalEmptyCacheHitsByLevel,
       totalDiskCacheHits,
+      totalDiskCacheHitsByLevel,
       totalDiskCacheMisses,
       totalScheduledDiskRequests,
       totalScheduledDiskStores,
@@ -3067,6 +3086,11 @@ export class GameController {
     this.lastLodSummary = {
       ...this.lastLodSummary,
       generated: 0,
+      generatedByLevel: [0, 0, 0, 0, 0],
+      cacheHits: 0,
+      cacheHitsByLevel: [0, 0, 0, 0, 0],
+      emptyCacheHits: 0,
+      emptyCacheHitsByLevel: [0, 0, 0, 0, 0],
       pending: Math.max(1, this.lastLodSummary.pending),
       elapsedMs: 0,
       yRangeMs: 0,
@@ -3077,6 +3101,13 @@ export class GameController {
       maxChunkLevel: 0,
       maxChunkKey: null,
       neededKeyCacheHit: false,
+      scheduledRegionSummaryRequests: 0,
+      lodDiskCacheHits: 0,
+      lodDiskCacheHitsByLevel: [0, 0, 0, 0, 0],
+      lodDiskCacheMisses: 0,
+      scheduledLodDiskRequests: 0,
+      scheduledLodDiskStores: 0,
+      completedLodDiskStores: 0,
     };
   }
 
@@ -4415,6 +4446,12 @@ function nextAnimationFrame(): Promise<number> {
   return new Promise((resolve) => {
     requestAnimationFrame((now) => resolve(now));
   });
+}
+
+function addLodLevelCounts(target: number[], source: readonly number[]): void {
+  for (let index = 0; index < target.length; index += 1) {
+    target[index] += source[index] ?? 0;
+  }
 }
 
 function sumNumbers(values: readonly number[]): number {

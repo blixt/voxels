@@ -87,6 +87,10 @@ interface LodPersistencePhaseSummary {
   totalCompletedDiskStores: number;
   totalDownsampleMs: number;
   totalMeshMs: number;
+  totalGeneratedByLevel: readonly number[];
+  totalMemoryCacheHitsByLevel: readonly number[];
+  totalEmptyCacheHitsByLevel: readonly number[];
+  totalDiskCacheHitsByLevel: readonly number[];
   maxLodChunkMs: number;
   maxWorstRecentFrameMs: number;
   maxRecentHitchCount: number;
@@ -110,6 +114,7 @@ interface LodPersistencePhaseSummary {
   finalLodGeneratedByLevel: readonly number[];
   finalLodCacheHitsByLevel: readonly number[];
   finalLodEmptyCacheHitsByLevel: readonly number[];
+  finalLodDiskCacheHitsByLevel: readonly number[];
   finalCumulativeGenerated: number;
   finalCumulativeDiskCacheHits: number;
   finalCumulativeDiskCacheMisses: number;
@@ -684,12 +689,21 @@ async function pumpLodPersistencePhase(
   let totalCompletedDiskStores = 0;
   let totalDownsampleMs = 0;
   let totalMeshMs = 0;
+  const totalGeneratedByLevel = [0, 0, 0, 0, 0];
+  const totalMemoryCacheHitsByLevel = [0, 0, 0, 0, 0];
+  const totalEmptyCacheHitsByLevel = [0, 0, 0, 0, 0];
+  const totalDiskCacheHitsByLevel = [0, 0, 0, 0, 0];
   let maxLodChunkMs = 0;
   let maxWorstRecentFrameMs = 0;
   let maxRecentHitchCount = 0;
   let maxRecentDroppedFrameEstimate = 0;
   let finalSnapshot = game.snapshot();
   const batchFrames = 4;
+  const addLevelCounts = (target: number[], source: readonly number[]): void => {
+    for (let index = 0; index < target.length; index += 1) {
+      target[index] += source[index] ?? 0;
+    }
+  };
 
   while (frameCount < maxFrames) {
     const remainingFrames = maxFrames - frameCount;
@@ -717,6 +731,10 @@ async function pumpLodPersistencePhase(
     totalCompletedDiskStores += pump.totalCompletedDiskStores;
     totalDownsampleMs += pump.totalDownsampleMs;
     totalMeshMs += pump.totalMeshMs;
+    addLevelCounts(totalGeneratedByLevel, pump.totalGeneratedByLevel);
+    addLevelCounts(totalMemoryCacheHitsByLevel, pump.totalMemoryCacheHitsByLevel);
+    addLevelCounts(totalEmptyCacheHitsByLevel, pump.totalEmptyCacheHitsByLevel);
+    addLevelCounts(totalDiskCacheHitsByLevel, pump.totalDiskCacheHitsByLevel);
     maxLodChunkMs = Math.max(maxLodChunkMs, pump.maxLodChunkMs);
     maxWorstRecentFrameMs = Math.max(maxWorstRecentFrameMs, pump.maxWorstRecentFrameMs);
     maxRecentHitchCount = Math.max(maxRecentHitchCount, pump.maxRecentHitchCount);
@@ -736,6 +754,10 @@ async function pumpLodPersistencePhase(
       totalCompletedDiskStores,
       totalDownsampleMs,
       totalMeshMs,
+      totalGeneratedByLevel,
+      totalMemoryCacheHitsByLevel,
+      totalEmptyCacheHitsByLevel,
+      totalDiskCacheHitsByLevel,
       maxLodChunkMs,
       maxWorstRecentFrameMs,
       maxRecentHitchCount,
@@ -768,6 +790,10 @@ async function pumpLodPersistencePhase(
     totalCompletedDiskStores,
     totalDownsampleMs,
     totalMeshMs,
+    totalGeneratedByLevel,
+    totalMemoryCacheHitsByLevel,
+    totalEmptyCacheHitsByLevel,
+    totalDiskCacheHitsByLevel,
     maxLodChunkMs,
     maxWorstRecentFrameMs,
     maxRecentHitchCount,
@@ -792,6 +818,10 @@ function buildLodPersistencePhaseSummary(input: {
   totalCompletedDiskStores: number;
   totalDownsampleMs: number;
   totalMeshMs: number;
+  totalGeneratedByLevel: readonly number[];
+  totalMemoryCacheHitsByLevel: readonly number[];
+  totalEmptyCacheHitsByLevel: readonly number[];
+  totalDiskCacheHitsByLevel: readonly number[];
   maxLodChunkMs: number;
   maxWorstRecentFrameMs: number;
   maxRecentHitchCount: number;
@@ -814,6 +844,10 @@ function buildLodPersistencePhaseSummary(input: {
     totalCompletedDiskStores: input.totalCompletedDiskStores,
     totalDownsampleMs: input.totalDownsampleMs,
     totalMeshMs: input.totalMeshMs,
+    totalGeneratedByLevel: [...input.totalGeneratedByLevel],
+    totalMemoryCacheHitsByLevel: [...input.totalMemoryCacheHitsByLevel],
+    totalEmptyCacheHitsByLevel: [...input.totalEmptyCacheHitsByLevel],
+    totalDiskCacheHitsByLevel: [...input.totalDiskCacheHitsByLevel],
     maxLodChunkMs: input.maxLodChunkMs,
     maxWorstRecentFrameMs: input.maxWorstRecentFrameMs,
     maxRecentHitchCount: input.maxRecentHitchCount,
@@ -837,6 +871,7 @@ function buildLodPersistencePhaseSummary(input: {
     finalLodGeneratedByLevel: [...input.finalSnapshot.lodGeneratedChunksByLevel],
     finalLodCacheHitsByLevel: [...input.finalSnapshot.lodCacheHitsByLevel],
     finalLodEmptyCacheHitsByLevel: [...input.finalSnapshot.lodEmptyCacheHitsByLevel],
+    finalLodDiskCacheHitsByLevel: [...input.finalSnapshot.lodDiskCacheHitsByLevel],
     finalCumulativeGenerated: input.finalSnapshot.cumulativeLodGeneratedChunks,
     finalCumulativeDiskCacheHits: input.finalSnapshot.cumulativeLodDiskCacheHits,
     finalCumulativeDiskCacheMisses: input.finalSnapshot.cumulativeLodDiskCacheMisses,
@@ -869,6 +904,10 @@ function buildCurrentLodPersistencePhaseSummary(
     totalCompletedDiskStores: 0,
     totalDownsampleMs: 0,
     totalMeshMs: 0,
+    totalGeneratedByLevel: [0, 0, 0, 0, 0],
+    totalMemoryCacheHitsByLevel: [0, 0, 0, 0, 0],
+    totalEmptyCacheHitsByLevel: [0, 0, 0, 0, 0],
+    totalDiskCacheHitsByLevel: [0, 0, 0, 0, 0],
     maxLodChunkMs: 0,
     maxWorstRecentFrameMs: snapshot.frameTiming.worstRecentFrameMs,
     maxRecentHitchCount: snapshot.frameTiming.recentHitchCount,

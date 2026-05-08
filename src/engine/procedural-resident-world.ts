@@ -144,6 +144,7 @@ export interface LodResidencyUpdateSummary {
   neededKeyCacheHit: boolean;
   scheduledRegionSummaryRequests: number;
   lodDiskCacheHits: number;
+  lodDiskCacheHitsByLevel: readonly number[];
   lodDiskCacheMisses: number;
   scheduledLodDiskRequests: number;
   scheduledLodDiskStores: number;
@@ -942,6 +943,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           emptyCacheHitsByLevel: createLodLevelCounts(),
           scheduledRegionSummaryRequests,
           lodDiskCacheHits: 0,
+          lodDiskCacheHitsByLevel: createLodLevelCounts(),
           lodDiskCacheMisses: 0,
           scheduledLodDiskRequests: 0,
           scheduledLodDiskStores: 0,
@@ -973,6 +975,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     let meshMs = 0;
     let commitMs = 0;
     let lodDiskCacheHits = 0;
+    const lodDiskCacheHitsByLevel = createLodLevelCounts();
     let scheduledLodDiskRequests = 0;
     let scheduledLodDiskStores = 0;
     const lodDiskStats = this.asyncChunkGeneration?.drainLodChunkCompletionStats() ?? { cacheHits: 0, missing: 0, stored: 0 };
@@ -983,8 +986,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
     const adoptedLodDisk = this.adoptCompletedLodDiskChunks(completedLodDiskChunks, neededKeys);
     lodDiskCacheHits += adoptedLodDisk.cacheHits;
-    for (let index = 0; index < cacheHitsByLevel.length; index += 1) {
-      cacheHitsByLevel[index] += adoptedLodDisk.cacheHitsByLevel[index] ?? 0;
+    for (let index = 0; index < lodDiskCacheHitsByLevel.length; index += 1) {
+      lodDiskCacheHitsByLevel[index] += adoptedLodDisk.cacheHitsByLevel[index] ?? 0;
     }
     meshMs += adoptedLodDisk.meshMs;
     let maxChunkMs = 0;
@@ -1256,6 +1259,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       neededKeyCacheHit,
       scheduledRegionSummaryRequests,
       lodDiskCacheHits,
+      lodDiskCacheHitsByLevel,
       lodDiskCacheMisses: lodDiskStats.missing,
       scheduledLodDiskRequests,
       scheduledLodDiskStores,
