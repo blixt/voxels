@@ -585,8 +585,8 @@ function createPerformanceStripView(root: HTMLElement): PerformanceStripView {
     update(snapshot) {
       const wallFrameMs = snapshot.avgFrameWallMs > 0 ? snapshot.avgFrameWallMs : snapshot.lastFrameWallMs;
       const nextValues = [
-        formatWallFrameRate(wallFrameMs),
-        `${formatFrameMs(snapshot.lastGameplayFrameMs)} work`,
+        `${formatWallFrameRate(wallFrameMs)} / ${formatFrameMs(snapshot.frameTiming.worstRecentFrameMs)} max`,
+        `${snapshot.frameTiming.recentHitchCount} hitch`,
         `${formatCompactCount(snapshot.chunkCount)} chunks`,
       ];
       for (let index = 0; index < nextValues.length; index += 1) {
@@ -599,6 +599,9 @@ function createPerformanceStripView(root: HTMLElement): PerformanceStripView {
       root.title = [
         `Wall frame ${snapshot.lastFrameWallMs.toFixed(1)} ms`,
         `Average wall frame ${snapshot.avgFrameWallMs.toFixed(1)} ms`,
+        `Worst recent wall frame ${snapshot.frameTiming.worstRecentFrameMs.toFixed(1)} ms`,
+        `Recent hitches ${snapshot.frameTiming.recentHitchCount.toLocaleString()}`,
+        `Estimated dropped frames ${snapshot.frameTiming.recentDroppedFrameEstimate.toLocaleString()}`,
         `Gameplay work ${snapshot.lastGameplayFrameMs.toFixed(1)} ms`,
         `Render CPU ${snapshot.lastFrameCpuMs.toFixed(1)} ms`,
         `Stream ${snapshot.streamMs.toFixed(1)} ms`,

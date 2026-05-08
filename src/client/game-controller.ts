@@ -39,6 +39,10 @@ import {
   type ExplorationSkillEffects,
 } from "../engine/exploration-skill-effects.ts";
 import {
+  FrameTimingBuckets,
+  type FrameTimingSnapshot,
+} from "../engine/frame-timing-buckets.ts";
+import {
   buildChunkMesh,
   buildChunkMeshFromOpaqueGeometry,
   collectDirtyChunks,
@@ -205,6 +209,7 @@ export interface GameHudSnapshot {
   drawCalls: number;
   triangles: number;
   lastFrameWallMs: number;
+  frameTiming: FrameTimingSnapshot;
   lastGameplayFrameMs: number;
   lastFrameCpuMs: number;
   avgFrameWallMs: number;
@@ -740,6 +745,7 @@ export class GameController {
   lastFrameLodMs = 0;
   avgFrameWallMs = 0;
   avgFrameCpuMs = 0;
+  private readonly frameTimingBuckets = new FrameTimingBuckets(125, 50, 96);
   status = "Booting";
   pointerLocked = false;
   onHudUpdate: ((snapshot: GameHudSnapshot) => void) | null = null;
@@ -942,6 +948,7 @@ export class GameController {
       drawCalls: this.drawCalls,
       triangles: this.triangles,
       lastFrameWallMs: this.lastFrameWallMs,
+      frameTiming: this.frameTimingBuckets.snapshot(),
       lastGameplayFrameMs: this.lastGameplayFrameMs,
       lastFrameCpuMs: this.lastFrameCpuMs,
       avgFrameWallMs: this.avgFrameWallMs,
@@ -2581,6 +2588,7 @@ export class GameController {
     const rawDeltaMs = this.lastFrameTime === 0
       ? 1000 / 60
       : Math.max(0, now - this.lastFrameTime);
+    this.frameTimingBuckets.record(now);
     this.lastFrameWallMs = rawDeltaMs;
     this.avgFrameWallMs = this.avgFrameWallMs === 0
       ? rawDeltaMs
