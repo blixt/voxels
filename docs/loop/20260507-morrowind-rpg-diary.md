@@ -1865,3 +1865,28 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint and push this harness slice
   - use `--enforce-comparison-budgets` on visual changes before accepting them
   - choose between route-aware RPG hooks and a shader/contact-depth smoke harness next
+
+### 2026-05-08 - Fast Shader Smoke Lab
+
+- Trigger:
+  - The previous WGSL/material modulation attempt black-framed the whole renderer and only got caught by the full seven-view atlas.
+  - The new atlas budgets are good, but shader iteration needs a cheaper single-view gate before full screenshot and browser labs.
+- Changes:
+  - Added `bun run lab:shader`, a thin wrapper around the owned view-atlas browser path.
+  - The smoke lab captures one deterministic view by default, reads the generated atlas report, and enforces shader-oriented budgets for luma, luma variance, color buckets, render CPU, last gameplay frame, draw calls, and triangles.
+  - The tool optionally accepts `--compare-to` and forwards `--enforce-comparison-budgets` to the underlying atlas run.
+- Validation:
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Initial budget calibration run: `artifacts/shader-smoke-lab/20260508T064251Z-shader-smoke-baseline/report.json`, failed because the triangle budget was unrealistically below the current baseline (`749504` triangles versus `700000`).
+  - Baseline smoke after budget calibration: `artifacts/shader-smoke-lab/20260508T064407Z-shader-smoke-baseline-v2/report.json`, failures none.
+- Honest assessment:
+  - This is another harness slice, but it directly addresses the most expensive recent mistake: plausible shader edits can blank the renderer.
+  - The triangle budget is a guardrail, not a target. It is set high enough for the current known-good baseline and low enough to catch accidental geometry/render explosions during shader work.
+- Rubric movement:
+  - Harness maturity: `9.80 -> 9.88`.
+  - Rendering correctness: `6.45 -> 6.50` because shader experiments now have a cheap black-frame/color/frame gate.
+  - Visual/world definition and performance/playability are unchanged; this was tooling.
+- Next:
+  - checkpoint and push this shader-smoke slice
+  - use `lab:shader` before any contact-depth or WGSL material change
+  - then either attempt a very small contact-depth shader edit or build route-aware RPG hooks

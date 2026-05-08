@@ -18,6 +18,7 @@
     "atlas:routes": "bun run scripts/route-atlas.ts",
     "atlas:views": "bun run scripts/capture-view-atlas.ts",
     "lab:object": "bun run scripts/object-lab.ts",
+    "lab:shader": "bun run scripts/shader-smoke-lab.ts",
     "lab:terrain": "bun run scripts/terrain-surface-lab.ts",
     "verify:smoke": "bun run scripts/verify-smoke.ts",
     "analyze:trace": "bun run scripts/analyze-chrome-trace.ts",

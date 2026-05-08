@@ -315,3 +315,21 @@ The next work can move back to player-facing value, but every visual branch shou
 | 4 | UI/journal polish for region and road discoveries | 4 | 4 | 3 | 5.3 | Good RPG feel return, now that block-building HUD is gone and route landmarks have names | UI tests, browser HUD smoke |
 | 5 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Useful cost cleanup but not the current gate blocker | object-lab target `<18000`, route coverage |
 | 6 | Far-view distance experiment | 4 | 3 | 4 | 3.0 | Wait until contact/depth work improves foreground and horizon readability | owned-browser LOD/fps/gap gates |
+
+## Re-Rank After Shader Smoke Lab
+
+Completed since the atlas budget gate:
+
+- `bun run lab:shader` now captures one deterministic owned-browser atlas view and enforces luma/color/frame/draw/triangle budgets.
+- A too-tight initial triangle budget failed against current baseline and was recalibrated honestly.
+- The calibrated baseline smoke passed with failures none.
+
+This removes the main blocker to careful shader/contact-depth work. Route-aware RPG hooks are still high ROI, but a small contact-depth pass can now be attempted with a cheap fail-fast gate.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Small contact-depth/lighting shader pass under shader smoke and enforced atlas budgets | 5 | 4 | 4 | 5.0 | The tooling now catches black frames and view regressions; block-edge depth remains the visible blocker | `lab:shader`, enforced view-atlas, owned-browser lab |
+| 2 | Route-aware RPG hooks: named old roads, shrine blessings, Cartography/Naturalist/Lore progress | 5 | 4 | 3 | 6.7 | Visual route identity and route influence are available; gameplay value can advance without renderer risk | objective/skill tests, browser objective probe |
+| 3 | UI/journal polish for region and road discoveries | 4 | 4 | 3 | 5.3 | Good RPG feel return after route gameplay hooks | UI tests, browser HUD smoke |
+| 4 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Useful cost cleanup but not the current blocker | object-lab target `<18000`, route coverage |
+| 5 | Far-view distance experiment | 4 | 3 | 4 | 3.0 | Wait until contact/depth work improves foreground and horizon readability | owned-browser LOD/fps/gap gates |
