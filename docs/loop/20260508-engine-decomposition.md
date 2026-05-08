@@ -49,4 +49,11 @@ The first lab should not use production biome noise. It should use artificial te
 
 - Server and Codex in-app browser are now the shared validation surface at `http://localhost:3000/`.
 - Existing generated chunk cache has been reviewed and identified as a cache, not yet the canonical world store.
-- Next concrete checkpoint: add an artificial LOD lab route and unit tests for deterministic coverage, handoff, and edit propagation.
+- Added `/lod-lab`, an artificial LOD route using the common renderer with high-contrast LOD0/LOD1/debug-edit materials.
+- Added `bun run test:lod-lab`, covering artificial coverage ownership, staged handoff, far edit propagation, production stale-handoff invalidation, and frame timing buckets.
+- Added 8 Hz frame timing buckets to the LOD lab and main game HUD. A first lab run caught a 692 ms max frame and 4 hitches; after staging data generation and meshing incrementally, the lab reached `max 46ms`, `hitches 0`, `gaps 0`, `overlaps 0` in the shared browser.
+- Production now marks invalidated LOD chunks stale instead of deleting them immediately, so visible coverage is retained until replacement. This fixes the disappearance side of the handoff problem but is not the final ownership model.
+
+## Current Risk
+
+Production still does not have the lab's full `active -> ready-inactive -> atomic commit` ownership model. Stale chunks may stay visible while newer finer chunks are active, which is better than gaps but can still produce temporary overdraw or depth-bias artifacts. The next production step is to stage newly generated finer chunks until their affected coarser chunks have been regenerated with holes, then activate the finer chunk and replacement coarser chunk in the same commit.
