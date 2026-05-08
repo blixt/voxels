@@ -233,3 +233,25 @@ Completed since the view-atlas checkpoint:
 | 4 | Push ziggurat below huge budget with more negative space | 3 | 4 | 3 | 4.0 | Good cost target, but current screen metrics say ground is now higher ROI | object-lab target `<18000` voxels, route coverage |
 | 5 | Object-lab distinctiveness score | 4 | 5 | 3 | 6.7 | Needed for scalable asset delegation, but not the immediate visible blocker | object-lab tests and comparison report |
 | 6 | Discovery gameplay pass using route and terrain tokens | 4 | 4 | 3 | 5.3 | Place identity still needs visual grounding before deeper RPG UI work | objective tests, browser objective probe |
+
+## Re-Rank After Old-Road Surface Lab And Ash Haze
+
+Completed since the megastructure checkpoint:
+
+- `bun run lab:terrain` now gives a cheap terrain/route surface report before browser capture.
+- Old-road columns expose `pilgrimRouteInfluence`, so ambient and future gameplay can react to being on a route.
+- Route surfaces are now narrower broken ash-stone/salt paver bands instead of broad grassy corridors.
+- Dry old-road views resolve to `ashfall`; wet/salt routes resolve to `silt-mist`.
+- Route atlas max notable gap improved from `108.0 m` to `72.0 m` with no lost route coverage.
+- View atlas mixed result: `ziggurat-approach` center/lower grid improved, `obelisk-approach` lower-ground improved, but origin and obelisk center still show too much block structure.
+
+The important learning: atmosphere helps the close route views, and route identity is now real data, but the foreground is still too rectilinear. The next work should create larger shape-language changes or reduce patch contrast at render time; do not spend another cycle on small color swaps.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Distance/material modulation shader pass with world-space ash/dust and lower far-LOD contrast | 5 | 4 | 3 | 6.7 | Large surface patches remain the dominant visual issue; shader-side modulation can affect every foreground/horizon pixel with little CPU cost | view-atlas luma/color/grid, black-frame gate, owned-browser frame budget |
+| 2 | Foreground silhouette interrupter pack: half-buried ribs, scree fans, shrine plinth debris, paver islands | 5 | 4 | 4 | 5.0 | Screenshots need actual non-rectangular shapes in the camera foreground, not more background tokens | terrain lab patch warnings, object-lab batches, route atlas, browser draw budget |
+| 3 | Terrain-lab comparison mode and thresholds | 4 | 5 | 2 | 10.0 | The lab is useful; adding compare/budget mode makes future ground claims faster and less subjective | `bun run lab:terrain -- --compare-to=...`, focused tests |
+| 4 | Route-aware gameplay/discovery hooks | 4 | 4 | 3 | 5.3 | `pilgrimRouteInfluence` is now available; it can drive RPG exploration memory and skill gains | objective tests, browser objective probe |
+| 5 | Push ziggurat below huge budget with negative space | 3 | 4 | 3 | 4.0 | Still worthwhile, but current view metrics point more at surface composition than the ziggurat voxel count | object-lab target `<18000`, route coverage |
+| 6 | Far-view distance experiment | 4 | 3 | 4 | 3.0 | Wait until far surfaces read less like chessboards | owned-browser LOD/fps/gap gates |

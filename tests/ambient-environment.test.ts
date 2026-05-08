@@ -7,7 +7,7 @@ import {
   type AmbientWorldProbe,
 } from "../src/engine/ambient-environment.ts";
 import { DEFAULT_RENDER_ENVIRONMENT } from "../src/engine/water-visuals.ts";
-import { ProceduralWorldGenerator, type BiomeId } from "../src/engine/procedural-generator.ts";
+import { hexColorToMaterial, ProceduralWorldGenerator, type BiomeId } from "../src/engine/procedural-generator.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
 
 const BASE_FIELDS: AmbientWorldProbe["fields"] = {
@@ -101,6 +101,32 @@ test("ashland and fungal ambience carry cheap sky/weather shader controls", () =
   expect(fungal.id).toBe("fungal-lantern");
   expect(fungal.fungalGlowIntensity).toBeGreaterThan(0.65);
   expect(fungal.ashfallIntensity).toBeLessThan(ash.ashfallIntensity);
+});
+
+test("old-road materials and landmarks pull dry routes into ash haze", () => {
+  const routeSurface = resolveAmbientWorldProfile(buildProbe({
+    biomeId: "steppe",
+    surfaceMaterial: hexColorToMaterial("#655"),
+    fields: {
+      ...BASE_FIELDS,
+      desolation: 0.42,
+      strata: 0.60,
+    },
+  }));
+  const routeLandmark = resolveAmbientWorldProfile(buildProbe({
+    biomeId: "savanna",
+    landmarkId: "pilgrim_lantern",
+  }));
+  const wetRoute = resolveAmbientWorldProfile(buildProbe({
+    biomeId: "saltflat",
+    surfaceMaterial: hexColorToMaterial("#887"),
+  }));
+
+  expect(routeSurface.id).toBe("ashfall");
+  expect(routeSurface.fogEndDistance).toBeLessThan(metersToWorldUnits(320));
+  expect(routeSurface.ashfallIntensity).toBeGreaterThan(0.50);
+  expect(routeLandmark.id).toBe("ashfall");
+  expect(wetRoute.id).toBe("silt-mist");
 });
 
 test("strong weather skies keep browser-lab-safe luma and color separation", () => {

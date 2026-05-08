@@ -222,6 +222,7 @@ interface MutableColumnState {
   oceanness: number;
   surfaceY: number;
   waterTopY: number;
+  pilgrimRouteInfluence: number;
   surfaceMaterialPrimary: number;
   surfaceMaterialSecondary: number;
   subsurfacePrimary: number;
@@ -270,6 +271,7 @@ export interface ProceduralColumnSample {
   surfaceY: number;
   topY: number;
   waterTopY: number | null;
+  pilgrimRouteInfluence: number;
   surfaceMaterial: number;
 }
 
@@ -278,6 +280,7 @@ export interface ProceduralSurfaceColumnSample {
   surfaceY: number;
   topY: number;
   waterTopY: number | null;
+  pilgrimRouteInfluence: number;
   surfaceMaterial: number;
   waterMaterial: number | null;
 }
@@ -448,6 +451,13 @@ interface PilgrimRouteBand {
   halfWidth: number;
 }
 
+interface PilgrimRouteSurfaceInfluence {
+  core: number;
+  shoulder: number;
+  fracture: number;
+  lateralRatio: number;
+}
+
 const PILGRIM_ROUTE_BANDS: readonly PilgrimRouteBand[] = [
   createPilgrimRouteBand(0, 0, 8, 1800, 70),
   createPilgrimRouteBand(0, 0, 126, 1800, 70),
@@ -490,6 +500,12 @@ const PROCEDURAL_WATER_MATERIALS = new Set<number>([
   "#9CF",
   "#9DF",
 ].map((material) => typeof material === "number" ? material : hexColorToMaterial(material)));
+
+const PILGRIM_ROUTE_CORE_MATERIAL = hexColorToMaterial("#655");
+const PILGRIM_ROUTE_WORN_MATERIAL = hexColorToMaterial("#887");
+const PILGRIM_ROUTE_DARK_MATERIAL = hexColorToMaterial("#433");
+const PILGRIM_ROUTE_DUST_MATERIAL = hexColorToMaterial("#544");
+const PILGRIM_ROUTE_SALT_MATERIAL = hexColorToMaterial("#BBA");
 
 const UNDERGROUND_BIOMES: Record<UndergroundBiomeId, UndergroundBiomeProfile> = {
   rooted: createUndergroundBiome("rooted", "#586", "#354", "#9C6"),
@@ -1438,6 +1454,13 @@ export class ProceduralWorldGenerator {
     if (regionalVariant) {
       surfaceY += sampleRegionalVariantSurfaceDelta(regionalVariant.id, regionalVariant.strength, fields, biomeCore);
     }
+    const routeSurface = samplePilgrimRouteSurfaceInfluence(worldX, worldZ, biomeId, fields);
+    if (routeSurface) {
+      surfaceY += samplePilgrimRouteSurfaceDelta(routeSurface, fields, biomeCore);
+    }
+    const pilgrimRouteInfluence = routeSurface
+      ? clamp(Math.max(routeSurface.core, routeSurface.shoulder) + routeSurface.fracture * 0.18, 0, 1)
+      : 0;
     surfaceY = clamp(surfaceY, 8, this.maxYExclusive - 2);
     const hostBiomeId = resolveHostBiomeId(biomeId, baseBlend.primary.id, baseBlend.secondary.id);
     const snowLine = terrainProfile.snowLine - Math.round((fields.temperature - 0.5) * 90);
@@ -1455,6 +1478,9 @@ export class ProceduralWorldGenerator {
     );
     if (regionalVariant) {
       applyRegionalVariantMaterialOverrides(surfaceMaterials, regionalVariant.id);
+    }
+    if (routeSurface) {
+      applyPilgrimRouteSurfaceMaterials(surfaceMaterials, routeSurface, fields);
     }
     const waterTopY = this.resolveWaterTopY(
       biomeId,
@@ -1488,6 +1514,7 @@ export class ProceduralWorldGenerator {
     out.regionalVariantId = regionalVariant?.id ?? null;
     out.regionalVariantStrength = regionalVariant?.strength ?? 0;
     out.landmarkId = landmarkId;
+    out.pilgrimRouteInfluence = pilgrimRouteInfluence;
     out.temperature = fields.temperature;
     out.moisture = fields.moisture;
     out.uplift = fields.uplift;
@@ -2430,6 +2457,7 @@ function createMutableColumnState(): MutableColumnState {
     oceanness: 0,
     surfaceY: 0,
     waterTopY: NO_WATER,
+    pilgrimRouteInfluence: 0,
     surfaceMaterialPrimary: 0,
     surfaceMaterialSecondary: 0,
     subsurfacePrimary: 0,
@@ -2488,6 +2516,7 @@ function columnSampleFromState(state: MutableColumnState): ProceduralColumnSampl
     surfaceY: state.surfaceY,
     topY: topYFromState(state),
     waterTopY: nullableWaterTopY(state.waterTopY),
+    pilgrimRouteInfluence: state.pilgrimRouteInfluence,
     surfaceMaterial: state.surfaceMaterialPrimary,
   };
 }
@@ -2498,6 +2527,7 @@ function surfaceColumnSampleFromState(state: MutableColumnState): ProceduralSurf
     surfaceY: state.surfaceY,
     topY: topYFromState(state),
     waterTopY: nullableWaterTopY(state.waterTopY),
+    pilgrimRouteInfluence: state.pilgrimRouteInfluence,
     surfaceMaterial: state.surfaceMaterialPrimary,
     waterMaterial: state.waterTopY === NO_WATER ? null : state.waterMaterial,
   };
@@ -2792,6 +2822,91 @@ function createPilgrimRouteBand(
     length: lengthMeters * WORLD_UNITS_PER_METER,
     halfWidth: halfWidthMeters * WORLD_UNITS_PER_METER,
   };
+}
+
+function samplePilgrimRouteSurfaceInfluence(
+  worldX: number,
+  worldZ: number,
+  biomeId: BiomeId,
+  fields: SurfaceFieldSample,
+): PilgrimRouteSurfaceInfluence | null {
+  if (
+    biomeId === "verdant"
+    || biomeId === "fern"
+    || biomeId === "bloom"
+    || (biomeId === "highland" && fields.oldGrowth > 0.62 && fields.moisture > 0.48)
+  ) {
+    return null;
+  }
+
+  let best: PilgrimRouteSurfaceInfluence | null = null;
+  for (const band of PILGRIM_ROUTE_BANDS) {
+    const deltaX = worldX - band.startX;
+    const deltaZ = worldZ - band.startZ;
+    const along = deltaX * band.directionX + deltaZ * band.directionZ;
+    if (along < -band.halfWidth || along > band.length + band.halfWidth) {
+      continue;
+    }
+    const lateralRatio = Math.abs(deltaX * -band.directionZ + deltaZ * band.directionX) / band.halfWidth;
+    if (lateralRatio > 1) {
+      continue;
+    }
+
+    const core = 1 - smoothstep(0.08, 0.38, lateralRatio);
+    const shoulder = smoothstep(0.22, 0.88, lateralRatio) * (1 - smoothstep(0.84, 1.02, lateralRatio));
+    const worldXDiv12 = Math.floor(worldX / 12);
+    const worldZDiv12 = Math.floor(worldZ / 12);
+    const diagonalA = diagonalStripeStrength(worldXDiv12, worldZDiv12, 83, 19, 5, 3);
+    const diagonalB = diagonalStripeStrength(worldXDiv12, worldZDiv12, 131, 29, -4, 7);
+    const crackField = Math.max(
+      smoothstep(0.70, 0.96, diagonalA),
+      smoothstep(0.76, 0.98, diagonalB) * 0.86,
+    );
+    const harshness = avg3(
+      smoothstep(0.42, 0.82, fields.surfacePatch),
+      smoothstep(0.40, 0.80, fields.scatter),
+      smoothstep(0.42, 0.82, fields.strata + fields.desolation * 0.24),
+    );
+    const fracture = saturate(crackField * (0.42 + harshness * 0.58) + shoulder * harshness * 0.26);
+    const candidate = { core, shoulder, fracture, lateralRatio };
+    if (!best || candidate.core + candidate.shoulder > best.core + best.shoulder) {
+      best = candidate;
+    }
+  }
+  return best && best.core + best.shoulder > 0.08 ? best : null;
+}
+
+function samplePilgrimRouteSurfaceDelta(
+  route: PilgrimRouteSurfaceInfluence,
+  fields: SurfaceFieldSample,
+  biomeCore: number,
+): number {
+  const centerWear = route.core * (0.8 + fields.strata * 1.25);
+  const shoulderCollapse = route.shoulder * (0.8 + route.fracture * 2.2 + fields.scatter * 0.55);
+  const raisedBrokenSlab = route.fracture > 0.68 && route.core > 0.22 ? 1 : 0;
+  return -Math.round((centerWear + shoulderCollapse) * (0.42 + biomeCore * 0.58)) + raisedBrokenSlab;
+}
+
+function applyPilgrimRouteSurfaceMaterials(
+  materials: ResolvedSurfaceMaterials,
+  route: PilgrimRouteSurfaceInfluence,
+  fields: SurfaceFieldSample,
+): void {
+  const desolateRoute = fields.desolation > 0.54 || fields.volcanism > 0.54;
+  const routeDeposit = route.fracture + route.core * 0.34 + route.shoulder * 0.22;
+  if (route.shoulder > route.core + 0.12 && routeDeposit > 0.50) {
+    materials.surfacePrimary = desolateRoute ? PILGRIM_ROUTE_DUST_MATERIAL : PILGRIM_ROUTE_WORN_MATERIAL;
+    materials.surfaceSecondary = route.fracture > 0.46 ? PILGRIM_ROUTE_DARK_MATERIAL : PILGRIM_ROUTE_CORE_MATERIAL;
+    materials.transitionThreshold = clamp(0.50 + route.fracture * 0.18, 0.50, 0.72);
+    return;
+  }
+  if (route.core > 0.28 || routeDeposit > 0.64) {
+    materials.surfacePrimary = route.fracture > 0.72 ? PILGRIM_ROUTE_DARK_MATERIAL : PILGRIM_ROUTE_CORE_MATERIAL;
+    materials.surfaceSecondary = route.fracture > 0.50
+      ? (desolateRoute ? PILGRIM_ROUTE_DUST_MATERIAL : PILGRIM_ROUTE_SALT_MATERIAL)
+      : PILGRIM_ROUTE_WORN_MATERIAL;
+    materials.transitionThreshold = clamp(0.58 + route.core * 0.16 - route.fracture * 0.10, 0.48, 0.78);
+  }
 }
 
 function selectPilgrimRouteRoster(

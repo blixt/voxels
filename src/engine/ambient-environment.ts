@@ -9,10 +9,12 @@ import {
   DEFAULT_RENDER_ENVIRONMENT,
   type RenderEnvironment,
 } from "./water-visuals.ts";
-import type {
-  BiomeId,
-  ProceduralBiomeProbe,
-  RegionalVariantId,
+import {
+  hexColorToMaterial,
+  type BiomeId,
+  type LandmarkId,
+  type ProceduralBiomeProbe,
+  type RegionalVariantId,
 } from "./procedural-generator.ts";
 
 export type AmbientProfileId =
@@ -38,6 +40,9 @@ export interface AmbientWorldProbe {
   regionalVariantStrength: number;
   specialStrength: number;
   surfaceY: number;
+  landmarkId?: LandmarkId | null;
+  surfaceMaterial?: number;
+  pilgrimRouteInfluence?: number;
   fields: ProceduralBiomeProbe["fields"];
 }
 
@@ -54,6 +59,21 @@ const SURFACE_FOG_MIN_END_DISTANCE = metersToWorldUnits(224);
 const SURFACE_FOG_MAX_END_DISTANCE = DEFAULT_RENDER_ENVIRONMENT.fogEndDistance;
 const UNDERGROUND_FOG_MIN_END_DISTANCE = metersToWorldUnits(64);
 const UNDERGROUND_FOG_MAX_END_DISTANCE = metersToWorldUnits(192);
+const PILGRIM_ROUTE_SURFACE_MATERIALS = new Set<number>(
+  ["#655", "#887", "#433", "#544", "#BBA"].map((code) => hexColorToMaterial(code)),
+);
+const PILGRIM_ROUTE_LANDMARKS = new Set<LandmarkId>([
+  "ancestor_pillar",
+  "ash_marker",
+  "bone_chimes",
+  "old_road_causeway",
+  "pilgrim_lantern",
+  "rib_arch",
+  "rib_remains",
+  "velothi_shrine",
+  "velothi_ziggurat",
+  "ash_obelisk",
+]);
 
 const PROFILE_DEFINITIONS: Record<AmbientProfileId, AmbientProfileDefinition> = {
   "open-air": {
@@ -185,7 +205,7 @@ export function resolveAmbientWorldProfile(
   const undergroundBiomeId = options.observedUndergroundBiomeId ?? null;
   const profileId = undergroundBiomeId
     ? resolveUndergroundProfileId(undergroundBiomeId)
-    : resolveSurfaceProfileId(probe.biomeId, probe.regionalVariantId);
+    : resolveSurfaceProfileId(probe);
   const definition = PROFILE_DEFINITIONS[profileId];
   const intensity = resolveProfileIntensity(probe, Boolean(undergroundBiomeId));
   const fogEndMinimum = undergroundBiomeId ? UNDERGROUND_FOG_MIN_END_DISTANCE : SURFACE_FOG_MIN_END_DISTANCE;
@@ -235,8 +255,12 @@ export function buildAmbientRenderEnvironment(profile: AmbientWorldProfile): Ren
   };
 }
 
-function resolveSurfaceProfileId(biomeId: BiomeId, regionalVariantId: RegionalVariantId | null): AmbientProfileId {
-  switch (regionalVariantId) {
+function resolveSurfaceProfileId(probe: AmbientWorldProbe): AmbientProfileId {
+  const routeHaze = isPilgrimRouteHazeProbe(probe);
+  if (routeHaze && probe.biomeId !== "marsh" && probe.biomeId !== "saltflat" && probe.biomeId !== "fungal") {
+    return "ashfall";
+  }
+  switch (probe.regionalVariantId) {
     case "badlands_crater":
     case "ember_caldera":
       return "ashfall";
@@ -261,7 +285,11 @@ function resolveSurfaceProfileId(biomeId: BiomeId, regionalVariantId: RegionalVa
       break;
   }
 
-  switch (biomeId) {
+  if (routeHaze) {
+    return "silt-mist";
+  }
+
+  switch (probe.biomeId) {
     case "verdant":
     case "fern":
     case "bloom":
@@ -287,6 +315,19 @@ function resolveSurfaceProfileId(biomeId: BiomeId, regionalVariantId: RegionalVa
   }
 }
 
+function isPilgrimRouteHazeProbe(probe: AmbientWorldProbe): boolean {
+  if (typeof probe.surfaceMaterial === "number" && PILGRIM_ROUTE_SURFACE_MATERIALS.has(probe.surfaceMaterial)) {
+    return true;
+  }
+  if (probe.landmarkId && PILGRIM_ROUTE_LANDMARKS.has(probe.landmarkId)) {
+    return true;
+  }
+  if ((probe.pilgrimRouteInfluence ?? 0) > 0.18) {
+    return true;
+  }
+  return probe.fields.desolation > 0.56 && probe.fields.strata > 0.58 && probe.fields.scatter > 0.56;
+}
+
 function resolveUndergroundProfileId(undergroundBiomeId: string): AmbientProfileId {
   switch (undergroundBiomeId) {
     case "mycelial":
@@ -308,7 +349,8 @@ function resolveProfileIntensity(probe: AmbientWorldProbe, underground: boolean)
     + Math.max(0, probe.fields.volcanism - 0.60) * 0.14
     + Math.max(0, probe.fields.oceanness - 0.50) * 0.08
   );
-  const profilePressure = probe.specialStrength * 0.22 + probe.regionalVariantStrength * 0.20;
+  const routePressure = !underground && isPilgrimRouteHazeProbe(probe) ? 0.18 : 0;
+  const profilePressure = probe.specialStrength * 0.22 + probe.regionalVariantStrength * 0.20 + routePressure;
   return clamp((underground ? 0.84 : 0.58) + fieldPressure + profilePressure, 0.48, 1);
 }
 

@@ -1112,6 +1112,44 @@ test("surface materials vary within major biomes to support finer ground detail"
   expect(materialsByBiome.get("moor")?.size ?? 0).toBeGreaterThanOrEqual(3);
 });
 
+test("pilgrim route surfaces read as broken ash-stone paths instead of grassy corridors", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const routeMaterials = new Set(["#655", "#887", "#433", "#544", "#BBA"].map((code) => hexColorToMaterial(code)));
+  const routeSamples = [
+    [0, 0],
+    [594, 84],
+    [2200, -3400],
+    [2788, -2591],
+    [-11245, -15846],
+    [-10958, -15675],
+  ] as const;
+
+  let oldRoadMaterialSamples = 0;
+  const routeMaterialVariety = new Set<number>();
+  const routeHeightModuloBuckets = new Map<number, number>();
+  for (const [centerX, centerZ] of routeSamples) {
+    for (let dz = -18; dz <= 18; dz += 6) {
+      for (let dx = -18; dx <= 18; dx += 6) {
+        const probe = generator.sampleBiomeProbe(centerX + dx, centerZ + dz);
+        routeHeightModuloBuckets.set(probe.surfaceY % 8, (routeHeightModuloBuckets.get(probe.surfaceY % 8) ?? 0) + 1);
+        if (!routeMaterials.has(probe.surfaceMaterial)) {
+          continue;
+        }
+        oldRoadMaterialSamples += 1;
+        routeMaterialVariety.add(probe.surfaceMaterial);
+      }
+    }
+  }
+  const totalSamples = routeSamples.length * 7 * 7;
+  const dominantHeightModuloShare = Math.max(...routeHeightModuloBuckets.values()) / totalSamples;
+
+  expect(oldRoadMaterialSamples / totalSamples).toBeGreaterThanOrEqual(0.58);
+  expect(routeMaterialVariety.size).toBeGreaterThanOrEqual(3);
+  expect(dominantHeightModuloShare).toBeLessThanOrEqual(0.32);
+  expect(generator.sampleBiomeProbe(-11245, -15846).pilgrimRouteInfluence).toBeGreaterThan(0.18);
+  expect(generator.sampleBiomeProbe(24_000, 24_000).pilgrimRouteInfluence).toBe(0);
+});
+
 test("new biome families expose distinct landmark identities", () => {
   const generator = new ProceduralWorldGenerator(1337);
   const landmarksByBiome = new Map<string, Set<string>>();

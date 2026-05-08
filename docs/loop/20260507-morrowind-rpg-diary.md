@@ -1725,3 +1725,40 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint and push this megastructure/harness slice
   - start the ground-interrupter pass against `artifacts/view-atlas/20260508T045619Z-megastructure-hudless-atlas/report.json`
   - focus on large non-rectangular ash drifts, salt cracks, and scree fans that alter foreground/horizon pixels instead of more small object families
+
+### 2026-05-08 - Old-Road Surface Lab And Ash Haze Pass
+
+- Trigger:
+  - The user noted the world still looked full of ugly props and lacked characteristic ambiance, and asked for bold ROI ordering.
+  - The clean HUDless atlas showed foreground roads and terrain surfaces dominate the blocky read.
+- Delegation:
+  - A worker added the terrain surface lab while I worked on the generator/ambient slice.
+  - A read-only audit independently ranked route/causeway replacement and route-local ash atmosphere as the highest visible ROI.
+- Changes:
+  - Added `bun run lab:terrain`, a fast non-browser terrain diagnostic that samples fixed atlas/route patches and reports material diversity, height modulo, flatness, grid-likeness, landmarks, warnings, and markdown summaries.
+  - Added old-road surface influence to generated column probes so browser/ambient systems can tell when the player is on or near a pilgrimage route.
+  - Reworked route surface materials into narrower, broken ash-stone/salt paver bands instead of broad grassy/steppe corridors.
+  - Route-influenced dry views now resolve to `ashfall`; wet/salt route views resolve to `silt-mist`. This gives routes cheaper atmospheric composition and fog culling without adding geometry.
+- Validation:
+  - Focused tests: `mise exec -- bun test tests/procedural-generator.test.ts tests/ambient-environment.test.ts tests/terrain-surface-lab.test.ts`, pass, `47` tests.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Build: `mise exec -- bun run build`, pass.
+  - Route atlas: `artifacts/route-atlas/20260508T053426Z-old-road-influence-haze/report.json`, failures none, route stretch coverage `100%`, strong silhouette coverage `87.7%`, max notable gap improved `108.0 m -> 72.0 m`.
+  - Terrain lab: `artifacts/terrain-lab/20260508T053123Z-old-road-influence-haze/report.json`, average grid-likeness `0.000`, one warning: `ziggurat-approach` patch still misses direct `velothi_ziggurat` focus samples inside the local terrain grid.
+  - View atlas: `artifacts/view-atlas/20260508T052931Z-old-road-influence-haze-retry/report.json`, failures none.
+  - View-atlas deltas against HUDless baseline: `ziggurat-approach` center grid `0.085 -> 0.080`, lower ground `0.027 -> 0.024`; `obelisk-approach` center grid `0.065 -> 0.074`, lower ground `0.020 -> 0.014`; origin is much moodier but slightly worse by grid metric.
+  - Owned browser lab: `artifacts/owned-browser-lab/20260508T053122Z-old-road-influence-haze/report.json`, failures none.
+  - Browser result: traversal p95/max `4.40/8.80 ms`, route p95/max `4.70/8.30 ms`, draw/triangles `511/385298`, visual saturation/grid/color `0.37/0.68/97`, LOD overlap LOD0/bands `0/0`, water overlap `0`, LOD gaps `0`, handoff holes `0`, render-ready near samples `961/961`, HUD smoke passed.
+- Honest assessment:
+  - This is the first pass where route atmosphere and route surface identity are measurable across fixed views, not just asserted.
+  - The result is still mixed: old-road close views are moodier and some ground metrics improved, but the prototype still has too many rectangular terrain patches and weak prop silhouettes.
+  - The terrain lab is a process win because I can now iterate on ground composition without starting a browser every time.
+  - Next visual work should not be another palette nudge. It should either add truly non-rectangular ground/object silhouettes in the actual camera foreground, or add a safer distance/material modulation pass that reduces large patch contrast at render time.
+- Rubric movement:
+  - Harness maturity: `9.45 -> 9.60` because terrain-surface sampling is now automated and part of the ROI loop.
+  - Visual/world definition: `5.95 -> 6.05` because old roads now have material and atmosphere identity, but screenshots remain visibly blocky.
+  - Performance/playability: unchanged at `6.25`; browser route/traversal frame budgets stayed playable, but bootstrap max had a `24.80 ms` startup spike to watch.
+  - Rendering correctness: `6.30 -> 6.35` because route influence is now exposed as data and tested through generator plus ambient paths.
+- Next:
+  - checkpoint and push this surface-lab/route-haze slice
+  - start shader-side distance material modulation or bolder foreground silhouette/terrain interrupters next

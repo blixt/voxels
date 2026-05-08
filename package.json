@@ -17,6 +17,7 @@
     "profile:lod-residency": "bun run scripts/profile-lod-residency.ts",
     "atlas:routes": "bun run scripts/route-atlas.ts",
     "atlas:views": "bun run scripts/capture-view-atlas.ts",
+    "lab:terrain": "bun run scripts/terrain-surface-lab.ts",
     "verify:smoke": "bun run scripts/verify-smoke.ts",
     "analyze:trace": "bun run scripts/analyze-chrome-trace.ts",
     "analyze:screenshot": "bun run scripts/analyze-screenshot-composition.ts",
