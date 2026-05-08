@@ -48,6 +48,8 @@ const SURFACE_BIOME_IDS = [
   "shardlands",
 ] as const;
 
+const CHUNK_SIZE = 32;
+
 const AUDITED_SURFACE_LANDMARK_IDS = [
   "oak",
   "canopy_tree",
@@ -126,6 +128,39 @@ const TRUNKED_LANDMARK_IDS = [
   "giant_fern",
   "giant_flower",
 ] as const;
+
+test("column material buckets match generated chunk voxel data", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const generatedChunks = new Map<string, ReturnType<ProceduralWorldGenerator["generateChunk"]>>();
+  const samplePoints = [
+    { x: -13_814, z: -24_678 },
+    { x: -4_320, z: 940 },
+    { x: -220, z: 4_020 },
+    { x: 4_760, z: 2_120 },
+  ];
+
+  for (const point of samplePoints) {
+    const column = generator.sampleColumn(point.x, point.z);
+    for (const bucketSize of [1, 2, 4, 8, 16]) {
+      const firstBucketMinY = Math.max(0, column.surfaceY - bucketSize * 8);
+      const bucketCount = 18;
+      const buckets = generator.sampleColumnMaterialBuckets(
+        point.x,
+        point.z,
+        firstBucketMinY,
+        bucketSize,
+        bucketCount,
+      );
+      for (let bucketIndex = 0; bucketIndex < bucketCount; bucketIndex += 1) {
+        const minY = firstBucketMinY + bucketIndex * bucketSize;
+        const maxY = Math.min(generator.maxYExclusive - 1, minY + bucketSize - 1);
+        expect(buckets[bucketIndex]).toBe(
+          sampleGeneratedBucketMaterial(generator, generatedChunks, point.x, point.z, minY, maxY),
+        );
+      }
+    }
+  }
+});
 
 type LandmarkRoot = { x: number; z: number; probe: ReturnType<ProceduralWorldGenerator["sampleBiomeProbe"]> };
 
@@ -2022,3 +2057,49 @@ test("procedural generator respects the configured Y range", () => {
   expect(generator.sampleMaterial(640, -1, -1280)).toBe(0);
   expect(generator.sampleMaterial(640, PROCEDURAL_WORLD_MAX_Y, -1280)).toBe(0);
 });
+
+function sampleGeneratedBucketMaterial(
+  generator: ProceduralWorldGenerator,
+  generatedChunks: Map<string, ReturnType<ProceduralWorldGenerator["generateChunk"]>>,
+  worldX: number,
+  worldZ: number,
+  minWorldY: number,
+  maxWorldY: number,
+): number {
+  let waterMaterial = 0;
+  for (let worldY = maxWorldY; worldY >= minWorldY; worldY -= 1) {
+    const material = getGeneratedVoxel(generator, generatedChunks, worldX, worldY, worldZ);
+    if (material === 0) {
+      continue;
+    }
+    if (!isProceduralWaterMaterial(material)) {
+      return material;
+    }
+    if (waterMaterial === 0) {
+      waterMaterial = material;
+    }
+  }
+  return waterMaterial;
+}
+
+function getGeneratedVoxel(
+  generator: ProceduralWorldGenerator,
+  generatedChunks: Map<string, ReturnType<ProceduralWorldGenerator["generateChunk"]>>,
+  worldX: number,
+  worldY: number,
+  worldZ: number,
+): number {
+  const cx = Math.floor(worldX / CHUNK_SIZE);
+  const cy = Math.floor(worldY / CHUNK_SIZE);
+  const cz = Math.floor(worldZ / CHUNK_SIZE);
+  const key = `${cx}:${cy}:${cz}`;
+  let chunk = generatedChunks.get(key);
+  if (!chunk) {
+    chunk = generator.generateChunk(cx, cy, cz);
+    generatedChunks.set(key, chunk);
+  }
+  const lx = worldX - cx * CHUNK_SIZE;
+  const ly = worldY - cy * CHUNK_SIZE;
+  const lz = worldZ - cz * CHUNK_SIZE;
+  return chunk.data[lx + ly * CHUNK_SIZE + lz * CHUNK_SIZE * CHUNK_SIZE] ?? 0;
+}

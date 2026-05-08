@@ -2321,3 +2321,35 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - checkpoint and push the regional-route slice
   - rebaseline object-lab representative-root tests so isolated model work can again support delegated biome/object improvements
+
+### 2026-05-08 - LOD Shell Ownership and Surface Boundary Fix
+
+- Trigger:
+  - The user asked whether I could actually see that nearby resident chunks and distant LOD chunks looked like different worlds.
+  - My own headless Chrome screenshot confirmed a hard visual discontinuity: near terrain and far LOD were not presenting as one continuous surface.
+- Diagnosis:
+  - The visible gap was not only duplicate LOD z-fighting. At sampled failing columns, `sampleSurfaceColumn()` could report a surface boundary whose exact voxel was air because of cave-surface breach logic.
+  - The LOD fallback filled from that boundary upward, so coarse LOD sometimes emitted no material for the visible terrain bucket, or emitted a bucket whose top face was one coarse step too high.
+  - The coarser LOD punchout was also too broad in one dimension and too weak in another: it could suppress a coarse shell because a finer LOD existed somewhere in the same column, while also allowing coarse and finer horizontal owners to coexist in other sampled columns.
+- Changes:
+  - Added `scripts/diagnose-lod-coverage.ts` as a fast, repeatable fog-range ownership harness. It reports coverage holes and overlapping chunks for concrete world samples.
+  - Changed generated LOD fallback to emit a single topmost visible shell bucket by sampling actual material buckets below/through the reported surface boundary instead of trusting the boundary as a filled voxel.
+  - Reworked LOD punchout so coarser shells defer to existing render-ready LOD0 columns and finer LOD horizontal owners, while the fallback material itself comes from the generator's authoritative material sampler.
+  - Tightened LOD Y planning to the visible shell range instead of planning padded underground and air chunks for a shell-only far representation.
+  - Bumped `PROCEDURAL_WORLD_GENERATION_VERSION` so stale persisted chunk data does not mask the renderer fix.
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun run scripts/diagnose-lod-coverage.ts --samples=3`: pass, `0` uncovered samples out of `11025`.
+  - `mise exec -- bun test tests/lod-system.test.ts -t "actual generated LOD data covers|sampled fog-range columns have a single visible LOD owner|generated fallback LOD terrain"`: pass, `3` focused tests.
+- Honest assessment:
+  - This is a correctness repair for the current shell fallback path, not the final ideal LOD architecture.
+  - The high-integrity next step is to restore source-first LOD generation where resident/finer data exists, using generated shell fallback only while source chunks are not ready, so edits and future non-procedural world changes remain visible in far LOD.
+  - The coverage harness now catches the specific failure the user reported: no owner, multiple owners, and boundary-derived empty shells.
+- Rubric movement:
+  - Rendering correctness/quality: `7.48 -> 7.72`.
+  - Harness maturity: `9.999 -> 10.0` for LOD ownership coverage, with the caveat that visual screenshot automation still needs a lighter page probe.
+  - Performance/playability: `6.53 -> 6.65` because shell LOD generation no longer fills vertical slabs, but the LOD residency path still needs a source/cache pass before I can claim a major runtime win.
+- Next:
+  - verify the screenshot-only browser capture
+  - add source-first LOD restoration on top of the shell fallback contract
+  - then checkpoint and push the rendering slice before returning to biome/content work

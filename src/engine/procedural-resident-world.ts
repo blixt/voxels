@@ -3,7 +3,6 @@ import type { AsyncChunkGenerationQueue } from "./async-chunk-generation.ts";
 import {
   ProceduralWorldGenerator,
   isProceduralWaterMaterial,
-  type ProceduralSurfaceColumnSample,
   type GeneratedChunk,
 } from "./procedural-generator.ts";
 import {
@@ -173,6 +172,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   private renderReadyColumnRevision = 0;
   private lodNeededKeyCache: { signature: string; keys: string[] } | null = null;
   private lodNeededKeyPlanningState: LodNeededKeyPlanningState | null = null;
+  private readonly lodWorldColumnCoverageCache = new Map<string, boolean>();
   private lastAnchorSignature = "";
   private lastAnchorComplete = true;
   private nextEditSequence = 1;
@@ -800,6 +800,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     if (!this.meshMaterialLut) {
       this.meshMaterialLut = createMeshMaterialLut(this.palette, isProceduralWaterMaterial);
     }
+    this.lodWorldColumnCoverageCache.clear();
 
     // Phase 1: compute all needed LOD chunk keys.
     //
@@ -1214,9 +1215,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     stride: number,
     worldSize: number,
   ): { minCy: number; maxCy: number } {
-    const shellPaddingY = Math.max(stride * 2, this.chunkSize);
+    const shellPaddingY = stride * 3;
     const paddedMinY = Math.max(this.minY, minWorldY - shellPaddingY);
-    const paddedMaxY = Math.min(this.maxYExclusive - 1, maxWorldY + this.airPaddingChunks * this.chunkSize);
+    const paddedMaxY = Math.min(this.maxYExclusive - 1, maxWorldY);
     return {
       minCy: Math.max(0, Math.floor(paddedMinY / worldSize)),
       maxCy: Math.max(0, Math.floor(paddedMaxY / worldSize)),
@@ -1246,31 +1247,11 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     const originY = lodCy * worldSize;
     const originZ = lodCz * worldSize;
 
-    // Source lookup: LOD 1 reads from LOD 0 chunks, LOD 2+ from LOD (level-1) chunks.
-    const lookupSource = level === 1
-      ? (cx: number, cy: number, cz: number): { data: Uint16Array | null; known: boolean } => {
-          const key = toChunkKey(cx, cy, cz);
-          const chunk = this.chunks.get(key);
-          if (chunk) {
-            return { data: chunk.data, known: true };
-          }
-          return { data: null, known: this.emptyChunkKeys.has(key) };
-        }
-      : (cx: number, cy: number, cz: number): { data: Uint16Array | null; known: boolean } => {
-          const key = `L${level - 1}:${cx}:${cy}:${cz}`;
-          const chunk = this.lodChunks.get(key);
-          if (chunk) {
-            return { data: chunk.data, known: true };
-          }
-          return { data: null, known: this.emptyLodKeys.has(key) || this.coveredEmptyLodKeys.has(key) };
-        };
-
     let solidCount = 0;
     let minX = cs, minY = cs, minZ = cs;
     let maxX = 0, maxY = 0, maxZ = 0;
     let sourceComplete = true;
     let skippedFinerCoverage = false;
-    let fallbackColumns: Array<ProceduralSurfaceColumnSample | null> | null = null;
     const recordMaterial = (ox: number, oy: number, oz: number, material: number): void => {
       data[ox + oy * cs + oz * chunkArea] = material;
       solidCount++;
@@ -1281,29 +1262,52 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       if (oy + 1 > maxY) maxY = oy + 1;
       if (oz + 1 > maxZ) maxZ = oz + 1;
     };
-    const sampleGeneratedFallbackColumn = (ox: number, oz: number): ProceduralSurfaceColumnSample => {
-      fallbackColumns ??= new Array<ProceduralSurfaceColumnSample | null>(chunkArea).fill(null);
-      const columnIndex = ox + oz * cs;
-      let column = fallbackColumns[columnIndex];
-      if (!column) {
-        column = this.generator.sampleSurfaceColumn(originX + ox * stride, originZ + oz * stride);
-        fallbackColumns[columnIndex] = column;
-      }
-      return column;
-    };
-    const isOutputColumnCoveredByRenderReadyLod0 = (ox: number, oz: number): boolean => {
+    const isOutputVoxelCoveredByFiner = (ox: number, oy: number, oz: number): boolean => {
       const minWorldX = originX + ox * stride;
       const maxWorldX = minWorldX + stride - 1;
+      const minWorldY = originY + oy * stride;
+      const maxWorldY = minWorldY + stride - 1;
       const minWorldZ = originZ + oz * stride;
       const maxWorldZ = minWorldZ + stride - 1;
       const minChunkX = Math.floor(minWorldX / this.chunkSize);
       const maxChunkX = Math.floor(maxWorldX / this.chunkSize);
+      const minChunkY = Math.floor(minWorldY / this.chunkSize);
+      const maxChunkY = Math.floor(maxWorldY / this.chunkSize);
       const minChunkZ = Math.floor(minWorldZ / this.chunkSize);
       const maxChunkZ = Math.floor(maxWorldZ / this.chunkSize);
       for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
         for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
-          if (this.isColumnRenderReady(chunkX, chunkZ)) {
-            return true;
+          if (!this.isColumnRenderReady(chunkX, chunkZ)) {
+            continue;
+          }
+          for (let chunkY = minChunkY; chunkY <= maxChunkY; chunkY += 1) {
+            const chunk = this.getResidentChunk(chunkX, chunkY, chunkZ);
+            if (chunk?.renderReady && chunk.solidCount > 0) {
+              return true;
+            }
+          }
+        }
+      }
+      for (let finerLevel = 1; finerLevel < level; finerLevel += 1) {
+        const finerStride = 1 << finerLevel;
+        const finerWorldSize = this.chunkSize * finerStride;
+        const minLodX = Math.floor(minWorldX / finerWorldSize);
+        const maxLodX = Math.floor(maxWorldX / finerWorldSize);
+        const minLodZ = Math.floor(minWorldZ / finerWorldSize);
+        const maxLodZ = Math.floor(maxWorldZ / finerWorldSize);
+        for (let lodZ = minLodZ; lodZ <= maxLodZ; lodZ += 1) {
+          for (let lodX = minLodX; lodX <= maxLodX; lodX += 1) {
+            if (this.isLodWorldColumnCovered(
+              finerLevel,
+              lodX,
+              lodZ,
+              minWorldX,
+              maxWorldX,
+              minWorldZ,
+              maxWorldZ,
+            )) {
+              return true;
+            }
           }
         }
       }
@@ -1315,109 +1319,40 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       minOy: number,
       maxOyExclusive: number,
     ): void => {
-      if (isOutputColumnCoveredByRenderReadyLod0(ox, oz)) {
-        skippedFinerCoverage = true;
+      const worldX = originX + ox * stride;
+      const worldZ = originZ + oz * stride;
+      const column = this.generator.sampleSurfaceColumn(worldX, worldZ);
+      const maxSurfaceWorldY = Math.max(column.topY, column.waterTopY ?? column.surfaceY);
+      const minSurfaceWorldY = column.surfaceY - stride * 3;
+      const startOy = Math.max(minOy, Math.floor((minSurfaceWorldY - originY) / stride));
+      const endOy = Math.min(maxOyExclusive - 1, Math.floor((maxSurfaceWorldY - originY) / stride));
+      if (startOy > endOy) {
         return;
       }
-      const column = sampleGeneratedFallbackColumn(ox, oz);
-      let wroteWater = false;
-      if (column.waterTopY !== null) {
-        const waterStartOy = Math.ceil((column.surfaceY + 1 - originY - (stride - 1)) / stride);
-        const waterEndOy = Math.floor((column.waterTopY - originY) / stride);
-        const startOy = Math.max(minOy, waterStartOy);
-        const endOy = Math.min(maxOyExclusive - 1, waterEndOy);
-        if (startOy <= endOy) {
-          const material = column.waterMaterial ?? column.surfaceMaterial;
-          for (let oy = startOy; oy <= endOy; oy += 1) {
-            recordMaterial(ox, oy, oz, material);
-          }
-          wroteWater = true;
+      const materials = this.generator.sampleColumnMaterialBuckets(
+        worldX,
+        worldZ,
+        originY + startOy * stride,
+        stride,
+        endOy - startOy + 1,
+      );
+      for (let oy = endOy; oy >= startOy; oy -= 1) {
+        const material = materials[oy - startOy] ?? 0;
+        if (material === 0) {
+          continue;
         }
-      }
-      const surfaceOy = Math.floor((column.surfaceY - originY) / stride);
-      if (!wroteWater && surfaceOy >= minOy && surfaceOy < maxOyExclusive) {
-        recordMaterial(ox, surfaceOy, oz, column.surfaceMaterial);
+        if (isOutputVoxelCoveredByFiner(ox, oy, oz)) {
+          skippedFinerCoverage = true;
+          return;
+        }
+        recordMaterial(ox, oy, oz, material);
+        return;
       }
     };
 
-    // The downsample factor relative to source: always 2 (each LOD level halves resolution)
-    const ds = 2;
-
-    const outputBlockSize = cs / ds;
-    for (let blockZ = 0; blockZ < ds; blockZ += 1) {
-      const srcCz = lodCz * ds + blockZ;
-      const minOz = blockZ * outputBlockSize;
-      const maxOz = minOz + outputBlockSize;
-      for (let blockY = 0; blockY < ds; blockY += 1) {
-        const srcCy = lodCy * ds + blockY;
-        const minOy = blockY * outputBlockSize;
-        const maxOy = minOy + outputBlockSize;
-        for (let blockX = 0; blockX < ds; blockX += 1) {
-          const srcCx = lodCx * ds + blockX;
-          const minOx = blockX * outputBlockSize;
-          const maxOx = minOx + outputBlockSize;
-
-          const coveredByFiner = level === 1
-            ? this.isColumnRenderReady(srcCx, srcCz)
-            : (this.lodChunks.get(`L${level - 1}:${srcCx}:${srcCy}:${srcCz}`)?.renderReady ?? false);
-          if (coveredByFiner) {
-            skippedFinerCoverage = true;
-            continue;
-          }
-
-          const source = lookupSource(srcCx, srcCy, srcCz);
-
-          if (!source.data) {
-            if (!source.known) {
-              sourceComplete = false;
-              for (let oz = minOz; oz < maxOz; oz += 1) {
-                for (let ox = minOx; ox < maxOx; ox += 1) {
-                  fillGeneratedFallbackColumn(ox, oz, minOy, maxOy);
-                }
-              }
-            }
-            continue;
-          }
-
-          for (let oz = minOz; oz < maxOz; oz += 1) {
-            const srcLz = (oz - minOz) * ds;
-            for (let oy = minOy; oy < maxOy; oy += 1) {
-              const srcLy = (oy - minOy) * ds;
-              for (let ox = minOx; ox < maxOx; ox += 1) {
-                if (isOutputColumnCoveredByRenderReadyLod0(ox, oz)) {
-                  skippedFinerCoverage = true;
-                  continue;
-                }
-                const srcLx = (ox - minOx) * ds;
-
-                // Downsample: scan the ds×ds×ds block starting at the source local coord,
-                // pick highest opaque voxel (top-down Y scan)
-                let bestMaterial = 0;
-                outer: for (let dy = ds - 1; dy >= 0; dy--) {
-                  for (let dz = 0; dz < ds; dz++) {
-                    for (let dx = 0; dx < ds; dx++) {
-                      const lx = srcLx + dx;
-                      const ly = srcLy + dy;
-                      const lz = srcLz + dz;
-                      const mat = source.data[lx + ly * cs + lz * chunkArea]!;
-                      if (mat !== 0 && !isProceduralWaterMaterial(mat)) {
-                        bestMaterial = mat;
-                        break outer;
-                      }
-                      if (mat !== 0 && bestMaterial === 0) {
-                        bestMaterial = mat; // water fallback
-                      }
-                    }
-                  }
-                }
-
-                if (bestMaterial !== 0) {
-                  recordMaterial(ox, oy, oz, bestMaterial);
-                }
-              }
-            }
-          }
-        }
+    for (let oz = 0; oz < cs; oz += 1) {
+      for (let ox = 0; ox < cs; ox += 1) {
+        fillGeneratedFallbackColumn(ox, oz, 0, cs);
       }
     }
 
@@ -1428,6 +1363,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       sourceComplete,
       skippedFinerCoverage,
     };
+
   }
 
   private invalidateLodChunksAt(worldX: number, worldY: number, worldZ: number): void {
@@ -1513,6 +1449,52 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       }
     }
     return true;
+  }
+
+  private isLodWorldColumnCovered(
+    level: number,
+    cx: number,
+    cz: number,
+    minWorldX: number,
+    maxWorldX: number,
+    minWorldZ: number,
+    maxWorldZ: number,
+  ): boolean {
+    const stride = 1 << level;
+    const worldSize = this.chunkSize * stride;
+    const minLocalX = Math.max(0, Math.floor((minWorldX - cx * worldSize) / stride));
+    const maxLocalX = Math.min(this.chunkSize - 1, Math.floor((maxWorldX - cx * worldSize) / stride));
+    const minLocalZ = Math.max(0, Math.floor((minWorldZ - cz * worldSize) / stride));
+    const maxLocalZ = Math.min(this.chunkSize - 1, Math.floor((maxWorldZ - cz * worldSize) / stride));
+    if (minLocalX > maxLocalX || minLocalZ > maxLocalZ) {
+      return false;
+    }
+    const cacheKey = `${level}:${cx}:${cz}:${minLocalX}:${maxLocalX}:${minLocalZ}:${maxLocalZ}`;
+    const cached = this.lodWorldColumnCoverageCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const chunkArea = this.chunkSize * this.chunkSize;
+    const maxCyExclusive = Math.ceil(this.maxYExclusive / worldSize);
+    for (let cy = 0; cy < maxCyExclusive; cy += 1) {
+      const chunk = this.lodChunks.get(`L${level}:${cx}:${cy}:${cz}`);
+      if (!chunk?.renderReady || chunk.solidCount === 0) {
+        continue;
+      }
+      for (let localZ = minLocalZ; localZ <= maxLocalZ; localZ += 1) {
+        for (let localX = minLocalX; localX <= maxLocalX; localX += 1) {
+          const columnOffset = localX + localZ * chunkArea;
+          for (let localY = 0; localY < this.chunkSize; localY += 1) {
+            if (chunk.data[columnOffset + localY * this.chunkSize] !== 0) {
+              this.lodWorldColumnCoverageCache.set(cacheKey, true);
+              return true;
+            }
+          }
+        }
+      }
+    }
+    this.lodWorldColumnCoverageCache.set(cacheKey, false);
+    return false;
   }
 
   private buildLodChunkMesh(

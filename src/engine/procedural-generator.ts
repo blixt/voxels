@@ -14,7 +14,7 @@ import type { AmbientProfileId } from "./ambient-environment.ts";
 
 export const HEX_COLOR_COUNT = 0x1000;
 export const PROCEDURAL_WORLD_MAX_Y = 16_384;
-export const PROCEDURAL_WORLD_GENERATION_VERSION = "20260312-persist-v2";
+export const PROCEDURAL_WORLD_GENERATION_VERSION = "20260508-region-authority-lod-shell-v2";
 
 export type BaseBiomeId = "verdant" | "savanna" | "steppe" | "dunes" | "badlands" | "highland" | "moor" | "tundra";
 export type SpecialBiomeId = "marsh" | "firefly" | "saltflat" | "fern" | "fungal" | "ember" | "bloom" | "shardlands";
@@ -1445,6 +1445,48 @@ export class ProceduralWorldGenerator {
     const state = this.materialSampleState;
     this.fillColumnState(worldX, worldZ, state);
     return this.sampleMaterialFromColumn(state, worldY);
+  }
+
+  sampleColumnMaterialBuckets(
+    worldX: number,
+    worldZ: number,
+    firstBucketMinY: number,
+    bucketSize: number,
+    bucketCount: number,
+  ): Uint16Array {
+    const count = Math.max(0, Math.floor(bucketCount));
+    const materials = new Uint16Array(count);
+    if (count === 0) {
+      return materials;
+    }
+    const state = this.materialSampleState;
+    this.fillColumnState(worldX, worldZ, state);
+    const stride = Math.max(1, Math.floor(bucketSize));
+    for (let bucketIndex = 0; bucketIndex < count; bucketIndex += 1) {
+      const minWorldY = Math.max(0, Math.floor(firstBucketMinY + bucketIndex * stride));
+      const maxWorldY = Math.min(this.maxYExclusive - 1, minWorldY + stride - 1);
+      if (maxWorldY < minWorldY) {
+        continue;
+      }
+      let waterMaterial = 0;
+      for (let worldY = maxWorldY; worldY >= minWorldY; worldY -= 1) {
+        const material = this.sampleMaterialFromColumn(state, worldY);
+        if (material === 0) {
+          continue;
+        }
+        if (!isProceduralWaterMaterial(material)) {
+          materials[bucketIndex] = material;
+          break;
+        }
+        if (waterMaterial === 0) {
+          waterMaterial = material;
+        }
+      }
+      if (materials[bucketIndex] === 0) {
+        materials[bucketIndex] = waterMaterial;
+      }
+    }
+    return materials;
   }
 
   generateChunk(cx: number, cy: number, cz: number): GeneratedChunk {

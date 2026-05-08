@@ -269,7 +269,7 @@ function collectOpaqueBoundaryFaceCells(
 // 1. Downsample correctness
 // ---------------------------------------------------------------------------
 describe("LOD downsampling", () => {
-  test("generated fallback LOD terrain preserves authoritative coarse surface cells", () => {
+  test("generated fallback LOD terrain preserves authoritative coarse visible surface cells", () => {
     const generator = new ProceduralWorldGenerator(SEED);
     const world = new ProceduralResidentWorld(generator, { horizontalRadiusChunks: 0 });
     const level = 4;
@@ -294,31 +294,51 @@ describe("LOD downsampling", () => {
     const originZ = lodCz * worldSize;
     const chunkArea = CHUNK_SIZE * CHUNK_SIZE;
     let checked = 0;
+    let nonEmptyChecked = 0;
     for (let oz = 0; oz < CHUNK_SIZE; oz += 1) {
       for (let ox = 0; ox < CHUNK_SIZE; ox += 1) {
-        let topOy = -1;
-        let topMaterial = 0;
-        for (let oy = CHUNK_SIZE - 1; oy >= 0; oy -= 1) {
-          const material = data.data[ox + oy * CHUNK_SIZE + oz * chunkArea]!;
-          if (material !== 0) {
-            topOy = oy;
-            topMaterial = material;
-            break;
-          }
-        }
-        if (topOy < 0 || isProceduralWaterMaterial(topMaterial)) {
-          continue;
-        }
         const worldX = originX + ox * stride;
         const worldZ = originZ + oz * stride;
-        const surfaceY = generator.sampleSurfaceColumn(worldX, worldZ).surfaceY;
-        expect(topOy).toBe(Math.floor((surfaceY - originY) / stride));
-        checked += 1;
+        const column = generator.sampleSurfaceColumn(worldX, worldZ);
+        const minExpectedOy = Math.max(0, Math.floor((column.surfaceY - stride * 3 - originY) / stride));
+        const maxExpectedOy = Math.min(
+          CHUNK_SIZE - 1,
+          Math.floor((Math.max(column.topY, column.waterTopY ?? column.surfaceY) - originY) / stride),
+        );
+        let visibleExpectedOy = -1;
+        let visibleExpectedMaterial = 0;
+        if (minExpectedOy <= maxExpectedOy) {
+          const materials = generator.sampleColumnMaterialBuckets(
+            worldX,
+            worldZ,
+            originY + minExpectedOy * stride,
+            stride,
+            maxExpectedOy - minExpectedOy + 1,
+          );
+          for (let candidateOy = maxExpectedOy; candidateOy >= minExpectedOy; candidateOy -= 1) {
+            const material = materials[candidateOy - minExpectedOy] ?? 0;
+            if (material !== 0) {
+              visibleExpectedOy = candidateOy;
+              visibleExpectedMaterial = material;
+              break;
+            }
+          }
+        }
+        for (let oy = CHUNK_SIZE - 1; oy >= 0; oy -= 1) {
+          const actual = data.data[ox + oy * CHUNK_SIZE + oz * chunkArea]!;
+          const expected = oy === visibleExpectedOy ? visibleExpectedMaterial : 0;
+          expect(actual).toBe(expected);
+          if (actual !== 0) {
+            nonEmptyChecked += 1;
+          }
+          checked += 1;
+        }
       }
     }
 
     expect(data.solidCount).toBeGreaterThan(0);
     expect(checked).toBeGreaterThan(0);
+    expect(nonEmptyChecked).toBeGreaterThan(0);
   });
 
   test("LOD 0 and LOD chunks are both generated", () => {
