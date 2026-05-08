@@ -1268,3 +1268,40 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - commit and push this route-atlas harness checkpoint
   - implement visible-nearby route landmark scans when adding the next set of vistas
+
+### 2026-05-08 - Removed Dead Material Tooling Surface
+
+- Trigger:
+  - User explicitly wanted the Minecraft-like material gathering/placement direction removed in favor of an RPG HUD and interaction model.
+  - The live UI had already moved away from the old hotbar/inventory/target panel, but stale engine modules and tests still made the repo point future work back toward block editing.
+- Changes:
+  - Removed legacy material-gathering and placement modules:
+    - `src/engine/inventory.ts`
+    - `src/engine/hotbar-layout.ts`
+    - `src/engine/interaction-loop.ts`
+    - `src/engine/targeting-overlay.ts`
+    - `src/engine/voxel-raycast.ts`
+  - Removed their stale unit tests.
+  - Added `tests/rpg-ui-cleanup.test.ts` so the live game page and game client cannot silently reintroduce hotbar, inventory panel, targeting overlay, or visible block-editing language.
+  - Updated `docs/loop/plan.md` and `docs/roadmap.md` so the active direction is exploration-first RPG verbs instead of gather/build.
+- Validation:
+  - Dead-surface search: `rg -n "inventory|hotbar|interaction-loop|targeting-overlay|voxel-raycast|game-hotbar|game-inventory-panel|target-overlay|No voxel in reach|Targeting|Hotbar" src tests scripts` now only finds deliberate absence gates in `scripts/owned-browser-lab.ts` and `tests/rpg-ui-cleanup.test.ts`.
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun test tests/rpg-ui-cleanup.test.ts`: pass, `2` tests.
+  - `mise exec -- bun test`: pass, `197` tests.
+  - `mise exec -- bun run build`: pass.
+  - Owned browser lab: `artifacts/owned-browser-lab/20260508T012127Z-rpg-no-material-tools-final/report.json`, failures none.
+  - Browser result: traversal p95/max `4.80/19.20 ms`, route p95/max `5.10/31.80 ms`, draw/triangles `501/382172`, `LOD overlap LOD0/bands 0/0`, water overlap `0`, gaps `0`, handoff holes `0`, HUD smoke passed.
+  - Screenshot reviewed: `artifacts/owned-browser-lab/20260508T012127Z-rpg-no-material-tools-final/settled-page.png`; no hotbar, inventory panel, or target overlay was visible.
+- Honest assessment:
+  - This does not by itself make the world less blocky or more Morrowind-like; it removes a wrong product direction that would keep pulling the implementation back toward Minecraft.
+  - Core voxel edit primitives still exist where the renderer, world model, tests, and debug tooling need them. The cleanup targets player-facing gather/build affordances and the obsolete interaction loop.
+  - The next major ROI target is still visual/world definition: macro terrain breakup, stronger silhouettes, sky/weather, roads, creature silhouettes, and route-visible landmarks.
+- Rubric movement:
+  - RPG direction/UI discipline: `4.30 -> 4.65` because the repo now has both code removal and absence tests for the old material-tool surface.
+  - Harness maturity: `7.00 -> 7.10` because the browser lab plus unit tests now protect the no-Minecraft-HUD rule.
+  - Visual/world definition: unchanged at `4.15`; this checkpoint is strategic cleanup, not a content leap.
+- Next:
+  - commit and push this cleanup checkpoint
+  - write a broader ROI backlog from the current inspiration art and implement the highest ROI items first
+  - start with the block-grid/Minecraft read and moving-performance risk, because those are both user-visible and measurable
