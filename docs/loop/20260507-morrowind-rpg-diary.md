@@ -1829,3 +1829,39 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint and push this foreground pack
   - implement a view-atlas comparison budget gate and object-lab distinctiveness/negative-space scoring
   - only then retry shader/contact-depth work or route-aware RPG hooks
+
+### 2026-05-08 - View-Atlas Budget Gate And Object-Lab Distinctiveness
+
+- Trigger:
+  - The foreground pack proved that screenshots can become moodier and more authored while still worsening center/lower-ground grid metrics.
+  - The object-lab warning queue could not tell intentional sparse negative-space forms apart from genuinely broken sparse/clipped objects.
+- Delegation:
+  - A worker owned the object-lab distinctiveness side quest in `scripts/object-lab.ts` and `tests/object-lab.test.ts`.
+  - I kept the atlas comparison/budget gate on the critical path in `scripts/capture-view-atlas.ts` and `scripts/lib/view-atlas-budgets.ts`.
+- Changes:
+  - Added `--enforce-comparison-budgets` to `bun run atlas:views`.
+  - Added comparison deltas for baseline presence and horizon grid, in addition to luma, color count, center grid, and lower-ground grid.
+  - Added default comparison budgets for luma drop, color bucket loss, horizon grid regression, center grid regression, and lower-ground grid regression.
+  - Added object-lab distinctiveness diagnostics: form class, intentional negative space, negative-space ratio, coverage balance, and projection asymmetry.
+  - Sparse intentional route forms now surface as `intentional-negative-space` while suppressing generic `low-bounds-fill` in a separate suppressed-warning column.
+- Validation:
+  - Focused tests: `mise exec -- bun test tests/view-atlas-budgets.test.ts tests/object-lab.test.ts`, pass, `7` tests.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Expected-fail atlas smoke: `artifacts/view-atlas/20260508T063518Z-budget-gate-smoke/report.json` failed as intended on `ziggurat-approach` center grid `+0.011` and lower-ground grid `+0.006` against budgets `+0.006/+0.005`.
+  - Expected-pass atlas smoke: `artifacts/view-atlas/20260508T063556Z-budget-gate-pass-smoke/report.json`, failures none when comparing the current state to the foreground-pack baseline.
+  - Object-lab distinctiveness smoke: `artifacts/object-lab/2026-05-08-063649753Z-distinctiveness-smoke/batch-report.json`.
+    - `scree_fan`: negative-space ratio `93.8%`, top asymmetry `93.1%`, warning `intentional-negative-space`, suppressed `low-bounds-fill`.
+    - `buried_ribs`: negative-space ratio `95.5%`, top asymmetry `85.0%`, warning `intentional-negative-space`, suppressed `low-bounds-fill`.
+- Honest assessment:
+  - This is mostly harness quality, not a player-facing visual upgrade.
+  - It closes an important loophole: future visual changes can no longer claim progress if they regress fixed-view grid budgets under the enforced mode.
+  - The object-lab still labels intentional negative-space forms as warnings, but now in an explicit class-aware way that is useful for review instead of conflating them with bad sparse assets.
+- Rubric movement:
+  - Harness maturity: `9.65 -> 9.80` because fixed screenshots now have opt-in regression budgets and object-lab reports distinguish sparse form intent.
+  - Visual/world definition: unchanged at `6.20`; no new world content in this slice.
+  - Performance/playability: unchanged at `6.30`; no runtime renderer changes.
+  - Rendering correctness: `6.35 -> 6.45` because view-atlas can now fail grid regressions directly instead of only reporting them.
+- Next:
+  - checkpoint and push this harness slice
+  - use `--enforce-comparison-budgets` on visual changes before accepting them
+  - choose between route-aware RPG hooks and a shader/contact-depth smoke harness next

@@ -8,6 +8,10 @@ import {
   timestampForFile,
   withBrowserGameSession,
 } from "./lib/browser-game-benchmark-harness.ts";
+import {
+  findViewAtlasComparisonBudgetFailures,
+  type ViewAtlasComparison,
+} from "./lib/view-atlas-budgets.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
 
 interface ViewSpec {
@@ -30,6 +34,7 @@ interface CliOptions {
   viewportHeight: number;
   skipBuild: boolean;
   settleMaxFrames: number;
+  enforceComparisonBudgets: boolean;
 }
 
 interface PngImage {
@@ -107,19 +112,6 @@ interface ViewAtlasReport {
   };
   views: ViewCapture[];
   failures: string[];
-}
-
-interface ViewAtlasComparison {
-  baselinePath: string;
-  baselineGeneratedAt: string | null;
-  viewDeltas: Array<{
-    id: string;
-    avgLuma: number;
-    lumaStdDev: number;
-    quantizedColorCount: number;
-    centerGridRiskScore: number;
-    lowerGroundGridRiskScore: number;
-  }>;
 }
 
 const VIEW_SPECS: ViewSpec[] = [
@@ -243,6 +235,13 @@ const comparison = baselinePath ? await compareWithBaseline(baselinePath, captur
 const failures = captures
   .filter((capture) => capture.visual.diagnosis.blankish)
   .map((capture) => `${capture.id} looks blankish: luma=${capture.visual.diagnosis.avgLuma.toFixed(1)}, colors=${capture.visual.diagnosis.quantizedColorCount}`);
+if (options.enforceComparisonBudgets) {
+  if (!comparison) {
+    failures.push("comparison budgets requested but no baseline comparison was available");
+  } else {
+    failures.push(...findViewAtlasComparisonBudgetFailures(comparison));
+  }
+}
 const report: ViewAtlasReport = {
   generatedAt: new Date().toISOString(),
   label: options.label,
@@ -460,10 +459,10 @@ function buildMarkdownSummary(report: ViewAtlasReport): string {
     lines.push(
       "## Deltas",
       "",
-      "| View | Luma | Stddev | Colors | Center grid | Ground grid |",
-      "| --- | ---: | ---: | ---: | ---: | ---: |",
+      "| View | Baseline | Luma | Stddev | Colors | Horizon grid | Center grid | Ground grid |",
+      "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
       ...report.comparison.viewDeltas.map((delta) =>
-        `| ${delta.id} | ${formatSigned(delta.avgLuma, 1)} | ${formatSigned(delta.lumaStdDev, 1)} | ${formatSigned(delta.quantizedColorCount)} | ${formatSigned(delta.centerGridRiskScore, 3)} | ${formatSigned(delta.lowerGroundGridRiskScore, 3)} |`
+        `| ${delta.id} | ${delta.baselinePresent ? "yes" : "no"} | ${formatSigned(delta.avgLuma, 1)} | ${formatSigned(delta.lumaStdDev, 1)} | ${formatSigned(delta.quantizedColorCount)} | ${formatSigned(delta.horizonGridRiskScore, 3)} | ${formatSigned(delta.centerGridRiskScore, 3)} | ${formatSigned(delta.lowerGroundGridRiskScore, 3)} |`
       ),
       "",
     );
@@ -503,11 +502,14 @@ async function compareWithBaseline(
     baselineGeneratedAt: typeof baseline.generatedAt === "string" ? baseline.generatedAt : null,
     viewDeltas: captures.map((view) => {
       const baselineView = baselineViews.get(view.id);
+      const baselineRegions = Array.isArray(baselineView?.visual?.regions) ? baselineView.visual.regions : [];
       return {
         id: view.id,
+        baselinePresent: Boolean(baselineView),
         avgLuma: view.visual.diagnosis.avgLuma - readNumber(baselineView?.visual?.diagnosis?.avgLuma),
         lumaStdDev: view.visual.diagnosis.lumaStdDev - readNumber(baselineView?.visual?.diagnosis?.lumaStdDev),
         quantizedColorCount: view.visual.diagnosis.quantizedColorCount - readNumber(baselineView?.visual?.diagnosis?.quantizedColorCount),
+        horizonGridRiskScore: readRegionMetric(view.visual.regions, "horizon", "gridRiskScore") - readRegionMetric(baselineRegions, "horizon", "gridRiskScore"),
         centerGridRiskScore: view.visual.diagnosis.centerGridRiskScore - readNumber(baselineView?.visual?.diagnosis?.centerGridRiskScore),
         lowerGroundGridRiskScore: view.visual.diagnosis.lowerGroundGridRiskScore - readNumber(baselineView?.visual?.diagnosis?.lowerGroundGridRiskScore),
       };
@@ -690,6 +692,7 @@ function parseCli(argv: readonly string[]): CliOptions {
     viewportHeight: readPositiveInt(readFlag(args, "--viewport-height"), 900),
     skipBuild: readBooleanFlag(args, "--skip-build", false),
     settleMaxFrames: readPositiveInt(readFlag(args, "--settle-max-frames"), 240),
+    enforceComparisonBudgets: readSwitchFlag(args, "--enforce-comparison-budgets"),
   };
 }
 
@@ -721,6 +724,14 @@ function readObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+function readRegionMetric(regions: unknown, regionId: string, metric: keyof RegionMetrics): number {
+  if (!Array.isArray(regions)) {
+    return 0;
+  }
+  const region = regions.find((entry) => readObject(entry).id === regionId);
+  return readNumber(readObject(region)[metric]);
+}
+
 function readFlag(args: readonly string[], name: string): string | null {
   const equalsPrefix = `${name}=`;
   const equalsValue = args.find((arg) => arg.startsWith(equalsPrefix));
@@ -745,6 +756,14 @@ function readBooleanFlag(args: readonly string[], name: string, fallback: boolea
     return fallback;
   }
   return value === "1" || value === "true" || value === "yes";
+}
+
+function readSwitchFlag(args: readonly string[], name: string): boolean {
+  if (!args.some((arg) => arg === name || arg.startsWith(`${name}=`))) {
+    return false;
+  }
+  const value = readFlag(args, name);
+  return value === null || value === "" || value === "1" || value === "true" || value === "yes";
 }
 
 function readOptionalPositiveInt(value: string | null): number | null {

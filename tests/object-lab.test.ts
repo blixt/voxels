@@ -173,6 +173,53 @@ test("representative roots prefer centered salt-marsh set piece columns", async 
   expect(report.sample.diagnostics.warnings).not.toContain("top-projection-touches-edge");
 });
 
+test("object lab labels intentional negative-space route debris separately from sparse failures", async () => {
+  const outputDir = await mkdtemp(join(tmpdir(), "voxels-object-lab-negative-space-"));
+  const screeFan = await runObjectLab({
+    landmarkId: "scree_fan",
+    seed: 1337,
+    outputDir,
+    label: "Scree Fan Negative Space Test",
+    timestamp: new Date("2026-05-08T12:36:10.000Z"),
+    scanRadius: 4096,
+    coarseStep: 32,
+    sampleRadius: 18,
+    heightPadding: 4,
+  });
+  const buriedRibs = await runObjectLab({
+    landmarkId: "buried_ribs",
+    seed: 1337,
+    outputDir,
+    label: "Buried Ribs Negative Space Test",
+    timestamp: new Date("2026-05-08T12:36:11.000Z"),
+    scanRadius: 4096,
+    coarseStep: 32,
+    sampleRadius: 18,
+    heightPadding: 4,
+  });
+
+  for (const report of [screeFan, buriedRibs]) {
+    expect(report.sample.diagnostics.distinctiveness.formClass).toBe("negative-space");
+    expect(report.sample.diagnostics.distinctiveness.intentionalNegativeSpace).toBe(true);
+    expect(report.sample.diagnostics.distinctiveness.negativeSpaceRatio).toBeGreaterThan(0.8);
+    expect(report.sample.diagnostics.distinctiveness.coverageBalance).toBeGreaterThan(0.5);
+    expect(report.sample.diagnostics.warnings).toContain("intentional-negative-space");
+    expect(report.sample.diagnostics.warnings).not.toContain("low-bounds-fill");
+    expect(Array.isArray(report.sample.diagnostics.warningsSuppressed)).toBe(true);
+  }
+
+  expect(screeFan.sample.diagnostics.distinctiveness.topAsymmetry).toBeGreaterThan(0.45);
+  expect(screeFan.sample.diagnostics.warnings).toContain("top-projection-touches-edge");
+  expect(buriedRibs.sample.diagnostics.distinctiveness.frontAsymmetry).toBeGreaterThan(0.5);
+  expect(buriedRibs.sample.diagnostics.warnings).not.toContain("top-projection-touches-edge");
+
+  const summary = await readFile(screeFan.artifacts.summary, "utf8");
+  expect(summary).toContain("## Distinctiveness Diagnostics");
+  expect(summary).toContain("- Form class: negative-space");
+  expect(summary).toContain("- Negative-space ratio:");
+  expect(summary).toContain("- Suppressed warnings:");
+});
+
 test("object lab batch writes route landmark comparison diagnostics", async () => {
   expect(OBJECT_LAB_ROUTE_LANDMARK_IDS).toEqual([
     "ash_marker",
@@ -212,6 +259,11 @@ test("object lab batch writes route landmark comparison diagnostics", async () =
   expect(report.comparison[0]?.solidVoxelCount).toBeGreaterThan(0);
   expect(report.comparison[0]?.boundsSize).not.toBeNull();
   expect(report.comparison[0]?.materialVariety).toBeGreaterThan(0);
+  expect(report.comparison[0]?.formClass).toBe("route");
+  expect(report.comparison[0]?.negativeSpaceRatio).toBeGreaterThan(0);
+  expect(report.comparison[0]?.coverageBalance).toBeGreaterThan(0);
+  expect(report.comparison[0]?.topAsymmetry).toBeGreaterThanOrEqual(0);
+  expect(report.comparison[0]?.warningsSuppressed).toEqual([]);
   expect(report.comparison[0]?.topSilhouette.coverage).toBeGreaterThan(0);
   expect(report.comparison[0]?.frontSilhouette.normalizedHeight).toBeGreaterThan(0);
   expect(report.comparison[0]?.contactSheet.endsWith("contact-sheet.svg")).toBe(true);
@@ -223,6 +275,9 @@ test("object lab batch writes route landmark comparison diagnostics", async () =
   expect(batchJson).toContain(`"landmarkIds": [`);
   expect(batchJson).toContain(`"ash_marker"`);
   expect(summary).toContain("# Object Lab Route Landmark Comparison");
+  expect(summary).toContain("Negative Space");
+  expect(summary).toContain("Coverage Balance");
+  expect(summary).toContain("Suppressed");
   expect(summary).toContain("| ash_marker |");
   expect(summary).toContain("| pilgrim_lantern |");
   expect(summary).toContain("## Warning Queue");

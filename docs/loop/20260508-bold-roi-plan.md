@@ -295,3 +295,23 @@ The next ROI is less about adding assets and more about making the evaluation ga
 | 5 | Route-aware RPG hooks: named old roads, shrine blessings, Cartography/Naturalist/Lore progress | 5 | 4 | 3 | 6.7 | `pilgrimRouteInfluence` and richer route landmarks can now support exploration gameplay | objective/skill tests, browser objective probe |
 | 6 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Still useful, but not the current screenshot bottleneck | object-lab target `<18000`, route coverage |
 | 7 | Far-view distance experiment | 4 | 3 | 4 | 3.0 | Still blocked by foreground/horizon readability | owned-browser LOD/fps/gap gates |
+
+## Re-Rank After Atlas Budget Gate And Object Distinctiveness
+
+Completed since the foreground pack:
+
+- `bun run atlas:views -- --enforce-comparison-budgets` now fails luma/color/horizon/center/lower-ground regressions against a baseline.
+- The budget gate caught the known foreground-pack close-view regression and passed a same-state comparison.
+- Object-lab now reports form class, intentional negative space, negative-space ratio, coverage balance, and asymmetry.
+- `scree_fan` and `buried_ribs` now report `intentional-negative-space` with `low-bounds-fill` suppressed instead of looking like generic broken sparse props.
+
+The next work can move back to player-facing value, but every visual branch should use the enforced atlas gate before being accepted.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Fast shader smoke harness before any WGSL/contact-depth retry | 4 | 5 | 2 | 10.0 | Atlas budgets exist, but shader iteration needs a cheaper first gate after the black-frame failure | one-view luma/color/frame gate, typecheck/build |
+| 2 | Route-aware RPG hooks: named old roads, shrine blessings, Cartography/Naturalist/Lore progress | 5 | 4 | 3 | 6.7 | Route identity data and foreground markers are now available; gameplay can reward exploration without risking renderer perf | objective/skill tests, browser objective probe |
+| 3 | Contact-depth/lighting pass under enforced atlas budgets | 5 | 3 | 4 | 3.8 | Still likely needed for the block-edge read, but only after shader smoke exists | shader smoke, enforced view-atlas, owned-browser budget |
+| 4 | UI/journal polish for region and road discoveries | 4 | 4 | 3 | 5.3 | Good RPG feel return, now that block-building HUD is gone and route landmarks have names | UI tests, browser HUD smoke |
+| 5 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Useful cost cleanup but not the current gate blocker | object-lab target `<18000`, route coverage |
+| 6 | Far-view distance experiment | 4 | 3 | 4 | 3.0 | Wait until contact/depth work improves foreground and horizon readability | owned-browser LOD/fps/gap gates |

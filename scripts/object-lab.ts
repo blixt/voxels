@@ -170,10 +170,15 @@ export interface ObjectLabComparisonRow {
   materialVariety: number;
   dominantMaterialShare: number;
   fillRatio: number;
+  formClass: ObjectDistinctivenessDiagnostics["formClass"];
+  negativeSpaceRatio: number;
+  coverageBalance: number;
+  topAsymmetry: number;
   solidVoxelBudget: ObjectScaleDiagnostics["solidVoxelBudget"];
   topSilhouette: ObjectLabSilhouetteSummary;
   frontSilhouette: ObjectLabSilhouetteSummary;
   warnings: string[];
+  warningsSuppressed: string[];
   contactSheet: string;
 }
 
@@ -189,12 +194,24 @@ export interface ObjectLabDiagnostics {
   dominantMaterialShare: number;
   scale: ObjectScaleDiagnostics;
   sampleFit: SampleFitDiagnostics;
+  distinctiveness: ObjectDistinctivenessDiagnostics;
   warnings: string[];
+  warningsSuppressed: string[];
   silhouette: {
     top: ProjectionDiagnostics;
     front: ProjectionDiagnostics;
     side: ProjectionDiagnostics;
   };
+}
+
+export interface ObjectDistinctivenessDiagnostics {
+  formClass: "solid" | "route" | "debris" | "negative-space";
+  intentionalNegativeSpace: boolean;
+  negativeSpaceRatio: number;
+  coverageBalance: number;
+  topAsymmetry: number;
+  frontAsymmetry: number;
+  sideAsymmetry: number;
 }
 
 export interface ObjectScaleDiagnostics {
@@ -291,6 +308,24 @@ const CENTERED_ROOT_LANDMARK_IDS = new Set<LandmarkId>([
   "crystal_reeds",
   "fungal_bridge",
   "rib_remains",
+]);
+const ROUTE_FORM_LANDMARK_IDS = new Set<LandmarkId>(OBJECT_LAB_ROUTE_LANDMARK_IDS);
+const DEBRIS_FORM_LANDMARK_IDS = new Set<LandmarkId>([
+  "paver_debris",
+  "scree_fan",
+  "shrine_debris",
+  "buried_ribs",
+  "rib_remains",
+]);
+const NEGATIVE_SPACE_LANDMARK_IDS = new Set<LandmarkId>([
+  "scree_fan",
+  "buried_ribs",
+]);
+const NEGATIVE_SPACE_SUPPRESSED_WARNINGS = new Set([
+  "low-bounds-fill",
+  "top-projection-sparse",
+  "front-projection-sparse",
+  "side-projection-sparse",
 ]);
 
 if (import.meta.main) {
@@ -684,14 +719,103 @@ function buildDiagnostics(sample: SampledObject, root: LandmarkRoot): ObjectLabD
     side: inspectProjection(sample.sideProjection),
   };
   const scale = inspectObjectScale(sample, silhouette.top);
+  const distinctiveness = inspectDistinctiveness(sample, root, silhouette, scale);
+  const warningDiagnostics = buildDiagnosticWarnings(
+    sampleFit,
+    silhouette,
+    scale,
+    dominantMaterialShare,
+    sample.solidVoxelCount,
+    distinctiveness,
+  );
   return {
     materialVariety: sample.materialCounts.size,
     dominantMaterialShare,
     scale,
     sampleFit,
-    warnings: buildDiagnosticWarnings(sampleFit, silhouette, scale, dominantMaterialShare, sample.solidVoxelCount),
+    distinctiveness,
+    warnings: warningDiagnostics.warnings,
+    warningsSuppressed: warningDiagnostics.suppressed,
     silhouette,
   };
+}
+
+function inspectDistinctiveness(
+  sample: SampledObject,
+  root: LandmarkRoot,
+  silhouette: ObjectLabDiagnostics["silhouette"],
+  scale: ObjectScaleDiagnostics,
+): ObjectDistinctivenessDiagnostics {
+  const landmarkId = root.probe.landmarkId;
+  const formClass = landmarkId && NEGATIVE_SPACE_LANDMARK_IDS.has(landmarkId)
+    ? "negative-space"
+    : landmarkId && DEBRIS_FORM_LANDMARK_IDS.has(landmarkId)
+    ? "debris"
+    : landmarkId && ROUTE_FORM_LANDMARK_IDS.has(landmarkId)
+    ? "route"
+    : "solid";
+  return {
+    formClass,
+    intentionalNegativeSpace: formClass === "negative-space",
+    negativeSpaceRatio: roundRatio(1 - scale.fillRatio),
+    coverageBalance: measureCoverageBalance([
+      silhouette.top.coverage,
+      silhouette.front.coverage,
+      silhouette.side.coverage,
+    ]),
+    topAsymmetry: measureProjectionAsymmetry(sample.topProjection),
+    frontAsymmetry: measureProjectionAsymmetry(sample.frontProjection),
+    sideAsymmetry: measureProjectionAsymmetry(sample.sideProjection),
+  };
+}
+
+function measureCoverageBalance(coverages: number[]): number {
+  const occupiedCoverages = coverages.filter((coverage) => coverage > 0);
+  if (occupiedCoverages.length === 0) {
+    return 0;
+  }
+  return roundRatio(Math.min(...occupiedCoverages) / Math.max(...occupiedCoverages));
+}
+
+function measureProjectionAsymmetry(projection: Projection): number {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (let y = 0; y < projection.height; y += 1) {
+    for (let x = 0; x < projection.width; x += 1) {
+      if (projection.pixels[x + y * projection.width] === BACKGROUND) {
+        continue;
+      }
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x + 1);
+      maxY = Math.max(maxY, y + 1);
+    }
+  }
+  if (minX === Infinity) {
+    return 0;
+  }
+  let comparedPairs = 0;
+  let mismatchedPairs = 0;
+  for (let y = minY; y < maxY; y += 1) {
+    for (let x = minX; x < maxX; x += 1) {
+      const mirrorX = minX + maxX - 1 - x;
+      if (x > mirrorX) {
+        continue;
+      }
+      const occupied = projection.pixels[x + y * projection.width] !== BACKGROUND;
+      const mirrored = projection.pixels[mirrorX + y * projection.width] !== BACKGROUND;
+      if (!occupied && !mirrored) {
+        continue;
+      }
+      comparedPairs += 1;
+      if (occupied !== mirrored) {
+        mismatchedPairs += 1;
+      }
+    }
+  }
+  return comparedPairs === 0 ? 0 : roundRatio(mismatchedPairs / comparedPairs);
 }
 
 function inspectObjectScale(sample: SampledObject, topProjection: ProjectionDiagnostics): ObjectScaleDiagnostics {
@@ -863,9 +987,10 @@ function buildDiagnosticWarnings(
   scale: ObjectScaleDiagnostics,
   dominantMaterialShare: number,
   solidVoxelCount: number,
-): string[] {
+  distinctiveness: ObjectDistinctivenessDiagnostics,
+): { warnings: string[]; suppressed: string[] } {
   if (solidVoxelCount === 0) {
-    return ["empty-sample"];
+    return { warnings: ["empty-sample"], suppressed: [] };
   }
   const warnings: string[] = [];
   if (sampleFit.touchesSampleEdge) {
@@ -903,7 +1028,16 @@ function buildDiagnosticWarnings(
       warnings.push(`${view}-projection-touches-edge`);
     }
   }
-  return warnings;
+  const suppressed = distinctiveness.intentionalNegativeSpace
+    ? warnings.filter((warning) => NEGATIVE_SPACE_SUPPRESSED_WARNINGS.has(warning))
+    : [];
+  const unsuppressed = suppressed.length === 0
+    ? warnings
+    : warnings.filter((warning) => !NEGATIVE_SPACE_SUPPRESSED_WARNINGS.has(warning));
+  if (distinctiveness.intentionalNegativeSpace) {
+    unsuppressed.push("intentional-negative-space");
+  }
+  return { warnings: unsuppressed, suppressed };
 }
 
 function roundRatio(value: number): number {
@@ -923,6 +1057,7 @@ function buildMarkdownSummary(report: ObjectLabReport): string {
     ? `${report.sample.bounds.min.join(", ")} -> ${report.sample.bounds.max.join(", ")}`
     : "none";
   const scale = report.sample.diagnostics.scale;
+  const distinctiveness = report.sample.diagnostics.distinctiveness;
   const materialRows = report.sample.materialCounts
     .slice(0, 12)
     .map((entry) => `| ${entry.hex} | ${entry.material} | ${entry.count} |`)
@@ -943,8 +1078,17 @@ function buildMarkdownSummary(report: ObjectLabReport): string {
     `- Material variety: ${report.sample.diagnostics.materialVariety}`,
     `- Dominant material share: ${formatPercent(report.sample.diagnostics.dominantMaterialShare)}`,
     `- Solid voxel budget: ${scale.solidVoxelBudget}`,
+    `- Form class: ${distinctiveness.formClass}`,
+    `- Negative-space ratio: ${formatPercent(distinctiveness.negativeSpaceRatio)}`,
+    `- Coverage balance: ${formatPercent(distinctiveness.coverageBalance)}`,
+    `- Top asymmetry: ${formatPercent(distinctiveness.topAsymmetry)}`,
     `- Warnings: ${
       report.sample.diagnostics.warnings.length === 0 ? "none" : report.sample.diagnostics.warnings.join(", ")
+    }`,
+    `- Suppressed warnings: ${
+      report.sample.diagnostics.warningsSuppressed.length === 0
+        ? "none"
+        : report.sample.diagnostics.warningsSuppressed.join(", ")
     }`,
     ``,
     `## Projection Artifacts`,
@@ -961,6 +1105,16 @@ function buildMarkdownSummary(report: ObjectLabReport): string {
     silhouetteRow("Top", report.sample.diagnostics.silhouette.top),
     silhouetteRow("Front", report.sample.diagnostics.silhouette.front),
     silhouetteRow("Side", report.sample.diagnostics.silhouette.side),
+    ``,
+    `## Distinctiveness Diagnostics`,
+    ``,
+    `| Form Class | Intentional Negative Space | Negative-Space Ratio | Coverage Balance | Top Asymmetry | Front Asymmetry | Side Asymmetry |`,
+    `| --- | --- | ---: | ---: | ---: | ---: | ---: |`,
+    `| ${distinctiveness.formClass} | ${distinctiveness.intentionalNegativeSpace ? "yes" : "no"} | ${
+      formatPercent(distinctiveness.negativeSpaceRatio)
+    } | ${formatPercent(distinctiveness.coverageBalance)} | ${formatPercent(distinctiveness.topAsymmetry)} | ${
+      formatPercent(distinctiveness.frontAsymmetry)
+    } | ${formatPercent(distinctiveness.sideAsymmetry)} |`,
     ``,
     `## Scale And Cost Diagnostics`,
     ``,
@@ -1002,10 +1156,15 @@ function buildComparisonRow(report: ObjectLabReport): ObjectLabComparisonRow {
     materialVariety: report.sample.diagnostics.materialVariety,
     dominantMaterialShare: report.sample.diagnostics.dominantMaterialShare,
     fillRatio: report.sample.diagnostics.scale.fillRatio,
+    formClass: report.sample.diagnostics.distinctiveness.formClass,
+    negativeSpaceRatio: report.sample.diagnostics.distinctiveness.negativeSpaceRatio,
+    coverageBalance: report.sample.diagnostics.distinctiveness.coverageBalance,
+    topAsymmetry: report.sample.diagnostics.distinctiveness.topAsymmetry,
     solidVoxelBudget: report.sample.diagnostics.scale.solidVoxelBudget,
     topSilhouette: summarizeSilhouette(report.sample.diagnostics.silhouette.top),
     frontSilhouette: summarizeSilhouette(report.sample.diagnostics.silhouette.front),
     warnings: report.sample.diagnostics.warnings,
+    warningsSuppressed: report.sample.diagnostics.warningsSuppressed,
     contactSheet: report.artifacts.contactSheet,
   };
 }
@@ -1021,8 +1180,10 @@ function summarizeSilhouette(diagnostics: ProjectionDiagnostics): ObjectLabSilho
 
 function buildBatchMarkdownSummary(report: ObjectLabBatchReport): string {
   const warningRows = report.comparison
-    .filter((row) => row.warnings.length > 0)
-    .map((row) => `| ${row.landmarkId} | ${row.warnings.join(", ")} | ${row.contactSheet} |`)
+    .filter((row) => row.warnings.length > 0 || row.warningsSuppressed.length > 0)
+    .map((row) => `| ${row.landmarkId} | ${row.warnings.join(", ") || "none"} | ${
+      row.warningsSuppressed.join(", ") || "none"
+    } | ${row.contactSheet} |`)
     .join("\n");
   const rows = report.comparison.map((row) => [
     `| ${row.landmarkId}`,
@@ -1033,10 +1194,15 @@ function buildBatchMarkdownSummary(report: ObjectLabBatchReport): string {
     row.materialVariety.toString(),
     formatPercent(row.dominantMaterialShare),
     formatPercent(row.fillRatio),
+    row.formClass,
+    formatPercent(row.negativeSpaceRatio),
+    formatPercent(row.coverageBalance),
+    formatPercent(row.topAsymmetry),
     row.solidVoxelBudget,
     formatSilhouetteSummary(row.topSilhouette),
     formatSilhouetteSummary(row.frontSilhouette),
     row.warnings.length === 0 ? "none" : row.warnings.join(", "),
+    row.warningsSuppressed.length === 0 ? "none" : row.warningsSuppressed.join(", "),
     row.contactSheet,
   ].join(" | ") + " |").join("\n");
 
@@ -1049,15 +1215,15 @@ function buildBatchMarkdownSummary(report: ObjectLabBatchReport): string {
     ``,
     `## Comparison`,
     ``,
-    `| Landmark | Root | Biome | Voxels | Bounds Size | Materials | Dominant | Fill | Budget | Top Silhouette | Front Silhouette | Warnings | Contact Sheet |`,
-    `| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- |`,
+    `| Landmark | Root | Biome | Voxels | Bounds Size | Materials | Dominant | Fill | Form | Negative Space | Coverage Balance | Top Asymmetry | Budget | Top Silhouette | Front Silhouette | Warnings | Suppressed | Contact Sheet |`,
+    `| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- |`,
     rows,
     ``,
     `## Warning Queue`,
     ``,
-    `| Landmark | Warnings | Contact Sheet |`,
-    `| --- | --- | --- |`,
-    warningRows || `| none | none | n/a |`,
+    `| Landmark | Warnings | Suppressed | Contact Sheet |`,
+    `| --- | --- | --- | --- |`,
+    warningRows || `| none | none | none | n/a |`,
     ``,
   ].join("\n");
 }
@@ -1145,9 +1311,16 @@ function buildContactSheetSvg(report: ObjectLabReport, sample: SampledObject): s
       report.sample.diagnostics.scale.solidVoxelBudget
     }</text>`,
   );
-  parts.push(`<text class="legend" x="0" y="130">Material legend</text>`);
+  parts.push(
+    `<text class="meta" x="0" y="130">form ${report.sample.diagnostics.distinctiveness.formClass} | neg ${
+      formatPercent(report.sample.diagnostics.distinctiveness.negativeSpaceRatio)
+    } | bal ${formatPercent(report.sample.diagnostics.distinctiveness.coverageBalance)} | asym ${
+      formatPercent(report.sample.diagnostics.distinctiveness.topAsymmetry)
+    }</text>`,
+  );
+  parts.push(`<text class="legend" x="0" y="148">Material legend</text>`);
   materialRows.forEach((entry, index) => {
-    const y = 142 + index * 18;
+    const y = 160 + index * 18;
     parts.push(`<rect x="0" y="${y - 10}" width="12" height="12" fill="${entry.hex}"/>`);
     parts.push(`<text class="meta" x="20" y="${y}">${entry.hex} material ${entry.material} (${entry.count})</text>`);
   });
