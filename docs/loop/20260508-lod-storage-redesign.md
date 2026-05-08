@@ -287,3 +287,39 @@ Next target:
 1. Stop treating the far window as hundreds of unrelated one-off chunk builds. The level breakdown points toward a hierarchical far-field/clipmap plan that reuses coarser canonical data and generates visible coverage in larger batches.
 2. Redesign partial handoff only after adding separate canonical persisted chunks and render-local punched instances, so disk reuse cannot regress.
 3. Keep the current correctness gate strict: far stress may fail settle budget, but it must keep `0` gaps and `0` overlaps while performance work continues.
+
+### Follow-up Checkpoint - Exclusive LOD Ownership Bands
+
+Reduced redundant LOD planning by changing higher LOD rings from nested circles into ownership bands:
+
+- A coarser LOD chunk is no longer scheduled if its full XZ footprint is already inside the next finer ring's coverage radius.
+- Boundary chunks are retained when they cross the finer/coarser radius, so the handoff edge remains conservative.
+- LOD2+ Y-range planning now prefers canonical generated column summaries before inheriting lower-LOD solid bounds. This avoids carrying lower-level padding into higher-level far chunks when summary data is available.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/lod-handoff.test.ts`
+- `mise exec -- bun test tests/lod-system.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-default-exclusive-rings-summary-y`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-far-exclusive-rings-summary-y --lod-persistence-chunk-delta=32 --lod-persistence-max-frames=260`
+
+Browser verifier artifacts:
+
+- Default persistence: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-jm9hfU/lod-idb-persistence-reload.json`
+  - Result: pass, with `32` reload disk hits and `32` cumulative reload disk hits.
+  - Cold generated LOD chunks dropped from `49` to `41`.
+  - Reload generated LOD chunks dropped from `16` to `8`.
+  - Reload downsample time dropped from `227.6ms` to `22.6ms`.
+  - Worst recent reload frame dropped from `25.3ms` to `17ms`.
+- Far transition stress: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-MlOlTw/lod-idb-persistence-reload.json`
+  - Result: still fails settle budget; visible far coverage stayed clean with `0` gaps and `0` overlaps.
+  - Pending after `260` frames improved from `898` to `817`; generation-budget pending moved from `817` to `743`.
+  - This confirms the change reduces real work but does not solve the structural far-transition backlog by itself.
+
+Subagent review synthesis:
+
+- Keep canonical generated chunks and generated summaries as the source of truth.
+- Keep derived LOD chunks disposable and keyed by generation settings plus edit revision.
+- Do not persist coverage-punched/render-context LOD chunks.
+- The next big step should move LOD derivation toward a canonical source boundary and eventually a worker-side derivation path, rather than adding more main-thread special cases.

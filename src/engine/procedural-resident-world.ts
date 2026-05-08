@@ -1276,6 +1276,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       const yRange = this.estimateYRangeFromSolidBounds(cx, cz, stride, worldSize);
       if (yRange) return yRange;
     } else {
+      const summaryRange = this.estimateYRangeFromColumnSummaries(cx, cz, stride, worldSize);
+      if (summaryRange) return summaryRange;
       // For LOD 2+, derive from LOD N-1 chunks' solidBounds
       const yRange = this.estimateYRangeFromLodSolidBounds(cx, cz, level, stride, worldSize);
       if (yRange) return yRange;
@@ -1653,6 +1655,22 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
               };
             }
             continue;
+          }
+          if (state.ringIndex > 0) {
+            const finerRing = LOD_RINGS[state.ringIndex - 1]!;
+            const finerCoverageRadius = finerRing.radiusChunks * this.chunkSize * (1 << finerRing.level);
+            if (lodFootprintFullyInsideRadius(position[0], position[2], cx, cz, worldSize, finerCoverageRadius)) {
+              if (performance.now() - startedAt >= maxPlanMs) {
+                return {
+                  complete: false,
+                  keys: [],
+                  neededKeyCount: state.neededKeys.size,
+                  yRangeMs,
+                  scheduledRegionSummaryRequests,
+                };
+              }
+              continue;
+            }
           }
 
           const coveredByFinerLod = ring.level === 1
@@ -3362,6 +3380,23 @@ function lodFootprintIntersectsRadius(
   const dx = closestX - centerX;
   const dz = closestZ - centerZ;
   return dx * dx + dz * dz <= radius * radius;
+}
+
+function lodFootprintFullyInsideRadius(
+  centerX: number,
+  centerZ: number,
+  cx: number,
+  cz: number,
+  worldSize: number,
+  radius: number,
+): boolean {
+  const minX = cx * worldSize;
+  const maxX = (cx + 1) * worldSize;
+  const minZ = cz * worldSize;
+  const maxZ = (cz + 1) * worldSize;
+  const farthestX = Math.max(Math.abs(minX - centerX), Math.abs(maxX - centerX));
+  const farthestZ = Math.max(Math.abs(minZ - centerZ), Math.abs(maxZ - centerZ));
+  return farthestX * farthestX + farthestZ * farthestZ <= radius * radius;
 }
 
 function lodChunksHaveCoveredColumnOverlap(coarser: VoxelChunk, finer: VoxelChunk, chunkSize: number): boolean {
