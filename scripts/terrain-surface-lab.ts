@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -17,6 +17,7 @@ export interface TerrainSurfaceLabOptions {
   radiusMeters?: number;
   stepMeters?: number;
   patchIds?: readonly string[];
+  compareTo?: string;
 }
 
 export interface TerrainPatchSpec {
@@ -144,12 +145,43 @@ export interface TerrainSurfaceLabReport {
     maxSurfaceRangeMeters: number;
     warningCount: number;
   };
+  comparison: TerrainSurfaceLabComparison | null;
   patches: TerrainPatchAnalysis[];
   artifacts: {
     report: string;
     summary: string;
   };
 }
+
+export interface TerrainSurfaceLabComparison {
+  baselinePath: string;
+  baselineGeneratedAt: string | null;
+  aggregateDeltas: {
+    patchCount: number;
+    sampleCount: number;
+    averageMaterialCount: number;
+    averageDominantMaterialShare: number;
+    maxSurfaceRangeMeters: number;
+    averageSurfaceRangeMeters: number;
+    averageGridLikenessScore: number;
+    maxGridLikenessScore: number;
+    averageFlatnessShareDeltas: TerrainFlatnessShareDeltas;
+  };
+  patchDeltas: TerrainPatchDelta[];
+}
+
+export interface TerrainPatchDelta {
+  id: string;
+  label: string;
+  baselinePresent: boolean;
+  materialCount: number;
+  dominantMaterialShare: number;
+  surfaceRangeMeters: number;
+  gridLikenessScore: number;
+  flatnessShareDeltas: TerrainFlatnessShareDeltas;
+}
+
+export type TerrainFlatnessShareDeltas = Record<TerrainFlatnessDistribution["buckets"][number]["id"], number>;
 
 const DEFAULT_SEED = 1337;
 const DEFAULT_OUTPUT_DIR = "artifacts/terrain-lab";
@@ -226,6 +258,13 @@ if (import.meta.main) {
     console.log(`patches: ${report.patches.map((patch) => patch.id).join(", ")}`);
     console.log(`avg grid-likeness: ${report.aggregate.averageGridLikenessScore.toFixed(3)}`);
     console.log(`warnings: ${report.aggregate.warningCount}`);
+    if (report.comparison) {
+      console.log(`compared to: ${report.comparison.baselinePath}`);
+      console.log(`material count delta: ${formatSigned(report.comparison.aggregateDeltas.averageMaterialCount, 2)} avg`);
+      console.log(`dominant material share delta: ${formatSigned(report.comparison.aggregateDeltas.averageDominantMaterialShare * 100, 1)} pp avg`);
+      console.log(`surface range delta: ${formatSigned(report.comparison.aggregateDeltas.maxSurfaceRangeMeters, 1)} m max`);
+      console.log(`grid-likeness delta: ${formatSigned(report.comparison.aggregateDeltas.averageGridLikenessScore, 3)} avg`);
+    }
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
@@ -249,6 +288,8 @@ export async function runTerrainSurfaceLab(options: TerrainSurfaceLabOptions = {
   await mkdir(runDir, { recursive: true });
 
   const patches = patchSpecs.map((patch) => analyzeTerrainPatch(generator, patch, { radiusMeters, stepMeters }));
+  const aggregate = summarizeAggregate(patches);
+  const comparison = options.compareTo ? await compareWithBaseline(options.compareTo, aggregate, patches) : null;
   const report: TerrainSurfaceLabReport = {
     generatedAt: timestamp.toISOString(),
     label,
@@ -259,7 +300,8 @@ export async function runTerrainSurfaceLab(options: TerrainSurfaceLabOptions = {
       stepMeters,
       selectedPatchIds,
     },
-    aggregate: summarizeAggregate(patches),
+    aggregate,
+    comparison,
     patches,
     artifacts: {
       report: reportPath,
@@ -590,6 +632,128 @@ function summarizeAggregate(patches: readonly TerrainPatchAnalysis[]): TerrainSu
   };
 }
 
+async function compareWithBaseline(
+  baselinePath: string,
+  aggregate: TerrainSurfaceLabReport["aggregate"],
+  patches: readonly TerrainPatchAnalysis[],
+): Promise<TerrainSurfaceLabComparison | null> {
+  let baseline: Partial<TerrainSurfaceLabReport>;
+  try {
+    baseline = JSON.parse(await readFile(baselinePath, "utf8")) as Partial<TerrainSurfaceLabReport>;
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(baseline.patches)) {
+    return null;
+  }
+  const baselinePatches = baseline.patches;
+  const baselineById = new Map(baselinePatches.map((patch) => [patch.id, patch]));
+  const baselineAggregate = baseline.aggregate;
+  const baselinePatchCount = readNumber(baselineAggregate?.patchCount, baselinePatches.length);
+  const baselineSampleCount = readNumber(
+    baselineAggregate?.sampleCount,
+    sum(baselinePatches.map((patch) => readNumber(patch.sampleCount))),
+  );
+  return {
+    baselinePath,
+    baselineGeneratedAt: typeof baseline.generatedAt === "string" ? baseline.generatedAt : null,
+    aggregateDeltas: {
+      patchCount: aggregate.patchCount - baselinePatchCount,
+      sampleCount: aggregate.sampleCount - baselineSampleCount,
+      averageMaterialCount: roundMetric(aggregate.averageMaterialCount - readNumber(baselineAggregate?.averageMaterialCount, averageMaterialCount(baselinePatches))),
+      averageDominantMaterialShare: roundMetric(averageDominantMaterialShare(patches) - averageDominantMaterialShare(baselinePatches)),
+      maxSurfaceRangeMeters: roundMetric(aggregate.maxSurfaceRangeMeters - readNumber(baselineAggregate?.maxSurfaceRangeMeters, maxSurfaceRangeMeters(baselinePatches))),
+      averageSurfaceRangeMeters: roundMetric(averageSurfaceRangeMeters(patches) - averageSurfaceRangeMeters(baselinePatches)),
+      averageGridLikenessScore: roundMetric(aggregate.averageGridLikenessScore - readNumber(baselineAggregate?.averageGridLikenessScore, averageGridLikenessScore(baselinePatches))),
+      maxGridLikenessScore: roundMetric(aggregate.maxGridLikenessScore - readNumber(baselineAggregate?.maxGridLikenessScore, maxGridLikenessScore(baselinePatches))),
+      averageFlatnessShareDeltas: subtractFlatnessShares(averageFlatnessShares(patches), averageFlatnessShares(baselinePatches)),
+    },
+    patchDeltas: patches.map((patch) => {
+      const baselinePatch = baselineById.get(patch.id);
+      return {
+        id: patch.id,
+        label: patch.label,
+        baselinePresent: baselinePatch !== undefined,
+        materialCount: patch.materialDiversity.distinctMaterialCount - readNumber(baselinePatch?.materialDiversity?.distinctMaterialCount),
+        dominantMaterialShare: roundMetric(dominantMaterialShare(patch) - dominantMaterialShare(baselinePatch)),
+        surfaceRangeMeters: roundMetric(patch.surfaceMeters.range - readNumber(baselinePatch?.surfaceMeters?.range)),
+        gridLikenessScore: roundMetric(patch.gridLikeness.score - readNumber(baselinePatch?.gridLikeness?.score)),
+        flatnessShareDeltas: subtractFlatnessShares(flatnessShares(patch), flatnessShares(baselinePatch)),
+      };
+    }),
+  };
+}
+
+function averageMaterialCount(patches: readonly Partial<TerrainPatchAnalysis>[]): number {
+  return roundMetric(average(patches.map((patch) => readNumber(patch.materialDiversity?.distinctMaterialCount))));
+}
+
+function averageDominantMaterialShare(patches: readonly Partial<TerrainPatchAnalysis>[]): number {
+  return roundMetric(average(patches.map((patch) => dominantMaterialShare(patch))));
+}
+
+function averageSurfaceRangeMeters(patches: readonly Partial<TerrainPatchAnalysis>[]): number {
+  return roundMetric(average(patches.map((patch) => readNumber(patch.surfaceMeters?.range))));
+}
+
+function maxSurfaceRangeMeters(patches: readonly Partial<TerrainPatchAnalysis>[]): number {
+  return roundMetric(Math.max(0, ...patches.map((patch) => readNumber(patch.surfaceMeters?.range))));
+}
+
+function averageGridLikenessScore(patches: readonly Partial<TerrainPatchAnalysis>[]): number {
+  return roundMetric(average(patches.map((patch) => readNumber(patch.gridLikeness?.score))));
+}
+
+function maxGridLikenessScore(patches: readonly Partial<TerrainPatchAnalysis>[]): number {
+  return roundMetric(Math.max(0, ...patches.map((patch) => readNumber(patch.gridLikeness?.score))));
+}
+
+function dominantMaterialShare(patch: Partial<TerrainPatchAnalysis> | undefined): number {
+  return readNumber(patch?.materialDiversity?.dominantMaterial?.share);
+}
+
+function averageFlatnessShares(patches: readonly Partial<TerrainPatchAnalysis>[]): TerrainFlatnessShareDeltas {
+  const ids = flatnessBucketIds();
+  const output = zeroFlatnessShares();
+  for (const id of ids) {
+    output[id] = roundMetric(average(patches.map((patch) => flatnessShares(patch)[id])));
+  }
+  return output;
+}
+
+function flatnessShares(patch: Partial<TerrainPatchAnalysis> | undefined): TerrainFlatnessShareDeltas {
+  const output = zeroFlatnessShares();
+  for (const bucket of patch?.flatness?.buckets ?? []) {
+    output[bucket.id] = readNumber(bucket.share);
+  }
+  return output;
+}
+
+function subtractFlatnessShares(
+  current: TerrainFlatnessShareDeltas,
+  baseline: TerrainFlatnessShareDeltas,
+): TerrainFlatnessShareDeltas {
+  const output = zeroFlatnessShares();
+  for (const id of flatnessBucketIds()) {
+    output[id] = roundMetric(current[id] - baseline[id]);
+  }
+  return output;
+}
+
+function zeroFlatnessShares(): TerrainFlatnessShareDeltas {
+  return {
+    flat: 0,
+    gentle: 0,
+    rolling: 0,
+    steep: 0,
+    cliff: 0,
+  };
+}
+
+function flatnessBucketIds(): Array<TerrainFlatnessDistribution["buckets"][number]["id"]> {
+  return FLATNESS_BUCKETS.map((bucket) => bucket.id);
+}
+
 function buildMarkdownSummary(report: TerrainSurfaceLabReport): string {
   const lines = [
     "# Terrain Surface Lab Summary",
@@ -612,6 +776,37 @@ function buildMarkdownSummary(report: TerrainSurfaceLabReport): string {
     `- Max surface range: ${report.aggregate.maxSurfaceRangeMeters.toFixed(1)} m`,
     `- Warnings: ${report.aggregate.warningCount}`,
     "",
+  ];
+  if (report.comparison) {
+    lines.push(
+      "## Comparison",
+      "",
+      `Baseline: ${report.comparison.baselinePath}`,
+      report.comparison.baselineGeneratedAt ? `Baseline generated: ${report.comparison.baselineGeneratedAt}` : "Baseline generated: unknown",
+      "",
+      "| Metric | Delta |",
+      "| --- | ---: |",
+      `| Patches | ${formatSigned(report.comparison.aggregateDeltas.patchCount)} |`,
+      `| Samples | ${formatSigned(report.comparison.aggregateDeltas.sampleCount)} |`,
+      `| Average material count | ${formatSigned(report.comparison.aggregateDeltas.averageMaterialCount, 2)} |`,
+      `| Average dominant material share | ${formatSigned(report.comparison.aggregateDeltas.averageDominantMaterialShare * 100, 1)} pp |`,
+      `| Max surface range | ${formatSigned(report.comparison.aggregateDeltas.maxSurfaceRangeMeters, 1)} m |`,
+      `| Average surface range | ${formatSigned(report.comparison.aggregateDeltas.averageSurfaceRangeMeters, 1)} m |`,
+      `| Average grid-likeness | ${formatSigned(report.comparison.aggregateDeltas.averageGridLikenessScore, 3)} |`,
+      `| Max grid-likeness | ${formatSigned(report.comparison.aggregateDeltas.maxGridLikenessScore, 3)} |`,
+      `| Average flatness share | ${formatFlatnessDeltas(report.comparison.aggregateDeltas.averageFlatnessShareDeltas)} |`,
+      "",
+      "### Patch Deltas",
+      "",
+      "| Patch | Baseline | Materials | Dominant | Height range | Flat/Gentle/Rolling/Steep/Cliff | Grid |",
+      "| --- | --- | ---: | ---: | ---: | --- | ---: |",
+      ...report.comparison.patchDeltas.map((delta) =>
+        `| ${delta.label} | ${delta.baselinePresent ? "yes" : "no"} | ${formatSigned(delta.materialCount)} | ${formatSigned(delta.dominantMaterialShare * 100, 1)} pp | ${formatSigned(delta.surfaceRangeMeters, 1)} m | ${formatFlatnessDeltas(delta.flatnessShareDeltas)} | ${formatSigned(delta.gridLikenessScore, 3)} |`
+      ),
+      "",
+    );
+  }
+  lines.push(
     "## Patches",
     "",
     "| Patch | Source | Materials | Dominant | Height range | Flat/Gentle/Rolling/Steep/Cliff | Grid | Landmarks | Warnings |",
@@ -632,7 +827,7 @@ function buildMarkdownSummary(report: TerrainSurfaceLabReport): string {
       `| ${patch.label} | ${patch.heightModulo.modulo} | ${patch.heightModulo.buckets.map((bucket) => `${bucket.remainder}:${formatPercent(bucket.share)}`).join(", ")} |`
     ),
     "",
-  ];
+  );
   return lines.join("\n");
 }
 
@@ -658,6 +853,7 @@ function readCliOptions(args: readonly string[]): TerrainSurfaceLabOptions {
     radiusMeters: readNumberFlag(args, "--radius-meters"),
     stepMeters: readNumberFlag(args, "--step-meters"),
     patchIds: readListFlag(args, "--patches") ?? undefined,
+    compareTo: readFlag(args, "--compare-to"),
   };
 }
 
@@ -695,6 +891,10 @@ function readListFlag(args: readonly string[], name: string): string[] | null {
     throw new Error(`${name} requires at least one id.`);
   }
   return entries;
+}
+
+function readNumber(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 function sampleAt(samples: readonly TerrainSurfaceSample[], width: number, x: number, z: number): TerrainSurfaceSample {
@@ -745,4 +945,13 @@ function validatePositiveNumber(value: number, name: string): void {
 
 function formatPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
+}
+
+function formatSigned(value: number, digits = 0): string {
+  const rounded = Number(value.toFixed(digits));
+  return `${rounded >= 0 ? "+" : ""}${rounded.toFixed(digits)}`;
+}
+
+function formatFlatnessDeltas(deltas: TerrainFlatnessShareDeltas): string {
+  return flatnessBucketIds().map((id) => `${formatSigned(deltas[id] * 100, 1)} pp`).join(" / ");
 }

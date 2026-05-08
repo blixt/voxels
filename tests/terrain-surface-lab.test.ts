@@ -80,6 +80,49 @@ test("terrain surface lab writes report and markdown summary artifacts", async (
   expect(summary).toContain("## Height Modulo");
 });
 
+test("terrain surface lab compare mode writes aggregate and per-patch deltas", async () => {
+  const outputDir = await mkdtemp(join(tmpdir(), "voxels-terrain-lab-compare-"));
+  const baseline = await runTerrainSurfaceLab({
+    outputDir,
+    label: "Terrain Lab Baseline",
+    timestamp: new Date("2026-05-08T12:40:00.000Z"),
+    patchIds: ["ash-marker-vista", "causeway-road"],
+    radiusMeters: 12,
+    stepMeters: 6,
+  });
+  const comparison = await runTerrainSurfaceLab({
+    outputDir,
+    label: "Terrain Lab Comparison",
+    timestamp: new Date("2026-05-08T12:41:00.000Z"),
+    patchIds: ["ash-marker-vista", "causeway-road"],
+    radiusMeters: 12,
+    stepMeters: 6,
+    compareTo: baseline.artifacts.report,
+  });
+
+  expect(comparison.comparison?.baselinePath).toBe(baseline.artifacts.report);
+  expect(comparison.comparison?.baselineGeneratedAt).toBe("2026-05-08T12:40:00.000Z");
+  expect(comparison.comparison?.aggregateDeltas.averageMaterialCount).toBe(0);
+  expect(comparison.comparison?.aggregateDeltas.averageDominantMaterialShare).toBe(0);
+  expect(comparison.comparison?.aggregateDeltas.maxSurfaceRangeMeters).toBe(0);
+  expect(comparison.comparison?.aggregateDeltas.averageFlatnessShareDeltas.flat).toBe(0);
+  expect(comparison.comparison?.patchDeltas).toHaveLength(2);
+  expect(comparison.comparison?.patchDeltas[0]?.baselinePresent).toBe(true);
+  expect(comparison.comparison?.patchDeltas[0]?.materialCount).toBe(0);
+  expect(comparison.comparison?.patchDeltas[0]?.dominantMaterialShare).toBe(0);
+  expect(comparison.comparison?.patchDeltas[0]?.surfaceRangeMeters).toBe(0);
+  expect(comparison.comparison?.patchDeltas[0]?.gridLikenessScore).toBe(0);
+  expect(comparison.comparison?.patchDeltas[0]?.flatnessShareDeltas.flat).toBe(0);
+
+  const json = await readFile(comparison.artifacts.report, "utf8");
+  const summary = await readFile(comparison.artifacts.summary, "utf8");
+  expect(json).toContain(`"comparison"`);
+  expect(json).toContain(`"patchDeltas"`);
+  expect(summary).toContain("## Comparison");
+  expect(summary).toContain("### Patch Deltas");
+  expect(summary).toContain("| Average material count | +0.00 |");
+});
+
 function buildSyntheticGrid(
   heights: readonly (readonly number[])[],
   materials: readonly (readonly number[])[],

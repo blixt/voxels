@@ -1762,3 +1762,25 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - checkpoint and push this surface-lab/route-haze slice
   - start shader-side distance material modulation or bolder foreground silhouette/terrain interrupters next
+
+### 2026-05-08 - Terrain Lab Compare Mode And Rejected Shader Attempt
+
+- Trigger:
+  - The old-road surface pass had mixed visual deltas, so the next terrain work needs cheaper comparison instead of repeated subjective screenshot review.
+- Changes:
+  - Added terrain-lab `--compare-to <report.json>` support.
+  - The report now includes aggregate and per-patch deltas for material count, dominant material share, surface range, flatness bucket shares, and grid-likeness.
+- Rejected attempt:
+  - Tried a small shader-side ash/distance material modulation pass.
+  - View atlas caught a black-frame/blank-render regression immediately: `artifacts/view-atlas/20260508T053840Z-ash-distance-modulation/report.json` failed every view with `luma=0.0` and `colors=3`.
+  - I reverted the renderer edit and kept the failed artifact as evidence. The next shader attempt should be smaller and probably needs a dedicated shader smoke harness before full atlas capture.
+- Validation:
+  - Focused terrain lab tests: `mise exec -- bun test tests/terrain-surface-lab.test.ts`, pass, `3` tests.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Comparison sample: `artifacts/terrain-lab/20260508T054242Z-compare-current/report.json`, deltas all zero against the current old-road influence baseline.
+- Honest assessment:
+  - This improves evaluation speed more than visuals.
+  - The failed shader attempt reinforces that browser/atlas gates are non-negotiable: a plausible-looking shader edit can blank the whole renderer.
+- Next:
+  - checkpoint and push compare-mode harness work
+  - move to foreground silhouette interrupters before another shader attempt

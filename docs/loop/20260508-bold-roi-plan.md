@@ -255,3 +255,21 @@ The important learning: atmosphere helps the close route views, and route identi
 | 4 | Route-aware gameplay/discovery hooks | 4 | 4 | 3 | 5.3 | `pilgrimRouteInfluence` is now available; it can drive RPG exploration memory and skill gains | objective tests, browser objective probe |
 | 5 | Push ziggurat below huge budget with negative space | 3 | 4 | 3 | 4.0 | Still worthwhile, but current view metrics point more at surface composition than the ziggurat voxel count | object-lab target `<18000`, route coverage |
 | 6 | Far-view distance experiment | 4 | 3 | 4 | 3.0 | Wait until far surfaces read less like chessboards | owned-browser LOD/fps/gap gates |
+
+## Re-Rank After Terrain-Lab Compare And Shader Rejection
+
+Completed since the old-road haze checkpoint:
+
+- Terrain lab now has `--compare-to` and reports aggregate/per-patch deltas.
+- A shader-side ash/distance modulation attempt was rejected by the view atlas: every view blanked (`luma=0.0`, `colors=3`), then the renderer edit was reverted.
+
+The next highest-confidence visual path is geometry/composition that the existing generator and object-lab can verify. Another shader attempt needs a tighter shader-specific smoke gate first.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Foreground silhouette interrupter pack: half-buried ribs, scree fans, shrine debris, paver islands | 5 | 4 | 4 | 5.0 | Shader path just failed; object/terrain generation has better current verification | terrain-lab compare, object-lab, view-atlas, owned-browser budget |
+| 2 | Object-lab distinctiveness score for foreground/debris forms | 4 | 5 | 3 | 6.7 | New assets need gates for asymmetry and negative space, not only no warnings | object-lab tests and comparison report |
+| 3 | Dedicated shader smoke harness for small WGSL edits | 4 | 4 | 3 | 5.3 | Full atlas catches failures, but too late for fast shader iteration | one-view black-frame gate, typecheck/build, atlas |
+| 4 | Route-aware gameplay/discovery hooks | 4 | 4 | 3 | 5.3 | `pilgrimRouteInfluence` is available, but visual foreground still leads | objective tests, browser objective probe |
+| 5 | Push ziggurat below huge budget with negative space | 3 | 4 | 3 | 4.0 | Still worthwhile, but less visible than foreground shape breakup | object-lab target `<18000`, route coverage |
+| 6 | Far-view distance experiment | 4 | 3 | 4 | 3.0 | Wait until far surfaces read less like chessboards | owned-browser LOD/fps/gap gates |
