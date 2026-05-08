@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { expect, test } from "bun:test";
 
 import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
-import { findRepresentativeLandmarkRoot, runObjectLab } from "../scripts/object-lab.ts";
+import {
+  OBJECT_LAB_ROUTE_LANDMARK_IDS,
+  findRepresentativeLandmarkRoot,
+  runObjectLab,
+  runObjectLabBatch,
+} from "../scripts/object-lab.ts";
 
 test("object lab finds a representative landmark and writes isolated artifacts", async () => {
   const generator = new ProceduralWorldGenerator(1337);
@@ -166,4 +171,54 @@ test("representative roots prefer centered salt-marsh set piece columns", async 
   expect(report.sample.diagnostics.warnings).not.toContain("sample-touches-horizontal-edge");
   expect(report.sample.diagnostics.warnings).not.toContain("root-off-center");
   expect(report.sample.diagnostics.warnings).not.toContain("top-projection-touches-edge");
+});
+
+test("object lab batch writes route landmark comparison diagnostics", async () => {
+  expect(OBJECT_LAB_ROUTE_LANDMARK_IDS).toEqual([
+    "ash_marker",
+    "pilgrim_lantern",
+    "old_road_causeway",
+    "velothi_ziggurat",
+    "ash_obelisk",
+    "rib_arch",
+    "crystal_reeds",
+    "fungal_bridge",
+    "rib_remains",
+  ]);
+
+  const outputDir = await mkdtemp(join(tmpdir(), "voxels-object-lab-batch-"));
+  const report = await runObjectLabBatch({
+    landmarkIds: ["ash_marker", "pilgrim_lantern"],
+    seed: 1337,
+    outputDir,
+    label: "Route Landmark Comparison Test",
+    timestamp: new Date("2026-05-08T12:37:00.000Z"),
+    scanRadius: 4096,
+    coarseStep: 32,
+    sampleRadius: 18,
+    heightPadding: 4,
+  });
+
+  expect(report.runDir.endsWith("2026-05-08-123700000Z-route-landmark-comparison-test")).toBe(true);
+  expect(report.landmarkIds).toEqual(["ash_marker", "pilgrim_lantern"]);
+  expect(report.reports.map((entry) => entry.landmarkId)).toEqual(["ash_marker", "pilgrim_lantern"]);
+  expect(report.comparison).toHaveLength(2);
+  expect(report.comparison[0]?.landmarkId).toBe("ash_marker");
+  expect(report.comparison[0]?.solidVoxelCount).toBeGreaterThan(0);
+  expect(report.comparison[0]?.boundsSize).not.toBeNull();
+  expect(report.comparison[0]?.materialVariety).toBeGreaterThan(0);
+  expect(report.comparison[0]?.topSilhouette.coverage).toBeGreaterThan(0);
+  expect(report.comparison[0]?.frontSilhouette.normalizedHeight).toBeGreaterThan(0);
+  expect(report.comparison[0]?.contactSheet.endsWith("contact-sheet.svg")).toBe(true);
+  expect(report.artifacts.report.endsWith("batch-report.json")).toBe(true);
+  expect(report.artifacts.summary.endsWith("comparison.md")).toBe(true);
+
+  const batchJson = await readFile(report.artifacts.report, "utf8");
+  const summary = await readFile(report.artifacts.summary, "utf8");
+  expect(batchJson).toContain(`"landmarkIds": [`);
+  expect(batchJson).toContain(`"ash_marker"`);
+  expect(summary).toContain("# Object Lab Route Landmark Comparison");
+  expect(summary).toContain("| ash_marker |");
+  expect(summary).toContain("| pilgrim_lantern |");
+  expect(summary).toContain("## Warning Queue");
 });

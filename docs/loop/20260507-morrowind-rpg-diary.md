@@ -1538,3 +1538,43 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - commit and push the causeway footprint plus browser-lab timeout hardening
   - continue composition density director work with browser route traces and route-atlas gates active
+
+### 2026-05-08 - Strong Silhouette Route Director
+
+- Trigger:
+  - User called out that the world still lacked characteristic forms and that small tweaks were not enough.
+  - The previous route-stretch gate could pass on terrain tokens even when route views still lacked large readable silhouettes.
+- Delegation:
+  - ROI sidecar returned a complementary ranked list: sky identity, atmospheric layering, prop-family replacement, marsh composition, and object-lab distinctiveness now outrank more terrain micro-noise.
+  - Object-lab worker added a batch route-landmark comparison mode so future prop passes can inspect the main Morrowind-like landmark set in one command.
+- Changes:
+  - Route atlas now has a separate strong-silhouette scan: `360 m` windows every `60 m`, only counting direct or vista landmarks at least `5.5 m` tall.
+  - The vista scan radius increased from `64 m` to `96 m`, which better represents midground silhouettes without pretending tiny route tokens are visible character.
+  - Added an old-route skyline director for the main traversal routes. It places causeways, lanterns, obelisks, rib arches, pillars, basalt spires, standing stones, and dead trees on dusty/open route bands.
+  - Tightened the director after a test regression: lush verdant/fern/bloom and old-growth highland areas keep their existing forest identity instead of being overwritten by ash-route props.
+- Validation so far:
+  - Strong-silhouette harness baseline before generation changes: `artifacts/route-atlas/20260508T034125Z-strong-silhouette-baseline/report.json`, `46.4%` strong coverage, `96` empty windows.
+  - Wider vista-only harness: `artifacts/route-atlas/20260508T034216Z-strong-silhouette-wider-vista/report.json`, `57.0%` strong coverage, `77` empty windows. This proved the old radius was under-counting, but still not enough.
+  - Final route-atlas: `artifacts/route-atlas/20260508T034816Z-pilgrim-route-skyline-open-biomes/report.json`, failures none, `87.7%` strong coverage, `22` empty windows, max notable gap `108.0 m`.
+  - Focused tests: `mise exec -- bun test tests/procedural-generator.test.ts tests/object-lab.test.ts`, pass, `42` tests.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Build: `mise run build`, pass.
+  - Object-lab batch: `artifacts/object-lab/2026-05-08-034851132Z-route-landmark-comparison-after-skyline/batch-report.json`, `9` landmark runs. It surfaced the next prop-quality queue: `velothi_ziggurat` and `ash_obelisk` are huge/dominant-material, `rib_arch` is too small/sparse, and `rib_remains` still has low-fill/root warnings.
+  - Live-forward trace: `artifacts/browser-route-trace/20260508T034913Z-pilgrim-route-skyline-live-forward/report.json`, avg/p95/max gameplay `3.18/5.20/7.30 ms`, p95 stream/mesh/LOD `1.00/1.50/3.70 ms`, max stream/mesh/LOD `3.50/4.70/5.10 ms`.
+  - Owned browser lab: `artifacts/owned-browser-lab/20260508T034913Z-pilgrim-route-skyline-browser/report.json`, failures none.
+  - Browser result: traversal p95/max `5.60/9.00 ms`, route p95/max `4.90/9.60 ms`, draw/triangles `556/393878`, `LOD overlap LOD0/bands 0/0`, water overlap `0`, LOD gaps `0`, handoff holes `0`, render-ready near samples `961/961`, HUD smoke passed.
+  - Browser visual identity stayed saturation/grid/color `0.38/0.68/89`.
+- Honest assessment:
+  - This is the first composition pass that moved a route-level characteristic metric substantially: strong coverage moved from `46.4%` to `87.7%`.
+  - It is still a route/vista proxy, not actual screenshot semantic understanding. The browser grid metric must decide whether this translates to the player's view.
+  - The object-lab batch proves several headline props are still first-pass quality. The director increases the chance the player sees them, so the next prop pass has higher ROI.
+  - Performance trace and full browser lab headroom are both good after adding the director.
+  - The browser grid metric still stayed at `0.68`, so route composition alone is not enough to solve the block-grid read. The next visual pass needs either better skyline object quality, atmosphere, or both.
+- Rubric movement:
+  - Harness maturity: `8.45 -> 8.70` because the atlas now distinguishes mere token density from actual tall-silhouette cadence, and object-lab can compare route landmarks in batch.
+  - Visual/world definition: `5.05 -> 5.45` because main routes now have frequent large skyline forms instead of only low props and terrain tokens.
+  - Performance/playability: `6.00 -> 6.15` because live-forward held under `8 ms` max and full browser route max held under `10 ms` after adding route density.
+  - Rendering correctness: `6.05 -> 6.15` because LOD overlap, water overlap, LOD gaps, handoff holes, and render-ready checks stayed clean with denser skyline routes.
+- Next:
+  - commit and push if browser correctness/performance hold
+  - next likely work: either prop-family replacement for the warned skyline objects or stronger sky/atmospheric layering, depending on the browser screenshot metrics

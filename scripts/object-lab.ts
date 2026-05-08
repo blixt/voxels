@@ -64,6 +64,18 @@ export const OBJECT_LAB_LANDMARK_IDS = [
   "rib_remains",
 ] as const satisfies readonly LandmarkId[];
 
+export const OBJECT_LAB_ROUTE_LANDMARK_IDS = [
+  "ash_marker",
+  "pilgrim_lantern",
+  "old_road_causeway",
+  "velothi_ziggurat",
+  "ash_obelisk",
+  "rib_arch",
+  "crystal_reeds",
+  "fungal_bridge",
+  "rib_remains",
+] as const satisfies readonly LandmarkId[];
+
 export interface LandmarkRoot {
   x: number;
   z: number;
@@ -83,6 +95,11 @@ export interface ObjectLabOptions {
   heightPadding?: number;
   worldX?: number;
   worldZ?: number;
+}
+
+export interface ObjectLabBatchOptions extends Omit<ObjectLabOptions, "landmarkId" | "label" | "worldX" | "worldZ"> {
+  landmarkIds?: readonly LandmarkId[];
+  label?: string;
 }
 
 export interface ObjectLabReport {
@@ -119,6 +136,42 @@ export interface ObjectLabReport {
     frontProjection: string;
     sideProjection: string;
   };
+}
+
+export interface ObjectLabBatchReport {
+  generatedAt: string;
+  seed: number;
+  runDir: string;
+  landmarkIds: LandmarkId[];
+  reports: ObjectLabReport[];
+  comparison: ObjectLabComparisonRow[];
+  artifacts: {
+    report: string;
+    summary: string;
+  };
+}
+
+export interface ObjectLabComparisonRow {
+  landmarkId: LandmarkId;
+  root: [number, number];
+  biomeId: string;
+  solidVoxelCount: number;
+  boundsSize: [number, number, number] | null;
+  materialVariety: number;
+  dominantMaterialShare: number;
+  fillRatio: number;
+  solidVoxelBudget: ObjectScaleDiagnostics["solidVoxelBudget"];
+  topSilhouette: ObjectLabSilhouetteSummary;
+  frontSilhouette: ObjectLabSilhouetteSummary;
+  warnings: string[];
+  contactSheet: string;
+}
+
+export interface ObjectLabSilhouetteSummary {
+  coverage: number;
+  normalizedWidth: number;
+  normalizedHeight: number;
+  aspectRatio: number | null;
 }
 
 export interface ObjectLabDiagnostics {
@@ -223,17 +276,80 @@ const CENTERED_ROOT_LANDMARK_IDS = new Set<LandmarkId>([
 
 if (import.meta.main) {
   try {
-    const options = readOptions(Bun.argv.slice(2));
-    const report = await runObjectLab(options);
-    console.log(`object-lab report: ${report.artifacts.report}`);
-    console.log(`summary: ${report.artifacts.summary}`);
-    console.log(`contact sheet: ${report.artifacts.contactSheet}`);
-    console.log(`root: ${report.root.x},${report.root.z} (${report.root.probe.biomeId})`);
-    console.log(`solid object voxels: ${report.sample.solidVoxelCount}`);
+    const options = readCliOptions(Bun.argv.slice(2));
+    if (isObjectLabBatchOptions(options)) {
+      const report = await runObjectLabBatch(options);
+      console.log(`object-lab batch report: ${report.artifacts.report}`);
+      console.log(`comparison summary: ${report.artifacts.summary}`);
+      console.log(`landmarks: ${report.landmarkIds.join(", ")}`);
+      console.log(`runs: ${report.reports.length}`);
+    } else {
+      const report = await runObjectLab(options);
+      console.log(`object-lab report: ${report.artifacts.report}`);
+      console.log(`summary: ${report.artifacts.summary}`);
+      console.log(`contact sheet: ${report.artifacts.contactSheet}`);
+      console.log(`root: ${report.root.x},${report.root.z} (${report.root.probe.biomeId})`);
+      console.log(`solid object voxels: ${report.sample.solidVoxelCount}`);
+    }
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
+}
+
+function isObjectLabBatchOptions(options: ObjectLabOptions | ObjectLabBatchOptions): options is ObjectLabBatchOptions {
+  return "landmarkIds" in options;
+}
+
+export async function runObjectLabBatch(options: ObjectLabBatchOptions = {}): Promise<ObjectLabBatchReport> {
+  const seed = options.seed ?? DEFAULT_SEED;
+  const timestamp = options.timestamp ?? new Date();
+  const landmarkIds = [...(options.landmarkIds ?? OBJECT_LAB_ROUTE_LANDMARK_IDS)];
+  if (landmarkIds.length === 0) {
+    throw new Error("Object lab batch requires at least one landmark id.");
+  }
+  const label = sanitizeFileStem(options.label ?? "route-landmark-comparison");
+  const runName = `${timestampForFile(timestamp)}-${label}`;
+  const runDir = join(options.outputDir ?? DEFAULT_OUTPUT_DIR, runName);
+  await mkdir(runDir, { recursive: true });
+
+  const reports: ObjectLabReport[] = [];
+  for (const landmarkId of landmarkIds) {
+    reports.push(
+      await runObjectLab({
+        landmarkId,
+        seed,
+        outputDir: runDir,
+        label: landmarkId,
+        timestamp,
+        scanRadius: options.scanRadius,
+        coarseStep: options.coarseStep,
+        refineRadius: options.refineRadius,
+        sampleRadius: options.sampleRadius,
+        heightPadding: options.heightPadding,
+      }),
+    );
+  }
+
+  const comparison = reports.map(buildComparisonRow);
+  const reportPath = join(runDir, "batch-report.json");
+  const summaryPath = join(runDir, "comparison.md");
+  const batchReport: ObjectLabBatchReport = {
+    generatedAt: timestamp.toISOString(),
+    seed,
+    runDir,
+    landmarkIds,
+    reports,
+    comparison,
+    artifacts: {
+      report: reportPath,
+      summary: summaryPath,
+    },
+  };
+
+  await writeFile(reportPath, `${JSON.stringify(batchReport, null, 2)}\n`);
+  await writeFile(summaryPath, buildBatchMarkdownSummary(batchReport));
+  return batchReport;
 }
 
 export async function runObjectLab(options: ObjectLabOptions): Promise<ObjectLabReport> {
@@ -857,6 +973,83 @@ function buildMarkdownSummary(report: ObjectLabReport): string {
   ].join("\n");
 }
 
+function buildComparisonRow(report: ObjectLabReport): ObjectLabComparisonRow {
+  return {
+    landmarkId: report.landmarkId,
+    root: [report.root.x, report.root.z],
+    biomeId: report.root.probe.biomeId,
+    solidVoxelCount: report.sample.solidVoxelCount,
+    boundsSize: report.sample.diagnostics.scale.boundsSize,
+    materialVariety: report.sample.diagnostics.materialVariety,
+    dominantMaterialShare: report.sample.diagnostics.dominantMaterialShare,
+    fillRatio: report.sample.diagnostics.scale.fillRatio,
+    solidVoxelBudget: report.sample.diagnostics.scale.solidVoxelBudget,
+    topSilhouette: summarizeSilhouette(report.sample.diagnostics.silhouette.top),
+    frontSilhouette: summarizeSilhouette(report.sample.diagnostics.silhouette.front),
+    warnings: report.sample.diagnostics.warnings,
+    contactSheet: report.artifacts.contactSheet,
+  };
+}
+
+function summarizeSilhouette(diagnostics: ProjectionDiagnostics): ObjectLabSilhouetteSummary {
+  return {
+    coverage: diagnostics.coverage,
+    normalizedWidth: diagnostics.normalizedWidth,
+    normalizedHeight: diagnostics.normalizedHeight,
+    aspectRatio: diagnostics.aspectRatio,
+  };
+}
+
+function buildBatchMarkdownSummary(report: ObjectLabBatchReport): string {
+  const warningRows = report.comparison
+    .filter((row) => row.warnings.length > 0)
+    .map((row) => `| ${row.landmarkId} | ${row.warnings.join(", ")} | ${row.contactSheet} |`)
+    .join("\n");
+  const rows = report.comparison.map((row) => [
+    `| ${row.landmarkId}`,
+    `${row.root[0]}, ${row.root[1]}`,
+    row.biomeId,
+    row.solidVoxelCount.toString(),
+    formatNullableTuple(row.boundsSize),
+    row.materialVariety.toString(),
+    formatPercent(row.dominantMaterialShare),
+    formatPercent(row.fillRatio),
+    row.solidVoxelBudget,
+    formatSilhouetteSummary(row.topSilhouette),
+    formatSilhouetteSummary(row.frontSilhouette),
+    row.warnings.length === 0 ? "none" : row.warnings.join(", "),
+    row.contactSheet,
+  ].join(" | ") + " |").join("\n");
+
+  return [
+    `# Object Lab Route Landmark Comparison`,
+    ``,
+    `- Seed: ${report.seed}`,
+    `- Runs: ${report.reports.length}`,
+    `- Batch report: ${report.artifacts.report}`,
+    ``,
+    `## Comparison`,
+    ``,
+    `| Landmark | Root | Biome | Voxels | Bounds Size | Materials | Dominant | Fill | Budget | Top Silhouette | Front Silhouette | Warnings | Contact Sheet |`,
+    `| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- |`,
+    rows,
+    ``,
+    `## Warning Queue`,
+    ``,
+    `| Landmark | Warnings | Contact Sheet |`,
+    `| --- | --- | --- |`,
+    warningRows || `| none | none | n/a |`,
+    ``,
+  ].join("\n");
+}
+
+function formatSilhouetteSummary(summary: ObjectLabSilhouetteSummary): string {
+  const aspect = summary.aspectRatio === null ? "n/a" : summary.aspectRatio.toFixed(3);
+  return `cov ${formatPercent(summary.coverage)}, w ${formatPercent(summary.normalizedWidth)}, h ${formatPercent(
+    summary.normalizedHeight,
+  )}, ar ${aspect}`;
+}
+
 function silhouetteRow(label: string, diagnostics: ProjectionDiagnostics): string {
   return [
     `| ${label}`,
@@ -976,10 +1169,36 @@ function escapeXml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
+function readCliOptions(args: string[]): ObjectLabOptions | ObjectLabBatchOptions {
+  const landmarkIds = readLandmarkIds(args);
+  if (landmarkIds) {
+    if (readFlag(args, "--world-x") !== null || readFlag(args, "--world-z") !== null) {
+      throw new Error("--world-x and --world-z are only supported for single-object lab runs.");
+    }
+    return {
+      landmarkIds,
+      seed: readPositiveInt(readFlag(args, "--seed"), DEFAULT_SEED),
+      outputDir: readFlag(args, "--output-dir") ?? DEFAULT_OUTPUT_DIR,
+      label: readFlag(args, "--label") ?? "route-landmark-comparison",
+      timestamp: undefined,
+      scanRadius: readPositiveInt(readFlag(args, "--scan-radius"), DEFAULT_SCAN_RADIUS),
+      coarseStep: readPositiveInt(readFlag(args, "--coarse-step"), DEFAULT_COARSE_STEP),
+      refineRadius: readPositiveInt(readFlag(args, "--refine-radius"), DEFAULT_REFINE_RADIUS),
+      sampleRadius: readPositiveInt(readFlag(args, "--sample-radius"), DEFAULT_SAMPLE_RADIUS),
+      heightPadding: readNonNegativeInt(readFlag(args, "--height-padding"), DEFAULT_HEIGHT_PADDING),
+    };
+  }
+  return readOptions(args);
+}
+
 function readOptions(args: string[]): ObjectLabOptions {
   const rawId = readFlag(args, "--id") ?? args.find((arg) => !arg.startsWith("--"));
   if (!rawId || !isLandmarkId(rawId)) {
-    throw new Error(`Usage: bun run scripts/object-lab.ts --id <landmark-id> [--seed 1337]`);
+    throw new Error(
+      `Usage: bun run scripts/object-lab.ts --id <landmark-id> [--seed 1337]\n`
+        + `       bun run scripts/object-lab.ts --batch route-landmarks [--seed 1337]\n`
+        + `       bun run scripts/object-lab.ts --ids ash_marker,pilgrim_lantern [--seed 1337]`,
+    );
   }
   return {
     landmarkId: rawId,
@@ -994,6 +1213,29 @@ function readOptions(args: string[]): ObjectLabOptions {
     worldX: readOptionalInt(readFlag(args, "--world-x")),
     worldZ: readOptionalInt(readFlag(args, "--world-z")),
   };
+}
+
+function readLandmarkIds(args: string[]): LandmarkId[] | null {
+  const batch = readFlag(args, "--batch");
+  const rawIds = readFlag(args, "--ids");
+  if (batch === null && rawIds === null) {
+    return null;
+  }
+  if (rawIds !== null) {
+    const ids = rawIds.split(",").map((id) => id.trim()).filter(Boolean);
+    if (ids.length === 0) {
+      throw new Error("--ids must include at least one landmark id.");
+    }
+    const invalid = ids.find((id) => !isLandmarkId(id));
+    if (invalid) {
+      throw new Error(`Unknown landmark id '${invalid}'.`);
+    }
+    return ids as LandmarkId[];
+  }
+  if (batch === "route-landmarks") {
+    return [...OBJECT_LAB_ROUTE_LANDMARK_IDS];
+  }
+  throw new Error(`Unknown object-lab batch '${batch}'. Supported batch: route-landmarks.`);
 }
 
 function isLandmarkId(value: string): value is LandmarkId {

@@ -25,6 +25,7 @@ interface RouteSample {
   landmarkId: string | null;
   landmarkHeightMeters: number;
   visibleNearbyLandmarkIds: string[];
+  visibleNearbyStrongLandmarkIds: string[];
   nearestVisibleNearbyLandmarkId: string | null;
   nearestVisibleNearbyLandmarkDistanceMeters: number | null;
   tallestVisibleNearbyLandmarkHeightMeters: number;
@@ -57,6 +58,12 @@ interface RouteSummary {
   routeStretchCoverageRatio: number;
   maxTokenlessRouteStretchMeters: number;
   tokenlessRouteStretches: RouteStretchSummary[];
+  strongSilhouetteStretchCount: number;
+  strongSilhouetteTokenizedStretchCount: number;
+  strongSilhouettelessStretchCount: number;
+  strongSilhouetteStretchCoverageRatio: number;
+  maxStrongSilhouettelessStretchMeters: number;
+  strongSilhouettelessStretches: RouteStretchSummary[];
   minSurfaceMeters: number;
   maxSurfaceMeters: number;
   samplePreview: RouteSample[];
@@ -67,6 +74,7 @@ interface RouteAtlasReport {
   thresholds: typeof thresholds;
   landmarkVistaScan: typeof landmarkVistaScan;
   routeStretchScan: typeof routeStretchScan;
+  strongSilhouetteScan: typeof strongSilhouetteScan;
   enforce: boolean;
   aggregate: RouteAtlasAggregate;
   comparison: RouteAtlasComparison | null;
@@ -93,6 +101,11 @@ interface RouteAtlasAggregate {
   tokenlessRouteStretchCount: number;
   routeStretchCoverageRatio: number;
   maxTokenlessRouteStretchMeters: number;
+  strongSilhouetteStretchCount: number;
+  strongSilhouetteTokenizedStretchCount: number;
+  strongSilhouettelessStretchCount: number;
+  strongSilhouetteStretchCoverageRatio: number;
+  maxStrongSilhouettelessStretchMeters: number;
   definitionScore: number;
 }
 
@@ -133,6 +146,8 @@ interface RouteAtlasComparison {
     averageNotableGapMeters: number;
     tokenlessRouteStretchCount: number;
     routeStretchCoverageRatio: number;
+    strongSilhouettelessStretchCount: number;
+    strongSilhouetteStretchCoverageRatio: number;
     definitionScore: number;
   };
   addedLandmarks: string[];
@@ -144,6 +159,7 @@ interface RouteAtlasComparison {
     landmarkHitCount: number;
     maxNotableGapMeters: number;
     tokenlessRouteStretchCount: number;
+    strongSilhouettelessStretchCount: number;
     addedLandmarks: string[];
     removedLandmarks: string[];
   }>;
@@ -179,18 +195,26 @@ const thresholds = {
   minLandmarkHits: 8,
   maxNotableGapMeters: 540,
   maxTokenlessRouteStretches: 0,
+  minStrongSilhouetteStretchCoverageRatio: 0.80,
+  maxStrongSilhouettelessRouteStretches: 35,
 } as const;
 
 const landmarkVistaScan = {
-  radiusMeters: 64,
+  radiusMeters: 96,
   minHeightMeters: 2.5,
-  samplesPerRouteSample: 16,
+  samplesPerRouteSample: 28,
 } as const;
 
 const routeStretchScan = {
   windowMeters: 300,
   strideMeters: 50,
   minSilhouetteHeightMeters: landmarkVistaScan.minHeightMeters,
+} as const;
+
+const strongSilhouetteScan = {
+  windowMeters: 360,
+  strideMeters: 60,
+  minHeightMeters: 5.5,
 } as const;
 
 const LANDMARK_VISTA_OFFSETS_METERS: ReadonlyArray<readonly [forwardMeters: number, lateralMeters: number]> = [
@@ -210,6 +234,18 @@ const LANDMARK_VISTA_OFFSETS_METERS: ReadonlyArray<readonly [forwardMeters: numb
   [-36, 48],
   [48, 0],
   [-48, 0],
+  [72, 0],
+  [-72, 0],
+  [72, -24],
+  [72, 24],
+  [-72, -24],
+  [-72, 24],
+  [72, -48],
+  [72, 48],
+  [-72, -48],
+  [-72, 48],
+  [0, -72],
+  [0, 72],
 ] as const;
 
 if (LANDMARK_VISTA_OFFSETS_METERS.length !== landmarkVistaScan.samplesPerRouteSample) {
@@ -240,6 +276,7 @@ const report: RouteAtlasReport = {
   thresholds,
   landmarkVistaScan,
   routeStretchScan,
+  strongSilhouetteScan,
   enforce,
   aggregate,
   comparison,
@@ -258,12 +295,14 @@ console.log(`regional variants: ${aggregate.distinctRegionalVariants.length}`);
 console.log(`landmark credited samples: ${aggregate.landmarkHitCount} (${aggregate.directLandmarkHitCount} direct samples, ${aggregate.visibleNearbyLandmarkHitCount} vista samples)`);
 console.log(`max notable gap: ${aggregate.maxNotableGapMeters.toFixed(1)} m`);
 console.log(`route stretch coverage: ${formatPercent(aggregate.routeStretchCoverageRatio)} (${aggregate.tokenizedRouteStretchCount}/${aggregate.routeStretchCount} tokenized, ${aggregate.tokenlessRouteStretchCount} tokenless)`);
+console.log(`strong silhouette coverage: ${formatPercent(aggregate.strongSilhouetteStretchCoverageRatio)} (${aggregate.strongSilhouetteTokenizedStretchCount}/${aggregate.strongSilhouetteStretchCount} tokenized, ${aggregate.strongSilhouettelessStretchCount} empty)`);
 console.log(`definition score: ${aggregate.definitionScore.toFixed(2)} / 5`);
 if (comparison) {
   console.log(`compared to: ${comparison.baselinePath}`);
   console.log(`landmark delta: ${formatSigned(comparison.metricDeltas.landmarkHitCount)} hits, ${formatSigned(comparison.metricDeltas.distinctLandmarkCount)} distinct`);
   console.log(`gap delta: ${formatSigned(comparison.metricDeltas.maxNotableGapMeters, 1)} m max`);
   console.log(`tokenless stretch delta: ${formatSigned(comparison.metricDeltas.tokenlessRouteStretchCount)} stretches`);
+  console.log(`strong silhouette stretch delta: ${formatSigned(comparison.metricDeltas.strongSilhouetteStretchCoverageRatio * 100, 1)} pp, ${formatSigned(comparison.metricDeltas.strongSilhouettelessStretchCount)} empty`);
   console.log(`added landmarks: ${comparison.addedLandmarks.length > 0 ? comparison.addedLandmarks.join(", ") : "none"}`);
 }
 if (failures.length > 0) {
@@ -287,6 +326,8 @@ function summarizeRoute(generator: ProceduralWorldGenerator, route: RouteSpec): 
   const notableGaps = computeNotableGaps(samples);
   const routeStretches = summarizeRouteStretches(samples);
   const tokenlessRouteStretches = routeStretches.filter((stretch) => stretch.tokenCount === 0);
+  const strongSilhouetteStretches = summarizeStrongSilhouetteStretches(samples);
+  const strongSilhouettelessStretches = strongSilhouetteStretches.filter((stretch) => stretch.tokenCount === 0);
   const surfaces = samples.map((sample) => sample.surfaceMeters);
   const directLandmarkHitCount = samples.filter((sample) => sample.landmarkId !== null).length;
   const visibleNearbyLandmarkHitCount = samples.filter((sample) => sample.visibleNearbyLandmarkIds.length > 0).length;
@@ -314,6 +355,12 @@ function summarizeRoute(generator: ProceduralWorldGenerator, route: RouteSpec): 
     routeStretchCoverageRatio: ratio(routeStretches.length - tokenlessRouteStretches.length, routeStretches.length),
     maxTokenlessRouteStretchMeters: Math.max(0, ...tokenlessRouteStretches.map((stretch) => stretch.endMeters - stretch.startMeters)),
     tokenlessRouteStretches,
+    strongSilhouetteStretchCount: strongSilhouetteStretches.length,
+    strongSilhouetteTokenizedStretchCount: strongSilhouetteStretches.length - strongSilhouettelessStretches.length,
+    strongSilhouettelessStretchCount: strongSilhouettelessStretches.length,
+    strongSilhouetteStretchCoverageRatio: ratio(strongSilhouetteStretches.length - strongSilhouettelessStretches.length, strongSilhouetteStretches.length),
+    maxStrongSilhouettelessStretchMeters: Math.max(0, ...strongSilhouettelessStretches.map((stretch) => stretch.endMeters - stretch.startMeters)),
+    strongSilhouettelessStretches,
     minSurfaceMeters: Math.min(...surfaces),
     maxSurfaceMeters: Math.max(...surfaces),
     samplePreview: samples.filter((_, index) => index % 12 === 0).slice(0, 24),
@@ -345,6 +392,9 @@ function sampleRoute(generator: ProceduralWorldGenerator, route: RouteSpec): Rou
       landmarkId: probe.landmarkId,
       landmarkHeightMeters: landmarkHeightMeters(probe),
       visibleNearbyLandmarkIds: visibleNearbyLandmarks.map((landmark) => landmark.landmarkId),
+      visibleNearbyStrongLandmarkIds: visibleNearbyLandmarks
+        .filter((landmark) => landmark.heightMeters >= strongSilhouetteScan.minHeightMeters)
+        .map((landmark) => landmark.landmarkId),
       nearestVisibleNearbyLandmarkId: visibleNearbyLandmarks[0]?.landmarkId ?? null,
       nearestVisibleNearbyLandmarkDistanceMeters: visibleNearbyLandmarks[0]?.distanceMeters ?? null,
       tallestVisibleNearbyLandmarkHeightMeters: Math.max(0, ...visibleNearbyLandmarks.map((landmark) => landmark.heightMeters)),
@@ -425,6 +475,9 @@ function summarizeAggregate(routes: RouteSummary[]): RouteAtlasAggregate {
   const routeStretchCount = sum(routes.map((route) => route.routeStretchCount));
   const tokenizedRouteStretchCount = sum(routes.map((route) => route.tokenizedRouteStretchCount));
   const tokenlessRouteStretchCount = sum(routes.map((route) => route.tokenlessRouteStretchCount));
+  const strongSilhouetteStretchCount = sum(routes.map((route) => route.strongSilhouetteStretchCount));
+  const strongSilhouetteTokenizedStretchCount = sum(routes.map((route) => route.strongSilhouetteTokenizedStretchCount));
+  const strongSilhouettelessStretchCount = sum(routes.map((route) => route.strongSilhouettelessStretchCount));
   const definitionScore = clampScore(
     distinctBiomes.length / thresholds.minDistinctBiomes
       + distinctAmbientProfiles.length / thresholds.minDistinctAmbientProfiles
@@ -451,6 +504,11 @@ function summarizeAggregate(routes: RouteSummary[]): RouteAtlasAggregate {
     tokenlessRouteStretchCount,
     routeStretchCoverageRatio: ratio(tokenizedRouteStretchCount, routeStretchCount),
     maxTokenlessRouteStretchMeters: Math.max(0, ...routes.map((route) => route.maxTokenlessRouteStretchMeters)),
+    strongSilhouetteStretchCount,
+    strongSilhouetteTokenizedStretchCount,
+    strongSilhouettelessStretchCount,
+    strongSilhouetteStretchCoverageRatio: ratio(strongSilhouetteTokenizedStretchCount, strongSilhouetteStretchCount),
+    maxStrongSilhouettelessStretchMeters: Math.max(0, ...routes.map((route) => route.maxStrongSilhouettelessStretchMeters)),
     definitionScore,
   };
 }
@@ -509,6 +567,8 @@ async function compareWithBaseline(
       averageNotableGapMeters: aggregate.averageNotableGapMeters - readNumber(baselineAggregate.averageNotableGapMeters),
       tokenlessRouteStretchCount: aggregate.tokenlessRouteStretchCount - readNumber(baselineAggregate.tokenlessRouteStretchCount),
       routeStretchCoverageRatio: aggregate.routeStretchCoverageRatio - readNumber(baselineAggregate.routeStretchCoverageRatio),
+      strongSilhouettelessStretchCount: aggregate.strongSilhouettelessStretchCount - readNumber(baselineAggregate.strongSilhouettelessStretchCount),
+      strongSilhouetteStretchCoverageRatio: aggregate.strongSilhouetteStretchCoverageRatio - readNumber(baselineAggregate.strongSilhouetteStretchCoverageRatio),
       definitionScore: aggregate.definitionScore - readNumber(baselineAggregate.definitionScore),
     },
     addedLandmarks: setDifference(aggregate.distinctLandmarks, readArray(baselineAggregate.distinctLandmarks)),
@@ -522,6 +582,7 @@ async function compareWithBaseline(
         landmarkHitCount: route.landmarkHitCount - readNumber(baselineRoute?.landmarkHitCount),
         maxNotableGapMeters: route.maxNotableGapMeters - readNumber(baselineRoute?.maxNotableGapMeters),
         tokenlessRouteStretchCount: route.tokenlessRouteStretchCount - readNumber(baselineRoute?.tokenlessRouteStretchCount),
+        strongSilhouettelessStretchCount: route.strongSilhouettelessStretchCount - readNumber(baselineRoute?.strongSilhouettelessStretchCount),
         addedLandmarks: setDifference(route.distinctLandmarks, readArray(baselineRoute?.distinctLandmarks)),
         removedLandmarks: setDifference(readArray(baselineRoute?.distinctLandmarks), route.distinctLandmarks),
       };
@@ -551,6 +612,9 @@ function buildMarkdownSummary(report: RouteAtlasReport): string {
     `- Route stretch scan: ${report.routeStretchScan.windowMeters} m windows every ${report.routeStretchScan.strideMeters} m`,
     `- Route stretch coverage: ${formatPercent(report.aggregate.routeStretchCoverageRatio)} (${report.aggregate.tokenizedRouteStretchCount}/${report.aggregate.routeStretchCount} tokenized, ${report.aggregate.tokenlessRouteStretchCount} tokenless)`,
     `- Max tokenless route stretch: ${report.aggregate.maxTokenlessRouteStretchMeters.toFixed(1)} m`,
+    `- Strong silhouette scan: ${report.strongSilhouetteScan.windowMeters} m windows every ${report.strongSilhouetteScan.strideMeters} m, min height ${report.strongSilhouetteScan.minHeightMeters.toFixed(1)} m`,
+    `- Strong silhouette coverage: ${formatPercent(report.aggregate.strongSilhouetteStretchCoverageRatio)} (${report.aggregate.strongSilhouetteTokenizedStretchCount}/${report.aggregate.strongSilhouetteStretchCount} tokenized, ${report.aggregate.strongSilhouettelessStretchCount} empty)`,
+    `- Max strong-silhouetteless stretch: ${report.aggregate.maxStrongSilhouettelessStretchMeters.toFixed(1)} m`,
     "",
   ];
   if (report.comparison) {
@@ -572,6 +636,8 @@ function buildMarkdownSummary(report: RouteAtlasReport): string {
       `| Average notable gap | ${formatSigned(report.comparison.metricDeltas.averageNotableGapMeters, 1)} m |`,
       `| Tokenless route stretches | ${formatSigned(report.comparison.metricDeltas.tokenlessRouteStretchCount)} |`,
       `| Route stretch coverage | ${formatSigned(report.comparison.metricDeltas.routeStretchCoverageRatio * 100, 1)} pp |`,
+      `| Strong-silhouetteless stretches | ${formatSigned(report.comparison.metricDeltas.strongSilhouettelessStretchCount)} |`,
+      `| Strong silhouette coverage | ${formatSigned(report.comparison.metricDeltas.strongSilhouetteStretchCoverageRatio * 100, 1)} pp |`,
       `| Definition score | ${formatSigned(report.comparison.metricDeltas.definitionScore, 2)} |`,
       "",
       `- Added landmarks: ${formatList(report.comparison.addedLandmarks)}`,
@@ -581,10 +647,10 @@ function buildMarkdownSummary(report: RouteAtlasReport): string {
       "",
       "### Route Deltas",
       "",
-      "| Route | Landmark Hits | Max Gap | Tokenless Stretches | Added Landmarks | Removed Landmarks |",
-      "| --- | ---: | ---: | ---: | --- | --- |",
+      "| Route | Landmark Hits | Max Gap | Tokenless Stretches | Strong Empty | Added Landmarks | Removed Landmarks |",
+      "| --- | ---: | ---: | ---: | ---: | --- | --- |",
       ...report.comparison.routeDeltas.map((route) =>
-        `| ${route.label} | ${formatSigned(route.landmarkHitCount)} | ${formatSigned(route.maxNotableGapMeters, 1)} m | ${formatSigned(route.tokenlessRouteStretchCount)} | ${formatList(route.addedLandmarks)} | ${formatList(route.removedLandmarks)} |`,
+        `| ${route.label} | ${formatSigned(route.landmarkHitCount)} | ${formatSigned(route.maxNotableGapMeters, 1)} m | ${formatSigned(route.tokenlessRouteStretchCount)} | ${formatSigned(route.strongSilhouettelessStretchCount)} | ${formatList(route.addedLandmarks)} | ${formatList(route.removedLandmarks)} |`,
       ),
       "",
     );
@@ -592,10 +658,10 @@ function buildMarkdownSummary(report: RouteAtlasReport): string {
   lines.push(
     "## Route Details",
     "",
-    "| Route | Biomes | Ambient | Landmarks | Vista | Required Missing | Hits | Max Gap | Stretch Coverage | Tokenless Windows |",
-    "| --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | --- |",
+    "| Route | Biomes | Ambient | Landmarks | Vista | Required Missing | Hits | Max Gap | Stretch Coverage | Strong Coverage | Tokenless Windows | Strong Empty Windows |",
+    "| --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
     ...report.routes.map((route) =>
-      `| ${route.label} | ${route.distinctBiomes.length} | ${route.distinctAmbientProfiles.length} | ${formatList(route.distinctLandmarks)} | ${formatList(route.visibleNearbyLandmarks)} | ${formatList(route.missingRequiredLandmarkIds)} | ${route.landmarkHitCount} | ${route.maxNotableGapMeters.toFixed(1)} m | ${formatPercent(route.routeStretchCoverageRatio)} | ${formatTokenlessRouteStretches(route.tokenlessRouteStretches)} |`,
+      `| ${route.label} | ${route.distinctBiomes.length} | ${route.distinctAmbientProfiles.length} | ${formatList(route.distinctLandmarks)} | ${formatList(route.visibleNearbyLandmarks)} | ${formatList(route.missingRequiredLandmarkIds)} | ${route.landmarkHitCount} | ${route.maxNotableGapMeters.toFixed(1)} m | ${formatPercent(route.routeStretchCoverageRatio)} | ${formatPercent(route.strongSilhouetteStretchCoverageRatio)} | ${formatTokenlessRouteStretches(route.tokenlessRouteStretches)} | ${formatTokenlessRouteStretches(route.strongSilhouettelessStretches)} |`,
     ),
     "",
     `Failures: ${report.failures.length > 0 ? report.failures.join("; ") : "none"}`,
@@ -626,6 +692,12 @@ function findFailures(
   }
   if (aggregate.tokenlessRouteStretchCount > thresholds.maxTokenlessRouteStretches) {
     failures.push(`${aggregate.tokenlessRouteStretchCount} route stretch window(s) lack a silhouette or route token`);
+  }
+  if (aggregate.strongSilhouetteStretchCoverageRatio < thresholds.minStrongSilhouetteStretchCoverageRatio) {
+    failures.push(`strong silhouette stretch coverage ${formatPercent(aggregate.strongSilhouetteStretchCoverageRatio)} is below ${formatPercent(thresholds.minStrongSilhouetteStretchCoverageRatio)}`);
+  }
+  if (aggregate.strongSilhouettelessStretchCount > thresholds.maxStrongSilhouettelessRouteStretches) {
+    failures.push(`${aggregate.strongSilhouettelessStretchCount} route stretch window(s) lack a strong silhouette`);
   }
   for (const route of routes) {
     if (route.missingRequiredLandmarkIds.length > 0) {
@@ -665,6 +737,28 @@ function summarizeRouteStretches(samples: readonly RouteSample[]): RouteStretchS
   });
 }
 
+function summarizeStrongSilhouetteStretches(samples: readonly RouteSample[]): RouteStretchSummary[] {
+  if (samples.length === 0) {
+    return [];
+  }
+  const finalDistance = samples[samples.length - 1]!.distanceMeters;
+  const windowMeters = Math.min(strongSilhouetteScan.windowMeters, finalDistance);
+  const starts = strongSilhouetteStretchStarts(finalDistance, windowMeters);
+  const tokenEvents = computeStrongSilhouetteTokenEvents(samples);
+  return starts.map((startMeters) => {
+    const endMeters = Math.min(finalDistance, startMeters + windowMeters);
+    const stretchEvents = tokenEvents.filter((event) => event.distanceMeters >= startMeters && event.distanceMeters <= endMeters);
+    const silhouetteTokenIds = sortedDistinct(stretchEvents.map((event) => event.tokenId));
+    return {
+      startMeters,
+      endMeters,
+      tokenCount: silhouetteTokenIds.length,
+      silhouetteTokenIds,
+      routeTokenIds: [],
+    };
+  });
+}
+
 function routeStretchStarts(finalDistance: number, windowMeters: number): number[] {
   if (finalDistance <= 0) {
     return [0];
@@ -674,6 +768,24 @@ function routeStretchStarts(finalDistance: number, windowMeters: number): number
   }
   const starts: number[] = [];
   for (let startMeters = 0; startMeters + windowMeters <= finalDistance; startMeters += routeStretchScan.strideMeters) {
+    starts.push(roundMeters(startMeters));
+  }
+  const finalStart = roundMeters(finalDistance - windowMeters);
+  if (starts[starts.length - 1] !== finalStart) {
+    starts.push(finalStart);
+  }
+  return starts;
+}
+
+function strongSilhouetteStretchStarts(finalDistance: number, windowMeters: number): number[] {
+  if (finalDistance <= 0) {
+    return [0];
+  }
+  if (windowMeters >= finalDistance) {
+    return [0];
+  }
+  const starts: number[] = [];
+  for (let startMeters = 0; startMeters + windowMeters <= finalDistance; startMeters += strongSilhouetteScan.strideMeters) {
     starts.push(roundMeters(startMeters));
   }
   const finalStart = roundMeters(finalDistance - windowMeters);
@@ -730,6 +842,27 @@ function computeRouteTokenEvents(samples: readonly RouteSample[]): RouteTokenEve
         distanceMeters: sample.distanceMeters,
         tokenId: `region-transition:${previous.regionalVariantId ?? "none"}>${sample.regionalVariantId ?? "none"}`,
         tokenKind: "route",
+      });
+    }
+  }
+  return events;
+}
+
+function computeStrongSilhouetteTokenEvents(samples: readonly RouteSample[]): RouteTokenEvent[] {
+  const events: RouteTokenEvent[] = [];
+  for (const sample of samples) {
+    if (sample.landmarkId && sample.landmarkHeightMeters >= strongSilhouetteScan.minHeightMeters) {
+      events.push({
+        distanceMeters: sample.distanceMeters,
+        tokenId: `direct:${sample.landmarkId}`,
+        tokenKind: "silhouette",
+      });
+    }
+    for (const landmarkId of sample.visibleNearbyStrongLandmarkIds) {
+      events.push({
+        distanceMeters: sample.distanceMeters,
+        tokenId: `vista:${landmarkId}`,
+        tokenKind: "silhouette",
       });
     }
   }

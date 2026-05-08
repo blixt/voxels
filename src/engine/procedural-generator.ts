@@ -414,6 +414,7 @@ const CAVE_OPENING_SCALE = 1 / 760;
 const STRATA_BAND_SCALE = 1 / 160;
 const ONE_THIRD = 1 / 3;
 const SURFACE_MATERIAL_DITHER_SCALE = 1 / 7;
+const WORLD_UNITS_PER_METER = 10;
 const NO_WATER = -1;
 const FEATURE_NONE = 0;
 const FEATURE_OAK = 1;
@@ -436,6 +437,23 @@ const FEATURE_MEGASTRUCTURE = 17;
 const FEATURE_RIB_ARCH = 18;
 const FEATURE_CAUSEWAY = 19;
 const CHUNK_GENERATION_SCRATCH_POOL_LIMIT = 4;
+
+interface PilgrimRouteBand {
+  startX: number;
+  startZ: number;
+  directionX: number;
+  directionZ: number;
+  length: number;
+  halfWidth: number;
+}
+
+const PILGRIM_ROUTE_BANDS: readonly PilgrimRouteBand[] = [
+  createPilgrimRouteBand(0, 0, 8, 1800, 70),
+  createPilgrimRouteBand(0, 0, 126, 1800, 70),
+  createPilgrimRouteBand(220, -340, 54, 2200, 72),
+  createPilgrimRouteBand(-540, 420, 315, 2200, 72),
+  createPilgrimRouteBand(960, -780, 202, 2600, 74),
+];
 
 const BASE_BIOMES: readonly BaseBiomeProfile[] = [
   createBaseBiome("verdant", 0.56, 0.78, 0.28, 0.74, 0.42, 0.18, -10, 0.48, 0.18, 0.40, 0.28, 0.00, 4.4, 1548, "#6A5", "#7B6", "#8B6", "#592", "#677", "#754", "#865", "#49B", "#DDE"),
@@ -766,6 +784,17 @@ const STEPPE_MONOLITH_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("acacia", { chance: 0.26, scale: 1.08, cellSize: 152, radius: 12 }),
   landmarkPlacement("flower_patch", { chance: 0.22, scale: 0.92, variant: 2, cellSize: 76, radius: 5 }),
   landmarkPlacement("boulder", { chance: 0.18, scale: 0.96 }),
+];
+
+const PILGRIM_ROUTE_SKYLINE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("old_road_causeway", { chance: 0.46, scale: 1.20, cellSize: 104, radius: 14 }),
+  landmarkPlacement("pilgrim_lantern", { chance: 0.40, scale: 1.22, cellSize: 104, radius: 5 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.30, scale: 1.30, cellSize: 164, radius: 8 }),
+  landmarkPlacement("rib_arch", { chance: 0.24, scale: 1.24, cellSize: 164, radius: 14 }),
+  landmarkPlacement("ancestor_pillar", { chance: 0.26, scale: 1.22, cellSize: 140, radius: 6 }),
+  landmarkPlacement("basalt_spire", { chance: 0.24, scale: 1.24, cellSize: 144, radius: 7 }),
+  landmarkPlacement("standing_stone", { chance: 0.32, scale: 1.24, cellSize: 128, radius: 6 }),
+  landmarkPlacement("dead_tree", { chance: 0.18, scale: 1.16, cellSize: 156, radius: 8 }),
 ];
 
 const DUNES_GLASS_LANDMARKS: readonly LandmarkProfile[] = [
@@ -1949,7 +1978,8 @@ export class ProceduralWorldGenerator {
     out.featureMaterialPrimary = 0;
     out.featureMaterialSecondary = 0;
     out.featureMaterialAccent = 0;
-    const roster = selectLandmarkRoster(biomeId, undergroundBiomeId, regionalVariantId, fields);
+    const roster = selectPilgrimRouteRoster(worldX, worldZ, biomeId, fields)
+      ?? selectLandmarkRoster(biomeId, undergroundBiomeId, regionalVariantId, fields);
     if (roster.length === 0) {
       return null;
     }
@@ -2740,6 +2770,58 @@ function pickSubsurfaceMaterial(
     return subsurfaceVariant;
   }
   return subsurface;
+}
+
+function createPilgrimRouteBand(
+  startMetersX: number,
+  startMetersZ: number,
+  headingDegrees: number,
+  lengthMeters: number,
+  halfWidthMeters: number,
+): PilgrimRouteBand {
+  const heading = headingDegrees * Math.PI / 180;
+  return {
+    startX: startMetersX * WORLD_UNITS_PER_METER,
+    startZ: startMetersZ * WORLD_UNITS_PER_METER,
+    directionX: Math.cos(heading),
+    directionZ: Math.sin(heading),
+    length: lengthMeters * WORLD_UNITS_PER_METER,
+    halfWidth: halfWidthMeters * WORLD_UNITS_PER_METER,
+  };
+}
+
+function selectPilgrimRouteRoster(
+  worldX: number,
+  worldZ: number,
+  biomeId: BiomeId,
+  fields: SurfaceFieldSample,
+): readonly LandmarkProfile[] | null {
+  if (
+    biomeId === "verdant"
+    || biomeId === "fern"
+    || biomeId === "bloom"
+    || (biomeId === "highland" && fields.oldGrowth > 0.62 && fields.moisture > 0.48)
+  ) {
+    return null;
+  }
+  for (const band of PILGRIM_ROUTE_BANDS) {
+    const deltaX = worldX - band.startX;
+    const deltaZ = worldZ - band.startZ;
+    const along = deltaX * band.directionX + deltaZ * band.directionZ;
+    if (along < -band.halfWidth || along > band.length + band.halfWidth) {
+      continue;
+    }
+    const lateralRatio = Math.abs(deltaX * -band.directionZ + deltaZ * band.directionX) / band.halfWidth;
+    if (lateralRatio > 1) {
+      continue;
+    }
+    const brokenRouteEdge = lateralRatio > 0.52 && (fields.surfacePatch > 0.42 || fields.scatter > 0.46);
+    const routeCore = lateralRatio <= 0.72 && fields.desolation + fields.ridge + fields.strata > 1.20;
+    if (brokenRouteEdge || routeCore) {
+      return PILGRIM_ROUTE_SKYLINE_LANDMARKS;
+    }
+  }
+  return null;
 }
 
 function selectLandmarkRoster(

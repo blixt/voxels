@@ -152,3 +152,24 @@ The browser visual metric did not move: the final browser lab still reports grid
 | 4 | Ashland travel-kit pack: masks, bone chimes, travel packs, water collector | 4 | 4 | 3 | 5.3 | Object-lab workflow is working for delegated prop upgrades | object-lab warnings/materials/contact sheets |
 | 5 | Far-view distance experiment with fixed route/vista screenshots | 4 | 3 | 4 | 3.0 | Worth trying only after visible far content density is stronger | LOD overlap/gap/fps gates |
 | 6 | Discovery gameplay pass around route tokens and shrine blessings | 4 | 4 | 3 | 5.3 | The route atlas now has meaningful terrain and silhouette events that can feed RPG progression | unit tests, browser objective probe |
+
+## Re-Rank After Strong Silhouette Director
+
+Completed since the terrain grid-breaker checkpoint:
+
+- Route-atlas now separates ordinary route-token coverage from strong visible silhouette coverage.
+- Vista scanning now reaches `96 m`, which raised the honest baseline from `46.4%` to `57.0%` strong coverage before any generation changes.
+- Main traversal routes now have an old-route skyline director for dusty/open terrain. Final route-atlas coverage is `87.7%` strong silhouette windows with only `22` empty windows.
+- Object-lab now has a batch route-landmark comparison mode and exposed the next object quality queue.
+- Live-forward movement remained healthy after density increased: max gameplay frame `7.30 ms`.
+
+The next work should still be bold. The density director improves route composition, but it also makes weak hero props more visible. The highest ROI is now to replace or redesign the weakest visible skyline props, while a sky/atmosphere pass remains a whole-screen fallback if the browser grid metric stays stubborn.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Replace weak skyline prop families: ash obelisk material breakup, rib arch/remains scale, ziggurat sample/LOD budget | 5 | 5 | 3 | 8.3 | Route director makes these objects visible; object-lab batch identified concrete warnings | `object-lab --batch route-landmarks`, focused shape tests, draw/triangle budget |
+| 2 | Full browser screenshot verdict on skyline density | 5 | 4 | 2 | 10.0 | Route metrics moved; need to verify actual player view/grid metric before piling on content | owned-browser luma/grid/color, route p95/max, LOD overlap/gap gates |
+| 3 | Stronger sky/atmospheric layering: ash streaks, lightning shelf, far haze silhouettes | 5 | 4 | 3 | 6.7 | Whole-screen ambiance can shift the Minecrafty read without much geometry | owned-browser luma/color/grid, shader black-frame gates, route frame budget |
+| 4 | Object-lab distinctiveness score: asymmetry, negative space, generic-envelope comparison | 4 | 5 | 3 | 6.7 | Batch comparison exists; now it should detect whether props are distinctive, not only valid | object-lab tests and comparison report |
+| 5 | Discovery gameplay pass using route and terrain tokens | 4 | 4 | 3 | 5.3 | Route atlas now emits meaningful cadence signals that can drive RPG travel memory | objective tests, browser objective probe |
+| 6 | Far-view distance experiment after prop and atmosphere quality | 4 | 3 | 4 | 3.0 | Strong route silhouettes help, but far view should wait for browser correctness and prop polish | owned-browser LOD/fps/gap gates |
