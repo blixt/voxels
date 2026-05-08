@@ -43,9 +43,9 @@ interface CdpMessage {
 
 interface CdpConnection {
   close(): Promise<void>;
-  send(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
+  send(method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, unknown>>;
   waitForEvent(method: string, timeoutMs: number): Promise<Record<string, unknown>>;
-  evaluate<T>(expression: string): Promise<T>;
+  evaluate<T>(expression: string, timeoutMs?: number): Promise<T>;
 }
 
 interface DevToolsVersionResponse {
@@ -87,6 +87,9 @@ const PERFORMANCE_BUDGETS = {
   minVisualLumaStdDev: 6,
   minVisualQuantizedColors: 8,
 } as const;
+
+const CDP_COMMAND_TIMEOUT_MS = 30_000;
+const PAGE_PROBE_TIMEOUT_MS = 180_000;
 
 const options = parseCli(Bun.argv);
 const runStamp = timestampForFile(new Date());
@@ -152,7 +155,7 @@ try {
   await waitForGameWorldReady(cdp, 120_000);
 
   const hudSmoke = await runHudSmoke(cdp);
-  const pageReport = await cdp.evaluate<Record<string, unknown>>(buildPageProbeExpression(options));
+  const pageReport = await cdp.evaluate<Record<string, unknown>>(buildPageProbeExpression(options), PAGE_PROBE_TIMEOUT_MS);
   const screenshot = await cdp.send("Page.captureScreenshot", {
     format: "png",
     fromSurface: true,
@@ -188,6 +191,26 @@ try {
   if (failures.length > 0) {
     process.exitCode = 1;
   }
+} catch (error) {
+  const report = {
+    generatedAt: new Date().toISOString(),
+    commit: readGitShortHead(),
+    appUrl,
+    outputDir,
+    screenshotPath: null,
+    chromeBinary: options.chromeBinary,
+    browserVersion: null,
+    serverMode: options.serverMode,
+    build: null,
+    options,
+    hudSmoke: null,
+    visualIdentity: null,
+    page: null,
+    failures: [`owned browser lab crashed: ${error instanceof Error ? error.message : String(error)}`],
+  };
+  await Bun.write(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  printSummary(reportPath, report);
+  process.exitCode = 1;
 } finally {
   await cdp?.close();
   chromeProcess?.kill();
@@ -1238,13 +1261,13 @@ function findFailures(
 }
 
 function printSummary(reportPath: string, report: {
-  hudSmoke: Record<string, unknown>;
+  hudSmoke: Record<string, unknown> | null;
   visualIdentity?: Record<string, unknown> | null;
-  page: Record<string, unknown>;
+  page: Record<string, unknown> | null;
   failures: string[];
   screenshotPath: string | null;
 }): void {
-  const page = report.page;
+  const page = readRecord(report.page);
   const after = readRecord(page.after);
   const lodCoverage = readRecord(page.lodCoverage);
   const renderReady = readRecord(page.renderReady);
@@ -1298,7 +1321,7 @@ function printSummary(reportPath: string, report: {
   console.log(`LOD gaps: ${formatNumber(readNumber(lodCoverage, "uncoveredGapCount"))}`);
   console.log(`LOD handoff holes: ${formatNumber(readNumber(lodCoverage, "handoffHoleCount"))}`);
   console.log(`render-ready near samples: ${formatNumber(readNumber(renderReady, "renderReadySampleCount"))}/${formatNumber(readNumber(renderReady, "sampleCount"))}`);
-  console.log(`HUD smoke: ${report.hudSmoke.passed === true ? "passed" : "failed"}`);
+  console.log(`HUD smoke: ${readRecord(report.hudSmoke).passed === true ? "passed" : "failed"}`);
   if (report.failures.length > 0) {
     console.log(`failures: ${report.failures.join("; ")}`);
   } else {
@@ -1649,6 +1672,7 @@ async function connectCdp(webSocketUrl: string): Promise<CdpConnection> {
   const pending = new Map<number, {
     resolve(value: Record<string, unknown>): void;
     reject(error: Error): void;
+    timeout: ReturnType<typeof setTimeout>;
   }>();
   const eventWaiters: Array<{
     method: string;
@@ -1669,6 +1693,7 @@ async function connectCdp(webSocketUrl: string): Promise<CdpConnection> {
       const waiter = pending.get(message.id);
       if (!waiter) return;
       pending.delete(message.id);
+      clearTimeout(waiter.timeout);
       if (message.error) {
         waiter.reject(new Error(`${message.error.code}: ${message.error.message}`));
       } else {
@@ -1687,11 +1712,15 @@ async function connectCdp(webSocketUrl: string): Promise<CdpConnection> {
     }
   });
 
-  const send = (method: string, params: Record<string, unknown> = {}) => {
+  const send = (method: string, params: Record<string, unknown> = {}, timeoutMs = CDP_COMMAND_TIMEOUT_MS) => {
     const id = nextId++;
     socket.send(JSON.stringify({ id, method, params }));
     return new Promise<Record<string, unknown>>((resolve, reject) => {
-      pending.set(id, { resolve, reject });
+      const timeout = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`Timed out waiting for CDP response to ${method}`));
+      }, timeoutMs);
+      pending.set(id, { resolve, reject, timeout });
     });
   };
 
@@ -1714,12 +1743,12 @@ async function connectCdp(webSocketUrl: string): Promise<CdpConnection> {
         eventWaiters.push({ method, resolve, reject, timeout });
       });
     },
-    async evaluate<T>(expression: string): Promise<T> {
+    async evaluate<T>(expression: string, timeoutMs = CDP_COMMAND_TIMEOUT_MS): Promise<T> {
       const response = await send("Runtime.evaluate", {
         expression,
         awaitPromise: true,
         returnByValue: true,
-      });
+      }, timeoutMs);
       const result = readRecord(response.result);
       if (response.exceptionDetails) {
         throw new Error(`Runtime.evaluate failed: ${JSON.stringify(response.exceptionDetails)}`);

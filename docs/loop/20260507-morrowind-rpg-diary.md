@@ -1521,16 +1521,20 @@ Build the first "place identity" slice without regressing performance or input:
   - Route atlas: `artifacts/route-atlas/20260508T032447Z-causeway-footprint-atlas/report.json`, failures none, route stretch coverage `100.0%`, max notable gap `360.0 m`.
   - Build: `mise run build`, pass.
   - Live-forward trace: `artifacts/browser-route-trace/20260508T032527Z-causeway-footprint-live-forward/report.json`, avg/p95/max gameplay `3.25/5.40/14.70 ms`, p95 stream/mesh/LOD `1.10/1.70/3.50 ms`, max stream/mesh/LOD `3.50/12.60/7.20 ms`.
-  - Full owned-browser-lab attempted as `causeway-footprint-browser-prod`, but it hung after navigation before writing a report. This result is inconclusive and not counted as validation.
+  - First full owned-browser-lab attempt hung after navigation before writing a report, exposing a harness reliability bug.
+  - Added CDP command and page-probe timeouts to `owned-browser-lab`; crashes now write a failure report instead of hanging silently.
+  - Final owned browser lab: `artifacts/owned-browser-lab/20260508T033327Z-causeway-footprint-browser-timeout-check/report.json`, failures none.
+  - Browser result: traversal p95/max `5.00/7.70 ms`, route p95/max `4.60/5.90 ms`, draw/triangles `550/388332`, `LOD overlap LOD0/bands 0/0`, water overlap `0`, gaps `0`, handoff holes `0`, render-ready near samples `961/961`, HUD smoke passed.
+  - Browser visual identity stayed saturation/grid/color `0.38/0.68/87`.
 - Honest assessment:
   - This is a small but directionally better composition change: old roads now have more foreground mass without broad placement churn or new draw-call families.
-  - The live-forward max frame is still comfortably under the route budget but worse than the prior final browser lab, probably due to one mesh outlier. This should be monitored before stacking more foreground voxel mass.
-  - Because the full browser lab hung, this checkpoint should stay modest. The next real quality jump still needs reliable browser screenshot comparison or a more robust non-hanging visual harness.
+  - The live-forward max frame had one mesh outlier, but the full browser lab route/traversal budgets stayed better than the prior checkpoint.
+  - The full browser lab now has timeout protection, which makes it safer to use as a gate for larger composition changes.
+  - Grid dominance still stayed at `0.68`, so foreground mass alone is not yet enough to solve the block-grid read.
 - Rubric movement:
   - Visual/world definition: `4.95 -> 5.05` for stronger route-surface footprint.
-  - Harness maturity: unchanged; this exposed owned-browser-lab reliability debt.
-  - Performance/playability: unchanged pending a successful full browser-lab run.
+  - Harness maturity: `8.30 -> 8.45` because owned-browser-lab no longer has unbounded CDP/page-probe waits.
+  - Performance/playability: unchanged; budgets held, but the content change was not primarily performance work.
 - Next:
-  - commit and push the causeway footprint if git diff remains scoped
-  - investigate the owned-browser-lab hang before using it as the sole gate for larger composition changes
+  - commit and push the causeway footprint plus browser-lab timeout hardening
   - continue composition density director work with browser route traces and route-atlas gates active
