@@ -1285,10 +1285,24 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         decoded.lodLevel,
         decoded.voxelStride,
       );
+      const activation = this.punchLodChunkCoveredByActiveFiner(chunk);
+      if (activation.chunk.solidCount === 0) {
+        this.coveredEmptyLodKeys.add(key);
+        this.retainedLodChunks.delete(key);
+        this.retainedEmptyLodKeys.delete(key);
+        this.coveragePunchedLodKeys.delete(key);
+        cacheHits += 1;
+        continue;
+      }
+      if (activation.skippedFinerCoverage) {
+        this.coveragePunchedLodKeys.add(key);
+      } else {
+        this.coveragePunchedLodKeys.delete(key);
+      }
       const worldSize = this.chunkSize * decoded.voxelStride;
       const meshStartedAt = performance.now();
       const mesh = this.buildLodChunkMesh(
-        chunk,
+        activation.chunk,
         decoded.coord.x,
         decoded.coord.y,
         decoded.coord.z,
@@ -1297,18 +1311,17 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         worldSize,
       );
       meshMs += performance.now() - meshStartedAt;
-      chunk.mesh = mesh;
-      chunk.meshBuilt = true;
-      chunk.meshDirty = false;
-      chunk.renderReady = true;
-      chunk.gpuDirty = true;
+      activation.chunk.mesh = mesh;
+      activation.chunk.meshBuilt = true;
+      activation.chunk.meshDirty = false;
+      activation.chunk.renderReady = true;
+      activation.chunk.gpuDirty = true;
       this.retainedLodChunks.delete(key);
       this.retainedEmptyLodKeys.delete(key);
-      this.coveragePunchedLodKeys.delete(key);
-      if (this.lodChunkHasCoveredActiveCoarserOverlap(chunk)) {
-        this.preparedLodChunks.set(key, chunk);
+      if (this.lodChunkHasCoveredActiveCoarserOverlap(activation.chunk)) {
+        this.preparedLodChunks.set(key, activation.chunk);
       } else {
-        this.lodChunks.set(key, chunk);
+        this.lodChunks.set(key, activation.chunk);
         this.staleLodKeys.delete(key);
       }
       this.remeshAdjacentLodChunks(decoded.lodLevel, decoded.coord.x, decoded.coord.y, decoded.coord.z);
@@ -1356,11 +1369,39 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
     this.retainedLodChunks.delete(key);
     this.retainedEmptyLodKeys.delete(key);
-    chunk.gpuDirty = true;
-    if (this.lodChunkHasCoveredActiveCoarserOverlap(chunk)) {
-      this.preparedLodChunks.set(key, chunk);
+    const activation = this.punchLodChunkCoveredByActiveFiner(chunk);
+    if (activation.chunk.solidCount === 0) {
+      this.coveredEmptyLodKeys.add(key);
+      this.coveragePunchedLodKeys.delete(key);
+      return true;
+    }
+    if (activation.skippedFinerCoverage) {
+      this.coveragePunchedLodKeys.add(key);
+      const stride = Math.max(1, activation.chunk.voxelStride);
+      const worldSize = this.chunkSize * stride;
+      if (!this.meshMaterialLut) {
+        this.meshMaterialLut = createMeshMaterialLut(this.palette, isProceduralWaterMaterial);
+      }
+      activation.chunk.mesh = this.buildLodChunkMesh(
+        activation.chunk,
+        activation.chunk.coord.x,
+        activation.chunk.coord.y,
+        activation.chunk.coord.z,
+        activation.chunk.lodLevel,
+        stride,
+        worldSize,
+      );
+      activation.chunk.meshBuilt = true;
+      activation.chunk.meshDirty = false;
+      activation.chunk.renderReady = true;
     } else {
-      this.lodChunks.set(key, chunk);
+      this.coveragePunchedLodKeys.delete(key);
+    }
+    activation.chunk.gpuDirty = true;
+    if (this.lodChunkHasCoveredActiveCoarserOverlap(activation.chunk)) {
+      this.preparedLodChunks.set(key, activation.chunk);
+    } else {
+      this.lodChunks.set(key, activation.chunk);
       this.staleLodKeys.delete(key);
     }
     return true;
@@ -2135,6 +2176,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       const key = `L${ring.level}:${Math.floor(sourceWorldX / worldSize)}:${Math.floor(sourceWorldY / worldSize)}:${Math.floor(sourceWorldZ / worldSize)}`;
       if (this.lodChunks.has(key)) {
         this.staleLodKeys.add(key);
+        this.punchActiveLodChunkCoveredByFiner(key);
       }
       this.preparedLodChunks.delete(key);
       this.emptyLodKeys.delete(key);
@@ -2346,6 +2388,113 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       }
     }
     return false;
+  }
+
+  private punchLodChunkCoveredByActiveFiner(chunk: VoxelChunk): { chunk: VoxelChunk; skippedFinerCoverage: boolean } {
+    if (chunk.lodLevel <= 0 || chunk.solidCount === 0) {
+      return { chunk, skippedFinerCoverage: false };
+    }
+    const stride = Math.max(1, chunk.voxelStride);
+    const originX = chunk.coord.x * this.chunkSize * stride;
+    const originZ = chunk.coord.z * this.chunkSize * stride;
+    let skippedFinerCoverage = false;
+    const chunkArea = this.chunkSize * this.chunkSize;
+    const coveredColumns = new Uint8Array(chunkArea);
+    for (let oz = 0; oz < this.chunkSize; oz += 1) {
+      for (let ox = 0; ox < this.chunkSize; ox += 1) {
+        if (this.isOutputLodColumnCoveredByFiner(chunk.lodLevel, originX, originZ, stride, ox, oz)) {
+          coveredColumns[ox + oz * this.chunkSize] = 1;
+          skippedFinerCoverage = true;
+        }
+      }
+    }
+    if (!skippedFinerCoverage) {
+      return { chunk, skippedFinerCoverage: false };
+    }
+
+    const data = new Uint16Array(chunk.data.length);
+    let solidCount = 0;
+    let minX = this.chunkSize;
+    let minY = this.chunkSize;
+    let minZ = this.chunkSize;
+    let maxX = 0;
+    let maxY = 0;
+    let maxZ = 0;
+    for (let oz = 0; oz < this.chunkSize; oz += 1) {
+      for (let ox = 0; ox < this.chunkSize; ox += 1) {
+        if (coveredColumns[ox + oz * this.chunkSize] !== 0) {
+          continue;
+        }
+        for (let oy = 0; oy < this.chunkSize; oy += 1) {
+          const index = ox + oy * this.chunkSize + oz * chunkArea;
+          const material = chunk.data[index] ?? 0;
+          if (material === 0) {
+            continue;
+          }
+          data[index] = material;
+          solidCount += 1;
+          if (ox < minX) minX = ox;
+          if (oy < minY) minY = oy;
+          if (oz < minZ) minZ = oz;
+          if (ox + 1 > maxX) maxX = ox + 1;
+          if (oy + 1 > maxY) maxY = oy + 1;
+          if (oz + 1 > maxZ) maxZ = oz + 1;
+        }
+      }
+    }
+
+    return {
+      chunk: createLodResidentChunk(
+        {
+          coord: { ...chunk.coord },
+          data,
+          solidCount,
+          solidBounds: solidCount === 0 ? null : { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
+          renderSummary: null!,
+        },
+        chunk.lodLevel,
+        stride,
+      ),
+      skippedFinerCoverage: true,
+    };
+  }
+
+  private punchActiveLodChunkCoveredByFiner(key: string): void {
+    const chunk = this.lodChunks.get(key);
+    if (!chunk || chunk.lodLevel <= 0 || chunk.solidCount === 0) {
+      return;
+    }
+    const activation = this.punchLodChunkCoveredByActiveFiner(chunk);
+    if (!activation.skippedFinerCoverage) {
+      return;
+    }
+    if (activation.chunk.solidCount === 0) {
+      this.lodChunks.delete(key);
+      this.staleLodKeys.delete(key);
+      this.coveragePunchedLodKeys.delete(key);
+      this.coveredEmptyLodKeys.add(key);
+      return;
+    }
+    const stride = Math.max(1, activation.chunk.voxelStride);
+    const worldSize = this.chunkSize * stride;
+    if (!this.meshMaterialLut) {
+      this.meshMaterialLut = createMeshMaterialLut(this.palette, isProceduralWaterMaterial);
+    }
+    activation.chunk.mesh = this.buildLodChunkMesh(
+      activation.chunk,
+      activation.chunk.coord.x,
+      activation.chunk.coord.y,
+      activation.chunk.coord.z,
+      activation.chunk.lodLevel,
+      stride,
+      worldSize,
+    );
+    activation.chunk.meshBuilt = true;
+    activation.chunk.meshDirty = false;
+    activation.chunk.renderReady = true;
+    activation.chunk.gpuDirty = true;
+    this.lodChunks.set(key, activation.chunk);
+    this.coveragePunchedLodKeys.add(key);
   }
 
   private buildLodChunkMesh(
@@ -2817,6 +2966,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         const parts = key.split(":");
         if (Number.parseInt(parts[3]!, 10) === lodCz) {
           this.staleLodKeys.add(key);
+          this.punchActiveLodChunkCoveredByFiner(key);
         }
       }
       for (const key of [...this.preparedLodChunks.keys()]) {

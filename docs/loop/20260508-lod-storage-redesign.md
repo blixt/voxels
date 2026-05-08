@@ -164,3 +164,33 @@ Browser verifier artifact:
 Important follow-up found by the broader stress variant:
 
 - `--lod-persistence-chunk-delta=32` is now a useful transition stress mode, but it still exposes LOD overlap samples while a large far-window replacement is pending. That is a rendering correctness issue to attack separately from persistence.
+
+### Follow-up Checkpoint - Reused LOD Handoff Correctness
+
+Fixed the overlap path exposed by `--lod-persistence-chunk-delta=32`:
+
+- Retained and IndexedDB-derived LOD chunks are now clipped against currently active finer coverage before they can become renderable.
+- Render-ready resident columns also clip any stale active coarser LOD chunk they invalidate, so old coverage can stay visible for handoff without drawing on top of LOD0.
+- Coverage-punched chunks remain context-local: they are marked in `coveragePunchedLodKeys` and are not retained or stored as canonical derived LOD data.
+- Added handoff unit coverage for both inverse cases: retained coarser-over-active-finer and resident-ready-over-stale-LOD.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/game-route-benchmark.test.ts tests/async-chunk-generation.test.ts tests/lod-debug-world.test.ts tests/lod-handoff.test.ts tests/frame-timing-buckets.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-default-after-handoff`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-far-overlap-after-resident-punch --lod-persistence-chunk-delta=32 --lod-persistence-max-frames=260`
+
+Browser verifier artifacts:
+
+- Default persistence: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-eWmq8w/lod-idb-persistence-reload.json`
+  - Result: pass, with `32` reload disk hits and `32` cumulative reload disk hits.
+- Far transition stress: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-OEP0sL/lod-idb-persistence-reload.json`
+  - Result: correctness improved to `0` uncovered gaps, `0` handoff holes, `0` resident overlaps, and `0` LOD-band overlaps.
+  - The scenario still fails its current pass gate because the far phase does not settle within `260` frames: `923` LOD chunks remain pending. That is now a backlog/performance scheduling problem rather than a visible multi-owner rendering bug.
+
+Next target:
+
+1. Reduce the large-move LOD backlog by avoiding thousands of doomed missing IndexedDB probes in a cold far window.
+2. Split stress validation so correctness failures (gaps/overlaps) and settle-budget failures are reported separately.
+3. Add per-phase pending-source counters so `lodPendingChunks` can be attributed to disk probes, generation budget, prepared handoff chunks, or planning.

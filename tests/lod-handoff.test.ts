@@ -102,6 +102,52 @@ test("prepared finer LOD chunks atomically replace the covered coarser chunk onc
   expect(worldWithInternals.lodChunks.has("L1:1:0:1")).toBe(true);
 });
 
+test("revived retained coarser LOD chunks are punched against active finer coverage", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
+  const worldWithInternals = world as unknown as {
+    lodChunks: Map<string, VoxelChunk>;
+    retainedLodChunks: Map<string, VoxelChunk>;
+    coveragePunchedLodKeys: Set<string>;
+    reviveRetainedLodChunk(key: string): boolean;
+  };
+
+  worldWithInternals.lodChunks.set("L1:0:0:0", createTestChunk(0, 0, 0, 1, 2, true, true));
+  worldWithInternals.retainedLodChunks.set("L2:0:0:0", createTestChunk(0, 0, 0, 2, 4, true, true));
+
+  expect(worldWithInternals.reviveRetainedLodChunk("L2:0:0:0")).toBe(true);
+
+  const revived = worldWithInternals.lodChunks.get("L2:0:0:0");
+  expect(revived).toBeDefined();
+  expect(worldWithInternals.coveragePunchedLodKeys.has("L2:0:0:0")).toBe(true);
+  expect(columnHasMaterial(revived!, 0, 0)).toBe(false);
+  expect(columnHasMaterial(revived!, 15, 15)).toBe(false);
+  expect(columnHasMaterial(revived!, 16, 0)).toBe(true);
+  expect(columnHasMaterial(revived!, 20, 20)).toBe(true);
+});
+
+test("render-ready resident columns punch stale active LOD coverage instead of overlapping it", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
+  const residentChunk = createTestChunk(0, 0, 0, 0, 1, false, true);
+  const worldWithInternals = world as unknown as {
+    lodChunks: Map<string, VoxelChunk>;
+    staleLodKeys: Set<string>;
+    coveragePunchedLodKeys: Set<string>;
+    adoptResidentChunk(key: string, chunk: VoxelChunk): void;
+  };
+
+  worldWithInternals.lodChunks.set("L1:0:0:0", createTestChunk(0, 0, 0, 1, 2, true, true));
+  worldWithInternals.adoptResidentChunk("0:0:0", residentChunk);
+  world.noteResidentChunkRenderReadyState(residentChunk, true);
+
+  const punched = worldWithInternals.lodChunks.get("L1:0:0:0");
+  expect(punched).toBeDefined();
+  expect(worldWithInternals.staleLodKeys.has("L1:0:0:0")).toBe(true);
+  expect(worldWithInternals.coveragePunchedLodKeys.has("L1:0:0:0")).toBe(true);
+  expect(columnHasMaterial(punched!, 0, 0)).toBe(false);
+  expect(columnHasMaterial(punched!, 15, 15)).toBe(false);
+  expect(columnHasMaterial(punched!, 16, 0)).toBe(true);
+});
+
 function createTestChunk(
   cx: number,
   cy: number,
@@ -132,4 +178,14 @@ function createTestChunk(
     gpuDirty: renderReady,
     mesh: null,
   };
+}
+
+function columnHasMaterial(chunk: VoxelChunk, localX: number, localZ: number): boolean {
+  const chunkArea = CHUNK_SIZE * CHUNK_SIZE;
+  for (let localY = 0; localY < CHUNK_SIZE; localY += 1) {
+    if (chunk.data[localX + localY * CHUNK_SIZE + localZ * chunkArea] !== 0) {
+      return true;
+    }
+  }
+  return false;
 }
