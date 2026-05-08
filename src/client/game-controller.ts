@@ -102,6 +102,9 @@ const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 7;
 const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 6;
 const DEFAULT_MAX_LOD_CHUNKS_PER_FRAME = 2;
 const DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME = 3;
+const MOVING_LOD_UPDATE_INTERVAL_FRAMES = 4;
+const MOVING_MAX_LOD_CHUNKS_PER_FRAME = 1;
+const MOVING_MAX_LOD_PLAN_MS_PER_FRAME = 0.75;
 const MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME = 6;
 const SYNC_NEAR_MESH_RADIUS_CHUNKS = 3;
 const BOOTSTRAP_PLAYABLE_COLUMN_RADIUS_CHUNKS = 2;
@@ -386,6 +389,11 @@ export interface IncrementalCrossingBenchmark {
 export interface StreamingBudgets {
   maxGeneratedChunksPerUpdate: number;
   maxMeshRebuildsPerFrame: number;
+}
+
+interface LodUpdateBudget {
+  maxGenerateLodChunks: number;
+  maxPlanMs: number;
 }
 
 export interface LodCoverageIssueSample {
@@ -1317,8 +1325,8 @@ export class GameController {
         const renderReadyWater = renderReady
           ? this.isRenderReadyWaterColumn(worldX, worldZ, chunkX, chunkZ)
           : false;
-        const lodBandStrideMeters = new Map<string, number>();
-        const waterBands: string[] = renderReadyWater ? ["LOD0"] : [];
+        const lodOwnerStridesByBand = new Map<string, number>();
+        const waterBands = new Set<string>(renderReadyWater ? ["LOD0"] : []);
         for (const span of lodSpans) {
           const lodColumn = worldX >= span.minX
             && worldX < span.maxX
@@ -1329,14 +1337,14 @@ export class GameController {
           if (
             lodColumn.covered
           ) {
-            lodBandStrideMeters.set(span.label, span.strideMeters);
+            lodOwnerStridesByBand.set(formatLodOwnerBand(span.chunk), span.strideMeters);
             if (lodColumn.water) {
-              waterBands.push(span.label);
+              waterBands.add(formatLodOwnerBand(span.chunk));
             }
           }
         }
-        const lodBands = [...lodBandStrideMeters.keys()];
-        const sampleStrideMeters = [...lodBandStrideMeters.values()];
+        const lodBands = [...lodOwnerStridesByBand.keys()];
+        const sampleStrideMeters = [...lodOwnerStridesByBand.values()];
         const bands = renderReady ? ["LOD0", ...lodBands] : lodBands;
         const strides = renderReady ? [worldUnitsToMeters(1), ...sampleStrideMeters] : sampleStrideMeters;
         const distanceWorldUnits = Math.max(Math.abs(offsetX), Math.abs(offsetZ));
@@ -1366,11 +1374,11 @@ export class GameController {
           bandOverlapCount += 1;
           pushIssueSample(bandOverlapSamples, issueSample);
         }
-        if (waterBands.length > 1) {
+        if (waterBands.size > 1) {
           waterOverlapCount += 1;
           pushIssueSample(waterOverlapSamples, {
             ...issueSample,
-            bands: waterBands,
+            bands: [...waterBands],
           });
         }
         if (bands.length === 0) {
@@ -2507,15 +2515,26 @@ export class GameController {
     }
     const movementMs = performance.now() - movementStartedAt;
     const dirtyResidentChunks = this.world.countDirtyResidentChunks();
+    const movementActive = hasMovementIntent || movement.moved;
+    const movingLodBudget: LodUpdateBudget = {
+      maxGenerateLodChunks: MOVING_MAX_LOD_CHUNKS_PER_FRAME,
+      maxPlanMs: MOVING_MAX_LOD_PLAN_MS_PER_FRAME,
+    };
+    const shouldRunMovingLodUpdate = movementActive
+      && this.interactiveFrameNumber % MOVING_LOD_UPDATE_INTERVAL_FRAMES === 0
+      && this.lastStreamSummary.pendingChunks === 0
+      && dirtyResidentChunks === 0;
+    const allowLodUpdate = !movementActive || shouldRunMovingLodUpdate;
+    const lodBudget = shouldRunMovingLodUpdate ? movingLodBudget : undefined;
     if (
       shouldPumpWorldWork(
-        hasMovementIntent || movement.moved,
+        movementActive,
         this.lastStreamSummary.pendingChunks,
         dirtyResidentChunks,
         this.lastLodSummary.pending,
       )
     ) {
-      this.syncWorldAroundPlayer(false, !hasMovementIntent && !movement.moved);
+      this.syncWorldAroundPlayer(false, allowLodUpdate, lodBudget);
     }
     const render = this.renderInteractiveFrame();
     const gameplayFrameMs = performance.now() - gameplayStartedAt;
@@ -2557,6 +2576,7 @@ export class GameController {
   private syncWorldAroundPlayer(
     force = false,
     allowLodUpdate = true,
+    lodBudget?: LodUpdateBudget,
   ): ResidencyUpdateSummary {
     const playerChunkX = Math.floor(this.player.feetPosition[0] / this.world.chunkSize);
     const playerChunkZ = Math.floor(this.player.feetPosition[2] / this.world.chunkSize);
@@ -2573,8 +2593,8 @@ export class GameController {
       this.flushMeshBuildBudget();
       if (allowLodUpdate) {
         this.lastLodSummary = this.world.updateLodResidencyAround(this.player.feetPosition, {
-          maxGenerateLodChunks: DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
-          maxPlanMs: DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME,
+          maxGenerateLodChunks: lodBudget?.maxGenerateLodChunks ?? DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
+          maxPlanMs: lodBudget?.maxPlanMs ?? DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME,
         });
         this.lastFrameLodMs = this.lastLodSummary.elapsedMs;
       } else {
@@ -2589,13 +2609,14 @@ export class GameController {
       );
       return cloneResidencySummary(this.lastStreamSummary);
     }
-    return this.syncWorldAroundAnchor(resolved.anchor, false, allowLodUpdate);
+    return this.syncWorldAroundAnchor(resolved.anchor, false, allowLodUpdate, lodBudget);
   }
 
   private syncWorldAroundAnchor(
     anchor: StreamAnchor,
     settle = false,
     allowLodUpdate = true,
+    lodBudget?: LodUpdateBudget,
   ): ResidencyUpdateSummary {
     this.streamAnchor = anchor;
     const residency = this.world.updateResidencyAround(
@@ -2612,8 +2633,12 @@ export class GameController {
     );
     if (settle || allowLodUpdate) {
       this.lastLodSummary = this.world.updateLodResidencyAround(this.player.feetPosition, {
-        maxGenerateLodChunks: settle ? Number.POSITIVE_INFINITY : DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
-        maxPlanMs: settle ? Number.POSITIVE_INFINITY : DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME,
+        maxGenerateLodChunks: settle
+          ? Number.POSITIVE_INFINITY
+          : lodBudget?.maxGenerateLodChunks ?? DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
+        maxPlanMs: settle
+          ? Number.POSITIVE_INFINITY
+          : lodBudget?.maxPlanMs ?? DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME,
       });
       this.lastFrameLodMs = this.lastLodSummary.elapsedMs;
     } else {
@@ -3506,6 +3531,10 @@ function classifyWorldColumnInLodChunk(
     }
   }
   return { covered, water };
+}
+
+function formatLodOwnerBand(chunk: VoxelChunk): string {
+  return `LOD${chunk.lodLevel}:${chunk.coord.x}:${chunk.coord.z}`;
 }
 
 function positiveModulo(value: number, divisor: number): number {

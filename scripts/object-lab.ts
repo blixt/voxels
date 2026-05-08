@@ -115,6 +115,8 @@ export interface ObjectLabReport {
 export interface ObjectLabDiagnostics {
   materialVariety: number;
   dominantMaterialShare: number;
+  sampleFit: SampleFitDiagnostics;
+  warnings: string[];
   silhouette: {
     top: ProjectionDiagnostics;
     front: ProjectionDiagnostics;
@@ -122,13 +124,38 @@ export interface ObjectLabDiagnostics {
   };
 }
 
+export interface SampleFitDiagnostics {
+  xMargin: {
+    negative: number;
+    positive: number;
+  };
+  zMargin: {
+    negative: number;
+    positive: number;
+  };
+  yHeadroom: number;
+  touchesSampleEdge: boolean;
+  touchesTop: boolean;
+  centerOffset: [number, number, number] | null;
+  normalizedCenterOffset: [number, number, number] | null;
+}
+
 export interface ProjectionDiagnostics {
   occupiedPixels: number;
+  occupiedRows: number;
+  occupiedColumns: number;
   coverage: number;
   bounds: {
     min: [number, number];
     max: [number, number];
   } | null;
+  edgeTouch: {
+    left: boolean;
+    right: boolean;
+    top: boolean;
+    bottom: boolean;
+  };
+  centerOffset: [number, number] | null;
   normalizedWidth: number;
   normalizedHeight: number;
   aspectRatio: number | null;
@@ -210,7 +237,7 @@ export async function runObjectLab(options: ObjectLabOptions): Promise<ObjectLab
   const topPath = join(runDir, "top.ppm");
   const frontPath = join(runDir, "front.ppm");
   const sidePath = join(runDir, "side.ppm");
-  const diagnostics = buildDiagnostics(sample);
+  const diagnostics = buildDiagnostics(sample, root);
   const report: ObjectLabReport = {
     generatedAt: timestamp.toISOString(),
     landmarkId: options.landmarkId,
@@ -406,22 +433,83 @@ function encodePpm(projection: Projection): string {
   return `${lines.join("\n")}\n`;
 }
 
-function buildDiagnostics(sample: SampledObject): ObjectLabDiagnostics {
+function buildDiagnostics(sample: SampledObject, root: LandmarkRoot): ObjectLabDiagnostics {
   const materialCounts = [...sample.materialCounts.values()];
   const dominantCount = materialCounts.length === 0 ? 0 : Math.max(...materialCounts);
+  const dominantMaterialShare = sample.solidVoxelCount === 0
+    ? 0
+    : roundRatio(dominantCount / sample.solidVoxelCount);
+  const sampleFit = inspectSampleFit(sample, root);
+  const silhouette = {
+    top: inspectProjection(sample.topProjection),
+    front: inspectProjection(sample.frontProjection),
+    side: inspectProjection(sample.sideProjection),
+  };
   return {
     materialVariety: sample.materialCounts.size,
-    dominantMaterialShare: sample.solidVoxelCount === 0 ? 0 : roundRatio(dominantCount / sample.solidVoxelCount),
-    silhouette: {
-      top: inspectProjection(sample.topProjection),
-      front: inspectProjection(sample.frontProjection),
-      side: inspectProjection(sample.sideProjection),
-    },
+    dominantMaterialShare,
+    sampleFit,
+    warnings: buildDiagnosticWarnings(sampleFit, silhouette, dominantMaterialShare, sample.solidVoxelCount),
+    silhouette,
+  };
+}
+
+function inspectSampleFit(sample: SampledObject, root: LandmarkRoot): SampleFitDiagnostics {
+  if (!sample.bounds) {
+    return {
+      xMargin: { negative: sample.radius, positive: sample.radius },
+      zMargin: { negative: sample.radius, positive: sample.radius },
+      yHeadroom: sample.yMax - sample.yMin + 1,
+      touchesSampleEdge: false,
+      touchesTop: false,
+      centerOffset: null,
+      normalizedCenterOffset: null,
+    };
+  }
+  const minX = sample.bounds.min[0] - root.x;
+  const maxX = sample.bounds.max[0] - 1 - root.x;
+  const minY = sample.bounds.min[1];
+  const maxY = sample.bounds.max[1] - 1;
+  const minZ = sample.bounds.min[2] - root.z;
+  const maxZ = sample.bounds.max[2] - 1 - root.z;
+  const centerOffset: [number, number, number] = [
+    roundRatio((minX + maxX) / 2),
+    roundRatio((minY + maxY) / 2 - sample.yMin),
+    roundRatio((minZ + maxZ) / 2),
+  ];
+  const sampleHeight = sample.yMax - sample.yMin + 1;
+  const normalizedCenterOffset: [number, number, number] = [
+    sample.radius === 0 ? 0 : roundRatio(centerOffset[0] / sample.radius),
+    sampleHeight <= 1 ? 0 : roundRatio(centerOffset[1] / (sampleHeight - 1)),
+    sample.radius === 0 ? 0 : roundRatio(centerOffset[2] / sample.radius),
+  ];
+  const xMargin = {
+    negative: minX + sample.radius,
+    positive: sample.radius - maxX,
+  };
+  const zMargin = {
+    negative: minZ + sample.radius,
+    positive: sample.radius - maxZ,
+  };
+  const yHeadroom = sample.yMax - maxY;
+  return {
+    xMargin,
+    zMargin,
+    yHeadroom,
+    touchesSampleEdge: xMargin.negative <= 0
+      || xMargin.positive <= 0
+      || zMargin.negative <= 0
+      || zMargin.positive <= 0,
+    touchesTop: yHeadroom <= 0,
+    centerOffset,
+    normalizedCenterOffset,
   };
 }
 
 function inspectProjection(projection: Projection): ProjectionDiagnostics {
   let occupiedPixels = 0;
+  const occupiedRows = new Set<number>();
+  const occupiedColumns = new Set<number>();
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -432,6 +520,8 @@ function inspectProjection(projection: Projection): ProjectionDiagnostics {
         continue;
       }
       occupiedPixels += 1;
+      occupiedRows.add(y);
+      occupiedColumns.add(x);
       minX = Math.min(minX, x);
       minY = Math.min(minY, y);
       maxX = Math.max(maxX, x + 1);
@@ -442,8 +532,12 @@ function inspectProjection(projection: Projection): ProjectionDiagnostics {
   if (occupiedPixels === 0) {
     return {
       occupiedPixels: 0,
+      occupiedRows: 0,
+      occupiedColumns: 0,
       coverage: 0,
       bounds: null,
+      edgeTouch: { left: false, right: false, top: false, bottom: false },
+      centerOffset: null,
       normalizedWidth: 0,
       normalizedHeight: 0,
       aspectRatio: null,
@@ -453,12 +547,67 @@ function inspectProjection(projection: Projection): ProjectionDiagnostics {
   const height = maxY - minY;
   return {
     occupiedPixels,
+    occupiedRows: occupiedRows.size,
+    occupiedColumns: occupiedColumns.size,
     coverage: roundRatio(occupiedPixels / pixelCount),
     bounds: { min: [minX, minY], max: [maxX, maxY] },
+    edgeTouch: {
+      left: minX === 0,
+      right: maxX === projection.width,
+      top: minY === 0,
+      bottom: maxY === projection.height,
+    },
+    centerOffset: [
+      roundRatio(
+        ((minX + maxX - 1) / 2 - (projection.width - 1) / 2) / Math.max(1, (projection.width - 1) / 2),
+      ),
+      roundRatio(
+        ((minY + maxY - 1) / 2 - (projection.height - 1) / 2) / Math.max(1, (projection.height - 1) / 2),
+      ),
+    ],
     normalizedWidth: roundRatio(width / projection.width),
     normalizedHeight: roundRatio(height / projection.height),
     aspectRatio: roundRatio(width / height),
   };
+}
+
+function buildDiagnosticWarnings(
+  sampleFit: SampleFitDiagnostics,
+  silhouette: ObjectLabDiagnostics["silhouette"],
+  dominantMaterialShare: number,
+  solidVoxelCount: number,
+): string[] {
+  if (solidVoxelCount === 0) {
+    return ["empty-sample"];
+  }
+  const warnings: string[] = [];
+  if (sampleFit.touchesSampleEdge) {
+    warnings.push("sample-touches-horizontal-edge");
+  }
+  if (sampleFit.touchesTop) {
+    warnings.push("sample-touches-top");
+  }
+  if (
+    sampleFit.normalizedCenterOffset
+    && Math.max(Math.abs(sampleFit.normalizedCenterOffset[0]), Math.abs(sampleFit.normalizedCenterOffset[2])) > 0.35
+  ) {
+    warnings.push("root-off-center");
+  }
+  if (dominantMaterialShare > 0.92) {
+    warnings.push("dominant-material");
+  }
+  for (const [view, diagnostics] of Object.entries(silhouette)) {
+    if (diagnostics.coverage > 0 && diagnostics.coverage < 0.02) {
+      warnings.push(`${view}-projection-sparse`);
+    }
+    const touchesClippingEdge = view === "top"
+      ? Object.values(diagnostics.edgeTouch).some(Boolean)
+      : diagnostics.edgeTouch.left || diagnostics.edgeTouch.right || diagnostics.edgeTouch.top;
+    if (touchesClippingEdge) {
+      warnings.push(`${view}-projection-touches-edge`);
+    }
+  }
+  return warnings;
 }
 
 function roundRatio(value: number): number {
@@ -495,6 +644,9 @@ function buildMarkdownSummary(report: ObjectLabReport): string {
     `- Bounds: ${bounds}`,
     `- Material variety: ${report.sample.diagnostics.materialVariety}`,
     `- Dominant material share: ${formatPercent(report.sample.diagnostics.dominantMaterialShare)}`,
+    `- Warnings: ${
+      report.sample.diagnostics.warnings.length === 0 ? "none" : report.sample.diagnostics.warnings.join(", ")
+    }`,
     ``,
     `## Projection Artifacts`,
     ``,
@@ -505,11 +657,24 @@ function buildMarkdownSummary(report: ObjectLabReport): string {
     ``,
     `## Silhouette Diagnostics`,
     ``,
-    `| View | Coverage | Width | Height | Aspect | Occupied Pixels |`,
-    `| --- | ---: | ---: | ---: | ---: | ---: |`,
+    `| View | Coverage | Width | Height | Aspect | Occupied Pixels | Rows | Columns | Center Offset |`,
+    `| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |`,
     silhouetteRow("Top", report.sample.diagnostics.silhouette.top),
     silhouetteRow("Front", report.sample.diagnostics.silhouette.front),
     silhouetteRow("Side", report.sample.diagnostics.silhouette.side),
+    ``,
+    `## Sample Fit Diagnostics`,
+    ``,
+    `| Axis | Negative Margin | Positive Margin |`,
+    `| --- | ---: | ---: |`,
+    `| X | ${report.sample.diagnostics.sampleFit.xMargin.negative} | ${report.sample.diagnostics.sampleFit.xMargin.positive} |`,
+    `| Z | ${report.sample.diagnostics.sampleFit.zMargin.negative} | ${report.sample.diagnostics.sampleFit.zMargin.positive} |`,
+    ``,
+    `- Y headroom: ${report.sample.diagnostics.sampleFit.yHeadroom}`,
+    `- Touches sample edge: ${report.sample.diagnostics.sampleFit.touchesSampleEdge ? "yes" : "no"}`,
+    `- Touches top: ${report.sample.diagnostics.sampleFit.touchesTop ? "yes" : "no"}`,
+    `- Center offset: ${formatNullableTuple(report.sample.diagnostics.sampleFit.centerOffset)}`,
+    `- Normalized center offset: ${formatNullableTuple(report.sample.diagnostics.sampleFit.normalizedCenterOffset)}`,
     ``,
     `## Materials`,
     ``,
@@ -528,13 +693,20 @@ function silhouetteRow(label: string, diagnostics: ProjectionDiagnostics): strin
     formatPercent(diagnostics.normalizedHeight),
     diagnostics.aspectRatio === null ? "n/a" : diagnostics.aspectRatio.toFixed(3),
     diagnostics.occupiedPixels.toString(),
+    diagnostics.occupiedRows.toString(),
+    diagnostics.occupiedColumns.toString(),
+    diagnostics.centerOffset ? diagnostics.centerOffset.join(", ") : "n/a",
   ].join(" | ") + " |";
+}
+
+function formatNullableTuple(tuple: readonly number[] | null): string {
+  return tuple ? tuple.join(", ") : "n/a";
 }
 
 function buildContactSheetSvg(report: ObjectLabReport, sample: SampledObject): string {
   const cellSize = 6;
   const gap = 28;
-  const labelHeight = 26;
+  const labelHeight = 36;
   const panelPadding = 10;
   const legendWidth = 240;
   const panels = [
@@ -561,17 +733,30 @@ function buildContactSheetSvg(report: ObjectLabReport, sample: SampledObject): s
       `<text class="meta" x="${x + panelPadding + 58}" y="18">coverage ${formatPercent(panel.diagnostics.coverage)} | aspect ${
         panel.diagnostics.aspectRatio === null ? "n/a" : panel.diagnostics.aspectRatio.toFixed(3)
       }</text>`,
+      `<text class="meta" x="${x + panelPadding}" y="34">rows ${panel.diagnostics.occupiedRows} | cols ${panel.diagnostics.occupiedColumns} | offset ${
+        panel.diagnostics.centerOffset ? panel.diagnostics.centerOffset.join(",") : "n/a"
+      }</text>`,
     );
-    parts.push(projectSvg(panel.projection, x + panelPadding, labelHeight + panelPadding, cellSize));
+    parts.push(projectSvg(panel.projection, x + panelPadding, labelHeight + panelPadding + 10, cellSize));
     x += panelWidth + gap;
   }
   parts.push(`<g transform="translate(${x}, 0)">`);
   parts.push(`<text class="title" x="0" y="18">${escapeXml(report.landmarkId)}</text>`);
   parts.push(`<text class="meta" x="0" y="40">seed ${report.seed} | root ${report.root.x}, ${report.root.z}</text>`);
   parts.push(`<text class="meta" x="0" y="58">voxels ${report.sample.solidVoxelCount} | materials ${report.sample.diagnostics.materialVariety}</text>`);
-  parts.push(`<text class="legend" x="0" y="88">Material legend</text>`);
+  parts.push(
+    `<text class="meta" x="0" y="76">fit x ${formatMargin(report.sample.diagnostics.sampleFit.xMargin)} | z ${
+      formatMargin(report.sample.diagnostics.sampleFit.zMargin)
+    } | top ${report.sample.diagnostics.sampleFit.yHeadroom}</text>`,
+  );
+  parts.push(
+    `<text class="meta" x="0" y="94">warnings ${
+      report.sample.diagnostics.warnings.length === 0 ? "none" : escapeXml(report.sample.diagnostics.warnings.join(", "))
+    }</text>`,
+  );
+  parts.push(`<text class="legend" x="0" y="112">Material legend</text>`);
   materialRows.forEach((entry, index) => {
-    const y = 108 + index * 18;
+    const y = 124 + index * 18;
     parts.push(`<rect x="0" y="${y - 10}" width="12" height="12" fill="${entry.hex}"/>`);
     parts.push(`<text class="meta" x="20" y="${y}">${entry.hex} material ${entry.material} (${entry.count})</text>`);
   });
@@ -602,6 +787,10 @@ function hexFromRgbInt(color: number): string {
 
 function formatPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
+}
+
+function formatMargin(margin: { negative: number; positive: number }): string {
+  return `${margin.negative}/${margin.positive}`;
 }
 
 function escapeXml(value: string): string {

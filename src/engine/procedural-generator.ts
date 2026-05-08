@@ -3869,7 +3869,7 @@ function configureLandmarkFeature(
         "#544",
         "#C86",
       );
-      out.featureExtra = 2;
+      out.featureExtra = 3;
       return true;
     case "crystal_cluster":
       configureSpireFeature(
@@ -4459,6 +4459,31 @@ function sampleFeatureMaterial(
           return radial <= Math.max(1.2, featureRadius + 1.4 - relativeY * 0.30) ? materialSecondary : 0;
         }
         const capBaseY = Math.max(plinthHeight + 4, featureHeight - 4);
+        if (featureExtra >= 3) {
+          const crossbarY = capBaseY - 1;
+          if (relativeY === crossbarY && absZ <= 0.65 && absX <= featureRadius + 2.5) {
+            return materialPrimary;
+          }
+          if (
+            relativeY >= crossbarY - 4
+            && relativeY < crossbarY
+            && absZ <= 0.55
+            && (
+              Math.abs(absX - (featureRadius + 1)) <= 0.55
+              || Math.abs(absX - Math.max(1, featureRadius - 1)) <= 0.55
+            )
+          ) {
+            return materialSecondary;
+          }
+          if (
+            relativeY >= crossbarY - 3
+            && relativeY <= crossbarY
+            && absX <= 1.0
+            && absZ <= 0.8
+          ) {
+            return materialSecondary;
+          }
+        }
         if (relativeY >= capBaseY) {
           const capStep = relativeY - capBaseY;
           const capHalfX = Math.max(1.5, featureRadius + 1.1 - capStep * 0.55);

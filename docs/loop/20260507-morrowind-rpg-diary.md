@@ -1152,3 +1152,41 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - checkpoint and push
   - continue world definition work or add a full completion audit before deciding what remains largest
+
+### 2026-05-08 - Movement LOD Cadence and Horizontal Owner Probe
+
+- Followed up the user-reported z-fighting/far-view issue with a stricter ownership probe.
+- Findings:
+  - the previous browser probe keyed LOD overlap by level label, which could hide same-level owner conflicts
+  - the first stricter browser run exposed `3` sampled "overlaps", but the samples were stacked vertical LOD4 chunks in the same X/Z footprint, not competing horizontal surface owners
+  - the corrected invariant is horizontal ownership: one LOD0/far-LOD footprint per sampled X/Z, with water tracked separately
+- Changes:
+  - browser `probeLodCoverage()` now keys LOD owners by horizontal footprint (`LOD level + x/z`), preserving LOD0-vs-LOD and cross-level overlap detection while ignoring valid stacked vertical chunks
+  - `tests/lod-system.test.ts` now has a fog-range sampled owner test that fails if any sampled column has multiple horizontal owners or multiple water owners
+  - movement frames now run a tiny LOD update cadence (`1` LOD chunk, `0.75 ms` planning budget, every fourth frame) once near streaming/mesh work is quiet, so far LOD can keep making progress while walking without reintroducing large movement hitches
+  - integrated the object-lab worker's diagnostics upgrade and ash-marker polish:
+    - sample-fit margins/headroom/center offsets
+    - projection row/column counts and edge-touch warnings
+    - stronger ashland lantern-marker silhouette with crossbar, hanging accents, and central glow
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun test tests/lod-system.test.ts --test-name-pattern "single visible LOD owner"`: pass.
+  - `mise exec -- bun test tests/object-lab.test.ts tests/procedural-generator.test.ts tests/game-route-benchmark.test.ts tests/stream-work.test.ts`: pass, `47` tests.
+  - `mise exec -- bun run scripts/owned-browser-lab.ts --label=lod-horizontal-owner-moving-cadence`: pass.
+  - Browser artifact: `artifacts/owned-browser-lab/20260508T002104Z-lod-horizontal-owner-moving-cadence/report.json`.
+  - Browser result: `LOD overlap LOD0/bands 0/0`, `LOD water overlap 0`, `LOD gaps 0`, `LOD handoff holes 0`, LOD draw calls by level `0/90/60/41/82`.
+  - Movement result: traversal p95/max `4.80/20.90 ms`, route p95/max `4.80/31.70 ms`, route work/render/stream/mesh/LOD p95 `4.70/1.40/0.70/1.70/3.30 ms`.
+  - Object-lab artifact: `artifacts/object-lab/2026-05-08-001606708Z-ash-marker-final/contact-sheet.svg`.
+- Honest assessment:
+  - This is a real harness/correctness improvement: same-level LOD owner conflicts are no longer hidden by label collapse.
+  - The movement cadence is intentionally conservative. It improves far-LOD progress while walking, but transient far-LOD gap samples still occur during active movement while chunks/meshes catch up.
+  - The visual identity metric is still too grid-dominated (`0.68`), so world definition and terrain/material shaping remain major work.
+- Rubric movement:
+  - Rendering correctness: `5.35 -> 5.55` because settled horizontal LOD ownership and water ownership now have direct unit and browser coverage.
+  - Performance/playability: `4.45 -> 4.50` because LOD keeps progressing during movement while route p95/max stays under budget.
+  - Harness maturity: `6.45 -> 6.65` because the browser and unit probes now catch a class of same-level LOD conflict the previous label-based probe missed.
+  - Visual/world definition: `3.35 -> 3.45` for the ash-marker silhouette polish and stronger object-lab self-monitoring.
+- Next:
+  - checkpoint and push
+  - add render-side ownership or culling if future probes find true fine/coarse overlap during pending movement
+  - start a terrain/material pass to reduce the remaining block-grid read

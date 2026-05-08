@@ -129,6 +129,69 @@ function isWorldColumnCoveredByLodChunk(
   return false;
 }
 
+function getLodHorizontalOwnerKey(chunk: VoxelChunk): string {
+  return `LOD${chunk.lodLevel}:${chunk.coord.x}:${chunk.coord.z}`;
+}
+
+function isWorldColumnWaterTopCoveredByLodChunk(
+  chunk: VoxelChunk,
+  worldX: number,
+  worldZ: number,
+): boolean {
+  const stride = Math.max(1, chunk.voxelStride);
+  const worldSize = CHUNK_SIZE * stride;
+  const localX = Math.floor((worldX - chunk.coord.x * worldSize) / stride);
+  const localZ = Math.floor((worldZ - chunk.coord.z * worldSize) / stride);
+  if (localX < 0 || localX >= CHUNK_SIZE || localZ < 0 || localZ >= CHUNK_SIZE) {
+    return false;
+  }
+  const chunkArea = CHUNK_SIZE * CHUNK_SIZE;
+  for (let localY = 0; localY < CHUNK_SIZE; localY += 1) {
+    const material = chunk.data[localX + localY * CHUNK_SIZE + localZ * chunkArea]!;
+    if (!isProceduralWaterMaterial(material)) {
+      continue;
+    }
+    const above = localY + 1 < CHUNK_SIZE
+      ? chunk.data[localX + (localY + 1) * CHUNK_SIZE + localZ * chunkArea]!
+      : 0;
+    if (!isProceduralWaterMaterial(above)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isRenderReadyWaterColumn(
+  world: ProceduralResidentWorld,
+  worldX: number,
+  worldZ: number,
+): boolean {
+  const chunkX = Math.floor(worldX / CHUNK_SIZE);
+  const chunkZ = Math.floor(worldZ / CHUNK_SIZE);
+  const localX = ((Math.floor(worldX) % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+  const localZ = ((Math.floor(worldZ) % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+  const chunkArea = CHUNK_SIZE * CHUNK_SIZE;
+  for (let cy = 0; cy < 8; cy += 1) {
+    const chunk = world.getResidentChunk(chunkX, cy, chunkZ);
+    if (!chunk?.renderReady) {
+      continue;
+    }
+    for (let localY = 0; localY < CHUNK_SIZE; localY += 1) {
+      const material = chunk.data[localX + localY * CHUNK_SIZE + localZ * chunkArea]!;
+      if (!isProceduralWaterMaterial(material)) {
+        continue;
+      }
+      const above = localY + 1 < CHUNK_SIZE
+        ? chunk.data[localX + (localY + 1) * CHUNK_SIZE + localZ * chunkArea]!
+        : 0;
+      if (!isProceduralWaterMaterial(above)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Downsample correctness
 // ---------------------------------------------------------------------------
@@ -866,6 +929,59 @@ describe("LOD coverage", () => {
 
     expect(total).toBeGreaterThan(0);
     expect(uncovered).toBe(0);
+  });
+
+  test("sampled fog-range columns have a single visible LOD owner", () => {
+    const { world, spawnPos } = getWorld();
+    const lodChunks: VoxelChunk[] = [];
+    for (const chunk of world.iterateResidentChunks()) {
+      if (chunk.lodLevel > 0 && chunk.renderReady && chunk.solidCount > 0) {
+        lodChunks.push(chunk);
+      }
+    }
+
+    const radiusWorldUnits = 4160;
+    const stepWorldUnits = 80;
+    let total = 0;
+    let overlapCount = 0;
+    let waterOverlapCount = 0;
+    for (let dz = -radiusWorldUnits; dz <= radiusWorldUnits; dz += stepWorldUnits) {
+      for (let dx = -radiusWorldUnits; dx <= radiusWorldUnits; dx += stepWorldUnits) {
+        const worldX = spawnPos[0] + dx;
+        const worldZ = spawnPos[2] + dz;
+        const chunkX = Math.floor(worldX / CHUNK_SIZE);
+        const chunkZ = Math.floor(worldZ / CHUNK_SIZE);
+        const renderReady = world.isColumnRenderReady(chunkX, chunkZ);
+        const lodOwners = new Set<string>();
+        for (const chunk of lodChunks) {
+          if (isWorldColumnCoveredByLodChunk(chunk, worldX, worldZ)) {
+            lodOwners.add(getLodHorizontalOwnerKey(chunk));
+          }
+        }
+        const lodOwnerCount = lodOwners.size;
+        const ownerCount = (renderReady ? 1 : 0) + lodOwnerCount;
+        if (ownerCount > 1) {
+          overlapCount += 1;
+        }
+
+        const lodWaterOwners = new Set<string>();
+        for (const chunk of lodChunks) {
+          if (isWorldColumnWaterTopCoveredByLodChunk(chunk, worldX, worldZ)) {
+            lodWaterOwners.add(getLodHorizontalOwnerKey(chunk));
+          }
+        }
+        const waterOwnerCount = (isRenderReadyWaterColumn(world, worldX, worldZ) ? 1 : 0)
+          + lodWaterOwners.size;
+        if (waterOwnerCount > 1) {
+          waterOverlapCount += 1;
+        }
+        total += 1;
+      }
+    }
+
+    expect(total).toBeGreaterThan(0);
+    expect(overlapCount).toBe(0);
+    expect(waterOverlapCount).toBe(0);
   });
 
   test("LOD 1 chunks that exist fill gaps where LOD 0 is not render-ready", () => {
