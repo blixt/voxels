@@ -26,6 +26,7 @@ interface CliOptions {
   label: string | null;
   outputDir: string;
   compareTo: string | null;
+  preset: "world" | "props";
   selectedViewIds: string[] | null;
   chromeBinary?: string;
   headless: boolean;
@@ -166,8 +167,46 @@ const VIEW_SPECS: ViewSpec[] = [
   },
 ];
 
+const PROP_VIEW_SPECS: ViewSpec[] = [
+  {
+    id: "ashlander-pack-close",
+    label: "Ashlander Pack Close",
+    eyeMeters: [-1445.7, -2638.4],
+    lookAtMeters: [-1439.7, -2630.4],
+    pitchDegrees: -20,
+  },
+  {
+    id: "bone-chimes-close",
+    label: "Bone Chimes Close",
+    eyeMeters: [-1518.8, -1859.9],
+    lookAtMeters: [-1510.8, -1849.3],
+    pitchDegrees: -14,
+  },
+  {
+    id: "pilgrim-lantern-close",
+    label: "Pilgrim Lantern Close",
+    eyeMeters: [12.6, -3253.3],
+    lookAtMeters: [18.6, -3245.3],
+    pitchDegrees: -14,
+  },
+  {
+    id: "shrine-debris-close",
+    label: "Shrine Debris Close",
+    eyeMeters: [2457, -3259.4],
+    lookAtMeters: [2463, -3251.4],
+    pitchDegrees: -22,
+  },
+  {
+    id: "paver-debris-close",
+    label: "Paver Debris Close",
+    eyeMeters: [-1701.3, -2543.2],
+    lookAtMeters: [-1695.3, -2535.2],
+    pitchDegrees: -22,
+  },
+];
+
 const options = parseCli(Bun.argv);
-const selectedViews = selectViews(options.selectedViewIds);
+const selectedViews = selectViews(options.preset, options.selectedViewIds);
 const runStamp = timestampForFile(new Date());
 const runName = `${runStamp}${options.label ? `-${sanitizeFileStem(options.label)}` : ""}`;
 const runDir = join(options.outputDir, runName);
@@ -253,6 +292,7 @@ const report: ViewAtlasReport = {
   comparison,
   options: {
     ...options,
+    preset: options.preset,
     selectedViewIds: options.selectedViewIds,
     chromeBinary: options.chromeBinary ?? null,
   },
@@ -684,6 +724,7 @@ function parseCli(argv: readonly string[]): CliOptions {
     label: readFlag(args, "--label"),
     outputDir: readFlag(args, "--output-dir") ?? "artifacts/view-atlas",
     compareTo: readFlag(args, "--compare-to"),
+    preset: readPresetFlag(args),
     selectedViewIds: readListFlag(args, "--views"),
     chromeBinary: readFlag(args, "--chrome-binary") ?? undefined,
     headless: !readBooleanFlag(args, "--headed", false),
@@ -696,15 +737,24 @@ function parseCli(argv: readonly string[]): CliOptions {
   };
 }
 
-function selectViews(selectedViewIds: readonly string[] | null): ViewSpec[] {
-  if (!selectedViewIds) {
-    return VIEW_SPECS;
+function readPresetFlag(args: readonly string[]): CliOptions["preset"] {
+  const rawPreset = readFlag(args, "--preset") ?? "world";
+  if (rawPreset === "world" || rawPreset === "props") {
+    return rawPreset;
   }
-  const viewsById = new Map(VIEW_SPECS.map((view) => [view.id, view]));
+  throw new Error(`Unknown view atlas preset "${rawPreset}". Available presets: world, props`);
+}
+
+function selectViews(preset: CliOptions["preset"], selectedViewIds: readonly string[] | null): ViewSpec[] {
+  const specs = preset === "props" ? PROP_VIEW_SPECS : VIEW_SPECS;
+  if (!selectedViewIds) {
+    return specs;
+  }
+  const viewsById = new Map(specs.map((view) => [view.id, view]));
   return selectedViewIds.map((id) => {
     const view = viewsById.get(id);
     if (!view) {
-      throw new Error(`Unknown view "${id}". Available: ${VIEW_SPECS.map((spec) => spec.id).join(", ")}`);
+      throw new Error(`Unknown view "${id}" for preset "${preset}". Available: ${specs.map((spec) => spec.id).join(", ")}`);
     }
     return view;
   });

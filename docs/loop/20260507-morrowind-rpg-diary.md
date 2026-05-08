@@ -2006,3 +2006,39 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint and push the prop slice
   - add a prop visibility/view lab or move to far-view/fog only if it can be measured by owned browser and fixed views
   - continue treating lower-ground/camera-scale terrain read as the main unsolved visual problem
+
+### 2026-05-08 - Prop Visibility Atlas Preset
+
+- Trigger:
+  - The ashlander travel pack was warning-free in object-lab but invisible to the seven-view world atlas.
+  - Adding more small props without camera-scale feedback would recreate the "barely visible tweak" failure mode.
+- Changes:
+  - Added `--preset props` to `bun run atlas:views`.
+  - The default `world` preset stays unchanged; the new `props` preset captures close views for:
+    - `ashlander-pack-close`
+    - `bone-chimes-close`
+    - `pilgrim-lantern-close`
+    - `shrine-debris-close`
+    - `paver-debris-close`
+  - The prop preset reuses the same browser session, HUD hiding, PNG analysis, comparison report, and budget infrastructure as the world atlas.
+- Validation:
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Prop atlas first run: `artifacts/view-atlas/20260508T080725Z-prop-visibility-baseline/report.json`, failures none.
+  - Tightened close cameras after inspecting `ashlander-pack-close`.
+  - Prop atlas close run: `artifacts/view-atlas/20260508T081042Z-prop-visibility-close/report.json`, failures none.
+  - Example close-view metrics:
+    - `ashlander-pack-close`: luma `151.5`, colors `107`, center grid `0.0724`, lower grid `0.0306`.
+    - `pilgrim-lantern-close`: luma `85.6`, colors `55`, center grid `0.0562`, lower grid `0.0306`.
+    - `paver-debris-close`: luma `69.5`, colors `70`, center grid `0.0913`, lower grid `0.0464`.
+- Honest assessment:
+  - This is a measurement checkpoint, not direct content.
+  - The close screenshots make it clear that small route props need careful camera placement and probably object prominence metrics; a low pack can still be visually dominated by nearby taller route forms.
+  - It is still a useful speedup: future prop work can now use `bun run atlas:views -- --preset props` instead of relying only on isolated object-lab contact sheets.
+- Rubric movement:
+  - Harness maturity: `9.94 -> 9.96`.
+  - Visual/world definition: unchanged; no new content in this slice.
+  - Rendering correctness/quality: unchanged, but prop-related visual claims now have a better evaluation path.
+- Next:
+  - checkpoint and push the prop atlas preset
+  - use prop atlas before accepting more small prop packs
+  - continue with far-view/fog or terrain foreground only when the gate can measure it

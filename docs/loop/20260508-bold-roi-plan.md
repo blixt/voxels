@@ -392,3 +392,20 @@ The asset pipeline is working, but the next visible-progress bottleneck is measu
 | 3 | Far-view/fog cushion experiment with strict LOD ownership gate | 4 | 4 | 3 | 5.3 | LOD correctness and frame time are healthy; user wants farther views | owned-browser LOD overlap/gap/fps, view-atlas horizon grid |
 | 4 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Skill hooks exist and could make discoveries feel less like raw IDs | UI tests, browser HUD smoke |
 | 5 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Useful cost cleanup, but not the main visual blocker | object-lab target `<18000`, route coverage |
+
+## Re-Rank After Prop Visibility Atlas
+
+Completed since the travel-pack checkpoint:
+
+- `bun run atlas:views -- --preset props` now captures five close prop views through the same browser/PNG/comparison machinery as the world atlas.
+- The prop preset exposed a useful issue: low route props can be technically valid in object-lab while still visually dominated by taller nearby route markers in the actual camera.
+
+Next work should use the prop preset for small assets, but the highest user-facing ROI is now a scale/readability pass: either far-view/fog with strict LOD gates or a bolder terrain foreground design that the world atlas can actually see.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Far-view/fog cushion experiment with strict LOD ownership gate | 4 | 4 | 3 | 5.3 | LOD correctness and frame time are healthy, and the user explicitly noticed short view distance | owned-browser LOD overlap/gap/fps, world view-atlas horizon grid |
+| 2 | Object prominence metric for prop atlas | 4 | 4 | 3 | 5.3 | Prop screenshots exist; now the harness should quantify whether the target object reads clearly | prop atlas region metrics, object-lab links |
+| 3 | Foreground terrain shape breakup with a camera-visible design | 5 | 3 | 4 | 3.8 | Lower-ground grid remains weak, but small route-height tweaks failed | terrain lab compare, enforced world atlas lower-ground grid, route continuity |
+| 4 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Skill hooks exist and could make discoveries feel less like raw IDs | UI tests, browser HUD smoke |
+| 5 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Useful cost cleanup, but not the current visual blocker | object-lab target `<18000`, route coverage |
