@@ -123,7 +123,8 @@ test("old-road materials and landmarks pull dry routes into ash haze", () => {
   }));
 
   expect(routeSurface.id).toBe("ashfall");
-  expect(routeSurface.fogEndDistance).toBeLessThan(metersToWorldUnits(320));
+  expect(routeSurface.fogEndDistance).toBeGreaterThan(metersToWorldUnits(365));
+  expect(routeSurface.fogEndDistance).toBeLessThan(metersToWorldUnits(380));
   expect(routeSurface.ashfallIntensity).toBeGreaterThan(0.50);
   expect(routeLandmark.id).toBe("ashfall");
   expect(wetRoute.id).toBe("silt-mist");

@@ -32,7 +32,7 @@ const DEFAULT_AIR_PADDING_CHUNKS = 2;
 const LOD_VERTEX_STRIDE = 20;
 const LOD_NORMAL_SCALE = 127;
 
-// LOD rings must cover the full fog distance (4160 world units).
+// LOD rings must cover the full fog distance (4800 world units).
 // Each ring's outer edge in world units = radiusChunks * chunkSize * stride.
 // LOD 1: 8 * 32 * 2  =   512   LOD 2: 8 * 32 * 4  = 1024
 // LOD 3: 6 * 32 * 8  = 1536   LOD 4: 10 * 32 * 16 = 5120 (covers fog end)

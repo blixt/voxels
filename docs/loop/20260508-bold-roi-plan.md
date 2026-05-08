@@ -409,3 +409,22 @@ Next work should use the prop preset for small assets, but the highest user-faci
 | 3 | Foreground terrain shape breakup with a camera-visible design | 5 | 3 | 4 | 3.8 | Lower-ground grid remains weak, but small route-height tweaks failed | terrain lab compare, enforced world atlas lower-ground grid, route continuity |
 | 4 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Skill hooks exist and could make discoveries feel less like raw IDs | UI tests, browser HUD smoke |
 | 5 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Useful cost cleanup, but not the current visual blocker | object-lab target `<18000`, route coverage |
+
+## Re-Rank After Far-View Fog Cushion
+
+Completed since the prop visibility checkpoint:
+
+- Default surface fog cap increased from `416 m` to `480 m`, still within existing LOD4 coverage.
+- Browser route ambience now reports `395.89 m` ashfall fog, up from the prior `341.23 m` route baseline.
+- Enforced world view atlas and owned-browser retry passed with no settled LOD overlap, water overlap, gaps, or handoff holes.
+- The retry stayed performant, but moving diagnostics still recorded transient far-LOD coverage gaps while streaming.
+- A delegated ROI audit independently flagged summary-derived LOD planning and far-view correctness as the next best work before content polish.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Remove or hard-gate generator-backed LOD Y-range fallback; far LOD planning should come from summaries/regions | 5 | 4 | 3 | 6.7 | Farther fog passed, but transient moving far-gap diagnostics show this is the next correctness/perf risk | focused resident-world tests, browser route far-gap diagnostics, owned-browser LOD gates |
+| 2 | Water/shoreline far-LOD correctness pass for marsh/saltflat horizons | 4 | 4 | 3 | 5.3 | Longer fog exposes more water horizon and z-fighting risk, even though current settled water overlap is `0` | extended `probeLodCoverage`, marsh/salt view atlas, owned-browser water overlap |
+| 3 | Object prominence metric for prop atlas | 4 | 4 | 3 | 5.3 | Prop screenshots exist, but target readability is still not quantified | prop atlas region metrics, object-lab links |
+| 4 | Foreground terrain shape breakup with a camera-visible design | 5 | 3 | 4 | 3.8 | The global grid metric remains `0.67`; this still needs real geometry/composition, not fog | terrain lab compare, enforced world atlas lower-ground grid, route continuity |
+| 5 | Composition director for actual route camera sightlines | 5 | 3 | 4 | 3.8 | Farther views matter more when the camera has strong foreground/midground silhouettes | route-atlas vista scan, view-atlas deltas, draw/triangle budget |
+| 6 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Valuable RPG feel, but rendering correctness and scale are currently more fragile | UI tests, browser HUD smoke |

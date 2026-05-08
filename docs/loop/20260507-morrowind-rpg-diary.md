@@ -2042,3 +2042,42 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint and push the prop atlas preset
   - use prop atlas before accepting more small prop packs
   - continue with far-view/fog or terrain foreground only when the gate can measure it
+
+### 2026-05-08 - Far-View Fog Cushion
+
+- Trigger:
+  - The user reported that distant LOD levels seemed absent and the world no longer read far enough.
+  - The latest strict LOD probes had no settled ownership overlap, and the browser route budget had enough headroom for a cautious distance experiment.
+- Changes:
+  - Increased the default surface fog cap from `416 m` to `480 m`, still inside the existing `512 m` LOD4 coverage shell.
+  - Raised surface ambience fog distances proportionally:
+    - open air: `416 -> 480 m`
+    - dry haze: `396 -> 440 m`
+    - cold glass: `384 -> 424 m`
+    - green canopy: `360 -> 400 m`
+    - ashfall: `288 -> 336 m`
+    - silt mist: `300 -> 348 m`
+    - fungal lantern: `304 -> 352 m`
+  - Updated the LOD coverage comment and ambient test expectations so old-road ash haze remains ashfall, but no longer clamps route sightlines below `320 m`.
+- Validation:
+  - Focused tests: `mise exec -- bun test tests/ambient-environment.test.ts tests/water-visuals.test.ts`, pass.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Build: `mise run build`, pass.
+  - Enforced world view atlas: `artifacts/view-atlas/20260508T081827Z-far-view-fog/report.json`, failures none against the contact-depth baseline.
+  - First owned-browser lab attempt: `artifacts/owned-browser-lab/20260508T082012Z-far-view-fog/report.json`, invalid because CDP timed out before a game snapshot. I did not count it as evidence.
+  - Valid owned-browser retry: `artifacts/owned-browser-lab/20260508T082407Z-far-view-fog-retry/report.json`, failures none.
+  - Browser result: ambient `ashfall` with `395.89 m` fog, saturation/grid/color `0.35/0.67/106`, traversal p95/max `4.50/6.90 ms`, route p95/max `4.80/9.80 ms`, draw/triangles `543/400898`, LOD overlap LOD0/bands `0/0`, water overlap `0`, settled LOD gaps/handoff holes `0/0`.
+- Honest assessment:
+  - This is a real scale/readability improvement: the live route fog distance increased by about `55 m` from the prior `341.23 m` ashfall route baseline.
+  - The view-atlas visual deltas were intentionally small; fog distance does not materially solve the block/grid read by itself.
+  - The moving route diagnostics still report transient far-LOD coverage gap samples during streaming even though final settled LOD ownership is clean. That should be the next correctness/performance target before pushing view distance much farther.
+  - A delegated ROI audit independently ranked summary-derived LOD planning and far-view correctness as the next high-return work before more content polish.
+- Rubric movement:
+  - Rendering correctness/quality: `6.68 -> 6.74` because farther fog held strict settled LOD overlap/gap gates.
+  - Performance/playability: unchanged at `6.40`; route max stayed under `10 ms`, but draw calls rose and transient far-gap diagnostics still deserve attention.
+  - Visual/world definition: `6.50 -> 6.56` because route vistas now expose more world scale without losing mood.
+  - Harness maturity: unchanged at `9.96`; this pass used existing gates and exposed the next LOD-planning weakness.
+- Next:
+  - checkpoint and push this far-view slice
+  - inspect LOD Y-range/summary planning fallback so farther views do not depend on expensive generator sampling or transient coverage holes
+  - only then attempt another view-distance increase or bolder foreground composition pass
