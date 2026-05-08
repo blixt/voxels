@@ -1,5 +1,6 @@
 import benchPage from "./pages/bench.html";
 import gamePage from "./pages/game.html";
+import lodLabPage from "./pages/lod-lab.html";
 
 const PROCEDURAL_WORKER_ROUTE = "/assets/procedural-generation-worker.js";
 const CHUNK_MESHING_WORKER_ROUTE = "/assets/chunk-meshing-worker.js";
@@ -65,6 +66,7 @@ const server = Bun.serve({
   routes: {
     "/": gamePage,
     "/bench": benchPage,
+    "/lod-lab": lodLabPage,
     [PROCEDURAL_WORKER_ROUTE]: () =>
       serveWorkerAsset(PROCEDURAL_WORKER_ROUTE, "./src/client/procedural-generation-worker.ts", "procedural-generation-worker.js"),
     [CHUNK_MESHING_WORKER_ROUTE]: () =>
