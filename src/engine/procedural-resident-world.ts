@@ -22,6 +22,8 @@ import {
   type GeneratedRenderColumnSummary,
 } from "./generated-render-column-summary.ts";
 import {
+  GENERATED_RENDER_SUMMARY_REGION_SIZE_CHUNKS,
+  getGeneratedRenderSummaryRegionCoord,
   type GeneratedRenderSummaryRegion,
 } from "./generated-render-summary-region.ts";
 import { metersToWorldUnits } from "./scale.ts";
@@ -32,6 +34,8 @@ const DEFAULT_UNDERGROUND_PADDING_CHUNKS = 3;
 const DEFAULT_AIR_PADDING_CHUNKS = 2;
 const LOD_VERTEX_STRIDE = 20;
 const LOD_NORMAL_SCALE = 127;
+const MAX_RETAINED_LOD_CHUNKS = 2048;
+const MAX_RETAINED_EMPTY_LOD_KEYS = 8192;
 
 // LOD rings must cover the full fog distance (4800 world units).
 // Each ring's outer edge in world units = radiusChunks * chunkSize * stride.
@@ -97,8 +101,12 @@ export interface ResidencyUpdateSummary {
 
 export interface LodResidencyUpdateSummary {
   generated: number;
+  cacheHits: number;
+  emptyCacheHits: number;
   pending: number;
   totalChunks: number;
+  cachedChunks: number;
+  cachedEmptyKeys: number;
   elapsedMs: number;
   yRangeMs: number;
   downsampleMs: number;
@@ -109,6 +117,7 @@ export interface LodResidencyUpdateSummary {
   maxChunkKey: string | null;
   neededKeyCount: number;
   neededKeyCacheHit: boolean;
+  scheduledRegionSummaryRequests: number;
 }
 
 export interface ResidencyUpdateOptions {
@@ -176,9 +185,13 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   private readonly chunks = new Map<string, VoxelChunk>();
   private readonly lodChunks = new Map<string, VoxelChunk>();
   private readonly preparedLodChunks = new Map<string, VoxelChunk>();
+  private readonly retainedLodChunks = new Map<string, VoxelChunk>();
   private readonly staleLodKeys = new Set<string>();
   private readonly emptyLodKeys = new Set<string>();
+  private readonly retainedEmptyLodKeys = new Set<string>();
   private readonly coveredEmptyLodKeys = new Set<string>();
+  private readonly coveragePunchedLodKeys = new Set<string>();
+  private readonly missingGeneratedRenderSummaryRegionKeys = new Set<string>();
   private coveredEmptyLodSignature: string | null = null;
   private activeLodBuildJob: PartialLodChunkBuild | null = null;
   private meshMaterialLut: MeshMaterialLut | null = null;
@@ -371,6 +384,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       localIndex,
     });
     // Invalidate LOD chunks covering this world position
+    this.clearRetainedLodCache();
     this.invalidateLodChunksAt(x, y, z);
     return true;
   }
@@ -633,6 +647,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     summaryDrainMs = performance.now() - summaryDrainStartedAt;
     const completedRegionSummaries = this.asyncChunkGeneration?.drainCompletedRegionSummaries() ?? [];
     const missingRegionSummaries = this.asyncChunkGeneration?.drainMissingRegionSummaries() ?? [];
+    for (const missing of missingRegionSummaries) {
+      this.missingGeneratedRenderSummaryRegionKeys.add(toRegionSummaryKey(missing.x, missing.z));
+    }
     for (const summary of completedRegionSummaries) {
       this.recordPersistedRegionRenderSummary(summary);
     }
@@ -847,6 +864,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     const neededKeys = new Set<string>();
     let neededKeyCacheHit = cachedNeededKeys !== null;
     let yRangeMs = 0;
+    let scheduledRegionSummaryRequests = 0;
 
     if (cachedNeededKeys) {
       for (const key of cachedNeededKeys) {
@@ -855,11 +873,14 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     } else {
       const planning = this.planLodNeededKeys(position, neededKeySignature, maxPlanMs);
       yRangeMs = planning.yRangeMs;
+      scheduledRegionSummaryRequests = planning.scheduledRegionSummaryRequests;
       if (!planning.complete) {
         return {
           generated: 0,
           pending: 1,
           totalChunks: this.lodChunks.size,
+          cachedChunks: this.retainedLodChunks.size,
+          cachedEmptyKeys: this.retainedEmptyLodKeys.size,
           elapsedMs: performance.now() - startedAt,
           yRangeMs,
           downsampleMs: 0,
@@ -870,6 +891,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           maxChunkKey: null,
           neededKeyCount: planning.neededKeyCount,
           neededKeyCacheHit,
+          cacheHits: 0,
+          emptyCacheHits: 0,
+          scheduledRegionSummaryRequests,
         };
       }
       for (const key of planning.keys) {
@@ -880,6 +904,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     // Phase 2: downsample and mesh LOD chunks with a budget.
     // Process levels in ascending order so LOD N-1 is available when building LOD N.
     let generated = 0;
+    let cacheHits = 0;
+    let emptyCacheHits = 0;
     let pending = 0;
     let downsampleMs = 0;
     let meshMs = 0;
@@ -900,9 +926,17 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         if (
           (this.lodChunks.has(key) && !this.staleLodKeys.has(key)) ||
           this.preparedLodChunks.has(key) ||
-          this.emptyLodKeys.has(key) ||
           this.coveredEmptyLodKeys.has(key)
         ) continue;
+        if (this.emptyLodKeys.has(key)) continue;
+        if (this.reviveRetainedEmptyLodKey(key)) {
+          emptyCacheHits += 1;
+          continue;
+        }
+        if (this.reviveRetainedLodChunk(key)) {
+          cacheHits += 1;
+          continue;
+        }
         if (
           workBudgetExhausted ||
           generated >= maxGenerate ||
@@ -963,6 +997,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           this.lodChunks.delete(key);
           this.preparedLodChunks.delete(key);
           this.staleLodKeys.delete(key);
+          this.retainedLodChunks.delete(key);
+          this.retainedEmptyLodKeys.delete(key);
+          this.coveragePunchedLodKeys.delete(key);
           this.invalidateCoarserLodChunksForSourceChunk(ring.level, cx, cy, cz, {
             clearNeededKeyCache: false,
           });
@@ -987,6 +1024,13 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         chunk.meshDirty = false;
         chunk.renderReady = true;
         chunk.gpuDirty = true;
+        this.retainedLodChunks.delete(key);
+        this.retainedEmptyLodKeys.delete(key);
+        if (data.skippedFinerCoverage) {
+          this.coveragePunchedLodKeys.add(key);
+        } else {
+          this.coveragePunchedLodKeys.delete(key);
+        }
         if (this.lodChunkHasCoveredActiveCoarserOverlap(chunk)) {
           this.preparedLodChunks.set(key, chunk);
         } else {
@@ -1024,6 +1068,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         if (!neededKeys.has(key)) {
           this.lodChunks.delete(key);
           this.staleLodKeys.delete(key);
+          this.retainLodChunk(key, chunk);
           this.invalidateCoarserLodChunksForSourceChunk(chunk.lodLevel, chunk.coord.x, chunk.coord.y, chunk.coord.z, {
             clearNeededKeyCache: false,
           });
@@ -1032,12 +1077,14 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       }
       for (const [key] of [...this.preparedLodChunks.entries()]) {
         if (!neededKeys.has(key)) {
+          this.retainLodChunk(key, this.preparedLodChunks.get(key)!);
           this.preparedLodChunks.delete(key);
         }
       }
       for (const key of [...this.emptyLodKeys]) {
         if (!neededKeys.has(key)) {
           this.emptyLodKeys.delete(key);
+          this.retainEmptyLodKey(key);
           const parts = parseLodKey(key);
           if (parts) {
             this.invalidateCoarserLodChunksForSourceChunk(parts.level, parts.cx, parts.cy, parts.cz, {
@@ -1073,8 +1120,12 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
     return {
       generated,
+      cacheHits,
+      emptyCacheHits,
       pending,
       totalChunks: this.lodChunks.size,
+      cachedChunks: this.retainedLodChunks.size,
+      cachedEmptyKeys: this.retainedEmptyLodKeys.size,
       elapsedMs: performance.now() - startedAt,
       yRangeMs,
       downsampleMs,
@@ -1085,6 +1136,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       maxChunkKey,
       neededKeyCount: neededKeys.size,
       neededKeyCacheHit,
+      scheduledRegionSummaryRequests,
     };
   }
 
@@ -1111,6 +1163,122 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     return this.estimateYRangeFromSurfaceSamples(cx, cz, stride, worldSize);
   }
 
+  private schedulePersistedRegionSummariesForLodFootprint(
+    lodCx: number,
+    lodCz: number,
+    stride: number,
+  ): number {
+    if (!this.asyncChunkGeneration) {
+      return 0;
+    }
+    const minCol0X = lodCx * stride;
+    const maxCol0X = minCol0X + stride - 1;
+    const minCol0Z = lodCz * stride;
+    const maxCol0Z = minCol0Z + stride - 1;
+    const regions = new Map<string, { x: number; z: number }>();
+    for (let cz = minCol0Z; cz <= maxCol0Z; cz += 1) {
+      for (let cx = minCol0X; cx <= maxCol0X; cx += 1) {
+        if (this.generatedRenderColumnSummaries.has(toColumnKey(cx, cz))) {
+          continue;
+        }
+        const region = getGeneratedRenderSummaryRegionCoord(
+          cx,
+          cz,
+          GENERATED_RENDER_SUMMARY_REGION_SIZE_CHUNKS,
+        );
+        const key = toRegionSummaryKey(region.x, region.z);
+        regions.set(key, region);
+      }
+    }
+
+    let requested = 0;
+    for (const [key, region] of regions) {
+      if (
+        this.missingGeneratedRenderSummaryRegionKeys.has(key)
+        || this.asyncChunkGeneration.hasPendingRegionSummary(region.x, region.z)
+      ) {
+        continue;
+      }
+      if (this.asyncChunkGeneration.requestRegionSummary(region.x, region.z)) {
+        requested += 1;
+      }
+    }
+    return requested;
+  }
+
+  private reviveRetainedLodChunk(key: string): boolean {
+    const chunk = this.retainedLodChunks.get(key);
+    if (!chunk) {
+      return false;
+    }
+    if (this.staleLodKeys.has(key) || this.coveragePunchedLodKeys.has(key)) {
+      this.retainedLodChunks.delete(key);
+      this.coveragePunchedLodKeys.delete(key);
+      return false;
+    }
+    this.retainedLodChunks.delete(key);
+    this.retainedEmptyLodKeys.delete(key);
+    chunk.gpuDirty = true;
+    if (this.lodChunkHasCoveredActiveCoarserOverlap(chunk)) {
+      this.preparedLodChunks.set(key, chunk);
+    } else {
+      this.lodChunks.set(key, chunk);
+      this.staleLodKeys.delete(key);
+    }
+    return true;
+  }
+
+  private reviveRetainedEmptyLodKey(key: string): boolean {
+    if (!this.retainedEmptyLodKeys.has(key)) {
+      return false;
+    }
+    this.retainedEmptyLodKeys.delete(key);
+    this.retainedLodChunks.delete(key);
+    this.coveragePunchedLodKeys.delete(key);
+    this.emptyLodKeys.add(key);
+    return true;
+  }
+
+  private retainLodChunk(key: string, chunk: VoxelChunk): void {
+    if (chunk.solidCount === 0 || this.staleLodKeys.has(key) || this.coveragePunchedLodKeys.has(key)) {
+      this.retainedLodChunks.delete(key);
+      this.coveragePunchedLodKeys.delete(key);
+      return;
+    }
+    this.retainedEmptyLodKeys.delete(key);
+    this.retainedLodChunks.delete(key);
+    this.retainedLodChunks.set(key, chunk);
+    while (this.retainedLodChunks.size > MAX_RETAINED_LOD_CHUNKS) {
+      const oldestKey = this.retainedLodChunks.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      this.retainedLodChunks.delete(oldestKey);
+    }
+  }
+
+  private retainEmptyLodKey(key: string): void {
+    this.retainedLodChunks.delete(key);
+    this.coveragePunchedLodKeys.delete(key);
+    this.retainedEmptyLodKeys.delete(key);
+    this.retainedEmptyLodKeys.add(key);
+    while (this.retainedEmptyLodKeys.size > MAX_RETAINED_EMPTY_LOD_KEYS) {
+      const oldestKey = this.retainedEmptyLodKeys.values().next().value as string | undefined;
+      if (!oldestKey) break;
+      this.retainedEmptyLodKeys.delete(oldestKey);
+    }
+  }
+
+  private deleteRetainedLodKey(key: string): void {
+    this.retainedLodChunks.delete(key);
+    this.retainedEmptyLodKeys.delete(key);
+    this.coveragePunchedLodKeys.delete(key);
+  }
+
+  private clearRetainedLodCache(): void {
+    this.retainedLodChunks.clear();
+    this.retainedEmptyLodKeys.clear();
+    this.coveragePunchedLodKeys.clear();
+  }
+
   private planLodNeededKeys(
     position: Vec3,
     signature: string,
@@ -1120,6 +1288,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     keys: string[];
     neededKeyCount: number;
     yRangeMs: number;
+    scheduledRegionSummaryRequests: number;
   } {
     let state = this.lodNeededKeyPlanningState;
     if (!state || state.signature !== signature) {
@@ -1135,6 +1304,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
     const startedAt = performance.now();
     let yRangeMs = 0;
+    let scheduledRegionSummaryRequests = 0;
     while (state.ringIndex < LOD_RINGS.length) {
       const ring = LOD_RINGS[state.ringIndex]!;
       const stride = 1 << ring.level;
@@ -1155,6 +1325,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
             : false;
 
           if (!coveredByFinerLod) {
+            scheduledRegionSummaryRequests += this.schedulePersistedRegionSummariesForLodFootprint(cx, cz, stride);
             const yRangeStartedAt = performance.now();
             const yRange = this.estimateLodColumnYRange(cx, cz, ring.level, stride, worldSize);
             yRangeMs += performance.now() - yRangeStartedAt;
@@ -1171,6 +1342,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
               keys: [],
               neededKeyCount: state.neededKeys.size,
               yRangeMs,
+              scheduledRegionSummaryRequests,
             };
           }
         }
@@ -1194,6 +1366,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       keys,
       neededKeyCount: keys.length,
       yRangeMs,
+      scheduledRegionSummaryRequests,
     };
   }
 
@@ -1729,6 +1902,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       this.preparedLodChunks.delete(key);
       this.emptyLodKeys.delete(key);
       this.coveredEmptyLodKeys.delete(key);
+      this.deleteRetainedLodKey(key);
     }
   }
 
@@ -1760,6 +1934,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       this.preparedLodChunks.delete(key);
       this.emptyLodKeys.delete(key);
       this.coveredEmptyLodKeys.delete(key);
+      this.deleteRetainedLodKey(key);
     }
   }
 
@@ -2466,6 +2641,24 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           this.coveredEmptyLodKeys.delete(key);
         }
       }
+      for (const key of [...this.retainedLodChunks.keys()]) {
+        if (!key.startsWith(keyPrefix)) {
+          continue;
+        }
+        const parts = key.split(":");
+        if (Number.parseInt(parts[3]!, 10) === lodCz) {
+          this.deleteRetainedLodKey(key);
+        }
+      }
+      for (const key of [...this.retainedEmptyLodKeys]) {
+        if (!key.startsWith(keyPrefix)) {
+          continue;
+        }
+        const parts = key.split(":");
+        if (Number.parseInt(parts[3]!, 10) === lodCz) {
+          this.deleteRetainedLodKey(key);
+        }
+      }
     }
   }
 
@@ -2511,6 +2704,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   }
 
   private recordPersistedRegionRenderSummary(region: GeneratedRenderSummaryRegion): void {
+    this.missingGeneratedRenderSummaryRegionKeys.delete(toRegionSummaryKey(region.regionX, region.regionZ));
     for (const entry of region.columns) {
       this.recordPersistedColumnRenderSummary(entry.summary);
     }
@@ -2753,6 +2947,10 @@ function toLocalVoxelIndex(
 
 function toColumnKey(cx: number, cz: number): string {
   return `${cx}:${cz}`;
+}
+
+function toRegionSummaryKey(regionX: number, regionZ: number): string {
+  return `${regionX}:${regionZ}`;
 }
 
 function extractLodNeighborFaceData(

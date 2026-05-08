@@ -1292,6 +1292,38 @@ describe("LOD coverage", () => {
     expect(third.yRangeMs).toBe(0);
   });
 
+  test("LOD residency reuses retained derived chunks after they leave the active window", () => {
+    const gen = new ProceduralWorldGenerator(SEED, { chunkSize: 16 });
+    const world = new ProceduralResidentWorld(gen, { horizontalRadiusChunks: 1 });
+    const spawnPos = world.getSpawnPosition() as [number, number, number];
+
+    const completeLod = (position: [number, number, number]) => {
+      let summary = world.updateLodResidencyAround(position, {
+        maxGenerateLodChunks: Number.POSITIVE_INFINITY,
+      });
+      for (let frame = 0; frame < 24 && summary.pending > 0; frame += 1) {
+        summary = world.updateLodResidencyAround(position, {
+          maxGenerateLodChunks: Number.POSITIVE_INFINITY,
+        });
+      }
+      expect(summary.pending).toBe(0);
+      return summary;
+    };
+
+    const first = completeLod(spawnPos);
+    expect(first.totalChunks).toBeGreaterThan(0);
+
+    const farPos: [number, number, number] = [spawnPos[0] + 8192, spawnPos[1], spawnPos[2] + 8192];
+    const far = completeLod(farPos);
+    expect(far.cachedChunks + far.cachedEmptyKeys).toBeGreaterThan(0);
+
+    const back = world.updateLodResidencyAround(spawnPos, {
+      maxGenerateLodChunks: 0,
+    });
+    expect(back.generated).toBe(0);
+    expect(back.cacheHits + back.emptyCacheHits).toBeGreaterThan(0);
+  });
+
   test("budgeted LOD generation does not starve far rings on punched-out coverage", () => {
     const gen = new ProceduralWorldGenerator(SEED);
     const world = new ProceduralResidentWorld(gen, { horizontalRadiusChunks: 4 });

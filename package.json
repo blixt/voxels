@@ -16,6 +16,7 @@
     "profile:stream": "bun run scripts/profile-procedural-stream.ts",
     "profile:game-stream": "bun run scripts/profile-game-stream.ts",
     "profile:lod-residency": "bun run scripts/profile-lod-residency.ts",
+    "profile:lod-cache": "bun run scripts/profile-lod-cache-reuse.ts",
     "atlas:routes": "bun run scripts/route-atlas.ts",
     "atlas:views": "bun run scripts/capture-view-atlas.ts",
     "lab:object": "bun run scripts/object-lab.ts",

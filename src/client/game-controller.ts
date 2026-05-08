@@ -227,6 +227,10 @@ export interface GameHudSnapshot {
   lodChunkCount: number;
   lodPendingChunks: number;
   lodGeneratedChunks: number;
+  lodCacheHits: number;
+  lodEmptyCacheHits: number;
+  lodCachedChunks: number;
+  lodCachedEmptyKeys: number;
   lodElapsedMs: number;
   lodYRangeMs: number;
   lodDownsampleMs: number;
@@ -237,6 +241,7 @@ export interface GameHudSnapshot {
   lodMaxChunkKey: string | null;
   lodNeededKeyCount: number;
   lodNeededKeyCacheHit: boolean;
+  lodScheduledRegionSummaryRequests: number;
   lodDrawCalls: number;
   lodDrawCallsByLevel: readonly number[];
   frustumCulledChunks: number;
@@ -796,8 +801,12 @@ export class GameController {
   private lastRenderStats: RenderStats = zeroRenderStats();
   private lastLodSummary: LodResidencyUpdateSummary = {
     generated: 0,
+    cacheHits: 0,
+    emptyCacheHits: 0,
     pending: 0,
     totalChunks: 0,
+    cachedChunks: 0,
+    cachedEmptyKeys: 0,
     elapsedMs: 0,
     yRangeMs: 0,
     downsampleMs: 0,
@@ -808,6 +817,7 @@ export class GameController {
     maxChunkKey: null,
     neededKeyCount: 0,
     neededKeyCacheHit: false,
+    scheduledRegionSummaryRequests: 0,
   };
   private lastStreamSummary: ResidencyUpdateSummary = cloneResidencySummary(this.world.lastResidency);
   private streamAnchor: StreamAnchor | null = null;
@@ -1003,6 +1013,10 @@ export class GameController {
       lodChunkCount: this.lastLodSummary.totalChunks,
       lodPendingChunks: this.lastLodSummary.pending,
       lodGeneratedChunks: this.lastLodSummary.generated,
+      lodCacheHits: this.lastLodSummary.cacheHits,
+      lodEmptyCacheHits: this.lastLodSummary.emptyCacheHits,
+      lodCachedChunks: this.lastLodSummary.cachedChunks,
+      lodCachedEmptyKeys: this.lastLodSummary.cachedEmptyKeys,
       lodElapsedMs: this.lastLodSummary.elapsedMs,
       lodYRangeMs: this.lastLodSummary.yRangeMs,
       lodDownsampleMs: this.lastLodSummary.downsampleMs,
@@ -1013,6 +1027,7 @@ export class GameController {
       lodMaxChunkKey: this.lastLodSummary.maxChunkKey,
       lodNeededKeyCount: this.lastLodSummary.neededKeyCount,
       lodNeededKeyCacheHit: this.lastLodSummary.neededKeyCacheHit,
+      lodScheduledRegionSummaryRequests: this.lastLodSummary.scheduledRegionSummaryRequests,
       lodDrawCalls: this.lastRenderStats.lodDrawCalls,
       lodDrawCallsByLevel: [...this.lastRenderStats.lodDrawCallsByLevel],
       frustumCulledChunks: this.lastRenderStats.frustumCulledChunks,

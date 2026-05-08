@@ -247,6 +247,28 @@ test("LOD Y-range planning avoids full procedural column fallback", () => {
   expect(generator.sampleColumnCalls).toBe(0);
 });
 
+test("LOD planning asks the persistent chunk store for missing render-summary regions", () => {
+  const requested = new Set<string>();
+  const queue = createFakeAsyncQueue({
+    requestRegionSummary: (regionX, regionZ) => {
+      requested.add(`${regionX}:${regionZ}`);
+      return true;
+    },
+    hasPendingRegionSummary: (regionX, regionZ) => requested.has(`${regionX}:${regionZ}`),
+  });
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    asyncChunkGeneration: queue,
+    horizontalRadiusChunks: 1,
+  });
+
+  const lod = world.updateLodResidencyAround(world.getSpawnPosition(), {
+    maxGenerateLodChunks: 0,
+  });
+
+  expect(requested.size).toBeGreaterThan(0);
+  expect(lod.scheduledRegionSummaryRequests).toBe(requested.size);
+});
+
 test("resident world tracks dirty chunks without rescanning the full resident set", () => {
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
     horizontalRadiusChunks: 2,
