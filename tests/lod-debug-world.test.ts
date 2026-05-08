@@ -86,6 +86,33 @@ test("LOD debug edits propagate through the active coarse representation", () =>
   expect(world.sampleActiveMaterialAtWorldVoxel(64, 6, 64)).toBe(LOD_DEBUG_MATERIAL.edited);
 });
 
+test("LOD debug terrain uses a smooth field across chunk edges", () => {
+  const world = new LodDebugWorld();
+  const samples = [
+    topVoxelY(world, 15, 8),
+    topVoxelY(world, 16, 8),
+    topVoxelY(world, 31, 8),
+    topVoxelY(world, 32, 8),
+  ];
+  const edgeDeltas = [
+    Math.abs(samples[1]! - samples[0]!),
+    Math.abs(samples[3]! - samples[2]!),
+  ];
+  const surfaceMaterials = new Set<number>();
+
+  for (let z = -48; z <= 48; z += 12) {
+    for (let x = -48; x <= 48; x += 12) {
+      const topY = topVoxelY(world, x, z);
+      if (topY !== null) {
+        surfaceMaterials.add(world.getVoxel(x, topY, z));
+      }
+    }
+  }
+
+  expect(edgeDeltas.every((delta) => delta <= 2)).toBe(true);
+  expect(surfaceMaterials.size).toBeGreaterThanOrEqual(3);
+});
+
 test("LOD debug world is renderable through resident chunk iteration", () => {
   const world = createLodDebugWorld();
   const chunks = [...world.iterateResidentChunks()];
@@ -95,3 +122,12 @@ test("LOD debug world is renderable through resident chunk iteration", () => {
   expect(chunks.some((chunk) => chunk.lodLevel === 0)).toBe(true);
   expect(chunks.some((chunk) => chunk.lodLevel === 1)).toBe(true);
 });
+
+function topVoxelY(world: LodDebugWorld, x: number, z: number): number | null {
+  for (let y = world.maxYExclusive - 1; y >= world.minY; y -= 1) {
+    if (world.getVoxel(x, y, z) !== 0) {
+      return y;
+    }
+  }
+  return null;
+}

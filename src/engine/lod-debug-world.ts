@@ -8,9 +8,13 @@ import type { ChunkBounds, ChunkMeshData, PackedColor, WorldStats } from "./type
 import { type ResidentChunkWorld, type VoxelChunk } from "./world.ts";
 
 export const LOD_DEBUG_MATERIAL = {
-  lod0: 1,
+  lod0: 2,
   lod1: 2,
-  edited: 3,
+  low: 1,
+  mid: 2,
+  high: 3,
+  ridge: 4,
+  edited: 5,
 } as const;
 
 export interface LodDebugCoverageRequest {
@@ -56,8 +60,10 @@ export class LodDebugWorld implements ResidentChunkWorld {
     this.maxYExclusive = chunkSize * 2;
     this.palette = [
       0x00000000,
-      0xff79a7ff,
-      0xffffb347,
+      0xff80b8d9,
+      0xff9ccf8a,
+      0xffdcc07a,
+      0xfff0e2b2,
       0xffff4fd8,
     ];
     this.materialLut = createMeshMaterialLut(this.palette, () => false);
@@ -299,7 +305,6 @@ export class LodDebugWorld implements ResidentChunkWorld {
     }
     const stride = 1 << parsed.level;
     const data = new Uint16Array(this.chunkSize * this.chunkSize * this.chunkSize);
-    const defaultMaterial = parsed.level === 0 ? LOD_DEBUG_MATERIAL.lod0 : LOD_DEBUG_MATERIAL.lod1;
     let solidCount = 0;
     let minX = this.chunkSize;
     let minY = this.chunkSize;
@@ -314,7 +319,7 @@ export class LodDebugWorld implements ResidentChunkWorld {
           const worldX = (parsed.cx * this.chunkSize + lx) * stride;
           const worldY = (parsed.cy * this.chunkSize + ly) * stride;
           const worldZ = (parsed.cz * this.chunkSize + lz) * stride;
-          const material = this.sampleFootprintMaterial(worldX, worldY, worldZ, stride, defaultMaterial);
+          const material = this.sampleFootprintMaterial(worldX, worldY, worldZ, stride);
           if (material === 0) {
             continue;
           }
@@ -355,12 +360,12 @@ export class LodDebugWorld implements ResidentChunkWorld {
     return chunk;
   }
 
-  private sampleFootprintMaterial(worldX: number, worldY: number, worldZ: number, stride: number, defaultMaterial: number): number {
+  private sampleFootprintMaterial(worldX: number, worldY: number, worldZ: number, stride: number): number {
     let fallback = 0;
     for (let dz = 0; dz < stride; dz += 1) {
       for (let dy = stride - 1; dy >= 0; dy -= 1) {
         for (let dx = 0; dx < stride; dx += 1) {
-          const material = this.sampleBaseMaterial(worldX + dx, worldY + dy, worldZ + dz, defaultMaterial);
+          const material = this.sampleBaseMaterial(worldX + dx, worldY + dy, worldZ + dz, LOD_DEBUG_MATERIAL.mid);
           if (material === LOD_DEBUG_MATERIAL.edited) {
             return material;
           }
@@ -378,10 +383,14 @@ export class LodDebugWorld implements ResidentChunkWorld {
     if (edit !== undefined) {
       return edit;
     }
-    const height = 7
-      + Math.floor((Math.sin(x * 0.11) + Math.cos(z * 0.13)) * 2)
-      + (((Math.floor(x / 11) + Math.floor(z / 13)) % 3 + 3) % 3);
-    return y >= 0 && y <= height ? defaultMaterial : 0;
+    const height = sampleSmoothDebugHeight(x, z);
+    if (y < 0 || y > height) {
+      return 0;
+    }
+    if (y < height - 2) {
+      return defaultMaterial;
+    }
+    return sampleSmoothDebugSurfaceMaterial(x, z, height);
   }
 
   private meshChunk(chunk: VoxelChunk): void {
@@ -569,6 +578,31 @@ function compareLodChunkKeys(left: string, right: string): number {
 
 function toVoxelKey(x: number, y: number, z: number): string {
   return `${x}:${y}:${z}`;
+}
+
+function sampleSmoothDebugHeight(x: number, z: number): number {
+  const longWave = Math.sin(x * 0.035) * 5.2
+    + Math.cos(z * 0.041) * 4.8;
+  const diagonalWave = Math.sin((x + z) * 0.023) * 3.4
+    + Math.cos((x - z) * 0.029) * 2.6;
+  const microWave = Math.sin(x * 0.097 + z * 0.031) * 1.2;
+  return Math.max(2, Math.min(24, Math.round(11 + longWave + diagonalWave + microWave)));
+}
+
+function sampleSmoothDebugSurfaceMaterial(x: number, z: number, height: number): number {
+  const field = Math.sin(x * 0.018 + z * 0.011)
+    + Math.cos(x * 0.013 - z * 0.017)
+    + (height - 11) * 0.12;
+  if (field < -0.70) {
+    return LOD_DEBUG_MATERIAL.low;
+  }
+  if (field > 1.10) {
+    return LOD_DEBUG_MATERIAL.ridge;
+  }
+  if (field > 0.35) {
+    return LOD_DEBUG_MATERIAL.high;
+  }
+  return LOD_DEBUG_MATERIAL.mid;
 }
 
 function chunkCoversBaseColumn(key: LodChunkKey, baseCx: number, baseCz: number, chunkSize: number): boolean {
