@@ -3,6 +3,7 @@
 import {
   openProceduralGeneratedChunkCache,
   type CachedEncodedGeneratedChunk,
+  type CachedEncodedDerivedLodChunk,
   type ProceduralGeneratedChunkCache,
 } from "./procedural-generated-chunk-cache.ts";
 import {
@@ -13,6 +14,7 @@ import {
   shiftDeferredProceduralPersistenceJob,
 } from "./procedural-deferred-persistence.ts";
 import { decodeGeneratedChunk, decodeGeneratedChunkSummary, encodeGeneratedChunk } from "../engine/generated-chunk-codec.ts";
+import type { AsyncDerivedLodChunkCacheKey } from "../engine/async-chunk-generation.ts";
 import { ProceduralWorldGenerator, type GeneratedChunk } from "../engine/procedural-generator.ts";
 import {
   serializeGeneratedChunk,
@@ -45,6 +47,20 @@ type WorkerRequest =
       type: "summarize-region";
       requestId: number;
       coord: RenderSummaryRegionCoordinate;
+    }
+  | {
+      type: "get-lod-chunk";
+      requestId: number;
+      key: AsyncDerivedLodChunkCacheKey;
+    }
+  | {
+      type: "put-lod-chunk";
+      requestId: number;
+      key: AsyncDerivedLodChunkCacheKey;
+      chunk: {
+        buffer: ArrayBuffer;
+        byteLength: number;
+      };
     };
 
 type WorkerResponse =
@@ -69,6 +85,22 @@ type WorkerResponse =
       source: "cache" | "missing";
       coord: RenderSummaryRegionCoordinate;
       summary: TransferredGeneratedRenderSummaryRegion | null;
+    }
+  | {
+      type: "lod-chunk";
+      requestId: number;
+      source: "cache" | "missing";
+      key: AsyncDerivedLodChunkCacheKey;
+      chunk: {
+        buffer: ArrayBuffer;
+        byteLength: number;
+      } | null;
+    }
+  | {
+      type: "lod-chunk-stored";
+      requestId: number;
+      key: AsyncDerivedLodChunkCacheKey;
+      stored: boolean;
     };
 
 let generator: ProceduralWorldGenerator | null = null;
@@ -109,6 +141,63 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
   }
   if (!generator) {
     throw new Error("Procedural generation worker received a request before initialization");
+  }
+  if (message.type === "get-lod-chunk") {
+    let cachedLodChunk: CachedEncodedDerivedLodChunk | null = null;
+    try {
+      cachedLodChunk = await chunkCache?.getLodChunk(message.key) ?? null;
+    } catch (error) {
+      reportCacheFailure("read", error);
+      chunkCache?.close();
+      chunkCache = null;
+      cachedLodChunk = null;
+    }
+    const response: WorkerResponse = {
+      type: "lod-chunk",
+      requestId: message.requestId,
+      source: cachedLodChunk ? "cache" : "missing",
+      key: cloneLodChunkCacheKey(message.key),
+      chunk: cachedLodChunk
+        ? {
+            buffer: cachedLodChunk.buffer,
+            byteLength: cachedLodChunk.byteLength,
+          }
+        : null,
+    };
+    self.postMessage(response, {
+      transfer: cachedLodChunk ? [cachedLodChunk.buffer] : [],
+    });
+    return;
+  }
+  if (message.type === "put-lod-chunk") {
+    let stored = false;
+    try {
+      if (chunkCache) {
+        await chunkCache.putLodChunk(message.key, {
+          buffer: message.chunk.buffer,
+          stats: {
+            byteLength: message.chunk.byteLength,
+            chunkSize: 0,
+            voxelCount: 0,
+            runCount: 0,
+            zeroRunCount: 0,
+          },
+        });
+        stored = true;
+      }
+    } catch (error) {
+      reportCacheFailure("write", error);
+      chunkCache?.close();
+      chunkCache = null;
+    }
+    const response: WorkerResponse = {
+      type: "lod-chunk-stored",
+      requestId: message.requestId,
+      key: cloneLodChunkCacheKey(message.key),
+      stored,
+    };
+    self.postMessage(response);
+    return;
   }
   if (message.type === "summarize-region") {
     let cachedRegionSummary: TransferredGeneratedRenderSummaryRegion | null = null;
@@ -334,6 +423,14 @@ function cloneTransferredSummary(summary: TransferredGeneratedChunkRenderSummary
     macroCellsPerAxis: summary.macroCellsPerAxis,
     macroCellStates: summary.macroCellStates.slice(),
     faceOpenMask: summary.faceOpenMask.slice(),
+  };
+}
+
+function cloneLodChunkCacheKey(key: AsyncDerivedLodChunkCacheKey): AsyncDerivedLodChunkCacheKey {
+  return {
+    lodLevel: key.lodLevel,
+    editRevision: key.editRevision,
+    coord: { ...key.coord },
   };
 }
 

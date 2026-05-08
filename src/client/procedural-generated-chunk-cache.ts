@@ -14,6 +14,7 @@ import {
 } from "../engine/generated-render-summary-region.ts";
 import type { EncodedGeneratedChunk } from "../engine/generated-chunk-codec.ts";
 import type { EncodedDerivedLodChunk } from "../engine/derived-lod-chunk-codec.ts";
+import type { AsyncDerivedLodChunkCacheKey } from "../engine/async-chunk-generation.ts";
 import { PROCEDURAL_WORLD_GENERATION_VERSION } from "../engine/procedural-generator.ts";
 import type { ChunkCoordinate, RenderSummaryRegionCoordinate } from "../engine/types.ts";
 
@@ -59,21 +60,15 @@ export interface ProceduralGeneratedChunkCache {
   getChunk(coord: ChunkCoordinate): Promise<CachedEncodedGeneratedChunk | null>;
   getChunkSummary(coord: ChunkCoordinate): Promise<TransferredGeneratedChunkRenderSummary | null>;
   getRegionSummary(coord: RenderSummaryRegionCoordinate): Promise<TransferredGeneratedRenderSummaryRegion | null>;
-  getLodChunk(key: DerivedLodChunkCacheKey): Promise<CachedEncodedDerivedLodChunk | null>;
+  getLodChunk(key: AsyncDerivedLodChunkCacheKey): Promise<CachedEncodedDerivedLodChunk | null>;
   putChunk(
     coord: ChunkCoordinate,
     chunk: EncodedGeneratedChunk,
     summary: TransferredGeneratedChunkRenderSummary,
   ): Promise<void>;
   putChunkSummary(coord: ChunkCoordinate, summary: TransferredGeneratedChunkRenderSummary): Promise<void>;
-  putLodChunk(key: DerivedLodChunkCacheKey, chunk: EncodedDerivedLodChunk): Promise<void>;
+  putLodChunk(key: AsyncDerivedLodChunkCacheKey, chunk: EncodedDerivedLodChunk): Promise<void>;
   close(): void;
-}
-
-export interface DerivedLodChunkCacheKey {
-  readonly lodLevel: number;
-  readonly coord: ChunkCoordinate;
-  readonly editRevision: number;
 }
 
 export interface CachedEncodedDerivedLodChunk {
@@ -244,7 +239,7 @@ function toRegionKey(prefix: string, coord: RenderSummaryRegionCoordinate): stri
   return `${prefix}:${coord.x}:${coord.z}`;
 }
 
-function toLodChunkKey(prefix: string, key: DerivedLodChunkCacheKey): string {
+function toLodChunkKey(prefix: string, key: AsyncDerivedLodChunkCacheKey): string {
   return `${prefix}:lod:${key.editRevision}:${key.lodLevel}:${key.coord.x}:${key.coord.y}:${key.coord.z}`;
 }
 

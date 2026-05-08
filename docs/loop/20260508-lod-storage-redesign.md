@@ -81,11 +81,26 @@ Validation:
 - `mise exec -- bun run typecheck`
 - `mise exec -- bun test tests/derived-lod-chunk-codec.test.ts tests/generated-chunk-codec.test.ts tests/procedural-deferred-persistence.test.ts`
 
+### Follow-up Checkpoint - Async Worker Surface
+
+Added the nonblocking worker API needed before production LOD can safely read/write disk:
+
+- `AsyncChunkGenerationQueue` now has derived LOD cache request, store, pending, drain, and completion-stat methods.
+- The browser worker now handles `get-lod-chunk` and `put-lod-chunk` messages through the `lod_chunks` IndexedDB store.
+- Completion stats distinguish cache hits, missing entries, and successful stores.
+- Async LOD cache keys include edit revision, LOD level, and full chunk coord.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/derived-lod-chunk-codec.test.ts`
+- `mise exec -- bun test tests/async-chunk-generation.test.ts`
+
 Next high-ROI work:
 
 1. Promote the existing IndexedDB worker cache into an explicit engine-facing `ChunkStore` contract.
 2. Persist base chunks, summaries, and edit overlays as the only authoritative world data.
-3. Wire derived LOD cache reads/writes through the worker without blocking `updateLodResidencyAround`.
+3. Wire production LOD residency to request cached derived chunks before rebuilding and to enqueue safe derived chunks after eviction.
 4. Add a prefetch planner that asks storage for base summaries and derived LOD chunks ahead of the active LOD window.
 5. Move far-field rendering toward a hierarchy/clipmap model where more LOD levels do not linearly increase CPU rebuild cost.
 
