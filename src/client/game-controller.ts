@@ -225,16 +225,24 @@ export interface GameHudSnapshot {
   maxGeneratedChunksPerUpdate: number;
   maxMeshRebuildsPerFrame: number;
   lodChunkCount: number;
+  lodChunkCountByLevel: readonly number[];
   lodPendingChunks: number;
   lodPendingPlanning: number;
   lodPendingDiskCache: number;
+  lodPendingDiskCacheByLevel: readonly number[];
   lodPendingGenerationBudget: number;
+  lodPendingGenerationBudgetByLevel: readonly number[];
   lodPendingPartialBuild: number;
+  lodPendingPartialBuildByLevel: readonly number[];
   lodPendingPrepared: number;
+  lodPendingPreparedByLevel: readonly number[];
   lodPendingInvalidatedEviction: number;
   lodGeneratedChunks: number;
+  lodGeneratedChunksByLevel: readonly number[];
   lodCacheHits: number;
+  lodCacheHitsByLevel: readonly number[];
   lodEmptyCacheHits: number;
+  lodEmptyCacheHitsByLevel: readonly number[];
   lodCachedChunks: number;
   lodCachedEmptyKeys: number;
   lodElapsedMs: number;
@@ -850,16 +858,24 @@ export class GameController {
   private lastRenderStats: RenderStats = zeroRenderStats();
   private lastLodSummary: LodResidencyUpdateSummary = {
     generated: 0,
+    generatedByLevel: [0, 0, 0, 0, 0],
     cacheHits: 0,
+    cacheHitsByLevel: [0, 0, 0, 0, 0],
     emptyCacheHits: 0,
+    emptyCacheHitsByLevel: [0, 0, 0, 0, 0],
     pending: 0,
     pendingPlanning: 0,
     pendingDiskCache: 0,
+    pendingDiskCacheByLevel: [0, 0, 0, 0, 0],
     pendingGenerationBudget: 0,
+    pendingGenerationBudgetByLevel: [0, 0, 0, 0, 0],
     pendingPartialBuild: 0,
+    pendingPartialBuildByLevel: [0, 0, 0, 0, 0],
     pendingPrepared: 0,
+    pendingPreparedByLevel: [0, 0, 0, 0, 0],
     pendingInvalidatedEviction: 0,
     totalChunks: 0,
+    totalChunksByLevel: [0, 0, 0, 0, 0],
     cachedChunks: 0,
     cachedEmptyKeys: 0,
     elapsedMs: 0,
@@ -1077,16 +1093,24 @@ export class GameController {
       maxGeneratedChunksPerUpdate: this.streamingBudgets.maxGeneratedChunksPerUpdate,
       maxMeshRebuildsPerFrame: this.streamingBudgets.maxMeshRebuildsPerFrame,
       lodChunkCount: this.lastLodSummary.totalChunks,
+      lodChunkCountByLevel: [...this.lastLodSummary.totalChunksByLevel],
       lodPendingChunks: this.lastLodSummary.pending,
       lodPendingPlanning: this.lastLodSummary.pendingPlanning,
       lodPendingDiskCache: this.lastLodSummary.pendingDiskCache,
+      lodPendingDiskCacheByLevel: [...this.lastLodSummary.pendingDiskCacheByLevel],
       lodPendingGenerationBudget: this.lastLodSummary.pendingGenerationBudget,
+      lodPendingGenerationBudgetByLevel: [...this.lastLodSummary.pendingGenerationBudgetByLevel],
       lodPendingPartialBuild: this.lastLodSummary.pendingPartialBuild,
+      lodPendingPartialBuildByLevel: [...this.lastLodSummary.pendingPartialBuildByLevel],
       lodPendingPrepared: this.lastLodSummary.pendingPrepared,
+      lodPendingPreparedByLevel: [...this.lastLodSummary.pendingPreparedByLevel],
       lodPendingInvalidatedEviction: this.lastLodSummary.pendingInvalidatedEviction,
       lodGeneratedChunks: this.lastLodSummary.generated,
+      lodGeneratedChunksByLevel: [...this.lastLodSummary.generatedByLevel],
       lodCacheHits: this.lastLodSummary.cacheHits,
+      lodCacheHitsByLevel: [...this.lastLodSummary.cacheHitsByLevel],
       lodEmptyCacheHits: this.lastLodSummary.emptyCacheHits,
+      lodEmptyCacheHitsByLevel: [...this.lastLodSummary.emptyCacheHitsByLevel],
       lodCachedChunks: this.lastLodSummary.cachedChunks,
       lodCachedEmptyKeys: this.lastLodSummary.cachedEmptyKeys,
       lodElapsedMs: this.lastLodSummary.elapsedMs,

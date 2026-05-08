@@ -248,3 +248,42 @@ Browser verifier artifacts:
   - Result: still fails settle budget; visible far coverage stayed clean with `0` gaps and `0` overlaps.
   - Pending after `260` frames improved modestly from `923` to `895`; generation-budget pending moved from `843` to `813`.
   - This is a safe but small reduction. The remaining backlog is still structural enough that the next meaningful step should be partial handoff punching or a far-field hierarchy/clipmap, not more small pruning.
+
+### Follow-up Checkpoint - LOD Level Attribution
+
+Backed out a speculative partial-handoff experiment before committing it:
+
+- The experiment reduced far-transition `pendingPrepared` to `0`, but it broke the persistence contract: default reload adopted `0` derived LOD chunks from IndexedDB.
+- Root issue: the experiment mixed canonical persisted LOD chunks with context-punched render copies. That needs a proper canonical/render-instance split before it can be safe.
+- Baseline was revalidated after the backout: default persistence passed again with `32` reload disk hits.
+
+Added by-level LOD counters to the runtime snapshot and persistence artifact:
+
+- Generated chunks by LOD level.
+- Memory/disk cache hits by LOD level.
+- Pending disk-cache, generation-budget, partial-build, and prepared-handoff chunks by LOD level.
+- Active LOD chunk counts by level.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-default-level-attribution`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-far-level-attribution --lod-persistence-chunk-delta=32 --lod-persistence-max-frames=260`
+
+Browser verifier artifacts:
+
+- Default persistence: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-77ow0s/lod-idb-persistence-reload.json`
+  - Result: pass, with `32` reload disk hits and `32` cumulative reload disk hits.
+- Far level attribution: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-6ZWv5k/lod-idb-persistence-reload.json`
+  - Result: still fails settle budget; visible far coverage stayed clean with `0` gaps and `0` overlaps.
+  - Pending after `260` frames: `898` total, `817` generation-budget, `69` prepared handoff, `12` disk-cache.
+  - Generation-budget pending by level: `L1=142`, `L2=314`, `L3=198`, `L4=163`.
+  - Prepared-handoff pending by level: `L1=69`, all other levels `0`.
+  - Active chunk counts by level: `L1=611`, `L2=243`, `L3=151`, `L4=427`.
+
+Next target:
+
+1. Stop treating the far window as hundreds of unrelated one-off chunk builds. The level breakdown points toward a hierarchical far-field/clipmap plan that reuses coarser canonical data and generates visible coverage in larger batches.
+2. Redesign partial handoff only after adding separate canonical persisted chunks and render-local punched instances, so disk reuse cannot regress.
+3. Keep the current correctness gate strict: far stress may fail settle budget, but it must keep `0` gaps and `0` overlaps while performance work continues.

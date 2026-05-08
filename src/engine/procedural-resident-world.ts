@@ -57,6 +57,7 @@ const LOD_RINGS = [
   { level: 3, radiusChunks: 6 },
   { level: 4, radiusChunks: 10 },
 ] as const;
+const MAX_LOD_LEVEL = LOD_RINGS[LOD_RINGS.length - 1]!.level;
 const SPAWN_FOOTPRINT_RADIUS = metersToWorldUnits(0.8);
 const SPAWN_SCAN_DEPTH = metersToWorldUnits(3.2);
 const SPAWN_MAX_SURFACE_DROP = metersToWorldUnits(1.2);
@@ -111,16 +112,24 @@ export interface ResidencyUpdateSummary {
 
 export interface LodResidencyUpdateSummary {
   generated: number;
+  generatedByLevel: readonly number[];
   cacheHits: number;
+  cacheHitsByLevel: readonly number[];
   emptyCacheHits: number;
+  emptyCacheHitsByLevel: readonly number[];
   pending: number;
   pendingPlanning: number;
   pendingDiskCache: number;
+  pendingDiskCacheByLevel: readonly number[];
   pendingGenerationBudget: number;
+  pendingGenerationBudgetByLevel: readonly number[];
   pendingPartialBuild: number;
+  pendingPartialBuildByLevel: readonly number[];
   pendingPrepared: number;
+  pendingPreparedByLevel: readonly number[];
   pendingInvalidatedEviction: number;
   totalChunks: number;
+  totalChunksByLevel: readonly number[];
   cachedChunks: number;
   cachedEmptyKeys: number;
   elapsedMs: number;
@@ -901,14 +910,20 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       if (!planning.complete) {
         return {
           generated: 0,
+          generatedByLevel: createLodLevelCounts(),
           pending: 1,
           pendingPlanning: 1,
           pendingDiskCache: 0,
+          pendingDiskCacheByLevel: createLodLevelCounts(),
           pendingGenerationBudget: 0,
+          pendingGenerationBudgetByLevel: createLodLevelCounts(),
           pendingPartialBuild: 0,
+          pendingPartialBuildByLevel: createLodLevelCounts(),
           pendingPrepared: 0,
+          pendingPreparedByLevel: createLodLevelCounts(),
           pendingInvalidatedEviction: 0,
           totalChunks: this.lodChunks.size,
+          totalChunksByLevel: countLodChunksByLevel(this.lodChunks.values()),
           cachedChunks: this.retainedLodChunks.size,
           cachedEmptyKeys: this.retainedEmptyLodKeys.size,
           elapsedMs: performance.now() - startedAt,
@@ -922,7 +937,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           neededKeyCount: planning.neededKeyCount,
           neededKeyCacheHit,
           cacheHits: 0,
+          cacheHitsByLevel: createLodLevelCounts(),
           emptyCacheHits: 0,
+          emptyCacheHitsByLevel: createLodLevelCounts(),
           scheduledRegionSummaryRequests,
           lodDiskCacheHits: 0,
           lodDiskCacheMisses: 0,
@@ -939,12 +956,18 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     // Phase 2: downsample and mesh LOD chunks with a budget.
     // Process levels in ascending order so LOD N-1 is available when building LOD N.
     let generated = 0;
+    const generatedByLevel = createLodLevelCounts();
     let cacheHits = 0;
+    const cacheHitsByLevel = createLodLevelCounts();
     let emptyCacheHits = 0;
+    const emptyCacheHitsByLevel = createLodLevelCounts();
     let pending = 0;
     let pendingDiskCache = 0;
+    const pendingDiskCacheByLevel = createLodLevelCounts();
     let pendingGenerationBudget = 0;
+    const pendingGenerationBudgetByLevel = createLodLevelCounts();
     let pendingPartialBuild = 0;
+    const pendingPartialBuildByLevel = createLodLevelCounts();
     let pendingInvalidatedEviction = 0;
     let downsampleMs = 0;
     let meshMs = 0;
@@ -960,6 +983,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
     const adoptedLodDisk = this.adoptCompletedLodDiskChunks(completedLodDiskChunks, neededKeys);
     lodDiskCacheHits += adoptedLodDisk.cacheHits;
+    for (let index = 0; index < cacheHitsByLevel.length; index += 1) {
+      cacheHitsByLevel[index] += adoptedLodDisk.cacheHitsByLevel[index] ?? 0;
+    }
     meshMs += adoptedLodDisk.meshMs;
     let maxChunkMs = 0;
     let maxChunkLevel = 0;
@@ -982,10 +1008,12 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         if (this.emptyLodKeys.has(key)) continue;
         if (this.reviveRetainedEmptyLodKey(key)) {
           emptyCacheHits += 1;
+          emptyCacheHitsByLevel[ring.level] += 1;
           continue;
         }
         if (this.reviveRetainedLodChunk(key)) {
           cacheHits += 1;
+          cacheHitsByLevel[ring.level] += 1;
           continue;
         }
         const parts = key.split(":");
@@ -999,6 +1027,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           }
           pending++;
           pendingDiskCache++;
+          pendingDiskCacheByLevel[ring.level] += 1;
           continue;
         }
         if (
@@ -1008,6 +1037,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         ) {
           pending++;
           pendingGenerationBudget++;
+          pendingGenerationBudgetByLevel[ring.level] += 1;
           workBudgetExhausted = true;
           continue;
         }
@@ -1026,6 +1056,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           if (this.activeLodBuildJob && this.activeLodBuildJob.key !== key) {
             pending++;
             pendingGenerationBudget++;
+            pendingGenerationBudgetByLevel[ring.level] += 1;
             workBudgetExhausted = true;
             continue;
           }
@@ -1042,6 +1073,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
             }
             pending++;
             pendingPartialBuild++;
+            pendingPartialBuildByLevel[ring.level] += 1;
             workBudgetExhausted = true;
             continue;
           }
@@ -1067,6 +1099,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
             clearNeededKeyCache: false,
           });
           generated++;
+          generatedByLevel[ring.level] += 1;
           const chunkMs = performance.now() - chunkStartedAt;
           if (chunkMs > maxChunkMs) {
             maxChunkMs = chunkMs;
@@ -1110,6 +1143,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           clearNeededKeyCache: false,
         });
         generated++;
+        generatedByLevel[ring.level] += 1;
         const chunkMs = performance.now() - chunkStartedAt;
         if (chunkMs > maxChunkMs) {
           maxChunkMs = chunkMs;
@@ -1179,6 +1213,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
     scheduledLodDiskStores += this.flushQueuedLodDiskStores();
     const pendingPrepared = this.preparedLodChunks.size;
+    const pendingPreparedByLevel = countLodChunksByLevel(this.preparedLodChunks.values());
     pending += pendingPrepared;
     if (!neededKeyCacheHit) {
       this.lodNeededKeyCache = {
@@ -1189,16 +1224,24 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
     return {
       generated,
+      generatedByLevel,
       cacheHits,
+      cacheHitsByLevel,
       emptyCacheHits,
+      emptyCacheHitsByLevel,
       pending,
       pendingPlanning: 0,
       pendingDiskCache,
+      pendingDiskCacheByLevel,
       pendingGenerationBudget,
+      pendingGenerationBudgetByLevel,
       pendingPartialBuild,
+      pendingPartialBuildByLevel,
       pendingPrepared,
+      pendingPreparedByLevel,
       pendingInvalidatedEviction,
       totalChunks: this.lodChunks.size,
+      totalChunksByLevel: countLodChunksByLevel(this.lodChunks.values()),
       cachedChunks: this.retainedLodChunks.size,
       cachedEmptyKeys: this.retainedEmptyLodKeys.size,
       elapsedMs: performance.now() - startedAt,
@@ -1289,8 +1332,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   private adoptCompletedLodDiskChunks(
     chunks: AsyncEncodedDerivedLodChunk[],
     neededKeys: Set<string>,
-  ): { cacheHits: number; meshMs: number } {
+  ): { cacheHits: number; cacheHitsByLevel: readonly number[]; meshMs: number } {
     let cacheHits = 0;
+    const cacheHitsByLevel = createLodLevelCounts();
     let meshMs = 0;
     for (const encoded of chunks) {
       this.missingLodDiskCacheKeys.delete(toAsyncLodChunkKey(encoded.key));
@@ -1302,6 +1346,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       if (decoded.solidCount === 0) {
         this.emptyLodKeys.add(key);
         cacheHits += 1;
+        cacheHitsByLevel[decoded.lodLevel] += 1;
         continue;
       }
       const chunk = createLodResidentChunk(
@@ -1322,6 +1367,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         this.retainedEmptyLodKeys.delete(key);
         this.coveragePunchedLodKeys.delete(key);
         cacheHits += 1;
+        cacheHitsByLevel[decoded.lodLevel] += 1;
         continue;
       }
       if (activation.skippedFinerCoverage) {
@@ -1359,8 +1405,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         clearNeededKeyCache: false,
       });
       cacheHits += 1;
+      cacheHitsByLevel[decoded.lodLevel] += 1;
     }
-    return { cacheHits, meshMs };
+    return { cacheHits, cacheHitsByLevel, meshMs };
   }
 
   private scheduleLodDiskChunkRequest(
@@ -3180,6 +3227,20 @@ const ADJACENT_CHUNK_OFFSETS: ReadonlyArray<readonly [number, number, number]> =
   [0, 0, 1],
 ];
 const PRIORITIZED_COLUMN_OFFSETS = new Map<number, Array<[number, number]>>();
+
+function createLodLevelCounts(): number[] {
+  return Array.from({ length: MAX_LOD_LEVEL + 1 }, () => 0);
+}
+
+function countLodChunksByLevel(chunks: Iterable<VoxelChunk>): number[] {
+  const counts = createLodLevelCounts();
+  for (const chunk of chunks) {
+    if (chunk.lodLevel >= 0 && chunk.lodLevel < counts.length) {
+      counts[chunk.lodLevel] += 1;
+    }
+  }
+  return counts;
+}
 
 function sampleOffsets(chunkSize: number): Array<[number, number]> {
   return [

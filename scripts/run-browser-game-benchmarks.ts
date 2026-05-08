@@ -95,13 +95,21 @@ interface LodPersistencePhaseSummary {
   finalLodPendingChunks: number;
   finalLodPendingPlanning: number;
   finalLodPendingDiskCache: number;
+  finalLodPendingDiskCacheByLevel: readonly number[];
   finalLodPendingGenerationBudget: number;
+  finalLodPendingGenerationBudgetByLevel: readonly number[];
   finalLodPendingPartialBuild: number;
+  finalLodPendingPartialBuildByLevel: readonly number[];
   finalLodPendingPrepared: number;
+  finalLodPendingPreparedByLevel: readonly number[];
   finalLodPendingInvalidatedEviction: number;
   finalLodChunkCount: number;
+  finalLodChunkCountByLevel: readonly number[];
   finalLodDrawCalls: number;
   finalLodDrawCallsByLevel: readonly number[];
+  finalLodGeneratedByLevel: readonly number[];
+  finalLodCacheHitsByLevel: readonly number[];
+  finalLodEmptyCacheHitsByLevel: readonly number[];
   finalCumulativeGenerated: number;
   finalCumulativeDiskCacheHits: number;
   finalCumulativeDiskCacheMisses: number;
@@ -814,13 +822,21 @@ function buildLodPersistencePhaseSummary(input: {
     finalLodPendingChunks: input.finalSnapshot.lodPendingChunks,
     finalLodPendingPlanning: input.finalSnapshot.lodPendingPlanning,
     finalLodPendingDiskCache: input.finalSnapshot.lodPendingDiskCache,
+    finalLodPendingDiskCacheByLevel: [...input.finalSnapshot.lodPendingDiskCacheByLevel],
     finalLodPendingGenerationBudget: input.finalSnapshot.lodPendingGenerationBudget,
+    finalLodPendingGenerationBudgetByLevel: [...input.finalSnapshot.lodPendingGenerationBudgetByLevel],
     finalLodPendingPartialBuild: input.finalSnapshot.lodPendingPartialBuild,
+    finalLodPendingPartialBuildByLevel: [...input.finalSnapshot.lodPendingPartialBuildByLevel],
     finalLodPendingPrepared: input.finalSnapshot.lodPendingPrepared,
+    finalLodPendingPreparedByLevel: [...input.finalSnapshot.lodPendingPreparedByLevel],
     finalLodPendingInvalidatedEviction: input.finalSnapshot.lodPendingInvalidatedEviction,
     finalLodChunkCount: input.finalSnapshot.lodChunkCount,
+    finalLodChunkCountByLevel: [...input.finalSnapshot.lodChunkCountByLevel],
     finalLodDrawCalls: input.finalSnapshot.lodDrawCalls,
     finalLodDrawCallsByLevel: [...input.finalSnapshot.lodDrawCallsByLevel],
+    finalLodGeneratedByLevel: [...input.finalSnapshot.lodGeneratedChunksByLevel],
+    finalLodCacheHitsByLevel: [...input.finalSnapshot.lodCacheHitsByLevel],
+    finalLodEmptyCacheHitsByLevel: [...input.finalSnapshot.lodEmptyCacheHitsByLevel],
     finalCumulativeGenerated: input.finalSnapshot.cumulativeLodGeneratedChunks,
     finalCumulativeDiskCacheHits: input.finalSnapshot.cumulativeLodDiskCacheHits,
     finalCumulativeDiskCacheMisses: input.finalSnapshot.cumulativeLodDiskCacheMisses,
@@ -978,6 +994,13 @@ function aggregateLodPersistenceIterations(
     maxFarPendingPrepared: maxNumber(far.map((phase) => phase.finalLodPendingPrepared)),
     maxFarPendingInvalidatedEviction: maxNumber(far.map((phase) => phase.finalLodPendingInvalidatedEviction)),
     maxFarPendingPlanning: maxNumber(far.map((phase) => phase.finalLodPendingPlanning)),
+    maxFarPendingDiskCacheByLevel: maxLevelCounts(far.map((phase) => phase.finalLodPendingDiskCacheByLevel)),
+    maxFarPendingGenerationBudgetByLevel: maxLevelCounts(far.map((phase) => phase.finalLodPendingGenerationBudgetByLevel)),
+    maxFarPendingPartialBuildByLevel: maxLevelCounts(far.map((phase) => phase.finalLodPendingPartialBuildByLevel)),
+    maxFarPendingPreparedByLevel: maxLevelCounts(far.map((phase) => phase.finalLodPendingPreparedByLevel)),
+    maxFarLodChunkCountByLevel: maxLevelCounts(far.map((phase) => phase.finalLodChunkCountByLevel)),
+    maxReloadPendingGenerationBudgetByLevel: maxLevelCounts(reloads.map((phase) => phase.finalLodPendingGenerationBudgetByLevel)),
+    maxReloadLodChunkCountByLevel: maxLevelCounts(reloads.map((phase) => phase.finalLodChunkCountByLevel)),
     firstFailure: failures[0] ?? null,
   };
 }
@@ -1278,4 +1301,18 @@ function maxNumber(values: readonly number[]): number | null {
     return null;
   }
   return roundNumber(Math.max(...numericValues));
+}
+
+function maxLevelCounts(values: readonly (readonly number[])[]): string | null {
+  if (values.length === 0) {
+    return null;
+  }
+  const levelCount = Math.max(0, ...values.map((counts) => counts.length));
+  if (levelCount === 0) {
+    return null;
+  }
+  const maxima = Array.from({ length: levelCount }, (_, level) =>
+    Math.max(0, ...values.map((counts) => counts[level] ?? 0)),
+  );
+  return maxima.join("/");
 }
