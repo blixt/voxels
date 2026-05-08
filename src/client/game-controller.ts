@@ -103,6 +103,9 @@ const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 6;
 const DEFAULT_MAX_LOD_CHUNKS_PER_FRAME = 2;
 const DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME = 3;
 const MOVING_LOD_UPDATE_INTERVAL_FRAMES = 4;
+const MOVING_MAX_RESIDENCY_PLAN_MS_PER_FRAME = 5;
+const MOVING_MAX_EVICT_CHUNKS_PER_FRAME = 32;
+const MOVING_MAX_MESH_REBUILDS_PER_FRAME = 4;
 const MOVING_MAX_LOD_CHUNKS_PER_FRAME = 1;
 const MOVING_MAX_LOD_PLAN_MS_PER_FRAME = 0.75;
 const MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME = 6;
@@ -2541,7 +2544,18 @@ export class GameController {
         this.lastLodSummary.pending,
       )
     ) {
-      this.syncWorldAroundPlayer(false, allowLodUpdate, lodBudget);
+      this.syncWorldAroundPlayer(
+        false,
+        allowLodUpdate,
+        lodBudget,
+        movementActive
+          ? {
+              maxEvictChunks: MOVING_MAX_EVICT_CHUNKS_PER_FRAME,
+              maxPlanMs: MOVING_MAX_RESIDENCY_PLAN_MS_PER_FRAME,
+            }
+          : undefined,
+        movementActive ? MOVING_MAX_MESH_REBUILDS_PER_FRAME : undefined,
+      );
     }
     const render = this.renderInteractiveFrame();
     const gameplayFrameMs = performance.now() - gameplayStartedAt;
@@ -2584,6 +2598,8 @@ export class GameController {
     force = false,
     allowLodUpdate = true,
     lodBudget?: LodUpdateBudget,
+    residencyBudget?: { maxEvictChunks?: number; maxPlanMs?: number },
+    meshBudget?: number,
   ): ResidencyUpdateSummary {
     const playerChunkX = Math.floor(this.player.feetPosition[0] / this.world.chunkSize);
     const playerChunkZ = Math.floor(this.player.feetPosition[2] / this.world.chunkSize);
@@ -2597,7 +2613,7 @@ export class GameController {
       return this.syncWorldAroundAnchor(resolved.anchor, true, true);
     }
     if (!shouldRefreshResidency(false, resolved.changed, this.lastStreamSummary.pendingChunks)) {
-      this.flushMeshBuildBudget();
+      this.flushMeshBuildBudget(meshBudget);
       if (allowLodUpdate) {
         this.lastLodSummary = this.world.updateLodResidencyAround(this.player.feetPosition, {
           maxGenerateLodChunks: lodBudget?.maxGenerateLodChunks ?? DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
@@ -2616,7 +2632,7 @@ export class GameController {
       );
       return cloneResidencySummary(this.lastStreamSummary);
     }
-    return this.syncWorldAroundAnchor(resolved.anchor, false, allowLodUpdate, lodBudget);
+    return this.syncWorldAroundAnchor(resolved.anchor, false, allowLodUpdate, lodBudget, residencyBudget, meshBudget);
   }
 
   private syncWorldAroundAnchor(
@@ -2624,6 +2640,8 @@ export class GameController {
     settle = false,
     allowLodUpdate = true,
     lodBudget?: LodUpdateBudget,
+    residencyBudget?: { maxEvictChunks?: number; maxPlanMs?: number },
+    meshBudget?: number,
   ): ResidencyUpdateSummary {
     this.streamAnchor = anchor;
     const residency = this.world.updateResidencyAround(
@@ -2632,11 +2650,17 @@ export class GameController {
         maxGenerateChunks: settle
           ? Number.POSITIVE_INFINITY
           : this.streamingBudgets.maxGeneratedChunksPerUpdate,
+        maxEvictChunks: settle
+          ? Number.POSITIVE_INFINITY
+          : residencyBudget?.maxEvictChunks,
+        maxPlanMs: settle
+          ? Number.POSITIVE_INFINITY
+          : residencyBudget?.maxPlanMs,
       },
     );
     this.lastStreamSummary = cloneResidencySummary(residency);
     this.flushMeshBuildBudget(
-      settle ? Number.POSITIVE_INFINITY : this.streamingBudgets.maxMeshRebuildsPerFrame,
+      settle ? Number.POSITIVE_INFINITY : meshBudget ?? this.streamingBudgets.maxMeshRebuildsPerFrame,
     );
     if (settle || allowLodUpdate) {
       this.lastLodSummary = this.world.updateLodResidencyAround(this.player.feetPosition, {

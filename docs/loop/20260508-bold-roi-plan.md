@@ -113,3 +113,22 @@ The grid metric still has not moved from `0.68`, so the next loop should stop tr
 | 4 | Ashland travel-kit props: bone chimes, masks, lantern variants, travel packs | 4 | 4 | 3 | 5.3 | Good delegated work now that object-lab root selection is trustworthy | object-lab contact sheets and warnings |
 | 5 | Stronger sky/weather iteration: lightning glow, cloud shelf shape, ash streak movement | 4 | 3 | 3 | 4.0 | Sky is now correct enough to iterate, but grid/composition still matters more | owned-browser luma/color/grid and route frame budget |
 | 6 | Far-view distance increase after spike audit and density pass | 4 | 3 | 4 | 3.0 | The LOD system is clean, but farther view without better composition risks showing more grid | owned-browser LOD/fps/gap gates |
+
+## Re-Rank After Movement Spike Budget Checkpoint
+
+Completed since the fourth ranking:
+
+- Live-forward walking max frame dropped from `21.00 ms` to `8.20 ms`.
+- Stream outliers dropped from `17.20 ms` to `4.10 ms`.
+- Mesh outliers dropped from `13.10 ms` to `3.70 ms` after rejecting an over-tight cap that starved readiness.
+- Full browser route max is now `8.60 ms` with no LOD overlap, no handoff holes, and all near samples render-ready.
+
+The performance foundation is much safer for the next visual push. The strongest remaining user-visible blocker is still the `0.68` grid-dominance metric and the blocky terrain read.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Terrain/composition grid-breaker, second attempt | 5 | 4 | 4 | 5.0 | Movement budget now has headroom; the world still reads too blocky | browser grid metric, route physics continuity, material distribution tests |
+| 2 | Landmark density director using vista scan | 4 | 4 | 3 | 5.3 | Better performance means we can add route composition deliberately, not blindly | route-atlas vista-hit/gap metrics, browser route budget |
+| 3 | Ashland travel-kit props delegated through object-lab | 4 | 4 | 3 | 5.3 | Object-lab root selection is now good enough for parallel asset work | object-lab contact sheets and warnings |
+| 4 | Stronger sky/weather iteration | 4 | 3 | 3 | 4.0 | Useful mood multiplier, but not the main blocker while grid dominance is unchanged | owned-browser luma/color/grid and route frame budget |
+| 5 | Far-view distance increase | 4 | 3 | 4 | 3.0 | Performance now supports experimentation, but far content/composition should improve first | owned-browser LOD/fps/gap gates |

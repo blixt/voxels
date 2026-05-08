@@ -1431,3 +1431,40 @@ Build the first "place identity" slice without regressing performance or input:
   - commit and push this checkpoint
   - tackle the persistent `0.68` grid metric with larger terrain/composition changes
   - run live-forward movement traces again before increasing view distance or adding heavier distant content
+
+### 2026-05-08 - Movement Streaming Spike Budget
+
+- Trigger:
+  - Before making terrain or view-distance heavier, I audited the user's walking-FPS complaint again with the live-forward trace harness.
+  - Baseline after the sky/object checkpoint still had acceptable p95 but bad outliers: `21.00 ms` max gameplay frame, `17.20 ms` max stream, `13.10 ms` max mesh, and `10.60 ms` max LOD in `artifacts/browser-route-trace/20260508T023051Z-post-sky-live-forward-audit/report.json`.
+- Investigation:
+  - The first spikes were residency scan/planning work while hundreds of chunks were pending, even on frames with `generated=0`.
+  - After adding a planning budget, remaining stream spikes were eviction bursts unloading roughly `150-161` old chunks in one movement frame.
+  - A too-low moving mesh cap (`3`) reduced max frame but starved readiness: hole-signal frames jumped to `309`, so I rejected that setting.
+- Changes:
+  - `ProceduralResidentWorld.updateResidencyAround` now accepts `maxPlanMs` and `maxEvictChunks`.
+  - Budget-exhausted residency scans now mark the update incomplete and never evict from a partial needed-key set.
+  - Movement frames use a `5 ms` residency plan budget, a `32` chunk eviction budget, and a `4` mesh rebuild/adoption budget.
+  - Idle/settle/forced updates still use full budgets so the world can catch up when the player stops.
+  - Added tests for incomplete planning safety and amortized eviction.
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun run build`: pass.
+  - Focused tests: `mise exec -- bun test tests/procedural-resident-world.test.ts tests/stream-work.test.ts tests/game-route-benchmark.test.ts`, pass, `29` tests.
+  - Live-forward final: `artifacts/browser-route-trace/20260508T024026Z-budgeted-mesh4-eviction-live-forward/report.json`.
+  - Live-forward result: avg/p95/max gameplay frame `3.68/5.80/8.20 ms`, p95 stream/mesh/LOD `1.10/1.70/3.90 ms`, max stream/mesh/LOD `4.10/3.70/6.50 ms`, no screen-void signals.
+  - Final owned browser lab: `artifacts/owned-browser-lab/20260508T024123Z-budgeted-streaming-final-browser/report.json`, failures none.
+  - Browser result: traversal p95/max `5.30/10.90 ms`, route p95/max `5.20/8.60 ms`, draw/triangles `539/384582`, `LOD overlap LOD0/bands 0/0`, water overlap `0`, gaps `0`, handoff holes `0`, render-ready near samples `961/961`, HUD smoke passed.
+- Honest assessment:
+  - This directly improves the walking outliers I could reproduce: live-forward max frame moved from `21.00 ms` to `8.20 ms`.
+  - The harness still reports diagnostic hole-signal frames during live movement, but screen-void signals are absent and the full browser lab reports no visible holes, no LOD overlap, and no handoff holes. This remains a diagnostic distinction to keep monitoring.
+  - The budget values are empirical, not magic. The `3` mesh cap looked faster but was rejected because it made readiness worse; `4` is the current measured balance.
+  - Visual grid dominance remains unchanged at `0.68`; this checkpoint is performance correctness, not an art/composition fix.
+- Rubric movement:
+  - Performance/playability: `5.20 -> 5.90` because live-forward max frame and stream/mesh outliers dropped sharply while route/traversal browser lab stayed clean.
+  - Harness maturity: `7.90 -> 8.05` because the trace now directly guided budget choices and caught the rejected starvation setting.
+  - Rendering correctness: unchanged at `5.95`; LOD/water correctness held, but no new rendering feature was added.
+  - Visual/world definition: unchanged at `4.80`.
+- Next:
+  - commit and push this performance checkpoint
+  - proceed to terrain/composition grid-breaker work with the new movement budgets in place

@@ -291,6 +291,76 @@ test("resident world can complete a residency window across multiple budgeted up
   expect(settled.pendingChunks).toBe(0);
 });
 
+test("budgeted residency planning does not evict from an incomplete needed-key scan", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    horizontalRadiusChunks: 1,
+  });
+  const spawn = world.getSpawnPosition();
+  world.updateResidencyAround(spawn, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+  const originalChunk = {
+    x: Math.floor(spawn[0] / world.chunkSize),
+    y: Math.floor(spawn[1] / world.chunkSize),
+    z: Math.floor(spawn[2] / world.chunkSize),
+  };
+  expect(world.hasResidentChunk(originalChunk.x, originalChunk.y, originalChunk.z)).toBe(true);
+
+  const farPosition: [number, number, number] = [
+    spawn[0] + world.chunkSize * 8,
+    spawn[1],
+    spawn[2],
+  ];
+  const budgeted = world.updateResidencyAround(farPosition, {
+    maxGenerateChunks: 0,
+    maxPlanMs: 0,
+  });
+
+  expect(budgeted.complete).toBe(false);
+  expect(budgeted.pendingChunks).toBeGreaterThan(0);
+  expect(budgeted.evictedChunks).toBe(0);
+  expect(world.hasResidentChunk(originalChunk.x, originalChunk.y, originalChunk.z)).toBe(true);
+
+  const full = world.updateResidencyAround(farPosition, {
+    maxGenerateChunks: Number.POSITIVE_INFINITY,
+  });
+
+  expect(full.complete).toBe(true);
+  expect(full.evictedChunks).toBeGreaterThan(0);
+  expect(world.hasResidentChunk(originalChunk.x, originalChunk.y, originalChunk.z)).toBe(false);
+});
+
+test("resident world can amortize eviction across budgeted updates", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    horizontalRadiusChunks: 1,
+  });
+  const spawn = world.getSpawnPosition();
+  world.updateResidencyAround(spawn, { maxGenerateChunks: Number.POSITIVE_INFINITY });
+
+  const shifted: [number, number, number] = [
+    spawn[0] + world.chunkSize * 8,
+    spawn[1],
+    spawn[2],
+  ];
+  const first = world.updateResidencyAround(shifted, {
+    maxGenerateChunks: Number.POSITIVE_INFINITY,
+    maxEvictChunks: 2,
+  });
+
+  expect(first.complete).toBe(false);
+  expect(first.evictedChunks).toBe(2);
+  expect(first.pendingChunks).toBeGreaterThan(0);
+
+  let latest = first;
+  for (let attempt = 0; attempt < 16 && !latest.complete; attempt += 1) {
+    latest = world.updateResidencyAround(shifted, {
+      maxGenerateChunks: Number.POSITIVE_INFINITY,
+      maxEvictChunks: 2,
+    });
+  }
+
+  expect(latest.complete).toBe(true);
+  expect(latest.pendingChunks).toBe(0);
+});
+
 test("resident world can stream the same anchor incrementally under a generation budget", () => {
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
     horizontalRadiusChunks: 3,
@@ -464,4 +534,3 @@ test("dirty remesh neighbors retain their existing mesh until rebuilt", () => {
   expect(targetChunk!.meshBuilt).toBe(true);
   expect(targetChunk!.mesh).not.toBeNull();
 });
-

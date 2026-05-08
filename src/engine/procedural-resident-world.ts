@@ -106,6 +106,12 @@ export interface LodResidencyUpdateSummary {
   neededKeyCacheHit: boolean;
 }
 
+export interface ResidencyUpdateOptions {
+  maxGenerateChunks?: number;
+  maxEvictChunks?: number;
+  maxPlanMs?: number;
+}
+
 interface LodNeededKeyPlanningState {
   signature: string;
   neededKeys: Set<string>;
@@ -520,15 +526,15 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
   updateResidencyAround(
     position: Vec3,
-    options: {
-      maxGenerateChunks?: number;
-    } = {},
+    options: ResidencyUpdateOptions = {},
   ): ResidencyUpdateSummary {
     const centerChunkX = Math.floor(position[0] / this.chunkSize);
     const centerChunkZ = Math.floor(position[2] / this.chunkSize);
     const radiusChunks = this.horizontalRadiusChunks;
     const anchorSignature = `${centerChunkX}:${centerChunkZ}:${radiusChunks}`;
     const maxGenerateChunks = options.maxGenerateChunks ?? Number.POSITIVE_INFINITY;
+    const maxEvictChunks = options.maxEvictChunks ?? Number.POSITIVE_INFINITY;
+    const maxPlanMs = options.maxPlanMs ?? Number.POSITIVE_INFINITY;
     const surfaceStartedAt = performance.now();
     const surfaceY = this.generator.sampleColumn(Math.floor(position[0]), Math.floor(position[2])).surfaceY;
     const surfaceSampleMs = performance.now() - surfaceStartedAt;
@@ -579,6 +585,14 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     let evictionMs = 0;
     let neighborDirtyMs = 0;
     let inFlightChunks = this.asyncChunkGeneration?.getPendingCount() ?? 0;
+    let planBudgetExhausted = false;
+    const hasPlanBudgetExpired = (): boolean => {
+      if (!Number.isFinite(maxPlanMs) || performance.now() - startedAt < maxPlanMs) {
+        return false;
+      }
+      planBudgetExhausted = true;
+      return true;
+    };
     const drainStartedAt = performance.now();
     const completedGeneratedChunks = this.asyncChunkGeneration?.drainCompletedChunks() ?? [];
     const completedGenerationStats = this.asyncChunkGeneration?.drainCompletionStats() ?? { cacheHits: 0, generated: 0 };
@@ -604,6 +618,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     let scheduledChunks = 0;
 
     for (const [dx, dz] of prioritizedColumnOffsets(radiusChunks)) {
+      if (hasPlanBudgetExpired()) {
+        break;
+      }
       const cx = centerChunkX + dx;
       const cz = centerChunkZ + dz;
       const yRangeStartedAt = performance.now();
@@ -613,6 +630,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         ? Math.floor(surfaceY / this.chunkSize)
         : Math.floor((minCy + maxCy) * 0.5);
       for (const cy of prioritizedChunkYRange(minCy, maxCy, preferredCy)) {
+        if (hasPlanBudgetExpired()) {
+          break;
+        }
         const key = toChunkKey(cx, cy, cz);
         neededKeys.add(key);
         if (this.chunks.has(key)) {
@@ -691,36 +711,44 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       }
     }
 
-    for (const [key, generated] of this.readyGeneratedChunks) {
-      if (neededKeys.has(key)) {
-        continue;
+    if (!planBudgetExhausted) {
+      for (const [key, generated] of this.readyGeneratedChunks) {
+        if (neededKeys.has(key)) {
+          continue;
+        }
+        this.readyGeneratedChunks.delete(key);
+        if (generated.solidCount === 0) {
+          this.emptyChunkKeys.add(key);
+        }
       }
-      this.readyGeneratedChunks.delete(key);
-      if (generated.solidCount === 0) {
-        this.emptyChunkKeys.add(key);
-      }
-    }
 
-    for (const [key, chunk] of [...this.chunks.entries()]) {
-      if (neededKeys.has(key)) {
-        continue;
+      for (const [key, chunk] of [...this.chunks.entries()]) {
+        if (neededKeys.has(key)) {
+          continue;
+        }
+        if (evictedChunks >= maxEvictChunks) {
+          pendingChunks = Math.max(pendingChunks, 1);
+          break;
+        }
+        const evictionStartedAt = performance.now();
+        this.evictResidentChunk(key, chunk);
+        evictedChunks += 1;
+        evictedChunkCoords.push({ ...chunk.coord });
+        evictionMs += performance.now() - evictionStartedAt;
+        const dirtyStartedAt = performance.now();
+        touchedNeighborChunks += this.markAdjacentChunksDirty(chunk.coord.x, chunk.coord.y, chunk.coord.z);
+        neighborDirtyMs += performance.now() - dirtyStartedAt;
       }
-      const evictionStartedAt = performance.now();
-      this.evictResidentChunk(key, chunk);
-      evictedChunks += 1;
-      evictedChunkCoords.push({ ...chunk.coord });
-      evictionMs += performance.now() - evictionStartedAt;
-      const dirtyStartedAt = performance.now();
-      touchedNeighborChunks += this.markAdjacentChunksDirty(chunk.coord.x, chunk.coord.y, chunk.coord.z);
-      neighborDirtyMs += performance.now() - dirtyStartedAt;
+    } else {
+      pendingChunks = Math.max(pendingChunks, 1, this.lastResidency.pendingChunks);
     }
 
     this.lastAnchorSignature = anchorSignature;
-    this.lastAnchorComplete = pendingChunks === 0;
+    this.lastAnchorComplete = pendingChunks === 0 && !planBudgetExhausted;
     inFlightChunks = this.asyncChunkGeneration?.getPendingCount() ?? 0;
     this.lastResidency = {
       changed: generatedChunks > 0 || evictedChunks > 0,
-      complete: pendingChunks === 0,
+      complete: pendingChunks === 0 && !planBudgetExhausted,
       centerChunkX,
       centerChunkZ,
       radiusChunks,
