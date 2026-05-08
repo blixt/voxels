@@ -19,6 +19,21 @@ interface LodLabSnapshot {
   timing: FrameTimingSnapshot;
   timingStrip: string;
   worstBucketSummary: string;
+  lastFrameAttribution: LodLabFrameAttribution;
+  lastHitchAttribution: LodLabFrameAttribution;
+}
+
+interface LodLabFrameAttribution {
+  frame: number;
+  wallMs: number;
+  planMs: number;
+  completeMs: number;
+  handoffMs: number;
+  renderMs: number;
+  hudMs: number;
+  completedChunks: number;
+  pendingChunks: number;
+  cause: string;
 }
 
 const canvas = document.querySelector<HTMLCanvasElement>('[data-role="viewport"]');
@@ -54,6 +69,9 @@ let animationId = 0;
 let nextSweepFrame = 0;
 const frameTimings = new FrameTimingBuckets(125, 50, 96);
 const timingStripBucketCount = 48;
+const maxPendingCompletionsPerFrame = 1;
+let lastFrameAttribution = createZeroLodLabFrameAttribution();
+let lastHitchAttribution = createZeroLodLabFrameAttribution();
 
 void boot();
 
@@ -83,10 +101,18 @@ function tick(timestamp: number): void {
   }
   const delta = Math.max(1, timestamp - lastTimestamp);
   const timing = frameTimings.record(timestamp);
+  if (delta >= timing.hitchThresholdMs) {
+    lastHitchAttribution = {
+      ...lastFrameAttribution,
+      wallMs: delta,
+      cause: lastFrameAttribution.cause === "none" ? "browser or idle" : lastFrameAttribution.cause,
+    };
+  }
   lastTimestamp = timestamp;
   fps = fps * 0.92 + (1000 / delta) * 0.08;
   frame += 1;
 
+  const planStartedAt = performance.now();
   const reportBeforePlan = world.reportCoverage(visibleRequest);
   if (!stagedRequest && reportBeforePlan.pendingChunks === 0 && frame >= nextSweepFrame) {
     const sweep = Math.sin(frame * 0.018) * 4;
@@ -98,26 +124,49 @@ function tick(timestamp: number): void {
     world.prepareCoverage(stagedRequest);
     nextSweepFrame = frame + 90;
   }
-  world.completePending(2);
+  const planMs = performance.now() - planStartedAt;
+
+  const completeStartedAt = performance.now();
+  const completedChunks = world.completePending(maxPendingCompletionsPerFrame);
+  const completeMs = performance.now() - completeStartedAt;
+
+  const handoffStartedAt = performance.now();
   if (stagedRequest && world.reportCoverage(stagedRequest).pendingChunks === 0) {
     visibleRequest = stagedRequest;
     stagedRequest = null;
     world.requestCoverage(visibleRequest);
   }
+  const handoffMs = performance.now() - handoffStartedAt;
   orbitCamera(camera, 0.0025, 0);
 
   const aspect = Math.max(1, viewportCanvas.width) / Math.max(1, viewportCanvas.height);
   const matrices = buildCameraMatrices(camera, aspect);
+  const renderStartedAt = performance.now();
   const stats = renderer.render(world, {
     viewProjection: matrices.viewProjection,
     position: matrices.eye,
   });
+  const renderMs = performance.now() - renderStartedAt;
   const snapshot = buildSnapshot(stats.drawCalls, stats.triangles);
+  const hudStartedAt = performance.now();
   hudElement.textContent = [
     `LOD Lab | ${snapshot.fps.toFixed(1)} fps | max ${timing.worstRecentFrameMs.toFixed(0)}ms | hitches ${timing.recentHitchCount} | dropped ${timing.recentDroppedFrameEstimate}`,
     `8Hz buckets ${snapshot.timingStrip} | ${snapshot.worstBucketSummary}`,
+    formatHitchAttribution(snapshot),
     `chunks ${snapshot.activeChunks} pending ${snapshot.pendingChunks} | gaps ${snapshot.gaps} overlaps ${snapshot.overlaps} | draws ${snapshot.drawCalls}`,
   ].join("\n");
+  const hudMs = performance.now() - hudStartedAt;
+  lastFrameAttribution = createLodLabFrameAttribution({
+    frame,
+    wallMs: delta,
+    planMs,
+    completeMs,
+    handoffMs,
+    renderMs,
+    hudMs,
+    completedChunks,
+    pendingChunks: snapshot.pendingChunks,
+  });
 
   animationId = requestAnimationFrame(tick);
 }
@@ -137,6 +186,8 @@ function buildSnapshot(drawCalls: number, triangles: number): LodLabSnapshot {
     timing,
     timingStrip: formatTimingStrip(timing),
     worstBucketSummary: formatWorstBucketSummary(timing),
+    lastFrameAttribution: { ...lastFrameAttribution },
+    lastHitchAttribution: { ...lastHitchAttribution },
   };
 }
 
@@ -177,6 +228,46 @@ function formatWorstBucketSummary(timing: FrameTimingSnapshot): string {
   }
   const secondsAgo = Math.max(0, (timing.current.endMs - worstBucket.endMs) / 1000);
   return `worst bucket ${worstBucket.maxFrameMs.toFixed(0)}ms ${secondsAgo.toFixed(1)}s ago (${worstBucket.hitchCount} hitch)`;
+}
+
+function formatHitchAttribution(snapshot: LodLabSnapshot): string {
+  if (snapshot.timing.recentHitchCount === 0) {
+    return "last hitch none in recent window";
+  }
+  const hitch = snapshot.lastHitchAttribution;
+  return `last hitch ${hitch.cause} ${hitch.wallMs.toFixed(0)}ms | complete ${hitch.completeMs.toFixed(1)} handoff ${hitch.handoffMs.toFixed(1)} render ${hitch.renderMs.toFixed(1)}`;
+}
+
+function createZeroLodLabFrameAttribution(): LodLabFrameAttribution {
+  return createLodLabFrameAttribution({
+    frame: 0,
+    wallMs: 0,
+    planMs: 0,
+    completeMs: 0,
+    handoffMs: 0,
+    renderMs: 0,
+    hudMs: 0,
+    completedChunks: 0,
+    pendingChunks: 0,
+  });
+}
+
+function createLodLabFrameAttribution(
+  input: Omit<LodLabFrameAttribution, "cause">,
+): LodLabFrameAttribution {
+  const candidates: Array<[cause: string, ms: number]> = [
+    ["complete", input.completeMs],
+    ["handoff", input.handoffMs],
+    ["render", input.renderMs],
+    ["plan", input.planMs],
+    ["HUD", input.hudMs],
+  ];
+  candidates.sort((left, right) => right[1] - left[1]);
+  const [cause, ms] = candidates[0] ?? ["none", 0];
+  return {
+    ...input,
+    cause: ms > 0.05 ? cause : "none",
+  };
 }
 
 function handlePointerDown(): void {
