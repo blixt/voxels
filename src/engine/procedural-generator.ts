@@ -90,6 +90,10 @@ export type LandmarkId =
   | "ash_obelisk"
   | "rib_arch"
   | "old_road_causeway"
+  | "paver_debris"
+  | "scree_fan"
+  | "shrine_debris"
+  | "buried_ribs"
   | "pilgrim_lantern"
   | "bone_chimes"
   | "crystal_reeds"
@@ -440,6 +444,8 @@ const FEATURE_DEAD_TREE = 16;
 const FEATURE_MEGASTRUCTURE = 17;
 const FEATURE_RIB_ARCH = 18;
 const FEATURE_CAUSEWAY = 19;
+const FEATURE_ROAD_DEBRIS = 20;
+const FEATURE_BURIED_RIBS = 21;
 const CHUNK_GENERATION_SCRATCH_POOL_LIMIT = 4;
 
 interface PilgrimRouteBand {
@@ -471,7 +477,7 @@ const BASE_BIOMES: readonly BaseBiomeProfile[] = [
   createBaseBiome("savanna", 0.72, 0.54, 0.32, 0.56, 0.46, 0.16, -2, 0.50, 0.20, 0.36, 0.18, 0.00, 6.4, 1640, "#BA6", "#CB7", "#DB8", "#C86", "#887", "#986", "#A97", "#5AB", "#EED"),
   createBaseBiome("steppe", 0.62, 0.42, 0.36, 0.52, 0.48, 0.14, 0, 0.54, 0.22, 0.32, 0.18, 0.00, 4.8, 1608, "#9B6", "#CB7", "#BA6", "#CA7", "#887", "#875", "#986", "#4AA", "#DDD"),
   createBaseBiome("dunes", 0.84, 0.16, 0.18, 0.28, 0.30, 0.12, -16, 0.32, 0.10, 0.54, 0.42, 0.00, 8.8, 1710, "#DB6", "#EC9", "#EC7", "#CA5", "#B96", "#B85", "#C96", "#5BC", "#EDC"),
-  createBaseBiome("badlands", 0.72, 0.20, 0.58, 0.36, 0.58, 0.16, 18, 0.72, 0.64, 0.38, 0.06, 0.28, 10.8, 1670, "#C75", "#D96", "#D86", "#B54", "#865", "#A54", "#965", "#49B", "#EBC"),
+  createBaseBiome("badlands", 0.72, 0.20, 0.58, 0.36, 0.58, 0.16, 18, 0.72, 0.64, 0.38, 0.06, 0.28, 10.8, 1670, "#A65", "#B87", "#A76", "#854", "#654", "#743", "#854", "#386", "#CAB"),
   createBaseBiome("highland", 0.40, 0.56, 0.72, 0.46, 0.72, 0.16, 44, 0.88, 0.62, 0.24, 0.10, 0.06, 7.8, 1518, "#6B7", "#7C8", "#7A8", "#8C7", "#778", "#667", "#889", "#5AD", "#EEF"),
   createBaseBiome("moor", 0.28, 0.68, 0.48, 0.28, 0.54, 0.16, 6, 0.34, 0.16, 0.22, 0.30, 0.00, 5.4, 1532, "#758", "#869", "#97A", "#546", "#667", "#564", "#675", "#357", "#DDE"),
   createBaseBiome("tundra", 0.18, 0.42, 0.86, 0.40, 0.82, 0.12, 78, 0.98, 0.82, 0.16, 0.02, 0.04, 6.2, 1452, "#BCC", "#CDD", "#DDE", "#ABB", "#889", "#99A", "#AAB", "#8CD", "#EEF"),
@@ -569,6 +575,10 @@ const LANDMARKS: Record<LandmarkId, LandmarkProfile> = {
   ash_obelisk: createLandmark("ash_obelisk", 212, 8, 0.18, 1.0, 2),
   rib_arch: createLandmark("rib_arch", 196, 13, 0.18, 1.0, 1),
   old_road_causeway: createLandmark("old_road_causeway", 128, 13, 0.30, 1.0, 1),
+  paver_debris: createLandmark("paver_debris", 96, 12, 0.38, 1.0, 0),
+  scree_fan: createLandmark("scree_fan", 104, 13, 0.34, 1.0, 1),
+  shrine_debris: createLandmark("shrine_debris", 124, 15, 0.28, 1.0, 2),
+  buried_ribs: createLandmark("buried_ribs", 144, 12, 0.24, 1.0, 3),
   pilgrim_lantern: createLandmark("pilgrim_lantern", 124, 5, 0.28, 1.0, 4),
   bone_chimes: createLandmark("bone_chimes", 156, 7, 0.24, 1.0, 5),
   crystal_reeds: createLandmark("crystal_reeds", 112, 5, 0.34, 1.0, 2),
@@ -805,6 +815,10 @@ const STEPPE_MONOLITH_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const PILGRIM_ROUTE_SKYLINE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("paver_debris", { chance: 0.60, scale: 1.24, cellSize: 70, radius: 15 }),
+  landmarkPlacement("scree_fan", { chance: 0.46, scale: 1.18, cellSize: 84, radius: 14 }),
+  landmarkPlacement("shrine_debris", { chance: 0.34, scale: 1.14, cellSize: 112, radius: 15 }),
+  landmarkPlacement("buried_ribs", { chance: 0.30, scale: 1.18, cellSize: 132, radius: 13 }),
   landmarkPlacement("old_road_causeway", { chance: 0.46, scale: 1.20, cellSize: 104, radius: 14 }),
   landmarkPlacement("pilgrim_lantern", { chance: 0.40, scale: 1.22, cellSize: 104, radius: 5 }),
   landmarkPlacement("bone_chimes", { chance: 0.34, scale: 1.18, cellSize: 124, radius: 7 }),
@@ -837,6 +851,8 @@ const BADLANDS_CRATER_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("ash_obelisk", { chance: 0.18, scale: 1.22, cellSize: 188, radius: 8 }),
   landmarkPlacement("rib_arch", { chance: 0.16, scale: 1.18, cellSize: 176, radius: 13 }),
   landmarkPlacement("old_road_causeway", { chance: 0.24, scale: 1.10, cellSize: 128, radius: 13 }),
+  landmarkPlacement("scree_fan", { chance: 0.30, scale: 1.12, cellSize: 112, radius: 13 }),
+  landmarkPlacement("buried_ribs", { chance: 0.18, scale: 1.10, cellSize: 156, radius: 12 }),
   landmarkPlacement("hoodoo", { chance: 0.34, scale: 1.24 }),
   landmarkPlacement("ash_marker", { chance: 0.26, scale: 1.22, cellSize: 148, radius: 5 }),
   landmarkPlacement("standing_stone", { chance: 0.26, scale: 1.22 }),
@@ -849,6 +865,10 @@ const ASH_WASTES_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("ash_obelisk", { chance: 0.30, scale: 1.28, cellSize: 172, radius: 8 }),
   landmarkPlacement("rib_arch", { chance: 0.28, scale: 1.24, cellSize: 160, radius: 14 }),
   landmarkPlacement("old_road_causeway", { chance: 0.38, scale: 1.16, cellSize: 104, radius: 14 }),
+  landmarkPlacement("paver_debris", { chance: 0.46, scale: 1.18, cellSize: 84, radius: 13 }),
+  landmarkPlacement("scree_fan", { chance: 0.42, scale: 1.18, cellSize: 92, radius: 14 }),
+  landmarkPlacement("shrine_debris", { chance: 0.28, scale: 1.12, cellSize: 124, radius: 15 }),
+  landmarkPlacement("buried_ribs", { chance: 0.26, scale: 1.16, cellSize: 144, radius: 13 }),
   landmarkPlacement("pilgrim_lantern", { chance: 0.42, scale: 1.22, cellSize: 108, radius: 5 }),
   landmarkPlacement("bone_chimes", { chance: 0.30, scale: 1.18, cellSize: 132, radius: 7 }),
   landmarkPlacement("ash_marker", { chance: 0.46, scale: 1.28, cellSize: 120, radius: 5 }),
@@ -4225,6 +4245,66 @@ function configureLandmarkFeature(
       );
       out.featureExtra = 5;
       return true;
+    case "paver_debris":
+      if (submergedSurface) {
+        return false;
+      }
+      configureSpireFeature(
+        out,
+        FEATURE_ROAD_DEBRIS,
+        scaledFeatureHeight(3, 4, fields.scatter + fields.surfacePatch * 0.25, profile.scale),
+        scaledFeatureRadius(10, 5, fields.scatter + fields.desolation * 0.2, profile.scale),
+        "#655",
+        "#887",
+        "#433",
+      );
+      out.featureExtra = profile.variant;
+      return true;
+    case "scree_fan":
+      if (submergedSurface) {
+        return false;
+      }
+      configureSpireFeature(
+        out,
+        FEATURE_ROAD_DEBRIS,
+        scaledFeatureHeight(4, 5, fields.scatter + fields.desolation * 0.22, profile.scale),
+        scaledFeatureRadius(12, 6, fields.scatter + fields.uplift * 0.18, profile.scale),
+        "#433",
+        "#765",
+        "#B75",
+      );
+      out.featureExtra = 1;
+      return true;
+    case "shrine_debris":
+      if (submergedSurface) {
+        return false;
+      }
+      configureSpireFeature(
+        out,
+        FEATURE_ROAD_DEBRIS,
+        scaledFeatureHeight(5, 5, fields.magic + fields.surfacePatch * 0.2, profile.scale),
+        scaledFeatureRadius(8, 5, fields.scatter + fields.magic * 0.2, profile.scale),
+        "#544",
+        "#A87",
+        "#DA8",
+      );
+      out.featureExtra = 2;
+      return true;
+    case "buried_ribs":
+      if (submergedSurface) {
+        return false;
+      }
+      configureSpireFeature(
+        out,
+        FEATURE_BURIED_RIBS,
+        scaledFeatureHeight(8, 8, fields.desolation + fields.surfacePatch * 0.25, profile.scale),
+        scaledFeatureRadius(11, 5, fields.scatter + fields.desolation * 0.2, profile.scale),
+        "#665",
+        "#CBA",
+        "#432",
+      );
+      out.featureExtra = profile.variant;
+      return true;
     case "ash_obelisk":
       configureSpireFeature(
         out,
@@ -4978,6 +5058,155 @@ function sampleFeatureMaterial(
       const edge = absZ > 1.6 || absX > featureRadius - 1 || (crossAxis && absX > 1.2) || oldRoadShoulder || oldRoadApproach;
       const brokenJoint = (Math.floor(featureDeltaX / 3) + Math.floor(featureDeltaZ / 3)) % 3 === 0;
       return edge || (relativeY === slabHeight && brokenJoint) ? materialSecondary : materialPrimary;
+    }
+    case FEATURE_ROAD_DEBRIS: {
+      const slabHeight = Math.max(1, Math.min(featureHeight, 5));
+      if (relativeY > slabHeight || radial > featureRadius + 1.5) {
+        return 0;
+      }
+      if (featureExtra === 1) {
+        const forward = featureDeltaZ + featureRadius * 0.66;
+        const fanWidth = Math.max(2.4, 2.2 + Math.max(0, forward) * 0.64);
+        const inFan = forward >= 0
+          && featureDeltaZ <= featureRadius * 0.82
+          && absX <= fanWidth
+          && absX + Math.max(0, -featureDeltaZ * 0.18) <= featureRadius * 0.94;
+        const spur = Math.abs(featureDeltaZ + featureDeltaX * 0.36) <= 1.05
+          && absX <= featureRadius * 0.76
+          && featureDeltaZ > -featureRadius * 0.52;
+        if (!inFan && !spur) {
+          return 0;
+        }
+        const localNoise = hashNoise3D(
+          Math.floor(featureDeltaX * 0.45),
+          relativeY + 11,
+          Math.floor(featureDeltaZ * 0.45),
+          1231 + featureRadius * 13,
+        );
+        const top = Math.max(1, Math.min(slabHeight, 1 + Math.floor(localNoise * (slabHeight + 1))));
+        if (relativeY > top) {
+          return 0;
+        }
+        const gap = localNoise < 0.16 && relativeY >= top - 1;
+        if (gap) {
+          return 0;
+        }
+        const brightChip = materialAccent !== 0 && relativeY === top && localNoise > 0.78;
+        return brightChip ? materialAccent : relativeY === top || spur ? materialSecondary : materialPrimary;
+      }
+      if (featureExtra === 2) {
+        const plinthHeight = Math.max(3, Math.min(slabHeight, 4));
+        const plinth = absX <= featureRadius * 0.92
+          && absZ <= Math.max(4.0, featureRadius * 0.66)
+          && absX + absZ <= featureRadius * 1.28
+          && relativeY <= plinthHeight;
+        const frontStep = featureDeltaZ < -featureRadius * 0.24
+          && absX <= featureRadius * 0.70
+          && absZ <= featureRadius * 0.88
+          && relativeY <= 2;
+        const leftShard = Math.abs(featureDeltaX + featureRadius * 0.42) <= 1.1
+          && Math.abs(featureDeltaZ - featureRadius * 0.12) <= 1.0
+          && relativeY <= slabHeight
+          && relativeY >= Math.max(1, Math.floor(absZ * 0.25));
+        const rightShard = Math.abs(featureDeltaX - featureRadius * 0.32) <= 1.0
+          && Math.abs(featureDeltaZ + featureRadius * 0.20) <= 1.35
+          && relativeY <= Math.max(2, slabHeight - 1);
+        const rearShard = Math.abs(featureDeltaZ - featureRadius * 0.36) <= 1.1
+          && absX <= 1.4
+          && relativeY <= Math.max(3, slabHeight - 1);
+        if (!plinth && !frontStep && !leftShard && !rightShard && !rearShard) {
+          return 0;
+        }
+        const brokenCorner = plinth
+          && relativeY === plinthHeight
+          && absX > featureRadius * 0.62
+          && absZ > featureRadius * 0.42
+          && (Math.floor(absX + absZ) + featureExtra) % 2 === 0;
+        if (brokenCorner) {
+          return 0;
+        }
+        const inlay = materialAccent !== 0
+          && relativeY >= plinthHeight - 1
+          && (absX <= 0.9 || absZ <= 0.9 || leftShard || rearShard)
+          && (Math.floor(absX + absZ) % 3 !== 1);
+        return inlay ? materialAccent : leftShard || rightShard || rearShard || relativeY >= plinthHeight - 1 ? materialSecondary : materialPrimary;
+      }
+      const islandA = Math.hypot(
+        (featureDeltaX + featureRadius * 0.34) / Math.max(2.6, featureRadius * 0.46),
+        (featureDeltaZ - featureRadius * 0.12) / Math.max(1.9, featureRadius * 0.22),
+      );
+      const islandB = Math.hypot(
+        (featureDeltaX - featureRadius * 0.28) / Math.max(2.4, featureRadius * 0.40),
+        (featureDeltaZ + featureRadius * 0.28) / Math.max(1.8, featureRadius * 0.24),
+      );
+      const islandC = Math.hypot(
+        (featureDeltaX + featureRadius * 0.04) / Math.max(2.0, featureRadius * 0.28),
+        (featureDeltaZ + featureRadius * 0.58) / Math.max(1.6, featureRadius * 0.18),
+      );
+      const ribLineA = Math.abs(featureDeltaZ - featureDeltaX * 0.38) <= 1.15
+        && featureDeltaX > -featureRadius * 0.70
+        && featureDeltaX < featureRadius * 0.58;
+      const ribLineB = featureExtra >= 2
+        && Math.abs(featureDeltaZ + featureDeltaX * 0.52 - featureRadius * 0.18) <= 0.90
+        && featureDeltaX > -featureRadius * 0.50
+        && featureDeltaX < featureRadius * 0.74;
+      const inIsland = islandA <= 1 || islandB <= 1 || islandC <= 1 || ribLineA || ribLineB;
+      if (!inIsland) {
+        return 0;
+      }
+      const localNoise = hashNoise3D(
+        Math.floor(featureDeltaX * 0.5),
+        featureExtra + relativeY,
+        Math.floor(featureDeltaZ * 0.5),
+        971 + featureRadius * 17,
+      );
+      const top = Math.max(1, Math.min(slabHeight, 1 + Math.floor(localNoise * (slabHeight + 1))));
+      if (relativeY > top) {
+        return 0;
+      }
+      const paverJoint = (Math.floor((featureDeltaX + featureRadius) / 3) + Math.floor((featureDeltaZ + featureRadius) / 4)) % 4 === 0;
+      const chip = localNoise < 0.18 && relativeY >= top - 1;
+      if (chip || (paverJoint && relativeY === top)) {
+        return 0;
+      }
+      if (materialAccent !== 0 && (ribLineA || ribLineB || (relativeY === top && localNoise > 0.76))) {
+        return materialAccent;
+      }
+      return relativeY === top || paverJoint ? materialSecondary : materialPrimary;
+    }
+    case FEATURE_BURIED_RIBS: {
+      const lowHeight = Math.max(4, Math.min(featureHeight, 14));
+      if (relativeY > lowHeight) {
+        return 0;
+      }
+      const ribPlanes = [-0.48, -0.24, 0.02, 0.28, 0.52].map((fraction) => fraction * featureRadius);
+      const ribPlaneDistance = Math.min(...ribPlanes.map((ribZ) => Math.abs(featureDeltaZ - ribZ)));
+      const span = Math.max(5.2, featureRadius * 0.88);
+      const normalizedX = Math.min(1, absX / span);
+      const archY = 1 + Math.round((1 - normalizedX * normalizedX) * lowHeight * 0.82);
+      const brokenGap = hashNoise3D(
+        Math.floor((featureDeltaX + 32) * 0.25),
+        Math.floor(relativeY * 0.5),
+        Math.floor((featureDeltaZ + 32) * 0.25),
+        1559 + featureExtra,
+      ) < 0.10;
+      const onRib = absX <= span
+        && ribPlaneDistance <= 0.95
+        && Math.abs(relativeY - archY) <= 1
+        && !brokenGap;
+      if (onRib) {
+        const darkCrack = materialAccent !== 0 && ribPlaneDistance <= 0.32 && (Math.round(absX) + relativeY) % 4 === 0;
+        return darkCrack ? materialAccent : materialSecondary;
+      }
+      const buriedSpine = absX <= 1.25
+        && absZ <= featureRadius * 0.62
+        && relativeY <= Math.max(2, Math.round(lowHeight * 0.28));
+      const knuckle = radial <= Math.max(1.3, featureRadius * 0.16)
+        && relativeY <= Math.max(3, Math.round(lowHeight * 0.34));
+      if (buriedSpine || knuckle) {
+        return materialPrimary;
+      }
+      return 0;
     }
     case FEATURE_BUSH:
       if (relativeY === 0 && absX <= 0.55 && absZ <= 0.55) {

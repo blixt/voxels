@@ -96,6 +96,10 @@ const AUDITED_SURFACE_LANDMARK_IDS = [
   "ash_obelisk",
   "rib_arch",
   "old_road_causeway",
+  "paver_debris",
+  "scree_fan",
+  "shrine_debris",
+  "buried_ribs",
   "pilgrim_lantern",
   "bone_chimes",
   "crystal_reeds",
@@ -1235,6 +1239,10 @@ test("ancient route landmarks appear in harsh and uncanny regions", () => {
   expect(seen.has("ash_marker")).toBe(true);
   expect(seen.has("glass_cairn")).toBe(true);
   expect(seen.has("old_road_causeway")).toBe(true);
+  expect(seen.has("paver_debris")).toBe(true);
+  expect(seen.has("scree_fan")).toBe(true);
+  expect(seen.has("shrine_debris")).toBe(true);
+  expect(seen.has("buried_ribs")).toBe(true);
   expect(seen.has("pilgrim_lantern")).toBe(true);
   expect(seen.has("bone_chimes")).toBe(true);
 });
@@ -1260,6 +1268,10 @@ test("ashland exploration landmarks add Morrowind-like silhouettes", () => {
   expect(seen.has("ash_obelisk")).toBe(true);
   expect(seen.has("rib_arch")).toBe(true);
   expect(seen.has("old_road_causeway")).toBe(true);
+  expect(seen.has("paver_debris")).toBe(true);
+  expect(seen.has("scree_fan")).toBe(true);
+  expect(seen.has("shrine_debris")).toBe(true);
+  expect(seen.has("buried_ribs")).toBe(true);
   expect(seen.has("pilgrim_lantern")).toBe(true);
   expect(seen.has("bone_chimes")).toBe(true);
 });
@@ -1277,6 +1289,10 @@ test("ash wastes regional pockets favor ancient ashland silhouettes over generic
     "ash_obelisk",
     "rib_arch",
     "old_road_causeway",
+    "paver_debris",
+    "scree_fan",
+    "shrine_debris",
+    "buried_ribs",
     "pilgrim_lantern",
     "bone_chimes",
   ]);
@@ -1386,6 +1402,50 @@ test("ashland and old-road landmarks render shaped caps instead of block columns
   expect(chimesObject.solidVoxelCount).toBeGreaterThanOrEqual(450);
   expect(chimesObject.materialVariety).toBeGreaterThanOrEqual(3);
   expect(chimesObject.dominantMaterialShare).toBeLessThan(0.80);
+
+  const paverDebris = findRepresentativeLandmarkRoot(generator, "paver_debris");
+  expect(paverDebris).not.toBeNull();
+  const paverObject = measureLandmarkObject(generator, paverDebris!, 18, 4);
+  expect(paverObject.solidVoxelCount).toBeGreaterThanOrEqual(80);
+  expect(paverObject.solidVoxelCount).toBeLessThan(1400);
+  expect(paverObject.materialVariety).toBeGreaterThanOrEqual(3);
+  expect(paverObject.dominantMaterialShare).toBeLessThan(0.86);
+  expect(paverObject.boundsSize[0]).toBeGreaterThanOrEqual(12);
+  expect(paverObject.boundsSize[2]).toBeGreaterThanOrEqual(8);
+  expect(paverObject.boundsSize[1]).toBeLessThanOrEqual(10);
+
+  const screeFan = findRepresentativeLandmarkRoot(generator, "scree_fan");
+  expect(screeFan).not.toBeNull();
+  const screeObject = measureLandmarkObject(generator, screeFan!, 20, 5);
+  expect(screeObject.solidVoxelCount).toBeGreaterThanOrEqual(120);
+  expect(screeObject.solidVoxelCount).toBeLessThan(1800);
+  expect(screeObject.materialVariety).toBeGreaterThanOrEqual(3);
+  expect(screeObject.dominantMaterialShare).toBeLessThan(0.88);
+  expect(screeObject.boundsSize[0]).toBeGreaterThanOrEqual(14);
+  expect(screeObject.boundsSize[2]).toBeGreaterThanOrEqual(10);
+  expect(screeObject.boundsSize[1]).toBeLessThanOrEqual(12);
+
+  const shrineDebris = findRepresentativeLandmarkRoot(generator, "shrine_debris");
+  expect(shrineDebris).not.toBeNull();
+  const shrineObject = measureLandmarkObject(generator, shrineDebris!, 18, 6);
+  expect(shrineObject.solidVoxelCount).toBeGreaterThanOrEqual(120);
+  expect(shrineObject.solidVoxelCount).toBeLessThan(1600);
+  expect(shrineObject.materialVariety).toBeGreaterThanOrEqual(3);
+  expect(shrineObject.dominantMaterialShare).toBeLessThan(0.88);
+  expect(shrineObject.boundsSize[0]).toBeGreaterThanOrEqual(10);
+  expect(shrineObject.boundsSize[2]).toBeGreaterThanOrEqual(7);
+  expect(shrineObject.boundsSize[1]).toBeLessThanOrEqual(14);
+
+  const buriedRibs = findRepresentativeLandmarkRoot(generator, "buried_ribs");
+  expect(buriedRibs).not.toBeNull();
+  const ribsObject = measureLandmarkObject(generator, buriedRibs!, 20, 8);
+  expect(ribsObject.solidVoxelCount).toBeGreaterThanOrEqual(120);
+  expect(ribsObject.solidVoxelCount).toBeLessThan(1800);
+  expect(ribsObject.materialVariety).toBeGreaterThanOrEqual(2);
+  expect(ribsObject.dominantMaterialShare).toBeLessThan(0.90);
+  expect(ribsObject.boundsSize[0]).toBeGreaterThanOrEqual(12);
+  expect(ribsObject.boundsSize[2]).toBeGreaterThanOrEqual(8);
+  expect(ribsObject.boundsSize[1]).toBeLessThanOrEqual(18);
 });
 
 test("ashland megastructures have distinctive large silhouettes", () => {

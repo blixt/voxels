@@ -1784,3 +1784,48 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - checkpoint and push compare-mode harness work
   - move to foreground silhouette interrupters before another shader attempt
+
+### 2026-05-08 - Foreground Interrupter Pack And Darker Ashland Read
+
+- Trigger:
+  - The paver-only foreground attempt was too subtle: object-lab passed, but view-atlas deltas were essentially zero and route strong-silhouette coverage dipped slightly.
+  - The ROI audit agreed the next useful work should be bold foreground/world identity plus harder comparison gates, not another tiny prop or unchecked shader edit.
+- Changes:
+  - Added `bun run lab:object` as a package alias because isolated object review is now a repeated inner-loop task.
+  - Expanded old-road foreground forms from only `paver_debris` to a small pack:
+    - `paver_debris`: half-buried old-road slabs.
+    - `scree_fan`: dark basalt slide fans across route shoulders.
+    - `shrine_debris`: collapsed amber-inlaid roadside plinths.
+    - `buried_ribs`: low bone arcs breaking up flat ash.
+  - Added the new landmarks to discovery names/flavor, old-road journal role, route object-lab batch, ash wastes and route rosters, and generator coverage tests.
+  - Shifted base badlands materials away from bright sand/orange toward darker rust/ash so ashland screenshots stop reading as generic desert.
+- Validation:
+  - Focused tests: `mise exec -- bun test tests/procedural-generator.test.ts tests/object-lab.test.ts tests/discovery-catalog.test.ts`, pass, `46` tests.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Build: `mise exec -- bun run build`, pass.
+  - Object-lab foreground debug: `artifacts/object-lab/2026-05-08-061819477Z-foreground-pack-debug-v3/batch-report.json`.
+    - `shrine_debris` improved from `63` sparse voxels / dominant-material warnings to `1133` voxels, `3` materials, no warnings.
+    - `scree_fan` and `buried_ribs` still report `low-bounds-fill`; visually this is partly intentional negative space, but the harness cannot distinguish that from bad sparsity yet.
+  - Route object-lab batch: `artifacts/object-lab/2026-05-08-061909845Z-foreground-pack-route/batch-report.json`, `14` route landmark runs.
+  - Route atlas: `artifacts/route-atlas/20260508T061943Z-foreground-pack/report.json`, failures none, route stretch coverage `100%`, strong silhouette coverage `87.7%`, max notable gap `72.0 m`, `+17` landmark hits and `+3` distinct route landmarks versus paver-only.
+  - Terrain lab: `artifacts/terrain-lab/20260508T062244Z-foreground-pack/report.json`, average grid-likeness unchanged at `0.000`; this confirms the terrain shape sampler did not regress.
+  - View atlas: `artifacts/view-atlas/20260508T062002Z-foreground-pack/report.json`, failures none.
+  - View-atlas deltas versus old-road haze baseline:
+    - stronger mood/read: origin luma `-4.5`, ash-marker luma `-5.7`, ziggurat-approach luma `-9.6`, obelisk-approach luma `-7.0`.
+    - mixed correctness metric: ash-marker center grid improved `-0.001`, but ziggurat-approach center/lower grid worsened `+0.011/+0.006` and obelisk-approach worsened `+0.008/+0.006`.
+  - Owned browser lab: `artifacts/owned-browser-lab/20260508T062244Z-foreground-pack/report.json`, failures none.
+  - Browser result: traversal p95/max `4.50/7.80 ms`, route p95/max `4.70/9.20 ms`, draw/triangles `511/384990`, visual saturation/grid/color `0.35/0.68/101`, LOD overlap LOD0/bands `0/0`, water overlap `0`, LOD gaps `0`, handoff holes `0`, render-ready near samples `961/961`, HUD smoke passed.
+- Honest assessment:
+  - This pass is visibly bolder than the paver-only attempt, especially in the close ashland approach screenshots where debris/ribs/markers create a more authored route scene.
+  - It still does not solve the Minecrafty read. The whole-screen grid metric remains `0.68`, and the close-view grid metric worsened where darker material contrast makes block edges more obvious.
+  - The performance result is acceptable: denser route landmarks did not create a movement-frame regression or LOD overlap bug.
+  - The next correctness step should be a hard view-atlas budget and object-lab distinctiveness/negative-space scoring, so I can separate genuine visual progress from merely darker or busier screenshots.
+- Rubric movement:
+  - Harness maturity: `9.60 -> 9.65` because `lab:object` is now a first-class repeated command and the foreground pack was evaluated across object, route, terrain, view, and browser labs.
+  - Visual/world definition: `6.05 -> 6.20` because old roads now have low debris, collapsed shrine markers, and rib forms instead of only towers/markers.
+  - Performance/playability: `6.25 -> 6.30` because frame budgets held despite more route object variety.
+  - Rendering correctness: unchanged at `6.35`; the screenshot atlas says the grid/block read is still not corrected.
+- Next:
+  - checkpoint and push this foreground pack
+  - implement a view-atlas comparison budget gate and object-lab distinctiveness/negative-space scoring
+  - only then retry shader/contact-depth work or route-aware RPG hooks

@@ -273,3 +273,25 @@ The next highest-confidence visual path is geometry/composition that the existin
 | 4 | Route-aware gameplay/discovery hooks | 4 | 4 | 3 | 5.3 | `pilgrimRouteInfluence` is available, but visual foreground still leads | objective tests, browser objective probe |
 | 5 | Push ziggurat below huge budget with negative space | 3 | 4 | 3 | 4.0 | Still worthwhile, but less visible than foreground shape breakup | object-lab target `<18000`, route coverage |
 | 6 | Far-view distance experiment | 4 | 3 | 4 | 3.0 | Wait until far surfaces read less like chessboards | owned-browser LOD/fps/gap gates |
+
+## Re-Rank After Foreground Interrupter Pack
+
+Completed since the rejected shader attempt:
+
+- Added old-road foreground forms: `paver_debris`, `scree_fan`, `shrine_debris`, and `buried_ribs`.
+- Added `bun run lab:object` for faster isolated asset review.
+- Route atlas recovered to strong silhouette coverage `87.7%`, with `+3` distinct route landmarks versus the paver-only pass.
+- Browser performance held: traversal p95/max `4.50/7.80 ms`, route p95/max `4.70/9.20 ms`, draw calls `511`, failures none.
+- View atlas is still mixed: close approach screenshots are more authored and moodier, but darker ground contrast worsened close-view grid metrics. Whole-browser visual grid remains `0.68`.
+
+The next ROI is less about adding assets and more about making the evaluation gates stricter so future work cannot pass by being merely darker or busier.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | View-atlas comparison budget gate with per-view center/lower/horizon thresholds and regression output | 4 | 5 | 2 | 10.0 | The latest pass proved screenshots can look moodier while grid metrics regress | `bun run atlas:views -- --compare-to=...`, tests for failing/passing budgets |
+| 2 | Object-lab distinctiveness and negative-space score | 4 | 5 | 3 | 6.7 | `scree_fan` and `buried_ribs` are intentionally sparse, but the lab treats them like bad low-fill assets | object-lab tests, route batch comparison |
+| 3 | Fast shader smoke harness before any WGSL retry | 4 | 4 | 2 | 8.0 | The previous shader attempt black-framed; shader work needs a one-view gate before the full atlas | one-view luma/color/frame gate, typecheck/build |
+| 4 | Contact-depth/lighting pass with strict atlas budgets | 5 | 3 | 4 | 3.8 | Block edges need softer depth cues, but it must not repeat the failed broad shader edit | shader smoke, view-atlas, owned-browser budget |
+| 5 | Route-aware RPG hooks: named old roads, shrine blessings, Cartography/Naturalist/Lore progress | 5 | 4 | 3 | 6.7 | `pilgrimRouteInfluence` and richer route landmarks can now support exploration gameplay | objective/skill tests, browser objective probe |
+| 6 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Still useful, but not the current screenshot bottleneck | object-lab target `<18000`, route coverage |
+| 7 | Far-view distance experiment | 4 | 3 | 4 | 3.0 | Still blocked by foreground/horizon readability | owned-browser LOD/fps/gap gates |
