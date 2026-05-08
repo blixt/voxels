@@ -110,6 +110,11 @@ const ROUTES: RouteSpec[] = [
   { label: "velothi-shrine-road", startMeters: [-1427.2, -2348.8], headingDegrees: 0, lengthMeters: 240, stepMeters: 3, requiredLandmarkIds: ["velothi_shrine"] },
   { label: "kwama-mound-road", startMeters: [-1360, -2568], headingDegrees: 0, lengthMeters: 120, stepMeters: 1.6, requiredLandmarkIds: ["kwama_mound"] },
   { label: "pilgrim-cairn-road", startMeters: [-1260, -2593.6], headingDegrees: 0, lengthMeters: 120, stepMeters: 1.6, requiredLandmarkIds: ["pilgrim_cairn"] },
+  { label: "ziggurat-vista-road", startMeters: [-1704.8, -2536.9], headingDegrees: 0, lengthMeters: 160, stepMeters: 2, requiredLandmarkIds: ["velothi_ziggurat"] },
+  { label: "ash-obelisk-road", startMeters: [-1658.1, -2508.8], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["ash_obelisk"] },
+  { label: "rib-arch-road", startMeters: [-1171.7, -2546.4], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["rib_arch"] },
+  { label: "causeway-road", startMeters: [19.6, -3277.1], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["old_road_causeway"] },
+  { label: "pilgrim-lantern-road", startMeters: [18.6, -3245.3], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["pilgrim_lantern"] },
 ];
 
 const thresholds = {

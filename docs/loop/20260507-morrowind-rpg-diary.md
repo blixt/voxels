@@ -1245,3 +1245,26 @@ Build the first "place identity" slice without regressing performance or input:
   - add route-atlas visible-nearby landmark requirements for ziggurat/obelisk/rib/causeway routes
   - revisit sky shader only with screenshot luma/color gates active
   - start terrain macro/material breakup to reduce the block-grid read
+
+### 2026-05-08 - Route Atlas Megastructure Route Coverage
+
+- Follow-up after the bold composition checkpoint.
+- Added explicit route-atlas coverage routes for:
+  - `velothi_ziggurat`
+  - `ash_obelisk`
+  - `rib_arch`
+  - `old_road_causeway`
+  - `pilgrim_lantern`
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun run scripts/route-atlas.ts --label=bold-landmark-routes`: pass.
+  - Route atlas artifact: `artifacts/route-atlas/20260508T011459Z-bold-landmark-routes/report.json`.
+  - Result: landmark hits `57` (`+11`), distinct landmarks `+6`, regional variants `7`, max notable gap `504.0 m`, failures none.
+- Honest assessment:
+  - This closes the immediate route-atlas gap for the new landmarks by direct route hits.
+  - The better long-term harness is still visible-nearby scanning, because vista landmarks can matter even when the path does not pass through their exact footprint.
+- Rubric movement:
+  - Harness maturity: `6.90 -> 7.00` because the atlas now has deterministic route coverage for the new high-ROI landmark families.
+- Next:
+  - commit and push this route-atlas harness checkpoint
+  - implement visible-nearby route landmark scans when adding the next set of vistas
