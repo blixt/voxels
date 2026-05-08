@@ -229,6 +229,24 @@ test("resident world reuses known-empty chunk results on a repeated anchor refre
   expect(second.phaseMs.chunkGenerationMs).toBe(0);
 });
 
+test("LOD Y-range planning avoids full procedural column fallback", () => {
+  const generator = new CountingProceduralWorldGenerator(1337);
+  const world = new ProceduralResidentWorld(generator, { horizontalRadiusChunks: 4 });
+  const spawn = world.getSpawnPosition();
+  world.updateResidencyAround(spawn, {
+    maxGenerateChunks: Number.POSITIVE_INFINITY,
+  });
+
+  generator.sampleColumnCalls = 0;
+  const lod = world.updateLodResidencyAround(spawn, {
+    maxGenerateLodChunks: 0,
+  });
+
+  expect(lod.neededKeyCount).toBeGreaterThan(0);
+  expect(lod.pending).toBeGreaterThan(0);
+  expect(generator.sampleColumnCalls).toBe(0);
+});
+
 test("resident world tracks dirty chunks without rescanning the full resident set", () => {
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
     horizontalRadiusChunks: 2,

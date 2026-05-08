@@ -428,3 +428,21 @@ Completed since the prop visibility checkpoint:
 | 4 | Foreground terrain shape breakup with a camera-visible design | 5 | 3 | 4 | 3.8 | The global grid metric remains `0.67`; this still needs real geometry/composition, not fog | terrain lab compare, enforced world atlas lower-ground grid, route continuity |
 | 5 | Composition director for actual route camera sightlines | 5 | 3 | 4 | 3.8 | Farther views matter more when the camera has strong foreground/midground silhouettes | route-atlas vista scan, view-atlas deltas, draw/triangle budget |
 | 6 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Valuable RPG feel, but rendering correctness and scale are currently more fragile | UI tests, browser HUD smoke |
+
+## Re-Rank After LOD Y-Range Planning Cleanup
+
+Completed since the far-view checkpoint:
+
+- LOD Y-range planning now prefers cached generated column summaries and no longer calls the full `sampleColumn()` fallback in the covered regression path.
+- A broad no-generator envelope attempt was rejected because it exploded pending LOD keys and failed the far-ring starvation test.
+- Owned browser route max improved from `9.80 ms` to `6.10 ms`, while settled overlap/gap/handoff gates stayed clean.
+- Transient far-LOD gap frames did not improve, and increasing moving LOD generation budget failed to reduce them.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Moving far-LOD handoff diagnostic: separate true visible holes from conservative far-gap samples and dirty/old coverage windows | 5 | 4 | 3 | 6.7 | The gap count is stubborn and may be measuring a benign handoff; correctness work needs sharper classification before more fixes | route benchmark samples, settled-reference capture, owned-browser gap counters |
+| 2 | Water/shoreline far-LOD correctness pass for marsh/saltflat horizons | 4 | 4 | 3 | 5.3 | Longer fog exposes more water horizon; water overlap is clean but needs route-specific probes | extended `probeLodCoverage`, marsh/salt view atlas, owned-browser water overlap |
+| 3 | Object prominence metric for prop atlas | 4 | 4 | 3 | 5.3 | Prop screenshots exist, but target readability is still not quantified | prop atlas region metrics, object-lab links |
+| 4 | Foreground terrain shape breakup with a camera-visible design | 5 | 3 | 4 | 3.8 | The global grid metric remains `0.67`; this still needs real geometry/composition, not fog | terrain lab compare, enforced world atlas lower-ground grid, route continuity |
+| 5 | Composition director for actual route camera sightlines | 5 | 3 | 4 | 3.8 | Farther views matter more when the camera has strong foreground/midground silhouettes | route-atlas vista scan, view-atlas deltas, draw/triangle budget |
+| 6 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Useful RPG feel, but rendering diagnostics are still the sharper blocker | UI tests, browser HUD smoke |

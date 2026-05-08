@@ -13,6 +13,8 @@ import {
   type OpaqueChunkNeighborFaceSnapshot,
 } from "./opaque-chunk-mesher.ts";
 import {
+  NO_GENERATED_SURFACE_HEIGHT,
+  NO_GENERATED_WATER_HEIGHT,
   summarizeGeneratedChunkRender,
   type GeneratedChunkRenderSummary,
 } from "./generated-chunk-render-summary.ts";
@@ -977,35 +979,10 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       const yRange = this.estimateYRangeFromLodSolidBounds(cx, cz, level, stride, worldSize);
       if (yRange) return yRange;
     }
-    // Fallback: sample the generator
-    const points = [
-      [cx * worldSize, cz * worldSize],
-      [cx * worldSize + worldSize - 1, cz * worldSize],
-      [cx * worldSize, cz * worldSize + worldSize - 1],
-      [cx * worldSize + worldSize - 1, cz * worldSize + worldSize - 1],
-      [cx * worldSize + (worldSize >> 1), cz * worldSize + (worldSize >> 1)],
-    ];
-    let minSurfaceY = Infinity;
-    let maxSurfaceY = -Infinity;
-    let maxTopY = -Infinity;
-    let maxWaterY = -Infinity;
-    for (const [px, pz] of points) {
-      const col = this.generator.sampleColumn(px!, pz!);
-      if (col.surfaceY < minSurfaceY) minSurfaceY = col.surfaceY;
-      if (col.surfaceY > maxSurfaceY) maxSurfaceY = col.surfaceY;
-      if (col.topY > maxTopY) maxTopY = col.topY;
-      if ((col.waterTopY ?? col.surfaceY) > maxWaterY) maxWaterY = col.waterTopY ?? col.surfaceY;
-    }
-    const shellPaddingY = Math.max(stride * 2, this.chunkSize);
-    const minWorldY = Math.max(0, minSurfaceY - shellPaddingY);
-    const maxWorldY = Math.min(
-      this.maxYExclusive - 1,
-      Math.max(maxSurfaceY, maxTopY, maxWaterY)
-        + this.airPaddingChunks * this.chunkSize,
-    );
-    const minCy = Math.max(0, Math.floor(minWorldY / worldSize));
-    const maxCy = Math.max(0, Math.floor(maxWorldY / worldSize));
-    return { minCy, maxCy };
+    const summaryRange = this.estimateYRangeFromColumnSummaries(cx, cz, stride, worldSize);
+    if (summaryRange) return summaryRange;
+
+    return this.estimateYRangeFromSurfaceSamples(cx, cz, stride, worldSize);
   }
 
   private planLodNeededKeys(
@@ -1169,6 +1146,74 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     const shellPaddingY = Math.max(sourceStride * 2, this.chunkSize);
     const paddedMinY = Math.max(0, globalMinY - shellPaddingY);
     const paddedMaxY = Math.min(this.maxYExclusive - 1, globalMaxY + this.airPaddingChunks * this.chunkSize);
+    return {
+      minCy: Math.max(0, Math.floor(paddedMinY / worldSize)),
+      maxCy: Math.max(0, Math.floor(paddedMaxY / worldSize)),
+    };
+  }
+
+  private estimateYRangeFromColumnSummaries(
+    lodCx: number,
+    lodCz: number,
+    stride: number,
+    worldSize: number,
+  ): { minCy: number; maxCy: number } | null {
+    const minCol0X = lodCx * stride;
+    const maxCol0X = minCol0X + stride - 1;
+    const minCol0Z = lodCz * stride;
+    const maxCol0Z = minCol0Z + stride - 1;
+    let minWorldY = Number.POSITIVE_INFINITY;
+    let maxWorldY = Number.NEGATIVE_INFINITY;
+
+    for (let cz = minCol0Z; cz <= maxCol0Z; cz += 1) {
+      for (let cx = minCol0X; cx <= maxCol0X; cx += 1) {
+        const summary = this.generatedRenderColumnSummaries.get(toColumnKey(cx, cz));
+        if (!summary) continue;
+        const range = estimateColumnSummaryWorldYRange(summary, this.chunkSize);
+        if (!range) continue;
+        minWorldY = Math.min(minWorldY, range.minY);
+        maxWorldY = Math.max(maxWorldY, range.maxY);
+      }
+    }
+
+    if (!Number.isFinite(minWorldY) || !Number.isFinite(maxWorldY)) {
+      return null;
+    }
+    return this.toPaddedLodYRange(minWorldY, maxWorldY, stride, worldSize);
+  }
+
+  private estimateYRangeFromSurfaceSamples(
+    cx: number,
+    cz: number,
+    stride: number,
+    worldSize: number,
+  ): { minCy: number; maxCy: number } {
+    const points = [
+      [cx * worldSize, cz * worldSize],
+      [cx * worldSize + worldSize - 1, cz * worldSize],
+      [cx * worldSize, cz * worldSize + worldSize - 1],
+      [cx * worldSize + worldSize - 1, cz * worldSize + worldSize - 1],
+      [cx * worldSize + (worldSize >> 1), cz * worldSize + (worldSize >> 1)],
+    ];
+    let minSurfaceY = Infinity;
+    let maxWorldY = -Infinity;
+    for (const [px, pz] of points) {
+      const column = this.generator.sampleSurfaceColumn(px!, pz!);
+      minSurfaceY = Math.min(minSurfaceY, column.surfaceY);
+      maxWorldY = Math.max(maxWorldY, column.surfaceY, column.topY, column.waterTopY ?? column.surfaceY);
+    }
+    return this.toPaddedLodYRange(minSurfaceY, maxWorldY, stride, worldSize);
+  }
+
+  private toPaddedLodYRange(
+    minWorldY: number,
+    maxWorldY: number,
+    stride: number,
+    worldSize: number,
+  ): { minCy: number; maxCy: number } {
+    const shellPaddingY = Math.max(stride * 2, this.chunkSize);
+    const paddedMinY = Math.max(this.minY, minWorldY - shellPaddingY);
+    const paddedMaxY = Math.min(this.maxYExclusive - 1, maxWorldY + this.airPaddingChunks * this.chunkSize);
     return {
       minCy: Math.max(0, Math.floor(paddedMinY / worldSize)),
       maxCy: Math.max(0, Math.floor(paddedMaxY / worldSize)),
@@ -2337,6 +2382,33 @@ function createLodResidentChunk(generated: GeneratedChunk, lodLevel: number, vox
     gpuDirty: true,
     mesh: null,
   };
+}
+
+function estimateColumnSummaryWorldYRange(
+  summary: GeneratedRenderColumnSummary,
+  chunkSize: number,
+): { minY: number; maxY: number } | null {
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  if (summary.minNonEmptyCy !== null && summary.maxNonEmptyCy !== null) {
+    minY = Math.min(minY, summary.minNonEmptyCy * chunkSize);
+    maxY = Math.max(maxY, (summary.maxNonEmptyCy + 1) * chunkSize - 1);
+  }
+  for (let index = 0; index < summary.surfaceY.length; index += 1) {
+    const surfaceY = summary.surfaceY[index] ?? NO_GENERATED_SURFACE_HEIGHT;
+    if (surfaceY !== NO_GENERATED_SURFACE_HEIGHT) {
+      minY = Math.min(minY, surfaceY);
+      maxY = Math.max(maxY, surfaceY);
+    }
+    const waterTopY = summary.waterTopY[index] ?? NO_GENERATED_WATER_HEIGHT;
+    if (waterTopY !== NO_GENERATED_WATER_HEIGHT) {
+      maxY = Math.max(maxY, waterTopY);
+    }
+  }
+  if (!Number.isFinite(minY) || !Number.isFinite(maxY)) {
+    return null;
+  }
+  return { minY, maxY };
 }
 
 function parseLodKey(key: string): { level: number; cx: number; cy: number; cz: number } | null {

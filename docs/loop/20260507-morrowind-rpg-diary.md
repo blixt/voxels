@@ -2081,3 +2081,43 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint and push this far-view slice
   - inspect LOD Y-range/summary planning fallback so farther views do not depend on expensive generator sampling or transient coverage holes
   - only then attempt another view-distance increase or bolder foreground composition pass
+
+### 2026-05-08 - LOD Y-Range Planning Cleanup
+
+- Trigger:
+  - The far-view retry passed, but bootstrap still spent `111.60 ms` in LOD Y-range planning and route movement still reported transient far-LOD gap samples.
+  - The ROI audit flagged the old generator-backed Y-range fallback as correctness/performance debt before any larger view-distance increase.
+- Rejected attempt:
+  - First removed generator fallback entirely and used a broad known-world Y envelope when summaries were missing.
+  - Unit tests caught the flaw: `budgeted LOD generation does not starve far rings` failed with `9456` pending chunks because the broad vertical range exploded the LOD key set.
+  - I replaced that attempt instead of accepting a theoretically cleaner but practically slower plan.
+- Changes:
+  - LOD Y-range planning now tries cached resident/LOD solid bounds first, then cached/generated render column summaries.
+  - Only when summaries are missing does it fall back to five `sampleSurfaceColumn()` probes, which expose `surfaceY`, `topY`, and water height without the heavier full `sampleColumn()` path.
+  - Added a regression test proving LOD Y-range planning no longer calls the full procedural `sampleColumn()` fallback after resident summaries exist.
+- Validation:
+  - Focused LOD/resident tests: `mise exec -- bun test tests/procedural-resident-world.test.ts tests/lod-system.test.ts`, pass, `48` tests.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Build: `mise run build`, pass.
+  - Owned browser lab: `artifacts/owned-browser-lab/20260508T084027Z-lod-summary-yrange/report.json`, failures none.
+  - Browser result versus far-view baseline:
+    - route p95/max improved from `4.80/9.80 ms` to `4.70/6.10 ms`
+    - draw/triangles dropped from `543/400898` to `532/398662`
+    - visual grid stayed `0.67`
+    - settled LOD overlap/gaps/handoff holes stayed `0/0/0`
+    - transient route far-LOD gap frames stayed `50`
+  - Rejected moving LOD budget experiment: `artifacts/owned-browser-lab/20260508T084333Z-lod-moving-budget/report.json`, failures none but route max worsened to `7.10 ms` and far-gap frames stayed `50`; reverted the budget change.
+- Honest assessment:
+  - This is a useful performance/correctness cleanup, not a complete far-gap fix.
+  - The full-column planning fallback is gone, and route max frame improved materially in the valid browser run.
+  - Bootstrap LOD Y-range time did not improve (`111.60 -> 133.40 ms`), likely because summary scanning plus surface fallback is still doing enough work to matter at startup. The better route max is the stronger acceptance signal here.
+  - The persistent `50` transient far-gap frames point to a different issue: old/new LOD handoff while the moving route is still dirty or pending, not just Y-range sampling cost.
+- Rubric movement:
+  - Rendering correctness/quality: `6.74 -> 6.78` because the planner now prefers render summaries and still passes strict settled overlap/gap gates.
+  - Performance/playability: `6.40 -> 6.48` because route max frame dropped from `9.80 ms` to `6.10 ms` without draw/triangle growth.
+  - Harness maturity: `9.96 -> 9.97` because there is now a regression test for the full-column fallback.
+  - Visual/world definition: unchanged at `6.56`.
+- Next:
+  - checkpoint and push this LOD planning slice
+  - inspect moving far-LOD gap classification and handoff timing; the gap count did not respond to larger generation budgets
+  - then return to the camera-scale visual backlog once LOD movement diagnostics are better understood
