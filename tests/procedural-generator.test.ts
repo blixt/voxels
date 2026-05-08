@@ -254,6 +254,47 @@ function measureCrossSection(
   };
 }
 
+function measureSurfaceFeatureFootprint(
+  generator: ProceduralWorldGenerator,
+  root: LandmarkRoot,
+  radius: number,
+): {
+  count: number;
+  widthX: number;
+  widthZ: number;
+} {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+  let count = 0;
+
+  for (let dz = -radius; dz <= radius; dz += 1) {
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      const x = root.x + dx;
+      const z = root.z + dz;
+      const probe = generator.sampleBiomeProbe(x, z);
+      if (probe.landmarkId !== root.probe.landmarkId) {
+        continue;
+      }
+      if (generator.sampleMaterial(x, probe.surfaceY + 1, z) === 0) {
+        continue;
+      }
+      count += 1;
+      minX = Math.min(minX, dx);
+      maxX = Math.max(maxX, dx);
+      minZ = Math.min(minZ, dz);
+      maxZ = Math.max(maxZ, dz);
+    }
+  }
+
+  return {
+    count,
+    widthX: count === 0 ? 0 : maxX - minX + 1,
+    widthZ: count === 0 ? 0 : maxZ - minZ + 1,
+  };
+}
+
 function measureLandmarkObject(
   generator: ProceduralWorldGenerator,
   root: LandmarkRoot,
@@ -1305,6 +1346,7 @@ test("ashland megastructures have distinctive large silhouettes", () => {
   const obeliskMid = measureCrossSection(generator, obelisk!.x, obelisk!.z, obelisk!.probe.surfaceY + Math.floor(obeliskHeight * 0.55), 18);
   const ribTop = measureMaxCrossSection(generator, ribArch!.x, ribArch!.z, ribArch!.probe.surfaceY + 4, ribArch!.probe.topY, 18);
   const causewaySlab = measureCrossSection(generator, causeway!.x, causeway!.z, causeway!.probe.surfaceY + 1, 24);
+  const causewayFootprint = measureSurfaceFeatureFootprint(generator, causeway!, 64);
 
   expect(zigguratHeight).toBeGreaterThanOrEqual(50);
   expect(obeliskHeight).toBeGreaterThanOrEqual(48);
@@ -1316,6 +1358,9 @@ test("ashland megastructures have distinctive large silhouettes", () => {
   expect(ribTop.maxCount).toBeGreaterThanOrEqual(12);
   expect(causewaySlab.widthX).toBeGreaterThanOrEqual(18);
   expect(causewaySlab.widthZ).toBeGreaterThanOrEqual(4);
+  expect(causewayFootprint.count).toBeGreaterThanOrEqual(240);
+  expect(causewayFootprint.widthX).toBeGreaterThanOrEqual(22);
+  expect(causewayFootprint.widthZ).toBeGreaterThanOrEqual(14);
 });
 
 test("underwater columns no longer expose grassy surface materials", () => {

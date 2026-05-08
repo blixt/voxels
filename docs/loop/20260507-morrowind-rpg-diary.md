@@ -1504,3 +1504,33 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - commit and push only if browser correctness and performance hold
   - next high-ROI candidate is a bolder composition density director; the browser screenshot metric says micro terrain breakup is not enough
+
+### 2026-05-08 - Old Road Foreground Mass
+
+- Trigger:
+  - The terrain grid-breaker browser result proved the next work should be composition-scale, not more subtle surface fracture.
+  - The screenshot still showed roads and terrain reading as broad grids with sparse landmarks.
+- Delegation:
+  - Prop/composition worker widened old-road causeways in isolation, keeping fungal bridges gated off through `materialAccent === 0`.
+- Changes:
+  - Old-road causeway material sampling now adds broken shoulder slabs and intermittent approach slabs around the main cross shape.
+  - Added a procedural surface-footprint helper and assertions so old-road causeways must occupy a wider, denser foreground footprint.
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - Focused tests: `mise exec -- bun test tests/procedural-generator.test.ts tests/object-lab.test.ts`, pass, `41` tests.
+  - Route atlas: `artifacts/route-atlas/20260508T032447Z-causeway-footprint-atlas/report.json`, failures none, route stretch coverage `100.0%`, max notable gap `360.0 m`.
+  - Build: `mise run build`, pass.
+  - Live-forward trace: `artifacts/browser-route-trace/20260508T032527Z-causeway-footprint-live-forward/report.json`, avg/p95/max gameplay `3.25/5.40/14.70 ms`, p95 stream/mesh/LOD `1.10/1.70/3.50 ms`, max stream/mesh/LOD `3.50/12.60/7.20 ms`.
+  - Full owned-browser-lab attempted as `causeway-footprint-browser-prod`, but it hung after navigation before writing a report. This result is inconclusive and not counted as validation.
+- Honest assessment:
+  - This is a small but directionally better composition change: old roads now have more foreground mass without broad placement churn or new draw-call families.
+  - The live-forward max frame is still comfortably under the route budget but worse than the prior final browser lab, probably due to one mesh outlier. This should be monitored before stacking more foreground voxel mass.
+  - Because the full browser lab hung, this checkpoint should stay modest. The next real quality jump still needs reliable browser screenshot comparison or a more robust non-hanging visual harness.
+- Rubric movement:
+  - Visual/world definition: `4.95 -> 5.05` for stronger route-surface footprint.
+  - Harness maturity: unchanged; this exposed owned-browser-lab reliability debt.
+  - Performance/playability: unchanged pending a successful full browser-lab run.
+- Next:
+  - commit and push the causeway footprint if git diff remains scoped
+  - investigate the owned-browser-lab hang before using it as the sole gate for larger composition changes
+  - continue composition density director work with browser route traces and route-atlas gates active

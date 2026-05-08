@@ -4643,10 +4643,22 @@ function sampleFeatureMaterial(
       }
       const longAxis = absX <= featureRadius + 1.5 && absZ <= 2.4;
       const crossAxis = absZ <= Math.max(4.0, featureRadius * 0.42) && absX <= 2.0;
-      if (!longAxis && !crossAxis) {
+      const oldRoadShoulder = materialAccent === 0
+        && relativeY <= Math.max(1, slabHeight - 1)
+        && absX <= featureRadius * 0.78
+        && absZ > 3.0
+        && absZ <= Math.max(5.2, featureRadius * 0.44)
+        && (Math.floor((featureDeltaX + featureRadius) / 4) + Math.floor(absZ)) % 3 !== 1;
+      const oldRoadApproach = materialAccent === 0
+        && relativeY <= Math.max(1, slabHeight - 2)
+        && absX <= Math.max(3.2, featureRadius * 0.34)
+        && absZ <= featureRadius * 0.72
+        && absZ > Math.max(4.0, featureRadius * 0.42)
+        && Math.floor((featureDeltaZ + featureRadius) / 5) % 2 === 0;
+      if (!longAxis && !crossAxis && !oldRoadShoulder && !oldRoadApproach) {
         return 0;
       }
-      const edge = absZ > 1.6 || absX > featureRadius - 1 || (crossAxis && absX > 1.2);
+      const edge = absZ > 1.6 || absX > featureRadius - 1 || (crossAxis && absX > 1.2) || oldRoadShoulder || oldRoadApproach;
       const brokenJoint = (Math.floor(featureDeltaX / 3) + Math.floor(featureDeltaZ / 3)) % 3 === 0;
       return edge || (relativeY === slabHeight && brokenJoint) ? materialSecondary : materialPrimary;
     }
