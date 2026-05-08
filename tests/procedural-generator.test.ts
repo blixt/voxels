@@ -147,6 +147,8 @@ function ensureLandmarkRootCache(generator: ProceduralWorldGenerator): Map<strin
       if (!landmarkId || !pending.has(landmarkId)) {
         continue;
       }
+      let bestRoot: LandmarkRoot | null = null;
+      let bestScore = -Infinity;
       for (let z = coarseZ - 48; z <= coarseZ + 48; z += 1) {
         for (let x = coarseX - 48; x <= coarseX + 48; x += 1) {
           const probe = generator.sampleBiomeProbe(x, z);
@@ -157,11 +159,18 @@ function ensureLandmarkRootCache(generator: ProceduralWorldGenerator): Map<strin
           if (rootMaterial === 0 || isProceduralWaterMaterial(rootMaterial)) {
             continue;
           }
-          cache.set(landmarkId, { x, z, probe });
-          pending.delete(landmarkId);
-          z = coarseZ + 49;
-          break;
+          const root = { x, z, probe };
+          const footprint = measureSurfaceFeatureFootprint(generator, root, 12);
+          const score = footprint.count + footprint.widthX * 4 + footprint.widthZ * 4 + (probe.topY - probe.surfaceY) * 0.5;
+          if (score > bestScore) {
+            bestRoot = root;
+            bestScore = score;
+          }
         }
+      }
+      if (bestRoot) {
+        cache.set(landmarkId, bestRoot);
+        pending.delete(landmarkId);
       }
     }
   }
@@ -1152,6 +1161,37 @@ test("pilgrim route surfaces read as broken ash-stone paths instead of grassy co
   expect(dominantHeightModuloShare).toBeLessThanOrEqual(0.32);
   expect(generator.sampleBiomeProbe(-11245, -15846).pilgrimRouteInfluence).toBeGreaterThan(0.18);
   expect(generator.sampleBiomeProbe(24_000, 24_000).pilgrimRouteInfluence).toBe(0);
+});
+
+test("pilgrim route centerlines drift instead of forming straight strips", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const heading = 8 * Math.PI / 180;
+  const directionX = Math.cos(heading);
+  const directionZ = Math.sin(heading);
+  const normalX = -directionZ;
+  const normalZ = directionX;
+  const bestOffsets: number[] = [];
+
+  for (const alongMeters of [180, 300, 420, 540, 660, 780]) {
+    let bestInfluence = 0;
+    let bestOffset = 0;
+    for (let lateralMeters = -30; lateralMeters <= 30; lateralMeters += 3) {
+      const worldX = Math.round((alongMeters * directionX + lateralMeters * normalX) * 10);
+      const worldZ = Math.round((alongMeters * directionZ + lateralMeters * normalZ) * 10);
+      const influence = generator.sampleBiomeProbe(worldX, worldZ).pilgrimRouteInfluence;
+      if (influence > bestInfluence) {
+        bestInfluence = influence;
+        bestOffset = lateralMeters;
+      }
+    }
+    if (bestInfluence > 0.18) {
+      bestOffsets.push(bestOffset);
+    }
+  }
+
+  expect(bestOffsets.length).toBeGreaterThanOrEqual(4);
+  expect(Math.max(...bestOffsets) - Math.min(...bestOffsets)).toBeGreaterThanOrEqual(9);
+  expect(bestOffsets.some((offset) => Math.abs(offset) >= 6)).toBe(true);
 });
 
 test("new biome families expose distinct landmark identities", () => {

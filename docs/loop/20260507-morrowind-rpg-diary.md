@@ -1890,3 +1890,41 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint and push this shader-smoke slice
   - use `lab:shader` before any contact-depth or WGSL material change
   - then either attempt a very small contact-depth shader edit or build route-aware RPG hooks
+
+### 2026-05-08 - Strict LOD Ownership Probe, Warped Roads, And Route RPG Hooks
+
+- Trigger:
+  - The user still reported visible z-fighting and a world that reads too much like straight voxel strips with ugly scattered props.
+  - A small shader contact/depth attempt after the shader-smoke baseline passed but barely moved view metrics, so I reverted it instead of committing a nearly invisible tweak.
+- Delegation:
+  - An explorer inspected LOD, fog, route, shader, and worldgen ROI without editing files.
+  - A worker improved object-lab diagnostics in isolation: cross-view variation and vertical profile now show whether a prop has a readable silhouette from several angles.
+- Changes:
+  - Skill progression now uses discovery role, not just discovery category:
+    - old-road landmarks train Naturalist plus Cartography and Lore
+    - shrines train Naturalist plus Lore
+  - `probeLodCoverage` now treats a render-ready visible LOD0 surface as an owner even when the full vertical chunk column is not render-ready yet. This closes a blind spot around transient surface/LOD overlap.
+  - Pilgrim routes now have deterministic low-frequency lateral warp instead of perfectly straight bands.
+  - Procedural route tests now verify centerline drift, and representative landmark-root selection prefers dense centered samples instead of first-hit edge samples.
+- Validation:
+  - Focused route/RPG/object/browser tests: `mise exec -- bun test tests/procedural-generator.test.ts tests/skill-journal.test.ts tests/object-lab.test.ts tests/browser-game-benchmark-harness.test.ts`, pass, `53` tests.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Terrain lab: `artifacts/terrain-lab/20260508T071038Z-surface-probes/report.json`, average grid-likeness `0.000`; route patches stayed clean.
+  - Route atlas: `artifacts/route-atlas/20260508T071150Z-warped-pilgrim-routes/report.json`, failures none, route stretch coverage `100%`, strong silhouette coverage `87.7%`, max notable gap `72.0 m`, `-2` landmark hits and `0` distinct delta versus foreground pack.
+  - View atlas: `artifacts/view-atlas/20260508T071150Z-warped-pilgrim-routes/report.json`, failures none.
+  - Owned browser strict LOD probe before route warp: `artifacts/owned-browser-lab/20260508T070116Z-strict-lod-owner-route-rpg/report.json`, failures none, visible LOD0 owner samples `41/11025`, resident/band/water overlaps `0/0/0`, handoff holes `0`.
+  - Owned browser after route warp: `artifacts/owned-browser-lab/20260508T071337Z-warped-pilgrim-routes/report.json`, failures none, traversal p95/max `5.30/9.10 ms`, route p95/max `4.80/7.90 ms`, draw/triangles `494/389948`, LOD overlap LOD0/bands `0/0`, water overlap `0`, gaps/handoff holes `0/0`.
+- Honest assessment:
+  - The stricter LOD probe did not reproduce the user's overlap report on the owned route path, so I kept the better gate and avoided speculative renderer surgery.
+  - Warped roads are a real composition change: route surfaces no longer follow mathematically straight bands, while route coverage and FPS stayed intact.
+  - The whole-browser grid metric is still `0.68`; warped routes help authored traversal feel, but they do not solve the dominant block-edge read by themselves.
+- Rubric movement:
+  - Harness maturity: `9.88 -> 9.92` because LOD ownership is now checked against visible surfaces, not only fully ready columns, and object-lab has more silhouette diagnostics.
+  - Visual/world definition: `6.20 -> 6.35` because old roads now bend and drift instead of reading as straight generated strips.
+  - RPG/exploration loop: `3.20 -> 3.45` because old roads and shrines now feed Cartography/Lore progression directly.
+  - Performance/playability: `6.30 -> 6.35` because route max frame improved to `7.90 ms` in the latest browser lab while draw/triangles stayed under budget.
+  - Rendering correctness: `6.50 -> 6.58` because the stricter ownership probe passed and is now part of browser validation.
+- Next:
+  - checkpoint and push this mixed route/RPG/harness slice
+  - re-rank around the stubborn `0.68` grid metric
+  - likely next work: screenshot-aware lighting/depth or stronger terrain foreground breakup, but only with shader-smoke and enforced view-atlas gates

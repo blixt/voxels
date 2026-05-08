@@ -57,14 +57,21 @@ test("object lab finds a representative landmark and writes isolated artifacts",
   expect(report.sample.diagnostics.silhouette.front.occupiedColumns).toBeGreaterThan(0);
   expect(report.sample.diagnostics.silhouette.front.centerOffset).not.toBeNull();
   expect(report.sample.diagnostics.silhouette.front.aspectRatio).not.toBeNull();
+  expect(report.sample.diagnostics.distinctiveness.crossViewVariation).toBeGreaterThanOrEqual(0);
+  expect(report.sample.diagnostics.distinctiveness.verticalProfile.peakBand).not.toBe("none");
+  expect(report.sample.diagnostics.distinctiveness.verticalProfile.upperShare).toBeGreaterThanOrEqual(0);
+  expect(report.sample.diagnostics.distinctiveness.verticalProfile.middleShare).toBeGreaterThanOrEqual(0);
+  expect(report.sample.diagnostics.distinctiveness.verticalProfile.lowerShare).toBeGreaterThan(0);
   expect(await readFile(report.artifacts.report, "utf8")).toContain(`"landmarkId": "oak"`);
   expect(await readFile(report.artifacts.summary, "utf8")).toContain("# Object Lab: oak");
   expect(await readFile(report.artifacts.summary, "utf8")).toContain("## Silhouette Diagnostics");
+  expect(await readFile(report.artifacts.summary, "utf8")).toContain("## Vertical Profile Diagnostics");
   expect(await readFile(report.artifacts.summary, "utf8")).toContain("## Scale And Cost Diagnostics");
   expect(await readFile(report.artifacts.summary, "utf8")).toContain("## Sample Fit Diagnostics");
   expect(await readFile(report.artifacts.contactSheet, "utf8")).toContain("<svg");
   expect(await readFile(report.artifacts.contactSheet, "utf8")).toContain("Material legend");
   expect(await readFile(report.artifacts.contactSheet, "utf8")).toContain("fit x");
+  expect(await readFile(report.artifacts.contactSheet, "utf8")).toContain("profile peak");
   expect(await readFile(report.artifacts.contactSheet, "utf8")).toContain("budget");
   expect(await readFile(report.artifacts.topProjection, "utf8")).toStartWith("P3\n");
   expect(await readFile(report.artifacts.frontProjection, "utf8")).toStartWith("P3\n");
@@ -138,6 +145,8 @@ test("ashland prop lab diagnostics keep snag branches and squat kwama mound acce
   expect(ashMarker.sample.diagnostics.sampleFit.touchesTop).toBe(false);
   expect(ashMarker.sample.diagnostics.silhouette.front.occupiedRows).toBeGreaterThan(35);
   expect(ashMarker.sample.diagnostics.silhouette.front.occupiedPixels).toBeGreaterThan(270);
+  expect(ashMarker.sample.diagnostics.distinctiveness.verticalProfile.peakBand).toBe("lower");
+  expect(ashMarker.sample.diagnostics.distinctiveness.verticalProfile.topHeaviness).toBeLessThan(0);
   expect(ashMarker.sample.diagnostics.warnings).not.toContain("sample-touches-horizontal-edge");
 
   expect(pilgrimLantern.sample.solidVoxelCount).toBeGreaterThan(350);
@@ -147,6 +156,7 @@ test("ashland prop lab diagnostics keep snag branches and squat kwama mound acce
   expect(pilgrimLantern.sample.diagnostics.sampleFit.touchesTop).toBe(false);
   expect(pilgrimLantern.sample.diagnostics.silhouette.front.occupiedRows).toBeGreaterThan(20);
   expect(pilgrimLantern.sample.diagnostics.silhouette.front.occupiedPixels).toBeGreaterThan(100);
+  expect(pilgrimLantern.sample.diagnostics.distinctiveness.crossViewVariation).toBeGreaterThan(0.15);
   expect(pilgrimLantern.sample.diagnostics.warnings).not.toContain("sample-touches-horizontal-edge");
 });
 
@@ -203,6 +213,8 @@ test("object lab labels intentional negative-space route debris separately from 
     expect(report.sample.diagnostics.distinctiveness.intentionalNegativeSpace).toBe(true);
     expect(report.sample.diagnostics.distinctiveness.negativeSpaceRatio).toBeGreaterThan(0.8);
     expect(report.sample.diagnostics.distinctiveness.coverageBalance).toBeGreaterThan(0.5);
+    expect(report.sample.diagnostics.distinctiveness.crossViewVariation).toBeGreaterThan(0);
+    expect(report.sample.diagnostics.distinctiveness.verticalProfile.peakBand).not.toBe("none");
     expect(report.sample.diagnostics.warnings).toContain("intentional-negative-space");
     expect(report.sample.diagnostics.warnings).not.toContain("low-bounds-fill");
     expect(Array.isArray(report.sample.diagnostics.warningsSuppressed)).toBe(true);
@@ -217,6 +229,8 @@ test("object lab labels intentional negative-space route debris separately from 
   expect(summary).toContain("## Distinctiveness Diagnostics");
   expect(summary).toContain("- Form class: negative-space");
   expect(summary).toContain("- Negative-space ratio:");
+  expect(summary).toContain("- Cross-view variation:");
+  expect(summary).toContain("## Vertical Profile Diagnostics");
   expect(summary).toContain("- Suppressed warnings:");
 });
 
@@ -262,7 +276,9 @@ test("object lab batch writes route landmark comparison diagnostics", async () =
   expect(report.comparison[0]?.formClass).toBe("route");
   expect(report.comparison[0]?.negativeSpaceRatio).toBeGreaterThan(0);
   expect(report.comparison[0]?.coverageBalance).toBeGreaterThan(0);
+  expect(report.comparison[0]?.crossViewVariation).toBeGreaterThan(0);
   expect(report.comparison[0]?.topAsymmetry).toBeGreaterThanOrEqual(0);
+  expect(report.comparison[0]?.verticalProfile.peakBand).not.toBe("none");
   expect(report.comparison[0]?.warningsSuppressed).toEqual([]);
   expect(report.comparison[0]?.topSilhouette.coverage).toBeGreaterThan(0);
   expect(report.comparison[0]?.frontSilhouette.normalizedHeight).toBeGreaterThan(0);
@@ -277,6 +293,8 @@ test("object lab batch writes route landmark comparison diagnostics", async () =
   expect(summary).toContain("# Object Lab Route Landmark Comparison");
   expect(summary).toContain("Negative Space");
   expect(summary).toContain("Coverage Balance");
+  expect(summary).toContain("Cross-View Variation");
+  expect(summary).toContain("Vertical Profile");
   expect(summary).toContain("Suppressed");
   expect(summary).toContain("| ash_marker |");
   expect(summary).toContain("| pilgrim_lantern |");

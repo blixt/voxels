@@ -50,6 +50,23 @@ test("skill journal awards usage XP from surface and underground travel", () => 
   expect(snapshot.travelMeters).toBe(96);
 });
 
+test("skill journal rewards route and shrine discoveries as RPG progression hooks", () => {
+  const journal = new SkillJournal();
+  const discoveries = [
+    event(1, "landmark", "old_road_causeway"),
+    event(2, "landmark", "velothi_shrine"),
+  ];
+
+  const first = journal.observeDiscoveries(discoveries);
+  const second = journal.observeDiscoveries(discoveries);
+
+  expect(first.skills.find((skill) => skill.id === "cartography")?.totalXp).toBe(35);
+  expect(first.skills.find((skill) => skill.id === "lore")?.totalXp).toBe(75);
+  expect(first.skills.find((skill) => skill.id === "naturalist")?.totalXp).toBe(70);
+  expect(second).toEqual(first);
+  expect(second.lastProcessedDiscoverySequence).toBe(2);
+});
+
 test("skill journal reset clears XP and processed discovery state", () => {
   const journal = new SkillJournal();
   journal.observeDiscoveries([event(1, "biome", "verdant")]);

@@ -464,6 +464,12 @@ interface PilgrimRouteSurfaceInfluence {
   lateralRatio: number;
 }
 
+interface PilgrimRouteCoordinates {
+  along: number;
+  lateral: number;
+  lateralRatio: number;
+}
+
 const PILGRIM_ROUTE_BANDS: readonly PilgrimRouteBand[] = [
   createPilgrimRouteBand(0, 0, 8, 1800, 70),
   createPilgrimRouteBand(0, 0, 126, 1800, 70),
@@ -512,6 +518,8 @@ const PILGRIM_ROUTE_WORN_MATERIAL = hexColorToMaterial("#887");
 const PILGRIM_ROUTE_DARK_MATERIAL = hexColorToMaterial("#433");
 const PILGRIM_ROUTE_DUST_MATERIAL = hexColorToMaterial("#544");
 const PILGRIM_ROUTE_SALT_MATERIAL = hexColorToMaterial("#BBA");
+const PILGRIM_ROUTE_WARP_MAX = 18 * WORLD_UNITS_PER_METER;
+const PILGRIM_ROUTE_WARP_FADE_DISTANCE = 140 * WORLD_UNITS_PER_METER;
 
 const UNDERGROUND_BIOMES: Record<UndergroundBiomeId, UndergroundBiomeProfile> = {
   rooted: createUndergroundBiome("rooted", "#586", "#354", "#9C6"),
@@ -2861,19 +2869,13 @@ function samplePilgrimRouteSurfaceInfluence(
 
   let best: PilgrimRouteSurfaceInfluence | null = null;
   for (const band of PILGRIM_ROUTE_BANDS) {
-    const deltaX = worldX - band.startX;
-    const deltaZ = worldZ - band.startZ;
-    const along = deltaX * band.directionX + deltaZ * band.directionZ;
-    if (along < -band.halfWidth || along > band.length + band.halfWidth) {
-      continue;
-    }
-    const lateralRatio = Math.abs(deltaX * -band.directionZ + deltaZ * band.directionX) / band.halfWidth;
-    if (lateralRatio > 1) {
+    const route = samplePilgrimRouteCoordinates(worldX, worldZ, band, fields);
+    if (!route) {
       continue;
     }
 
-    const core = 1 - smoothstep(0.08, 0.38, lateralRatio);
-    const shoulder = smoothstep(0.22, 0.88, lateralRatio) * (1 - smoothstep(0.84, 1.02, lateralRatio));
+    const core = 1 - smoothstep(0.08, 0.38, route.lateralRatio);
+    const shoulder = smoothstep(0.22, 0.88, route.lateralRatio) * (1 - smoothstep(0.84, 1.02, route.lateralRatio));
     const worldXDiv12 = Math.floor(worldX / 12);
     const worldZDiv12 = Math.floor(worldZ / 12);
     const diagonalA = diagonalStripeStrength(worldXDiv12, worldZDiv12, 83, 19, 5, 3);
@@ -2888,12 +2890,53 @@ function samplePilgrimRouteSurfaceInfluence(
       smoothstep(0.42, 0.82, fields.strata + fields.desolation * 0.24),
     );
     const fracture = saturate(crackField * (0.42 + harshness * 0.58) + shoulder * harshness * 0.26);
-    const candidate = { core, shoulder, fracture, lateralRatio };
+    const candidate = { core, shoulder, fracture, lateralRatio: route.lateralRatio };
     if (!best || candidate.core + candidate.shoulder > best.core + best.shoulder) {
       best = candidate;
     }
   }
   return best && best.core + best.shoulder > 0.08 ? best : null;
+}
+
+function samplePilgrimRouteCoordinates(
+  worldX: number,
+  worldZ: number,
+  band: PilgrimRouteBand,
+  fields: SurfaceFieldSample,
+): PilgrimRouteCoordinates | null {
+  const deltaX = worldX - band.startX;
+  const deltaZ = worldZ - band.startZ;
+  const along = deltaX * band.directionX + deltaZ * band.directionZ;
+  if (along < -(band.halfWidth + PILGRIM_ROUTE_WARP_MAX) || along > band.length + band.halfWidth + PILGRIM_ROUTE_WARP_MAX) {
+    return null;
+  }
+  const rawLateral = deltaX * -band.directionZ + deltaZ * band.directionX;
+  const lateral = rawLateral - samplePilgrimRouteLateralWarp(along, band, fields);
+  const lateralRatio = Math.abs(lateral) / band.halfWidth;
+  if (lateralRatio > 1) {
+    return null;
+  }
+  return { along, lateral, lateralRatio };
+}
+
+function samplePilgrimRouteLateralWarp(
+  along: number,
+  band: PilgrimRouteBand,
+  fields: SurfaceFieldSample,
+): number {
+  const edgeFade = smoothstep(0, PILGRIM_ROUTE_WARP_FADE_DISTANCE, along)
+    * (1 - smoothstep(band.length - PILGRIM_ROUTE_WARP_FADE_DISTANCE, band.length, along));
+  if (edgeFade <= 0) {
+    return 0;
+  }
+  const alongMeters = along / WORLD_UNITS_PER_METER;
+  const seed = band.startX * 0.000_037 + band.startZ * 0.000_053 + band.directionX * 11.7 + band.directionZ * 17.3;
+  const broadBend = Math.sin(alongMeters * 0.014 + seed) * 0.56
+    + Math.sin(alongMeters * 0.033 + seed * 1.61) * 0.26;
+  const groundDrift = (fields.surfaceGrain - 0.5) * 0.30
+    + (fields.strata - 0.5) * 0.22
+    + (fields.scatter - 0.5) * 0.18;
+  return clamp((broadBend + groundDrift) * PILGRIM_ROUTE_WARP_MAX, -PILGRIM_ROUTE_WARP_MAX, PILGRIM_ROUTE_WARP_MAX) * edgeFade;
 }
 
 function samplePilgrimRouteSurfaceDelta(
@@ -2944,18 +2987,12 @@ function selectPilgrimRouteRoster(
     return null;
   }
   for (const band of PILGRIM_ROUTE_BANDS) {
-    const deltaX = worldX - band.startX;
-    const deltaZ = worldZ - band.startZ;
-    const along = deltaX * band.directionX + deltaZ * band.directionZ;
-    if (along < -band.halfWidth || along > band.length + band.halfWidth) {
+    const route = samplePilgrimRouteCoordinates(worldX, worldZ, band, fields);
+    if (!route) {
       continue;
     }
-    const lateralRatio = Math.abs(deltaX * -band.directionZ + deltaZ * band.directionX) / band.halfWidth;
-    if (lateralRatio > 1) {
-      continue;
-    }
-    const brokenRouteEdge = lateralRatio > 0.52 && (fields.surfacePatch > 0.42 || fields.scatter > 0.46);
-    const routeCore = lateralRatio <= 0.72 && fields.desolation + fields.ridge + fields.strata > 1.20;
+    const brokenRouteEdge = route.lateralRatio > 0.52 && (fields.surfacePatch > 0.42 || fields.scatter > 0.46);
+    const routeCore = route.lateralRatio <= 0.72 && fields.desolation + fields.ridge + fields.strata > 1.20;
     if (brokenRouteEdge || routeCore) {
       return PILGRIM_ROUTE_SKYLINE_LANDMARKS;
     }

@@ -173,7 +173,9 @@ export interface ObjectLabComparisonRow {
   formClass: ObjectDistinctivenessDiagnostics["formClass"];
   negativeSpaceRatio: number;
   coverageBalance: number;
+  crossViewVariation: number;
   topAsymmetry: number;
+  verticalProfile: ObjectVerticalProfileDiagnostics;
   solidVoxelBudget: ObjectScaleDiagnostics["solidVoxelBudget"];
   topSilhouette: ObjectLabSilhouetteSummary;
   frontSilhouette: ObjectLabSilhouetteSummary;
@@ -209,9 +211,19 @@ export interface ObjectDistinctivenessDiagnostics {
   intentionalNegativeSpace: boolean;
   negativeSpaceRatio: number;
   coverageBalance: number;
+  crossViewVariation: number;
   topAsymmetry: number;
   frontAsymmetry: number;
   sideAsymmetry: number;
+  verticalProfile: ObjectVerticalProfileDiagnostics;
+}
+
+export interface ObjectVerticalProfileDiagnostics {
+  upperShare: number;
+  middleShare: number;
+  lowerShare: number;
+  peakBand: "upper" | "middle" | "lower" | "none";
+  topHeaviness: number;
 }
 
 export interface ObjectScaleDiagnostics {
@@ -763,9 +775,11 @@ function inspectDistinctiveness(
       silhouette.front.coverage,
       silhouette.side.coverage,
     ]),
+    crossViewVariation: measureCrossViewVariation(silhouette),
     topAsymmetry: measureProjectionAsymmetry(sample.topProjection),
     frontAsymmetry: measureProjectionAsymmetry(sample.frontProjection),
     sideAsymmetry: measureProjectionAsymmetry(sample.sideProjection),
+    verticalProfile: inspectVerticalProfile([sample.frontProjection, sample.sideProjection]),
   };
 }
 
@@ -775,6 +789,82 @@ function measureCoverageBalance(coverages: number[]): number {
     return 0;
   }
   return roundRatio(Math.min(...occupiedCoverages) / Math.max(...occupiedCoverages));
+}
+
+function measureCrossViewVariation(silhouette: ObjectLabDiagnostics["silhouette"]): number {
+  const views = Object.values(silhouette);
+  return roundRatio(
+    (
+      normalizedRange(views.map((view) => view.coverage))
+      + normalizedRange(views.map((view) => view.normalizedWidth))
+      + normalizedRange(views.map((view) => view.normalizedHeight))
+      + normalizedRange(views.map((view) => view.aspectRatio ?? 0))
+    ) / 4,
+  );
+}
+
+function normalizedRange(values: number[]): number {
+  const max = Math.max(...values);
+  if (max <= 0) {
+    return 0;
+  }
+  return (max - Math.min(...values)) / max;
+}
+
+function inspectVerticalProfile(projections: Projection[]): ObjectVerticalProfileDiagnostics {
+  const bandCounts = {
+    upper: 0,
+    middle: 0,
+    lower: 0,
+  };
+  for (const projection of projections) {
+    for (let y = 0; y < projection.height; y += 1) {
+      const band = y < projection.height / 3 ? "upper" : y < (projection.height * 2) / 3 ? "middle" : "lower";
+      for (let x = 0; x < projection.width; x += 1) {
+        if (projection.pixels[x + y * projection.width] !== BACKGROUND) {
+          bandCounts[band] += 1;
+        }
+      }
+    }
+  }
+  const total = bandCounts.upper + bandCounts.middle + bandCounts.lower;
+  if (total === 0) {
+    return {
+      upperShare: 0,
+      middleShare: 0,
+      lowerShare: 0,
+      peakBand: "none",
+      topHeaviness: 0,
+    };
+  }
+  const shares = {
+    upper: roundRatio(bandCounts.upper / total),
+    middle: roundRatio(bandCounts.middle / total),
+    lower: roundRatio(bandCounts.lower / total),
+  };
+  const peakBand = (Object.entries(shares) as Array<[ObjectVerticalProfileDiagnostics["peakBand"], number]>)
+    .filter(([band]) => band !== "none")
+    .sort((a, b) => b[1] - a[1] || profileBandRank(a[0]) - profileBandRank(b[0]))[0]![0];
+  return {
+    upperShare: shares.upper,
+    middleShare: shares.middle,
+    lowerShare: shares.lower,
+    peakBand,
+    topHeaviness: roundRatio(shares.upper - shares.lower),
+  };
+}
+
+function profileBandRank(band: ObjectVerticalProfileDiagnostics["peakBand"]): number {
+  if (band === "upper") {
+    return 0;
+  }
+  if (band === "middle") {
+    return 1;
+  }
+  if (band === "lower") {
+    return 2;
+  }
+  return 3;
 }
 
 function measureProjectionAsymmetry(projection: Projection): number {
@@ -1058,6 +1148,7 @@ function buildMarkdownSummary(report: ObjectLabReport): string {
     : "none";
   const scale = report.sample.diagnostics.scale;
   const distinctiveness = report.sample.diagnostics.distinctiveness;
+  const verticalProfile = distinctiveness.verticalProfile;
   const materialRows = report.sample.materialCounts
     .slice(0, 12)
     .map((entry) => `| ${entry.hex} | ${entry.material} | ${entry.count} |`)
@@ -1081,7 +1172,13 @@ function buildMarkdownSummary(report: ObjectLabReport): string {
     `- Form class: ${distinctiveness.formClass}`,
     `- Negative-space ratio: ${formatPercent(distinctiveness.negativeSpaceRatio)}`,
     `- Coverage balance: ${formatPercent(distinctiveness.coverageBalance)}`,
+    `- Cross-view variation: ${formatPercent(distinctiveness.crossViewVariation)}`,
     `- Top asymmetry: ${formatPercent(distinctiveness.topAsymmetry)}`,
+    `- Vertical profile: upper ${formatPercent(verticalProfile.upperShare)}, middle ${
+      formatPercent(verticalProfile.middleShare)
+    }, lower ${formatPercent(verticalProfile.lowerShare)}; peak ${verticalProfile.peakBand}; top heaviness ${
+      formatSignedRatio(verticalProfile.topHeaviness)
+    }`,
     `- Warnings: ${
       report.sample.diagnostics.warnings.length === 0 ? "none" : report.sample.diagnostics.warnings.join(", ")
     }`,
@@ -1108,13 +1205,22 @@ function buildMarkdownSummary(report: ObjectLabReport): string {
     ``,
     `## Distinctiveness Diagnostics`,
     ``,
-    `| Form Class | Intentional Negative Space | Negative-Space Ratio | Coverage Balance | Top Asymmetry | Front Asymmetry | Side Asymmetry |`,
-    `| --- | --- | ---: | ---: | ---: | ---: | ---: |`,
+    `| Form Class | Intentional Negative Space | Negative-Space Ratio | Coverage Balance | Cross-View Variation | Top Asymmetry | Front Asymmetry | Side Asymmetry |`,
+    `| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |`,
     `| ${distinctiveness.formClass} | ${distinctiveness.intentionalNegativeSpace ? "yes" : "no"} | ${
       formatPercent(distinctiveness.negativeSpaceRatio)
-    } | ${formatPercent(distinctiveness.coverageBalance)} | ${formatPercent(distinctiveness.topAsymmetry)} | ${
-      formatPercent(distinctiveness.frontAsymmetry)
+    } | ${formatPercent(distinctiveness.coverageBalance)} | ${formatPercent(distinctiveness.crossViewVariation)} | ${
+      formatPercent(distinctiveness.topAsymmetry)
+    } | ${formatPercent(distinctiveness.frontAsymmetry)
     } | ${formatPercent(distinctiveness.sideAsymmetry)} |`,
+    ``,
+    `## Vertical Profile Diagnostics`,
+    ``,
+    `| Upper Share | Middle Share | Lower Share | Peak Band | Top Heaviness |`,
+    `| ---: | ---: | ---: | --- | ---: |`,
+    `| ${formatPercent(verticalProfile.upperShare)} | ${formatPercent(verticalProfile.middleShare)} | ${
+      formatPercent(verticalProfile.lowerShare)
+    } | ${verticalProfile.peakBand} | ${formatSignedRatio(verticalProfile.topHeaviness)} |`,
     ``,
     `## Scale And Cost Diagnostics`,
     ``,
@@ -1159,7 +1265,9 @@ function buildComparisonRow(report: ObjectLabReport): ObjectLabComparisonRow {
     formClass: report.sample.diagnostics.distinctiveness.formClass,
     negativeSpaceRatio: report.sample.diagnostics.distinctiveness.negativeSpaceRatio,
     coverageBalance: report.sample.diagnostics.distinctiveness.coverageBalance,
+    crossViewVariation: report.sample.diagnostics.distinctiveness.crossViewVariation,
     topAsymmetry: report.sample.diagnostics.distinctiveness.topAsymmetry,
+    verticalProfile: report.sample.diagnostics.distinctiveness.verticalProfile,
     solidVoxelBudget: report.sample.diagnostics.scale.solidVoxelBudget,
     topSilhouette: summarizeSilhouette(report.sample.diagnostics.silhouette.top),
     frontSilhouette: summarizeSilhouette(report.sample.diagnostics.silhouette.front),
@@ -1197,7 +1305,9 @@ function buildBatchMarkdownSummary(report: ObjectLabBatchReport): string {
     row.formClass,
     formatPercent(row.negativeSpaceRatio),
     formatPercent(row.coverageBalance),
+    formatPercent(row.crossViewVariation),
     formatPercent(row.topAsymmetry),
+    formatVerticalProfileSummary(row.verticalProfile),
     row.solidVoxelBudget,
     formatSilhouetteSummary(row.topSilhouette),
     formatSilhouetteSummary(row.frontSilhouette),
@@ -1215,8 +1325,8 @@ function buildBatchMarkdownSummary(report: ObjectLabBatchReport): string {
     ``,
     `## Comparison`,
     ``,
-    `| Landmark | Root | Biome | Voxels | Bounds Size | Materials | Dominant | Fill | Form | Negative Space | Coverage Balance | Top Asymmetry | Budget | Top Silhouette | Front Silhouette | Warnings | Suppressed | Contact Sheet |`,
-    `| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- |`,
+    `| Landmark | Root | Biome | Voxels | Bounds Size | Materials | Dominant | Fill | Form | Negative Space | Coverage Balance | Cross-View Variation | Top Asymmetry | Vertical Profile | Budget | Top Silhouette | Front Silhouette | Warnings | Suppressed | Contact Sheet |`,
+    `| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- | --- |`,
     rows,
     ``,
     `## Warning Queue`,
@@ -1233,6 +1343,12 @@ function formatSilhouetteSummary(summary: ObjectLabSilhouetteSummary): string {
   return `cov ${formatPercent(summary.coverage)}, w ${formatPercent(summary.normalizedWidth)}, h ${formatPercent(
     summary.normalizedHeight,
   )}, ar ${aspect}`;
+}
+
+function formatVerticalProfileSummary(profile: ObjectVerticalProfileDiagnostics): string {
+  return `peak ${profile.peakBand}, upper ${formatPercent(profile.upperShare)}, mid ${formatPercent(
+    profile.middleShare,
+  )}, lower ${formatPercent(profile.lowerShare)}, top ${formatSignedRatio(profile.topHeaviness)}`;
 }
 
 function silhouetteRow(label: string, diagnostics: ProjectionDiagnostics): string {
@@ -1253,6 +1369,10 @@ function formatNullableTuple(tuple: readonly number[] | null): string {
   return tuple ? tuple.join(", ") : "n/a";
 }
 
+function formatSignedRatio(value: number): string {
+  return `${value > 0 ? "+" : ""}${value.toFixed(3)}`;
+}
+
 function buildContactSheetSvg(report: ObjectLabReport, sample: SampledObject): string {
   const cellSize = 6;
   const gap = 28;
@@ -1269,6 +1389,8 @@ function buildContactSheetSvg(report: ObjectLabReport, sample: SampledObject): s
   const width = panelWidth * panels.length + gap * (panels.length - 1) + legendWidth;
   const height = Math.max(...panelHeights, 260);
   const materialRows = report.sample.materialCounts.slice(0, 12);
+  const distinctiveness = report.sample.diagnostics.distinctiveness;
+  const verticalProfile = distinctiveness.verticalProfile;
   const parts = [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Object lab contact sheet for ${escapeXml(report.landmarkId)}">`,
     `<rect width="100%" height="100%" fill="#f8f8f6"/>`,
@@ -1312,15 +1434,23 @@ function buildContactSheetSvg(report: ObjectLabReport, sample: SampledObject): s
     }</text>`,
   );
   parts.push(
-    `<text class="meta" x="0" y="130">form ${report.sample.diagnostics.distinctiveness.formClass} | neg ${
-      formatPercent(report.sample.diagnostics.distinctiveness.negativeSpaceRatio)
-    } | bal ${formatPercent(report.sample.diagnostics.distinctiveness.coverageBalance)} | asym ${
-      formatPercent(report.sample.diagnostics.distinctiveness.topAsymmetry)
+    `<text class="meta" x="0" y="130">form ${distinctiveness.formClass} | neg ${
+      formatPercent(distinctiveness.negativeSpaceRatio)
+    } | bal ${formatPercent(distinctiveness.coverageBalance)} | views ${
+      formatPercent(distinctiveness.crossViewVariation)
+    } | asym ${formatPercent(distinctiveness.topAsymmetry)
     }</text>`,
   );
-  parts.push(`<text class="legend" x="0" y="148">Material legend</text>`);
+  parts.push(
+    `<text class="meta" x="0" y="148">profile peak ${verticalProfile.peakBand} | upper ${
+      formatPercent(verticalProfile.upperShare)
+    } | mid ${formatPercent(verticalProfile.middleShare)} | lower ${
+      formatPercent(verticalProfile.lowerShare)
+    } | top ${formatSignedRatio(verticalProfile.topHeaviness)}</text>`,
+  );
+  parts.push(`<text class="legend" x="0" y="166">Material legend</text>`);
   materialRows.forEach((entry, index) => {
-    const y = 160 + index * 18;
+    const y = 178 + index * 18;
     parts.push(`<rect x="0" y="${y - 10}" width="12" height="12" fill="${entry.hex}"/>`);
     parts.push(`<text class="meta" x="20" y="${y}">${entry.hex} material ${entry.material} (${entry.count})</text>`);
   });

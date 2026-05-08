@@ -333,3 +333,25 @@ This removes the main blocker to careful shader/contact-depth work. Route-aware 
 | 3 | UI/journal polish for region and road discoveries | 4 | 4 | 3 | 5.3 | Good RPG feel return after route gameplay hooks | UI tests, browser HUD smoke |
 | 4 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Useful cost cleanup but not the current blocker | object-lab target `<18000`, route coverage |
 | 5 | Far-view distance experiment | 4 | 3 | 4 | 3.0 | Wait until contact/depth work improves foreground and horizon readability | owned-browser LOD/fps/gap gates |
+
+## Re-Rank After Strict LOD Probe And Warped Routes
+
+Completed since the shader-smoke checkpoint:
+
+- Rejected a very small shader surface-mute attempt because shader smoke and atlas passed but the metric movement was effectively invisible.
+- `probeLodCoverage` now counts visible render-ready LOD0 surfaces as owners even when the full vertical column is not ready, closing a blind spot around transient LOD overlap.
+- Owned browser strict LOD probe passed with resident/band/water overlaps all `0`.
+- Old-road and shrine discoveries now train RPG skills beyond generic Naturalist XP.
+- Pilgrim routes now warp laterally instead of staying mathematically straight, and route/view/browser gates stayed clean.
+- Object-lab now reports cross-view variation and vertical profile diagnostics for delegated prop work.
+
+The latest browser result is healthy (`route p95/max 4.80/7.90 ms`, LOD overlap/gaps/handoff holes `0/0/0`), but the global visual grid metric remains `0.68`. The next changes need to attack camera-scale block-edge perception more directly.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Screenshot-aware contact-depth/lighting pass under shader smoke and enforced atlas budgets | 5 | 4 | 4 | 5.0 | Route composition improved but block-edge read is still dominant; shader smoke now prevents black-frame regressions | `lab:shader`, enforced view-atlas, owned-browser route budget |
+| 2 | Foreground terrain shape breakup, second large pass: route-adjacent ash drifts/salt cracks that alter silhouettes, not just materials | 5 | 4 | 4 | 5.0 | The stubborn `0.68` grid metric needs geometry/composition-scale foreground change | terrain lab compare, view-atlas lower-ground grid, route physics continuity |
+| 3 | Far-view/fog cushion experiment with strict LOD ownership gate | 4 | 4 | 3 | 5.3 | LOD ownership probes are clean; a cautious distance/fog pass can improve scale if draw/triangles hold | owned-browser LOD overlap/gap/fps, view-atlas horizon grid |
+| 4 | Ashland travel-kit pack delegated through improved object-lab: masks, travel packs, water collectors | 4 | 4 | 3 | 5.3 | Cross-view/vertical diagnostics now make isolated prop work less subjective | object-lab contact sheets, route atlas, browser draw budget |
+| 5 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Skill hooks exist; player-facing journal can now explain them without clutter | UI tests, browser HUD smoke |
+| 6 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Still useful for cost and silhouette, but not the current whole-screen blocker | object-lab target `<18000`, route coverage |

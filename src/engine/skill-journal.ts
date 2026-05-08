@@ -1,4 +1,5 @@
 import type { DiscoveryEvent } from "./exploration-journal.ts";
+import { describeDiscovery, type DiscoveryRole } from "./discovery-catalog.ts";
 
 export type SkillId = "cartography" | "naturalist" | "spelunking" | "lore";
 
@@ -47,6 +48,15 @@ const DISCOVERY_XP: Record<DiscoveryEvent["category"], { skillId: SkillId; xp: n
   "regional-variant": { skillId: "lore", xp: 120 },
   landmark: { skillId: "naturalist", xp: 35 },
 };
+const LANDMARK_ROLE_XP: Partial<Record<DiscoveryRole, readonly { skillId: SkillId; xp: number }[]>> = {
+  "old-road": [
+    { skillId: "cartography", xp: 35 },
+    { skillId: "lore", xp: 20 },
+  ],
+  shrine: [
+    { skillId: "lore", xp: 55 },
+  ],
+};
 const TRAVEL_METERS_PER_XP = 24;
 const UNDERGROUND_TRAVEL_XP_MULTIPLIER = 1.35;
 
@@ -67,8 +77,9 @@ export class SkillJournal {
       .filter((discovery) => discovery.sequence > this.lastProcessedDiscoverySequence)
       .sort((left, right) => left.sequence - right.sequence);
     for (const discovery of newDiscoveries) {
-      const award = DISCOVERY_XP[discovery.category];
-      this.addXp(award.skillId, award.xp);
+      for (const award of awardsForDiscovery(discovery)) {
+        this.addXp(award.skillId, award.xp);
+      }
       this.lastProcessedDiscoverySequence = Math.max(this.lastProcessedDiscoverySequence, discovery.sequence);
     }
     return this.getSnapshot();
@@ -162,6 +173,16 @@ export class SkillJournal {
   private addXp(skillId: SkillId, xp: number): void {
     this.xpBySkill.set(skillId, (this.xpBySkill.get(skillId) ?? 0) + xp);
   }
+}
+
+function awardsForDiscovery(discovery: DiscoveryEvent): readonly { skillId: SkillId; xp: number }[] {
+  const baseAward = DISCOVERY_XP[discovery.category];
+  if (discovery.category !== "landmark") {
+    return [baseAward];
+  }
+  const role = describeDiscovery(discovery.category, discovery.id).role;
+  const roleAwards = LANDMARK_ROLE_XP[role] ?? [];
+  return [baseAward, ...roleAwards];
 }
 
 function buildSkillSnapshot(definition: SkillDefinition, totalXp: number): SkillSnapshot {

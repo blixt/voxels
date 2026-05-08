@@ -421,6 +421,7 @@ export interface LodCoverageProbe {
   sampleCount: number;
   residentSampleCount: number;
   renderReadySampleCount: number;
+  visibleLod0OwnerSampleCount: number;
   coveredSampleCount: number;
   residentOverlapCount: number;
   uncoveredGapCount: number;
@@ -1317,6 +1318,7 @@ export class GameController {
     let sampleCount = 0;
     let residentSampleCount = 0;
     let renderReadySampleCount = 0;
+    let visibleLod0OwnerSampleCount = 0;
     let coveredSampleCount = 0;
     let residentOverlapCount = 0;
     let uncoveredGapCount = 0;
@@ -1333,9 +1335,8 @@ export class GameController {
         const chunkZ = Math.floor(worldZ / this.world.chunkSize);
         const resident = this.world.hasResidentColumn(chunkX, chunkZ);
         const renderReady = this.world.isColumnRenderReady(chunkX, chunkZ);
-        const renderReadyWater = renderReady
-          ? this.isRenderReadyWaterColumn(worldX, worldZ, chunkX, chunkZ)
-          : false;
+        const visibleLod0Owner = renderReady || this.isVisibleLod0SurfaceRenderReady(worldX, worldZ, chunkX, chunkZ);
+        const renderReadyWater = this.isRenderReadyWaterColumn(worldX, worldZ, chunkX, chunkZ);
         const lodOwnerStridesByBand = new Map<string, number>();
         const waterBands = new Set<string>(renderReadyWater ? ["LOD0"] : []);
         for (const span of lodSpans) {
@@ -1356,8 +1357,8 @@ export class GameController {
         }
         const lodBands = [...lodOwnerStridesByBand.keys()];
         const sampleStrideMeters = [...lodOwnerStridesByBand.values()];
-        const bands = renderReady ? ["LOD0", ...lodBands] : lodBands;
-        const strides = renderReady ? [worldUnitsToMeters(1), ...sampleStrideMeters] : sampleStrideMeters;
+        const bands = visibleLod0Owner ? ["LOD0", ...lodBands] : lodBands;
+        const strides = visibleLod0Owner ? [worldUnitsToMeters(1), ...sampleStrideMeters] : sampleStrideMeters;
         const distanceWorldUnits = Math.max(Math.abs(offsetX), Math.abs(offsetZ));
         const distanceMeters = worldUnitsToMeters(distanceWorldUnits);
         const issueSample: LodCoverageIssueSample = {
@@ -1374,10 +1375,13 @@ export class GameController {
         if (renderReady) {
           renderReadySampleCount += 1;
         }
+        if (visibleLod0Owner) {
+          visibleLod0OwnerSampleCount += 1;
+        }
         if (bands.length > 0) {
           coveredSampleCount += 1;
         }
-        if (renderReady && lodBands.length > 0) {
+        if (visibleLod0Owner && lodBands.length > 0) {
           residentOverlapCount += 1;
           pushIssueSample(residentOverlapSamples, issueSample);
         }
@@ -1410,6 +1414,7 @@ export class GameController {
       sampleCount,
       residentSampleCount,
       renderReadySampleCount,
+      visibleLod0OwnerSampleCount,
       coveredSampleCount,
       residentOverlapCount,
       uncoveredGapCount,
@@ -1460,6 +1465,28 @@ export class GameController {
         if (!isProceduralWaterMaterial(above) && !waterContinuesAboveChunk) {
           return true;
         }
+      }
+    }
+    return false;
+  }
+
+  private isVisibleLod0SurfaceRenderReady(
+    worldX: number,
+    worldZ: number,
+    chunkX: number,
+    chunkZ: number,
+  ): boolean {
+    const column = this.generator.sampleColumn(worldX, worldZ);
+    const visibleY = column.waterTopY ?? column.surfaceY;
+    const candidateChunkYs = new Set([
+      Math.floor(visibleY / this.world.chunkSize),
+      Math.floor(Math.max(0, visibleY - 1) / this.world.chunkSize),
+      Math.floor(column.surfaceY / this.world.chunkSize),
+    ]);
+    for (const chunkY of candidateChunkYs) {
+      const chunk = this.world.getResidentChunk(chunkX, chunkY, chunkZ);
+      if (chunk?.renderReady && chunk.mesh) {
+        return true;
       }
     }
     return false;
