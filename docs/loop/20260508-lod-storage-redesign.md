@@ -96,11 +96,34 @@ Validation:
 - `mise exec -- bun test tests/procedural-resident-world.test.ts tests/derived-lod-chunk-codec.test.ts`
 - `mise exec -- bun test tests/async-chunk-generation.test.ts`
 
+### Follow-up Checkpoint - Production Residency Wiring
+
+Connected production LOD residency to the async derived-cache surface, still conservatively:
+
+- `updateLodResidencyAround` drains completed derived LOD cache reads and can adopt them into active or prepared LOD chunks.
+- Missing disk-cache entries are remembered by edit-revisioned key so cold-cache misses do not get re-requested forever.
+- LOD cache reads are capped at 32 scheduled requests per update before the normal generation path takes over.
+- Safe retained derived chunks enqueue disk-cache stores, flushed at 4 stores per update to avoid encoding hitches.
+- Coverage-punched chunks and edited worlds remain excluded from disk persistence.
+- HUD snapshots now expose disk-cache hits, misses, scheduled reads, scheduled stores, and completed stores.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/async-chunk-generation.test.ts tests/derived-lod-chunk-codec.test.ts`
+- `mise exec -- bun test tests/lod-system.test.ts -t "reuses retained"`
+- `mise exec -- bun run profile:lod-cache --label=async-lod-disk-cache-wiring`
+
+Profile artifact:
+
+- `artifacts/lod-cache-reuse-profile/20260508T190754Z-async-lod-disk-cache-wiring.json`
+- In the no-worker profile path, memory reuse stayed intact: return reused `1540` retained derived entries and rebuilt `0` chunks before reuse.
+
 Next high-ROI work:
 
 1. Promote the existing IndexedDB worker cache into an explicit engine-facing `ChunkStore` contract.
 2. Persist base chunks, summaries, and edit overlays as the only authoritative world data.
-3. Wire production LOD residency to request cached derived chunks before rebuilding and to enqueue safe derived chunks after eviction.
+3. Add browser/harness coverage that exercises real IndexedDB derived LOD reads/writes across reloads.
 4. Add a prefetch planner that asks storage for base summaries and derived LOD chunks ahead of the active LOD window.
 5. Move far-field rendering toward a hierarchy/clipmap model where more LOD levels do not linearly increase CPU rebuild cost.
 

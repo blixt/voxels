@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
-import type { AsyncChunkGenerationQueue } from "../src/engine/async-chunk-generation.ts";
+import type { AsyncChunkGenerationQueue, AsyncDerivedLodChunkCacheKey } from "../src/engine/async-chunk-generation.ts";
+import { encodeDerivedLodChunk } from "../src/engine/derived-lod-chunk-codec.ts";
 import { rebuildDirtyMeshes } from "../src/engine/mesher.ts";
 import { ProceduralResidentWorld } from "../src/engine/procedural-resident-world.ts";
 import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
@@ -37,6 +38,30 @@ function createFakeAsyncQueue(overrides: Partial<AsyncChunkGenerationQueue> = {}
     drainLodChunkCompletionStats: () => ({ cacheHits: 0, missing: 0, stored: 0 }),
     dispose: () => {},
     ...overrides,
+  };
+}
+
+function toTestLodDiskKey(key: AsyncDerivedLodChunkCacheKey): string {
+  return `${key.editRevision}:${key.lodLevel}:${key.coord.x}:${key.coord.y}:${key.coord.z}`;
+}
+
+function createTestDerivedLodPayload(key: AsyncDerivedLodChunkCacheKey, chunkSize: number) {
+  const data = new Uint16Array(chunkSize * chunkSize * chunkSize);
+  const chunkArea = chunkSize * chunkSize;
+  const localX = Math.floor(chunkSize / 2);
+  const localY = Math.floor(chunkSize / 2);
+  const localZ = Math.floor(chunkSize / 2);
+  data[localX + localY * chunkSize + localZ * chunkArea] = 1;
+  return {
+    coord: { ...key.coord },
+    lodLevel: key.lodLevel,
+    voxelStride: 1 << key.lodLevel,
+    data,
+    solidCount: 1,
+    solidBounds: {
+      min: [localX, localY, localZ] as [number, number, number],
+      max: [localX + 1, localY + 1, localZ + 1] as [number, number, number],
+    },
   };
 }
 
@@ -273,6 +298,72 @@ test("LOD planning asks the persistent chunk store for missing render-summary re
 
   expect(requested.size).toBeGreaterThan(0);
   expect(lod.scheduledRegionSummaryRequests).toBe(requested.size);
+});
+
+test("LOD residency schedules a bounded number of derived LOD disk-cache requests before rebuilding", () => {
+  const requestedKeys: AsyncDerivedLodChunkCacheKey[] = [];
+  const pendingKeys = new Set<string>();
+  const queue = createFakeAsyncQueue({
+    requestLodChunk: (key) => {
+      requestedKeys.push({ ...key, coord: { ...key.coord } });
+      pendingKeys.add(toTestLodDiskKey(key));
+      return true;
+    },
+    hasPendingLodChunk: (key) => pendingKeys.has(toTestLodDiskKey(key)),
+  });
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    asyncChunkGeneration: queue,
+    horizontalRadiusChunks: 1,
+  });
+
+  const lod = world.updateLodResidencyAround(world.getSpawnPosition(), {
+    maxGenerateLodChunks: 0,
+  });
+
+  expect(lod.scheduledLodDiskRequests).toBeGreaterThan(0);
+  expect(lod.scheduledLodDiskRequests).toBeLessThanOrEqual(32);
+  expect(requestedKeys.length).toBe(lod.scheduledLodDiskRequests);
+  expect(lod.pending).toBeGreaterThan(0);
+});
+
+test("LOD residency adopts completed derived LOD disk-cache hits before rebuilding", () => {
+  const probeRequests: AsyncDerivedLodChunkCacheKey[] = [];
+  const probeWorld = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    asyncChunkGeneration: createFakeAsyncQueue({
+      requestLodChunk: (key) => {
+        probeRequests.push({ ...key, coord: { ...key.coord } });
+        return true;
+      },
+    }),
+    horizontalRadiusChunks: 1,
+  });
+  const spawn = probeWorld.getSpawnPosition();
+  probeWorld.updateLodResidencyAround(spawn, { maxGenerateLodChunks: 0 });
+  const key = probeRequests[0]!;
+
+  const encoded = encodeDerivedLodChunk(createTestDerivedLodPayload(key, 16));
+  let drained = false;
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    asyncChunkGeneration: createFakeAsyncQueue({
+      drainCompletedLodChunks: () => {
+        if (drained) {
+          return [];
+        }
+        drained = true;
+        return [{
+          key,
+          buffer: encoded.buffer,
+          byteLength: encoded.stats.byteLength,
+        }];
+      },
+    }),
+    horizontalRadiusChunks: 1,
+  });
+
+  const lod = world.updateLodResidencyAround(spawn, { maxGenerateLodChunks: 0 });
+
+  expect(lod.lodDiskCacheHits).toBe(1);
+  expect(lod.generated).toBe(0);
 });
 
 test("resident world tracks dirty chunks without rescanning the full resident set", () => {

@@ -242,6 +242,11 @@ export interface GameHudSnapshot {
   lodNeededKeyCount: number;
   lodNeededKeyCacheHit: boolean;
   lodScheduledRegionSummaryRequests: number;
+  lodDiskCacheHits: number;
+  lodDiskCacheMisses: number;
+  lodScheduledDiskRequests: number;
+  lodScheduledDiskStores: number;
+  lodCompletedDiskStores: number;
   lodDrawCalls: number;
   lodDrawCallsByLevel: readonly number[];
   frustumCulledChunks: number;
@@ -818,6 +823,11 @@ export class GameController {
     neededKeyCount: 0,
     neededKeyCacheHit: false,
     scheduledRegionSummaryRequests: 0,
+    lodDiskCacheHits: 0,
+    lodDiskCacheMisses: 0,
+    scheduledLodDiskRequests: 0,
+    scheduledLodDiskStores: 0,
+    completedLodDiskStores: 0,
   };
   private lastStreamSummary: ResidencyUpdateSummary = cloneResidencySummary(this.world.lastResidency);
   private streamAnchor: StreamAnchor | null = null;
@@ -1028,6 +1038,11 @@ export class GameController {
       lodNeededKeyCount: this.lastLodSummary.neededKeyCount,
       lodNeededKeyCacheHit: this.lastLodSummary.neededKeyCacheHit,
       lodScheduledRegionSummaryRequests: this.lastLodSummary.scheduledRegionSummaryRequests,
+      lodDiskCacheHits: this.lastLodSummary.lodDiskCacheHits,
+      lodDiskCacheMisses: this.lastLodSummary.lodDiskCacheMisses,
+      lodScheduledDiskRequests: this.lastLodSummary.scheduledLodDiskRequests,
+      lodScheduledDiskStores: this.lastLodSummary.scheduledLodDiskStores,
+      lodCompletedDiskStores: this.lastLodSummary.completedLodDiskStores,
       lodDrawCalls: this.lastRenderStats.lodDrawCalls,
       lodDrawCallsByLevel: [...this.lastRenderStats.lodDrawCallsByLevel],
       frustumCulledChunks: this.lastRenderStats.frustumCulledChunks,
