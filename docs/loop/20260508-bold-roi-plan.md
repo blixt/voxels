@@ -355,3 +355,21 @@ The latest browser result is healthy (`route p95/max 4.80/7.90 ms`, LOD overlap/
 | 4 | Ashland travel-kit pack delegated through improved object-lab: masks, travel packs, water collectors | 4 | 4 | 3 | 5.3 | Cross-view/vertical diagnostics now make isolated prop work less subjective | object-lab contact sheets, route atlas, browser draw budget |
 | 5 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Skill hooks exist; player-facing journal can now explain them without clutter | UI tests, browser HUD smoke |
 | 6 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Still useful for cost and silhouette, but not the current whole-screen blocker | object-lab target `<18000`, route coverage |
+
+## Re-Rank After Contact-Depth Shader Pass
+
+Completed since the strict LOD/route checkpoint:
+
+- A normal-based contact-depth shader pass was accepted only after shader smoke, enforced seven-view atlas, and owned-browser retry all passed.
+- Browser visual grid finally moved from `0.68` to `0.67`, with route p95/max `4.70/7.00 ms`.
+- Atlas deltas show the improvement is mainly horizon/center depth; lower-ground grid barely moved and slightly regressed in a few close views.
+
+The next work should not keep darkening. The renderer now has a small depth cue; the remaining visible blocker is foreground/lower-ground shape language.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Foreground terrain shape breakup, second large pass: route-adjacent ash drifts/salt cracks that alter silhouettes, not just materials | 5 | 4 | 4 | 5.0 | Lower-ground grid is still the weak metric after shader depth | terrain lab compare, enforced view-atlas lower-ground grid, route physics continuity |
+| 2 | Far-view/fog cushion experiment with strict LOD ownership gate | 4 | 4 | 3 | 5.3 | LOD correctness and frame time are currently healthy, so a cautious scale pass is plausible | owned-browser LOD overlap/gap/fps, view-atlas horizon grid |
+| 3 | Ashland travel-kit pack delegated through improved object-lab: masks, travel packs, water collectors | 4 | 4 | 3 | 5.3 | Cross-view/vertical diagnostics now make isolated prop work less subjective | object-lab contact sheets, route atlas, browser draw budget |
+| 4 | Route-aware UI/journal polish for old-road and shrine discoveries | 4 | 4 | 3 | 5.3 | Skill hooks exist; player-facing journal can now explain them without clutter | UI tests, browser HUD smoke |
+| 5 | Ziggurat budget/negative-space follow-up | 3 | 4 | 3 | 4.0 | Useful cost cleanup, but not what the current view metrics identify | object-lab target `<18000`, route coverage |

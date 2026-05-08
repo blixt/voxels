@@ -1928,3 +1928,42 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint and push this mixed route/RPG/harness slice
   - re-rank around the stubborn `0.68` grid metric
   - likely next work: screenshot-aware lighting/depth or stronger terrain foreground breakup, but only with shader-smoke and enforced view-atlas gates
+
+### 2026-05-08 - Contact-Depth Shader Pass
+
+- Trigger:
+  - The global browser grid metric was still stuck at `0.68` after route and prop work.
+  - The new shader-smoke harness made a small lighting/depth attempt safer than before.
+- Rejected/iterated attempts:
+  - A very small surface-mute shader pass passed shader smoke and atlas but barely moved metrics, so I reverted it.
+  - The first contact-depth pass also passed but was too subtle: mostly `0.000-0.002` grid-risk movement with small luma drops.
+  - I strengthened the pass once, then re-ran the same smoke/atlas/browser gates.
+- Changes:
+  - Added a cheap normal-based contact-depth multiplier in `shade_fragment`.
+  - Vertical and downward faces now darken slightly near the camera, fading with fog distance so far silhouettes do not become harsh black blocks.
+  - No new geometry, texture samples, loops, or CPU work.
+- Validation:
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Shader smoke baseline: `artifacts/shader-smoke-lab/20260508T071953Z-pre-contact-depth-baseline/report.json`, failures none.
+  - Shader smoke final: `artifacts/shader-smoke-lab/20260508T072809Z-contact-depth-stronger-smoke/report.json`, failures none.
+  - Enforced view atlas: `artifacts/view-atlas/20260508T072906Z-contact-depth-stronger/report.json`, failures none against `artifacts/view-atlas/20260508T071150Z-warped-pilgrim-routes/report.json`.
+  - View-atlas deltas:
+    - horizon grid risk improved in `5/7` views, with origin `-0.0030` and obelisk `-0.0017`.
+    - center grid risk improved in `5/7` views, with origin `-0.0019`, ash marker `-0.0010`, and obelisk `-0.0011`.
+    - lower-ground grid risk barely moved and slightly regressed in three close/ground-heavy views (`+0.0003` to `+0.0006`).
+    - luma dropped `3.0-7.1`; color buckets dropped in most views but stayed inside budget.
+  - First owned-browser lab attempt: `artifacts/owned-browser-lab/20260508T073140Z-contact-depth-stronger/report.json`, invalid because CDP timed out before page data.
+  - Valid owned-browser retry: `artifacts/owned-browser-lab/20260508T073504Z-contact-depth-stronger-retry/report.json`, failures none.
+  - Browser result: saturation/grid/color `0.35/0.67/97`, traversal p95/max `4.70/7.90 ms`, route p95/max `4.70/7.00 ms`, draw/triangles `532/388578`, LOD overlap LOD0/bands `0/0`, water overlap `0`, gaps/handoff holes `0/0`.
+- Honest assessment:
+  - This is a modest renderer improvement, not a dramatic visual rework.
+  - The browser grid metric finally moved from `0.68` to `0.67`, and live performance improved rather than regressed in the retry.
+  - The atlas shows the pass helps horizon/center depth more than foreground ground readability. The next visual work should still attack lower-ground composition/geometry, not keep turning the shader knob.
+- Rubric movement:
+  - Rendering correctness/quality: `6.58 -> 6.68` because the depth cue is measurable and keeps all black-frame/LOD/browser gates clean.
+  - Performance/playability: `6.35 -> 6.40` because route max frame stayed at `7.00 ms` in the valid browser run.
+  - Visual/world definition: `6.35 -> 6.42` because the world reads slightly less flat, but lower-ground geometry remains the blocker.
+  - Harness maturity: unchanged at `9.92`; this pass used the existing gates rather than adding new ones.
+- Next:
+  - checkpoint and push the renderer pass if build/test stay clean
+  - switch back to foreground terrain/composition changes; lower-ground grid is the remaining weak metric

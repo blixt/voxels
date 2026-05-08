@@ -77,6 +77,8 @@ fn shade_fragment(input: VertexOutput) -> vec4<f32> {
   let grain_strength = mix(0.045, 0.11, top_bias);
   let ashfall = clamp(uniforms.sky_params.z, 0.0, 1.0);
   let fungal_glow = clamp(uniforms.sky_params.w, 0.0, 1.0);
+  let fog_distance = distance(input.world_position, uniforms.camera_position.xyz);
+  let fog = smoothstep(uniforms.fog_params.x, uniforms.fog_params.y, fog_distance);
   let grounded_base = mix(vec3<f32>(albedo_luma), input.color.rgb, 0.78) * (1.0 + grain * grain_strength);
   let ash_deposit = ashfall * smoothstep(0.12, 0.92, input.normal.y) * (0.16 + broad_grain * 0.24);
   let grounded_albedo = mix(grounded_base, uniforms.sky_cloud_color.rgb, clamp(ash_deposit, 0.0, 0.38));
@@ -87,9 +89,10 @@ fn shade_fragment(input: VertexOutput) -> vec4<f32> {
   );
   let overcast = 1.0 - ashfall * 0.18;
   let fungal_shadow = vec3<f32>(0.04, 0.16, 0.18) * fungal_glow * (1.0 - directional) * (1.0 - hemi * 0.46);
-  let shaded = grounded_albedo * lighting * light_tint * overcast + fungal_shadow;
-  let fog_distance = distance(input.world_position, uniforms.camera_position.xyz);
-  let fog = smoothstep(uniforms.fog_params.x, uniforms.fog_params.y, fog_distance);
+  let vertical_contact = 1.0 - smoothstep(0.18, 0.72, abs(input.normal.y));
+  let underside_contact = smoothstep(-0.90, -0.18, -input.normal.y);
+  let contact_depth = (vertical_contact * (0.085 + ashfall * 0.045) + underside_contact * 0.070) * (1.0 - fog * 0.58);
+  let shaded = (grounded_albedo * lighting * light_tint * overcast + fungal_shadow) * (1.0 - clamp(contact_depth, 0.0, 0.18));
   let distance_luma = dot(shaded, vec3<f32>(0.2126, 0.7152, 0.0722));
   let distance_muted = mix(shaded, vec3<f32>(distance_luma), fog * 0.22);
   return vec4<f32>(distance_muted * (1.0 - fog) + uniforms.fog_color.rgb * fog, input.color.a);
