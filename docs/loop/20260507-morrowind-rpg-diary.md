@@ -1349,3 +1349,44 @@ Build the first "place identity" slice without regressing performance or input:
   - commit and push this checkpoint
   - attack visual grid dominance with a safer strategy than the failed shader: likely salt-marsh set pieces, more non-axis silhouettes, and route-visible content density before another shader attempt
   - investigate incremental residency/streaming spikes next, because max stream remains around `12 ms` in live-forward movement traces
+
+### 2026-05-08 - Salt-Marsh Set Pieces, Vista Harness, And Water Classification
+
+- Trigger:
+  - User pointed out that the world still lacked characteristic identity and supplied salt-marsh/ashland inspiration art.
+  - User also asked for stronger delegation and better self-monitoring for asset work, so I prioritized harness support that can score landmarks seen near a route, not only underfoot.
+- Delegation:
+  - Route-atlas worker added deterministic visible-nearby landmark scanning around route samples. This catches vista silhouettes within a fixed 64 m scan pattern, with separate direct-hit and vista-hit counts.
+  - Environment explorer reviewed safer set-piece insertion points and warned that object-lab samples could be polluted by water if the regional water materials were not treated as water.
+- Changes:
+  - Added three salt-marsh/fungal basin landmark families: `crystal_reeds`, `fungal_bridge`, and `rib_remains`.
+  - Added discovery catalog names/flavor for the new landmarks so RPG journal output can refer to them as places, not debug IDs.
+  - Added route-atlas basin routes that require the new landmarks, plus report fields for direct landmarks, visible-nearby landmarks, and credited landmark samples.
+  - Fixed a real water classification bug: regional water override materials such as blackwater `#134` and glow-water `#9CF` are now classified as procedural water. Before this, object-lab and water/rendering logic could treat these surfaces as opaque solid materials.
+  - Object-lab now rejects water roots, skips procedural water voxels in object samples, and reports bounds with the intended exclusive size convention.
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun run build`: pass.
+  - Focused tests: `mise exec -- bun test tests/procedural-generator.test.ts tests/object-lab.test.ts tests/water-visuals.test.ts tests/discovery-catalog.test.ts`, pass, `44` tests.
+  - Route atlas: `artifacts/route-atlas/20260508T020853Z-salt-marsh-route-coverage/report.json`, failures none, `436` credited landmark samples (`67` direct, `383` vista), max notable gap `360.0 m`, and required basin routes all covered.
+  - Object lab after water filtering:
+    - `crystal_reeds`: `artifacts/object-lab/2026-05-08-021125075Z-salt-marsh-crystal-reeds-waterfixed/report.json`, `905` solid object voxels.
+    - `fungal_bridge`: `artifacts/object-lab/2026-05-08-020452945Z-salt-marsh-fungal-bridge-waterfixed/report.json`, `435` solid object voxels.
+    - `rib_remains`: `artifacts/object-lab/2026-05-08-020454118Z-salt-marsh-rib-remains-waterfixed/report.json`, `681` solid object voxels.
+  - Final owned browser lab: `artifacts/owned-browser-lab/20260508T021156Z-salt-marsh-waterfixed-final/report.json`, failures none.
+  - Browser result: traversal p95/max `5.20/11.80 ms`, route p95/max `5.20/14.00 ms`, draw/triangles `502/381390`, `LOD overlap LOD0/bands 0/0`, water overlap `0`, gaps `0`, handoff holes `0`, render-ready near samples `961/961`, HUD smoke passed.
+- Honest assessment:
+  - The harness improvement is stronger than the art improvement: route-atlas can now credit visible landmarks near a route, which is the right direction for vista-driven world design.
+  - The water classification fix is correctness-significant and probably more important than it looks; blackwater was contaminating object samples and could be treated as solid/non-water by downstream logic.
+  - The new landmarks increase basin identity, but `fungal_bridge` is still too thin and material-uniform, while `crystal_reeds` is still overly dominated by one material. These need shape/material polish, not victory laps.
+  - Browser visual grid dominance remained `0.68`, so this checkpoint did not solve the Minecrafty read. The next visible ROI should be either object silhouette polish or a safer large-scale composition/sky pass.
+- Rubric movement:
+  - Harness maturity: `7.35 -> 7.65` because route-atlas now measures off-route vistas and object-lab correctly filters regional water.
+  - Rendering correctness: `5.60 -> 5.85` because regional water materials are now consistently classified and browser LOD/water overlap gates stayed clean.
+  - Visual/world definition: `4.25 -> 4.45` because the salt-marsh now has new landmark families and route coverage, but the screen-level grid metric did not improve.
+  - Performance/playability: unchanged at `5.20`; the new content stayed under the current frame budget but did not directly improve movement cost.
+- Next:
+  - commit and push this checkpoint
+  - delegate isolated object polish for the weakest set pieces with object-lab artifacts as the acceptance target
+  - improve object-lab representative-root selection so asset workers stop judging clipped/edge samples
+  - keep moving toward high-contrast silhouettes, sky/weather, and larger composition changes instead of small palette tweaks

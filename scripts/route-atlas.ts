@@ -23,6 +23,11 @@ interface RouteSample {
   undergroundBiomeId: string;
   regionalVariantId: string | null;
   landmarkId: string | null;
+  landmarkHeightMeters: number;
+  visibleNearbyLandmarkIds: string[];
+  nearestVisibleNearbyLandmarkId: string | null;
+  nearestVisibleNearbyLandmarkDistanceMeters: number | null;
+  tallestVisibleNearbyLandmarkHeightMeters: number;
   ambientProfileId: string;
   ambientProfileLabel: string;
 }
@@ -35,9 +40,13 @@ interface RouteSummary {
   distinctUndergroundBiomes: string[];
   distinctRegionalVariants: string[];
   distinctLandmarks: string[];
+  directLandmarks: string[];
+  visibleNearbyLandmarks: string[];
   requiredLandmarkIds: string[];
   missingRequiredLandmarkIds: string[];
   distinctAmbientProfiles: string[];
+  directLandmarkHitCount: number;
+  visibleNearbyLandmarkHitCount: number;
   landmarkHitCount: number;
   maxNotableGapMeters: number;
   averageNotableGapMeters: number;
@@ -49,6 +58,7 @@ interface RouteSummary {
 interface RouteAtlasReport {
   generatedAt: string;
   thresholds: typeof thresholds;
+  landmarkVistaScan: typeof landmarkVistaScan;
   enforce: boolean;
   aggregate: RouteAtlasAggregate;
   comparison: RouteAtlasComparison | null;
@@ -63,10 +73,22 @@ interface RouteAtlasAggregate {
   distinctAmbientProfiles: string[];
   distinctRegionalVariants: string[];
   distinctLandmarks: string[];
+  directLandmarks: string[];
+  visibleNearbyLandmarks: string[];
+  directLandmarkHitCount: number;
+  visibleNearbyLandmarkHitCount: number;
   landmarkHitCount: number;
   maxNotableGapMeters: number;
   averageNotableGapMeters: number;
   definitionScore: number;
+}
+
+interface VisibleNearbyLandmark {
+  landmarkId: string;
+  distanceMeters: number;
+  heightMeters: number;
+  worldX: number;
+  worldZ: number;
 }
 
 interface RouteAtlasComparison {
@@ -115,6 +137,9 @@ const ROUTES: RouteSpec[] = [
   { label: "rib-arch-road", startMeters: [-1171.7, -2546.4], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["rib_arch"] },
   { label: "causeway-road", startMeters: [19.6, -3277.1], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["old_road_causeway"] },
   { label: "pilgrim-lantern-road", startMeters: [18.6, -3245.3], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["pilgrim_lantern"] },
+  { label: "crystal-reeds-basin", startMeters: [2790.2, -2893.3], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["crystal_reeds"] },
+  { label: "fungal-bridge-basin", startMeters: [844.8, -2899.9], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["fungal_bridge"] },
+  { label: "rib-remains-basin", startMeters: [1727.5, 1753.3], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["rib_remains"] },
 ];
 
 const thresholds = {
@@ -124,6 +149,35 @@ const thresholds = {
   minLandmarkHits: 8,
   maxNotableGapMeters: 540,
 } as const;
+
+const landmarkVistaScan = {
+  radiusMeters: 64,
+  minHeightMeters: 2.5,
+  samplesPerRouteSample: 16,
+} as const;
+
+const LANDMARK_VISTA_OFFSETS_METERS: ReadonlyArray<readonly [forwardMeters: number, lateralMeters: number]> = [
+  [0, -12],
+  [0, 12],
+  [0, -24],
+  [0, 24],
+  [0, -48],
+  [0, 48],
+  [24, -24],
+  [24, 24],
+  [-24, -24],
+  [-24, 24],
+  [36, -48],
+  [36, 48],
+  [-36, -48],
+  [-36, 48],
+  [48, 0],
+  [-48, 0],
+] as const;
+
+if (LANDMARK_VISTA_OFFSETS_METERS.length !== landmarkVistaScan.samplesPerRouteSample) {
+  throw new Error("landmark vista scan sample count does not match offset table");
+}
 
 const args = Bun.argv.slice(2);
 const label = readFlag(args, "--label");
@@ -147,6 +201,7 @@ const comparison = baselineReportPath ? await compareWithBaseline(baselineReport
 const report: RouteAtlasReport = {
   generatedAt: new Date().toISOString(),
   thresholds,
+  landmarkVistaScan,
   enforce,
   aggregate,
   comparison,
@@ -162,7 +217,7 @@ console.log(`summary: ${summaryPath}`);
 console.log(`biomes: ${aggregate.distinctBiomes.length} (${aggregate.distinctBiomes.join(", ")})`);
 console.log(`ambient profiles: ${aggregate.distinctAmbientProfiles.length} (${aggregate.distinctAmbientProfiles.join(", ")})`);
 console.log(`regional variants: ${aggregate.distinctRegionalVariants.length}`);
-console.log(`landmark hits: ${aggregate.landmarkHitCount}`);
+console.log(`landmark credited samples: ${aggregate.landmarkHitCount} (${aggregate.directLandmarkHitCount} direct samples, ${aggregate.visibleNearbyLandmarkHitCount} vista samples)`);
 console.log(`max notable gap: ${aggregate.maxNotableGapMeters.toFixed(1)} m`);
 console.log(`definition score: ${aggregate.definitionScore.toFixed(2)} / 5`);
 if (comparison) {
@@ -183,12 +238,16 @@ function summarizeRoute(generator: ProceduralWorldGenerator, route: RouteSpec): 
   const distinctBiomes = sortedDistinct(samples.map((sample) => sample.biomeId));
   const distinctUndergroundBiomes = sortedDistinct(samples.map((sample) => sample.undergroundBiomeId));
   const distinctRegionalVariants = sortedDistinct(samples.map((sample) => sample.regionalVariantId).filter(isString));
-  const distinctLandmarks = sortedDistinct(samples.map((sample) => sample.landmarkId).filter(isString));
+  const directLandmarks = sortedDistinct(samples.map((sample) => sample.landmarkId).filter(isString));
+  const visibleNearbyLandmarks = sortedDistinct(samples.flatMap((sample) => sample.visibleNearbyLandmarkIds));
+  const distinctLandmarks = sortedDistinct([...directLandmarks, ...visibleNearbyLandmarks]);
   const requiredLandmarkIds = [...(route.requiredLandmarkIds ?? [])].sort();
   const missingRequiredLandmarkIds = requiredLandmarkIds.filter((landmarkId) => !distinctLandmarks.includes(landmarkId));
   const distinctAmbientProfiles = sortedDistinct(samples.map((sample) => sample.ambientProfileId));
   const notableGaps = computeNotableGaps(samples);
   const surfaces = samples.map((sample) => sample.surfaceMeters);
+  const directLandmarkHitCount = samples.filter((sample) => sample.landmarkId !== null).length;
+  const visibleNearbyLandmarkHitCount = samples.filter((sample) => sample.visibleNearbyLandmarkIds.length > 0).length;
   return {
     label: route.label,
     sampleCount: samples.length,
@@ -197,10 +256,14 @@ function summarizeRoute(generator: ProceduralWorldGenerator, route: RouteSpec): 
     distinctUndergroundBiomes,
     distinctRegionalVariants,
     distinctLandmarks,
+    directLandmarks,
+    visibleNearbyLandmarks,
     requiredLandmarkIds,
     missingRequiredLandmarkIds,
     distinctAmbientProfiles,
-    landmarkHitCount: samples.filter((sample) => sample.landmarkId !== null).length,
+    directLandmarkHitCount,
+    visibleNearbyLandmarkHitCount,
+    landmarkHitCount: samples.filter((sample) => sample.landmarkId !== null || sample.visibleNearbyLandmarkIds.length > 0).length,
     maxNotableGapMeters: Math.max(0, ...notableGaps),
     averageNotableGapMeters: average(notableGaps),
     minSurfaceMeters: Math.min(...surfaces),
@@ -221,6 +284,7 @@ function sampleRoute(generator: ProceduralWorldGenerator, route: RouteSpec): Rou
     const worldX = startX + directionX * distanceWorldUnits;
     const worldZ = startZ + directionZ * distanceWorldUnits;
     const probe = generator.sampleBiomeProbe(worldX, worldZ);
+    const visibleNearbyLandmarks = scanVisibleNearbyLandmarks(generator, worldX, worldZ, directionX, directionZ, probe.landmarkId);
     const ambient = resolveAmbientWorldProfile(probe);
     samples.push({
       distanceMeters,
@@ -231,6 +295,11 @@ function sampleRoute(generator: ProceduralWorldGenerator, route: RouteSpec): Rou
       undergroundBiomeId: probe.undergroundBiomeId,
       regionalVariantId: probe.regionalVariantId,
       landmarkId: probe.landmarkId,
+      landmarkHeightMeters: landmarkHeightMeters(probe),
+      visibleNearbyLandmarkIds: visibleNearbyLandmarks.map((landmark) => landmark.landmarkId),
+      nearestVisibleNearbyLandmarkId: visibleNearbyLandmarks[0]?.landmarkId ?? null,
+      nearestVisibleNearbyLandmarkDistanceMeters: visibleNearbyLandmarks[0]?.distanceMeters ?? null,
+      tallestVisibleNearbyLandmarkHeightMeters: Math.max(0, ...visibleNearbyLandmarks.map((landmark) => landmark.heightMeters)),
       ambientProfileId: ambient.id,
       ambientProfileLabel: ambient.label,
     });
@@ -238,11 +307,70 @@ function sampleRoute(generator: ProceduralWorldGenerator, route: RouteSpec): Rou
   return samples;
 }
 
+function scanVisibleNearbyLandmarks(
+  generator: ProceduralWorldGenerator,
+  worldX: number,
+  worldZ: number,
+  directionX: number,
+  directionZ: number,
+  directLandmarkId: string | null,
+): VisibleNearbyLandmark[] {
+  const lateralX = -directionZ;
+  const lateralZ = directionX;
+  const nearestByLandmark = new Map<string, VisibleNearbyLandmark>();
+  for (const [forwardMeters, lateralMeters] of LANDMARK_VISTA_OFFSETS_METERS) {
+    const distanceMeters = Math.hypot(forwardMeters, lateralMeters);
+    if (distanceMeters > landmarkVistaScan.radiusMeters) {
+      throw new Error(`landmark vista offset ${forwardMeters},${lateralMeters} exceeds scan radius`);
+    }
+    const offsetWorldX = metersToWorldUnits(forwardMeters * directionX + lateralMeters * lateralX);
+    const offsetWorldZ = metersToWorldUnits(forwardMeters * directionZ + lateralMeters * lateralZ);
+    const probeWorldX = worldX + offsetWorldX;
+    const probeWorldZ = worldZ + offsetWorldZ;
+    const probe = generator.sampleBiomeProbe(probeWorldX, probeWorldZ);
+    if (!probe.landmarkId || probe.landmarkId === directLandmarkId) {
+      continue;
+    }
+    const heightMeters = landmarkHeightMeters(probe);
+    if (heightMeters < landmarkVistaScan.minHeightMeters) {
+      continue;
+    }
+    const candidate: VisibleNearbyLandmark = {
+      landmarkId: probe.landmarkId,
+      distanceMeters,
+      heightMeters,
+      worldX: Math.round(probeWorldX),
+      worldZ: Math.round(probeWorldZ),
+    };
+    const existing = nearestByLandmark.get(probe.landmarkId);
+    if (!existing || compareVisibleNearbyLandmarks(candidate, existing) < 0) {
+      nearestByLandmark.set(probe.landmarkId, candidate);
+    }
+  }
+  return [...nearestByLandmark.values()].sort(compareVisibleNearbyLandmarks);
+}
+
+function compareVisibleNearbyLandmarks(left: VisibleNearbyLandmark, right: VisibleNearbyLandmark): number {
+  return left.distanceMeters - right.distanceMeters
+    || right.heightMeters - left.heightMeters
+    || left.landmarkId.localeCompare(right.landmarkId)
+    || left.worldX - right.worldX
+    || left.worldZ - right.worldZ;
+}
+
+function landmarkHeightMeters(probe: { topY: number; surfaceY: number }): number {
+  return worldUnitsToMeters(Math.max(0, probe.topY - probe.surfaceY));
+}
+
 function summarizeAggregate(routes: RouteSummary[]): RouteAtlasAggregate {
   const distinctBiomes = sortedDistinct(routes.flatMap((route) => route.distinctBiomes));
   const distinctAmbientProfiles = sortedDistinct(routes.flatMap((route) => route.distinctAmbientProfiles));
   const distinctRegionalVariants = sortedDistinct(routes.flatMap((route) => route.distinctRegionalVariants));
   const distinctLandmarks = sortedDistinct(routes.flatMap((route) => route.distinctLandmarks));
+  const directLandmarks = sortedDistinct(routes.flatMap((route) => route.directLandmarks));
+  const visibleNearbyLandmarks = sortedDistinct(routes.flatMap((route) => route.visibleNearbyLandmarks));
+  const directLandmarkHitCount = sum(routes.map((route) => route.directLandmarkHitCount));
+  const visibleNearbyLandmarkHitCount = sum(routes.map((route) => route.visibleNearbyLandmarkHitCount));
   const landmarkHitCount = sum(routes.map((route) => route.landmarkHitCount));
   const maxNotableGapMeters = Math.max(...routes.map((route) => route.maxNotableGapMeters));
   const definitionScore = clampScore(
@@ -259,6 +387,10 @@ function summarizeAggregate(routes: RouteSummary[]): RouteAtlasAggregate {
     distinctAmbientProfiles,
     distinctRegionalVariants,
     distinctLandmarks,
+    directLandmarks,
+    visibleNearbyLandmarks,
+    directLandmarkHitCount,
+    visibleNearbyLandmarkHitCount,
     landmarkHitCount,
     maxNotableGapMeters,
     averageNotableGapMeters: average(routes.map((route) => route.averageNotableGapMeters)),
@@ -352,7 +484,8 @@ function buildMarkdownSummary(report: RouteAtlasReport): string {
     `- Ambient profiles: ${report.aggregate.distinctAmbientProfiles.length} (${report.aggregate.distinctAmbientProfiles.join(", ")})`,
     `- Regional variants: ${report.aggregate.distinctRegionalVariants.length}`,
     `- Landmarks: ${report.aggregate.distinctLandmarks.length} (${report.aggregate.distinctLandmarks.join(", ")})`,
-    `- Landmark hits: ${report.aggregate.landmarkHitCount}`,
+    `- Landmark credited samples: ${report.aggregate.landmarkHitCount} (${report.aggregate.directLandmarkHitCount} direct samples, ${report.aggregate.visibleNearbyLandmarkHitCount} vista samples)`,
+    `- Vista scan: ${report.landmarkVistaScan.samplesPerRouteSample} samples within ${report.landmarkVistaScan.radiusMeters} m, min height ${report.landmarkVistaScan.minHeightMeters.toFixed(1)} m`,
     `- Max notable gap: ${report.aggregate.maxNotableGapMeters.toFixed(1)} m`,
     `- Average notable gap: ${report.aggregate.averageNotableGapMeters.toFixed(1)} m`,
     "",
@@ -394,10 +527,10 @@ function buildMarkdownSummary(report: RouteAtlasReport): string {
   lines.push(
     "## Route Details",
     "",
-    "| Route | Biomes | Ambient | Landmarks | Required Missing | Hits | Max Gap |",
-    "| --- | ---: | ---: | --- | --- | ---: | ---: |",
+    "| Route | Biomes | Ambient | Landmarks | Vista | Required Missing | Hits | Max Gap |",
+    "| --- | ---: | ---: | --- | --- | --- | ---: | ---: |",
     ...report.routes.map((route) =>
-      `| ${route.label} | ${route.distinctBiomes.length} | ${route.distinctAmbientProfiles.length} | ${formatList(route.distinctLandmarks)} | ${formatList(route.missingRequiredLandmarkIds)} | ${route.landmarkHitCount} | ${route.maxNotableGapMeters.toFixed(1)} m |`,
+      `| ${route.label} | ${route.distinctBiomes.length} | ${route.distinctAmbientProfiles.length} | ${formatList(route.distinctLandmarks)} | ${formatList(route.visibleNearbyLandmarks)} | ${formatList(route.missingRequiredLandmarkIds)} | ${route.landmarkHitCount} | ${route.maxNotableGapMeters.toFixed(1)} m |`,
     ),
     "",
     `Failures: ${report.failures.length > 0 ? report.failures.join("; ") : "none"}`,
@@ -459,9 +592,16 @@ function notableKey(sample: RouteSample): string {
   return [
     sample.biomeId,
     sample.regionalVariantId ?? "none",
-    sample.landmarkId ?? "none",
+    landmarkKey(sample),
     sample.ambientProfileId,
   ].join("|");
+}
+
+function landmarkKey(sample: RouteSample): string {
+  return formatList(sortedDistinct([
+    ...(sample.landmarkId ? [sample.landmarkId] : []),
+    ...sample.visibleNearbyLandmarkIds,
+  ]));
 }
 
 function sortedDistinct(values: readonly string[]): string[] {

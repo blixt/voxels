@@ -90,7 +90,10 @@ export type LandmarkId =
   | "ash_obelisk"
   | "rib_arch"
   | "old_road_causeway"
-  | "pilgrim_lantern";
+  | "pilgrim_lantern"
+  | "crystal_reeds"
+  | "fungal_bridge"
+  | "rib_remains";
 
 interface BaseBiomeProfile {
   id: BaseBiomeId;
@@ -452,7 +455,14 @@ const PROCEDURAL_WATER_ALPHA = 168;
 const PROCEDURAL_WATER_MATERIALS = new Set<number>([
   ...BASE_BIOMES.map((biome) => biome.water),
   ...Object.values(SPECIAL_BIOMES).map((biome) => biome.water),
-]);
+  "#134",
+  "#245",
+  "#58C",
+  "#5BD",
+  "#6DF",
+  "#9CF",
+  "#9DF",
+].map((material) => typeof material === "number" ? material : hexColorToMaterial(material)));
 
 const UNDERGROUND_BIOMES: Record<UndergroundBiomeId, UndergroundBiomeProfile> = {
   rooted: createUndergroundBiome("rooted", "#586", "#354", "#9C6"),
@@ -517,6 +527,9 @@ const LANDMARKS: Record<LandmarkId, LandmarkProfile> = {
   rib_arch: createLandmark("rib_arch", 196, 13, 0.18, 1.0, 1),
   old_road_causeway: createLandmark("old_road_causeway", 128, 13, 0.30, 1.0, 1),
   pilgrim_lantern: createLandmark("pilgrim_lantern", 124, 5, 0.28, 1.0, 4),
+  crystal_reeds: createLandmark("crystal_reeds", 112, 5, 0.34, 1.0, 2),
+  fungal_bridge: createLandmark("fungal_bridge", 156, 16, 0.26, 1.0, 1),
+  rib_remains: createLandmark("rib_remains", 152, 10, 0.24, 1.0, 1),
 };
 
 const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
@@ -853,6 +866,7 @@ const TUNDRA_BLUE_ICE_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const MARSH_THICKET_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("crystal_reeds", { chance: 0.32, scale: 1.08, cellSize: 104, radius: 5 }),
   landmarkPlacement("mangrove", { chance: 0.36, scale: 1.18, cellSize: 160, radius: 15 }),
   landmarkPlacement("cypress", { chance: 0.42, scale: 1.12, cellSize: 128, radius: 10 }),
   landmarkPlacement("reed_cluster", { chance: 0.70, scale: 1.12, cellSize: 68, radius: 4 }),
@@ -860,6 +874,8 @@ const MARSH_THICKET_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const MARSH_WILLOW_THICKET_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("fungal_bridge", { chance: 0.20, scale: 1.08, cellSize: 172, radius: 15 }),
+  landmarkPlacement("crystal_reeds", { chance: 0.34, scale: 1.10, cellSize: 100, radius: 5 }),
   landmarkPlacement("willow", { chance: 0.34, scale: 1.10, cellSize: 136, radius: 14 }),
   landmarkPlacement("mangrove", { chance: 0.30, scale: 1.18, cellSize: 154, radius: 15 }),
   landmarkPlacement("cypress", { chance: 0.40, scale: 1.14, cellSize: 118, radius: 10 }),
@@ -868,6 +884,9 @@ const MARSH_WILLOW_THICKET_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const MARSH_BLACKWATER_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("rib_remains", { chance: 0.30, scale: 1.12, cellSize: 150, radius: 10 }),
+  landmarkPlacement("fungal_bridge", { chance: 0.24, scale: 1.10, cellSize: 156, radius: 16 }),
+  landmarkPlacement("crystal_reeds", { chance: 0.42, scale: 1.16, cellSize: 84, radius: 5 }),
   landmarkPlacement("willow", { chance: 0.40, scale: 1.14, cellSize: 128, radius: 14 }),
   landmarkPlacement("cypress", { chance: 0.44, scale: 1.16, cellSize: 118, radius: 10 }),
   landmarkPlacement("reed_cluster", { chance: 0.80, scale: 1.16, cellSize: 60, radius: 4 }),
@@ -875,6 +894,7 @@ const MARSH_BLACKWATER_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const FIREFLY_LANTERN_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("crystal_reeds", { chance: 0.28, scale: 1.08, cellSize: 100, radius: 5 }),
   landmarkPlacement("lantern_tree", { chance: 0.42, scale: 1.12, cellSize: 124, radius: 12 }),
   landmarkPlacement("glowcap", { chance: 0.42, scale: 1.10, cellSize: 116, radius: 12 }),
   landmarkPlacement("willow", { chance: 0.26, scale: 1.04, cellSize: 136, radius: 14 }),
@@ -906,6 +926,8 @@ const FERN_OVERGROWN_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const FUNGAL_MOONLIT_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("fungal_bridge", { chance: 0.34, scale: 1.18, cellSize: 152, radius: 17 }),
+  landmarkPlacement("crystal_reeds", { chance: 0.22, scale: 1.08, cellSize: 116, radius: 5 }),
   landmarkPlacement("mega_glowcap", { chance: 0.32, scale: 1.20 }),
   landmarkPlacement("glowcap", { chance: 0.48, scale: 1.14 }),
   landmarkPlacement("lantern_tree", { chance: 0.24, scale: 1.02, cellSize: 136, radius: 12 }),
@@ -913,6 +935,8 @@ const FUNGAL_MOONLIT_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const FUNGAL_SPORE_GROVE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("fungal_bridge", { chance: 0.40, scale: 1.22, cellSize: 136, radius: 18 }),
+  landmarkPlacement("rib_remains", { chance: 0.14, scale: 1.02, cellSize: 184, radius: 10 }),
   landmarkPlacement("mega_glowcap", { chance: 0.40, scale: 1.24, cellSize: 140, radius: 20 }),
   landmarkPlacement("glowcap", { chance: 0.64, scale: 1.16, cellSize: 104, radius: 13 }),
   landmarkPlacement("lantern_tree", { chance: 0.34, scale: 1.08, cellSize: 120, radius: 13 }),
@@ -928,6 +952,8 @@ const ROOTED_SURFACE_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const PEATY_SURFACE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("rib_remains", { chance: 0.18, scale: 1.04, cellSize: 172, radius: 10 }),
+  landmarkPlacement("fungal_bridge", { chance: 0.20, scale: 1.08, cellSize: 160, radius: 15 }),
   landmarkPlacement("root_stump", { chance: 0.26, scale: 1.04, cellSize: 128, radius: 8 }),
   landmarkPlacement("willow", { chance: 0.40, scale: 1.12, cellSize: 132, radius: 15 }),
   landmarkPlacement("dead_tree", { chance: 0.30, scale: 1.12, cellSize: 140, radius: 8 }),
@@ -3891,6 +3917,20 @@ function configureLandmarkFeature(
       );
       out.featureExtra = 1;
       return true;
+    case "crystal_reeds":
+      if (waterTopY === NO_WATER && fields.channel < 0.54 && fields.moisture < 0.64) {
+        return false;
+      }
+      configureSpireFeature(
+        out,
+        FEATURE_CRYSTAL,
+        scaledFeatureHeight(16, 18, fields.magic + fields.moisture * 0.25, profile.scale),
+        scaledFeatureRadius(4, 3, fields.channel + fields.magic * 0.2, profile.scale),
+        "#68A",
+        "#CEF",
+      );
+      out.featureExtra = 3;
+      return true;
     case "basalt_spire":
       configureSpireFeature(
         out,
@@ -3978,6 +4018,17 @@ function configureLandmarkFeature(
       );
       out.featureExtra = 1;
       return true;
+    case "rib_remains":
+      configureSpireFeature(
+        out,
+        FEATURE_RIB_ARCH,
+        scaledFeatureHeight(12, 10, fields.channel + fields.surfacePatch * 0.2, profile.scale),
+        scaledFeatureRadius(9, 4, fields.scatter + fields.moisture * 0.2, profile.scale),
+        "#776",
+        "#CBA",
+      );
+      out.featureExtra = 2;
+      return true;
     case "velothi_shrine":
       configureSpireFeature(
         out,
@@ -4032,6 +4083,17 @@ function configureLandmarkFeature(
         "#BA8",
       );
       out.featureExtra = profile.variant;
+      return true;
+    case "fungal_bridge":
+      configureSpireFeature(
+        out,
+        FEATURE_CAUSEWAY,
+        scaledFeatureHeight(5, 4, fields.magic + fields.moisture * 0.25, profile.scale),
+        scaledFeatureRadius(14, 6, fields.channel + fields.grove * 0.25, profile.scale),
+        "#465",
+        "#9CF",
+      );
+      out.featureExtra = 3;
       return true;
     case "glowcap":
       if (submergedSurface) {

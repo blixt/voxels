@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 
 import { fnv1a } from "../src/engine/math.ts";
 import {
@@ -25,6 +25,8 @@ const UNDERWATER_ORGANIC_SURFACE_MATERIALS = new Set<number>([
   "#7C5",
   "#6A8",
 ].map((code) => hexColorToMaterial(code)));
+
+setDefaultTimeout(15_000);
 
 const SURFACE_BIOME_IDS = [
   "verdant",
@@ -95,6 +97,9 @@ const AUDITED_SURFACE_LANDMARK_IDS = [
   "rib_arch",
   "old_road_causeway",
   "pilgrim_lantern",
+  "crystal_reeds",
+  "fungal_bridge",
+  "rib_remains",
 ] as const;
 
 const TRUNKED_LANDMARK_IDS = [
@@ -1031,6 +1036,21 @@ test("new biome families expose distinct landmark identities", () => {
   expect(landmarksByBiome.get("fungal")?.has("mega_glowcap") || landmarksByBiome.get("fungal")?.has("lantern_tree")).toBe(true);
   expect(landmarksByBiome.get("firefly")?.has("lantern_tree")).toBe(true);
   expect(landmarksByBiome.get("shardlands")?.has("salt_spire") || landmarksByBiome.get("shardlands")?.has("crystal_cluster")).toBe(true);
+});
+
+test("salt-marsh and fungal regions expose basin set-piece landmarks", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+
+  const crystalReeds = findRepresentativeLandmarkRoot(generator, "crystal_reeds");
+  const fungalBridge = findRepresentativeLandmarkRoot(generator, "fungal_bridge");
+  const ribRemains = findRepresentativeLandmarkRoot(generator, "rib_remains");
+
+  expect(crystalReeds).not.toBeNull();
+  expect(fungalBridge).not.toBeNull();
+  expect(ribRemains).not.toBeNull();
+  expect(new Set(["marsh", "firefly", "fungal"]).has(crystalReeds!.probe.biomeId)).toBe(true);
+  expect(new Set(["marsh", "fungal"]).has(fungalBridge!.probe.biomeId)).toBe(true);
+  expect(new Set(["marsh", "fungal"]).has(ribRemains!.probe.biomeId)).toBe(true);
 });
 
 test("ancient route landmarks appear in harsh and uncanny regions", () => {

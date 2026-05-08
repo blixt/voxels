@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
+  isProceduralWaterMaterial,
   materialToHexColor,
   ProceduralWorldGenerator,
   type LandmarkId,
@@ -58,6 +59,9 @@ export const OBJECT_LAB_LANDMARK_IDS = [
   "rib_arch",
   "old_road_causeway",
   "pilgrim_lantern",
+  "crystal_reeds",
+  "fungal_bridge",
+  "rib_remains",
 ] as const satisfies readonly LandmarkId[];
 
 export interface LandmarkRoot {
@@ -330,7 +334,8 @@ function refineLandmarkRoot(
   for (let z = coarseZ - refineRadius; z <= coarseZ + refineRadius; z += 1) {
     for (let x = coarseX - refineRadius; x <= coarseX + refineRadius; x += 1) {
       const probe = generator.sampleBiomeProbe(x, z);
-      if (probe.landmarkId !== landmarkId || generator.sampleMaterial(x, probe.surfaceY + 1, z) === 0) {
+      const rootMaterial = generator.sampleMaterial(x, probe.surfaceY + 1, z);
+      if (probe.landmarkId !== landmarkId || rootMaterial === 0 || isProceduralWaterMaterial(rootMaterial)) {
         continue;
       }
       return { x, z, probe };
@@ -386,7 +391,7 @@ function sampleObject(
       const localSurfaceY = generator.sampleColumn(worldX, worldZ).surfaceY;
       for (let y = Math.max(yMin, localSurfaceY + 1); y <= yMax; y += 1) {
         const material = generator.sampleMaterial(worldX, y, worldZ);
-        if (material === 0) {
+        if (material === 0 || isProceduralWaterMaterial(material)) {
           continue;
         }
         solidVoxelCount += 1;
@@ -484,9 +489,9 @@ function inspectObjectScale(sample: SampledObject, topProjection: ProjectionDiag
       solidVoxelBudget: "empty",
     };
   }
-  const xSize = sample.bounds.max[0] - sample.bounds.min[0] + 1;
-  const ySize = sample.bounds.max[1] - sample.bounds.min[1] + 1;
-  const zSize = sample.bounds.max[2] - sample.bounds.min[2] + 1;
+  const xSize = sample.bounds.max[0] - sample.bounds.min[0];
+  const ySize = sample.bounds.max[1] - sample.bounds.min[1];
+  const zSize = sample.bounds.max[2] - sample.bounds.min[2];
   const boundsVolume = xSize * ySize * zSize;
   return {
     boundsSize: [xSize, ySize, zSize],

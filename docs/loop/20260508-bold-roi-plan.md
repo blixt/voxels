@@ -73,3 +73,24 @@ Execution order for the next loop:
 2. Start the terrain grid-breaker pass, because it directly addresses the Minecrafty read and can be measured.
 3. Let delegated object-lab/performance investigations finish while implementing terrain/material changes.
 4. Use the next checkpoint to either continue terrain if metrics improve, or immediately switch to moving-performance implementation if the live-forward trace reproduces the user's 10 FPS report.
+
+## Re-Rank After Salt-Marsh And Vista Harness Checkpoint
+
+Completed since the second ranking:
+
+- Route-atlas now credits visible-nearby landmark silhouettes instead of only direct route hits.
+- Salt-marsh/fungal basin coverage now includes `crystal_reeds`, `fungal_bridge`, and `rib_remains`.
+- Regional water override materials are classified as procedural water, fixing a correctness issue in object sampling and water/material handling.
+
+The newest browser lab stayed performant (`14.00 ms` route max frame, no LOD overlap, no handoff holes), but the visual grid metric stayed at `0.68`. That means the next work should favor larger readable silhouettes, sky/composition, or terrain breakup with strict screenshot gates.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Object-lab representative-root upgrade: choose central/high-density samples and flag edge/clipped roots harder | 4 | 5 | 2 | 10.0 | Delegated asset work is only useful if workers inspect representative, non-water, non-clipped objects | object-lab tests, before/after reports for new basin IDs |
+| 2 | Polish weakest basin silhouettes: fungal bridge thickness/material variety and crystal reed material breakup | 5 | 4 | 3 | 6.7 | Current new props exist but still look first-pass; object-lab already identifies the flaws | object-lab material/scale warnings, route screenshots, draw budget |
+| 3 | Storm sky rebuilt safely with luma/color gates active | 5 | 3 | 3 | 5.0 | Whole-screen ambiance gain and less block focus, but previous shader attempt failed black-frame gates | owned-browser screenshot luma/grid/color, route frame budget |
+| 4 | Landmark density director: every 250-350 m route stretch gets a meaningful vista token | 4 | 4 | 3 | 5.3 | Route-atlas can finally measure this honestly via visible-nearby scanning | route-atlas notable-gap and vista-hit metrics |
+| 5 | Terrain grid-breaker geometry/material pass, second attempt | 5 | 3 | 4 | 3.8 | Still essential, but the first shader attempt proved this must be incremental and heavily gated | browser grid metric, procedural terrain tests, route physics |
+| 6 | Ashland travel-kit props: bone chimes, masks, lantern variants, travel packs | 4 | 4 | 3 | 5.3 | Directly targets ugly generic props while staying isolated enough for subagents | object-lab contact sheets and warnings |
+| 7 | Streaming/residency spike reduction during movement | 5 | 3 | 4 | 3.8 | Current browser lab is fine, but user saw severe walking drops; keep watching live-forward traces | live-forward p95/max stream/mesh/LOD |
+| 8 | Far-view distance increase after density/sky improvements | 4 | 3 | 4 | 3.0 | Seeing farther only helps after far content and LOD correctness are worth trusting | owned-browser LOD/fps/gap gates |
