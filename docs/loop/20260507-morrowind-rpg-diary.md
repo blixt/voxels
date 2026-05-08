@@ -1125,3 +1125,30 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - checkpoint and push
   - re-label the old route seam counter as transient far LOD coverage or replace it with the direct continuity signal in summaries
+
+### 2026-05-08 - Far LOD Coverage Label Cleanup
+
+- Re-labeled the old route `seamGapCount` proxy in browser-lab summaries as far-LOD coverage gaps.
+- Added backward-compatible benchmark aliases:
+  - `farLodCoverageGapCount`
+  - `uncoveredFarLodGapCount`
+  - `handoffFarLodHoleCount`
+  - `maxFarLodCoverageGapMeters`
+  - `framesWithFarLodCoverageGaps`
+- Browser-lab output now reports:
+  - `holes/far-LOD gaps/blocking seams/overlaps`
+  - `route far-LOD gap sample`
+  - direct `route surface continuity gaps/max step` on a separate line
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun test tests/game-route-benchmark.test.ts`: pass, `8` tests.
+  - Direct browser lab: `artifacts/owned-browser-lab/20260508T000511Z-far-lod-label-cleanup-smoke/report.json`, failures none.
+  - Browser result: route `holes/far-LOD gaps/blocking seams/overlaps 0/51/0/0`, route surface continuity gaps/max step `0/0.50 m`, `LOD gaps 0`, `LOD water overlap 0`.
+- Honest assessment:
+  - This is reporting hygiene, not a renderer fix.
+  - It makes future performance/correctness triage less misleading by separating visible terrain continuity from transient far-LOD work.
+- Rubric movement:
+  - Harness maturity: `6.4 -> 6.45` because the browser lab now names the signal accurately and preserves the old field names for compatibility.
+- Next:
+  - checkpoint and push
+  - continue world definition work or add a full completion audit before deciding what remains largest

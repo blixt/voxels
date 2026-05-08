@@ -549,6 +549,10 @@ export interface RouteExperienceFrameSample {
   lodMs: number;
   lodGeneratedChunks: number;
   lodPendingChunks: number;
+  farLodCoverageGapCount: number;
+  uncoveredFarLodGapCount: number;
+  handoffFarLodHoleCount: number;
+  maxFarLodCoverageGapMeters: number;
   seamGapCount: number;
   uncoveredLodGapCount: number;
   handoffLodHoleCount: number;
@@ -616,10 +620,12 @@ export interface RouteExperienceBenchmarkSummary {
   maxSurfaceContinuityGapCount: number;
   framesWithVisibleGroundGaps: number;
   framesWithSurfaceContinuityGaps: number;
+  framesWithFarLodCoverageGaps: number;
   framesWithSeamGaps: number;
   framesWithLodOverlaps: number;
   maxSeamGapMeters: number;
   maxSurfaceContinuityStepMeters: number;
+  maxFarLodCoverageGapMeters: number;
   maxLodOverlapMeters: number;
   screenVoidCaptureCount: number;
   framesWithScreenVoidSignals: number;
@@ -2981,6 +2987,10 @@ export class GameController {
         surfaceContinuityGapCount: surfaceContinuity.missingSmoothEdgeCount,
         abruptSurfaceEdgeCount: surfaceContinuity.abruptEdgeCount,
         maxSurfaceContinuityStepMeters: surfaceContinuity.maxExpectedStepMeters,
+        farLodCoverageGapCount: seamCoverage.seamGapCount,
+        uncoveredFarLodGapCount: seamCoverage.uncoveredGapCount,
+        handoffFarLodHoleCount: seamCoverage.handoffHoleCount,
+        maxFarLodCoverageGapMeters: seamCoverage.maxSeamGapMeters,
         seamGapCount: seamCoverage.seamGapCount,
         uncoveredLodGapCount: seamCoverage.uncoveredGapCount,
         handoffLodHoleCount: seamCoverage.handoffHoleCount,
@@ -3638,6 +3648,7 @@ function summarizeRouteExperienceBenchmark(
   const visibleGroundResidentNotReadySamples = samples.map((sample) => sample.visibleGroundResidentNotReadyCount);
   const surfaceContinuityGapSamples = samples.map((sample) => sample.surfaceContinuityGapCount);
   const surfaceContinuityStepSamples = samples.map((sample) => sample.maxSurfaceContinuityStepMeters);
+  const farLodCoverageDistanceSamples = samples.map((sample) => sample.maxFarLodCoverageGapMeters);
   const diagnosticsSamples = samples.map((sample) => sample.diagnosticsMs);
   const captureDiagnosticsSamples = samples.map((sample) => sample.captureDiagnosticsMs);
   const settledReferenceChangedSamples = samples.map((sample) => sample.settledReferenceChangedRatio ?? 0);
@@ -3705,10 +3716,12 @@ function summarizeRouteExperienceBenchmark(
     maxSurfaceContinuityGapCount: maxValue(surfaceContinuityGapSamples),
     framesWithVisibleGroundGaps: samples.filter((sample) => sample.visibleGroundUncoveredCount > 0).length,
     framesWithSurfaceContinuityGaps: samples.filter((sample) => sample.surfaceContinuityGapCount > 0).length,
+    framesWithFarLodCoverageGaps: samples.filter((sample) => sample.farLodCoverageGapCount > 0).length,
     framesWithSeamGaps: samples.filter((sample) => sample.seamGapCount > 0).length,
     framesWithLodOverlaps: samples.filter((sample) => sample.lodOverlapCount > 0).length,
     maxSeamGapMeters: maxValue(samples.map((sample) => sample.maxSeamGapMeters)),
     maxSurfaceContinuityStepMeters: maxValue(surfaceContinuityStepSamples),
+    maxFarLodCoverageGapMeters: maxValue(farLodCoverageDistanceSamples),
     maxLodOverlapMeters: maxValue(samples.map((sample) => sample.maxLodOverlapMeters)),
     screenVoidCaptureCount: samples.filter((sample) => sample.screenVoidRatio !== null).length,
     framesWithScreenVoidSignals: samples.filter((sample) => sample.screenVoidSuspicious).length,

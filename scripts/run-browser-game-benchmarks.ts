@@ -536,6 +536,8 @@ function serializeRouteSample(
     visibleGroundSampleCount: sample.visibleGroundSampleCount,
     visibleGroundUncoveredCount: sample.visibleGroundUncoveredCount,
     visibleGroundResidentNotReadyCount: sample.visibleGroundResidentNotReadyCount,
+    farLodCoverageGapCount: sample.farLodCoverageGapCount,
+    maxFarLodCoverageGapMeters: sample.maxFarLodCoverageGapMeters,
     seamGapCount: sample.seamGapCount,
     maxSeamGapMeters: sample.maxSeamGapMeters,
     screenVoidRatio: sample.screenVoidRatio,
