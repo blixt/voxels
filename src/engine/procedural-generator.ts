@@ -4102,6 +4102,7 @@ function configureLandmarkFeature(
         scaledFeatureRadius(8, 3, fields.volcanism + fields.surfacePatch * 0.2, profile.scale),
         "#322",
         "#F74",
+        "#DA8",
       );
       out.featureExtra = 2;
       return true;
@@ -4146,6 +4147,7 @@ function configureLandmarkFeature(
         scaledFeatureRadius(12, 5, fields.scatter + fields.desolation * 0.2, profile.scale),
         "#665",
         "#CBA",
+        "#432",
       );
       out.featureExtra = 1;
       return true;
@@ -4157,6 +4159,7 @@ function configureLandmarkFeature(
         scaledFeatureRadius(9, 4, fields.scatter + fields.moisture * 0.2, profile.scale),
         "#776",
         "#CBA",
+        "#544",
       );
       out.featureExtra = 2;
       return true;
@@ -4632,7 +4635,11 @@ function sampleFeatureMaterial(
         const plinthHeight = Math.max(4, Math.round(featureHeight * 0.16));
         if (relativeY <= plinthHeight) {
           const plinthRadius = featureRadius + 2.4 - relativeY * 0.34;
-          return radial <= Math.max(2.2, plinthRadius) ? materialPrimary : 0;
+          if (radial > Math.max(2.2, plinthRadius)) {
+            return 0;
+          }
+          const plinthCourse = relativeY % 2 === 0 || Math.abs(absX - absZ) <= 0.65;
+          return plinthCourse ? materialSecondary : materialPrimary;
         }
         const towerY = relativeY - plinthHeight;
         const towerProgress = towerY / Math.max(1, featureHeight - plinthHeight);
@@ -4640,9 +4647,17 @@ function sampleFeatureMaterial(
         if (radial > towerRadius) {
           return 0;
         }
-        const glyphBand = towerY % 9 === 0 && absX <= towerRadius && absZ <= 0.72;
+        const glyphBand = towerY % 7 === 0 && absX <= towerRadius && absZ <= 0.84;
+        const verticalInlay = materialAccent !== 0
+          && towerY > 4
+          && towerY < featureHeight - plinthHeight - 3
+          && (
+            (absX <= 0.72 && featureDeltaZ < 0)
+            || (absZ <= 0.72 && featureDeltaX > 0)
+          )
+          && towerY % 3 !== 1;
         const crown = relativeY >= featureHeight - 3;
-        return glyphBand || crown ? materialSecondary : materialPrimary;
+        return verticalInlay ? materialAccent : glyphBand || crown ? materialSecondary : materialPrimary;
       }
 
       const baseHeight = Math.max(10, Math.round(featureHeight * 0.46));
@@ -4680,19 +4695,36 @@ function sampleFeatureMaterial(
       const pillarOffset = Math.max(4.2, featureRadius * 0.72);
       const archBaseY = Math.max(5, Math.round(featureHeight * 0.54));
       const archRise = Math.max(4, featureHeight - archBaseY);
-      const leftPillar = Math.abs(featureDeltaX + pillarOffset) <= 1.05 && absZ <= 1.25 && relativeY <= archBaseY + 1;
-      const rightPillar = Math.abs(featureDeltaX - pillarOffset) <= 1.05 && absZ <= 1.25 && relativeY <= archBaseY + 1;
+      const ribPlanes = featureExtra >= 2 ? [-5, -2, 1, 4] : [-4, -1, 2, 5];
+      const ribPlaneDistance = Math.min(...ribPlanes.map((ribZ) => Math.abs(featureDeltaZ - ribZ)));
+      const ribThickness = featureExtra >= 2 ? 1.45 : 1.25;
+      const leftPillar = Math.abs(featureDeltaX + pillarOffset) <= 1.35 && ribPlaneDistance <= ribThickness && relativeY <= archBaseY + 1;
+      const rightPillar = Math.abs(featureDeltaX - pillarOffset) <= 1.35 && ribPlaneDistance <= ribThickness && relativeY <= archBaseY + 1;
       if (leftPillar || rightPillar) {
         return materialPrimary;
       }
       const normalizedX = Math.min(1, absX / Math.max(1, pillarOffset));
       const archY = archBaseY + Math.round((1 - normalizedX * normalizedX) * archRise);
-      const onArch = absX <= pillarOffset + 1.65 && absZ <= 1.65 && Math.abs(relativeY - archY) <= 1;
+      const onArch = absX <= pillarOffset + 1.85 && ribPlaneDistance <= ribThickness && Math.abs(relativeY - archY) <= 1;
       if (onArch) {
-        return materialSecondary;
+        const chippedEdge = materialAccent !== 0 && ribPlaneDistance <= 0.48 && (Math.round(absX) + relativeY) % 5 === 0;
+        return chippedEdge ? materialAccent : materialSecondary;
       }
-      const brokenRib = absZ <= 0.75 && relativeY <= archBaseY && absX < pillarOffset - 2.2 && (Math.round(absX) + relativeY) % 7 === 0;
-      return brokenRib ? materialPrimary : 0;
+      const spine = featureExtra >= 2
+        && absX <= 1.25
+        && absZ <= Math.max(5.8, featureRadius * 0.58)
+        && relativeY <= Math.max(3, Math.round(archBaseY * 0.52));
+      const brokenRib = ribPlaneDistance <= 0.8
+        && relativeY <= archBaseY
+        && absX < pillarOffset - 2.2
+        && (Math.round(absX) + relativeY + Math.round(absZ)) % 7 === 0;
+      if (spine && materialAccent !== 0 && (Math.round(featureDeltaZ) + relativeY) % 4 === 0) {
+        return materialAccent;
+      }
+      if (brokenRib && materialAccent !== 0 && (Math.round(absX) + relativeY) % 4 === 0) {
+        return materialAccent;
+      }
+      return brokenRib || spine ? materialPrimary : 0;
     }
     case FEATURE_CAUSEWAY: {
       if (featureExtra >= 3) {

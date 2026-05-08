@@ -173,3 +173,24 @@ The next work should still be bold. The density director improves route composit
 | 4 | Object-lab distinctiveness score: asymmetry, negative space, generic-envelope comparison | 4 | 5 | 3 | 6.7 | Batch comparison exists; now it should detect whether props are distinctive, not only valid | object-lab tests and comparison report |
 | 5 | Discovery gameplay pass using route and terrain tokens | 4 | 4 | 3 | 5.3 | Route atlas now emits meaningful cadence signals that can drive RPG travel memory | objective tests, browser objective probe |
 | 6 | Far-view distance experiment after prop and atmosphere quality | 4 | 3 | 4 | 3.0 | Strong route silhouettes help, but far view should wait for browser correctness and prop polish | owned-browser LOD/fps/gap gates |
+
+## Re-Rank After Skyline Prop And Atmosphere Polish
+
+Completed since the strong silhouette director:
+
+- `ash_obelisk` now has warm vertical inlays and no dominant-material warning.
+- `rib_arch` and `rib_remains` now have denser multi-rib silhouettes and no object-lab warnings.
+- Ashfall/fungal skies now include stronger shelf haze, streaks, horizon tint, and luma-safe tests.
+- Browser lab stayed clean and route max frame improved to `8.10 ms`; visual color buckets rose to `98`.
+- The grid metric still stayed at `0.68`.
+
+The next decision should be based on the stubborn grid read. Silhouettes, prop quality, and sky color now moved without performance regression, but axis-aligned dominance did not. Invest in a screenshot-aware diagnostic and a lighting/depth pass before more object density.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Screenshot composition harness: fixed route cameras, ground/sky/object masks, axis-edge by region | 5 | 5 | 3 | 8.3 | Current grid metric is too blunt; need to know whether terrain, horizon, or HUD/camera dominates | owned-browser screenshots, per-region edge metrics, artifact diff |
+| 2 | Lighting depth/contact shading pass | 5 | 4 | 3 | 6.7 | Stronger object and terrain depth may reduce flat block read without more geometry | browser luma/stddev/grid, shader black-frame gates, route render budget |
+| 3 | Ziggurat/obelisk LOD budget and silhouette sampling | 4 | 4 | 3 | 5.3 | The object-lab still marks big skyline props huge; make them readable without excessive voxel mass | object-lab batch, draw/triangle budget |
+| 4 | Object-lab distinctiveness score | 4 | 5 | 3 | 6.7 | Warning-free does not guarantee distinctive; add asymmetry/negative-space gates | object-lab tests and comparison report |
+| 5 | Discovery gameplay pass using route and terrain tokens | 4 | 4 | 3 | 5.3 | Visual route identity is now better; gameplay can start rewarding it | objective tests, browser objective probe |
+| 6 | Far-view distance experiment | 4 | 3 | 4 | 3.0 | Wait until screenshot harness shows far composition is worth exposing | owned-browser LOD/fps/gap gates |

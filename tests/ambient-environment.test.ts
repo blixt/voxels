@@ -103,6 +103,42 @@ test("ashland and fungal ambience carry cheap sky/weather shader controls", () =
   expect(fungal.ashfallIntensity).toBeLessThan(ash.ashfallIntensity);
 });
 
+test("strong weather skies keep browser-lab-safe luma and color separation", () => {
+  const ash = resolveAmbientWorldProfile(buildProbe({
+    biomeId: "ember",
+    regionalVariantId: "ember_caldera",
+    regionalVariantStrength: 1,
+    specialStrength: 1,
+    fields: {
+      ...BASE_FIELDS,
+      volcanism: 0.95,
+    },
+  }));
+  const fungal = resolveAmbientWorldProfile(buildProbe({
+    biomeId: "fungal",
+    regionalVariantId: "fungal_moonlit",
+    regionalVariantStrength: 1,
+    specialStrength: 1,
+    fields: {
+      ...BASE_FIELDS,
+      magic: 0.96,
+      moisture: 0.78,
+    },
+  }));
+
+  expect(rgbaLuma(ash.skyTopColorRgba)).toBeGreaterThan(40);
+  expect(rgbaLuma(ash.skyHorizonColorRgba) - rgbaLuma(ash.skyTopColorRgba)).toBeGreaterThan(55);
+  expect(rgbaLuma(ash.fogColorRgba)).toBeGreaterThan(105);
+  expect(ash.skyCloudCoverage).toBeGreaterThanOrEqual(0.90);
+  expect(ash.skyCloudBand).toBeLessThanOrEqual(0.45);
+
+  expect(fungal.skyHorizonColorRgba[1]).toBeGreaterThan(fungal.skyHorizonColorRgba[0] + 45);
+  expect(fungal.skyCloudColorRgba[2]).toBeGreaterThan(fungal.skyCloudColorRgba[0] + 45);
+  expect(rgbaLuma(fungal.skyTopColorRgba)).toBeGreaterThan(55);
+  expect(rgbaLuma(fungal.fogColorRgba) - rgbaLuma(fungal.skyTopColorRgba)).toBeGreaterThan(85);
+  expect(fungal.skyCloudCoverage).toBeGreaterThanOrEqual(0.56);
+});
+
 test("procedural ambient profiles are deterministic and varied across the world", () => {
   const generator = new ProceduralWorldGenerator(1337);
   const first = resolveAmbientWorldProfile(generator.sampleBiomeProbe(1440, -960));
@@ -134,4 +170,8 @@ function buildProbe(overrides: Partial<AmbientWorldProbe>): AmbientWorldProbe {
     fields: BASE_FIELDS,
     ...overrides,
   };
+}
+
+function rgbaLuma(color: readonly [number, number, number, number]): number {
+  return color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
 }

@@ -268,6 +268,10 @@ const DEFAULT_HEIGHT_PADDING = 8;
 const BACKGROUND = 0xf4f4f4;
 const LANDMARK_ID_SET = new Set<string>(OBJECT_LAB_LANDMARK_IDS);
 const CENTERED_ROOT_LANDMARK_IDS = new Set<LandmarkId>([
+  "old_road_causeway",
+  "velothi_ziggurat",
+  "ash_obelisk",
+  "rib_arch",
   "silt_shell",
   "crystal_reeds",
   "fungal_bridge",

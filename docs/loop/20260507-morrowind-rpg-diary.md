@@ -1578,3 +1578,41 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - commit and push if browser correctness/performance hold
   - next likely work: either prop-family replacement for the warned skyline objects or stronger sky/atmospheric layering, depending on the browser screenshot metrics
+
+### 2026-05-08 - Skyline Prop And Atmosphere Polish
+
+- Trigger:
+  - Strong route silhouette coverage now exposes the weak objects more often, so the object-lab batch warning queue became high ROI.
+  - The browser grid metric still stayed at `0.68`, so a conservative whole-screen atmosphere pass was also worth testing.
+- Delegation:
+  - Sky/atmosphere worker took the renderer/ambient slice while I worked on skyline prop geometry.
+- Changes:
+  - `ash_obelisk` now has three materials with warm vertical inlays, plinth courses, tighter glyph bands, and a stronger crown read.
+  - `rib_arch` now uses multiple rib planes, chipped accent edges, and thicker supports; `rib_remains` gains a spine and accent vertebrae.
+  - Object-lab root selection now uses centered samples for the large old-road/skyline landmarks, not only wet set pieces.
+  - Ashfall and fungal ambient profiles now have stronger storm shelf, ash streak, far haze, and fungal horizon coloring while keeping a luma floor.
+- Validation:
+  - Object-lab before this pass: `artifacts/object-lab/2026-05-08-034851132Z-route-landmark-comparison-after-skyline/batch-report.json`.
+  - Object-lab final: `artifacts/object-lab/2026-05-08-035724493Z-route-landmark-prop-polish-v2/batch-report.json`.
+  - Object-lab improvements: `ash_obelisk` dominant share `98.0% -> 68.5%` and `2 -> 3` materials; `rib_arch` `206 -> 783` voxels, `2 -> 3` materials, warning-free; `rib_remains` `663 -> 3647` voxels, `2 -> 3` materials, warning-free.
+  - Remaining object-lab warning queue: `velothi_ziggurat` and `ash_obelisk` remain intentionally huge; `crystal_reeds` is still top-projection sparse.
+  - Focused tests: `mise exec -- bun test tests/procedural-generator.test.ts tests/object-lab.test.ts tests/ambient-environment.test.ts`, pass, `47` tests.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Route atlas: `artifacts/route-atlas/20260508T035800Z-skyline-prop-atmosphere-polish/report.json`, failures none, strong silhouette coverage still `87.7%`, max notable gap `108.0 m`.
+  - Build: `mise run build`, pass.
+  - Live-forward trace: `artifacts/browser-route-trace/20260508T035840Z-skyline-prop-atmosphere-live-forward/report.json`, avg/p95/max gameplay `3.25/5.30/9.10 ms`, p95 stream/mesh/LOD `1.10/1.60/3.70 ms`.
+  - Owned browser lab: `artifacts/owned-browser-lab/20260508T035840Z-skyline-prop-atmosphere-browser/report.json`, failures none.
+  - Browser result: traversal p95/max `4.70/9.20 ms`, route p95/max `4.60/8.10 ms`, draw/triangles `512/383634`, `LOD overlap LOD0/bands 0/0`, water overlap `0`, LOD gaps `0`, handoff holes `0`, render-ready near samples `961/961`, HUD smoke passed.
+  - Browser visual identity moved color count `89 -> 98`, saturation `0.38 -> 0.37`, grid dominance stayed `0.68`.
+- Honest assessment:
+  - This pass made visible skyline props materially less crude and did so without performance cost; browser draw calls and triangles actually dropped on the measured route.
+  - The atmosphere pass improved color variety and stayed browser-safe, but still did not move the axis-aligned grid metric.
+  - The persistent `0.68` grid read now looks like a camera/screen composition or meshing/lighting problem, not a lack of route tokens alone.
+- Rubric movement:
+  - Visual/world definition: `5.45 -> 5.75` because the route skyline objects and sky mood are now more distinctive, even though the screen-grid metric did not move.
+  - Harness maturity: `8.70 -> 8.80` because the batch object-lab reports now directly drive and confirm prop quality changes.
+  - Rendering correctness: `6.15 -> 6.25` because shader/ambient changes passed luma/color gates and LOD/water/handoff checks.
+  - Performance/playability: `6.15 -> 6.20` because route/traversal browser max frames stayed under `10 ms` and draw cost did not increase.
+- Next:
+  - commit and push this prop/atmosphere checkpoint
+  - target the persistent grid metric with either lighting depth/contact shading or a screenshot-specific composition/camera harness, since silhouette density and prop quality alone did not move it

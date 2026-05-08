@@ -104,6 +104,10 @@ fn sky_hash(cell: vec2<f32>) -> f32 {
   return fract(sin(dot(cell, vec2<f32>(127.1, 311.7))) * 43758.5453);
 }
 
+fn sky_luma(color: vec3<f32>) -> f32 {
+  return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
 @vertex
 fn vs_sky(@builtin(vertex_index) vertex_index: u32) -> SkyVertexOutput {
   var positions = array<vec2<f32>, 3>(
@@ -138,6 +142,16 @@ fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
   let cloud_strength = clamp(uniforms.sky_params.x * band_mask * cloud_texture * (0.72 + ashfall * 0.34), 0.0, 0.92);
 
   let ash_shelf = ashfall * smoothstep(0.18, 0.62, y) * (1.0 - smoothstep(0.74, 0.96, y));
+  let shelf_mask = ashfall
+    * smoothstep(0.14, 0.30, y)
+    * (1.0 - smoothstep(0.42, 0.62, y));
+  let shelf_noise = sky_hash(floor(vec2<f32>(input.uv.x * 20.0, y * 7.0) + vec2<f32>(5.0, 17.0)));
+  let ash_streak_cell = floor(vec2<f32>(input.uv.x * 54.0 + y * 12.0, y * 15.0));
+  let ash_streak_noise = sky_hash(ash_streak_cell);
+  let ash_streaks = ashfall
+    * (1.0 - smoothstep(0.18, 0.86, y))
+    * smoothstep(0.58, 0.94, ash_streak_noise)
+    * (0.28 + shelf_mask * 0.48);
   let fungal_horizon = fungal_glow * (1.0 - smoothstep(0.05, 0.48, y));
   let storm_belly = vec3<f32>(0.15, 0.14, 0.13);
   let storm_tint = mix(
@@ -145,10 +159,18 @@ fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
     storm_belly,
     ash_shelf * 0.54,
   );
+  let shelf_tint = mix(vec3<f32>(0.24, 0.22, 0.19), uniforms.fog_color.rgb, 0.34 + shelf_noise * 0.16);
+  let far_haze = (1.0 - smoothstep(0.02, 0.38, y)) * (0.18 + ashfall * 0.28 + fungal_glow * 0.10);
   var sky = mix(base, storm_tint, cloud_strength);
+  sky = mix(sky, shelf_tint, clamp(shelf_mask * (0.34 + shelf_noise * 0.28), 0.0, 0.62));
+  sky = mix(sky, uniforms.fog_color.rgb, clamp(far_haze, 0.0, 0.54));
+  sky = mix(sky, vec3<f32>(0.08, 0.08, 0.075), clamp(ash_streaks, 0.0, 0.30));
   sky = mix(sky, storm_belly, ashfall * smoothstep(0.66, 1.0, y) * 0.34);
   sky += vec3<f32>(0.00, 0.08, 0.09) * fungal_horizon;
-  sky = mix(sky, vec3<f32>(dot(sky, vec3<f32>(0.2126, 0.7152, 0.0722))), ashfall * 0.10);
+  sky += vec3<f32>(0.025, 0.055, 0.040) * fungal_glow * smoothstep(0.18, 0.72, y) * (1.0 - smoothstep(0.72, 0.98, y));
+  sky = mix(sky, vec3<f32>(sky_luma(sky)), ashfall * 0.10);
+  let luma_floor = 0.085 + fungal_glow * 0.015;
+  sky += vec3<f32>(max(0.0, luma_floor - sky_luma(sky)));
   return vec4<f32>(clamp(sky, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 `;
