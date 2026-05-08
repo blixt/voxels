@@ -214,3 +214,22 @@ This confirms the next pass must change camera-scale composition, not add anothe
 | 4 | Stronger atmospheric horizon separation without fragment-contact risk | 4 | 4 | 3 | 5.3 | Horizon is still the grid driver, but previous fragment shader attempts black-framed | view-atlas horizon grid/luma, browser black-frame gates |
 | 5 | Object-lab distinctiveness score: asymmetry, negative space, generic-envelope comparison | 4 | 5 | 3 | 6.7 | Warning-free props can still be generic; distinctiveness needs a numeric gate | object-lab tests and comparison report |
 | 6 | Discovery gameplay pass using route and terrain tokens | 4 | 4 | 3 | 5.3 | Valuable, but place identity and view correctness still lead | objective tests, browser objective probe |
+
+## Re-Rank After Megastructure Lower-Fill
+
+Completed since the view-atlas checkpoint:
+
+- View atlas screenshots are now HUDless and include close `ziggurat-approach` / `obelisk-approach` hero views.
+- `ash_obelisk` is warning-free in object-lab, `8351 -> 6345` voxels.
+- `velothi_ziggurat` is still huge but much less filled, `40224 -> 24198` voxels and fill `0.425 -> 0.255`.
+- Browser route p95/max stayed healthy at `4.60/7.40 ms`; LOD overlap/gap/handoff gates stayed clean.
+- Global visual grid stayed `0.68`, and HUDless screenshots make the next blocker obvious: foreground/horizon terrain surfaces.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Ground interrupter set: non-rectangular ash drifts, salt cracks, scree fans, broken road shoulders | 5 | 5 | 4 | 6.3 | HUDless atlas shows terrain/road pixels dominate the Minecrafty read | view-atlas lower-ground/horizon grid and colors, route physics continuity, browser route budget |
+| 2 | View-atlas world-only baseline gate and per-view budgets | 4 | 5 | 2 | 10.0 | The tool is useful; make future claims compare against the clean seven-view baseline | `bun run atlas:views -- --compare-to=artifacts/view-atlas/20260508T045619Z-megastructure-hudless-atlas/report.json` |
+| 3 | Stronger atmospheric horizon separation without fragment-contact risk | 4 | 4 | 3 | 5.3 | Terrain horizon still has high edge load; atmosphere may soften distant block read cheaply | view-atlas horizon grid/luma, browser black-frame gates |
+| 4 | Push ziggurat below huge budget with more negative space | 3 | 4 | 3 | 4.0 | Good cost target, but current screen metrics say ground is now higher ROI | object-lab target `<18000` voxels, route coverage |
+| 5 | Object-lab distinctiveness score | 4 | 5 | 3 | 6.7 | Needed for scalable asset delegation, but not the immediate visible blocker | object-lab tests and comparison report |
+| 6 | Discovery gameplay pass using route and terrain tokens | 4 | 4 | 3 | 5.3 | Place identity still needs visual grounding before deeper RPG UI work | objective tests, browser objective probe |

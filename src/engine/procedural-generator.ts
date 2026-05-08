@@ -4198,6 +4198,7 @@ function configureLandmarkFeature(
         scaledFeatureRadius(14, 5, fields.surfacePatch + fields.scatter * 0.2, profile.scale),
         "#433",
         "#DA8",
+        "#C86",
       );
       out.featureExtra = 1;
       return true;
@@ -4648,9 +4649,9 @@ function sampleFeatureMaterial(
     }
     case FEATURE_MEGASTRUCTURE: {
       if (featureExtra >= 2) {
-        const plinthHeight = Math.max(4, Math.round(featureHeight * 0.16));
+        const plinthHeight = Math.max(4, Math.round(featureHeight * 0.13));
         if (relativeY <= plinthHeight) {
-          const plinthRadius = featureRadius + 2.4 - relativeY * 0.34;
+          const plinthRadius = featureRadius + 1.8 - relativeY * 0.38;
           if (radial > Math.max(2.2, plinthRadius)) {
             return 0;
           }
@@ -4659,7 +4660,7 @@ function sampleFeatureMaterial(
         }
         const towerY = relativeY - plinthHeight;
         const towerProgress = towerY / Math.max(1, featureHeight - plinthHeight);
-        const towerRadius = Math.max(1.15, featureRadius * (0.50 - towerProgress * 0.32));
+        const towerRadius = Math.max(1.0, featureRadius * (0.42 - towerProgress * 0.28));
         if (radial > towerRadius) {
           return 0;
         }
@@ -4673,24 +4674,80 @@ function sampleFeatureMaterial(
           )
           && towerY % 3 !== 1;
         const crown = relativeY >= featureHeight - 3;
+        const narrowWindow = !crown
+          && !glyphBand
+          && !verticalInlay
+          && towerY > 7
+          && towerY < featureHeight - plinthHeight - 7
+          && (
+            (absX <= 0.52 && absZ > 1.05 && absZ < towerRadius - 0.25)
+            || (absZ <= 0.52 && featureDeltaX < 0 && absX > 1.05 && absX < towerRadius - 0.25)
+          )
+          && towerY % 11 >= 2
+          && towerY % 11 <= 6;
+        if (narrowWindow) {
+          return 0;
+        }
         return verticalInlay ? materialAccent : glyphBand || crown ? materialSecondary : materialPrimary;
       }
 
-      const baseHeight = Math.max(10, Math.round(featureHeight * 0.46));
+      const baseHeight = Math.max(10, Math.round(featureHeight * 0.36));
       if (relativeY <= baseHeight) {
-        const stepHeight = Math.max(2, Math.round(baseHeight / 6));
-        const step = Math.min(6, Math.floor(relativeY / stepHeight));
-        const tierHalfX = Math.max(3.2, featureRadius + 3.4 - step * 1.9);
-        const tierHalfZ = Math.max(2.4, featureRadius * 0.72 + 2.4 - step * 1.25);
-        if (absX > tierHalfX || absZ > tierHalfZ) {
+        const stepHeight = Math.max(2, Math.round(baseHeight / 5));
+        const step = Math.min(5, Math.floor(relativeY / stepHeight));
+        const tierHalfX = Math.max(3.2, featureRadius + 3.4 - step * 2.15);
+        const tierHalfZ = Math.max(2.4, featureRadius * 0.72 + 2.4 - step * 1.45);
+        const chamfer = Math.max(2.4, 4.6 - step * 0.45);
+        if (absX > tierHalfX || absZ > tierHalfZ || absX + absZ > tierHalfX + tierHalfZ - chamfer) {
           return 0;
         }
         const edgeCourse = Math.abs(absX - tierHalfX) <= 0.65 || Math.abs(absZ - tierHalfZ) <= 0.65;
         const stairCut = featureDeltaZ < 0 && absX <= Math.max(1.1, 1.8 + step * 0.35) && relativeY > stepHeight;
+        const cornerBreak = step >= 1
+          && relativeY > 1
+          && absX > tierHalfX - 2.2
+          && absZ > tierHalfZ - 1.8
+          && (
+            (featureDeltaX > 0 && featureDeltaZ > 0 && step % 2 === 0)
+            || (featureDeltaX < 0 && featureDeltaZ < 0 && step % 3 !== 1)
+          );
+        const innerVoid = step >= 2
+          && relativeY > stepHeight * 1.5
+          && relativeY < baseHeight - 2
+          && absX < tierHalfX - 2.6
+          && absZ < tierHalfZ - 1.8
+          && (
+            featureDeltaZ > Math.max(0.2, tierHalfZ * 0.06)
+            || (absX > 1.8 && absZ < tierHalfZ * 0.48 && step >= 3)
+          );
+        const forecourtVoid = step >= 1
+          && relativeY > stepHeight
+          && featureDeltaZ < -Math.max(1.6, tierHalfZ * 0.16)
+          && absX < Math.max(2.4, tierHalfX * 0.32)
+          && relativeY < baseHeight - 1;
+        const sideButtress = step >= 1
+          && relativeY <= baseHeight - 1
+          && absZ <= Math.max(1.4, tierHalfZ * 0.36)
+          && (
+            Math.abs(absX - Math.max(2.8, tierHalfX - 2.4)) <= 1.05
+            || (step >= 3 && Math.abs(absX - Math.max(2.2, tierHalfX - 4.8)) <= 0.85)
+          );
         if (stairCut) {
           return 0;
         }
-        return edgeCourse || relativeY % stepHeight === 0 ? materialSecondary : materialPrimary;
+        if (!sideButtress && (cornerBreak || innerVoid || forecourtVoid)) {
+          return 0;
+        }
+        const warmInlay = materialAccent !== 0
+          && !edgeCourse
+          && step >= 2
+          && relativeY % stepHeight === Math.max(1, Math.floor(stepHeight / 2))
+          && (
+            Math.abs(absX - Math.max(2.4, tierHalfX - 4.2)) <= 0.55
+            || Math.abs(absZ - Math.max(1.8, tierHalfZ - 3.2)) <= 0.55
+          )
+          && (Math.floor(absX + absZ + relativeY) % 3 !== 0);
+        return warmInlay ? materialAccent : edgeCourse || relativeY % stepHeight === 0 ? materialSecondary : materialPrimary;
       }
 
       const towerY = relativeY - baseHeight;
@@ -4703,7 +4760,22 @@ function sampleFeatureMaterial(
         }
         const crown = relativeY >= featureHeight - 4;
         const glyphBand = towerY % 8 === 0 && (absX <= 0.75 || absZ <= 0.75);
-        return crown || glyphBand ? materialSecondary : materialPrimary;
+        const sideWindow = materialAccent !== 0
+          && !crown
+          && !glyphBand
+          && towerY > 10
+          && towerY < featureHeight - baseHeight - 8
+          && towerY % 13 >= 4
+          && towerY % 13 <= 7
+          && (
+            (absX <= 0.55 && absZ > 0.72 && absZ < towerHalfZ - 0.2)
+            || (absZ <= 0.55 && featureDeltaX > 0 && absX > 0.72 && absX < towerHalfX - 0.2)
+          );
+        if (sideWindow) {
+          return 0;
+        }
+        const warmGlyph = materialAccent !== 0 && glyphBand && towerY % 16 === 0;
+        return warmGlyph ? materialAccent : crown || glyphBand ? materialSecondary : materialPrimary;
       }
       return 0;
     }

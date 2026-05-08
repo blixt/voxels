@@ -1370,9 +1370,16 @@ test("ashland megastructures have distinctive large silhouettes", () => {
   const ribTop = measureMaxCrossSection(generator, ribArch!.x, ribArch!.z, ribArch!.probe.surfaceY + 4, ribArch!.probe.topY, 18);
   const causewaySlab = measureCrossSection(generator, causeway!.x, causeway!.z, causeway!.probe.surfaceY + 1, 24);
   const causewayFootprint = measureSurfaceFeatureFootprint(generator, causeway!, 64);
+  const zigguratObject = measureLandmarkObject(generator, ziggurat!, 28, 8);
+  const obeliskObject = measureLandmarkObject(generator, obelisk!, 28, 8);
 
   expect(zigguratHeight).toBeGreaterThanOrEqual(50);
   expect(obeliskHeight).toBeGreaterThanOrEqual(48);
+  expect(zigguratObject.solidVoxelCount).toBeLessThan(32_000);
+  expect(zigguratObject.materialVariety).toBeGreaterThanOrEqual(3);
+  expect(obeliskObject.solidVoxelCount).toBeLessThan(7_000);
+  expect(obeliskObject.materialVariety).toBeGreaterThanOrEqual(3);
+  expect(obeliskObject.dominantMaterialShare).toBeLessThan(0.70);
   expect(zigguratBase.widthX).toBeGreaterThanOrEqual(24);
   expect(zigguratBase.widthZ).toBeGreaterThanOrEqual(14);
   expect(obeliskMid.widthX).toBeLessThan(zigguratBase.widthX);

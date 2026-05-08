@@ -1687,3 +1687,41 @@ Build the first "place identity" slice without regressing performance or input:
   - checkpoint and push this harness/prop slice
   - use `artifacts/view-atlas/20260508T044057Z-bone-chimes-view-atlas/report.json` as the first full view-atlas baseline
   - next highest ROI remains a bolder horizon/foreground composition pass, likely reducing huge rectilinear ziggurat fill and adding larger non-rectangular ground interrupters rather than another small prop
+
+### 2026-05-08 - Megastructure Lower-Fill Pass And HUDless View Atlas
+
+- Trigger:
+  - The five-view atlas proved the route prop was visible but the global grid read did not move.
+  - Object-lab still showed `velothi_ziggurat` and `ash_obelisk` as huge, solid, rectilinear forms.
+- Changes:
+  - The view atlas now hides HUD/capture/discovery overlays before screenshot capture, so visual metrics are no longer polluted by UI panels.
+  - Added two closer hero views, `ziggurat-approach` and `obelisk-approach`, aimed at actual object-lab roots instead of only distant route cameras.
+  - Reworked `ash_obelisk` into a slimmer tower with lower plinth, narrow cutouts, and preserved warm inlays.
+  - Reworked `velothi_ziggurat` lower tiers into chamfered, partly hollow perimeter geometry with forecourt voids, side buttresses, broken corners, and accent inlays while preserving the broad route silhouette.
+- Validation:
+  - Megastructure baseline before this pass: `artifacts/object-lab/2026-05-08-044829116Z-megastructure-baseline/batch-report.json`.
+  - Object-lab final: `artifacts/object-lab/2026-05-08-045244864Z-megastructure-lower-fill-v3/batch-report.json`.
+  - `velothi_ziggurat`: `40224 -> 24198` voxels, fill ratio `0.425 -> 0.255`, materials `2 -> 3`; still huge, but no longer a fully filled slab mass.
+  - `ash_obelisk`: `8351 -> 6345` voxels, fill ratio `0.352 -> 0.268`, dominant share `0.685 -> 0.653`, and warning-free.
+  - Focused tests: `mise exec -- bun test tests/procedural-generator.test.ts tests/object-lab.test.ts`, pass, `42` tests.
+  - Route atlas: `artifacts/route-atlas/20260508T045314Z-megastructure-lower-fill/report.json`, failures none, route stretch coverage `100%`, strong silhouette coverage `87.7%`, max notable gap `108.0 m`.
+  - HUDless/expanded view atlas: `artifacts/view-atlas/20260508T045619Z-megastructure-hudless-atlas/report.json`, failures none, seven fixed screenshots captured.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Build: `mise exec -- bun run build`, pass.
+  - First owned-browser lab attempt timed out in CDP before page metrics: `artifacts/owned-browser-lab/20260508T045842Z-megastructure-hudless-atlas-browser/report.json`.
+  - Retry owned-browser lab: `artifacts/owned-browser-lab/20260508T050211Z-megastructure-hudless-atlas-browser-retry/report.json`, failures none.
+  - Browser result: traversal p95/max `5.40/9.50 ms`, route p95/max `4.60/7.40 ms`, draw/triangles `507/390766`, `LOD overlap LOD0/bands 0/0`, water overlap `0`, LOD gaps `0`, handoff holes `0`, render-ready near samples `961/961`, HUD smoke passed.
+- Honest assessment:
+  - This is a real object-quality and cost improvement; it trims expensive solid megastructure mass without hurting route/vista coverage or browser performance.
+  - It still does not move the global browser grid metric: owned-browser saturation/grid/color is `0.37/0.68/97`.
+  - The HUDless atlas clarified why: the dominant screen problem is foreground/horizon terrain tiles and broad road surfaces, not only megastructure internals.
+  - The new approach views are useful and visibly expose the prop families, but the next visual pass has to reshape ground composition at camera scale.
+- Rubric movement:
+  - Harness maturity: `9.30 -> 9.45` because the view atlas now captures clean world-only screenshots and includes targeted hero views.
+  - Visual/world definition: `5.85 -> 5.95` because headline old-road structures are less solid and more authored, though the Minecrafty terrain read remains.
+  - Performance/playability: `6.20 -> 6.25` because route max frame improved in the browser lab retry and object voxel counts dropped.
+  - Rendering correctness: unchanged at `6.30`; the first browser-lab timeout was harness-level, and retry passed all correctness gates.
+- Next:
+  - checkpoint and push this megastructure/harness slice
+  - start the ground-interrupter pass against `artifacts/view-atlas/20260508T045619Z-megastructure-hudless-atlas/report.json`
+  - focus on large non-rectangular ash drifts, salt cracks, and scree fans that alter foreground/horizon pixels instead of more small object families

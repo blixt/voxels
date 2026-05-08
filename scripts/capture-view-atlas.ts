@@ -158,6 +158,20 @@ const VIEW_SPECS: ViewSpec[] = [
     lookAtMeters: [-1704.8, -2536.9],
     pitchDegrees: -14,
   },
+  {
+    id: "ziggurat-approach",
+    label: "Ziggurat Approach",
+    eyeMeters: [-1124.5, -1584.6],
+    lookAtMeters: [-1064.5, -1584.6],
+    pitchDegrees: -15,
+  },
+  {
+    id: "obelisk-approach",
+    label: "Obelisk Approach",
+    eyeMeters: [-1095.8, -1567.5],
+    lookAtMeters: [-1035.8, -1567.5],
+    pitchDegrees: -16,
+  },
 ];
 
 const options = parseCli(Bun.argv);
@@ -274,6 +288,21 @@ function buildSettleViewExpression(view: ViewSpec, yawDegrees: number, settleMax
     const game = window.__VOXELS_GAME__;
     if (!game) {
       throw new Error("window.__VOXELS_GAME__ is not ready");
+    }
+    const styleId = "voxels-view-atlas-hide-hud";
+    if (!document.getElementById(styleId)) {
+      const style = document.createElement("style");
+      style.id = styleId;
+      style.textContent = `
+        [data-role='capture'],
+        [data-role='objective-panel'],
+        [data-role='performance-strip'],
+        [data-role='interaction-hud'],
+        [data-role='discovery-achievements'] {
+          display: none !important;
+        }
+      `;
+      document.head.append(style);
     }
     const surfaceY = game.controller.generator.sampleColumn(rawWorldX, rawWorldZ).surfaceY;
     const eyeY = surfaceY + game.controller.player.eyeHeight;
