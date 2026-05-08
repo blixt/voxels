@@ -18,6 +18,7 @@
     "atlas:routes": "bun run scripts/route-atlas.ts",
     "verify:smoke": "bun run scripts/verify-smoke.ts",
     "analyze:trace": "bun run scripts/analyze-chrome-trace.ts",
+    "analyze:screenshot": "bun run scripts/analyze-screenshot-composition.ts",
     "cycle:bench": "bun run scripts/run-cycle-bench.ts",
     "trace:route": "bun run scripts/run-browser-route-trace.ts",
     "bench:browser-game": "bun run scripts/run-browser-game-benchmarks.ts",

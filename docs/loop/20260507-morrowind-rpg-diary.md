@@ -1616,3 +1616,36 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - commit and push this prop/atmosphere checkpoint
   - target the persistent grid metric with either lighting depth/contact shading or a screenshot-specific composition/camera harness, since silhouette density and prop quality alone did not move it
+
+### 2026-05-08 - Screenshot Composition Diagnostic
+
+- Trigger:
+  - The single browser grid metric stayed at `0.68` after route silhouettes, prop polish, and atmosphere changes.
+  - I needed to know which screen region was responsible before attempting more visual changes.
+- Changes:
+  - Added `scripts/analyze-screenshot-composition.ts` and `bun run analyze:screenshot`.
+  - The tool reads a PNG artifact, splits it into sky, horizon, center, lower-ground, and lower-corner regions, then reports luma, saturation, color count, horizontal/vertical/diagonal edge rates, and axis-to-diagonal dominance.
+  - It defaults to the latest completed owned-browser-lab screenshot, so it is fast to run after any browser checkpoint.
+- Validation:
+  - Smoke run on the prop/atmosphere browser artifact: `artifacts/screenshot-composition/20260508T040554Z-skyline-prop-atmosphere/report.json`.
+  - Post-revert confirmation run: `artifacts/screenshot-composition/20260508T041754Z-post-revert-browser-retry/report.json`.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Owned browser lab after rejecting the lighting attempt: `artifacts/owned-browser-lab/20260508T041557Z-screenshot-tool-post-revert-browser-retry/report.json`, failures none.
+- Findings:
+  - Likely grid driver is `horizon`, because it has the highest strong axis-edge product.
+  - Highest axis-to-diagonal ratio is `bottom_center` at `0.77`, but its absolute axis edge rate is low (`5.7%`) and it has only `16` color buckets.
+  - `center_view` remains the same as the overall browser metric (`0.68`), confirming the old single number was dominated by mid-screen composition, not HUD or one screen corner.
+- Rejected attempt:
+  - I tried a shader-only contact/depth pass after building the tool.
+  - Browser lab caught it as a black-frame regression twice: `artifacts/owned-browser-lab/20260508T040846Z-lighting-depth-composition-browser-retry/report.json` and `artifacts/owned-browser-lab/20260508T041028Z-lighting-depth-composition-browser-fixed/report.json` both had avg luma `0.03`, luma stddev `1.59`, and only `3` color buckets.
+  - I reverted that shader change and kept the diagnostic tool.
+- Honest assessment:
+  - This checkpoint improves evaluation, not visuals. It gives a faster and more precise way to decide whether future changes affect the actual problem.
+  - The failed shader pass was useful because the browser lab proved it unsafe before it could be committed.
+- Rubric movement:
+  - Harness maturity: `8.80 -> 9.00`.
+  - Rendering correctness: unchanged; the unsafe shader change was rejected.
+  - Visual/world definition: unchanged until the next visual fix uses the new diagnostic.
+- Next:
+  - commit and push the screenshot diagnostic
+  - attack the horizon/center composition specifically, likely through safer atmospheric occlusion or route-camera framing rather than fragment contact shading
