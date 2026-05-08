@@ -223,3 +223,28 @@ Browser verifier artifacts:
   - Result: still fails settle budget; visible far coverage stayed clean with `0` gaps and `0` overlaps.
   - Pending breakdown after `260` frames: `923` total pending, `843` generation-budget, `68` prepared handoff, `12` disk-cache, `0` planning, `0` partial-build, `0` invalidated-eviction.
   - A speculative early-covered-coarser skip reduced pending to `726`, but introduced a one-sample cold-origin coverage gap, so it was backed out. Next optimization needs a stricter coverage invariant before it can ship.
+
+### Follow-up Checkpoint - Fog-Footprint LOD Planning
+
+Reduced unnecessary far-field LOD work without changing ownership semantics:
+
+- `planLodNeededKeys` now only schedules LOD chunk footprints that intersect the circular fog-cull radius, instead of scheduling every square-corner chunk in every ring.
+- The intersection test uses chunk AABB vs. radius, not center-only distance, so chunks touching the visible fog footprint are retained.
+- LOD2+ generated fallback now uses the generator's top-bucket material API, matching the highest non-empty bucket while avoiding full bucket-array scans.
+- Fog-range LOD tests now sample the circular fog footprint rather than unreachable square corners.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-generator.test.ts tests/lod-system.test.ts tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-default-footprint-topbucket`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-far-footprint-topbucket --lod-persistence-chunk-delta=32 --lod-persistence-max-frames=260`
+
+Browser verifier artifacts:
+
+- Default persistence: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-MLkGzT/lod-idb-persistence-reload.json`
+  - Result: pass, with `32` reload disk hits and `32` cumulative reload disk hits.
+- Far transition stress: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-XdH85A/lod-idb-persistence-reload.json`
+  - Result: still fails settle budget; visible far coverage stayed clean with `0` gaps and `0` overlaps.
+  - Pending after `260` frames improved modestly from `923` to `895`; generation-budget pending moved from `843` to `813`.
+  - This is a safe but small reduction. The remaining backlog is still structural enough that the next meaningful step should be partial handoff punching or a far-field hierarchy/clipmap, not more small pruning.

@@ -1145,6 +1145,9 @@ describe("LOD coverage", () => {
     let total = 0;
     for (let dz = -radiusWorldUnits; dz <= radiusWorldUnits; dz += stepWorldUnits) {
       for (let dx = -radiusWorldUnits; dx <= radiusWorldUnits; dx += stepWorldUnits) {
+        if (Math.hypot(dx, dz) > radiusWorldUnits) {
+          continue;
+        }
         const worldX = spawnPos[0] + dx;
         const worldZ = spawnPos[2] + dz;
         const chunkX = Math.floor(worldX / CHUNK_SIZE);
@@ -1178,6 +1181,9 @@ describe("LOD coverage", () => {
     let waterOverlapCount = 0;
     for (let dz = -radiusWorldUnits; dz <= radiusWorldUnits; dz += stepWorldUnits) {
       for (let dx = -radiusWorldUnits; dx <= radiusWorldUnits; dx += stepWorldUnits) {
+        if (Math.hypot(dx, dz) > radiusWorldUnits) {
+          continue;
+        }
         const worldX = spawnPos[0] + dx;
         const worldZ = spawnPos[2] + dz;
         const chunkX = Math.floor(worldX / CHUNK_SIZE);

@@ -32,6 +32,7 @@ import {
   getGeneratedRenderSummaryRegionCoord,
   type GeneratedRenderSummaryRegion,
 } from "./generated-render-summary-region.ts";
+import { FOG_END_DISTANCE } from "./render-constants.ts";
 import { metersToWorldUnits } from "./scale.ts";
 import { setChunkMeshDirtyState, type MutableResidentChunkWorld, type VoxelChunk } from "./world.ts";
 
@@ -44,6 +45,7 @@ const MAX_RETAINED_LOD_CHUNKS = 2048;
 const MAX_RETAINED_EMPTY_LOD_KEYS = 8192;
 const MAX_LOD_CACHE_REQUESTS_PER_UPDATE = 32;
 const MAX_LOD_CACHE_STORES_PER_UPDATE = 4;
+const LOD_FOG_COVERAGE_RADIUS = FOG_END_DISTANCE + metersToWorldUnits(32);
 
 // LOD rings must cover the full fog distance (4800 world units).
 // Each ring's outer edge in world units = radiusChunks * chunkSize * stride.
@@ -1593,6 +1595,18 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           state.dx += 1;
           const cx = lcx + dx;
           const cz = lcz + dz;
+          if (!lodFootprintIntersectsRadius(position[0], position[2], cx, cz, worldSize, LOD_FOG_COVERAGE_RADIUS)) {
+            if (performance.now() - startedAt >= maxPlanMs) {
+              return {
+                complete: false,
+                keys: [],
+                neededKeyCount: state.neededKeys.size,
+                yRangeMs,
+                scheduledRegionSummaryRequests,
+              };
+            }
+            continue;
+          }
 
           const coveredByFinerLod = ring.level === 1
             ? this.isLodChunkFullyCoveredByRenderReadyColumns(cx, cz, stride)
@@ -2091,7 +2105,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       const worldX = originX + ox * stride;
       const worldZ = originZ + oz * stride;
       const shellPaddingY = stride * 3;
-      if (level >= 3 && this.editOverlays.size === 0) {
+      if (level >= 2 && this.editOverlays.size === 0) {
         const topBucket = this.generator.sampleTopColumnMaterialBucket(
           worldX,
           worldZ,
@@ -3268,6 +3282,25 @@ function lodChunkFootprintsOverlap(left: VoxelChunk, right: VoxelChunk, chunkSiz
   const rightMinZ = right.coord.z * rightWorldSize;
   const rightMaxZ = (right.coord.z + 1) * rightWorldSize;
   return leftMinX < rightMaxX && leftMaxX > rightMinX && leftMinZ < rightMaxZ && leftMaxZ > rightMinZ;
+}
+
+function lodFootprintIntersectsRadius(
+  centerX: number,
+  centerZ: number,
+  cx: number,
+  cz: number,
+  worldSize: number,
+  radius: number,
+): boolean {
+  const minX = cx * worldSize;
+  const maxX = (cx + 1) * worldSize;
+  const minZ = cz * worldSize;
+  const maxZ = (cz + 1) * worldSize;
+  const closestX = Math.min(maxX, Math.max(minX, centerX));
+  const closestZ = Math.min(maxZ, Math.max(minZ, centerZ));
+  const dx = closestX - centerX;
+  const dz = closestZ - centerZ;
+  return dx * dx + dz * dz <= radius * radius;
 }
 
 function lodChunksHaveCoveredColumnOverlap(coarser: VoxelChunk, finer: VoxelChunk, chunkSize: number): boolean {

@@ -162,6 +162,54 @@ test("column material buckets match generated chunk voxel data", () => {
   }
 });
 
+test("top column material bucket matches the highest non-empty bucket sample", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const samplePoints = [
+    { x: -13_814, z: -24_678 },
+    { x: -4_320, z: 940 },
+    { x: -220, z: 4_020 },
+    { x: 4_760, z: 2_120 },
+  ];
+
+  for (const point of samplePoints) {
+    const column = generator.sampleColumn(point.x, point.z);
+    for (const bucketSize of [4, 8, 16]) {
+      const shellPaddingY = bucketSize * 3;
+      const firstBucketMinY = Math.max(0, column.surfaceY - shellPaddingY);
+      const bucketCount = 32;
+      const buckets = generator.sampleColumnMaterialBuckets(
+        point.x,
+        point.z,
+        firstBucketMinY,
+        bucketSize,
+        bucketCount,
+      );
+      const topBucket = generator.sampleTopColumnMaterialBucket(
+        point.x,
+        point.z,
+        firstBucketMinY,
+        bucketSize,
+        bucketCount,
+        shellPaddingY,
+      );
+      let expectedBucket: { bucketIndex: number; material: number } | null = null;
+      for (let bucketIndex = buckets.length - 1; bucketIndex >= 0; bucketIndex -= 1) {
+        const material = buckets[bucketIndex]!;
+        if (material !== 0) {
+          expectedBucket = { bucketIndex, material };
+          break;
+        }
+      }
+      if (!expectedBucket) {
+        expect(topBucket).toBeNull();
+      } else {
+        expect(topBucket?.bucketIndex).toBe(expectedBucket.bucketIndex);
+        expect(topBucket?.material).toBe(expectedBucket.material);
+      }
+    }
+  }
+});
+
 type LandmarkRoot = { x: number; z: number; probe: ReturnType<ProceduralWorldGenerator["sampleBiomeProbe"]> };
 
 let landmarkRootCache: Map<string, LandmarkRoot | null> | null = null;
