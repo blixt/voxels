@@ -3924,10 +3924,11 @@ function configureLandmarkFeature(
       configureSpireFeature(
         out,
         FEATURE_CRYSTAL,
-        scaledFeatureHeight(16, 18, fields.magic + fields.moisture * 0.25, profile.scale),
-        scaledFeatureRadius(4, 3, fields.channel + fields.magic * 0.2, profile.scale),
+        scaledFeatureHeight(15, 16, fields.magic + fields.moisture * 0.25, profile.scale),
+        scaledFeatureRadius(5, 3, fields.channel + fields.magic * 0.2, profile.scale),
         "#68A",
         "#CEF",
+        "#DFF",
       );
       out.featureExtra = 3;
       return true;
@@ -4088,10 +4089,11 @@ function configureLandmarkFeature(
       configureSpireFeature(
         out,
         FEATURE_CAUSEWAY,
-        scaledFeatureHeight(5, 4, fields.magic + fields.moisture * 0.25, profile.scale),
+        scaledFeatureHeight(7, 4, fields.magic + fields.moisture * 0.25, profile.scale),
         scaledFeatureRadius(14, 6, fields.channel + fields.grove * 0.25, profile.scale),
         "#465",
-        "#9CF",
+        "#8CF",
+        "#6A8",
       );
       out.featureExtra = 3;
       return true;
@@ -4177,6 +4179,7 @@ function configureSpireFeature(
   radius: number,
   materialPrimary: string,
   materialSecondary: string,
+  materialAccent?: string,
 ): void {
   out.featureKind = featureKind;
   out.featureHeight = height;
@@ -4184,7 +4187,7 @@ function configureSpireFeature(
   out.featureExtra = 1;
   out.featureMaterialPrimary = hexColorToMaterial(materialPrimary);
   out.featureMaterialSecondary = hexColorToMaterial(materialSecondary);
-  out.featureMaterialAccent = 0;
+  out.featureMaterialAccent = materialAccent ? hexColorToMaterial(materialAccent) : 0;
 }
 
 function scaledFeatureHeight(base: number, jitterRange: number, signal: number, scale: number): number {
@@ -4562,6 +4565,30 @@ function sampleFeatureMaterial(
       return brokenRib ? materialPrimary : 0;
     }
     case FEATURE_CAUSEWAY: {
+      if (featureExtra >= 3) {
+        const capBaseY = Math.max(2, Math.round(featureHeight * 0.36));
+        const capTopY = Math.min(featureHeight, capBaseY + 3);
+        const halfLength = featureRadius + 1.8;
+        const halfWidth = Math.max(4.2, featureRadius * 0.40);
+        const capProfile = Math.hypot(featureDeltaX / halfLength, featureDeltaZ / halfWidth);
+        const centerStalk = radial <= Math.max(1.05, featureRadius * 0.10)
+          && relativeY <= capBaseY + 1;
+        const buttress = relativeY <= capBaseY
+          && absX <= Math.max(1.6, featureRadius * 0.16 + relativeY * 0.16)
+          && absZ <= Math.max(1.2, featureRadius * 0.11 + relativeY * 0.12);
+        if (centerStalk || buttress) {
+          return materialPrimary;
+        }
+        if (relativeY < capBaseY || relativeY > capTopY || capProfile > 1) {
+          return 0;
+        }
+        const rim = capProfile > 0.74 || Math.abs(absZ - halfWidth * 0.42) <= 0.62;
+        const gill = relativeY === capBaseY && Math.floor((featureDeltaX + featureRadius) / 3) % 2 === 0;
+        const capSpot = materialAccent !== 0
+          && relativeY >= capTopY - 1
+          && Math.abs((featureDeltaX * 5 + featureDeltaZ * 7 + relativeY * 3) % 11) <= 1;
+        return capSpot ? materialAccent : rim || gill ? materialSecondary : materialPrimary;
+      }
       const slabHeight = Math.max(1, Math.min(featureHeight, 4));
       if (relativeY > slabHeight) {
         return 0;
@@ -4739,6 +4766,43 @@ function sampleFeatureMaterial(
       }
       return radial <= Math.max(1, featureRadius - relativeY * 0.28) ? materialPrimary : 0;
     case FEATURE_CRYSTAL:
+      if (featureExtra >= 3) {
+        const reeds = [
+          [0, 0, 1.00, 1.00],
+          [-3, 2, 0.58, 0.62],
+          [3, -2, 0.68, 0.70],
+          [2, 4, 0.52, 0.55],
+          [5, 1, 0.42, 0.46],
+          [1, 6, 0.38, 0.42],
+        ] as const;
+        for (const [offsetX, offsetZ, heightScale, radiusScale] of reeds) {
+          const localX = featureDeltaX - offsetX;
+          const localZ = featureDeltaZ - offsetZ;
+          const localAbsX = Math.abs(localX);
+          const localAbsZ = Math.abs(localZ);
+          const localRadial = Math.hypot(localX, localZ);
+          const reedHeight = Math.max(5, Math.round(featureHeight * heightScale));
+          if (relativeY > reedHeight) {
+            continue;
+          }
+          const baseLift = offsetX === 0 && offsetZ === 0 ? 0 : Math.min(2, Math.max(1, Math.round((1 - heightScale) * 4)));
+          if (relativeY < baseLift) {
+            continue;
+          }
+          const reedProgress = (relativeY - baseLift) / Math.max(1, reedHeight - baseLift);
+          const reedRadius = Math.max(0.72, featureRadius * radiusScale * (0.34 - reedProgress * 0.22));
+          const shardFacet = localAbsX <= reedRadius && localAbsZ <= reedRadius * 0.72;
+          const diagonalFacet = Math.abs(localAbsX - localAbsZ) <= 0.62 && localRadial <= reedRadius * 1.15;
+          if (!shardFacet && !diagonalFacet) {
+            continue;
+          }
+          const tip = relativeY >= reedHeight - 1;
+          const brightEdge = materialAccent !== 0
+            && (tip || ((localX + localZ + relativeY + offsetX) % 5 === 0 && localRadial >= reedRadius * 0.42));
+          return brightEdge ? materialAccent : tip || localAbsX > reedRadius * 0.52 ? materialSecondary : materialPrimary;
+        }
+        return 0;
+      }
       if (relativeY >= featureHeight - 1 && radial <= Math.max(0.8, featureRadius - relativeY * 0.25)) {
         return materialSecondary;
       }

@@ -94,3 +94,22 @@ The newest browser lab stayed performant (`14.00 ms` route max frame, no LOD ove
 | 6 | Ashland travel-kit props: bone chimes, masks, lantern variants, travel packs | 4 | 4 | 3 | 5.3 | Directly targets ugly generic props while staying isolated enough for subagents | object-lab contact sheets and warnings |
 | 7 | Streaming/residency spike reduction during movement | 5 | 3 | 4 | 3.8 | Current browser lab is fine, but user saw severe walking drops; keep watching live-forward traces | live-forward p95/max stream/mesh/LOD |
 | 8 | Far-view distance increase after density/sky improvements | 4 | 3 | 4 | 3.0 | Seeing farther only helps after far content and LOD correctness are worth trusting | owned-browser LOD/fps/gap gates |
+
+## Re-Rank After Basin Polish And Storm Shelf Checkpoint
+
+Completed since the third ranking:
+
+- Object-lab representative-root selection now avoids edge/clipped samples for the weak wet/set-piece landmarks.
+- `crystal_reeds` and `fungal_bridge` are warning-free, three-material object-lab samples.
+- The renderer has a cheap ambient sky pass with storm shelf/fungal horizon tint, validated in browser.
+
+The grid metric still has not moved from `0.68`, so the next loop should stop treating individual props as the main blocker and attack the terrain/composition read directly.
+
+| Rank | Change | Impact | Confidence | Effort | ROI | Why Now | Verification |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | Terrain/composition grid-breaker, second attempt: larger diagonal strata, eroded edges, non-rectangular rubble/salt pads | 5 | 4 | 4 | 5.0 | This is the blocker the metrics and screenshots both agree on | browser grid metric, route physics continuity, material distribution tests |
+| 2 | Landmark density director using vista scan: route stretches get silhouette tokens every 250-350 m | 4 | 4 | 3 | 5.3 | Existing landmarks are better, but empty or block-dominated stretches still need composition | route-atlas vista-hit/gap metrics, browser route budget |
+| 3 | Live-forward movement spike audit after content changes | 5 | 4 | 2 | 10.0 | Route lab is clean, but user reported severe walking drops; verify before heavier far-view work | live-forward p95/max stream/mesh/LOD, HUD wall-FPS/work-ms |
+| 4 | Ashland travel-kit props: bone chimes, masks, lantern variants, travel packs | 4 | 4 | 3 | 5.3 | Good delegated work now that object-lab root selection is trustworthy | object-lab contact sheets and warnings |
+| 5 | Stronger sky/weather iteration: lightning glow, cloud shelf shape, ash streak movement | 4 | 3 | 3 | 4.0 | Sky is now correct enough to iterate, but grid/composition still matters more | owned-browser luma/color/grid and route frame budget |
+| 6 | Far-view distance increase after spike audit and density pass | 4 | 3 | 4 | 3.0 | The LOD system is clean, but farther view without better composition risks showing more grid | owned-browser LOD/fps/gap gates |

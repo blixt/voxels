@@ -111,6 +111,7 @@ test("ashland prop lab diagnostics keep snag branches and squat kwama mound acce
   expect(kwamaMound.sample.solidVoxelCount).toBeGreaterThan(900);
   expect(kwamaMound.sample.diagnostics.materialVariety).toBeGreaterThanOrEqual(2);
   expect(kwamaMound.sample.diagnostics.dominantMaterialShare).toBeLessThan(0.9);
+  expect(kwamaMound.sample.diagnostics.warnings).not.toContain("dominant-material");
   expect(kwamaMound.sample.diagnostics.silhouette.front.normalizedHeight).toBeLessThan(0.65);
   expect(kwamaMound.sample.diagnostics.silhouette.front.aspectRatio).toBeGreaterThan(1.1);
 
@@ -122,4 +123,27 @@ test("ashland prop lab diagnostics keep snag branches and squat kwama mound acce
   expect(ashMarker.sample.diagnostics.silhouette.front.occupiedRows).toBeGreaterThan(35);
   expect(ashMarker.sample.diagnostics.silhouette.front.occupiedPixels).toBeGreaterThan(270);
   expect(ashMarker.sample.diagnostics.warnings).not.toContain("sample-touches-horizontal-edge");
+});
+
+test("representative roots prefer centered salt-marsh set piece columns", async () => {
+  const outputDir = await mkdtemp(join(tmpdir(), "voxels-object-lab-salt-marsh-"));
+  const report = await runObjectLab({
+    landmarkId: "fungal_bridge",
+    seed: 1337,
+    outputDir,
+    label: "Fungal Bridge Root Selection Test",
+    timestamp: new Date("2026-05-08T12:36:00.000Z"),
+    scanRadius: 32_768,
+    coarseStep: 64,
+    sampleRadius: 24,
+    heightPadding: 4,
+  });
+
+  expect(report.root.probe.landmarkId).toBe("fungal_bridge");
+  expect(report.root.x).toBe(8464);
+  expect(report.root.z).toBe(-28998);
+  expect(report.sample.diagnostics.sampleFit.touchesSampleEdge).toBe(false);
+  expect(report.sample.diagnostics.warnings).not.toContain("sample-touches-horizontal-edge");
+  expect(report.sample.diagnostics.warnings).not.toContain("root-off-center");
+  expect(report.sample.diagnostics.warnings).not.toContain("top-projection-touches-edge");
 });

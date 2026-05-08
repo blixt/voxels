@@ -46,6 +46,11 @@ struct VertexOutput {
   @location(2) world_position: vec3<f32>,
 }
 
+struct SkyVertexOutput {
+  @builtin(position) clip_position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+}
+
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
   var output: VertexOutput;
@@ -93,6 +98,58 @@ fn shade_fragment(input: VertexOutput) -> vec4<f32> {
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   return shade_fragment(input);
+}
+
+fn sky_hash(cell: vec2<f32>) -> f32 {
+  return fract(sin(dot(cell, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+
+@vertex
+fn vs_sky(@builtin(vertex_index) vertex_index: u32) -> SkyVertexOutput {
+  var positions = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>(3.0, -1.0),
+    vec2<f32>(-1.0, 3.0),
+  );
+  let position = positions[vertex_index];
+  var output: SkyVertexOutput;
+  output.clip_position = vec4<f32>(position, 1.0, 1.0);
+  output.uv = position * 0.5 + vec2<f32>(0.5);
+  return output;
+}
+
+@fragment
+fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
+  let y = clamp(input.uv.y, 0.0, 1.0);
+  let horizon_blend = smoothstep(0.05, 0.95, y);
+  let ashfall = clamp(uniforms.sky_params.z, 0.0, 1.0);
+  let fungal_glow = clamp(uniforms.sky_params.w, 0.0, 1.0);
+  let high_storm = mix(uniforms.sky_top_color.rgb, vec3<f32>(0.10, 0.10, 0.11), ashfall * 0.46);
+  let horizon_glow = mix(uniforms.sky_horizon_color.rgb, uniforms.sky_cloud_color.rgb, ashfall * 0.18 + fungal_glow * 0.16);
+  let base = mix(horizon_glow, high_storm, horizon_blend);
+
+  let band_center = clamp(uniforms.sky_params.y, 0.18, 0.82);
+  let lower_band = smoothstep(band_center - 0.28, band_center - 0.04, y);
+  let upper_band = 1.0 - smoothstep(band_center + 0.05, band_center + 0.36, y);
+  let band_mask = clamp(lower_band * upper_band, 0.0, 1.0);
+  let wide_noise = sky_hash(floor(input.uv * vec2<f32>(14.0, 5.0)));
+  let streak_noise = sky_hash(floor(input.uv * vec2<f32>(36.0, 9.0) + vec2<f32>(11.0, 3.0)));
+  let cloud_texture = 0.48 + wide_noise * 0.34 + streak_noise * 0.22;
+  let cloud_strength = clamp(uniforms.sky_params.x * band_mask * cloud_texture * (0.72 + ashfall * 0.34), 0.0, 0.92);
+
+  let ash_shelf = ashfall * smoothstep(0.18, 0.62, y) * (1.0 - smoothstep(0.74, 0.96, y));
+  let fungal_horizon = fungal_glow * (1.0 - smoothstep(0.05, 0.48, y));
+  let storm_belly = vec3<f32>(0.15, 0.14, 0.13);
+  let storm_tint = mix(
+    uniforms.sky_cloud_color.rgb,
+    storm_belly,
+    ash_shelf * 0.54,
+  );
+  var sky = mix(base, storm_tint, cloud_strength);
+  sky = mix(sky, storm_belly, ashfall * smoothstep(0.66, 1.0, y) * 0.34);
+  sky += vec3<f32>(0.00, 0.08, 0.09) * fungal_horizon;
+  sky = mix(sky, vec3<f32>(dot(sky, vec3<f32>(0.2126, 0.7152, 0.0722))), ashfall * 0.10);
+  return vec4<f32>(clamp(sky, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 `;
 
@@ -242,6 +299,7 @@ export class WebGpuVoxelRenderer {
   private readonly pipeline: GPURenderPipeline;
   private readonly lodPipelines: GPURenderPipeline[];
   private readonly waterPipeline: GPURenderPipeline;
+  private readonly skyPipeline: GPURenderPipeline;
   private readonly uniformBuffer: GPUBuffer;
   private readonly uniformBindGroup: GPUBindGroup;
   private readonly resources = new Map<object, GpuChunkResources>();
@@ -316,6 +374,27 @@ export class WebGpuVoxelRenderer {
         format: "depth24plus",
         depthWriteEnabled: true,
         depthCompare: "less",
+      },
+    });
+    this.skyPipeline = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: {
+        module: shaderModule,
+        entryPoint: "vs_sky",
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: "fs_sky",
+        targets: [{ format }],
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none",
+      },
+      depthStencil: {
+        format: "depth24plus",
+        depthWriteEnabled: false,
+        depthCompare: "always",
       },
     });
     // Per-LOD-level pipelines with increasing depth bias so finer LOD
@@ -637,6 +716,8 @@ export class WebGpuVoxelRenderer {
   ): PassStats {
     const pass = encoder.beginRenderPass(passDescriptor);
     pass.setBindGroup(0, this.uniformBindGroup);
+    pass.setPipeline(this.skyPipeline);
+    pass.draw(3, 1, 0, 0);
 
     let drawCalls = 0;
     let triangles = 0;

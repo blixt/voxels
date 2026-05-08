@@ -1390,3 +1390,44 @@ Build the first "place identity" slice without regressing performance or input:
   - delegate isolated object polish for the weakest set pieces with object-lab artifacts as the acceptance target
   - improve object-lab representative-root selection so asset workers stop judging clipped/edge samples
   - keep moving toward high-contrast silhouettes, sky/weather, and larger composition changes instead of small palette tweaks
+
+### 2026-05-08 - Basin Object Polish, Centered Object Lab, And Storm Shelf Sky
+
+- Trigger:
+  - The prior salt-marsh checkpoint proved the new basin landmarks existed, but object-lab showed `fungal_bridge` was thin/material-uniform and `crystal_reeds` was too dominated by a single material.
+  - The browser screenshot still had a flat clear-color sky, which left the ashland scene feeling sterile even with large ruins in view.
+- Delegation:
+  - Object worker polished `crystal_reeds` and `fungal_bridge` using object-lab as the acceptance harness.
+  - Harness worker improved representative root selection for `silt_shell`, `crystal_reeds`, `fungal_bridge`, and `rib_remains` so object-lab chooses centered/high-density samples instead of clipped edge roots.
+- Changes:
+  - `crystal_reeds` now uses a multi-reed crystal cluster variant with three materials (`#68A`, `#CEF`, `#DFF`) instead of a near-monochrome spire.
+  - `fungal_bridge` now uses a stalked shelf/cap causeway variant with three non-water materials (`#465`, `#8CF`, `#6A8`) instead of a thin uniform slab.
+  - Object-lab centered-root selection is scoped to the weak wet/set-piece landmarks so older landmarks keep their previous first-hit behavior.
+  - Renderer now draws a single full-screen sky triangle before terrain, using the existing ambient sky/fog controls to create a darker ash storm shelf and fungal horizon tint without adding geometry or texture assets.
+  - Added regression tests for centered fungal-bridge root selection and basin set-piece silhouette/material variety.
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun run build`: pass.
+  - `mise exec -- bun test tests/object-lab.test.ts`: pass, `3` tests.
+  - `mise exec -- bun test tests/procedural-generator.test.ts -t "salt-marsh"`: pass, `2` tests.
+  - `mise exec -- bun test`: pass, `200` tests.
+  - Route atlas: `artifacts/route-atlas/20260508T022622Z-sky-and-basin-polish-route-check/report.json`, failures none, `436` credited landmark samples, `360.0 m` max notable gap, no delta from the salt-marsh coverage baseline.
+  - Object lab:
+    - `crystal_reeds`: `artifacts/object-lab-after/2026-05-08-022406613Z-crystal-reeds-scoped-root-selection/report.json`, `675` voxels, `3` materials, dominant share `41.2%`, warnings none.
+    - `fungal_bridge`: `artifacts/object-lab-after/2026-05-08-022349278Z-fungal-bridge-scoped-root-selection/report.json`, `2154` voxels, `3` materials, dominant share `48.7%`, warnings none.
+  - Final owned browser lab: `artifacts/owned-browser-lab/20260508T022417Z-sky-storm-shelf-enhanced/report.json`, failures none.
+  - Browser result: traversal p95/max `4.90/19.30 ms`, route p95/max `5.10/13.90 ms`, draw/triangles `489/376076`, `LOD overlap LOD0/bands 0/0`, water overlap `0`, gaps `0`, handoff holes `0`, render-ready near samples `961/961`, HUD smoke passed.
+- Honest assessment:
+  - The object-lab improvements are strong and measurable: the two weakest basin landmarks went from warning-heavy/dominant-material samples to warning-free, three-material silhouettes.
+  - The sky pass is intentionally cheap and passed the browser gates. It improves whole-screen mood, but it is still procedural bands rather than a fully art-directed storm/cloud system.
+  - Browser visual grid dominance is still `0.68`, so the screen still reads too blocky. The next large visual win needs terrain/composition density or a stronger non-axis surface breakup pass, not more small prop polish alone.
+  - Traversal max had one `19.30 ms` spike while route max stayed `13.90 ms`; this remains acceptable for the current budget but movement spikes still need periodic live-forward checks.
+- Rubric movement:
+  - Visual/world definition: `4.45 -> 4.80` because the weak basin props became readable set pieces and the sky is no longer just a flat clear.
+  - Harness maturity: `7.65 -> 7.90` because object-lab root choice is now more representative for delegated asset work.
+  - Rendering correctness: `5.85 -> 5.95` because the new sky pass renders through browser/WebGPU gates with no LOD/water overlap regressions.
+  - Performance/playability: unchanged at `5.20`; route performance held, but this checkpoint did not attack streaming spikes.
+- Next:
+  - commit and push this checkpoint
+  - tackle the persistent `0.68` grid metric with larger terrain/composition changes
+  - run live-forward movement traces again before increasing view distance or adding heavier distant content

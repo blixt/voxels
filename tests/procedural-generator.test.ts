@@ -148,7 +148,8 @@ function ensureLandmarkRootCache(generator: ProceduralWorldGenerator): Map<strin
           if (probe.landmarkId !== landmarkId) {
             continue;
           }
-          if (generator.sampleMaterial(x, probe.surfaceY + 1, z) === 0) {
+          const rootMaterial = generator.sampleMaterial(x, probe.surfaceY + 1, z);
+          if (rootMaterial === 0 || isProceduralWaterMaterial(rootMaterial)) {
             continue;
           }
           cache.set(landmarkId, { x, z, probe });
@@ -250,6 +251,62 @@ function measureCrossSection(
     count,
     widthX: count === 0 ? 0 : maxX - minX + 1,
     widthZ: count === 0 ? 0 : maxZ - minZ + 1,
+  };
+}
+
+function measureLandmarkObject(
+  generator: ProceduralWorldGenerator,
+  root: LandmarkRoot,
+  radius: number,
+  heightPadding: number,
+): {
+  solidVoxelCount: number;
+  materialVariety: number;
+  dominantMaterialShare: number;
+  boundsSize: [number, number, number];
+} {
+  const yMin = root.probe.surfaceY + 1;
+  const yMax = root.probe.topY + heightPadding;
+  const materialCounts = new Map<number, number>();
+  let solidVoxelCount = 0;
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+
+  for (let dz = -radius; dz <= radius; dz += 1) {
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      const worldX = root.x + dx;
+      const worldZ = root.z + dz;
+      const localProbe = generator.sampleBiomeProbe(worldX, worldZ);
+      if (localProbe.landmarkId !== root.probe.landmarkId) {
+        continue;
+      }
+      for (let y = Math.max(yMin, localProbe.surfaceY + 1); y <= yMax; y += 1) {
+        const material = generator.sampleMaterial(worldX, y, worldZ);
+        if (material === 0 || isProceduralWaterMaterial(material)) {
+          continue;
+        }
+        solidVoxelCount += 1;
+        materialCounts.set(material, (materialCounts.get(material) ?? 0) + 1);
+        minX = Math.min(minX, worldX);
+        minY = Math.min(minY, y);
+        minZ = Math.min(minZ, worldZ);
+        maxX = Math.max(maxX, worldX + 1);
+        maxY = Math.max(maxY, y + 1);
+        maxZ = Math.max(maxZ, worldZ + 1);
+      }
+    }
+  }
+
+  const dominantCount = materialCounts.size === 0 ? 0 : Math.max(...materialCounts.values());
+  return {
+    solidVoxelCount,
+    materialVariety: materialCounts.size,
+    dominantMaterialShare: solidVoxelCount === 0 ? 0 : dominantCount / solidVoxelCount,
+    boundsSize: solidVoxelCount === 0 ? [0, 0, 0] : [maxX - minX, maxY - minY, maxZ - minZ],
   };
 }
 
@@ -1051,6 +1108,34 @@ test("salt-marsh and fungal regions expose basin set-piece landmarks", () => {
   expect(new Set(["marsh", "firefly", "fungal"]).has(crystalReeds!.probe.biomeId)).toBe(true);
   expect(new Set(["marsh", "fungal"]).has(fungalBridge!.probe.biomeId)).toBe(true);
   expect(new Set(["marsh", "fungal"]).has(ribRemains!.probe.biomeId)).toBe(true);
+});
+
+test("salt-marsh basin set pieces keep readable silhouettes and material variety", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+
+  const crystalReeds = findRepresentativeLandmarkRoot(generator, "crystal_reeds");
+  const fungalBridge = findRepresentativeLandmarkRoot(generator, "fungal_bridge");
+
+  expect(crystalReeds).not.toBeNull();
+  expect(fungalBridge).not.toBeNull();
+
+  const crystalSample = measureLandmarkObject(generator, crystalReeds!, 18, 8);
+  const bridgeSample = measureLandmarkObject(generator, fungalBridge!, 24, 8);
+
+  expect(crystalSample.solidVoxelCount).toBeGreaterThanOrEqual(500);
+  expect(crystalSample.materialVariety).toBeGreaterThanOrEqual(3);
+  expect(crystalSample.dominantMaterialShare).toBeLessThan(0.70);
+  expect(crystalSample.boundsSize[1]).toBeGreaterThanOrEqual(24);
+  expect(crystalSample.boundsSize[0]).toBeGreaterThanOrEqual(8);
+  expect(crystalSample.boundsSize[2]).toBeGreaterThanOrEqual(8);
+
+  expect(bridgeSample.solidVoxelCount).toBeGreaterThanOrEqual(1200);
+  expect(bridgeSample.solidVoxelCount).toBeLessThan(3500);
+  expect(bridgeSample.materialVariety).toBeGreaterThanOrEqual(3);
+  expect(bridgeSample.dominantMaterialShare).toBeLessThan(0.65);
+  expect(bridgeSample.boundsSize[0]).toBeGreaterThanOrEqual(28);
+  expect(bridgeSample.boundsSize[2]).toBeGreaterThanOrEqual(12);
+  expect(bridgeSample.boundsSize[1]).toBeGreaterThanOrEqual(8);
 });
 
 test("ancient route landmarks appear in harsh and uncanny regions", () => {

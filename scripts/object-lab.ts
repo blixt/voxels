@@ -199,6 +199,12 @@ interface Projection {
   pixels: number[];
 }
 
+interface LandmarkRootCandidate {
+  x: number;
+  z: number;
+  localDensity: number;
+}
+
 const DEFAULT_SEED = 1337;
 const DEFAULT_OUTPUT_DIR = "artifacts/object-lab";
 const DEFAULT_SCAN_RADIUS = 32_768;
@@ -208,6 +214,12 @@ const DEFAULT_SAMPLE_RADIUS = 32;
 const DEFAULT_HEIGHT_PADDING = 8;
 const BACKGROUND = 0xf4f4f4;
 const LANDMARK_ID_SET = new Set<string>(OBJECT_LAB_LANDMARK_IDS);
+const CENTERED_ROOT_LANDMARK_IDS = new Set<LandmarkId>([
+  "silt_shell",
+  "crystal_reeds",
+  "fungal_bridge",
+  "rib_remains",
+]);
 
 if (import.meta.main) {
   try {
@@ -331,6 +343,11 @@ function refineLandmarkRoot(
   coarseZ: number,
   refineRadius: number,
 ): LandmarkRoot | null {
+  const candidates: LandmarkRootCandidate[] = [];
+  const candidateKeys = new Set<string>();
+  let sumX = 0;
+  let sumZ = 0;
+
   for (let z = coarseZ - refineRadius; z <= coarseZ + refineRadius; z += 1) {
     for (let x = coarseX - refineRadius; x <= coarseX + refineRadius; x += 1) {
       const probe = generator.sampleBiomeProbe(x, z);
@@ -338,10 +355,75 @@ function refineLandmarkRoot(
       if (probe.landmarkId !== landmarkId || rootMaterial === 0 || isProceduralWaterMaterial(rootMaterial)) {
         continue;
       }
-      return { x, z, probe };
+      candidates.push({ x, z, localDensity: 0 });
+      candidateKeys.add(`${x},${z}`);
+      sumX += x;
+      sumZ += z;
     }
   }
-  return null;
+
+  if (candidates.length === 0) {
+    return null;
+  }
+  if (!CENTERED_ROOT_LANDMARK_IDS.has(landmarkId)) {
+    const first = candidates[0]!;
+    return { x: first.x, z: first.z, probe: generator.sampleBiomeProbe(first.x, first.z) };
+  }
+
+  const centroidX = sumX / candidates.length;
+  const centroidZ = sumZ / candidates.length;
+  let best = candidates[0]!;
+  let bestScore = -Infinity;
+  for (const candidate of candidates) {
+    candidate.localDensity = countLocalLandmarkRoots(candidateKeys, candidate.x, candidate.z);
+    const distanceToCentroid = squaredDistance(candidate.x, candidate.z, centroidX, centroidZ);
+    const distanceToCoarseProbe = squaredDistance(candidate.x, candidate.z, coarseX, coarseZ);
+    const score = -distanceToCentroid * 100 + candidate.localDensity * 10 - distanceToCoarseProbe * 0.001;
+    if (
+      score > bestScore
+      || (score === bestScore && compareCandidateTieBreak(candidate, best, centroidX, centroidZ) < 0)
+    ) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+
+  return { x: best.x, z: best.z, probe: generator.sampleBiomeProbe(best.x, best.z) };
+}
+
+function countLocalLandmarkRoots(candidateKeys: Set<string>, x: number, z: number): number {
+  let count = 0;
+  for (let dz = -2; dz <= 2; dz += 1) {
+    for (let dx = -2; dx <= 2; dx += 1) {
+      if (candidateKeys.has(`${x + dx},${z + dz}`)) {
+        count += 1;
+      }
+    }
+  }
+  return count;
+}
+
+function squaredDistance(ax: number, az: number, bx: number, bz: number): number {
+  const dx = ax - bx;
+  const dz = az - bz;
+  return dx * dx + dz * dz;
+}
+
+function compareCandidateTieBreak(
+  candidate: LandmarkRootCandidate,
+  incumbent: LandmarkRootCandidate,
+  centroidX: number,
+  centroidZ: number,
+): number {
+  const candidateDistance = squaredDistance(candidate.x, candidate.z, centroidX, centroidZ);
+  const incumbentDistance = squaredDistance(incumbent.x, incumbent.z, centroidX, centroidZ);
+  if (candidateDistance !== incumbentDistance) {
+    return candidateDistance - incumbentDistance;
+  }
+  if (candidate.z !== incumbent.z) {
+    return candidate.z - incumbent.z;
+  }
+  return candidate.x - incumbent.x;
 }
 
 function resolveRequestedRoot(generator: ProceduralWorldGenerator, options: ObjectLabOptions): LandmarkRoot {
