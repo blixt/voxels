@@ -133,11 +133,14 @@ export function createAsyncChunkMeshing(
     getPendingCount(): number {
       return pendingKeys.size;
     },
-    drainCompletedMeshes(): CompletedChunkMeshingJob[] {
+    drainCompletedMeshes(maxCount = Number.POSITIVE_INFINITY): CompletedChunkMeshingJob[] {
       if (completedMeshes.length === 0) {
         return [];
       }
-      return completedMeshes.splice(0, completedMeshes.length);
+      const drainCount = Number.isFinite(maxCount)
+        ? Math.max(0, Math.min(completedMeshes.length, Math.floor(maxCount)))
+        : completedMeshes.length;
+      return completedMeshes.splice(0, drainCount);
     },
     dispose(): void {
       for (const slot of workerSlots) {

@@ -1305,3 +1305,47 @@ Build the first "place identity" slice without regressing performance or input:
   - commit and push this cleanup checkpoint
   - write a broader ROI backlog from the current inspiration art and implement the highest ROI items first
   - start with the block-grid/Minecraft read and moving-performance risk, because those are both user-visible and measurable
+
+### 2026-05-08 - Performance Truth, Mesh Spike Budget, And Terrain Grid Probe
+
+- Trigger:
+  - User reported that the visible counter had claimed very high FPS while walking visibly lagged.
+  - User also warned that small visual tweaks were not enough; the world still read as Minecrafty/blocky.
+  - I re-ranked the ROI backlog in `docs/loop/20260508-bold-roi-plan.md` and put movement-performance truth plus terrain grid breakup at the top.
+- Delegation:
+  - Performance explorer found that live-forward traces did not reproduce sustained `10 FPS`, but did show movement spikes from streaming and mesh work. The worst pre-fix live-forward move frame was `22.3 ms`, with `14.0 ms` mesh work and later `~11 ms` stream spikes.
+  - Terrain/material explorer recommended shader-first and bounded terrain/material changes, with a warning not to pay a geometry tax blindly.
+  - Object-lab worker added isolated object scale/cost diagnostics so future prop work can judge too-small, too-sparse, clipped, or expensive objects without guessing.
+- Changes:
+  - Performance HUD now shows wall-clock FPS from `requestAnimationFrame` timing plus explicit gameplay work milliseconds, instead of making render CPU look like true frame rate.
+  - Route trace summary now prints max frame, stream/mesh/LOD p95 and max, diagnostics totals, and unmeasured frame ratio.
+  - Async mesh completion adoption is now budgeted per frame, and urgent sync mesh builds share that budget. Worker scheduling still gets its own queue-fill budget so render readiness does not starve.
+  - Object lab now reports bounds size, max horizontal span, vertical span, occupied columns, bounds volume, fill ratio, and a solid voxel budget class.
+  - Badlands terrace quantization is lower, ash-waste terrain gets strata/grain relief, and the ashland test now gates against dominant `surfaceY % 8` terrace buckets while requiring all four ash material families in sampled columns.
+- Failed attempt:
+  - I tried a shader-only cracked-crust pass first. Owned browser lab caught a black-frame visual regression: `avg luma 0.03`, luma stddev `1.59`, and only `3` color buckets in `artifacts/owned-browser-lab/20260508T013534Z-terrain-grid-breaker-perf-truth/settled-page.png`.
+  - I backed that shader change out completely. `renderer.ts` has no remaining diff from that attempt.
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun run build`: pass.
+  - `mise exec -- bun test`: pass, `197` tests.
+  - Route atlas: `artifacts/route-atlas/20260508T014016Z-terrain-grid-breaker-bold/report.json`, failures none, landmark hits `57`, max notable gap `504.0 m`.
+  - Object lab: `artifacts/object-lab/2026-05-08-013523371Z-terrain-grid-breaker-ziggurat/report.json`; ziggurat sample reported `38822` solid object voxels, now visible as a `huge` budget signal for future optimization/aesthetic review.
+  - Live-forward trace before final mesh cap, after terrain/perf instrumentation: `artifacts/browser-route-trace/20260508T014227Z-terrain-grid-breaker-live-forward/report.json`, avg/p95/max gameplay frame `4.01/6.10/22.30 ms`, max stream/mesh/LOD `11.80/14.00/7.10 ms`, hole signals `57`.
+  - Strict mesh cap trace: `artifacts/browser-route-trace/20260508T014719Z-mesh-budget-schedule-live-forward/report.json`, avg/p95/max gameplay frame `3.97/6.00/15.30 ms`, max stream/mesh/LOD `12.30/5.40/6.10 ms`, hole signals `93`.
+  - I tested a looser mesh budget of `8`; it restored hole signals to `58` but regressed max gameplay frame to `21.40 ms` and max stream to `18.60 ms`, so I reverted that knob to `6`.
+  - Final owned browser lab: `artifacts/owned-browser-lab/20260508T015023Z-mesh-budget-terrain-final/report.json`, failures none.
+  - Final browser result: traversal p95/max `4.90/13.00 ms`, route p95/max `5.00/13.30 ms`, draw/triangles `500/383962`, `LOD overlap LOD0/bands 0/0`, water overlap `0`, gaps `0`, handoff holes `0`, render-ready samples `961/961`, HUD smoke passed.
+- Honest assessment:
+  - Performance improved materially in the full browser lab: route max frame dropped from the prior `~32 ms` browser-lab range to `13.30 ms`, and the live-forward max mesh slice dropped from `14.0 ms` to `5.4 ms`.
+  - The stricter mesh cap increases live-forward diagnostic hole signals, but the final owned browser lab still reports no visible ground holes, no LOD overlap, and no handoff holes. This needs continued monitoring, not denial.
+  - The performance strip is now honest about wall-clock FPS, but automated screenshot capture can still stall wall timing; the paired gameplay-work number is there to distinguish page jank from render/work cost.
+  - The terrain change is safe but not visually sufficient. Browser visual grid dominance stayed at `0.68`, so the next visual step needs stronger composition/content or a shader pass rebuilt more carefully with screenshot gates active.
+- Rubric movement:
+  - Performance/playability: `4.60 -> 5.20` because measured route/traversal max frame times improved substantially in owned browser lab.
+  - Harness maturity: `7.10 -> 7.35` because route trace and object lab now expose the right failure modes instead of hiding them.
+  - Visual/world definition: `4.15 -> 4.25` because ashland terrain distribution improved, but the visible grid metric did not move.
+- Next:
+  - commit and push this checkpoint
+  - attack visual grid dominance with a safer strategy than the failed shader: likely salt-marsh set pieces, more non-axis silhouettes, and route-visible content density before another shader attempt
+  - investigate incremental residency/streaming spikes next, because max stream remains around `12 ms` in live-forward movement traces

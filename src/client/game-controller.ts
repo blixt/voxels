@@ -194,6 +194,7 @@ export interface GameHudSnapshot {
   drawCalls: number;
   triangles: number;
   lastFrameWallMs: number;
+  lastGameplayFrameMs: number;
   lastFrameCpuMs: number;
   avgFrameWallMs: number;
   lastFrameSyncMs: number;
@@ -918,6 +919,7 @@ export class GameController {
       drawCalls: this.drawCalls,
       triangles: this.triangles,
       lastFrameWallMs: this.lastFrameWallMs,
+      lastGameplayFrameMs: this.lastGameplayFrameMs,
       lastFrameCpuMs: this.lastFrameCpuMs,
       avgFrameWallMs: this.avgFrameWallMs,
       lastFrameSyncMs: this.lastRenderStats.syncResourcesMs,
@@ -2682,6 +2684,7 @@ export class GameController {
   private flushMeshBuildBudget(maxChunks = DEFAULT_MAX_MESH_REBUILDS_PER_FRAME): void {
     if (this.asyncChunkMeshing) {
       const startedAt = performance.now();
+      const chunkBudget = Number.isFinite(maxChunks) ? Math.max(0, Math.floor(maxChunks)) : Number.POSITIVE_INFINITY;
       let meshCount = 0;
       let newMeshCount = 0;
       let remeshCount = 0;
@@ -2691,7 +2694,7 @@ export class GameController {
       const priorityChunkY = Math.floor(this.player.feetPosition[1] / this.world.chunkSize);
       const priorityChunkZ = Math.floor(this.player.feetPosition[2] / this.world.chunkSize);
 
-      for (const completed of this.asyncChunkMeshing.drainCompletedMeshes()) {
+      for (const completed of this.asyncChunkMeshing.drainCompletedMeshes(chunkBudget)) {
         const chunk = this.world.getResidentChunk(completed.coord.x, completed.coord.y, completed.coord.z);
         if (!chunk || chunk.meshRevision !== completed.meshRevision) {
           continue;
@@ -2719,7 +2722,8 @@ export class GameController {
 
       let syncBuiltCount = 0;
       for (const chunk of dirtyChunks) {
-        if (syncBuiltCount >= Math.min(MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME, maxChunks)) {
+        const remainingMeshBudget = chunkBudget - meshCount;
+        if (remainingMeshBudget <= 0 || syncBuiltCount >= Math.min(MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME, remainingMeshBudget)) {
           break;
         }
         if (!chunk.meshDirty) {
@@ -2752,7 +2756,8 @@ export class GameController {
 
       let scheduledCount = 0;
       for (const chunk of dirtyChunks) {
-        if (scheduledCount >= maxChunks) {
+        const remainingScheduleBudget = chunkBudget - scheduledCount;
+        if (remainingScheduleBudget <= 0) {
           break;
         }
         if (!chunk.meshDirty) {

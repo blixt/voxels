@@ -120,6 +120,7 @@ export interface ObjectLabReport {
 export interface ObjectLabDiagnostics {
   materialVariety: number;
   dominantMaterialShare: number;
+  scale: ObjectScaleDiagnostics;
   sampleFit: SampleFitDiagnostics;
   warnings: string[];
   silhouette: {
@@ -127,6 +128,16 @@ export interface ObjectLabDiagnostics {
     front: ProjectionDiagnostics;
     side: ProjectionDiagnostics;
   };
+}
+
+export interface ObjectScaleDiagnostics {
+  boundsSize: [number, number, number] | null;
+  maxHorizontalSpan: number;
+  verticalSpan: number;
+  occupiedColumnCount: number;
+  boundsVolume: number;
+  fillRatio: number;
+  solidVoxelBudget: "empty" | "tiny" | "small" | "medium" | "large" | "huge";
 }
 
 export interface SampleFitDiagnostics {
@@ -450,13 +461,61 @@ function buildDiagnostics(sample: SampledObject, root: LandmarkRoot): ObjectLabD
     front: inspectProjection(sample.frontProjection),
     side: inspectProjection(sample.sideProjection),
   };
+  const scale = inspectObjectScale(sample, silhouette.top);
   return {
     materialVariety: sample.materialCounts.size,
     dominantMaterialShare,
+    scale,
     sampleFit,
-    warnings: buildDiagnosticWarnings(sampleFit, silhouette, dominantMaterialShare, sample.solidVoxelCount),
+    warnings: buildDiagnosticWarnings(sampleFit, silhouette, scale, dominantMaterialShare, sample.solidVoxelCount),
     silhouette,
   };
+}
+
+function inspectObjectScale(sample: SampledObject, topProjection: ProjectionDiagnostics): ObjectScaleDiagnostics {
+  if (!sample.bounds) {
+    return {
+      boundsSize: null,
+      maxHorizontalSpan: 0,
+      verticalSpan: 0,
+      occupiedColumnCount: 0,
+      boundsVolume: 0,
+      fillRatio: 0,
+      solidVoxelBudget: "empty",
+    };
+  }
+  const xSize = sample.bounds.max[0] - sample.bounds.min[0] + 1;
+  const ySize = sample.bounds.max[1] - sample.bounds.min[1] + 1;
+  const zSize = sample.bounds.max[2] - sample.bounds.min[2] + 1;
+  const boundsVolume = xSize * ySize * zSize;
+  return {
+    boundsSize: [xSize, ySize, zSize],
+    maxHorizontalSpan: Math.max(xSize, zSize),
+    verticalSpan: ySize,
+    occupiedColumnCount: topProjection.occupiedPixels,
+    boundsVolume,
+    fillRatio: boundsVolume === 0 ? 0 : roundRatio(sample.solidVoxelCount / boundsVolume),
+    solidVoxelBudget: classifySolidVoxelBudget(sample.solidVoxelCount),
+  };
+}
+
+function classifySolidVoxelBudget(solidVoxelCount: number): ObjectScaleDiagnostics["solidVoxelBudget"] {
+  if (solidVoxelCount === 0) {
+    return "empty";
+  }
+  if (solidVoxelCount < 64) {
+    return "tiny";
+  }
+  if (solidVoxelCount < 512) {
+    return "small";
+  }
+  if (solidVoxelCount < 2_048) {
+    return "medium";
+  }
+  if (solidVoxelCount < 8_192) {
+    return "large";
+  }
+  return "huge";
 }
 
 function inspectSampleFit(sample: SampledObject, root: LandmarkRoot): SampleFitDiagnostics {
@@ -579,6 +638,7 @@ function inspectProjection(projection: Projection): ProjectionDiagnostics {
 function buildDiagnosticWarnings(
   sampleFit: SampleFitDiagnostics,
   silhouette: ObjectLabDiagnostics["silhouette"],
+  scale: ObjectScaleDiagnostics,
   dominantMaterialShare: number,
   solidVoxelCount: number,
 ): string[] {
@@ -600,6 +660,15 @@ function buildDiagnosticWarnings(
   }
   if (dominantMaterialShare > 0.92) {
     warnings.push("dominant-material");
+  }
+  if (scale.verticalSpan > 0 && scale.verticalSpan < 3 && scale.maxHorizontalSpan < 4) {
+    warnings.push("object-too-small");
+  }
+  if (scale.solidVoxelBudget === "huge") {
+    warnings.push("huge-solid-voxel-budget");
+  }
+  if (scale.boundsVolume > 0 && scale.fillRatio < 0.08) {
+    warnings.push("low-bounds-fill");
   }
   for (const [view, diagnostics] of Object.entries(silhouette)) {
     if (diagnostics.coverage > 0 && diagnostics.coverage < 0.02) {
@@ -631,6 +700,7 @@ function buildMarkdownSummary(report: ObjectLabReport): string {
   const bounds = report.sample.bounds
     ? `${report.sample.bounds.min.join(", ")} -> ${report.sample.bounds.max.join(", ")}`
     : "none";
+  const scale = report.sample.diagnostics.scale;
   const materialRows = report.sample.materialCounts
     .slice(0, 12)
     .map((entry) => `| ${entry.hex} | ${entry.material} | ${entry.count} |`)
@@ -647,8 +717,10 @@ function buildMarkdownSummary(report: ObjectLabReport): string {
     `- Sample radius: ${report.sample.radius}`,
     `- Solid object voxels: ${report.sample.solidVoxelCount}`,
     `- Bounds: ${bounds}`,
+    `- Bounds size: ${formatNullableTuple(scale.boundsSize)}`,
     `- Material variety: ${report.sample.diagnostics.materialVariety}`,
     `- Dominant material share: ${formatPercent(report.sample.diagnostics.dominantMaterialShare)}`,
+    `- Solid voxel budget: ${scale.solidVoxelBudget}`,
     `- Warnings: ${
       report.sample.diagnostics.warnings.length === 0 ? "none" : report.sample.diagnostics.warnings.join(", ")
     }`,
@@ -667,6 +739,14 @@ function buildMarkdownSummary(report: ObjectLabReport): string {
     silhouetteRow("Top", report.sample.diagnostics.silhouette.top),
     silhouetteRow("Front", report.sample.diagnostics.silhouette.front),
     silhouetteRow("Side", report.sample.diagnostics.silhouette.side),
+    ``,
+    `## Scale And Cost Diagnostics`,
+    ``,
+    `| Bounds Size | Max Horizontal Span | Vertical Span | Occupied Columns | Bounds Volume | Fill Ratio | Solid Voxel Budget |`,
+    `| ---: | ---: | ---: | ---: | ---: | ---: | --- |`,
+    `| ${formatNullableTuple(scale.boundsSize)} | ${scale.maxHorizontalSpan} | ${scale.verticalSpan} | ${scale.occupiedColumnCount} | ${
+      scale.boundsVolume
+    } | ${formatPercent(scale.fillRatio)} | ${scale.solidVoxelBudget} |`,
     ``,
     `## Sample Fit Diagnostics`,
     ``,
@@ -759,9 +839,16 @@ function buildContactSheetSvg(report: ObjectLabReport, sample: SampledObject): s
       report.sample.diagnostics.warnings.length === 0 ? "none" : escapeXml(report.sample.diagnostics.warnings.join(", "))
     }</text>`,
   );
-  parts.push(`<text class="legend" x="0" y="112">Material legend</text>`);
+  parts.push(
+    `<text class="meta" x="0" y="112">size ${formatNullableTuple(report.sample.diagnostics.scale.boundsSize)} | columns ${
+      report.sample.diagnostics.scale.occupiedColumnCount
+    } | fill ${formatPercent(report.sample.diagnostics.scale.fillRatio)} | budget ${
+      report.sample.diagnostics.scale.solidVoxelBudget
+    }</text>`,
+  );
+  parts.push(`<text class="legend" x="0" y="130">Material legend</text>`);
   materialRows.forEach((entry, index) => {
-    const y = 124 + index * 18;
+    const y = 142 + index * 18;
     parts.push(`<rect x="0" y="${y - 10}" width="12" height="12" fill="${entry.hex}"/>`);
     parts.push(`<text class="meta" x="20" y="${y}">${entry.hex} material ${entry.material} (${entry.count})</text>`);
   });

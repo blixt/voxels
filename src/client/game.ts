@@ -562,21 +562,22 @@ function createAchievementPresenter(root: HTMLElement): AchievementPresenter {
 }
 
 function createPerformanceStripView(root: HTMLElement): PerformanceStripView {
-  const fps = document.createElement("strong");
-  fps.className = "game-performance-value";
+  const frame = document.createElement("strong");
+  frame.className = "game-performance-value";
+  const work = document.createElement("span");
+  work.className = "game-performance-value";
   const chunks = document.createElement("span");
   chunks.className = "game-performance-value";
-  const draws = document.createElement("span");
-  draws.className = "game-performance-value";
-  root.replaceChildren(fps, chunks, draws);
+  root.replaceChildren(frame, work, chunks);
 
   const lastValues = ["", "", ""];
   return {
     update(snapshot) {
+      const wallFrameMs = snapshot.avgFrameWallMs > 0 ? snapshot.avgFrameWallMs : snapshot.lastFrameWallMs;
       const nextValues = [
-        `${formatFrameMs(snapshot.lastFrameWallMs)}`,
+        formatWallFrameRate(wallFrameMs),
+        `${formatFrameMs(snapshot.lastGameplayFrameMs)} work`,
         `${formatCompactCount(snapshot.chunkCount)} chunks`,
-        `${formatCompactCount(snapshot.drawCalls)} draws`,
       ];
       for (let index = 0; index < nextValues.length; index += 1) {
         if (nextValues[index] === lastValues[index]) {
@@ -586,15 +587,28 @@ function createPerformanceStripView(root: HTMLElement): PerformanceStripView {
         lastValues[index] = nextValues[index]!;
       }
       root.title = [
-        `Frame ${snapshot.lastFrameWallMs.toFixed(1)} ms`,
-        `CPU ${snapshot.lastFrameCpuMs.toFixed(1)} ms`,
+        `Wall frame ${snapshot.lastFrameWallMs.toFixed(1)} ms`,
+        `Average wall frame ${snapshot.avgFrameWallMs.toFixed(1)} ms`,
+        `Gameplay work ${snapshot.lastGameplayFrameMs.toFixed(1)} ms`,
+        `Render CPU ${snapshot.lastFrameCpuMs.toFixed(1)} ms`,
         `Stream ${snapshot.streamMs.toFixed(1)} ms`,
         `Mesh ${snapshot.meshMs.toFixed(1)} ms`,
+        `Pending ${snapshot.streamPendingChunks.toLocaleString()}`,
+        `Dirty ${snapshot.streamDirtyResidentChunks.toLocaleString()}`,
+        `Draws ${snapshot.drawCalls.toLocaleString()}`,
         `LOD ${snapshot.lodChunkCount.toLocaleString()}`,
         `Fog culled ${snapshot.fogCulledChunks.toLocaleString()}`,
       ].join(" • ");
     },
   };
+}
+
+function formatWallFrameRate(frameWallMs: number): string {
+  if (!Number.isFinite(frameWallMs) || frameWallMs <= 0) {
+    return "0 fps";
+  }
+  const fps = 1000 / frameWallMs;
+  return `${fps.toFixed(fps >= 100 ? 0 : 1)} fps`;
 }
 
 function formatFrameMs(frameWallMs: number): string {

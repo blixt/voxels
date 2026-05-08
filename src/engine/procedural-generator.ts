@@ -431,7 +431,7 @@ const BASE_BIOMES: readonly BaseBiomeProfile[] = [
   createBaseBiome("savanna", 0.72, 0.54, 0.32, 0.56, 0.46, 0.16, -2, 0.50, 0.20, 0.36, 0.18, 0.00, 6.4, 1640, "#BA6", "#CB7", "#DB8", "#C86", "#887", "#986", "#A97", "#5AB", "#EED"),
   createBaseBiome("steppe", 0.62, 0.42, 0.36, 0.52, 0.48, 0.14, 0, 0.54, 0.22, 0.32, 0.18, 0.00, 4.8, 1608, "#9B6", "#CB7", "#BA6", "#CA7", "#887", "#875", "#986", "#4AA", "#DDD"),
   createBaseBiome("dunes", 0.84, 0.16, 0.18, 0.28, 0.30, 0.12, -16, 0.32, 0.10, 0.54, 0.42, 0.00, 8.8, 1710, "#DB6", "#EC9", "#EC7", "#CA5", "#B96", "#B85", "#C96", "#5BC", "#EDC"),
-  createBaseBiome("badlands", 0.72, 0.20, 0.58, 0.36, 0.58, 0.16, 18, 0.72, 0.64, 0.38, 0.06, 0.46, 9.6, 1670, "#C75", "#D96", "#D86", "#B54", "#865", "#A54", "#965", "#49B", "#EBC"),
+  createBaseBiome("badlands", 0.72, 0.20, 0.58, 0.36, 0.58, 0.16, 18, 0.72, 0.64, 0.38, 0.06, 0.28, 10.8, 1670, "#C75", "#D96", "#D86", "#B54", "#865", "#A54", "#965", "#49B", "#EBC"),
   createBaseBiome("highland", 0.40, 0.56, 0.72, 0.46, 0.72, 0.16, 44, 0.88, 0.62, 0.24, 0.10, 0.06, 7.8, 1518, "#6B7", "#7C8", "#7A8", "#8C7", "#778", "#667", "#889", "#5AD", "#EEF"),
   createBaseBiome("moor", 0.28, 0.68, 0.48, 0.28, 0.54, 0.16, 6, 0.34, 0.16, 0.22, 0.30, 0.00, 5.4, 1532, "#758", "#869", "#97A", "#546", "#667", "#564", "#675", "#357", "#DDE"),
   createBaseBiome("tundra", 0.18, 0.42, 0.86, 0.40, 0.82, 0.12, 78, 0.98, 0.82, 0.16, 0.02, 0.04, 6.2, 1452, "#BCC", "#CDD", "#DDE", "#ABB", "#889", "#99A", "#AAB", "#8CD", "#EEF"),
@@ -1731,7 +1731,13 @@ export class ProceduralWorldGenerator {
     const preTerrace = globalBaseHeight + sharedRelief + localHeight;
     const terracedHeight = terrainProfile.terraceScale <= 0
       ? preTerrace
-      : lerp(preTerrace, Math.round(preTerrace / 8) * 8, terrainProfile.terraceScale * localWeight);
+      : (() => {
+          const terraceInfluence = terrainProfile.terraceScale * localWeight;
+          const strataWarp = (fields.strata - 0.5) * 10 + (fields.surfacePatch - 0.5) * 4;
+          const warpedTerraceInput = preTerrace + strataWarp * terraceInfluence;
+          const warpedTerrace = Math.round(warpedTerraceInput / 8) * 8 - strataWarp * terraceInfluence * 0.72;
+          return lerp(preTerrace, warpedTerrace, terraceInfluence);
+        })();
     const microRelief = Math.round(
       (fields.surfaceGrain - 0.5) * terrainProfile.microRelief * (0.35 + biomeCore * 0.65),
     );
@@ -3300,7 +3306,8 @@ function sampleRegionalVariantSurfaceDelta(
       return Math.round((fields.mesa - 0.52) * (16 + strength * 20) * weight);
     case "ash_wastes":
       return Math.round((fields.mesa - 0.58) * (6 + strength * 10) * weight)
-        - Math.round(lerp(2, 7, strength) * (0.45 + Math.max(0, fields.desolation - 0.5)) * weight);
+        - Math.round(lerp(2, 7, strength) * (0.45 + Math.max(0, fields.desolation - 0.5)) * weight)
+        + Math.round(((fields.strata - 0.5) * 8 + (fields.surfaceGrain - 0.5) * 4) * weight);
     case "highland_redleaf":
       return Math.round(lerp(4, 12, strength) * (0.55 + fields.hills * 0.15 + 0.30) * weight);
     case "moor_shadowglass":

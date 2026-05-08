@@ -552,6 +552,11 @@ function printReportSummary(reportPath: string, report: BrowserRouteTraceReport)
     `trace path: ${report.tracePath}`,
     `avg gameplay frame: ${formatNumber(benchmarkSummary.avgGameplayFrameMs)} ms`,
     `p95 gameplay frame: ${formatNumber(benchmarkSummary.p95GameplayFrameMs)} ms`,
+    `max gameplay frame: ${formatNumber(benchmarkSummary.maxGameplayFrameMs)} ms`,
+    `p95 stream/mesh/lod: ${formatNumber(benchmarkSummary.p95StreamMs)}/${formatNumber(benchmarkSummary.p95MeshMs)}/${formatNumber(benchmarkSummary.p95LodMs)} ms`,
+    `max stream/mesh/lod: ${formatNumber(benchmarkSummary.maxStreamMs)}/${formatNumber(benchmarkSummary.maxMeshMs)}/${formatNumber(benchmarkSummary.maxLodMs)} ms`,
+    `diagnostics total/capture: ${formatNumber(benchmarkSummary.totalDiagnosticsMs)}/${formatNumber(benchmarkSummary.totalCaptureDiagnosticsMs)} ms`,
+    `unmeasured frame ratio: ${formatNumber(benchmarkSummary.unmeasuredFrameRatio)}`,
     `frames with hole signals: ${formatNumber(benchmarkSummary.framesWithHoleSignals)}`,
     `discovered landmark families: ${discoveryLandmarks.length}`,
   ].join("\n"));

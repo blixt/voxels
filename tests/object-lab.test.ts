@@ -36,6 +36,15 @@ test("object lab finds a representative landmark and writes isolated artifacts",
   expect(report.sample.materialCounts.length).toBeGreaterThan(0);
   expect(report.sample.diagnostics.materialVariety).toBe(report.sample.materialCounts.length);
   expect(report.sample.diagnostics.dominantMaterialShare).toBeGreaterThan(0);
+  expect(report.sample.diagnostics.scale.boundsSize).not.toBeNull();
+  expect(report.sample.diagnostics.scale.verticalSpan).toBeGreaterThan(0);
+  expect(report.sample.diagnostics.scale.maxHorizontalSpan).toBeGreaterThan(0);
+  expect(report.sample.diagnostics.scale.occupiedColumnCount).toBe(
+    report.sample.diagnostics.silhouette.top.occupiedPixels,
+  );
+  expect(report.sample.diagnostics.scale.boundsVolume).toBeGreaterThanOrEqual(report.sample.solidVoxelCount);
+  expect(report.sample.diagnostics.scale.fillRatio).toBeGreaterThan(0);
+  expect(report.sample.diagnostics.scale.solidVoxelBudget).not.toBe("empty");
   expect(report.sample.diagnostics.sampleFit.centerOffset).not.toBeNull();
   expect(typeof report.sample.diagnostics.sampleFit.touchesSampleEdge).toBe("boolean");
   expect(report.sample.diagnostics.silhouette.front.occupiedPixels).toBeGreaterThan(0);
@@ -46,10 +55,12 @@ test("object lab finds a representative landmark and writes isolated artifacts",
   expect(await readFile(report.artifacts.report, "utf8")).toContain(`"landmarkId": "oak"`);
   expect(await readFile(report.artifacts.summary, "utf8")).toContain("# Object Lab: oak");
   expect(await readFile(report.artifacts.summary, "utf8")).toContain("## Silhouette Diagnostics");
+  expect(await readFile(report.artifacts.summary, "utf8")).toContain("## Scale And Cost Diagnostics");
   expect(await readFile(report.artifacts.summary, "utf8")).toContain("## Sample Fit Diagnostics");
   expect(await readFile(report.artifacts.contactSheet, "utf8")).toContain("<svg");
   expect(await readFile(report.artifacts.contactSheet, "utf8")).toContain("Material legend");
   expect(await readFile(report.artifacts.contactSheet, "utf8")).toContain("fit x");
+  expect(await readFile(report.artifacts.contactSheet, "utf8")).toContain("budget");
   expect(await readFile(report.artifacts.topProjection, "utf8")).toStartWith("P3\n");
   expect(await readFile(report.artifacts.frontProjection, "utf8")).toStartWith("P3\n");
   expect(await readFile(report.artifacts.sideProjection, "utf8")).toStartWith("P3\n");

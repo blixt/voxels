@@ -1098,6 +1098,8 @@ test("ash wastes regional pockets favor ancient ashland silhouettes over generic
   let ashlandLandmarkSamples = 0;
   let genericDesertSamples = 0;
   let ashSurfaceMaterialSamples = 0;
+  const ashMaterialVariety = new Set<number>();
+  const ashSurfaceModuloBuckets = new Map<number, number>();
 
   for (let z = -24_000; z <= 24_000; z += 32) {
     for (let x = -24_000; x <= 24_000; x += 32) {
@@ -1115,13 +1117,23 @@ test("ash wastes regional pockets favor ancient ashland silhouettes over generic
       if (ashMaterials.has(probe.surfaceMaterial)) {
         ashSurfaceMaterialSamples += 1;
       }
+      ashSurfaceModuloBuckets.set(probe.surfaceY % 8, (ashSurfaceModuloBuckets.get(probe.surfaceY % 8) ?? 0) + 1);
+      for (const y of [probe.surfaceY, probe.surfaceY - 1, probe.surfaceY - 2]) {
+        const material = generator.sampleMaterial(x, y, z);
+        if (ashMaterials.has(material)) {
+          ashMaterialVariety.add(material);
+        }
+      }
     }
   }
+  const dominantSurfaceModuloShare = Math.max(...ashSurfaceModuloBuckets.values()) / ashSamples;
 
   expect(ashSamples).toBeGreaterThan(0);
   expect(ashSamples / ((48_000 / 32 + 1) ** 2)).toBeLessThanOrEqual(0.02);
   expect(ashlandLandmarkSamples).toBeGreaterThan(genericDesertSamples);
   expect(ashSurfaceMaterialSamples / ashSamples).toBeGreaterThanOrEqual(0.55);
+  expect(ashMaterialVariety.size).toBeGreaterThanOrEqual(4);
+  expect(dominantSurfaceModuloShare).toBeLessThanOrEqual(0.22);
 });
 
 test("ashland and old-road landmarks render shaped caps instead of block columns", () => {
