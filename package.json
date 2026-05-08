@@ -10,7 +10,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test",
-    "test:lod-lab": "bun test tests/lod-debug-world.test.ts tests/frame-timing-buckets.test.ts",
+    "test:lod-lab": "bun test tests/lod-debug-world.test.ts tests/lod-handoff.test.ts tests/frame-timing-buckets.test.ts",
     "versions": "bun run scripts/check-versions.ts",
     "profile": "bun run scripts/profile-scenes.ts",
     "profile:stream": "bun run scripts/profile-procedural-stream.ts",
