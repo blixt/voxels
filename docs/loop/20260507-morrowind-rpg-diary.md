@@ -1100,3 +1100,28 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - commit and push this small prop checkpoint
   - continue renderer correctness with a direct surface-continuity seam probe
+
+### 2026-05-07 - Direct Surface Continuity Probe
+
+- Added a near-surface continuity probe to separate actual visible/near-player terrain continuity from the broad far-LOD seam candidate counter.
+- Rationale:
+  - `seamGapCount` still reports pending far-LOD coverage candidates during movement
+  - those candidates have not correlated with visible-ground gaps or screen-hole signals
+  - the new probe samples expected procedural surface heights in a forward grid near the player, compares adjacent smooth edges, and fails if smooth expected terrain is missing render-ready coverage
+- Browser-lab integration:
+  - route/traversal summaries now include `framesWithSurfaceContinuityGaps`, `maxSurfaceContinuityGapCount`, and `maxSurfaceContinuityStepMeters`
+  - owned browser lab now fails on surface-continuity gap frames
+  - seam samples include `surfaceContinuityGapCount`, `abruptSurfaceEdgeCount`, and `maxSurfaceContinuityStepMeters`
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun test tests/game-route-benchmark.test.ts`: pass, `8` tests.
+  - Direct browser lab: `artifacts/owned-browser-lab/20260507T235945Z-surface-continuity-probe-smoke/report.json`, failures none.
+  - Browser result: route surface continuity gaps/max step `0/0.50 m`, route p95/max `5.20/30.30 ms`, traversal p95/max `4.80/19.20 ms`, `LOD gaps 0`, `LOD water overlap 0`.
+- Honest assessment:
+  - This does not remove the legacy broad seam candidate counter; it gives us a better signal for whether those candidates matter near the player.
+  - Next work should either retire or re-label the old counter so it is not mistaken for an actual visible seam.
+- Rubric movement:
+  - Harness maturity: `6.25 -> 6.4` because visible terrain continuity now has a direct route benchmark signal instead of relying on far-coverage proxy counts.
+- Next:
+  - checkpoint and push
+  - re-label the old route seam counter as transient far LOD coverage or replace it with the direct continuity signal in summaries

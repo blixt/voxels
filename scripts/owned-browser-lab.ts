@@ -600,11 +600,14 @@ function buildPageProbeExpression(options: CliOptions): string {
         p95LodMs: benchmark.summary.p95LodMs,
         framesWithHoleSignals: benchmark.summary.framesWithHoleSignals,
         framesWithVisibleGroundGaps: benchmark.summary.framesWithVisibleGroundGaps,
+        framesWithSurfaceContinuityGaps: benchmark.summary.framesWithSurfaceContinuityGaps,
         framesWithSeamGaps: benchmark.summary.framesWithSeamGaps,
         framesWithLodOverlaps: benchmark.summary.framesWithLodOverlaps,
         blockingSeamGapCount: countBlockingSeamGaps(benchmark.samples),
         blockingLodOverlapCount: countBlockingLodOverlaps(benchmark.samples),
         maxSeamGapMeters: benchmark.summary.maxSeamGapMeters,
+        maxSurfaceContinuityGapCount: benchmark.summary.maxSurfaceContinuityGapCount,
+        maxSurfaceContinuityStepMeters: benchmark.summary.maxSurfaceContinuityStepMeters,
         maxLodOverlapMeters: benchmark.summary.maxLodOverlapMeters,
         screenVoidCaptureCount: benchmark.summary.screenVoidCaptureCount,
         framesWithScreenVoidSignals: benchmark.summary.framesWithScreenVoidSignals,
@@ -666,11 +669,14 @@ function buildPageProbeExpression(options: CliOptions): string {
         p95LodMs: benchmark.summary.p95LodMs,
         framesWithHoleSignals: benchmark.summary.framesWithHoleSignals,
         framesWithVisibleGroundGaps: benchmark.summary.framesWithVisibleGroundGaps,
+        framesWithSurfaceContinuityGaps: benchmark.summary.framesWithSurfaceContinuityGaps,
         framesWithSeamGaps: benchmark.summary.framesWithSeamGaps,
         framesWithLodOverlaps: benchmark.summary.framesWithLodOverlaps,
         blockingSeamGapCount: countBlockingSeamGaps(benchmark.samples),
         blockingLodOverlapCount: countBlockingLodOverlaps(benchmark.samples),
         maxSeamGapMeters: benchmark.summary.maxSeamGapMeters,
+        maxSurfaceContinuityGapCount: benchmark.summary.maxSurfaceContinuityGapCount,
+        maxSurfaceContinuityStepMeters: benchmark.summary.maxSurfaceContinuityStepMeters,
         maxLodOverlapMeters: benchmark.summary.maxLodOverlapMeters,
         screenVoidCaptureCount: benchmark.summary.screenVoidCaptureCount,
         framesWithScreenVoidSignals: benchmark.summary.framesWithScreenVoidSignals,
@@ -704,6 +710,9 @@ function buildPageProbeExpression(options: CliOptions): string {
       lodBandOverlapCount: number;
       maxLodOverlapMeters: number;
       visibleGroundUncoveredCount: number;
+      surfaceContinuityGapCount: number;
+      abruptSurfaceEdgeCount: number;
+      maxSurfaceContinuityStepMeters: number;
       screenVoidSuspicious: boolean;
     }[]) {
       return samples
@@ -728,6 +737,9 @@ function buildPageProbeExpression(options: CliOptions): string {
           lodBandOverlapCount: sample.lodBandOverlapCount,
           maxLodOverlapMeters: sample.maxLodOverlapMeters,
           visibleGroundUncoveredCount: sample.visibleGroundUncoveredCount,
+          surfaceContinuityGapCount: sample.surfaceContinuityGapCount,
+          abruptSurfaceEdgeCount: sample.abruptSurfaceEdgeCount,
+          maxSurfaceContinuityStepMeters: sample.maxSurfaceContinuityStepMeters,
           screenVoidSuspicious: sample.screenVoidSuspicious,
         }));
     }
@@ -1102,6 +1114,9 @@ function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<stri
   if ((readNumber(traversalBudget, "framesWithVisibleGroundGaps") ?? 0) > 0) {
     failures.push(`traversal benchmark had ${readNumber(traversalBudget, "framesWithVisibleGroundGaps")} visible-ground gap frames`);
   }
+  if ((readNumber(traversalBudget, "framesWithSurfaceContinuityGaps") ?? 0) > 0) {
+    failures.push(`traversal benchmark had ${readNumber(traversalBudget, "framesWithSurfaceContinuityGaps")} surface-continuity gap frames`);
+  }
   if ((readNumber(traversalBudget, "blockingSeamGapCount") ?? 0) > 0) {
     failures.push(`traversal benchmark had ${readNumber(traversalBudget, "blockingSeamGapCount")} visible or settled seam-gap frames`);
   }
@@ -1155,6 +1170,9 @@ function findFailures(pageReport: Record<string, unknown>, hudSmoke: Record<stri
   }
   if ((readNumber(routeBudget, "framesWithVisibleGroundGaps") ?? 0) > 0) {
     failures.push(`route benchmark had ${readNumber(routeBudget, "framesWithVisibleGroundGaps")} visible-ground gap frames`);
+  }
+  if ((readNumber(routeBudget, "framesWithSurfaceContinuityGaps") ?? 0) > 0) {
+    failures.push(`route benchmark had ${readNumber(routeBudget, "framesWithSurfaceContinuityGaps")} surface-continuity gap frames`);
   }
   if ((readNumber(routeBudget, "blockingSeamGapCount") ?? 0) > 0) {
     failures.push(`route benchmark had ${readNumber(routeBudget, "blockingSeamGapCount")} visible or settled seam-gap frames`);
@@ -1243,6 +1261,7 @@ function printSummary(reportPath: string, report: {
   console.log(`route p95 work/move/render/stream/mesh/LOD: ${formatNumber(readNumber(routeBudget, "p95MeasuredWorkMs"))}/${formatNumber(readNumber(routeBudget, "p95MovementMs"))}/${formatNumber(readNumber(routeBudget, "p95RenderCpuMs"))}/${formatNumber(readNumber(routeBudget, "p95StreamMs"))}/${formatNumber(readNumber(routeBudget, "p95MeshMs"))}/${formatNumber(readNumber(routeBudget, "p95LodMs"))} ms`);
   console.log(`route diagnostics avg/total/capture: ${formatNumber(readNumber(routeBudget, "avgDiagnosticsMs"))}/${formatNumber(readNumber(routeBudget, "totalDiagnosticsMs"))}/${formatNumber(readNumber(routeBudget, "totalCaptureDiagnosticsMs"))} ms`);
   console.log(`route distance: ${formatNumber(readNumber(routeBudget, "totalDistanceMeters"))} m, holes/seams/blocking seams/overlaps: ${formatNumber(readNumber(routeBudget, "framesWithHoleSignals"))}/${formatNumber(readNumber(routeBudget, "framesWithSeamGaps"))}/${formatNumber(readNumber(routeBudget, "blockingSeamGapCount"))}/${formatNumber(readNumber(routeBudget, "blockingLodOverlapCount"))}`);
+  console.log(`route surface continuity gaps/max step: ${formatNumber(readNumber(routeBudget, "maxSurfaceContinuityGapCount"))}/${formatNumber(readNumber(routeBudget, "maxSurfaceContinuityStepMeters"))} m`);
   if (Array.isArray(routeBudget.seamGapSamples) && routeBudget.seamGapSamples.length > 0) {
     console.log(`route seam sample: ${JSON.stringify(routeBudget.seamGapSamples[0])}`);
   }

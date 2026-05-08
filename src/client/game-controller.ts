@@ -462,6 +462,32 @@ export interface VisibleGroundCoverageProbe {
   uncoveredSamples: VisibleGroundCoverageIssueSample[];
 }
 
+export interface SurfaceContinuityIssueSample {
+  worldX: number;
+  worldZ: number;
+  neighborWorldX: number;
+  neighborWorldZ: number;
+  deltaMeters: number;
+  renderReady: boolean;
+  neighborRenderReady: boolean;
+}
+
+export interface SurfaceContinuityProbe {
+  center: Vec3;
+  yawRadians: number;
+  sampleForwardMeters: number;
+  sampleLateralMeters: number;
+  sampleStepMeters: number;
+  maxSmoothStepMeters: number;
+  sampleCount: number;
+  edgeCount: number;
+  smoothEdgeCount: number;
+  missingSmoothEdgeCount: number;
+  abruptEdgeCount: number;
+  maxExpectedStepMeters: number;
+  issueSamples: SurfaceContinuityIssueSample[];
+}
+
 export interface RouteExperienceBenchmarkOptions {
   durationSeconds?: number;
   settleSeconds?: number;
@@ -516,6 +542,10 @@ export interface RouteExperienceFrameSample {
   visibleGroundSampleCount: number;
   visibleGroundUncoveredCount: number;
   visibleGroundResidentNotReadyCount: number;
+  surfaceContinuityEdgeCount: number;
+  surfaceContinuityGapCount: number;
+  abruptSurfaceEdgeCount: number;
+  maxSurfaceContinuityStepMeters: number;
   lodMs: number;
   lodGeneratedChunks: number;
   lodPendingChunks: number;
@@ -583,10 +613,13 @@ export interface RouteExperienceBenchmarkSummary {
   maxVisibleGroundUncoveredCount: number;
   avgVisibleGroundResidentNotReadyCount: number;
   maxVisibleGroundResidentNotReadyCount: number;
+  maxSurfaceContinuityGapCount: number;
   framesWithVisibleGroundGaps: number;
+  framesWithSurfaceContinuityGaps: number;
   framesWithSeamGaps: number;
   framesWithLodOverlaps: number;
   maxSeamGapMeters: number;
+  maxSurfaceContinuityStepMeters: number;
   maxLodOverlapMeters: number;
   screenVoidCaptureCount: number;
   framesWithScreenVoidSignals: number;
@@ -1102,6 +1135,117 @@ export class GameController {
       uncoveredCount,
       residentNotReadyCount,
       uncoveredSamples,
+    };
+  }
+
+  probeSurfaceContinuity(
+    sampleForwardMeters = 16,
+    sampleLateralMeters = 6,
+    sampleStepMeters = 0.8,
+    maxSmoothStepMeters = 1.2,
+  ): SurfaceContinuityProbe {
+    const normalizedForward = Math.max(1, sampleForwardMeters);
+    const normalizedLateral = Math.max(0.5, sampleLateralMeters);
+    const normalizedStep = Math.max(0.1, sampleStepMeters);
+    const maxSmoothStepWorldUnits = metersToWorldUnits(Math.max(0.1, maxSmoothStepMeters));
+    const forwardWorldUnits = metersToWorldUnits(normalizedForward);
+    const lateralWorldUnits = metersToWorldUnits(normalizedLateral);
+    const stepWorldUnits = metersToWorldUnits(normalizedStep);
+    const center = this.player.feetPosition;
+    const yaw = this.camera.yaw;
+    const forwardX = Math.cos(yaw);
+    const forwardZ = Math.sin(yaw);
+    const rightX = Math.cos(yaw + Math.PI * 0.5);
+    const rightZ = Math.sin(yaw + Math.PI * 0.5);
+    const samples: Array<{
+      worldX: number;
+      worldZ: number;
+      surfaceY: number;
+      renderReady: boolean;
+    }> = [];
+    const forwardCount = Math.floor(forwardWorldUnits / stepWorldUnits) + 1;
+    const lateralCount = Math.floor((lateralWorldUnits * 2) / stepWorldUnits) + 1;
+    const issueSamples: SurfaceContinuityIssueSample[] = [];
+    let sampleCount = 0;
+    let edgeCount = 0;
+    let smoothEdgeCount = 0;
+    let missingSmoothEdgeCount = 0;
+    let abruptEdgeCount = 0;
+    let maxExpectedStepMeters = 0;
+
+    for (let forwardIndex = 0; forwardIndex < forwardCount; forwardIndex += 1) {
+      const forward = forwardIndex * stepWorldUnits;
+      for (let lateralIndex = 0; lateralIndex < lateralCount; lateralIndex += 1) {
+        const lateral = -lateralWorldUnits + lateralIndex * stepWorldUnits;
+        const worldX = center[0] + forwardX * forward + rightX * lateral;
+        const worldZ = center[2] + forwardZ * forward + rightZ * lateral;
+        const chunkX = Math.floor(worldX / this.world.chunkSize);
+        const chunkZ = Math.floor(worldZ / this.world.chunkSize);
+        const readiness = this.resolveVisibleGroundReadiness(worldX, worldZ, chunkX, chunkZ);
+        samples.push({
+          worldX,
+          worldZ,
+          surfaceY: this.generator.sampleColumn(worldX, worldZ).surfaceY,
+          renderReady: readiness.renderReady,
+        });
+        sampleCount += 1;
+      }
+    }
+
+    const compareEdge = (
+      sample: typeof samples[number],
+      neighbor: typeof samples[number],
+    ): void => {
+      const deltaWorldUnits = Math.abs(sample.surfaceY - neighbor.surfaceY);
+      const deltaMeters = worldUnitsToMeters(deltaWorldUnits);
+      maxExpectedStepMeters = Math.max(maxExpectedStepMeters, deltaMeters);
+      edgeCount += 1;
+      if (deltaWorldUnits > maxSmoothStepWorldUnits) {
+        abruptEdgeCount += 1;
+        return;
+      }
+      smoothEdgeCount += 1;
+      if (!sample.renderReady || !neighbor.renderReady) {
+        missingSmoothEdgeCount += 1;
+        pushSurfaceContinuityIssueSample(issueSamples, {
+          worldX: sample.worldX,
+          worldZ: sample.worldZ,
+          neighborWorldX: neighbor.worldX,
+          neighborWorldZ: neighbor.worldZ,
+          deltaMeters,
+          renderReady: sample.renderReady,
+          neighborRenderReady: neighbor.renderReady,
+        });
+      }
+    };
+
+    for (let forwardIndex = 0; forwardIndex < forwardCount; forwardIndex += 1) {
+      for (let lateralIndex = 0; lateralIndex < lateralCount; lateralIndex += 1) {
+        const index = forwardIndex * lateralCount + lateralIndex;
+        const sample = samples[index]!;
+        if (lateralIndex > 0) {
+          compareEdge(sample, samples[index - 1]!);
+        }
+        if (forwardIndex > 0) {
+          compareEdge(sample, samples[index - lateralCount]!);
+        }
+      }
+    }
+
+    return {
+      center: [...center],
+      yawRadians: yaw,
+      sampleForwardMeters: normalizedForward,
+      sampleLateralMeters: normalizedLateral,
+      sampleStepMeters: normalizedStep,
+      maxSmoothStepMeters,
+      sampleCount,
+      edgeCount,
+      smoothEdgeCount,
+      missingSmoothEdgeCount,
+      abruptEdgeCount,
+      maxExpectedStepMeters,
+      issueSamples,
     };
   }
 
@@ -2722,11 +2866,20 @@ export class GameController {
     const diagnosticsStartedAt = performance.now();
     const detailCoverage = this.probeRenderReadyCoverage();
     const visibleGround = this.probeVisibleGroundCoverage();
+    const shouldProbeSeams = target.frame % seamProbeStrideFrames === 0;
+    const surfaceContinuity = shouldProbeSeams
+      ? this.probeSurfaceContinuity()
+      : {
+          edgeCount: 0,
+          missingSmoothEdgeCount: 0,
+          abruptEdgeCount: 0,
+          maxExpectedStepMeters: 0,
+        };
     let screenVoid: BottomCenterVoidProbe | null = null;
     let capturedFrame: CapturedBenchmarkFrame | null = null;
     let captureDiagnosticsMs = 0;
     const shouldCaptureVoid = target.frame % captureStrideFrames === 0 || visibleGround.uncoveredCount > 0;
-    const seamCoverage = target.frame % seamProbeStrideFrames === 0
+    const seamCoverage = shouldProbeSeams
       ? summarizeRouteSeamCoverage(this.probeLodCoverage(48, 1.6))
       : {
           seamGapCount: 0,
@@ -2824,6 +2977,10 @@ export class GameController {
         visibleGroundSampleCount: visibleGround.sampleCount,
         visibleGroundUncoveredCount: visibleGround.uncoveredCount,
         visibleGroundResidentNotReadyCount: visibleGround.residentNotReadyCount,
+        surfaceContinuityEdgeCount: surfaceContinuity.edgeCount,
+        surfaceContinuityGapCount: surfaceContinuity.missingSmoothEdgeCount,
+        abruptSurfaceEdgeCount: surfaceContinuity.abruptEdgeCount,
+        maxSurfaceContinuityStepMeters: surfaceContinuity.maxExpectedStepMeters,
         seamGapCount: seamCoverage.seamGapCount,
         uncoveredLodGapCount: seamCoverage.uncoveredGapCount,
         handoffLodHoleCount: seamCoverage.handoffHoleCount,
@@ -3479,6 +3636,8 @@ function summarizeRouteExperienceBenchmark(
   const residentNotReadySamples = samples.map((sample) => sample.residentNotReadyNearSamples);
   const visibleGroundUncoveredSamples = samples.map((sample) => sample.visibleGroundUncoveredCount);
   const visibleGroundResidentNotReadySamples = samples.map((sample) => sample.visibleGroundResidentNotReadyCount);
+  const surfaceContinuityGapSamples = samples.map((sample) => sample.surfaceContinuityGapCount);
+  const surfaceContinuityStepSamples = samples.map((sample) => sample.maxSurfaceContinuityStepMeters);
   const diagnosticsSamples = samples.map((sample) => sample.diagnosticsMs);
   const captureDiagnosticsSamples = samples.map((sample) => sample.captureDiagnosticsMs);
   const settledReferenceChangedSamples = samples.map((sample) => sample.settledReferenceChangedRatio ?? 0);
@@ -3543,10 +3702,13 @@ function summarizeRouteExperienceBenchmark(
     maxVisibleGroundUncoveredCount: maxValue(visibleGroundUncoveredSamples),
     avgVisibleGroundResidentNotReadyCount: average(visibleGroundResidentNotReadySamples),
     maxVisibleGroundResidentNotReadyCount: maxValue(visibleGroundResidentNotReadySamples),
+    maxSurfaceContinuityGapCount: maxValue(surfaceContinuityGapSamples),
     framesWithVisibleGroundGaps: samples.filter((sample) => sample.visibleGroundUncoveredCount > 0).length,
+    framesWithSurfaceContinuityGaps: samples.filter((sample) => sample.surfaceContinuityGapCount > 0).length,
     framesWithSeamGaps: samples.filter((sample) => sample.seamGapCount > 0).length,
     framesWithLodOverlaps: samples.filter((sample) => sample.lodOverlapCount > 0).length,
     maxSeamGapMeters: maxValue(samples.map((sample) => sample.maxSeamGapMeters)),
+    maxSurfaceContinuityStepMeters: maxValue(surfaceContinuityStepSamples),
     maxLodOverlapMeters: maxValue(samples.map((sample) => sample.maxLodOverlapMeters)),
     screenVoidCaptureCount: samples.filter((sample) => sample.screenVoidRatio !== null).length,
     framesWithScreenVoidSignals: samples.filter((sample) => sample.screenVoidSuspicious).length,
@@ -3634,6 +3796,16 @@ function clampPositiveInt(value: number, fallback: number): number {
 function pushVisibleGroundIssueSample(
   target: VisibleGroundCoverageIssueSample[],
   sample: VisibleGroundCoverageIssueSample,
+): void {
+  if (target.length >= 8) {
+    return;
+  }
+  target.push(sample);
+}
+
+function pushSurfaceContinuityIssueSample(
+  target: SurfaceContinuityIssueSample[],
+  sample: SurfaceContinuityIssueSample,
 ): void {
   if (target.length >= 8) {
     return;
