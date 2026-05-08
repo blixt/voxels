@@ -28,6 +28,7 @@
     "cycle:bench": "bun run scripts/run-cycle-bench.ts",
     "trace:route": "bun run scripts/run-browser-route-trace.ts",
     "bench:browser-game": "bun run scripts/run-browser-game-benchmarks.ts",
+    "bench:lod-persistence": "bun run scripts/run-browser-game-benchmarks.ts --startup-warmup=0 --startup-iterations=0 --walk-warmup=0 --walk-iterations=0 --lod-persistence-iterations=1",
     "lab:browser": "bun run scripts/owned-browser-lab.ts"
   },
   "devDependencies": {

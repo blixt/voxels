@@ -68,6 +68,10 @@ declare global {
       benchmarkLiveForwardWalkExperience(
         options?: Parameters<GameController["benchmarkLiveForwardWalkExperience"]>[0],
       ): ReturnType<GameController["benchmarkLiveForwardWalkExperience"]>;
+      pumpWorldForBenchmark(
+        position?: Parameters<GameController["pumpWorldForBenchmark"]>[0],
+        options?: Parameters<GameController["pumpWorldForBenchmark"]>[1],
+      ): ReturnType<GameController["pumpWorldForBenchmark"]>;
       getBootstrapBenchmark(): ReturnType<GameController["getBootstrapBenchmark"]>;
       probeLodCoverage(
         sampleRadiusMeters?: number,
@@ -261,6 +265,7 @@ function mountGame(): GameRuntime {
     benchmarkRouteExperience: (options) => controller.benchmarkRouteExperience(options),
     benchmarkForwardWalkExperience: (options) => controller.benchmarkForwardWalkExperience(options),
     benchmarkLiveForwardWalkExperience: (options) => controller.benchmarkLiveForwardWalkExperience(options),
+    pumpWorldForBenchmark: (position, options) => controller.pumpWorldForBenchmark(position, options),
     getBootstrapBenchmark: () => controller.getBootstrapBenchmark(),
     probeLodCoverage: (sampleRadiusMeters, sampleStepMeters) =>
       controller.probeLodCoverage(sampleRadiusMeters, sampleStepMeters),

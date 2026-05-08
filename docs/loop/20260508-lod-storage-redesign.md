@@ -134,3 +134,33 @@ Next high-ROI work:
 - Storage architecture: `2.4 -> 2.8`
 
 The main remaining weakness is that retained derived LOD cache is still memory-only. Disk persistence is now a smaller, well-bounded follow-up instead of a cross-cutting rewrite.
+
+### Follow-up Checkpoint - Browser-Proven Derived LOD Persistence
+
+Added a real browser verifier for derived LOD persistence across reloads:
+
+- `bench:lod-persistence` launches the production browser harness with startup/walk scenarios disabled.
+- The scenario clears browser storage, builds and stores safe active derived LOD chunks, reloads the page without clearing IndexedDB, and verifies that the reloaded page adopts derived LOD chunks from the `lod_chunks` store.
+- The verifier now samples cumulative LOD disk counters from `GameHudSnapshot`, so cache activity that happens during page startup is not lost before the sampled phase begins.
+- `GameController.pumpWorldForBenchmark` gives harnesses a bounded way to advance streaming, meshing, rendering, and LOD work without using the unbounded force-settle path.
+
+Engine changes made while building the verifier:
+
+- Safe active derived LOD chunks now enqueue async disk stores immediately after they are built, instead of waiting for later eviction. This avoids a deadlock where pending replacement LOD work prevents eviction, and therefore prevents persistence from ever starting.
+- Derived LOD disk-cache probes get reserved async queue headroom, so a saturated chunk-generation queue does not force immediate rebuilds before IndexedDB can be checked.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/game-route-benchmark.test.ts tests/async-chunk-generation.test.ts`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/async-chunk-generation.test.ts tests/derived-lod-chunk-codec.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-idb-default`
+
+Browser verifier artifact:
+
+- `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-3d6ZPC/lod-idb-persistence-reload.json`
+- Result: pass, with `32` reload disk hits and `32` cumulative reload disk hits.
+
+Important follow-up found by the broader stress variant:
+
+- `--lod-persistence-chunk-delta=32` is now a useful transition stress mode, but it still exposes LOD overlap samples while a large far-window replacement is pending. That is a rendering correctness issue to attack separately from persistence.

@@ -84,6 +84,7 @@ interface WorkerSlot {
 }
 
 const DEFAULT_MAX_PENDING_JOBS = 128;
+const DEFAULT_MAX_PENDING_LOD_CACHE_PROBES = 64;
 const DEFAULT_MAX_WORKERS = 2;
 const DEFAULT_RESERVED_THREADS = 2;
 const PROCEDURAL_WORKER_ASSET_URL = "/assets/procedural-generation-worker.js";
@@ -383,7 +384,7 @@ export function createAsyncProceduralChunkGeneration(
 
   function requestLodChunk(key: AsyncDerivedLodChunkCacheKey): boolean {
     const requestKey = toAsyncLodChunkKey(key);
-    if (pendingKeys.has(requestKey) || pendingKeys.size >= maxPendingJobs) {
+    if (pendingKeys.has(requestKey) || pendingKeys.size >= maxPendingJobs + DEFAULT_MAX_PENDING_LOD_CACHE_PROBES) {
       return false;
     }
     const workerIndex = chooseWorkerIndex();

@@ -1078,6 +1078,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           this.lodChunks.set(key, chunk);
           this.staleLodKeys.delete(key);
         }
+        if (!data.skippedFinerCoverage) {
+          this.enqueueLodDiskStore(key);
+        }
         const neighborRemeshStartedAt = performance.now();
         this.remeshAdjacentLodChunks(ring.level, cx, cy, cz);
         meshMs += performance.now() - neighborRemeshStartedAt;
@@ -1435,8 +1438,14 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     while (scheduled < MAX_LOD_CACHE_STORES_PER_UPDATE && this.lodDiskStoreQueue.length > 0) {
       const key = this.lodDiskStoreQueue.shift()!;
       this.queuedLodDiskStoreKeys.delete(key);
-      const chunk = this.retainedLodChunks.get(key);
-      if (!chunk || chunk.solidCount === 0 || chunk.lodLevel <= 0 || this.coveragePunchedLodKeys.has(key)) {
+      const chunk = this.retainedLodChunks.get(key) ?? this.lodChunks.get(key) ?? this.preparedLodChunks.get(key);
+      if (
+        !chunk
+        || chunk.solidCount === 0
+        || chunk.lodLevel <= 0
+        || this.coveragePunchedLodKeys.has(key)
+        || this.staleLodKeys.has(key)
+      ) {
         continue;
       }
       const encoded = encodeDerivedLodChunk({

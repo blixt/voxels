@@ -366,6 +366,29 @@ test("LOD residency adopts completed derived LOD disk-cache hits before rebuildi
   expect(lod.generated).toBe(0);
 });
 
+test("LOD residency queues active derived chunks for persistence before eviction", () => {
+  const storedKeys: AsyncDerivedLodChunkCacheKey[] = [];
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    asyncChunkGeneration: createFakeAsyncQueue({
+      requestLodChunk: () => false,
+      storeLodChunk: (chunk) => {
+        storedKeys.push({ ...chunk.key, coord: { ...chunk.key.coord } });
+        return true;
+      },
+    }),
+    horizontalRadiusChunks: 1,
+  });
+
+  const lod = world.updateLodResidencyAround(world.getSpawnPosition(), {
+    maxGenerateLodChunks: 8,
+  });
+
+  expect(lod.generated).toBeGreaterThan(0);
+  expect(lod.scheduledLodDiskStores).toBeGreaterThan(0);
+  expect(storedKeys.length).toBe(lod.scheduledLodDiskStores);
+  expect(storedKeys.every((key) => key.lodLevel > 0)).toBe(true);
+});
+
 test("resident world tracks dirty chunks without rescanning the full resident set", () => {
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
     horizontalRadiusChunks: 2,

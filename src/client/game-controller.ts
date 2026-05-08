@@ -247,6 +247,12 @@ export interface GameHudSnapshot {
   lodScheduledDiskRequests: number;
   lodScheduledDiskStores: number;
   lodCompletedDiskStores: number;
+  cumulativeLodGeneratedChunks: number;
+  cumulativeLodDiskCacheHits: number;
+  cumulativeLodDiskCacheMisses: number;
+  cumulativeLodScheduledDiskRequests: number;
+  cumulativeLodScheduledDiskStores: number;
+  cumulativeLodCompletedDiskStores: number;
   lodDrawCalls: number;
   lodDrawCallsByLevel: readonly number[];
   frustumCulledChunks: number;
@@ -748,6 +754,38 @@ export interface BootstrapExperienceBenchmark {
   summary: BootstrapBenchmarkSummary;
 }
 
+export interface BenchmarkWorldPumpOptions {
+  maxFrames?: number;
+  maxGenerateLodChunks?: number;
+  maxLodPlanMs?: number;
+  maxLodWorkMs?: number;
+  maxEvictChunks?: number;
+  maxResidencyPlanMs?: number;
+  maxMeshRebuilds?: number;
+  stopWhenSettled?: boolean;
+}
+
+export interface BenchmarkWorldPumpSummary {
+  frameCount: number;
+  settled: boolean;
+  elapsedMs: number;
+  totalGenerated: number;
+  totalMemoryCacheHits: number;
+  totalEmptyCacheHits: number;
+  totalDiskCacheHits: number;
+  totalDiskCacheMisses: number;
+  totalScheduledDiskRequests: number;
+  totalScheduledDiskStores: number;
+  totalCompletedDiskStores: number;
+  totalDownsampleMs: number;
+  totalMeshMs: number;
+  maxLodChunkMs: number;
+  maxWorstRecentFrameMs: number;
+  maxRecentHitchCount: number;
+  maxRecentDroppedFrameEstimate: number;
+  finalSnapshot: GameHudSnapshot;
+}
+
 interface GameControllerOptions {
   eagerBootstrapBenchmark?: boolean;
 }
@@ -829,6 +867,12 @@ export class GameController {
     scheduledLodDiskStores: 0,
     completedLodDiskStores: 0,
   };
+  private cumulativeLodGeneratedChunks = 0;
+  private cumulativeLodDiskCacheHits = 0;
+  private cumulativeLodDiskCacheMisses = 0;
+  private cumulativeLodScheduledDiskRequests = 0;
+  private cumulativeLodScheduledDiskStores = 0;
+  private cumulativeLodCompletedDiskStores = 0;
   private lastStreamSummary: ResidencyUpdateSummary = cloneResidencySummary(this.world.lastResidency);
   private streamAnchor: StreamAnchor | null = null;
   private streamingBudgets: StreamingBudgets = {
@@ -1043,6 +1087,12 @@ export class GameController {
       lodScheduledDiskRequests: this.lastLodSummary.scheduledLodDiskRequests,
       lodScheduledDiskStores: this.lastLodSummary.scheduledLodDiskStores,
       lodCompletedDiskStores: this.lastLodSummary.completedLodDiskStores,
+      cumulativeLodGeneratedChunks: this.cumulativeLodGeneratedChunks,
+      cumulativeLodDiskCacheHits: this.cumulativeLodDiskCacheHits,
+      cumulativeLodDiskCacheMisses: this.cumulativeLodDiskCacheMisses,
+      cumulativeLodScheduledDiskRequests: this.cumulativeLodScheduledDiskRequests,
+      cumulativeLodScheduledDiskStores: this.cumulativeLodScheduledDiskStores,
+      cumulativeLodCompletedDiskStores: this.cumulativeLodCompletedDiskStores,
       lodDrawCalls: this.lastRenderStats.lodDrawCalls,
       lodDrawCallsByLevel: [...this.lastRenderStats.lodDrawCallsByLevel],
       frustumCulledChunks: this.lastRenderStats.frustumCulledChunks,
@@ -2447,6 +2497,106 @@ export class GameController {
     };
   }
 
+  async pumpWorldForBenchmark(
+    position?: Vec3,
+    options: BenchmarkWorldPumpOptions = {},
+  ): Promise<BenchmarkWorldPumpSummary> {
+    const maxFrames = Math.max(1, Math.floor(options.maxFrames ?? 120));
+    const stopWhenSettled = options.stopWhenSettled ?? true;
+    const lodBudget = {
+      maxGenerateLodChunks: Math.max(0, Math.floor(options.maxGenerateLodChunks ?? DEFAULT_MAX_LOD_CHUNKS_PER_FRAME)),
+      maxPlanMs: Math.max(0.1, options.maxLodPlanMs ?? DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME),
+      maxWorkMs: Math.max(0.1, options.maxLodWorkMs ?? DEFAULT_MAX_LOD_WORK_MS_PER_FRAME),
+    };
+    const residencyBudget = {
+      maxEvictChunks: Math.max(1, Math.floor(options.maxEvictChunks ?? MOVING_MAX_EVICT_CHUNKS_PER_FRAME)),
+      maxPlanMs: Math.max(0.1, options.maxResidencyPlanMs ?? MOVING_MAX_RESIDENCY_PLAN_MS_PER_FRAME),
+    };
+    const meshBudget = Math.max(0, Math.floor(options.maxMeshRebuilds ?? DEFAULT_MAX_MESH_REBUILDS_PER_FRAME));
+
+    if (position) {
+      teleportPlayerToEyePosition(this.player, position);
+      this.player.grounded = true;
+      this.syncCameraToPlayer();
+    }
+
+    const startedAt = performance.now();
+    let frameCount = 0;
+    let totalGenerated = 0;
+    let totalMemoryCacheHits = 0;
+    let totalEmptyCacheHits = 0;
+    let totalDiskCacheHits = 0;
+    let totalDiskCacheMisses = 0;
+    let totalScheduledDiskRequests = 0;
+    let totalScheduledDiskStores = 0;
+    let totalCompletedDiskStores = 0;
+    let totalDownsampleMs = 0;
+    let totalMeshMs = 0;
+    let maxLodChunkMs = 0;
+    let maxWorstRecentFrameMs = 0;
+    let maxRecentHitchCount = 0;
+    let maxRecentDroppedFrameEstimate = 0;
+    let settled = false;
+    let finalSnapshot = this.getDebugSnapshot();
+
+    for (; frameCount < maxFrames; frameCount += 1) {
+      await nextAnimationFrame();
+      const residency = this.syncWorldAroundPlayer(false, true, lodBudget, residencyBudget, meshBudget);
+      await this.renderProbeFrame();
+      finalSnapshot = this.getDebugSnapshot();
+      totalGenerated += this.lastLodSummary.generated;
+      totalMemoryCacheHits += this.lastLodSummary.cacheHits;
+      totalEmptyCacheHits += this.lastLodSummary.emptyCacheHits;
+      totalDiskCacheHits += this.lastLodSummary.lodDiskCacheHits;
+      totalDiskCacheMisses += this.lastLodSummary.lodDiskCacheMisses;
+      totalScheduledDiskRequests += this.lastLodSummary.scheduledLodDiskRequests;
+      totalScheduledDiskStores += this.lastLodSummary.scheduledLodDiskStores;
+      totalCompletedDiskStores += this.lastLodSummary.completedLodDiskStores;
+      totalDownsampleMs += this.lastLodSummary.downsampleMs;
+      totalMeshMs += this.lastLodSummary.meshMs;
+      maxLodChunkMs = Math.max(maxLodChunkMs, this.lastLodSummary.maxChunkMs);
+      maxWorstRecentFrameMs = Math.max(maxWorstRecentFrameMs, finalSnapshot.frameTiming.worstRecentFrameMs);
+      maxRecentHitchCount = Math.max(maxRecentHitchCount, finalSnapshot.frameTiming.recentHitchCount);
+      maxRecentDroppedFrameEstimate = Math.max(
+        maxRecentDroppedFrameEstimate,
+        finalSnapshot.frameTiming.recentDroppedFrameEstimate,
+      );
+      settled = residency.complete
+        && residency.pendingChunks === 0
+        && this.lastMeshBuildSummary.meshCount === 0
+        && this.lastLodSummary.pending === 0
+        && (this.asyncChunkGeneration?.getPendingCount() ?? 0) === 0
+        && (this.asyncChunkMeshing?.getPendingCount() ?? 0) === 0;
+      if (settled && stopWhenSettled && frameCount >= 2) {
+        frameCount += 1;
+        break;
+      }
+    }
+
+    const summary = {
+      frameCount,
+      settled,
+      elapsedMs: performance.now() - startedAt,
+      totalGenerated,
+      totalMemoryCacheHits,
+      totalEmptyCacheHits,
+      totalDiskCacheHits,
+      totalDiskCacheMisses,
+      totalScheduledDiskRequests,
+      totalScheduledDiskStores,
+      totalCompletedDiskStores,
+      totalDownsampleMs,
+      totalMeshMs,
+      maxLodChunkMs,
+      maxWorstRecentFrameMs,
+      maxRecentHitchCount,
+      maxRecentDroppedFrameEstimate,
+      finalSnapshot,
+    };
+    this.pushHud(true);
+    return summary;
+  }
+
   private loadBootstrapWorld(): void {
     const spawn = this.world.getSpawnPosition();
     this.player = createPlayerState(spawn, { grounded: true });
@@ -2798,11 +2948,11 @@ export class GameController {
     if (!shouldRefreshResidency(false, resolved.changed, this.lastStreamSummary.pendingChunks)) {
       this.flushMeshBuildBudget(meshBudget);
       if (allowLodUpdate) {
-        this.lastLodSummary = this.world.updateLodResidencyAround(this.player.feetPosition, {
+        this.recordLodSummary(this.world.updateLodResidencyAround(this.player.feetPosition, {
           maxGenerateLodChunks: lodBudget?.maxGenerateLodChunks ?? DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
           maxPlanMs: lodBudget?.maxPlanMs ?? DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME,
           maxWorkMs: lodBudget?.maxWorkMs ?? DEFAULT_MAX_LOD_WORK_MS_PER_FRAME,
-        });
+        }));
         this.lastFrameLodMs = this.lastLodSummary.elapsedMs;
       } else {
         this.deferLodWork();
@@ -2847,7 +2997,7 @@ export class GameController {
       settle ? Number.POSITIVE_INFINITY : meshBudget ?? this.streamingBudgets.maxMeshRebuildsPerFrame,
     );
     if (settle || allowLodUpdate) {
-      this.lastLodSummary = this.world.updateLodResidencyAround(this.player.feetPosition, {
+      this.recordLodSummary(this.world.updateLodResidencyAround(this.player.feetPosition, {
         maxGenerateLodChunks: settle
           ? Number.POSITIVE_INFINITY
           : lodBudget?.maxGenerateLodChunks ?? DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
@@ -2857,7 +3007,7 @@ export class GameController {
         maxWorkMs: settle
           ? Number.POSITIVE_INFINITY
           : lodBudget?.maxWorkMs ?? DEFAULT_MAX_LOD_WORK_MS_PER_FRAME,
-      });
+      }));
       this.lastFrameLodMs = this.lastLodSummary.elapsedMs;
     } else {
       this.deferLodWork();
@@ -2886,6 +3036,16 @@ export class GameController {
       maxChunkKey: null,
       neededKeyCacheHit: false,
     };
+  }
+
+  private recordLodSummary(summary: LodResidencyUpdateSummary): void {
+    this.lastLodSummary = summary;
+    this.cumulativeLodGeneratedChunks += summary.generated;
+    this.cumulativeLodDiskCacheHits += summary.lodDiskCacheHits;
+    this.cumulativeLodDiskCacheMisses += summary.lodDiskCacheMisses;
+    this.cumulativeLodScheduledDiskRequests += summary.scheduledLodDiskRequests;
+    this.cumulativeLodScheduledDiskStores += summary.scheduledLodDiskStores;
+    this.cumulativeLodCompletedDiskStores += summary.completedLodDiskStores;
   }
 
   private isPressed(...codes: string[]): boolean {
