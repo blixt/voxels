@@ -67,11 +67,25 @@ Important regression checks:
 
 This is the safe first step, not the final storage system.
 
+### Follow-up Checkpoint - Derived LOD Payloads
+
+Added the binary payload needed for disk-backed derived LOD cache:
+
+- `src/engine/derived-lod-chunk-codec.ts` stores derived LOD chunks as a compact header plus run-length material spans.
+- The payload records coord, LOD level, voxel stride, solid count, solid bounds, and voxel data.
+- Empty derived chunks encode to less than 64 bytes in the focused test.
+- `src/client/procedural-generated-chunk-cache.ts` now has a versioned `lod_chunks` IndexedDB store plus `getLodChunk`/`putLodChunk` methods keyed by edit revision, LOD level, and chunk coord.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/derived-lod-chunk-codec.test.ts tests/generated-chunk-codec.test.ts tests/procedural-deferred-persistence.test.ts`
+
 Next high-ROI work:
 
 1. Promote the existing IndexedDB worker cache into an explicit engine-facing `ChunkStore` contract.
 2. Persist base chunks, summaries, and edit overlays as the only authoritative world data.
-3. Add a derived LOD payload codec and disk cache keyed by generation version, edit revision, LOD level, and chunk coord.
+3. Wire derived LOD cache reads/writes through the worker without blocking `updateLodResidencyAround`.
 4. Add a prefetch planner that asks storage for base summaries and derived LOD chunks ahead of the active LOD window.
 5. Move far-field rendering toward a hierarchy/clipmap model where more LOD levels do not linearly increase CPU rebuild cost.
 

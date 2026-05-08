@@ -13,14 +13,16 @@ import {
   upsertGeneratedRenderSummaryRegion,
 } from "../engine/generated-render-summary-region.ts";
 import type { EncodedGeneratedChunk } from "../engine/generated-chunk-codec.ts";
+import type { EncodedDerivedLodChunk } from "../engine/derived-lod-chunk-codec.ts";
 import { PROCEDURAL_WORLD_GENERATION_VERSION } from "../engine/procedural-generator.ts";
 import type { ChunkCoordinate, RenderSummaryRegionCoordinate } from "../engine/types.ts";
 
 const DATABASE_NAME = "voxels-procedural-generated-chunks";
-const DATABASE_VERSION = 4;
+const DATABASE_VERSION = 5;
 const CHUNK_STORE_NAME = "chunks";
 const SUMMARY_STORE_NAME = "chunk_summaries";
 const REGION_SUMMARY_STORE_NAME = "render_summary_regions";
+const LOD_CHUNK_STORE_NAME = "lod_chunks";
 
 interface StoredGeneratedChunkRecord {
   key: string;
@@ -46,17 +48,37 @@ interface StoredGeneratedRenderSummaryRegionRecord {
   storedAt: number;
 }
 
+interface StoredDerivedLodChunkRecord {
+  key: string;
+  encodedBuffer: ArrayBuffer;
+  encodedByteLength: number;
+  storedAt: number;
+}
+
 export interface ProceduralGeneratedChunkCache {
   getChunk(coord: ChunkCoordinate): Promise<CachedEncodedGeneratedChunk | null>;
   getChunkSummary(coord: ChunkCoordinate): Promise<TransferredGeneratedChunkRenderSummary | null>;
   getRegionSummary(coord: RenderSummaryRegionCoordinate): Promise<TransferredGeneratedRenderSummaryRegion | null>;
+  getLodChunk(key: DerivedLodChunkCacheKey): Promise<CachedEncodedDerivedLodChunk | null>;
   putChunk(
     coord: ChunkCoordinate,
     chunk: EncodedGeneratedChunk,
     summary: TransferredGeneratedChunkRenderSummary,
   ): Promise<void>;
   putChunkSummary(coord: ChunkCoordinate, summary: TransferredGeneratedChunkRenderSummary): Promise<void>;
+  putLodChunk(key: DerivedLodChunkCacheKey, chunk: EncodedDerivedLodChunk): Promise<void>;
   close(): void;
+}
+
+export interface DerivedLodChunkCacheKey {
+  readonly lodLevel: number;
+  readonly coord: ChunkCoordinate;
+  readonly editRevision: number;
+}
+
+export interface CachedEncodedDerivedLodChunk {
+  readonly buffer: ArrayBuffer;
+  readonly byteLength: number;
 }
 
 export async function openProceduralGeneratedChunkCache(context: {
@@ -110,6 +132,21 @@ export async function openProceduralGeneratedChunkCache(context: {
       );
       return record?.summary ?? null;
     },
+    async getLodChunk(key) {
+      const record = await requestToPromise<StoredDerivedLodChunkRecord | undefined>(
+        database
+          .transaction(LOD_CHUNK_STORE_NAME, "readonly")
+          .objectStore(LOD_CHUNK_STORE_NAME)
+          .get(toLodChunkKey(keyPrefix, key)),
+      );
+      if (!record) {
+        return null;
+      }
+      return {
+        buffer: record.encodedBuffer,
+        byteLength: record.encodedByteLength,
+      };
+    },
     async putChunk(coord, chunk, summary) {
       const transaction = database.transaction([CHUNK_STORE_NAME, SUMMARY_STORE_NAME, REGION_SUMMARY_STORE_NAME], "readwrite");
       const key = toChunkKey(keyPrefix, coord);
@@ -140,6 +177,18 @@ export async function openProceduralGeneratedChunkCache(context: {
       await putMergedRegionSummary(transaction.objectStore(REGION_SUMMARY_STORE_NAME), keyPrefix, summary, storedAt);
       await transactionToPromise(transaction);
     },
+    async putLodChunk(key, chunk) {
+      const storedAt = Date.now();
+      const lodKey = toLodChunkKey(keyPrefix, key);
+      const transaction = database.transaction(LOD_CHUNK_STORE_NAME, "readwrite");
+      transaction.objectStore(LOD_CHUNK_STORE_NAME).put({
+        key: lodKey,
+        encodedBuffer: chunk.buffer.slice(0),
+        encodedByteLength: chunk.stats.byteLength,
+        storedAt,
+      } satisfies StoredDerivedLodChunkRecord);
+      await transactionToPromise(transaction);
+    },
     close() {
       database.close();
     },
@@ -163,6 +212,9 @@ function openDatabase(): Promise<IDBDatabase> {
       }
       if (!database.objectStoreNames.contains(REGION_SUMMARY_STORE_NAME)) {
         database.createObjectStore(REGION_SUMMARY_STORE_NAME, { keyPath: "key" });
+      }
+      if (!database.objectStoreNames.contains(LOD_CHUNK_STORE_NAME)) {
+        database.createObjectStore(LOD_CHUNK_STORE_NAME, { keyPath: "key" });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -190,6 +242,10 @@ function toChunkKey(prefix: string, coord: ChunkCoordinate): string {
 
 function toRegionKey(prefix: string, coord: RenderSummaryRegionCoordinate): string {
   return `${prefix}:${coord.x}:${coord.z}`;
+}
+
+function toLodChunkKey(prefix: string, key: DerivedLodChunkCacheKey): string {
+  return `${prefix}:lod:${key.editRevision}:${key.lodLevel}:${key.coord.x}:${key.coord.y}:${key.coord.z}`;
 }
 
 function cloneTransferredSummary(summary: TransferredGeneratedChunkRenderSummary): TransferredGeneratedChunkRenderSummary {
