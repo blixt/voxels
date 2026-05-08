@@ -226,6 +226,12 @@ export interface GameHudSnapshot {
   maxMeshRebuildsPerFrame: number;
   lodChunkCount: number;
   lodPendingChunks: number;
+  lodPendingPlanning: number;
+  lodPendingDiskCache: number;
+  lodPendingGenerationBudget: number;
+  lodPendingPartialBuild: number;
+  lodPendingPrepared: number;
+  lodPendingInvalidatedEviction: number;
   lodGeneratedChunks: number;
   lodCacheHits: number;
   lodEmptyCacheHits: number;
@@ -847,6 +853,12 @@ export class GameController {
     cacheHits: 0,
     emptyCacheHits: 0,
     pending: 0,
+    pendingPlanning: 0,
+    pendingDiskCache: 0,
+    pendingGenerationBudget: 0,
+    pendingPartialBuild: 0,
+    pendingPrepared: 0,
+    pendingInvalidatedEviction: 0,
     totalChunks: 0,
     cachedChunks: 0,
     cachedEmptyKeys: 0,
@@ -1066,6 +1078,12 @@ export class GameController {
       maxMeshRebuildsPerFrame: this.streamingBudgets.maxMeshRebuildsPerFrame,
       lodChunkCount: this.lastLodSummary.totalChunks,
       lodPendingChunks: this.lastLodSummary.pending,
+      lodPendingPlanning: this.lastLodSummary.pendingPlanning,
+      lodPendingDiskCache: this.lastLodSummary.pendingDiskCache,
+      lodPendingGenerationBudget: this.lastLodSummary.pendingGenerationBudget,
+      lodPendingPartialBuild: this.lastLodSummary.pendingPartialBuild,
+      lodPendingPrepared: this.lastLodSummary.pendingPrepared,
+      lodPendingInvalidatedEviction: this.lastLodSummary.pendingInvalidatedEviction,
       lodGeneratedChunks: this.lastLodSummary.generated,
       lodCacheHits: this.lastLodSummary.cacheHits,
       lodEmptyCacheHits: this.lastLodSummary.emptyCacheHits,

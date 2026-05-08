@@ -194,3 +194,32 @@ Next target:
 1. Reduce the large-move LOD backlog by avoiding thousands of doomed missing IndexedDB probes in a cold far window.
 2. Split stress validation so correctness failures (gaps/overlaps) and settle-budget failures are reported separately.
 3. Add per-phase pending-source counters so `lodPendingChunks` can be attributed to disk probes, generation budget, prepared handoff chunks, or planning.
+
+### Follow-up Checkpoint - LOD Pending Attribution
+
+Added pending-source counters to the LOD summary, HUD snapshot, and browser persistence artifact:
+
+- `pendingPlanning`
+- `pendingDiskCache`
+- `pendingGenerationBudget`
+- `pendingPartialBuild`
+- `pendingPrepared`
+- `pendingInvalidatedEviction`
+
+The large far-transition stress now reports why it fails the settle budget instead of only reporting one opaque pending total.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-default-pending-attribution`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-far-pending-attribution --lod-persistence-chunk-delta=32 --lod-persistence-max-frames=260`
+
+Browser verifier artifacts:
+
+- Default persistence: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-OsPjF1/lod-idb-persistence-reload.json`
+  - Result: pass, with `32` reload disk hits and `32` cumulative reload disk hits.
+- Far pending attribution: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-GwgAtM/lod-idb-persistence-reload.json`
+  - Result: still fails settle budget; visible far coverage stayed clean with `0` gaps and `0` overlaps.
+  - Pending breakdown after `260` frames: `923` total pending, `843` generation-budget, `68` prepared handoff, `12` disk-cache, `0` planning, `0` partial-build, `0` invalidated-eviction.
+  - A speculative early-covered-coarser skip reduced pending to `726`, but introduced a one-sample cold-origin coverage gap, so it was backed out. Next optimization needs a stricter coverage invariant before it can ship.

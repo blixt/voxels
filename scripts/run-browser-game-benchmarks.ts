@@ -93,6 +93,12 @@ interface LodPersistencePhaseSummary {
   maxRecentDroppedFrameEstimate: number;
   finalPendingChunks: number;
   finalLodPendingChunks: number;
+  finalLodPendingPlanning: number;
+  finalLodPendingDiskCache: number;
+  finalLodPendingGenerationBudget: number;
+  finalLodPendingPartialBuild: number;
+  finalLodPendingPrepared: number;
+  finalLodPendingInvalidatedEviction: number;
   finalLodChunkCount: number;
   finalLodDrawCalls: number;
   finalLodDrawCallsByLevel: readonly number[];
@@ -806,6 +812,12 @@ function buildLodPersistencePhaseSummary(input: {
     maxRecentDroppedFrameEstimate: input.maxRecentDroppedFrameEstimate,
     finalPendingChunks: input.finalSnapshot.streamPendingChunks,
     finalLodPendingChunks: input.finalSnapshot.lodPendingChunks,
+    finalLodPendingPlanning: input.finalSnapshot.lodPendingPlanning,
+    finalLodPendingDiskCache: input.finalSnapshot.lodPendingDiskCache,
+    finalLodPendingGenerationBudget: input.finalSnapshot.lodPendingGenerationBudget,
+    finalLodPendingPartialBuild: input.finalSnapshot.lodPendingPartialBuild,
+    finalLodPendingPrepared: input.finalSnapshot.lodPendingPrepared,
+    finalLodPendingInvalidatedEviction: input.finalSnapshot.lodPendingInvalidatedEviction,
     finalLodChunkCount: input.finalSnapshot.lodChunkCount,
     finalLodDrawCalls: input.finalSnapshot.lodDrawCalls,
     finalLodDrawCallsByLevel: [...input.finalSnapshot.lodDrawCallsByLevel],
@@ -934,6 +946,9 @@ function aggregateLodPersistenceIterations(
   const reloads = iterations.map((iteration) => iteration.reloadOrigin);
   const cold = iterations.map((iteration) => iteration.coldOrigin);
   const stores = iterations.map((iteration) => iteration.storeFlush);
+  const far = iterations
+    .map((iteration) => iteration.farEviction)
+    .filter((phase) => phase.label !== "far-eviction-skipped");
   const failures = iterations.flatMap((iteration) => iteration.failures);
   return {
     pass: failures.length === 0,
@@ -956,6 +971,13 @@ function aggregateLodPersistenceIterations(
       phase.finalCoverage.uncoveredGapCount + phase.finalCoverage.handoffHoleCount)),
     maxReloadCoverageOverlaps: maxNumber(reloads.map((phase) =>
       phase.finalCoverage.residentOverlapCount + phase.finalCoverage.bandOverlapCount)),
+    maxFarLodPendingChunks: maxNumber(far.map((phase) => phase.finalLodPendingChunks)),
+    maxFarPendingDiskCache: maxNumber(far.map((phase) => phase.finalLodPendingDiskCache)),
+    maxFarPendingGenerationBudget: maxNumber(far.map((phase) => phase.finalLodPendingGenerationBudget)),
+    maxFarPendingPartialBuild: maxNumber(far.map((phase) => phase.finalLodPendingPartialBuild)),
+    maxFarPendingPrepared: maxNumber(far.map((phase) => phase.finalLodPendingPrepared)),
+    maxFarPendingInvalidatedEviction: maxNumber(far.map((phase) => phase.finalLodPendingInvalidatedEviction)),
+    maxFarPendingPlanning: maxNumber(far.map((phase) => phase.finalLodPendingPlanning)),
     firstFailure: failures[0] ?? null,
   };
 }

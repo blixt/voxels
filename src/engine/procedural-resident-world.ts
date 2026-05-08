@@ -112,6 +112,12 @@ export interface LodResidencyUpdateSummary {
   cacheHits: number;
   emptyCacheHits: number;
   pending: number;
+  pendingPlanning: number;
+  pendingDiskCache: number;
+  pendingGenerationBudget: number;
+  pendingPartialBuild: number;
+  pendingPrepared: number;
+  pendingInvalidatedEviction: number;
   totalChunks: number;
   cachedChunks: number;
   cachedEmptyKeys: number;
@@ -894,6 +900,12 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         return {
           generated: 0,
           pending: 1,
+          pendingPlanning: 1,
+          pendingDiskCache: 0,
+          pendingGenerationBudget: 0,
+          pendingPartialBuild: 0,
+          pendingPrepared: 0,
+          pendingInvalidatedEviction: 0,
           totalChunks: this.lodChunks.size,
           cachedChunks: this.retainedLodChunks.size,
           cachedEmptyKeys: this.retainedEmptyLodKeys.size,
@@ -928,6 +940,10 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     let cacheHits = 0;
     let emptyCacheHits = 0;
     let pending = 0;
+    let pendingDiskCache = 0;
+    let pendingGenerationBudget = 0;
+    let pendingPartialBuild = 0;
+    let pendingInvalidatedEviction = 0;
     let downsampleMs = 0;
     let meshMs = 0;
     let commitMs = 0;
@@ -980,6 +996,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
             scheduledLodDiskRequests += 1;
           }
           pending++;
+          pendingDiskCache++;
           continue;
         }
         if (
@@ -988,6 +1005,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           (generated > 0 && performance.now() - startedAt >= maxWorkMs)
         ) {
           pending++;
+          pendingGenerationBudget++;
           workBudgetExhausted = true;
           continue;
         }
@@ -1005,6 +1023,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         if (partialBuildAllowed) {
           if (this.activeLodBuildJob && this.activeLodBuildJob.key !== key) {
             pending++;
+            pendingGenerationBudget++;
             workBudgetExhausted = true;
             continue;
           }
@@ -1020,6 +1039,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
               maxChunkKey = key;
             }
             pending++;
+            pendingPartialBuild++;
             workBudgetExhausted = true;
             continue;
           }
@@ -1153,9 +1173,11 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
     if (invalidatedCoarserDuringEviction) {
       pending += 1;
+      pendingInvalidatedEviction = 1;
     }
     scheduledLodDiskStores += this.flushQueuedLodDiskStores();
-    pending += this.preparedLodChunks.size;
+    const pendingPrepared = this.preparedLodChunks.size;
+    pending += pendingPrepared;
     if (!neededKeyCacheHit) {
       this.lodNeededKeyCache = {
         signature: neededKeySignature,
@@ -1168,6 +1190,12 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       cacheHits,
       emptyCacheHits,
       pending,
+      pendingPlanning: 0,
+      pendingDiskCache,
+      pendingGenerationBudget,
+      pendingPartialBuild,
+      pendingPrepared,
+      pendingInvalidatedEviction,
       totalChunks: this.lodChunks.size,
       cachedChunks: this.retainedLodChunks.size,
       cachedEmptyKeys: this.retainedEmptyLodKeys.size,
