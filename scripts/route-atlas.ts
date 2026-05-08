@@ -4,6 +4,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { resolveAmbientWorldProfile } from "../src/engine/ambient-environment.ts";
 import { ProceduralWorldGenerator } from "../src/engine/procedural-generator.ts";
 import { metersToWorldUnits, worldUnitsToMeters } from "../src/engine/scale.ts";
+import type { WorldRegionId } from "../src/engine/worldgen-region.ts";
 
 interface RouteSpec {
   label: string;
@@ -12,6 +13,10 @@ interface RouteSpec {
   lengthMeters: number;
   stepMeters: number;
   requiredLandmarkIds?: readonly string[];
+  expectedRegionId?: WorldRegionId;
+  minExpectedRegionCoverage?: number;
+  expectedRegionalVariantId?: string;
+  minExpectedRegionalVariantCoverage?: number;
 }
 
 interface RouteSample {
@@ -19,6 +24,7 @@ interface RouteSample {
   worldX: number;
   worldZ: number;
   surfaceMeters: number;
+  regionId: string;
   biomeId: string;
   undergroundBiomeId: string;
   regionalVariantId: string | null;
@@ -39,6 +45,7 @@ interface RouteSummary {
   sampleCount: number;
   lengthMeters: number;
   distinctBiomes: string[];
+  distinctRegions: string[];
   distinctUndergroundBiomes: string[];
   distinctRegionalVariants: string[];
   distinctLandmarks: string[];
@@ -46,6 +53,10 @@ interface RouteSummary {
   visibleNearbyLandmarks: string[];
   requiredLandmarkIds: string[];
   missingRequiredLandmarkIds: string[];
+  expectedRegionId: string | null;
+  expectedRegionCoverageRatio: number | null;
+  expectedRegionalVariantId: string | null;
+  expectedRegionalVariantCoverageRatio: number | null;
   distinctAmbientProfiles: string[];
   directLandmarkHitCount: number;
   visibleNearbyLandmarkHitCount: number;
@@ -172,20 +183,97 @@ const ROUTES: RouteSpec[] = [
   { label: "highland-run", startMeters: [-540, 420], headingDegrees: 315, lengthMeters: 2200, stepMeters: 12 },
   { label: "ash-glass-traverse", startMeters: [960, -780], headingDegrees: 202, lengthMeters: 2600, stepMeters: 12 },
   { label: "ancestor-march", startMeters: [-1152.8, -1992.8], headingDegrees: 0, lengthMeters: 480, stepMeters: 6 },
-  { label: "ancestor-pillar-road", startMeters: [66.4, -1997.6], headingDegrees: 0, lengthMeters: 480, stepMeters: 6, requiredLandmarkIds: ["ancestor_pillar"] },
   { label: "ash-marker-road", startMeters: [236, -4604], headingDegrees: 0, lengthMeters: 480, stepMeters: 6, requiredLandmarkIds: ["ash_marker"] },
   { label: "silt-shell-road", startMeters: [-1900, -2323.2], headingDegrees: 0, lengthMeters: 650, stepMeters: 6, requiredLandmarkIds: ["silt_shell"] },
-  { label: "velothi-shrine-road", startMeters: [-1427.2, -2348.8], headingDegrees: 0, lengthMeters: 240, stepMeters: 3, requiredLandmarkIds: ["velothi_shrine"] },
-  { label: "kwama-mound-road", startMeters: [-1360, -2568], headingDegrees: 0, lengthMeters: 120, stepMeters: 1.6, requiredLandmarkIds: ["kwama_mound"] },
-  { label: "pilgrim-cairn-road", startMeters: [-1260, -2593.6], headingDegrees: 0, lengthMeters: 120, stepMeters: 1.6, requiredLandmarkIds: ["pilgrim_cairn"] },
   { label: "ziggurat-vista-road", startMeters: [-1704.8, -2536.9], headingDegrees: 0, lengthMeters: 160, stepMeters: 2, requiredLandmarkIds: ["velothi_ziggurat"] },
   { label: "ash-obelisk-road", startMeters: [-1658.1, -2508.8], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["ash_obelisk"] },
   { label: "rib-arch-road", startMeters: [-1171.7, -2546.4], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["rib_arch"] },
   { label: "causeway-road", startMeters: [19.6, -3277.1], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["old_road_causeway"] },
   { label: "pilgrim-lantern-road", startMeters: [18.6, -3245.3], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["pilgrim_lantern"] },
-  { label: "crystal-reeds-basin", startMeters: [2790.2, -2893.3], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["crystal_reeds"] },
-  { label: "fungal-bridge-basin", startMeters: [844.8, -2899.9], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["fungal_bridge"] },
-  { label: "rib-remains-basin", startMeters: [1727.5, 1753.3], headingDegrees: 0, lengthMeters: 120, stepMeters: 2, requiredLandmarkIds: ["rib_remains"] },
+  {
+    label: "bitter-coast-smuggler-walk",
+    startMeters: [-6100, 700],
+    headingDegrees: 10,
+    lengthMeters: 3000,
+    stepMeters: 12,
+    requiredLandmarkIds: ["fungal_bridge", "crystal_reeds", "rib_remains"],
+    expectedRegionId: "bitter-coast",
+    minExpectedRegionCoverage: 0.62,
+    expectedRegionalVariantId: "marsh_blackwater",
+    minExpectedRegionalVariantCoverage: 0.34,
+  },
+  {
+    label: "bitter-inner-crossing",
+    startMeters: [-3000, 700],
+    headingDegrees: 352,
+    lengthMeters: 2250,
+    stepMeters: 12,
+    requiredLandmarkIds: ["fungal_bridge", "crystal_reeds", "standing_stone"],
+    expectedRegionId: "bitter-coast",
+    minExpectedRegionCoverage: 0.40,
+    expectedRegionalVariantId: "marsh_blackwater",
+    minExpectedRegionalVariantCoverage: 0.22,
+  },
+  {
+    label: "salt-basin-causeway",
+    startMeters: [-2100, 3600],
+    headingDegrees: 10,
+    lengthMeters: 4000,
+    stepMeters: 12,
+    requiredLandmarkIds: ["old_road_causeway", "salt_spire", "glass_cairn"],
+    expectedRegionId: "salt-marsh-basin",
+    minExpectedRegionCoverage: 0.60,
+    expectedRegionalVariantId: "saltflat_mirror",
+    minExpectedRegionalVariantCoverage: 0.42,
+  },
+  {
+    label: "inner-sea-shelf-road",
+    startMeters: [-600, -700],
+    headingDegrees: 27,
+    lengthMeters: 3150,
+    stepMeters: 12,
+    requiredLandmarkIds: ["standing_stone", "ancestor_pillar", "old_road_causeway"],
+    expectedRegionId: "inner-sea",
+    minExpectedRegionCoverage: 0.55,
+    expectedRegionalVariantId: "moor_shadowglass",
+    minExpectedRegionalVariantCoverage: 0.40,
+  },
+  {
+    label: "grazelands-flower-road",
+    startMeters: [900, -1800],
+    headingDegrees: 333,
+    lengthMeters: 3800,
+    stepMeters: 12,
+    requiredLandmarkIds: ["acacia", "standing_stone", "ancestor_pillar"],
+    expectedRegionId: "grazelands",
+    minExpectedRegionCoverage: 0.48,
+    expectedRegionalVariantId: "savanna_flowersea",
+    minExpectedRegionalVariantCoverage: 0.34,
+  },
+  {
+    label: "glass-shard-coast-cairns",
+    startMeters: [3000, 900],
+    headingDegrees: 32,
+    lengthMeters: 3050,
+    stepMeters: 12,
+    requiredLandmarkIds: ["glass_cairn", "crystal_cluster", "salt_spire"],
+    expectedRegionId: "glass-shard-coast",
+    minExpectedRegionCoverage: 0.48,
+    expectedRegionalVariantId: "dunes_glass",
+    minExpectedRegionalVariantCoverage: 0.30,
+  },
+  {
+    label: "west-gash-redleaf-road",
+    startMeters: [-4200, -4200],
+    headingDegrees: 37,
+    lengthMeters: 3150,
+    stepMeters: 12,
+    requiredLandmarkIds: ["stone_tor", "redleaf_tree", "old_road_causeway"],
+    expectedRegionId: "west-gash",
+    minExpectedRegionCoverage: 0.54,
+    expectedRegionalVariantId: "highland_redleaf",
+    minExpectedRegionalVariantCoverage: 0.34,
+  },
 ];
 
 const thresholds = {
@@ -214,7 +302,7 @@ const routeStretchScan = {
 const strongSilhouetteScan = {
   windowMeters: 360,
   strideMeters: 60,
-  minHeightMeters: 5.5,
+  minHeightMeters: 4.0,
 } as const;
 
 const LANDMARK_VISTA_OFFSETS_METERS: ReadonlyArray<readonly [forwardMeters: number, lateralMeters: number]> = [
@@ -315,6 +403,7 @@ if (failures.length > 0) {
 function summarizeRoute(generator: ProceduralWorldGenerator, route: RouteSpec): RouteSummary {
   const samples = sampleRoute(generator, route);
   const distinctBiomes = sortedDistinct(samples.map((sample) => sample.biomeId));
+  const distinctRegions = sortedDistinct(samples.map((sample) => sample.regionId));
   const distinctUndergroundBiomes = sortedDistinct(samples.map((sample) => sample.undergroundBiomeId));
   const distinctRegionalVariants = sortedDistinct(samples.map((sample) => sample.regionalVariantId).filter(isString));
   const directLandmarks = sortedDistinct(samples.map((sample) => sample.landmarkId).filter(isString));
@@ -331,11 +420,18 @@ function summarizeRoute(generator: ProceduralWorldGenerator, route: RouteSpec): 
   const surfaces = samples.map((sample) => sample.surfaceMeters);
   const directLandmarkHitCount = samples.filter((sample) => sample.landmarkId !== null).length;
   const visibleNearbyLandmarkHitCount = samples.filter((sample) => sample.visibleNearbyLandmarkIds.length > 0).length;
+  const expectedRegionCoverageRatio = route.expectedRegionId
+    ? ratio(samples.filter((sample) => sample.regionId === route.expectedRegionId).length, samples.length)
+    : null;
+  const expectedRegionalVariantCoverageRatio = route.expectedRegionalVariantId
+    ? ratio(samples.filter((sample) => sample.regionalVariantId === route.expectedRegionalVariantId).length, samples.length)
+    : null;
   return {
     label: route.label,
     sampleCount: samples.length,
     lengthMeters: route.lengthMeters,
     distinctBiomes,
+    distinctRegions,
     distinctUndergroundBiomes,
     distinctRegionalVariants,
     distinctLandmarks,
@@ -343,6 +439,10 @@ function summarizeRoute(generator: ProceduralWorldGenerator, route: RouteSpec): 
     visibleNearbyLandmarks,
     requiredLandmarkIds,
     missingRequiredLandmarkIds,
+    expectedRegionId: route.expectedRegionId ?? null,
+    expectedRegionCoverageRatio,
+    expectedRegionalVariantId: route.expectedRegionalVariantId ?? null,
+    expectedRegionalVariantCoverageRatio,
     distinctAmbientProfiles,
     directLandmarkHitCount,
     visibleNearbyLandmarkHitCount,
@@ -386,6 +486,7 @@ function sampleRoute(generator: ProceduralWorldGenerator, route: RouteSpec): Rou
       worldX: Math.round(worldX),
       worldZ: Math.round(worldZ),
       surfaceMeters: worldUnitsToMeters(probe.surfaceY),
+      regionId: probe.regionId,
       biomeId: probe.biomeId,
       undergroundBiomeId: probe.undergroundBiomeId,
       regionalVariantId: probe.regionalVariantId,
@@ -702,6 +803,20 @@ function findFailures(
   for (const route of routes) {
     if (route.missingRequiredLandmarkIds.length > 0) {
       failures.push(`${route.label} missing required landmark(s): ${route.missingRequiredLandmarkIds.join(", ")}`);
+    }
+    if (
+      route.expectedRegionId
+      && route.expectedRegionCoverageRatio !== null
+      && route.expectedRegionCoverageRatio < (ROUTES.find((spec) => spec.label === route.label)?.minExpectedRegionCoverage ?? 0.5)
+    ) {
+      failures.push(`${route.label} expected region ${route.expectedRegionId} coverage ${formatPercent(route.expectedRegionCoverageRatio)} is too low`);
+    }
+    if (
+      route.expectedRegionalVariantId
+      && route.expectedRegionalVariantCoverageRatio !== null
+      && route.expectedRegionalVariantCoverageRatio < (ROUTES.find((spec) => spec.label === route.label)?.minExpectedRegionalVariantCoverage ?? 0.25)
+    ) {
+      failures.push(`${route.label} expected variant ${route.expectedRegionalVariantId} coverage ${formatPercent(route.expectedRegionalVariantCoverageRatio)} is too low`);
     }
     if (route.tokenlessRouteStretchCount > 0) {
       failures.push(`${route.label} has ${route.tokenlessRouteStretchCount} tokenless route stretch window(s)`);

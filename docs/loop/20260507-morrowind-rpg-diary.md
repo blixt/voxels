@@ -2284,3 +2284,40 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - checkpoint and push this source-of-truth slice
   - then resume biome/world design on top of the consolidated generator instead of patching multiple disconnected places
+
+### 2026-05-08 - Regional Route Bands and Atlas Rebaseline
+
+- Trigger:
+  - With rendering and world classification stable, the next high-ROI world-definition slice was authored traversal rather than more palette work.
+  - The macro island exposed a harness problem: the route atlas still had stale micro-routes from the pre-island coordinate layout and was failing required-landmark checks.
+- Changes:
+  - Added regional pilgrim route bands through Bitter Coast, Salt Basin, Inner Sea, Grazelands, Glass-Shard Coast, and West Gash.
+  - Added region-specific route landmark rosters using existing assets first:
+    - wetland: fungal bridges, crystal reeds, rib remains, cypress/willow, glowcaps
+    - salt basin: salt spires, glass cairns, crystals, causeway debris, lanterns
+    - glass coast: glass cairns, crystal clusters, salt spires, shrines/cairns
+    - grazelands: acacia, standing stones, ancestor pillars, flower patches
+    - west gash: redleaf trees, stone tors, old-road pieces, lanterns
+  - Route set pieces now choose province-appropriate anchors instead of relying only on the old ash/wetland generic sequence.
+  - Replaced stale atlas one-off landmark routes with named regional travel routes and added per-route region/variant coverage checks.
+  - Recalibrated the atlas "strong silhouette" gate from `5.5 m` to `4.0 m`; for route readability this still requires above-player-height landmarks, but it no longer ignores lanterns, redleaf trees, reeds, and cairns that are visually meaningful at regional route cadence.
+  - Added a focused generator regression test proving regional route centerlines, off-route falloff, macro region coverage, regional variant coverage, and themed landmark cadence.
+- Validation:
+  - Route atlas: `mise exec -- bun run atlas:routes -- --label=regional-route-bands-final`, pass, artifact `artifacts/route-atlas/20260508T123423Z-regional-route-bands-final/report.json`.
+  - Atlas result: `15` biomes, `5` ambient profiles, `9` regional variants, `2115` credited landmark samples, max notable gap `156.0 m`, route stretch coverage `100%`, route-readable silhouette coverage `97.5%`, failures none.
+  - Full procedural generator suite: `mise exec -- bun test tests/procedural-generator.test.ts`, pass, `44` tests.
+  - Build: `mise exec -- bun run build`, pass.
+  - Typecheck: `mise exec -- bun run typecheck`, pass.
+  - Diff hygiene: `git diff --check`, pass.
+- Honest assessment:
+  - This is the first visible-world pass after the renderer/source-of-truth checkpoint that should materially change traversal composition across the island.
+  - The atlas now measures macro region coverage, not just aggregate biome variety, so it is harder to overclaim random landmark scatter as authored route design.
+  - `tests/object-lab.test.ts` currently fails on stale representative-root assumptions from the macro-region migration (`oak`, `dead_snag`, `ash_marker`, and old fungal-bridge coordinates). I did not fix that in this route checkpoint; the next harness cleanup should rebaseline object-lab scans against the island authority.
+- Rubric movement:
+  - Visual/world definition: `6.56 -> 6.82` because six macro provinces now have authored traversal corridors and measured local landmark cadence.
+  - Harness maturity: `9.998 -> 9.999` because route-atlas now gates expected region and regional-variant coverage per authored route.
+  - Rendering correctness/quality: unchanged.
+  - Performance/playability: unchanged until a browser route budget can run again.
+- Next:
+  - checkpoint and push the regional-route slice
+  - rebaseline object-lab representative-root tests so isolated model work can again support delegated biome/object improvements

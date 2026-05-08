@@ -1288,6 +1288,117 @@ test("pilgrim route centerlines drift instead of forming straight strips", () =>
   expect(bestOffsets.some((offset) => Math.abs(offset) >= 6)).toBe(true);
 });
 
+test("regional pilgrimage routes have authored region coverage and landmark cadence", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const routes = [
+    {
+      start: [-6100, 700],
+      heading: 10,
+      length: 3000,
+      regionId: "bitter-coast",
+      variantId: "marsh_blackwater",
+      landmarkIds: ["fungal_bridge", "crystal_reeds", "rib_remains"],
+    },
+    {
+      start: [-2100, 3600],
+      heading: 10,
+      length: 4000,
+      regionId: "salt-marsh-basin",
+      variantId: "saltflat_mirror",
+      landmarkIds: ["salt_spire", "glass_cairn", "old_road_causeway"],
+    },
+    {
+      start: [-600, -700],
+      heading: 27,
+      length: 3150,
+      regionId: "inner-sea",
+      variantId: "moor_shadowglass",
+      landmarkIds: ["old_road_causeway", "rib_arch", "glowcap"],
+    },
+    {
+      start: [900, -1800],
+      heading: 333,
+      length: 3800,
+      regionId: "grazelands",
+      variantId: "savanna_flowersea",
+      landmarkIds: ["acacia", "flower_patch", "thorn_tree"],
+    },
+    {
+      start: [3000, 900],
+      heading: 32,
+      length: 3050,
+      regionId: "glass-shard-coast",
+      variantId: "dunes_glass",
+      landmarkIds: ["glass_cairn", "crystal_cluster", "salt_spire"],
+    },
+    {
+      start: [-4200, -4200],
+      heading: 37,
+      length: 3150,
+      regionId: "west-gash",
+      variantId: "highland_redleaf",
+      landmarkIds: ["stone_tor", "redleaf_tree", "old_road_causeway"],
+    },
+  ] as const;
+
+  for (const route of routes) {
+    const heading = route.heading * Math.PI / 180;
+    const directionX = Math.cos(heading);
+    const directionZ = Math.sin(heading);
+    const normalX = -directionZ;
+    const normalZ = directionX;
+    let routeSamples = 0;
+    let regionSamples = 0;
+    let variantSamples = 0;
+    let centerlineHits = 0;
+    let outsideHits = 0;
+    const landmarks = new Set<string>();
+
+    for (let distanceMeters = 0; distanceMeters <= route.length; distanceMeters += 60) {
+      const worldX = Math.round((route.start[0] + directionX * distanceMeters) * 10);
+      const worldZ = Math.round((route.start[1] + directionZ * distanceMeters) * 10);
+      const center = generator.sampleBiomeProbe(worldX, worldZ);
+      routeSamples += 1;
+      if (center.regionId === route.regionId) {
+        regionSamples += 1;
+      }
+      if (center.regionalVariantId === route.variantId) {
+        variantSamples += 1;
+      }
+      if (center.pilgrimRouteInfluence > 0.18) {
+        centerlineHits += 1;
+      }
+      if (center.landmarkId) {
+        landmarks.add(center.landmarkId);
+      }
+      for (const lateralMeters of [-96, -72, -48, 48, 72, 96]) {
+        const vista = generator.sampleBiomeProbe(
+          Math.round(worldX + normalX * lateralMeters * 10),
+          Math.round(worldZ + normalZ * lateralMeters * 10),
+        );
+        if (vista.landmarkId) {
+          landmarks.add(vista.landmarkId);
+        }
+      }
+
+      const outside = generator.sampleBiomeProbe(
+        Math.round(worldX + normalX * 140 * 10),
+        Math.round(worldZ + normalZ * 140 * 10),
+      );
+      if (outside.pilgrimRouteInfluence > 0.18) {
+        outsideHits += 1;
+      }
+    }
+
+    const themedLandmarks = route.landmarkIds.filter((landmarkId) => landmarks.has(landmarkId));
+    expect(regionSamples / routeSamples).toBeGreaterThanOrEqual(0.48);
+    expect(variantSamples / routeSamples).toBeGreaterThanOrEqual(0.30);
+    expect(centerlineHits / routeSamples).toBeGreaterThanOrEqual(0.68);
+    expect(outsideHits / routeSamples).toBeLessThanOrEqual(0.25);
+    expect(themedLandmarks.length).toBeGreaterThanOrEqual(2);
+  }
+});
+
 test("new biome families expose distinct landmark identities", () => {
   const generator = new ProceduralWorldGenerator(1337);
   const landmarksByBiome = new Map<string, Set<string>>();

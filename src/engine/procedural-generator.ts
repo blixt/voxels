@@ -522,6 +522,13 @@ const PILGRIM_ROUTE_BANDS: readonly PilgrimRouteBand[] = [
   createPilgrimRouteBand(960, -780, 202, 2600, 74),
   createPilgrimRouteBand(236, -4624, 58, 3400, 82),
   createPilgrimRouteBand(-1880, -2860, 42, 3200, 86),
+  createPilgrimRouteBand(-6100, 700, 10, 3000, 74),
+  createPilgrimRouteBand(-3000, 700, 352, 2250, 76),
+  createPilgrimRouteBand(-2100, 3600, 10, 4000, 84),
+  createPilgrimRouteBand(-600, -700, 27, 3150, 82),
+  createPilgrimRouteBand(900, -1800, 333, 3800, 82),
+  createPilgrimRouteBand(3000, 900, 32, 3050, 80),
+  createPilgrimRouteBand(-4200, -4200, 37, 3150, 78),
 ];
 
 const BASE_BIOMES: readonly BaseBiomeProfile[] = [
@@ -890,6 +897,58 @@ const PILGRIM_ROUTE_SKYLINE_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("basalt_spire", { chance: 0.24, scale: 1.24, cellSize: 144, radius: 7 }),
   landmarkPlacement("standing_stone", { chance: 0.32, scale: 1.24, cellSize: 128, radius: 6 }),
   landmarkPlacement("dead_tree", { chance: 0.18, scale: 1.16, cellSize: 156, radius: 8 }),
+];
+
+const PILGRIM_ROUTE_WETLAND_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("fungal_bridge", { chance: 0.48, scale: 1.30, cellSize: 112, radius: 17 }),
+  landmarkPlacement("rib_remains", { chance: 0.38, scale: 1.22, cellSize: 126, radius: 11 }),
+  landmarkPlacement("crystal_reeds", { chance: 0.54, scale: 1.28, cellSize: 72, radius: 6 }),
+  landmarkPlacement("mega_glowcap", { chance: 0.34, scale: 1.34, cellSize: 118, radius: 20 }),
+  landmarkPlacement("cypress", { chance: 0.44, scale: 1.26, cellSize: 104, radius: 11 }),
+  landmarkPlacement("willow", { chance: 0.34, scale: 1.18, cellSize: 126, radius: 14 }),
+  landmarkPlacement("rib_arch", { chance: 0.34, scale: 1.34, cellSize: 138, radius: 15 }),
+  landmarkPlacement("pilgrim_lantern", { chance: 0.36, scale: 1.24, cellSize: 100, radius: 5 }),
+];
+
+const PILGRIM_ROUTE_SALT_BASIN_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("salt_spire", { chance: 0.58, scale: 1.82, cellSize: 78, radius: 8, variant: 2 }),
+  landmarkPlacement("glass_cairn", { chance: 0.42, scale: 1.34, cellSize: 104, radius: 6, variant: 2 }),
+  landmarkPlacement("crystal_cluster", { chance: 0.34, scale: 1.28, cellSize: 112, radius: 8, variant: 2 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.24, scale: 1.22, cellSize: 148, radius: 8 }),
+  landmarkPlacement("old_road_causeway", { chance: 0.44, scale: 1.22, cellSize: 104, radius: 15 }),
+  landmarkPlacement("pilgrim_lantern", { chance: 0.40, scale: 1.28, cellSize: 96, radius: 5 }),
+  landmarkPlacement("rib_arch", { chance: 0.26, scale: 1.30, cellSize: 148, radius: 15 }),
+  landmarkPlacement("standing_stone", { chance: 0.24, scale: 1.20, cellSize: 128, radius: 6 }),
+];
+
+const PILGRIM_ROUTE_GLASS_SHARD_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("glass_cairn", { chance: 0.58, scale: 1.38, cellSize: 88, radius: 6, variant: 2 }),
+  landmarkPlacement("crystal_cluster", { chance: 0.52, scale: 1.36, cellSize: 92, radius: 8, variant: 2 }),
+  landmarkPlacement("salt_spire", { chance: 0.42, scale: 1.42, cellSize: 110, radius: 7, variant: 2 }),
+  landmarkPlacement("velothi_shrine", { chance: 0.26, scale: 1.24, cellSize: 148, radius: 6 }),
+  landmarkPlacement("pilgrim_cairn", { chance: 0.36, scale: 1.18, cellSize: 112, radius: 5 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.22, scale: 1.24, cellSize: 176, radius: 8 }),
+  landmarkPlacement("basalt_spire", { chance: 0.26, scale: 1.26, cellSize: 140, radius: 7 }),
+];
+
+const PILGRIM_ROUTE_GRAZELANDS_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("acacia", { chance: 0.44, scale: 1.24, cellSize: 112, radius: 13 }),
+  landmarkPlacement("standing_stone", { chance: 0.46, scale: 1.48, cellSize: 96, radius: 7 }),
+  landmarkPlacement("ancestor_pillar", { chance: 0.38, scale: 1.44, cellSize: 112, radius: 7 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.20, scale: 1.18, cellSize: 168, radius: 8 }),
+  landmarkPlacement("thorn_tree", { chance: 0.32, scale: 1.16, cellSize: 128, radius: 10 }),
+  landmarkPlacement("flower_patch", { chance: 0.42, scale: 1.12, variant: 2, cellSize: 70, radius: 6 }),
+  landmarkPlacement("pilgrim_cairn", { chance: 0.28, scale: 1.16, cellSize: 118, radius: 5 }),
+];
+
+const PILGRIM_ROUTE_WEST_GASH_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("stone_tor", { chance: 0.46, scale: 1.34, cellSize: 102, radius: 9 }),
+  landmarkPlacement("redleaf_tree", { chance: 0.56, scale: 1.28, cellSize: 84, radius: 13 }),
+  landmarkPlacement("old_road_causeway", { chance: 0.36, scale: 1.20, cellSize: 104, radius: 15 }),
+  landmarkPlacement("pilgrim_lantern", { chance: 0.34, scale: 1.26, cellSize: 94, radius: 5 }),
+  landmarkPlacement("standing_stone", { chance: 0.30, scale: 1.26, cellSize: 118, radius: 6 }),
+  landmarkPlacement("rib_arch", { chance: 0.22, scale: 1.20, cellSize: 158, radius: 14 }),
+  landmarkPlacement("boulder", { chance: 0.30, scale: 1.10, cellSize: 96, radius: 6 }),
 ];
 
 const DUNES_GLASS_LANDMARKS: readonly LandmarkProfile[] = [
@@ -3246,6 +3305,23 @@ function selectPilgrimRouteRoster(
     if (!route) {
       continue;
     }
+    if (route.lateralRatio <= 0.86) {
+      if (fields.easternShardCoast > 0.48) {
+        return PILGRIM_ROUTE_GLASS_SHARD_LANDMARKS;
+      }
+      if (fields.southernSaltBasin > 0.48) {
+        return PILGRIM_ROUTE_SALT_BASIN_LANDMARKS;
+      }
+      if (fields.regionId === "west-gash") {
+        return PILGRIM_ROUTE_WEST_GASH_LANDMARKS;
+      }
+      if (fields.northeastGrazelands > 0.48) {
+        return PILGRIM_ROUTE_GRAZELANDS_LANDMARKS;
+      }
+      if (fields.westWetlands > 0.48 || fields.regionId === "bitter-coast") {
+        return PILGRIM_ROUTE_WETLAND_LANDMARKS;
+      }
+    }
     const brokenRouteEdge = route.lateralRatio > 0.52 && (fields.surfacePatch > 0.42 || fields.scatter > 0.46);
     const routeCore = route.lateralRatio <= 0.72 && fields.desolation + fields.ridge + fields.strata > 1.20;
     if (brokenRouteEdge || routeCore) {
@@ -3308,6 +3384,71 @@ function selectPilgrimRouteSetPieceProfile(
   fields: SurfaceFieldSample,
 ): LandmarkProfile {
   const sequence = (anchorIndex + bandIndex * 3) % 8;
+  if (fields.easternShardCoast > 0.48) {
+    switch (sequence) {
+      case 0:
+      case 5:
+        return landmarkPlacement("glass_cairn", { chance: 1, scale: 1.34, cellSize: 1, radius: 6, variant: 2 });
+      case 1:
+      case 6:
+        return landmarkPlacement("crystal_cluster", { chance: 1, scale: 1.30, cellSize: 1, radius: 7, variant: 2 });
+      case 2:
+        return landmarkPlacement("salt_spire", { chance: 1, scale: 1.30, cellSize: 1, radius: 6, variant: 2 });
+      case 3:
+        return landmarkPlacement("velothi_shrine", { chance: 1, scale: 1.20, cellSize: 1, radius: 6 });
+      default:
+        return landmarkPlacement("pilgrim_cairn", { chance: 1, scale: 1.18, cellSize: 1, radius: 5 });
+    }
+  }
+  if (fields.southernSaltBasin > 0.48) {
+    switch (sequence) {
+      case 0:
+        return landmarkPlacement("salt_spire", { chance: 1, scale: 1.90, cellSize: 1, radius: 8, variant: 2 });
+      case 5:
+        return landmarkPlacement("old_road_causeway", { chance: 1, scale: 1.30, cellSize: 1, radius: 17 });
+      case 1:
+      case 6:
+        return landmarkPlacement("ash_obelisk", { chance: 1, scale: 1.24, cellSize: 1, radius: 8 });
+      case 2:
+        return landmarkPlacement("glass_cairn", { chance: 1, scale: 1.22, cellSize: 1, radius: 6, variant: 2 });
+      case 3:
+        return landmarkPlacement("crystal_cluster", { chance: 1, scale: 1.16, cellSize: 1, radius: 7, variant: 2 });
+      default:
+        return landmarkPlacement("pilgrim_lantern", { chance: 1, scale: 1.28, cellSize: 1, radius: 5 });
+    }
+  }
+  if (fields.regionId === "west-gash") {
+    switch (sequence) {
+      case 0:
+      case 4:
+        return landmarkPlacement("stone_tor", { chance: 1, scale: 1.30, cellSize: 1, radius: 9 });
+      case 1:
+      case 5:
+        return landmarkPlacement("redleaf_tree", { chance: 1, scale: 1.24, cellSize: 1, radius: 13 });
+      case 2:
+        return landmarkPlacement("old_road_causeway", { chance: 1, scale: 1.22, cellSize: 1, radius: 15 });
+      case 3:
+        return landmarkPlacement("pilgrim_lantern", { chance: 1, scale: 1.28, cellSize: 1, radius: 5 });
+      default:
+        return landmarkPlacement("standing_stone", { chance: 1, scale: 1.24, cellSize: 1, radius: 6 });
+    }
+  }
+  if (fields.northeastGrazelands > 0.48) {
+    switch (sequence) {
+      case 0:
+      case 4:
+        return landmarkPlacement("standing_stone", { chance: 1, scale: 1.52, cellSize: 1, radius: 7 });
+      case 1:
+      case 5:
+        return landmarkPlacement("acacia", { chance: 1, scale: 1.18, cellSize: 1, radius: 13 });
+      case 2:
+        return landmarkPlacement("ancestor_pillar", { chance: 1, scale: 1.48, cellSize: 1, radius: 7 });
+      case 3:
+        return landmarkPlacement("flower_patch", { chance: 1, scale: 1.10, variant: 2, cellSize: 1, radius: 6 });
+      default:
+        return landmarkPlacement("pilgrim_cairn", { chance: 1, scale: 1.12, cellSize: 1, radius: 5 });
+    }
+  }
   if (fields.volcanicHeart > 0.42 || fields.ashRing > 0.48) {
     if (sequence === 0 || sequence === 5) {
       return landmarkPlacement("velothi_ziggurat", { chance: 1, scale: 1.34, cellSize: 1, radius: 18 });
@@ -3317,6 +3458,12 @@ function selectPilgrimRouteSetPieceProfile(
     }
   }
   if (fields.westWetlands > 0.50 || fields.magic > 0.62) {
+    if (fields.regionId === "bitter-coast" && (sequence === 0 || sequence === 4)) {
+      return landmarkPlacement("mega_glowcap", { chance: 1, scale: 1.42, cellSize: 1, radius: 21 });
+    }
+    if (fields.regionId === "bitter-coast" && sequence === 2) {
+      return landmarkPlacement("rib_arch", { chance: 1, scale: 1.36, cellSize: 1, radius: 15 });
+    }
     if (sequence === 1 || sequence === 6) {
       return landmarkPlacement("fungal_bridge", { chance: 1, scale: 1.34, cellSize: 1, radius: 18 });
     }
