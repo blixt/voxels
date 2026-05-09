@@ -933,3 +933,34 @@ Next:
 1. Adapt `src/client/procedural-generated-chunk-cache.ts` to use the canonical key helpers while preserving existing stores.
 2. Add backwards-compatible metadata fields to stored canonical chunk records.
 3. Add a canonical reload probe that reports warm canonical chunk hit ratio separately from derived LOD cache hits.
+
+### Follow-up Checkpoint - Canonical Keys In Browser Chunk Cache
+
+Accepted storage increment:
+
+- `src/client/procedural-generated-chunk-cache.ts` now builds its world identity through the canonical chunk store contract.
+- New generated chunk writes use canonical chunk keys and metadata while preserving the existing IndexedDB object stores.
+- Chunk, summary, and region-summary reads fall back to legacy keys, so existing local browser stores remain readable during migration.
+- Stored generated chunks now carry schema version, world key, generation version, chunk coord, canonical revision, encoded byte length, and timestamp metadata.
+- Derived LOD cache keys are unchanged and remain optional render artifacts keyed by edit revision, LOD level, and coord.
+
+Validation:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/procedural-generated-chunk-cache.test.ts tests/canonical-chunk-store.test.ts tests/procedural-deferred-persistence.test.ts tests/generated-chunk-codec.test.ts`: pass, `14` tests.
+- `mise exec -- bun run bench:lod-persistence -- --label=canonical-cache-keys-default-retry`: pass.
+  - Artifact: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-AZyn2d/lod-idb-persistence-reload.json`
+  - Reload disk hits: `1297`.
+  - Coverage: `0` uncovered gaps, `0` handoff holes, `0` resident overlaps, `0` band overlaps, `0` water overlaps.
+
+Rejected/observed during this checkpoint:
+
+- The first browser run, `canonical-cache-keys-default`, returned a cold-origin artifact with `7` uncovered LOD sample gaps despite `0` pending chunks; reload-origin was clean.
+- A retry with identical code passed with zero coverage issues. I am recording the failed artifact rather than treating the retry as proof the gap cannot recur:
+  `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-z4VBwA/lod-idb-persistence-reload.json`.
+
+Next:
+
+1. Add a benchmark repeat mode or flake detector for cold-origin LOD coverage so transient gap samples are not ignored.
+2. Add a canonical reload probe that reports generated chunk cache hits separately from derived LOD disk hits.
+3. Add edit-journal record persistence after canonical chunk hit reporting is reliable.

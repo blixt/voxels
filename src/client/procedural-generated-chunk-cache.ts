@@ -12,6 +12,17 @@ import {
   GENERATED_RENDER_SUMMARY_REGION_SIZE_CHUNKS,
   upsertGeneratedRenderSummaryRegion,
 } from "../engine/generated-render-summary-region.ts";
+import {
+  CANONICAL_CHUNK_STORE_SCHEMA_VERSION,
+  createCanonicalChunkRecordMetadata,
+  formatCanonicalChunkKey,
+  formatCanonicalChunkSummaryKey,
+  formatCanonicalRegionSummaryKey,
+  formatCanonicalWorldKey,
+  formatChunkEditJournalKey,
+  isCanonicalChunkRecordUsable,
+  type CanonicalWorldKey,
+} from "../engine/canonical-chunk-store.ts";
 import type { EncodedGeneratedChunk } from "../engine/generated-chunk-codec.ts";
 import type { EncodedDerivedLodChunk } from "../engine/derived-lod-chunk-codec.ts";
 import type { AsyncDerivedLodChunkCacheKey } from "../engine/async-chunk-generation.ts";
@@ -30,6 +41,11 @@ interface StoredGeneratedChunkRecord {
   encodedBuffer: ArrayBuffer;
   encodedByteLength: number;
   storedAt: number;
+  schemaVersion?: typeof CANONICAL_CHUNK_STORE_SCHEMA_VERSION;
+  worldKey?: string;
+  generationVersion?: string;
+  coord?: ChunkCoordinate;
+  canonicalRevision?: number;
 }
 
 export interface CachedEncodedGeneratedChunk {
@@ -41,12 +57,18 @@ interface StoredGeneratedChunkSummaryRecord {
   key: string;
   summary: TransferredGeneratedChunkRenderSummary;
   storedAt: number;
+  worldKey?: string;
+  coord?: ChunkCoordinate;
+  canonicalRevision?: number;
 }
 
 interface StoredGeneratedRenderSummaryRegionRecord {
   key: string;
   summary: TransferredGeneratedRenderSummaryRegion;
   storedAt: number;
+  worldKey?: string;
+  coord?: RenderSummaryRegionCoordinate;
+  canonicalRevision?: number;
 }
 
 interface StoredDerivedLodChunkRecord {
@@ -86,27 +108,31 @@ export async function openProceduralGeneratedChunkCache(context: {
     return null;
   }
   const database = await openDatabase();
-  const keyPrefix = [
-    PROCEDURAL_WORLD_GENERATION_VERSION,
-    context.seed,
-    context.seaLevel,
-    context.chunkSize,
-    context.maxYExclusive,
-  ].join(":");
+  const worldKey = createProceduralGeneratedChunkCacheWorldKey(context);
+  const keyPrefix = formatCanonicalWorldKey(worldKey);
   return {
     async getChunk(coord) {
       const record = await requestToPromise<StoredGeneratedChunkRecord | undefined>(
         database
           .transaction(CHUNK_STORE_NAME, "readonly")
           .objectStore(CHUNK_STORE_NAME)
-          .get(toChunkKey(keyPrefix, coord)),
+          .get(formatCanonicalChunkKey(worldKey, coord)),
       );
-      if (!record) {
+      const resolvedRecord = record ?? await requestToPromise<StoredGeneratedChunkRecord | undefined>(
+        database
+          .transaction(CHUNK_STORE_NAME, "readonly")
+          .objectStore(CHUNK_STORE_NAME)
+          .get(toLegacyChunkKey(keyPrefix, coord)),
+      );
+      if (!resolvedRecord) {
+        return null;
+      }
+      if (resolvedRecord.schemaVersion !== undefined && !isStoredGeneratedChunkRecordUsable(resolvedRecord, worldKey, coord)) {
         return null;
       }
       return {
-        buffer: record.encodedBuffer,
-        byteLength: record.encodedByteLength,
+        buffer: resolvedRecord.encodedBuffer,
+        byteLength: resolvedRecord.encodedByteLength,
       };
     },
     async getChunkSummary(coord) {
@@ -114,18 +140,30 @@ export async function openProceduralGeneratedChunkCache(context: {
         database
           .transaction(SUMMARY_STORE_NAME, "readonly")
           .objectStore(SUMMARY_STORE_NAME)
-          .get(toChunkKey(keyPrefix, coord)),
+          .get(formatCanonicalChunkSummaryKey(worldKey, coord)),
       );
-      return record?.summary ?? null;
+      const resolvedRecord = record ?? await requestToPromise<StoredGeneratedChunkSummaryRecord | undefined>(
+        database
+          .transaction(SUMMARY_STORE_NAME, "readonly")
+          .objectStore(SUMMARY_STORE_NAME)
+          .get(toLegacyChunkKey(keyPrefix, coord)),
+      );
+      return resolvedRecord?.summary ?? null;
     },
     async getRegionSummary(coord) {
       const record = await requestToPromise<StoredGeneratedRenderSummaryRegionRecord | undefined>(
         database
           .transaction(REGION_SUMMARY_STORE_NAME, "readonly")
           .objectStore(REGION_SUMMARY_STORE_NAME)
-          .get(toRegionKey(keyPrefix, coord)),
+          .get(formatCanonicalRegionSummaryKey(worldKey, coord)),
       );
-      return record?.summary ?? null;
+      const resolvedRecord = record ?? await requestToPromise<StoredGeneratedRenderSummaryRegionRecord | undefined>(
+        database
+          .transaction(REGION_SUMMARY_STORE_NAME, "readonly")
+          .objectStore(REGION_SUMMARY_STORE_NAME)
+          .get(toLegacyRegionKey(keyPrefix, coord)),
+      );
+      return resolvedRecord?.summary ?? null;
     },
     async getLodChunk(key) {
       const record = await requestToPromise<StoredDerivedLodChunkRecord | undefined>(
@@ -144,32 +182,62 @@ export async function openProceduralGeneratedChunkCache(context: {
     },
     async putChunk(coord, chunk, summary) {
       const transaction = database.transaction([CHUNK_STORE_NAME, SUMMARY_STORE_NAME, REGION_SUMMARY_STORE_NAME], "readwrite");
-      const key = toChunkKey(keyPrefix, coord);
+      const key = formatCanonicalChunkKey(worldKey, coord);
+      const summaryKey = formatCanonicalChunkSummaryKey(worldKey, coord);
       const storedAt = Date.now();
+      const canonicalRevision = 0;
       transaction.objectStore(CHUNK_STORE_NAME).put({
+        ...createCanonicalChunkRecordMetadata({
+          worldKey,
+          coord,
+          canonicalRevision,
+          encodedByteLength: chunk.stats.byteLength,
+          storedAt,
+        }),
         key,
         encodedBuffer: chunk.buffer.slice(0),
         encodedByteLength: chunk.stats.byteLength,
         storedAt,
       } satisfies StoredGeneratedChunkRecord);
       transaction.objectStore(SUMMARY_STORE_NAME).put({
-        key,
+        key: summaryKey,
+        worldKey: keyPrefix,
+        coord: { ...coord },
+        canonicalRevision,
         summary: cloneTransferredSummary(summary),
         storedAt,
       } satisfies StoredGeneratedChunkSummaryRecord);
-      await putMergedRegionSummary(transaction.objectStore(REGION_SUMMARY_STORE_NAME), keyPrefix, summary, storedAt);
+      await putMergedRegionSummary(
+        transaction.objectStore(REGION_SUMMARY_STORE_NAME),
+        worldKey,
+        keyPrefix,
+        summary,
+        storedAt,
+        canonicalRevision,
+      );
       await transactionToPromise(transaction);
     },
     async putChunkSummary(coord, summary) {
       const transaction = database.transaction([SUMMARY_STORE_NAME, REGION_SUMMARY_STORE_NAME], "readwrite");
-      const key = toChunkKey(keyPrefix, coord);
+      const key = formatCanonicalChunkSummaryKey(worldKey, coord);
       const storedAt = Date.now();
+      const canonicalRevision = 0;
       transaction.objectStore(SUMMARY_STORE_NAME).put({
         key,
+        worldKey: keyPrefix,
+        coord: { ...coord },
+        canonicalRevision,
         summary: cloneTransferredSummary(summary),
         storedAt,
       } satisfies StoredGeneratedChunkSummaryRecord);
-      await putMergedRegionSummary(transaction.objectStore(REGION_SUMMARY_STORE_NAME), keyPrefix, summary, storedAt);
+      await putMergedRegionSummary(
+        transaction.objectStore(REGION_SUMMARY_STORE_NAME),
+        worldKey,
+        keyPrefix,
+        summary,
+        storedAt,
+        canonicalRevision,
+      );
       await transactionToPromise(transaction);
     },
     async putLodChunk(key, chunk) {
@@ -231,11 +299,77 @@ function transactionToPromise(transaction: IDBTransaction): Promise<void> {
   });
 }
 
-function toChunkKey(prefix: string, coord: ChunkCoordinate): string {
+export function createProceduralGeneratedChunkCacheWorldKey(context: {
+  seed: number;
+  seaLevel: number;
+  chunkSize: number;
+  maxYExclusive: number;
+}): CanonicalWorldKey {
+  return {
+    generationVersion: PROCEDURAL_WORLD_GENERATION_VERSION,
+    seed: context.seed,
+    seaLevel: context.seaLevel,
+    chunkSize: context.chunkSize,
+    maxYExclusive: context.maxYExclusive,
+  };
+}
+
+export function createProceduralGeneratedChunkCacheKeys(
+  context: {
+    seed: number;
+    seaLevel: number;
+    chunkSize: number;
+    maxYExclusive: number;
+  },
+  coord: ChunkCoordinate,
+): {
+  worldKey: string;
+  chunkKey: string;
+  legacyChunkKey: string;
+  chunkSummaryKey: string;
+  legacyChunkSummaryKey: string;
+  editJournalKey: string;
+} {
+  const worldKey = createProceduralGeneratedChunkCacheWorldKey(context);
+  const keyPrefix = formatCanonicalWorldKey(worldKey);
+  return {
+    worldKey: keyPrefix,
+    chunkKey: formatCanonicalChunkKey(worldKey, coord),
+    legacyChunkKey: toLegacyChunkKey(keyPrefix, coord),
+    chunkSummaryKey: formatCanonicalChunkSummaryKey(worldKey, coord),
+    legacyChunkSummaryKey: toLegacyChunkKey(keyPrefix, coord),
+    editJournalKey: formatChunkEditJournalKey(worldKey, coord),
+  };
+}
+
+function isStoredGeneratedChunkRecordUsable(
+  record: StoredGeneratedChunkRecord,
+  worldKey: CanonicalWorldKey,
+  coord: ChunkCoordinate,
+): boolean {
+  if (record.schemaVersion === undefined) {
+    return true;
+  }
+  if (record.worldKey === undefined || record.generationVersion === undefined || record.coord === undefined) {
+    return false;
+  }
+  return isCanonicalChunkRecordUsable({
+    schemaVersion: record.schemaVersion,
+    key: record.key,
+    worldKey: record.worldKey,
+    generationVersion: record.generationVersion,
+    coord: record.coord,
+    canonicalRevision: record.canonicalRevision ?? 0,
+    encodedByteLength: record.encodedByteLength,
+    storedAt: record.storedAt,
+  }, worldKey, coord);
+}
+
+function toLegacyChunkKey(prefix: string, coord: ChunkCoordinate): string {
   return `${prefix}:${coord.x}:${coord.y}:${coord.z}`;
 }
 
-function toRegionKey(prefix: string, coord: RenderSummaryRegionCoordinate): string {
+function toLegacyRegionKey(prefix: string, coord: RenderSummaryRegionCoordinate): string {
   return `${prefix}:${coord.x}:${coord.z}`;
 }
 
@@ -260,18 +394,23 @@ function cloneTransferredSummary(summary: TransferredGeneratedChunkRenderSummary
 
 async function putMergedRegionSummary(
   regionStore: IDBObjectStore,
+  worldKey: CanonicalWorldKey,
   keyPrefix: string,
   summary: TransferredGeneratedChunkRenderSummary,
   storedAt: number,
+  canonicalRevision: number,
 ): Promise<void> {
   const regionCoord = getRegionCoord(summary);
   const existingRecord = await requestToPromise<StoredGeneratedRenderSummaryRegionRecord | undefined>(
-    regionStore.get(toRegionKey(keyPrefix, regionCoord)),
+    regionStore.get(formatCanonicalRegionSummaryKey(worldKey, regionCoord)),
+  );
+  const resolvedExistingRecord = existingRecord ?? await requestToPromise<StoredGeneratedRenderSummaryRegionRecord | undefined>(
+    regionStore.get(toLegacyRegionKey(keyPrefix, regionCoord)),
   );
   const chunkSize = summary.surfaceY.length > 0
     ? Math.round(Math.sqrt(summary.surfaceY.length))
     : summary.macroCellSize * summary.macroCellsPerAxis;
-  const existingRegion = existingRecord ? deserializeGeneratedRenderSummaryRegion(existingRecord.summary) : null;
+  const existingRegion = resolvedExistingRecord ? deserializeGeneratedRenderSummaryRegion(resolvedExistingRecord.summary) : null;
   const existingColumnSummary = existingRegion?.columns.find(
     (entry) => entry.chunkX === summary.coord.x && entry.chunkZ === summary.coord.z,
   )?.summary ?? null;
@@ -286,7 +425,10 @@ async function putMergedRegionSummary(
     GENERATED_RENDER_SUMMARY_REGION_SIZE_CHUNKS,
   );
   regionStore.put({
-    key: toRegionKey(keyPrefix, regionCoord),
+    key: formatCanonicalRegionSummaryKey(worldKey, regionCoord),
+    worldKey: keyPrefix,
+    coord: { ...regionCoord },
+    canonicalRevision,
     summary: cloneTransferredRegionSummary(serializeGeneratedRenderSummaryRegion(mergedRegion).summary),
     storedAt,
   } satisfies StoredGeneratedRenderSummaryRegionRecord);
