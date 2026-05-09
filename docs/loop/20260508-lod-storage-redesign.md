@@ -703,3 +703,22 @@ Next renderer target:
 - Thread clip masks into the LOD mesh build path as render-only ownership data.
 - Keep `VoxelChunk.data` authoritative and unchanged.
 - Have the mesher skip or subdivide clipped coarse faces based on the mask, then verify with the LOD lab and persistence probes.
+
+### Follow-up Checkpoint - Mesher Clip Mask Input
+
+Accepted mesher foundation:
+
+- Added optional `clipMask` support to `OpaqueChunkMeshingInput`.
+- When supplied, clipped local voxels are treated as transparent by opaque face generation without changing `chunkData`.
+- The normal no-mask path remains covered against the synchronous mesher output, so this should be behavior-preserving until runtime LOD code starts supplying masks.
+
+Validation:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/opaque-chunk-mesher.test.ts tests/lod-clip-mask.test.ts tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts`: pass, `47` tests.
+
+Next renderer target:
+
+- Compute a full-voxel LOD clip mask for active coarser chunks from active finer ownership.
+- Feed that mask into `buildLodChunkMesh` instead of punching full coarse voxels out of `VoxelChunk.data`.
+- Only after full-voxel masks are stable, extend the mesher to subdivide partial subvoxel boxes from `lod-clip-mask.ts`.
