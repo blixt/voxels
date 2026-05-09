@@ -67,6 +67,8 @@ test("client wires pure exploration interaction and travel goal systems", () => 
   expect(gameController).toContain("observeProgress");
   expect(gameController).toContain("observeTravel");
   expect(gameController).toContain("TRAVEL_GOALS");
+  expect(gameController).toContain("formatEncounterScoutLabel");
+  expect(gameController).toContain("formatEncounterScoutDescription");
 });
 
 test("progress storage hydrates after init and honors fresh-game launches", () => {

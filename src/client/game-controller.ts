@@ -126,6 +126,7 @@ import {
   describeRpgEncounterFaction,
   describeRpgEncounterMood,
   sampleRpgEncounterWorldUnits,
+  type RpgEncounterSample,
 } from "../engine/rpg-encounters.ts";
 
 const MAX_DELTA_SECONDS = 0.05;
@@ -1124,11 +1125,11 @@ export class GameController {
     const skills = this.skillJournal.observeDiscoveries(this.explorationJournal.drainPendingSkillDiscoveries());
     const explorationSkillEffects = resolveExplorationSkillEffects(skills);
     const routeSnapshot = this.routeJournal.getSnapshot();
-    const activeExplorationHud = this.buildActiveExplorationHudState(currentWorld, discovery, routeSnapshot);
-    const bootstrap = this.getBootstrapReadiness();
-    const ambientProfile = currentWorld.ambientProfile;
     const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
     const primaryFaction = encounter.factionHints[0]?.factionId ?? null;
+    const activeExplorationHud = this.buildActiveExplorationHudState(currentWorld, discovery, routeSnapshot, encounter);
+    const bootstrap = this.getBootstrapReadiness();
+    const ambientProfile = currentWorld.ambientProfile;
     const travelContextLabel = this.lastTravelContext === "underground" ? "Underground route" : "Surface route";
     return {
       status: this.status,
@@ -2928,6 +2929,7 @@ export class GameController {
     currentWorld: CurrentWorldProbeContext,
     discovery: ExplorationJournalSnapshot,
     routeSnapshot: RouteJournalSnapshot,
+    encounter: RpgEncounterSample,
   ): ActiveExplorationHudState {
     const target = this.resolveCurrentInteraction(currentWorld, discovery).target;
     const activeGoal = selectActiveTravelGoal(routeSnapshot);
@@ -2951,9 +2953,9 @@ export class GameController {
       activeTravelGoalStepLabel: nextStep?.label ?? (activeGoal?.completed ? "Route complete" : "Find a road sign"),
       activeTravelGoalProgressRatio: activeGoal?.progress ?? 0,
       interactionTargetName: target?.name ?? "No nearby focus",
-      interactionPromptLabel: prompt?.label ?? "Explore the route",
+      interactionPromptLabel: prompt?.label ?? formatEncounterScoutLabel(encounter),
       interactionPromptDescription: prompt?.description
-        ?? (target ? `${target.distanceMeters.toFixed(1)} m away` : "Travel, inspect landmarks, and read route signs."),
+        ?? (target ? `${target.distanceMeters.toFixed(1)} m away` : formatEncounterScoutDescription(encounter, this.lastTravelContext)),
       interactionPromptVerb: prompt?.verb ?? null,
     };
   }
@@ -4182,6 +4184,23 @@ function formatEncounterMoodForTravelContext(moodLabel: string, travelContext: "
     return "Cave Rumor";
   }
   return moodLabel;
+}
+
+function formatEncounterScoutLabel(encounter: RpgEncounterSample): string {
+  const moodLabel = describeRpgEncounterMood(encounter.moodId);
+  const faction = encounter.factionHints[0]?.factionId;
+  if (faction) {
+    return `Scout ${describeRpgEncounterFaction(faction)}`;
+  }
+  return `Scout ${moodLabel}`;
+}
+
+function formatEncounterScoutDescription(encounter: RpgEncounterSample, travelContext: "surface" | "underground"): string {
+  const moodLabel = formatEncounterMoodForTravelContext(describeRpgEncounterMood(encounter.moodId), travelContext);
+  const pressure = formatEncounterPressure(encounter.pressure).toLowerCase();
+  const flavor = encounter.flavorTags.slice(0, 2).map(formatEncounterFlavorTag).join(" and ");
+  const regionDetail = flavor ? ` Signs: ${flavor}.` : "";
+  return `${moodLabel}; ${pressure}.${regionDetail}`;
 }
 
 function formatEncounterFlavorTag(tag: string): string {
