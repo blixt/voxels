@@ -631,3 +631,32 @@ Next:
 1. Commit and push the safe planning/harness/atlas/gameplay checkpoint.
 2. Resume P0 LOD work with a bounded reconciliation queue driven by detected active overlap candidates.
 3. After P0, assign canonical store/edit-journal implementation and route graph work in parallel.
+
+### Follow-up Checkpoint - Safe Same-Key Prepared Replacement
+
+Accepted LOD change:
+
+- Added a conservative same-key prepared replacement path.
+- When a fresh prepared chunk has the same LOD key, level, stride, and an already render-ready active owner, it can replace that stale active owner directly.
+- The replacement still punches active coarser chunks after becoming active, so ownership remains consistent for that same footprint.
+- Added a regression test for stale active finer ownership being swapped to the prepared same-key chunk.
+
+Rejected attempts during this pass:
+
+- A bounded reconciliation queue for already-punched coarser chunks initially looked promising, but default browser persistence later exposed uncovered LOD sample gaps. Root cause: re-punching already-punched coarse voxels can remove coarse coverage around only partially covering finer voxels.
+- Early eviction/accounting changes for prepared chunks also exposed uncovered cold/reload sample gaps. Prepared chunks must remain under the conservative lifecycle until we have voxel-accurate clipping or a stronger ownership model.
+- Aggressively activating partially blocked prepared chunks made the far benchmark settle, but it produced cold-origin gaps in default persistence and was rejected.
+
+Validation:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts`: pass, `38` tests.
+- `mise exec -- bun run bench:lod-persistence -- --label=track-a-default-samekey-only`: pass.
+  - Artifact: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-ni0foA/lod-idb-persistence-reload.json`
+  - Reload disk hits: `1292`.
+  - Coverage: `0` uncovered gaps, `0` handoff holes, `0` resident overlaps, `0` band overlaps, `0` water overlaps.
+
+Current known limitation:
+
+- The far `--lod-persistence-chunk-delta=32` stress case still reaches visually clean coverage but can leave prepared chunks pending under the conservative handoff model.
+- The rejected attempts proved that this cannot be solved safely by coarse re-punching or by treating blocked prepared chunks as settled. The next accepted fix needs a voxel-accurate ownership/clipping model, or an equivalent per-column/per-voxel fallback proof, before changing visible handoff behavior.

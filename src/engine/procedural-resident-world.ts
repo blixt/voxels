@@ -1148,7 +1148,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           this.staleLodKeys.delete(key);
           this.retainedLodChunks.delete(key);
           this.retainedEmptyLodKeys.delete(key);
-          this.coveragePunchedLodKeys.delete(key);
+          this.clearLodCoveragePunchedKey(key);
           this.invalidateCoarserLodChunksForSourceChunk(ring.level, cx, cy, cz, {
             clearNeededKeyCache: false,
           });
@@ -1179,7 +1179,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         if (data.skippedFinerCoverage) {
           this.coveragePunchedLodKeys.add(key);
         } else {
-          this.coveragePunchedLodKeys.delete(key);
+          this.clearLodCoveragePunchedKey(key);
         }
         if (this.lodChunkHasCoveredActiveCoarserOverlap(chunk)) {
           this.prepareLodChunkBlockedByActiveCoarser(key, chunk);
@@ -1414,7 +1414,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         this.emptyLodKeys.add(key);
         this.lodChunks.delete(key);
         this.staleLodKeys.delete(key);
-        this.coveragePunchedLodKeys.delete(key);
+        this.clearLodCoveragePunchedKey(key);
         if (source === "generated") {
           workerGenerated += 1;
           workerGeneratedByLevel[decoded.lodLevel] += 1;
@@ -1442,7 +1442,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         this.staleLodKeys.delete(key);
         this.retainedLodChunks.delete(key);
         this.retainedEmptyLodKeys.delete(key);
-        this.coveragePunchedLodKeys.delete(key);
+        this.clearLodCoveragePunchedKey(key);
         if (source === "generated") {
           workerGenerated += 1;
           workerGeneratedByLevel[decoded.lodLevel] += 1;
@@ -1455,7 +1455,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       if (activation.skippedFinerCoverage) {
         this.coveragePunchedLodKeys.add(key);
       } else {
-        this.coveragePunchedLodKeys.delete(key);
+        this.clearLodCoveragePunchedKey(key);
       }
       const worldSize = this.chunkSize * decoded.voxelStride;
       const meshStartedAt = performance.now();
@@ -1550,7 +1550,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
     if (this.staleLodKeys.has(key) || this.coveragePunchedLodKeys.has(key)) {
       this.retainedLodChunks.delete(key);
-      this.coveragePunchedLodKeys.delete(key);
+      this.clearLodCoveragePunchedKey(key);
       return false;
     }
     this.retainedLodChunks.delete(key);
@@ -1558,7 +1558,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     const activation = this.punchLodChunkCoveredByActiveFiner(chunk);
     if (activation.chunk.solidCount === 0) {
       this.coveredEmptyLodKeys.add(key);
-      this.coveragePunchedLodKeys.delete(key);
+      this.clearLodCoveragePunchedKey(key);
       return true;
     }
     if (activation.skippedFinerCoverage) {
@@ -1581,7 +1581,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       activation.chunk.meshDirty = false;
       activation.chunk.renderReady = true;
     } else {
-      this.coveragePunchedLodKeys.delete(key);
+      this.clearLodCoveragePunchedKey(key);
     }
     activation.chunk.gpuDirty = true;
     if (this.lodChunkHasCoveredActiveCoarserOverlap(activation.chunk)) {
@@ -1601,7 +1601,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
     this.retainedEmptyLodKeys.delete(key);
     this.retainedLodChunks.delete(key);
-    this.coveragePunchedLodKeys.delete(key);
+    this.clearLodCoveragePunchedKey(key);
     this.emptyLodKeys.add(key);
     return true;
   }
@@ -1609,7 +1609,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   private retainLodChunk(key: string, chunk: VoxelChunk): void {
     if (chunk.solidCount === 0 || this.staleLodKeys.has(key) || this.coveragePunchedLodKeys.has(key)) {
       this.retainedLodChunks.delete(key);
-      this.coveragePunchedLodKeys.delete(key);
+      this.clearLodCoveragePunchedKey(key);
       return;
     }
     this.retainedEmptyLodKeys.delete(key);
@@ -1626,7 +1626,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
   private retainEmptyLodKey(key: string): void {
     this.retainedLodChunks.delete(key);
-    this.coveragePunchedLodKeys.delete(key);
+    this.clearLodCoveragePunchedKey(key);
     this.retainedEmptyLodKeys.delete(key);
     this.retainedEmptyLodKeys.add(key);
     while (this.retainedEmptyLodKeys.size > MAX_RETAINED_EMPTY_LOD_KEYS) {
@@ -1639,7 +1639,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   private deleteRetainedLodKey(key: string): void {
     this.retainedLodChunks.delete(key);
     this.retainedEmptyLodKeys.delete(key);
-    this.coveragePunchedLodKeys.delete(key);
+    this.clearLodCoveragePunchedKey(key);
     this.queuedLodDiskStoreKeys.delete(key);
   }
 
@@ -2596,6 +2596,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     if (this.preparedLodChunks.size === 0) {
       return;
     }
+    this.commitPreparedSameKeyReplacements();
     let changed = true;
     while (changed) {
       changed = false;
@@ -2640,6 +2641,24 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         this.punchActiveCoarserLodChunksCoveredBy(prepared);
         changed = true;
       }
+    }
+  }
+
+  private commitPreparedSameKeyReplacements(): void {
+    for (const [preparedKey, prepared] of [...this.preparedLodChunks.entries()]) {
+      const activeSameKey = this.lodChunks.get(preparedKey);
+      if (
+        !activeSameKey?.renderReady
+        || activeSameKey.lodLevel !== prepared.lodLevel
+        || activeSameKey.voxelStride !== prepared.voxelStride
+      ) {
+        continue;
+      }
+      this.preparedLodChunks.delete(preparedKey);
+      this.lodChunks.set(preparedKey, prepared);
+      this.lodWorldColumnCoverageCache.clear();
+      this.staleLodKeys.delete(preparedKey);
+      this.punchActiveCoarserLodChunksCoveredBy(prepared);
     }
   }
 
@@ -2828,7 +2847,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     if (activation.chunk.solidCount === 0) {
       this.lodChunks.delete(key);
       this.staleLodKeys.delete(key);
-      this.coveragePunchedLodKeys.delete(key);
+      this.clearLodCoveragePunchedKey(key);
       this.coveredEmptyLodKeys.add(key);
       return;
     }
@@ -2853,6 +2872,10 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     this.lodChunks.set(key, activation.chunk);
     this.lodWorldColumnCoverageCache.clear();
     this.coveragePunchedLodKeys.add(key);
+  }
+
+  private clearLodCoveragePunchedKey(key: string): void {
+    this.coveragePunchedLodKeys.delete(key);
   }
 
   private buildLodChunkMesh(

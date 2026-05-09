@@ -234,6 +234,42 @@ test("prepared replacement keeps stale active finer ownership punched out of coa
   }
 });
 
+test("prepared same-key replacement swaps into an already owned finer slot", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
+  const worldWithInternals = world as unknown as {
+    lodChunks: Map<string, VoxelChunk>;
+    preparedLodChunks: Map<string, VoxelChunk>;
+    staleLodKeys: Set<string>;
+    coveragePunchedLodKeys: Set<string>;
+    commitPreparedLodChunks(): void;
+  };
+  const activeFiner = createTestChunkWithVerticalRange(-196, 22, -376, 1, 2, true, 0, CHUNK_SIZE / 2);
+  const preparedReplacement = createTestChunkWithVerticalRange(-196, 22, -376, 1, 2, true, CHUNK_SIZE / 2, CHUNK_SIZE);
+  const partiallyPunchedCoarser = createTestChunk(-98, 11, -188, 2, 4, true, true);
+
+  worldWithInternals.lodChunks.set("L1:-196:22:-376", activeFiner);
+  worldWithInternals.staleLodKeys.add("L1:-196:22:-376");
+  worldWithInternals.preparedLodChunks.set("L1:-196:22:-376", preparedReplacement);
+  worldWithInternals.lodChunks.set("L2:-98:11:-188", partiallyPunchedCoarser);
+  worldWithInternals.coveragePunchedLodKeys.add("L2:-98:11:-188");
+
+  worldWithInternals.commitPreparedLodChunks();
+
+  expect(worldWithInternals.preparedLodChunks.size).toBe(0);
+  expect(worldWithInternals.lodChunks.get("L1:-196:22:-376")).toBe(preparedReplacement);
+  expect(worldWithInternals.staleLodKeys.has("L1:-196:22:-376")).toBe(false);
+  const punched = worldWithInternals.lodChunks.get("L2:-98:11:-188");
+  expect(punched).toBeDefined();
+  expect(worldWithInternals.coveragePunchedLodKeys.has("L2:-98:11:-188")).toBe(true);
+  for (let localZ = 0; localZ < CHUNK_SIZE / 2; localZ += 1) {
+    for (let localX = 0; localX < CHUNK_SIZE / 2; localX += 1) {
+      expect(columnHasMaterialInYRange(punched!, localX, localZ, CHUNK_SIZE / 4, CHUNK_SIZE / 2)).toBe(false);
+    }
+  }
+  expect(columnHasMaterialInYRange(punched!, 0, 0, 0, CHUNK_SIZE / 4)).toBe(true);
+  expect(columnHasMaterialInYRange(punched!, CHUNK_SIZE / 2, 0, CHUNK_SIZE / 4, CHUNK_SIZE / 2)).toBe(true);
+});
+
 test("prepared finer backlog repairs active coarser chunks refreshed after the finer became active", () => {
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
   const worldWithInternals = world as unknown as {
@@ -294,6 +330,35 @@ function createTestChunk(
     gpuDirty: renderReady,
     mesh: null,
   };
+}
+
+function createTestChunkWithVerticalRange(
+  cx: number,
+  cy: number,
+  cz: number,
+  lodLevel: number,
+  voxelStride: number,
+  renderReady: boolean,
+  minLocalY: number,
+  maxLocalYExclusive: number,
+): VoxelChunk {
+  const chunk = createTestChunk(cx, cy, cz, lodLevel, voxelStride, renderReady);
+  let solidCount = 0;
+  const chunkArea = CHUNK_SIZE * CHUNK_SIZE;
+  for (let localZ = 0; localZ < CHUNK_SIZE; localZ += 1) {
+    for (let localX = 0; localX < CHUNK_SIZE; localX += 1) {
+      const columnOffset = localX + localZ * chunkArea;
+      for (let localY = minLocalY; localY < maxLocalYExclusive; localY += 1) {
+        chunk.data[columnOffset + localY * CHUNK_SIZE] = 1;
+        solidCount += 1;
+      }
+    }
+  }
+  chunk.solidCount = solidCount;
+  chunk.solidBounds = solidCount === 0
+    ? null
+    : { min: [0, minLocalY, 0], max: [CHUNK_SIZE, maxLocalYExclusive, CHUNK_SIZE], dirty: false };
+  return chunk;
 }
 
 function columnHasMaterial(chunk: VoxelChunk, localX: number, localZ: number): boolean {
