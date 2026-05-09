@@ -23,8 +23,11 @@ export type AmbientProfileId =
   | "green-canopy"
   | "dry-haze"
   | "ashfall"
+  | "salt-marsh"
   | "silt-mist"
+  | "wetlands"
   | "fungal-lantern"
+  | "glass-coast"
   | "cold-glass"
   | "subterranean";
 
@@ -82,13 +85,13 @@ const PROFILE_DEFINITIONS: Record<AmbientProfileId, AmbientProfileDefinition> = 
   "open-air": {
     id: "open-air",
     label: "Open Air",
-    clearColorRgba: [209, 224, 240, 255],
-    fogColorRgba: [209, 224, 240, 255],
+    clearColorRgba: [207, 223, 238, 255],
+    fogColorRgba: [202, 219, 233, 255],
     fogStartDistance: metersToWorldUnits(96),
     fogEndDistance: metersToWorldUnits(480),
-    skyTopColorRgba: [93, 132, 169, 255],
-    skyHorizonColorRgba: [209, 224, 240, 255],
-    skyCloudColorRgba: [219, 228, 233, 255],
+    skyTopColorRgba: [78, 124, 172, 255],
+    skyHorizonColorRgba: [210, 224, 236, 255],
+    skyCloudColorRgba: [226, 231, 230, 255],
     skyCloudCoverage: 0.16,
     skyCloudBand: 0.70,
     ashfallIntensity: 0,
@@ -97,107 +100,152 @@ const PROFILE_DEFINITIONS: Record<AmbientProfileId, AmbientProfileDefinition> = 
   "green-canopy": {
     id: "green-canopy",
     label: "Canopy Light",
-    clearColorRgba: [199, 221, 207, 255],
-    fogColorRgba: [177, 204, 184, 255],
-    fogStartDistance: metersToWorldUnits(78),
-    fogEndDistance: metersToWorldUnits(400),
-    skyTopColorRgba: [91, 129, 137, 255],
-    skyHorizonColorRgba: [188, 220, 198, 255],
-    skyCloudColorRgba: [199, 219, 206, 255],
-    skyCloudCoverage: 0.26,
-    skyCloudBand: 0.64,
+    clearColorRgba: [184, 211, 192, 255],
+    fogColorRgba: [138, 176, 146, 255],
+    fogStartDistance: metersToWorldUnits(70),
+    fogEndDistance: metersToWorldUnits(372),
+    skyTopColorRgba: [57, 105, 113, 255],
+    skyHorizonColorRgba: [174, 214, 184, 255],
+    skyCloudColorRgba: [174, 203, 181, 255],
+    skyCloudCoverage: 0.30,
+    skyCloudBand: 0.66,
     ashfallIntensity: 0,
-    fungalGlowIntensity: 0.10,
+    fungalGlowIntensity: 0.06,
   },
   "dry-haze": {
     id: "dry-haze",
-    label: "Dry Haze",
-    clearColorRgba: [226, 214, 190, 255],
-    fogColorRgba: [215, 197, 164, 255],
-    fogStartDistance: metersToWorldUnits(88),
-    fogEndDistance: metersToWorldUnits(440),
-    skyTopColorRgba: [130, 137, 144, 255],
-    skyHorizonColorRgba: [225, 207, 177, 255],
-    skyCloudColorRgba: [190, 178, 157, 255],
-    skyCloudCoverage: 0.22,
-    skyCloudBand: 0.56,
-    ashfallIntensity: 0.10,
+    label: "Mineral Haze",
+    clearColorRgba: [220, 210, 188, 255],
+    fogColorRgba: [203, 188, 154, 255],
+    fogStartDistance: metersToWorldUnits(84),
+    fogEndDistance: metersToWorldUnits(420),
+    skyTopColorRgba: [112, 124, 137, 255],
+    skyHorizonColorRgba: [222, 200, 162, 255],
+    skyCloudColorRgba: [174, 166, 145, 255],
+    skyCloudCoverage: 0.28,
+    skyCloudBand: 0.54,
+    ashfallIntensity: 0.08,
     fungalGlowIntensity: 0,
   },
   ashfall: {
     id: "ashfall",
-    label: "Ash Storm",
-    clearColorRgba: [158, 132, 106, 255],
-    fogColorRgba: [151, 121, 96, 255],
-    fogStartDistance: metersToWorldUnits(44),
-    fogEndDistance: metersToWorldUnits(336),
-    skyTopColorRgba: [68, 62, 63, 255],
-    skyHorizonColorRgba: [202, 143, 91, 255],
-    skyCloudColorRgba: [95, 84, 73, 255],
-    skyCloudCoverage: 0.92,
-    skyCloudBand: 0.44,
-    ashfallIntensity: 0.92,
+    label: "Ashlands",
+    clearColorRgba: [137, 116, 101, 255],
+    fogColorRgba: [126, 101, 85, 255],
+    fogStartDistance: metersToWorldUnits(38),
+    fogEndDistance: metersToWorldUnits(304),
+    skyTopColorRgba: [48, 48, 52, 255],
+    skyHorizonColorRgba: [185, 115, 78, 255],
+    skyCloudColorRgba: [75, 67, 62, 255],
+    skyCloudCoverage: 0.96,
+    skyCloudBand: 0.40,
+    ashfallIntensity: 0.98,
     fungalGlowIntensity: 0,
+  },
+  "salt-marsh": {
+    id: "salt-marsh",
+    label: "Salt Marsh",
+    clearColorRgba: [196, 207, 197, 255],
+    fogColorRgba: [190, 198, 179, 255],
+    fogStartDistance: metersToWorldUnits(48),
+    fogEndDistance: metersToWorldUnits(316),
+    skyTopColorRgba: [86, 107, 112, 255],
+    skyHorizonColorRgba: [218, 218, 193, 255],
+    skyCloudColorRgba: [176, 185, 166, 255],
+    skyCloudCoverage: 0.66,
+    skyCloudBand: 0.48,
+    ashfallIntensity: 0.08,
+    fungalGlowIntensity: 0.05,
   },
   "silt-mist": {
     id: "silt-mist",
     label: "Silt Mist",
-    clearColorRgba: [190, 205, 202, 255],
-    fogColorRgba: [157, 178, 171, 255],
-    fogStartDistance: metersToWorldUnits(54),
-    fogEndDistance: metersToWorldUnits(348),
-    skyTopColorRgba: [74, 96, 103, 255],
-    skyHorizonColorRgba: [166, 191, 182, 255],
-    skyCloudColorRgba: [116, 139, 132, 255],
-    skyCloudCoverage: 0.58,
-    skyCloudBand: 0.46,
-    ashfallIntensity: 0.18,
-    fungalGlowIntensity: 0.10,
+    clearColorRgba: [181, 199, 196, 255],
+    fogColorRgba: [143, 168, 159, 255],
+    fogStartDistance: metersToWorldUnits(50),
+    fogEndDistance: metersToWorldUnits(336),
+    skyTopColorRgba: [65, 91, 100, 255],
+    skyHorizonColorRgba: [170, 196, 184, 255],
+    skyCloudColorRgba: [106, 132, 126, 255],
+    skyCloudCoverage: 0.62,
+    skyCloudBand: 0.45,
+    ashfallIntensity: 0.16,
+    fungalGlowIntensity: 0.06,
+  },
+  wetlands: {
+    id: "wetlands",
+    label: "Blackwater Wetlands",
+    clearColorRgba: [146, 177, 172, 255],
+    fogColorRgba: [92, 128, 123, 255],
+    fogStartDistance: metersToWorldUnits(36),
+    fogEndDistance: metersToWorldUnits(276),
+    skyTopColorRgba: [34, 62, 70, 255],
+    skyHorizonColorRgba: [124, 175, 157, 255],
+    skyCloudColorRgba: [58, 95, 91, 255],
+    skyCloudCoverage: 0.74,
+    skyCloudBand: 0.36,
+    ashfallIntensity: 0.04,
+    fungalGlowIntensity: 0.18,
   },
   "fungal-lantern": {
     id: "fungal-lantern",
     label: "Fungal Glow",
-    clearColorRgba: [184, 197, 219, 255],
-    fogColorRgba: [136, 178, 193, 255],
-    fogStartDistance: metersToWorldUnits(56),
-    fogEndDistance: metersToWorldUnits(352),
-    skyTopColorRgba: [42, 59, 84, 255],
-    skyHorizonColorRgba: [108, 177, 185, 255],
-    skyCloudColorRgba: [62, 111, 125, 255],
-    skyCloudCoverage: 0.58,
-    skyCloudBand: 0.38,
-    ashfallIntensity: 0.05,
-    fungalGlowIntensity: 0.78,
+    clearColorRgba: [169, 190, 211, 255],
+    fogColorRgba: [102, 170, 184, 255],
+    fogStartDistance: metersToWorldUnits(48),
+    fogEndDistance: metersToWorldUnits(324),
+    skyTopColorRgba: [40, 66, 94, 255],
+    skyHorizonColorRgba: [82, 184, 185, 255],
+    skyCloudColorRgba: [40, 119, 132, 255],
+    skyCloudCoverage: 0.64,
+    skyCloudBand: 0.35,
+    ashfallIntensity: 0.03,
+    fungalGlowIntensity: 0.86,
+  },
+  "glass-coast": {
+    id: "glass-coast",
+    label: "Glass Coast",
+    clearColorRgba: [191, 218, 226, 255],
+    fogColorRgba: [155, 207, 219, 255],
+    fogStartDistance: metersToWorldUnits(82),
+    fogEndDistance: metersToWorldUnits(448),
+    skyTopColorRgba: [39, 101, 145, 255],
+    skyHorizonColorRgba: [211, 236, 230, 255],
+    skyCloudColorRgba: [151, 198, 212, 255],
+    skyCloudCoverage: 0.22,
+    skyCloudBand: 0.68,
+    ashfallIntensity: 0,
+    fungalGlowIntensity: 0.02,
   },
   "cold-glass": {
     id: "cold-glass",
     label: "Cold Glass",
-    clearColorRgba: [201, 220, 236, 255],
-    fogColorRgba: [180, 209, 228, 255],
-    fogStartDistance: metersToWorldUnits(74),
-    fogEndDistance: metersToWorldUnits(424),
-    skyTopColorRgba: [80, 113, 148, 255],
-    skyHorizonColorRgba: [196, 222, 236, 255],
-    skyCloudColorRgba: [176, 204, 222, 255],
-    skyCloudCoverage: 0.34,
-    skyCloudBand: 0.62,
+    clearColorRgba: [194, 216, 231, 255],
+    fogColorRgba: [166, 201, 224, 255],
+    fogStartDistance: metersToWorldUnits(70),
+    fogEndDistance: metersToWorldUnits(408),
+    skyTopColorRgba: [55, 100, 147, 255],
+    skyHorizonColorRgba: [199, 225, 239, 255],
+    skyCloudColorRgba: [161, 195, 218, 255],
+    skyCloudCoverage: 0.38,
+    skyCloudBand: 0.60,
     ashfallIntensity: 0,
-    fungalGlowIntensity: 0.04,
+    fungalGlowIntensity: 0.03,
   },
   subterranean: {
     id: "subterranean",
     label: "Underdeep",
-    clearColorRgba: [35, 44, 48, 255],
-    fogColorRgba: [48, 58, 58, 255],
-    fogStartDistance: metersToWorldUnits(18),
-    fogEndDistance: metersToWorldUnits(128),
-    skyTopColorRgba: [20, 28, 30, 255],
-    skyHorizonColorRgba: [44, 52, 51, 255],
-    skyCloudColorRgba: [32, 39, 39, 255],
-    skyCloudCoverage: 0.30,
-    skyCloudBand: 0.36,
-    ashfallIntensity: 0.12,
-    fungalGlowIntensity: 0.28,
+    clearColorRgba: [30, 41, 45, 255],
+    fogColorRgba: [42, 56, 55, 255],
+    fogStartDistance: metersToWorldUnits(16),
+    fogEndDistance: metersToWorldUnits(116),
+    skyTopColorRgba: [16, 25, 29, 255],
+    skyHorizonColorRgba: [39, 51, 50, 255],
+    skyCloudColorRgba: [26, 36, 37, 255],
+    skyCloudCoverage: 0.34,
+    skyCloudBand: 0.32,
+    ashfallIntensity: 0.10,
+    fungalGlowIntensity: 0.34,
   },
 };
 
@@ -271,14 +319,17 @@ function resolveSurfaceProfileId(probe: AmbientWorldProbe): AmbientProfileId {
     case "ember_caldera":
       return "ashfall";
     case "marsh_blackwater":
-    case "moor_shadowglass":
+      return "wetlands";
     case "saltflat_mirror":
+      return "salt-marsh";
+    case "moor_shadowglass":
       return "silt-mist";
     case "firefly_lantern":
     case "fungal_moonlit":
     case "bloom_prism":
       return "fungal-lantern";
     case "dunes_glass":
+      return "glass-coast";
     case "tundra_blue_ice":
       return "cold-glass";
     case "verdant_karst":
@@ -292,7 +343,7 @@ function resolveSurfaceProfileId(probe: AmbientWorldProbe): AmbientProfileId {
   }
 
   if (routeHaze) {
-    return "silt-mist";
+    return probe.biomeId === "saltflat" ? "salt-marsh" : "silt-mist";
   }
 
   switch (probe.biomeId) {
@@ -301,9 +352,11 @@ function resolveSurfaceProfileId(probe: AmbientWorldProbe): AmbientProfileId {
     case "bloom":
       return "green-canopy";
     case "marsh":
+      return "wetlands";
     case "moor":
-    case "saltflat":
       return "silt-mist";
+    case "saltflat":
+      return "salt-marsh";
     case "firefly":
     case "fungal":
       return "fungal-lantern";
@@ -312,8 +365,9 @@ function resolveSurfaceProfileId(probe: AmbientWorldProbe): AmbientProfileId {
       return "ashfall";
     case "tundra":
     case "highland":
-    case "shardlands":
       return "cold-glass";
+    case "shardlands":
+      return "glass-coast";
     case "savanna":
     case "steppe":
     case "dunes":

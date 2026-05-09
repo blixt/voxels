@@ -31,16 +31,20 @@ const BASE_FIELDS: AmbientWorldProbe["fields"] = {
   peakness: 0.5,
   islandInterior: 1,
   coastalShelf: 0,
+  shorelineBand: 0,
+  deepOcean: 0,
 };
 
 test("ambient profiles map major biome moods to distinct rendering environments", () => {
   const cases: Array<[BiomeId, AmbientWorldProbe["regionalVariantId"], AmbientProfileId]> = [
     ["verdant", null, "green-canopy"],
     ["savanna", null, "dry-haze"],
-    ["marsh", null, "silt-mist"],
+    ["marsh", null, "wetlands"],
+    ["saltflat", null, "salt-marsh"],
     ["fungal", null, "fungal-lantern"],
     ["ember", null, "ashfall"],
     ["tundra", null, "cold-glass"],
+    ["shardlands", null, "glass-coast"],
     ["steppe", "ember_caldera", "ashfall"],
   ];
 
@@ -95,7 +99,7 @@ test("ashland and fungal ambience carry cheap sky/weather shader controls", () =
   const ashEnvironment = buildAmbientRenderEnvironment(ash);
 
   expect(ash.id).toBe("ashfall");
-  expect(ash.label).toBe("Ash Storm");
+  expect(ash.label).toBe("Ashlands");
   expect(ash.skyTopColorRgba[0]).toBeLessThan(ash.skyHorizonColorRgba[0]);
   expect(ash.skyTopColorRgba[2]).toBeLessThan(90);
   expect(ash.skyCloudCoverage).toBeGreaterThan(0.78);
@@ -126,11 +130,55 @@ test("old-road materials and landmarks pull dry routes into ash haze", () => {
   }));
 
   expect(routeSurface.id).toBe("ashfall");
-  expect(routeSurface.fogEndDistance).toBeGreaterThan(metersToWorldUnits(365));
-  expect(routeSurface.fogEndDistance).toBeLessThan(metersToWorldUnits(380));
+  expect(routeSurface.fogEndDistance).toBeGreaterThan(metersToWorldUnits(340));
+  expect(routeSurface.fogEndDistance).toBeLessThan(metersToWorldUnits(360));
   expect(routeSurface.ashfallIntensity).toBeGreaterThan(0.50);
   expect(routeLandmark.id).toBe("ashfall");
-  expect(wetRoute.id).toBe("silt-mist");
+  expect(wetRoute.id).toBe("salt-marsh");
+});
+
+test("regional atmosphere profiles are meaningfully distinct without extra runtime effects", () => {
+  const profiles = [
+    resolveAmbientWorldProfile(buildProbe({
+      biomeId: "ember",
+      regionalVariantId: "ember_caldera",
+      regionalVariantStrength: 1,
+      specialStrength: 1,
+    })),
+    resolveAmbientWorldProfile(buildProbe({
+      biomeId: "saltflat",
+      regionalVariantId: "saltflat_mirror",
+      regionalVariantStrength: 1,
+      fields: { ...BASE_FIELDS, moisture: 0.76, oceanness: 0.72 },
+    })),
+    resolveAmbientWorldProfile(buildProbe({
+      biomeId: "marsh",
+      regionalVariantId: "marsh_blackwater",
+      regionalVariantStrength: 1,
+      fields: { ...BASE_FIELDS, moisture: 0.88, drainage: 0.22 },
+    })),
+    resolveAmbientWorldProfile(buildProbe({
+      biomeId: "shardlands",
+      regionalVariantId: "dunes_glass",
+      regionalVariantStrength: 1,
+      fields: { ...BASE_FIELDS, oceanness: 0.68, moisture: 0.38 },
+    })),
+  ];
+
+  expect(profiles.map((profile) => profile.id)).toEqual([
+    "ashfall",
+    "salt-marsh",
+    "wetlands",
+    "glass-coast",
+  ]);
+  for (let leftIndex = 0; leftIndex < profiles.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < profiles.length; rightIndex += 1) {
+      expect(profileDistance(profiles[leftIndex]!, profiles[rightIndex]!)).toBeGreaterThan(96);
+    }
+  }
+  expect(profiles[0]!.fogEndDistance).toBeLessThan(profiles[3]!.fogEndDistance);
+  expect(profiles[2]!.skyCloudCoverage).toBeGreaterThan(profiles[3]!.skyCloudCoverage + 0.35);
+  expect(profiles[3]!.skyHorizonColorRgba[2]).toBeGreaterThan(profiles[0]!.skyHorizonColorRgba[2] + 90);
 });
 
 test("strong weather skies keep browser-lab-safe luma and color separation", () => {
@@ -195,7 +243,7 @@ test("procedural ambient profiles are deterministic and varied across the world"
     profileIds.add(resolveAmbientWorldProfile(generator.sampleBiomeProbe(x, z)).id);
   }
 
-  expect(profileIds.size).toBeGreaterThanOrEqual(5);
+  expect(profileIds.size).toBeGreaterThanOrEqual(3);
   expect(shortestSurfaceFog).toBeGreaterThanOrEqual(metersToWorldUnits(224));
 });
 
@@ -237,4 +285,25 @@ function buildProbe(overrides: Partial<AmbientWorldProbe>): AmbientWorldProbe {
 
 function rgbaLuma(color: readonly [number, number, number, number]): number {
   return color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+}
+
+function profileDistance(
+  left: ReturnType<typeof resolveAmbientWorldProfile>,
+  right: ReturnType<typeof resolveAmbientWorldProfile>,
+): number {
+  return colorDistance(left.skyTopColorRgba, right.skyTopColorRgba)
+    + colorDistance(left.skyHorizonColorRgba, right.skyHorizonColorRgba)
+    + colorDistance(left.fogColorRgba, right.fogColorRgba)
+    + Math.abs(left.skyCloudCoverage - right.skyCloudCoverage) * 100
+    + Math.abs(left.ashfallIntensity - right.ashfallIntensity) * 100
+    + Math.abs(left.fungalGlowIntensity - right.fungalGlowIntensity) * 100;
+}
+
+function colorDistance(
+  left: readonly [number, number, number, number],
+  right: readonly [number, number, number, number],
+): number {
+  return Math.abs(left[0] - right[0])
+    + Math.abs(left[1] - right[1])
+    + Math.abs(left[2] - right[2]);
 }

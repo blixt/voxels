@@ -174,12 +174,22 @@ Every region-facing atmosphere profile needs:
 
 Required profile reads:
 - Ashfall: darker upper sky, low dirty haze, ash shelf, muted ground contrast.
+- Ashlands: compressed visibility, brown-gray zenith, rust horizon, high ash shelf, water biased opaque and silty.
+- Salt marsh: chalky low horizon, green-gray brine fog, brackish water, shallow depth read.
 - Silt mist: pale low horizon, softer depth, low saturation, water/silt ambiguity.
+- Blackwater wetlands: short green-black visibility, humid low clouds, darker water, visible route silhouettes at close and mid range.
 - Fungal glow: cool horizon glow, damp shadow tint, restrained cyan accents.
+- Glass coast: clear blue-cyan distance, low cloud coverage, bright horizon, more transparent glassy water.
 - Cold glass: sharp pale sky, cold fog, blue-black material separation.
 - Dry haze: warm mineral distance, not orange desert.
 - Green canopy: filtered green presence without becoming generic forest.
 - Underground: low sky contribution, stronger local darkness, no flat black.
+
+First checkpoint implementation rules:
+- Prefer static profile parameters over new per-pixel or per-frame effects.
+- Fog/sky/water distinctions should be measurable in unit tests through color distance, cloud coverage, fog distance, and water alpha/fog parameters.
+- Regional identity should survive default blending without pushing surface fog beyond LOD-supported bounds.
+- Water visuals may vary by preset, but the default mesher path must remain cheap and allocation-free beyond existing color packing work.
 
 ### Sky Pass Principles
 

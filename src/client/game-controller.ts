@@ -29,11 +29,23 @@ import {
   type ExplorationObservation,
 } from "../engine/exploration-journal.ts";
 import {
+  resolveExplorationInteractionTarget,
+  type ExplorationInteractionCandidate,
+  type ExplorationInteractionVerb,
+} from "../engine/exploration-interactions.ts";
+import {
   SkillJournal,
   type SkillId,
   type SkillJournalState,
   type SkillJournalSnapshot,
 } from "../engine/skill-journal.ts";
+import {
+  RouteJournal,
+  type RouteJournalSnapshot,
+  type RouteJournalState,
+  type TravelGoalDefinition,
+  type TravelGoalSnapshot,
+} from "../engine/travel-goals.ts";
 import {
   describeExplorationSkillEffects,
   type ExplorationSkillEffects,
@@ -105,6 +117,11 @@ import {
 } from "../engine/water-visuals.ts";
 import { resolveObservedUndergroundBiomeId } from "../engine/underground-discovery.ts";
 import type { MeshBuildSummary } from "../engine/mesher.ts";
+import {
+  describeDiscovery,
+  formatDiscoveryName,
+  type DiscoveryRole,
+} from "../engine/discovery-catalog.ts";
 
 const MAX_DELTA_SECONDS = 0.05;
 const HUD_PUSH_INTERVAL_MS = 120;
@@ -142,6 +159,41 @@ const ANCIENT_LANDMARK_IDS = new Set([
   "pilgrim_lantern",
   "bone_chimes",
 ]);
+const ROUTE_LANDMARK_IDS = new Set([
+  "ancestor_pillar",
+  "ash_marker",
+  "glass_cairn",
+  "silt_shell",
+  "velothi_shrine",
+  "pilgrim_cairn",
+  "old_road_causeway",
+  "pilgrim_lantern",
+  "bone_chimes",
+  "ashlander_travel_pack",
+]);
+const DEFAULT_TRAVEL_GOAL_ID = "first-bearings";
+const TRAVEL_GOALS = [
+  {
+    id: DEFAULT_TRAVEL_GOAL_ID,
+    routeId: "pilgrim-road",
+    title: "First Bearings",
+    journalText: "Get your bearings on the pilgrim road.",
+    steps: [
+      { id: "inspect-causeway", kind: "inspect", targetId: "old_road_causeway", label: "Inspect the old causeway" },
+      { id: "read-shrine", kind: "read", targetId: "velothi_shrine", label: "Read the wayshrine" },
+      { id: "use-pack", kind: "use", targetId: "ashlander_travel_pack", label: "Use the travel pack", optional: true },
+    ],
+  },
+  {
+    id: "ash-road",
+    routeId: "ash-road",
+    title: "Ash Road",
+    journalText: "Follow the old ash markers into harsher country.",
+    steps: [
+      { id: "visit-ash-marker", kind: "visit", targetId: "ash_marker", label: "Reach an ash marker" },
+    ],
+  },
+] as const satisfies readonly TravelGoalDefinition[];
 const LANDMARK_SAMPLE_OFFSET_CACHE = new Map<string, ReadonlyArray<readonly [number, number]>>();
 
 export interface GameHudSnapshot {
@@ -184,6 +236,19 @@ export interface GameHudSnapshot {
   ambientProfileId: string;
   ambientProfileLabel: string;
   ambientFogEndMeters: number;
+  activePlaceName: string;
+  activeRouteName: string;
+  activeRouteProgressLabel: string;
+  activeTravelGoalTitle: string;
+  activeTravelGoalStepLabel: string;
+  activeTravelGoalProgressRatio: number;
+  travelContext: "surface" | "underground";
+  travelContextLabel: string;
+  interactionTargetName: string;
+  interactionPromptLabel: string;
+  interactionPromptDescription: string;
+  interactionPromptVerb: ExplorationInteractionVerb | null;
+  lastInteractionLabel: string;
   discoveredBiomeCount: number;
   discoveredUndergroundBiomeCount: number;
   discoveredRegionalVariantCount: number;
@@ -305,6 +370,20 @@ export interface ProgressStateSnapshot {
   version: 1;
   discovery: ExplorationJournalState;
   skills: SkillJournalState;
+  routes: RouteJournalState;
+}
+
+interface ActiveExplorationHudState {
+  activePlaceName: string;
+  activeRouteName: string;
+  activeRouteProgressLabel: string;
+  activeTravelGoalTitle: string;
+  activeTravelGoalStepLabel: string;
+  activeTravelGoalProgressRatio: number;
+  interactionTargetName: string;
+  interactionPromptLabel: string;
+  interactionPromptDescription: string;
+  interactionPromptVerb: ExplorationInteractionVerb | null;
 }
 
 interface BootstrapReadiness {
@@ -857,6 +936,7 @@ export class GameController {
   );
   readonly explorationJournal = new ExplorationJournal();
   readonly skillJournal = new SkillJournal();
+  readonly routeJournal = new RouteJournal(TRAVEL_GOALS);
 
   renderer: WebGpuVoxelRenderer | null = null;
   camera: FirstPersonCameraState = createFirstPersonCamera([0.5, 1500, 0.5]);
@@ -954,6 +1034,7 @@ export class GameController {
   private lastTravelContextSampleAt = 0;
   private lastTravelContextFeetPosition: Vec3 | null = null;
   private lastTravelContext: "surface" | "underground" = "surface";
+  private lastInteractionLabel = "No interaction yet";
   private readonly bootstrapBenchmarkStartedAt = performance.now();
   private readonly bootstrapBenchmarkSamples: BootstrapBenchmarkSample[] = [];
   private bootstrapPlayableReady = false;
@@ -964,6 +1045,7 @@ export class GameController {
     this.canvas = canvas;
     this.eagerBootstrapBenchmark = options.eagerBootstrapBenchmark ?? false;
     this.pointerLockTargets.add(canvas);
+    this.routeJournal.startGoal(DEFAULT_TRAVEL_GOAL_ID);
   }
 
   registerPointerLockTarget(target: HTMLElement): () => void {
@@ -1032,6 +1114,8 @@ export class GameController {
     const discovery = this.refreshDiscoveryJournal();
     const skills = this.skillJournal.observeDiscoveries(this.explorationJournal.drainPendingSkillDiscoveries());
     const explorationSkillEffects = resolveExplorationSkillEffects(skills);
+    const routeSnapshot = this.routeJournal.getSnapshot();
+    const activeExplorationHud = this.buildActiveExplorationHudState(currentWorld, discovery, routeSnapshot);
     const bootstrap = this.getBootstrapReadiness();
     const ambientProfile = currentWorld.ambientProfile;
     return {
@@ -1083,6 +1167,19 @@ export class GameController {
       ambientProfileId: ambientProfile.id,
       ambientProfileLabel: ambientProfile.label,
       ambientFogEndMeters: worldUnitsToMeters(ambientProfile.fogEndDistance),
+      activePlaceName: activeExplorationHud.activePlaceName,
+      activeRouteName: activeExplorationHud.activeRouteName,
+      activeRouteProgressLabel: activeExplorationHud.activeRouteProgressLabel,
+      activeTravelGoalTitle: activeExplorationHud.activeTravelGoalTitle,
+      activeTravelGoalStepLabel: activeExplorationHud.activeTravelGoalStepLabel,
+      activeTravelGoalProgressRatio: activeExplorationHud.activeTravelGoalProgressRatio,
+      travelContext: this.lastTravelContext,
+      travelContextLabel: this.lastTravelContext === "underground" ? "Underground route" : "Surface route",
+      interactionTargetName: activeExplorationHud.interactionTargetName,
+      interactionPromptLabel: activeExplorationHud.interactionPromptLabel,
+      interactionPromptDescription: activeExplorationHud.interactionPromptDescription,
+      interactionPromptVerb: activeExplorationHud.interactionPromptVerb,
+      lastInteractionLabel: this.lastInteractionLabel,
       discoveredBiomeCount: discovery.discoveredBiomeIds.length,
       discoveredUndergroundBiomeCount: discovery.discoveredUndergroundBiomeIds.length,
       discoveredRegionalVariantCount: discovery.discoveredRegionalVariantIds.length,
@@ -1269,12 +1366,15 @@ export class GameController {
       version: 1,
       discovery: this.explorationJournal.exportState(),
       skills: this.skillJournal.exportState(),
+      routes: this.routeJournal.exportState(),
     };
   }
 
   importProgressState(state: Partial<ProgressStateSnapshot>): ProgressStateSnapshot {
     this.explorationJournal.importState(state.discovery ?? {});
     this.skillJournal.importState(state.skills ?? {});
+    this.routeJournal.importState(state.routes ?? {});
+    this.routeJournal.startGoal(DEFAULT_TRAVEL_GOAL_ID);
     this.lastDiscoverySampleFeetPosition = null;
     this.lastDiscoverySampleAt = 0;
     this.refreshDiscoveryJournal(true);
@@ -2775,6 +2875,116 @@ export class GameController {
     document.addEventListener("visibilitychange", this.handleVisibilityChange);
   }
 
+  private performFocusedInteraction(): void {
+    const currentWorld = this.sampleCurrentWorldContext();
+    const discovery = this.refreshDiscoveryJournal(true);
+    const target = this.resolveCurrentInteraction(currentWorld, discovery).target;
+    const prompt = target?.prompts.find((candidate) => !candidate.disabled) ?? null;
+    if (!target || !prompt) {
+      this.lastInteractionLabel = "No route sign nearby";
+      this.status = this.lastInteractionLabel;
+      this.pushHud(true);
+      return;
+    }
+
+    const routeId = readPayloadRouteId(prompt.eventInput.payload) ?? routeIdForLandmark(target.id);
+    const result = this.routeJournal.observeProgress({
+      routeId,
+      kind: prompt.verb,
+      targetId: target.id,
+    });
+    const completedTitle = result.completedGoalIds
+      .map((goalId) => TRAVEL_GOALS.find((goal) => goal.id === goalId)?.title ?? goalId)
+      .join(", ");
+    this.lastInteractionLabel = completedTitle
+      ? `Completed ${completedTitle}`
+      : result.changed
+      ? prompt.label
+      : `${prompt.label} noted`;
+    this.status = this.lastInteractionLabel;
+    this.pushHud(true);
+  }
+
+  private buildActiveExplorationHudState(
+    currentWorld: CurrentWorldProbeContext,
+    discovery: ExplorationJournalSnapshot,
+    routeSnapshot: RouteJournalSnapshot,
+  ): ActiveExplorationHudState {
+    const target = this.resolveCurrentInteraction(currentWorld, discovery).target;
+    const activeGoal = selectActiveTravelGoal(routeSnapshot);
+    const nextStep = activeGoal ? findNextTravelGoalStep(activeGoal) : null;
+    const regionName = formatDiscoveryName("biome", currentWorld.probe.biomeId, "Unknown region");
+    const placeName = target?.name
+      ?? (discovery.currentLandmarkId
+        ? formatDiscoveryName("landmark", discovery.currentLandmarkId)
+        : currentWorld.probe.regionalVariantId
+        ? formatDiscoveryName("regional-variant", currentWorld.probe.regionalVariantId)
+        : regionName);
+    const prompt = target?.prompts.find((candidate) => !candidate.disabled) ?? null;
+    const routeName = activeGoal ? formatRouteName(activeGoal.routeId) : "Open road";
+    return {
+      activePlaceName: placeName,
+      activeRouteName: routeName,
+      activeRouteProgressLabel: activeGoal
+        ? `${activeGoal.completedRequiredStepCount}/${activeGoal.requiredStepCount} steps`
+        : "No route tracked",
+      activeTravelGoalTitle: activeGoal?.title ?? "Wander",
+      activeTravelGoalStepLabel: nextStep?.label ?? (activeGoal?.completed ? "Route complete" : "Find a road sign"),
+      activeTravelGoalProgressRatio: activeGoal?.progress ?? 0,
+      interactionTargetName: target?.name ?? "No nearby focus",
+      interactionPromptLabel: prompt?.label ?? "Explore the route",
+      interactionPromptDescription: prompt?.description
+        ?? (target ? `${target.distanceMeters.toFixed(1)} m away` : "Travel, inspect landmarks, and read route signs."),
+      interactionPromptVerb: prompt?.verb ?? null,
+    };
+  }
+
+  private resolveCurrentInteraction(
+    currentWorld: CurrentWorldProbeContext,
+    discovery: ExplorationJournalSnapshot,
+  ): ReturnType<typeof resolveExplorationInteractionTarget> {
+    return resolveExplorationInteractionTarget({
+      viewerPosition: this.camera.position,
+      viewerForward: buildFirstPersonCameraMatrices(this.camera, 1).forward,
+      maxDistanceMeters: 8,
+      candidates: this.buildExplorationInteractionCandidates(currentWorld, discovery),
+    });
+  }
+
+  private buildExplorationInteractionCandidates(
+    currentWorld: CurrentWorldProbeContext,
+    discovery: ExplorationJournalSnapshot,
+  ): ExplorationInteractionCandidate[] {
+    const landmarkIds = [
+      currentWorld.probe.landmarkId,
+      discovery.currentLandmarkId,
+    ].filter((landmarkId): landmarkId is string => typeof landmarkId === "string" && landmarkId.length > 0);
+    const uniqueLandmarkIds = [...new Set(landmarkIds)];
+    const candidates: ExplorationInteractionCandidate[] = [];
+    const forward = buildFirstPersonCameraMatrices(this.camera, 1).forward;
+    for (const landmarkId of uniqueLandmarkIds) {
+      const presentation = describeDiscovery("landmark", landmarkId);
+      const routeId = routeIdForLandmark(landmarkId);
+      candidates.push({
+        id: landmarkId,
+        subjectType: landmarkId === "ashlander_travel_pack" ? "object" : "landmark",
+        name: presentation.name,
+        role: presentation.role,
+        worldPosition: [
+          this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.4),
+          currentWorld.probe.surfaceY,
+          this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.4),
+        ],
+        interactionRadiusMeters: 5,
+        priority: ROUTE_LANDMARK_IDS.has(landmarkId) ? 20 : 4,
+        prompts: buildLandmarkInteractionPrompts(landmarkId, presentation.role),
+        flavorText: presentation.flavorText,
+        payload: routeId ? { routeId } : undefined,
+      });
+    }
+    return candidates;
+  }
+
   private readonly handleCanvasClick = () => {
     if (!this.pointerLocked) {
       void this.requestPointerLock();
@@ -2833,6 +3043,11 @@ export class GameController {
     }
     if (this.pointerLocked && isMovementKey(event.code)) {
       event.preventDefault();
+    }
+    if (this.pointerLocked && (event.code === "KeyE" || event.code === "Enter")) {
+      event.preventDefault();
+      this.performFocusedInteraction();
+      return;
     }
     this.pressedKeys.add(event.code);
   };
@@ -3795,7 +4010,24 @@ export class GameController {
     this.lastDiscoverySampleAt = now;
     this.lastDiscoverySampleFeetPosition = [...currentFeetPosition] as Vec3;
     this.lastDiscoverySnapshot = this.explorationJournal.observe(this.sampleExplorationObservation());
+    this.observePassiveRouteProgress(this.lastDiscoverySnapshot);
     return this.lastDiscoverySnapshot;
+  }
+
+  private observePassiveRouteProgress(discovery: ExplorationJournalSnapshot): void {
+    const landmarkId = discovery.currentLandmarkId;
+    if (!landmarkId) {
+      return;
+    }
+    const routeId = routeIdForLandmark(landmarkId);
+    if (!routeId) {
+      return;
+    }
+    this.routeJournal.observeProgress({
+      routeId,
+      kind: "visit",
+      targetId: landmarkId,
+    });
   }
 
   private sampleExplorationObservation(): ExplorationObservation {
@@ -3875,6 +4107,83 @@ function buildLandmarkSampleOffsets(effects: ExplorationSkillEffects): ReadonlyA
   const sorted = offsets.sort((left, right) => Math.hypot(left[0], left[1]) - Math.hypot(right[0], right[1]));
   LANDMARK_SAMPLE_OFFSET_CACHE.set(cacheKey, sorted);
   return sorted;
+}
+
+function buildLandmarkInteractionPrompts(
+  landmarkId: string,
+  role: DiscoveryRole,
+): ExplorationInteractionCandidate["prompts"] {
+  if (landmarkId === "velothi_shrine" || role === "shrine") {
+    return [
+      "inspect",
+      { verb: "read", label: "Read the shrine etching", description: "Trace the pilgrim marks for a route clue." },
+      { verb: "use", label: "Offer thanks", description: "Mark the shrine in your journal." },
+    ];
+  }
+  if (landmarkId === "ashlander_travel_pack") {
+    return [
+      "inspect",
+      { verb: "use", label: "Check the travel pack", description: "Look for a route note or useful bearing." },
+    ];
+  }
+  if (role === "old-road") {
+    return [
+      { verb: "inspect", label: `Inspect ${formatDiscoveryName("landmark", landmarkId)}`, description: "Study the old road sign for your route journal." },
+      { verb: "read", label: "Read the road marks", description: "Decode scratches left by earlier travelers." },
+    ];
+  }
+  return ["inspect"];
+}
+
+function routeIdForLandmark(landmarkId: string): string | null {
+  if (landmarkId === "ash_marker") {
+    return "ash-road";
+  }
+  return ROUTE_LANDMARK_IDS.has(landmarkId) ? "pilgrim-road" : null;
+}
+
+function readPayloadRouteId(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const routeId = (payload as Record<string, unknown>).routeId;
+  return typeof routeId === "string" && routeId.trim().length > 0 ? routeId : null;
+}
+
+function selectActiveTravelGoal(snapshot: RouteJournalSnapshot): TravelGoalSnapshot | null {
+  return snapshot.goals.find((goal) => goal.status === "active")
+    ?? snapshot.goals.find((goal) => !goal.completed)
+    ?? snapshot.goals[snapshot.goals.length - 1]
+    ?? null;
+}
+
+function findNextTravelGoalStep(goal: TravelGoalSnapshot): TravelGoalDefinition["steps"][number] | null {
+  const definition = TRAVEL_GOALS.find((candidate) => candidate.id === goal.id);
+  if (!definition) {
+    return null;
+  }
+  return definition.steps.find((step) => !("optional" in step && step.optional === true) && !goal.completedStepIds.includes(step.id))
+    ?? definition.steps.find((step) => !goal.completedStepIds.includes(step.id))
+    ?? null;
+}
+
+function formatRouteName(routeId: string): string {
+  switch (routeId) {
+    case "pilgrim-road":
+      return "Pilgrim Road";
+    case "ash-road":
+      return "Ash Road";
+    default:
+      return titleCaseRouteId(routeId);
+  }
+}
+
+function titleCaseRouteId(routeId: string): string {
+  return routeId
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part[0] ? `${part[0].toUpperCase()}${part.slice(1)}` : part)
+    .join(" ");
 }
 
 function toChunkTuple(coord: { x: number; y: number; z: number }): [number, number, number] {

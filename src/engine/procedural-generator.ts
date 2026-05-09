@@ -10,6 +10,12 @@ import {
   WORLD_REGION_AUTHORITY_THRESHOLD,
   type WorldRegionId,
 } from "./worldgen-region.ts";
+import {
+  sampleAtlasCaveAnchorMeters,
+  sampleAtlasRegionMeters,
+  sampleIslandMaskMeters,
+  WORLD_ATLAS,
+} from "./world-atlas.ts";
 import type { AmbientProfileId } from "./ambient-environment.ts";
 
 export const HEX_COLOR_COUNT = 0x1000;
@@ -199,7 +205,14 @@ interface SurfaceFieldSample {
   scatter: number;
   peakness: number;
   islandInterior: number;
+  shorelineBand: number;
   coastalShelf: number;
+  deepOcean: number;
+  atlasRouteInfluence: number;
+  atlasRouteCore: number;
+  atlasRouteShoulder: number;
+  atlasCaveInfluence: number;
+  atlasCaveCore: number;
   volcanicHeart: number;
   ashRing: number;
   westWetlands: number;
@@ -225,8 +238,10 @@ function createSurfaceFieldSample(): SurfaceFieldSample {
     detail: 0, ridge: 0, basin: 0, channel: 0, dune: 0, mesa: 0, grove: 0,
     oldGrowth: 0, orchard: 0, desolation: 0, strata: 0, surfacePatch: 0,
     surfaceGrain: 0, scatter: 0, peakness: 0, islandInterior: 0, coastalShelf: 0,
-    volcanicHeart: 0, ashRing: 0, westWetlands: 0, northeastGrazelands: 0,
-    southernSaltBasin: 0, easternShardCoast: 0,
+    shorelineBand: 0, deepOcean: 0, atlasRouteInfluence: 0, atlasRouteCore: 0,
+    atlasRouteShoulder: 0, atlasCaveInfluence: 0, atlasCaveCore: 0, volcanicHeart: 0,
+    ashRing: 0, westWetlands: 0, northeastGrazelands: 0, southernSaltBasin: 0,
+    easternShardCoast: 0,
   };
 }
 
@@ -353,7 +368,9 @@ export interface ProceduralBiomeProbe extends ProceduralColumnSample {
     scatter: number;
     peakness: number;
     islandInterior: number;
+    shorelineBand?: number;
     coastalShelf: number;
+    deepOcean?: number;
   };
 }
 
@@ -519,11 +536,33 @@ interface PilgrimRouteSetPiece {
   deltaLateral: number;
 }
 
+interface GeneratorAtlasFields {
+  islandInterior: number;
+  shorelineBand: number;
+  coastalShelf: number;
+  deepOcean: number;
+  primaryRegionId: WorldRegionId | null;
+  secondaryRegionId: WorldRegionId | null;
+  regionStrength: number;
+  regionBlend: number;
+  regionDistance: number;
+  primaryBiomeId: BiomeId | "ocean" | "deep-ocean";
+  regionalVariantId: RegionalVariantId | null;
+  ambientProfileId: AmbientProfileId | null;
+  routeInfluence: number;
+  routeCore: number;
+  routeShoulder: number;
+  distanceToRouteM: number;
+  caveInfluence: number;
+  caveCore: number;
+  distanceToCaveAnchorM: number;
+}
+
 const PILGRIM_ROUTE_BANDS: readonly PilgrimRouteBand[] = [
-  createPilgrimRouteBand(0, 0, 8, 1800, 70),
+  createPilgrimRouteBand(0, 0, 8, 820, 58),
   createPilgrimRouteBand(0, 0, 126, 1800, 70),
-  createPilgrimRouteBand(220, -340, 54, 2200, 72),
-  createPilgrimRouteBand(-540, 420, 315, 2200, 72),
+  createPilgrimRouteBand(220, -340, 54, 2200, 64),
+  createPilgrimRouteBand(-540, 420, 315, 2200, 64),
   createPilgrimRouteBand(960, -780, 202, 2600, 74),
   createPilgrimRouteBand(236, -4624, 58, 3400, 82),
   createPilgrimRouteBand(-1880, -2860, 42, 3200, 86),
@@ -1432,7 +1471,9 @@ export class ProceduralWorldGenerator {
         scatter: this.lastFillSurfaceFields.scatter,
         peakness: this.lastFillSurfaceFields.peakness,
         islandInterior: this.lastFillSurfaceFields.islandInterior,
+        shorelineBand: this.lastFillSurfaceFields.shorelineBand,
         coastalShelf: this.lastFillSurfaceFields.coastalShelf,
+        deepOcean: this.lastFillSurfaceFields.deepOcean,
       },
     };
   }
@@ -1749,6 +1790,7 @@ export class ProceduralWorldGenerator {
     if (regionalVariant) {
       applyRegionalVariantMaterialOverrides(surfaceMaterials, regionalVariant.id);
     }
+    applyAtlasSurfaceMaterialOverrides(surfaceMaterials, fields);
     if (routeSurface) {
       applyPilgrimRouteSurfaceMaterials(surfaceMaterials, routeSurface, fields);
     }
@@ -1847,6 +1889,21 @@ export class ProceduralWorldGenerator {
   private sampleSurfaceFields(worldX: number, worldZ: number): SurfaceFieldSample {
     const out = this.reusableSurfaceFields;
     const province = sampleWorldRegion(worldX, worldZ);
+    const atlas = sampleGeneratorAtlasFields(worldX, worldZ);
+    const atlasRegionId = atlas.primaryRegionId ?? province.regionId;
+    const atlasSecondaryRegionId = atlas.secondaryRegionId ?? atlasRegionId;
+    const atlasBiomeId = atlas.primaryBiomeId === "ocean" || atlas.primaryBiomeId === "deep-ocean"
+      ? province.biomeId
+      : atlas.primaryBiomeId;
+    const atlasRegionStrength = atlas.primaryRegionId
+      ? clamp(atlas.regionStrength + atlas.islandInterior * 0.08, 0, 1)
+      : 0;
+    const atlasRegionAuthority = atlas.primaryRegionId
+      ? atlasRegionStrength * smoothstep(0.72, 0.18, atlas.regionBlend)
+      : 0;
+    const atlasRegionCore = atlas.primaryRegionId
+      ? smoothstep(1.18, 0.12, atlas.regionDistance) * atlas.islandInterior * atlasRegionAuthority
+      : 0;
     const continentalness = fbm2D5(worldX * CONTINENT_SCALE, worldZ * CONTINENT_SCALE, this.continentSeed) - 0.5;
     const uplift = fbm2D4(worldX * UPLIFT_SCALE, worldZ * UPLIFT_SCALE, this.upliftSeed);
     const hills = fbm2D4(worldX * HILLS_SCALE, worldZ * HILLS_SCALE, this.hillsSeed) - 0.5;
@@ -1868,21 +1925,21 @@ export class ProceduralWorldGenerator {
         + province.southernSaltBasin * 0.10
         + province.northeastGrazelands * 0.04
         - province.westWetlands * 0.05
-        - province.coastalShelf * 0.05,
+        - atlas.coastalShelf * 0.05,
       0,
       1,
     );
     out.moisture = clamp(
       fbm2D4(worldX * MOISTURE_SCALE, worldZ * MOISTURE_SCALE, this.moistureSeed)
         + province.westWetlands * 0.34
-        + province.coastalShelf * 0.08
+        + atlas.coastalShelf * 0.08
         - province.ashRing * 0.22
         - province.volcanicHeart * 0.34
         - province.southernSaltBasin * 0.28,
       0,
       1,
     );
-    out.uplift = clamp(uplift + province.volcanicHeart * 0.34 + province.ashRing * 0.12 - province.coastalShelf * 0.16, 0, 1);
+    out.uplift = clamp(uplift + province.volcanicHeart * 0.12 + province.ashRing * 0.04 + sampleAtlasUpliftBias(atlasRegionId, atlasRegionCore) - atlas.coastalShelf * 0.16, 0, 1);
     out.drainage = clamp(
       fbm2D3(worldX * DRAINAGE_SCALE, worldZ * DRAINAGE_SCALE, this.drainageSeed)
         + province.westWetlands * 0.18
@@ -1907,9 +1964,9 @@ export class ProceduralWorldGenerator {
       0,
       1,
     );
-    out.globalHeight = clamp(globalHeight * (0.52 + province.islandInterior * 0.58) - province.coastalShelf * 0.30 + province.volcanicHeart * 0.12, 0, 1);
-    out.mountainness = clamp(mountainness + province.volcanicHeart * 0.52 + province.ashRing * 0.18, 0, 1);
-    out.oceanness = clamp(Math.max(oceanness, 1 - province.islandInterior + province.coastalShelf * 0.12), 0, 1);
+    out.globalHeight = clamp(globalHeight * (0.52 + atlas.islandInterior * 0.58) - atlas.coastalShelf * 0.30 - atlas.deepOcean * 0.18 + sampleAtlasGlobalHeightBias(atlasRegionId, atlasRegionCore), 0, 1);
+    out.mountainness = clamp(mountainness + sampleAtlasMountainnessBias(atlasRegionId, atlasRegionCore), 0, 1);
+    out.oceanness = clamp(Math.max(oceanness, 1 - atlas.islandInterior + atlas.coastalShelf * 0.16 + atlas.deepOcean * 0.34), 0, 1);
     out.continentalness = continentalness;
     out.hills = hills;
     out.detail = detail;
@@ -1935,21 +1992,34 @@ export class ProceduralWorldGenerator {
     out.surfaceGrain = clamp(fbm2D2(worldX * SURFACE_GRAIN_SCALE, worldZ * SURFACE_GRAIN_SCALE, this.surfaceGrainSeed) + province.ashRing * 0.16 + province.easternShardCoast * 0.14, 0, 1);
     out.scatter = clamp(fbm2D2(worldX * SURFACE_SCATTER_SCALE, worldZ * SURFACE_SCATTER_SCALE, this.surfaceScatterSeed) + province.ashRing * 0.12 + province.westWetlands * 0.10, 0, 1);
     out.peakness = clamp(peakness + province.volcanicHeart * 0.56 + province.ashRing * 0.10, 0, 1);
-    out.regionId = province.regionId;
-    out.secondaryRegionId = province.secondaryRegionId;
-    out.regionStrength = province.regionStrength;
-    out.regionBlend = province.regionBlend;
-    out.regionBiomeId = province.biomeId;
-    out.regionAmbientProfileId = province.ambientProfileId;
-    out.regionVariantId = province.regionalVariantId;
-    out.islandInterior = province.islandInterior;
-    out.coastalShelf = province.coastalShelf;
-    out.volcanicHeart = province.volcanicHeart;
-    out.ashRing = province.ashRing;
-    out.westWetlands = province.westWetlands;
-    out.northeastGrazelands = province.northeastGrazelands;
-    out.southernSaltBasin = province.southernSaltBasin;
-    out.easternShardCoast = province.easternShardCoast;
+    out.regionId = atlasRegionId;
+    out.secondaryRegionId = atlasSecondaryRegionId;
+    out.regionStrength = atlasRegionStrength;
+    out.regionBlend = atlas.primaryRegionId ? atlas.regionBlend : 1;
+    out.regionBiomeId = atlasBiomeId;
+    out.regionAmbientProfileId = atlas.ambientProfileId ?? province.ambientProfileId;
+    out.regionVariantId = atlas.regionalVariantId ?? province.regionalVariantId;
+    out.islandInterior = atlas.islandInterior;
+    out.shorelineBand = atlas.shorelineBand;
+    out.coastalShelf = atlas.coastalShelf;
+    out.deepOcean = atlas.deepOcean;
+    out.atlasRouteInfluence = atlas.routeInfluence;
+    out.atlasRouteCore = atlas.routeCore;
+    out.atlasRouteShoulder = atlas.routeShoulder;
+    out.atlasCaveInfluence = atlas.caveInfluence;
+    out.atlasCaveCore = atlas.caveCore;
+    out.volcanicHeart = Math.max(province.volcanicHeart * 0.35, atlasRegionId === "red-mountain" ? atlasRegionCore : 0);
+    out.ashRing = Math.max(
+      province.ashRing * 0.35,
+      atlasRegionId === "ashen-badlands" ? atlasRegionCore : atlasRegionId === "red-mountain" ? atlasRegionCore * 0.38 : 0,
+    );
+    out.westWetlands = Math.max(
+      province.westWetlands * 0.35,
+      atlasRegionId === "bitter-coast" ? atlasRegionCore : atlasRegionId === "inner-sea" ? atlasRegionCore * 0.30 : 0,
+    );
+    out.northeastGrazelands = Math.max(province.northeastGrazelands * 0.35, atlasRegionId === "grazelands" ? atlasRegionCore : 0);
+    out.southernSaltBasin = Math.max(province.southernSaltBasin * 0.35, atlasRegionId === "salt-marsh-basin" ? atlasRegionCore : 0);
+    out.easternShardCoast = Math.max(province.easternShardCoast * 0.35, atlasRegionId === "glass-shard-coast" ? atlasRegionCore : 0);
     return out;
   }
 
@@ -2175,7 +2245,7 @@ export class ProceduralWorldGenerator {
       || fields.regionStrength > 0.88
     );
     const preserveRegionSubBiome = (
-      (fields.regionBiomeId === "saltflat" && biomeId === "dunes")
+      (fields.regionBiomeId === "saltflat" && biomeId === "dunes" && fields.regionBlend > 0.22)
       || (fields.regionBiomeId === "marsh" && (biomeId === "fern" || biomeId === "fungal" || biomeId === "firefly"))
       || (fields.regionId === "west-gash" && (biomeId === "tundra" || biomeId === "highland"))
     );
@@ -2247,11 +2317,16 @@ export class ProceduralWorldGenerator {
       (fields.surfaceGrain - 0.5) * terrainProfile.microRelief * (0.35 + biomeCore * 0.65),
     );
     const crustBreakup = sampleTerrainCrustBreakup(fields, terrainProfile, biomeCore);
-    const islandCoastDelta = -Math.round(fields.coastalShelf * 72 + (1 - fields.islandInterior) * 240);
+    const islandCoastDelta = -Math.round(
+      fields.coastalShelf * 96
+        + fields.shorelineBand * 18
+        + (1 - fields.islandInterior) * (220 + fields.deepOcean * 260),
+    );
     const volcanicLift = Math.round(fields.volcanicHeart * (96 + fields.peakness * 104) + fields.ashRing * 18);
     const saltBasinDrop = Math.round(fields.southernSaltBasin * (18 + fields.coastalShelf * 28));
+    const atlasRegionDelta = sampleAtlasRegionSurfaceDelta(fields);
     return Math.floor(clamp(
-      terracedHeight + microRelief + crustBreakup + islandCoastDelta + volcanicLift - saltBasinDrop,
+      terracedHeight + microRelief + crustBreakup + islandCoastDelta + volcanicLift + atlasRegionDelta - saltBasinDrop,
       8,
       this.maxYExclusive - 2,
     ));
@@ -2369,6 +2444,23 @@ export class ProceduralWorldGenerator {
     hostBiomeId: BaseBiomeId,
     fields: SurfaceFieldSample,
   ): UndergroundBiomeId {
+    if (fields.atlasCaveInfluence > 0.38) {
+      switch (fields.regionId) {
+        case "red-mountain":
+        case "ashen-badlands":
+          return "basaltic";
+        case "bitter-coast":
+          return "rooted";
+        case "salt-marsh-basin":
+          return "saline";
+        case "glass-shard-coast":
+          return "crystalline";
+        case "west-gash":
+          return "granitic";
+        default:
+          break;
+      }
+    }
     if (biomeId === "saltflat") {
       return "saline";
     }
@@ -2504,26 +2596,32 @@ export class ProceduralWorldGenerator {
     );
     const deepAffinity = resolveDeepCaveAffinity(biomeId, hostBiomeId, undergroundBiomeId, regionalVariantId);
     const upperAffinity = resolveUpperCaveAffinity(biomeId, hostBiomeId, undergroundBiomeId, regionalVariantId);
-    const mainField = avg4(
+    let mainField = avg4(
       smoothstep(0.52, 0.82, caveFields.caveRibbon),
       smoothstep(0.42, 0.78, caveFields.cavePocket),
       smoothstep(0.34, 0.72, caveFields.caveDepth + fields.drainage * 0.18 + basinness * 0.20),
       smoothstep(0.24, 0.72, subterraneanDryness + ruggedness * 0.18),
     );
-    const upperField = avg3(
+    let upperField = avg3(
       smoothstep(0.56, 0.84, caveFields.caveOpenings),
       smoothstep(0.36, 0.76, ruggedness + basinness * 0.22 + fields.channel * 0.16),
       smoothstep(0.36, 0.74, caveFields.caveRibbon + caveFields.cavePocket * 0.18),
     );
-    const entranceField = avg3(
+    let entranceField = avg3(
       smoothstep(0.50, 0.82, caveFields.caveOpenings),
       smoothstep(0.42, 0.80, ruggedness + fields.channel * 0.22 + basinness * 0.12),
       smoothstep(0.34, 0.72, caveFields.caveRibbon + caveFields.cavePocket * 0.24),
     );
-    const mainStrength = saturate(mainField * (0.62 + deepAffinity * 0.58) * waterSuppression);
+    if (fields.atlasCaveInfluence > 0) {
+      const atlasCaveField = smoothstep(0.05, 0.92, fields.atlasCaveInfluence);
+      mainField = Math.max(mainField, 0.48 + atlasCaveField * 0.42);
+      upperField = Math.max(upperField, 0.34 + fields.atlasCaveCore * 0.54 + atlasCaveField * 0.18);
+      entranceField = Math.max(entranceField, 0.30 + fields.atlasCaveCore * 0.56 + atlasCaveField * 0.16);
+    }
+    const mainStrength = saturate(mainField * (0.62 + deepAffinity * 0.58 + fields.atlasCaveInfluence * 0.34) * waterSuppression);
     const upperStrength = saturate(
       (
-        upperField * (0.34 + upperAffinity * caveInterior * 1.22)
+        upperField * (0.34 + upperAffinity * caveInterior * 1.22 + fields.atlasCaveInfluence * 0.28)
         + ruggedness * 0.18 * caveInterior
       ) * waterSuppression,
     );
@@ -2531,7 +2629,7 @@ export class ProceduralWorldGenerator {
     const entranceStrength = saturate(
       entranceField
       * caveEntranceCliff
-      * (0.62 + upperAffinity * 1.45 + caveInterior * 0.90)
+      * (0.62 + upperAffinity * 1.45 + caveInterior * 0.90 + fields.atlasCaveInfluence * 0.45)
       * boundaryFactor
       * waterSuppression,
     );
@@ -3086,28 +3184,60 @@ function resolveHostBiomeId(
   secondary: BaseBiomeId,
 ): BaseBiomeId {
   if (biomeId === "marsh") {
-    return primary === "verdant" || primary === "savanna" || primary === "steppe" ? primary : secondary;
+    return primary === "verdant" || primary === "savanna" || primary === "steppe"
+      ? primary
+      : secondary === "verdant" || secondary === "savanna" || secondary === "steppe"
+      ? secondary
+      : "verdant";
   }
   if (biomeId === "firefly") {
-    return primary === "verdant" || primary === "savanna" || primary === "moor" || primary === "tundra" ? primary : secondary;
+    return primary === "verdant" || primary === "savanna" || primary === "steppe" || primary === "moor" || primary === "tundra"
+      ? primary
+      : secondary === "verdant" || secondary === "savanna" || secondary === "steppe" || secondary === "moor" || secondary === "tundra"
+      ? secondary
+      : "moor";
   }
   if (biomeId === "saltflat") {
-    return primary === "savanna" || primary === "steppe" || primary === "dunes" ? primary : secondary;
+    return primary === "savanna" || primary === "steppe" || primary === "dunes"
+      ? primary
+      : secondary === "savanna" || secondary === "steppe" || secondary === "dunes"
+      ? secondary
+      : "dunes";
   }
   if (biomeId === "fern") {
-    return primary === "verdant" || primary === "savanna" || primary === "highland" ? primary : secondary;
+    return primary === "verdant" || primary === "savanna" || primary === "highland"
+      ? primary
+      : secondary === "verdant" || secondary === "savanna" || secondary === "highland"
+      ? secondary
+      : "verdant";
   }
   if (biomeId === "fungal") {
-    return primary === "verdant" || primary === "highland" || primary === "moor" ? primary : secondary;
+    return primary === "verdant" || primary === "highland" || primary === "moor"
+      ? primary
+      : secondary === "verdant" || secondary === "highland" || secondary === "moor"
+      ? secondary
+      : "moor";
   }
   if (biomeId === "ember") {
-    return primary === "badlands" || primary === "highland" || primary === "steppe" || primary === "savanna" ? primary : secondary;
+    return primary === "badlands" || primary === "highland" || primary === "steppe" || primary === "savanna"
+      ? primary
+      : secondary === "badlands" || secondary === "highland" || secondary === "steppe" || secondary === "savanna"
+      ? secondary
+      : "badlands";
   }
   if (biomeId === "bloom") {
-    return primary === "verdant" || primary === "highland" || primary === "moor" ? primary : secondary;
+    return primary === "verdant" || primary === "highland" || primary === "moor"
+      ? primary
+      : secondary === "verdant" || secondary === "highland" || secondary === "moor"
+      ? secondary
+      : "verdant";
   }
   if (biomeId === "shardlands") {
-    return primary === "dunes" || primary === "badlands" || primary === "highland" || primary === "tundra" ? primary : secondary;
+    return primary === "dunes" || primary === "badlands" || primary === "highland" || primary === "tundra"
+      ? primary
+      : secondary === "dunes" || secondary === "badlands" || secondary === "highland" || secondary === "tundra"
+      ? secondary
+      : "dunes";
   }
   return primary;
 }
@@ -3290,8 +3420,10 @@ function samplePilgrimRouteSurfaceInfluence(
   fields: SurfaceFieldSample,
 ): PilgrimRouteSurfaceInfluence | null {
   const wetlandRoute = isWetlandPilgrimRouteField(fields);
+  const atlasRoute = fields.atlasRouteInfluence > 0.08 && fields.atlasRouteCore > 0.64;
   if (
     !wetlandRoute
+    && !atlasRoute
     && (
       biomeId === "verdant"
       || biomeId === "fern"
@@ -3302,7 +3434,20 @@ function samplePilgrimRouteSurfaceInfluence(
     return null;
   }
 
-  let best: PilgrimRouteSurfaceInfluence | null = null;
+  let best: PilgrimRouteSurfaceInfluence | null = atlasRoute
+    ? {
+        core: fields.atlasRouteCore,
+        shoulder: fields.atlasRouteShoulder,
+        fracture: saturate(
+          fields.atlasRouteInfluence * 0.16
+            + fields.atlasRouteShoulder * 0.28
+            + fields.surfacePatch * 0.22
+            + fields.strata * 0.18
+            + fields.desolation * 0.16,
+        ),
+        lateralRatio: fields.atlasRouteCore > 0 ? 0 : 0.72,
+      }
+    : null;
   for (const band of PILGRIM_ROUTE_BANDS) {
     const route = samplePilgrimRouteCoordinates(worldX, worldZ, band, fields);
     if (!route) {
@@ -3382,7 +3527,8 @@ function samplePilgrimRouteSurfaceDelta(
   const centerWear = route.core * (0.8 + fields.strata * 1.25);
   const shoulderCollapse = route.shoulder * (0.8 + route.fracture * 2.2 + fields.scatter * 0.55);
   const raisedBrokenSlab = route.fracture > 0.68 && route.core > 0.22 ? 1 : 0;
-  return -Math.round((centerWear + shoulderCollapse) * (0.42 + biomeCore * 0.58)) + raisedBrokenSlab;
+  const atlasConform = fields.atlasRouteInfluence * (1.2 + fields.atlasRouteCore * 2.4 + fields.atlasRouteShoulder * 1.1);
+  return -Math.round((centerWear + shoulderCollapse + atlasConform) * (0.42 + biomeCore * 0.58)) + raisedBrokenSlab;
 }
 
 function applyPilgrimRouteSurfaceMaterials(
@@ -4182,6 +4328,149 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
 
 const reusableRegionalVariant: RegionalVariantSelection = { id: "verdant_karst", strength: 0 };
 
+function sampleGeneratorAtlasFields(worldX: number, worldZ: number): GeneratorAtlasFields {
+  const xM = worldX / WORLD_UNITS_PER_METER;
+  const zM = worldZ / WORLD_UNITS_PER_METER;
+  const island = sampleIslandMaskMeters(xM, zM, WORLD_ATLAS);
+  const region = sampleAtlasRegionMeters(xM, zM, island, WORLD_ATLAS);
+  const route = sampleGeneratorAtlasRouteFields(xM, zM, island.islandInterior);
+  const cave = sampleAtlasCaveAnchorMeters(xM, zM, island, WORLD_ATLAS);
+  return {
+    islandInterior: island.islandInterior,
+    shorelineBand: island.shorelineBand,
+    coastalShelf: island.coastalShelf,
+    deepOcean: island.deepOcean,
+    primaryRegionId: region.primaryRegionId,
+    secondaryRegionId: region.secondaryRegionId,
+    regionStrength: region.regionStrength,
+    regionBlend: region.regionBlend,
+    regionDistance: region.regionDistance,
+    primaryBiomeId: region.primaryBiomeId,
+    regionalVariantId: region.regionalVariantId,
+    ambientProfileId: region.ambientProfileId,
+    ...route,
+    caveInfluence: cave.caveInfluence,
+    caveCore: cave.caveCore,
+    distanceToCaveAnchorM: cave.distanceToCaveAnchorM,
+  };
+}
+
+function sampleGeneratorAtlasRouteFields(
+  xM: number,
+  zM: number,
+  islandInterior: number,
+): Pick<GeneratorAtlasFields, "routeInfluence" | "routeCore" | "routeShoulder" | "distanceToRouteM"> {
+  if (islandInterior < 0.08) {
+    return { routeInfluence: 0, routeCore: 0, routeShoulder: 0, distanceToRouteM: Infinity };
+  }
+  let nearestDistance = Infinity;
+  for (const route of WORLD_ATLAS.routes) {
+    for (let index = 0; index < route.nodes.length - 1; index += 1) {
+      const a = route.nodes[index]!.point;
+      const b = route.nodes[index + 1]!.point;
+      nearestDistance = Math.min(nearestDistance, distancePointToSegmentMeters(xM, zM, a.x, a.z, b.x, b.z));
+    }
+  }
+  const core = 1 - smoothstep(38, 68, nearestDistance);
+  const shoulder = smoothstep(38, 68, nearestDistance) * (1 - smoothstep(72, 104, nearestDistance));
+  const influence = Math.max(core, shoulder);
+  return { routeInfluence: influence, routeCore: core, routeShoulder: shoulder, distanceToRouteM: nearestDistance };
+}
+
+function distancePointToSegmentMeters(
+  x: number,
+  z: number,
+  ax: number,
+  az: number,
+  bx: number,
+  bz: number,
+): number {
+  const abX = bx - ax;
+  const abZ = bz - az;
+  const lengthSquared = abX * abX + abZ * abZ;
+  if (lengthSquared <= 0) {
+    return Math.hypot(x - ax, z - az);
+  }
+  const t = clamp(((x - ax) * abX + (z - az) * abZ) / lengthSquared, 0, 1);
+  return Math.hypot(x - (ax + abX * t), z - (az + abZ * t));
+}
+
+function sampleAtlasUpliftBias(regionId: WorldRegionId, regionCore: number): number {
+  switch (regionId) {
+    case "red-mountain":
+      return regionCore * 0.46;
+    case "west-gash":
+      return regionCore * 0.28;
+    case "glass-shard-coast":
+      return regionCore * 0.12;
+    case "bitter-coast":
+    case "salt-marsh-basin":
+      return -regionCore * 0.08;
+    default:
+      return regionCore * 0.03;
+  }
+}
+
+function sampleAtlasGlobalHeightBias(regionId: WorldRegionId, regionCore: number): number {
+  switch (regionId) {
+    case "red-mountain":
+      return regionCore * 0.20;
+    case "west-gash":
+      return regionCore * 0.13;
+    case "ashen-badlands":
+      return regionCore * 0.07;
+    case "glass-shard-coast":
+      return regionCore * 0.05;
+    case "bitter-coast":
+      return -regionCore * 0.10;
+    case "salt-marsh-basin":
+      return -regionCore * 0.14;
+    case "inner-sea":
+      return -regionCore * 0.04;
+    default:
+      return 0;
+  }
+}
+
+function sampleAtlasMountainnessBias(regionId: WorldRegionId, regionCore: number): number {
+  switch (regionId) {
+    case "red-mountain":
+      return regionCore * 0.58;
+    case "west-gash":
+      return regionCore * 0.36;
+    case "ashen-badlands":
+      return regionCore * 0.16;
+    case "glass-shard-coast":
+      return regionCore * 0.20;
+    default:
+      return 0;
+  }
+}
+
+function sampleAtlasRegionSurfaceDelta(fields: SurfaceFieldSample): number {
+  const strength = fields.regionStrength * fields.islandInterior;
+  switch (fields.regionId) {
+    case "red-mountain":
+      return Math.round((92 + fields.peakness * 132 + fields.ridge * 42) * strength);
+    case "west-gash":
+      return Math.round((54 + fields.ridge * 60 + Math.max(0, fields.hills) * 36) * strength);
+    case "ashen-badlands":
+      return Math.round((18 + fields.mesa * 34 + fields.strata * 18) * strength);
+    case "glass-shard-coast":
+      return Math.round((22 + fields.ridge * 34 + fields.surfaceGrain * 18) * strength);
+    case "grazelands":
+      return Math.round((6 + fields.hills * 26) * strength);
+    case "bitter-coast":
+      return -Math.round((26 + fields.channel * 24) * strength);
+    case "inner-sea":
+      return -Math.round((16 + Math.max(0, -fields.basin) * 22) * strength);
+    case "salt-marsh-basin":
+      return -Math.round((38 + fields.channel * 18 + fields.coastalShelf * 28) * strength);
+    default:
+      return 0;
+  }
+}
+
 function sampleTerrainCrustBreakup(
   fields: SurfaceFieldSample,
   terrainProfile: { terraceScale: number; microRelief: number },
@@ -4407,6 +4696,60 @@ function applyRegionalVariantMaterialOverrides(
       materials.subsurfacePrimary = hexColorToMaterial("#668");
       materials.subsurfaceSecondary = hexColorToMaterial("#79B");
       materials.water = hexColorToMaterial("#6DF");
+      break;
+    default:
+      break;
+  }
+}
+
+function applyAtlasSurfaceMaterialOverrides(
+  materials: ResolvedSurfaceMaterials,
+  fields: SurfaceFieldSample,
+): void {
+  if (fields.deepOcean > 0.34) {
+    materials.surfacePrimary = hexColorToMaterial("#245");
+    materials.surfaceSecondary = hexColorToMaterial("#134");
+    materials.subsurfacePrimary = hexColorToMaterial("#345");
+    materials.subsurfaceSecondary = hexColorToMaterial("#234");
+    materials.water = hexColorToMaterial("#134");
+    materials.transitionThreshold = 0.68;
+    return;
+  }
+
+  if (fields.coastalShelf > 0.46 && fields.islandInterior < 0.38) {
+    materials.surfacePrimary = hexColorToMaterial("#887");
+    materials.surfaceSecondary = hexColorToMaterial("#655");
+    materials.subsurfacePrimary = hexColorToMaterial("#665");
+    materials.subsurfaceSecondary = hexColorToMaterial("#554");
+    materials.water = hexColorToMaterial("#58C");
+    materials.transitionThreshold = 0.58;
+  }
+
+  if (fields.atlasCaveInfluence <= 0.48) {
+    return;
+  }
+
+  switch (fields.regionId) {
+    case "red-mountain":
+    case "ashen-badlands":
+      materials.subsurfacePrimary = hexColorToMaterial("#433");
+      materials.subsurfaceSecondary = hexColorToMaterial("#654");
+      break;
+    case "bitter-coast":
+      materials.subsurfacePrimary = hexColorToMaterial("#342");
+      materials.subsurfaceSecondary = hexColorToMaterial("#564");
+      break;
+    case "salt-marsh-basin":
+      materials.subsurfacePrimary = hexColorToMaterial("#BBA");
+      materials.subsurfaceSecondary = hexColorToMaterial("#887");
+      break;
+    case "glass-shard-coast":
+      materials.subsurfacePrimary = hexColorToMaterial("#667");
+      materials.subsurfaceSecondary = hexColorToMaterial("#CEF");
+      break;
+    case "west-gash":
+      materials.subsurfacePrimary = hexColorToMaterial("#667");
+      materials.subsurfaceSecondary = hexColorToMaterial("#889");
       break;
     default:
       break;
@@ -4703,7 +5046,7 @@ function configureLandmarkFeature(
         out,
         FEATURE_PALM,
         scaledFeatureHeight(32, 12, fields.temperature, profile.scale),
-        scaledFeatureRadius(8, 3, fields.moisture, profile.scale),
+        scaledFeatureRadius(9, 4, fields.moisture, profile.scale),
         "#864",
         "#7B6",
       );

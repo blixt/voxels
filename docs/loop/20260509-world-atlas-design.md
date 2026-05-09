@@ -31,6 +31,24 @@ Scope deliberately excluded:
 - route terrain conforming, cave carving, or landmark placement;
 - renderer, controller, browser scripts, persistence, and package metadata changes.
 
+## Wave 2 Generator Checkpoint
+
+Implemented as the first narrow generator integration in `src/engine/procedural-generator.ts` with focused coverage in `tests/procedural-generator.test.ts`.
+
+Scope included:
+
+- `sampleWorldAtlasMeters` now reaches the generator through `sampleWorldAtlasWorldUnits` during surface field sampling;
+- atlas island mask values drive finite land, shelf, shoreline, and deep-ocean fields instead of leaving the generator on the older infinite-noise island classification;
+- atlas primary and secondary region samples choose generator region identity, biome authority, variants, ambient profile, and coherent macro-height biases;
+- atlas route influence joins the existing pilgrim-road shaping/material path so authored route validation anchors produce visible road wear even where old straight bands are not the source;
+- atlas cave-anchor influence boosts cave state, cave-prone underground material choice, and cave-adjacent subsurface palettes near authored cave anchors.
+
+Scope deliberately remains narrow:
+
+- no renderer, controller, HUD, ambient, package, script, or `world-atlas.ts` edits;
+- no new biome IDs or broad terrain rewrite;
+- route landmarks and cave tunnel geometry are still mostly inherited from the existing procedural systems, with atlas data only steering the current first visible checkpoint.
+
 ## Coordinate System
 
 ### Units

@@ -1142,7 +1142,7 @@ export function sampleAtlasCaveAnchorMeters(
   };
 }
 
-function sampleAtlasRegionMeters(
+export function sampleAtlasRegionMeters(
   xM: number,
   zM: number,
   islandMask: IslandMaskSample,

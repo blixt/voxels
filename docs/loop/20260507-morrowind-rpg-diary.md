@@ -2381,3 +2381,35 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - commit and push the edit-aware handoff
   - then move to the highest-ROI visible/gameplay work, while keeping the LOD coverage harness in the loop for regressions
+
+### 2026-05-09 - Game-Plan Slice: Atlas World, RPG HUD, Quest/Encounter Foundations
+
+- Trigger:
+  - The user correctly called out that I was over-focusing on LOD and needed to get back to making the actual game.
+  - I split the work into narrow lanes: atlas-driven terrain, RPG HUD/route interactions, ambiance/water identity, quest rumors, encounter/faction pressure, and a full-game audit script.
+- Changes:
+  - Generator now uses the shared `WorldAtlas` region/cave source of truth for finite-island macro regions, while retaining a tightened route-width override for renderer road shaping.
+  - Added visible RPG HUD state for active place, route step, interaction prompt, travel context, skills, and route progress.
+  - Added pure quest hook and encounter/faction samplers so regions/routes/caves now have deterministic RPG planning data instead of only visual props.
+  - Added `scripts/rpg-slice-audit.ts` plus `audit:rpg-slice` for a repeatable game-level rubric that scores world definition, exploration loop, ambiance, skills, performance evidence, and verification coverage.
+  - Strengthened ambient profiles and regional water presets for ashlands, salt marsh, wetlands, glass coast, fungal, canopy, and underground contexts.
+- Integration fixes:
+  - Removed a divergent local atlas region sampler after it produced a real `WorldAtlas` vs generator mismatch at a route validation anchor.
+  - Dampened atlas macro-height authority at high-blend region boundaries so soft biome edges stay walkable.
+  - Locked salt-marsh basin core samples back to `saltflat` and hardened special-biome host fallback rules.
+  - Tightened road bands and route influence so authored roads remain readable without broadly painting nearby terrain as road.
+  - Short-circuited the slow landmark-density test once all required pockets are proven, cutting that check from timeout-prone to about `21 s` in the full suite.
+- Validation:
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun test tests/procedural-generator.test.ts`: pass, `48` tests.
+  - `mise exec -- bun test tests/ambient-environment.test.ts tests/water-visuals.test.ts tests/rpg-ui-cleanup.test.ts tests/travel-goals.test.ts tests/skill-journal.test.ts tests/rpg-quests.test.ts tests/rpg-encounters.test.ts tests/rpg-slice-audit.test.ts`: pass, `39` tests.
+  - `mise exec -- bun run scripts/rpg-slice-audit.ts`: pass, overall `4.84 / 5`, status `milestone-ready`; ambiance color-distance remains the weakest subscore.
+  - Shared in-app browser at `http://localhost:3000/?freshGame=1778271774597`: rendered Old Road Causeway with RPG HUD, `0` recent hitches, observed about `187 fps / 12.5 ms max` after settle.
+- Honest assessment:
+  - This is now materially more game-shaped: routes, places, skills, interactions, quests, encounters, and region ambiance exist as deterministic systems.
+  - The scene is still visibly voxel/blocky and needs a bold art pass on silhouettes, lighting, and denser authored vistas.
+  - The audit score is useful for direction, but its ambiance color-distance signal is currently too strict or poorly scaled and should be refined before treating `4.84 / 5` as a final quality claim.
+- Next:
+  - Use quest/encounter foundations in the live HUD or journal instead of leaving them as pure data.
+  - Push more visible biome/object differentiation using object-lab acceptance checks.
+  - Run a live forward benchmark after the game-content checkpoint to catch movement hitches, not just idle browser state.

@@ -13,7 +13,7 @@ export interface SkyWeatherEnvironment {
   fungalGlowIntensity: number;
 }
 
-export const CLEAR_COLOR_RGBA = [209, 224, 240, 255] as const;
+export const CLEAR_COLOR_RGBA = [207, 223, 238, 255] as const;
 export const LIGHT_DIRECTION: Vec3 = [0.55, -0.85, 0.45];
 export const LIGHTING_TERMS = [0.40, 0.66, 0.28] as const;
 export const FOG_COLOR_RGBA = CLEAR_COLOR_RGBA;
@@ -22,11 +22,11 @@ export const FOG_END_DISTANCE = metersToWorldUnits(480);
 export const VALIDATION_RENDER_SIZE = 128;
 
 export const DEFAULT_SKY_WEATHER_ENVIRONMENT: SkyWeatherEnvironment = {
-  skyTopColorRgba: CLEAR_COLOR_RGBA,
+  skyTopColorRgba: [78, 124, 172, 255],
   skyHorizonColorRgba: CLEAR_COLOR_RGBA,
-  skyCloudColorRgba: CLEAR_COLOR_RGBA,
-  skyCloudCoverage: 0,
-  skyCloudBand: 0.58,
+  skyCloudColorRgba: [226, 231, 230, 255],
+  skyCloudCoverage: 0.08,
+  skyCloudBand: 0.64,
   ashfallIntensity: 0,
   fungalGlowIntensity: 0,
 };

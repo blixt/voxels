@@ -12,7 +12,6 @@ import type {
 } from "../engine/exploration-journal.ts";
 import {
   describeDiscovery,
-  formatDiscoveryName,
   type DiscoveryCategory,
 } from "../engine/discovery-catalog.ts";
 
@@ -315,6 +314,9 @@ function buildProgressSignature(snapshot: GameHudSnapshot): string {
     snapshot.focusSkillLevel,
     snapshot.focusSkillProgressRatio.toFixed(3),
     snapshot.totalSkillTravelMeters.toFixed(1),
+    snapshot.activeRouteProgressLabel,
+    snapshot.activeTravelGoalStepLabel,
+    snapshot.lastInteractionLabel,
     snapshot.lastDiscoveryLabel,
   ].join("|");
 }
@@ -406,40 +408,44 @@ function buildCaptureOverlayState(snapshot: GameHudSnapshot): CaptureOverlayStat
 }
 
 function createInteractionHudView(root: HTMLElement): InteractionHudView {
-  const region = document.createElement("strong");
-  region.className = "game-rpg-region";
-  const landmark = document.createElement("span");
-  landmark.className = "game-rpg-landmark";
+  const place = document.createElement("strong");
+  place.className = "game-rpg-place";
+  const route = document.createElement("span");
+  route.className = "game-rpg-route";
+  const interaction = document.createElement("span");
+  interaction.className = "game-rpg-interaction";
   const skill = document.createElement("span");
   skill.className = "game-rpg-skill";
-  const discovery = document.createElement("span");
-  discovery.className = "game-rpg-discovery";
+  const progress = document.createElement("span");
+  progress.className = "game-rpg-route-progress";
+  const progressFill = document.createElement("span");
+  progressFill.className = "game-rpg-route-progress-fill";
+  progress.append(progressFill);
   const card = document.createElement("section");
   card.className = "game-rpg-hud";
-  card.append(region, landmark, skill, discovery);
+  card.append(place, route, interaction, skill, progress);
   root.replaceChildren(card);
 
   return {
     update(snapshot) {
       const recentDiscovery = snapshot.recentDiscoveries[0] ?? null;
-      region.textContent = formatCurrentRegionName(snapshot);
-      landmark.textContent = snapshot.landmarkId
-        ? `Near ${formatDiscoveryName("landmark", snapshot.landmarkId)}`
-        : snapshot.undergroundBiomeId
-        ? formatDiscoveryName("underground", snapshot.undergroundBiomeId)
-        : snapshot.ambientProfileLabel;
-      skill.textContent = `${snapshot.focusSkillName} ${snapshot.focusSkillLevel}`;
-      discovery.textContent = recentDiscovery
-        ? `Found ${recentDiscovery.name}`
-        : snapshot.lastDiscoveryLabel === "None"
-        ? `${snapshot.discoveredLandmarkCount.toLocaleString()} landmarks cataloged`
-        : snapshot.lastDiscoveryLabel;
+      place.textContent = snapshot.activePlaceName;
+      route.textContent = `${snapshot.activeRouteName}: ${snapshot.activeTravelGoalStepLabel}`;
+      interaction.textContent = snapshot.interactionPromptVerb
+        ? `E ${snapshot.interactionPromptLabel}`
+        : snapshot.interactionPromptLabel;
+      skill.textContent = `${snapshot.focusSkillName} ${snapshot.focusSkillLevel} • ${snapshot.travelContextLabel}`;
+      progress.setAttribute("aria-label", `${snapshot.activeTravelGoalTitle} ${snapshot.activeRouteProgressLabel}`);
+      progressFill.style.transform = `scaleX(${Math.max(0, Math.min(1, snapshot.activeTravelGoalProgressRatio))})`;
       card.classList.toggle("is-captured", snapshot.pointerLocked);
       card.title = [
         snapshot.status,
-        `${snapshot.discoveredBiomeCount} regions`,
-        `${snapshot.discoveredRegionalVariantCount} strange regions`,
-        `${snapshot.discoveredAncientLandmarkCount} old road signs`,
+        snapshot.activeTravelGoalTitle,
+        snapshot.activeRouteProgressLabel,
+        snapshot.interactionTargetName,
+        snapshot.interactionPromptDescription,
+        snapshot.lastInteractionLabel,
+        recentDiscovery ? `Found ${recentDiscovery.name}` : null,
         `${snapshot.focusSkillName} ${(snapshot.focusSkillProgressRatio * 100).toFixed(0)}%`,
         recentDiscovery?.flavorText ?? null,
       ].filter(Boolean).join(" • ");
@@ -685,19 +691,6 @@ function formatCompactCount(value: number): string {
     return `${(value / 1_000).toFixed(1)}k`;
   }
   return value.toLocaleString();
-}
-
-function formatCurrentRegionName(snapshot: GameHudSnapshot): string {
-  if (snapshot.regionalVariantId) {
-    return formatDiscoveryName("regional-variant", snapshot.regionalVariantId);
-  }
-  if (snapshot.undergroundBiomeId) {
-    return formatDiscoveryName("underground", snapshot.undergroundBiomeId);
-  }
-  if (snapshot.biomeId) {
-    return formatDiscoveryName("biome", snapshot.biomeId);
-  }
-  return snapshot.ambientProfileLabel;
 }
 
 function formatDiscoveryCategoryLabel(category: DiscoveryCategory, id: string): string {
