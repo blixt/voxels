@@ -2443,3 +2443,18 @@ Build the first "place identity" slice without regressing performance or input:
 - Next:
   - Integrate subagent output if clean and non-conflicting.
   - Prioritize a high-ROI visible content pass: distinctive set pieces, encounter/lore hooks tied to place, and object-lab screenshots for individual props.
+
+### 2026-05-09 - Old Road Causeway Prop Pass
+
+- Trigger:
+  - After getting encounter context into the HUD, I moved to a visible world-content target near spawn instead of more renderer work.
+- Changes:
+  - Added a warm accent material to `old_road_causeway`.
+  - Gave old road causeways low edge posts and worn inlay marks so they read more like authored pilgrim infrastructure and less like plain crossing slabs.
+- Validation:
+  - `mise exec -- bun test tests/procedural-generator.test.ts -t "ashland megastructures have distinctive large silhouettes|ashland and old-road landmarks render shaped caps"`: pass, `2` tests.
+  - `mise exec -- bun run typecheck`: pass.
+  - `mise exec -- bun run lab:object -- --id old_road_causeway --label old-road-causeway-inlay`: pass; report `artifacts/object-lab/2026-05-09-114655628Z-old-road-causeway-inlay/report.json`, `829` solid object voxels, bounds `28 x 8 x 22`, material variety `3`, warnings `none`.
+- Honest assessment:
+  - This is a focused prop improvement, not a full visual identity overhaul.
+  - The object-lab report shows the prop stayed low and route-shaped, with no warnings, but the accent material only appears in a small number of voxels; future passes should make signature materials readable from farther away.

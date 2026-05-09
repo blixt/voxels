@@ -1923,6 +1923,7 @@ test("ashland megastructures have distinctive large silhouettes", () => {
   const causewayFootprint = measureSurfaceFeatureFootprint(generator, causeway!, 64);
   const zigguratObject = measureLandmarkObject(generator, ziggurat!, 28, 8);
   const obeliskObject = measureLandmarkObject(generator, obelisk!, 28, 8);
+  const causewayObject = measureLandmarkObject(generator, causeway!, 24, 8);
 
   expect(zigguratHeight).toBeGreaterThanOrEqual(50);
   expect(obeliskHeight).toBeGreaterThanOrEqual(48);
@@ -1942,6 +1943,9 @@ test("ashland megastructures have distinctive large silhouettes", () => {
   expect(causewayFootprint.count).toBeGreaterThanOrEqual(240);
   expect(causewayFootprint.widthX).toBeGreaterThanOrEqual(22);
   expect(causewayFootprint.widthZ).toBeGreaterThanOrEqual(14);
+  expect(causewayObject.materialVariety).toBeGreaterThanOrEqual(3);
+  expect(causewayObject.boundsSize[1]).toBeGreaterThanOrEqual(5);
+  expect(causewayObject.boundsSize[1]).toBeLessThanOrEqual(10);
 });
 
 test("underwater columns no longer expose grassy surface materials", () => {
