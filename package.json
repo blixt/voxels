@@ -24,6 +24,7 @@
     "lab:terrain": "bun run scripts/terrain-surface-lab.ts",
     "verify:smoke": "bun run scripts/verify-smoke.ts",
     "verify:render": "bun run scripts/run-render-verification.ts",
+    "verify:rpg": "bun run scripts/run-voxel-rpg-verification.ts",
     "analyze:trace": "bun run scripts/analyze-chrome-trace.ts",
     "analyze:screenshot": "bun run scripts/analyze-screenshot-composition.ts",
     "cycle:bench": "bun run scripts/run-cycle-bench.ts",

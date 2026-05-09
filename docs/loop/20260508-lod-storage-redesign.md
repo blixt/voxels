@@ -722,3 +722,52 @@ Next renderer target:
 - Compute a full-voxel LOD clip mask for active coarser chunks from active finer ownership.
 - Feed that mask into `buildLodChunkMesh` instead of punching full coarse voxels out of `VoxelChunk.data`.
 - Only after full-voxel masks are stable, extend the mesher to subdivide partial subvoxel boxes from `lod-clip-mask.ts`.
+
+### Follow-up Checkpoint - Execution Board And Pure System Foundations
+
+Planning and delegation:
+
+- Added `docs/loop/20260509-subagent-execution-board.md` as the current dependency graph and ROI-ordered execution board.
+- Spawned workers with disjoint write scopes for verification, edit-journal storage prep, atlas/routes, and pure gameplay systems.
+- Kept active LOD ownership work local because `ProceduralResidentWorld` is still the integration bottleneck.
+
+Accepted foundations from the parallel workers:
+
+- `verify:rpg` now wraps the existing render-verification report with centralized RPG budgets and failure categories.
+- `chunk-edit-journal.ts` now provides pure sparse edit-delta pack/replay/compact/export/import helpers without touching production IndexedDB stores.
+- `WorldAtlas` now includes eight authored route definitions and deterministic route sampling.
+- `exploration-interactions.ts` and `travel-goals.ts` add pure inspect/read/use targeting plus a route-journal goal state machine, without touching the live HUD/controller.
+
+Accepted renderer increment:
+
+- `ProceduralResidentWorld` now records a transient `lodRenderClipMasks` entry when a coarser LOD chunk is punched by active finer ownership.
+- `buildLodChunkMesh` and same-level LOD neighbor face extraction now read those clip masks.
+- This is still a bridge: current runtime chunks are still data-punched, but the mesher path now has the runtime plumbing needed for a later canonical-payload/render-instance split.
+
+Validation:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/world-atlas.test.ts tests/chunk-edit-journal.test.ts tests/voxel-rpg-budgets.test.ts tests/voxel-rpg-verification-runner.test.ts tests/exploration-interactions.test.ts tests/travel-goals.test.ts tests/opaque-chunk-mesher.test.ts tests/lod-clip-mask.test.ts tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts`: pass, `74` tests.
+- `mise exec -- bun test tests/lod-handoff.test.ts tests/opaque-chunk-mesher.test.ts tests/world-atlas.test.ts tests/chunk-edit-journal.test.ts tests/voxel-rpg-budgets.test.ts tests/voxel-rpg-verification-runner.test.ts tests/exploration-interactions.test.ts tests/travel-goals.test.ts`: pass, `43` tests after the renderer bookkeeping check was added.
+- `mise exec -- bun run bench:lod-persistence -- --label=clipmask-foundation-default`: pass.
+  - Artifact: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-bH96Uc/lod-idb-persistence-reload.json`
+  - Reload disk hits: `1307`.
+- `mise exec -- bun run bench:lod-persistence -- --label=clipmask-foundation-far --lod-persistence-chunk-delta=32 --lod-persistence-max-frames=260`: failed to produce a correctness report because the populate probe hit the `180000 ms` timeout.
+- `mise exec -- bun test`: `304` passed, `5` failed in `tests/object-lab.test.ts`.
+  - Failures were object-lab landmark expectation failures: `oak`, `dead_snag`, centered salt-marsh root coordinates, route debris balance, and `ash_marker` batch lookup.
+  - These are outside this checkpoint's modified runtime/verification/storage/gameplay files, so they remain a known content-test issue rather than accepted validation evidence.
+
+Rubric movement:
+
+- Harness maturity: `10.1 -> 10.25` because `verify:rpg` gives the long-running RPG work a single budget/failure taxonomy on top of existing artifacts.
+- Storage architecture readiness: `3.0 -> 3.2` because edit deltas now have a pure packed replay contract.
+- World architecture readiness: `3.0 -> 3.25` because routes are now atlas data instead of only generator-side behavior.
+- Gameplay architecture readiness: `2.7 -> 3.0` because inspect/read/use and travel goals now have pure testable contracts.
+- Rendering/LOD correctness: `3.85 -> 3.9` because clip-mask plumbing is now present in the LOD mesh path, but the canonical-payload split is not complete.
+
+Next:
+
+1. Commit and push this checkpoint.
+2. Replace punched-data active LOD chunks with unmodified canonical chunks plus render-only clip masks.
+3. Add a LOD lab scenario that proves the same canonical LOD payload can render under two different active finer-ownership masks.
+4. Re-run default and far browser LOD persistence; far timeout remains the main stress target.

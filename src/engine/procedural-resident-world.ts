@@ -239,6 +239,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   private readonly retainedEmptyLodKeys = new Set<string>();
   private readonly coveredEmptyLodKeys = new Set<string>();
   private readonly coveragePunchedLodKeys = new Set<string>();
+  private readonly lodRenderClipMasks = new Map<string, Uint8Array>();
   private readonly missingLodDiskCacheKeys = new Set<string>();
   private readonly queuedLodDiskStoreKeys = new Set<string>();
   private readonly lodDiskStoreQueue: string[] = [];
@@ -1647,6 +1648,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     this.retainedLodChunks.clear();
     this.retainedEmptyLodKeys.clear();
     this.coveragePunchedLodKeys.clear();
+    this.lodRenderClipMasks.clear();
     this.queuedLodDiskStoreKeys.clear();
     this.lodDiskStoreQueue.length = 0;
   }
@@ -2766,6 +2768,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     let skippedFinerCoverage = false;
     const chunkArea = this.chunkSize * this.chunkSize;
     const data = new Uint16Array(chunk.data.length);
+    let clipMask: Uint8Array | null = null;
     let solidCount = 0;
     let minX = this.chunkSize;
     let minY = this.chunkSize;
@@ -2802,6 +2805,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           }
           if (this.isOutputLodVoxelCoveredByFiner(chunk.lodLevel, originX, originY, originZ, stride, ox, oy, oz)) {
             skippedFinerCoverage = true;
+            clipMask ??= new Uint8Array(chunk.data.length);
+            clipMask[index] = 1;
             continue;
           }
           data[index] = material;
@@ -2819,20 +2824,21 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       return { chunk, skippedFinerCoverage: false };
     }
 
-    return {
-      chunk: createLodResidentChunk(
-        {
-          coord: { ...chunk.coord },
-          data,
-          solidCount,
-          solidBounds: solidCount === 0 ? null : { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
-          renderSummary: null!,
-        },
-        chunk.lodLevel,
-        stride,
-      ),
-      skippedFinerCoverage: true,
-    };
+    const clippedChunk = createLodResidentChunk(
+      {
+        coord: { ...chunk.coord },
+        data,
+        solidCount,
+        solidBounds: solidCount === 0 ? null : { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
+        renderSummary: null!,
+      },
+      chunk.lodLevel,
+      stride,
+    );
+    if (clipMask) {
+      this.lodRenderClipMasks.set(toLodChunkKey(clippedChunk.lodLevel, clippedChunk.coord.x, clippedChunk.coord.y, clippedChunk.coord.z), clipMask);
+    }
+    return { chunk: clippedChunk, skippedFinerCoverage: true };
   }
 
   private punchActiveLodChunkCoveredByFiner(key: string): void {
@@ -2876,6 +2882,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
   private clearLodCoveragePunchedKey(key: string): void {
     this.coveragePunchedLodKeys.delete(key);
+    this.lodRenderClipMasks.delete(key);
   }
 
   private buildLodChunkMesh(
@@ -2892,6 +2899,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         chunkSize: this.chunkSize,
         coord: { x: cx, y: cy, z: cz },
         chunkData: chunk.data,
+        clipMask: this.lodRenderClipMasks.get(toLodChunkKey(level, cx, cy, cz)) ?? null,
         solidCount: chunk.solidCount,
         solidBounds: chunk.solidBounds
           ? { min: [...chunk.solidBounds.min], max: [...chunk.solidBounds.max] }
@@ -2992,12 +3000,19 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     axis: number,
     negativeSide: boolean,
   ): OpaqueChunkNeighborFaceSnapshot {
-    const chunk = this.lodChunks.get(toLodChunkKey(level, cx, cy, cz));
+    const key = toLodChunkKey(level, cx, cy, cz);
+    const chunk = this.lodChunks.get(key);
     if (!chunk || chunk.solidCount === 0) {
       return { faceData: null, solidBounds: null };
     }
     return {
-      faceData: extractLodNeighborFaceData(chunk.data, axis, negativeSide, this.chunkSize),
+      faceData: extractLodNeighborFaceData(
+        chunk.data,
+        axis,
+        negativeSide,
+        this.chunkSize,
+        this.lodRenderClipMasks.get(key) ?? null,
+      ),
       solidBounds: chunk.solidBounds
         ? { min: [...chunk.solidBounds.min], max: [...chunk.solidBounds.max] }
         : null,
@@ -3744,6 +3759,7 @@ function extractLodNeighborFaceData(
   axis: number,
   negativeSide: boolean,
   chunkSize: number,
+  clipMask: Uint8Array | null = null,
 ): Uint16Array {
   const chunkArea = chunkSize * chunkSize;
   const faceData = new Uint16Array(chunkArea);
@@ -3753,7 +3769,8 @@ function extractLodNeighborFaceData(
       const sourcePlaneOffset = localX + z * chunkArea;
       const faceRowOffset = z * chunkSize;
       for (let y = 0; y < chunkSize; y += 1) {
-        faceData[y + faceRowOffset] = data[sourcePlaneOffset + y * chunkSize]!;
+        const sourceIndex = sourcePlaneOffset + y * chunkSize;
+        faceData[y + faceRowOffset] = clipMask?.[sourceIndex] ? 0 : data[sourceIndex]!;
       }
     }
     return faceData;
@@ -3765,7 +3782,8 @@ function extractLodNeighborFaceData(
       const sourcePlaneOffset = z * chunkArea + sourceRowOffset;
       const faceRowOffset = z * chunkSize;
       for (let x = 0; x < chunkSize; x += 1) {
-        faceData[x + faceRowOffset] = data[sourcePlaneOffset + x]!;
+        const sourceIndex = sourcePlaneOffset + x;
+        faceData[x + faceRowOffset] = clipMask?.[sourceIndex] ? 0 : data[sourceIndex]!;
       }
     }
     return faceData;
@@ -3776,7 +3794,8 @@ function extractLodNeighborFaceData(
     const sourceRowOffset = sourcePlaneOffset + y * chunkSize;
     const faceRowOffset = y * chunkSize;
     for (let x = 0; x < chunkSize; x += 1) {
-      faceData[x + faceRowOffset] = data[sourceRowOffset + x]!;
+      const sourceIndex = sourceRowOffset + x;
+      faceData[x + faceRowOffset] = clipMask?.[sourceIndex] ? 0 : data[sourceIndex]!;
     }
   }
   return faceData;

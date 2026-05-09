@@ -4,8 +4,10 @@ import {
   WORLD_ATLAS,
   atlasMetersToWorldUnits,
   atlasWorldUnitsToMeters,
+  sampleAtlasRouteMeters,
   sampleWorldAtlasMeters,
   type AtlasRegionId,
+  type AtlasRouteId,
 } from "../src/engine/world-atlas.ts";
 
 const EXPECTED_REGION_METADATA = {
@@ -58,12 +60,35 @@ const EXPECTED_REGION_METADATA = {
   }
 >;
 
+const EXPECTED_ROUTE_IDS = [
+  "pilgrim-spine-red",
+  "ash-gash-pass",
+  "badlands-east-trail",
+  "bitter-inner-crossing",
+  "salt-causeway",
+  "inner-sea-shelf-road",
+  "grazelands-glass-road",
+  "glass-coastal-cairns",
+] as const satisfies readonly AtlasRouteId[];
+
 test("world atlas defines the eight authored macro regions", () => {
   expect(WORLD_ATLAS.version).toBe("20260509-wave1-atlas-foundation");
   expect(WORLD_ATLAS.regions).toHaveLength(8);
   expect(new Set(WORLD_ATLAS.regions.map((region) => region.id)).size).toBe(8);
   expect(WORLD_ATLAS.island.origin).toEqual({ x: -180, z: -520 });
   expect(WORLD_ATLAS.island.radius).toEqual({ x: 6_400, z: 5_850 });
+});
+
+test("world atlas defines the eight initial authored routes", () => {
+  expect(WORLD_ATLAS.routes.map((route) => route.id)).toEqual(Array.from(EXPECTED_ROUTE_IDS));
+
+  for (const route of WORLD_ATLAS.routes) {
+    expect(route.nodes.length).toBeGreaterThanOrEqual(3);
+    expect(route.widthM).toBeGreaterThan(0);
+    expect(route.shoulderM).toBeGreaterThan(route.widthM);
+    expect(route.expectedRegionIds.length).toBeGreaterThanOrEqual(1);
+    expect(route.recommendedSetPieceIds.length).toBeGreaterThanOrEqual(2);
+  }
 });
 
 test("region centers sample their expected primary metadata", () => {
@@ -129,6 +154,8 @@ test("outside the finite island returns ocean classifications instead of land bi
     expect(sample.primaryBiomeId).toBe(point.biomeId);
     expect(sample.regionalVariantId).toBeNull();
     expect(sample.ambientProfileId).toBeNull();
+    expect(sample.routeId).toBeNull();
+    expect(sample.routeInfluence).toBe(0);
   }
 });
 
@@ -140,7 +167,37 @@ test("authored region-edge anchors expose plausible secondary regions", () => {
     expect(sample.regionEdgeId).toBe(edge.id);
     expect(sampledRegions.has(edge.from)).toBe(true);
     expect(sampledRegions.has(edge.to)).toBe(true);
+    expect(sample.primaryRegionId).not.toBeNull();
+    expect(sample.secondaryRegionId).not.toBeNull();
+    expect(sample.primaryRegionId).not.toBe(sample.secondaryRegionId);
     expect(sample.regionBlend).toBeGreaterThan(0.2);
+  }
+});
+
+test("route validation anchors sample their authored routes", () => {
+  for (const route of WORLD_ATLAS.routes) {
+    const sample = sampleAtlasRouteMeters(route.validationAnchor.x, route.validationAnchor.z);
+
+    expect(sample.routeId).toBe(route.id);
+    expect(sample.routeSegmentKind).toBe(route.segmentKind);
+    expect(sample.distanceToRouteM).toBeCloseTo(0, 8);
+    expect(sample.routeCore).toBe(1);
+    expect(sample.routeInfluence).toBe(1);
+    expect(sample.recommendedSetPieceIds).toEqual(route.recommendedSetPieceIds);
+  }
+});
+
+test("route nodes stay on finite island land and declared regions", () => {
+  for (const route of WORLD_ATLAS.routes) {
+    for (const node of route.nodes) {
+      const sample = sampleWorldAtlasMeters(node.point.x, node.point.z);
+      const sampledRegions = new Set([sample.primaryRegionId, sample.secondaryRegionId]);
+
+      expect(sample.surfaceClass).toBe("land");
+      expect(sample.islandInterior).toBeGreaterThan(0.08);
+      expect(route.expectedRegionIds).toContain(node.regionId);
+      expect(sampledRegions.has(node.regionId)).toBe(true);
+    }
   }
 });
 

@@ -16,6 +16,25 @@ export type AtlasRegionId =
 export type AtlasSurfaceClass = "land" | "shoreline" | "coastal-shelf" | "deep-ocean";
 export type AtlasWaterBiomeId = "ocean" | "deep-ocean";
 export type AtlasBiomeId = BiomeId | AtlasWaterBiomeId;
+export type AtlasRouteId =
+  | "pilgrim-spine-red"
+  | "ash-gash-pass"
+  | "badlands-east-trail"
+  | "bitter-inner-crossing"
+  | "salt-causeway"
+  | "inner-sea-shelf-road"
+  | "grazelands-glass-road"
+  | "glass-coastal-cairns";
+export type AtlasRouteKind = "pilgrim-road" | "coastal-walk" | "causeway" | "mountain-pass" | "hazard-route";
+export type AtlasRouteSegmentKind =
+  | "sacred-road"
+  | "ash-road"
+  | "ravine-pass"
+  | "caravan-trail"
+  | "wetland-bridge"
+  | "salt-causeway"
+  | "shelf-road"
+  | "hazard-cairns";
 
 export interface AtlasPointMeters {
   x: number;
@@ -52,11 +71,33 @@ export interface AtlasRegionEdgeDefinition {
   validationAnchor: AtlasPointMeters;
 }
 
+export interface AtlasRouteNodeDefinition {
+  id: string;
+  point: AtlasPointMeters;
+  regionId: AtlasRegionId;
+}
+
+export interface AtlasRouteDefinition {
+  id: AtlasRouteId;
+  kind: AtlasRouteKind;
+  nodes: readonly AtlasRouteNodeDefinition[];
+  widthM: number;
+  shoulderM: number;
+  materialProfileId: string;
+  expectedRegionIds: readonly AtlasRegionId[];
+  landmarkCadenceM: number;
+  strongVistaCadenceM: number;
+  segmentKind: AtlasRouteSegmentKind;
+  recommendedSetPieceIds: readonly string[];
+  validationAnchor: AtlasPointMeters;
+}
+
 export interface WorldAtlas {
   version: string;
   island: IslandEnvelope;
   regions: readonly AtlasRegionDefinition[];
   regionEdges: readonly AtlasRegionEdgeDefinition[];
+  routes: readonly AtlasRouteDefinition[];
 }
 
 export interface IslandMaskSample {
@@ -85,7 +126,18 @@ export interface AtlasRegionSample {
   ambientProfileId: AmbientProfileId | null;
 }
 
-export interface WorldAtlasSample extends IslandMaskSample, AtlasRegionSample {
+export interface AtlasRouteSample {
+  routeId: AtlasRouteId | null;
+  routeInfluence: number;
+  routeCore: number;
+  routeShoulder: number;
+  distanceAlongM: number;
+  distanceToRouteM: number;
+  routeSegmentKind: AtlasRouteSegmentKind | null;
+  recommendedSetPieceIds: readonly string[];
+}
+
+export interface WorldAtlasSample extends IslandMaskSample, AtlasRegionSample, AtlasRouteSample {
   xM: number;
   zM: number;
 }
@@ -94,6 +146,14 @@ interface RegionScore {
   region: AtlasRegionDefinition;
   distance: number;
   score: number;
+}
+
+interface RouteProjection {
+  route: AtlasRouteDefinition;
+  distanceToRouteM: number;
+  distanceAlongM: number;
+  segmentIndex: number;
+  t: number;
 }
 
 const SHORELINE_CENTER_DISTANCE = 0.985;
@@ -253,6 +313,154 @@ export const WORLD_ATLAS: WorldAtlas = {
       validationAnchor: { x: 4_080, z: -450 },
     },
   ],
+  routes: [
+    {
+      id: "pilgrim-spine-red",
+      kind: "pilgrim-road",
+      nodes: [
+        { id: "inner-sea-shrine-road", point: { x: 1_320, z: 120 }, regionId: "inner-sea" },
+        { id: "wet-ash-approach", point: { x: 400, z: -520 }, regionId: "inner-sea" },
+        { id: "red-caldera-gate", point: { x: -520, z: -1_080 }, regionId: "red-mountain" },
+        { id: "ash-apron-road", point: { x: -680, z: -1_720 }, regionId: "ashen-badlands" },
+        { id: "badlands-pilgrim-end", point: { x: -840, z: -2_360 }, regionId: "ashen-badlands" },
+      ],
+      widthM: 72,
+      shoulderM: 180,
+      materialProfileId: "ash-basalt-pilgrim-road",
+      expectedRegionIds: ["inner-sea", "red-mountain", "ashen-badlands"],
+      landmarkCadenceM: 240,
+      strongVistaCadenceM: 720,
+      segmentKind: "sacred-road",
+      recommendedSetPieceIds: ["road-shrine", "ash-marker", "caldera-vista"],
+      validationAnchor: { x: -60, z: -800 },
+    },
+    {
+      id: "ash-gash-pass",
+      kind: "mountain-pass",
+      nodes: [
+        { id: "ash-ravine-mouth", point: { x: -840, z: -2_360 }, regionId: "ashen-badlands" },
+        { id: "ash-gash-saddle", point: { x: -1_780, z: -2_810 }, regionId: "ashen-badlands" },
+        { id: "west-gash-redleaf-pass", point: { x: -2_720, z: -3_260 }, regionId: "west-gash" },
+      ],
+      widthM: 54,
+      shoulderM: 150,
+      materialProfileId: "ash-stone-ravine-pass",
+      expectedRegionIds: ["ashen-badlands", "west-gash"],
+      landmarkCadenceM: 260,
+      strongVistaCadenceM: 780,
+      segmentKind: "ravine-pass",
+      recommendedSetPieceIds: ["ravine-switchback", "kwama-mine-mouth", "redleaf-tor"],
+      validationAnchor: { x: -1_780, z: -2_810 },
+    },
+    {
+      id: "badlands-east-trail",
+      kind: "hazard-route",
+      nodes: [
+        { id: "badlands-east-camp", point: { x: -840, z: -2_360 }, regionId: "ashen-badlands" },
+        { id: "eastward-ash-trail", point: { x: 1_290, z: -2_720 }, regionId: "ashen-badlands" },
+        { id: "grazelands-west-camp", point: { x: 3_420, z: -3_080 }, regionId: "grazelands" },
+      ],
+      widthM: 58,
+      shoulderM: 190,
+      materialProfileId: "ash-grass-caravan-trail",
+      expectedRegionIds: ["ashen-badlands", "grazelands"],
+      landmarkCadenceM: 420,
+      strongVistaCadenceM: 1_050,
+      segmentKind: "caravan-trail",
+      recommendedSetPieceIds: ["trail-camp", "ash-windbreak", "grass-marker"],
+      validationAnchor: { x: 1_290, z: -2_720 },
+    },
+    {
+      id: "bitter-inner-crossing",
+      kind: "causeway",
+      nodes: [
+        { id: "bitter-blackwater-dock", point: { x: -4_360, z: 920 }, regionId: "bitter-coast" },
+        { id: "wetland-bridge-chain", point: { x: -1_520, z: 520 }, regionId: "bitter-coast" },
+        { id: "inner-sea-west-bank", point: { x: 1_320, z: 120 }, regionId: "inner-sea" },
+      ],
+      widthM: 64,
+      shoulderM: 210,
+      materialProfileId: "blackwater-peat-bridge",
+      expectedRegionIds: ["bitter-coast", "inner-sea"],
+      landmarkCadenceM: 300,
+      strongVistaCadenceM: 840,
+      segmentKind: "wetland-bridge",
+      recommendedSetPieceIds: ["reed-bridge", "dry-hummock", "old-stone-marker"],
+      validationAnchor: { x: -1_520, z: 520 },
+    },
+    {
+      id: "salt-causeway",
+      kind: "causeway",
+      nodes: [
+        { id: "salt-west-rib", point: { x: -1_860, z: 4_040 }, regionId: "salt-marsh-basin" },
+        { id: "salt-mirror-center", point: { x: -180, z: 4_040 }, regionId: "salt-marsh-basin" },
+        { id: "salt-glass-rib", point: { x: 2_280, z: 3_110 }, regionId: "glass-shard-coast" },
+      ],
+      widthM: 80,
+      shoulderM: 240,
+      materialProfileId: "white-salt-dead-causeway",
+      expectedRegionIds: ["salt-marsh-basin", "glass-shard-coast"],
+      landmarkCadenceM: 320,
+      strongVistaCadenceM: 960,
+      segmentKind: "salt-causeway",
+      recommendedSetPieceIds: ["salt-rib", "sunken-pylon", "glass-warning-marker"],
+      validationAnchor: { x: -180, z: 4_040 },
+    },
+    {
+      id: "inner-sea-shelf-road",
+      kind: "coastal-walk",
+      nodes: [
+        { id: "inner-north-shelf", point: { x: 1_320, z: 120 }, regionId: "inner-sea" },
+        { id: "inner-south-shelf", point: { x: 570, z: 2_080 }, regionId: "inner-sea" },
+        { id: "salt-basin-north-road", point: { x: -180, z: 4_040 }, regionId: "salt-marsh-basin" },
+      ],
+      widthM: 66,
+      shoulderM: 190,
+      materialProfileId: "moor-shelf-old-road",
+      expectedRegionIds: ["inner-sea", "salt-marsh-basin"],
+      landmarkCadenceM: 280,
+      strongVistaCadenceM: 760,
+      segmentKind: "shelf-road",
+      recommendedSetPieceIds: ["old-road-slab", "low-island", "silt-marker"],
+      validationAnchor: { x: 570, z: 2_080 },
+    },
+    {
+      id: "grazelands-glass-road",
+      kind: "hazard-route",
+      nodes: [
+        { id: "grazelands-flower-road", point: { x: 3_420, z: -3_080 }, regionId: "grazelands" },
+        { id: "glass-road-warning", point: { x: 4_080, z: -450 }, regionId: "grazelands" },
+        { id: "glass-shard-inland-gate", point: { x: 4_740, z: 2_180 }, regionId: "glass-shard-coast" },
+      ],
+      widthM: 62,
+      shoulderM: 220,
+      materialProfileId: "dry-grass-glass-road",
+      expectedRegionIds: ["grazelands", "glass-shard-coast"],
+      landmarkCadenceM: 450,
+      strongVistaCadenceM: 1_000,
+      segmentKind: "hazard-cairns",
+      recommendedSetPieceIds: ["grass-cairn", "glass-warning-marker", "shard-vista"],
+      validationAnchor: { x: 4_080, z: -450 },
+    },
+    {
+      id: "glass-coastal-cairns",
+      kind: "coastal-walk",
+      nodes: [
+        { id: "glass-north-cairns", point: { x: 5_140, z: 520 }, regionId: "glass-shard-coast" },
+        { id: "glass-shard-coastal-spine", point: { x: 4_740, z: 2_180 }, regionId: "glass-shard-coast" },
+        { id: "glass-salt-cairns", point: { x: 2_280, z: 3_110 }, regionId: "glass-shard-coast" },
+      ],
+      widthM: 50,
+      shoulderM: 180,
+      materialProfileId: "glass-coastal-cairns",
+      expectedRegionIds: ["glass-shard-coast", "salt-marsh-basin"],
+      landmarkCadenceM: 300,
+      strongVistaCadenceM: 800,
+      segmentKind: "hazard-cairns",
+      recommendedSetPieceIds: ["glass-cairn", "coastal-warning", "shard-shelter"],
+      validationAnchor: { x: 4_940, z: 1_350 },
+    },
+  ],
 };
 
 export function atlasMetersToWorldUnits(point: AtlasPointMeters): AtlasPointMeters {
@@ -272,12 +480,14 @@ export function atlasWorldUnitsToMeters(point: AtlasPointMeters): AtlasPointMete
 export function sampleWorldAtlasMeters(xM: number, zM: number, atlas = WORLD_ATLAS): WorldAtlasSample {
   const islandMask = sampleIslandMaskMeters(xM, zM, atlas);
   const regionSample = sampleAtlasRegionMeters(xM, zM, islandMask, atlas);
+  const routeSample = sampleAtlasRouteMeters(xM, zM, islandMask, atlas);
 
   return {
     xM,
     zM,
     ...islandMask,
     ...regionSample,
+    ...routeSample,
   };
 }
 
@@ -334,6 +544,56 @@ export function findAtlasRegionEdge(
     throw new Error(`Unknown atlas region edge: ${edgeId}`);
   }
   return edge;
+}
+
+export function findAtlasRoute(routeId: AtlasRouteId, atlas = WORLD_ATLAS): AtlasRouteDefinition {
+  const route = atlas.routes.find((candidate) => candidate.id === routeId);
+  if (!route) {
+    throw new Error(`Unknown atlas route: ${routeId}`);
+  }
+  return route;
+}
+
+export function sampleAtlasRouteMeters(
+  xM: number,
+  zM: number,
+  islandMask = sampleIslandMaskMeters(xM, zM),
+  atlas = WORLD_ATLAS,
+): AtlasRouteSample {
+  if (islandMask.islandInterior < LAND_CUTOFF_INTERIOR) {
+    return emptyRouteSample();
+  }
+
+  const projection = findNearestRouteProjection(xM, zM, atlas);
+  if (!projection) {
+    return emptyRouteSample();
+  }
+
+  const routeReachM = projection.route.widthM + projection.route.shoulderM;
+  const routeInfluence = 1 - smoothstep(projection.route.widthM, routeReachM, projection.distanceToRouteM);
+  const routeCore = 1 - smoothstep(projection.route.widthM * 0.58, projection.route.widthM, projection.distanceToRouteM);
+  const routeShoulder =
+    smoothstep(projection.route.widthM * 0.58, projection.route.widthM, projection.distanceToRouteM) *
+    (1 - smoothstep(projection.route.widthM, routeReachM, projection.distanceToRouteM));
+
+  if (routeInfluence <= 0) {
+    return {
+      ...emptyRouteSample(),
+      distanceToRouteM: projection.distanceToRouteM,
+      distanceAlongM: projection.distanceAlongM,
+    };
+  }
+
+  return {
+    routeId: projection.route.id,
+    routeInfluence,
+    routeCore,
+    routeShoulder,
+    distanceAlongM: projection.distanceAlongM,
+    distanceToRouteM: projection.distanceToRouteM,
+    routeSegmentKind: projection.route.segmentKind,
+    recommendedSetPieceIds: projection.route.recommendedSetPieceIds,
+  };
 }
 
 function sampleAtlasRegionMeters(
@@ -450,6 +710,46 @@ function resolveRegionEdge(
   return nearestEdge?.edge ?? null;
 }
 
+function emptyRouteSample(): AtlasRouteSample {
+  return {
+    routeId: null,
+    routeInfluence: 0,
+    routeCore: 0,
+    routeShoulder: 0,
+    distanceAlongM: Infinity,
+    distanceToRouteM: Infinity,
+    routeSegmentKind: null,
+    recommendedSetPieceIds: [],
+  };
+}
+
+function findNearestRouteProjection(xM: number, zM: number, atlas: WorldAtlas): RouteProjection | null {
+  let nearest: RouteProjection | null = null;
+  for (const route of atlas.routes) {
+    let distanceBeforeSegmentM = 0;
+    for (let index = 0; index < route.nodes.length - 1; index += 1) {
+      const a = route.nodes[index]!.point;
+      const b = route.nodes[index + 1]!.point;
+      const segment = projectPointToSegment(xM, zM, a, b);
+      const segmentLengthM = distanceBetweenPoints(a, b);
+      const projection: RouteProjection = {
+        route,
+        distanceToRouteM: segment.distance,
+        distanceAlongM: distanceBeforeSegmentM + segmentLengthM * segment.t,
+        segmentIndex: index,
+        t: segment.t,
+      };
+
+      if (!nearest || projection.distanceToRouteM < nearest.distanceToRouteM) {
+        nearest = projection;
+      }
+
+      distanceBeforeSegmentM += segmentLengthM;
+    }
+  }
+  return nearest;
+}
+
 function projectPointToSegment(
   x: number,
   z: number,
@@ -466,6 +766,10 @@ function projectPointToSegment(
   const projectedX = a.x + abX * t;
   const projectedZ = a.z + abZ * t;
   return { t, distance: Math.hypot(x - projectedX, z - projectedZ) };
+}
+
+function distanceBetweenPoints(a: AtlasPointMeters, b: AtlasPointMeters): number {
+  return Math.hypot(b.x - a.x, b.z - a.z);
 }
 
 function islandShorelineScale(angle: number): number {

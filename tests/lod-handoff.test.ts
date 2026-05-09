@@ -108,6 +108,7 @@ test("revived retained coarser LOD chunks are punched against active finer cover
     lodChunks: Map<string, VoxelChunk>;
     retainedLodChunks: Map<string, VoxelChunk>;
     coveragePunchedLodKeys: Set<string>;
+    lodRenderClipMasks: Map<string, Uint8Array>;
     reviveRetainedLodChunk(key: string): boolean;
   };
 
@@ -119,6 +120,10 @@ test("revived retained coarser LOD chunks are punched against active finer cover
   const revived = worldWithInternals.lodChunks.get("L2:0:0:0");
   expect(revived).toBeDefined();
   expect(worldWithInternals.coveragePunchedLodKeys.has("L2:0:0:0")).toBe(true);
+  const clipMask = worldWithInternals.lodRenderClipMasks.get("L2:0:0:0");
+  expect(clipMask?.[0]).toBe(1);
+  expect(clipMask?.[15 + 15 * CHUNK_SIZE + 15 * CHUNK_SIZE * CHUNK_SIZE]).toBe(1);
+  expect(clipMask?.[16 * CHUNK_SIZE]).toBeFalsy();
   expect(columnHasMaterialInYRange(revived!, 0, 0, 0, CHUNK_SIZE / 2)).toBe(false);
   expect(columnHasMaterialInYRange(revived!, 15, 15, 0, CHUNK_SIZE / 2)).toBe(false);
   expect(columnHasMaterialInYRange(revived!, 0, 0, CHUNK_SIZE / 2, CHUNK_SIZE)).toBe(true);

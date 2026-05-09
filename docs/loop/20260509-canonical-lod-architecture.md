@@ -120,6 +120,8 @@ Recommended file ownership:
 - `src/engine/generated-chunk-codec.ts`: canonical chunk codec.
 - New optional `src/engine/chunk-edit-journal.ts`: edit delta packing, replay, compaction.
 
+Track S0 foundation note: `src/engine/chunk-edit-journal.ts` now defines the pure packed edit-delta contract. It keeps sparse local voxel-index/material edits, replays by stable revision order, compacts repeated voxel overwrites by winning revision, and exports a JSON-safe journal shape without touching production cache stores.
+
 ## Effective Canonical Chunk Contract
 
 All LOD derivation and LOD0 residency should consume an effective chunk:
