@@ -148,6 +148,117 @@ test("render-ready resident columns punch stale active LOD coverage instead of o
   expect(columnHasMaterial(punched!, 16, 0)).toBe(true);
 });
 
+test("activating a finer LOD chunk punches active coarser columns in the same footprint", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
+  const worldWithInternals = world as unknown as {
+    lodChunks: Map<string, VoxelChunk>;
+    coveragePunchedLodKeys: Set<string>;
+    punchActiveCoarserLodChunksCoveredBy(finer: VoxelChunk): void;
+  };
+  const coarser = createTestChunk(0, 0, 0, 2, 4, true, true);
+  const finer = createTestChunk(0, 0, 0, 1, 2, true, true);
+
+  worldWithInternals.lodChunks.set("L2:0:0:0", coarser);
+  worldWithInternals.lodChunks.set("L1:0:0:0", finer);
+  worldWithInternals.punchActiveCoarserLodChunksCoveredBy(finer);
+
+  const punched = worldWithInternals.lodChunks.get("L2:0:0:0");
+  expect(punched).toBeDefined();
+  expect(worldWithInternals.coveragePunchedLodKeys.has("L2:0:0:0")).toBe(true);
+  expect(columnHasMaterial(punched!, 0, 0)).toBe(false);
+  expect(columnHasMaterial(punched!, 15, 15)).toBe(false);
+  expect(columnHasMaterial(punched!, 16, 0)).toBe(true);
+  expect(columnHasMaterial(punched!, 20, 20)).toBe(true);
+});
+
+test("activating negative-coordinate finer LOD chunks punches the matching coarser boundary row", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
+  const worldWithInternals = world as unknown as {
+    lodChunks: Map<string, VoxelChunk>;
+    coveragePunchedLodKeys: Set<string>;
+    punchActiveCoarserLodChunksCoveredBy(finer: VoxelChunk): void;
+  };
+  const coarser = createTestChunk(-98, 0, -188, 2, 4, true, true);
+  const finerLeft = createTestChunk(-196, 0, -376, 1, 2, true, true);
+  const finerRight = createTestChunk(-195, 0, -376, 1, 2, true, true);
+
+  worldWithInternals.lodChunks.set("L2:-98:0:-188", coarser);
+  worldWithInternals.lodChunks.set("L1:-196:0:-376", finerLeft);
+  worldWithInternals.lodChunks.set("L1:-195:0:-376", finerRight);
+  worldWithInternals.punchActiveCoarserLodChunksCoveredBy(finerLeft);
+  worldWithInternals.punchActiveCoarserLodChunksCoveredBy(finerRight);
+
+  const punched = worldWithInternals.lodChunks.get("L2:-98:0:-188");
+  expect(punched).toBeDefined();
+  expect(worldWithInternals.coveragePunchedLodKeys.has("L2:-98:0:-188")).toBe(true);
+  for (let localZ = 0; localZ < CHUNK_SIZE / 2; localZ += 1) {
+    for (let localX = 0; localX < CHUNK_SIZE; localX += 1) {
+      expect(columnHasMaterial(punched!, localX, localZ)).toBe(false);
+    }
+  }
+  expect(columnHasMaterial(punched!, 0, 16)).toBe(true);
+});
+
+test("prepared replacement keeps stale active finer ownership punched out of coarser chunks", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
+  const worldWithInternals = world as unknown as {
+    lodChunks: Map<string, VoxelChunk>;
+    preparedLodChunks: Map<string, VoxelChunk>;
+    staleLodKeys: Set<string>;
+    coveragePunchedLodKeys: Set<string>;
+    prepareLodChunkBlockedByActiveCoarser(key: string, chunk: VoxelChunk): void;
+  };
+  const coarser = createTestChunk(-98, 11, -188, 2, 4, true, true);
+  const staleActiveFiner = createTestChunk(-196, 22, -376, 1, 2, true, true);
+  const preparedReplacement = createTestChunk(-196, 22, -376, 1, 2, true, true);
+
+  worldWithInternals.lodChunks.set("L2:-98:11:-188", coarser);
+  worldWithInternals.lodChunks.set("L1:-196:22:-376", staleActiveFiner);
+  worldWithInternals.staleLodKeys.add("L1:-196:22:-376");
+
+  worldWithInternals.prepareLodChunkBlockedByActiveCoarser("L1:-196:22:-376", preparedReplacement);
+
+  const punched = worldWithInternals.lodChunks.get("L2:-98:11:-188");
+  expect(worldWithInternals.preparedLodChunks.get("L1:-196:22:-376")).toBe(preparedReplacement);
+  expect(punched).toBeDefined();
+  expect(worldWithInternals.coveragePunchedLodKeys.has("L2:-98:11:-188")).toBe(true);
+  for (let localZ = 0; localZ < CHUNK_SIZE / 2; localZ += 1) {
+    for (let localX = 0; localX < CHUNK_SIZE / 2; localX += 1) {
+      expect(columnHasMaterial(punched!, localX, localZ)).toBe(false);
+    }
+    expect(columnHasMaterial(punched!, CHUNK_SIZE / 2, localZ)).toBe(true);
+  }
+});
+
+test("prepared finer backlog repairs active coarser chunks refreshed after the finer became active", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
+  const worldWithInternals = world as unknown as {
+    lodChunks: Map<string, VoxelChunk>;
+    preparedLodChunks: Map<string, VoxelChunk>;
+    coveragePunchedLodKeys: Set<string>;
+    punchActiveCoarserLodChunksCoveredByPreparedActiveFiner(): void;
+  };
+  const activeFiner = createTestChunk(-196, 22, -376, 1, 2, true, true);
+  const preparedReplacement = createTestChunk(-196, 22, -376, 1, 2, true, true);
+  const refreshedCoarser = createTestChunk(-98, 11, -188, 2, 4, true, true);
+
+  worldWithInternals.lodChunks.set("L1:-196:22:-376", activeFiner);
+  worldWithInternals.preparedLodChunks.set("L1:-196:22:-376", preparedReplacement);
+  worldWithInternals.lodChunks.set("L2:-98:11:-188", refreshedCoarser);
+
+  worldWithInternals.punchActiveCoarserLodChunksCoveredByPreparedActiveFiner();
+
+  const punched = worldWithInternals.lodChunks.get("L2:-98:11:-188");
+  expect(punched).toBeDefined();
+  expect(worldWithInternals.coveragePunchedLodKeys.has("L2:-98:11:-188")).toBe(true);
+  for (let localZ = 0; localZ < CHUNK_SIZE / 2; localZ += 1) {
+    for (let localX = 0; localX < CHUNK_SIZE / 2; localX += 1) {
+      expect(columnHasMaterial(punched!, localX, localZ)).toBe(false);
+    }
+    expect(columnHasMaterial(punched!, CHUNK_SIZE / 2, localZ)).toBe(true);
+  }
+});
+
 function createTestChunk(
   cx: number,
   cy: number,

@@ -44,7 +44,8 @@ const LOD_VERTEX_STRIDE = 20;
 const LOD_NORMAL_SCALE = 127;
 const MAX_RETAINED_LOD_CHUNKS = 2048;
 const MAX_RETAINED_EMPTY_LOD_KEYS = 8192;
-const MAX_LOD_CACHE_REQUESTS_PER_UPDATE = 32;
+const MAX_LOD_CACHE_REQUESTS_PER_UPDATE = 64;
+const MAX_LOD_WORKER_GENERATE_REQUESTS_PER_UPDATE = 16;
 const MAX_LOD_CACHE_STORES_PER_UPDATE = 4;
 const LOD_FOG_COVERAGE_RADIUS = FOG_END_DISTANCE + metersToWorldUnits(32);
 
@@ -147,6 +148,9 @@ export interface LodResidencyUpdateSummary {
   lodDiskCacheHits: number;
   lodDiskCacheHitsByLevel: readonly number[];
   lodDiskCacheMisses: number;
+  lodWorkerGenerated: number;
+  lodWorkerGeneratedByLevel: readonly number[];
+  scheduledLodWorkerRequests: number;
   scheduledLodDiskRequests: number;
   scheduledLodDiskStores: number;
   completedLodDiskStores: number;
@@ -946,6 +950,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           lodDiskCacheHits: 0,
           lodDiskCacheHitsByLevel: createLodLevelCounts(),
           lodDiskCacheMisses: 0,
+          lodWorkerGenerated: 0,
+          lodWorkerGeneratedByLevel: createLodLevelCounts(),
+          scheduledLodWorkerRequests: 0,
           scheduledLodDiskRequests: 0,
           scheduledLodDiskStores: 0,
           completedLodDiskStores: 0,
@@ -977,20 +984,25 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     let commitMs = 0;
     let lodDiskCacheHits = 0;
     const lodDiskCacheHitsByLevel = createLodLevelCounts();
+    let lodWorkerGenerated = 0;
+    const lodWorkerGeneratedByLevel = createLodLevelCounts();
     let scheduledLodDiskRequests = 0;
+    let scheduledLodWorkerRequests = 0;
     let scheduledLodDiskStores = 0;
-    const lodDiskStats = this.asyncChunkGeneration?.drainLodChunkCompletionStats() ?? { cacheHits: 0, missing: 0, stored: 0 };
-    const completedLodDiskChunks = this.asyncChunkGeneration?.drainCompletedLodChunks() ?? [];
+    const lodDiskStats = this.asyncChunkGeneration?.drainLodChunkCompletionStats() ?? { cacheHits: 0, generated: 0, missing: 0, stored: 0 };
+    const completedLodChunks = this.asyncChunkGeneration?.drainCompletedLodChunks() ?? [];
     const missingLodDiskChunks = this.asyncChunkGeneration?.drainMissingLodChunks() ?? [];
     for (const missing of missingLodDiskChunks) {
       this.missingLodDiskCacheKeys.add(toAsyncLodChunkKey(missing));
     }
-    const adoptedLodDisk = this.adoptCompletedLodDiskChunks(completedLodDiskChunks, neededKeys);
-    lodDiskCacheHits += adoptedLodDisk.cacheHits;
+    const adoptedLod = this.adoptCompletedLodChunks(completedLodChunks, neededKeys);
+    lodDiskCacheHits += adoptedLod.cacheHits;
+    lodWorkerGenerated += adoptedLod.workerGenerated;
     for (let index = 0; index < lodDiskCacheHitsByLevel.length; index += 1) {
-      lodDiskCacheHitsByLevel[index] += adoptedLodDisk.cacheHitsByLevel[index] ?? 0;
+      lodDiskCacheHitsByLevel[index] += adoptedLod.cacheHitsByLevel[index] ?? 0;
+      lodWorkerGeneratedByLevel[index] += adoptedLod.workerGeneratedByLevel[index] ?? 0;
     }
-    meshMs += adoptedLodDisk.meshMs;
+    meshMs += adoptedLod.meshMs;
     let maxChunkMs = 0;
     let maxChunkLevel = 0;
     let maxChunkKey: string | null = null;
@@ -1032,6 +1044,16 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           pending++;
           pendingDiskCache++;
           pendingDiskCacheByLevel[ring.level] += 1;
+          continue;
+        }
+        const workerRequest = this.scheduleGeneratedLodChunkRequest(ring.level, cx, cy, cz, scheduledLodWorkerRequests);
+        if (workerRequest !== "skip") {
+          if (workerRequest === "scheduled") {
+            scheduledLodWorkerRequests += 1;
+          }
+          pending++;
+          pendingGenerationBudget++;
+          pendingGenerationBudgetByLevel[ring.level] += 1;
           continue;
         }
         if (
@@ -1132,10 +1154,12 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           this.coveragePunchedLodKeys.delete(key);
         }
         if (this.lodChunkHasCoveredActiveCoarserOverlap(chunk)) {
-          this.preparedLodChunks.set(key, chunk);
+          this.prepareLodChunkBlockedByActiveCoarser(key, chunk);
         } else {
           this.lodChunks.set(key, chunk);
+          this.lodWorldColumnCoverageCache.clear();
           this.staleLodKeys.delete(key);
+          this.punchActiveCoarserLodChunksCoveredBy(chunk);
         }
         if (!data.skippedFinerCoverage) {
           this.enqueueLodDiskStore(key);
@@ -1161,6 +1185,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
     const commitStartedAt = performance.now();
     this.commitPreparedLodChunks();
+    this.punchActiveCoarserLodChunksCoveredByPreparedActiveFiner();
     commitMs = performance.now() - commitStartedAt;
 
     // Phase 3: evict LOD chunks no longer needed.
@@ -1262,6 +1287,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       lodDiskCacheHits,
       lodDiskCacheHitsByLevel,
       lodDiskCacheMisses: lodDiskStats.missing,
+      lodWorkerGenerated,
+      lodWorkerGeneratedByLevel,
+      scheduledLodWorkerRequests,
       scheduledLodDiskRequests,
       scheduledLodDiskStores,
       completedLodDiskStores: lodDiskStats.stored,
@@ -1336,24 +1364,36 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     return requested;
   }
 
-  private adoptCompletedLodDiskChunks(
+  private adoptCompletedLodChunks(
     chunks: AsyncEncodedDerivedLodChunk[],
     neededKeys: Set<string>,
-  ): { cacheHits: number; cacheHitsByLevel: readonly number[]; meshMs: number } {
+  ): { cacheHits: number; cacheHitsByLevel: readonly number[]; workerGenerated: number; workerGeneratedByLevel: readonly number[]; meshMs: number } {
     let cacheHits = 0;
     const cacheHitsByLevel = createLodLevelCounts();
+    let workerGenerated = 0;
+    const workerGeneratedByLevel = createLodLevelCounts();
     let meshMs = 0;
     for (const encoded of chunks) {
       this.missingLodDiskCacheKeys.delete(toAsyncLodChunkKey(encoded.key));
       const key = toLodChunkKey(encoded.key.lodLevel, encoded.key.coord.x, encoded.key.coord.y, encoded.key.coord.z);
-      if (!neededKeys.has(key) || this.lodChunks.has(key) || this.preparedLodChunks.has(key) || this.staleLodKeys.has(key)) {
+      const activeIsFresh = this.lodChunks.has(key) && !this.staleLodKeys.has(key);
+      if (!neededKeys.has(key) || activeIsFresh || this.preparedLodChunks.has(key)) {
         continue;
       }
       const decoded = decodeDerivedLodChunk(encoded.buffer);
+      const source = encoded.source ?? "cache";
       if (decoded.solidCount === 0) {
         this.emptyLodKeys.add(key);
-        cacheHits += 1;
-        cacheHitsByLevel[decoded.lodLevel] += 1;
+        this.lodChunks.delete(key);
+        this.staleLodKeys.delete(key);
+        this.coveragePunchedLodKeys.delete(key);
+        if (source === "generated") {
+          workerGenerated += 1;
+          workerGeneratedByLevel[decoded.lodLevel] += 1;
+        } else {
+          cacheHits += 1;
+          cacheHitsByLevel[decoded.lodLevel] += 1;
+        }
         continue;
       }
       const chunk = createLodResidentChunk(
@@ -1370,11 +1410,18 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       const activation = this.punchLodChunkCoveredByActiveFiner(chunk);
       if (activation.chunk.solidCount === 0) {
         this.coveredEmptyLodKeys.add(key);
+        this.lodChunks.delete(key);
+        this.staleLodKeys.delete(key);
         this.retainedLodChunks.delete(key);
         this.retainedEmptyLodKeys.delete(key);
         this.coveragePunchedLodKeys.delete(key);
-        cacheHits += 1;
-        cacheHitsByLevel[decoded.lodLevel] += 1;
+        if (source === "generated") {
+          workerGenerated += 1;
+          workerGeneratedByLevel[decoded.lodLevel] += 1;
+        } else {
+          cacheHits += 1;
+          cacheHitsByLevel[decoded.lodLevel] += 1;
+        }
         continue;
       }
       if (activation.skippedFinerCoverage) {
@@ -1402,19 +1449,26 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       this.retainedLodChunks.delete(key);
       this.retainedEmptyLodKeys.delete(key);
       if (this.lodChunkHasCoveredActiveCoarserOverlap(activation.chunk)) {
-        this.preparedLodChunks.set(key, activation.chunk);
+        this.prepareLodChunkBlockedByActiveCoarser(key, activation.chunk);
       } else {
         this.lodChunks.set(key, activation.chunk);
+        this.lodWorldColumnCoverageCache.clear();
         this.staleLodKeys.delete(key);
+        this.punchActiveCoarserLodChunksCoveredBy(activation.chunk);
       }
       this.remeshAdjacentLodChunks(decoded.lodLevel, decoded.coord.x, decoded.coord.y, decoded.coord.z);
       this.invalidateCoarserLodChunksForSourceChunk(decoded.lodLevel, decoded.coord.x, decoded.coord.y, decoded.coord.z, {
         clearNeededKeyCache: false,
       });
-      cacheHits += 1;
-      cacheHitsByLevel[decoded.lodLevel] += 1;
+      if (source === "generated") {
+        workerGenerated += 1;
+        workerGeneratedByLevel[decoded.lodLevel] += 1;
+      } else {
+        cacheHits += 1;
+        cacheHitsByLevel[decoded.lodLevel] += 1;
+      }
     }
-    return { cacheHits, cacheHitsByLevel, meshMs };
+    return { cacheHits, cacheHitsByLevel, workerGenerated, workerGeneratedByLevel, meshMs };
   }
 
   private scheduleLodDiskChunkRequest(
@@ -1438,7 +1492,27 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     if (scheduledThisUpdate >= MAX_LOD_CACHE_REQUESTS_PER_UPDATE) {
       return "skip";
     }
-    return this.asyncChunkGeneration.requestLodChunk(cacheKey) ? "scheduled" : "skip";
+    return this.asyncChunkGeneration.requestLodChunk(cacheKey) ? "scheduled" : "pending";
+  }
+
+  private scheduleGeneratedLodChunkRequest(
+    lodLevel: number,
+    cx: number,
+    cy: number,
+    cz: number,
+    scheduledThisUpdate: number,
+  ): "scheduled" | "pending" | "skip" {
+    if (!this.asyncChunkGeneration || this.editOverlays.size > 0 || lodLevel < 2) {
+      return "skip";
+    }
+    if (scheduledThisUpdate >= MAX_LOD_WORKER_GENERATE_REQUESTS_PER_UPDATE) {
+      return "pending";
+    }
+    const cacheKey = this.toLodDiskCacheKey(lodLevel, cx, cy, cz);
+    if (this.asyncChunkGeneration.hasPendingGeneratedLodChunk(cacheKey)) {
+      return "pending";
+    }
+    return this.asyncChunkGeneration.requestGeneratedLodChunk(cacheKey) ? "scheduled" : "pending";
   }
 
   private reviveRetainedLodChunk(key: string): boolean {
@@ -1483,10 +1557,12 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
     activation.chunk.gpuDirty = true;
     if (this.lodChunkHasCoveredActiveCoarserOverlap(activation.chunk)) {
-      this.preparedLodChunks.set(key, activation.chunk);
+      this.prepareLodChunkBlockedByActiveCoarser(key, activation.chunk);
     } else {
       this.lodChunks.set(key, activation.chunk);
+      this.lodWorldColumnCoverageCache.clear();
       this.staleLodKeys.delete(key);
+      this.punchActiveCoarserLodChunksCoveredBy(activation.chunk);
     }
     return true;
   }
@@ -2346,6 +2422,49 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     return false;
   }
 
+  private prepareLodChunkBlockedByActiveCoarser(key: string, chunk: VoxelChunk): void {
+    this.preparedLodChunks.set(key, chunk);
+    const activeSameKey = this.lodChunks.get(key);
+    if (
+      activeSameKey?.renderReady
+      && activeSameKey.solidCount > 0
+      && activeSameKey.lodLevel === chunk.lodLevel
+    ) {
+      this.punchActiveCoarserLodChunksCoveredBy(activeSameKey);
+    }
+  }
+
+  private punchActiveCoarserLodChunksCoveredByPreparedActiveFiner(): void {
+    if (this.preparedLodChunks.size === 0) {
+      return;
+    }
+    const coarserCandidateKeys = this.collectPreparedCoarserCandidateKeys();
+    if (coarserCandidateKeys.size === 0) {
+      return;
+    }
+    const activeFinerChunks = [...this.lodChunks.values()]
+      .filter((chunk) => chunk.renderReady && chunk.lodLevel > 0 && chunk.solidCount > 0)
+      .sort((left, right) => left.lodLevel - right.lodLevel);
+    for (const coarserKey of coarserCandidateKeys) {
+      const coarser = this.lodChunks.get(coarserKey);
+      if (!coarser || coarser.solidCount === 0) {
+        continue;
+      }
+      for (const finer of activeFinerChunks) {
+        if (finer.lodLevel >= coarser.lodLevel) {
+          continue;
+        }
+        if (
+          lodChunkFootprintsOverlap(coarser, finer, this.chunkSize)
+          && lodChunksHaveCoveredColumnOverlap(coarser, finer, this.chunkSize)
+        ) {
+          this.punchActiveLodChunkCoveredByFiner(coarserKey);
+          break;
+        }
+      }
+    }
+  }
+
   private commitPreparedLodChunks(): void {
     if (this.preparedLodChunks.size === 0) {
       return;
@@ -2372,10 +2491,13 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           ) {
             this.preparedLodChunks.delete(preparedKey);
             this.lodChunks.set(preparedKey, prepared);
+            this.lodWorldColumnCoverageCache.clear();
             this.staleLodKeys.delete(preparedKey);
+            this.punchActiveCoarserLodChunksCoveredBy(prepared);
           }
         }
         this.lodChunks.delete(coarserKey);
+        this.lodWorldColumnCoverageCache.clear();
         this.staleLodKeys.delete(coarserKey);
         changed = true;
       }
@@ -2386,7 +2508,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         }
         this.preparedLodChunks.delete(preparedKey);
         this.lodChunks.set(preparedKey, prepared);
+        this.lodWorldColumnCoverageCache.clear();
         this.staleLodKeys.delete(preparedKey);
+        this.punchActiveCoarserLodChunksCoveredBy(prepared);
         changed = true;
       }
     }
@@ -2443,6 +2567,39 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       }
     }
     return false;
+  }
+
+  private punchActiveCoarserLodChunksCoveredBy(finer: VoxelChunk): void {
+    if (finer.lodLevel <= 0 || finer.solidCount === 0) {
+      return;
+    }
+    const finerStride = Math.max(1, finer.voxelStride);
+    const finerWorldSize = this.chunkSize * finerStride;
+    const minWorldX = finer.coord.x * finerWorldSize;
+    const maxWorldXExclusive = (finer.coord.x + 1) * finerWorldSize;
+    const minWorldZ = finer.coord.z * finerWorldSize;
+    const maxWorldZExclusive = (finer.coord.z + 1) * finerWorldSize;
+    for (let coarserLevel = finer.lodLevel + 1; coarserLevel <= MAX_LOD_LEVEL; coarserLevel += 1) {
+      const coarserStride = 1 << coarserLevel;
+      const coarserWorldSize = this.chunkSize * coarserStride;
+      const minCx = Math.floor(minWorldX / coarserWorldSize);
+      const maxCx = Math.floor((maxWorldXExclusive - 1) / coarserWorldSize);
+      const minCz = Math.floor(minWorldZ / coarserWorldSize);
+      const maxCz = Math.floor((maxWorldZExclusive - 1) / coarserWorldSize);
+      const maxCyExclusive = Math.ceil(this.maxYExclusive / coarserWorldSize);
+      for (let cz = minCz; cz <= maxCz; cz += 1) {
+        for (let cx = minCx; cx <= maxCx; cx += 1) {
+          for (let cy = 0; cy < maxCyExclusive; cy += 1) {
+            const coarserKey = toLodChunkKey(coarserLevel, cx, cy, cz);
+            const coarser = this.lodChunks.get(coarserKey);
+            if (!coarser || coarser === finer || coarser.solidCount === 0) {
+              continue;
+            }
+            this.punchActiveLodChunkCoveredByFiner(coarserKey);
+          }
+        }
+      }
+    }
   }
 
   private punchLodChunkCoveredByActiveFiner(chunk: VoxelChunk): { chunk: VoxelChunk; skippedFinerCoverage: boolean } {
@@ -2549,6 +2706,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     activation.chunk.renderReady = true;
     activation.chunk.gpuDirty = true;
     this.lodChunks.set(key, activation.chunk);
+    this.lodWorldColumnCoverageCache.clear();
     this.coveragePunchedLodKeys.add(key);
   }
 

@@ -14,6 +14,8 @@ import {
   shiftDeferredProceduralPersistenceJob,
 } from "./procedural-deferred-persistence.ts";
 import { decodeGeneratedChunk, decodeGeneratedChunkSummary, encodeGeneratedChunk } from "../engine/generated-chunk-codec.ts";
+import { encodeDerivedLodChunk } from "../engine/derived-lod-chunk-codec.ts";
+import { deriveLodChunkData } from "../engine/lod-chunk-derivation.ts";
 import type { AsyncDerivedLodChunkCacheKey } from "../engine/async-chunk-generation.ts";
 import { ProceduralWorldGenerator, type GeneratedChunk } from "../engine/procedural-generator.ts";
 import {
@@ -54,6 +56,11 @@ type WorkerRequest =
       key: AsyncDerivedLodChunkCacheKey;
     }
   | {
+      type: "derive-lod-chunk";
+      requestId: number;
+      key: AsyncDerivedLodChunkCacheKey;
+    }
+  | {
       type: "put-lod-chunk";
       requestId: number;
       key: AsyncDerivedLodChunkCacheKey;
@@ -89,8 +96,9 @@ type WorkerResponse =
   | {
       type: "lod-chunk";
       requestId: number;
-      source: "cache" | "missing";
+      source: "cache" | "generated" | "missing";
       key: AsyncDerivedLodChunkCacheKey;
+      stored?: boolean;
       chunk: {
         buffer: ArrayBuffer;
         byteLength: number;
@@ -166,6 +174,35 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
     };
     self.postMessage(response, {
       transfer: cachedLodChunk ? [cachedLodChunk.buffer] : [],
+    });
+    return;
+  }
+  if (message.type === "derive-lod-chunk") {
+    const encoded = deriveGeneratedLodChunk(generator, message.key);
+    let stored = false;
+    try {
+      if (chunkCache) {
+        await chunkCache.putLodChunk(message.key, encoded);
+        stored = true;
+      }
+    } catch (error) {
+      reportCacheFailure("write", error);
+      chunkCache?.close();
+      chunkCache = null;
+    }
+    const response: WorkerResponse = {
+      type: "lod-chunk",
+      requestId: message.requestId,
+      source: "generated",
+      key: cloneLodChunkCacheKey(message.key),
+      stored,
+      chunk: {
+        buffer: encoded.buffer,
+        byteLength: encoded.stats.byteLength,
+      },
+    };
+    self.postMessage(response, {
+      transfer: [encoded.buffer],
     });
     return;
   }
@@ -328,6 +365,70 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
     summary: summary.summary,
   };
   self.postMessage(response, { transfer: summary.transfer });
+}
+
+function deriveGeneratedLodChunk(
+  generator: ProceduralWorldGenerator,
+  key: AsyncDerivedLodChunkCacheKey,
+): ReturnType<typeof encodeDerivedLodChunk> {
+  const level = Math.max(1, Math.floor(key.lodLevel));
+  const chunkSize = generator.chunkSize;
+  const stride = 1 << level;
+  const worldSize = chunkSize * stride;
+  const originX = key.coord.x * worldSize;
+  const originY = key.coord.y * worldSize;
+  const originZ = key.coord.z * worldSize;
+  const derived = deriveLodChunkData({
+    chunkSize,
+    originX,
+    originY,
+    originZ,
+    level,
+    stride,
+    useGeneratedTopMaterial: level >= 2,
+    isOutputColumnCoveredByFiner: () => false,
+    sampleSourceMaterial: () => ({ material: 0, complete: false }),
+    sampleGeneratedTopMaterial: (ox, oz, minOy, maxOyExclusive) => {
+      const worldX = originX + ox * stride;
+      const worldZ = originZ + oz * stride;
+      return generator.sampleTopColumnMaterialBucket(
+        worldX,
+        worldZ,
+        originY + minOy * stride,
+        stride,
+        maxOyExclusive - minOy,
+        stride * 3,
+      );
+    },
+    sampleSurfaceYRange: (ox, oz) => {
+      const worldX = originX + ox * stride;
+      const worldZ = originZ + oz * stride;
+      const column = generator.sampleSurfaceColumn(worldX, worldZ);
+      return {
+        minY: column.surfaceY,
+        maxY: Math.max(column.topY, column.waterTopY ?? column.surfaceY),
+      };
+    },
+    sampleGeneratedColumnMaterials: (ox, oz, startOy, endOyInclusive) => {
+      const worldX = originX + ox * stride;
+      const worldZ = originZ + oz * stride;
+      return generator.sampleColumnMaterialBuckets(
+        worldX,
+        worldZ,
+        originY + startOy * stride,
+        stride,
+        endOyInclusive - startOy + 1,
+      );
+    },
+  });
+  return encodeDerivedLodChunk({
+    coord: { ...key.coord },
+    lodLevel: level,
+    voxelStride: stride,
+    data: derived.data,
+    solidCount: derived.solidCount,
+    solidBounds: derived.solidBounds,
+  });
 }
 
 function reportCacheFailure(stage: "open" | "read" | "write", error: unknown): void {

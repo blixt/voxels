@@ -373,3 +373,78 @@ Next target:
 1. Add a worker request that derives a LOD chunk through this same boundary using canonical generated chunk data and edit deltas.
 2. Keep the existing derived LOD disk cache as a disposable cache, not a source of truth.
 3. Move only LOD2+ far derivation first; LOD1 should remain resident-source-sensitive until edit and near-field behavior are better isolated.
+
+### Follow-up Checkpoint - Worker-Side LOD2+ Derivation
+
+Moved cache-cold LOD2+ derivation off the main thread:
+
+- Added an async `requestGeneratedLodChunk` queue path with separate pending keys from disk-cache probes.
+- The procedural generation worker now derives LOD chunks through `deriveLodChunkData`, using canonical procedural column sampling rather than resident render chunks.
+- Worker-derived chunks are immediately persisted to the derived LOD IndexedDB cache under the existing edit-revision key.
+- Completed derived chunks carry `source: "cache" | "generated"` so disk hits, worker generation, and stores are measured separately.
+- Residency still keeps LOD1 on the main-thread resident-source path; LOD2+ uses the worker only when edits are absent.
+- Disk probes now get a wider first chance (`64` per update), then worker generation keeps cold chunks from blocking the renderer. A strict disk-first experiment made cold population miss the settle budget and produced coverage gaps, so the hybrid is the current measured tradeoff.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/lod-chunk-derivation.test.ts tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-default-worker-derive-hybrid64`
+
+Browser verifier artifact:
+
+- Default persistence: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-DqUKao/lod-idb-persistence-reload.json`
+  - Result: pass, with `921` reload disk hits and `921` cumulative reload disk hits.
+  - Reload settled in `24` frames with clean coverage: `0` uncovered gaps, `0` handoff holes, `0` overlaps.
+  - Reload main-thread LOD generation was reduced to `1` LOD1 chunk; LOD2-L4 main-thread generation stayed at `0`.
+  - Reload worker-generated LOD chunks: `96` total (`L2=32`, `L3=16`, `L4=48`).
+  - Cold-origin LOD2-L4 derivation moved to the worker: `941` worker chunks (`L2=291`, `L3=187`, `L4=463`), while main-thread generated chunks were LOD1-only (`64`).
+  - Reload downsample time was `3ms`; coverage remained clean.
+
+Rejected check:
+
+- Strict disk-first scheduling artifact: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-rf0R4z/lod-idb-persistence-reload.json`
+  - Reload disk reuse improved to `1379` hits, but cold-origin ended with `144` pending LOD chunks and `258` uncovered coverage samples after `240` frames.
+  - Conclusion: disk-first is useful for reloads but cannot be allowed to starve cache-cold worker derivation.
+
+Next target:
+
+1. Add a far-transition benchmark run for this worker path and compare against the earlier far backlog (`L1=141`, `L2=288`, `L3=173`, `L4=145` pending).
+2. Add worker-side edit overlay awareness or a canonical edit delta layer before enabling worker derivation when edits are present.
+3. Investigate replacing LOD1 main-thread source derivation with a safer canonical-summary path after near-field handoff tests are expanded.
+
+### Follow-up Checkpoint - LOD Ownership Diagnostics
+
+Tightened the LOD correctness harness and fixed two activation-order gaps:
+
+- `probeLodCoverage` now records exact owner chunk IDs and vertical material ranges for overlap samples.
+- Band overlap is now counted only when different LOD bands overlap in X/Z and in material Y range. This avoided false positives from stacked vertical chunks while preserving real z-fighting risks.
+- `punchActiveCoarserLodChunksCoveredBy` now uses direct coarser coordinate lookup instead of scanning every active LOD chunk.
+- Prepared finer replacements now preserve visible stale-finer ownership by punching active coarser chunks when the old same-key finer chunk is still renderable.
+- Prepared finer backlogs now run a targeted coarser repair for coarser chunks known to overlap prepared finer candidates.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts tests/render-verification-metrics.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-default-direct-punch-check`
+
+Browser verifier artifacts:
+
+- Default persistence: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-p6BUct/lod-idb-persistence-reload.json`
+  - Result: pass, with `936` reload disk hits and clean coverage (`0` gaps, `0` handoff holes, `0` resident overlaps, `0` band overlaps).
+  - Reload settled in `24` frames.
+
+Rejected / incomplete checks:
+
+- Continuous active-ownership repair reduced far-transition overlap samples from `127` to `31`, but roughly doubled cold persistence elapsed time. It was removed as too expensive for the default engine path.
+- Far transition remains unresolved:
+  - `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-8RCKPO/lod-idb-persistence-reload.json`
+  - With vertical-aware samples, the failure is confirmed as real overlapping material ranges, not a stacked-Y false positive.
+  - Final far state still had `216` pending LOD chunks (`146` generation-budget, `70` prepared) and `127` true LOD band-overlap samples.
+
+Next target:
+
+1. Replace ad hoc ownership repair with deterministic ownership state during LOD planning/activation, so active LOD chunks cannot start a frame with overlapping material ranges.
+2. Add per-key active/prepared/stale diagnostics to overlap samples so the far artifact reports whether each owner is stale, punched, prepared-blocked, or fresh.
+3. Reduce far-transition LOD1 backlog; current worker derivation helps LOD2+, but the remaining far pending is dominated by main-thread LOD1 and prepared handoff state.

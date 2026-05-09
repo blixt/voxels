@@ -22,10 +22,12 @@ function createFakeAsyncQueue(overrides: Partial<AsyncChunkGenerationQueue> = {}
     requestSummary: () => false,
     requestRegionSummary: () => false,
     requestLodChunk: () => false,
+    requestGeneratedLodChunk: () => false,
     storeLodChunk: () => false,
     hasPendingChunk: () => false,
     hasPendingRegionSummary: () => false,
     hasPendingLodChunk: () => false,
+    hasPendingGeneratedLodChunk: () => false,
     getPendingCount: () => 0,
     drainCompletedChunks: () => [],
     drainCompletedSummaries: () => [],
@@ -35,7 +37,7 @@ function createFakeAsyncQueue(overrides: Partial<AsyncChunkGenerationQueue> = {}
     drainMissingLodChunks: () => [],
     drainCompletionStats: () => ({ cacheHits: 0, generated: 0 }),
     drainSummaryCompletionStats: () => ({ cacheHits: 0, generated: 0 }),
-    drainLodChunkCompletionStats: () => ({ cacheHits: 0, missing: 0, stored: 0 }),
+    drainLodChunkCompletionStats: () => ({ cacheHits: 0, generated: 0, missing: 0, stored: 0 }),
     dispose: () => {},
     ...overrides,
   };
@@ -321,9 +323,56 @@ test("LOD residency schedules a bounded number of derived LOD disk-cache request
   });
 
   expect(lod.scheduledLodDiskRequests).toBeGreaterThan(0);
-  expect(lod.scheduledLodDiskRequests).toBeLessThanOrEqual(32);
+  expect(lod.scheduledLodDiskRequests).toBeLessThanOrEqual(64);
   expect(requestedKeys.length).toBe(lod.scheduledLodDiskRequests);
   expect(lod.pending).toBeGreaterThan(0);
+});
+
+test("LOD residency schedules async generated derived chunks after disk-cache misses", () => {
+  const diskRequests: AsyncDerivedLodChunkCacheKey[] = [];
+  const generatedKeys: AsyncDerivedLodChunkCacheKey[] = [];
+  const pendingDiskKeys = new Set<string>();
+  const pendingGeneratedKeys = new Set<string>();
+  const queue = createFakeAsyncQueue({
+    requestLodChunk: (key) => {
+      diskRequests.push({ ...key, coord: { ...key.coord } });
+      pendingDiskKeys.add(toTestLodDiskKey(key));
+      return true;
+    },
+    hasPendingLodChunk: (key) => pendingDiskKeys.has(toTestLodDiskKey(key)),
+    drainMissingLodChunks: () => {
+      const missing = diskRequests.splice(0, diskRequests.length);
+      pendingDiskKeys.clear();
+      return missing;
+    },
+    drainLodChunkCompletionStats: () => ({ cacheHits: 0, generated: 0, missing: diskRequests.length, stored: 0 }),
+    requestGeneratedLodChunk: (key) => {
+      generatedKeys.push({ ...key, coord: { ...key.coord } });
+      pendingGeneratedKeys.add(toTestLodDiskKey(key));
+      return true;
+    },
+    hasPendingGeneratedLodChunk: (key) => pendingGeneratedKeys.has(toTestLodDiskKey(key)),
+  });
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    asyncChunkGeneration: queue,
+    horizontalRadiusChunks: 1,
+  });
+
+  let lod = world.updateLodResidencyAround(world.getSpawnPosition(), {
+    maxGenerateLodChunks: Number.POSITIVE_INFINITY,
+  });
+  for (let update = 0; update < 24 && lod.scheduledLodWorkerRequests === 0; update += 1) {
+    lod = world.updateLodResidencyAround(world.getSpawnPosition(), {
+      maxGenerateLodChunks: Number.POSITIVE_INFINITY,
+    });
+  }
+
+  expect(lod.scheduledLodWorkerRequests).toBeGreaterThan(0);
+  expect(lod.scheduledLodWorkerRequests).toBeLessThanOrEqual(16);
+  expect(generatedKeys.length).toBe(lod.scheduledLodWorkerRequests);
+  expect(generatedKeys.every((key) => key.lodLevel >= 2)).toBe(true);
+  expect(lod.generatedByLevel.slice(2).every((count) => count === 0)).toBe(true);
+  expect(lod.pendingGenerationBudget).toBeGreaterThan(0);
 });
 
 test("LOD residency adopts completed derived LOD disk-cache hits before rebuilding", () => {
@@ -366,11 +415,66 @@ test("LOD residency adopts completed derived LOD disk-cache hits before rebuildi
   expect(lod.generated).toBe(0);
 });
 
+test("LOD residency tracks worker-generated derived LOD chunks separately from disk hits", () => {
+  const probeRequests: AsyncDerivedLodChunkCacheKey[] = [];
+  const probeWorld = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    asyncChunkGeneration: createFakeAsyncQueue({
+      requestLodChunk: (key) => {
+        probeRequests.push({ ...key, coord: { ...key.coord } });
+        return true;
+      },
+    }),
+    horizontalRadiusChunks: 1,
+  });
+  const spawn = probeWorld.getSpawnPosition();
+  probeWorld.updateLodResidencyAround(spawn, { maxGenerateLodChunks: 0 });
+  const key = probeRequests.find((request) => request.lodLevel >= 2) ?? probeRequests[0]!;
+
+  const encoded = encodeDerivedLodChunk(createTestDerivedLodPayload(key, 16));
+  let drained = false;
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    asyncChunkGeneration: createFakeAsyncQueue({
+      drainCompletedLodChunks: () => {
+        if (drained) {
+          return [];
+        }
+        drained = true;
+        return [{
+          key,
+          source: "generated",
+          buffer: encoded.buffer,
+          byteLength: encoded.stats.byteLength,
+        }];
+      },
+    }),
+    horizontalRadiusChunks: 1,
+  });
+
+  const lod = world.updateLodResidencyAround(spawn, { maxGenerateLodChunks: 0 });
+
+  expect(lod.lodDiskCacheHits).toBe(0);
+  expect(lod.lodWorkerGenerated).toBe(1);
+  expect(lod.generated).toBe(0);
+});
+
 test("LOD residency queues active derived chunks for persistence before eviction", () => {
+  const diskRequests: AsyncDerivedLodChunkCacheKey[] = [];
+  const pendingDiskKeys = new Set<string>();
   const storedKeys: AsyncDerivedLodChunkCacheKey[] = [];
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
     asyncChunkGeneration: createFakeAsyncQueue({
-      requestLodChunk: () => false,
+      requestLodChunk: (key) => {
+        diskRequests.push({ ...key, coord: { ...key.coord } });
+        pendingDiskKeys.add(toTestLodDiskKey(key));
+        return true;
+      },
+      hasPendingLodChunk: (key) => pendingDiskKeys.has(toTestLodDiskKey(key)),
+      drainMissingLodChunks: () => {
+        const missing = diskRequests.splice(0, diskRequests.length);
+        pendingDiskKeys.clear();
+        return missing;
+      },
+      drainLodChunkCompletionStats: () => ({ cacheHits: 0, generated: 0, missing: diskRequests.length, stored: 0 }),
       storeLodChunk: (chunk) => {
         storedKeys.push({ ...chunk.key, coord: { ...chunk.key.coord } });
         return true;
@@ -379,9 +483,14 @@ test("LOD residency queues active derived chunks for persistence before eviction
     horizontalRadiusChunks: 1,
   });
 
-  const lod = world.updateLodResidencyAround(world.getSpawnPosition(), {
+  let lod = world.updateLodResidencyAround(world.getSpawnPosition(), {
     maxGenerateLodChunks: 8,
   });
+  for (let update = 0; update < 8 && lod.generated === 0; update += 1) {
+    lod = world.updateLodResidencyAround(world.getSpawnPosition(), {
+      maxGenerateLodChunks: 8,
+    });
+  }
 
   expect(lod.generated).toBeGreaterThan(0);
   expect(lod.scheduledLodDiskStores).toBeGreaterThan(0);

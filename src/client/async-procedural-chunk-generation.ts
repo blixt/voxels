@@ -48,8 +48,9 @@ interface WorkerRegionSummarizedMessage {
 interface WorkerLodChunkMessage {
   type: "lod-chunk";
   requestId: number;
-  source: "cache" | "missing";
+  source: "cache" | "generated" | "missing";
   key: AsyncDerivedLodChunkCacheKey;
+  stored?: boolean;
   chunk: {
     buffer: ArrayBuffer;
     byteLength: number;
@@ -71,7 +72,7 @@ type WorkerMessage =
   | WorkerLodChunkMessage
   | WorkerLodChunkStoredMessage;
 
-type PendingRequestMode = "chunk" | "summary" | "region-summary" | "lod-chunk" | "lod-store";
+type PendingRequestMode = "chunk" | "summary" | "region-summary" | "lod-chunk" | "lod-generate" | "lod-store";
 
 interface PendingRequest {
   key: string;
@@ -115,6 +116,7 @@ export function createAsyncProceduralChunkGeneration(
   let completedSummaryCacheHits = 0;
   let completedSummaryGenerated = 0;
   let completedLodCacheHits = 0;
+  let completedLodGenerated = 0;
   let completedLodMissing = 0;
   let completedLodStored = 0;
   let nextRequestId = 1;
@@ -140,14 +142,22 @@ export function createAsyncProceduralChunkGeneration(
       }
       return;
     }
-    if (pending.mode === "lod-chunk") {
+    if (pending.mode === "lod-chunk" || pending.mode === "lod-generate") {
       if (message.type !== "lod-chunk") {
         throw new Error(`Expected LOD chunk response for ${pending.key}, received ${message.type}`);
       }
-      if (message.source === "cache" && message.chunk) {
-        completedLodCacheHits += 1;
+      if ((message.source === "cache" || message.source === "generated") && message.chunk) {
+        if (message.source === "cache") {
+          completedLodCacheHits += 1;
+        } else {
+          completedLodGenerated += 1;
+          if (message.stored) {
+            completedLodStored += 1;
+          }
+        }
         completedLodChunks.push({
           key: cloneLodChunkCacheKey(message.key),
+          source: message.source,
           buffer: message.chunk.buffer,
           byteLength: message.chunk.byteLength,
         });
@@ -223,6 +233,9 @@ export function createAsyncProceduralChunkGeneration(
     requestLodChunk(key: AsyncDerivedLodChunkCacheKey): boolean {
       return requestLodChunk(key);
     },
+    requestGeneratedLodChunk(key: AsyncDerivedLodChunkCacheKey): boolean {
+      return requestGeneratedLodChunk(key);
+    },
     storeLodChunk(chunk: AsyncEncodedDerivedLodChunk): boolean {
       return storeLodChunk(chunk);
     },
@@ -234,6 +247,9 @@ export function createAsyncProceduralChunkGeneration(
     },
     hasPendingLodChunk(key: AsyncDerivedLodChunkCacheKey): boolean {
       return pendingKeys.has(toAsyncLodChunkKey(key));
+    },
+    hasPendingGeneratedLodChunk(key: AsyncDerivedLodChunkCacheKey): boolean {
+      return pendingKeys.has(toAsyncGeneratedLodChunkKey(key));
     },
     getWorkerCount(): number {
       return workerSlots.length;
@@ -298,10 +314,12 @@ export function createAsyncProceduralChunkGeneration(
     drainLodChunkCompletionStats() {
       const stats = {
         cacheHits: completedLodCacheHits,
+        generated: completedLodGenerated,
         missing: completedLodMissing,
         stored: completedLodStored,
       };
       completedLodCacheHits = 0;
+      completedLodGenerated = 0;
       completedLodMissing = 0;
       completedLodStored = 0;
       return stats;
@@ -324,6 +342,7 @@ export function createAsyncProceduralChunkGeneration(
       completedSummaryCacheHits = 0;
       completedSummaryGenerated = 0;
       completedLodCacheHits = 0;
+      completedLodGenerated = 0;
       completedLodMissing = 0;
       completedLodStored = 0;
     },
@@ -400,6 +419,24 @@ export function createAsyncProceduralChunkGeneration(
     return true;
   }
 
+  function requestGeneratedLodChunk(key: AsyncDerivedLodChunkCacheKey): boolean {
+    const requestKey = toAsyncGeneratedLodChunkKey(key);
+    if (pendingKeys.has(requestKey) || pendingKeys.size >= maxPendingJobs) {
+      return false;
+    }
+    const workerIndex = chooseWorkerIndex();
+    const requestId = nextRequestId++;
+    pendingKeys.add(requestKey);
+    pendingRequests.set(requestId, { key: requestKey, mode: "lod-generate" });
+    workerSlots[workerIndex]!.pendingCount += 1;
+    workerSlots[workerIndex]!.worker.postMessage({
+      type: "derive-lod-chunk",
+      requestId,
+      key: cloneLodChunkCacheKey(key),
+    });
+    return true;
+  }
+
   function storeLodChunk(chunk: AsyncEncodedDerivedLodChunk): boolean {
     const requestKey = `store:${toAsyncLodChunkKey(chunk.key)}`;
     if (pendingKeys.has(requestKey) || pendingKeys.size >= maxPendingJobs) {
@@ -434,6 +471,10 @@ export function createAsyncProceduralChunkGeneration(
     }
     return bestWorkerIndex;
   }
+}
+
+function toAsyncGeneratedLodChunkKey(key: AsyncDerivedLodChunkCacheKey): string {
+  return `generate:${toAsyncLodChunkKey(key)}`;
 }
 
 function cloneLodChunkCacheKey(key: AsyncDerivedLodChunkCacheKey): AsyncDerivedLodChunkCacheKey {

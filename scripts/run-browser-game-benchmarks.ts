@@ -82,6 +82,8 @@ interface LodPersistencePhaseSummary {
   totalEmptyCacheHits: number;
   totalDiskCacheHits: number;
   totalDiskCacheMisses: number;
+  totalWorkerGenerated: number;
+  totalScheduledWorkerRequests: number;
   totalScheduledDiskRequests: number;
   totalScheduledDiskStores: number;
   totalCompletedDiskStores: number;
@@ -91,6 +93,7 @@ interface LodPersistencePhaseSummary {
   totalMemoryCacheHitsByLevel: readonly number[];
   totalEmptyCacheHitsByLevel: readonly number[];
   totalDiskCacheHitsByLevel: readonly number[];
+  totalWorkerGeneratedByLevel: readonly number[];
   maxLodChunkMs: number;
   maxWorstRecentFrameMs: number;
   maxRecentHitchCount: number;
@@ -115,7 +118,9 @@ interface LodPersistencePhaseSummary {
   finalLodCacheHitsByLevel: readonly number[];
   finalLodEmptyCacheHitsByLevel: readonly number[];
   finalLodDiskCacheHitsByLevel: readonly number[];
+  finalLodWorkerGeneratedByLevel: readonly number[];
   finalCumulativeGenerated: number;
+  finalCumulativeWorkerGenerated: number;
   finalCumulativeDiskCacheHits: number;
   finalCumulativeDiskCacheMisses: number;
   finalCumulativeScheduledDiskRequests: number;
@@ -130,6 +135,10 @@ interface LodPersistencePhaseSummary {
     waterOverlapCount: number;
     maxSeamGapMeters: number;
     maxLodOverlapMeters: number;
+    residentOverlapSamples?: readonly unknown[];
+    bandOverlapSamples?: readonly unknown[];
+    uncoveredGapSamples?: readonly unknown[];
+    handoffHoleSamples?: readonly unknown[];
   };
   lastHitchCause: string;
   lastHitchWallMs: number;
@@ -684,6 +693,8 @@ async function pumpLodPersistencePhase(
   let totalEmptyCacheHits = 0;
   let totalDiskCacheHits = 0;
   let totalDiskCacheMisses = 0;
+  let totalWorkerGenerated = 0;
+  let totalScheduledWorkerRequests = 0;
   let totalScheduledDiskRequests = 0;
   let totalScheduledDiskStores = 0;
   let totalCompletedDiskStores = 0;
@@ -693,6 +704,7 @@ async function pumpLodPersistencePhase(
   const totalMemoryCacheHitsByLevel = [0, 0, 0, 0, 0];
   const totalEmptyCacheHitsByLevel = [0, 0, 0, 0, 0];
   const totalDiskCacheHitsByLevel = [0, 0, 0, 0, 0];
+  const totalWorkerGeneratedByLevel = [0, 0, 0, 0, 0];
   let maxLodChunkMs = 0;
   let maxWorstRecentFrameMs = 0;
   let maxRecentHitchCount = 0;
@@ -726,6 +738,8 @@ async function pumpLodPersistencePhase(
     totalEmptyCacheHits += pump.totalEmptyCacheHits;
     totalDiskCacheHits += pump.totalDiskCacheHits;
     totalDiskCacheMisses += pump.totalDiskCacheMisses;
+    totalWorkerGenerated += pump.totalWorkerGenerated;
+    totalScheduledWorkerRequests += pump.totalScheduledWorkerRequests;
     totalScheduledDiskRequests += pump.totalScheduledDiskRequests;
     totalScheduledDiskStores += pump.totalScheduledDiskStores;
     totalCompletedDiskStores += pump.totalCompletedDiskStores;
@@ -735,6 +749,7 @@ async function pumpLodPersistencePhase(
     addLevelCounts(totalMemoryCacheHitsByLevel, pump.totalMemoryCacheHitsByLevel);
     addLevelCounts(totalEmptyCacheHitsByLevel, pump.totalEmptyCacheHitsByLevel);
     addLevelCounts(totalDiskCacheHitsByLevel, pump.totalDiskCacheHitsByLevel);
+    addLevelCounts(totalWorkerGeneratedByLevel, pump.totalWorkerGeneratedByLevel);
     maxLodChunkMs = Math.max(maxLodChunkMs, pump.maxLodChunkMs);
     maxWorstRecentFrameMs = Math.max(maxWorstRecentFrameMs, pump.maxWorstRecentFrameMs);
     maxRecentHitchCount = Math.max(maxRecentHitchCount, pump.maxRecentHitchCount);
@@ -749,6 +764,8 @@ async function pumpLodPersistencePhase(
       totalEmptyCacheHits,
       totalDiskCacheHits,
       totalDiskCacheMisses,
+      totalWorkerGenerated,
+      totalScheduledWorkerRequests,
       totalScheduledDiskRequests,
       totalScheduledDiskStores,
       totalCompletedDiskStores,
@@ -758,6 +775,7 @@ async function pumpLodPersistencePhase(
       totalMemoryCacheHitsByLevel,
       totalEmptyCacheHitsByLevel,
       totalDiskCacheHitsByLevel,
+      totalWorkerGeneratedByLevel,
       maxLodChunkMs,
       maxWorstRecentFrameMs,
       maxRecentHitchCount,
@@ -785,6 +803,8 @@ async function pumpLodPersistencePhase(
     totalEmptyCacheHits,
     totalDiskCacheHits,
     totalDiskCacheMisses,
+    totalWorkerGenerated,
+    totalScheduledWorkerRequests,
     totalScheduledDiskRequests,
     totalScheduledDiskStores,
     totalCompletedDiskStores,
@@ -794,6 +814,7 @@ async function pumpLodPersistencePhase(
     totalMemoryCacheHitsByLevel,
     totalEmptyCacheHitsByLevel,
     totalDiskCacheHitsByLevel,
+    totalWorkerGeneratedByLevel,
     maxLodChunkMs,
     maxWorstRecentFrameMs,
     maxRecentHitchCount,
@@ -813,6 +834,8 @@ function buildLodPersistencePhaseSummary(input: {
   totalEmptyCacheHits: number;
   totalDiskCacheHits: number;
   totalDiskCacheMisses: number;
+  totalWorkerGenerated: number;
+  totalScheduledWorkerRequests: number;
   totalScheduledDiskRequests: number;
   totalScheduledDiskStores: number;
   totalCompletedDiskStores: number;
@@ -822,6 +845,7 @@ function buildLodPersistencePhaseSummary(input: {
   totalMemoryCacheHitsByLevel: readonly number[];
   totalEmptyCacheHitsByLevel: readonly number[];
   totalDiskCacheHitsByLevel: readonly number[];
+  totalWorkerGeneratedByLevel: readonly number[];
   maxLodChunkMs: number;
   maxWorstRecentFrameMs: number;
   maxRecentHitchCount: number;
@@ -839,6 +863,8 @@ function buildLodPersistencePhaseSummary(input: {
     totalEmptyCacheHits: input.totalEmptyCacheHits,
     totalDiskCacheHits: input.totalDiskCacheHits,
     totalDiskCacheMisses: input.totalDiskCacheMisses,
+    totalWorkerGenerated: input.totalWorkerGenerated,
+    totalScheduledWorkerRequests: input.totalScheduledWorkerRequests,
     totalScheduledDiskRequests: input.totalScheduledDiskRequests,
     totalScheduledDiskStores: input.totalScheduledDiskStores,
     totalCompletedDiskStores: input.totalCompletedDiskStores,
@@ -848,6 +874,7 @@ function buildLodPersistencePhaseSummary(input: {
     totalMemoryCacheHitsByLevel: [...input.totalMemoryCacheHitsByLevel],
     totalEmptyCacheHitsByLevel: [...input.totalEmptyCacheHitsByLevel],
     totalDiskCacheHitsByLevel: [...input.totalDiskCacheHitsByLevel],
+    totalWorkerGeneratedByLevel: [...input.totalWorkerGeneratedByLevel],
     maxLodChunkMs: input.maxLodChunkMs,
     maxWorstRecentFrameMs: input.maxWorstRecentFrameMs,
     maxRecentHitchCount: input.maxRecentHitchCount,
@@ -872,7 +899,9 @@ function buildLodPersistencePhaseSummary(input: {
     finalLodCacheHitsByLevel: [...input.finalSnapshot.lodCacheHitsByLevel],
     finalLodEmptyCacheHitsByLevel: [...input.finalSnapshot.lodEmptyCacheHitsByLevel],
     finalLodDiskCacheHitsByLevel: [...input.finalSnapshot.lodDiskCacheHitsByLevel],
+    finalLodWorkerGeneratedByLevel: [...input.finalSnapshot.lodWorkerGeneratedByLevel],
     finalCumulativeGenerated: input.finalSnapshot.cumulativeLodGeneratedChunks,
+    finalCumulativeWorkerGenerated: input.finalSnapshot.cumulativeLodWorkerGenerated,
     finalCumulativeDiskCacheHits: input.finalSnapshot.cumulativeLodDiskCacheHits,
     finalCumulativeDiskCacheMisses: input.finalSnapshot.cumulativeLodDiskCacheMisses,
     finalCumulativeScheduledDiskRequests: input.finalSnapshot.cumulativeLodScheduledDiskRequests,
@@ -899,6 +928,8 @@ function buildCurrentLodPersistencePhaseSummary(
     totalEmptyCacheHits: 0,
     totalDiskCacheHits: 0,
     totalDiskCacheMisses: 0,
+    totalWorkerGenerated: 0,
+    totalScheduledWorkerRequests: 0,
     totalScheduledDiskRequests: 0,
     totalScheduledDiskStores: 0,
     totalCompletedDiskStores: 0,
@@ -908,6 +939,7 @@ function buildCurrentLodPersistencePhaseSummary(
     totalMemoryCacheHitsByLevel: [0, 0, 0, 0, 0],
     totalEmptyCacheHitsByLevel: [0, 0, 0, 0, 0],
     totalDiskCacheHitsByLevel: [0, 0, 0, 0, 0],
+    totalWorkerGeneratedByLevel: [0, 0, 0, 0, 0],
     maxLodChunkMs: 0,
     maxWorstRecentFrameMs: snapshot.frameTiming.worstRecentFrameMs,
     maxRecentHitchCount: snapshot.frameTiming.recentHitchCount,
@@ -949,6 +981,10 @@ function summarizeLodCoverageForPersistence(
     waterOverlapCount: coverage.waterOverlapCount,
     maxSeamGapMeters,
     maxLodOverlapMeters,
+    residentOverlapSamples: coverage.residentOverlapSamples,
+    bandOverlapSamples: coverage.bandOverlapSamples,
+    uncoveredGapSamples: coverage.uncoveredGapSamples,
+    handoffHoleSamples: coverage.handoffHoleSamples,
   };
 }
 
@@ -960,7 +996,9 @@ function validateLodPersistenceIteration(iteration: LodPersistenceIteration): st
   if (iteration.farEviction.label !== "far-eviction-skipped" && !iteration.farEviction.settled) {
     failures.push("far eviction phase did not settle");
   }
-  if (iteration.storeFlush.totalCompletedDiskStores <= 0 && iteration.storeFlush.totalScheduledDiskStores <= 0) {
+  const populateScheduledStores = iteration.coldOrigin.totalScheduledDiskStores + iteration.storeFlush.totalScheduledDiskStores;
+  const populateCompletedStores = iteration.coldOrigin.totalCompletedDiskStores + iteration.storeFlush.totalCompletedDiskStores;
+  if (populateCompletedStores <= 0 && populateScheduledStores <= 0) {
     failures.push("populate run did not schedule or complete derived LOD disk stores");
   }
   if (!iteration.reloadOrigin.settled && iteration.reloadOrigin.finalLodPendingChunks > 8) {

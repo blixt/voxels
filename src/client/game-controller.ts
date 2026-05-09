@@ -259,10 +259,14 @@ export interface GameHudSnapshot {
   lodDiskCacheHits: number;
   lodDiskCacheHitsByLevel: readonly number[];
   lodDiskCacheMisses: number;
+  lodWorkerGenerated: number;
+  lodWorkerGeneratedByLevel: readonly number[];
+  lodScheduledWorkerRequests: number;
   lodScheduledDiskRequests: number;
   lodScheduledDiskStores: number;
   lodCompletedDiskStores: number;
   cumulativeLodGeneratedChunks: number;
+  cumulativeLodWorkerGenerated: number;
   cumulativeLodDiskCacheHits: number;
   cumulativeLodDiskCacheMisses: number;
   cumulativeLodScheduledDiskRequests: number;
@@ -484,6 +488,8 @@ export interface LodCoverageIssueSample {
   distanceMeters: number;
   bands: string[];
   sampleStrideMeters: number[];
+  ownerChunks?: string[];
+  verticalRanges?: LodCoverageVerticalRange[];
 }
 
 export interface LodCoverageProbe {
@@ -518,6 +524,13 @@ interface LodCoverageSpan {
   maxX: number;
   minZ: number;
   maxZ: number;
+}
+
+interface LodCoverageVerticalRange {
+  band: string;
+  ownerChunk: string;
+  minY: number;
+  maxY: number;
 }
 
 export interface RenderReadyCoverageProbe {
@@ -793,6 +806,9 @@ export interface BenchmarkWorldPumpSummary {
   totalDiskCacheHits: number;
   totalDiskCacheHitsByLevel: readonly number[];
   totalDiskCacheMisses: number;
+  totalWorkerGenerated: number;
+  totalWorkerGeneratedByLevel: readonly number[];
+  totalScheduledWorkerRequests: number;
   totalScheduledDiskRequests: number;
   totalScheduledDiskStores: number;
   totalCompletedDiskStores: number;
@@ -897,11 +913,15 @@ export class GameController {
     lodDiskCacheHits: 0,
     lodDiskCacheHitsByLevel: [0, 0, 0, 0, 0],
     lodDiskCacheMisses: 0,
+    lodWorkerGenerated: 0,
+    lodWorkerGeneratedByLevel: [0, 0, 0, 0, 0],
+    scheduledLodWorkerRequests: 0,
     scheduledLodDiskRequests: 0,
     scheduledLodDiskStores: 0,
     completedLodDiskStores: 0,
   };
   private cumulativeLodGeneratedChunks = 0;
+  private cumulativeLodWorkerGenerated = 0;
   private cumulativeLodDiskCacheHits = 0;
   private cumulativeLodDiskCacheMisses = 0;
   private cumulativeLodScheduledDiskRequests = 0;
@@ -1133,10 +1153,14 @@ export class GameController {
       lodDiskCacheHits: this.lastLodSummary.lodDiskCacheHits,
       lodDiskCacheHitsByLevel: [...this.lastLodSummary.lodDiskCacheHitsByLevel],
       lodDiskCacheMisses: this.lastLodSummary.lodDiskCacheMisses,
+      lodWorkerGenerated: this.lastLodSummary.lodWorkerGenerated,
+      lodWorkerGeneratedByLevel: [...this.lastLodSummary.lodWorkerGeneratedByLevel],
+      lodScheduledWorkerRequests: this.lastLodSummary.scheduledLodWorkerRequests,
       lodScheduledDiskRequests: this.lastLodSummary.scheduledLodDiskRequests,
       lodScheduledDiskStores: this.lastLodSummary.scheduledLodDiskStores,
       lodCompletedDiskStores: this.lastLodSummary.completedLodDiskStores,
       cumulativeLodGeneratedChunks: this.cumulativeLodGeneratedChunks,
+      cumulativeLodWorkerGenerated: this.cumulativeLodWorkerGenerated,
       cumulativeLodDiskCacheHits: this.cumulativeLodDiskCacheHits,
       cumulativeLodDiskCacheMisses: this.cumulativeLodDiskCacheMisses,
       cumulativeLodScheduledDiskRequests: this.cumulativeLodScheduledDiskRequests,
@@ -1536,6 +1560,8 @@ export class GameController {
         const visibleLod0Owner = renderReady || this.isVisibleLod0SurfaceRenderReady(worldX, worldZ, chunkX, chunkZ);
         const renderReadyWater = this.isRenderReadyWaterColumn(worldX, worldZ, chunkX, chunkZ);
         const lodOwnerStridesByBand = new Map<string, number>();
+        const lodOwnerChunksByBand = new Map<string, Set<string>>();
+        const lodVerticalRanges: LodCoverageVerticalRange[] = [];
         const waterBands = new Set<string>(renderReadyWater ? ["LOD0"] : []);
         for (const span of lodSpans) {
           const lodColumn = worldX >= span.minX
@@ -1543,17 +1569,31 @@ export class GameController {
             && worldZ >= span.minZ
             && worldZ < span.maxZ
             ? classifyWorldColumnInLodChunk(span.chunk, worldX, worldZ, this.world.chunkSize)
-            : { covered: false, water: false };
+            : { covered: false, water: false, minY: null, maxY: null };
           if (
             lodColumn.covered
           ) {
-            lodOwnerStridesByBand.set(formatLodOwnerBand(span.chunk), span.strideMeters);
+            const ownerBand = formatLodOwnerBand(span.chunk);
+            lodOwnerStridesByBand.set(ownerBand, span.strideMeters);
+            const ownerChunks = lodOwnerChunksByBand.get(ownerBand) ?? new Set<string>();
+            const ownerChunk = formatLodOwnerChunk(span.chunk);
+            ownerChunks.add(ownerChunk);
+            lodOwnerChunksByBand.set(ownerBand, ownerChunks);
+            if (lodColumn.minY !== null && lodColumn.maxY !== null) {
+              lodVerticalRanges.push({
+                band: ownerBand,
+                ownerChunk,
+                minY: lodColumn.minY,
+                maxY: lodColumn.maxY,
+              });
+            }
             if (lodColumn.water) {
-              waterBands.add(formatLodOwnerBand(span.chunk));
+              waterBands.add(ownerBand);
             }
           }
         }
         const lodBands = [...lodOwnerStridesByBand.keys()];
+        const ownerChunks = [...lodOwnerChunksByBand.values()].flatMap((chunks) => [...chunks]);
         const sampleStrideMeters = [...lodOwnerStridesByBand.values()];
         const bands = visibleLod0Owner ? ["LOD0", ...lodBands] : lodBands;
         const strides = visibleLod0Owner ? [worldUnitsToMeters(1), ...sampleStrideMeters] : sampleStrideMeters;
@@ -1565,6 +1605,8 @@ export class GameController {
           distanceMeters,
           bands,
           sampleStrideMeters: strides,
+          ownerChunks,
+          verticalRanges: lodVerticalRanges,
         };
         sampleCount += 1;
         if (resident) {
@@ -1583,7 +1625,7 @@ export class GameController {
           residentOverlapCount += 1;
           pushIssueSample(residentOverlapSamples, issueSample);
         }
-        if (lodBands.length > 1) {
+        if (lodBands.length > 1 && lodCoverageRangesHaveVerticalOverlap(lodVerticalRanges)) {
           bandOverlapCount += 1;
           pushIssueSample(bandOverlapSamples, issueSample);
         }
@@ -2580,6 +2622,9 @@ export class GameController {
     let totalDiskCacheHits = 0;
     const totalDiskCacheHitsByLevel = [0, 0, 0, 0, 0];
     let totalDiskCacheMisses = 0;
+    let totalWorkerGenerated = 0;
+    const totalWorkerGeneratedByLevel = [0, 0, 0, 0, 0];
+    let totalScheduledWorkerRequests = 0;
     let totalScheduledDiskRequests = 0;
     let totalScheduledDiskStores = 0;
     let totalCompletedDiskStores = 0;
@@ -2606,6 +2651,9 @@ export class GameController {
       totalDiskCacheHits += this.lastLodSummary.lodDiskCacheHits;
       addLodLevelCounts(totalDiskCacheHitsByLevel, this.lastLodSummary.lodDiskCacheHitsByLevel);
       totalDiskCacheMisses += this.lastLodSummary.lodDiskCacheMisses;
+      totalWorkerGenerated += this.lastLodSummary.lodWorkerGenerated;
+      addLodLevelCounts(totalWorkerGeneratedByLevel, this.lastLodSummary.lodWorkerGeneratedByLevel);
+      totalScheduledWorkerRequests += this.lastLodSummary.scheduledLodWorkerRequests;
       totalScheduledDiskRequests += this.lastLodSummary.scheduledLodDiskRequests;
       totalScheduledDiskStores += this.lastLodSummary.scheduledLodDiskStores;
       totalCompletedDiskStores += this.lastLodSummary.completedLodDiskStores;
@@ -2643,6 +2691,9 @@ export class GameController {
       totalDiskCacheHits,
       totalDiskCacheHitsByLevel,
       totalDiskCacheMisses,
+      totalWorkerGenerated,
+      totalWorkerGeneratedByLevel,
+      totalScheduledWorkerRequests,
       totalScheduledDiskRequests,
       totalScheduledDiskStores,
       totalCompletedDiskStores,
@@ -3102,18 +3153,22 @@ export class GameController {
       maxChunkKey: null,
       neededKeyCacheHit: false,
       scheduledRegionSummaryRequests: 0,
-      lodDiskCacheHits: 0,
-      lodDiskCacheHitsByLevel: [0, 0, 0, 0, 0],
-      lodDiskCacheMisses: 0,
-      scheduledLodDiskRequests: 0,
-      scheduledLodDiskStores: 0,
-      completedLodDiskStores: 0,
+    lodDiskCacheHits: 0,
+    lodDiskCacheHitsByLevel: [0, 0, 0, 0, 0],
+    lodDiskCacheMisses: 0,
+    lodWorkerGenerated: 0,
+    lodWorkerGeneratedByLevel: [0, 0, 0, 0, 0],
+    scheduledLodWorkerRequests: 0,
+    scheduledLodDiskRequests: 0,
+    scheduledLodDiskStores: 0,
+    completedLodDiskStores: 0,
     };
   }
 
   private recordLodSummary(summary: LodResidencyUpdateSummary): void {
     this.lastLodSummary = summary;
     this.cumulativeLodGeneratedChunks += summary.generated;
+    this.cumulativeLodWorkerGenerated += summary.lodWorkerGenerated;
     this.cumulativeLodDiskCacheHits += summary.lodDiskCacheHits;
     this.cumulativeLodDiskCacheMisses += summary.lodDiskCacheMisses;
     this.cumulativeLodScheduledDiskRequests += summary.scheduledLodDiskRequests;
@@ -4006,21 +4061,27 @@ function classifyWorldColumnInLodChunk(
   worldX: number,
   worldZ: number,
   chunkSize: number,
-): { covered: boolean; water: boolean } {
+): { covered: boolean; water: boolean; minY: number | null; maxY: number | null } {
   const stride = Math.max(1, chunk.voxelStride);
   const worldSize = chunkSize * stride;
   const localX = Math.floor((worldX - chunk.coord.x * worldSize) / stride);
   const localZ = Math.floor((worldZ - chunk.coord.z * worldSize) / stride);
   if (localX < 0 || localX >= chunkSize || localZ < 0 || localZ >= chunkSize) {
-    return { covered: false, water: false };
+    return { covered: false, water: false, minY: null, maxY: null };
   }
   const chunkArea = chunkSize * chunkSize;
   let covered = false;
   let water = false;
+  let minY: number | null = null;
+  let maxY: number | null = null;
   for (let localY = 0; localY < chunkSize; localY += 1) {
     const material = chunk.data[localX + localY * chunkSize + localZ * chunkArea]!;
     if (material !== 0) {
       covered = true;
+      const worldMinY = chunk.coord.y * worldSize + localY * stride;
+      const worldMaxY = worldMinY + stride;
+      minY = minY === null ? worldMinY : Math.min(minY, worldMinY);
+      maxY = maxY === null ? worldMaxY : Math.max(maxY, worldMaxY);
       if (isProceduralWaterMaterial(material)) {
         const above = localY + 1 < chunkSize
           ? chunk.data[localX + (localY + 1) * chunkSize + localZ * chunkArea]!
@@ -4029,11 +4090,31 @@ function classifyWorldColumnInLodChunk(
       }
     }
   }
-  return { covered, water };
+  return { covered, water, minY, maxY };
 }
 
 function formatLodOwnerBand(chunk: VoxelChunk): string {
   return `LOD${chunk.lodLevel}:${chunk.coord.x}:${chunk.coord.z}`;
+}
+
+function formatLodOwnerChunk(chunk: VoxelChunk): string {
+  return `LOD${chunk.lodLevel}:${chunk.coord.x}:${chunk.coord.y}:${chunk.coord.z}`;
+}
+
+function lodCoverageRangesHaveVerticalOverlap(ranges: readonly LodCoverageVerticalRange[]): boolean {
+  for (let leftIndex = 0; leftIndex < ranges.length; leftIndex += 1) {
+    const left = ranges[leftIndex]!;
+    for (let rightIndex = leftIndex + 1; rightIndex < ranges.length; rightIndex += 1) {
+      const right = ranges[rightIndex]!;
+      if (left.band === right.band) {
+        continue;
+      }
+      if (left.minY < right.maxY && left.maxY > right.minY) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function positiveModulo(value: number, divisor: number): number {

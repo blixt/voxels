@@ -21,12 +21,14 @@ export interface AsyncDerivedLodChunkCacheKey {
 
 export interface AsyncEncodedDerivedLodChunk {
   readonly key: AsyncDerivedLodChunkCacheKey;
+  readonly source?: "cache" | "generated";
   readonly buffer: ArrayBuffer;
   readonly byteLength: number;
 }
 
 export interface AsyncDerivedLodChunkCompletionStats {
   cacheHits: number;
+  generated: number;
   missing: number;
   stored: number;
 }
@@ -36,10 +38,12 @@ export interface AsyncChunkGenerationQueue {
   requestSummary(cx: number, cy: number, cz: number): boolean;
   requestRegionSummary(regionX: number, regionZ: number): boolean;
   requestLodChunk(key: AsyncDerivedLodChunkCacheKey): boolean;
+  requestGeneratedLodChunk(key: AsyncDerivedLodChunkCacheKey): boolean;
   storeLodChunk(chunk: AsyncEncodedDerivedLodChunk): boolean;
   hasPendingChunk(cx: number, cy: number, cz: number): boolean;
   hasPendingRegionSummary(regionX: number, regionZ: number): boolean;
   hasPendingLodChunk(key: AsyncDerivedLodChunkCacheKey): boolean;
+  hasPendingGeneratedLodChunk(key: AsyncDerivedLodChunkCacheKey): boolean;
   getWorkerCount?(): number;
   getPendingCount(): number;
   drainCompletedChunks(): GeneratedChunk[];
