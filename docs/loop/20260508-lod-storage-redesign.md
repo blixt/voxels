@@ -483,3 +483,34 @@ Next target:
 1. Move from reactive punching toward a deterministic single-owner LOD plan per world column, so coarser chunks are generated already clipped to the finer bands that are planned for the same frame.
 2. Add a small artificial LOD-lab scenario where planned LOD1 and LOD2 intentionally overlap in X/Z; assert that the active representation has exactly one owner per overlapping material interval.
 3. Keep default persistence as a guard before any new far-transition repair is accepted.
+
+### Follow-up Checkpoint - Voxel-Aware LOD Punching
+
+Changed LOD-vs-LOD punching from whole-column removal to voxel-range removal:
+
+- Coarser LOD voxels are removed only when their world-space X/Z and Y span intersects active finer LOD material.
+- This preserves upper/lower coarser material in the same X/Z column when the finer LOD only owns part of the vertical range.
+- Resident LOD0 ownership still clips whole columns because render-ready resident columns are the near-field authority.
+- The direct coarser lookup path remains in place so activation-time punching does not scan every active LOD chunk.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/lod-handoff.test.ts`
+- `mise exec -- bun test tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts tests/render-verification-metrics.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-default-voxel-aware-punch`
+
+Browser verifier artifacts:
+
+- Default persistence: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-KvXcaY/lod-idb-persistence-reload.json`
+  - Result: pass, with `926` reload disk hits and clean coverage.
+- Far transition: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-MJOxJU/lod-idb-persistence-reload.json`
+  - Result: still fails far settle.
+  - True band-overlap count remains `127`.
+  - The overlapping owners are still fresh active, unpunched chunks; this confirms the remaining bug is not punch precision, but the missing invocation/reconciliation path for already-active overlapping LODs.
+
+Next target:
+
+1. Build a deterministic LOD ownership reconciliation for fresh active overlaps that is scoped to detected owner conflicts, not all active needed chunks.
+2. Add a lab/unit scenario that starts with two fresh active overlapping LOD chunks and verifies reconciliation removes only the overlapping material interval without creating coverage gaps.
+3. Re-run default persistence before far-transition acceptance; the previous broad fresh-active repair regressed cold-origin coverage and must stay rejected.

@@ -119,8 +119,9 @@ test("revived retained coarser LOD chunks are punched against active finer cover
   const revived = worldWithInternals.lodChunks.get("L2:0:0:0");
   expect(revived).toBeDefined();
   expect(worldWithInternals.coveragePunchedLodKeys.has("L2:0:0:0")).toBe(true);
-  expect(columnHasMaterial(revived!, 0, 0)).toBe(false);
-  expect(columnHasMaterial(revived!, 15, 15)).toBe(false);
+  expect(columnHasMaterialInYRange(revived!, 0, 0, 0, CHUNK_SIZE / 2)).toBe(false);
+  expect(columnHasMaterialInYRange(revived!, 15, 15, 0, CHUNK_SIZE / 2)).toBe(false);
+  expect(columnHasMaterialInYRange(revived!, 0, 0, CHUNK_SIZE / 2, CHUNK_SIZE)).toBe(true);
   expect(columnHasMaterial(revived!, 16, 0)).toBe(true);
   expect(columnHasMaterial(revived!, 20, 20)).toBe(true);
 });
@@ -165,8 +166,9 @@ test("activating a finer LOD chunk punches active coarser columns in the same fo
   const punched = worldWithInternals.lodChunks.get("L2:0:0:0");
   expect(punched).toBeDefined();
   expect(worldWithInternals.coveragePunchedLodKeys.has("L2:0:0:0")).toBe(true);
-  expect(columnHasMaterial(punched!, 0, 0)).toBe(false);
-  expect(columnHasMaterial(punched!, 15, 15)).toBe(false);
+  expect(columnHasMaterialInYRange(punched!, 0, 0, 0, CHUNK_SIZE / 2)).toBe(false);
+  expect(columnHasMaterialInYRange(punched!, 15, 15, 0, CHUNK_SIZE / 2)).toBe(false);
+  expect(columnHasMaterialInYRange(punched!, 0, 0, CHUNK_SIZE / 2, CHUNK_SIZE)).toBe(true);
   expect(columnHasMaterial(punched!, 16, 0)).toBe(true);
   expect(columnHasMaterial(punched!, 20, 20)).toBe(true);
 });
@@ -193,7 +195,8 @@ test("activating negative-coordinate finer LOD chunks punches the matching coars
   expect(worldWithInternals.coveragePunchedLodKeys.has("L2:-98:0:-188")).toBe(true);
   for (let localZ = 0; localZ < CHUNK_SIZE / 2; localZ += 1) {
     for (let localX = 0; localX < CHUNK_SIZE; localX += 1) {
-      expect(columnHasMaterial(punched!, localX, localZ)).toBe(false);
+      expect(columnHasMaterialInYRange(punched!, localX, localZ, 0, CHUNK_SIZE / 2)).toBe(false);
+      expect(columnHasMaterialInYRange(punched!, localX, localZ, CHUNK_SIZE / 2, CHUNK_SIZE)).toBe(true);
     }
   }
   expect(columnHasMaterial(punched!, 0, 16)).toBe(true);
@@ -224,7 +227,8 @@ test("prepared replacement keeps stale active finer ownership punched out of coa
   expect(worldWithInternals.coveragePunchedLodKeys.has("L2:-98:11:-188")).toBe(true);
   for (let localZ = 0; localZ < CHUNK_SIZE / 2; localZ += 1) {
     for (let localX = 0; localX < CHUNK_SIZE / 2; localX += 1) {
-      expect(columnHasMaterial(punched!, localX, localZ)).toBe(false);
+      expect(columnHasMaterialInYRange(punched!, localX, localZ, 0, CHUNK_SIZE / 2)).toBe(false);
+      expect(columnHasMaterialInYRange(punched!, localX, localZ, CHUNK_SIZE / 2, CHUNK_SIZE)).toBe(true);
     }
     expect(columnHasMaterial(punched!, CHUNK_SIZE / 2, localZ)).toBe(true);
   }
@@ -253,7 +257,8 @@ test("prepared finer backlog repairs active coarser chunks refreshed after the f
   expect(worldWithInternals.coveragePunchedLodKeys.has("L2:-98:11:-188")).toBe(true);
   for (let localZ = 0; localZ < CHUNK_SIZE / 2; localZ += 1) {
     for (let localX = 0; localX < CHUNK_SIZE / 2; localX += 1) {
-      expect(columnHasMaterial(punched!, localX, localZ)).toBe(false);
+      expect(columnHasMaterialInYRange(punched!, localX, localZ, 0, CHUNK_SIZE / 2)).toBe(false);
+      expect(columnHasMaterialInYRange(punched!, localX, localZ, CHUNK_SIZE / 2, CHUNK_SIZE)).toBe(true);
     }
     expect(columnHasMaterial(punched!, CHUNK_SIZE / 2, localZ)).toBe(true);
   }
@@ -292,8 +297,18 @@ function createTestChunk(
 }
 
 function columnHasMaterial(chunk: VoxelChunk, localX: number, localZ: number): boolean {
+  return columnHasMaterialInYRange(chunk, localX, localZ, 0, CHUNK_SIZE);
+}
+
+function columnHasMaterialInYRange(
+  chunk: VoxelChunk,
+  localX: number,
+  localZ: number,
+  minLocalY: number,
+  maxLocalYExclusive: number,
+): boolean {
   const chunkArea = CHUNK_SIZE * CHUNK_SIZE;
-  for (let localY = 0; localY < CHUNK_SIZE; localY += 1) {
+  for (let localY = minLocalY; localY < maxLocalYExclusive; localY += 1) {
     if (chunk.data[localX + localY * CHUNK_SIZE + localZ * chunkArea] !== 0) {
       return true;
     }

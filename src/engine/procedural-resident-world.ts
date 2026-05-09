@@ -2434,6 +2434,105 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     return false;
   }
 
+  private isOutputLodVoxelCoveredByFiner(
+    level: number,
+    originX: number,
+    originY: number,
+    originZ: number,
+    stride: number,
+    ox: number,
+    oy: number,
+    oz: number,
+  ): boolean {
+    const minWorldX = originX + ox * stride;
+    const maxWorldX = minWorldX + stride - 1;
+    const minWorldY = originY + oy * stride;
+    const maxWorldY = minWorldY + stride - 1;
+    const minWorldZ = originZ + oz * stride;
+    const maxWorldZ = minWorldZ + stride - 1;
+    const minChunkX = Math.floor(minWorldX / this.chunkSize);
+    const maxChunkX = Math.floor(maxWorldX / this.chunkSize);
+    const minChunkZ = Math.floor(minWorldZ / this.chunkSize);
+    const maxChunkZ = Math.floor(maxWorldZ / this.chunkSize);
+    for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
+      for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
+        if (this.isColumnRenderReady(chunkX, chunkZ)) {
+          return true;
+        }
+      }
+    }
+    for (let finerLevel = 1; finerLevel < level; finerLevel += 1) {
+      const finerStride = 1 << finerLevel;
+      const finerWorldSize = this.chunkSize * finerStride;
+      const minLodX = Math.floor(minWorldX / finerWorldSize);
+      const maxLodX = Math.floor(maxWorldX / finerWorldSize);
+      const minLodZ = Math.floor(minWorldZ / finerWorldSize);
+      const maxLodZ = Math.floor(maxWorldZ / finerWorldSize);
+      for (let lodZ = minLodZ; lodZ <= maxLodZ; lodZ += 1) {
+        for (let lodX = minLodX; lodX <= maxLodX; lodX += 1) {
+          if (this.isLodWorldVoxelRangeCovered(
+            finerLevel,
+            lodX,
+            lodZ,
+            minWorldX,
+            maxWorldX,
+            minWorldY,
+            maxWorldY,
+            minWorldZ,
+            maxWorldZ,
+          )) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  private isLodWorldVoxelRangeCovered(
+    level: number,
+    cx: number,
+    cz: number,
+    minWorldX: number,
+    maxWorldX: number,
+    minWorldY: number,
+    maxWorldY: number,
+    minWorldZ: number,
+    maxWorldZ: number,
+  ): boolean {
+    const stride = 1 << level;
+    const worldSize = this.chunkSize * stride;
+    const minLocalX = Math.max(0, Math.floor((minWorldX - cx * worldSize) / stride));
+    const maxLocalX = Math.min(this.chunkSize - 1, Math.floor((maxWorldX - cx * worldSize) / stride));
+    const minLocalZ = Math.max(0, Math.floor((minWorldZ - cz * worldSize) / stride));
+    const maxLocalZ = Math.min(this.chunkSize - 1, Math.floor((maxWorldZ - cz * worldSize) / stride));
+    const minCy = Math.max(0, Math.floor(minWorldY / worldSize));
+    const maxCy = Math.min(Math.ceil(this.maxYExclusive / worldSize) - 1, Math.floor(maxWorldY / worldSize));
+    if (minLocalX > maxLocalX || minLocalZ > maxLocalZ || minCy > maxCy) {
+      return false;
+    }
+    const chunkArea = this.chunkSize * this.chunkSize;
+    for (let cy = minCy; cy <= maxCy; cy += 1) {
+      const chunk = this.lodChunks.get(`L${level}:${cx}:${cy}:${cz}`);
+      if (!chunk?.renderReady || chunk.solidCount === 0) {
+        continue;
+      }
+      const minLocalY = Math.max(0, Math.floor((minWorldY - cy * worldSize) / stride));
+      const maxLocalY = Math.min(this.chunkSize - 1, Math.floor((maxWorldY - cy * worldSize) / stride));
+      for (let localZ = minLocalZ; localZ <= maxLocalZ; localZ += 1) {
+        for (let localX = minLocalX; localX <= maxLocalX; localX += 1) {
+          const columnOffset = localX + localZ * chunkArea;
+          for (let localY = minLocalY; localY <= maxLocalY; localY += 1) {
+            if (chunk.data[columnOffset + localY * this.chunkSize] !== 0) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+    return false;
+  }
+
   private lodChunkHasCoveredActiveCoarserOverlap(chunk: VoxelChunk): boolean {
     if (chunk.lodLevel <= 0 || chunk.solidCount === 0) {
       return false;
@@ -2635,22 +2734,10 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
     const stride = Math.max(1, chunk.voxelStride);
     const originX = chunk.coord.x * this.chunkSize * stride;
+    const originY = chunk.coord.y * this.chunkSize * stride;
     const originZ = chunk.coord.z * this.chunkSize * stride;
     let skippedFinerCoverage = false;
     const chunkArea = this.chunkSize * this.chunkSize;
-    const coveredColumns = new Uint8Array(chunkArea);
-    for (let oz = 0; oz < this.chunkSize; oz += 1) {
-      for (let ox = 0; ox < this.chunkSize; ox += 1) {
-        if (this.isOutputLodColumnCoveredByFiner(chunk.lodLevel, originX, originZ, stride, ox, oz)) {
-          coveredColumns[ox + oz * this.chunkSize] = 1;
-          skippedFinerCoverage = true;
-        }
-      }
-    }
-    if (!skippedFinerCoverage) {
-      return { chunk, skippedFinerCoverage: false };
-    }
-
     const data = new Uint16Array(chunk.data.length);
     let solidCount = 0;
     let minX = this.chunkSize;
@@ -2661,13 +2748,33 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     let maxZ = 0;
     for (let oz = 0; oz < this.chunkSize; oz += 1) {
       for (let ox = 0; ox < this.chunkSize; ox += 1) {
-        if (coveredColumns[ox + oz * this.chunkSize] !== 0) {
+        if (!this.isOutputLodColumnCoveredByFiner(chunk.lodLevel, originX, originZ, stride, ox, oz)) {
+          const columnOffset = ox + oz * chunkArea;
+          for (let oy = 0; oy < this.chunkSize; oy += 1) {
+            const index = columnOffset + oy * this.chunkSize;
+            const material = chunk.data[index] ?? 0;
+            if (material === 0) {
+              continue;
+            }
+            data[index] = material;
+            solidCount += 1;
+            if (ox < minX) minX = ox;
+            if (oy < minY) minY = oy;
+            if (oz < minZ) minZ = oz;
+            if (ox + 1 > maxX) maxX = ox + 1;
+            if (oy + 1 > maxY) maxY = oy + 1;
+            if (oz + 1 > maxZ) maxZ = oz + 1;
+          }
           continue;
         }
         for (let oy = 0; oy < this.chunkSize; oy += 1) {
           const index = ox + oy * this.chunkSize + oz * chunkArea;
           const material = chunk.data[index] ?? 0;
           if (material === 0) {
+            continue;
+          }
+          if (this.isOutputLodVoxelCoveredByFiner(chunk.lodLevel, originX, originY, originZ, stride, ox, oy, oz)) {
+            skippedFinerCoverage = true;
             continue;
           }
           data[index] = material;
@@ -2680,6 +2787,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           if (oz + 1 > maxZ) maxZ = oz + 1;
         }
       }
+    }
+    if (!skippedFinerCoverage) {
+      return { chunk, skippedFinerCoverage: false };
     }
 
     return {
