@@ -912,3 +912,24 @@ Next:
 1. Use `maxPendingChunks` from bounded far artifacts to tune far LOD scheduling throughput.
 2. Add a canonical chunk store API once the far-pending telemetry has a stable baseline.
 3. Keep generator/content work behind these render and verification gates.
+
+### Follow-up Checkpoint - Canonical Chunk Store Contract
+
+Accepted storage increment:
+
+- Added `src/engine/canonical-chunk-store.ts` as a pure engine-facing contract for canonical chunk persistence.
+- The contract defines canonical world keys, canonical chunk/summary/region/edit-journal keys, record metadata, and a `CanonicalChunkStore` interface.
+- Metadata includes schema version, generation version, canonical revision, encoded byte size, and storage timestamp.
+- Usability checks reject stale generation versions, coordinate/key mismatches, schema mismatch, and empty encoded payloads.
+- This does not rewire IndexedDB yet; it is the S1.1/S1.2 contract that the existing browser cache can adopt next.
+
+Validation:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/canonical-chunk-store.test.ts tests/chunk-edit-journal.test.ts tests/generated-chunk-codec.test.ts`: pass, `16` tests.
+
+Next:
+
+1. Adapt `src/client/procedural-generated-chunk-cache.ts` to use the canonical key helpers while preserving existing stores.
+2. Add backwards-compatible metadata fields to stored canonical chunk records.
+3. Add a canonical reload probe that reports warm canonical chunk hit ratio separately from derived LOD cache hits.
