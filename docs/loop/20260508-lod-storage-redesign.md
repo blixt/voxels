@@ -579,3 +579,55 @@ Next target:
 1. Resolve prepared handoff backlog deterministically; generation is no longer the far-transition blocker.
 2. Inspect why prepared chunks remain blocked even when visual coverage is clean.
 3. Consider allowing the far benchmark to report a separate “visual-settled” pass, while keeping full-settle as a performance/backlog target.
+
+### Follow-up Checkpoint - Planning Wave and Rejected Prepared-Handoff Attempt
+
+The user asked for a multi-step plan, detailed subagent planning, dependency mapping, and distribution of work back to agents.
+
+Planning/integration completed:
+
+- Added a consolidated execution board to `docs/loop/20260509-master-execution-plan.md`.
+- Delegated four planning tracks:
+  - Track A: canonical storage and LOD architecture.
+  - Track B: render/performance verification harness.
+  - Track C/D: finite island atlas and art/content direction.
+  - Track E: RPG exploration gameplay.
+- Distributed Wave 1 implementation:
+  - render verification orchestrator;
+  - pure finite island atlas foundation;
+  - pure exploration event model;
+  - local P0 prepared LOD handoff investigation.
+
+Accepted Wave 1 implementation outputs:
+
+- `verify:render` now aggregates existing route/live-forward/LOD/view artifacts into a reproducible JSON report with command manifest and FPS/LOD/sample gates.
+- `world-atlas.ts` provides the first pure finite-island atlas with eight macro regions, island mask fields, ocean classification, and region-edge sampling tests.
+- `exploration-events.ts` provides a pure idempotent event log for discover/inspect/read/use/zone/travel-goal/encounter events.
+
+Rejected LOD attempt:
+
+- I tested material-range-aware prepared handoff predicates for the remaining prepared backlog.
+- Focused unit tests passed, but the far browser stress exposed two unacceptable outcomes:
+  - material-aware prepared activation without reconciliation reintroduced true LOD-band overlaps (`40` samples in `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-cMYFEC/lod-idb-persistence-reload.json`);
+  - broad re-punching of already-punched coarser chunks was too expensive and left the headless renderer CPU-bound for more than five minutes, so the run was terminated.
+- I reverted the unsafe LOD code and tests before checkpointing. The next LOD attempt needs a targeted overlap-reconciliation queue, not broad per-active-finer rescans.
+
+Validation kept for the accepted checkpoint:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/render-verification-metrics.test.ts tests/render-verification-runner.test.ts tests/world-atlas.test.ts tests/exploration-events.test.ts tests/exploration-journal.test.ts tests/skill-journal.test.ts tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts`: pass, `69` tests.
+- `mise exec -- bun run verify:render -- --latest-artifacts=false --output=/tmp/voxels-render-verification-cleaned.json`: pass, no failures; warnings/skips are expected because this smoke intentionally used no latest browser artifacts.
+- Default LOD persistence before reverting the unsafe LOD attempt: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-vTAxx9/lod-idb-persistence-reload.json`, pass, `1275` reload disk hits.
+
+Rubric movement:
+
+- Harness maturity: `10.0 -> 10.1` because `verify:render` gives a single artifact contract for existing visual/performance/LOD evidence.
+- World architecture readiness: `2.8 -> 3.0` because the island atlas now has a pure tested source of truth, without touching generator/runtime behavior.
+- Gameplay architecture readiness: `2.4 -> 2.7` because inspect/read/use/travel/encounter events now have a pure idempotent model.
+- Rendering/LOD correctness: unchanged; the prepared-handoff attempt was rejected rather than accepted.
+
+Next:
+
+1. Commit and push the safe planning/harness/atlas/gameplay checkpoint.
+2. Resume P0 LOD work with a bounded reconciliation queue driven by detected active overlap candidates.
+3. After P0, assign canonical store/edit-journal implementation and route graph work in parallel.

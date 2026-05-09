@@ -2,31 +2,35 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import {
-  buildRenderVerificationReport,
-  buildScenarioResult,
-  type RenderMetric,
-} from "./lib/render-verification-metrics.ts";
+  buildRenderVerificationRunnerReport,
+  loadRenderVerificationArtifacts,
+  resolveDefaultRenderVerificationArtifactPaths,
+  type RenderVerificationArtifactPaths,
+  type RenderVerificationThresholds,
+} from "./lib/render-verification-runner.ts";
 
 interface CliOptions {
-  label: string | null;
-  output: string | null;
+  readonly label: string | null;
+  readonly output: string | null;
+  readonly artifactRoot: string;
+  readonly useLatestArtifacts: boolean;
+  readonly paths: RenderVerificationArtifactPaths;
+  readonly thresholds: Partial<RenderVerificationThresholds>;
 }
 
 const options = parseCli(Bun.argv);
-const report = buildRenderVerificationReport({
+const defaultPaths = options.useLatestArtifacts
+  ? await resolveDefaultRenderVerificationArtifactPaths(options.artifactRoot)
+  : {};
+const paths = mergePaths(defaultPaths, options.paths);
+const artifacts = await loadRenderVerificationArtifacts(paths);
+const report = buildRenderVerificationRunnerReport({
   generatedAt: new Date().toISOString(),
   label: options.label,
   commit: readGitShortHead(),
-  scenarios: [
-    buildScenarioResult("smoke-skeleton", "Render verification smoke skeleton", [
-      {
-        id: "skeleton.report_shape",
-        label: "Report shape emitted",
-        value: true,
-        status: "pass",
-      } satisfies RenderMetric,
-    ]),
-  ],
+  thresholds: options.thresholds,
+  paths,
+  artifacts,
 });
 
 const serialized = `${JSON.stringify(report, null, 2)}\n`;
@@ -46,6 +50,38 @@ function parseCli(argv: readonly string[]): CliOptions {
   return {
     label: readFlag(args, "--label"),
     output: readFlag(args, "--output"),
+    artifactRoot: readFlag(args, "--artifact-root") ?? "artifacts",
+    useLatestArtifacts: readBooleanFlag(args, "--latest-artifacts", true),
+    paths: {
+      routeAtlasReport: readFlag(args, "--route-atlas-report"),
+      liveForwardReport: readFlag(args, "--live-forward-report"),
+      liveForwardSamples: readFlag(args, "--live-forward-samples"),
+      lodReport: readFlag(args, "--lod-report"),
+      viewAtlasReport: readFlag(args, "--view-atlas-report"),
+    },
+    thresholds: {
+      minRouteSamples: readOptionalNonNegativeInt(args, "--min-route-samples"),
+      minLiveForwardSamples: readOptionalNonNegativeInt(args, "--min-live-forward-samples"),
+      minViewCount: readOptionalNonNegativeInt(args, "--min-view-count"),
+      minLodIterations: readOptionalNonNegativeInt(args, "--min-lod-iterations"),
+      maxP95FrameMs: readOptionalPositiveFloat(args, "--max-p95-frame-ms"),
+      maxFrameMs: readOptionalPositiveFloat(args, "--max-frame-ms"),
+      maxFpsErrorRatio: readOptionalPositiveFloat(args, "--max-fps-error-ratio"),
+      requireArtifacts: readOptionalBooleanFlag(args, "--require-artifacts"),
+    },
+  };
+}
+
+function mergePaths(
+  defaults: RenderVerificationArtifactPaths,
+  overrides: RenderVerificationArtifactPaths,
+): RenderVerificationArtifactPaths {
+  return {
+    routeAtlasReport: overrides.routeAtlasReport ?? defaults.routeAtlasReport ?? null,
+    liveForwardReport: overrides.liveForwardReport ?? defaults.liveForwardReport ?? null,
+    liveForwardSamples: overrides.liveForwardSamples ?? defaults.liveForwardSamples ?? null,
+    lodReport: overrides.lodReport ?? defaults.lodReport ?? null,
+    viewAtlasReport: overrides.viewAtlasReport ?? defaults.viewAtlasReport ?? null,
   };
 }
 
@@ -61,6 +97,45 @@ function readFlag(args: readonly string[], name: string): string | null {
     }
   }
   return null;
+}
+
+function readBooleanFlag(args: readonly string[], name: string, fallback: boolean): boolean {
+  const value = readFlag(args, name);
+  if (value === null) {
+    return fallback;
+  }
+  return value !== "false" && value !== "0";
+}
+
+function readOptionalBooleanFlag(args: readonly string[], name: string): boolean | undefined {
+  if (!args.some((arg) => arg === name || arg.startsWith(`${name}=`))) {
+    return undefined;
+  }
+  return readBooleanFlag(args, name, true);
+}
+
+function readOptionalNonNegativeInt(args: readonly string[], name: string): number | undefined {
+  const value = readFlag(args, name);
+  if (value === null) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+  return parsed;
+}
+
+function readOptionalPositiveFloat(args: readonly string[], name: string): number | undefined {
+  const value = readFlag(args, name);
+  if (value === null) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive number`);
+  }
+  return parsed;
 }
 
 function readGitShortHead(): string | null {

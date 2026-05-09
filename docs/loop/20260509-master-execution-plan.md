@@ -231,3 +231,82 @@ Every checkpoint must include:
 - commit and push when clean.
 
 No content-heavy work should be accepted if the render smoke reports gaps, overlaps, or unverifiable frame timing.
+
+## Consolidated Execution Board - 2026-05-09
+
+This board folds the Track A/B/C/D/E subagent planning pass back into one execution plan. The work is deliberately ordered around engine proof first, then broader world/gameplay bets.
+
+### Current P0
+
+`A5` is the immediate local blocker. The far LOD stress now has clean visible coverage, `0` generation-budget backlog, and remaining pending chunks mostly stuck in `prepared` state. The likely cause is that prepared handoff predicates still use column-footprint overlap, while punching and probes now reason about voxel/material ranges. Fixing this comes before content work because content cannot be trusted while LOD handoff can deadlock.
+
+Acceptance for P0:
+
+- `uncoveredGapCount = 0`
+- `handoffHoleCount = 0`
+- `residentOverlapCount = 0`
+- `bandOverlapCount = 0`
+- `waterOverlapCount = 0`
+- far stress `finalLodPendingGenerationBudget = 0`
+- far stress `finalLodPendingPrepared = 0`, or the remaining prepared count is proven non-render-blocking and moved behind an explicit pass threshold
+
+Commands:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts tests/lod-chunk-derivation.test.ts tests/async-chunk-generation.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=track-a-default`
+- `mise exec -- bun run bench:lod-persistence -- --label=track-a-far --lod-persistence-chunk-delta=32 --lod-persistence-max-frames=260`
+
+### Wave 1 Assignments
+
+| Owner | Assignment | Write Scope | Dependencies | Acceptance |
+| --- | --- | --- | --- | --- |
+| Self | `A5.1/A5.2` prepared LOD handoff fix | `src/engine/procedural-resident-world.ts`, `tests/lod-handoff.test.ts`, LOD diary | none | P0 gates above |
+| Track B worker | `B0/B1/B3/B6` render verification orchestrator | `scripts/run-render-verification.ts`, new `scripts/lib/render-verification-runner.ts`, `tests/render-verification-*.test.ts`, `package.json` script if needed | no engine changes | report merges route/live-forward/LOD artifacts and gates FPS truth + LOD zero counts |
+| Track C/D worker | `C1-C3` atlas foundation | new `src/engine/world-atlas.ts`, optional sampling helper, `tests/world-atlas.test.ts`; avoid generator rewrites | none | region centers, 70% region-core coverage, out-of-island ocean leakage, edge-secondary tests |
+| Track E worker | `E1.1` exploration event model | new `src/engine/exploration-events.ts`, `tests/exploration-events.test.ts`; narrow journal/skill additions only if needed | none | idempotent replay, import/export, first-read/use awards once, discovery compatibility |
+| Later worker after P0 | `A1.1/A2.1` canonical store + edit journal | cache/edit-journal files only | P0 complete | existing cache behavior preserved; edit journal pure tests pass |
+
+### Dependency Rules
+
+- `A5` blocks all content acceptance but does not block pure new-file harness/gameplay/atlas modules.
+- `B0/B1` blocks accepting visual claims from `C/D` work.
+- `C1-C3` block bold worldgen rewrites; the generator should not be reworked until the atlas is a tested source of truth.
+- `E1` blocks inspect/read/use, route journal, and skill decision work.
+- `A1/A2/A3` block canonical-only warm reload and worker LOD from effective chunks.
+- Render/LOD ownership files are single-owner until the P0 checkpoint is committed.
+
+### Wave 2 Backlog
+
+| ID | Task | Depends On | Parallel Notes |
+| --- | --- | --- | --- |
+| `A1` | Canonical chunk store API with revision stamps | `A5` checkpoint | can proceed beside `E1` and `B2` |
+| `A2` | Chunk edit journal packing/replay/compaction | `A0` | pure module, safe parallel work |
+| `B2/B4/B5` | golden views, flicker detector, fog mismatch gate | `B1` | script/test work first, controller fields only if evidence is missing |
+| `C5` | named route graph and route-atlas route IDs | `C1-C3` | coordinates with `E3` but can expose compatibility fields first |
+| `C4/C8` | Red Mountain skyline slice | `C1-C3`, `B1` | one worker edits generator at a time |
+| `D2/D3` | object-lab distinctiveness + golden-view registry | `B1` | safe script/test work |
+| `E8` | route/path validation harness | `E1` not required | pure physics/harness work |
+| `E2` | inspect/read/use browser path | `E1`, P0 | touches controller/UI; serialize with engine work |
+
+### Wave 3 Backlog
+
+| ID | Task | Depends On |
+| --- | --- | --- |
+| `A3/A4/A6/A7` | effective canonical chunk source, worker LOD from canonical chunks + edits, canonical-only reload verifier, disposable LOD cache validation | `A1/A2` |
+| `C4-C7` | macro terrain, basins, routes, cave graph | `C1-C3`, `B1` |
+| `C8-C11` | region workers and directors | `C4-C7` |
+| `D4-D6` | prop kit upgrades, atmosphere, material/lighting grounding | `B2/B3` and relevant `C` slice |
+| `E3-E7` | route goals, encounter zones, passive sim, skill decisions, actor silhouettes | `E1`, `C5`, `D2`, `B1` |
+| `E9` | NPC/mob pathing MVP | `E5`, `E8` |
+
+### Evidence Contract
+
+Every accepted implementation task must produce:
+
+- the exact command list;
+- JSON artifact paths and screenshot/contact-sheet paths when visual;
+- pass/fail counts for LOD gaps, handoff holes, resident overlaps, band overlaps, water overlaps;
+- p95/max frame and hitch-bucket data when browser-facing;
+- before/after route or view metrics when art/world-facing;
+- a diary entry with rubric delta and remaining risks.
