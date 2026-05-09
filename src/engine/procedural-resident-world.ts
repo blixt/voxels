@@ -2425,7 +2425,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         for (let localX = minLocalX; localX <= maxLocalX; localX += 1) {
           const columnOffset = localX + localZ * chunkArea;
           for (let localY = 0; localY < this.chunkSize; localY += 1) {
-            if (chunk.data[columnOffset + localY * this.chunkSize] !== 0) {
+            if (this.isLodChunkLocalVoxelVisible(chunk, columnOffset + localY * this.chunkSize)) {
               this.lodWorldColumnCoverageCache.set(cacheKey, true);
               return true;
             }
@@ -2526,7 +2526,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         for (let localX = minLocalX; localX <= maxLocalX; localX += 1) {
           const columnOffset = localX + localZ * chunkArea;
           for (let localY = minLocalY; localY <= maxLocalY; localY += 1) {
-            if (chunk.data[columnOffset + localY * this.chunkSize] !== 0) {
+            if (this.isLodChunkLocalVoxelVisible(chunk, columnOffset + localY * this.chunkSize)) {
               return true;
             }
           }
@@ -2544,7 +2544,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       if (coarser.lodLevel <= chunk.lodLevel || coarser.solidCount === 0) {
         continue;
       }
-      if (lodChunksHaveCoveredColumnOverlap(coarser, chunk, this.chunkSize)) {
+      if (this.lodChunksHaveCoveredColumnOverlap(coarser, chunk)) {
         return true;
       }
     }
@@ -2585,7 +2585,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         }
         if (
           lodChunkFootprintsOverlap(coarser, finer, this.chunkSize)
-          && lodChunksHaveCoveredColumnOverlap(coarser, finer, this.chunkSize)
+          && this.lodChunksHaveCoveredColumnOverlap(coarser, finer)
         ) {
           this.punchActiveLodChunkCoveredByFiner(coarserKey);
           break;
@@ -2617,7 +2617,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
           if (
             prepared.lodLevel < coarser.lodLevel &&
             lodChunkFootprintsOverlap(coarser, prepared, this.chunkSize) &&
-            lodChunksHaveCoveredColumnOverlap(coarser, prepared, this.chunkSize)
+            this.lodChunksHaveCoveredColumnOverlap(coarser, prepared)
           ) {
             this.preparedLodChunks.delete(preparedKey);
             this.lodChunks.set(preparedKey, prepared);
@@ -2684,7 +2684,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     const coarserWorldSize = this.chunkSize * coarserStride;
     for (let localZ = 0; localZ < this.chunkSize; localZ += 1) {
       for (let localX = 0; localX < this.chunkSize; localX += 1) {
-        if (!lodChunkCoversLocalColumn(coarser, localX, localZ, this.chunkSize)) {
+        if (!this.lodChunkCoversLocalColumn(coarser, localX, localZ)) {
           continue;
         }
         const worldX = coarser.coord.x * coarserWorldSize + localX * coarserStride;
@@ -2702,7 +2702,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       if (chunk.lodLevel >= coarserLevel) {
         continue;
       }
-      if (lodChunkCoversWorldColumn(chunk, worldX, worldZ, this.chunkSize)) {
+      if (this.lodChunkCoversWorldColumn(chunk, worldX, worldZ)) {
         return true;
       }
     }
@@ -2710,11 +2710,62 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       if (chunk.lodLevel >= coarserLevel) {
         continue;
       }
-      if (lodChunkCoversWorldColumn(chunk, worldX, worldZ, this.chunkSize)) {
+      if (this.lodChunkCoversWorldColumn(chunk, worldX, worldZ)) {
         return true;
       }
     }
     return false;
+  }
+
+  private lodChunksHaveCoveredColumnOverlap(coarser: VoxelChunk, finer: VoxelChunk): boolean {
+    if (!lodChunkFootprintsOverlap(coarser, finer, this.chunkSize)) {
+      return false;
+    }
+    const finerStride = Math.max(1, finer.voxelStride);
+    const finerWorldSize = this.chunkSize * finerStride;
+    for (let localZ = 0; localZ < this.chunkSize; localZ += 1) {
+      for (let localX = 0; localX < this.chunkSize; localX += 1) {
+        if (!this.lodChunkCoversLocalColumn(finer, localX, localZ)) {
+          continue;
+        }
+        const worldX = finer.coord.x * finerWorldSize + localX * finerStride;
+        const worldZ = finer.coord.z * finerWorldSize + localZ * finerStride;
+        if (this.lodChunkCoversWorldColumn(coarser, worldX, worldZ)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private lodChunkCoversWorldColumn(chunk: VoxelChunk, worldX: number, worldZ: number): boolean {
+    const stride = Math.max(1, chunk.voxelStride);
+    const worldSize = this.chunkSize * stride;
+    const localX = Math.floor((worldX - chunk.coord.x * worldSize) / stride);
+    const localZ = Math.floor((worldZ - chunk.coord.z * worldSize) / stride);
+    if (localX < 0 || localX >= this.chunkSize || localZ < 0 || localZ >= this.chunkSize) {
+      return false;
+    }
+    return this.lodChunkCoversLocalColumn(chunk, localX, localZ);
+  }
+
+  private lodChunkCoversLocalColumn(chunk: VoxelChunk, localX: number, localZ: number): boolean {
+    const chunkArea = this.chunkSize * this.chunkSize;
+    const columnOffset = localX + localZ * chunkArea;
+    for (let localY = 0; localY < this.chunkSize; localY += 1) {
+      if (this.isLodChunkLocalVoxelVisible(chunk, columnOffset + localY * this.chunkSize)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private isLodChunkLocalVoxelVisible(chunk: VoxelChunk, localIndex: number): boolean {
+    if (chunk.data[localIndex] === 0) {
+      return false;
+    }
+    const clipMask = this.lodRenderClipMasks.get(toLodChunkKey(chunk.lodLevel, chunk.coord.x, chunk.coord.y, chunk.coord.z));
+    return !clipMask || clipMask[localIndex] === 0;
   }
 
   private punchActiveCoarserLodChunksCoveredBy(
@@ -2883,6 +2934,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   private clearLodCoveragePunchedKey(key: string): void {
     this.coveragePunchedLodKeys.delete(key);
     this.lodRenderClipMasks.delete(key);
+    this.lodWorldColumnCoverageCache.clear();
   }
 
   private buildLodChunkMesh(
@@ -3686,49 +3738,6 @@ function lodFootprintFullyInsideRadius(
   const farthestX = Math.max(Math.abs(minX - centerX), Math.abs(maxX - centerX));
   const farthestZ = Math.max(Math.abs(minZ - centerZ), Math.abs(maxZ - centerZ));
   return farthestX * farthestX + farthestZ * farthestZ <= radius * radius;
-}
-
-function lodChunksHaveCoveredColumnOverlap(coarser: VoxelChunk, finer: VoxelChunk, chunkSize: number): boolean {
-  if (!lodChunkFootprintsOverlap(coarser, finer, chunkSize)) {
-    return false;
-  }
-  const finerStride = Math.max(1, finer.voxelStride);
-  const finerWorldSize = chunkSize * finerStride;
-  for (let localZ = 0; localZ < chunkSize; localZ += 1) {
-    for (let localX = 0; localX < chunkSize; localX += 1) {
-      if (!lodChunkCoversLocalColumn(finer, localX, localZ, chunkSize)) {
-        continue;
-      }
-      const worldX = finer.coord.x * finerWorldSize + localX * finerStride;
-      const worldZ = finer.coord.z * finerWorldSize + localZ * finerStride;
-      if (lodChunkCoversWorldColumn(coarser, worldX, worldZ, chunkSize)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-function lodChunkCoversWorldColumn(chunk: VoxelChunk, worldX: number, worldZ: number, chunkSize: number): boolean {
-  const stride = Math.max(1, chunk.voxelStride);
-  const worldSize = chunkSize * stride;
-  const localX = Math.floor((worldX - chunk.coord.x * worldSize) / stride);
-  const localZ = Math.floor((worldZ - chunk.coord.z * worldSize) / stride);
-  if (localX < 0 || localX >= chunkSize || localZ < 0 || localZ >= chunkSize) {
-    return false;
-  }
-  return lodChunkCoversLocalColumn(chunk, localX, localZ, chunkSize);
-}
-
-function lodChunkCoversLocalColumn(chunk: VoxelChunk, localX: number, localZ: number, chunkSize: number): boolean {
-  const chunkArea = chunkSize * chunkSize;
-  const columnOffset = localX + localZ * chunkArea;
-  for (let localY = 0; localY < chunkSize; localY += 1) {
-    if (chunk.data[columnOffset + localY * chunkSize] !== 0) {
-      return true;
-    }
-  }
-  return false;
 }
 
 function toLocalVoxelIndex(

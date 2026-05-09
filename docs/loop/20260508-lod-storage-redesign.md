@@ -771,3 +771,34 @@ Next:
 2. Replace punched-data active LOD chunks with unmodified canonical chunks plus render-only clip masks.
 3. Add a LOD lab scenario that proves the same canonical LOD payload can render under two different active finer-ownership masks.
 4. Re-run default and far browser LOD persistence; far timeout remains the main stress target.
+
+### Follow-up Checkpoint - Clip-Aware Ownership Predicates
+
+Accepted renderer increment:
+
+- Converted internal LOD ownership predicates from raw `chunk.data` reads to clip-mask-aware visibility checks.
+- `isLodWorldColumnCovered`, `isLodWorldVoxelRangeCovered`, prepared handoff overlap checks, and finer-candidate coverage checks now agree with `lodRenderClipMasks`.
+- `clearLodCoveragePunchedKey` now clears the LOD world-column coverage cache as well as the clip mask, so cached coverage cannot outlive a changed render mask.
+
+Why this matters:
+
+- The previous checkpoint threaded clip masks into meshing, but ownership decisions still looked at unmasked data.
+- This checkpoint is the next prerequisite for replacing punched chunk data with unmodified canonical LOD payloads.
+
+Validation:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts tests/lod-system.test.ts`: pass, `70` tests.
+- `mise exec -- bun run bench:lod-persistence -- --label=clip-aware-ownership-default`: pass.
+  - Artifact: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-cCPsgB/lod-idb-persistence-reload.json`
+  - Reload disk hits: `1296`.
+
+Known limitation:
+
+- The far `--lod-persistence-chunk-delta=32` stress was not rerun for this checkpoint because the previous run timed out during the populate probe. The next high-value renderer target is still to make far transitions settle quickly enough to produce a correctness artifact.
+
+Next:
+
+1. Make `punchLodChunkCoveredByActiveFiner` return an unmodified canonical chunk plus a render clip mask.
+2. Keep coverage probes and handoff predicates on the clip-aware path.
+3. Re-run default persistence and then the far stress; if far still times out, split populate/gap correctness from full-settle performance in the harness.
