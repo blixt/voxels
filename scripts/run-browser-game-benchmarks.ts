@@ -520,22 +520,28 @@ async function runLodPersistenceScenario(
     });
     await session.waitForBootstrapBenchmarkComplete(options.lodPersistenceTimeoutMs);
     await session.waitForGameReady(options.lodPersistenceTimeoutMs);
-    const populate = await session.evaluate<Omit<LodPersistenceIteration, "iteration" | "reloadOrigin" | "pass" | "failures">>(
+    const populate = await evaluateWithTimeout<Omit<LodPersistenceIteration, "iteration" | "reloadOrigin" | "pass" | "failures">>(
+      session,
       buildLodPersistencePopulateExpression({
         maxFrames: options.lodPersistenceMaxFrames,
         chunkDelta: options.lodPersistenceChunkDelta,
       }),
+      options.lodPersistenceTimeoutMs,
+      "LOD persistence populate probe",
     );
 
     await session.navigateToGame({
       clearStorage: false,
     });
     await session.waitForGameReady(options.lodPersistenceTimeoutMs);
-    const reloadOrigin = await session.evaluate<LodPersistencePhaseSummary>(
+    const reloadOrigin = await evaluateWithTimeout<LodPersistencePhaseSummary>(
+      session,
       buildLodPersistenceReloadExpression({
         maxFrames: options.lodPersistenceMaxFrames,
         originPosition: populate.originPosition,
       }),
+      options.lodPersistenceTimeoutMs,
+      "LOD persistence reload probe",
     );
     const failures = validateLodPersistenceIteration({
       iteration,
@@ -564,6 +570,29 @@ async function runLodPersistenceScenario(
   };
   await Bun.write(artifactPath, `${JSON.stringify(result, null, 2)}\n`);
   return result;
+}
+
+async function evaluateWithTimeout<T>(
+  session: BrowserGameSession,
+  expression: string,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      session.evaluate<T>(expression),
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${timeoutMs} ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 function buildLodPersistencePopulateExpression(options: {

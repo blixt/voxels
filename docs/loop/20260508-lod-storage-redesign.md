@@ -660,3 +660,26 @@ Current known limitation:
 
 - The far `--lod-persistence-chunk-delta=32` stress case still reaches visually clean coverage but can leave prepared chunks pending under the conservative handoff model.
 - The rejected attempts proved that this cannot be solved safely by coarse re-punching or by treating blocked prepared chunks as settled. The next accepted fix needs a voxel-accurate ownership/clipping model, or an equivalent per-column/per-voxel fallback proof, before changing visible handoff behavior.
+
+### Follow-up Checkpoint - Runtime Clipping Attempt Rejected, Harness Hardened
+
+Attempted next fix:
+
+- Added a full/partial/none classifier for coarse voxel punching so a coarse voxel would only be removed when all eight immediate-finer subvoxels were solid.
+- The focused unit tests proved the intended local behavior, but browser persistence became CPU-bound for more than four minutes even after optimizing the classifier to one finer-chunk lookup plus eight direct array reads per coarse voxel.
+- I rejected and removed that runtime mutation approach. It is the wrong layer for true clipping; the next fix should keep terrain data intact and move ownership clipping into a mask/mesher path.
+
+Accepted harness change:
+
+- Added an explicit timeout wrapper around the LOD persistence page probes in `scripts/run-browser-game-benchmarks.ts`.
+- This prevents future CPU-bound renderer experiments from hanging indefinitely inside `Runtime.evaluate`; the existing `--lod-persistence-timeout-ms` now also bounds populate/reload page probes.
+
+Validation:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts`: pass, `38` tests.
+- `mise exec -- bun run bench:lod-persistence -- --label=track-a-default-timeout-guard`: pass.
+  - Artifact: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-rhTTVp/lod-idb-persistence-reload.json`
+  - Reload disk hits: `1295`.
+  - Coverage: `0` uncovered gaps, `0` handoff holes, `0` resident overlaps, `0` band overlaps, `0` water overlaps.
+  - Worst recent frame: `10.2 ms`; hitch buckets: `0`.
