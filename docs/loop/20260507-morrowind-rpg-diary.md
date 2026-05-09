@@ -2423,11 +2423,13 @@ Build the first "place identity" slice without regressing performance or input:
   - Honored `?freshGame=...` by clearing/skipping stored progress for deliberate clean starts.
   - Wired the deterministic RPG encounter sampler into the live HUD/objective tooltip: local mood, dominant faction, pressure, and flavor tags now surface during play.
   - Added player-facing labels for encounter moods/factions and changed surface cave-adjacent presentation from `Cave Threshold` to `Cave Rumor`.
+  - Added pressure-state HUD classes so high/watchful/low/quiet encounter pressure has a subtle visual read instead of being only text.
 - Validation:
   - `mise exec -- bun test tests/rpg-ui-cleanup.test.ts`: pass, `5` tests.
   - `mise exec -- bun test tests/rpg-encounters.test.ts tests/rpg-ui-cleanup.test.ts`: pass, `12` tests.
   - `mise exec -- bun run typecheck`: pass.
   - Shared in-app browser at `http://localhost:3001/?freshGame=codex-rpg-hud-check-2`: reached `Ready / Click to play`; bottom HUD showed `Lore 2 • Cave Rumor`, and DOM title included `Surface route`, `High pressure`, `Kwama Brood`, `Ash Apron`, and `Ravines`.
+  - Shared in-app browser at `http://localhost:3001/?freshGame=codex-pressure-hud-check`: `.game-rpg-hud` had `is-pressure-high`.
 - Honest assessment:
   - This is a modest but visible systems integration win: encounter/faction data is no longer dormant test-only RPG planning data.
   - The visible world still needs a bold art/content pass; this checkpoint improves context and feedback rather than silhouettes or map-scale landmarks.

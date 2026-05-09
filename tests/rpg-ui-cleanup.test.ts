@@ -47,6 +47,16 @@ test("RPG HUD renders place route interaction and skill snapshot fields", () => 
     expect(gameClient).toContain(className);
     expect(styles).toContain(`.${className}`);
   }
+
+  for (const pressureClassName of [
+    "is-pressure-high",
+    "is-pressure-watchful",
+    "is-pressure-low",
+    "is-pressure-quiet",
+  ]) {
+    expect(gameClient).toContain(pressureClassName);
+    expect(styles).toContain(`.${pressureClassName}`);
+  }
 });
 
 test("client wires pure exploration interaction and travel goal systems", () => {

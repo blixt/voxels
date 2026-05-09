@@ -448,6 +448,10 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
       progress.setAttribute("aria-label", `${snapshot.activeTravelGoalTitle} ${snapshot.activeRouteProgressLabel}`);
       progressFill.style.transform = `scaleX(${Math.max(0, Math.min(1, snapshot.activeTravelGoalProgressRatio))})`;
       card.classList.toggle("is-captured", snapshot.pointerLocked);
+      card.classList.toggle("is-pressure-high", snapshot.encounterPressureLabel === "High pressure");
+      card.classList.toggle("is-pressure-watchful", snapshot.encounterPressureLabel === "Watchful pressure");
+      card.classList.toggle("is-pressure-low", snapshot.encounterPressureLabel === "Low pressure");
+      card.classList.toggle("is-pressure-quiet", snapshot.encounterPressureLabel === "Quiet");
       card.title = [
         snapshot.status,
         snapshot.activeTravelGoalTitle,

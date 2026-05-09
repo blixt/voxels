@@ -238,6 +238,36 @@ body::before {
   background: #f0cf72;
 }
 
+.game-rpg-hud.is-pressure-high {
+  border-color: rgba(224, 115, 79, 0.34);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(224, 115, 79, 0.18);
+}
+
+.game-rpg-hud.is-pressure-watchful {
+  border-color: rgba(240, 207, 114, 0.26);
+}
+
+.game-rpg-hud.is-pressure-low {
+  border-color: rgba(122, 157, 141, 0.24);
+}
+
+.game-rpg-hud.is-pressure-quiet {
+  border-color: rgba(183, 203, 194, 0.18);
+}
+
+.game-rpg-hud.is-pressure-high .game-rpg-skill {
+  color: #f0b08c;
+}
+
+.game-rpg-hud.is-pressure-watchful .game-rpg-skill {
+  color: #f0cf72;
+}
+
+.game-rpg-hud.is-pressure-low .game-rpg-skill,
+.game-rpg-hud.is-pressure-quiet .game-rpg-skill {
+  color: rgba(204, 235, 230, 0.82);
+}
+
 .crosshair {
   position: absolute;
   left: 50%;
