@@ -514,3 +514,33 @@ Next target:
 1. Build a deterministic LOD ownership reconciliation for fresh active overlaps that is scoped to detected owner conflicts, not all active needed chunks.
 2. Add a lab/unit scenario that starts with two fresh active overlapping LOD chunks and verifies reconciliation removes only the overlapping material interval without creating coverage gaps.
 3. Re-run default persistence before far-transition acceptance; the previous broad fresh-active repair regressed cold-origin coverage and must stay rejected.
+
+### Follow-up Checkpoint - Far Coverage Clean
+
+Combined voxel-aware punching with idempotent fresh-active ownership reassertion:
+
+- Fresh active needed LOD chunks now reassert ownership against active coarser chunks, but skip coarser chunks already marked `coveragePunched`.
+- This keeps the repair bounded and avoids repeated coarser remeshes.
+- The previous broad reassertion created gaps because punching removed whole X/Z columns. With voxel-aware punching, the same ownership reassertion preserves unrelated vertical material.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts tests/render-verification-metrics.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-default-idempotent-voxel-aware-punch`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-far-idempotent-voxel-aware-punch --lod-persistence-chunk-delta=32 --lod-persistence-max-frames=260`
+
+Browser verifier artifacts:
+
+- Default persistence: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-KyKwW6/lod-idb-persistence-reload.json`
+  - Result: pass, with `918` reload disk hits.
+- Far transition: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-RMfHpm/lod-idb-persistence-reload.json`
+  - Result: still fails settle due pending backlog.
+  - Rendering coverage is clean: `0` uncovered gaps, `0` handoff holes, `0` resident overlaps, `0` band overlaps.
+  - Remaining far pending: `219` LOD chunks (`158` generation-budget, `57` prepared).
+
+Next target:
+
+1. Treat the visual LOD overlap bug as fixed for this checkpoint, guarded by the far coverage artifact.
+2. Attack far-transition backlog next: LOD1 generation and prepared handoff remain the dominant blockers to settle.
+3. Add a benchmark success mode that can distinguish “visual coverage clean but background backlog remains” from actual visible rendering failure.

@@ -1043,11 +1043,12 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       const keyPrefix = `L${ring.level}:`;
       for (const key of neededKeys) {
         if (!key.startsWith(keyPrefix)) continue;
-        if (
-          (this.lodChunks.has(key) && !this.staleLodKeys.has(key)) ||
-          this.preparedLodChunks.has(key) ||
-          this.coveredEmptyLodKeys.has(key)
-        ) continue;
+        const activeLodChunk = this.lodChunks.get(key);
+        if (activeLodChunk && !this.staleLodKeys.has(key)) {
+          this.punchActiveCoarserLodChunksCoveredBy(activeLodChunk, { includeAlreadyPunched: false });
+          continue;
+        }
+        if (this.preparedLodChunks.has(key) || this.coveredEmptyLodKeys.has(key)) continue;
         if (this.emptyLodKeys.has(key)) continue;
         if (this.reviveRetainedEmptyLodKey(key)) {
           emptyCacheHits += 1;
@@ -2695,10 +2696,14 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     return false;
   }
 
-  private punchActiveCoarserLodChunksCoveredBy(finer: VoxelChunk): void {
+  private punchActiveCoarserLodChunksCoveredBy(
+    finer: VoxelChunk,
+    options: { includeAlreadyPunched?: boolean } = {},
+  ): void {
     if (finer.lodLevel <= 0 || finer.solidCount === 0) {
       return;
     }
+    const includeAlreadyPunched = options.includeAlreadyPunched ?? true;
     const finerStride = Math.max(1, finer.voxelStride);
     const finerWorldSize = this.chunkSize * finerStride;
     const minWorldX = finer.coord.x * finerWorldSize;
@@ -2719,6 +2724,9 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
             const coarserKey = toLodChunkKey(coarserLevel, cx, cy, cz);
             const coarser = this.lodChunks.get(coarserKey);
             if (!coarser || coarser === finer || coarser.solidCount === 0) {
+              continue;
+            }
+            if (!includeAlreadyPunched && this.coveragePunchedLodKeys.has(coarserKey)) {
               continue;
             }
             this.punchActiveLodChunkCoveredByFiner(coarserKey);
