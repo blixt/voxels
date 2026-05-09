@@ -4,6 +4,8 @@ import {
   RPG_CAVE_ENCOUNTER_MODIFIERS,
   RPG_ENCOUNTER_ZONES,
   RPG_ROUTE_ENCOUNTER_MODIFIERS,
+  describeRpgEncounterFaction,
+  describeRpgEncounterMood,
   getRpgEncounterZoneDefinitions,
   sampleRpgEncounterMeters,
   type RpgEncounterSample,
@@ -41,6 +43,13 @@ test("encounter sampling is deterministic for fixed world-meter coordinates", ()
   expect(first.pressure).toBeGreaterThanOrEqual(0);
   expect(first.pressure).toBeLessThanOrEqual(1);
   expect(first.factionHints[0]?.weight).toBeGreaterThan(first.factionHints[1]?.weight ?? 0);
+});
+
+test("encounter presentation labels are player-facing and deterministic", () => {
+  expect(describeRpgEncounterMood("road-truce")).toBe("Road Truce");
+  expect(describeRpgEncounterMood("cave-threshold")).toBe("Cave Threshold");
+  expect(describeRpgEncounterFaction("temple-pilgrims")).toBe("Temple Pilgrims");
+  expect(describeRpgEncounterFaction("opportunist-bandits")).toBe("Road Bandits");
 });
 
 test("regional samples keep distinct pressure, mood, and faction identity", () => {

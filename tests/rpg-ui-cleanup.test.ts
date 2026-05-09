@@ -28,6 +28,9 @@ test("RPG HUD renders place route interaction and skill snapshot fields", () => 
     "activeTravelGoalStepLabel",
     "interactionPromptLabel",
     "travelContextLabel",
+    "encounterMoodLabel",
+    "encounterPressureLabel",
+    "encounterFactionLabel",
     "lastInteractionLabel",
   ]) {
     expect(gameController).toContain(field);

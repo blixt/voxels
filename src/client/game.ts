@@ -444,7 +444,7 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
       interaction.textContent = snapshot.interactionPromptVerb
         ? `E ${snapshot.interactionPromptLabel}`
         : snapshot.interactionPromptLabel;
-      skill.textContent = `${snapshot.focusSkillName} ${snapshot.focusSkillLevel} • ${snapshot.travelContextLabel}`;
+      skill.textContent = `${snapshot.focusSkillName} ${snapshot.focusSkillLevel} • ${snapshot.encounterMoodLabel}`;
       progress.setAttribute("aria-label", `${snapshot.activeTravelGoalTitle} ${snapshot.activeRouteProgressLabel}`);
       progressFill.style.transform = `scaleX(${Math.max(0, Math.min(1, snapshot.activeTravelGoalProgressRatio))})`;
       card.classList.toggle("is-captured", snapshot.pointerLocked);
@@ -455,6 +455,10 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
         snapshot.interactionTargetName,
         snapshot.interactionPromptDescription,
         snapshot.lastInteractionLabel,
+        snapshot.travelContextLabel,
+        snapshot.encounterPressureLabel,
+        snapshot.encounterFactionLabel,
+        snapshot.encounterFlavorLabel,
         recentDiscovery ? `Found ${recentDiscovery.name}` : null,
         `${snapshot.focusSkillName} ${(snapshot.focusSkillProgressRatio * 100).toFixed(0)}%`,
         recentDiscovery?.flavorText ?? null,
@@ -489,6 +493,7 @@ function createObjectivePanelView(root: HTMLElement): ObjectivePanelView {
         objectiveSnapshot.progressionHint,
         `${objectiveSnapshot.title}: ${objectiveSnapshot.completedCount}/${objectiveSnapshot.totalCount}`,
         `${snapshot.focusSkillName} ${snapshot.focusSkillLevel}`,
+        `${snapshot.encounterMoodLabel}: ${snapshot.encounterFactionLabel}`,
         `Fog ${snapshot.ambientFogEndMeters.toFixed(0)} m`,
       ].filter(Boolean).join(" • ");
       if (!currentObjective) {

@@ -122,6 +122,11 @@ import {
   formatDiscoveryName,
   type DiscoveryRole,
 } from "../engine/discovery-catalog.ts";
+import {
+  describeRpgEncounterFaction,
+  describeRpgEncounterMood,
+  sampleRpgEncounterWorldUnits,
+} from "../engine/rpg-encounters.ts";
 
 const MAX_DELTA_SECONDS = 0.05;
 const HUD_PUSH_INTERVAL_MS = 120;
@@ -236,6 +241,10 @@ export interface GameHudSnapshot {
   ambientProfileId: string;
   ambientProfileLabel: string;
   ambientFogEndMeters: number;
+  encounterMoodLabel: string;
+  encounterPressureLabel: string;
+  encounterFactionLabel: string;
+  encounterFlavorLabel: string;
   activePlaceName: string;
   activeRouteName: string;
   activeRouteProgressLabel: string;
@@ -1118,6 +1127,9 @@ export class GameController {
     const activeExplorationHud = this.buildActiveExplorationHudState(currentWorld, discovery, routeSnapshot);
     const bootstrap = this.getBootstrapReadiness();
     const ambientProfile = currentWorld.ambientProfile;
+    const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+    const primaryFaction = encounter.factionHints[0]?.factionId ?? null;
+    const travelContextLabel = this.lastTravelContext === "underground" ? "Underground route" : "Surface route";
     return {
       status: this.status,
       pointerLocked: this.pointerLocked,
@@ -1167,6 +1179,13 @@ export class GameController {
       ambientProfileId: ambientProfile.id,
       ambientProfileLabel: ambientProfile.label,
       ambientFogEndMeters: worldUnitsToMeters(ambientProfile.fogEndDistance),
+      encounterMoodLabel: formatEncounterMoodForTravelContext(
+        describeRpgEncounterMood(encounter.moodId),
+        this.lastTravelContext,
+      ),
+      encounterPressureLabel: formatEncounterPressure(encounter.pressure),
+      encounterFactionLabel: primaryFaction ? describeRpgEncounterFaction(primaryFaction) : "No dominant faction",
+      encounterFlavorLabel: encounter.flavorTags.slice(0, 2).map(formatEncounterFlavorTag).join(" • "),
       activePlaceName: activeExplorationHud.activePlaceName,
       activeRouteName: activeExplorationHud.activeRouteName,
       activeRouteProgressLabel: activeExplorationHud.activeRouteProgressLabel,
@@ -1174,7 +1193,7 @@ export class GameController {
       activeTravelGoalStepLabel: activeExplorationHud.activeTravelGoalStepLabel,
       activeTravelGoalProgressRatio: activeExplorationHud.activeTravelGoalProgressRatio,
       travelContext: this.lastTravelContext,
-      travelContextLabel: this.lastTravelContext === "underground" ? "Underground route" : "Surface route",
+      travelContextLabel,
       interactionTargetName: activeExplorationHud.interactionTargetName,
       interactionPromptLabel: activeExplorationHud.interactionPromptLabel,
       interactionPromptDescription: activeExplorationHud.interactionPromptDescription,
@@ -4140,6 +4159,37 @@ function routeIdForLandmark(landmarkId: string): string | null {
     return "ash-road";
   }
   return ROUTE_LANDMARK_IDS.has(landmarkId) ? "pilgrim-road" : null;
+}
+
+function formatEncounterPressure(pressure: number): string {
+  if (!Number.isFinite(pressure)) {
+    return "Unknown pressure";
+  }
+  if (pressure >= 0.72) {
+    return "High pressure";
+  }
+  if (pressure >= 0.48) {
+    return "Watchful pressure";
+  }
+  if (pressure >= 0.24) {
+    return "Low pressure";
+  }
+  return "Quiet";
+}
+
+function formatEncounterMoodForTravelContext(moodLabel: string, travelContext: "surface" | "underground"): string {
+  if (travelContext === "surface" && moodLabel === "Cave Threshold") {
+    return "Cave Rumor";
+  }
+  return moodLabel;
+}
+
+function formatEncounterFlavorTag(tag: string): string {
+  return tag
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function readPayloadRouteId(payload: unknown): string | null {

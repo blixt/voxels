@@ -80,6 +80,32 @@ export interface RpgEncounterSample {
   flavorTags: readonly string[];
 }
 
+const RPG_ENCOUNTER_MOOD_LABELS: Record<RpgEncounterMoodId, string> = {
+  "ash-pilgrimage": "Ash Pilgrimage",
+  "ash-wind-watch": "Ash Wind Watch",
+  "blackwater-fog": "Blackwater Fog",
+  "open-grass-patrol": "Open Grass Patrol",
+  "salt-mirage": "Salt Mirage",
+  "glass-cairn-tension": "Glass Cairn Tension",
+  "redleaf-ravine-watch": "Redleaf Ravine Watch",
+  "silt-road-calm": "Silt Road Calm",
+  "road-truce": "Road Truce",
+  "cave-threshold": "Cave Threshold",
+};
+
+const RPG_ENCOUNTER_FACTION_LABELS: Record<RpgEncounterFactionId, string> = {
+  "temple-pilgrims": "Temple Pilgrims",
+  "ashlander-scouts": "Ashlander Scouts",
+  "kwama-brood": "Kwama Brood",
+  "marsh-foragers": "Marsh Foragers",
+  "salt-causeway-wardens": "Salt Causeway Wardens",
+  "glass-cairn-keepers": "Glass Cairn Keepers",
+  "redleaf-guides": "Redleaf Guides",
+  "inner-sea-traders": "Inner Sea Traders",
+  "opportunist-bandits": "Road Bandits",
+  "wild-beasts": "Wild Beasts",
+};
+
 export const RPG_ENCOUNTER_ZONES: readonly RpgEncounterZoneDefinition[] = [
   {
     regionId: "red-mountain",
@@ -262,6 +288,14 @@ export function sampleRpgEncounterWorldUnits(
 
 export function getRpgEncounterZoneDefinitions(): readonly RpgEncounterZoneDefinition[] {
   return RPG_ENCOUNTER_ZONES;
+}
+
+export function describeRpgEncounterMood(moodId: RpgEncounterMoodId): string {
+  return RPG_ENCOUNTER_MOOD_LABELS[moodId];
+}
+
+export function describeRpgEncounterFaction(factionId: RpgEncounterFactionId): string {
+  return RPG_ENCOUNTER_FACTION_LABELS[factionId];
 }
 
 function routeModifier(
