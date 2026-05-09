@@ -163,6 +163,33 @@ test("render-ready resident columns punch stale active LOD coverage instead of o
   expect(world.classifyVisibleLodColumn(punched!, 32, 0).covered).toBe(true);
 });
 
+test("one canonical LOD payload can render through different active clip masks", () => {
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
+  const canonicalChunk = createTestChunk(0, 0, 0, 1, 2, true, true);
+  const worldWithInternals = world as unknown as {
+    lodRenderClipMasks: Map<string, Uint8Array>;
+  };
+  const key = "L1:0:0:0";
+  const originalData = canonicalChunk.data.slice();
+  const originalSolidCount = canonicalChunk.solidCount;
+  const originalBounds = JSON.stringify(canonicalChunk.solidBounds);
+
+  const firstMask = createColumnClipMask(0, 0);
+  worldWithInternals.lodRenderClipMasks.set(key, firstMask);
+
+  expect(world.classifyVisibleLodColumn(canonicalChunk, 0, 0).covered).toBe(false);
+  expect(world.classifyVisibleLodColumn(canonicalChunk, 32, 0).covered).toBe(true);
+
+  const secondMask = createColumnClipMask(16, 0);
+  worldWithInternals.lodRenderClipMasks.set(key, secondMask);
+
+  expect(world.classifyVisibleLodColumn(canonicalChunk, 0, 0).covered).toBe(true);
+  expect(world.classifyVisibleLodColumn(canonicalChunk, 32, 0).covered).toBe(false);
+  expect(canonicalChunk.data).toEqual(originalData);
+  expect(canonicalChunk.solidCount).toBe(originalSolidCount);
+  expect(JSON.stringify(canonicalChunk.solidBounds)).toBe(originalBounds);
+});
+
 test("activating a finer LOD chunk punches active coarser columns in the same footprint", () => {
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337), { horizontalRadiusChunks: 1 });
   const worldWithInternals = world as unknown as {
@@ -410,6 +437,15 @@ function columnHasVisibleMaterialInYRange(
     }
   }
   return false;
+}
+
+function createColumnClipMask(localX: number, localZ: number): Uint8Array {
+  const clipMask = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
+  const chunkArea = CHUNK_SIZE * CHUNK_SIZE;
+  for (let localY = 0; localY < CHUNK_SIZE; localY += 1) {
+    clipMask[localX + localY * CHUNK_SIZE + localZ * chunkArea] = 1;
+  }
+  return clipMask;
 }
 
 function expectClipMask(

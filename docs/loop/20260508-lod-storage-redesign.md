@@ -838,3 +838,23 @@ Next:
 1. Add a LOD lab fixture that reuses one canonical coarse payload under two different active clip masks.
 2. Split the far-stress benchmark into correctness visibility and settle-performance phases so timeouts still leave usable evidence.
 3. Begin `S1` canonical chunk store API and `P0` LOD lab/probe expansion in parallel now that render-only active masking has a passing default browser artifact.
+
+### Follow-up Checkpoint - Canonical Payload Multi-Mask Fixture
+
+Accepted verification increment:
+
+- Added a regression test proving one canonical LOD chunk payload can be viewed through two different active `lodRenderClipMasks`.
+- The test swaps masks over the same coarse chunk, verifies visible ownership moves between columns, and asserts `VoxelChunk.data`, `solidCount`, and `solidBounds` do not change.
+- This is the isolated fixture requested by the previous checkpoint: render ownership can now vary independently from canonical derived chunk data.
+
+Validation:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/lod-handoff.test.ts tests/opaque-chunk-mesher.test.ts`: pass, `17` tests.
+- `mise exec -- bun run test:lod-lab`: pass, `21` tests.
+
+Next:
+
+1. Split the far-stress persistence benchmark so correctness coverage can still be captured when full settle times out.
+2. Add a browser/lab artifact summary that records visible coverage separately from pending-generation performance.
+3. Start the canonical chunk store API work after the far-stress harness stops losing evidence on timeout.
