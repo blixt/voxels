@@ -259,6 +259,20 @@ Do not edit `src/client/game-controller.ts` or HUD files yet.
 | 6 | generator island rewrite | 9 after gates | High player-visible payoff, but unsafe until renderer and atlas gates are trustworthy. |
 | 7 | prop/atmosphere content packs | 7 after gates | Good visual payoff, but must be measured through object/view labs to avoid barely visible tweaks. |
 
+## Detailed Task Boards
+
+Subagents expanded the execution plan into two owned roadmap documents:
+
+- `docs/loop/20260509-lod-storage-roadmap.md`: persistent canonical chunks, edit journals, worker-derived LOD, LOD lab/probes, hitch attribution, and storage/OPFS decision points.
+- `docs/loop/20260509-rpg-world-roadmap.md`: finite island worldgen, region/content kits, traversal, ambiance, RPG verbs/skills, NPC zones, UI, and rubric-based acceptance.
+
+Immediate scheduling rule:
+
+- Keep `R0` as the current critical path until the browser LOD persistence probe reports zero gaps, holes, resident overlaps, band overlaps, and water overlaps.
+- Run storage and RPG work in pure modules/docs only while `R0` is active.
+- Do not integrate generator, HUD, route, or prop content changes into the live game loop until the verification board can prove render ownership is clean.
+- After `R0`, parallelize `S1` canonical chunk store, `P0` LOD lab/probe expansion, `S2.1-S2.2` island/region atlas foundations, and `S4.1` traversal-envelope specs.
+
 ## Evidence Checklist
 
 Every accepted checkpoint must record:

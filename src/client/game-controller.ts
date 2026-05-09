@@ -68,6 +68,7 @@ import {
 import {
   ProceduralResidentWorld,
   type LodChunkDebugState,
+  type LodVisibleColumnState,
   type LodResidencyUpdateSummary,
   type ResidencyUpdateSummary,
   type WorldEditRecord,
@@ -521,6 +522,7 @@ interface LodCoverageSpan {
   label: string;
   strideMeters: number;
   chunk: VoxelChunk;
+  classifyColumn: (worldX: number, worldZ: number) => LodVisibleColumnState;
   state: LodChunkDebugState;
   chunkSize: number;
   minX: number;
@@ -1576,7 +1578,7 @@ export class GameController {
             && worldX < span.maxX
             && worldZ >= span.minZ
             && worldZ < span.maxZ
-            ? classifyWorldColumnInLodChunk(span.chunk, worldX, worldZ, this.world.chunkSize)
+            ? span.classifyColumn(worldX, worldZ)
             : { covered: false, water: false, minY: null, maxY: null };
           if (
             lodColumn.covered
@@ -1759,6 +1761,7 @@ export class GameController {
         label: `LOD${chunk.lodLevel}`,
         strideMeters: worldUnitsToMeters(chunk.voxelStride),
         chunk,
+        classifyColumn: (worldX, worldZ) => this.world.classifyVisibleLodColumn(chunk, worldX, worldZ),
         state: this.world.getLodChunkDebugState(chunk),
         chunkSize: this.world.chunkSize,
         minX: chunk.coord.x * worldSize,
@@ -4051,58 +4054,12 @@ function isCoveredByLodSpans(
       && worldX < span.maxX
       && worldZ >= span.minZ
       && worldZ < span.maxZ
-      && isWorldColumnCoveredByLodChunk(span.chunk, worldX, worldZ, span.chunkSize)
+      && span.classifyColumn(worldX, worldZ).covered
     ) {
       return true;
     }
   }
   return false;
-}
-
-function isWorldColumnCoveredByLodChunk(
-  chunk: VoxelChunk,
-  worldX: number,
-  worldZ: number,
-  chunkSize: number,
-): boolean {
-  return classifyWorldColumnInLodChunk(chunk, worldX, worldZ, chunkSize).covered;
-}
-
-function classifyWorldColumnInLodChunk(
-  chunk: VoxelChunk,
-  worldX: number,
-  worldZ: number,
-  chunkSize: number,
-): { covered: boolean; water: boolean; minY: number | null; maxY: number | null } {
-  const stride = Math.max(1, chunk.voxelStride);
-  const worldSize = chunkSize * stride;
-  const localX = Math.floor((worldX - chunk.coord.x * worldSize) / stride);
-  const localZ = Math.floor((worldZ - chunk.coord.z * worldSize) / stride);
-  if (localX < 0 || localX >= chunkSize || localZ < 0 || localZ >= chunkSize) {
-    return { covered: false, water: false, minY: null, maxY: null };
-  }
-  const chunkArea = chunkSize * chunkSize;
-  let covered = false;
-  let water = false;
-  let minY: number | null = null;
-  let maxY: number | null = null;
-  for (let localY = 0; localY < chunkSize; localY += 1) {
-    const material = chunk.data[localX + localY * chunkSize + localZ * chunkArea]!;
-    if (material !== 0) {
-      covered = true;
-      const worldMinY = chunk.coord.y * worldSize + localY * stride;
-      const worldMaxY = worldMinY + stride;
-      minY = minY === null ? worldMinY : Math.min(minY, worldMinY);
-      maxY = maxY === null ? worldMaxY : Math.max(maxY, worldMaxY);
-      if (isProceduralWaterMaterial(material)) {
-        const above = localY + 1 < chunkSize
-          ? chunk.data[localX + (localY + 1) * chunkSize + localZ * chunkArea]!
-          : material;
-        water ||= !isProceduralWaterMaterial(above);
-      }
-    }
-  }
-  return { covered, water, minY, maxY };
 }
 
 function formatLodOwnerBand(chunk: VoxelChunk): string {

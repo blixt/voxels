@@ -193,6 +193,13 @@ export interface LodChunkDebugState {
   coveredEmpty: boolean;
 }
 
+export interface LodVisibleColumnState {
+  covered: boolean;
+  water: boolean;
+  minY: number | null;
+  maxY: number | null;
+}
+
 interface ChunkYRange {
   minCy: number;
   maxCy: number;
@@ -469,6 +476,45 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       empty: this.emptyLodKeys.has(key),
       coveredEmpty: this.coveredEmptyLodKeys.has(key),
     };
+  }
+
+  classifyVisibleLodColumn(chunk: VoxelChunk, worldX: number, worldZ: number): LodVisibleColumnState {
+    const stride = Math.max(1, chunk.voxelStride);
+    const worldSize = this.chunkSize * stride;
+    const localX = Math.floor((worldX - chunk.coord.x * worldSize) / stride);
+    const localZ = Math.floor((worldZ - chunk.coord.z * worldSize) / stride);
+    if (localX < 0 || localX >= this.chunkSize || localZ < 0 || localZ >= this.chunkSize) {
+      return { covered: false, water: false, minY: null, maxY: null };
+    }
+
+    const chunkArea = this.chunkSize * this.chunkSize;
+    const columnOffset = localX + localZ * chunkArea;
+    let covered = false;
+    let water = false;
+    let minY: number | null = null;
+    let maxY: number | null = null;
+    for (let localY = 0; localY < this.chunkSize; localY += 1) {
+      const index = columnOffset + localY * this.chunkSize;
+      const material = this.isLodChunkLocalVoxelVisible(chunk, index) ? chunk.data[index]! : 0;
+      if (material === 0) {
+        continue;
+      }
+      covered = true;
+      const worldMinY = chunk.coord.y * worldSize + localY * stride;
+      const worldMaxY = worldMinY + stride;
+      minY = minY === null ? worldMinY : Math.min(minY, worldMinY);
+      maxY = maxY === null ? worldMaxY : Math.max(maxY, worldMaxY);
+      if (isProceduralWaterMaterial(material)) {
+        const aboveIndex = index + this.chunkSize;
+        const above = localY + 1 < this.chunkSize
+          ? this.isLodChunkLocalVoxelVisible(chunk, aboveIndex)
+            ? chunk.data[aboveIndex]!
+            : 0
+          : material;
+        water ||= !isProceduralWaterMaterial(above);
+      }
+    }
+    return { covered, water, minY, maxY };
   }
 
   *iterateResidentChunks(): Iterable<VoxelChunk> {
@@ -1437,7 +1483,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         decoded.voxelStride,
       );
       const activation = this.punchLodChunkCoveredByActiveFiner(chunk);
-      if (activation.chunk.solidCount === 0) {
+      if (activation.visibleSolidCount === 0) {
         this.coveredEmptyLodKeys.add(key);
         this.lodChunks.delete(key);
         this.staleLodKeys.delete(key);
@@ -1557,7 +1603,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     this.retainedLodChunks.delete(key);
     this.retainedEmptyLodKeys.delete(key);
     const activation = this.punchLodChunkCoveredByActiveFiner(chunk);
-    if (activation.chunk.solidCount === 0) {
+    if (activation.visibleSolidCount === 0) {
       this.coveredEmptyLodKeys.add(key);
       this.clearLodCoveragePunchedKey(key);
       return true;
@@ -2808,9 +2854,11 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     }
   }
 
-  private punchLodChunkCoveredByActiveFiner(chunk: VoxelChunk): { chunk: VoxelChunk; skippedFinerCoverage: boolean } {
+  private punchLodChunkCoveredByActiveFiner(
+    chunk: VoxelChunk,
+  ): { chunk: VoxelChunk; skippedFinerCoverage: boolean; visibleSolidCount: number } {
     if (chunk.lodLevel <= 0 || chunk.solidCount === 0) {
-      return { chunk, skippedFinerCoverage: false };
+      return { chunk, skippedFinerCoverage: false, visibleSolidCount: chunk.solidCount };
     }
     const stride = Math.max(1, chunk.voxelStride);
     const originX = chunk.coord.x * this.chunkSize * stride;
@@ -2818,15 +2866,8 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     const originZ = chunk.coord.z * this.chunkSize * stride;
     let skippedFinerCoverage = false;
     const chunkArea = this.chunkSize * this.chunkSize;
-    const data = new Uint16Array(chunk.data.length);
     let clipMask: Uint8Array | null = null;
-    let solidCount = 0;
-    let minX = this.chunkSize;
-    let minY = this.chunkSize;
-    let minZ = this.chunkSize;
-    let maxX = 0;
-    let maxY = 0;
-    let maxZ = 0;
+    let visibleSolidCount = 0;
     for (let oz = 0; oz < this.chunkSize; oz += 1) {
       for (let ox = 0; ox < this.chunkSize; ox += 1) {
         if (!this.isOutputLodColumnCoveredByFiner(chunk.lodLevel, originX, originZ, stride, ox, oz)) {
@@ -2837,14 +2878,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
             if (material === 0) {
               continue;
             }
-            data[index] = material;
-            solidCount += 1;
-            if (ox < minX) minX = ox;
-            if (oy < minY) minY = oy;
-            if (oz < minZ) minZ = oz;
-            if (ox + 1 > maxX) maxX = ox + 1;
-            if (oy + 1 > maxY) maxY = oy + 1;
-            if (oz + 1 > maxZ) maxZ = oz + 1;
+            visibleSolidCount += 1;
           }
           continue;
         }
@@ -2860,36 +2894,17 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
             clipMask[index] = 1;
             continue;
           }
-          data[index] = material;
-          solidCount += 1;
-          if (ox < minX) minX = ox;
-          if (oy < minY) minY = oy;
-          if (oz < minZ) minZ = oz;
-          if (ox + 1 > maxX) maxX = ox + 1;
-          if (oy + 1 > maxY) maxY = oy + 1;
-          if (oz + 1 > maxZ) maxZ = oz + 1;
+          visibleSolidCount += 1;
         }
       }
     }
     if (!skippedFinerCoverage) {
-      return { chunk, skippedFinerCoverage: false };
+      return { chunk, skippedFinerCoverage: false, visibleSolidCount: chunk.solidCount };
     }
-
-    const clippedChunk = createLodResidentChunk(
-      {
-        coord: { ...chunk.coord },
-        data,
-        solidCount,
-        solidBounds: solidCount === 0 ? null : { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
-        renderSummary: null!,
-      },
-      chunk.lodLevel,
-      stride,
-    );
     if (clipMask) {
-      this.lodRenderClipMasks.set(toLodChunkKey(clippedChunk.lodLevel, clippedChunk.coord.x, clippedChunk.coord.y, clippedChunk.coord.z), clipMask);
+      this.lodRenderClipMasks.set(toLodChunkKey(chunk.lodLevel, chunk.coord.x, chunk.coord.y, chunk.coord.z), clipMask);
     }
-    return { chunk: clippedChunk, skippedFinerCoverage: true };
+    return { chunk, skippedFinerCoverage: true, visibleSolidCount };
   }
 
   private punchActiveLodChunkCoveredByFiner(key: string): void {
@@ -2901,7 +2916,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     if (!activation.skippedFinerCoverage) {
       return;
     }
-    if (activation.chunk.solidCount === 0) {
+    if (activation.visibleSolidCount === 0) {
       this.lodChunks.delete(key);
       this.staleLodKeys.delete(key);
       this.clearLodCoveragePunchedKey(key);
@@ -2946,12 +2961,13 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     stride: number,
     worldSize: number,
   ): ChunkMeshData {
+    const clipMask = this.lodRenderClipMasks.get(toLodChunkKey(level, cx, cy, cz)) ?? null;
     const opaqueMesh = buildOpaqueChunkMeshFromInput(
       {
         chunkSize: this.chunkSize,
         coord: { x: cx, y: cy, z: cz },
         chunkData: chunk.data,
-        clipMask: this.lodRenderClipMasks.get(toLodChunkKey(level, cx, cy, cz)) ?? null,
+        clipMask,
         solidCount: chunk.solidCount,
         solidBounds: chunk.solidBounds
           ? { min: [...chunk.solidBounds.min], max: [...chunk.solidBounds.max] }
@@ -3002,7 +3018,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         opaqueMesh.bounds.max[2] = worldOriginZ + (opaqueMesh.bounds.max[2] - mesherOriginZ) * stride;
       }
     }
-    const waterMesh = this.buildLodWaterTopMesh(chunk, cx, cy, cz, stride, worldSize);
+    const waterMesh = this.buildLodWaterTopMesh(chunk, cx, cy, cz, stride, worldSize, clipMask);
 
     return {
       vertexData: opaqueMesh.vertexData,
@@ -3078,6 +3094,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     cz: number,
     stride: number,
     worldSize: number,
+    clipMask: Uint8Array | null,
   ): {
     vertexData: ArrayBuffer;
     vertexCount: number;
@@ -3106,13 +3123,17 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       let maskIndex = 0;
       for (let z = solidBounds.min[2]; z < solidBounds.max[2]; z += 1) {
         for (let x = solidBounds.min[0]; x < solidBounds.max[0]; x += 1) {
-          const material = chunk.data[x + y * cs + z * chunkArea]!;
+          const index = x + y * cs + z * chunkArea;
+          const material = clipMask?.[index] ? 0 : chunk.data[index]!;
           if (!isProceduralWaterMaterial(material)) {
             mask[maskIndex++] = 0;
             continue;
           }
+          const aboveIndex = x + (y + 1) * cs + z * chunkArea;
           const above = y + 1 < cs
-            ? chunk.data[x + (y + 1) * cs + z * chunkArea]!
+            ? clipMask?.[aboveIndex]
+              ? 0
+              : chunk.data[aboveIndex]!
             : this.isLodWaterContinuingAboveChunk(cx, cy, cz, x, z, y, stride, worldSize)
               ? material
               : 0;

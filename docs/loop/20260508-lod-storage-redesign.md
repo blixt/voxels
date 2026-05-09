@@ -802,3 +802,39 @@ Next:
 1. Make `punchLodChunkCoveredByActiveFiner` return an unmodified canonical chunk plus a render clip mask.
 2. Keep coverage probes and handoff predicates on the clip-aware path.
 3. Re-run default persistence and then the far stress; if far still times out, split populate/gap correctness from full-settle performance in the harness.
+
+### Follow-up Checkpoint - Render-Only Clip Masks And Probe Source Of Truth
+
+Accepted renderer increment:
+
+- Replaced data-punched active LOD chunks with unmodified canonical LOD chunks plus transient `lodRenderClipMasks`.
+- `punchLodChunkCoveredByActiveFiner` now reports `visibleSolidCount` for active visibility decisions while leaving `VoxelChunk.data`, `solidCount`, and `solidBounds` intact.
+- LOD opaque and water mesh generation now consume the same render clip mask.
+- Added `classifyVisibleLodColumn` on `ProceduralResidentWorld` and changed `GameController` LOD coverage probes to use it instead of re-reading raw chunk data.
+
+Why this matters:
+
+- The first browser attempt failed with resident and band overlaps because the debug probe still treated masked coarse voxels as visible.
+- Moving the column classifier into `ProceduralResidentWorld` concentrates the ownership source of truth: meshing, handoff predicates, and browser coverage probes now agree that clipped LOD voxels are not rendered.
+- Canonical derived LOD data can now remain reusable while active ownership changes the render mask.
+
+Validation:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts tests/lod-system.test.ts tests/opaque-chunk-mesher.test.ts`: pass, `74` tests.
+- `mise exec -- bun run bench:lod-persistence -- --label=render-only-clip-water-fixed`: pass.
+  - Artifact: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-BRKGCV/lod-idb-persistence-reload.json`
+  - Reload disk hits: `1276`.
+  - Coverage: `0` uncovered gaps, `0` handoff holes, `0` resident overlaps, `0` band overlaps, `0` water overlaps.
+
+Planning expansion:
+
+- Added `docs/loop/20260509-lod-storage-roadmap.md` for canonical chunk persistence, edit journals, worker-derived LOD, LOD lab/probe work, hitch attribution, and storage decisions.
+- Added `docs/loop/20260509-rpg-world-roadmap.md` for finite island generation, biome/content kits, traversal, ambiance, RPG verbs/skills, NPC zones, UI, and rubrics.
+- Updated `docs/loop/20260509-subagent-execution-board.md` to keep `R0` render ownership as the current integration gate while allowing pure storage/world/RPG planning to proceed in parallel.
+
+Next:
+
+1. Add a LOD lab fixture that reuses one canonical coarse payload under two different active clip masks.
+2. Split the far-stress benchmark into correctness visibility and settle-performance phases so timeouts still leave usable evidence.
+3. Begin `S1` canonical chunk store API and `P0` LOD lab/probe expansion in parallel now that render-only active masking has a passing default browser artifact.
