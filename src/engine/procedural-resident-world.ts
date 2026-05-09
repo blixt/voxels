@@ -1530,7 +1530,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     cz: number,
     scheduledThisUpdate: number,
   ): "scheduled" | "pending" | "skip" {
-    if (!this.asyncChunkGeneration || this.editOverlays.size > 0 || lodLevel < 2) {
+    if (!this.asyncChunkGeneration || this.editOverlays.size > 0 || lodLevel < 1) {
       return "skip";
     }
     if (scheduledThisUpdate >= MAX_LOD_WORKER_GENERATE_REQUESTS_PER_UPDATE) {

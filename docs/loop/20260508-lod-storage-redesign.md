@@ -544,3 +544,38 @@ Next target:
 1. Treat the visual LOD overlap bug as fixed for this checkpoint, guarded by the far coverage artifact.
 2. Attack far-transition backlog next: LOD1 generation and prepared handoff remain the dominant blockers to settle.
 3. Add a benchmark success mode that can distinguish “visual coverage clean but background backlog remains” from actual visible rendering failure.
+
+### Follow-up Checkpoint - Worker LOD1 Derivation
+
+Moved cache-cold LOD1 derivation onto the worker path when there are no edit overlays:
+
+- `scheduleGeneratedLodChunkRequest` now permits `lodLevel >= 1`.
+- Main-thread LOD derivation remains available when edits are present.
+- Disk-cache and worker metrics now include LOD1 worker-derived chunks.
+- Updated the persistence queue unit test to test queue flushing directly, since cache-cold LOD1 no longer needs to be main-thread generated in normal unedited worlds.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/procedural-resident-world.test.ts tests/lod-handoff.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-default-worker-lod1`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-far-worker-lod1 --lod-persistence-chunk-delta=32 --lod-persistence-max-frames=260`
+
+Browser verifier artifacts:
+
+- Default persistence: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-1XW2h4/lod-idb-persistence-reload.json`
+  - Result: pass.
+  - Reload disk hits increased to `1299`.
+- Far transition: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-fhZ1AI/lod-idb-persistence-reload.json`
+  - Result: still fails settle, but pending dropped from `219` to `45`.
+  - Generation-budget pending is now `0`.
+  - Worker-generated chunks: `986` total (`L1=403`, `L2=277`, `L3=179`, `L4=127`).
+  - Main-thread LOD generation and downsample time are now `0`.
+  - Coverage remains clean (`0` gaps, `0` handoff holes, `0` overlaps).
+  - Remaining pending is almost entirely prepared handoff: `44` chunks (`L1=19`, `L2=11`, `L3=14`).
+
+Next target:
+
+1. Resolve prepared handoff backlog deterministically; generation is no longer the far-transition blocker.
+2. Inspect why prepared chunks remain blocked even when visual coverage is clean.
+3. Consider allowing the far benchmark to report a separate “visual-settled” pass, while keeping full-settle as a performance/backlog target.
