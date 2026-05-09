@@ -185,6 +185,10 @@ function mountGame(): GameRuntime {
   const controller = new GameController(canvas, {
     eagerBootstrapBenchmark: searchParams.get("benchmarkBootstrap") === "1",
   });
+  const startFresh = searchParams.has("freshGame");
+  if (startFresh) {
+    clearProgressState();
+  }
   const unregisterCapturePointerLockTarget = controller.registerPointerLockTarget(captureButton);
   const requestCapture = async (target: HTMLElement = captureButton) => {
     await controller.requestPointerLock(target);
@@ -207,6 +211,7 @@ function mountGame(): GameRuntime {
   const performanceStripView = createPerformanceStripView(performanceStripRoot);
   const interactionHudView = createInteractionHudView(interactionHudRoot);
   let lastProgressSignature = "";
+  let progressHydrated = false;
 
   controller.onHudUpdate = (snapshot) => {
     achievementPresenter.observe(snapshot.recentDiscoveries);
@@ -230,7 +235,7 @@ function mountGame(): GameRuntime {
       canvas.focus({ preventScroll: true });
     }
     const progressSignature = buildProgressSignature(snapshot);
-    if (progressSignature !== lastProgressSignature) {
+    if (progressHydrated && progressSignature !== lastProgressSignature) {
       lastProgressSignature = progressSignature;
       saveProgressState(controller);
     }
@@ -285,7 +290,12 @@ function mountGame(): GameRuntime {
   };
 
   const ready = controller.init().then(() => {
-    loadProgressState(controller);
+    if (!startFresh) {
+      loadProgressState(controller);
+    }
+    progressHydrated = true;
+    lastProgressSignature = buildProgressSignature(controller.getDebugSnapshot());
+    saveProgressState(controller);
   });
 
   return {

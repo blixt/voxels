@@ -56,6 +56,19 @@ test("client wires pure exploration interaction and travel goal systems", () => 
   expect(gameController).toContain("TRAVEL_GOALS");
 });
 
+test("progress storage hydrates after init and honors fresh-game launches", () => {
+  const gameClient = readFileSync(join(repoRoot, "src/client/game.ts"), "utf8");
+
+  expect(gameClient).toContain("const startFresh = searchParams.has(\"freshGame\")");
+  expect(gameClient).toContain("if (startFresh)");
+  expect(gameClient).toContain("clearProgressState()");
+  expect(gameClient).toContain("let progressHydrated = false");
+  expect(gameClient).toContain("progressHydrated && progressSignature !== lastProgressSignature");
+  expect(gameClient).toContain("if (!startFresh)");
+  expect(gameClient).toContain("loadProgressState(controller)");
+  expect(gameClient).toContain("progressHydrated = true");
+});
+
 test("legacy material gathering and placement modules stay removed", () => {
   for (const path of [
     "src/engine/inventory.ts",
