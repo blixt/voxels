@@ -448,3 +448,38 @@ Next target:
 1. Replace ad hoc ownership repair with deterministic ownership state during LOD planning/activation, so active LOD chunks cannot start a frame with overlapping material ranges.
 2. Add per-key active/prepared/stale diagnostics to overlap samples so the far artifact reports whether each owner is stale, punched, prepared-blocked, or fresh.
 3. Reduce far-transition LOD1 backlog; current worker derivation helps LOD2+, but the remaining far pending is dominated by main-thread LOD1 and prepared handoff state.
+
+### Follow-up Checkpoint - Owner State Evidence
+
+Added per-owner LOD state to overlap samples:
+
+- Each LOD coverage issue sample now includes `ownerStates` with `active`, `stale`, `coveragePunched`, `prepared`, `retained`, `empty`, and `coveredEmpty`.
+- `ProceduralResidentWorld.getLodChunkDebugState` exposes that state without giving the client mutable access to LOD internals.
+
+Validation:
+
+- `mise exec -- bun run typecheck`
+- `mise exec -- bun test tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts tests/render-verification-metrics.test.ts`
+- `mise exec -- bun run bench:lod-persistence -- --label=lod-default-owner-state-diagnostics`
+
+Browser verifier artifacts:
+
+- Default persistence: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-0BFRmD/lod-idb-persistence-reload.json`
+  - Result: pass, with `929` reload disk hits and clean coverage.
+- Far owner-state diagnostic: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-9gd839/lod-idb-persistence-reload.json`
+  - Result: still fails far settle.
+  - Critical evidence: the overlapping sample owners are both fresh active chunks (`stale=false`, `coveragePunched=false`, `prepared=false`), e.g. `L2:-98:11:-188` and `L1:-196:22:-376`.
+  - This rules out the earlier stale/prepared-only hypothesis for the remaining far overlap.
+
+Rejected check:
+
+- Reasserting ownership for every fresh active needed chunk cleared the conceptual leak but was too broad:
+  - It made the far benchmark over-budget.
+  - It also caused a default cold-origin regression with `16` uncovered LOD samples.
+  - The attempted artifact was `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-cLnFCB/lod-idb-persistence-reload.json`.
+
+Next target:
+
+1. Move from reactive punching toward a deterministic single-owner LOD plan per world column, so coarser chunks are generated already clipped to the finer bands that are planned for the same frame.
+2. Add a small artificial LOD-lab scenario where planned LOD1 and LOD2 intentionally overlap in X/Z; assert that the active representation has exactly one owner per overlapping material interval.
+3. Keep default persistence as a guard before any new far-transition repair is accepted.

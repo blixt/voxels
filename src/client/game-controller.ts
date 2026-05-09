@@ -67,6 +67,7 @@ import {
 } from "../engine/procedural-probes.ts";
 import {
   ProceduralResidentWorld,
+  type LodChunkDebugState,
   type LodResidencyUpdateSummary,
   type ResidencyUpdateSummary,
   type WorldEditRecord,
@@ -489,6 +490,7 @@ export interface LodCoverageIssueSample {
   bands: string[];
   sampleStrideMeters: number[];
   ownerChunks?: string[];
+  ownerStates?: LodCoverageOwnerState[];
   verticalRanges?: LodCoverageVerticalRange[];
 }
 
@@ -519,11 +521,16 @@ interface LodCoverageSpan {
   label: string;
   strideMeters: number;
   chunk: VoxelChunk;
+  state: LodChunkDebugState;
   chunkSize: number;
   minX: number;
   maxX: number;
   minZ: number;
   maxZ: number;
+}
+
+interface LodCoverageOwnerState extends LodChunkDebugState {
+  ownerChunk: string;
 }
 
 interface LodCoverageVerticalRange {
@@ -1561,6 +1568,7 @@ export class GameController {
         const renderReadyWater = this.isRenderReadyWaterColumn(worldX, worldZ, chunkX, chunkZ);
         const lodOwnerStridesByBand = new Map<string, number>();
         const lodOwnerChunksByBand = new Map<string, Set<string>>();
+        const lodOwnerStatesByChunk = new Map<string, LodCoverageOwnerState>();
         const lodVerticalRanges: LodCoverageVerticalRange[] = [];
         const waterBands = new Set<string>(renderReadyWater ? ["LOD0"] : []);
         for (const span of lodSpans) {
@@ -1579,6 +1587,7 @@ export class GameController {
             const ownerChunk = formatLodOwnerChunk(span.chunk);
             ownerChunks.add(ownerChunk);
             lodOwnerChunksByBand.set(ownerBand, ownerChunks);
+            lodOwnerStatesByChunk.set(ownerChunk, { ownerChunk, ...span.state });
             if (lodColumn.minY !== null && lodColumn.maxY !== null) {
               lodVerticalRanges.push({
                 band: ownerBand,
@@ -1594,6 +1603,7 @@ export class GameController {
         }
         const lodBands = [...lodOwnerStridesByBand.keys()];
         const ownerChunks = [...lodOwnerChunksByBand.values()].flatMap((chunks) => [...chunks]);
+        const ownerStates = [...lodOwnerStatesByChunk.values()];
         const sampleStrideMeters = [...lodOwnerStridesByBand.values()];
         const bands = visibleLod0Owner ? ["LOD0", ...lodBands] : lodBands;
         const strides = visibleLod0Owner ? [worldUnitsToMeters(1), ...sampleStrideMeters] : sampleStrideMeters;
@@ -1606,6 +1616,7 @@ export class GameController {
           bands,
           sampleStrideMeters: strides,
           ownerChunks,
+          ownerStates,
           verticalRanges: lodVerticalRanges,
         };
         sampleCount += 1;
@@ -1748,6 +1759,7 @@ export class GameController {
         label: `LOD${chunk.lodLevel}`,
         strideMeters: worldUnitsToMeters(chunk.voxelStride),
         chunk,
+        state: this.world.getLodChunkDebugState(chunk),
         chunkSize: this.world.chunkSize,
         minX: chunk.coord.x * worldSize,
         maxX: (chunk.coord.x + 1) * worldSize,

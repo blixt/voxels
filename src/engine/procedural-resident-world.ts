@@ -181,6 +181,18 @@ export interface WorldEditRecord {
   localIndex: number;
 }
 
+export interface LodChunkDebugState {
+  key: string;
+  active: boolean;
+  stale: boolean;
+  coveragePunched: boolean;
+  prepared: boolean;
+  retained: boolean;
+  retainedEmpty: boolean;
+  empty: boolean;
+  coveredEmpty: boolean;
+}
+
 interface ChunkYRange {
   minCy: number;
   maxCy: number;
@@ -441,6 +453,21 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
   hasResidentChunk(cx: number, cy: number, cz: number): boolean {
     return this.chunks.has(toChunkKey(cx, cy, cz));
+  }
+
+  getLodChunkDebugState(chunk: VoxelChunk): LodChunkDebugState {
+    const key = toLodChunkKey(chunk.lodLevel, chunk.coord.x, chunk.coord.y, chunk.coord.z);
+    return {
+      key,
+      active: this.lodChunks.get(key) === chunk,
+      stale: this.staleLodKeys.has(key),
+      coveragePunched: this.coveragePunchedLodKeys.has(key),
+      prepared: this.preparedLodChunks.has(key),
+      retained: this.retainedLodChunks.has(key),
+      retainedEmpty: this.retainedEmptyLodKeys.has(key),
+      empty: this.emptyLodKeys.has(key),
+      coveredEmpty: this.coveredEmptyLodKeys.has(key),
+    };
   }
 
   *iterateResidentChunks(): Iterable<VoxelChunk> {
