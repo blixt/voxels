@@ -69,6 +69,8 @@ test("client wires pure exploration interaction and travel goal systems", () => 
   expect(gameController).toContain("TRAVEL_GOALS");
   expect(gameController).toContain("formatEncounterScoutLabel");
   expect(gameController).toContain("formatEncounterScoutDescription");
+  expect(gameController).toContain("sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2])");
+  expect(gameController).toContain("interactionPromptVerb: prompt?.verb ?? \"inspect\"");
 });
 
 test("progress storage hydrates after init and honors fresh-game launches", () => {

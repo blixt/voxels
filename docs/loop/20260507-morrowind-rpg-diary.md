@@ -2458,3 +2458,18 @@ Build the first "place identity" slice without regressing performance or input:
 - Honest assessment:
   - This is a focused prop improvement, not a full visual identity overhaul.
   - The object-lab report shows the prop stayed low and route-shaped, with no warnings, but the accent material only appears in a small number of voxels; future passes should make signature materials readable from farther away.
+
+### 2026-05-09 - Actionable Local Scouting
+
+- Trigger:
+  - The local encounter prompt was visible but passive. If no landmark was targetable, pressing E still produced the old `No route sign nearby` style feedback.
+- Changes:
+  - Made no-target encounter scouting actionable through the same E interaction path.
+  - The HUD now prefixes the prompt as `E Scout <dominant faction>` and pressing E updates the player-facing status/last interaction with the current pressure read.
+- Validation:
+  - `mise exec -- bun test tests/rpg-ui-cleanup.test.ts tests/rpg-encounters.test.ts`: pass, `12` tests.
+  - `mise exec -- bun run typecheck`: pass.
+  - Shared in-app browser at `http://localhost:3001/?freshGame=codex-scout-action-check`: before input, HUD showed `E Scout Kwama Brood`; after clicking play and pressing E, HUD/status showed `Scout Kwama Brood: High pressure`.
+- Honest assessment:
+  - This is still lightweight RPG feedback rather than full encounter simulation.
+  - It makes ambient faction pressure actionable, which is important because the game now gives the player something meaningful to do even between authored landmarks.

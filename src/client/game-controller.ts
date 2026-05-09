@@ -2901,7 +2901,9 @@ export class GameController {
     const target = this.resolveCurrentInteraction(currentWorld, discovery).target;
     const prompt = target?.prompts.find((candidate) => !candidate.disabled) ?? null;
     if (!target || !prompt) {
-      this.lastInteractionLabel = "No route sign nearby";
+      const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+      const scoutLabel = formatEncounterScoutLabel(encounter);
+      this.lastInteractionLabel = `${scoutLabel}: ${formatEncounterPressure(encounter.pressure)}`;
       this.status = this.lastInteractionLabel;
       this.pushHud(true);
       return;
@@ -2956,7 +2958,7 @@ export class GameController {
       interactionPromptLabel: prompt?.label ?? formatEncounterScoutLabel(encounter),
       interactionPromptDescription: prompt?.description
         ?? (target ? `${target.distanceMeters.toFixed(1)} m away` : formatEncounterScoutDescription(encounter, this.lastTravelContext)),
-      interactionPromptVerb: prompt?.verb ?? null,
+      interactionPromptVerb: prompt?.verb ?? "inspect",
     };
   }
 
