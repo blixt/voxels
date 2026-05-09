@@ -6,6 +6,8 @@ import {
   RPG_ROUTE_ENCOUNTER_MODIFIERS,
   describeRpgEncounterFaction,
   describeRpgEncounterMood,
+  describeRpgEncounterPressure,
+  describeRpgEncounterScoutResult,
   getRpgEncounterZoneDefinitions,
   sampleRpgEncounterMeters,
   type RpgEncounterSample,
@@ -50,6 +52,19 @@ test("encounter presentation labels are player-facing and deterministic", () => 
   expect(describeRpgEncounterMood("cave-threshold")).toBe("Cave Threshold");
   expect(describeRpgEncounterFaction("temple-pilgrims")).toBe("Temple Pilgrims");
   expect(describeRpgEncounterFaction("opportunist-bandits")).toBe("Road Bandits");
+  expect(describeRpgEncounterPressure(0.8)).toBe("High pressure");
+  expect(describeRpgEncounterPressure(0.36)).toBe("Low pressure");
+});
+
+test("scout results turn pressure and faction data into field notes", () => {
+  const sample = sampleRpgEncounterMeters(-1_240, -2_600);
+  const result = describeRpgEncounterScoutResult(sample);
+
+  expect(result.label).toMatch(/^Scout /);
+  expect(result.pressureLabel).toBe(describeRpgEncounterPressure(sample.pressure));
+  expect(result.factionLabel.length).toBeGreaterThan(0);
+  expect(result.detail).toContain(result.pressureLabel);
+  expect(result.detail).toMatch(/Signs: /);
 });
 
 test("regional samples keep distinct pressure, mood, and faction identity", () => {

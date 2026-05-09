@@ -125,6 +125,7 @@ import {
 import {
   describeRpgEncounterFaction,
   describeRpgEncounterMood,
+  describeRpgEncounterScoutResult,
   sampleRpgEncounterWorldUnits,
   type RpgEncounterSample,
 } from "../engine/rpg-encounters.ts";
@@ -1127,6 +1128,7 @@ export class GameController {
     const routeSnapshot = this.routeJournal.getSnapshot();
     const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
     const primaryFaction = encounter.factionHints[0]?.factionId ?? null;
+    const scoutResult = describeRpgEncounterScoutResult(encounter);
     const activeExplorationHud = this.buildActiveExplorationHudState(currentWorld, discovery, routeSnapshot, encounter);
     const bootstrap = this.getBootstrapReadiness();
     const ambientProfile = currentWorld.ambientProfile;
@@ -1184,7 +1186,7 @@ export class GameController {
         describeRpgEncounterMood(encounter.moodId),
         this.lastTravelContext,
       ),
-      encounterPressureLabel: formatEncounterPressure(encounter.pressure),
+      encounterPressureLabel: scoutResult.pressureLabel,
       encounterFactionLabel: primaryFaction ? describeRpgEncounterFaction(primaryFaction) : "No dominant faction",
       encounterFlavorLabel: encounter.flavorTags.slice(0, 2).map(formatEncounterFlavorTag).join(" • "),
       activePlaceName: activeExplorationHud.activePlaceName,
@@ -2902,9 +2904,9 @@ export class GameController {
     const prompt = target?.prompts.find((candidate) => !candidate.disabled) ?? null;
     if (!target || !prompt) {
       const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
-      const scoutLabel = formatEncounterScoutLabel(encounter);
-      this.lastInteractionLabel = `${scoutLabel}: ${formatEncounterPressure(encounter.pressure)}`;
-      this.status = this.lastInteractionLabel;
+      const scoutResult = describeRpgEncounterScoutResult(encounter);
+      this.lastInteractionLabel = `${scoutResult.label}: ${scoutResult.pressureLabel}`;
+      this.status = scoutResult.detail;
       this.pushHud(true);
       return;
     }
@@ -2955,9 +2957,9 @@ export class GameController {
       activeTravelGoalStepLabel: nextStep?.label ?? (activeGoal?.completed ? "Route complete" : "Find a road sign"),
       activeTravelGoalProgressRatio: activeGoal?.progress ?? 0,
       interactionTargetName: target?.name ?? "No nearby focus",
-      interactionPromptLabel: prompt?.label ?? formatEncounterScoutLabel(encounter),
+      interactionPromptLabel: prompt?.label ?? describeRpgEncounterScoutResult(encounter).label,
       interactionPromptDescription: prompt?.description
-        ?? (target ? `${target.distanceMeters.toFixed(1)} m away` : formatEncounterScoutDescription(encounter, this.lastTravelContext)),
+        ?? (target ? `${target.distanceMeters.toFixed(1)} m away` : describeRpgEncounterScoutResult(encounter).detail),
       interactionPromptVerb: prompt?.verb ?? "inspect",
     };
   }
@@ -4165,44 +4167,11 @@ function routeIdForLandmark(landmarkId: string): string | null {
   return ROUTE_LANDMARK_IDS.has(landmarkId) ? "pilgrim-road" : null;
 }
 
-function formatEncounterPressure(pressure: number): string {
-  if (!Number.isFinite(pressure)) {
-    return "Unknown pressure";
-  }
-  if (pressure >= 0.72) {
-    return "High pressure";
-  }
-  if (pressure >= 0.48) {
-    return "Watchful pressure";
-  }
-  if (pressure >= 0.24) {
-    return "Low pressure";
-  }
-  return "Quiet";
-}
-
 function formatEncounterMoodForTravelContext(moodLabel: string, travelContext: "surface" | "underground"): string {
   if (travelContext === "surface" && moodLabel === "Cave Threshold") {
     return "Cave Rumor";
   }
   return moodLabel;
-}
-
-function formatEncounterScoutLabel(encounter: RpgEncounterSample): string {
-  const moodLabel = describeRpgEncounterMood(encounter.moodId);
-  const faction = encounter.factionHints[0]?.factionId;
-  if (faction) {
-    return `Scout ${describeRpgEncounterFaction(faction)}`;
-  }
-  return `Scout ${moodLabel}`;
-}
-
-function formatEncounterScoutDescription(encounter: RpgEncounterSample, travelContext: "surface" | "underground"): string {
-  const moodLabel = formatEncounterMoodForTravelContext(describeRpgEncounterMood(encounter.moodId), travelContext);
-  const pressure = formatEncounterPressure(encounter.pressure).toLowerCase();
-  const flavor = encounter.flavorTags.slice(0, 2).map(formatEncounterFlavorTag).join(" and ");
-  const regionDetail = flavor ? ` Signs: ${flavor}.` : "";
-  return `${moodLabel}; ${pressure}.${regionDetail}`;
 }
 
 function formatEncounterFlavorTag(tag: string): string {

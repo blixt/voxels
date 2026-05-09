@@ -80,6 +80,13 @@ export interface RpgEncounterSample {
   flavorTags: readonly string[];
 }
 
+export interface RpgEncounterScoutResult {
+  label: string;
+  pressureLabel: string;
+  factionLabel: string;
+  detail: string;
+}
+
 const RPG_ENCOUNTER_MOOD_LABELS: Record<RpgEncounterMoodId, string> = {
   "ash-pilgrimage": "Ash Pilgrimage",
   "ash-wind-watch": "Ash Wind Watch",
@@ -104,6 +111,19 @@ const RPG_ENCOUNTER_FACTION_LABELS: Record<RpgEncounterFactionId, string> = {
   "inner-sea-traders": "Inner Sea Traders",
   "opportunist-bandits": "Road Bandits",
   "wild-beasts": "Wild Beasts",
+};
+
+const RPG_SCOUT_NOTES: Record<RpgEncounterFactionId, string> = {
+  "temple-pilgrims": "Pilgrim marks are fresh enough to trust.",
+  "ashlander-scouts": "Ashlander sign has been cut into the lee side of the stones.",
+  "kwama-brood": "Kwama spoor crosses the ash and vanishes under broken ground.",
+  "marsh-foragers": "Forager traces bend around the wet ground instead of through it.",
+  "salt-causeway-wardens": "Salt wardens have marked the safer crust with low stone teeth.",
+  "glass-cairn-keepers": "Glass keepers have stacked warning shards along the windward edge.",
+  "redleaf-guides": "Guide scratches point toward the ravine shelf and away from loose stone.",
+  "inner-sea-traders": "Trader scuffs and wheel cuts make a readable road through the flats.",
+  "opportunist-bandits": "A few bootprints break away from the road and return behind cover.",
+  "wild-beasts": "Animal tracks cross the trail in nervous, overlapping loops.",
 };
 
 export const RPG_ENCOUNTER_ZONES: readonly RpgEncounterZoneDefinition[] = [
@@ -298,6 +318,37 @@ export function describeRpgEncounterFaction(factionId: RpgEncounterFactionId): s
   return RPG_ENCOUNTER_FACTION_LABELS[factionId];
 }
 
+export function describeRpgEncounterPressure(pressure: number): string {
+  if (!Number.isFinite(pressure)) {
+    return "Unknown pressure";
+  }
+  if (pressure >= 0.72) {
+    return "High pressure";
+  }
+  if (pressure >= 0.48) {
+    return "Watchful pressure";
+  }
+  if (pressure >= 0.24) {
+    return "Low pressure";
+  }
+  return "Quiet";
+}
+
+export function describeRpgEncounterScoutResult(sample: RpgEncounterSample): RpgEncounterScoutResult {
+  const factionId = sample.factionHints[0]?.factionId ?? null;
+  const pressureLabel = describeRpgEncounterPressure(sample.pressure);
+  const moodLabel = describeRpgEncounterMood(sample.moodId);
+  const factionLabel = factionId ? describeRpgEncounterFaction(factionId) : moodLabel;
+  const note = factionId ? RPG_SCOUT_NOTES[factionId] : "No organized trail sign stands out from the weather.";
+  const flavor = sample.flavorTags.slice(0, 2).map(formatFlavorTag).join(" and ");
+  return {
+    label: `Scout ${factionLabel}`,
+    pressureLabel,
+    factionLabel,
+    detail: `${note} ${pressureLabel}.${flavor ? ` Signs: ${flavor}.` : ""}`,
+  };
+}
+
 function routeModifier(
   routeId: AtlasRouteId,
   safety: number,
@@ -371,6 +422,14 @@ function normalizeFactionHints(hints: readonly RpgFactionHint[]): readonly RpgFa
 
 function uniqueStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
+}
+
+function formatFlavorTag(tag: string): string {
+  return tag
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function deterministicSignedJitter(xM: number, zM: number): number {

@@ -2466,10 +2466,12 @@ Build the first "place identity" slice without regressing performance or input:
 - Changes:
   - Made no-target encounter scouting actionable through the same E interaction path.
   - The HUD now prefixes the prompt as `E Scout <dominant faction>` and pressing E updates the player-facing status/last interaction with the current pressure read.
+  - Moved scouting presentation into `rpg-encounters.ts`, so faction pressure now produces reusable field notes instead of one-off HUD strings.
 - Validation:
   - `mise exec -- bun test tests/rpg-ui-cleanup.test.ts tests/rpg-encounters.test.ts`: pass, `12` tests.
   - `mise exec -- bun run typecheck`: pass.
   - Shared in-app browser at `http://localhost:3001/?freshGame=codex-scout-action-check`: before input, HUD showed `E Scout Kwama Brood`; after clicking play and pressing E, HUD/status showed `Scout Kwama Brood: High pressure`.
+  - Shared in-app browser at `http://localhost:3001/?freshGame=codex-scout-note-check`: after pressing E, status showed `Kwama spoor crosses the ash and vanishes under broken ground. High pressure. Signs: Ash Apron and Ravines.`
 - Honest assessment:
   - This is still lightweight RPG feedback rather than full encounter simulation.
   - It makes ambient faction pressure actionable, which is important because the game now gives the player something meaningful to do even between authored landmarks.
