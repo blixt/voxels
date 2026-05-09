@@ -683,3 +683,23 @@ Validation:
   - Reload disk hits: `1295`.
   - Coverage: `0` uncovered gaps, `0` handoff holes, `0` resident overlaps, `0` band overlaps, `0` water overlaps.
   - Worst recent frame: `10.2 ms`; hitch buckets: `0`.
+
+### Follow-up Checkpoint - Clip Mask Foundation
+
+Accepted next foundation:
+
+- Added `src/engine/lod-clip-mask.ts` as a pure 2x2x2 subvoxel ownership mask utility.
+- It deliberately does not touch live renderer behavior yet.
+- The utility defines stable bit positions, none/partial/full classification, clipped-subvoxel checks, and normalized boxes for coarse subcells that remain visible.
+- This is the artifact the next mesher-side clipping patch can use so we stop mutating coarse terrain data to represent render ownership.
+
+Validation:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/lod-clip-mask.test.ts tests/lod-handoff.test.ts tests/procedural-resident-world.test.ts`: pass, `43` tests.
+
+Next renderer target:
+
+- Thread clip masks into the LOD mesh build path as render-only ownership data.
+- Keep `VoxelChunk.data` authoritative and unchanged.
+- Have the mesher skip or subdivide clipped coarse faces based on the mask, then verify with the LOD lab and persistence probes.
