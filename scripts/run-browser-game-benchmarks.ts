@@ -635,6 +635,7 @@ function buildLodPersistencePageHarnessSource(): string {
     buildCurrentLodPersistencePhaseSummary,
     isLodPersistenceSettled,
     summarizeLodCoverageForPersistence,
+    isLodPersistenceCoverageClean,
   ].map((fn) => fn.toString()).join("\n");
 }
 
@@ -801,10 +802,12 @@ async function pumpLodPersistencePhase(
     maxWorstRecentFrameMs = Math.max(maxWorstRecentFrameMs, pump.maxWorstRecentFrameMs);
     maxRecentHitchCount = Math.max(maxRecentHitchCount, pump.maxRecentHitchCount);
     maxRecentDroppedFrameEstimate = Math.max(maxRecentDroppedFrameEstimate, pump.maxRecentDroppedFrameEstimate);
+    const finalCoverage = summarizeLodCoverageForPersistence(game);
+    const settled = pump.settled && isLodPersistenceCoverageClean(finalCoverage);
     const partial = buildLodPersistencePhaseSummary({
       label,
       frameCount,
-      settled: pump.settled,
+      settled,
       elapsedMs: performance.now() - startedAt,
       totalGenerated,
       totalMemoryCacheHits,
@@ -828,7 +831,7 @@ async function pumpLodPersistencePhase(
       maxRecentHitchCount,
       maxRecentDroppedFrameEstimate,
       finalSnapshot,
-      finalCoverage: summarizeLodCoverageForPersistence(game),
+      finalCoverage,
     });
     if (partial.settled && earlyExit(partial)) {
       return partial;
@@ -840,10 +843,11 @@ async function pumpLodPersistencePhase(
     }
   }
 
+  const finalCoverage = summarizeLodCoverageForPersistence(game);
   return buildLodPersistencePhaseSummary({
     label,
     frameCount,
-    settled: isLodPersistenceSettled(finalSnapshot),
+    settled: isLodPersistenceSettled(finalSnapshot) && isLodPersistenceCoverageClean(finalCoverage),
     elapsedMs: performance.now() - startedAt,
     totalGenerated,
     totalMemoryCacheHits,
@@ -867,7 +871,7 @@ async function pumpLodPersistencePhase(
     maxRecentHitchCount,
     maxRecentDroppedFrameEstimate,
     finalSnapshot,
-    finalCoverage: summarizeLodCoverageForPersistence(game),
+    finalCoverage,
   });
 }
 
@@ -1033,6 +1037,14 @@ function summarizeLodCoverageForPersistence(
     uncoveredGapSamples: coverage.uncoveredGapSamples,
     handoffHoleSamples: coverage.handoffHoleSamples,
   };
+}
+
+function isLodPersistenceCoverageClean(coverage: LodPersistencePhaseSummary["finalCoverage"]): boolean {
+  return coverage.uncoveredGapCount === 0
+    && coverage.handoffHoleCount === 0
+    && coverage.residentOverlapCount === 0
+    && coverage.bandOverlapCount === 0
+    && coverage.waterOverlapCount === 0;
 }
 
 function validateLodPersistenceIteration(iteration: LodPersistenceIteration): string[] {
