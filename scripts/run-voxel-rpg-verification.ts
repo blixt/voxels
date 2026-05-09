@@ -9,7 +9,8 @@ import {
 } from "./lib/render-verification-runner.ts";
 import {
   buildVoxelRpgVerificationReport,
-  VOXEL_RPG_VERIFICATION_BUDGETS,
+  resolveVoxelRpgVerificationProfile,
+  type VoxelRpgVerificationProfileId,
 } from "./lib/voxel-rpg-budgets.ts";
 
 interface CliOptions {
@@ -17,11 +18,13 @@ interface CliOptions {
   readonly output: string | null;
   readonly artifactRoot: string;
   readonly useLatestArtifacts: boolean;
+  readonly profile: VoxelRpgVerificationProfileId;
   readonly paths: RenderVerificationArtifactPaths;
 }
 
 const options = parseCli(Bun.argv);
 const generatedAt = new Date().toISOString();
+const profile = resolveVoxelRpgVerificationProfile(options.profile);
 const defaultPaths = options.useLatestArtifacts
   ? await resolveDefaultRenderVerificationArtifactPaths(options.artifactRoot)
   : {};
@@ -31,17 +34,21 @@ const renderVerification = buildRenderVerificationRunnerReport({
   generatedAt,
   label: options.label,
   commit: readGitShortHead(),
-  thresholds: VOXEL_RPG_VERIFICATION_BUDGETS,
+  thresholds: profile.renderThresholds,
   paths,
   artifacts,
 });
-const report = buildVoxelRpgVerificationReport(renderVerification);
+const report = buildVoxelRpgVerificationReport(renderVerification, {
+  profile,
+  liveForwardSamples: artifacts.liveForwardSamples,
+});
 const outputPath = options.output ?? defaultOutputPath(options.artifactRoot, options.label, generatedAt);
 
 await mkdir(dirname(outputPath), { recursive: true });
 await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`);
 
 console.log(`[verify:rpg] report: ${outputPath}`);
+console.log(`[verify:rpg] profile: ${report.profile.id}`);
 console.log(`[verify:rpg] status: ${report.summary.status}`);
 console.log(
   `[verify:rpg] failures correctness/performance/settle/artifact: `
@@ -51,6 +58,9 @@ console.log(
     + `${report.summary.artifactFailures.count}`,
 );
 for (const failure of report.renderVerification.failures) {
+  console.log(`[verify:rpg] ${failure.groupId}.${failure.gateId}: ${failure.message}`);
+}
+for (const failure of report.rpgGateGroups.flatMap((group) => group.failures)) {
   console.log(`[verify:rpg] ${failure.groupId}.${failure.gateId}: ${failure.message}`);
 }
 
@@ -65,6 +75,7 @@ function parseCli(argv: readonly string[]): CliOptions {
     output: readFlag(args, "--output"),
     artifactRoot: readFlag(args, "--artifact-root") ?? "artifacts",
     useLatestArtifacts: readBooleanFlag(args, "--latest-artifacts", true),
+    profile: readProfile(readFlag(args, "--profile")),
     paths: {
       routeAtlasReport: readFlag(args, "--route-atlas-report"),
       liveForwardReport: readFlag(args, "--live-forward-report"),
@@ -73,6 +84,16 @@ function parseCli(argv: readonly string[]): CliOptions {
       viewAtlasReport: readFlag(args, "--view-atlas-report"),
     },
   };
+}
+
+function readProfile(value: string | null): VoxelRpgVerificationProfileId {
+  if (value === null || value === "rpg-render-gate") {
+    return "rpg-render-gate";
+  }
+  if (value === "rpg-render-smoke") {
+    return "rpg-render-smoke";
+  }
+  throw new Error(`Unsupported --profile value: ${value}`);
 }
 
 function mergePaths(

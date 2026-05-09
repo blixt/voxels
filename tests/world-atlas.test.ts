@@ -4,8 +4,14 @@ import {
   WORLD_ATLAS,
   atlasMetersToWorldUnits,
   atlasWorldUnitsToMeters,
+  estimateAtlasRegionEllipseAreaM2,
+  getAtlasCaveAnchors,
+  getAtlasRegionGraph,
+  getAtlasRouteAnchors,
+  sampleAtlasCaveAnchorMeters,
   sampleAtlasRouteMeters,
   sampleWorldAtlasMeters,
+  type AtlasCaveSystemId,
   type AtlasRegionId,
   type AtlasRouteId,
 } from "../src/engine/world-atlas.ts";
@@ -71,6 +77,15 @@ const EXPECTED_ROUTE_IDS = [
   "glass-coastal-cairns",
 ] as const satisfies readonly AtlasRouteId[];
 
+const EXPECTED_CAVE_SYSTEM_IDS = [
+  "red-caldera-tubes",
+  "ash-kwama-ravines",
+  "bitter-root-grottos",
+  "west-gash-ravine-caves",
+  "glass-crystal-caverns",
+  "salt-crust-sinkholes",
+] as const satisfies readonly AtlasCaveSystemId[];
+
 test("world atlas defines the eight authored macro regions", () => {
   expect(WORLD_ATLAS.version).toBe("20260509-wave1-atlas-foundation");
   expect(WORLD_ATLAS.regions).toHaveLength(8);
@@ -91,6 +106,24 @@ test("world atlas defines the eight initial authored routes", () => {
   }
 });
 
+test("world atlas defines deterministic cave anchor systems", () => {
+  expect(WORLD_ATLAS.caveSystems.map((caveSystem) => caveSystem.id)).toEqual(Array.from(EXPECTED_CAVE_SYSTEM_IDS));
+
+  for (const caveSystem of WORLD_ATLAS.caveSystems) {
+    expect(caveSystem.anchors.length).toBeGreaterThanOrEqual(3);
+    expect(caveSystem.tunnels.length).toBeGreaterThanOrEqual(2);
+    expect(caveSystem.expectedRouteIds.length).toBeGreaterThanOrEqual(1);
+    expect(caveSystem.materialProfileId.length).toBeGreaterThan(0);
+
+    const anchorIds = new Set(caveSystem.anchors.map((anchor) => anchor.id));
+    for (const tunnel of caveSystem.tunnels) {
+      expect(anchorIds.has(tunnel.from)).toBe(true);
+      expect(anchorIds.has(tunnel.to)).toBe(true);
+      expect(tunnel.widthM).toBeGreaterThan(0);
+    }
+  }
+});
+
 test("region centers sample their expected primary metadata", () => {
   for (const region of WORLD_ATLAS.regions) {
     const sample = sampleWorldAtlasMeters(region.center.x, region.center.z);
@@ -103,6 +136,27 @@ test("region centers sample their expected primary metadata", () => {
     expect(sample.ambientProfileId).toBe(expected.ambientProfileId);
     expect(sample.islandInterior).toBeGreaterThan(0.8);
     expect(sample.surfaceClass).toBe("land");
+  }
+});
+
+test("region graph exposes stable centers, edges, routes, caves, and meaningful area", () => {
+  const graph = getAtlasRegionGraph();
+
+  expect(graph.map((node) => node.regionId)).toEqual(WORLD_ATLAS.regions.map((region) => region.id));
+  for (const node of graph) {
+    const region = WORLD_ATLAS.regions.find((candidate) => candidate.id === node.regionId)!;
+
+    expect(node.center).toEqual(region.center);
+    expect(node.radius).toEqual(region.radius);
+    expect(node.approximateEllipseAreaM2).toBeCloseTo(estimateAtlasRegionEllipseAreaM2(region), 5);
+    expect(node.approximateEllipseAreaM2).toBeGreaterThan(3_000_000);
+    expect(node.edgeIds.length).toBeGreaterThanOrEqual(1);
+    expect(node.routeIds.length).toBeGreaterThanOrEqual(1);
+  }
+
+  const graphedCaveSystemIds = new Set(graph.flatMap((node) => node.caveSystemIds));
+  for (const caveSystem of WORLD_ATLAS.caveSystems) {
+    expect(graphedCaveSystemIds.has(caveSystem.id)).toBe(true);
   }
 });
 
@@ -134,6 +188,42 @@ test("each region owns at least seventy percent of its inner ellipse", () => {
   }
 });
 
+test("finite island grid has bounded land and no biome leakage outside low interior", () => {
+  const { origin, radius } = WORLD_ATLAS.island;
+  const steps = 64;
+  let landSamples = 0;
+  let outsideSamples = 0;
+  let outsideOceanSamples = 0;
+  const regionHits = new Map<AtlasRegionId, number>();
+
+  for (let xStep = 0; xStep < steps; xStep += 1) {
+    for (let zStep = 0; zStep < steps; zStep += 1) {
+      const xM = origin.x - radius.x + (xStep / (steps - 1)) * radius.x * 2;
+      const zM = origin.z - radius.z + (zStep / (steps - 1)) * radius.z * 2;
+      const sample = sampleWorldAtlasMeters(xM, zM);
+
+      if (sample.islandInterior >= 0.08) {
+        landSamples += 1;
+        if (sample.primaryRegionId) {
+          regionHits.set(sample.primaryRegionId, (regionHits.get(sample.primaryRegionId) ?? 0) + 1);
+        }
+      } else {
+        outsideSamples += 1;
+        if (sample.primaryBiomeId === "ocean" || sample.primaryBiomeId === "deep-ocean") {
+          outsideOceanSamples += 1;
+        }
+      }
+    }
+  }
+
+  expect(landSamples).toBeGreaterThan(steps * steps * 0.55);
+  expect(landSamples).toBeLessThan(steps * steps * 0.9);
+  expect(outsideOceanSamples).toBe(outsideSamples);
+  for (const region of WORLD_ATLAS.regions) {
+    expect(regionHits.get(region.id) ?? 0).toBeGreaterThan(40);
+  }
+});
+
 test("outside the finite island returns ocean classifications instead of land biomes", () => {
   const { origin, radius } = WORLD_ATLAS.island;
   const waterSamples = [
@@ -159,6 +249,28 @@ test("outside the finite island returns ocean classifications instead of land bi
   }
 });
 
+test("route anchor helper returns deterministic route nodes and validation anchors", () => {
+  const anchors = getAtlasRouteAnchors();
+  const expectedCount = WORLD_ATLAS.routes.reduce((count, route) => count + route.nodes.length + 1, 0);
+
+  expect(anchors).toHaveLength(expectedCount);
+  expect(anchors.map((anchor) => anchor.routeId).slice(0, 6)).toEqual([
+    "pilgrim-spine-red",
+    "pilgrim-spine-red",
+    "pilgrim-spine-red",
+    "pilgrim-spine-red",
+    "pilgrim-spine-red",
+    "pilgrim-spine-red",
+  ]);
+
+  for (const anchor of anchors) {
+    const sample = sampleWorldAtlasMeters(anchor.point.x, anchor.point.z);
+
+    expect(sample.surfaceClass).toBe("land");
+    expect(sample.islandInterior).toBeGreaterThan(0.08);
+  }
+});
+
 test("authored region-edge anchors expose plausible secondary regions", () => {
   for (const edge of WORLD_ATLAS.regionEdges) {
     const sample = sampleWorldAtlasMeters(edge.validationAnchor.x, edge.validationAnchor.z);
@@ -171,6 +283,28 @@ test("authored region-edge anchors expose plausible secondary regions", () => {
     expect(sample.secondaryRegionId).not.toBeNull();
     expect(sample.primaryRegionId).not.toBe(sample.secondaryRegionId);
     expect(sample.regionBlend).toBeGreaterThan(0.2);
+  }
+});
+
+test("cave anchors stay on finite island land and sample their owning cave system", () => {
+  const anchors = getAtlasCaveAnchors();
+  expect(anchors).toHaveLength(WORLD_ATLAS.caveSystems.reduce((count, caveSystem) => count + caveSystem.anchors.length, 0));
+
+  for (const anchor of anchors) {
+    const worldSample = sampleWorldAtlasMeters(anchor.point.x, anchor.point.z);
+    const caveSample = sampleAtlasCaveAnchorMeters(anchor.point.x, anchor.point.z);
+    const sampledRegions = new Set([worldSample.primaryRegionId, worldSample.secondaryRegionId]);
+
+    expect(worldSample.surfaceClass).toBe("land");
+    expect(worldSample.islandInterior).toBeGreaterThan(0.08);
+    expect(sampledRegions.has(anchor.regionId)).toBe(true);
+    expect(caveSample.caveSystemId).toBe(anchor.caveSystemId);
+    expect(caveSample.caveAnchorId).toBe(anchor.id);
+    expect(caveSample.caveAnchorKind).toBe(anchor.kind);
+    expect(caveSample.distanceToCaveAnchorM).toBeCloseTo(0, 8);
+    expect(caveSample.caveCore).toBe(1);
+    expect(caveSample.caveInfluence).toBe(1);
+    expect(caveSample.caveLandmarkMarkerIds).toEqual(anchor.landmarkMarkerIds);
   }
 });
 

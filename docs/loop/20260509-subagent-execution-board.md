@@ -284,3 +284,99 @@ Every accepted checkpoint must record:
 - screenshots/contact sheets for visual changes;
 - diary update with rubric delta;
 - commit and push.
+
+## 2026-05-09 Regroup After Canonical Cache Checkpoint
+
+Checkpoint landed:
+
+- `a883d83 Use canonical keys for chunk cache`
+- The browser IndexedDB generated chunk cache now writes canonical keys and metadata while preserving legacy read fallback.
+- This does not complete canonical terrain authority yet. It only makes stored generated chunks easier to address and validate.
+
+Subagent planning synthesis:
+
+- Engine/LOD/storage: the durable authority must be `procedural base chunk + persisted edit journal + live overlay`; summaries and LOD remain derived artifacts.
+- Verification/tooling: subagents need one fresh evidence bundle command and hard hitch/LOD gates before their work can be trusted.
+- World/gameplay/art: bold island and RPG changes should start as pure atlas/data/gameplay modules, then integrate after render/storage gates are clean.
+
+### Current Critical Path
+
+`P1` replaces the older `R0` label. It is still render/storage-first:
+
+1. `P1-A`: expose canonical chunk records and edit journals through the browser cache API.
+2. `P1-B`: persist chunk-scoped edit journals and replay them into an effective canonical chunk.
+3. `P1-C`: make worker-derived LOD consume effective canonical chunks or a revision-validated snapshot, never a divergent generator shortcut.
+4. `P1-D`: prove LOD handoff in the browser with zero visible gaps/overlaps and no blank transition while a higher-detail chunk is loading.
+5. `P1-E`: add warm/cold/edit reload gates that distinguish canonical chunk hits from derived LOD cache hits.
+
+Acceptance for leaving `P1`:
+
+- `typecheck` passes.
+- Focused canonical store, edit journal, LOD handoff, and mesher tests pass.
+- `bench:lod-persistence` default and far probes report:
+  - `0` uncovered gaps,
+  - `0` handoff holes,
+  - `0` resident overlaps,
+  - `0` band overlaps,
+  - `0` water overlaps.
+- Edited voxel/chunk state survives reload and affects the active LOD for that footprint.
+- Any remaining pending-generation counts are reported as settle backlog, not hidden correctness proof.
+
+### Active Assignment Board
+
+| Owner | Task | Write Scope | Dependency | Status |
+| --- | --- | --- | --- | --- |
+| Self | `P1-A/P1-B` integration: browser cache canonical API, edit journal persistence boundary, parent review of all worker output | `src/client/procedural-generated-chunk-cache.ts`, `src/client/procedural-deferred-persistence.ts`, `src/engine/procedural-resident-world.ts`, persistence/LOD tests, diary | current clean branch | active |
+| Verification worker | `V1`: fresh evidence bundle and hitch gates | `scripts/lib/voxel-rpg-budgets.ts`, `scripts/run-voxel-rpg-verification.ts`, render/RPG verifier tests, optional new script helpers | none | assign now |
+| LOD lab worker | `L1`: artificial-world LOD browser/test scenarios for one-owner handoff, edit propagation, and smooth field seams | `src/engine/lod-debug-world.ts`, `tests/lod-debug-world.test.ts`, optional `scripts/diagnose-lod-coverage.ts` | none, but no production renderer edits | assign now |
+| World atlas worker | `W1`: pure finite island atlas, macro region graph, route/cave anchors, no generator integration | `src/engine/world-atlas.ts`, `tests/world-atlas.test.ts`, `docs/loop/20260509-world-atlas-design.md` | none | assign after a worker slot is free |
+| Gameplay worker | `G1`: pure interaction/travel/skill events, no controller or HUD integration | `src/engine/exploration-interactions.ts`, `src/engine/travel-goals.ts`, `src/engine/skill-journal.ts`, related tests | none | assign after a worker slot is free |
+| Art/content worker | `D1`: object-lab family budgets and golden-view acceptance profiles | `scripts/object-lab.ts`, `tests/object-lab.test.ts`, `scripts/capture-view-atlas.ts`, `tests/view-atlas-budgets.test.ts` | verification budget conventions | queued |
+
+Parallel-safe right now:
+
+- `V1` and `L1` can run while self works on `P1-A/P1-B`.
+- `W1` and `G1` are safe only if kept pure and out of the live generator/controller.
+- `D1` should wait until verification budget conventions are stable enough to avoid inventing different pass/fail semantics.
+
+Blocked until `P1` acceptance:
+
+- production generator island rewrite;
+- HUD/controller integration;
+- prop/atmosphere integration into the live game loop;
+- NPC/mob runtime simulation;
+- any change that makes screenshots look better by hiding LOD/fog/correctness failures.
+
+### Checkpoint - P1 Support Tools And Pure Atlas
+
+Accepted in this checkpoint:
+
+- Browser cache now exposes canonical chunk read/write methods in addition to the legacy `getChunk`/`putChunk` compatibility path.
+- Browser cache schema now includes `chunk_edit_journals`.
+- Edit journal persistence has a pure record builder that merges existing deltas with appended deltas, validates append revision, and uses canonical edit-journal keys.
+- RPG verification now has named profiles, stale/commit-mismatch artifact checks, and live-forward hitch aggregation separated from render correctness gates.
+- LOD lab now has a smooth sinusoidal field fixture plus seam/ownership analysis, so chunk-edge discontinuities and multi-owner/ownerless columns are easier to catch in pure tests.
+- WorldAtlas now contains pure cave-system anchors, route anchors, region graph helpers, and area estimates without touching the production generator.
+
+Validation:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/procedural-generated-chunk-cache.test.ts tests/canonical-chunk-store.test.ts tests/chunk-edit-journal.test.ts tests/procedural-deferred-persistence.test.ts tests/lod-debug-world.test.ts tests/lod-handoff.test.ts tests/frame-timing-buckets.test.ts tests/render-verification-runner.test.ts tests/voxel-rpg-budgets.test.ts tests/voxel-rpg-verification-runner.test.ts tests/world-atlas.test.ts`: pass, `68` tests.
+- `mise exec -- bun run bench:lod-persistence -- --label=p1-cache-journal-lod-lab-retry`: pass.
+  - Artifact: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-KlfGIJ/lod-idb-persistence-reload.json`
+  - Reload disk hits: `1277`.
+  - First failure: `n/a`.
+
+Rejected/observed:
+
+- First browser run, `p1-cache-journal-lod-lab`, failed with `16` cold-origin uncovered LOD sample gaps despite `pending=0`.
+  - Artifact: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-L6eGx3/lod-idb-persistence-reload.json`
+  - Samples were near the origin and had no owner chunks, matching the earlier cold-origin coverage flake/failure category.
+  - This remains a real P1 blocker. The retry only proves the cache schema/edit-journal boundary did not deterministically break reload persistence.
+
+Next:
+
+1. Add repeat/flaky cold-origin coverage detection so a single retry cannot hide ownerless samples.
+2. Wire persisted edit journals into the worker/deferred persistence flow.
+3. Build an effective canonical chunk source that replays persisted edit journals before any LOD derivation.
+4. Keep WorldAtlas generator integration blocked until the LOD coverage flake/failure has a deterministic fix.

@@ -32,6 +32,68 @@ export interface LodDebugCoverageReport {
   pendingChunks: number;
 }
 
+export interface LodDebugSmoothColumnFixture {
+  x: number;
+  z: number;
+  topY: number;
+  surfaceMaterial: number;
+}
+
+export interface LodDebugColumnOwner {
+  key: string;
+  level: number;
+  coord: { x: number; y: number; z: number };
+  stride: number;
+  topY: number | null;
+  material: number;
+}
+
+export interface LodDebugActiveColumnSample {
+  x: number;
+  z: number;
+  owners: LodDebugColumnOwner[];
+  ownerCount: number;
+  topY: number | null;
+  material: number;
+  expectedTopY: number;
+  expectedSurfaceMaterial: number;
+  maxOwnerStride: number;
+}
+
+export interface LodDebugSmoothSeamReport {
+  checkedColumns: number;
+  checkedEdges: number;
+  ownerlessColumns: number;
+  multiOwnerColumns: number;
+  emptyColumns: number;
+  surfaceErrorColumns: number;
+  discontinuousEdges: number;
+  maxSurfaceError: number;
+  maxAdjacentSurfaceDelta: number;
+  maxExpectedAdjacentSurfaceDelta: number;
+}
+
+export interface LodDebugSmoothSeamOptions {
+  edgeStep?: number;
+  maxSurfaceError?: number;
+  maxAdjacentSurfaceDelta?: number;
+}
+
+export const LOD_DEBUG_SMOOTH_FIELD_FIXTURES: readonly LodDebugSmoothColumnFixture[] = [
+  { x: -33, z: -17, topY: 7, surfaceMaterial: LOD_DEBUG_MATERIAL.mid },
+  { x: -32, z: -17, topY: 7, surfaceMaterial: LOD_DEBUG_MATERIAL.mid },
+  { x: -1, z: 0, topY: 11, surfaceMaterial: LOD_DEBUG_MATERIAL.ridge },
+  { x: 0, z: 0, topY: 11, surfaceMaterial: LOD_DEBUG_MATERIAL.ridge },
+  { x: 15, z: 8, topY: 14, surfaceMaterial: LOD_DEBUG_MATERIAL.ridge },
+  { x: 16, z: 8, topY: 14, surfaceMaterial: LOD_DEBUG_MATERIAL.ridge },
+  { x: 31, z: 8, topY: 14, surfaceMaterial: LOD_DEBUG_MATERIAL.ridge },
+  { x: 32, z: 8, topY: 14, surfaceMaterial: LOD_DEBUG_MATERIAL.ridge },
+  { x: 63, z: 64, topY: 10, surfaceMaterial: LOD_DEBUG_MATERIAL.ridge },
+  { x: 64, z: 64, topY: 10, surfaceMaterial: LOD_DEBUG_MATERIAL.ridge },
+  { x: 95, z: -32, topY: 9, surfaceMaterial: LOD_DEBUG_MATERIAL.high },
+  { x: 96, z: -32, topY: 9, surfaceMaterial: LOD_DEBUG_MATERIAL.high },
+];
+
 type LodChunkKey = `L${number}:${number}:${number}:${number}`;
 
 interface ParsedLodChunkKey {
@@ -71,6 +133,152 @@ export class LodDebugWorld implements ResidentChunkWorld {
 
   getVoxel(x: number, y: number, z: number): number {
     return this.sampleBaseMaterial(Math.floor(x), Math.floor(y), Math.floor(z), LOD_DEBUG_MATERIAL.lod0);
+  }
+
+  sampleSmoothColumn(x: number, z: number): LodDebugSmoothColumnFixture {
+    const sampleX = Math.floor(x);
+    const sampleZ = Math.floor(z);
+    const topY = sampleSmoothDebugHeight(sampleX, sampleZ);
+    return {
+      x: sampleX,
+      z: sampleZ,
+      topY,
+      surfaceMaterial: sampleSmoothDebugSurfaceMaterial(sampleX, sampleZ, topY),
+    };
+  }
+
+  sampleActiveColumn(x: number, z: number): LodDebugActiveColumnSample {
+    const sampleX = Math.floor(x);
+    const sampleZ = Math.floor(z);
+    const expected = this.sampleSmoothColumn(sampleX, sampleZ);
+    const owners: LodDebugColumnOwner[] = [];
+    for (const key of [...this.activeKeys].sort(compareLodChunkKeys)) {
+      const owner = this.sampleActiveColumnOwner(key, sampleX, sampleZ);
+      if (owner) {
+        owners.push(owner);
+      }
+    }
+    const soleOwner = owners.length === 1 ? owners[0]! : null;
+    return {
+      x: sampleX,
+      z: sampleZ,
+      owners,
+      ownerCount: owners.length,
+      topY: soleOwner?.topY ?? null,
+      material: soleOwner?.material ?? 0,
+      expectedTopY: expected.topY,
+      expectedSurfaceMaterial: expected.surfaceMaterial,
+      maxOwnerStride: owners.reduce((maxStride, owner) => Math.max(maxStride, owner.stride), 1),
+    };
+  }
+
+  analyzeSmoothFieldSeams(
+    request: LodDebugCoverageRequest,
+    options: LodDebugSmoothSeamOptions = {},
+  ): LodDebugSmoothSeamReport {
+    const edgeStep = Math.max(1, Math.floor(options.edgeStep ?? this.chunkSize / 4));
+    const maxSurfaceError = options.maxSurfaceError ?? 2;
+    const maxAdjacentSurfaceDelta = options.maxAdjacentSurfaceDelta ?? 3;
+    const { minBaseCx, maxBaseCx, minBaseCz, maxBaseCz } = resolveCoverageBaseRect(request);
+    const minWorldX = minBaseCx * this.chunkSize;
+    const maxWorldXExclusive = (maxBaseCx + 1) * this.chunkSize;
+    const minWorldZ = minBaseCz * this.chunkSize;
+    const maxWorldZExclusive = (maxBaseCz + 1) * this.chunkSize;
+    const columnKeys = new Set<string>();
+    const edgePairs: Array<readonly [string, string]> = [];
+
+    const addColumn = (x: number, z: number): string => {
+      const key = toVoxelKey(x, 0, z);
+      columnKeys.add(key);
+      return key;
+    };
+
+    for (let baseCx = minBaseCx + 1; baseCx <= maxBaseCx; baseCx += 1) {
+      const x = baseCx * this.chunkSize;
+      for (let z = minWorldZ; z < maxWorldZExclusive; z += edgeStep) {
+        edgePairs.push([addColumn(x - 1, z), addColumn(x, z)]);
+      }
+    }
+    for (let baseCz = minBaseCz + 1; baseCz <= maxBaseCz; baseCz += 1) {
+      const z = baseCz * this.chunkSize;
+      for (let x = minWorldX; x < maxWorldXExclusive; x += edgeStep) {
+        edgePairs.push([addColumn(x, z - 1), addColumn(x, z)]);
+      }
+    }
+    for (const fixture of LOD_DEBUG_SMOOTH_FIELD_FIXTURES) {
+      if (
+        fixture.x >= minWorldX
+        && fixture.x < maxWorldXExclusive
+        && fixture.z >= minWorldZ
+        && fixture.z < maxWorldZExclusive
+      ) {
+        addColumn(fixture.x, fixture.z);
+      }
+    }
+
+    const samples = new Map<string, LodDebugActiveColumnSample>();
+    let ownerlessColumns = 0;
+    let multiOwnerColumns = 0;
+    let emptyColumns = 0;
+    let surfaceErrorColumns = 0;
+    let reportMaxSurfaceError = 0;
+
+    for (const key of columnKeys) {
+      const [xText, , zText] = key.split(":");
+      const sample = this.sampleActiveColumn(Number.parseInt(xText!, 10), Number.parseInt(zText!, 10));
+      samples.set(key, sample);
+      if (sample.ownerCount === 0) {
+        ownerlessColumns += 1;
+        continue;
+      }
+      if (sample.ownerCount > 1) {
+        multiOwnerColumns += 1;
+        continue;
+      }
+      if (sample.topY === null) {
+        emptyColumns += 1;
+        continue;
+      }
+      const surfaceError = Math.abs(sample.topY - sample.expectedTopY);
+      reportMaxSurfaceError = Math.max(reportMaxSurfaceError, surfaceError);
+      if (surfaceError > Math.max(maxSurfaceError, sample.maxOwnerStride)) {
+        surfaceErrorColumns += 1;
+      }
+    }
+
+    let checkedEdges = 0;
+    let discontinuousEdges = 0;
+    let reportMaxAdjacentSurfaceDelta = 0;
+    let reportMaxExpectedAdjacentSurfaceDelta = 0;
+    for (const [leftKey, rightKey] of edgePairs) {
+      const left = samples.get(leftKey);
+      const right = samples.get(rightKey);
+      if (!left || !right || left.topY === null || right.topY === null || left.ownerCount !== 1 || right.ownerCount !== 1) {
+        continue;
+      }
+      checkedEdges += 1;
+      const activeDelta = Math.abs(left.topY - right.topY);
+      const expectedDelta = Math.abs(left.expectedTopY - right.expectedTopY);
+      const allowedDelta = expectedDelta + Math.max(maxAdjacentSurfaceDelta, left.maxOwnerStride, right.maxOwnerStride);
+      reportMaxAdjacentSurfaceDelta = Math.max(reportMaxAdjacentSurfaceDelta, activeDelta);
+      reportMaxExpectedAdjacentSurfaceDelta = Math.max(reportMaxExpectedAdjacentSurfaceDelta, expectedDelta);
+      if (activeDelta > allowedDelta) {
+        discontinuousEdges += 1;
+      }
+    }
+
+    return {
+      checkedColumns: columnKeys.size,
+      checkedEdges,
+      ownerlessColumns,
+      multiOwnerColumns,
+      emptyColumns,
+      surfaceErrorColumns,
+      discontinuousEdges,
+      maxSurfaceError: reportMaxSurfaceError,
+      maxAdjacentSurfaceDelta: reportMaxAdjacentSurfaceDelta,
+      maxExpectedAdjacentSurfaceDelta: reportMaxExpectedAdjacentSurfaceDelta,
+    };
   }
 
   getPaletteColor(materialIndex: number): PackedColor {
@@ -378,6 +586,44 @@ export class LodDebugWorld implements ResidentChunkWorld {
     return fallback;
   }
 
+  private sampleActiveColumnOwner(key: LodChunkKey, worldX: number, worldZ: number): LodDebugColumnOwner | null {
+    const parsed = parseLodChunkKey(key);
+    const chunk = this.chunks.get(key);
+    if (!parsed || !chunk) {
+      return null;
+    }
+    const stride = 1 << parsed.level;
+    const worldSize = this.chunkSize * stride;
+    const localX = Math.floor((worldX - parsed.cx * worldSize) / stride);
+    const localZ = Math.floor((worldZ - parsed.cz * worldSize) / stride);
+    if (localX < 0 || localX >= this.chunkSize || localZ < 0 || localZ >= this.chunkSize) {
+      return null;
+    }
+    const chunkArea = this.chunkSize * this.chunkSize;
+    for (let localY = this.chunkSize - 1; localY >= 0; localY -= 1) {
+      const material = chunk.data[localX + localY * this.chunkSize + localZ * chunkArea] ?? 0;
+      if (material === 0) {
+        continue;
+      }
+      return {
+        key,
+        level: parsed.level,
+        coord: { x: parsed.cx, y: parsed.cy, z: parsed.cz },
+        stride,
+        topY: (parsed.cy * this.chunkSize + localY) * stride + stride - 1,
+        material,
+      };
+    }
+    return {
+      key,
+      level: parsed.level,
+      coord: { x: parsed.cx, y: parsed.cy, z: parsed.cz },
+      stride,
+      topY: null,
+      material: 0,
+    };
+  }
+
   private sampleBaseMaterial(x: number, y: number, z: number, defaultMaterial: number): number {
     const edit = this.editMaterials.get(toVoxelKey(x, y, z));
     if (edit !== undefined) {
@@ -586,13 +832,13 @@ function sampleSmoothDebugHeight(x: number, z: number): number {
   const diagonalWave = Math.sin((x + z) * 0.023) * 3.4
     + Math.cos((x - z) * 0.029) * 2.6;
   const microWave = Math.sin(x * 0.097 + z * 0.031) * 1.2;
-  return Math.max(2, Math.min(24, Math.round(11 + longWave + diagonalWave + microWave)));
+  return Math.max(2, Math.min(14, Math.round(8 + (longWave + diagonalWave + microWave) * 0.45)));
 }
 
 function sampleSmoothDebugSurfaceMaterial(x: number, z: number, height: number): number {
   const field = Math.sin(x * 0.018 + z * 0.011)
     + Math.cos(x * 0.013 - z * 0.017)
-    + (height - 11) * 0.12;
+    + (height - 8) * 0.16;
   if (field < -0.70) {
     return LOD_DEBUG_MATERIAL.low;
   }
@@ -616,6 +862,26 @@ function chunkCoversBaseColumn(key: LodChunkKey, baseCx: number, baseCz: number,
   const minBaseCz = parsed.cz * stride;
   const maxBaseCz = Math.floor(((parsed.cz + 1) * chunkSize * stride - 1) / chunkSize);
   return baseCx >= minBaseCx && baseCx <= maxBaseCx && baseCz >= minBaseCz && baseCz <= maxBaseCz;
+}
+
+function resolveCoverageBaseRect(request: LodDebugCoverageRequest): {
+  minBaseCx: number;
+  maxBaseCx: number;
+  minBaseCz: number;
+  maxBaseCz: number;
+} {
+  const centerLod1X = Math.floor(request.centerChunkX / 2);
+  const centerLod1Z = Math.floor(request.centerChunkZ / 2);
+  const minLod1X = centerLod1X - request.farRadiusLod1Chunks;
+  const maxLod1X = centerLod1X + request.farRadiusLod1Chunks;
+  const minLod1Z = centerLod1Z - request.farRadiusLod1Chunks;
+  const maxLod1Z = centerLod1Z + request.farRadiusLod1Chunks;
+  return {
+    minBaseCx: minLod1X * 2,
+    maxBaseCx: maxLod1X * 2 + 1,
+    minBaseCz: minLod1Z * 2,
+    maxBaseCz: maxLod1Z * 2 + 1,
+  };
 }
 
 function chunksOverlap(leftKey: LodChunkKey, rightKey: LodChunkKey): boolean {

@@ -13,6 +13,24 @@ The target is a huge Morrowind-like island with coherent regions, macro terrain,
 - Do not add new biome IDs just to create variety. Prefer region directors, route/cave graphs, and landmark rosters first.
 - Do not make derived LOD or summaries authoritative world data.
 
+## Wave 1 Pure Checkpoint
+
+Implemented as a narrow, pure atlas layer in `src/engine/world-atlas.ts` with focused tests in `tests/world-atlas.test.ts`.
+
+Scope included:
+
+- finite island mask sampling with deterministic land, shoreline, coastal shelf, and deep ocean classification;
+- eight macro region definitions with stable centers, ellipse area estimates, explicit edge graph membership, route membership, and cave membership helpers;
+- route anchor extraction for authored route nodes and validation anchors;
+- six initial cave systems with deterministic entrance/chamber/overlook anchors, tunnel links, material profiles, expected nearby routes, and cave-anchor sampling;
+- tests for region centers, meaningful region area, island grid finiteness, outside-island ocean identity, region-edge anchors, route anchors, and cave anchors.
+
+Scope deliberately excluded:
+
+- procedural generator sampling or chunk generation changes;
+- route terrain conforming, cave carving, or landmark placement;
+- renderer, controller, browser scripts, persistence, and package metadata changes.
+
 ## Coordinate System
 
 ### Units
@@ -69,6 +87,7 @@ interface WorldAtlas {
   version: string;
   island: IslandEnvelope;
   regions: RegionDefinition[];
+  regionEdges: RegionEdgeDefinition[];
   macroTerrain: MacroTerrainDefinition;
   routes: RouteDefinition[];
   caveSystems: CaveSystemDefinition[];
@@ -350,6 +369,8 @@ Use graph-first carving:
 - local cave noise for edge breakup;
 - entrance orientation and dry-surface validation;
 - region-specific material lining.
+
+Wave 1 only defines cave-system anchors and tunnel intent. The anchors are dry-land, region-owned data that future generator work can use for entrance placement and tunnel carving; they do not carve chunks yet.
 
 Acceptance:
 
