@@ -50,6 +50,8 @@ interface CliOptions {
   lodPersistenceIterations: number;
   lodPersistenceTimeoutMs: number;
   lodPersistenceMaxFrames: number;
+  lodPersistenceFarMaxFrames: number | null;
+  lodPersistenceStoreMaxFrames: number | null;
   lodPersistenceChunkDelta: number;
 }
 
@@ -456,6 +458,8 @@ await withBrowserGameSession({
       lodPersistenceIterations: options.lodPersistenceIterations,
       lodPersistenceTimeoutMs: options.lodPersistenceTimeoutMs,
       lodPersistenceMaxFrames: options.lodPersistenceMaxFrames,
+      lodPersistenceFarMaxFrames: options.lodPersistenceFarMaxFrames,
+      lodPersistenceStoreMaxFrames: options.lodPersistenceStoreMaxFrames,
       lodPersistenceChunkDelta: options.lodPersistenceChunkDelta,
       viewportWidth: options.viewportWidth,
       viewportHeight: options.viewportHeight,
@@ -500,6 +504,8 @@ function parseCli(argv: readonly string[]): CliOptions {
     lodPersistenceIterations: readNonNegativeInt(readFlag(args, "--lod-persistence-iterations"), 0),
     lodPersistenceTimeoutMs: readPositiveInt(readFlag(args, "--lod-persistence-timeout-ms"), 180_000),
     lodPersistenceMaxFrames: readPositiveInt(readFlag(args, "--lod-persistence-max-frames"), 240),
+    lodPersistenceFarMaxFrames: readOptionalPositiveInt(readFlag(args, "--lod-persistence-far-max-frames")),
+    lodPersistenceStoreMaxFrames: readOptionalPositiveInt(readFlag(args, "--lod-persistence-store-max-frames")),
     lodPersistenceChunkDelta: readNonNegativeInt(readFlag(args, "--lod-persistence-chunk-delta"), 0),
   };
 }
@@ -524,6 +530,8 @@ async function runLodPersistenceScenario(
       session,
       buildLodPersistencePopulateExpression({
         maxFrames: options.lodPersistenceMaxFrames,
+        farMaxFrames: options.lodPersistenceFarMaxFrames,
+        storeMaxFrames: options.lodPersistenceStoreMaxFrames,
         chunkDelta: options.lodPersistenceChunkDelta,
       }),
       options.lodPersistenceTimeoutMs,
@@ -597,6 +605,8 @@ async function evaluateWithTimeout<T>(
 
 function buildLodPersistencePopulateExpression(options: {
   maxFrames: number;
+  farMaxFrames: number | null;
+  storeMaxFrames: number | null;
   chunkDelta: number;
 }): string {
   return `(async () => {
@@ -630,6 +640,8 @@ function buildLodPersistencePageHarnessSource(): string {
 
 async function lodPersistencePopulatePageProbe(rawOptions: {
   maxFrames: number;
+  farMaxFrames: number | null;
+  storeMaxFrames: number | null;
   chunkDelta: number;
 }): Promise<Omit<LodPersistenceIteration, "iteration" | "reloadOrigin" | "pass" | "failures">> {
   const game = window.__VOXELS_GAME__;
@@ -650,13 +662,19 @@ async function lodPersistencePopulatePageProbe(rawOptions: {
       originPosition[2] + chunkSize * chunkDelta,
     ];
     const maxFrames = Math.max(1, Math.floor(rawOptions.maxFrames));
+    const farMaxFrames = rawOptions.farMaxFrames === null
+      ? maxFrames
+      : Math.max(1, Math.floor(rawOptions.farMaxFrames));
+    const storeMaxFrames = rawOptions.storeMaxFrames === null
+      ? maxFrames
+      : Math.max(1, Math.floor(rawOptions.storeMaxFrames));
     const coldOrigin = await driveLodPersistencePhase(game, "cold-origin", originPosition, maxFrames, () => false);
-    const farEviction = chunkDelta > 0
-      ? await driveLodPersistencePhase(game, "far-eviction", farPosition, maxFrames, () => false)
-      : buildCurrentLodPersistencePhaseSummary(game, "far-eviction-skipped");
-    const storeFlush = await pumpLodPersistencePhase(game, "store-flush", maxFrames, (phase) =>
+    const storeFlush = await pumpLodPersistencePhase(game, "store-flush", storeMaxFrames, (phase) =>
       phase.totalCompletedDiskStores > 0 || phase.totalScheduledDiskStores > 0,
     );
+    const farEviction = chunkDelta > 0
+      ? await driveLodPersistencePhase(game, "far-eviction", farPosition, farMaxFrames, () => false)
+      : buildCurrentLodPersistencePhaseSummary(game, "far-eviction-skipped");
     return {
       originPosition,
       farPosition,
@@ -1022,9 +1040,6 @@ function validateLodPersistenceIteration(iteration: LodPersistenceIteration): st
   if (!iteration.coldOrigin.settled && iteration.coldOrigin.finalLodPendingChunks > 8) {
     failures.push("cold origin phase did not settle");
   }
-  if (iteration.farEviction.label !== "far-eviction-skipped" && !iteration.farEviction.settled) {
-    failures.push("far eviction phase did not settle");
-  }
   const populateScheduledStores = iteration.coldOrigin.totalScheduledDiskStores + iteration.storeFlush.totalScheduledDiskStores;
   const populateCompletedStores = iteration.coldOrigin.totalCompletedDiskStores + iteration.storeFlush.totalCompletedDiskStores;
   if (populateCompletedStores <= 0 && populateScheduledStores <= 0) {
@@ -1055,9 +1070,15 @@ function validateLodPersistenceIteration(iteration: LodPersistenceIteration): st
   }
   if (
     iteration.farEviction.label !== "far-eviction-skipped"
-    && (iteration.farEviction.finalCoverage.residentOverlapCount > 0 || iteration.farEviction.finalCoverage.bandOverlapCount > 0)
+    && (
+      iteration.farEviction.finalCoverage.uncoveredGapCount > 0
+      || iteration.farEviction.finalCoverage.handoffHoleCount > 0
+      || iteration.farEviction.finalCoverage.residentOverlapCount > 0
+      || iteration.farEviction.finalCoverage.bandOverlapCount > 0
+      || iteration.farEviction.finalCoverage.waterOverlapCount > 0
+    )
   ) {
-    failures.push("far-eviction has LOD overlap samples");
+    failures.push("far-eviction has LOD coverage correctness samples");
   }
   return failures;
 }
@@ -1072,9 +1093,12 @@ function aggregateLodPersistenceIterations(
     .map((iteration) => iteration.farEviction)
     .filter((phase) => phase.label !== "far-eviction-skipped");
   const failures = iterations.flatMap((iteration) => iteration.failures);
+  const farUnsettledCount = far.filter((phase) => !phase.settled).length;
   return {
     pass: failures.length === 0,
     failureCount: failures.length,
+    farSettlePass: farUnsettledCount === 0,
+    farUnsettledCount,
     iterationCount: iterations.length,
     totalReloadDiskCacheHits: sumNumbers(reloads.map((phase) => phase.totalDiskCacheHits)),
     totalReloadCumulativeDiskCacheHits: sumNumbers(reloads.map((phase) => phase.finalCumulativeDiskCacheHits)),
@@ -1093,6 +1117,10 @@ function aggregateLodPersistenceIterations(
       phase.finalCoverage.uncoveredGapCount + phase.finalCoverage.handoffHoleCount)),
     maxReloadCoverageOverlaps: maxNumber(reloads.map((phase) =>
       phase.finalCoverage.residentOverlapCount + phase.finalCoverage.bandOverlapCount)),
+    maxFarCoverageGaps: maxNumber(far.map((phase) =>
+      phase.finalCoverage.uncoveredGapCount + phase.finalCoverage.handoffHoleCount)),
+    maxFarCoverageOverlaps: maxNumber(far.map((phase) =>
+      phase.finalCoverage.residentOverlapCount + phase.finalCoverage.bandOverlapCount + phase.finalCoverage.waterOverlapCount)),
     maxFarLodPendingChunks: maxNumber(far.map((phase) => phase.finalLodPendingChunks)),
     maxFarPendingDiskCache: maxNumber(far.map((phase) => phase.finalLodPendingDiskCache)),
     maxFarPendingGenerationBudget: maxNumber(far.map((phase) => phase.finalLodPendingGenerationBudget)),

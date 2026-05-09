@@ -858,3 +858,38 @@ Next:
 1. Split the far-stress persistence benchmark so correctness coverage can still be captured when full settle times out.
 2. Add a browser/lab artifact summary that records visible coverage separately from pending-generation performance.
 3. Start the canonical chunk store API work after the far-stress harness stops losing evidence on timeout.
+
+### Follow-up Checkpoint - Far Persistence Evidence Split
+
+Accepted harness increment:
+
+- Added `--lod-persistence-far-max-frames` so the far-transition phase can be bounded independently from cold-origin and reload-origin settle.
+- Added `--lod-persistence-store-max-frames` so persistence flushing can be bounded independently when needed.
+- Reordered the LOD persistence populate probe to flush origin stores before moving to a far stress position. This keeps the IndexedDB reload proof tied to clean origin coverage and records far movement as a separate visibility/performance phase.
+- Added aggregate fields `farSettlePass`, `farUnsettledCount`, `maxFarCoverageGaps`, and `maxFarCoverageOverlaps`.
+- Far unsettlement is now performance telemetry, while far LOD gaps/holes/overlaps remain correctness failures.
+
+Validation:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/render-verification-runner.test.ts tests/voxel-rpg-verification-runner.test.ts`: pass, `7` tests.
+- `mise exec -- bun run bench:lod-persistence -- --label=far-split-reordered-default`: pass.
+  - Artifact: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-on3FxQ/lod-idb-persistence-reload.json`
+  - Reload disk hits: `1278`.
+  - Coverage: `0` uncovered gaps, `0` handoff holes, `0` resident overlaps, `0` band overlaps, `0` water overlaps.
+- `mise exec -- bun run bench:lod-persistence -- --label=far-split-reordered-delta32 --lod-persistence-chunk-delta=32 --lod-persistence-far-max-frames=24`: pass.
+  - Artifact: `/var/folders/h7/xz1x4d4x0cn702r2q9205bkh0000gn/T/voxels-browser-game-bench-vXiAaA/lod-idb-persistence-reload.json`
+  - Reload disk hits: `1277`.
+  - Far phase: `settled=false`, `frameCount=24`, `finalLodPendingChunks=967`, `maxFarCoverageGaps=0`, `maxFarCoverageOverlaps=0`.
+
+Rejected attempt during this checkpoint:
+
+- `--lod-persistence-max-frames=120 --lod-persistence-far-max-frames=24` returned an artifact but failed because cold origin did not settle.
+- Capping store flush after far movement produced transient store-flush resident overlaps while far work remained pending.
+- Reordering store flush before far movement fixed the evidence shape without hiding pending far performance.
+
+Next:
+
+1. Add a render-verification gate or summary field that surfaces `farSettlePass=false` as a performance/settle warning without confusing it with LOD coverage correctness.
+2. Use the bounded far artifact to decide whether to improve far pending generation throughput or scheduling next.
+3. Start canonical chunk store API work once the verification summary exposes the new far-settle telemetry.
