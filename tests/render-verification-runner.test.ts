@@ -99,6 +99,32 @@ test("render verification runner keeps visual and full-settle view gates separat
   ]);
 });
 
+test("render verification runner reports far LOD unsettlement as a warning", () => {
+  const report = buildRenderVerificationRunnerReport({
+    generatedAt: "2026-05-09T00:00:00.000Z",
+    artifacts: {
+      lodReport: lodPersistenceReport({
+        farEviction: {
+          label: "far-eviction",
+          settled: false,
+          finalLodPendingChunks: 967,
+        },
+      }),
+    },
+  });
+
+  const lodGroup = report.gateGroups.find((group) => group.id === "lod-persistence");
+  const farSettleGate = lodGroup?.gates.find((gate) => gate.id === "lod_persistence.far_unsettled_count");
+
+  expect(farSettleGate?.status).toBe("warn");
+  expect(farSettleGate?.value).toBe(1);
+  expect(farSettleGate?.details).toEqual({ maxPendingChunks: 967 });
+  expect(report.failures).toEqual([]);
+  expect(lodGroup?.gates.filter((gate) => gate.status === "warn").map((gate) => gate.id)).toEqual([
+    "lod_persistence.far_unsettled_count",
+  ]);
+});
+
 test("command manifest preserves explicit artifact paths and runnable commands", () => {
   const manifest = buildCommandManifest({
     routeAtlasReport: "route/report.json",
@@ -171,7 +197,9 @@ function sample(
   };
 }
 
-function lodPersistenceReport() {
+function lodPersistenceReport(options: {
+  farEviction?: Record<string, unknown>;
+} = {}) {
   const coverage = {
     uncoveredGapCount: 0,
     handoffHoleCount: 0,
@@ -183,13 +211,18 @@ function lodPersistenceReport() {
     label: "reload-origin",
     finalCoverage: coverage,
   };
+  const farEviction = {
+    ...phase,
+    ...options.farEviction,
+    finalCoverage: coverage,
+  };
   return {
     generatedAt: "2026-05-09T00:00:00.000Z",
     commit: "abc123",
     iterations: [
       {
         coldOrigin: phase,
-        farEviction: phase,
+        farEviction,
         storeFlush: phase,
         reloadOrigin: phase,
         failures: [],

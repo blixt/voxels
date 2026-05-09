@@ -357,6 +357,9 @@ function buildLodPersistenceGateGroup(
   const coverage = iterations.length > 0
     ? summarizeLodPersistenceCoverage(iterations)
     : summarizeLodPersistenceAggregateCoverage(aggregate);
+  const farSettle = iterations.length > 0
+    ? summarizeLodPersistenceFarSettle(iterations)
+    : summarizeLodPersistenceAggregateFarSettle(aggregate);
   const iterationCount = iterations.length > 0 ? iterations.length : readNumber(aggregate, ["iterationCount"]) ?? 0;
   const artifactFailures = readNumber(aggregate, ["failureCount"]) ?? asArray(record.failures).length;
   return buildGateGroup(
@@ -367,6 +370,17 @@ function buildLodPersistenceGateGroup(
       minGate("lod_persistence.iterations_min", "LOD persistence iteration minimum", "lod-persistence", iterationCount, thresholds.minLodIterations),
       zeroGate("lod_persistence.artifact_failures", "LOD persistence artifact failure count", "lod-persistence", artifactFailures),
       ...lodCoverageGates("lod_persistence", "lod-persistence", coverage),
+      {
+        id: "lod_persistence.far_unsettled_count",
+        label: "Far transition unsettled phases",
+        source: "lod-persistence",
+        status: farSettle.unsettledCount === 0 ? "pass" : "warn",
+        value: farSettle.unsettledCount,
+        threshold: "=== 0",
+        details: {
+          maxPendingChunks: farSettle.maxPendingChunks,
+        },
+      },
     ],
     compactArtifacts({ report: reportPath }),
   );
@@ -638,6 +652,25 @@ function summarizeLodPersistenceAggregateCoverage(aggregate: Record<string, unkn
     residentOverlapCount: readNumber(aggregate, ["maxReloadCoverageOverlaps"]) ?? 0,
     bandOverlapCount: 0,
     waterOverlapCount: 0,
+  };
+}
+
+function summarizeLodPersistenceFarSettle(iterations: readonly unknown[]): { unsettledCount: number; maxPendingChunks: number } {
+  const farPhases = iterations
+    .map((iteration) => readValue(iteration, ["farEviction"]))
+    .filter((phase) => readString(phase, ["label"]) !== "far-eviction-skipped");
+  return {
+    unsettledCount: farPhases.filter((phase) => readBoolean(phase, ["settled"]) === false).length,
+    maxPendingChunks: maxNumbers(farPhases.map((phase) => readNumber(phase, ["finalLodPendingChunks"]))),
+  };
+}
+
+function summarizeLodPersistenceAggregateFarSettle(
+  aggregate: Record<string, unknown>,
+): { unsettledCount: number; maxPendingChunks: number } {
+  return {
+    unsettledCount: readNumber(aggregate, ["farUnsettledCount"]) ?? 0,
+    maxPendingChunks: readNumber(aggregate, ["maxFarLodPendingChunks"]) ?? 0,
   };
 }
 

@@ -893,3 +893,22 @@ Next:
 1. Add a render-verification gate or summary field that surfaces `farSettlePass=false` as a performance/settle warning without confusing it with LOD coverage correctness.
 2. Use the bounded far artifact to decide whether to improve far pending generation throughput or scheduling next.
 3. Start canonical chunk store API work once the verification summary exposes the new far-settle telemetry.
+
+### Follow-up Checkpoint - Far Settle Warning In Verification
+
+Accepted verifier increment:
+
+- `render-verification-runner` now emits `lod_persistence.far_unsettled_count`.
+- The gate is a warning, not a failure, so far-transition pending work is visible without being classified as a LOD coverage correctness failure.
+- The warning details include `maxPendingChunks`, which points directly at far-transition scheduling/generation backlog.
+
+Validation:
+
+- `mise exec -- bun run typecheck`: pass.
+- `mise exec -- bun test tests/render-verification-runner.test.ts tests/voxel-rpg-verification-runner.test.ts`: pass, `8` tests.
+
+Next:
+
+1. Use `maxPendingChunks` from bounded far artifacts to tune far LOD scheduling throughput.
+2. Add a canonical chunk store API once the far-pending telemetry has a stable baseline.
+3. Keep generator/content work behind these render and verification gates.
