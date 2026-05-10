@@ -32,6 +32,7 @@ import {
   resolveExplorationInteractionTarget,
   type ExplorationInteractionCandidate,
   type ExplorationInteractionVerb,
+  type ResolvedExplorationInteractionTarget,
 } from "../engine/exploration-interactions.ts";
 import {
   ExplorationEventLog,
@@ -40,6 +41,7 @@ import {
 } from "../engine/exploration-events.ts";
 import { summarizeFieldKit } from "../engine/field-kit.ts";
 import { summarizeBestiary } from "../engine/bestiary-journal.ts";
+import { findSafeCaveEntryFeetPosition } from "../engine/cave-traversal.ts";
 import {
   SkillJournal,
   type SkillId,
@@ -1112,6 +1114,7 @@ export class GameController {
   private lastTravelContextFeetPosition: Vec3 | null = null;
   private lastTravelContext: "surface" | "underground" = "surface";
   private lastInteractionLabel = "No interaction yet";
+  private caveReturnFeetPosition: Vec3 | null = null;
   private readonly bootstrapBenchmarkStartedAt = performance.now();
   private readonly worldClockStartedAt = performance.now();
   private readonly bootstrapBenchmarkSamples: BootstrapBenchmarkSample[] = [];
@@ -3047,6 +3050,16 @@ export class GameController {
     if (eventResult.accepted) {
       this.skillJournal.observeSkillAwards(eventResult.event.skillAwards);
     }
+    if (target.role === "cave-mouth" && prompt.verb === "use") {
+      this.enterCaveMouth(target, currentWorld);
+      this.pushHud(true);
+      return;
+    }
+    if (target.role === "cave-exit" && prompt.verb === "use") {
+      this.exitCaveMouth();
+      this.pushHud(true);
+      return;
+    }
     const routeId = readPayloadRouteId(prompt.eventInput.payload) ?? routeIdForLandmark(target.id);
     const result = this.observeTravelGoalProgress({
       routeId,
@@ -3134,6 +3147,10 @@ export class GameController {
     const candidates: ExplorationInteractionCandidate[] = [];
     const forward = buildFirstPersonCameraMatrices(this.camera, 1).forward;
     const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+    const caveExitCandidate = this.buildCaveExitInteractionCandidate(forward);
+    if (caveExitCandidate) {
+      candidates.push(caveExitCandidate);
+    }
     const caveMouthCandidate = buildCaveMouthInteractionCandidate(currentWorld, encounter);
     if (caveMouthCandidate) {
       candidates.push(caveMouthCandidate);
@@ -3249,6 +3266,79 @@ export class GameController {
       },
     });
     return candidates;
+  }
+
+  private buildCaveExitInteractionCandidate(forward: readonly [number, number, number]): ExplorationInteractionCandidate | null {
+    if (!this.caveReturnFeetPosition || this.lastTravelContext !== "underground") {
+      return null;
+    }
+    return {
+      id: "cave-exit:return",
+      subjectType: "zone",
+      name: "Cave Mouth Return",
+      role: "cave-exit",
+      worldPosition: [
+        this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.4),
+        this.player.feetPosition[1] + PLAYER_EYE_HEIGHT * 0.5,
+        this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.4),
+      ],
+      interactionRadiusMeters: metersToWorldUnits(5),
+      priority: 18,
+      prompts: [{
+        verb: "use",
+        label: "Exit to cave mouth",
+        description: "Climb back toward the last surface entrance.",
+      }],
+      flavorText: "A memorized return path leads back to the surface.",
+      payload: {
+        caveTraversal: "exit",
+      },
+    };
+  }
+
+  private enterCaveMouth(
+    target: ResolvedExplorationInteractionTarget,
+    currentWorld: CurrentWorldProbeContext,
+  ): void {
+    const entryFeet = findSafeCaveEntryFeetPosition({
+      world: this.world,
+      anchorPosition: target.worldPosition,
+      surfaceY: currentWorld.probe.surfaceY,
+    });
+    if (!entryFeet) {
+      this.lastInteractionLabel = `${target.name} is blocked`;
+      this.status = "No safe passage is open here yet.";
+      return;
+    }
+    this.caveReturnFeetPosition = [...this.player.feetPosition] as Vec3;
+    teleportPlayerToFeetPosition(this.player, entryFeet);
+    this.player.grounded = true;
+    this.lastTravelContext = "underground";
+    this.lastTravelContextFeetPosition = null;
+    this.lastTravelContextSampleAt = 0;
+    this.syncCameraToPlayer();
+    this.syncWorldAroundPlayer(true);
+    this.lastInteractionLabel = `Entered ${target.name}`;
+    this.status = `${target.name}: underground route`;
+  }
+
+  private exitCaveMouth(): void {
+    const returnFeet = this.caveReturnFeetPosition;
+    if (!returnFeet) {
+      this.lastInteractionLabel = "No return path remembered";
+      this.status = this.lastInteractionLabel;
+      return;
+    }
+    teleportPlayerToFeetPosition(this.player, returnFeet);
+    this.player.grounded = true;
+    this.caveReturnFeetPosition = null;
+    this.lastTravelContext = "surface";
+    this.lastTravelContextFeetPosition = null;
+    this.lastTravelContextSampleAt = 0;
+    this.syncCameraToPlayer();
+    this.syncWorldAroundPlayer(true);
+    this.lastInteractionLabel = "Exited to cave mouth";
+    this.status = this.lastInteractionLabel;
   }
 
   private readonly handleCanvasClick = () => {
@@ -4576,8 +4666,8 @@ function buildCaveMouthInteractionCandidate(
     interactionRadiusMeters: metersToWorldUnits(6),
     priority: 12,
     prompts: [{
-      verb: "inspect",
-      label: `Scout ${caveName}`,
+      verb: "use",
+      label: `Enter ${caveName}`,
       description: `${undergroundName} begins here. ${scoutResult.detail}`,
     }],
     flavorText: `${undergroundName} begins here. ${scoutResult.detail}`,
