@@ -67,6 +67,24 @@ test("render verification runner reports live-forward sample, frame, FPS, and LO
   expect(failureIds).toContain("live_forward.lod_resident_overlap_count");
 });
 
+test("render verification runner ignores undefined threshold overrides", () => {
+  const report = buildRenderVerificationRunnerReport({
+    generatedAt: "2026-05-09T00:00:00.000Z",
+    artifacts: {
+      routeAtlasReport: routeAtlasReport(),
+      viewAtlasReport: viewAtlasReport(),
+    },
+    thresholds: {
+      minRouteSamples: undefined,
+      minViewCount: undefined,
+    },
+  });
+
+  expect(report.thresholds.minRouteSamples).toBe(100);
+  expect(report.thresholds.minViewCount).toBe(1);
+  expect(report.failures).toEqual([]);
+});
+
 test("render verification runner keeps visual and full-settle view gates separate", () => {
   const report = buildRenderVerificationRunnerReport({
     generatedAt: "2026-05-09T00:00:00.000Z",

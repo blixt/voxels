@@ -133,7 +133,7 @@ export function buildRenderVerificationRunnerReport(
 ): RenderVerificationReport {
   const thresholds = {
     ...DEFAULT_RENDER_VERIFICATION_THRESHOLDS,
-    ...(input.thresholds ?? {}),
+    ...definedThresholdOverrides(input.thresholds),
   };
   const paths = input.paths ?? {};
   const commandManifest = buildCommandManifest(paths, input.label ?? null);
@@ -173,6 +173,19 @@ export function buildRenderVerificationRunnerReport(
     },
     failures: gateGroups.flatMap((group) => group.failures),
   };
+}
+
+function definedThresholdOverrides(
+  thresholds: Partial<RenderVerificationThresholds> | undefined,
+): Partial<RenderVerificationThresholds> {
+  if (!thresholds) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(thresholds).filter((entry): entry is [keyof RenderVerificationThresholds, number | boolean] =>
+      entry[1] !== undefined
+    ),
+  ) as Partial<RenderVerificationThresholds>;
 }
 
 export async function loadRenderVerificationArtifacts(
