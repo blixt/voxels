@@ -540,6 +540,65 @@ test("LOD residency adopts completed derived chunks within the frame budget", ()
   expect(completed).toHaveLength(0);
 });
 
+test("LOD residency defers adjacent remesh work from completed chunk adoption", () => {
+  const probeRequests: AsyncDerivedLodChunkCacheKey[] = [];
+  const probeWorld = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    asyncChunkGeneration: createFakeAsyncQueue({
+      requestLodChunk: (key) => {
+        probeRequests.push({ ...key, coord: { ...key.coord } });
+        return true;
+      },
+    }),
+    horizontalRadiusChunks: 1,
+  });
+  const spawn = probeWorld.getSpawnPosition();
+  probeWorld.updateLodResidencyAround(spawn, { maxGenerateLodChunks: 0 });
+  const key = probeRequests[0]!;
+  const encoded = encodeDerivedLodChunk(createTestDerivedLodPayload(key, 16));
+  let drained = false;
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    asyncChunkGeneration: createFakeAsyncQueue({
+      drainCompletedLodChunks: () => {
+        if (drained) {
+          return [];
+        }
+        drained = true;
+        return [{
+          key,
+          buffer: encoded.buffer,
+          byteLength: encoded.stats.byteLength,
+        }];
+      },
+    }),
+    horizontalRadiusChunks: 1,
+  });
+  const worldWithInternals = world as unknown as {
+    lodChunks: Map<string, VoxelChunk>;
+    pendingLodNeighborRemeshKeys: Set<string>;
+  };
+  const neighborKey = `L${key.lodLevel}:${key.coord.x + 1}:${key.coord.y}:${key.coord.z}`;
+  worldWithInternals.lodChunks.set(
+    neighborKey,
+    createTestVoxelChunk(key.coord.x + 1, key.coord.y, key.coord.z, key.lodLevel, 16),
+  );
+
+  world.updateLodResidencyAround(spawn, {
+    maxGenerateLodChunks: 0,
+    maxAdoptCompletedLodChunks: 1,
+    maxWorkMs: 0,
+  });
+
+  expect(worldWithInternals.pendingLodNeighborRemeshKeys.has(neighborKey)).toBe(true);
+
+  world.updateLodResidencyAround(spawn, {
+    maxGenerateLodChunks: 0,
+    maxAdoptCompletedLodChunks: 0,
+    maxWorkMs: Number.POSITIVE_INFINITY,
+  });
+
+  expect(worldWithInternals.pendingLodNeighborRemeshKeys.size).toBe(0);
+});
+
 test("LOD residency queues active derived chunks for persistence before eviction", () => {
   const storedKeys: AsyncDerivedLodChunkCacheKey[] = [];
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {

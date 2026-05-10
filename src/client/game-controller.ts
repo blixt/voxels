@@ -95,6 +95,7 @@ import {
   FrameTimingBuckets,
   type FrameTimingSnapshot,
 } from "../engine/frame-timing-buckets.ts";
+import { classifyFrameAttributionCause } from "../engine/frame-attribution.ts";
 import {
   buildChunkMesh,
   buildChunkMeshFromOpaqueGeometry,
@@ -5225,20 +5226,9 @@ function createZeroFrameAttribution(): GameFrameAttribution {
 }
 
 function createFrameAttribution(input: Omit<GameFrameAttribution, "cause">): GameFrameAttribution {
-  const candidates: Array<[cause: string, ms: number]> = [
-    ["stream", input.streamMs],
-    ["mesh", input.meshMs],
-    ["LOD", input.lodMs],
-    ["render", input.renderCpuMs],
-    ["GPU upload", input.renderUploadMs],
-    ["GPU sync", input.renderSyncMs],
-    ["movement", input.movementMs],
-  ];
-  candidates.sort((left, right) => right[1] - left[1]);
-  const [cause, ms] = candidates[0] ?? ["none", 0];
   return {
     ...input,
-    cause: ms > 0.05 ? cause : "none",
+    cause: classifyFrameAttributionCause(input),
   };
 }
 
