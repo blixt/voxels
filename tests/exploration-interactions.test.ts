@@ -20,6 +20,13 @@ test("interaction resolver chooses the best facing target and builds inspect/rea
         "use",
       ],
       flavorText: "A small shrine watches the road.",
+      skillAwards: [{
+        skillId: "lore",
+        xp: 25,
+        reason: "Shrine reading",
+        awardKey: "read:landmark:velothi_shrine",
+        onceOnly: true,
+      }],
       payload: { routeId: "pilgrim-road" },
     },
     {
@@ -55,6 +62,13 @@ test("interaction resolver chooses the best facing target and builds inspect/rea
     name: "Velothi Wayshrine",
     flavorText: "A small shrine watches the road.",
     worldPosition: [0, 0, 3],
+    skillAwards: [{
+      skillId: "lore",
+      xp: 25,
+      reason: "Shrine reading",
+      awardKey: "read:landmark:velothi_shrine",
+      onceOnly: true,
+    }],
     payload: { routeId: "pilgrim-road" },
   });
 });
@@ -88,6 +102,127 @@ test("interaction resolver filters unreachable or promptless targets", () => {
 
   expect(resolution.candidates.map((candidate) => candidate.id)).toEqual(["near"]);
   expect(resolution.target?.distanceMeters).toBeCloseTo(Math.sqrt(2), 8);
+});
+
+test("interaction resolver lets authored landmarks outrank mob trails and loot caches", () => {
+  const resolution = resolveExplorationInteractionTarget({
+    viewerPosition: [0, 0, 0],
+    viewerForward: [0, 0, 1],
+    candidates: [
+      {
+        id: "trail-forage:0:0",
+        subjectType: "object",
+        name: "Trail Forage",
+        role: "loot-cache",
+        priority: 1,
+        worldPosition: [0, 0, 1],
+        prompts: ["use"],
+      },
+      {
+        id: "kwama-brood:0:0",
+        subjectType: "mob",
+        name: "Kwama Brood",
+        role: "mob-trail",
+        priority: 8,
+        worldPosition: [0, 0, 1.2],
+        prompts: ["inspect"],
+      },
+      {
+        id: "old_road_causeway",
+        subjectType: "landmark",
+        name: "Old Road Causeway",
+        role: "old-road",
+        priority: 20,
+        worldPosition: [0, 0, 1.4],
+        prompts: ["inspect"],
+      },
+    ],
+  });
+
+  expect(resolution.candidates.map((candidate) => candidate.id)).toEqual([
+    "old_road_causeway",
+    "kwama-brood:0:0",
+    "trail-forage:0:0",
+  ]);
+  expect(resolution.target?.subjectType).toBe("landmark");
+});
+
+test("interaction resolver surfaces mob trails ahead of local loot when no landmark is present", () => {
+  const resolution = resolveExplorationInteractionTarget({
+    viewerPosition: [0, 0, 0],
+    viewerForward: [0, 0, 1],
+    candidates: [
+      {
+        id: "trail-forage:0:0",
+        subjectType: "object",
+        name: "Trail Forage",
+        role: "loot-cache",
+        priority: 1,
+        worldPosition: [0, 0, 1],
+        prompts: ["use"],
+      },
+      {
+        id: "kwama-brood:0:0",
+        subjectType: "mob",
+        name: "Kwama Brood",
+        role: "mob-trail",
+        priority: 8,
+        worldPosition: [0, 0, 1.2],
+        prompts: ["inspect"],
+      },
+    ],
+  });
+
+  expect(resolution.target?.id).toBe("kwama-brood:0:0");
+  expect(resolution.target?.prompts[0]?.label).toBe("Inspect Kwama Brood");
+});
+
+test("interaction resolver surfaces visible cave mouths ahead of generic mob trails", () => {
+  const resolution = resolveExplorationInteractionTarget({
+    viewerPosition: [0, 0, 0],
+    viewerForward: [0, 0, 1],
+    candidates: [
+      {
+        id: "trail-forage:0:0",
+        subjectType: "object",
+        name: "Trail Forage",
+        role: "loot-cache",
+        priority: 1,
+        worldPosition: [0, 0, 1],
+        prompts: ["use"],
+      },
+      {
+        id: "kwama-brood:0:0",
+        subjectType: "mob",
+        name: "Kwama Brood",
+        role: "mob-trail",
+        priority: 8,
+        worldPosition: [0, 0, 1.2],
+        prompts: ["inspect"],
+      },
+      {
+        id: "cave-mouth:ash-ravine",
+        subjectType: "zone",
+        name: "Ash Ravine Mouth",
+        role: "cave-mouth",
+        priority: 12,
+        worldPosition: [0, 0, 1.35],
+        prompts: ["inspect"],
+      },
+    ],
+  });
+
+  expect(resolution.candidates.map((candidate) => candidate.role)).toEqual([
+    "cave-mouth",
+    "mob-trail",
+    "loot-cache",
+  ]);
+  expect(resolution.target?.subjectType).toBe("zone");
+  expect(resolution.target?.prompts[0]?.eventInput).toMatchObject({
+    kind: "inspect",
+    subjectType: "zone",
+    role: "cave-mouth",
+  });
 });
 
 test("interaction event helper keeps resolved target identity stable", () => {

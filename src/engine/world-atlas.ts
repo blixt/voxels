@@ -218,6 +218,8 @@ export interface AtlasCaveAnchorSample {
   caveSystemId: AtlasCaveSystemId | null;
   caveAnchorId: string | null;
   caveAnchorKind: AtlasCaveAnchorKind | null;
+  caveAnchorPoint: AtlasPointMeters | null;
+  caveDryEntranceRequired: boolean;
   caveInfluence: number;
   caveCore: number;
   distanceToCaveAnchorM: number;
@@ -1132,6 +1134,8 @@ export function sampleAtlasCaveAnchorMeters(
     caveSystemId: projection.system.id,
     caveAnchorId: projection.anchor.id,
     caveAnchorKind: projection.anchor.kind,
+    caveAnchorPoint: projection.anchor.point,
+    caveDryEntranceRequired: projection.anchor.dryEntranceRequired,
     caveInfluence,
     caveCore,
     distanceToCaveAnchorM: projection.distanceToAnchorM,
@@ -1274,6 +1278,8 @@ function emptyCaveAnchorSample(): AtlasCaveAnchorSample {
     caveSystemId: null,
     caveAnchorId: null,
     caveAnchorKind: null,
+    caveAnchorPoint: null,
+    caveDryEntranceRequired: false,
     caveInfluence: 0,
     caveCore: 0,
     distanceToCaveAnchorM: Infinity,

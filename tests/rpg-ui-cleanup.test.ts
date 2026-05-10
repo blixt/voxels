@@ -26,12 +26,30 @@ test("RPG HUD renders place route interaction and skill snapshot fields", () => 
     "activeRouteName",
     "activeRouteProgressLabel",
     "activeTravelGoalStepLabel",
+    "activeQuestTitle",
+    "activeQuestObjectiveKind",
+    "activeQuestObjectiveLabel",
+    "activeQuestRumorText",
+    "activeQuestMoodLabel",
+    "activeQuestFactionLabel",
     "interactionPromptLabel",
     "travelContextLabel",
     "encounterMoodLabel",
     "encounterPressureLabel",
     "encounterFactionLabel",
+    "bestiarySightingCount",
+    "bestiaryEntryCount",
+    "bestiarySummaryLabel",
+    "bestiaryLastSightingLabel",
+    "bestiaryLastNoteLabel",
+    "bestiaryDominantFactionLabel",
     "lastInteractionLabel",
+    "scoutedCaveMouthCount",
+    "fieldKitFindCount",
+    "fieldKitSummaryLabel",
+    "fieldKitLastFindLabel",
+    "fieldKitLastNoteLabel",
+    "fieldKitDominantCategoryLabel",
   ]) {
     expect(gameController).toContain(field);
     expect(gameClient).toContain(`snapshot.${field}`);
@@ -61,15 +79,45 @@ test("RPG HUD renders place route interaction and skill snapshot fields", () => 
 
 test("client wires pure exploration interaction and travel goal systems", () => {
   const gameController = readFileSync(join(repoRoot, "src/client/game-controller.ts"), "utf8");
+  const gameClient = readFileSync(join(repoRoot, "src/client/game.ts"), "utf8");
 
   expect(gameController).toContain("resolveExplorationInteractionTarget");
+  expect(gameController).toContain("new ExplorationEventLog");
+  expect(gameController).toContain("explorationEventLog.record");
+  expect(gameController).toContain("observeSkillAwards");
+  expect(gameController).toContain("subjectType: \"mob\"");
+  expect(gameController).toContain("role: encounterSite.role");
+  expect(gameController).toContain("countMobSignEvents");
+  expect(gameController).toContain("sampleRpgEncounterSiteWorldUnits");
+  expect(gameController).toContain("clueLabel: encounterSite.clueLabel");
+  expect(gameController).toContain("fieldNote: encounterSite.fieldNote");
+  expect(gameController).toContain("lootSkillId");
+  expect(gameController).toContain("sampleForageSiteWorldUnits");
+  expect(gameController).toContain("forageSiteRole");
+  expect(gameController).toContain("clueLabel: forageSite.clueLabel");
+  expect(gameController).toContain("fieldNote: forageSite.fieldNote");
+  expect(gameController).toContain("summarizeFieldKit");
+  expect(gameController).toContain("summarizeBestiary");
+  expect(gameController).toContain("factionId: encounterSite.factionId");
+  expect(gameController).toContain("role: \"cave-mouth\"");
+  expect(gameController).toContain("skillId: \"spelunking\"");
   expect(gameController).toContain("new RouteJournal");
+  expect(gameController).toContain("planRpgQuestHooks");
+  expect(gameController).toContain("selectRpgQuestHookForExploration");
+  expect(gameController).toContain("selectActiveQuestHook");
+  expect(gameController).toContain("observeActiveQuestStep");
+  expect(gameController).toContain("buildTravelGoalFromQuestHook");
+  expect(gameController).toContain("buildQuestTravelGoals");
+  expect(gameController).toContain("observeTravelGoalProgress");
+  expect(gameController).toContain("complete-travel-goal");
   expect(gameController).toContain("observeProgress");
   expect(gameController).toContain("observeTravel");
   expect(gameController).toContain("TRAVEL_GOALS");
   expect(gameController).toContain("describeRpgEncounterScoutResult");
   expect(gameController).toContain("sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2])");
   expect(gameController).toContain("interactionPromptVerb: prompt?.verb ?? \"inspect\"");
+  expect(gameClient).toContain("snapshot.activeQuestTitle");
+  expect(gameClient).toContain("snapshot.activeQuestRumorText");
 });
 
 test("progress storage hydrates after init and honors fresh-game launches", () => {

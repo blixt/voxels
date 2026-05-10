@@ -19,6 +19,7 @@ test("exploration objectives start with first bearings around roads and landmark
     "biomes-3",
     "old-road-1",
     "landmarks-3",
+    "mob-trails-1",
   ]);
   expect(snapshot.objectives.find((objective) => objective.id === "old-road-1")?.label).toBe(
     "Find an old road sign",
@@ -32,6 +33,7 @@ test("exploration objectives advance to pilgrim road after first bearings", () =
     discoveredRegionalVariantCount: 1,
     discoveredLandmarkCount: 4,
     discoveredAncientLandmarkCount: 1,
+    scoutedMobTrailCount: 1,
   });
 
   expect(snapshot.stageId).toBe("pilgrim-road");
@@ -39,6 +41,8 @@ test("exploration objectives advance to pilgrim road after first bearings", () =
     "old-road-2",
     "landmarks-6",
     "variants-2",
+    "loot-caches-2",
+    "cave-mouths-1",
     "underground-1",
   ]);
   expect(snapshot.objectives[0]?.journalText).toContain("route");
@@ -51,15 +55,21 @@ test("exploration objectives eventually settle into the deep pilgrimage stage", 
     discoveredRegionalVariantCount: 3,
     discoveredLandmarkCount: 8,
     discoveredAncientLandmarkCount: 3,
+    scoutedMobTrailCount: 4,
+    lootedCacheCount: 2,
+    scoutedCaveMouthCount: 1,
   });
 
   expect(snapshot.stageId).toBe("deep-pilgrimage");
-  expect(snapshot.objectives).toHaveLength(5);
+  expect(snapshot.objectives).toHaveLength(8);
   expect(snapshot.objectives.map((objective) => objective.id)).toEqual([
     "old-road-4",
     "biomes-10",
     "variants-4",
     "underground-3",
+    "mob-trails-5",
+    "loot-caches-5",
+    "cave-mouths-3",
     "landmarks-12",
   ]);
   expect(snapshot.completedCount).toBe(0);
@@ -72,6 +82,9 @@ test("exploration objective progress clamps to its target", () => {
     discoveredRegionalVariantCount: 30,
     discoveredLandmarkCount: 30,
     discoveredAncientLandmarkCount: 30,
+    scoutedMobTrailCount: 30,
+    lootedCacheCount: 30,
+    scoutedCaveMouthCount: 30,
   });
 
   expect(snapshot.stageId).toBe("deep-pilgrimage");

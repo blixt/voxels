@@ -87,6 +87,7 @@ declare global {
       ): ReturnType<GameController["probeVisibleGroundCoverage"]>;
       getDiscoveryJournal(): ExplorationJournalSnapshot;
       resetDiscoveryJournal(): ExplorationJournalSnapshot;
+      getExplorationEventLog(): ReturnType<GameController["getExplorationEventLogSnapshot"]>;
       getSkillJournal(): ReturnType<GameController["getSkillJournalSnapshot"]>;
       exportProgressState(): ReturnType<GameController["exportProgressState"]>;
       importProgressState(state: Parameters<GameController["importProgressState"]>[0]): ReturnType<GameController["importProgressState"]>;
@@ -279,6 +280,7 @@ function mountGame(): GameRuntime {
       controller.probeVisibleGroundCoverage(sampleForwardMeters, sampleLateralMeters, sampleStepMeters),
     getDiscoveryJournal: () => controller.getDiscoveryJournalSnapshot(),
     resetDiscoveryJournal: () => controller.resetDiscoveryJournal(),
+    getExplorationEventLog: () => controller.getExplorationEventLogSnapshot(),
     getSkillJournal: () => controller.getSkillJournalSnapshot(),
     exportProgressState: () => controller.exportProgressState(),
     importProgressState: (state) => controller.importProgressState(state),
@@ -319,6 +321,15 @@ function buildProgressSignature(snapshot: GameHudSnapshot): string {
     snapshot.discoveredUndergroundBiomeCount,
     snapshot.discoveredRegionalVariantCount,
     snapshot.discoveredLandmarkCount,
+    snapshot.scoutedMobTrailCount,
+    snapshot.lootedCacheCount,
+    snapshot.scoutedCaveMouthCount,
+    snapshot.fieldKitFindCount,
+    snapshot.fieldKitSummaryLabel,
+    snapshot.fieldKitLastFindLabel,
+    snapshot.activeQuestHookId ?? "no-quest",
+    snapshot.activeQuestTitle,
+    snapshot.activeQuestObjectiveKind ?? "no-quest-step",
     snapshot.totalSkillLevel,
     snapshot.focusSkillName,
     snapshot.focusSkillLevel,
@@ -440,11 +451,15 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
     update(snapshot) {
       const recentDiscovery = snapshot.recentDiscoveries[0] ?? null;
       place.textContent = snapshot.activePlaceName;
-      route.textContent = `${snapshot.activeRouteName}: ${snapshot.activeTravelGoalStepLabel}`;
+      route.textContent = `${snapshot.activeRouteName}: ${snapshot.activeTravelGoalStepLabel}${
+        snapshot.activeQuestHookId ? ` • ${snapshot.activeQuestTitle}` : ""
+      }`;
       interaction.textContent = snapshot.interactionPromptVerb
         ? `E ${snapshot.interactionPromptLabel}`
         : snapshot.interactionPromptLabel;
-      skill.textContent = `${snapshot.focusSkillName} ${snapshot.focusSkillLevel} • ${snapshot.encounterMoodLabel}`;
+      skill.textContent = `${snapshot.focusSkillName} ${snapshot.focusSkillLevel} • ${snapshot.timeOfDayLabel}${
+        snapshot.fieldKitFindCount > 0 ? ` • ${snapshot.fieldKitSummaryLabel}` : ""
+      }`;
       progress.setAttribute("aria-label", `${snapshot.activeTravelGoalTitle} ${snapshot.activeRouteProgressLabel}`);
       progressFill.style.transform = `scaleX(${Math.max(0, Math.min(1, snapshot.activeTravelGoalProgressRatio))})`;
       card.classList.toggle("is-captured", snapshot.pointerLocked);
@@ -456,13 +471,34 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
         snapshot.status,
         snapshot.activeTravelGoalTitle,
         snapshot.activeRouteProgressLabel,
+        snapshot.activeQuestTitle,
+        snapshot.activeQuestObjectiveKind,
+        snapshot.activeQuestObjectiveLabel,
+        snapshot.activeQuestRumorText,
+        snapshot.activeQuestMoodLabel,
+        snapshot.activeQuestFactionLabel,
         snapshot.interactionTargetName,
         snapshot.interactionPromptDescription,
         snapshot.lastInteractionLabel,
         snapshot.travelContextLabel,
+        `Day ${snapshot.worldDay} ${snapshot.worldClockLabel}`,
+        `${snapshot.weatherLabel} ${(snapshot.weatherIntensity * 100).toFixed(0)}%`,
+        snapshot.floraLabel,
+        snapshot.faunaLabel,
+        snapshot.lootSignalLabel,
+        snapshot.fieldKitSummaryLabel,
+        snapshot.fieldKitLastFindLabel,
+        snapshot.fieldKitDominantCategoryLabel,
+        snapshot.hazardLabel,
         snapshot.encounterPressureLabel,
         snapshot.encounterFactionLabel,
         snapshot.encounterFlavorLabel,
+        `${snapshot.bestiarySightingCount} bestiary sightings`,
+        `${snapshot.bestiaryEntryCount} bestiary entries`,
+        snapshot.bestiarySummaryLabel,
+        snapshot.bestiaryLastSightingLabel,
+        snapshot.bestiaryLastNoteLabel,
+        snapshot.bestiaryDominantFactionLabel,
         recentDiscovery ? `Found ${recentDiscovery.name}` : null,
         `${snapshot.focusSkillName} ${(snapshot.focusSkillProgressRatio * 100).toFixed(0)}%`,
         recentDiscovery?.flavorText ?? null,
@@ -489,7 +525,7 @@ function createObjectivePanelView(root: HTMLElement): ObjectivePanelView {
       const currentObjective = objectiveSnapshot.objectives.find((objective) => !objective.completed)
         ?? objectiveSnapshot.objectives[objectiveSnapshot.objectives.length - 1]
         ?? null;
-      stage.textContent = `${objectiveSnapshot.title} • ${objectiveSnapshot.completedCount}/${objectiveSnapshot.totalCount}`;
+      stage.textContent = `${objectiveSnapshot.title} • ${objectiveSnapshot.completedCount}/${objectiveSnapshot.totalCount} • ${snapshot.timeOfDayLabel}`;
       root.title = [
         objectiveSnapshot.subtitle,
         objectiveSnapshot.journalText,
@@ -497,6 +533,13 @@ function createObjectivePanelView(root: HTMLElement): ObjectivePanelView {
         objectiveSnapshot.progressionHint,
         `${objectiveSnapshot.title}: ${objectiveSnapshot.completedCount}/${objectiveSnapshot.totalCount}`,
         `${snapshot.focusSkillName} ${snapshot.focusSkillLevel}`,
+        `Day ${snapshot.worldDay} ${snapshot.worldClockLabel}`,
+        `${snapshot.weatherLabel}: ${snapshot.hazardLabel}`,
+        snapshot.areaCoherenceLabel,
+        snapshot.lootSignalLabel,
+        snapshot.fieldKitSummaryLabel,
+        snapshot.fieldKitLastFindLabel,
+        snapshot.fieldKitLastNoteLabel,
         `${snapshot.encounterMoodLabel}: ${snapshot.encounterFactionLabel}`,
         `Fog ${snapshot.ambientFogEndMeters.toFixed(0)} m`,
       ].filter(Boolean).join(" • ");
@@ -518,6 +561,9 @@ function snapshotToObjectiveSource(snapshot: GameHudSnapshot) {
     discoveredRegionalVariantCount: snapshot.discoveredRegionalVariantCount,
     discoveredLandmarkCount: snapshot.discoveredLandmarkCount,
     discoveredAncientLandmarkCount: snapshot.discoveredAncientLandmarkCount,
+    scoutedMobTrailCount: snapshot.scoutedMobTrailCount,
+    lootedCacheCount: snapshot.lootedCacheCount,
+    scoutedCaveMouthCount: snapshot.scoutedCaveMouthCount,
   };
 }
 

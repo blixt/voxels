@@ -4,12 +4,13 @@ import lodLabPage from "./pages/lod-lab.html";
 
 const PROCEDURAL_WORKER_ROUTE = "/assets/procedural-generation-worker.js";
 const CHUNK_MESHING_WORKER_ROUTE = "/assets/chunk-meshing-worker.js";
+const STYLESHEET_ROUTE = "/styles.css";
 const DEVELOPMENT_WORKER_OUTDIR = `${process.cwd()}/.tmp/worker-assets`;
 const devWorkerAssetPathPromises = new Map<string, Promise<string>>();
 
 function isDevelopmentMode(): boolean {
-  const nodeEnvKey = "NODE_ENV";
-  return process.env[nodeEnvKey] !== "production";
+  const env = Reflect.get(process, "env") as Record<string, string | undefined>;
+  return env.NODE_ENV !== "production";
 }
 
 async function buildDevelopmentWorkerAsset(entrypoint: string, assetName: string): Promise<string> {
@@ -55,6 +56,20 @@ async function serveWorkerAsset(routePath: string, entrypoint: string, assetFile
   });
 }
 
+function serveStylesheet(): Response {
+  const stylesheetUrl = isDevelopmentMode()
+    ? new URL("../public/styles.css", import.meta.url)
+    : new URL("./styles.css", import.meta.url);
+  return new Response(Bun.file(stylesheetUrl), {
+    headers: {
+      "Content-Type": "text/css; charset=utf-8",
+      "Cache-Control": isDevelopmentMode()
+        ? "no-store"
+        : "public, max-age=31536000, immutable",
+    },
+  });
+}
+
 const server = Bun.serve({
   port: Number.parseInt(process.env.PORT ?? "3000", 10),
   development: isDevelopmentMode()
@@ -67,6 +82,7 @@ const server = Bun.serve({
     "/": gamePage,
     "/bench": benchPage,
     "/lod-lab": lodLabPage,
+    [STYLESHEET_ROUTE]: serveStylesheet,
     [PROCEDURAL_WORKER_ROUTE]: () =>
       serveWorkerAsset(PROCEDURAL_WORKER_ROUTE, "./src/client/procedural-generation-worker.ts", "procedural-generation-worker.js"),
     [CHUNK_MESHING_WORKER_ROUTE]: () =>

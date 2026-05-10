@@ -12,6 +12,8 @@ import {
   sampleRpgEncounterMeters,
   type RpgEncounterSample,
 } from "../src/engine/rpg-encounters.ts";
+import { sampleRpgEncounterSiteWorldUnits } from "../src/engine/rpg-encounter-sites.ts";
+import { metersToWorldUnits } from "../src/engine/scale.ts";
 import {
   WORLD_ATLAS,
   type AtlasCaveSystemId,
@@ -132,6 +134,55 @@ test("cave anchors add cave-specific pressure, mood, factions, and flavor", () =
     expect(sample.cavePressure).toBeGreaterThan(0.1);
     expect(sample.pressure).toBeGreaterThan(0.45);
   }
+});
+
+test("mob encounter sites are deterministic anchored signs inside local cells", () => {
+  const worldX = metersToWorldUnits(-1_240);
+  const worldZ = metersToWorldUnits(-2_600);
+  const encounter = sampleRpgEncounterMeters(-1_240, -2_600);
+  const first = sampleRpgEncounterSiteWorldUnits(worldX, worldZ, encounter);
+  const second = sampleRpgEncounterSiteWorldUnits(worldX, worldZ, encounter);
+  const cellSize = metersToWorldUnits(48);
+
+  expect(second).toEqual(first);
+  expect(first.x).toBeGreaterThanOrEqual(first.cellX * cellSize);
+  expect(first.x).toBeLessThan((first.cellX + 1) * cellSize);
+  expect(first.z).toBeGreaterThanOrEqual(first.cellZ * cellSize);
+  expect(first.z).toBeLessThan((first.cellZ + 1) * cellSize);
+  expect(first.x).not.toBe(worldX);
+  expect(first.z).not.toBe(worldZ);
+  expect(["mob-spoor", "mob-nest", "mob-lair"]).toContain(first.role);
+  expect(first.name).toContain("Sign");
+  expect(first.clueLabel.length).toBeGreaterThan(0);
+  expect(first.fieldNote).toContain("sign is");
+});
+
+test("mob encounter sites turn cave kwama pressure into lair signs", () => {
+  const cave = WORLD_ATLAS.caveSystems.find((system) => system.id === "ash-kwama-ravines")!;
+  const encounter = sampleRpgEncounterMeters(cave.validationAnchor.x, cave.validationAnchor.z);
+  const site = sampleRpgEncounterSiteWorldUnits(
+    metersToWorldUnits(cave.validationAnchor.x),
+    metersToWorldUnits(cave.validationAnchor.z),
+    encounter,
+  );
+
+  expect(topFaction(encounter)).toBe("kwama-brood");
+  expect(site.role).toBe("mob-lair");
+  expect(site.name).toContain("Lair Sign");
+  expect(site.clueLabel).toBe("fresh lair sign");
+  expect(site.fieldNote).toContain("Kwama Brood");
+  expect(site.fieldNote).toContain("den");
+  expect(site.priority).toBeGreaterThanOrEqual(8);
+});
+
+test("low-pressure encounter sites stay as spoor instead of lairs", () => {
+  const encounter = sampleRpgEncounterMeters(570, 2_080);
+  const site = sampleRpgEncounterSiteWorldUnits(metersToWorldUnits(570), metersToWorldUnits(2_080), encounter);
+
+  expect(encounter.routeId).toBe("inner-sea-shelf-road");
+  expect(encounter.pressure).toBeLessThan(0.72);
+  expect(site.role).toBe("mob-spoor");
+  expect(site.clueLabel).toBe("passing spoor");
 });
 
 function topFaction(sample: RpgEncounterSample): string | null {

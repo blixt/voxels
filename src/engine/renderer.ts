@@ -32,6 +32,7 @@ struct Uniforms {
   sky_horizon_color: vec4<f32>,
   sky_cloud_color: vec4<f32>,
   sky_params: vec4<f32>,
+  sky_celestial_params: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -134,6 +135,9 @@ fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
   let horizon_blend = smoothstep(0.05, 0.95, y);
   let ashfall = clamp(uniforms.sky_params.z, 0.0, 1.0);
   let fungal_glow = clamp(uniforms.sky_params.w, 0.0, 1.0);
+  let sun_glow = clamp(uniforms.sky_celestial_params.x, 0.0, 1.0);
+  let moon_glow = clamp(uniforms.sky_celestial_params.y, 0.0, 1.0);
+  let star_intensity = clamp(uniforms.sky_celestial_params.z, 0.0, 1.0);
   let high_storm = mix(uniforms.sky_top_color.rgb, vec3<f32>(0.10, 0.10, 0.11), ashfall * 0.30);
   let horizon_glow = mix(uniforms.sky_horizon_color.rgb, uniforms.sky_cloud_color.rgb, ashfall * 0.18 + fungal_glow * 0.16);
   let base = mix(horizon_glow, high_storm, horizon_blend);
@@ -146,6 +150,23 @@ fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
   let streak_noise = sky_hash(floor(input.uv * vec2<f32>(36.0, 9.0) + vec2<f32>(11.0, 3.0)));
   let cloud_texture = 0.48 + wide_noise * 0.34 + streak_noise * 0.22;
   let cloud_strength = clamp(uniforms.sky_params.x * band_mask * cloud_texture * (0.72 + ashfall * 0.34), 0.0, 0.92);
+  let cloud_occlusion = clamp(uniforms.sky_params.x * 0.72 + ashfall * 0.44, 0.0, 1.0);
+
+  let sun_pos = vec2<f32>(0.50 + uniforms.light_direction.x * 0.42, 0.18 + (1.0 - clamp(-uniforms.light_direction.y, 0.0, 1.0)) * 0.54);
+  let sun_distance = distance(input.uv, sun_pos);
+  let sun_disc = (1.0 - smoothstep(0.010, 0.030, sun_distance)) * sun_glow * (1.0 - cloud_occlusion * 0.62);
+  let sun_halo = (1.0 - smoothstep(0.030, 0.280, sun_distance)) * sun_glow * (1.0 - cloud_occlusion * 0.48);
+
+  let moon_pos = vec2<f32>(0.50 - uniforms.light_direction.x * 0.36, 0.68 + clamp(-uniforms.light_direction.y, 0.0, 1.0) * 0.16);
+  let moon_distance = distance(input.uv, moon_pos);
+  let moon_disc = (1.0 - smoothstep(0.009, 0.024, moon_distance)) * moon_glow * (1.0 - cloud_occlusion * 0.70);
+  let moon_halo = (1.0 - smoothstep(0.025, 0.210, moon_distance)) * moon_glow * (1.0 - cloud_occlusion * 0.58);
+
+  let star_cell = floor(input.uv * vec2<f32>(160.0, 88.0));
+  let star_noise = sky_hash(star_cell);
+  let star_twinkle = sky_hash(star_cell + vec2<f32>(31.0, 17.0));
+  let star_mask = smoothstep(0.990, 0.999, star_noise);
+  let star_field = star_mask * star_intensity * (0.55 + star_twinkle * 0.45) * smoothstep(0.30, 0.82, y) * (1.0 - cloud_occlusion);
 
   let ash_shelf = ashfall * smoothstep(0.18, 0.62, y) * (1.0 - smoothstep(0.74, 0.96, y));
   let shelf_mask = ashfall
@@ -168,6 +189,11 @@ fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
   let shelf_tint = mix(vec3<f32>(0.24, 0.22, 0.19), uniforms.fog_color.rgb, 0.34 + shelf_noise * 0.16);
   let far_haze = (1.0 - smoothstep(0.02, 0.38, y)) * (0.18 + ashfall * 0.28 + fungal_glow * 0.10);
   var sky = mix(base, storm_tint, cloud_strength);
+  sky += vec3<f32>(1.00, 0.64, 0.30) * sun_halo * 0.36;
+  sky += vec3<f32>(1.00, 0.88, 0.56) * sun_disc * 0.54;
+  sky += vec3<f32>(0.52, 0.63, 0.82) * moon_halo * 0.20;
+  sky += vec3<f32>(0.74, 0.82, 0.95) * moon_disc * 0.32;
+  sky += vec3<f32>(0.76, 0.84, 0.98) * star_field * 0.42;
   sky = mix(sky, shelf_tint, clamp(shelf_mask * (0.34 + shelf_noise * 0.28), 0.0, 0.62));
   sky = mix(sky, uniforms.fog_color.rgb, clamp(far_haze, 0.0, 0.54));
   sky = mix(sky, vec3<f32>(0.08, 0.08, 0.075), clamp(ash_streaks, 0.0, 0.30));
@@ -331,7 +357,7 @@ export class WebGpuVoxelRenderer {
   private readonly uniformBuffer: GPUBuffer;
   private readonly uniformBindGroup: GPUBindGroup;
   private readonly resources = new Map<object, GpuChunkResources>();
-  private readonly uniformData = new Float32Array(52);
+  private readonly uniformData = new Float32Array(56);
   private depthTexture: GPUTexture | null = null;
   private depthView: GPUTextureView | null = null;
   private resourceSyncRevision = 0;
@@ -347,7 +373,7 @@ export class WebGpuVoxelRenderer {
     this.timestampQuerySupported = device.features.has("timestamp-query");
     const shaderModule = device.createShaderModule({ code: SHADER_SOURCE });
     const uniformBuffer = device.createBuffer({
-      size: 208,
+      size: 224,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     const bindGroupLayout = device.createBindGroupLayout({
@@ -837,13 +863,16 @@ export class WebGpuVoxelRenderer {
     this.lastCameraPosition = cameraPosition;
     const uniformData = this.uniformData;
     uniformData.set(viewProjection, 0);
-    uniformData[16] = LIGHT_DIRECTION[0];
-    uniformData[17] = LIGHT_DIRECTION[1];
-    uniformData[18] = LIGHT_DIRECTION[2];
+    const skyWeather = resolveSkyWeatherEnvironment(renderEnvironment);
+    const lightDirection = skyWeather.lightDirection ?? LIGHT_DIRECTION;
+    const lightingTerms = skyWeather.lightingTerms ?? LIGHTING_TERMS;
+    uniformData[16] = lightDirection[0];
+    uniformData[17] = lightDirection[1];
+    uniformData[18] = lightDirection[2];
     uniformData[19] = 0;
-    uniformData[20] = LIGHTING_TERMS[0];
-    uniformData[21] = LIGHTING_TERMS[1];
-    uniformData[22] = LIGHTING_TERMS[2];
+    uniformData[20] = lightingTerms[0];
+    uniformData[21] = lightingTerms[1];
+    uniformData[22] = lightingTerms[2];
     uniformData[23] = 0;
     uniformData[24] = cameraPosition[0];
     uniformData[25] = cameraPosition[1];
@@ -857,7 +886,6 @@ export class WebGpuVoxelRenderer {
     uniformData[33] = renderEnvironment.fogEndDistance;
     uniformData[34] = 0;
     uniformData[35] = 0;
-    const skyWeather = resolveSkyWeatherEnvironment(renderEnvironment);
     uniformData[36] = skyWeather.skyTopColorRgba[0] / 255;
     uniformData[37] = skyWeather.skyTopColorRgba[1] / 255;
     uniformData[38] = skyWeather.skyTopColorRgba[2] / 255;
@@ -874,6 +902,10 @@ export class WebGpuVoxelRenderer {
     uniformData[49] = skyWeather.skyCloudBand;
     uniformData[50] = skyWeather.ashfallIntensity;
     uniformData[51] = skyWeather.fungalGlowIntensity;
+    uniformData[52] = skyWeather.sunGlowIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.sunGlowIntensity ?? 0;
+    uniformData[53] = skyWeather.moonGlowIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.moonGlowIntensity ?? 0;
+    uniformData[54] = skyWeather.starIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.starIntensity ?? 0;
+    uniformData[55] = 0;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
 
@@ -1086,6 +1118,8 @@ function resolveSkyWeatherEnvironment(renderEnvironment: RenderEnvironment): Sky
   const skyHorizonColorRgba = atmosphere.skyHorizonColorRgba ?? renderEnvironment.clearColorRgba;
   const skyCloudColorRgba = atmosphere.skyCloudColorRgba ?? renderEnvironment.fogColorRgba;
   return {
+    lightDirection: atmosphere.lightDirection,
+    lightingTerms: atmosphere.lightingTerms,
     skyTopColorRgba,
     skyHorizonColorRgba,
     skyCloudColorRgba,
@@ -1093,6 +1127,9 @@ function resolveSkyWeatherEnvironment(renderEnvironment: RenderEnvironment): Sky
     skyCloudBand: clamp01(atmosphere.skyCloudBand ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.skyCloudBand),
     ashfallIntensity: clamp01(atmosphere.ashfallIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.ashfallIntensity),
     fungalGlowIntensity: clamp01(atmosphere.fungalGlowIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.fungalGlowIntensity),
+    sunGlowIntensity: clamp01(atmosphere.sunGlowIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.sunGlowIntensity ?? 0),
+    moonGlowIntensity: clamp01(atmosphere.moonGlowIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.moonGlowIntensity ?? 0),
+    starIntensity: clamp01(atmosphere.starIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.starIntensity ?? 0),
   };
 }
 

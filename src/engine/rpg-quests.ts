@@ -7,6 +7,11 @@ import {
 import { describeDiscovery } from "./discovery-catalog.ts";
 import type { LandmarkId } from "./procedural-generator.ts";
 import type { SkillId } from "./skill-journal.ts";
+import type {
+  TravelGoalDefinition,
+  TravelGoalStepDefinition,
+  TravelGoalStepKind,
+} from "./travel-goals.ts";
 
 export const RPG_QUESTS_VERSION = 1;
 
@@ -63,6 +68,27 @@ export interface RpgQuestPlan {
     landmarkId: string | null;
   };
   hooks: readonly RpgQuestHookSeed[];
+}
+
+export interface RpgQuestExplorationSignal {
+  nearCave: boolean;
+  hasFaction: boolean;
+  hasLandmark: boolean;
+  completedObjectiveIdsByHookId?: Readonly<Record<string, readonly string[]>>;
+}
+
+export interface RpgQuestHookSummary {
+  hookId: string;
+  kind: RpgQuestHookKind;
+  title: string;
+  rumorText: string;
+  mood: string;
+  faction: string | null;
+  objectiveId: string;
+  objectiveKind: RpgQuestObjectiveKind;
+  objectiveTargetId: string;
+  objectiveLabel: string;
+  objectiveJournalText: string;
 }
 
 interface RegionQuestProfile {
@@ -175,6 +201,68 @@ export function planRpgQuestHooks(input: RpgQuestPlanningInput): RpgQuestPlan {
   };
 }
 
+export function buildTravelGoalFromQuestHook(hook: RpgQuestHookSeed): TravelGoalDefinition | null {
+  const steps = hook.objectives.flatMap((objective): TravelGoalStepDefinition[] => {
+    const kind = travelGoalStepKindForQuestObjective(objective.kind);
+    if (!kind) {
+      return [];
+    }
+    return [{
+      id: objective.id,
+      kind,
+      targetId: objective.targetId,
+      label: objective.label,
+    }];
+  });
+  if (steps.length === 0) {
+    return null;
+  }
+  return {
+    id: hook.id,
+    routeId: hook.routeId ?? hook.regionId,
+    title: hook.title,
+    journalText: hook.rumorText,
+    steps,
+  };
+}
+
+export function selectRpgQuestHookForExploration(
+  plan: RpgQuestPlan,
+  signal: RpgQuestExplorationSignal,
+): RpgQuestHookSummary | null {
+  const preferredKind: RpgQuestHookKind = signal.nearCave
+    ? "cave-rumor"
+    : signal.hasFaction
+    ? "faction-errand"
+    : signal.hasLandmark
+    ? "environmental-mystery"
+    : "pilgrimage";
+  const hook = plan.hooks.find((candidate) => candidate.kind === preferredKind)
+    ?? plan.hooks.find((candidate) => candidate.kind === "pilgrimage")
+    ?? plan.hooks[0]
+    ?? null;
+  if (!hook) {
+    return null;
+  }
+  const completedObjectiveIds = new Set(signal.completedObjectiveIdsByHookId?.[hook.id] ?? []);
+  const objective = hook.objectives.find((candidate) => !completedObjectiveIds.has(candidate.id))
+    ?? hook.objectives[hook.objectives.length - 1]
+    ?? null;
+  return {
+    hookId: hook.id,
+    kind: hook.kind,
+    title: hook.title,
+    rumorText: hook.rumorText,
+    mood: hook.mood,
+    faction: hook.faction,
+    objectiveId: objective?.id ?? `${hook.id}:local-sign`,
+    objectiveKind: objective?.kind ?? "inspect",
+    objectiveTargetId: objective?.targetId ?? hook.landmarkId ?? hook.routeId ?? hook.regionId,
+    objectiveLabel: objective?.label ?? "Read the local signs",
+    objectiveJournalText: objective?.journalText ?? hook.rumorText,
+  };
+}
+
 function buildPilgrimageHook(
   regionId: AtlasRegionId,
   routeId: AtlasRouteId | null,
@@ -207,7 +295,7 @@ function buildPilgrimageHook(
       },
       {
         id: objectiveId(id, "read-landmark"),
-        kind: "interpret",
+        kind: "inspect",
         targetId: landmarkId ?? regionId,
         label: `Interpret the ${landmarkName(landmarkId)}`,
         journalText: `Read the landmark as a signpost instead of a resource node.`,
@@ -453,4 +541,15 @@ function titleCaseIdentifier(value: string): string {
 
 function slug(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "seed";
+}
+
+function travelGoalStepKindForQuestObjective(kind: RpgQuestObjectiveKind): TravelGoalStepKind | null {
+  switch (kind) {
+    case "visit":
+    case "inspect":
+    case "listen":
+    case "interpret":
+    case "report":
+      return kind;
+  }
 }

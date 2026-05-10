@@ -1,9 +1,39 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="game-page-root">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Voxels Game</title>
+    <style>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #0a1012;
+      }
+
+      .shell,
+      .game-shell,
+      .game-overlay {
+        position: fixed;
+        inset: 0;
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+      }
+
+      .game-viewport {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        background: #0a1012;
+      }
+    </style>
+    <style>
+      @import url("/styles.css");
+    </style>
     <link rel="stylesheet" href="../../public/styles.css" />
   </head>
   <body class="page-game">

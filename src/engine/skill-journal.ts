@@ -101,6 +101,16 @@ export class SkillJournal {
     return this.getSnapshot();
   }
 
+  observeSkillAwards(awards: readonly { skillId: SkillId; xp: number }[]): SkillJournalSnapshot {
+    for (const award of awards) {
+      if (!isSkillId(award.skillId) || !Number.isFinite(award.xp) || award.xp <= 0) {
+        continue;
+      }
+      this.addXp(award.skillId, Math.floor(award.xp));
+    }
+    return this.getSnapshot();
+  }
+
   reset(): void {
     for (const definition of SKILL_DEFINITIONS) {
       this.xpBySkill.set(definition.id, 0);
@@ -213,4 +223,8 @@ function xpForLevel(level: number): number {
     return 0;
   }
   return Math.round(80 * (level - 1) ** 1.55);
+}
+
+function isSkillId(value: string): value is SkillId {
+  return SKILL_DEFINITIONS.some((definition) => definition.id === value);
 }

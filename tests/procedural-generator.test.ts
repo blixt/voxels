@@ -1065,6 +1065,35 @@ test("WorldAtlas routes and cave anchors visibly steer generator shaping", () =>
   expect(caveVoidAnchors).toBeGreaterThanOrEqual(Math.floor(caveAnchors.length * 0.72));
 });
 
+test("cave anchor entrances expose visible dry surface tells", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const caveMouthLandmarks = new Set([
+    "basalt_spire",
+    "buried_ribs",
+    "crystal_cluster",
+    "kwama_mound",
+    "root_stump",
+    "scree_fan",
+    "stone_tor",
+  ]);
+
+  for (const anchor of getAtlasCaveAnchors().filter((candidate) => candidate.kind === "entrance")) {
+    const probe = generator.sampleBiomeProbe(anchor.point.x * 10, anchor.point.z * 10);
+
+    expect(probe.fields.atlasCaveAnchorId).toBe(anchor.id);
+    expect(probe.fields.atlasCaveSystemId).toBe(anchor.caveSystemId);
+    expect(probe.fields.atlasCaveAnchorKind).toBe("entrance");
+    expect(probe.fields.atlasCaveAnchorX).toBe(anchor.point.x * 10);
+    expect(probe.fields.atlasCaveAnchorZ).toBe(anchor.point.z * 10);
+    expect(probe.fields.atlasCaveCore ?? 0).toBeGreaterThan(0.9);
+    if (probe.waterTopY !== null) {
+      expect(probe.waterTopY).toBeLessThanOrEqual(probe.surfaceY);
+    }
+    expect(probe.landmarkId).not.toBeNull();
+    expect(caveMouthLandmarks.has(probe.landmarkId!)).toBe(true);
+  }
+});
+
 test("soft biome edges stay within a walkable transition budget", () => {
   const generator = new ProceduralWorldGenerator(1337);
   const softPairs = new Set([

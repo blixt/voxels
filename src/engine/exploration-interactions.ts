@@ -23,6 +23,7 @@ export interface ExplorationInteractionCandidate {
   priority?: number;
   prompts: readonly (ExplorationInteractionVerb | ExplorationInteractionPrompt)[];
   flavorText?: string | null;
+  skillAwards?: ExplorationEventInput["skillAwards"];
   payload?: ExplorationEventInput["payload"];
 }
 
@@ -160,6 +161,7 @@ function normalizePrompts(
         name: target.name,
         flavorText: typeof candidate.flavorText === "string" ? candidate.flavorText : null,
         worldPosition: candidate.worldPosition,
+        ...(candidate.skillAwards !== undefined ? { skillAwards: candidate.skillAwards } : {}),
         ...(candidate.payload !== undefined ? { payload: candidate.payload } : {}),
       },
     });

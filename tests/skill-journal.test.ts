@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 
+import { ExplorationEventLog } from "../src/engine/exploration-events.ts";
 import { SkillJournal } from "../src/engine/skill-journal.ts";
 import type { DiscoveryEvent } from "../src/engine/exploration-journal.ts";
 
@@ -48,6 +49,50 @@ test("skill journal awards usage XP from surface and underground travel", () => 
   expect(snapshot.skills.find((skill) => skill.id === "cartography")?.totalXp).toBe(2);
   expect(snapshot.skills.find((skill) => skill.id === "spelunking")?.totalXp).toBe(2);
   expect(snapshot.travelMeters).toBe(96);
+});
+
+test("skill journal applies explicit event skill awards without changing travel counters", () => {
+  const journal = new SkillJournal();
+
+  const snapshot = journal.observeSkillAwards([
+    { skillId: "lore", xp: 25 },
+    { skillId: "cartography", xp: 20 },
+    { skillId: "naturalist", xp: -10 },
+  ]);
+
+  expect(snapshot.skills.find((skill) => skill.id === "lore")?.totalXp).toBe(25);
+  expect(snapshot.skills.find((skill) => skill.id === "cartography")?.totalXp).toBe(20);
+  expect(snapshot.skills.find((skill) => skill.id === "naturalist")?.totalXp).toBe(0);
+  expect(snapshot.travelMeters).toBe(0);
+});
+
+test("event log first-read awards advance skills only when the event is accepted", () => {
+  const journal = new SkillJournal();
+  const eventLog = new ExplorationEventLog();
+  const firstEvent = eventLog.record({
+    kind: "read",
+    subjectType: "landmark",
+    subjectId: "velothi_shrine",
+    role: "shrine",
+  });
+  const duplicateEvent = eventLog.record({
+    kind: "read",
+    subjectType: "landmark",
+    subjectId: "velothi_shrine",
+    role: "shrine",
+  });
+
+  if (firstEvent.accepted) {
+    journal.observeSkillAwards(firstEvent.event.skillAwards);
+  }
+  if (duplicateEvent.accepted) {
+    journal.observeSkillAwards(duplicateEvent.event.skillAwards);
+  }
+  const duplicateIgnored = journal.getSnapshot();
+
+  expect(firstEvent.accepted).toBe(true);
+  expect(duplicateEvent.accepted).toBe(false);
+  expect(duplicateIgnored.skills.find((skill) => skill.id === "lore")?.totalXp).toBe(25);
 });
 
 test("skill journal rewards route and shrine discoveries as RPG progression hooks", () => {

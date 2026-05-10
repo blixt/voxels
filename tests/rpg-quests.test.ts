@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 
 import {
+  buildTravelGoalFromQuestHook,
   planRpgQuestHooks,
+  selectRpgQuestHookForExploration,
   type RpgQuestHookSeed,
 } from "../src/engine/rpg-quests.ts";
 
@@ -100,6 +102,98 @@ test("rpg quest text and mood are region specific", () => {
   expect(bitterCoast.hooks[0]?.mood).toContain("blackwater");
   expect(bitterCoast.hooks[1]?.rumorText).toContain("root grotto");
   expect(redMountain.hooks[0]?.mood).not.toBe(bitterCoast.hooks[0]?.mood);
+});
+
+test("rpg quest planner adapts hooks into travel goals", () => {
+  const plan = planRpgQuestHooks({
+    regionId: "red-mountain",
+    routeId: "pilgrim-spine-red",
+    landmarkId: "ash_obelisk",
+  });
+
+  const pilgrimage = requireHook(plan.hooks, "pilgrimage");
+  const caveRumor = requireHook(plan.hooks, "cave-rumor");
+  const goal = buildTravelGoalFromQuestHook(pilgrimage);
+  const caveGoal = buildTravelGoalFromQuestHook(caveRumor);
+
+  expect(goal).toMatchObject({
+    id: "rpgq-pilgrimage-red-mountain-pilgrim-spine-red-ash-obelisk",
+    routeId: "pilgrim-spine-red",
+    title: "Red Mountain Pilgrim Bearings",
+  });
+  expect(goal?.steps.map((step) => [step.kind, step.targetId])).toEqual([
+    ["visit", "pilgrim-spine-red"],
+    ["inspect", "ash_obelisk"],
+  ]);
+  expect(goal?.steps.map((step) => step.kind)).not.toContain("listen");
+  expect(goal?.steps.map((step) => step.kind)).not.toContain("read");
+  expect(goal?.steps.map((step) => step.kind)).not.toContain("use");
+  expect(caveGoal).toMatchObject({
+    id: "rpgq-cave-rumor-red-mountain-pilgrim-spine-red-ash-obelisk",
+    routeId: "pilgrim-spine-red",
+    title: "Rumor of a Lava Tube",
+  });
+  expect(caveGoal?.steps.map((step) => [step.kind, step.targetId])).toEqual([
+    ["listen", "red-mountain"],
+    ["inspect", "ash_obelisk"],
+  ]);
+});
+
+test("rpg quest exploration selector picks context-relevant hooks", () => {
+  const plan = planRpgQuestHooks({
+    regionId: "ashen-badlands",
+    routeId: "ash-gash-pass",
+    landmarkId: "kwama_mound",
+  });
+
+  expect(selectRpgQuestHookForExploration(plan, {
+    nearCave: true,
+    hasFaction: true,
+    hasLandmark: true,
+  })?.kind).toBe("cave-rumor");
+  expect(selectRpgQuestHookForExploration(plan, {
+    nearCave: false,
+    hasFaction: true,
+    hasLandmark: true,
+  })?.kind).toBe("faction-errand");
+  expect(selectRpgQuestHookForExploration(plan, {
+    nearCave: false,
+    hasFaction: false,
+    hasLandmark: true,
+  })?.kind).toBe("environmental-mystery");
+  const fallback = selectRpgQuestHookForExploration(plan, {
+    nearCave: false,
+    hasFaction: false,
+    hasLandmark: false,
+  });
+
+  expect(fallback?.kind).toBe("pilgrimage");
+  expect(fallback?.objectiveLabel.length).toBeGreaterThan(0);
+  expect(fallback?.rumorText).toContain("Ashen Badlands");
+});
+
+test("rpg quest exploration selector advances to the next incomplete objective", () => {
+  const plan = planRpgQuestHooks({
+    regionId: "ashen-badlands",
+    routeId: "ash-gash-pass",
+    landmarkId: "kwama_mound",
+  });
+  const caveRumor = requireHook(plan.hooks, "cave-rumor");
+
+  const selected = selectRpgQuestHookForExploration(plan, {
+    nearCave: true,
+    hasFaction: false,
+    hasLandmark: true,
+    completedObjectiveIdsByHookId: {
+      [caveRumor.id]: [caveRumor.objectives[0]!.id],
+    },
+  });
+
+  expect(selected).toMatchObject({
+    kind: "cave-rumor",
+    objectiveKind: "inspect",
+    objectiveTargetId: "kwama_mound",
+  });
 });
 
 function requireHook(

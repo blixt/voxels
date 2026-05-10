@@ -34,6 +34,13 @@ import {
   type ExplorationInteractionVerb,
 } from "../engine/exploration-interactions.ts";
 import {
+  ExplorationEventLog,
+  type ExplorationEventLogSnapshot,
+  type ExplorationEventLogState,
+} from "../engine/exploration-events.ts";
+import { summarizeFieldKit } from "../engine/field-kit.ts";
+import { summarizeBestiary } from "../engine/bestiary-journal.ts";
+import {
   SkillJournal,
   type SkillId,
   type SkillJournalState,
@@ -41,11 +48,23 @@ import {
 } from "../engine/skill-journal.ts";
 import {
   RouteJournal,
+  type TravelGoalProgressInput,
+  type TravelGoalProgressResult,
   type RouteJournalSnapshot,
   type RouteJournalState,
   type TravelGoalDefinition,
   type TravelGoalSnapshot,
+  type TravelGoalStepKind,
 } from "../engine/travel-goals.ts";
+import {
+  buildTravelGoalFromQuestHook,
+  planRpgQuestHooks,
+  selectRpgQuestHookForExploration,
+  type RpgQuestHookSummary,
+} from "../engine/rpg-quests.ts";
+import {
+  WORLD_ATLAS,
+} from "../engine/world-atlas.ts";
 import {
   describeExplorationSkillEffects,
   type ExplorationSkillEffects,
@@ -112,6 +131,11 @@ import {
   type AmbientWorldProfile,
 } from "../engine/ambient-environment.ts";
 import {
+  applyWorldAtmosphere,
+  sampleWorldSystems,
+  type WorldSystemSnapshot,
+} from "../engine/world-systems.ts";
+import {
   buildUnderwaterRenderEnvironment,
   type RenderEnvironment,
 } from "../engine/water-visuals.ts";
@@ -129,6 +153,8 @@ import {
   sampleRpgEncounterWorldUnits,
   type RpgEncounterSample,
 } from "../engine/rpg-encounters.ts";
+import { sampleRpgEncounterSiteWorldUnits } from "../engine/rpg-encounter-sites.ts";
+import { sampleForageSiteWorldUnits } from "../engine/forage-sites.ts";
 
 const MAX_DELTA_SECONDS = 0.05;
 const HUD_PUSH_INTERVAL_MS = 120;
@@ -148,6 +174,7 @@ const MOVING_MAX_LOD_WORK_MS_PER_FRAME = 4;
 const MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME = 6;
 const SYNC_NEAR_MESH_RADIUS_CHUNKS = 3;
 const BOOTSTRAP_PLAYABLE_COLUMN_RADIUS_CHUNKS = 2;
+const CAVE_MOUTH_INTERACTION_CORE_THRESHOLD = 0.55;
 const DISCOVERY_SAMPLE_INTERVAL_MS = 250;
 const DISCOVERY_SAMPLE_MOVE_THRESHOLD_WORLD_UNITS = metersToWorldUnits(0.8);
 const TRAVEL_CONTEXT_SAMPLE_INTERVAL_MS = 250;
@@ -179,7 +206,7 @@ const ROUTE_LANDMARK_IDS = new Set([
   "ashlander_travel_pack",
 ]);
 const DEFAULT_TRAVEL_GOAL_ID = "first-bearings";
-const TRAVEL_GOALS = [
+const BASE_TRAVEL_GOALS = [
   {
     id: DEFAULT_TRAVEL_GOAL_ID,
     routeId: "pilgrim-road",
@@ -201,6 +228,10 @@ const TRAVEL_GOALS = [
     ],
   },
 ] as const satisfies readonly TravelGoalDefinition[];
+const TRAVEL_GOALS: readonly TravelGoalDefinition[] = [
+  ...BASE_TRAVEL_GOALS,
+  ...buildQuestTravelGoals(),
+];
 const LANDMARK_SAMPLE_OFFSET_CACHE = new Map<string, ReadonlyArray<readonly [number, number]>>();
 
 export interface GameHudSnapshot {
@@ -243,16 +274,41 @@ export interface GameHudSnapshot {
   ambientProfileId: string;
   ambientProfileLabel: string;
   ambientFogEndMeters: number;
+  timeOfDayLabel: string;
+  worldClockLabel: string;
+  worldDay: number;
+  worldDaylight: number;
+  weatherLabel: string;
+  weatherIntensity: number;
+  floraLabel: string;
+  faunaLabel: string;
+  lootSignalLabel: string;
+  hazardLabel: string;
+  areaCoherenceLabel: string;
   encounterMoodLabel: string;
   encounterPressureLabel: string;
   encounterFactionLabel: string;
   encounterFlavorLabel: string;
+  bestiarySightingCount: number;
+  bestiaryEntryCount: number;
+  bestiarySummaryLabel: string;
+  bestiaryLastSightingLabel: string;
+  bestiaryLastNoteLabel: string;
+  bestiaryDominantFactionLabel: string;
   activePlaceName: string;
   activeRouteName: string;
   activeRouteProgressLabel: string;
   activeTravelGoalTitle: string;
   activeTravelGoalStepLabel: string;
   activeTravelGoalProgressRatio: number;
+  activeQuestHookId: string | null;
+  activeQuestHookKind: string | null;
+  activeQuestObjectiveKind: string | null;
+  activeQuestTitle: string;
+  activeQuestObjectiveLabel: string;
+  activeQuestRumorText: string;
+  activeQuestMoodLabel: string;
+  activeQuestFactionLabel: string;
   travelContext: "surface" | "underground";
   travelContextLabel: string;
   interactionTargetName: string;
@@ -265,6 +321,14 @@ export interface GameHudSnapshot {
   discoveredRegionalVariantCount: number;
   discoveredLandmarkCount: number;
   discoveredAncientLandmarkCount: number;
+  scoutedMobTrailCount: number;
+  lootedCacheCount: number;
+  scoutedCaveMouthCount: number;
+  fieldKitFindCount: number;
+  fieldKitSummaryLabel: string;
+  fieldKitLastFindLabel: string;
+  fieldKitLastNoteLabel: string;
+  fieldKitDominantCategoryLabel: string;
   landmarkScanRadiusMeters: number;
   landmarkScanSampleCount: number;
   surfaceTravelSpeedMultiplier: number;
@@ -380,6 +444,7 @@ interface CurrentWorldProbeContext {
 export interface ProgressStateSnapshot {
   version: 1;
   discovery: ExplorationJournalState;
+  events?: ExplorationEventLogState;
   skills: SkillJournalState;
   routes: RouteJournalState;
 }
@@ -946,6 +1011,7 @@ export class GameController {
     createMeshMaterialLut(this.world.palette, (materialIndex) => this.world.isWaterMaterial(materialIndex)),
   );
   readonly explorationJournal = new ExplorationJournal();
+  readonly explorationEventLog = new ExplorationEventLog();
   readonly skillJournal = new SkillJournal();
   readonly routeJournal = new RouteJournal(TRAVEL_GOALS);
 
@@ -1047,6 +1113,7 @@ export class GameController {
   private lastTravelContext: "surface" | "underground" = "surface";
   private lastInteractionLabel = "No interaction yet";
   private readonly bootstrapBenchmarkStartedAt = performance.now();
+  private readonly worldClockStartedAt = performance.now();
   private readonly bootstrapBenchmarkSamples: BootstrapBenchmarkSample[] = [];
   private bootstrapPlayableReady = false;
   private bootstrapBenchmarkComplete = false;
@@ -1127,9 +1194,14 @@ export class GameController {
     const explorationSkillEffects = resolveExplorationSkillEffects(skills);
     const routeSnapshot = this.routeJournal.getSnapshot();
     const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+    const worldSystems = this.sampleWorldSystems(currentWorld, encounter);
     const primaryFaction = encounter.factionHints[0]?.factionId ?? null;
     const scoutResult = describeRpgEncounterScoutResult(encounter);
+    const eventLog = this.explorationEventLog.getSnapshot();
+    const fieldKit = summarizeFieldKit(eventLog);
+    const bestiary = summarizeBestiary(eventLog);
     const activeExplorationHud = this.buildActiveExplorationHudState(currentWorld, discovery, routeSnapshot, encounter);
+    const activeQuest = this.selectActiveQuestHook(currentWorld, discovery, routeSnapshot, encounter, primaryFaction);
     const bootstrap = this.getBootstrapReadiness();
     const ambientProfile = currentWorld.ambientProfile;
     const travelContextLabel = this.lastTravelContext === "underground" ? "Underground route" : "Surface route";
@@ -1182,6 +1254,17 @@ export class GameController {
       ambientProfileId: ambientProfile.id,
       ambientProfileLabel: ambientProfile.label,
       ambientFogEndMeters: worldUnitsToMeters(ambientProfile.fogEndDistance),
+      timeOfDayLabel: worldSystems.clock.phaseLabel,
+      worldClockLabel: worldSystems.clock.clockLabel,
+      worldDay: worldSystems.clock.day,
+      worldDaylight: worldSystems.clock.daylight,
+      weatherLabel: worldSystems.weather.label,
+      weatherIntensity: worldSystems.weather.intensity,
+      floraLabel: worldSystems.area.floraLabel,
+      faunaLabel: worldSystems.area.faunaLabel,
+      lootSignalLabel: worldSystems.area.lootSignalLabel,
+      hazardLabel: worldSystems.area.hazardLabel,
+      areaCoherenceLabel: worldSystems.area.coherenceLabel,
       encounterMoodLabel: formatEncounterMoodForTravelContext(
         describeRpgEncounterMood(encounter.moodId),
         this.lastTravelContext,
@@ -1189,12 +1272,26 @@ export class GameController {
       encounterPressureLabel: scoutResult.pressureLabel,
       encounterFactionLabel: primaryFaction ? describeRpgEncounterFaction(primaryFaction) : "No dominant faction",
       encounterFlavorLabel: encounter.flavorTags.slice(0, 2).map(formatEncounterFlavorTag).join(" • "),
+      bestiarySightingCount: bestiary.totalSightings,
+      bestiaryEntryCount: bestiary.entryCount,
+      bestiarySummaryLabel: bestiary.summaryLabel,
+      bestiaryLastSightingLabel: bestiary.lastSightingLabel,
+      bestiaryLastNoteLabel: bestiary.lastFieldNoteLabel,
+      bestiaryDominantFactionLabel: bestiary.dominantFactionLabel,
       activePlaceName: activeExplorationHud.activePlaceName,
       activeRouteName: activeExplorationHud.activeRouteName,
       activeRouteProgressLabel: activeExplorationHud.activeRouteProgressLabel,
       activeTravelGoalTitle: activeExplorationHud.activeTravelGoalTitle,
       activeTravelGoalStepLabel: activeExplorationHud.activeTravelGoalStepLabel,
       activeTravelGoalProgressRatio: activeExplorationHud.activeTravelGoalProgressRatio,
+      activeQuestHookId: activeQuest?.hookId ?? null,
+      activeQuestHookKind: activeQuest?.kind ?? null,
+      activeQuestObjectiveKind: activeQuest?.objectiveKind ?? null,
+      activeQuestTitle: activeQuest?.title ?? "No local rumor",
+      activeQuestObjectiveLabel: activeQuest?.objectiveLabel ?? "Keep moving",
+      activeQuestRumorText: activeQuest?.rumorText ?? "No local rumor is strong enough to follow yet.",
+      activeQuestMoodLabel: activeQuest?.mood ?? "No quest mood",
+      activeQuestFactionLabel: activeQuest?.faction ?? "No quest faction",
       travelContext: this.lastTravelContext,
       travelContextLabel,
       interactionTargetName: activeExplorationHud.interactionTargetName,
@@ -1209,6 +1306,14 @@ export class GameController {
       discoveredAncientLandmarkCount: discovery.discoveredLandmarkIds
         .filter((landmarkId) => ANCIENT_LANDMARK_IDS.has(landmarkId))
         .length,
+      scoutedMobTrailCount: countMobSignEvents(eventLog),
+      lootedCacheCount: countEventsBySubjectRole(eventLog, "object", "loot-cache"),
+      scoutedCaveMouthCount: countEventsBySubjectRole(eventLog, "zone", "cave-mouth"),
+      fieldKitFindCount: fieldKit.totalFinds,
+      fieldKitSummaryLabel: fieldKit.summaryLabel,
+      fieldKitLastFindLabel: fieldKit.lastFindLabel,
+      fieldKitLastNoteLabel: fieldKit.lastFieldNoteLabel,
+      fieldKitDominantCategoryLabel: fieldKit.dominantCategoryLabel,
       landmarkScanRadiusMeters: explorationSkillEffects.landmarkScanRadiusMeters,
       landmarkScanSampleCount: buildLandmarkSampleOffsets(explorationSkillEffects).length,
       surfaceTravelSpeedMultiplier: explorationSkillEffects.surfaceTravelSpeedMultiplier,
@@ -1371,8 +1476,13 @@ export class GameController {
     return this.skillJournal.observeDiscoveries(this.explorationJournal.drainPendingSkillDiscoveries());
   }
 
+  getExplorationEventLogSnapshot(): ExplorationEventLogSnapshot {
+    return this.explorationEventLog.getSnapshot();
+  }
+
   resetDiscoveryJournal(): ExplorationJournalSnapshot {
     this.explorationJournal.reset();
+    this.explorationEventLog.reset();
     this.skillJournal.reset();
     this.lastDiscoverySampleFeetPosition = null;
     this.lastDiscoverySampleAt = 0;
@@ -1387,6 +1497,7 @@ export class GameController {
     return {
       version: 1,
       discovery: this.explorationJournal.exportState(),
+      events: this.explorationEventLog.exportState(),
       skills: this.skillJournal.exportState(),
       routes: this.routeJournal.exportState(),
     };
@@ -1394,6 +1505,7 @@ export class GameController {
 
   importProgressState(state: Partial<ProgressStateSnapshot>): ProgressStateSnapshot {
     this.explorationJournal.importState(state.discovery ?? {});
+    this.explorationEventLog.importState(state.events ?? {});
     this.skillJournal.importState(state.skills ?? {});
     this.routeJournal.importState(state.routes ?? {});
     this.routeJournal.startGoal(DEFAULT_TRAVEL_GOAL_ID);
@@ -2904,19 +3016,53 @@ export class GameController {
     const prompt = target?.prompts.find((candidate) => !candidate.disabled) ?? null;
     if (!target || !prompt) {
       const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+      const primaryFaction = encounter.factionHints[0]?.factionId ?? null;
       const scoutResult = describeRpgEncounterScoutResult(encounter);
+      this.explorationEventLog.record({
+        kind: "encounter",
+        subjectType: "mob",
+        subjectId: encounter.factionHints[0]?.factionId ?? encounter.moodId,
+        role: encounter.moodId,
+        name: scoutResult.label,
+        flavorText: scoutResult.detail,
+        worldPosition: [...this.player.feetPosition],
+        repeatable: true,
+        payload: {
+          factionId: encounter.factionHints[0]?.factionId ?? null,
+          pressure: Number(encounter.pressure.toFixed(3)),
+          moodId: encounter.moodId,
+          regionId: encounter.regionId,
+          routeId: encounter.routeId,
+          caveSystemId: encounter.caveSystemId,
+        },
+      });
+      this.observeActiveQuestStep(currentWorld, discovery, encounter, primaryFaction, null, null, ["listen"]);
       this.lastInteractionLabel = `${scoutResult.label}: ${scoutResult.pressureLabel}`;
       this.status = scoutResult.detail;
       this.pushHud(true);
       return;
     }
 
+    const eventResult = this.explorationEventLog.record(prompt.eventInput);
+    if (eventResult.accepted) {
+      this.skillJournal.observeSkillAwards(eventResult.event.skillAwards);
+    }
     const routeId = readPayloadRouteId(prompt.eventInput.payload) ?? routeIdForLandmark(target.id);
-    const result = this.routeJournal.observeProgress({
+    const result = this.observeTravelGoalProgress({
       routeId,
       kind: prompt.verb,
       targetId: target.id,
     });
+    const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+    this.observeActiveQuestStep(
+      currentWorld,
+      discovery,
+      encounter,
+      encounter.factionHints[0]?.factionId ?? null,
+      target.id,
+      routeId,
+      ["listen", "inspect", "interpret", "report"],
+    );
     const completedTitle = result.completedGoalIds
       .map((goalId) => TRAVEL_GOALS.find((goal) => goal.id === goalId)?.title ?? goalId)
       .join(", ");
@@ -2971,7 +3117,7 @@ export class GameController {
     return resolveExplorationInteractionTarget({
       viewerPosition: this.camera.position,
       viewerForward: buildFirstPersonCameraMatrices(this.camera, 1).forward,
-      maxDistanceMeters: 8,
+      maxDistanceMeters: metersToWorldUnits(8),
       candidates: this.buildExplorationInteractionCandidates(currentWorld, discovery),
     });
   }
@@ -2987,6 +3133,11 @@ export class GameController {
     const uniqueLandmarkIds = [...new Set(landmarkIds)];
     const candidates: ExplorationInteractionCandidate[] = [];
     const forward = buildFirstPersonCameraMatrices(this.camera, 1).forward;
+    const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+    const caveMouthCandidate = buildCaveMouthInteractionCandidate(currentWorld, encounter);
+    if (caveMouthCandidate) {
+      candidates.push(caveMouthCandidate);
+    }
     for (const landmarkId of uniqueLandmarkIds) {
       const presentation = describeDiscovery("landmark", landmarkId);
       const routeId = routeIdForLandmark(landmarkId);
@@ -3000,13 +3151,103 @@ export class GameController {
           currentWorld.probe.surfaceY,
           this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.4),
         ],
-        interactionRadiusMeters: 5,
+        interactionRadiusMeters: metersToWorldUnits(5),
         priority: ROUTE_LANDMARK_IDS.has(landmarkId) ? 20 : 4,
         prompts: buildLandmarkInteractionPrompts(landmarkId, presentation.role),
         flavorText: presentation.flavorText,
         payload: routeId ? { routeId } : undefined,
       });
     }
+    const encounterSite = sampleRpgEncounterSiteWorldUnits(
+      this.player.feetPosition[0],
+      this.player.feetPosition[2],
+      encounter,
+    );
+    candidates.push({
+      id: encounterSite.id,
+      subjectType: "mob",
+      name: encounterSite.name,
+      role: encounterSite.role,
+      worldPosition: [
+        encounterSite.x,
+        currentWorld.probe.surfaceY,
+        encounterSite.z,
+      ],
+      interactionRadiusMeters: encounterSite.interactionRadiusWorldUnits,
+      priority: encounterSite.priority,
+      prompts: [{
+        verb: "inspect",
+        label: `Scout ${encounterSite.name}`,
+        description: encounterSite.fieldNote,
+      }],
+      flavorText: encounterSite.fieldNote,
+      skillAwards: [{
+        skillId: "naturalist",
+        xp: 16,
+        reason: "First local encounter site",
+        awardKey: `encounter-site:${encounterSite.id}`,
+        onceOnly: true,
+      }],
+      payload: {
+        siteKind: encounterSite.kind,
+        factionId: encounterSite.factionId,
+        clueLabel: encounterSite.clueLabel,
+        fieldNote: encounterSite.fieldNote,
+        pressure: Number(encounter.pressure.toFixed(3)),
+        moodId: encounter.moodId,
+        regionId: encounter.regionId,
+        routeId: encounter.routeId,
+        caveSystemId: encounter.caveSystemId,
+      },
+    });
+    const worldSystems = sampleWorldSystems(
+      (performance.now() - this.worldClockStartedAt) / 1000,
+      currentWorld.probe,
+      currentWorld.ambientProfile,
+      encounter,
+      this.lastTravelContext,
+    );
+    const forageSite = sampleForageSiteWorldUnits(
+      this.player.feetPosition[0],
+      this.player.feetPosition[2],
+      worldSystems.area,
+    );
+    const forageProbe = this.generator.sampleBiomeProbe(forageSite.x, forageSite.z);
+    candidates.push({
+      id: forageSite.id,
+      subjectType: "object",
+      name: forageSite.name,
+      role: "loot-cache",
+      worldPosition: [
+        forageSite.x,
+        forageProbe.surfaceY,
+        forageSite.z,
+      ],
+      interactionRadiusMeters: forageSite.interactionRadiusWorldUnits,
+      priority: 1,
+      prompts: [{
+        verb: "use",
+        label: worldSystems.area.lootInteractionLabel,
+        description: forageSite.fieldNote,
+      }],
+      flavorText: forageSite.fieldNote,
+      skillAwards: [{
+        skillId: worldSystems.area.lootSkillId,
+        xp: 18,
+        reason: "First local find",
+        awardKey: `loot:${forageSite.id}`,
+        onceOnly: true,
+      }],
+      payload: {
+        lootId: worldSystems.area.lootId,
+        forageSiteRole: forageSite.role,
+        clueLabel: forageSite.clueLabel,
+        fieldNote: forageSite.fieldNote,
+        forageSourceLandmarkId: worldSystems.area.forageSourceLandmarkId,
+        weather: worldSystems.weather.id,
+        hazard: worldSystems.area.hazardLabel,
+      },
+    });
     return candidates;
   }
 
@@ -3828,9 +4069,12 @@ export class GameController {
   }
 
   private resolveRenderEnvironment(): RenderEnvironment {
-    const ambientEnvironment = buildAmbientRenderEnvironment(this.sampleCurrentWorldContext().ambientProfile);
+    const currentWorld = this.sampleCurrentWorldContext();
+    const ambientEnvironment = buildAmbientRenderEnvironment(currentWorld.ambientProfile);
     if (!this.player.eyeInWater) {
-      return ambientEnvironment;
+      const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+      const worldSystems = this.sampleWorldSystems(currentWorld, encounter);
+      return applyWorldAtmosphere(ambientEnvironment, worldSystems.clock, worldSystems.weather);
     }
     const eye = getPlayerEyePosition(this.player);
     const material = this.world.getVoxel(
@@ -3842,6 +4086,46 @@ export class GameController {
       return ambientEnvironment;
     }
     return buildUnderwaterRenderEnvironment(this.world.getPaletteColor(material));
+  }
+
+  private sampleWorldSystems(
+    currentWorld: CurrentWorldProbeContext,
+    encounter: RpgEncounterSample,
+  ): WorldSystemSnapshot {
+    return sampleWorldSystems(
+      (performance.now() - this.worldClockStartedAt) / 1000,
+      currentWorld.probe,
+      currentWorld.ambientProfile,
+      encounter,
+      this.lastTravelContext,
+    );
+  }
+
+  private selectActiveQuestHook(
+    currentWorld: CurrentWorldProbeContext,
+    discovery: ExplorationJournalSnapshot,
+    routeSnapshot: RouteJournalSnapshot,
+    encounter: RpgEncounterSample,
+    primaryFaction: string | null,
+  ): RpgQuestHookSummary | null {
+    if (!encounter.regionId) {
+      return null;
+    }
+    const landmarkId = currentWorld.probe.landmarkId ?? discovery.currentLandmarkId;
+    const plan = planRpgQuestHooks({
+      regionId: encounter.regionId,
+      routeId: encounter.routeId,
+      landmarkId,
+    });
+    return selectRpgQuestHookForExploration(plan, {
+      nearCave: encounter.caveSystemId !== null || this.lastTravelContext === "underground",
+      hasFaction: primaryFaction !== null,
+      hasLandmark: landmarkId !== null,
+      completedObjectiveIdsByHookId: Object.fromEntries(routeSnapshot.goals.map((goal) => [
+        goal.id,
+        goal.completedStepIds,
+      ])),
+    });
   }
 
   private sampleCurrentWorldContext(): CurrentWorldProbeContext {
@@ -4040,6 +4324,15 @@ export class GameController {
   }
 
   private observePassiveRouteProgress(discovery: ExplorationJournalSnapshot): void {
+    const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+    if (encounter.routeId) {
+      this.observeTravelGoalProgress({
+        routeId: encounter.routeId,
+        kind: "visit",
+        targetId: encounter.routeId,
+      });
+    }
+
     const landmarkId = discovery.currentLandmarkId;
     if (!landmarkId) {
       return;
@@ -4048,11 +4341,70 @@ export class GameController {
     if (!routeId) {
       return;
     }
-    this.routeJournal.observeProgress({
+    this.observeTravelGoalProgress({
       routeId,
       kind: "visit",
       targetId: landmarkId,
     });
+  }
+
+  private observeTravelGoalProgress(input: TravelGoalProgressInput): TravelGoalProgressResult {
+    const routeScopedResult = this.routeJournal.observeProgress(input);
+    const result = input.routeId && !input.goalId
+      ? mergeTravelGoalProgressResults(routeScopedResult, this.routeJournal.observeProgress({
+        ...input,
+        routeId: null,
+      }))
+      : routeScopedResult;
+    this.recordCompletedTravelGoals(result);
+    return result;
+  }
+
+  private observeActiveQuestStep(
+    currentWorld: CurrentWorldProbeContext,
+    discovery: ExplorationJournalSnapshot,
+    encounter: RpgEncounterSample,
+    primaryFaction: string | null,
+    targetId: string | null,
+    routeId: string | null,
+    allowedKinds: readonly TravelGoalStepKind[],
+  ): TravelGoalProgressResult | null {
+    const activeQuest = this.selectActiveQuestHook(
+      currentWorld,
+      discovery,
+      this.routeJournal.getSnapshot(),
+      encounter,
+      primaryFaction,
+    );
+    if (!activeQuest || !allowedKinds.includes(activeQuest.objectiveKind)) {
+      return null;
+    }
+    if (!questObjectiveMatchesInteraction(activeQuest, targetId, routeId)) {
+      return null;
+    }
+    return this.observeTravelGoalProgress({
+      goalId: activeQuest.hookId,
+      kind: activeQuest.objectiveKind,
+      targetId: activeQuest.objectiveTargetId,
+    });
+  }
+
+  private recordCompletedTravelGoals(result: TravelGoalProgressResult): void {
+    for (const goalId of result.completedGoalIds) {
+      const definition = TRAVEL_GOALS.find((goal) => goal.id === goalId);
+      this.explorationEventLog.record({
+        kind: "complete-travel-goal",
+        subjectType: "route",
+        subjectId: goalId,
+        role: "travel-goal",
+        name: definition?.title ?? goalId,
+        flavorText: definition?.journalText ?? null,
+        payload: {
+          routeId: definition?.routeId ?? null,
+          completedStepIds: result.completedStepIds,
+        },
+      });
+    }
   }
 
   private sampleExplorationObservation(): ExplorationObservation {
@@ -4188,6 +4540,136 @@ function readPayloadRouteId(payload: unknown): string | null {
   }
   const routeId = (payload as Record<string, unknown>).routeId;
   return typeof routeId === "string" && routeId.trim().length > 0 ? routeId : null;
+}
+
+function buildCaveMouthInteractionCandidate(
+  currentWorld: CurrentWorldProbeContext,
+  encounter: RpgEncounterSample,
+): ExplorationInteractionCandidate | null {
+  const fields = currentWorld.probe.fields;
+  if (
+    fields.atlasCaveAnchorKind !== "entrance"
+    || (fields.atlasCaveCore ?? 0) < CAVE_MOUTH_INTERACTION_CORE_THRESHOLD
+    || !fields.atlasCaveAnchorId
+    || fields.atlasCaveAnchorX === null
+    || fields.atlasCaveAnchorX === undefined
+    || fields.atlasCaveAnchorZ === null
+    || fields.atlasCaveAnchorZ === undefined
+  ) {
+    return null;
+  }
+
+  const caveSystemId = fields.atlasCaveSystemId ?? encounter.caveSystemId ?? "local-cave";
+  const caveName = `${formatCaveSystemName(caveSystemId)} Mouth`;
+  const undergroundName = formatDiscoveryName("underground", currentWorld.probe.undergroundBiomeId, "underground");
+  const scoutResult = describeRpgEncounterScoutResult(encounter);
+  return {
+    id: `cave-mouth:${fields.atlasCaveAnchorId}`,
+    subjectType: "zone",
+    name: caveName,
+    role: "cave-mouth",
+    worldPosition: [
+      fields.atlasCaveAnchorX,
+      currentWorld.probe.surfaceY,
+      fields.atlasCaveAnchorZ,
+    ],
+    interactionRadiusMeters: metersToWorldUnits(6),
+    priority: 12,
+    prompts: [{
+      verb: "inspect",
+      label: `Scout ${caveName}`,
+      description: `${undergroundName} begins here. ${scoutResult.detail}`,
+    }],
+    flavorText: `${undergroundName} begins here. ${scoutResult.detail}`,
+    skillAwards: [{
+      skillId: "spelunking",
+      xp: 24,
+      reason: "Cave mouth scouted",
+      awardKey: `cave-mouth:${fields.atlasCaveAnchorId}`,
+      onceOnly: true,
+    }],
+    payload: {
+      caveSystemId,
+      caveAnchorId: fields.atlasCaveAnchorId,
+      caveAnchorKind: fields.atlasCaveAnchorKind,
+      undergroundBiomeId: currentWorld.probe.undergroundBiomeId,
+      pressure: Number(encounter.pressure.toFixed(3)),
+      moodId: encounter.moodId,
+      regionId: encounter.regionId,
+      routeId: encounter.routeId,
+    },
+  };
+}
+
+function countEventsBySubjectRole(
+  snapshot: ExplorationEventLogSnapshot,
+  subjectType: string,
+  role: string,
+): number {
+  return snapshot.events.filter((event) => event.subjectType === subjectType && event.role === role).length;
+}
+
+function countMobSignEvents(snapshot: ExplorationEventLogSnapshot): number {
+  const mobSignRoles = new Set(["mob-trail", "mob-spoor", "mob-nest", "mob-lair"]);
+  return snapshot.events.filter((event) => event.subjectType === "mob" && event.role !== null && mobSignRoles.has(event.role)).length;
+}
+
+function buildQuestTravelGoals(): readonly TravelGoalDefinition[] {
+  return WORLD_ATLAS.routes.flatMap((route) => {
+    const regionId = route.nodes[0]?.regionId ?? route.expectedRegionIds[0];
+    if (!regionId) {
+      return [];
+    }
+    const plan = planRpgQuestHooks({
+      regionId,
+      routeId: route.id,
+    });
+    return plan.hooks
+      .map(buildTravelGoalFromQuestHook)
+      .filter((goal): goal is TravelGoalDefinition => goal !== null);
+  });
+}
+
+function mergeTravelGoalProgressResults(
+  primary: TravelGoalProgressResult,
+  secondary: TravelGoalProgressResult,
+): TravelGoalProgressResult {
+  return {
+    changed: primary.changed || secondary.changed,
+    completedGoalIds: uniqueStrings([...primary.completedGoalIds, ...secondary.completedGoalIds]),
+    completedStepIds: uniqueStrings([...primary.completedStepIds, ...secondary.completedStepIds]),
+    snapshot: secondary.snapshot,
+  };
+}
+
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
+}
+
+function questObjectiveMatchesInteraction(
+  quest: RpgQuestHookSummary,
+  targetId: string | null,
+  routeId: string | null,
+): boolean {
+  switch (quest.objectiveKind) {
+    case "listen":
+      return true;
+    case "inspect":
+    case "interpret":
+      return targetId === quest.objectiveTargetId;
+    case "report":
+    case "visit":
+      return targetId === quest.objectiveTargetId || routeId === quest.objectiveTargetId;
+  }
+}
+
+function formatCaveSystemName(caveSystemId: string): string {
+  return caveSystemId
+    .split(/[-_\s]+/g)
+    .map((word) => word.trim())
+    .filter(Boolean)
+    .map((word) => `${word[0]?.toUpperCase() ?? ""}${word.slice(1)}`)
+    .join(" ");
 }
 
 function selectActiveTravelGoal(snapshot: RouteJournalSnapshot): TravelGoalSnapshot | null {

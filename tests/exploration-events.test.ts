@@ -125,6 +125,15 @@ test("event export and import round-trip preserves order and advances sequence",
       flavorText: "Raised stones cross the low ground.",
       payload: { routeId: "pilgrim-road", unknownNested: { retained: true } },
     }),
+    event("complete-travel-goal", "route", "rpgq-pilgrimage-red-mountain-pilgrim-spine-red-ash-obelisk", {
+      role: "travel-goal",
+      payload: {
+        routeId: "pilgrim-spine-red",
+        completedStepIds: [
+          "rpgq-pilgrimage-red-mountain-pilgrim-spine-red-ash-obelisk-read-landmark",
+        ],
+      },
+    }),
   ]);
 
   const restored = new ExplorationEventLog();
@@ -135,12 +144,18 @@ test("event export and import round-trip preserves order and advances sequence",
   restored.record(event("encounter", "mob", "scrib"));
 
   const snapshot = restored.getSnapshot();
-  expect(importResult.importedEvents).toBe(2);
+  expect(importResult.importedEvents).toBe(3);
   expect(importResult.ignoredInvalidEvents).toBe(0);
-  expect(snapshot.events.map((record) => record.sequence)).toEqual([1, 2, 3]);
-  expect(snapshot.events.map((record) => record.kind)).toEqual(["discover", "read", "encounter"]);
+  expect(snapshot.events.map((record) => record.sequence)).toEqual([1, 2, 3, 4]);
+  expect(snapshot.events.map((record) => record.kind)).toEqual(["discover", "read", "complete-travel-goal", "encounter"]);
   expect(snapshot.events[0]?.worldPosition).toEqual([1, 2, 3]);
   expect(snapshot.events[1]?.payload).toEqual({ routeId: "pilgrim-road", unknownNested: { retained: true } });
+  expect(snapshot.events[2]?.payload).toEqual({
+    routeId: "pilgrim-spine-red",
+    completedStepIds: [
+      "rpgq-pilgrimage-red-mountain-pilgrim-spine-red-ash-obelisk-read-landmark",
+    ],
+  });
 });
 
 test("import ignores unknown event kinds, invalid events, and duplicate keys", () => {
