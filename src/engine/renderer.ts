@@ -1,4 +1,4 @@
-import type { ChunkMeshData } from "./types.ts";
+import type { ChunkMeshData, Vec3 } from "./types.ts";
 import type { ResidentChunkWorld } from "./world.ts";
 import {
   DEFAULT_SKY_WEATHER_ENVIRONMENT,
@@ -14,7 +14,11 @@ import {
 
 interface RenderCamera {
   viewProjection: Float32Array;
+  projection?: Float32Array;
   position?: readonly [number, number, number];
+  forward?: Vec3;
+  right?: Vec3;
+  up?: Vec3;
 }
 
 const FOG_CULL_MARGIN_DISTANCE = metersToWorldUnits(32);
@@ -32,6 +36,9 @@ struct Uniforms {
   sky_cloud_color: vec4<f32>,
   sky_params: vec4<f32>,
   sky_celestial_params: vec4<f32>,
+  sky_ray_x: vec4<f32>,
+  sky_ray_y: vec4<f32>,
+  sky_ray_center: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -52,6 +59,7 @@ struct VertexOutput {
 struct SkyVertexOutput {
   @builtin(position) clip_position: vec4<f32>,
   @location(0) uv: vec2<f32>,
+  @location(1) world_ray: vec3<f32>,
 }
 
 @vertex
@@ -113,8 +121,31 @@ fn sky_hash(cell: vec2<f32>) -> f32 {
   return fract(sin(dot(cell, vec2<f32>(127.1, 311.7))) * 43758.5453);
 }
 
+fn sky_value_noise(point: vec2<f32>) -> f32 {
+  let cell = floor(point);
+  let local = fract(point);
+  let blend = local * local * (vec2<f32>(3.0) - 2.0 * local);
+  let a = sky_hash(cell);
+  let b = sky_hash(cell + vec2<f32>(1.0, 0.0));
+  let c = sky_hash(cell + vec2<f32>(0.0, 1.0));
+  let d = sky_hash(cell + vec2<f32>(1.0, 1.0));
+  return mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y);
+}
+
+fn sky_cloud_noise(point: vec2<f32>) -> f32 {
+  let broad = sky_value_noise(point * vec2<f32>(7.0, 2.6));
+  let middle = sky_value_noise(point * vec2<f32>(18.0, 5.5) + vec2<f32>(11.0, 3.0));
+  let fine = sky_value_noise(point * vec2<f32>(42.0, 10.0) + vec2<f32>(5.0, 17.0));
+  return broad * 0.52 + middle * 0.32 + fine * 0.16;
+}
+
 fn sky_luma(color: vec3<f32>) -> f32 {
   return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+fn sky_dome_coords(ray: vec3<f32>, y: f32) -> vec2<f32> {
+  let azimuth = atan2(ray.z, ray.x) * 0.15915494309 + 0.5;
+  return vec2<f32>(azimuth, y);
 }
 
 @vertex
@@ -128,12 +159,17 @@ fn vs_sky(@builtin(vertex_index) vertex_index: u32) -> SkyVertexOutput {
   var output: SkyVertexOutput;
   output.clip_position = vec4<f32>(position, 1.0, 1.0);
   output.uv = position * 0.5 + vec2<f32>(0.5);
+  output.world_ray = uniforms.sky_ray_center.xyz
+    + uniforms.sky_ray_x.xyz * position.x
+    + uniforms.sky_ray_y.xyz * position.y;
   return output;
 }
 
 @fragment
 fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
-  let y = clamp(input.uv.y, 0.0, 1.0);
+  let ray = normalize(input.world_ray);
+  let y = clamp(ray.y * 1.08 + 0.10, 0.0, 1.0);
+  let dome_uv = sky_dome_coords(ray, y);
   let horizon_blend = smoothstep(0.05, 0.95, y);
   let ashfall = clamp(uniforms.sky_params.z, 0.0, 1.0);
   let fungal_glow = clamp(uniforms.sky_params.w, 0.0, 1.0);
@@ -142,30 +178,31 @@ fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
   let star_intensity = clamp(uniforms.sky_celestial_params.z, 0.0, 1.0);
   let rainfall = clamp(uniforms.sky_celestial_params.w, 0.0, 1.0);
   let high_storm = mix(uniforms.sky_top_color.rgb, vec3<f32>(0.10, 0.10, 0.11), ashfall * 0.30 + rainfall * 0.22);
-  let horizon_glow = mix(uniforms.sky_horizon_color.rgb, uniforms.sky_cloud_color.rgb, ashfall * 0.18 + fungal_glow * 0.16 + rainfall * 0.18);
+  let horizon_tint = mix(uniforms.sky_horizon_color.rgb, uniforms.fog_color.rgb, 0.52 + ashfall * 0.12 + rainfall * 0.10);
+  let horizon_glow = mix(horizon_tint, uniforms.sky_cloud_color.rgb, ashfall * 0.18 + fungal_glow * 0.16 + rainfall * 0.18);
   let base = mix(horizon_glow, high_storm, horizon_blend);
 
   let band_center = clamp(uniforms.sky_params.y, 0.18, 0.82);
   let lower_band = smoothstep(band_center - 0.28, band_center - 0.04, y);
   let upper_band = 1.0 - smoothstep(band_center + 0.05, band_center + 0.36, y);
   let band_mask = clamp(lower_band * upper_band, 0.0, 1.0);
-  let wide_noise = sky_hash(floor(input.uv * vec2<f32>(14.0, 5.0)));
-  let streak_noise = sky_hash(floor(input.uv * vec2<f32>(36.0, 9.0) + vec2<f32>(11.0, 3.0)));
-  let cloud_texture = 0.48 + wide_noise * 0.34 + streak_noise * 0.22;
-  let cloud_strength = clamp(uniforms.sky_params.x * band_mask * cloud_texture * (0.72 + ashfall * 0.34 + rainfall * 0.22), 0.0, 0.96);
+  let cloud_uv = vec2<f32>(dome_uv.x + ray.x * 0.08, y + ray.z * 0.05);
+  let cloud_texture = 0.38 + sky_cloud_noise(cloud_uv) * 0.46;
+  let cloud_fray = sky_value_noise(cloud_uv * vec2<f32>(68.0, 16.0) + vec2<f32>(19.0, 29.0));
+  let cloud_strength = clamp(uniforms.sky_params.x * band_mask * (cloud_texture * 0.86 + cloud_fray * 0.14) * (0.72 + ashfall * 0.34 + rainfall * 0.22), 0.0, 0.96);
   let cloud_occlusion = clamp(uniforms.sky_params.x * 0.72 + ashfall * 0.44 + rainfall * 0.38, 0.0, 1.0);
 
-  let sun_pos = vec2<f32>(0.50 + uniforms.light_direction.x * 0.42, 0.18 + (1.0 - clamp(-uniforms.light_direction.y, 0.0, 1.0)) * 0.54);
-  let sun_distance = distance(input.uv, sun_pos);
-  let sun_disc = (1.0 - smoothstep(0.010, 0.030, sun_distance)) * sun_glow * (1.0 - cloud_occlusion * 0.62);
-  let sun_halo = (1.0 - smoothstep(0.030, 0.280, sun_distance)) * sun_glow * (1.0 - cloud_occlusion * 0.48);
+  let sun_direction = normalize(-uniforms.light_direction.xyz);
+  let sun_alignment = dot(ray, sun_direction);
+  let sun_disc = smoothstep(0.9992, 0.9998, sun_alignment) * sun_glow * (1.0 - cloud_occlusion * 0.62);
+  let sun_halo = smoothstep(0.920, 0.998, sun_alignment) * sun_glow * (1.0 - cloud_occlusion * 0.48);
 
-  let moon_pos = vec2<f32>(0.50 - uniforms.light_direction.x * 0.36, 0.68 + clamp(-uniforms.light_direction.y, 0.0, 1.0) * 0.16);
-  let moon_distance = distance(input.uv, moon_pos);
-  let moon_disc = (1.0 - smoothstep(0.009, 0.024, moon_distance)) * moon_glow * (1.0 - cloud_occlusion * 0.70);
-  let moon_halo = (1.0 - smoothstep(0.025, 0.210, moon_distance)) * moon_glow * (1.0 - cloud_occlusion * 0.58);
+  let moon_direction = normalize(uniforms.light_direction.xyz);
+  let moon_alignment = dot(ray, moon_direction);
+  let moon_disc = smoothstep(0.9994, 0.99985, moon_alignment) * moon_glow * (1.0 - cloud_occlusion * 0.70);
+  let moon_halo = smoothstep(0.940, 0.998, moon_alignment) * moon_glow * (1.0 - cloud_occlusion * 0.58);
 
-  let star_cell = floor(input.uv * vec2<f32>(160.0, 88.0));
+  let star_cell = floor(dome_uv * vec2<f32>(220.0, 92.0));
   let star_noise = sky_hash(star_cell);
   let star_twinkle = sky_hash(star_cell + vec2<f32>(31.0, 17.0));
   let star_mask = smoothstep(0.990, 0.999, star_noise);
@@ -175,16 +212,16 @@ fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
   let shelf_mask = ashfall
     * smoothstep(0.14, 0.30, y)
     * (1.0 - smoothstep(0.42, 0.62, y));
-  let shelf_noise = sky_hash(floor(vec2<f32>(input.uv.x * 20.0, y * 7.0) + vec2<f32>(5.0, 17.0)));
-  let ash_streak_cell = floor(vec2<f32>(input.uv.x * 54.0 + y * 12.0, y * 15.0));
+  let shelf_noise = sky_hash(floor(vec2<f32>(dome_uv.x * 24.0, y * 7.0) + vec2<f32>(5.0, 17.0)));
+  let ash_streak_cell = floor(vec2<f32>(dome_uv.x * 70.0 + y * 12.0, y * 15.0));
   let ash_streak_noise = sky_hash(ash_streak_cell);
   let ash_streaks = ashfall
     * (1.0 - smoothstep(0.18, 0.86, y))
     * smoothstep(0.58, 0.94, ash_streak_noise)
     * (0.28 + shelf_mask * 0.48);
-  let rain_slant = fract(input.uv.x * 74.0 + y * 42.0);
+  let rain_slant = fract((dome_uv.x + ray.z * 0.04) * 92.0 + y * 42.0);
   let rain_column = 1.0 - smoothstep(0.018, 0.068, abs(rain_slant - 0.5));
-  let rain_gate = smoothstep(0.78, 0.98, sky_hash(floor(vec2<f32>(input.uv.x * 48.0 + y * 15.0, y * 30.0))));
+  let rain_gate = smoothstep(0.78, 0.98, sky_hash(floor(vec2<f32>(dome_uv.x * 58.0 + y * 15.0, y * 30.0))));
   let rain_vertical_mask = smoothstep(0.03, 0.20, y) * (1.0 - smoothstep(0.84, 1.0, y));
   let rain_streaks = rainfall * rain_column * rain_gate * rain_vertical_mask;
   let fungal_horizon = fungal_glow * (1.0 - smoothstep(0.05, 0.48, y));
@@ -203,7 +240,8 @@ fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
   sky += vec3<f32>(0.74, 0.82, 0.95) * moon_disc * 0.32;
   sky += vec3<f32>(0.76, 0.84, 0.98) * star_field * 0.42;
   sky = mix(sky, shelf_tint, clamp(shelf_mask * (0.34 + shelf_noise * 0.28), 0.0, 0.62));
-  sky = mix(sky, uniforms.fog_color.rgb, clamp(far_haze, 0.0, 0.54));
+  sky = mix(sky, uniforms.fog_color.rgb, clamp(far_haze, 0.0, 0.66));
+  sky = mix(sky, uniforms.fog_color.rgb, 1.0 - smoothstep(0.00, 0.16, y));
   sky = mix(sky, vec3<f32>(0.08, 0.08, 0.075), clamp(ash_streaks, 0.0, 0.30));
   sky = mix(sky, vec3<f32>(0.055, 0.070, 0.078), rainfall * (0.10 + (1.0 - y) * 0.18));
   sky += vec3<f32>(0.34, 0.42, 0.44) * rain_streaks * 0.22;
@@ -367,7 +405,7 @@ export class WebGpuVoxelRenderer {
   private readonly uniformBuffer: GPUBuffer;
   private readonly uniformBindGroup: GPUBindGroup;
   private readonly resources = new Map<object, GpuChunkResources>();
-  private readonly uniformData = new Float32Array(56);
+  private readonly uniformData = new Float32Array(68);
   private depthTexture: GPUTexture | null = null;
   private depthView: GPUTextureView | null = null;
   private resourceSyncRevision = 0;
@@ -383,7 +421,7 @@ export class WebGpuVoxelRenderer {
     this.timestampQuerySupported = device.features.has("timestamp-query");
     const shaderModule = device.createShaderModule({ code: SHADER_SOURCE });
     const uniformBuffer = device.createBuffer({
-      size: 224,
+      size: 272,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     const bindGroupLayout = device.createBindGroupLayout({
@@ -909,6 +947,24 @@ export class WebGpuVoxelRenderer {
     uniformData[53] = skyWeather.moonGlowIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.moonGlowIntensity ?? 0;
     uniformData[54] = skyWeather.starIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.starIntensity ?? 0;
     uniformData[55] = skyWeather.rainfallIntensity;
+    const projection = camera.projection;
+    const tanX = projection ? 1 / (projection[0] || 1) : aspect;
+    const tanY = projection ? 1 / (projection[5] || 1) : 1;
+    const right = camera.right ?? ([1, 0, 0] as const);
+    const up = camera.up ?? ([0, 1, 0] as const);
+    const forward = camera.forward ?? ([0, 0, -1] as const);
+    uniformData[56] = right[0] * tanX;
+    uniformData[57] = right[1] * tanX;
+    uniformData[58] = right[2] * tanX;
+    uniformData[59] = 0;
+    uniformData[60] = up[0] * tanY;
+    uniformData[61] = up[1] * tanY;
+    uniformData[62] = up[2] * tanY;
+    uniformData[63] = 0;
+    uniformData[64] = forward[0];
+    uniformData[65] = forward[1];
+    uniformData[66] = forward[2];
+    uniformData[67] = 0;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
 
