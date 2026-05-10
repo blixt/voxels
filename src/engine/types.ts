@@ -1,20 +1,9 @@
 export type Vec3 = [number, number, number];
 export type PackedColor = number;
 
-export interface WorldDimensions {
-  width: number;
-  height: number;
-  depth: number;
-}
-
 export interface ChunkCoordinate {
   x: number;
   y: number;
-  z: number;
-}
-
-export interface ColumnCoordinate {
-  x: number;
   z: number;
 }
 

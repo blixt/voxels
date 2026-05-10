@@ -9,6 +9,7 @@ import type {
   OpaqueChunkMeshGeometry,
 } from "../engine/opaque-chunk-mesher.ts";
 import type { ChunkCoordinate } from "../engine/types.ts";
+import { chooseLeastPendingWorkerIndex, drainArray } from "./async-worker-queue.ts";
 
 interface WorkerReadyMessage {
   type: "ready";
@@ -103,15 +104,7 @@ export function createAsyncChunkMeshing(
       if (pendingKeys.has(key) || pendingKeys.size >= maxPendingJobs) {
         return false;
       }
-      let bestWorkerIndex = 0;
-      let bestPendingCount = workerSlots[0]!.pendingCount;
-      for (let index = 1; index < workerSlots.length; index += 1) {
-        const pendingCount = workerSlots[index]!.pendingCount;
-        if (pendingCount < bestPendingCount) {
-          bestPendingCount = pendingCount;
-          bestWorkerIndex = index;
-        }
-      }
+      const bestWorkerIndex = chooseLeastPendingWorkerIndex(workerSlots);
       const requestId = nextRequestId++;
       pendingKeys.add(key);
       pendingRequests.set(requestId, { key, workerIndex: bestWorkerIndex });
@@ -134,13 +127,7 @@ export function createAsyncChunkMeshing(
       return pendingKeys.size;
     },
     drainCompletedMeshes(maxCount = Number.POSITIVE_INFINITY): CompletedChunkMeshingJob[] {
-      if (completedMeshes.length === 0) {
-        return [];
-      }
-      const drainCount = Number.isFinite(maxCount)
-        ? Math.max(0, Math.min(completedMeshes.length, Math.floor(maxCount)))
-        : completedMeshes.length;
-      return completedMeshes.splice(0, drainCount);
+      return drainArray(completedMeshes, maxCount);
     },
     dispose(): void {
       for (const slot of workerSlots) {

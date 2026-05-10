@@ -111,6 +111,23 @@ export function serializeGeneratedChunkRenderSummary(summary: GeneratedChunkRend
   };
 }
 
+export function cloneGeneratedChunkRenderSummary(
+  summary: GeneratedChunkRenderSummary,
+): GeneratedChunkRenderSummary {
+  return {
+    coord: { ...summary.coord },
+    coveredColumnCount: summary.coveredColumnCount,
+    surfaceY: summary.surfaceY.slice(),
+    surfaceMaterial: summary.surfaceMaterial.slice(),
+    waterTopY: summary.waterTopY.slice(),
+    waterMaterial: summary.waterMaterial.slice(),
+    macroCellSize: summary.macroCellSize,
+    macroCellsPerAxis: summary.macroCellsPerAxis,
+    macroCellStates: summary.macroCellStates.slice(),
+    faceOpenMask: summary.faceOpenMask.slice(),
+  };
+}
+
 export function deserializeGeneratedChunkRenderSummary(
   summary: TransferredGeneratedChunkRenderSummary,
 ): GeneratedChunkRenderSummary {
@@ -125,6 +142,23 @@ export function deserializeGeneratedChunkRenderSummary(
     macroCellsPerAxis: summary.macroCellsPerAxis,
     macroCellStates: summary.macroCellStates,
     faceOpenMask: summary.faceOpenMask,
+  };
+}
+
+export function cloneTransferredGeneratedChunkRenderSummary(
+  summary: TransferredGeneratedChunkRenderSummary,
+): TransferredGeneratedChunkRenderSummary {
+  return {
+    coord: { ...summary.coord },
+    coveredColumnCount: summary.coveredColumnCount,
+    surfaceY: summary.surfaceY.slice(),
+    surfaceMaterial: summary.surfaceMaterial.slice(),
+    waterTopY: summary.waterTopY.slice(),
+    waterMaterial: summary.waterMaterial.slice(),
+    macroCellSize: summary.macroCellSize,
+    macroCellsPerAxis: summary.macroCellsPerAxis,
+    macroCellStates: summary.macroCellStates.slice(),
+    faceOpenMask: summary.faceOpenMask.slice(),
   };
 }
 

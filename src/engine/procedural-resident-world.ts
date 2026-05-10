@@ -1,4 +1,9 @@
 import type { ChunkCoordinate, ChunkMeshData, Vec3, WorldStats } from "./types.ts";
+import {
+  formatChunkCoordinateKey,
+  formatColumnCoordinateKey,
+  formatRenderSummaryRegionCoordinateParts,
+} from "./coordinate-keys.ts";
 import type {
   AsyncChunkGenerationQueue,
   AsyncDerivedLodChunkCacheKey,
@@ -3755,7 +3760,7 @@ function prioritizedChunkYRange(minCy: number, maxCy: number, preferredCy: numbe
 }
 
 function toChunkKey(cx: number, cy: number, cz: number): string {
-  return `${cx}:${cy}:${cz}`;
+  return formatChunkCoordinateKey(cx, cy, cz);
 }
 
 function toLodChunkKey(level: number, cx: number, cy: number, cz: number): string {
@@ -3830,11 +3835,11 @@ function toLocalVoxelIndex(
 }
 
 function toColumnKey(cx: number, cz: number): string {
-  return `${cx}:${cz}`;
+  return formatColumnCoordinateKey(cx, cz);
 }
 
 function toRegionSummaryKey(regionX: number, regionZ: number): string {
-  return `${regionX}:${regionZ}`;
+  return formatRenderSummaryRegionCoordinateParts(regionX, regionZ);
 }
 
 function extractLodNeighborFaceData(

@@ -3,6 +3,7 @@ import type {
   TransferredGeneratedRenderSummaryRegion,
 } from "../engine/generated-chunk-transfer.ts";
 import {
+  cloneTransferredGeneratedChunkRenderSummary,
   deserializeGeneratedChunkRenderSummary,
   deserializeGeneratedRenderSummaryRegion,
   serializeGeneratedRenderSummaryRegion,
@@ -30,6 +31,7 @@ import type { PackedChunkEditDelta } from "../engine/chunk-edit-journal.ts";
 import type { EncodedGeneratedChunk } from "../engine/generated-chunk-codec.ts";
 import type { EncodedDerivedLodChunk } from "../engine/derived-lod-chunk-codec.ts";
 import type { AsyncDerivedLodChunkCacheKey } from "../engine/async-chunk-generation.ts";
+import { formatChunkCoordinate, formatRenderSummaryRegionCoordinateKey } from "../engine/coordinate-keys.ts";
 import { PROCEDURAL_WORLD_GENERATION_VERSION } from "../engine/procedural-generator.ts";
 import type { ChunkCoordinate, RenderSummaryRegionCoordinate } from "../engine/types.ts";
 
@@ -213,7 +215,7 @@ export async function openProceduralGeneratedChunkCache(context: {
         worldKey: keyPrefix,
         coord: { ...coord },
         canonicalRevision,
-        summary: cloneTransferredSummary(summary),
+        summary: cloneTransferredGeneratedChunkRenderSummary(summary),
         storedAt,
       } satisfies StoredGeneratedChunkSummaryRecord);
       await putMergedRegionSummary(
@@ -377,7 +379,7 @@ async function putGeneratedChunkRecord(
     worldKey: keyPrefix,
     coord: { ...coord },
     canonicalRevision,
-    summary: cloneTransferredSummary(summary),
+    summary: cloneTransferredGeneratedChunkRenderSummary(summary),
     storedAt,
   } satisfies StoredGeneratedChunkSummaryRecord);
   await putMergedRegionSummary(
@@ -424,34 +426,6 @@ export function createProceduralGeneratedChunkCacheWorldKey(context: {
     seaLevel: context.seaLevel,
     chunkSize: context.chunkSize,
     maxYExclusive: context.maxYExclusive,
-  };
-}
-
-export function createProceduralGeneratedChunkCacheKeys(
-  context: {
-    seed: number;
-    seaLevel: number;
-    chunkSize: number;
-    maxYExclusive: number;
-  },
-  coord: ChunkCoordinate,
-): {
-  worldKey: string;
-  chunkKey: string;
-  legacyChunkKey: string;
-  chunkSummaryKey: string;
-  legacyChunkSummaryKey: string;
-  editJournalKey: string;
-} {
-  const worldKey = createProceduralGeneratedChunkCacheWorldKey(context);
-  const keyPrefix = formatCanonicalWorldKey(worldKey);
-  return {
-    worldKey: keyPrefix,
-    chunkKey: formatCanonicalChunkKey(worldKey, coord),
-    legacyChunkKey: toLegacyChunkKey(keyPrefix, coord),
-    chunkSummaryKey: formatCanonicalChunkSummaryKey(worldKey, coord),
-    legacyChunkSummaryKey: toLegacyChunkKey(keyPrefix, coord),
-    editJournalKey: formatChunkEditJournalKey(worldKey, coord),
   };
 }
 
@@ -556,30 +530,15 @@ function clonePackedChunkEditDelta(delta: PackedChunkEditDelta): PackedChunkEdit
 }
 
 function toLegacyChunkKey(prefix: string, coord: ChunkCoordinate): string {
-  return `${prefix}:${coord.x}:${coord.y}:${coord.z}`;
+  return `${prefix}:${formatChunkCoordinate(coord)}`;
 }
 
 function toLegacyRegionKey(prefix: string, coord: RenderSummaryRegionCoordinate): string {
-  return `${prefix}:${coord.x}:${coord.z}`;
+  return `${prefix}:${formatRenderSummaryRegionCoordinateKey(coord)}`;
 }
 
 function toLodChunkKey(prefix: string, key: AsyncDerivedLodChunkCacheKey): string {
   return `${prefix}:lod:${key.editRevision}:${key.lodLevel}:${key.coord.x}:${key.coord.y}:${key.coord.z}`;
-}
-
-function cloneTransferredSummary(summary: TransferredGeneratedChunkRenderSummary): TransferredGeneratedChunkRenderSummary {
-  return {
-    coord: { ...summary.coord },
-    coveredColumnCount: summary.coveredColumnCount,
-    surfaceY: summary.surfaceY.slice(),
-    surfaceMaterial: summary.surfaceMaterial.slice(),
-    waterTopY: summary.waterTopY.slice(),
-    waterMaterial: summary.waterMaterial.slice(),
-    macroCellSize: summary.macroCellSize,
-    macroCellsPerAxis: summary.macroCellsPerAxis,
-    macroCellStates: summary.macroCellStates.slice(),
-    faceOpenMask: summary.faceOpenMask.slice(),
-  };
 }
 
 async function putMergedRegionSummary(

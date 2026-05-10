@@ -2,6 +2,7 @@ import type { GeneratedChunkRenderSummary } from "./generated-chunk-render-summa
 import type { GeneratedRenderSummaryRegion } from "./generated-render-summary-region.ts";
 import type { GeneratedChunk } from "./procedural-generator.ts";
 import type { ChunkCoordinate, RenderSummaryRegionCoordinate } from "./types.ts";
+import { formatChunkCoordinateKey } from "./coordinate-keys.ts";
 
 export interface AsyncChunkGenerationCompletionStats {
   cacheHits: number;
@@ -60,7 +61,7 @@ export interface AsyncChunkGenerationQueue {
 }
 
 export function toAsyncChunkGenerationKey(cx: number, cy: number, cz: number): string {
-  return `${cx}:${cy}:${cz}`;
+  return formatChunkCoordinateKey(cx, cy, cz);
 }
 
 export function toAsyncRegionSummaryKey(regionX: number, regionZ: number): string {
@@ -69,4 +70,22 @@ export function toAsyncRegionSummaryKey(regionX: number, regionZ: number): strin
 
 export function toAsyncLodChunkKey(key: AsyncDerivedLodChunkCacheKey): string {
   return `lod:${key.editRevision}:${key.lodLevel}:${key.coord.x}:${key.coord.y}:${key.coord.z}`;
+}
+
+export function toAsyncGeneratedLodChunkKey(key: AsyncDerivedLodChunkCacheKey): string {
+  return `generate:${toAsyncLodChunkKey(key)}`;
+}
+
+export function toAsyncStoredLodChunkKey(key: AsyncDerivedLodChunkCacheKey): string {
+  return `store:${toAsyncLodChunkKey(key)}`;
+}
+
+export function cloneAsyncDerivedLodChunkCacheKey(
+  key: AsyncDerivedLodChunkCacheKey,
+): AsyncDerivedLodChunkCacheKey {
+  return {
+    lodLevel: key.lodLevel,
+    editRevision: key.editRevision,
+    coord: { ...key.coord },
+  };
 }

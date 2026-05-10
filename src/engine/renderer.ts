@@ -1,4 +1,3 @@
-import { buildCameraMatrices, type CameraState } from "./camera.ts";
 import type { ChunkMeshData } from "./types.ts";
 import type { ResidentChunkWorld } from "./world.ts";
 import {
@@ -13,10 +12,10 @@ import {
   type RenderEnvironment,
 } from "./water-visuals.ts";
 
-type RenderCamera = CameraState | {
+interface RenderCamera {
   viewProjection: Float32Array;
   position?: readonly [number, number, number];
-};
+}
 
 const FOG_CULL_MARGIN_DISTANCE = metersToWorldUnits(32);
 
@@ -860,16 +859,9 @@ export class WebGpuVoxelRenderer {
   }
 
   private writeUniforms(camera: RenderCamera, aspect: number, renderEnvironment: RenderEnvironment): void {
-    let viewProjection: Float32Array;
-    let cameraPosition: readonly [number, number, number];
-    if (isCameraWithViewProjection(camera)) {
-      viewProjection = camera.viewProjection;
-      cameraPosition = camera.position ?? ([0, 0, 0] as const);
-    } else {
-      const cameraMatrices = buildCameraMatrices(camera, aspect);
-      viewProjection = cameraMatrices.viewProjection;
-      cameraPosition = cameraMatrices.eye;
-    }
+    void aspect;
+    const viewProjection = camera.viewProjection;
+    const cameraPosition = camera.position ?? ([0, 0, 0] as const);
     this.lastViewProjection = viewProjection;
     this.lastCameraPosition = cameraPosition;
     const uniformData = this.uniformData;
@@ -1117,10 +1109,6 @@ function nextBufferCapacity(requiredBytes: number, currentCapacity: number): num
       : alignTo(Math.ceil(nextCapacity * 1.5), 4096);
   }
   return nextCapacity;
-}
-
-function isCameraWithViewProjection(camera: RenderCamera): camera is { viewProjection: Float32Array } {
-  return "viewProjection" in camera;
 }
 
 function resolveSkyWeatherEnvironment(renderEnvironment: RenderEnvironment): SkyWeatherEnvironment {

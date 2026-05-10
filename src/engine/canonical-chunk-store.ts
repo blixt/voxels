@@ -1,9 +1,4 @@
 import type { PackedChunkEditDelta } from "./chunk-edit-journal.ts";
-import type { EncodedGeneratedChunk } from "./generated-chunk-codec.ts";
-import type {
-  TransferredGeneratedChunkRenderSummary,
-  TransferredGeneratedRenderSummaryRegion,
-} from "./generated-chunk-transfer.ts";
 import type { ChunkCoordinate, RenderSummaryRegionCoordinate } from "./types.ts";
 
 export const CANONICAL_CHUNK_STORE_SCHEMA_VERSION = 1;
@@ -33,24 +28,6 @@ export interface CachedCanonicalChunk {
   readonly metadata: CanonicalChunkRecordMetadata;
 }
 
-export interface CanonicalChunkSummaryRecord {
-  readonly key: string;
-  readonly worldKey: string;
-  readonly coord: ChunkCoordinate;
-  readonly canonicalRevision: number;
-  readonly summary: TransferredGeneratedChunkRenderSummary;
-  readonly storedAt: number;
-}
-
-export interface CanonicalRenderSummaryRegionRecord {
-  readonly key: string;
-  readonly worldKey: string;
-  readonly coord: RenderSummaryRegionCoordinate;
-  readonly canonicalRevision: number;
-  readonly summary: TransferredGeneratedRenderSummaryRegion;
-  readonly storedAt: number;
-}
-
 export interface ChunkEditJournalRecord {
   readonly key: string;
   readonly worldKey: string;
@@ -60,26 +37,6 @@ export interface ChunkEditJournalRecord {
   readonly maxRevision: number | null;
   readonly deltas: readonly PackedChunkEditDelta[];
   readonly storedAt: number;
-}
-
-export interface CanonicalChunkStore {
-  getCanonicalChunk(coord: ChunkCoordinate): Promise<CachedCanonicalChunk | null>;
-  putCanonicalChunk(
-    coord: ChunkCoordinate,
-    chunk: EncodedGeneratedChunk,
-    summary: TransferredGeneratedChunkRenderSummary,
-    canonicalRevision: number,
-  ): Promise<void>;
-  getChunkSummary(coord: ChunkCoordinate): Promise<CanonicalChunkSummaryRecord | null>;
-  putChunkSummary(
-    coord: ChunkCoordinate,
-    summary: TransferredGeneratedChunkRenderSummary,
-    canonicalRevision: number,
-  ): Promise<void>;
-  getRegionSummary(coord: RenderSummaryRegionCoordinate): Promise<CanonicalRenderSummaryRegionRecord | null>;
-  getEditJournal(coord: ChunkCoordinate): Promise<ChunkEditJournalRecord | null>;
-  appendEditDeltas(coord: ChunkCoordinate, deltas: readonly PackedChunkEditDelta[], revision: number): Promise<void>;
-  close(): void;
 }
 
 export function formatCanonicalWorldKey(worldKey: CanonicalWorldKey): string {

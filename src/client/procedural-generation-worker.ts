@@ -16,9 +16,11 @@ import {
 import { decodeGeneratedChunk, decodeGeneratedChunkSummary, encodeGeneratedChunk } from "../engine/generated-chunk-codec.ts";
 import { encodeDerivedLodChunk } from "../engine/derived-lod-chunk-codec.ts";
 import { deriveLodChunkData } from "../engine/lod-chunk-derivation.ts";
-import type { AsyncDerivedLodChunkCacheKey } from "../engine/async-chunk-generation.ts";
+import { cloneAsyncDerivedLodChunkCacheKey, type AsyncDerivedLodChunkCacheKey } from "../engine/async-chunk-generation.ts";
 import { ProceduralWorldGenerator, type GeneratedChunk } from "../engine/procedural-generator.ts";
 import {
+  cloneGeneratedChunkRenderSummary,
+  cloneTransferredGeneratedChunkRenderSummary,
   serializeGeneratedChunk,
   serializeGeneratedChunkRenderSummary,
   type TransferredGeneratedChunk,
@@ -164,7 +166,7 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
       type: "lod-chunk",
       requestId: message.requestId,
       source: cachedLodChunk ? "cache" : "missing",
-      key: cloneLodChunkCacheKey(message.key),
+      key: cloneAsyncDerivedLodChunkCacheKey(message.key),
       chunk: cachedLodChunk
         ? {
             buffer: cachedLodChunk.buffer,
@@ -194,7 +196,7 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
       type: "lod-chunk",
       requestId: message.requestId,
       source: "generated",
-      key: cloneLodChunkCacheKey(message.key),
+      key: cloneAsyncDerivedLodChunkCacheKey(message.key),
       stored,
       chunk: {
         buffer: encoded.buffer,
@@ -230,7 +232,7 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
     const response: WorkerResponse = {
       type: "lod-chunk-stored",
       requestId: message.requestId,
-      key: cloneLodChunkCacheKey(message.key),
+      key: cloneAsyncDerivedLodChunkCacheKey(message.key),
       stored,
     };
     self.postMessage(response);
@@ -316,7 +318,7 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
       enqueueDeferredProceduralPersistenceJob(pendingPersistenceJobs, {
         type: "summary",
         coord: { ...message.coord },
-        summary: cloneTransferredSummary(summary.summary),
+        summary: cloneTransferredGeneratedChunkRenderSummary(summary.summary),
       });
       scheduleDeferredPersistenceFlush();
     }
@@ -354,7 +356,7 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
     enqueueDeferredProceduralPersistenceJob(pendingPersistenceJobs, {
       type: "summary",
       coord: { ...generated.coord },
-      summary: cloneTransferredSummary(summary.summary),
+      summary: cloneTransferredGeneratedChunkRenderSummary(summary.summary),
     });
     scheduleDeferredPersistenceFlush();
   }
@@ -464,7 +466,7 @@ async function flushDeferredPersistenceJobs(): Promise<void> {
       if (job.type === "summary") {
         await chunkCache.putChunkSummary(job.coord, job.summary);
       } else {
-        const summary = cloneTransferredSummary(serializeGeneratedChunkRenderSummary(job.chunk.renderSummary).summary);
+        const summary = cloneTransferredGeneratedChunkRenderSummary(serializeGeneratedChunkRenderSummary(job.chunk.renderSummary).summary);
         await chunkCache.putChunk(job.chunk.coord, encodeGeneratedChunk(job.chunk), summary);
       }
       processedJobs += 1;
@@ -492,46 +494,6 @@ function cloneGeneratedChunkForDeferredPersistence(chunk: GeneratedChunk): Gener
         }
       : null,
     renderSummary: cloneGeneratedChunkRenderSummary(chunk.renderSummary),
-  };
-}
-
-function cloneGeneratedChunkRenderSummary(
-  summary: import("../engine/generated-chunk-render-summary.ts").GeneratedChunkRenderSummary,
-): import("../engine/generated-chunk-render-summary.ts").GeneratedChunkRenderSummary {
-  return {
-    coord: { ...summary.coord },
-    coveredColumnCount: summary.coveredColumnCount,
-    surfaceY: summary.surfaceY.slice(),
-    surfaceMaterial: summary.surfaceMaterial.slice(),
-    waterTopY: summary.waterTopY.slice(),
-    waterMaterial: summary.waterMaterial.slice(),
-    macroCellSize: summary.macroCellSize,
-    macroCellsPerAxis: summary.macroCellsPerAxis,
-    macroCellStates: summary.macroCellStates.slice(),
-    faceOpenMask: summary.faceOpenMask.slice(),
-  };
-}
-
-function cloneTransferredSummary(summary: TransferredGeneratedChunkRenderSummary): TransferredGeneratedChunkRenderSummary {
-  return {
-    coord: { ...summary.coord },
-    coveredColumnCount: summary.coveredColumnCount,
-    surfaceY: summary.surfaceY.slice(),
-    surfaceMaterial: summary.surfaceMaterial.slice(),
-    waterTopY: summary.waterTopY.slice(),
-    waterMaterial: summary.waterMaterial.slice(),
-    macroCellSize: summary.macroCellSize,
-    macroCellsPerAxis: summary.macroCellsPerAxis,
-    macroCellStates: summary.macroCellStates.slice(),
-    faceOpenMask: summary.faceOpenMask.slice(),
-  };
-}
-
-function cloneLodChunkCacheKey(key: AsyncDerivedLodChunkCacheKey): AsyncDerivedLodChunkCacheKey {
-  return {
-    lodLevel: key.lodLevel,
-    editRevision: key.editRevision,
-    coord: { ...key.coord },
   };
 }
 

@@ -16,10 +16,6 @@ export function subVec3(a: Vec3, b: Vec3): Vec3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 }
 
-export function scaleVec3(a: Vec3, scalar: number): Vec3 {
-  return [a[0] * scalar, a[1] * scalar, a[2] * scalar];
-}
-
 export function dotVec3(a: Vec3, b: Vec3): number {
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
@@ -74,25 +70,6 @@ export function fnv1a(bytes: Uint8Array): string {
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
   return hash.toString(16).padStart(8, "0");
-}
-
-export function createOrthographicMatrix(
-  left: number,
-  right: number,
-  bottom: number,
-  top: number,
-  near: number,
-  far: number,
-): Float32Array {
-  const out = new Float32Array(16);
-  out[0] = 2 / (right - left);
-  out[5] = 2 / (top - bottom);
-  out[10] = 1 / (near - far);
-  out[12] = (left + right) / (left - right);
-  out[13] = (top + bottom) / (bottom - top);
-  out[14] = near / (near - far);
-  out[15] = 1;
-  return out;
 }
 
 export function createPerspectiveMatrix(

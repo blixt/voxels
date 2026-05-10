@@ -1,5 +1,6 @@
 import type { OpaqueChunkMeshingInput, OpaqueChunkMeshGeometry } from "./opaque-chunk-mesher.ts";
 import type { ChunkCoordinate } from "./types.ts";
+import { formatChunkCoordinateKey } from "./coordinate-keys.ts";
 
 export interface CompletedChunkMeshingJob {
   coord: ChunkCoordinate;
@@ -16,5 +17,5 @@ export interface AsyncChunkMeshingQueue {
 }
 
 export function toAsyncChunkMeshingKey(cx: number, cy: number, cz: number): string {
-  return `${cx}:${cy}:${cz}`;
+  return formatChunkCoordinateKey(cx, cy, cz);
 }

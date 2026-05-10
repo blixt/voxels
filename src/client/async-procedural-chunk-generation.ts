@@ -1,8 +1,11 @@
 import type { AsyncChunkGenerationQueue } from "../engine/async-chunk-generation.ts";
 import {
+  cloneAsyncDerivedLodChunkCacheKey,
   toAsyncChunkGenerationKey,
+  toAsyncGeneratedLodChunkKey,
   toAsyncLodChunkKey,
   toAsyncRegionSummaryKey,
+  toAsyncStoredLodChunkKey,
   type AsyncDerivedLodChunkCacheKey,
   type AsyncEncodedDerivedLodChunk,
 } from "../engine/async-chunk-generation.ts";
@@ -18,6 +21,7 @@ import type { GeneratedChunkRenderSummary } from "../engine/generated-chunk-rend
 import type { GeneratedRenderSummaryRegion } from "../engine/generated-render-summary-region.ts";
 import type { GeneratedChunk, ProceduralWorldGenerator } from "../engine/procedural-generator.ts";
 import type { ChunkCoordinate, RenderSummaryRegionCoordinate } from "../engine/types.ts";
+import { chooseLeastPendingWorkerIndex, drainArray } from "./async-worker-queue.ts";
 
 interface WorkerReadyMessage {
   type: "ready";
@@ -156,14 +160,14 @@ export function createAsyncProceduralChunkGeneration(
           }
         }
         completedLodChunks.push({
-          key: cloneLodChunkCacheKey(message.key),
+          key: cloneAsyncDerivedLodChunkCacheKey(message.key),
           source: message.source,
           buffer: message.chunk.buffer,
           byteLength: message.chunk.byteLength,
         });
       } else {
         completedLodMissing += 1;
-        missingLodChunks.push(cloneLodChunkCacheKey(message.key));
+        missingLodChunks.push(cloneAsyncDerivedLodChunkCacheKey(message.key));
       }
       return;
     }
@@ -261,46 +265,22 @@ export function createAsyncProceduralChunkGeneration(
       return completedLodChunks.length;
     },
     drainCompletedChunks(): GeneratedChunk[] {
-      if (completedChunks.length === 0) {
-        return [];
-      }
-      return completedChunks.splice(0, completedChunks.length);
+      return drainArray(completedChunks);
     },
     drainCompletedSummaries(): GeneratedChunkRenderSummary[] {
-      if (completedSummaries.length === 0) {
-        return [];
-      }
-      return completedSummaries.splice(0, completedSummaries.length);
+      return drainArray(completedSummaries);
     },
     drainCompletedRegionSummaries(): GeneratedRenderSummaryRegion[] {
-      if (completedRegionSummaries.length === 0) {
-        return [];
-      }
-      return completedRegionSummaries.splice(0, completedRegionSummaries.length);
+      return drainArray(completedRegionSummaries);
     },
     drainMissingRegionSummaries(): RenderSummaryRegionCoordinate[] {
-      if (missingRegionSummaries.length === 0) {
-        return [];
-      }
-      return missingRegionSummaries.splice(0, missingRegionSummaries.length);
+      return drainArray(missingRegionSummaries);
     },
     drainCompletedLodChunks(maxCount?: number): AsyncEncodedDerivedLodChunk[] {
-      if (completedLodChunks.length === 0) {
-        return [];
-      }
-      const count = maxCount === undefined || !Number.isFinite(maxCount)
-        ? completedLodChunks.length
-        : Math.max(0, Math.floor(maxCount));
-      if (count === 0) {
-        return [];
-      }
-      return completedLodChunks.splice(0, Math.min(count, completedLodChunks.length));
+      return drainArray(completedLodChunks, maxCount);
     },
     drainMissingLodChunks(): AsyncDerivedLodChunkCacheKey[] {
-      if (missingLodChunks.length === 0) {
-        return [];
-      }
-      return missingLodChunks.splice(0, missingLodChunks.length);
+      return drainArray(missingLodChunks);
     },
     drainCompletionStats() {
       const stats = {
@@ -362,15 +342,7 @@ export function createAsyncProceduralChunkGeneration(
     if (pendingKeys.has(key) || pendingKeys.size >= maxPendingJobs) {
       return false;
     }
-    let bestWorkerIndex = 0;
-    let bestPendingCount = workerSlots[0]!.pendingCount;
-    for (let index = 1; index < workerSlots.length; index += 1) {
-      const pendingCount = workerSlots[index]!.pendingCount;
-      if (pendingCount < bestPendingCount) {
-        bestPendingCount = pendingCount;
-        bestWorkerIndex = index;
-      }
-    }
+    const bestWorkerIndex = chooseLeastPendingWorkerIndex(workerSlots);
     const requestId = nextRequestId++;
     pendingKeys.add(key);
     pendingRequests.set(requestId, { key, mode });
@@ -389,15 +361,7 @@ export function createAsyncProceduralChunkGeneration(
     if (pendingKeys.has(key) || pendingKeys.size >= maxPendingJobs) {
       return false;
     }
-    let bestWorkerIndex = 0;
-    let bestPendingCount = workerSlots[0]!.pendingCount;
-    for (let index = 1; index < workerSlots.length; index += 1) {
-      const pendingCount = workerSlots[index]!.pendingCount;
-      if (pendingCount < bestPendingCount) {
-        bestPendingCount = pendingCount;
-        bestWorkerIndex = index;
-      }
-    }
+    const bestWorkerIndex = chooseLeastPendingWorkerIndex(workerSlots);
     const requestId = nextRequestId++;
     pendingKeys.add(key);
     pendingRequests.set(requestId, { key, mode: "region-summary" });
@@ -415,7 +379,7 @@ export function createAsyncProceduralChunkGeneration(
     if (pendingKeys.has(requestKey) || pendingKeys.size >= maxPendingJobs + DEFAULT_MAX_PENDING_LOD_CACHE_PROBES) {
       return false;
     }
-    const workerIndex = chooseWorkerIndex();
+    const workerIndex = chooseLeastPendingWorkerIndex(workerSlots);
     const requestId = nextRequestId++;
     pendingKeys.add(requestKey);
     pendingRequests.set(requestId, { key: requestKey, mode: "lod-chunk" });
@@ -423,7 +387,7 @@ export function createAsyncProceduralChunkGeneration(
     workerSlots[workerIndex]!.worker.postMessage({
       type: "get-lod-chunk",
       requestId,
-      key: cloneLodChunkCacheKey(key),
+      key: cloneAsyncDerivedLodChunkCacheKey(key),
     });
     return true;
   }
@@ -433,7 +397,7 @@ export function createAsyncProceduralChunkGeneration(
     if (pendingKeys.has(requestKey) || pendingKeys.size >= maxPendingJobs) {
       return false;
     }
-    const workerIndex = chooseWorkerIndex();
+    const workerIndex = chooseLeastPendingWorkerIndex(workerSlots);
     const requestId = nextRequestId++;
     pendingKeys.add(requestKey);
     pendingRequests.set(requestId, { key: requestKey, mode: "lod-generate" });
@@ -441,17 +405,17 @@ export function createAsyncProceduralChunkGeneration(
     workerSlots[workerIndex]!.worker.postMessage({
       type: "derive-lod-chunk",
       requestId,
-      key: cloneLodChunkCacheKey(key),
+      key: cloneAsyncDerivedLodChunkCacheKey(key),
     });
     return true;
   }
 
   function storeLodChunk(chunk: AsyncEncodedDerivedLodChunk): boolean {
-    const requestKey = `store:${toAsyncLodChunkKey(chunk.key)}`;
+    const requestKey = toAsyncStoredLodChunkKey(chunk.key);
     if (pendingKeys.has(requestKey) || pendingKeys.size >= maxPendingJobs) {
       return false;
     }
-    const workerIndex = chooseWorkerIndex();
+    const workerIndex = chooseLeastPendingWorkerIndex(workerSlots);
     const requestId = nextRequestId++;
     pendingKeys.add(requestKey);
     pendingRequests.set(requestId, { key: requestKey, mode: "lod-store" });
@@ -459,7 +423,7 @@ export function createAsyncProceduralChunkGeneration(
     workerSlots[workerIndex]!.worker.postMessage({
       type: "put-lod-chunk",
       requestId,
-      key: cloneLodChunkCacheKey(chunk.key),
+      key: cloneAsyncDerivedLodChunkCacheKey(chunk.key),
       chunk: {
         buffer: chunk.buffer,
         byteLength: chunk.byteLength,
@@ -468,30 +432,6 @@ export function createAsyncProceduralChunkGeneration(
     return true;
   }
 
-  function chooseWorkerIndex(): number {
-    let bestWorkerIndex = 0;
-    let bestPendingCount = workerSlots[0]!.pendingCount;
-    for (let index = 1; index < workerSlots.length; index += 1) {
-      const pendingCount = workerSlots[index]!.pendingCount;
-      if (pendingCount < bestPendingCount) {
-        bestPendingCount = pendingCount;
-        bestWorkerIndex = index;
-      }
-    }
-    return bestWorkerIndex;
-  }
-}
-
-function toAsyncGeneratedLodChunkKey(key: AsyncDerivedLodChunkCacheKey): string {
-  return `generate:${toAsyncLodChunkKey(key)}`;
-}
-
-function cloneLodChunkCacheKey(key: AsyncDerivedLodChunkCacheKey): AsyncDerivedLodChunkCacheKey {
-  return {
-    lodLevel: key.lodLevel,
-    editRevision: key.editRevision,
-    coord: { ...key.coord },
-  };
 }
 
 function resolveProceduralGenerationWorkerCount(requestedWorkerCount?: number): number {
