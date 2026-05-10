@@ -64,6 +64,7 @@ test("RPG HUD renders place route interaction and skill snapshot fields", () => 
     "bestiaryDominantFactionLabel",
     "lastInteractionLabel",
     "scoutedCaveMouthCount",
+    "traversedCavePassageCount",
     "fieldKitFindCount",
     "fieldKitSummaryLabel",
     "fieldKitLastFindLabel",
@@ -136,6 +137,9 @@ test("client wires pure exploration interaction and travel goal systems", () => 
   expect(gameController).toContain("summarizeBestiary");
   expect(gameController).toContain("factionId: encounterSite.factionId");
   expect(gameController).toContain("role: \"cave-mouth\"");
+  expect(gameController).toContain("role: \"cave-passage\"");
+  expect(gameController).toContain("findConnectedAtlasCaveAnchors");
+  expect(gameController).toContain("activeCavePassageTraversalCount");
   expect(gameController).toContain("skillId: \"spelunking\"");
   expect(gameController).toContain("new RouteJournal");
   expect(gameController).toContain("planRpgQuestHooks");

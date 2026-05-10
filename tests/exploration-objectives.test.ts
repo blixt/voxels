@@ -61,12 +61,13 @@ test("exploration objectives eventually settle into the deep pilgrimage stage", 
   });
 
   expect(snapshot.stageId).toBe("deep-pilgrimage");
-  expect(snapshot.objectives).toHaveLength(8);
+  expect(snapshot.objectives).toHaveLength(9);
   expect(snapshot.objectives.map((objective) => objective.id)).toEqual([
     "old-road-4",
     "biomes-10",
     "variants-4",
     "underground-3",
+    "cave-passages-1",
     "mob-trails-5",
     "loot-caches-5",
     "cave-mouths-3",
@@ -85,6 +86,7 @@ test("exploration objective progress clamps to its target", () => {
     scoutedMobTrailCount: 30,
     lootedCacheCount: 30,
     scoutedCaveMouthCount: 30,
+    traversedCavePassageCount: 30,
   });
 
   expect(snapshot.stageId).toBe("deep-pilgrimage");

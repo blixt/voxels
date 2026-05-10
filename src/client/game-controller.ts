@@ -75,7 +75,12 @@ import {
   type RpgQuestHookSummary,
 } from "../engine/rpg-quests.ts";
 import {
+  atlasMetersToWorldUnits,
+  findConnectedAtlasCaveAnchors,
   WORLD_ATLAS,
+  type AtlasCaveAnchorKind,
+  type AtlasCaveAnchorConnection,
+  type AtlasCaveSystemId,
 } from "../engine/world-atlas.ts";
 import {
   describeExplorationSkillEffects,
@@ -360,6 +365,7 @@ export interface GameHudSnapshot {
   scoutedMobTrailCount: number;
   lootedCacheCount: number;
   scoutedCaveMouthCount: number;
+  traversedCavePassageCount: number;
   fieldKitFindCount: number;
   fieldKitSummaryLabel: string;
   fieldKitLastFindLabel: string;
@@ -1163,6 +1169,10 @@ export class GameController {
   private lastTravelContext: "surface" | "underground" = "surface";
   private lastInteractionLabel = "No interaction yet";
   private caveReturnFeetPosition: Vec3 | null = null;
+  private activeCaveSystemId: AtlasCaveSystemId | null = null;
+  private activeCaveAnchorId: string | null = null;
+  private activeCaveAnchorKind: AtlasCaveAnchorKind | null = null;
+  private activeCavePassageTraversalCount = 0;
   private readonly bootstrapBenchmarkStartedAt = performance.now();
   private readonly worldClockStartedAt = performance.now();
   private readonly bootstrapBenchmarkSamples: BootstrapBenchmarkSample[] = [];
@@ -1378,6 +1388,7 @@ export class GameController {
       scoutedMobTrailCount: countMobSignEvents(eventLog),
       lootedCacheCount: countEventsBySubjectRole(eventLog, "object", "loot-cache"),
       scoutedCaveMouthCount: countEventsBySubjectRole(eventLog, "zone", "cave-mouth"),
+      traversedCavePassageCount: countEventsBySubjectRole(eventLog, "zone", "cave-passage"),
       fieldKitFindCount: fieldKit.totalFinds,
       fieldKitSummaryLabel: fieldKit.summaryLabel,
       fieldKitLastFindLabel: fieldKit.lastFindLabel,
@@ -3137,7 +3148,12 @@ export class GameController {
       this.skillJournal.observeSkillAwards(eventResult.event.skillAwards);
     }
     if (target.role === "cave-mouth" && prompt.verb === "use") {
-      this.enterCaveMouth(target, currentWorld);
+      this.enterCaveMouth(target, currentWorld, prompt.eventInput.payload);
+      this.pushHud(true);
+      return;
+    }
+    if (target.role === "cave-passage" && prompt.verb === "use") {
+      this.followCavePassage(target, prompt.eventInput.payload);
       this.pushHud(true);
       return;
     }
@@ -3261,9 +3277,15 @@ export class GameController {
     const forward = buildFirstPersonCameraMatrices(this.camera, 1).forward;
     const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
     const skillGates = describeInteractionSkillGates(readInteractionSkillGateSource(this.skillJournal.getSnapshot()));
+    const cavePassageCandidate = this.buildCavePassageInteractionCandidate(forward);
     const caveExitCandidate = this.buildCaveExitInteractionCandidate(forward);
-    if (caveExitCandidate) {
+    if (
+      caveExitCandidate
+      && (!cavePassageCandidate || (this.activeCaveAnchorKind === "entrance" && this.activeCavePassageTraversalCount > 0))
+    ) {
       candidates.push(caveExitCandidate);
+    } else if (cavePassageCandidate) {
+      candidates.push(cavePassageCandidate);
     }
     const caveMouthCandidate = buildCaveMouthInteractionCandidate(currentWorld, encounter, skillGates);
     if (caveMouthCandidate) {
@@ -3423,9 +3445,59 @@ export class GameController {
     };
   }
 
+  private buildCavePassageInteractionCandidate(forward: readonly [number, number, number]): ExplorationInteractionCandidate | null {
+    if (!this.activeCaveSystemId || !this.activeCaveAnchorId || this.lastTravelContext !== "underground") {
+      return null;
+    }
+    const connection = selectCavePassageConnection(this.activeCaveSystemId, this.activeCaveAnchorId);
+    if (!connection) {
+      return null;
+    }
+    const destinationName = formatCaveAnchorName(connection.destinationAnchor.id);
+    const passageId = `cave-passage:${connection.caveSystemId}:${connection.sourceAnchor.id}:${connection.destinationAnchor.id}`;
+    return {
+      id: passageId,
+      subjectType: "zone",
+      name: `${destinationName} Passage`,
+      role: "cave-passage",
+      worldPosition: [
+        this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.6),
+        this.player.feetPosition[1] + PLAYER_EYE_HEIGHT * 0.5,
+        this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.6),
+      ],
+      interactionRadiusMeters: metersToWorldUnits(5),
+      priority: 19,
+      prompts: [{
+        verb: "use",
+        label: `Follow passage to ${destinationName}`,
+        description: `${formatCaveSystemName(connection.caveSystemId)} continues toward ${destinationName}.`,
+      }],
+      flavorText: `${connection.tunnel.materialProfileId} links ${formatCaveAnchorName(connection.sourceAnchor.id)} to ${destinationName}.`,
+      skillAwards: [{
+        skillId: "spelunking",
+        xp: 22,
+        reason: "First cave passage traversal",
+        awardKey: passageId,
+        onceOnly: true,
+      }],
+      payload: {
+        caveTraversal: "passage",
+        caveSystemId: connection.caveSystemId,
+        fromCaveAnchorId: connection.sourceAnchor.id,
+        toCaveAnchorId: connection.destinationAnchor.id,
+        toCaveAnchorKind: connection.destinationAnchor.kind,
+        associatedRouteId: connection.destinationAnchor.associatedRouteId,
+        tunnelMaterialProfileId: connection.tunnel.materialProfileId,
+        tunnelWidthM: connection.tunnel.widthM,
+        tunnelVerticalBiasM: connection.tunnel.verticalBiasM,
+      },
+    };
+  }
+
   private enterCaveMouth(
     target: ResolvedExplorationInteractionTarget,
     currentWorld: CurrentWorldProbeContext,
+    payload: unknown,
   ): void {
     const entryFeet = findSafeCaveEntryFeetPosition({
       world: this.world,
@@ -3438,6 +3510,10 @@ export class GameController {
       return;
     }
     this.caveReturnFeetPosition = [...this.player.feetPosition] as Vec3;
+    this.activeCaveSystemId = readAtlasCaveSystemIdFromPayload(payload);
+    this.activeCaveAnchorId = readPayloadString(payload, "caveAnchorId");
+    this.activeCaveAnchorKind = readAtlasCaveAnchorKind(readPayloadString(payload, "caveAnchorKind"));
+    this.activeCavePassageTraversalCount = 0;
     teleportPlayerToFeetPosition(this.player, entryFeet);
     this.player.grounded = true;
     this.lastTravelContext = "underground";
@@ -3447,6 +3523,59 @@ export class GameController {
     this.syncWorldAroundPlayer(true);
     this.lastInteractionLabel = `Entered ${target.name}`;
     this.status = `${target.name}: underground route`;
+  }
+
+  private followCavePassage(target: ResolvedExplorationInteractionTarget, payload: unknown): void {
+    const caveSystemId = readAtlasCaveSystemIdFromPayload(payload) ?? this.activeCaveSystemId;
+    const fromAnchorId = readPayloadString(payload, "fromCaveAnchorId") ?? this.activeCaveAnchorId;
+    const requestedDestinationAnchorId = readPayloadString(payload, "toCaveAnchorId");
+    if (!caveSystemId || !fromAnchorId) {
+      this.lastInteractionLabel = "No cave passage remembered";
+      this.status = this.lastInteractionLabel;
+      return;
+    }
+    const connection = selectCavePassageConnection(caveSystemId, fromAnchorId, requestedDestinationAnchorId);
+    if (!connection) {
+      this.lastInteractionLabel = `${target.name} is collapsed`;
+      this.status = "No connected passage is readable from here.";
+      return;
+    }
+
+    const destinationPoint = atlasMetersToWorldUnits(connection.destinationAnchor.point);
+    const destinationProbe = this.generator.sampleBiomeProbe(destinationPoint.x, destinationPoint.z);
+    const destinationAnchorPosition: Vec3 = [
+      destinationPoint.x,
+      destinationProbe.surfaceY,
+      destinationPoint.z,
+    ];
+    this.syncWorldAroundAnchor({
+      chunkX: Math.floor(destinationPoint.x / this.world.chunkSize),
+      chunkZ: Math.floor(destinationPoint.z / this.world.chunkSize),
+    }, true);
+    const entryFeet = findSafeCaveEntryFeetPosition({
+      world: this.world,
+      anchorPosition: destinationAnchorPosition,
+      surfaceY: destinationProbe.surfaceY,
+    });
+    if (!entryFeet) {
+      this.lastInteractionLabel = `${formatCaveAnchorName(connection.destinationAnchor.id)} is blocked`;
+      this.status = "The passage has no safe standing room yet.";
+      return;
+    }
+
+    teleportPlayerToFeetPosition(this.player, entryFeet);
+    this.player.grounded = true;
+    this.activeCaveSystemId = connection.caveSystemId;
+    this.activeCaveAnchorId = connection.destinationAnchor.id;
+    this.activeCaveAnchorKind = connection.destinationAnchor.kind;
+    this.activeCavePassageTraversalCount += 1;
+    this.lastTravelContext = "underground";
+    this.lastTravelContextFeetPosition = null;
+    this.lastTravelContextSampleAt = 0;
+    this.syncCameraToPlayer();
+    this.syncWorldAroundPlayer(true);
+    this.lastInteractionLabel = `Followed passage to ${formatCaveAnchorName(connection.destinationAnchor.id)}`;
+    this.status = `${formatCaveSystemName(connection.caveSystemId)}: ${formatCaveAnchorName(connection.destinationAnchor.id)}`;
   }
 
   private exitCaveMouth(): void {
@@ -3459,6 +3588,10 @@ export class GameController {
     teleportPlayerToFeetPosition(this.player, returnFeet);
     this.player.grounded = true;
     this.caveReturnFeetPosition = null;
+    this.activeCaveSystemId = null;
+    this.activeCaveAnchorId = null;
+    this.activeCaveAnchorKind = null;
+    this.activeCavePassageTraversalCount = 0;
     this.lastTravelContext = "surface";
     this.lastTravelContextFeetPosition = null;
     this.lastTravelContextSampleAt = 0;
@@ -4953,6 +5086,27 @@ function questObjectiveMatchesInteraction(
   }
 }
 
+function selectCavePassageConnection(
+  caveSystemId: AtlasCaveSystemId,
+  anchorId: string,
+  requestedDestinationAnchorId?: string | null,
+): AtlasCaveAnchorConnection | null {
+  const connections = findConnectedAtlasCaveAnchors(caveSystemId, anchorId);
+  if (connections.length === 0) {
+    return null;
+  }
+  if (requestedDestinationAnchorId) {
+    const requested = connections.find((connection) => connection.destinationAnchor.id === requestedDestinationAnchorId);
+    if (requested) {
+      return requested;
+    }
+  }
+  return connections.find((connection) => connection.destinationAnchor.kind === "chamber")
+    ?? connections.find((connection) => connection.destinationAnchor.kind === "entrance")
+    ?? connections[0]
+    ?? null;
+}
+
 function formatCaveSystemName(caveSystemId: string): string {
   return caveSystemId
     .split(/[-_\s]+/g)
@@ -4960,6 +5114,29 @@ function formatCaveSystemName(caveSystemId: string): string {
     .filter(Boolean)
     .map((word) => `${word[0]?.toUpperCase() ?? ""}${word.slice(1)}`)
     .join(" ");
+}
+
+function formatCaveAnchorName(caveAnchorId: string): string {
+  return formatCaveSystemName(caveAnchorId);
+}
+
+function readAtlasCaveSystemIdFromPayload(payload: unknown): AtlasCaveSystemId | null {
+  const value = readPayloadString(payload, "caveSystemId");
+  return value && WORLD_ATLAS.caveSystems.some((caveSystem) => caveSystem.id === value)
+    ? value as AtlasCaveSystemId
+    : null;
+}
+
+function readAtlasCaveAnchorKind(value: string | null): AtlasCaveAnchorKind | null {
+  return value === "entrance" || value === "chamber" || value === "overlook" ? value : null;
+}
+
+function readPayloadString(payload: unknown, key: string): string | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const value = (payload as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 function selectActiveTravelGoal(snapshot: RouteJournalSnapshot): TravelGoalSnapshot | null {

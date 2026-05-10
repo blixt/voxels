@@ -324,6 +324,7 @@ function buildProgressSignature(snapshot: GameHudSnapshot): string {
     snapshot.scoutedMobTrailCount,
     snapshot.lootedCacheCount,
     snapshot.scoutedCaveMouthCount,
+    snapshot.traversedCavePassageCount,
     snapshot.fieldKitFindCount,
     snapshot.fieldKitSummaryLabel,
     snapshot.fieldKitLastFindLabel,
@@ -598,6 +599,7 @@ function snapshotToObjectiveSource(snapshot: GameHudSnapshot) {
     scoutedMobTrailCount: snapshot.scoutedMobTrailCount,
     lootedCacheCount: snapshot.lootedCacheCount,
     scoutedCaveMouthCount: snapshot.scoutedCaveMouthCount,
+    traversedCavePassageCount: snapshot.traversedCavePassageCount,
   };
 }
 

@@ -225,6 +225,53 @@ test("interaction resolver surfaces visible cave mouths ahead of generic mob tra
   });
 });
 
+test("interaction resolver keeps cave passage use payloads stable", () => {
+  const resolution = resolveExplorationInteractionTarget({
+    viewerPosition: [0, 0, 0],
+    viewerForward: [0, 0, 1],
+    candidates: [
+      {
+        id: "cave-exit:return",
+        subjectType: "zone",
+        name: "Cave Mouth Return",
+        role: "cave-exit",
+        priority: 18,
+        worldPosition: [0, 0, 1],
+        prompts: ["use"],
+      },
+      {
+        id: "cave-passage:ash-kwama-ravines:ash-pilgrim-mine-mouth:ash-deep-brood-chamber",
+        subjectType: "zone",
+        name: "Ash Deep Brood Chamber Passage",
+        role: "cave-passage",
+        priority: 19,
+        worldPosition: [0, 0, 1.2],
+        prompts: [{ verb: "use", label: "Follow passage to Ash Deep Brood Chamber" }],
+        payload: {
+          caveTraversal: "passage",
+          caveSystemId: "ash-kwama-ravines",
+          fromCaveAnchorId: "ash-pilgrim-mine-mouth",
+          toCaveAnchorId: "ash-deep-brood-chamber",
+        },
+      },
+    ],
+  });
+
+  expect(resolution.target?.role).toBe("cave-passage");
+  expect(resolution.target?.prompts[0]?.eventInput).toMatchObject({
+    kind: "use",
+    subjectType: "zone",
+    subjectId: "cave-passage:ash-kwama-ravines:ash-pilgrim-mine-mouth:ash-deep-brood-chamber",
+    role: "cave-passage",
+    payload: {
+      caveTraversal: "passage",
+      caveSystemId: "ash-kwama-ravines",
+      fromCaveAnchorId: "ash-pilgrim-mine-mouth",
+      toCaveAnchorId: "ash-deep-brood-chamber",
+    },
+  });
+});
+
 test("interaction event helper keeps resolved target identity stable", () => {
   const eventInput = buildExplorationInteractionEventInput(
     {

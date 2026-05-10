@@ -7,6 +7,7 @@ export interface ExplorationObjectiveSource {
   scoutedMobTrailCount?: number;
   lootedCacheCount?: number;
   scoutedCaveMouthCount?: number;
+  traversedCavePassageCount?: number;
 }
 
 export interface ExplorationObjective {
@@ -156,6 +157,13 @@ export function describeExplorationObjectives(
       "Descend until the underground map has its own regions.",
       source.discoveredUndergroundBiomeCount,
       3,
+    ),
+    buildObjective(
+      "cave-passages-1",
+      "Follow 1 cave passage",
+      "Use cave links as routes, not only as isolated entrances.",
+      readObjectiveCount(source.traversedCavePassageCount),
+      1,
     ),
     buildObjective(
       "mob-trails-5",

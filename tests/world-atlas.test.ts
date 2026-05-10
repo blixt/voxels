@@ -5,6 +5,7 @@ import {
   atlasMetersToWorldUnits,
   atlasWorldUnitsToMeters,
   estimateAtlasRegionEllipseAreaM2,
+  findConnectedAtlasCaveAnchors,
   getAtlasCaveAnchors,
   getAtlasRegionGraph,
   getAtlasRouteAnchors,
@@ -305,6 +306,30 @@ test("cave anchors stay on finite island land and sample their owning cave syste
     expect(caveSample.caveCore).toBe(1);
     expect(caveSample.caveInfluence).toBe(1);
     expect(caveSample.caveLandmarkMarkerIds).toEqual(anchor.landmarkMarkerIds);
+  }
+});
+
+test("cave tunnel connections resolve existing anchors symmetrically", () => {
+  for (const caveSystem of WORLD_ATLAS.caveSystems) {
+    const anchorIds = new Set(caveSystem.anchors.map((anchor) => anchor.id));
+    for (const tunnel of caveSystem.tunnels) {
+      expect(anchorIds.has(tunnel.from)).toBe(true);
+      expect(anchorIds.has(tunnel.to)).toBe(true);
+
+      const fromConnections = findConnectedAtlasCaveAnchors(caveSystem.id, tunnel.from);
+      const toConnections = findConnectedAtlasCaveAnchors(caveSystem.id, tunnel.to);
+
+      expect(fromConnections.some((connection) =>
+        connection.tunnel === tunnel
+        && connection.sourceAnchor.id === tunnel.from
+        && connection.destinationAnchor.id === tunnel.to
+      )).toBe(true);
+      expect(toConnections.some((connection) =>
+        connection.tunnel === tunnel
+        && connection.sourceAnchor.id === tunnel.to
+        && connection.destinationAnchor.id === tunnel.from
+      )).toBe(true);
+    }
   }
 });
 
