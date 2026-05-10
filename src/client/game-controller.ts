@@ -158,7 +158,10 @@ import {
 } from "../engine/ambient-environment.ts";
 import {
   applyWorldAtmosphere,
+  resolveWorldClock,
   sampleWorldSystems,
+  WORLD_DAY_LENGTH_SECONDS,
+  type WorldClockSnapshot,
   type WorldSystemSnapshot,
 } from "../engine/world-systems.ts";
 import {
@@ -312,6 +315,7 @@ export interface GameHudSnapshot {
   weatherIntensity: number;
   floraLabel: string;
   faunaLabel: string;
+  timeActivityLabel: string;
   lootSignalLabel: string;
   hazardLabel: string;
   areaCoherenceLabel: string;
@@ -501,6 +505,7 @@ export interface ProgressStateSnapshot {
   events?: ExplorationEventLogState;
   skills: SkillJournalState;
   routes: RouteJournalState;
+  worldClockOffsetSeconds?: number;
 }
 
 interface ActiveExplorationHudState {
@@ -1184,6 +1189,7 @@ export class GameController {
   private activeCavePassageTraversalCount = 0;
   private readonly bootstrapBenchmarkStartedAt = performance.now();
   private readonly worldClockStartedAt = performance.now();
+  private worldClockOffsetSeconds = 0;
   private readonly bootstrapBenchmarkSamples: BootstrapBenchmarkSample[] = [];
   private bootstrapPlayableReady = false;
   private bootstrapBenchmarkComplete = false;
@@ -1335,6 +1341,7 @@ export class GameController {
       weatherIntensity: worldSystems.weather.intensity,
       floraLabel: worldSystems.area.floraLabel,
       faunaLabel: worldSystems.area.faunaLabel,
+      timeActivityLabel: worldSystems.area.timeActivityLabel,
       lootSignalLabel: worldSystems.area.lootSignalLabel,
       hazardLabel: worldSystems.area.hazardLabel,
       areaCoherenceLabel: worldSystems.area.coherenceLabel,
@@ -1597,6 +1604,7 @@ export class GameController {
       events: this.explorationEventLog.exportState(),
       skills: this.skillJournal.exportState(),
       routes: this.routeJournal.exportState(),
+      worldClockOffsetSeconds: this.worldClockOffsetSeconds,
     };
   }
 
@@ -1605,6 +1613,9 @@ export class GameController {
     this.explorationEventLog.importState(state.events ?? {});
     this.skillJournal.importState(state.skills ?? {});
     this.routeJournal.importState(state.routes ?? {});
+    this.worldClockOffsetSeconds = typeof state.worldClockOffsetSeconds === "number" && Number.isFinite(state.worldClockOffsetSeconds)
+      ? Math.max(0, state.worldClockOffsetSeconds)
+      : 0;
     this.routeJournal.startGoal(DEFAULT_TRAVEL_GOAL_ID);
     this.lastDiscoverySampleFeetPosition = null;
     this.lastDiscoverySampleAt = 0;
@@ -3195,6 +3206,13 @@ export class GameController {
       this.pushHud(true);
       return;
     }
+    if (target.role === "sky-watch" && prompt.verb === "listen") {
+      const nextClock = this.advanceWorldClockToNextWatchPhase();
+      this.lastInteractionLabel = `Watched sky until ${nextClock.phaseLabel}`;
+      this.status = `${this.lastInteractionLabel}: ${prompt.eventInput.flavorText ?? prompt.label}`;
+      this.pushHud(true);
+      return;
+    }
     if (target.role === "cave-mouth" && prompt.verb === "use") {
       this.enterCaveMouth(target, currentWorld, prompt.eventInput.payload);
       this.pushHud(true);
@@ -3423,12 +3441,53 @@ export class GameController {
       },
     });
     const worldSystems = sampleWorldSystems(
-      (performance.now() - this.worldClockStartedAt) / 1000,
+      this.getWorldElapsedSeconds(),
       currentWorld.probe,
       currentWorld.ambientProfile,
       encounter,
       this.lastTravelContext,
     );
+    const skyCellX = Math.floor(this.player.feetPosition[0] / metersToWorldUnits(128));
+    const skyCellZ = Math.floor(this.player.feetPosition[2] / metersToWorldUnits(128));
+    const skyWatchId = `skywatch:${currentWorld.ambientProfile.id}:${worldSystems.weather.id}:${worldSystems.clock.phaseId}:${skyCellX}:${skyCellZ}`;
+    candidates.push({
+      id: skyWatchId,
+      subjectType: "zone",
+      name: `${worldSystems.weather.label} Sky`,
+      role: "sky-watch",
+      worldPosition: [
+        this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.0),
+        currentWorld.probe.surfaceY,
+        this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.0),
+      ],
+      interactionRadiusMeters: metersToWorldUnits(8),
+      priority: 1.75,
+      prompts: [{
+        verb: "listen",
+        label: `Watch the ${worldSystems.weather.label.toLowerCase()} sky`,
+        description: `${worldSystems.clock.phaseLabel}: ${worldSystems.area.timeActivityLabel}`,
+      }],
+      flavorText: `${worldSystems.clock.phaseLabel} ${worldSystems.weather.label.toLowerCase()}: ${worldSystems.area.timeActivityLabel}`,
+      skillAwards: [{
+        skillId: worldSystems.weather.id === "blackwater-rain" || worldSystems.weather.id === "sporeglow" ? "naturalist" : "lore",
+        xp: 8,
+        reason: "Watched local sky and weather",
+        awardKey: `skywatch:${currentWorld.ambientProfile.id}:${worldSystems.weather.id}:${worldSystems.clock.phaseId}`,
+        onceOnly: true,
+      }],
+      payload: {
+        ambientProfileId: currentWorld.ambientProfile.id,
+        weather: worldSystems.weather.id,
+        weatherIntensity: Number(worldSystems.weather.intensity.toFixed(3)),
+        phaseId: worldSystems.clock.phaseId,
+        clockLabel: worldSystems.clock.clockLabel,
+        timeActivity: worldSystems.area.timeActivityLabel,
+        hazard: worldSystems.area.hazardLabel,
+        regionId: encounter.regionId,
+        routeId: encounter.routeId,
+        travelContext: this.lastTravelContext,
+      },
+    });
     const soundscapeCellX = Math.floor(this.player.feetPosition[0] / metersToWorldUnits(64));
     const soundscapeCellZ = Math.floor(this.player.feetPosition[2] / metersToWorldUnits(64));
     const soundscapeCandidateId = `soundscape:${worldSystems.area.soundscapeId}:${soundscapeCellX}:${soundscapeCellZ}`;
@@ -3463,6 +3522,8 @@ export class GameController {
         fieldNote: worldSystems.area.soundscapeFieldNote,
         weather: worldSystems.weather.id,
         weatherIntensity: Number(worldSystems.weather.intensity.toFixed(3)),
+        timeOfDay: worldSystems.clock.phaseId,
+        timeActivity: worldSystems.area.timeActivityLabel,
         regionId: encounter.regionId,
         routeId: encounter.routeId,
         caveSystemId: encounter.caveSystemId,
@@ -3525,6 +3586,8 @@ export class GameController {
         anchoredToVisibleLandmark: forageSite.anchoredToVisibleLandmark,
         forageSourceLandmarkId: worldSystems.area.forageSourceLandmarkId,
         weather: worldSystems.weather.id,
+        timeOfDay: worldSystems.clock.phaseId,
+        timeActivity: worldSystems.area.timeActivityLabel,
         hazard: worldSystems.area.hazardLabel,
       },
     });
@@ -4566,12 +4629,31 @@ export class GameController {
     encounter: RpgEncounterSample,
   ): WorldSystemSnapshot {
     return sampleWorldSystems(
-      (performance.now() - this.worldClockStartedAt) / 1000,
+      this.getWorldElapsedSeconds(),
       currentWorld.probe,
       currentWorld.ambientProfile,
       encounter,
       this.lastTravelContext,
     );
+  }
+
+  private getWorldElapsedSeconds(): number {
+    return (performance.now() - this.worldClockStartedAt) / 1000 + this.worldClockOffsetSeconds;
+  }
+
+  private advanceWorldClockToNextWatchPhase(): WorldClockSnapshot {
+    const currentClock = resolveWorldClock(this.getWorldElapsedSeconds());
+    const currentHour = (currentClock.day - 1) * 24 + currentClock.hour + currentClock.minute / 60;
+    const targetHours = [6.25, 11.5, 19.1, 23.25];
+    let targetHour = targetHours.find((hour) => hour > currentHour % 24 + 0.2);
+    let targetDayOffset = currentClock.day - 1;
+    if (targetHour === undefined) {
+      targetHour = targetHours[0]!;
+      targetDayOffset += 1;
+    }
+    const deltaHours = Math.max(0.25, targetDayOffset * 24 + targetHour - currentHour);
+    this.worldClockOffsetSeconds += deltaHours / 24 * WORLD_DAY_LENGTH_SECONDS;
+    return resolveWorldClock(this.getWorldElapsedSeconds());
   }
 
   private selectActiveQuestHook(

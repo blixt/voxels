@@ -41,6 +41,7 @@ export interface WorldWeatherSnapshot {
 export interface WorldAreaActivitySnapshot {
   floraLabel: string;
   faunaLabel: string;
+  timeActivityLabel: string;
   lootId: string;
   lootName: string;
   lootSignalLabel: string;
@@ -117,7 +118,7 @@ export function sampleWorldSystems(
   return {
     clock,
     weather,
-    area: resolveWorldAreaActivity(probe, encounter, weather, travelContext),
+    area: resolveWorldAreaActivity(probe, encounter, clock, weather, travelContext),
   };
 }
 
@@ -263,6 +264,7 @@ function resolveWorldWeather(
 function resolveWorldAreaActivity(
   probe: ProceduralBiomeProbe,
   encounter: RpgEncounterSample,
+  clock: WorldClockSnapshot,
   weather: WorldWeatherSnapshot,
   travelContext: "surface" | "underground",
 ): WorldAreaActivitySnapshot {
@@ -271,12 +273,14 @@ function resolveWorldAreaActivity(
     ? UNDERGROUND_FLORA[probe.undergroundBiomeId]
     : FLORA_BY_BIOME[probe.biomeId];
   const faunaLabel = resolveFaunaLabel(probe, encounter, underground);
+  const timeActivityLabel = resolveTimeActivityLabel(probe, clock, weather, underground);
   const loot = resolveLootSignal(probe.regionalVariantId, probe.landmarkId, underground, weather);
   const hazardLabel = resolveHazardLabel(probe, encounter, weather, underground);
   const soundscape = resolveSoundscapeCue(probe, encounter, weather, underground);
   return {
     floraLabel,
     faunaLabel,
+    timeActivityLabel,
     lootId: loot.id,
     lootName: loot.name,
     lootSignalLabel: loot.label,
@@ -285,13 +289,46 @@ function resolveWorldAreaActivity(
     forageSourceLandmarkId: loot.forageSourceLandmarkId,
     hazardLabel,
     coherenceLabel: underground
-      ? `cave ecology: ${floraLabel}; ${faunaLabel}`
-      : `surface ecology: ${floraLabel}; ${faunaLabel}`,
+      ? `cave ecology: ${floraLabel}; ${faunaLabel}; ${timeActivityLabel}`
+      : `surface ecology: ${floraLabel}; ${faunaLabel}; ${timeActivityLabel}`,
     soundscapeId: soundscape.id,
     soundscapeLabel: soundscape.label,
     soundscapeListenLabel: soundscape.listenLabel,
     soundscapeFieldNote: soundscape.fieldNote,
   };
+}
+
+function resolveTimeActivityLabel(
+  probe: ProceduralBiomeProbe,
+  clock: WorldClockSnapshot,
+  weather: WorldWeatherSnapshot,
+  underground: boolean,
+): string {
+  if (underground) {
+    if (clock.phaseId === "night" || weather.id === "sporeglow") {
+      return "cave glow is strongest and smaller tracks show along wet stone";
+    }
+    return "cave air moves slowly enough to read dust and draft";
+  }
+  if (weather.id === "ash-squall") {
+    return "ash cover freshens tracks while the wind hides distant movement";
+  }
+  if (weather.id === "blackwater-rain") {
+    return "rain raises scent and makes fresh crossings easier to spot";
+  }
+  if (clock.phaseId === "night") {
+    if (probe.biomeId === "fungal" || probe.biomeId === "firefly" || probe.regionalVariantId === "fungal_moonlit") {
+      return "nocturnal glow turns spores, insects, and trails readable";
+    }
+    return "night movement favors silhouettes, camp smoke, and reflective eyes";
+  }
+  if (clock.phaseId === "dawn") {
+    return "dawn dew and low light reveal fresh tracks before heat rises";
+  }
+  if (clock.phaseId === "dusk") {
+    return "dusk traffic gathers near shelter, water, and old road marks";
+  }
+  return "daylight favors long sightlines and readable landmark silhouettes";
 }
 
 interface SoundscapeCue {

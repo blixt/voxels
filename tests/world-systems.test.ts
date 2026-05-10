@@ -33,6 +33,7 @@ test("world systems produce coherent exploration cues from a generator probe", (
   expect(systems.weather.label.length).toBeGreaterThan(0);
   expect(systems.area.floraLabel.length).toBeGreaterThan(0);
   expect(systems.area.faunaLabel.length).toBeGreaterThan(0);
+  expect(systems.area.timeActivityLabel.length).toBeGreaterThan(0);
   expect(systems.area.lootId.length).toBeGreaterThan(0);
   expect(systems.area.lootName.length).toBeGreaterThan(0);
   expect(systems.area.lootSignalLabel.length).toBeGreaterThan(0);
@@ -42,6 +43,89 @@ test("world systems produce coherent exploration cues from a generator probe", (
   expect(systems.area.soundscapeListenLabel).toContain("Listen");
   expect(systems.area.soundscapeFieldNote.length).toBeGreaterThan(0);
   expect(systems.area.coherenceLabel).toContain(systems.area.floraLabel);
+  expect(systems.area.coherenceLabel).toContain(systems.area.timeActivityLabel);
+});
+
+test("day night and weather shift local activity cues", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const baseProbe = generator.sampleBiomeProbe(0, 0);
+  const encounter = sampleRpgEncounterWorldUnits(0, 0);
+  const clearProbe = {
+    ...baseProbe,
+    biomeId: "steppe" as const,
+    regionalVariantId: null,
+    fields: {
+      ...baseProbe.fields,
+      moisture: 0.05,
+      oceanness: 0.02,
+      volcanism: 0.05,
+      desolation: 0.08,
+      magic: 0.04,
+    },
+  };
+  const fungalProbe = {
+    ...baseProbe,
+    biomeId: "fungal" as const,
+    regionalVariantId: "fungal_moonlit" as const,
+    fields: {
+      ...baseProbe.fields,
+      magic: 0.96,
+      moisture: 0.78,
+    },
+  };
+  const ashProbe = {
+    ...baseProbe,
+    biomeId: "ember" as const,
+    fields: {
+      ...baseProbe.fields,
+      moisture: 0.05,
+      oceanness: 0.02,
+      volcanism: 0.98,
+      desolation: 0.92,
+      magic: 0.04,
+    },
+  };
+  const wetProbe = {
+    ...baseProbe,
+    biomeId: "marsh" as const,
+    fields: {
+      ...baseProbe.fields,
+      moisture: 0.96,
+      oceanness: 0.45,
+      volcanism: 0.05,
+      desolation: 0.05,
+      magic: 0.10,
+    },
+  };
+  const day = sampleWorldSystems(
+    WORLD_DAY_LENGTH_SECONDS * 0.20,
+    clearProbe,
+    resolveAmbientWorldProfile(clearProbe),
+    encounter,
+    "surface",
+  );
+  const night = sampleWorldSystems(
+    WORLD_DAY_LENGTH_SECONDS * 0.72,
+    fungalProbe,
+    resolveAmbientWorldProfile(fungalProbe),
+    encounter,
+    "surface",
+  );
+  const ash = sampleWorldSystems(180, ashProbe, resolveAmbientWorldProfile(ashProbe), encounter, "surface");
+  const wet = sampleWorldSystems(180, wetProbe, resolveAmbientWorldProfile(wetProbe), encounter, "surface");
+  const cave = sampleWorldSystems(
+    WORLD_DAY_LENGTH_SECONDS * 0.72,
+    { ...baseProbe, undergroundBiomeId: "mycelial" as const },
+    resolveAmbientWorldProfile(baseProbe),
+    encounter,
+    "underground",
+  );
+
+  expect(day.area.timeActivityLabel).toContain("daylight");
+  expect(night.area.timeActivityLabel).toContain("nocturnal glow");
+  expect(ash.area.timeActivityLabel).toContain("ash cover");
+  expect(wet.area.timeActivityLabel).toContain("rain raises scent");
+  expect(cave.area.timeActivityLabel).toContain("cave glow");
 });
 
 test("world systems derive deterministic soundscape cues from weather and cave context", () => {

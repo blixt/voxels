@@ -46,6 +46,7 @@ test("RPG HUD renders place route interaction and skill snapshot fields", () => 
     "weatherLabel",
     "weatherIntensity",
     "hazardLabel",
+    "timeActivityLabel",
     "soundscapeId",
     "soundscapeLabel",
     "soundscapeListenLabel",
@@ -129,6 +130,9 @@ test("client wires pure exploration interaction and travel goal systems", () => 
   expect(gameController).toContain("lootSkillId");
   expect(gameController).toContain("sampleForageSiteWorldUnits");
   expect(gameController).toContain("role: \"ambient-soundscape\"");
+  expect(gameController).toContain("role: \"sky-watch\"");
+  expect(gameController).toContain("advanceWorldClockToNextWatchPhase");
+  expect(gameController).toContain("worldClockOffsetSeconds");
   expect(gameController).toContain("soundscapeListenLabel");
   expect(gameController).toContain("soundscapeFieldNote");
   expect(gameController).toContain("forageSiteRole");
