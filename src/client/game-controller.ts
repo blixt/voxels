@@ -143,6 +143,7 @@ import { metersToWorldUnits, worldUnitsToMeters } from "../engine/scale.ts";
 import {
   shouldPumpWorldWork,
   shouldRefreshResidency,
+  shouldRunMovingLodUpdate,
 } from "../engine/stream-work.ts";
 import {
   buildStreamAnchorPosition,
@@ -3887,12 +3888,16 @@ export class GameController {
       maxPlanMs: MOVING_MAX_LOD_PLAN_MS_PER_FRAME,
       maxWorkMs: MOVING_MAX_LOD_WORK_MS_PER_FRAME,
     };
-    const shouldRunMovingLodUpdate = movementActive
-      && this.interactiveFrameNumber % MOVING_LOD_UPDATE_INTERVAL_FRAMES === 0
-      && this.lastStreamSummary.pendingChunks === 0
-      && dirtyResidentChunks === 0;
-    const allowLodUpdate = !movementActive || shouldRunMovingLodUpdate;
-    const lodBudget = shouldRunMovingLodUpdate ? movingLodBudget : undefined;
+    const runMovingLodUpdate = shouldRunMovingLodUpdate({
+      movementActive,
+      frameNumber: this.interactiveFrameNumber,
+      intervalFrames: MOVING_LOD_UPDATE_INTERVAL_FRAMES,
+      pendingChunks: this.lastStreamSummary.pendingChunks,
+      dirtyResidentChunks,
+      pendingLodChunks: this.lastLodSummary.pending,
+    });
+    const allowLodUpdate = !movementActive || runMovingLodUpdate;
+    const lodBudget = runMovingLodUpdate ? movingLodBudget : undefined;
     if (
       shouldPumpWorldWork(
         movementActive,
