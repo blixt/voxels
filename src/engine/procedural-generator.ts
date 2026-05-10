@@ -5,10 +5,22 @@ import {
   type GeneratedChunkRenderSummary,
 } from "./generated-chunk-render-summary.ts";
 import type { ChunkBounds, ChunkCoordinate } from "./types.ts";
+import {
+  sampleWorldRegion,
+  WORLD_REGION_AUTHORITY_THRESHOLD,
+  type WorldRegionId,
+} from "./worldgen-region.ts";
+import {
+  sampleAtlasCaveAnchorMeters,
+  sampleAtlasRegionMeters,
+  sampleIslandMaskMeters,
+  WORLD_ATLAS,
+} from "./world-atlas.ts";
+import type { AmbientProfileId } from "./ambient-environment.ts";
 
 export const HEX_COLOR_COUNT = 0x1000;
 export const PROCEDURAL_WORLD_MAX_Y = 16_384;
-export const PROCEDURAL_WORLD_GENERATION_VERSION = "20260312-persist-v2";
+export const PROCEDURAL_WORLD_GENERATION_VERSION = "20260508-region-authority-lod-shell-v2";
 
 export type BaseBiomeId = "verdant" | "savanna" | "steppe" | "dunes" | "badlands" | "highland" | "moor" | "tundra";
 export type SpecialBiomeId = "marsh" | "firefly" | "saltflat" | "fern" | "fungal" | "ember" | "bloom" | "shardlands";
@@ -30,6 +42,7 @@ export type RegionalVariantId =
   | "steppe_monolith"
   | "dunes_glass"
   | "badlands_crater"
+  | "ash_wastes"
   | "highland_redleaf"
   | "moor_shadowglass"
   | "tundra_blue_ice"
@@ -77,7 +90,28 @@ export type LandmarkId =
   | "glowcap"
   | "mega_glowcap"
   | "root_stump"
-  | "stone_tor";
+  | "stone_tor"
+  | "ancestor_pillar"
+  | "ash_marker"
+  | "glass_cairn"
+  | "silt_shell"
+  | "velothi_shrine"
+  | "kwama_mound"
+  | "pilgrim_cairn"
+  | "velothi_ziggurat"
+  | "ash_obelisk"
+  | "rib_arch"
+  | "old_road_causeway"
+  | "paver_debris"
+  | "scree_fan"
+  | "shrine_debris"
+  | "buried_ribs"
+  | "pilgrim_lantern"
+  | "bone_chimes"
+  | "ashlander_travel_pack"
+  | "crystal_reeds"
+  | "fungal_bridge"
+  | "rib_remains";
 
 interface BaseBiomeProfile {
   id: BaseBiomeId;
@@ -137,6 +171,13 @@ interface LandmarkProfile {
 }
 
 interface SurfaceFieldSample {
+  regionId: WorldRegionId;
+  secondaryRegionId: WorldRegionId;
+  regionStrength: number;
+  regionBlend: number;
+  regionBiomeId: BiomeId;
+  regionAmbientProfileId: AmbientProfileId;
+  regionVariantId: RegionalVariantId | null;
   temperature: number;
   moisture: number;
   uplift: number;
@@ -163,6 +204,21 @@ interface SurfaceFieldSample {
   surfaceGrain: number;
   scatter: number;
   peakness: number;
+  islandInterior: number;
+  shorelineBand: number;
+  coastalShelf: number;
+  deepOcean: number;
+  atlasRouteInfluence: number;
+  atlasRouteCore: number;
+  atlasRouteShoulder: number;
+  atlasCaveInfluence: number;
+  atlasCaveCore: number;
+  volcanicHeart: number;
+  ashRing: number;
+  westWetlands: number;
+  northeastGrazelands: number;
+  southernSaltBasin: number;
+  easternShardCoast: number;
 }
 
 interface CaveFieldSample {
@@ -174,11 +230,18 @@ interface CaveFieldSample {
 
 function createSurfaceFieldSample(): SurfaceFieldSample {
   return {
+    regionId: "inner-sea", secondaryRegionId: "inner-sea", regionStrength: 0,
+    regionBlend: 1, regionBiomeId: "moor", regionAmbientProfileId: "silt-mist",
+    regionVariantId: null,
     temperature: 0, moisture: 0, uplift: 0, drainage: 0, volcanism: 0, magic: 0,
     globalHeight: 0, mountainness: 0, oceanness: 0, continentalness: 0, hills: 0,
     detail: 0, ridge: 0, basin: 0, channel: 0, dune: 0, mesa: 0, grove: 0,
     oldGrowth: 0, orchard: 0, desolation: 0, strata: 0, surfacePatch: 0,
-    surfaceGrain: 0, scatter: 0, peakness: 0,
+    surfaceGrain: 0, scatter: 0, peakness: 0, islandInterior: 0, coastalShelf: 0,
+    shorelineBand: 0, deepOcean: 0, atlasRouteInfluence: 0, atlasRouteCore: 0,
+    atlasRouteShoulder: 0, atlasCaveInfluence: 0, atlasCaveCore: 0, volcanicHeart: 0,
+    ashRing: 0, westWetlands: 0, northeastGrazelands: 0, southernSaltBasin: 0,
+    easternShardCoast: 0,
   };
 }
 
@@ -187,6 +250,10 @@ function createCaveFieldSample(): CaveFieldSample {
 }
 
 interface MutableColumnState {
+  regionId: WorldRegionId;
+  secondaryRegionId: WorldRegionId;
+  regionStrength: number;
+  regionAmbientProfileId: AmbientProfileId;
   biomeId: BiomeId;
   hostBiomeId: BaseBiomeId;
   secondaryBiomeId: BaseBiomeId;
@@ -205,6 +272,7 @@ interface MutableColumnState {
   oceanness: number;
   surfaceY: number;
   waterTopY: number;
+  pilgrimRouteInfluence: number;
   surfaceMaterialPrimary: number;
   surfaceMaterialSecondary: number;
   subsurfacePrimary: number;
@@ -253,6 +321,7 @@ export interface ProceduralColumnSample {
   surfaceY: number;
   topY: number;
   waterTopY: number | null;
+  pilgrimRouteInfluence: number;
   surfaceMaterial: number;
 }
 
@@ -261,11 +330,21 @@ export interface ProceduralSurfaceColumnSample {
   surfaceY: number;
   topY: number;
   waterTopY: number | null;
+  pilgrimRouteInfluence: number;
   surfaceMaterial: number;
   waterMaterial: number | null;
 }
 
+export interface ProceduralTopColumnMaterialBucketSample extends ProceduralSurfaceColumnSample {
+  bucketIndex: number;
+  material: number;
+}
+
 export interface ProceduralBiomeProbe extends ProceduralColumnSample {
+  regionId: WorldRegionId;
+  secondaryRegionId: WorldRegionId;
+  regionStrength: number;
+  regionAmbientProfileId: AmbientProfileId;
   secondaryBiomeId: BaseBiomeId;
   transitionThreshold: number;
   specialStrength: number;
@@ -280,6 +359,18 @@ export interface ProceduralBiomeProbe extends ProceduralColumnSample {
     globalHeight: number;
     mountainness: number;
     oceanness: number;
+    ridge: number;
+    mesa: number;
+    desolation: number;
+    strata: number;
+    surfacePatch: number;
+    surfaceGrain: number;
+    scatter: number;
+    peakness: number;
+    islandInterior: number;
+    shorelineBand?: number;
+    coastalShelf: number;
+    deepOcean?: number;
   };
 }
 
@@ -389,6 +480,8 @@ const CAVE_DEPTH_SCALE = 1 / 1700;
 const CAVE_OPENING_SCALE = 1 / 760;
 const STRATA_BAND_SCALE = 1 / 160;
 const ONE_THIRD = 1 / 3;
+const SURFACE_MATERIAL_DITHER_SCALE = 1 / 7;
+const WORLD_UNITS_PER_METER = 10;
 const NO_WATER = -1;
 const FEATURE_NONE = 0;
 const FEATURE_OAK = 1;
@@ -407,18 +500,94 @@ const FEATURE_REEDS = 13;
 const FEATURE_CRYSTAL = 14;
 const FEATURE_REDWOOD = 15;
 const FEATURE_DEAD_TREE = 16;
+const FEATURE_MEGASTRUCTURE = 17;
+const FEATURE_RIB_ARCH = 18;
+const FEATURE_CAUSEWAY = 19;
+const FEATURE_ROAD_DEBRIS = 20;
+const FEATURE_BURIED_RIBS = 21;
+const FEATURE_TRAVEL_PACK = 22;
 const CHUNK_GENERATION_SCRATCH_POOL_LIMIT = 4;
+
+interface PilgrimRouteBand {
+  startX: number;
+  startZ: number;
+  directionX: number;
+  directionZ: number;
+  length: number;
+  halfWidth: number;
+}
+
+interface PilgrimRouteSurfaceInfluence {
+  core: number;
+  shoulder: number;
+  fracture: number;
+  lateralRatio: number;
+}
+
+interface PilgrimRouteCoordinates {
+  along: number;
+  lateral: number;
+  lateralRatio: number;
+}
+
+interface PilgrimRouteSetPiece {
+  profile: LandmarkProfile;
+  deltaAlong: number;
+  deltaLateral: number;
+}
+
+interface GeneratorAtlasFields {
+  islandInterior: number;
+  shorelineBand: number;
+  coastalShelf: number;
+  deepOcean: number;
+  primaryRegionId: WorldRegionId | null;
+  secondaryRegionId: WorldRegionId | null;
+  regionStrength: number;
+  regionBlend: number;
+  regionDistance: number;
+  primaryBiomeId: BiomeId | "ocean" | "deep-ocean";
+  regionalVariantId: RegionalVariantId | null;
+  ambientProfileId: AmbientProfileId | null;
+  routeInfluence: number;
+  routeCore: number;
+  routeShoulder: number;
+  distanceToRouteM: number;
+  caveInfluence: number;
+  caveCore: number;
+  distanceToCaveAnchorM: number;
+}
+
+const PILGRIM_ROUTE_BANDS: readonly PilgrimRouteBand[] = [
+  createPilgrimRouteBand(0, 0, 8, 820, 58),
+  createPilgrimRouteBand(0, 0, 126, 1800, 70),
+  createPilgrimRouteBand(220, -340, 54, 2200, 64),
+  createPilgrimRouteBand(-540, 420, 315, 2200, 64),
+  createPilgrimRouteBand(960, -780, 202, 2600, 74),
+  createPilgrimRouteBand(236, -4624, 58, 3400, 82),
+  createPilgrimRouteBand(-1880, -2860, 42, 3200, 86),
+  createPilgrimRouteBand(-6100, 700, 10, 3000, 74),
+  createPilgrimRouteBand(-3000, 700, 352, 2250, 76),
+  createPilgrimRouteBand(-2100, 3600, 10, 4000, 84),
+  createPilgrimRouteBand(-600, -700, 27, 3150, 82),
+  createPilgrimRouteBand(900, -1800, 333, 3800, 82),
+  createPilgrimRouteBand(3000, 900, 32, 3050, 80),
+  createPilgrimRouteBand(-4200, -4200, 37, 3150, 78),
+];
 
 const BASE_BIOMES: readonly BaseBiomeProfile[] = [
   createBaseBiome("verdant", 0.56, 0.78, 0.28, 0.74, 0.42, 0.18, -10, 0.48, 0.18, 0.40, 0.28, 0.00, 4.4, 1548, "#6A5", "#7B6", "#8B6", "#592", "#677", "#754", "#865", "#49B", "#DDE"),
   createBaseBiome("savanna", 0.72, 0.54, 0.32, 0.56, 0.46, 0.16, -2, 0.50, 0.20, 0.36, 0.18, 0.00, 6.4, 1640, "#BA6", "#CB7", "#DB8", "#C86", "#887", "#986", "#A97", "#5AB", "#EED"),
   createBaseBiome("steppe", 0.62, 0.42, 0.36, 0.52, 0.48, 0.14, 0, 0.54, 0.22, 0.32, 0.18, 0.00, 4.8, 1608, "#9B6", "#CB7", "#BA6", "#CA7", "#887", "#875", "#986", "#4AA", "#DDD"),
   createBaseBiome("dunes", 0.84, 0.16, 0.18, 0.28, 0.30, 0.12, -16, 0.32, 0.10, 0.54, 0.42, 0.00, 8.8, 1710, "#DB6", "#EC9", "#EC7", "#CA5", "#B96", "#B85", "#C96", "#5BC", "#EDC"),
-  createBaseBiome("badlands", 0.72, 0.20, 0.58, 0.36, 0.58, 0.16, 18, 0.72, 0.64, 0.38, 0.06, 0.46, 9.6, 1670, "#C75", "#D96", "#D86", "#B54", "#865", "#A54", "#965", "#49B", "#EBC"),
+  createBaseBiome("badlands", 0.72, 0.20, 0.58, 0.36, 0.58, 0.16, 18, 0.72, 0.64, 0.38, 0.06, 0.28, 10.8, 1670, "#A65", "#B87", "#A76", "#854", "#654", "#743", "#854", "#386", "#CAB"),
   createBaseBiome("highland", 0.40, 0.56, 0.72, 0.46, 0.72, 0.16, 44, 0.88, 0.62, 0.24, 0.10, 0.06, 7.8, 1518, "#6B7", "#7C8", "#7A8", "#8C7", "#778", "#667", "#889", "#5AD", "#EEF"),
   createBaseBiome("moor", 0.28, 0.68, 0.48, 0.28, 0.54, 0.16, 6, 0.34, 0.16, 0.22, 0.30, 0.00, 5.4, 1532, "#758", "#869", "#97A", "#546", "#667", "#564", "#675", "#357", "#DDE"),
   createBaseBiome("tundra", 0.18, 0.42, 0.86, 0.40, 0.82, 0.12, 78, 0.98, 0.82, 0.16, 0.02, 0.04, 6.2, 1452, "#BCC", "#CDD", "#DDE", "#ABB", "#889", "#99A", "#AAB", "#8CD", "#EEF"),
 ] as const;
+const BASE_BIOMES_BY_ID = new Map<BaseBiomeId, BaseBiomeProfile>(
+  BASE_BIOMES.map((biome) => [biome.id, biome]),
+);
 
 const SPECIAL_BIOMES: Record<SpecialBiomeId, SpecialBiomeProfile> = {
   marsh: createSpecialBiome("marsh", "#486", "#5A8", "#597", "#2A6", "#576", "#564", "#675", "#276", "#DDE", true),
@@ -435,7 +604,25 @@ const PROCEDURAL_WATER_ALPHA = 168;
 const PROCEDURAL_WATER_MATERIALS = new Set<number>([
   ...BASE_BIOMES.map((biome) => biome.water),
   ...Object.values(SPECIAL_BIOMES).map((biome) => biome.water),
-]);
+  "#134",
+  "#245",
+  "#58C",
+  "#5BD",
+  "#6DF",
+  "#9CF",
+  "#9DF",
+].map((material) => typeof material === "number" ? material : hexColorToMaterial(material)));
+
+const PILGRIM_ROUTE_CORE_MATERIAL = hexColorToMaterial("#655");
+const PILGRIM_ROUTE_WORN_MATERIAL = hexColorToMaterial("#887");
+const PILGRIM_ROUTE_DARK_MATERIAL = hexColorToMaterial("#433");
+const PILGRIM_ROUTE_DUST_MATERIAL = hexColorToMaterial("#544");
+const PILGRIM_ROUTE_SALT_MATERIAL = hexColorToMaterial("#BBA");
+const PILGRIM_ROUTE_WARP_MAX = 18 * WORLD_UNITS_PER_METER;
+const PILGRIM_ROUTE_WARP_FADE_DISTANCE = 140 * WORLD_UNITS_PER_METER;
+const PILGRIM_ROUTE_SET_PIECE_START = 180 * WORLD_UNITS_PER_METER;
+const PILGRIM_ROUTE_SET_PIECE_SPACING = 240 * WORLD_UNITS_PER_METER;
+const PILGRIM_ROUTE_SET_PIECE_END_MARGIN = 140 * WORLD_UNITS_PER_METER;
 
 const UNDERGROUND_BIOMES: Record<UndergroundBiomeId, UndergroundBiomeProfile> = {
   rooted: createUndergroundBiome("rooted", "#586", "#354", "#9C6"),
@@ -488,6 +675,27 @@ const LANDMARKS: Record<LandmarkId, LandmarkProfile> = {
   mega_glowcap: createLandmark("mega_glowcap", 232, 18, 0.16, 1.2, 2),
   root_stump: createLandmark("root_stump", 132, 7, 0.22, 1.0, 0),
   stone_tor: createLandmark("stone_tor", 176, 7, 0.18, 1.0, 0),
+  ancestor_pillar: createLandmark("ancestor_pillar", 192, 6, 0.18, 1.0, 0),
+  ash_marker: createLandmark("ash_marker", 160, 5, 0.20, 1.0, 0),
+  glass_cairn: createLandmark("glass_cairn", 128, 5, 0.24, 1.0, 2),
+  silt_shell: createLandmark("silt_shell", 176, 8, 0.18, 1.0, 1),
+  velothi_shrine: createLandmark("velothi_shrine", 164, 5, 0.18, 1.0, 1),
+  kwama_mound: createLandmark("kwama_mound", 132, 6, 0.26, 1.0, 1),
+  pilgrim_cairn: createLandmark("pilgrim_cairn", 144, 5, 0.22, 1.0, 1),
+  velothi_ziggurat: createLandmark("velothi_ziggurat", 292, 15, 0.14, 1.0, 1),
+  ash_obelisk: createLandmark("ash_obelisk", 212, 8, 0.18, 1.0, 2),
+  rib_arch: createLandmark("rib_arch", 196, 13, 0.18, 1.0, 1),
+  old_road_causeway: createLandmark("old_road_causeway", 128, 13, 0.30, 1.0, 1),
+  paver_debris: createLandmark("paver_debris", 96, 12, 0.38, 1.0, 0),
+  scree_fan: createLandmark("scree_fan", 104, 13, 0.34, 1.0, 1),
+  shrine_debris: createLandmark("shrine_debris", 124, 15, 0.28, 1.0, 2),
+  buried_ribs: createLandmark("buried_ribs", 144, 12, 0.24, 1.0, 3),
+  pilgrim_lantern: createLandmark("pilgrim_lantern", 124, 5, 0.28, 1.0, 4),
+  bone_chimes: createLandmark("bone_chimes", 156, 7, 0.24, 1.0, 5),
+  ashlander_travel_pack: createLandmark("ashlander_travel_pack", 132, 7, 0.14, 1.0, 1),
+  crystal_reeds: createLandmark("crystal_reeds", 112, 5, 0.34, 1.0, 2),
+  fungal_bridge: createLandmark("fungal_bridge", 156, 16, 0.26, 1.0, 1),
+  rib_remains: createLandmark("rib_remains", 152, 10, 0.24, 1.0, 1),
 };
 
 const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
@@ -513,12 +721,18 @@ const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
     landmarkPlacement("shrub", { chance: 0.24, scale: 1.0, variant: 2 }),
     landmarkPlacement("flower_patch", { chance: 0.16, scale: 0.88, variant: 2 }),
     landmarkPlacement("standing_stone", { chance: 0.28, scale: 1.12 }),
+    landmarkPlacement("ancestor_pillar", { chance: 0.14, scale: 1.10, cellSize: 176, radius: 6 }),
+    landmarkPlacement("pilgrim_cairn", { chance: 0.12, scale: 1.06, cellSize: 168, radius: 5 }),
+    landmarkPlacement("old_road_causeway", { chance: 0.16, scale: 1.04, cellSize: 152, radius: 12 }),
+    landmarkPlacement("pilgrim_lantern", { chance: 0.12, scale: 1.04, cellSize: 148, radius: 5 }),
     landmarkPlacement("boulder", { chance: 0.18, scale: 0.9 }),
   ],
   dunes: [
     landmarkPlacement("palm", { chance: 0.34, scale: 1.22 }),
     landmarkPlacement("cactus", { chance: 0.36, scale: 1.12 }),
     landmarkPlacement("cactus", { chance: 0.24, scale: 1.65, variant: 2, cellSize: 168, radius: 6 }),
+    landmarkPlacement("silt_shell", { chance: 0.14, scale: 1.04, cellSize: 188, radius: 8 }),
+    landmarkPlacement("kwama_mound", { chance: 0.12, scale: 1.06, cellSize: 172, radius: 6 }),
     landmarkPlacement("dead_snag", { chance: 0.18, scale: 0.9 }),
     landmarkPlacement("boulder", { chance: 0.16, scale: 0.86 }),
   ],
@@ -527,6 +741,15 @@ const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
     landmarkPlacement("hoodoo", { chance: 0.24, scale: 0.86, variant: 1, cellSize: 156, radius: 6 }),
     landmarkPlacement("dead_snag", { chance: 0.28, scale: 1.24 }),
     landmarkPlacement("standing_stone", { chance: 0.20, scale: 1.18 }),
+    landmarkPlacement("velothi_ziggurat", { chance: 0.08, scale: 1.08, cellSize: 280, radius: 15 }),
+    landmarkPlacement("ash_obelisk", { chance: 0.12, scale: 1.10, cellSize: 204, radius: 8 }),
+    landmarkPlacement("rib_arch", { chance: 0.14, scale: 1.08, cellSize: 184, radius: 13 }),
+    landmarkPlacement("old_road_causeway", { chance: 0.22, scale: 1.06, cellSize: 132, radius: 13 }),
+    landmarkPlacement("pilgrim_lantern", { chance: 0.16, scale: 1.10, cellSize: 128, radius: 5 }),
+    landmarkPlacement("ash_marker", { chance: 0.16, scale: 1.12, cellSize: 168, radius: 5 }),
+    landmarkPlacement("velothi_shrine", { chance: 0.14, scale: 1.12, cellSize: 184, radius: 5 }),
+    landmarkPlacement("kwama_mound", { chance: 0.14, scale: 1.10, cellSize: 164, radius: 6 }),
+    landmarkPlacement("pilgrim_cairn", { chance: 0.12, scale: 1.08, cellSize: 172, radius: 5 }),
     landmarkPlacement("cactus", { chance: 0.18, scale: 0.96 }),
     landmarkPlacement("boulder", { chance: 0.20, scale: 0.94 }),
   ],
@@ -542,6 +765,7 @@ const BASE_BIOME_LANDMARKS: Record<BaseBiomeId, readonly LandmarkProfile[]> = {
     landmarkPlacement("willow", { chance: 0.24, scale: 0.98, cellSize: 148, radius: 14 }),
     landmarkPlacement("frost_shrub", { chance: 0.40, scale: 1.04 }),
     landmarkPlacement("standing_stone", { chance: 0.32, scale: 1.18 }),
+    landmarkPlacement("ancestor_pillar", { chance: 0.16, scale: 1.08, cellSize: 172, radius: 6 }),
     landmarkPlacement("glowcap", { chance: 0.14, scale: 0.96, cellSize: 156, radius: 12 }),
     landmarkPlacement("boulder", { chance: 0.22, scale: 1.00 }),
   ],
@@ -570,6 +794,9 @@ const SPECIAL_BIOME_LANDMARKS: Record<SpecialBiomeId, readonly LandmarkProfile[]
   saltflat: [
     landmarkPlacement("salt_spire", { chance: 0.36, scale: 1.10 }),
     landmarkPlacement("crystal_cluster", { chance: 0.20, scale: 1.04, variant: 2 }),
+    landmarkPlacement("glass_cairn", { chance: 0.16, scale: 1.08, cellSize: 152, radius: 5 }),
+    landmarkPlacement("silt_shell", { chance: 0.16, scale: 1.06, cellSize: 184, radius: 8 }),
+    landmarkPlacement("kwama_mound", { chance: 0.12, scale: 1.04, cellSize: 176, radius: 6 }),
     landmarkPlacement("dead_snag", { chance: 0.12, scale: 0.90 }),
     landmarkPlacement("shrub", { chance: 0.12, scale: 0.82, variant: 2 }),
   ],
@@ -589,6 +816,10 @@ const SPECIAL_BIOME_LANDMARKS: Record<SpecialBiomeId, readonly LandmarkProfile[]
   ],
   ember: [
     landmarkPlacement("basalt_spire", { chance: 0.30, scale: 1.28 }),
+    landmarkPlacement("ash_marker", { chance: 0.22, scale: 1.20, cellSize: 152, radius: 5 }),
+    landmarkPlacement("kwama_mound", { chance: 0.14, scale: 1.12, cellSize: 164, radius: 6 }),
+    landmarkPlacement("pilgrim_cairn", { chance: 0.12, scale: 1.10, cellSize: 168, radius: 5 }),
+    landmarkPlacement("ashlander_travel_pack", { chance: 0.16, scale: 1.04, cellSize: 148, radius: 7 }),
     landmarkPlacement("crystal_cluster", { chance: 0.28, scale: 1.12, variant: 3 }),
     landmarkPlacement("dead_snag", { chance: 0.26, scale: 1.16, variant: 1 }),
     landmarkPlacement("boulder", { chance: 0.24, scale: 0.94, variant: 1 }),
@@ -604,6 +835,9 @@ const SPECIAL_BIOME_LANDMARKS: Record<SpecialBiomeId, readonly LandmarkProfile[]
   shardlands: [
     landmarkPlacement("salt_spire", { chance: 0.34, scale: 1.12, variant: 1 }),
     landmarkPlacement("crystal_cluster", { chance: 0.38, scale: 1.16, variant: 2 }),
+    landmarkPlacement("glass_cairn", { chance: 0.20, scale: 1.12, cellSize: 144, radius: 5, variant: 2 }),
+    landmarkPlacement("velothi_shrine", { chance: 0.16, scale: 1.14, cellSize: 176, radius: 5 }),
+    landmarkPlacement("pilgrim_cairn", { chance: 0.14, scale: 1.10, cellSize: 164, radius: 5 }),
     landmarkPlacement("hoodoo", { chance: 0.20, scale: 1.02, variant: 1 }),
     landmarkPlacement("dead_tree", { chance: 0.18, scale: 1.02, cellSize: 156, radius: 8 }),
   ],
@@ -686,14 +920,84 @@ const STEPPE_THORN_SCRUB_LANDMARKS: readonly LandmarkProfile[] = [
 
 const STEPPE_MONOLITH_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("standing_stone", { chance: 0.44, scale: 1.28, cellSize: 132, radius: 6 }),
+  landmarkPlacement("ancestor_pillar", { chance: 0.30, scale: 1.22, cellSize: 148, radius: 6 }),
   landmarkPlacement("thorn_tree", { chance: 0.28, scale: 1.12, cellSize: 140, radius: 10 }),
   landmarkPlacement("acacia", { chance: 0.26, scale: 1.08, cellSize: 152, radius: 12 }),
   landmarkPlacement("flower_patch", { chance: 0.22, scale: 0.92, variant: 2, cellSize: 76, radius: 5 }),
   landmarkPlacement("boulder", { chance: 0.18, scale: 0.96 }),
 ];
 
+const PILGRIM_ROUTE_SKYLINE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("paver_debris", { chance: 0.60, scale: 1.24, cellSize: 70, radius: 15 }),
+  landmarkPlacement("scree_fan", { chance: 0.46, scale: 1.18, cellSize: 84, radius: 14 }),
+  landmarkPlacement("shrine_debris", { chance: 0.34, scale: 1.14, cellSize: 112, radius: 15 }),
+  landmarkPlacement("buried_ribs", { chance: 0.30, scale: 1.18, cellSize: 132, radius: 13 }),
+  landmarkPlacement("old_road_causeway", { chance: 0.46, scale: 1.20, cellSize: 104, radius: 14 }),
+  landmarkPlacement("pilgrim_lantern", { chance: 0.40, scale: 1.22, cellSize: 104, radius: 5 }),
+  landmarkPlacement("bone_chimes", { chance: 0.34, scale: 1.18, cellSize: 124, radius: 7 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.30, scale: 1.30, cellSize: 164, radius: 8 }),
+  landmarkPlacement("rib_arch", { chance: 0.24, scale: 1.24, cellSize: 164, radius: 14 }),
+  landmarkPlacement("ancestor_pillar", { chance: 0.26, scale: 1.22, cellSize: 140, radius: 6 }),
+  landmarkPlacement("basalt_spire", { chance: 0.24, scale: 1.24, cellSize: 144, radius: 7 }),
+  landmarkPlacement("standing_stone", { chance: 0.32, scale: 1.24, cellSize: 128, radius: 6 }),
+  landmarkPlacement("dead_tree", { chance: 0.18, scale: 1.16, cellSize: 156, radius: 8 }),
+];
+
+const PILGRIM_ROUTE_WETLAND_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("fungal_bridge", { chance: 0.48, scale: 1.30, cellSize: 112, radius: 17 }),
+  landmarkPlacement("rib_remains", { chance: 0.38, scale: 1.22, cellSize: 126, radius: 11 }),
+  landmarkPlacement("crystal_reeds", { chance: 0.54, scale: 1.28, cellSize: 72, radius: 6 }),
+  landmarkPlacement("mega_glowcap", { chance: 0.34, scale: 1.34, cellSize: 118, radius: 20 }),
+  landmarkPlacement("cypress", { chance: 0.44, scale: 1.26, cellSize: 104, radius: 11 }),
+  landmarkPlacement("willow", { chance: 0.34, scale: 1.18, cellSize: 126, radius: 14 }),
+  landmarkPlacement("rib_arch", { chance: 0.34, scale: 1.34, cellSize: 138, radius: 15 }),
+  landmarkPlacement("pilgrim_lantern", { chance: 0.36, scale: 1.24, cellSize: 100, radius: 5 }),
+];
+
+const PILGRIM_ROUTE_SALT_BASIN_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("salt_spire", { chance: 0.58, scale: 1.82, cellSize: 78, radius: 8, variant: 2 }),
+  landmarkPlacement("glass_cairn", { chance: 0.42, scale: 1.34, cellSize: 104, radius: 6, variant: 2 }),
+  landmarkPlacement("crystal_cluster", { chance: 0.34, scale: 1.28, cellSize: 112, radius: 8, variant: 2 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.24, scale: 1.22, cellSize: 148, radius: 8 }),
+  landmarkPlacement("old_road_causeway", { chance: 0.44, scale: 1.22, cellSize: 104, radius: 15 }),
+  landmarkPlacement("pilgrim_lantern", { chance: 0.40, scale: 1.28, cellSize: 96, radius: 5 }),
+  landmarkPlacement("rib_arch", { chance: 0.26, scale: 1.30, cellSize: 148, radius: 15 }),
+  landmarkPlacement("standing_stone", { chance: 0.24, scale: 1.20, cellSize: 128, radius: 6 }),
+];
+
+const PILGRIM_ROUTE_GLASS_SHARD_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("glass_cairn", { chance: 0.58, scale: 1.38, cellSize: 88, radius: 6, variant: 2 }),
+  landmarkPlacement("crystal_cluster", { chance: 0.52, scale: 1.36, cellSize: 92, radius: 8, variant: 2 }),
+  landmarkPlacement("salt_spire", { chance: 0.42, scale: 1.42, cellSize: 110, radius: 7, variant: 2 }),
+  landmarkPlacement("velothi_shrine", { chance: 0.26, scale: 1.24, cellSize: 148, radius: 6 }),
+  landmarkPlacement("pilgrim_cairn", { chance: 0.36, scale: 1.18, cellSize: 112, radius: 5 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.22, scale: 1.24, cellSize: 176, radius: 8 }),
+  landmarkPlacement("basalt_spire", { chance: 0.26, scale: 1.26, cellSize: 140, radius: 7 }),
+];
+
+const PILGRIM_ROUTE_GRAZELANDS_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("acacia", { chance: 0.44, scale: 1.24, cellSize: 112, radius: 13 }),
+  landmarkPlacement("standing_stone", { chance: 0.46, scale: 1.48, cellSize: 96, radius: 7 }),
+  landmarkPlacement("ancestor_pillar", { chance: 0.38, scale: 1.44, cellSize: 112, radius: 7 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.20, scale: 1.18, cellSize: 168, radius: 8 }),
+  landmarkPlacement("thorn_tree", { chance: 0.32, scale: 1.16, cellSize: 128, radius: 10 }),
+  landmarkPlacement("flower_patch", { chance: 0.42, scale: 1.12, variant: 2, cellSize: 70, radius: 6 }),
+  landmarkPlacement("pilgrim_cairn", { chance: 0.28, scale: 1.16, cellSize: 118, radius: 5 }),
+];
+
+const PILGRIM_ROUTE_WEST_GASH_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("stone_tor", { chance: 0.46, scale: 1.34, cellSize: 102, radius: 9 }),
+  landmarkPlacement("redleaf_tree", { chance: 0.56, scale: 1.28, cellSize: 84, radius: 13 }),
+  landmarkPlacement("old_road_causeway", { chance: 0.36, scale: 1.20, cellSize: 104, radius: 15 }),
+  landmarkPlacement("pilgrim_lantern", { chance: 0.34, scale: 1.26, cellSize: 94, radius: 5 }),
+  landmarkPlacement("standing_stone", { chance: 0.30, scale: 1.26, cellSize: 118, radius: 6 }),
+  landmarkPlacement("rib_arch", { chance: 0.22, scale: 1.20, cellSize: 158, radius: 14 }),
+  landmarkPlacement("boulder", { chance: 0.30, scale: 1.10, cellSize: 96, radius: 6 }),
+];
+
 const DUNES_GLASS_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("crystal_cluster", { chance: 0.36, scale: 1.18, variant: 2 }),
+  landmarkPlacement("glass_cairn", { chance: 0.28, scale: 1.14, cellSize: 136, radius: 5, variant: 2 }),
   landmarkPlacement("palm", { chance: 0.28, scale: 1.18, cellSize: 176, radius: 13 }),
   landmarkPlacement("cactus", { chance: 0.34, scale: 1.08 }),
   landmarkPlacement("standing_stone", { chance: 0.18, scale: 1.08 }),
@@ -704,14 +1008,43 @@ const BADLANDS_DESOLATE_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("dead_tree", { chance: 0.34, scale: 1.28, cellSize: 148, radius: 8 }),
   landmarkPlacement("hoodoo", { chance: 0.28, scale: 1.18 }),
   landmarkPlacement("standing_stone", { chance: 0.22, scale: 1.20 }),
+  landmarkPlacement("ashlander_travel_pack", { chance: 0.12, scale: 1.04, cellSize: 148, radius: 7 }),
   landmarkPlacement("boulder", { chance: 0.20, scale: 0.98, variant: 1 }),
 ];
 
 const BADLANDS_CRATER_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("velothi_ziggurat", { chance: 0.14, scale: 1.16, cellSize: 264, radius: 15 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.18, scale: 1.22, cellSize: 188, radius: 8 }),
+  landmarkPlacement("rib_arch", { chance: 0.16, scale: 1.18, cellSize: 176, radius: 13 }),
+  landmarkPlacement("old_road_causeway", { chance: 0.24, scale: 1.10, cellSize: 128, radius: 13 }),
+  landmarkPlacement("scree_fan", { chance: 0.30, scale: 1.12, cellSize: 112, radius: 13 }),
+  landmarkPlacement("buried_ribs", { chance: 0.18, scale: 1.10, cellSize: 156, radius: 12 }),
   landmarkPlacement("hoodoo", { chance: 0.34, scale: 1.24 }),
+  landmarkPlacement("ash_marker", { chance: 0.26, scale: 1.22, cellSize: 148, radius: 5 }),
+  landmarkPlacement("ashlander_travel_pack", { chance: 0.12, scale: 1.08, cellSize: 148, radius: 7 }),
   landmarkPlacement("standing_stone", { chance: 0.26, scale: 1.22 }),
   landmarkPlacement("dead_tree", { chance: 0.30, scale: 1.18, cellSize: 156, radius: 8 }),
   landmarkPlacement("boulder", { chance: 0.20, scale: 1.04, variant: 1 }),
+];
+
+const ASH_WASTES_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("velothi_ziggurat", { chance: 0.22, scale: 1.22, cellSize: 252, radius: 16 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.30, scale: 1.28, cellSize: 172, radius: 8 }),
+  landmarkPlacement("rib_arch", { chance: 0.28, scale: 1.24, cellSize: 160, radius: 14 }),
+  landmarkPlacement("old_road_causeway", { chance: 0.38, scale: 1.16, cellSize: 104, radius: 14 }),
+  landmarkPlacement("paver_debris", { chance: 0.46, scale: 1.18, cellSize: 84, radius: 13 }),
+  landmarkPlacement("scree_fan", { chance: 0.42, scale: 1.18, cellSize: 92, radius: 14 }),
+  landmarkPlacement("shrine_debris", { chance: 0.28, scale: 1.12, cellSize: 124, radius: 15 }),
+  landmarkPlacement("buried_ribs", { chance: 0.26, scale: 1.16, cellSize: 144, radius: 13 }),
+  landmarkPlacement("pilgrim_lantern", { chance: 0.42, scale: 1.22, cellSize: 108, radius: 5 }),
+  landmarkPlacement("bone_chimes", { chance: 0.30, scale: 1.18, cellSize: 132, radius: 7 }),
+  landmarkPlacement("ash_marker", { chance: 0.46, scale: 1.28, cellSize: 120, radius: 5 }),
+  landmarkPlacement("velothi_shrine", { chance: 0.28, scale: 1.18, cellSize: 148, radius: 5 }),
+  landmarkPlacement("pilgrim_cairn", { chance: 0.26, scale: 1.14, cellSize: 136, radius: 5 }),
+  landmarkPlacement("kwama_mound", { chance: 0.24, scale: 1.14, cellSize: 132, radius: 6 }),
+  landmarkPlacement("silt_shell", { chance: 0.18, scale: 1.08, cellSize: 164, radius: 8 }),
+  landmarkPlacement("basalt_spire", { chance: 0.24, scale: 1.22, cellSize: 148, radius: 7 }),
+  landmarkPlacement("dead_snag", { chance: 0.18, scale: 1.08, variant: 1, cellSize: 152, radius: 4 }),
 ];
 
 const HIGHLAND_REDWOOD_LANDMARKS: readonly LandmarkProfile[] = [
@@ -750,6 +1083,7 @@ const MOOR_SHADOWGLASS_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("lantern_tree", { chance: 0.26, scale: 1.00, cellSize: 144, radius: 12 }),
   landmarkPlacement("dead_tree", { chance: 0.34, scale: 1.16, cellSize: 144, radius: 8 }),
   landmarkPlacement("standing_stone", { chance: 0.38, scale: 1.22 }),
+  landmarkPlacement("ancestor_pillar", { chance: 0.24, scale: 1.14, cellSize: 156, radius: 6 }),
   landmarkPlacement("glowcap", { chance: 0.26, scale: 1.02, cellSize: 128, radius: 12 }),
   landmarkPlacement("frost_shrub", { chance: 0.36, scale: 1.04 }),
 ];
@@ -776,6 +1110,7 @@ const TUNDRA_BLUE_ICE_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const MARSH_THICKET_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("crystal_reeds", { chance: 0.32, scale: 1.08, cellSize: 104, radius: 5 }),
   landmarkPlacement("mangrove", { chance: 0.36, scale: 1.18, cellSize: 160, radius: 15 }),
   landmarkPlacement("cypress", { chance: 0.42, scale: 1.12, cellSize: 128, radius: 10 }),
   landmarkPlacement("reed_cluster", { chance: 0.70, scale: 1.12, cellSize: 68, radius: 4 }),
@@ -783,6 +1118,8 @@ const MARSH_THICKET_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const MARSH_WILLOW_THICKET_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("fungal_bridge", { chance: 0.20, scale: 1.08, cellSize: 172, radius: 15 }),
+  landmarkPlacement("crystal_reeds", { chance: 0.34, scale: 1.10, cellSize: 100, radius: 5 }),
   landmarkPlacement("willow", { chance: 0.34, scale: 1.10, cellSize: 136, radius: 14 }),
   landmarkPlacement("mangrove", { chance: 0.30, scale: 1.18, cellSize: 154, radius: 15 }),
   landmarkPlacement("cypress", { chance: 0.40, scale: 1.14, cellSize: 118, radius: 10 }),
@@ -791,6 +1128,9 @@ const MARSH_WILLOW_THICKET_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const MARSH_BLACKWATER_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("rib_remains", { chance: 0.30, scale: 1.12, cellSize: 150, radius: 10 }),
+  landmarkPlacement("fungal_bridge", { chance: 0.24, scale: 1.10, cellSize: 156, radius: 16 }),
+  landmarkPlacement("crystal_reeds", { chance: 0.42, scale: 1.16, cellSize: 84, radius: 5 }),
   landmarkPlacement("willow", { chance: 0.40, scale: 1.14, cellSize: 128, radius: 14 }),
   landmarkPlacement("cypress", { chance: 0.44, scale: 1.16, cellSize: 118, radius: 10 }),
   landmarkPlacement("reed_cluster", { chance: 0.80, scale: 1.16, cellSize: 60, radius: 4 }),
@@ -798,6 +1138,7 @@ const MARSH_BLACKWATER_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const FIREFLY_LANTERN_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("crystal_reeds", { chance: 0.28, scale: 1.08, cellSize: 100, radius: 5 }),
   landmarkPlacement("lantern_tree", { chance: 0.42, scale: 1.12, cellSize: 124, radius: 12 }),
   landmarkPlacement("glowcap", { chance: 0.42, scale: 1.10, cellSize: 116, radius: 12 }),
   landmarkPlacement("willow", { chance: 0.26, scale: 1.04, cellSize: 136, radius: 14 }),
@@ -807,6 +1148,7 @@ const FIREFLY_LANTERN_LANDMARKS: readonly LandmarkProfile[] = [
 const SALTFLAT_MIRROR_LANDMARKS: readonly LandmarkProfile[] = [
   landmarkPlacement("salt_spire", { chance: 0.44, scale: 1.18 }),
   landmarkPlacement("crystal_cluster", { chance: 0.28, scale: 1.08, variant: 2 }),
+  landmarkPlacement("glass_cairn", { chance: 0.24, scale: 1.12, cellSize: 136, radius: 5, variant: 2 }),
   landmarkPlacement("standing_stone", { chance: 0.18, scale: 1.06 }),
 ];
 
@@ -828,6 +1170,8 @@ const FERN_OVERGROWN_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const FUNGAL_MOONLIT_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("fungal_bridge", { chance: 0.34, scale: 1.18, cellSize: 152, radius: 17 }),
+  landmarkPlacement("crystal_reeds", { chance: 0.22, scale: 1.08, cellSize: 116, radius: 5 }),
   landmarkPlacement("mega_glowcap", { chance: 0.32, scale: 1.20 }),
   landmarkPlacement("glowcap", { chance: 0.48, scale: 1.14 }),
   landmarkPlacement("lantern_tree", { chance: 0.24, scale: 1.02, cellSize: 136, radius: 12 }),
@@ -835,6 +1179,8 @@ const FUNGAL_MOONLIT_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const FUNGAL_SPORE_GROVE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("fungal_bridge", { chance: 0.40, scale: 1.22, cellSize: 136, radius: 18 }),
+  landmarkPlacement("rib_remains", { chance: 0.14, scale: 1.02, cellSize: 184, radius: 10 }),
   landmarkPlacement("mega_glowcap", { chance: 0.40, scale: 1.24, cellSize: 140, radius: 20 }),
   landmarkPlacement("glowcap", { chance: 0.64, scale: 1.16, cellSize: 104, radius: 13 }),
   landmarkPlacement("lantern_tree", { chance: 0.34, scale: 1.08, cellSize: 120, radius: 13 }),
@@ -850,6 +1196,8 @@ const ROOTED_SURFACE_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const PEATY_SURFACE_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("rib_remains", { chance: 0.18, scale: 1.04, cellSize: 172, radius: 10 }),
+  landmarkPlacement("fungal_bridge", { chance: 0.20, scale: 1.08, cellSize: 160, radius: 15 }),
   landmarkPlacement("root_stump", { chance: 0.26, scale: 1.04, cellSize: 128, radius: 8 }),
   landmarkPlacement("willow", { chance: 0.40, scale: 1.12, cellSize: 132, radius: 15 }),
   landmarkPlacement("dead_tree", { chance: 0.30, scale: 1.12, cellSize: 140, radius: 8 }),
@@ -893,14 +1241,25 @@ const BASALTIC_SURFACE_LANDMARKS: readonly LandmarkProfile[] = [
 ];
 
 const EMBER_DEADLAND_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("ash_obelisk", { chance: 0.26, scale: 1.30, cellSize: 176, radius: 8 }),
+  landmarkPlacement("pilgrim_lantern", { chance: 0.24, scale: 1.16, cellSize: 132, radius: 5 }),
   landmarkPlacement("dead_tree", { chance: 0.28, scale: 1.22, cellSize: 156, radius: 8 }),
   landmarkPlacement("basalt_spire", { chance: 0.28, scale: 1.30 }),
+  landmarkPlacement("ash_marker", { chance: 0.24, scale: 1.22, cellSize: 144, radius: 5 }),
+  landmarkPlacement("kwama_mound", { chance: 0.16, scale: 1.12, cellSize: 156, radius: 6 }),
+  landmarkPlacement("ashlander_travel_pack", { chance: 0.10, scale: 1.04, cellSize: 152, radius: 7 }),
   landmarkPlacement("crystal_cluster", { chance: 0.26, scale: 1.12, variant: 3 }),
   landmarkPlacement("boulder", { chance: 0.18, scale: 0.96, variant: 1 }),
 ];
 
 const EMBER_CALDERA_LANDMARKS: readonly LandmarkProfile[] = [
+  landmarkPlacement("velothi_ziggurat", { chance: 0.12, scale: 1.20, cellSize: 276, radius: 16 }),
+  landmarkPlacement("ash_obelisk", { chance: 0.32, scale: 1.34, cellSize: 164, radius: 8 }),
+  landmarkPlacement("old_road_causeway", { chance: 0.18, scale: 1.08, cellSize: 136, radius: 13 }),
   landmarkPlacement("basalt_spire", { chance: 0.38, scale: 1.34 }),
+  landmarkPlacement("ash_marker", { chance: 0.34, scale: 1.28, cellSize: 132, radius: 5 }),
+  landmarkPlacement("pilgrim_cairn", { chance: 0.18, scale: 1.14, cellSize: 152, radius: 5 }),
+  landmarkPlacement("ashlander_travel_pack", { chance: 0.18, scale: 1.08, cellSize: 144, radius: 7 }),
   landmarkPlacement("crystal_cluster", { chance: 0.34, scale: 1.16, variant: 3 }),
   landmarkPlacement("dead_tree", { chance: 0.24, scale: 1.18, cellSize: 164, radius: 8 }),
   landmarkPlacement("boulder", { chance: 0.18, scale: 1.00, variant: 1 }),
@@ -1085,6 +1444,10 @@ export class ProceduralWorldGenerator {
     this.fillSurfaceColumnState(worldX, worldZ, state);
     return {
       ...columnSampleFromState(state),
+      regionId: state.regionId,
+      secondaryRegionId: state.secondaryRegionId,
+      regionStrength: state.regionStrength,
+      regionAmbientProfileId: state.regionAmbientProfileId,
       secondaryBiomeId: state.secondaryBiomeId,
       transitionThreshold: state.transitionThreshold,
       specialStrength: state.specialStrength,
@@ -1099,6 +1462,18 @@ export class ProceduralWorldGenerator {
         globalHeight: state.globalHeight,
         mountainness: state.mountainness,
         oceanness: state.oceanness,
+        ridge: this.lastFillSurfaceFields.ridge,
+        mesa: this.lastFillSurfaceFields.mesa,
+        desolation: this.lastFillSurfaceFields.desolation,
+        strata: this.lastFillSurfaceFields.strata,
+        surfacePatch: this.lastFillSurfaceFields.surfacePatch,
+        surfaceGrain: this.lastFillSurfaceFields.surfaceGrain,
+        scatter: this.lastFillSurfaceFields.scatter,
+        peakness: this.lastFillSurfaceFields.peakness,
+        islandInterior: this.lastFillSurfaceFields.islandInterior,
+        shorelineBand: this.lastFillSurfaceFields.shorelineBand,
+        coastalShelf: this.lastFillSurfaceFields.coastalShelf,
+        deepOcean: this.lastFillSurfaceFields.deepOcean,
       },
     };
   }
@@ -1116,6 +1491,118 @@ export class ProceduralWorldGenerator {
     const state = this.materialSampleState;
     this.fillColumnState(worldX, worldZ, state);
     return this.sampleMaterialFromColumn(state, worldY);
+  }
+
+  sampleColumnMaterialBuckets(
+    worldX: number,
+    worldZ: number,
+    firstBucketMinY: number,
+    bucketSize: number,
+    bucketCount: number,
+  ): Uint16Array {
+    const count = Math.max(0, Math.floor(bucketCount));
+    const materials = new Uint16Array(count);
+    if (count === 0) {
+      return materials;
+    }
+    const state = this.materialSampleState;
+    this.fillColumnState(worldX, worldZ, state);
+    return this.sampleMaterialBucketsFromColumnState(state, firstBucketMinY, bucketSize, count);
+  }
+
+  sampleTopColumnMaterialBucket(
+    worldX: number,
+    worldZ: number,
+    firstBucketMinY: number,
+    bucketSize: number,
+    bucketCount: number,
+    shellPaddingY: number,
+  ): ProceduralTopColumnMaterialBucketSample | null {
+    const count = Math.max(0, Math.floor(bucketCount));
+    if (count === 0) {
+      return null;
+    }
+    const state = this.materialSampleState;
+    this.fillColumnState(worldX, worldZ, state);
+    const stride = Math.max(1, Math.floor(bucketSize));
+    const minSurfaceWorldY = state.surfaceY - Math.max(0, Math.floor(shellPaddingY));
+    const maxSurfaceWorldY = Math.max(topYFromState(state), nullableWaterTopY(state.waterTopY) ?? state.surfaceY);
+    const startBucket = Math.max(0, Math.floor((minSurfaceWorldY - firstBucketMinY) / stride));
+    const endBucket = Math.min(count - 1, Math.floor((maxSurfaceWorldY - firstBucketMinY) / stride));
+    if (startBucket > endBucket) {
+      return null;
+    }
+    for (let bucketIndex = endBucket; bucketIndex >= startBucket; bucketIndex -= 1) {
+      const minWorldY = Math.max(0, Math.floor(firstBucketMinY + bucketIndex * stride));
+      const maxWorldY = Math.min(this.maxYExclusive - 1, minWorldY + stride - 1);
+      if (maxWorldY < minWorldY) {
+        continue;
+      }
+      let waterMaterial = 0;
+      for (let worldY = maxWorldY; worldY >= minWorldY; worldY -= 1) {
+        const material = this.sampleMaterialFromColumn(state, worldY);
+        if (material === 0) {
+          continue;
+        }
+        if (!isProceduralWaterMaterial(material)) {
+          return {
+            ...surfaceColumnSampleFromState(state),
+            bucketIndex,
+            material,
+          };
+        }
+        if (waterMaterial === 0) {
+          waterMaterial = material;
+        }
+      }
+      if (waterMaterial !== 0) {
+        return {
+          ...surfaceColumnSampleFromState(state),
+          bucketIndex,
+          material: waterMaterial,
+        };
+      }
+    }
+    return null;
+  }
+
+  private sampleMaterialBucketsFromColumnState(
+    state: MutableColumnState,
+    firstBucketMinY: number,
+    bucketSize: number,
+    bucketCount: number,
+  ): Uint16Array {
+    const count = Math.max(0, Math.floor(bucketCount));
+    const materials = new Uint16Array(count);
+    if (count === 0) {
+      return materials;
+    }
+    const stride = Math.max(1, Math.floor(bucketSize));
+    for (let bucketIndex = 0; bucketIndex < count; bucketIndex += 1) {
+      const minWorldY = Math.max(0, Math.floor(firstBucketMinY + bucketIndex * stride));
+      const maxWorldY = Math.min(this.maxYExclusive - 1, minWorldY + stride - 1);
+      if (maxWorldY < minWorldY) {
+        continue;
+      }
+      let waterMaterial = 0;
+      for (let worldY = maxWorldY; worldY >= minWorldY; worldY -= 1) {
+        const material = this.sampleMaterialFromColumn(state, worldY);
+        if (material === 0) {
+          continue;
+        }
+        if (!isProceduralWaterMaterial(material)) {
+          materials[bucketIndex] = material;
+          break;
+        }
+        if (waterMaterial === 0) {
+          waterMaterial = material;
+        }
+      }
+      if (materials[bucketIndex] === 0) {
+        materials[bucketIndex] = waterMaterial;
+      }
+    }
+    return materials;
   }
 
   generateChunk(cx: number, cy: number, cz: number): GeneratedChunk {
@@ -1272,10 +1759,19 @@ export class ProceduralWorldGenerator {
     const specialStrength = biomeSelection.specialStrength;
     surfaceY = adjustSpecialBiomeSurfaceY(this.seaLevel, biomeId, specialStrength, fields, biomeCore, surfaceY);
 
-    const regionalVariant = selectRegionalVariant(biomeId, fields);
+    const regionalVariant = fields.regionStrength > WORLD_REGION_AUTHORITY_THRESHOLD && fields.regionVariantId
+      ? { id: fields.regionVariantId, strength: fields.regionStrength }
+      : selectRegionalVariant(biomeId, fields);
     if (regionalVariant) {
       surfaceY += sampleRegionalVariantSurfaceDelta(regionalVariant.id, regionalVariant.strength, fields, biomeCore);
     }
+    const routeSurface = samplePilgrimRouteSurfaceInfluence(worldX, worldZ, biomeId, fields);
+    if (routeSurface) {
+      surfaceY += samplePilgrimRouteSurfaceDelta(routeSurface, fields, biomeCore);
+    }
+    const pilgrimRouteInfluence = routeSurface
+      ? clamp(Math.max(routeSurface.core, routeSurface.shoulder) + routeSurface.fracture * 0.18, 0, 1)
+      : 0;
     surfaceY = clamp(surfaceY, 8, this.maxYExclusive - 2);
     const hostBiomeId = resolveHostBiomeId(biomeId, baseBlend.primary.id, baseBlend.secondary.id);
     const snowLine = terrainProfile.snowLine - Math.round((fields.temperature - 0.5) * 90);
@@ -1293,6 +1789,10 @@ export class ProceduralWorldGenerator {
     );
     if (regionalVariant) {
       applyRegionalVariantMaterialOverrides(surfaceMaterials, regionalVariant.id);
+    }
+    applyAtlasSurfaceMaterialOverrides(surfaceMaterials, fields);
+    if (routeSurface) {
+      applyPilgrimRouteSurfaceMaterials(surfaceMaterials, routeSurface, fields);
     }
     const waterTopY = this.resolveWaterTopY(
       biomeId,
@@ -1320,12 +1820,17 @@ export class ProceduralWorldGenerator {
     );
 
     out.biomeId = biomeId;
+    out.regionId = fields.regionId;
+    out.secondaryRegionId = fields.secondaryRegionId;
+    out.regionStrength = fields.regionStrength;
+    out.regionAmbientProfileId = fields.regionAmbientProfileId;
     out.hostBiomeId = hostBiomeId;
     out.secondaryBiomeId = baseBlend.secondary.id;
     out.undergroundBiomeId = undergroundBiomeId;
     out.regionalVariantId = regionalVariant?.id ?? null;
     out.regionalVariantStrength = regionalVariant?.strength ?? 0;
     out.landmarkId = landmarkId;
+    out.pilgrimRouteInfluence = pilgrimRouteInfluence;
     out.temperature = fields.temperature;
     out.moisture = fields.moisture;
     out.uplift = fields.uplift;
@@ -1349,8 +1854,8 @@ export class ProceduralWorldGenerator {
     out.transitionThreshold = surfaceMaterials.transitionThreshold;
     out.specialStrength = specialStrength;
     out.strataOffset = fields.strata * 5;
-    out.worldXDiv3 = Math.floor(worldX * ONE_THIRD);
-    out.worldZDiv3 = Math.floor(worldZ * ONE_THIRD);
+    out.worldXDiv3 = Math.floor(worldX * SURFACE_MATERIAL_DITHER_SCALE);
+    out.worldZDiv3 = Math.floor(worldZ * SURFACE_MATERIAL_DITHER_SCALE);
     out.ditherSeed = this.transitionSeed + baseBlend.primary.surface + baseBlend.secondary.surface;
     out.accentSeed = this.seed + underground.accent;
     this.lastFillSurfaceFields = fields;
@@ -1383,6 +1888,22 @@ export class ProceduralWorldGenerator {
 
   private sampleSurfaceFields(worldX: number, worldZ: number): SurfaceFieldSample {
     const out = this.reusableSurfaceFields;
+    const province = sampleWorldRegion(worldX, worldZ);
+    const atlas = sampleGeneratorAtlasFields(worldX, worldZ);
+    const atlasRegionId = atlas.primaryRegionId ?? province.regionId;
+    const atlasSecondaryRegionId = atlas.secondaryRegionId ?? atlasRegionId;
+    const atlasBiomeId = atlas.primaryBiomeId === "ocean" || atlas.primaryBiomeId === "deep-ocean"
+      ? province.biomeId
+      : atlas.primaryBiomeId;
+    const atlasRegionStrength = atlas.primaryRegionId
+      ? clamp(atlas.regionStrength + atlas.islandInterior * 0.08, 0, 1)
+      : 0;
+    const atlasRegionAuthority = atlas.primaryRegionId
+      ? atlasRegionStrength * smoothstep(0.72, 0.18, atlas.regionBlend)
+      : 0;
+    const atlasRegionCore = atlas.primaryRegionId
+      ? smoothstep(1.18, 0.12, atlas.regionDistance) * atlas.islandInterior * atlasRegionAuthority
+      : 0;
     const continentalness = fbm2D5(worldX * CONTINENT_SCALE, worldZ * CONTINENT_SCALE, this.continentSeed) - 0.5;
     const uplift = fbm2D4(worldX * UPLIFT_SCALE, worldZ * UPLIFT_SCALE, this.upliftSeed);
     const hills = fbm2D4(worldX * HILLS_SCALE, worldZ * HILLS_SCALE, this.hillsSeed) - 0.5;
@@ -1399,32 +1920,106 @@ export class ProceduralWorldGenerator {
         - oceanness * 0.14
         - smoothstep(0.46, 0.82, -basin) * 0.05,
     );
-    out.temperature = fbm2D4(worldX * TEMPERATURE_SCALE, worldZ * TEMPERATURE_SCALE, this.temperatureSeed);
-    out.moisture = fbm2D4(worldX * MOISTURE_SCALE, worldZ * MOISTURE_SCALE, this.moistureSeed);
-    out.uplift = uplift;
-    out.drainage = fbm2D3(worldX * DRAINAGE_SCALE, worldZ * DRAINAGE_SCALE, this.drainageSeed);
-    out.volcanism = fbm2D3(worldX * VOLCANISM_SCALE, worldZ * VOLCANISM_SCALE, this.volcanismSeed);
-    out.magic = fbm2D3(worldX * MAGIC_SCALE, worldZ * MAGIC_SCALE, this.magicSeed);
-    out.globalHeight = globalHeight;
-    out.mountainness = mountainness;
-    out.oceanness = oceanness;
+    out.temperature = clamp(
+      fbm2D4(worldX * TEMPERATURE_SCALE, worldZ * TEMPERATURE_SCALE, this.temperatureSeed)
+        + province.southernSaltBasin * 0.10
+        + province.northeastGrazelands * 0.04
+        - province.westWetlands * 0.05
+        - atlas.coastalShelf * 0.05,
+      0,
+      1,
+    );
+    out.moisture = clamp(
+      fbm2D4(worldX * MOISTURE_SCALE, worldZ * MOISTURE_SCALE, this.moistureSeed)
+        + province.westWetlands * 0.34
+        + atlas.coastalShelf * 0.08
+        - province.ashRing * 0.22
+        - province.volcanicHeart * 0.34
+        - province.southernSaltBasin * 0.28,
+      0,
+      1,
+    );
+    out.uplift = clamp(uplift + province.volcanicHeart * 0.12 + province.ashRing * 0.04 + sampleAtlasUpliftBias(atlasRegionId, atlasRegionCore) - atlas.coastalShelf * 0.16, 0, 1);
+    out.drainage = clamp(
+      fbm2D3(worldX * DRAINAGE_SCALE, worldZ * DRAINAGE_SCALE, this.drainageSeed)
+        + province.westWetlands * 0.18
+        + province.southernSaltBasin * 0.12
+        - province.volcanicHeart * 0.12,
+      0,
+      1,
+    );
+    out.volcanism = clamp(
+      fbm2D3(worldX * VOLCANISM_SCALE, worldZ * VOLCANISM_SCALE, this.volcanismSeed)
+        + province.volcanicHeart * 0.52
+        + province.ashRing * 0.26
+        + province.easternShardCoast * 0.16,
+      0,
+      1,
+    );
+    out.magic = clamp(
+      fbm2D3(worldX * MAGIC_SCALE, worldZ * MAGIC_SCALE, this.magicSeed)
+        + province.westWetlands * 0.12
+        + province.easternShardCoast * 0.22
+        + province.southernSaltBasin * 0.10,
+      0,
+      1,
+    );
+    out.globalHeight = clamp(globalHeight * (0.52 + atlas.islandInterior * 0.58) - atlas.coastalShelf * 0.30 - atlas.deepOcean * 0.18 + sampleAtlasGlobalHeightBias(atlasRegionId, atlasRegionCore), 0, 1);
+    out.mountainness = clamp(mountainness + sampleAtlasMountainnessBias(atlasRegionId, atlasRegionCore), 0, 1);
+    out.oceanness = clamp(Math.max(oceanness, 1 - atlas.islandInterior + atlas.coastalShelf * 0.16 + atlas.deepOcean * 0.34), 0, 1);
     out.continentalness = continentalness;
     out.hills = hills;
     out.detail = detail;
-    out.ridge = ridge;
-    out.basin = basin;
-    out.channel = 1 - Math.abs(fbm2D2(worldX * CHANNEL_SCALE, worldZ * CHANNEL_SCALE, this.channelSeed) * 2 - 1);
-    out.dune = 1 - Math.abs(fbm2D2(worldX * DUNE_SCALE, worldZ * DUNE_SCALE, this.duneSeed) * 2 - 1);
-    out.mesa = smoothstep(0.54, 0.84, fbm2D2(worldX * MESA_SCALE, worldZ * MESA_SCALE, this.mesaSeed));
-    out.grove = fbm2D3(worldX * GROVE_SCALE, worldZ * GROVE_SCALE, this.groveSeed);
-    out.oldGrowth = fbm2D3(worldX * OLD_GROWTH_SCALE, worldZ * OLD_GROWTH_SCALE, this.oldGrowthSeed);
-    out.orchard = fbm2D3(worldX * ORCHARD_SCALE, worldZ * ORCHARD_SCALE, this.orchardSeed);
-    out.desolation = fbm2D3(worldX * DESOLATION_SCALE, worldZ * DESOLATION_SCALE, this.desolationSeed);
-    out.strata = fbm2D2(worldX * STRATA_SCALE, worldZ * STRATA_SCALE, this.strataSeed);
-    out.surfacePatch = fbm2D3(worldX * SURFACE_PATCH_SCALE, worldZ * SURFACE_PATCH_SCALE, this.surfacePatchSeed);
-    out.surfaceGrain = fbm2D2(worldX * SURFACE_GRAIN_SCALE, worldZ * SURFACE_GRAIN_SCALE, this.surfaceGrainSeed);
-    out.scatter = fbm2D2(worldX * SURFACE_SCATTER_SCALE, worldZ * SURFACE_SCATTER_SCALE, this.surfaceScatterSeed);
-    out.peakness = peakness;
+    out.ridge = clamp(ridge + province.volcanicHeart * 0.18 + province.easternShardCoast * 0.12, 0, 1);
+    out.basin = clamp(basin - province.southernSaltBasin * 0.42 - province.westWetlands * 0.18, -1, 1);
+    out.channel = clamp(1 - Math.abs(fbm2D2(worldX * CHANNEL_SCALE, worldZ * CHANNEL_SCALE, this.channelSeed) * 2 - 1) + province.westWetlands * 0.16 + province.southernSaltBasin * 0.18, 0, 1);
+    out.dune = clamp(1 - Math.abs(fbm2D2(worldX * DUNE_SCALE, worldZ * DUNE_SCALE, this.duneSeed) * 2 - 1) + province.southernSaltBasin * 0.24, 0, 1);
+    out.mesa = clamp(smoothstep(0.54, 0.84, fbm2D2(worldX * MESA_SCALE, worldZ * MESA_SCALE, this.mesaSeed)) + province.ashRing * 0.22 + province.volcanicHeart * 0.28, 0, 1);
+    out.grove = clamp(fbm2D3(worldX * GROVE_SCALE, worldZ * GROVE_SCALE, this.groveSeed) + province.westWetlands * 0.22 + province.northeastGrazelands * 0.10 - province.ashRing * 0.18, 0, 1);
+    out.oldGrowth = clamp(fbm2D3(worldX * OLD_GROWTH_SCALE, worldZ * OLD_GROWTH_SCALE, this.oldGrowthSeed) + province.westWetlands * 0.20 - province.volcanicHeart * 0.26, 0, 1);
+    out.orchard = clamp(fbm2D3(worldX * ORCHARD_SCALE, worldZ * ORCHARD_SCALE, this.orchardSeed) + province.northeastGrazelands * 0.22, 0, 1);
+    out.desolation = clamp(
+      fbm2D3(worldX * DESOLATION_SCALE, worldZ * DESOLATION_SCALE, this.desolationSeed)
+        + province.volcanicHeart * 0.42
+        + province.ashRing * 0.34
+        + province.southernSaltBasin * 0.18
+        - province.westWetlands * 0.22,
+      0,
+      1,
+    );
+    out.strata = clamp(fbm2D2(worldX * STRATA_SCALE, worldZ * STRATA_SCALE, this.strataSeed) + province.ashRing * 0.22 + province.volcanicHeart * 0.18, 0, 1);
+    out.surfacePatch = clamp(fbm2D3(worldX * SURFACE_PATCH_SCALE, worldZ * SURFACE_PATCH_SCALE, this.surfacePatchSeed) + province.ashRing * 0.18 + province.southernSaltBasin * 0.12, 0, 1);
+    out.surfaceGrain = clamp(fbm2D2(worldX * SURFACE_GRAIN_SCALE, worldZ * SURFACE_GRAIN_SCALE, this.surfaceGrainSeed) + province.ashRing * 0.16 + province.easternShardCoast * 0.14, 0, 1);
+    out.scatter = clamp(fbm2D2(worldX * SURFACE_SCATTER_SCALE, worldZ * SURFACE_SCATTER_SCALE, this.surfaceScatterSeed) + province.ashRing * 0.12 + province.westWetlands * 0.10, 0, 1);
+    out.peakness = clamp(peakness + province.volcanicHeart * 0.56 + province.ashRing * 0.10, 0, 1);
+    out.regionId = atlasRegionId;
+    out.secondaryRegionId = atlasSecondaryRegionId;
+    out.regionStrength = atlasRegionStrength;
+    out.regionBlend = atlas.primaryRegionId ? atlas.regionBlend : 1;
+    out.regionBiomeId = atlasBiomeId;
+    out.regionAmbientProfileId = atlas.ambientProfileId ?? province.ambientProfileId;
+    out.regionVariantId = atlas.regionalVariantId ?? province.regionalVariantId;
+    out.islandInterior = atlas.islandInterior;
+    out.shorelineBand = atlas.shorelineBand;
+    out.coastalShelf = atlas.coastalShelf;
+    out.deepOcean = atlas.deepOcean;
+    out.atlasRouteInfluence = atlas.routeInfluence;
+    out.atlasRouteCore = atlas.routeCore;
+    out.atlasRouteShoulder = atlas.routeShoulder;
+    out.atlasCaveInfluence = atlas.caveInfluence;
+    out.atlasCaveCore = atlas.caveCore;
+    out.volcanicHeart = Math.max(province.volcanicHeart * 0.35, atlasRegionId === "red-mountain" ? atlasRegionCore : 0);
+    out.ashRing = Math.max(
+      province.ashRing * 0.35,
+      atlasRegionId === "ashen-badlands" ? atlasRegionCore : atlasRegionId === "red-mountain" ? atlasRegionCore * 0.38 : 0,
+    );
+    out.westWetlands = Math.max(
+      province.westWetlands * 0.35,
+      atlasRegionId === "bitter-coast" ? atlasRegionCore : atlasRegionId === "inner-sea" ? atlasRegionCore * 0.30 : 0,
+    );
+    out.northeastGrazelands = Math.max(province.northeastGrazelands * 0.35, atlasRegionId === "grazelands" ? atlasRegionCore : 0);
+    out.southernSaltBasin = Math.max(province.southernSaltBasin * 0.35, atlasRegionId === "salt-marsh-basin" ? atlasRegionCore : 0);
+    out.easternShardCoast = Math.max(province.easternShardCoast * 0.35, atlasRegionId === "glass-shard-coast" ? atlasRegionCore : 0);
     return out;
   }
 
@@ -1452,6 +2047,17 @@ export class ProceduralWorldGenerator {
       } else if (score > secondaryScore) {
         secondary = biome;
         secondaryScore = score;
+      }
+    }
+    const regionBaseBiome = BASE_BIOMES_BY_ID.get(fields.regionBiomeId as BaseBiomeId) ?? null;
+    if (regionBaseBiome && fields.regionStrength > 0.58) {
+      if (primary.id !== regionBaseBiome.id) {
+        secondary = primary;
+        secondaryScore = primaryScore;
+        primary = regionBaseBiome;
+        primaryScore = Math.max(primaryScore, secondaryScore, 0.001) * (1.12 + fields.regionStrength * 0.42);
+      } else {
+        primaryScore *= 1.10 + fields.regionStrength * 0.24;
       }
     }
     const total = primaryScore + secondaryScore;
@@ -1579,7 +2185,7 @@ export class ProceduralWorldGenerator {
       biomeId = "fungal";
       specialStrength = fungalStrength;
     }
-    if (emberStrength > 0.54 && emberStrength > specialStrength) {
+    if (emberStrength > 0.54 && emberStrength > specialStrength && fields.moisture < 0.58) {
       biomeId = "ember";
       specialStrength = emberStrength;
     }
@@ -1591,10 +2197,66 @@ export class ProceduralWorldGenerator {
       biomeId = "shardlands";
       specialStrength = shardlandsStrength;
     }
+    if (fields.southernSaltBasin > 0.62 && saltflatStrength > 0.58 && saltflatStrength >= specialStrength * 0.86) {
+      biomeId = "saltflat";
+      specialStrength = Math.max(specialStrength, saltflatStrength, fields.southernSaltBasin);
+    }
+    if (fields.southernSaltBasin > 0.66 && (fields.surfacePatch > 0.56 || fields.dune > 0.52)) {
+      biomeId = "dunes";
+      specialStrength = 0;
+    }
+    if (fields.southernSaltBasin > 0.94 && fields.coastalShelf > 0.54) {
+      biomeId = "saltflat";
+      specialStrength = Math.max(specialStrength, fields.southernSaltBasin);
+    }
+    if (fields.southernSaltBasin > 0.82 && fields.strata > 0.72 && fields.dune > 0.42) {
+      biomeId = "tundra";
+      specialStrength = 0;
+    }
+    if (fields.westWetlands > 0.64 && marshStrength > 0.48 && marshStrength >= specialStrength * 0.78) {
+      biomeId = fields.magic > 0.58 ? "fungal" : fields.magic > 0.50 ? "firefly" : "marsh";
+      specialStrength = Math.max(specialStrength, marshStrength, fields.westWetlands);
+    }
+    if (fields.westWetlands > 0.78 && fields.drainage > 0.58 && fields.magic < 0.74) {
+      biomeId = "marsh";
+      specialStrength = Math.max(specialStrength, fields.westWetlands);
+    }
+    if (fields.westWetlands > 0.70 && fields.grove > 0.72 && fields.temperature > 0.42) {
+      biomeId = "fern";
+      specialStrength = Math.max(specialStrength, fields.westWetlands * 0.86);
+    }
+    if (fields.westWetlands > 0.92 && fields.drainage > 0.48) {
+      biomeId = "marsh";
+      specialStrength = Math.max(specialStrength, fields.westWetlands);
+    }
+    if (fields.easternShardCoast > 0.58 && shardlandsStrength > 0.56 && shardlandsStrength >= specialStrength * 0.82) {
+      biomeId = "shardlands";
+      specialStrength = Math.max(specialStrength, shardlandsStrength, fields.easternShardCoast);
+    }
+    if (fields.volcanicHeart > 0.44 && fields.volcanism > 0.62 && fields.moisture < 0.58) {
+      biomeId = "ember";
+      specialStrength = Math.max(specialStrength, fields.volcanicHeart, emberStrength);
+    }
+    const shouldLockRegionBiome = fields.regionStrength > 0.64 && (
+      fields.regionBiomeId === "ember"
+      || fields.regionBiomeId === "marsh"
+      || fields.regionBiomeId === "saltflat"
+      || fields.regionBiomeId === "shardlands"
+      || fields.regionStrength > 0.88
+    );
+    const preserveRegionSubBiome = (
+      (fields.regionBiomeId === "saltflat" && biomeId === "dunes" && fields.regionBlend > 0.22)
+      || (fields.regionBiomeId === "marsh" && (biomeId === "fern" || biomeId === "fungal" || biomeId === "firefly"))
+      || (fields.regionId === "west-gash" && (biomeId === "tundra" || biomeId === "highland"))
+    );
+    if (shouldLockRegionBiome && !preserveRegionSubBiome) {
+      biomeId = fields.regionBiomeId;
+      specialStrength = Math.max(specialStrength, fields.regionStrength);
+    }
     const result = this.biomeClassificationState;
     result.biomeId = biomeId;
     result.specialStrength = specialStrength;
-    result.biomeCore = biomeCore;
+    result.biomeCore = Math.max(biomeCore, fields.regionStrength);
     return result;
   }
 
@@ -1622,10 +2284,10 @@ export class ProceduralWorldGenerator {
     const peakProvince = smoothstep(0.54, 0.72, fields.peakness)
       * smoothstep(0.54, 0.82, fields.globalHeight)
       * smoothstep(0.56, 0.82, fields.uplift);
-    const peakProvinceLift = 1.25 * peakProvince * (84 + fields.globalHeight * 280 + fields.uplift * 160);
-    const peakCrown = 1.25 * peakProvince
+    const peakProvinceLift = peakProvince * (66 + fields.globalHeight * 202 + fields.uplift * 112);
+    const peakCrown = peakProvince
       * smoothstep(0.62, 0.88, fields.ridge)
-      * (36 + fields.mountainness * 110);
+      * (28 + fields.mountainness * 68);
     const sharedRelief = fields.hills * (28 + fields.globalHeight * 36)
       + (fields.ridge * fields.ridge - 0.30) * (18 + fields.mountainness * 68)
       + fields.basin * 26
@@ -1644,11 +2306,30 @@ export class ProceduralWorldGenerator {
     const preTerrace = globalBaseHeight + sharedRelief + localHeight;
     const terracedHeight = terrainProfile.terraceScale <= 0
       ? preTerrace
-      : lerp(preTerrace, Math.round(preTerrace / 8) * 8, terrainProfile.terraceScale * localWeight);
+      : (() => {
+          const terraceInfluence = terrainProfile.terraceScale * localWeight;
+          const strataWarp = (fields.strata - 0.5) * 10 + (fields.surfacePatch - 0.5) * 4;
+          const warpedTerraceInput = preTerrace + strataWarp * terraceInfluence;
+          const warpedTerrace = Math.round(warpedTerraceInput / 8) * 8 - strataWarp * terraceInfluence * 0.72;
+          return lerp(preTerrace, warpedTerrace, terraceInfluence);
+        })();
     const microRelief = Math.round(
       (fields.surfaceGrain - 0.5) * terrainProfile.microRelief * (0.35 + biomeCore * 0.65),
     );
-    return Math.floor(clamp(terracedHeight + microRelief, 8, this.maxYExclusive - 2));
+    const crustBreakup = sampleTerrainCrustBreakup(fields, terrainProfile, biomeCore);
+    const islandCoastDelta = -Math.round(
+      fields.coastalShelf * 96
+        + fields.shorelineBand * 18
+        + (1 - fields.islandInterior) * (220 + fields.deepOcean * 260),
+    );
+    const volcanicLift = Math.round(fields.volcanicHeart * (96 + fields.peakness * 104) + fields.ashRing * 18);
+    const saltBasinDrop = Math.round(fields.southernSaltBasin * (18 + fields.coastalShelf * 28));
+    const atlasRegionDelta = sampleAtlasRegionSurfaceDelta(fields);
+    return Math.floor(clamp(
+      terracedHeight + microRelief + crustBreakup + islandCoastDelta + volcanicLift + atlasRegionDelta - saltBasinDrop,
+      8,
+      this.maxYExclusive - 2,
+    ));
   }
 
   private resolveSurfaceMaterials(
@@ -1662,6 +2343,11 @@ export class ProceduralWorldGenerator {
     surfaceY: number,
   ): ResolvedSurfaceMaterials {
     const materials = this.resolvedSurfaceMaterials;
+    const baseBiomeOverride = biomeId !== primary.id ? BASE_BIOMES_BY_ID.get(biomeId as BaseBiomeId) : null;
+    if (baseBiomeOverride) {
+      primary = baseBiomeOverride;
+      primaryWeight = Math.max(primaryWeight, 0.82);
+    }
     if (biomeId === primary.id) {
       const primarySurface = selectSurfaceMaterial(primary, fields, biomeCore, surfaceY);
       const primarySubsurface = selectSubsurfaceMaterial(primary, fields, biomeCore, surfaceY);
@@ -1758,6 +2444,23 @@ export class ProceduralWorldGenerator {
     hostBiomeId: BaseBiomeId,
     fields: SurfaceFieldSample,
   ): UndergroundBiomeId {
+    if (fields.atlasCaveInfluence > 0.38) {
+      switch (fields.regionId) {
+        case "red-mountain":
+        case "ashen-badlands":
+          return "basaltic";
+        case "bitter-coast":
+          return "rooted";
+        case "salt-marsh-basin":
+          return "saline";
+        case "glass-shard-coast":
+          return "crystalline";
+        case "west-gash":
+          return "granitic";
+        default:
+          break;
+      }
+    }
     if (biomeId === "saltflat") {
       return "saline";
     }
@@ -1813,7 +2516,16 @@ export class ProceduralWorldGenerator {
     out.featureMaterialPrimary = 0;
     out.featureMaterialSecondary = 0;
     out.featureMaterialAccent = 0;
-    const roster = selectLandmarkRoster(biomeId, undergroundBiomeId, regionalVariantId, fields);
+    const setPiece = samplePilgrimRouteSetPiece(worldX, worldZ, biomeId, fields);
+    if (setPiece) {
+      out.featureDeltaX = setPiece.deltaAlong;
+      out.featureDeltaZ = setPiece.deltaLateral;
+      if (configureLandmarkFeature(setPiece.profile, surfaceY, waterTopY, fields, out)) {
+        return setPiece.profile.id;
+      }
+    }
+    const roster = selectPilgrimRouteRoster(worldX, worldZ, biomeId, fields)
+      ?? selectLandmarkRoster(biomeId, undergroundBiomeId, regionalVariantId, fields);
     if (roster.length === 0) {
       return null;
     }
@@ -1884,26 +2596,32 @@ export class ProceduralWorldGenerator {
     );
     const deepAffinity = resolveDeepCaveAffinity(biomeId, hostBiomeId, undergroundBiomeId, regionalVariantId);
     const upperAffinity = resolveUpperCaveAffinity(biomeId, hostBiomeId, undergroundBiomeId, regionalVariantId);
-    const mainField = avg4(
+    let mainField = avg4(
       smoothstep(0.52, 0.82, caveFields.caveRibbon),
       smoothstep(0.42, 0.78, caveFields.cavePocket),
       smoothstep(0.34, 0.72, caveFields.caveDepth + fields.drainage * 0.18 + basinness * 0.20),
       smoothstep(0.24, 0.72, subterraneanDryness + ruggedness * 0.18),
     );
-    const upperField = avg3(
+    let upperField = avg3(
       smoothstep(0.56, 0.84, caveFields.caveOpenings),
       smoothstep(0.36, 0.76, ruggedness + basinness * 0.22 + fields.channel * 0.16),
       smoothstep(0.36, 0.74, caveFields.caveRibbon + caveFields.cavePocket * 0.18),
     );
-    const entranceField = avg3(
+    let entranceField = avg3(
       smoothstep(0.50, 0.82, caveFields.caveOpenings),
       smoothstep(0.42, 0.80, ruggedness + fields.channel * 0.22 + basinness * 0.12),
       smoothstep(0.34, 0.72, caveFields.caveRibbon + caveFields.cavePocket * 0.24),
     );
-    const mainStrength = saturate(mainField * (0.62 + deepAffinity * 0.58) * waterSuppression);
+    if (fields.atlasCaveInfluence > 0) {
+      const atlasCaveField = smoothstep(0.05, 0.92, fields.atlasCaveInfluence);
+      mainField = Math.max(mainField, 0.48 + atlasCaveField * 0.42);
+      upperField = Math.max(upperField, 0.34 + fields.atlasCaveCore * 0.54 + atlasCaveField * 0.18);
+      entranceField = Math.max(entranceField, 0.30 + fields.atlasCaveCore * 0.56 + atlasCaveField * 0.16);
+    }
+    const mainStrength = saturate(mainField * (0.62 + deepAffinity * 0.58 + fields.atlasCaveInfluence * 0.34) * waterSuppression);
     const upperStrength = saturate(
       (
-        upperField * (0.34 + upperAffinity * caveInterior * 1.22)
+        upperField * (0.34 + upperAffinity * caveInterior * 1.22 + fields.atlasCaveInfluence * 0.28)
         + ruggedness * 0.18 * caveInterior
       ) * waterSuppression,
     );
@@ -1911,7 +2629,7 @@ export class ProceduralWorldGenerator {
     const entranceStrength = saturate(
       entranceField
       * caveEntranceCliff
-      * (0.62 + upperAffinity * 1.45 + caveInterior * 0.90)
+      * (0.62 + upperAffinity * 1.45 + caveInterior * 0.90 + fields.atlasCaveInfluence * 0.45)
       * boundaryFactor
       * waterSuppression,
     );
@@ -2049,7 +2767,7 @@ export class ProceduralWorldGenerator {
       ) {
         return 0;
       }
-      return resolveTransitionMaterial(
+      return resolveSurfaceTransitionMaterial(
         context.surfaceMaterialPrimary,
         context.surfaceMaterialSecondary,
         context.transitionThreshold,
@@ -2242,6 +2960,10 @@ function landmarkPlacement(
 
 function createMutableColumnState(): MutableColumnState {
   return {
+    regionId: "inner-sea",
+    secondaryRegionId: "inner-sea",
+    regionStrength: 0,
+    regionAmbientProfileId: "silt-mist",
     biomeId: "verdant",
     hostBiomeId: "verdant",
     secondaryBiomeId: "steppe",
@@ -2260,6 +2982,7 @@ function createMutableColumnState(): MutableColumnState {
     oceanness: 0,
     surfaceY: 0,
     waterTopY: NO_WATER,
+    pilgrimRouteInfluence: 0,
     surfaceMaterialPrimary: 0,
     surfaceMaterialSecondary: 0,
     subsurfacePrimary: 0,
@@ -2318,6 +3041,7 @@ function columnSampleFromState(state: MutableColumnState): ProceduralColumnSampl
     surfaceY: state.surfaceY,
     topY: topYFromState(state),
     waterTopY: nullableWaterTopY(state.waterTopY),
+    pilgrimRouteInfluence: state.pilgrimRouteInfluence,
     surfaceMaterial: state.surfaceMaterialPrimary,
   };
 }
@@ -2328,6 +3052,7 @@ function surfaceColumnSampleFromState(state: MutableColumnState): ProceduralSurf
     surfaceY: state.surfaceY,
     topY: topYFromState(state),
     waterTopY: nullableWaterTopY(state.waterTopY),
+    pilgrimRouteInfluence: state.pilgrimRouteInfluence,
     surfaceMaterial: state.surfaceMaterialPrimary,
     waterMaterial: state.waterTopY === NO_WATER ? null : state.waterMaterial,
   };
@@ -2379,7 +3104,39 @@ function scoreBaseBiome(fields: SurfaceFieldSample, biome: BaseBiomeProfile): nu
         + smoothstep(0.40, 0.82, 1 - fields.temperature) * 0.54;
       break;
   }
+  score *= scoreIslandProvinceBaseBiomeBias(fields, biome.id);
   return score;
+}
+
+function scoreIslandProvinceBaseBiomeBias(fields: SurfaceFieldSample, biomeId: BaseBiomeId): number {
+  let bias = 0.82;
+  switch (biomeId) {
+    case "badlands":
+      bias += fields.ashRing * 0.72 + fields.volcanicHeart * 0.44 + fields.easternShardCoast * 0.14;
+      break;
+    case "dunes":
+      bias += fields.southernSaltBasin * 0.48 + fields.coastalShelf * 0.10;
+      break;
+    case "savanna":
+      bias += fields.northeastGrazelands * 0.54 + fields.southernSaltBasin * 0.10;
+      break;
+    case "steppe":
+      bias += fields.northeastGrazelands * 0.42 + fields.ashRing * 0.12;
+      break;
+    case "moor":
+      bias += fields.westWetlands * 0.40 + fields.coastalShelf * 0.14;
+      break;
+    case "verdant":
+      bias += fields.westWetlands * 0.26 + fields.northeastGrazelands * 0.18 - fields.ashRing * 0.34;
+      break;
+    case "highland":
+      bias += fields.volcanicHeart * 0.20 + fields.easternShardCoast * 0.22;
+      break;
+    case "tundra":
+      bias += fields.volcanicHeart * 0.08 + fields.coastalShelf * 0.06;
+      break;
+  }
+  return clamp(bias, 0.28, 1.76);
 }
 
 function blendTerrainProfile(primary: BaseBiomeProfile, secondary: BaseBiomeProfile, primaryWeight: number): {
@@ -2427,28 +3184,60 @@ function resolveHostBiomeId(
   secondary: BaseBiomeId,
 ): BaseBiomeId {
   if (biomeId === "marsh") {
-    return primary === "verdant" || primary === "savanna" || primary === "steppe" ? primary : secondary;
+    return primary === "verdant" || primary === "savanna" || primary === "steppe"
+      ? primary
+      : secondary === "verdant" || secondary === "savanna" || secondary === "steppe"
+      ? secondary
+      : "verdant";
   }
   if (biomeId === "firefly") {
-    return primary === "verdant" || primary === "savanna" || primary === "moor" || primary === "tundra" ? primary : secondary;
+    return primary === "verdant" || primary === "savanna" || primary === "steppe" || primary === "moor" || primary === "tundra"
+      ? primary
+      : secondary === "verdant" || secondary === "savanna" || secondary === "steppe" || secondary === "moor" || secondary === "tundra"
+      ? secondary
+      : "moor";
   }
   if (biomeId === "saltflat") {
-    return primary === "savanna" || primary === "steppe" || primary === "dunes" ? primary : secondary;
+    return primary === "savanna" || primary === "steppe" || primary === "dunes"
+      ? primary
+      : secondary === "savanna" || secondary === "steppe" || secondary === "dunes"
+      ? secondary
+      : "dunes";
   }
   if (biomeId === "fern") {
-    return primary === "verdant" || primary === "savanna" || primary === "highland" ? primary : secondary;
+    return primary === "verdant" || primary === "savanna" || primary === "highland"
+      ? primary
+      : secondary === "verdant" || secondary === "savanna" || secondary === "highland"
+      ? secondary
+      : "verdant";
   }
   if (biomeId === "fungal") {
-    return primary === "verdant" || primary === "highland" || primary === "moor" ? primary : secondary;
+    return primary === "verdant" || primary === "highland" || primary === "moor"
+      ? primary
+      : secondary === "verdant" || secondary === "highland" || secondary === "moor"
+      ? secondary
+      : "moor";
   }
   if (biomeId === "ember") {
-    return primary === "badlands" || primary === "highland" ? primary : secondary;
+    return primary === "badlands" || primary === "highland" || primary === "steppe" || primary === "savanna"
+      ? primary
+      : secondary === "badlands" || secondary === "highland" || secondary === "steppe" || secondary === "savanna"
+      ? secondary
+      : "badlands";
   }
   if (biomeId === "bloom") {
-    return primary === "verdant" || primary === "highland" || primary === "moor" ? primary : secondary;
+    return primary === "verdant" || primary === "highland" || primary === "moor"
+      ? primary
+      : secondary === "verdant" || secondary === "highland" || secondary === "moor"
+      ? secondary
+      : "verdant";
   }
   if (biomeId === "shardlands") {
-    return primary === "dunes" || primary === "badlands" || primary === "highland" || primary === "tundra" ? primary : secondary;
+    return primary === "dunes" || primary === "badlands" || primary === "highland" || primary === "tundra"
+      ? primary
+      : secondary === "dunes" || secondary === "badlands" || secondary === "highland" || secondary === "tundra"
+      ? secondary
+      : "dunes";
   }
   return primary;
 }
@@ -2606,6 +3395,384 @@ function pickSubsurfaceMaterial(
   return subsurface;
 }
 
+function createPilgrimRouteBand(
+  startMetersX: number,
+  startMetersZ: number,
+  headingDegrees: number,
+  lengthMeters: number,
+  halfWidthMeters: number,
+): PilgrimRouteBand {
+  const heading = headingDegrees * Math.PI / 180;
+  return {
+    startX: startMetersX * WORLD_UNITS_PER_METER,
+    startZ: startMetersZ * WORLD_UNITS_PER_METER,
+    directionX: Math.cos(heading),
+    directionZ: Math.sin(heading),
+    length: lengthMeters * WORLD_UNITS_PER_METER,
+    halfWidth: halfWidthMeters * WORLD_UNITS_PER_METER,
+  };
+}
+
+function samplePilgrimRouteSurfaceInfluence(
+  worldX: number,
+  worldZ: number,
+  biomeId: BiomeId,
+  fields: SurfaceFieldSample,
+): PilgrimRouteSurfaceInfluence | null {
+  const wetlandRoute = isWetlandPilgrimRouteField(fields);
+  const atlasRoute = fields.atlasRouteInfluence > 0.08 && fields.atlasRouteCore > 0.64;
+  if (
+    !wetlandRoute
+    && !atlasRoute
+    && (
+      biomeId === "verdant"
+      || biomeId === "fern"
+      || biomeId === "bloom"
+      || (biomeId === "highland" && fields.oldGrowth > 0.62 && fields.moisture > 0.48)
+    )
+  ) {
+    return null;
+  }
+
+  let best: PilgrimRouteSurfaceInfluence | null = atlasRoute
+    ? {
+        core: fields.atlasRouteCore,
+        shoulder: fields.atlasRouteShoulder,
+        fracture: saturate(
+          fields.atlasRouteInfluence * 0.16
+            + fields.atlasRouteShoulder * 0.28
+            + fields.surfacePatch * 0.22
+            + fields.strata * 0.18
+            + fields.desolation * 0.16,
+        ),
+        lateralRatio: fields.atlasRouteCore > 0 ? 0 : 0.72,
+      }
+    : null;
+  for (const band of PILGRIM_ROUTE_BANDS) {
+    const route = samplePilgrimRouteCoordinates(worldX, worldZ, band, fields);
+    if (!route) {
+      continue;
+    }
+
+    const core = 1 - smoothstep(0.08, 0.38, route.lateralRatio);
+    const shoulder = smoothstep(0.22, 0.88, route.lateralRatio) * (1 - smoothstep(0.84, 1.02, route.lateralRatio));
+    const worldXDiv12 = Math.floor(worldX / 12);
+    const worldZDiv12 = Math.floor(worldZ / 12);
+    const diagonalA = diagonalStripeStrength(worldXDiv12, worldZDiv12, 83, 19, 5, 3);
+    const diagonalB = diagonalStripeStrength(worldXDiv12, worldZDiv12, 131, 29, -4, 7);
+    const crackField = Math.max(
+      smoothstep(0.70, 0.96, diagonalA),
+      smoothstep(0.76, 0.98, diagonalB) * 0.86,
+    );
+    const harshness = avg3(
+      smoothstep(0.42, 0.82, fields.surfacePatch),
+      smoothstep(0.40, 0.80, fields.scatter),
+      smoothstep(0.42, 0.82, fields.strata + fields.desolation * 0.24),
+    );
+    const fracture = saturate(crackField * (0.42 + harshness * 0.58) + shoulder * harshness * 0.26);
+    const candidate = { core, shoulder, fracture, lateralRatio: route.lateralRatio };
+    if (!best || candidate.core + candidate.shoulder > best.core + best.shoulder) {
+      best = candidate;
+    }
+  }
+  return best && best.core + best.shoulder > 0.08 ? best : null;
+}
+
+function samplePilgrimRouteCoordinates(
+  worldX: number,
+  worldZ: number,
+  band: PilgrimRouteBand,
+  fields: SurfaceFieldSample,
+): PilgrimRouteCoordinates | null {
+  const deltaX = worldX - band.startX;
+  const deltaZ = worldZ - band.startZ;
+  const along = deltaX * band.directionX + deltaZ * band.directionZ;
+  if (along < -(band.halfWidth + PILGRIM_ROUTE_WARP_MAX) || along > band.length + band.halfWidth + PILGRIM_ROUTE_WARP_MAX) {
+    return null;
+  }
+  const rawLateral = deltaX * -band.directionZ + deltaZ * band.directionX;
+  const lateral = rawLateral - samplePilgrimRouteLateralWarp(along, band, fields);
+  const lateralRatio = Math.abs(lateral) / band.halfWidth;
+  if (lateralRatio > 1) {
+    return null;
+  }
+  return { along, lateral, lateralRatio };
+}
+
+function samplePilgrimRouteLateralWarp(
+  along: number,
+  band: PilgrimRouteBand,
+  fields: SurfaceFieldSample,
+): number {
+  const edgeFade = smoothstep(0, PILGRIM_ROUTE_WARP_FADE_DISTANCE, along)
+    * (1 - smoothstep(band.length - PILGRIM_ROUTE_WARP_FADE_DISTANCE, band.length, along));
+  if (edgeFade <= 0) {
+    return 0;
+  }
+  const alongMeters = along / WORLD_UNITS_PER_METER;
+  const seed = band.startX * 0.000_037 + band.startZ * 0.000_053 + band.directionX * 11.7 + band.directionZ * 17.3;
+  const broadBend = Math.sin(alongMeters * 0.014 + seed) * 0.56
+    + Math.sin(alongMeters * 0.033 + seed * 1.61) * 0.26;
+  const groundDrift = (fields.surfaceGrain - 0.5) * 0.30
+    + (fields.strata - 0.5) * 0.22
+    + (fields.scatter - 0.5) * 0.18;
+  return clamp((broadBend + groundDrift) * PILGRIM_ROUTE_WARP_MAX, -PILGRIM_ROUTE_WARP_MAX, PILGRIM_ROUTE_WARP_MAX) * edgeFade;
+}
+
+function samplePilgrimRouteSurfaceDelta(
+  route: PilgrimRouteSurfaceInfluence,
+  fields: SurfaceFieldSample,
+  biomeCore: number,
+): number {
+  const centerWear = route.core * (0.8 + fields.strata * 1.25);
+  const shoulderCollapse = route.shoulder * (0.8 + route.fracture * 2.2 + fields.scatter * 0.55);
+  const raisedBrokenSlab = route.fracture > 0.68 && route.core > 0.22 ? 1 : 0;
+  const atlasConform = fields.atlasRouteInfluence * (1.2 + fields.atlasRouteCore * 2.4 + fields.atlasRouteShoulder * 1.1);
+  return -Math.round((centerWear + shoulderCollapse + atlasConform) * (0.42 + biomeCore * 0.58)) + raisedBrokenSlab;
+}
+
+function applyPilgrimRouteSurfaceMaterials(
+  materials: ResolvedSurfaceMaterials,
+  route: PilgrimRouteSurfaceInfluence,
+  fields: SurfaceFieldSample,
+): void {
+  const desolateRoute = fields.desolation > 0.54 || fields.volcanism > 0.54;
+  const routeDeposit = route.fracture + route.core * 0.34 + route.shoulder * 0.22;
+  if (route.shoulder > route.core + 0.12 && routeDeposit > 0.50) {
+    materials.surfacePrimary = desolateRoute ? PILGRIM_ROUTE_DUST_MATERIAL : PILGRIM_ROUTE_WORN_MATERIAL;
+    materials.surfaceSecondary = route.fracture > 0.46 ? PILGRIM_ROUTE_DARK_MATERIAL : PILGRIM_ROUTE_CORE_MATERIAL;
+    materials.transitionThreshold = clamp(0.50 + route.fracture * 0.18, 0.50, 0.72);
+    return;
+  }
+  if (route.core > 0.28 || routeDeposit > 0.64) {
+    materials.surfacePrimary = route.fracture > 0.72 ? PILGRIM_ROUTE_DARK_MATERIAL : PILGRIM_ROUTE_CORE_MATERIAL;
+    materials.surfaceSecondary = route.fracture > 0.50
+      ? (desolateRoute ? PILGRIM_ROUTE_DUST_MATERIAL : PILGRIM_ROUTE_SALT_MATERIAL)
+      : PILGRIM_ROUTE_WORN_MATERIAL;
+    materials.transitionThreshold = clamp(0.58 + route.core * 0.16 - route.fracture * 0.10, 0.48, 0.78);
+  }
+}
+
+function selectPilgrimRouteRoster(
+  worldX: number,
+  worldZ: number,
+  biomeId: BiomeId,
+  fields: SurfaceFieldSample,
+): readonly LandmarkProfile[] | null {
+  const wetlandRoute = isWetlandPilgrimRouteField(fields);
+  if (
+    !wetlandRoute
+    && (
+      biomeId === "verdant"
+      || biomeId === "fern"
+      || biomeId === "bloom"
+      || (biomeId === "highland" && fields.oldGrowth > 0.62 && fields.moisture > 0.48)
+    )
+  ) {
+    return null;
+  }
+  for (const band of PILGRIM_ROUTE_BANDS) {
+    const route = samplePilgrimRouteCoordinates(worldX, worldZ, band, fields);
+    if (!route) {
+      continue;
+    }
+    if (route.lateralRatio <= 0.86) {
+      if (fields.easternShardCoast > 0.48) {
+        return PILGRIM_ROUTE_GLASS_SHARD_LANDMARKS;
+      }
+      if (fields.southernSaltBasin > 0.48) {
+        return PILGRIM_ROUTE_SALT_BASIN_LANDMARKS;
+      }
+      if (fields.regionId === "west-gash") {
+        return PILGRIM_ROUTE_WEST_GASH_LANDMARKS;
+      }
+      if (fields.northeastGrazelands > 0.48) {
+        return PILGRIM_ROUTE_GRAZELANDS_LANDMARKS;
+      }
+      if (fields.westWetlands > 0.48 || fields.regionId === "bitter-coast") {
+        return PILGRIM_ROUTE_WETLAND_LANDMARKS;
+      }
+    }
+    const brokenRouteEdge = route.lateralRatio > 0.52 && (fields.surfacePatch > 0.42 || fields.scatter > 0.46);
+    const routeCore = route.lateralRatio <= 0.72 && fields.desolation + fields.ridge + fields.strata > 1.20;
+    if (brokenRouteEdge || routeCore) {
+      return PILGRIM_ROUTE_SKYLINE_LANDMARKS;
+    }
+  }
+  return null;
+}
+
+function samplePilgrimRouteSetPiece(
+  worldX: number,
+  worldZ: number,
+  biomeId: BiomeId,
+  fields: SurfaceFieldSample,
+): PilgrimRouteSetPiece | null {
+  const wetlandRoute = isWetlandPilgrimRouteField(fields);
+  if (!wetlandRoute && (biomeId === "verdant" || biomeId === "bloom")) {
+    return null;
+  }
+  let best: PilgrimRouteSetPiece | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let bandIndex = 0; bandIndex < PILGRIM_ROUTE_BANDS.length; bandIndex += 1) {
+    const band = PILGRIM_ROUTE_BANDS[bandIndex]!;
+    const deltaX = worldX - band.startX;
+    const deltaZ = worldZ - band.startZ;
+    const along = deltaX * band.directionX + deltaZ * band.directionZ;
+    const earlyWetlandCadence = wetlandRoute && bandIndex === 8;
+    const setPieceStart = earlyWetlandCadence ? 48 * WORLD_UNITS_PER_METER : PILGRIM_ROUTE_SET_PIECE_START;
+    const setPieceSpacing = earlyWetlandCadence ? 180 * WORLD_UNITS_PER_METER : PILGRIM_ROUTE_SET_PIECE_SPACING;
+    if (
+      along < setPieceStart - band.halfWidth
+      || along > band.length - PILGRIM_ROUTE_SET_PIECE_END_MARGIN + band.halfWidth
+    ) {
+      continue;
+    }
+    const rawLateral = deltaX * -band.directionZ + deltaZ * band.directionX;
+    const lateral = rawLateral - samplePilgrimRouteLateralWarp(along, band, fields);
+    const anchorIndex = Math.max(0, Math.round((along - setPieceStart) / setPieceSpacing));
+    const anchorAlong = setPieceStart + anchorIndex * setPieceSpacing;
+    if (anchorAlong > band.length - PILGRIM_ROUTE_SET_PIECE_END_MARGIN) {
+      continue;
+    }
+    const side = (anchorIndex + bandIndex) % 2 === 0 ? 1 : -1;
+    const anchorLateral = side * band.halfWidth * 0.62;
+    const deltaAlong = along - anchorAlong;
+    const deltaLateral = lateral - anchorLateral;
+    const profile = selectPilgrimRouteSetPieceProfile(anchorIndex, bandIndex, fields);
+    const radius = profile.radius + 3;
+    if (Math.abs(deltaAlong) > radius || Math.abs(deltaLateral) > radius) {
+      continue;
+    }
+    const distance = Math.hypot(deltaAlong, deltaLateral);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = { profile, deltaAlong, deltaLateral };
+    }
+  }
+  return best;
+}
+
+function isWetlandPilgrimRouteField(fields: SurfaceFieldSample): boolean {
+  return fields.regionId === "bitter-coast" || fields.westWetlands > 0.48;
+}
+
+function selectPilgrimRouteSetPieceProfile(
+  anchorIndex: number,
+  bandIndex: number,
+  fields: SurfaceFieldSample,
+): LandmarkProfile {
+  const sequence = (anchorIndex + bandIndex * 3) % 8;
+  if (fields.easternShardCoast > 0.48) {
+    switch (sequence) {
+      case 0:
+      case 5:
+        return landmarkPlacement("glass_cairn", { chance: 1, scale: 1.34, cellSize: 1, radius: 6, variant: 2 });
+      case 1:
+      case 6:
+        return landmarkPlacement("crystal_cluster", { chance: 1, scale: 1.30, cellSize: 1, radius: 7, variant: 2 });
+      case 2:
+        return landmarkPlacement("salt_spire", { chance: 1, scale: 1.30, cellSize: 1, radius: 6, variant: 2 });
+      case 3:
+        return landmarkPlacement("velothi_shrine", { chance: 1, scale: 1.20, cellSize: 1, radius: 6 });
+      default:
+        return landmarkPlacement("pilgrim_cairn", { chance: 1, scale: 1.18, cellSize: 1, radius: 5 });
+    }
+  }
+  if (fields.southernSaltBasin > 0.48) {
+    switch (sequence) {
+      case 0:
+        return landmarkPlacement("salt_spire", { chance: 1, scale: 1.90, cellSize: 1, radius: 8, variant: 2 });
+      case 5:
+        return landmarkPlacement("old_road_causeway", { chance: 1, scale: 1.30, cellSize: 1, radius: 17 });
+      case 1:
+      case 6:
+        return landmarkPlacement("ash_obelisk", { chance: 1, scale: 1.24, cellSize: 1, radius: 8 });
+      case 2:
+        return landmarkPlacement("glass_cairn", { chance: 1, scale: 1.22, cellSize: 1, radius: 6, variant: 2 });
+      case 3:
+        return landmarkPlacement("crystal_cluster", { chance: 1, scale: 1.16, cellSize: 1, radius: 7, variant: 2 });
+      default:
+        return landmarkPlacement("pilgrim_lantern", { chance: 1, scale: 1.28, cellSize: 1, radius: 5 });
+    }
+  }
+  if (fields.regionId === "west-gash") {
+    switch (sequence) {
+      case 0:
+      case 4:
+        return landmarkPlacement("stone_tor", { chance: 1, scale: 1.30, cellSize: 1, radius: 9 });
+      case 1:
+      case 5:
+        return landmarkPlacement("redleaf_tree", { chance: 1, scale: 1.24, cellSize: 1, radius: 13 });
+      case 2:
+        return landmarkPlacement("old_road_causeway", { chance: 1, scale: 1.22, cellSize: 1, radius: 15 });
+      case 3:
+        return landmarkPlacement("pilgrim_lantern", { chance: 1, scale: 1.28, cellSize: 1, radius: 5 });
+      default:
+        return landmarkPlacement("standing_stone", { chance: 1, scale: 1.24, cellSize: 1, radius: 6 });
+    }
+  }
+  if (fields.northeastGrazelands > 0.48) {
+    switch (sequence) {
+      case 0:
+      case 4:
+        return landmarkPlacement("standing_stone", { chance: 1, scale: 1.52, cellSize: 1, radius: 7 });
+      case 1:
+      case 5:
+        return landmarkPlacement("acacia", { chance: 1, scale: 1.18, cellSize: 1, radius: 13 });
+      case 2:
+        return landmarkPlacement("ancestor_pillar", { chance: 1, scale: 1.48, cellSize: 1, radius: 7 });
+      case 3:
+        return landmarkPlacement("flower_patch", { chance: 1, scale: 1.10, variant: 2, cellSize: 1, radius: 6 });
+      default:
+        return landmarkPlacement("pilgrim_cairn", { chance: 1, scale: 1.12, cellSize: 1, radius: 5 });
+    }
+  }
+  if (fields.volcanicHeart > 0.42 || fields.ashRing > 0.48) {
+    if (sequence === 0 || sequence === 5) {
+      return landmarkPlacement("velothi_ziggurat", { chance: 1, scale: 1.34, cellSize: 1, radius: 18 });
+    }
+    if (sequence === 2 || sequence === 6) {
+      return landmarkPlacement("ash_obelisk", { chance: 1, scale: 1.42, cellSize: 1, radius: 9 });
+    }
+  }
+  if (fields.regionId === "bitter-coast" || fields.westWetlands > 0.50 || fields.magic > 0.62) {
+    if (fields.regionId === "bitter-coast" && (sequence === 0 || sequence === 4)) {
+      return landmarkPlacement("rib_arch", { chance: 1, scale: 1.70, cellSize: 1, radius: 17 });
+    }
+    if (fields.regionId === "bitter-coast" && (sequence === 2 || sequence === 6)) {
+      return landmarkPlacement("crystal_reeds", { chance: 1, scale: 1.66, cellSize: 1, radius: 8 });
+    }
+    if (fields.regionId === "bitter-coast" && sequence === 5) {
+      return landmarkPlacement("rib_remains", { chance: 1, scale: 1.58, cellSize: 1, radius: 12 });
+    }
+    if (sequence === 1 || sequence === 6) {
+      return landmarkPlacement("fungal_bridge", { chance: 1, scale: 1.34, cellSize: 1, radius: 18 });
+    }
+    if (sequence === 3) {
+      return landmarkPlacement("crystal_reeds", { chance: 1, scale: 1.24, cellSize: 1, radius: 7 });
+    }
+  }
+  switch (sequence) {
+    case 0:
+      return landmarkPlacement("old_road_causeway", { chance: 1, scale: 1.34, cellSize: 1, radius: 17 });
+    case 1:
+      return landmarkPlacement("pilgrim_lantern", { chance: 1, scale: 1.42, cellSize: 1, radius: 6 });
+    case 2:
+      return landmarkPlacement("rib_arch", { chance: 1, scale: 1.34, cellSize: 1, radius: 16 });
+    case 3:
+      return landmarkPlacement("ash_obelisk", { chance: 1, scale: 1.32, cellSize: 1, radius: 9 });
+    case 4:
+      return landmarkPlacement("bone_chimes", { chance: 1, scale: 1.24, cellSize: 1, radius: 8 });
+    case 5:
+      return landmarkPlacement("velothi_shrine", { chance: 1, scale: 1.28, cellSize: 1, radius: 6 });
+    case 6:
+      return landmarkPlacement("buried_ribs", { chance: 1, scale: 1.28, cellSize: 1, radius: 14 });
+    default:
+      return landmarkPlacement("shrine_debris", { chance: 1, scale: 1.22, cellSize: 1, radius: 16 });
+  }
+}
+
 function selectLandmarkRoster(
   biomeId: BiomeId,
   undergroundBiomeId: UndergroundBiomeId,
@@ -2623,6 +3790,8 @@ function selectLandmarkRoster(
       return DUNES_GLASS_LANDMARKS;
     case "badlands_crater":
       return BADLANDS_CRATER_LANDMARKS;
+    case "ash_wastes":
+      return ASH_WASTES_LANDMARKS;
     case "highland_redleaf":
       return HIGHLAND_REDLEAF_LANDMARKS;
     case "moor_shadowglass":
@@ -3041,7 +4210,20 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
         smoothstep(0.48, 0.80, fields.volcanism),
         smoothstep(0.48, 0.78, fields.peakness),
       );
-      id = strength > 0.62 ? "badlands_crater" : null;
+      {
+        const ashStrength = avg4(
+          smoothstep(0.50, 0.78, fields.volcanism),
+          smoothstep(0.40, 0.76, fields.desolation),
+          smoothstep(0.36, 0.74, fields.mesa),
+          smoothstep(0.48, 0.78, 1 - fields.moisture),
+        );
+        if (ashStrength > 0.56) {
+          strength = ashStrength;
+          id = "ash_wastes";
+        } else {
+          id = strength > 0.62 ? "badlands_crater" : null;
+        }
+      }
       break;
     case "highland":
       strength = avg4(
@@ -3114,7 +4296,20 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
         smoothstep(0.58, 0.82, fields.peakness + fields.mesa * 0.3),
         smoothstep(0.50, 0.80, fields.ridge),
       );
-      id = strength > 0.52 ? "ember_caldera" : null;
+      {
+        const ashStrength = avg4(
+          smoothstep(0.54, 0.82, fields.volcanism),
+          smoothstep(0.44, 0.78, fields.desolation),
+          smoothstep(0.42, 0.76, fields.surfacePatch + fields.scatter * 0.2),
+          smoothstep(0.48, 0.78, 1 - fields.moisture),
+        );
+        if (ashStrength > 0.58 && strength < 0.72) {
+          strength = ashStrength;
+          id = "ash_wastes";
+        } else {
+          id = strength > 0.52 ? "ember_caldera" : null;
+        }
+      }
       break;
     case "bloom":
       strength = avg3(
@@ -3132,6 +4327,177 @@ function selectRegionalVariant(biomeId: BiomeId, fields: SurfaceFieldSample): Re
 }
 
 const reusableRegionalVariant: RegionalVariantSelection = { id: "verdant_karst", strength: 0 };
+
+function sampleGeneratorAtlasFields(worldX: number, worldZ: number): GeneratorAtlasFields {
+  const xM = worldX / WORLD_UNITS_PER_METER;
+  const zM = worldZ / WORLD_UNITS_PER_METER;
+  const island = sampleIslandMaskMeters(xM, zM, WORLD_ATLAS);
+  const region = sampleAtlasRegionMeters(xM, zM, island, WORLD_ATLAS);
+  const route = sampleGeneratorAtlasRouteFields(xM, zM, island.islandInterior);
+  const cave = sampleAtlasCaveAnchorMeters(xM, zM, island, WORLD_ATLAS);
+  return {
+    islandInterior: island.islandInterior,
+    shorelineBand: island.shorelineBand,
+    coastalShelf: island.coastalShelf,
+    deepOcean: island.deepOcean,
+    primaryRegionId: region.primaryRegionId,
+    secondaryRegionId: region.secondaryRegionId,
+    regionStrength: region.regionStrength,
+    regionBlend: region.regionBlend,
+    regionDistance: region.regionDistance,
+    primaryBiomeId: region.primaryBiomeId,
+    regionalVariantId: region.regionalVariantId,
+    ambientProfileId: region.ambientProfileId,
+    ...route,
+    caveInfluence: cave.caveInfluence,
+    caveCore: cave.caveCore,
+    distanceToCaveAnchorM: cave.distanceToCaveAnchorM,
+  };
+}
+
+function sampleGeneratorAtlasRouteFields(
+  xM: number,
+  zM: number,
+  islandInterior: number,
+): Pick<GeneratorAtlasFields, "routeInfluence" | "routeCore" | "routeShoulder" | "distanceToRouteM"> {
+  if (islandInterior < 0.08) {
+    return { routeInfluence: 0, routeCore: 0, routeShoulder: 0, distanceToRouteM: Infinity };
+  }
+  let nearestDistance = Infinity;
+  for (const route of WORLD_ATLAS.routes) {
+    for (let index = 0; index < route.nodes.length - 1; index += 1) {
+      const a = route.nodes[index]!.point;
+      const b = route.nodes[index + 1]!.point;
+      nearestDistance = Math.min(nearestDistance, distancePointToSegmentMeters(xM, zM, a.x, a.z, b.x, b.z));
+    }
+  }
+  const core = 1 - smoothstep(38, 68, nearestDistance);
+  const shoulder = smoothstep(38, 68, nearestDistance) * (1 - smoothstep(72, 104, nearestDistance));
+  const influence = Math.max(core, shoulder);
+  return { routeInfluence: influence, routeCore: core, routeShoulder: shoulder, distanceToRouteM: nearestDistance };
+}
+
+function distancePointToSegmentMeters(
+  x: number,
+  z: number,
+  ax: number,
+  az: number,
+  bx: number,
+  bz: number,
+): number {
+  const abX = bx - ax;
+  const abZ = bz - az;
+  const lengthSquared = abX * abX + abZ * abZ;
+  if (lengthSquared <= 0) {
+    return Math.hypot(x - ax, z - az);
+  }
+  const t = clamp(((x - ax) * abX + (z - az) * abZ) / lengthSquared, 0, 1);
+  return Math.hypot(x - (ax + abX * t), z - (az + abZ * t));
+}
+
+function sampleAtlasUpliftBias(regionId: WorldRegionId, regionCore: number): number {
+  switch (regionId) {
+    case "red-mountain":
+      return regionCore * 0.46;
+    case "west-gash":
+      return regionCore * 0.28;
+    case "glass-shard-coast":
+      return regionCore * 0.12;
+    case "bitter-coast":
+    case "salt-marsh-basin":
+      return -regionCore * 0.08;
+    default:
+      return regionCore * 0.03;
+  }
+}
+
+function sampleAtlasGlobalHeightBias(regionId: WorldRegionId, regionCore: number): number {
+  switch (regionId) {
+    case "red-mountain":
+      return regionCore * 0.20;
+    case "west-gash":
+      return regionCore * 0.13;
+    case "ashen-badlands":
+      return regionCore * 0.07;
+    case "glass-shard-coast":
+      return regionCore * 0.05;
+    case "bitter-coast":
+      return -regionCore * 0.10;
+    case "salt-marsh-basin":
+      return -regionCore * 0.14;
+    case "inner-sea":
+      return -regionCore * 0.04;
+    default:
+      return 0;
+  }
+}
+
+function sampleAtlasMountainnessBias(regionId: WorldRegionId, regionCore: number): number {
+  switch (regionId) {
+    case "red-mountain":
+      return regionCore * 0.58;
+    case "west-gash":
+      return regionCore * 0.36;
+    case "ashen-badlands":
+      return regionCore * 0.16;
+    case "glass-shard-coast":
+      return regionCore * 0.20;
+    default:
+      return 0;
+  }
+}
+
+function sampleAtlasRegionSurfaceDelta(fields: SurfaceFieldSample): number {
+  const strength = fields.regionStrength * fields.islandInterior;
+  switch (fields.regionId) {
+    case "red-mountain":
+      return Math.round((92 + fields.peakness * 132 + fields.ridge * 42) * strength);
+    case "west-gash":
+      return Math.round((54 + fields.ridge * 60 + Math.max(0, fields.hills) * 36) * strength);
+    case "ashen-badlands":
+      return Math.round((18 + fields.mesa * 34 + fields.strata * 18) * strength);
+    case "glass-shard-coast":
+      return Math.round((22 + fields.ridge * 34 + fields.surfaceGrain * 18) * strength);
+    case "grazelands":
+      return Math.round((6 + fields.hills * 26) * strength);
+    case "bitter-coast":
+      return -Math.round((26 + fields.channel * 24) * strength);
+    case "inner-sea":
+      return -Math.round((16 + Math.max(0, -fields.basin) * 22) * strength);
+    case "salt-marsh-basin":
+      return -Math.round((38 + fields.channel * 18 + fields.coastalShelf * 28) * strength);
+    default:
+      return 0;
+  }
+}
+
+function sampleTerrainCrustBreakup(
+  fields: SurfaceFieldSample,
+  terrainProfile: { terraceScale: number; microRelief: number },
+  biomeCore: number,
+): number {
+  const terraceHost = smoothstep(0.18, 0.70, terrainProfile.terraceScale);
+  const harshSurface = avg4(
+    smoothstep(0.46, 0.82, fields.surfacePatch),
+    smoothstep(0.44, 0.82, fields.scatter),
+    smoothstep(0.44, 0.84, fields.strata),
+    smoothstep(0.40, 0.82, fields.desolation + fields.mesa * 0.20),
+  );
+  const diagonalLift = (
+    (fields.strata - 0.5) * 2.0
+    + (fields.surfacePatch - 0.5) * 1.2
+    - (fields.scatter - 0.5) * 0.9
+  );
+  const erodedLip = (
+    smoothstep(0.56, 0.86, fields.surfacePatch + fields.mesa * 0.18)
+    - smoothstep(0.52, 0.84, fields.channel + fields.basin * 0.14)
+  );
+  const amplitude = (1.2 + terrainProfile.microRelief * 0.18)
+    * (0.22 + biomeCore * 0.48)
+    * (0.45 + terraceHost * 0.55)
+    * (0.50 + harshSurface * 0.50);
+  return Math.round((diagonalLift * 0.62 + erodedLip * 0.72) * amplitude);
+}
 
 function adjustSpecialBiomeSurfaceY(
   seaLevel: number,
@@ -3178,11 +4544,16 @@ function sampleRegionalVariantSurfaceDelta(
     case "savanna_flowersea":
       return Math.round((fields.hills - 0.2) * (8 + strength * 10) * weight);
     case "steppe_monolith":
-      return Math.round(lerp(4, 14, strength) * (0.5 + fields.ridge * 0.5) * weight);
+      return Math.round(lerp(4, 16, strength) * (0.46 + fields.ridge * 0.42 + fields.surfacePatch * 0.12) * weight)
+        + Math.round(((fields.strata - 0.5) * 5 + (fields.scatter - 0.5) * 3) * weight);
     case "dunes_glass":
       return Math.round((fields.dune - 0.52) * (12 + strength * 18) * weight);
     case "badlands_crater":
       return Math.round((fields.mesa - 0.52) * (16 + strength * 20) * weight);
+    case "ash_wastes":
+      return Math.round((fields.mesa - 0.58) * (6 + strength * 10) * weight)
+        - Math.round(lerp(2, 7, strength) * (0.45 + Math.max(0, fields.desolation - 0.5)) * weight)
+        + Math.round(((fields.strata - 0.5) * 12 + (fields.surfaceGrain - 0.5) * 6 + (fields.scatter - 0.5) * 5) * weight);
     case "highland_redleaf":
       return Math.round(lerp(4, 12, strength) * (0.55 + fields.hills * 0.15 + 0.30) * weight);
     case "moor_shadowglass":
@@ -3251,6 +4622,13 @@ function applyRegionalVariantMaterialOverrides(
       materials.subsurfacePrimary = hexColorToMaterial("#754");
       materials.subsurfaceSecondary = hexColorToMaterial("#965");
       break;
+    case "ash_wastes":
+      materials.surfacePrimary = hexColorToMaterial("#655");
+      materials.surfaceSecondary = hexColorToMaterial("#887");
+      materials.subsurfacePrimary = hexColorToMaterial("#433");
+      materials.subsurfaceSecondary = hexColorToMaterial("#544");
+      materials.transitionThreshold = Math.min(materials.transitionThreshold, 0.66);
+      break;
     case "highland_redleaf":
       materials.surfacePrimary = hexColorToMaterial("#A86");
       materials.surfaceSecondary = hexColorToMaterial("#C97");
@@ -3318,6 +4696,60 @@ function applyRegionalVariantMaterialOverrides(
       materials.subsurfacePrimary = hexColorToMaterial("#668");
       materials.subsurfaceSecondary = hexColorToMaterial("#79B");
       materials.water = hexColorToMaterial("#6DF");
+      break;
+    default:
+      break;
+  }
+}
+
+function applyAtlasSurfaceMaterialOverrides(
+  materials: ResolvedSurfaceMaterials,
+  fields: SurfaceFieldSample,
+): void {
+  if (fields.deepOcean > 0.34) {
+    materials.surfacePrimary = hexColorToMaterial("#245");
+    materials.surfaceSecondary = hexColorToMaterial("#134");
+    materials.subsurfacePrimary = hexColorToMaterial("#345");
+    materials.subsurfaceSecondary = hexColorToMaterial("#234");
+    materials.water = hexColorToMaterial("#134");
+    materials.transitionThreshold = 0.68;
+    return;
+  }
+
+  if (fields.coastalShelf > 0.46 && fields.islandInterior < 0.38) {
+    materials.surfacePrimary = hexColorToMaterial("#887");
+    materials.surfaceSecondary = hexColorToMaterial("#655");
+    materials.subsurfacePrimary = hexColorToMaterial("#665");
+    materials.subsurfaceSecondary = hexColorToMaterial("#554");
+    materials.water = hexColorToMaterial("#58C");
+    materials.transitionThreshold = 0.58;
+  }
+
+  if (fields.atlasCaveInfluence <= 0.48) {
+    return;
+  }
+
+  switch (fields.regionId) {
+    case "red-mountain":
+    case "ashen-badlands":
+      materials.subsurfacePrimary = hexColorToMaterial("#433");
+      materials.subsurfaceSecondary = hexColorToMaterial("#654");
+      break;
+    case "bitter-coast":
+      materials.subsurfacePrimary = hexColorToMaterial("#342");
+      materials.subsurfaceSecondary = hexColorToMaterial("#564");
+      break;
+    case "salt-marsh-basin":
+      materials.subsurfacePrimary = hexColorToMaterial("#BBA");
+      materials.subsurfaceSecondary = hexColorToMaterial("#887");
+      break;
+    case "glass-shard-coast":
+      materials.subsurfacePrimary = hexColorToMaterial("#667");
+      materials.subsurfaceSecondary = hexColorToMaterial("#CEF");
+      break;
+    case "west-gash":
+      materials.subsurfacePrimary = hexColorToMaterial("#667");
+      materials.subsurfaceSecondary = hexColorToMaterial("#889");
       break;
     default:
       break;
@@ -3563,6 +4995,17 @@ function configureLandmarkFeature(
         "#CBA",
       );
       return true;
+    case "ancestor_pillar":
+      configureSpireFeature(
+        out,
+        FEATURE_STANDING_STONE,
+        scaledFeatureHeight(28, 18, fields.uplift + fields.magic * 0.2, profile.scale),
+        scaledFeatureRadius(4, 2, fields.uplift + fields.scatter * 0.2, profile.scale),
+        "#776",
+        "#DBC",
+      );
+      out.featureExtra = 1;
+      return true;
     case "shrub":
       if (submergedSurface) {
         return false;
@@ -3603,7 +5046,7 @@ function configureLandmarkFeature(
         out,
         FEATURE_PALM,
         scaledFeatureHeight(32, 12, fields.temperature, profile.scale),
-        scaledFeatureRadius(8, 3, fields.moisture, profile.scale),
+        scaledFeatureRadius(9, 4, fields.moisture, profile.scale),
         "#864",
         "#7B6",
       );
@@ -3640,14 +5083,15 @@ function configureLandmarkFeature(
       if (submergedSurface) {
         return false;
       }
-      configureSpireFeature(
+      configureTreeFeature(
         out,
-        FEATURE_STANDING_STONE,
-        scaledFeatureHeight(20, 20, fields.uplift + fields.surfacePatch * 0.5, profile.scale),
-        scaledFeatureRadius(2, 1, fields.scatter, profile.scale),
+        FEATURE_DEAD_TREE,
+        scaledFeatureHeight(22, 18, fields.uplift + fields.surfacePatch * 0.5, profile.scale),
+        scaledFeatureRadius(6, 3, fields.scatter + fields.desolation * 0.3, profile.scale),
         profile.variant > 0 ? "#433" : "#654",
         profile.variant > 0 ? "#654" : "#876",
       );
+      out.featureExtra = profile.variant > 0 ? 3 : 1;
       return true;
     case "hoodoo":
       configureSpireFeature(
@@ -3748,6 +5192,21 @@ function configureLandmarkFeature(
       );
       out.featureExtra = 1;
       return true;
+    case "crystal_reeds":
+      if (waterTopY === NO_WATER && fields.channel < 0.54 && fields.moisture < 0.64) {
+        return false;
+      }
+      configureSpireFeature(
+        out,
+        FEATURE_CRYSTAL,
+        scaledFeatureHeight(15, 16, fields.magic + fields.moisture * 0.25, profile.scale),
+        scaledFeatureRadius(5, 3, fields.channel + fields.magic * 0.2, profile.scale),
+        "#68A",
+        "#CEF",
+        "#DFF",
+      );
+      out.featureExtra = 3;
+      return true;
     case "basalt_spire":
       configureSpireFeature(
         out,
@@ -3757,6 +5216,128 @@ function configureLandmarkFeature(
         "#433",
         "#F74",
       );
+      return true;
+    case "ash_marker":
+      configureSpireFeature(
+        out,
+        FEATURE_BASALT_SPIRE,
+        scaledFeatureHeight(20, 22, fields.volcanism + fields.desolation * 0.2, profile.scale),
+        scaledFeatureRadius(3, 2, fields.volcanism + fields.scatter * 0.2, profile.scale),
+        "#544",
+        "#C86",
+      );
+      out.featureExtra = 3;
+      return true;
+    case "pilgrim_lantern":
+      configureSpireFeature(
+        out,
+        FEATURE_BASALT_SPIRE,
+        scaledFeatureHeight(22, 18, fields.volcanism + fields.magic * 0.25, profile.scale),
+        scaledFeatureRadius(3, 2, fields.scatter + fields.magic * 0.2, profile.scale),
+        "#544",
+        "#DA8",
+        "#FC6",
+      );
+      out.featureExtra = 4;
+      return true;
+    case "bone_chimes":
+      configureSpireFeature(
+        out,
+        FEATURE_BASALT_SPIRE,
+        scaledFeatureHeight(28, 20, fields.desolation + fields.magic * 0.2, profile.scale),
+        scaledFeatureRadius(6, 3, fields.scatter + fields.surfacePatch * 0.2, profile.scale),
+        "#322",
+        "#CBA",
+        "#DA8",
+      );
+      out.featureExtra = 5;
+      return true;
+    case "ashlander_travel_pack":
+      if (submergedSurface) {
+        return false;
+      }
+      configureSpireFeature(
+        out,
+        FEATURE_TRAVEL_PACK,
+        scaledFeatureHeight(12, 8, fields.desolation + fields.surfacePatch * 0.35, profile.scale),
+        scaledFeatureRadius(6, 2, fields.scatter + fields.desolation * 0.22, profile.scale),
+        "#764",
+        "#BA8",
+        "#322",
+      );
+      out.featureExtra = profile.variant;
+      return true;
+    case "paver_debris":
+      if (submergedSurface) {
+        return false;
+      }
+      configureSpireFeature(
+        out,
+        FEATURE_ROAD_DEBRIS,
+        scaledFeatureHeight(3, 4, fields.scatter + fields.surfacePatch * 0.25, profile.scale),
+        scaledFeatureRadius(10, 5, fields.scatter + fields.desolation * 0.2, profile.scale),
+        "#655",
+        "#887",
+        "#433",
+      );
+      out.featureExtra = profile.variant;
+      return true;
+    case "scree_fan":
+      if (submergedSurface) {
+        return false;
+      }
+      configureSpireFeature(
+        out,
+        FEATURE_ROAD_DEBRIS,
+        scaledFeatureHeight(4, 5, fields.scatter + fields.desolation * 0.22, profile.scale),
+        scaledFeatureRadius(12, 6, fields.scatter + fields.uplift * 0.18, profile.scale),
+        "#433",
+        "#765",
+        "#B75",
+      );
+      out.featureExtra = 1;
+      return true;
+    case "shrine_debris":
+      if (submergedSurface) {
+        return false;
+      }
+      configureSpireFeature(
+        out,
+        FEATURE_ROAD_DEBRIS,
+        scaledFeatureHeight(5, 5, fields.magic + fields.surfacePatch * 0.2, profile.scale),
+        scaledFeatureRadius(8, 5, fields.scatter + fields.magic * 0.2, profile.scale),
+        "#544",
+        "#A87",
+        "#DA8",
+      );
+      out.featureExtra = 2;
+      return true;
+    case "buried_ribs":
+      if (submergedSurface) {
+        return false;
+      }
+      configureSpireFeature(
+        out,
+        FEATURE_BURIED_RIBS,
+        scaledFeatureHeight(8, 8, fields.desolation + fields.surfacePatch * 0.25, profile.scale),
+        scaledFeatureRadius(11, 5, fields.scatter + fields.desolation * 0.2, profile.scale),
+        "#665",
+        "#CBA",
+        "#432",
+      );
+      out.featureExtra = profile.variant;
+      return true;
+    case "ash_obelisk":
+      configureSpireFeature(
+        out,
+        FEATURE_MEGASTRUCTURE,
+        scaledFeatureHeight(42, 24, fields.volcanism + fields.uplift * 0.25, profile.scale),
+        scaledFeatureRadius(8, 3, fields.volcanism + fields.surfacePatch * 0.2, profile.scale),
+        "#322",
+        "#F74",
+        "#DA8",
+      );
+      out.featureExtra = 2;
       return true;
     case "crystal_cluster":
       configureSpireFeature(
@@ -3768,6 +5349,121 @@ function configureLandmarkFeature(
         profile.variant >= 2 ? "#EFF" : "#CEF",
       );
       out.featureExtra = 1;
+      return true;
+    case "glass_cairn":
+      configureSpireFeature(
+        out,
+        FEATURE_CRYSTAL,
+        scaledFeatureHeight(8, 12, fields.magic + fields.surfacePatch * 0.2, profile.scale),
+        scaledFeatureRadius(5, 2, fields.magic + fields.surfacePatch * 0.3, profile.scale),
+        "#8AC",
+        "#EFF",
+      );
+      out.featureExtra = 2;
+      return true;
+    case "silt_shell":
+      configureSpireFeature(
+        out,
+        FEATURE_HOODOO,
+        scaledFeatureHeight(10, 10, fields.desolation + fields.surfacePatch * 0.3, profile.scale),
+        scaledFeatureRadius(8, 4, fields.scatter + fields.desolation * 0.2, profile.scale),
+        "#876",
+        "#CBA",
+      );
+      out.featureExtra = 2;
+      return true;
+    case "rib_arch":
+      configureSpireFeature(
+        out,
+        FEATURE_RIB_ARCH,
+        scaledFeatureHeight(20, 16, fields.desolation + fields.surfacePatch * 0.25, profile.scale),
+        scaledFeatureRadius(12, 5, fields.scatter + fields.desolation * 0.2, profile.scale),
+        "#665",
+        "#CBA",
+        "#432",
+      );
+      out.featureExtra = 1;
+      return true;
+    case "rib_remains":
+      configureSpireFeature(
+        out,
+        FEATURE_RIB_ARCH,
+        scaledFeatureHeight(12, 10, fields.channel + fields.surfacePatch * 0.2, profile.scale),
+        scaledFeatureRadius(9, 4, fields.scatter + fields.moisture * 0.2, profile.scale),
+        "#776",
+        "#CBA",
+        "#544",
+      );
+      out.featureExtra = 2;
+      return true;
+    case "velothi_shrine":
+      configureSpireFeature(
+        out,
+        FEATURE_STANDING_STONE,
+        scaledFeatureHeight(18, 14, fields.uplift + fields.magic * 0.25, profile.scale),
+        scaledFeatureRadius(4, 2, fields.surfacePatch + fields.magic * 0.2, profile.scale),
+        "#665",
+        "#DA8",
+      );
+      out.featureExtra = 2;
+      return true;
+    case "velothi_ziggurat":
+      configureSpireFeature(
+        out,
+        FEATURE_MEGASTRUCTURE,
+        scaledFeatureHeight(46, 32, fields.uplift + fields.magic * 0.25, profile.scale),
+        scaledFeatureRadius(14, 5, fields.surfacePatch + fields.scatter * 0.2, profile.scale),
+        "#433",
+        "#DA8",
+        "#C86",
+      );
+      out.featureExtra = 1;
+      return true;
+    case "kwama_mound":
+      configureSpireFeature(
+        out,
+        FEATURE_BOULDER,
+        scaledFeatureHeight(6, 8, fields.desolation + fields.surfacePatch * 0.3, profile.scale),
+        scaledFeatureRadius(7, 3, fields.scatter + fields.surfacePatch * 0.3, profile.scale),
+        "#765",
+        "#DB8",
+      );
+      out.featureExtra = 2;
+      return true;
+    case "pilgrim_cairn":
+      configureSpireFeature(
+        out,
+        FEATURE_STANDING_STONE,
+        scaledFeatureHeight(12, 10, fields.uplift + fields.magic * 0.2, profile.scale),
+        scaledFeatureRadius(5, 2, fields.scatter + fields.surfacePatch * 0.2, profile.scale),
+        "#776",
+        "#EDB",
+      );
+      out.featureExtra = 1;
+      return true;
+    case "old_road_causeway":
+      configureSpireFeature(
+        out,
+        FEATURE_CAUSEWAY,
+        scaledFeatureHeight(3, 3, fields.surfacePatch + fields.scatter * 0.2, profile.scale),
+        scaledFeatureRadius(12, 5, fields.scatter + fields.uplift * 0.15, profile.scale),
+        "#766",
+        "#BA8",
+        "#DA8",
+      );
+      out.featureExtra = profile.variant;
+      return true;
+    case "fungal_bridge":
+      configureSpireFeature(
+        out,
+        FEATURE_CAUSEWAY,
+        scaledFeatureHeight(7, 4, fields.magic + fields.moisture * 0.25, profile.scale),
+        scaledFeatureRadius(14, 6, fields.channel + fields.grove * 0.25, profile.scale),
+        "#465",
+        "#8CF",
+        "#6A8",
+      );
+      out.featureExtra = 3;
       return true;
     case "glowcap":
       if (submergedSurface) {
@@ -3851,6 +5547,7 @@ function configureSpireFeature(
   radius: number,
   materialPrimary: string,
   materialSecondary: string,
+  materialAccent?: string,
 ): void {
   out.featureKind = featureKind;
   out.featureHeight = height;
@@ -3858,7 +5555,7 @@ function configureSpireFeature(
   out.featureExtra = 1;
   out.featureMaterialPrimary = hexColorToMaterial(materialPrimary);
   out.featureMaterialSecondary = hexColorToMaterial(materialSecondary);
-  out.featureMaterialAccent = 0;
+  out.featureMaterialAccent = materialAccent ? hexColorToMaterial(materialAccent) : 0;
 }
 
 function scaledFeatureHeight(base: number, jitterRange: number, signal: number, scale: number): number {
@@ -3929,7 +5626,7 @@ function sampleMaterialFromScratch(
     ) {
       return 0;
     }
-    return resolveTransitionMaterial(
+    return resolveSurfaceTransitionMaterial(
       scratch.surfacePrimary[columnIndex]!,
       scratch.surfaceSecondary[columnIndex]!,
       scratch.transitionThreshold[columnIndex]!,
@@ -4137,12 +5834,476 @@ function sampleFeatureMaterial(
       return materialSecondary;
     }
     case FEATURE_BOULDER: {
+      if (featureExtra >= 2) {
+        const moundHeight = Math.max(3, Math.round(featureHeight * 0.76));
+        if (relativeY > moundHeight) {
+          return 0;
+        }
+        const yProgress = relativeY / Math.max(1, moundHeight);
+        const layerWidthX = Math.max(1.6, featureRadius * (1.18 - yProgress * 0.58));
+        const layerWidthZ = Math.max(1.2, featureRadius * (0.78 - yProgress * 0.38));
+        const oval = Math.hypot(featureDeltaX / layerWidthX, featureDeltaZ / layerWidthZ);
+        if (oval > 1) {
+          return 0;
+        }
+        const eggY = Math.max(1, Math.round(featureHeight * 0.36));
+        const leftEgg = Math.hypot((featureDeltaX + featureRadius * 0.32) / 1.7, (featureDeltaZ - featureRadius * 0.18) / 1.25);
+        const rightEgg = Math.hypot((featureDeltaX - featureRadius * 0.36) / 1.55, (featureDeltaZ + featureRadius * 0.14) / 1.2);
+        const centerEgg = Math.hypot(featureDeltaX / 1.45, (featureDeltaZ + featureRadius * 0.34) / 1.15);
+        if (Math.abs(relativeY - eggY) <= 1 && (leftEgg <= 1 || rightEgg <= 1 || centerEgg <= 1)) {
+          return materialSecondary;
+        }
+        if (relativeY >= moundHeight - 1 && oval <= 0.62) {
+          return materialSecondary;
+        }
+        return materialPrimary;
+      }
       const bodyRadius = Math.max(1.1, featureRadius - Math.abs(relativeY - featureHeight * 0.45) * 0.55);
       const topCapRadius = Math.min(bodyRadius, Math.max(0.9, featureRadius * 0.58));
       if (relativeY === featureHeight && radial <= topCapRadius) {
         return materialSecondary;
       }
       return radial <= bodyRadius ? materialPrimary : 0;
+    }
+    case FEATURE_MEGASTRUCTURE: {
+      if (featureExtra >= 2) {
+        const plinthHeight = Math.max(4, Math.round(featureHeight * 0.13));
+        if (relativeY <= plinthHeight) {
+          const plinthRadius = featureRadius + 1.8 - relativeY * 0.38;
+          if (radial > Math.max(2.2, plinthRadius)) {
+            return 0;
+          }
+          const plinthCourse = relativeY % 2 === 0 || Math.abs(absX - absZ) <= 0.65;
+          return plinthCourse ? materialSecondary : materialPrimary;
+        }
+        const towerY = relativeY - plinthHeight;
+        const towerProgress = towerY / Math.max(1, featureHeight - plinthHeight);
+        const towerRadius = Math.max(1.0, featureRadius * (0.42 - towerProgress * 0.28));
+        if (radial > towerRadius) {
+          return 0;
+        }
+        const glyphBand = towerY % 7 === 0 && absX <= towerRadius && absZ <= 0.84;
+        const verticalInlay = materialAccent !== 0
+          && towerY > 4
+          && towerY < featureHeight - plinthHeight - 3
+          && (
+            (absX <= 0.72 && featureDeltaZ < 0)
+            || (absZ <= 0.72 && featureDeltaX > 0)
+          )
+          && towerY % 3 !== 1;
+        const crown = relativeY >= featureHeight - 3;
+        const narrowWindow = !crown
+          && !glyphBand
+          && !verticalInlay
+          && towerY > 7
+          && towerY < featureHeight - plinthHeight - 7
+          && (
+            (absX <= 0.52 && absZ > 1.05 && absZ < towerRadius - 0.25)
+            || (absZ <= 0.52 && featureDeltaX < 0 && absX > 1.05 && absX < towerRadius - 0.25)
+          )
+          && towerY % 11 >= 2
+          && towerY % 11 <= 6;
+        if (narrowWindow) {
+          return 0;
+        }
+        return verticalInlay ? materialAccent : glyphBand || crown ? materialSecondary : materialPrimary;
+      }
+
+      const baseHeight = Math.max(10, Math.round(featureHeight * 0.36));
+      if (relativeY <= baseHeight) {
+        const stepHeight = Math.max(2, Math.round(baseHeight / 5));
+        const step = Math.min(5, Math.floor(relativeY / stepHeight));
+        const tierHalfX = Math.max(3.2, featureRadius + 3.4 - step * 2.15);
+        const tierHalfZ = Math.max(2.4, featureRadius * 0.72 + 2.4 - step * 1.45);
+        const chamfer = Math.max(2.4, 4.6 - step * 0.45);
+        if (absX > tierHalfX || absZ > tierHalfZ || absX + absZ > tierHalfX + tierHalfZ - chamfer) {
+          return 0;
+        }
+        const edgeCourse = Math.abs(absX - tierHalfX) <= 0.65 || Math.abs(absZ - tierHalfZ) <= 0.65;
+        const stairCut = featureDeltaZ < 0 && absX <= Math.max(1.1, 1.8 + step * 0.35) && relativeY > stepHeight;
+        const cornerBreak = step >= 1
+          && relativeY > 1
+          && absX > tierHalfX - 2.2
+          && absZ > tierHalfZ - 1.8
+          && (
+            (featureDeltaX > 0 && featureDeltaZ > 0 && step % 2 === 0)
+            || (featureDeltaX < 0 && featureDeltaZ < 0 && step % 3 !== 1)
+          );
+        const innerVoid = step >= 2
+          && relativeY > stepHeight * 1.5
+          && relativeY < baseHeight - 2
+          && absX < tierHalfX - 2.6
+          && absZ < tierHalfZ - 1.8
+          && (
+            featureDeltaZ > Math.max(0.2, tierHalfZ * 0.06)
+            || (absX > 1.8 && absZ < tierHalfZ * 0.48 && step >= 3)
+          );
+        const forecourtVoid = step >= 1
+          && relativeY > stepHeight
+          && featureDeltaZ < -Math.max(1.6, tierHalfZ * 0.16)
+          && absX < Math.max(2.4, tierHalfX * 0.32)
+          && relativeY < baseHeight - 1;
+        const sideButtress = step >= 1
+          && relativeY <= baseHeight - 1
+          && absZ <= Math.max(1.4, tierHalfZ * 0.36)
+          && (
+            Math.abs(absX - Math.max(2.8, tierHalfX - 2.4)) <= 1.05
+            || (step >= 3 && Math.abs(absX - Math.max(2.2, tierHalfX - 4.8)) <= 0.85)
+          );
+        if (stairCut) {
+          return 0;
+        }
+        if (!sideButtress && (cornerBreak || innerVoid || forecourtVoid)) {
+          return 0;
+        }
+        const warmInlay = materialAccent !== 0
+          && !edgeCourse
+          && step >= 2
+          && relativeY % stepHeight === Math.max(1, Math.floor(stepHeight / 2))
+          && (
+            Math.abs(absX - Math.max(2.4, tierHalfX - 4.2)) <= 0.55
+            || Math.abs(absZ - Math.max(1.8, tierHalfZ - 3.2)) <= 0.55
+          )
+          && (Math.floor(absX + absZ + relativeY) % 3 !== 0);
+        return warmInlay ? materialAccent : edgeCourse || relativeY % stepHeight === 0 ? materialSecondary : materialPrimary;
+      }
+
+      const towerY = relativeY - baseHeight;
+      const towerHalfX = Math.max(1.9, featureRadius * 0.34 - towerY * 0.030);
+      const towerHalfZ = Math.max(1.4, featureRadius * 0.24 - towerY * 0.024);
+      if (absX <= towerHalfX && absZ <= towerHalfZ) {
+        const slit = absX <= 0.55 && featureDeltaZ < 0 && towerY > 4 && towerY < Math.max(7, featureHeight * 0.18);
+        if (slit) {
+          return 0;
+        }
+        const crown = relativeY >= featureHeight - 4;
+        const glyphBand = towerY % 8 === 0 && (absX <= 0.75 || absZ <= 0.75);
+        const sideWindow = materialAccent !== 0
+          && !crown
+          && !glyphBand
+          && towerY > 10
+          && towerY < featureHeight - baseHeight - 8
+          && towerY % 13 >= 4
+          && towerY % 13 <= 7
+          && (
+            (absX <= 0.55 && absZ > 0.72 && absZ < towerHalfZ - 0.2)
+            || (absZ <= 0.55 && featureDeltaX > 0 && absX > 0.72 && absX < towerHalfX - 0.2)
+          );
+        if (sideWindow) {
+          return 0;
+        }
+        const warmGlyph = materialAccent !== 0 && glyphBand && towerY % 16 === 0;
+        return warmGlyph ? materialAccent : crown || glyphBand ? materialSecondary : materialPrimary;
+      }
+      return 0;
+    }
+    case FEATURE_RIB_ARCH: {
+      const pillarOffset = Math.max(4.2, featureRadius * 0.72);
+      const archBaseY = Math.max(5, Math.round(featureHeight * 0.54));
+      const archRise = Math.max(4, featureHeight - archBaseY);
+      const ribPlanes = featureExtra >= 2 ? [-5, -2, 1, 4] : [-4, -1, 2, 5];
+      const ribPlaneDistance = Math.min(...ribPlanes.map((ribZ) => Math.abs(featureDeltaZ - ribZ)));
+      const ribThickness = featureExtra >= 2 ? 1.45 : 1.25;
+      const leftPillar = Math.abs(featureDeltaX + pillarOffset) <= 1.35 && ribPlaneDistance <= ribThickness && relativeY <= archBaseY + 1;
+      const rightPillar = Math.abs(featureDeltaX - pillarOffset) <= 1.35 && ribPlaneDistance <= ribThickness && relativeY <= archBaseY + 1;
+      if (leftPillar || rightPillar) {
+        return materialPrimary;
+      }
+      const normalizedX = Math.min(1, absX / Math.max(1, pillarOffset));
+      const archY = archBaseY + Math.round((1 - normalizedX * normalizedX) * archRise);
+      const onArch = absX <= pillarOffset + 1.85 && ribPlaneDistance <= ribThickness && Math.abs(relativeY - archY) <= 1;
+      if (onArch) {
+        const chippedEdge = materialAccent !== 0 && ribPlaneDistance <= 0.48 && (Math.round(absX) + relativeY) % 5 === 0;
+        return chippedEdge ? materialAccent : materialSecondary;
+      }
+      const spine = featureExtra >= 2
+        && absX <= 1.25
+        && absZ <= Math.max(5.8, featureRadius * 0.58)
+        && relativeY <= Math.max(3, Math.round(archBaseY * 0.52));
+      const brokenRib = ribPlaneDistance <= 0.8
+        && relativeY <= archBaseY
+        && absX < pillarOffset - 2.2
+        && (Math.round(absX) + relativeY + Math.round(absZ)) % 7 === 0;
+      if (spine && materialAccent !== 0 && (Math.round(featureDeltaZ) + relativeY) % 4 === 0) {
+        return materialAccent;
+      }
+      if (brokenRib && materialAccent !== 0 && (Math.round(absX) + relativeY) % 4 === 0) {
+        return materialAccent;
+      }
+      return brokenRib || spine ? materialPrimary : 0;
+    }
+    case FEATURE_CAUSEWAY: {
+      if (featureExtra >= 3) {
+        const capBaseY = Math.max(2, Math.round(featureHeight * 0.36));
+        const capTopY = Math.min(featureHeight, capBaseY + 3);
+        const halfLength = featureRadius + 1.8;
+        const halfWidth = Math.max(4.2, featureRadius * 0.40);
+        const capProfile = Math.hypot(featureDeltaX / halfLength, featureDeltaZ / halfWidth);
+        const centerStalk = radial <= Math.max(1.05, featureRadius * 0.10)
+          && relativeY <= capBaseY + 1;
+        const buttress = relativeY <= capBaseY
+          && absX <= Math.max(1.6, featureRadius * 0.16 + relativeY * 0.16)
+          && absZ <= Math.max(1.2, featureRadius * 0.11 + relativeY * 0.12);
+        if (centerStalk || buttress) {
+          return materialPrimary;
+        }
+        if (relativeY < capBaseY || relativeY > capTopY || capProfile > 1) {
+          return 0;
+        }
+        const rim = capProfile > 0.74 || Math.abs(absZ - halfWidth * 0.42) <= 0.62;
+        const gill = relativeY === capBaseY && Math.floor((featureDeltaX + featureRadius) / 3) % 2 === 0;
+        const capSpot = materialAccent !== 0
+          && relativeY >= capTopY - 1
+          && Math.abs((featureDeltaX * 5 + featureDeltaZ * 7 + relativeY * 3) % 11) <= 1;
+        return capSpot ? materialAccent : rim || gill ? materialSecondary : materialPrimary;
+      }
+      const slabHeight = Math.max(1, Math.min(featureHeight, 4));
+      if (relativeY > slabHeight) {
+        return 0;
+      }
+      const longAxis = absX <= featureRadius + 1.5 && absZ <= 2.4;
+      const crossAxis = absZ <= Math.max(4.0, featureRadius * 0.42) && absX <= 2.0;
+      const oldRoadShoulder = relativeY <= Math.max(1, slabHeight - 1)
+        && absX <= featureRadius * 0.78
+        && absZ > 3.0
+        && absZ <= Math.max(5.2, featureRadius * 0.44)
+        && (Math.floor((featureDeltaX + featureRadius) / 4) + Math.floor(absZ)) % 3 !== 1;
+      const oldRoadApproach = relativeY <= Math.max(1, slabHeight - 2)
+        && absX <= Math.max(3.2, featureRadius * 0.34)
+        && absZ <= featureRadius * 0.72
+        && absZ > Math.max(4.0, featureRadius * 0.42)
+        && Math.floor((featureDeltaZ + featureRadius) / 5) % 2 === 0;
+      const intervalX = Math.round(featureDeltaX + featureRadius * 3);
+      const routeEdgePost = materialAccent !== 0
+        && featureExtra <= 2
+        && relativeY <= slabHeight + 4
+        && (Math.abs(absZ - 3.15) <= 0.55 || Math.abs(absX - 2.65) <= 0.55)
+        && (intervalX % 9 === 0 || Math.round(featureDeltaZ + featureRadius * 3) % 11 === 0);
+      if (routeEdgePost) {
+        return relativeY >= slabHeight + 2 ? materialAccent : materialSecondary;
+      }
+      if (!longAxis && !crossAxis && !oldRoadShoulder && !oldRoadApproach) {
+        return 0;
+      }
+      const edge = absZ > 1.6 || absX > featureRadius - 1 || (crossAxis && absX > 1.2) || oldRoadShoulder || oldRoadApproach;
+      const brokenJoint = (Math.floor(featureDeltaX / 3) + Math.floor(featureDeltaZ / 3)) % 3 === 0;
+      const warmInlay = materialAccent !== 0
+        && relativeY === slabHeight
+        && !edge
+        && (Math.floor((featureDeltaX + featureRadius) / 5) + Math.floor((featureDeltaZ + featureRadius) / 4)) % 5 === 0;
+      if (warmInlay) {
+        return materialAccent;
+      }
+      return edge || (relativeY === slabHeight && brokenJoint) ? materialSecondary : materialPrimary;
+    }
+    case FEATURE_ROAD_DEBRIS: {
+      const slabHeight = Math.max(1, Math.min(featureHeight, 5));
+      if (relativeY > slabHeight || radial > featureRadius + 1.5) {
+        return 0;
+      }
+      if (featureExtra === 1) {
+        const forward = featureDeltaZ + featureRadius * 0.66;
+        const fanWidth = Math.max(2.4, 2.2 + Math.max(0, forward) * 0.64);
+        const inFan = forward >= 0
+          && featureDeltaZ <= featureRadius * 0.82
+          && absX <= fanWidth
+          && absX + Math.max(0, -featureDeltaZ * 0.18) <= featureRadius * 0.94;
+        const spur = Math.abs(featureDeltaZ + featureDeltaX * 0.36) <= 1.05
+          && absX <= featureRadius * 0.76
+          && featureDeltaZ > -featureRadius * 0.52;
+        if (!inFan && !spur) {
+          return 0;
+        }
+        const localNoise = hashNoise3D(
+          Math.floor(featureDeltaX * 0.45),
+          relativeY + 11,
+          Math.floor(featureDeltaZ * 0.45),
+          1231 + featureRadius * 13,
+        );
+        const top = Math.max(1, Math.min(slabHeight, 1 + Math.floor(localNoise * (slabHeight + 1))));
+        if (relativeY > top) {
+          return 0;
+        }
+        const gap = localNoise < 0.16 && relativeY >= top - 1;
+        if (gap) {
+          return 0;
+        }
+        const brightChip = materialAccent !== 0 && relativeY === top && localNoise > 0.78;
+        return brightChip ? materialAccent : relativeY === top || spur ? materialSecondary : materialPrimary;
+      }
+      if (featureExtra === 2) {
+        const plinthHeight = Math.max(3, Math.min(slabHeight, 4));
+        const plinth = absX <= featureRadius * 0.92
+          && absZ <= Math.max(4.0, featureRadius * 0.66)
+          && absX + absZ <= featureRadius * 1.28
+          && relativeY <= plinthHeight;
+        const frontStep = featureDeltaZ < -featureRadius * 0.24
+          && absX <= featureRadius * 0.70
+          && absZ <= featureRadius * 0.88
+          && relativeY <= 2;
+        const leftShard = Math.abs(featureDeltaX + featureRadius * 0.42) <= 1.1
+          && Math.abs(featureDeltaZ - featureRadius * 0.12) <= 1.0
+          && relativeY <= slabHeight
+          && relativeY >= Math.max(1, Math.floor(absZ * 0.25));
+        const rightShard = Math.abs(featureDeltaX - featureRadius * 0.32) <= 1.0
+          && Math.abs(featureDeltaZ + featureRadius * 0.20) <= 1.35
+          && relativeY <= Math.max(2, slabHeight - 1);
+        const rearShard = Math.abs(featureDeltaZ - featureRadius * 0.36) <= 1.1
+          && absX <= 1.4
+          && relativeY <= Math.max(3, slabHeight - 1);
+        if (!plinth && !frontStep && !leftShard && !rightShard && !rearShard) {
+          return 0;
+        }
+        const brokenCorner = plinth
+          && relativeY === plinthHeight
+          && absX > featureRadius * 0.62
+          && absZ > featureRadius * 0.42
+          && (Math.floor(absX + absZ) + featureExtra) % 2 === 0;
+        if (brokenCorner) {
+          return 0;
+        }
+        const inlay = materialAccent !== 0
+          && relativeY >= plinthHeight - 1
+          && (absX <= 0.9 || absZ <= 0.9 || leftShard || rearShard)
+          && (Math.floor(absX + absZ) % 3 !== 1);
+        return inlay ? materialAccent : leftShard || rightShard || rearShard || relativeY >= plinthHeight - 1 ? materialSecondary : materialPrimary;
+      }
+      const islandA = Math.hypot(
+        (featureDeltaX + featureRadius * 0.34) / Math.max(2.6, featureRadius * 0.46),
+        (featureDeltaZ - featureRadius * 0.12) / Math.max(1.9, featureRadius * 0.22),
+      );
+      const islandB = Math.hypot(
+        (featureDeltaX - featureRadius * 0.28) / Math.max(2.4, featureRadius * 0.40),
+        (featureDeltaZ + featureRadius * 0.28) / Math.max(1.8, featureRadius * 0.24),
+      );
+      const islandC = Math.hypot(
+        (featureDeltaX + featureRadius * 0.04) / Math.max(2.0, featureRadius * 0.28),
+        (featureDeltaZ + featureRadius * 0.58) / Math.max(1.6, featureRadius * 0.18),
+      );
+      const ribLineA = Math.abs(featureDeltaZ - featureDeltaX * 0.38) <= 1.15
+        && featureDeltaX > -featureRadius * 0.70
+        && featureDeltaX < featureRadius * 0.58;
+      const ribLineB = featureExtra >= 2
+        && Math.abs(featureDeltaZ + featureDeltaX * 0.52 - featureRadius * 0.18) <= 0.90
+        && featureDeltaX > -featureRadius * 0.50
+        && featureDeltaX < featureRadius * 0.74;
+      const inIsland = islandA <= 1 || islandB <= 1 || islandC <= 1 || ribLineA || ribLineB;
+      if (!inIsland) {
+        return 0;
+      }
+      const localNoise = hashNoise3D(
+        Math.floor(featureDeltaX * 0.5),
+        featureExtra + relativeY,
+        Math.floor(featureDeltaZ * 0.5),
+        971 + featureRadius * 17,
+      );
+      const top = Math.max(1, Math.min(slabHeight, 1 + Math.floor(localNoise * (slabHeight + 1))));
+      if (relativeY > top) {
+        return 0;
+      }
+      const paverJoint = (Math.floor((featureDeltaX + featureRadius) / 3) + Math.floor((featureDeltaZ + featureRadius) / 4)) % 4 === 0;
+      const chip = localNoise < 0.18 && relativeY >= top - 1;
+      if (chip || (paverJoint && relativeY === top)) {
+        return 0;
+      }
+      if (materialAccent !== 0 && (ribLineA || ribLineB || (relativeY === top && localNoise > 0.76))) {
+        return materialAccent;
+      }
+      return relativeY === top || paverJoint ? materialSecondary : materialPrimary;
+    }
+    case FEATURE_TRAVEL_PACK: {
+      const bodyHeight = Math.max(4, Math.round(featureHeight * 0.46));
+      const bedrollY = Math.max(bodyHeight + 2, Math.round(featureHeight * 0.66));
+      const frameTopY = Math.max(bedrollY + 2, featureHeight - 1);
+      const bodyProgress = relativeY / Math.max(1, bodyHeight);
+      const bodyHalfX = Math.max(2.6, featureRadius * (0.98 - bodyProgress * 0.24));
+      const bodyHalfZ = Math.max(1.9, featureRadius * (0.58 - bodyProgress * 0.18));
+      const bodyOval = Math.hypot(featureDeltaX / bodyHalfX, (featureDeltaZ + featureRadius * 0.05) / bodyHalfZ);
+
+      if (relativeY <= bodyHeight && bodyOval <= 1) {
+        const bottomMat = relativeY <= 1 || bodyOval > 0.76;
+        const strap = materialAccent !== 0
+          && (
+            Math.abs(featureDeltaX) <= 0.55
+            || Math.abs(featureDeltaX - featureRadius * 0.42) <= 0.48
+            || (Math.abs(featureDeltaZ) <= 0.48 && relativeY >= 2)
+          );
+        return strap ? materialAccent : bottomMat ? materialPrimary : materialSecondary;
+      }
+
+      const frameOffsetX = Math.max(3.2, featureRadius * 0.66);
+      const frameZ = Math.max(1.4, featureRadius * 0.36);
+      const leftFrame = Math.abs(featureDeltaX + frameOffsetX) <= 0.58
+        && Math.abs(featureDeltaZ - frameZ) <= 0.58
+        && relativeY <= frameTopY;
+      const rightFrame = Math.abs(featureDeltaX - frameOffsetX) <= 0.58
+        && Math.abs(featureDeltaZ - frameZ) <= 0.58
+        && relativeY <= frameTopY;
+      const topFrame = Math.abs(relativeY - frameTopY) <= 0
+        && absX <= frameOffsetX + 0.8
+        && Math.abs(featureDeltaZ - frameZ) <= 0.58;
+      if (leftFrame || rightFrame || topFrame) {
+        return materialAccent || materialPrimary;
+      }
+
+      const bedrollTube = absX <= featureRadius + 1.2
+        && Math.hypot((featureDeltaZ + featureRadius * 0.18) / 1.75, (relativeY - bedrollY) / 2.15) <= 1;
+      if (bedrollTube) {
+        const rolledEnd = absX > featureRadius - 0.8;
+        const lash = materialAccent !== 0
+          && (Math.abs(featureDeltaX) <= 0.48 || Math.abs(absX - featureRadius * 0.52) <= 0.48);
+        return lash ? materialAccent : rolledEnd ? materialPrimary : materialSecondary;
+      }
+
+      const potX = featureRadius * 0.78;
+      const potY = Math.max(3, Math.round(bodyHeight * 0.64));
+      const sidePot = Math.hypot((featureDeltaX - potX) / 1.45, (featureDeltaZ + 1.2) / 1.15) <= 1
+        && Math.abs(relativeY - potY) <= 2;
+      if (sidePot) {
+        const rim = Math.abs(relativeY - potY) === 2 || Math.abs(featureDeltaX - potX) > 1.05;
+        return rim ? materialAccent || materialPrimary : materialSecondary;
+      }
+
+      const bedrollCord = materialAccent !== 0
+        && relativeY > bodyHeight
+        && relativeY < bedrollY
+        && absZ <= 0.55
+        && (Math.abs(featureDeltaX + featureRadius * 0.36) <= 0.48 || Math.abs(featureDeltaX - featureRadius * 0.28) <= 0.48);
+      return bedrollCord ? materialAccent : 0;
+    }
+    case FEATURE_BURIED_RIBS: {
+      const lowHeight = Math.max(4, Math.min(featureHeight, 14));
+      if (relativeY > lowHeight) {
+        return 0;
+      }
+      const ribPlanes = [-0.48, -0.24, 0.02, 0.28, 0.52].map((fraction) => fraction * featureRadius);
+      const ribPlaneDistance = Math.min(...ribPlanes.map((ribZ) => Math.abs(featureDeltaZ - ribZ)));
+      const span = Math.max(5.2, featureRadius * 0.88);
+      const normalizedX = Math.min(1, absX / span);
+      const archY = 1 + Math.round((1 - normalizedX * normalizedX) * lowHeight * 0.82);
+      const brokenGap = hashNoise3D(
+        Math.floor((featureDeltaX + 32) * 0.25),
+        Math.floor(relativeY * 0.5),
+        Math.floor((featureDeltaZ + 32) * 0.25),
+        1559 + featureExtra,
+      ) < 0.10;
+      const onRib = absX <= span
+        && ribPlaneDistance <= 0.95
+        && Math.abs(relativeY - archY) <= 1
+        && !brokenGap;
+      if (onRib) {
+        const darkCrack = materialAccent !== 0 && ribPlaneDistance <= 0.32 && (Math.round(absX) + relativeY) % 4 === 0;
+        return darkCrack ? materialAccent : materialSecondary;
+      }
+      const buriedSpine = absX <= 1.25
+        && absZ <= featureRadius * 0.62
+        && relativeY <= Math.max(2, Math.round(lowHeight * 0.28));
+      const knuckle = radial <= Math.max(1.3, featureRadius * 0.16)
+        && relativeY <= Math.max(3, Math.round(lowHeight * 0.34));
+      if (buriedSpine || knuckle) {
+        return materialPrimary;
+      }
+      return 0;
     }
     case FEATURE_BUSH:
       if (relativeY === 0 && absX <= 0.55 && absZ <= 0.55) {
@@ -4156,6 +6317,26 @@ function sampleFeatureMaterial(
       }
       return materialSecondary;
     case FEATURE_STANDING_STONE:
+      if (featureExtra >= 2) {
+        const baseHeight = Math.min(4, Math.max(2, Math.round(featureHeight * 0.16)));
+        if (relativeY <= baseHeight) {
+          const baseRadius = featureRadius + 1.25 - relativeY * 0.28;
+          return radial <= Math.max(1.4, baseRadius) ? materialPrimary : 0;
+        }
+        const roofBaseY = Math.max(baseHeight + 3, featureHeight - 5);
+        if (relativeY >= roofBaseY) {
+          const roofStep = relativeY - roofBaseY;
+          const roofHalfX = Math.max(2.6, featureRadius + 2.25 - roofStep * 0.65);
+          const roofHalfZ = Math.max(1.1, featureRadius * 0.48 - roofStep * 0.20);
+          return absX <= roofHalfX && absZ <= roofHalfZ ? materialSecondary : 0;
+        }
+        const doorwayHeight = Math.min(6, Math.max(3, Math.round(featureHeight * 0.26)));
+        if (relativeY <= baseHeight + doorwayHeight && absX <= 0.65 && featureDeltaZ < 0) {
+          return 0;
+        }
+        const columnRadius = Math.max(1.0, featureRadius * 0.48 - (relativeY - baseHeight) * 0.025);
+        return radial <= columnRadius ? materialPrimary : 0;
+      }
       return radial <= Math.max(1.1, featureRadius - relativeY * 0.2) ? materialPrimary : 0;
     case FEATURE_PALM: {
       const trunkHeight = Math.max(4, featureHeight - Math.max(4, Math.round(featureHeight * 0.20)));
@@ -4241,11 +6422,191 @@ function sampleFeatureMaterial(
         ? materialSecondary
         : 0;
     case FEATURE_BASALT_SPIRE:
+      if (featureExtra >= 5) {
+        const baseHeight = Math.min(4, Math.max(2, Math.round(featureHeight * 0.11)));
+        if (relativeY <= baseHeight) {
+          const baseRadius = featureRadius + 1.9 - relativeY * 0.35;
+          const lip = relativeY === baseHeight || radial > baseRadius - 0.85;
+          return radial <= Math.max(1.7, baseRadius) ? (lip ? materialSecondary : materialPrimary) : 0;
+        }
+
+        const crossbarY = Math.max(baseHeight + 10, featureHeight - 8);
+        const shoulderY = Math.max(baseHeight + 5, crossbarY - 6);
+        const supportOffset = Math.max(3.6, featureRadius * 0.72);
+        const postHeight = Math.min(featureHeight, crossbarY + 2);
+        const leftPost = Math.abs(featureDeltaX + supportOffset) <= 0.95 && absZ <= 0.85 && relativeY <= postHeight;
+        const rightPost = Math.abs(featureDeltaX - supportOffset) <= 0.95 && absZ <= 0.85 && relativeY <= postHeight;
+        const centerPost = absX <= 0.72 && absZ <= 0.72 && relativeY <= crossbarY + 3;
+        if (leftPost || rightPost || centerPost) {
+          const banded = (relativeY - baseHeight) % 6 === 0;
+          return banded ? materialSecondary : materialPrimary;
+        }
+
+        const crossbarHalf = featureRadius + 3.8;
+        const topCrossbar = Math.abs(relativeY - crossbarY) <= 1 && absX <= crossbarHalf && absZ <= 0.85;
+        const lowerCrossbar = relativeY === shoulderY && absX <= crossbarHalf * 0.82 && absZ <= 0.65;
+        if (topCrossbar || lowerCrossbar) {
+          return materialSecondary;
+        }
+
+        const hangerOffsets = [-5.2, -2.8, -0.8, 1.7, 4.5] as const;
+        for (const offsetX of hangerOffsets) {
+          const localX = featureDeltaX - offsetX;
+          const localAbsX = Math.abs(localX);
+          const hangerTop = crossbarY - 1;
+          const hangerBottom = Math.max(baseHeight + 3, crossbarY - 10 - Math.round(Math.abs(offsetX) * 0.35));
+          const nearString = localAbsX <= 0.42 && absZ <= 0.42;
+          if (nearString && relativeY >= hangerBottom && relativeY <= hangerTop) {
+            const bead = materialAccent !== 0 && relativeY % 4 === 0;
+            return bead ? materialAccent : materialSecondary;
+          }
+          const boneY = hangerBottom + Math.round(Math.abs(offsetX) % 3);
+          const boneBlade = Math.abs(relativeY - boneY) <= 2 && localAbsX <= 0.82 && absZ <= 0.58;
+          if (boneBlade) {
+            const edge = localAbsX > 0.55 || Math.abs(relativeY - boneY) === 2;
+            return edge && materialAccent !== 0 ? materialAccent : materialSecondary;
+          }
+        }
+
+        const windTornCord = Math.abs(absX - absZ) <= 0.45
+          && absX <= featureRadius * 0.72
+          && relativeY >= shoulderY - 3
+          && relativeY <= crossbarY - 1
+          && (Math.round(absX + relativeY) % 4 === 0);
+        return windTornCord ? materialSecondary : 0;
+      }
+      if (featureExtra >= 4) {
+        const baseHeight = Math.min(4, Math.max(2, Math.round(featureHeight * 0.12)));
+        if (relativeY <= baseHeight) {
+          const baseRadius = featureRadius + 1.7 - relativeY * 0.32;
+          const ashLip = relativeY === baseHeight || radial > baseRadius - 0.75;
+          return radial <= Math.max(1.5, baseRadius) ? (ashLip ? materialSecondary : materialPrimary) : 0;
+        }
+
+        const crossbarY = Math.max(baseHeight + 7, featureHeight - 7);
+        const postTopY = Math.min(featureHeight, crossbarY + 2);
+        const pole = relativeY <= postTopY && absX <= 1.05 && absZ <= 1.05;
+        if (pole) {
+          const metalBand = (relativeY - baseHeight) % 5 === 0;
+          return metalBand ? materialSecondary : materialPrimary;
+        }
+
+        const crossbarHalf = featureRadius + 3.2;
+        if (relativeY === crossbarY && absX <= crossbarHalf && absZ <= 1.05) {
+          return materialSecondary;
+        }
+        if (
+          relativeY >= crossbarY - 3
+          && relativeY < crossbarY
+          && absZ <= 0.85
+          && Math.abs(absX - Math.max(1.6, featureRadius + 1.4)) <= 0.58
+        ) {
+          return materialSecondary;
+        }
+
+        const lanternX = featureRadius + 1.6;
+        const lanternY = crossbarY - 5;
+        const localX = featureDeltaX - lanternX;
+        const localAbsX = Math.abs(localX);
+        const localAbsZ = absZ;
+        if (Math.abs(relativeY - (crossbarY - 2)) <= 1 && localAbsX <= 0.85 && localAbsZ <= 0.85) {
+          return materialSecondary;
+        }
+        if (Math.abs(relativeY - lanternY) <= 2 && localAbsX <= 1.85 && localAbsZ <= 1.35) {
+          const frame = localAbsX >= 1.55 || localAbsZ >= 1.15 || Math.abs(relativeY - lanternY) === 2;
+          return frame ? materialSecondary : materialAccent || materialSecondary;
+        }
+
+        const rearCounterweight = Math.abs(featureDeltaX + featureRadius * 0.9) <= 0.75
+          && absZ <= 0.75
+          && relativeY >= crossbarY - 4
+          && relativeY <= crossbarY - 2;
+        return rearCounterweight ? materialSecondary : 0;
+      }
+      if (featureExtra >= 2) {
+        const plinthHeight = Math.min(4, Math.max(2, Math.round(featureHeight * 0.12)));
+        if (relativeY <= plinthHeight) {
+          return radial <= Math.max(1.2, featureRadius + 1.4 - relativeY * 0.30) ? materialSecondary : 0;
+        }
+        const capBaseY = Math.max(plinthHeight + 4, featureHeight - 4);
+        if (featureExtra >= 3) {
+          const crossbarY = capBaseY - 1;
+          if (relativeY === crossbarY && absZ <= 0.65 && absX <= featureRadius + 2.5) {
+            return materialPrimary;
+          }
+          if (
+            relativeY >= crossbarY - 4
+            && relativeY < crossbarY
+            && absZ <= 0.55
+            && (
+              Math.abs(absX - (featureRadius + 1)) <= 0.55
+              || Math.abs(absX - Math.max(1, featureRadius - 1)) <= 0.55
+            )
+          ) {
+            return materialSecondary;
+          }
+          if (
+            relativeY >= crossbarY - 3
+            && relativeY <= crossbarY
+            && absX <= 1.0
+            && absZ <= 0.8
+          ) {
+            return materialSecondary;
+          }
+        }
+        if (relativeY >= capBaseY) {
+          const capStep = relativeY - capBaseY;
+          const capHalfX = Math.max(1.5, featureRadius + 1.1 - capStep * 0.55);
+          const capHalfZ = Math.max(1.0, featureRadius * 0.42 - capStep * 0.10);
+          if (absX <= capHalfX && absZ <= capHalfZ) {
+            return materialSecondary;
+          }
+        }
+        const shaftRadius = Math.max(0.9, featureRadius * 0.66 - (relativeY - plinthHeight) * 0.045);
+        return radial <= shaftRadius ? materialPrimary : 0;
+      }
       if (relativeY <= 1 + featureExtra && radial <= Math.max(1, featureRadius - relativeY * 0.15)) {
         return materialSecondary;
       }
       return radial <= Math.max(1, featureRadius - relativeY * 0.28) ? materialPrimary : 0;
     case FEATURE_CRYSTAL:
+      if (featureExtra >= 3) {
+        const reeds = [
+          [0, 0, 1.00, 1.00],
+          [-3, 2, 0.58, 0.62],
+          [3, -2, 0.68, 0.70],
+          [2, 4, 0.52, 0.55],
+          [5, 1, 0.42, 0.46],
+          [1, 6, 0.38, 0.42],
+        ] as const;
+        for (const [offsetX, offsetZ, heightScale, radiusScale] of reeds) {
+          const localX = featureDeltaX - offsetX;
+          const localZ = featureDeltaZ - offsetZ;
+          const localAbsX = Math.abs(localX);
+          const localAbsZ = Math.abs(localZ);
+          const localRadial = Math.hypot(localX, localZ);
+          const reedHeight = Math.max(5, Math.round(featureHeight * heightScale));
+          if (relativeY > reedHeight) {
+            continue;
+          }
+          const baseLift = offsetX === 0 && offsetZ === 0 ? 0 : Math.min(2, Math.max(1, Math.round((1 - heightScale) * 4)));
+          if (relativeY < baseLift) {
+            continue;
+          }
+          const reedProgress = (relativeY - baseLift) / Math.max(1, reedHeight - baseLift);
+          const reedRadius = Math.max(0.72, featureRadius * radiusScale * (0.34 - reedProgress * 0.22));
+          const shardFacet = localAbsX <= reedRadius && localAbsZ <= reedRadius * 0.72;
+          const diagonalFacet = Math.abs(localAbsX - localAbsZ) <= 0.62 && localRadial <= reedRadius * 1.15;
+          if (!shardFacet && !diagonalFacet) {
+            continue;
+          }
+          const tip = relativeY >= reedHeight - 1;
+          const brightEdge = materialAccent !== 0
+            && (tip || ((localX + localZ + relativeY + offsetX) % 5 === 0 && localRadial >= reedRadius * 0.42));
+          return brightEdge ? materialAccent : tip || localAbsX > reedRadius * 0.52 ? materialSecondary : materialPrimary;
+        }
+        return 0;
+      }
       if (relativeY >= featureHeight - 1 && radial <= Math.max(0.8, featureRadius - relativeY * 0.25)) {
         return materialSecondary;
       }
@@ -4329,6 +6690,48 @@ function resolveTransitionMaterial(
     return primary;
   }
   return hashNoise3D(worldXDiv3, worldYDiv3, worldZDiv3, seed) <= threshold ? primary : secondary;
+}
+
+function resolveSurfaceTransitionMaterial(
+  primary: number,
+  secondary: number,
+  threshold: number,
+  worldXDiv3: number,
+  worldYDiv3: number,
+  worldZDiv3: number,
+  seed: number,
+): number {
+  if (primary === secondary || threshold >= 0.999) {
+    return primary;
+  }
+  const diagonalA = diagonalStripeStrength(worldXDiv3, worldZDiv3, seed, 23, 5, 3);
+  const diagonalB = diagonalStripeStrength(worldXDiv3, worldZDiv3, seed + 37, 31, -4, 7);
+  const fracture = Math.max(
+    smoothstep(0.70, 0.96, diagonalA),
+    smoothstep(0.76, 0.98, diagonalB) * 0.82,
+  );
+  const grain = hashNoise3D(worldXDiv3, worldYDiv3 + 11, worldZDiv3, seed + 101);
+  if (fracture > 0.68 && grain > 0.22) {
+    return secondary;
+  }
+  const adjustedThreshold = clamp(threshold - fracture * 0.20, 0.30, 0.96);
+  return hashNoise3D(worldXDiv3, worldYDiv3, worldZDiv3, seed) <= adjustedThreshold ? primary : secondary;
+}
+
+function diagonalStripeStrength(
+  worldXDiv3: number,
+  worldZDiv3: number,
+  seed: number,
+  period: number,
+  xWeight: number,
+  zWeight: number,
+): number {
+  const phase = positiveModulo(worldXDiv3 * xWeight + worldZDiv3 * zWeight + seed, period) / period;
+  return 1 - Math.abs(phase * 2 - 1);
+}
+
+function positiveModulo(value: number, modulus: number): number {
+  return ((value % modulus) + modulus) % modulus;
 }
 
 function scoreField(value: number, target: number, spread: number): number {

@@ -49,15 +49,12 @@ Build a Chrome-first WebGPU voxel game where:
 - Add biome and height-driven variation designed around exploration and color discovery, not only topography.
 - Keep generation deterministic from world seed plus chunk coordinate.
 
-### Stage 4: basic interaction loop
+### Stage 4: RPG interaction loop
 
-- Add center-screen voxel targeting for break/place.
-- Add inventory management:
-  - `32` stacks total
-  - `1024` voxels max per stack
-  - voxel identity begins as `#ABC` color
-- Route destroyed voxels into the inventory.
-- Add deterministic tests for inventory and interaction rules.
+- Keep the live game free of player-facing material gathering, hotbar, and block placement affordances.
+- Add center-screen exploration interactions for inspect/read/discover/use verbs.
+- Add RPG inventory/equipment only when it supports exploration, skills, and authored objects rather than terrain collection.
+- Add deterministic tests for discovery, journal, skill, and non-destructive interaction rules.
 
 ### Stage 5: persistence-ready storage
 

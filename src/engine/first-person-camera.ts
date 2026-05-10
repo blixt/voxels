@@ -8,12 +8,16 @@ import {
   multiplyMatrices,
   normalizeVec3,
 } from "./math.ts";
+import { FOG_END_DISTANCE } from "./render-constants.ts";
+import { metersToWorldUnits } from "./scale.ts";
 import type { Vec3 } from "./types.ts";
 
 const LOOK_YAW_PER_PIXEL = 0.0032;
 const LOOK_PITCH_PER_PIXEL = 0.0024;
 const MIN_PITCH = degToRad(-89);
 const MAX_PITCH = degToRad(89);
+export const FIRST_PERSON_NEAR_DISTANCE = metersToWorldUnits(0.4);
+export const FIRST_PERSON_FAR_DISTANCE = FOG_END_DISTANCE + metersToWorldUnits(96);
 
 export interface FirstPersonCameraState {
   position: Vec3;
@@ -44,8 +48,8 @@ export function createFirstPersonCamera(
     yaw,
     pitch,
     fovY: degToRad(68),
-    near: 0.1,
-    far: 20000,
+    near: FIRST_PERSON_NEAR_DISTANCE,
+    far: FIRST_PERSON_FAR_DISTANCE,
   };
 }
 

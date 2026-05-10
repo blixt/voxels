@@ -11,7 +11,7 @@ export interface AsyncChunkMeshingQueue {
   requestChunk(input: OpaqueChunkMeshingInput, meshRevision: number): boolean;
   hasPendingChunk(cx: number, cy: number, cz: number): boolean;
   getPendingCount(): number;
-  drainCompletedMeshes(): CompletedChunkMeshingJob[];
+  drainCompletedMeshes(maxCount?: number): CompletedChunkMeshingJob[];
   dispose(): void;
 }
 

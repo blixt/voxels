@@ -1,5 +1,17 @@
 # Verification Log
 
+## View Atlas Tool
+
+- `bun run atlas:views` captures a fixed multi-view screenshot atlas through the real browser/game API without changing runtime rendering or worldgen.
+- Outputs land under `artifacts/view-atlas/<timestamp>/`:
+  - `report.json` with per-view visual metrics and deltas against the previous atlas when available
+  - `summary.md` with screenshot thumbnails and composition tables
+  - `screenshots/*.png` for the captured views
+- Useful focused smoke:
+  - `bun run atlas:views -- --label=tool-smoke --views=origin-overlook --settle-max-frames=30`
+- Useful iteration run:
+  - `bun run atlas:views -- --label=<change-name>`
+
 ## 2026-03-12
 
 ### Commands

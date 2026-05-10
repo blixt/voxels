@@ -59,6 +59,26 @@ test("worker-friendly opaque meshing matches the synchronous opaque mesh", () =>
   expect(combinedMesh.bounds).toEqual(syncMesh.bounds);
 });
 
+test("opaque meshing clip masks hide voxels without mutating chunk data", () => {
+  const world = new VoxelWorld({ width: 16, height: 16, depth: 16 }, 16, [0, 0xff88aa44]);
+  world.setVoxel(1, 1, 1, 1);
+  const input = createOpaqueChunkMeshingInput(world, 0, 0, 0, { cloneData: true });
+  expect(input).not.toBeNull();
+  const clippedIndex = 1 + 1 * 16 + 1 * 16 * 16;
+  const clipMask = new Uint8Array(16 * 16 * 16);
+  clipMask[clippedIndex] = 1;
+
+  const opaqueMesh = buildOpaqueChunkMeshFromInput(
+    { ...input!, clipMask },
+    createMeshMaterialLut(world.palette, (materialIndex) => world.isWaterMaterial(materialIndex)),
+  );
+
+  expect(input!.chunkData[clippedIndex]).toBe(1);
+  expect(opaqueMesh.vertexCount).toBe(0);
+  expect(opaqueMesh.indexCount).toBe(0);
+  expect(opaqueMesh.triangleCount).toBe(0);
+});
+
 test("worker-friendly opaque meshing matches the synchronous mesh for fully solid chunks", () => {
   const world = new VoxelWorld({ width: 48, height: 16, depth: 48 }, 16, [0, 0xff88aa44]);
   for (let z = 16; z < 32; z += 1) {

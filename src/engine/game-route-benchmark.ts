@@ -65,6 +65,7 @@ export interface RouteFrameAccountingSample {
   movementMs: number;
   streamMs: number;
   meshMs: number;
+  lodMs?: number;
   renderCpuMs: number;
 }
 
@@ -74,18 +75,67 @@ export interface RouteFrameAccountingSummary {
   totalMovementMs: number;
   totalStreamMs: number;
   totalMeshMs: number;
+  totalLodMs: number;
   totalRenderCpuMs: number;
   totalAccountedMs: number;
   totalUnmeasuredMs: number;
   avgGameplayFrameMs: number;
   p95GameplayFrameMs: number;
   maxGameplayFrameMs: number;
+  avgMovementMs: number;
+  p95MovementMs: number;
+  maxMovementMs: number;
   avgUnmeasuredMs: number;
   p95UnmeasuredMs: number;
   maxUnmeasuredMs: number;
   avgMeasuredWorkMs: number;
   p95MeasuredWorkMs: number;
   maxMeasuredWorkMs: number;
+}
+
+export interface RouteSeamCoverageIssue {
+  distanceMeters: number;
+}
+
+export interface RouteSeamCoverageProbe {
+  uncoveredGapCount: number;
+  handoffHoleCount: number;
+  residentOverlapCount?: number;
+  bandOverlapCount?: number;
+  uncoveredGapSamples?: readonly RouteSeamCoverageIssue[];
+  handoffHoleSamples?: readonly RouteSeamCoverageIssue[];
+  residentOverlapSamples?: readonly RouteSeamCoverageIssue[];
+  bandOverlapSamples?: readonly RouteSeamCoverageIssue[];
+}
+
+export interface RouteSeamCoverageSummary {
+  seamGapCount: number;
+  uncoveredGapCount: number;
+  handoffHoleCount: number;
+  lodOverlapCount: number;
+  residentOverlapCount: number;
+  bandOverlapCount: number;
+  maxSeamGapMeters: number;
+  maxLodOverlapMeters: number;
+}
+
+export interface RouteSeamFrameClassificationSample {
+  phase: "move" | "settle";
+  pendingChunks: number;
+  pendingMeshJobs: number;
+  dirtyResidentChunks: number;
+  lodPendingChunks: number;
+  seamGapCount: number;
+  visibleGroundUncoveredCount: number;
+  screenVoidSuspicious: boolean;
+  settledReferenceSuspiciousHole?: boolean;
+}
+
+export type RouteSeamFrameClassification = "clean" | "transition-gap" | "blocking-gap";
+
+export interface RouteSeamFrameClassCounts {
+  framesWithBlockingSeamGaps: number;
+  framesWithTransitionSeamGaps: number;
 }
 
 export function buildDefaultRouteBenchmarkPlan(
@@ -259,11 +309,13 @@ export function summarizeRouteFrameAccounting(
   const movementSamples = samples.map((sample) => sample.movementMs);
   const streamSamples = samples.map((sample) => sample.streamMs);
   const meshSamples = samples.map((sample) => sample.meshMs);
+  const lodSamples = samples.map((sample) => sample.lodMs ?? 0);
   const renderCpuSamples = samples.map((sample) => sample.renderCpuMs);
   const measuredWorkSamples = samples.map((sample) =>
     sample.movementMs
     + sample.streamMs
     + sample.meshMs
+    + (sample.lodMs ?? 0)
     + sample.renderCpuMs);
   const unmeasuredSamples = gameplayFrameSamples.map((value, index) =>
     Math.max(0, value - (measuredWorkSamples[index] ?? 0)));
@@ -273,18 +325,91 @@ export function summarizeRouteFrameAccounting(
     totalMovementMs: sum(movementSamples),
     totalStreamMs: sum(streamSamples),
     totalMeshMs: sum(meshSamples),
+    totalLodMs: sum(lodSamples),
     totalRenderCpuMs: sum(renderCpuSamples),
     totalAccountedMs: sum(measuredWorkSamples),
     totalUnmeasuredMs: sum(unmeasuredSamples),
     avgGameplayFrameMs: average(gameplayFrameSamples),
     p95GameplayFrameMs: percentile(gameplayFrameSamples, 0.95),
     maxGameplayFrameMs: maxValue(gameplayFrameSamples),
+    avgMovementMs: average(movementSamples),
+    p95MovementMs: percentile(movementSamples, 0.95),
+    maxMovementMs: maxValue(movementSamples),
     avgUnmeasuredMs: average(unmeasuredSamples),
     p95UnmeasuredMs: percentile(unmeasuredSamples, 0.95),
     maxUnmeasuredMs: maxValue(unmeasuredSamples),
     avgMeasuredWorkMs: average(measuredWorkSamples),
     p95MeasuredWorkMs: percentile(measuredWorkSamples, 0.95),
     maxMeasuredWorkMs: maxValue(measuredWorkSamples),
+  };
+}
+
+export function summarizeRouteSeamCoverage(
+  probe: RouteSeamCoverageProbe,
+): RouteSeamCoverageSummary {
+  const gapSamples = [
+    ...(probe.uncoveredGapSamples ?? []),
+    ...(probe.handoffHoleSamples ?? []),
+  ];
+  const overlapSamples = [
+    ...(probe.residentOverlapSamples ?? []),
+    ...(probe.bandOverlapSamples ?? []),
+  ];
+  const uncoveredGapCount = Math.max(0, probe.uncoveredGapCount);
+  const handoffHoleCount = Math.max(0, probe.handoffHoleCount);
+  const residentOverlapCount = Math.max(0, probe.residentOverlapCount ?? 0);
+  const bandOverlapCount = Math.max(0, probe.bandOverlapCount ?? 0);
+  return {
+    seamGapCount: uncoveredGapCount + handoffHoleCount,
+    uncoveredGapCount,
+    handoffHoleCount,
+    lodOverlapCount: residentOverlapCount + bandOverlapCount,
+    residentOverlapCount,
+    bandOverlapCount,
+    maxSeamGapMeters: maxValue(gapSamples.map((sample) => sample.distanceMeters)),
+    maxLodOverlapMeters: maxValue(overlapSamples.map((sample) => sample.distanceMeters)),
+  };
+}
+
+export function classifyRouteSeamFrame(
+  sample: RouteSeamFrameClassificationSample,
+): RouteSeamFrameClassification {
+  if (sample.seamGapCount <= 0) {
+    return "clean";
+  }
+  if (
+    sample.visibleGroundUncoveredCount > 0
+    || sample.screenVoidSuspicious
+    || (sample.settledReferenceSuspiciousHole ?? false)
+  ) {
+    return "blocking-gap";
+  }
+  const settledAndIdle = sample.phase === "settle"
+    && sample.pendingChunks === 0
+    && sample.pendingMeshJobs === 0
+    && sample.dirtyResidentChunks === 0
+    && sample.lodPendingChunks === 0;
+  return settledAndIdle ? "blocking-gap" : "transition-gap";
+}
+
+export function countRouteSeamFrameClasses(
+  samples: readonly RouteSeamFrameClassificationSample[],
+): RouteSeamFrameClassCounts {
+  let framesWithBlockingSeamGaps = 0;
+  let framesWithTransitionSeamGaps = 0;
+  for (const sample of samples) {
+    switch (classifyRouteSeamFrame(sample)) {
+      case "blocking-gap":
+        framesWithBlockingSeamGaps += 1;
+        break;
+      case "transition-gap":
+        framesWithTransitionSeamGaps += 1;
+        break;
+    }
+  }
+  return {
+    framesWithBlockingSeamGaps,
+    framesWithTransitionSeamGaps,
   };
 }
 

@@ -240,6 +240,7 @@ function simulateChunkCrossing(deltaChunks: number): {
 
   let step = 0;
   let pendingChunks = 0;
+  let pendingLodChunks = 0;
   let dirtyResidentChunks = world.countDirtyResidentChunks();
   do {
     step += 1;
@@ -253,6 +254,7 @@ function simulateChunkCrossing(deltaChunks: number): {
     const lodResult = world.updateLodResidencyAround(targetFeetPosition);
     dirtyResidentChunks = world.countDirtyResidentChunks();
     pendingChunks = residency.pendingChunks;
+    pendingLodChunks = lodResult.pending;
     const frameWorkMs = residency.elapsedMs + mesh.elapsedMs + lodResult.elapsedMs;
     frames.push({
       step,
@@ -286,7 +288,7 @@ function simulateChunkCrossing(deltaChunks: number): {
     maxFrameWorkMs = Math.max(maxFrameWorkMs, frameWorkMs);
     maxLodPendingChunks = Math.max(maxLodPendingChunks, lodResult.pending);
     lodTotalChunks = lodResult.totalChunks;
-  } while (shouldPumpWorldWork(false, pendingChunks, dirtyResidentChunks));
+  } while (shouldPumpWorldWork(false, pendingChunks, dirtyResidentChunks, pendingLodChunks));
 
   return {
     anchorChanged: true,

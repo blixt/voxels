@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   createPlayerState,
   getPlayerEyePosition,
+  PLAYER_BASE_MOVE_SPEED,
   PLAYER_MAX_STEP_HEIGHT,
   stepPlayer,
 } from "../src/engine/player-physics.ts";
@@ -82,6 +83,19 @@ test("player walks up a 3-voxel step without jumping", () => {
   expect(result.collidedX).toBe(false);
   expect(result.grounded).toBe(true);
   expect(player.feetPosition[0]).toBeGreaterThan(20);
+  expect(player.feetPosition[1]).toBe(1 + PLAYER_MAX_STEP_HEIGHT);
+});
+
+test("player auto-step does not add extra horizontal distance", () => {
+  const world = new VoxelWorld({ width: 64, height: 64, depth: 64 }, 16, [0, 0xff8899aa]);
+  world.fillBox(0, 0, 0, 64, 1, 64, 1);
+  world.fillBox(20, 1, 0, 64, 1 + PLAYER_MAX_STEP_HEIGHT, 64, 1);
+  const player = createPlayerState([16, 1, 32], { grounded: true });
+  const deltaSeconds = 0.12;
+
+  stepPlayer(world, player, 0, { ...idleInput(), forward: 1, speedMultiplier: 1.14 }, deltaSeconds);
+
+  expect(player.feetPosition[0]).toBeLessThanOrEqual(16 + PLAYER_BASE_MOVE_SPEED * 1.14 * deltaSeconds);
   expect(player.feetPosition[1]).toBe(1 + PLAYER_MAX_STEP_HEIGHT);
 });
 

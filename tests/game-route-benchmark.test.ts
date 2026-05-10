@@ -5,6 +5,9 @@ import {
   analyzeBottomCenterVoid,
   buildDefaultRouteBenchmarkPlan,
   buildForwardRouteBenchmarkPlan,
+  classifyRouteSeamFrame,
+  countRouteSeamFrameClasses,
+  summarizeRouteSeamCoverage,
   summarizeRouteFrameAccounting,
 } from "../src/engine/game-route-benchmark.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
@@ -121,6 +124,7 @@ test("route frame accounting exposes measured and unmeasured time explicitly", (
       movementMs: 1,
       streamMs: 2,
       meshMs: 3,
+      lodMs: 5,
       renderCpuMs: 4,
     },
     {
@@ -128,14 +132,87 @@ test("route frame accounting exposes measured and unmeasured time explicitly", (
       movementMs: 1,
       streamMs: 1,
       meshMs: 1,
+      lodMs: 0,
       renderCpuMs: 2,
     },
   ]);
 
   expect(summary.totalGameplayFrameMs).toBe(21);
-  expect(summary.totalAccountedMs).toBe(15);
-  expect(summary.totalUnmeasuredMs).toBe(6);
+  expect(summary.totalLodMs).toBe(5);
+  expect(summary.totalAccountedMs).toBe(20);
+  expect(summary.totalUnmeasuredMs).toBe(4);
   expect(summary.maxUnmeasuredMs).toBe(4);
+  expect(summary.p95MovementMs).toBe(1);
+});
+
+test("route seam coverage summarizes LOD holes with max sampled distance", () => {
+  const summary = summarizeRouteSeamCoverage({
+    uncoveredGapCount: 2,
+    handoffHoleCount: 1,
+    residentOverlapCount: 4,
+    bandOverlapCount: 2,
+    uncoveredGapSamples: [
+      { distanceMeters: 12.4 },
+      { distanceMeters: 18.8 },
+    ],
+    handoffHoleSamples: [
+      { distanceMeters: 9.2 },
+    ],
+    residentOverlapSamples: [
+      { distanceMeters: 7.1 },
+      { distanceMeters: 22.5 },
+    ],
+    bandOverlapSamples: [
+      { distanceMeters: 14.2 },
+    ],
+  });
+
+  expect(summary.seamGapCount).toBe(3);
+  expect(summary.uncoveredGapCount).toBe(2);
+  expect(summary.handoffHoleCount).toBe(1);
+  expect(summary.lodOverlapCount).toBe(6);
+  expect(summary.residentOverlapCount).toBe(4);
+  expect(summary.bandOverlapCount).toBe(2);
+  expect(summary.maxSeamGapMeters).toBe(18.8);
+  expect(summary.maxLodOverlapMeters).toBe(22.5);
+});
+
+test("route seam classification separates transition gaps from blocking holes", () => {
+  const transition = {
+    phase: "move" as const,
+    pendingChunks: 12,
+    pendingMeshJobs: 0,
+    dirtyResidentChunks: 4,
+    lodPendingChunks: 1,
+    seamGapCount: 3,
+    visibleGroundUncoveredCount: 0,
+    screenVoidSuspicious: false,
+  };
+  const blockingSettled = {
+    ...transition,
+    phase: "settle" as const,
+    pendingChunks: 0,
+    dirtyResidentChunks: 0,
+    lodPendingChunks: 0,
+  };
+  const blockingVisible = {
+    ...transition,
+    visibleGroundUncoveredCount: 2,
+  };
+
+  expect(classifyRouteSeamFrame({ ...transition, seamGapCount: 0 })).toBe("clean");
+  expect(classifyRouteSeamFrame(transition)).toBe("transition-gap");
+  expect(classifyRouteSeamFrame(blockingSettled)).toBe("blocking-gap");
+  expect(classifyRouteSeamFrame(blockingVisible)).toBe("blocking-gap");
+  expect(countRouteSeamFrameClasses([
+    transition,
+    blockingSettled,
+    blockingVisible,
+    { ...transition, seamGapCount: 0 },
+  ])).toEqual({
+    framesWithBlockingSeamGaps: 2,
+    framesWithTransitionSeamGaps: 1,
+  });
 });
 
 test("settled reference diff flags transient clear holes that later fill with terrain", () => {

@@ -2,9 +2,12 @@ import { buildCameraMatrices, type CameraState } from "./camera.ts";
 import type { ChunkMeshData } from "./types.ts";
 import type { ResidentChunkWorld } from "./world.ts";
 import {
+  DEFAULT_SKY_WEATHER_ENVIRONMENT,
   LIGHT_DIRECTION,
   LIGHTING_TERMS,
+  type SkyWeatherEnvironment,
 } from "./render-constants.ts";
+import { metersToWorldUnits } from "./scale.ts";
 import {
   DEFAULT_RENDER_ENVIRONMENT,
   type RenderEnvironment,
@@ -15,6 +18,8 @@ type RenderCamera = CameraState | {
   position?: readonly [number, number, number];
 };
 
+const FOG_CULL_MARGIN_DISTANCE = metersToWorldUnits(32);
+
 const SHADER_SOURCE = `
 struct Uniforms {
   view_projection: mat4x4<f32>,
@@ -23,6 +28,10 @@ struct Uniforms {
   camera_position: vec4<f32>,
   fog_color: vec4<f32>,
   fog_params: vec4<f32>,
+  sky_top_color: vec4<f32>,
+  sky_horizon_color: vec4<f32>,
+  sky_cloud_color: vec4<f32>,
+  sky_params: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -40,6 +49,11 @@ struct VertexOutput {
   @location(2) world_position: vec3<f32>,
 }
 
+struct SkyVertexOutput {
+  @builtin(position) clip_position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+}
+
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
   var output: VertexOutput;
@@ -50,19 +64,120 @@ fn vs_main(input: VertexInput) -> VertexOutput {
   return output;
 }
 
+fn hash_grain(cell: vec3<f32>) -> f32 {
+  return fract(sin(dot(cell, vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
 fn shade_fragment(input: VertexOutput) -> vec4<f32> {
   let directional = max(dot(input.normal, -uniforms.light_direction.xyz), 0.0);
   let hemi = input.normal.y * 0.5 + 0.5;
   let lighting = uniforms.lighting_terms.x + uniforms.lighting_terms.y * directional + uniforms.lighting_terms.z * hemi;
-  let shaded = input.color.rgb * lighting;
+  let albedo_luma = dot(input.color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+  let broad_grain = hash_grain(floor(input.world_position * 0.18));
+  let fine_grain = hash_grain(floor(input.world_position * 0.73 + vec3<f32>(19.0, 7.0, 31.0)));
+  let grain = (broad_grain - 0.5) * 0.16 + (fine_grain - 0.5) * 0.06;
+  let top_bias = abs(input.normal.y);
+  let grain_strength = mix(0.045, 0.11, top_bias);
+  let ashfall = clamp(uniforms.sky_params.z, 0.0, 1.0);
+  let fungal_glow = clamp(uniforms.sky_params.w, 0.0, 1.0);
   let fog_distance = distance(input.world_position, uniforms.camera_position.xyz);
   let fog = smoothstep(uniforms.fog_params.x, uniforms.fog_params.y, fog_distance);
-  return vec4<f32>(shaded * (1.0 - fog) + uniforms.fog_color.rgb * fog, input.color.a);
+  let grounded_base = mix(vec3<f32>(albedo_luma), input.color.rgb, 0.78) * (1.0 + grain * grain_strength);
+  let ash_deposit = ashfall * smoothstep(0.12, 0.92, input.normal.y) * (0.16 + broad_grain * 0.24);
+  let grounded_albedo = mix(grounded_base, uniforms.sky_cloud_color.rgb, clamp(ash_deposit, 0.0, 0.38));
+  let light_tint = mix(
+    vec3<f32>(0.82, 0.86, 0.92),
+    vec3<f32>(1.08, 1.02, 0.92),
+    clamp(directional * 0.78 + hemi * 0.22, 0.0, 1.0),
+  );
+  let overcast = 1.0 - ashfall * 0.18;
+  let fungal_shadow = vec3<f32>(0.04, 0.16, 0.18) * fungal_glow * (1.0 - directional) * (1.0 - hemi * 0.46);
+  let vertical_contact = 1.0 - smoothstep(0.18, 0.72, abs(input.normal.y));
+  let underside_contact = smoothstep(-0.90, -0.18, -input.normal.y);
+  let contact_depth = (vertical_contact * (0.085 + ashfall * 0.045) + underside_contact * 0.070) * (1.0 - fog * 0.58);
+  let shaded = (grounded_albedo * lighting * light_tint * overcast + fungal_shadow) * (1.0 - clamp(contact_depth, 0.0, 0.18));
+  let distance_luma = dot(shaded, vec3<f32>(0.2126, 0.7152, 0.0722));
+  let distance_muted = mix(shaded, vec3<f32>(distance_luma), fog * 0.22);
+  return vec4<f32>(distance_muted * (1.0 - fog) + uniforms.fog_color.rgb * fog, input.color.a);
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   return shade_fragment(input);
+}
+
+fn sky_hash(cell: vec2<f32>) -> f32 {
+  return fract(sin(dot(cell, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+
+fn sky_luma(color: vec3<f32>) -> f32 {
+  return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+@vertex
+fn vs_sky(@builtin(vertex_index) vertex_index: u32) -> SkyVertexOutput {
+  var positions = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>(3.0, -1.0),
+    vec2<f32>(-1.0, 3.0),
+  );
+  let position = positions[vertex_index];
+  var output: SkyVertexOutput;
+  output.clip_position = vec4<f32>(position, 1.0, 1.0);
+  output.uv = position * 0.5 + vec2<f32>(0.5);
+  return output;
+}
+
+@fragment
+fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
+  let y = clamp(input.uv.y, 0.0, 1.0);
+  let horizon_blend = smoothstep(0.05, 0.95, y);
+  let ashfall = clamp(uniforms.sky_params.z, 0.0, 1.0);
+  let fungal_glow = clamp(uniforms.sky_params.w, 0.0, 1.0);
+  let high_storm = mix(uniforms.sky_top_color.rgb, vec3<f32>(0.10, 0.10, 0.11), ashfall * 0.30);
+  let horizon_glow = mix(uniforms.sky_horizon_color.rgb, uniforms.sky_cloud_color.rgb, ashfall * 0.18 + fungal_glow * 0.16);
+  let base = mix(horizon_glow, high_storm, horizon_blend);
+
+  let band_center = clamp(uniforms.sky_params.y, 0.18, 0.82);
+  let lower_band = smoothstep(band_center - 0.28, band_center - 0.04, y);
+  let upper_band = 1.0 - smoothstep(band_center + 0.05, band_center + 0.36, y);
+  let band_mask = clamp(lower_band * upper_band, 0.0, 1.0);
+  let wide_noise = sky_hash(floor(input.uv * vec2<f32>(14.0, 5.0)));
+  let streak_noise = sky_hash(floor(input.uv * vec2<f32>(36.0, 9.0) + vec2<f32>(11.0, 3.0)));
+  let cloud_texture = 0.48 + wide_noise * 0.34 + streak_noise * 0.22;
+  let cloud_strength = clamp(uniforms.sky_params.x * band_mask * cloud_texture * (0.72 + ashfall * 0.34), 0.0, 0.92);
+
+  let ash_shelf = ashfall * smoothstep(0.18, 0.62, y) * (1.0 - smoothstep(0.74, 0.96, y));
+  let shelf_mask = ashfall
+    * smoothstep(0.14, 0.30, y)
+    * (1.0 - smoothstep(0.42, 0.62, y));
+  let shelf_noise = sky_hash(floor(vec2<f32>(input.uv.x * 20.0, y * 7.0) + vec2<f32>(5.0, 17.0)));
+  let ash_streak_cell = floor(vec2<f32>(input.uv.x * 54.0 + y * 12.0, y * 15.0));
+  let ash_streak_noise = sky_hash(ash_streak_cell);
+  let ash_streaks = ashfall
+    * (1.0 - smoothstep(0.18, 0.86, y))
+    * smoothstep(0.58, 0.94, ash_streak_noise)
+    * (0.28 + shelf_mask * 0.48);
+  let fungal_horizon = fungal_glow * (1.0 - smoothstep(0.05, 0.48, y));
+  let storm_belly = vec3<f32>(0.15, 0.14, 0.13);
+  let storm_tint = mix(
+    uniforms.sky_cloud_color.rgb,
+    storm_belly,
+    ash_shelf * 0.54,
+  );
+  let shelf_tint = mix(vec3<f32>(0.24, 0.22, 0.19), uniforms.fog_color.rgb, 0.34 + shelf_noise * 0.16);
+  let far_haze = (1.0 - smoothstep(0.02, 0.38, y)) * (0.18 + ashfall * 0.28 + fungal_glow * 0.10);
+  var sky = mix(base, storm_tint, cloud_strength);
+  sky = mix(sky, shelf_tint, clamp(shelf_mask * (0.34 + shelf_noise * 0.28), 0.0, 0.62));
+  sky = mix(sky, uniforms.fog_color.rgb, clamp(far_haze, 0.0, 0.54));
+  sky = mix(sky, vec3<f32>(0.08, 0.08, 0.075), clamp(ash_streaks, 0.0, 0.30));
+  sky = mix(sky, storm_belly, ashfall * smoothstep(0.66, 1.0, y) * 0.22);
+  sky += vec3<f32>(0.00, 0.08, 0.09) * fungal_horizon;
+  sky += vec3<f32>(0.025, 0.055, 0.040) * fungal_glow * smoothstep(0.18, 0.72, y) * (1.0 - smoothstep(0.72, 0.98, y));
+  sky = mix(sky, vec3<f32>(sky_luma(sky)), ashfall * 0.10);
+  let luma_floor = 0.090 + ashfall * 0.045 + fungal_glow * 0.015;
+  sky += vec3<f32>(max(0.0, luma_floor - sky_luma(sky)));
+  return vec4<f32>(clamp(sky, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 `;
 
@@ -91,7 +206,9 @@ interface PassStats {
   drawCalls: number;
   triangles: number;
   frustumCulledChunks: number;
+  fogCulledChunks: number;
   lodDrawCalls: number;
+  lodDrawCallsByLevel: readonly number[];
 }
 
 export interface RenderStats {
@@ -103,7 +220,9 @@ export interface RenderStats {
   uploadBytes: number;
   encodeMs: number;
   frustumCulledChunks: number;
+  fogCulledChunks: number;
   lodDrawCalls: number;
+  lodDrawCallsByLevel: readonly number[];
 }
 
 interface ReadbackImage {
@@ -190,20 +309,34 @@ function isAabbVisible(
   return true;
 }
 
+function isAabbBeyondDistance(
+  point: readonly [number, number, number],
+  maxDistance: number,
+  minX: number, minY: number, minZ: number,
+  maxX: number, maxY: number, maxZ: number,
+): boolean {
+  const dx = point[0] < minX ? minX - point[0] : point[0] > maxX ? point[0] - maxX : 0;
+  const dy = point[1] < minY ? minY - point[1] : point[1] > maxY ? point[1] - maxY : 0;
+  const dz = point[2] < minZ ? minZ - point[2] : point[2] > maxZ ? point[2] - maxZ : 0;
+  return dx * dx + dy * dy + dz * dz > maxDistance * maxDistance;
+}
+
 export class WebGpuVoxelRenderer {
   private readonly context: GPUCanvasContext;
   private readonly device: GPUDevice;
   private readonly pipeline: GPURenderPipeline;
   private readonly lodPipelines: GPURenderPipeline[];
   private readonly waterPipeline: GPURenderPipeline;
+  private readonly skyPipeline: GPURenderPipeline;
   private readonly uniformBuffer: GPUBuffer;
   private readonly uniformBindGroup: GPUBindGroup;
   private readonly resources = new Map<object, GpuChunkResources>();
-  private readonly uniformData = new Float32Array(36);
+  private readonly uniformData = new Float32Array(52);
   private depthTexture: GPUTexture | null = null;
   private depthView: GPUTextureView | null = null;
   private resourceSyncRevision = 0;
   private lastViewProjection: Float32Array | null = null;
+  private lastCameraPosition: readonly [number, number, number] = [0, 0, 0];
   readonly format: GPUTextureFormat;
   readonly timestampQuerySupported: boolean;
 
@@ -214,7 +347,7 @@ export class WebGpuVoxelRenderer {
     this.timestampQuerySupported = device.features.has("timestamp-query");
     const shaderModule = device.createShaderModule({ code: SHADER_SOURCE });
     const uniformBuffer = device.createBuffer({
-      size: 144,
+      size: 208,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     const bindGroupLayout = device.createBindGroupLayout({
@@ -269,6 +402,27 @@ export class WebGpuVoxelRenderer {
         format: "depth24plus",
         depthWriteEnabled: true,
         depthCompare: "less",
+      },
+    });
+    this.skyPipeline = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: {
+        module: shaderModule,
+        entryPoint: "vs_sky",
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: "fs_sky",
+        targets: [{ format }],
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none",
+      },
+      depthStencil: {
+        format: "depth24plus",
+        depthWriteEnabled: false,
+        depthCompare: "always",
       },
     });
     // Per-LOD-level pipelines with increasing depth bias so finer LOD
@@ -428,12 +582,13 @@ export class WebGpuVoxelRenderer {
       : null;
 
     const encoder = this.device.createCommandEncoder();
+    const skyWeather = resolveSkyWeatherEnvironment(renderEnvironment);
     const passDescriptor: GPURenderPassDescriptor = {
       colorAttachments: [
         {
           view: this.context.getCurrentTexture().createView(),
           loadOp: "clear",
-          clearValue: toGpuColor(renderEnvironment.clearColorRgba),
+          clearValue: toGpuColor(skyWeather.skyHorizonColorRgba),
           storeOp: "store",
         },
       ],
@@ -453,7 +608,14 @@ export class WebGpuVoxelRenderer {
     }
 
     const encodeStartedAt = performance.now();
-    const stats = this.encodeRenderPass(world, encoder, passDescriptor, frustumPlanes);
+    const stats = this.encodeRenderPass(
+      world,
+      encoder,
+      passDescriptor,
+      frustumPlanes,
+      this.lastCameraPosition,
+      renderEnvironment.fogEndDistance,
+    );
     const encodeMs = performance.now() - encodeStartedAt;
 
     if (timer) {
@@ -508,12 +670,13 @@ export class WebGpuVoxelRenderer {
     });
 
     const encoder = this.device.createCommandEncoder();
+    const skyWeather = resolveSkyWeatherEnvironment(renderEnvironment);
     this.encodeRenderPass(world, encoder, {
       colorAttachments: [
         {
           view: colorTexture.createView(),
           loadOp: "clear",
-          clearValue: toGpuColor(renderEnvironment.clearColorRgba),
+          clearValue: toGpuColor(skyWeather.skyHorizonColorRgba),
           storeOp: "store",
         },
       ],
@@ -523,7 +686,7 @@ export class WebGpuVoxelRenderer {
         depthClearValue: 1,
         depthStoreOp: "store",
       },
-    }, frustumPlanes);
+    }, frustumPlanes, this.lastCameraPosition, renderEnvironment.fogEndDistance);
     encoder.copyTextureToBuffer(
       { texture: colorTexture },
       { buffer: readback, bytesPerRow, rowsPerImage: height },
@@ -576,15 +739,22 @@ export class WebGpuVoxelRenderer {
     encoder: GPUCommandEncoder,
     passDescriptor: GPURenderPassDescriptor,
     frustumPlanes: Float32Array | null,
+    cameraPosition: readonly [number, number, number],
+    fogEndDistance: number,
   ): PassStats {
     const pass = encoder.beginRenderPass(passDescriptor);
     pass.setBindGroup(0, this.uniformBindGroup);
+    pass.setPipeline(this.skyPipeline);
+    pass.draw(3, 1, 0, 0);
 
     let drawCalls = 0;
     let triangles = 0;
     let frustumCulledChunks = 0;
+    let fogCulledChunks = 0;
     let lodDrawCalls = 0;
+    const lodDrawCallsByLevel = [0, 0, 0, 0, 0];
     let currentPipeline: GPURenderPipeline | null = null;
+    const fogCullDistance = fogEndDistance + FOG_CULL_MARGIN_DISTANCE;
 
     // Opaque pass: LOD chunks first (depth-biased), then LOD 0 (standard).
     // iterateResidentChunks yields LOD chunks before LOD 0 chunks.
@@ -599,6 +769,10 @@ export class WebGpuVoxelRenderer {
         frustumCulledChunks++;
         continue;
       }
+      if (b && isAabbBeyondDistance(cameraPosition, fogCullDistance, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
+        fogCulledChunks++;
+        continue;
+      }
       const pipeline = chunk.lodLevel > 0
         ? this.lodPipelines[Math.min(chunk.lodLevel - 1, this.lodPipelines.length - 1)]!
         : this.pipeline;
@@ -611,10 +785,13 @@ export class WebGpuVoxelRenderer {
       pass.drawIndexed(resource.indexCount, 1, 0, 0, 0);
       drawCalls += 1;
       triangles += resource.triangleCount;
-      if (chunk.lodLevel > 0) lodDrawCalls += 1;
+      if (chunk.lodLevel > 0) {
+        lodDrawCalls += 1;
+        lodDrawCallsByLevel[Math.min(chunk.lodLevel, lodDrawCallsByLevel.length - 1)] += 1;
+      }
     }
 
-    // Water pass (LOD 0 only — LOD chunks skip water)
+    // Water pass.
     pass.setPipeline(this.waterPipeline);
     for (const chunk of world.iterateResidentChunks()) {
       const resource = this.resources.get(chunk);
@@ -626,15 +803,23 @@ export class WebGpuVoxelRenderer {
         frustumCulledChunks++;
         continue;
       }
+      if (b && isAabbBeyondDistance(cameraPosition, fogCullDistance, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2])) {
+        fogCulledChunks++;
+        continue;
+      }
       pass.setVertexBuffer(0, resource.waterVertexBuffer);
       pass.setIndexBuffer(resource.waterIndexBuffer, "uint32");
       pass.drawIndexed(resource.waterIndexCount, 1, 0, 0, 0);
       drawCalls += 1;
       triangles += resource.waterTriangleCount;
+      if (chunk.lodLevel > 0) {
+        lodDrawCalls += 1;
+        lodDrawCallsByLevel[Math.min(chunk.lodLevel, lodDrawCallsByLevel.length - 1)] += 1;
+      }
     }
 
     pass.end();
-    return { drawCalls, triangles, frustumCulledChunks, lodDrawCalls };
+    return { drawCalls, triangles, frustumCulledChunks, fogCulledChunks, lodDrawCalls, lodDrawCallsByLevel };
   }
 
   private writeUniforms(camera: RenderCamera, aspect: number, renderEnvironment: RenderEnvironment): void {
@@ -649,6 +834,7 @@ export class WebGpuVoxelRenderer {
       cameraPosition = cameraMatrices.eye;
     }
     this.lastViewProjection = viewProjection;
+    this.lastCameraPosition = cameraPosition;
     const uniformData = this.uniformData;
     uniformData.set(viewProjection, 0);
     uniformData[16] = LIGHT_DIRECTION[0];
@@ -671,6 +857,23 @@ export class WebGpuVoxelRenderer {
     uniformData[33] = renderEnvironment.fogEndDistance;
     uniformData[34] = 0;
     uniformData[35] = 0;
+    const skyWeather = resolveSkyWeatherEnvironment(renderEnvironment);
+    uniformData[36] = skyWeather.skyTopColorRgba[0] / 255;
+    uniformData[37] = skyWeather.skyTopColorRgba[1] / 255;
+    uniformData[38] = skyWeather.skyTopColorRgba[2] / 255;
+    uniformData[39] = skyWeather.skyTopColorRgba[3] / 255;
+    uniformData[40] = skyWeather.skyHorizonColorRgba[0] / 255;
+    uniformData[41] = skyWeather.skyHorizonColorRgba[1] / 255;
+    uniformData[42] = skyWeather.skyHorizonColorRgba[2] / 255;
+    uniformData[43] = skyWeather.skyHorizonColorRgba[3] / 255;
+    uniformData[44] = skyWeather.skyCloudColorRgba[0] / 255;
+    uniformData[45] = skyWeather.skyCloudColorRgba[1] / 255;
+    uniformData[46] = skyWeather.skyCloudColorRgba[2] / 255;
+    uniformData[47] = skyWeather.skyCloudColorRgba[3] / 255;
+    uniformData[48] = skyWeather.skyCloudCoverage;
+    uniformData[49] = skyWeather.skyCloudBand;
+    uniformData[50] = skyWeather.ashfallIntensity;
+    uniformData[51] = skyWeather.fungalGlowIntensity;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
 
@@ -875,6 +1078,26 @@ function nextBufferCapacity(requiredBytes: number, currentCapacity: number): num
 
 function isCameraWithViewProjection(camera: RenderCamera): camera is { viewProjection: Float32Array } {
   return "viewProjection" in camera;
+}
+
+function resolveSkyWeatherEnvironment(renderEnvironment: RenderEnvironment): SkyWeatherEnvironment {
+  const atmosphere = renderEnvironment as RenderEnvironment & Partial<SkyWeatherEnvironment>;
+  const skyTopColorRgba = atmosphere.skyTopColorRgba ?? renderEnvironment.clearColorRgba;
+  const skyHorizonColorRgba = atmosphere.skyHorizonColorRgba ?? renderEnvironment.clearColorRgba;
+  const skyCloudColorRgba = atmosphere.skyCloudColorRgba ?? renderEnvironment.fogColorRgba;
+  return {
+    skyTopColorRgba,
+    skyHorizonColorRgba,
+    skyCloudColorRgba,
+    skyCloudCoverage: clamp01(atmosphere.skyCloudCoverage ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.skyCloudCoverage),
+    skyCloudBand: clamp01(atmosphere.skyCloudBand ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.skyCloudBand),
+    ashfallIntensity: clamp01(atmosphere.ashfallIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.ashfallIntensity),
+    fungalGlowIntensity: clamp01(atmosphere.fungalGlowIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.fungalGlowIntensity),
+  };
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
 }
 
 function toGpuColor(color: readonly [number, number, number, number]): GPUColor {

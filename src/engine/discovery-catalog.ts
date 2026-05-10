@@ -6,12 +6,17 @@ import type {
 } from "./procedural-generator.ts";
 
 export type DiscoveryCategory = "biome" | "underground" | "regional-variant" | "landmark";
+export type DiscoveryRole = "region" | "deep-place" | "strange-border" | "old-road" | "shrine" | "landmark";
 
 export interface DiscoveryPresentation {
   category: DiscoveryCategory;
   categoryLabel: string;
   id: string;
   name: string;
+  role: DiscoveryRole;
+  roleLabel: string;
+  flavorText: string | null;
+  progressionHint: string;
   inlineLabel: string;
   fullLabel: string;
 }
@@ -21,6 +26,22 @@ const DISCOVERY_CATEGORY_LABELS: Record<DiscoveryCategory, string> = {
   underground: "Underground",
   "regional-variant": "Regional Variant",
   landmark: "Landmark",
+};
+
+const DISCOVERY_ROLE_LABELS: Record<DiscoveryRole, string> = {
+  region: "Region",
+  "deep-place": "Deep Place",
+  "strange-border": "Strange Border",
+  "old-road": "Old Road",
+  shrine: "Shrine",
+  landmark: "Landmark",
+};
+
+const DISCOVERY_PROGRESSION_HINTS: Record<DiscoveryCategory, string> = {
+  biome: "Travel and region discovery train Cartography.",
+  underground: "Underground discovery trains Spelunking.",
+  "regional-variant": "Strange region discovery trains Lore.",
+  landmark: "Landmark discovery trains Naturalist.",
 };
 
 const BIOME_NAMES = {
@@ -61,6 +82,7 @@ const REGIONAL_VARIANT_NAMES = {
   steppe_monolith: "Monolith March",
   dunes_glass: "Glasswind Basin",
   badlands_crater: "Crater Maze",
+  ash_wastes: "Ash Wastes",
   highland_redleaf: "Redleaf Crown",
   moor_shadowglass: "Shadowglass Bog",
   tundra_blue_ice: "Blue-Ice Shelf",
@@ -111,17 +133,97 @@ const LANDMARK_NAMES = {
   mega_glowcap: "Great Glowcap",
   root_stump: "Root Stump",
   stone_tor: "Stone Tor",
-} satisfies Record<LandmarkId, string>;
+  ancestor_pillar: "Ancestor Pillar",
+  ash_marker: "Ash Marker",
+  glass_cairn: "Glass Cairn",
+  silt_shell: "Silt Strider Shell",
+  velothi_shrine: "Velothi Wayshrine",
+  kwama_mound: "Kwama Egg Mound",
+  pilgrim_cairn: "Pilgrim Cairn",
+  velothi_ziggurat: "Velothi Ziggurat",
+  rib_arch: "Rib Arch",
+  ash_obelisk: "Ash Obelisk",
+  old_road_causeway: "Old Road Causeway",
+  paver_debris: "Broken Paver Field",
+  scree_fan: "Ash Scree Fan",
+  shrine_debris: "Shrine Debris",
+  buried_ribs: "Half-Buried Ribs",
+  pilgrim_lantern: "Pilgrim Lantern",
+  bone_chimes: "Bone Wind Chimes",
+  ashlander_travel_pack: "Ashlander Travel Pack",
+  crystal_reeds: "Crystal Reeds",
+  fungal_bridge: "Fungal Bridge",
+  rib_remains: "Rib Remains",
+} satisfies Record<LandmarkId, string> & Record<string, string>;
+
+const LANDMARK_FLAVOR_TEXT: Partial<Record<LandmarkId, string>> & Partial<Record<string, string>> = {
+  ancestor_pillar: "Weathered stonework suggests old roads beneath the grass.",
+  ash_marker: "Charred stones point toward a harsher volcanic country.",
+  glass_cairn: "Pale shards catch the fog like frozen lightning.",
+  silt_shell: "A hollow carapace rests half-buried in windblown dust.",
+  velothi_shrine: "A small shrine watches the road with worn amber light.",
+  kwama_mound: "Packed clay rises around a clutch of amber-shelled hollows.",
+  pilgrim_cairn: "Stacked stones mark a footpath older than the ash.",
+  velothi_ziggurat: "Tiered stone rises where the old road turns toward temple country.",
+  rib_arch: "Great ribs frame the trail like the remains of a forgotten silt beast.",
+  ash_obelisk: "A black obelisk leans into the ash wind and refuses to fall.",
+  old_road_causeway: "Raised stones cross the low ground, worn smooth by pilgrim feet.",
+  paver_debris: "Half-buried pavers and old bones break the ash where a road once held together.",
+  scree_fan: "A dark fan of broken basalt has slid across the pilgrim stones.",
+  shrine_debris: "Amber inlays still glow through the collapsed plinth of a roadside shrine.",
+  buried_ribs: "White ribs surface from the ash in low arcs, as if the road was built over a giant carcass.",
+  pilgrim_lantern: "A hooded lantern keeps its watch over a road almost lost.",
+  bone_chimes: "A wind rack of black posts and pale bones clatters over the pilgrim stones.",
+  ashlander_travel_pack: "A bedroll, frame pack, and ash-dark cooking pot wait beside the pilgrim road.",
+  crystal_reeds: "Glass-bright reeds grow from brackish pools and hum in the silt wind.",
+  fungal_bridge: "A shelf of old fungus spans the wet ground like a living footbridge.",
+  rib_remains: "Low bones break the blackwater, more warning than shelter.",
+};
+
+const OLD_ROAD_LANDMARK_IDS = new Set<string>([
+  "ancestor_pillar",
+  "ash_marker",
+  "glass_cairn",
+  "silt_shell",
+  "pilgrim_cairn",
+  "rib_arch",
+  "ash_obelisk",
+  "old_road_causeway",
+  "paver_debris",
+  "scree_fan",
+  "shrine_debris",
+  "buried_ribs",
+  "pilgrim_lantern",
+  "bone_chimes",
+  "ashlander_travel_pack",
+]);
+
+const SHRINE_LANDMARK_IDS = new Set<string>([
+  "velothi_shrine",
+  "velothi_ziggurat",
+]);
+
+const CATEGORY_ROLES: Record<Exclude<DiscoveryCategory, "landmark">, DiscoveryRole> = {
+  biome: "region",
+  underground: "deep-place",
+  "regional-variant": "strange-border",
+};
 
 export function describeDiscovery(category: DiscoveryCategory, id: string): DiscoveryPresentation {
   const categoryLabel = DISCOVERY_CATEGORY_LABELS[category];
   const name = resolveDiscoveryName(category, id);
+  const role = resolveDiscoveryRole(category, id);
+  const flavorText = resolveDiscoveryFlavorText(category, id);
   const inlineLabel = `${name} [${id}]`;
   return {
     category,
     categoryLabel,
     id,
     name,
+    role,
+    roleLabel: DISCOVERY_ROLE_LABELS[role],
+    flavorText,
+    progressionHint: DISCOVERY_PROGRESSION_HINTS[category],
     inlineLabel,
     fullLabel: `${categoryLabel}: ${inlineLabel}`,
   };
@@ -138,6 +240,10 @@ export function formatDiscoveryLabel(category: DiscoveryCategory, id: string): s
   return describeDiscovery(category, id).fullLabel;
 }
 
+export function formatDiscoveryName(category: DiscoveryCategory, id: string | null, fallback = "Unknown"): string {
+  return id ? describeDiscovery(category, id).name : fallback;
+}
+
 function resolveDiscoveryName(category: DiscoveryCategory, id: string): string {
   switch (category) {
     case "biome":
@@ -149,6 +255,26 @@ function resolveDiscoveryName(category: DiscoveryCategory, id: string): string {
     case "landmark":
       return LANDMARK_NAMES[id as LandmarkId] ?? titleCaseIdentifier(id);
   }
+}
+
+function resolveDiscoveryRole(category: DiscoveryCategory, id: string): DiscoveryRole {
+  if (category !== "landmark") {
+    return CATEGORY_ROLES[category];
+  }
+  if (SHRINE_LANDMARK_IDS.has(id as LandmarkId)) {
+    return "shrine";
+  }
+  if (OLD_ROAD_LANDMARK_IDS.has(id as LandmarkId)) {
+    return "old-road";
+  }
+  return "landmark";
+}
+
+function resolveDiscoveryFlavorText(category: DiscoveryCategory, id: string): string | null {
+  if (category !== "landmark") {
+    return null;
+  }
+  return LANDMARK_FLAVOR_TEXT[id as LandmarkId] ?? null;
 }
 
 function titleCaseIdentifier(value: string): string {

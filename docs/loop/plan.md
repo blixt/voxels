@@ -2,19 +2,19 @@
 
 ## Active target
 
-Turn `/` into the first slice of a real voxel game while preserving `/bench` as the repeatable correctness and performance harness.
+Turn `/` into the first slice of a Morrowind-like voxel exploration RPG while preserving `/bench` as the repeatable correctness and performance harness.
 
 The game direction is intentionally demanding:
 
 - full-screen WebGPU canvas with click-to-capture cursor
-- Minecraft-inspired interaction model
+- exploration-first interaction model built around travel, landmarks, routes, skills, and discoveries
 - voxel scale around `10 cm^3`
 - procedurally generated world
 - effectively infinite `X/Z`
 - `Y` range `0..16383`
 - lazy generation and streaming on demand
 - architecture that can grow into persistence, remote authority, and multiplayer
-- inventory-driven gather/build loop, starting with color-coded voxels
+- no player-facing material gathering, hotbar, or block placement loop in the RPG surface
 
 ## Feedback-driven priorities
 
@@ -148,13 +148,11 @@ Status:
   - reducing real boundary remesh cost in cases other than the already-rejected face-aware invalidation path
   - hardening browser-side verification so acceptance does not depend on the shared DevTools MCP profile
 
-### Slice 5: interaction loop
+### Deprecated slice: material gather/build loop
 
-- Break/place interaction from center-screen picking.
-- Inventory with `32` stacks and `1024` voxels per stack.
-- Destroyed voxels flow into inventory.
-- Color is the first material identity (`#ABC`, `4096` possible values).
-- Unit tests for inventory rules and deterministic interaction cases.
+- The earlier break/place plus inventory slice was removed from the RPG surface.
+- Do not reintroduce hotbar, inventory panel, target placement overlay, or material collection as core player affordances.
+- Future interaction work should use exploration verbs first: inspect, discover, read, travel, rest, talk, equip, and learn.
 
 ### Slice 6: persistence boundary
 

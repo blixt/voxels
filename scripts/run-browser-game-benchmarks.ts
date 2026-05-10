@@ -18,6 +18,7 @@ import {
   writeBenchmarkArtifacts,
   type BenchmarkArtifactPaths,
   type BenchmarkHarnessOptions,
+  type BrowserGameSession,
   type BrowserBenchmarkIterationResult,
 } from "./lib/browser-game-benchmark-harness.ts";
 
@@ -46,6 +47,12 @@ interface CliOptions {
   walkSpeedMetersPerSecond: number;
   walkYawRadians: number;
   walkSeamProbeStrideFrames: number;
+  lodPersistenceIterations: number;
+  lodPersistenceTimeoutMs: number;
+  lodPersistenceMaxFrames: number;
+  lodPersistenceFarMaxFrames: number | null;
+  lodPersistenceStoreMaxFrames: number | null;
+  lodPersistenceChunkDelta: number;
 }
 
 interface BrowserGameBenchmarksReport {
@@ -61,9 +68,102 @@ interface BrowserGameBenchmarksReport {
     description: string;
     iterationCount: number;
     measuredIterationCount: number;
-    csvPaths: BenchmarkArtifactPaths;
-    aggregate: Record<string, number | null>;
+    csvPaths?: BenchmarkArtifactPaths | null;
+    artifactPaths?: Record<string, string>;
+    aggregate: Record<string, number | string | boolean | null>;
   }>;
+}
+
+interface LodPersistencePhaseSummary {
+  label: string;
+  frameCount: number;
+  settled: boolean;
+  elapsedMs: number;
+  totalGenerated: number;
+  totalMemoryCacheHits: number;
+  totalEmptyCacheHits: number;
+  totalDiskCacheHits: number;
+  totalDiskCacheMisses: number;
+  totalWorkerGenerated: number;
+  totalScheduledWorkerRequests: number;
+  totalScheduledDiskRequests: number;
+  totalScheduledDiskStores: number;
+  totalCompletedDiskStores: number;
+  totalDownsampleMs: number;
+  totalMeshMs: number;
+  totalGeneratedByLevel: readonly number[];
+  totalMemoryCacheHitsByLevel: readonly number[];
+  totalEmptyCacheHitsByLevel: readonly number[];
+  totalDiskCacheHitsByLevel: readonly number[];
+  totalWorkerGeneratedByLevel: readonly number[];
+  maxLodChunkMs: number;
+  maxWorstRecentFrameMs: number;
+  maxRecentHitchCount: number;
+  maxRecentDroppedFrameEstimate: number;
+  finalPendingChunks: number;
+  finalLodPendingChunks: number;
+  finalLodPendingPlanning: number;
+  finalLodPendingDiskCache: number;
+  finalLodPendingDiskCacheByLevel: readonly number[];
+  finalLodPendingGenerationBudget: number;
+  finalLodPendingGenerationBudgetByLevel: readonly number[];
+  finalLodPendingPartialBuild: number;
+  finalLodPendingPartialBuildByLevel: readonly number[];
+  finalLodPendingPrepared: number;
+  finalLodPendingPreparedByLevel: readonly number[];
+  finalLodPendingInvalidatedEviction: number;
+  finalLodChunkCount: number;
+  finalLodChunkCountByLevel: readonly number[];
+  finalLodDrawCalls: number;
+  finalLodDrawCallsByLevel: readonly number[];
+  finalLodGeneratedByLevel: readonly number[];
+  finalLodCacheHitsByLevel: readonly number[];
+  finalLodEmptyCacheHitsByLevel: readonly number[];
+  finalLodDiskCacheHitsByLevel: readonly number[];
+  finalLodWorkerGeneratedByLevel: readonly number[];
+  finalCumulativeGenerated: number;
+  finalCumulativeWorkerGenerated: number;
+  finalCumulativeDiskCacheHits: number;
+  finalCumulativeDiskCacheMisses: number;
+  finalCumulativeScheduledDiskRequests: number;
+  finalCumulativeScheduledDiskStores: number;
+  finalCumulativeCompletedDiskStores: number;
+  finalCoverage: {
+    sampleCount: number;
+    uncoveredGapCount: number;
+    handoffHoleCount: number;
+    residentOverlapCount: number;
+    bandOverlapCount: number;
+    waterOverlapCount: number;
+    maxSeamGapMeters: number;
+    maxLodOverlapMeters: number;
+    residentOverlapSamples?: readonly unknown[];
+    bandOverlapSamples?: readonly unknown[];
+    uncoveredGapSamples?: readonly unknown[];
+    handoffHoleSamples?: readonly unknown[];
+  };
+  lastHitchCause: string;
+  lastHitchWallMs: number;
+}
+
+interface LodPersistenceIteration {
+  iteration: number;
+  originPosition: readonly number[];
+  farPosition: readonly number[];
+  coldOrigin: LodPersistencePhaseSummary;
+  farEviction: LodPersistencePhaseSummary;
+  storeFlush: LodPersistencePhaseSummary;
+  reloadOrigin: LodPersistencePhaseSummary;
+  pass: boolean;
+  failures: string[];
+}
+
+interface LodPersistenceScenarioResult {
+  scenarioId: "lod-idb-persistence-reload";
+  description: string;
+  iterations: LodPersistenceIteration[];
+  aggregate: Record<string, number | string | boolean | null>;
+  artifactPath: string;
 }
 
 const options = parseCli(Bun.argv);
@@ -135,6 +235,7 @@ await withBrowserGameSession({
       {
         buildIterationRow(iteration, memory) {
           const drops = countFrameDrops(iteration.result.samples.map((sample) => sample.gameplayFrameMs));
+          const { maxLodDrawCallsByLevel, ...summary } = iteration.result.summary;
           return {
             scenarioId: iteration.scenarioId,
             warmup: iteration.warmup,
@@ -142,7 +243,8 @@ await withBrowserGameSession({
             globalIndex: iteration.globalIndex,
             setupElapsedMs: iteration.setupElapsedMs,
             benchmarkElapsedMs: iteration.benchmarkElapsedMs,
-            ...iteration.result.summary,
+            ...summary,
+            maxLodDrawCallsByLevel: maxLodDrawCallsByLevel.join("/"),
             framesOver16_67Ms: drops.framesOver16_67Ms,
             framesOver33_33Ms: drops.framesOver33_33Ms,
             framesOver50Ms: drops.framesOver50Ms,
@@ -315,6 +417,20 @@ await withBrowserGameSession({
     };
   }
 
+  let lodPersistenceResult: LodPersistenceScenarioResult | null = null;
+  if (options.lodPersistenceIterations > 0) {
+    lodPersistenceResult = await runLodPersistenceScenario(session, options, outputDir);
+    scenarioReports[lodPersistenceResult.scenarioId] = {
+      description: lodPersistenceResult.description,
+      iterationCount: lodPersistenceResult.iterations.length,
+      measuredIterationCount: lodPersistenceResult.iterations.length,
+      artifactPaths: {
+        reportJsonPath: lodPersistenceResult.artifactPath,
+      },
+      aggregate: lodPersistenceResult.aggregate,
+    };
+  }
+
   const reportPath = join(outputDir, "report.json");
   const report: BrowserGameBenchmarksReport = {
     generatedAt: new Date().toISOString(),
@@ -339,6 +455,12 @@ await withBrowserGameSession({
       walkSpeedMetersPerSecond: options.walkSpeedMetersPerSecond,
       walkYawRadians: options.walkYawRadians,
       walkSeamProbeStrideFrames: options.walkSeamProbeStrideFrames,
+      lodPersistenceIterations: options.lodPersistenceIterations,
+      lodPersistenceTimeoutMs: options.lodPersistenceTimeoutMs,
+      lodPersistenceMaxFrames: options.lodPersistenceMaxFrames,
+      lodPersistenceFarMaxFrames: options.lodPersistenceFarMaxFrames,
+      lodPersistenceStoreMaxFrames: options.lodPersistenceStoreMaxFrames,
+      lodPersistenceChunkDelta: options.lodPersistenceChunkDelta,
       viewportWidth: options.viewportWidth,
       viewportHeight: options.viewportHeight,
       headless: options.headless,
@@ -348,7 +470,10 @@ await withBrowserGameSession({
   };
   await Bun.write(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 
-  printSummary(outputDir, reportPath, startupArtifacts, walkArtifacts, startupResults, walkResults);
+  printSummary(outputDir, reportPath, startupArtifacts, walkArtifacts, startupResults, walkResults, lodPersistenceResult);
+  if (lodPersistenceResult && lodPersistenceResult.aggregate.pass !== true) {
+    process.exitCode = 1;
+  }
 });
 
 function parseCli(argv: readonly string[]): CliOptions {
@@ -376,6 +501,653 @@ function parseCli(argv: readonly string[]): CliOptions {
     walkSpeedMetersPerSecond: readPositiveFloat(readFlag(args, "--walk-speed"), 4.6),
     walkYawRadians: readFloat(readFlag(args, "--walk-yaw"), 0),
     walkSeamProbeStrideFrames: readPositiveInt(readFlag(args, "--walk-seam-stride"), 15),
+    lodPersistenceIterations: readNonNegativeInt(readFlag(args, "--lod-persistence-iterations"), 0),
+    lodPersistenceTimeoutMs: readPositiveInt(readFlag(args, "--lod-persistence-timeout-ms"), 180_000),
+    lodPersistenceMaxFrames: readPositiveInt(readFlag(args, "--lod-persistence-max-frames"), 240),
+    lodPersistenceFarMaxFrames: readOptionalPositiveInt(readFlag(args, "--lod-persistence-far-max-frames")),
+    lodPersistenceStoreMaxFrames: readOptionalPositiveInt(readFlag(args, "--lod-persistence-store-max-frames")),
+    lodPersistenceChunkDelta: readNonNegativeInt(readFlag(args, "--lod-persistence-chunk-delta"), 0),
+  };
+}
+
+async function runLodPersistenceScenario(
+  session: BrowserGameSession,
+  options: CliOptions,
+  outputDir: string,
+): Promise<LodPersistenceScenarioResult> {
+  const scenarioId = "lod-idb-persistence-reload";
+  const description = "Derived LOD IndexedDB persistence across reload after JS memory is cleared";
+  const iterations: LodPersistenceIteration[] = [];
+  for (let iteration = 1; iteration <= options.lodPersistenceIterations; iteration += 1) {
+    console.log(`[${scenarioId}] starting measured iteration ${iteration}/${options.lodPersistenceIterations}`);
+    await session.navigateToGame({
+      clearStorage: true,
+      query: { benchmarkBootstrap: 1 },
+    });
+    await session.waitForBootstrapBenchmarkComplete(options.lodPersistenceTimeoutMs);
+    await session.waitForGameReady(options.lodPersistenceTimeoutMs);
+    const populate = await evaluateWithTimeout<Omit<LodPersistenceIteration, "iteration" | "reloadOrigin" | "pass" | "failures">>(
+      session,
+      buildLodPersistencePopulateExpression({
+        maxFrames: options.lodPersistenceMaxFrames,
+        farMaxFrames: options.lodPersistenceFarMaxFrames,
+        storeMaxFrames: options.lodPersistenceStoreMaxFrames,
+        chunkDelta: options.lodPersistenceChunkDelta,
+      }),
+      options.lodPersistenceTimeoutMs,
+      "LOD persistence populate probe",
+    );
+
+    await session.navigateToGame({
+      clearStorage: false,
+    });
+    await session.waitForGameReady(options.lodPersistenceTimeoutMs);
+    const reloadOrigin = await evaluateWithTimeout<LodPersistencePhaseSummary>(
+      session,
+      buildLodPersistenceReloadExpression({
+        maxFrames: options.lodPersistenceMaxFrames,
+        originPosition: populate.originPosition,
+      }),
+      options.lodPersistenceTimeoutMs,
+      "LOD persistence reload probe",
+    );
+    const failures = validateLodPersistenceIteration({
+      iteration,
+      ...populate,
+      reloadOrigin,
+      pass: true,
+      failures: [],
+    });
+    iterations.push({
+      iteration,
+      ...populate,
+      reloadOrigin,
+      pass: failures.length === 0,
+      failures,
+    });
+  }
+
+  const artifactPath = join(outputDir, `${scenarioId}.json`);
+  const aggregate = aggregateLodPersistenceIterations(iterations);
+  const result: LodPersistenceScenarioResult = {
+    scenarioId,
+    description,
+    iterations,
+    aggregate,
+    artifactPath,
+  };
+  await Bun.write(artifactPath, `${JSON.stringify(result, null, 2)}\n`);
+  return result;
+}
+
+async function evaluateWithTimeout<T>(
+  session: BrowserGameSession,
+  expression: string,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      session.evaluate<T>(expression),
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${timeoutMs} ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function buildLodPersistencePopulateExpression(options: {
+  maxFrames: number;
+  farMaxFrames: number | null;
+  storeMaxFrames: number | null;
+  chunkDelta: number;
+}): string {
+  return `(async () => {
+    ${buildLodPersistencePageHarnessSource()}
+    return await lodPersistencePopulatePageProbe(${JSON.stringify(options)});
+  })()`;
+}
+
+function buildLodPersistenceReloadExpression(options: {
+  maxFrames: number;
+  originPosition: readonly number[];
+}): string {
+  return `(async () => {
+    ${buildLodPersistencePageHarnessSource()}
+    return await lodPersistenceReloadPageProbe(${JSON.stringify(options)});
+  })()`;
+}
+
+function buildLodPersistencePageHarnessSource(): string {
+  return [
+    lodPersistencePopulatePageProbe,
+    lodPersistenceReloadPageProbe,
+    driveLodPersistencePhase,
+    pumpLodPersistencePhase,
+    buildLodPersistencePhaseSummary,
+    buildCurrentLodPersistencePhaseSummary,
+    isLodPersistenceSettled,
+    summarizeLodCoverageForPersistence,
+    isLodPersistenceCoverageClean,
+  ].map((fn) => fn.toString()).join("\n");
+}
+
+async function lodPersistencePopulatePageProbe(rawOptions: {
+  maxFrames: number;
+  farMaxFrames: number | null;
+  storeMaxFrames: number | null;
+  chunkDelta: number;
+}): Promise<Omit<LodPersistenceIteration, "iteration" | "reloadOrigin" | "pass" | "failures">> {
+  const game = window.__VOXELS_GAME__;
+  if (!game) {
+    throw new Error("window.__VOXELS_GAME__ is not available");
+  }
+  const controller = game.controller;
+  controller.stop();
+  try {
+    game.setViewDistance(1);
+    const originSnapshot = game.snapshot();
+    const originPosition = [...originSnapshot.position];
+    const chunkSize = Math.max(1, controller.world.chunkSize);
+    const chunkDelta = Math.max(0, Math.floor(rawOptions.chunkDelta));
+    const farPosition = [
+      originPosition[0] + chunkSize * chunkDelta,
+      originPosition[1],
+      originPosition[2] + chunkSize * chunkDelta,
+    ];
+    const maxFrames = Math.max(1, Math.floor(rawOptions.maxFrames));
+    const farMaxFrames = rawOptions.farMaxFrames === null
+      ? maxFrames
+      : Math.max(1, Math.floor(rawOptions.farMaxFrames));
+    const storeMaxFrames = rawOptions.storeMaxFrames === null
+      ? maxFrames
+      : Math.max(1, Math.floor(rawOptions.storeMaxFrames));
+    const coldOrigin = await driveLodPersistencePhase(game, "cold-origin", originPosition, maxFrames, () => false);
+    const storeFlush = await pumpLodPersistencePhase(game, "store-flush", storeMaxFrames, (phase) =>
+      phase.totalCompletedDiskStores > 0 || phase.totalScheduledDiskStores > 0,
+    );
+    const farEviction = chunkDelta > 0
+      ? await driveLodPersistencePhase(game, "far-eviction", farPosition, farMaxFrames, () => false)
+      : buildCurrentLodPersistencePhaseSummary(game, "far-eviction-skipped");
+    return {
+      originPosition,
+      farPosition,
+      coldOrigin,
+      farEviction,
+      storeFlush,
+    };
+  } finally {
+    controller.start();
+  }
+}
+
+async function lodPersistenceReloadPageProbe(rawOptions: {
+  maxFrames: number;
+  originPosition: readonly number[];
+}): Promise<LodPersistencePhaseSummary> {
+  const game = window.__VOXELS_GAME__;
+  if (!game) {
+    throw new Error("window.__VOXELS_GAME__ is not available");
+  }
+  const controller = game.controller;
+  controller.stop();
+  try {
+    game.setViewDistance(1);
+    const origin = rawOptions.originPosition;
+    return await driveLodPersistencePhase(
+      game,
+      "reload-origin",
+      [Number(origin[0]), Number(origin[1]), Number(origin[2])],
+      Math.max(1, Math.floor(rawOptions.maxFrames)),
+      (phase) => phase.totalDiskCacheHits > 0,
+    );
+  } finally {
+    controller.start();
+  }
+}
+
+async function driveLodPersistencePhase(
+  game: NonNullable<Window["__VOXELS_GAME__"]>,
+  label: string,
+  position: readonly number[],
+  maxFrames: number,
+  earlyExit: (phase: LodPersistencePhaseSummary) => boolean,
+): Promise<LodPersistencePhaseSummary> {
+  return await pumpLodPersistencePhase(game, label, maxFrames, earlyExit, [
+    Number(position[0]),
+    Number(position[1]),
+    Number(position[2]),
+  ]);
+}
+
+async function pumpLodPersistencePhase(
+  game: NonNullable<Window["__VOXELS_GAME__"]>,
+  label: string,
+  maxFrames: number,
+  earlyExit: (phase: LodPersistencePhaseSummary) => boolean,
+  position?: readonly number[],
+): Promise<LodPersistencePhaseSummary> {
+  const startedAt = performance.now();
+  let frameCount = 0;
+  let totalGenerated = 0;
+  let totalMemoryCacheHits = 0;
+  let totalEmptyCacheHits = 0;
+  let totalDiskCacheHits = 0;
+  let totalDiskCacheMisses = 0;
+  let totalWorkerGenerated = 0;
+  let totalScheduledWorkerRequests = 0;
+  let totalScheduledDiskRequests = 0;
+  let totalScheduledDiskStores = 0;
+  let totalCompletedDiskStores = 0;
+  let totalDownsampleMs = 0;
+  let totalMeshMs = 0;
+  const totalGeneratedByLevel = [0, 0, 0, 0, 0];
+  const totalMemoryCacheHitsByLevel = [0, 0, 0, 0, 0];
+  const totalEmptyCacheHitsByLevel = [0, 0, 0, 0, 0];
+  const totalDiskCacheHitsByLevel = [0, 0, 0, 0, 0];
+  const totalWorkerGeneratedByLevel = [0, 0, 0, 0, 0];
+  let maxLodChunkMs = 0;
+  let maxWorstRecentFrameMs = 0;
+  let maxRecentHitchCount = 0;
+  let maxRecentDroppedFrameEstimate = 0;
+  let finalSnapshot = game.snapshot();
+  const batchFrames = 4;
+  const addLevelCounts = (target: number[], source: readonly number[]): void => {
+    for (let index = 0; index < target.length; index += 1) {
+      target[index] += source[index] ?? 0;
+    }
+  };
+
+  while (frameCount < maxFrames) {
+    const remainingFrames = maxFrames - frameCount;
+    const pump = await game.pumpWorldForBenchmark(
+      position && frameCount === 0 ? [Number(position[0]), Number(position[1]), Number(position[2])] : undefined,
+      {
+        maxFrames: Math.min(batchFrames, remainingFrames),
+        maxGenerateLodChunks: 12,
+        maxLodPlanMs: 12,
+        maxLodWorkMs: 12,
+        maxEvictChunks: 48,
+        maxMeshRebuilds: 4,
+        stopWhenSettled: false,
+      },
+    );
+    frameCount += pump.frameCount;
+    finalSnapshot = pump.finalSnapshot;
+    totalGenerated += pump.totalGenerated;
+    totalMemoryCacheHits += pump.totalMemoryCacheHits;
+    totalEmptyCacheHits += pump.totalEmptyCacheHits;
+    totalDiskCacheHits += pump.totalDiskCacheHits;
+    totalDiskCacheMisses += pump.totalDiskCacheMisses;
+    totalWorkerGenerated += pump.totalWorkerGenerated;
+    totalScheduledWorkerRequests += pump.totalScheduledWorkerRequests;
+    totalScheduledDiskRequests += pump.totalScheduledDiskRequests;
+    totalScheduledDiskStores += pump.totalScheduledDiskStores;
+    totalCompletedDiskStores += pump.totalCompletedDiskStores;
+    totalDownsampleMs += pump.totalDownsampleMs;
+    totalMeshMs += pump.totalMeshMs;
+    addLevelCounts(totalGeneratedByLevel, pump.totalGeneratedByLevel);
+    addLevelCounts(totalMemoryCacheHitsByLevel, pump.totalMemoryCacheHitsByLevel);
+    addLevelCounts(totalEmptyCacheHitsByLevel, pump.totalEmptyCacheHitsByLevel);
+    addLevelCounts(totalDiskCacheHitsByLevel, pump.totalDiskCacheHitsByLevel);
+    addLevelCounts(totalWorkerGeneratedByLevel, pump.totalWorkerGeneratedByLevel);
+    maxLodChunkMs = Math.max(maxLodChunkMs, pump.maxLodChunkMs);
+    maxWorstRecentFrameMs = Math.max(maxWorstRecentFrameMs, pump.maxWorstRecentFrameMs);
+    maxRecentHitchCount = Math.max(maxRecentHitchCount, pump.maxRecentHitchCount);
+    maxRecentDroppedFrameEstimate = Math.max(maxRecentDroppedFrameEstimate, pump.maxRecentDroppedFrameEstimate);
+    const finalCoverage = summarizeLodCoverageForPersistence(game);
+    const settled = pump.settled && isLodPersistenceCoverageClean(finalCoverage);
+    const partial = buildLodPersistencePhaseSummary({
+      label,
+      frameCount,
+      settled,
+      elapsedMs: performance.now() - startedAt,
+      totalGenerated,
+      totalMemoryCacheHits,
+      totalEmptyCacheHits,
+      totalDiskCacheHits,
+      totalDiskCacheMisses,
+      totalWorkerGenerated,
+      totalScheduledWorkerRequests,
+      totalScheduledDiskRequests,
+      totalScheduledDiskStores,
+      totalCompletedDiskStores,
+      totalDownsampleMs,
+      totalMeshMs,
+      totalGeneratedByLevel,
+      totalMemoryCacheHitsByLevel,
+      totalEmptyCacheHitsByLevel,
+      totalDiskCacheHitsByLevel,
+      totalWorkerGeneratedByLevel,
+      maxLodChunkMs,
+      maxWorstRecentFrameMs,
+      maxRecentHitchCount,
+      maxRecentDroppedFrameEstimate,
+      finalSnapshot,
+      finalCoverage,
+    });
+    if (partial.settled && earlyExit(partial)) {
+      return partial;
+    }
+    if (partial.settled && frameCount >= 3 && !earlyExit(partial)) {
+      if (label !== "store-flush" && label !== "reload-origin") {
+        return partial;
+      }
+    }
+  }
+
+  const finalCoverage = summarizeLodCoverageForPersistence(game);
+  return buildLodPersistencePhaseSummary({
+    label,
+    frameCount,
+    settled: isLodPersistenceSettled(finalSnapshot) && isLodPersistenceCoverageClean(finalCoverage),
+    elapsedMs: performance.now() - startedAt,
+    totalGenerated,
+    totalMemoryCacheHits,
+    totalEmptyCacheHits,
+    totalDiskCacheHits,
+    totalDiskCacheMisses,
+    totalWorkerGenerated,
+    totalScheduledWorkerRequests,
+    totalScheduledDiskRequests,
+    totalScheduledDiskStores,
+    totalCompletedDiskStores,
+    totalDownsampleMs,
+    totalMeshMs,
+    totalGeneratedByLevel,
+    totalMemoryCacheHitsByLevel,
+    totalEmptyCacheHitsByLevel,
+    totalDiskCacheHitsByLevel,
+    totalWorkerGeneratedByLevel,
+    maxLodChunkMs,
+    maxWorstRecentFrameMs,
+    maxRecentHitchCount,
+    maxRecentDroppedFrameEstimate,
+    finalSnapshot,
+    finalCoverage,
+  });
+}
+
+function buildLodPersistencePhaseSummary(input: {
+  label: string;
+  frameCount: number;
+  settled: boolean;
+  elapsedMs: number;
+  totalGenerated: number;
+  totalMemoryCacheHits: number;
+  totalEmptyCacheHits: number;
+  totalDiskCacheHits: number;
+  totalDiskCacheMisses: number;
+  totalWorkerGenerated: number;
+  totalScheduledWorkerRequests: number;
+  totalScheduledDiskRequests: number;
+  totalScheduledDiskStores: number;
+  totalCompletedDiskStores: number;
+  totalDownsampleMs: number;
+  totalMeshMs: number;
+  totalGeneratedByLevel: readonly number[];
+  totalMemoryCacheHitsByLevel: readonly number[];
+  totalEmptyCacheHitsByLevel: readonly number[];
+  totalDiskCacheHitsByLevel: readonly number[];
+  totalWorkerGeneratedByLevel: readonly number[];
+  maxLodChunkMs: number;
+  maxWorstRecentFrameMs: number;
+  maxRecentHitchCount: number;
+  maxRecentDroppedFrameEstimate: number;
+  finalSnapshot: ReturnType<NonNullable<Window["__VOXELS_GAME__"]>["snapshot"]>;
+  finalCoverage: LodPersistencePhaseSummary["finalCoverage"];
+}): LodPersistencePhaseSummary {
+  return {
+    label: input.label,
+    frameCount: input.frameCount,
+    settled: input.settled,
+    elapsedMs: input.elapsedMs,
+    totalGenerated: input.totalGenerated,
+    totalMemoryCacheHits: input.totalMemoryCacheHits,
+    totalEmptyCacheHits: input.totalEmptyCacheHits,
+    totalDiskCacheHits: input.totalDiskCacheHits,
+    totalDiskCacheMisses: input.totalDiskCacheMisses,
+    totalWorkerGenerated: input.totalWorkerGenerated,
+    totalScheduledWorkerRequests: input.totalScheduledWorkerRequests,
+    totalScheduledDiskRequests: input.totalScheduledDiskRequests,
+    totalScheduledDiskStores: input.totalScheduledDiskStores,
+    totalCompletedDiskStores: input.totalCompletedDiskStores,
+    totalDownsampleMs: input.totalDownsampleMs,
+    totalMeshMs: input.totalMeshMs,
+    totalGeneratedByLevel: [...input.totalGeneratedByLevel],
+    totalMemoryCacheHitsByLevel: [...input.totalMemoryCacheHitsByLevel],
+    totalEmptyCacheHitsByLevel: [...input.totalEmptyCacheHitsByLevel],
+    totalDiskCacheHitsByLevel: [...input.totalDiskCacheHitsByLevel],
+    totalWorkerGeneratedByLevel: [...input.totalWorkerGeneratedByLevel],
+    maxLodChunkMs: input.maxLodChunkMs,
+    maxWorstRecentFrameMs: input.maxWorstRecentFrameMs,
+    maxRecentHitchCount: input.maxRecentHitchCount,
+    maxRecentDroppedFrameEstimate: input.maxRecentDroppedFrameEstimate,
+    finalPendingChunks: input.finalSnapshot.streamPendingChunks,
+    finalLodPendingChunks: input.finalSnapshot.lodPendingChunks,
+    finalLodPendingPlanning: input.finalSnapshot.lodPendingPlanning,
+    finalLodPendingDiskCache: input.finalSnapshot.lodPendingDiskCache,
+    finalLodPendingDiskCacheByLevel: [...input.finalSnapshot.lodPendingDiskCacheByLevel],
+    finalLodPendingGenerationBudget: input.finalSnapshot.lodPendingGenerationBudget,
+    finalLodPendingGenerationBudgetByLevel: [...input.finalSnapshot.lodPendingGenerationBudgetByLevel],
+    finalLodPendingPartialBuild: input.finalSnapshot.lodPendingPartialBuild,
+    finalLodPendingPartialBuildByLevel: [...input.finalSnapshot.lodPendingPartialBuildByLevel],
+    finalLodPendingPrepared: input.finalSnapshot.lodPendingPrepared,
+    finalLodPendingPreparedByLevel: [...input.finalSnapshot.lodPendingPreparedByLevel],
+    finalLodPendingInvalidatedEviction: input.finalSnapshot.lodPendingInvalidatedEviction,
+    finalLodChunkCount: input.finalSnapshot.lodChunkCount,
+    finalLodChunkCountByLevel: [...input.finalSnapshot.lodChunkCountByLevel],
+    finalLodDrawCalls: input.finalSnapshot.lodDrawCalls,
+    finalLodDrawCallsByLevel: [...input.finalSnapshot.lodDrawCallsByLevel],
+    finalLodGeneratedByLevel: [...input.finalSnapshot.lodGeneratedChunksByLevel],
+    finalLodCacheHitsByLevel: [...input.finalSnapshot.lodCacheHitsByLevel],
+    finalLodEmptyCacheHitsByLevel: [...input.finalSnapshot.lodEmptyCacheHitsByLevel],
+    finalLodDiskCacheHitsByLevel: [...input.finalSnapshot.lodDiskCacheHitsByLevel],
+    finalLodWorkerGeneratedByLevel: [...input.finalSnapshot.lodWorkerGeneratedByLevel],
+    finalCumulativeGenerated: input.finalSnapshot.cumulativeLodGeneratedChunks,
+    finalCumulativeWorkerGenerated: input.finalSnapshot.cumulativeLodWorkerGenerated,
+    finalCumulativeDiskCacheHits: input.finalSnapshot.cumulativeLodDiskCacheHits,
+    finalCumulativeDiskCacheMisses: input.finalSnapshot.cumulativeLodDiskCacheMisses,
+    finalCumulativeScheduledDiskRequests: input.finalSnapshot.cumulativeLodScheduledDiskRequests,
+    finalCumulativeScheduledDiskStores: input.finalSnapshot.cumulativeLodScheduledDiskStores,
+    finalCumulativeCompletedDiskStores: input.finalSnapshot.cumulativeLodCompletedDiskStores,
+    finalCoverage: input.finalCoverage,
+    lastHitchCause: input.finalSnapshot.lastHitchAttribution.cause,
+    lastHitchWallMs: input.finalSnapshot.lastHitchAttribution.wallMs,
+  };
+}
+
+function buildCurrentLodPersistencePhaseSummary(
+  game: NonNullable<Window["__VOXELS_GAME__"]>,
+  label: string,
+): LodPersistencePhaseSummary {
+  const snapshot = game.snapshot();
+  return buildLodPersistencePhaseSummary({
+    label,
+    frameCount: 0,
+    settled: isLodPersistenceSettled(snapshot),
+    elapsedMs: 0,
+    totalGenerated: 0,
+    totalMemoryCacheHits: 0,
+    totalEmptyCacheHits: 0,
+    totalDiskCacheHits: 0,
+    totalDiskCacheMisses: 0,
+    totalWorkerGenerated: 0,
+    totalScheduledWorkerRequests: 0,
+    totalScheduledDiskRequests: 0,
+    totalScheduledDiskStores: 0,
+    totalCompletedDiskStores: 0,
+    totalDownsampleMs: 0,
+    totalMeshMs: 0,
+    totalGeneratedByLevel: [0, 0, 0, 0, 0],
+    totalMemoryCacheHitsByLevel: [0, 0, 0, 0, 0],
+    totalEmptyCacheHitsByLevel: [0, 0, 0, 0, 0],
+    totalDiskCacheHitsByLevel: [0, 0, 0, 0, 0],
+    totalWorkerGeneratedByLevel: [0, 0, 0, 0, 0],
+    maxLodChunkMs: 0,
+    maxWorstRecentFrameMs: snapshot.frameTiming.worstRecentFrameMs,
+    maxRecentHitchCount: snapshot.frameTiming.recentHitchCount,
+    maxRecentDroppedFrameEstimate: snapshot.frameTiming.recentDroppedFrameEstimate,
+    finalSnapshot: snapshot,
+    finalCoverage: summarizeLodCoverageForPersistence(game),
+  });
+}
+
+function isLodPersistenceSettled(snapshot: ReturnType<NonNullable<Window["__VOXELS_GAME__"]>["snapshot"]>): boolean {
+  return snapshot.streamPendingChunks === 0
+    && snapshot.lodPendingChunks === 0
+    && snapshot.meshNewChunks === 0
+    && snapshot.meshRemeshChunks === 0
+    && snapshot.bootstrapPlayableReady === true;
+}
+
+function summarizeLodCoverageForPersistence(
+  game: NonNullable<Window["__VOXELS_GAME__"]>,
+): LodPersistencePhaseSummary["finalCoverage"] {
+  const coverage = game.probeLodCoverage(48, 1.6);
+  const maxSeamGapMeters = Math.max(
+    0,
+    ...coverage.uncoveredGapSamples.map((sample) => sample.distanceMeters),
+    ...coverage.handoffHoleSamples.map((sample) => sample.distanceMeters),
+  );
+  const maxLodOverlapMeters = Math.max(
+    0,
+    ...coverage.residentOverlapSamples.map((sample) => sample.distanceMeters),
+    ...coverage.bandOverlapSamples.map((sample) => sample.distanceMeters),
+    ...coverage.waterOverlapSamples.map((sample) => sample.distanceMeters),
+  );
+  return {
+    sampleCount: coverage.sampleCount,
+    uncoveredGapCount: coverage.uncoveredGapCount,
+    handoffHoleCount: coverage.handoffHoleCount,
+    residentOverlapCount: coverage.residentOverlapCount,
+    bandOverlapCount: coverage.bandOverlapCount,
+    waterOverlapCount: coverage.waterOverlapCount,
+    maxSeamGapMeters,
+    maxLodOverlapMeters,
+    residentOverlapSamples: coverage.residentOverlapSamples,
+    bandOverlapSamples: coverage.bandOverlapSamples,
+    uncoveredGapSamples: coverage.uncoveredGapSamples,
+    handoffHoleSamples: coverage.handoffHoleSamples,
+  };
+}
+
+function isLodPersistenceCoverageClean(coverage: LodPersistencePhaseSummary["finalCoverage"]): boolean {
+  return coverage.uncoveredGapCount === 0
+    && coverage.handoffHoleCount === 0
+    && coverage.residentOverlapCount === 0
+    && coverage.bandOverlapCount === 0
+    && coverage.waterOverlapCount === 0;
+}
+
+function validateLodPersistenceIteration(iteration: LodPersistenceIteration): string[] {
+  const failures: string[] = [];
+  if (!iteration.coldOrigin.settled && iteration.coldOrigin.finalLodPendingChunks > 8) {
+    failures.push("cold origin phase did not settle");
+  }
+  const populateScheduledStores = iteration.coldOrigin.totalScheduledDiskStores + iteration.storeFlush.totalScheduledDiskStores;
+  const populateCompletedStores = iteration.coldOrigin.totalCompletedDiskStores + iteration.storeFlush.totalCompletedDiskStores;
+  if (populateCompletedStores <= 0 && populateScheduledStores <= 0) {
+    failures.push("populate run did not schedule or complete derived LOD disk stores");
+  }
+  if (!iteration.reloadOrigin.settled && iteration.reloadOrigin.finalLodPendingChunks > 8) {
+    failures.push("reload origin phase did not settle");
+  }
+  if (iteration.reloadOrigin.totalScheduledDiskRequests <= 0 && iteration.reloadOrigin.finalCumulativeScheduledDiskRequests <= 0) {
+    failures.push("reload origin did not schedule derived LOD disk reads");
+  }
+  if (iteration.reloadOrigin.totalDiskCacheHits <= 0 && iteration.reloadOrigin.finalCumulativeDiskCacheHits <= 0) {
+    failures.push("reload origin did not adopt any derived LOD chunks from IndexedDB");
+  }
+  if (iteration.reloadOrigin.totalGenerated >= iteration.coldOrigin.totalGenerated && iteration.reloadOrigin.finalCumulativeDiskCacheHits <= 0) {
+    failures.push("reload origin generated at least as many LOD chunks as cold origin");
+  }
+  for (const phase of [iteration.coldOrigin, iteration.reloadOrigin]) {
+    if (phase.finalCoverage.uncoveredGapCount > 0) {
+      failures.push(`${phase.label} has ${phase.finalCoverage.uncoveredGapCount} uncovered LOD sample gaps`);
+    }
+    if (phase.finalCoverage.handoffHoleCount > 0) {
+      failures.push(`${phase.label} has ${phase.finalCoverage.handoffHoleCount} LOD handoff holes`);
+    }
+    if (phase.finalCoverage.residentOverlapCount > 0 || phase.finalCoverage.bandOverlapCount > 0) {
+      failures.push(`${phase.label} has LOD overlap samples`);
+    }
+  }
+  if (
+    iteration.farEviction.label !== "far-eviction-skipped"
+    && (
+      iteration.farEviction.finalCoverage.uncoveredGapCount > 0
+      || iteration.farEviction.finalCoverage.handoffHoleCount > 0
+      || iteration.farEviction.finalCoverage.residentOverlapCount > 0
+      || iteration.farEviction.finalCoverage.bandOverlapCount > 0
+      || iteration.farEviction.finalCoverage.waterOverlapCount > 0
+    )
+  ) {
+    failures.push("far-eviction has LOD coverage correctness samples");
+  }
+  return failures;
+}
+
+function aggregateLodPersistenceIterations(
+  iterations: readonly LodPersistenceIteration[],
+): Record<string, number | string | boolean | null> {
+  const reloads = iterations.map((iteration) => iteration.reloadOrigin);
+  const cold = iterations.map((iteration) => iteration.coldOrigin);
+  const stores = iterations.map((iteration) => iteration.storeFlush);
+  const far = iterations
+    .map((iteration) => iteration.farEviction)
+    .filter((phase) => phase.label !== "far-eviction-skipped");
+  const failures = iterations.flatMap((iteration) => iteration.failures);
+  const farUnsettledCount = far.filter((phase) => !phase.settled).length;
+  return {
+    pass: failures.length === 0,
+    failureCount: failures.length,
+    farSettlePass: farUnsettledCount === 0,
+    farUnsettledCount,
+    iterationCount: iterations.length,
+    totalReloadDiskCacheHits: sumNumbers(reloads.map((phase) => phase.totalDiskCacheHits)),
+    totalReloadCumulativeDiskCacheHits: sumNumbers(reloads.map((phase) => phase.finalCumulativeDiskCacheHits)),
+    totalReloadDiskCacheMisses: sumNumbers(reloads.map((phase) => phase.totalDiskCacheMisses)),
+    totalReloadScheduledDiskRequests: sumNumbers(reloads.map((phase) => phase.totalScheduledDiskRequests)),
+    totalReloadCumulativeScheduledDiskRequests: sumNumbers(reloads.map((phase) => phase.finalCumulativeScheduledDiskRequests)),
+    totalStoreScheduledDiskStores: sumNumbers(stores.map((phase) => phase.totalScheduledDiskStores)),
+    totalStoreCompletedDiskStores: sumNumbers(stores.map((phase) => phase.totalCompletedDiskStores)),
+    avgColdGenerated: averageNumber(cold.map((phase) => phase.totalGenerated)),
+    avgReloadGenerated: averageNumber(reloads.map((phase) => phase.totalGenerated)),
+    avgColdDownsampleMs: averageNumber(cold.map((phase) => phase.totalDownsampleMs)),
+    avgReloadDownsampleMs: averageNumber(reloads.map((phase) => phase.totalDownsampleMs)),
+    maxReloadLodChunkMs: maxNumber(reloads.map((phase) => phase.maxLodChunkMs)),
+    maxReloadWorstRecentFrameMs: maxNumber(reloads.map((phase) => phase.maxWorstRecentFrameMs)),
+    maxReloadCoverageGaps: maxNumber(reloads.map((phase) =>
+      phase.finalCoverage.uncoveredGapCount + phase.finalCoverage.handoffHoleCount)),
+    maxReloadCoverageOverlaps: maxNumber(reloads.map((phase) =>
+      phase.finalCoverage.residentOverlapCount + phase.finalCoverage.bandOverlapCount)),
+    maxFarCoverageGaps: maxNumber(far.map((phase) =>
+      phase.finalCoverage.uncoveredGapCount + phase.finalCoverage.handoffHoleCount)),
+    maxFarCoverageOverlaps: maxNumber(far.map((phase) =>
+      phase.finalCoverage.residentOverlapCount + phase.finalCoverage.bandOverlapCount + phase.finalCoverage.waterOverlapCount)),
+    maxFarLodPendingChunks: maxNumber(far.map((phase) => phase.finalLodPendingChunks)),
+    maxFarPendingDiskCache: maxNumber(far.map((phase) => phase.finalLodPendingDiskCache)),
+    maxFarPendingGenerationBudget: maxNumber(far.map((phase) => phase.finalLodPendingGenerationBudget)),
+    maxFarPendingPartialBuild: maxNumber(far.map((phase) => phase.finalLodPendingPartialBuild)),
+    maxFarPendingPrepared: maxNumber(far.map((phase) => phase.finalLodPendingPrepared)),
+    maxFarPendingInvalidatedEviction: maxNumber(far.map((phase) => phase.finalLodPendingInvalidatedEviction)),
+    maxFarPendingPlanning: maxNumber(far.map((phase) => phase.finalLodPendingPlanning)),
+    maxFarPendingDiskCacheByLevel: maxLevelCounts(far.map((phase) => phase.finalLodPendingDiskCacheByLevel)),
+    maxFarPendingGenerationBudgetByLevel: maxLevelCounts(far.map((phase) => phase.finalLodPendingGenerationBudgetByLevel)),
+    maxFarPendingPartialBuildByLevel: maxLevelCounts(far.map((phase) => phase.finalLodPendingPartialBuildByLevel)),
+    maxFarPendingPreparedByLevel: maxLevelCounts(far.map((phase) => phase.finalLodPendingPreparedByLevel)),
+    maxFarLodChunkCountByLevel: maxLevelCounts(far.map((phase) => phase.finalLodChunkCountByLevel)),
+    maxReloadPendingGenerationBudgetByLevel: maxLevelCounts(reloads.map((phase) => phase.finalLodPendingGenerationBudgetByLevel)),
+    maxReloadLodChunkCountByLevel: maxLevelCounts(reloads.map((phase) => phase.finalLodChunkCountByLevel)),
+    firstFailure: failures[0] ?? null,
   };
 }
 
@@ -472,12 +1244,14 @@ function serializeBootstrapSample(
   iteration: BrowserBenchmarkIterationResult<BootstrapExperienceBenchmark>,
   sample: BootstrapBenchmarkSample,
 ): Record<string, string | number | boolean | null | undefined> {
+  const { lodDrawCallsByLevel, ...serializableSample } = sample;
   return {
     scenarioId: iteration.scenarioId,
     warmup: iteration.warmup,
     iteration: iteration.iteration,
     globalIndex: iteration.globalIndex,
-    ...sample,
+    ...serializableSample,
+    lodDrawCallsByLevel: lodDrawCallsByLevel.join("/"),
   };
 }
 
@@ -532,6 +1306,8 @@ function serializeRouteSample(
     visibleGroundSampleCount: sample.visibleGroundSampleCount,
     visibleGroundUncoveredCount: sample.visibleGroundUncoveredCount,
     visibleGroundResidentNotReadyCount: sample.visibleGroundResidentNotReadyCount,
+    farLodCoverageGapCount: sample.farLodCoverageGapCount,
+    maxFarLodCoverageGapMeters: sample.maxFarLodCoverageGapMeters,
     seamGapCount: sample.seamGapCount,
     maxSeamGapMeters: sample.maxSeamGapMeters,
     screenVoidRatio: sample.screenVoidRatio,
@@ -624,6 +1400,7 @@ function printSummary(
   walkArtifacts: BenchmarkArtifactPaths | null,
   startupResults: readonly BrowserBenchmarkIterationResult<BootstrapExperienceBenchmark>[],
   walkResults: readonly BrowserBenchmarkIterationResult<RouteExperienceBenchmark>[],
+  lodPersistenceResult: LodPersistenceScenarioResult | null,
 ): void {
   const startupMeasured = startupResults.filter((iteration) => !iteration.warmup);
   const walkMeasured = walkResults.filter((iteration) => !iteration.warmup);
@@ -647,6 +1424,13 @@ function printSummary(
     console.log(`Walk avg p95 gameplay frame ms: ${walkP95 ?? "n/a"}`);
     console.log(`Walk total hole-signal frames across measured iterations: ${walkHoles}`);
   }
+  if (lodPersistenceResult) {
+    console.log(`LOD persistence report JSON: ${lodPersistenceResult.artifactPath}`);
+    console.log(`LOD persistence pass: ${lodPersistenceResult.aggregate.pass}`);
+    console.log(`LOD persistence reload disk hits: ${lodPersistenceResult.aggregate.totalReloadDiskCacheHits}`);
+    console.log(`LOD persistence reload cumulative disk hits: ${lodPersistenceResult.aggregate.totalReloadCumulativeDiskCacheHits}`);
+    console.log(`LOD persistence first failure: ${lodPersistenceResult.aggregate.firstFailure ?? "n/a"}`);
+  }
 }
 
 function averageNumber(values: readonly (number | null)[]): number | null {
@@ -655,4 +1439,26 @@ function averageNumber(values: readonly (number | null)[]): number | null {
     return null;
   }
   return roundNumber(sumNumbers(numericValues) / numericValues.length);
+}
+
+function maxNumber(values: readonly number[]): number | null {
+  const numericValues = values.filter((value) => Number.isFinite(value));
+  if (numericValues.length === 0) {
+    return null;
+  }
+  return roundNumber(Math.max(...numericValues));
+}
+
+function maxLevelCounts(values: readonly (readonly number[])[]): string | null {
+  if (values.length === 0) {
+    return null;
+  }
+  const levelCount = Math.max(0, ...values.map((counts) => counts.length));
+  if (levelCount === 0) {
+    return null;
+  }
+  const maxima = Array.from({ length: levelCount }, (_, level) =>
+    Math.max(0, ...values.map((counts) => counts[level] ?? 0)),
+  );
+  return maxima.join("/");
 }

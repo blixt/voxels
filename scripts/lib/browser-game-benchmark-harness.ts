@@ -118,6 +118,7 @@ export interface BrowserGameSession {
   waitForBootstrapBenchmarkComplete(timeoutMs: number): Promise<void>;
   waitForGameReady(timeoutMs: number): Promise<void>;
   evaluate<T>(expression: string): Promise<T>;
+  captureScreenshotPng(): Promise<Uint8Array>;
   startAsyncWindowBenchmark(startExpression: string): Promise<string>;
   getAsyncWindowBenchmarkState<TResult>(token: string): Promise<AsyncWindowBenchmarkState<TResult> | null>;
   captureMemorySample(elapsedMs: number): Promise<BrowserMemorySample>;
@@ -695,6 +696,17 @@ class BrowserGameSessionImpl implements BrowserGameSession {
 
   async evaluate<T>(expression: string): Promise<T> {
     return await this.cdp.evaluate<T>(expression);
+  }
+
+  async captureScreenshotPng(): Promise<Uint8Array> {
+    const response = await this.cdp.send("Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+    });
+    if (typeof response.data !== "string" || response.data.length === 0) {
+      throw new Error("Chrome did not return screenshot data");
+    }
+    return Buffer.from(response.data, "base64");
   }
 
   async startAsyncWindowBenchmark(startExpression: string): Promise<string> {

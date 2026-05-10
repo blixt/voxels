@@ -25,6 +25,7 @@ export interface OpaqueChunkMeshingInput {
   chunkSize: number;
   coord: ChunkCoordinate;
   chunkData: Uint16Array;
+  clipMask?: Uint8Array | null;
   solidCount: number;
   solidBounds: LocalChunkBounds | null;
   neighbors: [
@@ -68,6 +69,7 @@ export function cloneOpaqueChunkMeshingInput(input: OpaqueChunkMeshingInput): Op
     chunkSize: input.chunkSize,
     coord: { ...input.coord },
     chunkData: input.chunkData.slice(),
+    clipMask: input.clipMask?.slice() ?? null,
     solidCount: input.solidCount,
     solidBounds: cloneLocalBounds(input.solidBounds),
     neighbors: [
@@ -96,10 +98,10 @@ export function buildOpaqueChunkMeshFromInput(
 
   const chunkArea = chunkSize * chunkSize;
   const chunkVolume = chunkSize * chunkArea;
-  if (input.solidCount === chunkVolume && isChunkFullyOccluded(input.neighbors, chunkSize)) {
+  if (!input.clipMask && input.solidCount === chunkVolume && isChunkFullyOccluded(input.neighbors, chunkSize)) {
     return createEmptyOpaqueChunkMesh(null);
   }
-  if (input.solidCount === chunkVolume && isChunkFullyOpaque(input.chunkData, materialLut)) {
+  if (!input.clipMask && input.solidCount === chunkVolume && isChunkFullyOpaque(input.chunkData, materialLut)) {
     return buildFullyOpaqueChunkBoundaryMesh(input, materialLut, fallbackBounds);
   }
 
@@ -131,6 +133,7 @@ export function buildOpaqueChunkMeshFromInput(
         input.solidBounds,
         axis,
         x[axis]!,
+        input.clipMask ?? null,
         negativeNeighbor.faceData,
         positiveNeighbor.faceData,
         opaqueMask,
@@ -258,6 +261,7 @@ function fillAxisMask(
   solidBounds: LocalChunkBounds,
   axis: number,
   axisPosition: number,
+  clipMask: Uint8Array | null,
   negativeNeighborFace: Uint16Array | null,
   positiveNeighborFace: Uint16Array | null,
   opaqueMask: Uint8Array,
@@ -270,6 +274,7 @@ function fillAxisMask(
       chunkArea,
       solidBounds,
       axisPosition,
+      clipMask,
       negativeNeighborFace,
       positiveNeighborFace,
       opaqueMask,
@@ -284,6 +289,7 @@ function fillAxisMask(
       chunkArea,
       solidBounds,
       axisPosition,
+      clipMask,
       negativeNeighborFace,
       positiveNeighborFace,
       opaqueMask,
@@ -297,6 +303,7 @@ function fillAxisMask(
     chunkArea,
     solidBounds,
     axisPosition,
+    clipMask,
     negativeNeighborFace,
     positiveNeighborFace,
     opaqueMask,
@@ -310,6 +317,7 @@ function fillXAxisMask(
   chunkArea: number,
   solidBounds: LocalChunkBounds,
   axisPosition: number,
+  clipMask: Uint8Array | null,
   negativeNeighborFace: Uint16Array | null,
   positiveNeighborFace: Uint16Array | null,
   opaqueMask: Uint8Array,
@@ -322,17 +330,17 @@ function fillXAxisMask(
     for (let y = solidBounds.min[1]; y < solidBounds.max[1]; y += 1) {
       const rowOffset = y * chunkSize + zChunkOffset;
       const a = axisPosition >= 0
-        ? chunkData[axisPosition + rowOffset]!
+        ? readOpaqueMaterial(chunkData, clipMask, axisPosition + rowOffset, opaqueMask)
         : negativeNeighborFace
         ? negativeNeighborFace[y + zFaceOffset]!
         : 0;
       const b = nextAxisPosition < chunkSize
-        ? chunkData[nextAxisPosition + rowOffset]!
+        ? readOpaqueMaterial(chunkData, clipMask, nextAxisPosition + rowOffset, opaqueMask)
         : positiveNeighborFace
         ? positiveNeighborFace[y + zFaceOffset]!
         : 0;
-      const opaqueA = opaqueMask[a] === 1 ? a : 0;
-      const opaqueB = opaqueMask[b] === 1 ? b : 0;
+      const opaqueA = axisPosition >= 0 ? a : opaqueMask[a] === 1 ? a : 0;
+      const opaqueB = nextAxisPosition < chunkSize ? b : opaqueMask[b] === 1 ? b : 0;
       mask[maskIndex] = (opaqueA !== 0) === (opaqueB !== 0)
         ? 0
         : opaqueA !== 0
@@ -350,6 +358,7 @@ function fillYAxisMask(
   chunkArea: number,
   solidBounds: LocalChunkBounds,
   axisPosition: number,
+  clipMask: Uint8Array | null,
   negativeNeighborFace: Uint16Array | null,
   positiveNeighborFace: Uint16Array | null,
   opaqueMask: Uint8Array,
@@ -361,17 +370,17 @@ function fillYAxisMask(
     for (let z = solidBounds.min[2]; z < solidBounds.max[2]; z += 1) {
       const zChunkOffset = z * chunkArea;
       const a = axisPosition >= 0
-        ? chunkData[x + planeOffset + zChunkOffset]!
+        ? readOpaqueMaterial(chunkData, clipMask, x + planeOffset + zChunkOffset, opaqueMask)
         : negativeNeighborFace
         ? negativeNeighborFace[x + z * chunkSize]!
         : 0;
       const b = axisPosition + 1 < chunkSize
-        ? chunkData[x + nextPlaneOffset + zChunkOffset]!
+        ? readOpaqueMaterial(chunkData, clipMask, x + nextPlaneOffset + zChunkOffset, opaqueMask)
         : positiveNeighborFace
         ? positiveNeighborFace[x + z * chunkSize]!
         : 0;
-      const opaqueA = opaqueMask[a] === 1 ? a : 0;
-      const opaqueB = opaqueMask[b] === 1 ? b : 0;
+      const opaqueA = axisPosition >= 0 ? a : opaqueMask[a] === 1 ? a : 0;
+      const opaqueB = axisPosition + 1 < chunkSize ? b : opaqueMask[b] === 1 ? b : 0;
       mask[maskIndex] = (opaqueA !== 0) === (opaqueB !== 0)
         ? 0
         : opaqueA !== 0
@@ -389,6 +398,7 @@ function fillZAxisMask(
   chunkArea: number,
   solidBounds: LocalChunkBounds,
   axisPosition: number,
+  clipMask: Uint8Array | null,
   negativeNeighborFace: Uint16Array | null,
   positiveNeighborFace: Uint16Array | null,
   opaqueMask: Uint8Array,
@@ -400,17 +410,17 @@ function fillZAxisMask(
     const rowOffset = y * chunkSize;
     for (let x = solidBounds.min[0]; x < solidBounds.max[0]; x += 1) {
       const a = axisPosition >= 0
-        ? chunkData[x + rowOffset + planeOffset]!
+        ? readOpaqueMaterial(chunkData, clipMask, x + rowOffset + planeOffset, opaqueMask)
         : negativeNeighborFace
         ? negativeNeighborFace[x + y * chunkSize]!
         : 0;
       const b = axisPosition + 1 < chunkSize
-        ? chunkData[x + rowOffset + nextPlaneOffset]!
+        ? readOpaqueMaterial(chunkData, clipMask, x + rowOffset + nextPlaneOffset, opaqueMask)
         : positiveNeighborFace
         ? positiveNeighborFace[x + y * chunkSize]!
         : 0;
-      const opaqueA = opaqueMask[a] === 1 ? a : 0;
-      const opaqueB = opaqueMask[b] === 1 ? b : 0;
+      const opaqueA = axisPosition >= 0 ? a : opaqueMask[a] === 1 ? a : 0;
+      const opaqueB = axisPosition + 1 < chunkSize ? b : opaqueMask[b] === 1 ? b : 0;
       mask[maskIndex] = (opaqueA !== 0) === (opaqueB !== 0)
         ? 0
         : opaqueA !== 0
@@ -430,6 +440,19 @@ function sampleChunkVoxel(
   z: number,
 ): number {
   return chunkData[x + y * chunkSize + z * chunkArea]!;
+}
+
+function readOpaqueMaterial(
+  chunkData: Uint16Array,
+  clipMask: Uint8Array | null,
+  index: number,
+  opaqueMask: Uint8Array,
+): number {
+  if (clipMask && clipMask[index] !== 0) {
+    return 0;
+  }
+  const material = chunkData[index] ?? 0;
+  return opaqueMask[material] === 1 ? material : 0;
 }
 
 function isChunkFullyOccluded(
