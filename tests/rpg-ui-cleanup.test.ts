@@ -129,6 +129,8 @@ test("client wires pure exploration interaction and travel goal systems", () => 
   expect(gameController).toContain("fieldNote: encounterSite.fieldNote");
   expect(gameController).toContain("lootSkillId");
   expect(gameController).toContain("sampleForageSiteWorldUnits");
+  expect(gameController).toContain("feedingTrail");
+  expect(gameController).toContain("forageSitePosition");
   expect(gameController).toContain("role: \"ambient-soundscape\"");
   expect(gameController).toContain("role: \"sky-watch\"");
   expect(gameController).toContain("advanceWorldClockToNextWatchPhase");

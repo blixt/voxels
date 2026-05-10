@@ -1,10 +1,33 @@
+import type { ExplorationEventPayload } from "./exploration-events.ts";
 import type { ExplorationInteractionCandidate } from "./exploration-interactions.ts";
-import type { PassiveMobSighting } from "./passive-mob-sim.ts";
-import { worldUnitsToMeters } from "./scale.ts";
+import type { PassiveMobSighting, PassiveMobSpeciesId } from "./passive-mob-sim.ts";
+import { metersToWorldUnits, worldUnitsToMeters } from "./scale.ts";
 
 export interface PassiveMobInteractionOptions {
   surfaceY: number;
   maxCount?: number;
+  feedingTrail?: PassiveMobFeedingTrailSource | null;
+}
+
+export interface PassiveMobFeedingTrailSource {
+  forageSiteId: string;
+  forageSiteName: string;
+  forageSiteRole: string;
+  forageSitePosition: readonly [number, number, number];
+  lootId: string;
+  clueLabel: string;
+  fieldNote: string;
+}
+
+export interface PassiveMobFeedingTrailClue {
+  sourceMobSightingId: string;
+  forageSiteId: string;
+  forageSiteName: string;
+  forageSiteRole: string;
+  lootId: string;
+  feedingTrailLabel: string;
+  fieldNote: string;
+  distanceMeters: number;
 }
 
 export function buildPassiveMobInteractionCandidates(
@@ -14,6 +37,20 @@ export function buildPassiveMobInteractionCandidates(
   const maxCount = Math.max(0, Math.floor(options.maxCount ?? 3));
   return sightings.slice(0, maxCount).map((sighting, index) => {
     const distanceMeters = worldUnitsToMeters(sighting.distanceWorldUnits);
+    const feedingTrail = buildPassiveMobFeedingTrailClue(sighting, options.feedingTrail ?? null);
+    const feedingTrailPayload: ExplorationEventPayload = feedingTrail
+      ? {
+          sourceMobSightingId: feedingTrail.sourceMobSightingId,
+          forageSiteId: feedingTrail.forageSiteId,
+          forageSiteName: feedingTrail.forageSiteName,
+          forageSiteRole: feedingTrail.forageSiteRole,
+          lootId: feedingTrail.lootId,
+          feedingTrailLabel: feedingTrail.feedingTrailLabel,
+          fieldNote: feedingTrail.fieldNote,
+          distanceMeters: feedingTrail.distanceMeters,
+        }
+      : null;
+    const trailSuffix = feedingTrail ? ` ${feedingTrail.feedingTrailLabel}.` : "";
     return {
       id: sighting.id,
       subjectType: "mob",
@@ -25,9 +62,9 @@ export function buildPassiveMobInteractionCandidates(
       prompts: [{
         verb: "inspect",
         label: `Observe ${sighting.speciesName}`,
-        description: `${sighting.label} is moving ${formatPassiveMobDistance(distanceMeters)} away.`,
+        description: `${sighting.label} is moving ${formatPassiveMobDistance(distanceMeters)} away.${trailSuffix}`,
       }],
-      flavorText: `${sighting.label} is moving through the nearby terrain.`,
+      flavorText: `${sighting.label} is moving through the nearby terrain.${trailSuffix}`,
       skillAwards: [{
         skillId: "naturalist",
         xp: 12,
@@ -46,9 +83,59 @@ export function buildPassiveMobInteractionCandidates(
         routeId: sighting.routeId,
         caveSystemId: sighting.caveSystemId,
         flavorTags: [...sighting.flavorTags],
+        feedingTrail: feedingTrailPayload,
       },
     };
   });
+}
+
+export function buildPassiveMobFeedingTrailClue(
+  sighting: Pick<PassiveMobSighting, "id" | "speciesId" | "position">,
+  source: PassiveMobFeedingTrailSource | null,
+): PassiveMobFeedingTrailClue | null {
+  if (!source || !supportsFeedingTrail(sighting.speciesId)) {
+    return null;
+  }
+  const distanceMeters = worldUnitsToMeters(Math.hypot(
+    source.forageSitePosition[0] - sighting.position[0],
+    source.forageSitePosition[2] - sighting.position[2],
+  ));
+  if (distanceMeters > worldUnitsToMeters(metersToWorldUnits(220))) {
+    return null;
+  }
+  return {
+    sourceMobSightingId: sighting.id,
+    forageSiteId: source.forageSiteId,
+    forageSiteName: source.forageSiteName,
+    forageSiteRole: source.forageSiteRole,
+    lootId: source.lootId,
+    feedingTrailLabel: `${speciesTrailNoun(sighting.speciesId)} points toward ${source.forageSiteName}`,
+    fieldNote: `${source.fieldNote} ${source.clueLabel} is reinforced by fresh feeding sign.`,
+    distanceMeters: Number(distanceMeters.toFixed(1)),
+  };
+}
+
+function supportsFeedingTrail(speciesId: PassiveMobSpeciesId): boolean {
+  return speciesId === "kwama-forager"
+    || speciesId === "marsh-forager"
+    || speciesId === "wild-grazer"
+    || speciesId === "pack-guar"
+    || speciesId === "salt-strider";
+}
+
+function speciesTrailNoun(speciesId: PassiveMobSpeciesId): string {
+  switch (speciesId) {
+    case "kwama-forager":
+      return "kwama feeding sign";
+    case "marsh-forager":
+      return "marsh forager tracks";
+    case "pack-guar":
+      return "pack guar browse";
+    case "salt-strider":
+      return "salt strider scrape";
+    default:
+      return "grazing tracks";
+  }
 }
 
 function formatPassiveMobDistance(distanceMeters: number): string {

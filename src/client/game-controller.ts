@@ -3346,10 +3346,7 @@ export class GameController {
     const skillGates = describeInteractionSkillGates(readInteractionSkillGateSource(this.skillJournal.getSnapshot()));
     const routeSnapshot = this.routeJournal.getSnapshot();
     const primaryFaction = encounter.factionHints[0]?.factionId ?? null;
-    candidates.push(...buildPassiveMobInteractionCandidates(this.samplePassiveMobSightings(), {
-      surfaceY: currentWorld.probe.surfaceY,
-      maxCount: 3,
-    }));
+    const passiveMobSightings = this.samplePassiveMobSightings();
     const cavePassageCandidate = this.buildCavePassageInteractionCandidate(forward);
     const caveExitCandidate = this.buildCaveExitInteractionCandidate(forward);
     if (
@@ -3545,6 +3542,23 @@ export class GameController {
     });
     const exactLootRevisit = lootState.match === "subject" && lootState.collected;
     const forageProbe = this.generator.sampleBiomeProbe(forageSite.x, forageSite.z);
+    candidates.push(...buildPassiveMobInteractionCandidates(passiveMobSightings, {
+      surfaceY: currentWorld.probe.surfaceY,
+      maxCount: 3,
+      feedingTrail: {
+        forageSiteId: forageSite.id,
+        forageSiteName: forageSite.name,
+        forageSiteRole: forageSite.role,
+        forageSitePosition: [
+          forageSite.x,
+          forageProbe.surfaceY,
+          forageSite.z,
+        ],
+        lootId: worldSystems.area.lootId,
+        clueLabel: forageSite.clueLabel,
+        fieldNote: forageSite.fieldNote,
+      },
+    }));
     candidates.push({
       id: forageSite.id,
       subjectType: "object",
