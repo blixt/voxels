@@ -19,6 +19,7 @@ interface CliOptions {
   settleSeconds: number;
   sampleHz: number;
   speedMetersPerSecond: number;
+  preWalkSettleFrames: number;
   seamProbeStrideFrames: number;
   captureStrideFrames: number;
   referenceDiffStrideFrames: number;
@@ -169,6 +170,7 @@ try {
     settleSeconds: options.settleSeconds,
     sampleHz: options.sampleHz,
     speedMetersPerSecond: options.speedMetersPerSecond,
+    preWalkSettleFrames: options.preWalkSettleFrames,
     seamProbeStrideFrames: options.seamProbeStrideFrames,
     captureStrideFrames: options.captureStrideFrames,
     referenceDiffStrideFrames: options.referenceDiffStrideFrames,
@@ -261,6 +263,7 @@ function parseCli(argv: readonly string[]): CliOptions {
     settleSeconds: readPositiveFloat(readFlag(args, "--settle"), 4),
     sampleHz: readPositiveInt(readFlag(args, "--sample-hz"), 60),
     speedMetersPerSecond: readPositiveFloat(readFlag(args, "--speed"), 4.6),
+    preWalkSettleFrames: readPositiveInt(readFlag(args, "--prewalk-settle-frames"), 240),
     seamProbeStrideFrames: readPositiveInt(readFlag(args, "--seam-stride"), 15),
     captureStrideFrames: readPositiveInt(readFlag(args, "--capture-stride"), 999999),
     referenceDiffStrideFrames: readNonNegativeInt(readFlag(args, "--reference-diff-stride"), 0),

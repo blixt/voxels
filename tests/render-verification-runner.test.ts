@@ -67,6 +67,21 @@ test("render verification runner reports live-forward sample, frame, FPS, and LO
   expect(failureIds).toContain("live_forward.lod_resident_overlap_count");
 });
 
+test("render verification runner uses measured live-forward cadence for FPS truth", () => {
+  const report = buildRenderVerificationRunnerReport({
+    generatedAt: "2026-05-09T00:00:00.000Z",
+    artifacts: {
+      liveForwardReport: liveForwardReport({ sampleHz: 72, routeSampleHz: 60, benchmarkMode: "live-forward" }),
+      liveForwardSamples: liveForwardSamples(180, 1 / 72),
+    },
+    thresholds: {
+      minLiveForwardSamples: 10,
+    },
+  });
+
+  expect(report.failures.map((failure) => failure.gateId)).not.toContain("live_forward.fps_truth_error_ratio");
+});
+
 test("render verification runner ignores undefined threshold overrides", () => {
   const report = buildRenderVerificationRunnerReport({
     generatedAt: "2026-05-09T00:00:00.000Z",
@@ -174,14 +189,19 @@ function routeAtlasReport() {
   };
 }
 
-function liveForwardReport(options: { readonly sampleHz?: number } = {}) {
+function liveForwardReport(options: {
+  readonly sampleHz?: number;
+  readonly routeSampleHz?: number;
+  readonly benchmarkMode?: string;
+} = {}) {
   return {
     generatedAt: "2026-05-09T00:00:00.000Z",
     label: "live",
     commit: "abc123",
+    benchmarkMode: options.benchmarkMode ?? "route",
     benchmarkSamplesPath: "artifacts/browser-route-trace/run/benchmark-samples.json",
     routeOptions: {
-      sampleHz: options.sampleHz ?? 60,
+      sampleHz: options.routeSampleHz ?? options.sampleHz ?? 60,
     },
     benchmark: {
       sampleCount: 180,

@@ -824,6 +824,7 @@ export interface RouteExperienceBenchmarkOptions {
   settleSeconds?: number;
   sampleHz?: number;
   speedMetersPerSecond?: number;
+  preWalkSettleFrames?: number;
   seamProbeStrideFrames?: number;
   captureStrideFrames?: number;
   captureWidth?: number;
@@ -2581,14 +2582,15 @@ export class GameController {
       this.syncCameraToPlayer();
       this.pointerLocked = true;
       this.pressedKeys.clear();
-      this.pressedKeys.add("KeyW");
-      if (options.sprint === true) {
-        this.pressedKeys.add("ControlLeft");
-      }
       this.lastFrameTime = 0;
       this.syncWorldAroundPlayer(true);
       this.renderCurrentFrame();
       await this.renderer?.waitForGpuIdle();
+      await this.settleLiveForwardBenchmarkStart(options.preWalkSettleFrames);
+      this.pressedKeys.add("KeyW");
+      if (options.sprint === true) {
+        this.pressedKeys.add("ControlLeft");
+      }
 
       const samples: RouteExperienceFrameSample[] = [];
       const capturedFrames: CapturedBenchmarkFrame[] = [];
@@ -2714,6 +2716,36 @@ export class GameController {
       await this.renderer?.waitForGpuIdle();
       this.pushHud(true);
       this.start();
+    }
+  }
+
+  private async settleLiveForwardBenchmarkStart(maxFrames = 240): Promise<void> {
+    const normalizedMaxFrames = Math.max(1, Math.floor(maxFrames));
+    const settleLodBudget = {
+      maxGenerateLodChunks: 8,
+      maxAdoptCompletedLodChunks: 8,
+      maxPlanMs: 12,
+      maxWorkMs: 20,
+    };
+    for (let frame = 0; frame < normalizedMaxFrames; frame += 1) {
+      this.syncWorldAroundPlayer(false, true, settleLodBudget, undefined, Number.POSITIVE_INFINITY);
+      this.renderCurrentFrame();
+      await this.renderer?.waitForGpuIdle();
+      const visibleGround = this.probeVisibleGroundCoverage();
+      const seamCoverage = this.probeLodCoverage(48, 1.6);
+      if (
+        this.lastStreamSummary.pendingChunks === 0
+        && this.world.countDirtyResidentChunks() === 0
+        && this.lastLodSummary.pending === 0
+        && visibleGround.uncoveredCount === 0
+        && seamCoverage.uncoveredGapCount === 0
+        && seamCoverage.handoffHoleCount === 0
+      ) {
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
     }
   }
 

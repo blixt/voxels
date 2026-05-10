@@ -606,9 +606,12 @@ function calculateFpsTruth(
   report: Record<string, unknown>,
   samples: readonly unknown[],
 ): Record<string, number | null> {
-  const expectedFps = readNumber(report, ["routeOptions", "sampleHz"])
-    ?? readNumber(report, ["benchmark", "sampleHz"])
-    ?? readNumber(report, ["benchmark", "summary", "sampleHz"]);
+  const measuredBenchmarkFps = readNumber(report, ["benchmark", "summary", "sampleHz"])
+    ?? readNumber(report, ["benchmark", "sampleHz"]);
+  const expectedFps = readString(report, ["benchmarkMode"]) === "live-forward"
+    ? measuredBenchmarkFps
+    : readNumber(report, ["routeOptions", "sampleHz"])
+      ?? measuredBenchmarkFps;
   const firstSimSeconds = readNumber(samples[0], ["simTimeSeconds"]);
   const lastSimSeconds = readNumber(samples[samples.length - 1], ["simTimeSeconds"]);
   const computedFps = firstSimSeconds !== null && lastSimSeconds !== null && lastSimSeconds > firstSimSeconds
