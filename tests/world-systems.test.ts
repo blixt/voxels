@@ -115,6 +115,7 @@ test("world atmosphere exposes celestial cues that weather can obscure", () => {
     cloudCoverageBonus: 0,
     fogMultiplier: 1,
     ashfallBonus: 0,
+    rainfallIntensity: 0,
     fungalGlowBonus: 0,
   };
   const stormWeather = {
@@ -125,6 +126,7 @@ test("world atmosphere exposes celestial cues that weather can obscure", () => {
     cloudCoverageBonus: 0.82,
     fogMultiplier: 1.5,
     ashfallBonus: 1,
+    rainfallIntensity: 0,
   };
 
   const day = applyWorldAtmosphere(baseEnvironment, dayClock, clearWeather);
@@ -138,4 +140,64 @@ test("world atmosphere exposes celestial cues that weather can obscure", () => {
   expect(stormNight.moonGlowIntensity).toBeLessThan(clearNight.moonGlowIntensity!);
   expect(stormNight.starIntensity).toBeLessThan(clearNight.starIntensity!);
   expect(stormNight.fogEndDistance).toBeLessThanOrEqual(baseEnvironment.fogEndDistance);
+});
+
+test("blackwater rain carries a renderable rainfall signal", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const baseProbe = generator.sampleBiomeProbe(0, 0);
+  const encounter = sampleRpgEncounterWorldUnits(0, 0);
+  const wetProbe = {
+    ...baseProbe,
+    biomeId: "marsh" as const,
+    fields: {
+      ...baseProbe.fields,
+      moisture: 0.96,
+      oceanness: 0.45,
+      volcanism: 0.05,
+      desolation: 0.05,
+      magic: 0.10,
+    },
+  };
+  const dryProbe = {
+    ...baseProbe,
+    biomeId: "steppe" as const,
+    regionalVariantId: null,
+    fields: {
+      ...baseProbe.fields,
+      moisture: 0.05,
+      oceanness: 0.02,
+      volcanism: 0.05,
+      desolation: 0.08,
+      magic: 0.04,
+    },
+  };
+  const ashProbe = {
+    ...baseProbe,
+    biomeId: "ember" as const,
+    fields: {
+      ...baseProbe.fields,
+      moisture: 0.05,
+      oceanness: 0.02,
+      volcanism: 0.98,
+      desolation: 0.90,
+      magic: 0.04,
+    },
+  };
+
+  const wet = sampleWorldSystems(180, wetProbe, resolveAmbientWorldProfile(wetProbe), encounter, "surface");
+  const dry = sampleWorldSystems(180, dryProbe, resolveAmbientWorldProfile(dryProbe), encounter, "surface");
+  const ash = sampleWorldSystems(180, ashProbe, resolveAmbientWorldProfile(ashProbe), encounter, "surface");
+  const wetEnvironment = applyWorldAtmosphere(
+    buildAmbientRenderEnvironment(resolveAmbientWorldProfile(wetProbe)),
+    resolveWorldClock(180),
+    wet.weather,
+  );
+
+  expect(wet.weather.id).toBe("blackwater-rain");
+  expect(wet.weather.rainfallIntensity).toBeGreaterThan(0.4);
+  expect(wetEnvironment.rainfallIntensity).toBe(wet.weather.rainfallIntensity);
+  expect(dry.weather.id).toBe("clear");
+  expect(dry.weather.rainfallIntensity).toBe(0);
+  expect(ash.weather.id).toBe("ash-squall");
+  expect(ash.weather.rainfallIntensity).toBe(0);
 });

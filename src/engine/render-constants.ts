@@ -12,6 +12,7 @@ export interface SkyWeatherEnvironment {
   skyCloudCoverage: number;
   skyCloudBand: number;
   ashfallIntensity: number;
+  rainfallIntensity: number;
   fungalGlowIntensity: number;
   sunGlowIntensity?: number;
   moonGlowIntensity?: number;
@@ -33,6 +34,7 @@ export const DEFAULT_SKY_WEATHER_ENVIRONMENT: SkyWeatherEnvironment = {
   skyCloudCoverage: 0.08,
   skyCloudBand: 0.64,
   ashfallIntensity: 0,
+  rainfallIntensity: 0,
   fungalGlowIntensity: 0,
   sunGlowIntensity: 0.72,
   moonGlowIntensity: 0,

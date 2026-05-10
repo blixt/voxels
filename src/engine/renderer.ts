@@ -81,21 +81,24 @@ fn shade_fragment(input: VertexOutput) -> vec4<f32> {
   let grain_strength = mix(0.045, 0.11, top_bias);
   let ashfall = clamp(uniforms.sky_params.z, 0.0, 1.0);
   let fungal_glow = clamp(uniforms.sky_params.w, 0.0, 1.0);
+  let rainfall = clamp(uniforms.sky_celestial_params.w, 0.0, 1.0);
   let fog_distance = distance(input.world_position, uniforms.camera_position.xyz);
   let fog = smoothstep(uniforms.fog_params.x, uniforms.fog_params.y, fog_distance);
   let grounded_base = mix(vec3<f32>(albedo_luma), input.color.rgb, 0.78) * (1.0 + grain * grain_strength);
   let ash_deposit = ashfall * smoothstep(0.12, 0.92, input.normal.y) * (0.16 + broad_grain * 0.24);
-  let grounded_albedo = mix(grounded_base, uniforms.sky_cloud_color.rgb, clamp(ash_deposit, 0.0, 0.38));
+  let wet_darkening = rainfall * smoothstep(0.18, 0.96, input.normal.y) * (0.12 + fine_grain * 0.10);
+  let wet_albedo = mix(grounded_base, grounded_base * vec3<f32>(0.62, 0.70, 0.72), clamp(wet_darkening, 0.0, 0.32));
+  let grounded_albedo = mix(wet_albedo, uniforms.sky_cloud_color.rgb, clamp(ash_deposit, 0.0, 0.38));
   let light_tint = mix(
     vec3<f32>(0.82, 0.86, 0.92),
     vec3<f32>(1.08, 1.02, 0.92),
     clamp(directional * 0.78 + hemi * 0.22, 0.0, 1.0),
   );
-  let overcast = 1.0 - ashfall * 0.18;
+  let overcast = 1.0 - ashfall * 0.18 - rainfall * 0.14;
   let fungal_shadow = vec3<f32>(0.04, 0.16, 0.18) * fungal_glow * (1.0 - directional) * (1.0 - hemi * 0.46);
   let vertical_contact = 1.0 - smoothstep(0.18, 0.72, abs(input.normal.y));
   let underside_contact = smoothstep(-0.90, -0.18, -input.normal.y);
-  let contact_depth = (vertical_contact * (0.085 + ashfall * 0.045) + underside_contact * 0.070) * (1.0 - fog * 0.58);
+  let contact_depth = (vertical_contact * (0.085 + ashfall * 0.045 + rainfall * 0.030) + underside_contact * 0.070) * (1.0 - fog * 0.58);
   let shaded = (grounded_albedo * lighting * light_tint * overcast + fungal_shadow) * (1.0 - clamp(contact_depth, 0.0, 0.18));
   let distance_luma = dot(shaded, vec3<f32>(0.2126, 0.7152, 0.0722));
   let distance_muted = mix(shaded, vec3<f32>(distance_luma), fog * 0.22);
@@ -138,8 +141,9 @@ fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
   let sun_glow = clamp(uniforms.sky_celestial_params.x, 0.0, 1.0);
   let moon_glow = clamp(uniforms.sky_celestial_params.y, 0.0, 1.0);
   let star_intensity = clamp(uniforms.sky_celestial_params.z, 0.0, 1.0);
-  let high_storm = mix(uniforms.sky_top_color.rgb, vec3<f32>(0.10, 0.10, 0.11), ashfall * 0.30);
-  let horizon_glow = mix(uniforms.sky_horizon_color.rgb, uniforms.sky_cloud_color.rgb, ashfall * 0.18 + fungal_glow * 0.16);
+  let rainfall = clamp(uniforms.sky_celestial_params.w, 0.0, 1.0);
+  let high_storm = mix(uniforms.sky_top_color.rgb, vec3<f32>(0.10, 0.10, 0.11), ashfall * 0.30 + rainfall * 0.22);
+  let horizon_glow = mix(uniforms.sky_horizon_color.rgb, uniforms.sky_cloud_color.rgb, ashfall * 0.18 + fungal_glow * 0.16 + rainfall * 0.18);
   let base = mix(horizon_glow, high_storm, horizon_blend);
 
   let band_center = clamp(uniforms.sky_params.y, 0.18, 0.82);
@@ -149,8 +153,8 @@ fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
   let wide_noise = sky_hash(floor(input.uv * vec2<f32>(14.0, 5.0)));
   let streak_noise = sky_hash(floor(input.uv * vec2<f32>(36.0, 9.0) + vec2<f32>(11.0, 3.0)));
   let cloud_texture = 0.48 + wide_noise * 0.34 + streak_noise * 0.22;
-  let cloud_strength = clamp(uniforms.sky_params.x * band_mask * cloud_texture * (0.72 + ashfall * 0.34), 0.0, 0.92);
-  let cloud_occlusion = clamp(uniforms.sky_params.x * 0.72 + ashfall * 0.44, 0.0, 1.0);
+  let cloud_strength = clamp(uniforms.sky_params.x * band_mask * cloud_texture * (0.72 + ashfall * 0.34 + rainfall * 0.22), 0.0, 0.96);
+  let cloud_occlusion = clamp(uniforms.sky_params.x * 0.72 + ashfall * 0.44 + rainfall * 0.38, 0.0, 1.0);
 
   let sun_pos = vec2<f32>(0.50 + uniforms.light_direction.x * 0.42, 0.18 + (1.0 - clamp(-uniforms.light_direction.y, 0.0, 1.0)) * 0.54);
   let sun_distance = distance(input.uv, sun_pos);
@@ -179,6 +183,11 @@ fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
     * (1.0 - smoothstep(0.18, 0.86, y))
     * smoothstep(0.58, 0.94, ash_streak_noise)
     * (0.28 + shelf_mask * 0.48);
+  let rain_slant = fract(input.uv.x * 74.0 + y * 42.0);
+  let rain_column = 1.0 - smoothstep(0.018, 0.068, abs(rain_slant - 0.5));
+  let rain_gate = smoothstep(0.78, 0.98, sky_hash(floor(vec2<f32>(input.uv.x * 48.0 + y * 15.0, y * 30.0))));
+  let rain_vertical_mask = smoothstep(0.03, 0.20, y) * (1.0 - smoothstep(0.84, 1.0, y));
+  let rain_streaks = rainfall * rain_column * rain_gate * rain_vertical_mask;
   let fungal_horizon = fungal_glow * (1.0 - smoothstep(0.05, 0.48, y));
   let storm_belly = vec3<f32>(0.15, 0.14, 0.13);
   let storm_tint = mix(
@@ -197,6 +206,8 @@ fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
   sky = mix(sky, shelf_tint, clamp(shelf_mask * (0.34 + shelf_noise * 0.28), 0.0, 0.62));
   sky = mix(sky, uniforms.fog_color.rgb, clamp(far_haze, 0.0, 0.54));
   sky = mix(sky, vec3<f32>(0.08, 0.08, 0.075), clamp(ash_streaks, 0.0, 0.30));
+  sky = mix(sky, vec3<f32>(0.055, 0.070, 0.078), rainfall * (0.10 + (1.0 - y) * 0.18));
+  sky += vec3<f32>(0.34, 0.42, 0.44) * rain_streaks * 0.22;
   sky = mix(sky, storm_belly, ashfall * smoothstep(0.66, 1.0, y) * 0.22);
   sky += vec3<f32>(0.00, 0.08, 0.09) * fungal_horizon;
   sky += vec3<f32>(0.025, 0.055, 0.040) * fungal_glow * smoothstep(0.18, 0.72, y) * (1.0 - smoothstep(0.72, 0.98, y));
@@ -905,7 +916,7 @@ export class WebGpuVoxelRenderer {
     uniformData[52] = skyWeather.sunGlowIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.sunGlowIntensity ?? 0;
     uniformData[53] = skyWeather.moonGlowIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.moonGlowIntensity ?? 0;
     uniformData[54] = skyWeather.starIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.starIntensity ?? 0;
-    uniformData[55] = 0;
+    uniformData[55] = skyWeather.rainfallIntensity;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
 
@@ -1126,6 +1137,7 @@ function resolveSkyWeatherEnvironment(renderEnvironment: RenderEnvironment): Sky
     skyCloudCoverage: clamp01(atmosphere.skyCloudCoverage ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.skyCloudCoverage),
     skyCloudBand: clamp01(atmosphere.skyCloudBand ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.skyCloudBand),
     ashfallIntensity: clamp01(atmosphere.ashfallIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.ashfallIntensity),
+    rainfallIntensity: clamp01(atmosphere.rainfallIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.rainfallIntensity),
     fungalGlowIntensity: clamp01(atmosphere.fungalGlowIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.fungalGlowIntensity),
     sunGlowIntensity: clamp01(atmosphere.sunGlowIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.sunGlowIntensity ?? 0),
     moonGlowIntensity: clamp01(atmosphere.moonGlowIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.moonGlowIntensity ?? 0),

@@ -34,6 +34,7 @@ export interface WorldWeatherSnapshot {
   cloudCoverageBonus: number;
   fogMultiplier: number;
   ashfallBonus: number;
+  rainfallIntensity: number;
   fungalGlowBonus: number;
 }
 
@@ -210,6 +211,7 @@ export function applyWorldAtmosphere(
     skyCloudCoverage: clamp(environment.skyCloudCoverage + weather.cloudCoverageBonus + nightAmount * 0.06, 0, 1),
     skyCloudBand: clamp(environment.skyCloudBand - weather.intensity * 0.08 + duskAmount * 0.04, 0.18, 0.82),
     ashfallIntensity: clamp(environment.ashfallIntensity + weather.ashfallBonus, 0, 1),
+    rainfallIntensity: clamp(environment.rainfallIntensity + weather.rainfallIntensity, 0, 1),
     fungalGlowIntensity: clamp(environment.fungalGlowIntensity + weather.fungalGlowBonus + nightAmount * 0.10, 0, 1),
     sunGlowIntensity: clamp((clock.daylight * 0.68 + clock.dawnDusk * 0.74) * (1 - cloudVeil * 0.50), 0, 1),
     moonGlowIntensity: clamp((clock.night - clock.dawnDusk * 0.34) * (1 - cloudVeil * 0.72), 0, 1),
@@ -428,6 +430,7 @@ function weather(id: WorldWeatherId, intensity: number): WorldWeatherSnapshot {
         cloudCoverageBonus: 0.18 + clampedIntensity * 0.22,
         fogMultiplier: 1.16 + clampedIntensity * 0.48,
         ashfallBonus: 0.16 + clampedIntensity * 0.32,
+        rainfallIntensity: 0,
         fungalGlowBonus: 0,
       };
     case "blackwater-rain":
@@ -438,6 +441,7 @@ function weather(id: WorldWeatherId, intensity: number): WorldWeatherSnapshot {
         cloudCoverageBonus: 0.20 + clampedIntensity * 0.26,
         fogMultiplier: 1.10 + clampedIntensity * 0.38,
         ashfallBonus: 0,
+        rainfallIntensity: 0.24 + clampedIntensity * 0.66,
         fungalGlowBonus: 0.03,
       };
     case "glass-haze":
@@ -448,6 +452,7 @@ function weather(id: WorldWeatherId, intensity: number): WorldWeatherSnapshot {
         cloudCoverageBonus: 0.08 + clampedIntensity * 0.14,
         fogMultiplier: 1.06 + clampedIntensity * 0.26,
         ashfallBonus: 0,
+        rainfallIntensity: 0,
         fungalGlowBonus: 0.04 + clampedIntensity * 0.08,
       };
     case "sporeglow":
@@ -458,6 +463,7 @@ function weather(id: WorldWeatherId, intensity: number): WorldWeatherSnapshot {
         cloudCoverageBonus: 0.10 + clampedIntensity * 0.18,
         fogMultiplier: 1.08 + clampedIntensity * 0.30,
         ashfallBonus: 0,
+        rainfallIntensity: 0,
         fungalGlowBonus: 0.18 + clampedIntensity * 0.42,
       };
     case "silt-mist":
@@ -468,6 +474,7 @@ function weather(id: WorldWeatherId, intensity: number): WorldWeatherSnapshot {
         cloudCoverageBonus: 0.08 + clampedIntensity * 0.18,
         fogMultiplier: 1.08 + clampedIntensity * 0.32,
         ashfallBonus: 0.03 + clampedIntensity * 0.08,
+        rainfallIntensity: 0,
         fungalGlowBonus: 0,
       };
     case "clear":
@@ -478,6 +485,7 @@ function weather(id: WorldWeatherId, intensity: number): WorldWeatherSnapshot {
         cloudCoverageBonus: clampedIntensity * 0.04,
         fogMultiplier: 1,
         ashfallBonus: 0,
+        rainfallIntensity: 0,
         fungalGlowBonus: 0,
       };
   }

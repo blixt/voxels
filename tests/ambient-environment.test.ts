@@ -105,9 +105,12 @@ test("ashland and fungal ambience carry cheap sky/weather shader controls", () =
   expect(ash.skyTopColorRgba[2]).toBeLessThan(90);
   expect(ash.skyCloudCoverage).toBeGreaterThan(0.78);
   expect(ash.ashfallIntensity).toBeGreaterThan(0.78);
+  expect(ash.rainfallIntensity).toBe(0);
   expect(ashEnvironment.ashfallIntensity).toBe(ash.ashfallIntensity);
+  expect(ashEnvironment.rainfallIntensity).toBe(0);
   expect(fungal.id).toBe("fungal-lantern");
   expect(fungal.fungalGlowIntensity).toBeGreaterThan(0.65);
+  expect(fungal.rainfallIntensity).toBe(0);
   expect(fungal.ashfallIntensity).toBeLessThan(ash.ashfallIntensity);
 });
 
@@ -332,6 +335,7 @@ function profileDistance(
     + colorDistance(left.fogColorRgba, right.fogColorRgba)
     + Math.abs(left.skyCloudCoverage - right.skyCloudCoverage) * 100
     + Math.abs(left.ashfallIntensity - right.ashfallIntensity) * 100
+    + Math.abs(left.rainfallIntensity - right.rainfallIntensity) * 100
     + Math.abs(left.fungalGlowIntensity - right.fungalGlowIntensity) * 100;
 }
 
