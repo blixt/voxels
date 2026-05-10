@@ -44,34 +44,6 @@ declare global {
         pitchRadians: number,
         options?: { radiusChunks?: number; maxFrames?: number },
       ): ReturnType<GameController["setCameraPoseAndSettle"]>;
-      benchmarkChunkCrossing(
-        iterations: number,
-        chunkDelta?: number,
-      ): ReturnType<GameController["benchmarkChunkCrossing"]>;
-      benchmarkChunkCacheReuse(
-        chunkDelta?: number,
-        maxFramesPerLeg?: number,
-      ): ReturnType<GameController["benchmarkChunkCacheReuse"]>;
-      benchmarkIncrementalCrossing(
-        iterations: number,
-        chunkDelta?: number,
-        stepsPerLeg?: number,
-        settleFrames?: number,
-      ): ReturnType<GameController["benchmarkIncrementalCrossing"]>;
-      benchmarkRouteExperience(
-        options?: Parameters<GameController["benchmarkRouteExperience"]>[0],
-      ): ReturnType<GameController["benchmarkRouteExperience"]>;
-      benchmarkForwardWalkExperience(
-        options?: Parameters<GameController["benchmarkForwardWalkExperience"]>[0],
-      ): ReturnType<GameController["benchmarkForwardWalkExperience"]>;
-      benchmarkLiveForwardWalkExperience(
-        options?: Parameters<GameController["benchmarkLiveForwardWalkExperience"]>[0],
-      ): ReturnType<GameController["benchmarkLiveForwardWalkExperience"]>;
-      pumpWorldForBenchmark(
-        position?: Parameters<GameController["pumpWorldForBenchmark"]>[0],
-        options?: Parameters<GameController["pumpWorldForBenchmark"]>[1],
-      ): ReturnType<GameController["pumpWorldForBenchmark"]>;
-      getBootstrapBenchmark(): ReturnType<GameController["getBootstrapBenchmark"]>;
       probeLodCoverage(
         sampleRadiusMeters?: number,
         sampleStepMeters?: number,
@@ -183,9 +155,7 @@ function mountGame(): GameRuntime {
     throw new Error("Game UI is incomplete");
   }
 
-  const controller = new GameController(canvas, {
-    eagerBootstrapBenchmark: searchParams.get("benchmarkBootstrap") === "1",
-  });
+  const controller = new GameController(canvas);
   const startFresh = searchParams.has("freshGame");
   if (startFresh) {
     clearProgressState();
@@ -262,16 +232,6 @@ function mountGame(): GameRuntime {
     teleportAndSettle: (x, y, z, options) => controller.teleportAndSettle([x, y, z], options),
     setCameraPoseAndSettle: (x, y, z, yawRadians, pitchRadians, options) =>
       controller.setCameraPoseAndSettle([x, y, z], yawRadians, pitchRadians, options),
-    benchmarkChunkCrossing: (iterations, chunkDelta) => controller.benchmarkChunkCrossing(iterations, chunkDelta),
-    benchmarkChunkCacheReuse: (chunkDelta, maxFramesPerLeg) =>
-      controller.benchmarkChunkCacheReuse(chunkDelta, maxFramesPerLeg),
-    benchmarkIncrementalCrossing: (iterations, chunkDelta, stepsPerLeg, settleFrames) =>
-      controller.benchmarkIncrementalCrossing(iterations, chunkDelta, stepsPerLeg, settleFrames),
-    benchmarkRouteExperience: (options) => controller.benchmarkRouteExperience(options),
-    benchmarkForwardWalkExperience: (options) => controller.benchmarkForwardWalkExperience(options),
-    benchmarkLiveForwardWalkExperience: (options) => controller.benchmarkLiveForwardWalkExperience(options),
-    pumpWorldForBenchmark: (position, options) => controller.pumpWorldForBenchmark(position, options),
-    getBootstrapBenchmark: () => controller.getBootstrapBenchmark(),
     probeLodCoverage: (sampleRadiusMeters, sampleStepMeters) =>
       controller.probeLodCoverage(sampleRadiusMeters, sampleStepMeters),
     probeRenderReadyCoverage: (sampleRadiusMeters, sampleStepMeters) =>

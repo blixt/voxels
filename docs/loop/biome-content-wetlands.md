@@ -129,19 +129,5 @@ Material direction:
 
 ## Programmatic Verification Ideas
 
-Build verification around deterministic probes, not screenshots alone:
-
-- Add route-atlas wetland routes for the four routes above. Require expected region/variant coverage, no long tokenless stretches, and direct or nearby hits for `fungal_bridge`, `crystal_reeds`, `rib_remains`, `salt_spire`, `old_road_causeway`, and `rib_arch`.
-- Add terrain-surface-lab patches centered on `(-4360, 920)`, `(-180, 4040)`, and `(1320, 120)`. Track surface range, flatness buckets, material entropy, direct landmarks, and dominant material share.
-- Add macro-region assertions against `sampleWorldRegion` for center and edge points: centers should produce the expected `regionId`, `biomeId`, `regionalVariantId`, and `ambientProfileId`; blend points should expose plausible `secondaryRegionId`.
-- Add water coverage metrics by patch: Bitter Coast should have frequent standing water but dry route islands; Salt Basin should have shallow water/mirror flats with high flatness; Inner Sea should have broad water plus island shelves.
-- Add landmark silhouette cadence metrics: in wetland route windows, at least one strong silhouette every `300-360 m`, using the existing route-atlas visible-nearby landmark scan.
-- Add cave entrance metrics only after cave hooks land: count dry entrances near raised hummocks/salt ribs and assert no underwater entrance spam in `marsh_blackwater` or `saltflat_mirror`.
-
-## High ROI Next Implementation Slices
-
-1. Regional route bands: add 3-4 wetland/salt/inner-sea route bands and extend route-atlas with required landmark IDs. This gives immediate authored-feeling navigation and measurable cadence.
-2. Region-local water/channel fields: add deterministic authored channel masks per target region, then gate water depth and dry shelves through those masks.
-3. Landmark roster weighting by region: split `marsh_blackwater`, `saltflat_mirror`, and `moor_shadowglass` into region-aware rosters so Bitter Coast, Salt Basin, and Inner Sea do not share the same content cadence.
-4. Terrain-surface-lab wetland patches: establish flatness/material/landmark baselines before heavy tuning so "huge biome" changes are measurable.
+Review wetland changes with deterministic route samples and player screenshots before heavy tuning.
 5. Dry-island cave entrances: add a narrow regional cave override for hummocks, salt ribs, and moor shelves after route and surface identity are stable.

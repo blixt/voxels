@@ -10,56 +10,12 @@ description = "Build the production Bun server bundle into dist"
 run = "bun run build"
 
 [tasks.test]
-description = "Run type checks and unit tests"
+description = "Run type checks"
 run = "bun run check"
 
 [tasks.versions]
 description = "Check pinned tool and package versions against official upstream releases"
 run = "bun run versions"
-
-[tasks.profile]
-description = "Profile local scene build and meshing performance"
-run = "bun run profile"
-
-[tasks.profile-stream]
-description = "Profile local procedural residency and meshing transitions"
-run = "bun run profile:stream"
-
-[tasks.profile-game-stream]
-description = "Profile the incremental game-path streaming loop"
-run = "bun run profile:game-stream"
-
-[tasks.profile-lod-residency]
-description = "Profile local LOD residency generation, meshing, and renderable geometry by level"
-run = "bun run profile:lod-residency"
-
-[tasks.atlas-routes]
-description = "Sample fixed expedition routes for biome, landmark, height, and ambient-profile cadence"
-run = "bun run atlas:routes"
-
-[tasks.verify-smoke]
-description = "Run the fast correctness/performance smoke wrapper with tests, build, route atlas, and browser lab"
-run = "bun run verify:smoke"
-
-[tasks.analyze-trace]
-description = "Summarize a Chrome performance trace into top CPU, heap, GC, and long-task findings"
-run = "bun run analyze:trace"
-
-[tasks.cycle-bench]
-description = "Run the standard command-line quality and performance battery and store a timestamped report"
-run = "bun run cycle:bench"
-
-[tasks.trace-route]
-description = "Launch a fresh production server and Chrome route benchmark trace run, then save the trace and analyzed report"
-run = "bun run trace:route"
-
-[tasks.bench-browser-game]
-description = "Run browser startup and forward-walk benchmark suites and write CSV detail to /tmp"
-run = "bun run bench:browser-game"
-
-[tasks.browser-lab]
-description = "Run the owned browser lab probe and write screenshot/JSON artifacts"
-run = "bun run lab:browser"
 
 [tasks.serve]
 description = "Run the built production server bundle"
