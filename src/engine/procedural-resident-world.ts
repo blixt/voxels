@@ -949,10 +949,17 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
   updateLodResidencyAround(
     position: Vec3,
-    options?: { maxGenerateLodChunks?: number; maxPlanMs?: number; maxWorkMs?: number },
+    options?: {
+      maxGenerateLodChunks?: number;
+      maxAdoptCompletedLodChunks?: number;
+      maxPlanMs?: number;
+      maxWorkMs?: number;
+    },
   ): LodResidencyUpdateSummary {
     const startedAt = performance.now();
     const maxGenerate = options?.maxGenerateLodChunks ?? 32;
+    const maxAdoptCompleted = options?.maxAdoptCompletedLodChunks
+      ?? (options ? Math.max(1, maxGenerate) : Number.POSITIVE_INFINITY);
     const maxPlanMs = options?.maxPlanMs ?? Number.POSITIVE_INFINITY;
     const maxWorkMs = options?.maxWorkMs ?? Number.POSITIVE_INFINITY;
 
@@ -1064,7 +1071,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     let scheduledLodWorkerRequests = 0;
     let scheduledLodDiskStores = 0;
     const lodDiskStats = this.asyncChunkGeneration?.drainLodChunkCompletionStats() ?? { cacheHits: 0, generated: 0, missing: 0, stored: 0 };
-    const completedLodChunks = this.asyncChunkGeneration?.drainCompletedLodChunks() ?? [];
+    const completedLodChunks = this.asyncChunkGeneration?.drainCompletedLodChunks(maxAdoptCompleted) ?? [];
     const missingLodDiskChunks = this.asyncChunkGeneration?.drainMissingLodChunks() ?? [];
     for (const missing of missingLodDiskChunks) {
       this.missingLodDiskCacheKeys.add(toAsyncLodChunkKey(missing));
@@ -1077,6 +1084,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       lodWorkerGeneratedByLevel[index] += adoptedLod.workerGeneratedByLevel[index] ?? 0;
     }
     meshMs += adoptedLod.meshMs;
+    const pendingCompletedLodAdoptions = this.asyncChunkGeneration?.getCompletedLodChunkCount?.() ?? 0;
     let maxChunkMs = 0;
     let maxChunkLevel = 0;
     let maxChunkKey: string | null = null;
@@ -1318,7 +1326,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     scheduledLodDiskStores += this.flushQueuedLodDiskStores();
     const pendingPrepared = this.preparedLodChunks.size;
     const pendingPreparedByLevel = countLodChunksByLevel(this.preparedLodChunks.values());
-    pending += pendingPrepared;
+    pending += pendingPrepared + pendingCompletedLodAdoptions;
     if (!neededKeyCacheHit) {
       this.lodNeededKeyCache = {
         signature: neededKeySignature,

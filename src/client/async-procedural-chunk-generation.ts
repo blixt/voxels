@@ -257,6 +257,9 @@ export function createAsyncProceduralChunkGeneration(
     getPendingCount(): number {
       return pendingKeys.size;
     },
+    getCompletedLodChunkCount(): number {
+      return completedLodChunks.length;
+    },
     drainCompletedChunks(): GeneratedChunk[] {
       if (completedChunks.length === 0) {
         return [];
@@ -281,11 +284,17 @@ export function createAsyncProceduralChunkGeneration(
       }
       return missingRegionSummaries.splice(0, missingRegionSummaries.length);
     },
-    drainCompletedLodChunks(): AsyncEncodedDerivedLodChunk[] {
+    drainCompletedLodChunks(maxCount?: number): AsyncEncodedDerivedLodChunk[] {
       if (completedLodChunks.length === 0) {
         return [];
       }
-      return completedLodChunks.splice(0, completedLodChunks.length);
+      const count = maxCount === undefined || !Number.isFinite(maxCount)
+        ? completedLodChunks.length
+        : Math.max(0, Math.floor(maxCount));
+      if (count === 0) {
+        return [];
+      }
+      return completedLodChunks.splice(0, Math.min(count, completedLodChunks.length));
     },
     drainMissingLodChunks(): AsyncDerivedLodChunkCacheKey[] {
       if (missingLodChunks.length === 0) {

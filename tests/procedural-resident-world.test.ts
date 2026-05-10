@@ -489,6 +489,57 @@ test("LOD residency tracks worker-generated derived LOD chunks separately from d
   expect(lod.generated).toBe(0);
 });
 
+test("LOD residency adopts completed derived chunks within the frame budget", () => {
+  const probeRequests: AsyncDerivedLodChunkCacheKey[] = [];
+  const probeWorld = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    asyncChunkGeneration: createFakeAsyncQueue({
+      requestLodChunk: (key) => {
+        probeRequests.push({ ...key, coord: { ...key.coord } });
+        return true;
+      },
+    }),
+    horizontalRadiusChunks: 1,
+  });
+  const spawn = probeWorld.getSpawnPosition();
+  probeWorld.updateLodResidencyAround(spawn, { maxGenerateLodChunks: 0 });
+  const keys = probeRequests.slice(0, 2);
+  expect(keys).toHaveLength(2);
+
+  const completed = keys.map((key) => {
+    const encoded = encodeDerivedLodChunk(createTestDerivedLodPayload(key, 16));
+    return {
+      key,
+      buffer: encoded.buffer,
+      byteLength: encoded.stats.byteLength,
+    };
+  });
+  const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {
+    asyncChunkGeneration: createFakeAsyncQueue({
+      drainCompletedLodChunks: (maxCount) => {
+        const count = maxCount === undefined ? completed.length : Math.min(maxCount, completed.length);
+        return completed.splice(0, count);
+      },
+      getCompletedLodChunkCount: () => completed.length,
+    }),
+    horizontalRadiusChunks: 1,
+  });
+
+  const first = world.updateLodResidencyAround(spawn, {
+    maxGenerateLodChunks: 0,
+    maxAdoptCompletedLodChunks: 1,
+  });
+  expect(first.lodDiskCacheHits).toBe(1);
+  expect(first.pending).toBeGreaterThan(0);
+  expect(completed).toHaveLength(1);
+
+  const second = world.updateLodResidencyAround(spawn, {
+    maxGenerateLodChunks: 0,
+    maxAdoptCompletedLodChunks: 1,
+  });
+  expect(second.lodDiskCacheHits).toBe(1);
+  expect(completed).toHaveLength(0);
+});
+
 test("LOD residency queues active derived chunks for persistence before eviction", () => {
   const storedKeys: AsyncDerivedLodChunkCacheKey[] = [];
   const world = new ProceduralResidentWorld(new ProceduralWorldGenerator(1337, { chunkSize: 16 }), {

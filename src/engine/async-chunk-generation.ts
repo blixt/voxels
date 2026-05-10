@@ -50,8 +50,9 @@ export interface AsyncChunkGenerationQueue {
   drainCompletedSummaries(): GeneratedChunkRenderSummary[];
   drainCompletedRegionSummaries(): GeneratedRenderSummaryRegion[];
   drainMissingRegionSummaries(): RenderSummaryRegionCoordinate[];
-  drainCompletedLodChunks(): AsyncEncodedDerivedLodChunk[];
+  drainCompletedLodChunks(maxCount?: number): AsyncEncodedDerivedLodChunk[];
   drainMissingLodChunks(): AsyncDerivedLodChunkCacheKey[];
+  getCompletedLodChunkCount?(): number;
   drainCompletionStats(): AsyncChunkGenerationCompletionStats;
   drainSummaryCompletionStats(): AsyncChunkSummaryCompletionStats;
   drainLodChunkCompletionStats(): AsyncDerivedLodChunkCompletionStats;

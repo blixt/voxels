@@ -165,6 +165,7 @@ const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
 const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 7;
 const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 6;
 const DEFAULT_MAX_LOD_CHUNKS_PER_FRAME = 1;
+const DEFAULT_MAX_LOD_ADOPTIONS_PER_FRAME = 1;
 const DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME = 3;
 const DEFAULT_MAX_LOD_WORK_MS_PER_FRAME = 8;
 const MOVING_LOD_UPDATE_INTERVAL_FRAMES = 4;
@@ -172,6 +173,7 @@ const MOVING_MAX_RESIDENCY_PLAN_MS_PER_FRAME = 5;
 const MOVING_MAX_EVICT_CHUNKS_PER_FRAME = 32;
 const MOVING_MAX_MESH_REBUILDS_PER_FRAME = 4;
 const MOVING_MAX_LOD_CHUNKS_PER_FRAME = 1;
+const MOVING_MAX_LOD_ADOPTIONS_PER_FRAME = 1;
 const MOVING_MAX_LOD_PLAN_MS_PER_FRAME = 0.75;
 const MOVING_MAX_LOD_WORK_MS_PER_FRAME = 4;
 const MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME = 6;
@@ -654,6 +656,7 @@ export interface StreamingBudgets {
 
 interface LodUpdateBudget {
   maxGenerateLodChunks: number;
+  maxAdoptCompletedLodChunks: number;
   maxPlanMs: number;
   maxWorkMs: number;
 }
@@ -968,6 +971,7 @@ export interface BootstrapExperienceBenchmark {
 export interface BenchmarkWorldPumpOptions {
   maxFrames?: number;
   maxGenerateLodChunks?: number;
+  maxAdoptCompletedLodChunks?: number;
   maxLodPlanMs?: number;
   maxLodWorkMs?: number;
   maxEvictChunks?: number;
@@ -2873,6 +2877,7 @@ export class GameController {
     const stopWhenSettled = options.stopWhenSettled ?? true;
     const lodBudget = {
       maxGenerateLodChunks: Math.max(0, Math.floor(options.maxGenerateLodChunks ?? DEFAULT_MAX_LOD_CHUNKS_PER_FRAME)),
+      maxAdoptCompletedLodChunks: Math.max(1, Math.floor(options.maxAdoptCompletedLodChunks ?? DEFAULT_MAX_LOD_ADOPTIONS_PER_FRAME)),
       maxPlanMs: Math.max(0.1, options.maxLodPlanMs ?? DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME),
       maxWorkMs: Math.max(0.1, options.maxLodWorkMs ?? DEFAULT_MAX_LOD_WORK_MS_PER_FRAME),
     };
@@ -3583,6 +3588,7 @@ export class GameController {
     let lodMs = 0;
     const movingLodBudget: LodUpdateBudget = {
       maxGenerateLodChunks: MOVING_MAX_LOD_CHUNKS_PER_FRAME,
+      maxAdoptCompletedLodChunks: MOVING_MAX_LOD_ADOPTIONS_PER_FRAME,
       maxPlanMs: MOVING_MAX_LOD_PLAN_MS_PER_FRAME,
       maxWorkMs: MOVING_MAX_LOD_WORK_MS_PER_FRAME,
     };
@@ -3689,6 +3695,7 @@ export class GameController {
       if (allowLodUpdate) {
         this.recordLodSummary(this.world.updateLodResidencyAround(this.player.feetPosition, {
           maxGenerateLodChunks: lodBudget?.maxGenerateLodChunks ?? DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
+          maxAdoptCompletedLodChunks: lodBudget?.maxAdoptCompletedLodChunks ?? DEFAULT_MAX_LOD_ADOPTIONS_PER_FRAME,
           maxPlanMs: lodBudget?.maxPlanMs ?? DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME,
           maxWorkMs: lodBudget?.maxWorkMs ?? DEFAULT_MAX_LOD_WORK_MS_PER_FRAME,
         }));
@@ -3740,6 +3747,9 @@ export class GameController {
         maxGenerateLodChunks: settle
           ? Number.POSITIVE_INFINITY
           : lodBudget?.maxGenerateLodChunks ?? DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
+        maxAdoptCompletedLodChunks: settle
+          ? Number.POSITIVE_INFINITY
+          : lodBudget?.maxAdoptCompletedLodChunks ?? DEFAULT_MAX_LOD_ADOPTIONS_PER_FRAME,
         maxPlanMs: settle
           ? Number.POSITIVE_INFINITY
           : lodBudget?.maxPlanMs ?? DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME,
