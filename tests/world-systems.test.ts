@@ -37,7 +37,60 @@ test("world systems produce coherent exploration cues from a generator probe", (
   expect(systems.area.lootName.length).toBeGreaterThan(0);
   expect(systems.area.lootSignalLabel.length).toBeGreaterThan(0);
   expect(["cartography", "naturalist", "spelunking", "lore"]).toContain(systems.area.lootSkillId);
+  expect(systems.area.soundscapeId.length).toBeGreaterThan(0);
+  expect(systems.area.soundscapeLabel.length).toBeGreaterThan(0);
+  expect(systems.area.soundscapeListenLabel).toContain("Listen");
+  expect(systems.area.soundscapeFieldNote.length).toBeGreaterThan(0);
   expect(systems.area.coherenceLabel).toContain(systems.area.floraLabel);
+});
+
+test("world systems derive deterministic soundscape cues from weather and cave context", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const baseProbe = generator.sampleBiomeProbe(0, 0);
+  const encounter = sampleRpgEncounterWorldUnits(0, 0);
+  const ashProbe = {
+    ...baseProbe,
+    biomeId: "ember" as const,
+    fields: {
+      ...baseProbe.fields,
+      moisture: 0.05,
+      oceanness: 0.02,
+      volcanism: 0.98,
+      desolation: 0.92,
+      magic: 0.04,
+    },
+  };
+  const wetProbe = {
+    ...baseProbe,
+    biomeId: "marsh" as const,
+    fields: {
+      ...baseProbe.fields,
+      moisture: 0.96,
+      oceanness: 0.45,
+      volcanism: 0.05,
+      desolation: 0.05,
+      magic: 0.10,
+    },
+  };
+  const caveProbe = {
+    ...baseProbe,
+    undergroundBiomeId: "crystalline" as const,
+  };
+
+  const ash = sampleWorldSystems(180, ashProbe, resolveAmbientWorldProfile(ashProbe), encounter, "surface");
+  const wet = sampleWorldSystems(180, wetProbe, resolveAmbientWorldProfile(wetProbe), encounter, "surface");
+  const cave = sampleWorldSystems(180, caveProbe, resolveAmbientWorldProfile(caveProbe), encounter, "underground");
+  const caveAgain = sampleWorldSystems(180, caveProbe, resolveAmbientWorldProfile(caveProbe), encounter, "underground");
+
+  expect(ash.weather.id).toBe("ash-squall");
+  expect(ash.area.soundscapeId).toBe("ash-wind-road");
+  expect(ash.area.soundscapeListenLabel).toBe("Listen to the ash wind");
+  expect(wet.weather.id).toBe("blackwater-rain");
+  expect(wet.area.soundscapeId).toBe("blackwater-rain-reeds");
+  expect(wet.area.soundscapeFieldNote).toContain("Rain ticks through reeds");
+  expect(cave.area.soundscapeId).toBe("crystal-cave-ringing");
+  expect(cave.area.soundscapeLabel).toBe("Crystal Cave Ringing");
+  expect(cave.area.soundscapeFieldNote).toBe(caveAgain.area.soundscapeFieldNote);
 });
 
 test("visible vegetation landmarks produce specific forage signals", () => {

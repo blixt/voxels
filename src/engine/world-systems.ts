@@ -8,7 +8,7 @@ import type {
   RegionalVariantId,
   UndergroundBiomeId,
 } from "./procedural-generator.ts";
-import type { RpgEncounterSample } from "./rpg-encounters.ts";
+import { describeRpgEncounterFaction, type RpgEncounterSample } from "./rpg-encounters.ts";
 import type { SkillId } from "./skill-journal.ts";
 
 export type TimeOfDayPhaseId = "dawn" | "morning" | "day" | "dusk" | "night";
@@ -49,6 +49,10 @@ export interface WorldAreaActivitySnapshot {
   forageSourceLandmarkId: string | null;
   hazardLabel: string;
   coherenceLabel: string;
+  soundscapeId: string;
+  soundscapeLabel: string;
+  soundscapeListenLabel: string;
+  soundscapeFieldNote: string;
 }
 
 export interface WorldSystemSnapshot {
@@ -269,6 +273,7 @@ function resolveWorldAreaActivity(
   const faunaLabel = resolveFaunaLabel(probe, encounter, underground);
   const loot = resolveLootSignal(probe.regionalVariantId, probe.landmarkId, underground, weather);
   const hazardLabel = resolveHazardLabel(probe, encounter, weather, underground);
+  const soundscape = resolveSoundscapeCue(probe, encounter, weather, underground);
   return {
     floraLabel,
     faunaLabel,
@@ -282,7 +287,124 @@ function resolveWorldAreaActivity(
     coherenceLabel: underground
       ? `cave ecology: ${floraLabel}; ${faunaLabel}`
       : `surface ecology: ${floraLabel}; ${faunaLabel}`,
+    soundscapeId: soundscape.id,
+    soundscapeLabel: soundscape.label,
+    soundscapeListenLabel: soundscape.listenLabel,
+    soundscapeFieldNote: soundscape.fieldNote,
   };
+}
+
+interface SoundscapeCue {
+  id: string;
+  label: string;
+  listenLabel: string;
+  fieldNote: string;
+}
+
+function resolveSoundscapeCue(
+  probe: ProceduralBiomeProbe,
+  encounter: RpgEncounterSample,
+  weather: WorldWeatherSnapshot,
+  underground: boolean,
+): SoundscapeCue {
+  const factionId = encounter.factionHints[0]?.factionId ?? null;
+  const factionLabel = factionId ? describeRpgEncounterFaction(factionId) : "distant travelers";
+  const caveSystemId = normalizeCuePart(encounter.caveSystemId ?? probe.fields.atlasCaveSystemId ?? null);
+  if (underground) {
+    if (probe.undergroundBiomeId === "crystalline") {
+      return soundscape(
+        "crystal-cave-ringing",
+        "Crystal Cave Ringing",
+        "Listen to the crystal cave ringing",
+        "Small stone shifts come back as glassy overtones from deeper chambers.",
+      );
+    }
+    if (probe.undergroundBiomeId === "mycelial" || weather.id === "sporeglow") {
+      return soundscape(
+        "mycelial-cave-hum",
+        "Mycelial Cave Hum",
+        "Listen to the mycelial cave hum",
+        "Soft clicks and wet fungal pulses make the cave feel occupied beyond the lamp edge.",
+      );
+    }
+    return soundscape(
+      caveSystemId ? `${caveSystemId}-cave-echo` : `${probe.undergroundBiomeId}-cave-echo`,
+      "Cave Echoes",
+      "Listen to the cave echoes",
+      `Footfalls return unevenly through ${factionLabel.toLowerCase()} traces and blind stone turns.`,
+    );
+  }
+  if (weather.id === "blackwater-rain") {
+    return soundscape(
+      "blackwater-rain-reeds",
+      "Blackwater Rain Reeds",
+      "Listen to the blackwater rain",
+      "Rain ticks through reeds and dark channels, hiding smaller movement in the marsh edge.",
+    );
+  }
+  if (weather.id === "ash-squall" || probe.biomeId === "ember" || probe.biomeId === "badlands") {
+    return soundscape(
+      "ash-wind-road",
+      "Ash Wind Road",
+      "Listen to the ash wind",
+      "Ash wind rasps over old road stones while loose grit marks the safer lee side.",
+    );
+  }
+  if (weather.id === "glass-haze" || probe.biomeId === "shardlands") {
+    return soundscape(
+      "glass-haze-chime",
+      "Glass Haze Chime",
+      "Listen to the glass haze",
+      "Glass reeds and cairn shards click in a pattern that makes distance hard to judge.",
+    );
+  }
+  if (encounter.pressure >= 0.72) {
+    const cueId = factionId ? `${factionId}-distant-movement` : "distant-movement";
+    return soundscape(
+      cueId,
+      `${factionLabel} Movement`,
+      `Listen for ${factionLabel.toLowerCase()} movement`,
+      `The quiet breaks around ${factionLabel.toLowerCase()} routes before anything becomes visible.`,
+    );
+  }
+  if (encounter.routeId) {
+    return soundscape(
+      `${encounter.routeId}-road-murmur`,
+      "Road Murmur",
+      "Listen to the road murmur",
+      "Wind, old stones, and distant traffic give the route a direction even between landmarks.",
+    );
+  }
+  if (probe.biomeId === "marsh" || probe.biomeId === "moor") {
+    return soundscape(
+      "wetland-chorus",
+      "Wetland Chorus",
+      "Listen to the wetland chorus",
+      "Insects, reeds, and slow water make a living border around the path.",
+    );
+  }
+  if (probe.biomeId === "fungal" || probe.biomeId === "firefly") {
+    return soundscape(
+      "sporewood-murmur",
+      "Sporewood Murmur",
+      "Listen to the sporewood murmur",
+      "Glowing growth and small wings turn the undergrowth into a soft, uneven pulse.",
+    );
+  }
+  return soundscape(
+    `${probe.biomeId}-island-wind`,
+    "Island Wind",
+    "Listen to the island wind",
+    "The wind carries enough surf, grass, and stone noise to make this place distinct from the last.",
+  );
+}
+
+function soundscape(id: string, label: string, listenLabel: string, fieldNote: string): SoundscapeCue {
+  return { id, label, listenLabel, fieldNote };
+}
+
+function normalizeCuePart(value: string | null | undefined): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 function resolveFaunaLabel(

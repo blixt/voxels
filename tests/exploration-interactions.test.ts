@@ -365,6 +365,114 @@ test("interaction resolver keeps plant forage payloads stable below mob trails",
   });
 });
 
+test("interaction resolver keeps ambient soundscapes as fallback listen targets", () => {
+  const resolution = resolveExplorationInteractionTarget({
+    viewerPosition: [0, 0, 0],
+    viewerForward: [0, 0, 1],
+    candidates: [
+      {
+        id: "trail-forage:0:0",
+        subjectType: "object",
+        name: "Trail Forage",
+        role: "loot-cache",
+        priority: 1,
+        worldPosition: [0, 0, 1],
+        prompts: ["use"],
+      },
+      {
+        id: "soundscape:ash-wind-road:0:0",
+        subjectType: "zone",
+        name: "Ash Wind Road",
+        role: "ambient-soundscape",
+        priority: 1.5,
+        worldPosition: [0, 0, 1.05],
+        prompts: [{
+          verb: "listen",
+          label: "Listen to the ash wind",
+          description: "Ash wind rasps over old road stones.",
+        }],
+        payload: {
+          soundscapeId: "ash-wind-road",
+          weather: "ash-squall",
+          regionId: "red-mountain",
+          routeId: "pilgrim-road",
+          caveSystemId: null,
+          moodId: "ash-pilgrimage",
+          pressure: 0.72,
+        },
+      },
+      {
+        id: "berry-bush-forage:berry_bush:0:0",
+        subjectType: "object",
+        name: "Berry Bush Forage",
+        role: "loot-cache",
+        priority: 7,
+        worldPosition: [0, 0, 1.1],
+        prompts: ["use"],
+      },
+      {
+        id: "kwama-brood:kwama-forager:0:0",
+        subjectType: "mob",
+        name: "Kwama Forager I",
+        role: "passive-sighting",
+        priority: 6.75,
+        worldPosition: [0, 0, 1.15],
+        prompts: ["inspect"],
+      },
+      {
+        id: "kwama-brood:mob-lair:0:0",
+        subjectType: "mob",
+        name: "Kwama Brood Lair",
+        role: "mob-lair",
+        priority: 8,
+        worldPosition: [0, 0, 1.2],
+        prompts: ["inspect"],
+      },
+      {
+        id: "cave-mouth:ash-ravine",
+        subjectType: "zone",
+        name: "Ash Ravine Mouth",
+        role: "cave-mouth",
+        priority: 12,
+        worldPosition: [0, 0, 1.25],
+        prompts: ["use"],
+      },
+      {
+        id: "old_road_causeway",
+        subjectType: "landmark",
+        name: "Old Road Causeway",
+        role: "old-road",
+        priority: 20,
+        worldPosition: [0, 0, 1.3],
+        prompts: ["inspect"],
+      },
+    ],
+  });
+
+  expect(resolution.candidates.map((candidate) => candidate.role)).toEqual([
+    "old-road",
+    "cave-mouth",
+    "mob-lair",
+    "loot-cache",
+    "passive-sighting",
+    "ambient-soundscape",
+    "loot-cache",
+  ]);
+  expect(resolution.candidates[5]?.prompts[0]?.eventInput).toMatchObject({
+    kind: "listen",
+    subjectType: "zone",
+    subjectId: "soundscape:ash-wind-road:0:0",
+    role: "ambient-soundscape",
+    payload: {
+      soundscapeId: "ash-wind-road",
+      weather: "ash-squall",
+      routeId: "pilgrim-road",
+      regionId: "red-mountain",
+      moodId: "ash-pilgrimage",
+    },
+  });
+});
+
 test("interaction resolver keeps cave passage use payloads stable", () => {
   const resolution = resolveExplorationInteractionTarget({
     viewerPosition: [0, 0, 0],

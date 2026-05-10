@@ -314,6 +314,10 @@ export interface GameHudSnapshot {
   lootSignalLabel: string;
   hazardLabel: string;
   areaCoherenceLabel: string;
+  soundscapeId: string;
+  soundscapeLabel: string;
+  soundscapeListenLabel: string;
+  soundscapeFieldNote: string;
   encounterMoodLabel: string;
   encounterPressureLabel: string;
   encounterFactionLabel: string;
@@ -1332,6 +1336,10 @@ export class GameController {
       lootSignalLabel: worldSystems.area.lootSignalLabel,
       hazardLabel: worldSystems.area.hazardLabel,
       areaCoherenceLabel: worldSystems.area.coherenceLabel,
+      soundscapeId: worldSystems.area.soundscapeId,
+      soundscapeLabel: worldSystems.area.soundscapeLabel,
+      soundscapeListenLabel: worldSystems.area.soundscapeListenLabel,
+      soundscapeFieldNote: worldSystems.area.soundscapeFieldNote,
       encounterMoodLabel: formatEncounterMoodForTravelContext(
         describeRpgEncounterMood(encounter.moodId),
         this.lastTravelContext,
@@ -3388,6 +3396,48 @@ export class GameController {
       encounter,
       this.lastTravelContext,
     );
+    const soundscapeCellX = Math.floor(this.player.feetPosition[0] / metersToWorldUnits(64));
+    const soundscapeCellZ = Math.floor(this.player.feetPosition[2] / metersToWorldUnits(64));
+    const soundscapeCandidateId = `soundscape:${worldSystems.area.soundscapeId}:${soundscapeCellX}:${soundscapeCellZ}`;
+    candidates.push({
+      id: soundscapeCandidateId,
+      subjectType: "zone",
+      name: worldSystems.area.soundscapeLabel,
+      role: "ambient-soundscape",
+      worldPosition: [
+        this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.1),
+        currentWorld.probe.surfaceY,
+        this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.1),
+      ],
+      interactionRadiusMeters: metersToWorldUnits(8),
+      priority: 1.5,
+      prompts: [{
+        verb: "listen",
+        label: worldSystems.area.soundscapeListenLabel,
+        description: worldSystems.area.soundscapeFieldNote,
+      }],
+      flavorText: worldSystems.area.soundscapeFieldNote,
+      skillAwards: [{
+        skillId: "lore",
+        xp: 6,
+        reason: "Listened to local soundscape",
+        awardKey: `soundscape:${worldSystems.area.soundscapeId}`,
+        onceOnly: true,
+      }],
+      payload: {
+        soundscapeId: worldSystems.area.soundscapeId,
+        soundscapeLabel: worldSystems.area.soundscapeLabel,
+        fieldNote: worldSystems.area.soundscapeFieldNote,
+        weather: worldSystems.weather.id,
+        weatherIntensity: Number(worldSystems.weather.intensity.toFixed(3)),
+        regionId: encounter.regionId,
+        routeId: encounter.routeId,
+        caveSystemId: encounter.caveSystemId,
+        moodId: encounter.moodId,
+        pressure: Number(encounter.pressure.toFixed(3)),
+        travelContext: this.lastTravelContext,
+      },
+    });
     const anchoredForage = Boolean(worldSystems.area.forageSourceLandmarkId);
     const forageSite = sampleForageSiteWorldUnits(
       anchoredForage ? this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.5) : this.player.feetPosition[0],
