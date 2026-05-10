@@ -42,6 +42,10 @@ test("RPG HUD renders place route interaction and skill snapshot fields", () => 
     "navigationCompassLabel",
     "navigationTurnLabel",
     "travelContextLabel",
+    "ambientProfileLabel",
+    "weatherLabel",
+    "weatherIntensity",
+    "hazardLabel",
     "encounterMoodLabel",
     "encounterPressureLabel",
     "encounterFactionLabel",
@@ -73,6 +77,8 @@ test("RPG HUD renders place route interaction and skill snapshot fields", () => 
     expect(gameController).toContain(field);
     expect(gameClient).toContain(`snapshot.${field}`);
   }
+  expect(gameClient).toContain("snapshot.weatherLabel ? ` • ${snapshot.weatherLabel} ${(snapshot.weatherIntensity * 100).toFixed(0)}%` : \"\"");
+  expect(gameClient).toContain("snapshot.ambientProfileLabel ? ` • ${snapshot.ambientProfileLabel}` : \"\"");
 
   for (const className of [
     "game-rpg-place",

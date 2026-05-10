@@ -460,6 +460,10 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
         }`
         : snapshot.interactionPromptLabel;
       skill.textContent = `${snapshot.focusSkillName} ${snapshot.focusSkillLevel} • ${snapshot.timeOfDayLabel}${
+        snapshot.weatherLabel ? ` • ${snapshot.weatherLabel} ${(snapshot.weatherIntensity * 100).toFixed(0)}%` : ""
+      }${
+        snapshot.ambientProfileLabel ? ` • ${snapshot.ambientProfileLabel}` : ""
+      }${
         snapshot.fieldKitFindCount > 0 ? ` • ${snapshot.fieldKitSummaryLabel}` : ""
       }${
         snapshot.passiveMobSightingCount > 0 ? ` • ${snapshot.passiveMobNearestLabel}` : ""
