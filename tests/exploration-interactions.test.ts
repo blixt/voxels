@@ -248,3 +248,36 @@ test("interaction event helper keeps resolved target identity stable", () => {
     flavorText: "Raised stones cross the low ground.",
   });
 });
+
+test("interaction resolver carries repeatable occurrence ids for revisitable targets", () => {
+  const resolution = resolveExplorationInteractionTarget({
+    viewerPosition: [0, 0, 0],
+    candidates: [{
+      id: "berry-bush-forage:forage-patch:4:0",
+      subjectType: "object",
+      name: "Berry Bush Forage Patch",
+      role: "loot-cache",
+      worldPosition: [0, 0, 1],
+      prompts: [{ verb: "use", label: "Revisit berry bush forage" }],
+      occurrenceId: "revisit-2",
+      repeatable: true,
+      payload: {
+        lootId: "berry-bush-forage",
+        collectedBefore: true,
+      },
+    }],
+  });
+
+  expect(resolution.target?.prompts[0]?.eventInput).toMatchObject({
+    kind: "use",
+    subjectType: "object",
+    subjectId: "berry-bush-forage:forage-patch:4:0",
+    role: "loot-cache",
+    occurrenceId: "revisit-2",
+    repeatable: true,
+    payload: {
+      lootId: "berry-bush-forage",
+      collectedBefore: true,
+    },
+  });
+});

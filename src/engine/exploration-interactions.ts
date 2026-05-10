@@ -25,6 +25,8 @@ export interface ExplorationInteractionCandidate {
   flavorText?: string | null;
   skillAwards?: ExplorationEventInput["skillAwards"];
   payload?: ExplorationEventInput["payload"];
+  occurrenceId?: string | null;
+  repeatable?: boolean;
 }
 
 export interface ExplorationInteractionResolverInput {
@@ -161,6 +163,8 @@ function normalizePrompts(
         name: target.name,
         flavorText: typeof candidate.flavorText === "string" ? candidate.flavorText : null,
         worldPosition: candidate.worldPosition,
+        ...(candidate.occurrenceId ? { occurrenceId: candidate.occurrenceId } : {}),
+        ...(candidate.repeatable !== undefined ? { repeatable: candidate.repeatable } : {}),
         ...(candidate.skillAwards !== undefined ? { skillAwards: candidate.skillAwards } : {}),
         ...(candidate.payload !== undefined ? { payload: candidate.payload } : {}),
       },

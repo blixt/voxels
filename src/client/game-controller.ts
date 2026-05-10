@@ -41,6 +41,11 @@ import {
 } from "../engine/exploration-events.ts";
 import { summarizeFieldKit } from "../engine/field-kit.ts";
 import { summarizeBestiary } from "../engine/bestiary-journal.ts";
+import {
+  getLootJournalCandidateState,
+  summarizeLootJournal,
+  type LootJournalCandidateState,
+} from "../engine/loot-journal.ts";
 import { findSafeCaveEntryFeetPosition } from "../engine/cave-traversal.ts";
 import { describeNavigationBearing } from "../engine/navigation-bearing.ts";
 import {
@@ -355,6 +360,10 @@ export interface GameHudSnapshot {
   fieldKitLastFindLabel: string;
   fieldKitLastNoteLabel: string;
   fieldKitDominantCategoryLabel: string;
+  lootJournalCollectedCacheCount: number;
+  lootJournalRevisitedCacheCount: number;
+  lootJournalRevisitEventCount: number;
+  lootJournalStateLabel: string;
   landmarkScanRadiusMeters: number;
   landmarkScanSampleCount: number;
   surfaceTravelSpeedMultiplier: number;
@@ -1236,6 +1245,7 @@ export class GameController {
     const scoutResult = describeRpgEncounterScoutResult(encounter);
     const eventLog = this.explorationEventLog.getSnapshot();
     const fieldKit = summarizeFieldKit(eventLog);
+    const lootJournal = summarizeLootJournal(eventLog);
     const bestiary = summarizeBestiary(eventLog);
     const passiveMobSightings = this.samplePassiveMobSightings();
     const nearestPassiveMob = passiveMobSightings[0] ?? null;
@@ -1368,6 +1378,10 @@ export class GameController {
       fieldKitLastFindLabel: fieldKit.lastFindLabel,
       fieldKitLastNoteLabel: fieldKit.lastFieldNoteLabel,
       fieldKitDominantCategoryLabel: fieldKit.dominantCategoryLabel,
+      lootJournalCollectedCacheCount: lootJournal.totalCollectedCaches,
+      lootJournalRevisitedCacheCount: lootJournal.totalRevisitedCaches,
+      lootJournalRevisitEventCount: lootJournal.totalRevisitEvents,
+      lootJournalStateLabel: formatLootJournalStateLabel(lootJournal.totalCollectedCaches, lootJournal.totalRevisitedCaches),
       landmarkScanRadiusMeters: explorationSkillEffects.landmarkScanRadiusMeters,
       landmarkScanSampleCount: buildLandmarkSampleOffsets(explorationSkillEffects).length,
       surfaceTravelSpeedMultiplier: explorationSkillEffects.surfaceTravelSpeedMultiplier,
@@ -3323,6 +3337,12 @@ export class GameController {
       this.player.feetPosition[2],
       worldSystems.area,
     );
+    const lootState = getLootJournalCandidateState(this.explorationEventLog.getSnapshot(), {
+      subjectId: forageSite.id,
+      lootId: worldSystems.area.lootId,
+      categoryId: forageSite.role,
+    });
+    const exactLootRevisit = lootState.match === "subject" && lootState.collected;
     const forageProbe = this.generator.sampleBiomeProbe(forageSite.x, forageSite.z);
     candidates.push({
       id: forageSite.id,
@@ -3338,10 +3358,12 @@ export class GameController {
       priority: 1,
       prompts: [{
         verb: "use",
-        label: worldSystems.area.lootInteractionLabel,
-        description: forageSite.fieldNote,
+        label: exactLootRevisit ? `Revisit ${forageSite.name}` : worldSystems.area.lootInteractionLabel,
+        description: describeLootCandidatePrompt(forageSite.fieldNote, lootState),
       }],
       flavorText: forageSite.fieldNote,
+      occurrenceId: exactLootRevisit ? `revisit-${lootState.eventCount + 1}` : null,
+      repeatable: exactLootRevisit,
       skillAwards: [{
         skillId: worldSystems.area.lootSkillId,
         xp: 18,
@@ -3351,9 +3373,13 @@ export class GameController {
       }],
       payload: {
         lootId: worldSystems.area.lootId,
+        categoryId: forageSite.role,
         forageSiteRole: forageSite.role,
         clueLabel: forageSite.clueLabel,
         fieldNote: forageSite.fieldNote,
+        collectedBefore: exactLootRevisit,
+        lootJournalMatch: lootState.match,
+        previousFindNote: lootState.lastNote,
         forageSourceLandmarkId: worldSystems.area.forageSourceLandmarkId,
         weather: worldSystems.weather.id,
         hazard: worldSystems.area.hazardLabel,
@@ -4831,6 +4857,25 @@ function formatPassiveMobShortSpecies(speciesName: string): string {
   if (speciesName.includes("Vagrant")) return "Vagrant";
   if (speciesName.includes("Grazer")) return "Grazer";
   return speciesName;
+}
+
+function describeLootCandidatePrompt(fieldNote: string, state: LootJournalCandidateState): string {
+  if (!state.collected) {
+    return fieldNote;
+  }
+  if (state.match === "subject") {
+    return state.lastNote ? `Already searched here. Last note: ${state.lastNote}` : "Already searched here.";
+  }
+  return `${fieldNote} Similar find recorded: ${state.lastNote ?? state.lootId ?? "known cache"}.`;
+}
+
+function formatLootJournalStateLabel(collectedCaches: number, revisitedCaches: number): string {
+  if (collectedCaches === 0) {
+    return "No caches collected";
+  }
+  return revisitedCaches > 0
+    ? `${collectedCaches} caches • ${revisitedCaches} revisited`
+    : `${collectedCaches} caches collected`;
 }
 
 function buildQuestTravelGoals(): readonly TravelGoalDefinition[] {

@@ -65,6 +65,10 @@ test("RPG HUD renders place route interaction and skill snapshot fields", () => 
     "fieldKitLastFindLabel",
     "fieldKitLastNoteLabel",
     "fieldKitDominantCategoryLabel",
+    "lootJournalCollectedCacheCount",
+    "lootJournalRevisitedCacheCount",
+    "lootJournalRevisitEventCount",
+    "lootJournalStateLabel",
   ]) {
     expect(gameController).toContain(field);
     expect(gameClient).toContain(`snapshot.${field}`);
@@ -117,6 +121,9 @@ test("client wires pure exploration interaction and travel goal systems", () => 
   expect(gameController).toContain("clueLabel: forageSite.clueLabel");
   expect(gameController).toContain("fieldNote: forageSite.fieldNote");
   expect(gameController).toContain("summarizeFieldKit");
+  expect(gameController).toContain("summarizeLootJournal");
+  expect(gameController).toContain("getLootJournalCandidateState");
+  expect(gameController).toContain("occurrenceId: exactLootRevisit ? `revisit-${lootState.eventCount + 1}` : null");
   expect(gameController).toContain("summarizeBestiary");
   expect(gameController).toContain("factionId: encounterSite.factionId");
   expect(gameController).toContain("role: \"cave-mouth\"");
