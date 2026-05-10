@@ -3148,6 +3148,12 @@ export class GameController {
     if (eventResult.accepted) {
       this.skillJournal.observeSkillAwards(eventResult.event.skillAwards);
     }
+    if (target.subjectType === "mob" && target.role === "passive-sighting") {
+      this.lastInteractionLabel = prompt.label;
+      this.status = prompt.eventInput.flavorText ?? prompt.label;
+      this.pushHud(true);
+      return;
+    }
     if (target.role === "cave-mouth" && prompt.verb === "use") {
       this.enterCaveMouth(target, currentWorld, prompt.eventInput.payload);
       this.pushHud(true);

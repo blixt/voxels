@@ -288,6 +288,10 @@ function collectExplorationLoopFacts(): RpgSliceAuditFacts["explorationLoop"] {
     discoveredRegionalVariantCount: 4,
     discoveredLandmarkCount: 12,
     discoveredAncientLandmarkCount: 4,
+    scoutedMobTrailCount: 5,
+    lootedCacheCount: 5,
+    scoutedCaveMouthCount: 3,
+    traversedCavePassageCount: 1,
   });
 
   return {

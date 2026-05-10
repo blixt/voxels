@@ -61,6 +61,7 @@ test("RPG slice audit collector is deterministic for module-derived facts", () =
   expect(second).toEqual(first);
   expect(first.worldDefinition.regionCount).toBeGreaterThanOrEqual(8);
   expect(first.explorationLoop.interactionVerbCount).toBe(3);
+  expect(first.explorationLoop.objectiveStageReached).toBe("deep-pilgrimage");
   expect(first.skillsProgression.skillCount).toBe(4);
   expect(first.performanceEvidenceAvailability.latestEvidenceIsNotRequiredForScore).toBe(true);
 });

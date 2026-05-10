@@ -21,7 +21,7 @@ export function buildPassiveMobInteractionCandidates(
       role: "passive-sighting",
       worldPosition: [sighting.position[0], options.surfaceY, sighting.position[2]],
       interactionRadiusMeters: sighting.distanceWorldUnits + 1,
-      priority: 9 - index * 0.05,
+      priority: 6.75 - index * 0.05,
       prompts: [{
         verb: "inspect",
         label: `Observe ${sighting.speciesName}`,

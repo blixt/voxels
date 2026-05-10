@@ -273,7 +273,7 @@ test("interaction resolver surfaces visible cave mouths ahead of generic mob tra
   });
 });
 
-test("interaction resolver ranks passive sightings above forage but below authored encounter sites", () => {
+test("interaction resolver ranks passive sightings above generic forage but below authored encounter sites", () => {
   const resolution = resolveExplorationInteractionTarget({
     viewerPosition: [0, 0, 0],
     viewerForward: [0, 0, 1],
@@ -292,7 +292,7 @@ test("interaction resolver ranks passive sightings above forage but below author
         subjectType: "mob",
         name: "Kwama Forager I",
         role: "passive-sighting",
-        priority: 9,
+        priority: 6.75,
         worldPosition: [0, 0, 1.1],
         prompts: ["inspect"],
       },
@@ -301,7 +301,7 @@ test("interaction resolver ranks passive sightings above forage but below author
         subjectType: "mob",
         name: "Kwama Brood Lair",
         role: "mob-lair",
-        priority: 10,
+        priority: 8,
         worldPosition: [0, 0, 1.2],
         prompts: ["inspect"],
       },

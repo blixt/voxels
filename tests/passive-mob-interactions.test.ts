@@ -26,7 +26,7 @@ test("passive mob interaction candidates expose stable bestiary payloads", () =>
       metersToWorldUnits(42),
       sightings[0]!.position[2],
     ],
-    priority: 9,
+    priority: 6.75,
     prompts: [{
       verb: "inspect",
       label: `Observe ${sightings[0]!.speciesName}`,
@@ -55,7 +55,7 @@ test("passive mob interaction candidates expose stable bestiary payloads", () =>
   expect(candidates[0]!.payload).toMatchObject({
     fieldNote: expect.stringContaining("sighted"),
   });
-  expect(candidates.map((candidate) => candidate.priority)).toEqual([9, 8.95]);
+  expect(candidates.map((candidate) => candidate.priority)).toEqual([6.75, 6.7]);
 });
 
 test("passive mob interaction candidate caps can suppress all sightings", () => {

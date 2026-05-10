@@ -38,6 +38,42 @@ test("bestiary summarizes mob signs by faction and latest field note", () => {
   ]);
 });
 
+test("bestiary includes inspected passive mob sightings", () => {
+  const log = new ExplorationEventLog();
+
+  log.record({
+    kind: "inspect",
+    subjectType: "mob",
+    subjectId: "kwama-brood:kwama-forager:0:0",
+    role: "passive-sighting",
+    name: "Kwama Forager I",
+    flavorText: "Kwama Forager is moving through the nearby terrain.",
+    payload: {
+      factionId: "kwama-brood",
+      speciesId: "kwama-forager",
+      speciesName: "Kwama Forager",
+      moodId: "cave-threshold",
+      fieldNote: "Kwama Forager sighted 6.4 m away.",
+    },
+  });
+
+  const bestiary = summarizeBestiary(log.getSnapshot());
+
+  expect(bestiary).toMatchObject({
+    totalSightings: 1,
+    entryCount: 1,
+    summaryLabel: "1 mob sighting",
+    lastSightingLabel: "Last sign: Kwama Brood",
+    lastFieldNoteLabel: "Mob note: Kwama Forager sighted 6.4 m away.",
+    dominantFactionLabel: "Most signs: Kwama Brood",
+  });
+  expect(bestiary.entries[0]).toMatchObject({
+    id: "kwama-brood",
+    count: 1,
+    lastRole: "passive-sighting",
+  });
+});
+
 test("empty bestiary uses readable empty labels", () => {
   const bestiary = summarizeBestiary(new ExplorationEventLog().getSnapshot());
 
