@@ -4,6 +4,10 @@ export interface ExplorationObjectiveSource {
   discoveredRegionalVariantCount: number;
   discoveredLandmarkCount: number;
   discoveredAncientLandmarkCount: number;
+  scoutedMobTrailCount?: number;
+  lootedCacheCount?: number;
+  scoutedCaveMouthCount?: number;
+  traversedCavePassageCount?: number;
 }
 
 export interface ExplorationObjective {
@@ -51,6 +55,13 @@ export function describeExplorationObjectives(
       source.discoveredLandmarkCount,
       3,
     ),
+    buildObjective(
+      "mob-trails-1",
+      "Scout 1 local trail sign",
+      "Tracks, spoor, and camp traces make nearby pressure readable.",
+      readObjectiveCount(source.scoutedMobTrailCount),
+      1,
+    ),
   ];
   if (!allObjectivesComplete(surveyObjectives)) {
     return buildSnapshot(
@@ -84,6 +95,20 @@ export function describeExplorationObjectives(
       "Odd borders often hide older paths.",
       source.discoveredRegionalVariantCount,
       2,
+    ),
+    buildObjective(
+      "loot-caches-2",
+      "Recover 2 field finds",
+      "Use caches, forage, and salvage to turn wandering into supplies.",
+      readObjectiveCount(source.lootedCacheCount),
+      2,
+    ),
+    buildObjective(
+      "cave-mouths-1",
+      "Scout 1 cave mouth",
+      "Surface tells mark where authored cave systems begin.",
+      readObjectiveCount(source.scoutedCaveMouthCount),
+      1,
     ),
     buildObjective(
       "underground-1",
@@ -131,6 +156,34 @@ export function describeExplorationObjectives(
       "Enter 3 underground biomes",
       "Descend until the underground map has its own regions.",
       source.discoveredUndergroundBiomeCount,
+      3,
+    ),
+    buildObjective(
+      "cave-passages-1",
+      "Follow 1 cave passage",
+      "Use cave links as routes, not only as isolated entrances.",
+      readObjectiveCount(source.traversedCavePassageCount),
+      1,
+    ),
+    buildObjective(
+      "mob-trails-5",
+      "Scout 5 encounter signs",
+      "Learn which factions and beasts own the routes before pushing deeper.",
+      readObjectiveCount(source.scoutedMobTrailCount),
+      5,
+    ),
+    buildObjective(
+      "loot-caches-5",
+      "Recover 5 field finds",
+      "Build a practical field kit from local caches, forage, and salvage.",
+      readObjectiveCount(source.lootedCacheCount),
+      5,
+    ),
+    buildObjective(
+      "cave-mouths-3",
+      "Scout 3 cave mouths",
+      "Read cave thresholds before committing to the dark routes below.",
+      readObjectiveCount(source.scoutedCaveMouthCount),
       3,
     ),
     buildObjective(
@@ -192,4 +245,8 @@ function buildSnapshot(
 
 function allObjectivesComplete(objectives: readonly ExplorationObjective[]): boolean {
   return objectives.every((objective) => objective.completed);
+}
+
+function readObjectiveCount(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
 }

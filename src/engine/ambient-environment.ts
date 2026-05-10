@@ -52,13 +52,14 @@ export interface AmbientWorldProbe {
   fields: ProceduralBiomeProbe["fields"];
 }
 
-interface AmbientProfileDefinition extends SkyWeatherEnvironment {
+interface AmbientProfileDefinition extends Omit<SkyWeatherEnvironment, "rainfallIntensity"> {
   id: AmbientProfileId;
   label: string;
   clearColorRgba: Rgba;
   fogColorRgba: Rgba;
   fogStartDistance: number;
   fogEndDistance: number;
+  rainfallIntensity?: number;
 }
 
 const SURFACE_FOG_MIN_END_DISTANCE = metersToWorldUnits(224);
@@ -286,6 +287,11 @@ export function resolveAmbientWorldProfile(
     skyCloudCoverage: blend(DEFAULT_SKY_WEATHER_ENVIRONMENT.skyCloudCoverage, definition.skyCloudCoverage, intensity),
     skyCloudBand: blend(DEFAULT_SKY_WEATHER_ENVIRONMENT.skyCloudBand, definition.skyCloudBand, intensity),
     ashfallIntensity: blend(DEFAULT_SKY_WEATHER_ENVIRONMENT.ashfallIntensity, definition.ashfallIntensity, intensity),
+    rainfallIntensity: blend(
+      DEFAULT_SKY_WEATHER_ENVIRONMENT.rainfallIntensity,
+      definition.rainfallIntensity ?? DEFAULT_SKY_WEATHER_ENVIRONMENT.rainfallIntensity,
+      intensity,
+    ),
     fungalGlowIntensity: blend(DEFAULT_SKY_WEATHER_ENVIRONMENT.fungalGlowIntensity, definition.fungalGlowIntensity, intensity),
   };
 }
@@ -302,6 +308,7 @@ export function buildAmbientRenderEnvironment(profile: AmbientWorldProfile): Ren
     skyCloudCoverage: profile.skyCloudCoverage,
     skyCloudBand: profile.skyCloudBand,
     ashfallIntensity: profile.ashfallIntensity,
+    rainfallIntensity: profile.rainfallIntensity,
     fungalGlowIntensity: profile.fungalGlowIntensity,
   };
 }

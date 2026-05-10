@@ -77,8 +77,8 @@ Palette / material targets: red/orange leaves against cool highland stone and gr
 
 ## Highest ROI Next Slices
 
-1. Add named regional route bands and route-atlas checks for Grazelands, Glass-Shard Coast, and West Gash. This gives immediate authored traversal and measurable cadence.
+1. Add named regional route bands and manual route checks for Grazelands, Glass-Shard Coast, and West Gash. This gives immediate authored traversal and measurable cadence.
 2. Add region-specific landmark directors using existing IDs only. Start with Glass-Shard cairn/shard/cave clusters and West Gash redleaf/tor/cave clusters.
 3. Add cave-mouth visibility directors for Glass-Shard and West Gash. This turns existing cave affinity into player-facing content.
 4. Add palette/material overrides only after route and landmark composition exist. Palette alone will not fix the authored-feeling problem.
-5. Add one new prop family later only if object-lab proves existing IDs cannot carry the region: likely a Grazelands camp marker or Glass-Shard mine/claim marker.
+5. Add one new prop family later only if player screenshots prove existing IDs cannot carry the region: likely a Grazelands camp marker or Glass-Shard mine/claim marker.

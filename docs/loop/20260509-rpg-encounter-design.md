@@ -79,12 +79,3 @@ Pressure is clamped to `[0, 1]` and deterministic. A tiny hash jitter based on c
 - Flavor tags are intentionally short strings so future systems can filter without coupling to prose.
 
 ## Validation
-
-Focused coverage lives in `tests/rpg-encounters.test.ts`:
-
-- encounter definitions cover all atlas regions, routes, and cave systems;
-- repeated coordinate sampling is deterministic;
-- regions retain distinct moods, pressure, and top faction identities;
-- route core samples are safer than nearby wilderness;
-- safer pilgrim roads score higher route safety than hazard routes;
-- cave anchors add cave-specific mood, pressure, faction, and flavor.

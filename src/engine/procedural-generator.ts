@@ -20,7 +20,7 @@ import type { AmbientProfileId } from "./ambient-environment.ts";
 
 export const HEX_COLOR_COUNT = 0x1000;
 export const PROCEDURAL_WORLD_MAX_Y = 16_384;
-export const PROCEDURAL_WORLD_GENERATION_VERSION = "20260508-region-authority-lod-shell-v2";
+export const PROCEDURAL_WORLD_GENERATION_VERSION = "20260510-cave-mouth-setpieces-v1";
 
 export type BaseBiomeId = "verdant" | "savanna" | "steppe" | "dunes" | "badlands" | "highland" | "moor" | "tundra";
 export type SpecialBiomeId = "marsh" | "firefly" | "saltflat" | "fern" | "fungal" | "ember" | "bloom" | "shardlands";
@@ -213,6 +213,13 @@ interface SurfaceFieldSample {
   atlasRouteShoulder: number;
   atlasCaveInfluence: number;
   atlasCaveCore: number;
+  atlasCaveSystemId: string | null;
+  atlasCaveAnchorId: string | null;
+  atlasCaveAnchorKind: string | null;
+  atlasCaveAnchorX: number | null;
+  atlasCaveAnchorZ: number | null;
+  atlasCaveDryEntranceRequired: boolean;
+  atlasCaveLandmarkMarkerIds: readonly string[];
   volcanicHeart: number;
   ashRing: number;
   westWetlands: number;
@@ -240,6 +247,9 @@ function createSurfaceFieldSample(): SurfaceFieldSample {
     surfaceGrain: 0, scatter: 0, peakness: 0, islandInterior: 0, coastalShelf: 0,
     shorelineBand: 0, deepOcean: 0, atlasRouteInfluence: 0, atlasRouteCore: 0,
     atlasRouteShoulder: 0, atlasCaveInfluence: 0, atlasCaveCore: 0, volcanicHeart: 0,
+    atlasCaveSystemId: null, atlasCaveAnchorId: null, atlasCaveAnchorKind: null,
+    atlasCaveAnchorX: null, atlasCaveAnchorZ: null, atlasCaveDryEntranceRequired: false,
+    atlasCaveLandmarkMarkerIds: [],
     ashRing: 0, westWetlands: 0, northeastGrazelands: 0, southernSaltBasin: 0,
     easternShardCoast: 0,
   };
@@ -371,6 +381,13 @@ export interface ProceduralBiomeProbe extends ProceduralColumnSample {
     shorelineBand?: number;
     coastalShelf: number;
     deepOcean?: number;
+    atlasCaveInfluence?: number;
+    atlasCaveCore?: number;
+    atlasCaveSystemId?: string | null;
+    atlasCaveAnchorId?: string | null;
+    atlasCaveAnchorKind?: string | null;
+    atlasCaveAnchorX?: number | null;
+    atlasCaveAnchorZ?: number | null;
   };
 }
 
@@ -536,6 +553,12 @@ interface PilgrimRouteSetPiece {
   deltaLateral: number;
 }
 
+interface CaveMouthSetPiece {
+  profile: LandmarkProfile;
+  deltaX: number;
+  deltaZ: number;
+}
+
 interface GeneratorAtlasFields {
   islandInterior: number;
   shorelineBand: number;
@@ -556,6 +579,13 @@ interface GeneratorAtlasFields {
   caveInfluence: number;
   caveCore: number;
   distanceToCaveAnchorM: number;
+  caveSystemId: string | null;
+  caveAnchorId: string | null;
+  caveAnchorKind: string | null;
+  caveAnchorX: number | null;
+  caveAnchorZ: number | null;
+  caveDryEntranceRequired: boolean;
+  caveLandmarkMarkerIds: readonly string[];
 }
 
 const PILGRIM_ROUTE_BANDS: readonly PilgrimRouteBand[] = [
@@ -1474,6 +1504,13 @@ export class ProceduralWorldGenerator {
         shorelineBand: this.lastFillSurfaceFields.shorelineBand,
         coastalShelf: this.lastFillSurfaceFields.coastalShelf,
         deepOcean: this.lastFillSurfaceFields.deepOcean,
+        atlasCaveInfluence: this.lastFillSurfaceFields.atlasCaveInfluence,
+        atlasCaveCore: this.lastFillSurfaceFields.atlasCaveCore,
+        atlasCaveSystemId: this.lastFillSurfaceFields.atlasCaveSystemId,
+        atlasCaveAnchorId: this.lastFillSurfaceFields.atlasCaveAnchorId,
+        atlasCaveAnchorKind: this.lastFillSurfaceFields.atlasCaveAnchorKind,
+        atlasCaveAnchorX: this.lastFillSurfaceFields.atlasCaveAnchorX,
+        atlasCaveAnchorZ: this.lastFillSurfaceFields.atlasCaveAnchorZ,
       },
     };
   }
@@ -2008,6 +2045,13 @@ export class ProceduralWorldGenerator {
     out.atlasRouteShoulder = atlas.routeShoulder;
     out.atlasCaveInfluence = atlas.caveInfluence;
     out.atlasCaveCore = atlas.caveCore;
+    out.atlasCaveSystemId = atlas.caveSystemId;
+    out.atlasCaveAnchorId = atlas.caveAnchorId;
+    out.atlasCaveAnchorKind = atlas.caveAnchorKind;
+    out.atlasCaveAnchorX = atlas.caveAnchorX;
+    out.atlasCaveAnchorZ = atlas.caveAnchorZ;
+    out.atlasCaveDryEntranceRequired = atlas.caveDryEntranceRequired;
+    out.atlasCaveLandmarkMarkerIds = atlas.caveLandmarkMarkerIds;
     out.volcanicHeart = Math.max(province.volcanicHeart * 0.35, atlasRegionId === "red-mountain" ? atlasRegionCore : 0);
     out.ashRing = Math.max(
       province.ashRing * 0.35,
@@ -2436,6 +2480,13 @@ export class ProceduralWorldGenerator {
     } else if (regionalVariantId === "bloom_prism" && fields.magic > 0.76) {
       waterTopY = Math.max(waterTopY, surfaceY + 1);
     }
+    if (
+      fields.atlasCaveDryEntranceRequired
+      && fields.atlasCaveAnchorKind === "entrance"
+      && fields.atlasCaveCore > 0.55
+    ) {
+      waterTopY = NO_WATER;
+    }
     return waterTopY;
   }
 
@@ -2516,6 +2567,14 @@ export class ProceduralWorldGenerator {
     out.featureMaterialPrimary = 0;
     out.featureMaterialSecondary = 0;
     out.featureMaterialAccent = 0;
+    const caveSetPiece = sampleCaveMouthSetPiece(worldX, worldZ, biomeId, undergroundBiomeId, fields);
+    if (caveSetPiece && !hasStandingWater(surfaceY, waterTopY)) {
+      out.featureDeltaX = caveSetPiece.deltaX;
+      out.featureDeltaZ = caveSetPiece.deltaZ;
+      if (configureLandmarkFeature(caveSetPiece.profile, surfaceY, waterTopY, fields, out)) {
+        return caveSetPiece.profile.id;
+      }
+    }
     const setPiece = samplePilgrimRouteSetPiece(worldX, worldZ, biomeId, fields);
     if (setPiece) {
       out.featureDeltaX = setPiece.deltaAlong;
@@ -3553,6 +3612,62 @@ function applyPilgrimRouteSurfaceMaterials(
   }
 }
 
+function sampleCaveMouthSetPiece(
+  worldX: number,
+  worldZ: number,
+  biomeId: BiomeId,
+  undergroundBiomeId: UndergroundBiomeId,
+  fields: SurfaceFieldSample,
+): CaveMouthSetPiece | null {
+  if (
+    fields.atlasCaveInfluence <= 0
+    || fields.atlasCaveAnchorKind !== "entrance"
+    || fields.atlasCaveAnchorX === null
+    || fields.atlasCaveAnchorZ === null
+  ) {
+    return null;
+  }
+  const profile = selectCaveMouthSetPieceProfile(biomeId, undergroundBiomeId, fields);
+  const deltaX = worldX - fields.atlasCaveAnchorX;
+  const deltaZ = worldZ - fields.atlasCaveAnchorZ;
+  const radius = profile.radius + 4;
+  if (Math.abs(deltaX) > radius || Math.abs(deltaZ) > radius) {
+    return null;
+  }
+  return { profile, deltaX, deltaZ };
+}
+
+function selectCaveMouthSetPieceProfile(
+  biomeId: BiomeId,
+  undergroundBiomeId: UndergroundBiomeId,
+  fields: SurfaceFieldSample,
+): LandmarkProfile {
+  const markers = fields.atlasCaveLandmarkMarkerIds;
+  if (hasCaveMarker(markers, "kwama")) {
+    return landmarkPlacement("kwama_mound", { chance: 1, scale: 1.42, cellSize: 1, radius: 9, variant: 2 });
+  }
+  if (hasCaveMarker(markers, "glass") || hasCaveMarker(markers, "crystal") || undergroundBiomeId === "crystalline") {
+    return landmarkPlacement("crystal_cluster", { chance: 1, scale: 1.44, cellSize: 1, radius: 8, variant: 3 });
+  }
+  if (hasCaveMarker(markers, "root") || biomeId === "marsh" || biomeId === "fern" || undergroundBiomeId === "rooted") {
+    return landmarkPlacement("root_stump", { chance: 1, scale: 1.36, cellSize: 1, radius: 8 });
+  }
+  if (hasCaveMarker(markers, "rib") || undergroundBiomeId === "saline") {
+    return landmarkPlacement("buried_ribs", { chance: 1, scale: 1.28, cellSize: 1, radius: 12, variant: 3 });
+  }
+  if (hasCaveMarker(markers, "ash") || hasCaveMarker(markers, "pumice") || fields.volcanism > 0.58 || undergroundBiomeId === "basaltic") {
+    return landmarkPlacement("basalt_spire", { chance: 1, scale: 1.36, cellSize: 1, radius: 9 });
+  }
+  if (hasCaveMarker(markers, "stone") || hasCaveMarker(markers, "tor") || undergroundBiomeId === "granitic") {
+    return landmarkPlacement("stone_tor", { chance: 1, scale: 1.30, cellSize: 1, radius: 9 });
+  }
+  return landmarkPlacement("scree_fan", { chance: 1, scale: 1.24, cellSize: 1, radius: 12, variant: 1 });
+}
+
+function hasCaveMarker(markers: readonly string[], fragment: string): boolean {
+  return markers.some((marker) => marker.includes(fragment));
+}
+
 function selectPilgrimRouteRoster(
   worldX: number,
   worldZ: number,
@@ -4352,6 +4467,13 @@ function sampleGeneratorAtlasFields(worldX: number, worldZ: number): GeneratorAt
     caveInfluence: cave.caveInfluence,
     caveCore: cave.caveCore,
     distanceToCaveAnchorM: cave.distanceToCaveAnchorM,
+    caveSystemId: cave.caveSystemId,
+    caveAnchorId: cave.caveAnchorId,
+    caveAnchorKind: cave.caveAnchorKind,
+    caveAnchorX: cave.caveAnchorPoint ? cave.caveAnchorPoint.x * WORLD_UNITS_PER_METER : null,
+    caveAnchorZ: cave.caveAnchorPoint ? cave.caveAnchorPoint.z * WORLD_UNITS_PER_METER : null,
+    caveDryEntranceRequired: cave.caveDryEntranceRequired,
+    caveLandmarkMarkerIds: cave.caveLandmarkMarkerIds,
   };
 }
 

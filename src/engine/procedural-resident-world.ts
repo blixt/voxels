@@ -250,6 +250,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
   private readonly missingLodDiskCacheKeys = new Set<string>();
   private readonly queuedLodDiskStoreKeys = new Set<string>();
   private readonly lodDiskStoreQueue: string[] = [];
+  private readonly pendingLodNeighborRemeshKeys = new Set<string>();
   private readonly missingGeneratedRenderSummaryRegionKeys = new Set<string>();
   private coveredEmptyLodSignature: string | null = null;
   private activeLodBuildJob: PartialLodChunkBuild | null = null;
@@ -949,10 +950,17 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
 
   updateLodResidencyAround(
     position: Vec3,
-    options?: { maxGenerateLodChunks?: number; maxPlanMs?: number; maxWorkMs?: number },
+    options?: {
+      maxGenerateLodChunks?: number;
+      maxAdoptCompletedLodChunks?: number;
+      maxPlanMs?: number;
+      maxWorkMs?: number;
+    },
   ): LodResidencyUpdateSummary {
     const startedAt = performance.now();
     const maxGenerate = options?.maxGenerateLodChunks ?? 32;
+    const maxAdoptCompleted = options?.maxAdoptCompletedLodChunks
+      ?? (options ? Math.max(1, maxGenerate) : Number.POSITIVE_INFINITY);
     const maxPlanMs = options?.maxPlanMs ?? Number.POSITIVE_INFINITY;
     const maxWorkMs = options?.maxWorkMs ?? Number.POSITIVE_INFINITY;
 
@@ -1064,7 +1072,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     let scheduledLodWorkerRequests = 0;
     let scheduledLodDiskStores = 0;
     const lodDiskStats = this.asyncChunkGeneration?.drainLodChunkCompletionStats() ?? { cacheHits: 0, generated: 0, missing: 0, stored: 0 };
-    const completedLodChunks = this.asyncChunkGeneration?.drainCompletedLodChunks() ?? [];
+    const completedLodChunks = this.asyncChunkGeneration?.drainCompletedLodChunks(maxAdoptCompleted) ?? [];
     const missingLodDiskChunks = this.asyncChunkGeneration?.drainMissingLodChunks() ?? [];
     for (const missing of missingLodDiskChunks) {
       this.missingLodDiskCacheKeys.add(toAsyncLodChunkKey(missing));
@@ -1077,6 +1085,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
       lodWorkerGeneratedByLevel[index] += adoptedLod.workerGeneratedByLevel[index] ?? 0;
     }
     meshMs += adoptedLod.meshMs;
+    const pendingCompletedLodAdoptions = this.asyncChunkGeneration?.getCompletedLodChunkCount?.() ?? 0;
     let maxChunkMs = 0;
     let maxChunkLevel = 0;
     let maxChunkKey: string | null = null;
@@ -1239,9 +1248,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         if (!data.skippedFinerCoverage) {
           this.enqueueLodDiskStore(key);
         }
-        const neighborRemeshStartedAt = performance.now();
-        this.remeshAdjacentLodChunks(ring.level, cx, cy, cz);
-        meshMs += performance.now() - neighborRemeshStartedAt;
+        this.queueAdjacentLodChunkRemeshes(ring.level, cx, cy, cz);
         this.invalidateCoarserLodChunksForSourceChunk(ring.level, cx, cy, cz, {
           clearNeededKeyCache: false,
         });
@@ -1262,6 +1269,16 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     this.commitPreparedLodChunks();
     this.punchActiveCoarserLodChunksCoveredByPreparedActiveFiner();
     commitMs = performance.now() - commitStartedAt;
+
+    const neighborRemeshStartedAt = performance.now();
+    const neighborRemeshBudget = Number.isFinite(maxWorkMs)
+      ? Math.max(0, startedAt + maxWorkMs - neighborRemeshStartedAt)
+      : Number.POSITIVE_INFINITY;
+    const neighborRemesh = this.processPendingLodNeighborRemeshes({
+      maxMs: neighborRemeshBudget,
+      maxCount: Number.isFinite(maxWorkMs) ? 1 : Number.POSITIVE_INFINITY,
+    });
+    meshMs += neighborRemesh.meshMs;
 
     // Phase 3: evict LOD chunks no longer needed.
     // Only evict when there's no pending work — otherwise old LOD chunks
@@ -1318,7 +1335,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     scheduledLodDiskStores += this.flushQueuedLodDiskStores();
     const pendingPrepared = this.preparedLodChunks.size;
     const pendingPreparedByLevel = countLodChunksByLevel(this.preparedLodChunks.values());
-    pending += pendingPrepared;
+    pending += pendingPrepared + pendingCompletedLodAdoptions + this.pendingLodNeighborRemeshKeys.size;
     if (!neededKeyCacheHit) {
       this.lodNeededKeyCache = {
         signature: neededKeySignature,
@@ -1531,7 +1548,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
         this.staleLodKeys.delete(key);
         this.punchActiveCoarserLodChunksCoveredBy(activation.chunk);
       }
-      this.remeshAdjacentLodChunks(decoded.lodLevel, decoded.coord.x, decoded.coord.y, decoded.coord.z);
+      this.queueAdjacentLodChunkRemeshes(decoded.lodLevel, decoded.coord.x, decoded.coord.y, decoded.coord.z);
       this.invalidateCoarserLodChunksForSourceChunk(decoded.lodLevel, decoded.coord.x, decoded.coord.y, decoded.coord.z, {
         clearNeededKeyCache: false,
       });
@@ -1697,6 +1714,7 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     this.lodRenderClipMasks.clear();
     this.queuedLodDiskStoreKeys.clear();
     this.lodDiskStoreQueue.length = 0;
+    this.pendingLodNeighborRemeshKeys.clear();
   }
 
   private enqueueLodDiskStore(key: string): void {
@@ -3042,22 +3060,57 @@ export class ProceduralResidentWorld implements MutableResidentChunkWorld {
     };
   }
 
-  private remeshAdjacentLodChunks(level: number, cx: number, cy: number, cz: number): void {
-    const stride = 1 << level;
-    const worldSize = this.chunkSize * stride;
+  private queueAdjacentLodChunkRemeshes(level: number, cx: number, cy: number, cz: number): void {
     for (const [dx, dy, dz] of ADJACENT_CHUNK_OFFSETS) {
       const neighborCx = cx + dx;
       const neighborCy = cy + dy;
       const neighborCz = cz + dz;
-      const neighbor = this.lodChunks.get(toLodChunkKey(level, neighborCx, neighborCy, neighborCz));
+      const key = toLodChunkKey(level, neighborCx, neighborCy, neighborCz);
+      const neighbor = this.lodChunks.get(key);
       if (!neighbor || !neighbor.renderReady || neighbor.solidCount === 0) {
         continue;
       }
-      neighbor.mesh = this.buildLodChunkMesh(neighbor, neighborCx, neighborCy, neighborCz, level, stride, worldSize);
+      this.pendingLodNeighborRemeshKeys.add(key);
+    }
+  }
+
+  private processPendingLodNeighborRemeshes(options: {
+    maxMs: number;
+    maxCount: number;
+  }): { remeshed: number; meshMs: number } {
+    if (this.pendingLodNeighborRemeshKeys.size === 0 || options.maxCount <= 0 || options.maxMs <= 0) {
+      return { remeshed: 0, meshMs: 0 };
+    }
+    const startedAt = performance.now();
+    let remeshed = 0;
+    let meshMs = 0;
+    for (const key of [...this.pendingLodNeighborRemeshKeys]) {
+      if (
+        remeshed >= options.maxCount
+        || (remeshed > 0 && performance.now() - startedAt >= options.maxMs)
+      ) {
+        break;
+      }
+      this.pendingLodNeighborRemeshKeys.delete(key);
+      const parsed = parseLodKey(key);
+      if (!parsed) {
+        continue;
+      }
+      const neighbor = this.lodChunks.get(key);
+      if (!neighbor || !neighbor.renderReady || neighbor.solidCount === 0) {
+        continue;
+      }
+      const stride = 1 << parsed.level;
+      const worldSize = this.chunkSize * stride;
+      const meshStartedAt = performance.now();
+      neighbor.mesh = this.buildLodChunkMesh(neighbor, parsed.cx, parsed.cy, parsed.cz, parsed.level, stride, worldSize);
+      meshMs += performance.now() - meshStartedAt;
       neighbor.meshBuilt = true;
       neighbor.meshDirty = false;
       neighbor.gpuDirty = true;
+      remeshed += 1;
     }
+    return { remeshed, meshMs };
   }
 
   private resolveLodOpaqueNeighborFace(

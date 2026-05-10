@@ -137,6 +137,13 @@ export interface AtlasCaveSystemDefinition {
   validationAnchor: AtlasPointMeters;
 }
 
+export interface AtlasCaveAnchorConnection {
+  caveSystemId: AtlasCaveSystemId;
+  tunnel: AtlasCaveTunnelDefinition;
+  sourceAnchor: AtlasCaveAnchorDefinition;
+  destinationAnchor: AtlasCaveAnchorDefinition;
+}
+
 export interface AtlasRegionGraphNode {
   regionId: AtlasRegionId;
   center: AtlasPointMeters;
@@ -218,6 +225,8 @@ export interface AtlasCaveAnchorSample {
   caveSystemId: AtlasCaveSystemId | null;
   caveAnchorId: string | null;
   caveAnchorKind: AtlasCaveAnchorKind | null;
+  caveAnchorPoint: AtlasPointMeters | null;
+  caveDryEntranceRequired: boolean;
   caveInfluence: number;
   caveCore: number;
   distanceToCaveAnchorM: number;
@@ -998,6 +1007,37 @@ export function findAtlasCaveSystem(caveSystemId: AtlasCaveSystemId, atlas = WOR
   return caveSystem;
 }
 
+export function findConnectedAtlasCaveAnchors(
+  caveSystemId: AtlasCaveSystemId,
+  anchorId: string,
+  atlas = WORLD_ATLAS,
+): readonly AtlasCaveAnchorConnection[] {
+  const caveSystem = findAtlasCaveSystem(caveSystemId, atlas);
+  const sourceAnchor = caveSystem.anchors.find((anchor) => anchor.id === anchorId);
+  if (!sourceAnchor) {
+    return [];
+  }
+  return caveSystem.tunnels.flatMap((tunnel): AtlasCaveAnchorConnection[] => {
+    const destinationAnchorId = tunnel.from === anchorId
+      ? tunnel.to
+      : tunnel.to === anchorId
+      ? tunnel.from
+      : null;
+    if (!destinationAnchorId) {
+      return [];
+    }
+    const destinationAnchor = caveSystem.anchors.find((anchor) => anchor.id === destinationAnchorId);
+    return destinationAnchor
+      ? [{
+          caveSystemId: caveSystem.id,
+          tunnel,
+          sourceAnchor,
+          destinationAnchor,
+        }]
+      : [];
+  });
+}
+
 export function estimateAtlasRegionEllipseAreaM2(region: AtlasRegionDefinition): number {
   return Math.PI * region.radius.x * region.radius.z;
 }
@@ -1132,6 +1172,8 @@ export function sampleAtlasCaveAnchorMeters(
     caveSystemId: projection.system.id,
     caveAnchorId: projection.anchor.id,
     caveAnchorKind: projection.anchor.kind,
+    caveAnchorPoint: projection.anchor.point,
+    caveDryEntranceRequired: projection.anchor.dryEntranceRequired,
     caveInfluence,
     caveCore,
     distanceToCaveAnchorM: projection.distanceToAnchorM,
@@ -1274,6 +1316,8 @@ function emptyCaveAnchorSample(): AtlasCaveAnchorSample {
     caveSystemId: null,
     caveAnchorId: null,
     caveAnchorKind: null,
+    caveAnchorPoint: null,
+    caveDryEntranceRequired: false,
     caveInfluence: 0,
     caveCore: 0,
     distanceToCaveAnchorM: Infinity,

@@ -15,7 +15,7 @@ The target is a huge Morrowind-like island with coherent regions, macro terrain,
 
 ## Wave 1 Pure Checkpoint
 
-Implemented as a narrow, pure atlas layer in `src/engine/world-atlas.ts` with focused tests in `tests/world-atlas.test.ts`.
+Implemented as a narrow, pure atlas layer in `src/engine/world-atlas.ts`.
 
 Scope included:
 
@@ -33,7 +33,7 @@ Scope deliberately excluded:
 
 ## Wave 2 Generator Checkpoint
 
-Implemented as the first narrow generator integration in `src/engine/procedural-generator.ts` with focused coverage in `tests/procedural-generator.test.ts`.
+Implemented as a narrow generator integration in `src/engine/procedural-generator.ts`.
 
 Scope included:
 
@@ -344,7 +344,7 @@ Route sampling should expose:
 
 Acceptance:
 
-- Every named route has a route-atlas report.
+- Every named route should be manually reviewable from representative route samples.
 - Max route-token gap:
   - pilgrimage/West Gash: `<= 300 m`
   - wetland/salt causeways: `<= 360 m`
@@ -627,7 +627,7 @@ Commands/artifacts:
 
 Acceptance:
 
-- baseline artifact paths recorded before behavior changes.
+- representative before/after notes recorded before behavior changes.
 
 ### `C1`: Extract `WorldAtlas` Design Into Data
 
@@ -775,7 +775,7 @@ Acceptance:
 
 - Track A: `ChunkStore`, edit journal, revision-keyed derived data.
 - Track B: render verification, golden views, route smoke, hitch/FPS truth.
-- Track D: art direction and object-lab budgets for region props.
+- Track D: art direction guidance for region props.
 - Track E: exploration routes, travel goals, region discovery language.
 
 ## Wave 1 Deliverables

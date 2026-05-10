@@ -1,6 +1,6 @@
 export const TRAVEL_GOALS_VERSION = 1;
 
-export type TravelGoalStepKind = "visit" | "inspect" | "read" | "use";
+export type TravelGoalStepKind = "visit" | "inspect" | "read" | "use" | "listen" | "interpret" | "report";
 export type TravelGoalStatus = "inactive" | "active" | "completed";
 
 export interface TravelGoalStepDefinition {

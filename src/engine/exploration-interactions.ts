@@ -4,7 +4,10 @@ import type {
   ExplorationEventSubjectType,
 } from "./exploration-events.ts";
 
-export type ExplorationInteractionVerb = Extract<ExplorationEventKind, "inspect" | "read" | "use">;
+export type ExplorationInteractionVerb = Extract<
+  ExplorationEventKind,
+  "inspect" | "read" | "use" | "listen" | "interpret" | "report"
+>;
 
 export interface ExplorationInteractionPrompt {
   verb: ExplorationInteractionVerb;
@@ -23,7 +26,10 @@ export interface ExplorationInteractionCandidate {
   priority?: number;
   prompts: readonly (ExplorationInteractionVerb | ExplorationInteractionPrompt)[];
   flavorText?: string | null;
+  skillAwards?: ExplorationEventInput["skillAwards"];
   payload?: ExplorationEventInput["payload"];
+  occurrenceId?: string | null;
+  repeatable?: boolean;
 }
 
 export interface ExplorationInteractionResolverInput {
@@ -63,6 +69,9 @@ const VERB_ORDER = new Map<ExplorationInteractionVerb, number>([
   ["inspect", 0],
   ["read", 1],
   ["use", 2],
+  ["listen", 3],
+  ["interpret", 4],
+  ["report", 5],
 ]);
 
 export function resolveExplorationInteractionTarget(
@@ -160,6 +169,9 @@ function normalizePrompts(
         name: target.name,
         flavorText: typeof candidate.flavorText === "string" ? candidate.flavorText : null,
         worldPosition: candidate.worldPosition,
+        ...(candidate.occurrenceId ? { occurrenceId: candidate.occurrenceId } : {}),
+        ...(candidate.repeatable !== undefined ? { repeatable: candidate.repeatable } : {}),
+        ...(candidate.skillAwards !== undefined ? { skillAwards: candidate.skillAwards } : {}),
         ...(candidate.payload !== undefined ? { payload: candidate.payload } : {}),
       },
     });
@@ -232,7 +244,12 @@ function distanceBetween(left: readonly [number, number, number], right: readonl
 }
 
 function isInteractionVerb(value: string): value is ExplorationInteractionVerb {
-  return value === "inspect" || value === "read" || value === "use";
+  return value === "inspect"
+    || value === "read"
+    || value === "use"
+    || value === "listen"
+    || value === "interpret"
+    || value === "report";
 }
 
 function buildDefaultPromptLabel(verb: ExplorationInteractionVerb, name: string): string {
@@ -243,6 +260,12 @@ function buildDefaultPromptLabel(verb: ExplorationInteractionVerb, name: string)
       return `Read ${name}`;
     case "use":
       return `Use ${name}`;
+    case "listen":
+      return `Listen to ${name}`;
+    case "interpret":
+      return `Interpret ${name}`;
+    case "report":
+      return `Report to ${name}`;
   }
 }
 

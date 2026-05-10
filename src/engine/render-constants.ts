@@ -4,13 +4,19 @@ import type { Vec3 } from "./types.ts";
 export type Rgba = readonly [number, number, number, number];
 
 export interface SkyWeatherEnvironment {
+  lightDirection?: Vec3;
+  lightingTerms?: readonly [number, number, number];
   skyTopColorRgba: Rgba;
   skyHorizonColorRgba: Rgba;
   skyCloudColorRgba: Rgba;
   skyCloudCoverage: number;
   skyCloudBand: number;
   ashfallIntensity: number;
+  rainfallIntensity: number;
   fungalGlowIntensity: number;
+  sunGlowIntensity?: number;
+  moonGlowIntensity?: number;
+  starIntensity?: number;
 }
 
 export const CLEAR_COLOR_RGBA = [207, 223, 238, 255] as const;
@@ -28,5 +34,9 @@ export const DEFAULT_SKY_WEATHER_ENVIRONMENT: SkyWeatherEnvironment = {
   skyCloudCoverage: 0.08,
   skyCloudBand: 0.64,
   ashfallIntensity: 0,
+  rainfallIntensity: 0,
   fungalGlowIntensity: 0,
+  sunGlowIntensity: 0.72,
+  moonGlowIntensity: 0,
+  starIntensity: 0,
 };

@@ -1,20 +1,3 @@
-import { average, maxValue, percentile } from "../engine/benchmark-metrics.ts";
-import {
-  analyzeSettledReferenceDiff,
-  analyzeBottomCenterVoid,
-  buildDefaultRouteBenchmarkPlan,
-  buildForwardRouteBenchmarkPlan,
-  countRouteSeamFrameClasses,
-  summarizeRouteFrameAccounting,
-  summarizeRouteSeamCoverage,
-  type BottomCenterVoidProbe,
-  type RouteBenchmarkFrameTarget,
-} from "../engine/game-route-benchmark.ts";
-import {
-  summarizeBootstrapBenchmark,
-  type BootstrapBenchmarkSample,
-  type BootstrapBenchmarkSummary,
-} from "../engine/game-bootstrap-benchmark.ts";
 import {
   buildFirstPersonCameraMatrices,
   createFirstPersonCamera,
@@ -32,7 +15,27 @@ import {
   resolveExplorationInteractionTarget,
   type ExplorationInteractionCandidate,
   type ExplorationInteractionVerb,
+  type ResolvedExplorationInteractionTarget,
 } from "../engine/exploration-interactions.ts";
+import {
+  ExplorationEventLog,
+  type ExplorationEventLogSnapshot,
+  type ExplorationEventLogState,
+} from "../engine/exploration-events.ts";
+import { summarizeFieldKit } from "../engine/field-kit.ts";
+import { summarizeBestiary } from "../engine/bestiary-journal.ts";
+import {
+  getLootJournalCandidateState,
+  summarizeLootJournal,
+  type LootJournalCandidateState,
+} from "../engine/loot-journal.ts";
+import { findSafeCaveEntryFeetPosition } from "../engine/cave-traversal.ts";
+import { describeNavigationBearing } from "../engine/navigation-bearing.ts";
+import {
+  samplePassiveMobSightingsWorldUnits,
+  type PassiveMobSighting,
+} from "../engine/passive-mob-sim.ts";
+import { buildPassiveMobInteractionCandidates } from "../engine/passive-mob-interactions.ts";
 import {
   SkillJournal,
   type SkillId,
@@ -41,19 +44,43 @@ import {
 } from "../engine/skill-journal.ts";
 import {
   RouteJournal,
+  type TravelGoalProgressInput,
+  type TravelGoalProgressResult,
   type RouteJournalSnapshot,
   type RouteJournalState,
   type TravelGoalDefinition,
   type TravelGoalSnapshot,
+  type TravelGoalStepKind,
 } from "../engine/travel-goals.ts";
+import {
+  buildTravelGoalFromQuestHook,
+  planRpgQuestHooks,
+  selectRpgQuestHookForExploration,
+  type RpgQuestHookSummary,
+} from "../engine/rpg-quests.ts";
+import { buildRpgQuestTopicInteractionCandidate } from "../engine/rpg-quest-topics.ts";
+import {
+  atlasMetersToWorldUnits,
+  findConnectedAtlasCaveAnchors,
+  WORLD_ATLAS,
+  type AtlasCaveAnchorKind,
+  type AtlasCaveAnchorConnection,
+  type AtlasCaveSystemId,
+} from "../engine/world-atlas.ts";
 import {
   describeExplorationSkillEffects,
   type ExplorationSkillEffects,
 } from "../engine/exploration-skill-effects.ts";
 import {
+  describeInteractionSkillGates,
+  type InteractionSkillGateHints,
+  type InteractionSkillGateSource,
+} from "../engine/interaction-skill-gates.ts";
+import {
   FrameTimingBuckets,
   type FrameTimingSnapshot,
 } from "../engine/frame-timing-buckets.ts";
+import { classifyFrameAttributionCause } from "../engine/frame-attribution.ts";
 import {
   buildChunkMesh,
   buildChunkMeshFromOpaqueGeometry,
@@ -99,6 +126,7 @@ import { metersToWorldUnits, worldUnitsToMeters } from "../engine/scale.ts";
 import {
   shouldPumpWorldWork,
   shouldRefreshResidency,
+  shouldRunMovingLodUpdate,
 } from "../engine/stream-work.ts";
 import {
   buildStreamAnchorPosition,
@@ -111,6 +139,14 @@ import {
   resolveAmbientWorldProfile,
   type AmbientWorldProfile,
 } from "../engine/ambient-environment.ts";
+import {
+  applyWorldAtmosphere,
+  resolveWorldClock,
+  sampleWorldSystems,
+  WORLD_DAY_LENGTH_SECONDS,
+  type WorldClockSnapshot,
+  type WorldSystemSnapshot,
+} from "../engine/world-systems.ts";
 import {
   buildUnderwaterRenderEnvironment,
   type RenderEnvironment,
@@ -129,6 +165,8 @@ import {
   sampleRpgEncounterWorldUnits,
   type RpgEncounterSample,
 } from "../engine/rpg-encounters.ts";
+import { sampleRpgEncounterSiteWorldUnits } from "../engine/rpg-encounter-sites.ts";
+import { sampleForageSiteWorldUnits } from "../engine/forage-sites.ts";
 
 const MAX_DELTA_SECONDS = 0.05;
 const HUD_PUSH_INTERVAL_MS = 120;
@@ -136,18 +174,23 @@ const STREAM_ANCHOR_MARGIN_CHUNKS = 1;
 const DEFAULT_MAX_GENERATED_CHUNKS_PER_UPDATE = 7;
 const DEFAULT_MAX_MESH_REBUILDS_PER_FRAME = 6;
 const DEFAULT_MAX_LOD_CHUNKS_PER_FRAME = 1;
+const DEFAULT_MAX_LOD_ADOPTIONS_PER_FRAME = 1;
 const DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME = 3;
 const DEFAULT_MAX_LOD_WORK_MS_PER_FRAME = 8;
+const PASSIVE_MOB_SIGHTING_RADIUS_WORLD_UNITS = metersToWorldUnits(96);
+const PASSIVE_MOB_SIGHTING_CAP = 6;
 const MOVING_LOD_UPDATE_INTERVAL_FRAMES = 4;
 const MOVING_MAX_RESIDENCY_PLAN_MS_PER_FRAME = 5;
 const MOVING_MAX_EVICT_CHUNKS_PER_FRAME = 32;
 const MOVING_MAX_MESH_REBUILDS_PER_FRAME = 4;
 const MOVING_MAX_LOD_CHUNKS_PER_FRAME = 1;
+const MOVING_MAX_LOD_ADOPTIONS_PER_FRAME = 1;
 const MOVING_MAX_LOD_PLAN_MS_PER_FRAME = 0.75;
 const MOVING_MAX_LOD_WORK_MS_PER_FRAME = 4;
 const MAX_SYNC_NEAR_MESH_REBUILDS_PER_FRAME = 6;
 const SYNC_NEAR_MESH_RADIUS_CHUNKS = 3;
 const BOOTSTRAP_PLAYABLE_COLUMN_RADIUS_CHUNKS = 2;
+const CAVE_MOUTH_INTERACTION_CORE_THRESHOLD = 0.55;
 const DISCOVERY_SAMPLE_INTERVAL_MS = 250;
 const DISCOVERY_SAMPLE_MOVE_THRESHOLD_WORLD_UNITS = metersToWorldUnits(0.8);
 const TRAVEL_CONTEXT_SAMPLE_INTERVAL_MS = 250;
@@ -179,7 +222,7 @@ const ROUTE_LANDMARK_IDS = new Set([
   "ashlander_travel_pack",
 ]);
 const DEFAULT_TRAVEL_GOAL_ID = "first-bearings";
-const TRAVEL_GOALS = [
+const BASE_TRAVEL_GOALS = [
   {
     id: DEFAULT_TRAVEL_GOAL_ID,
     routeId: "pilgrim-road",
@@ -201,6 +244,10 @@ const TRAVEL_GOALS = [
     ],
   },
 ] as const satisfies readonly TravelGoalDefinition[];
+const TRAVEL_GOALS: readonly TravelGoalDefinition[] = [
+  ...BASE_TRAVEL_GOALS,
+  ...buildQuestTravelGoals(),
+];
 const LANDMARK_SAMPLE_OFFSET_CACHE = new Map<string, ReadonlyArray<readonly [number, number]>>();
 
 export interface GameHudSnapshot {
@@ -243,28 +290,86 @@ export interface GameHudSnapshot {
   ambientProfileId: string;
   ambientProfileLabel: string;
   ambientFogEndMeters: number;
+  timeOfDayLabel: string;
+  worldClockLabel: string;
+  worldDay: number;
+  worldDaylight: number;
+  weatherLabel: string;
+  weatherIntensity: number;
+  floraLabel: string;
+  faunaLabel: string;
+  timeActivityLabel: string;
+  lootSignalLabel: string;
+  hazardLabel: string;
+  areaCoherenceLabel: string;
+  soundscapeId: string;
+  soundscapeLabel: string;
+  soundscapeListenLabel: string;
+  soundscapeFieldNote: string;
   encounterMoodLabel: string;
   encounterPressureLabel: string;
   encounterFactionLabel: string;
   encounterFlavorLabel: string;
+  passiveMobSightingCount: number;
+  passiveMobNearestId: string | null;
+  passiveMobNearestLabel: string;
+  passiveMobNearestDetailLabel: string;
+  passiveMobNearestDistanceMeters: number | null;
+  passiveMobNearestFactionLabel: string;
+  passiveMobNearestMoodLabel: string;
+  bestiarySightingCount: number;
+  bestiaryEntryCount: number;
+  bestiarySummaryLabel: string;
+  bestiaryLastSightingLabel: string;
+  bestiaryLastNoteLabel: string;
+  bestiaryDominantFactionLabel: string;
   activePlaceName: string;
   activeRouteName: string;
   activeRouteProgressLabel: string;
   activeTravelGoalTitle: string;
   activeTravelGoalStepLabel: string;
   activeTravelGoalProgressRatio: number;
+  activeQuestHookId: string | null;
+  activeQuestHookKind: string | null;
+  activeQuestObjectiveKind: string | null;
+  activeQuestTitle: string;
+  activeQuestObjectiveLabel: string;
+  activeQuestRumorText: string;
+  activeQuestMoodLabel: string;
+  activeQuestFactionLabel: string;
   travelContext: "surface" | "underground";
   travelContextLabel: string;
   interactionTargetName: string;
   interactionPromptLabel: string;
   interactionPromptDescription: string;
   interactionPromptVerb: ExplorationInteractionVerb | null;
+  navigationTargetId: string | null;
+  navigationTargetName: string | null;
+  navigationSource: "interaction-target" | null;
+  navigationDistanceMeters: number | null;
+  navigationDistanceLabel: string | null;
+  navigationCompassLabel: string | null;
+  navigationBearingLabel: string | null;
+  navigationTurnLabel: string | null;
   lastInteractionLabel: string;
   discoveredBiomeCount: number;
   discoveredUndergroundBiomeCount: number;
   discoveredRegionalVariantCount: number;
   discoveredLandmarkCount: number;
   discoveredAncientLandmarkCount: number;
+  scoutedMobTrailCount: number;
+  lootedCacheCount: number;
+  scoutedCaveMouthCount: number;
+  traversedCavePassageCount: number;
+  fieldKitFindCount: number;
+  fieldKitSummaryLabel: string;
+  fieldKitLastFindLabel: string;
+  fieldKitLastNoteLabel: string;
+  fieldKitDominantCategoryLabel: string;
+  lootJournalCollectedCacheCount: number;
+  lootJournalRevisitedCacheCount: number;
+  lootJournalRevisitEventCount: number;
+  lootJournalStateLabel: string;
   landmarkScanRadiusMeters: number;
   landmarkScanSampleCount: number;
   surfaceTravelSpeedMultiplier: number;
@@ -380,8 +485,10 @@ interface CurrentWorldProbeContext {
 export interface ProgressStateSnapshot {
   version: 1;
   discovery: ExplorationJournalState;
+  events?: ExplorationEventLogState;
   skills: SkillJournalState;
   routes: RouteJournalState;
+  worldClockOffsetSeconds?: number;
 }
 
 interface ActiveExplorationHudState {
@@ -395,6 +502,14 @@ interface ActiveExplorationHudState {
   interactionPromptLabel: string;
   interactionPromptDescription: string;
   interactionPromptVerb: ExplorationInteractionVerb | null;
+  navigationTargetId: string | null;
+  navigationTargetName: string | null;
+  navigationSource: "interaction-target" | null;
+  navigationDistanceMeters: number | null;
+  navigationDistanceLabel: string | null;
+  navigationCompassLabel: string | null;
+  navigationBearingLabel: string | null;
+  navigationTurnLabel: string | null;
 }
 
 interface BootstrapReadiness {
@@ -431,138 +546,6 @@ export interface ResidencyTransitionProbe {
   settled: boolean;
 }
 
-export interface ChunkBoundaryBenchmarkSample {
-  step: number;
-  targetEyePosition: Vec3;
-  targetChunk: [number, number, number];
-  changed: boolean;
-  generatedChunks: number;
-  evictedChunks: number;
-  streamMs: number;
-  meshMs: number;
-  meshNewChunks: number;
-  meshRemeshChunks: number;
-  frameCpuMs: number;
-  syncMs: number;
-  uploadMs: number;
-  uploadChunks: number;
-  uploadBytes: number;
-  encodeMs: number;
-}
-
-export interface ChunkBoundaryBenchmarkSummary {
-  sampleCount: number;
-  changedCount: number;
-  avgStreamMs: number;
-  p95StreamMs: number;
-  maxStreamMs: number;
-  avgMeshMs: number;
-  p95MeshMs: number;
-  maxMeshMs: number;
-  avgFrameCpuMs: number;
-  p95FrameCpuMs: number;
-  maxFrameCpuMs: number;
-  avgSyncMs: number;
-  p95SyncMs: number;
-  maxSyncMs: number;
-  avgUploadMs: number;
-  p95UploadMs: number;
-  maxUploadMs: number;
-  avgUploadChunks: number;
-  maxUploadChunks: number;
-  avgUploadBytes: number;
-  maxUploadBytes: number;
-}
-
-export interface ChunkBoundaryBenchmark {
-  iterations: number;
-  chunkDelta: number;
-  radiusChunks: number;
-  samples: ChunkBoundaryBenchmarkSample[];
-  summary: ChunkBoundaryBenchmarkSummary;
-}
-
-export interface ChunkCacheReuseLegSummary {
-  targetChunk: [number, number, number];
-  frameCount: number;
-  settled: boolean;
-  totalStreamMs: number;
-  totalMeshMs: number;
-  totalGeneratedChunks: number;
-  totalPersistedChunkHits: number;
-  totalPersistedSummaryHits: number;
-  totalPersistedRegionSummaryHits: number;
-  totalMissingRegionSummaries: number;
-  totalWorkerGeneratedChunks: number;
-  maxPendingChunks: number;
-  residentChunks: number;
-}
-
-export interface ChunkCacheReuseBenchmark {
-  chunkDelta: number;
-  radiusChunks: number;
-  populate: ChunkCacheReuseLegSummary;
-  revisit: ChunkCacheReuseLegSummary;
-}
-
-export interface IncrementalCrossingSample {
-  frame: number;
-  phase: "move" | "settle";
-  leg: number;
-  changed: boolean;
-  complete: boolean;
-  pendingChunks: number;
-  generatedChunks: number;
-  evictedChunks: number;
-  streamMs: number;
-  meshMs: number;
-  meshCount: number;
-  residentNearSamples: number;
-  renderReadyNearSamples: number;
-  residentNotReadyNearSamples: number;
-  frameCpuMs: number;
-  syncMs: number;
-  uploadMs: number;
-  uploadChunks: number;
-  uploadBytes: number;
-  encodeMs: number;
-}
-
-export interface IncrementalCrossingSummary {
-  sampleCount: number;
-  workFrameCount: number;
-  changedCount: number;
-  incompleteFrameCount: number;
-  avgWorkMs: number;
-  p95WorkMs: number;
-  maxWorkMs: number;
-  avgResidentNotReadyNearSamples: number;
-  maxResidentNotReadyNearSamples: number;
-  avgStreamMs: number;
-  p95StreamMs: number;
-  maxStreamMs: number;
-  avgMeshMs: number;
-  p95MeshMs: number;
-  maxMeshMs: number;
-  avgFrameCpuMs: number;
-  p95FrameCpuMs: number;
-  maxFrameCpuMs: number;
-  avgUploadMs: number;
-  p95UploadMs: number;
-  maxUploadMs: number;
-  maxPendingChunks: number;
-}
-
-export interface IncrementalCrossingBenchmark {
-  iterations: number;
-  chunkDelta: number;
-  stepsPerLeg: number;
-  settleFrames: number;
-  radiusChunks: number;
-  samples: IncrementalCrossingSample[];
-  summary: IncrementalCrossingSummary;
-}
-
 export interface StreamingBudgets {
   maxGeneratedChunksPerUpdate: number;
   maxMeshRebuildsPerFrame: number;
@@ -570,6 +553,7 @@ export interface StreamingBudgets {
 
 interface LodUpdateBudget {
   maxGenerateLodChunks: number;
+  maxAdoptCompletedLodChunks: number;
   maxPlanMs: number;
   maxWorkMs: number;
 }
@@ -690,251 +674,6 @@ export interface SurfaceContinuityProbe {
   maxExpectedStepMeters: number;
   issueSamples: SurfaceContinuityIssueSample[];
 }
-
-export interface RouteExperienceBenchmarkOptions {
-  durationSeconds?: number;
-  settleSeconds?: number;
-  sampleHz?: number;
-  speedMetersPerSecond?: number;
-  seamProbeStrideFrames?: number;
-  captureStrideFrames?: number;
-  captureWidth?: number;
-  captureHeight?: number;
-  referenceDiffStrideFrames?: number;
-  referenceDiffLimit?: number;
-}
-
-export interface RouteExperienceFrameSample {
-  frame: number;
-  phase: "move" | "settle";
-  simTimeSeconds: number;
-  routeDistanceMeters: number;
-  feetPosition: Vec3;
-  yaw: number;
-  pitch: number;
-  changed: boolean;
-  complete: boolean;
-  pendingChunks: number;
-  pendingMeshJobs: number;
-  dirtyResidentChunks: number;
-  dirtyMeshlessResidentChunks: number;
-  dirtyRetainedMeshResidentChunks: number;
-  generatedChunks: number;
-  evictedChunks: number;
-  movementMs: number;
-  streamMs: number;
-  meshMs: number;
-  meshCount: number;
-  gameplayFrameMs: number;
-  accountedFrameMs: number;
-  unmeasuredFrameMs: number;
-  diagnosticsMs: number;
-  captureDiagnosticsMs: number;
-  renderCpuMs: number;
-  renderSyncMs: number;
-  renderUploadMs: number;
-  renderEncodeMs: number;
-  renderOtherMs: number;
-  uploadChunks: number;
-  uploadBytes: number;
-  drawCalls: number;
-  triangles: number;
-  residentNearSamples: number;
-  renderReadyNearSamples: number;
-  residentNotReadyNearSamples: number;
-  visibleGroundSampleCount: number;
-  visibleGroundUncoveredCount: number;
-  visibleGroundResidentNotReadyCount: number;
-  surfaceContinuityEdgeCount: number;
-  surfaceContinuityGapCount: number;
-  abruptSurfaceEdgeCount: number;
-  maxSurfaceContinuityStepMeters: number;
-  lodMs: number;
-  lodGeneratedChunks: number;
-  lodPendingChunks: number;
-  lodMaxChunkMs: number;
-  lodMaxChunkLevel: number;
-  lodMaxChunkKey: string | null;
-  farLodCoverageGapCount: number;
-  uncoveredFarLodGapCount: number;
-  handoffFarLodHoleCount: number;
-  maxFarLodCoverageGapMeters: number;
-  seamGapCount: number;
-  uncoveredLodGapCount: number;
-  handoffLodHoleCount: number;
-  maxSeamGapMeters: number;
-  lodOverlapCount: number;
-  lodResidentOverlapCount: number;
-  lodBandOverlapCount: number;
-  maxLodOverlapMeters: number;
-  screenVoidRatio: number | null;
-  screenVoidMaxRunRatio: number | null;
-  screenVoidSuspicious: boolean;
-  settledReferenceChangedRatio: number | null;
-  settledReferenceClearToFilledRatio: number | null;
-  settledReferenceMaxClearToFilledRunRatio: number | null;
-  settledReferenceSuspiciousHole: boolean;
-  suspiciousHole: boolean;
-}
-
-export interface RouteExperienceBenchmarkSummary {
-  sampleCount: number;
-  moveFrameCount: number;
-  settleFrameCount: number;
-  incompleteFrameCount: number;
-  totalDistanceMeters: number;
-  sampleHz: number;
-  speedMetersPerSecond: number;
-  totalGameplayFrameMs: number;
-  totalAccountedFrameMs: number;
-  totalUnmeasuredFrameMs: number;
-  unmeasuredFrameRatio: number;
-  totalDiagnosticsMs: number;
-  totalCaptureDiagnosticsMs: number;
-  avgGameplayFrameMs: number;
-  p95GameplayFrameMs: number;
-  maxGameplayFrameMs: number;
-  framesOver16_67Ms: number;
-  framesOver33_33Ms: number;
-  framesOver50Ms: number;
-  moveFramesOver50Ms: number;
-  settleFramesOver50Ms: number;
-  avgMovementMs: number;
-  p95MovementMs: number;
-  maxMovementMs: number;
-  avgMeasuredWorkMs: number;
-  p95MeasuredWorkMs: number;
-  maxMeasuredWorkMs: number;
-  avgUnmeasuredFrameMs: number;
-  p95UnmeasuredFrameMs: number;
-  maxUnmeasuredFrameMs: number;
-  avgStreamMs: number;
-  p95StreamMs: number;
-  maxStreamMs: number;
-  avgMeshMs: number;
-  p95MeshMs: number;
-  maxMeshMs: number;
-  avgLodMs: number;
-  p95LodMs: number;
-  maxLodMs: number;
-  p95LodChunkMs: number;
-  maxLodChunkMs: number;
-  avgRenderCpuMs: number;
-  p95RenderCpuMs: number;
-  maxRenderCpuMs: number;
-  avgRenderOtherMs: number;
-  maxRenderOtherMs: number;
-  avgResidentNotReadyNearSamples: number;
-  maxResidentNotReadyNearSamples: number;
-  avgVisibleGroundUncoveredCount: number;
-  maxVisibleGroundUncoveredCount: number;
-  avgVisibleGroundResidentNotReadyCount: number;
-  maxVisibleGroundResidentNotReadyCount: number;
-  maxSurfaceContinuityGapCount: number;
-  framesWithVisibleGroundGaps: number;
-  framesWithSurfaceContinuityGaps: number;
-  framesWithFarLodCoverageGaps: number;
-  framesWithSeamGaps: number;
-  framesWithBlockingSeamGaps: number;
-  framesWithTransitionSeamGaps: number;
-  framesWithLodOverlaps: number;
-  maxSeamGapMeters: number;
-  maxSurfaceContinuityStepMeters: number;
-  maxFarLodCoverageGapMeters: number;
-  maxLodOverlapMeters: number;
-  screenVoidCaptureCount: number;
-  framesWithScreenVoidSignals: number;
-  framesWithSettledReferenceHoleSignals: number;
-  framesWithHoleSignals: number;
-  maxScreenVoidRatio: number;
-  maxSettledReferenceChangedRatio: number;
-  maxSettledReferenceClearToFilledRatio: number;
-  maxSettledReferenceClearToFilledRunRatio: number;
-  maxPendingChunks: number;
-  maxPendingMeshJobs: number;
-  maxDirtyResidentChunks: number;
-  maxDirtyMeshlessResidentChunks: number;
-  maxDirtyRetainedMeshResidentChunks: number;
-  settleFramesUntilComplete: number | null;
-}
-
-export interface RouteExperienceBenchmark {
-  seed: number;
-  radiusChunks: number;
-  captureStrideFrames: number;
-  seamProbeStrideFrames: number;
-  referenceDiffStrideFrames: number;
-  referenceDiffLimit: number;
-  durationSeconds: number;
-  settleSeconds: number;
-  totalDistanceMeters: number;
-  sampleHz: number;
-  speedMetersPerSecond: number;
-  samples: RouteExperienceFrameSample[];
-  summary: RouteExperienceBenchmarkSummary;
-}
-
-export interface BootstrapExperienceBenchmark {
-  completed: boolean;
-  startedAtMs: number;
-  samples: BootstrapBenchmarkSample[];
-  summary: BootstrapBenchmarkSummary;
-}
-
-export interface BenchmarkWorldPumpOptions {
-  maxFrames?: number;
-  maxGenerateLodChunks?: number;
-  maxLodPlanMs?: number;
-  maxLodWorkMs?: number;
-  maxEvictChunks?: number;
-  maxResidencyPlanMs?: number;
-  maxMeshRebuilds?: number;
-  stopWhenSettled?: boolean;
-}
-
-export interface BenchmarkWorldPumpSummary {
-  frameCount: number;
-  settled: boolean;
-  elapsedMs: number;
-  totalGenerated: number;
-  totalGeneratedByLevel: readonly number[];
-  totalMemoryCacheHits: number;
-  totalMemoryCacheHitsByLevel: readonly number[];
-  totalEmptyCacheHits: number;
-  totalEmptyCacheHitsByLevel: readonly number[];
-  totalDiskCacheHits: number;
-  totalDiskCacheHitsByLevel: readonly number[];
-  totalDiskCacheMisses: number;
-  totalWorkerGenerated: number;
-  totalWorkerGeneratedByLevel: readonly number[];
-  totalScheduledWorkerRequests: number;
-  totalScheduledDiskRequests: number;
-  totalScheduledDiskStores: number;
-  totalCompletedDiskStores: number;
-  totalDownsampleMs: number;
-  totalMeshMs: number;
-  maxLodChunkMs: number;
-  maxWorstRecentFrameMs: number;
-  maxRecentHitchCount: number;
-  maxRecentDroppedFrameEstimate: number;
-  finalSnapshot: GameHudSnapshot;
-}
-
-interface GameControllerOptions {
-  eagerBootstrapBenchmark?: boolean;
-}
-
-interface CapturedBenchmarkFrame {
-  sampleIndex: number;
-  target: Pick<RouteBenchmarkFrameTarget, "frame" | "simTimeSeconds" | "distanceMeters" | "feetPosition" | "yaw" | "pitch">
-    & { phase: "move" | "settle" };
-  image: {
-    width: number;
-    height: number;
-    pixels: Uint8ClampedArray;
-  };
-}
-
 export class GameController {
   readonly canvas: HTMLCanvasElement;
   readonly generator = new ProceduralWorldGenerator(1337);
@@ -946,6 +685,7 @@ export class GameController {
     createMeshMaterialLut(this.world.palette, (materialIndex) => this.world.isWaterMaterial(materialIndex)),
   );
   readonly explorationJournal = new ExplorationJournal();
+  readonly explorationEventLog = new ExplorationEventLog();
   readonly skillJournal = new SkillJournal();
   readonly routeJournal = new RouteJournal(TRAVEL_GOALS);
 
@@ -1046,15 +786,18 @@ export class GameController {
   private lastTravelContextFeetPosition: Vec3 | null = null;
   private lastTravelContext: "surface" | "underground" = "surface";
   private lastInteractionLabel = "No interaction yet";
-  private readonly bootstrapBenchmarkStartedAt = performance.now();
-  private readonly bootstrapBenchmarkSamples: BootstrapBenchmarkSample[] = [];
+  private caveReturnFeetPosition: Vec3 | null = null;
+  private activeCaveSystemId: AtlasCaveSystemId | null = null;
+  private activeCaveAnchorId: string | null = null;
+  private activeCaveAnchorKind: AtlasCaveAnchorKind | null = null;
+  private activeCavePassageTraversalCount = 0;
+  private readonly bootstrapStartedAt = performance.now();
+  private readonly worldClockStartedAt = performance.now();
+  private worldClockOffsetSeconds = 0;
   private bootstrapPlayableReady = false;
-  private bootstrapBenchmarkComplete = false;
-  private readonly eagerBootstrapBenchmark: boolean;
 
-  constructor(canvas: HTMLCanvasElement, options: GameControllerOptions = {}) {
+  constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
-    this.eagerBootstrapBenchmark = options.eagerBootstrapBenchmark ?? false;
     this.pointerLockTargets.add(canvas);
     this.routeJournal.startGoal(DEFAULT_TRAVEL_GOAL_ID);
   }
@@ -1070,9 +813,6 @@ export class GameController {
     this.renderer = await WebGpuVoxelRenderer.create(this.canvas);
     this.loadBootstrapWorld();
     this.attachInteractions();
-    if (this.eagerBootstrapBenchmark) {
-      await this.drainBootstrapBenchmark();
-    }
     this.start();
   }
 
@@ -1127,9 +867,17 @@ export class GameController {
     const explorationSkillEffects = resolveExplorationSkillEffects(skills);
     const routeSnapshot = this.routeJournal.getSnapshot();
     const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+    const worldSystems = this.sampleWorldSystems(currentWorld, encounter);
     const primaryFaction = encounter.factionHints[0]?.factionId ?? null;
     const scoutResult = describeRpgEncounterScoutResult(encounter);
+    const eventLog = this.explorationEventLog.getSnapshot();
+    const fieldKit = summarizeFieldKit(eventLog);
+    const lootJournal = summarizeLootJournal(eventLog);
+    const bestiary = summarizeBestiary(eventLog);
+    const passiveMobSightings = this.samplePassiveMobSightings();
+    const nearestPassiveMob = passiveMobSightings[0] ?? null;
     const activeExplorationHud = this.buildActiveExplorationHudState(currentWorld, discovery, routeSnapshot, encounter);
+    const activeQuest = this.selectActiveQuestHook(currentWorld, discovery, routeSnapshot, encounter, primaryFaction);
     const bootstrap = this.getBootstrapReadiness();
     const ambientProfile = currentWorld.ambientProfile;
     const travelContextLabel = this.lastTravelContext === "underground" ? "Underground route" : "Surface route";
@@ -1182,6 +930,22 @@ export class GameController {
       ambientProfileId: ambientProfile.id,
       ambientProfileLabel: ambientProfile.label,
       ambientFogEndMeters: worldUnitsToMeters(ambientProfile.fogEndDistance),
+      timeOfDayLabel: worldSystems.clock.phaseLabel,
+      worldClockLabel: worldSystems.clock.clockLabel,
+      worldDay: worldSystems.clock.day,
+      worldDaylight: worldSystems.clock.daylight,
+      weatherLabel: worldSystems.weather.label,
+      weatherIntensity: worldSystems.weather.intensity,
+      floraLabel: worldSystems.area.floraLabel,
+      faunaLabel: worldSystems.area.faunaLabel,
+      timeActivityLabel: worldSystems.area.timeActivityLabel,
+      lootSignalLabel: worldSystems.area.lootSignalLabel,
+      hazardLabel: worldSystems.area.hazardLabel,
+      areaCoherenceLabel: worldSystems.area.coherenceLabel,
+      soundscapeId: worldSystems.area.soundscapeId,
+      soundscapeLabel: worldSystems.area.soundscapeLabel,
+      soundscapeListenLabel: worldSystems.area.soundscapeListenLabel,
+      soundscapeFieldNote: worldSystems.area.soundscapeFieldNote,
       encounterMoodLabel: formatEncounterMoodForTravelContext(
         describeRpgEncounterMood(encounter.moodId),
         this.lastTravelContext,
@@ -1189,18 +953,47 @@ export class GameController {
       encounterPressureLabel: scoutResult.pressureLabel,
       encounterFactionLabel: primaryFaction ? describeRpgEncounterFaction(primaryFaction) : "No dominant faction",
       encounterFlavorLabel: encounter.flavorTags.slice(0, 2).map(formatEncounterFlavorTag).join(" • "),
+      passiveMobSightingCount: passiveMobSightings.length,
+      passiveMobNearestId: nearestPassiveMob?.id ?? null,
+      passiveMobNearestLabel: formatPassiveMobPresenceLabel(nearestPassiveMob),
+      passiveMobNearestDetailLabel: nearestPassiveMob?.label ?? "No passive mob nearby",
+      passiveMobNearestDistanceMeters: nearestPassiveMob ? worldUnitsToMeters(nearestPassiveMob.distanceWorldUnits) : null,
+      passiveMobNearestFactionLabel: nearestPassiveMob?.factionName ?? "No nearby faction",
+      passiveMobNearestMoodLabel: nearestPassiveMob?.moodName ?? "No nearby mob mood",
+      bestiarySightingCount: bestiary.totalSightings,
+      bestiaryEntryCount: bestiary.entryCount,
+      bestiarySummaryLabel: bestiary.summaryLabel,
+      bestiaryLastSightingLabel: bestiary.lastSightingLabel,
+      bestiaryLastNoteLabel: bestiary.lastFieldNoteLabel,
+      bestiaryDominantFactionLabel: bestiary.dominantFactionLabel,
       activePlaceName: activeExplorationHud.activePlaceName,
       activeRouteName: activeExplorationHud.activeRouteName,
       activeRouteProgressLabel: activeExplorationHud.activeRouteProgressLabel,
       activeTravelGoalTitle: activeExplorationHud.activeTravelGoalTitle,
       activeTravelGoalStepLabel: activeExplorationHud.activeTravelGoalStepLabel,
       activeTravelGoalProgressRatio: activeExplorationHud.activeTravelGoalProgressRatio,
+      activeQuestHookId: activeQuest?.hookId ?? null,
+      activeQuestHookKind: activeQuest?.kind ?? null,
+      activeQuestObjectiveKind: activeQuest?.objectiveKind ?? null,
+      activeQuestTitle: activeQuest?.title ?? "No local rumor",
+      activeQuestObjectiveLabel: activeQuest?.objectiveLabel ?? "Keep moving",
+      activeQuestRumorText: activeQuest?.rumorText ?? "No local rumor is strong enough to follow yet.",
+      activeQuestMoodLabel: activeQuest?.mood ?? "No quest mood",
+      activeQuestFactionLabel: activeQuest?.faction ?? "No quest faction",
       travelContext: this.lastTravelContext,
       travelContextLabel,
       interactionTargetName: activeExplorationHud.interactionTargetName,
       interactionPromptLabel: activeExplorationHud.interactionPromptLabel,
       interactionPromptDescription: activeExplorationHud.interactionPromptDescription,
       interactionPromptVerb: activeExplorationHud.interactionPromptVerb,
+      navigationTargetId: activeExplorationHud.navigationTargetId,
+      navigationTargetName: activeExplorationHud.navigationTargetName,
+      navigationSource: activeExplorationHud.navigationSource,
+      navigationDistanceMeters: activeExplorationHud.navigationDistanceMeters,
+      navigationBearingLabel: activeExplorationHud.navigationBearingLabel,
+      navigationDistanceLabel: activeExplorationHud.navigationDistanceLabel,
+      navigationCompassLabel: activeExplorationHud.navigationCompassLabel,
+      navigationTurnLabel: activeExplorationHud.navigationTurnLabel,
       lastInteractionLabel: this.lastInteractionLabel,
       discoveredBiomeCount: discovery.discoveredBiomeIds.length,
       discoveredUndergroundBiomeCount: discovery.discoveredUndergroundBiomeIds.length,
@@ -1209,6 +1002,19 @@ export class GameController {
       discoveredAncientLandmarkCount: discovery.discoveredLandmarkIds
         .filter((landmarkId) => ANCIENT_LANDMARK_IDS.has(landmarkId))
         .length,
+      scoutedMobTrailCount: countMobSignEvents(eventLog),
+      lootedCacheCount: countEventsBySubjectRole(eventLog, "object", "loot-cache"),
+      scoutedCaveMouthCount: countEventsBySubjectRole(eventLog, "zone", "cave-mouth"),
+      traversedCavePassageCount: countEventsBySubjectRole(eventLog, "zone", "cave-passage"),
+      fieldKitFindCount: fieldKit.totalFinds,
+      fieldKitSummaryLabel: fieldKit.summaryLabel,
+      fieldKitLastFindLabel: fieldKit.lastFindLabel,
+      fieldKitLastNoteLabel: fieldKit.lastFieldNoteLabel,
+      fieldKitDominantCategoryLabel: fieldKit.dominantCategoryLabel,
+      lootJournalCollectedCacheCount: lootJournal.totalCollectedCaches,
+      lootJournalRevisitedCacheCount: lootJournal.totalRevisitedCaches,
+      lootJournalRevisitEventCount: lootJournal.totalRevisitEvents,
+      lootJournalStateLabel: formatLootJournalStateLabel(lootJournal.totalCollectedCaches, lootJournal.totalRevisitedCaches),
       landmarkScanRadiusMeters: explorationSkillEffects.landmarkScanRadiusMeters,
       landmarkScanSampleCount: buildLandmarkSampleOffsets(explorationSkillEffects).length,
       surfaceTravelSpeedMultiplier: explorationSkillEffects.surfaceTravelSpeedMultiplier,
@@ -1222,7 +1028,7 @@ export class GameController {
       totalSkillLevel: skills.totalLevel,
       bootstrapPlayableReady: bootstrap.playableReady,
       bootstrapVisualReady: bootstrap.visualReady,
-      bootstrapElapsedMs: performance.now() - this.bootstrapBenchmarkStartedAt,
+      bootstrapElapsedMs: performance.now() - this.bootstrapStartedAt,
       bootstrapRequiredColumns: bootstrap.requiredColumns,
       bootstrapReadyColumns: bootstrap.readyColumns,
       bootstrapUrgentDirtyMeshlessChunks: bootstrap.urgentDirtyMeshlessChunks,
@@ -1301,16 +1107,6 @@ export class GameController {
     };
   }
 
-  getBootstrapBenchmark(): BootstrapExperienceBenchmark {
-    const samples = this.bootstrapBenchmarkSamples.map((sample) => ({ ...sample }));
-    return {
-      completed: this.bootstrapBenchmarkComplete,
-      startedAtMs: this.bootstrapBenchmarkStartedAt,
-      samples,
-      summary: summarizeBootstrapBenchmark(samples),
-    };
-  }
-
   getStreamingBudgets(): StreamingBudgets {
     return { ...this.streamingBudgets };
   }
@@ -1371,8 +1167,13 @@ export class GameController {
     return this.skillJournal.observeDiscoveries(this.explorationJournal.drainPendingSkillDiscoveries());
   }
 
+  getExplorationEventLogSnapshot(): ExplorationEventLogSnapshot {
+    return this.explorationEventLog.getSnapshot();
+  }
+
   resetDiscoveryJournal(): ExplorationJournalSnapshot {
     this.explorationJournal.reset();
+    this.explorationEventLog.reset();
     this.skillJournal.reset();
     this.lastDiscoverySampleFeetPosition = null;
     this.lastDiscoverySampleAt = 0;
@@ -1387,15 +1188,21 @@ export class GameController {
     return {
       version: 1,
       discovery: this.explorationJournal.exportState(),
+      events: this.explorationEventLog.exportState(),
       skills: this.skillJournal.exportState(),
       routes: this.routeJournal.exportState(),
+      worldClockOffsetSeconds: this.worldClockOffsetSeconds,
     };
   }
 
   importProgressState(state: Partial<ProgressStateSnapshot>): ProgressStateSnapshot {
     this.explorationJournal.importState(state.discovery ?? {});
+    this.explorationEventLog.importState(state.events ?? {});
     this.skillJournal.importState(state.skills ?? {});
     this.routeJournal.importState(state.routes ?? {});
+    this.worldClockOffsetSeconds = typeof state.worldClockOffsetSeconds === "number" && Number.isFinite(state.worldClockOffsetSeconds)
+      ? Math.max(0, state.worldClockOffsetSeconds)
+      : 0;
     this.routeJournal.startGoal(DEFAULT_TRAVEL_GOAL_ID);
     this.lastDiscoverySampleFeetPosition = null;
     this.lastDiscoverySampleAt = 0;
@@ -1978,874 +1785,6 @@ export class GameController {
     };
   }
 
-  async benchmarkChunkCrossing(iterations: number, chunkDelta = 1): Promise<ChunkBoundaryBenchmark> {
-    const normalizedIterations = Math.max(1, Math.floor(iterations));
-    const normalizedChunkDelta = Math.max(1, Math.floor(chunkDelta));
-    const spawn = this.world.getSpawnPosition();
-    const baseChunkX = Math.floor(spawn[0] / this.world.chunkSize);
-    const baseChunkZ = Math.floor(spawn[2] / this.world.chunkSize);
-    const leftTarget = buildEyePositionForChunkCenter(
-      baseChunkX,
-      baseChunkZ,
-      spawn[1],
-      this.world.chunkSize,
-      this.player.eyeHeight,
-    );
-    const rightTarget = buildEyePositionForChunkCenter(
-      baseChunkX + normalizedChunkDelta,
-      baseChunkZ,
-      spawn[1],
-      this.world.chunkSize,
-      this.player.eyeHeight,
-    );
-    const savedPlayer = {
-      feetPosition: [...this.player.feetPosition] as Vec3,
-      velocity: [...this.player.velocity] as Vec3,
-      grounded: this.player.grounded,
-    };
-    const savedCamera = {
-      position: [...this.camera.position] as Vec3,
-      yaw: this.camera.yaw,
-      pitch: this.camera.pitch,
-      fovY: this.camera.fovY,
-      near: this.camera.near,
-      far: this.camera.far,
-    };
-    const savedStatus = this.status;
-    const savedStreamAnchor = this.streamAnchor
-      ? { chunkX: this.streamAnchor.chunkX, chunkZ: this.streamAnchor.chunkZ }
-      : null;
-
-    this.stop();
-    try {
-      await this.teleportAndSettle(leftTarget);
-      const samples: ChunkBoundaryBenchmarkSample[] = [];
-      for (let iteration = 0; iteration < normalizedIterations; iteration += 1) {
-        for (const target of [rightTarget, leftTarget]) {
-          const transition = await this.teleportAndSettle(target);
-          samples.push({
-            step: samples.length + 1,
-            targetEyePosition: [...target],
-            targetChunk: [
-              Math.floor(target[0] / this.world.chunkSize),
-              Math.floor((target[1] - this.player.eyeHeight) / this.world.chunkSize),
-              Math.floor(target[2] / this.world.chunkSize),
-            ],
-            changed: transition.residency.changed,
-            generatedChunks: transition.residency.generatedChunks,
-            evictedChunks: transition.residency.evictedChunks,
-            streamMs: transition.residency.elapsedMs,
-            meshMs: transition.mesh.elapsedMs,
-            meshNewChunks: transition.mesh.newMeshCount,
-            meshRemeshChunks: transition.mesh.remeshCount,
-            frameCpuMs: transition.render.frameCpuMs,
-            syncMs: transition.render.syncResourcesMs,
-            uploadMs: transition.render.uploadMs,
-            uploadChunks: transition.render.uploadChunks,
-            uploadBytes: transition.render.uploadBytes,
-            encodeMs: transition.render.encodeMs,
-          });
-        }
-      }
-      return {
-        iterations: normalizedIterations,
-        chunkDelta: normalizedChunkDelta,
-        radiusChunks: this.world.horizontalRadiusChunks,
-        samples,
-        summary: summarizeChunkBoundaryBenchmark(samples),
-      };
-    } finally {
-      this.player.feetPosition = savedPlayer.feetPosition;
-      this.player.velocity = savedPlayer.velocity;
-      this.player.grounded = savedPlayer.grounded;
-      this.camera = {
-        position: savedCamera.position,
-        yaw: savedCamera.yaw,
-        pitch: savedCamera.pitch,
-        fovY: savedCamera.fovY,
-        near: savedCamera.near,
-        far: savedCamera.far,
-      };
-      this.status = savedStatus;
-      if (savedStreamAnchor) {
-        this.syncWorldAroundAnchor(savedStreamAnchor);
-      } else {
-        this.streamAnchor = null;
-        this.syncWorldAroundPlayer(true);
-      }
-      await this.renderProbeFrame();
-      this.pushHud(true);
-      this.start();
-    }
-  }
-
-  async benchmarkChunkCacheReuse(chunkDelta = 24, maxFramesPerLeg = 240): Promise<ChunkCacheReuseBenchmark> {
-    const normalizedChunkDelta = Math.max(1, Math.floor(chunkDelta));
-    const normalizedMaxFrames = Math.max(1, Math.floor(maxFramesPerLeg));
-    const spawn = this.world.getSpawnPosition();
-    const baseChunkX = Math.floor(spawn[0] / this.world.chunkSize);
-    const baseChunkZ = Math.floor(spawn[2] / this.world.chunkSize);
-    const originTarget = buildEyePositionForChunkCenter(
-      baseChunkX,
-      baseChunkZ,
-      spawn[1],
-      this.world.chunkSize,
-      this.player.eyeHeight,
-    );
-    const farTarget = buildEyePositionForChunkCenter(
-      baseChunkX + normalizedChunkDelta,
-      baseChunkZ,
-      spawn[1],
-      this.world.chunkSize,
-      this.player.eyeHeight,
-    );
-    const savedPlayer = {
-      feetPosition: [...this.player.feetPosition] as Vec3,
-      velocity: [...this.player.velocity] as Vec3,
-      grounded: this.player.grounded,
-    };
-    const savedCamera = {
-      position: [...this.camera.position] as Vec3,
-      yaw: this.camera.yaw,
-      pitch: this.camera.pitch,
-      fovY: this.camera.fovY,
-      near: this.camera.near,
-      far: this.camera.far,
-    };
-    const savedStatus = this.status;
-    const savedStreamAnchor = this.streamAnchor
-      ? { chunkX: this.streamAnchor.chunkX, chunkZ: this.streamAnchor.chunkZ }
-      : null;
-
-    this.stop();
-    try {
-      await this.teleportAndSettle(originTarget, { radiusChunks: this.world.horizontalRadiusChunks });
-      const populate = await this.measureChunkCacheReuseLeg(farTarget, normalizedMaxFrames);
-      const revisit = await this.measureChunkCacheReuseLeg(originTarget, normalizedMaxFrames);
-      return {
-        chunkDelta: normalizedChunkDelta,
-        radiusChunks: this.world.horizontalRadiusChunks,
-        populate,
-        revisit,
-      };
-    } finally {
-      this.player.feetPosition = savedPlayer.feetPosition;
-      this.player.velocity = savedPlayer.velocity;
-      this.player.grounded = savedPlayer.grounded;
-      this.camera = {
-        position: savedCamera.position,
-        yaw: savedCamera.yaw,
-        pitch: savedCamera.pitch,
-        fovY: savedCamera.fovY,
-        near: savedCamera.near,
-        far: savedCamera.far,
-      };
-      this.status = savedStatus;
-      if (savedStreamAnchor) {
-        this.syncWorldAroundAnchor(savedStreamAnchor, true);
-      } else {
-        this.streamAnchor = null;
-        this.syncWorldAroundPlayer(true);
-      }
-      await this.renderProbeFrame();
-      this.pushHud(true);
-      this.start();
-    }
-  }
-
-  async benchmarkIncrementalCrossing(
-    iterations: number,
-    chunkDelta = 2,
-    stepsPerLeg = 12,
-    settleFrames = 16,
-  ): Promise<IncrementalCrossingBenchmark> {
-    const normalizedIterations = Math.max(1, Math.floor(iterations));
-    const normalizedChunkDelta = Math.max(1, Math.floor(chunkDelta));
-    const normalizedSteps = Math.max(2, Math.floor(stepsPerLeg));
-    const normalizedSettleFrames = Math.max(1, Math.floor(settleFrames));
-    const spawn = this.world.getSpawnPosition();
-    const baseChunkX = Math.floor(spawn[0] / this.world.chunkSize);
-    const baseChunkZ = Math.floor(spawn[2] / this.world.chunkSize);
-    const leftFeet = buildFeetPositionForChunkCenter(baseChunkX, baseChunkZ, spawn[1], this.world.chunkSize);
-    const rightFeet = buildFeetPositionForChunkCenter(
-      baseChunkX + normalizedChunkDelta,
-      baseChunkZ,
-      spawn[1],
-      this.world.chunkSize,
-    );
-    const savedPlayer = {
-      feetPosition: [...this.player.feetPosition] as Vec3,
-      velocity: [...this.player.velocity] as Vec3,
-      grounded: this.player.grounded,
-    };
-    const savedCamera = {
-      position: [...this.camera.position] as Vec3,
-      yaw: this.camera.yaw,
-      pitch: this.camera.pitch,
-      fovY: this.camera.fovY,
-      near: this.camera.near,
-      far: this.camera.far,
-    };
-    const savedStatus = this.status;
-    const savedStreamAnchor = this.streamAnchor
-      ? { chunkX: this.streamAnchor.chunkX, chunkZ: this.streamAnchor.chunkZ }
-      : null;
-
-    this.stop();
-    try {
-      teleportPlayerToFeetPosition(this.player, leftFeet);
-      this.player.grounded = true;
-      this.syncCameraToPlayer();
-      this.syncWorldAroundPlayer(true);
-      await this.renderProbeFrame();
-
-      const samples: IncrementalCrossingSample[] = [];
-      let frame = 0;
-      const legs: Array<readonly [Vec3, Vec3]> = [[leftFeet, rightFeet], [rightFeet, leftFeet]];
-      for (let iteration = 0; iteration < normalizedIterations; iteration += 1) {
-        for (const [startFeet, endFeet] of legs) {
-          const legIndex = samples.length;
-          for (let step = 1; step <= normalizedSteps; step += 1) {
-            const t = step / normalizedSteps;
-            teleportPlayerToFeetPosition(this.player, lerpVec3(startFeet, endFeet, t));
-            this.player.grounded = true;
-            this.syncCameraToPlayer();
-            const residency = this.syncWorldAroundPlayer(false);
-            const detailCoverage = this.probeRenderReadyCoverage();
-            const render = await this.renderProbeFrame();
-            frame += 1;
-            samples.push(
-              buildIncrementalSample(
-                frame,
-                "move",
-                legIndex,
-                residency,
-                this.lastMeshBuildSummary,
-                detailCoverage,
-                render,
-              ),
-            );
-          }
-          for (let settleFrame = 0; settleFrame < normalizedSettleFrames; settleFrame += 1) {
-            const residency = this.syncWorldAroundPlayer(false);
-            const detailCoverage = this.probeRenderReadyCoverage();
-            const render = await this.renderProbeFrame();
-            frame += 1;
-            samples.push(
-              buildIncrementalSample(
-                frame,
-                "settle",
-                legIndex,
-                residency,
-                this.lastMeshBuildSummary,
-                detailCoverage,
-                render,
-              ),
-            );
-            if (
-              residency.complete
-              && residency.pendingChunks === 0
-              && this.lastMeshBuildSummary.meshCount === 0
-            ) {
-              break;
-            }
-          }
-        }
-      }
-      return {
-        iterations: normalizedIterations,
-        chunkDelta: normalizedChunkDelta,
-        stepsPerLeg: normalizedSteps,
-        settleFrames: normalizedSettleFrames,
-        radiusChunks: this.world.horizontalRadiusChunks,
-        samples,
-        summary: summarizeIncrementalCrossing(samples),
-      };
-    } finally {
-      this.player.feetPosition = savedPlayer.feetPosition;
-      this.player.velocity = savedPlayer.velocity;
-      this.player.grounded = savedPlayer.grounded;
-      this.camera = {
-        position: savedCamera.position,
-        yaw: savedCamera.yaw,
-        pitch: savedCamera.pitch,
-        fovY: savedCamera.fovY,
-        near: savedCamera.near,
-        far: savedCamera.far,
-      };
-      this.status = savedStatus;
-      if (savedStreamAnchor) {
-        this.syncWorldAroundAnchor(savedStreamAnchor, true);
-      } else {
-        this.streamAnchor = null;
-        this.syncWorldAroundPlayer(true);
-      }
-      await this.renderProbeFrame();
-      this.pushHud(true);
-      this.start();
-    }
-  }
-
-  async benchmarkRouteExperience(
-    options: RouteExperienceBenchmarkOptions = {},
-  ): Promise<RouteExperienceBenchmark> {
-    const spawnFeet = this.world.getSpawnPosition();
-    const routePlan = buildDefaultRouteBenchmarkPlan(
-      spawnFeet,
-      (worldX, worldZ) => this.generator.sampleColumn(worldX, worldZ).surfaceY + 1,
-      normalizeRouteBenchmarkPlanOptions(options),
-    );
-    return this.runRouteExperienceBenchmark(routePlan, options);
-  }
-
-  async benchmarkForwardWalkExperience(
-    options: RouteExperienceBenchmarkOptions & {
-      yawRadians?: number;
-    } = {},
-  ): Promise<RouteExperienceBenchmark> {
-    const spawnFeet = this.world.getSpawnPosition();
-    const routePlan = buildForwardRouteBenchmarkPlan(
-      spawnFeet,
-      (worldX, worldZ) => this.generator.sampleColumn(worldX, worldZ).surfaceY + 1,
-      {
-        ...normalizeRouteBenchmarkPlanOptions(options),
-        yawRadians: options.yawRadians,
-      },
-    );
-    return this.runRouteExperienceBenchmark(routePlan, options);
-  }
-
-  async benchmarkLiveForwardWalkExperience(
-    options: RouteExperienceBenchmarkOptions & {
-      yawRadians?: number;
-      yawDriftRadians?: number;
-      yawDriftPeriodSeconds?: number;
-      sprint?: boolean;
-    } = {},
-  ): Promise<RouteExperienceBenchmark> {
-    const normalizedOptions = normalizeRouteBenchmarkPlanOptions(options);
-    const durationSeconds = normalizedOptions.durationSeconds;
-    const settleSeconds = Math.max(1, options.settleSeconds ?? 4);
-    const seamProbeStrideFrames = clampPositiveInt(
-      options.seamProbeStrideFrames ?? Math.max(1, Math.round((normalizedOptions.sampleHz ?? 60) / 4)),
-      Math.max(1, Math.round((normalizedOptions.sampleHz ?? 60) / 4)),
-    );
-    const captureStrideFrames = clampPositiveInt(
-      options.captureStrideFrames ?? 999999,
-      999999,
-    );
-    const captureWidth = clampPositiveInt(options.captureWidth ?? 128, 128);
-    const captureHeight = clampPositiveInt(options.captureHeight ?? 72, 72);
-    const referenceDiffStrideFrames = Math.max(0, Math.floor(options.referenceDiffStrideFrames ?? 0));
-    const referenceDiffLimit = Math.max(0, Math.floor(options.referenceDiffLimit ?? 24));
-    const yaw = options.yawRadians ?? 0;
-    const yawDriftRadians = Math.max(0, options.yawDriftRadians ?? 0);
-    const yawDriftPeriodSeconds = Math.max(0.1, options.yawDriftPeriodSeconds ?? Math.max(1, durationSeconds));
-    const pitch = -0.34;
-    const savedPlayer = {
-      feetPosition: [...this.player.feetPosition] as Vec3,
-      velocity: [...this.player.velocity] as Vec3,
-      grounded: this.player.grounded,
-    };
-    const savedCamera = {
-      position: [...this.camera.position] as Vec3,
-      yaw: this.camera.yaw,
-      pitch: this.camera.pitch,
-      fovY: this.camera.fovY,
-      near: this.camera.near,
-      far: this.camera.far,
-    };
-    const savedStatus = this.status;
-    const savedPointerLocked = this.pointerLocked;
-    const savedPressedKeys = [...this.pressedKeys];
-    const savedStreamAnchor = this.streamAnchor
-      ? { chunkX: this.streamAnchor.chunkX, chunkZ: this.streamAnchor.chunkZ }
-      : null;
-
-    this.stop();
-    try {
-      const spawnFeet = this.world.getSpawnPosition();
-      teleportPlayerToFeetPosition(this.player, spawnFeet);
-      this.player.velocity = [0, 0, 0];
-      this.player.grounded = true;
-      this.camera.yaw = yaw;
-      this.camera.pitch = pitch;
-      this.syncCameraToPlayer();
-      this.pointerLocked = true;
-      this.pressedKeys.clear();
-      this.pressedKeys.add("KeyW");
-      if (options.sprint === true) {
-        this.pressedKeys.add("ControlLeft");
-      }
-      this.lastFrameTime = 0;
-      this.syncWorldAroundPlayer(true);
-      this.renderCurrentFrame();
-      await this.renderer?.waitForGpuIdle();
-
-      const samples: RouteExperienceFrameSample[] = [];
-      const capturedFrames: CapturedBenchmarkFrame[] = [];
-      let totalDistanceMeters = 0;
-      const startedAt = performance.now();
-      let frame = 0;
-      let lastFeetPosition: Vec3 = [...this.player.feetPosition];
-      while (true) {
-        const now = await nextAnimationFrame();
-        const elapsedSeconds = (performance.now() - startedAt) / 1000;
-        const phase: "move" | "settle" = elapsedSeconds < durationSeconds ? "move" : "settle";
-        if (phase === "settle") {
-          this.pressedKeys.delete("KeyW");
-          this.pressedKeys.delete("ControlLeft");
-        }
-        this.camera.yaw = yaw + resolveBenchmarkYawDrift(
-          elapsedSeconds,
-          yawDriftRadians,
-          yawDriftPeriodSeconds,
-        );
-        const interactiveFrame = this.advanceInteractiveFrame(now);
-        frame += 1;
-        totalDistanceMeters += worldUnitsToMeters(Math.hypot(
-          this.player.feetPosition[0] - lastFeetPosition[0],
-          this.player.feetPosition[2] - lastFeetPosition[2],
-        ));
-        lastFeetPosition = [...this.player.feetPosition];
-        const frameResult = await this.captureRouteExperienceFrameSample(
-          {
-            frame,
-            phase,
-            simTimeSeconds: elapsedSeconds,
-            distanceMeters: totalDistanceMeters,
-          },
-          interactiveFrame.movementMs,
-          interactiveFrame.gameplayFrameMs,
-          seamProbeStrideFrames,
-          captureStrideFrames,
-          captureWidth,
-          captureHeight,
-          referenceDiffStrideFrames,
-          referenceDiffLimit,
-          samples.length,
-          capturedFrames.length,
-          {
-            frameStats: {
-              drawCalls: interactiveFrame.render.drawCalls,
-              triangles: interactiveFrame.render.triangles,
-              syncResourcesMs: interactiveFrame.render.syncResourcesMs,
-              uploadMs: interactiveFrame.render.uploadMs,
-              uploadChunks: interactiveFrame.render.uploadChunks,
-              uploadBytes: interactiveFrame.render.uploadBytes,
-              encodeMs: interactiveFrame.render.encodeMs,
-              frustumCulledChunks: this.lastRenderStats.frustumCulledChunks,
-              fogCulledChunks: this.lastRenderStats.fogCulledChunks,
-              lodDrawCalls: this.lastRenderStats.lodDrawCalls,
-              lodDrawCallsByLevel: this.lastRenderStats.lodDrawCallsByLevel,
-            },
-            frameCpuMs: interactiveFrame.render.frameCpuMs,
-          },
-        );
-        samples.push(frameResult.sample);
-        if (frameResult.capturedFrame) {
-          capturedFrames.push(frameResult.capturedFrame);
-        }
-        if (
-          phase === "settle"
-          && elapsedSeconds >= durationSeconds + settleSeconds
-        ) {
-          break;
-        }
-      }
-
-      if (capturedFrames.length > 0) {
-        await this.applySettledReferenceDiffs(samples, capturedFrames);
-      }
-
-      return {
-        seed: this.generator.seed,
-        radiusChunks: this.world.horizontalRadiusChunks,
-        captureStrideFrames,
-        seamProbeStrideFrames,
-        referenceDiffStrideFrames,
-        referenceDiffLimit,
-        durationSeconds,
-        settleSeconds,
-        totalDistanceMeters,
-        sampleHz: durationSeconds <= 0 ? samples.length : samples.length / Math.max(durationSeconds + settleSeconds, 0.001),
-        speedMetersPerSecond: durationSeconds <= 0 ? 0 : totalDistanceMeters / durationSeconds,
-        samples,
-        summary: summarizeRouteExperienceBenchmark(samples, {
-          totalDistanceMeters,
-          sampleHz: durationSeconds <= 0 ? samples.length : samples.length / Math.max(durationSeconds + settleSeconds, 0.001),
-          speedMetersPerSecond: durationSeconds <= 0 ? 0 : totalDistanceMeters / durationSeconds,
-        }),
-      };
-    } finally {
-      this.pressedKeys.clear();
-      for (const code of savedPressedKeys) {
-        this.pressedKeys.add(code);
-      }
-      this.pointerLocked = savedPointerLocked;
-      this.player.feetPosition = savedPlayer.feetPosition;
-      this.player.velocity = savedPlayer.velocity;
-      this.player.grounded = savedPlayer.grounded;
-      this.camera = {
-        position: savedCamera.position,
-        yaw: savedCamera.yaw,
-        pitch: savedCamera.pitch,
-        fovY: savedCamera.fovY,
-        near: savedCamera.near,
-        far: savedCamera.far,
-      };
-      this.status = savedStatus;
-      this.lastFrameTime = 0;
-      if (savedStreamAnchor) {
-        this.syncWorldAroundAnchor(savedStreamAnchor, true);
-      } else {
-        this.streamAnchor = null;
-        this.syncWorldAroundPlayer(true);
-      }
-      this.renderCurrentFrame();
-      await this.renderer?.waitForGpuIdle();
-      this.pushHud(true);
-      this.start();
-    }
-  }
-
-  private async runRouteExperienceBenchmark(
-    routePlan: ReturnType<typeof buildDefaultRouteBenchmarkPlan>,
-    options: RouteExperienceBenchmarkOptions,
-  ): Promise<RouteExperienceBenchmark> {
-    const settleSeconds = Math.max(1, options.settleSeconds ?? 4);
-    const sampleHz = routePlan.sampleHz;
-    const seamProbeStrideFrames = clampPositiveInt(
-      options.seamProbeStrideFrames ?? Math.max(1, Math.round(sampleHz / 4)),
-      Math.max(1, Math.round(sampleHz / 4)),
-    );
-    const captureStrideFrames = clampPositiveInt(
-      options.captureStrideFrames ?? Math.max(1, Math.round(sampleHz / 2)),
-      Math.max(1, Math.round(sampleHz / 2)),
-    );
-    const captureWidth = clampPositiveInt(options.captureWidth ?? 128, 128);
-    const captureHeight = clampPositiveInt(options.captureHeight ?? 72, 72);
-    const referenceDiffStrideFrames = Math.max(0, Math.floor(options.referenceDiffStrideFrames ?? 0));
-    const referenceDiffLimit = Math.max(0, Math.floor(options.referenceDiffLimit ?? 24));
-    const savedPlayer = {
-      feetPosition: [...this.player.feetPosition] as Vec3,
-      velocity: [...this.player.velocity] as Vec3,
-      grounded: this.player.grounded,
-    };
-    const savedCamera = {
-      position: [...this.camera.position] as Vec3,
-      yaw: this.camera.yaw,
-      pitch: this.camera.pitch,
-      fovY: this.camera.fovY,
-      near: this.camera.near,
-      far: this.camera.far,
-    };
-    const savedStatus = this.status;
-    const savedStreamAnchor = this.streamAnchor
-      ? { chunkX: this.streamAnchor.chunkX, chunkZ: this.streamAnchor.chunkZ }
-      : null;
-    const spawnFeet = this.world.getSpawnPosition();
-
-    this.stop();
-    try {
-      const initialTarget = routePlan.frames[0] ?? {
-        frame: 1,
-        phase: "move" as const,
-        simTimeSeconds: 0,
-        distanceMeters: 0,
-        feetPosition: spawnFeet,
-        yaw: this.camera.yaw,
-        pitch: this.camera.pitch,
-        segmentIndex: 0,
-      };
-      teleportPlayerToFeetPosition(this.player, initialTarget.feetPosition);
-      this.player.grounded = true;
-      this.camera.yaw = initialTarget.yaw;
-      this.camera.pitch = initialTarget.pitch;
-      this.syncCameraToPlayer();
-      this.syncWorldAroundPlayer(true);
-      this.renderCurrentFrame();
-      await this.renderer?.waitForGpuIdle();
-
-      const samples: RouteExperienceFrameSample[] = [];
-      const capturedFrames: CapturedBenchmarkFrame[] = [];
-      for (const target of routePlan.frames) {
-        const frameResult = await this.runRouteExperienceFrame(
-          target,
-          seamProbeStrideFrames,
-          captureStrideFrames,
-          captureWidth,
-          captureHeight,
-          referenceDiffStrideFrames,
-          referenceDiffLimit,
-          samples.length,
-          capturedFrames.length,
-        );
-        samples.push(frameResult.sample);
-        if (frameResult.capturedFrame) {
-          capturedFrames.push(frameResult.capturedFrame);
-        }
-      }
-
-      const finalTarget = routePlan.frames[routePlan.frames.length - 1] ?? initialTarget;
-      const maxSettleFrames = Math.max(1, Math.round(settleSeconds * sampleHz));
-      for (let settleFrame = 1; settleFrame <= maxSettleFrames; settleFrame += 1) {
-        const frameResult = await this.runRouteExperienceFrame(
-          {
-            ...finalTarget,
-            frame: routePlan.frames.length + settleFrame,
-            phase: "settle",
-            simTimeSeconds: routePlan.durationSeconds + settleFrame / sampleHz,
-            distanceMeters: routePlan.totalDistanceMeters,
-          },
-          seamProbeStrideFrames,
-          captureStrideFrames,
-          captureWidth,
-          captureHeight,
-          referenceDiffStrideFrames,
-          referenceDiffLimit,
-          samples.length,
-          capturedFrames.length,
-        );
-        const sample = frameResult.sample;
-        samples.push(sample);
-        if (frameResult.capturedFrame) {
-          capturedFrames.push(frameResult.capturedFrame);
-        }
-        if (
-          sample.complete
-          && sample.pendingChunks === 0
-          && sample.dirtyResidentChunks === 0
-          && sample.visibleGroundUncoveredCount === 0
-        ) {
-          break;
-        }
-      }
-
-      if (capturedFrames.length > 0) {
-        await this.applySettledReferenceDiffs(samples, capturedFrames);
-      }
-
-      return {
-        seed: this.generator.seed,
-        radiusChunks: this.world.horizontalRadiusChunks,
-        captureStrideFrames,
-        seamProbeStrideFrames,
-        referenceDiffStrideFrames,
-        referenceDiffLimit,
-        durationSeconds: routePlan.durationSeconds,
-        settleSeconds,
-        totalDistanceMeters: routePlan.totalDistanceMeters,
-        sampleHz: routePlan.sampleHz,
-        speedMetersPerSecond: routePlan.speedMetersPerSecond,
-        samples,
-        summary: summarizeRouteExperienceBenchmark(samples, routePlan),
-      };
-    } finally {
-      this.player.feetPosition = savedPlayer.feetPosition;
-      this.player.velocity = savedPlayer.velocity;
-      this.player.grounded = savedPlayer.grounded;
-      this.camera = {
-        position: savedCamera.position,
-        yaw: savedCamera.yaw,
-        pitch: savedCamera.pitch,
-        fovY: savedCamera.fovY,
-        near: savedCamera.near,
-        far: savedCamera.far,
-      };
-      this.status = savedStatus;
-      if (savedStreamAnchor) {
-        this.syncWorldAroundAnchor(savedStreamAnchor, true);
-      } else {
-        this.streamAnchor = null;
-        this.syncWorldAroundPlayer(true);
-      }
-      this.renderCurrentFrame();
-      await this.renderer?.waitForGpuIdle();
-      this.pushHud(true);
-      this.start();
-    }
-  }
-
-  private async measureChunkCacheReuseLeg(
-    targetEyePosition: Vec3,
-    maxFrames: number,
-  ): Promise<ChunkCacheReuseLegSummary> {
-    teleportPlayerToEyePosition(this.player, targetEyePosition);
-    this.player.grounded = true;
-    this.syncCameraToPlayer();
-    let frameCount = 0;
-    let totalStreamMs = 0;
-    let totalMeshMs = 0;
-    let totalGeneratedChunks = 0;
-    let totalPersistedChunkHits = 0;
-    let totalPersistedSummaryHits = 0;
-    let totalPersistedRegionSummaryHits = 0;
-    let totalMissingRegionSummaries = 0;
-    let totalWorkerGeneratedChunks = 0;
-    let maxPendingChunks = 0;
-    for (; frameCount < maxFrames; frameCount += 1) {
-      const residency = this.syncWorldAroundPlayer(frameCount === 0);
-      await this.renderProbeFrame();
-      totalStreamMs += residency.elapsedMs;
-      totalMeshMs += this.lastMeshBuildSummary.elapsedMs;
-      totalGeneratedChunks += residency.generatedChunks;
-      totalPersistedChunkHits += residency.phaseMs.completedChunkCacheHits;
-      totalPersistedSummaryHits += residency.phaseMs.completedSummaryCacheHits;
-      totalPersistedRegionSummaryHits += residency.phaseMs.completedRegionSummaryCacheHits;
-      totalMissingRegionSummaries += residency.phaseMs.missingRegionSummaries;
-      totalWorkerGeneratedChunks += residency.phaseMs.completedGeneratedChunks;
-      maxPendingChunks = Math.max(maxPendingChunks, residency.pendingChunks);
-      if (
-        residency.complete
-        && residency.pendingChunks === 0
-        && this.lastMeshBuildSummary.meshCount === 0
-      ) {
-        break;
-      }
-    }
-    return {
-      targetChunk: [
-        Math.floor(targetEyePosition[0] / this.world.chunkSize),
-        Math.floor((targetEyePosition[1] - this.player.eyeHeight) / this.world.chunkSize),
-        Math.floor(targetEyePosition[2] / this.world.chunkSize),
-      ],
-      frameCount: frameCount + 1,
-      settled: frameCount < maxFrames,
-      totalStreamMs,
-      totalMeshMs,
-      totalGeneratedChunks,
-      totalPersistedChunkHits,
-      totalPersistedSummaryHits,
-      totalPersistedRegionSummaryHits,
-      totalMissingRegionSummaries,
-      totalWorkerGeneratedChunks,
-      maxPendingChunks,
-      residentChunks: this.world.getStats().chunkCount,
-    };
-  }
-
-  async pumpWorldForBenchmark(
-    position?: Vec3,
-    options: BenchmarkWorldPumpOptions = {},
-  ): Promise<BenchmarkWorldPumpSummary> {
-    const maxFrames = Math.max(1, Math.floor(options.maxFrames ?? 120));
-    const stopWhenSettled = options.stopWhenSettled ?? true;
-    const lodBudget = {
-      maxGenerateLodChunks: Math.max(0, Math.floor(options.maxGenerateLodChunks ?? DEFAULT_MAX_LOD_CHUNKS_PER_FRAME)),
-      maxPlanMs: Math.max(0.1, options.maxLodPlanMs ?? DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME),
-      maxWorkMs: Math.max(0.1, options.maxLodWorkMs ?? DEFAULT_MAX_LOD_WORK_MS_PER_FRAME),
-    };
-    const residencyBudget = {
-      maxEvictChunks: Math.max(1, Math.floor(options.maxEvictChunks ?? MOVING_MAX_EVICT_CHUNKS_PER_FRAME)),
-      maxPlanMs: Math.max(0.1, options.maxResidencyPlanMs ?? MOVING_MAX_RESIDENCY_PLAN_MS_PER_FRAME),
-    };
-    const meshBudget = Math.max(0, Math.floor(options.maxMeshRebuilds ?? DEFAULT_MAX_MESH_REBUILDS_PER_FRAME));
-
-    if (position) {
-      teleportPlayerToEyePosition(this.player, position);
-      this.player.grounded = true;
-      this.syncCameraToPlayer();
-    }
-
-    const startedAt = performance.now();
-    let frameCount = 0;
-    let totalGenerated = 0;
-    const totalGeneratedByLevel = [0, 0, 0, 0, 0];
-    let totalMemoryCacheHits = 0;
-    const totalMemoryCacheHitsByLevel = [0, 0, 0, 0, 0];
-    let totalEmptyCacheHits = 0;
-    const totalEmptyCacheHitsByLevel = [0, 0, 0, 0, 0];
-    let totalDiskCacheHits = 0;
-    const totalDiskCacheHitsByLevel = [0, 0, 0, 0, 0];
-    let totalDiskCacheMisses = 0;
-    let totalWorkerGenerated = 0;
-    const totalWorkerGeneratedByLevel = [0, 0, 0, 0, 0];
-    let totalScheduledWorkerRequests = 0;
-    let totalScheduledDiskRequests = 0;
-    let totalScheduledDiskStores = 0;
-    let totalCompletedDiskStores = 0;
-    let totalDownsampleMs = 0;
-    let totalMeshMs = 0;
-    let maxLodChunkMs = 0;
-    let maxWorstRecentFrameMs = 0;
-    let maxRecentHitchCount = 0;
-    let maxRecentDroppedFrameEstimate = 0;
-    let settled = false;
-    let finalSnapshot = this.getDebugSnapshot();
-
-    for (; frameCount < maxFrames; frameCount += 1) {
-      await nextAnimationFrame();
-      const residency = this.syncWorldAroundPlayer(false, true, lodBudget, residencyBudget, meshBudget);
-      await this.renderProbeFrame();
-      finalSnapshot = this.getDebugSnapshot();
-      totalGenerated += this.lastLodSummary.generated;
-      addLodLevelCounts(totalGeneratedByLevel, this.lastLodSummary.generatedByLevel);
-      totalMemoryCacheHits += this.lastLodSummary.cacheHits;
-      addLodLevelCounts(totalMemoryCacheHitsByLevel, this.lastLodSummary.cacheHitsByLevel);
-      totalEmptyCacheHits += this.lastLodSummary.emptyCacheHits;
-      addLodLevelCounts(totalEmptyCacheHitsByLevel, this.lastLodSummary.emptyCacheHitsByLevel);
-      totalDiskCacheHits += this.lastLodSummary.lodDiskCacheHits;
-      addLodLevelCounts(totalDiskCacheHitsByLevel, this.lastLodSummary.lodDiskCacheHitsByLevel);
-      totalDiskCacheMisses += this.lastLodSummary.lodDiskCacheMisses;
-      totalWorkerGenerated += this.lastLodSummary.lodWorkerGenerated;
-      addLodLevelCounts(totalWorkerGeneratedByLevel, this.lastLodSummary.lodWorkerGeneratedByLevel);
-      totalScheduledWorkerRequests += this.lastLodSummary.scheduledLodWorkerRequests;
-      totalScheduledDiskRequests += this.lastLodSummary.scheduledLodDiskRequests;
-      totalScheduledDiskStores += this.lastLodSummary.scheduledLodDiskStores;
-      totalCompletedDiskStores += this.lastLodSummary.completedLodDiskStores;
-      totalDownsampleMs += this.lastLodSummary.downsampleMs;
-      totalMeshMs += this.lastLodSummary.meshMs;
-      maxLodChunkMs = Math.max(maxLodChunkMs, this.lastLodSummary.maxChunkMs);
-      maxWorstRecentFrameMs = Math.max(maxWorstRecentFrameMs, finalSnapshot.frameTiming.worstRecentFrameMs);
-      maxRecentHitchCount = Math.max(maxRecentHitchCount, finalSnapshot.frameTiming.recentHitchCount);
-      maxRecentDroppedFrameEstimate = Math.max(
-        maxRecentDroppedFrameEstimate,
-        finalSnapshot.frameTiming.recentDroppedFrameEstimate,
-      );
-      settled = residency.complete
-        && residency.pendingChunks === 0
-        && this.lastMeshBuildSummary.meshCount === 0
-        && this.lastLodSummary.pending === 0
-        && (this.asyncChunkGeneration?.getPendingCount() ?? 0) === 0
-        && (this.asyncChunkMeshing?.getPendingCount() ?? 0) === 0;
-      if (settled && stopWhenSettled && frameCount >= 2) {
-        frameCount += 1;
-        break;
-      }
-    }
-
-    const summary = {
-      frameCount,
-      settled,
-      elapsedMs: performance.now() - startedAt,
-      totalGenerated,
-      totalGeneratedByLevel,
-      totalMemoryCacheHits,
-      totalMemoryCacheHitsByLevel,
-      totalEmptyCacheHits,
-      totalEmptyCacheHitsByLevel,
-      totalDiskCacheHits,
-      totalDiskCacheHitsByLevel,
-      totalDiskCacheMisses,
-      totalWorkerGenerated,
-      totalWorkerGeneratedByLevel,
-      totalScheduledWorkerRequests,
-      totalScheduledDiskRequests,
-      totalScheduledDiskStores,
-      totalCompletedDiskStores,
-      totalDownsampleMs,
-      totalMeshMs,
-      maxLodChunkMs,
-      maxWorstRecentFrameMs,
-      maxRecentHitchCount,
-      maxRecentDroppedFrameEstimate,
-      finalSnapshot,
-    };
-    this.pushHud(true);
-    return summary;
-  }
-
   private loadBootstrapWorld(): void {
     const spawn = this.world.getSpawnPosition();
     this.player = createPlayerState(spawn, { grounded: true });
@@ -2854,36 +1793,9 @@ export class GameController {
     const bootstrapStartedAt = performance.now();
     this.syncWorldAroundPlayer(false);
     this.lastGameplayFrameMs = performance.now() - bootstrapStartedAt;
-    this.recordBootstrapBenchmarkSample(this.lastGameplayFrameMs);
+    this.updateBootstrapReadiness();
     this.status = this.bootstrapPlayableReady ? "Click once to capture cursor" : "Preparing world";
     this.pushHud(true);
-  }
-
-  private async drainBootstrapBenchmark(maxFrames = 600): Promise<void> {
-    if (this.bootstrapPlayableReady) {
-      return;
-    }
-    const normalizedMaxFrames = Math.max(1, Math.floor(maxFrames));
-    for (let frame = 0; frame < normalizedMaxFrames; frame += 1) {
-      const gameplayStartedAt = performance.now();
-      if (
-        this.lastStreamSummary.pendingChunks > 0
-        || this.world.countDirtyResidentChunks() > 0
-        || this.lastLodSummary.pending > 0
-      ) {
-        this.syncWorldAroundPlayer(false);
-      }
-      this.renderCurrentFrame();
-      this.lastGameplayFrameMs = performance.now() - gameplayStartedAt;
-      this.recordBootstrapBenchmarkSample(this.lastGameplayFrameMs);
-      if (this.bootstrapPlayableReady) {
-        return;
-      }
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, 0);
-      });
-    }
-    throw new Error("Bootstrap benchmark did not complete within the allotted deterministic drain frames");
   }
 
   private attachInteractions(): void {
@@ -2905,18 +1817,94 @@ export class GameController {
     if (!target || !prompt) {
       const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
       const scoutResult = describeRpgEncounterScoutResult(encounter);
-      this.lastInteractionLabel = `${scoutResult.label}: ${scoutResult.pressureLabel}`;
-      this.status = scoutResult.detail;
+      const nearestPassiveMob = this.samplePassiveMobSightings()[0] ?? null;
+      this.explorationEventLog.record({
+        kind: "encounter",
+        subjectType: "mob",
+        subjectId: nearestPassiveMob ? nearestPassiveMob.id : encounter.factionHints[0]?.factionId ?? encounter.moodId,
+        role: nearestPassiveMob ? "passive-sighting" : encounter.moodId,
+        name: nearestPassiveMob?.name ?? scoutResult.label,
+        flavorText: nearestPassiveMob
+          ? `${nearestPassiveMob.label} is moving through the nearby terrain.`
+          : scoutResult.detail,
+        worldPosition: nearestPassiveMob
+          ? [nearestPassiveMob.position[0], this.player.feetPosition[1], nearestPassiveMob.position[2]]
+          : [...this.player.feetPosition],
+        repeatable: true,
+        payload: {
+          factionId: nearestPassiveMob?.factionId ?? encounter.factionHints[0]?.factionId ?? null,
+          speciesId: nearestPassiveMob?.speciesId ?? null,
+          speciesName: nearestPassiveMob?.speciesName ?? null,
+          distanceMeters: nearestPassiveMob ? Number(worldUnitsToMeters(nearestPassiveMob.distanceWorldUnits).toFixed(1)) : null,
+          fieldNote: nearestPassiveMob
+            ? `${nearestPassiveMob.label} sighted ${formatPassiveMobDistance(worldUnitsToMeters(nearestPassiveMob.distanceWorldUnits))} away.`
+            : scoutResult.detail,
+          pressure: Number(encounter.pressure.toFixed(3)),
+          moodId: nearestPassiveMob?.moodId ?? encounter.moodId,
+          regionId: nearestPassiveMob?.regionId ?? encounter.regionId,
+          routeId: nearestPassiveMob?.routeId ?? encounter.routeId,
+          caveSystemId: nearestPassiveMob?.caveSystemId ?? encounter.caveSystemId,
+        },
+      });
+      this.lastInteractionLabel = nearestPassiveMob
+        ? `Sighted ${nearestPassiveMob.speciesName}`
+        : `${scoutResult.label}: ${scoutResult.pressureLabel}`;
+      this.status = nearestPassiveMob
+        ? `${nearestPassiveMob.label} ${formatPassiveMobDistance(worldUnitsToMeters(nearestPassiveMob.distanceWorldUnits))} away.`
+        : scoutResult.detail;
       this.pushHud(true);
       return;
     }
 
+    const eventResult = this.explorationEventLog.record(prompt.eventInput);
+    if (eventResult.accepted) {
+      this.skillJournal.observeSkillAwards(eventResult.event.skillAwards);
+    }
+    if (target.subjectType === "mob" && target.role === "passive-sighting") {
+      this.lastInteractionLabel = prompt.label;
+      this.status = prompt.eventInput.flavorText ?? prompt.label;
+      this.pushHud(true);
+      return;
+    }
+    if (target.role === "sky-watch" && prompt.verb === "listen") {
+      const nextClock = this.advanceWorldClockToNextWatchPhase();
+      this.lastInteractionLabel = `Watched sky until ${nextClock.phaseLabel}`;
+      this.status = `${this.lastInteractionLabel}: ${prompt.eventInput.flavorText ?? prompt.label}`;
+      this.pushHud(true);
+      return;
+    }
+    if (target.role === "cave-mouth" && prompt.verb === "use") {
+      this.enterCaveMouth(target, currentWorld, prompt.eventInput.payload);
+      this.pushHud(true);
+      return;
+    }
+    if (target.role === "cave-passage" && prompt.verb === "use") {
+      this.followCavePassage(target, prompt.eventInput.payload);
+      this.pushHud(true);
+      return;
+    }
+    if (target.role === "cave-exit" && prompt.verb === "use") {
+      this.exitCaveMouth();
+      this.pushHud(true);
+      return;
+    }
     const routeId = readPayloadRouteId(prompt.eventInput.payload) ?? routeIdForLandmark(target.id);
-    const result = this.routeJournal.observeProgress({
+    const result = this.observeTravelGoalProgress({
       routeId,
       kind: prompt.verb,
       targetId: target.id,
     });
+    const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+    this.observeActiveQuestStep(
+      currentWorld,
+      discovery,
+      encounter,
+      encounter.factionHints[0]?.factionId ?? null,
+      target.id,
+      routeId,
+      prompt.eventInput.payload,
+      ["listen", "inspect", "interpret", "report"],
+    );
     const completedTitle = result.completedGoalIds
       .map((goalId) => TRAVEL_GOALS.find((goal) => goal.id === goalId)?.title ?? goalId)
       .join(", ");
@@ -2938,6 +1926,14 @@ export class GameController {
     const target = this.resolveCurrentInteraction(currentWorld, discovery).target;
     const activeGoal = selectActiveTravelGoal(routeSnapshot);
     const nextStep = activeGoal ? findNextTravelGoalStep(activeGoal) : null;
+    const navigation = target
+      ? describeNavigationBearing({
+          viewerPosition: this.camera.position,
+          viewerYawRadians: this.camera.yaw,
+          targetPosition: target.worldPosition,
+          targetName: target.name,
+        })
+      : null;
     const regionName = formatDiscoveryName("biome", currentWorld.probe.biomeId, "Unknown region");
     const placeName = target?.name
       ?? (discovery.currentLandmarkId
@@ -2961,6 +1957,14 @@ export class GameController {
       interactionPromptDescription: prompt?.description
         ?? (target ? `${target.distanceMeters.toFixed(1)} m away` : describeRpgEncounterScoutResult(encounter).detail),
       interactionPromptVerb: prompt?.verb ?? "inspect",
+      navigationTargetId: target?.id ?? null,
+      navigationTargetName: navigation?.targetName ?? null,
+      navigationSource: navigation ? "interaction-target" : null,
+      navigationDistanceMeters: navigation?.distanceMeters ?? null,
+      navigationBearingLabel: navigation?.bearingLabel ?? null,
+      navigationDistanceLabel: navigation?.distanceLabel ?? null,
+      navigationCompassLabel: navigation?.compassLabel ?? null,
+      navigationTurnLabel: navigation?.turnLabel ?? null,
     };
   }
 
@@ -2971,9 +1975,20 @@ export class GameController {
     return resolveExplorationInteractionTarget({
       viewerPosition: this.camera.position,
       viewerForward: buildFirstPersonCameraMatrices(this.camera, 1).forward,
-      maxDistanceMeters: 8,
+      maxDistanceMeters: metersToWorldUnits(8),
       candidates: this.buildExplorationInteractionCandidates(currentWorld, discovery),
     });
+  }
+
+  private samplePassiveMobSightings(): readonly PassiveMobSighting[] {
+    return samplePassiveMobSightingsWorldUnits(
+      this.player.feetPosition[0],
+      this.player.feetPosition[2],
+      {
+        radiusWorldUnits: PASSIVE_MOB_SIGHTING_RADIUS_WORLD_UNITS,
+        cap: PASSIVE_MOB_SIGHTING_CAP,
+      },
+    );
   }
 
   private buildExplorationInteractionCandidates(
@@ -2987,6 +2002,39 @@ export class GameController {
     const uniqueLandmarkIds = [...new Set(landmarkIds)];
     const candidates: ExplorationInteractionCandidate[] = [];
     const forward = buildFirstPersonCameraMatrices(this.camera, 1).forward;
+    const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+    const skillGates = describeInteractionSkillGates(readInteractionSkillGateSource(this.skillJournal.getSnapshot()));
+    const routeSnapshot = this.routeJournal.getSnapshot();
+    const primaryFaction = encounter.factionHints[0]?.factionId ?? null;
+    const passiveMobSightings = this.samplePassiveMobSightings();
+    const cavePassageCandidate = this.buildCavePassageInteractionCandidate(forward);
+    const caveExitCandidate = this.buildCaveExitInteractionCandidate(forward);
+    if (
+      caveExitCandidate
+      && (!cavePassageCandidate || (this.activeCaveAnchorKind === "entrance" && this.activeCavePassageTraversalCount > 0))
+    ) {
+      candidates.push(caveExitCandidate);
+    } else if (cavePassageCandidate) {
+      candidates.push(cavePassageCandidate);
+    }
+    const caveMouthCandidate = buildCaveMouthInteractionCandidate(currentWorld, encounter, skillGates);
+    if (caveMouthCandidate) {
+      candidates.push(caveMouthCandidate);
+    }
+    const activeQuest = this.selectActiveQuestHook(currentWorld, discovery, routeSnapshot, encounter, primaryFaction);
+    const questTopicCandidate = buildRpgQuestTopicInteractionCandidate({
+      quest: activeQuest,
+      regionId: encounter.regionId,
+      routeId: encounter.routeId,
+      worldPosition: [
+        this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.3),
+        currentWorld.probe.surfaceY,
+        this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.3),
+      ],
+    });
+    if (questTopicCandidate) {
+      candidates.push(questTopicCandidate);
+    }
     for (const landmarkId of uniqueLandmarkIds) {
       const presentation = describeDiscovery("landmark", landmarkId);
       const routeId = routeIdForLandmark(landmarkId);
@@ -3000,14 +2048,408 @@ export class GameController {
           currentWorld.probe.surfaceY,
           this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.4),
         ],
-        interactionRadiusMeters: 5,
+        interactionRadiusMeters: metersToWorldUnits(5),
         priority: ROUTE_LANDMARK_IDS.has(landmarkId) ? 20 : 4,
-        prompts: buildLandmarkInteractionPrompts(landmarkId, presentation.role),
+        prompts: buildLandmarkInteractionPrompts(landmarkId, presentation.role, skillGates),
         flavorText: presentation.flavorText,
         payload: routeId ? { routeId } : undefined,
       });
     }
+    const encounterSite = sampleRpgEncounterSiteWorldUnits(
+      this.player.feetPosition[0],
+      this.player.feetPosition[2],
+      encounter,
+    );
+    candidates.push({
+      id: encounterSite.id,
+      subjectType: "mob",
+      name: encounterSite.name,
+      role: encounterSite.role,
+      worldPosition: [
+        encounterSite.x,
+        currentWorld.probe.surfaceY,
+        encounterSite.z,
+      ],
+      interactionRadiusMeters: encounterSite.interactionRadiusWorldUnits,
+      priority: encounterSite.priority,
+      prompts: [{
+        verb: "inspect",
+        label: `Scout ${encounterSite.name}`,
+        description: encounterSite.fieldNote,
+      }],
+      flavorText: encounterSite.fieldNote,
+      skillAwards: [{
+        skillId: "naturalist",
+        xp: 16,
+        reason: "First local encounter site",
+        awardKey: `encounter-site:${encounterSite.id}`,
+        onceOnly: true,
+      }],
+      payload: {
+        siteKind: encounterSite.kind,
+        factionId: encounterSite.factionId,
+        clueLabel: encounterSite.clueLabel,
+        fieldNote: encounterSite.fieldNote,
+        pressure: Number(encounter.pressure.toFixed(3)),
+        moodId: encounter.moodId,
+        regionId: encounter.regionId,
+        routeId: encounter.routeId,
+        caveSystemId: encounter.caveSystemId,
+      },
+    });
+    const worldSystems = sampleWorldSystems(
+      this.getWorldElapsedSeconds(),
+      currentWorld.probe,
+      currentWorld.ambientProfile,
+      encounter,
+      this.lastTravelContext,
+    );
+    const skyCellX = Math.floor(this.player.feetPosition[0] / metersToWorldUnits(128));
+    const skyCellZ = Math.floor(this.player.feetPosition[2] / metersToWorldUnits(128));
+    const skyWatchId = `skywatch:${currentWorld.ambientProfile.id}:${worldSystems.weather.id}:${worldSystems.clock.phaseId}:${skyCellX}:${skyCellZ}`;
+    candidates.push({
+      id: skyWatchId,
+      subjectType: "zone",
+      name: `${worldSystems.weather.label} Sky`,
+      role: "sky-watch",
+      worldPosition: [
+        this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.0),
+        currentWorld.probe.surfaceY,
+        this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.0),
+      ],
+      interactionRadiusMeters: metersToWorldUnits(8),
+      priority: 1.75,
+      prompts: [{
+        verb: "listen",
+        label: `Watch the ${worldSystems.weather.label.toLowerCase()} sky`,
+        description: `${worldSystems.clock.phaseLabel}: ${worldSystems.area.timeActivityLabel}`,
+      }],
+      flavorText: `${worldSystems.clock.phaseLabel} ${worldSystems.weather.label.toLowerCase()}: ${worldSystems.area.timeActivityLabel}`,
+      skillAwards: [{
+        skillId: worldSystems.weather.id === "blackwater-rain" || worldSystems.weather.id === "sporeglow" ? "naturalist" : "lore",
+        xp: 8,
+        reason: "Watched local sky and weather",
+        awardKey: `skywatch:${currentWorld.ambientProfile.id}:${worldSystems.weather.id}:${worldSystems.clock.phaseId}`,
+        onceOnly: true,
+      }],
+      payload: {
+        ambientProfileId: currentWorld.ambientProfile.id,
+        weather: worldSystems.weather.id,
+        weatherIntensity: Number(worldSystems.weather.intensity.toFixed(3)),
+        phaseId: worldSystems.clock.phaseId,
+        clockLabel: worldSystems.clock.clockLabel,
+        timeActivity: worldSystems.area.timeActivityLabel,
+        hazard: worldSystems.area.hazardLabel,
+        regionId: encounter.regionId,
+        routeId: encounter.routeId,
+        travelContext: this.lastTravelContext,
+      },
+    });
+    const soundscapeCellX = Math.floor(this.player.feetPosition[0] / metersToWorldUnits(64));
+    const soundscapeCellZ = Math.floor(this.player.feetPosition[2] / metersToWorldUnits(64));
+    const soundscapeCandidateId = `soundscape:${worldSystems.area.soundscapeId}:${soundscapeCellX}:${soundscapeCellZ}`;
+    candidates.push({
+      id: soundscapeCandidateId,
+      subjectType: "zone",
+      name: worldSystems.area.soundscapeLabel,
+      role: "ambient-soundscape",
+      worldPosition: [
+        this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.1),
+        currentWorld.probe.surfaceY,
+        this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.1),
+      ],
+      interactionRadiusMeters: metersToWorldUnits(8),
+      priority: 1.5,
+      prompts: [{
+        verb: "listen",
+        label: worldSystems.area.soundscapeListenLabel,
+        description: worldSystems.area.soundscapeFieldNote,
+      }],
+      flavorText: worldSystems.area.soundscapeFieldNote,
+      skillAwards: [{
+        skillId: "lore",
+        xp: 6,
+        reason: "Listened to local soundscape",
+        awardKey: `soundscape:${worldSystems.area.soundscapeId}`,
+        onceOnly: true,
+      }],
+      payload: {
+        soundscapeId: worldSystems.area.soundscapeId,
+        soundscapeLabel: worldSystems.area.soundscapeLabel,
+        fieldNote: worldSystems.area.soundscapeFieldNote,
+        weather: worldSystems.weather.id,
+        weatherIntensity: Number(worldSystems.weather.intensity.toFixed(3)),
+        timeOfDay: worldSystems.clock.phaseId,
+        timeActivity: worldSystems.area.timeActivityLabel,
+        regionId: encounter.regionId,
+        routeId: encounter.routeId,
+        caveSystemId: encounter.caveSystemId,
+        moodId: encounter.moodId,
+        pressure: Number(encounter.pressure.toFixed(3)),
+        travelContext: this.lastTravelContext,
+      },
+    });
+    const anchoredForage = Boolean(worldSystems.area.forageSourceLandmarkId);
+    const forageSite = sampleForageSiteWorldUnits(
+      anchoredForage ? this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.5) : this.player.feetPosition[0],
+      anchoredForage ? this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.5) : this.player.feetPosition[2],
+      worldSystems.area,
+    );
+    const lootState = getLootJournalCandidateState(this.explorationEventLog.getSnapshot(), {
+      subjectId: forageSite.id,
+      lootId: worldSystems.area.lootId,
+      categoryId: forageSite.role,
+    });
+    const exactLootRevisit = lootState.match === "subject" && lootState.collected;
+    const forageProbe = this.generator.sampleBiomeProbe(forageSite.x, forageSite.z);
+    candidates.push(...buildPassiveMobInteractionCandidates(passiveMobSightings, {
+      surfaceY: currentWorld.probe.surfaceY,
+      maxCount: 3,
+      feedingTrail: {
+        forageSiteId: forageSite.id,
+        forageSiteName: forageSite.name,
+        forageSiteRole: forageSite.role,
+        forageSitePosition: [
+          forageSite.x,
+          forageProbe.surfaceY,
+          forageSite.z,
+        ],
+        lootId: worldSystems.area.lootId,
+        clueLabel: forageSite.clueLabel,
+        fieldNote: forageSite.fieldNote,
+      },
+    }));
+    candidates.push({
+      id: forageSite.id,
+      subjectType: "object",
+      name: forageSite.name,
+      role: "loot-cache",
+      worldPosition: [
+        forageSite.x,
+        forageProbe.surfaceY,
+        forageSite.z,
+      ],
+      interactionRadiusMeters: forageSite.interactionRadiusWorldUnits,
+      priority: forageSite.anchoredToVisibleLandmark ? 7 : 1,
+      prompts: [{
+        verb: "use",
+        label: exactLootRevisit ? `Revisit ${forageSite.name}` : worldSystems.area.lootInteractionLabel,
+        description: describeLootCandidatePrompt(forageSite.fieldNote, lootState, skillGates, forageSite.sourceLandmarkId),
+      }],
+      flavorText: forageSite.fieldNote,
+      occurrenceId: exactLootRevisit ? `revisit-${lootState.eventCount + 1}` : null,
+      repeatable: exactLootRevisit,
+      skillAwards: [{
+        skillId: worldSystems.area.lootSkillId,
+        xp: 18,
+        reason: "First local find",
+        awardKey: `loot:${forageSite.id}`,
+        onceOnly: true,
+      }],
+      payload: {
+        lootId: worldSystems.area.lootId,
+        categoryId: forageSite.role,
+        forageSiteRole: forageSite.role,
+        clueLabel: forageSite.clueLabel,
+        fieldNote: forageSite.fieldNote,
+        collectedBefore: exactLootRevisit,
+        lootJournalMatch: lootState.match,
+        previousFindNote: lootState.lastNote,
+        skillGateHint: skillGates.forageHint,
+        sourceLandmarkId: forageSite.sourceLandmarkId,
+        anchoredToVisibleLandmark: forageSite.anchoredToVisibleLandmark,
+        forageSourceLandmarkId: worldSystems.area.forageSourceLandmarkId,
+        weather: worldSystems.weather.id,
+        timeOfDay: worldSystems.clock.phaseId,
+        timeActivity: worldSystems.area.timeActivityLabel,
+        hazard: worldSystems.area.hazardLabel,
+      },
+    });
     return candidates;
+  }
+
+  private buildCaveExitInteractionCandidate(forward: readonly [number, number, number]): ExplorationInteractionCandidate | null {
+    if (!this.caveReturnFeetPosition || this.lastTravelContext !== "underground") {
+      return null;
+    }
+    return {
+      id: "cave-exit:return",
+      subjectType: "zone",
+      name: "Cave Mouth Return",
+      role: "cave-exit",
+      worldPosition: [
+        this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.4),
+        this.player.feetPosition[1] + PLAYER_EYE_HEIGHT * 0.5,
+        this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.4),
+      ],
+      interactionRadiusMeters: metersToWorldUnits(5),
+      priority: 18,
+      prompts: [{
+        verb: "use",
+        label: "Exit to cave mouth",
+        description: "Climb back toward the last surface entrance.",
+      }],
+      flavorText: "A memorized return path leads back to the surface.",
+      payload: {
+        caveTraversal: "exit",
+      },
+    };
+  }
+
+  private buildCavePassageInteractionCandidate(forward: readonly [number, number, number]): ExplorationInteractionCandidate | null {
+    if (!this.activeCaveSystemId || !this.activeCaveAnchorId || this.lastTravelContext !== "underground") {
+      return null;
+    }
+    const connection = selectCavePassageConnection(this.activeCaveSystemId, this.activeCaveAnchorId);
+    if (!connection) {
+      return null;
+    }
+    const destinationName = formatCaveAnchorName(connection.destinationAnchor.id);
+    const passageId = `cave-passage:${connection.caveSystemId}:${connection.sourceAnchor.id}:${connection.destinationAnchor.id}`;
+    return {
+      id: passageId,
+      subjectType: "zone",
+      name: `${destinationName} Passage`,
+      role: "cave-passage",
+      worldPosition: [
+        this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.6),
+        this.player.feetPosition[1] + PLAYER_EYE_HEIGHT * 0.5,
+        this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.6),
+      ],
+      interactionRadiusMeters: metersToWorldUnits(5),
+      priority: 19,
+      prompts: [{
+        verb: "use",
+        label: `Follow passage to ${destinationName}`,
+        description: `${formatCaveSystemName(connection.caveSystemId)} continues toward ${destinationName}.`,
+      }],
+      flavorText: `${connection.tunnel.materialProfileId} links ${formatCaveAnchorName(connection.sourceAnchor.id)} to ${destinationName}.`,
+      skillAwards: [{
+        skillId: "spelunking",
+        xp: 22,
+        reason: "First cave passage traversal",
+        awardKey: passageId,
+        onceOnly: true,
+      }],
+      payload: {
+        caveTraversal: "passage",
+        caveSystemId: connection.caveSystemId,
+        fromCaveAnchorId: connection.sourceAnchor.id,
+        toCaveAnchorId: connection.destinationAnchor.id,
+        toCaveAnchorKind: connection.destinationAnchor.kind,
+        associatedRouteId: connection.destinationAnchor.associatedRouteId,
+        tunnelMaterialProfileId: connection.tunnel.materialProfileId,
+        tunnelWidthM: connection.tunnel.widthM,
+        tunnelVerticalBiasM: connection.tunnel.verticalBiasM,
+      },
+    };
+  }
+
+  private enterCaveMouth(
+    target: ResolvedExplorationInteractionTarget,
+    currentWorld: CurrentWorldProbeContext,
+    payload: unknown,
+  ): void {
+    const entryFeet = findSafeCaveEntryFeetPosition({
+      world: this.world,
+      anchorPosition: target.worldPosition,
+      surfaceY: currentWorld.probe.surfaceY,
+    });
+    if (!entryFeet) {
+      this.lastInteractionLabel = `${target.name} is blocked`;
+      this.status = "No safe passage is open here yet.";
+      return;
+    }
+    this.caveReturnFeetPosition = [...this.player.feetPosition] as Vec3;
+    this.activeCaveSystemId = readAtlasCaveSystemIdFromPayload(payload);
+    this.activeCaveAnchorId = readPayloadString(payload, "caveAnchorId");
+    this.activeCaveAnchorKind = readAtlasCaveAnchorKind(readPayloadString(payload, "caveAnchorKind"));
+    this.activeCavePassageTraversalCount = 0;
+    teleportPlayerToFeetPosition(this.player, entryFeet);
+    this.player.grounded = true;
+    this.lastTravelContext = "underground";
+    this.lastTravelContextFeetPosition = null;
+    this.lastTravelContextSampleAt = 0;
+    this.syncCameraToPlayer();
+    this.syncWorldAroundPlayer(true);
+    this.lastInteractionLabel = `Entered ${target.name}`;
+    this.status = `${target.name}: underground route`;
+  }
+
+  private followCavePassage(target: ResolvedExplorationInteractionTarget, payload: unknown): void {
+    const caveSystemId = readAtlasCaveSystemIdFromPayload(payload) ?? this.activeCaveSystemId;
+    const fromAnchorId = readPayloadString(payload, "fromCaveAnchorId") ?? this.activeCaveAnchorId;
+    const requestedDestinationAnchorId = readPayloadString(payload, "toCaveAnchorId");
+    if (!caveSystemId || !fromAnchorId) {
+      this.lastInteractionLabel = "No cave passage remembered";
+      this.status = this.lastInteractionLabel;
+      return;
+    }
+    const connection = selectCavePassageConnection(caveSystemId, fromAnchorId, requestedDestinationAnchorId);
+    if (!connection) {
+      this.lastInteractionLabel = `${target.name} is collapsed`;
+      this.status = "No connected passage is readable from here.";
+      return;
+    }
+
+    const destinationPoint = atlasMetersToWorldUnits(connection.destinationAnchor.point);
+    const destinationProbe = this.generator.sampleBiomeProbe(destinationPoint.x, destinationPoint.z);
+    const destinationAnchorPosition: Vec3 = [
+      destinationPoint.x,
+      destinationProbe.surfaceY,
+      destinationPoint.z,
+    ];
+    this.syncWorldAroundAnchor({
+      chunkX: Math.floor(destinationPoint.x / this.world.chunkSize),
+      chunkZ: Math.floor(destinationPoint.z / this.world.chunkSize),
+    }, true);
+    const entryFeet = findSafeCaveEntryFeetPosition({
+      world: this.world,
+      anchorPosition: destinationAnchorPosition,
+      surfaceY: destinationProbe.surfaceY,
+    });
+    if (!entryFeet) {
+      this.lastInteractionLabel = `${formatCaveAnchorName(connection.destinationAnchor.id)} is blocked`;
+      this.status = "The passage has no safe standing room yet.";
+      return;
+    }
+
+    teleportPlayerToFeetPosition(this.player, entryFeet);
+    this.player.grounded = true;
+    this.activeCaveSystemId = connection.caveSystemId;
+    this.activeCaveAnchorId = connection.destinationAnchor.id;
+    this.activeCaveAnchorKind = connection.destinationAnchor.kind;
+    this.activeCavePassageTraversalCount += 1;
+    this.lastTravelContext = "underground";
+    this.lastTravelContextFeetPosition = null;
+    this.lastTravelContextSampleAt = 0;
+    this.syncCameraToPlayer();
+    this.syncWorldAroundPlayer(true);
+    this.lastInteractionLabel = `Followed passage to ${formatCaveAnchorName(connection.destinationAnchor.id)}`;
+    this.status = `${formatCaveSystemName(connection.caveSystemId)}: ${formatCaveAnchorName(connection.destinationAnchor.id)}`;
+  }
+
+  private exitCaveMouth(): void {
+    const returnFeet = this.caveReturnFeetPosition;
+    if (!returnFeet) {
+      this.lastInteractionLabel = "No return path remembered";
+      this.status = this.lastInteractionLabel;
+      return;
+    }
+    teleportPlayerToFeetPosition(this.player, returnFeet);
+    this.player.grounded = true;
+    this.caveReturnFeetPosition = null;
+    this.activeCaveSystemId = null;
+    this.activeCaveAnchorId = null;
+    this.activeCaveAnchorKind = null;
+    this.activeCavePassageTraversalCount = 0;
+    this.lastTravelContext = "surface";
+    this.lastTravelContextFeetPosition = null;
+    this.lastTravelContextSampleAt = 0;
+    this.syncCameraToPlayer();
+    this.syncWorldAroundPlayer(true);
+    this.lastInteractionLabel = "Exited to cave mouth";
+    this.status = this.lastInteractionLabel;
   }
 
   private readonly handleCanvasClick = () => {
@@ -3211,15 +2653,20 @@ export class GameController {
     let lodMs = 0;
     const movingLodBudget: LodUpdateBudget = {
       maxGenerateLodChunks: MOVING_MAX_LOD_CHUNKS_PER_FRAME,
+      maxAdoptCompletedLodChunks: MOVING_MAX_LOD_ADOPTIONS_PER_FRAME,
       maxPlanMs: MOVING_MAX_LOD_PLAN_MS_PER_FRAME,
       maxWorkMs: MOVING_MAX_LOD_WORK_MS_PER_FRAME,
     };
-    const shouldRunMovingLodUpdate = movementActive
-      && this.interactiveFrameNumber % MOVING_LOD_UPDATE_INTERVAL_FRAMES === 0
-      && this.lastStreamSummary.pendingChunks === 0
-      && dirtyResidentChunks === 0;
-    const allowLodUpdate = !movementActive || shouldRunMovingLodUpdate;
-    const lodBudget = shouldRunMovingLodUpdate ? movingLodBudget : undefined;
+    const runMovingLodUpdate = shouldRunMovingLodUpdate({
+      movementActive,
+      frameNumber: this.interactiveFrameNumber,
+      intervalFrames: MOVING_LOD_UPDATE_INTERVAL_FRAMES,
+      pendingChunks: this.lastStreamSummary.pendingChunks,
+      dirtyResidentChunks,
+      pendingLodChunks: this.lastLodSummary.pending,
+    });
+    const allowLodUpdate = !movementActive || runMovingLodUpdate;
+    const lodBudget = runMovingLodUpdate ? movingLodBudget : undefined;
     if (
       shouldPumpWorldWork(
         movementActive,
@@ -3260,7 +2707,7 @@ export class GameController {
       renderUploadMs: render.uploadMs,
       renderEncodeMs: render.encodeMs,
     });
-    this.recordBootstrapBenchmarkSample(gameplayFrameMs);
+    this.updateBootstrapReadiness();
     return {
       movementMs,
       render,
@@ -3317,6 +2764,7 @@ export class GameController {
       if (allowLodUpdate) {
         this.recordLodSummary(this.world.updateLodResidencyAround(this.player.feetPosition, {
           maxGenerateLodChunks: lodBudget?.maxGenerateLodChunks ?? DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
+          maxAdoptCompletedLodChunks: lodBudget?.maxAdoptCompletedLodChunks ?? DEFAULT_MAX_LOD_ADOPTIONS_PER_FRAME,
           maxPlanMs: lodBudget?.maxPlanMs ?? DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME,
           maxWorkMs: lodBudget?.maxWorkMs ?? DEFAULT_MAX_LOD_WORK_MS_PER_FRAME,
         }));
@@ -3368,6 +2816,9 @@ export class GameController {
         maxGenerateLodChunks: settle
           ? Number.POSITIVE_INFINITY
           : lodBudget?.maxGenerateLodChunks ?? DEFAULT_MAX_LOD_CHUNKS_PER_FRAME,
+        maxAdoptCompletedLodChunks: settle
+          ? Number.POSITIVE_INFINITY
+          : lodBudget?.maxAdoptCompletedLodChunks ?? DEFAULT_MAX_LOD_ADOPTIONS_PER_FRAME,
         maxPlanMs: settle
           ? Number.POSITIVE_INFINITY
           : lodBudget?.maxPlanMs ?? DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME,
@@ -3589,248 +3040,13 @@ export class GameController {
     };
   }
 
-  private async runRouteExperienceFrame(
-    target: Pick<RouteBenchmarkFrameTarget, "frame" | "simTimeSeconds" | "distanceMeters" | "feetPosition" | "yaw" | "pitch">
-      & { phase: "move" | "settle" },
-    seamProbeStrideFrames: number,
-    captureStrideFrames: number,
-    captureWidth: number,
-    captureHeight: number,
-    referenceDiffStrideFrames: number,
-    referenceDiffLimit: number,
-    sampleIndex: number,
-    capturedFrameCount: number,
-  ): Promise<{
-    sample: RouteExperienceFrameSample;
-    capturedFrame: CapturedBenchmarkFrame | null;
-  }> {
-    const gameplayStartedAt = performance.now();
-    const movementStartedAt = performance.now();
-    teleportPlayerToFeetPosition(this.player, target.feetPosition);
-    this.player.grounded = true;
-    this.camera.yaw = target.yaw;
-    this.camera.pitch = target.pitch;
-    this.syncCameraToPlayer();
-    const movementMs = performance.now() - movementStartedAt;
-    this.syncWorldAroundPlayer(false);
-    const render = this.renderCurrentFrame();
-    const gameplayFrameMs = performance.now() - gameplayStartedAt;
-    return this.captureRouteExperienceFrameSample(
-      target,
-      movementMs,
-      gameplayFrameMs,
-      seamProbeStrideFrames,
-      captureStrideFrames,
-      captureWidth,
-      captureHeight,
-      referenceDiffStrideFrames,
-      referenceDiffLimit,
-      sampleIndex,
-      capturedFrameCount,
-      render,
-    );
-  }
-
-  private async captureRouteExperienceFrameSample(
-    target: {
-      frame: number;
-      phase: "move" | "settle";
-      simTimeSeconds: number;
-      distanceMeters: number;
-    },
-    movementMs: number,
-    gameplayFrameMs: number,
-    seamProbeStrideFrames: number,
-    captureStrideFrames: number,
-    captureWidth: number,
-    captureHeight: number,
-    referenceDiffStrideFrames: number,
-    referenceDiffLimit: number,
-    sampleIndex: number,
-    capturedFrameCount: number,
-    render: {
-      frameStats: RenderStats;
-      frameCpuMs: number;
-    } | null = null,
-  ): Promise<{
-    sample: RouteExperienceFrameSample;
-    capturedFrame: CapturedBenchmarkFrame | null;
-  }> {
-    const residency = this.lastStreamSummary;
-    const dirtyResidentMeshes = summarizeDirtyResidentMeshes(this.world);
-    const frameProbe = render ?? {
-      frameStats: zeroRenderStats(),
-      frameCpuMs: 0,
-    };
-    const diagnosticsStartedAt = performance.now();
-    const detailCoverage = this.probeRenderReadyCoverage();
-    const visibleGround = this.probeVisibleGroundCoverage();
-    const shouldProbeSeams = target.frame % seamProbeStrideFrames === 0;
-    const surfaceContinuity = shouldProbeSeams
-      ? this.probeSurfaceContinuity()
-      : {
-          edgeCount: 0,
-          missingSmoothEdgeCount: 0,
-          abruptEdgeCount: 0,
-          maxExpectedStepMeters: 0,
-        };
-    let screenVoid: BottomCenterVoidProbe | null = null;
-    let capturedFrame: CapturedBenchmarkFrame | null = null;
-    let captureDiagnosticsMs = 0;
-    const shouldCaptureVoid = target.frame % captureStrideFrames === 0 || visibleGround.uncoveredCount > 0;
-    const seamCoverage = shouldProbeSeams
-      ? summarizeRouteSeamCoverage(this.probeLodCoverage(48, 1.6))
-      : {
-          seamGapCount: 0,
-          uncoveredGapCount: 0,
-          handoffHoleCount: 0,
-          lodOverlapCount: 0,
-          residentOverlapCount: 0,
-          bandOverlapCount: 0,
-          maxSeamGapMeters: 0,
-          maxLodOverlapMeters: 0,
-        };
-    const shouldCaptureReference = referenceDiffStrideFrames > 0
-      && capturedFrameCount < referenceDiffLimit
-      && target.frame % referenceDiffStrideFrames === 0;
-    if (shouldCaptureVoid || shouldCaptureReference) {
-      const captureStartedAt = performance.now();
-      const image = await this.captureRouteFrameImage(captureWidth, captureHeight);
-      screenVoid = image ? analyzeBottomCenterVoid(image) : null;
-      if (image && shouldCaptureReference) {
-        capturedFrame = {
-          sampleIndex,
-          target: {
-            frame: target.frame,
-            phase: target.phase,
-            simTimeSeconds: target.simTimeSeconds,
-            distanceMeters: target.distanceMeters,
-            feetPosition: [...this.player.feetPosition],
-            yaw: this.camera.yaw,
-            pitch: this.camera.pitch,
-          },
-          image,
-        };
-      }
-      captureDiagnosticsMs = performance.now() - captureStartedAt;
-    }
-    const diagnosticsMs = performance.now() - diagnosticsStartedAt;
-    const renderOtherMs = Math.max(
-      0,
-      frameProbe.frameCpuMs
-        - frameProbe.frameStats.syncResourcesMs
-        - frameProbe.frameStats.uploadMs
-        - frameProbe.frameStats.encodeMs,
-    );
-    const accountedFrameMs = movementMs
-      + residency.elapsedMs
-      + this.lastMeshBuildSummary.elapsedMs
-      + this.lastFrameLodMs
-      + frameProbe.frameCpuMs;
-    const unmeasuredFrameMs = Math.max(0, gameplayFrameMs - accountedFrameMs);
-    const suspiciousHole = visibleGround.uncoveredCount > 0
-      || (screenVoid?.suspicious ?? false);
-
-    return {
-      sample: {
-        frame: target.frame,
-        phase: target.phase,
-        simTimeSeconds: target.simTimeSeconds,
-        routeDistanceMeters: target.distanceMeters,
-        feetPosition: [...this.player.feetPosition],
-        yaw: this.camera.yaw,
-        pitch: this.camera.pitch,
-        changed: residency.changed,
-        complete: residency.complete,
-        pendingChunks: residency.pendingChunks,
-        pendingMeshJobs: this.asyncChunkMeshing?.getPendingCount() ?? 0,
-        dirtyResidentChunks: dirtyResidentMeshes.dirtyResidentChunks,
-        dirtyMeshlessResidentChunks: dirtyResidentMeshes.dirtyMeshlessResidentChunks,
-        dirtyRetainedMeshResidentChunks: dirtyResidentMeshes.dirtyRetainedMeshResidentChunks,
-        generatedChunks: residency.generatedChunks,
-        evictedChunks: residency.evictedChunks,
-        movementMs,
-        streamMs: residency.elapsedMs,
-        meshMs: this.lastMeshBuildSummary.elapsedMs,
-        meshCount: this.lastMeshBuildSummary.meshCount,
-        lodMs: this.lastFrameLodMs,
-        lodGeneratedChunks: this.lastLodSummary.generated,
-        lodPendingChunks: this.lastLodSummary.pending,
-        gameplayFrameMs,
-        accountedFrameMs,
-        unmeasuredFrameMs,
-        diagnosticsMs,
-        captureDiagnosticsMs,
-        renderCpuMs: frameProbe.frameCpuMs,
-        renderSyncMs: frameProbe.frameStats.syncResourcesMs,
-        renderUploadMs: frameProbe.frameStats.uploadMs,
-        renderEncodeMs: frameProbe.frameStats.encodeMs,
-        renderOtherMs,
-        uploadChunks: frameProbe.frameStats.uploadChunks,
-        uploadBytes: frameProbe.frameStats.uploadBytes,
-        drawCalls: frameProbe.frameStats.drawCalls,
-        triangles: frameProbe.frameStats.triangles,
-        residentNearSamples: detailCoverage.residentSampleCount,
-        renderReadyNearSamples: detailCoverage.renderReadySampleCount,
-        residentNotReadyNearSamples: detailCoverage.residentNotReadyCount,
-        visibleGroundSampleCount: visibleGround.sampleCount,
-        visibleGroundUncoveredCount: visibleGround.uncoveredCount,
-        visibleGroundResidentNotReadyCount: visibleGround.residentNotReadyCount,
-        surfaceContinuityEdgeCount: surfaceContinuity.edgeCount,
-        surfaceContinuityGapCount: surfaceContinuity.missingSmoothEdgeCount,
-        abruptSurfaceEdgeCount: surfaceContinuity.abruptEdgeCount,
-        maxSurfaceContinuityStepMeters: surfaceContinuity.maxExpectedStepMeters,
-        farLodCoverageGapCount: seamCoverage.seamGapCount,
-        lodMaxChunkMs: this.lastLodSummary.maxChunkMs,
-        lodMaxChunkLevel: this.lastLodSummary.maxChunkLevel,
-        lodMaxChunkKey: this.lastLodSummary.maxChunkKey,
-        uncoveredFarLodGapCount: seamCoverage.uncoveredGapCount,
-        handoffFarLodHoleCount: seamCoverage.handoffHoleCount,
-        maxFarLodCoverageGapMeters: seamCoverage.maxSeamGapMeters,
-        seamGapCount: seamCoverage.seamGapCount,
-        uncoveredLodGapCount: seamCoverage.uncoveredGapCount,
-        handoffLodHoleCount: seamCoverage.handoffHoleCount,
-        maxSeamGapMeters: seamCoverage.maxSeamGapMeters,
-        lodOverlapCount: seamCoverage.lodOverlapCount,
-        lodResidentOverlapCount: seamCoverage.residentOverlapCount,
-        lodBandOverlapCount: seamCoverage.bandOverlapCount,
-        maxLodOverlapMeters: seamCoverage.maxLodOverlapMeters,
-        screenVoidRatio: screenVoid?.clearRatio ?? null,
-        screenVoidMaxRunRatio: screenVoid?.maxClearRunRatio ?? null,
-        screenVoidSuspicious: screenVoid?.suspicious ?? false,
-        settledReferenceChangedRatio: null,
-        settledReferenceClearToFilledRatio: null,
-        settledReferenceMaxClearToFilledRunRatio: null,
-        settledReferenceSuspiciousHole: false,
-        suspiciousHole,
-      },
-      capturedFrame,
-    };
-  }
-
-  private async captureRouteFrameImage(width: number, height: number): Promise<{
-    width: number;
-    height: number;
-    pixels: Uint8ClampedArray;
-  } | null> {
-    if (!this.renderer) {
-      return null;
-    }
-    const cameraMatrices = buildFirstPersonCameraMatrices(this.camera, width / height);
-    const renderEnvironment = this.resolveRenderEnvironment();
-    return await this.renderer.captureImage(
-      this.world,
-      cameraMatrices,
-      width,
-      height,
-      renderEnvironment,
-    );
-  }
-
   private resolveRenderEnvironment(): RenderEnvironment {
-    const ambientEnvironment = buildAmbientRenderEnvironment(this.sampleCurrentWorldContext().ambientProfile);
+    const currentWorld = this.sampleCurrentWorldContext();
+    const ambientEnvironment = buildAmbientRenderEnvironment(currentWorld.ambientProfile);
     if (!this.player.eyeInWater) {
-      return ambientEnvironment;
+      const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+      const worldSystems = this.sampleWorldSystems(currentWorld, encounter);
+      return applyWorldAtmosphere(ambientEnvironment, worldSystems.clock, worldSystems.weather);
     }
     const eye = getPlayerEyePosition(this.player);
     const material = this.world.getVoxel(
@@ -3842,6 +3058,65 @@ export class GameController {
       return ambientEnvironment;
     }
     return buildUnderwaterRenderEnvironment(this.world.getPaletteColor(material));
+  }
+
+  private sampleWorldSystems(
+    currentWorld: CurrentWorldProbeContext,
+    encounter: RpgEncounterSample,
+  ): WorldSystemSnapshot {
+    return sampleWorldSystems(
+      this.getWorldElapsedSeconds(),
+      currentWorld.probe,
+      currentWorld.ambientProfile,
+      encounter,
+      this.lastTravelContext,
+    );
+  }
+
+  private getWorldElapsedSeconds(): number {
+    return (performance.now() - this.worldClockStartedAt) / 1000 + this.worldClockOffsetSeconds;
+  }
+
+  private advanceWorldClockToNextWatchPhase(): WorldClockSnapshot {
+    const currentClock = resolveWorldClock(this.getWorldElapsedSeconds());
+    const currentHour = (currentClock.day - 1) * 24 + currentClock.hour + currentClock.minute / 60;
+    const targetHours = [6.25, 11.5, 19.1, 23.25];
+    let targetHour = targetHours.find((hour) => hour > currentHour % 24 + 0.2);
+    let targetDayOffset = currentClock.day - 1;
+    if (targetHour === undefined) {
+      targetHour = targetHours[0]!;
+      targetDayOffset += 1;
+    }
+    const deltaHours = Math.max(0.25, targetDayOffset * 24 + targetHour - currentHour);
+    this.worldClockOffsetSeconds += deltaHours / 24 * WORLD_DAY_LENGTH_SECONDS;
+    return resolveWorldClock(this.getWorldElapsedSeconds());
+  }
+
+  private selectActiveQuestHook(
+    currentWorld: CurrentWorldProbeContext,
+    discovery: ExplorationJournalSnapshot,
+    routeSnapshot: RouteJournalSnapshot,
+    encounter: RpgEncounterSample,
+    primaryFaction: string | null,
+  ): RpgQuestHookSummary | null {
+    if (!encounter.regionId) {
+      return null;
+    }
+    const landmarkId = currentWorld.probe.landmarkId ?? discovery.currentLandmarkId;
+    const plan = planRpgQuestHooks({
+      regionId: encounter.regionId,
+      routeId: encounter.routeId,
+      landmarkId,
+    });
+    return selectRpgQuestHookForExploration(plan, {
+      nearCave: encounter.caveSystemId !== null || this.lastTravelContext === "underground",
+      hasFaction: primaryFaction !== null,
+      hasLandmark: landmarkId !== null,
+      completedObjectiveIdsByHookId: Object.fromEntries(routeSnapshot.goals.map((goal) => [
+        goal.id,
+        goal.completedStepIds,
+      ])),
+    });
   }
 
   private sampleCurrentWorldContext(): CurrentWorldProbeContext {
@@ -3859,46 +3134,6 @@ export class GameController {
       observedUndergroundBiomeId,
       ambientProfile: resolveAmbientWorldProfile(probe, { observedUndergroundBiomeId }),
     };
-  }
-
-  private async applySettledReferenceDiffs(
-    samples: RouteExperienceFrameSample[],
-    capturedFrames: readonly CapturedBenchmarkFrame[],
-  ): Promise<void> {
-    for (const capturedFrame of capturedFrames) {
-      const referenceImage = await this.captureSettledReferenceFrame(capturedFrame.target, capturedFrame.image.width, capturedFrame.image.height);
-      if (!referenceImage) {
-        continue;
-      }
-      const diff = analyzeSettledReferenceDiff(capturedFrame.image, referenceImage);
-      const sample = samples[capturedFrame.sampleIndex];
-      if (!sample) {
-        continue;
-      }
-      sample.settledReferenceChangedRatio = diff.changedRatio;
-      sample.settledReferenceClearToFilledRatio = diff.clearToFilledRatio;
-      sample.settledReferenceMaxClearToFilledRunRatio = diff.maxClearToFilledRunRatio;
-      sample.settledReferenceSuspiciousHole = diff.suspiciousHole;
-      sample.suspiciousHole = sample.suspiciousHole || diff.suspiciousHole;
-    }
-  }
-
-  private async captureSettledReferenceFrame(
-    target: CapturedBenchmarkFrame["target"],
-    width: number,
-    height: number,
-  ): Promise<{
-    width: number;
-    height: number;
-    pixels: Uint8ClampedArray;
-  } | null> {
-    teleportPlayerToFeetPosition(this.player, target.feetPosition);
-    this.player.grounded = true;
-    this.camera.yaw = target.yaw;
-    this.camera.pitch = target.pitch;
-    this.syncCameraToPlayer();
-    this.syncWorldAroundPlayer(true);
-    return await this.captureRouteFrameImage(width, height);
   }
 
   private async renderProbeFrame(): Promise<GameRenderProbe> {
@@ -3919,55 +3154,13 @@ export class GameController {
     };
   }
 
-  private recordBootstrapBenchmarkSample(gameplayFrameMs: number): void {
-    if (this.bootstrapBenchmarkComplete) {
-      return;
-    }
+  private updateBootstrapReadiness(): void {
     const bootstrap = this.getBootstrapReadiness();
     const becamePlayableReady = !this.bootstrapPlayableReady && bootstrap.playableReady;
-    const becameVisualReady = !this.bootstrapBenchmarkComplete && bootstrap.visualReady;
-    this.bootstrapBenchmarkSamples.push({
-      frame: this.bootstrapBenchmarkSamples.length,
-      elapsedMs: performance.now() - this.bootstrapBenchmarkStartedAt,
-      gameplayFrameMs,
-      renderCpuMs: this.lastFrameCpuMs,
-      renderSyncMs: this.lastRenderStats.syncResourcesMs,
-      renderUploadMs: this.lastRenderStats.uploadMs,
-      renderEncodeMs: this.lastRenderStats.encodeMs,
-      uploadChunks: this.lastRenderStats.uploadChunks,
-      uploadBytes: this.lastRenderStats.uploadBytes,
-      drawCalls: this.drawCalls,
-      triangles: this.triangles,
-      streamMs: this.lastStreamSummary.elapsedMs,
-      meshMs: this.lastMeshBuildSummary.elapsedMs,
-      lodMs: this.lastLodSummary.elapsedMs,
-      lodYRangeMs: this.lastLodSummary.yRangeMs,
-      lodDownsampleMs: this.lastLodSummary.downsampleMs,
-      lodMeshMs: this.lastLodSummary.meshMs,
-      pendingChunks: this.lastStreamSummary.pendingChunks,
-      pendingMeshJobs: bootstrap.pendingMeshJobs,
-      dirtyResidentChunks: bootstrap.dirtyResidentMeshes.dirtyResidentChunks,
-      dirtyMeshlessResidentChunks: bootstrap.dirtyResidentMeshes.dirtyMeshlessResidentChunks,
-      dirtyRetainedMeshResidentChunks: bootstrap.dirtyResidentMeshes.dirtyRetainedMeshResidentChunks,
-      generatedChunks: this.lastStreamSummary.generatedChunks,
-      evictedChunks: this.lastStreamSummary.evictedChunks,
-      playableReady: bootstrap.playableReady,
-      visualReady: bootstrap.visualReady,
-      lodChunkCount: this.lastLodSummary.totalChunks,
-      lodPendingChunks: this.lastLodSummary.pending,
-      lodComplete: this.lastLodSummary.pending === 0 && this.lastLodSummary.totalChunks > 0,
-      frustumCulledChunks: this.lastRenderStats.frustumCulledChunks,
-      fogCulledChunks: this.lastRenderStats.fogCulledChunks,
-      lodDrawCalls: this.lastRenderStats.lodDrawCalls,
-      lodDrawCallsByLevel: this.lastRenderStats.lodDrawCallsByLevel,
-    });
     if (bootstrap.playableReady) {
       this.bootstrapPlayableReady = true;
     }
-    if (bootstrap.visualReady) {
-      this.bootstrapBenchmarkComplete = true;
-    }
-    if (becamePlayableReady || becameVisualReady) {
+    if (becamePlayableReady) {
       this.status = this.pointerLocked
         ? "Pointer locked: WASD move, Space jump, Ctrl sprint, Alt slow"
         : "Click once to capture cursor";
@@ -4040,6 +3233,15 @@ export class GameController {
   }
 
   private observePassiveRouteProgress(discovery: ExplorationJournalSnapshot): void {
+    const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+    if (encounter.routeId) {
+      this.observeTravelGoalProgress({
+        routeId: encounter.routeId,
+        kind: "visit",
+        targetId: encounter.routeId,
+      });
+    }
+
     const landmarkId = discovery.currentLandmarkId;
     if (!landmarkId) {
       return;
@@ -4048,11 +3250,71 @@ export class GameController {
     if (!routeId) {
       return;
     }
-    this.routeJournal.observeProgress({
+    this.observeTravelGoalProgress({
       routeId,
       kind: "visit",
       targetId: landmarkId,
     });
+  }
+
+  private observeTravelGoalProgress(input: TravelGoalProgressInput): TravelGoalProgressResult {
+    const routeScopedResult = this.routeJournal.observeProgress(input);
+    const result = input.routeId && !input.goalId
+      ? mergeTravelGoalProgressResults(routeScopedResult, this.routeJournal.observeProgress({
+        ...input,
+        routeId: null,
+      }))
+      : routeScopedResult;
+    this.recordCompletedTravelGoals(result);
+    return result;
+  }
+
+  private observeActiveQuestStep(
+    currentWorld: CurrentWorldProbeContext,
+    discovery: ExplorationJournalSnapshot,
+    encounter: RpgEncounterSample,
+    primaryFaction: string | null,
+    targetId: string | null,
+    routeId: string | null,
+    payload: unknown,
+    allowedKinds: readonly TravelGoalStepKind[],
+  ): TravelGoalProgressResult | null {
+    const activeQuest = this.selectActiveQuestHook(
+      currentWorld,
+      discovery,
+      this.routeJournal.getSnapshot(),
+      encounter,
+      primaryFaction,
+    );
+    if (!activeQuest || !allowedKinds.includes(activeQuest.objectiveKind)) {
+      return null;
+    }
+    if (!questObjectiveMatchesInteraction(activeQuest, targetId, routeId, payload)) {
+      return null;
+    }
+    return this.observeTravelGoalProgress({
+      goalId: activeQuest.hookId,
+      kind: activeQuest.objectiveKind,
+      targetId: activeQuest.objectiveTargetId,
+    });
+  }
+
+  private recordCompletedTravelGoals(result: TravelGoalProgressResult): void {
+    for (const goalId of result.completedGoalIds) {
+      const definition = TRAVEL_GOALS.find((goal) => goal.id === goalId);
+      this.explorationEventLog.record({
+        kind: "complete-travel-goal",
+        subjectType: "route",
+        subjectId: goalId,
+        role: "travel-goal",
+        name: definition?.title ?? goalId,
+        flavorText: definition?.journalText ?? null,
+        payload: {
+          routeId: definition?.routeId ?? null,
+          completedStepIds: result.completedStepIds,
+        },
+      });
+    }
   }
 
   private sampleExplorationObservation(): ExplorationObservation {
@@ -4110,6 +3372,15 @@ function readSkillLevel(snapshot: SkillJournalSnapshot, skillId: SkillId): numbe
   return snapshot.skills.find((skill) => skill.id === skillId)?.level ?? 1;
 }
 
+function readInteractionSkillGateSource(snapshot: SkillJournalSnapshot): InteractionSkillGateSource {
+  return {
+    cartographyLevel: readSkillLevel(snapshot, "cartography"),
+    naturalistLevel: readSkillLevel(snapshot, "naturalist"),
+    spelunkingLevel: readSkillLevel(snapshot, "spelunking"),
+    loreLevel: readSkillLevel(snapshot, "lore"),
+  };
+}
+
 function buildLandmarkSampleOffsets(effects: ExplorationSkillEffects): ReadonlyArray<readonly [number, number]> {
   const cacheKey = `${effects.landmarkScanRadiusMeters.toFixed(3)}:${effects.landmarkScanSampleStepMeters.toFixed(3)}`;
   const cached = LANDMARK_SAMPLE_OFFSET_CACHE.get(cacheKey);
@@ -4137,11 +3408,12 @@ function buildLandmarkSampleOffsets(effects: ExplorationSkillEffects): ReadonlyA
 function buildLandmarkInteractionPrompts(
   landmarkId: string,
   role: DiscoveryRole,
+  skillGates: InteractionSkillGateHints,
 ): ExplorationInteractionCandidate["prompts"] {
   if (landmarkId === "velothi_shrine" || role === "shrine") {
     return [
       "inspect",
-      { verb: "read", label: "Read the shrine etching", description: "Trace the pilgrim marks for a route clue." },
+      { verb: "read", label: "Read the shrine etching", description: `Trace the pilgrim marks for a route clue. ${skillGates.loreHint}` },
       { verb: "use", label: "Offer thanks", description: "Mark the shrine in your journal." },
     ];
   }
@@ -4154,7 +3426,7 @@ function buildLandmarkInteractionPrompts(
   if (role === "old-road") {
     return [
       { verb: "inspect", label: `Inspect ${formatDiscoveryName("landmark", landmarkId)}`, description: "Study the old road sign for your route journal." },
-      { verb: "read", label: "Read the road marks", description: "Decode scratches left by earlier travelers." },
+      { verb: "read", label: "Read the road marks", description: `Decode scratches left by earlier travelers. ${skillGates.roadMarkHint}` },
     ];
   }
   return ["inspect"];
@@ -4188,6 +3460,264 @@ function readPayloadRouteId(payload: unknown): string | null {
   }
   const routeId = (payload as Record<string, unknown>).routeId;
   return typeof routeId === "string" && routeId.trim().length > 0 ? routeId : null;
+}
+
+function buildCaveMouthInteractionCandidate(
+  currentWorld: CurrentWorldProbeContext,
+  encounter: RpgEncounterSample,
+  skillGates: InteractionSkillGateHints,
+): ExplorationInteractionCandidate | null {
+  const fields = currentWorld.probe.fields;
+  if (
+    fields.atlasCaveAnchorKind !== "entrance"
+    || (fields.atlasCaveCore ?? 0) < CAVE_MOUTH_INTERACTION_CORE_THRESHOLD
+    || !fields.atlasCaveAnchorId
+    || fields.atlasCaveAnchorX === null
+    || fields.atlasCaveAnchorX === undefined
+    || fields.atlasCaveAnchorZ === null
+    || fields.atlasCaveAnchorZ === undefined
+  ) {
+    return null;
+  }
+
+  const caveSystemId = fields.atlasCaveSystemId ?? encounter.caveSystemId ?? "local-cave";
+  const caveName = `${formatCaveSystemName(caveSystemId)} Mouth`;
+  const undergroundName = formatDiscoveryName("underground", currentWorld.probe.undergroundBiomeId, "underground");
+  const scoutResult = describeRpgEncounterScoutResult(encounter);
+  return {
+    id: `cave-mouth:${fields.atlasCaveAnchorId}`,
+    subjectType: "zone",
+    name: caveName,
+    role: "cave-mouth",
+    worldPosition: [
+      fields.atlasCaveAnchorX,
+      currentWorld.probe.surfaceY,
+      fields.atlasCaveAnchorZ,
+    ],
+    interactionRadiusMeters: metersToWorldUnits(6),
+    priority: 12,
+    prompts: [{
+      verb: "use",
+      label: `Enter ${caveName}`,
+      description: `${undergroundName} begins here. ${scoutResult.detail} ${skillGates.caveRouteHint}`,
+    }],
+    flavorText: `${undergroundName} begins here. ${scoutResult.detail} ${skillGates.caveRouteHint}`,
+    skillAwards: [{
+      skillId: "spelunking",
+      xp: 24,
+      reason: "Cave mouth scouted",
+      awardKey: `cave-mouth:${fields.atlasCaveAnchorId}`,
+      onceOnly: true,
+    }],
+    payload: {
+      caveSystemId,
+      caveAnchorId: fields.atlasCaveAnchorId,
+      caveAnchorKind: fields.atlasCaveAnchorKind,
+      undergroundBiomeId: currentWorld.probe.undergroundBiomeId,
+      pressure: Number(encounter.pressure.toFixed(3)),
+      moodId: encounter.moodId,
+      regionId: encounter.regionId,
+      routeId: encounter.routeId,
+      skillGateHint: skillGates.caveRouteHint,
+    },
+  };
+}
+
+function countEventsBySubjectRole(
+  snapshot: ExplorationEventLogSnapshot,
+  subjectType: string,
+  role: string,
+): number {
+  return snapshot.events.filter((event) => event.subjectType === subjectType && event.role === role).length;
+}
+
+function countMobSignEvents(snapshot: ExplorationEventLogSnapshot): number {
+  const mobSignRoles = new Set(["mob-trail", "mob-spoor", "mob-nest", "mob-lair"]);
+  return snapshot.events.filter((event) => event.subjectType === "mob" && event.role !== null && mobSignRoles.has(event.role)).length;
+}
+
+function formatPassiveMobPresenceLabel(sighting: PassiveMobSighting | null): string {
+  if (!sighting) {
+    return "No passive mob nearby";
+  }
+  return `${formatPassiveMobShortSpecies(sighting.speciesName)} ${formatPassiveMobDistance(worldUnitsToMeters(sighting.distanceWorldUnits))}`;
+}
+
+function formatPassiveMobDistance(distanceMeters: number): string {
+  if (distanceMeters < 10) {
+    return `${distanceMeters.toFixed(1)} m`;
+  }
+  if (distanceMeters < 1000) {
+    return `${Math.round(distanceMeters)} m`;
+  }
+  return `${(distanceMeters / 1000).toFixed(1)} km`;
+}
+
+function formatPassiveMobShortSpecies(speciesName: string): string {
+  if (speciesName.includes("Kwama")) return "Kwama";
+  if (speciesName.includes("Guar")) return "Guar";
+  if (speciesName.includes("Pilgrim")) return "Pilgrim";
+  if (speciesName.includes("Runner")) return "Runner";
+  if (speciesName.includes("Forager")) return "Forager";
+  if (speciesName.includes("Sentry")) return "Sentry";
+  if (speciesName.includes("Guide")) return "Guide";
+  if (speciesName.includes("Vagrant")) return "Vagrant";
+  if (speciesName.includes("Grazer")) return "Grazer";
+  return speciesName;
+}
+
+function describeLootCandidatePrompt(
+  fieldNote: string,
+  state: LootJournalCandidateState,
+  skillGates: InteractionSkillGateHints,
+  sourceLandmarkId: string | null,
+): string {
+  const skillHint = describeForageSkillHint(skillGates, sourceLandmarkId);
+  if (!state.collected) {
+    return `${fieldNote} ${skillHint}`;
+  }
+  if (state.match === "subject") {
+    return state.lastNote
+      ? `Already searched here. Last note: ${state.lastNote} ${skillHint}`
+      : `Already searched here. ${skillHint}`;
+  }
+  return `${fieldNote} Similar find recorded: ${state.lastNote ?? state.lootId ?? "known cache"}. ${skillHint}`;
+}
+
+function describeForageSkillHint(skillGates: InteractionSkillGateHints, sourceLandmarkId: string | null): string {
+  if (!sourceLandmarkId) {
+    return skillGates.forageHint;
+  }
+  return skillGates.canIdentifyForageQuality
+    ? `${skillGates.forageHint} The visible ${formatDiscoveryName("landmark", sourceLandmarkId)} shows whether this cut is ripe, safe, or depleted.`
+    : `${skillGates.forageHint} The visible ${formatDiscoveryName("landmark", sourceLandmarkId)} has readable growth signs you cannot fully judge yet.`;
+}
+
+function formatLootJournalStateLabel(collectedCaches: number, revisitedCaches: number): string {
+  if (collectedCaches === 0) {
+    return "No caches collected";
+  }
+  return revisitedCaches > 0
+    ? `${collectedCaches} caches • ${revisitedCaches} revisited`
+    : `${collectedCaches} caches collected`;
+}
+
+function buildQuestTravelGoals(): readonly TravelGoalDefinition[] {
+  return WORLD_ATLAS.routes.flatMap((route) => {
+    const regionId = route.nodes[0]?.regionId ?? route.expectedRegionIds[0];
+    if (!regionId) {
+      return [];
+    }
+    const plan = planRpgQuestHooks({
+      regionId,
+      routeId: route.id,
+    });
+    return plan.hooks
+      .map(buildTravelGoalFromQuestHook)
+      .filter((goal): goal is TravelGoalDefinition => goal !== null);
+  });
+}
+
+function mergeTravelGoalProgressResults(
+  primary: TravelGoalProgressResult,
+  secondary: TravelGoalProgressResult,
+): TravelGoalProgressResult {
+  return {
+    changed: primary.changed || secondary.changed,
+    completedGoalIds: uniqueStrings([...primary.completedGoalIds, ...secondary.completedGoalIds]),
+    completedStepIds: uniqueStrings([...primary.completedStepIds, ...secondary.completedStepIds]),
+    snapshot: secondary.snapshot,
+  };
+}
+
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
+}
+
+function questObjectiveMatchesInteraction(
+  quest: RpgQuestHookSummary,
+  targetId: string | null,
+  routeId: string | null,
+  payload: unknown,
+): boolean {
+  const payloadHookId = readPayloadString(payload, "hookId");
+  const payloadObjectiveId = readPayloadString(payload, "objectiveId");
+  const payloadTargetId = readPayloadString(payload, "objectiveTargetId");
+  const payloadRouteId = readPayloadRouteId(payload);
+  if (payloadHookId || payloadObjectiveId) {
+    return payloadHookId === quest.hookId
+      && payloadObjectiveId === quest.objectiveId
+      && (
+        payloadTargetId === quest.objectiveTargetId
+        || payloadRouteId === quest.objectiveTargetId
+        || routeId === quest.objectiveTargetId
+      );
+  }
+  const matchedTargetId = payloadTargetId ?? targetId;
+  const matchedRouteId = payloadRouteId ?? routeId;
+  switch (quest.objectiveKind) {
+    case "listen":
+      return matchedTargetId === quest.objectiveTargetId || matchedRouteId === quest.objectiveTargetId;
+    case "inspect":
+    case "interpret":
+      return matchedTargetId === quest.objectiveTargetId;
+    case "report":
+    case "visit":
+      return matchedTargetId === quest.objectiveTargetId || matchedRouteId === quest.objectiveTargetId;
+  }
+}
+
+function selectCavePassageConnection(
+  caveSystemId: AtlasCaveSystemId,
+  anchorId: string,
+  requestedDestinationAnchorId?: string | null,
+): AtlasCaveAnchorConnection | null {
+  const connections = findConnectedAtlasCaveAnchors(caveSystemId, anchorId);
+  if (connections.length === 0) {
+    return null;
+  }
+  if (requestedDestinationAnchorId) {
+    const requested = connections.find((connection) => connection.destinationAnchor.id === requestedDestinationAnchorId);
+    if (requested) {
+      return requested;
+    }
+  }
+  return connections.find((connection) => connection.destinationAnchor.kind === "chamber")
+    ?? connections.find((connection) => connection.destinationAnchor.kind === "entrance")
+    ?? connections[0]
+    ?? null;
+}
+
+function formatCaveSystemName(caveSystemId: string): string {
+  return caveSystemId
+    .split(/[-_\s]+/g)
+    .map((word) => word.trim())
+    .filter(Boolean)
+    .map((word) => `${word[0]?.toUpperCase() ?? ""}${word.slice(1)}`)
+    .join(" ");
+}
+
+function formatCaveAnchorName(caveAnchorId: string): string {
+  return formatCaveSystemName(caveAnchorId);
+}
+
+function readAtlasCaveSystemIdFromPayload(payload: unknown): AtlasCaveSystemId | null {
+  const value = readPayloadString(payload, "caveSystemId");
+  return value && WORLD_ATLAS.caveSystems.some((caveSystem) => caveSystem.id === value)
+    ? value as AtlasCaveSystemId
+    : null;
+}
+
+function readAtlasCaveAnchorKind(value: string | null): AtlasCaveAnchorKind | null {
+  return value === "entrance" || value === "chamber" || value === "overlook" ? value : null;
+}
+
+function readPayloadString(payload: unknown, key: string): string | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const value = (payload as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 function selectActiveTravelGoal(snapshot: RouteJournalSnapshot): TravelGoalSnapshot | null {
@@ -4276,20 +3806,9 @@ function createZeroFrameAttribution(): GameFrameAttribution {
 }
 
 function createFrameAttribution(input: Omit<GameFrameAttribution, "cause">): GameFrameAttribution {
-  const candidates: Array<[cause: string, ms: number]> = [
-    ["stream", input.streamMs],
-    ["mesh", input.meshMs],
-    ["LOD", input.lodMs],
-    ["render", input.renderCpuMs],
-    ["GPU upload", input.renderUploadMs],
-    ["GPU sync", input.renderSyncMs],
-    ["movement", input.movementMs],
-  ];
-  candidates.sort((left, right) => right[1] - left[1]);
-  const [cause, ms] = candidates[0] ?? ["none", 0];
   return {
     ...input,
-    cause: ms > 0.05 ? cause : "none",
+    cause: classifyFrameAttributionCause(input),
   };
 }
 
@@ -4312,76 +3831,50 @@ function shouldSyncBuildUrgentChunk(
   return Math.abs(chunk.coord.y - priorityChunkY) <= 1;
 }
 
-function buildEyePositionForChunkCenter(
-  chunkX: number,
-  chunkZ: number,
-  feetY: number,
-  chunkSize: number,
-  eyeHeight: number,
-): Vec3 {
-  return [
-    chunkX * chunkSize + chunkSize * 0.5,
-    feetY + eyeHeight,
-    chunkZ * chunkSize + chunkSize * 0.5,
-  ];
-}
-
-function buildFeetPositionForChunkCenter(
-  chunkX: number,
-  chunkZ: number,
-  feetY: number,
-  chunkSize: number,
-): Vec3 {
-  return [
-    chunkX * chunkSize + chunkSize * 0.5,
-    feetY,
-    chunkZ * chunkSize + chunkSize * 0.5,
-  ];
-}
-
 function teleportPlayerToFeetPosition(player: PlayerState, feetPosition: Vec3): void {
   player.feetPosition = [...feetPosition];
   player.velocity = [0, 0, 0];
 }
 
-function lerpVec3(from: Vec3, to: Vec3, t: number): Vec3 {
-  return [
-    from[0] + (to[0] - from[0]) * t,
-    from[1] + (to[1] - from[1]) * t,
-    from[2] + (to[2] - from[2]) * t,
-  ];
+function positiveModulo(value: number, divisor: number): number {
+  return ((value % divisor) + divisor) % divisor;
 }
 
-function buildIncrementalSample(
-  frame: number,
-  phase: "move" | "settle",
-  leg: number,
-  residency: ResidencyUpdateSummary,
-  mesh: MeshBuildSummary,
-  detailCoverage: RenderReadyCoverageProbe,
-  render: GameRenderProbe,
-): IncrementalCrossingSample {
+function cloneResidencySummary(summary: ResidencyUpdateSummary): ResidencyUpdateSummary {
   return {
-    frame,
-    phase,
-    leg,
-    changed: residency.changed,
-    complete: residency.complete,
-    pendingChunks: residency.pendingChunks,
-    generatedChunks: residency.generatedChunks,
-    evictedChunks: residency.evictedChunks,
-    streamMs: residency.elapsedMs,
-    meshMs: mesh.elapsedMs,
-    meshCount: mesh.meshCount,
-    residentNearSamples: detailCoverage.residentSampleCount,
-    renderReadyNearSamples: detailCoverage.renderReadySampleCount,
-    residentNotReadyNearSamples: detailCoverage.residentNotReadyCount,
-    frameCpuMs: render.frameCpuMs,
-    syncMs: render.syncResourcesMs,
-    uploadMs: render.uploadMs,
-    uploadChunks: render.uploadChunks,
-    uploadBytes: render.uploadBytes,
-    encodeMs: render.encodeMs,
+    ...summary,
+    generatedChunkCoords: summary.generatedChunkCoords.map((coord) => ({ ...coord })),
+    evictedChunkCoords: summary.evictedChunkCoords.map((coord) => ({ ...coord })),
+    phaseMs: { ...summary.phaseMs },
+  };
+}
+
+function createIdleResidencySummary(
+  summary: ResidencyUpdateSummary,
+  anchor: StreamAnchor,
+  radiusChunks: number,
+  residentChunks: number,
+  dirtyResidentChunks: number,
+): ResidencyUpdateSummary {
+  return {
+    ...summary,
+    changed: false,
+    complete: true,
+    centerChunkX: anchor.chunkX,
+    centerChunkZ: anchor.chunkZ,
+    radiusChunks,
+    generatedChunks: 0,
+    evictedChunks: 0,
+    pendingChunks: 0,
+    emptyChunksSkipped: 0,
+    cachedEmptyChunkHits: 0,
+    touchedNeighborChunks: 0,
+    residentChunks,
+    dirtyResidentChunks,
+    elapsedMs: 0,
+    generatedChunkCoords: [],
+    evictedChunkCoords: [],
+    phaseMs: zeroResidencyPhaseMetrics(),
   };
 }
 
@@ -4433,276 +3926,6 @@ function lodCoverageRangesHaveVerticalOverlap(ranges: readonly LodCoverageVertic
     }
   }
   return false;
-}
-
-function positiveModulo(value: number, divisor: number): number {
-  return ((value % divisor) + divisor) % divisor;
-}
-
-function cloneResidencySummary(summary: ResidencyUpdateSummary): ResidencyUpdateSummary {
-  return {
-    ...summary,
-    generatedChunkCoords: summary.generatedChunkCoords.map((coord) => ({ ...coord })),
-    evictedChunkCoords: summary.evictedChunkCoords.map((coord) => ({ ...coord })),
-    phaseMs: { ...summary.phaseMs },
-  };
-}
-
-function createIdleResidencySummary(
-  summary: ResidencyUpdateSummary,
-  anchor: StreamAnchor,
-  radiusChunks: number,
-  residentChunks: number,
-  dirtyResidentChunks: number,
-): ResidencyUpdateSummary {
-  return {
-    ...summary,
-    changed: false,
-    complete: true,
-    centerChunkX: anchor.chunkX,
-    centerChunkZ: anchor.chunkZ,
-    radiusChunks,
-    generatedChunks: 0,
-    evictedChunks: 0,
-    pendingChunks: 0,
-    emptyChunksSkipped: 0,
-    cachedEmptyChunkHits: 0,
-    touchedNeighborChunks: 0,
-    residentChunks,
-    dirtyResidentChunks,
-    elapsedMs: 0,
-    generatedChunkCoords: [],
-    evictedChunkCoords: [],
-    phaseMs: zeroResidencyPhaseMetrics(),
-  };
-}
-
-function summarizeChunkBoundaryBenchmark(samples: readonly ChunkBoundaryBenchmarkSample[]): ChunkBoundaryBenchmarkSummary {
-  const streamSamples = samples.map((sample) => sample.streamMs);
-  const meshSamples = samples.map((sample) => sample.meshMs);
-  const frameCpuSamples = samples.map((sample) => sample.frameCpuMs);
-  const syncSamples = samples.map((sample) => sample.syncMs);
-  const uploadSamples = samples.map((sample) => sample.uploadMs);
-  const uploadChunkSamples = samples.map((sample) => sample.uploadChunks);
-  const uploadByteSamples = samples.map((sample) => sample.uploadBytes);
-  return {
-    sampleCount: samples.length,
-    changedCount: samples.filter((sample) => sample.changed).length,
-    avgStreamMs: average(streamSamples),
-    p95StreamMs: percentile(streamSamples, 0.95),
-    maxStreamMs: maxValue(streamSamples),
-    avgMeshMs: average(meshSamples),
-    p95MeshMs: percentile(meshSamples, 0.95),
-    maxMeshMs: maxValue(meshSamples),
-    avgFrameCpuMs: average(frameCpuSamples),
-    p95FrameCpuMs: percentile(frameCpuSamples, 0.95),
-    maxFrameCpuMs: maxValue(frameCpuSamples),
-    avgSyncMs: average(syncSamples),
-    p95SyncMs: percentile(syncSamples, 0.95),
-    maxSyncMs: maxValue(syncSamples),
-    avgUploadMs: average(uploadSamples),
-    p95UploadMs: percentile(uploadSamples, 0.95),
-    maxUploadMs: maxValue(uploadSamples),
-    avgUploadChunks: average(uploadChunkSamples),
-    maxUploadChunks: maxValue(uploadChunkSamples),
-    avgUploadBytes: average(uploadByteSamples),
-    maxUploadBytes: maxValue(uploadByteSamples),
-  };
-}
-
-function summarizeIncrementalCrossing(samples: readonly IncrementalCrossingSample[]): IncrementalCrossingSummary {
-  const workSamples = samples.map((sample) => sample.streamMs + sample.meshMs + sample.frameCpuMs);
-  const streamSamples = samples.map((sample) => sample.streamMs);
-  const meshSamples = samples.map((sample) => sample.meshMs);
-  const frameCpuSamples = samples.map((sample) => sample.frameCpuMs);
-  const uploadSamples = samples.map((sample) => sample.uploadMs);
-  const residentNotReadySamples = samples.map((sample) => sample.residentNotReadyNearSamples);
-  return {
-    sampleCount: samples.length,
-    workFrameCount: samples.filter((sample) =>
-      sample.streamMs > 0
-      || sample.meshMs > 0
-      || sample.uploadChunks > 0
-    ).length,
-    changedCount: samples.filter((sample) => sample.changed).length,
-    incompleteFrameCount: samples.filter((sample) =>
-      !sample.complete || sample.pendingChunks > 0
-    ).length,
-    avgWorkMs: average(workSamples),
-    p95WorkMs: percentile(workSamples, 0.95),
-    maxWorkMs: maxValue(workSamples),
-    avgResidentNotReadyNearSamples: average(residentNotReadySamples),
-    maxResidentNotReadyNearSamples: maxValue(residentNotReadySamples),
-    avgStreamMs: average(streamSamples),
-    p95StreamMs: percentile(streamSamples, 0.95),
-    maxStreamMs: maxValue(streamSamples),
-    avgMeshMs: average(meshSamples),
-    p95MeshMs: percentile(meshSamples, 0.95),
-    maxMeshMs: maxValue(meshSamples),
-    avgFrameCpuMs: average(frameCpuSamples),
-    p95FrameCpuMs: percentile(frameCpuSamples, 0.95),
-    maxFrameCpuMs: maxValue(frameCpuSamples),
-    avgUploadMs: average(uploadSamples),
-    p95UploadMs: percentile(uploadSamples, 0.95),
-    maxUploadMs: maxValue(uploadSamples),
-    maxPendingChunks: maxValue(samples.map((sample) => sample.pendingChunks)),
-  };
-}
-
-function summarizeRouteExperienceBenchmark(
-  samples: readonly RouteExperienceFrameSample[],
-  plan: {
-    totalDistanceMeters: number;
-    sampleHz: number;
-    speedMetersPerSecond: number;
-  },
-): RouteExperienceBenchmarkSummary {
-  const accounting = summarizeRouteFrameAccounting(samples.map((sample) => ({
-    gameplayFrameMs: sample.gameplayFrameMs,
-    movementMs: sample.movementMs,
-    streamMs: sample.streamMs,
-    meshMs: sample.meshMs,
-    lodMs: sample.lodMs,
-    renderCpuMs: sample.renderCpuMs,
-  })));
-  const streamSamples = samples.map((sample) => sample.streamMs);
-  const meshSamples = samples.map((sample) => sample.meshMs);
-  const lodSamples = samples.map((sample) => sample.lodMs);
-  const lodChunkSamples = samples.map((sample) => sample.lodMaxChunkMs);
-  const renderCpuSamples = samples.map((sample) => sample.renderCpuMs);
-  const renderOtherSamples = samples.map((sample) => sample.renderOtherMs);
-  const residentNotReadySamples = samples.map((sample) => sample.residentNotReadyNearSamples);
-  const visibleGroundUncoveredSamples = samples.map((sample) => sample.visibleGroundUncoveredCount);
-  const visibleGroundResidentNotReadySamples = samples.map((sample) => sample.visibleGroundResidentNotReadyCount);
-  const surfaceContinuityGapSamples = samples.map((sample) => sample.surfaceContinuityGapCount);
-  const surfaceContinuityStepSamples = samples.map((sample) => sample.maxSurfaceContinuityStepMeters);
-  const farLodCoverageDistanceSamples = samples.map((sample) => sample.maxFarLodCoverageGapMeters);
-  const diagnosticsSamples = samples.map((sample) => sample.diagnosticsMs);
-  const captureDiagnosticsSamples = samples.map((sample) => sample.captureDiagnosticsMs);
-  const settledReferenceChangedSamples = samples.map((sample) => sample.settledReferenceChangedRatio ?? 0);
-  const settledReferenceClearToFilledSamples = samples.map((sample) => sample.settledReferenceClearToFilledRatio ?? 0);
-  const settledReferenceClearToFilledRunSamples = samples.map((sample) =>
-    sample.settledReferenceMaxClearToFilledRunRatio ?? 0);
-  const seamFrameClasses = countRouteSeamFrameClasses(samples);
-  const settleCompletion = samples.find((sample) =>
-    sample.phase === "settle"
-    && sample.complete
-    && sample.pendingChunks === 0
-    && sample.dirtyResidentChunks === 0
-    && sample.visibleGroundUncoveredCount === 0);
-
-  return {
-    sampleCount: samples.length,
-    moveFrameCount: samples.filter((sample) => sample.phase === "move").length,
-    settleFrameCount: samples.filter((sample) => sample.phase === "settle").length,
-    incompleteFrameCount: samples.filter((sample) =>
-      !sample.complete
-      || sample.pendingChunks > 0
-      || sample.dirtyResidentChunks > 0).length,
-    totalDistanceMeters: plan.totalDistanceMeters,
-    sampleHz: plan.sampleHz,
-    speedMetersPerSecond: plan.speedMetersPerSecond,
-    totalGameplayFrameMs: accounting.totalGameplayFrameMs,
-    totalAccountedFrameMs: accounting.totalAccountedMs,
-    totalUnmeasuredFrameMs: accounting.totalUnmeasuredMs,
-    unmeasuredFrameRatio: accounting.totalGameplayFrameMs === 0
-      ? 0
-      : accounting.totalUnmeasuredMs / accounting.totalGameplayFrameMs,
-    totalDiagnosticsMs: sumNumbers(diagnosticsSamples),
-    totalCaptureDiagnosticsMs: sumNumbers(captureDiagnosticsSamples),
-    avgGameplayFrameMs: accounting.avgGameplayFrameMs,
-    p95GameplayFrameMs: accounting.p95GameplayFrameMs,
-    maxGameplayFrameMs: accounting.maxGameplayFrameMs,
-    framesOver16_67Ms: samples.filter((sample) => sample.gameplayFrameMs > 16.67).length,
-    framesOver33_33Ms: samples.filter((sample) => sample.gameplayFrameMs > 33.33).length,
-    framesOver50Ms: samples.filter((sample) => sample.gameplayFrameMs > 50).length,
-    moveFramesOver50Ms: samples.filter((sample) => sample.phase === "move" && sample.gameplayFrameMs > 50).length,
-    settleFramesOver50Ms: samples.filter((sample) => sample.phase === "settle" && sample.gameplayFrameMs > 50).length,
-    avgMovementMs: accounting.avgMovementMs,
-    p95MovementMs: accounting.p95MovementMs,
-    maxMovementMs: accounting.maxMovementMs,
-    avgMeasuredWorkMs: accounting.avgMeasuredWorkMs,
-    p95MeasuredWorkMs: accounting.p95MeasuredWorkMs,
-    maxMeasuredWorkMs: accounting.maxMeasuredWorkMs,
-    avgUnmeasuredFrameMs: accounting.avgUnmeasuredMs,
-    p95UnmeasuredFrameMs: accounting.p95UnmeasuredMs,
-    maxUnmeasuredFrameMs: accounting.maxUnmeasuredMs,
-    avgStreamMs: average(streamSamples),
-    p95StreamMs: percentile(streamSamples, 0.95),
-    maxStreamMs: maxValue(streamSamples),
-    avgMeshMs: average(meshSamples),
-    p95MeshMs: percentile(meshSamples, 0.95),
-    maxMeshMs: maxValue(meshSamples),
-    avgLodMs: average(lodSamples),
-    p95LodMs: percentile(lodSamples, 0.95),
-    maxLodMs: maxValue(lodSamples),
-    p95LodChunkMs: percentile(lodChunkSamples, 0.95),
-    maxLodChunkMs: maxValue(lodChunkSamples),
-    avgRenderCpuMs: average(renderCpuSamples),
-    p95RenderCpuMs: percentile(renderCpuSamples, 0.95),
-    maxRenderCpuMs: maxValue(renderCpuSamples),
-    avgRenderOtherMs: average(renderOtherSamples),
-    maxRenderOtherMs: maxValue(renderOtherSamples),
-    avgResidentNotReadyNearSamples: average(residentNotReadySamples),
-    maxResidentNotReadyNearSamples: maxValue(residentNotReadySamples),
-    avgVisibleGroundUncoveredCount: average(visibleGroundUncoveredSamples),
-    maxVisibleGroundUncoveredCount: maxValue(visibleGroundUncoveredSamples),
-    avgVisibleGroundResidentNotReadyCount: average(visibleGroundResidentNotReadySamples),
-    maxVisibleGroundResidentNotReadyCount: maxValue(visibleGroundResidentNotReadySamples),
-    maxSurfaceContinuityGapCount: maxValue(surfaceContinuityGapSamples),
-    framesWithVisibleGroundGaps: samples.filter((sample) => sample.visibleGroundUncoveredCount > 0).length,
-    framesWithSurfaceContinuityGaps: samples.filter((sample) => sample.surfaceContinuityGapCount > 0).length,
-    framesWithFarLodCoverageGaps: samples.filter((sample) => sample.farLodCoverageGapCount > 0).length,
-    framesWithSeamGaps: samples.filter((sample) => sample.seamGapCount > 0).length,
-    framesWithBlockingSeamGaps: seamFrameClasses.framesWithBlockingSeamGaps,
-    framesWithTransitionSeamGaps: seamFrameClasses.framesWithTransitionSeamGaps,
-    framesWithLodOverlaps: samples.filter((sample) => sample.lodOverlapCount > 0).length,
-    maxSeamGapMeters: maxValue(samples.map((sample) => sample.maxSeamGapMeters)),
-    maxSurfaceContinuityStepMeters: maxValue(surfaceContinuityStepSamples),
-    maxFarLodCoverageGapMeters: maxValue(farLodCoverageDistanceSamples),
-    maxLodOverlapMeters: maxValue(samples.map((sample) => sample.maxLodOverlapMeters)),
-    screenVoidCaptureCount: samples.filter((sample) => sample.screenVoidRatio !== null).length,
-    framesWithScreenVoidSignals: samples.filter((sample) => sample.screenVoidSuspicious).length,
-    framesWithSettledReferenceHoleSignals: samples.filter((sample) => sample.settledReferenceSuspiciousHole).length,
-    framesWithHoleSignals: samples.filter((sample) => sample.suspiciousHole).length,
-    maxScreenVoidRatio: maxValue(samples.map((sample) => sample.screenVoidRatio ?? 0)),
-    maxSettledReferenceChangedRatio: maxValue(settledReferenceChangedSamples),
-    maxSettledReferenceClearToFilledRatio: maxValue(settledReferenceClearToFilledSamples),
-    maxSettledReferenceClearToFilledRunRatio: maxValue(settledReferenceClearToFilledRunSamples),
-    maxPendingChunks: maxValue(samples.map((sample) => sample.pendingChunks)),
-    maxPendingMeshJobs: maxValue(samples.map((sample) => sample.pendingMeshJobs)),
-    maxDirtyResidentChunks: maxValue(samples.map((sample) => sample.dirtyResidentChunks)),
-    maxDirtyMeshlessResidentChunks: maxValue(samples.map((sample) => sample.dirtyMeshlessResidentChunks)),
-    maxDirtyRetainedMeshResidentChunks: maxValue(samples.map((sample) => sample.dirtyRetainedMeshResidentChunks)),
-    settleFramesUntilComplete: settleCompletion
-      ? samples.filter((sample) => sample.phase === "settle" && sample.frame <= settleCompletion.frame).length
-      : null,
-  };
-}
-
-function normalizeRouteBenchmarkPlanOptions(options: RouteExperienceBenchmarkOptions): {
-  durationSeconds: number;
-  sampleHz: number;
-  speedMetersPerSecond: number;
-} {
-  return {
-    durationSeconds: Math.max(1, options.durationSeconds ?? 10),
-    sampleHz: Math.max(1, Math.floor(options.sampleHz ?? 60)),
-    speedMetersPerSecond: Math.max(0.1, options.speedMetersPerSecond ?? 4.6),
-  };
-}
-
-function resolveBenchmarkYawDrift(
-  elapsedSeconds: number,
-  amplitudeRadians: number,
-  periodSeconds: number,
-): number {
-  if (amplitudeRadians <= 0) {
-    return 0;
-  }
-  const phase = (elapsedSeconds / periodSeconds) * Math.PI * 2;
-  return Math.sin(phase) * amplitudeRadians
-    + Math.sin(phase * 0.43) * amplitudeRadians * 0.35;
 }
 
 function zeroResidencyPhaseMetrics(): ResidencyUpdateSummary["phaseMs"] {
@@ -4839,24 +4062,4 @@ function countUrgentDirtyMeshlessChunks(
     }
   }
   return urgentDirtyMeshlessChunks;
-}
-
-function nextAnimationFrame(): Promise<number> {
-  return new Promise((resolve) => {
-    requestAnimationFrame((now) => resolve(now));
-  });
-}
-
-function addLodLevelCounts(target: number[], source: readonly number[]): void {
-  for (let index = 0; index < target.length; index += 1) {
-    target[index] += source[index] ?? 0;
-  }
-}
-
-function sumNumbers(values: readonly number[]): number {
-  let total = 0;
-  for (const value of values) {
-    total += value;
-  }
-  return total;
 }

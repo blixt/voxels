@@ -44,34 +44,6 @@ declare global {
         pitchRadians: number,
         options?: { radiusChunks?: number; maxFrames?: number },
       ): ReturnType<GameController["setCameraPoseAndSettle"]>;
-      benchmarkChunkCrossing(
-        iterations: number,
-        chunkDelta?: number,
-      ): ReturnType<GameController["benchmarkChunkCrossing"]>;
-      benchmarkChunkCacheReuse(
-        chunkDelta?: number,
-        maxFramesPerLeg?: number,
-      ): ReturnType<GameController["benchmarkChunkCacheReuse"]>;
-      benchmarkIncrementalCrossing(
-        iterations: number,
-        chunkDelta?: number,
-        stepsPerLeg?: number,
-        settleFrames?: number,
-      ): ReturnType<GameController["benchmarkIncrementalCrossing"]>;
-      benchmarkRouteExperience(
-        options?: Parameters<GameController["benchmarkRouteExperience"]>[0],
-      ): ReturnType<GameController["benchmarkRouteExperience"]>;
-      benchmarkForwardWalkExperience(
-        options?: Parameters<GameController["benchmarkForwardWalkExperience"]>[0],
-      ): ReturnType<GameController["benchmarkForwardWalkExperience"]>;
-      benchmarkLiveForwardWalkExperience(
-        options?: Parameters<GameController["benchmarkLiveForwardWalkExperience"]>[0],
-      ): ReturnType<GameController["benchmarkLiveForwardWalkExperience"]>;
-      pumpWorldForBenchmark(
-        position?: Parameters<GameController["pumpWorldForBenchmark"]>[0],
-        options?: Parameters<GameController["pumpWorldForBenchmark"]>[1],
-      ): ReturnType<GameController["pumpWorldForBenchmark"]>;
-      getBootstrapBenchmark(): ReturnType<GameController["getBootstrapBenchmark"]>;
       probeLodCoverage(
         sampleRadiusMeters?: number,
         sampleStepMeters?: number,
@@ -87,6 +59,7 @@ declare global {
       ): ReturnType<GameController["probeVisibleGroundCoverage"]>;
       getDiscoveryJournal(): ExplorationJournalSnapshot;
       resetDiscoveryJournal(): ExplorationJournalSnapshot;
+      getExplorationEventLog(): ReturnType<GameController["getExplorationEventLogSnapshot"]>;
       getSkillJournal(): ReturnType<GameController["getSkillJournalSnapshot"]>;
       exportProgressState(): ReturnType<GameController["exportProgressState"]>;
       importProgressState(state: Parameters<GameController["importProgressState"]>[0]): ReturnType<GameController["importProgressState"]>;
@@ -182,9 +155,7 @@ function mountGame(): GameRuntime {
     throw new Error("Game UI is incomplete");
   }
 
-  const controller = new GameController(canvas, {
-    eagerBootstrapBenchmark: searchParams.get("benchmarkBootstrap") === "1",
-  });
+  const controller = new GameController(canvas);
   const startFresh = searchParams.has("freshGame");
   if (startFresh) {
     clearProgressState();
@@ -261,16 +232,6 @@ function mountGame(): GameRuntime {
     teleportAndSettle: (x, y, z, options) => controller.teleportAndSettle([x, y, z], options),
     setCameraPoseAndSettle: (x, y, z, yawRadians, pitchRadians, options) =>
       controller.setCameraPoseAndSettle([x, y, z], yawRadians, pitchRadians, options),
-    benchmarkChunkCrossing: (iterations, chunkDelta) => controller.benchmarkChunkCrossing(iterations, chunkDelta),
-    benchmarkChunkCacheReuse: (chunkDelta, maxFramesPerLeg) =>
-      controller.benchmarkChunkCacheReuse(chunkDelta, maxFramesPerLeg),
-    benchmarkIncrementalCrossing: (iterations, chunkDelta, stepsPerLeg, settleFrames) =>
-      controller.benchmarkIncrementalCrossing(iterations, chunkDelta, stepsPerLeg, settleFrames),
-    benchmarkRouteExperience: (options) => controller.benchmarkRouteExperience(options),
-    benchmarkForwardWalkExperience: (options) => controller.benchmarkForwardWalkExperience(options),
-    benchmarkLiveForwardWalkExperience: (options) => controller.benchmarkLiveForwardWalkExperience(options),
-    pumpWorldForBenchmark: (position, options) => controller.pumpWorldForBenchmark(position, options),
-    getBootstrapBenchmark: () => controller.getBootstrapBenchmark(),
     probeLodCoverage: (sampleRadiusMeters, sampleStepMeters) =>
       controller.probeLodCoverage(sampleRadiusMeters, sampleStepMeters),
     probeRenderReadyCoverage: (sampleRadiusMeters, sampleStepMeters) =>
@@ -279,6 +240,7 @@ function mountGame(): GameRuntime {
       controller.probeVisibleGroundCoverage(sampleForwardMeters, sampleLateralMeters, sampleStepMeters),
     getDiscoveryJournal: () => controller.getDiscoveryJournalSnapshot(),
     resetDiscoveryJournal: () => controller.resetDiscoveryJournal(),
+    getExplorationEventLog: () => controller.getExplorationEventLogSnapshot(),
     getSkillJournal: () => controller.getSkillJournalSnapshot(),
     exportProgressState: () => controller.exportProgressState(),
     importProgressState: (state) => controller.importProgressState(state),
@@ -319,6 +281,16 @@ function buildProgressSignature(snapshot: GameHudSnapshot): string {
     snapshot.discoveredUndergroundBiomeCount,
     snapshot.discoveredRegionalVariantCount,
     snapshot.discoveredLandmarkCount,
+    snapshot.scoutedMobTrailCount,
+    snapshot.lootedCacheCount,
+    snapshot.scoutedCaveMouthCount,
+    snapshot.traversedCavePassageCount,
+    snapshot.fieldKitFindCount,
+    snapshot.fieldKitSummaryLabel,
+    snapshot.fieldKitLastFindLabel,
+    snapshot.activeQuestHookId ?? "no-quest",
+    snapshot.activeQuestTitle,
+    snapshot.activeQuestObjectiveKind ?? "no-quest-step",
     snapshot.totalSkillLevel,
     snapshot.focusSkillName,
     snapshot.focusSkillLevel,
@@ -440,11 +412,23 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
     update(snapshot) {
       const recentDiscovery = snapshot.recentDiscoveries[0] ?? null;
       place.textContent = snapshot.activePlaceName;
-      route.textContent = `${snapshot.activeRouteName}: ${snapshot.activeTravelGoalStepLabel}`;
+      route.textContent = `${snapshot.activeRouteName}: ${snapshot.activeTravelGoalStepLabel}${
+        snapshot.activeQuestHookId ? ` • ${snapshot.activeQuestTitle}` : ""
+      }`;
       interaction.textContent = snapshot.interactionPromptVerb
-        ? `E ${snapshot.interactionPromptLabel}`
+        ? `E ${formatInteractionVerb(snapshot.interactionPromptVerb)}${
+          snapshot.navigationBearingLabel ? ` • ${snapshot.navigationBearingLabel}` : ""
+        }`
         : snapshot.interactionPromptLabel;
-      skill.textContent = `${snapshot.focusSkillName} ${snapshot.focusSkillLevel} • ${snapshot.encounterMoodLabel}`;
+      skill.textContent = `${snapshot.focusSkillName} ${snapshot.focusSkillLevel} • ${snapshot.timeOfDayLabel}${
+        snapshot.weatherLabel ? ` • ${snapshot.weatherLabel} ${(snapshot.weatherIntensity * 100).toFixed(0)}%` : ""
+      }${
+        snapshot.ambientProfileLabel ? ` • ${snapshot.ambientProfileLabel}` : ""
+      }${
+        snapshot.fieldKitFindCount > 0 ? ` • ${snapshot.fieldKitSummaryLabel}` : ""
+      }${
+        snapshot.passiveMobSightingCount > 0 ? ` • ${snapshot.passiveMobNearestLabel}` : ""
+      }`;
       progress.setAttribute("aria-label", `${snapshot.activeTravelGoalTitle} ${snapshot.activeRouteProgressLabel}`);
       progressFill.style.transform = `scaleX(${Math.max(0, Math.min(1, snapshot.activeTravelGoalProgressRatio))})`;
       card.classList.toggle("is-captured", snapshot.pointerLocked);
@@ -456,19 +440,71 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
         snapshot.status,
         snapshot.activeTravelGoalTitle,
         snapshot.activeRouteProgressLabel,
+        snapshot.activeQuestTitle,
+        snapshot.activeQuestObjectiveKind,
+        snapshot.activeQuestObjectiveLabel,
+        snapshot.activeQuestRumorText,
+        snapshot.activeQuestMoodLabel,
+        snapshot.activeQuestFactionLabel,
         snapshot.interactionTargetName,
         snapshot.interactionPromptDescription,
+        snapshot.navigationTargetId,
+        snapshot.navigationTargetName,
+        snapshot.navigationSource,
+        snapshot.navigationBearingLabel,
+        snapshot.navigationDistanceLabel,
+        snapshot.navigationDistanceMeters === null ? null : `${snapshot.navigationDistanceMeters.toFixed(1)} m exact`,
+        snapshot.navigationCompassLabel,
+        snapshot.navigationTurnLabel,
         snapshot.lastInteractionLabel,
         snapshot.travelContextLabel,
+        `Day ${snapshot.worldDay} ${snapshot.worldClockLabel}`,
+        `${snapshot.weatherLabel} ${(snapshot.weatherIntensity * 100).toFixed(0)}%`,
+        snapshot.floraLabel,
+        snapshot.faunaLabel,
+        snapshot.timeActivityLabel,
+        snapshot.lootSignalLabel,
+        snapshot.soundscapeId,
+        snapshot.soundscapeLabel,
+        snapshot.soundscapeListenLabel,
+        snapshot.soundscapeFieldNote,
+        snapshot.fieldKitSummaryLabel,
+        snapshot.fieldKitLastFindLabel,
+        snapshot.fieldKitDominantCategoryLabel,
+        snapshot.lootJournalStateLabel,
+        `${snapshot.lootJournalCollectedCacheCount} collected caches`,
+        `${snapshot.lootJournalRevisitedCacheCount} revisited caches`,
+        `${snapshot.lootJournalRevisitEventCount} cache revisits`,
+        snapshot.hazardLabel,
         snapshot.encounterPressureLabel,
         snapshot.encounterFactionLabel,
         snapshot.encounterFlavorLabel,
+        `${snapshot.passiveMobSightingCount} passive mob sightings nearby`,
+        snapshot.passiveMobNearestId,
+        snapshot.passiveMobNearestLabel,
+        snapshot.passiveMobNearestDetailLabel,
+        snapshot.passiveMobNearestDistanceMeters === null ? null : `${snapshot.passiveMobNearestDistanceMeters.toFixed(1)} m passive mob exact`,
+        snapshot.passiveMobNearestFactionLabel,
+        snapshot.passiveMobNearestMoodLabel,
+        `${snapshot.bestiarySightingCount} bestiary sightings`,
+        `${snapshot.bestiaryEntryCount} bestiary entries`,
+        snapshot.bestiarySummaryLabel,
+        snapshot.bestiaryLastSightingLabel,
+        snapshot.bestiaryLastNoteLabel,
+        snapshot.bestiaryDominantFactionLabel,
         recentDiscovery ? `Found ${recentDiscovery.name}` : null,
         `${snapshot.focusSkillName} ${(snapshot.focusSkillProgressRatio * 100).toFixed(0)}%`,
         recentDiscovery?.flavorText ?? null,
       ].filter(Boolean).join(" • ");
     },
   };
+}
+
+function formatInteractionVerb(verb: GameHudSnapshot["interactionPromptVerb"]): string {
+  if (!verb) {
+    return "Interact";
+  }
+  return verb.charAt(0).toUpperCase() + verb.slice(1);
 }
 
 function createObjectivePanelView(root: HTMLElement): ObjectivePanelView {
@@ -489,7 +525,7 @@ function createObjectivePanelView(root: HTMLElement): ObjectivePanelView {
       const currentObjective = objectiveSnapshot.objectives.find((objective) => !objective.completed)
         ?? objectiveSnapshot.objectives[objectiveSnapshot.objectives.length - 1]
         ?? null;
-      stage.textContent = `${objectiveSnapshot.title} • ${objectiveSnapshot.completedCount}/${objectiveSnapshot.totalCount}`;
+      stage.textContent = `${objectiveSnapshot.title} • ${objectiveSnapshot.completedCount}/${objectiveSnapshot.totalCount} • ${snapshot.timeOfDayLabel}`;
       root.title = [
         objectiveSnapshot.subtitle,
         objectiveSnapshot.journalText,
@@ -497,6 +533,14 @@ function createObjectivePanelView(root: HTMLElement): ObjectivePanelView {
         objectiveSnapshot.progressionHint,
         `${objectiveSnapshot.title}: ${objectiveSnapshot.completedCount}/${objectiveSnapshot.totalCount}`,
         `${snapshot.focusSkillName} ${snapshot.focusSkillLevel}`,
+        `Day ${snapshot.worldDay} ${snapshot.worldClockLabel}`,
+        `${snapshot.weatherLabel}: ${snapshot.hazardLabel}`,
+        snapshot.areaCoherenceLabel,
+        snapshot.timeActivityLabel,
+        snapshot.lootSignalLabel,
+        snapshot.fieldKitSummaryLabel,
+        snapshot.fieldKitLastFindLabel,
+        snapshot.fieldKitLastNoteLabel,
         `${snapshot.encounterMoodLabel}: ${snapshot.encounterFactionLabel}`,
         `Fog ${snapshot.ambientFogEndMeters.toFixed(0)} m`,
       ].filter(Boolean).join(" • ");
@@ -518,6 +562,10 @@ function snapshotToObjectiveSource(snapshot: GameHudSnapshot) {
     discoveredRegionalVariantCount: snapshot.discoveredRegionalVariantCount,
     discoveredLandmarkCount: snapshot.discoveredLandmarkCount,
     discoveredAncientLandmarkCount: snapshot.discoveredAncientLandmarkCount,
+    scoutedMobTrailCount: snapshot.scoutedMobTrailCount,
+    lootedCacheCount: snapshot.lootedCacheCount,
+    scoutedCaveMouthCount: snapshot.scoutedCaveMouthCount,
+    traversedCavePassageCount: snapshot.traversedCavePassageCount,
   };
 }
 
