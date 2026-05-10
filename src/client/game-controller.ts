@@ -52,6 +52,7 @@ import {
   samplePassiveMobSightingsWorldUnits,
   type PassiveMobSighting,
 } from "../engine/passive-mob-sim.ts";
+import { buildPassiveMobInteractionCandidates } from "../engine/passive-mob-interactions.ts";
 import {
   SkillJournal,
   type SkillId,
@@ -3280,6 +3281,10 @@ export class GameController {
     const skillGates = describeInteractionSkillGates(readInteractionSkillGateSource(this.skillJournal.getSnapshot()));
     const routeSnapshot = this.routeJournal.getSnapshot();
     const primaryFaction = encounter.factionHints[0]?.factionId ?? null;
+    candidates.push(...buildPassiveMobInteractionCandidates(this.samplePassiveMobSightings(), {
+      surfaceY: currentWorld.probe.surfaceY,
+      maxCount: 3,
+    }));
     const cavePassageCandidate = this.buildCavePassageInteractionCandidate(forward);
     const caveExitCandidate = this.buildCaveExitInteractionCandidate(forward);
     if (

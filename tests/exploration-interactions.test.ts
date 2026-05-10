@@ -273,6 +273,48 @@ test("interaction resolver surfaces visible cave mouths ahead of generic mob tra
   });
 });
 
+test("interaction resolver ranks passive sightings above forage but below authored encounter sites", () => {
+  const resolution = resolveExplorationInteractionTarget({
+    viewerPosition: [0, 0, 0],
+    viewerForward: [0, 0, 1],
+    candidates: [
+      {
+        id: "trail-forage:0:0",
+        subjectType: "object",
+        name: "Trail Forage",
+        role: "loot-cache",
+        priority: 1,
+        worldPosition: [0, 0, 1],
+        prompts: ["use"],
+      },
+      {
+        id: "kwama-brood:kwama-forager:0:0",
+        subjectType: "mob",
+        name: "Kwama Forager I",
+        role: "passive-sighting",
+        priority: 9,
+        worldPosition: [0, 0, 1.1],
+        prompts: ["inspect"],
+      },
+      {
+        id: "kwama-brood:mob-lair:0:0",
+        subjectType: "mob",
+        name: "Kwama Brood Lair",
+        role: "mob-lair",
+        priority: 10,
+        worldPosition: [0, 0, 1.2],
+        prompts: ["inspect"],
+      },
+    ],
+  });
+
+  expect(resolution.candidates.map((candidate) => candidate.role)).toEqual([
+    "mob-lair",
+    "passive-sighting",
+    "loot-cache",
+  ]);
+});
+
 test("interaction resolver keeps plant forage payloads stable below mob trails", () => {
   const resolution = resolveExplorationInteractionTarget({
     viewerPosition: [0, 0, 0],
