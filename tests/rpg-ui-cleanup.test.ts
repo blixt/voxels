@@ -123,6 +123,9 @@ test("client wires pure exploration interaction and travel goal systems", () => 
   expect(gameController).toContain("summarizeFieldKit");
   expect(gameController).toContain("summarizeLootJournal");
   expect(gameController).toContain("getLootJournalCandidateState");
+  expect(gameController).toContain("describeInteractionSkillGates");
+  expect(gameController).toContain("skillGateHint: skillGates.forageHint");
+  expect(gameController).toContain("skillGateHint: skillGates.caveRouteHint");
   expect(gameController).toContain("occurrenceId: exactLootRevisit ? `revisit-${lootState.eventCount + 1}` : null");
   expect(gameController).toContain("summarizeBestiary");
   expect(gameController).toContain("factionId: encounterSite.factionId");

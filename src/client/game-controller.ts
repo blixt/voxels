@@ -82,6 +82,11 @@ import {
   type ExplorationSkillEffects,
 } from "../engine/exploration-skill-effects.ts";
 import {
+  describeInteractionSkillGates,
+  type InteractionSkillGateHints,
+  type InteractionSkillGateSource,
+} from "../engine/interaction-skill-gates.ts";
+import {
   FrameTimingBuckets,
   type FrameTimingSnapshot,
 } from "../engine/frame-timing-buckets.ts";
@@ -3255,11 +3260,12 @@ export class GameController {
     const candidates: ExplorationInteractionCandidate[] = [];
     const forward = buildFirstPersonCameraMatrices(this.camera, 1).forward;
     const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
+    const skillGates = describeInteractionSkillGates(readInteractionSkillGateSource(this.skillJournal.getSnapshot()));
     const caveExitCandidate = this.buildCaveExitInteractionCandidate(forward);
     if (caveExitCandidate) {
       candidates.push(caveExitCandidate);
     }
-    const caveMouthCandidate = buildCaveMouthInteractionCandidate(currentWorld, encounter);
+    const caveMouthCandidate = buildCaveMouthInteractionCandidate(currentWorld, encounter, skillGates);
     if (caveMouthCandidate) {
       candidates.push(caveMouthCandidate);
     }
@@ -3278,7 +3284,7 @@ export class GameController {
         ],
         interactionRadiusMeters: metersToWorldUnits(5),
         priority: ROUTE_LANDMARK_IDS.has(landmarkId) ? 20 : 4,
-        prompts: buildLandmarkInteractionPrompts(landmarkId, presentation.role),
+        prompts: buildLandmarkInteractionPrompts(landmarkId, presentation.role, skillGates),
         flavorText: presentation.flavorText,
         payload: routeId ? { routeId } : undefined,
       });
@@ -3359,7 +3365,7 @@ export class GameController {
       prompts: [{
         verb: "use",
         label: exactLootRevisit ? `Revisit ${forageSite.name}` : worldSystems.area.lootInteractionLabel,
-        description: describeLootCandidatePrompt(forageSite.fieldNote, lootState),
+        description: describeLootCandidatePrompt(forageSite.fieldNote, lootState, skillGates),
       }],
       flavorText: forageSite.fieldNote,
       occurrenceId: exactLootRevisit ? `revisit-${lootState.eventCount + 1}` : null,
@@ -3380,6 +3386,7 @@ export class GameController {
         collectedBefore: exactLootRevisit,
         lootJournalMatch: lootState.match,
         previousFindNote: lootState.lastNote,
+        skillGateHint: skillGates.forageHint,
         forageSourceLandmarkId: worldSystems.area.forageSourceLandmarkId,
         weather: worldSystems.weather.id,
         hazard: worldSystems.area.hazardLabel,
@@ -4677,6 +4684,15 @@ function readSkillLevel(snapshot: SkillJournalSnapshot, skillId: SkillId): numbe
   return snapshot.skills.find((skill) => skill.id === skillId)?.level ?? 1;
 }
 
+function readInteractionSkillGateSource(snapshot: SkillJournalSnapshot): InteractionSkillGateSource {
+  return {
+    cartographyLevel: readSkillLevel(snapshot, "cartography"),
+    naturalistLevel: readSkillLevel(snapshot, "naturalist"),
+    spelunkingLevel: readSkillLevel(snapshot, "spelunking"),
+    loreLevel: readSkillLevel(snapshot, "lore"),
+  };
+}
+
 function buildLandmarkSampleOffsets(effects: ExplorationSkillEffects): ReadonlyArray<readonly [number, number]> {
   const cacheKey = `${effects.landmarkScanRadiusMeters.toFixed(3)}:${effects.landmarkScanSampleStepMeters.toFixed(3)}`;
   const cached = LANDMARK_SAMPLE_OFFSET_CACHE.get(cacheKey);
@@ -4704,11 +4720,12 @@ function buildLandmarkSampleOffsets(effects: ExplorationSkillEffects): ReadonlyA
 function buildLandmarkInteractionPrompts(
   landmarkId: string,
   role: DiscoveryRole,
+  skillGates: InteractionSkillGateHints,
 ): ExplorationInteractionCandidate["prompts"] {
   if (landmarkId === "velothi_shrine" || role === "shrine") {
     return [
       "inspect",
-      { verb: "read", label: "Read the shrine etching", description: "Trace the pilgrim marks for a route clue." },
+      { verb: "read", label: "Read the shrine etching", description: `Trace the pilgrim marks for a route clue. ${skillGates.loreHint}` },
       { verb: "use", label: "Offer thanks", description: "Mark the shrine in your journal." },
     ];
   }
@@ -4721,7 +4738,7 @@ function buildLandmarkInteractionPrompts(
   if (role === "old-road") {
     return [
       { verb: "inspect", label: `Inspect ${formatDiscoveryName("landmark", landmarkId)}`, description: "Study the old road sign for your route journal." },
-      { verb: "read", label: "Read the road marks", description: "Decode scratches left by earlier travelers." },
+      { verb: "read", label: "Read the road marks", description: `Decode scratches left by earlier travelers. ${skillGates.roadMarkHint}` },
     ];
   }
   return ["inspect"];
@@ -4760,6 +4777,7 @@ function readPayloadRouteId(payload: unknown): string | null {
 function buildCaveMouthInteractionCandidate(
   currentWorld: CurrentWorldProbeContext,
   encounter: RpgEncounterSample,
+  skillGates: InteractionSkillGateHints,
 ): ExplorationInteractionCandidate | null {
   const fields = currentWorld.probe.fields;
   if (
@@ -4793,9 +4811,9 @@ function buildCaveMouthInteractionCandidate(
     prompts: [{
       verb: "use",
       label: `Enter ${caveName}`,
-      description: `${undergroundName} begins here. ${scoutResult.detail}`,
+      description: `${undergroundName} begins here. ${scoutResult.detail} ${skillGates.caveRouteHint}`,
     }],
-    flavorText: `${undergroundName} begins here. ${scoutResult.detail}`,
+    flavorText: `${undergroundName} begins here. ${scoutResult.detail} ${skillGates.caveRouteHint}`,
     skillAwards: [{
       skillId: "spelunking",
       xp: 24,
@@ -4812,6 +4830,7 @@ function buildCaveMouthInteractionCandidate(
       moodId: encounter.moodId,
       regionId: encounter.regionId,
       routeId: encounter.routeId,
+      skillGateHint: skillGates.caveRouteHint,
     },
   };
 }
@@ -4859,14 +4878,21 @@ function formatPassiveMobShortSpecies(speciesName: string): string {
   return speciesName;
 }
 
-function describeLootCandidatePrompt(fieldNote: string, state: LootJournalCandidateState): string {
+function describeLootCandidatePrompt(
+  fieldNote: string,
+  state: LootJournalCandidateState,
+  skillGates: InteractionSkillGateHints,
+): string {
+  const skillHint = skillGates.forageHint;
   if (!state.collected) {
-    return fieldNote;
+    return `${fieldNote} ${skillHint}`;
   }
   if (state.match === "subject") {
-    return state.lastNote ? `Already searched here. Last note: ${state.lastNote}` : "Already searched here.";
+    return state.lastNote
+      ? `Already searched here. Last note: ${state.lastNote} ${skillHint}`
+      : `Already searched here. ${skillHint}`;
   }
-  return `${fieldNote} Similar find recorded: ${state.lastNote ?? state.lootId ?? "known cache"}.`;
+  return `${fieldNote} Similar find recorded: ${state.lastNote ?? state.lootId ?? "known cache"}. ${skillHint}`;
 }
 
 function formatLootJournalStateLabel(collectedCaches: number, revisitedCaches: number): string {
