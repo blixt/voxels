@@ -33,6 +33,14 @@ test("RPG HUD renders place route interaction and skill snapshot fields", () => 
     "activeQuestMoodLabel",
     "activeQuestFactionLabel",
     "interactionPromptLabel",
+    "navigationTargetId",
+    "navigationTargetName",
+    "navigationSource",
+    "navigationDistanceMeters",
+    "navigationBearingLabel",
+    "navigationDistanceLabel",
+    "navigationCompassLabel",
+    "navigationTurnLabel",
     "travelContextLabel",
     "encounterMoodLabel",
     "encounterPressureLabel",
@@ -82,6 +90,9 @@ test("client wires pure exploration interaction and travel goal systems", () => 
   const gameClient = readFileSync(join(repoRoot, "src/client/game.ts"), "utf8");
 
   expect(gameController).toContain("resolveExplorationInteractionTarget");
+  expect(gameController).toContain("describeNavigationBearing");
+  expect(gameController).toContain("navigation ? \"interaction-target\" : null");
+  expect(gameClient).toContain("snapshot.navigationBearingLabel ? ` • ${snapshot.navigationBearingLabel}` : \"\"");
   expect(gameController).toContain("new ExplorationEventLog");
   expect(gameController).toContain("explorationEventLog.record");
   expect(gameController).toContain("observeSkillAwards");

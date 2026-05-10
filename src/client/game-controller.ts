@@ -42,6 +42,7 @@ import {
 import { summarizeFieldKit } from "../engine/field-kit.ts";
 import { summarizeBestiary } from "../engine/bestiary-journal.ts";
 import { findSafeCaveEntryFeetPosition } from "../engine/cave-traversal.ts";
+import { describeNavigationBearing } from "../engine/navigation-bearing.ts";
 import {
   SkillJournal,
   type SkillId,
@@ -317,6 +318,14 @@ export interface GameHudSnapshot {
   interactionPromptLabel: string;
   interactionPromptDescription: string;
   interactionPromptVerb: ExplorationInteractionVerb | null;
+  navigationTargetId: string | null;
+  navigationTargetName: string | null;
+  navigationSource: "interaction-target" | null;
+  navigationDistanceMeters: number | null;
+  navigationDistanceLabel: string | null;
+  navigationCompassLabel: string | null;
+  navigationBearingLabel: string | null;
+  navigationTurnLabel: string | null;
   lastInteractionLabel: string;
   discoveredBiomeCount: number;
   discoveredUndergroundBiomeCount: number;
@@ -462,6 +471,14 @@ interface ActiveExplorationHudState {
   interactionPromptLabel: string;
   interactionPromptDescription: string;
   interactionPromptVerb: ExplorationInteractionVerb | null;
+  navigationTargetId: string | null;
+  navigationTargetName: string | null;
+  navigationSource: "interaction-target" | null;
+  navigationDistanceMeters: number | null;
+  navigationDistanceLabel: string | null;
+  navigationCompassLabel: string | null;
+  navigationBearingLabel: string | null;
+  navigationTurnLabel: string | null;
 }
 
 interface BootstrapReadiness {
@@ -1301,6 +1318,14 @@ export class GameController {
       interactionPromptLabel: activeExplorationHud.interactionPromptLabel,
       interactionPromptDescription: activeExplorationHud.interactionPromptDescription,
       interactionPromptVerb: activeExplorationHud.interactionPromptVerb,
+      navigationTargetId: activeExplorationHud.navigationTargetId,
+      navigationTargetName: activeExplorationHud.navigationTargetName,
+      navigationSource: activeExplorationHud.navigationSource,
+      navigationDistanceMeters: activeExplorationHud.navigationDistanceMeters,
+      navigationBearingLabel: activeExplorationHud.navigationBearingLabel,
+      navigationDistanceLabel: activeExplorationHud.navigationDistanceLabel,
+      navigationCompassLabel: activeExplorationHud.navigationCompassLabel,
+      navigationTurnLabel: activeExplorationHud.navigationTurnLabel,
       lastInteractionLabel: this.lastInteractionLabel,
       discoveredBiomeCount: discovery.discoveredBiomeIds.length,
       discoveredUndergroundBiomeCount: discovery.discoveredUndergroundBiomeIds.length,
@@ -3097,6 +3122,14 @@ export class GameController {
     const target = this.resolveCurrentInteraction(currentWorld, discovery).target;
     const activeGoal = selectActiveTravelGoal(routeSnapshot);
     const nextStep = activeGoal ? findNextTravelGoalStep(activeGoal) : null;
+    const navigation = target
+      ? describeNavigationBearing({
+          viewerPosition: this.camera.position,
+          viewerYawRadians: this.camera.yaw,
+          targetPosition: target.worldPosition,
+          targetName: target.name,
+        })
+      : null;
     const regionName = formatDiscoveryName("biome", currentWorld.probe.biomeId, "Unknown region");
     const placeName = target?.name
       ?? (discovery.currentLandmarkId
@@ -3120,6 +3153,14 @@ export class GameController {
       interactionPromptDescription: prompt?.description
         ?? (target ? `${target.distanceMeters.toFixed(1)} m away` : describeRpgEncounterScoutResult(encounter).detail),
       interactionPromptVerb: prompt?.verb ?? "inspect",
+      navigationTargetId: target?.id ?? null,
+      navigationTargetName: navigation?.targetName ?? null,
+      navigationSource: navigation ? "interaction-target" : null,
+      navigationDistanceMeters: navigation?.distanceMeters ?? null,
+      navigationBearingLabel: navigation?.bearingLabel ?? null,
+      navigationDistanceLabel: navigation?.distanceLabel ?? null,
+      navigationCompassLabel: navigation?.compassLabel ?? null,
+      navigationTurnLabel: navigation?.turnLabel ?? null,
     };
   }
 

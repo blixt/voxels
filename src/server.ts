@@ -70,6 +70,44 @@ function serveStylesheet(): Response {
   });
 }
 
+function serveHtmlFile(pathname: string): Response | null {
+  const fileName = pathname === "/bench"
+    ? "bench.html"
+    : pathname === "/lod-lab"
+    ? "lod-lab.html"
+    : pathname === "/"
+    ? "game.html"
+    : null;
+  if (!fileName) {
+    return null;
+  }
+  return new Response(Bun.file(new URL(`./pages/${fileName}`, import.meta.url)), {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": isDevelopmentMode() ? "no-store" : "no-cache",
+    },
+  });
+}
+
+function serveBuiltAsset(pathname: string): Response | null {
+  if (!/^\/chunk-[a-z0-9]+(\.js|\.css|\.js\.map|\.css\.map)$/i.test(pathname)) {
+    return null;
+  }
+  const contentType = pathname.endsWith(".css")
+    ? "text/css; charset=utf-8"
+    : pathname.endsWith(".map")
+    ? "application/json; charset=utf-8"
+    : "text/javascript; charset=utf-8";
+  return new Response(Bun.file(new URL(`.${pathname}`, import.meta.url)), {
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control": isDevelopmentMode()
+        ? "no-store"
+        : "public, max-age=31536000, immutable",
+    },
+  });
+}
+
 const server = Bun.serve({
   port: Number.parseInt(process.env.PORT ?? "3000", 10),
   development: isDevelopmentMode()
@@ -89,7 +127,16 @@ const server = Bun.serve({
       serveWorkerAsset(CHUNK_MESHING_WORKER_ROUTE, "./src/client/chunk-meshing-worker.ts", "chunk-meshing-worker.js"),
     "/favicon.ico": () => new Response(null, { status: 204 }),
   },
-  fetch() {
+  fetch(request) {
+    const pathname = new URL(request.url).pathname;
+    const htmlResponse = serveHtmlFile(pathname);
+    if (htmlResponse) {
+      return htmlResponse;
+    }
+    const assetResponse = serveBuiltAsset(pathname);
+    if (assetResponse) {
+      return assetResponse;
+    }
     return new Response("Not Found", { status: 404 });
   },
 });

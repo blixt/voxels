@@ -455,7 +455,9 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
         snapshot.activeQuestHookId ? ` • ${snapshot.activeQuestTitle}` : ""
       }`;
       interaction.textContent = snapshot.interactionPromptVerb
-        ? `E ${snapshot.interactionPromptLabel}`
+        ? `E ${formatInteractionVerb(snapshot.interactionPromptVerb)}${
+          snapshot.navigationBearingLabel ? ` • ${snapshot.navigationBearingLabel}` : ""
+        }`
         : snapshot.interactionPromptLabel;
       skill.textContent = `${snapshot.focusSkillName} ${snapshot.focusSkillLevel} • ${snapshot.timeOfDayLabel}${
         snapshot.fieldKitFindCount > 0 ? ` • ${snapshot.fieldKitSummaryLabel}` : ""
@@ -479,6 +481,14 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
         snapshot.activeQuestFactionLabel,
         snapshot.interactionTargetName,
         snapshot.interactionPromptDescription,
+        snapshot.navigationTargetId,
+        snapshot.navigationTargetName,
+        snapshot.navigationSource,
+        snapshot.navigationBearingLabel,
+        snapshot.navigationDistanceLabel,
+        snapshot.navigationDistanceMeters === null ? null : `${snapshot.navigationDistanceMeters.toFixed(1)} m exact`,
+        snapshot.navigationCompassLabel,
+        snapshot.navigationTurnLabel,
         snapshot.lastInteractionLabel,
         snapshot.travelContextLabel,
         `Day ${snapshot.worldDay} ${snapshot.worldClockLabel}`,
@@ -505,6 +515,13 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
       ].filter(Boolean).join(" • ");
     },
   };
+}
+
+function formatInteractionVerb(verb: GameHudSnapshot["interactionPromptVerb"]): string {
+  if (!verb) {
+    return "Interact";
+  }
+  return verb.charAt(0).toUpperCase() + verb.slice(1);
 }
 
 function createObjectivePanelView(root: HTMLElement): ObjectivePanelView {
