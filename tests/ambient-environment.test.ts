@@ -9,6 +9,7 @@ import {
 import { DEFAULT_RENDER_ENVIRONMENT } from "../src/engine/water-visuals.ts";
 import { hexColorToMaterial, ProceduralWorldGenerator, type BiomeId } from "../src/engine/procedural-generator.ts";
 import { metersToWorldUnits } from "../src/engine/scale.ts";
+import { WORLD_ATLAS } from "../src/engine/world-atlas.ts";
 import { WORLD_REGION_AUTHORITY_THRESHOLD } from "../src/engine/worldgen-region.ts";
 
 const BASE_FIELDS: AmbientWorldProbe["fields"] = {
@@ -247,6 +248,41 @@ test("procedural ambient profiles are deterministic and varied across the world"
   expect(shortestSurfaceFog).toBeGreaterThanOrEqual(metersToWorldUnits(224));
 });
 
+test("authored macro region atmospheres stay separated in clear color, fog, and horizon", () => {
+  const profiles = new Map(WORLD_ATLAS.regions.map((region) => {
+    const profile = resolveAmbientWorldProfile({
+      biomeId: region.biomeId,
+      undergroundBiomeId: null,
+      regionalVariantId: region.regionalVariantId,
+      regionalVariantStrength: region.regionalVariantId ? 1 : 0,
+      specialStrength: 0.5,
+      surfaceY: 0,
+      regionAmbientProfileId: region.ambientProfileId,
+      regionStrength: 1,
+      fields: BASE_FIELDS,
+    });
+    return [profile.id, profile];
+  }));
+  const resolvedProfiles = [...profiles.values()];
+  let minColorSeparation = Infinity;
+
+  for (let leftIndex = 0; leftIndex < resolvedProfiles.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < resolvedProfiles.length; rightIndex += 1) {
+      const left = resolvedProfiles[leftIndex]!;
+      const right = resolvedProfiles[rightIndex]!;
+      minColorSeparation = Math.min(minColorSeparation, euclideanColorDistance(left.clearColorRgba, right.clearColorRgba));
+      minColorSeparation = Math.min(minColorSeparation, euclideanColorDistance(left.fogColorRgba, right.fogColorRgba));
+      minColorSeparation = Math.min(
+        minColorSeparation,
+        euclideanColorDistance(left.skyHorizonColorRgba, right.skyHorizonColorRgba),
+      );
+    }
+  }
+
+  expect([...profiles.keys()].sort()).toEqual(["ashfall", "cold-glass", "dry-haze", "green-canopy", "silt-mist"]);
+  expect(minColorSeparation).toBeGreaterThan(80);
+});
+
 test("strong macro regions stabilize sky profile across local biome noise", () => {
   const generator = new ProceduralWorldGenerator(1337);
   const center = generator.sampleBiomeProbe(-13_814, -24_678);
@@ -306,4 +342,11 @@ function colorDistance(
   return Math.abs(left[0] - right[0])
     + Math.abs(left[1] - right[1])
     + Math.abs(left[2] - right[2]);
+}
+
+function euclideanColorDistance(
+  left: readonly [number, number, number, number],
+  right: readonly [number, number, number, number],
+): number {
+  return Math.hypot(left[0] - right[0], left[1] - right[1], left[2] - right[2]);
 }
