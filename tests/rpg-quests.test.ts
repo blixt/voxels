@@ -170,6 +170,7 @@ test("rpg quest exploration selector picks context-relevant hooks", () => {
   expect(fallback?.kind).toBe("pilgrimage");
   expect(fallback?.objectiveLabel.length).toBeGreaterThan(0);
   expect(fallback?.rumorText).toContain("Ashen Badlands");
+  expect(fallback?.objectiveTrainsSkillId).toBe("cartography");
 });
 
 test("rpg quest exploration selector advances to the next incomplete objective", () => {
@@ -193,6 +194,42 @@ test("rpg quest exploration selector advances to the next incomplete objective",
     kind: "cave-rumor",
     objectiveKind: "inspect",
     objectiveTargetId: "kwama_mound",
+    objectiveTrainsSkillId: "naturalist",
+  });
+});
+
+test("rpg quest summaries expose the skill trained by the active objective", () => {
+  const plan = planRpgQuestHooks({
+    regionId: "red-mountain",
+    routeId: "pilgrim-spine-red",
+    landmarkId: "ash_obelisk",
+  });
+  const caveRumor = requireHook(plan.hooks, "cave-rumor");
+  const factionErrand = requireHook(plan.hooks, "faction-errand");
+
+  const caveSummary = selectRpgQuestHookForExploration(plan, {
+    nearCave: true,
+    hasFaction: false,
+    hasLandmark: true,
+  });
+  const factionSummary = selectRpgQuestHookForExploration(plan, {
+    nearCave: false,
+    hasFaction: true,
+    hasLandmark: true,
+    completedObjectiveIdsByHookId: {
+      [factionErrand.id]: [factionErrand.objectives[0]!.id],
+    },
+  });
+
+  expect(caveSummary).toMatchObject({
+    hookId: caveRumor.id,
+    objectiveKind: "listen",
+    objectiveTrainsSkillId: "spelunking",
+  });
+  expect(factionSummary).toMatchObject({
+    hookId: factionErrand.id,
+    objectiveKind: "report",
+    objectiveTrainsSkillId: "cartography",
   });
 });
 

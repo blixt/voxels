@@ -73,6 +73,54 @@ test("interaction resolver chooses the best facing target and builds inspect/rea
   });
 });
 
+test("interaction resolver accepts quest topic verbs after core object verbs", () => {
+  const resolution = resolveExplorationInteractionTarget({
+    viewerPosition: [0, 0, 0],
+    viewerForward: [0, 0, 1],
+    candidates: [{
+      id: "quest-topic:rpgq-cave-rumor-red-mountain:ask-about-mouth",
+      subjectType: "route",
+      name: "Rumor of a Lava Tube",
+      role: "quest-topic",
+      worldPosition: [0, 0, 1],
+      prompts: ["report", "listen", "use", "interpret", "inspect", "read"],
+      payload: {
+        hookId: "rpgq-cave-rumor-red-mountain",
+        objectiveId: "ask-about-mouth",
+        objectiveTargetId: "red-mountain",
+      },
+    }],
+  });
+
+  expect(resolution.target?.prompts.map((prompt) => prompt.verb)).toEqual([
+    "inspect",
+    "read",
+    "use",
+    "listen",
+    "interpret",
+    "report",
+  ]);
+  expect(resolution.target?.prompts.map((prompt) => prompt.label)).toEqual([
+    "Inspect Rumor of a Lava Tube",
+    "Read Rumor of a Lava Tube",
+    "Use Rumor of a Lava Tube",
+    "Listen to Rumor of a Lava Tube",
+    "Interpret Rumor of a Lava Tube",
+    "Report to Rumor of a Lava Tube",
+  ]);
+  expect(resolution.target?.prompts[3]?.eventInput).toMatchObject({
+    kind: "listen",
+    subjectType: "route",
+    subjectId: "quest-topic:rpgq-cave-rumor-red-mountain:ask-about-mouth",
+    role: "quest-topic",
+    payload: {
+      hookId: "rpgq-cave-rumor-red-mountain",
+      objectiveId: "ask-about-mouth",
+      objectiveTargetId: "red-mountain",
+    },
+  });
+});
+
 test("interaction resolver filters unreachable or promptless targets", () => {
   const resolution = resolveExplorationInteractionTarget({
     viewerPosition: [0, 0, 0],

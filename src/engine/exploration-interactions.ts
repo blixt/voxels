@@ -4,7 +4,10 @@ import type {
   ExplorationEventSubjectType,
 } from "./exploration-events.ts";
 
-export type ExplorationInteractionVerb = Extract<ExplorationEventKind, "inspect" | "read" | "use">;
+export type ExplorationInteractionVerb = Extract<
+  ExplorationEventKind,
+  "inspect" | "read" | "use" | "listen" | "interpret" | "report"
+>;
 
 export interface ExplorationInteractionPrompt {
   verb: ExplorationInteractionVerb;
@@ -66,6 +69,9 @@ const VERB_ORDER = new Map<ExplorationInteractionVerb, number>([
   ["inspect", 0],
   ["read", 1],
   ["use", 2],
+  ["listen", 3],
+  ["interpret", 4],
+  ["report", 5],
 ]);
 
 export function resolveExplorationInteractionTarget(
@@ -238,7 +244,12 @@ function distanceBetween(left: readonly [number, number, number], right: readonl
 }
 
 function isInteractionVerb(value: string): value is ExplorationInteractionVerb {
-  return value === "inspect" || value === "read" || value === "use";
+  return value === "inspect"
+    || value === "read"
+    || value === "use"
+    || value === "listen"
+    || value === "interpret"
+    || value === "report";
 }
 
 function buildDefaultPromptLabel(verb: ExplorationInteractionVerb, name: string): string {
@@ -249,6 +260,12 @@ function buildDefaultPromptLabel(verb: ExplorationInteractionVerb, name: string)
       return `Read ${name}`;
     case "use":
       return `Use ${name}`;
+    case "listen":
+      return `Listen to ${name}`;
+    case "interpret":
+      return `Interpret ${name}`;
+    case "report":
+      return `Report to ${name}`;
   }
 }
 

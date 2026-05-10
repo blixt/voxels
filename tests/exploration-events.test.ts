@@ -13,6 +13,9 @@ test("exploration event log records all event kinds with stable sequence orderin
     event("inspect", "landmark", "old_road_causeway", { role: "old-road" }),
     event("read", "landmark", "velothi_shrine", { role: "shrine" }),
     event("use", "route", "pilgrim-road-west", { role: "route-mark" }),
+    event("listen", "route", "red-mountain-rumor", { role: "quest-topic" }),
+    event("interpret", "route", "ashfall-sign", { role: "quest-topic" }),
+    event("report", "npc", "temple-waykeepers", { role: "quest-topic" }),
     event("enter-zone", "zone", "ash-road-approach"),
     event("complete-travel-goal", "route", "first-bearings"),
     event("encounter", "npc", "pilgrim-scout"),
@@ -26,13 +29,16 @@ test("exploration event log records all event kinds with stable sequence orderin
     "inspect",
     "read",
     "use",
+    "listen",
+    "interpret",
+    "report",
     "enter-zone",
     "complete-travel-goal",
     "encounter",
   ]);
-  expect(snapshot.events.map((record) => record.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  expect(snapshot.events.map((record) => record.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   expect(snapshot.lastEvent?.kind).toBe("encounter");
-  expect(snapshot.nextSequence).toBe(8);
+  expect(snapshot.nextSequence).toBe(11);
   expect(snapshot.events.map((record) => record.key)).toEqual(inputs.map((input) => buildExplorationEventKey(input)));
 });
 

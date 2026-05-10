@@ -937,6 +937,8 @@ function findFailures(
   if (hudSmoke.passed !== true) {
     failures.push(`HUD smoke failed: ${String(hudSmoke.reason ?? "unknown")}`);
   }
+  appendHudLayoutFailures(failures, "before click", readRecord(readRecord(hudSmoke).before));
+  appendHudLayoutFailures(failures, "after click", readRecord(readRecord(hudSmoke).after));
   if (!visualIdentity || typeof visualIdentity.error === "string") {
     failures.push(`settled screenshot visual analysis failed: ${String(visualIdentity?.error ?? "missing screenshot")}`);
   } else {
@@ -1264,6 +1266,34 @@ function findFailures(
   return failures;
 }
 
+function appendHudLayoutFailures(
+  failures: string[],
+  phase: string,
+  hudPhase: Record<string, unknown>,
+): void {
+  const layout = readRecord(hudPhase.pageLayout);
+  if (Object.keys(layout).length === 0) {
+    failures.push(`HUD layout smoke missing for ${phase}`);
+    return;
+  }
+  if (layout.passed === true) {
+    return;
+  }
+  if (layout.pageScrollableX === true || layout.pageScrollableY === true) {
+    failures.push(
+      `page became scrollable ${phase}: `
+        + `${formatNumber(readNumber(layout, "scrollWidth"))}x${formatNumber(readNumber(layout, "scrollHeight"))} `
+        + `content in ${formatNumber(readNumber(layout, "clientWidth"))}x${formatNumber(readNumber(layout, "clientHeight"))} viewport`,
+    );
+  }
+  if (layout.canvasFillsViewport !== true) {
+    failures.push(`viewport canvas does not fill browser viewport ${phase}`);
+  }
+  if (layout.captureFillsViewport !== true) {
+    failures.push(`input capture layer does not fill browser viewport ${phase}`);
+  }
+}
+
 function printSummary(reportPath: string, report: {
   hudSmoke: Record<string, unknown> | null;
   visualIdentity?: Record<string, unknown> | null;
@@ -1544,6 +1574,7 @@ async function runHudSmoke(cdp: CdpConnection): Promise<Record<string, unknown>>
       capturePresent: capture instanceof HTMLElement,
       promptVisible: capture instanceof HTMLElement && capture.innerText.includes("Click to play"),
       canvasPresent: canvas instanceof HTMLCanvasElement,
+      pageLayout: readPageLayoutSmoke(),
       legacyTextFound: /Show Debug|Hide Debug|No voxel in reach|Targeting|Inventory|Hotbar/.test(text),
       minecraftHudFound: Boolean(
         document.querySelector(".game-hotbar, .game-inventory-panel, .target-overlay"),
@@ -1551,6 +1582,54 @@ async function runHudSmoke(cdp: CdpConnection): Promise<Record<string, unknown>>
       clickX: Math.round(window.innerWidth / 2),
       clickY: Math.round(window.innerHeight / 2),
     };
+    function readPageLayoutSmoke() {
+      const doc = document.documentElement;
+      const body = document.body;
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const scrollWidth = Math.max(doc.scrollWidth, body?.scrollWidth ?? 0);
+      const scrollHeight = Math.max(doc.scrollHeight, body?.scrollHeight ?? 0);
+      const clientWidth = doc.clientWidth || viewportWidth;
+      const clientHeight = doc.clientHeight || viewportHeight;
+      const canvasRect = rectSummary(canvas);
+      const captureRect = rectSummary(capture);
+      const pageScrollableX = scrollWidth - clientWidth > 2;
+      const pageScrollableY = scrollHeight - clientHeight > 2;
+      const canvasFillsViewport = coversViewport(canvasRect, viewportWidth, viewportHeight);
+      const captureFillsViewport = coversViewport(captureRect, viewportWidth, viewportHeight);
+      return {
+        viewportWidth,
+        viewportHeight,
+        clientWidth,
+        clientHeight,
+        scrollWidth,
+        scrollHeight,
+        pageScrollableX,
+        pageScrollableY,
+        canvasRect,
+        captureRect,
+        canvasFillsViewport,
+        captureFillsViewport,
+        passed: !pageScrollableX && !pageScrollableY && canvasFillsViewport && captureFillsViewport,
+      };
+    }
+    function rectSummary(element) {
+      if (!(element instanceof Element)) return null;
+      const rect = element.getBoundingClientRect();
+      return {
+        left: Math.round(rect.left),
+        top: Math.round(rect.top),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      };
+    }
+    function coversViewport(rect, viewportWidth, viewportHeight) {
+      return Boolean(rect)
+        && Math.abs(rect.left) <= 1
+        && Math.abs(rect.top) <= 1
+        && Math.abs(rect.width - viewportWidth) <= 2
+        && Math.abs(rect.height - viewportHeight) <= 2;
+    }
   })()`);
   if (before.capturePresent !== true) {
     return { passed: false, reason: "capture overlay missing", before };
@@ -1584,6 +1663,7 @@ async function runHudSmoke(cdp: CdpConnection): Promise<Record<string, unknown>>
       capturePresent: capture instanceof HTMLElement,
       promptVisible: capture instanceof HTMLElement && capture.innerText.includes("Click to play"),
       pointerLocked: snapshot?.pointerLocked === true,
+      pageLayout: readPageLayoutSmoke(),
       documentPointerLockElementRole: document.pointerLockElement === capture
         ? "capture"
         : document.pointerLockElement === document.querySelector("[data-role='viewport']")
@@ -1602,6 +1682,55 @@ async function runHudSmoke(cdp: CdpConnection): Promise<Record<string, unknown>>
       positionBeforeMove: snapshot?.feetPosition ?? null,
       skillTravelMetersBeforeMove: snapshot?.totalSkillTravelMeters ?? null,
     };
+    function readPageLayoutSmoke() {
+      const canvas = document.querySelector("[data-role='viewport']");
+      const doc = document.documentElement;
+      const body = document.body;
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const scrollWidth = Math.max(doc.scrollWidth, body?.scrollWidth ?? 0);
+      const scrollHeight = Math.max(doc.scrollHeight, body?.scrollHeight ?? 0);
+      const clientWidth = doc.clientWidth || viewportWidth;
+      const clientHeight = doc.clientHeight || viewportHeight;
+      const canvasRect = rectSummary(canvas);
+      const captureRect = rectSummary(capture);
+      const pageScrollableX = scrollWidth - clientWidth > 2;
+      const pageScrollableY = scrollHeight - clientHeight > 2;
+      const canvasFillsViewport = coversViewport(canvasRect, viewportWidth, viewportHeight);
+      const captureFillsViewport = coversViewport(captureRect, viewportWidth, viewportHeight);
+      return {
+        viewportWidth,
+        viewportHeight,
+        clientWidth,
+        clientHeight,
+        scrollWidth,
+        scrollHeight,
+        pageScrollableX,
+        pageScrollableY,
+        canvasRect,
+        captureRect,
+        canvasFillsViewport,
+        captureFillsViewport,
+        passed: !pageScrollableX && !pageScrollableY && canvasFillsViewport && captureFillsViewport,
+      };
+    }
+    function rectSummary(element) {
+      if (!(element instanceof Element)) return null;
+      const rect = element.getBoundingClientRect();
+      return {
+        left: Math.round(rect.left),
+        top: Math.round(rect.top),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      };
+    }
+    function coversViewport(rect, viewportWidth, viewportHeight) {
+      return Boolean(rect)
+        && Math.abs(rect.left) <= 1
+        && Math.abs(rect.top) <= 1
+        && Math.abs(rect.width - viewportWidth) <= 2
+        && Math.abs(rect.height - viewportHeight) <= 2;
+    }
   })()`);
   await cdp.send("Input.dispatchKeyEvent", {
     type: "rawKeyDown",
@@ -1642,6 +1771,8 @@ async function runHudSmoke(cdp: CdpConnection): Promise<Record<string, unknown>>
   })()`);
   const passed = before.legacyTextFound !== true
     && after.legacyTextFound !== true
+    && readRecord(before.pageLayout).passed === true
+    && readRecord(after.pageLayout).passed === true
     && before.minecraftHudFound !== true
     && after.minecraftHudFound !== true
     && after.requestPointerLockCalled === true

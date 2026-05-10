@@ -89,6 +89,7 @@ export interface RpgQuestHookSummary {
   objectiveTargetId: string;
   objectiveLabel: string;
   objectiveJournalText: string;
+  objectiveTrainsSkillId: SkillId;
 }
 
 interface RegionQuestProfile {
@@ -260,6 +261,7 @@ export function selectRpgQuestHookForExploration(
     objectiveTargetId: objective?.targetId ?? hook.landmarkId ?? hook.routeId ?? hook.regionId,
     objectiveLabel: objective?.label ?? "Read the local signs",
     objectiveJournalText: objective?.journalText ?? hook.rumorText,
+    objectiveTrainsSkillId: objective?.trainsSkillId ?? "lore",
   };
 }
 

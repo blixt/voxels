@@ -74,6 +74,7 @@ import {
   selectRpgQuestHookForExploration,
   type RpgQuestHookSummary,
 } from "../engine/rpg-quests.ts";
+import { buildRpgQuestTopicInteractionCandidate } from "../engine/rpg-quest-topics.ts";
 import {
   atlasMetersToWorldUnits,
   findConnectedAtlasCaveAnchors,
@@ -3102,7 +3103,6 @@ export class GameController {
     const prompt = target?.prompts.find((candidate) => !candidate.disabled) ?? null;
     if (!target || !prompt) {
       const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
-      const primaryFaction = encounter.factionHints[0]?.factionId ?? null;
       const scoutResult = describeRpgEncounterScoutResult(encounter);
       const nearestPassiveMob = this.samplePassiveMobSightings()[0] ?? null;
       this.explorationEventLog.record({
@@ -3133,7 +3133,6 @@ export class GameController {
           caveSystemId: nearestPassiveMob?.caveSystemId ?? encounter.caveSystemId,
         },
       });
-      this.observeActiveQuestStep(currentWorld, discovery, encounter, primaryFaction, null, null, ["listen"]);
       this.lastInteractionLabel = nearestPassiveMob
         ? `Sighted ${nearestPassiveMob.speciesName}`
         : `${scoutResult.label}: ${scoutResult.pressureLabel}`;
@@ -3177,6 +3176,7 @@ export class GameController {
       encounter.factionHints[0]?.factionId ?? null,
       target.id,
       routeId,
+      prompt.eventInput.payload,
       ["listen", "inspect", "interpret", "report"],
     );
     const completedTitle = result.completedGoalIds
@@ -3278,6 +3278,8 @@ export class GameController {
     const forward = buildFirstPersonCameraMatrices(this.camera, 1).forward;
     const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
     const skillGates = describeInteractionSkillGates(readInteractionSkillGateSource(this.skillJournal.getSnapshot()));
+    const routeSnapshot = this.routeJournal.getSnapshot();
+    const primaryFaction = encounter.factionHints[0]?.factionId ?? null;
     const cavePassageCandidate = this.buildCavePassageInteractionCandidate(forward);
     const caveExitCandidate = this.buildCaveExitInteractionCandidate(forward);
     if (
@@ -3291,6 +3293,20 @@ export class GameController {
     const caveMouthCandidate = buildCaveMouthInteractionCandidate(currentWorld, encounter, skillGates);
     if (caveMouthCandidate) {
       candidates.push(caveMouthCandidate);
+    }
+    const activeQuest = this.selectActiveQuestHook(currentWorld, discovery, routeSnapshot, encounter, primaryFaction);
+    const questTopicCandidate = buildRpgQuestTopicInteractionCandidate({
+      quest: activeQuest,
+      regionId: encounter.regionId,
+      routeId: encounter.routeId,
+      worldPosition: [
+        this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.3),
+        currentWorld.probe.surfaceY,
+        this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.3),
+      ],
+    });
+    if (questTopicCandidate) {
+      candidates.push(questTopicCandidate);
     }
     for (const landmarkId of uniqueLandmarkIds) {
       const presentation = describeDiscovery("landmark", landmarkId);
@@ -4723,6 +4739,7 @@ export class GameController {
     primaryFaction: string | null,
     targetId: string | null,
     routeId: string | null,
+    payload: unknown,
     allowedKinds: readonly TravelGoalStepKind[],
   ): TravelGoalProgressResult | null {
     const activeQuest = this.selectActiveQuestHook(
@@ -4735,7 +4752,7 @@ export class GameController {
     if (!activeQuest || !allowedKinds.includes(activeQuest.objectiveKind)) {
       return null;
     }
-    if (!questObjectiveMatchesInteraction(activeQuest, targetId, routeId)) {
+    if (!questObjectiveMatchesInteraction(activeQuest, targetId, routeId, payload)) {
       return null;
     }
     return this.observeTravelGoalProgress({
@@ -5074,16 +5091,32 @@ function questObjectiveMatchesInteraction(
   quest: RpgQuestHookSummary,
   targetId: string | null,
   routeId: string | null,
+  payload: unknown,
 ): boolean {
+  const payloadHookId = readPayloadString(payload, "hookId");
+  const payloadObjectiveId = readPayloadString(payload, "objectiveId");
+  const payloadTargetId = readPayloadString(payload, "objectiveTargetId");
+  const payloadRouteId = readPayloadRouteId(payload);
+  if (payloadHookId || payloadObjectiveId) {
+    return payloadHookId === quest.hookId
+      && payloadObjectiveId === quest.objectiveId
+      && (
+        payloadTargetId === quest.objectiveTargetId
+        || payloadRouteId === quest.objectiveTargetId
+        || routeId === quest.objectiveTargetId
+      );
+  }
+  const matchedTargetId = payloadTargetId ?? targetId;
+  const matchedRouteId = payloadRouteId ?? routeId;
   switch (quest.objectiveKind) {
     case "listen":
-      return true;
+      return matchedTargetId === quest.objectiveTargetId || matchedRouteId === quest.objectiveTargetId;
     case "inspect":
     case "interpret":
-      return targetId === quest.objectiveTargetId;
+      return matchedTargetId === quest.objectiveTargetId;
     case "report":
     case "visit":
-      return targetId === quest.objectiveTargetId || routeId === quest.objectiveTargetId;
+      return matchedTargetId === quest.objectiveTargetId || matchedRouteId === quest.objectiveTargetId;
   }
 }
 
