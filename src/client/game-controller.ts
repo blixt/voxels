@@ -3377,9 +3377,10 @@ export class GameController {
       encounter,
       this.lastTravelContext,
     );
+    const anchoredForage = Boolean(worldSystems.area.forageSourceLandmarkId);
     const forageSite = sampleForageSiteWorldUnits(
-      this.player.feetPosition[0],
-      this.player.feetPosition[2],
+      anchoredForage ? this.player.feetPosition[0] + forward[0] * metersToWorldUnits(1.5) : this.player.feetPosition[0],
+      anchoredForage ? this.player.feetPosition[2] + forward[2] * metersToWorldUnits(1.5) : this.player.feetPosition[2],
       worldSystems.area,
     );
     const lootState = getLootJournalCandidateState(this.explorationEventLog.getSnapshot(), {
@@ -3400,11 +3401,11 @@ export class GameController {
         forageSite.z,
       ],
       interactionRadiusMeters: forageSite.interactionRadiusWorldUnits,
-      priority: 1,
+      priority: forageSite.anchoredToVisibleLandmark ? 7 : 1,
       prompts: [{
         verb: "use",
         label: exactLootRevisit ? `Revisit ${forageSite.name}` : worldSystems.area.lootInteractionLabel,
-        description: describeLootCandidatePrompt(forageSite.fieldNote, lootState, skillGates),
+        description: describeLootCandidatePrompt(forageSite.fieldNote, lootState, skillGates, forageSite.sourceLandmarkId),
       }],
       flavorText: forageSite.fieldNote,
       occurrenceId: exactLootRevisit ? `revisit-${lootState.eventCount + 1}` : null,
@@ -3426,6 +3427,8 @@ export class GameController {
         lootJournalMatch: lootState.match,
         previousFindNote: lootState.lastNote,
         skillGateHint: skillGates.forageHint,
+        sourceLandmarkId: forageSite.sourceLandmarkId,
+        anchoredToVisibleLandmark: forageSite.anchoredToVisibleLandmark,
         forageSourceLandmarkId: worldSystems.area.forageSourceLandmarkId,
         weather: worldSystems.weather.id,
         hazard: worldSystems.area.hazardLabel,
@@ -5033,8 +5036,9 @@ function describeLootCandidatePrompt(
   fieldNote: string,
   state: LootJournalCandidateState,
   skillGates: InteractionSkillGateHints,
+  sourceLandmarkId: string | null,
 ): string {
-  const skillHint = skillGates.forageHint;
+  const skillHint = describeForageSkillHint(skillGates, sourceLandmarkId);
   if (!state.collected) {
     return `${fieldNote} ${skillHint}`;
   }
@@ -5044,6 +5048,15 @@ function describeLootCandidatePrompt(
       : `Already searched here. ${skillHint}`;
   }
   return `${fieldNote} Similar find recorded: ${state.lastNote ?? state.lootId ?? "known cache"}. ${skillHint}`;
+}
+
+function describeForageSkillHint(skillGates: InteractionSkillGateHints, sourceLandmarkId: string | null): string {
+  if (!sourceLandmarkId) {
+    return skillGates.forageHint;
+  }
+  return skillGates.canIdentifyForageQuality
+    ? `${skillGates.forageHint} The visible ${formatDiscoveryName("landmark", sourceLandmarkId)} shows whether this cut is ripe, safe, or depleted.`
+    : `${skillGates.forageHint} The visible ${formatDiscoveryName("landmark", sourceLandmarkId)} has readable growth signs you cannot fully judge yet.`;
 }
 
 function formatLootJournalStateLabel(collectedCaches: number, revisitedCaches: number): string {

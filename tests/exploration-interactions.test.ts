@@ -273,6 +273,56 @@ test("interaction resolver surfaces visible cave mouths ahead of generic mob tra
   });
 });
 
+test("interaction resolver keeps plant forage payloads stable below mob trails", () => {
+  const resolution = resolveExplorationInteractionTarget({
+    viewerPosition: [0, 0, 0],
+    viewerForward: [0, 0, 1],
+    candidates: [
+      {
+        id: "berry-bush-forage:berry_bush:0:0",
+        subjectType: "object",
+        name: "Berry Bush Forage",
+        role: "loot-cache",
+        priority: 7,
+        worldPosition: [0, 0, 1],
+        prompts: [{ verb: "use", label: "Pick berry bush forage" }],
+        payload: {
+          lootId: "berry-bush-forage",
+          categoryId: "vegetation-forage",
+          sourceLandmarkId: "berry_bush",
+          anchoredToVisibleLandmark: true,
+        },
+      },
+      {
+        id: "kwama-brood:0:0",
+        subjectType: "mob",
+        name: "Kwama Brood",
+        role: "mob-trail",
+        priority: 8,
+        worldPosition: [0, 0, 1.2],
+        prompts: ["inspect"],
+      },
+    ],
+  });
+
+  expect(resolution.candidates.map((candidate) => candidate.id)).toEqual([
+    "kwama-brood:0:0",
+    "berry-bush-forage:berry_bush:0:0",
+  ]);
+  expect(resolution.candidates[1]?.prompts[0]?.eventInput).toMatchObject({
+    kind: "use",
+    subjectType: "object",
+    subjectId: "berry-bush-forage:berry_bush:0:0",
+    role: "loot-cache",
+    payload: {
+      lootId: "berry-bush-forage",
+      categoryId: "vegetation-forage",
+      sourceLandmarkId: "berry_bush",
+      anchoredToVisibleLandmark: true,
+    },
+  });
+});
+
 test("interaction resolver keeps cave passage use payloads stable", () => {
   const resolution = resolveExplorationInteractionTarget({
     viewerPosition: [0, 0, 0],

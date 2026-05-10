@@ -52,3 +52,38 @@ test("forage site roles keep reagents caches relics and salvage distinct", () =>
   ]);
   expect(new Set(samples.map((site) => site.id)).size).toBe(samples.length);
 });
+
+test("vegetation forage sites anchor to visible source landmarks", () => {
+  const worldX = metersToWorldUnits(12);
+  const worldZ = metersToWorldUnits(-18);
+  const first = sampleForageSiteWorldUnits(worldX, worldZ, {
+    lootId: "berry-bush-forage",
+    lootName: "Berry Bush Forage",
+    forageSourceLandmarkId: "berry_bush",
+  });
+  const second = sampleForageSiteWorldUnits(worldX, worldZ, {
+    lootId: "berry-bush-forage",
+    lootName: "Berry Bush Forage",
+    forageSourceLandmarkId: "berry_bush",
+  });
+  const generic = sampleForageSiteWorldUnits(worldX, worldZ, {
+    lootId: "berry-bush-forage",
+    lootName: "Berry Bush Forage",
+  });
+
+  expect(second).toEqual(first);
+  expect(first).toMatchObject({
+    id: `berry-bush-forage:berry_bush:${first.cellX}:${first.cellZ}`,
+    role: "vegetation-forage",
+    name: "Berry Bush Forage",
+    x: worldX,
+    z: worldZ,
+    sourceLandmarkId: "berry_bush",
+    anchoredToVisibleLandmark: true,
+    clueLabel: "berry bush field sign",
+  });
+  expect(first.fieldNote).toContain("visible on the berry bush");
+  expect(generic.id).not.toBe(first.id);
+  expect(generic.role).toBe("forage-patch");
+  expect(generic.anchoredToVisibleLandmark).toBe(false);
+});

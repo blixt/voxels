@@ -121,6 +121,51 @@ test("loot journal candidate lookup falls back through loot id and category", ()
   });
 });
 
+test("loot journal recognizes anchored plant forage revisits", () => {
+  const log = new ExplorationEventLog();
+
+  log.replay([
+    loot("berry-bush-forage:berry_bush:4:0", {
+      lootId: "berry-bush-forage",
+      categoryId: "vegetation-forage",
+      sourceLandmarkId: "berry_bush",
+      anchoredToVisibleLandmark: true,
+      fieldNote: "Berry Bush Forage is visible on the berry bush.",
+    }),
+    loot("berry-bush-forage:berry_bush:4:0", {
+      lootId: "berry-bush-forage",
+      categoryId: "vegetation-forage",
+      sourceLandmarkId: "berry_bush",
+      anchoredToVisibleLandmark: true,
+      fieldNote: "Only stripped stems remain.",
+    }, "revisit-2"),
+  ]);
+
+  const state = getLootJournalCandidateState(log.getSnapshot(), {
+    subjectId: "berry-bush-forage:berry_bush:4:0",
+    lootId: "berry-bush-forage",
+    categoryId: "vegetation-forage",
+  });
+  const similarPlant = getLootJournalCandidateState(log.getSnapshot(), {
+    subjectId: "berry-bush-forage:berry_bush:5:0",
+    lootId: "berry-bush-forage",
+    categoryId: "vegetation-forage",
+  });
+
+  expect(state).toMatchObject({
+    collected: true,
+    revisited: true,
+    eventCount: 2,
+    match: "subject",
+    lastNote: "Only stripped stems remain.",
+  });
+  expect(similarPlant).toMatchObject({
+    collected: true,
+    match: "loot-id",
+    matchedSubjectId: "berry-bush-forage:berry_bush:4:0",
+  });
+});
+
 test("empty loot journal returns empty state and candidate misses", () => {
   const log = new ExplorationEventLog();
   log.record({

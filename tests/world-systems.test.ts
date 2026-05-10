@@ -59,6 +59,27 @@ test("visible vegetation landmarks produce specific forage signals", () => {
   expect(systems.area.lootInteractionLabel).toBe("Pick berry bush forage");
 });
 
+test("vegetation forage signals stay tied to their visible landmark source", () => {
+  const generator = new ProceduralWorldGenerator(1337);
+  const baseProbe = generator.sampleBiomeProbe(0, 0);
+  const ambient = resolveAmbientWorldProfile(baseProbe);
+  const encounter = sampleRpgEncounterWorldUnits(0, 0);
+
+  const glowcap = sampleWorldSystems(180, {
+    ...baseProbe,
+    landmarkId: "glowcap" as LandmarkId,
+  }, ambient, encounter, "surface");
+  const cactus = sampleWorldSystems(180, {
+    ...baseProbe,
+    landmarkId: "cactus" as LandmarkId,
+  }, ambient, encounter, "surface");
+
+  expect(glowcap.area.forageSourceLandmarkId).toBe("glowcap");
+  expect(glowcap.area.lootId).toBe("glowcap-reagents");
+  expect(cactus.area.forageSourceLandmarkId).toBe("cactus");
+  expect(cactus.area.lootId).toBe("cactus-pulp");
+});
+
 test("world atmosphere darkens and tightens fog at night without expanding fog culling distance", () => {
   const generator = new ProceduralWorldGenerator(1337);
   const probe = generator.sampleBiomeProbe(0, 0);
