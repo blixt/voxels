@@ -44,6 +44,10 @@ import { summarizeBestiary } from "../engine/bestiary-journal.ts";
 import { findSafeCaveEntryFeetPosition } from "../engine/cave-traversal.ts";
 import { describeNavigationBearing } from "../engine/navigation-bearing.ts";
 import {
+  samplePassiveMobSightingsWorldUnits,
+  type PassiveMobSighting,
+} from "../engine/passive-mob-sim.ts";
+import {
   SkillJournal,
   type SkillId,
   type SkillJournalState,
@@ -168,6 +172,8 @@ const DEFAULT_MAX_LOD_CHUNKS_PER_FRAME = 1;
 const DEFAULT_MAX_LOD_ADOPTIONS_PER_FRAME = 1;
 const DEFAULT_MAX_LOD_PLAN_MS_PER_FRAME = 3;
 const DEFAULT_MAX_LOD_WORK_MS_PER_FRAME = 8;
+const PASSIVE_MOB_SIGHTING_RADIUS_WORLD_UNITS = metersToWorldUnits(96);
+const PASSIVE_MOB_SIGHTING_CAP = 6;
 const MOVING_LOD_UPDATE_INTERVAL_FRAMES = 4;
 const MOVING_MAX_RESIDENCY_PLAN_MS_PER_FRAME = 5;
 const MOVING_MAX_EVICT_CHUNKS_PER_FRAME = 32;
@@ -294,6 +300,13 @@ export interface GameHudSnapshot {
   encounterPressureLabel: string;
   encounterFactionLabel: string;
   encounterFlavorLabel: string;
+  passiveMobSightingCount: number;
+  passiveMobNearestId: string | null;
+  passiveMobNearestLabel: string;
+  passiveMobNearestDetailLabel: string;
+  passiveMobNearestDistanceMeters: number | null;
+  passiveMobNearestFactionLabel: string;
+  passiveMobNearestMoodLabel: string;
   bestiarySightingCount: number;
   bestiaryEntryCount: number;
   bestiarySummaryLabel: string;
@@ -1224,6 +1237,8 @@ export class GameController {
     const eventLog = this.explorationEventLog.getSnapshot();
     const fieldKit = summarizeFieldKit(eventLog);
     const bestiary = summarizeBestiary(eventLog);
+    const passiveMobSightings = this.samplePassiveMobSightings();
+    const nearestPassiveMob = passiveMobSightings[0] ?? null;
     const activeExplorationHud = this.buildActiveExplorationHudState(currentWorld, discovery, routeSnapshot, encounter);
     const activeQuest = this.selectActiveQuestHook(currentWorld, discovery, routeSnapshot, encounter, primaryFaction);
     const bootstrap = this.getBootstrapReadiness();
@@ -1296,6 +1311,13 @@ export class GameController {
       encounterPressureLabel: scoutResult.pressureLabel,
       encounterFactionLabel: primaryFaction ? describeRpgEncounterFaction(primaryFaction) : "No dominant faction",
       encounterFlavorLabel: encounter.flavorTags.slice(0, 2).map(formatEncounterFlavorTag).join(" • "),
+      passiveMobSightingCount: passiveMobSightings.length,
+      passiveMobNearestId: nearestPassiveMob?.id ?? null,
+      passiveMobNearestLabel: formatPassiveMobPresenceLabel(nearestPassiveMob),
+      passiveMobNearestDetailLabel: nearestPassiveMob?.label ?? "No passive mob nearby",
+      passiveMobNearestDistanceMeters: nearestPassiveMob ? worldUnitsToMeters(nearestPassiveMob.distanceWorldUnits) : null,
+      passiveMobNearestFactionLabel: nearestPassiveMob?.factionName ?? "No nearby faction",
+      passiveMobNearestMoodLabel: nearestPassiveMob?.moodName ?? "No nearby mob mood",
       bestiarySightingCount: bestiary.totalSightings,
       bestiaryEntryCount: bestiary.entryCount,
       bestiarySummaryLabel: bestiary.summaryLabel,
@@ -3051,27 +3073,42 @@ export class GameController {
       const encounter = sampleRpgEncounterWorldUnits(this.player.feetPosition[0], this.player.feetPosition[2]);
       const primaryFaction = encounter.factionHints[0]?.factionId ?? null;
       const scoutResult = describeRpgEncounterScoutResult(encounter);
+      const nearestPassiveMob = this.samplePassiveMobSightings()[0] ?? null;
       this.explorationEventLog.record({
         kind: "encounter",
         subjectType: "mob",
-        subjectId: encounter.factionHints[0]?.factionId ?? encounter.moodId,
-        role: encounter.moodId,
-        name: scoutResult.label,
-        flavorText: scoutResult.detail,
-        worldPosition: [...this.player.feetPosition],
+        subjectId: nearestPassiveMob ? nearestPassiveMob.id : encounter.factionHints[0]?.factionId ?? encounter.moodId,
+        role: nearestPassiveMob ? "passive-sighting" : encounter.moodId,
+        name: nearestPassiveMob?.name ?? scoutResult.label,
+        flavorText: nearestPassiveMob
+          ? `${nearestPassiveMob.label} is moving through the nearby terrain.`
+          : scoutResult.detail,
+        worldPosition: nearestPassiveMob
+          ? [nearestPassiveMob.position[0], this.player.feetPosition[1], nearestPassiveMob.position[2]]
+          : [...this.player.feetPosition],
         repeatable: true,
         payload: {
-          factionId: encounter.factionHints[0]?.factionId ?? null,
+          factionId: nearestPassiveMob?.factionId ?? encounter.factionHints[0]?.factionId ?? null,
+          speciesId: nearestPassiveMob?.speciesId ?? null,
+          speciesName: nearestPassiveMob?.speciesName ?? null,
+          distanceMeters: nearestPassiveMob ? Number(worldUnitsToMeters(nearestPassiveMob.distanceWorldUnits).toFixed(1)) : null,
+          fieldNote: nearestPassiveMob
+            ? `${nearestPassiveMob.label} sighted ${formatPassiveMobDistance(worldUnitsToMeters(nearestPassiveMob.distanceWorldUnits))} away.`
+            : scoutResult.detail,
           pressure: Number(encounter.pressure.toFixed(3)),
-          moodId: encounter.moodId,
-          regionId: encounter.regionId,
-          routeId: encounter.routeId,
-          caveSystemId: encounter.caveSystemId,
+          moodId: nearestPassiveMob?.moodId ?? encounter.moodId,
+          regionId: nearestPassiveMob?.regionId ?? encounter.regionId,
+          routeId: nearestPassiveMob?.routeId ?? encounter.routeId,
+          caveSystemId: nearestPassiveMob?.caveSystemId ?? encounter.caveSystemId,
         },
       });
       this.observeActiveQuestStep(currentWorld, discovery, encounter, primaryFaction, null, null, ["listen"]);
-      this.lastInteractionLabel = `${scoutResult.label}: ${scoutResult.pressureLabel}`;
-      this.status = scoutResult.detail;
+      this.lastInteractionLabel = nearestPassiveMob
+        ? `Sighted ${nearestPassiveMob.speciesName}`
+        : `${scoutResult.label}: ${scoutResult.pressureLabel}`;
+      this.status = nearestPassiveMob
+        ? `${nearestPassiveMob.label} ${formatPassiveMobDistance(worldUnitsToMeters(nearestPassiveMob.distanceWorldUnits))} away.`
+        : scoutResult.detail;
       this.pushHud(true);
       return;
     }
@@ -3179,6 +3216,17 @@ export class GameController {
       maxDistanceMeters: metersToWorldUnits(8),
       candidates: this.buildExplorationInteractionCandidates(currentWorld, discovery),
     });
+  }
+
+  private samplePassiveMobSightings(): readonly PassiveMobSighting[] {
+    return samplePassiveMobSightingsWorldUnits(
+      this.player.feetPosition[0],
+      this.player.feetPosition[2],
+      {
+        radiusWorldUnits: PASSIVE_MOB_SIGHTING_RADIUS_WORLD_UNITS,
+        cap: PASSIVE_MOB_SIGHTING_CAP,
+      },
+    );
   }
 
   private buildExplorationInteractionCandidates(
@@ -4753,6 +4801,36 @@ function countEventsBySubjectRole(
 function countMobSignEvents(snapshot: ExplorationEventLogSnapshot): number {
   const mobSignRoles = new Set(["mob-trail", "mob-spoor", "mob-nest", "mob-lair"]);
   return snapshot.events.filter((event) => event.subjectType === "mob" && event.role !== null && mobSignRoles.has(event.role)).length;
+}
+
+function formatPassiveMobPresenceLabel(sighting: PassiveMobSighting | null): string {
+  if (!sighting) {
+    return "No passive mob nearby";
+  }
+  return `${formatPassiveMobShortSpecies(sighting.speciesName)} ${formatPassiveMobDistance(worldUnitsToMeters(sighting.distanceWorldUnits))}`;
+}
+
+function formatPassiveMobDistance(distanceMeters: number): string {
+  if (distanceMeters < 10) {
+    return `${distanceMeters.toFixed(1)} m`;
+  }
+  if (distanceMeters < 1000) {
+    return `${Math.round(distanceMeters)} m`;
+  }
+  return `${(distanceMeters / 1000).toFixed(1)} km`;
+}
+
+function formatPassiveMobShortSpecies(speciesName: string): string {
+  if (speciesName.includes("Kwama")) return "Kwama";
+  if (speciesName.includes("Guar")) return "Guar";
+  if (speciesName.includes("Pilgrim")) return "Pilgrim";
+  if (speciesName.includes("Runner")) return "Runner";
+  if (speciesName.includes("Forager")) return "Forager";
+  if (speciesName.includes("Sentry")) return "Sentry";
+  if (speciesName.includes("Guide")) return "Guide";
+  if (speciesName.includes("Vagrant")) return "Vagrant";
+  if (speciesName.includes("Grazer")) return "Grazer";
+  return speciesName;
 }
 
 function buildQuestTravelGoals(): readonly TravelGoalDefinition[] {

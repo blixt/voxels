@@ -45,6 +45,13 @@ test("RPG HUD renders place route interaction and skill snapshot fields", () => 
     "encounterMoodLabel",
     "encounterPressureLabel",
     "encounterFactionLabel",
+    "passiveMobSightingCount",
+    "passiveMobNearestId",
+    "passiveMobNearestLabel",
+    "passiveMobNearestDetailLabel",
+    "passiveMobNearestDistanceMeters",
+    "passiveMobNearestFactionLabel",
+    "passiveMobNearestMoodLabel",
     "bestiarySightingCount",
     "bestiaryEntryCount",
     "bestiarySummaryLabel",
@@ -91,8 +98,10 @@ test("client wires pure exploration interaction and travel goal systems", () => 
 
   expect(gameController).toContain("resolveExplorationInteractionTarget");
   expect(gameController).toContain("describeNavigationBearing");
+  expect(gameController).toContain("samplePassiveMobSightingsWorldUnits");
   expect(gameController).toContain("navigation ? \"interaction-target\" : null");
   expect(gameClient).toContain("snapshot.navigationBearingLabel ? ` • ${snapshot.navigationBearingLabel}` : \"\"");
+  expect(gameClient).toContain("snapshot.passiveMobSightingCount > 0 ? ` • ${snapshot.passiveMobNearestLabel}` : \"\"");
   expect(gameController).toContain("new ExplorationEventLog");
   expect(gameController).toContain("explorationEventLog.record");
   expect(gameController).toContain("observeSkillAwards");

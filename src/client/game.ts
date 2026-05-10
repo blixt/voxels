@@ -461,6 +461,8 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
         : snapshot.interactionPromptLabel;
       skill.textContent = `${snapshot.focusSkillName} ${snapshot.focusSkillLevel} • ${snapshot.timeOfDayLabel}${
         snapshot.fieldKitFindCount > 0 ? ` • ${snapshot.fieldKitSummaryLabel}` : ""
+      }${
+        snapshot.passiveMobSightingCount > 0 ? ` • ${snapshot.passiveMobNearestLabel}` : ""
       }`;
       progress.setAttribute("aria-label", `${snapshot.activeTravelGoalTitle} ${snapshot.activeRouteProgressLabel}`);
       progressFill.style.transform = `scaleX(${Math.max(0, Math.min(1, snapshot.activeTravelGoalProgressRatio))})`;
@@ -503,6 +505,13 @@ function createInteractionHudView(root: HTMLElement): InteractionHudView {
         snapshot.encounterPressureLabel,
         snapshot.encounterFactionLabel,
         snapshot.encounterFlavorLabel,
+        `${snapshot.passiveMobSightingCount} passive mob sightings nearby`,
+        snapshot.passiveMobNearestId,
+        snapshot.passiveMobNearestLabel,
+        snapshot.passiveMobNearestDetailLabel,
+        snapshot.passiveMobNearestDistanceMeters === null ? null : `${snapshot.passiveMobNearestDistanceMeters.toFixed(1)} m passive mob exact`,
+        snapshot.passiveMobNearestFactionLabel,
+        snapshot.passiveMobNearestMoodLabel,
         `${snapshot.bestiarySightingCount} bestiary sightings`,
         `${snapshot.bestiaryEntryCount} bestiary entries`,
         snapshot.bestiarySummaryLabel,
