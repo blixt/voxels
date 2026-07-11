@@ -343,6 +343,27 @@ impl StreamScheduler {
         }
     }
 
+    /// Returns a matching in-flight job to its queue without advancing its revision. Hosts use
+    /// this for transient resource pressure such as a failed GPU arena allocation.
+    pub fn retry(&mut self, ticket: WorkTicket) -> CompletionStatus {
+        let key = coord_key(ticket.coord);
+        let queued = match self.entries.get(&key).map(|entry| entry.state) {
+            Some(State::Generating(active)) if active == ticket => Some(State::QueuedGeneration),
+            Some(State::Meshing(active)) if active == ticket => Some(State::QueuedMeshing),
+            Some(State::Uploading(active)) if active == ticket => Some(State::QueuedUpload),
+            _ => None,
+        };
+        if let Some(queued) = queued {
+            if let Some(entry) = self.entries.get_mut(&key) {
+                entry.state = queued;
+            }
+            CompletionStatus::Accepted
+        } else {
+            self.stale_completions = increment_nonzero(self.stale_completions);
+            CompletionStatus::Stale
+        }
+    }
+
     /// Invalidates every mesh whose faces can be affected by an edit. The edited chunk and any
     /// boundary neighbors retain generated voxel data when available; generation already in flight
     /// is restarted under a new revision.
@@ -783,5 +804,29 @@ mod tests {
             scheduler.status(origin).map(|status| status.state),
             Some(ChunkState::QueuedGeneration)
         );
+    }
+
+    #[test]
+    fn transient_failure_requeues_the_same_revision_with_a_new_ticket() {
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: 1,
+        });
+        let coord = ChunkCoord::new(0, 0, 0);
+        scheduler.update_focus(coord);
+        let first = scheduler.schedule_frame(FrameBudget {
+            generation: 1,
+            ..FrameBudget::default()
+        });
+        let ticket = first.generation[0];
+        assert_eq!(scheduler.retry(ticket), CompletionStatus::Accepted);
+        let second = scheduler.schedule_frame(FrameBudget {
+            generation: 1,
+            ..FrameBudget::default()
+        });
+        assert_eq!(second.generation[0].revision, ticket.revision);
+        assert_ne!(second.generation[0].serial, ticket.serial);
     }
 }

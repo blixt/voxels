@@ -169,10 +169,21 @@ mod web {
                 let Some(quads) = quads else {
                     continue;
                 };
-                self.renderer
+                if self
+                    .renderer
                     .borrow_mut()
-                    .upload_chunk(ticket.coord, &quads);
-                let _ = self.scheduler.borrow_mut().complete(ticket);
+                    .upload_chunk(ticket.coord, &quads)
+                {
+                    let _ = self.scheduler.borrow_mut().complete(ticket);
+                } else {
+                    self.pending_meshes
+                        .borrow_mut()
+                        .insert(coord_key(ticket.coord), quads);
+                    let _ = self.scheduler.borrow_mut().retry(ticket);
+                    web_sys::console::error_1(&JsValue::from_str(
+                        "voxel mesh arena allocation failed; upload requeued",
+                    ));
+                }
             }
             let evictions = self.scheduler.borrow_mut().drain_evictions();
             if !evictions.is_empty() {
@@ -289,9 +300,10 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 10], |engine| {
+            let values = self.engine.as_ref().map_or([0.0; 16], |engine| {
                 let camera = engine.camera.borrow();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
+                let render = engine.renderer.borrow().diagnostics();
                 [
                     camera.position.x,
                     camera.position.y,
@@ -303,6 +315,14 @@ mod web {
                     engine.edits.borrow().len() as f32,
                     diagnostics.resident as f32,
                     diagnostics.tracked as f32,
+                    render.visible_chunks as f32,
+                    render.draw_calls as f32,
+                    render.arena_pages as f32,
+                    render.arena_allocated_bytes as f32 / (1024.0 * 1024.0),
+                    render.arena_capacity_bytes as f32 / (1024.0 * 1024.0),
+                    (diagnostics.generation.queued
+                        + diagnostics.meshing.queued
+                        + diagnostics.upload.queued) as f32,
                 ]
             });
             Float32Array::from(values.as_slice())

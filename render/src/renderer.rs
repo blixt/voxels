@@ -1,3 +1,4 @@
+use crate::arena::{Allocation, ArenaAllocator};
 use bytemuck::{Pod, Zeroable};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use wgpu::{
 
 const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 const WORLD_RADIUS_CHUNKS: i32 = 3;
+const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -34,8 +36,19 @@ struct GpuQuad {
 const _: () = assert!(size_of::<GpuQuad>() == 28);
 
 struct ChunkMesh {
-    buffer: Buffer,
+    allocation: Allocation,
     quad_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenderDiagnostics {
+    pub resident_chunks: u32,
+    pub visible_chunks: u32,
+    pub draw_calls: u32,
+    pub quads: u32,
+    pub arena_pages: u32,
+    pub arena_capacity_bytes: u64,
+    pub arena_allocated_bytes: u64,
 }
 
 pub struct Renderer {
@@ -48,8 +61,11 @@ pub struct Renderer {
     frame_buffer: Buffer,
     frame_bind_group: BindGroup,
     chunks: BTreeMap<(i32, i32, i32), ChunkMesh>,
+    arena: ArenaAllocator,
+    arena_buffers: Vec<Buffer>,
     depth_view: TextureView,
     time: f32,
+    diagnostics: RenderDiagnostics,
 }
 
 impl Renderer {
@@ -178,8 +194,11 @@ impl Renderer {
             frame_buffer,
             frame_bind_group,
             chunks: BTreeMap::new(),
+            arena: ArenaAllocator::new(ARENA_PAGE_BYTES, 4),
+            arena_buffers: Vec::new(),
             depth_view,
             time: 0.0,
+            diagnostics: RenderDiagnostics::default(),
         })
     }
 
@@ -197,11 +216,15 @@ impl Renderer {
         self.chunks.values().map(|chunk| chunk.quad_count).sum()
     }
 
-    pub fn upload_chunk(&mut self, coord: ChunkCoord, quads: &[Quad]) {
+    pub const fn diagnostics(&self) -> RenderDiagnostics {
+        self.diagnostics
+    }
+
+    pub fn upload_chunk(&mut self, coord: ChunkCoord, quads: &[Quad]) -> bool {
         let key = (coord.x, coord.y, coord.z);
         if quads.is_empty() {
-            self.chunks.remove(&key);
-            return;
+            self.remove_chunk(coord);
+            return true;
         }
         let origin = coord.world_origin();
         let gpu_quads: Vec<_> = quads
@@ -220,29 +243,56 @@ impl Renderer {
                 material: u32::from(quad.material),
             })
             .collect();
-        let buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("streamed chunk quad instances"),
-                contents: bytemuck::cast_slice(&gpu_quads),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        self.chunks.insert(
+        let bytes = bytemuck::cast_slice(&gpu_quads);
+        let Ok(byte_len) = u32::try_from(bytes.len()) else {
+            return false;
+        };
+        let Some(allocation) = self.arena.allocate(byte_len) else {
+            return false;
+        };
+        while self.arena_buffers.len() <= allocation.page as usize {
+            let page = self.arena_buffers.len() as u16;
+            let Some(capacity) = self.arena.page_capacity(page) else {
+                let _ = self.arena.free(allocation);
+                return false;
+            };
+            self.arena_buffers
+                .push(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("voxel mesh arena page"),
+                    size: u64::from(capacity),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+        }
+        let Some(buffer) = self.arena_buffers.get(allocation.page as usize) else {
+            let _ = self.arena.free(allocation);
+            return false;
+        };
+        self.queue
+            .write_buffer(buffer, u64::from(allocation.offset), bytes);
+        let old = self.chunks.insert(
             key,
             ChunkMesh {
-                buffer,
+                allocation,
                 quad_count: gpu_quads.len() as u32,
             },
         );
+        if let Some(old) = old {
+            let _ = self.arena.free(old.allocation);
+        }
+        true
     }
 
     pub fn remove_chunk(&mut self, coord: ChunkCoord) {
-        self.chunks.remove(&(coord.x, coord.y, coord.z));
+        if let Some(chunk) = self.chunks.remove(&(coord.x, coord.y, coord.z)) {
+            let _ = self.arena.free(chunk.allocation);
+        }
     }
 
     pub fn render(&mut self, dt: f32, camera: &CameraState) {
         self.time += dt.min(0.1);
         let uniform = frame_uniform(&self.config, camera, self.time);
+        let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
         let frame = match self.surface.get_current_texture() {
@@ -291,10 +341,33 @@ impl Renderer {
             pass.set_pipeline(&self.sky_pipeline);
             pass.draw(0..3, 0..1);
             pass.set_pipeline(&self.voxel_pipeline);
-            for chunk in self.chunks.values() {
-                pass.set_vertex_buffer(0, chunk.buffer.slice(..));
+            let mut visible_chunks = 0;
+            let mut visible_quads = 0;
+            for (&key, chunk) in &self.chunks {
+                let coord = ChunkCoord::new(key.0, key.1, key.2);
+                if !chunk_visible(coord, view_projection) {
+                    continue;
+                }
+                let Some(buffer) = self.arena_buffers.get(chunk.allocation.page as usize) else {
+                    continue;
+                };
+                let start = u64::from(chunk.allocation.offset);
+                let end = start + u64::from(chunk.allocation.size);
+                pass.set_vertex_buffer(0, buffer.slice(start..end));
                 pass.draw(0..6, 0..chunk.quad_count);
+                visible_chunks += 1;
+                visible_quads += chunk.quad_count;
             }
+            let arena = self.arena.stats();
+            self.diagnostics = RenderDiagnostics {
+                resident_chunks: self.chunks.len() as u32,
+                visible_chunks,
+                draw_calls: visible_chunks,
+                quads: visible_quads,
+                arena_pages: arena.pages as u32,
+                arena_capacity_bytes: arena.capacity_bytes,
+                arena_allocated_bytes: arena.allocated_bytes,
+            };
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
@@ -302,12 +375,7 @@ impl Renderer {
 }
 
 fn frame_uniform(config: &SurfaceConfiguration, camera: &CameraState, time: f32) -> FrameUniform {
-    let aspect = config.width as f32 / config.height.max(1) as f32;
-    let projection =
-        glam::camera::rh::proj::directx::perspective(68.0f32.to_radians(), aspect, 0.01, 80.0);
-    let view =
-        glam::camera::rh::view::look_to_mat4(camera.position, camera.forward(), glam::Vec3::Y);
-    let view_projection = projection * view;
+    let view_projection = view_projection(config, camera);
     FrameUniform {
         view_projection: view_projection.to_cols_array_2d(),
         inverse_view_projection: view_projection.inverse().to_cols_array_2d(),
@@ -324,6 +392,37 @@ fn frame_uniform(config: &SurfaceConfiguration, camera: &CameraState, time: f32)
             (WORLD_RADIUS_CHUNKS + 1) as f32 * CHUNK_EDGE as f32 * VOXEL_SIZE_METRES,
         ],
     }
+}
+
+fn view_projection(config: &SurfaceConfiguration, camera: &CameraState) -> glam::Mat4 {
+    let aspect = config.width as f32 / config.height.max(1) as f32;
+    let projection =
+        glam::camera::rh::proj::directx::perspective(68.0f32.to_radians(), aspect, 0.01, 80.0);
+    let view =
+        glam::camera::rh::view::look_to_mat4(camera.position, camera.forward(), glam::Vec3::Y);
+    projection * view
+}
+
+fn chunk_visible(coord: ChunkCoord, view_projection: glam::Mat4) -> bool {
+    let origin = coord
+        .world_origin()
+        .map(|value| value as f32 * VOXEL_SIZE_METRES);
+    let edge = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
+    let mut clips = [glam::Vec4::ZERO; 8];
+    for (index, clip) in clips.iter_mut().enumerate() {
+        let corner = glam::Vec3::new(
+            origin[0] + if index & 1 == 0 { 0.0 } else { edge },
+            origin[1] + if index & 2 == 0 { 0.0 } else { edge },
+            origin[2] + if index & 4 == 0 { 0.0 } else { edge },
+        );
+        *clip = view_projection * corner.extend(1.0);
+    }
+    !clips.iter().all(|value| value.x < -value.w)
+        && !clips.iter().all(|value| value.x > value.w)
+        && !clips.iter().all(|value| value.y < -value.w)
+        && !clips.iter().all(|value| value.y > value.w)
+        && !clips.iter().all(|value| value.z < 0.0)
+        && !clips.iter().all(|value| value.z > value.w)
 }
 
 fn pipeline(
@@ -403,4 +502,23 @@ fn preferred_format(formats: &[TextureFormat]) -> TextureFormat {
                 .find(|format| *format == TextureFormat::Rgba8Unorm)
         })
         .unwrap_or(formats[0])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_view_projection(camera: &CameraState) -> glam::Mat4 {
+        glam::camera::rh::proj::directx::perspective(68.0f32.to_radians(), 1.0, 0.01, 80.0)
+            * glam::camera::rh::view::look_to_mat4(camera.position, camera.forward(), glam::Vec3::Y)
+    }
+
+    #[test]
+    fn frustum_rejects_chunks_behind_camera_and_beyond_far_plane() {
+        let camera = CameraState::spawn(glam::Vec3::new(0.0, 1.7, 0.0));
+        let matrix = test_view_projection(&camera);
+        assert!(chunk_visible(ChunkCoord::new(0, 0, -1), matrix));
+        assert!(!chunk_visible(ChunkCoord::new(0, 0, 2), matrix));
+        assert!(!chunk_visible(ChunkCoord::new(0, 0, -30), matrix));
+    }
 }
