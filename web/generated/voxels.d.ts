@@ -22,10 +22,11 @@ export interface InitOutput {
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => void;
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;
     readonly enginehandle_snapshot: (a: number) => any;
-    readonly wasm_bindgen__convert__closures_____invoke__he2c6339bddc2f20d: (a: number, b: number, c: number) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h51bac0c26d58f8ab: (a: number, b: number, c: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h047b1d66ef70cf75: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen__convert__closures_____invoke__h01edf5ea193bf9b1: (a: number, b: number, c: any, d: any) => void;
     readonly wasm_bindgen__convert__closures_____invoke__hd19213adbd3b2bc8: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__hd19213adbd3b2bc8_3: (a: number, b: number, c: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

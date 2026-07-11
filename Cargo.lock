@@ -574,6 +574,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "voxels-core",
+ "voxels-world",
  "wgpu",
 ]
 

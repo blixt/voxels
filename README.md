@@ -1,31 +1,39 @@
 # Voxels
 
-WebGPU voxel exploration game built with Bun and TypeScript.
+A Rust-first procedural voxel world rendered with WGPU/WebGPU. The browser main thread captures input
+and transfers an `OffscreenCanvas`; a dedicated worker runs the Rust/WASM simulation, generation,
+greedy meshing, rendering, and persistence boundary.
 
 ## Workflow
 
-1. Install tooling with `mise install`.
-2. Install dependencies with `bun install`.
-3. Start the app with `mise run dev`.
-4. Open `http://localhost:3000/` for the game.
-5. Build production output with `mise run build`, then run it with `mise run serve`.
+1. Install the Vite+ CLI from <https://viteplus.dev/>.
+2. Install managed Node, pnpm, and project dependencies with `vp install`.
+3. Start the app with `vp dev`.
+4. Run TypeScript checks and tests with `vp check` and `vp test`.
+5. Run host/WASM Rust tests and Clippy with `vp run check:rust`.
+6. Build production WASM and assets with `vp build`; inspect them with `vp preview`.
 
-`mise run dev` uses Bun's hot-reload/full-stack dev path, so edits to the server, page shell, CSS, and browser entrypoints update without manual cache-busting.
+`vp run verify` runs the complete TypeScript, Rust, test, lint, and production-build gate.
 
-## Current Direction
+## Architecture
 
-- The root route boots directly into the exploratory island game.
-- The world is procedurally generated and lazily streamed around the player.
-- The active direction is a coherent island RPG world with authored landmarks, biomes, caves, ambient systems, mobs, vegetation, loot, skills, and exploration-first interaction loops.
+- `core/`: portable player, input, physics, and game simulation.
+- `world/`: deterministic chunks, generation, palette/bit-packed codecs, and greedy meshing.
+- `render/`: web-free WGPU resources, pipelines, shaders, and frame rendering.
+- `shell/`: WASM/browser worker leaf, packed input decoding, display clock, and persistence seam.
+- `web/`: canvas/input harness and worker boot only.
 
-## Game Automation
+The canonical world is generator identity plus sparse edits. Meshes and future LODs are derived caches.
+See [docs/architecture.md](docs/architecture.md) for format, persistence, and research decisions.
 
-- `window.__VOXELS_GAME__.snapshot()`
-- `window.__VOXELS_GAME__.snapshotResidentWorld()`
-- `window.__VOXELS_GAME__.teleport(x, y, z)`
-- `window.__VOXELS_GAME__.teleportAndSettle(x, y, z, { radiusChunks })`
-- `window.__VOXELS_GAME__.requestPointerLock()`
-- `window.__VOXELS_GAME__.setViewDistance(chunks)`
-- `window.__VOXELS_GAME__.forceResidencyUpdate()`
-- `window.__VOXELS_GAME__.getDiscoveryJournal()`
-- `window.__VOXELS_GAME__.resetDiscoveryJournal()`
+## Controls
+
+- Click the world to capture the pointer.
+- Move with <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>.
+- Fly vertically with <kbd>Space</kbd> and <kbd>Shift</kbd>.
+- Look with the mouse; <kbd>Esc</kbd> releases pointer lock.
+
+## Automation
+
+`window.__VOXELS__.snapshot()` returns a promise containing camera position, yaw, pitch, and resident
+greedy-quad count. It is intentionally a diagnostic view rather than a second JavaScript game model.

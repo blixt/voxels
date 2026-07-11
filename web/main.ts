@@ -47,6 +47,20 @@ function start(root: HTMLElement): void {
   const worker = new Worker(new URL("./worker.ts", import.meta.url), {
     type: "module",
   }) as TypedWorker;
+  let nextSnapshotRequest = 1;
+  const snapshotResolvers = new Map<number, (values: number[]) => void>();
+  const debugGlobal = globalThis as typeof globalThis & {
+    __VOXELS__?: { snapshot(): Promise<number[]> };
+  };
+  debugGlobal.__VOXELS__ = {
+    snapshot: () =>
+      new Promise<number[]>((resolve) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        snapshotResolvers.set(requestId, resolve);
+        worker.postMessage({ kind: "snapshot", requestId });
+      }),
+  };
   worker.onmessage = (event) => {
     if (event.data.kind === "ready") {
       status.textContent = "Click to look around";
@@ -54,6 +68,9 @@ function start(root: HTMLElement): void {
       window.setTimeout(() => status.classList.add("quiet"), 1800);
     } else if (event.data.kind === "error") {
       fail(`The Rust engine could not start.\n${event.data.message}`);
+    } else if (event.data.kind === "snapshot") {
+      snapshotResolvers.get(event.data.requestId)?.(event.data.values);
+      snapshotResolvers.delete(event.data.requestId);
     }
   };
   worker.onerror = (event) => fail(event.message || "The engine worker failed to load.");
@@ -200,6 +217,7 @@ function start(root: HTMLElement): void {
   window.addEventListener("pagehide", () => {
     resize.disconnect();
     worker.postMessage({ kind: "destroy" });
+    delete debugGlobal.__VOXELS__;
   });
 }
 

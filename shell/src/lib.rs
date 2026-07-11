@@ -7,7 +7,7 @@ mod web {
     use js_sys::Float32Array;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
-    use voxels_core::CameraState;
+    use voxels_core::{CameraState, InputState};
     use voxels_render::renderer::Renderer;
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -32,10 +32,17 @@ mod web {
     const INPUT_RECORD_SIZE: usize = size_of::<InputRecord>();
     const _: () = assert!(INPUT_RECORD_SIZE == 28);
     const KIND_POINTER_MOVE: u8 = 1;
+    const KIND_KEY_DOWN: u8 = 4;
+    const KIND_KEY_UP: u8 = 5;
+
+    fn log_gpu_error(message: &str) {
+        web_sys::console::error_1(&JsValue::from_str(message));
+    }
 
     struct Engine {
         renderer: RefCell<Renderer>,
         camera: RefCell<CameraState>,
+        input: RefCell<InputState>,
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
         frame_id: Cell<i32>,
@@ -77,7 +84,9 @@ mod web {
             } else {
                 ((time - last).max(0.0) / 1000.0) as f32
             };
-            self.renderer.borrow_mut().render(dt);
+            let mut camera = self.camera.borrow_mut();
+            camera.update(&self.input.borrow(), dt);
+            self.renderer.borrow_mut().render(dt, &camera);
             if let Err(error) = self.request_frame() {
                 web_sys::console::error_1(&error);
                 self.stopped.set(true);
@@ -96,10 +105,14 @@ mod web {
         fn feed_input(&self, bytes: &[u8]) {
             for chunk in bytes.chunks_exact(INPUT_RECORD_SIZE) {
                 let record = bytemuck::pod_read_unaligned::<InputRecord>(chunk);
-                if record.kind == KIND_POINTER_MOVE {
-                    self.camera
+                match record.kind {
+                    KIND_POINTER_MOVE => self
+                        .camera
                         .borrow_mut()
-                        .look(Vec2::new(record.dx, record.dy));
+                        .look(Vec2::new(record.dx, record.dy)),
+                    KIND_KEY_DOWN => self.input.borrow_mut().set_key(record.code, true),
+                    KIND_KEY_UP => self.input.borrow_mut().set_key(record.code, false),
+                    _ => {}
                 }
             }
         }
@@ -127,7 +140,7 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 5], |engine| {
+            let values = self.engine.as_ref().map_or([0.0; 6], |engine| {
                 let camera = engine.camera.borrow();
                 [
                     camera.position.x,
@@ -135,6 +148,7 @@ mod web {
                     camera.position.z,
                     camera.yaw,
                     camera.pitch,
+                    engine.renderer.borrow().quad_count() as f32,
                 ]
             });
             Float32Array::from(values.as_slice())
@@ -163,13 +177,19 @@ mod web {
         console_error_panic_hook::set_once();
         let width = (css_width * dpr).round().max(1.0) as u32;
         let height = (css_height * dpr).round().max(1.0) as u32;
-        let renderer = Renderer::new(wgpu::SurfaceTarget::OffscreenCanvas(canvas), width, height)
-            .await
-            .map_err(|error| JsValue::from_str(&error))?;
+        let renderer = Renderer::new(
+            wgpu::SurfaceTarget::OffscreenCanvas(canvas),
+            width,
+            height,
+            log_gpu_error,
+        )
+        .await
+        .map_err(|error| JsValue::from_str(&error))?;
         let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
         let engine = Rc::new(Engine {
             renderer: RefCell::new(renderer),
             camera: RefCell::new(CameraState::default()),
+            input: RefCell::new(InputState::default()),
             scope,
             callback: RefCell::new(None),
             frame_id: Cell::new(0),
