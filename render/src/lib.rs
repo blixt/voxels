@@ -2,5 +2,6 @@
 
 mod arena;
 pub mod renderer;
+pub mod shadow;
 pub mod ui;
 mod ui_gpu;
