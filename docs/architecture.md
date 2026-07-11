@@ -48,12 +48,13 @@ separately generated tiles form a closed shell without cracks. The coarsest ring
 All surface meshes remain disposable derivatives: the generator, 10 cm voxels, and sparse edits stay
 authoritative.
 
-Coverage ownership is complementary across four short, screen-stable dither bands. The hash uses only
-world X/Z and the same threshold is applied to both representations, so every transition cell belongs
-to exactly one adjacent level. The color and shadow-caster shaders apply the same predicate, preventing
-discarded geometry from casting or overlapping LODs from double-shadowing. Trees remain canonical
-near-field geometry; they are withheld only during the first incomplete fine-field load so isolated
-crowns cannot appear before their supporting columns.
+Coverage ownership changes at four camera-centred radial cuts placed safely inside the guaranteed
+coverage overlap of adjacent levels. This exact, continuous predicate avoids the salt-and-pepper holes
+that stochastic coverage creates when two height fields disagree, while a progressively lowered coarse
+underlay hides sub-voxel cracks at each cut. The color and shadow-caster shaders apply the same
+predicate, preventing discarded geometry from casting or overlapping LODs from double-shadowing.
+Trees remain canonical near-field geometry; they are withheld only during the first incomplete
+fine-field load so isolated crowns cannot appear before their supporting columns.
 
 An edit invalidates every surface tile whose sampling footprint depends on that X/Z column. Resident
 geometry stays active while its replacement is generated and allocated, then the renderer switches

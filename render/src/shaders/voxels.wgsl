@@ -92,23 +92,18 @@ fn hash31(position: vec3<f32>) -> f32 {
   return fract(sin(value) * 43758.5453);
 }
 
-fn hash21(position: vec2<f32>) -> f32 {
-  let value = dot(position, vec2<f32>(127.1, 311.7));
-  return fract(sin(value) * 43758.5453);
-}
-
-fn coarser_owns_boundary(distance_xz: f32, cell: vec2<f32>, boundary: u32) -> bool {
-  var start = 8.0;
-  var end = 11.0;
-  var salt = 23.0;
+fn coarser_owns_boundary(distance_xz: f32, boundary: u32) -> bool {
+  // Each split sits safely inside the guaranteed coverage of both adjacent rings. A continuous
+  // radial cut keeps ownership complementary without turning height disagreement into visible
+  // salt-and-pepper holes. The lower coarse mesh remains a crack-hiding underlay at the seam.
+  var split = 9.5;
   switch boundary {
-    case 1u: { start = 21.0; end = 26.0; salt = 37.0; }
-    case 2u: { start = 44.0; end = 52.0; salt = 51.0; }
-    case 3u: { start = 88.0; end = 104.0; salt = 67.0; }
+    case 1u: { split = 23.5; }
+    case 2u: { split = 48.0; }
+    case 3u: { split = 96.0; }
     default: {}
   }
-  let blend = smoothstep(start, end, distance_xz);
-  return hash21(cell + vec2<f32>(salt)) < blend;
+  return distance_xz >= split;
 }
 
 fn owns_lod_surface(world: vec3<f32>, packed_material: u32) -> bool {
@@ -124,14 +119,13 @@ fn owns_lod_surface(world: vec3<f32>, packed_material: u32) -> bool {
     return true;
   }
   let distance_xz = distance(world.xz, frame.camera_time.xz);
-  let cell = floor(world.xz / frame.viewport_voxel.z);
   if !far_surface {
-    return !coarser_owns_boundary(distance_xz, cell, 0u);
+    return !coarser_owns_boundary(distance_xz, 0u);
   }
   let level = (packed_material >> 28u) & 3u;
-  var owns = coarser_owns_boundary(distance_xz, cell, level);
+  var owns = coarser_owns_boundary(distance_xz, level);
   if level < 3u {
-    owns = owns && !coarser_owns_boundary(distance_xz, cell, level + 1u);
+    owns = owns && !coarser_owns_boundary(distance_xz, level + 1u);
   }
   return owns;
 }
