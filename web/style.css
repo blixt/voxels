@@ -26,6 +26,20 @@ canvas {
   cursor: crosshair;
 }
 
+#app::after {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 0.72rem;
+  height: 0.72rem;
+  border: 1px solid rgb(255 255 255 / 82%);
+  border-radius: 50%;
+  box-shadow: 0 1px 5px rgb(0 0 0 / 65%);
+  translate: -50% -50%;
+  pointer-events: none;
+  content: "";
+}
+
 .status {
   position: fixed;
   left: 50%;

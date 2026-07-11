@@ -12,6 +12,84 @@ const GRAVITY: f32 = 19.5;
 const STEP_HEIGHT: f32 = 0.35;
 const COLLISION_EPSILON: f32 = 0.0001;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VoxelHit {
+    pub voxel: [i32; 3],
+    pub adjacent: [i32; 3],
+    pub normal: [i32; 3],
+    pub distance_metres: f32,
+}
+
+/// Amanatides-Woo grid traversal in metric world space. Runtime grows with crossed cells rather
+/// than distance-sampling resolution, so picking remains exact at the canonical 10 cm scale.
+pub fn raycast_voxels(
+    origin: Vec3,
+    direction: Vec3,
+    max_distance_metres: f32,
+    voxel_size_metres: f32,
+    is_solid: impl Fn(i32, i32, i32) -> bool,
+) -> Option<VoxelHit> {
+    if max_distance_metres <= 0.0 || voxel_size_metres <= 0.0 {
+        return None;
+    }
+    let direction = direction.normalize_or_zero();
+    if direction == Vec3::ZERO {
+        return None;
+    }
+    let mut voxel = (origin / voxel_size_metres).floor().as_ivec3();
+    if is_solid(voxel.x, voxel.y, voxel.z) {
+        return Some(VoxelHit {
+            voxel: voxel.to_array(),
+            adjacent: voxel.to_array(),
+            normal: [0; 3],
+            distance_metres: 0.0,
+        });
+    }
+    let step = direction.signum().as_ivec3();
+    let mut maximum = Vec3::splat(f32::INFINITY);
+    let mut delta = Vec3::splat(f32::INFINITY);
+    for axis in 0..3 {
+        if step[axis] == 0 {
+            continue;
+        }
+        let boundary = if step[axis] > 0 {
+            voxel[axis] + 1
+        } else {
+            voxel[axis]
+        } as f32
+            * voxel_size_metres;
+        maximum[axis] = (boundary - origin[axis]) / direction[axis];
+        delta[axis] = voxel_size_metres / direction[axis].abs();
+    }
+
+    loop {
+        let axis = if maximum.x <= maximum.y && maximum.x <= maximum.z {
+            0
+        } else if maximum.y <= maximum.z {
+            1
+        } else {
+            2
+        };
+        let distance = maximum[axis];
+        if distance > max_distance_metres {
+            return None;
+        }
+        let adjacent = voxel;
+        voxel[axis] += step[axis];
+        let mut normal = [0; 3];
+        normal[axis] = -step[axis];
+        if is_solid(voxel.x, voxel.y, voxel.z) {
+            return Some(VoxelHit {
+                voxel: voxel.to_array(),
+                adjacent: adjacent.to_array(),
+                normal,
+                distance_metres: distance,
+            });
+        }
+        maximum[axis] += delta[axis];
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InputState {
     forward: bool,
@@ -93,6 +171,23 @@ impl CameraState {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
         Vec3::new(sin_yaw * cos_pitch, sin_pitch, -cos_yaw * cos_pitch).normalize()
+    }
+
+    pub fn intersects_voxel(self, voxel: [i32; 3], voxel_size: f32) -> bool {
+        let feet_y = self.position.y - PLAYER_EYE_HEIGHT_METRES;
+        let player_min = Vec3::new(
+            self.position.x - PLAYER_RADIUS_METRES,
+            feet_y,
+            self.position.z - PLAYER_RADIUS_METRES,
+        );
+        let player_max = Vec3::new(
+            self.position.x + PLAYER_RADIUS_METRES,
+            feet_y + PLAYER_HEIGHT_METRES,
+            self.position.z + PLAYER_RADIUS_METRES,
+        );
+        let voxel_min = Vec3::from_array(voxel.map(|value| value as f32 * voxel_size));
+        let voxel_max = voxel_min + Vec3::splat(voxel_size);
+        player_min.cmplt(voxel_max).all() && player_max.cmpgt(voxel_min).all()
     }
 
     pub fn update(
@@ -280,5 +375,45 @@ mod tests {
         camera.grounded = true;
         camera.update(&input, 1.0 / 60.0, 0.1, |_, y, _| y < 0);
         assert!(camera.velocity.y < initial_velocity);
+    }
+
+    #[test]
+    fn dda_hits_ten_centimetre_voxel_and_reports_place_cell() {
+        let hit = raycast_voxels(Vec3::new(0.05, 0.05, 0.05), Vec3::X, 1.0, 0.1, |x, y, z| {
+            [x, y, z] == [4, 0, 0]
+        });
+        assert_eq!(
+            hit,
+            Some(VoxelHit {
+                voxel: [4, 0, 0],
+                adjacent: [3, 0, 0],
+                normal: [-1, 0, 0],
+                distance_metres: 0.35,
+            })
+        );
+    }
+
+    #[test]
+    fn dda_handles_negative_coordinates_and_range_limit() {
+        let hit = raycast_voxels(
+            Vec3::new(0.05, 0.05, 0.05),
+            -Vec3::X,
+            0.3,
+            0.1,
+            |x, _, _| x == -2,
+        );
+        assert_eq!(hit.map(|value| value.voxel), Some([-2, 0, 0]));
+        assert!(
+            raycast_voxels(Vec3::new(0.05, 0.05, 0.05), Vec3::X, 0.2, 0.1, |x, _, _| x
+                == 4)
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn placement_cannot_overlap_player() {
+        let camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
+        assert!(camera.intersects_voxel([0, 0, 0], 0.1));
+        assert!(!camera.intersects_voxel([20, 0, 0], 0.1));
     }
 }

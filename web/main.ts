@@ -63,7 +63,7 @@ function start(root: HTMLElement): void {
   };
   worker.onmessage = (event) => {
     if (event.data.kind === "ready") {
-      status.textContent = "Click to look around";
+      status.textContent = "Click to look · WASD move · Space jump · LMB remove · RMB place";
       status.classList.add("ready");
       window.setTimeout(() => status.classList.add("quiet"), 1800);
     } else if (event.data.kind === "error") {
@@ -127,10 +127,15 @@ function start(root: HTMLElement): void {
 
   canvas.addEventListener("pointerdown", (event) => {
     canvas.setPointerCapture(event.pointerId);
-    if (event.pointerType === "mouse") void canvas.requestPointerLock();
+    if (event.pointerType === "mouse" && document.pointerLockElement !== canvas) {
+      void canvas.requestPointerLock();
+      return;
+    }
     enqueue(point(event, INPUT_POINTER_DOWN), true);
   });
+  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
   canvas.addEventListener("pointermove", (event) => {
+    if (event.pointerType === "mouse" && document.pointerLockElement !== canvas) return;
     for (const sample of event.getCoalescedEvents?.() ?? [event]) {
       enqueue(point(sample, INPUT_POINTER_MOVE));
     }

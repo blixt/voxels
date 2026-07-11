@@ -3,10 +3,11 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use sqlite_wasm_vfs::sahpool::{OpfsSAHPoolCfg, install as install_opfs_sahpool};
 use voxels_core::CameraState;
+use voxels_world::{EditMap, Material, VoxelCoord};
 use wasm_bindgen::JsValue;
 
 const DATABASE_NAME: &str = "voxels.db";
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct Store {
     connection: Connection,
@@ -61,10 +62,54 @@ impl Store {
             .map(|_| ())
             .map_err(|error| js_error("save camera", error))
     }
+
+    pub fn load_edits(&self) -> Result<EditMap, JsValue> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT x, y, z, material FROM voxel_edits WHERE world_id = 0")
+            .map_err(|error| js_error("prepare edit load", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    VoxelCoord::new(row.get(0)?, row.get(1)?, row.get(2)?),
+                    row.get::<_, u16>(3)?,
+                ))
+            })
+            .map_err(|error| js_error("load edit rows", error))?;
+        let mut edits = EditMap::default();
+        for row in rows {
+            let (coord, id) = row.map_err(|error| js_error("decode edit row", error))?;
+            let material = Material::from_id(id)
+                .ok_or_else(|| JsValue::from_str(&format!("unknown material id {id}")))?;
+            edits.insert_override(coord, material);
+        }
+        Ok(edits)
+    }
+
+    pub fn save_edit(&self, coord: VoxelCoord, material: Option<Material>) -> Result<(), JsValue> {
+        if let Some(material) = material {
+            self.connection
+                .execute(
+                    "INSERT INTO voxel_edits (world_id, x, y, z, material) VALUES (0, ?1, ?2, ?3, ?4) \
+                     ON CONFLICT(world_id, x, y, z) DO UPDATE SET material=excluded.material, \
+                     updated_at=unixepoch()",
+                    params![coord.x, coord.y, coord.z, material.id()],
+                )
+                .map_err(|error| js_error("persist voxel edit", error))?;
+        } else {
+            self.connection
+                .execute(
+                    "DELETE FROM voxel_edits WHERE world_id=0 AND x=?1 AND y=?2 AND z=?3",
+                    params![coord.x, coord.y, coord.z],
+                )
+                .map_err(|error| js_error("remove reverted voxel edit", error))?;
+        }
+        Ok(())
+    }
 }
 
 fn migrate(connection: &Connection) -> Result<(), JsValue> {
-    let version: i64 = connection
+    let mut version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|error| js_error("read schema version", error))?;
     if version > SCHEMA_VERSION {
@@ -102,10 +147,20 @@ fn migrate(connection: &Connection) -> Result<(), JsValue> {
                    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
                    PRIMARY KEY (world_id, x, y, z)
                  ) WITHOUT ROWID;
-                 PRAGMA user_version=2;
+                 CREATE TABLE voxel_edits (
+                   world_id INTEGER NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+                   x INTEGER NOT NULL,
+                   y INTEGER NOT NULL,
+                   z INTEGER NOT NULL,
+                   material INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                   PRIMARY KEY (world_id, x, y, z)
+                 ) WITHOUT ROWID;
+                 PRAGMA user_version=3;
                  COMMIT;",
             )
             .map_err(|error| js_error("apply schema migration 1", error))?;
+        version = 3;
     }
     if version == 1 {
         // Schema 1 stored positions in whole-voxel units. Schema 2 uses SI metres so that the
@@ -118,6 +173,25 @@ fn migrate(connection: &Connection) -> Result<(), JsValue> {
                  COMMIT;",
             )
             .map_err(|error| js_error("apply schema migration 2", error))?;
+        version = 2;
+    }
+    if version == 2 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE voxel_edits (
+                   world_id INTEGER NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+                   x INTEGER NOT NULL,
+                   y INTEGER NOT NULL,
+                   z INTEGER NOT NULL,
+                   material INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                   PRIMARY KEY (world_id, x, y, z)
+                 ) WITHOUT ROWID;
+                 PRAGMA user_version=3;
+                 COMMIT;",
+            )
+            .map_err(|error| js_error("apply schema migration 3", error))?;
     }
     Ok(())
 }

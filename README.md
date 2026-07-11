@@ -32,10 +32,13 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 
 - Click the world to capture the pointer.
 - Move with <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>.
-- Fly vertically with <kbd>Space</kbd> and <kbd>Shift</kbd>.
+- Jump with <kbd>Space</kbd>; hold <kbd>Shift</kbd> to sprint.
 - Look with the mouse; <kbd>Esc</kbd> releases pointer lock.
+- Remove the targeted voxel with the left mouse button; place a grass voxel with the right mouse
+  button. Sparse edits are saved transactionally in SQLite on OPFS.
 
 ## Automation
 
-`window.__VOXELS__.snapshot()` returns a promise containing camera position, yaw, pitch, and resident
-greedy-quad count. It is intentionally a diagnostic view rather than a second JavaScript game model.
+`window.__VOXELS__.snapshot()` returns a promise containing camera position, yaw, pitch, grounded
+state, resident greedy-quad count, and persisted edit count. It is intentionally a diagnostic view
+rather than a second JavaScript game model.

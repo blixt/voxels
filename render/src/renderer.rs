@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use std::sync::Arc;
 use voxels_core::CameraState;
-use voxels_world::{CHUNK_EDGE, ChunkCoord, Generator, VOXEL_SIZE_METRES, mesh_chunk};
+use voxels_world::{CHUNK_EDGE, Chunk, ChunkCoord, Generator, VOXEL_SIZE_METRES, mesh_chunk};
 use wgpu::util::DeviceExt;
 use wgpu::{
     Backends, BindGroup, Buffer, CurrentSurfaceTexture, Device, DeviceDescriptor, Instance,
@@ -200,6 +200,20 @@ impl Renderer {
         self.quad_count
     }
 
+    /// Temporary whole-resident-set rebuild seam. Streaming replaces this with per-chunk arena
+    /// uploads, but keeping edit-derived meshes owned by the renderer avoids mirroring world state.
+    pub fn rebuild_world(&mut self, sample: impl Fn(i32, i32, i32) -> voxels_world::Material) {
+        let quads = build_world(sample);
+        self.quad_count = quads.len() as u32;
+        self.quad_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("edited world quad instances"),
+                contents: bytemuck::cast_slice(&quads),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+    }
+
     pub fn render(&mut self, dt: f32, camera: &CameraState) {
         self.time += dt.min(0.1);
         let uniform = frame_uniform(&self.config, camera, self.time);
@@ -261,14 +275,34 @@ impl Renderer {
 
 fn build_initial_world(seed: u64) -> Vec<GpuQuad> {
     let generator = Generator::new(seed);
+    build_world(|x, y, z| generator.sample(x, y, z))
+}
+
+fn build_world(sample: impl Fn(i32, i32, i32) -> voxels_world::Material) -> Vec<GpuQuad> {
     let mut gpu_quads = Vec::new();
     for chunk_z in -WORLD_RADIUS_CHUNKS..=WORLD_RADIUS_CHUNKS {
         for chunk_x in -WORLD_RADIUS_CHUNKS..=WORLD_RADIUS_CHUNKS {
             for chunk_y in 0..=1 {
                 let coord = ChunkCoord::new(chunk_x, chunk_y, chunk_z);
-                let chunk = generator.generate_chunk(coord);
                 let world_origin = coord.world_origin();
-                let quads = mesh_chunk(&chunk, |x, y, z| generator.sample(x, y, z));
+                let mut chunk = Chunk::empty(coord);
+                for y in 0..CHUNK_EDGE {
+                    for z in 0..CHUNK_EDGE {
+                        for x in 0..CHUNK_EDGE {
+                            chunk.set(
+                                x,
+                                y,
+                                z,
+                                sample(
+                                    world_origin[0] + x as i32,
+                                    world_origin[1] + y as i32,
+                                    world_origin[2] + z as i32,
+                                ),
+                            );
+                        }
+                    }
+                }
+                let quads = mesh_chunk(&chunk, &sample);
                 gpu_quads.extend(quads.into_iter().map(|quad| GpuQuad {
                     origin: [
                         (world_origin[0] + i32::from(quad.origin[0])) as f32 * VOXEL_SIZE_METRES,

@@ -10,9 +10,9 @@ mod web {
     use js_sys::Float32Array;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
-    use voxels_core::{CameraState, InputState};
+    use voxels_core::{CameraState, InputState, raycast_voxels};
     use voxels_render::renderer::Renderer;
-    use voxels_world::{Generator, VOXEL_SIZE_METRES};
+    use voxels_world::{EditMap, Generator, Material, VOXEL_SIZE_METRES, VoxelCoord};
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
@@ -38,6 +38,7 @@ mod web {
     const INPUT_RECORD_SIZE: usize = size_of::<InputRecord>();
     const _: () = assert!(INPUT_RECORD_SIZE == 28);
     const KIND_POINTER_MOVE: u8 = 1;
+    const KIND_POINTER_DOWN: u8 = 0;
     const KIND_KEY_DOWN: u8 = 4;
     const KIND_KEY_UP: u8 = 5;
     const KIND_CANCEL: u8 = 6;
@@ -51,6 +52,7 @@ mod web {
         camera: RefCell<CameraState>,
         input: RefCell<InputState>,
         generator: Generator,
+        edits: RefCell<EditMap>,
         store: RefCell<Store>,
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
@@ -95,9 +97,13 @@ mod web {
                 ((time - last).max(0.0) / 1000.0) as f32
             };
             let mut camera = self.camera.borrow_mut();
+            let edits = self.edits.borrow();
             camera.update(&self.input.borrow(), dt, VOXEL_SIZE_METRES, |x, y, z| {
-                self.generator.sample(x, y, z).is_solid()
+                edits
+                    .sample(self.generator, VoxelCoord::new(x, y, z))
+                    .is_solid()
             });
+            drop(edits);
             self.renderer.borrow_mut().render(dt, &camera);
             if time - self.last_persist.get() >= 1_000.0 {
                 if let Err(error) = self.store.borrow().save_camera(&camera) {
@@ -127,6 +133,7 @@ mod web {
             for chunk in bytes.chunks_exact(INPUT_RECORD_SIZE) {
                 let record = bytemuck::pod_read_unaligned::<InputRecord>(chunk);
                 match record.kind {
+                    KIND_POINTER_DOWN => self.edit_target(record.buttons),
                     KIND_POINTER_MOVE => self
                         .camera
                         .borrow_mut()
@@ -137,6 +144,53 @@ mod web {
                     _ => {}
                 }
             }
+        }
+
+        fn edit_target(&self, buttons: u16) {
+            let camera = *self.camera.borrow();
+            let hit = {
+                let edits = self.edits.borrow();
+                raycast_voxels(
+                    camera.position,
+                    camera.forward(),
+                    5.0,
+                    VOXEL_SIZE_METRES,
+                    |x, y, z| {
+                        edits
+                            .sample(self.generator, VoxelCoord::new(x, y, z))
+                            .is_solid()
+                    },
+                )
+            };
+            let Some(hit) = hit else {
+                return;
+            };
+            let (target, material) = if buttons & 1 != 0 {
+                (
+                    VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]),
+                    Material::Air,
+                )
+            } else if buttons & 2 != 0 {
+                if camera.intersects_voxel(hit.adjacent, VOXEL_SIZE_METRES) {
+                    return;
+                }
+                (
+                    VoxelCoord::new(hit.adjacent[0], hit.adjacent[1], hit.adjacent[2]),
+                    Material::Grass,
+                )
+            } else {
+                return;
+            };
+
+            let mut edits = self.edits.borrow_mut();
+            edits.set(self.generator, target, material);
+            let durable = edits.override_at(target);
+            if let Err(error) = self.store.borrow().save_edit(target, durable) {
+                web_sys::console::error_1(&error);
+            }
+            self.renderer
+                .borrow_mut()
+                .rebuild_world(|x, y, z| edits.sample(self.generator, VoxelCoord::new(x, y, z)));
         }
     }
 
@@ -162,7 +216,7 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 7], |engine| {
+            let values = self.engine.as_ref().map_or([0.0; 8], |engine| {
                 let camera = engine.camera.borrow();
                 [
                     camera.position.x,
@@ -172,6 +226,7 @@ mod web {
                     camera.pitch,
                     if camera.grounded { 1.0 } else { 0.0 },
                     engine.renderer.borrow().quad_count() as f32,
+                    engine.edits.borrow().len() as f32,
                 ]
             });
             Float32Array::from(values.as_slice())
@@ -202,6 +257,7 @@ mod web {
         let height = (css_height * dpr).round().max(1.0) as u32;
         let generator = Generator::new(WORLD_SEED);
         let store = Store::open(WORLD_SEED, voxels_world::generation::GENERATOR_VERSION).await?;
+        let edits = store.load_edits()?;
         let spawn_z = 5.2;
         let spawn_voxel_z = (spawn_z / VOXEL_SIZE_METRES).floor() as i32;
         let spawn_y = (generator.surface_height(0, spawn_voxel_z) + 1) as f32 * VOXEL_SIZE_METRES
@@ -210,7 +266,7 @@ mod web {
         let camera = store
             .load_camera()?
             .unwrap_or_else(|| CameraState::spawn(glam::Vec3::new(0.0, spawn_y, spawn_z)));
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             wgpu::SurfaceTarget::OffscreenCanvas(canvas),
             width,
             height,
@@ -219,12 +275,16 @@ mod web {
         )
         .await
         .map_err(|error| JsValue::from_str(&error))?;
+        if !edits.is_empty() {
+            renderer.rebuild_world(|x, y, z| edits.sample(generator, VoxelCoord::new(x, y, z)));
+        }
         let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
         let engine = Rc::new(Engine {
             renderer: RefCell::new(renderer),
             camera: RefCell::new(camera),
             input: RefCell::new(InputState::default()),
             generator,
+            edits: RefCell::new(edits),
             store: RefCell::new(store),
             scope,
             callback: RefCell::new(None),
