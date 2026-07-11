@@ -61,31 +61,6 @@ function start(root: HTMLElement): void {
         worker.postMessage({ kind: "snapshot", requestId });
       }),
   };
-  const diagnostics = document.createElement("output");
-  diagnostics.className = "diagnostics";
-  diagnostics.setAttribute("aria-label", "Engine diagnostics");
-  diagnostics.hidden = !new URLSearchParams(location.search).has("diagnostics");
-  root.appendChild(diagnostics);
-  let diagnosticsBusy = false;
-  const diagnosticsTimer = window.setInterval(() => {
-    if (diagnostics.hidden || diagnosticsBusy) return;
-    diagnosticsBusy = true;
-    void debugGlobal.__VOXELS__
-      ?.snapshot()
-      .then((values) => {
-        diagnostics.textContent = [
-          `${Math.round(values[8] ?? 0)} near + ${Math.round(values[16] ?? 0)} far`,
-          `${Math.round(values[10] ?? 0)} visible`,
-          `${Math.round(values[6] ?? 0).toLocaleString()} quads`,
-          `${(values[13] ?? 0).toFixed(2)}/${(values[14] ?? 0).toFixed(1)} MiB arena`,
-          `${Math.round(values[15] ?? 0)} queued`,
-          `${(values[17] ?? 0).toFixed(1)} ms`,
-        ].join(" · ");
-      })
-      .finally(() => {
-        diagnosticsBusy = false;
-      });
-  }, 500);
   worker.onmessage = (event) => {
     if (event.data.kind === "ready") {
       status.textContent = "Click to look · WASD move · Space jump · LMB remove · RMB place";
@@ -210,6 +185,7 @@ function start(root: HTMLElement): void {
       ShiftLeft: 6,
       ShiftRight: 6,
       Escape: 7,
+      F3: 8,
     };
     return codes[code] ?? 0;
   };
@@ -225,11 +201,6 @@ function start(root: HTMLElement): void {
     flags: event.repeat ? 1 : 0,
   });
   window.addEventListener("keydown", (event) => {
-    if (event.code === "F3") {
-      event.preventDefault();
-      diagnostics.hidden = !diagnostics.hidden;
-      return;
-    }
     if (keyCode(event.code) !== 0) {
       event.preventDefault();
       enqueue(keySample(event, INPUT_KEY_DOWN), true);
@@ -270,7 +241,6 @@ function start(root: HTMLElement): void {
   });
   resize.observe(canvas);
   window.addEventListener("pagehide", () => {
-    window.clearInterval(diagnosticsTimer);
     resize.disconnect();
     worker.postMessage({ kind: "destroy" });
     delete debugGlobal.__VOXELS__;
