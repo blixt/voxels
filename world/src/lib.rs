@@ -14,9 +14,10 @@ pub use generation::{GeneratedColumn, Generator, SurfaceRegion, SurfaceSample};
 pub use lod::{
     FAR_STRIDE_VOXELS, FAR_TILE_EDGE_CELLS, FAR_TILE_SPAN_VOXELS, FarTileCoord,
     SURFACE_PATCH_EDGE_CELLS, SURFACE_PATCHES_PER_TILE_EDGE, SURFACE_TILE_EDGE_CELLS,
-    SurfaceBounds, SurfaceLodLevel, SurfacePatch, SurfaceQuad, SurfaceTileCoord, SurfaceTileMesh,
-    generate_far_tile, generate_far_tile_with, generate_surface_tile, generate_surface_tile_mesh,
-    generate_surface_tile_mesh_with, generate_surface_tile_with, surface_tiles_affected_by_column,
+    SurfaceBounds, SurfaceLodLevel, SurfacePatch, SurfacePatchEdge, SurfaceQuad, SurfaceTileCoord,
+    SurfaceTileMesh, generate_far_tile, generate_far_tile_with, generate_surface_tile,
+    generate_surface_tile_mesh, generate_surface_tile_mesh_with, generate_surface_tile_with,
+    surface_tiles_affected_by_column,
 };
 pub use material::Material;
 pub use mesh::{Quad, mesh_chunk};

@@ -151,19 +151,53 @@ pub struct SurfaceBounds {
     pub max: [i32; 3],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SurfacePatchEdge {
+    NegativeX,
+    PositiveX,
+    NegativeZ,
+    PositiveZ,
+}
+
+impl SurfacePatchEdge {
+    pub const ALL: [Self; 4] = [
+        Self::NegativeX,
+        Self::PositiveX,
+        Self::NegativeZ,
+        Self::PositiveZ,
+    ];
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// A contiguous part of a [`SurfaceTileMesh`]. Cell bounds are local to the tile and half-open;
 /// geometry bounds are in canonical 10 cm voxel coordinates and conservatively enclose every quad
 /// in `quad_range`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SurfacePatch {
     pub cell_bounds: [[u8; 2]; 2],
+    /// Main surface shell. Transition skirts are kept separately so the renderer can enable them
+    /// only where this patch touches another geometric LOD owner.
     pub quad_range: Range<u32>,
+    pub skirt_ranges: [Range<u32>; 4],
     pub bounds: SurfaceBounds,
 }
 
 impl SurfacePatch {
     pub fn quads<'a>(&self, tile: &'a SurfaceTileMesh) -> &'a [SurfaceQuad] {
         &tile.quads[self.quad_range.start as usize..self.quad_range.end as usize]
+    }
+
+    pub fn skirt_quads<'a>(
+        &self,
+        tile: &'a SurfaceTileMesh,
+        edge: SurfacePatchEdge,
+    ) -> &'a [SurfaceQuad] {
+        let range = &self.skirt_ranges[edge.index()];
+        &tile.quads[range.start as usize..range.end as usize]
     }
 }
 
@@ -262,7 +296,10 @@ pub fn surface_tiles_affected_by_column(
 /// cell centers, and vertical transition quads close every height discontinuity, so independently
 /// streamed tiles cannot expose holes.
 pub fn generate_surface_tile(generator: Generator, coord: SurfaceTileCoord) -> Vec<SurfaceQuad> {
-    generate_surface_tile_mesh(generator, coord).quads
+    generate_surface_tile_with(coord, |x, z| {
+        let sample = generator.surface_sample(x, z);
+        (sample.height, sample.material)
+    })
 }
 
 pub fn generate_surface_tile_mesh(
@@ -279,12 +316,34 @@ pub fn generate_surface_tile_with(
     coord: SurfaceTileCoord,
     surface: impl Fn(i32, i32) -> (i32, Material),
 ) -> Vec<SurfaceQuad> {
-    generate_surface_tile_mesh_with(coord, surface).quads
+    generate_surface_tile_mesh_with_options(coord, surface, false).into_surface_quads()
+}
+
+impl SurfaceTileMesh {
+    /// Flattens only the main shell for compatibility with callers that cannot selectively draw
+    /// per-edge transition skirts.
+    pub fn into_surface_quads(self) -> Vec<SurfaceQuad> {
+        let mut surface = Vec::new();
+        for patch in &self.patches {
+            surface.extend_from_slice(
+                &self.quads[patch.quad_range.start as usize..patch.quad_range.end as usize],
+            );
+        }
+        surface
+    }
 }
 
 pub fn generate_surface_tile_mesh_with(
     coord: SurfaceTileCoord,
     surface: impl Fn(i32, i32) -> (i32, Material),
+) -> SurfaceTileMesh {
+    generate_surface_tile_mesh_with_options(coord, surface, true)
+}
+
+fn generate_surface_tile_mesh_with_options(
+    coord: SurfaceTileCoord,
+    surface: impl Fn(i32, i32) -> (i32, Material),
+    transition_skirts: bool,
 ) -> SurfaceTileMesh {
     let [origin_x, origin_z] = coord.voxel_origin();
     let stride = coord.stride_voxels();
@@ -304,7 +363,7 @@ pub fn generate_surface_tile_mesh_with(
         samples[index as usize]
     };
 
-    let mut quads = Vec::with_capacity((edge * edge * 3) as usize);
+    let mut quads = Vec::with_capacity((edge * edge * 4) as usize);
     let mut patches = Vec::with_capacity(
         (SURFACE_PATCHES_PER_TILE_EDGE * SURFACE_PATCHES_PER_TILE_EDGE) as usize,
     );
@@ -358,6 +417,50 @@ pub fn generate_surface_tile_mesh_with(
             }
             let quad_end = quads.len() as u32;
             let quad_range = quad_start..quad_end;
+            let skirt_ranges = std::array::from_fn(|edge_index| {
+                let skirt_start = quads.len() as u32;
+                if !transition_skirts {
+                    return skirt_start..skirt_start;
+                }
+                let patch_edge = SurfacePatchEdge::ALL[edge_index];
+                for edge_cell in 0..SURFACE_PATCH_EDGE_CELLS {
+                    let (cell_x, cell_z, face) = match patch_edge {
+                        SurfacePatchEdge::NegativeX => {
+                            (cell_min_x, cell_min_z + edge_cell, FACE_NEG_X)
+                        }
+                        SurfacePatchEdge::PositiveX => (
+                            cell_min_x + SURFACE_PATCH_EDGE_CELLS - 1,
+                            cell_min_z + edge_cell,
+                            FACE_POS_X,
+                        ),
+                        SurfacePatchEdge::NegativeZ => {
+                            (cell_min_x + edge_cell, cell_min_z, FACE_NEG_Z)
+                        }
+                        SurfacePatchEdge::PositiveZ => (
+                            cell_min_x + edge_cell,
+                            cell_min_z + SURFACE_PATCH_EDGE_CELLS - 1,
+                            FACE_POS_Z,
+                        ),
+                    };
+                    let x = origin_x + cell_x * stride;
+                    let z = origin_z + cell_z * stride;
+                    let (height, material) = sample(cell_x, cell_z);
+                    let skirt_depth = 128i32.max(stride * 8);
+                    let origin = match patch_edge {
+                        SurfacePatchEdge::NegativeX => [x, height - skirt_depth, z],
+                        SurfacePatchEdge::PositiveX => [x + stride - 1, height - skirt_depth, z],
+                        SurfacePatchEdge::NegativeZ => [x, height - skirt_depth, z],
+                        SurfacePatchEdge::PositiveZ => [x, height - skirt_depth, z + stride - 1],
+                    };
+                    quads.push(SurfaceQuad {
+                        origin,
+                        face,
+                        extent: [stride as u16, skirt_depth as u16],
+                        material,
+                    });
+                }
+                skirt_start..quads.len() as u32
+            });
             patches.push(SurfacePatch {
                 cell_bounds: [
                     [cell_min_x as u8, cell_min_z as u8],
@@ -367,6 +470,7 @@ pub fn generate_surface_tile_mesh_with(
                     ],
                 ],
                 quad_range,
+                skirt_ranges,
                 bounds,
             });
         }
@@ -554,6 +658,20 @@ mod tests {
                 }
             }
             next_start = patch.quad_range.end;
+            for edge in SurfacePatchEdge::ALL {
+                let range = &patch.skirt_ranges[edge.index()];
+                assert_eq!(range.start, next_start);
+                assert_eq!(range.end - range.start, SURFACE_PATCH_EDGE_CELLS as u32);
+                let skirts = patch.skirt_quads(&mesh, edge);
+                assert_eq!(skirts.len(), SURFACE_PATCH_EDGE_CELLS as usize);
+                assert!(skirts.iter().all(|quad| match edge {
+                    SurfacePatchEdge::NegativeX => quad.face == FACE_NEG_X,
+                    SurfacePatchEdge::PositiveX => quad.face == FACE_POS_X,
+                    SurfacePatchEdge::NegativeZ => quad.face == FACE_NEG_Z,
+                    SurfacePatchEdge::PositiveZ => quad.face == FACE_POS_Z,
+                }));
+                next_start = range.end;
+            }
         }
         assert_eq!(next_start as usize, mesh.quads.len());
     }
@@ -583,11 +701,11 @@ mod tests {
         let surface = |x: i32, z: i32| (x.div_euclid(17) - z.div_euclid(29), Material::Grass);
         assert_eq!(
             generate_surface_tile_with(coord, surface),
-            generate_surface_tile_mesh_with(coord, surface).quads
+            generate_surface_tile_mesh_with(coord, surface).into_surface_quads()
         );
         assert_eq!(
             generate_surface_tile(Generator::new(42), coord),
-            generate_surface_tile_mesh(Generator::new(42), coord).quads
+            generate_surface_tile_mesh(Generator::new(42), coord).into_surface_quads()
         );
     }
 
