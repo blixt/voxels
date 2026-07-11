@@ -39,7 +39,8 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 - Remove the targeted voxel with the left mouse button; place a grass voxel with the right mouse
   button. Sparse edits are saved transactionally in SQLite on OPFS.
 - Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and context menu
-  can toggle ambient occlusion, fog, far terrain, and target highlighting without a DOM UI layer.
+  can toggle cascaded sun shadows, ambient occlusion, fog, far terrain, and target highlighting
+  without a DOM UI layer.
 
 ## Automation
 
@@ -47,4 +48,5 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 state, resident greedy-quad count, persisted edit count, resident chunk count, and tracked chunk
 count, followed by visible chunks, draw calls, arena pages, allocated/capacity MiB, and queued stream
 work and far-tile residency. It is intentionally an automation hook rather than a second JavaScript
-game model. The final value is exponentially smoothed display-frame cadence in milliseconds.
+game model. The last three values are exponentially smoothed display-frame cadence in milliseconds,
+shadow-caster draw calls, and active shadow-cascade count.

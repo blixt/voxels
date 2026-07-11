@@ -43,14 +43,23 @@ tile boundaries, so separately generated tiles form a closed shell without crack
 distance band hands coverage between canonical chunks and the far shell. Far meshes remain disposable
 derivatives; 10 cm voxels and sparse edits remain authoritative.
 
-Coverage ownership overlaps deliberately: the far shell becomes fully opaque before canonical chunks
-begin a screen-stable dithered fade. This keeps terrain covered while ensuring cross-chunk structures
-such as tree crowns and trunks leave the near representation together at its residency boundary.
+Coverage ownership is complementary across one screen-stable dither band: every transition cell is
+owned by exactly one of the near or far representations. The color and shadow-caster shaders apply the
+same predicate so discarded geometry cannot cast and overlapping LODs cannot double-shadow. Far tiles
+do not represent tree crowns or trunks, so those materials leave the near representation together at
+its residency boundary.
 
 Near meshes also bake the established four-level voxel ambient-occlusion term from two side samples
 and the diagonal at each face corner. Four 2-bit values participate in the greedy merge key, and the
 renderer selects the lower-error triangle diagonal from opposing AO sums. A single 34³ occupancy halo
 makes visibility and AO sampling cache-local while preserving authoritative neighbor seams.
+
+Directional sunlight uses three stable cascaded shadow maps in a portable `Depth32Float` texture
+array. Practical logarithmic/uniform splits prioritize the editable near field; each frustum slice is
+enclosed in a quantized sphere and snapped to its own world-space texel grid to resist shimmer. Shadow
+passes reuse greedy mesh allocations, cull against each light volume, preserve the near/far ownership
+dither, and apply 3x3 comparison PCF only to direct sunlight. The Rust mission-control toggle skips all
+three caster passes, while live diagnostics expose their draw-call cost.
 
 The first persistent chunk format is versioned and little-endian:
 
@@ -101,6 +110,11 @@ the seed and generator version so an incompatible build cannot silently answer a
 
 - WGPU 30 directly supports an `OffscreenCanvas` surface and the browser WebGPU backend:
   <https://docs.rs/wgpu/30.0.0/wasm32-unknown-unknown/wgpu/enum.SurfaceTarget.html>
+- WebGPU depth texture arrays and comparison samplers provide a portable shadow-map path; WGSL's
+  `textureSampleCompareLevel` fixes mip level zero and is valid in non-uniform cascade selection:
+  <https://gpuweb.github.io/gpuweb/wgsl/#texturesamplecomparelevel-builtin>
+- The official WebGPU sample demonstrates depth-only shadow-map rendering and comparison sampling:
+  <https://webgpu.github.io/webgpu-samples/?sample=shadowMapping>
 - SQLite recommends `opfs-sahpool` when performance matters more than concurrent connections and notes
   that OPFS APIs are worker-only:
   <https://sqlite.org/wasm/doc/tip/persistence.md>
