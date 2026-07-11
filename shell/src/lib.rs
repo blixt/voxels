@@ -17,8 +17,8 @@ mod web {
     use voxels_runtime::{ChunkState, FrameBudget, StreamConfig, StreamScheduler};
     use voxels_world::{
         CHUNK_EDGE, Chunk, ChunkCoord, EditMap, Generator, Material, Quad, SurfaceLodLevel,
-        SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord, generate_surface_tile_with, mesh_chunk,
-        surface_tiles_affected_by_column,
+        SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord, generate_surface_tile_mesh_with,
+        mesh_chunk, surface_tiles_affected_by_column,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -73,6 +73,7 @@ mod web {
         chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
         pending_meshes: RefCell<BTreeMap<(i32, i32, i32), Vec<Quad>>>,
         surface_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
+        surface_active_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
         surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
@@ -170,6 +171,12 @@ mod web {
                 && self.surface_queue.borrow().is_empty()
                 && self.surface_dirty.borrow().is_empty();
             renderer.set_lod_coverage_ready(self.fine_initialized.get(), all_lods_ready);
+            if all_lods_ready {
+                let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
+                let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
+                renderer.set_geometric_lod_focus(voxel_x, voxel_z);
+                self.surface_active_focus.set(self.surface_focus.get());
+            }
             renderer.render(
                 dt,
                 &camera,
@@ -332,13 +339,11 @@ mod web {
                     let level_focus = focus[index];
                     for dz in -radius..=radius {
                         for dx in -radius..=radius {
-                            if dx * dx + dz * dz <= radius * radius {
-                                desired.insert(SurfaceTileCoord::new(
-                                    level,
-                                    level_focus.x + dx,
-                                    level_focus.z + dz,
-                                ));
-                            }
+                            desired.insert(SurfaceTileCoord::new(
+                                level,
+                                level_focus.x + dx,
+                                level_focus.z + dz,
+                            ));
                         }
                     }
                 }
@@ -353,7 +358,14 @@ mod web {
                         let retain = SURFACE_LOAD_RADIUS_TILES[index] + SURFACE_RETAIN_MARGIN_TILES;
                         let dx = coord.x - focus[index].x;
                         let dz = coord.z - focus[index].z;
-                        dx * dx + dz * dz > retain * retain
+                        let outside_pending = dx.abs().max(dz.abs()) > retain;
+                        let outside_active = self.surface_active_focus.get().is_none_or(|active| {
+                            let dx = coord.x - active[index].x;
+                            let dz = coord.z - active[index].z;
+                            dx.abs().max(dz.abs())
+                                > SURFACE_LOAD_RADIUS_TILES[index] + SURFACE_RETAIN_MARGIN_TILES
+                        });
+                        outside_pending && outside_active
                     })
                     .collect();
                 if !evicted.is_empty() {
@@ -412,15 +424,11 @@ mod web {
                 return;
             };
             let edits = self.edits.borrow();
-            let quads = generate_surface_tile_with(coord, |x, z| {
+            let mesh = generate_surface_tile_mesh_with(coord, |x, z| {
                 edits.surface_sample(self.generator, x, z)
             });
             drop(edits);
-            if self
-                .renderer
-                .borrow_mut()
-                .upload_surface_tile(coord, &quads)
-            {
+            if self.renderer.borrow_mut().upload_surface_tile_mesh(&mesh) {
                 self.surface_resident.borrow_mut().insert(coord);
                 self.surface_dirty.borrow_mut().remove(&coord);
             } else if dirty.is_none() {
@@ -694,6 +702,7 @@ mod web {
             chunks: RefCell::new(BTreeMap::new()),
             pending_meshes: RefCell::new(BTreeMap::new()),
             surface_focus: Cell::new(None),
+            surface_active_focus: Cell::new(None),
             surface_resident: RefCell::new(BTreeSet::new()),
             surface_queue: RefCell::new(VecDeque::new()),
             surface_dirty: RefCell::new(BTreeSet::new()),

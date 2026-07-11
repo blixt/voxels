@@ -1,5 +1,6 @@
 use crate::arena::{Allocation, ArenaAllocator};
 use crate::environment::OutdoorEnvironment;
+use crate::lod::GeometricLodFocus;
 use crate::shadow::{
     CASCADE_COUNT, DirectionalShadowCascades, DirectionalShadowConfig, aabb_visible_in_cascade,
     build_directional_shadow_cascades,
@@ -13,8 +14,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use voxels_core::CameraState;
 use voxels_world::{
-    CHUNK_EDGE, ChunkCoord, FarTileCoord, Quad, SurfaceBounds, SurfaceQuad, SurfaceTileCoord,
-    VOXEL_SIZE_METRES,
+    CHUNK_EDGE, ChunkCoord, FarTileCoord, Quad, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge,
+    SurfaceQuad, SurfaceTileCoord, SurfaceTileMesh, VOXEL_SIZE_METRES,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -76,9 +77,19 @@ const _: () = assert!(size_of::<GpuQuad>() == 32);
 struct ChunkMesh {
     allocation: Allocation,
     quad_count: u32,
+    slices: Vec<MeshSlice>,
+    active: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MeshSlice {
+    relative_offset: u32,
+    size: u32,
+    quad_count: u32,
     bounds_min: glam::Vec3,
     bounds_max: glam::Vec3,
-    active: bool,
+    surface_bounds: Option<SurfaceBounds>,
+    skirt_edge: Option<SurfacePatchEdge>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,6 +148,7 @@ pub struct Renderer {
     target_voxel: Option<[i32; 3]>,
     options: RenderOptions,
     environment: OutdoorEnvironment,
+    geometric_lod_focus: Option<GeometricLodFocus>,
     fine_coverage_ready: bool,
     lod_coverage_ready: bool,
     ui: MissionControlUi,
@@ -169,6 +181,7 @@ struct RenderOptions {
 struct LodReadiness {
     fine: bool,
     all: bool,
+    geometric: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -528,6 +541,7 @@ impl Renderer {
             target_voxel: None,
             options,
             environment,
+            geometric_lod_focus: None,
             fine_coverage_ready: false,
             lod_coverage_ready: false,
             ui: MissionControlUi::default(),
@@ -573,6 +587,10 @@ impl Renderer {
         self.environment = environment.sanitized();
     }
 
+    pub fn set_geometric_lod_focus(&mut self, voxel_x: i32, voxel_z: i32) {
+        self.geometric_lod_focus = Some(GeometricLodFocus::snapped(voxel_x, voxel_z));
+    }
+
     pub const fn set_lod_coverage_ready(&mut self, fine_ready: bool, all_lods_ready: bool) {
         self.fine_coverage_ready = fine_ready;
         self.lod_coverage_ready = all_lods_ready;
@@ -582,6 +600,7 @@ impl Renderer {
         LodReadiness {
             fine: self.fine_coverage_ready,
             all: self.lod_coverage_ready,
+            geometric: self.geometric_lod_focus.is_some(),
         }
     }
 
@@ -737,12 +756,115 @@ impl Renderer {
         self.upload_mesh(key, &gpu_quads, min, max)
     }
 
+    pub fn upload_surface_tile_mesh(&mut self, tile: &SurfaceTileMesh) -> bool {
+        let coord = tile.coord;
+        let key = (coord.level.index() + 1, coord.x, 0, coord.z);
+        if tile.quads.is_empty() {
+            self.remove_surface_tile(coord);
+            return true;
+        }
+        let underlay_offset = FAR_UNDERLAY_OFFSET_METRES * (f32::from(coord.level.index()) + 1.0);
+        let gpu_quads: Vec<_> = tile
+            .quads
+            .iter()
+            .map(|quad| GpuQuad {
+                origin: [
+                    quad.origin[0] as f32 * VOXEL_SIZE_METRES,
+                    quad.origin[1] as f32 * VOXEL_SIZE_METRES - underlay_offset,
+                    quad.origin[2] as f32 * VOXEL_SIZE_METRES,
+                ],
+                face: u32::from(quad.face),
+                extent: [
+                    f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
+                    f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
+                ],
+                material: u32::from(quad.material.id())
+                    | FAR_MATERIAL_FLAG
+                    | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
+                ao: 0xff,
+            })
+            .collect();
+        let stride = coord.stride_voxels();
+        let [tile_x, tile_z] = coord.voxel_origin();
+        let quad_bytes = size_of::<GpuQuad>() as u32;
+        let slices = tile
+            .patches
+            .iter()
+            .flat_map(|patch| {
+                let [[min_x, min_z], [max_x, max_z]] = patch.cell_bounds;
+                let surface_bounds = SurfaceBounds {
+                    min: [
+                        tile_x + i32::from(min_x) * stride,
+                        patch.bounds.min[1],
+                        tile_z + i32::from(min_z) * stride,
+                    ],
+                    max: [
+                        tile_x + i32::from(max_x) * stride,
+                        patch.bounds.max[1],
+                        tile_z + i32::from(max_z) * stride,
+                    ],
+                };
+                std::iter::once((patch.quad_range.clone(), patch.bounds, None))
+                    .chain(SurfacePatchEdge::ALL.into_iter().map(|edge| {
+                        let range = patch.skirt_ranges[edge.index()].clone();
+                        let bounds = SurfaceBounds::from_quads(
+                            &tile.quads[range.start as usize..range.end as usize],
+                        )
+                        .unwrap_or(patch.bounds);
+                        (range, bounds, Some(edge))
+                    }))
+                    .map(move |(range, bounds, skirt_edge)| {
+                        let bounds_min = glam::Vec3::from_array(
+                            bounds.min.map(|value| value as f32 * VOXEL_SIZE_METRES),
+                        ) - glam::Vec3::Y * underlay_offset;
+                        let bounds_max = glam::Vec3::from_array(
+                            bounds.max.map(|value| value as f32 * VOXEL_SIZE_METRES),
+                        );
+                        MeshSlice {
+                            relative_offset: range.start * quad_bytes,
+                            size: (range.end - range.start) * quad_bytes,
+                            quad_count: range.end - range.start,
+                            bounds_min,
+                            bounds_max,
+                            surface_bounds: Some(surface_bounds),
+                            skirt_edge,
+                        }
+                    })
+            })
+            .collect();
+        self.upload_mesh_sliced(key, &gpu_quads, slices)
+    }
+
     fn upload_mesh(
         &mut self,
         key: MeshKey,
         gpu_quads: &[GpuQuad],
         bounds_min: glam::Vec3,
         bounds_max: glam::Vec3,
+    ) -> bool {
+        let Ok(size) = u32::try_from(size_of_val(gpu_quads)) else {
+            return false;
+        };
+        self.upload_mesh_sliced(
+            key,
+            gpu_quads,
+            vec![MeshSlice {
+                relative_offset: 0,
+                size,
+                quad_count: gpu_quads.len() as u32,
+                bounds_min,
+                bounds_max,
+                surface_bounds: None,
+                skirt_edge: None,
+            }],
+        )
+    }
+
+    fn upload_mesh_sliced(
+        &mut self,
+        key: MeshKey,
+        gpu_quads: &[GpuQuad],
+        slices: Vec<MeshSlice>,
     ) -> bool {
         let bytes = bytemuck::cast_slice(gpu_quads);
         let Ok(byte_len) = u32::try_from(bytes.len()) else {
@@ -781,8 +903,7 @@ impl Renderer {
             ChunkMesh {
                 allocation,
                 quad_count: gpu_quads.len() as u32,
-                bounds_min,
-                bounds_max,
+                slices,
                 active,
             },
         );
@@ -839,23 +960,26 @@ impl Renderer {
             &shadow_cascades,
         );
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
+        let geometric_lod_focus = self.geometric_lod_focus;
         let shadow_draw_lists: [DrawList; CASCADE_COUNT] = if self.options.shadows {
             std::array::from_fn(|cascade_index| {
-                self.collect_draw_list(|key, chunk| {
+                self.collect_draw_list(|key, slice| {
                     (key.0 == 0 || self.options.far_terrain)
+                        && slice_owned_by_lod(geometric_lod_focus, key, slice)
                         && aabb_visible_in_cascade(
                             &shadow_cascades.cascades[cascade_index],
-                            chunk.bounds_min,
-                            chunk.bounds_max,
+                            slice.bounds_min,
+                            slice.bounds_max,
                         )
                 })
             })
         } else {
             std::array::from_fn(|_| DrawList::default())
         };
-        let world_draw_list = self.collect_draw_list(|key, chunk| {
+        let world_draw_list = self.collect_draw_list(|key, slice| {
             (key.0 == 0 || self.options.far_terrain)
-                && aabb_visible(chunk.bounds_min, chunk.bounds_max, view_projection)
+                && slice_owned_by_lod(geometric_lod_focus, key, slice)
+                && aabb_visible(slice.bounds_min, slice.bounds_max, view_projection)
         });
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -1002,26 +1126,35 @@ impl Renderer {
         self.queue.present(frame);
     }
 
-    fn collect_draw_list(&self, mut include: impl FnMut(&MeshKey, &ChunkMesh) -> bool) -> DrawList {
+    fn collect_draw_list(&self, mut include: impl FnMut(&MeshKey, &MeshSlice) -> bool) -> DrawList {
         let mut items = Vec::new();
         let mut mesh_count = 0u32;
         let mut quad_count = 0u32;
         for (key, chunk) in &self.chunks {
-            if !chunk.active || !include(key, chunk) {
+            if !chunk.active {
                 continue;
             }
             debug_assert_eq!(
                 chunk.allocation.size,
                 chunk.quad_count * size_of::<GpuQuad>() as u32
             );
-            items.push(DrawItem {
-                page: chunk.allocation.page,
-                offset: chunk.allocation.offset,
-                size: chunk.allocation.size,
-                quad_count: chunk.quad_count,
-            });
-            mesh_count = mesh_count.saturating_add(1);
-            quad_count = quad_count.saturating_add(chunk.quad_count);
+            let mut selected = false;
+            for slice in &chunk.slices {
+                if !include(key, slice) {
+                    continue;
+                }
+                items.push(DrawItem {
+                    page: chunk.allocation.page,
+                    offset: chunk.allocation.offset + slice.relative_offset,
+                    size: slice.size,
+                    quad_count: slice.quad_count,
+                });
+                selected = true;
+                quad_count = quad_count.saturating_add(slice.quad_count);
+            }
+            if selected {
+                mesh_count = mesh_count.saturating_add(1);
+            }
         }
         DrawList {
             spans: coalesce_draw_items(items),
@@ -1029,6 +1162,24 @@ impl Renderer {
             quad_count,
         }
     }
+}
+
+fn slice_owned_by_lod(focus: Option<GeometricLodFocus>, key: &MeshKey, slice: &MeshSlice) -> bool {
+    let Some(focus) = focus else {
+        return true;
+    };
+    if key.0 == 0 {
+        return focus.owns_canonical_chunk(key.1, key.3);
+    }
+    let Some(level) = SurfaceLodLevel::ALL.get(usize::from(key.0 - 1)).copied() else {
+        return false;
+    };
+    slice.surface_bounds.is_some_and(|bounds| {
+        slice.skirt_edge.map_or_else(
+            || focus.owns_surface_bounds(level, bounds),
+            |edge| focus.owns_surface_skirt(level, bounds, edge),
+        )
+    })
 }
 
 fn coalesce_draw_items(mut items: Vec<DrawItem>) -> Vec<DrawSpan> {
@@ -1100,7 +1251,7 @@ fn frame_uniform(
             if readiness.fine { 1.0 } else { 0.0 },
             if options.far_terrain { 1.0 } else { 0.0 },
             if readiness.all { 1.0 } else { 0.0 },
-            0.0,
+            if readiness.geometric { 1.0 } else { 0.0 },
         ],
         camera_forward: [camera_forward.x, camera_forward.y, camera_forward.z, 0.0],
         shadow_splits: [
@@ -1158,7 +1309,7 @@ fn shadow_frame_uniform(
             if readiness.fine { 1.0 } else { 0.0 },
             if options.far_terrain { 1.0 } else { 0.0 },
             if readiness.all { 1.0 } else { 0.0 },
-            0.0,
+            if readiness.geometric { 1.0 } else { 0.0 },
         ],
     }
 }
@@ -1295,6 +1446,18 @@ fn preferred_format(formats: &[TextureFormat]) -> TextureFormat {
 mod tests {
     use super::*;
 
+    fn test_slice(surface_bounds: Option<SurfaceBounds>) -> MeshSlice {
+        MeshSlice {
+            relative_offset: 0,
+            size: size_of::<GpuQuad>() as u32,
+            quad_count: 1,
+            bounds_min: glam::Vec3::splat(-10_000.0),
+            bounds_max: glam::Vec3::splat(10_000.0),
+            surface_bounds,
+            skirt_edge: None,
+        }
+    }
+
     fn test_view_projection(camera: &CameraState) -> glam::Mat4 {
         glam::camera::rh::proj::directx::perspective(68.0f32.to_radians(), 1.0, 0.01, 80.0)
             * glam::camera::rh::view::look_to_mat4(camera.position, camera.forward(), glam::Vec3::Y)
@@ -1372,5 +1535,67 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn geometric_lod_selects_canonical_chunks_and_surface_patches_exclusively() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        assert!(slice_owned_by_lod(
+            Some(focus),
+            &(0, 0, 0, 0),
+            &test_slice(None)
+        ));
+        assert!(!slice_owned_by_lod(
+            Some(focus),
+            &(0, 7, 0, 0),
+            &test_slice(None)
+        ));
+
+        let stride_two_patch = test_slice(Some(SurfaceBounds {
+            min: [96, -20, 0],
+            max: [112, 80, 16],
+        }));
+        assert!(slice_owned_by_lod(
+            Some(focus),
+            &(SurfaceLodLevel::Stride2.index() + 1, 1, 0, 0),
+            &stride_two_patch
+        ));
+        assert!(!slice_owned_by_lod(
+            Some(focus),
+            &(SurfaceLodLevel::Stride4.index() + 1, 1, 0, 0),
+            &stride_two_patch
+        ));
+    }
+
+    #[test]
+    fn geometric_lod_uses_fixed_coverage_not_protruding_geometry_bounds() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        let slice = test_slice(Some(SurfaceBounds {
+            min: [256, -500, 0],
+            max: [288, 500, 32],
+        }));
+        assert!(slice.bounds_min.x < -9_000.0);
+        assert!(slice.bounds_max.x > 9_000.0);
+        assert!(slice_owned_by_lod(
+            Some(focus),
+            &(SurfaceLodLevel::Stride4.index() + 1, 2, 0, 0),
+            &slice
+        ));
+        assert!(!slice_owned_by_lod(
+            Some(focus),
+            &(SurfaceLodLevel::Stride8.index() + 1, 1, 0, 0),
+            &slice
+        ));
+    }
+
+    #[test]
+    fn geometric_lod_falls_back_to_all_resident_meshes_until_ready() {
+        let surface = test_slice(None);
+        assert!(slice_owned_by_lod(None, &(99, 0, 0, 0), &surface));
+        assert!(!slice_owned_by_lod(
+            Some(GeometricLodFocus::snapped(0, 0)),
+            &(99, 0, 0, 0),
+            &surface
+        ));
     }
 }

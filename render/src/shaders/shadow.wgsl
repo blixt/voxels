@@ -68,6 +68,9 @@ fn owns_lod_surface(world: vec3<f32>, packed_material: u32) -> bool {
   if !far_surface && shadow_frame.lod_options.x < 0.5 && (material == 8u || material == 9u) {
     return false;
   }
+  if shadow_frame.lod_options.w > 0.5 {
+    return true;
+  }
   if shadow_frame.lod_options.z < 0.5 {
     return true;
   }

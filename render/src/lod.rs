@@ -1,6 +1,6 @@
 //! Pure geometric ownership for nested block-surface LOD rings.
 
-use voxels_world::{CHUNK_EDGE, SurfaceBounds, SurfaceLodLevel};
+use voxels_world::{CHUNK_EDGE, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge};
 
 /// Half extents in canonical 10 cm voxels. Every boundary is a multiple of the patch span on both
 /// sides, so whole patches can change owner without overlap, holes, or fragment clipping.
@@ -54,6 +54,26 @@ impl GeometricLodFocus {
         let centre_x = bounds.min[0] + (bounds.max[0] - bounds.min[0]) / 2;
         let centre_z = bounds.min[2] + (bounds.max[2] - bounds.min[2]) / 2;
         self.owner_at(centre_x, centre_z) == LodOwner::Surface(level)
+    }
+
+    pub fn owns_surface_skirt(
+        self,
+        level: SurfaceLodLevel,
+        bounds: SurfaceBounds,
+        edge: SurfacePatchEdge,
+    ) -> bool {
+        if !self.owns_surface_bounds(level, bounds) {
+            return false;
+        }
+        let centre_x = bounds.min[0] + (bounds.max[0] - bounds.min[0]) / 2;
+        let centre_z = bounds.min[2] + (bounds.max[2] - bounds.min[2]) / 2;
+        let neighbor = match edge {
+            SurfacePatchEdge::NegativeX => [bounds.min[0] - 1, centre_z],
+            SurfacePatchEdge::PositiveX => [bounds.max[0], centre_z],
+            SurfacePatchEdge::NegativeZ => [centre_x, bounds.min[2] - 1],
+            SurfacePatchEdge::PositiveZ => [centre_x, bounds.max[2]],
+        };
+        self.owner_at(neighbor[0], neighbor[1]) != LodOwner::Surface(level)
     }
 
     pub fn owns_canonical_chunk(self, chunk_x: i32, chunk_z: i32) -> bool {
@@ -166,5 +186,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn skirts_are_owned_only_on_resolution_boundaries() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        let interior = SurfaceBounds {
+            min: [112, -64, 0],
+            max: [128, 128, 16],
+        };
+        assert!(!focus.owns_surface_skirt(
+            SurfaceLodLevel::Stride2,
+            interior,
+            SurfacePatchEdge::PositiveX
+        ));
+
+        let canonical_boundary = SurfaceBounds {
+            min: [96, -64, 0],
+            max: [112, 128, 16],
+        };
+        assert!(focus.owns_surface_skirt(
+            SurfaceLodLevel::Stride2,
+            canonical_boundary,
+            SurfacePatchEdge::NegativeX
+        ));
+        assert!(!focus.owns_surface_skirt(
+            SurfaceLodLevel::Stride2,
+            canonical_boundary,
+            SurfacePatchEdge::PositiveX
+        ));
+
+        let wrong_level = SurfaceBounds {
+            min: [256, -64, 0],
+            max: [288, 128, 32],
+        };
+        assert!(!focus.owns_surface_skirt(
+            SurfaceLodLevel::Stride2,
+            wrong_level,
+            SurfacePatchEdge::NegativeX
+        ));
     }
 }
