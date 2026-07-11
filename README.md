@@ -44,5 +44,5 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 state, resident greedy-quad count, persisted edit count, resident chunk count, and tracked chunk
 count, followed by visible chunks, draw calls, arena pages, allocated/capacity MiB, and queued stream
 work and far-tile residency. It is intentionally a diagnostic view rather than a second JavaScript
-game model.
+game model. The final value is exponentially smoothed display-frame cadence in milliseconds.
 Press <kbd>F3</kbd> to toggle the compact diagnostics overlay, or add `?diagnostics` to the URL.

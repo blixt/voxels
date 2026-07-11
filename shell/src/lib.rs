@@ -25,6 +25,8 @@ mod web {
     const WORLD_SEED: u64 = 0x5eed_cafe;
     const FAR_LOAD_RADIUS_TILES: i32 = 5;
     const FAR_RETAIN_RADIUS_TILES: i32 = 6;
+    const SIMULATION_STEP_SECONDS: f32 = 1.0 / 120.0;
+    const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
 
     type FrameCallback = Closure<dyn FnMut(f64)>;
 
@@ -71,6 +73,8 @@ mod web {
         callback: RefCell<Option<FrameCallback>>,
         frame_id: Cell<i32>,
         last_time: Cell<f64>,
+        simulation_accumulator: Cell<f32>,
+        frame_milliseconds: Cell<f32>,
         last_persist: Cell<f64>,
         stopped: Cell<bool>,
     }
@@ -109,13 +113,33 @@ mod web {
             } else {
                 ((time - last).max(0.0) / 1000.0) as f32
             };
+            let frame_ms = dt * 1_000.0;
+            let previous_frame_ms = self.frame_milliseconds.get();
+            self.frame_milliseconds.set(if previous_frame_ms <= 0.0 {
+                frame_ms
+            } else {
+                previous_frame_ms * 0.9 + frame_ms * 0.1
+            });
             let mut camera = self.camera.borrow_mut();
             let edits = self.edits.borrow();
-            camera.update(&self.input.borrow(), dt, VOXEL_SIZE_METRES, |x, y, z| {
-                edits
-                    .sample(self.generator, VoxelCoord::new(x, y, z))
-                    .is_solid()
-            });
+            let mut accumulator = (self.simulation_accumulator.get() + dt.min(0.1))
+                .min(SIMULATION_STEP_SECONDS * MAX_SIMULATION_STEPS_PER_FRAME as f32);
+            let mut steps = 0;
+            while accumulator >= SIMULATION_STEP_SECONDS && steps < MAX_SIMULATION_STEPS_PER_FRAME {
+                camera.update(
+                    &self.input.borrow(),
+                    SIMULATION_STEP_SECONDS,
+                    VOXEL_SIZE_METRES,
+                    |x, y, z| {
+                        edits
+                            .sample(self.generator, VoxelCoord::new(x, y, z))
+                            .is_solid()
+                    },
+                );
+                accumulator -= SIMULATION_STEP_SECONDS;
+                steps += 1;
+            }
+            self.simulation_accumulator.set(accumulator);
             drop(edits);
             self.stream_world(&camera);
             self.renderer.borrow_mut().render(dt, &camera);
@@ -384,7 +408,7 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 17], |engine| {
+            let values = self.engine.as_ref().map_or([0.0; 18], |engine| {
                 let camera = engine.camera.borrow();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let render = engine.renderer.borrow().diagnostics();
@@ -409,6 +433,7 @@ mod web {
                         + diagnostics.upload.queued
                         + engine.far_queue.borrow().len()) as f32,
                     engine.far_resident.borrow().len() as f32,
+                    engine.frame_milliseconds.get(),
                 ]
             });
             Float32Array::from(values.as_slice())
@@ -488,6 +513,8 @@ mod web {
             callback: RefCell::new(None),
             frame_id: Cell::new(0),
             last_time: Cell::new(0.0),
+            simulation_accumulator: Cell::new(0.0),
+            frame_milliseconds: Cell::new(0.0),
             last_persist: Cell::new(0.0),
             stopped: Cell::new(false),
         });

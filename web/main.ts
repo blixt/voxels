@@ -79,6 +79,7 @@ function start(root: HTMLElement): void {
           `${Math.round(values[6] ?? 0).toLocaleString()} quads`,
           `${(values[13] ?? 0).toFixed(2)}/${(values[14] ?? 0).toFixed(1)} MiB arena`,
           `${Math.round(values[15] ?? 0)} queued`,
+          `${(values[17] ?? 0).toFixed(1)} ms`,
         ].join(" · ");
       })
       .finally(() => {
