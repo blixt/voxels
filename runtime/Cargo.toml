@@ -1,0 +1,15 @@
+[package]
+name = "voxels-runtime"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "voxels_runtime"
+
+[dependencies]
+voxels-world = { path = "../world" }

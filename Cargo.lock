@@ -1178,6 +1178,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "voxels-runtime"
+version = "0.0.0"
+dependencies = [
+ "voxels-world",
+]
+
+[[package]]
 name = "voxels-shell"
 version = "0.0.0"
 dependencies = [

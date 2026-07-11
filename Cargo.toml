@@ -1,6 +1,6 @@
 # Virtual workspace: portable game/world logic, a web-free WGPU renderer, and the browser WASM leaf.
 [workspace]
-members = ["core", "world", "render", "shell"]
+members = ["core", "world", "runtime", "render", "shell"]
 resolver = "2"
 
 [workspace.package]
