@@ -86,3 +86,26 @@ same material-bearing `SurfaceSample` once, rather than separately recomputing h
 material. Runtime meshing uses `GeneratedColumn` through a bounded 34×34 halo cache. A version-coupled
 golden checksum and a fixed-grid catalog test prove deterministic output, surface/material
 self-consistency, and representation of all six regions.
+
+## 2026-07-12: geometric surface LOD handoff
+
+Surface residency now uses complete square coverage sets so every grid-aligned CPU ownership patch is
+available before activation. The four sets contain 81/81/81/121 tiles at the configured radii, up from
+49/49/49/81 circular sets. Each tile remains one GPU allocation but exposes sixteen 8x8-cell body
+ranges and four conditional edge-skirt ranges per patch. Color and all three shadow cascades filter the
+same ranges, and adjacent ranges still coalesce into a single draw span where allocation order permits.
+
+The larger coverage set is prepared behind the currently active set. A focus change retains active
+tiles while pending tiles generate, then swaps the grid-snapped ownership plan only when canonical and
+all surface queues are clean. This intentionally trades bounded transient residency for a hole-free
+handoff rather than showing half of a new ring.
+
+The portable release benchmarks remained within their noise thresholds after adding structured mesh
+generation: one canonical chunk measured 0.719 ms, greedy meshing measured 1.201 ms, and the legacy
+surface-shell API measured 0.168 ms. That compatibility API skips transition-skirt construction;
+runtime structured tiles construct skirts because they can select those ranges independently.
+
+Browser validation opened two simultaneous tabs against the same OPFS world and rapidly reloaded one
+tab several times. Both workers recovered to a rendered world through Web-Lock ownership handoff, and
+both document bodies contained only the canvas plus the non-rendering module script. This exercises the
+same stale sync-access-handle retry path used after a quick refresh.

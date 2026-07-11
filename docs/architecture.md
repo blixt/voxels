@@ -56,13 +56,19 @@ separately generated tiles form a closed shell without cracks. The coarsest ring
 All surface meshes remain disposable derivatives: the generator, 10 cm voxels, and sparse edits stay
 authoritative.
 
-Coverage ownership changes at four camera-centred radial cuts placed safely inside the guaranteed
-coverage overlap of adjacent levels. This exact, continuous predicate avoids the salt-and-pepper holes
-that stochastic coverage creates when two height fields disagree, while a progressively lowered coarse
-underlay hides sub-voxel cracks at each cut. The color and shadow-caster shaders apply the same
-predicate, preventing discarded geometry from casting or overlapping LODs from double-shadowing.
-Trees remain canonical near-field geometry; they are withheld only during the first incomplete
-fine-field load so isolated crowns cannot appear before their supporting columns.
+Every surface tile is one arena allocation partitioned into sixteen contiguous 8x8-cell draw patches.
+Each patch also owns four separately addressable vertical skirts. The renderer submits a skirt only
+where that edge touches a different LOD owner, closing height disagreement without paying for internal
+same-resolution walls.
+
+Coverage ownership changes at grid-snapped, half-open square boundaries aligned to every participating
+patch size. Rust selects whole canonical chunks and surface patches on the CPU, then uses the identical
+selection for color and all shadow cascades; no fragment-level discard is needed after a complete
+coverage set becomes active. During initial fill, the former continuous shader predicate remains a
+safe fallback over complete coarse underlays. A pending focus retains the last active surface set until
+all replacement tiles are resident, so movement changes ownership transactionally instead of exposing
+partially streamed rings. Trees remain canonical near-field geometry; they are withheld only during the
+first incomplete fine-field load so isolated crowns cannot appear before their supporting columns.
 
 An edit invalidates every surface tile whose sampling footprint depends on that X/Z column. Resident
 geometry stays active while its replacement is generated and allocated, then the renderer switches
@@ -77,8 +83,9 @@ makes visibility and AO sampling cache-local while preserving authoritative neig
 Directional sunlight uses three stable cascaded shadow maps in a portable `Depth32Float` texture
 array. Practical logarithmic/uniform splits prioritize the editable near field; each frustum slice is
 enclosed in a quantized sphere and snapped to its own world-space texel grid to resist shimmer. Shadow
-passes reuse greedy mesh allocations, cull against each light volume, preserve the near/far ownership
-dither, and apply 3x3 comparison PCF only to direct sunlight. The Rust mission-control toggle skips all
+passes reuse greedy mesh allocations, cull each selected slice against its light volume, preserve the
+same CPU geometric ownership as the color pass, and apply 3x3 comparison PCF only to direct sunlight.
+The Rust mission-control toggle skips all
 three caster passes, while live diagnostics expose their draw-call cost.
 
 Outdoor lighting is one Rust-owned environment shared by shadow projection, sky radiance, voxel
@@ -131,7 +138,8 @@ the seed and generator version so an incompatible build cannot silently answer a
 - Generate and mesh only dirty/resident chunks, with bounded work admitted each frame.
 - Mesh chunk boundaries using neighbor samples so hidden seam faces are not emitted.
 - Suballocate immutable chunk and surface-ring meshes from coalescing GPU arena pages, replacing only
-  the allocation whose source changes. Coalesce adjacent visible allocations into draw spans.
+  the allocation whose source changes. Keep LOD patches as byte ranges within each tile allocation and
+  coalesce adjacent selected ranges into draw spans.
 - Frustum-cull chunks on CPU; add occlusion/indirect drawing only after GPU captures justify it.
 - Keep deterministic host benchmarks for generation, codec round-trips, meshing, and edit replay.
 - Expose lightweight browser frame and residency snapshots for end-to-end regression automation.
