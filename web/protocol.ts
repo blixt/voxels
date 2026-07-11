@@ -46,6 +46,7 @@ export interface InitMessage {
   cssWidth: number;
   cssHeight: number;
   dpr: number;
+  reducedMotion: boolean;
 }
 
 export type ToWorker =
@@ -57,5 +58,6 @@ export type ToWorker =
 
 export type FromWorker =
   | { kind: "ready" }
+  | { kind: "uiMode"; cursor: boolean }
   | { kind: "error"; message: string }
   | { kind: "snapshot"; requestId: number; values: number[] };

@@ -18,18 +18,9 @@ type TypedWorker = Omit<Worker, "onmessage" | "postMessage"> & {
   postMessage(message: ToWorker, transfer?: Transferable[]): void;
 };
 
-function start(root: HTMLElement): void {
-  const canvas = document.createElement("canvas");
-  canvas.setAttribute("aria-label", "Procedural voxel world");
-  root.appendChild(canvas);
-  const status = document.createElement("div");
-  status.className = "status";
-  status.textContent = "Building the world…";
-  root.appendChild(status);
-
+function start(canvas: HTMLCanvasElement): void {
   const fail = (message: string): void => {
-    status.classList.add("error");
-    status.textContent = message;
+    console.error(`[voxels] ${message}`);
   };
   if (!window.isSecureContext && location.hostname !== "localhost") {
     fail("Voxels needs a secure HTTPS connection for WebGPU.");
@@ -47,6 +38,7 @@ function start(root: HTMLElement): void {
   const worker = new Worker(new URL("./worker.ts", import.meta.url), {
     type: "module",
   }) as TypedWorker;
+  let uiCursorMode = false;
   let nextSnapshotRequest = 1;
   const snapshotResolvers = new Map<number, (values: number[]) => void>();
   const debugGlobal = globalThis as typeof globalThis & {
@@ -62,10 +54,12 @@ function start(root: HTMLElement): void {
       }),
   };
   worker.onmessage = (event) => {
-    if (event.data.kind === "ready") {
-      status.textContent = "Click to look · WASD move · Space jump · LMB remove · RMB place";
-      status.classList.add("ready");
-      window.setTimeout(() => status.classList.add("quiet"), 1800);
+    if (event.data.kind === "uiMode") {
+      uiCursorMode = event.data.cursor;
+      canvas.classList.toggle("ui-cursor", uiCursorMode);
+      if (uiCursorMode && document.pointerLockElement === canvas) {
+        document.exitPointerLock();
+      }
     } else if (event.data.kind === "error") {
       fail(`The Rust engine could not start.\n${event.data.message}`);
     } else if (event.data.kind === "snapshot") {
@@ -84,6 +78,7 @@ function start(root: HTMLElement): void {
       cssWidth: bounds.width,
       cssHeight: bounds.height,
       dpr: window.devicePixelRatio || 1,
+      reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
     },
     [offscreen],
   );
@@ -127,6 +122,10 @@ function start(root: HTMLElement): void {
 
   canvas.addEventListener("pointerdown", (event) => {
     canvas.setPointerCapture(event.pointerId);
+    if (uiCursorMode) {
+      enqueue(point(event, INPUT_POINTER_DOWN), true);
+      return;
+    }
     if (event.pointerType === "mouse" && document.pointerLockElement !== canvas) {
       void canvas.requestPointerLock();
       return;
@@ -135,7 +134,9 @@ function start(root: HTMLElement): void {
   });
   canvas.addEventListener("contextmenu", (event) => event.preventDefault());
   canvas.addEventListener("pointermove", (event) => {
-    if (event.pointerType === "mouse" && document.pointerLockElement !== canvas) return;
+    if (event.pointerType === "mouse" && document.pointerLockElement !== canvas && !uiCursorMode) {
+      return;
+    }
     for (const sample of event.getCoalescedEvents?.() ?? [event]) {
       enqueue(point(sample, INPUT_POINTER_MOVE));
     }
@@ -203,6 +204,9 @@ function start(root: HTMLElement): void {
   window.addEventListener("keydown", (event) => {
     if (keyCode(event.code) !== 0) {
       event.preventDefault();
+      if (event.code === "F3" && document.pointerLockElement === canvas) {
+        document.exitPointerLock();
+      }
       enqueue(keySample(event, INPUT_KEY_DOWN), true);
     }
   });
@@ -247,5 +251,5 @@ function start(root: HTMLElement): void {
   });
 }
 
-const root = document.querySelector<HTMLElement>("#app");
-if (root) start(root);
+const canvas = document.querySelector<HTMLCanvasElement>("#app");
+if (canvas) start(canvas);

@@ -1,4 +1,8 @@
 use crate::arena::{Allocation, ArenaAllocator};
+use crate::ui::{
+    ContextAction, LiveStats, MissionControlUi, RendererFeature, UiAction, UiKey, Viewport,
+};
+use crate::ui_gpu::UiGpu;
 use bytemuck::{Pod, Zeroable};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -28,6 +32,7 @@ struct FrameUniform {
     camera_time: [f32; 4],
     viewport_voxel: [f32; 4],
     target_voxel: [f32; 4],
+    render_options: [f32; 4],
 }
 
 #[repr(C)]
@@ -76,6 +81,31 @@ pub struct Renderer {
     time: f32,
     diagnostics: RenderDiagnostics,
     target_voxel: Option<[i32; 3]>,
+    options: RenderOptions,
+    ui: MissionControlUi,
+    ui_gpu: UiGpu,
+    dpr: f32,
+    log_error: fn(&str),
+    ui_text_error_reported: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RenderOptions {
+    ambient_occlusion: bool,
+    fog: bool,
+    far_terrain: bool,
+    target_outline: bool,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            ambient_occlusion: true,
+            fog: true,
+            far_terrain: true,
+            target_outline: true,
+        }
+    }
 }
 
 impl Renderer {
@@ -83,6 +113,7 @@ impl Renderer {
         target: wgpu::SurfaceTarget<'static>,
         width: u32,
         height: u32,
+        dpr: f32,
         log_error: fn(&str),
     ) -> Result<Self, String> {
         let instance = Instance::new(InstanceDescriptor {
@@ -127,7 +158,8 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        let frame = frame_uniform(&config, &CameraState::default(), 0.0, None);
+        let options = RenderOptions::default();
+        let frame = frame_uniform(&config, &CameraState::default(), 0.0, None, options);
         let frame_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("frame uniform"),
             contents: bytemuck::bytes_of(&frame),
@@ -193,6 +225,7 @@ impl Renderer {
         );
 
         let depth_view = depth_view(&device, config.width, config.height);
+        let ui_gpu = UiGpu::new(&device, format, config.width, config.height, dpr)?;
 
         Ok(Self {
             surface,
@@ -210,10 +243,16 @@ impl Renderer {
             time: 0.0,
             diagnostics: RenderDiagnostics::default(),
             target_voxel: None,
+            options,
+            ui: MissionControlUi::default(),
+            ui_gpu,
+            dpr: valid_dpr(dpr),
+            log_error,
+            ui_text_error_reported: false,
         })
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
+    pub fn resize(&mut self, width: u32, height: u32, dpr: f32) {
         if width == 0 || height == 0 {
             return;
         }
@@ -221,6 +260,15 @@ impl Renderer {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.depth_view = depth_view(&self.device, width, height);
+        self.dpr = valid_dpr(dpr);
+        self.ui_gpu.resize(
+            &self.device,
+            &self.queue,
+            self.config.format,
+            width,
+            height,
+            self.dpr,
+        );
     }
 
     pub fn quad_count(&self) -> u32 {
@@ -233,6 +281,81 @@ impl Renderer {
 
     pub const fn set_target_voxel(&mut self, target: Option<[i32; 3]>) {
         self.target_voxel = target;
+    }
+
+    pub const fn ui_open(&self) -> bool {
+        self.ui.open()
+    }
+
+    pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
+        self.ui.set_reduced_motion(reduced_motion);
+    }
+
+    pub fn handle_ui_key(&mut self, code: u8, pressed: bool, repeat: bool) -> bool {
+        let key = if code == 8 { UiKey::F3 } else { UiKey::Other };
+        let action = self.ui.handle_key(key, pressed, repeat);
+        self.apply_ui_action(action);
+        self.ui.open()
+    }
+
+    pub fn handle_ui_pointer_move(&mut self, css_x: f32, css_y: f32) -> bool {
+        let viewport = self.ui_viewport();
+        self.ui
+            .pointer_move_device([css_x * self.dpr, css_y * self.dpr], viewport)
+    }
+
+    pub fn handle_ui_pointer_down(&mut self, css_x: f32, css_y: f32, secondary: bool) -> bool {
+        let viewport = self.ui_viewport();
+        let point = [css_x * self.dpr, css_y * self.dpr];
+        let action = if secondary && self.ui.open() {
+            self.ui.open_context_menu_device(point, viewport)
+        } else {
+            self.ui.activate_device(point, viewport)
+        };
+        self.apply_ui_action(action);
+        self.ui.open()
+    }
+
+    fn ui_viewport(&self) -> Viewport {
+        Viewport::new(
+            self.config.width as f32,
+            self.config.height as f32,
+            self.dpr,
+        )
+    }
+
+    fn apply_ui_action(&mut self, action: UiAction) {
+        match action {
+            UiAction::FeatureChanged(feature, enabled) => match feature {
+                RendererFeature::VoxelAmbientOcclusion => {
+                    self.options.ambient_occlusion = enabled;
+                }
+                RendererFeature::AtmosphericFog => self.options.fog = enabled,
+                RendererFeature::FarTerrain => self.options.far_terrain = enabled,
+                RendererFeature::TargetOutline => self.options.target_outline = enabled,
+            },
+            UiAction::ContextAction(ContextAction::ResetRendererFeatures) => {
+                for feature in RendererFeature::ALL {
+                    let _ = self.ui.set_feature(feature, true);
+                }
+                self.options = RenderOptions::default();
+            }
+            UiAction::ContextAction(ContextAction::ToggleCompactTelemetry) => {
+                let _ = self.ui.set_compact(!self.ui.compact());
+            }
+            UiAction::ContextAction(ContextAction::HideFarTerrain) => {
+                let _ = self.ui.set_feature(RendererFeature::FarTerrain, false);
+                self.options.far_terrain = false;
+            }
+            UiAction::ContextAction(ContextAction::CloseMissionControl) => {
+                let _ = self.ui.set_open(false);
+            }
+            UiAction::None
+            | UiAction::PanelOpenChanged(_)
+            | UiAction::CompactChanged(_)
+            | UiAction::ContextMenuOpened
+            | UiAction::ContextMenuClosed => {}
+        }
     }
 
     pub fn upload_chunk(&mut self, coord: ChunkCoord, quads: &[Quad]) -> bool {
@@ -360,9 +483,24 @@ impl Renderer {
         }
     }
 
-    pub fn render(&mut self, dt: f32, camera: &CameraState) {
+    pub fn render(&mut self, dt: f32, camera: &CameraState, ui_stats: LiveStats) {
         self.time += dt.min(0.1);
-        let uniform = frame_uniform(&self.config, camera, self.time, self.target_voxel);
+        self.ui.set_stats(ui_stats);
+        self.ui.advance(dt);
+        let ui_draw = self.ui.build_draw_list(self.ui_viewport());
+        if let Err(error) = self.ui_gpu.prepare(&self.device, &self.queue, &ui_draw)
+            && !self.ui_text_error_reported
+        {
+            (self.log_error)(&error);
+            self.ui_text_error_reported = true;
+        }
+        let uniform = frame_uniform(
+            &self.config,
+            camera,
+            self.time,
+            self.target_voxel,
+            self.options,
+        );
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -388,7 +526,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("world pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: self.ui_gpu.scene_view(),
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -414,7 +552,10 @@ impl Renderer {
             pass.set_pipeline(&self.voxel_pipeline);
             let mut visible_chunks = 0;
             let mut visible_quads = 0;
-            for chunk in self.chunks.values() {
+            for (key, chunk) in &self.chunks {
+                if key.0 == 1 && !self.options.far_terrain {
+                    continue;
+                }
                 if !aabb_visible(chunk.bounds_min, chunk.bounds_max, view_projection) {
                     continue;
                 }
@@ -439,6 +580,25 @@ impl Renderer {
                 arena_allocated_bytes: arena.allocated_bytes,
             };
         }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("present and Rust UI pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.ui_gpu.draw(&mut pass);
+        }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
     }
@@ -449,6 +609,7 @@ fn frame_uniform(
     camera: &CameraState,
     time: f32,
     target: Option<[i32; 3]>,
+    options: RenderOptions,
 ) -> FrameUniform {
     let view_projection = view_projection(config, camera);
     FrameUniform {
@@ -469,6 +630,20 @@ fn frame_uniform(
         target_voxel: target.map_or([0.0; 4], |value| {
             [value[0] as f32, value[1] as f32, value[2] as f32, 1.0]
         }),
+        render_options: [
+            if options.ambient_occlusion { 1.0 } else { 0.0 },
+            if options.fog { 1.0 } else { 0.0 },
+            if options.far_terrain { 1.0 } else { 0.0 },
+            if options.target_outline { 1.0 } else { 0.0 },
+        ],
+    }
+}
+
+fn valid_dpr(dpr: f32) -> f32 {
+    if dpr.is_finite() && dpr > 0.0 {
+        dpr
+    } else {
+        1.0
     }
 }
 

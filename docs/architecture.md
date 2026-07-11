@@ -16,11 +16,15 @@ rendering, persistence, and binary codecs live in Rust.
   generation/meshing/upload admission, revisioned work tickets, stale-result rejection, eviction
   hysteresis, and streaming diagnostics. It owns no payloads or GPU resources.
 - `render/` is a platform-neutral WGPU library. It owns cameras, GPU resources, mesh uploads, shaders,
-  culling, frame timing, and rendering. It names no web types so a future native shell can reuse it.
+  culling, frame timing, and all visible UI. Its pure mission-control model produces glass/text draw
+  lists; a two-pass WGPU backend presents the sampled world backdrop, refractive chrome, embedded-font
+  glyphs, the controls toast, and crosshair. It names no web types so a native shell can reuse it.
 - `shell/` is the `wasm32-unknown-unknown` leaf. It owns the `wasm-bindgen` API, the transferred
   `OffscreenCanvas`, worker animation clock, packed input decoding, and OPFS persistence.
-- `web/` is the deliberately thin browser harness. Input is batched into fixed-size binary records and
-  transferred to the worker; semantic actions and world state do not cross into TypeScript.
+- `web/` is the deliberately thin browser harness. Its only visible element is the canvas. Input is
+  batched into fixed-size binary records and transferred to the worker; TypeScript only mirrors Rust's
+  cursor/capture mode because pointer lock is a browser responsibility. Semantic actions, status, UI
+  layout, text, world state, and feature behavior do not cross into TypeScript.
 
 The renderer and simulation run together in one dedicated worker. The shell advances runtime-issued
 generation, meshing, and upload tickets under independent frame budgets, while the renderer only owns
@@ -76,8 +80,11 @@ constraint, the same codec can move snapshots into append-only region files whil
 transactional index. Region files would group a bounded X/Z tile, use a checksummed offset table, and
 write payloads in aligned extents; that complexity is not justified before measurements.
 
-Multi-tab access is single-writer. The first implementation reports contention clearly; leader election
-and follower proxying can be added without changing `core` or `render`.
+Multi-tab access is single-writer without excluding other tabs. A Web Lock elects one worker as the
+SQLite/SAH-pool owner; followers proxy typed camera/edit operations over a BroadcastChannel and queue
+for ownership when the leader closes. Follower requests retry across short handoff gaps, while SAH-pool
+installation retries through stale sync-access handles left briefly by rapid reloads. The wire includes
+the seed and generator version so an incompatible build cannot silently answer another world's request.
 
 ## Performance policy
 

@@ -13,6 +13,7 @@ mod web {
     use std::rc::Rc;
     use voxels_core::{CameraState, InputState, VoxelHit, raycast_voxels};
     use voxels_render::renderer::Renderer;
+    use voxels_render::ui::LiveStats;
     use voxels_runtime::{FrameBudget, StreamConfig, StreamScheduler};
     use voxels_world::{
         CHUNK_EDGE, Chunk, ChunkCoord, EditMap, FAR_TILE_SPAN_VOXELS, FarTileCoord, Generator,
@@ -145,7 +146,35 @@ mod web {
             let target = self.raycast_target(&camera).map(|hit| hit.voxel);
             let mut renderer = self.renderer.borrow_mut();
             renderer.set_target_voxel(target);
-            renderer.render(dt, &camera);
+            let stream = self.scheduler.borrow().diagnostics();
+            let render = renderer.diagnostics();
+            renderer.render(
+                dt,
+                &camera,
+                LiveStats {
+                    frames_per_second: if self.frame_milliseconds.get() > 0.0 {
+                        1_000.0 / self.frame_milliseconds.get()
+                    } else {
+                        0.0
+                    },
+                    frame_ms: self.frame_milliseconds.get(),
+                    cpu_ms: self.frame_milliseconds.get(),
+                    gpu_ms: None,
+                    resident_chunks: usize_to_u32(
+                        stream.resident + self.far_resident.borrow().len(),
+                    ),
+                    visible_chunks: render.visible_chunks,
+                    quads: render.quads,
+                    draw_calls: render.draw_calls,
+                    pending_jobs: usize_to_u32(
+                        stream.generation.queued
+                            + stream.meshing.queued
+                            + stream.upload.queued
+                            + self.far_queue.borrow().len(),
+                    ),
+                    arena_bytes: render.arena_allocated_bytes,
+                },
+            );
             drop(renderer);
             if time - self.last_persist.get() >= 1_000.0 {
                 if let Err(error) = self.store.borrow().save_camera(&camera) {
@@ -308,21 +337,57 @@ mod web {
             self.callback.borrow_mut().take();
         }
 
-        fn feed_input(&self, bytes: &[u8]) {
+        fn feed_input(&self, bytes: &[u8]) -> bool {
             for chunk in bytes.chunks_exact(INPUT_RECORD_SIZE) {
                 let record = bytemuck::pod_read_unaligned::<InputRecord>(chunk);
                 match record.kind {
-                    KIND_POINTER_DOWN => self.edit_target(record.buttons),
-                    KIND_POINTER_MOVE => self
-                        .camera
-                        .borrow_mut()
-                        .look(Vec2::new(record.dx, record.dy)),
-                    KIND_KEY_DOWN => self.input.borrow_mut().set_key(record.code, true),
-                    KIND_KEY_UP => self.input.borrow_mut().set_key(record.code, false),
+                    KIND_POINTER_DOWN => {
+                        let was_open = self.renderer.borrow().ui_open();
+                        let is_open = self.renderer.borrow_mut().handle_ui_pointer_down(
+                            record.x,
+                            record.y,
+                            record.buttons & 2 != 0,
+                        );
+                        if !was_open && !is_open {
+                            self.edit_target(record.buttons);
+                        }
+                    }
+                    KIND_POINTER_MOVE => {
+                        if self.renderer.borrow().ui_open() {
+                            self.renderer
+                                .borrow_mut()
+                                .handle_ui_pointer_move(record.x, record.y);
+                        } else {
+                            self.camera
+                                .borrow_mut()
+                                .look(Vec2::new(record.dx, record.dy));
+                        }
+                    }
+                    KIND_KEY_DOWN => {
+                        if record.code == 8 {
+                            self.renderer.borrow_mut().handle_ui_key(
+                                record.code,
+                                true,
+                                record.flags & 1 != 0,
+                            );
+                        } else {
+                            self.input.borrow_mut().set_key(record.code, true);
+                        }
+                    }
+                    KIND_KEY_UP => {
+                        if record.code == 8 {
+                            self.renderer
+                                .borrow_mut()
+                                .handle_ui_key(record.code, false, false);
+                        } else {
+                            self.input.borrow_mut().set_key(record.code, false);
+                        }
+                    }
                     KIND_CANCEL => self.input.borrow_mut().clear(),
                     _ => {}
                 }
             }
+            self.renderer.borrow().ui_open()
         }
 
         fn edit_target(&self, buttons: u16) {
@@ -399,9 +464,11 @@ mod web {
 
     #[wasm_bindgen]
     impl EngineHandle {
-        pub fn feed_input(&self, bytes: &[u8]) {
+        pub fn feed_input(&self, bytes: &[u8]) -> bool {
             if let Some(engine) = self.engine.as_ref() {
-                engine.feed_input(bytes);
+                engine.feed_input(bytes)
+            } else {
+                false
             }
         }
 
@@ -409,7 +476,7 @@ mod web {
             if let Some(engine) = self.engine.as_ref() {
                 let width = (css_width * dpr).round().max(1.0) as u32;
                 let height = (css_height * dpr).round().max(1.0) as u32;
-                engine.renderer.borrow_mut().resize(width, height);
+                engine.renderer.borrow_mut().resize(width, height, dpr);
             }
         }
 
@@ -464,6 +531,7 @@ mod web {
         css_width: f32,
         css_height: f32,
         dpr: f32,
+        reduced_motion: bool,
     ) -> Result<EngineHandle, JsValue> {
         console_error_panic_hook::set_once();
         let width = (css_width * dpr).round().max(1.0) as u32;
@@ -490,10 +558,13 @@ mod web {
             wgpu::SurfaceTarget::OffscreenCanvas(canvas),
             width,
             height,
+            dpr,
             log_gpu_error,
         )
         .await
         .map_err(|error| JsValue::from_str(&error))?;
+        let mut renderer = renderer;
+        renderer.set_reduced_motion(reduced_motion);
         let scheduler = StreamScheduler::new(StreamConfig {
             load_radius_chunks: 3,
             vertical_radius_chunks: 1,
@@ -532,6 +603,10 @@ mod web {
 
     const fn coord_key(coord: ChunkCoord) -> (i32, i32, i32) {
         (coord.x, coord.y, coord.z)
+    }
+
+    fn usize_to_u32(value: usize) -> u32 {
+        u32::try_from(value).unwrap_or(u32::MAX)
     }
 
     fn world_to_chunk(position: glam::Vec3) -> ChunkCoord {

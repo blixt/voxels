@@ -24,7 +24,8 @@ greedy meshing. Reports are written under the ignored `target/criterion/` direct
 - `runtime/`: deterministic streaming priorities, budgets, revision tickets, eviction, and diagnostics.
 - `render/`: web-free WGPU resources, pipelines, shaders, and frame rendering.
 - `shell/`: WASM/browser worker leaf, packed input decoding, display clock, and persistence seam.
-- `web/`: canvas/input harness and worker boot only.
+- `web/`: the single canvas, normalized input transport, pointer lock, and worker boot only. All visible
+  HUD, status, crosshair, controls, menus, and text are composed by Rust/WGPU.
 
 The canonical world is generator identity plus sparse edits. Meshes and future LODs are derived caches.
 See [docs/architecture.md](docs/architecture.md) for format, persistence, and research decisions.
@@ -37,6 +38,8 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 - Look with the mouse; <kbd>Esc</kbd> releases pointer lock.
 - Remove the targeted voxel with the left mouse button; place a grass voxel with the right mouse
   button. Sparse edits are saved transactionally in SQLite on OPFS.
+- Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and context menu
+  can toggle ambient occlusion, fog, far terrain, and target highlighting without a DOM UI layer.
 
 ## Automation
 

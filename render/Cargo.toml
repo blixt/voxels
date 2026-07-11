@@ -17,3 +17,6 @@ voxels-world = { path = "../world" }
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
 wgpu = { version = "=30.0.0", default-features = false, features = ["wgsl"] }
+# WGPU 30 support is merged upstream but not published yet. Keep this exact revision until the
+# matching crates.io release exists, then replace the git pin with `=30.0.0`.
+wgpu_text = { git = "https://github.com/Blatko1/wgpu_text", rev = "3772c2fe7b79343db4ae20e1adf14f2342f96cd1" }

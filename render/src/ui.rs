@@ -25,6 +25,8 @@ const CONTEXT_ROW_HEIGHT: f32 = 34.0;
 const CONTEXT_PAD: f32 = 6.0;
 const AUTO_COMPACT_WIDTH: f32 = 720.0;
 const MOTION_RATE: f32 = 18.0;
+const TOAST_HOLD_SECONDS: f32 = 5.0;
+const TOAST_FADE_SECONDS: f32 = 1.5;
 
 const PANEL_COLOR: Color = Color::new(0.055, 0.070, 0.105, 0.88);
 const PANEL_BORDER: Color = Color::new(0.52, 0.66, 0.88, 0.28);
@@ -158,26 +160,26 @@ const fn feature_index(feature: RendererFeature) -> usize {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ContextAction {
-    RebuildVisibleMeshes,
-    ReloadShaders,
-    CaptureFrame,
-    ResetDiagnostics,
+    ResetRendererFeatures,
+    ToggleCompactTelemetry,
+    HideFarTerrain,
+    CloseMissionControl,
 }
 
 impl ContextAction {
     pub const ALL: [Self; 4] = [
-        Self::RebuildVisibleMeshes,
-        Self::ReloadShaders,
-        Self::CaptureFrame,
-        Self::ResetDiagnostics,
+        Self::ResetRendererFeatures,
+        Self::ToggleCompactTelemetry,
+        Self::HideFarTerrain,
+        Self::CloseMissionControl,
     ];
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::RebuildVisibleMeshes => "Rebuild visible meshes",
-            Self::ReloadShaders => "Reload shaders",
-            Self::CaptureFrame => "Capture frame profile",
-            Self::ResetDiagnostics => "Reset diagnostics",
+            Self::ResetRendererFeatures => "Reset renderer features",
+            Self::ToggleCompactTelemetry => "Toggle compact telemetry",
+            Self::HideFarTerrain => "Hide far terrain",
+            Self::CloseMissionControl => "Close mission control",
         }
     }
 }
@@ -228,6 +230,7 @@ pub struct LiveStats {
 pub enum SurfaceRole {
     Brand,
     Launcher,
+    Toast,
     Crosshair,
     Panel,
     Header,
@@ -285,7 +288,8 @@ pub struct InteractiveRegion {
 pub struct UiLayout {
     pub brand: Rect,
     pub launcher: Rect,
-    pub crosshair: [Rect; 2],
+    pub toast: Rect,
+    pub crosshair: Rect,
     pub panel: Rect,
     pub header: Rect,
     pub compact: bool,
@@ -350,6 +354,7 @@ pub struct MissionControlUi {
     open_motion: EasedValue,
     compact_motion: EasedValue,
     hover_motion: BTreeMap<UiTarget, EasedValue>,
+    toast_age: f32,
 }
 
 impl Default for MissionControlUi {
@@ -366,6 +371,7 @@ impl Default for MissionControlUi {
             open_motion: EasedValue::new(0.0),
             compact_motion: EasedValue::new(0.0),
             hover_motion: BTreeMap::new(),
+            toast_age: 0.0,
         }
     }
 }
@@ -470,6 +476,7 @@ impl MissionControlUi {
     }
 
     pub fn advance(&mut self, dt: f32) {
+        self.toast_age += dt.clamp(0.0, 0.1);
         self.open_motion.advance(dt, self.reduced_motion);
         self.compact_motion.advance(dt, self.reduced_motion);
         for motion in &mut self.feature_motion {
@@ -503,20 +510,19 @@ impl MissionControlUi {
             CHROME_HEIGHT,
         );
         let crosshair_center = [viewport_width * 0.5, viewport_height * 0.5];
-        let crosshair = [
-            Rect::new(
-                crosshair_center[0] - 6.0,
-                crosshair_center[1] - 1.0,
-                12.0,
-                2.0,
-            ),
-            Rect::new(
-                crosshair_center[0] - 1.0,
-                crosshair_center[1] - 6.0,
-                2.0,
-                12.0,
-            ),
-        ];
+        let toast_width = 590.0f32.min((viewport_width - PANEL_INSET * 2.0).max(180.0));
+        let toast = Rect::new(
+            (viewport_width - toast_width) * 0.5,
+            (viewport_height - CHROME_HEIGHT - PANEL_INSET).max(0.0),
+            toast_width,
+            CHROME_HEIGHT,
+        );
+        let crosshair = Rect::new(
+            crosshair_center[0] - 6.0,
+            crosshair_center[1] - 6.0,
+            12.0,
+            12.0,
+        );
         let panel = Rect::new(
             (viewport_width - panel_width - PANEL_INSET).max(0.0),
             PANEL_TOP.min((viewport_height - HEADER_HEIGHT).max(0.0)),
@@ -635,6 +641,7 @@ impl MissionControlUi {
         UiLayout {
             brand,
             launcher,
+            toast,
             crosshair,
             panel,
             header,
@@ -935,6 +942,35 @@ impl MissionControlUi {
             TextAlign::Center,
         );
 
+        let toast_alpha = if self.toast_age <= TOAST_HOLD_SECONDS {
+            1.0
+        } else {
+            1.0 - ((self.toast_age - TOAST_HOLD_SECONDS) / TOAST_FADE_SECONDS).clamp(0.0, 1.0)
+        };
+        if toast_alpha > 0.001 {
+            push_surface(
+                draw,
+                layout.toast,
+                CHROME_HEIGHT * 0.5,
+                PANEL_COLOR.with_alpha(toast_alpha),
+                PANEL_BORDER.with_alpha(toast_alpha),
+                16.0,
+                SurfaceRole::Toast,
+            );
+            push_text(
+                draw,
+                if layout.toast.width < 500.0 {
+                    "WASD MOVE  /  SPACE JUMP  /  F3 CONTROLS"
+                } else {
+                    "CLICK TO LOOK  /  WASD MOVE  /  SPACE JUMP  /  LMB REMOVE  /  RMB PLACE  /  F3 CONTROLS"
+                },
+                layout.toast.center(),
+                9.5,
+                TEXT_PRIMARY.with_alpha(toast_alpha),
+                TextAlign::Center,
+            );
+        }
+
         let launcher_hover = self.hover_eased_value(UiTarget::Launcher);
         push_surface(
             draw,
@@ -957,17 +993,15 @@ impl MissionControlUi {
             TextAlign::Center,
         );
 
-        for rect in layout.crosshair {
-            push_surface(
-                draw,
-                rect,
-                1.0,
-                Color::new(0.94, 0.98, 1.0, 0.82),
-                Color::new(0.0, 0.0, 0.0, 0.38),
-                0.0,
-                SurfaceRole::Crosshair,
-            );
-        }
+        push_surface(
+            draw,
+            layout.crosshair,
+            6.0,
+            Color::new(0.94, 0.98, 1.0, 0.88),
+            Color::new(0.0, 0.0, 0.0, 0.56),
+            0.0,
+            SurfaceRole::Crosshair,
+        );
     }
 
     fn card_data(&self, compact: bool) -> Vec<(&'static str, String)> {
@@ -1281,7 +1315,7 @@ mod tests {
             assert!(menu.x + menu.width <= viewport.css_size()[0]);
             assert!(menu.y + menu.height <= viewport.css_size()[1]);
         }
-        let action = ContextAction::CaptureFrame;
+        let action = ContextAction::ToggleCompactTelemetry;
         let center = layout.region(UiTarget::Context(action)).map(Rect::center);
         if let Some(center) = center {
             assert_eq!(
@@ -1387,7 +1421,7 @@ mod tests {
                 .iter()
                 .filter(|surface| surface.role == SurfaceRole::Crosshair)
                 .count(),
-            2
+            1
         );
     }
 
@@ -1423,5 +1457,27 @@ mod tests {
         let viewport = Viewport::new(800.0, 600.0, 0.0);
         assert_eq!(viewport.scale_factor, 1.0);
         assert_eq!(viewport.device_to_css([20.0, 30.0]), [20.0, 30.0]);
+    }
+
+    #[test]
+    fn controls_toast_is_rust_drawn_then_fades_away() {
+        let mut ui = MissionControlUi::default();
+        let initial = ui.build_draw_list(viewport());
+        assert!(
+            initial
+                .glass
+                .iter()
+                .any(|surface| surface.role == SurfaceRole::Toast)
+        );
+        for _ in 0..500 {
+            ui.advance(1.0 / 60.0);
+        }
+        let settled = ui.build_draw_list(viewport());
+        assert!(
+            settled
+                .glass
+                .iter()
+                .all(|surface| surface.role != SurfaceRole::Toast)
+        );
     }
 }

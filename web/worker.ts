@@ -8,12 +8,19 @@ const scope = self as unknown as {
 
 let handle: EngineHandle | null = null;
 let disposed = false;
+let cursorMode = false;
 const pending: Exclude<ToWorker, InitMessage>[] = [];
 
 function dispatch(message: Exclude<ToWorker, InitMessage>): void {
   switch (message.kind) {
     case "input":
-      handle?.feed_input(new Uint8Array(message.buffer));
+      {
+        const next = handle?.feed_input(new Uint8Array(message.buffer)) ?? false;
+        if (next !== cursorMode) {
+          cursorMode = next;
+          scope.postMessage({ kind: "uiMode", cursor: next });
+        }
+      }
       break;
     case "resize":
       handle?.resize(message.cssWidth, message.cssHeight, message.dpr);
@@ -41,6 +48,7 @@ async function boot(message: InitMessage): Promise<void> {
     message.cssWidth,
     message.cssHeight,
     message.dpr,
+    message.reducedMotion,
   );
   if (disposed) {
     engine.destroy();

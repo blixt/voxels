@@ -5,21 +5,21 @@ export class EngineHandle {
     private constructor();
     free(): void;
     destroy(): void;
-    feed_input(bytes: Uint8Array): void;
+    feed_input(bytes: Uint8Array): boolean;
     resize(css_width: number, css_height: number, dpr: number): void;
     snapshot(): Float32Array;
 }
 
-export function create_engine(canvas: OffscreenCanvas, css_width: number, css_height: number, dpr: number): Promise<EngineHandle>;
+export function create_engine(canvas: OffscreenCanvas, css_width: number, css_height: number, dpr: number, reduced_motion: boolean): Promise<EngineHandle>;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_enginehandle_free: (a: number, b: number) => void;
-    readonly create_engine: (a: any, b: number, c: number, d: number) => any;
+    readonly create_engine: (a: any, b: number, c: number, d: number, e: number) => any;
     readonly enginehandle_destroy: (a: number) => void;
-    readonly enginehandle_feed_input: (a: number, b: number, c: number) => void;
+    readonly enginehandle_feed_input: (a: number, b: number, c: number) => number;
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;
     readonly enginehandle_snapshot: (a: number) => any;
     readonly rust_sqlite_wasm_abort: () => void;
@@ -34,11 +34,13 @@ export interface InitOutput {
     readonly sqlite3_os_init: () => number;
     readonly wasm_bindgen_7bdf24c225287f40___convert__closures_____invoke___f64______true_: (a: number, b: number, c: number) => void;
     readonly wasm_bindgen_7bdf24c225287f40___convert__closures_____invoke___wasm_bindgen_7bdf24c225287f40___JsValue__core_7d5f0a2ba6a62c33___result__Result_____wasm_bindgen_7bdf24c225287f40___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_7bdf24c225287f40___convert__closures_____invoke___wasm_bindgen_7bdf24c225287f40___sys__JsOption_wgpu_94d9a66afb1ceff7___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_7d5f0a2ba6a62c33___result__Result_____wasm_bindgen_7bdf24c225287f40___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_7bdf24c225287f40___convert__closures_____invoke___wasm_bindgen_7bdf24c225287f40___sys__JsOption_wgpu_94d9a66afb1ceff7___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_7d5f0a2ba6a62c33___result__Result_____wasm_bindgen_7bdf24c225287f40___JsError___true__4: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_7bdf24c225287f40___convert__closures_____invoke___wasm_bindgen_7bdf24c225287f40___sys__JsOption_wgpu_94d9a66afb1ceff7___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_7d5f0a2ba6a62c33___result__Result_____wasm_bindgen_7bdf24c225287f40___JsError___true__5: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_7bdf24c225287f40___convert__closures_____invoke___wasm_bindgen_7bdf24c225287f40___sys__JsOption_wgpu_f3eabd642bcf21ef___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_7d5f0a2ba6a62c33___result__Result_____wasm_bindgen_7bdf24c225287f40___JsError___true_: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_7bdf24c225287f40___convert__closures_____invoke___wasm_bindgen_7bdf24c225287f40___sys__JsOption_wgpu_f3eabd642bcf21ef___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_7d5f0a2ba6a62c33___result__Result_____wasm_bindgen_7bdf24c225287f40___JsError___true__6: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_7bdf24c225287f40___convert__closures_____invoke___wasm_bindgen_7bdf24c225287f40___sys__JsOption_wgpu_f3eabd642bcf21ef___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_7d5f0a2ba6a62c33___result__Result_____wasm_bindgen_7bdf24c225287f40___JsError___true__7: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_7bdf24c225287f40___convert__closures_____invoke___js_sys_102388b01e77fd2c___Function_fn_wasm_bindgen_7bdf24c225287f40___JsValue_____wasm_bindgen_7bdf24c225287f40___sys__Undefined___js_sys_102388b01e77fd2c___Function_fn_wasm_bindgen_7bdf24c225287f40___JsValue_____wasm_bindgen_7bdf24c225287f40___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
-    readonly wasm_bindgen_7bdf24c225287f40___convert__closures_____invoke___wgpu_94d9a66afb1ceff7___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true_: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen_7bdf24c225287f40___convert__closures_____invoke___wasm_bindgen_7bdf24c225287f40___JsValue__js_sys_102388b01e77fd2c___Promise__true_: (a: number, b: number, c: any) => any;
+    readonly wasm_bindgen_7bdf24c225287f40___convert__closures_____invoke___wgpu_f3eabd642bcf21ef___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true_: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen_7bdf24c225287f40___convert__closures_____invoke___web_sys_f7f962d8876487fd___features__gen_MessageEvent__MessageEvent______true_: (a: number, b: number, c: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
