@@ -10,6 +10,12 @@ struct Frame {
   shadow_splits: vec4<f32>,
   shadow_texel_sizes: vec4<f32>,
   shadow_view_projection: array<mat4x4<f32>, 3>,
+  sun_direction: vec4<f32>,
+  sun_radiance: vec4<f32>,
+  sky_horizon: vec4<f32>,
+  sky_zenith: vec4<f32>,
+  ground_atmosphere: vec4<f32>,
+  fog_exposure: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -84,6 +90,35 @@ fn material_color(material: u32) -> vec3<f32> {
     case 11u: { return vec3<f32>(0.58, 0.55, 0.44); }
     case 12u: { return vec3<f32>(0.62, 0.20, 0.075); }
     default: { return vec3<f32>(1.0, 0.0, 1.0); }
+  }
+}
+
+fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
+  let low = srgb / 12.92;
+  let high = pow((srgb + 0.055) / 1.055, vec3<f32>(2.4));
+  return select(high, low, srgb <= vec3<f32>(0.04045));
+}
+
+fn material_roughness(material: u32) -> f32 {
+  switch material {
+    case 3u: { return 0.68; }
+    case 5u: { return 0.42; }
+    case 7u: { return 0.74; }
+    case 9u: { return 0.64; }
+    case 11u: { return 0.58; }
+    default: { return 0.86; }
+  }
+}
+
+fn material_macro_tint(material: u32, world: vec3<f32>) -> vec3<f32> {
+  let wave = sin(world.x * 0.17 + sin(world.z * 0.11) * 1.7) * 0.5 + 0.5;
+  switch material {
+    case 1u: { return mix(vec3<f32>(0.80, 0.94, 0.77), vec3<f32>(1.10, 1.02, 0.72), wave); }
+    case 9u: { return mix(vec3<f32>(0.72, 0.92, 0.76), vec3<f32>(1.08, 1.01, 0.78), wave); }
+    case 10u: { return mix(vec3<f32>(0.76, 0.96, 0.82), vec3<f32>(1.03, 0.95, 0.72), wave); }
+    case 3u: { return mix(vec3<f32>(0.82, 0.88, 0.96), vec3<f32>(1.08, 1.02, 0.91), wave); }
+    case 11u: { return mix(vec3<f32>(0.90, 0.94, 1.02), vec3<f32>(1.08, 1.01, 0.86), wave); }
+    default: { return vec3<f32>(mix(0.93, 1.06, wave)); }
   }
 }
 
@@ -182,17 +217,37 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     discard;
   }
   let material = input.material & 0xffffu;
-  let sun = normalize(vec3<f32>(0.48, 0.72, 0.35));
+  let sun = normalize(frame.sun_direction.xyz);
   let diffuse = max(dot(input.normal, sun), 0.0);
   let shadow = sun_visibility(input.world, input.normal);
   let sky_visibility = input.normal.y * 0.5 + 0.5;
-  let bounce = max(-input.normal.y, 0.0) * 0.08;
-  let light = 0.46 + sky_visibility * 0.22 + diffuse * 0.48 * mix(0.18, 1.0, shadow) + bounce;
   let cell = floor(input.world / frame.viewport_voxel.z);
   let grain = mix(0.88, 1.12, hash31(cell + vec3<f32>(f32(material) * 3.1)));
   let fine_grain = mix(0.96, 1.04, hash31(floor(input.world * 28.0)));
   let ambient_occlusion = select(1.0, mix(0.52, 1.0, input.ao), frame.render_options.x > 0.5);
-  var color = material_color(material) * light * grain * fine_grain * ambient_occlusion;
+  let sky_irradiance = mix(frame.ground_atmosphere.rgb, frame.sky_horizon.rgb * 0.48, sky_visibility);
+  let bounce = frame.ground_atmosphere.rgb * max(-input.normal.y, 0.0) * 0.35;
+  let direct = frame.sun_radiance.rgb * diffuse * mix(0.16, 1.0, shadow) * 0.19;
+  let albedo = srgb_to_linear(material_color(material))
+    * material_macro_tint(material, input.world)
+    * grain
+    * fine_grain;
+  let view_direction = normalize(frame.camera_time.xyz - input.world);
+  let half_direction = normalize(sun + view_direction);
+  let roughness = material_roughness(material);
+  let specular_power = mix(110.0, 5.0, roughness * roughness);
+  let fresnel = 0.04 + 0.96 * pow(1.0 - max(dot(view_direction, half_direction), 0.0), 5.0);
+  let specular = frame.sun_radiance.rgb
+    * pow(max(dot(input.normal, half_direction), 0.0), specular_power)
+    * fresnel
+    * (1.0 - roughness * 0.72)
+    * mix(0.16, 1.0, shadow)
+    * 0.16;
+  var color = albedo * ((sky_irradiance + bounce) * ambient_occlusion + direct) + specular;
+  if material == 9u {
+    let leaf_scatter = pow(max(dot(-sun, view_direction), 0.0), 3.0) * (1.0 - shadow * 0.55);
+    color += albedo * frame.sun_radiance.rgb * leaf_scatter * 0.035;
+  }
   let inside_position = input.world - input.normal * frame.viewport_voxel.z * 0.02;
   let voxel = floor(inside_position / frame.viewport_voxel.z);
   let targeted = frame.render_options.w > 0.5 && frame.target_voxel.w > 0.5 && all(abs(voxel - frame.target_voxel.xyz) < vec3<f32>(0.1));
@@ -203,14 +258,19 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     if abs(input.normal.y) < 0.5 { edge = min(edge, min(coordinate.y, 1.0 - coordinate.y)); }
     if abs(input.normal.z) < 0.5 { edge = min(edge, min(coordinate.z, 1.0 - coordinate.z)); }
     let outline = 1.0 - smoothstep(0.045, 0.085, edge);
-    color = mix(color, vec3<f32>(0.95, 0.86, 0.48), outline * 0.88);
+    color = mix(color, vec3<f32>(1.4, 1.08, 0.42), outline * 0.88);
   }
-  let distance_to_camera = distance(input.world, frame.camera_time.xyz);
-  let distance_fog = smoothstep(frame.viewport_voxel.w * 0.58, frame.viewport_voxel.w, distance_to_camera);
-  let height_fog = exp(-max(input.world.y, 0.0) * 0.16) * smoothstep(2.5, frame.viewport_voxel.w, distance_to_camera) * 0.18;
-  let fog = clamp(distance_fog + height_fog, 0.0, 1.0);
-  let fog_color = vec3<f32>(0.49, 0.62, 0.72);
-  color = mix(color, fog_color, fog * frame.render_options.y);
-  let mapped = color / (color + vec3<f32>(0.72));
-  return vec4<f32>(max(mapped, vec3<f32>(0.0)), 1.0);
+  let camera_to_surface = input.world - frame.camera_time.xyz;
+  let distance_to_camera = length(camera_to_surface);
+  let fog_view_direction = camera_to_surface / max(distance_to_camera, 0.0001);
+  let average_height = max((input.world.y + frame.camera_time.y) * 0.5, 0.0);
+  let height_density = exp(-average_height * frame.fog_exposure.x);
+  let optical_depth = distance_to_camera * frame.ground_atmosphere.w * height_density * frame.render_options.y;
+  let transmittance = exp(-optical_depth);
+  let sky_factor = pow(max(fog_view_direction.y, 0.0), 0.42);
+  var fog_radiance = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, sky_factor);
+  let sun_amount = max(dot(fog_view_direction, sun), 0.0);
+  fog_radiance += frame.sun_radiance.rgb * pow(sun_amount, 32.0) * 0.012;
+  color = color * transmittance + fog_radiance * (1.0 - transmittance);
+  return vec4<f32>(max(color * frame.fog_exposure.y, vec3<f32>(0.0)), 1.0);
 }

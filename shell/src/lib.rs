@@ -202,7 +202,7 @@ mod web {
                             + self.surface_queue.borrow().len()
                             + self.surface_dirty.borrow().len(),
                     ),
-                    arena_bytes: render.arena_allocated_bytes,
+                    core_gpu_bytes: render.core_gpu_bytes,
                 },
             );
             drop(renderer);

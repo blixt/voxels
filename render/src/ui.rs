@@ -234,7 +234,7 @@ pub struct LiveStats {
     pub remesh_max_frames: u64,
     pub lod_tiles: [u32; 4],
     pub pending_jobs: u32,
-    pub arena_bytes: u64,
+    pub core_gpu_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1062,11 +1062,11 @@ impl MissionControlUi {
                     ),
                 ),
                 (
-                    "JOBS / ARENA",
+                    "JOBS / GPU CORE",
                     format!(
                         "{} / {}",
                         stats.pending_jobs,
-                        compact_bytes(stats.arena_bytes)
+                        compact_bytes(stats.core_gpu_bytes)
                     ),
                 ),
                 (
@@ -1394,7 +1394,7 @@ mod tests {
             remesh_max_frames: 4,
             lod_tiles: [49, 49, 49, 81],
             pending_jobs: 7,
-            arena_bytes: 48 * 1_048_576,
+            core_gpu_bytes: 76 * 1_048_576,
         });
         let _ = ui.open_context_menu_device([900.0, 80.0], viewport());
         let draw = ui.build_draw_list(viewport());
@@ -1425,7 +1425,7 @@ mod tests {
             4
         );
         assert!(draw.text.iter().any(|run| run.text == "123.4k / 132+164s"));
-        assert!(draw.text.iter().any(|run| run.text == "7 / 48.0 MiB"));
+        assert!(draw.text.iter().any(|run| run.text == "7 / 76.0 MiB"));
     }
 
     #[test]

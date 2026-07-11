@@ -1,4 +1,5 @@
 use crate::arena::{Allocation, ArenaAllocator};
+use crate::environment::OutdoorEnvironment;
 use crate::shadow::{
     CASCADE_COUNT, DirectionalShadowCascades, DirectionalShadowConfig, aabb_visible_in_cascade,
     build_directional_shadow_cascades,
@@ -6,7 +7,7 @@ use crate::shadow::{
 use crate::ui::{
     ContextAction, LiveStats, MissionControlUi, RendererFeature, UiAction, UiKey, Viewport,
 };
-use crate::ui_gpu::UiGpu;
+use crate::ui_gpu::{SCENE_FORMAT, UiGpu};
 use bytemuck::{Pod, Zeroable};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -28,7 +29,6 @@ const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 const FAR_MATERIAL_FLAG: u32 = 1 << 31;
 const SURFACE_LOD_SHIFT: u32 = 28;
 const FAR_UNDERLAY_OFFSET_METRES: f32 = 0.025;
-const SUN_DIRECTION: glam::Vec3 = glam::Vec3::new(0.48, 0.72, 0.35);
 type MeshKey = (u8, i32, i32, i32);
 
 #[repr(C)]
@@ -45,6 +45,12 @@ struct FrameUniform {
     shadow_splits: [f32; 4],
     shadow_texel_sizes: [f32; 4],
     shadow_view_projection: [[[f32; 4]; 4]; CASCADE_COUNT],
+    sun_direction: [f32; 4],
+    sun_radiance: [f32; 4],
+    sky_horizon: [f32; 4],
+    sky_zenith: [f32; 4],
+    ground_atmosphere: [f32; 4],
+    fog_exposure: [f32; 4],
 }
 
 #[repr(C)]
@@ -109,6 +115,7 @@ pub struct RenderDiagnostics {
     pub arena_pages: u32,
     pub arena_capacity_bytes: u64,
     pub arena_allocated_bytes: u64,
+    pub core_gpu_bytes: u64,
 }
 
 pub struct Renderer {
@@ -129,6 +136,7 @@ pub struct Renderer {
     diagnostics: RenderDiagnostics,
     target_voxel: Option<[i32; 3]>,
     options: RenderOptions,
+    environment: OutdoorEnvironment,
     fine_coverage_ready: bool,
     lod_coverage_ready: bool,
     ui: MissionControlUi,
@@ -163,6 +171,13 @@ struct LodReadiness {
     all: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct FrameState {
+    options: RenderOptions,
+    readiness: LodReadiness,
+    environment: OutdoorEnvironment,
+}
+
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
@@ -176,10 +191,15 @@ impl Default for RenderOptions {
 }
 
 impl ShadowGpu {
-    fn new(device: &Device, camera: &CameraState) -> Result<Self, String> {
+    fn new(
+        device: &Device,
+        camera: &CameraState,
+        environment: OutdoorEnvironment,
+    ) -> Result<Self, String> {
         let config = DirectionalShadowConfig::default();
-        let cascades = build_directional_shadow_cascades(camera, 1.0, -SUN_DIRECTION, config)
-            .map_err(|error| format!("build initial shadow cascades: {error:?}"))?;
+        let cascades =
+            build_directional_shadow_cascades(camera, 1.0, -environment.sun_direction, config)
+                .map_err(|error| format!("build initial shadow cascades: {error:?}"))?;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("sun shadow cascade array"),
             size: wgpu::Extent3d {
@@ -377,16 +397,21 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let options = RenderOptions::default();
+        let environment = OutdoorEnvironment::default().sanitized();
         let initial_camera = CameraState::default();
-        let shadow_gpu = ShadowGpu::new(&device, &initial_camera)?;
-        let shadow_cascades = directional_shadow_cascades(&config, &initial_camera)?;
+        let shadow_gpu = ShadowGpu::new(&device, &initial_camera, environment)?;
+        let shadow_cascades =
+            directional_shadow_cascades(&config, &initial_camera, environment.sun_direction)?;
         let frame = frame_uniform(
             &config,
             &initial_camera,
             0.0,
             None,
-            options,
-            LodReadiness::default(),
+            FrameState {
+                options,
+                readiness: LodReadiness::default(),
+                environment,
+            },
             &shadow_cascades,
         );
         let frame_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -454,7 +479,7 @@ impl Renderer {
             "sky pipeline",
             &pipeline_layout,
             &sky_shader,
-            format,
+            SCENE_FORMAT,
             &[],
             Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
@@ -470,7 +495,7 @@ impl Renderer {
             "voxel pipeline",
             &pipeline_layout,
             &voxel_shader,
-            format,
+            SCENE_FORMAT,
             &[Some(quad_layout())],
             Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
@@ -502,6 +527,7 @@ impl Renderer {
             diagnostics: RenderDiagnostics::default(),
             target_voxel: None,
             options,
+            environment,
             fine_coverage_ready: false,
             lod_coverage_ready: false,
             ui: MissionControlUi::default(),
@@ -541,6 +567,10 @@ impl Renderer {
 
     pub const fn set_target_voxel(&mut self, target: Option<[i32; 3]>) {
         self.target_voxel = target;
+    }
+
+    pub fn set_environment(&mut self, environment: OutdoorEnvironment) {
+        self.environment = environment.sanitized();
     }
 
     pub const fn set_lod_coverage_ready(&mut self, fine_ready: bool, all_lods_ready: bool) {
@@ -782,7 +812,9 @@ impl Renderer {
 
     pub fn render(&mut self, dt: f32, camera: &CameraState, ui_stats: LiveStats) {
         self.time += dt.min(0.1);
-        let Ok(shadow_cascades) = directional_shadow_cascades(&self.config, camera) else {
+        let Ok(shadow_cascades) =
+            directional_shadow_cascades(&self.config, camera, self.environment.sun_direction)
+        else {
             return;
         };
         self.ui.set_stats(ui_stats);
@@ -799,8 +831,11 @@ impl Renderer {
             camera,
             self.time,
             self.target_voxel,
-            self.options,
-            self.lod_readiness(),
+            FrameState {
+                options: self.options,
+                readiness: self.lod_readiness(),
+                environment: self.environment,
+            },
             &shadow_cascades,
         );
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
@@ -919,6 +954,11 @@ impl Renderer {
                 pass.draw(0..6, 0..span.quad_count);
             }
             let arena = self.arena.stats();
+            let scene_pixels = u64::from(self.config.width) * u64::from(self.config.height);
+            let shadow_bytes = u64::from(DirectionalShadowConfig::default().shadow_map_resolution)
+                * u64::from(DirectionalShadowConfig::default().shadow_map_resolution)
+                * CASCADE_COUNT as u64
+                * 4;
             self.diagnostics = RenderDiagnostics {
                 resident_chunks: self.chunks.len() as u32,
                 visible_chunks: world_draw_list.mesh_count,
@@ -933,6 +973,10 @@ impl Renderer {
                 arena_pages: arena.pages as u32,
                 arena_capacity_bytes: arena.capacity_bytes,
                 arena_allocated_bytes: arena.allocated_bytes,
+                core_gpu_bytes: arena
+                    .capacity_bytes
+                    .saturating_add(scene_pixels.saturating_mul(12))
+                    .saturating_add(shadow_bytes),
             };
         }
         {
@@ -1018,10 +1062,14 @@ fn frame_uniform(
     camera: &CameraState,
     time: f32,
     target: Option<[i32; 3]>,
-    options: RenderOptions,
-    readiness: LodReadiness,
+    state: FrameState,
     shadows: &DirectionalShadowCascades,
 ) -> FrameUniform {
+    let FrameState {
+        options,
+        readiness,
+        environment,
+    } = state;
     let view_projection = view_projection(config, camera);
     let camera_forward = camera.forward();
     FrameUniform {
@@ -1070,6 +1118,22 @@ fn frame_uniform(
         shadow_view_projection: std::array::from_fn(|index| {
             shadows.cascades[index].clip_from_world.to_cols_array_2d()
         }),
+        sun_direction: environment.sun_direction.extend(0.0).to_array(),
+        sun_radiance: environment.sun_radiance.extend(0.0).to_array(),
+        sky_horizon: environment.sky_horizon.extend(0.0).to_array(),
+        sky_zenith: environment.sky_zenith.extend(0.0).to_array(),
+        ground_atmosphere: [
+            environment.ground_irradiance.x,
+            environment.ground_irradiance.y,
+            environment.ground_irradiance.z,
+            environment.fog_density,
+        ],
+        fog_exposure: [
+            environment.fog_height_falloff,
+            environment.exposure,
+            0.0,
+            0.0,
+        ],
     }
 }
 
@@ -1102,12 +1166,13 @@ fn shadow_frame_uniform(
 fn directional_shadow_cascades(
     config: &SurfaceConfiguration,
     camera: &CameraState,
+    sun_direction: glam::Vec3,
 ) -> Result<DirectionalShadowCascades, String> {
     let aspect = config.width as f32 / config.height.max(1) as f32;
     build_directional_shadow_cascades(
         camera,
         aspect,
-        -SUN_DIRECTION,
+        -sun_direction,
         DirectionalShadowConfig::default(),
     )
     .map_err(|error| format!("build shadow cascades: {error:?}"))

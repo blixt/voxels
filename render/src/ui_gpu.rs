@@ -21,6 +21,7 @@ use wgpu_text::glyph_brush::{HorizontalAlign, Layout, Section, Text, VerticalAli
 use wgpu_text::{BrushBuilder, TextBrush};
 
 const GLASS_CAPACITY: usize = 192;
+pub(crate) const SCENE_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
 pub struct SceneTarget {
     _texture: Texture,
@@ -31,7 +32,7 @@ pub struct SceneTarget {
 }
 
 impl SceneTarget {
-    fn new(device: &Device, format: TextureFormat, width: u32, height: u32) -> Self {
+    fn new(device: &Device, width: u32, height: u32) -> Self {
         let width = width.max(1);
         let height = height.max(1);
         let texture = device.create_texture(&TextureDescriptor {
@@ -44,7 +45,7 @@ impl SceneTarget {
             mip_level_count: 1,
             sample_count: 1,
             dimension: TextureDimension::D2,
-            format,
+            format: SCENE_FORMAT,
             usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -72,12 +73,12 @@ impl SceneTarget {
         &self.view
     }
 
-    fn resize(&mut self, device: &Device, format: TextureFormat, width: u32, height: u32) -> bool {
+    fn resize(&mut self, device: &Device, width: u32, height: u32) -> bool {
         let size = (width.max(1), height.max(1));
         if size == (self.width, self.height) {
             return false;
         }
-        *self = Self::new(device, format, size.0, size.1);
+        *self = Self::new(device, size.0, size.1);
         true
     }
 }
@@ -375,7 +376,7 @@ impl UiGpu {
         height: u32,
         dpr: f32,
     ) -> Result<Self, String> {
-        let scene = SceneTarget::new(device, format, width, height);
+        let scene = SceneTarget::new(device, width, height);
         let present = PresentPipeline::new(device, format, &scene);
         let glass = GlassPipeline::new(device, format, &scene);
         let text = TextEngine::new(device, format, width, height, dpr)?;
@@ -399,7 +400,7 @@ impl UiGpu {
         &mut self,
         device: &Device,
         queue: &Queue,
-        format: TextureFormat,
+        _format: TextureFormat,
         width: u32,
         height: u32,
         dpr: f32,
@@ -407,7 +408,7 @@ impl UiGpu {
         self.width = width.max(1);
         self.height = height.max(1);
         self.dpr = valid_dpr(dpr);
-        if self.scene.resize(device, format, self.width, self.height) {
+        if self.scene.resize(device, self.width, self.height) {
             self.present.rebind(device, &self.scene);
             self.glass.rebind(device, &self.scene);
         }
