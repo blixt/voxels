@@ -39,6 +39,10 @@ tile boundaries, so separately generated tiles form a closed shell without crack
 distance band hands coverage between canonical chunks and the far shell. Far meshes remain disposable
 derivatives; 10 cm voxels and sparse edits remain authoritative.
 
+Coverage ownership overlaps deliberately: the far shell becomes fully opaque before canonical chunks
+begin a screen-stable dithered fade. This keeps terrain covered while ensuring cross-chunk structures
+such as tree crowns and trunks leave the near representation together at its residency boundary.
+
 The first persistent chunk format is versioned and little-endian:
 
 1. a small magic/version header and chunk coordinates;

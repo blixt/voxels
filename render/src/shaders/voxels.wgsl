@@ -79,10 +79,20 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let far_surface = (input.material & 0x80000000u) != 0u;
   let material = input.material & 0xffffu;
   let distance_xz = distance(input.world.xz, frame.camera_time.xz);
+  let transition_cell = floor(input.world / frame.viewport_voxel.z);
   if far_surface {
     let handoff = smoothstep(6.3, 7.3, distance_xz);
-    let threshold = hash31(vec3<f32>(floor(input.position.xy), 17.0));
+    let threshold = hash31(transition_cell + vec3<f32>(17.0));
     if handoff < threshold {
+      discard;
+    }
+  } else {
+    if (material == 8u || material == 9u) && distance_xz > 9.0 {
+      discard;
+    }
+    let ownership = 1.0 - smoothstep(10.0, 12.0, distance_xz);
+    let threshold = hash31(transition_cell + vec3<f32>(41.0));
+    if ownership < threshold {
       discard;
     }
   }
