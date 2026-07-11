@@ -1,5 +1,9 @@
 node_modules/
 dist/
+target/
+web/generated/*
+!web/generated/voxels.d.ts
+.vite-plus/
 .DS_Store
 tmp/
 .tmp/

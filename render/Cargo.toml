@@ -1,0 +1,18 @@
+[package]
+name = "voxels-render"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "voxels_render"
+
+[dependencies]
+voxels-core = { path = "../core" }
+bytemuck = { version = "1", features = ["derive"] }
+glam = { version = "0.33", features = ["bytemuck"] }
+wgpu = { version = "=29.0.3", default-features = false, features = ["wgsl"] }
