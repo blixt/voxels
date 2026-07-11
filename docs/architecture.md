@@ -35,19 +35,30 @@ until benchmarks show generation or meshing is the frame-time bottleneck.
 ## World representation
 
 The live world is a sparse map of fixed-size cubic chunks. A chunk stores a compact material id per
-voxel and is the unit of generation, editing, persistence, remeshing, culling, and streaming. Near-field
-chunks use face-culling plus greedy rectangle merging. The first far tier derives independently
-streamable 25.6 m surface tiles from the same generator at an 0.8 m sampling stride. Each coarse
-column emits a top plus vertical transition faces down to lower neighbors, including samples across
-tile boundaries, so separately generated tiles form a closed shell without cracks. A short dithered
-distance band hands coverage between canonical chunks and the far shell. Far meshes remain disposable
-derivatives; 10 cm voxels and sparse edits remain authoritative.
+voxel and is the unit of generation, editing, persistence, remeshing, culling, and streaming. The
+authoritative near field keeps the required 10 cm voxel resolution and uses face-culling plus greedy
+rectangle merging. A column becomes render-ready only when all desired vertical chunks are resident,
+so a partially streamed stack cannot expose an open terrain slice.
 
-Coverage ownership is complementary across one screen-stable dither band: every transition cell is
-owned by exactly one of the near or far representations. The color and shadow-caster shaders apply the
-same predicate so discarded geometry cannot cast and overlapping LODs cannot double-shadow. Far tiles
-do not represent tree crowns or trunks, so those materials leave the near representation together at
-its residency boundary.
+Four independently streamable surface rings derive from the same generator and sparse edit overlay at
+0.2, 0.4, 0.8, and 1.6 m sampling strides. Each tile covers 32 samples per side and emits a top plus
+vertical transition faces down to lower neighbors, including samples across tile boundaries, so
+separately generated tiles form a closed shell without cracks. The coarsest ring extends beyond the
+220 m fog cutoff; missing finer rings temporarily reveal complete coarse underlays instead of a hole.
+All surface meshes remain disposable derivatives: the generator, 10 cm voxels, and sparse edits stay
+authoritative.
+
+Coverage ownership is complementary across four short, screen-stable dither bands. The hash uses only
+world X/Z and the same threshold is applied to both representations, so every transition cell belongs
+to exactly one adjacent level. The color and shadow-caster shaders apply the same predicate, preventing
+discarded geometry from casting or overlapping LODs from double-shadowing. Trees remain canonical
+near-field geometry; they are withheld only during the first incomplete fine-field load so isolated
+crowns cannot appear before their supporting columns.
+
+An edit invalidates every surface tile whose sampling footprint depends on that X/Z column. Resident
+geometry stays active while its replacement is generated and allocated, then the renderer switches
+the mesh and releases the old allocation atomically. Dirty work that leaves the retained streaming
+window is discarded because any later load samples the authoritative edit overlay again.
 
 Near meshes also bake the established four-level voxel ambient-occlusion term from two side samples
 and the diagonal at each face corner. Four 2-bit values participate in the greedy merge key, and the
@@ -100,8 +111,8 @@ the seed and generator version so an incompatible build cannot silently answer a
 - Never allocate or send one JavaScript object per input sample, voxel, face, or chunk.
 - Generate and mesh only dirty/resident chunks, with bounded work admitted each frame.
 - Mesh chunk boundaries using neighbor samples so hidden seam faces are not emitted.
-- Suballocate immutable chunk and far-tile meshes from coalescing GPU arena pages, replacing only the
-  allocation whose source changes.
+- Suballocate immutable chunk and surface-ring meshes from coalescing GPU arena pages, replacing only
+  the allocation whose source changes. Coalesce adjacent visible allocations into draw spans.
 - Frustum-cull chunks on CPU; add occlusion/indirect drawing only after GPU captures justify it.
 - Keep deterministic host benchmarks for generation, codec round-trips, meshing, and edit replay.
 - Expose lightweight browser frame and residency snapshots for end-to-end regression automation.

@@ -28,7 +28,9 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 - `web/`: the single canvas, normalized input transport, pointer lock, and worker boot only. All visible
   HUD, status, crosshair, controls, menus, and text are composed by Rust/WGPU.
 
-The canonical world is generator identity plus sparse edits. Meshes and future LODs are derived caches.
+The canonical world is generator identity plus sparse edits. Near meshes and four streamed surface LOD
+rings are derived caches; the rings sample at 0.2, 0.4, 0.8, and 1.6 m while the editable near field
+retains authoritative 10 cm voxels.
 See [docs/architecture.md](docs/architecture.md) for format, persistence, and research decisions.
 
 ## Controls
@@ -49,5 +51,6 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 state, resident greedy-quad count, persisted edit count, resident chunk count, and tracked chunk
 count, followed by visible chunks, draw calls, arena pages, allocated/capacity MiB, and queued stream
 work and far-tile residency. It is intentionally an automation hook rather than a second JavaScript
-game model. The last three values are exponentially smoothed display-frame cadence in milliseconds,
-shadow-caster draw calls, and active shadow-cascade count.
+game model. The final eleven values are display-frame cadence in milliseconds, shadow-caster draws,
+active shadow cascades, load/remesh p95 and maximum latency in scheduler frames, and resident tile
+counts for each of the four surface LOD levels.
