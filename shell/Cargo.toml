@@ -15,6 +15,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 voxels-core = { path = "../core" }
 voxels-render = { path = "../render" }
+voxels-runtime = { path = "../runtime" }
 voxels-world = { path = "../world" }
 bytemuck = { version = "1", features = ["derive"] }
 console_error_panic_hook = "0.1"

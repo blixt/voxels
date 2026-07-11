@@ -21,6 +21,7 @@ greedy meshing. Reports are written under the ignored `target/criterion/` direct
 
 - `core/`: portable player, input, physics, and game simulation.
 - `world/`: deterministic chunks, generation, palette/bit-packed codecs, and greedy meshing.
+- `runtime/`: deterministic streaming priorities, budgets, revision tickets, eviction, and diagnostics.
 - `render/`: web-free WGPU resources, pipelines, shaders, and frame rendering.
 - `shell/`: WASM/browser worker leaf, packed input decoding, display clock, and persistence seam.
 - `web/`: canvas/input harness and worker boot only.
@@ -40,5 +41,5 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 ## Automation
 
 `window.__VOXELS__.snapshot()` returns a promise containing camera position, yaw, pitch, grounded
-state, resident greedy-quad count, and persisted edit count. It is intentionally a diagnostic view
-rather than a second JavaScript game model.
+state, resident greedy-quad count, persisted edit count, resident chunk count, and tracked chunk
+count. It is intentionally a diagnostic view rather than a second JavaScript game model.

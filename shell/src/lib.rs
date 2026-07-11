@@ -9,10 +9,15 @@ mod web {
     use glam::Vec2;
     use js_sys::Float32Array;
     use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
     use std::rc::Rc;
     use voxels_core::{CameraState, InputState, raycast_voxels};
     use voxels_render::renderer::Renderer;
-    use voxels_world::{EditMap, Generator, Material, VOXEL_SIZE_METRES, VoxelCoord};
+    use voxels_runtime::{FrameBudget, StreamConfig, StreamScheduler};
+    use voxels_world::{
+        CHUNK_EDGE, Chunk, ChunkCoord, EditMap, Generator, Material, Quad, VOXEL_SIZE_METRES,
+        VoxelCoord, mesh_chunk,
+    };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
@@ -53,6 +58,9 @@ mod web {
         input: RefCell<InputState>,
         generator: Generator,
         edits: RefCell<EditMap>,
+        scheduler: RefCell<StreamScheduler>,
+        chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
+        pending_meshes: RefCell<BTreeMap<(i32, i32, i32), Vec<Quad>>>,
         store: RefCell<Store>,
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
@@ -104,6 +112,7 @@ mod web {
                     .is_solid()
             });
             drop(edits);
+            self.stream_world(&camera);
             self.renderer.borrow_mut().render(dt, &camera);
             if time - self.last_persist.get() >= 1_000.0 {
                 if let Err(error) = self.store.borrow().save_camera(&camera) {
@@ -114,6 +123,67 @@ mod web {
             if let Err(error) = self.request_frame() {
                 web_sys::console::error_1(&error);
                 self.stopped.set(true);
+            }
+        }
+
+        fn stream_world(&self, camera: &CameraState) {
+            let focus = world_to_chunk(camera.position);
+            let work = {
+                let mut scheduler = self.scheduler.borrow_mut();
+                scheduler.update_focus(focus);
+                scheduler.schedule_frame(FrameBudget {
+                    generation: 3,
+                    meshing: 3,
+                    upload: 3,
+                })
+            };
+
+            for ticket in work.generation {
+                let mut chunk = self.generator.generate_chunk(ticket.coord);
+                self.edits.borrow().apply_to_chunk(&mut chunk);
+                self.chunks
+                    .borrow_mut()
+                    .insert(coord_key(ticket.coord), chunk);
+                let _ = self.scheduler.borrow_mut().complete(ticket);
+            }
+            for ticket in work.meshing {
+                let chunk = self.chunks.borrow().get(&coord_key(ticket.coord)).cloned();
+                let Some(chunk) = chunk else {
+                    continue;
+                };
+                let edits = self.edits.borrow();
+                let quads = mesh_chunk(&chunk, |x, y, z| {
+                    edits.sample(self.generator, VoxelCoord::new(x, y, z))
+                });
+                drop(edits);
+                self.pending_meshes
+                    .borrow_mut()
+                    .insert(coord_key(ticket.coord), quads);
+                let _ = self.scheduler.borrow_mut().complete(ticket);
+            }
+            for ticket in work.upload {
+                let quads = self
+                    .pending_meshes
+                    .borrow_mut()
+                    .remove(&coord_key(ticket.coord));
+                let Some(quads) = quads else {
+                    continue;
+                };
+                self.renderer
+                    .borrow_mut()
+                    .upload_chunk(ticket.coord, &quads);
+                let _ = self.scheduler.borrow_mut().complete(ticket);
+            }
+            let evictions = self.scheduler.borrow_mut().drain_evictions();
+            if !evictions.is_empty() {
+                let mut chunks = self.chunks.borrow_mut();
+                let mut pending = self.pending_meshes.borrow_mut();
+                let mut renderer = self.renderer.borrow_mut();
+                for eviction in evictions {
+                    chunks.remove(&coord_key(eviction.coord));
+                    pending.remove(&coord_key(eviction.coord));
+                    renderer.remove_chunk(eviction.coord);
+                }
             }
         }
 
@@ -184,13 +254,16 @@ mod web {
 
             let mut edits = self.edits.borrow_mut();
             edits.set(self.generator, target, material);
+            if let Some(chunk) = self.chunks.borrow_mut().get_mut(&coord_key(target.chunk())) {
+                let [x, y, z] = target.local();
+                chunk.set(x, y, z, material);
+            }
             let durable = edits.override_at(target);
             if let Err(error) = self.store.borrow().save_edit(target, durable) {
                 web_sys::console::error_1(&error);
             }
-            self.renderer
-                .borrow_mut()
-                .rebuild_world(|x, y, z| edits.sample(self.generator, VoxelCoord::new(x, y, z)));
+            drop(edits);
+            let _ = self.scheduler.borrow_mut().mark_voxel_edited(target);
         }
     }
 
@@ -216,8 +289,9 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 8], |engine| {
+            let values = self.engine.as_ref().map_or([0.0; 10], |engine| {
                 let camera = engine.camera.borrow();
+                let diagnostics = engine.scheduler.borrow().diagnostics();
                 [
                     camera.position.x,
                     camera.position.y,
@@ -227,6 +301,8 @@ mod web {
                     if camera.grounded { 1.0 } else { 0.0 },
                     engine.renderer.borrow().quad_count() as f32,
                     engine.edits.borrow().len() as f32,
+                    diagnostics.resident as f32,
+                    diagnostics.tracked as f32,
                 ]
             });
             Float32Array::from(values.as_slice())
@@ -273,18 +349,21 @@ mod web {
                 camera.position.y - voxels_core::PLAYER_EYE_HEIGHT_METRES >= terrain_top
             })
             .unwrap_or_else(|| CameraState::spawn(glam::Vec3::new(0.0, spawn_y, spawn_z)));
-        let mut renderer = Renderer::new(
+        let renderer = Renderer::new(
             wgpu::SurfaceTarget::OffscreenCanvas(canvas),
             width,
             height,
-            WORLD_SEED,
             log_gpu_error,
         )
         .await
         .map_err(|error| JsValue::from_str(&error))?;
-        if !edits.is_empty() {
-            renderer.rebuild_world(|x, y, z| edits.sample(generator, VoxelCoord::new(x, y, z)));
-        }
+        let scheduler = StreamScheduler::new(StreamConfig {
+            load_radius_chunks: 3,
+            vertical_radius_chunks: 1,
+            retention_margin_chunks: 1,
+            max_tracked_chunks: 128,
+        })
+        .map_err(|error| JsValue::from_str(&format!("stream configuration: {error:?}")))?;
         let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
         let engine = Rc::new(Engine {
             renderer: RefCell::new(renderer),
@@ -292,6 +371,9 @@ mod web {
             input: RefCell::new(InputState::default()),
             generator,
             edits: RefCell::new(edits),
+            scheduler: RefCell::new(scheduler),
+            chunks: RefCell::new(BTreeMap::new()),
+            pending_meshes: RefCell::new(BTreeMap::new()),
             store: RefCell::new(store),
             scope,
             callback: RefCell::new(None),
@@ -304,6 +386,19 @@ mod web {
         Ok(EngineHandle {
             engine: Some(engine),
         })
+    }
+
+    const fn coord_key(coord: ChunkCoord) -> (i32, i32, i32) {
+        (coord.x, coord.y, coord.z)
+    }
+
+    fn world_to_chunk(position: glam::Vec3) -> ChunkCoord {
+        let edge_metres = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
+        ChunkCoord::new(
+            (position.x / edge_metres).floor() as i32,
+            (position.y / edge_metres).floor() as i32,
+            (position.z / edge_metres).floor() as i32,
+        )
     }
 }
 

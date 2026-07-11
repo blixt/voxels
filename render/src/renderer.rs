@@ -1,7 +1,8 @@
 use bytemuck::{Pod, Zeroable};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use voxels_core::CameraState;
-use voxels_world::{CHUNK_EDGE, Chunk, ChunkCoord, Generator, VOXEL_SIZE_METRES, mesh_chunk};
+use voxels_world::{CHUNK_EDGE, ChunkCoord, Quad, VOXEL_SIZE_METRES};
 use wgpu::util::DeviceExt;
 use wgpu::{
     Backends, BindGroup, Buffer, CurrentSurfaceTexture, Device, DeviceDescriptor, Instance,
@@ -32,6 +33,11 @@ struct GpuQuad {
 
 const _: () = assert!(size_of::<GpuQuad>() == 28);
 
+struct ChunkMesh {
+    buffer: Buffer,
+    quad_count: u32,
+}
+
 pub struct Renderer {
     surface: Surface<'static>,
     device: Device,
@@ -41,8 +47,7 @@ pub struct Renderer {
     voxel_pipeline: RenderPipeline,
     frame_buffer: Buffer,
     frame_bind_group: BindGroup,
-    quad_buffer: Buffer,
-    quad_count: u32,
+    chunks: BTreeMap<(i32, i32, i32), ChunkMesh>,
     depth_view: TextureView,
     time: f32,
 }
@@ -52,7 +57,6 @@ impl Renderer {
         target: wgpu::SurfaceTarget<'static>,
         width: u32,
         height: u32,
-        world_seed: u64,
         log_error: fn(&str),
     ) -> Result<Self, String> {
         let instance = Instance::new(InstanceDescriptor {
@@ -162,13 +166,6 @@ impl Renderer {
             }),
         );
 
-        let quads = build_initial_world(world_seed);
-        let quad_count = quads.len() as u32;
-        let quad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("world quad instances"),
-            contents: bytemuck::cast_slice(&quads),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
         let depth_view = depth_view(&device, config.width, config.height);
 
         Ok(Self {
@@ -180,8 +177,7 @@ impl Renderer {
             voxel_pipeline,
             frame_buffer,
             frame_bind_group,
-            quad_buffer,
-            quad_count,
+            chunks: BTreeMap::new(),
             depth_view,
             time: 0.0,
         })
@@ -197,22 +193,51 @@ impl Renderer {
         self.depth_view = depth_view(&self.device, width, height);
     }
 
-    pub const fn quad_count(&self) -> u32 {
-        self.quad_count
+    pub fn quad_count(&self) -> u32 {
+        self.chunks.values().map(|chunk| chunk.quad_count).sum()
     }
 
-    /// Temporary whole-resident-set rebuild seam. Streaming replaces this with per-chunk arena
-    /// uploads, but keeping edit-derived meshes owned by the renderer avoids mirroring world state.
-    pub fn rebuild_world(&mut self, sample: impl Fn(i32, i32, i32) -> voxels_world::Material) {
-        let quads = build_world(sample);
-        self.quad_count = quads.len() as u32;
-        self.quad_buffer = self
+    pub fn upload_chunk(&mut self, coord: ChunkCoord, quads: &[Quad]) {
+        let key = (coord.x, coord.y, coord.z);
+        if quads.is_empty() {
+            self.chunks.remove(&key);
+            return;
+        }
+        let origin = coord.world_origin();
+        let gpu_quads: Vec<_> = quads
+            .iter()
+            .map(|quad| GpuQuad {
+                origin: [
+                    (origin[0] + i32::from(quad.origin[0])) as f32 * VOXEL_SIZE_METRES,
+                    (origin[1] + i32::from(quad.origin[1])) as f32 * VOXEL_SIZE_METRES,
+                    (origin[2] + i32::from(quad.origin[2])) as f32 * VOXEL_SIZE_METRES,
+                ],
+                face: u32::from(quad.face),
+                extent: [
+                    f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
+                    f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
+                ],
+                material: u32::from(quad.material),
+            })
+            .collect();
+        let buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("edited world quad instances"),
-                contents: bytemuck::cast_slice(&quads),
+                label: Some("streamed chunk quad instances"),
+                contents: bytemuck::cast_slice(&gpu_quads),
                 usage: wgpu::BufferUsages::VERTEX,
             });
+        self.chunks.insert(
+            key,
+            ChunkMesh {
+                buffer,
+                quad_count: gpu_quads.len() as u32,
+            },
+        );
+    }
+
+    pub fn remove_chunk(&mut self, coord: ChunkCoord) {
+        self.chunks.remove(&(coord.x, coord.y, coord.z));
     }
 
     pub fn render(&mut self, dt: f32, camera: &CameraState) {
@@ -266,61 +291,14 @@ impl Renderer {
             pass.set_pipeline(&self.sky_pipeline);
             pass.draw(0..3, 0..1);
             pass.set_pipeline(&self.voxel_pipeline);
-            pass.set_vertex_buffer(0, self.quad_buffer.slice(..));
-            pass.draw(0..6, 0..self.quad_count);
+            for chunk in self.chunks.values() {
+                pass.set_vertex_buffer(0, chunk.buffer.slice(..));
+                pass.draw(0..6, 0..chunk.quad_count);
+            }
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
     }
-}
-
-fn build_initial_world(seed: u64) -> Vec<GpuQuad> {
-    let generator = Generator::new(seed);
-    build_world(|x, y, z| generator.sample(x, y, z))
-}
-
-fn build_world(sample: impl Fn(i32, i32, i32) -> voxels_world::Material) -> Vec<GpuQuad> {
-    let mut gpu_quads = Vec::new();
-    for chunk_z in -WORLD_RADIUS_CHUNKS..=WORLD_RADIUS_CHUNKS {
-        for chunk_x in -WORLD_RADIUS_CHUNKS..=WORLD_RADIUS_CHUNKS {
-            for chunk_y in 0..=2 {
-                let coord = ChunkCoord::new(chunk_x, chunk_y, chunk_z);
-                let world_origin = coord.world_origin();
-                let mut chunk = Chunk::empty(coord);
-                for y in 0..CHUNK_EDGE {
-                    for z in 0..CHUNK_EDGE {
-                        for x in 0..CHUNK_EDGE {
-                            chunk.set(
-                                x,
-                                y,
-                                z,
-                                sample(
-                                    world_origin[0] + x as i32,
-                                    world_origin[1] + y as i32,
-                                    world_origin[2] + z as i32,
-                                ),
-                            );
-                        }
-                    }
-                }
-                let quads = mesh_chunk(&chunk, &sample);
-                gpu_quads.extend(quads.into_iter().map(|quad| GpuQuad {
-                    origin: [
-                        (world_origin[0] + i32::from(quad.origin[0])) as f32 * VOXEL_SIZE_METRES,
-                        (world_origin[1] + i32::from(quad.origin[1])) as f32 * VOXEL_SIZE_METRES,
-                        (world_origin[2] + i32::from(quad.origin[2])) as f32 * VOXEL_SIZE_METRES,
-                    ],
-                    face: u32::from(quad.face),
-                    extent: [
-                        f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
-                        f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
-                    ],
-                    material: u32::from(quad.material),
-                }));
-            }
-        }
-    }
-    gpu_quads
 }
 
 fn frame_uniform(config: &SurfaceConfiguration, camera: &CameraState, time: f32) -> FrameUniform {

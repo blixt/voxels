@@ -7,10 +7,14 @@ rendering, persistence, and binary codecs live in Rust.
 
 ## Workspace boundaries
 
-- `core/` is portable and host-testable. It owns commands, player/camera state, physics, simulation,
-  and game rules. It has no GPU, browser, filesystem, or JavaScript dependencies.
+- `core/` is portable and host-testable. It owns commands, player/camera state, physics, exact voxel
+  DDA picking, simulation, and game rules. It has no GPU, browser, filesystem, or JavaScript
+  dependencies.
 - `world/` is portable and host-testable. It owns chunk coordinates/data, materials, procedural
-  generation, edit overlays, picking, greedy meshing, and durable voxel codecs.
+  generation, edit overlays, greedy meshing, and durable voxel codecs.
+- `runtime/` is portable and host-testable. It owns deterministic chunk interest, bounded per-frame
+  generation/meshing/upload admission, revisioned work tickets, stale-result rejection, eviction
+  hysteresis, and streaming diagnostics. It owns no payloads or GPU resources.
 - `render/` is a platform-neutral WGPU library. It owns cameras, GPU resources, mesh uploads, shaders,
   culling, frame timing, and rendering. It names no web types so a future native shell can reuse it.
 - `shell/` is the `wasm32-unknown-unknown` leaf. It owns the `wasm-bindgen` API, the transferred
@@ -18,10 +22,11 @@ rendering, persistence, and binary codecs live in Rust.
 - `web/` is the deliberately thin browser harness. Input is batched into fixed-size binary records and
   transferred to the worker; semantic actions and world state do not cross into TypeScript.
 
-The renderer and simulation run together in one dedicated worker. That keeps generation, meshing,
-SQLite, and GPU submission off the browser main thread without inventing a JavaScript coordination
-layer. Additional Rust/WASM workers are deferred until benchmarks show generation or meshing is the
-frame-time bottleneck.
+The renderer and simulation run together in one dedicated worker. The shell advances runtime-issued
+generation, meshing, and upload tickets under independent frame budgets, while the renderer only owns
+per-chunk GPU meshes. That keeps generation, meshing, SQLite, and GPU submission off the browser main
+thread without inventing a JavaScript coordination layer. Additional Rust/WASM workers are deferred
+until benchmarks show generation or meshing is the frame-time bottleneck.
 
 ## World representation
 
@@ -51,9 +56,10 @@ is worker-only; keeping the engine in a dedicated worker therefore satisfies bot
 constraints.
 
 SQLite stores structured, queryable state: schema version, world identity and generator version,
-player/settings state, edit journal metadata, and chunk index records. Versioned packed chunk payloads
-are stored as BLOBs initially. If profiling shows write amplification or database size becoming a real
-constraint, the same codec can move unchanged into append-only region files while SQLite remains the
+player state, and sparse voxel overrides. Each override is an idempotent row keyed by world and voxel;
+restoring the generated material removes the row. Versioned palette/bit-packed chunk payloads exist for
+future snapshot compaction. If profiling shows write amplification or database size becoming a real
+constraint, the same codec can move snapshots into append-only region files while SQLite remains the
 transactional index. Region files would group a bounded X/Z tile, use a checksummed offset table, and
 write payloads in aligned extents; that complexity is not justified before measurements.
 

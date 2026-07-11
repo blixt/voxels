@@ -1197,6 +1197,7 @@ dependencies = [
  "sqlite-wasm-vfs",
  "voxels-core",
  "voxels-render",
+ "voxels-runtime",
  "voxels-world",
  "wasm-bindgen",
  "wasm-bindgen-futures",

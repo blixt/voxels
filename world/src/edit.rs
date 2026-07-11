@@ -1,4 +1,4 @@
-use crate::{CHUNK_EDGE, ChunkCoord, Generator, Material};
+use crate::{CHUNK_EDGE, Chunk, ChunkCoord, Generator, Material};
 use std::collections::BTreeMap;
 
 /// Integer address of one canonical 10 cm voxel.
@@ -25,6 +25,15 @@ impl VoxelCoord {
             self.y.div_euclid(edge),
             self.z.div_euclid(edge),
         )
+    }
+
+    pub fn local(self) -> [usize; 3] {
+        let edge = CHUNK_EDGE as i32;
+        [
+            self.x.rem_euclid(edge) as usize,
+            self.y.rem_euclid(edge) as usize,
+            self.z.rem_euclid(edge) as usize,
+        ]
     }
 }
 
@@ -67,6 +76,16 @@ impl EditMap {
 
     pub fn is_empty(&self) -> bool {
         self.overrides.is_empty()
+    }
+
+    pub fn apply_to_chunk(&self, chunk: &mut Chunk) {
+        let coord = chunk.coord();
+        for (voxel, material) in &self.overrides {
+            if voxel.chunk() == coord {
+                let [x, y, z] = voxel.local();
+                chunk.set(x, y, z, *material);
+            }
+        }
     }
 
     /// Chunks whose meshes can change after this voxel changes. A face on a chunk boundary also
