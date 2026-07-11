@@ -132,8 +132,8 @@ mod web {
                 let mut scheduler = self.scheduler.borrow_mut();
                 scheduler.update_focus(focus);
                 scheduler.schedule_frame(FrameBudget {
-                    generation: 3,
-                    meshing: 3,
+                    generation: 1,
+                    meshing: 2,
                     upload: 3,
                 })
             };

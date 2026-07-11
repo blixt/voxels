@@ -1,7 +1,7 @@
 use crate::{CHUNK_EDGE, Chunk, ChunkCoord, Material};
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 2;
+pub const GENERATOR_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Generator {
@@ -28,14 +28,24 @@ impl Generator {
                         origin[1] + y as i32,
                         origin[2] + z as i32,
                     ];
-                    chunk.set(x, y, z, self.sample(world[0], world[1], world[2]));
+                    chunk.set(x, y, z, self.sample_terrain(world[0], world[1], world[2]));
                 }
             }
         }
+        self.decorate_trees(&mut chunk);
         chunk
     }
 
     pub fn sample(self, x: i32, y: i32, z: i32) -> Material {
+        let terrain = self.sample_terrain(x, y, z);
+        if terrain.is_solid() {
+            terrain
+        } else {
+            self.tree_material(x, y, z).unwrap_or(Material::Air)
+        }
+    }
+
+    fn sample_terrain(self, x: i32, y: i32, z: i32) -> Material {
         if y < -16 {
             return Material::Basalt;
         }
@@ -98,6 +108,118 @@ impl Generator {
         (8.0 + continental * 27.0 + hills * 11.0 + detail * 4.0 + ridge * ridge * 10.0) as i32
     }
 
+    fn tree_material(self, x: i32, y: i32, z: i32) -> Option<Material> {
+        const CELL: i32 = 96;
+        let cell_x = x.div_euclid(CELL);
+        let cell_z = z.div_euclid(CELL);
+        for dz_cell in -1..=1 {
+            for dx_cell in -1..=1 {
+                let candidate_x = cell_x + dx_cell;
+                let candidate_z = cell_z + dz_cell;
+                let (anchor_x, anchor_z, tree_height) = self.tree_anchor(candidate_x, candidate_z);
+                let dx = x - anchor_x;
+                let dz = z - anchor_z;
+                if dx.abs() > 9 || dz.abs() > 9 {
+                    continue;
+                }
+                if !self.tree_grows_at(anchor_x, anchor_z) {
+                    continue;
+                }
+                let ground = self.surface_height(anchor_x, anchor_z);
+                let trunk_top = ground + tree_height;
+                if y > ground && y <= trunk_top && dx.abs() <= 1 && dz.abs() <= 1 {
+                    return Some(Material::Wood);
+                }
+                let crown_y = trunk_top - 3;
+                let dy = y - crown_y;
+                if (-7..=5).contains(&dy) {
+                    let horizontal_radius = 9 - dy.abs() / 2;
+                    let distance_squared = dx * dx + dz * dz + (dy * dy) / 2;
+                    if dx.abs() <= horizontal_radius
+                        && dz.abs() <= horizontal_radius
+                        && distance_squared <= 78
+                    {
+                        return Some(Material::Leaves);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn decorate_trees(self, chunk: &mut Chunk) {
+        const CELL: i32 = 96;
+        const CROWN_RADIUS: i32 = 9;
+        let origin = chunk.coord().world_origin();
+        let max_x = origin[0] + CHUNK_EDGE as i32 - 1;
+        let max_z = origin[2] + CHUNK_EDGE as i32 - 1;
+        let min_cell_x = (origin[0] - CROWN_RADIUS).div_euclid(CELL);
+        let max_cell_x = (max_x + CROWN_RADIUS).div_euclid(CELL);
+        let min_cell_z = (origin[2] - CROWN_RADIUS).div_euclid(CELL);
+        let max_cell_z = (max_z + CROWN_RADIUS).div_euclid(CELL);
+        for cell_z in min_cell_z..=max_cell_z {
+            for cell_x in min_cell_x..=max_cell_x {
+                let (anchor_x, anchor_z, tree_height) = self.tree_anchor(cell_x, cell_z);
+                if !self.tree_grows_at(anchor_x, anchor_z) {
+                    continue;
+                }
+                let ground = self.surface_height(anchor_x, anchor_z);
+                let trunk_top = ground + tree_height;
+                let min_y = (ground + 1).max(origin[1]);
+                let max_y = (trunk_top + 5).min(origin[1] + CHUNK_EDGE as i32 - 1);
+                for world_y in min_y..=max_y {
+                    for world_z in (anchor_z - CROWN_RADIUS).max(origin[2])
+                        ..=(anchor_z + CROWN_RADIUS).min(max_z)
+                    {
+                        for world_x in (anchor_x - CROWN_RADIUS).max(origin[0])
+                            ..=(anchor_x + CROWN_RADIUS).min(max_x)
+                        {
+                            let local = [
+                                (world_x - origin[0]) as usize,
+                                (world_y - origin[1]) as usize,
+                                (world_z - origin[2]) as usize,
+                            ];
+                            if chunk.get(local[0], local[1], local[2]).is_solid() {
+                                continue;
+                            }
+                            let dx = world_x - anchor_x;
+                            let dz = world_z - anchor_z;
+                            let material = if world_y <= trunk_top && dx.abs() <= 1 && dz.abs() <= 1
+                            {
+                                Some(Material::Wood)
+                            } else {
+                                let dy = world_y - (trunk_top - 3);
+                                let radius = 9 - dy.abs() / 2;
+                                let distance_squared = dx * dx + dz * dz + (dy * dy) / 2;
+                                ((-7..=5).contains(&dy)
+                                    && dx.abs() <= radius
+                                    && dz.abs() <= radius
+                                    && distance_squared <= 78)
+                                    .then_some(Material::Leaves)
+                            };
+                            if let Some(material) = material {
+                                chunk.set(local[0], local[1], local[2], material);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn tree_grows_at(self, x: i32, z: i32) -> bool {
+        self.value_2d(x, z, 1_200, 0x4f1b) >= 0.28 && self.value_2d(x, z, 1_900, 0xa18d) >= 0.30
+    }
+
+    fn tree_anchor(self, cell_x: i32, cell_z: i32) -> (i32, i32, i32) {
+        const CELL: i32 = 96;
+        let hash = self.hash(cell_x, 0, cell_z, 0x7a11_5eed);
+        let x_offset = 12 + (hash & 63) as i32;
+        let z_offset = 12 + ((hash >> 8) & 63) as i32;
+        let height = 25 + ((hash >> 16) & 15) as i32;
+        (cell_x * CELL + x_offset, cell_z * CELL + z_offset, height)
+    }
+
     fn fractal_2d(self, x: i32, z: i32, scale: i32, octaves: u32, salt: u64) -> f32 {
         let mut amplitude = 1.0;
         let mut total = 0.0;
@@ -142,6 +264,10 @@ impl Generator {
     }
 
     fn hash_unit(self, x: i32, y: i32, z: i32, salt: u64) -> f32 {
+        (self.hash(x, y, z, salt) >> 40) as f32 / ((1u32 << 24) - 1) as f32
+    }
+
+    fn hash(self, x: i32, y: i32, z: i32, salt: u64) -> u64 {
         let mut value = self.seed ^ salt;
         value ^= (x as i64 as u64).wrapping_mul(0x9e37_79b1_85eb_ca87);
         value ^= (y as i64 as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
@@ -151,7 +277,7 @@ impl Generator {
         value ^= value >> 27;
         value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
         value ^= value >> 31;
-        (value >> 40) as f32 / ((1u32 << 24) - 1) as f32
+        value
     }
 }
 
@@ -197,5 +323,34 @@ mod tests {
             "one metre should not cross a macro biome"
         );
         assert!(distant_delta >= nearby_delta);
+    }
+
+    #[test]
+    fn trees_are_deterministic_editable_voxels() {
+        let generator = Generator::new(0x5eed);
+        let mut found = None;
+        for cell_z in -4..=4 {
+            for cell_x in -4..=4 {
+                let (x, z, height) = generator.tree_anchor(cell_x, cell_z);
+                let ground = generator.surface_height(x, z);
+                if generator.sample(x, ground + 1, z) == Material::Wood {
+                    found = Some((x, ground, z, height));
+                    break;
+                }
+            }
+        }
+        assert!(
+            found.is_some(),
+            "seed should produce at least one nearby tree"
+        );
+        let Some((x, ground, z, height)) = found else {
+            return;
+        };
+        assert_eq!(generator.sample(x, ground + 1, z), Material::Wood);
+        assert_eq!(generator.sample(x, ground + height, z), Material::Wood);
+        assert_eq!(
+            generator.sample(x + 5, ground + height - 3, z),
+            Material::Leaves
+        );
     }
 }
