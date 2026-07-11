@@ -1,7 +1,7 @@
 use crate::{CHUNK_EDGE, Chunk, ChunkCoord, Material};
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 1;
+pub const GENERATOR_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Generator {
@@ -46,29 +46,40 @@ impl Generator {
 
         // Broad caves only affect material well under the surface, leaving a stable walking crust.
         if y + 4 < height {
-            let cave = self.value_3d(x, y, z, 18, 0x9e37);
-            let tunnel = self.value_3d(x, y * 2, z, 31, 0xb529);
+            let cave = self.value_3d(x, y, z, 90, 0x9e37);
+            let tunnel = self.value_3d(x, y * 2, z, 150, 0xb529);
             if cave > 0.73 && tunnel > 0.43 {
                 return Material::Air;
             }
         }
 
-        let moisture = self.value_2d(x, z, 110, 0x4f1b);
-        let temperature = self.value_2d(x, z, 170, 0xa18d) - y as f32 * 0.008;
+        let moisture = self.value_2d(x, z, 1_200, 0x4f1b);
+        let temperature = self.value_2d(x, z, 1_900, 0xa18d) - y as f32 * 0.006;
+        let local_biome = self.value_2d(x, z, 260, 0x8b21);
         let depth = height - y;
         if depth == 0 {
-            if height < 12 {
+            if height < 11 {
                 Material::Sand
             } else if temperature < 0.31 {
                 Material::Snow
-            } else if moisture < 0.25 {
-                Material::Clay
+            } else if moisture < 0.23 {
+                if local_biome > 0.58 {
+                    Material::RedSand
+                } else {
+                    Material::Clay
+                }
+            } else if moisture > 0.68 && local_biome > 0.48 {
+                Material::Moss
+            } else if local_biome < 0.18 {
+                Material::Limestone
             } else {
                 Material::Grass
             }
         } else if depth < 4 {
-            if height < 12 {
+            if height < 11 {
                 Material::Sand
+            } else if local_biome < 0.18 {
+                Material::Limestone
             } else {
                 Material::Dirt
             }
@@ -80,10 +91,11 @@ impl Generator {
     }
 
     pub fn surface_height(self, x: i32, z: i32) -> i32 {
-        let continental = self.fractal_2d(x, z, 96, 4, 0x71a9);
-        let detail = self.fractal_2d(x, z, 24, 3, 0x2d31);
-        let ridge = 1.0 - (self.value_2d(x, z, 54, 0xc43b) * 2.0 - 1.0).abs();
-        (10.0 + continental * 15.0 + detail * 5.0 + ridge * ridge * 9.0) as i32
+        let continental = self.fractal_2d(x, z, 1_800, 4, 0x71a9);
+        let hills = self.fractal_2d(x, z, 420, 3, 0x2d31);
+        let detail = self.fractal_2d(x, z, 64, 2, 0x51f7);
+        let ridge = 1.0 - (self.value_2d(x, z, 620, 0xc43b) * 2.0 - 1.0).abs();
+        (8.0 + continental * 27.0 + hills * 11.0 + detail * 4.0 + ridge * ridge * 10.0) as i32
     }
 
     fn fractal_2d(self, x: i32, z: i32, scale: i32, octaves: u32, salt: u64) -> f32 {
@@ -172,5 +184,18 @@ mod tests {
             Generator::new(1).generate_chunk(coord),
             Generator::new(2).generate_chunk(coord)
         );
+    }
+
+    #[test]
+    fn macro_terrain_varies_over_real_world_distances() {
+        let generator = Generator::new(0x5eed);
+        let nearby_delta = (generator.surface_height(0, 0) - generator.surface_height(10, 0)).abs();
+        let distant_delta =
+            (generator.surface_height(0, 0) - generator.surface_height(2_000, 0)).abs();
+        assert!(
+            nearby_delta <= 8,
+            "one metre should not cross a macro biome"
+        );
+        assert!(distant_delta >= nearby_delta);
     }
 }

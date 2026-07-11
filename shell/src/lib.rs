@@ -265,6 +265,13 @@ mod web {
             + 0.02;
         let camera = store
             .load_camera()?
+            .filter(|camera| {
+                let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
+                let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
+                let terrain_top =
+                    (generator.surface_height(voxel_x, voxel_z) + 1) as f32 * VOXEL_SIZE_METRES;
+                camera.position.y - voxels_core::PLAYER_EYE_HEIGHT_METRES >= terrain_top
+            })
             .unwrap_or_else(|| CameraState::spawn(glam::Vec3::new(0.0, spawn_y, spawn_z)));
         let mut renderer = Renderer::new(
             wgpu::SurfaceTarget::OffscreenCanvas(canvas),

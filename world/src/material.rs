@@ -15,6 +15,9 @@ pub enum Material {
     Basalt = 7,
     Wood = 8,
     Leaves = 9,
+    Moss = 10,
+    Limestone = 11,
+    RedSand = 12,
 }
 
 impl Material {
@@ -32,6 +35,9 @@ impl Material {
             7 => Self::Basalt,
             8 => Self::Wood,
             9 => Self::Leaves,
+            10 => Self::Moss,
+            11 => Self::Limestone,
+            12 => Self::RedSand,
             _ => return None,
         })
     }

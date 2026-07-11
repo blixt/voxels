@@ -283,7 +283,7 @@ fn build_world(sample: impl Fn(i32, i32, i32) -> voxels_world::Material) -> Vec<
     let mut gpu_quads = Vec::new();
     for chunk_z in -WORLD_RADIUS_CHUNKS..=WORLD_RADIUS_CHUNKS {
         for chunk_x in -WORLD_RADIUS_CHUNKS..=WORLD_RADIUS_CHUNKS {
-            for chunk_y in 0..=1 {
+            for chunk_y in 0..=2 {
                 let coord = ChunkCoord::new(chunk_x, chunk_y, chunk_z);
                 let world_origin = coord.world_origin();
                 let mut chunk = Chunk::empty(coord);
@@ -343,7 +343,7 @@ fn frame_uniform(config: &SurfaceConfiguration, camera: &CameraState, time: f32)
             config.width as f32,
             config.height as f32,
             VOXEL_SIZE_METRES,
-            WORLD_RADIUS_CHUNKS as f32 * CHUNK_EDGE as f32 * VOXEL_SIZE_METRES,
+            (WORLD_RADIUS_CHUNKS + 1) as f32 * CHUNK_EDGE as f32 * VOXEL_SIZE_METRES,
         ],
     }
 }

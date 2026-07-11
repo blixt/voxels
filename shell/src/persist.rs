@@ -210,10 +210,18 @@ fn ensure_world(
         .optional()
         .map_err(|error| js_error("load world identity", error))?;
     if let Some((seed, version)) = stored {
-        if seed.as_slice() != world_seed.to_le_bytes() || version != generator_version {
+        if seed.as_slice() != world_seed.to_le_bytes() || version > generator_version {
             return Err(JsValue::from_str(
                 "saved world identity does not match this generator build",
             ));
+        }
+        if version < generator_version {
+            connection
+                .execute(
+                    "UPDATE worlds SET generator_version=?1 WHERE id=0",
+                    params![generator_version],
+                )
+                .map_err(|error| js_error("advance world generator version", error))?;
         }
     } else {
         connection
