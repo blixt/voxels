@@ -65,3 +65,24 @@ allocation-free histograms so collecting them does not add per-frame heap work.
 These numbers are a decision record, not universal hardware targets. Criterion's stored baselines in
 `target/criterion/` remain ignored and local; repeat the command on target hardware before changing
 per-frame admission budgets.
+
+## 2026-07-12: regional surface ecology
+
+Generator v4 replaces the single generic surface formula with six regional terrain influences and a
+shared climate/geology sample. On the same Apple M3 Max and Criterion configuration, canonical chunk
+generation rose from 0.600 ms to 0.730 ms while remaining below the 1 ms admission target. Caching the
+resulting regional profile and tree intersections per X/Z column reduced greedy meshing from 1.470 ms
+to 1.198 ms, leaving generation plus meshing at roughly 1.93 ms rather than 2.07 ms.
+
+| Operation                             | Previous | Regional v4 | Change |
+| ------------------------------------- | -------: | ----------: | -----: |
+| Generate one canonical 32³ chunk      | 0.600 ms |    0.730 ms | +21.7% |
+| Greedy mesh one generated chunk       | 1.470 ms |    1.198 ms | -18.5% |
+| Generate one stride-8 surface tile    | 0.670 ms |    0.156 ms | -76.7% |
+| Surface tile with 10k unrelated edits | 0.750 ms |    0.173 ms | -76.9% |
+
+The far-tile improvement comes from making generator and edit-overlay surface queries consume the
+same material-bearing `SurfaceSample` once, rather than separately recomputing height and top
+material. Runtime meshing uses `GeneratedColumn` through a bounded 34×34 halo cache. A version-coupled
+golden checksum and a fixed-grid catalog test prove deterministic output, surface/material
+self-consistency, and representation of all six regions.

@@ -40,6 +40,14 @@ authoritative near field keeps the required 10 cm voxel resolution and uses face
 rectangle merging. A column becomes render-ready only when all desired vertical chunks are resident,
 so a partially streamed stack cannot expose an open terrain slice.
 
+Generator v4 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
+detail, dune, and volcanic fields. Six dominant regional identities—verdant forest, wind-cut moor,
+alpine, red badlands, pale dunes, and volcanic terrain—select surface ecology and geology, while their
+normalized weights blend height modifiers continuously across boundaries. Canonical generation, LOD
+surface summaries, edit overlays, and spawn queries consume that same sample. A reusable
+`GeneratedColumn` additionally caches terrain fields and tree intersections for repeated Y sampling,
+which keeps richer world logic from multiplying meshing-halo cost.
+
 Four independently streamable surface rings derive from the same generator and sparse edit overlay at
 0.2, 0.4, 0.8, and 1.6 m sampling strides. Each tile covers 32 samples per side and emits a top plus
 vertical transition faces down to lower neighbors, including samples across tile boundaries, so
