@@ -1,9 +1,16 @@
 use crate::mesh::{FACE_NEG_X, FACE_NEG_Y, FACE_NEG_Z, FACE_POS_X, FACE_POS_Y, FACE_POS_Z};
 use crate::{Generator, Material};
+use std::ops::Range;
 
 /// Every surface LOD tile contains the same number of cells. Increasing the level therefore
 /// increases world coverage without increasing generation or upload work per tile.
 pub const SURFACE_TILE_EDGE_CELLS: i32 = 32;
+
+/// Surface tiles are emitted as independently addressable patches. Keeping patches much smaller
+/// than a streamed tile lets the renderer select geometric clipmap rings without regenerating or
+/// uploading overlapping tile-sized geometry.
+pub const SURFACE_PATCH_EDGE_CELLS: i32 = 8;
+pub const SURFACE_PATCHES_PER_TILE_EDGE: i32 = SURFACE_TILE_EDGE_CELLS / SURFACE_PATCH_EDGE_CELLS;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
@@ -144,6 +151,31 @@ pub struct SurfaceBounds {
     pub max: [i32; 3],
 }
 
+/// A contiguous part of a [`SurfaceTileMesh`]. Cell bounds are local to the tile and half-open;
+/// geometry bounds are in canonical 10 cm voxel coordinates and conservatively enclose every quad
+/// in `quad_range`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SurfacePatch {
+    pub cell_bounds: [[u8; 2]; 2],
+    pub quad_range: Range<u32>,
+    pub bounds: SurfaceBounds,
+}
+
+impl SurfacePatch {
+    pub fn quads<'a>(&self, tile: &'a SurfaceTileMesh) -> &'a [SurfaceQuad] {
+        &tile.quads[self.quad_range.start as usize..self.quad_range.end as usize]
+    }
+}
+
+/// Structured coarse-surface geometry. Patches are ordered in row-major patch coordinates and
+/// each owns one non-overlapping 8x8-cell region of the 32x32-cell tile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SurfaceTileMesh {
+    pub coord: SurfaceTileCoord,
+    pub quads: Vec<SurfaceQuad>,
+    pub patches: Vec<SurfacePatch>,
+}
+
 impl SurfaceBounds {
     pub fn from_quads(quads: &[SurfaceQuad]) -> Option<Self> {
         let first = quads.first()?;
@@ -156,6 +188,21 @@ impl SurfaceBounds {
             }
         }
         Some(Self { min, max })
+    }
+
+    fn empty() -> Self {
+        Self {
+            min: [i32::MAX; 3],
+            max: [i32::MIN; 3],
+        }
+    }
+
+    fn include_quad(&mut self, quad: SurfaceQuad) {
+        let (quad_min, quad_max) = quad_voxel_bounds(quad);
+        for axis in 0..3 {
+            self.min[axis] = self.min[axis].min(quad_min[axis]);
+            self.max[axis] = self.max[axis].max(quad_max[axis]);
+        }
     }
 }
 
@@ -215,7 +262,14 @@ pub fn surface_tiles_affected_by_column(
 /// cell centers, and vertical transition quads close every height discontinuity, so independently
 /// streamed tiles cannot expose holes.
 pub fn generate_surface_tile(generator: Generator, coord: SurfaceTileCoord) -> Vec<SurfaceQuad> {
-    generate_surface_tile_with(coord, |x, z| {
+    generate_surface_tile_mesh(generator, coord).quads
+}
+
+pub fn generate_surface_tile_mesh(
+    generator: Generator,
+    coord: SurfaceTileCoord,
+) -> SurfaceTileMesh {
+    generate_surface_tile_mesh_with(coord, |x, z| {
         let sample = generator.surface_sample(x, z);
         (sample.height, sample.material)
     })
@@ -225,6 +279,13 @@ pub fn generate_surface_tile_with(
     coord: SurfaceTileCoord,
     surface: impl Fn(i32, i32) -> (i32, Material),
 ) -> Vec<SurfaceQuad> {
+    generate_surface_tile_mesh_with(coord, surface).quads
+}
+
+pub fn generate_surface_tile_mesh_with(
+    coord: SurfaceTileCoord,
+    surface: impl Fn(i32, i32) -> (i32, Material),
+) -> SurfaceTileMesh {
     let [origin_x, origin_z] = coord.voxel_origin();
     let stride = coord.stride_voxels();
     let edge = SURFACE_TILE_EDGE_CELLS;
@@ -244,45 +305,77 @@ pub fn generate_surface_tile_with(
     };
 
     let mut quads = Vec::with_capacity((edge * edge * 3) as usize);
-    for cell_z in 0..edge {
-        for cell_x in 0..edge {
-            let x = origin_x + cell_x * stride;
-            let z = origin_z + cell_z * stride;
-            let (height, material) = sample(cell_x, cell_z);
-            quads.push(SurfaceQuad {
-                origin: [x, height, z],
-                face: FACE_POS_Y,
-                extent: [stride as u16; 2],
-                material,
-            });
+    let mut patches = Vec::with_capacity(
+        (SURFACE_PATCHES_PER_TILE_EDGE * SURFACE_PATCHES_PER_TILE_EDGE) as usize,
+    );
+    for patch_z in 0..SURFACE_PATCHES_PER_TILE_EDGE {
+        for patch_x in 0..SURFACE_PATCHES_PER_TILE_EDGE {
+            let cell_min_x = patch_x * SURFACE_PATCH_EDGE_CELLS;
+            let cell_min_z = patch_z * SURFACE_PATCH_EDGE_CELLS;
+            let quad_start = quads.len() as u32;
+            let mut bounds = SurfaceBounds::empty();
+            for cell_z in cell_min_z..cell_min_z + SURFACE_PATCH_EDGE_CELLS {
+                for cell_x in cell_min_x..cell_min_x + SURFACE_PATCH_EDGE_CELLS {
+                    let x = origin_x + cell_x * stride;
+                    let z = origin_z + cell_z * stride;
+                    let (height, material) = sample(cell_x, cell_z);
+                    let top = SurfaceQuad {
+                        origin: [x, height, z],
+                        face: FACE_POS_Y,
+                        extent: [stride as u16; 2],
+                        material,
+                    };
+                    bounds.include_quad(top);
+                    quads.push(top);
 
-            let neighbors = [
-                (-1, 0, FACE_NEG_X),
-                (1, 0, FACE_POS_X),
-                (0, -1, FACE_NEG_Z),
-                (0, 1, FACE_POS_Z),
-            ];
-            for (dx, dz, face) in neighbors {
-                let (neighbor_height, _) = sample(cell_x + dx, cell_z + dz);
-                if height <= neighbor_height {
-                    continue;
+                    let neighbors = [
+                        (-1, 0, FACE_NEG_X),
+                        (1, 0, FACE_POS_X),
+                        (0, -1, FACE_NEG_Z),
+                        (0, 1, FACE_POS_Z),
+                    ];
+                    for (dx, dz, face) in neighbors {
+                        let (neighbor_height, _) = sample(cell_x + dx, cell_z + dz);
+                        if height <= neighbor_height {
+                            continue;
+                        }
+                        let side_origin = match face {
+                            FACE_POS_X => [x + stride - 1, neighbor_height + 1, z],
+                            FACE_NEG_X => [x, neighbor_height + 1, z],
+                            FACE_POS_Z => [x, neighbor_height + 1, z + stride - 1],
+                            _ => [x, neighbor_height + 1, z],
+                        };
+                        let side = SurfaceQuad {
+                            origin: side_origin,
+                            face,
+                            extent: [stride as u16, (height - neighbor_height) as u16],
+                            material,
+                        };
+                        bounds.include_quad(side);
+                        quads.push(side);
+                    }
                 }
-                let side_origin = match face {
-                    FACE_POS_X => [x + stride - 1, neighbor_height + 1, z],
-                    FACE_NEG_X => [x, neighbor_height + 1, z],
-                    FACE_POS_Z => [x, neighbor_height + 1, z + stride - 1],
-                    _ => [x, neighbor_height + 1, z],
-                };
-                quads.push(SurfaceQuad {
-                    origin: side_origin,
-                    face,
-                    extent: [stride as u16, (height - neighbor_height) as u16],
-                    material,
-                });
             }
+            let quad_end = quads.len() as u32;
+            let quad_range = quad_start..quad_end;
+            patches.push(SurfacePatch {
+                cell_bounds: [
+                    [cell_min_x as u8, cell_min_z as u8],
+                    [
+                        (cell_min_x + SURFACE_PATCH_EDGE_CELLS) as u8,
+                        (cell_min_z + SURFACE_PATCH_EDGE_CELLS) as u8,
+                    ],
+                ],
+                quad_range,
+                bounds,
+            });
         }
     }
-    quads
+    SurfaceTileMesh {
+        coord,
+        quads,
+        patches,
+    }
 }
 
 pub fn generate_far_tile(generator: Generator, coord: FarTileCoord) -> Vec<SurfaceQuad> {
@@ -394,6 +487,111 @@ mod tests {
     }
 
     #[test]
+    fn surface_patches_cover_every_cell_once() {
+        assert_eq!(SURFACE_PATCH_EDGE_CELLS, 8);
+        assert_eq!(SURFACE_PATCHES_PER_TILE_EDGE, 4);
+
+        for level in SurfaceLodLevel::ALL {
+            let mesh =
+                generate_surface_tile_mesh_with(SurfaceTileCoord::new(level, 2, -3), |x, z| {
+                    (x.div_euclid(23) - z.div_euclid(41), Material::Stone)
+                });
+            assert_eq!(
+                mesh.patches.len(),
+                (SURFACE_PATCHES_PER_TILE_EDGE * SURFACE_PATCHES_PER_TILE_EDGE) as usize
+            );
+
+            let stride = level.stride_voxels();
+            let [origin_x, origin_z] = mesh.coord.voxel_origin();
+            let mut covered =
+                [[false; SURFACE_TILE_EDGE_CELLS as usize]; SURFACE_TILE_EDGE_CELLS as usize];
+            for patch in &mesh.patches {
+                let [[min_x, min_z], [max_x, max_z]] = patch.cell_bounds;
+                assert_eq!(i32::from(max_x - min_x), SURFACE_PATCH_EDGE_CELLS);
+                assert_eq!(i32::from(max_z - min_z), SURFACE_PATCH_EDGE_CELLS);
+
+                let mut top_count = 0;
+                for quad in patch.quads(&mesh) {
+                    if quad.face != FACE_POS_Y {
+                        continue;
+                    }
+                    let cell_x = (quad.origin[0] - origin_x).div_euclid(stride);
+                    let cell_z = (quad.origin[2] - origin_z).div_euclid(stride);
+                    assert!((i32::from(min_x)..i32::from(max_x)).contains(&cell_x));
+                    assert!((i32::from(min_z)..i32::from(max_z)).contains(&cell_z));
+                    assert!(!std::mem::replace(
+                        &mut covered[cell_z as usize][cell_x as usize],
+                        true
+                    ));
+                    top_count += 1;
+                }
+                assert_eq!(top_count, (SURFACE_PATCH_EDGE_CELLS.pow(2)) as usize);
+            }
+            assert!(covered.into_iter().flatten().all(|covered| covered));
+        }
+    }
+
+    #[test]
+    fn surface_patch_ranges_are_contiguous_bounded_and_conservative() {
+        let mesh = generate_surface_tile_mesh_with(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride4, -2, 1),
+            |x, z| (x.rem_euclid(37) - z.rem_euclid(19), Material::Dirt),
+        );
+        let mut next_start = 0;
+        for patch in &mesh.patches {
+            assert_eq!(patch.quad_range.start, next_start);
+            assert!(patch.quad_range.start < patch.quad_range.end);
+            assert!(patch.quad_range.end as usize <= mesh.quads.len());
+            assert_eq!(
+                Some(patch.bounds),
+                SurfaceBounds::from_quads(patch.quads(&mesh))
+            );
+            for quad in patch.quads(&mesh) {
+                let (quad_min, quad_max) = quad_voxel_bounds(*quad);
+                for axis in 0..3 {
+                    assert!(patch.bounds.min[axis] <= quad_min[axis]);
+                    assert!(patch.bounds.max[axis] >= quad_max[axis]);
+                }
+            }
+            next_start = patch.quad_range.end;
+        }
+        assert_eq!(next_start as usize, mesh.quads.len());
+    }
+
+    #[test]
+    fn negative_tile_patch_bounds_follow_half_open_cell_bounds() {
+        for level in SurfaceLodLevel::ALL {
+            let coord = SurfaceTileCoord::new(level, -3, -2);
+            let mesh = generate_surface_tile_mesh_with(coord, |x, z| {
+                (x.div_euclid(11) + z.div_euclid(13), Material::Grass)
+            });
+            let [origin_x, origin_z] = coord.voxel_origin();
+            let stride = level.stride_voxels();
+            for patch in &mesh.patches {
+                let [[min_x, min_z], [max_x, max_z]] = patch.cell_bounds;
+                assert_eq!(patch.bounds.min[0], origin_x + i32::from(min_x) * stride);
+                assert_eq!(patch.bounds.max[0], origin_x + i32::from(max_x) * stride);
+                assert_eq!(patch.bounds.min[2], origin_z + i32::from(min_z) * stride);
+                assert_eq!(patch.bounds.max[2], origin_z + i32::from(max_z) * stride);
+            }
+        }
+    }
+
+    #[test]
+    fn vector_surface_apis_preserve_structured_quad_order() {
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride8, -1, 2);
+        let surface = |x: i32, z: i32| (x.div_euclid(17) - z.div_euclid(29), Material::Grass);
+        assert_eq!(
+            generate_surface_tile_with(coord, surface),
+            generate_surface_tile_mesh_with(coord, surface).quads
+        );
+        assert_eq!(
+            generate_surface_tile(Generator::new(42), coord),
+            generate_surface_tile_mesh(Generator::new(42), coord).quads
+        );
+    }
+
+    #[test]
     fn independently_generated_neighbors_share_every_boundary() {
         for level in SurfaceLodLevel::ALL {
             let stride = level.stride_voxels();
@@ -437,6 +635,64 @@ mod tests {
                 assert_eq!(forward_quad.origin[1], surface(x, span + stride / 2).0);
                 assert_eq!(back_quad.origin[2] + stride, forward_quad.origin[2]);
             }
+        }
+    }
+
+    #[test]
+    fn structured_neighbor_patches_share_same_level_edges() {
+        for level in SurfaceLodLevel::ALL {
+            let stride = level.stride_voxels();
+            let span = level.tile_span_voxels();
+            let surface = |x: i32, z: i32| (x.div_euclid(17) - z.div_euclid(29), Material::Grass);
+            let left =
+                generate_surface_tile_mesh_with(SurfaceTileCoord::new(level, -1, -1), surface);
+            let right =
+                generate_surface_tile_mesh_with(SurfaceTileCoord::new(level, 0, -1), surface);
+            let edge_x = 0;
+            let mut left_edge: Vec<_> = left
+                .quads
+                .iter()
+                .filter(|quad| quad.face == FACE_POS_Y && quad.origin[0] == edge_x - stride)
+                .map(|quad| (quad.origin[2], quad.origin[1]))
+                .collect();
+            let mut right_edge: Vec<_> = right
+                .quads
+                .iter()
+                .filter(|quad| quad.face == FACE_POS_Y && quad.origin[0] == edge_x)
+                .map(|quad| (quad.origin[2], quad.origin[1]))
+                .collect();
+            left_edge.sort_unstable();
+            right_edge.sort_unstable();
+            assert_eq!(left_edge.len(), SURFACE_TILE_EDGE_CELLS as usize);
+            assert_eq!(right_edge.len(), SURFACE_TILE_EDGE_CELLS as usize);
+            for ((left_z, left_y), (right_z, right_y)) in left_edge.iter().zip(&right_edge) {
+                assert_eq!(left_z, right_z);
+                assert_eq!(*left_y, surface(-stride / 2, *left_z + stride / 2).0);
+                assert_eq!(*right_y, surface(stride / 2, *right_z + stride / 2).0);
+            }
+
+            assert_eq!(
+                left.coord.voxel_origin()[0] + span,
+                right.coord.voxel_origin()[0]
+            );
+            let left_boundary_patches: Vec<_> = left
+                .patches
+                .iter()
+                .filter(|patch| patch.cell_bounds[1][0] == SURFACE_TILE_EDGE_CELLS as u8)
+                .collect();
+            let right_boundary_patches: Vec<_> = right
+                .patches
+                .iter()
+                .filter(|patch| patch.cell_bounds[0][0] == 0)
+                .collect();
+            assert_eq!(
+                left_boundary_patches.len(),
+                SURFACE_PATCHES_PER_TILE_EDGE as usize
+            );
+            assert_eq!(
+                right_boundary_patches.len(),
+                SURFACE_PATCHES_PER_TILE_EDGE as usize
+            );
         }
     }
 
