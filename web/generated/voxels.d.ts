@@ -7,6 +7,7 @@ export class EngineHandle {
     destroy(): void;
     feed_input(bytes: Uint8Array): void;
     resize(css_width: number, css_height: number, dpr: number): void;
+    set_option(code: number, enabled: boolean): void;
     snapshot(): Float32Array;
 }
 
@@ -21,6 +22,7 @@ export interface InitOutput {
     readonly enginehandle_destroy: (a: number) => void;
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => void;
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;
+    readonly enginehandle_set_option: (a: number, b: number, c: number) => void;
     readonly enginehandle_snapshot: (a: number) => any;
     readonly rust_sqlite_wasm_abort: () => void;
     readonly rust_sqlite_wasm_assert_fail: (a: number, b: number, c: number, d: number) => void;

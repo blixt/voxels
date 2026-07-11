@@ -445,6 +445,12 @@ mod web {
             Float32Array::from(values.as_slice())
         }
 
+        pub fn set_option(&self, code: u8, enabled: bool) {
+            if let Some(engine) = self.engine.as_ref() {
+                engine.renderer.borrow_mut().set_option(code, enabled);
+            }
+        }
+
         pub fn destroy(&mut self) {
             if let Some(engine) = self.engine.take() {
                 engine.stop();

@@ -52,6 +52,7 @@ export type ToWorker =
   | InitMessage
   | { kind: "input"; buffer: ArrayBuffer }
   | { kind: "resize"; cssWidth: number; cssHeight: number; dpr: number }
+  | { kind: "option"; code: number; enabled: boolean }
   | { kind: "snapshot"; requestId: number }
   | { kind: "destroy" };
 
