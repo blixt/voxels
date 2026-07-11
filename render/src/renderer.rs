@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use voxels_core::CameraState;
 use voxels_world::{
-    CHUNK_EDGE, ChunkCoord, FAR_TILE_SPAN_VOXELS, FarTileCoord, Quad, SurfaceQuad,
+    CHUNK_EDGE, ChunkCoord, FarTileCoord, Quad, SurfaceBounds, SurfaceQuad, SurfaceTileCoord,
     VOXEL_SIZE_METRES,
 };
 use wgpu::util::DeviceExt;
@@ -26,6 +26,8 @@ const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 const VIEW_DISTANCE_METRES: f32 = 220.0;
 const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 const FAR_MATERIAL_FLAG: u32 = 1 << 31;
+const SURFACE_LOD_SHIFT: u32 = 28;
+const FAR_UNDERLAY_OFFSET_METRES: f32 = 0.025;
 const SUN_DIRECTION: glam::Vec3 = glam::Vec3::new(0.48, 0.72, 0.35);
 type MeshKey = (u8, i32, i32, i32);
 
@@ -38,6 +40,7 @@ struct FrameUniform {
     viewport_voxel: [f32; 4],
     target_voxel: [f32; 4],
     render_options: [f32; 4],
+    lod_options: [f32; 4],
     camera_forward: [f32; 4],
     shadow_splits: [f32; 4],
     shadow_texel_sizes: [f32; 4],
@@ -49,6 +52,7 @@ struct FrameUniform {
 struct ShadowFrameUniform {
     clip_from_world: [[f32; 4]; 4],
     camera_voxel: [f32; 4],
+    lod_options: [f32; 4],
 }
 
 #[repr(C)]
@@ -68,6 +72,7 @@ struct ChunkMesh {
     quad_count: u32,
     bounds_min: glam::Vec3,
     bounds_max: glam::Vec3,
+    active: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +129,8 @@ pub struct Renderer {
     diagnostics: RenderDiagnostics,
     target_voxel: Option<[i32; 3]>,
     options: RenderOptions,
+    fine_coverage_ready: bool,
+    lod_coverage_ready: bool,
     ui: MissionControlUi,
     ui_gpu: UiGpu,
     dpr: f32,
@@ -148,6 +155,12 @@ struct RenderOptions {
     fog: bool,
     far_terrain: bool,
     target_outline: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct LodReadiness {
+    fine: bool,
+    all: bool,
 }
 
 impl Default for RenderOptions {
@@ -220,8 +233,15 @@ impl ShadowGpu {
                 count: None,
             }],
         });
-        let initial_uniforms: [ShadowFrameUniform; CASCADE_COUNT] =
-            std::array::from_fn(|index| shadow_frame_uniform(&cascades, index, camera));
+        let initial_uniforms: [ShadowFrameUniform; CASCADE_COUNT] = std::array::from_fn(|index| {
+            shadow_frame_uniform(
+                &cascades,
+                index,
+                camera,
+                RenderOptions::default(),
+                LodReadiness::default(),
+            )
+        });
         let uniform_buffers = std::array::from_fn(|index| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("shadow caster frame uniform"),
@@ -292,9 +312,11 @@ impl ShadowGpu {
         queue: &Queue,
         cascades: &DirectionalShadowCascades,
         camera: &CameraState,
+        options: RenderOptions,
+        readiness: LodReadiness,
     ) {
         for index in 0..CASCADE_COUNT {
-            let uniform = shadow_frame_uniform(cascades, index, camera);
+            let uniform = shadow_frame_uniform(cascades, index, camera, options, readiness);
             queue.write_buffer(
                 &self.uniform_buffers[index],
                 0,
@@ -364,6 +386,7 @@ impl Renderer {
             0.0,
             None,
             options,
+            LodReadiness::default(),
             &shadow_cascades,
         );
         let frame_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -479,6 +502,8 @@ impl Renderer {
             diagnostics: RenderDiagnostics::default(),
             target_voxel: None,
             options,
+            fine_coverage_ready: false,
+            lod_coverage_ready: false,
             ui: MissionControlUi::default(),
             ui_gpu,
             dpr: valid_dpr(dpr),
@@ -516,6 +541,26 @@ impl Renderer {
 
     pub const fn set_target_voxel(&mut self, target: Option<[i32; 3]>) {
         self.target_voxel = target;
+    }
+
+    pub const fn set_lod_coverage_ready(&mut self, fine_ready: bool, all_lods_ready: bool) {
+        self.fine_coverage_ready = fine_ready;
+        self.lod_coverage_ready = all_lods_ready;
+    }
+
+    const fn lod_readiness(&self) -> LodReadiness {
+        LodReadiness {
+            fine: self.fine_coverage_ready,
+            all: self.lod_coverage_ready,
+        }
+    }
+
+    pub fn set_chunk_column_active(&mut self, x: i32, z: i32, active: bool) {
+        for (key, chunk) in &mut self.chunks {
+            if key.0 == 0 && key.1 == x && key.3 == z {
+                chunk.active = active;
+            }
+        }
     }
 
     pub const fn ui_open(&self) -> bool {
@@ -624,35 +669,41 @@ impl Renderer {
     }
 
     pub fn upload_far_tile(&mut self, coord: FarTileCoord, quads: &[SurfaceQuad]) -> bool {
-        let key = (1, coord.x, 0, coord.z);
+        self.upload_surface_tile(coord.surface_coord(), quads)
+    }
+
+    pub fn upload_surface_tile(&mut self, coord: SurfaceTileCoord, quads: &[SurfaceQuad]) -> bool {
+        let key = (coord.level.index() + 1, coord.x, 0, coord.z);
         if quads.is_empty() {
-            self.remove_far_tile(coord);
+            self.remove_surface_tile(coord);
             return true;
         }
+        let Some(bounds) = SurfaceBounds::from_quads(quads) else {
+            return false;
+        };
+        let underlay_offset = FAR_UNDERLAY_OFFSET_METRES * (f32::from(coord.level.index()) + 1.0);
         let gpu_quads: Vec<_> = quads
             .iter()
             .map(|quad| GpuQuad {
-                origin: quad.origin.map(|value| value as f32 * VOXEL_SIZE_METRES),
+                origin: [
+                    quad.origin[0] as f32 * VOXEL_SIZE_METRES,
+                    quad.origin[1] as f32 * VOXEL_SIZE_METRES - underlay_offset,
+                    quad.origin[2] as f32 * VOXEL_SIZE_METRES,
+                ],
                 face: u32::from(quad.face),
                 extent: [
                     f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
                     f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
                 ],
-                material: u32::from(quad.material.id()) | FAR_MATERIAL_FLAG,
+                material: u32::from(quad.material.id())
+                    | FAR_MATERIAL_FLAG
+                    | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
                 ao: 0xff,
             })
             .collect();
-        let [x, z] = coord.voxel_origin();
-        let min = glam::Vec3::new(
-            x as f32 * VOXEL_SIZE_METRES,
-            -6.4,
-            z as f32 * VOXEL_SIZE_METRES,
-        );
-        let max = glam::Vec3::new(
-            (x + FAR_TILE_SPAN_VOXELS) as f32 * VOXEL_SIZE_METRES,
-            12.8,
-            (z + FAR_TILE_SPAN_VOXELS) as f32 * VOXEL_SIZE_METRES,
-        );
+        let min = glam::Vec3::from_array(bounds.min.map(|value| value as f32 * VOXEL_SIZE_METRES))
+            - glam::Vec3::Y * underlay_offset;
+        let max = glam::Vec3::from_array(bounds.max.map(|value| value as f32 * VOXEL_SIZE_METRES));
         self.upload_mesh(key, &gpu_quads, min, max)
     }
 
@@ -690,6 +741,11 @@ impl Renderer {
         };
         self.queue
             .write_buffer(buffer, u64::from(allocation.offset), bytes);
+        let active = key.0 != 0
+            || self
+                .chunks
+                .get(&key)
+                .is_some_and(|existing| existing.active);
         let old = self.chunks.insert(
             key,
             ChunkMesh {
@@ -697,6 +753,7 @@ impl Renderer {
                 quad_count: gpu_quads.len() as u32,
                 bounds_min,
                 bounds_max,
+                active,
             },
         );
         if let Some(old) = old {
@@ -710,7 +767,11 @@ impl Renderer {
     }
 
     pub fn remove_far_tile(&mut self, coord: FarTileCoord) {
-        self.remove_mesh((1, coord.x, 0, coord.z));
+        self.remove_surface_tile(coord.surface_coord());
+    }
+
+    pub fn remove_surface_tile(&mut self, coord: SurfaceTileCoord) {
+        self.remove_mesh((coord.level.index() + 1, coord.x, 0, coord.z));
     }
 
     fn remove_mesh(&mut self, key: MeshKey) {
@@ -739,6 +800,7 @@ impl Renderer {
             self.time,
             self.target_voxel,
             self.options,
+            self.lod_readiness(),
             &shadow_cascades,
         );
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
@@ -762,8 +824,13 @@ impl Renderer {
         });
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
-        self.shadow_gpu
-            .write_cascades(&self.queue, &shadow_cascades, camera);
+        self.shadow_gpu.write_cascades(
+            &self.queue,
+            &shadow_cascades,
+            camera,
+            self.options,
+            self.lod_readiness(),
+        );
         let frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame
@@ -896,7 +963,7 @@ impl Renderer {
         let mut mesh_count = 0u32;
         let mut quad_count = 0u32;
         for (key, chunk) in &self.chunks {
-            if !include(key, chunk) {
+            if !chunk.active || !include(key, chunk) {
                 continue;
             }
             debug_assert_eq!(
@@ -952,6 +1019,7 @@ fn frame_uniform(
     time: f32,
     target: Option<[i32; 3]>,
     options: RenderOptions,
+    readiness: LodReadiness,
     shadows: &DirectionalShadowCascades,
 ) -> FrameUniform {
     let view_projection = view_projection(config, camera);
@@ -980,6 +1048,12 @@ fn frame_uniform(
             if options.far_terrain { 1.0 } else { 0.0 },
             if options.target_outline { 1.0 } else { 0.0 },
         ],
+        lod_options: [
+            if readiness.fine { 1.0 } else { 0.0 },
+            if options.far_terrain { 1.0 } else { 0.0 },
+            if readiness.all { 1.0 } else { 0.0 },
+            0.0,
+        ],
         camera_forward: [camera_forward.x, camera_forward.y, camera_forward.z, 0.0],
         shadow_splits: [
             shadows.split_depths[0],
@@ -1003,6 +1077,8 @@ fn shadow_frame_uniform(
     shadows: &DirectionalShadowCascades,
     cascade_index: usize,
     camera: &CameraState,
+    options: RenderOptions,
+    readiness: LodReadiness,
 ) -> ShadowFrameUniform {
     ShadowFrameUniform {
         clip_from_world: shadows.cascades[cascade_index]
@@ -1013,6 +1089,12 @@ fn shadow_frame_uniform(
             camera.position.y,
             camera.position.z,
             VOXEL_SIZE_METRES,
+        ],
+        lod_options: [
+            if readiness.fine { 1.0 } else { 0.0 },
+            if options.far_terrain { 1.0 } else { 0.0 },
+            if readiness.all { 1.0 } else { 0.0 },
+            0.0,
         ],
     }
 }

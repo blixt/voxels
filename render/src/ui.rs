@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 const PANEL_INSET: f32 = 18.0;
 const PANEL_WIDTH: f32 = 360.0;
 const COMPACT_WIDTH: f32 = 292.0;
-const PANEL_HEIGHT: f32 = 463.0;
-const COMPACT_HEIGHT: f32 = 376.0;
+const PANEL_HEIGHT: f32 = 528.0;
+const COMPACT_HEIGHT: f32 = 441.0;
 const HEADER_HEIGHT: f32 = 48.0;
 const PANEL_RADIUS: f32 = 18.0;
 const CONTENT_PAD: f32 = 14.0;
@@ -228,6 +228,11 @@ pub struct LiveStats {
     pub draw_calls: u32,
     pub shadow_draw_calls: u32,
     pub shadow_cascades: u32,
+    pub load_p95_frames: u64,
+    pub load_max_frames: u64,
+    pub remesh_p95_frames: u64,
+    pub remesh_max_frames: u64,
+    pub lod_tiles: [u32; 4],
     pub pending_jobs: u32,
     pub arena_bytes: u64,
 }
@@ -592,7 +597,7 @@ impl MissionControlUi {
         let stat_width = (panel.width - CONTENT_PAD * 2.0 - stat_gap * (stat_columns - 1) as f32)
             / stat_columns as f32;
         let stat_height = if compact { 43.0 } else { 58.0 };
-        let stat_count: usize = if compact { 4 } else { 6 };
+        let stat_count: usize = if compact { 6 } else { 9 };
         let stat_cards = (0..stat_count)
             .map(|index| {
                 let column = index % stat_columns;
@@ -1021,6 +1026,8 @@ impl MissionControlUi {
                     format!("{}/{}", stats.visible_chunks, stats.resident_chunks),
                 ),
                 ("QUADS", compact_count(u64::from(stats.quads))),
+                ("LOAD P95", format!("{} f", stats.load_p95_frames)),
+                ("REMESH P95", format!("{} f", stats.remesh_p95_frames)),
             ]
         } else {
             vec![
@@ -1044,11 +1051,32 @@ impl MissionControlUi {
                     ),
                 ),
                 (
+                    "LOAD P95 / MAX",
+                    format!("{} / {} f", stats.load_p95_frames, stats.load_max_frames),
+                ),
+                (
+                    "REMESH P95 / MAX",
+                    format!(
+                        "{} / {} f",
+                        stats.remesh_p95_frames, stats.remesh_max_frames
+                    ),
+                ),
+                (
                     "JOBS / ARENA",
                     format!(
                         "{} / {}",
                         stats.pending_jobs,
                         compact_bytes(stats.arena_bytes)
+                    ),
+                ),
+                (
+                    "LOD 1 / 2 / 3 / 4",
+                    format!(
+                        "{} / {} / {} / {}",
+                        stats.lod_tiles[0],
+                        stats.lod_tiles[1],
+                        stats.lod_tiles[2],
+                        stats.lod_tiles[3]
                     ),
                 ),
             ]
@@ -1294,11 +1322,11 @@ mod tests {
         let mut ui = opened();
         let normal = ui.layout(viewport());
         assert!(!normal.compact);
-        assert_eq!(normal.stat_cards.len(), 6);
+        assert_eq!(normal.stat_cards.len(), 9);
         let _ = ui.set_compact(true);
         let compact = ui.layout(viewport());
         assert!(compact.compact);
-        assert_eq!(compact.stat_cards.len(), 4);
+        assert_eq!(compact.stat_cards.len(), 6);
         assert!(compact.panel.width < normal.panel.width);
 
         let automatic = opened();
@@ -1360,6 +1388,11 @@ mod tests {
             draw_calls: 132,
             shadow_draw_calls: 164,
             shadow_cascades: 3,
+            load_p95_frames: 18,
+            load_max_frames: 31,
+            remesh_p95_frames: 2,
+            remesh_max_frames: 4,
+            lod_tiles: [49, 49, 49, 81],
             pending_jobs: 7,
             arena_bytes: 48 * 1_048_576,
         });
@@ -1375,7 +1408,7 @@ mod tests {
                 .iter()
                 .filter(|surface| surface.role == SurfaceRole::StatCard)
                 .count(),
-            6
+            9
         );
         assert_eq!(
             draw.glass

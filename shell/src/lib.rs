@@ -14,18 +14,19 @@ mod web {
     use voxels_core::{CameraState, InputState, VoxelHit, raycast_voxels};
     use voxels_render::renderer::Renderer;
     use voxels_render::ui::LiveStats;
-    use voxels_runtime::{FrameBudget, StreamConfig, StreamScheduler};
+    use voxels_runtime::{ChunkState, FrameBudget, StreamConfig, StreamScheduler};
     use voxels_world::{
-        CHUNK_EDGE, Chunk, ChunkCoord, EditMap, FAR_TILE_SPAN_VOXELS, FarTileCoord, Generator,
-        Material, Quad, VOXEL_SIZE_METRES, VoxelCoord, generate_far_tile_with, mesh_chunk,
+        CHUNK_EDGE, Chunk, ChunkCoord, EditMap, Generator, Material, Quad, SurfaceLodLevel,
+        SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord, generate_surface_tile_with, mesh_chunk,
+        surface_tiles_affected_by_column,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const WORLD_SEED: u64 = 0x5eed_cafe;
-    const FAR_LOAD_RADIUS_TILES: i32 = 5;
-    const FAR_RETAIN_RADIUS_TILES: i32 = 6;
+    const SURFACE_LOAD_RADIUS_TILES: [i32; 4] = [4, 4, 4, 5];
+    const SURFACE_RETAIN_MARGIN_TILES: i32 = 1;
     const SIMULATION_STEP_SECONDS: f32 = 1.0 / 120.0;
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
     const STREAM_FRAME_BUDGET: FrameBudget = FrameBudget {
@@ -71,9 +72,11 @@ mod web {
         scheduler: RefCell<StreamScheduler>,
         chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
         pending_meshes: RefCell<BTreeMap<(i32, i32, i32), Vec<Quad>>>,
-        far_focus: Cell<Option<FarTileCoord>>,
-        far_resident: RefCell<BTreeSet<(i32, i32)>>,
-        far_queue: RefCell<VecDeque<FarTileCoord>>,
+        surface_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
+        surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
+        surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
+        surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
+        fine_initialized: Cell<bool>,
         store: RefCell<Store>,
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
@@ -153,6 +156,20 @@ mod web {
             renderer.set_target_voxel(target);
             let stream = self.scheduler.borrow().diagnostics();
             let render = renderer.diagnostics();
+            let lod_tiles = self.surface_lod_counts();
+            let fine_coverage_ready = stream.generation.queued == 0
+                && stream.generation.in_flight == 0
+                && stream.meshing.queued == 0
+                && stream.meshing.in_flight == 0
+                && stream.upload.queued == 0
+                && stream.upload.in_flight == 0;
+            if fine_coverage_ready {
+                self.fine_initialized.set(true);
+            }
+            let all_lods_ready = fine_coverage_ready
+                && self.surface_queue.borrow().is_empty()
+                && self.surface_dirty.borrow().is_empty();
+            renderer.set_lod_coverage_ready(self.fine_initialized.get(), all_lods_ready);
             renderer.render(
                 dt,
                 &camera,
@@ -166,18 +183,24 @@ mod web {
                     cpu_ms: self.frame_milliseconds.get(),
                     gpu_ms: None,
                     resident_chunks: usize_to_u32(
-                        stream.resident + self.far_resident.borrow().len(),
+                        stream.resident + self.surface_resident.borrow().len(),
                     ),
                     visible_chunks: render.visible_chunks,
                     quads: render.quads,
                     draw_calls: render.draw_calls,
                     shadow_draw_calls: render.shadow_draw_calls,
                     shadow_cascades: render.shadow_cascades,
+                    load_p95_frames: stream.initial_residency_latency.p95_frames,
+                    load_max_frames: stream.initial_residency_latency.max_frames,
+                    remesh_p95_frames: stream.remesh_latency.p95_frames,
+                    remesh_max_frames: stream.remesh_latency.max_frames,
+                    lod_tiles,
                     pending_jobs: usize_to_u32(
                         stream.generation.queued
                             + stream.meshing.queued
                             + stream.upload.queued
-                            + self.far_queue.borrow().len(),
+                            + self.surface_queue.borrow().len()
+                            + self.surface_dirty.borrow().len(),
                     ),
                     arena_bytes: render.arena_allocated_bytes,
                 },
@@ -240,6 +263,7 @@ mod web {
                     .upload_chunk(ticket.coord, &quads)
                 {
                     let _ = self.scheduler.borrow_mut().complete(ticket);
+                    self.update_render_ready_column(ticket.coord);
                 } else {
                     self.pending_meshes
                         .borrow_mut()
@@ -258,73 +282,142 @@ mod web {
                 for eviction in evictions {
                     chunks.remove(&coord_key(eviction.coord));
                     pending.remove(&coord_key(eviction.coord));
+                    renderer.set_chunk_column_active(eviction.coord.x, eviction.coord.z, false);
                     renderer.remove_chunk(eviction.coord);
                 }
             }
-            self.stream_far(camera.position);
+            self.stream_surface_lods(camera.position);
         }
 
-        fn stream_far(&self, position: glam::Vec3) {
-            let focus = world_to_far_tile(position);
-            if self.far_focus.get() != Some(focus) {
-                self.far_focus.set(Some(focus));
-                let desired: BTreeSet<_> = (-FAR_LOAD_RADIUS_TILES..=FAR_LOAD_RADIUS_TILES)
-                    .flat_map(|dz| {
-                        (-FAR_LOAD_RADIUS_TILES..=FAR_LOAD_RADIUS_TILES).map(move |dx| (dx, dz))
-                    })
-                    .filter(|(dx, dz)| {
-                        dx * dx + dz * dz <= FAR_LOAD_RADIUS_TILES * FAR_LOAD_RADIUS_TILES
-                    })
-                    .map(|(dx, dz)| (focus.x + dx, focus.z + dz))
-                    .collect();
+        fn update_render_ready_column(&self, coord: ChunkCoord) {
+            let scheduler = self.scheduler.borrow();
+            let focus = scheduler.focus();
+            let vertical = scheduler.config().vertical_radius_chunks;
+            let ready = (-vertical..=vertical).all(|dy| {
+                scheduler
+                    .status(ChunkCoord::new(coord.x, focus.y + dy, coord.z))
+                    .is_some_and(|status| status.desired && status.state == ChunkState::Resident)
+            });
+            drop(scheduler);
+            self.renderer
+                .borrow_mut()
+                .set_chunk_column_active(coord.x, coord.z, ready);
+        }
+
+        fn surface_lod_counts(&self) -> [u32; 4] {
+            let mut counts = [0u32; 4];
+            for coord in self.surface_resident.borrow().iter() {
+                let count = &mut counts[coord.level.index() as usize];
+                *count = count.saturating_add(1);
+            }
+            counts
+        }
+
+        fn stream_surface_lods(&self, position: glam::Vec3) {
+            let focus = std::array::from_fn(|index| {
+                world_to_surface_tile(position, SurfaceLodLevel::ALL[index])
+            });
+            if self.surface_focus.get() != Some(focus) {
+                self.surface_focus.set(Some(focus));
+                let mut desired = BTreeSet::new();
+                for (index, level) in SurfaceLodLevel::ALL.into_iter().enumerate() {
+                    let radius = SURFACE_LOAD_RADIUS_TILES[index];
+                    let level_focus = focus[index];
+                    for dz in -radius..=radius {
+                        for dx in -radius..=radius {
+                            if dx * dx + dz * dz <= radius * radius {
+                                desired.insert(SurfaceTileCoord::new(
+                                    level,
+                                    level_focus.x + dx,
+                                    level_focus.z + dz,
+                                ));
+                            }
+                        }
+                    }
+                }
+
                 let evicted: Vec<_> = self
-                    .far_resident
+                    .surface_resident
                     .borrow()
                     .iter()
                     .copied()
-                    .filter(|(x, z)| {
-                        let dx = x - focus.x;
-                        let dz = z - focus.z;
-                        dx * dx + dz * dz > FAR_RETAIN_RADIUS_TILES * FAR_RETAIN_RADIUS_TILES
+                    .filter(|coord| {
+                        let index = coord.level.index() as usize;
+                        let retain = SURFACE_LOAD_RADIUS_TILES[index] + SURFACE_RETAIN_MARGIN_TILES;
+                        let dx = coord.x - focus[index].x;
+                        let dz = coord.z - focus[index].z;
+                        dx * dx + dz * dz > retain * retain
                     })
                     .collect();
                 if !evicted.is_empty() {
-                    let mut resident = self.far_resident.borrow_mut();
+                    let mut resident = self.surface_resident.borrow_mut();
+                    let mut dirty = self.surface_dirty.borrow_mut();
                     let mut renderer = self.renderer.borrow_mut();
-                    for (x, z) in evicted {
-                        resident.remove(&(x, z));
-                        renderer.remove_far_tile(FarTileCoord::new(x, z));
+                    for coord in evicted {
+                        resident.remove(&coord);
+                        dirty.remove(&coord);
+                        renderer.remove_surface_tile(coord);
                     }
                 }
-                let resident = self.far_resident.borrow();
+
+                // Edits may have dirtied a tile just before a focus jump. Keep replacement work only
+                // while the tile is still resident or belongs to the new desired set; a future load
+                // samples the authoritative edit map and does not need a stale dirty marker.
+                {
+                    let resident = self.surface_resident.borrow();
+                    self.surface_dirty
+                        .borrow_mut()
+                        .retain(|coord| resident.contains(coord) || desired.contains(coord));
+                }
+
+                let resident = self.surface_resident.borrow();
                 let mut candidates: Vec<_> = desired
                     .into_iter()
                     .filter(|coord| !resident.contains(coord))
-                    .map(|(x, z)| FarTileCoord::new(x, z))
                     .collect();
                 drop(resident);
                 candidates.sort_by_key(|coord| {
-                    let dx = coord.x - focus.x;
-                    let dz = coord.z - focus.z;
-                    (dx * dx + dz * dz, coord.z, coord.x)
+                    let index = coord.level.index() as usize;
+                    let dx = coord.x - focus[index].x;
+                    let dz = coord.z - focus[index].z;
+                    (
+                        u8::MAX - coord.level.index(),
+                        dx * dx + dz * dz,
+                        coord.z,
+                        coord.x,
+                    )
                 });
-                let mut queue = self.far_queue.borrow_mut();
+                let mut queue = self.surface_queue.borrow_mut();
                 queue.clear();
                 queue.extend(candidates);
             }
 
-            let next = self.far_queue.borrow_mut().pop_front();
+            let dirty = {
+                let resident = self.surface_resident.borrow();
+                self.surface_dirty
+                    .borrow()
+                    .iter()
+                    .copied()
+                    .find(|coord| resident.contains(coord))
+            };
+            let next = dirty.or_else(|| self.surface_queue.borrow_mut().pop_front());
             let Some(coord) = next else {
                 return;
             };
             let edits = self.edits.borrow();
-            let quads =
-                generate_far_tile_with(coord, |x, z| edits.surface_sample(self.generator, x, z));
+            let quads = generate_surface_tile_with(coord, |x, z| {
+                edits.surface_sample(self.generator, x, z)
+            });
             drop(edits);
-            if self.renderer.borrow_mut().upload_far_tile(coord, &quads) {
-                self.far_resident.borrow_mut().insert((coord.x, coord.z));
-            } else {
-                self.far_queue.borrow_mut().push_front(coord);
+            if self
+                .renderer
+                .borrow_mut()
+                .upload_surface_tile(coord, &quads)
+            {
+                self.surface_resident.borrow_mut().insert(coord);
+                self.surface_dirty.borrow_mut().remove(&coord);
+            } else if dirty.is_none() {
+                self.surface_queue.borrow_mut().push_front(coord);
             }
         }
 
@@ -428,20 +521,16 @@ mod web {
             }
             drop(edits);
             let _ = self.scheduler.borrow_mut().mark_voxel_edited(target);
-            let far_coord = FarTileCoord::new(
-                target.x.div_euclid(FAR_TILE_SPAN_VOXELS),
-                target.z.div_euclid(FAR_TILE_SPAN_VOXELS),
-            );
-            if self
-                .far_resident
-                .borrow_mut()
-                .remove(&(far_coord.x, far_coord.z))
-            {
-                self.renderer.borrow_mut().remove_far_tile(far_coord);
+            let resident = self.surface_resident.borrow();
+            let queue = self.surface_queue.borrow();
+            let mut dirty = self.surface_dirty.borrow_mut();
+            for level in SurfaceLodLevel::ALL {
+                dirty.extend(
+                    surface_tiles_affected_by_column(level, target.x, target.z)
+                        .into_iter()
+                        .filter(|coord| resident.contains(coord) || queue.contains(coord)),
+                );
             }
-            let mut queue = self.far_queue.borrow_mut();
-            queue.retain(|queued| *queued != far_coord);
-            queue.push_front(far_coord);
         }
 
         fn raycast_target(&self, camera: &CameraState) -> Option<VoxelHit> {
@@ -484,10 +573,11 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 20], |engine| {
+            let values = self.engine.as_ref().map_or([0.0; 28], |engine| {
                 let camera = engine.camera.borrow();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let render = engine.renderer.borrow().diagnostics();
+                let lod_tiles = engine.surface_lod_counts();
                 [
                     camera.position.x,
                     camera.position.y,
@@ -507,11 +597,20 @@ mod web {
                     (diagnostics.generation.queued
                         + diagnostics.meshing.queued
                         + diagnostics.upload.queued
-                        + engine.far_queue.borrow().len()) as f32,
-                    engine.far_resident.borrow().len() as f32,
+                        + engine.surface_queue.borrow().len()
+                        + engine.surface_dirty.borrow().len()) as f32,
+                    engine.surface_resident.borrow().len() as f32,
                     engine.frame_milliseconds.get(),
                     render.shadow_draw_calls as f32,
                     render.shadow_cascades as f32,
+                    diagnostics.initial_residency_latency.p95_frames as f32,
+                    diagnostics.initial_residency_latency.max_frames as f32,
+                    diagnostics.remesh_latency.p95_frames as f32,
+                    diagnostics.remesh_latency.max_frames as f32,
+                    lod_tiles[0] as f32,
+                    lod_tiles[1] as f32,
+                    lod_tiles[2] as f32,
+                    lod_tiles[3] as f32,
                 ]
             });
             Float32Array::from(values.as_slice())
@@ -571,10 +670,10 @@ mod web {
         let mut renderer = renderer;
         renderer.set_reduced_motion(reduced_motion);
         let scheduler = StreamScheduler::new(StreamConfig {
-            load_radius_chunks: 3,
+            load_radius_chunks: 5,
             vertical_radius_chunks: 1,
             retention_margin_chunks: 1,
-            max_tracked_chunks: 128,
+            max_tracked_chunks: 320,
         })
         .map_err(|error| JsValue::from_str(&format!("stream configuration: {error:?}")))?;
         let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
@@ -587,9 +686,11 @@ mod web {
             scheduler: RefCell::new(scheduler),
             chunks: RefCell::new(BTreeMap::new()),
             pending_meshes: RefCell::new(BTreeMap::new()),
-            far_focus: Cell::new(None),
-            far_resident: RefCell::new(BTreeSet::new()),
-            far_queue: RefCell::new(VecDeque::new()),
+            surface_focus: Cell::new(None),
+            surface_resident: RefCell::new(BTreeSet::new()),
+            surface_queue: RefCell::new(VecDeque::new()),
+            surface_dirty: RefCell::new(BTreeSet::new()),
+            fine_initialized: Cell::new(false),
             store: RefCell::new(store),
             scope,
             callback: RefCell::new(None),
@@ -623,12 +724,10 @@ mod web {
         )
     }
 
-    fn world_to_far_tile(position: glam::Vec3) -> FarTileCoord {
-        let tile_metres = FAR_TILE_SPAN_VOXELS as f32 * VOXEL_SIZE_METRES;
-        FarTileCoord::new(
-            (position.x / tile_metres).floor() as i32,
-            (position.z / tile_metres).floor() as i32,
-        )
+    fn world_to_surface_tile(position: glam::Vec3, level: SurfaceLodLevel) -> SurfaceTileCoord {
+        let voxel_x = (position.x / VOXEL_SIZE_METRES).floor() as i32;
+        let voxel_z = (position.z / VOXEL_SIZE_METRES).floor() as i32;
+        SurfaceTileCoord::containing(level, voxel_x, voxel_z)
     }
 }
 

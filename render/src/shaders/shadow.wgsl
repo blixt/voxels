@@ -1,6 +1,7 @@
 struct ShadowFrame {
   clip_from_world: mat4x4<f32>,
   camera_voxel: vec4<f32>,
+  lod_options: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> shadow_frame: ShadowFrame;
@@ -50,17 +51,48 @@ fn hash31(position: vec3<f32>) -> f32 {
   return fract(sin(value) * 43758.5453);
 }
 
+fn hash21(position: vec2<f32>) -> f32 {
+  let value = dot(position, vec2<f32>(127.1, 311.7));
+  return fract(sin(value) * 43758.5453);
+}
+
+fn coarser_owns_boundary(distance_xz: f32, cell: vec2<f32>, boundary: u32) -> bool {
+  var start = 8.0;
+  var end = 11.0;
+  var salt = 23.0;
+  switch boundary {
+    case 1u: { start = 21.0; end = 26.0; salt = 37.0; }
+    case 2u: { start = 44.0; end = 52.0; salt = 51.0; }
+    case 3u: { start = 88.0; end = 104.0; salt = 67.0; }
+    default: {}
+  }
+  let blend = smoothstep(start, end, distance_xz);
+  return hash21(cell + vec2<f32>(salt)) < blend;
+}
+
 fn owns_lod_surface(world: vec3<f32>, packed_material: u32) -> bool {
   let far_surface = (packed_material & 0x80000000u) != 0u;
   let material = packed_material & 0xffffu;
-  let distance_xz = distance(world.xz, shadow_frame.camera_voxel.xz);
-  if !far_surface && (material == 8u || material == 9u) && distance_xz > 9.0 {
+  if !far_surface && shadow_frame.lod_options.x < 0.5 && (material == 8u || material == 9u) {
     return false;
   }
-  let blend = smoothstep(8.0, 11.0, distance_xz);
-  let cell = floor(world / shadow_frame.camera_voxel.w);
-  let threshold = hash31(cell + vec3<f32>(23.0));
-  return select(threshold >= blend, threshold < blend, far_surface);
+  if shadow_frame.lod_options.z < 0.5 {
+    return true;
+  }
+  if !far_surface && shadow_frame.lod_options.y < 0.5 {
+    return true;
+  }
+  let distance_xz = distance(world.xz, shadow_frame.camera_voxel.xz);
+  let cell = floor(world.xz / shadow_frame.camera_voxel.w);
+  if !far_surface {
+    return !coarser_owns_boundary(distance_xz, cell, 0u);
+  }
+  let level = (packed_material >> 28u) & 3u;
+  var owns = coarser_owns_boundary(distance_xz, cell, level);
+  if level < 3u {
+    owns = owns && !coarser_owns_boundary(distance_xz, cell, level + 1u);
+  }
+  return owns;
 }
 
 @fragment
