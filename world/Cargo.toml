@@ -15,3 +15,10 @@ name = "voxels_world"
 blake3 = "1"
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "world"
+harness = false

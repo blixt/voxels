@@ -14,6 +14,8 @@ greedy meshing, rendering, and persistence boundary.
 6. Build production WASM and assets with `vp build`; inspect them with `vp preview`.
 
 `vp run verify` runs the complete TypeScript, Rust, test, lint, and production-build gate.
+`vp run bench:world` runs native Criterion baselines for chunk generation, VXCH encode/decode, and
+greedy meshing. Reports are written under the ignored `target/criterion/` directory.
 
 ## Architecture
 
