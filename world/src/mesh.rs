@@ -109,9 +109,9 @@ fn build_occupancy_halo(
     chunk: &Chunk,
     origin: [i32; 3],
     outside: &impl Fn(i32, i32, i32) -> Material,
-) -> Vec<bool> {
+) -> Vec<u8> {
     const HALO_EDGE: usize = CHUNK_EDGE + 2;
-    let mut occupancy = vec![false; HALO_EDGE * HALO_EDGE * HALO_EDGE];
+    let mut occupancy = vec![0; HALO_EDGE * HALO_EDGE * HALO_EDGE];
     for y in -1..=CHUNK_EDGE as i32 {
         for z in -1..=CHUNK_EDGE as i32 {
             for x in -1..=CHUNK_EDGE as i32 {
@@ -126,7 +126,7 @@ fn build_occupancy_halo(
                 let index = (x + 1) as usize
                     + (z + 1) as usize * HALO_EDGE
                     + (y + 1) as usize * HALO_EDGE * HALO_EDGE;
-                occupancy[index] = material.is_solid();
+                occupancy[index] = u8::from(material.is_solid());
             }
         }
     }
@@ -143,7 +143,7 @@ fn face_ao(
     u_axis: usize,
     v_axis: usize,
     step: i32,
-    occupancy: &[bool],
+    occupancy: &[u8],
 ) -> u8 {
     let mut base = local.map(|value| value as i32);
     base[axis] += step;
@@ -172,12 +172,12 @@ fn face_ao(
     packed
 }
 
-fn halo_solid(occupancy: &[bool], local: [i32; 3]) -> bool {
+fn halo_solid(occupancy: &[u8], local: [i32; 3]) -> bool {
     const HALO_EDGE: usize = CHUNK_EDGE + 2;
     let index = (local[0] + 1) as usize
         + (local[2] + 1) as usize * HALO_EDGE
         + (local[1] + 1) as usize * HALO_EDGE * HALO_EDGE;
-    occupancy[index]
+    occupancy[index] != 0
 }
 
 fn face_axes(face: u8) -> (usize, usize, usize, i32) {
