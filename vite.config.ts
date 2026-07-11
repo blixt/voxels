@@ -42,17 +42,9 @@ function rustWasm(release: boolean): Plugin {
 export default defineConfig(({ command, mode }) => ({
   plugins: mode === "test" ? [] : [rustWasm(command === "build")],
   fmt: {
-    ignorePatterns: [
-      "src/**",
-      "public/**",
-      "docs/20260311-*.md",
-      "docs/loop/**",
-      "autoresearch*.md",
-      "web/generated/**",
-    ],
+    ignorePatterns: ["docs/20260311-*.md", "docs/loop/**", "web/generated/**"],
   },
   lint: {
-    ignorePatterns: ["src/**", "public/**"],
     jsPlugins: [{ name: "vite-plus", specifier: "vite-plus/oxlint-plugin" }],
     rules: { "vite-plus/prefer-vite-plus-imports": "error" },
     options: { typeAware: true, typeCheck: true },
