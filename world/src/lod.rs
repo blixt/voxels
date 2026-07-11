@@ -1,9 +1,95 @@
-use crate::mesh::{FACE_NEG_X, FACE_NEG_Z, FACE_POS_X, FACE_POS_Y, FACE_POS_Z};
+use crate::mesh::{FACE_NEG_X, FACE_NEG_Y, FACE_NEG_Z, FACE_POS_X, FACE_POS_Y, FACE_POS_Z};
 use crate::{Generator, Material};
 
-pub const FAR_STRIDE_VOXELS: i32 = 8;
-pub const FAR_TILE_EDGE_CELLS: i32 = 32;
-pub const FAR_TILE_SPAN_VOXELS: i32 = FAR_STRIDE_VOXELS * FAR_TILE_EDGE_CELLS;
+/// Every surface LOD tile contains the same number of cells. Increasing the level therefore
+/// increases world coverage without increasing generation or upload work per tile.
+pub const SURFACE_TILE_EDGE_CELLS: i32 = 32;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub enum SurfaceLodLevel {
+    Stride2 = 0,
+    Stride4 = 1,
+    Stride8 = 2,
+    Stride16 = 3,
+}
+
+impl SurfaceLodLevel {
+    pub const ALL: [Self; 4] = [Self::Stride2, Self::Stride4, Self::Stride8, Self::Stride16];
+
+    pub const fn index(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn stride_voxels(self) -> i32 {
+        match self {
+            Self::Stride2 => 2,
+            Self::Stride4 => 4,
+            Self::Stride8 => 8,
+            Self::Stride16 => 16,
+        }
+    }
+
+    pub const fn tile_span_voxels(self) -> i32 {
+        self.stride_voxels() * SURFACE_TILE_EDGE_CELLS
+    }
+
+    pub const fn from_stride_voxels(stride: i32) -> Option<Self> {
+        match stride {
+            2 => Some(Self::Stride2),
+            4 => Some(Self::Stride4),
+            8 => Some(Self::Stride8),
+            16 => Some(Self::Stride16),
+            _ => None,
+        }
+    }
+}
+
+/// A stable streamed-tile key. The LOD level is part of the identity even when two tiles share
+/// the same integer X/Z coordinates.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SurfaceTileCoord {
+    pub level: SurfaceLodLevel,
+    pub x: i32,
+    pub z: i32,
+}
+
+impl SurfaceTileCoord {
+    pub const fn new(level: SurfaceLodLevel, x: i32, z: i32) -> Self {
+        Self { level, x, z }
+    }
+
+    pub fn containing(level: SurfaceLodLevel, voxel_x: i32, voxel_z: i32) -> Self {
+        let span = level.tile_span_voxels();
+        Self::new(level, voxel_x.div_euclid(span), voxel_z.div_euclid(span))
+    }
+
+    pub const fn stride_voxels(self) -> i32 {
+        self.level.stride_voxels()
+    }
+
+    pub const fn voxel_span(self) -> i32 {
+        self.level.tile_span_voxels()
+    }
+
+    pub const fn voxel_origin(self) -> [i32; 2] {
+        let span = self.voxel_span();
+        [self.x * span, self.z * span]
+    }
+
+    /// Horizontal half-open bounds in canonical 10 cm voxel coordinates.
+    pub const fn voxel_bounds_xz(self) -> [[i32; 2]; 2] {
+        let origin = self.voxel_origin();
+        let span = self.voxel_span();
+        [origin, [origin[0] + span, origin[1] + span]]
+    }
+}
+
+/// The original far renderer used the stride-8 member of the generalized LOD family. Keep this
+/// small wrapper while shell and renderer migrate to level-aware keys.
+pub const FAR_STRIDE_VOXELS: i32 = SurfaceLodLevel::Stride8.stride_voxels();
+pub const FAR_TILE_EDGE_CELLS: i32 = SURFACE_TILE_EDGE_CELLS;
+pub const FAR_TILE_SPAN_VOXELS: i32 = SurfaceLodLevel::Stride8.tile_span_voxels();
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FarTileCoord {
@@ -19,6 +105,28 @@ impl FarTileCoord {
     pub const fn voxel_origin(self) -> [i32; 2] {
         [self.x * FAR_TILE_SPAN_VOXELS, self.z * FAR_TILE_SPAN_VOXELS]
     }
+
+    pub const fn surface_coord(self) -> SurfaceTileCoord {
+        SurfaceTileCoord::new(SurfaceLodLevel::Stride8, self.x, self.z)
+    }
+}
+
+impl From<FarTileCoord> for SurfaceTileCoord {
+    fn from(coord: FarTileCoord) -> Self {
+        coord.surface_coord()
+    }
+}
+
+impl TryFrom<SurfaceTileCoord> for FarTileCoord {
+    type Error = SurfaceLodLevel;
+
+    fn try_from(coord: SurfaceTileCoord) -> Result<Self, Self::Error> {
+        if coord.level == SurfaceLodLevel::Stride8 {
+            Ok(Self::new(coord.x, coord.z))
+        } else {
+            Err(coord.level)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,33 +137,122 @@ pub struct SurfaceQuad {
     pub material: Material,
 }
 
-/// Builds a closed, surface-preserving coarse shell. Adjacent tile samples use the same global cell
-/// centers, and vertical transition quads close every height discontinuity, so independently streamed
-/// tiles cannot expose cracks.
-pub fn generate_far_tile(generator: Generator, coord: FarTileCoord) -> Vec<SurfaceQuad> {
-    generate_far_tile_with(coord, |x, z| {
+/// Conservative half-open voxel bounds derived from actual surface geometry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SurfaceBounds {
+    pub min: [i32; 3],
+    pub max: [i32; 3],
+}
+
+impl SurfaceBounds {
+    pub fn from_quads(quads: &[SurfaceQuad]) -> Option<Self> {
+        let first = quads.first()?;
+        let (mut min, mut max) = quad_voxel_bounds(*first);
+        for quad in &quads[1..] {
+            let (quad_min, quad_max) = quad_voxel_bounds(*quad);
+            for axis in 0..3 {
+                min[axis] = min[axis].min(quad_min[axis]);
+                max[axis] = max[axis].max(quad_max[axis]);
+            }
+        }
+        Some(Self { min, max })
+    }
+}
+
+fn quad_voxel_bounds(quad: SurfaceQuad) -> ([i32; 3], [i32; 3]) {
+    let mut max = quad.origin.map(|value| value.saturating_add(1));
+    let extent = [i32::from(quad.extent[0]), i32::from(quad.extent[1])];
+    match quad.face {
+        FACE_POS_X | FACE_NEG_X => {
+            max[1] = quad.origin[1].saturating_add(extent[1]);
+            max[2] = quad.origin[2].saturating_add(extent[0]);
+        }
+        FACE_POS_Y | FACE_NEG_Y => {
+            max[0] = quad.origin[0].saturating_add(extent[0]);
+            max[2] = quad.origin[2].saturating_add(extent[1]);
+        }
+        FACE_POS_Z | FACE_NEG_Z => {
+            max[0] = quad.origin[0].saturating_add(extent[0]);
+            max[1] = quad.origin[1].saturating_add(extent[1]);
+        }
+        _ => {}
+    }
+    (quad.origin, max)
+}
+
+/// Returns all tiles at `level` whose surface or cardinal transition shell can depend on a
+/// canonical column. The owning tile is always first. A cardinal neighbor is included when the
+/// column lies in the one-cell boundary band sampled by that neighbor.
+pub fn surface_tiles_affected_by_column(
+    level: SurfaceLodLevel,
+    voxel_x: i32,
+    voxel_z: i32,
+) -> Vec<SurfaceTileCoord> {
+    let owner = SurfaceTileCoord::containing(level, voxel_x, voxel_z);
+    let [origin_x, origin_z] = owner.voxel_origin();
+    let local_x = voxel_x - origin_x;
+    let local_z = voxel_z - origin_z;
+    let stride = level.stride_voxels();
+    let span = level.tile_span_voxels();
+    let mut affected = Vec::with_capacity(3);
+    affected.push(owner);
+    if local_x < stride {
+        affected.push(SurfaceTileCoord::new(level, owner.x - 1, owner.z));
+    }
+    if local_x >= span - stride {
+        affected.push(SurfaceTileCoord::new(level, owner.x + 1, owner.z));
+    }
+    if local_z < stride {
+        affected.push(SurfaceTileCoord::new(level, owner.x, owner.z - 1));
+    }
+    if local_z >= span - stride {
+        affected.push(SurfaceTileCoord::new(level, owner.x, owner.z + 1));
+    }
+    affected
+}
+
+/// Builds a deterministic, surface-preserving coarse shell. Adjacent tiles sample the same global
+/// cell centers, and vertical transition quads close every height discontinuity, so independently
+/// streamed tiles cannot expose holes.
+pub fn generate_surface_tile(generator: Generator, coord: SurfaceTileCoord) -> Vec<SurfaceQuad> {
+    generate_surface_tile_with(coord, |x, z| {
         let height = generator.surface_height(x, z);
         (height, generator.sample(x, height, z))
     })
 }
 
-pub fn generate_far_tile_with(
-    coord: FarTileCoord,
+pub fn generate_surface_tile_with(
+    coord: SurfaceTileCoord,
     surface: impl Fn(i32, i32) -> (i32, Material),
 ) -> Vec<SurfaceQuad> {
     let [origin_x, origin_z] = coord.voxel_origin();
-    let mut quads = Vec::with_capacity((FAR_TILE_EDGE_CELLS * FAR_TILE_EDGE_CELLS * 3) as usize);
-    for cell_z in 0..FAR_TILE_EDGE_CELLS {
-        for cell_x in 0..FAR_TILE_EDGE_CELLS {
-            let x = origin_x + cell_x * FAR_STRIDE_VOXELS;
-            let z = origin_z + cell_z * FAR_STRIDE_VOXELS;
-            let center_x = x + FAR_STRIDE_VOXELS / 2;
-            let center_z = z + FAR_STRIDE_VOXELS / 2;
-            let (height, material) = surface(center_x, center_z);
+    let stride = coord.stride_voxels();
+    let edge = SURFACE_TILE_EDGE_CELLS;
+    let sample_edge = edge + 2;
+    let mut samples = Vec::with_capacity((sample_edge * sample_edge) as usize);
+    for sample_z in -1..=edge {
+        for sample_x in -1..=edge {
+            samples.push(surface(
+                origin_x + sample_x * stride + stride / 2,
+                origin_z + sample_z * stride + stride / 2,
+            ));
+        }
+    }
+    let sample = |cell_x: i32, cell_z: i32| {
+        let index = (cell_x + 1) + (cell_z + 1) * sample_edge;
+        samples[index as usize]
+    };
+
+    let mut quads = Vec::with_capacity((edge * edge * 3) as usize);
+    for cell_z in 0..edge {
+        for cell_x in 0..edge {
+            let x = origin_x + cell_x * stride;
+            let z = origin_z + cell_z * stride;
+            let (height, material) = sample(cell_x, cell_z);
             quads.push(SurfaceQuad {
                 origin: [x, height, z],
                 face: FACE_POS_Y,
-                extent: [FAR_STRIDE_VOXELS as u16; 2],
+                extent: [stride as u16; 2],
                 material,
             });
 
@@ -66,23 +263,20 @@ pub fn generate_far_tile_with(
                 (0, 1, FACE_POS_Z),
             ];
             for (dx, dz, face) in neighbors {
-                let (neighbor_height, _) = surface(
-                    center_x + dx * FAR_STRIDE_VOXELS,
-                    center_z + dz * FAR_STRIDE_VOXELS,
-                );
+                let (neighbor_height, _) = sample(cell_x + dx, cell_z + dz);
                 if height <= neighbor_height {
                     continue;
                 }
                 let side_origin = match face {
-                    FACE_POS_X => [x + FAR_STRIDE_VOXELS - 1, neighbor_height + 1, z],
+                    FACE_POS_X => [x + stride - 1, neighbor_height + 1, z],
                     FACE_NEG_X => [x, neighbor_height + 1, z],
-                    FACE_POS_Z => [x, neighbor_height + 1, z + FAR_STRIDE_VOXELS - 1],
+                    FACE_POS_Z => [x, neighbor_height + 1, z + stride - 1],
                     _ => [x, neighbor_height + 1, z],
                 };
                 quads.push(SurfaceQuad {
                     origin: side_origin,
                     face,
-                    extent: [FAR_STRIDE_VOXELS as u16, (height - neighbor_height) as u16],
+                    extent: [stride as u16, (height - neighbor_height) as u16],
                     material,
                 });
             }
@@ -91,42 +285,172 @@ pub fn generate_far_tile_with(
     quads
 }
 
+pub fn generate_far_tile(generator: Generator, coord: FarTileCoord) -> Vec<SurfaceQuad> {
+    generate_surface_tile(generator, coord.surface_coord())
+}
+
+pub fn generate_far_tile_with(
+    coord: FarTileCoord,
+    surface: impl Fn(i32, i32) -> (i32, Material),
+) -> Vec<SurfaceQuad> {
+    generate_surface_tile_with(coord.surface_coord(), surface)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
-    fn far_tiles_cover_exactly_their_canonical_span() {
-        assert_eq!(FarTileCoord::new(-1, 2).voxel_origin(), [-256, 512]);
-        let tile = generate_far_tile(Generator::new(7), FarTileCoord::new(0, 0));
+    fn levels_have_explicit_power_of_two_strides_and_spans() {
+        let strides: Vec<_> = SurfaceLodLevel::ALL
+            .into_iter()
+            .map(SurfaceLodLevel::stride_voxels)
+            .collect();
+        let spans: Vec<_> = SurfaceLodLevel::ALL
+            .into_iter()
+            .map(SurfaceLodLevel::tile_span_voxels)
+            .collect();
+        assert_eq!(strides, [2, 4, 8, 16]);
+        assert_eq!(spans, [64, 128, 256, 512]);
         assert_eq!(
-            tile.iter().filter(|quad| quad.face == FACE_POS_Y).count(),
-            (FAR_TILE_EDGE_CELLS * FAR_TILE_EDGE_CELLS) as usize
+            SurfaceLodLevel::from_stride_voxels(8),
+            Some(SurfaceLodLevel::Stride8)
+        );
+        assert_eq!(SurfaceLodLevel::from_stride_voxels(3), None);
+    }
+
+    #[test]
+    fn level_is_part_of_tile_identity() {
+        let tiles = SurfaceLodLevel::ALL
+            .map(|level| SurfaceTileCoord::new(level, 3, -2))
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(tiles.len(), SurfaceLodLevel::ALL.len());
+        assert_eq!(tiles.first().unwrap().voxel_origin(), [192, -128]);
+        assert_eq!(tiles.last().unwrap().voxel_origin(), [1536, -1024]);
+    }
+
+    #[test]
+    fn tile_coordinates_use_euclidean_negative_boundaries() {
+        let level = SurfaceLodLevel::Stride4;
+        assert_eq!(
+            SurfaceTileCoord::containing(level, -1, -129),
+            SurfaceTileCoord::new(level, -1, -2)
+        );
+        assert_eq!(
+            SurfaceTileCoord::containing(level, -128, 127),
+            SurfaceTileCoord::new(level, -1, 0)
+        );
+        assert_eq!(
+            SurfaceTileCoord::new(level, -1, 2).voxel_bounds_xz(),
+            [[-128, 256], [0, 384]]
         );
     }
 
     #[test]
-    fn independently_generated_neighbors_share_boundary_heights() {
-        let generator = Generator::new(0x5eed);
-        let left = generate_far_tile(generator, FarTileCoord::new(0, 0));
-        let right = generate_far_tile(generator, FarTileCoord::new(1, 0));
-        let left_edge = left.iter().filter(|quad| {
-            quad.face == FACE_POS_Y && quad.origin[0] == FAR_TILE_SPAN_VOXELS - FAR_STRIDE_VOXELS
-        });
-        let right_edge: Vec<_> = right
-            .iter()
-            .filter(|quad| quad.face == FACE_POS_Y && quad.origin[0] == FAR_TILE_SPAN_VOXELS)
-            .collect();
-        for (index, quad) in left_edge.enumerate() {
-            let adjacent_height = generator.surface_height(
-                FAR_TILE_SPAN_VOXELS + FAR_STRIDE_VOXELS / 2,
-                index as i32 * FAR_STRIDE_VOXELS + FAR_STRIDE_VOXELS / 2,
-            );
-            assert_eq!(right_edge[index].origin[1], adjacent_height);
+    fn affected_tiles_include_cardinal_boundary_readers() {
+        let level = SurfaceLodLevel::Stride8;
+        assert_eq!(
+            surface_tiles_affected_by_column(level, -1, -1),
+            [
+                SurfaceTileCoord::new(level, -1, -1),
+                SurfaceTileCoord::new(level, 0, -1),
+                SurfaceTileCoord::new(level, -1, 0),
+            ]
+        );
+        assert_eq!(
+            surface_tiles_affected_by_column(level, -256, -256),
+            [
+                SurfaceTileCoord::new(level, -1, -1),
+                SurfaceTileCoord::new(level, -2, -1),
+                SurfaceTileCoord::new(level, -1, -2),
+            ]
+        );
+        assert_eq!(
+            surface_tiles_affected_by_column(level, -128, -128),
+            [SurfaceTileCoord::new(level, -1, -1)]
+        );
+    }
+
+    #[test]
+    fn every_level_covers_exactly_its_canonical_span() {
+        for level in SurfaceLodLevel::ALL {
+            let coord = SurfaceTileCoord::new(level, -1, 2);
+            let tile = generate_surface_tile_with(coord, |x, z| {
+                (x.div_euclid(31) + z.div_euclid(47), Material::Stone)
+            });
             assert_eq!(
-                quad.origin[0] + FAR_STRIDE_VOXELS,
-                right_edge[index].origin[0]
+                tile.iter().filter(|quad| quad.face == FACE_POS_Y).count(),
+                (SURFACE_TILE_EDGE_CELLS * SURFACE_TILE_EDGE_CELLS) as usize
             );
+            let bounds = SurfaceBounds::from_quads(&tile).unwrap();
+            let [origin_x, origin_z] = coord.voxel_origin();
+            assert_eq!(bounds.min[0], origin_x);
+            assert_eq!(bounds.max[0], origin_x + coord.voxel_span());
+            assert_eq!(bounds.min[2], origin_z);
+            assert_eq!(bounds.max[2], origin_z + coord.voxel_span());
         }
+    }
+
+    #[test]
+    fn independently_generated_neighbors_share_every_boundary() {
+        for level in SurfaceLodLevel::ALL {
+            let stride = level.stride_voxels();
+            let span = level.tile_span_voxels();
+            let surface = |x: i32, z: i32| (x.div_euclid(17) - z.div_euclid(29), Material::Grass);
+            let left = generate_surface_tile_with(SurfaceTileCoord::new(level, 0, 0), surface);
+            let right = generate_surface_tile_with(SurfaceTileCoord::new(level, 1, 0), surface);
+            let forward = generate_surface_tile_with(SurfaceTileCoord::new(level, 0, 1), surface);
+            let left_edge: Vec<_> = left
+                .iter()
+                .filter(|quad| quad.face == FACE_POS_Y && quad.origin[0] == span - stride)
+                .collect();
+            let right_edge: Vec<_> = right
+                .iter()
+                .filter(|quad| quad.face == FACE_POS_Y && quad.origin[0] == span)
+                .collect();
+            assert_eq!(left_edge.len(), SURFACE_TILE_EDGE_CELLS as usize);
+            assert_eq!(right_edge.len(), SURFACE_TILE_EDGE_CELLS as usize);
+            for (index, (left_quad, right_quad)) in left_edge.iter().zip(&right_edge).enumerate() {
+                let z = index as i32 * stride + stride / 2;
+                assert_eq!(left_quad.origin[1], surface(span - stride / 2, z).0);
+                assert_eq!(right_quad.origin[1], surface(span + stride / 2, z).0);
+                assert_eq!(left_quad.origin[0] + stride, right_quad.origin[0]);
+            }
+
+            let back_edge: Vec<_> = left
+                .iter()
+                .filter(|quad| quad.face == FACE_POS_Y && quad.origin[2] == span - stride)
+                .collect();
+            let forward_edge: Vec<_> = forward
+                .iter()
+                .filter(|quad| quad.face == FACE_POS_Y && quad.origin[2] == span)
+                .collect();
+            assert_eq!(back_edge.len(), SURFACE_TILE_EDGE_CELLS as usize);
+            assert_eq!(forward_edge.len(), SURFACE_TILE_EDGE_CELLS as usize);
+            for (index, (back_quad, forward_quad)) in
+                back_edge.iter().zip(&forward_edge).enumerate()
+            {
+                let x = index as i32 * stride + stride / 2;
+                assert_eq!(back_quad.origin[1], surface(x, span - stride / 2).0);
+                assert_eq!(forward_quad.origin[1], surface(x, span + stride / 2).0);
+                assert_eq!(back_quad.origin[2] + stride, forward_quad.origin[2]);
+            }
+        }
+    }
+
+    #[test]
+    fn far_api_remains_the_stride_eight_level() {
+        let far = FarTileCoord::new(-1, 2);
+        assert_eq!(far.voxel_origin(), [-256, 512]);
+        assert_eq!(
+            SurfaceTileCoord::from(far),
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride8, -1, 2)
+        );
+        assert_eq!(
+            generate_far_tile(Generator::new(7), far),
+            generate_surface_tile(Generator::new(7), far.surface_coord())
+        );
     }
 }

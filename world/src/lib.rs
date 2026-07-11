@@ -12,8 +12,10 @@ pub use chunk::{CHUNK_EDGE, CHUNK_VOLUME, Chunk, ChunkCoord};
 pub use edit::{EditMap, VoxelCoord};
 pub use generation::Generator;
 pub use lod::{
-    FAR_STRIDE_VOXELS, FAR_TILE_EDGE_CELLS, FAR_TILE_SPAN_VOXELS, FarTileCoord, SurfaceQuad,
-    generate_far_tile, generate_far_tile_with,
+    FAR_STRIDE_VOXELS, FAR_TILE_EDGE_CELLS, FAR_TILE_SPAN_VOXELS, FarTileCoord,
+    SURFACE_TILE_EDGE_CELLS, SurfaceBounds, SurfaceLodLevel, SurfaceQuad, SurfaceTileCoord,
+    generate_far_tile, generate_far_tile_with, generate_surface_tile, generate_surface_tile_with,
+    surface_tiles_affected_by_column,
 };
 pub use material::Material;
 pub use mesh::{Quad, mesh_chunk};
