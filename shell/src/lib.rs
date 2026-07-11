@@ -11,7 +11,7 @@ mod web {
     use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::rc::Rc;
-    use voxels_core::{CameraState, InputState, raycast_voxels};
+    use voxels_core::{CameraState, InputState, VoxelHit, raycast_voxels};
     use voxels_render::renderer::Renderer;
     use voxels_runtime::{FrameBudget, StreamConfig, StreamScheduler};
     use voxels_world::{
@@ -142,7 +142,11 @@ mod web {
             self.simulation_accumulator.set(accumulator);
             drop(edits);
             self.stream_world(&camera);
-            self.renderer.borrow_mut().render(dt, &camera);
+            let target = self.raycast_target(&camera).map(|hit| hit.voxel);
+            let mut renderer = self.renderer.borrow_mut();
+            renderer.set_target_voxel(target);
+            renderer.render(dt, &camera);
+            drop(renderer);
             if time - self.last_persist.get() >= 1_000.0 {
                 if let Err(error) = self.store.borrow().save_camera(&camera) {
                     web_sys::console::error_1(&error);
@@ -323,20 +327,7 @@ mod web {
 
         fn edit_target(&self, buttons: u16) {
             let camera = *self.camera.borrow();
-            let hit = {
-                let edits = self.edits.borrow();
-                raycast_voxels(
-                    camera.position,
-                    camera.forward(),
-                    5.0,
-                    VOXEL_SIZE_METRES,
-                    |x, y, z| {
-                        edits
-                            .sample(self.generator, VoxelCoord::new(x, y, z))
-                            .is_solid()
-                    },
-                )
-            };
+            let hit = self.raycast_target(&camera);
             let Some(hit) = hit else {
                 return;
             };
@@ -383,6 +374,21 @@ mod web {
             let mut queue = self.far_queue.borrow_mut();
             queue.retain(|queued| *queued != far_coord);
             queue.push_front(far_coord);
+        }
+
+        fn raycast_target(&self, camera: &CameraState) -> Option<VoxelHit> {
+            let edits = self.edits.borrow();
+            raycast_voxels(
+                camera.position,
+                camera.forward(),
+                5.0,
+                VOXEL_SIZE_METRES,
+                |x, y, z| {
+                    edits
+                        .sample(self.generator, VoxelCoord::new(x, y, z))
+                        .is_solid()
+                },
+            )
         }
     }
 

@@ -3,6 +3,7 @@ struct Frame {
   inverse_view_projection: mat4x4<f32>,
   camera_time: vec4<f32>,
   viewport_voxel: vec4<f32>,
+  target_voxel: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -115,6 +116,18 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let fine_grain = mix(0.96, 1.04, hash31(floor(input.world * 28.0)));
   let ambient_occlusion = mix(0.52, 1.0, input.ao);
   var color = material_color(material) * light * grain * fine_grain * ambient_occlusion;
+  let inside_position = input.world - input.normal * frame.viewport_voxel.z * 0.02;
+  let voxel = floor(inside_position / frame.viewport_voxel.z);
+  let targeted = frame.target_voxel.w > 0.5 && all(abs(voxel - frame.target_voxel.xyz) < vec3<f32>(0.1));
+  if targeted {
+    let coordinate = fract(input.world / frame.viewport_voxel.z + vec3<f32>(0.0001));
+    var edge = 1.0;
+    if abs(input.normal.x) < 0.5 { edge = min(edge, min(coordinate.x, 1.0 - coordinate.x)); }
+    if abs(input.normal.y) < 0.5 { edge = min(edge, min(coordinate.y, 1.0 - coordinate.y)); }
+    if abs(input.normal.z) < 0.5 { edge = min(edge, min(coordinate.z, 1.0 - coordinate.z)); }
+    let outline = 1.0 - smoothstep(0.045, 0.085, edge);
+    color = mix(color, vec3<f32>(0.95, 0.86, 0.48), outline * 0.88);
+  }
   let distance_to_camera = distance(input.world, frame.camera_time.xyz);
   let distance_fog = smoothstep(frame.viewport_voxel.w * 0.58, frame.viewport_voxel.w, distance_to_camera);
   let height_fog = exp(-max(input.world.y, 0.0) * 0.16) * smoothstep(2.5, frame.viewport_voxel.w, distance_to_camera) * 0.18;

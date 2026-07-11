@@ -27,6 +27,7 @@ struct FrameUniform {
     inverse_view_projection: [[f32; 4]; 4],
     camera_time: [f32; 4],
     viewport_voxel: [f32; 4],
+    target_voxel: [f32; 4],
 }
 
 #[repr(C)]
@@ -74,6 +75,7 @@ pub struct Renderer {
     depth_view: TextureView,
     time: f32,
     diagnostics: RenderDiagnostics,
+    target_voxel: Option<[i32; 3]>,
 }
 
 impl Renderer {
@@ -125,7 +127,7 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        let frame = frame_uniform(&config, &CameraState::default(), 0.0);
+        let frame = frame_uniform(&config, &CameraState::default(), 0.0, None);
         let frame_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("frame uniform"),
             contents: bytemuck::bytes_of(&frame),
@@ -207,6 +209,7 @@ impl Renderer {
             depth_view,
             time: 0.0,
             diagnostics: RenderDiagnostics::default(),
+            target_voxel: None,
         })
     }
 
@@ -226,6 +229,10 @@ impl Renderer {
 
     pub const fn diagnostics(&self) -> RenderDiagnostics {
         self.diagnostics
+    }
+
+    pub const fn set_target_voxel(&mut self, target: Option<[i32; 3]>) {
+        self.target_voxel = target;
     }
 
     pub fn upload_chunk(&mut self, coord: ChunkCoord, quads: &[Quad]) -> bool {
@@ -355,7 +362,7 @@ impl Renderer {
 
     pub fn render(&mut self, dt: f32, camera: &CameraState) {
         self.time += dt.min(0.1);
-        let uniform = frame_uniform(&self.config, camera, self.time);
+        let uniform = frame_uniform(&self.config, camera, self.time, self.target_voxel);
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -437,7 +444,12 @@ impl Renderer {
     }
 }
 
-fn frame_uniform(config: &SurfaceConfiguration, camera: &CameraState, time: f32) -> FrameUniform {
+fn frame_uniform(
+    config: &SurfaceConfiguration,
+    camera: &CameraState,
+    time: f32,
+    target: Option<[i32; 3]>,
+) -> FrameUniform {
     let view_projection = view_projection(config, camera);
     FrameUniform {
         view_projection: view_projection.to_cols_array_2d(),
@@ -454,6 +466,9 @@ fn frame_uniform(config: &SurfaceConfiguration, camera: &CameraState, time: f32)
             VOXEL_SIZE_METRES,
             VIEW_DISTANCE_METRES,
         ],
+        target_voxel: target.map_or([0.0; 4], |value| {
+            [value[0] as f32, value[1] as f32, value[2] as f32, 1.0]
+        }),
     }
 }
 
