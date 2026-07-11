@@ -1,5 +1,6 @@
 struct Frame {
   view_projection: mat4x4<f32>,
+  inverse_view_projection: mat4x4<f32>,
   camera_time: vec4<f32>,
   viewport_voxel: vec4<f32>,
 };
@@ -52,29 +53,41 @@ fn vs_main(
 
 fn material_color(material: u32) -> vec3<f32> {
   switch material {
-    case 1u: { return vec3<f32>(0.32, 0.56, 0.22); }
-    case 2u: { return vec3<f32>(0.38, 0.25, 0.14); }
-    case 3u: { return vec3<f32>(0.42, 0.45, 0.48); }
-    case 4u: { return vec3<f32>(0.74, 0.64, 0.38); }
-    case 5u: { return vec3<f32>(0.84, 0.91, 0.94); }
-    case 6u: { return vec3<f32>(0.57, 0.32, 0.22); }
-    case 7u: { return vec3<f32>(0.20, 0.23, 0.27); }
-    case 8u: { return vec3<f32>(0.36, 0.22, 0.10); }
-    case 9u: { return vec3<f32>(0.20, 0.46, 0.20); }
+    case 1u: { return vec3<f32>(0.22, 0.52, 0.13); }
+    case 2u: { return vec3<f32>(0.36, 0.20, 0.095); }
+    case 3u: { return vec3<f32>(0.34, 0.38, 0.43); }
+    case 4u: { return vec3<f32>(0.72, 0.53, 0.25); }
+    case 5u: { return vec3<f32>(0.76, 0.86, 0.91); }
+    case 6u: { return vec3<f32>(0.56, 0.25, 0.15); }
+    case 7u: { return vec3<f32>(0.12, 0.15, 0.20); }
+    case 8u: { return vec3<f32>(0.31, 0.15, 0.055); }
+    case 9u: { return vec3<f32>(0.10, 0.40, 0.13); }
     default: { return vec3<f32>(1.0, 0.0, 1.0); }
   }
 }
 
+fn hash31(position: vec3<f32>) -> f32 {
+  let value = dot(position, vec3<f32>(127.1, 311.7, 74.7));
+  return fract(sin(value) * 43758.5453);
+}
+
 @fragment
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
-  let sun = normalize(vec3<f32>(0.55, 0.82, 0.28));
+  let sun = normalize(vec3<f32>(0.48, 0.72, 0.35));
   let diffuse = max(dot(input.normal, sun), 0.0);
-  let up = input.normal.y * 0.08;
-  let light = 0.38 + diffuse * 0.62 + up;
-  var color = material_color(input.material) * light;
+  let sky_visibility = input.normal.y * 0.5 + 0.5;
+  let bounce = max(-input.normal.y, 0.0) * 0.08;
+  let light = 0.46 + sky_visibility * 0.22 + diffuse * 0.48 + bounce;
+  let cell = floor(input.world / frame.viewport_voxel.z);
+  let grain = mix(0.88, 1.12, hash31(cell + vec3<f32>(f32(input.material) * 3.1)));
+  let fine_grain = mix(0.96, 1.04, hash31(floor(input.world * 28.0)));
+  var color = material_color(input.material) * light * grain * fine_grain;
   let distance_to_camera = distance(input.world, frame.camera_time.xyz);
-  let fog = smoothstep(frame.viewport_voxel.w * 0.62, frame.viewport_voxel.w, distance_to_camera);
-  let fog_color = vec3<f32>(0.24, 0.39, 0.55);
+  let distance_fog = smoothstep(frame.viewport_voxel.w * 0.58, frame.viewport_voxel.w, distance_to_camera);
+  let height_fog = exp(-max(input.world.y, 0.0) * 0.16) * smoothstep(2.5, frame.viewport_voxel.w, distance_to_camera) * 0.18;
+  let fog = clamp(distance_fog + height_fog, 0.0, 1.0);
+  let fog_color = vec3<f32>(0.49, 0.62, 0.72);
   color = mix(color, fog_color, fog);
-  return vec4<f32>(color, 1.0);
+  let mapped = color / (color + vec3<f32>(0.72));
+  return vec4<f32>(max(mapped, vec3<f32>(0.0)), 1.0);
 }

@@ -16,6 +16,7 @@ const WORLD_RADIUS_CHUNKS: i32 = 3;
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct FrameUniform {
     view_projection: [[f32; 4]; 4],
+    inverse_view_projection: [[f32; 4]; 4],
     camera_time: [f32; 4],
     viewport_voxel: [f32; 4],
 }
@@ -328,8 +329,10 @@ fn frame_uniform(config: &SurfaceConfiguration, camera: &CameraState, time: f32)
         glam::camera::rh::proj::directx::perspective(68.0f32.to_radians(), aspect, 0.01, 80.0);
     let view =
         glam::camera::rh::view::look_to_mat4(camera.position, camera.forward(), glam::Vec3::Y);
+    let view_projection = projection * view;
     FrameUniform {
-        view_projection: (projection * view).to_cols_array_2d(),
+        view_projection: view_projection.to_cols_array_2d(),
+        inverse_view_projection: view_projection.inverse().to_cols_array_2d(),
         camera_time: [
             camera.position.x,
             camera.position.y,
