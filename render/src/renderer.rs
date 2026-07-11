@@ -70,6 +70,29 @@ struct ChunkMesh {
     bounds_max: glam::Vec3,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DrawItem {
+    page: u16,
+    offset: u32,
+    size: u32,
+    quad_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DrawSpan {
+    page: u16,
+    offset: u32,
+    size: u32,
+    quad_count: u32,
+}
+
+#[derive(Debug, Default)]
+struct DrawList {
+    spans: Vec<DrawSpan>,
+    mesh_count: u32,
+    quad_count: u32,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RenderDiagnostics {
     pub resident_chunks: u32,
@@ -449,7 +472,7 @@ impl Renderer {
             frame_buffer,
             frame_bind_group,
             chunks: BTreeMap::new(),
-            arena: ArenaAllocator::new(ARENA_PAGE_BYTES, 4),
+            arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
             arena_buffers: Vec::new(),
             depth_view,
             time: 0.0,
@@ -719,6 +742,24 @@ impl Renderer {
             &shadow_cascades,
         );
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
+        let shadow_draw_lists: [DrawList; CASCADE_COUNT] = if self.options.shadows {
+            std::array::from_fn(|cascade_index| {
+                self.collect_draw_list(|key, chunk| {
+                    (key.0 == 0 || self.options.far_terrain)
+                        && aabb_visible_in_cascade(
+                            &shadow_cascades.cascades[cascade_index],
+                            chunk.bounds_min,
+                            chunk.bounds_max,
+                        )
+                })
+            })
+        } else {
+            std::array::from_fn(|_| DrawList::default())
+        };
+        let world_draw_list = self.collect_draw_list(|key, chunk| {
+            (key.0 == 0 || self.options.far_terrain)
+                && aabb_visible(chunk.bounds_min, chunk.bounds_max, view_projection)
+        });
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
         self.shadow_gpu
@@ -743,7 +784,7 @@ impl Renderer {
             });
         let mut shadow_draw_calls = 0;
         if self.options.shadows {
-            for (cascade_index, cascade) in shadow_cascades.cascades.iter().enumerate() {
+            for (cascade_index, draw_list) in shadow_draw_lists.iter().enumerate() {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("sun shadow cascade pass"),
                     color_attachments: &[],
@@ -761,21 +802,14 @@ impl Renderer {
                 });
                 pass.set_pipeline(&self.shadow_gpu.pipeline);
                 pass.set_bind_group(0, &self.shadow_gpu.bind_groups[cascade_index], &[]);
-                for (key, chunk) in &self.chunks {
-                    if key.0 == 1 && !self.options.far_terrain {
-                        continue;
-                    }
-                    if !aabb_visible_in_cascade(cascade, chunk.bounds_min, chunk.bounds_max) {
-                        continue;
-                    }
-                    let Some(buffer) = self.arena_buffers.get(chunk.allocation.page as usize)
-                    else {
+                for span in &draw_list.spans {
+                    let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
                         continue;
                     };
-                    let start = u64::from(chunk.allocation.offset);
-                    let end = start + u64::from(chunk.allocation.size);
+                    let start = u64::from(span.offset);
+                    let end = start + u64::from(span.size);
                     pass.set_vertex_buffer(0, buffer.slice(start..end));
-                    pass.draw(0..6, 0..chunk.quad_count);
+                    pass.draw(0..6, 0..span.quad_count);
                     shadow_draw_calls += 1;
                 }
             }
@@ -808,37 +842,27 @@ impl Renderer {
             pass.set_pipeline(&self.sky_pipeline);
             pass.draw(0..3, 0..1);
             pass.set_pipeline(&self.voxel_pipeline);
-            let mut visible_chunks = 0;
-            let mut visible_quads = 0;
-            for (key, chunk) in &self.chunks {
-                if key.0 == 1 && !self.options.far_terrain {
-                    continue;
-                }
-                if !aabb_visible(chunk.bounds_min, chunk.bounds_max, view_projection) {
-                    continue;
-                }
-                let Some(buffer) = self.arena_buffers.get(chunk.allocation.page as usize) else {
+            for span in &world_draw_list.spans {
+                let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
                     continue;
                 };
-                let start = u64::from(chunk.allocation.offset);
-                let end = start + u64::from(chunk.allocation.size);
+                let start = u64::from(span.offset);
+                let end = start + u64::from(span.size);
                 pass.set_vertex_buffer(0, buffer.slice(start..end));
-                pass.draw(0..6, 0..chunk.quad_count);
-                visible_chunks += 1;
-                visible_quads += chunk.quad_count;
+                pass.draw(0..6, 0..span.quad_count);
             }
             let arena = self.arena.stats();
             self.diagnostics = RenderDiagnostics {
                 resident_chunks: self.chunks.len() as u32,
-                visible_chunks,
-                draw_calls: visible_chunks,
+                visible_chunks: world_draw_list.mesh_count,
+                draw_calls: world_draw_list.spans.len() as u32,
                 shadow_draw_calls,
                 shadow_cascades: if self.options.shadows {
                     CASCADE_COUNT as u32
                 } else {
                     0
                 },
-                quads: visible_quads,
+                quads: world_draw_list.quad_count,
                 arena_pages: arena.pages as u32,
                 arena_capacity_bytes: arena.capacity_bytes,
                 arena_allocated_bytes: arena.allocated_bytes,
@@ -866,6 +890,60 @@ impl Renderer {
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
     }
+
+    fn collect_draw_list(&self, mut include: impl FnMut(&MeshKey, &ChunkMesh) -> bool) -> DrawList {
+        let mut items = Vec::new();
+        let mut mesh_count = 0u32;
+        let mut quad_count = 0u32;
+        for (key, chunk) in &self.chunks {
+            if !include(key, chunk) {
+                continue;
+            }
+            debug_assert_eq!(
+                chunk.allocation.size,
+                chunk.quad_count * size_of::<GpuQuad>() as u32
+            );
+            items.push(DrawItem {
+                page: chunk.allocation.page,
+                offset: chunk.allocation.offset,
+                size: chunk.allocation.size,
+                quad_count: chunk.quad_count,
+            });
+            mesh_count = mesh_count.saturating_add(1);
+            quad_count = quad_count.saturating_add(chunk.quad_count);
+        }
+        DrawList {
+            spans: coalesce_draw_items(items),
+            mesh_count,
+            quad_count,
+        }
+    }
+}
+
+fn coalesce_draw_items(mut items: Vec<DrawItem>) -> Vec<DrawSpan> {
+    items.sort_unstable_by_key(|item| (item.page, item.offset));
+    let mut spans: Vec<DrawSpan> = Vec::with_capacity(items.len());
+    for item in items {
+        if let Some(last) = spans.last_mut()
+            && last.page == item.page
+            && last.offset.checked_add(last.size) == Some(item.offset)
+            && let (Some(size), Some(quad_count)) = (
+                last.size.checked_add(item.size),
+                last.quad_count.checked_add(item.quad_count),
+            )
+        {
+            last.size = size;
+            last.quad_count = quad_count;
+            continue;
+        }
+        spans.push(DrawSpan {
+            page: item.page,
+            offset: item.offset,
+            size: item.size,
+            quad_count: item.quad_count,
+        });
+    }
+    spans
 }
 
 fn frame_uniform(
@@ -1094,5 +1172,58 @@ mod tests {
         assert!(aabb_visible(front_min, front_max, matrix));
         assert!(!aabb_visible(back_min, back_max, matrix));
         assert!(!aabb_visible(far_min, far_max, matrix));
+    }
+
+    #[test]
+    fn contiguous_mesh_allocations_coalesce_into_one_instanced_draw() {
+        let spans = coalesce_draw_items(vec![
+            DrawItem {
+                page: 1,
+                offset: 64,
+                size: 32,
+                quad_count: 1,
+            },
+            DrawItem {
+                page: 0,
+                offset: 96,
+                size: 64,
+                quad_count: 2,
+            },
+            DrawItem {
+                page: 0,
+                offset: 0,
+                size: 96,
+                quad_count: 3,
+            },
+            DrawItem {
+                page: 0,
+                offset: 192,
+                size: 32,
+                quad_count: 1,
+            },
+        ]);
+        assert_eq!(
+            spans,
+            vec![
+                DrawSpan {
+                    page: 0,
+                    offset: 0,
+                    size: 160,
+                    quad_count: 5,
+                },
+                DrawSpan {
+                    page: 0,
+                    offset: 192,
+                    size: 32,
+                    quad_count: 1,
+                },
+                DrawSpan {
+                    page: 1,
+                    offset: 64,
+                    size: 32,
+                    quad_count: 1,
+                },
+            ]
+        );
     }
 }
