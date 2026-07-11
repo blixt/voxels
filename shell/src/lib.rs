@@ -28,6 +28,11 @@ mod web {
     const FAR_RETAIN_RADIUS_TILES: i32 = 6;
     const SIMULATION_STEP_SECONDS: f32 = 1.0 / 120.0;
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
+    const STREAM_FRAME_BUDGET: FrameBudget = FrameBudget {
+        generation: 2,
+        meshing: 2,
+        upload: 3,
+    };
 
     type FrameCallback = Closure<dyn FnMut(f64)>;
 
@@ -195,11 +200,7 @@ mod web {
             let work = {
                 let mut scheduler = self.scheduler.borrow_mut();
                 scheduler.update_focus(focus);
-                scheduler.schedule_frame(FrameBudget {
-                    generation: 1,
-                    meshing: 2,
-                    upload: 3,
-                })
+                scheduler.schedule_frame(STREAM_FRAME_BUDGET)
             };
 
             for ticket in work.generation {

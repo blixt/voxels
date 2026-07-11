@@ -16,6 +16,7 @@ greedy meshing, rendering, and persistence boundary.
 `vp run verify` runs the complete TypeScript, Rust, test, lint, and production-build gate.
 `vp run bench:world` runs native Criterion baselines for chunk generation, VXCH encode/decode, and
 greedy meshing. Reports are written under the ignored `target/criterion/` directory.
+Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture
 
