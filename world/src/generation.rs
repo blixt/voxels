@@ -8,6 +8,14 @@ pub struct Generator {
     seed: u64,
 }
 
+#[derive(Clone, Copy)]
+struct ColumnProfile {
+    height: i32,
+    moisture: f32,
+    temperature: f32,
+    local_biome: f32,
+}
+
 impl Generator {
     pub const fn new(seed: u64) -> Self {
         Self { seed }
@@ -20,6 +28,12 @@ impl Generator {
     pub fn generate_chunk(self, coord: ChunkCoord) -> Chunk {
         let mut chunk = Chunk::empty(coord);
         let origin = coord.world_origin();
+        let columns = (0..CHUNK_EDGE)
+            .flat_map(|z| {
+                (0..CHUNK_EDGE)
+                    .map(move |x| self.column_profile(origin[0] + x as i32, origin[2] + z as i32))
+            })
+            .collect::<Vec<_>>();
         for y in 0..CHUNK_EDGE {
             for z in 0..CHUNK_EDGE {
                 for x in 0..CHUNK_EDGE {
@@ -28,7 +42,17 @@ impl Generator {
                         origin[1] + y as i32,
                         origin[2] + z as i32,
                     ];
-                    chunk.set(x, y, z, self.sample_terrain(world[0], world[1], world[2]));
+                    chunk.set(
+                        x,
+                        y,
+                        z,
+                        self.sample_terrain_with_profile(
+                            world[0],
+                            world[1],
+                            world[2],
+                            columns[x + z * CHUNK_EDGE],
+                        ),
+                    );
                 }
             }
         }
@@ -46,10 +70,20 @@ impl Generator {
     }
 
     fn sample_terrain(self, x: i32, y: i32, z: i32) -> Material {
+        self.sample_terrain_with_profile(x, y, z, self.column_profile(x, z))
+    }
+
+    fn sample_terrain_with_profile(
+        self,
+        x: i32,
+        y: i32,
+        z: i32,
+        profile: ColumnProfile,
+    ) -> Material {
         if y < -16 {
             return Material::Basalt;
         }
-        let height = self.surface_height(x, z);
+        let height = profile.height;
         if y > height {
             return Material::Air;
         }
@@ -63,9 +97,9 @@ impl Generator {
             }
         }
 
-        let moisture = self.value_2d(x, z, 1_200, 0x4f1b);
-        let temperature = self.value_2d(x, z, 1_900, 0xa18d) - y as f32 * 0.006;
-        let local_biome = self.value_2d(x, z, 260, 0x8b21);
+        let moisture = profile.moisture;
+        let temperature = profile.temperature - y as f32 * 0.006;
+        let local_biome = profile.local_biome;
         let depth = height - y;
         if depth == 0 {
             if height < 11 {
@@ -97,6 +131,15 @@ impl Generator {
             Material::Basalt
         } else {
             Material::Stone
+        }
+    }
+
+    fn column_profile(self, x: i32, z: i32) -> ColumnProfile {
+        ColumnProfile {
+            height: self.surface_height(x, z),
+            moisture: self.value_2d(x, z, 1_200, 0x4f1b),
+            temperature: self.value_2d(x, z, 1_900, 0xa18d),
+            local_biome: self.value_2d(x, z, 260, 0x8b21),
         }
     }
 
@@ -301,6 +344,28 @@ mod tests {
         assert_eq!(left.get(31, 17, 9), generator.sample(-1, 17, 9));
         assert_eq!(right.get(0, 17, 9), generator.sample(0, 17, 9));
         assert_ne!(left.voxels(), right.voxels());
+    }
+
+    #[test]
+    fn cached_column_generation_matches_random_access_sampling() {
+        let generator = Generator::new(0x5eed);
+        let coord = ChunkCoord::new(-2, 0, 3);
+        let chunk = generator.generate_chunk(coord);
+        let origin = coord.world_origin();
+        for y in [0, 5, 15, 31] {
+            for z in [0, 11, 23, 31] {
+                for x in [0, 7, 15, 31] {
+                    assert_eq!(
+                        chunk.get(x, y, z),
+                        generator.sample(
+                            origin[0] + x as i32,
+                            origin[1] + y as i32,
+                            origin[2] + z as i32,
+                        )
+                    );
+                }
+            }
+        }
     }
 
     #[test]
