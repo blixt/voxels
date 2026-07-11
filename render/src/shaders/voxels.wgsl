@@ -76,15 +76,25 @@ fn hash31(position: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
+  let far_surface = (input.material & 0x80000000u) != 0u;
+  let material = input.material & 0xffffu;
+  let distance_xz = distance(input.world.xz, frame.camera_time.xz);
+  if far_surface {
+    let handoff = smoothstep(6.3, 7.3, distance_xz);
+    let threshold = hash31(vec3<f32>(floor(input.position.xy), 17.0));
+    if handoff < threshold {
+      discard;
+    }
+  }
   let sun = normalize(vec3<f32>(0.48, 0.72, 0.35));
   let diffuse = max(dot(input.normal, sun), 0.0);
   let sky_visibility = input.normal.y * 0.5 + 0.5;
   let bounce = max(-input.normal.y, 0.0) * 0.08;
   let light = 0.46 + sky_visibility * 0.22 + diffuse * 0.48 + bounce;
   let cell = floor(input.world / frame.viewport_voxel.z);
-  let grain = mix(0.88, 1.12, hash31(cell + vec3<f32>(f32(input.material) * 3.1)));
+  let grain = mix(0.88, 1.12, hash31(cell + vec3<f32>(f32(material) * 3.1)));
   let fine_grain = mix(0.96, 1.04, hash31(floor(input.world * 28.0)));
-  var color = material_color(input.material) * light * grain * fine_grain;
+  var color = material_color(material) * light * grain * fine_grain;
   let distance_to_camera = distance(input.world, frame.camera_time.xyz);
   let distance_fog = smoothstep(frame.viewport_voxel.w * 0.58, frame.viewport_voxel.w, distance_to_camera);
   let height_fog = exp(-max(input.world.y, 0.0) * 0.16) * smoothstep(2.5, frame.viewport_voxel.w, distance_to_camera) * 0.18;

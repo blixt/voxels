@@ -3,7 +3,10 @@ use bytemuck::{Pod, Zeroable};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use voxels_core::CameraState;
-use voxels_world::{CHUNK_EDGE, ChunkCoord, Quad, VOXEL_SIZE_METRES};
+use voxels_world::{
+    CHUNK_EDGE, ChunkCoord, FAR_TILE_SPAN_VOXELS, FarTileCoord, Quad, SurfaceQuad,
+    VOXEL_SIZE_METRES,
+};
 use wgpu::util::DeviceExt;
 use wgpu::{
     Backends, BindGroup, Buffer, CurrentSurfaceTexture, Device, DeviceDescriptor, Instance,
@@ -12,8 +15,10 @@ use wgpu::{
 };
 
 const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
-const WORLD_RADIUS_CHUNKS: i32 = 3;
+const VIEW_DISTANCE_METRES: f32 = 220.0;
 const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
+const FAR_MATERIAL_FLAG: u32 = 1 << 31;
+type MeshKey = (u8, i32, i32, i32);
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -38,6 +43,8 @@ const _: () = assert!(size_of::<GpuQuad>() == 28);
 struct ChunkMesh {
     allocation: Allocation,
     quad_count: u32,
+    bounds_min: glam::Vec3,
+    bounds_max: glam::Vec3,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -60,7 +67,7 @@ pub struct Renderer {
     voxel_pipeline: RenderPipeline,
     frame_buffer: Buffer,
     frame_bind_group: BindGroup,
-    chunks: BTreeMap<(i32, i32, i32), ChunkMesh>,
+    chunks: BTreeMap<MeshKey, ChunkMesh>,
     arena: ArenaAllocator,
     arena_buffers: Vec<Buffer>,
     depth_view: TextureView,
@@ -221,7 +228,7 @@ impl Renderer {
     }
 
     pub fn upload_chunk(&mut self, coord: ChunkCoord, quads: &[Quad]) -> bool {
-        let key = (coord.x, coord.y, coord.z);
+        let key = (0, coord.x, coord.y, coord.z);
         if quads.is_empty() {
             self.remove_chunk(coord);
             return true;
@@ -243,7 +250,51 @@ impl Renderer {
                 material: u32::from(quad.material),
             })
             .collect();
-        let bytes = bytemuck::cast_slice(&gpu_quads);
+        let min = glam::Vec3::from_array(origin.map(|value| value as f32 * VOXEL_SIZE_METRES));
+        let max = min + glam::Vec3::splat(CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
+        self.upload_mesh(key, &gpu_quads, min, max)
+    }
+
+    pub fn upload_far_tile(&mut self, coord: FarTileCoord, quads: &[SurfaceQuad]) -> bool {
+        let key = (1, coord.x, 0, coord.z);
+        if quads.is_empty() {
+            self.remove_far_tile(coord);
+            return true;
+        }
+        let gpu_quads: Vec<_> = quads
+            .iter()
+            .map(|quad| GpuQuad {
+                origin: quad.origin.map(|value| value as f32 * VOXEL_SIZE_METRES),
+                face: u32::from(quad.face),
+                extent: [
+                    f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
+                    f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
+                ],
+                material: u32::from(quad.material.id()) | FAR_MATERIAL_FLAG,
+            })
+            .collect();
+        let [x, z] = coord.voxel_origin();
+        let min = glam::Vec3::new(
+            x as f32 * VOXEL_SIZE_METRES,
+            -6.4,
+            z as f32 * VOXEL_SIZE_METRES,
+        );
+        let max = glam::Vec3::new(
+            (x + FAR_TILE_SPAN_VOXELS) as f32 * VOXEL_SIZE_METRES,
+            12.8,
+            (z + FAR_TILE_SPAN_VOXELS) as f32 * VOXEL_SIZE_METRES,
+        );
+        self.upload_mesh(key, &gpu_quads, min, max)
+    }
+
+    fn upload_mesh(
+        &mut self,
+        key: MeshKey,
+        gpu_quads: &[GpuQuad],
+        bounds_min: glam::Vec3,
+        bounds_max: glam::Vec3,
+    ) -> bool {
+        let bytes = bytemuck::cast_slice(gpu_quads);
         let Ok(byte_len) = u32::try_from(bytes.len()) else {
             return false;
         };
@@ -275,6 +326,8 @@ impl Renderer {
             ChunkMesh {
                 allocation,
                 quad_count: gpu_quads.len() as u32,
+                bounds_min,
+                bounds_max,
             },
         );
         if let Some(old) = old {
@@ -284,7 +337,15 @@ impl Renderer {
     }
 
     pub fn remove_chunk(&mut self, coord: ChunkCoord) {
-        if let Some(chunk) = self.chunks.remove(&(coord.x, coord.y, coord.z)) {
+        self.remove_mesh((0, coord.x, coord.y, coord.z));
+    }
+
+    pub fn remove_far_tile(&mut self, coord: FarTileCoord) {
+        self.remove_mesh((1, coord.x, 0, coord.z));
+    }
+
+    fn remove_mesh(&mut self, key: MeshKey) {
+        if let Some(chunk) = self.chunks.remove(&key) {
             let _ = self.arena.free(chunk.allocation);
         }
     }
@@ -343,9 +404,8 @@ impl Renderer {
             pass.set_pipeline(&self.voxel_pipeline);
             let mut visible_chunks = 0;
             let mut visible_quads = 0;
-            for (&key, chunk) in &self.chunks {
-                let coord = ChunkCoord::new(key.0, key.1, key.2);
-                if !chunk_visible(coord, view_projection) {
+            for chunk in self.chunks.values() {
+                if !aabb_visible(chunk.bounds_min, chunk.bounds_max, view_projection) {
                     continue;
                 }
                 let Some(buffer) = self.arena_buffers.get(chunk.allocation.page as usize) else {
@@ -389,7 +449,7 @@ fn frame_uniform(config: &SurfaceConfiguration, camera: &CameraState, time: f32)
             config.width as f32,
             config.height as f32,
             VOXEL_SIZE_METRES,
-            (WORLD_RADIUS_CHUNKS + 1) as f32 * CHUNK_EDGE as f32 * VOXEL_SIZE_METRES,
+            VIEW_DISTANCE_METRES,
         ],
     }
 }
@@ -397,23 +457,19 @@ fn frame_uniform(config: &SurfaceConfiguration, camera: &CameraState, time: f32)
 fn view_projection(config: &SurfaceConfiguration, camera: &CameraState) -> glam::Mat4 {
     let aspect = config.width as f32 / config.height.max(1) as f32;
     let projection =
-        glam::camera::rh::proj::directx::perspective(68.0f32.to_radians(), aspect, 0.01, 80.0);
+        glam::camera::rh::proj::directx::perspective(68.0f32.to_radians(), aspect, 0.01, 320.0);
     let view =
         glam::camera::rh::view::look_to_mat4(camera.position, camera.forward(), glam::Vec3::Y);
     projection * view
 }
 
-fn chunk_visible(coord: ChunkCoord, view_projection: glam::Mat4) -> bool {
-    let origin = coord
-        .world_origin()
-        .map(|value| value as f32 * VOXEL_SIZE_METRES);
-    let edge = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
+fn aabb_visible(min: glam::Vec3, max: glam::Vec3, view_projection: glam::Mat4) -> bool {
     let mut clips = [glam::Vec4::ZERO; 8];
     for (index, clip) in clips.iter_mut().enumerate() {
         let corner = glam::Vec3::new(
-            origin[0] + if index & 1 == 0 { 0.0 } else { edge },
-            origin[1] + if index & 2 == 0 { 0.0 } else { edge },
-            origin[2] + if index & 4 == 0 { 0.0 } else { edge },
+            if index & 1 == 0 { min.x } else { max.x },
+            if index & 2 == 0 { min.y } else { max.y },
+            if index & 4 == 0 { min.z } else { max.z },
         );
         *clip = view_projection * corner.extend(1.0);
     }
@@ -517,8 +573,20 @@ mod tests {
     fn frustum_rejects_chunks_behind_camera_and_beyond_far_plane() {
         let camera = CameraState::spawn(glam::Vec3::new(0.0, 1.7, 0.0));
         let matrix = test_view_projection(&camera);
-        assert!(chunk_visible(ChunkCoord::new(0, 0, -1), matrix));
-        assert!(!chunk_visible(ChunkCoord::new(0, 0, 2), matrix));
-        assert!(!chunk_visible(ChunkCoord::new(0, 0, -30), matrix));
+        let edge = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
+        let bounds = |coord: ChunkCoord| {
+            let min = glam::Vec3::from_array(
+                coord
+                    .world_origin()
+                    .map(|value| value as f32 * VOXEL_SIZE_METRES),
+            );
+            (min, min + glam::Vec3::splat(edge))
+        };
+        let (front_min, front_max) = bounds(ChunkCoord::new(0, 0, -1));
+        let (back_min, back_max) = bounds(ChunkCoord::new(0, 0, 2));
+        let (far_min, far_max) = bounds(ChunkCoord::new(0, 0, -120));
+        assert!(aabb_visible(front_min, front_max, matrix));
+        assert!(!aabb_visible(back_min, back_max, matrix));
+        assert!(!aabb_visible(far_min, far_max, matrix));
     }
 }

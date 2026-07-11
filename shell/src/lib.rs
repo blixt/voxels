@@ -9,20 +9,22 @@ mod web {
     use glam::Vec2;
     use js_sys::Float32Array;
     use std::cell::{Cell, RefCell};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::rc::Rc;
     use voxels_core::{CameraState, InputState, raycast_voxels};
     use voxels_render::renderer::Renderer;
     use voxels_runtime::{FrameBudget, StreamConfig, StreamScheduler};
     use voxels_world::{
-        CHUNK_EDGE, Chunk, ChunkCoord, EditMap, Generator, Material, Quad, VOXEL_SIZE_METRES,
-        VoxelCoord, mesh_chunk,
+        CHUNK_EDGE, Chunk, ChunkCoord, EditMap, FAR_TILE_SPAN_VOXELS, FarTileCoord, Generator,
+        Material, Quad, VOXEL_SIZE_METRES, VoxelCoord, generate_far_tile_with, mesh_chunk,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const WORLD_SEED: u64 = 0x5eed_cafe;
+    const FAR_LOAD_RADIUS_TILES: i32 = 5;
+    const FAR_RETAIN_RADIUS_TILES: i32 = 6;
 
     type FrameCallback = Closure<dyn FnMut(f64)>;
 
@@ -61,6 +63,9 @@ mod web {
         scheduler: RefCell<StreamScheduler>,
         chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
         pending_meshes: RefCell<BTreeMap<(i32, i32, i32), Vec<Quad>>>,
+        far_focus: Cell<Option<FarTileCoord>>,
+        far_resident: RefCell<BTreeSet<(i32, i32)>>,
+        far_queue: RefCell<VecDeque<FarTileCoord>>,
         store: RefCell<Store>,
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
@@ -196,6 +201,71 @@ mod web {
                     renderer.remove_chunk(eviction.coord);
                 }
             }
+            self.stream_far(camera.position);
+        }
+
+        fn stream_far(&self, position: glam::Vec3) {
+            let focus = world_to_far_tile(position);
+            if self.far_focus.get() != Some(focus) {
+                self.far_focus.set(Some(focus));
+                let desired: BTreeSet<_> = (-FAR_LOAD_RADIUS_TILES..=FAR_LOAD_RADIUS_TILES)
+                    .flat_map(|dz| {
+                        (-FAR_LOAD_RADIUS_TILES..=FAR_LOAD_RADIUS_TILES).map(move |dx| (dx, dz))
+                    })
+                    .filter(|(dx, dz)| {
+                        dx * dx + dz * dz <= FAR_LOAD_RADIUS_TILES * FAR_LOAD_RADIUS_TILES
+                    })
+                    .map(|(dx, dz)| (focus.x + dx, focus.z + dz))
+                    .collect();
+                let evicted: Vec<_> = self
+                    .far_resident
+                    .borrow()
+                    .iter()
+                    .copied()
+                    .filter(|(x, z)| {
+                        let dx = x - focus.x;
+                        let dz = z - focus.z;
+                        dx * dx + dz * dz > FAR_RETAIN_RADIUS_TILES * FAR_RETAIN_RADIUS_TILES
+                    })
+                    .collect();
+                if !evicted.is_empty() {
+                    let mut resident = self.far_resident.borrow_mut();
+                    let mut renderer = self.renderer.borrow_mut();
+                    for (x, z) in evicted {
+                        resident.remove(&(x, z));
+                        renderer.remove_far_tile(FarTileCoord::new(x, z));
+                    }
+                }
+                let resident = self.far_resident.borrow();
+                let mut candidates: Vec<_> = desired
+                    .into_iter()
+                    .filter(|coord| !resident.contains(coord))
+                    .map(|(x, z)| FarTileCoord::new(x, z))
+                    .collect();
+                drop(resident);
+                candidates.sort_by_key(|coord| {
+                    let dx = coord.x - focus.x;
+                    let dz = coord.z - focus.z;
+                    (dx * dx + dz * dz, coord.z, coord.x)
+                });
+                let mut queue = self.far_queue.borrow_mut();
+                queue.clear();
+                queue.extend(candidates);
+            }
+
+            let next = self.far_queue.borrow_mut().pop_front();
+            let Some(coord) = next else {
+                return;
+            };
+            let edits = self.edits.borrow();
+            let quads =
+                generate_far_tile_with(coord, |x, z| edits.surface_sample(self.generator, x, z));
+            drop(edits);
+            if self.renderer.borrow_mut().upload_far_tile(coord, &quads) {
+                self.far_resident.borrow_mut().insert((coord.x, coord.z));
+            } else {
+                self.far_queue.borrow_mut().push_front(coord);
+            }
         }
 
         fn stop(&self) {
@@ -275,6 +345,20 @@ mod web {
             }
             drop(edits);
             let _ = self.scheduler.borrow_mut().mark_voxel_edited(target);
+            let far_coord = FarTileCoord::new(
+                target.x.div_euclid(FAR_TILE_SPAN_VOXELS),
+                target.z.div_euclid(FAR_TILE_SPAN_VOXELS),
+            );
+            if self
+                .far_resident
+                .borrow_mut()
+                .remove(&(far_coord.x, far_coord.z))
+            {
+                self.renderer.borrow_mut().remove_far_tile(far_coord);
+            }
+            let mut queue = self.far_queue.borrow_mut();
+            queue.retain(|queued| *queued != far_coord);
+            queue.push_front(far_coord);
         }
     }
 
@@ -300,7 +384,7 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 16], |engine| {
+            let values = self.engine.as_ref().map_or([0.0; 17], |engine| {
                 let camera = engine.camera.borrow();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let render = engine.renderer.borrow().diagnostics();
@@ -322,7 +406,9 @@ mod web {
                     render.arena_capacity_bytes as f32 / (1024.0 * 1024.0),
                     (diagnostics.generation.queued
                         + diagnostics.meshing.queued
-                        + diagnostics.upload.queued) as f32,
+                        + diagnostics.upload.queued
+                        + engine.far_queue.borrow().len()) as f32,
+                    engine.far_resident.borrow().len() as f32,
                 ]
             });
             Float32Array::from(values.as_slice())
@@ -394,6 +480,9 @@ mod web {
             scheduler: RefCell::new(scheduler),
             chunks: RefCell::new(BTreeMap::new()),
             pending_meshes: RefCell::new(BTreeMap::new()),
+            far_focus: Cell::new(None),
+            far_resident: RefCell::new(BTreeSet::new()),
+            far_queue: RefCell::new(VecDeque::new()),
             store: RefCell::new(store),
             scope,
             callback: RefCell::new(None),
@@ -418,6 +507,14 @@ mod web {
             (position.x / edge_metres).floor() as i32,
             (position.y / edge_metres).floor() as i32,
             (position.z / edge_metres).floor() as i32,
+        )
+    }
+
+    fn world_to_far_tile(position: glam::Vec3) -> FarTileCoord {
+        let tile_metres = FAR_TILE_SPAN_VOXELS as f32 * VOXEL_SIZE_METRES;
+        FarTileCoord::new(
+            (position.x / tile_metres).floor() as i32,
+            (position.z / tile_metres).floor() as i32,
         )
     }
 }

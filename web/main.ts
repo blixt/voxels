@@ -74,7 +74,7 @@ function start(root: HTMLElement): void {
       ?.snapshot()
       .then((values) => {
         diagnostics.textContent = [
-          `${Math.round(values[8] ?? 0)}/${Math.round(values[9] ?? 0)} chunks`,
+          `${Math.round(values[8] ?? 0)} near + ${Math.round(values[16] ?? 0)} far`,
           `${Math.round(values[10] ?? 0)} visible`,
           `${Math.round(values[6] ?? 0).toLocaleString()} quads`,
           `${(values[13] ?? 0).toFixed(2)}/${(values[14] ?? 0).toFixed(1)} MiB arena`,

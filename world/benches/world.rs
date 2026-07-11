@@ -1,6 +1,6 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use voxels_world::codec::{decode_chunk, encode_chunk};
-use voxels_world::{ChunkCoord, Generator, mesh_chunk};
+use voxels_world::{ChunkCoord, FarTileCoord, Generator, generate_far_tile, mesh_chunk};
 
 const SEED: u64 = 0x5eed_cafe;
 const COORD: ChunkCoord = ChunkCoord::new(2, 0, -3);
@@ -39,5 +39,12 @@ fn meshing(criterion: &mut Criterion) {
     });
 }
 
-criterion_group!(world_benches, generation, codec, meshing);
+fn far_surface(criterion: &mut Criterion) {
+    let generator = Generator::new(SEED);
+    criterion.bench_function("generate 25.6m far surface tile", |bencher| {
+        bencher.iter(|| generate_far_tile(generator, FarTileCoord::new(2, -3)));
+    });
+}
+
+criterion_group!(world_benches, generation, codec, meshing, far_surface);
 criterion_main!(world_benches);

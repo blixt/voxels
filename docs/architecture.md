@@ -32,8 +32,12 @@ until benchmarks show generation or meshing is the frame-time bottleneck.
 
 The live world is a sparse map of fixed-size cubic chunks. A chunk stores a compact material id per
 voxel and is the unit of generation, editing, persistence, remeshing, culling, and streaming. Near-field
-chunks use face-culling plus greedy rectangle merging; distant detail can later use coarser derived
-chunks without changing the canonical data.
+chunks use face-culling plus greedy rectangle merging. The first far tier derives independently
+streamable 25.6 m surface tiles from the same generator at an 0.8 m sampling stride. Each coarse
+column emits a top plus vertical transition faces down to lower neighbors, including samples across
+tile boundaries, so separately generated tiles form a closed shell without cracks. A short dithered
+distance band hands coverage between canonical chunks and the far shell. Far meshes remain disposable
+derivatives; 10 cm voxels and sparse edits remain authoritative.
 
 The first persistent chunk format is versioned and little-endian:
 
@@ -71,7 +75,8 @@ and follower proxying can be added without changing `core` or `render`.
 - Never allocate or send one JavaScript object per input sample, voxel, face, or chunk.
 - Generate and mesh only dirty/resident chunks, with bounded work admitted each frame.
 - Mesh chunk boundaries using neighbor samples so hidden seam faces are not emitted.
-- Upload immutable mesh buffers once and reuse them until that chunk changes.
+- Suballocate immutable chunk and far-tile meshes from coalescing GPU arena pages, replacing only the
+  allocation whose source changes.
 - Frustum-cull chunks on CPU; add occlusion/indirect drawing only after GPU captures justify it.
 - Keep deterministic host benchmarks for generation, codec round-trips, meshing, and edit replay.
 - Expose lightweight browser frame and residency snapshots for end-to-end regression automation.

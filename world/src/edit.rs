@@ -88,6 +88,26 @@ impl EditMap {
         }
     }
 
+    /// Resolves the visible material of one edited column. Far surface summaries use this to remain
+    /// derived from generator + edits rather than silently becoming a second world authority.
+    pub fn surface_sample(&self, generator: Generator, x: i32, z: i32) -> (i32, Material) {
+        let generated_height = generator.surface_height(x, z);
+        let highest_override = self
+            .overrides
+            .iter()
+            .filter(|(coord, material)| coord.x == x && coord.z == z && material.is_solid())
+            .map(|(coord, _)| coord.y)
+            .max();
+        let mut y = highest_override.map_or(generated_height, |value| value.max(generated_height));
+        loop {
+            let material = self.sample(generator, VoxelCoord::new(x, y, z));
+            if material.is_solid() || y <= -16 {
+                return (y, material);
+            }
+            y -= 1;
+        }
+    }
+
     /// Chunks whose meshes can change after this voxel changes. A face on a chunk boundary also
     /// invalidates the neighboring mesh so a removed or added block cannot leave a stale seam.
     pub fn affected_chunks(coord: VoxelCoord) -> Vec<ChunkCoord> {
@@ -144,5 +164,27 @@ mod tests {
         assert!(chunks.contains(&ChunkCoord::new(0, 2, 0)));
         assert!(chunks.contains(&ChunkCoord::new(-1, 1, 0)));
         assert!(chunks.contains(&ChunkCoord::new(-1, 2, 1)));
+    }
+
+    #[test]
+    fn edited_column_surface_tracks_additions_and_removals() {
+        let generator = Generator::new(11);
+        let x = 7;
+        let z = -9;
+        let generated = generator.surface_height(x, z);
+        let mut edits = EditMap::default();
+        edits.set(
+            generator,
+            VoxelCoord::new(x, generated + 5, z),
+            Material::Stone,
+        );
+        assert_eq!(edits.surface_sample(generator, x, z).0, generated + 5);
+        edits.set(
+            generator,
+            VoxelCoord::new(x, generated + 5, z),
+            Material::Air,
+        );
+        edits.set(generator, VoxelCoord::new(x, generated, z), Material::Air);
+        assert_eq!(edits.surface_sample(generator, x, z).0, generated - 1);
     }
 }
