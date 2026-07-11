@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 const PANEL_INSET: f32 = 18.0;
 const PANEL_WIDTH: f32 = 360.0;
 const COMPACT_WIDTH: f32 = 292.0;
-const PANEL_HEIGHT: f32 = 424.0;
-const COMPACT_HEIGHT: f32 = 342.0;
+const PANEL_HEIGHT: f32 = 463.0;
+const COMPACT_HEIGHT: f32 = 376.0;
 const HEADER_HEIGHT: f32 = 48.0;
 const PANEL_RADIUS: f32 = 18.0;
 const CONTENT_PAD: f32 = 14.0;
@@ -125,6 +125,7 @@ impl Viewport {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum RendererFeature {
+    CascadedSunShadows,
     VoxelAmbientOcclusion,
     AtmosphericFog,
     FarTerrain,
@@ -132,7 +133,8 @@ pub enum RendererFeature {
 }
 
 impl RendererFeature {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
+        Self::CascadedSunShadows,
         Self::VoxelAmbientOcclusion,
         Self::AtmosphericFog,
         Self::FarTerrain,
@@ -141,6 +143,7 @@ impl RendererFeature {
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::CascadedSunShadows => "Cascaded sun shadows",
             Self::VoxelAmbientOcclusion => "Voxel ambient occlusion",
             Self::AtmosphericFog => "Atmospheric fog",
             Self::FarTerrain => "Far terrain",
@@ -151,10 +154,11 @@ impl RendererFeature {
 
 const fn feature_index(feature: RendererFeature) -> usize {
     match feature {
-        RendererFeature::VoxelAmbientOcclusion => 0,
-        RendererFeature::AtmosphericFog => 1,
-        RendererFeature::FarTerrain => 2,
-        RendererFeature::TargetOutline => 3,
+        RendererFeature::CascadedSunShadows => 0,
+        RendererFeature::VoxelAmbientOcclusion => 1,
+        RendererFeature::AtmosphericFog => 2,
+        RendererFeature::FarTerrain => 3,
+        RendererFeature::TargetOutline => 4,
     }
 }
 
@@ -222,6 +226,8 @@ pub struct LiveStats {
     pub visible_chunks: u32,
     pub quads: u32,
     pub draw_calls: u32,
+    pub shadow_draw_calls: u32,
+    pub shadow_cascades: u32,
     pub pending_jobs: u32,
     pub arena_bytes: u64,
 }
@@ -349,8 +355,8 @@ pub struct MissionControlUi {
     hovered: Option<UiTarget>,
     context_anchor: Option<[f32; 2]>,
     stats: LiveStats,
-    feature_enabled: [bool; 4],
-    feature_motion: [EasedValue; 4],
+    feature_enabled: [bool; 5],
+    feature_motion: [EasedValue; 5],
     open_motion: EasedValue,
     compact_motion: EasedValue,
     hover_motion: BTreeMap<UiTarget, EasedValue>,
@@ -366,8 +372,8 @@ impl Default for MissionControlUi {
             hovered: None,
             context_anchor: None,
             stats: LiveStats::default(),
-            feature_enabled: [true; 4],
-            feature_motion: [EasedValue::new(1.0); 4],
+            feature_enabled: [true; 5],
+            feature_motion: [EasedValue::new(1.0); 5],
             open_motion: EasedValue::new(0.0),
             compact_motion: EasedValue::new(0.0),
             hover_motion: BTreeMap::new(),
@@ -845,7 +851,7 @@ impl MissionControlUi {
         }
 
         let first_feature_y = layout
-            .region(UiTarget::Feature(RendererFeature::VoxelAmbientOcclusion))
+            .region(UiTarget::Feature(RendererFeature::CascadedSunShadows))
             .map_or(layout.header.y + HEADER_HEIGHT, |rect| rect.y);
         push_text(
             &mut draw,
@@ -1031,9 +1037,10 @@ impl MissionControlUi {
                 (
                     "QUADS / DRAWS",
                     format!(
-                        "{} / {}",
+                        "{} / {}+{}s",
                         compact_count(u64::from(stats.quads)),
-                        stats.draw_calls
+                        stats.draw_calls,
+                        stats.shadow_draw_calls
                     ),
                 ),
                 (
@@ -1351,6 +1358,8 @@ mod tests {
             visible_chunks: 132,
             quads: 123_400,
             draw_calls: 132,
+            shadow_draw_calls: 164,
+            shadow_cascades: 3,
             pending_jobs: 7,
             arena_bytes: 48 * 1_048_576,
         });
@@ -1373,7 +1382,7 @@ mod tests {
                 .iter()
                 .filter(|surface| surface.role == SurfaceRole::ToggleTrack)
                 .count(),
-            4
+            5
         );
         assert_eq!(
             draw.glass
@@ -1382,7 +1391,7 @@ mod tests {
                 .count(),
             4
         );
-        assert!(draw.text.iter().any(|run| run.text == "123.4k / 132"));
+        assert!(draw.text.iter().any(|run| run.text == "123.4k / 132+164s"));
         assert!(draw.text.iter().any(|run| run.text == "7 / 48.0 MiB"));
     }
 

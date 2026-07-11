@@ -5,9 +5,15 @@ struct Frame {
   viewport_voxel: vec4<f32>,
   target_voxel: vec4<f32>,
   render_options: vec4<f32>,
+  camera_forward: vec4<f32>,
+  shadow_splits: vec4<f32>,
+  shadow_texel_sizes: vec4<f32>,
+  shadow_view_projection: array<mat4x4<f32>, 3>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
+@group(0) @binding(1) var shadow_map: texture_depth_2d_array;
+@group(0) @binding(2) var shadow_sampler: sampler_comparison;
 
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
@@ -85,33 +91,77 @@ fn hash31(position: vec3<f32>) -> f32 {
   return fract(sin(value) * 43758.5453);
 }
 
+fn owns_lod_surface(world: vec3<f32>, packed_material: u32) -> bool {
+  let far_surface = (packed_material & 0x80000000u) != 0u;
+  let material = packed_material & 0xffffu;
+  let distance_xz = distance(world.xz, frame.camera_time.xz);
+  if !far_surface && (material == 8u || material == 9u) && distance_xz > 9.0 {
+    return false;
+  }
+  let blend = smoothstep(8.0, 11.0, distance_xz);
+  let cell = floor(world / frame.viewport_voxel.z);
+  let threshold = hash31(cell + vec3<f32>(23.0));
+  return select(threshold >= blend, threshold < blend, far_surface);
+}
+
+fn cascade_shadow(world: vec3<f32>, normal: vec3<f32>, cascade: u32) -> f32 {
+  let texel_world_size = frame.shadow_texel_sizes[cascade];
+  let normal_offset = normal * (frame.viewport_voxel.z * 0.24 + texel_world_size * 0.65);
+  let clip = frame.shadow_view_projection[cascade] * vec4<f32>(world + normal_offset, 1.0);
+  let projected = clip.xyz / clip.w;
+  let uv = projected.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+  if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || projected.z <= 0.0 || projected.z >= 1.0 {
+    return 1.0;
+  }
+  let layer = i32(cascade);
+  let depth_ref = projected.z - 0.00035;
+  var visibility = 0.0;
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>(-1, -1));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 0, -1));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 1, -1));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>(-1,  0));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 0,  0));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 1,  0));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>(-1,  1));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 0,  1));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 1,  1));
+  return visibility / 9.0;
+}
+
+fn sun_visibility(world: vec3<f32>, normal: vec3<f32>) -> f32 {
+  if frame.shadow_splits.w < 0.5 {
+    return 1.0;
+  }
+  let view_depth = max(dot(world - frame.camera_time.xyz, frame.camera_forward.xyz), 0.0);
+  var cascade = 0u;
+  if view_depth > frame.shadow_splits.x { cascade = 1u; }
+  if view_depth > frame.shadow_splits.y { cascade = 2u; }
+  if view_depth > frame.shadow_splits.z { return 1.0; }
+  let visibility = cascade_shadow(world, normal, cascade);
+  if cascade >= 2u {
+    return visibility;
+  }
+  var near_split = 0.0;
+  if cascade > 0u {
+    near_split = frame.shadow_splits[cascade - 1u];
+  }
+  let far_split = frame.shadow_splits[cascade];
+  let blend = smoothstep(mix(near_split, far_split, 0.88), far_split, view_depth);
+  return mix(visibility, cascade_shadow(world, normal, cascade + 1u), blend);
+}
+
 @fragment
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
-  let far_surface = (input.material & 0x80000000u) != 0u;
-  let material = input.material & 0xffffu;
-  let distance_xz = distance(input.world.xz, frame.camera_time.xz);
-  let transition_cell = floor(input.world / frame.viewport_voxel.z);
-  if far_surface {
-    let handoff = smoothstep(6.3, 7.3, distance_xz);
-    let threshold = hash31(transition_cell + vec3<f32>(17.0));
-    if handoff < threshold {
-      discard;
-    }
-  } else {
-    if (material == 8u || material == 9u) && distance_xz > 9.0 {
-      discard;
-    }
-    let ownership = 1.0 - smoothstep(10.0, 12.0, distance_xz);
-    let threshold = hash31(transition_cell + vec3<f32>(41.0));
-    if ownership < threshold {
-      discard;
-    }
+  if !owns_lod_surface(input.world, input.material) {
+    discard;
   }
+  let material = input.material & 0xffffu;
   let sun = normalize(vec3<f32>(0.48, 0.72, 0.35));
   let diffuse = max(dot(input.normal, sun), 0.0);
+  let shadow = sun_visibility(input.world, input.normal);
   let sky_visibility = input.normal.y * 0.5 + 0.5;
   let bounce = max(-input.normal.y, 0.0) * 0.08;
-  let light = 0.46 + sky_visibility * 0.22 + diffuse * 0.48 + bounce;
+  let light = 0.46 + sky_visibility * 0.22 + diffuse * 0.48 * mix(0.18, 1.0, shadow) + bounce;
   let cell = floor(input.world / frame.viewport_voxel.z);
   let grain = mix(0.88, 1.12, hash31(cell + vec3<f32>(f32(material) * 3.1)));
   let fine_grain = mix(0.96, 1.04, hash31(floor(input.world * 28.0)));

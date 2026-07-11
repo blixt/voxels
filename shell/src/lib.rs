@@ -166,6 +166,8 @@ mod web {
                     visible_chunks: render.visible_chunks,
                     quads: render.quads,
                     draw_calls: render.draw_calls,
+                    shadow_draw_calls: render.shadow_draw_calls,
+                    shadow_cascades: render.shadow_cascades,
                     pending_jobs: usize_to_u32(
                         stream.generation.queued
                             + stream.meshing.queued
@@ -481,7 +483,7 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 18], |engine| {
+            let values = self.engine.as_ref().map_or([0.0; 20], |engine| {
                 let camera = engine.camera.borrow();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let render = engine.renderer.borrow().diagnostics();
@@ -507,6 +509,8 @@ mod web {
                         + engine.far_queue.borrow().len()) as f32,
                     engine.far_resident.borrow().len() as f32,
                     engine.frame_milliseconds.get(),
+                    render.shadow_draw_calls as f32,
+                    render.shadow_cascades as f32,
                 ]
             });
             Float32Array::from(values.as_slice())
