@@ -1,8 +1,7 @@
 struct Frame {
   view_projection: mat4x4<f32>,
   camera_time: vec4<f32>,
-  viewport: vec2<f32>,
-  _pad: vec2<f32>,
+  viewport_voxel: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -35,11 +34,11 @@ fn vs_main(
   var local = vec3<f32>(0.0);
   var normal = vec3<f32>(0.0);
   switch face {
-    case 0u: { local = vec3<f32>(1.0, uv.y * extent.y, uv.x * extent.x); normal.x = 1.0; }
+    case 0u: { local = vec3<f32>(frame.viewport_voxel.z, uv.y * extent.y, uv.x * extent.x); normal.x = 1.0; }
     case 1u: { local = vec3<f32>(0.0, uv.y * extent.y, uv.x * extent.x); normal.x = -1.0; }
-    case 2u: { local = vec3<f32>(uv.x * extent.x, 1.0, uv.y * extent.y); normal.y = 1.0; }
+    case 2u: { local = vec3<f32>(uv.x * extent.x, frame.viewport_voxel.z, uv.y * extent.y); normal.y = 1.0; }
     case 3u: { local = vec3<f32>(uv.x * extent.x, 0.0, uv.y * extent.y); normal.y = -1.0; }
-    case 4u: { local = vec3<f32>(uv.x * extent.x, uv.y * extent.y, 1.0); normal.z = 1.0; }
+    case 4u: { local = vec3<f32>(uv.x * extent.x, uv.y * extent.y, frame.viewport_voxel.z); normal.z = 1.0; }
     default: { local = vec3<f32>(uv.x * extent.x, uv.y * extent.y, 0.0); normal.z = -1.0; }
   }
   let world = origin + local;
@@ -74,7 +73,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let light = 0.38 + diffuse * 0.62 + up;
   var color = material_color(input.material) * light;
   let distance_to_camera = distance(input.world, frame.camera_time.xyz);
-  let fog = smoothstep(105.0, 220.0, distance_to_camera);
+  let fog = smoothstep(frame.viewport_voxel.w * 0.62, frame.viewport_voxel.w, distance_to_camera);
   let fog_color = vec3<f32>(0.24, 0.39, 0.55);
   color = mix(color, fog_color, fog);
   return vec4<f32>(color, 1.0);

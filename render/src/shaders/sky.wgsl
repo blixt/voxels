@@ -1,8 +1,7 @@
 struct Frame {
   view_projection: mat4x4<f32>,
   camera_time: vec4<f32>,
-  viewport: vec2<f32>,
-  _pad: vec2<f32>,
+  viewport_voxel: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -16,7 +15,7 @@ fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-  let uv = position.xy / frame.viewport;
+  let uv = position.xy / frame.viewport_voxel.xy;
   let horizon = smoothstep(0.12, 0.82, uv.y);
   let pulse = sin(frame.camera_time.w * 0.12) * 0.018;
   let sky = mix(vec3<f32>(0.42, 0.68, 0.82), vec3<f32>(0.035, 0.08, 0.16), horizon);

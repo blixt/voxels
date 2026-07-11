@@ -6,7 +6,7 @@ use voxels_core::CameraState;
 use wasm_bindgen::JsValue;
 
 const DATABASE_NAME: &str = "voxels.db";
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct Store {
     connection: Connection,
@@ -33,12 +33,11 @@ impl Store {
                 "SELECT x, y, z, yaw, pitch FROM camera WHERE id = 0",
                 [],
                 |row| {
-                    Ok(CameraState {
-                        position: glam::Vec3::new(row.get(0)?, row.get(1)?, row.get(2)?),
-                        yaw: row.get(3)?,
-                        pitch: row.get(4)?,
-                        velocity: glam::Vec3::ZERO,
-                    })
+                    Ok(CameraState::from_persisted(
+                        glam::Vec3::new(row.get(0)?, row.get(1)?, row.get(2)?),
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
                 },
             )
             .optional()
@@ -103,10 +102,22 @@ fn migrate(connection: &Connection) -> Result<(), JsValue> {
                    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
                    PRIMARY KEY (world_id, x, y, z)
                  ) WITHOUT ROWID;
-                 PRAGMA user_version=1;
+                 PRAGMA user_version=2;
                  COMMIT;",
             )
             .map_err(|error| js_error("apply schema migration 1", error))?;
+    }
+    if version == 1 {
+        // Schema 1 stored positions in whole-voxel units. Schema 2 uses SI metres so that the
+        // 10 cm voxel resolution is explicit throughout simulation, rendering and persistence.
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE camera SET x=x*0.1, y=y*0.1, z=z*0.1;
+                 PRAGMA user_version=2;
+                 COMMIT;",
+            )
+            .map_err(|error| js_error("apply schema migration 2", error))?;
     }
     Ok(())
 }

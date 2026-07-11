@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use std::sync::Arc;
 use voxels_core::CameraState;
-use voxels_world::{ChunkCoord, Generator, mesh_chunk};
+use voxels_world::{CHUNK_EDGE, ChunkCoord, Generator, VOXEL_SIZE_METRES, mesh_chunk};
 use wgpu::util::DeviceExt;
 use wgpu::{
     Backends, BindGroup, Buffer, CurrentSurfaceTexture, Device, DeviceDescriptor, Instance,
@@ -17,8 +17,7 @@ const WORLD_RADIUS_CHUNKS: i32 = 3;
 struct FrameUniform {
     view_projection: [[f32; 4]; 4],
     camera_time: [f32; 4],
-    viewport: [f32; 2],
-    _pad: [f32; 2],
+    viewport_voxel: [f32; 4],
 }
 
 #[repr(C)]
@@ -272,12 +271,15 @@ fn build_initial_world(seed: u64) -> Vec<GpuQuad> {
                 let quads = mesh_chunk(&chunk, |x, y, z| generator.sample(x, y, z));
                 gpu_quads.extend(quads.into_iter().map(|quad| GpuQuad {
                     origin: [
-                        (world_origin[0] + i32::from(quad.origin[0])) as f32,
-                        (world_origin[1] + i32::from(quad.origin[1])) as f32,
-                        (world_origin[2] + i32::from(quad.origin[2])) as f32,
+                        (world_origin[0] + i32::from(quad.origin[0])) as f32 * VOXEL_SIZE_METRES,
+                        (world_origin[1] + i32::from(quad.origin[1])) as f32 * VOXEL_SIZE_METRES,
+                        (world_origin[2] + i32::from(quad.origin[2])) as f32 * VOXEL_SIZE_METRES,
                     ],
                     face: u32::from(quad.face),
-                    extent: [f32::from(quad.extent[0]), f32::from(quad.extent[1])],
+                    extent: [
+                        f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
+                        f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
+                    ],
                     material: u32::from(quad.material),
                 }));
             }
@@ -289,7 +291,7 @@ fn build_initial_world(seed: u64) -> Vec<GpuQuad> {
 fn frame_uniform(config: &SurfaceConfiguration, camera: &CameraState, time: f32) -> FrameUniform {
     let aspect = config.width as f32 / config.height.max(1) as f32;
     let projection =
-        glam::camera::rh::proj::directx::perspective(65.0f32.to_radians(), aspect, 0.1, 800.0);
+        glam::camera::rh::proj::directx::perspective(68.0f32.to_radians(), aspect, 0.01, 80.0);
     let view =
         glam::camera::rh::view::look_to_mat4(camera.position, camera.forward(), glam::Vec3::Y);
     FrameUniform {
@@ -300,8 +302,12 @@ fn frame_uniform(config: &SurfaceConfiguration, camera: &CameraState, time: f32)
             camera.position.z,
             time,
         ],
-        viewport: [config.width as f32, config.height as f32],
-        _pad: [0.0; 2],
+        viewport_voxel: [
+            config.width as f32,
+            config.height as f32,
+            VOXEL_SIZE_METRES,
+            WORLD_RADIUS_CHUNKS as f32 * CHUNK_EDGE as f32 * VOXEL_SIZE_METRES,
+        ],
     }
 }
 

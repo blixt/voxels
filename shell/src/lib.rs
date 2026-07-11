@@ -12,6 +12,7 @@ mod web {
     use std::rc::Rc;
     use voxels_core::{CameraState, InputState};
     use voxels_render::renderer::Renderer;
+    use voxels_world::{Generator, VOXEL_SIZE_METRES};
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
@@ -39,6 +40,7 @@ mod web {
     const KIND_POINTER_MOVE: u8 = 1;
     const KIND_KEY_DOWN: u8 = 4;
     const KIND_KEY_UP: u8 = 5;
+    const KIND_CANCEL: u8 = 6;
 
     fn log_gpu_error(message: &str) {
         web_sys::console::error_1(&JsValue::from_str(message));
@@ -48,6 +50,7 @@ mod web {
         renderer: RefCell<Renderer>,
         camera: RefCell<CameraState>,
         input: RefCell<InputState>,
+        generator: Generator,
         store: RefCell<Store>,
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
@@ -92,7 +95,9 @@ mod web {
                 ((time - last).max(0.0) / 1000.0) as f32
             };
             let mut camera = self.camera.borrow_mut();
-            camera.update(&self.input.borrow(), dt);
+            camera.update(&self.input.borrow(), dt, VOXEL_SIZE_METRES, |x, y, z| {
+                self.generator.sample(x, y, z).is_solid()
+            });
             self.renderer.borrow_mut().render(dt, &camera);
             if time - self.last_persist.get() >= 1_000.0 {
                 if let Err(error) = self.store.borrow().save_camera(&camera) {
@@ -128,6 +133,7 @@ mod web {
                         .look(Vec2::new(record.dx, record.dy)),
                     KIND_KEY_DOWN => self.input.borrow_mut().set_key(record.code, true),
                     KIND_KEY_UP => self.input.borrow_mut().set_key(record.code, false),
+                    KIND_CANCEL => self.input.borrow_mut().clear(),
                     _ => {}
                 }
             }
@@ -156,7 +162,7 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 6], |engine| {
+            let values = self.engine.as_ref().map_or([0.0; 7], |engine| {
                 let camera = engine.camera.borrow();
                 [
                     camera.position.x,
@@ -164,6 +170,7 @@ mod web {
                     camera.position.z,
                     camera.yaw,
                     camera.pitch,
+                    if camera.grounded { 1.0 } else { 0.0 },
                     engine.renderer.borrow().quad_count() as f32,
                 ]
             });
@@ -193,8 +200,16 @@ mod web {
         console_error_panic_hook::set_once();
         let width = (css_width * dpr).round().max(1.0) as u32;
         let height = (css_height * dpr).round().max(1.0) as u32;
+        let generator = Generator::new(WORLD_SEED);
         let store = Store::open(WORLD_SEED, voxels_world::generation::GENERATOR_VERSION).await?;
-        let camera = store.load_camera()?.unwrap_or_default();
+        let spawn_z = 5.2;
+        let spawn_voxel_z = (spawn_z / VOXEL_SIZE_METRES).floor() as i32;
+        let spawn_y = (generator.surface_height(0, spawn_voxel_z) + 1) as f32 * VOXEL_SIZE_METRES
+            + voxels_core::PLAYER_EYE_HEIGHT_METRES
+            + 0.02;
+        let camera = store
+            .load_camera()?
+            .unwrap_or_else(|| CameraState::spawn(glam::Vec3::new(0.0, spawn_y, spawn_z)));
         let renderer = Renderer::new(
             wgpu::SurfaceTarget::OffscreenCanvas(canvas),
             width,
@@ -209,6 +224,7 @@ mod web {
             renderer: RefCell::new(renderer),
             camera: RefCell::new(camera),
             input: RefCell::new(InputState::default()),
+            generator,
             store: RefCell::new(store),
             scope,
             callback: RefCell::new(None),

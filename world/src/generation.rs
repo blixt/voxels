@@ -39,10 +39,7 @@ impl Generator {
         if y < -16 {
             return Material::Basalt;
         }
-        let continental = self.fractal_2d(x, z, 96, 4, 0x71a9);
-        let detail = self.fractal_2d(x, z, 24, 3, 0x2d31);
-        let ridge = 1.0 - (self.value_2d(x, z, 54, 0xc43b) * 2.0 - 1.0).abs();
-        let height = (10.0 + continental * 15.0 + detail * 5.0 + ridge * ridge * 9.0) as i32;
+        let height = self.surface_height(x, z);
         if y > height {
             return Material::Air;
         }
@@ -80,6 +77,13 @@ impl Generator {
         } else {
             Material::Stone
         }
+    }
+
+    pub fn surface_height(self, x: i32, z: i32) -> i32 {
+        let continental = self.fractal_2d(x, z, 96, 4, 0x71a9);
+        let detail = self.fractal_2d(x, z, 24, 3, 0x2d31);
+        let ridge = 1.0 - (self.value_2d(x, z, 54, 0xc43b) * 2.0 - 1.0).abs();
+        (10.0 + continental * 15.0 + detail * 5.0 + ridge * ridge * 9.0) as i32
     }
 
     fn fractal_2d(self, x: i32, z: i32, scale: i32, octaves: u32, salt: u64) -> f32 {

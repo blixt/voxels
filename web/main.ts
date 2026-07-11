@@ -203,6 +203,26 @@ function start(root: HTMLElement): void {
   window.addEventListener("keyup", (event) => {
     if (keyCode(event.code) !== 0) enqueue(keySample(event, INPUT_KEY_UP), true);
   });
+  const cancelInput = (): void => {
+    enqueue(
+      {
+        kind: INPUT_CANCEL,
+        code: 0,
+        buttons: 0,
+        x: 0,
+        y: 0,
+        dx: 0,
+        dy: 0,
+        time: performance.now(),
+        flags: 0,
+      },
+      true,
+    );
+  };
+  window.addEventListener("blur", cancelInput);
+  document.addEventListener("pointerlockchange", () => {
+    if (document.pointerLockElement !== canvas) cancelInput();
+  });
 
   const resize = new ResizeObserver(([entry]) => {
     if (!entry) return;
