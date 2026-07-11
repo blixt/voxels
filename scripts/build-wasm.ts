@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = process.cwd();
@@ -36,11 +36,58 @@ export function rustTool(name: string): string {
   return existsSync(installed) ? installed : name;
 }
 
+export function wasmCcEnv(): Record<string, string> {
+  const override = process.env.CC_wasm32_unknown_unknown;
+  if (override) {
+    return {
+      CC_wasm32_unknown_unknown: override,
+      AR_wasm32_unknown_unknown:
+        process.env.AR_wasm32_unknown_unknown ?? siblingLlvmAr(override) ?? "llvm-ar",
+    };
+  }
+  for (const compiler of [
+    "/opt/homebrew/opt/llvm/bin/clang",
+    "/usr/local/opt/llvm/bin/clang",
+    "clang",
+  ]) {
+    if (emitsWasm(compiler)) {
+      return {
+        CC_wasm32_unknown_unknown: compiler,
+        AR_wasm32_unknown_unknown: siblingLlvmAr(compiler) ?? "llvm-ar",
+      };
+    }
+  }
+  return {};
+}
+
+function siblingLlvmAr(compiler: string): string | null {
+  if (!compiler.includes("/")) return null;
+  const archiver = join(dirname(compiler), "llvm-ar");
+  return existsSync(archiver) ? archiver : null;
+}
+
+function emitsWasm(compiler: string): boolean {
+  try {
+    execFileSync(
+      compiler,
+      ["--target=wasm32-unknown-unknown", "-x", "c", "-c", "-o", "/dev/null", "-"],
+      { input: "int probe(void){return 0;}", stdio: ["pipe", "ignore", "ignore"] },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function run(command: string, args: string[]): void {
   execFileSync(command, args, {
     cwd: ROOT,
     stdio: "inherit",
-    env: { ...process.env, PATH: `${CARGO_BIN}:${process.env.PATH ?? ""}` },
+    env: {
+      ...process.env,
+      PATH: `${CARGO_BIN}:${process.env.PATH ?? ""}`,
+      ...wasmCcEnv(),
+    },
   });
 }
 

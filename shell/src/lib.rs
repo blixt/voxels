@@ -1,7 +1,10 @@
 //! Browser/WASM leaf for Voxels. The worker owns the renderer, clock, input semantics, and persistence.
 
 #[cfg(target_arch = "wasm32")]
+mod persist;
+#[cfg(target_arch = "wasm32")]
 mod web {
+    use crate::persist::Store;
     use bytemuck::{Pod, Zeroable};
     use glam::Vec2;
     use js_sys::Float32Array;
@@ -12,6 +15,8 @@ mod web {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
+
+    const WORLD_SEED: u64 = 0x5eed_cafe;
 
     type FrameCallback = Closure<dyn FnMut(f64)>;
 
@@ -43,10 +48,12 @@ mod web {
         renderer: RefCell<Renderer>,
         camera: RefCell<CameraState>,
         input: RefCell<InputState>,
+        store: RefCell<Store>,
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
         frame_id: Cell<i32>,
         last_time: Cell<f64>,
+        last_persist: Cell<f64>,
         stopped: Cell<bool>,
     }
 
@@ -87,6 +94,12 @@ mod web {
             let mut camera = self.camera.borrow_mut();
             camera.update(&self.input.borrow(), dt);
             self.renderer.borrow_mut().render(dt, &camera);
+            if time - self.last_persist.get() >= 1_000.0 {
+                if let Err(error) = self.store.borrow().save_camera(&camera) {
+                    web_sys::console::error_1(&error);
+                }
+                self.last_persist.set(time);
+            }
             if let Err(error) = self.request_frame() {
                 web_sys::console::error_1(&error);
                 self.stopped.set(true);
@@ -94,6 +107,9 @@ mod web {
         }
 
         fn stop(&self) {
+            if let Err(error) = self.store.borrow().save_camera(&self.camera.borrow()) {
+                web_sys::console::error_1(&error);
+            }
             self.stopped.set(true);
             let id = self.frame_id.replace(0);
             if id != 0 {
@@ -177,10 +193,13 @@ mod web {
         console_error_panic_hook::set_once();
         let width = (css_width * dpr).round().max(1.0) as u32;
         let height = (css_height * dpr).round().max(1.0) as u32;
+        let store = Store::open(WORLD_SEED, voxels_world::generation::GENERATOR_VERSION).await?;
+        let camera = store.load_camera()?.unwrap_or_default();
         let renderer = Renderer::new(
             wgpu::SurfaceTarget::OffscreenCanvas(canvas),
             width,
             height,
+            WORLD_SEED,
             log_gpu_error,
         )
         .await
@@ -188,12 +207,14 @@ mod web {
         let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
         let engine = Rc::new(Engine {
             renderer: RefCell::new(renderer),
-            camera: RefCell::new(CameraState::default()),
+            camera: RefCell::new(camera),
             input: RefCell::new(InputState::default()),
+            store: RefCell::new(store),
             scope,
             callback: RefCell::new(None),
             frame_id: Cell::new(0),
             last_time: Cell::new(0.0),
+            last_persist: Cell::new(0.0),
             stopped: Cell::new(false),
         });
         engine.start()?;

@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { rustTool } from "./build-wasm.ts";
+import { rustTool, wasmCcEnv } from "./build-wasm.ts";
 
-function cargo(args: string[]): void {
+function cargo(args: string[], env = process.env): void {
   execFileSync(rustTool("rustup"), ["run", "stable", "cargo", ...args], {
     stdio: "inherit",
+    env,
   });
 }
 
@@ -22,4 +23,7 @@ cargo([
   "-D",
   "warnings",
 ]);
-cargo(["clippy", "--workspace", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"]);
+cargo(["clippy", "--workspace", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"], {
+  ...process.env,
+  ...wasmCcEnv(),
+});

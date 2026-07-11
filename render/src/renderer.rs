@@ -52,6 +52,7 @@ impl Renderer {
         target: wgpu::SurfaceTarget<'static>,
         width: u32,
         height: u32,
+        world_seed: u64,
         log_error: fn(&str),
     ) -> Result<Self, String> {
         let instance = Instance::new(InstanceDescriptor {
@@ -159,7 +160,7 @@ impl Renderer {
             }),
         );
 
-        let quads = build_initial_world(0x5eed_cafe);
+        let quads = build_initial_world(world_seed);
         let quad_count = quads.len() as u32;
         let quad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("world quad instances"),
