@@ -12,16 +12,21 @@ struct VertexOut {
   @location(0) world: vec3<f32>,
   @location(1) normal: vec3<f32>,
   @location(2) @interpolate(flat) material: u32,
+  @location(3) ao: f32,
 };
 
-const CORNERS = array<vec2<f32>, 6>(
+const CORNERS = array<vec2<f32>, 4>(
   vec2<f32>(0.0, 0.0),
   vec2<f32>(1.0, 0.0),
   vec2<f32>(1.0, 1.0),
-  vec2<f32>(0.0, 0.0),
-  vec2<f32>(1.0, 1.0),
   vec2<f32>(0.0, 1.0),
 );
+const STANDARD_DIAGONAL = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
+const FLIPPED_DIAGONAL = array<u32, 6>(0u, 1u, 3u, 1u, 2u, 3u);
+
+fn corner_ao(packed: u32, corner: u32) -> f32 {
+  return f32((packed >> (corner * 2u)) & 3u) / 3.0;
+}
 
 @vertex
 fn vs_main(
@@ -30,8 +35,11 @@ fn vs_main(
   @location(1) face: u32,
   @location(2) extent: vec2<f32>,
   @location(3) material: u32,
+  @location(4) ao: u32,
 ) -> VertexOut {
-  let uv = CORNERS[vertex_index];
+  let flip = corner_ao(ao, 0u) + corner_ao(ao, 2u) > corner_ao(ao, 1u) + corner_ao(ao, 3u);
+  let corner = select(STANDARD_DIAGONAL[vertex_index], FLIPPED_DIAGONAL[vertex_index], flip);
+  let uv = CORNERS[corner];
   var local = vec3<f32>(0.0);
   var normal = vec3<f32>(0.0);
   switch face {
@@ -48,6 +56,7 @@ fn vs_main(
   out.world = world;
   out.normal = normal;
   out.material = material;
+  out.ao = corner_ao(ao, corner);
   return out;
 }
 
@@ -104,7 +113,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let cell = floor(input.world / frame.viewport_voxel.z);
   let grain = mix(0.88, 1.12, hash31(cell + vec3<f32>(f32(material) * 3.1)));
   let fine_grain = mix(0.96, 1.04, hash31(floor(input.world * 28.0)));
-  var color = material_color(material) * light * grain * fine_grain;
+  let ambient_occlusion = mix(0.52, 1.0, input.ao);
+  var color = material_color(material) * light * grain * fine_grain * ambient_occlusion;
   let distance_to_camera = distance(input.world, frame.camera_time.xyz);
   let distance_fog = smoothstep(frame.viewport_voxel.w * 0.58, frame.viewport_voxel.w, distance_to_camera);
   let height_fog = exp(-max(input.world.y, 0.0) * 0.16) * smoothstep(2.5, frame.viewport_voxel.w, distance_to_camera) * 0.18;

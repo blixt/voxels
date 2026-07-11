@@ -36,9 +36,10 @@ struct GpuQuad {
     face: u32,
     extent: [f32; 2],
     material: u32,
+    ao: u32,
 }
 
-const _: () = assert!(size_of::<GpuQuad>() == 28);
+const _: () = assert!(size_of::<GpuQuad>() == 32);
 
 struct ChunkMesh {
     allocation: Allocation,
@@ -248,6 +249,7 @@ impl Renderer {
                     f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
                 ],
                 material: u32::from(quad.material),
+                ao: u32::from(quad.ao),
             })
             .collect();
         let min = glam::Vec3::from_array(origin.map(|value| value as f32 * VOXEL_SIZE_METRES));
@@ -271,6 +273,7 @@ impl Renderer {
                     f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
                 ],
                 material: u32::from(quad.material.id()) | FAR_MATERIAL_FLAG,
+                ao: 0xff,
             })
             .collect();
         let [x, z] = coord.voxel_origin();
@@ -518,8 +521,7 @@ fn pipeline(
 }
 
 fn quad_layout() -> wgpu::VertexBufferLayout<'static> {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32, 2 => Float32x2, 3 => Uint32];
+    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32, 2 => Float32x2, 3 => Uint32, 4 => Uint32];
     wgpu::VertexBufferLayout {
         array_stride: size_of::<GpuQuad>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,

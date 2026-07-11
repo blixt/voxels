@@ -43,6 +43,11 @@ Coverage ownership overlaps deliberately: the far shell becomes fully opaque bef
 begin a screen-stable dithered fade. This keeps terrain covered while ensuring cross-chunk structures
 such as tree crowns and trunks leave the near representation together at its residency boundary.
 
+Near meshes also bake the established four-level voxel ambient-occlusion term from two side samples
+and the diagonal at each face corner. Four 2-bit values participate in the greedy merge key, and the
+renderer selects the lower-error triangle diagonal from opposing AO sums. A single 34³ occupancy halo
+makes visibility and AO sampling cache-local while preserving authoritative neighbor seams.
+
 The first persistent chunk format is versioned and little-endian:
 
 1. a small magic/version header and chunk coordinates;

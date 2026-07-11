@@ -16,16 +16,26 @@ pub struct Quad {
     pub face: u8,
     pub extent: [u8; 2],
     pub material: u16,
+    /// Four 2-bit corner values in (0,0), (1,0), (1,1), (0,1) order; 3 is unoccluded.
+    pub ao: u8,
+    pub _pad: u8,
 }
 
-const _: () = assert!(size_of::<Quad>() == 8);
+const _: () = assert!(size_of::<Quad>() == 10);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FaceKey {
+    material: Material,
+    ao: u8,
+}
 
 /// Greedily merges coplanar visible faces with the same material. `outside` samples world coordinates
 /// beyond this chunk, preventing hidden seam faces when neighboring chunks are resident or generated.
 pub fn mesh_chunk(chunk: &Chunk, outside: impl Fn(i32, i32, i32) -> Material) -> Vec<Quad> {
     let mut quads = Vec::new();
     let origin = chunk.coord().world_origin();
-    let mut mask = vec![Material::Air; CHUNK_EDGE * CHUNK_EDGE];
+    let occupancy = build_occupancy_halo(chunk, origin, &outside);
+    let mut mask = vec![FaceKey::default(); CHUNK_EDGE * CHUNK_EDGE];
     for face in 0..6 {
         let (axis, u_axis, v_axis, step) = face_axes(face);
         for slice in 0..CHUNK_EDGE {
@@ -34,28 +44,18 @@ pub fn mesh_chunk(chunk: &Chunk, outside: impl Fn(i32, i32, i32) -> Material) ->
                     let local = compose(axis, u_axis, v_axis, slice, u, v);
                     let material = chunk.get(local[0], local[1], local[2]);
                     if !material.is_solid() {
-                        mask[u + v * CHUNK_EDGE] = Material::Air;
+                        mask[u + v * CHUNK_EDGE] = FaceKey::default();
                         continue;
                     }
                     let mut neighbor = [local[0] as i32, local[1] as i32, local[2] as i32];
                     neighbor[axis] += step;
-                    let adjacent = if neighbor[axis] >= 0 && neighbor[axis] < CHUNK_EDGE as i32 {
-                        chunk.get(
-                            neighbor[0] as usize,
-                            neighbor[1] as usize,
-                            neighbor[2] as usize,
-                        )
+                    mask[u + v * CHUNK_EDGE] = if halo_solid(&occupancy, neighbor) {
+                        FaceKey::default()
                     } else {
-                        outside(
-                            origin[0] + neighbor[0],
-                            origin[1] + neighbor[1],
-                            origin[2] + neighbor[2],
-                        )
-                    };
-                    mask[u + v * CHUNK_EDGE] = if adjacent.is_solid() {
-                        Material::Air
-                    } else {
-                        material
+                        FaceKey {
+                            material,
+                            ao: face_ao(local, axis, u_axis, v_axis, step, &occupancy),
+                        }
                     };
                 }
             }
@@ -64,19 +64,19 @@ pub fn mesh_chunk(chunk: &Chunk, outside: impl Fn(i32, i32, i32) -> Material) ->
             while v < CHUNK_EDGE {
                 let mut u = 0;
                 while u < CHUNK_EDGE {
-                    let material = mask[u + v * CHUNK_EDGE];
-                    if !material.is_solid() {
+                    let key = mask[u + v * CHUNK_EDGE];
+                    if !key.material.is_solid() {
                         u += 1;
                         continue;
                     }
                     let mut width = 1;
-                    while u + width < CHUNK_EDGE && mask[u + width + v * CHUNK_EDGE] == material {
+                    while u + width < CHUNK_EDGE && mask[u + width + v * CHUNK_EDGE] == key {
                         width += 1;
                     }
                     let mut height = 1;
                     'height: while v + height < CHUNK_EDGE {
                         for offset in 0..width {
-                            if mask[u + offset + (v + height) * CHUNK_EDGE] != material {
+                            if mask[u + offset + (v + height) * CHUNK_EDGE] != key {
                                 break 'height;
                             }
                         }
@@ -84,7 +84,7 @@ pub fn mesh_chunk(chunk: &Chunk, outside: impl Fn(i32, i32, i32) -> Material) ->
                     }
                     for clear_v in v..v + height {
                         for clear_u in u..u + width {
-                            mask[clear_u + clear_v * CHUNK_EDGE] = Material::Air;
+                            mask[clear_u + clear_v * CHUNK_EDGE] = FaceKey::default();
                         }
                     }
                     let local = compose(axis, u_axis, v_axis, slice, u, v);
@@ -92,7 +92,9 @@ pub fn mesh_chunk(chunk: &Chunk, outside: impl Fn(i32, i32, i32) -> Material) ->
                         origin: [local[0] as u8, local[1] as u8, local[2] as u8],
                         face,
                         extent: [width as u8, height as u8],
-                        material: material.id(),
+                        material: key.material.id(),
+                        ao: key.ao,
+                        _pad: 0,
                     });
                     u += width;
                 }
@@ -101,6 +103,81 @@ pub fn mesh_chunk(chunk: &Chunk, outside: impl Fn(i32, i32, i32) -> Material) ->
         }
     }
     quads
+}
+
+fn build_occupancy_halo(
+    chunk: &Chunk,
+    origin: [i32; 3],
+    outside: &impl Fn(i32, i32, i32) -> Material,
+) -> Vec<bool> {
+    const HALO_EDGE: usize = CHUNK_EDGE + 2;
+    let mut occupancy = vec![false; HALO_EDGE * HALO_EDGE * HALO_EDGE];
+    for y in -1..=CHUNK_EDGE as i32 {
+        for z in -1..=CHUNK_EDGE as i32 {
+            for x in -1..=CHUNK_EDGE as i32 {
+                let inside = [x, y, z]
+                    .iter()
+                    .all(|value| *value >= 0 && *value < CHUNK_EDGE as i32);
+                let material = if inside {
+                    chunk.get(x as usize, y as usize, z as usize)
+                } else {
+                    outside(origin[0] + x, origin[1] + y, origin[2] + z)
+                };
+                let index = (x + 1) as usize
+                    + (z + 1) as usize * HALO_EDGE
+                    + (y + 1) as usize * HALO_EDGE * HALO_EDGE;
+                occupancy[index] = material.is_solid();
+            }
+        }
+    }
+    occupancy
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "face basis is explicit for deterministic AO sampling"
+)]
+fn face_ao(
+    local: [usize; 3],
+    axis: usize,
+    u_axis: usize,
+    v_axis: usize,
+    step: i32,
+    occupancy: &[bool],
+) -> u8 {
+    let mut base = local.map(|value| value as i32);
+    base[axis] += step;
+    let mut packed = 0;
+    for corner in 0..4 {
+        let high_u = corner == 1 || corner == 2;
+        let high_v = corner >= 2;
+        let du = if high_u { 1 } else { -1 };
+        let dv = if high_v { 1 } else { -1 };
+        let mut side_u = base;
+        side_u[u_axis] += du;
+        let mut side_v = base;
+        side_v[v_axis] += dv;
+        let mut diagonal = side_u;
+        diagonal[v_axis] += dv;
+        let side_u = halo_solid(occupancy, side_u);
+        let side_v = halo_solid(occupancy, side_v);
+        let diagonal = halo_solid(occupancy, diagonal);
+        let ao = if side_u && side_v {
+            0
+        } else {
+            3 - u8::from(side_u) - u8::from(side_v) - u8::from(diagonal)
+        };
+        packed |= ao << (corner * 2);
+    }
+    packed
+}
+
+fn halo_solid(occupancy: &[bool], local: [i32; 3]) -> bool {
+    const HALO_EDGE: usize = CHUNK_EDGE + 2;
+    let index = (local[0] + 1) as usize
+        + (local[2] + 1) as usize * HALO_EDGE
+        + (local[1] + 1) as usize * HALO_EDGE * HALO_EDGE;
+    occupancy[index]
 }
 
 fn face_axes(face: u8) -> (usize, usize, usize, i32) {
@@ -141,6 +218,7 @@ mod tests {
         let quads = mesh_chunk(&chunk, |_, _, _| Material::Air);
         assert_eq!(quads.len(), 6);
         assert!(quads.iter().all(|quad| quad.extent == [32, 32]));
+        assert!(quads.iter().all(|quad| quad.ao == 0xff));
     }
 
     #[test]
@@ -153,7 +231,9 @@ mod tests {
                 Material::Air
             }
         });
-        assert_eq!(quads.len(), 5);
+        // Neighbor occupancy also changes AO along the four adjoining faces, conservatively
+        // splitting their merge keys; the hidden positive-X face itself must still be absent.
+        assert!(quads.len() >= 5);
         assert!(!quads.iter().any(|quad| quad.face == FACE_POS_X));
     }
 
@@ -177,5 +257,23 @@ mod tests {
         let quads = mesh_chunk(&chunk, |_, _, _| Material::Air);
         let top = quads.iter().filter(|quad| quad.face == FACE_POS_Y).count();
         assert_eq!(top, CHUNK_EDGE * CHUNK_EDGE);
+    }
+
+    #[test]
+    fn two_corner_neighbors_fully_occlude_shared_vertex() {
+        let mut chunk = Chunk::empty(ChunkCoord::new(0, 0, 0));
+        chunk.set(1, 1, 1, Material::Stone);
+        chunk.set(0, 2, 1, Material::Stone);
+        chunk.set(1, 2, 0, Material::Stone);
+        let quads = mesh_chunk(&chunk, |_, _, _| Material::Air);
+        let target = quads.iter().find(|quad| {
+            quad.face == FACE_POS_Y
+                && quad.origin == [1, 1, 1]
+                && quad.material == Material::Stone.id()
+        });
+        assert!(target.is_some());
+        if let Some(target) = target {
+            assert_eq!(target.ao & 0b11, 0);
+        }
     }
 }
