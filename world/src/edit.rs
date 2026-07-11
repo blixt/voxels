@@ -43,6 +43,8 @@ impl VoxelCoord {
 #[derive(Clone, Debug, Default)]
 pub struct EditMap {
     overrides: BTreeMap<VoxelCoord, Material>,
+    chunk_overrides: BTreeMap<(i32, i32, i32), BTreeMap<[usize; 3], Material>>,
+    column_overrides: BTreeMap<(i32, i32), BTreeMap<i32, Material>>,
 }
 
 impl EditMap {
@@ -55,15 +57,15 @@ impl EditMap {
 
     pub fn set(&mut self, generator: Generator, coord: VoxelCoord, material: Material) {
         if generator.sample(coord.x, coord.y, coord.z) == material {
-            self.overrides.remove(&coord);
+            self.replace_override(coord, None);
         } else {
-            self.overrides.insert(coord, material);
+            self.replace_override(coord, Some(material));
         }
     }
 
     /// Used only when hydrating already validated durable rows.
     pub fn insert_override(&mut self, coord: VoxelCoord, material: Material) {
-        self.overrides.insert(coord, material);
+        self.replace_override(coord, Some(material));
     }
 
     pub fn override_at(&self, coord: VoxelCoord) -> Option<Material> {
@@ -80,11 +82,12 @@ impl EditMap {
 
     pub fn apply_to_chunk(&self, chunk: &mut Chunk) {
         let coord = chunk.coord();
-        for (voxel, material) in &self.overrides {
-            if voxel.chunk() == coord {
-                let [x, y, z] = voxel.local();
-                chunk.set(x, y, z, *material);
-            }
+        let key = (coord.x, coord.y, coord.z);
+        let Some(overrides) = self.chunk_overrides.get(&key) else {
+            return;
+        };
+        for (&[x, y, z], &material) in overrides {
+            chunk.set(x, y, z, material);
         }
     }
 
@@ -92,12 +95,13 @@ impl EditMap {
     /// derived from generator + edits rather than silently becoming a second world authority.
     pub fn surface_sample(&self, generator: Generator, x: i32, z: i32) -> (i32, Material) {
         let generated_height = generator.surface_height(x, z);
-        let highest_override = self
-            .overrides
-            .iter()
-            .filter(|(coord, material)| coord.x == x && coord.z == z && material.is_solid())
-            .map(|(coord, _)| coord.y)
-            .max();
+        let highest_override = self.column_overrides.get(&(x, z)).and_then(|column| {
+            column
+                .iter()
+                .rev()
+                .find(|(_, material)| material.is_solid())
+                .map(|(&y, _)| y)
+        });
         let mut y = highest_override.map_or(generated_height, |value| value.max(generated_height));
         loop {
             let material = self.sample(generator, VoxelCoord::new(x, y, z));
@@ -105,6 +109,49 @@ impl EditMap {
                 return (y, material);
             }
             y -= 1;
+        }
+    }
+
+    fn replace_override(&mut self, coord: VoxelCoord, material: Option<Material>) {
+        if self.overrides.get(&coord).copied() == material {
+            return;
+        }
+        let chunk = coord.chunk();
+        let chunk_key = (chunk.x, chunk.y, chunk.z);
+        let column_key = (coord.x, coord.z);
+        if let Some(material) = material {
+            self.overrides.insert(coord, material);
+            self.chunk_overrides
+                .entry(chunk_key)
+                .or_default()
+                .insert(coord.local(), material);
+            self.column_overrides
+                .entry(column_key)
+                .or_default()
+                .insert(coord.y, material);
+            return;
+        }
+
+        self.overrides.remove(&coord);
+        let remove_chunk = self
+            .chunk_overrides
+            .get_mut(&chunk_key)
+            .is_some_and(|chunk| {
+                chunk.remove(&coord.local());
+                chunk.is_empty()
+            });
+        if remove_chunk {
+            self.chunk_overrides.remove(&chunk_key);
+        }
+        let remove_column = self
+            .column_overrides
+            .get_mut(&column_key)
+            .is_some_and(|column| {
+                column.remove(&coord.y);
+                column.is_empty()
+            });
+        if remove_column {
+            self.column_overrides.remove(&column_key);
         }
     }
 
@@ -186,5 +233,31 @@ mod tests {
         );
         edits.set(generator, VoxelCoord::new(x, generated, z), Material::Air);
         assert_eq!(edits.surface_sample(generator, x, z).0, generated - 1);
+    }
+
+    #[test]
+    fn chunk_and_column_indices_follow_override_replacement() {
+        let generator = Generator::new(19);
+        let coord = VoxelCoord::new(-33, 65, 31);
+        let mut edits = EditMap::default();
+        edits.insert_override(coord, Material::Snow);
+        edits.insert_override(coord, Material::Basalt);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits.override_at(coord), Some(Material::Basalt));
+
+        let mut chunk = generator.generate_chunk(coord.chunk());
+        edits.apply_to_chunk(&mut chunk);
+        let [x, y, z] = coord.local();
+        assert_eq!(chunk.get(x, y, z), Material::Basalt);
+        assert_eq!(edits.surface_sample(generator, coord.x, coord.z).0, coord.y);
+
+        edits.set(
+            generator,
+            coord,
+            generator.sample(coord.x, coord.y, coord.z),
+        );
+        assert!(edits.is_empty());
+        assert!(edits.chunk_overrides.is_empty());
+        assert!(edits.column_overrides.is_empty());
     }
 }

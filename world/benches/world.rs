@@ -1,6 +1,9 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use voxels_world::codec::{decode_chunk, encode_chunk};
-use voxels_world::{ChunkCoord, FarTileCoord, Generator, generate_far_tile, mesh_chunk};
+use voxels_world::{
+    ChunkCoord, EditMap, FarTileCoord, Generator, Material, VoxelCoord, generate_far_tile,
+    generate_far_tile_with, mesh_chunk,
+};
 
 const SEED: u64 = 0x5eed_cafe;
 const COORD: ChunkCoord = ChunkCoord::new(2, 0, -3);
@@ -46,5 +49,28 @@ fn far_surface(criterion: &mut Criterion) {
     });
 }
 
-criterion_group!(world_benches, generation, codec, meshing, far_surface);
+fn edited_far_surface(criterion: &mut Criterion) {
+    let generator = Generator::new(SEED);
+    let coord = FarTileCoord::new(2, -3);
+    let mut edits = EditMap::default();
+    for index in 0..10_000 {
+        edits.insert_override(
+            VoxelCoord::new(1_000_000 + index, 80, 1_000_000 - index),
+            Material::Stone,
+        );
+    }
+    criterion.bench_function("generate far tile with 10k unrelated edits", |bencher| {
+        bencher
+            .iter(|| generate_far_tile_with(coord, |x, z| edits.surface_sample(generator, x, z)));
+    });
+}
+
+criterion_group!(
+    world_benches,
+    generation,
+    codec,
+    meshing,
+    far_surface,
+    edited_far_surface
+);
 criterion_main!(world_benches);
