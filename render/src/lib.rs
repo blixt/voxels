@@ -2,6 +2,7 @@
 
 mod arena;
 pub mod environment;
+pub mod lod;
 pub mod renderer;
 pub mod shadow;
 pub mod ui;
