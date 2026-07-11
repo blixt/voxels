@@ -14,6 +14,7 @@ pub const CHUNK_EDGE_METRES: f32 = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
 
 const MAX_LOAD_RADIUS_CHUNKS: i32 = 64;
 const MAX_VERTICAL_RADIUS_CHUNKS: i32 = 32;
+const LATENCY_HISTOGRAM_BUCKETS: usize = 256;
 
 type CoordKey = (i32, i32, i32);
 
@@ -133,6 +134,19 @@ pub struct StageCounts {
     pub in_flight: usize,
 }
 
+/// Lifetime latency summary measured in calls to [`StreamScheduler::schedule_frame`].
+///
+/// Frame counts make the metric deterministic and independent of host clock precision. The p95
+/// value is exact for samples below 255 frames. If the p95 falls in the final overflow bucket it
+/// conservatively reports the lifetime maximum instead.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FrameLatency {
+    pub completed: u64,
+    pub in_flight: usize,
+    pub p95_frames: u64,
+    pub max_frames: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StreamDiagnostics {
     pub frame: u64,
@@ -146,6 +160,67 @@ pub struct StreamDiagnostics {
     pub stale_completions: u64,
     pub total_evictions: u64,
     pub started_this_frame: FrameBudget,
+    /// First tracking of a desired chunk through its first accepted resident upload.
+    pub initial_residency_latency: FrameLatency,
+    /// Invalidation of a previously resident chunk through its replacement resident upload.
+    pub remesh_latency: FrameLatency,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LatencyHistogram {
+    buckets: [u64; LATENCY_HISTOGRAM_BUCKETS],
+    completed: u64,
+    max_frames: u64,
+}
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self {
+            buckets: [0; LATENCY_HISTOGRAM_BUCKETS],
+            completed: 0,
+            max_frames: 0,
+        }
+    }
+}
+
+impl LatencyHistogram {
+    fn record(&mut self, frames: u64) {
+        let last_bucket = LATENCY_HISTOGRAM_BUCKETS - 1;
+        let bucket = usize::try_from(frames)
+            .unwrap_or(last_bucket)
+            .min(last_bucket);
+        self.buckets[bucket] = self.buckets[bucket].saturating_add(1);
+        self.completed = self.completed.saturating_add(1);
+        self.max_frames = self.max_frames.max(frames);
+    }
+
+    fn summary(&self, in_flight: usize) -> FrameLatency {
+        FrameLatency {
+            completed: self.completed,
+            in_flight,
+            p95_frames: self.percentile(95),
+            max_frames: self.max_frames,
+        }
+    }
+
+    fn percentile(&self, percentile: u64) -> u64 {
+        if self.completed == 0 {
+            return 0;
+        }
+        let rank = ((u128::from(self.completed) * u128::from(percentile)).div_ceil(100)) as u64;
+        let mut cumulative = 0_u64;
+        for (index, count) in self.buckets.iter().copied().enumerate() {
+            cumulative = cumulative.saturating_add(count);
+            if cumulative >= rank {
+                return if index == LATENCY_HISTOGRAM_BUCKETS - 1 {
+                    self.max_frames
+                } else {
+                    index as u64
+                };
+            }
+        }
+        self.max_frames
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -190,6 +265,9 @@ struct Entry {
     state: State,
     revision: u64,
     desired: bool,
+    initial_residency_started_frame: Option<u64>,
+    remesh_started_frame: Option<u64>,
+    ever_resident: bool,
 }
 
 /// Deterministic metadata scheduler for the chunk generation -> meshing -> upload pipeline.
@@ -204,6 +282,8 @@ pub struct StreamScheduler {
     stale_completions: u64,
     total_evictions: u64,
     started_this_frame: FrameBudget,
+    initial_residency_latency: LatencyHistogram,
+    remesh_latency: LatencyHistogram,
 }
 
 impl StreamScheduler {
@@ -238,6 +318,8 @@ impl StreamScheduler {
             stale_completions: 0,
             total_evictions: 0,
             started_this_frame: FrameBudget::default(),
+            initial_residency_latency: LatencyHistogram::default(),
+            remesh_latency: LatencyHistogram::default(),
         })
     }
 
@@ -290,6 +372,9 @@ impl StreamScheduler {
                         state: State::QueuedGeneration,
                         revision: 1,
                         desired: true,
+                        initial_residency_started_frame: Some(self.frame),
+                        remesh_started_frame: None,
+                        ever_resident: false,
                     },
                 );
             }
@@ -334,6 +419,17 @@ impl StreamScheduler {
         if let Some(next_state) = next {
             if let Some(entry) = self.entries.get_mut(&key) {
                 entry.state = next_state;
+                if next_state == State::Resident {
+                    if let Some(started_frame) = entry.initial_residency_started_frame.take() {
+                        self.initial_residency_latency
+                            .record(elapsed_frames(started_frame, self.frame));
+                    }
+                    if let Some(started_frame) = entry.remesh_started_frame.take() {
+                        self.remesh_latency
+                            .record(elapsed_frames(started_frame, self.frame));
+                    }
+                    entry.ever_resident = true;
+                }
             }
             self.accepted_completions = increment_nonzero(self.accepted_completions);
             CompletionStatus::Accepted
@@ -384,6 +480,9 @@ impl StreamScheduler {
             if entry.state == State::Resident {
                 report.previously_resident.push(coord);
             }
+            if entry.ever_resident {
+                entry.remesh_started_frame = Some(self.frame);
+            }
             entry.revision = increment_nonzero(entry.revision);
             entry.state = match entry.state {
                 State::QueuedGeneration | State::Generating(_) => State::QueuedGeneration,
@@ -420,10 +519,16 @@ impl StreamScheduler {
             stale_completions: self.stale_completions,
             total_evictions: self.total_evictions,
             started_this_frame: self.started_this_frame,
+            initial_residency_latency: self.initial_residency_latency.summary(0),
+            remesh_latency: self.remesh_latency.summary(0),
             ..StreamDiagnostics::default()
         };
         for entry in self.entries.values() {
             diagnostics.desired += usize::from(entry.desired);
+            diagnostics.initial_residency_latency.in_flight +=
+                usize::from(entry.initial_residency_started_frame.is_some());
+            diagnostics.remesh_latency.in_flight +=
+                usize::from(entry.remesh_started_frame.is_some());
             match entry.state {
                 State::QueuedGeneration => diagnostics.generation.queued += 1,
                 State::Generating(_) => diagnostics.generation.in_flight += 1,
@@ -567,6 +672,15 @@ const fn increment_nonzero(value: u64) -> u64 {
     if incremented == 0 { 1 } else { incremented }
 }
 
+const fn elapsed_frames(start: u64, end: u64) -> u64 {
+    if end >= start {
+        end - start
+    } else {
+        // The scheduler frame counter skips zero when it wraps.
+        u64::MAX - start + end
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,6 +788,162 @@ mod tests {
         let diagnostics = scheduler.diagnostics();
         assert_eq!(diagnostics.resident, 1);
         assert_eq!(diagnostics.accepted_completions, 3);
+    }
+
+    #[test]
+    fn initial_residency_latency_counts_scheduler_frames() {
+        let focus = ChunkCoord::new(4, -2, 7);
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: 1,
+        });
+        scheduler.update_focus(focus);
+
+        assert_eq!(
+            scheduler.diagnostics().initial_residency_latency,
+            FrameLatency {
+                completed: 0,
+                in_flight: 1,
+                p95_frames: 0,
+                max_frames: 0,
+            }
+        );
+
+        advance_to_resident(&mut scheduler, focus);
+        assert_eq!(
+            scheduler.diagnostics().initial_residency_latency,
+            FrameLatency {
+                completed: 1,
+                in_flight: 0,
+                p95_frames: 3,
+                max_frames: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn remesh_latency_starts_at_edit_and_ends_at_replacement_upload() {
+        let coord = ChunkCoord::new(0, 0, 0);
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: 1,
+        });
+        scheduler.update_focus(coord);
+        advance_to_resident(&mut scheduler, coord);
+
+        let report = scheduler.mark_voxel_edited(VoxelCoord::new(2, 2, 2));
+        assert_eq!(report.previously_resident, vec![coord]);
+        assert_eq!(scheduler.diagnostics().remesh_latency.in_flight, 1);
+
+        let mesh = scheduler.schedule_frame(FrameBudget {
+            meshing: 1,
+            ..FrameBudget::default()
+        });
+        assert_eq!(
+            scheduler.complete(mesh.meshing[0]),
+            CompletionStatus::Accepted
+        );
+        assert_eq!(scheduler.diagnostics().remesh_latency.completed, 0);
+
+        let upload = scheduler.schedule_frame(FrameBudget {
+            upload: 1,
+            ..FrameBudget::default()
+        });
+        assert_eq!(
+            scheduler.complete(upload.upload[0]),
+            CompletionStatus::Accepted
+        );
+        assert_eq!(
+            scheduler.diagnostics().remesh_latency,
+            FrameLatency {
+                completed: 1,
+                in_flight: 0,
+                p95_frames: 2,
+                max_frames: 2,
+            }
+        );
+        assert_eq!(
+            scheduler.diagnostics().initial_residency_latency.completed,
+            1
+        );
+    }
+
+    #[test]
+    fn superseded_remesh_only_records_the_replacement_revision() {
+        let coord = ChunkCoord::new(0, 0, 0);
+        let voxel = VoxelCoord::new(2, 2, 2);
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: 1,
+        });
+        scheduler.update_focus(coord);
+        advance_to_resident(&mut scheduler, coord);
+        scheduler.mark_voxel_edited(voxel);
+
+        let first_mesh = scheduler.schedule_frame(FrameBudget {
+            meshing: 1,
+            ..FrameBudget::default()
+        });
+        let stale_ticket = first_mesh.meshing[0];
+        scheduler.mark_voxel_edited(voxel);
+        assert_eq!(scheduler.complete(stale_ticket), CompletionStatus::Stale);
+        assert_eq!(scheduler.diagnostics().remesh_latency.completed, 0);
+
+        let replacement_mesh = scheduler.schedule_frame(FrameBudget {
+            meshing: 1,
+            ..FrameBudget::default()
+        });
+        assert_eq!(
+            scheduler.complete(replacement_mesh.meshing[0]),
+            CompletionStatus::Accepted
+        );
+        let replacement_upload = scheduler.schedule_frame(FrameBudget {
+            upload: 1,
+            ..FrameBudget::default()
+        });
+        assert_eq!(
+            scheduler.complete(replacement_upload.upload[0]),
+            CompletionStatus::Accepted
+        );
+        assert_eq!(scheduler.diagnostics().remesh_latency.completed, 1);
+        assert_eq!(scheduler.diagnostics().remesh_latency.p95_frames, 2);
+    }
+
+    #[test]
+    fn latency_histogram_reports_exact_p95_and_conservative_overflow() {
+        let mut histogram = LatencyHistogram::default();
+        for frames in 1..=100 {
+            histogram.record(frames);
+        }
+        assert_eq!(
+            histogram.summary(7),
+            FrameLatency {
+                completed: 100,
+                in_flight: 7,
+                p95_frames: 95,
+                max_frames: 100,
+            }
+        );
+
+        let mut overflow = LatencyHistogram::default();
+        for frames in 300..=399 {
+            overflow.record(frames);
+        }
+        assert_eq!(overflow.summary(0).p95_frames, 399);
+        assert_eq!(overflow.summary(0).max_frames, 399);
+    }
+
+    #[test]
+    fn elapsed_frame_count_handles_the_nonzero_counter_wrap() {
+        assert_eq!(elapsed_frames(12, 19), 7);
+        assert_eq!(elapsed_frames(u64::MAX, 1), 1);
+        assert_eq!(elapsed_frames(u64::MAX - 2, 2), 4);
     }
 
     #[test]
