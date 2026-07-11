@@ -28,7 +28,6 @@ struct FrameUniform {
     camera_time: [f32; 4],
     viewport_voxel: [f32; 4],
     target_voxel: [f32; 4],
-    render_options: [f32; 4],
 }
 
 #[repr(C)]
@@ -77,26 +76,6 @@ pub struct Renderer {
     time: f32,
     diagnostics: RenderDiagnostics,
     target_voxel: Option<[i32; 3]>,
-    options: RenderOptions,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct RenderOptions {
-    ambient_occlusion: bool,
-    fog: bool,
-    far_terrain: bool,
-    target_outline: bool,
-}
-
-impl Default for RenderOptions {
-    fn default() -> Self {
-        Self {
-            ambient_occlusion: true,
-            fog: true,
-            far_terrain: true,
-            target_outline: true,
-        }
-    }
 }
 
 impl Renderer {
@@ -148,8 +127,7 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        let options = RenderOptions::default();
-        let frame = frame_uniform(&config, &CameraState::default(), 0.0, None, options);
+        let frame = frame_uniform(&config, &CameraState::default(), 0.0, None);
         let frame_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("frame uniform"),
             contents: bytemuck::bytes_of(&frame),
@@ -232,7 +210,6 @@ impl Renderer {
             time: 0.0,
             diagnostics: RenderDiagnostics::default(),
             target_voxel: None,
-            options,
         })
     }
 
@@ -256,16 +233,6 @@ impl Renderer {
 
     pub const fn set_target_voxel(&mut self, target: Option<[i32; 3]>) {
         self.target_voxel = target;
-    }
-
-    pub fn set_option(&mut self, code: u8, enabled: bool) {
-        match code {
-            1 => self.options.ambient_occlusion = enabled,
-            2 => self.options.fog = enabled,
-            3 => self.options.far_terrain = enabled,
-            4 => self.options.target_outline = enabled,
-            _ => {}
-        }
     }
 
     pub fn upload_chunk(&mut self, coord: ChunkCoord, quads: &[Quad]) -> bool {
@@ -395,13 +362,7 @@ impl Renderer {
 
     pub fn render(&mut self, dt: f32, camera: &CameraState) {
         self.time += dt.min(0.1);
-        let uniform = frame_uniform(
-            &self.config,
-            camera,
-            self.time,
-            self.target_voxel,
-            self.options,
-        );
+        let uniform = frame_uniform(&self.config, camera, self.time, self.target_voxel);
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -453,10 +414,7 @@ impl Renderer {
             pass.set_pipeline(&self.voxel_pipeline);
             let mut visible_chunks = 0;
             let mut visible_quads = 0;
-            for (key, chunk) in &self.chunks {
-                if key.0 == 1 && !self.options.far_terrain {
-                    continue;
-                }
+            for chunk in self.chunks.values() {
                 if !aabb_visible(chunk.bounds_min, chunk.bounds_max, view_projection) {
                     continue;
                 }
@@ -491,7 +449,6 @@ fn frame_uniform(
     camera: &CameraState,
     time: f32,
     target: Option<[i32; 3]>,
-    options: RenderOptions,
 ) -> FrameUniform {
     let view_projection = view_projection(config, camera);
     FrameUniform {
@@ -512,12 +469,6 @@ fn frame_uniform(
         target_voxel: target.map_or([0.0; 4], |value| {
             [value[0] as f32, value[1] as f32, value[2] as f32, 1.0]
         }),
-        render_options: [
-            if options.ambient_occlusion { 1.0 } else { 0.0 },
-            if options.fog { 1.0 } else { 0.0 },
-            if options.far_terrain { 1.0 } else { 0.0 },
-            if options.target_outline { 1.0 } else { 0.0 },
-        ],
     }
 }
 

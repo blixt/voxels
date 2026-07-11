@@ -20,8 +20,7 @@ rendering, persistence, and binary codecs live in Rust.
 - `shell/` is the `wasm32-unknown-unknown` leaf. It owns the `wasm-bindgen` API, the transferred
   `OffscreenCanvas`, worker animation clock, packed input decoding, and OPFS persistence.
 - `web/` is the deliberately thin browser harness. Input is batched into fixed-size binary records and
-  transferred to the worker. Its reusable glass control deck only presents Rust snapshots and emits
-  renderer-option commands; semantic world state and feature behavior do not cross into TypeScript.
+  transferred to the worker; semantic actions and world state do not cross into TypeScript.
 
 The renderer and simulation run together in one dedicated worker. The shell advances runtime-issued
 generation, meshing, and upload tickets under independent frame budgets, while the renderer only owns

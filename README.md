@@ -37,8 +37,6 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 - Look with the mouse; <kbd>Esc</kbd> releases pointer lock.
 - Remove the targeted voxel with the left mouse button; place a grass voxel with the right mouse
   button. Sparse edits are saved transactionally in SQLite on OPFS.
-- Press <kbd>F3</kbd> to open Mission Control. Its live Rust/WGPU telemetry, frame history, renderer
-  feature switches, context menu, and compact mode are also available from the top-right glass pill.
 
 ## Automation
 
@@ -47,6 +45,4 @@ state, resident greedy-quad count, persisted edit count, resident chunk count, a
 count, followed by visible chunks, draw calls, arena pages, allocated/capacity MiB, and queued stream
 work and far-tile residency. It is intentionally a diagnostic view rather than a second JavaScript
 game model. The final value is exponentially smoothed display-frame cadence in milliseconds.
-`window.__VOXELS__.setOption(code, enabled)` drives the same Rust renderer feature switches used by
-Mission Control; `window.__VOXELS__.toggleControls()` opens or closes it. Add `?controls` (or the
-legacy `?diagnostics`) to the URL to start with the deck open.
+Press <kbd>F3</kbd> to toggle the compact diagnostics overlay, or add `?diagnostics` to the URL.

@@ -12,7 +12,6 @@ import {
   type InputSample,
   type ToWorker,
 } from "./protocol.ts";
-import { createGlassControlDeck } from "./ui.ts";
 
 type TypedWorker = Omit<Worker, "onmessage" | "postMessage"> & {
   onmessage: ((event: MessageEvent<FromWorker>) => void) | null;
@@ -51,53 +50,42 @@ function start(root: HTMLElement): void {
   let nextSnapshotRequest = 1;
   const snapshotResolvers = new Map<number, (values: number[]) => void>();
   const debugGlobal = globalThis as typeof globalThis & {
-    __VOXELS__?: {
-      snapshot(): Promise<number[]>;
-      setOption(code: number, enabled: boolean): void;
-      toggleControls(): void;
-    };
+    __VOXELS__?: { snapshot(): Promise<number[]> };
   };
-  const requestSnapshot = (): Promise<number[]> =>
-    new Promise<number[]>((resolve) => {
-      const requestId = nextSnapshotRequest;
-      nextSnapshotRequest += 1;
-      snapshotResolvers.set(requestId, resolve);
-      worker.postMessage({ kind: "snapshot", requestId });
-    });
-  const query = new URLSearchParams(location.search);
-  const controls = createGlassControlDeck({
-    mount: root,
-    initiallyOpen: query.has("controls") || query.has("diagnostics"),
-    requestSnapshot,
-    setOption: (code, enabled) => worker.postMessage({ kind: "option", code, enabled }),
-    toggles: [
-      {
-        code: 1,
-        label: "Voxel ambient occlusion",
-        detail: "Corner-baked contact depth",
-      },
-      {
-        code: 2,
-        label: "Atmospheric fog",
-        detail: "Distance and lowland haze",
-      },
-      {
-        code: 3,
-        label: "Distant terrain",
-        detail: "Streamed far-field surface LOD",
-      },
-      {
-        code: 4,
-        label: "Target outline",
-        detail: "Editable 10 cm voxel focus",
-      },
-    ],
-  });
   debugGlobal.__VOXELS__ = {
-    snapshot: requestSnapshot,
-    setOption: (code, enabled) => worker.postMessage({ kind: "option", code, enabled }),
-    toggleControls: () => controls.toggle(),
+    snapshot: () =>
+      new Promise<number[]>((resolve) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        snapshotResolvers.set(requestId, resolve);
+        worker.postMessage({ kind: "snapshot", requestId });
+      }),
   };
+  const diagnostics = document.createElement("output");
+  diagnostics.className = "diagnostics";
+  diagnostics.setAttribute("aria-label", "Engine diagnostics");
+  diagnostics.hidden = !new URLSearchParams(location.search).has("diagnostics");
+  root.appendChild(diagnostics);
+  let diagnosticsBusy = false;
+  const diagnosticsTimer = window.setInterval(() => {
+    if (diagnostics.hidden || diagnosticsBusy) return;
+    diagnosticsBusy = true;
+    void debugGlobal.__VOXELS__
+      ?.snapshot()
+      .then((values) => {
+        diagnostics.textContent = [
+          `${Math.round(values[8] ?? 0)} near + ${Math.round(values[16] ?? 0)} far`,
+          `${Math.round(values[10] ?? 0)} visible`,
+          `${Math.round(values[6] ?? 0).toLocaleString()} quads`,
+          `${(values[13] ?? 0).toFixed(2)}/${(values[14] ?? 0).toFixed(1)} MiB arena`,
+          `${Math.round(values[15] ?? 0)} queued`,
+          `${(values[17] ?? 0).toFixed(1)} ms`,
+        ].join(" · ");
+      })
+      .finally(() => {
+        diagnosticsBusy = false;
+      });
+  }, 500);
   worker.onmessage = (event) => {
     if (event.data.kind === "ready") {
       status.textContent = "Click to look · WASD move · Space jump · LMB remove · RMB place";
@@ -239,7 +227,7 @@ function start(root: HTMLElement): void {
   window.addEventListener("keydown", (event) => {
     if (event.code === "F3") {
       event.preventDefault();
-      controls.toggle();
+      diagnostics.hidden = !diagnostics.hidden;
       return;
     }
     if (keyCode(event.code) !== 0) {
@@ -282,7 +270,7 @@ function start(root: HTMLElement): void {
   });
   resize.observe(canvas);
   window.addEventListener("pagehide", () => {
-    controls.destroy();
+    window.clearInterval(diagnosticsTimer);
     resize.disconnect();
     worker.postMessage({ kind: "destroy" });
     delete debugGlobal.__VOXELS__;

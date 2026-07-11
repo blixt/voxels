@@ -18,9 +18,6 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
     case "resize":
       handle?.resize(message.cssWidth, message.cssHeight, message.dpr);
       break;
-    case "option":
-      handle?.set_option(message.code, message.enabled);
-      break;
     case "snapshot":
       scope.postMessage({
         kind: "snapshot",

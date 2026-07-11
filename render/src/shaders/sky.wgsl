@@ -4,7 +4,6 @@ struct Frame {
   camera_time: vec4<f32>,
   viewport_voxel: vec4<f32>,
   target_voxel: vec4<f32>,
-  render_options: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;

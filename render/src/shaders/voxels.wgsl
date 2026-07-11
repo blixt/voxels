@@ -4,7 +4,6 @@ struct Frame {
   camera_time: vec4<f32>,
   viewport_voxel: vec4<f32>,
   target_voxel: vec4<f32>,
-  render_options: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -115,11 +114,11 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let cell = floor(input.world / frame.viewport_voxel.z);
   let grain = mix(0.88, 1.12, hash31(cell + vec3<f32>(f32(material) * 3.1)));
   let fine_grain = mix(0.96, 1.04, hash31(floor(input.world * 28.0)));
-  let ambient_occlusion = select(1.0, mix(0.52, 1.0, input.ao), frame.render_options.x > 0.5);
+  let ambient_occlusion = mix(0.52, 1.0, input.ao);
   var color = material_color(material) * light * grain * fine_grain * ambient_occlusion;
   let inside_position = input.world - input.normal * frame.viewport_voxel.z * 0.02;
   let voxel = floor(inside_position / frame.viewport_voxel.z);
-  let targeted = frame.render_options.w > 0.5 && frame.target_voxel.w > 0.5 && all(abs(voxel - frame.target_voxel.xyz) < vec3<f32>(0.1));
+  let targeted = frame.target_voxel.w > 0.5 && all(abs(voxel - frame.target_voxel.xyz) < vec3<f32>(0.1));
   if targeted {
     let coordinate = fract(input.world / frame.viewport_voxel.z + vec3<f32>(0.0001));
     var edge = 1.0;
@@ -134,7 +133,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let height_fog = exp(-max(input.world.y, 0.0) * 0.16) * smoothstep(2.5, frame.viewport_voxel.w, distance_to_camera) * 0.18;
   let fog = clamp(distance_fog + height_fog, 0.0, 1.0);
   let fog_color = vec3<f32>(0.49, 0.62, 0.72);
-  color = mix(color, fog_color, fog * frame.render_options.y);
+  color = mix(color, fog_color, fog);
   let mapped = color / (color + vec3<f32>(0.72));
   return vec4<f32>(max(mapped, vec3<f32>(0.0)), 1.0);
 }
