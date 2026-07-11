@@ -7,9 +7,10 @@ rendering, persistence, and binary codecs live in Rust.
 
 ## Workspace boundaries
 
-- `core/` is portable and host-testable. It owns coordinates, chunks, materials, procedural generation,
-  edits, camera/player state, meshing inputs, and the save codec. It has no GPU, browser, or JavaScript
-  dependencies.
+- `core/` is portable and host-testable. It owns commands, player/camera state, physics, simulation,
+  and game rules. It has no GPU, browser, filesystem, or JavaScript dependencies.
+- `world/` is portable and host-testable. It owns chunk coordinates/data, materials, procedural
+  generation, edit overlays, picking, greedy meshing, and durable voxel codecs.
 - `render/` is a platform-neutral WGPU library. It owns cameras, GPU resources, mesh uploads, shaders,
   culling, frame timing, and rendering. It names no web types so a future native shell can reuse it.
 - `shell/` is the `wasm32-unknown-unknown` leaf. It owns the `wasm-bindgen` API, the transferred

@@ -1,0 +1,17 @@
+[package]
+name = "voxels-world"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "voxels_world"
+
+[dependencies]
+blake3 = "1"
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }

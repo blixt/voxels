@@ -19,11 +19,12 @@ const OUT = join(ROOT, "web/generated");
 const TARGET = "wasm32-unknown-unknown";
 const CARGO_BIN = join(homedir(), ".cargo/bin");
 
-export const RUST_SOURCE_DIRS = ["core/src", "render/src", "shell/src"];
+export const RUST_SOURCE_DIRS = ["core/src", "world/src", "render/src", "shell/src"];
 export const RUST_INPUT_FILES = [
   "Cargo.toml",
   "Cargo.lock",
   "core/Cargo.toml",
+  "world/Cargo.toml",
   "render/Cargo.toml",
   "shell/Cargo.toml",
   "rust-toolchain.toml",

@@ -12,7 +12,8 @@ This repository standardizes on Vite+.
 
 ## Architecture
 
-- Keep portable simulation and voxel data in `core`; it must remain host-testable.
+- Keep portable simulation in `core` and voxel data/generation/codecs/meshing in `world`; both must
+  remain host-testable.
 - Keep WGPU rendering in `render`; it must not name browser or wasm types.
 - Keep browser/WASM glue, input decoding, and persistence in `shell`.
 - Keep TypeScript limited to browser-required input, canvas, worker, and development harness code.

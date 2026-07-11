@@ -8,11 +8,13 @@ function cargo(args: string[]): void {
 }
 
 cargo(["fmt", "--all", "--", "--check"]);
-cargo(["test", "-p", "voxels-core", "-p", "voxels-render"]);
+cargo(["test", "-p", "voxels-core", "-p", "voxels-world", "-p", "voxels-render"]);
 cargo([
   "clippy",
   "-p",
   "voxels-core",
+  "-p",
+  "voxels-world",
   "-p",
   "voxels-render",
   "--all-targets",
