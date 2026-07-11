@@ -240,8 +240,15 @@ mod web {
                     continue;
                 };
                 let edits = self.edits.borrow();
+                let mut generated_columns = BTreeMap::new();
                 let quads = mesh_chunk(&chunk, |x, y, z| {
-                    edits.sample(self.generator, VoxelCoord::new(x, y, z))
+                    let coord = VoxelCoord::new(x, y, z);
+                    edits.override_at(coord).unwrap_or_else(|| {
+                        generated_columns
+                            .entry((x, z))
+                            .or_insert_with(|| self.generator.column(x, z))
+                            .sample(y)
+                    })
                 });
                 drop(edits);
                 self.pending_meshes

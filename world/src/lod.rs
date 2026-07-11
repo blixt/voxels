@@ -216,8 +216,8 @@ pub fn surface_tiles_affected_by_column(
 /// streamed tiles cannot expose holes.
 pub fn generate_surface_tile(generator: Generator, coord: SurfaceTileCoord) -> Vec<SurfaceQuad> {
     generate_surface_tile_with(coord, |x, z| {
-        let height = generator.surface_height(x, z);
-        (height, generator.sample(x, height, z))
+        let sample = generator.surface_sample(x, z);
+        (sample.height, sample.material)
     })
 }
 

@@ -31,10 +31,10 @@ struct FaceKey {
 
 /// Greedily merges coplanar visible faces with the same material. `outside` samples world coordinates
 /// beyond this chunk, preventing hidden seam faces when neighboring chunks are resident or generated.
-pub fn mesh_chunk(chunk: &Chunk, outside: impl Fn(i32, i32, i32) -> Material) -> Vec<Quad> {
+pub fn mesh_chunk(chunk: &Chunk, mut outside: impl FnMut(i32, i32, i32) -> Material) -> Vec<Quad> {
     let mut quads = Vec::new();
     let origin = chunk.coord().world_origin();
-    let occupancy = build_occupancy_halo(chunk, origin, &outside);
+    let occupancy = build_occupancy_halo(chunk, origin, &mut outside);
     let mut mask = vec![FaceKey::default(); CHUNK_EDGE * CHUNK_EDGE];
     for face in 0..6 {
         let (axis, u_axis, v_axis, step) = face_axes(face);
@@ -108,7 +108,7 @@ pub fn mesh_chunk(chunk: &Chunk, outside: impl Fn(i32, i32, i32) -> Material) ->
 fn build_occupancy_halo(
     chunk: &Chunk,
     origin: [i32; 3],
-    outside: &impl Fn(i32, i32, i32) -> Material,
+    outside: &mut impl FnMut(i32, i32, i32) -> Material,
 ) -> Vec<u8> {
     const HALO_EDGE: usize = CHUNK_EDGE + 2;
     let mut occupancy = vec![0; HALO_EDGE * HALO_EDGE * HALO_EDGE];

@@ -1,4 +1,5 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use std::collections::BTreeMap;
 use voxels_world::codec::{decode_chunk, encode_chunk};
 use voxels_world::{
     ChunkCoord, EditMap, FarTileCoord, Generator, Material, VoxelCoord, generate_far_tile,
@@ -36,7 +37,15 @@ fn meshing(criterion: &mut Criterion) {
     criterion.bench_function("greedy mesh generated chunk", |bencher| {
         bencher.iter_batched(
             || generator.generate_chunk(COORD),
-            |chunk| mesh_chunk(&chunk, |x, y, z| generator.sample(x, y, z)),
+            |chunk| {
+                let mut columns = BTreeMap::new();
+                mesh_chunk(&chunk, |x, y, z| {
+                    columns
+                        .entry((x, z))
+                        .or_insert_with(|| generator.column(x, z))
+                        .sample(y)
+                })
+            },
             BatchSize::SmallInput,
         );
     });

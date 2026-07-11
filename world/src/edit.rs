@@ -94,15 +94,16 @@ impl EditMap {
     /// Resolves the visible material of one edited column. Far surface summaries use this to remain
     /// derived from generator + edits rather than silently becoming a second world authority.
     pub fn surface_sample(&self, generator: Generator, x: i32, z: i32) -> (i32, Material) {
-        let generated_height = generator.surface_height(x, z);
-        let highest_override = self.column_overrides.get(&(x, z)).and_then(|column| {
-            column
-                .iter()
-                .rev()
-                .find(|(_, material)| material.is_solid())
-                .map(|(&y, _)| y)
-        });
-        let mut y = highest_override.map_or(generated_height, |value| value.max(generated_height));
+        let generated = generator.surface_sample(x, z);
+        let Some(column) = self.column_overrides.get(&(x, z)) else {
+            return (generated.height, generated.material);
+        };
+        let highest_override = column
+            .iter()
+            .rev()
+            .find(|(_, material)| material.is_solid())
+            .map(|(&y, _)| y);
+        let mut y = highest_override.map_or(generated.height, |value| value.max(generated.height));
         loop {
             let material = self.sample(generator, VoxelCoord::new(x, y, z));
             if material.is_solid() || y <= -16 {

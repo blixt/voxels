@@ -77,7 +77,7 @@ fn vs_main(
 
 fn material_color(material: u32) -> vec3<f32> {
   switch material {
-    case 1u: { return vec3<f32>(0.22, 0.52, 0.13); }
+    case 1u: { return vec3<f32>(0.18, 0.42, 0.12); }
     case 2u: { return vec3<f32>(0.36, 0.20, 0.095); }
     case 3u: { return vec3<f32>(0.34, 0.38, 0.43); }
     case 4u: { return vec3<f32>(0.72, 0.53, 0.25); }
@@ -85,8 +85,8 @@ fn material_color(material: u32) -> vec3<f32> {
     case 6u: { return vec3<f32>(0.56, 0.25, 0.15); }
     case 7u: { return vec3<f32>(0.12, 0.15, 0.20); }
     case 8u: { return vec3<f32>(0.31, 0.15, 0.055); }
-    case 9u: { return vec3<f32>(0.10, 0.40, 0.13); }
-    case 10u: { return vec3<f32>(0.08, 0.34, 0.16); }
+    case 9u: { return vec3<f32>(0.08, 0.30, 0.10); }
+    case 10u: { return vec3<f32>(0.12, 0.32, 0.14); }
     case 11u: { return vec3<f32>(0.58, 0.55, 0.44); }
     case 12u: { return vec3<f32>(0.62, 0.20, 0.075); }
     default: { return vec3<f32>(1.0, 0.0, 1.0); }
