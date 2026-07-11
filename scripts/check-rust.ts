@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { rustTool, wasmCcEnv } from "./build-wasm.ts";
 
 function cargo(args: string[], env = process.env): void {
-  execFileSync(rustTool("rustup"), ["run", "stable", "cargo", ...args], {
+  execFileSync(rustTool("cargo"), args, {
     stdio: "inherit",
     env,
   });

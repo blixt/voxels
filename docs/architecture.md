@@ -72,8 +72,8 @@ and follower proxying can be added without changing `core` or `render`.
 
 ## Research basis
 
-- WGPU 29 directly supports an `OffscreenCanvas` surface and the browser WebGPU backend:
-  <https://docs.rs/wgpu/29.0.0/wasm32-unknown-unknown/wgpu/enum.SurfaceTarget.html>
+- WGPU 30 directly supports an `OffscreenCanvas` surface and the browser WebGPU backend:
+  <https://docs.rs/wgpu/30.0.0/wasm32-unknown-unknown/wgpu/enum.SurfaceTarget.html>
 - SQLite recommends `opfs-sahpool` when performance matters more than concurrent connections and notes
   that OPFS APIs are worker-only:
   <https://sqlite.org/wasm/doc/tip/persistence.md>

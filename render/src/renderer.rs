@@ -67,6 +67,7 @@ impl Renderer {
                 power_preference: PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
                 compatible_surface: Some(&surface),
+                apply_limit_buckets: false,
             })
             .await
             .map_err(|error| format!("request_adapter: {error:?}"))?;
@@ -86,6 +87,7 @@ impl Renderer {
         let config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: width.max(1),
             height: height.max(1),
             present_mode: PresentMode::Fifo,
@@ -150,7 +152,7 @@ impl Renderer {
             &pipeline_layout,
             &voxel_shader,
             format,
-            &[quad_layout()],
+            &[Some(quad_layout())],
             Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
@@ -254,7 +256,7 @@ impl Renderer {
             pass.draw(0..6, 0..self.quad_count);
         }
         self.queue.submit([encoder.finish()]);
-        frame.present();
+        self.queue.present(frame);
     }
 }
 
@@ -309,7 +311,7 @@ fn pipeline(
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     format: TextureFormat,
-    buffers: &[wgpu::VertexBufferLayout<'_>],
+    buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
     depth_stencil: Option<wgpu::DepthStencilState>,
 ) -> RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
