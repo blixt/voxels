@@ -73,6 +73,16 @@ passes reuse greedy mesh allocations, cull against each light volume, preserve t
 dither, and apply 3x3 comparison PCF only to direct sunlight. The Rust mission-control toggle skips all
 three caster passes, while live diagnostics expose their draw-call cost.
 
+Outdoor lighting is one Rust-owned environment shared by shadow projection, sky radiance, voxel
+lighting, and aerial perspective. The world first renders in linear HDR to `Rgba16Float`; the present
+pass applies the Khronos PBR Neutral tone mapper and an sRGB transfer before the Rust UI is composited.
+Refractive glass samples and maps that same HDR backdrop before mixing its display-space chrome, so a
+panel cannot expose a differently transformed copy of the world. Material base colors are converted
+from authored sRGB values, ambient occlusion attenuates indirect light rather than direct sunlight,
+and per-material roughness drives a compact dielectric highlight. Exponential height fog converges on
+the same horizon/zenith radiance rendered by the procedural sky, which also includes a world-anchored
+three-octave cloud layer.
+
 The first persistent chunk format is versioned and little-endian:
 
 1. a small magic/version header and chunk coordinates;
@@ -144,6 +154,9 @@ the seed and generator version so an incompatible build cannot silently answer a
   <https://research.nvidia.com/sites/default/files/pubs/2010-02_Efficient-Sparse-Voxel/laine2010tr1_paper.pdf>
 - Geometry/attribute DAG work reinforces separating compressed topology from palette-based attributes:
   <https://doi.org/10.1111/cgf.12841>
+- Khronos PBR Neutral provides a bounded, hue-preserving reference display transform for linear HDR
+  PBR output:
+  <https://github.com/KhronosGroup/ToneMapping/tree/main/PBR_Neutral>
 
 ## Deliberate non-goals for the conversion
 

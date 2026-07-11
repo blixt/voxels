@@ -49,6 +49,14 @@ and 10.9 MiB of live arena allocations while remaining at the 120 Hz display cap
 extends beyond the 220 m fog cutoff. Turning shadows off still reduces their passes to zero; disabling
 far terrain remains a hard CPU filter in both kinds of pass.
 
+The linear-HDR outdoor-lighting pass retained that 120 Hz cap at 1280×720 with the same 144 visible
+meshes, roughly 134,900 quads, 81 main draw spans, and 123 shadow draw spans. Its `Rgba16Float` scene
+target costs 8 bytes per pixel (7.03 MiB at that viewport); Mission Control now reports core GPU
+residency including allocated mesh arena pages, the HDR scene target, the depth target, and all three
+shadow cascades instead of presenting mesh payload bytes as total rendering memory. Procedural clouds,
+linear material response, dielectric highlights, tone mapping, and exponential-height aerial
+perspective remained inside the existing frame budget.
+
 Initial fine-chunk residency in this larger configuration measured 118 scheduler frames p95 and 124
 frames maximum, roughly 983/1,033 ms at 120 Hz. Mission Control renders load and edit-remesh p95/max
 counters and all four ring populations directly through Rust/WGPU; the scheduler uses fixed,
