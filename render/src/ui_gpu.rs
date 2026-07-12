@@ -10,8 +10,8 @@ use wgpu::{
     AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
     Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites,
-    Device, Extent3d, FilterMode, FragmentState, MipmapFilterMode, MultisampleState,
-    PipelineLayoutDescriptor, PrimitiveState, Queue, RenderPass, RenderPipeline,
+    CommandEncoder, Device, Extent3d, FilterMode, FragmentState, MipmapFilterMode,
+    MultisampleState, PipelineLayoutDescriptor, PrimitiveState, Queue, RenderPass, RenderPipeline,
     RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages,
     Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
     TextureView, TextureViewDescriptor, TextureViewDimension, VertexState,
@@ -24,7 +24,7 @@ const GLASS_CAPACITY: usize = 192;
 pub(crate) const SCENE_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
 pub struct SceneTarget {
-    _texture: Texture,
+    texture: Texture,
     view: TextureView,
     sampler: Sampler,
     width: u32,
@@ -46,7 +46,10 @@ impl SceneTarget {
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: SCENE_FORMAT,
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            usage: TextureUsages::RENDER_ATTACHMENT
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC
+                | TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let view = texture.create_view(&TextureViewDescriptor::default());
@@ -61,7 +64,7 @@ impl SceneTarget {
             ..Default::default()
         });
         Self {
-            _texture: texture,
+            texture,
             view,
             sampler,
             width,
@@ -71,6 +74,22 @@ impl SceneTarget {
 
     pub const fn view(&self) -> &TextureView {
         &self.view
+    }
+
+    fn copy_to(&self, encoder: &mut CommandEncoder, destination: &Self) {
+        debug_assert_eq!(
+            (self.width, self.height),
+            (destination.width, destination.height)
+        );
+        encoder.copy_texture_to_texture(
+            self.texture.as_image_copy(),
+            destination.texture.as_image_copy(),
+            Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     fn resize(&mut self, device: &Device, width: u32, height: u32) -> bool {
@@ -358,6 +377,7 @@ impl TextEngine {
 }
 
 pub struct UiGpu {
+    opaque_scene: SceneTarget,
     scene: SceneTarget,
     present: PresentPipeline,
     glass: GlassPipeline,
@@ -376,11 +396,13 @@ impl UiGpu {
         height: u32,
         dpr: f32,
     ) -> Result<Self, String> {
+        let opaque_scene = SceneTarget::new(device, width, height);
         let scene = SceneTarget::new(device, width, height);
         let present = PresentPipeline::new(device, format, &scene);
         let glass = GlassPipeline::new(device, format, &scene);
         let text = TextEngine::new(device, format, width, height, dpr)?;
         Ok(Self {
+            opaque_scene,
             scene,
             present,
             glass,
@@ -396,6 +418,24 @@ impl UiGpu {
         self.scene.view()
     }
 
+    pub const fn opaque_scene_view(&self) -> &TextureView {
+        self.opaque_scene.view()
+    }
+
+    pub fn copy_opaque_to_scene(&self, encoder: &mut CommandEncoder) {
+        self.opaque_scene.copy_to(encoder, &self.scene);
+    }
+
+    pub fn refraction_bind_group(&self, device: &Device, layout: &BindGroupLayout) -> BindGroup {
+        texture_sampler_bind_group(
+            device,
+            "water refraction scene bind group",
+            layout,
+            &self.opaque_scene.view,
+            &self.opaque_scene.sampler,
+        )
+    }
+
     pub fn resize(
         &mut self,
         device: &Device,
@@ -404,15 +444,18 @@ impl UiGpu {
         width: u32,
         height: u32,
         dpr: f32,
-    ) {
+    ) -> bool {
         self.width = width.max(1);
         self.height = height.max(1);
         self.dpr = valid_dpr(dpr);
-        if self.scene.resize(device, self.width, self.height) {
+        let opaque_resized = self.opaque_scene.resize(device, self.width, self.height);
+        let scene_resized = self.scene.resize(device, self.width, self.height);
+        if scene_resized {
             self.present.rebind(device, &self.scene);
             self.glass.rebind(device, &self.scene);
         }
         self.text.resize(queue, self.width, self.height, self.dpr);
+        opaque_resized || scene_resized
     }
 
     pub fn prepare(
@@ -446,7 +489,7 @@ fn valid_dpr(dpr: f32) -> f32 {
     }
 }
 
-fn texture_sampler_layout(device: &Device, label: &str) -> BindGroupLayout {
+pub(crate) fn texture_sampler_layout(device: &Device, label: &str) -> BindGroupLayout {
     device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         label: Some(label),
         entries: &[

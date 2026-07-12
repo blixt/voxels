@@ -21,6 +21,8 @@ struct Frame {
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var shadow_map: texture_depth_2d_array;
 @group(0) @binding(2) var shadow_sampler: sampler_comparison;
+@group(1) @binding(0) var opaque_scene: texture_2d<f32>;
+@group(1) @binding(1) var opaque_scene_sampler: sampler;
 
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
@@ -256,22 +258,46 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   let facing = clamp(dot(normal, view_direction), 0.0, 1.0);
   let fresnel = 0.02037 + 0.97963 * pow(1.0 - facing, 5.0);
   let reflection = reflected_environment(reflect(-view_direction, normal));
+  let camera_to_surface = input.world - frame.camera_time.xyz;
+  let distance_to_camera = length(camera_to_surface);
+  // Until opaque depth is sampled separately, distance is a conservative attenuation proxy rather
+  // than a claim about physical water thickness.
+  let absorption = 1.0 - exp(-distance_to_camera * 0.055);
+  let base_uv = input.position.xy / frame.viewport_voxel.xy;
+  let transmitted_ray = refract(-view_direction, normal, 1.0 / 1.333);
+  let sample_world = input.world + transmitted_ray * mix(0.35, 1.6, absorption);
+  let sample_clip = frame.view_projection * vec4<f32>(sample_world, 1.0);
+  let projected_uv = sample_clip.xy / max(sample_clip.w, 0.0001)
+    * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+  let max_refraction_offset = vec2<f32>(14.0) / frame.viewport_voxel.xy;
+  let projected_offset = clamp(
+    projected_uv - base_uv,
+    -max_refraction_offset,
+    max_refraction_offset,
+  );
+  let refraction_uv = clamp(
+    base_uv + select(vec2<f32>(0.0), projected_offset, sample_clip.w > 0.0),
+    vec2<f32>(0.001),
+    vec2<f32>(0.999),
+  );
+  let refracted_scene = max(
+    textureSampleLevel(opaque_scene, opaque_scene_sampler, refraction_uv, 0.0).rgb,
+    vec3<f32>(0.0),
+  );
   let deep = srgb_to_linear(vec3<f32>(0.018, 0.14, 0.22));
   let shallow = srgb_to_linear(vec3<f32>(0.075, 0.34, 0.41));
   let wave_light = sin(input.world.x * 2.7 + frame.camera_time.w * 0.9)
     * sin(input.world.z * 2.2 - frame.camera_time.w * 0.7) * 0.5 + 0.5;
-  var color = mix(deep, shallow, 0.28 + wave_light * 0.18);
-  color = mix(color, reflection, clamp(fresnel * 0.88 + 0.08, 0.0, 0.92));
+  var local_light = mix(deep, shallow, 0.28 + wave_light * 0.18);
+  local_light = mix(local_light, reflection, clamp(fresnel * 0.88 + 0.08, 0.0, 0.92));
   let sun = normalize(frame.sun_direction.xyz);
   let half_direction = normalize(sun + view_direction);
   let visibility = sun_visibility(input.world, normal);
-  color += frame.sun_radiance.rgb
+  local_light += frame.sun_radiance.rgb
     * pow(max(dot(normal, half_direction), 0.0), 260.0)
     * mix(0.18, 1.0, visibility)
     * 0.34;
 
-  let camera_to_surface = input.world - frame.camera_time.xyz;
-  let distance_to_camera = length(camera_to_surface);
   let fog_view_direction = camera_to_surface / max(distance_to_camera, 0.0001);
   let average_height = max((input.world.y + frame.camera_time.y) * 0.5, 0.0);
   let height_density = exp(-average_height * frame.fog_exposure.x);
@@ -279,14 +305,13 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   let transmittance = exp(-optical_depth);
   let sky_factor = pow(max(fog_view_direction.y, 0.0), 0.42);
   let fog_radiance = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, sky_factor);
-  color = color * transmittance + fog_radiance * (1.0 - transmittance);
-  color = max(color * frame.fog_exposure.y, vec3<f32>(0.0));
-  // Without a sampled opaque-depth buffer yet, distance is a conservative absorption proxy: it
-  // preserves nearby shallows while preventing distant seabed geometry from producing noisy
-  // transparent LOD bands. Fresnel still dominates at grazing angles.
-  let absorption = 1.0 - exp(-distance_to_camera * 0.055);
-  let alpha = mix(0.78, 0.97, max(fresnel, absorption));
-  return vec4<f32>(color * alpha, alpha);
+  local_light = local_light * transmittance + fog_radiance * (1.0 - transmittance);
+  local_light = max(local_light * frame.fog_exposure.y, vec3<f32>(0.0));
+  let transmission_tint = mix(vec3<f32>(0.86, 0.97, 0.98), vec3<f32>(0.38, 0.72, 0.76), absorption);
+  let transmitted = refracted_scene * transmission_tint + deep * absorption * 0.18;
+  let transmission_weight = (1.0 - fresnel) * mix(0.86, 0.42, absorption);
+  let color = mix(local_light, transmitted, transmission_weight);
+  return vec4<f32>(color, 1.0);
 }
 
 @fragment

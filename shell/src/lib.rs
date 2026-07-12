@@ -640,7 +640,7 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 30], |engine| {
+            let values = self.engine.as_ref().map_or([0.0; 31], |engine| {
                 let camera = engine.camera.borrow();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let render = engine.renderer.borrow().diagnostics();
@@ -680,6 +680,7 @@ mod web {
                     lod_tiles[3] as f32,
                     render.water_quads as f32,
                     render.water_draw_calls as f32,
+                    render.refraction_copy_bytes as f32 / (1024.0 * 1024.0),
                 ]
             });
             Float32Array::from(values.as_slice())

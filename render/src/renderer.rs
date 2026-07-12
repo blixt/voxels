@@ -8,7 +8,7 @@ use crate::shadow::{
 use crate::ui::{
     ContextAction, LiveStats, MissionControlUi, RendererFeature, UiAction, UiKey, Viewport,
 };
-use crate::ui_gpu::{SCENE_FORMAT, UiGpu};
+use crate::ui_gpu::{SCENE_FORMAT, UiGpu, texture_sampler_layout};
 use bytemuck::{Pod, Zeroable};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -127,6 +127,7 @@ pub struct RenderDiagnostics {
     pub shadow_cascades: u32,
     pub quads: u32,
     pub water_quads: u32,
+    pub refraction_copy_bytes: u64,
     pub arena_pages: u32,
     pub arena_capacity_bytes: u64,
     pub arena_allocated_bytes: u64,
@@ -142,6 +143,8 @@ pub struct Renderer {
     voxel_pipeline: RenderPipeline,
     water_depth_pipeline: RenderPipeline,
     water_pipeline: RenderPipeline,
+    water_scene_layout: wgpu::BindGroupLayout,
+    water_scene_bind_group: BindGroup,
     shadow_gpu: ShadowGpu,
     frame_buffer: Buffer,
     frame_bind_group: BindGroup,
@@ -498,6 +501,13 @@ impl Renderer {
             bind_group_layouts: &[Some(&frame_layout)],
             immediate_size: 0,
         });
+        let water_scene_layout = texture_sampler_layout(&device, "water refraction scene layout");
+        let water_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("water pipeline layout"),
+                bind_group_layouts: &[Some(&frame_layout), Some(&water_scene_layout)],
+                immediate_size: 0,
+            });
         let sky_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/sky.wgsl"));
         let sky_pipeline = pipeline(
             &device,
@@ -563,13 +573,13 @@ impl Renderer {
         let water_pipeline = pipeline(
             &device,
             "water pipeline",
-            &pipeline_layout,
+            &water_pipeline_layout,
             &voxel_shader,
             SCENE_FORMAT,
             &[Some(quad_layout())],
             PipelineOptions {
                 fragment_entry: "fs_water",
-                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
@@ -583,6 +593,7 @@ impl Renderer {
 
         let depth_view = depth_view(&device, config.width, config.height);
         let ui_gpu = UiGpu::new(&device, format, config.width, config.height, dpr)?;
+        let water_scene_bind_group = ui_gpu.refraction_bind_group(&device, &water_scene_layout);
 
         Ok(Self {
             surface,
@@ -593,6 +604,8 @@ impl Renderer {
             voxel_pipeline,
             water_depth_pipeline,
             water_pipeline,
+            water_scene_layout,
+            water_scene_bind_group,
             shadow_gpu,
             frame_buffer,
             frame_bind_group,
@@ -629,14 +642,18 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
         self.depth_view = depth_view(&self.device, width, height);
         self.dpr = valid_dpr(dpr);
-        self.ui_gpu.resize(
+        if self.ui_gpu.resize(
             &self.device,
             &self.queue,
             self.config.format,
             width,
             height,
             self.dpr,
-        );
+        ) {
+            self.water_scene_bind_group = self
+                .ui_gpu
+                .refraction_bind_group(&self.device, &self.water_scene_layout);
+        }
     }
 
     pub fn quad_count(&self) -> u32 {
@@ -1250,11 +1267,17 @@ impl Renderer {
                 }
             }
         }
+        let refract_water = !water_draw_list.spans.is_empty();
         {
+            let scene_view = if refract_water {
+                self.ui_gpu.opaque_scene_view()
+            } else {
+                self.ui_gpu.scene_view()
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("world pass"),
+                label: Some("opaque world and water depth pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: self.ui_gpu.scene_view(),
+                    view: scene_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -1266,7 +1289,11 @@ impl Renderer {
                     view: &self.depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
+                        store: if refract_water {
+                            wgpu::StoreOp::Store
+                        } else {
+                            wgpu::StoreOp::Discard
+                        },
                     }),
                     stencil_ops: None,
                 }),
@@ -1297,7 +1324,35 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(start..end));
                 pass.draw(0..6, 0..span.quad_count);
             }
+        }
+        if refract_water {
+            self.ui_gpu.copy_opaque_to_scene(&mut encoder);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("refractive water color pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: self.ui_gpu.scene_view(),
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
             pass.set_pipeline(&self.water_pipeline);
+            pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            pass.set_bind_group(1, &self.water_scene_bind_group, &[]);
             for span in &water_draw_list.spans {
                 let Some(buffer) = self.water_arena_buffers.get(span.page as usize) else {
                     continue;
@@ -1307,46 +1362,51 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(start..end));
                 pass.draw(0..6, 0..span.quad_count);
             }
-            let arena = self.arena.stats();
-            let water_arena = self.water_arena.stats();
-            let scene_pixels = u64::from(self.config.width) * u64::from(self.config.height);
-            let shadow_bytes = u64::from(DirectionalShadowConfig::default().shadow_map_resolution)
-                * u64::from(DirectionalShadowConfig::default().shadow_map_resolution)
-                * CASCADE_COUNT as u64
-                * 4;
-            self.diagnostics = RenderDiagnostics {
-                resident_chunks: self.chunks.len() as u32,
-                visible_chunks: world_draw_list.mesh_count,
-                draw_calls: world_draw_list
-                    .spans
-                    .len()
-                    .saturating_add(water_draw_list.spans.len().saturating_mul(2))
-                    as u32,
-                water_draw_calls: water_draw_list.spans.len().saturating_mul(2) as u32,
-                shadow_draw_calls,
-                shadow_cascades: if self.options.shadows {
-                    CASCADE_COUNT as u32
-                } else {
-                    0
-                },
-                quads: world_draw_list
-                    .quad_count
-                    .saturating_add(water_draw_list.quad_count),
-                water_quads: water_draw_list.quad_count,
-                arena_pages: arena.pages.saturating_add(water_arena.pages) as u32,
-                arena_capacity_bytes: arena
-                    .capacity_bytes
-                    .saturating_add(water_arena.capacity_bytes),
-                arena_allocated_bytes: arena
-                    .allocated_bytes
-                    .saturating_add(water_arena.allocated_bytes),
-                core_gpu_bytes: arena
-                    .capacity_bytes
-                    .saturating_add(water_arena.capacity_bytes)
-                    .saturating_add(scene_pixels.saturating_mul(12))
-                    .saturating_add(shadow_bytes),
-            };
         }
+        let arena = self.arena.stats();
+        let water_arena = self.water_arena.stats();
+        let scene_pixels = u64::from(self.config.width) * u64::from(self.config.height);
+        let shadow_bytes = u64::from(DirectionalShadowConfig::default().shadow_map_resolution)
+            * u64::from(DirectionalShadowConfig::default().shadow_map_resolution)
+            * CASCADE_COUNT as u64
+            * 4;
+        self.diagnostics = RenderDiagnostics {
+            resident_chunks: self.chunks.len() as u32,
+            visible_chunks: world_draw_list.mesh_count,
+            draw_calls: world_draw_list
+                .spans
+                .len()
+                .saturating_add(water_draw_list.spans.len().saturating_mul(2))
+                as u32,
+            water_draw_calls: water_draw_list.spans.len().saturating_mul(2) as u32,
+            shadow_draw_calls,
+            shadow_cascades: if self.options.shadows {
+                CASCADE_COUNT as u32
+            } else {
+                0
+            },
+            quads: world_draw_list
+                .quad_count
+                .saturating_add(water_draw_list.quad_count),
+            water_quads: water_draw_list.quad_count,
+            refraction_copy_bytes: refraction_copy_bytes(
+                self.config.width,
+                self.config.height,
+                refract_water,
+            ),
+            arena_pages: arena.pages.saturating_add(water_arena.pages) as u32,
+            arena_capacity_bytes: arena
+                .capacity_bytes
+                .saturating_add(water_arena.capacity_bytes),
+            arena_allocated_bytes: arena
+                .allocated_bytes
+                .saturating_add(water_arena.allocated_bytes),
+            core_gpu_bytes: arena
+                .capacity_bytes
+                .saturating_add(water_arena.capacity_bytes)
+                .saturating_add(scene_pixels.saturating_mul(20))
+                .saturating_add(shadow_bytes),
+        };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("present and Rust UI pass"),
@@ -1641,6 +1701,14 @@ fn valid_dpr(dpr: f32) -> f32 {
     }
 }
 
+const fn refraction_copy_bytes(width: u32, height: u32, active: bool) -> u64 {
+    if active {
+        width as u64 * height as u64 * 8
+    } else {
+        0
+    }
+}
+
 fn view_projection(config: &SurfaceConfiguration, camera: &CameraState) -> glam::Mat4 {
     let aspect = config.width as f32 / config.height.max(1) as f32;
     let projection =
@@ -1773,6 +1841,12 @@ mod tests {
     fn test_view_projection(camera: &CameraState) -> glam::Mat4 {
         glam::camera::rh::proj::directx::perspective(68.0f32.to_radians(), 1.0, 0.01, 80.0)
             * glam::camera::rh::view::look_to_mat4(camera.position, camera.forward(), glam::Vec3::Y)
+    }
+
+    #[test]
+    fn refraction_bandwidth_is_paid_only_for_visible_water() {
+        assert_eq!(refraction_copy_bytes(1_280, 720, false), 0);
+        assert_eq!(refraction_copy_bytes(1_280, 720, true), 7_372_800);
     }
 
     #[test]
