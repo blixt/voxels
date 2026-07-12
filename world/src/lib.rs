@@ -9,6 +9,7 @@ pub mod generation;
 pub mod lod;
 pub mod material;
 pub mod mesh;
+pub mod route;
 
 pub use chunk::{CHUNK_EDGE, CHUNK_VOLUME, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord};
 pub use composition::{
@@ -36,6 +37,13 @@ pub use lod::{
 };
 pub use material::{Material, RenderLayer};
 pub use mesh::{MeshedChunk, Quad, mesh_chunk};
+pub use route::{
+    FIRST_PILGRIM_ROAD_NODES, ROUTE_CORE_HALF_WIDTH_VOXELS, ROUTE_SHOULDER_WIDTH_VOXELS,
+    ROUTE_TOKEN_CADENCE_VOXELS, ROUTE_TOKEN_SIDE_OFFSET_VOXELS, RouteAnchor, RouteAnchorRole,
+    RouteId, RouteNode, RouteSample, first_pilgrim_road_length_voxels, first_pilgrim_route_anchor,
+    first_pilgrim_route_anchor_count, first_pilgrim_route_anchor_for_feature_cell,
+    sample_first_pilgrim_road,
+};
 
 /// One canonical voxel is a 10 cm cube. World-space simulation and rendering use metres.
 pub const VOXEL_SIZE_METRES: f32 = 0.1;
