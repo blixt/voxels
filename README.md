@@ -39,6 +39,9 @@ captures a deterministic contact sheet, and gates settled streaming, depth owner
 and GPU cost in every region.
 `vp run profile:lights` isolates bounded voxel-emissive lighting from the cave headlamp, captures the
 Rust-toggle A/B, and gates active-light count, unchanged geometry/residency, frame pacing, and GPU cost.
+`vp run profile:portals` moves to the playable terrain directly above Cinder Vault and proves that its
+resident chamber lights are rejected by Rust's edit-aware portal geodesic rather than leaking through
+the sealed shell.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture

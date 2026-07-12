@@ -209,7 +209,16 @@ pub struct RenderDiagnostics {
     pub active_local_lights: u32,
     pub clipped_local_lights: u32,
     pub occluded_local_lights: u32,
+    pub portal_rejected_local_lights: u32,
+    pub local_light_visibility_tests: u32,
     pub local_lighting: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalLightVisibility {
+    Visible,
+    Occluded,
+    PortalRejected,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1787,8 +1796,8 @@ impl Renderer {
     fn selected_local_lights(
         &self,
         camera: &CameraState,
-        mut is_visible: impl FnMut([f32; 3]) -> bool,
-    ) -> (LocalLightUniform, u32) {
+        mut visibility: impl FnMut([f32; 3], f32) -> LocalLightVisibility,
+    ) -> (LocalLightUniform, u32, u32, u32) {
         let mut uniform = LocalLightUniform::default();
         let enabled = self.options.local_lighting;
         let mut ranked =
@@ -1797,6 +1806,8 @@ impl Renderer {
         let mut candidates = 0u32;
         let mut in_range = 0u32;
         let mut occluded = 0u32;
+        let mut portal_rejected = 0u32;
+        let mut visibility_tests = 0u32;
         for (key, lights) in &self.local_light_candidates {
             if !self.chunks.get(key).is_some_and(|chunk| chunk.active) {
                 continue;
@@ -1823,13 +1834,24 @@ impl Renderer {
         }
         let mut selected = 0usize;
         for (_, light) in ranked.into_iter().take(ranked_count) {
-            if !is_visible([
-                light.position_radius[0],
-                light.position_radius[1],
-                light.position_radius[2],
-            ]) {
-                occluded = occluded.saturating_add(1);
-                continue;
+            visibility_tests = visibility_tests.saturating_add(1);
+            match visibility(
+                [
+                    light.position_radius[0],
+                    light.position_radius[1],
+                    light.position_radius[2],
+                ],
+                light.position_radius[3] * 2.0,
+            ) {
+                LocalLightVisibility::Visible => {}
+                LocalLightVisibility::Occluded => {
+                    occluded = occluded.saturating_add(1);
+                    continue;
+                }
+                LocalLightVisibility::PortalRejected => {
+                    portal_rejected = portal_rejected.saturating_add(1);
+                    continue;
+                }
             }
             uniform.lights[selected] = light;
             selected += 1;
@@ -1842,10 +1864,11 @@ impl Renderer {
             candidates,
             in_range
                 .saturating_sub(selected as u32)
-                .saturating_sub(occluded),
+                .saturating_sub(occluded)
+                .saturating_sub(portal_rejected),
             u32::from(enabled),
         ];
-        (uniform, occluded)
+        (uniform, occluded, portal_rejected, visibility_tests)
     }
 
     /// Encodes and submits one frame, returning `false` when the surface could not be presented.
@@ -1855,7 +1878,7 @@ impl Renderer {
         dt: f32,
         camera: &CameraState,
         ui_stats: LiveStats,
-        local_light_visible: impl FnMut([f32; 3]) -> bool,
+        local_light_visibility: impl FnMut([f32; 3], f32) -> LocalLightVisibility,
     ) -> bool {
         self.time += dt.min(0.1);
         let environment_response = 1.0 - (-dt.clamp(0.0, 0.1) / 0.85).exp();
@@ -1903,8 +1926,12 @@ impl Renderer {
             (self.log_error)(&error);
             self.ui_text_error_reported = true;
         }
-        let (local_lights, occluded_local_lights) =
-            self.selected_local_lights(camera, local_light_visible);
+        let (
+            local_lights,
+            occluded_local_lights,
+            portal_rejected_local_lights,
+            local_light_visibility_tests,
+        ) = self.selected_local_lights(camera, local_light_visibility);
         self.queue.write_buffer(
             &self.local_light_buffer,
             0,
@@ -2245,6 +2272,8 @@ impl Renderer {
             active_local_lights: local_lights.metadata[0],
             clipped_local_lights: local_lights.metadata[2],
             occluded_local_lights,
+            portal_rejected_local_lights,
+            local_light_visibility_tests,
             local_lighting: self.options.local_lighting,
         };
         {

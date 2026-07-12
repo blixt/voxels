@@ -223,16 +223,23 @@ pub fn cinder_vault_portal_state(
 ) -> PortalState {
     let mut state = PortalState::default();
     for portal_index in 0..CINDER_VAULT_PORTAL_COUNT {
-        let mut open_lanes = 0usize;
-        for sample_index in 0..(CINDER_VAULT_PORTAL_PROBE_EDGE.pow(2) as usize) {
-            let Some(voxel) = cinder_vault_portal_probe_voxel(portal_index, sample_index) else {
-                continue;
-            };
-            open_lanes += usize::from(is_open_voxel(voxel[0], voxel[1], voxel[2]));
-        }
-        let _ = state.set_open(portal_index, open_lanes >= CINDER_VAULT_PORTAL_OPEN_LANES);
+        let open = cinder_vault_portal_is_open(portal_index, &mut is_open_voxel).unwrap_or(false);
+        let _ = state.set_open(portal_index, open);
     }
     state
+}
+
+pub fn cinder_vault_portal_is_open(
+    portal_index: usize,
+    mut is_open_voxel: impl FnMut(i32, i32, i32) -> bool,
+) -> Option<bool> {
+    cinder_vault_portal_probe(portal_index)?;
+    let mut open_lanes = 0usize;
+    for sample_index in 0..(CINDER_VAULT_PORTAL_PROBE_EDGE.pow(2) as usize) {
+        let voxel = cinder_vault_portal_probe_voxel(portal_index, sample_index)?;
+        open_lanes += usize::from(is_open_voxel(voxel[0], voxel[1], voxel[2]));
+    }
+    Some(open_lanes >= CINDER_VAULT_PORTAL_OPEN_LANES)
 }
 
 pub fn cinder_vault_portals_affected_by_voxel(x: i32, y: i32, z: i32) -> u8 {

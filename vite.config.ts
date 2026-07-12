@@ -98,6 +98,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-performance.mjs --lights",
         cache: false,
       },
+      "profile:portals": {
+        command: "node scripts/browser-performance.mjs --portals",
+        cache: false,
+      },
       "test:persistence-browser": {
         command: "node scripts/browser-persistence-test.mjs",
         cache: false,

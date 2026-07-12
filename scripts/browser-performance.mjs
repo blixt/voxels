@@ -66,14 +66,18 @@ const SNAPSHOT = {
   activeLocalLights: 81,
   clippedLocalLights: 82,
   occludedLocalLights: 83,
-  localLighting: 84,
-  placementMaterial: 85,
-  schemaVersion: 86,
-  sampleCount: 87,
-  droppedSamples: 88,
+  portalRejectedLocalLights: 84,
+  localLightVisibilityTests: 85,
+  openCinderPortals: 86,
+  cinderPortalRevision: 87,
+  localLighting: 88,
+  placementMaterial: 89,
+  schemaVersion: 90,
+  sampleCount: 91,
+  droppedSamples: 92,
 };
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 89;
+const FRAME_SAMPLE_START = 93;
 const EDIT_SAMPLE_WIDTH = 6;
 
 function percentile(values, fraction) {
@@ -167,7 +171,13 @@ function phaseSummary(captures) {
       active: latest[SNAPSHOT.activeLocalLights],
       clipped: latest[SNAPSHOT.clippedLocalLights],
       occluded: latest[SNAPSHOT.occludedLocalLights],
+      portalRejected: latest[SNAPSHOT.portalRejectedLocalLights],
+      visibilityTests: latest[SNAPSHOT.localLightVisibilityTests],
       enabled: latest[SNAPSHOT.localLighting] === 1,
+    },
+    cinderPortals: {
+      open: latest[SNAPSHOT.openCinderPortals],
+      revision: latest[SNAPSHOT.cinderPortalRevision],
     },
     placementMaterial: latest[SNAPSHOT.placementMaterial],
     loadLatencyFrames: {
@@ -752,6 +762,43 @@ async function localLightProfile(page, viewportWidth) {
   return result;
 }
 
+async function cavePortalProfile(page, viewportWidth) {
+  for (let stop = 0; stop < 4; stop += 1) await visitCinderVault(page, viewportWidth);
+  const phase = phaseSummary(await sample(page, 6_000));
+  await page.screenshot({ path: "target/cinder-vault-overhead-portal-gate.png" });
+  const violations = [];
+  if (phase.cinderPortals.open !== 7 || phase.cinderPortals.revision !== 0) {
+    violations.push("pristine Cinder portal topology was not fully open and revision-zero");
+  }
+  if (phase.localLights.candidates < 2) {
+    violations.push("overhead view did not retain chamber light candidates");
+  }
+  if (phase.localLights.active !== 0) {
+    violations.push("chamber lights crossed the exterior shell");
+  }
+  if (phase.localLights.portalRejected < 2) {
+    violations.push("portal geodesic did not reject chamber candidates");
+  }
+  if (phase.localLights.visibilityTests > 32 || phase.localLights.clipped !== 0) {
+    violations.push("portal visibility escaped its bounded test/light budget");
+  }
+  if (phase.pendingJobs !== 0 || phase.memory.pendingMeshMiB !== 0) {
+    violations.push("overhead portal profile did not settle streaming");
+  }
+  if (phase.droppedSamples !== 0 || phase.frameMs.p95 > 12 || phase.frameMs.above33_33ms > 0) {
+    violations.push("overhead portal profile missed its frame gate");
+  }
+  if (phase.gpu.available && phase.gpu.totalMs.p95 > 7.5) {
+    violations.push("overhead portal profile exceeded the active GPU gate");
+  }
+  if (violations.length > 0) {
+    throw new Error(
+      `Cinder portal profile violations: ${violations.join(", ")}; ${JSON.stringify(phase)}`,
+    );
+  }
+  return phase;
+}
+
 async function semanticHeroProfile(page, viewportWidth) {
   // Skip the six regional background forms and three route forms. The append-only hero ids occupy
   // the final six positions in the Rust catalog.
@@ -950,7 +997,7 @@ async function waitForEngine(page) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
     lastSnapshot = snapshot;
     if (
-      snapshot[SNAPSHOT.schemaVersion] === 13 &&
+      snapshot[SNAPSHOT.schemaVersion] === 14 &&
       snapshot[SNAPSHOT.quads] > 0 &&
       snapshot[SNAPSHOT.residentChunks] > 0 &&
       snapshot[SNAPSHOT.pendingJobs] === 0
@@ -1004,6 +1051,7 @@ const ambientOcclusion = process.argv.includes("--gtao");
 const semanticHeroes = process.argv.includes("--heroes");
 const caves = process.argv.includes("--caves");
 const localLights = process.argv.includes("--lights");
+const cavePortals = process.argv.includes("--portals");
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
@@ -1059,6 +1107,8 @@ try {
     scenarios = { caves: await caveProfile(page, viewport.width) };
   } else if (localLights) {
     scenarios = { localLights: await localLightProfile(page, viewport.width) };
+  } else if (cavePortals) {
+    scenarios = { cavePortals: await cavePortalProfile(page, viewport.width) };
   } else {
     const steady = phaseSummary(await sample(page, 4_000));
     await page.keyboard.down("KeyW");

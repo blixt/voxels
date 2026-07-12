@@ -15,20 +15,23 @@ mod web {
         CameraState, EnclosureSample, InputState, ProfileAutomation, ProfilePhase, VoxelHit,
         VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
     };
-    use voxels_render::renderer::Renderer;
+    use voxels_render::renderer::{LocalLightVisibility, Renderer};
     use voxels_render::ui::LiveStats;
     use voxels_runtime::{
         ChunkState, FrameBudget, StreamConfig, StreamScheduler, SurfaceFocusAction,
         SurfaceRevisionCache,
     };
     use voxels_world::{
-        CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT, CINDER_VAULT_NODES, Chunk, ChunkCoord,
-        EditMap, Generator, Material, MeshedChunk, SkylineFeature, SkylineFeatureKind,
-        SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
-        first_pilgrim_road_length_voxels, first_pilgrim_route_anchor,
-        first_pilgrim_route_anchor_count, generate_edited_surface_tile_mesh,
-        generate_edited_water_tile_mesh, mesh_chunk, pilgrim_chapter_at_distance,
-        sample_cinder_vault, sample_first_pilgrim_road, surface_tiles_affected_by_voxel,
+        CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT, CINDER_VAULT_NODES, CINDER_VAULT_PORTAL_COUNT,
+        Chunk, ChunkCoord, EditMap, Generator, Material, MeshedChunk, PortalState, SkylineFeature,
+        SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
+        cinder_vault_portal_is_open, cinder_vault_portal_state,
+        cinder_vault_portals_affected_by_voxel, cinder_vault_visibility_cell,
+        cinder_vault_visibility_graph, first_pilgrim_road_length_voxels,
+        first_pilgrim_route_anchor, first_pilgrim_route_anchor_count,
+        generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, mesh_chunk,
+        pilgrim_chapter_at_distance, sample_cinder_vault, sample_first_pilgrim_road,
+        surface_tiles_affected_by_voxel,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -41,7 +44,7 @@ mod web {
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const EDIT_HISTORY_CAPACITY: usize = 64;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 13.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 14.0;
     const MAX_EDIT_TRACKERS: usize = 128;
     const ENCLOSURE_PROBE_INTERVAL_MS: f64 = 100.0;
     const ENCLOSURE_PROBE_DISTANCE_METRES: f32 = 12.0;
@@ -289,6 +292,9 @@ mod web {
         enclosure: Cell<EnclosureSample>,
         last_enclosure_probe: Cell<f64>,
         enclosure_probe_microseconds: Cell<f32>,
+        cinder_portal_state: Cell<PortalState>,
+        cinder_portal_dirty: Cell<u8>,
+        cinder_portal_revision: Cell<u32>,
         route_tour_index: Cell<u16>,
         cave_tour_index: Cell<u8>,
         landmark_tour_index: Cell<u8>,
@@ -418,6 +424,7 @@ mod web {
             let performance = self.scope.performance();
             let cpu_start = performance_now(performance.as_ref());
             self.apply_remote_edits();
+            self.refresh_cinder_portals();
             let last = self.last_time.replace(time);
             let dt = if last <= 0.0 {
                 1.0 / 60.0
@@ -586,6 +593,11 @@ mod web {
             let edits = self.edits.borrow();
             let chunks = self.chunks.borrow();
             let mut light_columns = BTreeMap::new();
+            let camera_voxel = (camera.position / VOXEL_SIZE_METRES).floor().as_ivec3();
+            let camera_visibility_cell =
+                cinder_vault_visibility_cell(camera_voxel.x, camera_voxel.y, camera_voxel.z);
+            let cinder_graph = cinder_vault_visibility_graph().ok();
+            let cinder_portal_state = self.cinder_portal_state.get();
             let submitted = renderer.render(
                 dt,
                 &camera,
@@ -628,9 +640,38 @@ mod web {
                     eye_depth_metres: camera.fluid_state().eye_depth_metres,
                     eyes_submerged: camera.fluid_state().eyes_submerged,
                     swimming: camera.fluid_state().swimming,
+                    local_light_candidates: render.local_light_candidates,
+                    active_local_lights: render.active_local_lights,
+                    occluded_local_lights: render.occluded_local_lights,
+                    portal_rejected_local_lights: render.portal_rejected_local_lights,
+                    open_cinder_portals: self
+                        .cinder_portal_state
+                        .get()
+                        .open_count(CINDER_VAULT_PORTAL_COUNT),
+                    cinder_portal_revision: self.cinder_portal_revision.get(),
                 },
-                |position| {
-                    voxel_segment_is_clear(
+                |position, maximum_geodesic_metres| {
+                    let light_voxel = (Vec3::from_array(position) / VOXEL_SIZE_METRES)
+                        .floor()
+                        .as_ivec3();
+                    let light_visibility_cell =
+                        cinder_vault_visibility_cell(light_voxel.x, light_voxel.y, light_voxel.z);
+                    if light_visibility_cell != camera_visibility_cell
+                        && let Some(graph) = cinder_graph
+                    {
+                        let Some(distance) = graph.shortest_open_distance(
+                            camera_visibility_cell,
+                            light_visibility_cell,
+                            cinder_portal_state,
+                        ) else {
+                            return LocalLightVisibility::PortalRejected;
+                        };
+                        if distance > maximum_geodesic_metres {
+                            return LocalLightVisibility::PortalRejected;
+                        }
+                        return LocalLightVisibility::Visible;
+                    }
+                    if voxel_segment_is_clear(
                         camera.position,
                         Vec3::from_array(position),
                         VOXEL_SIZE_METRES,
@@ -652,7 +693,11 @@ mod web {
                                 });
                             material.occludes_ambient() && material.emission().is_none()
                         },
-                    )
+                    ) {
+                        LocalLightVisibility::Visible
+                    } else {
+                        LocalLightVisibility::Occluded
+                    }
                 },
             );
             drop(chunks);
@@ -1052,8 +1097,8 @@ mod web {
         }
 
         fn teleport_to_cinder_vault(&self) {
-            let index = self.cave_tour_index.get() % 3;
-            self.cave_tour_index.set((index + 1) % 3);
+            let index = self.cave_tour_index.get() % 4;
+            self.cave_tour_index.set((index + 1) % 4);
             let mut camera = match index {
                 0 => {
                     let x = CINDER_VAULT.entrance[0] + 40;
@@ -1080,7 +1125,7 @@ mod web {
                     camera.pitch = -0.10;
                     camera
                 }
-                _ => {
+                2 => {
                     let node = CINDER_VAULT.chamber;
                     let mut camera = CameraState::spawn(glam::Vec3::new(
                         (node[0] as f32 + 0.5) * VOXEL_SIZE_METRES,
@@ -1089,6 +1134,20 @@ mod web {
                     ));
                     camera.yaw = -2.13;
                     camera.pitch = -0.08;
+                    camera
+                }
+                _ => {
+                    let x = CINDER_VAULT.chamber[0];
+                    let z = CINDER_VAULT.chamber[2];
+                    let surface = self.generator.surface_sample(x, z);
+                    let mut camera = CameraState::spawn(glam::Vec3::new(
+                        (x as f32 + 0.5) * VOXEL_SIZE_METRES,
+                        (surface.height + 1) as f32 * VOXEL_SIZE_METRES
+                            + voxels_core::PLAYER_EYE_HEIGHT_METRES,
+                        (z as f32 + 0.5) * VOXEL_SIZE_METRES,
+                    ));
+                    camera.yaw = 0.35;
+                    camera.pitch = 0.28;
                     camera
                 }
             };
@@ -1344,6 +1403,35 @@ mod web {
             }
         }
 
+        fn refresh_cinder_portals(&self) {
+            let dirty = self.cinder_portal_dirty.replace(0);
+            if dirty == 0 {
+                return;
+            }
+            let edits = self.edits.borrow();
+            let mut state = self.cinder_portal_state.get();
+            let mut changed = false;
+            for portal_index in 0..u8::BITS as usize {
+                if dirty & (1 << portal_index) == 0 {
+                    continue;
+                }
+                let Some(open) = cinder_vault_portal_is_open(portal_index, |x, y, z| {
+                    !edits
+                        .sample(self.generator, VoxelCoord::new(x, y, z))
+                        .occludes_ambient()
+                }) else {
+                    continue;
+                };
+                changed |= state.is_open(portal_index) != open;
+                let _ = state.set_open(portal_index, open);
+            }
+            self.cinder_portal_state.set(state);
+            if changed {
+                self.cinder_portal_revision
+                    .set(self.cinder_portal_revision.get().wrapping_add(1));
+            }
+        }
+
         fn submit_local_edit(
             &self,
             target: VoxelCoord,
@@ -1389,6 +1477,10 @@ mod web {
             target: VoxelCoord,
             durable: Option<Material>,
         ) -> EditRequirements {
+            let affected_portals =
+                cinder_vault_portals_affected_by_voxel(target.x, target.y, target.z);
+            self.cinder_portal_dirty
+                .set(self.cinder_portal_dirty.get() | affected_portals);
             self.edits
                 .borrow_mut()
                 .replace_durable_override(target, durable);
@@ -1755,6 +1847,13 @@ mod web {
                     render.active_local_lights as f32,
                     render.clipped_local_lights as f32,
                     render.occluded_local_lights as f32,
+                    render.portal_rejected_local_lights as f32,
+                    render.local_light_visibility_tests as f32,
+                    engine
+                        .cinder_portal_state
+                        .get()
+                        .open_count(CINDER_VAULT_PORTAL_COUNT) as f32,
+                    engine.cinder_portal_revision.get() as f32,
                     if render.local_lighting { 1.0 } else { 0.0 },
                     engine.renderer.borrow().placement_material().id() as f32,
                     SNAPSHOT_SCHEMA_VERSION,
@@ -1874,6 +1973,11 @@ mod web {
             max_tracked_chunks: 320,
         })
         .map_err(|error| JsValue::from_str(&format!("stream configuration: {error:?}")))?;
+        let cinder_portal_state = cinder_vault_portal_state(|x, y, z| {
+            !edits
+                .sample(generator, VoxelCoord::new(x, y, z))
+                .occludes_ambient()
+        });
         let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
         let engine = Rc::new(Engine {
             renderer: RefCell::new(renderer),
@@ -1912,6 +2016,9 @@ mod web {
             enclosure: Cell::new(EnclosureSample::OPEN),
             last_enclosure_probe: Cell::new(f64::NEG_INFINITY),
             enclosure_probe_microseconds: Cell::new(0.0),
+            cinder_portal_state: Cell::new(cinder_portal_state),
+            cinder_portal_dirty: Cell::new(0),
+            cinder_portal_revision: Cell::new(0),
             route_tour_index: Cell::new(0),
             cave_tour_index: Cell::new(0),
             landmark_tour_index: Cell::new(0),

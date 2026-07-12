@@ -654,6 +654,17 @@ plane disconnects only its edge and reverting restores it; and an exterior-to-ch
 requires the mouth and exceeds the current 6.4 m light-selection radius. The world suite now contains
 101 tests without adding a persisted format or changing generator output.
 
+`vp run profile:portals` visits a fourth Rust-owned Cinder tour stop on playable terrain directly above
+the chamber. Radial streaming deliberately keeps the underground source chunks resident, creating the
+adversarial case that Euclidean lighting gets wrong. The exact release result retained 10 candidates,
+performed 10 bounded visibility queries, rejected all 10 by portal geodesic, and submitted zero active,
+occluded, or clipped lights. All seven pristine portals remained open at revision zero.
+
+The six-second overhead window measured 8.8 ms frame p95, 3.5 ms CPU p95, 3.1 ms render-submission
+p95, 3.895 ms active-GPU p95, and 0.789 ms world-GPU p95 with zero dropped samples, pending work, or
+stale completions. The chamber A/B then retained all 10 connected lights with zero portal rejection,
+8.8 ms frame p95, and unchanged chunks, geometry, draws, and mesh allocation.
+
 The material atlas simultaneously returned to nearest-neighbor sampling for the original pixelated
 style. The sampler contract is host-tested as nearest magnification/minification/mip selection with
 anisotropy 1, while retaining the averaged mip chain for distance stability. An isolated headless

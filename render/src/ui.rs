@@ -285,6 +285,12 @@ pub struct LiveStats {
     pub eye_depth_metres: f32,
     pub eyes_submerged: bool,
     pub swimming: bool,
+    pub local_light_candidates: u32,
+    pub active_local_lights: u32,
+    pub occluded_local_lights: u32,
+    pub portal_rejected_local_lights: u32,
+    pub open_cinder_portals: u32,
+    pub cinder_portal_revision: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1216,13 +1222,15 @@ impl MissionControlUi {
                     ),
                 ),
                 (
-                    "LOD 1 / 2 / 3 / 4",
+                    "LIGHTS / PORTALS",
                     format!(
-                        "{} / {} / {} / {}",
-                        stats.lod_tiles[0],
-                        stats.lod_tiles[1],
-                        stats.lod_tiles[2],
-                        stats.lod_tiles[3]
+                        "{}/{} · R{} P{} · {}/7 r{}",
+                        stats.active_local_lights,
+                        stats.local_light_candidates,
+                        stats.occluded_local_lights,
+                        stats.portal_rejected_local_lights,
+                        stats.open_cinder_portals,
+                        stats.cinder_portal_revision,
                     ),
                 ),
             ]
@@ -1574,12 +1582,23 @@ mod tests {
             eye_depth_metres: 0.0,
             eyes_submerged: false,
             swimming: false,
+            local_light_candidates: 10,
+            active_local_lights: 6,
+            occluded_local_lights: 1,
+            portal_rejected_local_lights: 3,
+            open_cinder_portals: 6,
+            cinder_portal_revision: 2,
         });
         let base = ui.build_draw_list(viewport());
         assert!(base.text.iter().any(|run| run.text == "18 / 2 f / 31 ms"));
         assert!(base.text.iter().any(|run| run.text == "7 + 1 / 76.0 MiB"));
         assert!(base.text.iter().any(|run| run.text == "123.4k / 8.2k"));
         assert!(base.text.iter().any(|run| run.text == "132 / 12"));
+        assert!(
+            base.text
+                .iter()
+                .any(|run| run.text == "6/10 · R1 P3 · 6/7 r2")
+        );
         assert!(
             base.text
                 .iter()

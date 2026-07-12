@@ -69,6 +69,17 @@ impl PortalState {
         portal_index < MAX_VISIBILITY_PORTALS && self.open_bits & (1u32 << portal_index) != 0
     }
 
+    pub const fn open_count(self, portal_count: usize) -> u32 {
+        let mask = if portal_count >= u32::BITS as usize {
+            u32::MAX
+        } else if portal_count == 0 {
+            0
+        } else {
+            (1u32 << portal_count) - 1
+        };
+        (self.open_bits & mask).count_ones()
+    }
+
     pub fn set_open(&mut self, portal_index: usize, open: bool) -> bool {
         if portal_index >= MAX_VISIBILITY_PORTALS {
             return false;

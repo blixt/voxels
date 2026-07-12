@@ -296,6 +296,16 @@ plane and remains open while at least four lanes are clear. The mouth uses an X/
 surface aperture; interior probes use tunnel-tangent-perpendicular and vertical axes. Sparse edits can
 identify affected portals with a seven-bit mask, so unrelated edits require no topology work.
 
+The WASM shell initializes portal state from the hydrated sparse edit map plus generator, then marks
+only probe planes touched by local or remote durable edits. Dirty portals recompute before the next
+light selection and increment a topology revision only when openness changes. For lights in the same
+cell, exact camera-to-source DDA remains authoritative. Across cells, the open graph's geodesic must fit
+inside the light's finite selection range; disconnected or overly long routes are reported separately
+from rock-occluded and budget-clipped candidates. This permits legitimate around-corner tunnel light
+without allowing a nearby Euclidean source to cross the cave shell.
+Mission Control renders active/candidate lights, rock and path rejections, open portal count, and
+topology revision in its WGPU statistics card; these values are not a browser overlay.
+
 Placement material is Rust state, selected through the canvas context menu and displayed in the Rust
 header. The browser still transmits only pointer input; right-click uses the selected material and the
 ordinary sparse-edit/SQLite/remesh path, so GlowCrystal is not a renderer-only decoration.
