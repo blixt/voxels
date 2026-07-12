@@ -13,6 +13,17 @@ export function keyCode(code: string): number {
   return KEY_CODES[code] ?? 0;
 }
 
+export async function requestPointerLockSafely(
+  request: () => Promise<void>,
+  onFailure: (error: unknown) => void,
+): Promise<void> {
+  try {
+    await request();
+  } catch (error) {
+    onFailure(error);
+  }
+}
+
 /** Keeps aliased physical keys pressed until every key for the logical input is released. */
 export class PressedKeys {
   readonly #physical = new Set<string>();

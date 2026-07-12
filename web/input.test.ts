@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { PressedKeys, keyCode } from "./input.ts";
+import { PressedKeys, keyCode, requestPointerLockSafely } from "./input.ts";
 
 describe("browser key state", () => {
   it("keeps aliased Shift input active until both physical keys are released", () => {
@@ -26,5 +26,19 @@ describe("browser key state", () => {
     expect(keys.keyDown("F3")).toBe(8);
     expect(keyCode("Escape")).toBe(0);
     expect(keys.keyUp("Escape")).toBe(0);
+  });
+
+  it("handles rejected pointer lock requests", async () => {
+    const failure = new Error("pointer lock denied");
+    let reported: unknown;
+
+    await requestPointerLockSafely(
+      () => Promise.reject(failure),
+      (error) => {
+        reported = error;
+      },
+    );
+
+    expect(reported).toBe(failure);
   });
 });

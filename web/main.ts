@@ -1,6 +1,6 @@
 import "./style.css";
 import { watchDevicePixelRatio } from "./display.ts";
-import { PressedKeys } from "./input.ts";
+import { PressedKeys, requestPointerLockSafely } from "./input.ts";
 import {
   INPUT_CANCEL,
   INPUT_KEY_DOWN,
@@ -141,7 +141,10 @@ function start(canvas: HTMLCanvasElement): void {
       return;
     }
     if (event.pointerType === "mouse" && document.pointerLockElement !== canvas) {
-      void canvas.requestPointerLock();
+      void requestPointerLockSafely(
+        () => canvas.requestPointerLock(),
+        (error) => fail(`Pointer lock request failed: ${String(error)}`),
+      );
       return;
     }
     enqueue(point(event, INPUT_POINTER_DOWN), true);
