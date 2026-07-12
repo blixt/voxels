@@ -21,8 +21,9 @@ pub use cave::{
     CINDER_VAULT_TOPOLOGY_VERSION, CINDER_VAULT_VISIBILITY_CELL_COUNT, CaveCrystalFormation,
     CaveEdge, CaveNode, CavePortalProbe, CaveSample, cinder_vault_crystal_at,
     cinder_vault_override, cinder_vault_portal_is_open, cinder_vault_portal_probe,
-    cinder_vault_portal_state, cinder_vault_portals_affected_by_voxel,
-    cinder_vault_visibility_cell, cinder_vault_visibility_graph, sample_cinder_vault,
+    cinder_vault_portal_probe_voxel, cinder_vault_portal_state,
+    cinder_vault_portals_affected_by_voxel, cinder_vault_visibility_cell,
+    cinder_vault_visibility_graph, sample_cinder_vault,
 };
 pub use chunk::{CHUNK_EDGE, CHUNK_VOLUME, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord};
 pub use composition::{

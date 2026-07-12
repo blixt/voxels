@@ -25,7 +25,7 @@ mod web {
         CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT, CINDER_VAULT_NODES, CINDER_VAULT_PORTAL_COUNT,
         Chunk, ChunkCoord, EditMap, Generator, Material, MeshedChunk, PortalState, SkylineFeature,
         SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
-        cinder_vault_portal_is_open, cinder_vault_portal_state,
+        cinder_vault_portal_is_open, cinder_vault_portal_probe_voxel, cinder_vault_portal_state,
         cinder_vault_portals_affected_by_voxel, cinder_vault_visibility_cell,
         cinder_vault_visibility_graph, first_pilgrim_road_length_voxels,
         first_pilgrim_route_anchor, first_pilgrim_route_anchor_count,
@@ -52,6 +52,7 @@ mod web {
     const EDIT_PROFILE_TERRAIN: [i32; 3] = [18_016, -12, 12_896];
     const EDIT_PROFILE_WATER: [i32; 3] = [18_016, 10, 12_896];
     const EDIT_PROFILE_OPERATIONS: u8 = 40;
+    const CINDER_MOUTH_PROFILE_VOXELS: usize = 25;
     const STREAM_FRAME_BUDGET: FrameBudget = FrameBudget {
         generation: 2,
         meshing: 1,
@@ -341,8 +342,65 @@ mod web {
             match profile_id {
                 1 => self.start_stream_profile(),
                 2 => self.start_edit_profile(),
+                3 => self.set_cinder_mouth_profile(true),
+                4 => self.set_cinder_mouth_profile(false),
                 _ => false,
             }
+        }
+
+        fn set_cinder_mouth_profile(&self, sealed: bool) -> bool {
+            if self.profile.borrow().running() || self.edit_profile.get().active() {
+                log_gpu_error("Cinder mouth edit profile refused: another profile is active");
+                return false;
+            }
+            if !self.store.borrow().owns_persistence() {
+                log_gpu_error("Cinder mouth edit profile refused: tab does not own persistence");
+                return false;
+            }
+            if !self.edit_trackers.borrow().is_empty() {
+                log_gpu_error(
+                    "Cinder mouth edit profile refused: prior edits are still converging",
+                );
+                return false;
+            }
+
+            let expected = sealed.then_some(Material::Basalt);
+            for sample_index in 0..CINDER_MOUTH_PROFILE_VOXELS {
+                let Some(voxel) = cinder_vault_portal_probe_voxel(0, sample_index) else {
+                    log_gpu_error(
+                        "Cinder mouth edit profile refused: probe topology is incomplete",
+                    );
+                    return false;
+                };
+                let coord = voxel_coord(voxel);
+                let current = self.edits.borrow().override_at(coord);
+                let valid = if sealed {
+                    current.is_none()
+                        && self.generator.sample(coord.x, coord.y, coord.z) == Material::Air
+                } else {
+                    current == Some(Material::Basalt)
+                };
+                if !valid {
+                    log_gpu_error(
+                        "Cinder mouth edit profile refused: fixture is not in its expected state",
+                    );
+                    return false;
+                }
+            }
+
+            for sample_index in 0..CINDER_MOUTH_PROFILE_VOXELS {
+                let Some(voxel) = cinder_vault_portal_probe_voxel(0, sample_index) else {
+                    return false;
+                };
+                let _ = self.submit_local_edit(
+                    voxel_coord(voxel),
+                    expected,
+                    3,
+                    if sealed { 1 } else { 2 },
+                    (sample_index + 1) as u8,
+                );
+            }
+            true
         }
 
         fn start_stream_profile(&self) -> bool {

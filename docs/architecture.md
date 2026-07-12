@@ -283,8 +283,9 @@ remains the promotion seam if dense-emitter stress tests outgrow the fixed budge
 
 Camera-to-source visibility prevents lights in disconnected caves from shining through intervening
 rock, but the current punctual lights remain unshadowed at the receiver. Thin-wall leakage inside a
-source's finite radius is therefore still a known limitation; edit-aware portal/geodesic gating is the
-next tier rather than pretending this bounded DDA is full voxel global illumination.
+source's finite radius and one visibility cell is therefore still a known limitation; portal/geodesic
+gating handles authored chokepoints but does not pretend this bounded path is full voxel global
+illumination.
 
 Portable cave topology starts with an allocation-free visibility graph capped at 16 cells and 32
 undirected portals. Portal openness is a 32-bit derived mask, and fixed-array Dijkstra queries return
@@ -305,6 +306,12 @@ from rock-occluded and budget-clipped candidates. This permits legitimate around
 without allowing a nearby Euclidean source to cross the cave shell.
 Mission Control renders active/candidate lights, rock and path rejections, open portal count, and
 topology revision in its WGPU statistics card; these values are not a browser overlay.
+
+The portal probe voxel API is canonical world data rather than a browser fixture. The isolated
+`profile:portal-edits` harness asks the Rust worker to place or revert the 25 mouth-plane overrides;
+the browser layer only opens an observer tab, requests snapshots, and reloads. Both tabs derive the
+same mask from ordinary remote edits, and a fresh worker reconstructs it from SQLite/OPFS without a
+separate persisted topology cache.
 
 Placement material is Rust state, selected through the canvas context menu and displayed in the Rust
 header. The browser still transmits only pointer input; right-click uses the selected material and the

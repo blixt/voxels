@@ -42,6 +42,9 @@ Rust-toggle A/B, and gates active-light count, unchanged geometry/residency, fra
 `vp run profile:portals` moves to the playable terrain directly above Cinder Vault and proves that its
 resident chamber lights are rejected by Rust's edit-aware portal geodesic rather than leaking through
 the sealed shell.
+`vp run profile:portal-edits` seals the vault mouth with 25 durable 10 cm basalt edits, observes the
+derived closure in a second isolated tab, reloads it from SQLite/OPFS, then restores and reloads the
+pristine opening.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture

@@ -255,7 +255,14 @@ pub fn cinder_vault_portals_affected_by_voxel(x: i32, y: i32, z: i32) -> u8 {
     affected
 }
 
-fn cinder_vault_portal_probe_voxel(portal_index: usize, sample_index: usize) -> Option<[i32; 3]> {
+/// Returns one canonical 10 cm voxel in an authored portal's fixed probe plane.
+///
+/// This is public so host shells and native tools can author, persist, and validate portal edits
+/// without duplicating cave topology or converting metre-space coordinates back into voxels.
+pub fn cinder_vault_portal_probe_voxel(
+    portal_index: usize,
+    sample_index: usize,
+) -> Option<[i32; 3]> {
     let probe = cinder_vault_portal_probe(portal_index)?;
     if sample_index >= CINDER_VAULT_PORTAL_PROBE_EDGE.pow(2) as usize {
         return None;

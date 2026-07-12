@@ -665,6 +665,13 @@ p95, 3.895 ms active-GPU p95, and 0.789 ms world-GPU p95 with zero dropped sampl
 stale completions. The chamber A/B then retained all 10 connected lights with zero portal rejection,
 8.8 ms frame p95, and unchanged chunks, geometry, draws, and mesh allocation.
 
+`vp run profile:portal-edits` adds an end-to-end durability gate without controlling the user's
+browser. Rust places basalt in all 25 canonical mouth-probe voxels, reducing the leader and observer
+tab from seven open portals to six. A fresh worker then hydrated all 25 sparse edits and reconstructed
+six open portals at revision zero. Rust reverted the generated-air overrides, returned live state to
+seven portals, and a second reload hydrated zero edits and the pristine seven-portal mask. The isolated
+two-tab release run reported no OPFS, SQLite, worker, or WebGPU errors.
+
 The material atlas simultaneously returned to nearest-neighbor sampling for the original pixelated
 style. The sampler contract is host-tested as nearest magnification/minification/mip selection with
 anisotropy 1, while retaining the averaged mip chain for distance stability. An isolated headless

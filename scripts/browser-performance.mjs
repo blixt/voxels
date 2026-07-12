@@ -317,6 +317,107 @@ async function editProfile(page) {
   return result;
 }
 
+async function waitForSnapshot(page, label, predicate, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest;
+  while (Date.now() < deadline) {
+    latest = await capture(page);
+    if (predicate(latest)) return latest;
+    await page.waitForTimeout(50);
+  }
+  throw new Error(`${label} did not converge: ${JSON.stringify(latest?.snapshot)}`);
+}
+
+async function cavePortalEditPersistenceProfile(page, context) {
+  const baseline = await capture(page);
+  if (
+    baseline.edit.currentEdits !== 0 ||
+    baseline.snapshot[SNAPSHOT.openCinderPortals] !== 7 ||
+    baseline.snapshot[SNAPSHOT.cinderPortalRevision] !== 0
+  ) {
+    throw new Error(
+      `Cinder portal edit fixture was not pristine: ${JSON.stringify(baseline.edit)}`,
+    );
+  }
+
+  const observer = await context.newPage();
+  observePageErrors(observer);
+  await observer.goto(page.url(), { waitUntil: "domcontentloaded" });
+  await waitForEngine(observer);
+
+  await page.evaluate(() => globalThis.__VOXELS__.profile(3));
+  const sealedLeader = await waitForSnapshot(
+    page,
+    "Cinder mouth seal on persistence leader",
+    (next) =>
+      next.edit.currentEdits === 25 &&
+      next.edit.inFlight === 0 &&
+      next.snapshot[SNAPSHOT.openCinderPortals] === 6 &&
+      next.snapshot[SNAPSHOT.cinderPortalRevision] >= 1 &&
+      next.snapshot[SNAPSHOT.pendingJobs] === 0,
+  );
+  const sealedObserver = await waitForSnapshot(
+    observer,
+    "Cinder mouth seal in observer tab",
+    (next) =>
+      next.edit.currentEdits === 25 &&
+      next.edit.inFlight === 0 &&
+      next.snapshot[SNAPSHOT.openCinderPortals] === 6 &&
+      next.snapshot[SNAPSHOT.cinderPortalRevision] >= 1 &&
+      next.snapshot[SNAPSHOT.pendingJobs] === 0,
+  );
+  await observer.close();
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForEngine(page);
+  const sealedReload = await waitForSnapshot(
+    page,
+    "persisted Cinder mouth seal after reload",
+    (next) =>
+      next.edit.currentEdits === 25 &&
+      next.snapshot[SNAPSHOT.openCinderPortals] === 6 &&
+      next.snapshot[SNAPSHOT.cinderPortalRevision] === 0,
+  );
+
+  await page.evaluate(() => globalThis.__VOXELS__.profile(4));
+  const restored = await waitForSnapshot(
+    page,
+    "Cinder mouth restoration",
+    (next) =>
+      next.edit.currentEdits === 0 &&
+      next.edit.inFlight === 0 &&
+      next.snapshot[SNAPSHOT.openCinderPortals] === 7 &&
+      next.snapshot[SNAPSHOT.cinderPortalRevision] >= 1 &&
+      next.snapshot[SNAPSHOT.pendingJobs] === 0,
+  );
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForEngine(page);
+  const restoredReload = await waitForSnapshot(
+    page,
+    "persisted Cinder mouth restoration after reload",
+    (next) =>
+      next.edit.currentEdits === 0 &&
+      next.snapshot[SNAPSHOT.openCinderPortals] === 7 &&
+      next.snapshot[SNAPSHOT.cinderPortalRevision] === 0,
+  );
+
+  return {
+    editedVoxels: 25,
+    sealed: {
+      leaderOpenPortals: sealedLeader.snapshot[SNAPSHOT.openCinderPortals],
+      observerOpenPortals: sealedObserver.snapshot[SNAPSHOT.openCinderPortals],
+      reloadOpenPortals: sealedReload.snapshot[SNAPSHOT.openCinderPortals],
+      persistedEdits: sealedReload.edit.currentEdits,
+    },
+    restored: {
+      liveOpenPortals: restored.snapshot[SNAPSHOT.openCinderPortals],
+      reloadOpenPortals: restoredReload.snapshot[SNAPSHOT.openCinderPortals],
+      persistedEdits: restoredReload.edit.currentEdits,
+    },
+  };
+}
+
 async function sample(page, durationMs) {
   const captures = [];
   const deadline = Date.now() + durationMs;
@@ -1052,10 +1153,23 @@ const semanticHeroes = process.argv.includes("--heroes");
 const caves = process.argv.includes("--caves");
 const localLights = process.argv.includes("--lights");
 const cavePortals = process.argv.includes("--portals");
+const cavePortalEdits = process.argv.includes("--portal-edits");
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
 let server;
+
+function observePageErrors(page) {
+  page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
+  page.on("console", (message) => {
+    if (
+      (message.type() === "error" || message.type() === "warning") &&
+      FAILURE.test(message.text())
+    ) {
+      errors.push(`${message.type()}: ${message.text()}`);
+    }
+  });
+}
 
 try {
   await build({ logLevel: "warn" });
@@ -1076,15 +1190,7 @@ try {
   });
   const context = await browser.newContext({ viewport, deviceScaleFactor: 1 });
   const page = await context.newPage();
-  page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
-  page.on("console", (message) => {
-    if (
-      (message.type() === "error" || message.type() === "warning") &&
-      FAILURE.test(message.text())
-    ) {
-      errors.push(`${message.type()}: ${message.text()}`);
-    }
-  });
+  observePageErrors(page);
   const navigationStarted = performance.now();
   await page.goto(`http://127.0.0.1:${port}`, { waitUntil: "domcontentloaded" });
   await waitForEngine(page);
@@ -1093,6 +1199,8 @@ try {
   let scenarios;
   if (edits) {
     scenarios = { edits: await editProfile(page) };
+  } else if (cavePortalEdits) {
+    scenarios = { cavePortalEdits: await cavePortalEditPersistenceProfile(page, context) };
   } else if (sustained) {
     scenarios = { sustained: await sustainedProfile(page) };
   } else if (materials) {
