@@ -274,6 +274,7 @@ struct Entry {
 pub struct StreamScheduler {
     config: StreamConfig,
     focus: ChunkCoord,
+    focus_initialized: bool,
     entries: BTreeMap<CoordKey, Entry>,
     evictions: Vec<EvictedChunk>,
     next_ticket_serial: u64,
@@ -310,6 +311,7 @@ impl StreamScheduler {
         Ok(Self {
             config,
             focus: ChunkCoord::new(0, 0, 0),
+            focus_initialized: false,
             entries: BTreeMap::new(),
             evictions: Vec::new(),
             next_ticket_serial: 1,
@@ -335,7 +337,11 @@ impl StreamScheduler {
     /// smaller than the configured cylinder. Previously tracked chunks survive inside the wider
     /// retention radius when spare capacity exists, preventing boundary thrash.
     pub fn update_focus(&mut self, focus: ChunkCoord) {
+        if self.focus_initialized && self.focus == focus {
+            return;
+        }
         self.focus = focus;
+        self.focus_initialized = true;
         let desired = self.desired_coordinates(focus);
         let desired_keys: BTreeSet<_> = desired.iter().copied().map(coord_key).collect();
 
@@ -768,6 +774,20 @@ mod tests {
         assert!(first_work.upload.is_empty());
         assert_eq!(first.diagnostics().generation.queued, 3);
         assert_eq!(first.diagnostics().generation.in_flight, 2);
+    }
+
+    #[test]
+    fn repeated_focus_updates_are_noops_after_initial_population() {
+        let focus = ChunkCoord::new(0, 0, 0);
+        let mut scheduler = scheduler(compact_config(5));
+
+        scheduler.update_focus(focus);
+        let populated = scheduler.diagnostics();
+        assert_eq!(populated.tracked, 5);
+
+        scheduler.update_focus(focus);
+        assert_eq!(scheduler.diagnostics(), populated);
+        assert!(scheduler.drain_evictions().is_empty());
     }
 
     #[test]
