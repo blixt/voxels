@@ -1,4 +1,5 @@
 use crate::FEATURE_CELL_VOXELS;
+use std::sync::LazyLock;
 
 pub const ROUTE_CORE_HALF_WIDTH_VOXELS: f32 = 18.0;
 pub const ROUTE_SHOULDER_WIDTH_VOXELS: f32 = 54.0;
@@ -55,10 +56,154 @@ pub const FIRST_PILGRIM_ROAD_NODES: [RouteNode; 6] = [
     },
 ];
 
+#[derive(Clone, Copy, Debug)]
+struct RouteSegment {
+    index: u16,
+    from: [f32; 2],
+    delta: [f32; 2],
+    tangent: [f32; 2],
+    length_squared: f32,
+    length: f32,
+    distance_before: f32,
+    corridor_min: [f32; 2],
+    corridor_max: [f32; 2],
+}
+
+#[derive(Debug)]
+struct RouteIndex {
+    route_id: RouteId,
+    segments: Box<[RouteSegment]>,
+    length: f32,
+    bounds: [[i32; 2]; 2],
+}
+
+impl RouteIndex {
+    fn new(route_id: RouteId, nodes: &[RouteNode]) -> Self {
+        let mut distance_before = 0.0;
+        let mut segments = Vec::with_capacity(nodes.len().saturating_sub(1));
+        for (index, pair) in nodes.windows(2).enumerate() {
+            let from = [pair[0].x as f32, pair[0].z as f32];
+            let delta = [pair[1].x as f32 - from[0], pair[1].z as f32 - from[1]];
+            let length_squared = delta[0] * delta[0] + delta[1] * delta[1];
+            if length_squared <= f32::EPSILON {
+                continue;
+            }
+            let Ok(index) = u16::try_from(index) else {
+                break;
+            };
+            let length = length_squared.sqrt();
+            let corridor_min = [
+                from[0].min(from[0] + delta[0]) - ROUTE_SHOULDER_WIDTH_VOXELS,
+                from[1].min(from[1] + delta[1]) - ROUTE_SHOULDER_WIDTH_VOXELS,
+            ];
+            let corridor_max = [
+                from[0].max(from[0] + delta[0]) + ROUTE_SHOULDER_WIDTH_VOXELS,
+                from[1].max(from[1] + delta[1]) + ROUTE_SHOULDER_WIDTH_VOXELS,
+            ];
+            segments.push(RouteSegment {
+                index,
+                from,
+                delta,
+                tangent: [delta[0] / length, delta[1] / length],
+                length_squared,
+                length,
+                distance_before,
+                corridor_min,
+                corridor_max,
+            });
+            distance_before += length;
+        }
+        let bounds = if nodes.is_empty() {
+            [[0; 2]; 2]
+        } else {
+            let shoulder = ROUTE_SHOULDER_WIDTH_VOXELS.ceil() as i32;
+            let min_x = nodes.iter().map(|node| node.x).min().unwrap_or(0) - shoulder;
+            let min_z = nodes.iter().map(|node| node.z).min().unwrap_or(0) - shoulder;
+            let max_x = nodes.iter().map(|node| node.x).max().unwrap_or(0) + shoulder + 1;
+            let max_z = nodes.iter().map(|node| node.z).max().unwrap_or(0) + shoulder + 1;
+            [[min_x, min_z], [max_x, max_z]]
+        };
+        Self {
+            route_id,
+            segments: segments.into_boxed_slice(),
+            length: distance_before,
+            bounds,
+        }
+    }
+
+    fn sample(&self, x: f32, z: f32) -> Option<RouteSample> {
+        let mut best: Option<(f32, RouteSample)> = None;
+        for segment in &self.segments {
+            if x < segment.corridor_min[0]
+                || x > segment.corridor_max[0]
+                || z < segment.corridor_min[1]
+                || z > segment.corridor_max[1]
+            {
+                continue;
+            }
+            let relative = [x - segment.from[0], z - segment.from[1]];
+            let t = ((relative[0] * segment.delta[0] + relative[1] * segment.delta[1])
+                / segment.length_squared)
+                .clamp(0.0, 1.0);
+            let closest = [
+                segment.from[0] + segment.delta[0] * t,
+                segment.from[1] + segment.delta[1] * t,
+            ];
+            let offset = [x - closest[0], z - closest[1]];
+            let distance_squared = offset[0] * offset[0] + offset[1] * offset[1];
+            if best
+                .as_ref()
+                .is_some_and(|(best_squared, _)| *best_squared <= distance_squared)
+            {
+                continue;
+            }
+            let distance = distance_squared.sqrt();
+            best = Some((
+                distance_squared,
+                route_sample(self.route_id, *segment, t, closest, offset, distance),
+            ));
+        }
+        best.map(|(_, sample)| sample)
+    }
+
+    fn point_at_distance(&self, distance: f32) -> Option<([f32; 2], [f32; 2])> {
+        let distance = distance.max(0.0);
+        if let Some(segment) = self
+            .segments
+            .iter()
+            .find(|segment| distance <= segment.distance_before + segment.length)
+        {
+            let along = distance - segment.distance_before;
+            return Some((
+                [
+                    segment.from[0] + segment.tangent[0] * along,
+                    segment.from[1] + segment.tangent[1] * along,
+                ],
+                segment.tangent,
+            ));
+        }
+        let segment = self.segments.last()?;
+        Some((
+            [
+                segment.from[0] + segment.delta[0],
+                segment.from[1] + segment.delta[1],
+            ],
+            segment.tangent,
+        ))
+    }
+}
+
+static FIRST_PILGRIM_ROAD_INDEX: LazyLock<RouteIndex> = LazyLock::new(|| {
+    let index = RouteIndex::new(RouteId::FirstPilgrimRoad, &FIRST_PILGRIM_ROAD_NODES);
+    assert_eq!(index.segments.len(), FIRST_PILGRIM_ROAD_NODES.len() - 1);
+    assert_eq!(index.bounds, FIRST_PILGRIM_ROAD_BOUNDS);
+    index
+});
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RouteSample {
     pub route_id: RouteId,
-    pub segment_index: u8,
+    pub segment_index: u16,
     pub segment_t: f32,
     pub closest: [f32; 2],
     pub tangent: [f32; 2],
@@ -103,21 +248,17 @@ pub fn sample_first_pilgrim_road(x: i32, z: i32) -> Option<RouteSample> {
     if !(min_x..max_x).contains(&x) || !(min_z..max_z).contains(&z) {
         return None;
     }
-    sample_polyline(
-        RouteId::FirstPilgrimRoad,
-        &FIRST_PILGRIM_ROAD_NODES,
-        x as f32,
-        z as f32,
-    )
-    .filter(|sample| sample.distance_to_route_voxels <= ROUTE_SHOULDER_WIDTH_VOXELS)
+    FIRST_PILGRIM_ROAD_INDEX
+        .sample(x as f32, z as f32)
+        .filter(|sample| sample.distance_to_route_voxels <= ROUTE_SHOULDER_WIDTH_VOXELS)
 }
 
 pub fn first_pilgrim_road_length_voxels() -> f32 {
-    polyline_length(&FIRST_PILGRIM_ROAD_NODES)
+    FIRST_PILGRIM_ROAD_INDEX.length
 }
 
 pub fn first_pilgrim_road_point_at_distance(distance: f32) -> Option<([f32; 2], [f32; 2])> {
-    point_and_tangent_at_distance(&FIRST_PILGRIM_ROAD_NODES, distance)
+    FIRST_PILGRIM_ROAD_INDEX.point_at_distance(distance)
 }
 
 pub fn first_pilgrim_route_anchor_count() -> u16 {
@@ -136,7 +277,7 @@ pub fn first_pilgrim_route_anchor(ordinal: u16) -> Option<RouteAnchor> {
         return None;
     }
     let distance = ROUTE_TOKEN_START_VOXELS + f32::from(ordinal) * ROUTE_TOKEN_CADENCE_VOXELS;
-    let (point, tangent) = point_and_tangent_at_distance(&FIRST_PILGRIM_ROAD_NODES, distance)?;
+    let (point, tangent) = FIRST_PILGRIM_ROAD_INDEX.point_at_distance(distance)?;
     let side = if ordinal & 1 == 0 { 1.0 } else { -1.0 };
     let raw = [
         point[0] - tangent[1] * ROUTE_TOKEN_SIDE_OFFSET_VOXELS * side,
@@ -187,7 +328,47 @@ pub fn first_pilgrim_route_anchor_for_feature_cell(
         .find(|anchor| anchor.feature_cell == [cell_x, cell_z])
 }
 
-fn sample_polyline(route_id: RouteId, nodes: &[RouteNode], x: f32, z: f32) -> Option<RouteSample> {
+fn route_sample(
+    route_id: RouteId,
+    segment: RouteSegment,
+    t: f32,
+    closest: [f32; 2],
+    offset: [f32; 2],
+    distance: f32,
+) -> RouteSample {
+    let normalized_core = (distance / ROUTE_CORE_HALF_WIDTH_VOXELS).clamp(0.0, 1.0);
+    let core = 1.0 - smooth(((normalized_core - 0.70) / 0.30).clamp(0.0, 1.0));
+    let shoulder_t = ((distance - ROUTE_CORE_HALF_WIDTH_VOXELS)
+        / (ROUTE_SHOULDER_WIDTH_VOXELS - ROUTE_CORE_HALF_WIDTH_VOXELS))
+        .clamp(0.0, 1.0);
+    let shoulder = 1.0 - smooth(shoulder_t);
+    let terrain_blend = if distance <= ROUTE_CORE_HALF_WIDTH_VOXELS {
+        1.0
+    } else {
+        shoulder
+    };
+    RouteSample {
+        route_id,
+        segment_index: segment.index,
+        segment_t: t,
+        closest,
+        tangent: segment.tangent,
+        signed_lateral_voxels: segment.tangent[0] * offset[1] - segment.tangent[1] * offset[0],
+        distance_to_route_voxels: distance,
+        distance_along_voxels: segment.distance_before + segment.length * t,
+        terrain_blend,
+        core,
+        shoulder,
+    }
+}
+
+#[cfg(test)]
+fn sample_polyline_reference(
+    route_id: RouteId,
+    nodes: &[RouteNode],
+    x: f32,
+    z: f32,
+) -> Option<RouteSample> {
     let mut accumulated = 0.0;
     let mut best: Option<RouteSample> = None;
     for (segment_index, pair) in nodes.windows(2).enumerate() {
@@ -225,7 +406,7 @@ fn sample_polyline(route_id: RouteId, nodes: &[RouteNode], x: f32, z: f32) -> Op
         };
         best = Some(RouteSample {
             route_id,
-            segment_index: segment_index as u8,
+            segment_index: segment_index as u16,
             segment_t: t,
             closest,
             tangent,
@@ -241,7 +422,8 @@ fn sample_polyline(route_id: RouteId, nodes: &[RouteNode], x: f32, z: f32) -> Op
     best
 }
 
-fn point_and_tangent_at_distance(
+#[cfg(test)]
+fn point_and_tangent_at_distance_reference(
     nodes: &[RouteNode],
     distance: f32,
 ) -> Option<([f32; 2], [f32; 2])> {
@@ -277,7 +459,8 @@ fn point_and_tangent_at_distance(
     ))
 }
 
-fn polyline_length(nodes: &[RouteNode]) -> f32 {
+#[cfg(test)]
+fn polyline_length_reference(nodes: &[RouteNode]) -> f32 {
     nodes
         .windows(2)
         .map(|pair| {
@@ -301,14 +484,72 @@ mod tests {
     fn route_projection_is_continuous_and_distance_along_is_monotonic() {
         let mut previous = -1.0;
         for distance in (0..first_pilgrim_road_length_voxels() as i32).step_by(7) {
-            let (point, _) =
-                point_and_tangent_at_distance(&FIRST_PILGRIM_ROAD_NODES, distance as f32).unwrap();
+            let (point, _) = first_pilgrim_road_point_at_distance(distance as f32).unwrap();
             let sample =
                 sample_first_pilgrim_road(point[0].round() as i32, point[1].round() as i32)
                     .unwrap();
             assert!(sample.distance_to_route_voxels <= 1.0);
             assert!(sample.distance_along_voxels + 1.5 >= previous);
             previous = sample.distance_along_voxels;
+        }
+    }
+
+    #[test]
+    fn indexed_route_matches_slow_projection_and_preserves_station_identity() {
+        assert_eq!(FIRST_PILGRIM_ROAD_INDEX.bounds, FIRST_PILGRIM_ROAD_BOUNDS);
+        assert_eq!(
+            FIRST_PILGRIM_ROAD_INDEX.length,
+            polyline_length_reference(&FIRST_PILGRIM_ROAD_NODES)
+        );
+        let [[min_x, min_z], [max_x, max_z]] = FIRST_PILGRIM_ROAD_BOUNDS;
+        for z in (min_z..max_z).step_by(13) {
+            for x in (min_x..max_x).step_by(13) {
+                let indexed =
+                    FIRST_PILGRIM_ROAD_INDEX
+                        .sample(x as f32, z as f32)
+                        .filter(|sample| {
+                            sample.distance_to_route_voxels <= ROUTE_SHOULDER_WIDTH_VOXELS
+                        });
+                let reference = sample_polyline_reference(
+                    RouteId::FirstPilgrimRoad,
+                    &FIRST_PILGRIM_ROAD_NODES,
+                    x as f32,
+                    z as f32,
+                )
+                .filter(|sample| sample.distance_to_route_voxels <= ROUTE_SHOULDER_WIDTH_VOXELS);
+                assert_eq!(indexed, reference, "indexed mismatch at ({x}, {z})");
+            }
+        }
+        for distance in (-10..=first_pilgrim_road_length_voxels() as i32 + 10).step_by(3) {
+            let indexed = FIRST_PILGRIM_ROAD_INDEX
+                .point_at_distance(distance as f32)
+                .unwrap();
+            let reference =
+                point_and_tangent_at_distance_reference(&FIRST_PILGRIM_ROAD_NODES, distance as f32)
+                    .unwrap();
+            assert_eq!(indexed.1, reference.1);
+            assert!((indexed.0[0] - reference.0[0]).abs() <= 0.001);
+            assert!((indexed.0[1] - reference.0[1]).abs() <= 0.001);
+        }
+        for ordinal in 0..first_pilgrim_route_anchor_count() {
+            let distance =
+                ROUTE_TOKEN_START_VOXELS + f32::from(ordinal) * ROUTE_TOKEN_CADENCE_VOXELS;
+            let indexed = FIRST_PILGRIM_ROAD_INDEX
+                .point_at_distance(distance)
+                .unwrap();
+            let reference =
+                point_and_tangent_at_distance_reference(&FIRST_PILGRIM_ROAD_NODES, distance)
+                    .unwrap();
+            let side = if ordinal & 1 == 0 { 1.0 } else { -1.0 };
+            let station = |point: ([f32; 2], [f32; 2])| {
+                [
+                    (point.0[0] - point.1[1] * ROUTE_TOKEN_SIDE_OFFSET_VOXELS * side).round()
+                        as i32,
+                    (point.0[1] + point.1[0] * ROUTE_TOKEN_SIDE_OFFSET_VOXELS * side).round()
+                        as i32,
+                ]
+            };
+            assert_eq!(station(indexed), station(reference));
         }
     }
 

@@ -1,10 +1,13 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use voxels_world::codec::{decode_chunk, encode_chunk};
 use voxels_world::{
     ChunkCoord, EditMap, FarTileCoord, Generator, Material, SkylineFeatureKind, SurfaceLodLevel,
     SurfaceTileCoord, VoxelCoord, first_pilgrim_road_length_voxels,
-    first_pilgrim_road_point_at_distance, generate_edited_surface_tile_mesh,
+    first_pilgrim_road_point_at_distance, first_pilgrim_route_anchor,
+    first_pilgrim_route_anchor_for_feature_cell, generate_edited_surface_tile_mesh,
     generate_edited_water_tile_mesh, generate_far_tile, generate_far_tile_with, mesh_chunk,
+    sample_first_pilgrim_road,
 };
 
 const SEED: u64 = 0x5eed_cafe;
@@ -73,6 +76,41 @@ fn semantic_hero_generation(criterion: &mut Criterion) {
                 bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
             },
         );
+    }
+    group.finish();
+}
+
+fn route_queries(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("pilgrim-road indexed queries");
+    group.bench_function("global bounds reject", |bencher| {
+        bencher.iter(|| {
+            let (x, z) = black_box((10_000, -10_000));
+            sample_first_pilgrim_road(x, z)
+        });
+    });
+    group.bench_function("segment corridor reject", |bencher| {
+        bencher.iter(|| {
+            let (x, z) = black_box((-1_200, 0));
+            sample_first_pilgrim_road(x, z)
+        });
+    });
+    group.bench_function("near-segment projection", |bencher| {
+        bencher.iter(|| {
+            let (x, z) = black_box((-632, 656));
+            sample_first_pilgrim_road(x, z)
+        });
+    });
+    let distance = first_pilgrim_road_length_voxels() * 0.73;
+    group.bench_function("point at cumulative distance", |bencher| {
+        bencher.iter(|| first_pilgrim_road_point_at_distance(black_box(distance)));
+    });
+    if let Some(anchor) = first_pilgrim_route_anchor(3) {
+        group.bench_function("station feature-cell lookup", |bencher| {
+            bencher.iter(|| {
+                let cell = black_box(anchor.feature_cell);
+                first_pilgrim_route_anchor_for_feature_cell(cell[0], cell[1])
+            });
+        });
     }
     group.finish();
 }
@@ -162,6 +200,7 @@ criterion_group!(
     generation,
     route_surface_lod,
     semantic_hero_generation,
+    route_queries,
     codec,
     meshing,
     water_meshing,
