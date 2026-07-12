@@ -171,6 +171,13 @@ async function closeFollowerAndAssertFinalCamera(context, url, follower) {
       `follower camera did not move before close: ${before.slice(0, 5)} -> ${final.slice(0, 5)}`,
     );
   }
+  // Playwright's force-close may destroy a target without giving its worker a lifecycle turn.
+  // Fire the real pagehide path explicitly, then allow the bounded graceful-shutdown window to
+  // forward the final write and close SQLite before force-closing the now-stopped page.
+  await follower.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false }));
+  });
+  await follower.waitForTimeout(500);
   await follower.close();
 
   const replacement = await context.newPage();

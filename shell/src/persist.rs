@@ -128,6 +128,7 @@ struct Coordinator {
     next_request: Cell<u64>,
     pending: RefCell<HashMap<u64, Pending>>,
     write_queue: RefCell<VecDeque<Operation>>,
+    active_write: RefCell<Option<Operation>>,
     committed_edits: RefCell<VecDeque<(VoxelCoord, Option<u16>)>>,
     writing: Cell<bool>,
     closed: Cell<bool>,
@@ -244,6 +245,7 @@ impl Coordinator {
             next_request: Cell::new(0),
             pending: RefCell::new(HashMap::new()),
             write_queue: RefCell::new(VecDeque::new()),
+            active_write: RefCell::new(None),
             committed_edits: RefCell::new(VecDeque::new()),
             writing: Cell::new(false),
             closed: Cell::new(false),
@@ -351,7 +353,10 @@ impl Coordinator {
                 let Some(operation) = coordinator.write_queue.borrow_mut().pop_front() else {
                     break;
                 };
-                if let OperationResult::Error(error) = coordinator.request(operation).await {
+                *coordinator.active_write.borrow_mut() = Some(operation.clone());
+                let result = coordinator.request(operation).await;
+                coordinator.active_write.borrow_mut().take();
+                if let OperationResult::Error(error) = result {
                     web_sys::console::error_1(&JsValue::from_str(&format!(
                         "persistence follower write failed: {error}"
                     )));
@@ -605,6 +610,7 @@ impl Coordinator {
         if self.closed.get() {
             return;
         }
+        self.flush_queued_writes();
         for _ in 0..40 {
             if !self.writing.get() && self.write_queue.borrow().is_empty() {
                 break;
@@ -645,13 +651,16 @@ impl Coordinator {
         self.channel.close();
     }
 
-    /// Hands writes that have not entered the async follower drain to the current owner before this
-    /// worker closes. BroadcastChannel clones a posted message synchronously, so the leader can
-    /// finish the write after the follower has released its own channel and worker.
+    /// Hands every unfinished write to the current owner before this worker closes. This includes
+    /// the operation removed from the queue by the async follower drain but still awaiting its
+    /// response. BroadcastChannel clones a posted message synchronously, so the leader can finish
+    /// the write after the follower has released its own channel and worker.
     fn flush_queued_writes(&self) {
+        let active = self.active_write.borrow_mut().take();
         let queued = std::mem::take(&mut *self.write_queue.borrow_mut());
+        let unfinished = active.into_iter().chain(queued);
         if let Some(leader) = self.leader.borrow().clone() {
-            for operation in queued {
+            for operation in unfinished {
                 let result = leader.run(&operation);
                 if matches!(result, OperationResult::Ok)
                     && let Operation::SaveEdit { coord, material } = operation
@@ -666,7 +675,7 @@ impl Coordinator {
             }
             return;
         }
-        for operation in queued {
+        for operation in unfinished {
             let id = self.next_request.get();
             self.next_request.set(id.wrapping_add(1));
             self.post_request(id, &operation);
