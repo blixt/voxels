@@ -66,5 +66,5 @@ work and far-tile residency. It is intentionally an automation hook rather than 
 game model. The final thirteen values are display-frame cadence in milliseconds, shadow-caster draws,
 active shadow cascades, load/remesh p95 and maximum latency in scheduler frames, and resident tile
 counts for each of the four surface LOD levels, followed by visible water quads, water-pass draws, and
-refraction-copy MiB. The final four values are exact immersion, eye depth, eyes-submerged, and
-swimming state.
+refraction-copy MiB. The next four values are exact immersion, eye depth, eyes-submerged, and
+swimming state; the final four expose targeted voxel X/Y/Z and target validity for input automation.

@@ -171,6 +171,13 @@ queued acquisitions are aborted and the BroadcastChannel is closed. A browser st
 rapid reload and ownership handoff on an isolated origin. The wire includes the seed and generator
 version so an incompatible build cannot silently answer another world's request.
 
+Committed sparse edits are also a Rust-to-Rust multi-tab replication unit. A follower applies its edit
+optimistically, the elected leader commits it, applies follower-originated commits to its own engine
+because BroadcastChannel does not self-echo, and broadcasts the durable override (including row
+removal) to every other follower. Each recipient updates `EditMap`, resident canonical data, remesh
+tickets, and affected LOD tiles through the same invalidation path as a local edit. Rendering and
+collision therefore converge live instead of waiting for a reload.
+
 ## Performance policy
 
 - Never allocate or send one JavaScript object per input sample, voxel, face, or chunk.

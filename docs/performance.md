@@ -164,3 +164,7 @@ measured 177.87 us: about 0.75 us versus 1.48 us per 120 Hz tick. `vp run bench:
 baselines. The browser gate entered the Rust underwater showcase, toggled water rendering off and back
 on while verifying physics stayed submerged, and completed with no WGPU/shader warning or error. The
 captured frame retained only canvas-rendered crosshair, depth/immersion status, and swim-help chrome.
+The same isolated browser sequence now performs a real pointer-locked removal in a follower tab and
+waits for the leader's live Rust edit map to reach the same revision before any reload. This covers the
+follower proxy, SQLite commit, committed-edit broadcast, and canonical/LOD invalidation path in addition
+to storage ownership handoff.
