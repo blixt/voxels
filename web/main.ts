@@ -83,6 +83,7 @@ function start(canvas: HTMLCanvasElement): void {
 
   const offscreen = canvas.transferControlToOffscreen();
   const bounds = canvas.getBoundingClientRect();
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   worker.postMessage(
     {
       kind: "init",
@@ -90,7 +91,7 @@ function start(canvas: HTMLCanvasElement): void {
       cssWidth: bounds.width,
       cssHeight: bounds.height,
       dpr: window.devicePixelRatio || 1,
-      reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+      reducedMotion: reducedMotion.matches,
     },
     [offscreen],
   );
@@ -232,6 +233,10 @@ function start(canvas: HTMLCanvasElement): void {
       postResize(bounds.width, bounds.height);
     },
   );
+  const handleReducedMotionChange = (event: MediaQueryListEvent): void => {
+    worker.postMessage({ kind: "reducedMotion", reduced: event.matches });
+  };
+  reducedMotion.addEventListener("change", handleReducedMotionChange);
   let destroyed = false;
   window.addEventListener("pagehide", (event) => {
     // A page entering the back-forward cache is frozen with its worker and must resume intact.
@@ -241,6 +246,7 @@ function start(canvas: HTMLCanvasElement): void {
     flush();
     resize.disconnect();
     stopWatchingPixelRatio();
+    reducedMotion.removeEventListener("change", handleReducedMotionChange);
     const error = new Error("Voxels page closed before the snapshot completed");
     for (const { reject } of snapshotResolvers.values()) reject(error);
     snapshotResolvers.clear();

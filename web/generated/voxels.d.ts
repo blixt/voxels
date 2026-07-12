@@ -7,6 +7,7 @@ export class EngineHandle {
     destroy(): void;
     feed_input(bytes: Uint8Array): boolean;
     resize(css_width: number, css_height: number, dpr: number): void;
+    set_reduced_motion(reduced_motion: boolean): void;
     snapshot(): Float32Array;
     start_profile(profile_id: number): boolean;
 }
@@ -22,6 +23,7 @@ export interface InitOutput {
     readonly enginehandle_destroy: (a: number) => void;
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => number;
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;
+    readonly enginehandle_set_reduced_motion: (a: number, b: number) => void;
     readonly enginehandle_snapshot: (a: number) => any;
     readonly enginehandle_start_profile: (a: number, b: number) => number;
     readonly rust_sqlite_wasm_abort: () => void;

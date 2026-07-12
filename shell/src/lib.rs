@@ -1918,6 +1918,15 @@ mod web {
             }
         }
 
+        pub fn set_reduced_motion(&self, reduced_motion: bool) {
+            if let Some(engine) = self.engine.as_ref() {
+                engine
+                    .renderer
+                    .borrow_mut()
+                    .set_reduced_motion(reduced_motion);
+            }
+        }
+
         pub fn snapshot(&self) -> Float32Array {
             let mut values = Vec::new();
             if let Some(engine) = self.engine.as_ref() {

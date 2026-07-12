@@ -26,6 +26,9 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
     case "resize":
       handle?.resize(message.cssWidth, message.cssHeight, message.dpr);
       break;
+    case "reducedMotion":
+      handle?.set_reduced_motion(message.reduced);
+      break;
     case "profile":
       handle?.start_profile(message.profileId);
       break;
