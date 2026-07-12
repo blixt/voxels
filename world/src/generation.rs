@@ -1,13 +1,13 @@
 use crate::{
     CHUNK_EDGE, COMPOSITION_EDGE_FEATURE_CELLS, Chunk, ChunkCoord, FEATURE_CELL_VOXELS,
-    FEATURE_MAX_RADIUS_VOXELS, FIRST_PILGRIM_ROAD_NODES, FeatureComposition, Material,
-    ROUTE_CORE_HALF_WIDTH_VOXELS, RouteAnchor, RouteAnchorRole, RouteLandmarkId, RouteSample,
-    SkylineFeature, SkylineFeatureId, SkylineFeatureKind,
+    FEATURE_MAX_RADIUS_VOXELS, FIRST_PILGRIM_ROAD_NODES, FeatureComposition,
+    FeatureCompositionRole, Material, ROUTE_CORE_HALF_WIDTH_VOXELS, RouteAnchor, RouteAnchorRole,
+    RouteLandmarkId, RouteSample, SkylineFeature, SkylineFeatureId, SkylineFeatureKind,
     first_pilgrim_route_anchor_for_feature_cell, sample_first_pilgrim_road,
 };
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 10;
+pub const GENERATOR_VERSION: u32 = 11;
 pub const SEA_LEVEL_VOXELS: i32 = 10;
 
 /// Renderer-neutral continuous atmosphere inputs derived from the same regional weights as terrain.
@@ -702,8 +702,12 @@ impl Generator {
 
     fn feature_anchor(self, cell_x: i32, cell_z: i32) -> (i32, i32, u64) {
         let hash = self.hash(cell_x, 0, cell_z, 0x7a11_5eed);
-        let x_offset = 12 + (hash & 63) as i32;
-        let z_offset = 12 + ((hash >> 8) & 63) as i32;
+        // The largest semantic hero still remains inside its one authoritative placement cell.
+        // Keeping that invariant avoids a second identity or ownership structure for large forms.
+        let minimum_offset = FEATURE_MAX_RADIUS_VOXELS + 2;
+        let offset_span = FEATURE_CELL_VOXELS - minimum_offset * 2;
+        let x_offset = minimum_offset + (hash % offset_span as u64) as i32;
+        let z_offset = minimum_offset + ((hash >> 8) % offset_span as u64) as i32;
         (
             cell_x * FEATURE_CELL_VOXELS + x_offset,
             cell_z * FEATURE_CELL_VOXELS + z_offset,
@@ -733,13 +737,27 @@ impl Generator {
         }) {
             return None;
         }
-        let kind = match surface.region {
+        let regional_kind = match surface.region {
             SurfaceRegion::VerdantForest => SkylineFeatureKind::Broadleaf,
             SurfaceRegion::WindMoor => SkylineFeatureKind::MoorTor,
             SurfaceRegion::Alpine => SkylineFeatureKind::AlpineNeedle,
             SurfaceRegion::RedBadlands => SkylineFeatureKind::BadlandsHoodoo,
             SurfaceRegion::PaleDunes => SkylineFeatureKind::DuneArch,
             SurfaceRegion::Volcanic => SkylineFeatureKind::BasaltColumns,
+        };
+        let composition = self.feature_composition(cell_x, cell_z);
+        let influence = composition.influence(cell_x, cell_z);
+        let kind = if influence.role() == FeatureCompositionRole::Hero {
+            match surface.region {
+                SurfaceRegion::VerdantForest => SkylineFeatureKind::ElderCanopy,
+                SurfaceRegion::WindMoor => SkylineFeatureKind::TorCircle,
+                SurfaceRegion::Alpine => SkylineFeatureKind::NeedleGate,
+                SurfaceRegion::RedBadlands => SkylineFeatureKind::BuriedRibs,
+                SurfaceRegion::PaleDunes => SkylineFeatureKind::BuriedColonnade,
+                SurfaceRegion::Volcanic => SkylineFeatureKind::BasaltCrown,
+            }
+        } else {
+            regional_kind
         };
         let density_threshold: u8 = match kind {
             SkylineFeatureKind::Broadleaf => 224,
@@ -750,17 +768,22 @@ impl Generator {
             SkylineFeatureKind::BasaltColumns => 112,
             SkylineFeatureKind::PilgrimCairn
             | SkylineFeatureKind::RouteWaystone
-            | SkylineFeatureKind::RuinedArch => u8::MAX,
+            | SkylineFeatureKind::RuinedArch
+            | SkylineFeatureKind::ElderCanopy
+            | SkylineFeatureKind::TorCircle
+            | SkylineFeatureKind::NeedleGate
+            | SkylineFeatureKind::BuriedRibs
+            | SkylineFeatureKind::BuriedColonnade
+            | SkylineFeatureKind::BasaltCrown => u8::MAX,
         };
-        let composition = self.feature_composition(cell_x, cell_z);
-        let influence = composition.influence(cell_x, cell_z);
-        let effective_density = if influence.prominence == 2 {
+        let hero = influence.role() == FeatureCompositionRole::Hero;
+        let effective_density = if hero {
             u8::MAX
         } else {
             (u16::from(density_threshold) * u16::from(influence.density) / u16::from(u8::MAX)) as u8
         };
         if effective_density == 0
-            || ((hash >> 40) & 0xff) as u8 >= effective_density
+            || (!hero && ((hash >> 40) & 0xff) as u8 >= effective_density)
             || (kind == SkylineFeatureKind::Broadleaf && surface.moisture < 0.30)
         {
             return None;
@@ -774,7 +797,13 @@ impl Generator {
             SkylineFeatureKind::AlpineNeedle | SkylineFeatureKind::BasaltColumns => 1.0,
             SkylineFeatureKind::PilgrimCairn
             | SkylineFeatureKind::RouteWaystone
-            | SkylineFeatureKind::RuinedArch => 1.0,
+            | SkylineFeatureKind::RuinedArch
+            | SkylineFeatureKind::ElderCanopy
+            | SkylineFeatureKind::TorCircle
+            | SkylineFeatureKind::NeedleGate
+            | SkylineFeatureKind::BuriedRibs
+            | SkylineFeatureKind::BuriedColonnade
+            | SkylineFeatureKind::BasaltCrown => 1.0,
         };
         if surface.ridge > maximum_ridge {
             return None;
@@ -786,11 +815,21 @@ impl Generator {
             SkylineFeatureKind::BadlandsHoodoo => 24 + ((hash >> 16) & 15) as i32,
             SkylineFeatureKind::DuneArch => 18 + ((hash >> 16) & 7) as i32,
             SkylineFeatureKind::BasaltColumns => 24 + ((hash >> 16) & 19) as i32,
+            SkylineFeatureKind::ElderCanopy => 66 + ((hash >> 16) & 15) as i32,
+            SkylineFeatureKind::TorCircle => 48 + ((hash >> 16) & 15) as i32,
+            SkylineFeatureKind::NeedleGate => 62 + ((hash >> 16) & 15) as i32,
+            SkylineFeatureKind::BuriedRibs => 42 + ((hash >> 16) & 11) as i32,
+            SkylineFeatureKind::BuriedColonnade => 44 + ((hash >> 16) & 11) as i32,
+            SkylineFeatureKind::BasaltCrown => 58 + ((hash >> 16) & 15) as i32,
             SkylineFeatureKind::PilgrimCairn
             | SkylineFeatureKind::RouteWaystone
             | SkylineFeatureKind::RuinedArch => 0,
         };
-        let height = base_height + base_height * i32::from(influence.prominence.min(2)) / 4;
+        let height = if hero {
+            base_height
+        } else {
+            base_height + base_height * i32::from(influence.prominence.min(1)) / 4
+        };
         Some(SkylineFeature {
             id: SkylineFeatureId { cell_x, cell_z },
             kind,
@@ -1115,7 +1154,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checksum, 0x3d1c_bc5e_e75f_c0a6);
+        assert_eq!(checksum, 0xc579_36e4_d617_c29f);
     }
 
     #[test]
@@ -1383,18 +1422,43 @@ mod tests {
             crate::FeatureCompositionMode::ALL.into_iter().collect()
         );
         assert!(prominence_counts.into_iter().all(|count| count > 0));
-        assert_eq!(checksum, 0x251b_911c_980d_e284);
+        assert_eq!(checksum, 0x7bad_436d_a5ba_2213);
     }
 
     #[test]
     fn prominent_landmark_search_returns_composition_heroes() {
         let generator = Generator::new(0x5eed_cafe);
-        for kind in SkylineFeatureKind::REGIONAL {
+        for kind in SkylineFeatureKind::REGIONAL_HEROES {
             let feature = generator
                 .nearest_prominent_skyline_feature(0, 0, kind, 192)
                 .expect("the fixed catalog should contain a hero of every regional kind");
             assert_eq!(feature.kind, kind);
             assert_eq!(feature.prominence, 2);
+        }
+    }
+
+    #[test]
+    fn regional_heroes_agree_across_every_canonical_sampling_path() {
+        let generator = Generator::new(0x5eed_cafe);
+        for kind in SkylineFeatureKind::REGIONAL_HEROES {
+            let feature = generator
+                .nearest_prominent_skyline_feature(0, 0, kind, 192)
+                .expect("fixed catalog should contain every semantic hero");
+            let probe = VoxelCoord::new(feature.anchor[0], feature.trunk_top, feature.anchor[2]);
+            let material = feature
+                .material_at(probe)
+                .expect("semantic hero must occupy its top-center probe");
+            assert_eq!(generator.sample(probe.x, probe.y, probe.z), material);
+            assert_eq!(generator.column(probe.x, probe.z).sample(probe.y), material);
+            assert_eq!(
+                generator
+                    .region(probe.x, probe.z, 1, 1)
+                    .sample(probe.x, probe.y, probe.z),
+                material
+            );
+            let chunk = generator.generate_chunk(probe.chunk());
+            let local = probe.local();
+            assert_eq!(chunk.get(local[0], local[1], local[2]), material);
         }
     }
 

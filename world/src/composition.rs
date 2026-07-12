@@ -37,6 +37,24 @@ pub struct FeatureCompositionInfluence {
     pub prominence: u8,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum FeatureCompositionRole {
+    #[default]
+    Background,
+    Companion,
+    Hero,
+}
+
+impl FeatureCompositionInfluence {
+    pub const fn role(self) -> FeatureCompositionRole {
+        match self.prominence {
+            0 => FeatureCompositionRole::Background,
+            1 => FeatureCompositionRole::Companion,
+            _ => FeatureCompositionRole::Hero,
+        }
+    }
+}
+
 impl FeatureComposition {
     pub fn for_feature_cell(feature_cell_x: i32, feature_cell_z: i32, hash: u64) -> Self {
         let id = FeatureCompositionId {

@@ -921,6 +921,149 @@ fn append_skyline_proxy(
                 Material::Stone,
             );
         }
+        SkylineFeatureKind::ElderCanopy => {
+            append_box(
+                quads,
+                [anchor_x - 2, ground + 1, anchor_z - 2],
+                [anchor_x + 3, top + 1, anchor_z + 3],
+                Material::Wood,
+            );
+            for &(offset_x, offset_z, radius, min_y) in &[
+                (0, 0, 15, top - 10),
+                (-7, -4, 9, top - 6),
+                (7, 5, 9, top - 5),
+            ] {
+                append_box(
+                    quads,
+                    [
+                        anchor_x + offset_x - radius,
+                        min_y,
+                        anchor_z + offset_z - radius,
+                    ],
+                    [
+                        anchor_x + offset_x + radius + 1,
+                        top + 6,
+                        anchor_z + offset_z + radius + 1,
+                    ],
+                    Material::Leaves,
+                );
+            }
+        }
+        SkylineFeatureKind::TorCircle => {
+            let height = top - ground;
+            for &(offset, column_height) in &[
+                ([0, 0], height),
+                ([-11, 0], height * 3 / 4),
+                ([11, 0], height * 4 / 5),
+                ([0, 11], height * 7 / 8),
+            ] {
+                let [offset_x, offset_z] = feature.oriented_offset(offset[0], offset[1]);
+                append_box(
+                    quads,
+                    [anchor_x + offset_x - 3, ground + 1, anchor_z + offset_z - 3],
+                    [
+                        anchor_x + offset_x + 4,
+                        ground + column_height + 1,
+                        anchor_z + offset_z + 4,
+                    ],
+                    Material::Limestone,
+                );
+            }
+        }
+        SkylineFeatureKind::NeedleGate => {
+            for direction in [-1, 1] {
+                let [offset_x, offset_z] = feature.oriented_offset(direction * 10, 0);
+                append_box(
+                    quads,
+                    [anchor_x + offset_x - 3, ground + 1, anchor_z + offset_z - 3],
+                    [anchor_x + offset_x + 4, top + 1, anchor_z + offset_z + 4],
+                    Material::Stone,
+                );
+            }
+            let [axis_x, axis_z] = feature.oriented_offset(12, 3);
+            append_box(
+                quads,
+                [anchor_x - axis_x.abs(), top - 5, anchor_z - axis_z.abs()],
+                [
+                    anchor_x + axis_x.abs() + 1,
+                    top + 1,
+                    anchor_z + axis_z.abs() + 1,
+                ],
+                Material::Snow,
+            );
+        }
+        SkylineFeatureKind::BuriedRibs => {
+            for direction in [-1, 1] {
+                let [offset_x, offset_z] = feature.oriented_offset(0, direction * 9);
+                append_box(
+                    quads,
+                    [anchor_x + offset_x - 2, ground + 1, anchor_z + offset_z - 2],
+                    [anchor_x + offset_x + 3, top - 5, anchor_z + offset_z + 3],
+                    Material::Stone,
+                );
+            }
+            for along in [-7, 7] {
+                let [offset_x, offset_z] = feature.oriented_offset(along, 0);
+                let [axis_x, axis_z] = feature.oriented_offset(2, 10);
+                append_box(
+                    quads,
+                    [
+                        anchor_x + offset_x - axis_x.abs(),
+                        top - 7,
+                        anchor_z + offset_z - axis_z.abs(),
+                    ],
+                    [
+                        anchor_x + offset_x + axis_x.abs() + 1,
+                        top + 1,
+                        anchor_z + offset_z + axis_z.abs() + 1,
+                    ],
+                    Material::Limestone,
+                );
+            }
+        }
+        SkylineFeatureKind::BuriedColonnade => {
+            for along in [-10, 0, 10] {
+                let [offset_x, offset_z] = feature.oriented_offset(along, 0);
+                append_box(
+                    quads,
+                    [anchor_x + offset_x - 2, ground + 1, anchor_z + offset_z - 2],
+                    [anchor_x + offset_x + 3, top + 1, anchor_z + offset_z + 3],
+                    Material::Limestone,
+                );
+            }
+            let [axis_x, axis_z] = feature.oriented_offset(14, 3);
+            append_box(
+                quads,
+                [anchor_x - axis_x.abs(), top - 4, anchor_z - axis_z.abs()],
+                [
+                    anchor_x + axis_x.abs() + 1,
+                    top + 1,
+                    anchor_z + axis_z.abs() + 1,
+                ],
+                Material::Stone,
+            );
+        }
+        SkylineFeatureKind::BasaltCrown => {
+            let height = top - ground;
+            for &(offset, column_height) in &[
+                ([0, 0], height),
+                ([-10, -5], height * 4 / 5),
+                ([10, -5], height * 3 / 4),
+                ([0, 12], height * 3 / 5),
+            ] {
+                let [offset_x, offset_z] = feature.oriented_offset(offset[0], offset[1]);
+                append_box(
+                    quads,
+                    [anchor_x + offset_x - 3, ground + 1, anchor_z + offset_z - 3],
+                    [
+                        anchor_x + offset_x + 4,
+                        ground + column_height + 1,
+                        anchor_z + offset_z + 4,
+                    ],
+                    Material::Basalt,
+                );
+            }
+        }
     }
 }
 
@@ -1034,6 +1177,47 @@ mod tests {
                 assert!(!quads.is_empty());
                 assert!(quads.len() <= 24, "{kind:?} emitted {} quads", quads.len());
                 assert!(quads.iter().all(|quad| quad.material.is_renderable()));
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_hero_proxies_are_edit_suppressed_and_exactly_restored() {
+        let generator = Generator::new(0x5eed_cafe);
+        for kind in SkylineFeatureKind::REGIONAL_HEROES {
+            let feature = generator
+                .nearest_prominent_skyline_feature(0, 0, kind, 192)
+                .expect("fixed catalog should contain every semantic hero");
+            let target = VoxelCoord::new(feature.anchor[0], feature.trunk_top, feature.anchor[2]);
+            let generated = feature
+                .material_at(target)
+                .expect("hero inspection probe must be canonical geometry");
+            assert_eq!(generator.sample(target.x, target.y, target.z), generated);
+            for level in SurfaceLodLevel::ALL {
+                let coord =
+                    SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
+                let pristine =
+                    generate_edited_surface_tile_mesh(generator, &EditMap::default(), coord);
+                let mut direct_proxy = Vec::new();
+                append_skyline_proxy(&mut direct_proxy, level, feature);
+                assert!(!direct_proxy.is_empty());
+                assert!(direct_proxy.len() <= 24);
+
+                let mut edits = EditMap::default();
+                edits.set(generator, target, Material::Air);
+                let edited = generate_edited_surface_tile_mesh(generator, &edits, coord);
+                assert_eq!(
+                    pristine.quads.len() - edited.quads.len(),
+                    direct_proxy.len(),
+                    "{kind:?} proxy did not disappear at {level:?}"
+                );
+                edits.set(generator, target, generated);
+                assert!(edits.is_empty());
+                assert_eq!(
+                    generate_edited_surface_tile_mesh(generator, &edits, coord),
+                    pristine,
+                    "{kind:?} proxy did not restore exactly at {level:?}"
+                );
             }
         }
     }

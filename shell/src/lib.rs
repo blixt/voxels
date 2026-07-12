@@ -1000,14 +1000,14 @@ mod web {
             let camera = *self.camera.borrow();
             let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
             let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-            let Some(feature) = self
-                .generator
-                .nearest_prominent_skyline_feature(voxel_x, voxel_z, kind, 192)
-                .or_else(|| {
-                    self.generator
-                        .nearest_skyline_feature(voxel_x, voxel_z, kind, 192)
-                })
-            else {
+            let feature = if kind.is_semantic_hero() {
+                self.generator
+                    .nearest_prominent_skyline_feature(voxel_x, voxel_z, kind, 192)
+            } else {
+                self.generator
+                    .nearest_skyline_feature(voxel_x, voxel_z, kind, 192)
+            };
+            let Some(feature) = feature else {
                 web_sys::console::error_1(&JsValue::from_str(
                     "landmark tour could not find the requested biome archetype",
                 ));
