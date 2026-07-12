@@ -360,9 +360,10 @@ assets, where their topology compression is a better fit.
 ## Persistence
 
 SQLite runs inside Rust/WASM through the native SQLite C API exposed by `sqlite-wasm-rs`. Its database
-lives in Origin Private File System storage through the `sqlite-wasm-vfs` sync-access-handle pool. OPFS
-is worker-only; keeping the engine in a dedicated worker therefore satisfies both rendering and storage
-constraints.
+lives in Origin Private File System storage through the `sqlite-wasm-vfs` sync-access-handle pool.
+General OPFS handles are available on both windows and workers, but the synchronous access handles
+used by this VFS are dedicated-worker-only. Keeping the engine in a dedicated worker therefore
+satisfies both rendering and storage constraints.
 
 SQLite stores structured, queryable state: schema version, world identity and generator version,
 player state, and sparse voxel overrides. Each override is an idempotent row keyed by world and voxel;
@@ -428,7 +429,7 @@ latency a user-visible, revision-backed measurement rather than a queue-length a
   <https://gpuopen.com/fidelityfx-cacao/>
   <https://github.com/GameTechDev/XeGTAO>
 - SQLite recommends `opfs-sahpool` when performance matters more than concurrent connections and notes
-  that OPFS APIs are worker-only:
+  that the synchronous OPFS APIs required by this VFS are worker-only:
   <https://sqlite.org/wasm/doc/tip/persistence.md>
 - Web Locks are origin-scoped, available in workers, held for the lifetime of the callback promise, and
   support aborting queued acquisition:
