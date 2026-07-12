@@ -40,7 +40,7 @@ authoritative near field keeps the required 10 cm voxel resolution and uses face
 rectangle merging. A column becomes render-ready only when all desired vertical chunks are resident,
 so a partially streamed stack cannot expose an open terrain slice.
 
-Generator v14 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
+The current generator builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
 detail, dune, and volcanic fields. Six dominant regional identities—verdant forest, wind-cut moor,
 alpine, red badlands, pale dunes, and volcanic terrain—select surface ecology and geology, while their
 normalized weights blend height modifiers continuously across boundaries. Canonical generation, LOD
@@ -172,7 +172,8 @@ the existing pristine-feature test ensure the tell appears once; editing any can
 suppresses its derived proxy at all levels, and restoring the generated material recreates it exactly.
 The protected entrance itself remains canonical Air and is never approximated as a negative LOD hole.
 
-Atlas schema v1 adds append-only Rust discriminants for six destinations and five route chapters.
+Atlas schema v1 adds append-only Rust discriminants for six destinations and five route chapters;
+schema v2 appends the Cinder Vault cave-system identity and its authored atlas definition.
 Each destination freezes its canonical X/Z and route station, with tests reconstructing the authored
 point to within one 10 cm voxel. The shell projects the camera onto the same route index, chooses the
 chapter, and forwards only that Rust state to the renderer. Mission Control draws the chapter and
@@ -333,7 +334,7 @@ Replacement uploads preserve the reason mask. Retained resident chunks edited ou
 desired set are still allowed to finish remeshing, preventing a permanently queued transaction.
 
 Placement material is Rust state, selected through the canvas context menu and displayed in the Rust
-header. The browser still transmits only pointer input; right-click uses the selected material and the
+header. The browser still transmits only raw input records; right-click uses the selected material and the
 ordinary sparse-edit/SQLite/remesh path, so GlowCrystal is not a renderer-only decoration.
 
 The first persistent chunk format is versioned and little-endian:
