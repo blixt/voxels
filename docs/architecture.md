@@ -346,7 +346,7 @@ The first persistent chunk format is versioned and little-endian:
 1. a small magic/version header and chunk coordinates;
 2. a chunk-local palette of stable material ids;
 3. palette indices packed at `ceil(log2(palette length))` bits per voxel in Y-Z-X traversal order;
-4. an integrity hash and optional block compression around the packed payload.
+4. an integrity hash over the decoded voxel materials.
 
 Palette + bit packing follows the useful part of modern Minecraft's paletted-container design while
 remaining independent of NBT and game-specific registries. Fixed chunks are intentionally preferred
@@ -367,7 +367,8 @@ restoring the generated material removes the row. Versioned palette/bit-packed c
 future snapshot compaction. If profiling shows write amplification or database size becoming a real
 constraint, the same codec can move snapshots into append-only region files while SQLite remains the
 transactional index. Region files would group a bounded X/Z tile, use a checksummed offset table, and
-write payloads in aligned extents; that complexity is not justified before measurements.
+write payloads in aligned extents. Optional block compression can be evaluated around those packed
+payloads then; neither region wrapping nor compression is part of VXCH v1.
 
 Multi-tab access is single-writer without excluding other tabs. A Web Lock elects one worker as the
 SQLite/SAH-pool owner; followers proxy typed camera/edit operations over a BroadcastChannel and queue
