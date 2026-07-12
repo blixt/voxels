@@ -41,6 +41,12 @@ function rustWasm(release: boolean): Plugin {
 
 export default defineConfig(({ command, mode }) => ({
   plugins: mode === "test" ? [] : [rustWasm(command === "build")],
+  // A renderer failure belongs in the console. Vite's default HMR overlay appends a shadow-DOM
+  // element over the canvas, which violates the engine's canvas-only host contract.
+  server: { hmr: { overlay: false } },
+  // Current engines support modulepreload. Avoid Vite's compatibility shim because its feature probe
+  // constructs detached DOM elements even though the application itself owns only one canvas.
+  build: { modulePreload: { polyfill: false } },
   fmt: {
     ignorePatterns: ["docs/20260311-*.md", "docs/loop/**", "web/generated/**"],
   },
