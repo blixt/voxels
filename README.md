@@ -37,6 +37,8 @@ resource residency, frame pacing, and depth-plus-AO GPU cost.
 `vp run profile:heroes` visits the six semantic regional heroes through the Rust canvas context menu,
 captures a deterministic contact sheet, and gates settled streaming, depth ownership, frame pacing,
 and GPU cost in every region.
+`vp run profile:lights` isolates bounded voxel-emissive lighting from the cave headlamp, captures the
+Rust-toggle A/B, and gates active-light count, unchanged geometry/residency, frame pacing, and GPU cost.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture
@@ -60,8 +62,8 @@ gates, buried ribs, colonnades, and basalt crowns as ordinary editable voxels. A
 director arranges backgrounds and companions into clusters, rings, clearings, and procession lines,
 then gives each macro cell one distinct semantic hero. Bounded edit-aware proxies preserve every form
 across the surface rings. A deterministic Rust-generated
-material atlas adds world-anchored, mip-filtered albedo, micro-normal, and roughness structure without
-changing geometry, draw ownership, or durable voxel data.
+material atlas adds world-anchored, nearest-sampled pixel albedo, micro-normal, and roughness structure
+with a distance-stable mip chain, without changing geometry, draw ownership, or durable voxel data.
 The 753 m First Pilgrim Road is a stable Rust polyline graded through those same canonical columns.
 Its 10 cm paving, shoulders, 26 cairns/waystones/arches, five named chapters, and alpine Needle Gate
 destination remain editable, collidable, and continuous through every streamed LOD rather than
@@ -76,11 +78,13 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 - In deep water, use <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to swim along the view direction,
   <kbd>Space</kbd> to ascend, and <kbd>Shift</kbd> to dive.
 - Look with the mouse; <kbd>Esc</kbd> releases pointer lock.
-- Remove the targeted voxel with the left mouse button; place a grass voxel with the right mouse
-  button. Sparse edits are saved transactionally in SQLite on OPFS.
+- Remove the targeted voxel with the left mouse button; place the Rust-selected material with the
+  right mouse button. Cycle Grass, Stone, Basalt, and Glow Crystal from the Mission Control context
+  menu. Sparse edits are saved transactionally in SQLite on OPFS.
 - Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and context menu
   can toggle cascaded sun shadows, voxel AO, screen-space contact AO, fog, far terrain, animated
-  water, target highlighting, or material surface detail without a DOM UI layer. Its Rust-rendered
+  water, target highlighting, material surface detail, or voxel emissive lights without a DOM UI
+  layer. Its Rust-rendered
   more menu can teleport to the coastal showcase, follow the 26 marks of the pilgrim road, or cycle
   through regional landmarks and regional daylight phases for repeatable graphics and streaming
   checks.

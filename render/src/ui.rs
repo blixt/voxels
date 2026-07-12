@@ -133,10 +133,11 @@ pub enum RendererFeature {
     TargetOutline,
     MaterialSurfaceDetail,
     CaveHeadlamp,
+    VoxelEmissiveLights,
 }
 
 impl RendererFeature {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::CascadedSunShadows,
         Self::VoxelAmbientOcclusion,
         Self::ScreenSpaceAmbientOcclusion,
@@ -146,6 +147,7 @@ impl RendererFeature {
         Self::TargetOutline,
         Self::MaterialSurfaceDetail,
         Self::CaveHeadlamp,
+        Self::VoxelEmissiveLights,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -159,6 +161,7 @@ impl RendererFeature {
             Self::TargetOutline => "Target outline",
             Self::MaterialSurfaceDetail => "Material surface detail",
             Self::CaveHeadlamp => "Automatic cave headlamp",
+            Self::VoxelEmissiveLights => "Voxel emissive lights",
         }
     }
 }
@@ -178,6 +181,7 @@ const fn feature_index(feature: RendererFeature) -> usize {
         RendererFeature::TargetOutline => 6,
         RendererFeature::MaterialSurfaceDetail => 7,
         RendererFeature::CaveHeadlamp => 8,
+        RendererFeature::VoxelEmissiveLights => 9,
     }
 }
 
@@ -191,11 +195,12 @@ pub enum ContextAction {
     FollowPilgrimRoad,
     VisitCinderVault,
     VisitLandmark,
+    CyclePlacementMaterial,
     CloseMissionControl,
 }
 
 impl ContextAction {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::TeleportToCoast,
         Self::DiveBelowSurface,
         Self::ResetRendererFeatures,
@@ -204,6 +209,7 @@ impl ContextAction {
         Self::FollowPilgrimRoad,
         Self::VisitCinderVault,
         Self::VisitLandmark,
+        Self::CyclePlacementMaterial,
         Self::CloseMissionControl,
     ];
 
@@ -217,6 +223,7 @@ impl ContextAction {
             Self::FollowPilgrimRoad => "Follow pilgrim road",
             Self::VisitCinderVault => "Visit Cinder Vault",
             Self::VisitLandmark => "Visit next landmark",
+            Self::CyclePlacementMaterial => "Cycle placement material",
             Self::CloseMissionControl => "Close mission control",
         }
     }
@@ -413,6 +420,7 @@ pub struct MissionControlUi {
     region_label: &'static str,
     route_chapter_label: &'static str,
     route_progress_percent: u8,
+    placement_material_label: &'static str,
 }
 
 impl Default for MissionControlUi {
@@ -434,6 +442,7 @@ impl Default for MissionControlUi {
             region_label: "VERDANT FOREST",
             route_chapter_label: "OFF PILGRIM ROAD",
             route_progress_percent: 0,
+            placement_material_label: "GRASS",
         }
     }
 }
@@ -482,6 +491,10 @@ impl MissionControlUi {
     pub fn set_route_status(&mut self, chapter_label: &'static str, progress_percent: u8) {
         self.route_chapter_label = chapter_label;
         self.route_progress_percent = progress_percent.min(100);
+    }
+
+    pub fn set_placement_material(&mut self, label: &'static str) {
+        self.placement_material_label = label;
     }
 
     pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
@@ -876,8 +889,10 @@ impl MissionControlUi {
         push_text(
             &mut draw,
             format!(
-                "{} / {}%",
-                self.route_chapter_label, self.route_progress_percent
+                "{} / {}%  ·  PLACE {}",
+                self.route_chapter_label,
+                self.route_progress_percent,
+                self.placement_material_label
             ),
             [layout.panel.x + CONTENT_PAD, layout.header.y + 44.0],
             8.5,
@@ -1531,6 +1546,7 @@ mod tests {
         let mut ui = opened();
         ui.set_reduced_motion(true);
         ui.set_route_status("WINDCUT WAY", 47);
+        ui.set_placement_material("GLOW CRYSTAL");
         ui.set_stats(LiveStats {
             frames_per_second: 59.8,
             frame_ms: 16.7,
@@ -1569,7 +1585,11 @@ mod tests {
                 .iter()
                 .any(|run| run.text == "GOLDEN HOUR / VERDANT FOREST")
         );
-        assert!(base.text.iter().any(|run| run.text == "WINDCUT WAY / 47%"));
+        assert!(
+            base.text
+                .iter()
+                .any(|run| run.text == "WINDCUT WAY / 47%  ·  PLACE GLOW CRYSTAL")
+        );
 
         let _ = ui.open_context_menu_device([900.0, 80.0], viewport());
         let draw = ui.build_draw_list(viewport());
@@ -1614,6 +1634,11 @@ mod tests {
             draw.text
                 .iter()
                 .any(|run| run.text == "Cycle regional daylight")
+        );
+        assert!(
+            draw.text
+                .iter()
+                .any(|run| run.text == "Cycle placement material")
         );
         assert!(!draw.text.iter().any(|run| run.text == "CPU / GPU"));
     }

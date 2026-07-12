@@ -41,7 +41,7 @@ mod web {
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const EDIT_HISTORY_CAPACITY: usize = 64;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 10.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 12.0;
     const MAX_EDIT_TRACKERS: usize = 128;
     const ENCLOSURE_PROBE_INTERVAL_MS: f64 = 100.0;
     const ENCLOSURE_PROBE_DISTANCE_METRES: f32 = 12.0;
@@ -1273,6 +1273,7 @@ mod web {
 
         fn edit_target(&self, buttons: u16) {
             let camera = *self.camera.borrow();
+            let placement_material = self.renderer.borrow().placement_material();
             let hit = self.raycast_target(&camera);
             let Some(hit) = hit else {
                 return;
@@ -1288,7 +1289,7 @@ mod web {
                 }
                 (
                     VoxelCoord::new(hit.adjacent[0], hit.adjacent[1], hit.adjacent[2]),
-                    Material::Grass,
+                    placement_material,
                 )
             } else {
                 return;
@@ -1720,6 +1721,11 @@ mod web {
                     render.interior_exposure,
                     if render.cave_headlamp { 1.0 } else { 0.0 },
                     engine.enclosure_probe_microseconds.get(),
+                    render.local_light_candidates as f32,
+                    render.active_local_lights as f32,
+                    render.clipped_local_lights as f32,
+                    if render.local_lighting { 1.0 } else { 0.0 },
+                    engine.renderer.borrow().placement_material().id() as f32,
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);

@@ -20,12 +20,23 @@ struct Frame {
   interior: vec4<f32>,
 };
 
+struct LocalLight {
+  position_radius: vec4<f32>,
+  color_intensity: vec4<f32>,
+};
+
+struct LocalLightUniform {
+  metadata: vec4<u32>,
+  lights: array<LocalLight, 16>,
+};
+
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var shadow_map: texture_depth_2d_array;
 @group(0) @binding(2) var shadow_sampler: sampler_comparison;
 @group(0) @binding(3) var material_albedo: texture_2d_array<f32>;
 @group(0) @binding(4) var material_surface: texture_2d_array<f32>;
 @group(0) @binding(5) var material_sampler: sampler;
+@group(0) @binding(6) var<uniform> local_light_uniform: LocalLightUniform;
 @group(1) @binding(0) var opaque_scene: texture_2d<f32>;
 @group(1) @binding(1) var opaque_scene_sampler: sampler;
 @group(2) @binding(0) var filtered_spatial_ao: texture_2d<f32>;
@@ -547,6 +558,33 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     * mix(1.0, 0.10, frame.interior.x)
     * 0.16;
   var color = albedo * ((sky_irradiance + bounce) * ambient_occlusion + direct) + specular;
+  for (var light_index = 0u; light_index < 16u; light_index += 1u) {
+    if light_index >= local_light_uniform.metadata.x {
+      break;
+    }
+    let light = local_light_uniform.lights[light_index];
+    let to_light = light.position_radius.xyz - input.world;
+    let distance_squared = dot(to_light, to_light);
+    let radius_squared = light.position_radius.w * light.position_radius.w;
+    if distance_squared >= radius_squared {
+      continue;
+    }
+    let inverse_distance = inverseSqrt(max(distance_squared, 0.000001));
+    let light_direction = to_light * inverse_distance;
+    let normalized_squared = distance_squared / radius_squared;
+    let window = max(1.0 - normalized_squared * normalized_squared, 0.0);
+    let attenuation = window * window / max(distance_squared, 0.15 * 0.15);
+    let radiance = light.color_intensity.rgb * light.color_intensity.w * attenuation;
+    let no_l = max(dot(surface_detail.normal, light_direction), 0.0);
+    let local_half = normalize(light_direction + view_direction);
+    let local_fresnel = 0.04
+      + 0.96 * pow(1.0 - max(dot(view_direction, local_half), 0.0), 5.0);
+    let local_specular = pow(
+      max(dot(surface_detail.normal, local_half), 0.0),
+      specular_power
+    ) * local_fresnel * (1.0 - roughness * 0.72) * 0.08;
+    color += radiance * (albedo * no_l * 0.3183099 + local_specular);
+  }
   if material == 9u {
     let leaf_scatter = pow(max(dot(-sun, view_direction), 0.0), 3.0) * (1.0 - shadow * 0.55);
     color += albedo * frame.sun_radiance.rgb * leaf_scatter * 0.035;

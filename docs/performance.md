@@ -611,3 +611,33 @@ After the proxy, a six-second-per-stop release run recorded 9.8 / 10.2 / 10.1 ms
 zero dropped samples, pending jobs, pending mesh bytes, and stale completions; the enclosure-probe
 p95 remained 0 / 300 / 100 us. Twenty-four GPU timestamp samples per stop make the 95th percentile
 distinct from a single scheduling outlier while retaining the 12 ms frame and 7.5 ms GPU gates.
+
+## 2026-07-12: bounded voxel-emissive lighting
+
+Material emission is now ordinary derived world data rather than a Cinder Vault shader special case.
+Meshing bins exposed emitters into deterministic 0.8 m cells, and the renderer selects no more than 16
+active lights from successfully uploaded canonical chunks. Host tests cover exposed/buried clustering,
+deterministic centroids and ordering, stable capped ranking, world-space conversion, GPU layout, and
+the Rust placement palette. The release WGSL validator covers the fixed uniform and bounded loop.
+
+`vp run profile:lights` disables the independent cave headlamp and measures matched six-second chamber
+windows through the Rust Mission Control toggle:
+
+| Cinder Vault chamber         | Local lights off | Local lights on |    Delta |
+| ---------------------------- | ---------------: | --------------: | -------: |
+| Frame p95                    |           8.9 ms |          8.9 ms |   0.0 ms |
+| World GPU p95                |         1.291 ms |        1.464 ms | 0.173 ms |
+| Active-window GPU p95        |         5.847 ms |        6.196 ms | 0.349 ms |
+| Candidate / active / clipped |       10 / 0 / 0 |     10 / 10 / 0 |        — |
+
+Both phases retained identical chunks, geometry, draws, and mesh allocation with zero dropped samples.
+The regular three-stop cave gate independently observed 0 active lights on the approach and descent,
+then 10 in the chamber, with 8.5 / 9.1 / 9.1 ms frame p95 and no pending or stale work. Candidate
+selection remains visible while lighting is disabled, so the A/B proves a render-only cost rather than
+changing residency.
+
+The material atlas simultaneously returned to nearest-neighbor sampling for the original pixelated
+style. The sampler contract is host-tested as nearest magnification/minification/mip selection with
+anisotropy 1, while retaining the averaged mip chain for distance stability. An isolated headless
+release run held steady, traversal, and underwater frame p95 to 9.2 / 9.2 / 9.1 ms at 1280x720 with
+zero dropped samples or browser errors.

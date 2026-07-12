@@ -62,12 +62,17 @@ const SNAPSHOT = {
   interiorExposure: 77,
   caveHeadlamp: 78,
   enclosureProbeUs: 79,
-  schemaVersion: 80,
-  sampleCount: 81,
-  droppedSamples: 82,
+  localLightCandidates: 80,
+  activeLocalLights: 81,
+  clippedLocalLights: 82,
+  localLighting: 83,
+  placementMaterial: 84,
+  schemaVersion: 85,
+  sampleCount: 86,
+  droppedSamples: 87,
 };
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 83;
+const FRAME_SAMPLE_START = 88;
 const EDIT_SAMPLE_WIDTH = 6;
 
 function percentile(values, fraction) {
@@ -156,6 +161,13 @@ function phaseSummary(captures) {
       headlamp: latest[SNAPSHOT.caveHeadlamp] === 1,
       probeUs: latest[SNAPSHOT.enclosureProbeUs],
     },
+    localLights: {
+      candidates: latest[SNAPSHOT.localLightCandidates],
+      active: latest[SNAPSHOT.activeLocalLights],
+      clipped: latest[SNAPSHOT.clippedLocalLights],
+      enabled: latest[SNAPSHOT.localLighting] === 1,
+    },
+    placementMaterial: latest[SNAPSHOT.placementMaterial],
     loadLatencyFrames: {
       p95: latest[SNAPSHOT.loadP95Frames],
       max: latest[SNAPSHOT.loadMaxFrames],
@@ -313,7 +325,7 @@ async function setMaterialDetail(page, enabled, viewportWidth) {
   await page.waitForTimeout(200);
   // Material detail is the eighth Rust-owned feature row. The click targets the toggle,
   // exercising the same canvas hit-testing path as a human rather than a JavaScript render option.
-  await page.mouse.click(viewportWidth - 57, 639);
+  await page.mouse.click(viewportWidth - 57, 607);
   await page.waitForFunction(
     async ({ index, expected }) => {
       const snapshot = await globalThis.__VOXELS__.snapshot();
@@ -611,6 +623,15 @@ async function caveProfile(page, viewportWidth) {
   if (chamber.cave.enclosure + 0.05 < descent.cave.enclosure) {
     violations.push("chamber: enclosure regressed materially from the descent");
   }
+  if (approach.localLights.active !== 0 || descent.localLights.active !== 0) {
+    violations.push("approach/descent: out-of-range voxel lights became active");
+  }
+  if (chamber.localLights.active < 2 || chamber.localLights.active > 16) {
+    violations.push("chamber: active voxel light count left the bounded 2..16 range");
+  }
+  if (chamber.localLights.clipped !== 0) {
+    violations.push("chamber: natural authored lights exceeded the active budget");
+  }
 
   if (violations.length > 0) {
     throw new Error(
@@ -618,6 +639,109 @@ async function caveProfile(page, viewportWidth) {
     );
   }
   return phases;
+}
+
+async function setCaveHeadlamp(page, enabled, viewportWidth) {
+  const current = await page.evaluate(
+    (index) => globalThis.__VOXELS__.snapshot().then((snapshot) => snapshot[index] === 1),
+    SNAPSHOT.caveHeadlamp,
+  );
+  if (current === enabled) return;
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(200);
+  await page.mouse.click(viewportWidth - 57, 639);
+  await page.waitForFunction(
+    async ({ index, expected }) => {
+      const snapshot = await globalThis.__VOXELS__.snapshot();
+      return (snapshot[index] === 1) === expected;
+    },
+    { index: SNAPSHOT.caveHeadlamp, expected: enabled },
+    { timeout: 5_000 },
+  );
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(500);
+}
+
+async function setLocalLighting(page, enabled, viewportWidth) {
+  const current = await page.evaluate(
+    (index) => globalThis.__VOXELS__.snapshot().then((snapshot) => snapshot[index] === 1),
+    SNAPSHOT.localLighting,
+  );
+  if (current === enabled) return;
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(200);
+  await page.mouse.click(viewportWidth - 57, 672);
+  await page.waitForFunction(
+    async ({ index, expected }) => {
+      const snapshot = await globalThis.__VOXELS__.snapshot();
+      return (snapshot[index] === 1) === expected;
+    },
+    { index: SNAPSHOT.localLighting, expected: enabled },
+    { timeout: 5_000 },
+  );
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(500);
+}
+
+async function localLightProfile(page, viewportWidth) {
+  for (let stop = 0; stop < 3; stop += 1) await visitCinderVault(page, viewportWidth);
+  await waitForCaveAdaptation(page, 0.75, 1.35);
+  await setCaveHeadlamp(page, false, viewportWidth);
+  await setLocalLighting(page, false, viewportWidth);
+  const off = phaseSummary(await sample(page, 6_000));
+  await page.screenshot({ path: "target/cinder-vault-local-lights-off.png" });
+  await setLocalLighting(page, true, viewportWidth);
+  const on = phaseSummary(await sample(page, 6_000));
+  await page.screenshot({ path: "target/cinder-vault-local-lights-on.png" });
+
+  const invariantKeys = [
+    "residentChunks",
+    "visibleChunks",
+    "quads",
+    "waterQuads",
+    "drawCalls",
+    "meshArenaAllocatedMiB",
+    "meshArenaCapacityMiB",
+  ];
+  const changed = invariantKeys.filter((key) => off[key] !== on[key]);
+  const delta = {
+    worldP95Ms: on.gpu.worldMs.p95 - off.gpu.worldMs.p95,
+    totalP95Ms: on.gpu.totalMs.p95 - off.gpu.totalMs.p95,
+    frameP95Ms: on.frameMs.p95 - off.frameMs.p95,
+  };
+  const violations = [];
+  if (off.cave.headlamp || on.cave.headlamp) violations.push("headlamp was not isolated off");
+  if (off.localLights.enabled || off.localLights.active !== 0) {
+    violations.push("disabled local lights remained active");
+  }
+  if (!on.localLights.enabled || on.localLights.active < 2 || on.localLights.active > 16) {
+    violations.push("enabled active light count left the bounded 2..16 range");
+  }
+  if (off.localLights.candidates !== on.localLights.candidates || on.localLights.candidates < 2) {
+    violations.push("resident light candidates changed across the render-only toggle");
+  }
+  if (on.localLights.clipped !== 0) violations.push("authored chamber lights were clipped");
+  if (changed.length > 0)
+    violations.push(`geometry/resource invariants changed: ${changed.join(", ")}`);
+  if (!off.gpu.available || !on.gpu.available) violations.push("GPU timestamps unavailable");
+  if (delta.worldP95Ms > 1.25) violations.push("world GPU p95 increased by more than 1.25ms");
+  if (delta.totalP95Ms > 1.5 || on.gpu.totalMs.p95 > 7.5) {
+    violations.push("active GPU local-light budget was exceeded");
+  }
+  if (off.frameMs.p95 > 12 || on.frameMs.p95 > 12) violations.push("frame p95 exceeded 12ms");
+  if (off.frameMs.above33_33ms > 0 || on.frameMs.above33_33ms > 0) {
+    violations.push("a paired local-light frame exceeded 33.33ms");
+  }
+  if (off.droppedSamples > 0 || on.droppedSamples > 0) violations.push("frame samples dropped");
+  const result = { off, on, delta, invariantKeys };
+  if (violations.length > 0) {
+    throw new Error(
+      `local-light profile violations: ${violations.join(", ")}; ${JSON.stringify(result)}`,
+    );
+  }
+  return result;
 }
 
 async function semanticHeroProfile(page, viewportWidth) {
@@ -818,7 +942,7 @@ async function waitForEngine(page) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
     lastSnapshot = snapshot;
     if (
-      snapshot[SNAPSHOT.schemaVersion] === 10 &&
+      snapshot[SNAPSHOT.schemaVersion] === 12 &&
       snapshot[SNAPSHOT.quads] > 0 &&
       snapshot[SNAPSHOT.residentChunks] > 0 &&
       snapshot[SNAPSHOT.pendingJobs] === 0
@@ -871,6 +995,7 @@ const atmosphere = process.argv.includes("--atmosphere");
 const ambientOcclusion = process.argv.includes("--gtao");
 const semanticHeroes = process.argv.includes("--heroes");
 const caves = process.argv.includes("--caves");
+const localLights = process.argv.includes("--lights");
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
@@ -924,6 +1049,8 @@ try {
     scenarios = { semanticHeroes: await semanticHeroProfile(page, viewport.width) };
   } else if (caves) {
     scenarios = { caves: await caveProfile(page, viewport.width) };
+  } else if (localLights) {
+    scenarios = { localLights: await localLightProfile(page, viewport.width) };
   } else {
     const steady = phaseSummary(await sample(page, 4_000));
     await page.keyboard.down("KeyW");

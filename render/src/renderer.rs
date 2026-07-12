@@ -19,9 +19,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample};
 use voxels_world::{
-    AtmosphereSample, CHUNK_EDGE, ChunkCoord, FarTileCoord, MeshedChunk, Quad, RenderLayer,
-    SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfaceQuad, SurfaceRegion, SurfaceTileCoord,
-    SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh,
+    AtmosphereSample, CHUNK_EDGE, ChunkCoord, FarTileCoord, Material, MeshedChunk, Quad,
+    RenderLayer, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfaceQuad, SurfaceRegion,
+    SurfaceTileCoord, SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -33,6 +33,13 @@ use wgpu::{
 
 const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 const VIEW_DISTANCE_METRES: f32 = 220.0;
+const MAX_ACTIVE_LOCAL_LIGHTS: usize = 16;
+const PLACEMENT_MATERIALS: [Material; 4] = [
+    Material::Grass,
+    Material::Stone,
+    Material::Basalt,
+    Material::GlowCrystal,
+];
 const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 const FAR_MATERIAL_FLAG: u32 = 1 << 31;
 const SURFACE_LOD_SHIFT: u32 = 28;
@@ -72,6 +79,34 @@ struct FrameUniform {
 const _: () = assert!(size_of::<FrameUniform>() == 576);
 const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 544);
 const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 560);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+struct GpuLocalLight {
+    position_radius: [f32; 4],
+    color_intensity: [f32; 4],
+}
+
+const _: () = assert!(size_of::<GpuLocalLight>() == 32);
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LocalLightUniform {
+    metadata: [u32; 4],
+    lights: [GpuLocalLight; MAX_ACTIVE_LOCAL_LIGHTS],
+}
+
+impl Default for LocalLightUniform {
+    fn default() -> Self {
+        Self {
+            metadata: [0; 4],
+            lights: [GpuLocalLight::default(); MAX_ACTIVE_LOCAL_LIGHTS],
+        }
+    }
+}
+
+const _: () = assert!(size_of::<LocalLightUniform>() == 528);
+const _: () = assert!(std::mem::offset_of!(LocalLightUniform, lights) == 16);
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -168,6 +203,10 @@ pub struct RenderDiagnostics {
     pub enclosure: f32,
     pub interior_exposure: f32,
     pub cave_headlamp: bool,
+    pub local_light_candidates: u32,
+    pub active_local_lights: u32,
+    pub clipped_local_lights: u32,
+    pub local_lighting: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -435,9 +474,11 @@ pub struct Renderer {
     shadow_gpu: ShadowGpu,
     frame_buffer: Buffer,
     frame_bind_group: BindGroup,
+    local_light_buffer: Buffer,
     material_detail: MaterialDetailGpu,
     chunks: BTreeMap<MeshKey, ChunkMesh>,
     water_chunks: BTreeMap<MeshKey, ChunkMesh>,
+    local_light_candidates: BTreeMap<MeshKey, Vec<GpuLocalLight>>,
     arena: ArenaAllocator,
     arena_buffers: Vec<Buffer>,
     water_arena: ArenaAllocator,
@@ -470,6 +511,7 @@ pub struct Renderer {
     underwater_blend: f32,
     interior: InteriorEnvironment,
     interior_target: InteriorEnvironment,
+    placement_material: Material,
 }
 
 struct ShadowGpu {
@@ -493,6 +535,7 @@ struct RenderOptions {
     target_outline: bool,
     material_detail: bool,
     cave_headlamp: bool,
+    local_lighting: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -523,6 +566,7 @@ impl Default for RenderOptions {
             target_outline: true,
             material_detail: true,
             cave_headlamp: true,
+            local_lighting: true,
         }
     }
 }
@@ -781,6 +825,11 @@ impl Renderer {
             contents: bytemuck::bytes_of(&frame),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let local_light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bounded local light uniform"),
+            contents: bytemuck::bytes_of(&LocalLightUniform::default()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
         let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("frame layout"),
             entries: &[
@@ -836,6 +885,18 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            size_of::<LocalLightUniform>() as u64
+                        ),
+                    },
+                    count: None,
+                },
             ],
         });
         let frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -867,6 +928,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::Sampler(&material_detail.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: local_light_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -1064,9 +1129,11 @@ impl Renderer {
             shadow_gpu,
             frame_buffer,
             frame_bind_group,
+            local_light_buffer,
             material_detail,
             chunks: BTreeMap::new(),
             water_chunks: BTreeMap::new(),
+            local_light_candidates: BTreeMap::new(),
             arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
             arena_buffers: Vec::new(),
             water_arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
@@ -1099,6 +1166,7 @@ impl Renderer {
             underwater_blend: 0.0,
             interior: InteriorEnvironment::default(),
             interior_target: InteriorEnvironment::default(),
+            placement_material: Material::Grass,
         })
     }
 
@@ -1230,6 +1298,10 @@ impl Renderer {
         std::mem::take(&mut self.landmark_teleport_requested)
     }
 
+    pub const fn placement_material(&self) -> Material {
+        self.placement_material
+    }
+
     pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
         self.ui.set_reduced_motion(reduced_motion);
     }
@@ -1283,6 +1355,7 @@ impl Renderer {
                 RendererFeature::TargetOutline => self.options.target_outline = enabled,
                 RendererFeature::MaterialSurfaceDetail => self.options.material_detail = enabled,
                 RendererFeature::CaveHeadlamp => self.options.cave_headlamp = enabled,
+                RendererFeature::VoxelEmissiveLights => self.options.local_lighting = enabled,
             },
             UiAction::ContextAction(ContextAction::ResetRendererFeatures) => {
                 for feature in RendererFeature::ALL {
@@ -1316,6 +1389,16 @@ impl Renderer {
             }
             UiAction::ContextAction(ContextAction::VisitLandmark) => {
                 self.landmark_teleport_requested = true;
+            }
+            UiAction::ContextAction(ContextAction::CyclePlacementMaterial) => {
+                let index = PLACEMENT_MATERIALS
+                    .iter()
+                    .position(|material| *material == self.placement_material)
+                    .unwrap_or(0);
+                self.placement_material =
+                    PLACEMENT_MATERIALS[(index + 1) % PLACEMENT_MATERIALS.len()];
+                self.ui
+                    .set_placement_material(placement_material_label(self.placement_material));
             }
             UiAction::ContextAction(ContextAction::CloseMissionControl) => {
                 let _ = self.ui.set_open(false);
@@ -1394,7 +1477,16 @@ impl Renderer {
                 }],
             )
         };
-        opaque_uploaded && water_uploaded
+        let uploaded = opaque_uploaded && water_uploaded;
+        if uploaded {
+            let lights = local_lights_for_mesh(origin, mesh);
+            if lights.is_empty() {
+                self.local_light_candidates.remove(&key);
+            } else {
+                self.local_light_candidates.insert(key, lights);
+            }
+        }
+        uploaded
     }
 
     pub fn upload_far_tile(&mut self, coord: FarTileCoord, quads: &[SurfaceQuad]) -> bool {
@@ -1659,7 +1751,9 @@ impl Renderer {
     }
 
     pub fn remove_chunk(&mut self, coord: ChunkCoord) {
-        self.remove_mesh((0, coord.x, coord.y, coord.z));
+        let key = (0, coord.x, coord.y, coord.z);
+        self.remove_mesh(key);
+        self.local_light_candidates.remove(&key);
     }
 
     pub fn remove_far_tile(&mut self, coord: FarTileCoord) {
@@ -1685,6 +1779,49 @@ impl Renderer {
         if let Some(chunk) = self.water_chunks.remove(&key) {
             let _ = self.water_arena.free(chunk.allocation);
         }
+    }
+
+    fn selected_local_lights(&self, camera: &CameraState) -> LocalLightUniform {
+        let mut uniform = LocalLightUniform::default();
+        let enabled = self.options.local_lighting;
+        let mut ranked = [(f32::NEG_INFINITY, GpuLocalLight::default()); MAX_ACTIVE_LOCAL_LIGHTS];
+        let mut selected = 0usize;
+        let mut candidates = 0u32;
+        let mut eligible = 0u32;
+        for (key, lights) in &self.local_light_candidates {
+            if !self.chunks.get(key).is_some_and(|chunk| chunk.active) {
+                continue;
+            }
+            for light in lights {
+                candidates = candidates.saturating_add(1);
+                if !enabled {
+                    continue;
+                }
+                let position = glam::Vec3::from_array([
+                    light.position_radius[0],
+                    light.position_radius[1],
+                    light.position_radius[2],
+                ]);
+                let distance_squared = position.distance_squared(camera.position);
+                let selection_radius = light.position_radius[3] * 2.0;
+                if distance_squared > selection_radius * selection_radius {
+                    continue;
+                }
+                eligible = eligible.saturating_add(1);
+                let score = light.color_intensity[3] / distance_squared.max(0.15 * 0.15);
+                rank_local_light(&mut ranked, &mut selected, score, *light);
+            }
+        }
+        for (destination, (_, light)) in uniform.lights.iter_mut().zip(ranked).take(selected) {
+            *destination = light;
+        }
+        uniform.metadata = [
+            selected as u32,
+            candidates,
+            eligible.saturating_sub(selected as u32),
+            u32::from(enabled),
+        ];
+        uniform
     }
 
     /// Encodes and submits one frame, returning `false` when the surface could not be presented.
@@ -1736,6 +1873,12 @@ impl Renderer {
             (self.log_error)(&error);
             self.ui_text_error_reported = true;
         }
+        let local_lights = self.selected_local_lights(camera);
+        self.queue.write_buffer(
+            &self.local_light_buffer,
+            0,
+            bytemuck::bytes_of(&local_lights),
+        );
         let uniform = frame_uniform(
             &self.config,
             camera,
@@ -2043,6 +2186,7 @@ impl Renderer {
                 .saturating_add(shadow_bytes)
                 .saturating_add(self.ambient_occlusion_gpu.bytes())
                 .saturating_add(self.material_detail.bytes)
+                .saturating_add(size_of::<LocalLightUniform>() as u64)
                 .saturating_add(if self.gpu_timer.is_some() {
                     GPU_TIMER_BUFFER_BYTES
                 } else {
@@ -2066,6 +2210,10 @@ impl Renderer {
             enclosure: self.interior.enclosure,
             interior_exposure: self.interior.exposure_multiplier,
             cave_headlamp: self.options.cave_headlamp && self.interior.headlamp_strength > 0.01,
+            local_light_candidates: local_lights.metadata[1],
+            active_local_lights: local_lights.metadata[0],
+            clipped_local_lights: local_lights.metadata[2],
+            local_lighting: self.options.local_lighting,
         };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2237,6 +2385,66 @@ fn coalesce_draw_items(mut items: Vec<DrawItem>) -> Vec<DrawSpan> {
         });
     }
     spans
+}
+
+const fn placement_material_label(material: Material) -> &'static str {
+    match material {
+        Material::Grass => "GRASS",
+        Material::Stone => "STONE",
+        Material::Basalt => "BASALT",
+        Material::GlowCrystal => "GLOW CRYSTAL",
+        _ => "VOXEL",
+    }
+}
+
+fn local_lights_for_mesh(origin: [i32; 3], mesh: &MeshedChunk) -> Vec<GpuLocalLight> {
+    mesh.emissive_clusters
+        .iter()
+        .filter_map(|cluster| {
+            let material = Material::from_id(cluster.material)?;
+            let emission = material.emission()?;
+            let count = f32::from(cluster.voxel_count);
+            let denominator = count * 2.0;
+            let position: [f32; 3] = std::array::from_fn(|axis| {
+                (origin[axis] as f32 + cluster.position_half_voxel_sum[axis] as f32 / denominator)
+                    * VOXEL_SIZE_METRES
+            });
+            Some(GpuLocalLight {
+                position_radius: [
+                    position[0],
+                    position[1],
+                    position[2],
+                    emission.radius_metres,
+                ],
+                color_intensity: [
+                    emission.color_linear[0],
+                    emission.color_linear[1],
+                    emission.color_linear[2],
+                    emission.intensity * count.sqrt().min(2.25),
+                ],
+            })
+        })
+        .collect()
+}
+
+fn rank_local_light(
+    ranked: &mut [(f32, GpuLocalLight); MAX_ACTIVE_LOCAL_LIGHTS],
+    count: &mut usize,
+    score: f32,
+    light: GpuLocalLight,
+) {
+    let insertion = (0..*count)
+        .find(|index| score > ranked[*index].0)
+        .unwrap_or(*count);
+    if insertion >= MAX_ACTIVE_LOCAL_LIGHTS {
+        return;
+    }
+    let new_count = (*count + 1).min(MAX_ACTIVE_LOCAL_LIGHTS);
+    for index in (insertion + 1..new_count).rev() {
+        ranked[index] = ranked[index - 1];
+    }
+    ranked[insertion] = (score, light);
+    *count = new_count;
 }
 
 fn frame_uniform(
@@ -2605,6 +2813,41 @@ mod tests {
     fn test_view_projection(camera: &CameraState) -> glam::Mat4 {
         glam::camera::rh::proj::directx::perspective(68.0f32.to_radians(), 1.0, 0.01, 80.0)
             * glam::camera::rh::view::look_to_mat4(camera.position, camera.forward(), glam::Vec3::Y)
+    }
+
+    #[test]
+    fn meshed_emissive_clusters_become_linear_world_space_lights() {
+        let mut mesh = MeshedChunk::default();
+        mesh.emissive_clusters.push(voxels_world::EmissiveCluster {
+            position_half_voxel_sum: [18, 22, 26],
+            voxel_count: 2,
+            material: Material::GlowCrystal.id(),
+        });
+        let lights = local_lights_for_mesh([0, 0, 0], &mesh);
+        assert_eq!(lights.len(), 1);
+        let light = lights[0];
+        assert!((light.position_radius[0] - 0.45).abs() < 0.0001);
+        assert!((light.position_radius[1] - 0.55).abs() < 0.0001);
+        assert!((light.position_radius[2] - 0.65).abs() < 0.0001);
+        assert_eq!(light.position_radius[3], 3.2);
+        assert!(light.color_intensity[3] > 2.4);
+    }
+
+    #[test]
+    fn local_light_ranking_is_stable_and_hard_capped() {
+        let mut ranked = [(f32::NEG_INFINITY, GpuLocalLight::default()); MAX_ACTIVE_LOCAL_LIGHTS];
+        let mut count = 0;
+        for ordinal in 0..20 {
+            let light = GpuLocalLight {
+                position_radius: [ordinal as f32, 0.0, 0.0, 3.0],
+                color_intensity: [1.0, 1.0, 1.0, ordinal as f32],
+            };
+            rank_local_light(&mut ranked, &mut count, ordinal as f32, light);
+        }
+        assert_eq!(count, MAX_ACTIVE_LOCAL_LIGHTS);
+        assert_eq!(ranked[0].0, 19.0);
+        assert_eq!(ranked[MAX_ACTIVE_LOCAL_LIGHTS - 1].0, 4.0);
+        assert!(ranked.windows(2).all(|pair| pair[0].0 >= pair[1].0));
     }
 
     #[test]

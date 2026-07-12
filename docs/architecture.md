@@ -245,6 +245,11 @@ index array layers directly, including valid diagnostic Air and Water layers, wh
 continues on its dedicated physical shader path. The complete derived atlas is 2,621,400 bytes and is
 regenerated at startup rather than persisted.
 
+The atlas sampler uses nearest-neighbor magnification, minification, and mip selection with
+anisotropy disabled. This preserves explicit pixel cells on 10 cm voxel faces instead of blending
+neighboring texels and mip levels. The box-filtered mip chain remains in place so distant terrain does
+not regress to a shimmering level-zero sample.
+
 Axis-aligned face bases derive planar coordinates from world position, so greedy quads never stretch
 detail and adjacent canonical chunks, surface LODs, skirts, and landmark proxies sample the same
 coordinates without new vertex attributes. Albedo mips average in linear space before sRGB encoding.
@@ -253,6 +258,29 @@ roughness before normalizing, suppressing distant specular sparkle. Detail norma
 only—geometric normals remain authoritative for shadow bias, LOD ownership, targeting, and collision.
 Two specialized voxel pipelines let the Rust Mission Control toggle choose a real zero-sample flat
 path without expanding the shared frame uniform or adding a per-fragment feature branch.
+
+Emissive materials also derive bounded local-light candidates during greedy meshing. Only exposed
+emissive voxels participate; deterministic material-separated `8x8x8` voxel bins retain a half-voxel
+centroid sum and count, avoiding both buried lights and a false centroid between disconnected
+formations. These records are disposable mesh data, not durable world state. A chunk's candidate list
+changes only after its replacement GPU upload succeeds and is removed with the active canonical mesh,
+so geometry and lighting cannot disagree during remesh retries or eviction.
+
+The renderer ranks resident candidates by expected camera influence with a stable tie break and writes
+at most 16 lights to a fixed 528-byte uniform at frame binding 6. Each 32-byte light stores world-space
+position/radius and linear radiance/intensity; compile-time Rust layout assertions and WGSL's uniform
+[address-space layout rules](https://www.w3.org/TR/WGSL/#address-space-layout-constraints) keep the
+host and shader representations identical. The fragment path uses a finite-radius smooth window over
+inverse-square attenuation following [Filament's punctual-light model](https://google.github.io/filament/Filament.md.html#lighting/directlighting/punctuallights/attenuationfunction).
+Crystal self-emission remains separate, and the light contribution is accumulated before cave fog and
+exposure. Mission Control can disable the pass without removing candidates, while diagnostics report
+resident candidates, active lights, and budget clipping. This bounded forward path is intentionally
+the first tier; logarithmic-Z [clustered forward shading](https://diglib.eg.org/items/6342d4d6-5220-4376-a5c6-a153058f4a3c)
+remains the promotion seam if dense-emitter stress tests outgrow the fixed budget.
+
+Placement material is Rust state, selected through the canvas context menu and displayed in the Rust
+header. The browser still transmits only pointer input; right-click uses the selected material and the
+ordinary sparse-edit/SQLite/remesh path, so GlowCrystal is not a renderer-only decoration.
 
 The first persistent chunk format is versioned and little-endian:
 
