@@ -538,7 +538,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f22fb22f065b308be0d8724e3706c7fa3fc2a6c7d6899df4cad7860e7a75436"
 dependencies = [
  "bytemuck",
- "serde_core",
 ]
 
 [[package]]
@@ -1623,10 +1622,8 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "voxels-core"
 version = "0.0.0"
 dependencies = [
- "bytemuck",
  "criterion",
  "glam",
- "serde",
 ]
 
 [[package]]

@@ -12,9 +12,7 @@ workspace = true
 name = "voxels_core"
 
 [dependencies]
-bytemuck = { version = "1", features = ["derive"] }
-glam = { version = "0.33", features = ["bytemuck", "serde"] }
-serde = { version = "1", features = ["derive"] }
+glam = "0.33"
 
 [dev-dependencies]
 criterion = "0.8.2"
