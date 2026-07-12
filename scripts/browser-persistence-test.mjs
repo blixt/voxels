@@ -39,10 +39,7 @@ async function assertCanvasOnly(page) {
       shadow: element.shadowRoot !== null,
     })),
   );
-  const expected = [
-    { tag: "CANVAS", id: "app", shadow: false },
-    { tag: "SCRIPT", id: "", shadow: false },
-  ];
+  const expected = [{ tag: "CANVAS", id: "app", shadow: false }];
   if (JSON.stringify(body) !== JSON.stringify(expected)) {
     throw new Error(`canvas-only body contract changed: ${JSON.stringify(body)}`);
   }
@@ -55,6 +52,19 @@ async function reloadRapidly(page, count) {
   await page.waitForLoadState("domcontentloaded");
   await waitForEngine(page);
   await assertCanvasOnly(page);
+}
+
+async function reloadConcurrently(pages, rounds) {
+  for (let index = 0; index < rounds; index += 1) {
+    await Promise.all(pages.map((page) => page.reload({ waitUntil: "commit" })));
+  }
+  await Promise.all(
+    pages.map(async (page) => {
+      await page.waitForLoadState("domcontentloaded");
+      await waitForEngine(page);
+      await assertCanvasOnly(page);
+    }),
+  );
 }
 
 async function enterUnderwaterShowcase(page) {
@@ -172,12 +182,20 @@ try {
   await waitForEngine(leader);
   await assertCanvasOnly(leader);
 
+  // Model a user hammering refresh before any stable follower exists. Intermediate workers are
+  // intentionally replaced before their async SQLite/WebGPU boot necessarily finishes.
+  await reloadRapidly(leader, 12);
+
   const follower = await context.newPage();
   watch("follower", follower);
   await follower.goto(url, { waitUntil: "domcontentloaded" });
   await waitForEngine(follower);
   await assertCanvasOnly(follower);
   await editFromFollowerAndWaitForLeader(follower, leader);
+
+  // Reload every live browsing context together. Exactly one replacement worker must win the Web
+  // Lock while the others remain usable followers; no worker may race the exclusive SAH pool.
+  await reloadConcurrently([leader, follower], 4);
 
   // The first reload hands ownership to the follower. The remaining reloads repeatedly dispose and
   // recreate queued lock requests while that tab keeps the single OPFS lease.
@@ -207,8 +225,10 @@ try {
   console.log(
     JSON.stringify({
       ok: true,
-      reloads: 18,
+      reloads: 38,
       tabs: 3,
+      soloBurst: 12,
+      concurrentRounds: 4,
       canvasOnly: true,
       underwater: true,
       liveEditSync: true,

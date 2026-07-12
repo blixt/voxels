@@ -131,6 +131,7 @@ struct Coordinator {
     committed_edits: RefCell<VecDeque<(VoxelCoord, Option<u16>)>>,
     writing: Cell<bool>,
     closed: Cell<bool>,
+    last_leader_error: RefCell<Option<String>>,
     _on_message: RefCell<Option<MessageHandler>>,
     world_seed: u64,
     generator_version: u32,
@@ -241,6 +242,7 @@ impl Coordinator {
             committed_edits: RefCell::new(VecDeque::new()),
             writing: Cell::new(false),
             closed: Cell::new(false),
+            last_leader_error: RefCell::new(None),
             _on_message: RefCell::new(None),
             world_seed,
             generator_version,
@@ -285,7 +287,10 @@ impl Coordinator {
                 return response;
             }
         }
-        OperationResult::Error("no persistence leader responded during ownership handoff".into())
+        OperationResult::Error(self.last_leader_error.borrow().clone().map_or_else(
+            || "no persistence leader responded during ownership handoff".into(),
+            |error| format!("persistence ownership recovery exhausted: {error}"),
+        ))
     }
 
     fn dispatch_write(self: &Rc<Self>, operation: Operation) -> Result<(), JsValue> {
@@ -522,6 +527,7 @@ impl Coordinator {
         wasm_bindgen_futures::spawn_local(async move {
             match open_leader(coordinator.world_seed, coordinator.generator_version).await {
                 Ok(leader) if !coordinator.closed.get() => {
+                    coordinator.last_leader_error.borrow_mut().take();
                     *coordinator.leader.borrow_mut() = Some(Rc::new(leader));
                     *coordinator.leader_release.borrow_mut() = Some(release);
                     if let Some(ready) = ready {
@@ -538,10 +544,11 @@ impl Coordinator {
                     }
                 }
                 Err(error) => {
-                    web_sys::console::error_1(&JsValue::from_str(&format!(
-                        "persistence leader open failed: {}",
-                        js_value_message(&error)
-                    )));
+                    // A predecessor can release its Web Lock a little before the browser has finished
+                    // releasing every synchronous OPFS handle. That is a recoverable ownership
+                    // transition, not an engine error. Retain the reason so Store::open can report it
+                    // once, as a fatal error, only if all election/request retries are exhausted.
+                    *coordinator.last_leader_error.borrow_mut() = Some(js_value_message(&error));
                     if let Some(ready) = ready {
                         let _ = ready.call0(&JsValue::NULL);
                     }

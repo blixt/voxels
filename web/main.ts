@@ -247,7 +247,13 @@ function start(canvas: HTMLCanvasElement): void {
     });
   });
   resize.observe(canvas);
-  window.addEventListener("pagehide", () => {
+  let destroyed = false;
+  window.addEventListener("pagehide", (event) => {
+    // A page entering the back-forward cache is frozen with its worker and must resume intact.
+    // A real navigation/reload gets one explicit worker turn to close SQLite and pause the OPFS VFS.
+    if (event.persisted || destroyed) return;
+    destroyed = true;
+    flush();
     resize.disconnect();
     worker.postMessage({ kind: "destroy" });
     delete debugGlobal.__VOXELS__;
