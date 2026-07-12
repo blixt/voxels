@@ -574,3 +574,30 @@ Rust/WGPU draw data.
 Atlas schema v1 subsequently froze six destination and five chapter IDs. Mission Control renders the
 current Rust-projected chapter and whole-route percentage in the same WGPU header; no additional DOM,
 TypeScript geography state, draw pass, or persistent terrain data was introduced.
+
+## 2026-07-12: Cinder Vault vertical slice
+
+Generator v14 adds the connected Cinder Vault and four sparse material-14 crystal formations without
+weakening its 10 cm edit authority. Host validation proves more than 180 path samples retain a
+7x7x18-voxel player-clear volume, floor steps stay within 30 cm, the chamber is dry, the sealed shell
+survives ambient cave noise, and random, chunk, region, edit, and versioned codec paths agree. The
+material-detail atlas grows from 14 to 15 deterministic layers and 2,621,400 derived bytes.
+
+`vp run profile:caves` drives the three-stop tour only through Rust canvas controls and records the
+approach, descent, and chamber after streaming and eye adaptation settle:
+
+| Integrated cave measurement                        | Approach / descent / chamber |
+| -------------------------------------------------- | ---------------------------: |
+| Frame p95                                          |           8.5 / 8.8 / 8.8 ms |
+| Active GPU p95                                     |     3.853 / 6.082 / 6.299 ms |
+| Enclosure                                          |            0 / 0.222 / 1.000 |
+| Interior exposure                                  |            1 / 1.222 / 2.037 |
+| Enclosure-probe p95                                |             0 / 400 / 100 us |
+| Dropped samples / pending jobs / stale completions |                    0 / 0 / 0 |
+
+The first probe implementation regenerated procedural columns along every ray and measured roughly
+1.8 ms at the descent. Consulting authoritative edited resident chunks before the procedural fallback
+reduced that p95 to 0.4 ms while preserving player-made openings. All three views stay under the
+12 ms frame, 7.5 ms active-GPU, and 1 ms probe gates. The captured chamber shows the emissive crystal
+surface cue under enclosure-correct ambient light; the renderer contains no cave-coordinate special
+case and the cue remains editable world data.

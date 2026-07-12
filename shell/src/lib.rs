@@ -491,6 +491,7 @@ mod web {
                 let probe_start = performance_now(performance.as_ref());
                 let sample = if underground {
                     let edits = self.edits.borrow();
+                    let chunks = self.chunks.borrow();
                     let mut columns = BTreeMap::new();
                     probe_enclosure(
                         camera.position,
@@ -500,6 +501,12 @@ mod web {
                             let coord = VoxelCoord::new(x, y, z);
                             edits
                                 .override_at(coord)
+                                .or_else(|| {
+                                    chunks.get(&coord_key(coord.chunk())).map(|chunk| {
+                                        let [local_x, local_y, local_z] = coord.local();
+                                        chunk.get(local_x, local_y, local_z)
+                                    })
+                                })
                                 .unwrap_or_else(|| {
                                     columns
                                         .entry((x, z))

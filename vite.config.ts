@@ -90,6 +90,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-performance.mjs --heroes",
         cache: false,
       },
+      "profile:caves": {
+        command: "node scripts/browser-performance.mjs --caves",
+        cache: false,
+      },
       "test:persistence-browser": {
         command: "node scripts/browser-persistence-test.mjs",
         cache: false,

@@ -481,12 +481,142 @@ async function visitNextLandmark(page, viewportWidth) {
   await page.waitForTimeout(80);
   await page.mouse.click(viewportWidth - 83, 90);
   await page.waitForTimeout(80);
-  // The seventh Rust context row advances the deterministic landmark catalog. TypeScript only
+  // The eighth Rust context row advances the deterministic landmark catalog. TypeScript only
   // clicks the canvas; kind lookup, teleport placement, camera aim, and streaming remain Rust-owned.
-  await page.mouse.click(viewportWidth - 171, 338);
+  await page.mouse.click(viewportWidth - 171, 372);
   await page.keyboard.press("F3");
   await waitForEngine(page);
   await page.waitForTimeout(500);
+}
+
+async function visitCinderVault(page, viewportWidth) {
+  const before = await capture(page);
+  const previousPosition = before.snapshot.slice(0, 3);
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(80);
+  await page.mouse.click(viewportWidth - 83, 90);
+  await page.waitForTimeout(80);
+  // The seventh Rust context row advances the three-stop Cinder Vault tour. TypeScript only
+  // supplies canvas input; Rust owns the tour state, poses, enclosure probe, and rendering.
+  await page.mouse.click(viewportWidth - 171, 338);
+  await page.keyboard.press("F3");
+  await page.waitForFunction(
+    async ({ previous }) => {
+      const snapshot = await globalThis.__VOXELS__.snapshot();
+      const dx = snapshot[0] - previous[0];
+      const dy = snapshot[1] - previous[1];
+      const dz = snapshot[2] - previous[2];
+      return dx * dx + dy * dy + dz * dz > 1;
+    },
+    { previous: previousPosition },
+    { timeout: 5_000 },
+  );
+  // Let the new camera pose schedule its first streaming pass before checking for a drained queue.
+  await page.waitForTimeout(150);
+  await waitForEngine(page);
+}
+
+async function waitForCaveAdaptation(page, minimumEnclosure, minimumExposure) {
+  await page.waitForFunction(
+    async ({ enclosureIndex, exposureIndex, minimumEnclosure, minimumExposure }) => {
+      const snapshot = await globalThis.__VOXELS__.snapshot();
+      return (
+        snapshot[enclosureIndex] >= minimumEnclosure && snapshot[exposureIndex] >= minimumExposure
+      );
+    },
+    {
+      enclosureIndex: SNAPSHOT.enclosure,
+      exposureIndex: SNAPSHOT.interiorExposure,
+      minimumEnclosure,
+      minimumExposure,
+    },
+    { timeout: 12_000 },
+  );
+}
+
+async function caveProfile(page, viewportWidth) {
+  const stops = [
+    { name: "approach", minimumEnclosure: 0, minimumExposure: 0.99, headlamp: false },
+    { name: "descent", minimumEnclosure: 0.18, minimumExposure: 1.15, headlamp: false },
+    { name: "chamber", minimumEnclosure: 0.75, minimumExposure: 1.35, headlamp: true },
+  ];
+  const phases = {};
+  const violations = [];
+
+  for (const stop of stops) {
+    await visitCinderVault(page, viewportWidth);
+    await waitForCaveAdaptation(page, stop.minimumEnclosure, stop.minimumExposure);
+    const captures = await sample(page, 4_000);
+    const phase = phaseSummary(captures);
+    phase.cave.probe = summary(
+      captures.map((capture) => capture.snapshot[SNAPSHOT.enclosureProbeUs]),
+    );
+    phase.streaming = {
+      maxPendingJobs: Math.max(
+        ...captures.map((capture) => capture.snapshot[SNAPSHOT.pendingJobs]),
+        0,
+      ),
+      maxPendingMeshMiB: Math.max(
+        ...captures.map((capture) => capture.snapshot[SNAPSHOT.pendingMeshMiB]),
+        0,
+      ),
+      maxStaleCompletions: Math.max(
+        ...captures.map((capture) => capture.snapshot[SNAPSHOT.staleCompletions]),
+        0,
+      ),
+    };
+    phases[stop.name] = phase;
+    await page.screenshot({ path: `target/cinder-vault-${stop.name}.png` });
+
+    if (phase.cave.headlamp !== stop.headlamp) {
+      violations.push(`${stop.name}: automatic headlamp transition was incorrect`);
+    }
+    if (phase.pendingJobs !== 0 || phase.streaming.maxPendingJobs !== 0) {
+      violations.push(`${stop.name}: streaming queues did not stay drained`);
+    }
+    if (phase.memory.pendingMeshMiB !== 0 || phase.streaming.maxPendingMeshMiB !== 0) {
+      violations.push(`${stop.name}: pending mesh payload did not stay drained`);
+    }
+    if (phase.staleCompletions !== 0 || phase.streaming.maxStaleCompletions !== 0) {
+      violations.push(`${stop.name}: stale streaming work completed`);
+    }
+    if (phase.droppedSamples !== 0) violations.push(`${stop.name}: frame samples were dropped`);
+    if (phase.frameMs.p95 > 12) violations.push(`${stop.name}: frame p95 exceeded 12ms`);
+    if (phase.frameMs.above33_33ms > 0) {
+      violations.push(`${stop.name}: a frame exceeded 33.33ms`);
+    }
+    if (phase.gpu.available && phase.gpu.totalMs.p95 > 7.5) {
+      violations.push(`${stop.name}: active GPU p95 exceeded 7.5ms`);
+    }
+    if (phase.cave.probe.max > 1_000) {
+      violations.push(`${stop.name}: enclosure probe exceeded 1ms`);
+    }
+  }
+
+  const { approach, descent, chamber } = phases;
+  if (approach.cave.enclosure > 0.15) {
+    violations.push("approach: enclosure did not return to an outdoor state");
+  }
+  if (approach.cave.exposure < 0.98 || approach.cave.exposure > 1.08) {
+    violations.push("approach: interior exposure did not return to its outdoor range");
+  }
+  if (descent.cave.enclosure < 0.18 || descent.cave.exposure < 1.15) {
+    violations.push("descent: tunnel did not engage enclosure adaptation");
+  }
+  if (chamber.cave.enclosure < 0.75 || chamber.cave.exposure < 1.35) {
+    violations.push("chamber: deep interior adaptation did not converge");
+  }
+  if (chamber.cave.enclosure + 0.05 < descent.cave.enclosure) {
+    violations.push("chamber: enclosure regressed materially from the descent");
+  }
+
+  if (violations.length > 0) {
+    throw new Error(
+      `Cinder Vault profile violations: ${violations.join(", ")}; ${JSON.stringify(phases)}`,
+    );
+  }
+  return phases;
 }
 
 async function semanticHeroProfile(page, viewportWidth) {
@@ -739,6 +869,7 @@ const materials = process.argv.includes("--materials");
 const atmosphere = process.argv.includes("--atmosphere");
 const ambientOcclusion = process.argv.includes("--gtao");
 const semanticHeroes = process.argv.includes("--heroes");
+const caves = process.argv.includes("--caves");
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
@@ -790,6 +921,8 @@ try {
     scenarios = { ambientOcclusion: await ambientOcclusionProfile(page, viewport.width) };
   } else if (semanticHeroes) {
     scenarios = { semanticHeroes: await semanticHeroProfile(page, viewport.width) };
+  } else if (caves) {
+    scenarios = { caves: await caveProfile(page, viewport.width) };
   } else {
     const steady = phaseSummary(await sample(page, 4_000));
     await page.keyboard.down("KeyW");
