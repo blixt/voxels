@@ -1383,7 +1383,9 @@ impl Renderer {
         }
     }
 
-    pub fn render(&mut self, dt: f32, camera: &CameraState, ui_stats: LiveStats) {
+    /// Encodes and submits one frame, returning `false` when the surface could not be presented.
+    #[must_use]
+    pub fn render(&mut self, dt: f32, camera: &CameraState, ui_stats: LiveStats) -> bool {
         self.time += dt.min(0.1);
         let target_underwater = f32::from(camera.fluid_state().eyes_submerged);
         let response_seconds = if target_underwater > self.underwater_blend {
@@ -1399,7 +1401,7 @@ impl Renderer {
         let Ok(shadow_cascades) =
             directional_shadow_cascades(&self.config, camera, self.environment.sun_direction)
         else {
-            return;
+            return false;
         };
         self.ui.set_stats(ui_stats);
         self.ui.advance(dt);
@@ -1470,9 +1472,9 @@ impl Renderer {
             }
             CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return;
+                return false;
             }
-            _ => return,
+            _ => return false,
         };
         let view = frame
             .texture
@@ -1689,6 +1691,7 @@ impl Renderer {
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
+        true
     }
 
     fn collect_draw_list(

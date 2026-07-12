@@ -34,7 +34,9 @@ mod web {
     const SIMULATION_STEP_SECONDS: f32 = 1.0 / 120.0;
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 5.0;
+    const EDIT_HISTORY_CAPACITY: usize = 64;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 6.0;
+    const MAX_EDIT_TRACKERS: usize = 128;
     const COAST_WATER_REFERENCE: [i32; 2] = [18_016, 12_896];
     const STREAM_FRAME_BUDGET: FrameBudget = FrameBudget {
         generation: 2,
@@ -99,6 +101,89 @@ mod web {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct CanonicalRequirement {
+        coord: ChunkCoord,
+        revision: u64,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct SurfaceRequirement {
+        coord: SurfaceTileCoord,
+        revision: u64,
+    }
+
+    #[derive(Default)]
+    struct EditRequirements {
+        canonical: Vec<CanonicalRequirement>,
+        surface: Vec<SurfaceRequirement>,
+    }
+
+    struct EditTracker {
+        target: VoxelCoord,
+        class: u8,
+        operation: u8,
+        started_ms: f64,
+        enqueue_ms: f32,
+        canonical_ms: Option<f32>,
+        requirements: EditRequirements,
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct EditSample {
+        class: f32,
+        operation: f32,
+        enqueue_ms: f32,
+        canonical_ms: f32,
+        full_ms: f32,
+    }
+
+    struct EditHistory {
+        samples: [EditSample; EDIT_HISTORY_CAPACITY],
+        next: usize,
+        len: usize,
+        dropped: u32,
+    }
+
+    impl EditHistory {
+        fn new() -> Self {
+            Self {
+                samples: [EditSample::default(); EDIT_HISTORY_CAPACITY],
+                next: 0,
+                len: 0,
+                dropped: 0,
+            }
+        }
+
+        fn push(&mut self, sample: EditSample) {
+            self.samples[self.next] = sample;
+            self.next = (self.next + 1) % EDIT_HISTORY_CAPACITY;
+            if self.len < EDIT_HISTORY_CAPACITY {
+                self.len += 1;
+            } else {
+                self.dropped = self.dropped.saturating_add(1);
+            }
+        }
+
+        fn drain_into(&mut self, values: &mut Vec<f32>) {
+            values.push(self.len as f32);
+            values.push(self.dropped as f32);
+            let first = (self.next + EDIT_HISTORY_CAPACITY - self.len) % EDIT_HISTORY_CAPACITY;
+            for offset in 0..self.len {
+                let sample = self.samples[(first + offset) % EDIT_HISTORY_CAPACITY];
+                values.extend_from_slice(&[
+                    sample.class,
+                    sample.operation,
+                    sample.enqueue_ms,
+                    sample.canonical_ms,
+                    sample.full_ms,
+                ]);
+            }
+            self.len = 0;
+            self.dropped = 0;
+        }
+    }
+
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable)]
     struct InputRecord {
@@ -137,6 +222,9 @@ mod web {
         surface_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
         surface_active_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
+        surface_requested_revision: RefCell<BTreeMap<SurfaceTileCoord, u64>>,
+        surface_resident_revision: RefCell<BTreeMap<SurfaceTileCoord, u64>>,
+        surface_revision: Cell<u64>,
         surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
         surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
         fine_initialized: Cell<bool>,
@@ -152,6 +240,10 @@ mod web {
         stream_milliseconds: Cell<f32>,
         render_milliseconds: Cell<f32>,
         frame_history: RefCell<FrameHistory>,
+        edit_trackers: RefCell<VecDeque<EditTracker>>,
+        edit_history: RefCell<EditHistory>,
+        edit_completed: Cell<u32>,
+        edit_superseded: Cell<u32>,
         profile: RefCell<ProfileAutomation>,
         profile_tracked_high: Cell<usize>,
         profile_surface_high: Cell<usize>,
@@ -313,7 +405,7 @@ mod web {
                 self.surface_active_focus.set(self.surface_focus.get());
             }
             let render_start = performance_now(performance.as_ref());
-            renderer.render(
+            let submitted = renderer.render(
                 dt,
                 &camera,
                 LiveStats {
@@ -356,6 +448,7 @@ mod web {
             );
             let rendered = renderer.diagnostics();
             drop(renderer);
+            self.update_edit_convergence(time, submitted);
             if self.profile.borrow().phase() != ProfilePhase::Idle {
                 let pending = stream.generation.queued
                     + stream.meshing.queued
@@ -533,6 +626,13 @@ mod web {
                         }
                     }
                 }
+                {
+                    let mut requested = self.surface_requested_revision.borrow_mut();
+                    let revision = self.surface_revision.get();
+                    for coord in &desired {
+                        requested.entry(*coord).or_insert(revision);
+                    }
+                }
 
                 let evicted: Vec<_> = self
                     .surface_resident
@@ -556,10 +656,14 @@ mod web {
                     .collect();
                 if !evicted.is_empty() {
                     let mut resident = self.surface_resident.borrow_mut();
+                    let mut requested = self.surface_requested_revision.borrow_mut();
+                    let mut resident_revision = self.surface_resident_revision.borrow_mut();
                     let mut dirty = self.surface_dirty.borrow_mut();
                     let mut renderer = self.renderer.borrow_mut();
                     for coord in evicted {
                         resident.remove(&coord);
+                        requested.remove(&coord);
+                        resident_revision.remove(&coord);
                         dirty.remove(&coord);
                         renderer.remove_surface_tile(coord);
                     }
@@ -610,6 +714,12 @@ mod web {
                 return;
             };
             let edits = self.edits.borrow();
+            let revision = self
+                .surface_requested_revision
+                .borrow()
+                .get(&coord)
+                .copied()
+                .unwrap_or_else(|| self.surface_revision.get());
             let mesh = generate_edited_surface_tile_mesh(self.generator, &edits, coord);
             let water = generate_edited_water_tile_mesh(self.generator, &edits, coord);
             drop(edits);
@@ -619,6 +729,9 @@ mod web {
                 .upload_surface_tile_meshes(&mesh, &water)
             {
                 self.surface_resident.borrow_mut().insert(coord);
+                self.surface_resident_revision
+                    .borrow_mut()
+                    .insert(coord, revision);
                 self.surface_dirty.borrow_mut().remove(&coord);
             } else if dirty.is_none() {
                 self.surface_queue.borrow_mut().push_front(coord);
@@ -832,14 +945,9 @@ mod web {
                 return;
             };
 
-            let mut edits = self.edits.borrow_mut();
-            edits.set(self.generator, target, material);
-            let durable = edits.override_at(target);
-            drop(edits);
-            if let Err(error) = self.store.borrow().save_edit(target, durable) {
-                web_sys::console::error_1(&error);
-            }
-            self.apply_durable_edit(target, durable);
+            let generated = self.generator.sample(target.x, target.y, target.z);
+            let durable = (material != generated).then_some(material);
+            self.submit_local_edit(target, durable, 0, u8::from(material == Material::Air));
         }
 
         fn apply_remote_edits(&self) {
@@ -851,11 +959,51 @@ mod web {
                 }
             };
             for (coord, material) in edits {
-                self.apply_durable_edit(coord, material);
+                let _ = self.apply_durable_edit(coord, material);
             }
         }
 
-        fn apply_durable_edit(&self, target: VoxelCoord, durable: Option<Material>) {
+        fn submit_local_edit(
+            &self,
+            target: VoxelCoord,
+            durable: Option<Material>,
+            class: u8,
+            operation: u8,
+        ) {
+            let performance = self.scope.performance();
+            let started_ms = performance_now(performance.as_ref());
+            if let Err(error) = self.store.borrow().save_edit(target, durable) {
+                web_sys::console::error_1(&error);
+            }
+            let enqueue_ms = (performance_now(performance.as_ref()) - started_ms) as f32;
+            let requirements = self.apply_durable_edit(target, durable);
+            let mut trackers = self.edit_trackers.borrow_mut();
+            if let Some(index) = trackers.iter().position(|tracker| tracker.target == target) {
+                trackers.remove(index);
+                self.edit_superseded
+                    .set(self.edit_superseded.get().saturating_add(1));
+            }
+            if trackers.len() == MAX_EDIT_TRACKERS {
+                trackers.pop_front();
+                self.edit_superseded
+                    .set(self.edit_superseded.get().saturating_add(1));
+            }
+            trackers.push_back(EditTracker {
+                target,
+                class,
+                operation,
+                started_ms,
+                enqueue_ms,
+                canonical_ms: None,
+                requirements,
+            });
+        }
+
+        fn apply_durable_edit(
+            &self,
+            target: VoxelCoord,
+            durable: Option<Material>,
+        ) -> EditRequirements {
             self.edits
                 .borrow_mut()
                 .replace_durable_override(target, durable);
@@ -865,17 +1013,84 @@ mod web {
                 let [x, y, z] = target.local();
                 chunk.set(x, y, z, material);
             }
-            let _ = self.scheduler.borrow_mut().mark_voxel_edited(target);
-            let resident = self.surface_resident.borrow();
-            let queue = self.surface_queue.borrow();
+            let canonical = {
+                let mut scheduler = self.scheduler.borrow_mut();
+                let report = scheduler.mark_voxel_edited(target);
+                report
+                    .affected_chunks
+                    .into_iter()
+                    .filter_map(|coord| {
+                        let status = scheduler.status(coord)?;
+                        status.desired.then_some(CanonicalRequirement {
+                            coord,
+                            revision: status.revision,
+                        })
+                    })
+                    .collect()
+            };
+            let revision = increment_nonzero(self.surface_revision.get());
+            self.surface_revision.set(revision);
+            let mut surface = Vec::new();
+            let mut requested = self.surface_requested_revision.borrow_mut();
             let mut dirty = self.surface_dirty.borrow_mut();
             for level in SurfaceLodLevel::ALL {
-                dirty.extend(
-                    surface_tiles_affected_by_voxel(self.generator, level, target)
-                        .into_iter()
-                        .filter(|coord| resident.contains(coord) || queue.contains(coord)),
-                );
+                for coord in surface_tiles_affected_by_voxel(self.generator, level, target) {
+                    if !self.surface_tile_relevant(coord) {
+                        continue;
+                    }
+                    requested.insert(coord, revision);
+                    dirty.insert(coord);
+                    surface.push(SurfaceRequirement { coord, revision });
+                }
             }
+            EditRequirements { canonical, surface }
+        }
+
+        fn surface_tile_relevant(&self, coord: SurfaceTileCoord) -> bool {
+            surface_tile_in_coverage(coord, self.surface_focus.get())
+                || surface_tile_in_coverage(coord, self.surface_active_focus.get())
+        }
+
+        fn update_edit_convergence(&self, now_ms: f64, submitted: bool) {
+            if !submitted || self.edit_trackers.borrow().is_empty() {
+                return;
+            }
+            let scheduler = self.scheduler.borrow();
+            let resident_revision = self.surface_resident_revision.borrow();
+            let mut trackers = self.edit_trackers.borrow_mut();
+            let mut pending = VecDeque::with_capacity(trackers.len());
+            while let Some(mut tracker) = trackers.pop_front() {
+                let canonical_ready = tracker.requirements.canonical.iter().all(|requirement| {
+                    scheduler.status(requirement.coord).is_none_or(|status| {
+                        !status.desired
+                            || (status.state == ChunkState::Resident
+                                && status.revision >= requirement.revision)
+                    })
+                });
+                if canonical_ready && tracker.canonical_ms.is_none() {
+                    tracker.canonical_ms = Some((now_ms - tracker.started_ms) as f32);
+                }
+                let surface_ready = tracker.requirements.surface.iter().all(|requirement| {
+                    resident_revision
+                        .get(&requirement.coord)
+                        .is_some_and(|revision| *revision >= requirement.revision)
+                        || !self.surface_tile_relevant(requirement.coord)
+                });
+                if canonical_ready && surface_ready {
+                    self.edit_history.borrow_mut().push(EditSample {
+                        class: f32::from(tracker.class),
+                        operation: f32::from(tracker.operation),
+                        enqueue_ms: tracker.enqueue_ms,
+                        canonical_ms: tracker.canonical_ms.unwrap_or_default(),
+                        full_ms: (now_ms - tracker.started_ms) as f32,
+                    });
+                    self.edit_completed
+                        .set(self.edit_completed.get().saturating_add(1));
+                } else {
+                    pending.push_back(tracker);
+                }
+            }
+            *trackers = pending;
         }
 
         fn raycast_target(&self, camera: &CameraState) -> Option<VoxelHit> {
@@ -1038,6 +1253,12 @@ mod web {
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
+                values.extend_from_slice(&[
+                    engine.edit_trackers.borrow().len() as f32,
+                    engine.edit_completed.get() as f32,
+                    engine.edit_superseded.get() as f32,
+                ]);
+                engine.edit_history.borrow_mut().drain_into(&mut values);
             }
             Float32Array::from(values.as_slice())
         }
@@ -1152,6 +1373,9 @@ mod web {
             surface_focus: Cell::new(None),
             surface_active_focus: Cell::new(None),
             surface_resident: RefCell::new(BTreeSet::new()),
+            surface_requested_revision: RefCell::new(BTreeMap::new()),
+            surface_resident_revision: RefCell::new(BTreeMap::new()),
+            surface_revision: Cell::new(1),
             surface_queue: RefCell::new(VecDeque::new()),
             surface_dirty: RefCell::new(BTreeSet::new()),
             fine_initialized: Cell::new(false),
@@ -1167,6 +1391,10 @@ mod web {
             stream_milliseconds: Cell::new(0.0),
             render_milliseconds: Cell::new(0.0),
             frame_history: RefCell::new(FrameHistory::new()),
+            edit_trackers: RefCell::new(VecDeque::new()),
+            edit_history: RefCell::new(EditHistory::new()),
+            edit_completed: Cell::new(0),
+            edit_superseded: Cell::new(0),
             profile: RefCell::new(ProfileAutomation::default()),
             profile_tracked_high: Cell::new(0),
             profile_surface_high: Cell::new(0),
@@ -1223,6 +1451,25 @@ mod web {
         let voxel_x = (position.x / VOXEL_SIZE_METRES).floor() as i32;
         let voxel_z = (position.z / VOXEL_SIZE_METRES).floor() as i32;
         SurfaceTileCoord::containing(level, voxel_x, voxel_z)
+    }
+
+    fn surface_tile_in_coverage(
+        coord: SurfaceTileCoord,
+        focus: Option<[SurfaceTileCoord; 4]>,
+    ) -> bool {
+        let Some(focus) = focus else {
+            return false;
+        };
+        let index = coord.level.index() as usize;
+        let center = focus[index];
+        let dx = (coord.x - center.x).abs();
+        let dz = (coord.z - center.z).abs();
+        dx.max(dz) <= SURFACE_LOAD_RADIUS_TILES[index]
+    }
+
+    const fn increment_nonzero(value: u64) -> u64 {
+        let next = value.wrapping_add(1);
+        if next == 0 { 1 } else { next }
     }
 }
 
