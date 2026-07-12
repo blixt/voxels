@@ -53,6 +53,7 @@ export type ToWorker =
   | InitMessage
   | { kind: "input"; buffer: ArrayBuffer }
   | { kind: "resize"; cssWidth: number; cssHeight: number; dpr: number }
+  | { kind: "profile"; profileId: number }
   | { kind: "snapshot"; requestId: number }
   | { kind: "destroy" };
 

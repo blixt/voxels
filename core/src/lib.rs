@@ -1,5 +1,9 @@
 //! Portable simulation and player state. GPU, world generation, and browser concerns live elsewhere.
 
+mod profile;
+
+pub use profile::{ProfileAutomation, ProfilePhase, ProfilePose};
+
 use glam::{Vec2, Vec3};
 
 pub const PLAYER_RADIUS_METRES: f32 = 0.28;

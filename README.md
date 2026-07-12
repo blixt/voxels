@@ -22,6 +22,9 @@ greedy meshing. Reports are written under the ignored `target/criterion/` direct
 `vp run bench:core` compares 120 dry and submerged fixed simulation steps.
 `vp run profile:browser` builds release WASM, serves it from an isolated origin, and records raw
 frame/CPU phase distributions for steady, traversal, and underwater scenarios in system Chrome.
+`vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step rail, measures its final 60 seconds,
+checks streaming/residency bounds and memory plateau, then requires every canonical and LOD queue to
+drain.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture

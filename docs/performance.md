@@ -256,3 +256,38 @@ required before setting a plateau regression ceiling.
 Persistence hydration now moves the initial `EditMap` into the engine exactly once. Previously the
 store cloned all three edit indices and retained the original for the entire session, creating an
 avoidable near-2x edit-journal payload before any new edit was made.
+
+## 2026-07-12: sustained deterministic streaming rail
+
+`vp run profile:sustained` starts one numeric debug command through the browser transport; all
+scenario timing and movement remain in portable Rust. The camera follows a fixed 120 Hz golden-ratio
+rail at 12 m/s, warms the allocator for 30 seconds, measures the next 60 seconds, covers 1.08 km, then
+stops and requires canonical and all four surface-LOD queues to drain. The harness runs against release
+WASM on an isolated ephemeral origin and enforces frame, memory, residency, and queue gates.
+
+The first run exposed unfinished, undesired chunks retained inside scheduler hysteresis. Such entries
+were deliberately excluded from future admission but still counted as queued forever, preventing a
+final drain. Retention now preserves useful resident geometry only; unfinished undesired work is
+evicted immediately and any late ticket is stale. A host test covers the inside-retention case.
+
+The corrected M3 Max / system Chrome run produced:
+
+| Sustained measurement                     |                Result |                     Gate |
+| ----------------------------------------- | --------------------: | -----------------------: |
+| Distance                                  |               1,080 m |         at least 1,000 m |
+| Canonical evictions                       |                15,149 |             at least 500 |
+| Tracked canonical high-water              |                   320 |              at most 320 |
+| Surface-resident high-water               |                   829 |              at most 896 |
+| Pending mesh high-water                   |                     1 |                at most 3 |
+| Frame p95 / p99 / max                     |  9.3 / 10.0 / 16.7 ms | 12 / 16.67 / no 33.33 ms |
+| Worker CPU p95 / p99                      |          6.3 / 6.9 ms |               7.5 ms p95 |
+| Streaming p95 / p99                       |          3.3 / 3.7 ms |               4.5 ms p95 |
+| GPU active-window p95 / p99 / max         | 4.11 / 5.44 / 6.17 ms |        recorded baseline |
+| Final-20-second WASM committed range      |             0.938 MiB |            at most 1 MiB |
+| Final-20-second arena-capacity range      |                 4 MiB |         at most one page |
+| Dropped telemetry / stale completions     |                 0 / 0 |                     zero |
+| Final pending jobs / pending mesh payload |                 0 / 0 |                     zero |
+
+The rail reached 27.438 MiB committed WASM and 64 MiB of mesh-arena capacity. Those are high-water
+figures, not live payload claims. The active surface plus pending coverage union stayed below its
+conservative 896-tile bound, and the final focus activated only after every replacement queue drained.

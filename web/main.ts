@@ -42,7 +42,7 @@ function start(canvas: HTMLCanvasElement): void {
   let nextSnapshotRequest = 1;
   const snapshotResolvers = new Map<number, (values: number[]) => void>();
   const debugGlobal = globalThis as typeof globalThis & {
-    __VOXELS__?: { snapshot(): Promise<number[]> };
+    __VOXELS__?: { snapshot(): Promise<number[]>; profile(profileId: number): void };
   };
   debugGlobal.__VOXELS__ = {
     snapshot: () =>
@@ -52,6 +52,7 @@ function start(canvas: HTMLCanvasElement): void {
         snapshotResolvers.set(requestId, resolve);
         worker.postMessage({ kind: "snapshot", requestId });
       }),
+    profile: (profileId) => worker.postMessage({ kind: "profile", profileId }),
   };
   worker.onmessage = (event) => {
     if (event.data.kind === "uiMode") {

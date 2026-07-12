@@ -11,7 +11,10 @@ mod web {
     use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::rc::Rc;
-    use voxels_core::{CameraState, InputState, VoxelHit, VoxelPhysics, raycast_voxels};
+    use voxels_core::{
+        CameraState, InputState, ProfileAutomation, ProfilePhase, VoxelHit, VoxelPhysics,
+        raycast_voxels,
+    };
     use voxels_render::renderer::Renderer;
     use voxels_render::ui::LiveStats;
     use voxels_runtime::{ChunkState, FrameBudget, StreamConfig, StreamScheduler};
@@ -31,7 +34,7 @@ mod web {
     const SIMULATION_STEP_SECONDS: f32 = 1.0 / 120.0;
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 4.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 5.0;
     const COAST_WATER_REFERENCE: [i32; 2] = [18_016, 12_896];
     const STREAM_FRAME_BUDGET: FrameBudget = FrameBudget {
         generation: 2,
@@ -149,6 +152,14 @@ mod web {
         stream_milliseconds: Cell<f32>,
         render_milliseconds: Cell<f32>,
         frame_history: RefCell<FrameHistory>,
+        profile: RefCell<ProfileAutomation>,
+        profile_tracked_high: Cell<usize>,
+        profile_surface_high: Cell<usize>,
+        profile_pending_high: Cell<usize>,
+        profile_pending_mesh_high: Cell<usize>,
+        profile_arena_capacity_high: Cell<u64>,
+        profile_wasm_high: Cell<u64>,
+        profile_start_evictions: Cell<u64>,
         last_persist: Cell<f64>,
         stopped: Cell<bool>,
     }
@@ -180,6 +191,24 @@ mod web {
             Ok(())
         }
 
+        fn start_profile(&self, profile_id: u32) -> bool {
+            if profile_id != 1 {
+                return false;
+            }
+            self.input.borrow_mut().clear();
+            let position = self.camera.borrow().position;
+            self.profile.borrow_mut().start(position);
+            self.profile_tracked_high.set(0);
+            self.profile_surface_high.set(0);
+            self.profile_pending_high.set(0);
+            self.profile_pending_mesh_high.set(0);
+            self.profile_arena_capacity_high.set(0);
+            self.profile_wasm_high.set(wasm_committed_bytes());
+            self.profile_start_evictions
+                .set(self.scheduler.borrow().diagnostics().total_evictions);
+            true
+        }
+
         fn frame(&self, time: f64) {
             let performance = self.scope.performance();
             let cpu_start = performance_now(performance.as_ref());
@@ -195,35 +224,59 @@ mod web {
                 .set(smoothed_ms(self.frame_milliseconds.get(), frame_ms));
             let simulation_start = performance_now(performance.as_ref());
             let mut camera = self.camera.borrow_mut();
+            let profiling = self.profile.borrow().running();
             let edits = self.edits.borrow();
             let mut generated_columns = BTreeMap::new();
             let mut accumulator = (self.simulation_accumulator.get() + dt.min(0.1))
                 .min(SIMULATION_STEP_SECONDS * MAX_SIMULATION_STEPS_PER_FRAME as f32);
             let mut steps = 0;
             while accumulator >= SIMULATION_STEP_SECONDS && steps < MAX_SIMULATION_STEPS_PER_FRAME {
-                camera.update(
-                    &self.input.borrow(),
-                    SIMULATION_STEP_SECONDS,
-                    VOXEL_SIZE_METRES,
-                    |x, y, z| {
-                        let coord = VoxelCoord::new(x, y, z);
-                        let material = edits.override_at(coord).unwrap_or_else(|| {
-                            generated_columns
-                                .entry((x, z))
-                                .or_insert_with(|| self.generator.column(x, z))
-                                .sample(y)
-                        });
-                        VoxelPhysics {
-                            collidable: material.is_collidable(),
-                            fluid: material.is_fluid(),
-                        }
-                    },
-                );
+                if profiling {
+                    self.profile.borrow_mut().advance_fixed_step();
+                } else {
+                    camera.update(
+                        &self.input.borrow(),
+                        SIMULATION_STEP_SECONDS,
+                        VOXEL_SIZE_METRES,
+                        |x, y, z| {
+                            let coord = VoxelCoord::new(x, y, z);
+                            let material = edits.override_at(coord).unwrap_or_else(|| {
+                                generated_columns
+                                    .entry((x, z))
+                                    .or_insert_with(|| self.generator.column(x, z))
+                                    .sample(y)
+                            });
+                            VoxelPhysics {
+                                collidable: material.is_collidable(),
+                                fluid: material.is_fluid(),
+                            }
+                        },
+                    );
+                }
                 accumulator -= SIMULATION_STEP_SECONDS;
                 steps += 1;
             }
             self.simulation_accumulator.set(accumulator);
             drop(edits);
+            if profiling && let Some(pose) = self.profile.borrow().pose() {
+                let voxel_x = (pose.position_xz.x / VOXEL_SIZE_METRES).floor() as i32;
+                let voxel_z = (pose.position_xz.y / VOXEL_SIZE_METRES).floor() as i32;
+                let surface = self.generator.surface_sample(voxel_x, voxel_z);
+                let top = surface
+                    .water_level
+                    .unwrap_or(surface.height)
+                    .max(surface.height);
+                let position = glam::Vec3::new(
+                    pose.position_xz.x,
+                    (top + 1) as f32 * VOXEL_SIZE_METRES
+                        + voxels_core::PLAYER_EYE_HEIGHT_METRES
+                        + 0.8,
+                    pose.position_xz.y,
+                );
+                *camera = CameraState::spawn(position);
+                camera.yaw = pose.yaw;
+                camera.pitch = pose.pitch;
+            }
             let simulation_ms = (performance_now(performance.as_ref()) - simulation_start) as f32;
             self.simulation_milliseconds.set(smoothed_ms(
                 self.simulation_milliseconds.get(),
@@ -301,7 +354,39 @@ mod web {
                     swimming: camera.fluid_state().swimming,
                 },
             );
+            let rendered = renderer.diagnostics();
             drop(renderer);
+            if self.profile.borrow().phase() != ProfilePhase::Idle {
+                let pending = stream.generation.queued
+                    + stream.meshing.queued
+                    + stream.upload.queued
+                    + self.surface_queue.borrow().len()
+                    + self.surface_dirty.borrow().len();
+                self.profile_tracked_high
+                    .set(self.profile_tracked_high.get().max(stream.tracked));
+                self.profile_surface_high.set(
+                    self.profile_surface_high
+                        .get()
+                        .max(self.surface_resident.borrow().len()),
+                );
+                self.profile_pending_high
+                    .set(self.profile_pending_high.get().max(pending));
+                self.profile_pending_mesh_high.set(
+                    self.profile_pending_mesh_high
+                        .get()
+                        .max(self.pending_meshes.borrow().len()),
+                );
+                self.profile_arena_capacity_high.set(
+                    self.profile_arena_capacity_high
+                        .get()
+                        .max(rendered.arena_capacity_bytes),
+                );
+                self.profile_wasm_high
+                    .set(self.profile_wasm_high.get().max(wasm_committed_bytes()));
+                if self.profile.borrow().phase() == ProfilePhase::Drain && all_lods_ready {
+                    self.profile.borrow_mut().complete_drain();
+                }
+            }
             let render_ms = (performance_now(performance.as_ref()) - render_start) as f32;
             self.render_milliseconds
                 .set(smoothed_ms(self.render_milliseconds.get(), render_ms));
@@ -827,6 +912,12 @@ mod web {
 
     #[wasm_bindgen]
     impl EngineHandle {
+        pub fn start_profile(&self, profile_id: u32) -> bool {
+            self.engine
+                .as_ref()
+                .is_some_and(|engine| engine.start_profile(profile_id))
+        }
+
         pub fn feed_input(&self, bytes: &[u8]) -> bool {
             if let Some(engine) = self.engine.as_ref() {
                 engine.feed_input(bytes)
@@ -864,6 +955,7 @@ mod web {
                     .map(MeshedChunk::retained_bytes)
                     .sum::<usize>();
                 let edit_logical_bytes = engine.edits.borrow().logical_bytes();
+                let profile = *engine.profile.borrow();
                 values.extend_from_slice(&[
                     camera.position.x,
                     camera.position.y,
@@ -925,6 +1017,24 @@ mod web {
                     edit_logical_bytes as f32 / (1024.0 * 1024.0),
                     diagnostics.total_evictions as f32,
                     diagnostics.stale_completions as f32,
+                    profile.phase() as u8 as f32,
+                    profile.elapsed_seconds(),
+                    profile.distance_metres(),
+                    if profile.phase() == ProfilePhase::Complete {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    engine.profile_tracked_high.get() as f32,
+                    engine.profile_surface_high.get() as f32,
+                    engine.profile_pending_high.get() as f32,
+                    engine.profile_pending_mesh_high.get() as f32,
+                    engine.profile_arena_capacity_high.get() as f32 / (1024.0 * 1024.0),
+                    engine.profile_wasm_high.get() as f32 / (1024.0 * 1024.0),
+                    diagnostics
+                        .total_evictions
+                        .saturating_sub(engine.profile_start_evictions.get())
+                        as f32,
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
@@ -1057,6 +1167,14 @@ mod web {
             stream_milliseconds: Cell::new(0.0),
             render_milliseconds: Cell::new(0.0),
             frame_history: RefCell::new(FrameHistory::new()),
+            profile: RefCell::new(ProfileAutomation::default()),
+            profile_tracked_high: Cell::new(0),
+            profile_surface_high: Cell::new(0),
+            profile_pending_high: Cell::new(0),
+            profile_pending_mesh_high: Cell::new(0),
+            profile_arena_capacity_high: Cell::new(0),
+            profile_wasm_high: Cell::new(0),
+            profile_start_evictions: Cell::new(0),
             last_persist: Cell::new(0.0),
             stopped: Cell::new(false),
         });

@@ -38,12 +38,23 @@ const SNAPSHOT = {
   editLogicalMiB: 53,
   totalEvictions: 54,
   staleCompletions: 55,
-  schemaVersion: 56,
-  sampleCount: 57,
-  droppedSamples: 58,
+  profilePhase: 56,
+  profileElapsedSeconds: 57,
+  profileDistanceMetres: 58,
+  profileComplete: 59,
+  profileTrackedHigh: 60,
+  profileSurfaceHigh: 61,
+  profilePendingHigh: 62,
+  profilePendingMeshHigh: 63,
+  profileArenaCapacityHighMiB: 64,
+  profileWasmHighMiB: 65,
+  profileEvictions: 66,
+  schemaVersion: 67,
+  sampleCount: 68,
+  droppedSamples: 69,
 };
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 59;
+const FRAME_SAMPLE_START = 70;
 
 function percentile(values, fraction) {
   if (values.length === 0) return 0;
@@ -125,36 +136,114 @@ function phaseSummary(captures) {
   };
 }
 
+async function capture(page) {
+  const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
+  const count = snapshot[SNAPSHOT.sampleCount];
+  const samples = [];
+  for (let index = 0; index < count; index += 1) {
+    const start = FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH;
+    samples.push(snapshot.slice(start, start + FRAME_SAMPLE_WIDTH));
+  }
+  return {
+    snapshot,
+    samples,
+    dropped: snapshot[SNAPSHOT.droppedSamples],
+    gpuSample:
+      snapshot[SNAPSHOT.gpuSampleId] > 0
+        ? {
+            id: snapshot[SNAPSHOT.gpuSampleId],
+            total: snapshot[SNAPSHOT.gpuTotalMs],
+            shadow: snapshot[SNAPSHOT.gpuShadowMs],
+            world: snapshot[SNAPSHOT.gpuWorldMs],
+            water: snapshot[SNAPSHOT.gpuWaterMs],
+            ui: snapshot[SNAPSHOT.gpuUiMs],
+          }
+        : null,
+  };
+}
+
 async function sample(page, durationMs) {
   const captures = [];
   const deadline = Date.now() + durationMs;
   while (Date.now() < deadline) {
-    const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
-    const count = snapshot[SNAPSHOT.sampleCount];
-    const samples = [];
-    for (let index = 0; index < count; index += 1) {
-      const start = FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH;
-      samples.push(snapshot.slice(start, start + FRAME_SAMPLE_WIDTH));
-    }
-    captures.push({
-      snapshot,
-      samples,
-      dropped: snapshot[SNAPSHOT.droppedSamples],
-      gpuSample:
-        snapshot[SNAPSHOT.gpuSampleId] > 0
-          ? {
-              id: snapshot[SNAPSHOT.gpuSampleId],
-              total: snapshot[SNAPSHOT.gpuTotalMs],
-              shadow: snapshot[SNAPSHOT.gpuShadowMs],
-              world: snapshot[SNAPSHOT.gpuWorldMs],
-              water: snapshot[SNAPSHOT.gpuWaterMs],
-              ui: snapshot[SNAPSHOT.gpuUiMs],
-            }
-          : null,
-    });
+    captures.push(await capture(page));
     await page.waitForTimeout(250);
   }
   return captures;
+}
+
+async function sustainedProfile(page) {
+  await page.evaluate(() => globalThis.__VOXELS__.profile(1));
+  const captures = [];
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const next = await capture(page);
+    captures.push(next);
+    if (next.snapshot[SNAPSHOT.profileComplete] === 1) break;
+    await page.waitForTimeout(250);
+  }
+  const latest = captures.at(-1)?.snapshot;
+  if (!latest || latest[SNAPSHOT.profileComplete] !== 1) {
+    throw new Error(
+      `sustained Rust profile did not drain: ${JSON.stringify(latest?.slice(56, 70))}`,
+    );
+  }
+  const measured = captures.filter((capture) => capture.snapshot[SNAPSHOT.profilePhase] === 2);
+  const finalTwenty = measured.filter(
+    (capture) => capture.snapshot[SNAPSHOT.profileElapsedSeconds] >= 70,
+  );
+  const range = (values) => Math.max(...values) - Math.min(...values);
+  const result = {
+    measured: phaseSummary(measured),
+    distanceMetres: latest[SNAPSHOT.profileDistanceMetres],
+    evictions: latest[SNAPSHOT.profileEvictions],
+    highWater: {
+      trackedChunks: latest[SNAPSHOT.profileTrackedHigh],
+      surfaceTiles: latest[SNAPSHOT.profileSurfaceHigh],
+      pendingJobs: latest[SNAPSHOT.profilePendingHigh],
+      pendingMeshes: latest[SNAPSHOT.profilePendingMeshHigh],
+      arenaCapacityMiB: latest[SNAPSHOT.profileArenaCapacityHighMiB],
+      wasmCommittedMiB: latest[SNAPSHOT.profileWasmHighMiB],
+    },
+    finalTwentySeconds: {
+      wasmCommittedRangeMiB: range(
+        finalTwenty.map((capture) => capture.snapshot[SNAPSHOT.wasmCommittedMiB]),
+      ),
+      arenaCapacityRangeMiB: range(
+        finalTwenty.map((capture) => capture.snapshot[SNAPSHOT.arenaCapacityMiB]),
+      ),
+    },
+    final: {
+      pendingJobs: latest[SNAPSHOT.pendingJobs],
+      pendingMeshMiB: latest[SNAPSHOT.pendingMeshMiB],
+      canonicalVoxelMiB: latest[SNAPSHOT.canonicalVoxelMiB],
+      staleCompletions: latest[SNAPSHOT.staleCompletions],
+    },
+  };
+  const violations = [];
+  if (result.distanceMetres < 1_000) violations.push("distance below 1km");
+  if (result.evictions < 500) violations.push("fewer than 500 canonical evictions");
+  if (result.highWater.trackedChunks > 320) violations.push("tracked chunk bound exceeded");
+  if (result.highWater.surfaceTiles > 896) violations.push("surface residency bound exceeded");
+  if (result.highWater.pendingMeshes > 3) violations.push("pending mesh bound exceeded");
+  if (result.final.pendingJobs !== 0) violations.push("queues did not drain");
+  if (result.final.pendingMeshMiB !== 0) violations.push("pending mesh payload did not drain");
+  if (result.measured.frameMs.p95 > 12) violations.push("frame p95 above 12ms");
+  if (result.measured.frameMs.p99 > 16.67) violations.push("frame p99 above 16.67ms");
+  if (result.measured.cpuMs.p95 > 7.5) violations.push("worker CPU p95 above 7.5ms");
+  if (result.measured.streamingMs.p95 > 4.5) violations.push("streaming p95 above 4.5ms");
+  if (result.measured.frameMs.above33_33ms > 0) violations.push("frame exceeded 33.33ms");
+  if (result.measured.droppedSamples > 0) violations.push("frame samples were dropped");
+  if (result.finalTwentySeconds.wasmCommittedRangeMiB > 1) {
+    violations.push("WASM committed memory did not plateau");
+  }
+  if (result.finalTwentySeconds.arenaCapacityRangeMiB > 4) {
+    violations.push("mesh arena capacity did not plateau");
+  }
+  if (violations.length > 0) {
+    throw new Error(`sustained profile violations: ${violations.join(", ")}`);
+  }
+  return result;
 }
 
 async function waitForEngine(page) {
@@ -167,7 +256,7 @@ async function waitForEngine(page) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
     lastSnapshot = snapshot;
     if (
-      snapshot[SNAPSHOT.schemaVersion] === 4 &&
+      snapshot[SNAPSHOT.schemaVersion] === 5 &&
       snapshot[SNAPSHOT.quads] > 0 &&
       snapshot[SNAPSHOT.residentChunks] > 0 &&
       snapshot[SNAPSHOT.pendingJobs] === 0
@@ -213,6 +302,7 @@ async function reserveEphemeralPort() {
 }
 
 const viewport = { width: 1280, height: 720 };
+const sustained = process.argv.includes("--sustained");
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
@@ -251,15 +341,19 @@ try {
   await waitForEngine(page);
   const settledMilliseconds = performance.now() - navigationStarted;
 
-  const steady = phaseSummary(await sample(page, 4_000));
-
-  await page.keyboard.down("KeyW");
-  const traversalSamples = await sample(page, 6_000);
-  await page.keyboard.up("KeyW");
-  const traversal = phaseSummary(traversalSamples);
-
-  await enterUnderwaterShowcase(page, viewport.width);
-  const underwater = phaseSummary(await sample(page, 4_000));
+  let scenarios;
+  if (sustained) {
+    scenarios = { sustained: await sustainedProfile(page) };
+  } else {
+    const steady = phaseSummary(await sample(page, 4_000));
+    await page.keyboard.down("KeyW");
+    const traversalSamples = await sample(page, 6_000);
+    await page.keyboard.up("KeyW");
+    const traversal = phaseSummary(traversalSamples);
+    await enterUnderwaterShowcase(page, viewport.width);
+    const underwater = phaseSummary(await sample(page, 4_000));
+    scenarios = { steady, traversal, underwater };
+  }
   if (process.env.SCREENSHOT) {
     await page.screenshot({ path: process.env.SCREENSHOT });
   }
@@ -273,9 +367,7 @@ try {
         build: "release",
         viewport,
         startup: { settledMilliseconds },
-        steady,
-        traversal,
-        underwater,
+        ...scenarios,
         errors: 0,
       },
       null,
