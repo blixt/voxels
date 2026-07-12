@@ -2,7 +2,7 @@ use crate::first_pilgrim_road_length_voxels;
 
 /// Append-only semantic atlas schema. Names and stable IDs do not alter canonical terrain by
 /// themselves, but consumers may persist discoveries and must be able to interpret older IDs.
-pub const ATLAS_VERSION: u32 = 1;
+pub const ATLAS_VERSION: u32 = 2;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -25,6 +25,13 @@ pub enum RouteChapterId {
     WindcutWay = 2,
     CinderReach = 3,
     NeedleAscent = 4,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CaveSystemId {
+    #[default]
+    CinderVault = 0,
 }
 
 impl RouteChapterId {
@@ -54,6 +61,23 @@ pub struct RouteChapter {
     pub end_station_voxels: i32,
     pub destination: DestinationId,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CaveSystemDefinition {
+    pub id: CaveSystemId,
+    pub name: &'static str,
+    pub entrance: [i32; 3],
+    pub chamber: [i32; 3],
+    pub nearby_destination: DestinationId,
+}
+
+pub const CINDER_VAULT: CaveSystemDefinition = CaveSystemDefinition {
+    id: CaveSystemId::CinderVault,
+    name: "Cinder Vault",
+    entrance: [-5_020, 50, 3_178],
+    chamber: [-5_180, 24, 3_300],
+    nearby_destination: DestinationId::CinderSteps,
+};
 
 pub const PILGRIM_DESTINATIONS: [Destination; 6] = [
     Destination {
@@ -144,7 +168,7 @@ mod tests {
 
     #[test]
     fn atlas_ids_and_route_stations_are_stable_and_self_consistent() {
-        assert_eq!(ATLAS_VERSION, 1);
+        assert_eq!(ATLAS_VERSION, 2);
         assert_eq!(PILGRIM_DESTINATIONS.len(), 6);
         assert_eq!(PILGRIM_CHAPTERS.len(), 5);
         let mut ids = BTreeSet::new();
@@ -160,6 +184,8 @@ mod tests {
         assert_eq!(PILGRIM_DESTINATIONS[5].id as u8, 5);
         assert_eq!(PILGRIM_CHAPTERS[0].id as u8, 0);
         assert_eq!(PILGRIM_CHAPTERS[4].id as u8, 4);
+        assert_eq!(CINDER_VAULT.id as u8, 0);
+        assert_eq!(CINDER_VAULT.nearby_destination, DestinationId::CinderSteps);
     }
 
     #[test]

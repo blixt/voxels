@@ -2,8 +2,8 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use voxels_world::codec::{decode_chunk, encode_chunk};
 use voxels_world::{
-    ChunkCoord, EditMap, FarTileCoord, Generator, Material, SkylineFeatureKind, SurfaceLodLevel,
-    SurfaceTileCoord, VoxelCoord, first_pilgrim_road_length_voxels,
+    CINDER_VAULT, ChunkCoord, EditMap, FarTileCoord, Generator, Material, SkylineFeatureKind,
+    SurfaceLodLevel, SurfaceTileCoord, VoxelCoord, first_pilgrim_road_length_voxels,
     first_pilgrim_road_point_at_distance, first_pilgrim_route_anchor,
     first_pilgrim_route_anchor_for_feature_cell, generate_edited_surface_tile_mesh,
     generate_edited_water_tile_mesh, generate_far_tile, generate_far_tile_with, mesh_chunk,
@@ -30,6 +30,12 @@ fn generation(criterion: &mut Criterion) {
     let road_coord = VoxelCoord::new(road_x, road_y, road_z).chunk();
     criterion.bench_function("generate 32^3 pilgrim-road chunk", |bencher| {
         bencher.iter(|| generator.generate_chunk(road_coord));
+    });
+
+    let chamber = CINDER_VAULT.chamber;
+    let cave_coord = VoxelCoord::new(chamber[0], chamber[1], chamber[2]).chunk();
+    criterion.bench_function("generate 32^3 Cinder Vault chunk", |bencher| {
+        bencher.iter(|| generator.generate_chunk(cave_coord));
     });
 }
 
@@ -136,6 +142,19 @@ fn meshing(criterion: &mut Criterion) {
     criterion.bench_function("greedy mesh generated chunk", |bencher| {
         bencher.iter_batched(
             || generator.generate_chunk(COORD),
+            |chunk| {
+                let origin = chunk.coord().world_origin();
+                let region = generator.region(origin[0] - 1, origin[2] - 1, 34, 34);
+                mesh_chunk(&chunk, |x, y, z| region.sample(x, y, z))
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    let chamber = CINDER_VAULT.chamber;
+    let cave_coord = VoxelCoord::new(chamber[0], chamber[1], chamber[2]).chunk();
+    criterion.bench_function("greedy mesh Cinder Vault chunk", |bencher| {
+        bencher.iter_batched(
+            || generator.generate_chunk(cave_coord),
             |chunk| {
                 let origin = chunk.coord().world_origin();
                 let region = generator.region(origin[0] - 1, origin[2] - 1, 34, 34);

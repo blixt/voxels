@@ -322,10 +322,15 @@ pub fn surface_tiles_affected_by_column(
 /// which matters when a crown crosses a tile or patch boundary.
 pub fn surface_tiles_affected_by_voxel(
     generator: Generator,
+    edits: &EditMap,
     level: SurfaceLodLevel,
     coord: VoxelCoord,
 ) -> Vec<SurfaceTileCoord> {
-    let mut affected = surface_tiles_affected_by_column(level, coord.x, coord.z);
+    let mut affected = if coord.y >= edits.surface_sample(generator, coord.x, coord.z).0 {
+        surface_tiles_affected_by_column(level, coord.x, coord.z)
+    } else {
+        Vec::new()
+    };
     for feature in generator.skyline_features_at(coord) {
         let Some(feature_material) = feature.material_at(coord) else {
             continue;
@@ -1860,7 +1865,10 @@ mod tests {
                     "{:?} proxy was not suppressed at {level:?}",
                     feature.kind
                 );
-                assert!(surface_tiles_affected_by_voxel(generator, level, target).contains(&coord));
+                assert!(
+                    surface_tiles_affected_by_voxel(generator, &edits, level, target)
+                        .contains(&coord)
+                );
 
                 edits.set(generator, target, material);
                 assert!(edits.is_empty());
@@ -1933,7 +1941,26 @@ mod tests {
             owner,
             SurfaceTileCoord::containing(level, target.x, target.z)
         );
-        assert!(surface_tiles_affected_by_voxel(generator, level, target).contains(&owner));
+        assert!(
+            surface_tiles_affected_by_voxel(generator, &EditMap::default(), level, target)
+                .contains(&owner)
+        );
+    }
+
+    #[test]
+    fn underground_cave_edits_do_not_rebuild_surface_lods() {
+        let generator = Generator::new(0x5eed_cafe);
+        let chamber = crate::CINDER_VAULT.chamber;
+        let target = VoxelCoord::new(chamber[0], chamber[1], chamber[2]);
+        assert_eq!(
+            generator.sample(target.x, target.y, target.z),
+            Material::Air
+        );
+        let mut edits = EditMap::default();
+        edits.set(generator, target, Material::Basalt);
+        for level in SurfaceLodLevel::ALL {
+            assert!(surface_tiles_affected_by_voxel(generator, &edits, level, target).is_empty());
+        }
     }
 
     #[test]

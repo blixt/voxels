@@ -1,6 +1,7 @@
 //! Deterministic, host-testable voxel world representation, generation, meshing, and storage codecs.
 
 pub mod atlas;
+pub mod cave;
 pub mod chunk;
 pub mod codec;
 pub mod composition;
@@ -12,6 +13,10 @@ pub mod material;
 pub mod mesh;
 pub mod route;
 
+pub use cave::{
+    CINDER_VAULT_BOUNDS, CINDER_VAULT_EDGES, CINDER_VAULT_NODES, CaveEdge, CaveNode, CaveSample,
+    cinder_vault_override, sample_cinder_vault,
+};
 pub use chunk::{CHUNK_EDGE, CHUNK_VOLUME, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord};
 pub use composition::{
     COMPOSITION_EDGE_FEATURE_CELLS, FeatureComposition, FeatureCompositionId,
@@ -50,6 +55,7 @@ pub use route::{
 /// One canonical voxel is a 10 cm cube. World-space simulation and rendering use metres.
 pub const VOXEL_SIZE_METRES: f32 = 0.1;
 pub use atlas::{
-    ATLAS_VERSION, Destination, DestinationId, PILGRIM_CHAPTERS, PILGRIM_DESTINATIONS,
-    RouteChapter, RouteChapterId, pilgrim_chapter_at_distance,
+    ATLAS_VERSION, CINDER_VAULT, CaveSystemDefinition, CaveSystemId, Destination, DestinationId,
+    PILGRIM_CHAPTERS, PILGRIM_DESTINATIONS, RouteChapter, RouteChapterId,
+    pilgrim_chapter_at_distance,
 };

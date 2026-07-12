@@ -1,13 +1,13 @@
 use crate::{
-    CHUNK_EDGE, COMPOSITION_EDGE_FEATURE_CELLS, Chunk, ChunkCoord, FEATURE_CELL_VOXELS,
-    FEATURE_MAX_RADIUS_VOXELS, FIRST_PILGRIM_ROAD_NODES, FeatureComposition,
+    CHUNK_EDGE, CINDER_VAULT_BOUNDS, COMPOSITION_EDGE_FEATURE_CELLS, Chunk, ChunkCoord,
+    FEATURE_CELL_VOXELS, FEATURE_MAX_RADIUS_VOXELS, FIRST_PILGRIM_ROAD_NODES, FeatureComposition,
     FeatureCompositionRole, Material, ROUTE_CORE_HALF_WIDTH_VOXELS, RouteAnchor, RouteAnchorRole,
     RouteLandmarkId, RouteSample, SkylineFeature, SkylineFeatureId, SkylineFeatureKind,
-    first_pilgrim_route_anchor_for_feature_cell, sample_first_pilgrim_road,
+    cinder_vault_override, first_pilgrim_route_anchor_for_feature_cell, sample_first_pilgrim_road,
 };
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 12;
+pub const GENERATOR_VERSION: u32 = 13;
 pub const SEA_LEVEL_VOXELS: i32 = 10;
 const FEATURE_MIN_XZ_OFFSET: i32 = 2;
 const FEATURE_MAX_XZ_OFFSET: i32 = FEATURE_CELL_VOXELS - 3;
@@ -118,6 +118,7 @@ pub struct GeneratedColumn {
     profile: ColumnProfile,
     features: [SkylineFeature; 9],
     feature_count: u8,
+    cinder_vault_candidate: bool,
 }
 
 /// Reusable authoritative sampler for a rectangular X/Z region. Analytic features are discovered
@@ -144,6 +145,12 @@ impl GeneratedRegion {
 
 impl GeneratedColumn {
     pub fn sample(&self, y: i32) -> Material {
+        if self.cinder_vault_candidate
+            && let Some(material) = cinder_vault_override(self.x, y, self.z)
+            && (material == Material::Air || y <= self.profile.height)
+        {
+            return material;
+        }
         let terrain = self
             .generator
             .sample_terrain_with_profile(self.x, y, self.z, self.profile);
@@ -198,6 +205,7 @@ impl Generator {
             }
         }
         self.decorate_features(&mut chunk);
+        self.apply_authored_caves(&mut chunk, &columns);
         chunk
     }
 
@@ -232,6 +240,7 @@ impl Generator {
             profile: self.column_profile(x, z),
             features,
             feature_count,
+            cinder_vault_candidate: cinder_vault_column_candidate(x, z),
         }
     }
 
@@ -276,6 +285,7 @@ impl Generator {
                     profile: self.column_profile(x, z),
                     features: column_features,
                     feature_count,
+                    cinder_vault_candidate: cinder_vault_column_candidate(x, z),
                 });
             }
         }
@@ -285,6 +295,42 @@ impl Generator {
             width,
             depth,
             columns,
+        }
+    }
+
+    fn apply_authored_caves(self, chunk: &mut Chunk, columns: &[ColumnProfile]) {
+        let origin = chunk.coord().world_origin();
+        let [[min_x, min_y, min_z], [max_x, max_y, max_z]] = CINDER_VAULT_BOUNDS;
+        let chunk_max = [
+            origin[0] + CHUNK_EDGE as i32,
+            origin[1] + CHUNK_EDGE as i32,
+            origin[2] + CHUNK_EDGE as i32,
+        ];
+        if origin[0] >= max_x
+            || chunk_max[0] <= min_x
+            || origin[1] >= max_y
+            || chunk_max[1] <= min_y
+            || origin[2] >= max_z
+            || chunk_max[2] <= min_z
+        {
+            return;
+        }
+        for y in 0..CHUNK_EDGE {
+            for z in 0..CHUNK_EDGE {
+                for x in 0..CHUNK_EDGE {
+                    let world = [
+                        origin[0] + x as i32,
+                        origin[1] + y as i32,
+                        origin[2] + z as i32,
+                    ];
+                    if let Some(material) = cinder_vault_override(world[0], world[1], world[2])
+                        && (material == Material::Air
+                            || world[1] <= columns[x + z * CHUNK_EDGE].height)
+                    {
+                        chunk.set(x, y, z, material);
+                    }
+                }
+            }
         }
     }
 
@@ -975,6 +1021,11 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
+fn cinder_vault_column_candidate(x: i32, z: i32) -> bool {
+    let [[min_x, _, min_z], [max_x, _, max_z]] = CINDER_VAULT_BOUNDS;
+    (min_x..max_x).contains(&x) && (min_z..max_z).contains(&z)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1153,7 +1204,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checksum, 0x28fa_f332_1b0d_f3f0);
+        assert_eq!(checksum, 0x7bd4_5bdd_e002_da41);
     }
 
     #[test]
@@ -1427,7 +1478,7 @@ mod tests {
             crate::FeatureCompositionMode::ALL.into_iter().collect()
         );
         assert!(prominence_counts.into_iter().all(|count| count > 0));
-        assert_eq!(checksum, 0x6386_6ec0_9717_c0a3);
+        assert_eq!(checksum, 0xa171_eec3_7e5b_8a5a);
     }
 
     #[test]
@@ -1564,6 +1615,126 @@ mod tests {
         assert!(
             max_fill <= 2,
             "road fill reached {max_fill} voxels at {max_fill_point:?}"
+        );
+    }
+
+    #[test]
+    fn cinder_vault_is_enterable_connected_dry_and_player_clear() {
+        let generator = Generator::new(0x5eed_cafe);
+        let [[min_x, _, min_z], [max_x, _, max_z]] = crate::CINDER_VAULT_BOUNDS;
+        let region = generator.region(
+            min_x,
+            min_z,
+            (max_x - min_x) as usize,
+            (max_z - min_z) as usize,
+        );
+        let player_foot = |x: i32, center_y: i32, z: i32| {
+            (center_y - 22..=center_y + 3).find(|foot| {
+                (-3..=3).any(|dx| {
+                    (-3..=3).any(|dz| region.sample(x + dx, *foot - 1, z + dz).is_collidable())
+                }) && (-3..=3).all(|dx| {
+                    (-3..=3).all(|dz| {
+                        (0..18).all(|dy| region.sample(x + dx, *foot + dy, z + dz) == Material::Air)
+                    })
+                })
+            })
+        };
+
+        let mut previous = None;
+        let mut samples = 0;
+        for edge in crate::CINDER_VAULT_EDGES {
+            let from = crate::CINDER_VAULT_NODES[usize::from(edge.from)].center;
+            let to = crate::CINDER_VAULT_NODES[usize::from(edge.to)].center;
+            let run = (((to[0] - from[0]).pow(2) + (to[2] - from[2]).pow(2)) as f32).sqrt();
+            for distance in 0..=run.ceil() as i32 {
+                let t = (distance as f32 / run).min(1.0);
+                let point = [
+                    (from[0] as f32 + (to[0] - from[0]) as f32 * t).round() as i32,
+                    (from[1] as f32 + (to[1] - from[1]) as f32 * t).round() as i32,
+                    (from[2] as f32 + (to[2] - from[2]) as f32 * t).round() as i32,
+                ];
+                let foot = player_foot(point[0], point[1], point[2]).unwrap_or_else(|| {
+                    panic!("no player-clear floor near authored cave point {point:?}")
+                });
+                if let Some(previous) = previous {
+                    let step: i32 = foot - previous;
+                    assert!(step.abs() <= 3, "cave floor step reached {step} voxels");
+                }
+                previous = Some(foot);
+                samples += 1;
+            }
+        }
+        assert!(samples > 180);
+
+        let chamber = crate::CINDER_VAULT.chamber;
+        assert_eq!(
+            generator.sample(chamber[0], chamber[1], chamber[2]),
+            Material::Air
+        );
+        let entrance = crate::CINDER_VAULT.entrance;
+        assert_eq!(
+            generator.sample(entrance[0], entrance[1], entrance[2]),
+            Material::Air
+        );
+
+        let mut breaches = 0;
+        let mut farthest_breach = (0, [0; 2]);
+        for z in min_z..max_z {
+            for x in min_x..max_x {
+                let height = generator.column_profile(x, z).height;
+                if cinder_vault_override(x, height, z) == Some(Material::Air) {
+                    let dx = x - entrance[0];
+                    let dz = z - entrance[2];
+                    let distance_squared = dx * dx + dz * dz;
+                    if distance_squared > farthest_breach.0 {
+                        farthest_breach = (distance_squared, [x, z]);
+                    }
+                    breaches += 1;
+                }
+            }
+        }
+        assert!(
+            breaches >= 24,
+            "entrance opened only {breaches} surface voxels"
+        );
+        assert!(
+            farthest_breach.0 <= 96 * 96,
+            "unintended breach at {:?}",
+            farthest_breach.1
+        );
+    }
+
+    #[test]
+    fn cinder_vault_agrees_across_sampling_paths_and_sparse_edits() {
+        let generator = Generator::new(0x5eed_cafe);
+        let probes = [
+            crate::CINDER_VAULT_NODES[1].center,
+            crate::CINDER_VAULT_NODES[3].center,
+            crate::CINDER_VAULT_NODES[5].center,
+        ];
+        for point in probes {
+            assert_eq!(
+                generator.sample(point[0], point[1], point[2]),
+                Material::Air
+            );
+            let voxel = VoxelCoord::new(point[0], point[1], point[2]);
+            let chunk = generator.generate_chunk(voxel.chunk());
+            let local = voxel.local();
+            assert_eq!(chunk.get(local[0], local[1], local[2]), Material::Air);
+            let region = generator.region(point[0] - 1, point[2] - 1, 3, 3);
+            assert_eq!(region.sample(point[0], point[1], point[2]), Material::Air);
+
+            let mut edits = crate::EditMap::default();
+            edits.set(generator, voxel, Material::Basalt);
+            assert_eq!(edits.sample(generator, voxel), Material::Basalt);
+            edits.set(generator, voxel, Material::Air);
+            assert!(edits.is_empty());
+        }
+
+        let shell = VoxelCoord::new(-5_180, 24, 3_270);
+        assert_eq!(
+            generator.sample(shell.x, shell.y, shell.z),
+            Material::Basalt
         );
     }
 

@@ -1283,8 +1283,10 @@ mod web {
             let resident = self.surface_resident.borrow();
             let mut revisions = self.surface_revisions.borrow_mut();
             let mut dirty = self.surface_dirty.borrow_mut();
+            let edits = self.edits.borrow();
             for level in SurfaceLodLevel::ALL {
-                for coord in surface_tiles_affected_by_voxel(self.generator, level, target) {
+                for coord in surface_tiles_affected_by_voxel(self.generator, &edits, level, target)
+                {
                     let relevant = self.surface_tile_relevant(coord);
                     if !relevant && !resident.contains(&coord) {
                         continue;
