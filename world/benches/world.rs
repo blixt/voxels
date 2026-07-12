@@ -1,10 +1,10 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use voxels_world::codec::{decode_chunk, encode_chunk};
 use voxels_world::{
-    ChunkCoord, EditMap, FarTileCoord, Generator, Material, SurfaceLodLevel, SurfaceTileCoord,
-    VoxelCoord, first_pilgrim_road_length_voxels, first_pilgrim_road_point_at_distance,
-    generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_far_tile,
-    generate_far_tile_with, mesh_chunk,
+    ChunkCoord, EditMap, FarTileCoord, Generator, Material, SkylineFeatureKind, SurfaceLodLevel,
+    SurfaceTileCoord, VoxelCoord, first_pilgrim_road_length_voxels,
+    first_pilgrim_road_point_at_distance, generate_edited_surface_tile_mesh,
+    generate_edited_water_tile_mesh, generate_far_tile, generate_far_tile_with, mesh_chunk,
 };
 
 const SEED: u64 = 0x5eed_cafe;
@@ -43,6 +43,32 @@ fn route_surface_lod(criterion: &mut Criterion) {
         let coord = SurfaceTileCoord::containing(level, road[0], road[1]);
         group.bench_function(
             format!("stride-{} tile", level.stride_voxels()),
+            |bencher| {
+                bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
+            },
+        );
+    }
+    group.finish();
+}
+
+fn semantic_hero_generation(criterion: &mut Criterion) {
+    let generator = Generator::new(SEED);
+    let Some(hero) =
+        generator.nearest_prominent_skyline_feature(0, 0, SkylineFeatureKind::ElderCanopy, 192)
+    else {
+        return;
+    };
+    let hero_chunk = VoxelCoord::new(hero.anchor[0], hero.trunk_top, hero.anchor[2]).chunk();
+    criterion.bench_function("generate 32^3 elder-canopy hero chunk", |bencher| {
+        bencher.iter(|| generator.generate_chunk(hero_chunk));
+    });
+
+    let edits = EditMap::default();
+    let mut group = criterion.benchmark_group("semantic-hero surface LOD");
+    for level in [SurfaceLodLevel::Stride2, SurfaceLodLevel::Stride16] {
+        let coord = SurfaceTileCoord::containing(level, hero.anchor[0], hero.anchor[2]);
+        group.bench_function(
+            format!("stride-{} elder-canopy tile", level.stride_voxels()),
             |bencher| {
                 bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
             },
@@ -135,6 +161,7 @@ criterion_group!(
     world_benches,
     generation,
     route_surface_lod,
+    semantic_hero_generation,
     codec,
     meshing,
     water_meshing,

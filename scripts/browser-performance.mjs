@@ -3,7 +3,7 @@ import { chromium } from "playwright";
 import { build, preview } from "vite-plus";
 
 const FAILURE =
-  /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed/i;
+  /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed|landmark tour/i;
 const SNAPSHOT = {
   quads: 6,
   residentChunks: 8,
@@ -465,6 +465,62 @@ async function ambientOcclusionProfile(page, viewportWidth) {
   return result;
 }
 
+async function visitNextLandmark(page, viewportWidth) {
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(80);
+  await page.mouse.click(viewportWidth - 83, 90);
+  await page.waitForTimeout(80);
+  // The seventh Rust context row advances the deterministic landmark catalog. TypeScript only
+  // clicks the canvas; kind lookup, teleport placement, camera aim, and streaming remain Rust-owned.
+  await page.mouse.click(viewportWidth - 171, 338);
+  await page.keyboard.press("F3");
+  await waitForEngine(page);
+  await page.waitForTimeout(500);
+}
+
+async function semanticHeroProfile(page, viewportWidth) {
+  // Skip the six regional background forms and three route forms. The append-only hero ids occupy
+  // the final six positions in the Rust catalog.
+  for (let index = 0; index < 9; index += 1) {
+    await visitNextLandmark(page, viewportWidth);
+  }
+  const slugs = [
+    "elder-canopy",
+    "tor-circle",
+    "needle-gate",
+    "buried-ribs",
+    "buried-colonnade",
+    "basalt-crown",
+  ];
+  const heroes = {};
+  const violations = [];
+  for (const slug of slugs) {
+    await visitNextLandmark(page, viewportWidth);
+    const phase = phaseSummary(await sample(page, 3_000));
+    heroes[slug] = phase;
+    await page.screenshot({ path: `target/semantic-hero-${slug}.png` });
+    if (!phase.gpu.available) violations.push(`${slug}: GPU timestamps unavailable`);
+    if (phase.pendingJobs !== 0) violations.push(`${slug}: streaming did not settle`);
+    if (phase.droppedSamples > 0) violations.push(`${slug}: frame samples were dropped`);
+    if (phase.frameMs.p95 > 12) violations.push(`${slug}: frame p95 exceeded 12ms`);
+    if (phase.frameMs.above33_33ms > 0) violations.push(`${slug}: a frame exceeded 33.33ms`);
+    if (phase.gpu.available && phase.gpu.totalMs.p95 > 7.5) {
+      violations.push(`${slug}: active GPU p95 exceeded 7.5ms`);
+    }
+    if (phase.depthPrepassDrawCalls + phase.waterDrawCalls !== phase.drawCalls) {
+      violations.push(`${slug}: AO depth ownership did not match opaque draws`);
+    }
+    if (phase.staleCompletions !== 0) violations.push(`${slug}: stale work completed`);
+  }
+  if (violations.length > 0) {
+    throw new Error(
+      `semantic hero profile violations: ${violations.join(", ")}; ${JSON.stringify(heroes)}`,
+    );
+  }
+  return heroes;
+}
+
 async function cycleDaylight(page, viewportWidth, expectedPhase) {
   await page.keyboard.press("Escape");
   await page.keyboard.press("F3");
@@ -672,6 +728,7 @@ const edits = process.argv.includes("--edits");
 const materials = process.argv.includes("--materials");
 const atmosphere = process.argv.includes("--atmosphere");
 const ambientOcclusion = process.argv.includes("--gtao");
+const semanticHeroes = process.argv.includes("--heroes");
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
@@ -721,6 +778,8 @@ try {
     scenarios = { atmosphere: await atmosphereProfile(page, viewport.width) };
   } else if (ambientOcclusion) {
     scenarios = { ambientOcclusion: await ambientOcclusionProfile(page, viewport.width) };
+  } else if (semanticHeroes) {
+    scenarios = { semanticHeroes: await semanticHeroProfile(page, viewport.width) };
   } else {
     const steady = phaseSummary(await sample(page, 4_000));
     await page.keyboard.down("KeyW");
