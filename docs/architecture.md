@@ -146,6 +146,14 @@ Ordinary candidates reject water before computing composition identity, so rare 
 inflate every column's hot path. The SQLite world record advances generator identity without dropping
 existing sparse edits.
 
+Authored routes are compiled once into immutable Rust segment records containing squared length,
+normalized tangent, cumulative distance, and a shoulder-expanded corridor bound. The global route
+bound rejects unrelated columns before touching the index; points inside that broad rectangle reject
+individual segments with scalar comparisons before projection or square root. Sampling preserves the
+earlier nearest-segment/tie behavior exactly, while cumulative-distance queries reuse stored lengths
+and station reconstruction retains identical rounded anchors. Segment identity is `u16`, leaving room
+for terrain-following 600 m routes without coupling route length to per-column arithmetic.
+
 An edit invalidates every surface tile whose sampling footprint depends on that X/Z column. Resident
 geometry stays active while its replacement is generated and allocated, then the renderer switches
 the mesh and releases the old allocation atomically. Dirty work that leaves the retained streaming

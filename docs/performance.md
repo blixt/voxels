@@ -526,3 +526,18 @@ class and well under the 1 ms generation budget. Codec and greedy-mesh cases rem
 The first implementation put generalized hero anchor work on every candidate; the retained version
 restores cheap established anchors for ordinary forms and computes the clamped wider anchor only for
 the rare semantic hero.
+
+## 2026-07-12: scalable authored-route queries
+
+Before extending the pilgrim road, its five-segment linear projection was replaced by an immutable
+Rust route index. Segment length, tangent, cumulative distance, and expanded corridor bounds are
+computed once. A host reference test compares indexed and legacy sampling across the complete route
+rectangle at 1.3 m spacing, verifies cumulative positions to 0.1 mm, and proves that every rounded
+landmark station remains identical.
+
+Criterion with runtime-black-boxed inputs measured 3.25 ns for global route rejection, 5.45 ns for a
+point inside the global rectangle but outside every segment corridor, 8.64 ns for a near-segment
+projection, 3.54 ns for cumulative-distance lookup, and 38.8–53.9 ns for the existing station-cell
+lookup. The release browser profile then held steady, walking, and underwater frame p95 at 9.7, 9.5,
+and 9.2 ms with zero drops, errors, stale completions, or residual jobs. This establishes a measured
+route-sampling foundation before the authored path grows from 165 m to the planned 600 m class.
