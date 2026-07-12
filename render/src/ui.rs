@@ -126,6 +126,7 @@ impl Viewport {
 pub enum RendererFeature {
     CascadedSunShadows,
     VoxelAmbientOcclusion,
+    ScreenSpaceAmbientOcclusion,
     AtmosphericFog,
     FarTerrain,
     WaterSurface,
@@ -134,9 +135,10 @@ pub enum RendererFeature {
 }
 
 impl RendererFeature {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::CascadedSunShadows,
         Self::VoxelAmbientOcclusion,
+        Self::ScreenSpaceAmbientOcclusion,
         Self::AtmosphericFog,
         Self::FarTerrain,
         Self::WaterSurface,
@@ -148,6 +150,7 @@ impl RendererFeature {
         match self {
             Self::CascadedSunShadows => "Cascaded sun shadows",
             Self::VoxelAmbientOcclusion => "Voxel ambient occlusion",
+            Self::ScreenSpaceAmbientOcclusion => "Screen-space contact AO",
             Self::AtmosphericFog => "Atmospheric fog",
             Self::FarTerrain => "Far terrain",
             Self::WaterSurface => "Animated water surface",
@@ -165,11 +168,12 @@ const fn feature_index(feature: RendererFeature) -> usize {
     match feature {
         RendererFeature::CascadedSunShadows => 0,
         RendererFeature::VoxelAmbientOcclusion => 1,
-        RendererFeature::AtmosphericFog => 2,
-        RendererFeature::FarTerrain => 3,
-        RendererFeature::WaterSurface => 4,
-        RendererFeature::TargetOutline => 5,
-        RendererFeature::MaterialSurfaceDetail => 6,
+        RendererFeature::ScreenSpaceAmbientOcclusion => 2,
+        RendererFeature::AtmosphericFog => 3,
+        RendererFeature::FarTerrain => 4,
+        RendererFeature::WaterSurface => 5,
+        RendererFeature::TargetOutline => 6,
+        RendererFeature::MaterialSurfaceDetail => 7,
     }
 }
 
@@ -245,6 +249,7 @@ pub struct LiveStats {
     pub frame_ms: f32,
     pub cpu_ms: f32,
     pub gpu_ms: Option<f32>,
+    pub gpu_ambient_occlusion_ms: Option<f32>,
     pub resident_chunks: u32,
     pub visible_chunks: u32,
     pub quads: u32,
@@ -660,7 +665,12 @@ impl MissionControlUi {
 
         let stats_rows = stat_count.div_ceil(stat_columns);
         let feature_top = stats_top + stats_rows as f32 * (stat_height + stat_gap) + 23.0;
-        let feature_row_height = if compact { 34.0 } else { 39.0 };
+        let nominal_feature_row_height: f32 = if compact { 34.0 } else { 39.0 };
+        let available_feature_height =
+            (panel.y + panel.height - CONTENT_PAD - feature_top).max(0.0);
+        let feature_row_height = nominal_feature_row_height
+            .min(available_feature_height / FEATURE_COUNT.max(1) as f32)
+            .max(1.0);
         for (index, feature) in RendererFeature::ALL.into_iter().enumerate() {
             regions.push(InteractiveRegion {
                 target: UiTarget::Feature(feature),
@@ -1122,8 +1132,13 @@ impl MissionControlUi {
             vec![
                 ("FRAME", format!("{:.1} ms", stats.frame_ms)),
                 (
-                    "CPU / GPU",
-                    format!("{:.1} / {}", stats.cpu_ms, optional_ms(stats.gpu_ms)),
+                    "CPU / GPU / AO",
+                    format!(
+                        "{:.1} / {} / {}",
+                        stats.cpu_ms,
+                        optional_ms(stats.gpu_ms),
+                        optional_ms(stats.gpu_ambient_occlusion_ms)
+                    ),
                 ),
                 ("FPS", format!("{:.0}", stats.frames_per_second)),
                 (
@@ -1493,6 +1508,7 @@ mod tests {
             frame_ms: 16.7,
             cpu_ms: 4.2,
             gpu_ms: Some(7.8),
+            gpu_ambient_occlusion_ms: Some(1.2),
             resident_chunks: 481,
             visible_chunks: 132,
             quads: 123_400,

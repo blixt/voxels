@@ -1,5 +1,6 @@
 //! Platform-neutral WGPU renderer. The shell supplies a platform surface target.
 
+mod ambient_occlusion;
 mod arena;
 pub mod environment;
 pub mod lod;

@@ -1,3 +1,4 @@
+use crate::ambient_occlusion::AmbientOcclusionGpu;
 use crate::arena::{Allocation, ArenaAllocator};
 use crate::environment::{DaylightPhase, OutdoorEnvironment, surface_region_label};
 use crate::lod::GeometricLodFocus;
@@ -34,7 +35,7 @@ const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 const FAR_MATERIAL_FLAG: u32 = 1 << 31;
 const SURFACE_LOD_SHIFT: u32 = 28;
 const FAR_UNDERLAY_OFFSET_METRES: f32 = 0.025;
-const GPU_QUERY_COUNT: u32 = 12;
+const GPU_QUERY_COUNT: u32 = 18;
 const GPU_QUERY_BUFFER_BYTES: u64 = GPU_QUERY_COUNT as u64 * size_of::<u64>() as u64;
 const GPU_RESOLVE_BUFFER_BYTES: u64 = 256;
 const GPU_READBACK_SLOTS: usize = 4;
@@ -148,9 +149,14 @@ pub struct RenderDiagnostics {
     pub gpu_sample_id: u32,
     pub gpu_total_ms: Option<f32>,
     pub gpu_shadow_ms: Option<f32>,
+    pub gpu_depth_prepass_ms: Option<f32>,
     pub gpu_world_ms: Option<f32>,
     pub gpu_water_ms: Option<f32>,
+    pub gpu_ambient_occlusion_ms: Option<f32>,
     pub gpu_ui_ms: Option<f32>,
+    pub ambient_occlusion_bytes: u64,
+    pub depth_prepass_draw_calls: u32,
+    pub screen_space_ambient_occlusion: bool,
     pub material_detail: bool,
     pub daylight_phase: u8,
     pub surface_region: u8,
@@ -162,8 +168,10 @@ struct GpuTimingSample {
     id: u32,
     total_ms: f32,
     shadow_ms: f32,
+    depth_prepass_ms: f32,
     world_ms: f32,
     water_ms: f32,
+    ambient_occlusion_ms: f32,
     ui_ms: f32,
 }
 
@@ -183,6 +191,7 @@ struct GpuTimingFrame {
     slot: usize,
     shadows: bool,
     water: bool,
+    ambient_occlusion: bool,
 }
 
 impl GpuTimingFrame {
@@ -209,6 +218,7 @@ fn parse_gpu_timestamps(
     timestamp_period: f32,
     shadows: bool,
     water: bool,
+    ambient_occlusion: bool,
 ) -> Option<GpuTimingSample> {
     if !timestamp_period.is_finite() || timestamp_period <= 0.0 {
         return None;
@@ -224,11 +234,21 @@ fn parse_gpu_timestamps(
     } else {
         0.0
     };
-    let world_ms = elapsed_ms(6, 7)?;
-    let water_ms = if water { elapsed_ms(8, 9)? } else { 0.0 };
-    let ui_ms = elapsed_ms(10, 11)?;
-    let mut first = timestamps[6].min(timestamps[10]);
-    let mut last = timestamps[7].max(timestamps[11]);
+    let depth_prepass_ms = if ambient_occlusion {
+        elapsed_ms(6, 7)?
+    } else {
+        0.0
+    };
+    let world_ms = elapsed_ms(12, 13)?;
+    let water_ms = if water { elapsed_ms(14, 15)? } else { 0.0 };
+    let ambient_occlusion_ms = if ambient_occlusion {
+        elapsed_ms(8, 9)? + elapsed_ms(10, 11)?
+    } else {
+        0.0
+    };
+    let ui_ms = elapsed_ms(16, 17)?;
+    let mut first = timestamps[12].min(timestamps[16]);
+    let mut last = timestamps[13].max(timestamps[17]);
     if shadows {
         for (start, end) in [(0, 1), (2, 3), (4, 5)] {
             first = first.min(timestamps[start]);
@@ -236,8 +256,18 @@ fn parse_gpu_timestamps(
         }
     }
     if water {
-        first = first.min(timestamps[8]);
-        last = last.max(timestamps[9]);
+        first = first.min(timestamps[14]);
+        last = last.max(timestamps[15]);
+    }
+    if ambient_occlusion {
+        first = first
+            .min(timestamps[6])
+            .min(timestamps[8])
+            .min(timestamps[10]);
+        last = last
+            .max(timestamps[7])
+            .max(timestamps[9])
+            .max(timestamps[11]);
     }
     let total_ms = last.checked_sub(first)? as f32 * timestamp_period / 1_000_000.0;
     if total_ms > 1_000.0 {
@@ -247,8 +277,10 @@ fn parse_gpu_timestamps(
         id: 0,
         total_ms,
         shadow_ms,
+        depth_prepass_ms,
         world_ms,
         water_ms,
+        ambient_occlusion_ms,
         ui_ms,
     })
 }
@@ -289,7 +321,12 @@ impl GpuTimer {
         })
     }
 
-    fn begin_frame(&mut self, shadows: bool, water: bool) -> Option<GpuTimingFrame> {
+    fn begin_frame(
+        &mut self,
+        shadows: bool,
+        water: bool,
+        ambient_occlusion: bool,
+    ) -> Option<GpuTimingFrame> {
         for offset in 0..GPU_READBACK_SLOTS {
             let slot = (self.next_slot + offset) % GPU_READBACK_SLOTS;
             if self.readback[slot]
@@ -303,6 +340,7 @@ impl GpuTimer {
                     slot,
                     shadows,
                     water,
+                    ambient_occlusion,
                 });
             }
         }
@@ -343,7 +381,13 @@ impl GpuTimer {
                         *timestamp = u64::from_le_bytes(raw);
                     }
                     drop(mapped);
-                    parsed = parse_gpu_timestamps(&timestamps, period, frame.shadows, frame.water);
+                    parsed = parse_gpu_timestamps(
+                        &timestamps,
+                        period,
+                        frame.shadows,
+                        frame.water,
+                        frame.ambient_occlusion,
+                    );
                 }
                 callback_buffer.unmap();
                 parsed
@@ -372,8 +416,12 @@ pub struct Renderer {
     queue: Queue,
     config: SurfaceConfiguration,
     sky_pipeline: RenderPipeline,
+    depth_prepass_pipeline: RenderPipeline,
+    depth_prepass_fast_pipeline: RenderPipeline,
     voxel_pipeline: RenderPipeline,
     voxel_flat_pipeline: RenderPipeline,
+    voxel_ambient_occlusion_pipeline: RenderPipeline,
+    voxel_ambient_occlusion_flat_pipeline: RenderPipeline,
     water_pipeline: RenderPipeline,
     water_scene_layout: wgpu::BindGroupLayout,
     water_scene_bind_group: BindGroup,
@@ -388,6 +436,7 @@ pub struct Renderer {
     water_arena: ArenaAllocator,
     water_arena_buffers: Vec<Buffer>,
     depth_view: TextureView,
+    ambient_occlusion_gpu: AmbientOcclusionGpu,
     time: f32,
     diagnostics: RenderDiagnostics,
     gpu_timer: Option<GpuTimer>,
@@ -427,6 +476,7 @@ struct ShadowGpu {
 struct RenderOptions {
     shadows: bool,
     ambient_occlusion: bool,
+    screen_space_ambient_occlusion: bool,
     fog: bool,
     far_terrain: bool,
     water: bool,
@@ -453,6 +503,7 @@ impl Default for RenderOptions {
         Self {
             shadows: true,
             ambient_occlusion: true,
+            screen_space_ambient_occlusion: true,
             fog: true,
             far_terrain: true,
             water: true,
@@ -804,11 +855,29 @@ impl Renderer {
                 },
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("world pipeline layout"),
+        let depth_view = depth_view(&device, config.width, config.height);
+        let ambient_occlusion_gpu = AmbientOcclusionGpu::new(
+            &device,
+            &frame_layout,
+            &depth_view,
+            config.width,
+            config.height,
+        );
+        let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky pipeline layout"),
             bind_group_layouts: &[Some(&frame_layout)],
             immediate_size: 0,
         });
+        let world_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("world pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&frame_layout),
+                    None,
+                    Some(ambient_occlusion_gpu.sample_layout()),
+                ],
+                immediate_size: 0,
+            });
         let water_scene_layout = texture_sampler_layout(&device, "water refraction scene layout");
         let water_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -820,7 +889,7 @@ impl Renderer {
         let sky_pipeline = pipeline(
             &device,
             "sky pipeline",
-            &pipeline_layout,
+            &sky_pipeline_layout,
             &sky_shader,
             SCENE_FORMAT,
             &[],
@@ -839,10 +908,22 @@ impl Renderer {
             },
         );
         let voxel_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/voxels.wgsl"));
+        let depth_prepass_pipeline = depth_only_pipeline(
+            &device,
+            "spatial AO depth ownership pipeline",
+            &sky_pipeline_layout,
+            &voxel_shader,
+        );
+        let depth_prepass_fast_pipeline = fragmentless_depth_pipeline(
+            &device,
+            "settled spatial AO depth pipeline",
+            &sky_pipeline_layout,
+            &voxel_shader,
+        );
         let voxel_pipeline = pipeline(
             &device,
             "voxel pipeline",
-            &pipeline_layout,
+            &world_pipeline_layout,
             &voxel_shader,
             SCENE_FORMAT,
             &[Some(quad_layout())],
@@ -863,7 +944,7 @@ impl Renderer {
         let voxel_flat_pipeline = pipeline(
             &device,
             "flat voxel pipeline",
-            &pipeline_layout,
+            &world_pipeline_layout,
             &voxel_shader,
             SCENE_FORMAT,
             &[Some(quad_layout())],
@@ -875,6 +956,48 @@ impl Renderer {
                     format: DEPTH_FORMAT,
                     depth_write_enabled: Some(true),
                     depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                fragment_constants: &[("MATERIAL_DETAIL", 0.0)],
+            },
+        );
+        let voxel_ambient_occlusion_pipeline = pipeline(
+            &device,
+            "spatial AO voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            SCENE_FORMAT,
+            &[Some(quad_layout())],
+            PipelineOptions {
+                fragment_entry: "fs_main",
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                fragment_constants: &[("MATERIAL_DETAIL", 1.0)],
+            },
+        );
+        let voxel_ambient_occlusion_flat_pipeline = pipeline(
+            &device,
+            "flat spatial AO voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            SCENE_FORMAT,
+            &[Some(quad_layout())],
+            PipelineOptions {
+                fragment_entry: "fs_main",
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
@@ -903,7 +1026,6 @@ impl Renderer {
             },
         );
 
-        let depth_view = depth_view(&device, config.width, config.height);
         let ui_gpu = UiGpu::new(&device, format, config.width, config.height, dpr)?;
         let water_scene_bind_group = ui_gpu.refraction_bind_group(&device, &water_scene_layout);
 
@@ -915,8 +1037,12 @@ impl Renderer {
             queue,
             config,
             sky_pipeline,
+            depth_prepass_pipeline,
+            depth_prepass_fast_pipeline,
             voxel_pipeline,
             voxel_flat_pipeline,
+            voxel_ambient_occlusion_pipeline,
+            voxel_ambient_occlusion_flat_pipeline,
             water_pipeline,
             water_scene_layout,
             water_scene_bind_group,
@@ -931,6 +1057,7 @@ impl Renderer {
             water_arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
             water_arena_buffers: Vec::new(),
             depth_view,
+            ambient_occlusion_gpu,
             time: 0.0,
             diagnostics: RenderDiagnostics::default(),
             gpu_timer,
@@ -965,6 +1092,8 @@ impl Renderer {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.depth_view = depth_view(&self.device, width, height);
+        self.ambient_occlusion_gpu
+            .resize(&self.device, &self.depth_view, width, height);
         self.dpr = valid_dpr(dpr);
         if self.ui_gpu.resize(
             &self.device,
@@ -1114,6 +1243,9 @@ impl Renderer {
                 RendererFeature::CascadedSunShadows => self.options.shadows = enabled,
                 RendererFeature::VoxelAmbientOcclusion => {
                     self.options.ambient_occlusion = enabled;
+                }
+                RendererFeature::ScreenSpaceAmbientOcclusion => {
+                    self.options.screen_space_ambient_occlusion = enabled;
                 }
                 RendererFeature::AtmosphericFog => self.options.fog = enabled,
                 RendererFeature::FarTerrain => self.options.far_terrain = enabled,
@@ -1626,10 +1758,13 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
-        let gpu_frame = self
-            .gpu_timer
-            .as_mut()
-            .and_then(|timer| timer.begin_frame(self.options.shadows, refract_water));
+        let gpu_frame = self.gpu_timer.as_mut().and_then(|timer| {
+            timer.begin_frame(
+                self.options.shadows,
+                refract_water,
+                self.options.screen_space_ambient_occlusion,
+            )
+        });
         let mut shadow_draw_calls = 0;
         if self.options.shadows {
             for (cascade_index, draw_list) in shadow_draw_lists.iter().enumerate() {
@@ -1664,6 +1799,52 @@ impl Renderer {
                 }
             }
         }
+        let mut depth_prepass_draw_calls = 0u32;
+        if self.options.screen_space_ambient_occlusion {
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("spatial AO depth ownership pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(6)),
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(if self.lod_readiness().geometric {
+                    &self.depth_prepass_fast_pipeline
+                } else {
+                    &self.depth_prepass_pipeline
+                });
+                pass.set_bind_group(0, &self.frame_bind_group, &[]);
+                for span in &world_draw_list.spans {
+                    let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
+                        continue;
+                    };
+                    let start = u64::from(span.offset);
+                    let end = start + u64::from(span.size);
+                    pass.set_vertex_buffer(0, buffer.slice(start..end));
+                    pass.draw(0..6, 0..span.quad_count);
+                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(1);
+                }
+            }
+            self.ambient_occlusion_gpu.evaluate(
+                &mut encoder,
+                &self.frame_bind_group,
+                gpu_frame.as_ref().map(|frame| frame.pass(8)),
+            );
+            self.ambient_occlusion_gpu.denoise(
+                &mut encoder,
+                &self.frame_bind_group,
+                gpu_frame.as_ref().map(|frame| frame.pass(10)),
+            );
+        }
         {
             let scene_view = if refract_water {
                 self.ui_gpu.opaque_scene_view()
@@ -1684,7 +1865,11 @@ impl Renderer {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        load: if self.options.screen_space_ambient_occlusion {
+                            wgpu::LoadOp::Load
+                        } else {
+                            wgpu::LoadOp::Clear(1.0)
+                        },
                         store: if refract_water {
                             wgpu::StoreOp::Store
                         } else {
@@ -1693,12 +1878,19 @@ impl Renderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(6)),
+                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(12)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
-            pass.set_pipeline(if self.options.material_detail {
+            pass.set_bind_group(2, self.ambient_occlusion_gpu.sample_bind_group(), &[]);
+            pass.set_pipeline(if self.options.screen_space_ambient_occlusion {
+                if self.options.material_detail {
+                    &self.voxel_ambient_occlusion_pipeline
+                } else {
+                    &self.voxel_ambient_occlusion_flat_pipeline
+                }
+            } else if self.options.material_detail {
                 &self.voxel_pipeline
             } else {
                 &self.voxel_flat_pipeline
@@ -1734,11 +1926,11 @@ impl Renderer {
                     view: &self.depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Discard,
+                        store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(8)),
+                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(14)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1798,6 +1990,7 @@ impl Renderer {
                 .saturating_add(water_arena.capacity_bytes)
                 .saturating_add(scene_pixels.saturating_mul(20))
                 .saturating_add(shadow_bytes)
+                .saturating_add(self.ambient_occlusion_gpu.bytes())
                 .saturating_add(self.material_detail.bytes)
                 .saturating_add(if self.gpu_timer.is_some() {
                     GPU_TIMER_BUFFER_BYTES
@@ -1807,9 +2000,14 @@ impl Renderer {
             gpu_sample_id: gpu_timing.map_or(0, |timing| timing.id),
             gpu_total_ms: gpu_timing.map(|timing| timing.total_ms),
             gpu_shadow_ms: gpu_timing.map(|timing| timing.shadow_ms),
+            gpu_depth_prepass_ms: gpu_timing.map(|timing| timing.depth_prepass_ms),
             gpu_world_ms: gpu_timing.map(|timing| timing.world_ms),
             gpu_water_ms: gpu_timing.map(|timing| timing.water_ms),
+            gpu_ambient_occlusion_ms: gpu_timing.map(|timing| timing.ambient_occlusion_ms),
             gpu_ui_ms: gpu_timing.map(|timing| timing.ui_ms),
+            ambient_occlusion_bytes: self.ambient_occlusion_gpu.bytes(),
+            depth_prepass_draw_calls,
+            screen_space_ambient_occlusion: self.options.screen_space_ambient_occlusion,
             material_detail: self.options.material_detail,
             daylight_phase: self.daylight_phase as u8,
             surface_region: self.surface_region as u8,
@@ -1828,7 +2026,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(10)),
+                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(16)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -2034,7 +2232,16 @@ fn frame_uniform(
             if readiness.all { 1.0 } else { 0.0 },
             if readiness.geometric { 1.0 } else { 0.0 },
         ],
-        camera_forward: [camera_forward.x, camera_forward.y, camera_forward.z, 0.0],
+        camera_forward: [
+            camera_forward.x,
+            camera_forward.y,
+            camera_forward.z,
+            if options.screen_space_ambient_occlusion {
+                1.0
+            } else {
+                0.0
+            },
+        ],
         shadow_splits: [
             shadows.split_depths[0],
             shadows.split_depths[1],
@@ -2206,6 +2413,71 @@ fn pipeline(
     })
 }
 
+fn depth_only_pipeline(
+    device: &Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+) -> RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[Some(quad_layout())],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_depth"),
+            targets: &[],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn fragmentless_depth_pipeline(
+    device: &Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+) -> RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[Some(quad_layout())],
+            compilation_options: Default::default(),
+        },
+        fragment: None,
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 fn quad_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32, 2 => Float32x2, 3 => Uint32, 4 => Uint32];
     wgpu::VertexBufferLayout {
@@ -2228,7 +2500,7 @@ fn depth_view(device: &Device, width: u32, height: u32) -> TextureView {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         })
         .create_view(&wgpu::TextureViewDescriptor::default())
@@ -2280,22 +2552,28 @@ mod tests {
     fn gpu_timestamp_breakdown_uses_only_active_passes() {
         let timestamps = [
             1_000_000, 2_000_000, 2_100_000, 3_100_000, 3_200_000, 4_200_000, 4_500_000, 6_500_000,
-            7_000_000, 10_000_000, 10_500_000, 11_500_000,
+            6_700_000, 7_700_000, 7_900_000, 8_400_000, 8_600_000, 10_600_000, 10_800_000,
+            13_800_000, 14_000_000, 15_000_000,
         ];
-        let timing = parse_gpu_timestamps(&timestamps, 1.0, true, true)
+        let timing = parse_gpu_timestamps(&timestamps, 1.0, true, true, true)
             .unwrap_or_else(|| panic!("valid timestamps should parse"));
-        assert!((timing.total_ms - 10.5).abs() < f32::EPSILON);
+        assert!((timing.total_ms - 14.0).abs() < f32::EPSILON);
         assert!((timing.shadow_ms - 3.0).abs() < f32::EPSILON);
+        assert!((timing.depth_prepass_ms - 2.0).abs() < f32::EPSILON);
+        assert!((timing.ambient_occlusion_ms - 1.5).abs() < f32::EPSILON);
         assert!((timing.world_ms - 2.0).abs() < f32::EPSILON);
         assert!((timing.water_ms - 3.0).abs() < f32::EPSILON);
         assert!((timing.ui_ms - 1.0).abs() < f32::EPSILON);
 
         let mut skipped = timestamps;
         skipped[0..6].copy_from_slice(&[90, 80, 70, 60, 50, 40]);
-        skipped[8..10].copy_from_slice(&[30, 20]);
-        let timing = parse_gpu_timestamps(&skipped, 1.0, false, false)
+        skipped[6..12].copy_from_slice(&[39, 38, 37, 36, 35, 34]);
+        skipped[14..16].copy_from_slice(&[30, 20]);
+        let timing = parse_gpu_timestamps(&skipped, 1.0, false, false, false)
             .unwrap_or_else(|| panic!("inactive timestamp pairs should be ignored"));
         assert_eq!(timing.shadow_ms, 0.0);
+        assert_eq!(timing.depth_prepass_ms, 0.0);
+        assert_eq!(timing.ambient_occlusion_ms, 0.0);
         assert_eq!(timing.water_ms, 0.0);
     }
 
@@ -2305,13 +2583,13 @@ mod tests {
         for (index, timestamp) in timestamps.iter_mut().enumerate() {
             *timestamp = index as u64 * 1_000_000;
         }
-        assert!(parse_gpu_timestamps(&timestamps, 0.0, false, false).is_none());
-        timestamps[7] = timestamps[6] - 1;
-        assert!(parse_gpu_timestamps(&timestamps, 1.0, false, false).is_none());
-        timestamps[7] = timestamps[6] + 1;
-        timestamps[11] = timestamps[6] + 1_100_000_000;
-        assert!(parse_gpu_timestamps(&timestamps, 1.0, false, false).is_none());
-        assert_eq!(GPU_QUERY_BUFFER_BYTES, 96);
+        assert!(parse_gpu_timestamps(&timestamps, 0.0, false, false, false).is_none());
+        timestamps[13] = timestamps[12] - 1;
+        assert!(parse_gpu_timestamps(&timestamps, 1.0, false, false, false).is_none());
+        timestamps[13] = timestamps[12] + 1;
+        timestamps[17] = timestamps[12] + 1_100_000_000;
+        assert!(parse_gpu_timestamps(&timestamps, 1.0, false, false, false).is_none());
+        assert_eq!(GPU_QUERY_BUFFER_BYTES, 144);
         assert_eq!(GPU_RESOLVE_BUFFER_BYTES % 256, 0);
     }
 

@@ -39,7 +39,7 @@ mod web {
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const EDIT_HISTORY_CAPACITY: usize = 64;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 8.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 9.0;
     const MAX_EDIT_TRACKERS: usize = 128;
     const COAST_WATER_REFERENCE: [i32; 2] = [18_016, 12_896];
     const EDIT_PROFILE_TERRAIN: [i32; 3] = [18_016, -12, 12_896];
@@ -531,6 +531,7 @@ mod web {
                     frame_ms: self.frame_milliseconds.get(),
                     cpu_ms: self.cpu_milliseconds.get(),
                     gpu_ms: render.gpu_total_ms,
+                    gpu_ambient_occlusion_ms: render.gpu_ambient_occlusion_ms,
                     resident_chunks: usize_to_u32(
                         stream.resident + self.surface_resident.borrow().len(),
                     ),
@@ -1590,6 +1591,15 @@ mod web {
                     render.daylight_phase as f32,
                     render.surface_region as f32,
                     render.cloud_coverage,
+                    if render.screen_space_ambient_occlusion {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    render.gpu_depth_prepass_ms.unwrap_or(-1.0),
+                    render.gpu_ambient_occlusion_ms.unwrap_or(-1.0),
+                    render.ambient_occlusion_bytes as f32 / (1024.0 * 1024.0),
+                    render.depth_prepass_draw_calls as f32,
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);

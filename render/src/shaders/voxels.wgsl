@@ -27,6 +27,7 @@ struct Frame {
 @group(0) @binding(5) var material_sampler: sampler;
 @group(1) @binding(0) var opaque_scene: texture_2d<f32>;
 @group(1) @binding(1) var opaque_scene_sampler: sampler;
+@group(2) @binding(0) var filtered_spatial_ao: texture_2d<f32>;
 
 override MATERIAL_DETAIL: u32 = 1u;
 
@@ -297,6 +298,13 @@ fn owns_lod_surface(world: vec3<f32>, packed_material: u32) -> bool {
   return owns;
 }
 
+@fragment
+fn fs_depth(input: VertexOut) {
+  if !owns_lod_surface(input.world, input.material) {
+    discard;
+  }
+}
+
 fn cascade_shadow(world: vec3<f32>, normal: vec3<f32>, cascade: u32) -> f32 {
   let texel_world_size = frame.shadow_texel_sizes[cascade];
   let normal_offset = normal * (frame.viewport_voxel.z * 0.24 + texel_world_size * 0.65);
@@ -450,6 +458,38 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   return vec4<f32>(color, 1.0);
 }
 
+fn screen_space_ambient_visibility(pixel_position: vec2<f32>, world: vec3<f32>) -> f32 {
+  if frame.camera_forward.w < 0.5 {
+    return 1.0;
+  }
+  let dimensions = textureDimensions(filtered_spatial_ao);
+  let half_position = (pixel_position - vec2<f32>(1.5)) * 0.5;
+  let base = vec2<i32>(floor(half_position));
+  let fraction = fract(half_position);
+  let center_view_depth = dot(world - frame.camera_time.xyz, frame.camera_forward.xyz);
+  var weighted_visibility = 0.0;
+  var total_weight = 0.0;
+  for (var y = 0; y <= 1; y += 1) {
+    for (var x = 0; x <= 1; x += 1) {
+      let coordinate = clamp(
+        base + vec2<i32>(x, y),
+        vec2<i32>(0),
+        vec2<i32>(dimensions) - vec2<i32>(1),
+      );
+      let sample_value = textureLoad(filtered_spatial_ao, coordinate, 0).rg;
+      let bilinear = (1.0 - abs(f32(x) - fraction.x))
+        * (1.0 - abs(f32(y) - fraction.y));
+      let relative_depth_delta = abs(sample_value.y - center_view_depth)
+        / max(center_view_depth, 0.01);
+      let depth_weight = select(exp(-relative_depth_delta * 220.0), 0.0, sample_value.y <= 0.0);
+      let weight = bilinear * depth_weight;
+      weighted_visibility += sample_value.x * weight;
+      total_weight += weight;
+    }
+  }
+  return clamp(select(1.0, weighted_visibility / total_weight, total_weight > 0.0001), 0.30, 1.0);
+}
+
 @fragment
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let material = input.material & 0xffffu;
@@ -472,7 +512,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     1.0,
     MATERIAL_DETAIL != 0u,
   );
-  let ambient_occlusion = select(1.0, mix(0.52, 1.0, input.ao), frame.render_options.x > 0.5);
+  let voxel_ambient_occlusion = select(1.0, mix(0.52, 1.0, input.ao), frame.render_options.x > 0.5);
+  let spatial_ambient_occlusion = screen_space_ambient_visibility(input.position.xy, input.world);
+  let ambient_occlusion = min(voxel_ambient_occlusion, spatial_ambient_occlusion);
   let sky_irradiance = mix(frame.ground_atmosphere.rgb, frame.sky_horizon.rgb * 0.48, sky_visibility);
   let bounce = frame.ground_atmosphere.rgb * max(-surface_detail.normal.y, 0.0) * 0.35;
   let direct = frame.sun_radiance.rgb * diffuse * mix(0.16, 1.0, shadow) * 0.19;
