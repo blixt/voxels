@@ -597,10 +597,11 @@ impl Generator {
         if min_x >= max_x || min_z >= max_z {
             return Vec::new();
         }
-        let min_cell_x = (min_x - 75).div_euclid(FEATURE_CELL_VOXELS);
-        let max_cell_x = (max_x - 1 - 12).div_euclid(FEATURE_CELL_VOXELS);
-        let min_cell_z = (min_z - 75).div_euclid(FEATURE_CELL_VOXELS);
-        let max_cell_z = (max_z - 1 - 12).div_euclid(FEATURE_CELL_VOXELS);
+        let cell_edge = i64::from(FEATURE_CELL_VOXELS);
+        let min_cell_x = ((i64::from(min_x) - 75).div_euclid(cell_edge)) as i32;
+        let max_cell_x = ((i64::from(max_x) - 1 - 12).div_euclid(cell_edge)) as i32;
+        let min_cell_z = ((i64::from(min_z) - 75).div_euclid(cell_edge)) as i32;
+        let max_cell_z = ((i64::from(max_z) - 1 - 12).div_euclid(cell_edge)) as i32;
         let mut features = Vec::new();
         for cell_z in min_cell_z..=max_cell_z {
             for cell_x in min_cell_x..=max_cell_x {
@@ -746,7 +747,7 @@ impl Generator {
         }
     }
 
-    fn feature_anchor(self, cell_x: i32, cell_z: i32, hero: bool) -> (i32, i32, u64) {
+    fn feature_anchor(self, cell_x: i32, cell_z: i32, hero: bool) -> Option<(i32, i32, u64)> {
         let hash = self.hash(cell_x, 0, cell_z, 0x7a11_5eed);
         let (x_offset, z_offset) = if hero {
             // The largest semantic hero still remains inside its one authoritative placement cell.
@@ -762,11 +763,11 @@ impl Generator {
             // Preserve the established cheap placement and world identity for ordinary forms.
             (12 + (hash & 63) as i32, 12 + ((hash >> 8) & 63) as i32)
         };
-        (
-            cell_x * FEATURE_CELL_VOXELS + x_offset,
-            cell_z * FEATURE_CELL_VOXELS + z_offset,
+        Some((
+            checked_feature_anchor_axis(cell_x, x_offset)?,
+            checked_feature_anchor_axis(cell_z, z_offset)?,
             hash,
-        )
+        ))
     }
 
     fn feature_composition(self, cell_x: i32, cell_z: i32) -> FeatureComposition {
@@ -796,7 +797,7 @@ impl Generator {
         }
         // Ordinary candidates retain the established cheap anchor and can reject water before
         // paying for composition identity. Only the one hero cell in 64 recomputes a wider anchor.
-        let (mut anchor_x, mut anchor_z, hash) = self.feature_anchor(cell_x, cell_z, false);
+        let (mut anchor_x, mut anchor_z, hash) = self.feature_anchor(cell_x, cell_z, false)?;
         let mut surface = self.surface_sample(anchor_x, anchor_z);
         if surface.height < SEA_LEVEL_VOXELS || surface.water_level.is_some() {
             return None;
@@ -819,7 +820,7 @@ impl Generator {
         let role = influence.role();
         let hero = role == FeatureCompositionRole::Hero;
         if hero {
-            (anchor_x, anchor_z, _) = self.feature_anchor(cell_x, cell_z, true);
+            (anchor_x, anchor_z, _) = self.feature_anchor(cell_x, cell_z, true)?;
             surface = self.surface_sample(anchor_x, anchor_z);
             if surface.height < SEA_LEVEL_VOXELS
                 || surface.water_level.is_some()
@@ -1035,6 +1036,15 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
+fn checked_feature_anchor_axis(cell: i32, offset: i32) -> Option<i32> {
+    let anchor = i64::from(cell) * i64::from(FEATURE_CELL_VOXELS) + i64::from(offset);
+    let minimum = i64::from(i32::MIN) + i64::from(FEATURE_MAX_RADIUS_VOXELS);
+    let maximum = i64::from(i32::MAX) - i64::from(FEATURE_MAX_RADIUS_VOXELS) - 1;
+    (minimum..=maximum)
+        .contains(&anchor)
+        .then_some(anchor as i32)
+}
+
 fn cinder_vault_column_candidate(x: i32, z: i32) -> bool {
     let [[min_x, _, min_z], [max_x, _, max_z]] = CINDER_VAULT_BOUNDS;
     (min_x..max_x).contains(&x) && (min_z..max_z).contains(&z)
@@ -1114,6 +1124,29 @@ mod tests {
             Generator::new(1).generate_chunk(coord),
             Generator::new(2).generate_chunk(coord)
         );
+    }
+
+    #[test]
+    fn canonical_coordinate_limits_skip_unrepresentable_features_without_panicking() {
+        let generator = Generator::new(1);
+        for [x, z] in [
+            [i32::MIN, i32::MIN],
+            [i32::MIN, i32::MAX],
+            [i32::MAX, i32::MIN],
+            [i32::MAX, i32::MAX],
+        ] {
+            let material = generator.sample(x, 0, z);
+            assert!(Material::ALL.contains(&material));
+        }
+
+        for bounds in [
+            [[i32::MIN, 0], [i32::MIN + 1, 1]],
+            [[i32::MAX - 1, 0], [i32::MAX, 1]],
+            [[0, i32::MIN], [1, i32::MIN + 1]],
+            [[0, i32::MAX - 1], [1, i32::MAX]],
+        ] {
+            assert!(generator.skyline_features_anchored_in(bounds).is_empty());
+        }
     }
 
     #[test]
