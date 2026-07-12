@@ -262,6 +262,20 @@ mod tests {
     }
 
     #[test]
+    fn glow_crystal_round_trips_as_an_ordinary_opaque_voxel() {
+        let mut chunk = Chunk::empty(ChunkCoord::new(-162, 0, 103));
+        chunk.set(4, 10, 7, Material::GlowCrystal);
+        let encoded = encode_chunk(&chunk);
+        let decoded = decode_chunk(&encoded).expect("valid current-version crystal payload");
+        assert_eq!(decoded, chunk);
+        assert_eq!(decoded.get(4, 10, 7), Material::GlowCrystal);
+        assert_eq!(
+            Material::GlowCrystal.render_layer(),
+            crate::RenderLayer::Opaque
+        );
+    }
+
+    #[test]
     fn generated_chunk_round_trips_through_palette_bits() {
         let chunk = Generator::new(42).generate_chunk(ChunkCoord::new(0, 0, 0));
         let encoded = encode_chunk(&chunk);

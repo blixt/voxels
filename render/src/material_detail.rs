@@ -298,6 +298,7 @@ fn material_profile(material: Material) -> MaterialProfile {
         Material::Limestone => profile([0.58, 0.55, 0.44], [0.73, 0.68, 0.53], 0.62, 0.15, 4.6),
         Material::RedSand => profile([0.62, 0.20, 0.075], [0.78, 0.30, 0.10], 0.88, 0.08, 3.4),
         Material::Water => profile([0.02, 0.22, 0.30], [0.04, 0.34, 0.40], 0.12, 0.04, 1.0),
+        Material::GlowCrystal => profile([0.12, 0.58, 0.78], [0.48, 0.94, 1.0], 0.24, 0.10, 7.0),
     }
 }
 
@@ -328,7 +329,7 @@ fn material_pattern(material: Material, u: f32, v: f32) -> f32 {
     let wave = |frequency: f32, phase: f32| (frequency * tau + phase).sin() * 0.5 + 0.5;
     match material {
         Material::Grass | Material::Moss => periodic_noise(material, u, v, 24, 0x101),
-        Material::Stone | Material::Limestone => {
+        Material::Stone | Material::Limestone | Material::GlowCrystal => {
             let seam = (periodic_noise(material, u, v, 8, 0x202) - 0.5).abs() * 2.0;
             (1.0 - seam).powi(5)
         }
@@ -422,13 +423,13 @@ mod tests {
         let second = MaterialDetailAtlas::generate();
         assert_eq!(first.mips, second.mips);
         assert_eq!(first.mips.len(), MATERIAL_DETAIL_MIP_COUNT as usize);
-        assert_eq!(first.byte_len(), 2_446_640);
-        assert_eq!(atlas_checksum(&first), 0x0a19_f36f_331d_2d84);
+        assert_eq!(first.byte_len(), 2_621_400);
+        assert_eq!(atlas_checksum(&first), 0x625f_9fc3_9061_46ef);
     }
 
     #[test]
     fn every_stable_material_id_maps_to_one_array_layer() {
-        assert_eq!(MATERIAL_DETAIL_LAYER_COUNT, 14);
+        assert_eq!(MATERIAL_DETAIL_LAYER_COUNT, 15);
         for (layer, material) in Material::ALL.into_iter().enumerate() {
             assert_eq!(usize::from(material.id()), layer);
         }

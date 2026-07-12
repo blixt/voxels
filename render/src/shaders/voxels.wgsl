@@ -99,6 +99,7 @@ fn material_color(material: u32) -> vec3<f32> {
     case 10u: { return vec3<f32>(0.12, 0.32, 0.14); }
     case 11u: { return vec3<f32>(0.58, 0.55, 0.44); }
     case 12u: { return vec3<f32>(0.62, 0.20, 0.075); }
+    case 14u: { return vec3<f32>(0.12, 0.58, 0.78); }
     default: { return vec3<f32>(1.0, 0.0, 1.0); }
   }
 }
@@ -116,6 +117,7 @@ fn material_roughness(material: u32) -> f32 {
     case 7u: { return 0.74; }
     case 9u: { return 0.64; }
     case 11u: { return 0.58; }
+    case 14u: { return 0.22; }
     default: { return 0.86; }
   }
 }
@@ -548,6 +550,10 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   if material == 9u {
     let leaf_scatter = pow(max(dot(-sun, view_direction), 0.0), 3.0) * (1.0 - shadow * 0.55);
     color += albedo * frame.sun_radiance.rgb * leaf_scatter * 0.035;
+  }
+  if material == 14u {
+    let crystal_pulse = 0.86 + sin(input.world.y * 9.0 + input.world.x * 3.0) * 0.08;
+    color += srgb_to_linear(vec3<f32>(0.10, 0.72, 0.96)) * crystal_pulse * 1.45;
   }
   if frame.interior.w > 0.0001 {
     let camera_to_surface = input.world - frame.camera_time.xyz;

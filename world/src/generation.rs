@@ -7,7 +7,7 @@ use crate::{
 };
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 13;
+pub const GENERATOR_VERSION: u32 = 14;
 pub const SEA_LEVEL_VOXELS: i32 = 10;
 const FEATURE_MIN_XZ_OFFSET: i32 = 2;
 const FEATURE_MAX_XZ_OFFSET: i32 = FEATURE_CELL_VOXELS - 3;
@@ -1204,7 +1204,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checksum, 0x7bd4_5bdd_e002_da41);
+        assert_eq!(checksum, 0x2e15_8a72_e499_02aa);
     }
 
     #[test]
@@ -1478,7 +1478,7 @@ mod tests {
             crate::FeatureCompositionMode::ALL.into_iter().collect()
         );
         assert!(prominence_counts.into_iter().all(|count| count > 0));
-        assert_eq!(checksum, 0xa171_eec3_7e5b_8a5a);
+        assert_eq!(checksum, 0x310e_2ad9_47aa_bf2d);
     }
 
     #[test]
@@ -1728,6 +1728,32 @@ mod tests {
             edits.set(generator, voxel, Material::Basalt);
             assert_eq!(edits.sample(generator, voxel), Material::Basalt);
             edits.set(generator, voxel, Material::Air);
+            assert!(edits.is_empty());
+        }
+
+        for formation in crate::CINDER_VAULT_CRYSTALS {
+            let point = formation.base;
+            let voxel = VoxelCoord::new(point[0], point[1], point[2]);
+            assert_eq!(
+                generator.sample(point[0], point[1], point[2]),
+                Material::GlowCrystal
+            );
+            let chunk = generator.generate_chunk(voxel.chunk());
+            let local = voxel.local();
+            assert_eq!(
+                chunk.get(local[0], local[1], local[2]),
+                Material::GlowCrystal
+            );
+            let region = generator.region(point[0] - 1, point[2] - 1, 3, 3);
+            assert_eq!(
+                region.sample(point[0], point[1], point[2]),
+                Material::GlowCrystal
+            );
+
+            let mut edits = crate::EditMap::default();
+            edits.set(generator, voxel, Material::Air);
+            assert_eq!(edits.sample(generator, voxel), Material::Air);
+            edits.set(generator, voxel, Material::GlowCrystal);
             assert!(edits.is_empty());
         }
 

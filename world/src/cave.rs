@@ -27,6 +27,39 @@ pub struct CaveSample {
     pub normalized_distance: f32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CaveCrystalFormation {
+    /// Inclusive base voxel in canonical 10 cm world coordinates.
+    pub base: [i32; 3],
+    pub height: u8,
+    pub base_radius: u8,
+}
+
+/// Sparse authored mineral cues remain ordinary voxels: they mesh, collide, edit, persist, and
+/// round-trip through the same versioned palette codec as terrain.
+pub const CINDER_VAULT_CRYSTALS: [CaveCrystalFormation; 4] = [
+    CaveCrystalFormation {
+        base: [-5_192, 10, 3_293],
+        height: 11,
+        base_radius: 2,
+    },
+    CaveCrystalFormation {
+        base: [-5_162, 13, 3_308],
+        height: 9,
+        base_radius: 2,
+    },
+    CaveCrystalFormation {
+        base: [-5_208, 19, 3_332],
+        height: 8,
+        base_radius: 2,
+    },
+    CaveCrystalFormation {
+        base: [-5_180, 18, 3_276],
+        height: 8,
+        base_radius: 2,
+    },
+];
+
 pub const CINDER_VAULT_NODES: [CaveNode; 7] = [
     CaveNode {
         center: [-5_020, 60, 3_178],
@@ -162,12 +195,28 @@ pub fn sample_cinder_vault(x: i32, y: i32, z: i32) -> Option<CaveSample> {
 pub fn cinder_vault_override(x: i32, y: i32, z: i32) -> Option<Material> {
     let distance_squared = cinder_vault_distance_squared(x, y, z)?;
     if distance_squared <= 1.0 {
-        Some(Material::Air)
+        if cinder_vault_crystal_at(x, y, z) {
+            Some(Material::GlowCrystal)
+        } else {
+            Some(Material::Air)
+        }
     } else if distance_squared <= 1.30 * 1.30 {
         Some(Material::Basalt)
     } else {
         None
     }
+}
+
+pub fn cinder_vault_crystal_at(x: i32, y: i32, z: i32) -> bool {
+    CINDER_VAULT_CRYSTALS.iter().any(|formation| {
+        let dy = y - formation.base[1];
+        if !(0..i32::from(formation.height)).contains(&dy) {
+            return false;
+        }
+        let last = (i32::from(formation.height) - 1).max(1);
+        let radius = (last - dy) * i32::from(formation.base_radius) / last;
+        (x - formation.base[0]).abs() + (z - formation.base[2]).abs() <= radius
+    })
 }
 
 fn cinder_vault_distance_squared(x: i32, y: i32, z: i32) -> Option<f32> {
@@ -326,5 +375,34 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn authored_crystals_are_sparse_ordinary_voxels_inside_the_void() {
+        for formation in CINDER_VAULT_CRYSTALS {
+            let [x, y, z] = formation.base;
+            assert!(sample_cinder_vault(x, y, z).is_some());
+            assert_eq!(cinder_vault_override(x, y, z), Some(Material::GlowCrystal));
+            assert_eq!(
+                cinder_vault_override(x, y - 1, z),
+                Some(Material::Basalt),
+                "formation at {:?} must grow from the sealed shell",
+                formation.base
+            );
+            assert!(Material::GlowCrystal.is_collidable());
+            assert!(Material::GlowCrystal.occludes_ambient());
+            let tip_y = y + i32::from(formation.height) - 1;
+            let tip_voxels = (-2..=2)
+                .flat_map(|dz| (-2..=2).map(move |dx| (x + dx, z + dz)))
+                .filter(|(tip_x, tip_z)| {
+                    cinder_vault_override(*tip_x, tip_y, *tip_z) == Some(Material::GlowCrystal)
+                })
+                .count();
+            assert_eq!(tip_voxels, 1, "formation must taper to one 10 cm voxel");
+            assert_eq!(
+                cinder_vault_override(x, y + i32::from(formation.height), z),
+                Some(Material::Air)
+            );
+        }
     }
 }

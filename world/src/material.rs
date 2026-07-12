@@ -26,11 +26,13 @@ pub enum Material {
     Limestone = 11,
     RedSand = 12,
     Water = 13,
+    /// Stable emissive cave mineral. This remains an ordinary opaque, editable voxel.
+    GlowCrystal = 14,
 }
 
 impl Material {
-    pub const SCHEMA_VERSION: u16 = 2;
-    pub const ALL: [Self; 14] = [
+    pub const SCHEMA_VERSION: u16 = 3;
+    pub const ALL: [Self; 15] = [
         Self::Air,
         Self::Grass,
         Self::Dirt,
@@ -45,6 +47,7 @@ impl Material {
         Self::Limestone,
         Self::RedSand,
         Self::Water,
+        Self::GlowCrystal,
     ];
 
     pub fn from_id(id: u16) -> Option<Self> {
@@ -63,6 +66,7 @@ impl Material {
             11 => Self::Limestone,
             12 => Self::RedSand,
             13 => Self::Water,
+            14 => Self::GlowCrystal,
             _ => return None,
         })
     }
@@ -115,6 +119,9 @@ mod tests {
 
     #[test]
     fn stable_material_catalog_is_dense_and_id_ordered() {
+        assert_eq!(Material::SCHEMA_VERSION, 3);
+        assert_eq!(Material::Water.id(), 13);
+        assert_eq!(Material::GlowCrystal.id(), 14);
         for (id, material) in Material::ALL.into_iter().enumerate() {
             assert_eq!(usize::from(material.id()), id);
             assert_eq!(Material::from_id(id as u16), Some(material));

@@ -40,7 +40,7 @@ authoritative near field keeps the required 10 cm voxel resolution and uses face
 rectangle merging. A column becomes render-ready only when all desired vertical chunks are resident,
 so a partially streamed stack cannot expose an open terrain slice.
 
-Generator v11 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
+Generator v14 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
 detail, dune, and volcanic fields. Six dominant regional identities—verdant forest, wind-cut moor,
 alpine, red badlands, pale dunes, and volcanic terrain—select surface ecology and geology, while their
 normalized weights blend height modifiers continuously across boundaries. Canonical generation, LOD
@@ -48,7 +48,7 @@ surface summaries, edit overlays, and spawn queries consume that same sample. A 
 `GeneratedColumn` additionally caches terrain fields and landmark intersections for repeated Y sampling,
 which keeps richer world logic from multiplying meshing-halo cost.
 
-Water is material 13 in material schema v2 and remains part of the same canonical 10 cm voxel field.
+Water remains material 13 in material schema v3 and part of the same canonical 10 cm voxel field.
 It is renderable and editable but non-collidable and non-occluding. Low continental basins fill only
 the cells above terrain through the versioned sea level, never underground cave air. Near greedy
 meshes split opaque and translucent quads without duplicating a water face against an opaque bank.
@@ -154,6 +154,16 @@ on every surface-LOD lattice. The same cadence now yields 26 stable editable rou
 ordinal catalog and feature-cell lookup are immutable derived indices, so ambient feature generation
 does not rebuild or linearly scan every station.
 
+Generator v14 gives the atlas-defined Cinder Vault a final analytic CSG pass: seven ellipsoidal
+nodes and six anisotropic conduits form one dry, enterable route with a sealed Basalt shell. The pass
+runs after ambient features in chunk and cached-column generation, so unrelated procedural content
+cannot puncture or fill the authored void. Four supported crystal spires use append-only material 14
+and remain ordinary opaque 10 cm voxels for collision, greedy meshing, editing, SQLite persistence,
+and palette-codec round trips. Deep edits invalidate canonical chunks without rebuilding heightfield
+LODs. A portable nine-ray enclosure probe reads edited resident chunks first, then falls back to
+canonical generation; Rust/WGPU uses the result for asymmetric eye adaptation, cave air,
+outdoor-light rejection, and an optional bounded headlamp.
+
 Atlas schema v1 adds append-only Rust discriminants for six destinations and five route chapters.
 Each destination freezes its canonical X/Z and route station, with tests reconstructing the authored
 point to within one 10 cm voxel. The shell projects the camera onto the same route index, chooses the
@@ -221,10 +231,10 @@ and per-material roughness drives a compact dielectric highlight. Exponential he
 the same horizon/zenith radiance rendered by the procedural sky, which also includes a world-anchored
 three-octave cloud layer.
 
-Opaque materials use two deterministic Rust-generated `128x128x14` texture arrays with eight mip
+Opaque materials use two deterministic Rust-generated `128x128x15` texture arrays with eight mip
 levels through `1x1`: sRGB albedo and unorm averaged tangent normal plus roughness. Stable material ids
 index array layers directly, including valid diagnostic Air and Water layers, while water rendering
-continues on its dedicated physical shader path. The complete derived atlas is 2,446,640 bytes and is
+continues on its dedicated physical shader path. The complete derived atlas is 2,621,400 bytes and is
 regenerated at startup rather than persisted.
 
 Axis-aligned face bases derive planar coordinates from world position, so greedy quads never stretch
