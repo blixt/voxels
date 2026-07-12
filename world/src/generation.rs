@@ -50,27 +50,61 @@ struct ColumnProfile {
     material: Material,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct TreeColumn {
-    ground: i32,
-    trunk_top: i32,
-    dx: i32,
-    dz: i32,
+const TREE_CELL_VOXELS: i32 = 96;
+const TREE_CROWN_RADIUS_VOXELS: i32 = 8;
+
+/// Stable procedural identity for an analytic feature that remains readable in surface LODs.
+/// The placement cell is sufficient to reconstruct the feature from the generator seed.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SkylineFeatureId {
+    pub cell_x: i32,
+    pub cell_z: i32,
 }
 
-impl TreeColumn {
-    fn material(self, y: i32) -> Option<Material> {
-        if y > self.ground && y <= self.trunk_top && self.dx.abs() <= 1 && self.dz.abs() <= 1 {
+/// One deterministic procedural feature shared by canonical voxel generation and disposable
+/// skyline proxies. Bounds are half-open canonical 10 cm voxel coordinates.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SkylineFeature {
+    pub id: SkylineFeatureId,
+    pub anchor: [i32; 3],
+    pub trunk_top: i32,
+}
+
+impl SkylineFeature {
+    pub const fn bounds(self) -> [[i32; 3]; 2] {
+        [
+            [
+                self.anchor[0] - TREE_CROWN_RADIUS_VOXELS,
+                self.anchor[1] + 1,
+                self.anchor[2] - TREE_CROWN_RADIUS_VOXELS,
+            ],
+            [
+                self.anchor[0] + TREE_CROWN_RADIUS_VOXELS + 1,
+                self.trunk_top + 3,
+                self.anchor[2] + TREE_CROWN_RADIUS_VOXELS + 1,
+            ],
+        ]
+    }
+
+    pub fn material_at(self, coord: crate::VoxelCoord) -> Option<Material> {
+        let dx = coord.x - self.anchor[0];
+        let dz = coord.z - self.anchor[2];
+        if coord.y > self.anchor[1] && coord.y <= self.trunk_top && dx.abs() <= 1 && dz.abs() <= 1 {
             return Some(Material::Wood);
         }
-        let dy = y - (self.trunk_top - 3);
+        let dy = coord.y - (self.trunk_top - 3);
         let horizontal_radius = 9 - dy.abs() / 2;
-        let distance_squared = self.dx * self.dx + self.dz * self.dz + (dy * dy) / 2;
+        let distance_squared = dx * dx + dz * dz + (dy * dy) / 2;
         ((-7..=5).contains(&dy)
-            && self.dx.abs() <= horizontal_radius
-            && self.dz.abs() <= horizontal_radius
+            && dx.abs() <= horizontal_radius
+            && dz.abs() <= horizontal_radius
             && distance_squared <= 78)
             .then_some(Material::Leaves)
+    }
+
+    pub const fn contains_xz(self, x: i32, z: i32) -> bool {
+        let bounds = self.bounds();
+        x >= bounds[0][0] && x < bounds[1][0] && z >= bounds[0][2] && z < bounds[1][2]
     }
 }
 
@@ -83,7 +117,7 @@ pub struct GeneratedColumn {
     x: i32,
     z: i32,
     profile: ColumnProfile,
-    trees: [TreeColumn; 9],
+    trees: [SkylineFeature; 9],
     tree_count: u8,
 }
 
@@ -97,7 +131,7 @@ impl GeneratedColumn {
         }
         self.trees[..usize::from(self.tree_count)]
             .iter()
-            .find_map(|tree| tree.material(y))
+            .find_map(|tree| tree.material_at(crate::VoxelCoord::new(self.x, y, self.z)))
             .unwrap_or(Material::Air)
     }
 }
@@ -151,31 +185,21 @@ impl Generator {
     }
 
     pub fn column(self, x: i32, z: i32) -> GeneratedColumn {
-        const CELL: i32 = 96;
-        let mut trees = [TreeColumn::default(); 9];
+        let mut trees = [SkylineFeature::default(); 9];
         let mut tree_count = 0u8;
-        let cell_x = x.div_euclid(CELL);
-        let cell_z = z.div_euclid(CELL);
+        let cell_x = x.div_euclid(TREE_CELL_VOXELS);
+        let cell_z = z.div_euclid(TREE_CELL_VOXELS);
         for dz_cell in -1..=1 {
             for dx_cell in -1..=1 {
                 let candidate_x = cell_x + dx_cell;
                 let candidate_z = cell_z + dz_cell;
-                let (anchor_x, anchor_z, tree_height) = self.tree_anchor(candidate_x, candidate_z);
-                let dx = x - anchor_x;
-                let dz = z - anchor_z;
-                if dx.abs() > 9 || dz.abs() > 9 {
+                let Some(feature) = self.skyline_feature(candidate_x, candidate_z) else {
                     continue;
-                }
-                let anchor_surface = self.surface_sample(anchor_x, anchor_z);
-                if !self.tree_grows_on(anchor_x, anchor_z, anchor_surface) {
-                    continue;
-                }
-                trees[usize::from(tree_count)] = TreeColumn {
-                    ground: anchor_surface.height,
-                    trunk_top: anchor_surface.height + tree_height,
-                    dx,
-                    dz,
                 };
+                if !feature.contains_xz(x, z) {
+                    continue;
+                }
+                trees[usize::from(tree_count)] = feature;
                 tree_count += 1;
             }
         }
@@ -363,34 +387,73 @@ impl Generator {
         }
     }
 
+    /// Enumerates each deterministic skyline feature whose anchor lies in the supplied half-open
+    /// X/Z bounds exactly once. Anchor ownership prevents cross-tile duplication at every LOD.
+    pub fn skyline_features_anchored_in(self, bounds: [[i32; 2]; 2]) -> Vec<SkylineFeature> {
+        let [[min_x, min_z], [max_x, max_z]] = bounds;
+        if min_x >= max_x || min_z >= max_z {
+            return Vec::new();
+        }
+        let min_cell_x = (min_x - 75).div_euclid(TREE_CELL_VOXELS);
+        let max_cell_x = (max_x - 1 - 12).div_euclid(TREE_CELL_VOXELS);
+        let min_cell_z = (min_z - 75).div_euclid(TREE_CELL_VOXELS);
+        let max_cell_z = (max_z - 1 - 12).div_euclid(TREE_CELL_VOXELS);
+        let mut features = Vec::new();
+        for cell_z in min_cell_z..=max_cell_z {
+            for cell_x in min_cell_x..=max_cell_x {
+                let Some(feature) = self.skyline_feature(cell_x, cell_z) else {
+                    continue;
+                };
+                if feature.anchor[0] >= min_x
+                    && feature.anchor[0] < max_x
+                    && feature.anchor[2] >= min_z
+                    && feature.anchor[2] < max_z
+                {
+                    features.push(feature);
+                }
+            }
+        }
+        features
+    }
+
+    /// Returns procedural features whose canonical shape can own `coord`. The final material check
+    /// remains cheap and lets edit invalidation target the anchor-owned derived mesh.
+    pub fn skyline_features_at(self, coord: crate::VoxelCoord) -> Vec<SkylineFeature> {
+        let cell_x = coord.x.div_euclid(TREE_CELL_VOXELS);
+        let cell_z = coord.z.div_euclid(TREE_CELL_VOXELS);
+        let mut features = Vec::new();
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let Some(feature) = self.skyline_feature(cell_x + dx, cell_z + dz) else {
+                    continue;
+                };
+                if feature.material_at(coord).is_some() {
+                    features.push(feature);
+                }
+            }
+        }
+        features
+    }
+
     fn decorate_trees(self, chunk: &mut Chunk) {
-        const CELL: i32 = 96;
-        const CROWN_RADIUS: i32 = 9;
         let origin = chunk.coord().world_origin();
         let max_x = origin[0] + CHUNK_EDGE as i32 - 1;
         let max_z = origin[2] + CHUNK_EDGE as i32 - 1;
-        let min_cell_x = (origin[0] - CROWN_RADIUS).div_euclid(CELL);
-        let max_cell_x = (max_x + CROWN_RADIUS).div_euclid(CELL);
-        let min_cell_z = (origin[2] - CROWN_RADIUS).div_euclid(CELL);
-        let max_cell_z = (max_z + CROWN_RADIUS).div_euclid(CELL);
+        let min_cell_x = (origin[0] - TREE_CROWN_RADIUS_VOXELS - 75).div_euclid(TREE_CELL_VOXELS);
+        let max_cell_x = (max_x + TREE_CROWN_RADIUS_VOXELS - 12).div_euclid(TREE_CELL_VOXELS);
+        let min_cell_z = (origin[2] - TREE_CROWN_RADIUS_VOXELS - 75).div_euclid(TREE_CELL_VOXELS);
+        let max_cell_z = (max_z + TREE_CROWN_RADIUS_VOXELS - 12).div_euclid(TREE_CELL_VOXELS);
         for cell_z in min_cell_z..=max_cell_z {
             for cell_x in min_cell_x..=max_cell_x {
-                let (anchor_x, anchor_z, tree_height) = self.tree_anchor(cell_x, cell_z);
-                let anchor_surface = self.surface_sample(anchor_x, anchor_z);
-                if !self.tree_grows_on(anchor_x, anchor_z, anchor_surface) {
+                let Some(feature) = self.skyline_feature(cell_x, cell_z) else {
                     continue;
-                }
-                let ground = anchor_surface.height;
-                let trunk_top = ground + tree_height;
-                let min_y = (ground + 1).max(origin[1]);
-                let max_y = (trunk_top + 5).min(origin[1] + CHUNK_EDGE as i32 - 1);
+                };
+                let bounds = feature.bounds();
+                let min_y = bounds[0][1].max(origin[1]);
+                let max_y = (bounds[1][1] - 1).min(origin[1] + CHUNK_EDGE as i32 - 1);
                 for world_y in min_y..=max_y {
-                    for world_z in (anchor_z - CROWN_RADIUS).max(origin[2])
-                        ..=(anchor_z + CROWN_RADIUS).min(max_z)
-                    {
-                        for world_x in (anchor_x - CROWN_RADIUS).max(origin[0])
-                            ..=(anchor_x + CROWN_RADIUS).min(max_x)
-                        {
+                    for world_z in bounds[0][2].max(origin[2])..=(bounds[1][2] - 1).min(max_z) {
+                        for world_x in bounds[0][0].max(origin[0])..=(bounds[1][0] - 1).min(max_x) {
                             let local = [
                                 (world_x - origin[0]) as usize,
                                 (world_y - origin[1]) as usize,
@@ -399,21 +462,8 @@ impl Generator {
                             if chunk.get(local[0], local[1], local[2]).is_solid() {
                                 continue;
                             }
-                            let dx = world_x - anchor_x;
-                            let dz = world_z - anchor_z;
-                            let material = if world_y <= trunk_top && dx.abs() <= 1 && dz.abs() <= 1
-                            {
-                                Some(Material::Wood)
-                            } else {
-                                let dy = world_y - (trunk_top - 3);
-                                let radius = 9 - dy.abs() / 2;
-                                let distance_squared = dx * dx + dz * dz + (dy * dy) / 2;
-                                ((-7..=5).contains(&dy)
-                                    && dx.abs() <= radius
-                                    && dz.abs() <= radius
-                                    && distance_squared <= 78)
-                                    .then_some(Material::Leaves)
-                            };
+                            let material = feature
+                                .material_at(crate::VoxelCoord::new(world_x, world_y, world_z));
                             if let Some(material) = material {
                                 chunk.set(local[0], local[1], local[2], material);
                             }
@@ -435,12 +485,26 @@ impl Generator {
     }
 
     fn tree_anchor(self, cell_x: i32, cell_z: i32) -> (i32, i32, i32) {
-        const CELL: i32 = 96;
         let hash = self.hash(cell_x, 0, cell_z, 0x7a11_5eed);
         let x_offset = 12 + (hash & 63) as i32;
         let z_offset = 12 + ((hash >> 8) & 63) as i32;
         let height = 25 + ((hash >> 16) & 15) as i32;
-        (cell_x * CELL + x_offset, cell_z * CELL + z_offset, height)
+        (
+            cell_x * TREE_CELL_VOXELS + x_offset,
+            cell_z * TREE_CELL_VOXELS + z_offset,
+            height,
+        )
+    }
+
+    fn skyline_feature(self, cell_x: i32, cell_z: i32) -> Option<SkylineFeature> {
+        let (anchor_x, anchor_z, height) = self.tree_anchor(cell_x, cell_z);
+        let surface = self.surface_sample(anchor_x, anchor_z);
+        self.tree_grows_on(anchor_x, anchor_z, surface)
+            .then_some(SkylineFeature {
+                id: SkylineFeatureId { cell_x, cell_z },
+                anchor: [anchor_x, surface.height, anchor_z],
+                trunk_top: surface.height + height,
+            })
     }
 
     fn fractal_2d(self, x: i32, z: i32, scale: i32, octaves: u32, salt: u64) -> f32 {
@@ -515,6 +579,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::VoxelCoord;
     use std::collections::BTreeSet;
 
     #[test]
@@ -640,6 +705,52 @@ mod tests {
         assert_eq!(
             generator.sample(x + 5, ground + height - 3, z),
             Material::Leaves
+        );
+    }
+
+    #[test]
+    fn analytic_skyline_descriptor_is_the_canonical_tree_source() {
+        let generator = Generator::new(0x5eed);
+        let feature = generator
+            .skyline_features_anchored_in([[-512, -512], [512, 512]])
+            .into_iter()
+            .next()
+            .expect("fixed seed should place a nearby tree");
+        let probes = [
+            VoxelCoord::new(feature.anchor[0], feature.anchor[1] + 1, feature.anchor[2]),
+            VoxelCoord::new(feature.anchor[0], feature.trunk_top, feature.anchor[2]),
+            VoxelCoord::new(
+                feature.anchor[0] + 5,
+                feature.trunk_top - 3,
+                feature.anchor[2],
+            ),
+        ];
+        assert_eq!(feature.material_at(probes[0]), Some(Material::Wood));
+        assert_eq!(feature.material_at(probes[1]), Some(Material::Wood));
+        assert_eq!(feature.material_at(probes[2]), Some(Material::Leaves));
+        for probe in probes {
+            assert_eq!(
+                generator.sample(probe.x, probe.y, probe.z),
+                feature.material_at(probe).unwrap()
+            );
+        }
+
+        let one_voxel_anchor_bounds = [
+            [feature.anchor[0], feature.anchor[2]],
+            [feature.anchor[0] + 1, feature.anchor[2] + 1],
+        ];
+        assert_eq!(
+            generator.skyline_features_anchored_in(one_voxel_anchor_bounds),
+            [feature]
+        );
+        let bounds = feature.bounds();
+        assert_eq!(
+            feature.material_at(VoxelCoord::new(
+                bounds[1][0],
+                feature.trunk_top,
+                feature.anchor[2]
+            )),
+            None
         );
     }
 }

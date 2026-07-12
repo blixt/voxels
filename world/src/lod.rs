@@ -1,5 +1,5 @@
 use crate::mesh::{FACE_NEG_X, FACE_NEG_Y, FACE_NEG_Z, FACE_POS_X, FACE_POS_Y, FACE_POS_Z};
-use crate::{Generator, Material};
+use crate::{EditMap, Generator, Material, SkylineFeature, VoxelCoord};
 use std::ops::Range;
 
 /// Every surface LOD tile contains the same number of cells. Increasing the level therefore
@@ -292,31 +292,82 @@ pub fn surface_tiles_affected_by_column(
     affected
 }
 
+/// Returns every derived tile whose terrain shell or anchor-owned skyline proxy can change after
+/// one canonical voxel edit. Feature ownership follows the anchor rather than the edited column,
+/// which matters when a crown crosses a tile or patch boundary.
+pub fn surface_tiles_affected_by_voxel(
+    generator: Generator,
+    level: SurfaceLodLevel,
+    coord: VoxelCoord,
+) -> Vec<SurfaceTileCoord> {
+    let mut affected = surface_tiles_affected_by_column(level, coord.x, coord.z);
+    for feature in generator.skyline_features_at(coord) {
+        let Some(feature_material) = feature.material_at(coord) else {
+            continue;
+        };
+        if generator.sample(coord.x, coord.y, coord.z) != feature_material {
+            continue;
+        }
+        let owner = SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
+        if !affected.contains(&owner) {
+            affected.push(owner);
+        }
+    }
+    affected
+}
+
 /// Builds a deterministic, surface-preserving coarse shell. Adjacent tiles sample the same global
 /// cell centers, and vertical transition quads close every height discontinuity, so independently
 /// streamed tiles cannot expose holes.
 pub fn generate_surface_tile(generator: Generator, coord: SurfaceTileCoord) -> Vec<SurfaceQuad> {
-    generate_surface_tile_with(coord, |x, z| {
-        let sample = generator.surface_sample(x, z);
-        (sample.height, sample.material)
-    })
+    generate_edited_surface_tile(generator, &EditMap::default(), coord)
 }
 
 pub fn generate_surface_tile_mesh(
     generator: Generator,
     coord: SurfaceTileCoord,
 ) -> SurfaceTileMesh {
-    generate_surface_tile_mesh_with(coord, |x, z| {
-        let sample = generator.surface_sample(x, z);
-        (sample.height, sample.material)
-    })
+    generate_edited_surface_tile_mesh(generator, &EditMap::default(), coord)
+}
+
+/// Builds the compatibility vector form of an edit-aware surface tile. Transition skirts remain
+/// omitted because callers of the legacy API cannot select them per patch edge.
+pub fn generate_edited_surface_tile(
+    generator: Generator,
+    edits: &EditMap,
+    coord: SurfaceTileCoord,
+) -> Vec<SurfaceQuad> {
+    let features = pristine_skyline_features(generator, edits, coord);
+    generate_surface_tile_mesh_with_options(
+        coord,
+        |x, z| edits.surface_sample(generator, x, z),
+        false,
+        &features,
+    )
+    .into_surface_quads()
+}
+
+/// Builds terrain patches and anchor-owned skyline proxies from the same generator plus sparse
+/// edit authority used by canonical chunks.
+pub fn generate_edited_surface_tile_mesh(
+    generator: Generator,
+    edits: &EditMap,
+    coord: SurfaceTileCoord,
+) -> SurfaceTileMesh {
+    let features = pristine_skyline_features(generator, edits, coord);
+    generate_surface_tile_mesh_with_options(
+        coord,
+        |x, z| edits.surface_sample(generator, x, z),
+        true,
+        &features,
+    )
 }
 
 pub fn generate_surface_tile_with(
     coord: SurfaceTileCoord,
     surface: impl Fn(i32, i32) -> (i32, Material),
 ) -> Vec<SurfaceQuad> {
-    generate_surface_tile_mesh_with_options(coord, surface, false).into_surface_quads()
+    generate_surface_tile_mesh_with_options(coord, surface, false, &[]).into_surface_quads()
 }
 
 impl SurfaceTileMesh {
@@ -337,13 +388,14 @@ pub fn generate_surface_tile_mesh_with(
     coord: SurfaceTileCoord,
     surface: impl Fn(i32, i32) -> (i32, Material),
 ) -> SurfaceTileMesh {
-    generate_surface_tile_mesh_with_options(coord, surface, true)
+    generate_surface_tile_mesh_with_options(coord, surface, true, &[])
 }
 
 fn generate_surface_tile_mesh_with_options(
     coord: SurfaceTileCoord,
     surface: impl Fn(i32, i32) -> (i32, Material),
     transition_skirts: bool,
+    skyline_features: &[SkylineFeature],
 ) -> SurfaceTileMesh {
     let [origin_x, origin_z] = coord.voxel_origin();
     let stride = coord.stride_voxels();
@@ -415,6 +467,22 @@ fn generate_surface_tile_mesh_with_options(
                     }
                 }
             }
+            let patch_min_x = origin_x + cell_min_x * stride;
+            let patch_min_z = origin_z + cell_min_z * stride;
+            let patch_max_x = patch_min_x + SURFACE_PATCH_EDGE_CELLS * stride;
+            let patch_max_z = patch_min_z + SURFACE_PATCH_EDGE_CELLS * stride;
+            for feature in skyline_features.iter().copied().filter(|feature| {
+                feature.anchor[0] >= patch_min_x
+                    && feature.anchor[0] < patch_max_x
+                    && feature.anchor[2] >= patch_min_z
+                    && feature.anchor[2] < patch_max_z
+            }) {
+                let feature_start = quads.len();
+                append_skyline_proxy(&mut quads, coord.level, feature);
+                for quad in &quads[feature_start..] {
+                    bounds.include_quad(*quad);
+                }
+            }
             let quad_end = quads.len() as u32;
             let quad_range = quad_start..quad_end;
             let skirt_ranges = std::array::from_fn(|edge_index| {
@@ -482,6 +550,97 @@ fn generate_surface_tile_mesh_with_options(
     }
 }
 
+fn pristine_skyline_features(
+    generator: Generator,
+    edits: &EditMap,
+    coord: SurfaceTileCoord,
+) -> Vec<SkylineFeature> {
+    generator
+        .skyline_features_anchored_in(coord.voxel_bounds_xz())
+        .into_iter()
+        .filter(|feature| edits.skyline_feature_is_pristine(generator, *feature))
+        .collect()
+}
+
+fn append_skyline_proxy(
+    quads: &mut Vec<SurfaceQuad>,
+    level: SurfaceLodLevel,
+    feature: SkylineFeature,
+) {
+    let [anchor_x, ground, anchor_z] = feature.anchor;
+    append_box(
+        quads,
+        [anchor_x - 1, ground + 1, anchor_z - 1],
+        [anchor_x + 2, feature.trunk_top + 1, anchor_z + 2],
+        Material::Wood,
+    );
+    let top = feature.trunk_top;
+    let crown_layers: &[([i32; 2], i32)] = match level {
+        SurfaceLodLevel::Stride2 => &[
+            ([top - 9, top - 5], 6),
+            ([top - 5, top], 8),
+            ([top, top + 3], 5),
+        ],
+        SurfaceLodLevel::Stride4 => &[([top - 8, top - 2], 8), ([top - 2, top + 3], 6)],
+        SurfaceLodLevel::Stride8 | SurfaceLodLevel::Stride16 => &[([top - 7, top + 3], 8)],
+    };
+    for &([min_y, max_y], radius) in crown_layers {
+        append_box(
+            quads,
+            [anchor_x - radius, min_y, anchor_z - radius],
+            [anchor_x + radius + 1, max_y, anchor_z + radius + 1],
+            Material::Leaves,
+        );
+    }
+}
+
+fn append_box(quads: &mut Vec<SurfaceQuad>, min: [i32; 3], max: [i32; 3], material: Material) {
+    let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+    debug_assert!(
+        size.into_iter()
+            .all(|size| size > 0 && size <= i32::from(u16::MAX))
+    );
+    let size = size.map(|size| size as u16);
+    quads.extend([
+        SurfaceQuad {
+            origin: [max[0] - 1, min[1], min[2]],
+            face: FACE_POS_X,
+            extent: [size[2], size[1]],
+            material,
+        },
+        SurfaceQuad {
+            origin: min,
+            face: FACE_NEG_X,
+            extent: [size[2], size[1]],
+            material,
+        },
+        SurfaceQuad {
+            origin: [min[0], max[1] - 1, min[2]],
+            face: FACE_POS_Y,
+            extent: [size[0], size[2]],
+            material,
+        },
+        SurfaceQuad {
+            origin: min,
+            face: FACE_NEG_Y,
+            extent: [size[0], size[2]],
+            material,
+        },
+        SurfaceQuad {
+            origin: [min[0], min[1], max[2] - 1],
+            face: FACE_POS_Z,
+            extent: [size[0], size[1]],
+            material,
+        },
+        SurfaceQuad {
+            origin: min,
+            face: FACE_NEG_Z,
+            extent: [size[0], size[1]],
+            material,
+        },
+    ]);
+}
+
 pub fn generate_far_tile(generator: Generator, coord: FarTileCoord) -> Vec<SurfaceQuad> {
     generate_surface_tile(generator, coord.surface_coord())
 }
@@ -497,6 +656,30 @@ pub fn generate_far_tile_with(
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    fn nearby_skyline_feature(generator: Generator) -> SkylineFeature {
+        generator
+            .skyline_features_anchored_in([[-512, -512], [512, 512]])
+            .into_iter()
+            .next()
+            .expect("fixed seed should place a nearby skyline feature")
+    }
+
+    fn proxy_quads_per_feature(level: SurfaceLodLevel) -> usize {
+        match level {
+            SurfaceLodLevel::Stride2 => 24,
+            SurfaceLodLevel::Stride4 => 18,
+            SurfaceLodLevel::Stride8 | SurfaceLodLevel::Stride16 => 12,
+        }
+    }
+
+    fn skyline_quad_count(mesh: &SurfaceTileMesh) -> usize {
+        mesh.patches
+            .iter()
+            .flat_map(|patch| patch.quads(mesh))
+            .filter(|quad| matches!(quad.material, Material::Wood | Material::Leaves))
+            .count()
+    }
 
     #[test]
     fn levels_have_explicit_power_of_two_strides_and_spans() {
@@ -812,6 +995,181 @@ mod tests {
                 SURFACE_PATCHES_PER_TILE_EDGE as usize
             );
         }
+    }
+
+    #[test]
+    fn skyline_proxies_are_anchor_owned_once_at_every_level() {
+        let generator = Generator::new(0x5eed);
+        let target = nearby_skyline_feature(generator);
+        for level in SurfaceLodLevel::ALL {
+            let coord = SurfaceTileCoord::containing(level, target.anchor[0], target.anchor[2]);
+            let features = generator.skyline_features_anchored_in(coord.voxel_bounds_xz());
+            let mesh = generate_surface_tile_mesh(generator, coord);
+            let expected_per_feature = proxy_quads_per_feature(level);
+            assert_eq!(
+                skyline_quad_count(&mesh),
+                features.len() * expected_per_feature
+            );
+
+            let [origin_x, origin_z] = coord.voxel_origin();
+            for patch in &mesh.patches {
+                let [[min_x, min_z], [max_x, max_z]] = patch.cell_bounds;
+                let world_min_x = origin_x + i32::from(min_x) * level.stride_voxels();
+                let world_min_z = origin_z + i32::from(min_z) * level.stride_voxels();
+                let world_max_x = origin_x + i32::from(max_x) * level.stride_voxels();
+                let world_max_z = origin_z + i32::from(max_z) * level.stride_voxels();
+                let owned = features
+                    .iter()
+                    .filter(|feature| {
+                        feature.anchor[0] >= world_min_x
+                            && feature.anchor[0] < world_max_x
+                            && feature.anchor[2] >= world_min_z
+                            && feature.anchor[2] < world_max_z
+                    })
+                    .count();
+                let actual = patch
+                    .quads(&mesh)
+                    .iter()
+                    .filter(|quad| matches!(quad.material, Material::Wood | Material::Leaves))
+                    .count();
+                assert_eq!(actual, owned * expected_per_feature);
+                assert!(SurfacePatchEdge::ALL.into_iter().all(|edge| {
+                    patch
+                        .skirt_quads(&mesh, edge)
+                        .iter()
+                        .all(|quad| !matches!(quad.material, Material::Wood | Material::Leaves))
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn protruding_proxy_expands_culling_bounds_without_changing_patch_cells() {
+        let generator = Generator::new(0x5eed);
+        let feature = nearby_skyline_feature(generator);
+        let level = SurfaceLodLevel::Stride2;
+        let coord = SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
+        let mesh = generate_surface_tile_mesh(generator, coord);
+        let [origin_x, origin_z] = coord.voxel_origin();
+        let patch = mesh
+            .patches
+            .iter()
+            .find(|patch| {
+                let [[min_x, min_z], [max_x, max_z]] = patch.cell_bounds;
+                let stride = level.stride_voxels();
+                feature.anchor[0] >= origin_x + i32::from(min_x) * stride
+                    && feature.anchor[0] < origin_x + i32::from(max_x) * stride
+                    && feature.anchor[2] >= origin_z + i32::from(min_z) * stride
+                    && feature.anchor[2] < origin_z + i32::from(max_z) * stride
+            })
+            .unwrap();
+        let [[min_x, min_z], [max_x, max_z]] = patch.cell_bounds;
+        let fixed_min = [
+            origin_x + i32::from(min_x) * level.stride_voxels(),
+            origin_z + i32::from(min_z) * level.stride_voxels(),
+        ];
+        let fixed_max = [
+            origin_x + i32::from(max_x) * level.stride_voxels(),
+            origin_z + i32::from(max_z) * level.stride_voxels(),
+        ];
+        assert!(
+            patch.bounds.min[0] < fixed_min[0]
+                || patch.bounds.max[0] > fixed_max[0]
+                || patch.bounds.min[2] < fixed_min[1]
+                || patch.bounds.max[2] > fixed_max[1]
+        );
+        assert_eq!(patch.cell_bounds, [[min_x, min_z], [max_x, max_z]]);
+    }
+
+    #[test]
+    fn canonical_feature_edit_suppresses_and_reversion_restores_every_proxy() {
+        let generator = Generator::new(0x5eed);
+        let feature = nearby_skyline_feature(generator);
+        let target = VoxelCoord::new(feature.anchor[0], feature.anchor[1] + 1, feature.anchor[2]);
+        assert_eq!(
+            generator.sample(target.x, target.y, target.z),
+            Material::Wood
+        );
+        let mut edits = EditMap::default();
+        for level in SurfaceLodLevel::ALL {
+            let coord = SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
+            let pristine =
+                skyline_quad_count(&generate_edited_surface_tile_mesh(generator, &edits, coord));
+            edits.set(generator, target, Material::Air);
+            let edited =
+                skyline_quad_count(&generate_edited_surface_tile_mesh(generator, &edits, coord));
+            assert_eq!(pristine - edited, proxy_quads_per_feature(level));
+            edits.set(generator, target, Material::Wood);
+            assert_eq!(
+                skyline_quad_count(&generate_edited_surface_tile_mesh(generator, &edits, coord,)),
+                pristine
+            );
+        }
+        assert!(edits.is_empty());
+    }
+
+    #[test]
+    fn edit_outside_analytic_feature_does_not_suppress_proxy() {
+        let generator = Generator::new(0x5eed);
+        let feature = nearby_skyline_feature(generator);
+        let target = VoxelCoord::new(
+            feature.anchor[0] + 8,
+            feature.anchor[1] + 1,
+            feature.anchor[2] + 8,
+        );
+        assert_eq!(feature.material_at(target), None);
+        let level = SurfaceLodLevel::Stride2;
+        let coord = SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
+        let pristine = skyline_quad_count(&generate_surface_tile_mesh(generator, coord));
+        let generated = generator.sample(target.x, target.y, target.z);
+        let replacement = if generated == Material::Stone {
+            Material::Air
+        } else {
+            Material::Stone
+        };
+        let mut edits = EditMap::default();
+        edits.set(generator, target, replacement);
+        assert_eq!(
+            skyline_quad_count(&generate_edited_surface_tile_mesh(generator, &edits, coord,)),
+            pristine
+        );
+    }
+
+    #[test]
+    fn crown_edit_invalidates_anchor_owner_across_a_tile_boundary() {
+        let generator = Generator::new(0x5eed);
+        let level = SurfaceLodLevel::Stride2;
+        let (feature, target) = generator
+            .skyline_features_anchored_in([[-2_048, -2_048], [2_048, 2_048]])
+            .into_iter()
+            .find_map(|feature| {
+                for dx in [-5, 5] {
+                    let target = VoxelCoord::new(
+                        feature.anchor[0] + dx,
+                        feature.trunk_top - 3,
+                        feature.anchor[2],
+                    );
+                    if feature.material_at(target) == Some(Material::Leaves)
+                        && generator.sample(target.x, target.y, target.z) == Material::Leaves
+                        && SurfaceTileCoord::containing(level, target.x, target.z)
+                            != SurfaceTileCoord::containing(
+                                level,
+                                feature.anchor[0],
+                                feature.anchor[2],
+                            )
+                    {
+                        return Some((feature, target));
+                    }
+                }
+                None
+            })
+            .expect("fixed seed should place a crown across a stride-2 tile boundary");
+        let owner = SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
+        assert_ne!(
+            owner,
+            SurfaceTileCoord::containing(level, target.x, target.z)
+        );
+        assert!(surface_tiles_affected_by_voxel(generator, level, target).contains(&owner));
     }
 
     #[test]

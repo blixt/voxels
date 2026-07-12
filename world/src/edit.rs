@@ -1,4 +1,4 @@
-use crate::{CHUNK_EDGE, Chunk, ChunkCoord, Generator, Material};
+use crate::{CHUNK_EDGE, Chunk, ChunkCoord, Generator, Material, SkylineFeature};
 use std::collections::BTreeMap;
 
 /// Integer address of one canonical 10 cm voxel.
@@ -89,6 +89,56 @@ impl EditMap {
         for (&[x, y, z], &material) in overrides {
             chunk.set(x, y, z, material);
         }
+    }
+
+    /// Returns whether a disposable skyline proxy still represents pristine canonical feature
+    /// voxels. The query walks only chunk-index buckets touched by the small analytic feature, so
+    /// unrelated large edit journals do not affect surface-tile generation cost.
+    pub fn skyline_feature_is_pristine(
+        &self,
+        generator: Generator,
+        feature: SkylineFeature,
+    ) -> bool {
+        if self.overrides.is_empty() {
+            return true;
+        }
+        let [min, max] = feature.bounds();
+        let chunk_min = VoxelCoord::new(min[0], min[1], min[2]).chunk();
+        let chunk_max = VoxelCoord::new(max[0] - 1, max[1] - 1, max[2] - 1).chunk();
+        for chunk_z in chunk_min.z..=chunk_max.z {
+            for chunk_y in chunk_min.y..=chunk_max.y {
+                for chunk_x in chunk_min.x..=chunk_max.x {
+                    let Some(overrides) = self.chunk_overrides.get(&(chunk_x, chunk_y, chunk_z))
+                    else {
+                        continue;
+                    };
+                    let origin = ChunkCoord::new(chunk_x, chunk_y, chunk_z).world_origin();
+                    for &[local_x, local_y, local_z] in overrides.keys() {
+                        let coord = VoxelCoord::new(
+                            origin[0] + local_x as i32,
+                            origin[1] + local_y as i32,
+                            origin[2] + local_z as i32,
+                        );
+                        if coord.x < min[0]
+                            || coord.x >= max[0]
+                            || coord.y < min[1]
+                            || coord.y >= max[1]
+                            || coord.z < min[2]
+                            || coord.z >= max[2]
+                        {
+                            continue;
+                        }
+                        let Some(feature_material) = feature.material_at(coord) else {
+                            continue;
+                        };
+                        if generator.sample(coord.x, coord.y, coord.z) == feature_material {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// Resolves the visible material of one edited column. Far surface summaries use this to remain
