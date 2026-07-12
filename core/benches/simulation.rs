@@ -16,8 +16,7 @@ fn bench_camera_update(criterion: &mut Criterion) {
     group.bench_function("dry_ground", |bencher| {
         bencher.iter_batched(
             || {
-                let mut camera =
-                    CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
+                let mut camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
                 camera.grounded = true;
                 (camera, forward_input())
             },
