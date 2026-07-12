@@ -433,6 +433,7 @@ pub fn generate_water_tile_mesh_with(
             let mut consumed =
                 [[false; SURFACE_PATCH_EDGE_CELLS as usize]; SURFACE_PATCH_EDGE_CELLS as usize];
             let quad_start = quads.len() as u32;
+            let mut bounds = SurfaceBounds::empty();
             for local_z in 0..SURFACE_PATCH_EDGE_CELLS {
                 for local_x in 0..SURFACE_PATCH_EDGE_CELLS {
                     if consumed[local_z as usize][local_x as usize]
@@ -465,7 +466,7 @@ pub fn generate_water_tile_mesh_with(
                             consumed[z as usize][x as usize] = true;
                         }
                     }
-                    quads.push(SurfaceQuad {
+                    let quad = SurfaceQuad {
                         origin: [
                             origin_x + (cell_min_x + local_x) * stride,
                             SEA_LEVEL_VOXELS,
@@ -474,18 +475,15 @@ pub fn generate_water_tile_mesh_with(
                         face: FACE_POS_Y,
                         extent: [(width * stride) as u16, (height * stride) as u16],
                         material: Material::Water,
-                    });
+                    };
+                    bounds.include_quad(quad);
+                    quads.push(quad);
                 }
             }
             let quad_end = quads.len() as u32;
             if quad_start == quad_end {
                 continue;
             }
-            let bounds = SurfaceBounds::from_quads(&quads[quad_start as usize..quad_end as usize])
-                .unwrap_or(SurfaceBounds {
-                    min: [origin_x, SEA_LEVEL_VOXELS, origin_z],
-                    max: [origin_x, SEA_LEVEL_VOXELS + 1, origin_z],
-                });
             patches.push(WaterPatch {
                 cell_bounds: [
                     [cell_min_x as u8, cell_min_z as u8],
@@ -1347,6 +1345,20 @@ mod tests {
                     .iter()
                     .all(|patch| patch.quads(&tile).len() == 1)
             );
+            for patch in &tile.patches {
+                assert_eq!(
+                    Some(patch.bounds),
+                    SurfaceBounds::from_quads(patch.quads(&tile))
+                );
+                assert!(
+                    patch
+                        .bounds
+                        .min
+                        .iter()
+                        .zip(patch.bounds.max)
+                        .all(|(min, max)| *min < max)
+                );
+            }
             assert!(tile.quads.iter().all(|quad| {
                 quad.origin[1] == SEA_LEVEL_VOXELS
                     && quad.face == FACE_POS_Y
