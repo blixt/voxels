@@ -673,8 +673,9 @@ impl Generator {
     ) -> Option<SkylineFeature> {
         let center_x = x.div_euclid(FEATURE_CELL_VOXELS);
         let center_z = z.div_euclid(FEATURE_CELL_VOXELS);
-        for radius in 0..=max_radius_cells.clamp(0, 256) {
-            let mut closest = None;
+        let max_radius = max_radius_cells.clamp(0, 256);
+        let mut closest = None;
+        for radius in 0..=max_radius {
             let mut consider = |cell_x: i32, cell_z: i32| {
                 let Some(feature) = self.skyline_feature(cell_x, cell_z) else {
                     return;
@@ -701,7 +702,11 @@ impl Generator {
                     consider(center_x + radius, center_z + dz);
                 }
             }
-            if let Some((_, feature)) = closest {
+            if let Some((distance, feature)) = closest
+                && (radius == max_radius
+                    || distance
+                        <= unvisited_feature_distance_lower_bound(x, z, center_x, center_z, radius))
+            {
                 return Some(feature);
             }
         }
@@ -1043,6 +1048,26 @@ fn checked_feature_anchor_axis(cell: i32, offset: i32) -> Option<i32> {
     (minimum..=maximum)
         .contains(&anchor)
         .then_some(anchor as i32)
+}
+
+fn unvisited_feature_distance_lower_bound(
+    x: i32,
+    z: i32,
+    center_x: i32,
+    center_z: i32,
+    visited_radius: i32,
+) -> i64 {
+    let edge = i64::from(FEATURE_CELL_VOXELS);
+    let axis_distance = |position: i32, center: i32| {
+        let position = i64::from(position);
+        let center = i64::from(center);
+        let radius = i64::from(visited_radius);
+        let lower_max = (center - radius) * edge - 1;
+        let upper_min = (center + radius + 1) * edge;
+        (position - lower_max).min(upper_min - position)
+    };
+    let distance = axis_distance(x, center_x).min(axis_distance(z, center_z));
+    distance * distance
 }
 
 fn cinder_vault_column_candidate(x: i32, z: i32) -> bool {
@@ -1588,6 +1613,15 @@ mod tests {
             assert_eq!(feature.kind, kind);
             assert_eq!(feature.prominence, 2);
         }
+    }
+
+    #[test]
+    fn nearest_landmark_search_checks_later_cells_that_can_be_physically_closer() {
+        let feature = Generator::new(0x5eed_cafe)
+            .nearest_skyline_feature(-877, -1_000, SkylineFeatureKind::AlpineNeedle, 10)
+            .expect("fixed catalog should contain an alpine needle");
+
+        assert_eq!(feature.anchor, [-218, 51, -1_292]);
     }
 
     #[test]
