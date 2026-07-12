@@ -11,6 +11,45 @@ const JUMP_SPEED: f32 = 5.6;
 const GRAVITY: f32 = 19.5;
 const STEP_HEIGHT: f32 = 0.35;
 const COLLISION_EPSILON: f32 = 0.0001;
+const SWIM_SPEED: f32 = 3.2;
+const SWIM_RESPONSE: f32 = 5.5;
+const SWIM_ENTER_IMMERSION: f32 = 0.52;
+const SWIM_EXIT_IMMERSION: f32 = 0.25;
+const MAX_FLUID_SURFACE_SCAN_VOXELS: i32 = 256;
+
+/// Host-independent physical meaning of one canonical voxel. `core` deliberately does not depend on
+/// the world's material registry; every shell maps its own authoritative material into these traits.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VoxelPhysics {
+    pub collidable: bool,
+    pub fluid: bool,
+}
+
+impl VoxelPhysics {
+    pub const EMPTY: Self = Self {
+        collidable: false,
+        fluid: false,
+    };
+    pub const SOLID: Self = Self {
+        collidable: true,
+        fluid: false,
+    };
+    pub const FLUID: Self = Self {
+        collidable: false,
+        fluid: true,
+    };
+}
+
+/// Derived fixed-step environment state. It is recomputed from canonical 10 cm voxels and never
+/// persisted, so a saved camera remains portable across generators and native/browser hosts.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FluidState {
+    pub immersion: f32,
+    pub eyes_submerged: bool,
+    pub eye_depth_metres: f32,
+    pub surface_y_metres: f32,
+    pub swimming: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VoxelHit {
@@ -27,7 +66,7 @@ pub fn raycast_voxels(
     direction: Vec3,
     max_distance_metres: f32,
     voxel_size_metres: f32,
-    is_solid: impl Fn(i32, i32, i32) -> bool,
+    mut is_solid: impl FnMut(i32, i32, i32) -> bool,
 ) -> Option<VoxelHit> {
     if max_distance_metres <= 0.0 || voxel_size_metres <= 0.0 {
         return None;
@@ -129,6 +168,7 @@ pub struct CameraState {
     pub velocity: Vec3,
     pub grounded: bool,
     jump_was_down: bool,
+    fluid: FluidState,
 }
 
 impl Default for CameraState {
@@ -146,6 +186,7 @@ impl CameraState {
             velocity: Vec3::ZERO,
             grounded: false,
             jump_was_down: false,
+            fluid: FluidState::default(),
         }
     }
 
@@ -157,6 +198,7 @@ impl CameraState {
             velocity: Vec3::ZERO,
             grounded: false,
             jump_was_down: false,
+            fluid: FluidState::default(),
         }
     }
 
@@ -171,6 +213,10 @@ impl CameraState {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
         Vec3::new(sin_yaw * cos_pitch, sin_pitch, -cos_yaw * cos_pitch).normalize()
+    }
+
+    pub const fn fluid_state(self) -> FluidState {
+        self.fluid
     }
 
     pub fn intersects_voxel(self, voxel: [i32; 3], voxel_size: f32) -> bool {
@@ -195,65 +241,191 @@ impl CameraState {
         input: &InputState,
         dt: f32,
         voxel_size: f32,
-        is_solid: impl Fn(i32, i32, i32) -> bool,
+        mut sample_voxel: impl FnMut(i32, i32, i32) -> VoxelPhysics,
     ) {
+        if !voxel_size.is_finite() || voxel_size <= 0.0 {
+            return;
+        }
         let dt = dt.clamp(0.0, 0.05);
-        let forward = Vec3::new(self.yaw.sin(), 0.0, -self.yaw.cos());
-        let right = Vec3::new(-forward.z, 0.0, forward.x);
-        let mut wish = Vec3::ZERO;
-        if input.forward {
-            wish += forward;
-        }
-        if input.backward {
-            wish -= forward;
-        }
-        if input.right {
-            wish += right;
-        }
-        if input.left {
-            wish -= right;
-        }
-        let speed = WALK_SPEED * if input.sprint { SPRINT_MULTIPLIER } else { 1.0 };
-        let target = wish.normalize_or_zero() * speed;
-        let response = 1.0 - (-(if self.grounded { 18.0 } else { 5.0 }) * dt).exp();
-        self.velocity.x += (target.x - self.velocity.x) * response;
-        self.velocity.z += (target.z - self.velocity.z) * response;
-
-        let jump_pressed = input.jump && !self.jump_was_down;
-        self.jump_was_down = input.jump;
-        if self.grounded && jump_pressed {
-            self.velocity.y = JUMP_SPEED;
+        let was_swimming = self.fluid.swimming;
+        let horizontal_grounded;
+        if was_swimming {
+            let forward = self.forward();
+            let horizontal_forward = Vec3::new(self.yaw.sin(), 0.0, -self.yaw.cos());
+            let right = Vec3::new(-horizontal_forward.z, 0.0, horizontal_forward.x);
+            let mut wish = Vec3::ZERO;
+            if input.forward {
+                wish += forward;
+            }
+            if input.backward {
+                wish -= forward;
+            }
+            if input.right {
+                wish += right;
+            }
+            if input.left {
+                wish -= right;
+            }
+            if input.jump {
+                wish += Vec3::Y;
+            }
+            if input.sprint {
+                wish -= Vec3::Y;
+            }
+            let target = wish.normalize_or_zero() * SWIM_SPEED;
+            let response = 1.0 - (-SWIM_RESPONSE * dt).exp();
+            self.velocity += (target - self.velocity) * response;
+            let support = 1.0 - (1.0 - self.fluid.immersion).powi(2);
+            self.velocity.y += (-GRAVITY * (1.0 - support) + 0.8 * self.fluid.immersion) * dt;
+            self.velocity.y = self.velocity.y.clamp(-4.0, 3.0);
             self.grounded = false;
-        }
-        self.velocity.y -= GRAVITY * dt;
+            self.jump_was_down = input.jump;
+            horizontal_grounded = input.jump;
+        } else {
+            let forward = Vec3::new(self.yaw.sin(), 0.0, -self.yaw.cos());
+            let right = Vec3::new(-forward.z, 0.0, forward.x);
+            let mut wish = Vec3::ZERO;
+            if input.forward {
+                wish += forward;
+            }
+            if input.backward {
+                wish -= forward;
+            }
+            if input.right {
+                wish += right;
+            }
+            if input.left {
+                wish -= right;
+            }
+            let speed = WALK_SPEED * if input.sprint { SPRINT_MULTIPLIER } else { 1.0 };
+            let target = wish.normalize_or_zero() * speed;
+            let response = 1.0 - (-(if self.grounded { 18.0 } else { 5.0 }) * dt).exp();
+            self.velocity.x += (target.x - self.velocity.x) * response;
+            self.velocity.z += (target.z - self.velocity.z) * response;
 
-        let horizontal_grounded = self.grounded;
+            let jump_pressed = input.jump && !self.jump_was_down;
+            self.jump_was_down = input.jump;
+            if self.grounded && jump_pressed {
+                self.velocity.y = JUMP_SPEED;
+                self.grounded = false;
+            }
+            self.velocity.y -= GRAVITY * dt;
+            horizontal_grounded = self.grounded;
+        }
+
         self.move_axis(
             0,
             self.velocity.x * dt,
             voxel_size,
             horizontal_grounded,
-            &is_solid,
+            &mut sample_voxel,
         );
         self.move_axis(
             2,
             self.velocity.z * dt,
             voxel_size,
             horizontal_grounded,
-            &is_solid,
+            &mut sample_voxel,
         );
         self.grounded = false;
-        self.move_axis(1, self.velocity.y * dt, voxel_size, false, &is_solid);
+        self.move_axis(
+            1,
+            self.velocity.y * dt,
+            voxel_size,
+            false,
+            &mut sample_voxel,
+        );
         if !self.grounded
             && collides(
                 self.position - Vec3::Y * voxel_size * 0.08,
                 voxel_size,
-                &is_solid,
+                &mut sample_voxel,
             )
         {
             self.grounded = true;
             self.velocity.y = self.velocity.y.max(0.0);
         }
+        self.refresh_fluid_state(voxel_size, &mut sample_voxel);
+    }
+
+    /// Refresh derived fluid state without advancing movement, used after restoring or teleporting a
+    /// camera so the very first rendered frame already has the correct medium.
+    pub fn refresh_fluid_state(
+        &mut self,
+        voxel_size: f32,
+        mut sample_voxel: impl FnMut(i32, i32, i32) -> VoxelPhysics,
+    ) {
+        if !voxel_size.is_finite() || voxel_size <= 0.0 {
+            self.fluid = FluidState::default();
+            return;
+        }
+        let previous_swimming = self.fluid.swimming;
+        let (player_min, player_max) = player_bounds(self.position);
+        let range_max = player_max - Vec3::splat(COLLISION_EPSILON);
+        let min_voxel = (player_min / voxel_size).floor().as_ivec3();
+        let max_voxel = (range_max / voxel_size).floor().as_ivec3();
+        let mut fluid_volume = 0.0;
+        let mut highest_surface = f32::NEG_INFINITY;
+        for y in min_voxel.y..=max_voxel.y {
+            for z in min_voxel.z..=max_voxel.z {
+                for x in min_voxel.x..=max_voxel.x {
+                    if !sample_voxel(x, y, z).fluid {
+                        continue;
+                    }
+                    let voxel_min = Vec3::new(x as f32, y as f32, z as f32) * voxel_size;
+                    let voxel_max = voxel_min + Vec3::splat(voxel_size);
+                    let overlap = player_max.min(voxel_max) - player_min.max(voxel_min);
+                    let overlap = overlap.max(Vec3::ZERO);
+                    fluid_volume += overlap.x * overlap.y * overlap.z;
+                    highest_surface = highest_surface.max(voxel_max.y);
+                }
+            }
+        }
+        let player_size = player_max - player_min;
+        let player_volume = player_size.x * player_size.y * player_size.z;
+        let immersion = (fluid_volume / player_volume).clamp(0.0, 1.0);
+        let eye_voxel = (self.position / voxel_size).floor().as_ivec3();
+        let eyes_submerged = sample_voxel(eye_voxel.x, eye_voxel.y, eye_voxel.z).fluid;
+        let surface_y_metres = if eyes_submerged {
+            let mut first_air = eye_voxel.y;
+            for _ in 0..MAX_FLUID_SURFACE_SCAN_VOXELS {
+                if !sample_voxel(eye_voxel.x, first_air, eye_voxel.z).fluid {
+                    break;
+                }
+                first_air += 1;
+            }
+            first_air as f32 * voxel_size
+        } else if highest_surface.is_finite() {
+            highest_surface
+        } else {
+            self.position.y
+        };
+        let swimming = if previous_swimming {
+            eyes_submerged || immersion > SWIM_EXIT_IMMERSION
+        } else {
+            eyes_submerged || immersion >= SWIM_ENTER_IMMERSION
+        };
+        self.fluid = FluidState {
+            immersion,
+            eyes_submerged,
+            eye_depth_metres: if eyes_submerged {
+                (surface_y_metres - self.position.y).max(0.0)
+            } else {
+                0.0
+            },
+            surface_y_metres,
+            swimming,
+        };
+    }
+
+    pub fn overlaps_collidable(
+        self,
+        voxel_size: f32,
+        mut sample_voxel: impl FnMut(i32, i32, i32) -> VoxelPhysics,
+    ) -> bool {
+        !voxel_size.is_finite()
+            || voxel_size <= 0.0
+            || collides(self.position, voxel_size, &mut sample_voxel)
     }
 
     fn move_axis(
@@ -262,7 +434,7 @@ impl CameraState {
         distance: f32,
         voxel_size: f32,
         allow_step: bool,
-        is_solid: &impl Fn(i32, i32, i32) -> bool,
+        sample_voxel: &mut impl FnMut(i32, i32, i32) -> VoxelPhysics,
     ) {
         if distance.abs() <= f32::EPSILON {
             return;
@@ -272,7 +444,7 @@ impl CameraState {
         for _ in 0..step_count {
             let mut candidate = self.position;
             candidate[axis] += delta;
-            if !collides(candidate, voxel_size, is_solid) {
+            if !collides(candidate, voxel_size, sample_voxel) {
                 self.position = candidate;
                 continue;
             }
@@ -280,7 +452,7 @@ impl CameraState {
                 let increments = (STEP_HEIGHT / voxel_size).floor() as u32;
                 let stepped = (1..=increments).find_map(|increment| {
                     let raised = candidate + Vec3::Y * voxel_size * increment as f32;
-                    (!collides(raised, voxel_size, is_solid)).then_some(raised)
+                    (!collides(raised, voxel_size, sample_voxel)).then_some(raised)
                 });
                 if let Some(raised) = stepped {
                     self.position = raised;
@@ -296,28 +468,35 @@ impl CameraState {
     }
 }
 
+fn player_bounds(eye_position: Vec3) -> (Vec3, Vec3) {
+    let feet_y = eye_position.y - PLAYER_EYE_HEIGHT_METRES;
+    (
+        Vec3::new(
+            eye_position.x - PLAYER_RADIUS_METRES,
+            feet_y,
+            eye_position.z - PLAYER_RADIUS_METRES,
+        ),
+        Vec3::new(
+            eye_position.x + PLAYER_RADIUS_METRES,
+            feet_y + PLAYER_HEIGHT_METRES,
+            eye_position.z + PLAYER_RADIUS_METRES,
+        ),
+    )
+}
+
 fn collides(
     eye_position: Vec3,
     voxel_size: f32,
-    is_solid: &impl Fn(i32, i32, i32) -> bool,
+    sample_voxel: &mut impl FnMut(i32, i32, i32) -> VoxelPhysics,
 ) -> bool {
-    let feet_y = eye_position.y - PLAYER_EYE_HEIGHT_METRES;
-    let min = Vec3::new(
-        eye_position.x - PLAYER_RADIUS_METRES,
-        feet_y,
-        eye_position.z - PLAYER_RADIUS_METRES,
-    );
-    let max = Vec3::new(
-        eye_position.x + PLAYER_RADIUS_METRES - COLLISION_EPSILON,
-        feet_y + PLAYER_HEIGHT_METRES - COLLISION_EPSILON,
-        eye_position.z + PLAYER_RADIUS_METRES - COLLISION_EPSILON,
-    );
+    let (min, max) = player_bounds(eye_position);
+    let max = max - Vec3::splat(COLLISION_EPSILON);
     let min_voxel = (min / voxel_size).floor().as_ivec3();
     let max_voxel = (max / voxel_size).floor().as_ivec3();
     for y in min_voxel.y..=max_voxel.y {
         for z in min_voxel.z..=max_voxel.z {
             for x in min_voxel.x..=max_voxel.x {
-                if is_solid(x, y, z) {
+                if sample_voxel(x, y, z).collidable {
                     return true;
                 }
             }
@@ -329,6 +508,14 @@ fn collides(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn solid_if(value: bool) -> VoxelPhysics {
+        if value {
+            VoxelPhysics::SOLID
+        } else {
+            VoxelPhysics::EMPTY
+        }
+    }
 
     #[test]
     fn mouse_right_turns_camera_right_and_pitch_is_clamped() {
@@ -345,7 +532,7 @@ mod tests {
         let mut camera = CameraState::spawn(Vec3::new(0.0, 3.0, 0.0));
         let input = InputState::default();
         for _ in 0..240 {
-            camera.update(&input, 1.0 / 120.0, 0.1, |_, y, _| y < 0);
+            camera.update(&input, 1.0 / 120.0, 0.1, |_, y, _| solid_if(y < 0));
         }
         assert!(camera.grounded);
         assert!((camera.position.y - PLAYER_EYE_HEIGHT_METRES).abs() < 0.011);
@@ -358,7 +545,7 @@ mod tests {
         let mut input = InputState::default();
         input.set_key(4, true);
         for _ in 0..120 {
-            camera.update(&input, 1.0 / 60.0, 0.1, |x, y, _| y < 0 || x >= 5);
+            camera.update(&input, 1.0 / 60.0, 0.1, |x, y, _| solid_if(y < 0 || x >= 5));
         }
         assert!(camera.position.x <= 0.5 - PLAYER_RADIUS_METRES + 0.001);
     }
@@ -369,11 +556,11 @@ mod tests {
         camera.grounded = true;
         let mut input = InputState::default();
         input.set_key(5, true);
-        camera.update(&input, 1.0 / 60.0, 0.1, |_, y, _| y < 0);
+        camera.update(&input, 1.0 / 60.0, 0.1, |_, y, _| solid_if(y < 0));
         assert!(camera.velocity.y > 0.0);
         let initial_velocity = camera.velocity.y;
         camera.grounded = true;
-        camera.update(&input, 1.0 / 60.0, 0.1, |_, y, _| y < 0);
+        camera.update(&input, 1.0 / 60.0, 0.1, |_, y, _| solid_if(y < 0));
         assert!(camera.velocity.y < initial_velocity);
     }
 
@@ -415,5 +602,103 @@ mod tests {
         let camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
         assert!(camera.intersects_voxel([0, 0, 0], 0.1));
         assert!(!camera.intersects_voxel([20, 0, 0], 0.1));
+    }
+
+    #[test]
+    fn canonical_fluid_overlap_drives_immersion_and_eye_depth() {
+        let mut camera = CameraState::spawn(Vec3::new(0.05, PLAYER_EYE_HEIGHT_METRES, 0.05));
+        camera.refresh_fluid_state(0.1, |_, y, _| {
+            if (0..=17).contains(&y) {
+                VoxelPhysics::FLUID
+            } else {
+                VoxelPhysics::EMPTY
+            }
+        });
+        let fluid = camera.fluid_state();
+        assert!((fluid.immersion - 1.0).abs() < 0.0001);
+        assert!(fluid.eyes_submerged);
+        assert!((fluid.surface_y_metres - 1.8).abs() < 0.0001);
+        assert!((fluid.eye_depth_metres - 0.18).abs() < 0.0001);
+        assert!(fluid.swimming);
+    }
+
+    #[test]
+    fn swim_hysteresis_is_stable_at_a_blocky_shoreline() {
+        let mut camera = CameraState::spawn(Vec3::new(0.05, PLAYER_EYE_HEIGHT_METRES, 0.05));
+        camera.refresh_fluid_state(0.1, |_, y, _| {
+            if (0..=9).contains(&y) {
+                VoxelPhysics::FLUID
+            } else {
+                VoxelPhysics::EMPTY
+            }
+        });
+        assert!(camera.fluid_state().swimming);
+
+        camera.refresh_fluid_state(0.1, |_, y, _| {
+            if (0..=4).contains(&y) {
+                VoxelPhysics::FLUID
+            } else {
+                VoxelPhysics::EMPTY
+            }
+        });
+        assert!(camera.fluid_state().swimming);
+
+        camera.refresh_fluid_state(0.1, |_, y, _| {
+            if (0..=3).contains(&y) {
+                VoxelPhysics::FLUID
+            } else {
+                VoxelPhysics::EMPTY
+            }
+        });
+        assert!(!camera.fluid_state().swimming);
+    }
+
+    #[test]
+    fn space_ascends_and_shift_dives_while_swimming() {
+        let fluid = |_: i32, _: i32, _: i32| VoxelPhysics::FLUID;
+        let mut ascending = CameraState::spawn(Vec3::new(0.05, PLAYER_EYE_HEIGHT_METRES, 0.05));
+        ascending.refresh_fluid_state(0.1, fluid);
+        let mut input = InputState::default();
+        input.set_key(5, true);
+        for _ in 0..30 {
+            ascending.update(&input, 1.0 / 120.0, 0.1, fluid);
+        }
+        assert!(ascending.velocity.y > 0.5);
+
+        let mut diving = CameraState::spawn(Vec3::new(0.05, PLAYER_EYE_HEIGHT_METRES, 0.05));
+        diving.refresh_fluid_state(0.1, fluid);
+        let mut input = InputState::default();
+        input.set_key(6, true);
+        for _ in 0..30 {
+            diving.update(&input, 1.0 / 120.0, 0.1, fluid);
+        }
+        assert!(diving.velocity.y < -0.5);
+    }
+
+    #[test]
+    fn swimming_player_still_collides_with_solid_voxels() {
+        let sample = |x: i32, _: i32, _: i32| {
+            if x >= 5 {
+                VoxelPhysics::SOLID
+            } else {
+                VoxelPhysics::FLUID
+            }
+        };
+        let mut camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
+        camera.refresh_fluid_state(0.1, sample);
+        let mut input = InputState::default();
+        input.set_key(4, true);
+        for _ in 0..240 {
+            camera.update(&input, 1.0 / 120.0, 0.1, sample);
+        }
+        assert!(camera.position.x <= 0.5 - PLAYER_RADIUS_METRES + 0.001);
+    }
+
+    #[test]
+    fn restored_camera_can_be_valid_inside_water_but_not_solid() {
+        let camera =
+            CameraState::from_persisted(Vec3::new(0.05, PLAYER_EYE_HEIGHT_METRES, 0.05), 0.0, 0.0);
+        assert!(!camera.overlaps_collidable(0.1, |_, _, _| VoxelPhysics::FLUID));
+        assert!(camera.overlaps_collidable(0.1, |_, y, _| solid_if(y == 0)));
     }
 }

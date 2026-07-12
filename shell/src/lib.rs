@@ -11,7 +11,7 @@ mod web {
     use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::rc::Rc;
-    use voxels_core::{CameraState, InputState, VoxelHit, raycast_voxels};
+    use voxels_core::{CameraState, InputState, VoxelHit, VoxelPhysics, raycast_voxels};
     use voxels_render::renderer::Renderer;
     use voxels_render::ui::LiveStats;
     use voxels_runtime::{ChunkState, FrameBudget, StreamConfig, StreamScheduler};
@@ -133,6 +133,7 @@ mod web {
             });
             let mut camera = self.camera.borrow_mut();
             let edits = self.edits.borrow();
+            let mut generated_columns = BTreeMap::new();
             let mut accumulator = (self.simulation_accumulator.get() + dt.min(0.1))
                 .min(SIMULATION_STEP_SECONDS * MAX_SIMULATION_STEPS_PER_FRAME as f32);
             let mut steps = 0;
@@ -142,9 +143,17 @@ mod web {
                     SIMULATION_STEP_SECONDS,
                     VOXEL_SIZE_METRES,
                     |x, y, z| {
-                        edits
-                            .sample(self.generator, VoxelCoord::new(x, y, z))
-                            .is_collidable()
+                        let coord = VoxelCoord::new(x, y, z);
+                        let material = edits.override_at(coord).unwrap_or_else(|| {
+                            generated_columns
+                                .entry((x, z))
+                                .or_insert_with(|| self.generator.column(x, z))
+                                .sample(y)
+                        });
+                        VoxelPhysics {
+                            collidable: material.is_collidable(),
+                            fluid: material.is_fluid(),
+                        }
                     },
                 );
                 accumulator -= SIMULATION_STEP_SECONDS;
@@ -603,7 +612,8 @@ mod web {
                 (camera.position.y / VOXEL_SIZE_METRES).floor() as i32,
                 (camera.position.z / VOXEL_SIZE_METRES).floor() as i32,
             );
-            let ignore_water = edits.sample(self.generator, camera_voxel) == Material::Water;
+            let mut skipping_origin_water =
+                edits.sample(self.generator, camera_voxel) == Material::Water;
             raycast_voxels(
                 camera.position,
                 camera.forward(),
@@ -611,7 +621,12 @@ mod web {
                 VOXEL_SIZE_METRES,
                 |x, y, z| {
                     let material = edits.sample(self.generator, VoxelCoord::new(x, y, z));
-                    material.is_collidable() || (!ignore_water && material == Material::Water)
+                    if skipping_origin_water && material == Material::Water {
+                        false
+                    } else {
+                        skipping_origin_water = false;
+                        material.is_collidable() || material == Material::Water
+                    }
                 },
             )
         }
@@ -724,20 +739,47 @@ mod web {
         let spawn_y = (spawn_top + 1) as f32 * VOXEL_SIZE_METRES
             + voxels_core::PLAYER_EYE_HEIGHT_METRES
             + 0.02;
-        let camera = store
+        let mut camera = store
             .load_camera()?
             .filter(|camera| {
-                let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
-                let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-                let surface = generator.surface_sample(voxel_x, voxel_z);
-                let walkable_top = surface
-                    .water_level
-                    .unwrap_or(surface.height)
-                    .max(surface.height);
-                camera.position.y - voxels_core::PLAYER_EYE_HEIGHT_METRES
-                    >= (walkable_top + 1) as f32 * VOXEL_SIZE_METRES
+                if !camera.position.is_finite()
+                    || !camera.yaw.is_finite()
+                    || !camera.pitch.is_finite()
+                {
+                    return false;
+                }
+                let mut generated_columns = BTreeMap::new();
+                !camera.overlaps_collidable(VOXEL_SIZE_METRES, |x, y, z| {
+                    let coord = VoxelCoord::new(x, y, z);
+                    let material = edits.override_at(coord).unwrap_or_else(|| {
+                        generated_columns
+                            .entry((x, z))
+                            .or_insert_with(|| generator.column(x, z))
+                            .sample(y)
+                    });
+                    VoxelPhysics {
+                        collidable: material.is_collidable(),
+                        fluid: material.is_fluid(),
+                    }
+                })
             })
             .unwrap_or_else(|| CameraState::spawn(glam::Vec3::new(0.0, spawn_y, spawn_z)));
+        {
+            let mut generated_columns = BTreeMap::new();
+            camera.refresh_fluid_state(VOXEL_SIZE_METRES, |x, y, z| {
+                let coord = VoxelCoord::new(x, y, z);
+                let material = edits.override_at(coord).unwrap_or_else(|| {
+                    generated_columns
+                        .entry((x, z))
+                        .or_insert_with(|| generator.column(x, z))
+                        .sample(y)
+                });
+                VoxelPhysics {
+                    collidable: material.is_collidable(),
+                    fluid: material.is_fluid(),
+                }
+            });
+        }
         let renderer = Renderer::new(
             wgpu::SurfaceTarget::OffscreenCanvas(canvas),
             width,
