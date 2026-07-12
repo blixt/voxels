@@ -924,7 +924,7 @@ pub fn generate_far_tile_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, VecDeque};
 
     fn nearby_skyline_feature(generator: Generator) -> SkylineFeature {
         generator
@@ -1261,6 +1261,73 @@ mod tests {
             generate_surface_tile(Generator::new(42), coord),
             generate_surface_tile_mesh(Generator::new(42), coord).into_surface_quads()
         );
+    }
+
+    #[test]
+    fn pilgrim_road_is_cardinal_connected_on_every_lod_sampling_lattice() {
+        let generator = Generator::new(0x5eed_cafe);
+        let [[min_x, min_z], [max_x, max_z]] = crate::FIRST_PILGRIM_ROAD_BOUNDS;
+        for level in SurfaceLodLevel::ALL {
+            let stride = level.stride_voxels();
+            let half = stride / 2;
+            let min_cell_x = (min_x - half).div_euclid(stride) - 1;
+            let max_cell_x = (max_x - 1 - half).div_euclid(stride) + 1;
+            let min_cell_z = (min_z - half).div_euclid(stride) - 1;
+            let max_cell_z = (max_z - 1 - half).div_euclid(stride) + 1;
+            let mut core = BTreeSet::new();
+            for cell_z in min_cell_z..=max_cell_z {
+                for cell_x in min_cell_x..=max_cell_x {
+                    let x = cell_x * stride + half;
+                    let z = cell_z * stride + half;
+                    if crate::sample_first_pilgrim_road(x, z).is_some_and(|route| route.core > 0.02)
+                    {
+                        core.insert((cell_x, cell_z));
+                        let sample = generator.surface_sample(x, z);
+                        assert!(matches!(
+                            sample.material,
+                            Material::Limestone | Material::Stone
+                        ));
+                        assert!(sample.water_level.is_none());
+                    }
+                }
+            }
+            assert!(!core.is_empty());
+            let first = *core.first().unwrap();
+            let mut queue = VecDeque::from([first]);
+            let mut visited = BTreeSet::from([first]);
+            while let Some((cell_x, cell_z)) = queue.pop_front() {
+                for neighbor in [
+                    (cell_x - 1, cell_z),
+                    (cell_x + 1, cell_z),
+                    (cell_x, cell_z - 1),
+                    (cell_x, cell_z + 1),
+                ] {
+                    if core.contains(&neighbor) && visited.insert(neighbor) {
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+            assert_eq!(
+                visited.len(),
+                core.len(),
+                "{level:?} route core split into multiple sampled components"
+            );
+
+            // Exercise the actual structured mesh path at one route lattice cell per level.
+            let center = [first.0 * stride + half, first.1 * stride + half];
+            let coord = SurfaceTileCoord::containing(level, center[0], center[1]);
+            let mesh = generate_surface_tile_mesh(generator, coord);
+            let cell_origin = [center[0] - half, center[1] - half];
+            let expected = generator.surface_sample(center[0], center[1]);
+            assert!(mesh.quads.iter().any(|quad| {
+                quad.face == FACE_POS_Y
+                    && quad.origin[0] == cell_origin[0]
+                    && quad.origin[2] == cell_origin[1]
+                    && quad.origin[1] == expected.height
+                    && quad.extent == [stride as u16; 2]
+                    && quad.material == expected.material
+            }));
+        }
     }
 
     #[test]

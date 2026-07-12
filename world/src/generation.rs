@@ -1,11 +1,12 @@
 use crate::{
     CHUNK_EDGE, COMPOSITION_EDGE_FEATURE_CELLS, Chunk, ChunkCoord, FEATURE_CELL_VOXELS,
-    FEATURE_MAX_RADIUS_VOXELS, FeatureComposition, Material, SkylineFeature, SkylineFeatureId,
-    SkylineFeatureKind,
+    FEATURE_MAX_RADIUS_VOXELS, FIRST_PILGRIM_ROAD_NODES, FeatureComposition, Material,
+    ROUTE_CORE_HALF_WIDTH_VOXELS, RouteSample, SkylineFeature, SkylineFeatureId,
+    SkylineFeatureKind, sample_first_pilgrim_road,
 };
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 8;
+pub const GENERATOR_VERSION: u32 = 9;
 pub const SEA_LEVEL_VOXELS: i32 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -39,6 +40,7 @@ pub struct SurfaceSample {
     pub moisture: f32,
     pub temperature: f32,
     pub ridge: f32,
+    pub route: Option<RouteSample>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -54,6 +56,7 @@ struct ColumnProfile {
     ridge: f32,
     region: SurfaceRegion,
     material: Material,
+    route: Option<RouteSample>,
 }
 
 /// Reusable authoritative sampler for one X/Z column. Meshing a halo touches many Y values at the
@@ -292,6 +295,11 @@ impl Generator {
     }
 
     fn column_profile(self, x: i32, z: i32) -> ColumnProfile {
+        let natural = self.natural_column_profile(x, z);
+        self.apply_route_profile(x, z, natural)
+    }
+
+    fn natural_column_profile(self, x: i32, z: i32) -> ColumnProfile {
         let moisture = self.value_2d(x, z, 1_200, 0x4f1b);
         let temperature = self.value_2d(x, z, 1_900, 0xa18d);
         let local_biome = self.value_2d(x, z, 260, 0x8b21);
@@ -402,7 +410,37 @@ impl Generator {
             ridge,
             region,
             material,
+            route: None,
         }
+    }
+
+    fn apply_route_profile(self, x: i32, z: i32, mut profile: ColumnProfile) -> ColumnProfile {
+        let Some(route) = sample_first_pilgrim_road(x, z) else {
+            return profile;
+        };
+        let segment = usize::from(route.segment_index);
+        let (Some(from), Some(to)) = (
+            FIRST_PILGRIM_ROAD_NODES.get(segment).copied(),
+            FIRST_PILGRIM_ROAD_NODES.get(segment + 1).copied(),
+        ) else {
+            return profile;
+        };
+        let target_height = from.y as f32 + (to.y - from.y) as f32 * route.segment_t;
+        profile.height = (profile.height as f32
+            + (target_height - profile.height as f32) * route.terrain_blend)
+            .round() as i32;
+        if route.core > 0.02 {
+            let paving_along = (route.distance_along_voxels / 12.0).floor() as i32;
+            let paving_lateral =
+                ((route.signed_lateral_voxels + ROUTE_CORE_HALF_WIDTH_VOXELS) / 6.0).floor() as i32;
+            profile.material = if self.hash(paving_along, 0, paving_lateral, 0x51ab_5eed) & 7 == 0 {
+                Material::Stone
+            } else {
+                Material::Limestone
+            };
+        }
+        profile.route = Some(route);
+        profile
     }
 
     pub fn surface_height(self, x: i32, z: i32) -> i32 {
@@ -419,6 +457,7 @@ impl Generator {
             moisture: profile.moisture,
             temperature: profile.temperature,
             ridge: profile.ridge,
+            route: profile.route,
         }
     }
 
@@ -602,6 +641,12 @@ impl Generator {
         let (anchor_x, anchor_z, hash) = self.feature_anchor(cell_x, cell_z);
         let surface = self.surface_sample(anchor_x, anchor_z);
         if surface.height < SEA_LEVEL_VOXELS || surface.water_level.is_some() {
+            return None;
+        }
+        if surface.route.is_some_and(|route| {
+            route.distance_to_route_voxels
+                <= ROUTE_CORE_HALF_WIDTH_VOXELS + FEATURE_MAX_RADIUS_VOXELS as f32 + 3.0
+        }) {
             return None;
         }
         let kind = match surface.region {
@@ -867,7 +912,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checksum, 0x527e_5bdf_fbc2_7ec3);
+        assert_eq!(checksum, 0x31f1_c297_67d3_ee7d);
     }
 
     #[test]
@@ -1040,7 +1085,7 @@ mod tests {
             crate::FeatureCompositionMode::ALL.into_iter().collect()
         );
         assert!(prominence_counts.into_iter().all(|count| count > 0));
-        assert_eq!(checksum, 0xac20_8e96_0b77_2f1a);
+        assert_eq!(checksum, 0x8958_b81d_7fcb_ffb7);
     }
 
     #[test]
@@ -1052,6 +1097,126 @@ mod tests {
                 .expect("the fixed catalog should contain a hero of every regional kind");
             assert_eq!(feature.kind, kind);
             assert_eq!(feature.prominence, 2);
+        }
+    }
+
+    #[test]
+    fn pilgrim_road_is_dry_continuous_editable_ten_centimetre_terrain() {
+        let generator = Generator::new(0x5eed_cafe);
+        let length = crate::first_pilgrim_road_length_voxels() as i32;
+        let mut previous: Option<i32> = None;
+        let mut previous_point = None;
+        let mut max_step = 0;
+        let mut max_cut = 0;
+        let mut max_fill = 0;
+        let mut sampled_columns = 0;
+        for distance in 0..=length {
+            let (point, tangent) = crate::first_pilgrim_road_point_at_distance(distance as f32)
+                .expect("road distance must resolve to its authored polyline");
+            let point = [point[0].round() as i32, point[1].round() as i32];
+            if previous_point == Some(point) {
+                continue;
+            }
+            previous_point = Some(point);
+            let sample = generator.surface_sample(point[0], point[1]);
+            let route = sample.route.expect("centerline must retain route identity");
+            assert!(route.core > 0.5);
+            assert!(sample.water_level.is_none());
+            assert!(matches!(
+                sample.material,
+                Material::Limestone | Material::Stone
+            ));
+            assert_eq!(
+                generator.sample(point[0], sample.height, point[1]),
+                sample.material
+            );
+            assert_eq!(
+                generator.sample(point[0], sample.height + 1, point[1]),
+                Material::Air
+            );
+            let natural = generator.natural_column_profile(point[0], point[1]);
+            max_cut = max_cut.max(natural.height - sample.height);
+            max_fill = max_fill.max(sample.height - natural.height);
+            if let Some(previous) = previous {
+                max_step = max_step.max((sample.height - previous).abs());
+            }
+            previous = Some(sample.height);
+            sampled_columns += 1;
+
+            // The player's 0.56 m diameter fits entirely on the graded bed without a cross-slope snag.
+            for lateral in [-3.0, 3.0] {
+                let x = (point[0] as f32 - tangent[1] * lateral).round() as i32;
+                let z = (point[1] as f32 + tangent[0] * lateral).round() as i32;
+                let shoulder = generator.surface_sample(x, z);
+                assert!((shoulder.height - sample.height).abs() <= 1);
+                assert!(shoulder.water_level.is_none());
+            }
+        }
+        assert!(sampled_columns > 1_000);
+        assert!(
+            max_step <= 3,
+            "road longitudinal step was {max_step} voxels"
+        );
+        assert!(max_cut <= 3, "road cut reached {max_cut} voxels");
+        assert!(max_fill <= 2, "road fill reached {max_fill} voxels");
+    }
+
+    #[test]
+    fn route_surface_matches_chunk_region_and_sparse_edit_authority() {
+        let generator = Generator::new(0x5eed_cafe);
+        let length = crate::first_pilgrim_road_length_voxels();
+        let probes = [
+            crate::first_pilgrim_road_point_at_distance(0.0).unwrap().0,
+            crate::first_pilgrim_road_point_at_distance(length * 0.5)
+                .unwrap()
+                .0,
+            crate::first_pilgrim_road_point_at_distance(length - 1.0)
+                .unwrap()
+                .0,
+        ];
+        for point in probes {
+            let x = point[0].round() as i32;
+            let z = point[1].round() as i32;
+            let surface = generator.surface_sample(x, z);
+            let coord = crate::VoxelCoord::new(x, surface.height, z);
+            let chunk = generator.generate_chunk(coord.chunk());
+            let local = coord.local();
+            assert_eq!(chunk.get(local[0], local[1], local[2]), surface.material);
+            let region = generator.region(x - 1, z - 1, 3, 3);
+            assert_eq!(region.sample(x, surface.height, z), surface.material);
+
+            let mut edits = crate::EditMap::default();
+            edits.set(generator, coord, Material::Air);
+            assert_eq!(edits.sample(generator, coord), Material::Air);
+            edits.set(generator, coord, surface.material);
+            assert!(edits.is_empty());
+        }
+    }
+
+    #[test]
+    fn terrain_outside_route_shoulder_is_identical_to_natural_generation() {
+        let generator = Generator::new(0x5eed_cafe);
+        for distance in (0..crate::first_pilgrim_road_length_voxels() as i32).step_by(73) {
+            let (point, tangent) =
+                crate::first_pilgrim_road_point_at_distance(distance as f32).unwrap();
+            for side in [-1.0, 1.0] {
+                let offset = crate::ROUTE_SHOULDER_WIDTH_VOXELS + 2.0;
+                let x = (point[0] - tangent[1] * offset * side).round() as i32;
+                let z = (point[1] + tangent[0] * offset * side).round() as i32;
+                if sample_first_pilgrim_road(x, z).is_some() {
+                    // Near a bend, the other segment can legitimately own this sample.
+                    continue;
+                }
+                let actual = generator.column_profile(x, z);
+                let natural = generator.natural_column_profile(x, z);
+                assert_eq!(actual.height, natural.height);
+                assert_eq!(actual.material, natural.material);
+                assert_eq!(actual.region, natural.region);
+                assert_eq!(actual.moisture, natural.moisture);
+                assert_eq!(actual.temperature, natural.temperature);
+                assert_eq!(actual.ridge, natural.ridge);
+                assert!(actual.route.is_none());
+            }
         }
     }
 }

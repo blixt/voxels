@@ -6,6 +6,7 @@ pub const ROUTE_TOKEN_CADENCE_VOXELS: f32 = 288.0;
 pub const ROUTE_TOKEN_SIDE_OFFSET_VOXELS: f32 = 32.0;
 const ROUTE_TOKEN_START_VOXELS: f32 = ROUTE_TOKEN_CADENCE_VOXELS * 0.5;
 const FEATURE_ANCHOR_MARGIN_VOXELS: i32 = 12;
+pub const FIRST_PILGRIM_ROAD_BOUNDS: [[i32; 2]; 2] = [[-1_234, -6], [55, 1_249]];
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -17,24 +18,40 @@ pub enum RouteId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RouteNode {
     pub x: i32,
+    pub y: i32,
     pub z: i32,
 }
 
-/// Authored in canonical 10 cm voxel coordinates. The road begins beside spawn and then bends far
-/// enough across the generated landscape to exercise streaming, region changes, and long sightlines.
-pub const FIRST_PILGRIM_ROAD_NODES: [RouteNode; 12] = [
-    RouteNode { x: -480, z: 32 },
-    RouteNode { x: -160, z: 48 },
-    RouteNode { x: 160, z: 72 },
-    RouteNode { x: 448, z: 224 },
-    RouteNode { x: 736, z: 160 },
-    RouteNode { x: 1_024, z: -96 },
-    RouteNode { x: 1_344, z: -192 },
-    RouteNode { x: 1_664, z: 0 },
-    RouteNode { x: 1_984, z: 320 },
-    RouteNode { x: 2_304, z: 640 },
-    RouteNode { x: 2_688, z: 512 },
-    RouteNode { x: 3_072, z: 128 },
+/// Authored in canonical 10 cm voxel coordinates after a terrain-aware coarse search. The road begins
+/// beside spawn, crosses forest, moor, and badlands, then terminates at a prominent hoodoo. Its node
+/// grades require at most a 30 cm cut or 20 cm fill against generator v8's route-free terrain.
+pub const FIRST_PILGRIM_ROAD_NODES: [RouteNode; 6] = [
+    RouteNode { x: 0, y: 35, z: 48 },
+    RouteNode {
+        x: -256,
+        y: 36,
+        z: 304,
+    },
+    RouteNode {
+        x: -512,
+        y: 30,
+        z: 528,
+    },
+    RouteNode {
+        x: -752,
+        y: 31,
+        z: 784,
+    },
+    RouteNode {
+        x: -992,
+        y: 43,
+        z: 1_040,
+    },
+    RouteNode {
+        x: -1_180,
+        y: 36,
+        z: 1_194,
+    },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -75,6 +92,10 @@ pub struct RouteAnchor {
 }
 
 pub fn sample_first_pilgrim_road(x: i32, z: i32) -> Option<RouteSample> {
+    let [[min_x, min_z], [max_x, max_z]] = FIRST_PILGRIM_ROAD_BOUNDS;
+    if !(min_x..max_x).contains(&x) || !(min_z..max_z).contains(&z) {
+        return None;
+    }
     sample_polyline(
         RouteId::FirstPilgrimRoad,
         &FIRST_PILGRIM_ROAD_NODES,
@@ -86,6 +107,10 @@ pub fn sample_first_pilgrim_road(x: i32, z: i32) -> Option<RouteSample> {
 
 pub fn first_pilgrim_road_length_voxels() -> f32 {
     polyline_length(&FIRST_PILGRIM_ROAD_NODES)
+}
+
+pub fn first_pilgrim_road_point_at_distance(distance: f32) -> Option<([f32; 2], [f32; 2])> {
+    point_and_tangent_at_distance(&FIRST_PILGRIM_ROAD_NODES, distance)
 }
 
 pub fn first_pilgrim_route_anchor_count() -> u16 {
@@ -284,6 +309,7 @@ mod tests {
         let to = FIRST_PILGRIM_ROAD_NODES[1];
         let point = RouteNode {
             x: (from.x + to.x) / 2,
+            y: (from.y + to.y) / 2,
             z: (from.z + to.z) / 2,
         };
         let center = sample_first_pilgrim_road(point.x, point.z).unwrap();
@@ -307,7 +333,7 @@ mod tests {
     fn route_tokens_are_unique_alternating_and_inside_feature_cells() {
         let mut cells = BTreeSet::new();
         let count = first_pilgrim_route_anchor_count();
-        assert!(count >= 12);
+        assert!(count >= 5);
         let mut previous_distance = 0;
         for ordinal in 0..count {
             let anchor = first_pilgrim_route_anchor(ordinal).unwrap();
@@ -342,10 +368,36 @@ mod tests {
     }
 
     #[test]
-    fn route_begins_in_negative_space_and_passes_spawn() {
-        assert!(FIRST_PILGRIM_ROAD_NODES[0].x < 0);
+    fn route_begins_at_spawn_and_reaches_negative_space() {
+        assert_eq!(
+            FIRST_PILGRIM_ROAD_NODES[0],
+            RouteNode { x: 0, y: 35, z: 48 }
+        );
+        assert!(FIRST_PILGRIM_ROAD_NODES.last().unwrap().x < 0);
         let spawn = sample_first_pilgrim_road(0, 52).unwrap();
         assert!(spawn.distance_to_route_voxels < ROUTE_CORE_HALF_WIDTH_VOXELS);
         assert!(spawn.core > 0.5);
+    }
+
+    #[test]
+    fn fast_reject_bounds_contain_every_authored_node_and_shoulder() {
+        for node in FIRST_PILGRIM_ROAD_NODES {
+            assert!(sample_first_pilgrim_road(node.x, node.z).is_some());
+            for [dx, dz] in [
+                [-ROUTE_SHOULDER_WIDTH_VOXELS as i32, 0],
+                [ROUTE_SHOULDER_WIDTH_VOXELS as i32, 0],
+                [0, -ROUTE_SHOULDER_WIDTH_VOXELS as i32],
+                [0, ROUTE_SHOULDER_WIDTH_VOXELS as i32],
+            ] {
+                // A cardinal shoulder point can be farther than the route's radial reach because the
+                // segment is diagonal, but the manually duplicated broad-phase must never reject it.
+                let x = node.x + dx;
+                let z = node.z + dz;
+                let [[min_x, min_z], [max_x, max_z]] = FIRST_PILGRIM_ROAD_BOUNDS;
+                let broad_phase_contains =
+                    (min_x..max_x).contains(&x) && (min_z..max_z).contains(&z);
+                assert!(broad_phase_contains);
+            }
+        }
     }
 }
