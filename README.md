@@ -19,6 +19,7 @@ greedy meshing, rendering, and persistence boundary.
 The browser persistence stress test remains explicit because it launches a system Chrome instance.
 `vp run bench:world` runs native Criterion baselines for chunk generation, VXCH encode/decode, and
 greedy meshing. Reports are written under the ignored `target/criterion/` directory.
+`vp run bench:core` compares 120 dry and submerged fixed simulation steps.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture
@@ -33,7 +34,7 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 
 The canonical world is generator identity plus sparse edits. Near meshes and four streamed surface LOD
 rings are derived caches; the rings sample at 0.2, 0.4, 0.8, and 1.6 m while the editable near field
-retains authoritative 10 cm voxels. Generator v5 shares one regional surface sample across canonical
+retains authoritative 10 cm voxels. Generator v6 shares one regional surface sample across canonical
 chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
 conditional skirts, and activates a newly streamed coverage set only when it is complete.
@@ -46,6 +47,8 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 - Click the world to capture the pointer.
 - Move with <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>.
 - Jump with <kbd>Space</kbd>; hold <kbd>Shift</kbd> to sprint.
+- In deep water, use <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to swim along the view direction,
+  <kbd>Space</kbd> to ascend, and <kbd>Shift</kbd> to dive.
 - Look with the mouse; <kbd>Esc</kbd> releases pointer lock.
 - Remove the targeted voxel with the left mouse button; place a grass voxel with the right mouse
   button. Sparse edits are saved transactionally in SQLite on OPFS.
@@ -62,4 +65,6 @@ count, followed by visible chunks, draw calls, arena pages, allocated/capacity M
 work and far-tile residency. It is intentionally an automation hook rather than a second JavaScript
 game model. The final thirteen values are display-frame cadence in milliseconds, shadow-caster draws,
 active shadow cascades, load/remesh p95 and maximum latency in scheduler frames, and resident tile
-counts for each of the four surface LOD levels, followed by visible water quads and water-pass draws.
+counts for each of the four surface LOD levels, followed by visible water quads, water-pass draws, and
+refraction-copy MiB. The final four values are exact immersion, eye depth, eyes-submerged, and
+swimming state.

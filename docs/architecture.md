@@ -40,7 +40,7 @@ authoritative near field keeps the required 10 cm voxel resolution and uses face
 rectangle merging. A column becomes render-ready only when all desired vertical chunks are resident,
 so a partially streamed stack cannot expose an open terrain slice.
 
-Generator v5 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
+Generator v6 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
 detail, dune, and volcanic fields. Six dominant regional identities—verdant forest, wind-cut moor,
 alpine, red badlands, pale dunes, and volcanic terrain—select surface ecology and geology, while their
 normalized weights blend height modifiers continuously across boundaries. Canonical generation, LOD
@@ -54,6 +54,18 @@ the cells above terrain through the versioned sea level, never underground cave 
 meshes split opaque and translucent quads without duplicating a water face against an opaque bank.
 The edit journal stores Water/Air overrides exactly like every other material, so removing a surface
 cell and restoring its generated water are durable sparse operations rather than renderer effects.
+Continental noise shapes flooded areas into a shelf, slope, and navigable basin instead of a shallow
+visual sheet. Portable simulation derives exact player immersion from AABB overlap with those same
+water voxels, uses hysteretic swim state and buoyancy while retaining solid collision, and accepts
+restored underwater cameras. The shell caches generated columns across fixed-step collision/fluid
+queries so the richer probe does not recompute climate fields per voxel.
+
+The frame uniform appends a version-asserted medium vector containing smoothed underwater blend, eye
+depth, physical immersion, and local surface height. Opaque and sky shaders apply wavelength-dependent
+absorption and in-scattering, terrain caustics, and a world-anchored Snell window; the water shader
+handles underside refraction and total internal reflection. Simulation values remain fixed-step and
+unsmoothed. Rust/WGPU chrome reports immersion/depth and re-opens a Rust-rendered swim-help toast on
+entry. Disabling animated water changes rendering only, never authoritative fluid physics.
 
 Four independently streamable surface rings derive from the same generator and sparse edit overlay at
 0.2, 0.4, 0.8, and 1.6 m sampling strides. Each tile covers 32 samples per side and emits a top plus

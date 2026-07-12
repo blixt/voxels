@@ -151,3 +151,16 @@ strict order SQLite close -> VFS pause -> Web Lock release. Its dedicated Chrome
 rapid reloads across three tabs and two owner handoffs on an isolated localhost origin. All three
 workers reached resident rendered geometry, every body stayed canvas-plus-script only, and the gate
 recorded zero OPFS, SQLite, SyncAccessHandle, Web Lock, or persistence warnings/errors.
+
+## 2026-07-12: navigable water and underwater medium
+
+Generator v6 replaces the former shallow basin subtraction with continental shelf/slope/basin
+bathymetry. The deterministic coastal showcase column now contains 2.2 m of canonical water instead of
+0.5 m, and a host invariant requires at least 2.0 m there. Water remains editable at 10 cm resolution.
+
+Exact fluid sensing roughly doubles portable camera-update cost, but the absolute budget is small. On
+the same release benchmark host, 120 dry grounded ticks measured 90.48 us and 120 submerged ticks
+measured 177.87 us: about 0.75 us versus 1.48 us per 120 Hz tick. `vp run bench:core` preserves both
+baselines. The browser gate entered the Rust underwater showcase, toggled water rendering off and back
+on while verifying physics stayed submerged, and completed with no WGPU/shader warning or error. The
+captured frame retained only canvas-rendered crosshair, depth/immersion status, and swim-help chrome.
