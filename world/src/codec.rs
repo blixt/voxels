@@ -38,19 +38,25 @@ impl fmt::Display for CodecError {
 impl std::error::Error for CodecError {}
 
 pub fn encode_chunk(chunk: &Chunk) -> Vec<u8> {
-    let mut palette: Vec<u16> = chunk
-        .voxels()
-        .iter()
-        .map(|material| material.id())
-        .collect();
-    palette.sort_unstable();
-    palette.dedup();
+    let mut present = [false; Material::ALL.len()];
+    for material in chunk.voxels() {
+        present[usize::from(material.id())] = true;
+    }
+    let mut palette = Vec::with_capacity(Material::ALL.len());
+    let mut palette_indices = [0u8; Material::ALL.len()];
+    for material in Material::ALL {
+        let id = material.id();
+        if present[usize::from(id)] {
+            palette_indices[usize::from(id)] = palette.len() as u8;
+            palette.push(id);
+        }
+    }
     let uniform = palette.len() == 1;
     let bits = if uniform { 0 } else { bits_for(palette.len()) };
     let payload = if uniform {
         Vec::new()
     } else {
-        pack_indices(chunk.voxels(), &palette, bits)
+        pack_indices(chunk.voxels(), &palette_indices, bits)
     };
     let hash = hash_voxels(chunk.voxels());
     let coord = chunk.coord();
@@ -165,12 +171,16 @@ fn bits_for(palette_len: usize) -> u8 {
     usize::BITS.saturating_sub((palette_len - 1).leading_zeros()) as u8
 }
 
-fn pack_indices(voxels: &[Material], palette: &[u16], bits: u8) -> Vec<u8> {
+fn pack_indices(
+    voxels: &[Material],
+    palette_indices: &[u8; Material::ALL.len()],
+    bits: u8,
+) -> Vec<u8> {
     let mut packed = Vec::with_capacity((voxels.len() * usize::from(bits)).div_ceil(8));
     let mut accumulator = 0u64;
     let mut held = 0u32;
     for material in voxels {
-        let index = palette.binary_search(&material.id()).unwrap_or_default() as u64;
+        let index = u64::from(palette_indices[usize::from(material.id())]);
         accumulator |= index << held;
         held += u32::from(bits);
         while held >= 8 {
@@ -279,6 +289,10 @@ mod tests {
     fn generated_chunk_round_trips_through_palette_bits() {
         let chunk = Generator::new(42).generate_chunk(ChunkCoord::new(0, 0, 0));
         let encoded = encode_chunk(&chunk);
+        assert_eq!(
+            blake3::hash(&encoded).to_hex().to_string(),
+            "3c3accd05e44cc9ecb8ec291e56b579fe52e42df2682c171e005292bc39b37cc"
+        );
         assert!(encoded.len() < CHUNK_VOLUME * size_of::<u16>());
         assert_eq!(decode_chunk(&encoded), Ok(chunk));
     }
