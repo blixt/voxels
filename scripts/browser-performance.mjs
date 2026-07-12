@@ -50,12 +50,15 @@ const SNAPSHOT = {
   profileWasmHighMiB: 65,
   profileEvictions: 66,
   materialDetail: 67,
-  schemaVersion: 68,
-  sampleCount: 69,
-  droppedSamples: 70,
+  daylightPhase: 68,
+  surfaceRegion: 69,
+  cloudCoverage: 70,
+  schemaVersion: 71,
+  sampleCount: 72,
+  droppedSamples: 73,
 };
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 71;
+const FRAME_SAMPLE_START = 74;
 const EDIT_SAMPLE_WIDTH = 6;
 
 function percentile(values, fraction) {
@@ -128,6 +131,11 @@ function phaseSummary(captures) {
     totalEvictions: latest[SNAPSHOT.totalEvictions],
     staleCompletions: latest[SNAPSHOT.staleCompletions],
     materialDetail: latest[SNAPSHOT.materialDetail] === 1,
+    atmosphere: {
+      daylightPhase: latest[SNAPSHOT.daylightPhase],
+      surfaceRegion: latest[SNAPSHOT.surfaceRegion],
+      cloudCoverage: latest[SNAPSHOT.cloudCoverage],
+    },
     loadLatencyFrames: {
       p95: latest[SNAPSHOT.loadP95Frames],
       max: latest[SNAPSHOT.loadMaxFrames],
@@ -341,6 +349,76 @@ async function materialDetailProfile(page, viewportWidth) {
   return result;
 }
 
+async function cycleDaylight(page, viewportWidth, expectedPhase) {
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(100);
+  await page.mouse.click(viewportWidth - 83, 90);
+  await page.waitForTimeout(100);
+  // The fifth Rust context row is "Cycle regional daylight". This intentionally exercises canvas
+  // hit-testing rather than adding a browser-side debug setter for atmosphere state.
+  await page.mouse.click(viewportWidth - 171, 270);
+  await page.waitForFunction(
+    async ({ index, expected }) => {
+      const snapshot = await globalThis.__VOXELS__.snapshot();
+      return snapshot[index] === expected;
+    },
+    { index: SNAPSHOT.daylightPhase, expected: expectedPhase },
+    { timeout: 5_000 },
+  );
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(1_200);
+}
+
+async function atmosphereProfile(page, viewportWidth) {
+  const names = ["dawn", "clearDay", "goldenHour", "blueHour"];
+  const phases = {};
+  for (let captured = 0; captured < names.length; captured += 1) {
+    const before = await capture(page);
+    const phase = before.snapshot[SNAPSHOT.daylightPhase];
+    phases[names[phase]] = phaseSummary(await sample(page, 4_000));
+    await page.screenshot({ path: `target/atmosphere-${names[phase]}.png` });
+    if (captured + 1 < names.length) {
+      await cycleDaylight(page, viewportWidth, (phase + 1) % names.length);
+    }
+  }
+
+  const values = Object.values(phases);
+  const violations = [];
+  if (values.length !== names.length) violations.push("did not observe all four daylight phases");
+  const reference = values[0];
+  for (const [name, phase] of Object.entries(phases)) {
+    if (phase.frameMs.p95 > 12 || phase.frameMs.above16_67ms > 0) {
+      violations.push(`${name} missed the 120Hz frame gate`);
+    }
+    if (phase.gpu.available && phase.gpu.worldMs.p95 > 2.0) {
+      violations.push(`${name} world GPU p95 exceeded 2ms`);
+    }
+    if (phase.gpu.available && phase.gpu.totalMs.p95 > 7.5) {
+      violations.push(`${name} active GPU p95 exceeded 7.5ms`);
+    }
+    if (phase.atmosphere.cloudCoverage < 0.08 || phase.atmosphere.cloudCoverage > 0.94) {
+      violations.push(`${name} cloud coverage escaped its normalized visual range`);
+    }
+    if (
+      reference &&
+      (phase.quads !== reference.quads ||
+        phase.visibleChunks !== reference.visibleChunks ||
+        phase.drawCalls !== reference.drawCalls ||
+        phase.meshArenaCapacityMiB !== reference.meshArenaCapacityMiB)
+    ) {
+      violations.push(`${name} changed geometry or mesh residency`);
+    }
+    if (phase.droppedSamples > 0) violations.push(`${name} dropped frame samples`);
+  }
+  if (violations.length > 0) {
+    throw new Error(
+      `atmosphere profile violations: ${violations.join(", ")}; ${JSON.stringify(phases)}`,
+    );
+  }
+  return phases;
+}
+
 async function sustainedProfile(page) {
   await page.evaluate(() => globalThis.__VOXELS__.profile(1));
   const captures = [];
@@ -427,7 +505,7 @@ async function waitForEngine(page) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
     lastSnapshot = snapshot;
     if (
-      snapshot[SNAPSHOT.schemaVersion] === 7 &&
+      snapshot[SNAPSHOT.schemaVersion] === 8 &&
       snapshot[SNAPSHOT.quads] > 0 &&
       snapshot[SNAPSHOT.residentChunks] > 0 &&
       snapshot[SNAPSHOT.pendingJobs] === 0
@@ -476,6 +554,7 @@ const viewport = { width: 1280, height: 720 };
 const sustained = process.argv.includes("--sustained");
 const edits = process.argv.includes("--edits");
 const materials = process.argv.includes("--materials");
+const atmosphere = process.argv.includes("--atmosphere");
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
@@ -521,6 +600,8 @@ try {
     scenarios = { sustained: await sustainedProfile(page) };
   } else if (materials) {
     scenarios = { materials: await materialDetailProfile(page, viewport.width) };
+  } else if (atmosphere) {
+    scenarios = { atmosphere: await atmosphereProfile(page, viewport.width) };
   } else {
     const steady = phaseSummary(await sample(page, 4_000));
     await page.keyboard.down("KeyW");
