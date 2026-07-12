@@ -19,9 +19,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample};
 use voxels_world::{
-    AtmosphereSample, CHUNK_EDGE, ChunkCoord, FarTileCoord, Material, MeshedChunk, Quad,
-    RenderLayer, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfaceQuad, SurfaceRegion,
-    SurfaceTileCoord, SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh,
+    AtmosphereSample, CHUNK_EDGE, ChunkCoord, Material, MeshedChunk, Quad, RenderLayer,
+    SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfaceRegion, SurfaceTileCoord,
+    SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -1558,45 +1558,6 @@ impl Renderer {
         uploaded
     }
 
-    pub fn upload_far_tile(&mut self, coord: FarTileCoord, quads: &[SurfaceQuad]) -> bool {
-        self.upload_surface_tile(coord.surface_coord(), quads)
-    }
-
-    pub fn upload_surface_tile(&mut self, coord: SurfaceTileCoord, quads: &[SurfaceQuad]) -> bool {
-        let key = (coord.level.index() + 1, coord.x, 0, coord.z);
-        if quads.is_empty() {
-            self.remove_surface_tile(coord);
-            return true;
-        }
-        let Some(bounds) = SurfaceBounds::from_quads(quads) else {
-            return false;
-        };
-        let underlay_offset = FAR_UNDERLAY_OFFSET_METRES * (f32::from(coord.level.index()) + 1.0);
-        let gpu_quads: Vec<_> = quads
-            .iter()
-            .map(|quad| GpuQuad {
-                origin: [
-                    quad.origin[0] as f32 * VOXEL_SIZE_METRES,
-                    quad.origin[1] as f32 * VOXEL_SIZE_METRES - underlay_offset,
-                    quad.origin[2] as f32 * VOXEL_SIZE_METRES,
-                ],
-                face: u32::from(quad.face),
-                extent: [
-                    f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
-                    f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
-                ],
-                material: u32::from(quad.material.id())
-                    | FAR_MATERIAL_FLAG
-                    | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
-                ao: 0xff,
-            })
-            .collect();
-        let min = glam::Vec3::from_array(bounds.min.map(|value| value as f32 * VOXEL_SIZE_METRES))
-            - glam::Vec3::Y * underlay_offset;
-        let max = glam::Vec3::from_array(bounds.max.map(|value| value as f32 * VOXEL_SIZE_METRES));
-        self.upload_mesh(key, &gpu_quads, min, max)
-    }
-
     pub fn upload_surface_tile_meshes(
         &mut self,
         tile: &SurfaceTileMesh,
@@ -1755,32 +1716,6 @@ impl Renderer {
         opaque_uploaded && water_uploaded
     }
 
-    fn upload_mesh(
-        &mut self,
-        key: MeshKey,
-        gpu_quads: &[GpuQuad],
-        bounds_min: glam::Vec3,
-        bounds_max: glam::Vec3,
-    ) -> bool {
-        let Ok(size) = u32::try_from(size_of_val(gpu_quads)) else {
-            return false;
-        };
-        self.upload_mesh_sliced(
-            key,
-            gpu_quads,
-            vec![MeshSlice {
-                relative_offset: 0,
-                size,
-                quad_count: gpu_quads.len() as u32,
-                bounds_min,
-                bounds_max,
-                surface_bounds: None,
-                skirt_edge: None,
-                render_layer: RenderLayer::Opaque,
-            }],
-        )
-    }
-
     fn upload_mesh_sliced(
         &mut self,
         key: MeshKey,
@@ -1827,10 +1762,6 @@ impl Renderer {
         let key = (0, coord.x, coord.y, coord.z);
         self.remove_chunk_mesh(key);
         self.chunk_activations.remove(key);
-    }
-
-    pub fn remove_far_tile(&mut self, coord: FarTileCoord) {
-        self.remove_surface_tile(coord.surface_coord());
     }
 
     pub fn remove_surface_tile(&mut self, coord: SurfaceTileCoord) {
