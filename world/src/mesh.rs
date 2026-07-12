@@ -7,6 +7,10 @@ pub const FACE_POS_Y: u8 = 2;
 pub const FACE_NEG_Y: u8 = 3;
 pub const FACE_POS_Z: u8 = 4;
 pub const FACE_NEG_Z: u8 = 5;
+const EMISSIVE_BIN_EDGE: usize = 8;
+const EMISSIVE_BINS_PER_AXIS: usize = CHUNK_EDGE / EMISSIVE_BIN_EDGE;
+const EMISSIVE_BIN_COUNT: usize =
+    EMISSIVE_BINS_PER_AXIS * EMISSIVE_BINS_PER_AXIS * EMISSIVE_BINS_PER_AXIS;
 
 /// Compact durable mesher output. The renderer expands each record into six vertices on the GPU.
 #[repr(C)]
@@ -72,16 +76,21 @@ pub fn mesh_chunk(
     mut outside: impl FnMut(i32, i32, i32) -> Material,
 ) -> MeshedChunk {
     let mut mesh = MeshedChunk::default();
-    let mut emission_counts = [0u16; Material::ALL.len()];
-    let mut emission_sums = [[0u32; 3]; Material::ALL.len()];
+    let origin = chunk.coord().world_origin();
+    let occupancy = build_occupancy_halo(chunk, origin, &mut outside);
+    let mut emission_counts = [0u16; Material::ALL.len() * EMISSIVE_BIN_COUNT];
+    let mut emission_sums = [[0u32; 3]; Material::ALL.len() * EMISSIVE_BIN_COUNT];
     for y in 0..CHUNK_EDGE {
         for z in 0..CHUNK_EDGE {
             for x in 0..CHUNK_EDGE {
                 let material = chunk.get(x, y, z);
-                if material.emission().is_none() {
+                if material.emission().is_none() || !emitter_is_exposed(&occupancy, [x, y, z]) {
                     continue;
                 }
-                let index = usize::from(material.id());
+                let bin = x / EMISSIVE_BIN_EDGE
+                    + z / EMISSIVE_BIN_EDGE * EMISSIVE_BINS_PER_AXIS
+                    + y / EMISSIVE_BIN_EDGE * EMISSIVE_BINS_PER_AXIS * EMISSIVE_BINS_PER_AXIS;
+                let index = usize::from(material.id()) * EMISSIVE_BIN_COUNT + bin;
                 emission_counts[index] = emission_counts[index].saturating_add(1);
                 for (axis, value) in [x, y, z].into_iter().enumerate() {
                     emission_sums[index][axis] = emission_sums[index][axis]
@@ -91,17 +100,17 @@ pub fn mesh_chunk(
         }
     }
     for material in Material::ALL {
-        let index = usize::from(material.id());
-        if emission_counts[index] > 0 {
-            mesh.emissive_clusters.push(EmissiveCluster {
-                position_half_voxel_sum: emission_sums[index],
-                voxel_count: emission_counts[index],
-                material: material.id(),
-            });
+        for bin in 0..EMISSIVE_BIN_COUNT {
+            let index = usize::from(material.id()) * EMISSIVE_BIN_COUNT + bin;
+            if emission_counts[index] > 0 {
+                mesh.emissive_clusters.push(EmissiveCluster {
+                    position_half_voxel_sum: emission_sums[index],
+                    voxel_count: emission_counts[index],
+                    material: material.id(),
+                });
+            }
         }
     }
-    let origin = chunk.coord().world_origin();
-    let occupancy = build_occupancy_halo(chunk, origin, &mut outside);
     let mut mask = vec![FaceKey::default(); CHUNK_EDGE * CHUNK_EDGE];
     for face in 0..6 {
         let (axis, u_axis, v_axis, step) = face_axes(face);
@@ -176,6 +185,29 @@ pub fn mesh_chunk(
         }
     }
     mesh
+}
+
+fn emitter_is_exposed(occupancy: &[u8], local: [usize; 3]) -> bool {
+    let local = local.map(|value| value as i32);
+    [
+        [-1, 0, 0],
+        [1, 0, 0],
+        [0, -1, 0],
+        [0, 1, 0],
+        [0, 0, -1],
+        [0, 0, 1],
+    ]
+    .into_iter()
+    .any(|offset| {
+        halo_kind(
+            occupancy,
+            [
+                local[0] + offset[0],
+                local[1] + offset[1],
+                local[2] + offset[2],
+            ],
+        ) != 1
+    })
 }
 
 fn build_occupancy_halo(
@@ -319,16 +351,16 @@ mod tests {
     }
 
     #[test]
-    fn emissive_voxels_form_one_deterministic_material_cluster_per_chunk() {
+    fn emissive_voxels_form_deterministic_exposed_spatial_clusters() {
         let mut chunk = Chunk::empty(ChunkCoord::new(-3, 2, 7));
         chunk.set(2, 4, 6, Material::GlowCrystal);
-        chunk.set(6, 8, 10, Material::GlowCrystal);
+        chunk.set(6, 6, 6, Material::GlowCrystal);
         chunk.set(12, 12, 12, Material::Basalt);
         let mesh = mesh_chunk(&chunk, |_, _, _| Material::Air);
         assert_eq!(
             mesh.emissive_clusters,
             vec![EmissiveCluster {
-                position_half_voxel_sum: [18, 26, 34],
+                position_half_voxel_sum: [18, 22, 26],
                 voxel_count: 2,
                 material: Material::GlowCrystal.id(),
             }]
@@ -338,9 +370,17 @@ mod tests {
         let edited = mesh_chunk(&chunk, |_, _, _| Material::Air);
         assert_eq!(
             edited.emissive_clusters[0].position_half_voxel_sum,
-            [13, 17, 21]
+            [13, 13, 13]
         );
         assert_eq!(edited.emissive_clusters[0].voxel_count, 1);
+
+        let mut buried = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Basalt);
+        buried.set(16, 16, 16, Material::GlowCrystal);
+        assert!(
+            mesh_chunk(&buried, |_, _, _| Material::Basalt)
+                .emissive_clusters
+                .is_empty()
+        );
     }
 
     #[test]
