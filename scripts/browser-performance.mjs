@@ -256,7 +256,7 @@ async function editProfile(page) {
     violations.push("edit phase missed the interactive frame-time gate");
   }
   if (violations.length > 0) {
-    throw new Error(`edit profile violations: ${violations.join(", ")}`);
+    throw new Error(`edit profile violations: ${violations.join(", ")}; ${JSON.stringify(result)}`);
   }
   return result;
 }

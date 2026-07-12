@@ -17,7 +17,10 @@ mod web {
     };
     use voxels_render::renderer::Renderer;
     use voxels_render::ui::LiveStats;
-    use voxels_runtime::{ChunkState, FrameBudget, StreamConfig, StreamScheduler};
+    use voxels_runtime::{
+        ChunkState, FrameBudget, StreamConfig, StreamScheduler, SurfaceFocusAction,
+        SurfaceRevisionCache,
+    };
     use voxels_world::{
         CHUNK_EDGE, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord, EditMap, Generator, Material,
         MeshedChunk, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
@@ -256,9 +259,7 @@ mod web {
         surface_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
         surface_active_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
-        surface_requested_revision: RefCell<BTreeMap<SurfaceTileCoord, u64>>,
-        surface_resident_revision: RefCell<BTreeMap<SurfaceTileCoord, u64>>,
-        surface_revision: Cell<u64>,
+        surface_revisions: RefCell<SurfaceRevisionCache>,
         surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
         surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
         fine_initialized: Cell<bool>,
@@ -499,6 +500,10 @@ mod web {
             let all_lods_ready = fine_coverage_ready
                 && self.surface_queue.borrow().is_empty()
                 && self.surface_dirty.borrow().is_empty();
+            debug_assert!(
+                !all_lods_ready || self.surface_coverage_current(),
+                "surface coverage became ready with missing or stale revisions"
+            );
             renderer.set_lod_coverage_ready(self.fine_initialized.get(), all_lods_ready);
             if all_lods_ready {
                 let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
@@ -734,14 +739,6 @@ mod web {
                         }
                     }
                 }
-                {
-                    let mut requested = self.surface_requested_revision.borrow_mut();
-                    let revision = self.surface_revision.get();
-                    for coord in &desired {
-                        requested.entry(*coord).or_insert(revision);
-                    }
-                }
-
                 let evicted: Vec<_> = self
                     .surface_resident
                     .borrow()
@@ -764,14 +761,12 @@ mod web {
                     .collect();
                 if !evicted.is_empty() {
                     let mut resident = self.surface_resident.borrow_mut();
-                    let mut requested = self.surface_requested_revision.borrow_mut();
-                    let mut resident_revision = self.surface_resident_revision.borrow_mut();
+                    let mut revisions = self.surface_revisions.borrow_mut();
                     let mut dirty = self.surface_dirty.borrow_mut();
                     let mut renderer = self.renderer.borrow_mut();
                     for coord in evicted {
                         resident.remove(&coord);
-                        requested.remove(&coord);
-                        resident_revision.remove(&coord);
+                        revisions.evict(coord);
                         dirty.remove(&coord);
                         renderer.remove_surface_tile(coord);
                     }
@@ -788,10 +783,26 @@ mod web {
                 }
 
                 let resident = self.surface_resident.borrow();
-                let mut candidates: Vec<_> = desired
-                    .into_iter()
-                    .filter(|coord| !resident.contains(coord))
-                    .collect();
+                let mut revisions = self.surface_revisions.borrow_mut();
+                let mut dirty = self.surface_dirty.borrow_mut();
+                let mut candidates = Vec::new();
+                for coord in desired {
+                    match revisions.prepare_focus(coord) {
+                        SurfaceFocusAction::Load { .. } => {
+                            debug_assert!(!resident.contains(&coord));
+                            candidates.push(coord);
+                        }
+                        SurfaceFocusAction::Replace { .. } => {
+                            debug_assert!(resident.contains(&coord));
+                            dirty.insert(coord);
+                        }
+                        SurfaceFocusAction::Current { .. } => {
+                            debug_assert!(resident.contains(&coord));
+                        }
+                    }
+                }
+                drop(dirty);
+                drop(revisions);
                 drop(resident);
                 candidates.sort_by_key(|coord| {
                     let index = coord.level.index() as usize;
@@ -822,24 +833,31 @@ mod web {
                 return;
             };
             let edits = self.edits.borrow();
-            let revision = self
-                .surface_requested_revision
-                .borrow()
-                .get(&coord)
-                .copied()
-                .unwrap_or_else(|| self.surface_revision.get());
+            let revision = {
+                let revisions = self.surface_revisions.borrow();
+                revisions
+                    .requested_revision(coord)
+                    .unwrap_or_else(|| revisions.epoch())
+            };
             let mesh = generate_edited_surface_tile_mesh(self.generator, &edits, coord);
             let water = generate_edited_water_tile_mesh(self.generator, &edits, coord);
             drop(edits);
+            if !self.surface_revisions.borrow().accepts(coord, revision) {
+                if dirty.is_some() {
+                    self.surface_dirty.borrow_mut().insert(coord);
+                } else {
+                    self.surface_queue.borrow_mut().push_front(coord);
+                }
+                return;
+            }
             if self
                 .renderer
                 .borrow_mut()
                 .upload_surface_tile_meshes(&mesh, &water)
             {
                 self.surface_resident.borrow_mut().insert(coord);
-                self.surface_resident_revision
-                    .borrow_mut()
-                    .insert(coord, revision);
+                let committed = self.surface_revisions.borrow_mut().commit(coord, revision);
+                debug_assert!(committed, "uploaded surface revision became stale");
                 self.surface_dirty.borrow_mut().remove(&coord);
             } else if dirty.is_none() {
                 self.surface_queue.borrow_mut().push_front(coord);
@@ -1141,19 +1159,22 @@ mod web {
                     })
                     .collect()
             };
-            let revision = increment_nonzero(self.surface_revision.get());
-            self.surface_revision.set(revision);
+            let revision = self.surface_revisions.borrow_mut().begin_edit();
             let mut surface = Vec::new();
-            let mut requested = self.surface_requested_revision.borrow_mut();
+            let resident = self.surface_resident.borrow();
+            let mut revisions = self.surface_revisions.borrow_mut();
             let mut dirty = self.surface_dirty.borrow_mut();
             for level in SurfaceLodLevel::ALL {
                 for coord in surface_tiles_affected_by_voxel(self.generator, level, target) {
-                    if !self.surface_tile_relevant(coord) {
+                    let relevant = self.surface_tile_relevant(coord);
+                    if !relevant && !resident.contains(&coord) {
                         continue;
                     }
-                    requested.insert(coord, revision);
-                    dirty.insert(coord);
-                    surface.push(SurfaceRequirement { coord, revision });
+                    revisions.request(coord, revision);
+                    if relevant {
+                        dirty.insert(coord);
+                        surface.push(SurfaceRequirement { coord, revision });
+                    }
                 }
             }
             EditRequirements { canonical, surface }
@@ -1164,12 +1185,35 @@ mod web {
                 || surface_tile_in_coverage(coord, self.surface_active_focus.get())
         }
 
+        fn surface_coverage_current(&self) -> bool {
+            let resident = self.surface_resident.borrow();
+            let revisions = self.surface_revisions.borrow();
+            for focus in [self.surface_focus.get(), self.surface_active_focus.get()]
+                .into_iter()
+                .flatten()
+            {
+                for (index, level) in SurfaceLodLevel::ALL.into_iter().enumerate() {
+                    let center = focus[index];
+                    let radius = SURFACE_LOAD_RADIUS_TILES[index];
+                    for dz in -radius..=radius {
+                        for dx in -radius..=radius {
+                            let coord = SurfaceTileCoord::new(level, center.x + dx, center.z + dz);
+                            if !resident.contains(&coord) || !revisions.is_current(coord) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+            true
+        }
+
         fn update_edit_convergence(&self, now_ms: f64, submitted: bool) {
             if !submitted || self.edit_trackers.borrow().is_empty() {
                 return;
             }
             let scheduler = self.scheduler.borrow();
-            let resident_revision = self.surface_resident_revision.borrow();
+            let surface_revisions = self.surface_revisions.borrow();
             let mut trackers = self.edit_trackers.borrow_mut();
             let mut pending = VecDeque::with_capacity(trackers.len());
             while let Some(mut tracker) = trackers.pop_front() {
@@ -1184,9 +1228,9 @@ mod web {
                     tracker.canonical_ms = Some((now_ms - tracker.started_ms) as f32);
                 }
                 let surface_ready = tracker.requirements.surface.iter().all(|requirement| {
-                    resident_revision
-                        .get(&requirement.coord)
-                        .is_some_and(|revision| *revision >= requirement.revision)
+                    surface_revisions
+                        .resident_revision(requirement.coord)
+                        .is_some_and(|revision| revision >= requirement.revision)
                         || !self.surface_tile_relevant(requirement.coord)
                 });
                 if canonical_ready && surface_ready {
@@ -1564,9 +1608,7 @@ mod web {
             surface_focus: Cell::new(None),
             surface_active_focus: Cell::new(None),
             surface_resident: RefCell::new(BTreeSet::new()),
-            surface_requested_revision: RefCell::new(BTreeMap::new()),
-            surface_resident_revision: RefCell::new(BTreeMap::new()),
-            surface_revision: Cell::new(1),
+            surface_revisions: RefCell::new(SurfaceRevisionCache::new()),
             surface_queue: RefCell::new(VecDeque::new()),
             surface_dirty: RefCell::new(BTreeSet::new()),
             fine_initialized: Cell::new(false),
@@ -1662,11 +1704,6 @@ mod web {
         let dx = (coord.x - center.x).abs();
         let dz = (coord.z - center.z).abs();
         dx.max(dz) <= SURFACE_LOAD_RADIUS_TILES[index]
-    }
-
-    const fn increment_nonzero(value: u64) -> u64 {
-        let next = value.wrapping_add(1);
-        if next == 0 { 1 } else { next }
     }
 }
 
