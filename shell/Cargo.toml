@@ -38,6 +38,8 @@ features = [
   # SQLite's OPFS SAH pool is exclusive per origin. Web Locks elect one owning tab and
   # BroadcastChannel lets every other tab proxy its typed persistence operations to that owner.
   "BroadcastChannel",
+  "AbortController",
+  "AbortSignal",
   "MessageEvent",
   "WorkerNavigator",
   "LockManager",

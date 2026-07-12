@@ -7,16 +7,16 @@
 //! sync access handle can remain busy briefly during a rapid reload or ownership handoff.
 
 use rusqlite::{Connection, OptionalExtension, params};
-use sqlite_wasm_vfs::sahpool::{OpfsSAHPoolCfg, install as install_opfs_sahpool};
+use sqlite_wasm_vfs::sahpool::{OpfsSAHPoolCfg, OpfsSAHPoolUtil, install as install_opfs_sahpool};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use voxels_core::CameraState;
 use voxels_world::{EditMap, Material, VoxelCoord};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{BroadcastChannel, DedicatedWorkerGlobalScope, MessageEvent};
+use web_sys::{AbortController, BroadcastChannel, DedicatedWorkerGlobalScope, MessageEvent};
 
 const DATABASE_NAME: &str = "voxels.db";
 const SCHEMA_VERSION: i64 = 3;
@@ -24,7 +24,7 @@ const CHANNEL_NAME: &str = "voxels-db-v1";
 const LOCK_NAME: &str = "voxels-db-owner";
 const WIRE_VERSION: f64 = 1.0;
 const REQUEST_TIMEOUT_MS: i32 = 400;
-const REQUEST_RETRIES: usize = 8;
+const REQUEST_RETRIES: usize = 30;
 const VFS_INSTALL_ATTEMPTS: usize = 20;
 const VFS_RETRY_DELAY_MS: i32 = 150;
 
@@ -65,15 +65,70 @@ struct Pending {
     slot: Rc<RefCell<Option<OperationResult>>>,
 }
 
+/// The leader owns both layers of the browser-local database. SQLite must close first, then the VFS
+/// must pause to relinquish every synchronous OPFS access handle before another worker can install it.
+struct Leader {
+    connection: RefCell<Option<Connection>>,
+    vfs: OpfsSAHPoolUtil,
+    paused: Cell<bool>,
+}
+
+impl Leader {
+    fn new(connection: Connection, vfs: OpfsSAHPoolUtil) -> Self {
+        Self {
+            connection: RefCell::new(Some(connection)),
+            vfs,
+            paused: Cell::new(false),
+        }
+    }
+
+    fn run(&self, operation: &Operation) -> OperationResult {
+        self.connection.borrow().as_ref().map_or_else(
+            || OperationResult::Error("persistence leader is shutting down".into()),
+            |connection| run_operation(connection, operation),
+        )
+    }
+
+    fn shutdown(&self) -> bool {
+        drop(self.connection.borrow_mut().take());
+        if self.paused.get() {
+            return true;
+        }
+        match self.vfs.pause_vfs() {
+            Ok(()) => {
+                self.paused.set(true);
+                true
+            }
+            Err(error) => {
+                web_sys::console::error_1(&JsValue::from_str(&format!(
+                    "release OPFS SQLite VFS: {error}"
+                )));
+                false
+            }
+        }
+    }
+}
+
+impl Drop for Leader {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
 /// One origin-wide persistence coordinator. `leader` is populated exactly while this worker owns the
 /// Web Lock. The lock callback's unresolved promise keeps ownership alive until the worker disappears.
 struct Coordinator {
     tab_id: f64,
     world_tag: String,
     channel: BroadcastChannel,
-    leader: RefCell<Option<Rc<Connection>>>,
+    leader: RefCell<Option<Rc<Leader>>>,
+    leader_release: RefCell<Option<js_sys::Function>>,
+    queued_lock_abort: RefCell<Option<AbortController>>,
     next_request: Cell<u64>,
     pending: RefCell<HashMap<u64, Pending>>,
+    write_queue: RefCell<VecDeque<Operation>>,
+    writing: Cell<bool>,
+    closed: Cell<bool>,
     _on_message: RefCell<Option<MessageHandler>>,
     world_seed: u64,
     generator_version: u32,
@@ -133,6 +188,16 @@ impl Store {
             material: material.map(Material::id),
         })
     }
+
+    pub fn shutdown(&self) {
+        self.coordinator.shutdown();
+    }
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }
 
 impl Coordinator {
@@ -143,8 +208,13 @@ impl Coordinator {
             world_tag: format!("{world_seed:016x}:{generator_version}"),
             channel,
             leader: RefCell::new(None),
+            leader_release: RefCell::new(None),
+            queued_lock_abort: RefCell::new(None),
             next_request: Cell::new(0),
             pending: RefCell::new(HashMap::new()),
+            write_queue: RefCell::new(VecDeque::new()),
+            writing: Cell::new(false),
+            closed: Cell::new(false),
             _on_message: RefCell::new(None),
             world_seed,
             generator_version,
@@ -156,8 +226,11 @@ impl Coordinator {
 
     async fn request(self: &Rc<Self>, operation: Operation) -> OperationResult {
         for _ in 0..REQUEST_RETRIES {
-            if let Some(connection) = self.leader.borrow().clone() {
-                return run_operation(&connection, &operation);
+            if self.closed.get() {
+                return OperationResult::Error("persistence coordinator is closed".into());
+            }
+            if let Some(leader) = self.leader.borrow().clone() {
+                return leader.run(&operation);
             }
             let id = self.next_request.get();
             self.next_request.set(id.wrapping_add(1));
@@ -184,18 +257,63 @@ impl Coordinator {
     }
 
     fn dispatch_write(self: &Rc<Self>, operation: Operation) -> Result<(), JsValue> {
-        if let Some(connection) = self.leader.borrow().clone() {
-            return operation_result(run_operation(&connection, &operation));
+        if self.closed.get() {
+            return Err(JsValue::from_str("persistence coordinator is closed"));
+        }
+        if let Some(leader) = self.leader.borrow().clone() {
+            return operation_result(leader.run(&operation));
+        }
+
+        let mut queue = self.write_queue.borrow_mut();
+        match &operation {
+            Operation::SaveCamera(_) => {
+                if let Some(pending) = queue
+                    .iter_mut()
+                    .rev()
+                    .find(|pending| matches!(pending, Operation::SaveCamera(_)))
+                {
+                    *pending = operation;
+                } else {
+                    queue.push_back(operation);
+                }
+            }
+            Operation::SaveEdit { coord, .. } => {
+                if let Some(pending) = queue.iter_mut().rev().find(|pending| {
+                    matches!(pending, Operation::SaveEdit { coord: queued, .. } if queued == coord)
+                }) {
+                    *pending = operation;
+                } else {
+                    queue.push_back(operation);
+                }
+            }
+            _ => queue.push_back(operation),
+        }
+        drop(queue);
+        self.start_write_drain();
+        Ok(())
+    }
+
+    fn start_write_drain(self: &Rc<Self>) {
+        if self.writing.replace(true) {
+            return;
         }
         let coordinator = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            if let OperationResult::Error(error) = coordinator.request(operation).await {
-                web_sys::console::error_1(&JsValue::from_str(&format!(
-                    "persistence follower write failed: {error}"
-                )));
+            while !coordinator.closed.get() {
+                let Some(operation) = coordinator.write_queue.borrow_mut().pop_front() else {
+                    break;
+                };
+                if let OperationResult::Error(error) = coordinator.request(operation).await {
+                    web_sys::console::error_1(&JsValue::from_str(&format!(
+                        "persistence follower write failed: {error}"
+                    )));
+                }
+            }
+            coordinator.writing.set(false);
+            if !coordinator.closed.get() && !coordinator.write_queue.borrow().is_empty() {
+                coordinator.start_write_drain();
             }
         });
-        Ok(())
     }
 
     fn install_message_handler(self: &Rc<Self>) {
@@ -215,6 +333,9 @@ impl Coordinator {
     }
 
     fn handle_message(self: &Rc<Self>, message: &js_sys::Array) {
+        if self.closed.get() {
+            return;
+        }
         if number(message, 1) != Some(WIRE_VERSION) {
             return;
         }
@@ -233,13 +354,12 @@ impl Coordinator {
         ) else {
             return;
         };
-        let Some(connection) = self.leader.borrow().clone() else {
+        let Some(leader) = self.leader.borrow().clone() else {
             return;
         };
         let result = if world_tag == self.world_tag {
-            decode_operation(message).map_or_else(OperationResult::Error, |operation| {
-                run_operation(&connection, &operation)
-            })
+            decode_operation(message)
+                .map_or_else(OperationResult::Error, |operation| leader.run(&operation))
         } else {
             OperationResult::Error("persistence leader belongs to a different world build".into())
         };
@@ -298,7 +418,7 @@ impl Coordinator {
         js_sys::Reflect::set(&options, &JsValue::from_str("ifAvailable"), &JsValue::TRUE)?;
         request_lock(&[&JsValue::from_str(LOCK_NAME), &options, &probe])?;
         JsFuture::from(ready).await?;
-        if self.leader.borrow().is_none() {
+        if self.leader.borrow().is_none() && !self.closed.get() {
             self.queue_for_handoff();
         }
         Ok(())
@@ -309,11 +429,21 @@ impl Coordinator {
         let boot_probe = ready.is_some();
         let coordinator = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            match open_connection(coordinator.world_seed, coordinator.generator_version).await {
-                Ok(connection) => {
-                    *coordinator.leader.borrow_mut() = Some(Rc::new(connection));
+            match open_leader(coordinator.world_seed, coordinator.generator_version).await {
+                Ok(leader) if !coordinator.closed.get() => {
+                    *coordinator.leader.borrow_mut() = Some(Rc::new(leader));
+                    *coordinator.leader_release.borrow_mut() = Some(release);
                     if let Some(ready) = ready {
                         let _ = ready.call0(&JsValue::NULL);
+                    }
+                }
+                Ok(leader) => {
+                    let released = leader.shutdown();
+                    if let Some(ready) = ready {
+                        let _ = ready.call0(&JsValue::NULL);
+                    }
+                    if released {
+                        let _ = release.call0(&JsValue::NULL);
                     }
                 }
                 Err(error) => {
@@ -324,7 +454,7 @@ impl Coordinator {
                     if let Some(ready) = ready {
                         let _ = ready.call0(&JsValue::NULL);
                     }
-                    if !boot_probe {
+                    if !boot_probe && !coordinator.closed.get() {
                         coordinator.queue_for_handoff();
                     }
                     let _ = release.call0(&JsValue::NULL);
@@ -335,15 +465,68 @@ impl Coordinator {
     }
 
     fn queue_for_handoff(self: &Rc<Self>) {
-        let coordinator = self.clone();
+        if self.closed.get() || self.queued_lock_abort.borrow().is_some() {
+            return;
+        }
+        let Ok(abort) = AbortController::new() else {
+            return;
+        };
+        let weak = Rc::downgrade(self);
         let callback = Closure::once_into_js(move |_lock: JsValue| -> js_sys::Promise {
-            coordinator.become_leader(None)
+            let Some(coordinator) = weak.upgrade() else {
+                return js_sys::Promise::resolve(&JsValue::NULL);
+            };
+            coordinator.queued_lock_abort.borrow_mut().take();
+            if coordinator.closed.get() {
+                js_sys::Promise::resolve(&JsValue::NULL)
+            } else {
+                coordinator.become_leader(None)
+            }
         });
-        let _ = request_lock(&[&JsValue::from_str(LOCK_NAME), &callback]);
+        let options = js_sys::Object::new();
+        if js_sys::Reflect::set(
+            &options,
+            &JsValue::from_str("signal"),
+            abort.signal().as_ref(),
+        )
+        .is_err()
+        {
+            return;
+        }
+        if request_lock(&[&JsValue::from_str(LOCK_NAME), &options, &callback]).is_ok() {
+            *self.queued_lock_abort.borrow_mut() = Some(abort);
+        }
+    }
+
+    fn shutdown(&self) {
+        if self.closed.replace(true) {
+            return;
+        }
+        self.write_queue.borrow_mut().clear();
+        if let Some(abort) = self.queued_lock_abort.borrow_mut().take() {
+            abort.abort();
+        }
+        let opfs_released = self
+            .leader
+            .borrow_mut()
+            .take()
+            .is_none_or(|leader| leader.shutdown());
+        if opfs_released && let Some(release) = self.leader_release.borrow_mut().take() {
+            let _ = release.call0(&JsValue::NULL);
+        }
+        for (_, pending) in self.pending.borrow_mut().drain() {
+            *pending.slot.borrow_mut() = Some(OperationResult::Error(
+                "persistence coordinator closed during request".into(),
+            ));
+            let _ = pending.resolve.call0(&JsValue::NULL);
+        }
+        self.channel.set_onmessage(None);
+        self._on_message.borrow_mut().take();
+        self.channel.close();
     }
 }
 
-async fn install_vfs() -> Result<(), JsValue> {
+async fn install_vfs() -> Result<OpfsSAHPoolUtil, JsValue> {
     let mut last_error = String::new();
     for attempt in 0..VFS_INSTALL_ATTEMPTS {
         match install_opfs_sahpool::<sqlite_wasm_rs::WasmOsCallback>(
@@ -352,14 +535,9 @@ async fn install_vfs() -> Result<(), JsValue> {
         )
         .await
         {
-            Ok(_) => return Ok(()),
+            Ok(vfs) => return Ok(vfs),
             Err(error) => {
                 last_error = error.to_string();
-                if attempt == 0 {
-                    web_sys::console::warn_1(&JsValue::from_str(
-                        "OPFS database handle is busy during reload/handoff; retrying",
-                    ));
-                }
                 if attempt + 1 < VFS_INSTALL_ATTEMPTS {
                     JsFuture::from(timeout(VFS_RETRY_DELAY_MS)).await?;
                 }
@@ -371,16 +549,29 @@ async fn install_vfs() -> Result<(), JsValue> {
     )))
 }
 
-async fn open_connection(world_seed: u64, generator_version: u32) -> Result<Connection, JsValue> {
-    install_vfs().await?;
-    let connection =
-        Connection::open(DATABASE_NAME).map_err(|error| js_error("open SQLite database", error))?;
-    connection
-        .execute_batch("PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")
-        .map_err(|error| js_error("configure SQLite", error))?;
-    migrate(&connection)?;
-    ensure_world(&connection, world_seed, generator_version)?;
-    Ok(connection)
+async fn open_leader(world_seed: u64, generator_version: u32) -> Result<Leader, JsValue> {
+    let vfs = install_vfs().await?;
+    let connection = (|| {
+        let connection = Connection::open(DATABASE_NAME)
+            .map_err(|error| js_error("open SQLite database", error))?;
+        connection
+            .execute_batch("PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")
+            .map_err(|error| js_error("configure SQLite", error))?;
+        migrate(&connection)?;
+        ensure_world(&connection, world_seed, generator_version)?;
+        Ok(connection)
+    })();
+    match connection {
+        Ok(connection) => Ok(Leader::new(connection, vfs)),
+        Err(error) => {
+            if let Err(pause_error) = vfs.pause_vfs() {
+                web_sys::console::error_1(&JsValue::from_str(&format!(
+                    "release OPFS VFS after failed open: {pause_error}"
+                )));
+            }
+            Err(error)
+        }
+    }
 }
 
 fn run_operation(connection: &Connection, operation: &Operation) -> OperationResult {
@@ -671,7 +862,22 @@ fn request_lock(arguments: &[&JsValue]) -> Result<(), JsValue> {
     for argument in arguments {
         args.push(argument);
     }
-    js_sys::Reflect::apply(&request, &locks, &args)?;
+    let promise: js_sys::Promise = js_sys::Reflect::apply(&request, &locks, &args)?.dyn_into()?;
+    let on_rejected = Closure::once_into_js(move |error: JsValue| -> JsValue {
+        let name = js_sys::Reflect::get(&error, &JsValue::from_str("name"))
+            .ok()
+            .and_then(|name| name.as_string());
+        if name.as_deref() != Some("AbortError") {
+            web_sys::console::error_1(&JsValue::from_str(&format!(
+                "Web Lock request failed: {}",
+                js_value_message(&error)
+            )));
+        }
+        JsValue::UNDEFINED
+    });
+    let catch: js_sys::Function =
+        js_sys::Reflect::get(&promise, &JsValue::from_str("catch"))?.unchecked_into();
+    js_sys::Reflect::apply(&catch, &promise, &js_sys::Array::of1(&on_rejected))?;
     Ok(())
 }
 

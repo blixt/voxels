@@ -442,6 +442,7 @@ mod web {
             if let Err(error) = self.store.borrow().save_camera(&self.camera.borrow()) {
                 web_sys::console::error_1(&error);
             }
+            self.store.borrow().shutdown();
             self.stopped.set(true);
             let id = self.frame_id.replace(0);
             if id != 0 {

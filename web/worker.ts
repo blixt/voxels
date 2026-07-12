@@ -4,6 +4,7 @@ import type { FromWorker, InitMessage, ToWorker } from "./protocol.ts";
 const scope = self as unknown as {
   postMessage(message: FromWorker): void;
   onmessage: ((event: MessageEvent<ToWorker>) => void) | null;
+  close(): void;
 };
 
 let handle: EngineHandle | null = null;
@@ -37,6 +38,7 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
       pending.length = 0;
       handle?.destroy();
       handle = null;
+      scope.close();
       break;
   }
 }
