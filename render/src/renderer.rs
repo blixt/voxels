@@ -14,8 +14,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use voxels_core::CameraState;
 use voxels_world::{
-    CHUNK_EDGE, ChunkCoord, FarTileCoord, Quad, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge,
-    SurfaceQuad, SurfaceTileCoord, SurfaceTileMesh, VOXEL_SIZE_METRES,
+    CHUNK_EDGE, ChunkCoord, FarTileCoord, MeshedChunk, Quad, RenderLayer, SurfaceBounds,
+    SurfaceLodLevel, SurfacePatchEdge, SurfaceQuad, SurfaceTileCoord, SurfaceTileMesh,
+    VOXEL_SIZE_METRES, WaterTileMesh,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -90,6 +91,7 @@ struct MeshSlice {
     bounds_max: glam::Vec3,
     surface_bounds: Option<SurfaceBounds>,
     skirt_edge: Option<SurfacePatchEdge>,
+    render_layer: RenderLayer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,9 +122,11 @@ pub struct RenderDiagnostics {
     pub resident_chunks: u32,
     pub visible_chunks: u32,
     pub draw_calls: u32,
+    pub water_draw_calls: u32,
     pub shadow_draw_calls: u32,
     pub shadow_cascades: u32,
     pub quads: u32,
+    pub water_quads: u32,
     pub arena_pages: u32,
     pub arena_capacity_bytes: u64,
     pub arena_allocated_bytes: u64,
@@ -136,6 +140,8 @@ pub struct Renderer {
     config: SurfaceConfiguration,
     sky_pipeline: RenderPipeline,
     voxel_pipeline: RenderPipeline,
+    water_depth_pipeline: RenderPipeline,
+    water_pipeline: RenderPipeline,
     shadow_gpu: ShadowGpu,
     frame_buffer: Buffer,
     frame_bind_group: BindGroup,
@@ -494,13 +500,18 @@ impl Renderer {
             &sky_shader,
             SCENE_FORMAT,
             &[],
-            Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            PipelineOptions {
+                fragment_entry: "fs_main",
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+            },
         );
         let voxel_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/voxels.wgsl"));
         let voxel_pipeline = pipeline(
@@ -510,13 +521,58 @@ impl Renderer {
             &voxel_shader,
             SCENE_FORMAT,
             &[Some(quad_layout())],
-            Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            PipelineOptions {
+                fragment_entry: "fs_main",
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+            },
+        );
+        let water_depth_pipeline = pipeline(
+            &device,
+            "water depth pipeline",
+            &pipeline_layout,
+            &voxel_shader,
+            SCENE_FORMAT,
+            &[Some(quad_layout())],
+            PipelineOptions {
+                fragment_entry: "fs_water_depth",
+                blend: None,
+                write_mask: wgpu::ColorWrites::empty(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+            },
+        );
+        let water_pipeline = pipeline(
+            &device,
+            "water pipeline",
+            &pipeline_layout,
+            &voxel_shader,
+            SCENE_FORMAT,
+            &[Some(quad_layout())],
+            PipelineOptions {
+                fragment_entry: "fs_water",
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Equal),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+            },
         );
 
         let depth_view = depth_view(&device, config.width, config.height);
@@ -529,6 +585,8 @@ impl Renderer {
             config,
             sky_pipeline,
             voxel_pipeline,
+            water_depth_pipeline,
+            water_pipeline,
             shadow_gpu,
             frame_buffer,
             frame_bind_group,
@@ -688,33 +746,64 @@ impl Renderer {
         }
     }
 
-    pub fn upload_chunk(&mut self, coord: ChunkCoord, quads: &[Quad]) -> bool {
+    pub fn upload_chunk(&mut self, coord: ChunkCoord, mesh: &MeshedChunk) -> bool {
         let key = (0, coord.x, coord.y, coord.z);
-        if quads.is_empty() {
+        if mesh.is_empty() {
             self.remove_chunk(coord);
             return true;
         }
         let origin = coord.world_origin();
-        let gpu_quads: Vec<_> = quads
+        let convert = |quad: &Quad| GpuQuad {
+            origin: [
+                (origin[0] + i32::from(quad.origin[0])) as f32 * VOXEL_SIZE_METRES,
+                (origin[1] + i32::from(quad.origin[1])) as f32 * VOXEL_SIZE_METRES,
+                (origin[2] + i32::from(quad.origin[2])) as f32 * VOXEL_SIZE_METRES,
+            ],
+            face: u32::from(quad.face),
+            extent: [
+                f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
+                f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
+            ],
+            material: u32::from(quad.material),
+            ao: u32::from(quad.ao),
+        };
+        let gpu_quads: Vec<_> = mesh
+            .opaque
             .iter()
-            .map(|quad| GpuQuad {
-                origin: [
-                    (origin[0] + i32::from(quad.origin[0])) as f32 * VOXEL_SIZE_METRES,
-                    (origin[1] + i32::from(quad.origin[1])) as f32 * VOXEL_SIZE_METRES,
-                    (origin[2] + i32::from(quad.origin[2])) as f32 * VOXEL_SIZE_METRES,
-                ],
-                face: u32::from(quad.face),
-                extent: [
-                    f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
-                    f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
-                ],
-                material: u32::from(quad.material),
-                ao: u32::from(quad.ao),
-            })
+            .chain(&mesh.translucent)
+            .map(convert)
             .collect();
         let min = glam::Vec3::from_array(origin.map(|value| value as f32 * VOXEL_SIZE_METRES));
         let max = min + glam::Vec3::splat(CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
-        self.upload_mesh(key, &gpu_quads, min, max)
+        let quad_bytes = size_of::<GpuQuad>() as u32;
+        let mut slices = Vec::with_capacity(2);
+        let opaque_count = mesh.opaque.len() as u32;
+        if opaque_count > 0 {
+            slices.push(MeshSlice {
+                relative_offset: 0,
+                size: opaque_count * quad_bytes,
+                quad_count: opaque_count,
+                bounds_min: min,
+                bounds_max: max,
+                surface_bounds: None,
+                skirt_edge: None,
+                render_layer: RenderLayer::Opaque,
+            });
+        }
+        let translucent_count = mesh.translucent.len() as u32;
+        if translucent_count > 0 {
+            slices.push(MeshSlice {
+                relative_offset: opaque_count * quad_bytes,
+                size: translucent_count * quad_bytes,
+                quad_count: translucent_count,
+                bounds_min: min,
+                bounds_max: max,
+                surface_bounds: None,
+                skirt_edge: None,
+                render_layer: RenderLayer::Translucent,
+            });
+        }
+        self.upload_mesh_sliced(key, &gpu_quads, slices)
     }
 
     pub fn upload_far_tile(&mut self, coord: FarTileCoord, quads: &[SurfaceQuad]) -> bool {
@@ -756,15 +845,22 @@ impl Renderer {
         self.upload_mesh(key, &gpu_quads, min, max)
     }
 
-    pub fn upload_surface_tile_mesh(&mut self, tile: &SurfaceTileMesh) -> bool {
+    pub fn upload_surface_tile_meshes(
+        &mut self,
+        tile: &SurfaceTileMesh,
+        water: &WaterTileMesh,
+    ) -> bool {
         let coord = tile.coord;
+        if water.coord != coord {
+            return false;
+        }
         let key = (coord.level.index() + 1, coord.x, 0, coord.z);
-        if tile.quads.is_empty() {
+        if tile.quads.is_empty() && water.quads.is_empty() {
             self.remove_surface_tile(coord);
             return true;
         }
         let underlay_offset = FAR_UNDERLAY_OFFSET_METRES * (f32::from(coord.level.index()) + 1.0);
-        let gpu_quads: Vec<_> = tile
+        let mut gpu_quads: Vec<_> = tile
             .quads
             .iter()
             .map(|quad| GpuQuad {
@@ -784,10 +880,26 @@ impl Renderer {
                 ao: 0xff,
             })
             .collect();
+        gpu_quads.extend(water.quads.iter().map(|quad| GpuQuad {
+            origin: [
+                quad.origin[0] as f32 * VOXEL_SIZE_METRES,
+                quad.origin[1] as f32 * VOXEL_SIZE_METRES,
+                quad.origin[2] as f32 * VOXEL_SIZE_METRES,
+            ],
+            face: u32::from(quad.face),
+            extent: [
+                f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
+                f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
+            ],
+            material: u32::from(quad.material.id())
+                | FAR_MATERIAL_FLAG
+                | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
+            ao: 0xff,
+        }));
         let stride = coord.stride_voxels();
         let [tile_x, tile_z] = coord.voxel_origin();
         let quad_bytes = size_of::<GpuQuad>() as u32;
-        let slices = tile
+        let mut slices: Vec<_> = tile
             .patches
             .iter()
             .flat_map(|patch| {
@@ -828,10 +940,47 @@ impl Renderer {
                             bounds_max,
                             surface_bounds: Some(surface_bounds),
                             skirt_edge,
+                            render_layer: RenderLayer::Opaque,
                         }
                     })
             })
             .collect();
+        let water_byte_offset = tile.quads.len() as u32 * quad_bytes;
+        slices.extend(water.patches.iter().map(|patch| {
+            let [[min_x, min_z], [max_x, max_z]] = patch.cell_bounds;
+            let surface_bounds = SurfaceBounds {
+                min: [
+                    tile_x + i32::from(min_x) * stride,
+                    patch.bounds.min[1],
+                    tile_z + i32::from(min_z) * stride,
+                ],
+                max: [
+                    tile_x + i32::from(max_x) * stride,
+                    patch.bounds.max[1],
+                    tile_z + i32::from(max_z) * stride,
+                ],
+            };
+            MeshSlice {
+                relative_offset: water_byte_offset + patch.quad_range.start * quad_bytes,
+                size: (patch.quad_range.end - patch.quad_range.start) * quad_bytes,
+                quad_count: patch.quad_range.end - patch.quad_range.start,
+                bounds_min: glam::Vec3::from_array(
+                    patch
+                        .bounds
+                        .min
+                        .map(|value| value as f32 * VOXEL_SIZE_METRES),
+                ),
+                bounds_max: glam::Vec3::from_array(
+                    patch
+                        .bounds
+                        .max
+                        .map(|value| value as f32 * VOXEL_SIZE_METRES),
+                ),
+                surface_bounds: Some(surface_bounds),
+                skirt_edge: None,
+                render_layer: RenderLayer::Translucent,
+            }
+        }));
         self.upload_mesh_sliced(key, &gpu_quads, slices)
     }
 
@@ -856,6 +1005,7 @@ impl Renderer {
                 bounds_max,
                 surface_bounds: None,
                 skirt_edge: None,
+                render_layer: RenderLayer::Opaque,
             }],
         )
     }
@@ -965,6 +1115,7 @@ impl Renderer {
             std::array::from_fn(|cascade_index| {
                 self.collect_draw_list(|key, slice| {
                     (key.0 == 0 || self.options.far_terrain)
+                        && slice.render_layer == RenderLayer::Opaque
                         && slice_owned_by_lod(geometric_lod_focus, key, slice)
                         && aabb_visible_in_cascade(
                             &shadow_cascades.cascades[cascade_index],
@@ -978,6 +1129,13 @@ impl Renderer {
         };
         let world_draw_list = self.collect_draw_list(|key, slice| {
             (key.0 == 0 || self.options.far_terrain)
+                && slice.render_layer == RenderLayer::Opaque
+                && slice_owned_by_lod(geometric_lod_focus, key, slice)
+                && aabb_visible(slice.bounds_min, slice.bounds_max, view_projection)
+        });
+        let water_draw_list = self.collect_draw_list(|key, slice| {
+            (key.0 == 0 || self.options.far_terrain)
+                && slice.render_layer == RenderLayer::Translucent
                 && slice_owned_by_lod(geometric_lod_focus, key, slice)
                 && aabb_visible(slice.bounds_min, slice.bounds_max, view_projection)
         });
@@ -1077,6 +1235,26 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(start..end));
                 pass.draw(0..6, 0..span.quad_count);
             }
+            pass.set_pipeline(&self.water_depth_pipeline);
+            for span in &water_draw_list.spans {
+                let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
+                    continue;
+                };
+                let start = u64::from(span.offset);
+                let end = start + u64::from(span.size);
+                pass.set_vertex_buffer(0, buffer.slice(start..end));
+                pass.draw(0..6, 0..span.quad_count);
+            }
+            pass.set_pipeline(&self.water_pipeline);
+            for span in &water_draw_list.spans {
+                let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
+                    continue;
+                };
+                let start = u64::from(span.offset);
+                let end = start + u64::from(span.size);
+                pass.set_vertex_buffer(0, buffer.slice(start..end));
+                pass.draw(0..6, 0..span.quad_count);
+            }
             let arena = self.arena.stats();
             let scene_pixels = u64::from(self.config.width) * u64::from(self.config.height);
             let shadow_bytes = u64::from(DirectionalShadowConfig::default().shadow_map_resolution)
@@ -1086,14 +1264,22 @@ impl Renderer {
             self.diagnostics = RenderDiagnostics {
                 resident_chunks: self.chunks.len() as u32,
                 visible_chunks: world_draw_list.mesh_count,
-                draw_calls: world_draw_list.spans.len() as u32,
+                draw_calls: world_draw_list
+                    .spans
+                    .len()
+                    .saturating_add(water_draw_list.spans.len().saturating_mul(2))
+                    as u32,
+                water_draw_calls: water_draw_list.spans.len().saturating_mul(2) as u32,
                 shadow_draw_calls,
                 shadow_cascades: if self.options.shadows {
                     CASCADE_COUNT as u32
                 } else {
                     0
                 },
-                quads: world_draw_list.quad_count,
+                quads: world_draw_list
+                    .quad_count
+                    .saturating_add(water_draw_list.quad_count),
+                water_quads: water_draw_list.quad_count,
                 arena_pages: arena.pages as u32,
                 arena_capacity_bytes: arena.capacity_bytes,
                 arena_allocated_bytes: arena.allocated_bytes,
@@ -1364,6 +1550,13 @@ fn aabb_visible(min: glam::Vec3, max: glam::Vec3, view_projection: glam::Mat4) -
         && !clips.iter().all(|value| value.z > value.w)
 }
 
+struct PipelineOptions<'a> {
+    fragment_entry: &'a str,
+    blend: Option<wgpu::BlendState>,
+    write_mask: wgpu::ColorWrites,
+    depth_stencil: Option<wgpu::DepthStencilState>,
+}
+
 fn pipeline(
     device: &Device,
     label: &str,
@@ -1371,7 +1564,7 @@ fn pipeline(
     shader: &wgpu::ShaderModule,
     format: TextureFormat,
     buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
-    depth_stencil: Option<wgpu::DepthStencilState>,
+    options: PipelineOptions<'_>,
 ) -> RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
@@ -1384,16 +1577,16 @@ fn pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_main"),
+            entry_point: Some(options.fragment_entry),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
+                blend: options.blend,
+                write_mask: options.write_mask,
             })],
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState::default(),
-        depth_stencil,
+        depth_stencil: options.depth_stencil,
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
@@ -1455,6 +1648,7 @@ mod tests {
             bounds_max: glam::Vec3::splat(10_000.0),
             surface_bounds,
             skirt_edge: None,
+            render_layer: RenderLayer::Opaque,
         }
     }
 

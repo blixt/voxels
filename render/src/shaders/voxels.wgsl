@@ -214,6 +214,77 @@ fn sun_visibility(world: vec3<f32>, normal: vec3<f32>) -> f32 {
   return mix(visibility, cascade_shadow(world, normal, cascade + 1u), blend);
 }
 
+fn water_wave_normal(world: vec3<f32>) -> vec3<f32> {
+  let time = frame.camera_time.w;
+  let phase_a = dot(world.xz, vec2<f32>(1.08, 0.46)) * 2.1 + time * 0.82;
+  let phase_b = dot(world.xz, vec2<f32>(-0.38, 1.27)) * 3.4 - time * 0.57;
+  let phase_c = dot(world.xz, vec2<f32>(0.82, -1.11)) * 6.8 + time * 1.16;
+  let slope = vec2<f32>(1.08, 0.46) * cos(phase_a) * 0.075
+    + vec2<f32>(-0.38, 1.27) * cos(phase_b) * 0.048
+    + vec2<f32>(0.82, -1.11) * cos(phase_c) * 0.018;
+  return normalize(vec3<f32>(-slope.x, 1.0, -slope.y));
+}
+
+fn reflected_environment(direction: vec3<f32>) -> vec3<f32> {
+  let sky_height = pow(clamp(direction.y * 0.5 + 0.5, 0.0, 1.0), 0.58);
+  var radiance = mix(frame.ground_atmosphere.rgb, frame.sky_zenith.rgb, sky_height);
+  radiance = mix(radiance, frame.sky_horizon.rgb, exp(-abs(direction.y) * 5.5) * 0.46);
+  let sun = normalize(frame.sun_direction.xyz);
+  radiance += frame.sun_radiance.rgb * pow(max(dot(direction, sun), 0.0), 420.0) * 0.72;
+  return radiance;
+}
+
+@fragment
+fn fs_water_depth(input: VertexOut) -> @location(0) vec4<f32> {
+  if !owns_lod_surface(input.world, input.material) || (input.material & 0xffffu) != 13u {
+    discard;
+  }
+  return vec4<f32>(0.0);
+}
+
+@fragment
+fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
+  if !owns_lod_surface(input.world, input.material) {
+    discard;
+  }
+  let material = input.material & 0xffffu;
+  if material != 13u {
+    discard;
+  }
+  let view_direction = normalize(frame.camera_time.xyz - input.world);
+  let normal = select(input.normal, water_wave_normal(input.world), input.normal.y > 0.5);
+  let facing = clamp(dot(normal, view_direction), 0.0, 1.0);
+  let fresnel = 0.02037 + 0.97963 * pow(1.0 - facing, 5.0);
+  let reflection = reflected_environment(reflect(-view_direction, normal));
+  let deep = srgb_to_linear(vec3<f32>(0.025, 0.18, 0.24));
+  let shallow = srgb_to_linear(vec3<f32>(0.09, 0.39, 0.43));
+  let wave_light = sin(input.world.x * 2.7 + frame.camera_time.w * 0.9)
+    * sin(input.world.z * 2.2 - frame.camera_time.w * 0.7) * 0.5 + 0.5;
+  var color = mix(deep, shallow, 0.28 + wave_light * 0.18);
+  color = mix(color, reflection, clamp(fresnel * 0.88 + 0.08, 0.0, 0.92));
+  let sun = normalize(frame.sun_direction.xyz);
+  let half_direction = normalize(sun + view_direction);
+  let visibility = sun_visibility(input.world, normal);
+  color += frame.sun_radiance.rgb
+    * pow(max(dot(normal, half_direction), 0.0), 260.0)
+    * mix(0.18, 1.0, visibility)
+    * 0.34;
+
+  let camera_to_surface = input.world - frame.camera_time.xyz;
+  let distance_to_camera = length(camera_to_surface);
+  let fog_view_direction = camera_to_surface / max(distance_to_camera, 0.0001);
+  let average_height = max((input.world.y + frame.camera_time.y) * 0.5, 0.0);
+  let height_density = exp(-average_height * frame.fog_exposure.x);
+  let optical_depth = distance_to_camera * frame.ground_atmosphere.w * height_density * frame.render_options.y;
+  let transmittance = exp(-optical_depth);
+  let sky_factor = pow(max(fog_view_direction.y, 0.0), 0.42);
+  let fog_radiance = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, sky_factor);
+  color = color * transmittance + fog_radiance * (1.0 - transmittance);
+  color = max(color * frame.fog_exposure.y, vec3<f32>(0.0));
+  let alpha = mix(0.68, 0.91, fresnel);
+  return vec4<f32>(color * alpha, alpha);
+}
+
 @fragment
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   if !owns_lod_surface(input.world, input.material) {

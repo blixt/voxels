@@ -16,9 +16,9 @@ mod web {
     use voxels_render::ui::LiveStats;
     use voxels_runtime::{ChunkState, FrameBudget, StreamConfig, StreamScheduler};
     use voxels_world::{
-        CHUNK_EDGE, Chunk, ChunkCoord, EditMap, Generator, Material, Quad, SurfaceLodLevel,
+        CHUNK_EDGE, Chunk, ChunkCoord, EditMap, Generator, Material, MeshedChunk, SurfaceLodLevel,
         SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord, generate_edited_surface_tile_mesh,
-        mesh_chunk, surface_tiles_affected_by_voxel,
+        generate_edited_water_tile_mesh, mesh_chunk, surface_tiles_affected_by_voxel,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -71,7 +71,7 @@ mod web {
         edits: RefCell<EditMap>,
         scheduler: RefCell<StreamScheduler>,
         chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
-        pending_meshes: RefCell<BTreeMap<(i32, i32, i32), Vec<Quad>>>,
+        pending_meshes: RefCell<BTreeMap<(i32, i32, i32), MeshedChunk>>,
         surface_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
         surface_active_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
@@ -143,7 +143,7 @@ mod web {
                     |x, y, z| {
                         edits
                             .sample(self.generator, VoxelCoord::new(x, y, z))
-                            .is_solid()
+                            .is_collidable()
                     },
                 );
                 accumulator -= SIMULATION_STEP_SECONDS;
@@ -248,7 +248,7 @@ mod web {
                 };
                 let edits = self.edits.borrow();
                 let mut generated_columns = BTreeMap::new();
-                let quads = mesh_chunk(&chunk, |x, y, z| {
+                let mesh = mesh_chunk(&chunk, |x, y, z| {
                     let coord = VoxelCoord::new(x, y, z);
                     edits.override_at(coord).unwrap_or_else(|| {
                         generated_columns
@@ -260,28 +260,24 @@ mod web {
                 drop(edits);
                 self.pending_meshes
                     .borrow_mut()
-                    .insert(coord_key(ticket.coord), quads);
+                    .insert(coord_key(ticket.coord), mesh);
                 let _ = self.scheduler.borrow_mut().complete(ticket);
             }
             for ticket in work.upload {
-                let quads = self
+                let mesh = self
                     .pending_meshes
                     .borrow_mut()
                     .remove(&coord_key(ticket.coord));
-                let Some(quads) = quads else {
+                let Some(mesh) = mesh else {
                     continue;
                 };
-                if self
-                    .renderer
-                    .borrow_mut()
-                    .upload_chunk(ticket.coord, &quads)
-                {
+                if self.renderer.borrow_mut().upload_chunk(ticket.coord, &mesh) {
                     let _ = self.scheduler.borrow_mut().complete(ticket);
                     self.update_render_ready_column(ticket.coord);
                 } else {
                     self.pending_meshes
                         .borrow_mut()
-                        .insert(coord_key(ticket.coord), quads);
+                        .insert(coord_key(ticket.coord), mesh);
                     let _ = self.scheduler.borrow_mut().retry(ticket);
                     web_sys::console::error_1(&JsValue::from_str(
                         "voxel mesh arena allocation failed; upload requeued",
@@ -425,8 +421,13 @@ mod web {
             };
             let edits = self.edits.borrow();
             let mesh = generate_edited_surface_tile_mesh(self.generator, &edits, coord);
+            let water = generate_edited_water_tile_mesh(self.generator, &edits, coord);
             drop(edits);
-            if self.renderer.borrow_mut().upload_surface_tile_mesh(&mesh) {
+            if self
+                .renderer
+                .borrow_mut()
+                .upload_surface_tile_meshes(&mesh, &water)
+            {
                 self.surface_resident.borrow_mut().insert(coord);
                 self.surface_dirty.borrow_mut().remove(&coord);
             } else if dirty.is_none() {
@@ -548,15 +549,20 @@ mod web {
 
         fn raycast_target(&self, camera: &CameraState) -> Option<VoxelHit> {
             let edits = self.edits.borrow();
+            let camera_voxel = VoxelCoord::new(
+                (camera.position.x / VOXEL_SIZE_METRES).floor() as i32,
+                (camera.position.y / VOXEL_SIZE_METRES).floor() as i32,
+                (camera.position.z / VOXEL_SIZE_METRES).floor() as i32,
+            );
+            let ignore_water = edits.sample(self.generator, camera_voxel) == Material::Water;
             raycast_voxels(
                 camera.position,
                 camera.forward(),
                 5.0,
                 VOXEL_SIZE_METRES,
                 |x, y, z| {
-                    edits
-                        .sample(self.generator, VoxelCoord::new(x, y, z))
-                        .is_solid()
+                    let material = edits.sample(self.generator, VoxelCoord::new(x, y, z));
+                    material.is_collidable() || (!ignore_water && material == Material::Water)
                 },
             )
         }
@@ -658,7 +664,12 @@ mod web {
         let edits = store.load_edits()?;
         let spawn_z = 5.2;
         let spawn_voxel_z = (spawn_z / VOXEL_SIZE_METRES).floor() as i32;
-        let spawn_y = (generator.surface_height(0, spawn_voxel_z) + 1) as f32 * VOXEL_SIZE_METRES
+        let spawn_surface = generator.surface_sample(0, spawn_voxel_z);
+        let spawn_top = spawn_surface
+            .water_level
+            .unwrap_or(spawn_surface.height)
+            .max(spawn_surface.height);
+        let spawn_y = (spawn_top + 1) as f32 * VOXEL_SIZE_METRES
             + voxels_core::PLAYER_EYE_HEIGHT_METRES
             + 0.02;
         let camera = store
@@ -666,9 +677,13 @@ mod web {
             .filter(|camera| {
                 let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
                 let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-                let terrain_top =
-                    (generator.surface_height(voxel_x, voxel_z) + 1) as f32 * VOXEL_SIZE_METRES;
-                camera.position.y - voxels_core::PLAYER_EYE_HEIGHT_METRES >= terrain_top
+                let surface = generator.surface_sample(voxel_x, voxel_z);
+                let walkable_top = surface
+                    .water_level
+                    .unwrap_or(surface.height)
+                    .max(surface.height);
+                camera.position.y - voxels_core::PLAYER_EYE_HEIGHT_METRES
+                    >= (walkable_top + 1) as f32 * VOXEL_SIZE_METRES
             })
             .unwrap_or_else(|| CameraState::spawn(glam::Vec3::new(0.0, spawn_y, spawn_z)));
         let renderer = Renderer::new(
