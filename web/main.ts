@@ -38,16 +38,27 @@ function start(canvas: HTMLCanvasElement): void {
   }) as TypedWorker;
   let uiCursorMode = false;
   let nextSnapshotRequest = 1;
-  const snapshotResolvers = new Map<number, (values: number[]) => void>();
+  const snapshotResolvers = new Map<
+    number,
+    { resolve: (values: number[]) => void; reject: (reason: Error) => void }
+  >();
   const debugGlobal = globalThis as typeof globalThis & {
     __VOXELS__?: { snapshot(): Promise<number[]>; profile(profileId: number): void };
   };
+  const failWorker = (message: string): void => {
+    fail(message);
+    worker.terminate();
+    const error = new Error(message);
+    for (const { reject } of snapshotResolvers.values()) reject(error);
+    snapshotResolvers.clear();
+    delete debugGlobal.__VOXELS__;
+  };
   debugGlobal.__VOXELS__ = {
     snapshot: () =>
-      new Promise<number[]>((resolve) => {
+      new Promise<number[]>((resolve, reject) => {
         const requestId = nextSnapshotRequest;
         nextSnapshotRequest += 1;
-        snapshotResolvers.set(requestId, resolve);
+        snapshotResolvers.set(requestId, { resolve, reject });
         worker.postMessage({ kind: "snapshot", requestId });
       }),
     profile: (profileId) => worker.postMessage({ kind: "profile", profileId }),
@@ -60,13 +71,13 @@ function start(canvas: HTMLCanvasElement): void {
         document.exitPointerLock();
       }
     } else if (event.data.kind === "error") {
-      fail(`The Rust engine could not start.\n${event.data.message}`);
+      failWorker(`The Rust engine could not start.\n${event.data.message}`);
     } else if (event.data.kind === "snapshot") {
-      snapshotResolvers.get(event.data.requestId)?.(event.data.values);
+      snapshotResolvers.get(event.data.requestId)?.resolve(event.data.values);
       snapshotResolvers.delete(event.data.requestId);
     }
   };
-  worker.onerror = (event) => fail(event.message || "The engine worker failed to load.");
+  worker.onerror = (event) => failWorker(event.message || "The engine worker failed to load.");
 
   const offscreen = canvas.transferControlToOffscreen();
   const bounds = canvas.getBoundingClientRect();
@@ -226,6 +237,9 @@ function start(canvas: HTMLCanvasElement): void {
     destroyed = true;
     flush();
     resize.disconnect();
+    const error = new Error("Voxels page closed before the snapshot completed");
+    for (const { reject } of snapshotResolvers.values()) reject(error);
+    snapshotResolvers.clear();
     worker.postMessage({ kind: "destroy" });
     delete debugGlobal.__VOXELS__;
   });

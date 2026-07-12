@@ -70,7 +70,9 @@ scope.onmessage = (event) => {
   if (message.kind === "init") {
     void boot(message).catch((error: unknown) => {
       disposed = true;
+      pending.length = 0;
       scope.postMessage({ kind: "error", message: String(error) });
+      scope.close();
     });
   } else if (!handle && message.kind !== "destroy") {
     pending.push(message);
