@@ -359,6 +359,19 @@ impl StreamScheduler {
             self.evict_key(key);
         }
 
+        // Retention prevents visible resident chunks from thrashing at a boundary. Incomplete work
+        // has no visible value once it is undesired and is deliberately excluded from scheduling;
+        // retaining it would leave permanent queued diagnostics and consume capacity forever.
+        let incomplete_undesired: Vec<_> = self
+            .entries
+            .values()
+            .filter(|entry| !entry.desired && entry.state != State::Resident)
+            .map(|entry| coord_key(entry.coord))
+            .collect();
+        for key in incomplete_undesired {
+            self.evict_key(key);
+        }
+
         for coord in desired {
             let key = coord_key(coord);
             if let Some(entry) = self.entries.get_mut(&key) {
@@ -1042,6 +1055,21 @@ mod tests {
         let mut scheduler = scheduler(compact_config(9));
         scheduler.update_focus(ChunkCoord::new(0, 0, 0));
         assert_eq!(scheduler.diagnostics().tracked, 5);
+        while scheduler.diagnostics().resident < 5 {
+            let work = scheduler.schedule_frame(FrameBudget {
+                generation: 5,
+                meshing: 5,
+                upload: 5,
+            });
+            for ticket in work
+                .generation
+                .iter()
+                .chain(&work.meshing)
+                .chain(&work.upload)
+            {
+                assert_eq!(scheduler.complete(*ticket), CompletionStatus::Accepted);
+            }
+        }
 
         scheduler.update_focus(ChunkCoord::new(1, 0, 0));
         let diagnostics = scheduler.diagnostics();
@@ -1054,6 +1082,29 @@ mod tests {
         assert_eq!(scheduler.diagnostics().tracked, 5);
         assert!(scheduler.status(ChunkCoord::new(-1, 0, 0)).is_none());
         assert_eq!(scheduler.drain_evictions().len(), 8);
+    }
+
+    #[test]
+    fn incomplete_undesired_work_is_evicted_inside_retention_margin() {
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 1,
+            max_tracked_chunks: 2,
+        });
+        let origin = ChunkCoord::new(0, 0, 0);
+        scheduler.update_focus(origin);
+        let work = scheduler.schedule_frame(FrameBudget {
+            generation: 1,
+            ..FrameBudget::default()
+        });
+        let ticket = work.generation[0];
+
+        scheduler.update_focus(ChunkCoord::new(1, 0, 0));
+        assert!(scheduler.status(origin).is_none());
+        assert_eq!(scheduler.complete(ticket), CompletionStatus::Stale);
+        assert_eq!(scheduler.drain_evictions().len(), 1);
+        assert_eq!(scheduler.diagnostics().generation.queued, 1);
     }
 
     #[test]
