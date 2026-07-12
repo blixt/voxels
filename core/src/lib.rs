@@ -68,7 +68,12 @@ pub fn probe_enclosure(
         [0.0, 0.720, -0.694],
         [0.491, 0.720, -0.491],
     ];
-    if max_distance_metres <= 0.0 || voxel_size_metres <= 0.0 {
+    if !eye.is_finite()
+        || !max_distance_metres.is_finite()
+        || max_distance_metres <= 0.0
+        || !voxel_size_metres.is_finite()
+        || voxel_size_metres <= 0.0
+    {
         return EnclosureSample::OPEN;
     }
     let mut escaped = 0u8;
@@ -154,7 +159,13 @@ pub fn raycast_voxels(
     voxel_size_metres: f32,
     mut is_solid: impl FnMut(i32, i32, i32) -> bool,
 ) -> Option<VoxelHit> {
-    if max_distance_metres <= 0.0 || voxel_size_metres <= 0.0 {
+    if !origin.is_finite()
+        || !direction.is_finite()
+        || !max_distance_metres.is_finite()
+        || max_distance_metres <= 0.0
+        || !voxel_size_metres.is_finite()
+        || voxel_size_metres <= 0.0
+    {
         return None;
     }
     let direction = direction.normalize_or_zero();
@@ -704,6 +715,29 @@ mod tests {
     }
 
     #[test]
+    fn dda_rejects_non_finite_inputs_without_sampling() {
+        let invalid = [
+            (Vec3::splat(f32::NAN), Vec3::X, 1.0, 0.1),
+            (Vec3::ZERO, Vec3::splat(f32::INFINITY), 1.0, 0.1),
+            (Vec3::ZERO, Vec3::X, f32::NAN, 0.1),
+            (Vec3::ZERO, Vec3::X, f32::INFINITY, 0.1),
+            (Vec3::ZERO, Vec3::X, 1.0, f32::NAN),
+            (Vec3::ZERO, Vec3::X, 1.0, f32::INFINITY),
+        ];
+        for (origin, direction, max_distance, voxel_size) in invalid {
+            let mut sampled = false;
+            assert_eq!(
+                raycast_voxels(origin, direction, max_distance, voxel_size, |_, _, _| {
+                    sampled = true;
+                    false
+                }),
+                None
+            );
+            assert!(!sampled);
+        }
+    }
+
+    #[test]
     fn voxel_segment_visibility_rejects_only_occluders_before_the_target() {
         let origin = Vec3::new(0.05, 0.05, 0.05);
         assert!(!voxel_segment_is_clear(
@@ -749,6 +783,27 @@ mod tests {
 
         let opened_roof = probe_enclosure(eye, 4.0, 0.1, |x, y, z| y >= 3 && !(x == 0 && z == 0));
         assert!(opened_roof.sky_visibility > 0.0);
+    }
+
+    #[test]
+    fn enclosure_probe_treats_non_finite_inputs_as_open() {
+        for (eye, max_distance, voxel_size) in [
+            (Vec3::splat(f32::NAN), 12.0, 0.1),
+            (Vec3::ZERO, f32::NAN, 0.1),
+            (Vec3::ZERO, f32::INFINITY, 0.1),
+            (Vec3::ZERO, 12.0, f32::NAN),
+            (Vec3::ZERO, 12.0, f32::INFINITY),
+        ] {
+            let mut sampled = false;
+            assert_eq!(
+                probe_enclosure(eye, max_distance, voxel_size, |_, _, _| {
+                    sampled = true;
+                    false
+                }),
+                EnclosureSample::OPEN
+            );
+            assert!(!sampled);
+        }
     }
 
     #[test]
