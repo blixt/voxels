@@ -40,12 +40,12 @@ authoritative near field keeps the required 10 cm voxel resolution and uses face
 rectangle merging. A column becomes render-ready only when all desired vertical chunks are resident,
 so a partially streamed stack cannot expose an open terrain slice.
 
-Generator v6 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
+Generator v7 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
 detail, dune, and volcanic fields. Six dominant regional identities—verdant forest, wind-cut moor,
 alpine, red badlands, pale dunes, and volcanic terrain—select surface ecology and geology, while their
 normalized weights blend height modifiers continuously across boundaries. Canonical generation, LOD
 surface summaries, edit overlays, and spawn queries consume that same sample. A reusable
-`GeneratedColumn` additionally caches terrain fields and tree intersections for repeated Y sampling,
+`GeneratedColumn` additionally caches terrain fields and landmark intersections for repeated Y sampling,
 which keeps richer world logic from multiplying meshing-halo cost.
 
 Water is material 13 in material schema v2 and remains part of the same canonical 10 cm voxel field.
@@ -95,21 +95,29 @@ selection for color and all shadow cascades; no fragment-level discard is needed
 coverage set becomes active. During initial fill, the former continuous shader predicate remains a
 safe fallback over complete coarse underlays. A pending focus retains the last active surface set until
 all replacement tiles are resident, so movement changes ownership transactionally instead of exposing
-partially streamed rings. Trees remain canonical near-field geometry; they are withheld only during the
-first incomplete fine-field load so isolated crowns cannot appear before their supporting columns.
+partially streamed rings. Landmarks remain canonical near-field geometry; they are withheld only
+during the first incomplete fine-field load so isolated upper geometry cannot appear before its
+supporting columns.
 
-Procedural trees have one analytic `SkylineFeature` identity shared by canonical chunk decoration,
-random-access voxel sampling, edit invalidation, and surface LOD generation. An anchor-owned surface
-patch appends a small stepped trunk/crown cuboid proxy, simplified with distance but using the same
-materials and bounds. Any canonical edit that touches the generated feature suppresses its disposable
-proxy at every level; an edit outside the analytic tree does not. The canonical boundary snaps to the
-96-voxel feature placement grid, keeping a whole tree on one side of the canonical/proxy handoff.
+Each region owns an analytic `SkylineFeature` archetype shared by canonical chunk decoration,
+random-access voxel sampling, edit invalidation, and surface LOD generation: broadleaf, limestone tor,
+alpine needle, clay hoodoo, oriented dune arch, or basalt-column cluster. All are ordinary canonical
+10 cm voxels rather than renderer entities, so picking, collision, removal, restoration, codecs, and
+sparse persistence require no special case. An anchor-owned surface patch appends at most four cuboid
+proxies (24 quads) using the same stable materials and conservative bounds, adding no per-landmark draw
+object or allocation. Any canonical edit that touches generated feature material suppresses its
+disposable proxy at every level; reverting the edit restores it. The canonical boundary snaps to the
+96-voxel feature placement grid, keeping a whole landmark on one side of the canonical/proxy handoff.
 
 An edit invalidates every surface tile whose sampling footprint depends on that X/Z column. Resident
 geometry stays active while its replacement is generated and allocated, then the renderer switches
 the mesh and releases the old allocation atomically. Dirty work that leaves the retained streaming
 window is discarded because any later load samples the authoritative edit overlay again. Feature
-edits additionally invalidate the feature anchor's tile when a crown or branch crosses a tile edge.
+edits additionally invalidate the feature anchor's tile when generated geometry crosses a tile edge.
+Retained tiles just outside active coverage still record affected revisions without spending immediate
+remesh work. If focus returns before eviction, revision comparison marks the cached mesh stale and
+blocks coverage activation until its replacement is uploaded; this prevents multi-tab edits from
+reviving an old retained LOD mesh.
 
 Near meshes also bake the established four-level voxel ambient-occlusion term from two side samples
 and the diagonal at each face corner. Four 2-bit values participate in the greedy merge key, and the

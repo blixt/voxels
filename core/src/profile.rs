@@ -4,6 +4,7 @@ pub const PROFILE_SPEED_METRES_PER_SECOND: f32 = 12.0;
 pub const PROFILE_WARMUP_SECONDS: f32 = 30.0;
 pub const PROFILE_MEASURE_SECONDS: f32 = 60.0;
 pub const PROFILE_TOTAL_SECONDS: f32 = PROFILE_WARMUP_SECONDS + PROFILE_MEASURE_SECONDS;
+pub const PROFILE_LOOP_METRES: f32 = PROFILE_SPEED_METRES_PER_SECOND * PROFILE_WARMUP_SECONDS;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -82,10 +83,15 @@ impl ProfileAutomation {
         if !matches!(self.phase, ProfilePhase::Warmup | ProfilePhase::Measured) {
             return None;
         }
-        let direction = Vec2::new(1.0, 0.618_033_95).normalize();
+        // Warm the exact route measured by the allocator gate. The first 30-second lap discovers
+        // the route's geometry; the next two laps prove that evicting and reloading the same
+        // canonical/LOD working set reuses GPU pages instead of growing with distance travelled.
+        let radius = PROFILE_LOOP_METRES / std::f32::consts::TAU;
+        let angle = (self.distance_metres() % PROFILE_LOOP_METRES) / radius;
+        let offset = Vec2::new(radius * angle.sin(), radius * (1.0 - angle.cos()));
+        let direction = Vec2::new(angle.cos(), angle.sin());
         Some(ProfilePose {
-            position_xz: Vec2::new(self.origin.x, self.origin.z)
-                + direction * self.distance_metres(),
+            position_xz: Vec2::new(self.origin.x, self.origin.z) + offset,
             yaw: direction.x.atan2(-direction.y),
             pitch: -0.22,
         })
@@ -101,7 +107,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deterministic_rail_covers_over_one_kilometre_then_drains() {
+    fn deterministic_rail_warms_one_lap_then_measures_two_more() {
         let mut profile = ProfileAutomation::default();
         profile.start(Vec3::new(2.0, 3.0, -4.0));
         assert_eq!(profile.phase(), ProfilePhase::Warmup);
@@ -109,6 +115,8 @@ mod tests {
             profile.advance_fixed_step();
         }
         assert_eq!(profile.phase(), ProfilePhase::Measured);
+        let warm_pose = profile.pose().expect("measured lap has a pose");
+        assert!((warm_pose.position_xz - Vec2::new(2.0, -4.0)).length() < 0.001);
         for _ in 0..(120 * 60) {
             profile.advance_fixed_step();
         }

@@ -22,9 +22,9 @@ greedy meshing. Reports are written under the ignored `target/criterion/` direct
 `vp run bench:core` compares 120 dry and submerged fixed simulation steps.
 `vp run profile:browser` builds release WASM, serves it from an isolated origin, and records raw
 frame/CPU phase distributions for steady, traversal, and underwater scenarios in system Chrome.
-`vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step rail, measures its final 60 seconds,
-checks streaming/residency bounds and memory plateau, then requires every canonical and LOD queue to
-drain.
+`vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step closed rail. One lap warms the exact
+terrain used by two measured laps, making its arena-plateau gate prove allocation reuse before every
+canonical and LOD queue must drain.
 `vp run profile:edits` runs 40 Rust-owned terrain/water remove-and-restore operations and gates SQLite
 dispatch, canonical remesh, all four LOD replacements, submitted-frame convergence, and pristine
 restoration.
@@ -42,12 +42,13 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 
 The canonical world is generator identity plus sparse edits. Near meshes and four streamed surface LOD
 rings are derived caches; the rings sample at 0.2, 0.4, 0.8, and 1.6 m while the editable near field
-retains authoritative 10 cm voxels. Generator v6 shares one regional surface sample across canonical
+retains authoritative 10 cm voxels. Generator v7 shares one regional surface sample across canonical
 chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
 conditional skirts, and activates a newly streamed coverage set only when it is complete.
-Analytic tree identities preserve an edit-aware forest skyline across those rings instead of dropping
-procedural features at the canonical-chunk boundary.
+Analytic landmark identities add broadleaf trees, limestone tors, alpine needles, hoodoos, dune
+arches, and basalt columns as ordinary editable voxels, with bounded edit-aware proxies preserving
+their silhouettes across the surface rings.
 See [docs/architecture.md](docs/architecture.md) for format, persistence, and research decisions.
 
 ## Controls
@@ -63,7 +64,7 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 - Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and context menu
   can toggle cascaded sun shadows, ambient occlusion, fog, far terrain, animated water, and target
   highlighting without a DOM UI layer. Its Rust-rendered more menu can teleport to the coastal
-  showcase for repeatable graphics and streaming checks.
+  showcase or cycle through regional landmarks for repeatable graphics and streaming checks.
 
 ## Automation
 

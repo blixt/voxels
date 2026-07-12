@@ -257,13 +257,28 @@ Persistence hydration now moves the initial `EditMap` into the engine exactly on
 store cloned all three edit indices and retained the original for the entire session, creating an
 avoidable near-2x edit-journal payload before any new edit was made.
 
+## 2026-07-12: editable regional landmarks
+
+Generator v7 generalizes the old broadleaf-only feature path into six region-specific landmark
+archetypes. Canonical shapes remain ordinary 10 cm voxels and coarse representations stay packed into
+their owning surface patch with at most four proxy boxes. The native `generate 32^3 chunk` Criterion
+mean remained 709.12 us on the M3 Max, with no statistically significant change from its saved
+baseline. The release edit profile also restored all 40 terrain/water operations with 9.4 ms frame p95,
+3.1 ms SQLite/OPFS enqueue p95, and 29.7 ms full canonical-plus-LOD convergence p95.
+
+The first one-way sustained run reached denser landmark geometry late and grew the arena from 60 to
+68 MiB during the nominal plateau window. That exposed a flaw in the benchmark: different terrain was
+being mistaken for allocator growth. The rail now closes after exactly the 30-second warm-up lap and
+measures two repetitions of that same terrain. A flat measured capacity therefore demonstrates page
+reuse after eviction while retaining the original distance, streaming, and drain gates.
+
 ## 2026-07-12: sustained deterministic streaming rail
 
 `vp run profile:sustained` starts one numeric debug command through the browser transport; all
-scenario timing and movement remain in portable Rust. The camera follows a fixed 120 Hz golden-ratio
-rail at 12 m/s, warms the allocator for 30 seconds, measures the next 60 seconds, covers 1.08 km, then
-stops and requires canonical and all four surface-LOD queues to drain. The harness runs against release
-WASM on an isolated ephemeral origin and enforces frame, memory, residency, and queue gates.
+scenario timing and movement remain in portable Rust. The camera follows a fixed 120 Hz circular rail
+at 12 m/s: one 360 m lap warms the allocator, two identical laps measure it, and the cumulative 1.08 km
+run then stops and requires canonical and all four surface-LOD queues to drain. The harness runs against
+release WASM on an isolated ephemeral origin and enforces frame, memory, residency, and queue gates.
 
 The first run exposed unfinished, undesired chunks retained inside scheduler hysteresis. Such entries
 were deliberately excluded from future admission but still counted as queued forever, preventing a
@@ -275,20 +290,20 @@ The corrected M3 Max / system Chrome run produced:
 | Sustained measurement                     |                Result |                     Gate |
 | ----------------------------------------- | --------------------: | -----------------------: |
 | Distance                                  |               1,080 m |         at least 1,000 m |
-| Canonical evictions                       |                15,149 |             at least 500 |
+| Canonical evictions                       |                14,287 |             at least 500 |
 | Tracked canonical high-water              |                   320 |              at most 320 |
-| Surface-resident high-water               |                   829 |              at most 896 |
+| Surface-resident high-water               |                   725 |              at most 896 |
 | Pending mesh high-water                   |                     1 |                at most 3 |
-| Frame p95 / p99 / max                     |  9.3 / 10.0 / 16.7 ms | 12 / 16.67 / no 33.33 ms |
-| Worker CPU p95 / p99                      |          6.3 / 6.9 ms |               7.5 ms p95 |
-| Streaming p95 / p99                       |          3.3 / 3.7 ms |               4.5 ms p95 |
-| GPU active-window p95 / p99 / max         | 4.11 / 5.44 / 6.17 ms |        recorded baseline |
-| Final-20-second WASM committed range      |             0.938 MiB |            at most 1 MiB |
-| Final-20-second arena-capacity range      |                 4 MiB |         at most one page |
+| Frame p95 / p99 / max                     |  9.3 / 10.3 / 16.9 ms | 12 / 16.67 / no 33.33 ms |
+| Worker CPU p95 / p99                      |          6.4 / 7.0 ms |               7.5 ms p95 |
+| Streaming p95 / p99                       |          3.3 / 3.6 ms |               4.5 ms p95 |
+| GPU active-window p95 / p99 / max         | 6.88 / 7.57 / 7.63 ms |        recorded baseline |
+| Final-20-second WASM committed range      |             0.375 MiB |            at most 1 MiB |
+| Final-20-second arena-capacity range      |                 0 MiB |         at most one page |
 | Dropped telemetry / stale completions     |                 0 / 0 |                     zero |
 | Final pending jobs / pending mesh payload |                 0 / 0 |                     zero |
 
-The rail reached 27.438 MiB committed WASM and 64 MiB of mesh-arena capacity. Those are high-water
+The rail reached 27.063 MiB committed WASM and 56 MiB of mesh-arena capacity. Those are high-water
 figures, not live payload claims. The active surface plus pending coverage union stayed below its
 conservative 896-tile bound, and the final focus activated only after every replacement queue drained.
 
