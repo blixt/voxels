@@ -173,7 +173,7 @@ impl EditMap {
         let mut y = highest_override.map_or(generated.height, |value| value.max(generated.height));
         loop {
             let material = self.sample(generator, VoxelCoord::new(x, y, z));
-            if material.is_collidable() || y <= -16 {
+            if material.is_collidable() || y == i32::MIN {
                 return (y, material);
             }
             y -= 1;
@@ -315,6 +315,24 @@ mod tests {
         );
         edits.set(generator, VoxelCoord::new(x, generated, z), Material::Air);
         assert_eq!(edits.surface_sample(generator, x, z).0, generated - 1);
+    }
+
+    #[test]
+    fn edited_column_surface_reaches_the_generated_floor() {
+        let generator = Generator::new(11);
+        let x = 7;
+        let z = -9;
+        let generated = generator.surface_height(x, z);
+        let mut edits = EditMap::default();
+        for y in -16..=generated {
+            edits.set(generator, VoxelCoord::new(x, y, z), Material::Air);
+        }
+
+        assert_eq!(generator.sample(x, -17, z), Material::Basalt);
+        assert_eq!(
+            edits.surface_sample(generator, x, z),
+            (-17, Material::Basalt)
+        );
     }
 
     #[test]
