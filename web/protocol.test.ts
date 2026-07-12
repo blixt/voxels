@@ -12,7 +12,6 @@ describe("packed input protocol", () => {
         y: 20.25,
         dx: -3.5,
         dy: 4.75,
-        time: 1000.5,
         flags: 0x89abcdef,
       },
     ]);
@@ -25,7 +24,6 @@ describe("packed input protocol", () => {
     expect(view.getFloat32(8, true)).toBe(20.25);
     expect(view.getFloat32(12, true)).toBe(-3.5);
     expect(view.getFloat32(16, true)).toBe(4.75);
-    expect(view.getFloat32(20, true)).toBe(1000.5);
-    expect(view.getUint32(24, true)).toBe(0x89abcdef);
+    expect(view.getUint32(20, true)).toBe(0x89abcdef);
   });
 });

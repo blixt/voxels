@@ -5,8 +5,6 @@ import {
   INPUT_KEY_UP,
   INPUT_POINTER_DOWN,
   INPUT_POINTER_MOVE,
-  INPUT_POINTER_UP,
-  INPUT_WHEEL,
   packInput,
   type FromWorker,
   type InputSample,
@@ -116,7 +114,6 @@ function start(canvas: HTMLCanvasElement): void {
       y: event.clientY - rect.top,
       dx: event.movementX,
       dy: event.movementY,
-      time: event.timeStamp,
       flags: event.ctrlKey || event.metaKey ? 1 : 0,
     };
   };
@@ -144,9 +141,6 @@ function start(canvas: HTMLCanvasElement): void {
       enqueue(point(sample, INPUT_POINTER_MOVE));
     }
   });
-  canvas.addEventListener("pointerup", (event) => {
-    enqueue(point(event, INPUT_POINTER_UP), true);
-  });
   canvas.addEventListener("pointercancel", (event) => {
     enqueue(point(event, INPUT_CANCEL), true);
   });
@@ -154,27 +148,6 @@ function start(canvas: HTMLCanvasElement): void {
     "wheel",
     (event) => {
       event.preventDefault();
-      const rect = canvas.getBoundingClientRect();
-      const scale =
-        event.deltaMode === WheelEvent.DOM_DELTA_LINE
-          ? 16
-          : event.deltaMode === 2
-            ? rect.height
-            : 1;
-      enqueue(
-        {
-          kind: INPUT_WHEEL,
-          code: 0,
-          buttons: 0,
-          x: event.clientX - rect.left,
-          y: event.clientY - rect.top,
-          dx: event.deltaX * scale,
-          dy: event.deltaY * scale,
-          time: event.timeStamp,
-          flags: event.ctrlKey || event.metaKey ? 1 : 0,
-        },
-        true,
-      );
     },
     { passive: false },
   );
@@ -201,7 +174,6 @@ function start(canvas: HTMLCanvasElement): void {
     y: 0,
     dx: 0,
     dy: 0,
-    time: event.timeStamp,
     flags: event.repeat ? 1 : 0,
   });
   window.addEventListener("keydown", (event) => {
@@ -226,7 +198,6 @@ function start(canvas: HTMLCanvasElement): void {
         y: 0,
         dx: 0,
         dy: 0,
-        time: performance.now(),
         flags: 0,
       },
       true,

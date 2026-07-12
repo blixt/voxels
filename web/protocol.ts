@@ -1,9 +1,7 @@
-export const INPUT_RECORD_BYTES = 28;
+export const INPUT_RECORD_BYTES = 24;
 
 export const INPUT_POINTER_DOWN = 0;
 export const INPUT_POINTER_MOVE = 1;
-export const INPUT_POINTER_UP = 2;
-export const INPUT_WHEEL = 3;
 export const INPUT_KEY_DOWN = 4;
 export const INPUT_KEY_UP = 5;
 export const INPUT_CANCEL = 6;
@@ -16,7 +14,6 @@ export interface InputSample {
   y: number;
   dx: number;
   dy: number;
-  time: number;
   flags: number;
 }
 
@@ -34,8 +31,7 @@ export function packInput(samples: readonly InputSample[]): ArrayBuffer {
     view.setFloat32(offset + 8, sample.y, true);
     view.setFloat32(offset + 12, sample.dx, true);
     view.setFloat32(offset + 16, sample.dy, true);
-    view.setFloat32(offset + 20, sample.time, true);
-    view.setUint32(offset + 24, sample.flags, true);
+    view.setUint32(offset + 20, sample.flags, true);
   }
   return buffer;
 }

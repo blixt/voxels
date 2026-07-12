@@ -241,12 +241,11 @@ mod web {
         y: f32,
         dx: f32,
         dy: f32,
-        time: f32,
         flags: u32,
     }
 
     const INPUT_RECORD_SIZE: usize = size_of::<InputRecord>();
-    const _: () = assert!(INPUT_RECORD_SIZE == 28);
+    const _: () = assert!(INPUT_RECORD_SIZE == 24);
     const KIND_POINTER_MOVE: u8 = 1;
     const KIND_POINTER_DOWN: u8 = 0;
     const KIND_KEY_DOWN: u8 = 4;
