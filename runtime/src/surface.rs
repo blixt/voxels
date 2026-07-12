@@ -110,8 +110,7 @@ impl SurfaceRevisionCache {
     }
 
     pub fn accepts(&self, coord: SurfaceTileCoord, revision: u64) -> bool {
-        self.requested_revision(coord)
-            .is_none_or(|requested| revision >= requested)
+        self.requested_revision(coord).unwrap_or(self.epoch) <= revision
     }
 
     /// Records a generated tile only if it still satisfies the newest request.
@@ -193,6 +192,23 @@ mod tests {
         assert_eq!(
             cache.status(coord),
             Some(SurfaceRevisionStatus::Current { revision: second })
+        );
+    }
+
+    #[test]
+    fn unrequested_tile_rejects_a_revision_older_than_the_current_epoch() {
+        let mut cache = SurfaceRevisionCache::new();
+        let coord = tile(9);
+        let obsolete = cache.epoch();
+        let current = cache.begin_edit();
+
+        assert!(!cache.accepts(coord, obsolete));
+        assert!(!cache.commit(coord, obsolete));
+        assert_eq!(cache.status(coord), None);
+        assert!(cache.commit(coord, current));
+        assert_eq!(
+            cache.status(coord),
+            Some(SurfaceRevisionStatus::Current { revision: current })
         );
     }
 
