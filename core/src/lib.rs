@@ -323,7 +323,7 @@ impl CameraState {
     pub fn from_persisted(position: Vec3, yaw: f32, pitch: f32) -> Self {
         Self {
             position,
-            yaw,
+            yaw: normalized_yaw(yaw),
             pitch: pitch.clamp(-1.5, 1.5),
             velocity: Vec3::ZERO,
             grounded: false,
@@ -335,8 +335,14 @@ impl CameraState {
     pub fn look(&mut self, delta: Vec2) {
         const SENSITIVITY: f32 = 0.0022;
         // Pointer movement right turns right; browser Y grows downward, so moving up raises pitch.
-        self.yaw += delta.x * SENSITIVITY;
-        self.pitch = (self.pitch - delta.y * SENSITIVITY).clamp(-1.5, 1.5);
+        let yaw = self.yaw + delta.x * SENSITIVITY;
+        if yaw.is_finite() {
+            self.yaw = normalized_yaw(yaw);
+        }
+        let pitch = self.pitch - delta.y * SENSITIVITY;
+        if pitch.is_finite() {
+            self.pitch = pitch.clamp(-1.5, 1.5);
+        }
     }
 
     pub fn forward(self) -> Vec3 {
@@ -606,6 +612,14 @@ impl CameraState {
     }
 }
 
+fn normalized_yaw(yaw: f32) -> f32 {
+    if yaw.is_finite() {
+        (yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+    } else {
+        0.0
+    }
+}
+
 fn player_bounds(eye_position: Vec3) -> (Vec3, Vec3) {
     let feet_y = eye_position.y - PLAYER_EYE_HEIGHT_METRES;
     (
@@ -663,6 +677,32 @@ mod tests {
         assert_eq!(camera.pitch, -1.5);
         camera.look(Vec2::new(0.0, -20_000.0));
         assert_eq!(camera.pitch, 1.5);
+    }
+
+    #[test]
+    fn restored_yaw_stays_bounded_and_retains_mouse_precision() {
+        let mut camera = CameraState::from_persisted(Vec3::ZERO, 1.0e30, 0.0);
+        assert!((-std::f32::consts::PI..std::f32::consts::PI).contains(&camera.yaw));
+        let before = camera.yaw;
+
+        camera.look(Vec2::new(1.0, 0.0));
+
+        let turn = normalized_yaw(camera.yaw - before);
+        assert!((turn - 0.0022).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn non_finite_mouse_axes_do_not_poison_camera_angles() {
+        let mut camera = CameraState::default();
+        let initial_yaw = camera.yaw;
+        camera.look(Vec2::new(f32::NAN, 10.0));
+        assert_eq!(camera.yaw, initial_yaw);
+        assert!(camera.pitch.is_finite());
+
+        let initial_pitch = camera.pitch;
+        camera.look(Vec2::new(10.0, f32::INFINITY));
+        assert_ne!(camera.yaw, initial_yaw);
+        assert_eq!(camera.pitch, initial_pitch);
     }
 
     #[test]
