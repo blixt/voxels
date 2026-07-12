@@ -1,5 +1,5 @@
 use crate::mesh::{FACE_NEG_X, FACE_NEG_Y, FACE_NEG_Z, FACE_POS_X, FACE_POS_Y, FACE_POS_Z};
-use crate::{EditMap, Generator, Material, SkylineFeature, VoxelCoord};
+use crate::{EditMap, Generator, Material, SEA_LEVEL_VOXELS, SkylineFeature, VoxelCoord};
 use std::ops::Range;
 
 /// Every surface LOD tile contains the same number of cells. Increasing the level therefore
@@ -210,6 +210,28 @@ pub struct SurfaceTileMesh {
     pub patches: Vec<SurfacePatch>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterPatch {
+    pub cell_bounds: [[u8; 2]; 2],
+    pub quad_range: Range<u32>,
+    pub bounds: SurfaceBounds,
+}
+
+impl WaterPatch {
+    pub fn quads<'a>(&self, tile: &'a WaterTileMesh) -> &'a [SurfaceQuad] {
+        &tile.quads[self.quad_range.start as usize..self.quad_range.end as usize]
+    }
+}
+
+/// Flat, edit-aware sea geometry kept separate from lowered terrain underlays. Only patches with
+/// sampled Water occupancy are present, and every quad stays on the canonical sea-level voxel.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterTileMesh {
+    pub coord: SurfaceTileCoord,
+    pub quads: Vec<SurfaceQuad>,
+    pub patches: Vec<WaterPatch>,
+}
+
 impl SurfaceBounds {
     pub fn from_quads(quads: &[SurfaceQuad]) -> Option<Self> {
         let first = quads.first()?;
@@ -361,6 +383,114 @@ pub fn generate_edited_surface_tile_mesh(
         true,
         &features,
     )
+}
+
+pub fn generate_edited_water_tile_mesh(
+    generator: Generator,
+    edits: &EditMap,
+    coord: SurfaceTileCoord,
+) -> WaterTileMesh {
+    generate_water_tile_mesh_with(coord, |x, z| {
+        edits.sample(generator, VoxelCoord::new(x, SEA_LEVEL_VOXELS, z)) == Material::Water
+    })
+}
+
+pub fn generate_water_tile_mesh_with(
+    coord: SurfaceTileCoord,
+    water_at: impl Fn(i32, i32) -> bool,
+) -> WaterTileMesh {
+    let [origin_x, origin_z] = coord.voxel_origin();
+    let stride = coord.stride_voxels();
+    let mut wet = [[false; SURFACE_TILE_EDGE_CELLS as usize]; SURFACE_TILE_EDGE_CELLS as usize];
+    for cell_z in 0..SURFACE_TILE_EDGE_CELLS {
+        for cell_x in 0..SURFACE_TILE_EDGE_CELLS {
+            wet[cell_z as usize][cell_x as usize] = water_at(
+                origin_x + cell_x * stride + stride / 2,
+                origin_z + cell_z * stride + stride / 2,
+            );
+        }
+    }
+
+    let mut quads = Vec::new();
+    let mut patches = Vec::new();
+    for patch_z in 0..SURFACE_PATCHES_PER_TILE_EDGE {
+        for patch_x in 0..SURFACE_PATCHES_PER_TILE_EDGE {
+            let cell_min_x = patch_x * SURFACE_PATCH_EDGE_CELLS;
+            let cell_min_z = patch_z * SURFACE_PATCH_EDGE_CELLS;
+            let mut consumed =
+                [[false; SURFACE_PATCH_EDGE_CELLS as usize]; SURFACE_PATCH_EDGE_CELLS as usize];
+            let quad_start = quads.len() as u32;
+            for local_z in 0..SURFACE_PATCH_EDGE_CELLS {
+                for local_x in 0..SURFACE_PATCH_EDGE_CELLS {
+                    if consumed[local_z as usize][local_x as usize]
+                        || !wet[(cell_min_z + local_z) as usize][(cell_min_x + local_x) as usize]
+                    {
+                        continue;
+                    }
+                    let mut width = 1;
+                    while local_x + width < SURFACE_PATCH_EDGE_CELLS
+                        && !consumed[local_z as usize][(local_x + width) as usize]
+                        && wet[(cell_min_z + local_z) as usize]
+                            [(cell_min_x + local_x + width) as usize]
+                    {
+                        width += 1;
+                    }
+                    let mut height = 1;
+                    'height: while local_z + height < SURFACE_PATCH_EDGE_CELLS {
+                        for offset in 0..width {
+                            if consumed[(local_z + height) as usize][(local_x + offset) as usize]
+                                || !wet[(cell_min_z + local_z + height) as usize]
+                                    [(cell_min_x + local_x + offset) as usize]
+                            {
+                                break 'height;
+                            }
+                        }
+                        height += 1;
+                    }
+                    for z in local_z..local_z + height {
+                        for x in local_x..local_x + width {
+                            consumed[z as usize][x as usize] = true;
+                        }
+                    }
+                    quads.push(SurfaceQuad {
+                        origin: [
+                            origin_x + (cell_min_x + local_x) * stride,
+                            SEA_LEVEL_VOXELS,
+                            origin_z + (cell_min_z + local_z) * stride,
+                        ],
+                        face: FACE_POS_Y,
+                        extent: [(width * stride) as u16, (height * stride) as u16],
+                        material: Material::Water,
+                    });
+                }
+            }
+            let quad_end = quads.len() as u32;
+            if quad_start == quad_end {
+                continue;
+            }
+            let bounds = SurfaceBounds::from_quads(&quads[quad_start as usize..quad_end as usize])
+                .unwrap_or(SurfaceBounds {
+                    min: [origin_x, SEA_LEVEL_VOXELS, origin_z],
+                    max: [origin_x, SEA_LEVEL_VOXELS + 1, origin_z],
+                });
+            patches.push(WaterPatch {
+                cell_bounds: [
+                    [cell_min_x as u8, cell_min_z as u8],
+                    [
+                        (cell_min_x + SURFACE_PATCH_EDGE_CELLS) as u8,
+                        (cell_min_z + SURFACE_PATCH_EDGE_CELLS) as u8,
+                    ],
+                ],
+                quad_range: quad_start..quad_end,
+                bounds,
+            });
+        }
+    }
+    WaterTileMesh {
+        coord,
+        quads,
+        patches,
+    }
 }
 
 pub fn generate_surface_tile_with(
@@ -681,6 +811,15 @@ mod tests {
             .count()
     }
 
+    fn water_quad_covers(tile: &WaterTileMesh, voxel_x: i32, voxel_z: i32) -> bool {
+        tile.quads.iter().any(|quad| {
+            quad.origin[0] <= voxel_x
+                && voxel_x < quad.origin[0] + i32::from(quad.extent[0])
+                && quad.origin[2] <= voxel_z
+                && voxel_z < quad.origin[2] + i32::from(quad.extent[1])
+        })
+    }
+
     #[test]
     fn levels_have_explicit_power_of_two_strides_and_spans() {
         let strides: Vec<_> = SurfaceLodLevel::ALL
@@ -751,6 +890,69 @@ mod tests {
             surface_tiles_affected_by_column(level, -128, -128),
             [SurfaceTileCoord::new(level, -1, -1)]
         );
+    }
+
+    #[test]
+    fn full_water_tiles_merge_once_per_patch_at_one_canonical_level() {
+        for level in SurfaceLodLevel::ALL {
+            let coord = SurfaceTileCoord::new(level, -2, 3);
+            let tile = generate_water_tile_mesh_with(coord, |_, _| true);
+            assert_eq!(tile.patches.len(), 16);
+            assert_eq!(tile.quads.len(), 16);
+            assert!(
+                tile.patches
+                    .iter()
+                    .all(|patch| patch.quads(&tile).len() == 1)
+            );
+            assert!(tile.quads.iter().all(|quad| {
+                quad.origin[1] == SEA_LEVEL_VOXELS
+                    && quad.face == FACE_POS_Y
+                    && quad.material == Material::Water
+                    && quad.extent == [(SURFACE_PATCH_EDGE_CELLS * level.stride_voxels()) as u16; 2]
+            }));
+        }
+    }
+
+    #[test]
+    fn sparse_water_edits_remove_sampled_lod_occupancy() {
+        let generator = Generator::new(0x5eed_cafe);
+        let mut target = None;
+        'search: for z in (-12_000..=12_000).step_by(37) {
+            for x in (-12_000..=12_000).step_by(37) {
+                if generator.sample(x, SEA_LEVEL_VOXELS, z) == Material::Water {
+                    target = Some(VoxelCoord::new(x, SEA_LEVEL_VOXELS, z));
+                    break 'search;
+                }
+            }
+        }
+        let Some(target) = target else {
+            panic!("fixed seed should expose ocean Water");
+        };
+        let level = SurfaceLodLevel::Stride2;
+        let coord = SurfaceTileCoord::containing(level, target.x, target.z);
+        let [origin_x, origin_z] = coord.voxel_origin();
+        let stride = level.stride_voxels();
+        let sample_x = origin_x + (target.x - origin_x).div_euclid(stride) * stride + stride / 2;
+        let sample_z = origin_z + (target.z - origin_z).div_euclid(stride) * stride + stride / 2;
+        let sampled = VoxelCoord::new(sample_x, SEA_LEVEL_VOXELS, sample_z);
+        assert_eq!(
+            generator.sample(sampled.x, sampled.y, sampled.z),
+            Material::Water
+        );
+
+        let mut edits = EditMap::default();
+        let pristine = generate_edited_water_tile_mesh(generator, &edits, coord);
+        assert!(water_quad_covers(&pristine, sample_x, sample_z));
+        edits.set(generator, sampled, Material::Air);
+        let edited = generate_edited_water_tile_mesh(generator, &edits, coord);
+        assert!(!water_quad_covers(&edited, sample_x, sample_z));
+        edits.set(generator, sampled, Material::Water);
+        assert!(water_quad_covers(
+            &generate_edited_water_tile_mesh(generator, &edits, coord),
+            sample_x,
+            sample_z
+        ));
+        assert!(edits.is_empty());
     }
 
     #[test]
