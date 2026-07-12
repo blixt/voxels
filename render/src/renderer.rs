@@ -1987,13 +1987,15 @@ impl Renderer {
         let refract_water = !water_draw_list.spans.is_empty();
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
-        self.shadow_gpu.write_cascades(
-            &self.queue,
-            &shadow_cascades,
-            camera,
-            self.options,
-            self.lod_readiness(),
-        );
+        if self.options.shadows {
+            self.shadow_gpu.write_cascades(
+                &self.queue,
+                &shadow_cascades,
+                camera,
+                self.options,
+                self.lod_readiness(),
+            );
+        }
         let frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame
