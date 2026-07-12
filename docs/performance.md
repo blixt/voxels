@@ -648,6 +648,12 @@ closed-portal disconnection and reopening, stable equal-cost paths, and hard def
 It uses fixed arrays for 16 cells and 32 portals and performs no allocation per query; integration with
 Cinder's authored node/edge graph remains deliberately separate from the proven radial streamer.
 
+Cinder topology v1 adds three more host gates over its eight cells and seven portals: all authored node
+centers classify stably and the 175-sample pristine evaluation leaves every portal open; closing one probe
+plane disconnects only its edge and reverting restores it; and an exterior-to-chamber route both
+requires the mouth and exceeds the current 6.4 m light-selection radius. The world suite now contains
+101 tests without adding a persisted format or changing generator output.
+
 The material atlas simultaneously returned to nearest-neighbor sampling for the original pixelated
 style. The sampler contract is host-tested as nearest magnification/minification/mip selection with
 anisotropy 1, while retaining the averaged mip chain for distance stability. An isolated headless

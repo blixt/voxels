@@ -15,9 +15,14 @@ pub mod route;
 pub mod visibility;
 
 pub use cave::{
-    CINDER_VAULT_BOUNDS, CINDER_VAULT_CRYSTALS, CINDER_VAULT_EDGES, CINDER_VAULT_MOUTH_ANCHOR_XZ,
-    CINDER_VAULT_MOUTH_CELL, CINDER_VAULT_NODES, CaveCrystalFormation, CaveEdge, CaveNode,
-    CaveSample, cinder_vault_crystal_at, cinder_vault_override, sample_cinder_vault,
+    CINDER_VAULT_BOUNDS, CINDER_VAULT_CRYSTALS, CINDER_VAULT_EDGES, CINDER_VAULT_EXTERIOR_CELL,
+    CINDER_VAULT_MOUTH_ANCHOR_XZ, CINDER_VAULT_MOUTH_CELL, CINDER_VAULT_NODES,
+    CINDER_VAULT_PORTAL_COUNT, CINDER_VAULT_PORTAL_OPEN_LANES, CINDER_VAULT_PORTAL_PROBE_EDGE,
+    CINDER_VAULT_TOPOLOGY_VERSION, CINDER_VAULT_VISIBILITY_CELL_COUNT, CaveCrystalFormation,
+    CaveEdge, CaveNode, CavePortalProbe, CaveSample, cinder_vault_crystal_at,
+    cinder_vault_override, cinder_vault_portal_probe, cinder_vault_portal_state,
+    cinder_vault_portals_affected_by_voxel, cinder_vault_visibility_cell,
+    cinder_vault_visibility_graph, sample_cinder_vault,
 };
 pub use chunk::{CHUNK_EDGE, CHUNK_VOLUME, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord};
 pub use composition::{

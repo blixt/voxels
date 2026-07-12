@@ -1,9 +1,18 @@
-use crate::{CaveSystemId, Material};
+use crate::{
+    CINDER_VAULT, CaveSystemId, Material, PortalState, VOXEL_SIZE_METRES, VisibilityCellId,
+    VisibilityGraph, VisibilityGraphError, VisibilityPortal,
+};
 use std::sync::LazyLock;
 
 pub const CINDER_VAULT_BOUNDS: [[i32; 3]; 2] = [[-5_236, 2, 3_158], [-5_004, 77, 3_342]];
 pub const CINDER_VAULT_MOUTH_CELL: [i32; 2] = [-53, 33];
 pub const CINDER_VAULT_MOUTH_ANCHOR_XZ: [i32; 2] = [-5_020, 3_186];
+pub const CINDER_VAULT_TOPOLOGY_VERSION: u16 = 1;
+pub const CINDER_VAULT_VISIBILITY_CELL_COUNT: usize = CINDER_VAULT_NODES.len() + 1;
+pub const CINDER_VAULT_PORTAL_COUNT: usize = CINDER_VAULT_EDGES.len() + 1;
+pub const CINDER_VAULT_EXTERIOR_CELL: VisibilityCellId = VisibilityCellId::new(0);
+pub const CINDER_VAULT_PORTAL_OPEN_LANES: usize = 4;
+pub const CINDER_VAULT_PORTAL_PROBE_EDGE: i32 = 5;
 const CAVE_X_BIN_EDGE: i32 = 32;
 const CAVE_X_BIN_COUNT: usize = 8;
 
@@ -35,6 +44,13 @@ pub struct CaveCrystalFormation {
     pub base: [i32; 3],
     pub height: u8,
     pub base_radius: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CavePortalProbe {
+    pub center: [i32; 3],
+    pub axis_u: [i32; 3],
+    pub axis_v: [i32; 3],
 }
 
 /// Sparse authored mineral cues remain ordinary voxels: they mesh, collide, edit, persist, and
@@ -138,6 +154,127 @@ pub const CINDER_VAULT_EDGES: [CaveEdge; 6] = [
         vertical_radius: 12,
     },
 ];
+
+static CINDER_VAULT_VISIBILITY_GRAPH: LazyLock<Result<VisibilityGraph, VisibilityGraphError>> =
+    LazyLock::new(|| {
+        let mut portals =
+            [VisibilityPortal::new(CINDER_VAULT_EXTERIOR_CELL, VisibilityCellId::new(1), 0.0);
+                CINDER_VAULT_PORTAL_COUNT];
+        portals[0] = VisibilityPortal::new(
+            CINDER_VAULT_EXTERIOR_CELL,
+            VisibilityCellId::new(1),
+            node_distance_metres(CINDER_VAULT.entrance, CINDER_VAULT_NODES[0].center),
+        );
+        for (index, edge) in CINDER_VAULT_EDGES.iter().enumerate() {
+            portals[index + 1] = VisibilityPortal::new(
+                VisibilityCellId::new(edge.from + 1),
+                VisibilityCellId::new(edge.to + 1),
+                node_distance_metres(
+                    CINDER_VAULT_NODES[usize::from(edge.from)].center,
+                    CINDER_VAULT_NODES[usize::from(edge.to)].center,
+                ),
+            );
+        }
+        VisibilityGraph::new(CINDER_VAULT_VISIBILITY_CELL_COUNT, &portals)
+    });
+
+pub fn cinder_vault_visibility_graph() -> Result<&'static VisibilityGraph, VisibilityGraphError> {
+    CINDER_VAULT_VISIBILITY_GRAPH
+        .as_ref()
+        .map_err(|error| *error)
+}
+
+pub fn cinder_vault_visibility_cell(x: i32, y: i32, z: i32) -> VisibilityCellId {
+    if sample_cinder_vault(x, y, z).is_none() {
+        return CINDER_VAULT_EXTERIOR_CELL;
+    }
+    let point = [x, y, z];
+    let nearest = CINDER_VAULT_NODES
+        .iter()
+        .enumerate()
+        .min_by_key(|(index, node)| (squared_distance(point, node.center), *index))
+        .map_or(0, |(index, _)| index);
+    VisibilityCellId::new(nearest as u8 + 1)
+}
+
+pub fn cinder_vault_portal_probe(portal_index: usize) -> Option<CavePortalProbe> {
+    if portal_index == 0 {
+        return Some(CavePortalProbe {
+            center: [CINDER_VAULT.entrance[0], 49, CINDER_VAULT.entrance[2]],
+            axis_u: [1, 0, 0],
+            axis_v: [0, 0, 1],
+        });
+    }
+    let edge = *CINDER_VAULT_EDGES.get(portal_index - 1)?;
+    let from = CINDER_VAULT_NODES[usize::from(edge.from)].center;
+    let to = CINDER_VAULT_NODES[usize::from(edge.to)].center;
+    let center = std::array::from_fn(|axis| (from[axis] + to[axis]).div_euclid(2));
+    let tangent_x = (to[0] - from[0]).signum();
+    let tangent_z = (to[2] - from[2]).signum();
+    Some(CavePortalProbe {
+        center,
+        axis_u: [-tangent_z, 0, tangent_x],
+        axis_v: [0, 1, 0],
+    })
+}
+
+pub fn cinder_vault_portal_state(
+    mut is_open_voxel: impl FnMut(i32, i32, i32) -> bool,
+) -> PortalState {
+    let mut state = PortalState::default();
+    for portal_index in 0..CINDER_VAULT_PORTAL_COUNT {
+        let mut open_lanes = 0usize;
+        for sample_index in 0..(CINDER_VAULT_PORTAL_PROBE_EDGE.pow(2) as usize) {
+            let Some(voxel) = cinder_vault_portal_probe_voxel(portal_index, sample_index) else {
+                continue;
+            };
+            open_lanes += usize::from(is_open_voxel(voxel[0], voxel[1], voxel[2]));
+        }
+        let _ = state.set_open(portal_index, open_lanes >= CINDER_VAULT_PORTAL_OPEN_LANES);
+    }
+    state
+}
+
+pub fn cinder_vault_portals_affected_by_voxel(x: i32, y: i32, z: i32) -> u8 {
+    let mut affected = 0u8;
+    for portal_index in 0..CINDER_VAULT_PORTAL_COUNT {
+        for sample_index in 0..(CINDER_VAULT_PORTAL_PROBE_EDGE.pow(2) as usize) {
+            if cinder_vault_portal_probe_voxel(portal_index, sample_index) == Some([x, y, z]) {
+                affected |= 1 << portal_index;
+                break;
+            }
+        }
+    }
+    affected
+}
+
+fn cinder_vault_portal_probe_voxel(portal_index: usize, sample_index: usize) -> Option<[i32; 3]> {
+    let probe = cinder_vault_portal_probe(portal_index)?;
+    if sample_index >= CINDER_VAULT_PORTAL_PROBE_EDGE.pow(2) as usize {
+        return None;
+    }
+    let half = CINDER_VAULT_PORTAL_PROBE_EDGE / 2;
+    let u = sample_index as i32 % CINDER_VAULT_PORTAL_PROBE_EDGE - half;
+    let v = sample_index as i32 / CINDER_VAULT_PORTAL_PROBE_EDGE - half;
+    Some([
+        probe.center[0] + probe.axis_u[0] * u + probe.axis_v[0] * v,
+        probe.center[1] + probe.axis_u[1] * u + probe.axis_v[1] * v,
+        probe.center[2] + probe.axis_u[2] * u + probe.axis_v[2] * v,
+    ])
+}
+
+fn node_distance_metres(left: [i32; 3], right: [i32; 3]) -> f32 {
+    (squared_distance(left, right) as f32).sqrt() * VOXEL_SIZE_METRES
+}
+
+fn squared_distance(left: [i32; 3], right: [i32; 3]) -> i64 {
+    (0..3)
+        .map(|axis| {
+            let delta = i64::from(left[axis]) - i64::from(right[axis]);
+            delta * delta
+        })
+        .sum()
+}
 
 static CINDER_VAULT_X_BIN_MASKS: LazyLock<[u16; CAVE_X_BIN_COUNT]> = LazyLock::new(|| {
     let mut masks = [0u16; CAVE_X_BIN_COUNT];
@@ -307,6 +444,148 @@ fn dot(left: [f32; 3], right: [f32; 3]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visibility_cells_and_pristine_portals_match_the_authored_graph() {
+        assert_eq!(CINDER_VAULT_TOPOLOGY_VERSION, 1);
+        let graph = cinder_vault_visibility_graph().unwrap();
+        assert_eq!(graph.cell_count(), 8);
+        assert_eq!(graph.portal_count(), 7);
+        for (index, node) in CINDER_VAULT_NODES.iter().enumerate() {
+            assert_eq!(
+                cinder_vault_visibility_cell(node.center[0], node.center[1], node.center[2]),
+                VisibilityCellId::new(index as u8 + 1)
+            );
+        }
+
+        let generator = crate::Generator::new(0x5eed_cafe);
+        let state =
+            cinder_vault_portal_state(|x, y, z| !generator.sample(x, y, z).occludes_ambient());
+        for portal_index in 0..CINDER_VAULT_PORTAL_COUNT {
+            assert!(
+                state.is_open(portal_index),
+                "portal {portal_index} was not pristine-open"
+            );
+            for sample_index in 0..(CINDER_VAULT_PORTAL_PROBE_EDGE.pow(2) as usize) {
+                let voxel = cinder_vault_portal_probe_voxel(portal_index, sample_index).unwrap();
+                assert_eq!(
+                    cinder_vault_override(voxel[0], voxel[1], voxel[2]),
+                    Some(Material::Air)
+                );
+                assert_eq!(
+                    generator.sample(voxel[0], voxel[1], voxel[2]),
+                    Material::Air
+                );
+                assert_ne!(
+                    cinder_vault_portals_affected_by_voxel(voxel[0], voxel[1], voxel[2])
+                        & (1 << portal_index),
+                    0
+                );
+            }
+        }
+        for formation in CINDER_VAULT_CRYSTALS {
+            let [x, y, z] = formation.base;
+            let cell = cinder_vault_visibility_cell(x, y, z);
+            assert!((1..=CINDER_VAULT_NODES.len()).contains(&cell.index()));
+        }
+    }
+
+    #[test]
+    fn exterior_to_chamber_visibility_requires_the_mouth_and_geodesic_range() {
+        let graph = cinder_vault_visibility_graph().unwrap();
+        let chamber = cinder_vault_visibility_cell(
+            CINDER_VAULT.chamber[0],
+            CINDER_VAULT.chamber[1],
+            CINDER_VAULT.chamber[2],
+        );
+        let mut state = PortalState::all_open(graph.portal_count());
+        let geodesic = graph
+            .shortest_open_distance(CINDER_VAULT_EXTERIOR_CELL, chamber, state)
+            .expect("pristine chamber must connect to the exterior");
+        assert!((geodesic - 22.239_94).abs() < 0.000_1);
+        let final_cell = VisibilityCellId::new(7);
+        let final_distance = graph
+            .shortest_open_distance(CINDER_VAULT_EXTERIOR_CELL, final_cell, state)
+            .unwrap();
+        assert!((final_distance - 26.014_86).abs() < 0.000_1);
+        assert!(state.set_open(0, false));
+        assert_eq!(
+            graph.shortest_open_distance(CINDER_VAULT_EXTERIOR_CELL, chamber, state),
+            None
+        );
+    }
+
+    #[test]
+    fn portal_probes_close_from_edits_and_unrelated_voxels_touch_nothing() {
+        let generator = crate::Generator::new(0x5eed_cafe);
+        let pristine =
+            cinder_vault_portal_state(|x, y, z| !generator.sample(x, y, z).occludes_ambient());
+        let portal_index = 4usize;
+        let portal_mask = 1u8 << portal_index;
+        let closed = cinder_vault_portal_state(|x, y, z| {
+            cinder_vault_portals_affected_by_voxel(x, y, z) & portal_mask == 0
+                && !generator.sample(x, y, z).occludes_ambient()
+        });
+        assert!(pristine.is_open(portal_index));
+        assert!(!closed.is_open(portal_index));
+        for other in 0..CINDER_VAULT_PORTAL_COUNT {
+            if other != portal_index {
+                assert_eq!(closed.is_open(other), pristine.is_open(other));
+            }
+        }
+        assert_eq!(cinder_vault_portals_affected_by_voxel(0, 0, 0), 0);
+        let probe = cinder_vault_portal_probe(portal_index).unwrap();
+        assert_ne!(
+            cinder_vault_portals_affected_by_voxel(
+                probe.center[0],
+                probe.center[1],
+                probe.center[2]
+            ) & portal_mask,
+            0
+        );
+
+        let mut edits = crate::EditMap::default();
+        for sample_index in 0..(CINDER_VAULT_PORTAL_PROBE_EDGE.pow(2) as usize) {
+            let voxel = cinder_vault_portal_probe_voxel(0, sample_index).unwrap();
+            edits.set(
+                generator,
+                crate::VoxelCoord::new(voxel[0], voxel[1], voxel[2]),
+                Material::Basalt,
+            );
+        }
+        let sealed = cinder_vault_portal_state(|x, y, z| {
+            !edits
+                .sample(generator, crate::VoxelCoord::new(x, y, z))
+                .occludes_ambient()
+        });
+        assert!(!sealed.is_open(0));
+        assert_eq!(
+            cinder_vault_visibility_graph()
+                .unwrap()
+                .shortest_open_distance(
+                    CINDER_VAULT_EXTERIOR_CELL,
+                    VisibilityCellId::new(6),
+                    sealed,
+                ),
+            None
+        );
+        for sample_index in 0..(CINDER_VAULT_PORTAL_PROBE_EDGE.pow(2) as usize) {
+            let voxel = cinder_vault_portal_probe_voxel(0, sample_index).unwrap();
+            let coord = crate::VoxelCoord::new(voxel[0], voxel[1], voxel[2]);
+            edits.set(
+                generator,
+                coord,
+                generator.sample(voxel[0], voxel[1], voxel[2]),
+            );
+        }
+        assert!(edits.is_empty());
+        let restored = cinder_vault_portal_state(|x, y, z| {
+            !edits
+                .sample(generator, crate::VoxelCoord::new(x, y, z))
+                .occludes_ambient()
+        });
+        assert_eq!(restored, pristine);
+    }
 
     #[test]
     fn every_graph_node_and_edge_centerline_is_inside_the_cinder_vault() {

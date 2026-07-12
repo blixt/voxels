@@ -290,7 +290,11 @@ Portable cave topology starts with an allocation-free visibility graph capped at
 undirected portals. Portal openness is a 32-bit derived mask, and fixed-array Dijkstra queries return
 deterministic geodesic distance with stable cell-index tie breaking. Invalid endpoints, weights, and
 oversized definitions are rejected at construction. The graph persists nothing and names no cave;
-Cinder Vault will supply its exterior/node cells and edit-probed portals in the next integration step.
+Cinder Vault topology v1 supplies one exterior cell, seven nearest-node interior cells, a surface-mouth
+portal, and the six authored tunnel edges. Every portal owns a deterministic `5x5` canonical probe
+plane and remains open while at least four lanes are clear. The mouth uses an X/Z plane across the
+surface aperture; interior probes use tunnel-tangent-perpendicular and vertical axes. Sparse edits can
+identify affected portals with a seven-bit mask, so unrelated edits require no topology work.
 
 Placement material is Rust state, selected through the canvas context menu and displayed in the Rust
 header. The browser still transmits only pointer input; right-click uses the selected material and the
