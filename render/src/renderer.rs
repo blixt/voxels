@@ -530,7 +530,7 @@ impl Renderer {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
                     depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
@@ -1334,8 +1334,6 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
-            pass.set_pipeline(&self.sky_pipeline);
-            pass.draw(0..3, 0..1);
             pass.set_pipeline(&self.voxel_pipeline);
             for span in &world_draw_list.spans {
                 let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
@@ -1346,6 +1344,10 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(start..end));
                 pass.draw(0..6, 0..span.quad_count);
             }
+            // Draw the fullscreen sky at the far plane after opaque geometry so early depth
+            // rejection avoids running its procedural clouds behind terrain.
+            pass.set_pipeline(&self.sky_pipeline);
+            pass.draw(0..3, 0..1);
             pass.set_pipeline(&self.water_depth_pipeline);
             for span in &water_draw_list.spans {
                 let Some(buffer) = self.water_arena_buffers.get(span.page as usize) else {

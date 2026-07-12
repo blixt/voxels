@@ -211,6 +211,9 @@ try {
 
   await enterUnderwaterShowcase(page, viewport.width);
   const underwater = phaseSummary(await sample(page, 4_000));
+  if (process.env.SCREENSHOT) {
+    await page.screenshot({ path: process.env.SCREENSHOT });
+  }
 
   if (errors.length > 0) throw new Error(errors.join("\n"));
   console.log(

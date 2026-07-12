@@ -47,7 +47,7 @@ fn cloud_field(position: vec2<f32>) -> f32 {
 fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
   let x = f32((index << 1u) & 2u);
   let y = f32(index & 2u);
-  return vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+  return vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 1.0, 1.0);
 }
 
 @fragment
