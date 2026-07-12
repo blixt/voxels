@@ -46,11 +46,6 @@ fn vs_main(
   return out;
 }
 
-fn hash31(position: vec3<f32>) -> f32 {
-  let value = dot(position, vec3<f32>(127.1, 311.7, 74.7));
-  return fract(sin(value) * 43758.5453);
-}
-
 fn coarser_owns_boundary(distance_xz: f32, boundary: u32) -> bool {
   var split = 9.5;
   switch boundary {
