@@ -29,6 +29,7 @@ pub enum SkylineFeatureKind {
     BuriedRibs = 12,
     BuriedColonnade = 13,
     BasaltCrown = 14,
+    CaveMouth = 15,
 }
 
 impl SkylineFeatureKind {
@@ -48,7 +49,7 @@ impl SkylineFeatureKind {
         Self::BuriedColonnade,
         Self::BasaltCrown,
     ];
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Broadleaf,
         Self::MoorTor,
         Self::AlpineNeedle,
@@ -64,6 +65,7 @@ impl SkylineFeatureKind {
         Self::BuriedRibs,
         Self::BuriedColonnade,
         Self::BasaltCrown,
+        Self::CaveMouth,
     ];
 
     pub const fn horizontal_radius_voxels(self) -> i32 {
@@ -71,6 +73,7 @@ impl SkylineFeatureKind {
             Self::ElderCanopy => 16,
             Self::TorCircle | Self::BuriedRibs | Self::BuriedColonnade | Self::BasaltCrown => 14,
             Self::NeedleGate => 13,
+            Self::CaveMouth => 18,
             _ => 10,
         }
     }
@@ -265,6 +268,7 @@ impl SkylineFeature {
             SkylineFeatureKind::BuriedRibs => self.buried_ribs_material(dx, dy, dz),
             SkylineFeatureKind::BuriedColonnade => self.buried_colonnade_material(dx, dy, dz),
             SkylineFeatureKind::BasaltCrown => self.basalt_crown_material(dx, dy, dz),
+            SkylineFeatureKind::CaveMouth => self.cave_mouth_material(dx, dy, dz),
         }
     }
 
@@ -284,6 +288,16 @@ impl SkylineFeature {
 
     fn radius_bonus(self) -> i32 {
         self.prominence.min(2) as i32
+    }
+
+    fn cave_mouth_material(self, dx: i32, dy: i32, dz: i32) -> Option<Material> {
+        let lower_west =
+            (-18..-12).contains(&dx) && (1..14).contains(&dy) && (-16..-10).contains(&dz);
+        let upper_west =
+            (-17..-13).contains(&dx) && (14..29).contains(&dy) && (-15..-11).contains(&dz);
+        let lower_east = (12..18).contains(&dx) && (1..14).contains(&dy) && (4..10).contains(&dz);
+        let upper_east = (13..17).contains(&dx) && (14..29).contains(&dy) && (5..9).contains(&dz);
+        (lower_west || upper_west || lower_east || upper_east).then_some(Material::Basalt)
     }
 
     fn broadleaf_material(self, dx: i32, dy: i32, dz: i32) -> Option<Material> {

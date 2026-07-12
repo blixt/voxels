@@ -1069,6 +1069,28 @@ fn append_skyline_proxy(
                 );
             }
         }
+        SkylineFeatureKind::CaveMouth => {
+            for &(min, max) in &[
+                (
+                    [anchor_x - 18, ground + 1, anchor_z - 16],
+                    [anchor_x - 12, ground + 14, anchor_z - 10],
+                ),
+                (
+                    [anchor_x - 17, ground + 14, anchor_z - 15],
+                    [anchor_x - 13, ground + 29, anchor_z - 11],
+                ),
+                (
+                    [anchor_x + 12, ground + 1, anchor_z + 4],
+                    [anchor_x + 18, ground + 14, anchor_z + 10],
+                ),
+                (
+                    [anchor_x + 13, ground + 14, anchor_z + 5],
+                    [anchor_x + 17, ground + 29, anchor_z + 9],
+                ),
+            ] {
+                append_box(quads, min, max, Material::Basalt);
+            }
+        }
     }
 }
 
@@ -1175,7 +1197,12 @@ mod tests {
                 prominence: (index % 3) as u8,
                 route_landmark: None,
             };
-            assert!(feature.material_at(VoxelCoord::new(32, 60, 32)).is_some());
+            let canonical_probe = if kind == SkylineFeatureKind::CaveMouth {
+                VoxelCoord::new(14, 21, 16)
+            } else {
+                VoxelCoord::new(32, 60, 32)
+            };
+            assert!(feature.material_at(canonical_probe).is_some());
             for level in SurfaceLodLevel::ALL {
                 let mut quads = Vec::new();
                 append_skyline_proxy(&mut quads, level, feature);
@@ -1877,6 +1904,55 @@ mod tests {
                     pristine
                 );
             }
+        }
+    }
+
+    #[test]
+    fn cave_mouth_proxy_is_identical_edit_aware_and_anchor_owned_at_every_lod() {
+        let generator = Generator::new(0x5eed_cafe);
+        let [anchor_x, anchor_z] = crate::CINDER_VAULT_MOUTH_ANCHOR_XZ;
+        let feature = generator
+            .skyline_features_anchored_in([[anchor_x, anchor_z], [anchor_x + 1, anchor_z + 1]])
+            .into_iter()
+            .find(|feature| feature.kind == SkylineFeatureKind::CaveMouth)
+            .expect("the Cinder Vault mouth tell must be anchor-owned once");
+        let target = VoxelCoord::new(anchor_x - 18, feature.anchor[1] + 1, anchor_z - 16);
+        assert_eq!(feature.material_at(target), Some(Material::Basalt));
+        assert_eq!(
+            generator.sample(target.x, target.y, target.z),
+            Material::Basalt
+        );
+
+        let mut reference_proxy = None;
+        for level in SurfaceLodLevel::ALL {
+            let mut direct_proxy = Vec::new();
+            append_skyline_proxy(&mut direct_proxy, level, feature);
+            assert_eq!(direct_proxy.len(), 24);
+            if let Some(reference) = &reference_proxy {
+                assert_eq!(&direct_proxy, reference);
+            } else {
+                reference_proxy = Some(direct_proxy.clone());
+            }
+
+            let owner = SurfaceTileCoord::containing(level, anchor_x, anchor_z);
+            let pristine = generate_edited_surface_tile_mesh(generator, &EditMap::default(), owner);
+            let mut edits = EditMap::default();
+            edits.set(generator, target, Material::Air);
+            assert!(
+                surface_tiles_affected_by_voxel(generator, &edits, level, target).contains(&owner)
+            );
+            let edited = generate_edited_surface_tile_mesh(generator, &edits, owner);
+            assert_eq!(
+                pristine.quads.len() - edited.quads.len(),
+                direct_proxy.len()
+            );
+
+            edits.set(generator, target, Material::Basalt);
+            assert!(edits.is_empty());
+            assert_eq!(
+                generate_edited_surface_tile_mesh(generator, &edits, owner),
+                pristine
+            );
         }
     }
 

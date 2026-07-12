@@ -7,7 +7,7 @@ use crate::{
 };
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 14;
+pub const GENERATOR_VERSION: u32 = 15;
 pub const SEA_LEVEL_VOXELS: i32 = 10;
 const FEATURE_MIN_XZ_OFFSET: i32 = 2;
 const FEATURE_MAX_XZ_OFFSET: i32 = FEATURE_CELL_VOXELS - 3;
@@ -777,6 +777,20 @@ impl Generator {
     }
 
     fn skyline_feature(self, cell_x: i32, cell_z: i32) -> Option<SkylineFeature> {
+        if [cell_x, cell_z] == crate::CINDER_VAULT_MOUTH_CELL {
+            let [anchor_x, anchor_z] = crate::CINDER_VAULT_MOUTH_ANCHOR_XZ;
+            let surface = self.surface_sample(anchor_x, anchor_z);
+            return Some(SkylineFeature {
+                id: SkylineFeatureId { cell_x, cell_z },
+                kind: SkylineFeatureKind::CaveMouth,
+                anchor: [anchor_x, surface.height, anchor_z],
+                trunk_top: surface.height + 28,
+                orientation: 0,
+                variant: 0,
+                prominence: 2,
+                route_landmark: None,
+            });
+        }
         if let Some(anchor) = first_pilgrim_route_anchor_for_feature_cell(cell_x, cell_z) {
             return self.route_landmark_feature(anchor);
         }
@@ -1204,7 +1218,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checksum, 0x2e15_8a72_e499_02aa);
+        assert_eq!(checksum, 0x4334_1902_1c1f_dac3);
     }
 
     #[test]
@@ -1478,7 +1492,57 @@ mod tests {
             crate::FeatureCompositionMode::ALL.into_iter().collect()
         );
         assert!(prominence_counts.into_iter().all(|count| count > 0));
-        assert_eq!(checksum, 0x310e_2ad9_47aa_bf2d);
+        assert_eq!(checksum, 0x0ea1_c0cf_43b0_a704);
+    }
+
+    #[test]
+    fn cinder_vault_mouth_tell_is_canonical_bounded_and_keeps_the_entrance_open() {
+        let generator = Generator::new(0x5eed_cafe);
+        let [cell_x, cell_z] = crate::CINDER_VAULT_MOUTH_CELL;
+        let feature = generator
+            .skyline_feature(cell_x, cell_z)
+            .expect("the authored cave mouth cell must always resolve");
+        assert_eq!(feature.kind, SkylineFeatureKind::CaveMouth);
+        assert_eq!(
+            [feature.anchor[0], feature.anchor[2]],
+            crate::CINDER_VAULT_MOUTH_ANCHOR_XZ
+        );
+        let [min, max] = feature.bounds();
+        let cell_min = [cell_x * FEATURE_CELL_VOXELS, cell_z * FEATURE_CELL_VOXELS];
+        let cell_max = [
+            cell_min[0] + FEATURE_CELL_VOXELS,
+            cell_min[1] + FEATURE_CELL_VOXELS,
+        ];
+        assert!(min[0] >= cell_min[0] && max[0] <= cell_max[0]);
+        assert!(min[2] >= cell_min[1] && max[2] <= cell_max[1]);
+
+        let mut occupied = 0usize;
+        for y in min[1]..max[1] {
+            for z in min[2]..max[2] {
+                for x in min[0]..max[0] {
+                    let voxel = VoxelCoord::new(x, y, z);
+                    if feature.material_at(voxel).is_some() {
+                        occupied += 1;
+                        assert_ne!(
+                            cinder_vault_override(x, y, z),
+                            Some(Material::Air),
+                            "mouth tell intersected the protected cave void at {voxel:?}"
+                        );
+                        let generated = generator.sample(x, y, z);
+                        assert!(generated.is_collidable());
+                        if y > generator.surface_height(x, z) {
+                            assert_eq!(generated, Material::Basalt);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(occupied > 1_000);
+        let entrance = crate::CINDER_VAULT.entrance;
+        assert_eq!(
+            generator.sample(entrance[0], entrance[1], entrance[2]),
+            Material::Air
+        );
     }
 
     #[test]

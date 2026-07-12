@@ -2,6 +2,8 @@ use crate::{CaveSystemId, Material};
 use std::sync::LazyLock;
 
 pub const CINDER_VAULT_BOUNDS: [[i32; 3]; 2] = [[-5_236, 2, 3_158], [-5_004, 77, 3_342]];
+pub const CINDER_VAULT_MOUTH_CELL: [i32; 2] = [-53, 33];
+pub const CINDER_VAULT_MOUTH_ANCHOR_XZ: [i32; 2] = [-5_020, 3_186];
 const CAVE_X_BIN_EDGE: i32 = 32;
 const CAVE_X_BIN_COUNT: usize = 8;
 

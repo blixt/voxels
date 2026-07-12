@@ -2,12 +2,12 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use voxels_world::codec::{decode_chunk, encode_chunk};
 use voxels_world::{
-    CINDER_VAULT, ChunkCoord, EditMap, FarTileCoord, Generator, Material, SkylineFeatureKind,
-    SurfaceLodLevel, SurfaceTileCoord, VoxelCoord, first_pilgrim_road_length_voxels,
-    first_pilgrim_road_point_at_distance, first_pilgrim_route_anchor,
-    first_pilgrim_route_anchor_for_feature_cell, generate_edited_surface_tile_mesh,
-    generate_edited_water_tile_mesh, generate_far_tile, generate_far_tile_with, mesh_chunk,
-    sample_first_pilgrim_road,
+    CINDER_VAULT, CINDER_VAULT_MOUTH_ANCHOR_XZ, ChunkCoord, EditMap, FarTileCoord, Generator,
+    Material, SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
+    first_pilgrim_road_length_voxels, first_pilgrim_road_point_at_distance,
+    first_pilgrim_route_anchor, first_pilgrim_route_anchor_for_feature_cell,
+    generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_far_tile,
+    generate_far_tile_with, mesh_chunk, sample_first_pilgrim_road,
 };
 
 const SEED: u64 = 0x5eed_cafe;
@@ -78,6 +78,23 @@ fn semantic_hero_generation(criterion: &mut Criterion) {
         let coord = SurfaceTileCoord::containing(level, hero.anchor[0], hero.anchor[2]);
         group.bench_function(
             format!("stride-{} elder-canopy tile", level.stride_voxels()),
+            |bencher| {
+                bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
+            },
+        );
+    }
+    group.finish();
+}
+
+fn cave_mouth_surface_lod(criterion: &mut Criterion) {
+    let generator = Generator::new(SEED);
+    let edits = EditMap::default();
+    let [x, z] = CINDER_VAULT_MOUTH_ANCHOR_XZ;
+    let mut group = criterion.benchmark_group("Cinder Vault mouth surface LOD");
+    for level in [SurfaceLodLevel::Stride2, SurfaceLodLevel::Stride16] {
+        let coord = SurfaceTileCoord::containing(level, x, z);
+        group.bench_function(
+            format!("stride-{} tile", level.stride_voxels()),
             |bencher| {
                 bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
             },
@@ -219,6 +236,7 @@ criterion_group!(
     generation,
     route_surface_lod,
     semantic_hero_generation,
+    cave_mouth_surface_lod,
     route_queries,
     codec,
     meshing,

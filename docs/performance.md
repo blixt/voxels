@@ -601,3 +601,13 @@ reduced that p95 to 0.4 ms while preserving player-made openings. All three view
 12 ms frame, 7.5 ms active-GPU, and 1 ms probe gates. The captured chamber shows the emissive crystal
 surface cue under enclosure-correct ambient light; the renderer contains no cave-coordinate special
 case and the cue remains editable world data.
+
+Generator v15 adds the edit-aware 24-quad mouth tell without changing the watertight surface mesh.
+Criterion measured the complete mouth-owning tile at 198.48 us for stride 2 and 199.63 us for stride 16. Host tests prove the four-box proxy is byte-identical at every level, owns one anchor, never
+intersects protected cave Air, disappears after a canonical sentinel edit, and restores exactly.
+
+After the proxy, a six-second-per-stop release run recorded 9.8 / 10.2 / 10.1 ms frame p95 and
+2.643 / 3.420 / 3.545 ms active-GPU p95 across approach, descent, and chamber. All phases retained
+zero dropped samples, pending jobs, pending mesh bytes, and stale completions; the enclosure-probe
+p95 remained 0 / 300 / 100 us. Twenty-four GPU timestamp samples per stop make the 95th percentile
+distinct from a single scheduling outlier while retaining the 12 ms frame and 7.5 ms GPU gates.

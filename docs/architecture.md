@@ -164,6 +164,14 @@ LODs. A portable nine-ray enclosure probe reads edited resident chunks first, th
 canonical generation; Rust/WGPU uses the result for asymmetric eye adaptation, cave air,
 outdoor-light rejection, and an optional bounded headlamp.
 
+Generator v15 reserves one append-only skyline identity for the Cinder Vault mouth. Four canonical
+Basalt volumes form two tapered sentinels around the diagonal entrance, and the identical 24-quad
+positive proxy is emitted at every surface LOD. This keeps the coarse heightfield watertight while
+making the entrance readable outside the 9.6 m canonical ring. Anchor ownership, patch packing, and
+the existing pristine-feature test ensure the tell appears once; editing any canonical sentinel voxel
+suppresses its derived proxy at all levels, and restoring the generated material recreates it exactly.
+The protected entrance itself remains canonical Air and is never approximated as a negative LOD hole.
+
 Atlas schema v1 adds append-only Rust discriminants for six destinations and five route chapters.
 Each destination freezes its canonical X/Z and route station, with tests reconstructing the authored
 point to within one 10 cm voxel. The shell projects the camera onto the same route index, chooses the

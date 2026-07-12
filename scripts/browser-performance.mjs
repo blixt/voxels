@@ -547,7 +547,8 @@ async function caveProfile(page, viewportWidth) {
   for (const stop of stops) {
     await visitCinderVault(page, viewportWidth);
     await waitForCaveAdaptation(page, stop.minimumEnclosure, stop.minimumExposure);
-    const captures = await sample(page, 4_000);
+    // At least 20 timestamp samples keep p95 distinct from a single scheduling outlier.
+    const captures = await sample(page, 6_000);
     const phase = phaseSummary(captures);
     phase.cave.probe = summary(
       captures.map((capture) => capture.snapshot[SNAPSHOT.enclosureProbeUs]),
