@@ -9,6 +9,8 @@ use crate::{
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
 pub const GENERATOR_VERSION: u32 = 11;
 pub const SEA_LEVEL_VOXELS: i32 = 10;
+const FEATURE_MIN_XZ_OFFSET: i32 = 2;
+const FEATURE_MAX_XZ_OFFSET: i32 = FEATURE_CELL_VOXELS - 3;
 
 /// Renderer-neutral continuous atmosphere inputs derived from the same regional weights as terrain.
 /// Every component is normalized to `[0, 1]`; shells may map them to lighting and weather without
@@ -663,12 +665,10 @@ impl Generator {
         let origin = chunk.coord().world_origin();
         let max_x = origin[0] + CHUNK_EDGE as i32 - 1;
         let max_z = origin[2] + CHUNK_EDGE as i32 - 1;
-        let min_cell_x =
-            (origin[0] - FEATURE_MAX_RADIUS_VOXELS - 75).div_euclid(FEATURE_CELL_VOXELS);
-        let max_cell_x = (max_x + FEATURE_MAX_RADIUS_VOXELS - 12).div_euclid(FEATURE_CELL_VOXELS);
-        let min_cell_z =
-            (origin[2] - FEATURE_MAX_RADIUS_VOXELS - 75).div_euclid(FEATURE_CELL_VOXELS);
-        let max_cell_z = (max_z + FEATURE_MAX_RADIUS_VOXELS - 12).div_euclid(FEATURE_CELL_VOXELS);
+        let min_cell_x = (origin[0] - FEATURE_MAX_XZ_OFFSET).div_euclid(FEATURE_CELL_VOXELS);
+        let max_cell_x = (max_x - FEATURE_MIN_XZ_OFFSET).div_euclid(FEATURE_CELL_VOXELS);
+        let min_cell_z = (origin[2] - FEATURE_MAX_XZ_OFFSET).div_euclid(FEATURE_CELL_VOXELS);
+        let max_cell_z = (max_z - FEATURE_MIN_XZ_OFFSET).div_euclid(FEATURE_CELL_VOXELS);
         for cell_z in min_cell_z..=max_cell_z {
             for cell_x in min_cell_x..=max_cell_x {
                 let Some(feature) = self.skyline_feature(cell_x, cell_z) else {
@@ -700,14 +700,22 @@ impl Generator {
         }
     }
 
-    fn feature_anchor(self, cell_x: i32, cell_z: i32) -> (i32, i32, u64) {
+    fn feature_anchor(self, cell_x: i32, cell_z: i32, hero: bool) -> (i32, i32, u64) {
         let hash = self.hash(cell_x, 0, cell_z, 0x7a11_5eed);
-        // The largest semantic hero still remains inside its one authoritative placement cell.
-        // Keeping that invariant avoids a second identity or ownership structure for large forms.
-        let minimum_offset = FEATURE_MAX_RADIUS_VOXELS + 2;
-        let offset_span = FEATURE_CELL_VOXELS - minimum_offset * 2;
-        let x_offset = minimum_offset + (hash % offset_span as u64) as i32;
-        let z_offset = minimum_offset + ((hash >> 8) % offset_span as u64) as i32;
+        let (x_offset, z_offset) = if hero {
+            // The largest semantic hero still remains inside its one authoritative placement cell.
+            // Clamp the established anchor rather than re-hashing it, preserving local composition
+            // and destination relationships wherever the larger footprint already fits.
+            let minimum_offset = FEATURE_MAX_RADIUS_VOXELS + 2;
+            let maximum_offset = FEATURE_CELL_VOXELS - minimum_offset - 1;
+            (
+                (12 + (hash & 63) as i32).clamp(minimum_offset, maximum_offset),
+                (12 + ((hash >> 8) & 63) as i32).clamp(minimum_offset, maximum_offset),
+            )
+        } else {
+            // Preserve the established cheap placement and world identity for ordinary forms.
+            (12 + (hash & 63) as i32, 12 + ((hash >> 8) & 63) as i32)
+        };
         (
             cell_x * FEATURE_CELL_VOXELS + x_offset,
             cell_z * FEATURE_CELL_VOXELS + z_offset,
@@ -726,57 +734,54 @@ impl Generator {
         if let Some(anchor) = first_pilgrim_route_anchor_for_feature_cell(cell_x, cell_z) {
             return self.route_landmark_feature(anchor);
         }
-        let (anchor_x, anchor_z, hash) = self.feature_anchor(cell_x, cell_z);
-        let surface = self.surface_sample(anchor_x, anchor_z);
+        // Ordinary candidates retain the established cheap anchor and can reject water before
+        // paying for composition identity. Only the one hero cell in 64 recomputes a wider anchor.
+        let (mut anchor_x, mut anchor_z, hash) = self.feature_anchor(cell_x, cell_z, false);
+        let mut surface = self.surface_sample(anchor_x, anchor_z);
         if surface.height < SEA_LEVEL_VOXELS || surface.water_level.is_some() {
             return None;
         }
+        let feature_region = surface.region;
+        let regional_kind = SkylineFeatureKind::REGIONAL[feature_region as usize];
         if surface.route.is_some_and(|route| {
             route.distance_to_route_voxels
-                <= ROUTE_CORE_HALF_WIDTH_VOXELS + FEATURE_MAX_RADIUS_VOXELS as f32 + 3.0
+                <= ROUTE_CORE_HALF_WIDTH_VOXELS
+                    + regional_kind.horizontal_radius_voxels() as f32
+                    + 3.0
         }) {
             return None;
         }
-        let regional_kind = match surface.region {
-            SurfaceRegion::VerdantForest => SkylineFeatureKind::Broadleaf,
-            SurfaceRegion::WindMoor => SkylineFeatureKind::MoorTor,
-            SurfaceRegion::Alpine => SkylineFeatureKind::AlpineNeedle,
-            SurfaceRegion::RedBadlands => SkylineFeatureKind::BadlandsHoodoo,
-            SurfaceRegion::PaleDunes => SkylineFeatureKind::DuneArch,
-            SurfaceRegion::Volcanic => SkylineFeatureKind::BasaltColumns,
-        };
+        // Region identity belongs to the placement cell's established anchor. A larger hero may
+        // clamp inward inside that cell, but it must not silently turn into a neighboring biome's
+        // archetype at a soft procedural boundary.
         let composition = self.feature_composition(cell_x, cell_z);
         let influence = composition.influence(cell_x, cell_z);
-        let kind = if influence.role() == FeatureCompositionRole::Hero {
-            match surface.region {
-                SurfaceRegion::VerdantForest => SkylineFeatureKind::ElderCanopy,
-                SurfaceRegion::WindMoor => SkylineFeatureKind::TorCircle,
-                SurfaceRegion::Alpine => SkylineFeatureKind::NeedleGate,
-                SurfaceRegion::RedBadlands => SkylineFeatureKind::BuriedRibs,
-                SurfaceRegion::PaleDunes => SkylineFeatureKind::BuriedColonnade,
-                SurfaceRegion::Volcanic => SkylineFeatureKind::BasaltCrown,
+        let role = influence.role();
+        let hero = role == FeatureCompositionRole::Hero;
+        if hero {
+            (anchor_x, anchor_z, _) = self.feature_anchor(cell_x, cell_z, true);
+            surface = self.surface_sample(anchor_x, anchor_z);
+            if surface.height < SEA_LEVEL_VOXELS
+                || surface.water_level.is_some()
+                || surface.route.is_some_and(|route| {
+                    route.distance_to_route_voxels
+                        <= ROUTE_CORE_HALF_WIDTH_VOXELS + FEATURE_MAX_RADIUS_VOXELS as f32 + 3.0
+                })
+            {
+                return None;
             }
+        }
+        let region_index = feature_region as usize;
+        let kind = if hero {
+            SkylineFeatureKind::REGIONAL_HEROES[region_index]
         } else {
-            regional_kind
+            SkylineFeatureKind::REGIONAL[region_index]
         };
-        let density_threshold: u8 = match kind {
-            SkylineFeatureKind::Broadleaf => 224,
-            SkylineFeatureKind::MoorTor => 92,
-            SkylineFeatureKind::AlpineNeedle => 82,
-            SkylineFeatureKind::BadlandsHoodoo => 88,
-            SkylineFeatureKind::DuneArch => 64,
-            SkylineFeatureKind::BasaltColumns => 112,
-            SkylineFeatureKind::PilgrimCairn
-            | SkylineFeatureKind::RouteWaystone
-            | SkylineFeatureKind::RuinedArch
-            | SkylineFeatureKind::ElderCanopy
-            | SkylineFeatureKind::TorCircle
-            | SkylineFeatureKind::NeedleGate
-            | SkylineFeatureKind::BuriedRibs
-            | SkylineFeatureKind::BuriedColonnade
-            | SkylineFeatureKind::BasaltCrown => u8::MAX,
+        let density_threshold: u8 = if hero {
+            u8::MAX
+        } else {
+            [224, 92, 82, 88, 64, 112][region_index]
         };
-        let hero = influence.role() == FeatureCompositionRole::Hero;
         let effective_density = if hero {
             u8::MAX
         } else {
@@ -791,39 +796,33 @@ impl Generator {
         // `ridge` is already part of this authoritative column profile. Using it as the placement
         // constraint avoids four extra terrain-stack evaluations every time a hot column sampler
         // reconstructs its nine neighboring feature cells.
-        let maximum_ridge = match kind {
-            SkylineFeatureKind::Broadleaf | SkylineFeatureKind::DuneArch => 0.86,
-            SkylineFeatureKind::MoorTor | SkylineFeatureKind::BadlandsHoodoo => 0.94,
-            SkylineFeatureKind::AlpineNeedle | SkylineFeatureKind::BasaltColumns => 1.0,
-            SkylineFeatureKind::PilgrimCairn
-            | SkylineFeatureKind::RouteWaystone
-            | SkylineFeatureKind::RuinedArch
-            | SkylineFeatureKind::ElderCanopy
-            | SkylineFeatureKind::TorCircle
-            | SkylineFeatureKind::NeedleGate
-            | SkylineFeatureKind::BuriedRibs
-            | SkylineFeatureKind::BuriedColonnade
-            | SkylineFeatureKind::BasaltCrown => 1.0,
+        let maximum_ridge = if hero {
+            1.0
+        } else {
+            [0.86, 0.94, 1.0, 0.94, 0.86, 1.0][region_index]
         };
         if surface.ridge > maximum_ridge {
             return None;
         }
-        let base_height = match kind {
-            SkylineFeatureKind::Broadleaf => 25 + ((hash >> 16) & 15) as i32,
-            SkylineFeatureKind::MoorTor => 18 + ((hash >> 16) & 11) as i32,
-            SkylineFeatureKind::AlpineNeedle => 34 + ((hash >> 16) & 23) as i32,
-            SkylineFeatureKind::BadlandsHoodoo => 24 + ((hash >> 16) & 15) as i32,
-            SkylineFeatureKind::DuneArch => 18 + ((hash >> 16) & 7) as i32,
-            SkylineFeatureKind::BasaltColumns => 24 + ((hash >> 16) & 19) as i32,
-            SkylineFeatureKind::ElderCanopy => 66 + ((hash >> 16) & 15) as i32,
-            SkylineFeatureKind::TorCircle => 48 + ((hash >> 16) & 15) as i32,
-            SkylineFeatureKind::NeedleGate => 62 + ((hash >> 16) & 15) as i32,
-            SkylineFeatureKind::BuriedRibs => 42 + ((hash >> 16) & 11) as i32,
-            SkylineFeatureKind::BuriedColonnade => 44 + ((hash >> 16) & 11) as i32,
-            SkylineFeatureKind::BasaltCrown => 58 + ((hash >> 16) & 15) as i32,
-            SkylineFeatureKind::PilgrimCairn
-            | SkylineFeatureKind::RouteWaystone
-            | SkylineFeatureKind::RuinedArch => 0,
+        let variation = (hash >> 16) as i32;
+        let base_height = if hero {
+            [
+                66 + (variation & 15),
+                48 + (variation & 15),
+                62 + (variation & 15),
+                42 + (variation & 11),
+                44 + (variation & 11),
+                58 + (variation & 15),
+            ][region_index]
+        } else {
+            [
+                25 + (variation & 15),
+                18 + (variation & 11),
+                34 + (variation & 23),
+                24 + (variation & 15),
+                18 + (variation & 7),
+                24 + (variation & 19),
+            ][region_index]
         };
         let height = if hero {
             base_height
@@ -1287,29 +1286,35 @@ mod tests {
     }
 
     #[test]
-    fn road_destination_retains_its_badlands_hoodoo_silhouette() {
+    fn road_destination_retains_its_badlands_silhouette() {
         let generator = Generator::new(0x5eed_cafe);
         let destination = crate::FIRST_PILGRIM_ROAD_NODES.last().unwrap();
         let nearby = generator.skyline_features_anchored_in([
             [destination.x - 512, destination.z - 512],
             [destination.x + 513, destination.z + 513],
         ]);
-        let hoodoo = nearby
+        let badlands_landmark = nearby
             .iter()
             .copied()
             .filter(|feature| {
-                feature.kind == SkylineFeatureKind::BadlandsHoodoo
-                    && feature.route_landmark.is_none()
+                matches!(
+                    feature.kind,
+                    SkylineFeatureKind::BadlandsHoodoo | SkylineFeatureKind::BuriedRibs
+                ) && feature.route_landmark.is_none()
             })
             .min_by_key(|feature| {
                 let dx = feature.anchor[0] - destination.x;
                 let dz = feature.anchor[2] - destination.z;
                 dx * dx + dz * dz
             })
-            .unwrap_or_else(|| panic!("destination catalog had no hoodoo: {nearby:?}"));
-        let dx = hoodoo.anchor[0] - destination.x;
-        let dz = hoodoo.anchor[2] - destination.z;
-        assert!(dx * dx + dz * dz <= 100 * 100);
+            .unwrap_or_else(|| panic!("destination catalog had no badlands landmark: {nearby:?}"));
+        let dx = badlands_landmark.anchor[0] - destination.x;
+        let dz = badlands_landmark.anchor[2] - destination.z;
+        assert!(
+            dx * dx + dz * dz <= 100 * 100,
+            "nearest {:?} was offset by ({dx}, {dz}) voxels",
+            badlands_landmark.kind
+        );
     }
 
     #[test]
@@ -1422,7 +1427,7 @@ mod tests {
             crate::FeatureCompositionMode::ALL.into_iter().collect()
         );
         assert!(prominence_counts.into_iter().all(|count| count > 0));
-        assert_eq!(checksum, 0x7bad_436d_a5ba_2213);
+        assert_eq!(checksum, 0x52c3_3d22_2fc1_3363);
     }
 
     #[test]
