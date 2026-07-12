@@ -366,3 +366,29 @@ The M3 Max / system Chrome release run produced:
 The Mission Control panel receives the latest full convergence time and active tracker count through
 `LiveStats`; those status cards remain Rust-composed and WGPU-rendered like the crosshair, startup
 controls toast, toggles, hover surfaces, and context menu.
+
+## 2026-07-12: composed landmark hierarchy
+
+Generator v8 replaces independent landmark scatter with deterministic 76.8 m composition cells while
+retaining one bounded editable feature per 9.6 m ownership cell. Cluster, ring, clearing, and procession
+grammars select background, companion, and hero prominence; canonical shapes and all four LOD proxy
+levels consume the same descriptor. The Rust landmark tour now prefers heroes, and browser inspection
+confirmed distinct forest and moor hero/companion silhouettes without a DOM overlay.
+
+Native 32-cubed generation measured 714.38 us mean, a 0.95% increase that Criterion classified inside
+the noise threshold. Greedy meshing measured 1.196 ms mean with no detected change. The release browser
+gates produced:
+
+| Composition measurement               |               Result |                     Gate |
+| ------------------------------------- | -------------------: | -----------------------: |
+| Steady / traversal / underwater p95   |   9.9 / 9.5 / 9.5 ms |                    12 ms |
+| Sustained frame p95 / p99 / max       | 9.8 / 10.3 / 16.7 ms | 12 / 16.67 / no 33.33 ms |
+| Sustained CPU / streaming p95         |         6.5 / 3.3 ms |                7.5 / 4.5 |
+| Sustained distance / evictions        |     1,080 m / 14,296 |          >=1,000 / >=500 |
+| Final WASM / arena capacity range     |            0 / 0 MiB |         <=1 / <=one page |
+| Edit enqueue / convergence p95        |        3.2 / 29.4 ms |               8 / 150 ms |
+| Dropped telemetry / stale completions |                0 / 0 |                     zero |
+
+The edit gate completed 40 canonical-plus-LOD remove/restore operations, returned to zero sparse edits,
+and recorded no superseded work or browser errors. The sustained rail drained every final job and mesh
+payload, so the larger hero silhouettes do not weaken bounded streaming or allocation reuse.

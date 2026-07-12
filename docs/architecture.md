@@ -40,7 +40,7 @@ authoritative near field keeps the required 10 cm voxel resolution and uses face
 rectangle merging. A column becomes render-ready only when all desired vertical chunks are resident,
 so a partially streamed stack cannot expose an open terrain slice.
 
-Generator v7 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
+Generator v8 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
 detail, dune, and volcanic fields. Six dominant regional identities—verdant forest, wind-cut moor,
 alpine, red badlands, pale dunes, and volcanic terrain—select surface ecology and geology, while their
 normalized weights blend height modifiers continuously across boundaries. Canonical generation, LOD
@@ -108,6 +108,16 @@ proxies (24 quads) using the same stable materials and conservative bounds, addi
 object or allocation. Any canonical edit that touches generated feature material suppresses its
 disposable proxy at every level; reverting the edit restores it. The canonical boundary snaps to the
 96-voxel feature placement grid, keeping a whole landmark on one side of the canonical/proxy handoff.
+
+Independent placement probability made the landmark catalog read as uniform scatter even when each
+archetype was distinct. Generator v8 adds a deterministic 8x8-feature-cell (76.8 m) composition layer
+above that safe ownership unit. Each macro cell selects a cluster, ring, clearing, or locally oriented
+procession grammar; its pure influence field modulates the existing regional probability and identifies
+one hero candidate. Background, companion, and hero prominence increase height by 0%, 25%, and 50% and
+expand canonical/proxy radii within the existing ten-voxel conservative bound. The representation still
+returns at most one feature per 96-voxel cell, so stable identity, fixed column storage, 24-quad proxy
+caps, editing, and LOD handoff remain unchanged. A fixed-seed checksum covers placement, archetype,
+anchor, height, orientation, variant, and prominence across positive and negative cells.
 
 An edit invalidates every surface tile whose sampling footprint depends on that X/Z column. Resident
 geometry stays active while its replacement is generated and allocated, then the renderer switches
@@ -240,6 +250,13 @@ latency a user-visible, revision-backed measurement rather than a queue-length a
   <https://www.w3.org/TR/web-locks/>
 - A synchronous OPFS access handle owns an exclusive file lock until it is closed:
   <https://fs.spec.whatwg.org/#api-filesystemsyncaccesshandle-close>
+- Bridson's bounded Poisson-disk sampler is a useful blue-noise baseline for avoiding uniform-grid
+  repetition; the composition director deliberately adds hierarchy and empty space above that local
+  spacing problem:
+  <https://www.cs.ubc.ca/~rbridson/docs/bridson-siggraph07-poissondisk.pdf>
+- Deussen et al. model plant ecosystems as interacting spatial distributions rather than independent
+  props, motivating region-scale composition instead of raising one global landmark probability:
+  <https://doi.org/10.1145/280814.280898>
 - The Rust SQLite bindings and OPFS VFS expose the SQLite C API and sync-access-handle pool directly to
   `wasm32-unknown-unknown`:
   <https://docs.rs/sqlite-wasm-rs/0.5.5/sqlite_wasm_rs/>

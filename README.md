@@ -38,20 +38,21 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 - `runtime/`: deterministic streaming priorities, budgets, revision tickets, eviction, and diagnostics.
 - `render/`: web-free WGPU resources, pipelines, shaders, and frame rendering.
 - `shell/`: WASM/browser worker leaf, packed input decoding, display clock, and persistence seam.
-- `web/`: the single body canvas, normalized input transport, pointer lock, and worker boot only. All visible
-  HUD, status, crosshair, controls, menus, and text are composed by Rust/WGPU.
+- `web/`: the single body canvas, normalized input transport, pointer lock, and worker boot only. All
+  visible HUD, status, crosshair, controls, menus, and text are composed by Rust/WGPU.
 
 The canonical world is generator identity plus sparse edits. Near meshes and four streamed surface LOD
 rings are derived caches; the rings sample at 0.2, 0.4, 0.8, and 1.6 m while the editable near field
-retains authoritative 10 cm voxels. Generator v7 shares one regional surface sample across canonical
+retains authoritative 10 cm voxels. Generator v8 shares one regional surface sample across canonical
 chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
 conditional skirts, and activates a newly streamed coverage set only when it is complete.
 Analytic landmark identities add broadleaf trees, limestone tors, alpine needles, hoodoos, dune
-arches, and basalt columns as ordinary editable voxels, with bounded edit-aware proxies preserving
-their silhouettes across the surface rings. A deterministic Rust-generated material atlas adds
-world-anchored, mip-filtered albedo, micro-normal, and roughness structure without changing geometry,
-draw ownership, or durable voxel data.
+arches, and basalt columns as ordinary editable voxels. An 8x8-cell composition director arranges them
+into clusters, rings, clearings, and procession lines with larger companion and hero silhouettes, while
+bounded edit-aware proxies preserve them across the surface rings. A deterministic Rust-generated
+material atlas adds world-anchored, mip-filtered albedo, micro-normal, and roughness structure without
+changing geometry, draw ownership, or durable voxel data.
 See [docs/architecture.md](docs/architecture.md) for format, persistence, and research decisions.
 
 ## Controls
