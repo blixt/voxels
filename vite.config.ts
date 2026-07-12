@@ -58,6 +58,10 @@ export default defineConfig(({ command, mode }) => ({
   run: {
     tasks: {
       "bench:world": { command: "node scripts/bench-world.ts", cache: false },
+      "test:persistence-browser": {
+        command: "node scripts/browser-persistence-test.mjs",
+        cache: false,
+      },
       "check:rust": { command: "node scripts/check-rust.ts", cache: false },
       verify: {
         command: ["vp check", "vp test", "vp run check:rust", "vp build"],
