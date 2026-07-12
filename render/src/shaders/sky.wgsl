@@ -67,18 +67,31 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let sun_glow = pow(sun_amount, 96.0) * 0.16 + pow(sun_amount, 12.0) * 0.022;
   let below_horizon = mix(frame.ground_atmosphere.rgb, base, smoothstep(0.0, 0.12, elevation));
   var color = below_horizon + warm_horizon + frame.sun_radiance.rgb * (sun_disc * 1.15 + sun_glow);
+  let star_coordinates = ray.xz / max(ray.y + 1.08, 0.08);
+  let star_cell = floor(star_coordinates * 420.0);
+  let star_seed = hash21(star_cell);
+  let star = smoothstep(0.9968, 0.9995, star_seed)
+    * mix(0.35, 1.0, hash21(star_cell + vec2<f32>(19.0, 47.0)))
+    * smoothstep(0.04, 0.32, ray.y)
+    * frame.fog_exposure.w;
+  color += mix(vec3<f32>(0.48, 0.62, 1.0), vec3<f32>(1.0, 0.82, 0.58), star_seed) * star * 1.8;
   if ray.y > 0.015 {
     let cloud_height = 480.0;
     let distance_to_layer = (cloud_height - frame.camera_time.y) / ray.y;
     let cloud_world = frame.camera_time.xz + ray.xz * distance_to_layer;
     let wind = vec2<f32>(frame.camera_time.w * 0.55, frame.camera_time.w * 0.16);
     let field = cloud_field(cloud_world * 0.0032 + wind * 0.001);
-    let coverage = smoothstep(0.62, 0.77, field)
+    let coverage_control = clamp(frame.fog_exposure.z, 0.0, 1.0);
+    let threshold = mix(0.76, 0.49, coverage_control);
+    // Keep this analytic rather than derivative-driven: the cloud layer is only evaluated for
+    // upward rays, while WGSL derivatives must execute in uniform control flow.
+    let softness = mix(0.052, 0.035, smoothstep(0.02, 0.28, ray.y));
+    let coverage = smoothstep(threshold - softness, threshold + softness, field)
       * smoothstep(0.015, 0.12, ray.y)
       * (1.0 - smoothstep(0.94, 0.995, sun_amount));
     let cloud_shadow = vec3<f32>(0.16, 0.20, 0.27);
     let cloud_light = cloud_shadow + frame.sun_radiance.rgb * 0.085;
-    color = mix(color, cloud_light, coverage * 0.62);
+    color = mix(color, cloud_light, coverage * mix(0.34, 0.78, coverage_control));
   }
   let interface_distance = max(
     (frame.medium.w - frame.camera_time.y) / max(ray.y, 0.05),

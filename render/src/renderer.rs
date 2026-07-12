@@ -1,5 +1,5 @@
 use crate::arena::{Allocation, ArenaAllocator};
-use crate::environment::OutdoorEnvironment;
+use crate::environment::{DaylightPhase, OutdoorEnvironment, surface_region_label};
 use crate::lod::GeometricLodFocus;
 use crate::material_detail::MaterialDetailGpu;
 use crate::shadow::{
@@ -16,9 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_core::CameraState;
 use voxels_world::{
-    CHUNK_EDGE, ChunkCoord, FarTileCoord, MeshedChunk, Quad, RenderLayer, SurfaceBounds,
-    SurfaceLodLevel, SurfacePatchEdge, SurfaceQuad, SurfaceTileCoord, SurfaceTileMesh,
-    VOXEL_SIZE_METRES, WaterTileMesh,
+    AtmosphereSample, CHUNK_EDGE, ChunkCoord, FarTileCoord, MeshedChunk, Quad, RenderLayer,
+    SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfaceQuad, SurfaceRegion, SurfaceTileCoord,
+    SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -152,6 +152,9 @@ pub struct RenderDiagnostics {
     pub gpu_water_ms: Option<f32>,
     pub gpu_ui_ms: Option<f32>,
     pub material_detail: bool,
+    pub daylight_phase: u8,
+    pub surface_region: u8,
+    pub cloud_coverage: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -391,6 +394,10 @@ pub struct Renderer {
     target_voxel: Option<[i32; 3]>,
     options: RenderOptions,
     environment: OutdoorEnvironment,
+    environment_target: OutdoorEnvironment,
+    atmosphere_sample: AtmosphereSample,
+    surface_region: SurfaceRegion,
+    daylight_phase: DaylightPhase,
     geometric_lod_focus: Option<GeometricLodFocus>,
     fine_coverage_ready: bool,
     lod_coverage_ready: bool,
@@ -673,7 +680,18 @@ impl Renderer {
         } else {
             None
         };
-        let environment = OutdoorEnvironment::default().sanitized();
+        let atmosphere_sample = AtmosphereSample {
+            humidity: 0.68,
+            coldness: 0.32,
+            aerosol: 0.08,
+            cloudiness: 0.62,
+            horizon_warmth: 0.30,
+            haze: 0.38,
+        };
+        let surface_region = SurfaceRegion::VerdantForest;
+        let daylight_phase = DaylightPhase::default();
+        let environment =
+            OutdoorEnvironment::for_atmosphere(atmosphere_sample, daylight_phase).sanitized();
         let initial_camera = CameraState::default();
         let shadow_gpu = ShadowGpu::new(&device, &initial_camera, environment)?;
         let material_detail = MaterialDetailGpu::new(&device, &queue);
@@ -889,6 +907,8 @@ impl Renderer {
         let ui_gpu = UiGpu::new(&device, format, config.width, config.height, dpr)?;
         let water_scene_bind_group = ui_gpu.refraction_bind_group(&device, &water_scene_layout);
 
+        let mut ui = MissionControlUi::default();
+        ui.set_environment_status(daylight_phase.label(), surface_region_label(surface_region));
         Ok(Self {
             surface,
             device,
@@ -917,10 +937,14 @@ impl Renderer {
             target_voxel: None,
             options,
             environment,
+            environment_target: environment,
+            atmosphere_sample,
+            surface_region,
+            daylight_phase,
             geometric_lod_focus: None,
             fine_coverage_ready: false,
             lod_coverage_ready: false,
-            ui: MissionControlUi::default(),
+            ui,
             ui_gpu,
             dpr: valid_dpr(dpr),
             log_error,
@@ -973,7 +997,24 @@ impl Renderer {
     }
 
     pub fn set_environment(&mut self, environment: OutdoorEnvironment) {
-        self.environment = environment.sanitized();
+        let environment = environment.sanitized();
+        self.environment = environment;
+        self.environment_target = environment;
+    }
+
+    pub fn set_atmosphere(&mut self, sample: AtmosphereSample, region: SurfaceRegion) {
+        if self.atmosphere_sample == sample && self.surface_region == region {
+            return;
+        }
+        self.atmosphere_sample = sample;
+        self.surface_region = region;
+        self.environment_target = OutdoorEnvironment::for_atmosphere(sample, self.daylight_phase);
+        self.ui
+            .set_environment_status(self.daylight_phase.label(), surface_region_label(region));
+    }
+
+    pub const fn daylight_phase(&self) -> DaylightPhase {
+        self.daylight_phase
     }
 
     pub fn set_geometric_lod_focus(&mut self, voxel_x: i32, voxel_z: i32) {
@@ -1094,6 +1135,15 @@ impl Renderer {
             }
             UiAction::ContextAction(ContextAction::ToggleCompactTelemetry) => {
                 let _ = self.ui.set_compact(!self.ui.compact());
+            }
+            UiAction::ContextAction(ContextAction::CycleDaylight) => {
+                self.daylight_phase = self.daylight_phase.next();
+                self.environment_target =
+                    OutdoorEnvironment::for_atmosphere(self.atmosphere_sample, self.daylight_phase);
+                self.ui.set_environment_status(
+                    self.daylight_phase.label(),
+                    surface_region_label(self.surface_region),
+                );
             }
             UiAction::ContextAction(ContextAction::FollowPilgrimRoad) => {
                 self.route_teleport_requested = true;
@@ -1475,6 +1525,10 @@ impl Renderer {
     #[must_use]
     pub fn render(&mut self, dt: f32, camera: &CameraState, ui_stats: LiveStats) -> bool {
         self.time += dt.min(0.1);
+        let environment_response = 1.0 - (-dt.clamp(0.0, 0.1) / 0.85).exp();
+        self.environment = self
+            .environment
+            .lerp(self.environment_target, environment_response);
         let target_underwater = f32::from(camera.fluid_state().eyes_submerged);
         let response_seconds = if target_underwater > self.underwater_blend {
             0.12
@@ -1757,6 +1811,9 @@ impl Renderer {
             gpu_water_ms: gpu_timing.map(|timing| timing.water_ms),
             gpu_ui_ms: gpu_timing.map(|timing| timing.ui_ms),
             material_detail: self.options.material_detail,
+            daylight_phase: self.daylight_phase as u8,
+            surface_region: self.surface_region as u8,
+            cloud_coverage: self.environment.cloud_coverage,
         };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2006,8 +2063,8 @@ fn frame_uniform(
         fog_exposure: [
             environment.fog_height_falloff,
             environment.exposure,
-            0.0,
-            0.0,
+            environment.cloud_coverage,
+            environment.star_visibility,
         ],
         medium: [
             underwater_blend.clamp(0.0, 1.0),

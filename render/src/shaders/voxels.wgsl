@@ -219,6 +219,43 @@ fn hash31(position: vec3<f32>) -> f32 {
   return fract(sin(value) * 43758.5453);
 }
 
+fn atmosphere_hash21(position: vec2<f32>) -> f32 {
+  return fract(sin(dot(position, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+
+fn atmosphere_value_noise(position: vec2<f32>) -> f32 {
+  let cell = floor(position);
+  let fraction = fract(position);
+  let blend = fraction * fraction * (3.0 - 2.0 * fraction);
+  let a = atmosphere_hash21(cell);
+  let b = atmosphere_hash21(cell + vec2<f32>(1.0, 0.0));
+  let c = atmosphere_hash21(cell + vec2<f32>(0.0, 1.0));
+  let d = atmosphere_hash21(cell + vec2<f32>(1.0, 1.0));
+  return mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y);
+}
+
+fn atmosphere_cloud_field(position: vec2<f32>) -> f32 {
+  let broad = atmosphere_value_noise(position) * 0.58;
+  let billows = atmosphere_value_noise(position * 2.03 + vec2<f32>(17.2, -9.1)) * 0.29;
+  let detail = atmosphere_value_noise(position * 4.11 + vec2<f32>(-4.7, 23.4)) * 0.13;
+  return broad + billows + detail;
+}
+
+fn cloud_sun_visibility(world: vec3<f32>) -> f32 {
+  let coverage_control = clamp(frame.fog_exposure.z, 0.0, 1.0);
+  if coverage_control < 0.08 {
+    return 1.0;
+  }
+  let sun = normalize(frame.sun_direction.xyz);
+  let distance_to_layer = max(480.0 - world.y, 0.0) / max(sun.y, 0.12);
+  let cloud_world = world.xz + sun.xz * distance_to_layer;
+  let wind = vec2<f32>(frame.camera_time.w * 0.55, frame.camera_time.w * 0.16);
+  let field = atmosphere_cloud_field(cloud_world * 0.0032 + wind * 0.001);
+  let threshold = mix(0.76, 0.49, coverage_control);
+  let cloud = smoothstep(threshold - 0.055, threshold + 0.055, field);
+  return mix(1.0, 0.54, cloud * coverage_control);
+}
+
 fn coarser_owns_boundary(distance_xz: f32, boundary: u32) -> bool {
   // Each split sits safely inside the guaranteed coverage of both adjacent rings. A continuous
   // radial cut keeps ownership complementary without turning height disagreement into visible
@@ -386,7 +423,7 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   local_light = mix(local_light, reflection, clamp(fresnel * 0.88 + 0.08, 0.0, 0.92));
   let sun = normalize(frame.sun_direction.xyz);
   let half_direction = normalize(sun + view_direction);
-  let visibility = sun_visibility(input.world, normal);
+  let visibility = sun_visibility(input.world, normal) * cloud_sun_visibility(input.world);
   local_light += frame.sun_radiance.rgb
     * pow(max(dot(normal, half_direction), 0.0), 260.0)
     * mix(0.18, 1.0, visibility)
@@ -424,7 +461,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   }
   let sun = normalize(frame.sun_direction.xyz);
   let diffuse = max(dot(surface_detail.normal, sun), 0.0);
-  let shadow = sun_visibility(input.world, input.normal);
+  let shadow = sun_visibility(input.world, input.normal) * cloud_sun_visibility(input.world);
   let sky_visibility = surface_detail.normal.y * 0.5 + 0.5;
   let cell = floor(input.world / frame.viewport_voxel.z);
   let flat_grain = mix(0.88, 1.12, hash31(cell + vec3<f32>(f32(material) * 3.1)));

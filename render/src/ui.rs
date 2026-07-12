@@ -179,17 +179,19 @@ pub enum ContextAction {
     DiveBelowSurface,
     ResetRendererFeatures,
     ToggleCompactTelemetry,
+    CycleDaylight,
     FollowPilgrimRoad,
     VisitLandmark,
     CloseMissionControl,
 }
 
 impl ContextAction {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::TeleportToCoast,
         Self::DiveBelowSurface,
         Self::ResetRendererFeatures,
         Self::ToggleCompactTelemetry,
+        Self::CycleDaylight,
         Self::FollowPilgrimRoad,
         Self::VisitLandmark,
         Self::CloseMissionControl,
@@ -201,6 +203,7 @@ impl ContextAction {
             Self::DiveBelowSurface => "Dive below the surface",
             Self::ResetRendererFeatures => "Reset renderer features",
             Self::ToggleCompactTelemetry => "Toggle compact telemetry",
+            Self::CycleDaylight => "Cycle regional daylight",
             Self::FollowPilgrimRoad => "Follow pilgrim road",
             Self::VisitLandmark => "Visit next landmark",
             Self::CloseMissionControl => "Close mission control",
@@ -394,6 +397,8 @@ pub struct MissionControlUi {
     compact_motion: EasedValue,
     hover_motion: BTreeMap<UiTarget, EasedValue>,
     toast_age: f32,
+    daylight_label: &'static str,
+    region_label: &'static str,
 }
 
 impl Default for MissionControlUi {
@@ -411,6 +416,8 @@ impl Default for MissionControlUi {
             compact_motion: EasedValue::new(0.0),
             hover_motion: BTreeMap::new(),
             toast_age: 0.0,
+            daylight_label: "GOLDEN HOUR",
+            region_label: "VERDANT FOREST",
         }
     }
 }
@@ -445,6 +452,15 @@ impl MissionControlUi {
             self.toast_age = 0.0;
         }
         self.stats = stats;
+    }
+
+    pub fn set_environment_status(
+        &mut self,
+        daylight_label: &'static str,
+        region_label: &'static str,
+    ) {
+        self.daylight_label = daylight_label;
+        self.region_label = region_label;
     }
 
     pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
@@ -818,9 +834,17 @@ impl MissionControlUi {
         push_text(
             &mut draw,
             "VOXELS / MISSION CONTROL",
-            [layout.panel.x + CONTENT_PAD, layout.header.center()[1]],
-            if layout.compact { 11.0 } else { 12.0 },
+            [layout.panel.x + CONTENT_PAD, layout.header.y + 17.0],
+            if layout.compact { 10.5 } else { 11.5 },
             TEXT_PRIMARY.with_alpha(opacity),
+            TextAlign::Left,
+        );
+        push_text(
+            &mut draw,
+            format!("{} / {}", self.daylight_label, self.region_label),
+            [layout.panel.x + CONTENT_PAD, layout.header.y + 33.0],
+            8.5,
+            TEXT_MUTED.with_alpha(opacity),
             TextAlign::Left,
         );
 
@@ -1496,6 +1520,11 @@ mod tests {
         assert!(base.text.iter().any(|run| run.text == "7 + 1 / 76.0 MiB"));
         assert!(base.text.iter().any(|run| run.text == "123.4k / 8.2k"));
         assert!(base.text.iter().any(|run| run.text == "132 / 12"));
+        assert!(
+            base.text
+                .iter()
+                .any(|run| run.text == "GOLDEN HOUR / VERDANT FOREST")
+        );
 
         let _ = ui.open_context_menu_device([900.0, 80.0], viewport());
         let draw = ui.build_draw_list(viewport());
@@ -1534,6 +1563,11 @@ mod tests {
             draw.text
                 .iter()
                 .any(|run| run.text == "Follow pilgrim road")
+        );
+        assert!(
+            draw.text
+                .iter()
+                .any(|run| run.text == "Cycle regional daylight")
         );
         assert!(!draw.text.iter().any(|run| run.text == "CPU / GPU"));
     }

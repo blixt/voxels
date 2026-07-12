@@ -1,6 +1,50 @@
 //! Shared outdoor-lighting state used by sky, terrain, fog, and shadow projection.
 
 use glam::Vec3;
+use voxels_world::{AtmosphereSample, SurfaceRegion};
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DaylightPhase {
+    Dawn,
+    ClearDay,
+    #[default]
+    GoldenHour,
+    BlueHour,
+}
+
+impl DaylightPhase {
+    pub const ALL: [Self; 4] = [Self::Dawn, Self::ClearDay, Self::GoldenHour, Self::BlueHour];
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Dawn => Self::ClearDay,
+            Self::ClearDay => Self::GoldenHour,
+            Self::GoldenHour => Self::BlueHour,
+            Self::BlueHour => Self::Dawn,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Dawn => "DAWN",
+            Self::ClearDay => "CLEAR DAY",
+            Self::GoldenHour => "GOLDEN HOUR",
+            Self::BlueHour => "BLUE HOUR",
+        }
+    }
+}
+
+pub const fn surface_region_label(region: SurfaceRegion) -> &'static str {
+    match region {
+        SurfaceRegion::VerdantForest => "VERDANT FOREST",
+        SurfaceRegion::WindMoor => "WIND MOOR",
+        SurfaceRegion::Alpine => "ALPINE",
+        SurfaceRegion::RedBadlands => "RED BADLANDS",
+        SurfaceRegion::PaleDunes => "PALE DUNES",
+        SurfaceRegion::Volcanic => "VOLCANIC",
+    }
+}
 
 /// Rust-owned daylight parameters. Keeping this outside WGSL prevents the sky and world pipelines
 /// from quietly drifting to different suns or horizon colors as rendering evolves.
@@ -14,6 +58,8 @@ pub struct OutdoorEnvironment {
     pub fog_density: f32,
     pub fog_height_falloff: f32,
     pub exposure: f32,
+    pub cloud_coverage: f32,
+    pub star_visibility: f32,
 }
 
 impl Default for OutdoorEnvironment {
@@ -27,11 +73,112 @@ impl Default for OutdoorEnvironment {
             fog_density: 0.012,
             fog_height_falloff: 0.075,
             exposure: 1.0,
+            cloud_coverage: 0.42,
+            star_visibility: 0.0,
         }
     }
 }
 
 impl OutdoorEnvironment {
+    pub fn for_atmosphere(sample: AtmosphereSample, phase: DaylightPhase) -> Self {
+        let mut environment = match phase {
+            DaylightPhase::Dawn => Self {
+                sun_direction: Vec3::new(-0.74, 0.24, 0.43).normalize(),
+                sun_radiance: Vec3::new(6.0, 3.05, 1.55),
+                sky_horizon: Vec3::new(0.72, 0.39, 0.28),
+                sky_zenith: Vec3::new(0.045, 0.11, 0.31),
+                ground_irradiance: Vec3::new(0.14, 0.13, 0.12),
+                fog_density: 0.014,
+                fog_height_falloff: 0.070,
+                exposure: 0.98,
+                cloud_coverage: 0.44,
+                star_visibility: 0.08,
+            },
+            DaylightPhase::ClearDay => Self::default(),
+            DaylightPhase::GoldenHour => Self {
+                sun_direction: Vec3::new(0.79, 0.38, 0.28).normalize(),
+                sun_radiance: Vec3::new(6.1, 4.05, 2.35),
+                sky_horizon: Vec3::new(0.70, 0.52, 0.39),
+                sky_zenith: Vec3::new(0.045, 0.15, 0.43),
+                ground_irradiance: Vec3::new(0.18, 0.17, 0.13),
+                fog_density: 0.013,
+                fog_height_falloff: 0.068,
+                exposure: 0.98,
+                cloud_coverage: 0.38,
+                star_visibility: 0.0,
+            },
+            DaylightPhase::BlueHour => Self {
+                sun_direction: Vec3::new(-0.70, 0.18, -0.46).normalize(),
+                sun_radiance: Vec3::new(1.45, 1.65, 2.35),
+                sky_horizon: Vec3::new(0.18, 0.24, 0.38),
+                sky_zenith: Vec3::new(0.012, 0.038, 0.13),
+                ground_irradiance: Vec3::new(0.052, 0.066, 0.10),
+                fog_density: 0.017,
+                fog_height_falloff: 0.062,
+                exposure: 1.10,
+                cloud_coverage: 0.36,
+                star_visibility: 0.62,
+            },
+        };
+        let humidity = sample.humidity.clamp(0.0, 1.0);
+        let coldness = sample.coldness.clamp(0.0, 1.0);
+        let aerosol = sample.aerosol.clamp(0.0, 1.0);
+        let haze = sample.haze.clamp(0.0, 1.0);
+        let warmth = sample.horizon_warmth.clamp(0.0, 1.0);
+        environment.cloud_coverage = (environment.cloud_coverage * 0.58
+            + sample.cloudiness.clamp(0.0, 1.0) * 0.66)
+            .clamp(0.08, 0.94);
+        environment.fog_density *= 0.62 + haze * 1.16 + humidity * 0.22;
+        environment.fog_height_falloff *= 1.12 - humidity * 0.30 + aerosol * 0.16;
+        environment.sky_horizon = environment
+            .sky_horizon
+            .lerp(
+                Vec3::new(0.86, 0.39, 0.17),
+                warmth * (0.12 + aerosol * 0.12),
+            )
+            .lerp(Vec3::new(0.54, 0.66, 0.76), humidity * 0.10);
+        environment.sky_zenith = environment
+            .sky_zenith
+            .lerp(Vec3::new(0.12, 0.13, 0.16), aerosol * 0.24)
+            .lerp(Vec3::new(0.08, 0.19, 0.42), coldness * 0.10);
+        environment.ground_irradiance = environment
+            .ground_irradiance
+            .lerp(Vec3::new(0.11, 0.19, 0.13), humidity * 0.22)
+            .lerp(Vec3::new(0.10, 0.14, 0.22), coldness * 0.18)
+            .lerp(Vec3::new(0.12, 0.105, 0.09), aerosol * 0.24);
+        environment.sun_radiance *= 1.0 - environment.cloud_coverage * 0.18 - aerosol * 0.16;
+        environment.star_visibility *= 1.0 - environment.cloud_coverage * 0.78;
+        environment.sanitized()
+    }
+
+    pub fn lerp(self, target: Self, amount: f32) -> Self {
+        let amount = amount.clamp(0.0, 1.0);
+        let direction = self.sun_direction.lerp(target.sun_direction, amount);
+        Self {
+            sun_direction: if direction.length_squared() > 0.0001 {
+                direction.normalize()
+            } else {
+                target.sun_direction
+            },
+            sun_radiance: self.sun_radiance.lerp(target.sun_radiance, amount),
+            sky_horizon: self.sky_horizon.lerp(target.sky_horizon, amount),
+            sky_zenith: self.sky_zenith.lerp(target.sky_zenith, amount),
+            ground_irradiance: self
+                .ground_irradiance
+                .lerp(target.ground_irradiance, amount),
+            fog_density: scalar_lerp(self.fog_density, target.fog_density, amount),
+            fog_height_falloff: scalar_lerp(
+                self.fog_height_falloff,
+                target.fog_height_falloff,
+                amount,
+            ),
+            exposure: scalar_lerp(self.exposure, target.exposure, amount),
+            cloud_coverage: scalar_lerp(self.cloud_coverage, target.cloud_coverage, amount),
+            star_visibility: scalar_lerp(self.star_visibility, target.star_visibility, amount),
+        }
+        .sanitized()
+    }
+
     pub fn sanitized(self) -> Self {
         let fallback = Self::default();
         let direction =
@@ -55,8 +202,14 @@ impl OutdoorEnvironment {
                 fallback.fog_height_falloff,
             ),
             exposure: finite_non_negative_scalar(self.exposure, fallback.exposure),
+            cloud_coverage: finite_unit_scalar(self.cloud_coverage, fallback.cloud_coverage),
+            star_visibility: finite_unit_scalar(self.star_visibility, fallback.star_visibility),
         }
     }
+}
+
+fn scalar_lerp(from: f32, to: f32, amount: f32) -> f32 {
+    from + (to - from) * amount
 }
 
 fn finite_non_negative(value: Vec3, fallback: Vec3) -> Vec3 {
@@ -70,6 +223,14 @@ fn finite_non_negative(value: Vec3, fallback: Vec3) -> Vec3 {
 fn finite_non_negative_scalar(value: f32, fallback: f32) -> f32 {
     if value.is_finite() {
         value.max(0.0)
+    } else {
+        fallback
+    }
+}
+
+fn finite_unit_scalar(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
     } else {
         fallback
     }
@@ -122,6 +283,8 @@ mod tests {
             fog_density: f32::NAN,
             fog_height_falloff: -1.0,
             exposure: f32::INFINITY,
+            cloud_coverage: f32::NAN,
+            star_visibility: 4.0,
         }
         .sanitized();
         assert!(environment.sun_direction.is_finite());
@@ -132,6 +295,89 @@ mod tests {
         assert!(environment.fog_density.is_finite());
         assert_eq!(environment.fog_height_falloff, 0.0);
         assert!(environment.exposure.is_finite());
+        assert!((0.0..=1.0).contains(&environment.cloud_coverage));
+        assert_eq!(environment.star_visibility, 1.0);
+    }
+
+    #[test]
+    fn every_daylight_phase_and_region_profile_is_distinct_and_bounded() {
+        let samples = [
+            AtmosphereSample {
+                humidity: 0.82,
+                coldness: 0.30,
+                aerosol: 0.06,
+                cloudiness: 0.76,
+                horizon_warmth: 0.28,
+                haze: 0.42,
+            },
+            AtmosphereSample {
+                humidity: 0.30,
+                coldness: 0.72,
+                aerosol: 0.18,
+                cloudiness: 0.42,
+                horizon_warmth: 0.20,
+                haze: 0.24,
+            },
+            AtmosphereSample {
+                humidity: 0.10,
+                coldness: 0.12,
+                aerosol: 0.88,
+                cloudiness: 0.18,
+                horizon_warmth: 0.86,
+                haze: 0.78,
+            },
+        ];
+        let mut fingerprints = std::collections::BTreeSet::new();
+        for phase in DaylightPhase::ALL {
+            assert_eq!(phase.next().next().next().next(), phase);
+            for sample in samples {
+                let environment = OutdoorEnvironment::for_atmosphere(sample, phase);
+                assert!(environment.sun_direction.is_finite());
+                assert!((environment.sun_direction.length() - 1.0).abs() < 1.0e-5);
+                assert!(environment.sun_direction.y > 0.0);
+                assert!(environment.fog_density > 0.0);
+                assert!((0.0..=1.0).contains(&environment.cloud_coverage));
+                assert!((0.0..=1.0).contains(&environment.star_visibility));
+                fingerprints.insert([
+                    (environment.sun_radiance.x * 100.0).round() as i32,
+                    (environment.sky_horizon.x * 100.0).round() as i32,
+                    (environment.sky_zenith.z * 100.0).round() as i32,
+                    (environment.fog_density * 10_000.0).round() as i32,
+                    (environment.cloud_coverage * 100.0).round() as i32,
+                ]);
+            }
+        }
+        assert_eq!(fingerprints.len(), DaylightPhase::ALL.len() * samples.len());
+    }
+
+    #[test]
+    fn environment_blending_is_frame_rate_independent_and_normalized() {
+        let start =
+            OutdoorEnvironment::for_atmosphere(AtmosphereSample::default(), DaylightPhase::Dawn);
+        let target = OutdoorEnvironment::for_atmosphere(
+            AtmosphereSample {
+                humidity: 1.0,
+                coldness: 1.0,
+                aerosol: 1.0,
+                cloudiness: 1.0,
+                horizon_warmth: 1.0,
+                haze: 1.0,
+            },
+            DaylightPhase::BlueHour,
+        );
+        let response_seconds = 0.85;
+        let advance = |mut environment: OutdoorEnvironment, dt: f32, steps: usize| {
+            for _ in 0..steps {
+                let amount = 1.0 - (-dt / response_seconds).exp();
+                environment = environment.lerp(target, amount);
+            }
+            environment
+        };
+        let sixty_hz = advance(start, 1.0 / 60.0, 60);
+        let one_twenty_hz = advance(start, 1.0 / 120.0, 120);
+        assert!(sixty_hz.sun_direction.dot(one_twenty_hz.sun_direction) > 0.9999);
+        assert!((sixty_hz.fog_density - one_twenty_hz.fog_density).abs() < 0.0001);
+        assert!((sixty_hz.cloud_coverage - one_twenty_hz.cloud_coverage).abs() < 0.0001);
     }
 
     #[test]

@@ -39,7 +39,7 @@ mod web {
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const EDIT_HISTORY_CAPACITY: usize = 64;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 7.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 8.0;
     const MAX_EDIT_TRACKERS: usize = 128;
     const COAST_WATER_REFERENCE: [i32; 2] = [18_016, 12_896];
     const EDIT_PROFILE_TERRAIN: [i32; 3] = [18_016, -12, 12_896];
@@ -488,6 +488,10 @@ mod web {
             let target = self.raycast_target(&camera).map(|hit| hit.voxel);
             let mut renderer = self.renderer.borrow_mut();
             renderer.set_target_voxel(target);
+            let atmosphere_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
+            let atmosphere_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
+            let atmosphere = self.generator.surface_sample(atmosphere_x, atmosphere_z);
+            renderer.set_atmosphere(atmosphere.atmosphere, atmosphere.region);
             let stream = self.scheduler.borrow().diagnostics();
             let render = renderer.diagnostics();
             let lod_tiles = self.surface_lod_counts();
@@ -1583,6 +1587,9 @@ mod web {
                         .saturating_sub(engine.profile_start_evictions.get())
                         as f32,
                     if render.material_detail { 1.0 } else { 0.0 },
+                    render.daylight_phase as f32,
+                    render.surface_region as f32,
+                    render.cloud_coverage,
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
