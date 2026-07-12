@@ -581,7 +581,10 @@ mod web {
                 );
                 self.profile_wasm_high
                     .set(self.profile_wasm_high.get().max(wasm_committed_bytes()));
-                if self.profile.borrow().phase() == ProfilePhase::Drain && all_lods_ready {
+                if self.profile.borrow().phase() == ProfilePhase::Drain
+                    && all_lods_ready
+                    && submitted
+                {
                     self.profile.borrow_mut().complete_drain();
                 }
             }

@@ -340,7 +340,9 @@ async function sustainedProfile(page) {
     violations.push("mesh arena capacity did not plateau");
   }
   if (violations.length > 0) {
-    throw new Error(`sustained profile violations: ${violations.join(", ")}`);
+    throw new Error(
+      `sustained profile violations: ${violations.join(", ")}; ${JSON.stringify(result)}`,
+    );
   }
   return result;
 }
