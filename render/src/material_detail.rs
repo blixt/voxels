@@ -177,6 +177,16 @@ fn texture(device: &Device, label: &'static str, format: TextureFormat) -> Textu
 
 fn generate_layer(material: Material, width: u32) -> LayerTexels {
     let profile = material_profile(material);
+    let mut heights = Vec::with_capacity(width as usize * width as usize);
+    for y in 0..width {
+        for x in 0..width {
+            heights.push(material_height(
+                material,
+                x as f32 / width as f32,
+                y as f32 / width as f32,
+            ));
+        }
+    }
     let mut albedo = Vec::with_capacity(width as usize * width as usize);
     let mut normal_roughness = Vec::with_capacity(width as usize * width as usize);
     for y in 0..width {
@@ -194,11 +204,10 @@ fn generate_layer(material: Material, width: u32) -> LayerTexels {
                 (base[channel] + (accent[channel] - base[channel]) * blend) * tone
             }));
 
-            let step = 1.0 / width as f32;
-            let left = material_height(material, u - step, v);
-            let right = material_height(material, u + step, v);
-            let down = material_height(material, u, v - step);
-            let up = material_height(material, u, v + step);
+            let left = heights[((x + width - 1) % width + y * width) as usize];
+            let right = heights[((x + 1) % width + y * width) as usize];
+            let down = heights[(x + ((y + width - 1) % width) * width) as usize];
+            let up = heights[(x + ((y + 1) % width) * width) as usize];
             let normal = glam::Vec3::new(
                 (left - right) * profile.normal_strength,
                 (down - up) * profile.normal_strength,
