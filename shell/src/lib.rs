@@ -1110,6 +1110,7 @@ mod web {
                 let resident = self.surface_resident.borrow();
                 let mut revisions = self.surface_revisions.borrow_mut();
                 let mut dirty = self.surface_dirty.borrow_mut();
+                revisions.retain(|coord| resident.contains(&coord) || desired.contains(&coord));
                 let mut candidates = Vec::new();
                 for coord in desired {
                     match revisions.prepare_focus(coord) {

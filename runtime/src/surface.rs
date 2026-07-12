@@ -128,6 +128,12 @@ impl SurfaceRevisionCache {
         self.requested.remove(&coord);
         self.resident.remove(&coord);
     }
+
+    /// Drops revision metadata for tiles that are neither retained nor desired by the host.
+    pub fn retain(&mut self, mut keep: impl FnMut(SurfaceTileCoord) -> bool) {
+        self.requested.retain(|coord, _| keep(*coord));
+        self.resident.retain(|coord, _| keep(*coord));
+    }
 }
 
 const fn increment_nonzero(value: u64) -> u64 {
@@ -207,5 +213,20 @@ mod tests {
         cache.evict(affected);
         assert_eq!(cache.status(affected), None);
         assert_eq!(cache.resident_revision(affected), None);
+    }
+
+    #[test]
+    fn abandoned_requests_are_pruned_without_forgetting_resident_tiles() {
+        let mut cache = SurfaceRevisionCache::new();
+        let resident = tile(7);
+        let abandoned = tile(8);
+        let revision = cache.ensure_requested(resident);
+        assert!(cache.commit(resident, revision));
+        cache.ensure_requested(abandoned);
+
+        cache.retain(|coord| coord == resident);
+
+        assert!(cache.is_current(resident));
+        assert_eq!(cache.status(abandoned), None);
     }
 }
