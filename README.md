@@ -34,6 +34,8 @@ retains authoritative 10 cm voxels. Generator v4 shares one regional surface sam
 chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
 conditional skirts, and activates a newly streamed coverage set only when it is complete.
+Analytic tree identities preserve an edit-aware forest skyline across those rings instead of dropping
+procedural features at the canonical-chunk boundary.
 See [docs/architecture.md](docs/architecture.md) for format, persistence, and research decisions.
 
 ## Controls

@@ -109,3 +109,19 @@ Browser validation opened two simultaneous tabs against the same OPFS world and 
 tab several times. Both workers recovered to a rendered world through Web-Lock ownership handoff, and
 both document bodies contained only the canvas plus the non-rendering module script. This exercises the
 same stale sync-access-handle retry path used after a quick refresh.
+
+## 2026-07-12: edit-aware skyline proxies
+
+The surface rings now retain procedural trees instead of flattening the horizon once canonical chunks
+end. Each generator placement cell yields one analytic feature descriptor used by canonical voxels and
+by anchor-owned LOD proxies. Stride-2 proxies use four boxes (24 quads), stride-4 uses three (18 quads),
+and the outer levels use two (12 quads); they stay inside the owning patch allocation and therefore add
+no mesh object or JavaScript overhead. A single-tab debug build rendered the expanded forest view at
+26 FPS in the in-app browser, versus 9 FPS while a second WebGPU tab rendered the same world; release
+profiling remains the next useful end-to-end comparison.
+
+Native stride-8 surface generation remained unchanged within noise at 0.161 ms. The 10,000-unrelated-
+edit case measured 0.164 ms and improved slightly, confirming that pristine-feature checks use indexed
+chunk buckets instead of scanning the edit journal. Host tests prove single anchor ownership, fixed
+patch coverage despite protruding culling bounds, cross-tile crown invalidation, proxy suppression on a
+canonical tree edit, and restoration when the edit returns to generated state.

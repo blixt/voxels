@@ -70,10 +70,18 @@ all replacement tiles are resident, so movement changes ownership transactionall
 partially streamed rings. Trees remain canonical near-field geometry; they are withheld only during the
 first incomplete fine-field load so isolated crowns cannot appear before their supporting columns.
 
+Procedural trees have one analytic `SkylineFeature` identity shared by canonical chunk decoration,
+random-access voxel sampling, edit invalidation, and surface LOD generation. An anchor-owned surface
+patch appends a small stepped trunk/crown cuboid proxy, simplified with distance but using the same
+materials and bounds. Any canonical edit that touches the generated feature suppresses its disposable
+proxy at every level; an edit outside the analytic tree does not. The canonical boundary snaps to the
+96-voxel feature placement grid, keeping a whole tree on one side of the canonical/proxy handoff.
+
 An edit invalidates every surface tile whose sampling footprint depends on that X/Z column. Resident
 geometry stays active while its replacement is generated and allocated, then the renderer switches
 the mesh and releases the old allocation atomically. Dirty work that leaves the retained streaming
-window is discarded because any later load samples the authoritative edit overlay again.
+window is discarded because any later load samples the authoritative edit overlay again. Feature
+edits additionally invalidate the feature anchor's tile when a crown or branch crosses a tile edge.
 
 Near meshes also bake the established four-level voxel ambient-occlusion term from two side samples
 and the diagonal at each face corner. Four 2-bit values participate in the greedy merge key, and the
