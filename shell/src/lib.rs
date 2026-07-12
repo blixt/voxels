@@ -252,6 +252,16 @@ mod web {
     const KIND_KEY_UP: u8 = 5;
     const KIND_CANCEL: u8 = 6;
 
+    fn camera_persistence_values(camera: &CameraState) -> [f32; 5] {
+        [
+            camera.position.x,
+            camera.position.y,
+            camera.position.z,
+            camera.yaw,
+            camera.pitch,
+        ]
+    }
+
     fn log_gpu_error(message: &str) {
         web_sys::console::error_1(&JsValue::from_str(message));
     }
@@ -312,6 +322,7 @@ mod web {
         profile_wasm_high: Cell<u64>,
         profile_start_evictions: Cell<u64>,
         last_persist: Cell<f64>,
+        last_persisted_camera: Cell<[f32; 5]>,
         stopped: Cell<bool>,
     }
 
@@ -810,9 +821,7 @@ mod web {
             self.render_milliseconds
                 .set(smoothed_ms(self.render_milliseconds.get(), render_ms));
             if time - self.last_persist.get() >= 1_000.0 {
-                if let Err(error) = self.store.borrow().save_camera(&camera) {
-                    web_sys::console::error_1(&error);
-                }
+                self.persist_camera_if_changed(&camera);
                 self.last_persist.set(time);
             }
             let cpu_ms = (performance_now(performance.as_ref()) - cpu_start) as f32;
@@ -1181,9 +1190,7 @@ mod web {
         }
 
         fn stop(&self) {
-            if let Err(error) = self.store.borrow().save_camera(&self.camera.borrow()) {
-                web_sys::console::error_1(&error);
-            }
+            self.persist_camera_if_changed(&self.camera.borrow());
             self.store.borrow().shutdown();
             self.stopped.set(true);
             let id = self.frame_id.replace(0);
@@ -1191,6 +1198,17 @@ mod web {
                 let _ = self.scope.cancel_animation_frame(id);
             }
             self.callback.borrow_mut().take();
+        }
+
+        fn persist_camera_if_changed(&self, camera: &CameraState) {
+            let values = camera_persistence_values(camera);
+            if self.last_persisted_camera.get() == values {
+                return;
+            }
+            match self.store.borrow().save_camera(camera) {
+                Ok(()) => self.last_persisted_camera.set(values),
+                Err(error) => web_sys::console::error_1(&error),
+            }
         }
 
         fn feed_input(&self, bytes: &[u8]) -> bool {
@@ -2180,6 +2198,7 @@ mod web {
                 .occludes_ambient()
         });
         let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
+        let persisted_camera = camera_persistence_values(&camera);
         let engine = Rc::new(Engine {
             renderer: RefCell::new(renderer),
             camera: RefCell::new(camera),
@@ -2236,6 +2255,7 @@ mod web {
             profile_wasm_high: Cell::new(0),
             profile_start_evictions: Cell::new(0),
             last_persist: Cell::new(0.0),
+            last_persisted_camera: Cell::new(persisted_camera),
             stopped: Cell::new(false),
         });
         engine.start()?;
