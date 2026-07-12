@@ -25,6 +25,9 @@ frame/CPU phase distributions for steady, traversal, and underwater scenarios in
 `vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step rail, measures its final 60 seconds,
 checks streaming/residency bounds and memory plateau, then requires every canonical and LOD queue to
 drain.
+`vp run profile:edits` runs 40 Rust-owned terrain/water remove-and-restore operations and gates SQLite
+dispatch, canonical remesh, all four LOD replacements, submitted-frame convergence, and pristine
+restoration.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture
@@ -64,12 +67,7 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 
 ## Automation
 
-`window.__VOXELS__.snapshot()` returns a promise containing camera position, yaw, pitch, grounded
-state, resident greedy-quad count, persisted edit count, resident chunk count, and tracked chunk
-count, followed by visible chunks, draw calls, arena pages, allocated/capacity MiB, and queued stream
-work and far-tile residency. It is intentionally an automation hook rather than a second JavaScript
-game model. The final thirteen values are display-frame cadence in milliseconds, shadow-caster draws,
-active shadow cascades, load/remesh p95 and maximum latency in scheduler frames, and resident tile
-counts for each of the four surface LOD levels, followed by visible water quads, water-pass draws, and
-refraction-copy MiB. The next four values are exact immersion, eye depth, eyes-submerged, and
-swimming state; the final four expose targeted voxel X/Y/Z and target validity for input automation.
+`window.__VOXELS__.snapshot()` returns a versioned numeric telemetry stream for browser automation.
+It contains camera, renderer, streaming, memory, water, GPU, sustained-profile, frame-history, and
+edit-convergence records. It is intentionally an automation hook rather than a second JavaScript game
+model; the browser owns no simulation or UI state.

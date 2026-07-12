@@ -178,6 +178,13 @@ removal) to every other follower. Each recipient updates `EditMap`, resident can
 tickets, and affected LOD tiles through the same invalidation path as a local edit. Rendering and
 collision therefore converge live instead of waiting for a reload.
 
+Every local edit also captures the post-invalidation revision of each desired canonical chunk and a
+monotonic revision for every affected active or pending surface tile. The shell considers the edit
+converged only when those canonical chunks and LOD replacements are resident and the renderer confirms
+that the replacement frame reached WGPU submission. Focus eviction explicitly waives representations
+that are no longer visible; a later load samples the authoritative edit map again. This makes edit
+latency a user-visible, revision-backed measurement rather than a queue-length approximation.
+
 ## Performance policy
 
 - Never allocate or send one JavaScript object per input sample, voxel, face, or chunk.

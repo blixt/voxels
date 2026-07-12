@@ -291,3 +291,27 @@ The corrected M3 Max / system Chrome run produced:
 The rail reached 27.438 MiB committed WASM and 64 MiB of mesh-arena capacity. Those are high-water
 figures, not live payload claims. The active surface plus pending coverage union stayed below its
 conservative 896-tile bound, and the final focus activated only after every replacement queue drained.
+
+## 2026-07-12: submitted edit convergence
+
+`vp run profile:edits` teleports through one numeric browser command, then Rust serializes 40 edits at
+a fixed coastal column: ten terrain removals/restores and ten water removals/restores. Each operation
+invalidates three 32-cubed canonical chunks and one tile at each of the 0.2, 0.4, 0.8, and 1.6 metre
+surface levels. The next edit is withheld until all exact revisions reach residency and a frame using
+them reaches WGPU submission. The fixture refuses follower execution and pre-existing edits, and must
+finish with the sparse edit map restored to its starting row count.
+
+The M3 Max / system Chrome release run produced:
+
+| Edit measurement                      |         Result |                Gate |
+| ------------------------------------- | -------------: | ------------------: |
+| Operations / dropped / superseded     |     40 / 0 / 0 |      exactly 40/0/0 |
+| SQLite/OPFS dispatch p95 / max        |   3.0 / 3.2 ms |       8 / 25 ms max |
+| Canonical replacement p95 / max       | 30.3 / 30.9 ms |    100 / 200 ms max |
+| Full submitted LOD p95 / max          | 30.3 / 30.9 ms |    150 / 250 ms max |
+| Frame p95 / max                       |  9.3 / 10.3 ms | 16.67 / no 33.33 ms |
+| Final edits / trackers / mesh payload |      0 / 0 / 0 |                zero |
+
+The Mission Control panel receives the latest full convergence time and active tracker count through
+`LiveStats`; those status cards remain Rust-composed and WGPU-rendered like the crosshair, startup
+controls toast, toggles, hover surfaces, and context menu.
