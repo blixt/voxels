@@ -1626,6 +1626,20 @@ mod tests {
     }
 
     #[test]
+    fn crosshair_is_a_rust_drawn_circle() {
+        let ui = MissionControlUi::default();
+        let draw = ui.build_draw_list(viewport());
+        let crosshair = draw
+            .glass
+            .iter()
+            .find(|surface| surface.role == SurfaceRole::Crosshair)
+            .expect("Rust UI must always emit the crosshair");
+        assert_eq!(crosshair.rect.width, crosshair.rect.height);
+        assert_eq!(crosshair.radius, crosshair.rect.width * 0.5);
+        assert!(crosshair.fill.0[3] > 0.0);
+    }
+
+    #[test]
     fn underwater_status_and_controls_are_rust_drawn() {
         let mut ui = MissionControlUi::default();
         for _ in 0..500 {

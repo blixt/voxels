@@ -12,9 +12,13 @@ describe("canvas-only browser shell", () => {
     const tags = Array.from(body.matchAll(/<([a-z][a-z0-9-]*)(?:\s|>)/gi), (match) =>
       match[1]?.toLowerCase(),
     );
-    assert.deepEqual(tags, ["canvas", "script"]);
+    assert.deepEqual(tags, ["canvas"]);
     assert.match(body, /<canvas\s+id="app"[^>]*><\/canvas>/i);
-    assert.match(body, /<script\s+type="module"\s+src="\/web\/main\.ts"><\/script>/i);
+    assert.doesNotMatch(body, /<script/i);
+    assert.match(
+      html,
+      /<head>[\s\S]*<script\s+type="module"\s+src="\/web\/main\.ts"><\/script>[\s\S]*<\/head>/i,
+    );
   });
 
   it("does not construct a JavaScript UI tree", () => {
@@ -24,6 +28,11 @@ describe("canvas-only browser shell", () => {
         "createElement",
         "appendChild",
         "insertAdjacentHTML",
+        "insertBefore",
+        "replaceChildren",
+        "attachShadow",
+        "customElements",
+        "DOMParser",
         "innerHTML",
         "outerHTML",
         "textContent",
