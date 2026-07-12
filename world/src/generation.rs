@@ -1,10 +1,11 @@
 use crate::{
-    CHUNK_EDGE, Chunk, ChunkCoord, FEATURE_CELL_VOXELS, FEATURE_MAX_RADIUS_VOXELS, Material,
-    SkylineFeature, SkylineFeatureId, SkylineFeatureKind,
+    CHUNK_EDGE, COMPOSITION_EDGE_FEATURE_CELLS, Chunk, ChunkCoord, FEATURE_CELL_VOXELS,
+    FEATURE_MAX_RADIUS_VOXELS, FeatureComposition, Material, SkylineFeature, SkylineFeatureId,
+    SkylineFeatureKind,
 };
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 7;
+pub const GENERATOR_VERSION: u32 = 8;
 pub const SEA_LEVEL_VOXELS: i32 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -168,6 +169,7 @@ impl Generator {
                 if !feature.contains_xz(x, z) {
                     continue;
                 }
+                debug_assert!(usize::from(feature_count) < features.len());
                 features[usize::from(feature_count)] = feature;
                 feature_count += 1;
             }
@@ -212,6 +214,7 @@ impl Generator {
                     .copied()
                     .filter(|feature| feature.contains_xz(x, z))
                 {
+                    debug_assert!(usize::from(feature_count) < column_features.len());
                     column_features[usize::from(feature_count)] = feature;
                     feature_count += 1;
                 }
@@ -476,6 +479,29 @@ impl Generator {
         kind: SkylineFeatureKind,
         max_radius_cells: i32,
     ) -> Option<SkylineFeature> {
+        self.nearest_skyline_feature_with_prominence(x, z, kind, 0, max_radius_cells)
+    }
+
+    /// Finds the nearest authored composition hero of one biome kind. This keeps the Rust debug tour
+    /// focused on the larger silhouettes while ordinary callers can still request any landmark.
+    pub fn nearest_prominent_skyline_feature(
+        self,
+        x: i32,
+        z: i32,
+        kind: SkylineFeatureKind,
+        max_radius_cells: i32,
+    ) -> Option<SkylineFeature> {
+        self.nearest_skyline_feature_with_prominence(x, z, kind, 2, max_radius_cells)
+    }
+
+    fn nearest_skyline_feature_with_prominence(
+        self,
+        x: i32,
+        z: i32,
+        kind: SkylineFeatureKind,
+        minimum_prominence: u8,
+        max_radius_cells: i32,
+    ) -> Option<SkylineFeature> {
         let center_x = x.div_euclid(FEATURE_CELL_VOXELS);
         let center_z = z.div_euclid(FEATURE_CELL_VOXELS);
         for radius in 0..=max_radius_cells.clamp(0, 256) {
@@ -484,7 +510,7 @@ impl Generator {
                 let Some(feature) = self.skyline_feature(cell_x, cell_z) else {
                     return;
                 };
-                if feature.kind != kind {
+                if feature.kind != kind || feature.prominence < minimum_prominence {
                     return;
                 }
                 let dx = i64::from(feature.anchor[0]) - i64::from(x);
@@ -565,6 +591,13 @@ impl Generator {
         )
     }
 
+    fn feature_composition(self, cell_x: i32, cell_z: i32) -> FeatureComposition {
+        let composition_x = cell_x.div_euclid(COMPOSITION_EDGE_FEATURE_CELLS);
+        let composition_z = cell_z.div_euclid(COMPOSITION_EDGE_FEATURE_CELLS);
+        let hash = self.hash(composition_x, 0, composition_z, 0xc06f_0517_10a5_1e5d);
+        FeatureComposition::for_feature_cell(cell_x, cell_z, hash)
+    }
+
     fn skyline_feature(self, cell_x: i32, cell_z: i32) -> Option<SkylineFeature> {
         let (anchor_x, anchor_z, hash) = self.feature_anchor(cell_x, cell_z);
         let surface = self.surface_sample(anchor_x, anchor_z);
@@ -579,7 +612,7 @@ impl Generator {
             SurfaceRegion::PaleDunes => SkylineFeatureKind::DuneArch,
             SurfaceRegion::Volcanic => SkylineFeatureKind::BasaltColumns,
         };
-        let density_threshold = match kind {
+        let density_threshold: u8 = match kind {
             SkylineFeatureKind::Broadleaf => 224,
             SkylineFeatureKind::MoorTor => 92,
             SkylineFeatureKind::AlpineNeedle => 82,
@@ -587,7 +620,15 @@ impl Generator {
             SkylineFeatureKind::DuneArch => 64,
             SkylineFeatureKind::BasaltColumns => 112,
         };
-        if ((hash >> 40) & 0xff) as u8 >= density_threshold
+        let composition = self.feature_composition(cell_x, cell_z);
+        let influence = composition.influence(cell_x, cell_z);
+        let effective_density = if influence.prominence == 2 {
+            u8::MAX
+        } else {
+            (u16::from(density_threshold) * u16::from(influence.density) / u16::from(u8::MAX)) as u8
+        };
+        if effective_density == 0
+            || ((hash >> 40) & 0xff) as u8 >= effective_density
             || (kind == SkylineFeatureKind::Broadleaf && surface.moisture < 0.30)
         {
             return None;
@@ -603,7 +644,7 @@ impl Generator {
         if surface.ridge > maximum_ridge {
             return None;
         }
-        let height = match kind {
+        let base_height = match kind {
             SkylineFeatureKind::Broadleaf => 25 + ((hash >> 16) & 15) as i32,
             SkylineFeatureKind::MoorTor => 18 + ((hash >> 16) & 11) as i32,
             SkylineFeatureKind::AlpineNeedle => 34 + ((hash >> 16) & 23) as i32,
@@ -611,6 +652,7 @@ impl Generator {
             SkylineFeatureKind::DuneArch => 18 + ((hash >> 16) & 7) as i32,
             SkylineFeatureKind::BasaltColumns => 24 + ((hash >> 16) & 19) as i32,
         };
+        let height = base_height + base_height * i32::from(influence.prominence.min(2)) / 4;
         Some(SkylineFeature {
             id: SkylineFeatureId { cell_x, cell_z },
             kind,
@@ -618,6 +660,7 @@ impl Generator {
             trunk_top: surface.height + height,
             orientation: ((hash >> 32) & 3) as u8,
             variant: ((hash >> 36) & 3) as u8,
+            prominence: influence.prominence,
         })
     }
 
@@ -824,7 +867,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checksum, 0x8208_9ab6_5ab3_0500);
+        assert_eq!(checksum, 0x527e_5bdf_fbc2_7ec3);
     }
 
     #[test]
@@ -954,5 +997,61 @@ mod tests {
             }
         }
         assert_eq!(kinds, SkylineFeatureKind::ALL.into_iter().collect());
+    }
+
+    #[test]
+    fn composed_landmark_catalog_is_stable_and_bounded() {
+        let generator = Generator::new(0x5eed_cafe);
+        let mut modes = BTreeSet::new();
+        let mut prominence_counts = [0usize; 3];
+        let mut checksum = u64::from(GENERATOR_VERSION);
+        for cell_z in -32..=32 {
+            for cell_x in -32..=32 {
+                modes.insert(generator.feature_composition(cell_x, cell_z).mode);
+                let Some(feature) = generator.skyline_feature(cell_x, cell_z) else {
+                    continue;
+                };
+                assert!(feature.prominence <= 2);
+                prominence_counts[usize::from(feature.prominence)] += 1;
+                let [min, max] = feature.bounds();
+                let cell_min_x = cell_x * FEATURE_CELL_VOXELS;
+                let cell_min_z = cell_z * FEATURE_CELL_VOXELS;
+                assert!(min[0] >= cell_min_x && max[0] <= cell_min_x + FEATURE_CELL_VOXELS);
+                assert!(min[2] >= cell_min_z && max[2] <= cell_min_z + FEATURE_CELL_VOXELS);
+                for value in [
+                    cell_x as i64 as u64,
+                    cell_z as i64 as u64,
+                    feature.kind as u64,
+                    feature.anchor[0] as i64 as u64,
+                    feature.anchor[1] as i64 as u64,
+                    feature.anchor[2] as i64 as u64,
+                    feature.trunk_top as i64 as u64,
+                    u64::from(feature.orientation),
+                    u64::from(feature.variant),
+                    u64::from(feature.prominence),
+                ] {
+                    checksum ^= value;
+                    checksum = checksum.wrapping_mul(0x100_0000_01b3);
+                }
+            }
+        }
+        assert_eq!(
+            modes,
+            crate::FeatureCompositionMode::ALL.into_iter().collect()
+        );
+        assert!(prominence_counts.into_iter().all(|count| count > 0));
+        assert_eq!(checksum, 0xac20_8e96_0b77_2f1a);
+    }
+
+    #[test]
+    fn prominent_landmark_search_returns_composition_heroes() {
+        let generator = Generator::new(0x5eed_cafe);
+        for kind in SkylineFeatureKind::ALL {
+            let feature = generator
+                .nearest_prominent_skyline_feature(0, 0, kind, 192)
+                .expect("the fixed catalog should contain a hero of every regional kind");
+            assert_eq!(feature.kind, kind);
+            assert_eq!(feature.prominence, 2);
+        }
     }
 }

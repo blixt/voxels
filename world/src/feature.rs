@@ -43,6 +43,8 @@ pub struct SkylineFeature {
     pub trunk_top: i32,
     pub orientation: u8,
     pub variant: u8,
+    /// 0 = background, 1 = composition companion, 2 = composition hero.
+    pub prominence: u8,
 }
 
 impl SkylineFeature {
@@ -77,13 +79,14 @@ impl SkylineFeature {
                 if !(1..=height).contains(&dy) {
                     return None;
                 }
-                let radius = if dy * 3 < height {
+                let radius = (if dy * 3 < height {
                     6
                 } else if dy * 3 < height * 2 {
                     5
                 } else {
                     3
-                };
+                } + self.radius_bonus())
+                .min(FEATURE_MAX_RADIUS_VOXELS);
                 let notch =
                     (dx * 13 + dz * 7 + dy * 3 + i32::from(self.variant)).rem_euclid(17) == 0;
                 (dx.abs().max(dz.abs()) <= radius
@@ -95,7 +98,8 @@ impl SkylineFeature {
                 if !(1..=height).contains(&dy) {
                     return None;
                 }
-                let radius = (7 - dy * 6 / height.max(1)).max(1);
+                let radius = ((7 - dy * 6 / height.max(1)).max(1) + self.radius_bonus())
+                    .min(FEATURE_MAX_RADIUS_VOXELS);
                 (dx.abs().max(dz.abs()) <= radius && dx.abs() + dz.abs() <= radius * 2).then_some(
                     if dy >= height - 5 {
                         Material::Snow
@@ -108,7 +112,7 @@ impl SkylineFeature {
                 if !(1..=height).contains(&dy) {
                     return None;
                 }
-                let radius = if dy >= height - 4 {
+                let radius = (if dy >= height - 4 {
                     6
                 } else if dy >= height - 9 {
                     4
@@ -116,7 +120,8 @@ impl SkylineFeature {
                     3
                 } else {
                     2
-                };
+                } + self.radius_bonus())
+                .min(FEATURE_MAX_RADIUS_VOXELS);
                 (dx.abs().max(dz.abs()) <= radius && dx * dx + dz * dz <= radius * radius + radius)
                     .then_some(if dy >= height - 5 {
                         Material::RedSand
@@ -134,11 +139,12 @@ impl SkylineFeature {
                 (pillar || lintel).then_some(Material::Limestone)
             }
             SkylineFeatureKind::BasaltColumns => {
+                let bonus = self.radius_bonus();
                 let columns = [
-                    ([0, 0], height, 2),
-                    ([-5, -3], height * 3 / 4, 2),
-                    ([5, -2], height * 5 / 8, 1),
-                    ([2, 5], height * 7 / 8, 2),
+                    ([0, 0], height, 2 + bonus),
+                    ([-5, -3], height * 3 / 4, 2 + bonus),
+                    ([5, -2], height * 5 / 8, 1 + bonus),
+                    ([2, 5], height * 7 / 8, 2 + bonus),
                 ];
                 columns
                     .into_iter()
@@ -167,18 +173,23 @@ impl SkylineFeature {
         }
     }
 
+    fn radius_bonus(self) -> i32 {
+        self.prominence.min(2) as i32
+    }
+
     fn broadleaf_material(self, dx: i32, dy: i32, dz: i32) -> Option<Material> {
         let height = self.trunk_top - self.anchor[1];
         if (1..=height).contains(&dy) && dx.abs() <= 1 && dz.abs() <= 1 {
             return Some(Material::Wood);
         }
         let crown_dy = dy - (height - 3);
-        let horizontal_radius = 9 - crown_dy.abs() / 2;
+        let horizontal_radius =
+            (9 + self.radius_bonus() - crown_dy.abs() / 2).min(FEATURE_MAX_RADIUS_VOXELS);
         let distance_squared = dx * dx + dz * dz + (crown_dy * crown_dy) / 2;
         ((-7..=5).contains(&crown_dy)
             && dx.abs() <= horizontal_radius
             && dz.abs() <= horizontal_radius
-            && distance_squared <= 76 + i32::from(self.variant) * 2)
+            && distance_squared <= 76 + i32::from(self.variant) * 2 + self.radius_bonus() * 12)
             .then_some(Material::Leaves)
     }
 }

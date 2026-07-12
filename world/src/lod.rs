@@ -1,6 +1,7 @@
 use crate::mesh::{FACE_NEG_X, FACE_NEG_Y, FACE_NEG_Z, FACE_POS_X, FACE_POS_Y, FACE_POS_Z};
 use crate::{
-    EditMap, Generator, Material, SEA_LEVEL_VOXELS, SkylineFeature, SkylineFeatureKind, VoxelCoord,
+    EditMap, FEATURE_MAX_RADIUS_VOXELS, Generator, Material, SEA_LEVEL_VOXELS, SkylineFeature,
+    SkylineFeatureKind, VoxelCoord,
 };
 use std::ops::Range;
 
@@ -710,6 +711,7 @@ fn append_skyline_proxy(
 ) {
     let [anchor_x, ground, anchor_z] = feature.anchor;
     let top = feature.trunk_top;
+    let radius_bonus = i32::from(feature.prominence.min(2));
     match feature.kind {
         SkylineFeatureKind::Broadleaf => {
             append_box(
@@ -728,6 +730,7 @@ fn append_skyline_proxy(
                 SurfaceLodLevel::Stride8 | SurfaceLodLevel::Stride16 => &[([top - 7, top + 3], 8)],
             };
             for &([min_y, max_y], radius) in crown_layers {
+                let radius = (radius + radius_bonus).min(FEATURE_MAX_RADIUS_VOXELS);
                 append_box(
                     quads,
                     [anchor_x - radius, min_y, anchor_z - radius],
@@ -743,6 +746,7 @@ fn append_skyline_proxy(
                 (ground + height / 3, ground + height * 2 / 3 + 1, 5),
                 (ground + height * 2 / 3, top + 1, 3),
             ] {
+                let radius = (radius + radius_bonus).min(FEATURE_MAX_RADIUS_VOXELS);
                 append_box(
                     quads,
                     [anchor_x - radius, min, anchor_z - radius],
@@ -758,6 +762,7 @@ fn append_skyline_proxy(
                 (ground + height / 2, top - 4, 4, Material::Stone),
                 (top - 5, top + 1, 2, Material::Snow),
             ] {
+                let radius = (radius + radius_bonus).min(FEATURE_MAX_RADIUS_VOXELS);
                 append_box(
                     quads,
                     [anchor_x - radius, min, anchor_z - radius],
@@ -769,20 +774,44 @@ fn append_skyline_proxy(
         SkylineFeatureKind::BadlandsHoodoo => {
             append_box(
                 quads,
-                [anchor_x - 2, ground + 1, anchor_z - 2],
-                [anchor_x + 3, top - 7, anchor_z + 3],
+                [
+                    anchor_x - 2 - radius_bonus,
+                    ground + 1,
+                    anchor_z - 2 - radius_bonus,
+                ],
+                [
+                    anchor_x + 3 + radius_bonus,
+                    top - 7,
+                    anchor_z + 3 + radius_bonus,
+                ],
                 Material::Clay,
             );
             append_box(
                 quads,
-                [anchor_x - 4, top - 8, anchor_z - 4],
-                [anchor_x + 5, top - 3, anchor_z + 5],
+                [
+                    anchor_x - 4 - radius_bonus,
+                    top - 8,
+                    anchor_z - 4 - radius_bonus,
+                ],
+                [
+                    anchor_x + 5 + radius_bonus,
+                    top - 3,
+                    anchor_z + 5 + radius_bonus,
+                ],
                 Material::Clay,
             );
             append_box(
                 quads,
-                [anchor_x - 6, top - 4, anchor_z - 6],
-                [anchor_x + 7, top + 1, anchor_z + 7],
+                [
+                    anchor_x - 6 - radius_bonus,
+                    top - 4,
+                    anchor_z - 6 - radius_bonus,
+                ],
+                [
+                    anchor_x + 7 + radius_bonus,
+                    top + 1,
+                    anchor_z + 7 + radius_bonus,
+                ],
                 Material::RedSand,
             );
         }
@@ -813,6 +842,7 @@ fn append_skyline_proxy(
                 ([5, -2], height * 5 / 8, 1),
                 ([2, 5], height * 7 / 8, 2),
             ] {
+                let radius = radius + radius_bonus;
                 let [offset_x, offset_z] = feature.oriented_offset(offset[0], offset[1]);
                 append_box(
                     quads,
@@ -933,6 +963,7 @@ mod tests {
                 trunk_top: 60,
                 orientation: index as u8,
                 variant: (index % 4) as u8,
+                prominence: (index % 3) as u8,
             };
             assert!(feature.material_at(VoxelCoord::new(32, 60, 32)).is_some());
             for level in SurfaceLodLevel::ALL {

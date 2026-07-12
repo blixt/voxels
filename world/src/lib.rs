@@ -2,6 +2,7 @@
 
 pub mod chunk;
 pub mod codec;
+pub mod composition;
 pub mod edit;
 pub mod feature;
 pub mod generation;
@@ -10,6 +11,10 @@ pub mod material;
 pub mod mesh;
 
 pub use chunk::{CHUNK_EDGE, CHUNK_VOLUME, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord};
+pub use composition::{
+    COMPOSITION_EDGE_FEATURE_CELLS, FeatureComposition, FeatureCompositionId,
+    FeatureCompositionInfluence, FeatureCompositionMode,
+};
 pub use edit::{EditMap, VoxelCoord};
 pub use feature::{
     FEATURE_CELL_VOXELS, FEATURE_MAX_RADIUS_VOXELS, SkylineFeature, SkylineFeatureId,
