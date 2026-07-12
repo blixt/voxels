@@ -180,6 +180,7 @@ struct RenderOptions {
     ambient_occlusion: bool,
     fog: bool,
     far_terrain: bool,
+    water: bool,
     target_outline: bool,
 }
 
@@ -204,6 +205,7 @@ impl Default for RenderOptions {
             ambient_occlusion: true,
             fog: true,
             far_terrain: true,
+            water: true,
             target_outline: true,
         }
     }
@@ -720,6 +722,7 @@ impl Renderer {
                 }
                 RendererFeature::AtmosphericFog => self.options.fog = enabled,
                 RendererFeature::FarTerrain => self.options.far_terrain = enabled,
+                RendererFeature::WaterSurface => self.options.water = enabled,
                 RendererFeature::TargetOutline => self.options.target_outline = enabled,
             },
             UiAction::ContextAction(ContextAction::ResetRendererFeatures) => {
@@ -1134,7 +1137,8 @@ impl Renderer {
                 && aabb_visible(slice.bounds_min, slice.bounds_max, view_projection)
         });
         let water_draw_list = self.collect_draw_list(|key, slice| {
-            (key.0 == 0 || self.options.far_terrain)
+            self.options.water
+                && (key.0 == 0 || self.options.far_terrain)
                 && slice.render_layer == RenderLayer::Translucent
                 && slice_owned_by_lod(geometric_lod_focus, key, slice)
                 && aabb_visible(slice.bounds_min, slice.bounds_max, view_projection)

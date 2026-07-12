@@ -194,7 +194,9 @@ mod web {
                     ),
                     visible_chunks: render.visible_chunks,
                     quads: render.quads,
+                    water_quads: render.water_quads,
                     draw_calls: render.draw_calls,
+                    water_draw_calls: render.water_draw_calls,
                     shadow_draw_calls: render.shadow_draw_calls,
                     shadow_cascades: render.shadow_cascades,
                     load_p95_frames: stream.initial_residency_latency.p95_frames,
@@ -592,7 +594,7 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 28], |engine| {
+            let values = self.engine.as_ref().map_or([0.0; 30], |engine| {
                 let camera = engine.camera.borrow();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let render = engine.renderer.borrow().diagnostics();
@@ -630,6 +632,8 @@ mod web {
                     lod_tiles[1] as f32,
                     lod_tiles[2] as f32,
                     lod_tiles[3] as f32,
+                    render.water_quads as f32,
+                    render.water_draw_calls as f32,
                 ]
             });
             Float32Array::from(values.as_slice())

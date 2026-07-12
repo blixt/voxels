@@ -129,15 +129,17 @@ pub enum RendererFeature {
     VoxelAmbientOcclusion,
     AtmosphericFog,
     FarTerrain,
+    WaterSurface,
     TargetOutline,
 }
 
 impl RendererFeature {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::CascadedSunShadows,
         Self::VoxelAmbientOcclusion,
         Self::AtmosphericFog,
         Self::FarTerrain,
+        Self::WaterSurface,
         Self::TargetOutline,
     ];
 
@@ -147,6 +149,7 @@ impl RendererFeature {
             Self::VoxelAmbientOcclusion => "Voxel ambient occlusion",
             Self::AtmosphericFog => "Atmospheric fog",
             Self::FarTerrain => "Far terrain",
+            Self::WaterSurface => "Animated water surface",
             Self::TargetOutline => "Target outline",
         }
     }
@@ -158,7 +161,8 @@ const fn feature_index(feature: RendererFeature) -> usize {
         RendererFeature::VoxelAmbientOcclusion => 1,
         RendererFeature::AtmosphericFog => 2,
         RendererFeature::FarTerrain => 3,
-        RendererFeature::TargetOutline => 4,
+        RendererFeature::WaterSurface => 4,
+        RendererFeature::TargetOutline => 5,
     }
 }
 
@@ -225,7 +229,9 @@ pub struct LiveStats {
     pub resident_chunks: u32,
     pub visible_chunks: u32,
     pub quads: u32,
+    pub water_quads: u32,
     pub draw_calls: u32,
+    pub water_draw_calls: u32,
     pub shadow_draw_calls: u32,
     pub shadow_cascades: u32,
     pub load_p95_frames: u64,
@@ -360,8 +366,8 @@ pub struct MissionControlUi {
     hovered: Option<UiTarget>,
     context_anchor: Option<[f32; 2]>,
     stats: LiveStats,
-    feature_enabled: [bool; 5],
-    feature_motion: [EasedValue; 5],
+    feature_enabled: [bool; 6],
+    feature_motion: [EasedValue; 6],
     open_motion: EasedValue,
     compact_motion: EasedValue,
     hover_motion: BTreeMap<UiTarget, EasedValue>,
@@ -377,8 +383,8 @@ impl Default for MissionControlUi {
             hovered: None,
             context_anchor: None,
             stats: LiveStats::default(),
-            feature_enabled: [true; 5],
-            feature_motion: [EasedValue::new(1.0); 5],
+            feature_enabled: [true; 6],
+            feature_motion: [EasedValue::new(1.0); 6],
             open_motion: EasedValue::new(0.0),
             compact_motion: EasedValue::new(0.0),
             hover_motion: BTreeMap::new(),
@@ -1025,7 +1031,14 @@ impl MissionControlUi {
                     "CHUNKS",
                     format!("{}/{}", stats.visible_chunks, stats.resident_chunks),
                 ),
-                ("QUADS", compact_count(u64::from(stats.quads))),
+                (
+                    "QUADS / WATER",
+                    format!(
+                        "{} / {}",
+                        compact_count(u64::from(stats.quads)),
+                        compact_count(u64::from(stats.water_quads))
+                    ),
+                ),
                 ("LOAD P95", format!("{} f", stats.load_p95_frames)),
                 ("REMESH P95", format!("{} f", stats.remesh_p95_frames)),
             ]
@@ -1042,11 +1055,13 @@ impl MissionControlUi {
                     format!("{} / {}", stats.visible_chunks, stats.resident_chunks),
                 ),
                 (
-                    "QUADS / DRAWS",
+                    "QUADS W / DRAWS W",
                     format!(
-                        "{} / {}+{}s",
+                        "{}({}) / {}({})+{}s",
                         compact_count(u64::from(stats.quads)),
+                        compact_count(u64::from(stats.water_quads)),
                         stats.draw_calls,
+                        stats.water_draw_calls,
                         stats.shadow_draw_calls
                     ),
                 ),
@@ -1385,7 +1400,9 @@ mod tests {
             resident_chunks: 481,
             visible_chunks: 132,
             quads: 123_400,
+            water_quads: 8_200,
             draw_calls: 132,
+            water_draw_calls: 12,
             shadow_draw_calls: 164,
             shadow_cascades: 3,
             load_p95_frames: 18,
@@ -1415,7 +1432,7 @@ mod tests {
                 .iter()
                 .filter(|surface| surface.role == SurfaceRole::ToggleTrack)
                 .count(),
-            5
+            RendererFeature::ALL.len()
         );
         assert_eq!(
             draw.glass
@@ -1424,7 +1441,11 @@ mod tests {
                 .count(),
             4
         );
-        assert!(draw.text.iter().any(|run| run.text == "123.4k / 132+164s"));
+        assert!(
+            draw.text
+                .iter()
+                .any(|run| run.text == "123.4k(8.2k) / 132(12)+164s")
+        );
         assert!(draw.text.iter().any(|run| run.text == "7 / 76.0 MiB"));
     }
 
