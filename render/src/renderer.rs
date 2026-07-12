@@ -158,6 +158,37 @@ const fn update_activation_mask(mask: u8, reason: ChunkActivationReason, active:
     }
 }
 
+#[derive(Default)]
+struct ChunkActivations {
+    masks: BTreeMap<MeshKey, u8>,
+}
+
+impl ChunkActivations {
+    fn set(&mut self, key: MeshKey, reason: ChunkActivationReason, active: bool) -> u8 {
+        debug_assert_eq!(key.0, 0);
+        let mask =
+            update_activation_mask(self.masks.get(&key).copied().unwrap_or(0), reason, active);
+        if mask == 0 {
+            self.masks.remove(&key);
+        } else {
+            self.masks.insert(key, mask);
+        }
+        mask
+    }
+
+    fn upload_mask(&self, key: MeshKey) -> u8 {
+        if key.0 == 0 {
+            self.masks.get(&key).copied().unwrap_or(0)
+        } else {
+            u8::MAX
+        }
+    }
+
+    fn remove(&mut self, key: MeshKey) {
+        self.masks.remove(&key);
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct MeshSlice {
     relative_offset: u32,
@@ -511,6 +542,7 @@ pub struct Renderer {
     material_detail: MaterialDetailGpu,
     chunks: BTreeMap<MeshKey, ChunkMesh>,
     water_chunks: BTreeMap<MeshKey, ChunkMesh>,
+    chunk_activations: ChunkActivations,
     local_light_candidates: BTreeMap<MeshKey, Vec<GpuLocalLight>>,
     arena: ArenaAllocator,
     arena_buffers: Vec<Buffer>,
@@ -1166,6 +1198,7 @@ impl Renderer {
             material_detail,
             chunks: BTreeMap::new(),
             water_chunks: BTreeMap::new(),
+            chunk_activations: ChunkActivations::default(),
             local_light_candidates: BTreeMap::new(),
             arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
             arena_buffers: Vec::new(),
@@ -1297,11 +1330,12 @@ impl Renderer {
         active: bool,
     ) {
         let key = (0, coord.x, coord.y, coord.z);
+        let activation_mask = self.chunk_activations.set(key, reason, active);
         for chunks in [&mut self.chunks, &mut self.water_chunks] {
             let Some(chunk) = chunks.get_mut(&key) else {
                 continue;
             };
-            chunk.activation_mask = update_activation_mask(chunk.activation_mask, reason, active);
+            chunk.activation_mask = activation_mask;
         }
     }
 
@@ -1449,7 +1483,7 @@ impl Renderer {
     pub fn upload_chunk(&mut self, coord: ChunkCoord, mesh: &MeshedChunk) -> bool {
         let key = (0, coord.x, coord.y, coord.z);
         if mesh.is_empty() {
-            self.remove_chunk(coord);
+            self.remove_chunk_mesh(key);
             return true;
         }
         let origin = coord.world_origin();
@@ -1753,6 +1787,7 @@ impl Renderer {
         gpu_quads: &[GpuQuad],
         slices: Vec<MeshSlice>,
     ) -> bool {
+        let activation_mask = self.chunk_activations.upload_mask(key);
         upload_mesh_sliced_into(
             &self.device,
             &self.queue,
@@ -1762,6 +1797,7 @@ impl Renderer {
             key,
             gpu_quads,
             slices,
+            activation_mask,
             "opaque voxel mesh arena page",
         )
     }
@@ -1772,6 +1808,7 @@ impl Renderer {
         gpu_quads: &[GpuQuad],
         slices: Vec<MeshSlice>,
     ) -> bool {
+        let activation_mask = self.chunk_activations.upload_mask(key);
         upload_mesh_sliced_into(
             &self.device,
             &self.queue,
@@ -1781,14 +1818,15 @@ impl Renderer {
             key,
             gpu_quads,
             slices,
+            activation_mask,
             "water mesh arena page",
         )
     }
 
     pub fn remove_chunk(&mut self, coord: ChunkCoord) {
         let key = (0, coord.x, coord.y, coord.z);
-        self.remove_mesh(key);
-        self.local_light_candidates.remove(&key);
+        self.remove_chunk_mesh(key);
+        self.chunk_activations.remove(key);
     }
 
     pub fn remove_far_tile(&mut self, coord: FarTileCoord) {
@@ -1802,6 +1840,11 @@ impl Renderer {
     fn remove_mesh(&mut self, key: MeshKey) {
         self.remove_opaque_mesh(key);
         self.remove_water_mesh(key);
+    }
+
+    fn remove_chunk_mesh(&mut self, key: MeshKey) {
+        self.remove_mesh(key);
+        self.local_light_candidates.remove(&key);
     }
 
     fn remove_opaque_mesh(&mut self, key: MeshKey) {
@@ -2384,6 +2427,7 @@ fn upload_mesh_sliced_into(
     key: MeshKey,
     gpu_quads: &[GpuQuad],
     slices: Vec<MeshSlice>,
+    activation_mask: u8,
     buffer_label: &'static str,
 ) -> bool {
     let bytes = bytemuck::cast_slice(gpu_quads);
@@ -2411,13 +2455,6 @@ fn upload_mesh_sliced_into(
         return false;
     };
     queue.write_buffer(buffer, u64::from(allocation.offset), bytes);
-    let activation_mask = if key.0 != 0 {
-        u8::MAX
-    } else {
-        chunks
-            .get(&key)
-            .map_or(0, |existing| existing.activation_mask)
-    };
     let old = chunks.insert(
         key,
         ChunkMesh {
@@ -2889,13 +2926,41 @@ mod tests {
 
     #[test]
     fn radial_and_portal_activation_reasons_do_not_disable_each_other() {
-        let radial = update_activation_mask(0, ChunkActivationReason::Radial, true);
-        let both = update_activation_mask(radial, ChunkActivationReason::Portal, true);
+        let key = (0, 3, -2, 7);
+        let mut activations = ChunkActivations::default();
+        let radial = activations.set(key, ChunkActivationReason::Radial, true);
+        assert_eq!(activations.upload_mask(key), radial);
+        let both = activations.set(key, ChunkActivationReason::Portal, true);
         assert_ne!(both, 0);
-        let portal_only = update_activation_mask(both, ChunkActivationReason::Radial, false);
+        assert_eq!(activations.upload_mask(key), both);
+        let portal_only = activations.set(key, ChunkActivationReason::Radial, false);
         assert_ne!(portal_only, 0);
-        let inactive = update_activation_mask(portal_only, ChunkActivationReason::Portal, false);
+        let inactive = activations.set(key, ChunkActivationReason::Portal, false);
         assert_eq!(inactive, 0);
+        assert!(!activations.masks.contains_key(&key));
+    }
+
+    #[test]
+    fn chunk_activation_survives_empty_meshes_but_not_eviction() {
+        let key = (0, -4, 8, 12);
+        let mut activations = ChunkActivations::default();
+        activations.set(key, ChunkActivationReason::Radial, true);
+        let both = activations.set(key, ChunkActivationReason::Portal, true);
+
+        // An empty upload does not touch the independent registry, so later opaque and water
+        // allocations both inherit the same active reasons.
+        assert_eq!(activations.upload_mask(key), both);
+        assert_eq!(activations.upload_mask(key), both);
+        activations.remove(key);
+        assert_eq!(activations.upload_mask(key), 0);
+
+        // Shell reconciliation can clear reasons after eviction without recreating zero tombstones.
+        assert_eq!(
+            activations.set(key, ChunkActivationReason::Radial, false),
+            0
+        );
+        assert!(activations.masks.is_empty());
+        assert_eq!(activations.upload_mask((1, 0, 0, 0)), u8::MAX);
     }
 
     fn test_slice(surface_bounds: Option<SurfaceBounds>) -> MeshSlice {
