@@ -66,7 +66,7 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 
 The canonical world is generator identity plus sparse edits. Near meshes and four streamed surface LOD
 rings are derived caches; the rings sample at 0.2, 0.4, 0.8, and 1.6 m while the editable near field
-retains authoritative 10 cm voxels. Generator v15 shares one regional surface sample across canonical
+retains authoritative 10 cm voxels. The current generator shares one regional surface sample across canonical
 chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
 conditional skirts, and activates a newly streamed coverage set only when it is complete.

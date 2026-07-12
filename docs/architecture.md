@@ -172,6 +172,10 @@ the existing pristine-feature test ensure the tell appears once; editing any can
 suppresses its derived proxy at all levels, and restoring the generated material recreates it exactly.
 The protected entrance itself remains canonical Air and is never approximated as a negative LOD hole.
 
+Generator v16 expands the conservative Elder Canopy and Needle Gate bounds to contain their complete
+analytic forms. Canonical chunk/region generation, random-access sampling, edit invalidation, and LOD
+proxy ownership therefore agree on every voxel those heroes can produce.
+
 Atlas schema v1 adds append-only Rust discriminants for six destinations and five route chapters;
 schema v2 appends the Cinder Vault cave-system identity and its authored atlas definition.
 Each destination freezes its canonical X/Z and route station, with tests reconstructing the authored

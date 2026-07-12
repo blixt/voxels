@@ -7,7 +7,7 @@ use crate::{
 };
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 15;
+pub const GENERATOR_VERSION: u32 = 16;
 pub const SEA_LEVEL_VOXELS: i32 = 10;
 const FEATURE_MIN_XZ_OFFSET: i32 = 2;
 const FEATURE_MAX_XZ_OFFSET: i32 = FEATURE_CELL_VOXELS - 3;
@@ -1218,7 +1218,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checksum, 0x4334_1902_1c1f_dac3);
+        assert_eq!(checksum, 0xa9ec_3e89_8566_11a4);
     }
 
     #[test]
@@ -1492,7 +1492,7 @@ mod tests {
             crate::FeatureCompositionMode::ALL.into_iter().collect()
         );
         assert!(prominence_counts.into_iter().all(|count| count > 0));
-        assert_eq!(checksum, 0x0ea1_c0cf_43b0_a704);
+        assert_eq!(checksum, 0x1ec3_bb33_2fdc_884f);
     }
 
     #[test]

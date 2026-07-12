@@ -70,9 +70,9 @@ impl SkylineFeatureKind {
 
     pub const fn horizontal_radius_voxels(self) -> i32 {
         match self {
-            Self::ElderCanopy => 16,
+            Self::ElderCanopy => 17,
             Self::TorCircle | Self::BuriedRibs | Self::BuriedColonnade | Self::BasaltCrown => 14,
-            Self::NeedleGate => 13,
+            Self::NeedleGate => 15,
             Self::CaveMouth => 18,
             _ => 10,
         }
@@ -513,6 +513,43 @@ mod tests {
                     None,
                     "{kind:?} escaped its bounds"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn every_feature_formula_stays_inside_declared_bounds() {
+        for kind in SkylineFeatureKind::ALL {
+            for orientation in 0..4 {
+                let feature = SkylineFeature {
+                    id: SkylineFeatureId::default(),
+                    kind,
+                    anchor: [0, 20, 0],
+                    trunk_top: 90,
+                    orientation,
+                    variant: 3,
+                    prominence: 2,
+                    route_landmark: None,
+                };
+                let [min, max] = feature.bounds();
+                for y in feature.anchor[1] - 2..=feature.trunk_top + 8 {
+                    for z in -FEATURE_MAX_RADIUS_VOXELS - 2..=FEATURE_MAX_RADIUS_VOXELS + 2 {
+                        for x in -FEATURE_MAX_RADIUS_VOXELS - 2..=FEATURE_MAX_RADIUS_VOXELS + 2 {
+                            let coord = VoxelCoord::new(x, y, z);
+                            if feature.material_at(coord).is_some() {
+                                assert!(
+                                    x >= min[0]
+                                        && x < max[0]
+                                        && y >= min[1]
+                                        && y < max[1]
+                                        && z >= min[2]
+                                        && z < max[2],
+                                    "{kind:?} orientation {orientation} escaped {min:?}..{max:?} at {coord:?}"
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
     }
