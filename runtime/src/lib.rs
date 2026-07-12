@@ -363,6 +363,7 @@ impl StreamScheduler {
             && self.focus == focus
             && self.secondary_interest == secondary_interest
             && self.secondary_interest_requested == interest.len()
+            && self.secondary_interest_capacity_truncated == capacity_truncated
         {
             return;
         }
@@ -988,6 +989,29 @@ mod tests {
             MAX_SECONDARY_INTEREST_CHUNKS
         );
         assert_eq!(diagnostics.secondary_interest_truncated, 8);
+    }
+
+    #[test]
+    fn unchanged_interest_still_refreshes_capacity_truncation() {
+        let focus = ChunkCoord::new(0, 0, 0);
+        let interest: Vec<_> = (1..=MAX_SECONDARY_INTEREST_CHUNKS)
+            .map(|x| ChunkCoord::new(x as i32, 0, 0))
+            .collect();
+        let mut with_duplicate = interest.clone();
+        with_duplicate.push(interest[0]);
+        let mut with_rejected = interest;
+        with_rejected.push(ChunkCoord::new(10_000, 0, 0));
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: MAX_SECONDARY_INTEREST_CHUNKS + 1,
+        });
+
+        scheduler.update_focus_with_interest(focus, &with_duplicate);
+        assert_eq!(scheduler.diagnostics().secondary_interest_truncated, 0);
+        scheduler.update_focus_with_interest(focus, &with_rejected);
+        assert_eq!(scheduler.diagnostics().secondary_interest_truncated, 1);
     }
 
     #[test]
