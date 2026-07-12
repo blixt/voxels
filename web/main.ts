@@ -173,7 +173,6 @@ function start(canvas: HTMLCanvasElement): void {
       Space: 5,
       ShiftLeft: 6,
       ShiftRight: 6,
-      Escape: 7,
       F3: 8,
     };
     return codes[code] ?? 0;
