@@ -3,7 +3,7 @@ import { createServer as createNetServer } from "node:net";
 import { createServer as createViteServer } from "vite-plus";
 
 const FAILURE =
-  /panic|unreachable|runtimeerror|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed/i;
+  /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed/i;
 const errors = [];
 
 function watch(name, page) {

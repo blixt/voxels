@@ -222,6 +222,10 @@ mod web {
                             + self.surface_dirty.borrow().len(),
                     ),
                     core_gpu_bytes: render.core_gpu_bytes,
+                    water_immersion: camera.fluid_state().immersion,
+                    eye_depth_metres: camera.fluid_state().eye_depth_metres,
+                    eyes_submerged: camera.fluid_state().eyes_submerged,
+                    swimming: camera.fluid_state().swimming,
                 },
             );
             drop(renderer);

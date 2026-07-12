@@ -16,6 +16,7 @@ struct Frame {
   sky_zenith: vec4<f32>,
   ground_atmosphere: vec4<f32>,
   fog_exposure: vec4<f32>,
+  medium: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -79,5 +80,22 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let cloud_light = cloud_shadow + frame.sun_radiance.rgb * 0.085;
     color = mix(color, cloud_light, coverage * 0.62);
   }
+  let wave = sin(ray.x * 21.0 + frame.camera_time.w * 1.3)
+    * sin(ray.z * 17.0 - frame.camera_time.w * 0.9) * 0.025;
+  let snell_window = smoothstep(0.61, 0.72, ray.y + wave);
+  let path_to_surface = frame.medium.y / max(ray.y, 0.08);
+  let water_transmittance = exp(-vec3<f32>(0.42, 0.16, 0.075) * path_to_surface);
+  let water_scattering = vec3<f32>(0.010, 0.105, 0.145);
+  let window_color = color * water_transmittance
+    + water_scattering * (vec3<f32>(1.0) - water_transmittance);
+  let overhead_glow = frame.sun_radiance.rgb
+    * pow(max(dot(ray, sun_direction), 0.0), 18.0)
+    * 0.012;
+  let underwater_sky = mix(
+    water_scattering * mix(0.34, 1.0, max(ray.y, 0.0)) + overhead_glow,
+    window_color,
+    snell_window,
+  );
+  color = mix(color, underwater_sky, frame.medium.x);
   return vec4<f32>(max(color * frame.fog_exposure.y, vec3<f32>(0.0)), 1.0);
 }

@@ -16,6 +16,7 @@ struct Frame {
   sky_zenith: vec4<f32>,
   ground_atmosphere: vec4<f32>,
   fog_exposure: vec4<f32>,
+  medium: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -254,9 +255,12 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
     discard;
   }
   let view_direction = normalize(frame.camera_time.xyz - input.world);
-  let normal = select(input.normal, water_wave_normal(input.world), input.normal.y > 0.5);
+  var normal = select(input.normal, water_wave_normal(input.world), input.normal.y > 0.5);
+  if dot(normal, view_direction) < 0.0 {
+    normal = -normal;
+  }
   let facing = clamp(dot(normal, view_direction), 0.0, 1.0);
-  let fresnel = 0.02037 + 0.97963 * pow(1.0 - facing, 5.0);
+  var fresnel = 0.02037 + 0.97963 * pow(1.0 - facing, 5.0);
   let reflection = reflected_environment(reflect(-view_direction, normal));
   let camera_to_surface = input.world - frame.camera_time.xyz;
   let distance_to_camera = length(camera_to_surface);
@@ -264,7 +268,13 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   // than a claim about physical water thickness.
   let absorption = 1.0 - exp(-distance_to_camera * 0.055);
   let base_uv = input.position.xy / frame.viewport_voxel.xy;
-  let transmitted_ray = refract(-view_direction, normal, 1.0 / 1.333);
+  let below_surface = frame.camera_time.y < input.world.y - frame.viewport_voxel.z * 0.1;
+  let refraction_ratio = select(1.0 / 1.333, 1.333, below_surface);
+  var transmitted_ray = refract(-view_direction, normal, refraction_ratio);
+  if dot(transmitted_ray, transmitted_ray) < 0.000001 {
+    transmitted_ray = reflect(-view_direction, normal);
+    fresnel = 1.0;
+  }
   let sample_world = input.world + transmitted_ray * mix(0.35, 1.6, absorption);
   let sample_clip = frame.view_projection * vec4<f32>(sample_world, 1.0);
   let projected_uv = sample_clip.xy / max(sample_clip.w, 0.0001)
@@ -310,7 +320,12 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   let transmission_tint = mix(vec3<f32>(0.86, 0.97, 0.98), vec3<f32>(0.38, 0.72, 0.76), absorption);
   let transmitted = refracted_scene * transmission_tint + deep * absorption * 0.18;
   let transmission_weight = (1.0 - fresnel) * mix(0.86, 0.42, absorption);
-  let color = mix(local_light, transmitted, transmission_weight);
+  var color = mix(local_light, transmitted, transmission_weight);
+  let water_transmittance = exp(-vec3<f32>(0.34, 0.13, 0.065) * distance_to_camera);
+  let water_scattering = srgb_to_linear(vec3<f32>(0.025, 0.24, 0.30));
+  let underwater_color = color * water_transmittance
+    + water_scattering * (vec3<f32>(1.0) - water_transmittance);
+  color = mix(color, underwater_color, frame.medium.x);
   return vec4<f32>(color, 1.0);
 }
 
@@ -351,6 +366,21 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     let leaf_scatter = pow(max(dot(-sun, view_direction), 0.0), 3.0) * (1.0 - shadow * 0.55);
     color += albedo * frame.sun_radiance.rgb * leaf_scatter * 0.035;
   }
+  if frame.medium.x > 0.0001 && input.normal.y > 0.35 {
+    let phase_a = sin(input.world.x * 5.1 + frame.camera_time.w * 1.7)
+      * sin(input.world.z * 4.3 - frame.camera_time.w * 1.2);
+    let phase_b = sin((input.world.x + input.world.z) * 8.7 - frame.camera_time.w * 2.1);
+    let caustic = pow(clamp(phase_a * 0.55 + phase_b * 0.25 + 0.55, 0.0, 1.0), 5.0);
+    let water_depth = max(frame.medium.w - input.world.y, 0.0);
+    let caustic_fade = exp(-water_depth * 0.32) * smoothstep(0.35, 0.9, input.normal.y);
+    color += frame.sun_radiance.rgb
+      * vec3<f32>(0.36, 0.78, 0.84)
+      * caustic
+      * caustic_fade
+      * shadow
+      * frame.medium.x
+      * 0.08;
+  }
   let inside_position = input.world - input.normal * frame.viewport_voxel.z * 0.02;
   let voxel = floor(inside_position / frame.viewport_voxel.z);
   let targeted = frame.render_options.w > 0.5 && frame.target_voxel.w > 0.5 && all(abs(voxel - frame.target_voxel.xyz) < vec3<f32>(0.1));
@@ -375,5 +405,10 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let sun_amount = max(dot(fog_view_direction, sun), 0.0);
   fog_radiance += frame.sun_radiance.rgb * pow(sun_amount, 32.0) * 0.012;
   color = color * transmittance + fog_radiance * (1.0 - transmittance);
+  let water_transmittance = exp(-vec3<f32>(0.36, 0.14, 0.07) * distance_to_camera);
+  let water_scattering = srgb_to_linear(vec3<f32>(0.018, 0.20, 0.27));
+  let underwater_color = color * water_transmittance
+    + water_scattering * (vec3<f32>(1.0) - water_transmittance);
+  color = mix(color, underwater_color, frame.medium.x);
   return vec4<f32>(max(color * frame.fog_exposure.y, vec3<f32>(0.0)), 1.0);
 }

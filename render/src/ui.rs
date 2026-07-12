@@ -244,6 +244,10 @@ pub struct LiveStats {
     pub lod_tiles: [u32; 4],
     pub pending_jobs: u32,
     pub core_gpu_bytes: u64,
+    pub water_immersion: f32,
+    pub eye_depth_metres: f32,
+    pub eyes_submerged: bool,
+    pub swimming: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -953,9 +957,16 @@ impl MissionControlUi {
             16.0,
             SurfaceRole::Brand,
         );
+        let brand = if self.stats.eyes_submerged {
+            format!("SUBMERGED / {:.1} M", self.stats.eye_depth_metres)
+        } else if self.stats.water_immersion > 0.01 {
+            format!("WATER / {:.0}%", self.stats.water_immersion * 100.0)
+        } else {
+            "VOXELS / 10 CM CUBES".into()
+        };
         push_text(
             draw,
-            "VOXELS / 10 CM CUBES",
+            brand,
             layout.brand.center(),
             10.5,
             TEXT_PRIMARY,
@@ -979,7 +990,9 @@ impl MissionControlUi {
             );
             push_text(
                 draw,
-                if layout.toast.width < 500.0 {
+                if self.stats.swimming {
+                    "WASD SWIM  /  SPACE ASCEND  /  SHIFT DIVE  /  F3 CONTROLS"
+                } else if layout.toast.width < 500.0 {
                     "WASD MOVE  /  SPACE JUMP  /  F3 CONTROLS"
                 } else {
                     "CLICK TO LOOK  /  WASD MOVE  /  SPACE JUMP  /  LMB REMOVE  /  RMB PLACE  /  F3 CONTROLS"
@@ -1001,12 +1014,21 @@ impl MissionControlUi {
             16.0,
             SurfaceRole::Launcher,
         );
-        push_text(
-            draw,
+        let launcher = if self.stats.swimming {
+            format!(
+                "SWIMMING {:.0}%   F3   {:.0} FPS",
+                self.stats.water_immersion * 100.0,
+                self.stats.frames_per_second
+            )
+        } else {
             format!(
                 "MISSION CONTROL   F3   {:.0} FPS",
                 self.stats.frames_per_second
-            ),
+            )
+        };
+        push_text(
+            draw,
+            launcher,
             layout.launcher.center(),
             10.5,
             TEXT_PRIMARY,
@@ -1409,6 +1431,10 @@ mod tests {
             lod_tiles: [49, 49, 49, 81],
             pending_jobs: 7,
             core_gpu_bytes: 76 * 1_048_576,
+            water_immersion: 0.0,
+            eye_depth_metres: 0.0,
+            eyes_submerged: false,
+            swimming: false,
         });
         let _ = ui.open_context_menu_device([900.0, 80.0], viewport());
         let draw = ui.build_draw_list(viewport());
@@ -1535,6 +1561,31 @@ mod tests {
                 .glass
                 .iter()
                 .all(|surface| surface.role != SurfaceRole::Toast)
+        );
+    }
+
+    #[test]
+    fn underwater_status_and_controls_are_rust_drawn() {
+        let mut ui = MissionControlUi::default();
+        ui.set_stats(LiveStats {
+            frames_per_second: 60.0,
+            water_immersion: 0.82,
+            eye_depth_metres: 0.7,
+            eyes_submerged: true,
+            swimming: true,
+            ..LiveStats::default()
+        });
+        let draw = ui.build_draw_list(viewport());
+        assert!(draw.text.iter().any(|run| run.text == "SUBMERGED / 0.7 M"));
+        assert!(
+            draw.text
+                .iter()
+                .any(|run| run.text.contains("SPACE ASCEND") && run.text.contains("SHIFT DIVE"))
+        );
+        assert!(
+            draw.text
+                .iter()
+                .any(|run| run.text.contains("SWIMMING 82%"))
         );
     }
 }

@@ -53,7 +53,11 @@ struct FrameUniform {
     sky_zenith: [f32; 4],
     ground_atmosphere: [f32; 4],
     fog_exposure: [f32; 4],
+    medium: [f32; 4],
 }
+
+const _: () = assert!(size_of::<FrameUniform>() == 560);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 544);
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -169,6 +173,7 @@ pub struct Renderer {
     log_error: fn(&str),
     ui_text_error_reported: bool,
     coast_teleport_requested: bool,
+    underwater_blend: f32,
 }
 
 struct ShadowGpu {
@@ -441,6 +446,7 @@ impl Renderer {
                 environment,
             },
             &shadow_cascades,
+            0.0,
         );
         let frame_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("frame uniform"),
@@ -630,6 +636,7 @@ impl Renderer {
             log_error,
             ui_text_error_reported: false,
             coast_teleport_requested: false,
+            underwater_blend: 0.0,
         })
     }
 
@@ -1151,6 +1158,17 @@ impl Renderer {
 
     pub fn render(&mut self, dt: f32, camera: &CameraState, ui_stats: LiveStats) {
         self.time += dt.min(0.1);
+        let target_underwater = f32::from(camera.fluid_state().eyes_submerged);
+        let response_seconds = if target_underwater > self.underwater_blend {
+            0.12
+        } else {
+            0.22
+        };
+        let response = 1.0 - (-dt.clamp(0.0, 0.1) / response_seconds).exp();
+        self.underwater_blend += (target_underwater - self.underwater_blend) * response;
+        if (target_underwater - self.underwater_blend).abs() < 0.000_5 {
+            self.underwater_blend = target_underwater;
+        }
         let Ok(shadow_cascades) =
             directional_shadow_cascades(&self.config, camera, self.environment.sun_direction)
         else {
@@ -1176,6 +1194,7 @@ impl Renderer {
                 environment: self.environment,
             },
             &shadow_cascades,
+            self.underwater_blend,
         );
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
         let geometric_lod_focus = self.geometric_lod_focus;
@@ -1579,6 +1598,7 @@ fn frame_uniform(
     target: Option<[i32; 3]>,
     state: FrameState,
     shadows: &DirectionalShadowCascades,
+    underwater_blend: f32,
 ) -> FrameUniform {
     let FrameState {
         options,
@@ -1587,6 +1607,7 @@ fn frame_uniform(
     } = state;
     let view_projection = view_projection(config, camera);
     let camera_forward = camera.forward();
+    let fluid = camera.fluid_state();
     FrameUniform {
         view_projection: view_projection.to_cols_array_2d(),
         inverse_view_projection: view_projection.inverse().to_cols_array_2d(),
@@ -1648,6 +1669,12 @@ fn frame_uniform(
             environment.exposure,
             0.0,
             0.0,
+        ],
+        medium: [
+            underwater_blend.clamp(0.0, 1.0),
+            fluid.eye_depth_metres.max(0.0),
+            fluid.immersion.clamp(0.0, 1.0),
+            fluid.surface_y_metres,
         ],
     }
 }
