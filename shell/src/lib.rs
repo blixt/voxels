@@ -29,14 +29,71 @@ mod web {
     const SURFACE_RETAIN_MARGIN_TILES: i32 = 1;
     const SIMULATION_STEP_SECONDS: f32 = 1.0 / 120.0;
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
+    const FRAME_HISTORY_CAPACITY: usize = 512;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 2.0;
     const COAST_WATER_REFERENCE: [i32; 2] = [18_016, 12_896];
     const STREAM_FRAME_BUDGET: FrameBudget = FrameBudget {
         generation: 2,
-        meshing: 2,
+        meshing: 1,
         upload: 3,
     };
 
     type FrameCallback = Closure<dyn FnMut(f64)>;
+
+    #[derive(Clone, Copy, Default)]
+    struct FrameSample {
+        interval_ms: f32,
+        cpu_ms: f32,
+        simulation_ms: f32,
+        stream_ms: f32,
+        render_ms: f32,
+    }
+
+    struct FrameHistory {
+        samples: [FrameSample; FRAME_HISTORY_CAPACITY],
+        next: usize,
+        len: usize,
+        dropped: u32,
+    }
+
+    impl FrameHistory {
+        fn new() -> Self {
+            Self {
+                samples: [FrameSample::default(); FRAME_HISTORY_CAPACITY],
+                next: 0,
+                len: 0,
+                dropped: 0,
+            }
+        }
+
+        fn push(&mut self, sample: FrameSample) {
+            self.samples[self.next] = sample;
+            self.next = (self.next + 1) % FRAME_HISTORY_CAPACITY;
+            if self.len < FRAME_HISTORY_CAPACITY {
+                self.len += 1;
+            } else {
+                self.dropped = self.dropped.saturating_add(1);
+            }
+        }
+
+        fn drain_into(&mut self, values: &mut Vec<f32>) {
+            values.push(self.len as f32);
+            values.push(self.dropped as f32);
+            let first = (self.next + FRAME_HISTORY_CAPACITY - self.len) % FRAME_HISTORY_CAPACITY;
+            for offset in 0..self.len {
+                let sample = self.samples[(first + offset) % FRAME_HISTORY_CAPACITY];
+                values.extend_from_slice(&[
+                    sample.interval_ms,
+                    sample.cpu_ms,
+                    sample.simulation_ms,
+                    sample.stream_ms,
+                    sample.render_ms,
+                ]);
+            }
+            self.len = 0;
+            self.dropped = 0;
+        }
+    }
 
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable)]
@@ -86,6 +143,11 @@ mod web {
         last_time: Cell<f64>,
         simulation_accumulator: Cell<f32>,
         frame_milliseconds: Cell<f32>,
+        cpu_milliseconds: Cell<f32>,
+        simulation_milliseconds: Cell<f32>,
+        stream_milliseconds: Cell<f32>,
+        render_milliseconds: Cell<f32>,
+        frame_history: RefCell<FrameHistory>,
         last_persist: Cell<f64>,
         stopped: Cell<bool>,
     }
@@ -118,6 +180,8 @@ mod web {
         }
 
         fn frame(&self, time: f64) {
+            let performance = self.scope.performance();
+            let cpu_start = performance_now(performance.as_ref());
             self.apply_remote_edits();
             let last = self.last_time.replace(time);
             let dt = if last <= 0.0 {
@@ -126,12 +190,9 @@ mod web {
                 ((time - last).max(0.0) / 1000.0) as f32
             };
             let frame_ms = dt * 1_000.0;
-            let previous_frame_ms = self.frame_milliseconds.get();
-            self.frame_milliseconds.set(if previous_frame_ms <= 0.0 {
-                frame_ms
-            } else {
-                previous_frame_ms * 0.9 + frame_ms * 0.1
-            });
+            self.frame_milliseconds
+                .set(smoothed_ms(self.frame_milliseconds.get(), frame_ms));
+            let simulation_start = performance_now(performance.as_ref());
             let mut camera = self.camera.borrow_mut();
             let edits = self.edits.borrow();
             let mut generated_columns = BTreeMap::new();
@@ -162,7 +223,16 @@ mod web {
             }
             self.simulation_accumulator.set(accumulator);
             drop(edits);
+            let simulation_ms = (performance_now(performance.as_ref()) - simulation_start) as f32;
+            self.simulation_milliseconds.set(smoothed_ms(
+                self.simulation_milliseconds.get(),
+                simulation_ms,
+            ));
+            let stream_start = performance_now(performance.as_ref());
             self.stream_world(&camera);
+            let stream_ms = (performance_now(performance.as_ref()) - stream_start) as f32;
+            self.stream_milliseconds
+                .set(smoothed_ms(self.stream_milliseconds.get(), stream_ms));
             let target = self.raycast_target(&camera).map(|hit| hit.voxel);
             let mut renderer = self.renderer.borrow_mut();
             renderer.set_target_voxel(target);
@@ -188,6 +258,7 @@ mod web {
                 renderer.set_geometric_lod_focus(voxel_x, voxel_z);
                 self.surface_active_focus.set(self.surface_focus.get());
             }
+            let render_start = performance_now(performance.as_ref());
             renderer.render(
                 dt,
                 &camera,
@@ -198,7 +269,7 @@ mod web {
                         0.0
                     },
                     frame_ms: self.frame_milliseconds.get(),
-                    cpu_ms: self.frame_milliseconds.get(),
+                    cpu_ms: self.cpu_milliseconds.get(),
                     gpu_ms: None,
                     resident_chunks: usize_to_u32(
                         stream.resident + self.surface_resident.borrow().len(),
@@ -230,12 +301,25 @@ mod web {
                 },
             );
             drop(renderer);
+            let render_ms = (performance_now(performance.as_ref()) - render_start) as f32;
+            self.render_milliseconds
+                .set(smoothed_ms(self.render_milliseconds.get(), render_ms));
             if time - self.last_persist.get() >= 1_000.0 {
                 if let Err(error) = self.store.borrow().save_camera(&camera) {
                     web_sys::console::error_1(&error);
                 }
                 self.last_persist.set(time);
             }
+            let cpu_ms = (performance_now(performance.as_ref()) - cpu_start) as f32;
+            self.cpu_milliseconds
+                .set(smoothed_ms(self.cpu_milliseconds.get(), cpu_ms));
+            self.frame_history.borrow_mut().push(FrameSample {
+                interval_ms: frame_ms,
+                cpu_ms,
+                simulation_ms,
+                stream_ms,
+                render_ms,
+            });
             if let Err(error) = self.request_frame() {
                 web_sys::console::error_1(&error);
                 self.stopped.set(true);
@@ -756,14 +840,15 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 39], |engine| {
+            let mut values = Vec::new();
+            if let Some(engine) = self.engine.as_ref() {
                 let camera = engine.camera.borrow();
                 let fluid = camera.fluid_state();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let render = engine.renderer.borrow().diagnostics();
                 let target = engine.renderer.borrow().target_voxel();
                 let lod_tiles = engine.surface_lod_counts();
-                [
+                values.extend_from_slice(&[
                     camera.position.x,
                     camera.position.y,
                     camera.position.z,
@@ -807,8 +892,15 @@ mod web {
                     target.map_or(0.0, |coord| coord[1] as f32),
                     target.map_or(0.0, |coord| coord[2] as f32),
                     if target.is_some() { 1.0 } else { 0.0 },
-                ]
-            });
+                    render.core_gpu_bytes as f32 / (1024.0 * 1024.0),
+                    engine.cpu_milliseconds.get(),
+                    engine.simulation_milliseconds.get(),
+                    engine.stream_milliseconds.get(),
+                    engine.render_milliseconds.get(),
+                    SNAPSHOT_SCHEMA_VERSION,
+                ]);
+                engine.frame_history.borrow_mut().drain_into(&mut values);
+            }
             Float32Array::from(values.as_slice())
         }
 
@@ -931,6 +1023,11 @@ mod web {
             last_time: Cell::new(0.0),
             simulation_accumulator: Cell::new(0.0),
             frame_milliseconds: Cell::new(0.0),
+            cpu_milliseconds: Cell::new(0.0),
+            simulation_milliseconds: Cell::new(0.0),
+            stream_milliseconds: Cell::new(0.0),
+            render_milliseconds: Cell::new(0.0),
+            frame_history: RefCell::new(FrameHistory::new()),
             last_persist: Cell::new(0.0),
             stopped: Cell::new(false),
         });
@@ -946,6 +1043,18 @@ mod web {
 
     fn usize_to_u32(value: usize) -> u32 {
         u32::try_from(value).unwrap_or(u32::MAX)
+    }
+
+    fn smoothed_ms(previous: f32, sample: f32) -> f32 {
+        if previous <= 0.0 {
+            sample
+        } else {
+            previous * 0.9 + sample * 0.1
+        }
+    }
+
+    fn performance_now(performance: Option<&web_sys::Performance>) -> f64 {
+        performance.map_or(0.0, web_sys::Performance::now)
     }
 
     fn world_to_chunk(position: glam::Vec3) -> ChunkCoord {

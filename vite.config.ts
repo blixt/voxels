@@ -62,6 +62,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/bench-core.ts",
         cache: false,
       },
+      "profile:browser": {
+        command: "node scripts/browser-performance.mjs",
+        cache: false,
+      },
       "test:persistence-browser": {
         command: "node scripts/browser-persistence-test.mjs",
         cache: false,
