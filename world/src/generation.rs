@@ -123,6 +123,28 @@ pub struct GeneratedColumn {
     tree_count: u8,
 }
 
+/// Reusable authoritative sampler for a rectangular X/Z region. Analytic features are discovered
+/// once for the whole region instead of once for every column, which keeps chunk halo construction
+/// deterministic without repeating placement work.
+#[derive(Clone, Debug)]
+pub struct GeneratedRegion {
+    min_x: i32,
+    min_z: i32,
+    width: usize,
+    depth: usize,
+    columns: Vec<GeneratedColumn>,
+}
+
+impl GeneratedRegion {
+    pub fn sample(&self, x: i32, y: i32, z: i32) -> Material {
+        assert!(x >= self.min_x && z >= self.min_z);
+        let local_x = (i64::from(x) - i64::from(self.min_x)) as usize;
+        let local_z = (i64::from(z) - i64::from(self.min_z)) as usize;
+        assert!(local_x < self.width && local_z < self.depth);
+        self.columns[local_x + local_z * self.width].sample(y)
+    }
+}
+
 impl GeneratedColumn {
     pub fn sample(&self, y: i32) -> Material {
         let terrain = self
@@ -212,6 +234,58 @@ impl Generator {
             profile: self.column_profile(x, z),
             trees,
             tree_count,
+        }
+    }
+
+    pub fn region(self, min_x: i32, min_z: i32, width: usize, depth: usize) -> GeneratedRegion {
+        let max_x =
+            min_x.saturating_add(i32::try_from(width.saturating_sub(1)).unwrap_or(i32::MAX));
+        let max_z =
+            min_z.saturating_add(i32::try_from(depth.saturating_sub(1)).unwrap_or(i32::MAX));
+        let min_cell_x = min_x.div_euclid(TREE_CELL_VOXELS) - 1;
+        let max_cell_x = max_x.div_euclid(TREE_CELL_VOXELS) + 1;
+        let min_cell_z = min_z.div_euclid(TREE_CELL_VOXELS) - 1;
+        let max_cell_z = max_z.div_euclid(TREE_CELL_VOXELS) + 1;
+        let mut features = Vec::new();
+        for cell_z in min_cell_z..=max_cell_z {
+            for cell_x in min_cell_x..=max_cell_x {
+                if let Some(feature) = self.skyline_feature(cell_x, cell_z) {
+                    features.push(feature);
+                }
+            }
+        }
+
+        let mut columns = Vec::with_capacity(width.saturating_mul(depth));
+        for local_z in 0..depth {
+            for local_x in 0..width {
+                let x = min_x.saturating_add(i32::try_from(local_x).unwrap_or(i32::MAX));
+                let z = min_z.saturating_add(i32::try_from(local_z).unwrap_or(i32::MAX));
+                let mut trees = [SkylineFeature::default(); 9];
+                let mut tree_count = 0u8;
+                for feature in features
+                    .iter()
+                    .copied()
+                    .filter(|feature| feature.contains_xz(x, z))
+                {
+                    trees[usize::from(tree_count)] = feature;
+                    tree_count += 1;
+                }
+                columns.push(GeneratedColumn {
+                    generator: self,
+                    x,
+                    z,
+                    profile: self.column_profile(x, z),
+                    trees,
+                    tree_count,
+                });
+            }
+        }
+        GeneratedRegion {
+            min_x,
+            min_z,
+            width,
+            depth,
+            columns,
         }
     }
 
@@ -636,6 +710,21 @@ mod tests {
                             origin[2] + z as i32,
                         )
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generated_region_matches_random_access_across_tree_cells_and_negative_space() {
+        let generator = Generator::new(0x5eed_cafe);
+        for [min_x, min_z] in [[-113, -101], [79, 91], [18_015, 12_895]] {
+            let region = generator.region(min_x, min_z, 34, 34);
+            for z in min_z..min_z + 34 {
+                for x in min_x..min_x + 34 {
+                    for y in [-17, 0, 9, 10, 24, 48] {
+                        assert_eq!(region.sample(x, y, z), generator.sample(x, y, z));
+                    }
                 }
             }
         }

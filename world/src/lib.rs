@@ -11,8 +11,8 @@ pub mod mesh;
 pub use chunk::{CHUNK_EDGE, CHUNK_VOLUME, Chunk, ChunkCoord};
 pub use edit::{EditMap, VoxelCoord};
 pub use generation::{
-    GENERATOR_VERSION, GeneratedColumn, Generator, SEA_LEVEL_VOXELS, SkylineFeature,
-    SkylineFeatureId, SurfaceRegion, SurfaceSample,
+    GENERATOR_VERSION, GeneratedColumn, GeneratedRegion, Generator, SEA_LEVEL_VOXELS,
+    SkylineFeature, SkylineFeatureId, SurfaceRegion, SurfaceSample,
 };
 pub use lod::{
     FAR_STRIDE_VOXELS, FAR_TILE_EDGE_CELLS, FAR_TILE_SPAN_VOXELS, FarTileCoord,

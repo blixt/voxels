@@ -1,5 +1,4 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use std::collections::BTreeMap;
 use voxels_world::codec::{decode_chunk, encode_chunk};
 use voxels_world::{
     ChunkCoord, EditMap, FarTileCoord, Generator, Material, SurfaceLodLevel, SurfaceTileCoord,
@@ -40,13 +39,9 @@ fn meshing(criterion: &mut Criterion) {
         bencher.iter_batched(
             || generator.generate_chunk(COORD),
             |chunk| {
-                let mut columns = BTreeMap::new();
-                mesh_chunk(&chunk, |x, y, z| {
-                    columns
-                        .entry((x, z))
-                        .or_insert_with(|| generator.column(x, z))
-                        .sample(y)
-                })
+                let origin = chunk.coord().world_origin();
+                let region = generator.region(origin[0] - 1, origin[2] - 1, 34, 34);
+                mesh_chunk(&chunk, |x, y, z| region.sample(x, y, z))
             },
             BatchSize::SmallInput,
         );
@@ -60,13 +55,9 @@ fn water_meshing(criterion: &mut Criterion) {
         bencher.iter_batched(
             || generator.generate_chunk(coord),
             |chunk| {
-                let mut columns = BTreeMap::new();
-                mesh_chunk(&chunk, |x, y, z| {
-                    columns
-                        .entry((x, z))
-                        .or_insert_with(|| generator.column(x, z))
-                        .sample(y)
-                })
+                let origin = chunk.coord().world_origin();
+                let region = generator.region(origin[0] - 1, origin[2] - 1, 34, 34);
+                mesh_chunk(&chunk, |x, y, z| region.sample(x, y, z))
             },
             BatchSize::SmallInput,
         );
