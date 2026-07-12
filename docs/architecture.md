@@ -190,9 +190,12 @@ SQLite/SAH-pool owner; followers proxy typed camera/edit operations over a Broad
 for ownership when the leader closes. Follower writes pass through one ordered, coalescing Rust outbox,
 and follower requests tolerate a complete VFS retry window plus worker startup. Teardown closes SQLite,
 pauses the SAH-pool VFS to synchronously release its OPFS handles, and only then resolves the Web Lock;
-queued acquisitions are aborted and the BroadcastChannel is closed. A browser stress test exercises
-rapid reload and ownership handoff on an isolated origin. The wire includes the seed and generator
-version so an incompatible build cannot silently answer another world's request.
+queued acquisitions are aborted and the BroadcastChannel is closed. A failed VFS acquisition is retained
+as recovery state rather than logged as an engine failure: the worker releases the Web Lock, re-elects,
+and reports the retained cause only if the complete request window is exhausted. Browser gates exercise
+solo refresh bursts, concurrent multi-tab refreshes, ownership handoff, and a forced 20-attempt stale
+lease before successful reacquisition. The wire includes the seed and generator version so an
+incompatible build cannot silently answer another world's request.
 
 Committed sparse edits are also a Rust-to-Rust multi-tab replication unit. A follower applies its edit
 optimistically, the elected leader commits it, applies follower-originated commits to its own engine

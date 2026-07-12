@@ -143,14 +143,17 @@ holding the 120 Hz display cap. The view contained 127,800 total quads, includin
 quads; the water depth/color pair required 94 draws across the patch-aligned LOD boundaries.
 
 Live browser validation also opened two tabs simultaneously and reloaded both twice in parallel. Both
-returned to a canvas-only rendered world with no OPFS/database warning or error. The only document-body
-children remained the canvas and its non-rendering module script.
+returned to a canvas-only rendered world with no OPFS/database warning or error. The module script now
+lives in the document head, leaving the canvas as the only document-body child.
 
 The persistence coordinator now retains the SAH-pool management handle and releases ownership in the
-strict order SQLite close -> VFS pause -> Web Lock release. Its dedicated Chrome regression ran 18
-rapid reloads across three tabs and two owner handoffs on an isolated localhost origin. All three
-workers reached resident rendered geometry, every body stayed canvas-plus-script only, and the gate
-recorded zero OPFS, SQLite, SyncAccessHandle, Web Lock, or persistence warnings/errors.
+strict order SQLite close -> VFS pause -> Web Lock release. Its dedicated Chrome regression now runs 38
+reloads across three tabs: a 12-reload solo burst with no stable follower, four simultaneous two-tab
+reload rounds, and two owner handoffs on an isolated localhost origin. All three workers reached
+resident rendered geometry, every body retained only its canvas, and the gate recorded zero OPFS,
+SQLite, SyncAccessHandle, Web Lock, or persistence warnings/errors. A second fault-injection gate forced
+all 20 acquisitions in the first VFS-open cycle to fail with `NoModificationAllowedError`; election
+recovered on call 21, rendered the world, and emitted zero console warnings/errors.
 
 ## 2026-07-12: navigable water and underwater medium
 

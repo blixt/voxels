@@ -14,6 +14,7 @@ greedy meshing, rendering, and persistence boundary.
 6. Build production WASM and assets with `vp build`; inspect them with `vp preview`.
 7. Stress isolated rapid-refresh and multi-tab OPFS handoff in Chrome with
    `vp run test:persistence-browser`.
+8. Force a complete stale-lease retry cycle with `vp run test:persistence-recovery`.
 
 `vp run verify` runs the complete TypeScript, Rust, test, lint, and production-build gate.
 The browser persistence stress test remains explicit because it launches a system Chrome instance.
@@ -37,7 +38,7 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 - `runtime/`: deterministic streaming priorities, budgets, revision tickets, eviction, and diagnostics.
 - `render/`: web-free WGPU resources, pipelines, shaders, and frame rendering.
 - `shell/`: WASM/browser worker leaf, packed input decoding, display clock, and persistence seam.
-- `web/`: the single canvas, normalized input transport, pointer lock, and worker boot only. All visible
+- `web/`: the single body canvas, normalized input transport, pointer lock, and worker boot only. All visible
   HUD, status, crosshair, controls, menus, and text are composed by Rust/WGPU.
 
 The canonical world is generator identity plus sparse edits. Near meshes and four streamed surface LOD
