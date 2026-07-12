@@ -238,14 +238,6 @@ fn reflected_environment(direction: vec3<f32>) -> vec3<f32> {
 }
 
 @fragment
-fn fs_water_depth(input: VertexOut) -> @location(0) vec4<f32> {
-  if !owns_lod_surface(input.world, input.material) || (input.material & 0xffffu) != 13u {
-    discard;
-  }
-  return vec4<f32>(0.0);
-}
-
-@fragment
 fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   if !owns_lod_surface(input.world, input.material) {
     discard;

@@ -145,7 +145,6 @@ pub struct Renderer {
     config: SurfaceConfiguration,
     sky_pipeline: RenderPipeline,
     voxel_pipeline: RenderPipeline,
-    water_depth_pipeline: RenderPipeline,
     water_pipeline: RenderPipeline,
     water_scene_layout: wgpu::BindGroupLayout,
     water_scene_bind_group: BindGroup,
@@ -557,26 +556,6 @@ impl Renderer {
                 }),
             },
         );
-        let water_depth_pipeline = pipeline(
-            &device,
-            "water depth pipeline",
-            &pipeline_layout,
-            &voxel_shader,
-            SCENE_FORMAT,
-            &[Some(quad_layout())],
-            PipelineOptions {
-                fragment_entry: "fs_water_depth",
-                blend: None,
-                write_mask: wgpu::ColorWrites::empty(),
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-            },
-        );
         let water_pipeline = pipeline(
             &device,
             "water pipeline",
@@ -590,8 +569,8 @@ impl Renderer {
                 write_mask: wgpu::ColorWrites::ALL,
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::Equal),
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
@@ -609,7 +588,6 @@ impl Renderer {
             config,
             sky_pipeline,
             voxel_pipeline,
-            water_depth_pipeline,
             water_pipeline,
             water_scene_layout,
             water_scene_bind_group,
@@ -1307,7 +1285,7 @@ impl Renderer {
                 self.ui_gpu.scene_view()
             };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("opaque world and water depth pass"),
+                label: Some("opaque world pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: scene_view,
                     resolve_target: None,
@@ -1348,16 +1326,6 @@ impl Renderer {
             // rejection avoids running its procedural clouds behind terrain.
             pass.set_pipeline(&self.sky_pipeline);
             pass.draw(0..3, 0..1);
-            pass.set_pipeline(&self.water_depth_pipeline);
-            for span in &water_draw_list.spans {
-                let Some(buffer) = self.water_arena_buffers.get(span.page as usize) else {
-                    continue;
-                };
-                let start = u64::from(span.offset);
-                let end = start + u64::from(span.size);
-                pass.set_vertex_buffer(0, buffer.slice(start..end));
-                pass.draw(0..6, 0..span.quad_count);
-            }
         }
         if refract_water {
             self.ui_gpu.copy_opaque_to_scene(&mut encoder);
@@ -1410,9 +1378,8 @@ impl Renderer {
             draw_calls: world_draw_list
                 .spans
                 .len()
-                .saturating_add(water_draw_list.spans.len().saturating_mul(2))
-                as u32,
-            water_draw_calls: water_draw_list.spans.len().saturating_mul(2) as u32,
+                .saturating_add(water_draw_list.spans.len()) as u32,
+            water_draw_calls: water_draw_list.spans.len() as u32,
             shadow_draw_calls,
             shadow_cascades: if self.options.shadows {
                 CASCADE_COUNT as u32

@@ -227,8 +227,8 @@ collision therefore converge live instead of waiting for a reload.
 - GPU Gems derives real-time water from summed directional waves, analytic surface derivatives, and
   reflection/refraction rather than treating the surface as a flat alpha overlay:
   <https://developer.nvidia.com/gpugems/gpugems/part-i-natural-effects/chapter-1-effective-water-simulation-physical-models>
-- WebGPU defines independent blend factors and depth-stencil state used by the water depth/color pair:
-  <https://www.w3.org/TR/webgpu/#blend-state>
+- WebGPU defines the depth-stencil state used by the opaque water color pass:
+  <https://gpuweb.github.io/gpuweb/#dictdef-gpudepthstencilstate>
 
 ## Deliberate non-goals for the conversion
 
