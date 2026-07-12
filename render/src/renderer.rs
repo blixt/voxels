@@ -1881,8 +1881,9 @@ impl Renderer {
         ui_stats: LiveStats,
         local_light_visibility: impl FnMut([f32; 3], f32) -> LocalLightVisibility,
     ) -> bool {
-        self.time += dt.min(0.1);
-        let environment_response = 1.0 - (-dt.clamp(0.0, 0.1) / 0.85).exp();
+        let dt = bounded_frame_delta(dt);
+        self.time += dt;
+        let environment_response = 1.0 - (-dt / 0.85).exp();
         self.environment = self
             .environment
             .lerp(self.environment_target, environment_response);
@@ -1892,7 +1893,7 @@ impl Renderer {
         } else {
             0.22
         };
-        let response = 1.0 - (-dt.clamp(0.0, 0.1) / response_seconds).exp();
+        let response = 1.0 - (-dt / response_seconds).exp();
         self.underwater_blend += (target_underwater - self.underwater_blend) * response;
         if (target_underwater - self.underwater_blend).abs() < 0.000_5 {
             self.underwater_blend = target_underwater;
@@ -1902,14 +1903,14 @@ impl Renderer {
         } else {
             0.45
         };
-        let interior_response = 1.0 - (-dt.clamp(0.0, 0.1) / interior_seconds).exp();
+        let interior_response = 1.0 - (-dt / interior_seconds).exp();
         let exposure_seconds =
             if self.interior_target.exposure_multiplier > self.interior.exposure_multiplier {
                 2.5
             } else {
                 0.45
             };
-        let exposure_response = 1.0 - (-dt.clamp(0.0, 0.1) / exposure_seconds).exp();
+        let exposure_response = 1.0 - (-dt / exposure_seconds).exp();
         self.interior =
             self.interior
                 .lerp(self.interior_target, interior_response, exposure_response);
@@ -2668,6 +2669,14 @@ fn directional_shadow_cascades(
     .map_err(|error| format!("build shadow cascades: {error:?}"))
 }
 
+fn bounded_frame_delta(dt: f32) -> f32 {
+    if dt.is_finite() && dt > 0.0 {
+        dt.min(0.1)
+    } else {
+        0.0
+    }
+}
+
 fn valid_dpr(dpr: f32) -> f32 {
     if dpr.is_finite() && dpr > 0.0 {
         dpr
@@ -2999,6 +3008,16 @@ mod tests {
     fn refraction_bandwidth_is_paid_only_for_visible_water() {
         assert_eq!(refraction_copy_bytes(1_280, 720, false), 0);
         assert_eq!(refraction_copy_bytes(1_280, 720, true), 7_372_800);
+    }
+
+    #[test]
+    fn frame_delta_rejects_invalid_time_and_caps_long_frames() {
+        assert_eq!(bounded_frame_delta(f32::NAN), 0.0);
+        assert_eq!(bounded_frame_delta(f32::INFINITY), 0.0);
+        assert_eq!(bounded_frame_delta(-0.25), 0.0);
+        assert_eq!(bounded_frame_delta(0.0), 0.0);
+        assert_eq!(bounded_frame_delta(0.025), 0.025);
+        assert_eq!(bounded_frame_delta(0.25), 0.1);
     }
 
     #[test]
