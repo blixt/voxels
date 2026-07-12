@@ -96,6 +96,10 @@ export function assertSnapshotSchema(snapshot) {
   return snapshot;
 }
 
+export function isBrowserConsoleFailure(type, text, warningPattern) {
+  return type === "error" || (type === "warning" && warningPattern.test(text));
+}
+
 export async function reserveEphemeralPort() {
   const probe = createNetServer();
   await new Promise((resolve, reject) => {

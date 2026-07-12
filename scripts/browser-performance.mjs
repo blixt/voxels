@@ -2,6 +2,7 @@ import { chromium } from "playwright";
 import { build, preview } from "vite-plus";
 import {
   chromeWebGpuLaunchOptions,
+  isBrowserConsoleFailure,
   reserveEphemeralPort,
   SNAPSHOT,
   SNAPSHOT_SCHEMA_VERSION,
@@ -1212,10 +1213,7 @@ let server;
 function observePageErrors(page) {
   page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
   page.on("console", (message) => {
-    if (
-      (message.type() === "error" || message.type() === "warning") &&
-      FAILURE.test(message.text())
-    ) {
+    if (isBrowserConsoleFailure(message.type(), message.text(), FAILURE)) {
       errors.push(`${message.type()}: ${message.text()}`);
     }
   });

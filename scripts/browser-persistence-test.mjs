@@ -3,6 +3,7 @@ import { createServer as createViteServer } from "vite-plus";
 import {
   assertSnapshotSchema,
   chromeWebGpuLaunchOptions,
+  isBrowserConsoleFailure,
   reserveEphemeralPort,
   SNAPSHOT,
 } from "./browser-harness.mjs";
@@ -14,10 +15,7 @@ const errors = [];
 function watch(name, page) {
   page.on("pageerror", (error) => errors.push(`${name} pageerror: ${error.message}`));
   page.on("console", (message) => {
-    if (
-      (message.type() === "error" || message.type() === "warning") &&
-      FAILURE.test(message.text())
-    ) {
+    if (isBrowserConsoleFailure(message.type(), message.text(), FAILURE)) {
       errors.push(`${name} ${message.type()}: ${message.text()}`);
     }
   });
