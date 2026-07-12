@@ -120,7 +120,7 @@ pub fn decode_chunk(bytes: &[u8]) -> Result<Chunk, CodecError> {
         return Err(CodecError::InvalidHeader("unexpected voxel count"));
     }
     let palette_len = usize::from(read_u16(bytes, 36)?);
-    if palette_len == 0 || palette_len > CHUNK_VOLUME {
+    if palette_len == 0 || palette_len > Material::ALL.len() {
         return Err(CodecError::InvalidHeader("invalid palette length"));
     }
     let bits = bytes[38];
@@ -310,7 +310,8 @@ mod tests {
     fn malformed_lengths_are_rejected_before_allocation() {
         let chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Stone);
         let mut encoded = encode_chunk(&chunk);
-        encoded[36..38].copy_from_slice(&u16::MAX.to_le_bytes());
+        let impossible_palette_len = Material::ALL.len() as u16 + 1;
+        encoded[36..38].copy_from_slice(&impossible_palette_len.to_le_bytes());
         assert_eq!(
             decode_chunk(&encoded),
             Err(CodecError::InvalidHeader("invalid palette length"))
