@@ -172,7 +172,7 @@ pub enum ContextAction {
     DiveBelowSurface,
     ResetRendererFeatures,
     ToggleCompactTelemetry,
-    HideFarTerrain,
+    VisitLandmark,
     CloseMissionControl,
 }
 
@@ -182,7 +182,7 @@ impl ContextAction {
         Self::DiveBelowSurface,
         Self::ResetRendererFeatures,
         Self::ToggleCompactTelemetry,
-        Self::HideFarTerrain,
+        Self::VisitLandmark,
         Self::CloseMissionControl,
     ];
 
@@ -192,7 +192,7 @@ impl ContextAction {
             Self::DiveBelowSurface => "Dive below the surface",
             Self::ResetRendererFeatures => "Reset renderer features",
             Self::ToggleCompactTelemetry => "Toggle compact telemetry",
-            Self::HideFarTerrain => "Hide far terrain",
+            Self::VisitLandmark => "Visit next landmark",
             Self::CloseMissionControl => "Close mission control",
         }
     }
@@ -916,6 +916,9 @@ impl MissionControlUi {
         }
 
         if let Some(menu) = layout.context_menu {
+            // Glass and glyphs use separate GPU batches. Remove text anchored behind the modal
+            // surface so earlier panel labels cannot bleed through after the glass batch finishes.
+            draw.text.retain(|run| !menu.contains(run.position));
             push_surface(
                 &mut draw,
                 menu,
@@ -1456,6 +1459,12 @@ mod tests {
             eyes_submerged: false,
             swimming: false,
         });
+        let base = ui.build_draw_list(viewport());
+        assert!(base.text.iter().any(|run| run.text == "18 / 2 f / 31 ms"));
+        assert!(base.text.iter().any(|run| run.text == "7 + 1 / 76.0 MiB"));
+        assert!(base.text.iter().any(|run| run.text == "123.4k / 8.2k"));
+        assert!(base.text.iter().any(|run| run.text == "132 / 12"));
+
         let _ = ui.open_context_menu_device([900.0, 80.0], viewport());
         let draw = ui.build_draw_list(viewport());
         assert!(
@@ -1470,8 +1479,6 @@ mod tests {
                 .count(),
             9
         );
-        assert!(draw.text.iter().any(|run| run.text == "18 / 2 f / 31 ms"));
-        assert!(draw.text.iter().any(|run| run.text == "7 + 1 / 76.0 MiB"));
         assert_eq!(
             draw.glass
                 .iter()
@@ -1486,8 +1493,12 @@ mod tests {
                 .count(),
             ContextAction::ALL.len()
         );
-        assert!(draw.text.iter().any(|run| run.text == "123.4k / 8.2k"));
-        assert!(draw.text.iter().any(|run| run.text == "132 / 12"));
+        assert!(
+            draw.text
+                .iter()
+                .any(|run| run.text == "Visit next landmark")
+        );
+        assert!(!draw.text.iter().any(|run| run.text == "CPU / GPU"));
     }
 
     #[test]

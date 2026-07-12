@@ -3,6 +3,7 @@
 pub mod chunk;
 pub mod codec;
 pub mod edit;
+pub mod feature;
 pub mod generation;
 pub mod lod;
 pub mod material;
@@ -10,9 +11,13 @@ pub mod mesh;
 
 pub use chunk::{CHUNK_EDGE, CHUNK_VOLUME, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord};
 pub use edit::{EditMap, VoxelCoord};
+pub use feature::{
+    FEATURE_CELL_VOXELS, FEATURE_MAX_RADIUS_VOXELS, SkylineFeature, SkylineFeatureId,
+    SkylineFeatureKind,
+};
 pub use generation::{
     GENERATOR_VERSION, GeneratedColumn, GeneratedRegion, Generator, SEA_LEVEL_VOXELS,
-    SkylineFeature, SkylineFeatureId, SurfaceRegion, SurfaceSample,
+    SurfaceRegion, SurfaceSample,
 };
 pub use lod::{
     FAR_STRIDE_VOXELS, FAR_TILE_EDGE_CELLS, FAR_TILE_SPAN_VOXELS, FarTileCoord,

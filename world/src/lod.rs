@@ -1,5 +1,7 @@
 use crate::mesh::{FACE_NEG_X, FACE_NEG_Y, FACE_NEG_Z, FACE_POS_X, FACE_POS_Y, FACE_POS_Z};
-use crate::{EditMap, Generator, Material, SEA_LEVEL_VOXELS, SkylineFeature, VoxelCoord};
+use crate::{
+    EditMap, Generator, Material, SEA_LEVEL_VOXELS, SkylineFeature, SkylineFeatureKind, VoxelCoord,
+};
 use std::ops::Range;
 
 /// Every surface LOD tile contains the same number of cells. Increasing the level therefore
@@ -707,29 +709,127 @@ fn append_skyline_proxy(
     feature: SkylineFeature,
 ) {
     let [anchor_x, ground, anchor_z] = feature.anchor;
-    append_box(
-        quads,
-        [anchor_x - 1, ground + 1, anchor_z - 1],
-        [anchor_x + 2, feature.trunk_top + 1, anchor_z + 2],
-        Material::Wood,
-    );
     let top = feature.trunk_top;
-    let crown_layers: &[([i32; 2], i32)] = match level {
-        SurfaceLodLevel::Stride2 => &[
-            ([top - 9, top - 5], 6),
-            ([top - 5, top], 8),
-            ([top, top + 3], 5),
-        ],
-        SurfaceLodLevel::Stride4 => &[([top - 8, top - 2], 8), ([top - 2, top + 3], 6)],
-        SurfaceLodLevel::Stride8 | SurfaceLodLevel::Stride16 => &[([top - 7, top + 3], 8)],
-    };
-    for &([min_y, max_y], radius) in crown_layers {
-        append_box(
-            quads,
-            [anchor_x - radius, min_y, anchor_z - radius],
-            [anchor_x + radius + 1, max_y, anchor_z + radius + 1],
-            Material::Leaves,
-        );
+    match feature.kind {
+        SkylineFeatureKind::Broadleaf => {
+            append_box(
+                quads,
+                [anchor_x - 1, ground + 1, anchor_z - 1],
+                [anchor_x + 2, top + 1, anchor_z + 2],
+                Material::Wood,
+            );
+            let crown_layers: &[([i32; 2], i32)] = match level {
+                SurfaceLodLevel::Stride2 => &[
+                    ([top - 9, top - 5], 6),
+                    ([top - 5, top], 8),
+                    ([top, top + 3], 5),
+                ],
+                SurfaceLodLevel::Stride4 => &[([top - 8, top - 2], 8), ([top - 2, top + 3], 6)],
+                SurfaceLodLevel::Stride8 | SurfaceLodLevel::Stride16 => &[([top - 7, top + 3], 8)],
+            };
+            for &([min_y, max_y], radius) in crown_layers {
+                append_box(
+                    quads,
+                    [anchor_x - radius, min_y, anchor_z - radius],
+                    [anchor_x + radius + 1, max_y, anchor_z + radius + 1],
+                    Material::Leaves,
+                );
+            }
+        }
+        SkylineFeatureKind::MoorTor => {
+            let height = top - ground;
+            for &(min, max, radius) in &[
+                (ground + 1, ground + height / 3 + 1, 6),
+                (ground + height / 3, ground + height * 2 / 3 + 1, 5),
+                (ground + height * 2 / 3, top + 1, 3),
+            ] {
+                append_box(
+                    quads,
+                    [anchor_x - radius, min, anchor_z - radius],
+                    [anchor_x + radius + 1, max, anchor_z + radius + 1],
+                    Material::Limestone,
+                );
+            }
+        }
+        SkylineFeatureKind::AlpineNeedle => {
+            let height = top - ground;
+            for &(min, max, radius, material) in &[
+                (ground + 1, ground + height / 2 + 1, 7, Material::Stone),
+                (ground + height / 2, top - 4, 4, Material::Stone),
+                (top - 5, top + 1, 2, Material::Snow),
+            ] {
+                append_box(
+                    quads,
+                    [anchor_x - radius, min, anchor_z - radius],
+                    [anchor_x + radius + 1, max, anchor_z + radius + 1],
+                    material,
+                );
+            }
+        }
+        SkylineFeatureKind::BadlandsHoodoo => {
+            append_box(
+                quads,
+                [anchor_x - 2, ground + 1, anchor_z - 2],
+                [anchor_x + 3, top - 7, anchor_z + 3],
+                Material::Clay,
+            );
+            append_box(
+                quads,
+                [anchor_x - 4, top - 8, anchor_z - 4],
+                [anchor_x + 5, top - 3, anchor_z + 5],
+                Material::Clay,
+            );
+            append_box(
+                quads,
+                [anchor_x - 6, top - 4, anchor_z - 6],
+                [anchor_x + 7, top + 1, anchor_z + 7],
+                Material::RedSand,
+            );
+        }
+        SkylineFeatureKind::DuneArch => {
+            let [axis_x, axis_z] = feature.oriented_offset(7, 0);
+            let [half_x, half_z] = [axis_x.abs() + 2, axis_z.abs() + 2];
+            for direction in [-1, 1] {
+                let [offset_x, offset_z] = feature.oriented_offset(direction * 7, 0);
+                append_box(
+                    quads,
+                    [anchor_x + offset_x - 2, ground + 1, anchor_z + offset_z - 2],
+                    [anchor_x + offset_x + 3, top + 1, anchor_z + offset_z + 3],
+                    Material::Limestone,
+                );
+            }
+            append_box(
+                quads,
+                [anchor_x - half_x, top - 4, anchor_z - half_z],
+                [anchor_x + half_x + 1, top + 1, anchor_z + half_z + 1],
+                Material::Limestone,
+            );
+        }
+        SkylineFeatureKind::BasaltColumns => {
+            let height = top - ground;
+            for &(offset, column_height, radius) in &[
+                ([0, 0], height, 2),
+                ([-5, -3], height * 3 / 4, 2),
+                ([5, -2], height * 5 / 8, 1),
+                ([2, 5], height * 7 / 8, 2),
+            ] {
+                let [offset_x, offset_z] = feature.oriented_offset(offset[0], offset[1]);
+                append_box(
+                    quads,
+                    [
+                        anchor_x + offset_x - radius,
+                        ground + 1,
+                        anchor_z + offset_z - radius,
+                    ],
+                    [
+                        anchor_x + offset_x + radius + 1,
+                        ground + column_height + 1,
+                        anchor_z + offset_z + radius + 1,
+                    ],
+                    Material::Basalt,
+                );
+            }
+        }
     }
 }
 
@@ -798,9 +898,9 @@ mod tests {
 
     fn nearby_skyline_feature(generator: Generator) -> SkylineFeature {
         generator
-            .skyline_features_anchored_in([[-512, -512], [512, 512]])
+            .skyline_features_anchored_in([[-1_024, -1_024], [1_024, 1_024]])
             .into_iter()
-            .next()
+            .find(|feature| feature.kind == SkylineFeatureKind::Broadleaf)
             .expect("fixed seed should place a nearby skyline feature")
     }
 
@@ -818,6 +918,31 @@ mod tests {
             .flat_map(|patch| patch.quads(mesh))
             .filter(|quad| matches!(quad.material, Material::Wood | Material::Leaves))
             .count()
+    }
+
+    #[test]
+    fn every_landmark_proxy_is_patch_packed_and_bounded_to_four_boxes() {
+        for (index, kind) in SkylineFeatureKind::ALL.into_iter().enumerate() {
+            let feature = SkylineFeature {
+                id: crate::SkylineFeatureId {
+                    cell_x: 0,
+                    cell_z: 0,
+                },
+                kind,
+                anchor: [32, 20, 32],
+                trunk_top: 60,
+                orientation: index as u8,
+                variant: (index % 4) as u8,
+            };
+            assert!(feature.material_at(VoxelCoord::new(32, 60, 32)).is_some());
+            for level in SurfaceLodLevel::ALL {
+                let mut quads = Vec::new();
+                append_skyline_proxy(&mut quads, level, feature);
+                assert!(!quads.is_empty());
+                assert!(quads.len() <= 24, "{kind:?} emitted {} quads", quads.len());
+                assert!(quads.iter().all(|quad| quad.material.is_renderable()));
+            }
+        }
     }
 
     fn water_quad_covers(tile: &WaterTileMesh, voxel_x: i32, voxel_z: i32) -> bool {
@@ -1223,7 +1348,11 @@ mod tests {
             let expected_per_feature = proxy_quads_per_feature(level);
             assert_eq!(
                 skyline_quad_count(&mesh),
-                features.len() * expected_per_feature
+                features
+                    .iter()
+                    .filter(|feature| feature.kind == SkylineFeatureKind::Broadleaf)
+                    .count()
+                    * expected_per_feature
             );
 
             let [origin_x, origin_z] = coord.voxel_origin();
@@ -1236,7 +1365,8 @@ mod tests {
                 let owned = features
                     .iter()
                     .filter(|feature| {
-                        feature.anchor[0] >= world_min_x
+                        feature.kind == SkylineFeatureKind::Broadleaf
+                            && feature.anchor[0] >= world_min_x
                             && feature.anchor[0] < world_max_x
                             && feature.anchor[2] >= world_min_z
                             && feature.anchor[2] < world_max_z

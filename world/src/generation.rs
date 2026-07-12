@@ -1,7 +1,10 @@
-use crate::{CHUNK_EDGE, Chunk, ChunkCoord, Material};
+use crate::{
+    CHUNK_EDGE, Chunk, ChunkCoord, FEATURE_CELL_VOXELS, FEATURE_MAX_RADIUS_VOXELS, Material,
+    SkylineFeature, SkylineFeatureId, SkylineFeatureKind,
+};
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 6;
+pub const GENERATOR_VERSION: u32 = 7;
 pub const SEA_LEVEL_VOXELS: i32 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -52,64 +55,6 @@ struct ColumnProfile {
     material: Material,
 }
 
-const TREE_CELL_VOXELS: i32 = 96;
-const TREE_CROWN_RADIUS_VOXELS: i32 = 8;
-
-/// Stable procedural identity for an analytic feature that remains readable in surface LODs.
-/// The placement cell is sufficient to reconstruct the feature from the generator seed.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SkylineFeatureId {
-    pub cell_x: i32,
-    pub cell_z: i32,
-}
-
-/// One deterministic procedural feature shared by canonical voxel generation and disposable
-/// skyline proxies. Bounds are half-open canonical 10 cm voxel coordinates.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct SkylineFeature {
-    pub id: SkylineFeatureId,
-    pub anchor: [i32; 3],
-    pub trunk_top: i32,
-}
-
-impl SkylineFeature {
-    pub const fn bounds(self) -> [[i32; 3]; 2] {
-        [
-            [
-                self.anchor[0] - TREE_CROWN_RADIUS_VOXELS,
-                self.anchor[1] + 1,
-                self.anchor[2] - TREE_CROWN_RADIUS_VOXELS,
-            ],
-            [
-                self.anchor[0] + TREE_CROWN_RADIUS_VOXELS + 1,
-                self.trunk_top + 3,
-                self.anchor[2] + TREE_CROWN_RADIUS_VOXELS + 1,
-            ],
-        ]
-    }
-
-    pub fn material_at(self, coord: crate::VoxelCoord) -> Option<Material> {
-        let dx = coord.x - self.anchor[0];
-        let dz = coord.z - self.anchor[2];
-        if coord.y > self.anchor[1] && coord.y <= self.trunk_top && dx.abs() <= 1 && dz.abs() <= 1 {
-            return Some(Material::Wood);
-        }
-        let dy = coord.y - (self.trunk_top - 3);
-        let horizontal_radius = 9 - dy.abs() / 2;
-        let distance_squared = dx * dx + dz * dz + (dy * dy) / 2;
-        ((-7..=5).contains(&dy)
-            && dx.abs() <= horizontal_radius
-            && dz.abs() <= horizontal_radius
-            && distance_squared <= 78)
-            .then_some(Material::Leaves)
-    }
-
-    pub const fn contains_xz(self, x: i32, z: i32) -> bool {
-        let bounds = self.bounds();
-        x >= bounds[0][0] && x < bounds[1][0] && z >= bounds[0][2] && z < bounds[1][2]
-    }
-}
-
 /// Reusable authoritative sampler for one X/Z column. Meshing a halo touches many Y values at the
 /// same horizontal coordinate, so retaining its regional fields and feature intersections avoids
 /// recomputing the full climate stack for every voxel.
@@ -119,8 +64,8 @@ pub struct GeneratedColumn {
     x: i32,
     z: i32,
     profile: ColumnProfile,
-    trees: [SkylineFeature; 9],
-    tree_count: u8,
+    features: [SkylineFeature; 9],
+    feature_count: u8,
 }
 
 /// Reusable authoritative sampler for a rectangular X/Z region. Analytic features are discovered
@@ -153,9 +98,9 @@ impl GeneratedColumn {
         if terrain.is_collidable() {
             return terrain;
         }
-        self.trees[..usize::from(self.tree_count)]
+        self.features[..usize::from(self.feature_count)]
             .iter()
-            .find_map(|tree| tree.material_at(crate::VoxelCoord::new(self.x, y, self.z)))
+            .find_map(|feature| feature.material_at(crate::VoxelCoord::new(self.x, y, self.z)))
             .unwrap_or(terrain)
     }
 }
@@ -200,7 +145,7 @@ impl Generator {
                 }
             }
         }
-        self.decorate_trees(&mut chunk);
+        self.decorate_features(&mut chunk);
         chunk
     }
 
@@ -209,10 +154,10 @@ impl Generator {
     }
 
     pub fn column(self, x: i32, z: i32) -> GeneratedColumn {
-        let mut trees = [SkylineFeature::default(); 9];
-        let mut tree_count = 0u8;
-        let cell_x = x.div_euclid(TREE_CELL_VOXELS);
-        let cell_z = z.div_euclid(TREE_CELL_VOXELS);
+        let mut features = [SkylineFeature::default(); 9];
+        let mut feature_count = 0u8;
+        let cell_x = x.div_euclid(FEATURE_CELL_VOXELS);
+        let cell_z = z.div_euclid(FEATURE_CELL_VOXELS);
         for dz_cell in -1..=1 {
             for dx_cell in -1..=1 {
                 let candidate_x = cell_x + dx_cell;
@@ -223,8 +168,8 @@ impl Generator {
                 if !feature.contains_xz(x, z) {
                     continue;
                 }
-                trees[usize::from(tree_count)] = feature;
-                tree_count += 1;
+                features[usize::from(feature_count)] = feature;
+                feature_count += 1;
             }
         }
         GeneratedColumn {
@@ -232,8 +177,8 @@ impl Generator {
             x,
             z,
             profile: self.column_profile(x, z),
-            trees,
-            tree_count,
+            features,
+            feature_count,
         }
     }
 
@@ -242,10 +187,10 @@ impl Generator {
             min_x.saturating_add(i32::try_from(width.saturating_sub(1)).unwrap_or(i32::MAX));
         let max_z =
             min_z.saturating_add(i32::try_from(depth.saturating_sub(1)).unwrap_or(i32::MAX));
-        let min_cell_x = min_x.div_euclid(TREE_CELL_VOXELS) - 1;
-        let max_cell_x = max_x.div_euclid(TREE_CELL_VOXELS) + 1;
-        let min_cell_z = min_z.div_euclid(TREE_CELL_VOXELS) - 1;
-        let max_cell_z = max_z.div_euclid(TREE_CELL_VOXELS) + 1;
+        let min_cell_x = min_x.div_euclid(FEATURE_CELL_VOXELS) - 1;
+        let max_cell_x = max_x.div_euclid(FEATURE_CELL_VOXELS) + 1;
+        let min_cell_z = min_z.div_euclid(FEATURE_CELL_VOXELS) - 1;
+        let max_cell_z = max_z.div_euclid(FEATURE_CELL_VOXELS) + 1;
         let mut features = Vec::new();
         for cell_z in min_cell_z..=max_cell_z {
             for cell_x in min_cell_x..=max_cell_x {
@@ -260,23 +205,23 @@ impl Generator {
             for local_x in 0..width {
                 let x = min_x.saturating_add(i32::try_from(local_x).unwrap_or(i32::MAX));
                 let z = min_z.saturating_add(i32::try_from(local_z).unwrap_or(i32::MAX));
-                let mut trees = [SkylineFeature::default(); 9];
-                let mut tree_count = 0u8;
+                let mut column_features = [SkylineFeature::default(); 9];
+                let mut feature_count = 0u8;
                 for feature in features
                     .iter()
                     .copied()
                     .filter(|feature| feature.contains_xz(x, z))
                 {
-                    trees[usize::from(tree_count)] = feature;
-                    tree_count += 1;
+                    column_features[usize::from(feature_count)] = feature;
+                    feature_count += 1;
                 }
                 columns.push(GeneratedColumn {
                     generator: self,
                     x,
                     z,
                     profile: self.column_profile(x, z),
-                    trees,
-                    tree_count,
+                    features: column_features,
+                    feature_count,
                 });
             }
         }
@@ -481,10 +426,10 @@ impl Generator {
         if min_x >= max_x || min_z >= max_z {
             return Vec::new();
         }
-        let min_cell_x = (min_x - 75).div_euclid(TREE_CELL_VOXELS);
-        let max_cell_x = (max_x - 1 - 12).div_euclid(TREE_CELL_VOXELS);
-        let min_cell_z = (min_z - 75).div_euclid(TREE_CELL_VOXELS);
-        let max_cell_z = (max_z - 1 - 12).div_euclid(TREE_CELL_VOXELS);
+        let min_cell_x = (min_x - 75).div_euclid(FEATURE_CELL_VOXELS);
+        let max_cell_x = (max_x - 1 - 12).div_euclid(FEATURE_CELL_VOXELS);
+        let min_cell_z = (min_z - 75).div_euclid(FEATURE_CELL_VOXELS);
+        let max_cell_z = (max_z - 1 - 12).div_euclid(FEATURE_CELL_VOXELS);
         let mut features = Vec::new();
         for cell_z in min_cell_z..=max_cell_z {
             for cell_x in min_cell_x..=max_cell_x {
@@ -506,8 +451,8 @@ impl Generator {
     /// Returns procedural features whose canonical shape can own `coord`. The final material check
     /// remains cheap and lets edit invalidation target the anchor-owned derived mesh.
     pub fn skyline_features_at(self, coord: crate::VoxelCoord) -> Vec<SkylineFeature> {
-        let cell_x = coord.x.div_euclid(TREE_CELL_VOXELS);
-        let cell_z = coord.z.div_euclid(TREE_CELL_VOXELS);
+        let cell_x = coord.x.div_euclid(FEATURE_CELL_VOXELS);
+        let cell_z = coord.z.div_euclid(FEATURE_CELL_VOXELS);
         let mut features = Vec::new();
         for dz in -1..=1 {
             for dx in -1..=1 {
@@ -522,14 +467,62 @@ impl Generator {
         features
     }
 
-    fn decorate_trees(self, chunk: &mut Chunk) {
+    /// Finds a deterministic landmark for Rust-owned exploration/debug controls without exposing
+    /// placement internals to the browser shell.
+    pub fn nearest_skyline_feature(
+        self,
+        x: i32,
+        z: i32,
+        kind: SkylineFeatureKind,
+        max_radius_cells: i32,
+    ) -> Option<SkylineFeature> {
+        let center_x = x.div_euclid(FEATURE_CELL_VOXELS);
+        let center_z = z.div_euclid(FEATURE_CELL_VOXELS);
+        for radius in 0..=max_radius_cells.clamp(0, 256) {
+            let mut closest = None;
+            let mut consider = |cell_x: i32, cell_z: i32| {
+                let Some(feature) = self.skyline_feature(cell_x, cell_z) else {
+                    return;
+                };
+                if feature.kind != kind {
+                    return;
+                }
+                let dx = i64::from(feature.anchor[0]) - i64::from(x);
+                let dz = i64::from(feature.anchor[2]) - i64::from(z);
+                let distance = dx * dx + dz * dz;
+                if closest.is_none_or(|(best, _)| distance < best) {
+                    closest = Some((distance, feature));
+                }
+            };
+            if radius == 0 {
+                consider(center_x, center_z);
+            } else {
+                for dx in -radius..=radius {
+                    consider(center_x + dx, center_z - radius);
+                    consider(center_x + dx, center_z + radius);
+                }
+                for dz in (-radius + 1)..radius {
+                    consider(center_x - radius, center_z + dz);
+                    consider(center_x + radius, center_z + dz);
+                }
+            }
+            if let Some((_, feature)) = closest {
+                return Some(feature);
+            }
+        }
+        None
+    }
+
+    fn decorate_features(self, chunk: &mut Chunk) {
         let origin = chunk.coord().world_origin();
         let max_x = origin[0] + CHUNK_EDGE as i32 - 1;
         let max_z = origin[2] + CHUNK_EDGE as i32 - 1;
-        let min_cell_x = (origin[0] - TREE_CROWN_RADIUS_VOXELS - 75).div_euclid(TREE_CELL_VOXELS);
-        let max_cell_x = (max_x + TREE_CROWN_RADIUS_VOXELS - 12).div_euclid(TREE_CELL_VOXELS);
-        let min_cell_z = (origin[2] - TREE_CROWN_RADIUS_VOXELS - 75).div_euclid(TREE_CELL_VOXELS);
-        let max_cell_z = (max_z + TREE_CROWN_RADIUS_VOXELS - 12).div_euclid(TREE_CELL_VOXELS);
+        let min_cell_x =
+            (origin[0] - FEATURE_MAX_RADIUS_VOXELS - 75).div_euclid(FEATURE_CELL_VOXELS);
+        let max_cell_x = (max_x + FEATURE_MAX_RADIUS_VOXELS - 12).div_euclid(FEATURE_CELL_VOXELS);
+        let min_cell_z =
+            (origin[2] - FEATURE_MAX_RADIUS_VOXELS - 75).div_euclid(FEATURE_CELL_VOXELS);
+        let max_cell_z = (max_z + FEATURE_MAX_RADIUS_VOXELS - 12).div_euclid(FEATURE_CELL_VOXELS);
         for cell_z in min_cell_z..=max_cell_z {
             for cell_x in min_cell_x..=max_cell_x {
                 let Some(feature) = self.skyline_feature(cell_x, cell_z) else {
@@ -561,37 +554,71 @@ impl Generator {
         }
     }
 
-    fn tree_grows_on(self, x: i32, z: i32, surface: SurfaceSample) -> bool {
-        match surface.region {
-            SurfaceRegion::VerdantForest => surface.moisture >= 0.30,
-            SurfaceRegion::WindMoor => {
-                surface.moisture >= 0.42 && self.value_2d(x, z, 310, 0x781d) > 0.66
-            }
-            _ => false,
-        }
-    }
-
-    fn tree_anchor(self, cell_x: i32, cell_z: i32) -> (i32, i32, i32) {
+    fn feature_anchor(self, cell_x: i32, cell_z: i32) -> (i32, i32, u64) {
         let hash = self.hash(cell_x, 0, cell_z, 0x7a11_5eed);
         let x_offset = 12 + (hash & 63) as i32;
         let z_offset = 12 + ((hash >> 8) & 63) as i32;
-        let height = 25 + ((hash >> 16) & 15) as i32;
         (
-            cell_x * TREE_CELL_VOXELS + x_offset,
-            cell_z * TREE_CELL_VOXELS + z_offset,
-            height,
+            cell_x * FEATURE_CELL_VOXELS + x_offset,
+            cell_z * FEATURE_CELL_VOXELS + z_offset,
+            hash,
         )
     }
 
     fn skyline_feature(self, cell_x: i32, cell_z: i32) -> Option<SkylineFeature> {
-        let (anchor_x, anchor_z, height) = self.tree_anchor(cell_x, cell_z);
+        let (anchor_x, anchor_z, hash) = self.feature_anchor(cell_x, cell_z);
         let surface = self.surface_sample(anchor_x, anchor_z);
-        (surface.height >= SEA_LEVEL_VOXELS && self.tree_grows_on(anchor_x, anchor_z, surface))
-            .then_some(SkylineFeature {
-                id: SkylineFeatureId { cell_x, cell_z },
-                anchor: [anchor_x, surface.height, anchor_z],
-                trunk_top: surface.height + height,
-            })
+        if surface.height < SEA_LEVEL_VOXELS || surface.water_level.is_some() {
+            return None;
+        }
+        let kind = match surface.region {
+            SurfaceRegion::VerdantForest => SkylineFeatureKind::Broadleaf,
+            SurfaceRegion::WindMoor => SkylineFeatureKind::MoorTor,
+            SurfaceRegion::Alpine => SkylineFeatureKind::AlpineNeedle,
+            SurfaceRegion::RedBadlands => SkylineFeatureKind::BadlandsHoodoo,
+            SurfaceRegion::PaleDunes => SkylineFeatureKind::DuneArch,
+            SurfaceRegion::Volcanic => SkylineFeatureKind::BasaltColumns,
+        };
+        let density_threshold = match kind {
+            SkylineFeatureKind::Broadleaf => 224,
+            SkylineFeatureKind::MoorTor => 92,
+            SkylineFeatureKind::AlpineNeedle => 82,
+            SkylineFeatureKind::BadlandsHoodoo => 88,
+            SkylineFeatureKind::DuneArch => 64,
+            SkylineFeatureKind::BasaltColumns => 112,
+        };
+        if ((hash >> 40) & 0xff) as u8 >= density_threshold
+            || (kind == SkylineFeatureKind::Broadleaf && surface.moisture < 0.30)
+        {
+            return None;
+        }
+        // `ridge` is already part of this authoritative column profile. Using it as the placement
+        // constraint avoids four extra terrain-stack evaluations every time a hot column sampler
+        // reconstructs its nine neighboring feature cells.
+        let maximum_ridge = match kind {
+            SkylineFeatureKind::Broadleaf | SkylineFeatureKind::DuneArch => 0.86,
+            SkylineFeatureKind::MoorTor | SkylineFeatureKind::BadlandsHoodoo => 0.94,
+            SkylineFeatureKind::AlpineNeedle | SkylineFeatureKind::BasaltColumns => 1.0,
+        };
+        if surface.ridge > maximum_ridge {
+            return None;
+        }
+        let height = match kind {
+            SkylineFeatureKind::Broadleaf => 25 + ((hash >> 16) & 15) as i32,
+            SkylineFeatureKind::MoorTor => 18 + ((hash >> 16) & 11) as i32,
+            SkylineFeatureKind::AlpineNeedle => 34 + ((hash >> 16) & 23) as i32,
+            SkylineFeatureKind::BadlandsHoodoo => 24 + ((hash >> 16) & 15) as i32,
+            SkylineFeatureKind::DuneArch => 18 + ((hash >> 16) & 7) as i32,
+            SkylineFeatureKind::BasaltColumns => 24 + ((hash >> 16) & 19) as i32,
+        };
+        Some(SkylineFeature {
+            id: SkylineFeatureId { cell_x, cell_z },
+            kind,
+            anchor: [anchor_x, surface.height, anchor_z],
+            trunk_top: surface.height + height,
+            orientation: ((hash >> 32) & 3) as u8,
+            variant: ((hash >> 36) & 3) as u8,
+        })
     }
 
     fn fractal_2d(self, x: i32, z: i32, scale: i32, octaves: u32, salt: u64) -> f32 {
@@ -716,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_region_matches_random_access_across_tree_cells_and_negative_space() {
+    fn generated_region_matches_random_access_across_feature_cells_and_negative_space() {
         let generator = Generator::new(0x5eed_cafe);
         for [min_x, min_z] in [[-113, -101], [79, 91], [18_015, 12_895]] {
             let region = generator.region(min_x, min_z, 34, 34);
@@ -797,7 +824,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checksum, 0x39a3_a092_5fe2_08a1);
+        assert_eq!(checksum, 0x8208_9ab6_5ab3_0500);
     }
 
     #[test]
@@ -831,49 +858,42 @@ mod tests {
     }
 
     #[test]
-    fn procedural_tree_anchors_stay_on_dry_land() {
+    fn procedural_landmarks_stay_dry_and_inside_their_cells() {
         let generator = Generator::new(0x5eed_cafe);
         for feature in generator.skyline_features_anchored_in([[-4_096, -4_096], [4_096, 4_096]]) {
             assert!(feature.anchor[1] >= SEA_LEVEL_VOXELS);
+            let cell_min_x = feature.id.cell_x * FEATURE_CELL_VOXELS;
+            let cell_min_z = feature.id.cell_z * FEATURE_CELL_VOXELS;
+            let [min, max] = feature.bounds();
+            assert!(min[0] >= cell_min_x && max[0] <= cell_min_x + FEATURE_CELL_VOXELS);
+            assert!(min[2] >= cell_min_z && max[2] <= cell_min_z + FEATURE_CELL_VOXELS);
         }
     }
 
     #[test]
-    fn trees_are_deterministic_editable_voxels() {
+    fn broadleaf_landmarks_are_deterministic_editable_voxels() {
         let generator = Generator::new(0x5eed);
-        let mut found = None;
-        for cell_z in -4..=4 {
-            for cell_x in -4..=4 {
-                let (x, z, height) = generator.tree_anchor(cell_x, cell_z);
-                let ground = generator.surface_height(x, z);
-                if generator.sample(x, ground + 1, z) == Material::Wood {
-                    found = Some((x, ground, z, height));
-                    break;
-                }
-            }
-        }
-        assert!(
-            found.is_some(),
-            "seed should produce at least one nearby tree"
-        );
-        let Some((x, ground, z, height)) = found else {
-            return;
-        };
+        let feature = generator
+            .skyline_features_anchored_in([[-1_024, -1_024], [1_024, 1_024]])
+            .into_iter()
+            .find(|feature| feature.kind == SkylineFeatureKind::Broadleaf)
+            .expect("fixed seed should produce a nearby broadleaf landmark");
+        let [x, ground, z] = feature.anchor;
         assert_eq!(generator.sample(x, ground + 1, z), Material::Wood);
-        assert_eq!(generator.sample(x, ground + height, z), Material::Wood);
+        assert_eq!(generator.sample(x, feature.trunk_top, z), Material::Wood);
         assert_eq!(
-            generator.sample(x + 5, ground + height - 3, z),
+            generator.sample(x + 5, feature.trunk_top - 3, z),
             Material::Leaves
         );
     }
 
     #[test]
-    fn analytic_skyline_descriptor_is_the_canonical_tree_source() {
+    fn analytic_skyline_descriptor_is_the_canonical_broadleaf_source() {
         let generator = Generator::new(0x5eed);
         let feature = generator
-            .skyline_features_anchored_in([[-512, -512], [512, 512]])
+            .skyline_features_anchored_in([[-1_024, -1_024], [1_024, 1_024]])
             .into_iter()
-            .next()
+            .find(|feature| feature.kind == SkylineFeatureKind::Broadleaf)
             .expect("fixed seed should place a nearby tree");
         let probes = [
             VoxelCoord::new(feature.anchor[0], feature.anchor[1] + 1, feature.anchor[2]),
@@ -911,5 +931,28 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn every_surface_region_has_a_distinct_landmark_archetype() {
+        let generator = Generator::new(0x5eed_cafe);
+        let mut kinds = BTreeSet::new();
+        'catalog: for z in (-12_000i32..=12_000).step_by(389) {
+            for x in (-12_000i32..=12_000).step_by(389) {
+                let cell_x = x.div_euclid(FEATURE_CELL_VOXELS);
+                let cell_z = z.div_euclid(FEATURE_CELL_VOXELS);
+                for dz in -4..=4 {
+                    for dx in -4..=4 {
+                        if let Some(feature) = generator.skyline_feature(cell_x + dx, cell_z + dz) {
+                            kinds.insert(feature.kind);
+                        }
+                    }
+                }
+                if kinds.len() == SkylineFeatureKind::ALL.len() {
+                    break 'catalog;
+                }
+            }
+        }
+        assert_eq!(kinds, SkylineFeatureKind::ALL.into_iter().collect());
     }
 }

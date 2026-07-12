@@ -23,8 +23,8 @@ mod web {
     };
     use voxels_world::{
         CHUNK_EDGE, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord, EditMap, Generator, Material,
-        MeshedChunk, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
-        generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, mesh_chunk,
+        MeshedChunk, SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES,
+        VoxelCoord, generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, mesh_chunk,
         surface_tiles_affected_by_voxel,
     };
     use wasm_bindgen::JsCast;
@@ -281,6 +281,7 @@ mod web {
         edit_superseded: Cell<u32>,
         edit_last_ms: Cell<f32>,
         edit_profile: Cell<EditProfile>,
+        landmark_tour_index: Cell<u8>,
         profile: RefCell<ProfileAutomation>,
         profile_tracked_high: Cell<usize>,
         profile_surface_high: Cell<usize>,
@@ -937,7 +938,60 @@ mod web {
             {
                 self.teleport_underwater();
             }
+            if self.renderer.borrow_mut().take_landmark_teleport_request() {
+                self.teleport_to_next_landmark();
+            }
             self.renderer.borrow().ui_open()
+        }
+
+        fn teleport_to_next_landmark(&self) {
+            let index =
+                usize::from(self.landmark_tour_index.get()).min(SkylineFeatureKind::ALL.len() - 1);
+            let kind = SkylineFeatureKind::ALL[index];
+            self.landmark_tour_index
+                .set(((index + 1) % SkylineFeatureKind::ALL.len()) as u8);
+            let camera = *self.camera.borrow();
+            let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
+            let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
+            let Some(feature) = self
+                .generator
+                .nearest_skyline_feature(voxel_x, voxel_z, kind, 192)
+            else {
+                web_sys::console::error_1(&JsValue::from_str(
+                    "landmark tour could not find the requested biome archetype",
+                ));
+                return;
+            };
+            let [anchor_x, ground, anchor_z] = feature.anchor;
+            let offsets = [[48, 36], [-48, 36], [48, -36], [-48, -36]];
+            let [view_x, view_z, view_height] = offsets
+                .into_iter()
+                .find_map(|offset| {
+                    let offset = feature.oriented_offset(offset[0], offset[1]);
+                    let x = anchor_x + offset[0];
+                    let z = anchor_z + offset[1];
+                    let surface = self.generator.surface_sample(x, z);
+                    surface
+                        .water_level
+                        .is_none()
+                        .then_some([x, z, surface.height])
+                })
+                .unwrap_or([anchor_x + 48, anchor_z + 36, ground]);
+            let mut camera = CameraState::spawn(glam::Vec3::new(
+                (view_x as f32 + 0.5) * VOXEL_SIZE_METRES,
+                (view_height + 1) as f32 * VOXEL_SIZE_METRES
+                    + voxels_core::PLAYER_EYE_HEIGHT_METRES
+                    + 0.02,
+                (view_z as f32 + 0.5) * VOXEL_SIZE_METRES,
+            ));
+            let look_x = (anchor_x - view_x) as f32;
+            let look_z = (anchor_z - view_z) as f32;
+            camera.yaw = look_x.atan2(-look_z);
+            let horizontal_metres = look_x.hypot(look_z) * VOXEL_SIZE_METRES;
+            let target_y = (ground + (feature.trunk_top - ground) / 2) as f32 * VOXEL_SIZE_METRES;
+            camera.pitch = (target_y - camera.position.y).atan2(horizontal_metres);
+            *self.camera.borrow_mut() = camera;
+            self.input.borrow_mut().clear();
         }
 
         fn teleport_to_coast(&self) {
@@ -1630,6 +1684,7 @@ mod web {
             edit_superseded: Cell::new(0),
             edit_last_ms: Cell::new(0.0),
             edit_profile: Cell::new(EditProfile::default()),
+            landmark_tour_index: Cell::new(0),
             profile: RefCell::new(ProfileAutomation::default()),
             profile_tracked_high: Cell::new(0),
             profile_surface_high: Cell::new(0),

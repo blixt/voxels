@@ -5,8 +5,8 @@ use voxels_world::{CHUNK_EDGE, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge}
 /// Half extents in canonical 10 cm voxels. Every boundary is a multiple of the patch span on both
 /// sides, so whole patches can change owner without overlap, holes, or fragment clipping.
 pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 4] = [96, 256, 512, 1_024];
-// The canonical boundary also snaps to the 96-voxel procedural-feature cell. A whole tree therefore
-// remains on one side of the canonical/proxy handoff instead of being clipped by a moving chunk cut.
+// The canonical boundary also snaps to the 96-voxel procedural-feature cell. A whole landmark stays
+// on one side of the canonical/proxy handoff instead of being clipped by a moving chunk cut.
 const LOD_BOUNDARY_SNAP: [i32; 4] = [96, 32, 64, 128];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
