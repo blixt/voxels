@@ -46,6 +46,22 @@ pub(crate) struct MaterialDetailGpu {
     pub(crate) bytes: u64,
 }
 
+fn material_detail_sampler_descriptor() -> SamplerDescriptor<'static> {
+    SamplerDescriptor {
+        label: Some("pixelated material detail sampler"),
+        address_mode_u: AddressMode::Repeat,
+        address_mode_v: AddressMode::Repeat,
+        address_mode_w: AddressMode::ClampToEdge,
+        // Preserve the authored texel blocks. Linear magnification was smearing the procedural
+        // atlas across 10 cm voxel faces and fighting the deliberately pixelated world style.
+        mag_filter: FilterMode::Nearest,
+        min_filter: FilterMode::Nearest,
+        mipmap_filter: MipmapFilterMode::Nearest,
+        anisotropy_clamp: 1,
+        ..Default::default()
+    }
+}
+
 impl MaterialDetailGpu {
     pub(crate) fn new(device: &Device, queue: &Queue) -> Self {
         let atlas = MaterialDetailAtlas::generate();
@@ -100,17 +116,7 @@ impl MaterialDetailGpu {
         };
         let albedo_view = albedo_texture.create_view(&view_descriptor);
         let normal_roughness_view = normal_roughness_texture.create_view(&view_descriptor);
-        let sampler = device.create_sampler(&SamplerDescriptor {
-            label: Some("material detail sampler"),
-            address_mode_u: AddressMode::Repeat,
-            address_mode_v: AddressMode::Repeat,
-            address_mode_w: AddressMode::ClampToEdge,
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mipmap_filter: MipmapFilterMode::Linear,
-            anisotropy_clamp: 2,
-            ..Default::default()
-        });
+        let sampler = device.create_sampler(&material_detail_sampler_descriptor());
         Self {
             _albedo_texture: albedo_texture,
             _normal_roughness_texture: normal_roughness_texture,
@@ -433,6 +439,15 @@ mod tests {
         for (layer, material) in Material::ALL.into_iter().enumerate() {
             assert_eq!(usize::from(material.id()), layer);
         }
+    }
+
+    #[test]
+    fn material_detail_sampling_preserves_pixel_edges() {
+        let sampler = material_detail_sampler_descriptor();
+        assert_eq!(sampler.mag_filter, FilterMode::Nearest);
+        assert_eq!(sampler.min_filter, FilterMode::Nearest);
+        assert_eq!(sampler.mipmap_filter, MipmapFilterMode::Nearest);
+        assert_eq!(sampler.anisotropy_clamp, 1);
     }
 
     #[test]
