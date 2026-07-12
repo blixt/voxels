@@ -55,6 +55,7 @@ const SNAPSHOT = {
 };
 const FRAME_SAMPLE_WIDTH = 5;
 const FRAME_SAMPLE_START = 70;
+const EDIT_SAMPLE_WIDTH = 6;
 
 function percentile(values, fraction) {
   if (values.length === 0) return 0;
@@ -144,10 +145,30 @@ async function capture(page) {
     const start = FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH;
     samples.push(snapshot.slice(start, start + FRAME_SAMPLE_WIDTH));
   }
+  const editStart = FRAME_SAMPLE_START + count * FRAME_SAMPLE_WIDTH;
+  const editCount = snapshot[editStart + 9];
+  const editSamples = [];
+  for (let index = 0; index < editCount; index += 1) {
+    const start = editStart + 11 + index * EDIT_SAMPLE_WIDTH;
+    editSamples.push(snapshot.slice(start, start + EDIT_SAMPLE_WIDTH));
+  }
   return {
     snapshot,
     samples,
     dropped: snapshot[SNAPSHOT.droppedSamples],
+    edit: {
+      phase: snapshot[editStart],
+      nextOperation: snapshot[editStart + 1],
+      totalOperations: snapshot[editStart + 2],
+      restored: snapshot[editStart + 3] === 1,
+      baselineEdits: snapshot[editStart + 4],
+      currentEdits: snapshot[editStart + 5],
+      inFlight: snapshot[editStart + 6],
+      completed: snapshot[editStart + 7],
+      superseded: snapshot[editStart + 8],
+      dropped: snapshot[editStart + 10],
+      samples: editSamples,
+    },
     gpuSample:
       snapshot[SNAPSHOT.gpuSampleId] > 0
         ? {
@@ -160,6 +181,84 @@ async function capture(page) {
           }
         : null,
   };
+}
+
+async function editProfile(page) {
+  await page.evaluate(() => globalThis.__VOXELS__.profile(2));
+  const captures = [];
+  const samples = [];
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const next = await capture(page);
+    captures.push(next);
+    samples.push(...next.edit.samples);
+    if (next.edit.phase === 3 || next.edit.phase === 4) break;
+    await page.waitForTimeout(50);
+  }
+  const latest = captures.at(-1);
+  if (!latest || latest.edit.phase !== 3) {
+    throw new Error(`Rust edit profile did not converge: ${JSON.stringify(latest?.edit)}`);
+  }
+  const column = (index) => samples.map((sample) => sample[index]);
+  const result = {
+    operations: samples.length,
+    frame: phaseSummary(captures).frameMs,
+    enqueueMs: summary(column(3)),
+    canonicalMs: summary(column(4)),
+    fullConvergenceMs: summary(column(5)),
+    final: {
+      restored: latest.edit.restored,
+      baselineEdits: latest.edit.baselineEdits,
+      currentEdits: latest.edit.currentEdits,
+      inFlight: latest.edit.inFlight,
+      completed: latest.edit.completed,
+      superseded: latest.edit.superseded,
+      droppedSamples: captures.reduce((total, capture) => total + capture.edit.dropped, 0),
+      pendingJobs: latest.snapshot[SNAPSHOT.pendingJobs],
+      pendingMeshMiB: latest.snapshot[SNAPSHOT.pendingMeshMiB],
+    },
+  };
+  const violations = [];
+  const ordinals = column(0);
+  if (samples.length !== 40) violations.push("did not record exactly 40 operations");
+  if (!ordinals.every((ordinal, index) => ordinal === index + 1)) {
+    violations.push("operation sequence is incomplete or reordered");
+  }
+  for (const targetClass of [1, 2]) {
+    for (const operation of [1, 2]) {
+      const countForKind = samples.filter(
+        (sample) => sample[1] === targetClass && sample[2] === operation,
+      ).length;
+      if (countForKind !== 10) {
+        violations.push(`class ${targetClass} operation ${operation} count was ${countForKind}`);
+      }
+    }
+  }
+  if (!result.final.restored || result.final.currentEdits !== result.final.baselineEdits) {
+    violations.push("sparse edit map was not restored to its pristine baseline");
+  }
+  if (result.final.inFlight !== 0) violations.push("edit tracker did not drain");
+  if (result.final.completed !== 40) violations.push("completion count was not 40");
+  if (result.final.superseded !== 0) violations.push("an edit was superseded");
+  if (result.final.droppedSamples !== 0) violations.push("edit samples were dropped");
+  if (result.final.pendingJobs !== 0) violations.push("streaming queues did not drain");
+  if (result.final.pendingMeshMiB !== 0) violations.push("pending mesh payload did not drain");
+  if (result.enqueueMs.p95 > 8 || result.enqueueMs.max > 25) {
+    violations.push("persistence enqueue latency exceeded 8ms p95 or 25ms max");
+  }
+  if (result.canonicalMs.p95 > 100 || result.canonicalMs.max > 200) {
+    violations.push("canonical replacement exceeded 100ms p95 or 200ms max");
+  }
+  if (result.fullConvergenceMs.p95 > 150 || result.fullConvergenceMs.max > 250) {
+    violations.push("full LOD convergence exceeded 150ms p95 or 250ms max");
+  }
+  if (result.frame.p95 > 16.67 || result.frame.above33_33ms > 0) {
+    violations.push("edit phase missed the interactive frame-time gate");
+  }
+  if (violations.length > 0) {
+    throw new Error(`edit profile violations: ${violations.join(", ")}`);
+  }
+  return result;
 }
 
 async function sample(page, durationMs) {
@@ -303,6 +402,7 @@ async function reserveEphemeralPort() {
 
 const viewport = { width: 1280, height: 720 };
 const sustained = process.argv.includes("--sustained");
+const edits = process.argv.includes("--edits");
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
@@ -342,7 +442,9 @@ try {
   const settledMilliseconds = performance.now() - navigationStarted;
 
   let scenarios;
-  if (sustained) {
+  if (edits) {
+    scenarios = { edits: await editProfile(page) };
+  } else if (sustained) {
     scenarios = { sustained: await sustainedProfile(page) };
   } else {
     const steady = phaseSummary(await sample(page, 4_000));

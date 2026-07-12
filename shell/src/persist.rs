@@ -193,6 +193,10 @@ impl Store {
         })
     }
 
+    pub fn owns_persistence(&self) -> bool {
+        self.coordinator.leader.borrow().is_some()
+    }
+
     pub fn shutdown(&self) {
         self.coordinator.shutdown();
     }

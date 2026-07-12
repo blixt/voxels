@@ -70,6 +70,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-performance.mjs --sustained",
         cache: false,
       },
+      "profile:edits": {
+        command: "node scripts/browser-performance.mjs --edits",
+        cache: false,
+      },
       "test:persistence-browser": {
         command: "node scripts/browser-persistence-test.mjs",
         cache: false,

@@ -38,6 +38,9 @@ mod web {
     const SNAPSHOT_SCHEMA_VERSION: f32 = 6.0;
     const MAX_EDIT_TRACKERS: usize = 128;
     const COAST_WATER_REFERENCE: [i32; 2] = [18_016, 12_896];
+    const EDIT_PROFILE_TERRAIN: [i32; 3] = [18_016, -12, 12_896];
+    const EDIT_PROFILE_WATER: [i32; 3] = [18_016, 10, 12_896];
+    const EDIT_PROFILE_OPERATIONS: u8 = 40;
     const STREAM_FRAME_BUDGET: FrameBudget = FrameBudget {
         generation: 2,
         meshing: 1,
@@ -121,6 +124,7 @@ mod web {
 
     struct EditTracker {
         target: VoxelCoord,
+        ordinal: u8,
         class: u8,
         operation: u8,
         started_ms: f64,
@@ -131,6 +135,7 @@ mod web {
 
     #[derive(Clone, Copy, Default)]
     struct EditSample {
+        ordinal: f32,
         class: f32,
         operation: f32,
         enqueue_ms: f32,
@@ -172,6 +177,7 @@ mod web {
             for offset in 0..self.len {
                 let sample = self.samples[(first + offset) % EDIT_HISTORY_CAPACITY];
                 values.extend_from_slice(&[
+                    sample.ordinal,
                     sample.class,
                     sample.operation,
                     sample.enqueue_ms,
@@ -181,6 +187,34 @@ mod web {
             }
             self.len = 0;
             self.dropped = 0;
+        }
+    }
+
+    #[repr(u8)]
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    enum EditProfilePhase {
+        #[default]
+        Idle = 0,
+        Settling = 1,
+        Running = 2,
+        Complete = 3,
+        Failed = 4,
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct EditProfile {
+        phase: EditProfilePhase,
+        next_operation: u8,
+        baseline_edits: usize,
+        restored: bool,
+    }
+
+    impl EditProfile {
+        fn active(self) -> bool {
+            matches!(
+                self.phase,
+                EditProfilePhase::Settling | EditProfilePhase::Running
+            )
         }
     }
 
@@ -244,6 +278,7 @@ mod web {
         edit_history: RefCell<EditHistory>,
         edit_completed: Cell<u32>,
         edit_superseded: Cell<u32>,
+        edit_profile: Cell<EditProfile>,
         profile: RefCell<ProfileAutomation>,
         profile_tracked_high: Cell<usize>,
         profile_surface_high: Cell<usize>,
@@ -284,7 +319,15 @@ mod web {
         }
 
         fn start_profile(&self, profile_id: u32) -> bool {
-            if profile_id != 1 {
+            match profile_id {
+                1 => self.start_stream_profile(),
+                2 => self.start_edit_profile(),
+                _ => false,
+            }
+        }
+
+        fn start_stream_profile(&self) -> bool {
+            if self.edit_profile.get().active() {
                 return false;
             }
             self.input.borrow_mut().clear();
@@ -299,6 +342,63 @@ mod web {
             self.profile_start_evictions
                 .set(self.scheduler.borrow().diagnostics().total_evictions);
             true
+        }
+
+        fn start_edit_profile(&self) -> bool {
+            let terrain = voxel_coord(EDIT_PROFILE_TERRAIN);
+            let water = voxel_coord(EDIT_PROFILE_WATER);
+            if self.profile.borrow().running() {
+                return self.refuse_edit_profile(1, "streaming profile is active");
+            }
+            if !self.store.borrow().owns_persistence() {
+                return self.refuse_edit_profile(2, "tab does not own persistence");
+            }
+            if !self.edit_trackers.borrow().is_empty() {
+                return self.refuse_edit_profile(3, "prior edits are still converging");
+            }
+            if self.generator.sample(terrain.x, terrain.y, terrain.z) != Material::Sand {
+                return self.refuse_edit_profile(4, "terrain fixture no longer resolves to sand");
+            }
+            if self.generator.sample(water.x, water.y, water.z) != Material::Water {
+                return self.refuse_edit_profile(5, "water fixture no longer resolves to water");
+            }
+            let edits = self.edits.borrow();
+            if edits.override_at(terrain).is_some() || edits.override_at(water).is_some() {
+                drop(edits);
+                return self.refuse_edit_profile(6, "fixture has existing local voxel edits");
+            }
+            let baseline_edits = edits.len();
+            drop(edits);
+
+            let mut camera = CameraState::spawn(glam::Vec3::new(
+                (EDIT_PROFILE_TERRAIN[0] as f32 + 0.5) * VOXEL_SIZE_METRES,
+                2.74,
+                (EDIT_PROFILE_TERRAIN[2] as f32 + 0.5) * VOXEL_SIZE_METRES,
+            ));
+            camera.yaw = 0.35;
+            camera.pitch = 0.12;
+            *self.camera.borrow_mut() = camera;
+            self.input.borrow_mut().clear();
+            *self.edit_history.borrow_mut() = EditHistory::new();
+            self.edit_completed.set(0);
+            self.edit_superseded.set(0);
+            self.edit_profile.set(EditProfile {
+                phase: EditProfilePhase::Settling,
+                next_operation: 0,
+                baseline_edits,
+                restored: false,
+            });
+            true
+        }
+
+        fn refuse_edit_profile(&self, code: u8, reason: &str) -> bool {
+            self.edit_profile.set(EditProfile {
+                phase: EditProfilePhase::Failed,
+                next_operation: code,
+                ..EditProfile::default()
+            });
+            log_gpu_error(&format!("edit profile refused: {reason}"));
+            false
         }
 
         fn frame(&self, time: f64) {
@@ -317,6 +417,7 @@ mod web {
             let simulation_start = performance_now(performance.as_ref());
             let mut camera = self.camera.borrow_mut();
             let profiling = self.profile.borrow().running();
+            let edit_profiling = self.edit_profile.get().active();
             let edits = self.edits.borrow();
             let mut generated_columns = BTreeMap::new();
             let mut accumulator = (self.simulation_accumulator.get() + dt.min(0.1))
@@ -325,7 +426,7 @@ mod web {
             while accumulator >= SIMULATION_STEP_SECONDS && steps < MAX_SIMULATION_STEPS_PER_FRAME {
                 if profiling {
                     self.profile.borrow_mut().advance_fixed_step();
-                } else {
+                } else if !edit_profiling {
                     camera.update(
                         &self.input.borrow(),
                         SIMULATION_STEP_SECONDS,
@@ -449,6 +550,7 @@ mod web {
             let rendered = renderer.diagnostics();
             drop(renderer);
             self.update_edit_convergence(time, submitted);
+            self.advance_edit_profile(all_lods_ready, submitted);
             if self.profile.borrow().phase() != ProfilePhase::Idle {
                 let pending = stream.generation.queued
                     + stream.meshing.queued
@@ -947,7 +1049,8 @@ mod web {
 
             let generated = self.generator.sample(target.x, target.y, target.z);
             let durable = (material != generated).then_some(material);
-            self.submit_local_edit(target, durable, 0, u8::from(material == Material::Air));
+            let _ =
+                self.submit_local_edit(target, durable, 0, u8::from(material == Material::Air), 0);
         }
 
         fn apply_remote_edits(&self) {
@@ -969,7 +1072,8 @@ mod web {
             durable: Option<Material>,
             class: u8,
             operation: u8,
-        ) {
+            ordinal: u8,
+        ) -> [usize; 2] {
             let performance = self.scope.performance();
             let started_ms = performance_now(performance.as_ref());
             if let Err(error) = self.store.borrow().save_edit(target, durable) {
@@ -977,6 +1081,7 @@ mod web {
             }
             let enqueue_ms = (performance_now(performance.as_ref()) - started_ms) as f32;
             let requirements = self.apply_durable_edit(target, durable);
+            let counts = [requirements.canonical.len(), requirements.surface.len()];
             let mut trackers = self.edit_trackers.borrow_mut();
             if let Some(index) = trackers.iter().position(|tracker| tracker.target == target) {
                 trackers.remove(index);
@@ -990,6 +1095,7 @@ mod web {
             }
             trackers.push_back(EditTracker {
                 target,
+                ordinal,
                 class,
                 operation,
                 started_ms,
@@ -997,6 +1103,7 @@ mod web {
                 canonical_ms: None,
                 requirements,
             });
+            counts
         }
 
         fn apply_durable_edit(
@@ -1078,6 +1185,7 @@ mod web {
                 });
                 if canonical_ready && surface_ready {
                     self.edit_history.borrow_mut().push(EditSample {
+                        ordinal: f32::from(tracker.ordinal),
                         class: f32::from(tracker.class),
                         operation: f32::from(tracker.operation),
                         enqueue_ms: tracker.enqueue_ms,
@@ -1091,6 +1199,74 @@ mod web {
                 }
             }
             *trackers = pending;
+        }
+
+        fn advance_edit_profile(&self, all_lods_ready: bool, submitted: bool) {
+            let profile = self.edit_profile.get();
+            match profile.phase {
+                EditProfilePhase::Idle | EditProfilePhase::Complete | EditProfilePhase::Failed => {
+                    return;
+                }
+                EditProfilePhase::Settling => {
+                    if submitted
+                        && all_lods_ready
+                        && self.surface_focus.get() == self.surface_active_focus.get()
+                    {
+                        self.edit_profile.set(EditProfile {
+                            phase: EditProfilePhase::Running,
+                            ..profile
+                        });
+                    }
+                    return;
+                }
+                EditProfilePhase::Running => {}
+            }
+            if !submitted || !all_lods_ready || !self.edit_trackers.borrow().is_empty() {
+                return;
+            }
+            if profile.next_operation == EDIT_PROFILE_OPERATIONS {
+                let terrain = voxel_coord(EDIT_PROFILE_TERRAIN);
+                let water = voxel_coord(EDIT_PROFILE_WATER);
+                let restored = self.edits.borrow().len() == profile.baseline_edits
+                    && self.edits.borrow().override_at(terrain).is_none()
+                    && self.edits.borrow().override_at(water).is_none()
+                    && self.edit_completed.get() == u32::from(EDIT_PROFILE_OPERATIONS)
+                    && self.edit_superseded.get() == 0;
+                self.edit_profile.set(EditProfile {
+                    phase: if restored {
+                        EditProfilePhase::Complete
+                    } else {
+                        EditProfilePhase::Failed
+                    },
+                    restored,
+                    ..profile
+                });
+                return;
+            }
+
+            let step = profile.next_operation % 4;
+            let (target, class) = if step < 2 {
+                (voxel_coord(EDIT_PROFILE_TERRAIN), 1)
+            } else {
+                (voxel_coord(EDIT_PROFILE_WATER), 2)
+            };
+            let removing = step == 0 || step == 2;
+            let counts = self.submit_local_edit(
+                target,
+                removing.then_some(Material::Air),
+                class,
+                if removing { 1 } else { 2 },
+                profile.next_operation + 1,
+            );
+            self.edit_profile.set(EditProfile {
+                phase: if counts == [3, 4] {
+                    EditProfilePhase::Running
+                } else {
+                    EditProfilePhase::Failed
+                },
+                next_operation: profile.next_operation + 1,
+                ..profile
+            });
         }
 
         fn raycast_target(&self, camera: &CameraState) -> Option<VoxelHit> {
@@ -1253,7 +1429,14 @@ mod web {
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
+                let edit_profile = engine.edit_profile.get();
                 values.extend_from_slice(&[
+                    edit_profile.phase as u8 as f32,
+                    edit_profile.next_operation as f32,
+                    EDIT_PROFILE_OPERATIONS as f32,
+                    if edit_profile.restored { 1.0 } else { 0.0 },
+                    edit_profile.baseline_edits as f32,
+                    engine.edits.borrow().len() as f32,
                     engine.edit_trackers.borrow().len() as f32,
                     engine.edit_completed.get() as f32,
                     engine.edit_superseded.get() as f32,
@@ -1395,6 +1578,7 @@ mod web {
             edit_history: RefCell::new(EditHistory::new()),
             edit_completed: Cell::new(0),
             edit_superseded: Cell::new(0),
+            edit_profile: Cell::new(EditProfile::default()),
             profile: RefCell::new(ProfileAutomation::default()),
             profile_tracked_high: Cell::new(0),
             profile_surface_high: Cell::new(0),
@@ -1414,6 +1598,10 @@ mod web {
 
     const fn coord_key(coord: ChunkCoord) -> (i32, i32, i32) {
         (coord.x, coord.y, coord.z)
+    }
+
+    const fn voxel_coord(coord: [i32; 3]) -> VoxelCoord {
+        VoxelCoord::new(coord[0], coord[1], coord[2])
     }
 
     fn usize_to_u32(value: usize) -> u32 {
