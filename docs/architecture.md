@@ -124,8 +124,9 @@ coordinates. A single projection returns the nearest segment, tangent, signed la
 cumulative distance, core coverage, and shoulder blend. The column generator first produces natural
 terrain and then applies that route exactly once, so canonical chunks, collision, edits, water,
 surface LOD, and random-access sampling cannot disagree. The 3.6 m bed is fully graded while a smooth
-shoulder reaches 5.4 m from center; host invariants limit longitudinal steps to the player's 30 cm
-step height and preserve a dry cardinal-connected sampled core at all four LOD strides.
+shoulder reaches 5.4 m from center; host invariants limit longitudinal cuts to 30 cm, below the
+player's 35 cm step height, and preserve a dry cardinal-connected sampled core at all four LOD
+strides.
 
 Generator v10 gives the route five stable `(route id, ordinal)` landmarks at 28.8 m cadence. Route
 cells take precedence over ambient placement and alternate sides while cycling editable cairns,
