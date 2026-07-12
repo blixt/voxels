@@ -10,7 +10,7 @@ const ROUTE_TOKEN_END_MARGIN_VOXELS: f32 = 96.0;
 const FEATURE_ANCHOR_MARGIN_VOXELS: i32 = 12;
 const ROUTE_BIN_EDGE_VOXELS: i32 = 256;
 const LINEAR_ROUTE_SEGMENT_LIMIT: usize = 16;
-pub const FIRST_PILGRIM_ROAD_BOUNDS: [[i32; 2]; 2] = [[-1_234, -6], [55, 1_249]];
+pub const FIRST_PILGRIM_ROAD_BOUNDS: [[i32; 2]; 2] = [[-5_330, -6], [55, 4_255]];
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -26,10 +26,11 @@ pub struct RouteNode {
     pub z: i32,
 }
 
-/// Authored in canonical 10 cm voxel coordinates after a terrain-aware coarse search. The road begins
-/// beside spawn, crosses forest, moor, and badlands, then terminates at a prominent hoodoo. Its node
-/// grades require at most a 30 cm cut or 20 cm fill against generator v8's route-free terrain.
-pub const FIRST_PILGRIM_ROAD_NODES: [RouteNode; 6] = [
+/// Authored in canonical 10 cm voxel coordinates by a deterministic terrain-aware A* search, then
+/// simplified only where the exact 10 cm centerline and player-width cross-section retain a maximum
+/// 30 cm cut, 20 cm fill, and 12% grade against generator v11's route-free terrain. The road begins
+/// beside spawn and travels more than 700 metres through forest, moor, volcanic, and alpine country.
+pub const FIRST_PILGRIM_ROAD_NODES: [RouteNode; 42] = [
     RouteNode { x: 0, y: 35, z: 48 },
     RouteNode {
         x: -256,
@@ -55,6 +56,186 @@ pub const FIRST_PILGRIM_ROAD_NODES: [RouteNode; 6] = [
         x: -1_180,
         y: 36,
         z: 1_194,
+    },
+    RouteNode {
+        x: -1_244,
+        y: 36,
+        z: 1_194,
+    },
+    RouteNode {
+        x: -1_372,
+        y: 41,
+        z: 1_322,
+    },
+    RouteNode {
+        x: -1_436,
+        y: 43,
+        z: 1_322,
+    },
+    RouteNode {
+        x: -1_596,
+        y: 48,
+        z: 1_482,
+    },
+    RouteNode {
+        x: -1_692,
+        y: 43,
+        z: 1_578,
+    },
+    RouteNode {
+        x: -1_724,
+        y: 41,
+        z: 1_578,
+    },
+    RouteNode {
+        x: -1_756,
+        y: 40,
+        z: 1_578,
+    },
+    RouteNode {
+        x: -1_820,
+        y: 40,
+        z: 1_578,
+    },
+    RouteNode {
+        x: -2_204,
+        y: 41,
+        z: 1_962,
+    },
+    RouteNode {
+        x: -2_268,
+        y: 43,
+        z: 1_994,
+    },
+    RouteNode {
+        x: -2_492,
+        y: 47,
+        z: 1_994,
+    },
+    RouteNode {
+        x: -2_652,
+        y: 43,
+        z: 1_994,
+    },
+    RouteNode {
+        x: -2_844,
+        y: 34,
+        z: 2_186,
+    },
+    RouteNode {
+        x: -2_972,
+        y: 33,
+        z: 2_314,
+    },
+    RouteNode {
+        x: -3_068,
+        y: 35,
+        z: 2_410,
+    },
+    RouteNode {
+        x: -3_420,
+        y: 31,
+        z: 2_410,
+    },
+    RouteNode {
+        x: -3_452,
+        y: 31,
+        z: 2_442,
+    },
+    RouteNode {
+        x: -3_516,
+        y: 29,
+        z: 2_410,
+    },
+    RouteNode {
+        x: -4_028,
+        y: 29,
+        z: 2_410,
+    },
+    RouteNode {
+        x: -4_348,
+        y: 37,
+        z: 2_442,
+    },
+    RouteNode {
+        x: -4_412,
+        y: 35,
+        z: 2_474,
+    },
+    RouteNode {
+        x: -4_540,
+        y: 34,
+        z: 2_602,
+    },
+    RouteNode {
+        x: -4_636,
+        y: 35,
+        z: 2_698,
+    },
+    RouteNode {
+        x: -4_988,
+        y: 47,
+        z: 3_050,
+    },
+    RouteNode {
+        x: -4_988,
+        y: 49,
+        z: 3_210,
+    },
+    RouteNode {
+        x: -5_052,
+        y: 55,
+        z: 3_274,
+    },
+    RouteNode {
+        x: -5_020,
+        y: 54,
+        z: 3_306,
+    },
+    RouteNode {
+        x: -5_052,
+        y: 50,
+        z: 3_338,
+    },
+    RouteNode {
+        x: -5_084,
+        y: 48,
+        z: 3_370,
+    },
+    RouteNode {
+        x: -5_180,
+        y: 45,
+        z: 3_466,
+    },
+    RouteNode {
+        x: -5_276,
+        y: 44,
+        z: 3_562,
+    },
+    RouteNode {
+        x: -5_276,
+        y: 37,
+        z: 3_690,
+    },
+    RouteNode {
+        x: -5_244,
+        y: 38,
+        z: 3_818,
+    },
+    RouteNode {
+        x: -5_244,
+        y: 42,
+        z: 4_042,
+    },
+    RouteNode {
+        x: -5_212,
+        y: 44,
+        z: 4_106,
+    },
+    RouteNode {
+        x: -5_200,
+        y: 48,
+        z: 4_200,
     },
 ];
 
@@ -323,6 +504,12 @@ pub struct RouteAnchor {
     pub distance_along_voxels: i32,
 }
 
+#[derive(Debug)]
+struct RouteAnchorIndex {
+    by_ordinal: Box<[RouteAnchor]>,
+    by_feature_cell: Box<[RouteAnchor]>,
+}
+
 pub fn sample_first_pilgrim_road(x: i32, z: i32) -> Option<RouteSample> {
     let [[min_x, min_z], [max_x, max_z]] = FIRST_PILGRIM_ROAD_BOUNDS;
     if !(min_x..max_x).contains(&x) || !(min_z..max_z).contains(&z) {
@@ -342,71 +529,91 @@ pub fn first_pilgrim_road_point_at_distance(distance: f32) -> Option<([f32; 2], 
 }
 
 pub fn first_pilgrim_route_anchor_count() -> u16 {
-    let usable = first_pilgrim_road_length_voxels()
-        - ROUTE_TOKEN_START_VOXELS
-        - ROUTE_TOKEN_END_MARGIN_VOXELS;
-    if usable <= 0.0 {
-        0
-    } else {
-        (usable / ROUTE_TOKEN_CADENCE_VOXELS).floor() as u16 + 1
-    }
+    FIRST_PILGRIM_ROUTE_ANCHORS.by_ordinal.len() as u16
 }
 
 pub fn first_pilgrim_route_anchor(ordinal: u16) -> Option<RouteAnchor> {
-    if ordinal >= first_pilgrim_route_anchor_count() {
-        return None;
-    }
-    let distance = ROUTE_TOKEN_START_VOXELS + f32::from(ordinal) * ROUTE_TOKEN_CADENCE_VOXELS;
-    let (point, tangent) = FIRST_PILGRIM_ROAD_INDEX.point_at_distance(distance)?;
-    let side = if ordinal & 1 == 0 { 1.0 } else { -1.0 };
-    let raw = [
-        point[0] - tangent[1] * ROUTE_TOKEN_SIDE_OFFSET_VOXELS * side,
-        point[1] + tangent[0] * ROUTE_TOKEN_SIDE_OFFSET_VOXELS * side,
-    ];
-    let raw = [raw[0].round() as i32, raw[1].round() as i32];
-    let feature_cell = [
-        raw[0].div_euclid(FEATURE_CELL_VOXELS),
-        raw[1].div_euclid(FEATURE_CELL_VOXELS),
-    ];
-    let cell_min = [
-        feature_cell[0] * FEATURE_CELL_VOXELS,
-        feature_cell[1] * FEATURE_CELL_VOXELS,
-    ];
-    let anchor = [
-        raw[0].clamp(
-            cell_min[0] + FEATURE_ANCHOR_MARGIN_VOXELS,
-            cell_min[0] + FEATURE_CELL_VOXELS - FEATURE_ANCHOR_MARGIN_VOXELS - 1,
-        ),
-        raw[1].clamp(
-            cell_min[1] + FEATURE_ANCHOR_MARGIN_VOXELS,
-            cell_min[1] + FEATURE_CELL_VOXELS - FEATURE_ANCHOR_MARGIN_VOXELS - 1,
-        ),
-    ];
-    let role = if ordinal.is_multiple_of(3) {
-        RouteAnchorRole::RuinedArch
-    } else if ordinal & 1 == 0 {
-        RouteAnchorRole::Waystone
-    } else {
-        RouteAnchorRole::Cairn
-    };
-    Some(RouteAnchor {
-        route_id: RouteId::FirstPilgrimRoad,
-        ordinal,
-        role,
-        feature_cell,
-        anchor,
-        distance_along_voxels: distance.round() as i32,
-    })
+    FIRST_PILGRIM_ROUTE_ANCHORS
+        .by_ordinal
+        .get(usize::from(ordinal))
+        .copied()
 }
 
 pub fn first_pilgrim_route_anchor_for_feature_cell(
     cell_x: i32,
     cell_z: i32,
 ) -> Option<RouteAnchor> {
-    (0..first_pilgrim_route_anchor_count())
-        .filter_map(first_pilgrim_route_anchor)
-        .find(|anchor| anchor.feature_cell == [cell_x, cell_z])
+    let key = [cell_x, cell_z];
+    FIRST_PILGRIM_ROUTE_ANCHORS
+        .by_feature_cell
+        .binary_search_by_key(&key, |anchor| anchor.feature_cell)
+        .ok()
+        .map(|index| FIRST_PILGRIM_ROUTE_ANCHORS.by_feature_cell[index])
 }
+
+static FIRST_PILGRIM_ROUTE_ANCHORS: LazyLock<RouteAnchorIndex> = LazyLock::new(|| {
+    let usable = first_pilgrim_road_length_voxels()
+        - ROUTE_TOKEN_START_VOXELS
+        - ROUTE_TOKEN_END_MARGIN_VOXELS;
+    let count = if usable <= 0.0 {
+        0
+    } else {
+        (usable / ROUTE_TOKEN_CADENCE_VOXELS).floor() as u16 + 1
+    };
+    let by_ordinal = (0..count)
+        .filter_map(|ordinal| {
+            let distance =
+                ROUTE_TOKEN_START_VOXELS + f32::from(ordinal) * ROUTE_TOKEN_CADENCE_VOXELS;
+            let (point, tangent) = FIRST_PILGRIM_ROAD_INDEX.point_at_distance(distance)?;
+            let side = if ordinal & 1 == 0 { 1.0 } else { -1.0 };
+            let raw = [
+                point[0] - tangent[1] * ROUTE_TOKEN_SIDE_OFFSET_VOXELS * side,
+                point[1] + tangent[0] * ROUTE_TOKEN_SIDE_OFFSET_VOXELS * side,
+            ];
+            let raw = [raw[0].round() as i32, raw[1].round() as i32];
+            let feature_cell = [
+                raw[0].div_euclid(FEATURE_CELL_VOXELS),
+                raw[1].div_euclid(FEATURE_CELL_VOXELS),
+            ];
+            let cell_min = [
+                feature_cell[0] * FEATURE_CELL_VOXELS,
+                feature_cell[1] * FEATURE_CELL_VOXELS,
+            ];
+            let anchor = [
+                raw[0].clamp(
+                    cell_min[0] + FEATURE_ANCHOR_MARGIN_VOXELS,
+                    cell_min[0] + FEATURE_CELL_VOXELS - FEATURE_ANCHOR_MARGIN_VOXELS - 1,
+                ),
+                raw[1].clamp(
+                    cell_min[1] + FEATURE_ANCHOR_MARGIN_VOXELS,
+                    cell_min[1] + FEATURE_CELL_VOXELS - FEATURE_ANCHOR_MARGIN_VOXELS - 1,
+                ),
+            ];
+            let role = if ordinal.is_multiple_of(3) {
+                RouteAnchorRole::RuinedArch
+            } else if ordinal & 1 == 0 {
+                RouteAnchorRole::Waystone
+            } else {
+                RouteAnchorRole::Cairn
+            };
+            Some(RouteAnchor {
+                route_id: RouteId::FirstPilgrimRoad,
+                ordinal,
+                role,
+                feature_cell,
+                anchor,
+                distance_along_voxels: distance.round() as i32,
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let mut by_feature_cell = by_ordinal.clone().into_vec();
+    by_feature_cell.sort_unstable_by_key(|anchor| anchor.feature_cell);
+    RouteAnchorIndex {
+        by_ordinal,
+        by_feature_cell: by_feature_cell.into_boxed_slice(),
+    }
+});
 
 fn route_sample(
     route_id: RouteId,
@@ -608,8 +815,8 @@ mod tests {
                 point_and_tangent_at_distance_reference(&FIRST_PILGRIM_ROAD_NODES, distance as f32)
                     .unwrap();
             assert_eq!(indexed.1, reference.1);
-            assert!((indexed.0[0] - reference.0[0]).abs() <= 0.001);
-            assert!((indexed.0[1] - reference.0[1]).abs() <= 0.001);
+            assert!((indexed.0[0] - reference.0[0]).abs() <= 0.005);
+            assert!((indexed.0[1] - reference.0[1]).abs() <= 0.005);
         }
         for ordinal in 0..first_pilgrim_route_anchor_count() {
             let distance =
@@ -679,7 +886,7 @@ mod tests {
 
     #[test]
     fn short_routes_keep_the_exact_linear_candidate_order() {
-        let index = RouteIndex::new(RouteId::FirstPilgrimRoad, &FIRST_PILGRIM_ROAD_NODES);
+        let index = RouteIndex::new(RouteId::FirstPilgrimRoad, &FIRST_PILGRIM_ROAD_NODES[..6]);
         assert!(index.bins.is_empty());
         assert_eq!(index.bin_segment_slots.as_ref(), &[0, 1, 2, 3, 4]);
     }

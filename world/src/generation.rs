@@ -7,7 +7,7 @@ use crate::{
 };
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 11;
+pub const GENERATOR_VERSION: u32 = 12;
 pub const SEA_LEVEL_VOXELS: i32 = 10;
 const FEATURE_MIN_XZ_OFFSET: i32 = 2;
 const FEATURE_MAX_XZ_OFFSET: i32 = FEATURE_CELL_VOXELS - 3;
@@ -1153,7 +1153,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checksum, 0xc579_36e4_d617_c29f);
+        assert_eq!(checksum, 0x28fa_f332_1b0d_f3f0);
     }
 
     #[test]
@@ -1220,7 +1220,7 @@ mod tests {
     fn pilgrim_route_landmarks_override_ambient_placement_with_stable_identity() {
         let generator = Generator::new(0x5eed_cafe);
         let count = crate::first_pilgrim_route_anchor_count();
-        assert_eq!(count, 5);
+        assert_eq!(count, 26);
         let mut kinds = BTreeSet::new();
 
         for ordinal in 0..count {
@@ -1286,20 +1286,20 @@ mod tests {
     }
 
     #[test]
-    fn road_destination_retains_its_badlands_silhouette() {
+    fn road_destination_reaches_its_alpine_needle_gate() {
         let generator = Generator::new(0x5eed_cafe);
         let destination = crate::FIRST_PILGRIM_ROAD_NODES.last().unwrap();
         let nearby = generator.skyline_features_anchored_in([
             [destination.x - 512, destination.z - 512],
             [destination.x + 513, destination.z + 513],
         ]);
-        let badlands_landmark = nearby
+        let alpine_landmark = nearby
             .iter()
             .copied()
             .filter(|feature| {
                 matches!(
                     feature.kind,
-                    SkylineFeatureKind::BadlandsHoodoo | SkylineFeatureKind::BuriedRibs
+                    SkylineFeatureKind::NeedleGate | SkylineFeatureKind::AlpineNeedle
                 ) && feature.route_landmark.is_none()
             })
             .min_by_key(|feature| {
@@ -1307,13 +1307,13 @@ mod tests {
                 let dz = feature.anchor[2] - destination.z;
                 dx * dx + dz * dz
             })
-            .unwrap_or_else(|| panic!("destination catalog had no badlands landmark: {nearby:?}"));
-        let dx = badlands_landmark.anchor[0] - destination.x;
-        let dz = badlands_landmark.anchor[2] - destination.z;
+            .unwrap_or_else(|| panic!("destination catalog had no alpine landmark: {nearby:?}"));
+        let dx = alpine_landmark.anchor[0] - destination.x;
+        let dz = alpine_landmark.anchor[2] - destination.z;
         assert!(
-            dx * dx + dz * dz <= 100 * 100,
+            dx * dx + dz * dz <= 128 * 128,
             "nearest {:?} was offset by ({dx}, {dz}) voxels",
-            badlands_landmark.kind
+            alpine_landmark.kind
         );
     }
 
@@ -1427,7 +1427,7 @@ mod tests {
             crate::FeatureCompositionMode::ALL.into_iter().collect()
         );
         assert!(prominence_counts.into_iter().all(|count| count > 0));
-        assert_eq!(checksum, 0x52c3_3d22_2fc1_3363);
+        assert_eq!(checksum, 0x6386_6ec0_9717_c0a3);
     }
 
     #[test]
@@ -1471,11 +1471,36 @@ mod tests {
     fn pilgrim_road_is_dry_continuous_editable_ten_centimetre_terrain() {
         let generator = Generator::new(0x5eed_cafe);
         let length = crate::first_pilgrim_road_length_voxels() as i32;
+        assert!(
+            (7_000..=8_000).contains(&length),
+            "authored road length was {:.1} metres",
+            length as f32 * 0.1
+        );
+        for pair in FIRST_PILGRIM_ROAD_NODES.windows(2) {
+            let dx = (pair[1].x - pair[0].x) as f32;
+            let dz = (pair[1].z - pair[0].z) as f32;
+            let run = (dx * dx + dz * dz).sqrt();
+            let grade = (pair[1].y - pair[0].y).abs() as f32 / run;
+            assert!(grade <= 0.12, "authored road grade reached {grade:.3}");
+        }
+        for (point, expected) in [
+            ([-2_492, 1_994], SurfaceRegion::VerdantForest),
+            ([-3_516, 2_410], SurfaceRegion::WindMoor),
+            ([-4_988, 3_050], SurfaceRegion::Volcanic),
+            ([-5_200, 4_200], SurfaceRegion::Alpine),
+        ] {
+            assert_eq!(
+                generator.surface_sample(point[0], point[1]).region,
+                expected
+            );
+        }
         let mut previous: Option<i32> = None;
         let mut previous_point = None;
         let mut max_step = 0;
         let mut max_cut = 0;
         let mut max_fill = 0;
+        let mut max_cut_point = [0; 2];
+        let mut max_fill_point = [0; 2];
         let mut sampled_columns = 0;
         for distance in 0..=length {
             let (point, tangent) = crate::first_pilgrim_road_point_at_distance(distance as f32)
@@ -1502,8 +1527,16 @@ mod tests {
                 Material::Air
             );
             let natural = generator.natural_column_profile(point[0], point[1]);
-            max_cut = max_cut.max(natural.height - sample.height);
-            max_fill = max_fill.max(sample.height - natural.height);
+            let cut = natural.height - sample.height;
+            let fill = sample.height - natural.height;
+            if cut > max_cut {
+                max_cut = cut;
+                max_cut_point = point;
+            }
+            if fill > max_fill {
+                max_fill = fill;
+                max_fill_point = point;
+            }
             if let Some(previous) = previous {
                 max_step = max_step.max((sample.height - previous).abs());
             }
@@ -1524,8 +1557,14 @@ mod tests {
             max_step <= 3,
             "road longitudinal step was {max_step} voxels"
         );
-        assert!(max_cut <= 3, "road cut reached {max_cut} voxels");
-        assert!(max_fill <= 2, "road fill reached {max_fill} voxels");
+        assert!(
+            max_cut <= 3,
+            "road cut reached {max_cut} voxels at {max_cut_point:?}"
+        );
+        assert!(
+            max_fill <= 2,
+            "road fill reached {max_fill} voxels at {max_fill_point:?}"
+        );
     }
 
     #[test]

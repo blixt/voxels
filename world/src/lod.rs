@@ -1512,28 +1512,35 @@ mod tests {
     #[test]
     fn pilgrim_road_is_cardinal_connected_on_every_lod_sampling_lattice() {
         let generator = Generator::new(0x5eed_cafe);
-        let [[min_x, min_z], [max_x, max_z]] = crate::FIRST_PILGRIM_ROAD_BOUNDS;
         for level in SurfaceLodLevel::ALL {
             let stride = level.stride_voxels();
             let half = stride / 2;
-            let min_cell_x = (min_x - half).div_euclid(stride) - 1;
-            let max_cell_x = (max_x - 1 - half).div_euclid(stride) + 1;
-            let min_cell_z = (min_z - half).div_euclid(stride) - 1;
-            let max_cell_z = (max_z - 1 - half).div_euclid(stride) + 1;
             let mut core = BTreeSet::new();
-            for cell_z in min_cell_z..=max_cell_z {
-                for cell_x in min_cell_x..=max_cell_x {
-                    let x = cell_x * stride + half;
-                    let z = cell_z * stride + half;
-                    if crate::sample_first_pilgrim_road(x, z).is_some_and(|route| route.core > 0.02)
-                    {
-                        core.insert((cell_x, cell_z));
-                        let sample = generator.surface_sample(x, z);
-                        assert!(matches!(
-                            sample.material,
-                            Material::Limestone | Material::Stone
-                        ));
-                        assert!(sample.water_level.is_none());
+            let reach = crate::ROUTE_CORE_HALF_WIDTH_VOXELS.ceil() as i32 + stride;
+            for pair in crate::FIRST_PILGRIM_ROAD_NODES.windows(2) {
+                let min_x = pair[0].x.min(pair[1].x) - reach;
+                let max_x = pair[0].x.max(pair[1].x) + reach;
+                let min_z = pair[0].z.min(pair[1].z) - reach;
+                let max_z = pair[0].z.max(pair[1].z) + reach;
+                let min_cell_x = (min_x - half).div_euclid(stride) - 1;
+                let max_cell_x = (max_x - half).div_euclid(stride) + 1;
+                let min_cell_z = (min_z - half).div_euclid(stride) - 1;
+                let max_cell_z = (max_z - half).div_euclid(stride) + 1;
+                for cell_z in min_cell_z..=max_cell_z {
+                    for cell_x in min_cell_x..=max_cell_x {
+                        let x = cell_x * stride + half;
+                        let z = cell_z * stride + half;
+                        if crate::sample_first_pilgrim_road(x, z)
+                            .is_some_and(|route| route.core > 0.02)
+                            && core.insert((cell_x, cell_z))
+                        {
+                            let sample = generator.surface_sample(x, z);
+                            assert!(matches!(
+                                sample.material,
+                                Material::Limestone | Material::Stone
+                            ));
+                            assert!(sample.water_level.is_none());
+                        }
                     }
                 }
             }
@@ -1813,7 +1820,10 @@ mod tests {
                     .expect("route landmark should be anchor-owned")
             })
             .collect();
-        assert_eq!(features.len(), 5);
+        assert_eq!(
+            features.len(),
+            usize::from(crate::first_pilgrim_route_anchor_count())
+        );
 
         for feature in features {
             let [min, max] = feature.bounds();
