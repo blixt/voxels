@@ -278,6 +278,7 @@ mod web {
         edit_history: RefCell<EditHistory>,
         edit_completed: Cell<u32>,
         edit_superseded: Cell<u32>,
+        edit_last_ms: Cell<f32>,
         edit_profile: Cell<EditProfile>,
         profile: RefCell<ProfileAutomation>,
         profile_tracked_high: Cell<usize>,
@@ -532,6 +533,8 @@ mod web {
                     load_max_frames: stream.initial_residency_latency.max_frames,
                     remesh_p95_frames: stream.remesh_latency.p95_frames,
                     remesh_max_frames: stream.remesh_latency.max_frames,
+                    edit_last_ms: self.edit_last_ms.get(),
+                    edit_in_flight: usize_to_u32(self.edit_trackers.borrow().len()),
                     lod_tiles,
                     pending_jobs: usize_to_u32(
                         stream.generation.queued
@@ -1184,14 +1187,16 @@ mod web {
                         || !self.surface_tile_relevant(requirement.coord)
                 });
                 if canonical_ready && surface_ready {
+                    let full_ms = (now_ms - tracker.started_ms) as f32;
                     self.edit_history.borrow_mut().push(EditSample {
                         ordinal: f32::from(tracker.ordinal),
                         class: f32::from(tracker.class),
                         operation: f32::from(tracker.operation),
                         enqueue_ms: tracker.enqueue_ms,
                         canonical_ms: tracker.canonical_ms.unwrap_or_default(),
-                        full_ms: (now_ms - tracker.started_ms) as f32,
+                        full_ms,
                     });
+                    self.edit_last_ms.set(full_ms);
                     self.edit_completed
                         .set(self.edit_completed.get().saturating_add(1));
                 } else {
@@ -1578,6 +1583,7 @@ mod web {
             edit_history: RefCell::new(EditHistory::new()),
             edit_completed: Cell::new(0),
             edit_superseded: Cell::new(0),
+            edit_last_ms: Cell::new(0.0),
             edit_profile: Cell::new(EditProfile::default()),
             profile: RefCell::new(ProfileAutomation::default()),
             profile_tracked_high: Cell::new(0),

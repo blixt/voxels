@@ -244,6 +244,8 @@ pub struct LiveStats {
     pub load_max_frames: u64,
     pub remesh_p95_frames: u64,
     pub remesh_max_frames: u64,
+    pub edit_last_ms: f32,
+    pub edit_in_flight: u32,
     pub lod_tiles: [u32; 4],
     pub pending_jobs: u32,
     pub core_gpu_bytes: u64,
@@ -1071,7 +1073,13 @@ impl MissionControlUi {
                     ),
                 ),
                 ("LOAD P95", format!("{} f", stats.load_p95_frames)),
-                ("REMESH P95", format!("{} f", stats.remesh_p95_frames)),
+                (
+                    "REMESH / EDIT",
+                    format!(
+                        "{} f / {:.0} ms",
+                        stats.remesh_p95_frames, stats.edit_last_ms
+                    ),
+                ),
             ]
         } else {
             vec![
@@ -1098,14 +1106,18 @@ impl MissionControlUi {
                     format!("{} / {}", stats.draw_calls, stats.water_draw_calls),
                 ),
                 (
-                    "LOAD / REMESH P95",
-                    format!("{} / {} f", stats.load_p95_frames, stats.remesh_p95_frames),
+                    "LOAD / REMESH / EDIT",
+                    format!(
+                        "{} / {} f / {:.0} ms",
+                        stats.load_p95_frames, stats.remesh_p95_frames, stats.edit_last_ms
+                    ),
                 ),
                 (
-                    "JOBS / GPU",
+                    "JOBS + EDITS / GPU",
                     format!(
-                        "{} / {}",
+                        "{} + {} / {}",
                         stats.pending_jobs,
+                        stats.edit_in_flight,
                         compact_bytes(stats.core_gpu_bytes)
                     ),
                 ),
@@ -1434,6 +1446,8 @@ mod tests {
             load_max_frames: 31,
             remesh_p95_frames: 2,
             remesh_max_frames: 4,
+            edit_last_ms: 31.2,
+            edit_in_flight: 1,
             lod_tiles: [49, 49, 49, 81],
             pending_jobs: 7,
             core_gpu_bytes: 76 * 1_048_576,
@@ -1456,6 +1470,8 @@ mod tests {
                 .count(),
             9
         );
+        assert!(draw.text.iter().any(|run| run.text == "18 / 2 f / 31 ms"));
+        assert!(draw.text.iter().any(|run| run.text == "7 + 1 / 76.0 MiB"));
         assert_eq!(
             draw.glass
                 .iter()
@@ -1472,7 +1488,6 @@ mod tests {
         );
         assert!(draw.text.iter().any(|run| run.text == "123.4k / 8.2k"));
         assert!(draw.text.iter().any(|run| run.text == "132 / 12"));
-        assert!(draw.text.iter().any(|run| run.text == "7 / 76.0 MiB"));
     }
 
     #[test]
