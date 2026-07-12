@@ -72,7 +72,10 @@ impl Chunk {
 }
 
 const fn index(x: usize, y: usize, z: usize) -> usize {
-    debug_assert!(x < CHUNK_EDGE && y < CHUNK_EDGE && z < CHUNK_EDGE);
+    assert!(
+        x < CHUNK_EDGE && y < CHUNK_EDGE && z < CHUNK_EDGE,
+        "chunk-local coordinate is outside the chunk"
+    );
     // Y-Z-X traversal: X is contiguous, then Z, then Y. Horizontal runs stay cache-friendly for the
     // mesher while terrain layers remain compression-friendly.
     x + z * CHUNK_EDGE + y * CHUNK_EDGE * CHUNK_EDGE
@@ -90,5 +93,19 @@ mod tests {
         assert_eq!(chunk.get(31, 30, 29), Material::Snow);
         assert_eq!(chunk.get(30, 31, 29), Material::Air);
         assert_eq!(chunk.coord().world_origin(), [-64, 32, 96]);
+    }
+
+    #[test]
+    #[should_panic(expected = "chunk-local coordinate is outside the chunk")]
+    fn out_of_range_x_cannot_alias_the_next_z_row() {
+        let chunk = Chunk::empty(ChunkCoord::new(0, 0, 0));
+        let _ = chunk.get(CHUNK_EDGE, 0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "chunk-local coordinate is outside the chunk")]
+    fn out_of_range_z_cannot_alias_the_next_y_layer() {
+        let mut chunk = Chunk::empty(ChunkCoord::new(0, 0, 0));
+        chunk.set(0, 0, CHUNK_EDGE, Material::Stone);
     }
 }
