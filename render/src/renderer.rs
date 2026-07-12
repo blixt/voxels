@@ -2876,12 +2876,32 @@ fn preferred_format(formats: &[TextureFormat]) -> TextureFormat {
                 .copied()
                 .find(|format| *format == TextureFormat::Rgba8Unorm)
         })
+        // Presentation shaders already apply the sRGB transfer function. If the common 8-bit
+        // formats are absent, preserve that contract with any other linear surface format before
+        // accepting an sRGB target that would encode the output a second time.
+        .or_else(|| formats.iter().copied().find(|format| !format.is_srgb()))
         .unwrap_or(formats[0])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surface_format_fallback_keeps_explicit_srgb_encoding_linear() {
+        assert_eq!(
+            preferred_format(&[
+                TextureFormat::Bgra8UnormSrgb,
+                TextureFormat::Rgba16Float,
+                TextureFormat::Rgba8UnormSrgb,
+            ]),
+            TextureFormat::Rgba16Float
+        );
+        assert_eq!(
+            preferred_format(&[TextureFormat::Rgba8UnormSrgb, TextureFormat::Bgra8Unorm]),
+            TextureFormat::Bgra8Unorm
+        );
+    }
 
     #[test]
     fn radial_and_portal_activation_reasons_do_not_disable_each_other() {
