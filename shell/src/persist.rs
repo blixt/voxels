@@ -139,7 +139,7 @@ struct Coordinator {
 pub struct Store {
     coordinator: Rc<Coordinator>,
     initial_camera: Option<CameraState>,
-    initial_edits: EditMap,
+    initial_edits: Option<EditMap>,
 }
 
 impl Store {
@@ -162,12 +162,12 @@ impl Store {
         Ok(Self {
             coordinator,
             initial_camera,
-            initial_edits,
+            initial_edits: Some(initial_edits),
         })
     }
 
-    pub fn load_camera(&self) -> Result<Option<CameraState>, JsValue> {
-        Ok(self.initial_camera)
+    pub fn load_camera(&mut self) -> Result<Option<CameraState>, JsValue> {
+        Ok(self.initial_camera.take())
     }
 
     pub fn save_camera(&self, camera: &CameraState) -> Result<(), JsValue> {
@@ -180,8 +180,10 @@ impl Store {
         ]))
     }
 
-    pub fn load_edits(&self) -> Result<EditMap, JsValue> {
-        Ok(self.initial_edits.clone())
+    pub fn load_edits(&mut self) -> Result<EditMap, JsValue> {
+        self.initial_edits
+            .take()
+            .ok_or_else(|| JsValue::from_str("initial edits were already loaded"))
     }
 
     pub fn save_edit(&self, coord: VoxelCoord, material: Option<Material>) -> Result<(), JsValue> {

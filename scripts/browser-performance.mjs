@@ -32,12 +32,18 @@ const SNAPSHOT = {
   gpuWorldMs: 47,
   gpuWaterMs: 48,
   gpuUiMs: 49,
-  schemaVersion: 50,
-  sampleCount: 51,
-  droppedSamples: 52,
+  wasmCommittedMiB: 50,
+  canonicalVoxelMiB: 51,
+  pendingMeshMiB: 52,
+  editLogicalMiB: 53,
+  totalEvictions: 54,
+  staleCompletions: 55,
+  schemaVersion: 56,
+  sampleCount: 57,
+  droppedSamples: 58,
 };
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 53;
+const FRAME_SAMPLE_START = 59;
 
 function percentile(values, fraction) {
   if (values.length === 0) return 0;
@@ -100,6 +106,14 @@ function phaseSummary(captures) {
     meshArenaAllocatedMiB: latest[SNAPSHOT.arenaAllocatedMiB],
     meshArenaCapacityMiB: latest[SNAPSHOT.arenaCapacityMiB],
     refractionCopyMiB: latest[SNAPSHOT.refractionCopyMiB],
+    memory: {
+      wasmCommittedMiB: latest[SNAPSHOT.wasmCommittedMiB],
+      canonicalVoxelMiB: latest[SNAPSHOT.canonicalVoxelMiB],
+      pendingMeshMiB: latest[SNAPSHOT.pendingMeshMiB],
+      editLogicalMiB: latest[SNAPSHOT.editLogicalMiB],
+    },
+    totalEvictions: latest[SNAPSHOT.totalEvictions],
+    staleCompletions: latest[SNAPSHOT.staleCompletions],
     loadLatencyFrames: {
       p95: latest[SNAPSHOT.loadP95Frames],
       max: latest[SNAPSHOT.loadMaxFrames],
@@ -153,7 +167,7 @@ async function waitForEngine(page) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
     lastSnapshot = snapshot;
     if (
-      snapshot[SNAPSHOT.schemaVersion] === 3 &&
+      snapshot[SNAPSHOT.schemaVersion] === 4 &&
       snapshot[SNAPSHOT.quads] > 0 &&
       snapshot[SNAPSHOT.residentChunks] > 0 &&
       snapshot[SNAPSHOT.pendingJobs] === 0

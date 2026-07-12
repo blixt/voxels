@@ -48,6 +48,17 @@ pub struct EditMap {
 }
 
 impl EditMap {
+    /// Known logical B-tree payload. This deliberately excludes allocator/node overhead while
+    /// counting the authoritative row and both lookup-index rows retained for every edit.
+    pub fn logical_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.overrides.len() * size_of::<(VoxelCoord, Material)>()
+            + self.chunk_overrides.len()
+                * size_of::<((i32, i32, i32), BTreeMap<[usize; 3], Material>)>()
+            + self.overrides.len() * size_of::<([usize; 3], Material)>()
+            + self.column_overrides.len() * size_of::<((i32, i32), BTreeMap<i32, Material>)>()
+            + self.overrides.len() * size_of::<(i32, Material)>()
+    }
     pub fn sample(&self, generator: Generator, coord: VoxelCoord) -> Material {
         self.overrides
             .get(&coord)
@@ -342,5 +353,19 @@ mod tests {
         assert_eq!(edits.override_at(coord), None);
         assert!(edits.chunk_overrides.is_empty());
         assert!(edits.column_overrides.is_empty());
+    }
+
+    #[test]
+    fn logical_memory_tracks_rows_without_growing_on_replacement() {
+        let coord = VoxelCoord::new(7, 8, 9);
+        let mut edits = EditMap::default();
+        let empty = edits.logical_bytes();
+        edits.insert_override(coord, Material::Clay);
+        let one_row = edits.logical_bytes();
+        edits.insert_override(coord, Material::Basalt);
+        assert_eq!(edits.logical_bytes(), one_row);
+        assert!(one_row > empty);
+        edits.replace_durable_override(coord, None);
+        assert_eq!(edits.logical_bytes(), empty);
     }
 }

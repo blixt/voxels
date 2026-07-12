@@ -16,9 +16,10 @@ mod web {
     use voxels_render::ui::LiveStats;
     use voxels_runtime::{ChunkState, FrameBudget, StreamConfig, StreamScheduler};
     use voxels_world::{
-        CHUNK_EDGE, Chunk, ChunkCoord, EditMap, Generator, Material, MeshedChunk, SurfaceLodLevel,
-        SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord, generate_edited_surface_tile_mesh,
-        generate_edited_water_tile_mesh, mesh_chunk, surface_tiles_affected_by_voxel,
+        CHUNK_EDGE, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord, EditMap, Generator, Material,
+        MeshedChunk, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
+        generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, mesh_chunk,
+        surface_tiles_affected_by_voxel,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -30,7 +31,7 @@ mod web {
     const SIMULATION_STEP_SECONDS: f32 = 1.0 / 120.0;
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 3.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 4.0;
     const COAST_WATER_REFERENCE: [i32; 2] = [18_016, 12_896];
     const STREAM_FRAME_BUDGET: FrameBudget = FrameBudget {
         generation: 2,
@@ -851,6 +852,18 @@ mod web {
                 let render = engine.renderer.borrow().diagnostics();
                 let target = engine.renderer.borrow().target_voxel();
                 let lod_tiles = engine.surface_lod_counts();
+                let canonical_voxel_bytes = engine
+                    .chunks
+                    .borrow()
+                    .len()
+                    .saturating_mul(CHUNK_VOXEL_BYTES);
+                let pending_mesh_bytes = engine
+                    .pending_meshes
+                    .borrow()
+                    .values()
+                    .map(MeshedChunk::retained_bytes)
+                    .sum::<usize>();
+                let edit_logical_bytes = engine.edits.borrow().logical_bytes();
                 values.extend_from_slice(&[
                     camera.position.x,
                     camera.position.y,
@@ -906,6 +919,12 @@ mod web {
                     render.gpu_world_ms.unwrap_or(-1.0),
                     render.gpu_water_ms.unwrap_or(-1.0),
                     render.gpu_ui_ms.unwrap_or(-1.0),
+                    wasm_committed_bytes() as f32 / (1024.0 * 1024.0),
+                    canonical_voxel_bytes as f32 / (1024.0 * 1024.0),
+                    pending_mesh_bytes as f32 / (1024.0 * 1024.0),
+                    edit_logical_bytes as f32 / (1024.0 * 1024.0),
+                    diagnostics.total_evictions as f32,
+                    diagnostics.stale_completions as f32,
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
@@ -938,7 +957,8 @@ mod web {
         let width = (css_width * dpr).round().max(1.0) as u32;
         let height = (css_height * dpr).round().max(1.0) as u32;
         let generator = Generator::new(WORLD_SEED);
-        let store = Store::open(WORLD_SEED, voxels_world::generation::GENERATOR_VERSION).await?;
+        let mut store =
+            Store::open(WORLD_SEED, voxels_world::generation::GENERATOR_VERSION).await?;
         let edits = store.load_edits()?;
         let spawn_z = 5.2;
         let spawn_voxel_z = (spawn_z / VOXEL_SIZE_METRES).floor() as i32;
@@ -1064,6 +1084,12 @@ mod web {
 
     fn performance_now(performance: Option<&web_sys::Performance>) -> f64 {
         performance.map_or(0.0, web_sys::Performance::now)
+    }
+
+    fn wasm_committed_bytes() -> u64 {
+        let memory: js_sys::WebAssembly::Memory = wasm_bindgen::memory().unchecked_into();
+        let buffer: js_sys::ArrayBuffer = memory.buffer().unchecked_into();
+        u64::from(buffer.byte_length())
     }
 
     fn world_to_chunk(position: glam::Vec3) -> ChunkCoord {

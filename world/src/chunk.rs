@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const CHUNK_EDGE: usize = 32;
 pub const CHUNK_VOLUME: usize = CHUNK_EDGE * CHUNK_EDGE * CHUNK_EDGE;
+pub const CHUNK_VOXEL_BYTES: usize = CHUNK_VOLUME * size_of::<Material>();
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct ChunkCoord {
@@ -83,6 +84,7 @@ mod tests {
 
     #[test]
     fn chunk_coordinates_do_not_alias() {
+        assert_eq!(CHUNK_VOXEL_BYTES, 65_536);
         let mut chunk = Chunk::empty(ChunkCoord::new(-2, 1, 3));
         chunk.set(31, 30, 29, Material::Snow);
         assert_eq!(chunk.get(31, 30, 29), Material::Snow);

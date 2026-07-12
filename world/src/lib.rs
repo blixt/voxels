@@ -8,7 +8,7 @@ pub mod lod;
 pub mod material;
 pub mod mesh;
 
-pub use chunk::{CHUNK_EDGE, CHUNK_VOLUME, Chunk, ChunkCoord};
+pub use chunk::{CHUNK_EDGE, CHUNK_VOLUME, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord};
 pub use edit::{EditMap, VoxelCoord};
 pub use generation::{
     GENERATOR_VERSION, GeneratedColumn, GeneratedRegion, Generator, SEA_LEVEL_VOXELS,

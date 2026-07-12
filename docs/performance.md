@@ -231,3 +231,28 @@ overlap or reorder passes, so individual pass durations are not summed and the i
 and water is not mislabeled as pure refraction-copy cost. The Rust Mission Control GPU field now shows
 the latest completed active-window sample; it remains an explicit unavailable value without adapter
 support.
+
+## 2026-07-12: live versus committed memory telemetry
+
+Snapshot schema v4 separates three kinds of memory instead of presenting one ambiguous total:
+
+- committed WASM linear memory, sampled from the current `WebAssembly.Memory` buffer;
+- known logical Rust payload for canonical voxel arrays, pending mesh vector capacity, and the
+  triple-indexed sparse edit map;
+- estimated core GPU resources, including mesh arena pages, scene/depth targets, shadows, and GPU
+  timestamp buffers.
+
+The logical figures exclude B-tree node/allocator overhead, SQLite internals, WGPU backend objects,
+and JavaScript allocations. Committed WASM memory includes allocator slack and opaque Rust/WASM
+consumers and may grow without shrinking, so neither is labeled process memory.
+
+The release run started at 20.875 MiB committed WASM with 15.188 MiB of canonical voxel payload.
+Short traversal grew those figures to 22.750 MiB and 18.000 MiB while retaining 288 chunks; after the
+underwater focus jump and queue drain, canonical payload returned to 15.188 MiB while committed WASM
+remained at its allocator high-water mark. Pending mesh payload returned to zero and the scheduler
+recorded 540 total evictions with no stale completion. A longer deterministic traversal is still
+required before setting a plateau regression ceiling.
+
+Persistence hydration now moves the initial `EditMap` into the engine exactly once. Previously the
+store cloned all three edit indices and retained the original for the entire session, creating an
+avoidable near-2x edit-journal payload before any new edit was made.

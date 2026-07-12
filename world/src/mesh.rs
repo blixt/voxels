@@ -37,6 +37,12 @@ impl MeshedChunk {
     pub fn is_empty(&self) -> bool {
         self.opaque.is_empty() && self.translucent.is_empty()
     }
+
+    pub fn retained_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.opaque.capacity() * size_of::<Quad>()
+            + self.translucent.capacity() * size_of::<Quad>()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -261,6 +267,13 @@ mod tests {
         assert_eq!(quads.len(), 6);
         assert!(quads.iter().all(|quad| quad.extent == [32, 32]));
         assert!(quads.iter().all(|quad| quad.ao == 0xff));
+    }
+
+    #[test]
+    fn retained_bytes_include_both_quad_allocations() {
+        let chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Water);
+        let mesh = mesh_chunk(&chunk, |_, _, _| Material::Air);
+        assert!(mesh.retained_bytes() >= size_of::<MeshedChunk>() + 6 * size_of::<Quad>());
     }
 
     #[test]
