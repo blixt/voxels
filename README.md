@@ -30,7 +30,7 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 
 The canonical world is generator identity plus sparse edits. Near meshes and four streamed surface LOD
 rings are derived caches; the rings sample at 0.2, 0.4, 0.8, and 1.6 m while the editable near field
-retains authoritative 10 cm voxels. Generator v4 shares one regional surface sample across canonical
+retains authoritative 10 cm voxels. Generator v5 shares one regional surface sample across canonical
 chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
 conditional skirts, and activates a newly streamed coverage set only when it is complete.
@@ -47,8 +47,9 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 - Remove the targeted voxel with the left mouse button; place a grass voxel with the right mouse
   button. Sparse edits are saved transactionally in SQLite on OPFS.
 - Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and context menu
-  can toggle cascaded sun shadows, ambient occlusion, fog, far terrain, and target highlighting
-  without a DOM UI layer.
+  can toggle cascaded sun shadows, ambient occlusion, fog, far terrain, animated water, and target
+  highlighting without a DOM UI layer. Its Rust-rendered more menu can teleport to the coastal
+  showcase for repeatable graphics and streaming checks.
 
 ## Automation
 
@@ -56,6 +57,6 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 state, resident greedy-quad count, persisted edit count, resident chunk count, and tracked chunk
 count, followed by visible chunks, draw calls, arena pages, allocated/capacity MiB, and queued stream
 work and far-tile residency. It is intentionally an automation hook rather than a second JavaScript
-game model. The final eleven values are display-frame cadence in milliseconds, shadow-caster draws,
+game model. The final thirteen values are display-frame cadence in milliseconds, shadow-caster draws,
 active shadow cascades, load/remesh p95 and maximum latency in scheduler frames, and resident tile
-counts for each of the four surface LOD levels.
+counts for each of the four surface LOD levels, followed by visible water quads and water-pass draws.

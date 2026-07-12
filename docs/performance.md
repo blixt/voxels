@@ -91,9 +91,10 @@ self-consistency, and representation of all six regions.
 
 Surface residency now uses complete square coverage sets so every grid-aligned CPU ownership patch is
 available before activation. The four sets contain 81/81/81/121 tiles at the configured radii, up from
-49/49/49/81 circular sets. Each tile remains one GPU allocation but exposes sixteen 8x8-cell body
-ranges and four conditional edge-skirt ranges per patch. Color and all three shadow cascades filter the
-same ranges, and adjacent ranges still coalesce into a single draw span where allocation order permits.
+49/49/49/81 circular sets. Each terrain tile remains one GPU allocation but exposes sixteen 8x8-cell
+body ranges and four conditional edge-skirt ranges per patch. Color and all three shadow cascades
+filter the same ranges, and adjacent ranges still coalesce into a single draw span where allocation
+order permits.
 
 The larger coverage set is prepared behind the currently active set. A focus change retains active
 tiles while pending tiles generate, then swaps the grid-snapped ownership plan only when canonical and
@@ -125,3 +126,22 @@ edit case measured 0.164 ms and improved slightly, confirming that pristine-feat
 chunk buckets instead of scanning the edit journal. Host tests prove single anchor ownership, fixed
 patch coverage despite protruding culling bounds, cross-tile crown invalidation, proxy suppression on a
 canonical tree edit, and restoration when the edit returns to generated state.
+
+## 2026-07-12: authoritative water and draw-range packing
+
+Generator v5 and material schema v2 add editable canonical Water, edit-aware water masks at all four
+surface levels, and a dedicated two-pass translucent renderer. A pristine stride-8 water tile first
+measured 1.351 ms when every mask sample invoked the general 3D voxel sampler. Using the shared
+`SurfaceSample` for generated occupancy and consulting the sparse override index only at the sea cell
+reduced that work to 0.140 ms, an 89.6% reduction. The benchmark remains in `world/benches/world.rs`.
+
+The first coastal browser capture exposed 1,375 main-pass draw spans at full 81/81/81/121 surface
+residency. Transition skirt bytes were interleaved after every patch body, so rejecting internal skirts
+prevented otherwise adjacent bodies from coalescing. Packing all common bodies first, keeping skirts
+at the tail, and separating opaque/water arenas reduced the same view to 432 main-pass spans while
+holding the 120 Hz display cap. The view contained 127,800 total quads, including 503 visible water
+quads; the water depth/color pair required 94 draws across the patch-aligned LOD boundaries.
+
+Live browser validation also opened two tabs simultaneously and reloaded both twice in parallel. Both
+returned to a canvas-only rendered world with no OPFS/database warning or error. The only document-body
+children remained the canvas and its non-rendering module script.

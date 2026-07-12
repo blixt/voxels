@@ -40,13 +40,20 @@ authoritative near field keeps the required 10 cm voxel resolution and uses face
 rectangle merging. A column becomes render-ready only when all desired vertical chunks are resident,
 so a partially streamed stack cannot expose an open terrain slice.
 
-Generator v4 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
+Generator v5 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
 detail, dune, and volcanic fields. Six dominant regional identities—verdant forest, wind-cut moor,
 alpine, red badlands, pale dunes, and volcanic terrain—select surface ecology and geology, while their
 normalized weights blend height modifiers continuously across boundaries. Canonical generation, LOD
 surface summaries, edit overlays, and spawn queries consume that same sample. A reusable
 `GeneratedColumn` additionally caches terrain fields and tree intersections for repeated Y sampling,
 which keeps richer world logic from multiplying meshing-halo cost.
+
+Water is material 13 in material schema v2 and remains part of the same canonical 10 cm voxel field.
+It is renderable and editable but non-collidable and non-occluding. Low continental basins fill only
+the cells above terrain through the versioned sea level, never underground cave air. Near greedy
+meshes split opaque and translucent quads without duplicating a water face against an opaque bank.
+The edit journal stores Water/Air overrides exactly like every other material, so removing a surface
+cell and restoring its generated water are durable sparse operations rather than renderer effects.
 
 Four independently streamable surface rings derive from the same generator and sparse edit overlay at
 0.2, 0.4, 0.8, and 1.6 m sampling strides. Each tile covers 32 samples per side and emits a top plus
@@ -56,9 +63,18 @@ separately generated tiles form a closed shell without cracks. The coarsest ring
 All surface meshes remain disposable derivatives: the generator, 10 cm voxels, and sparse edits stay
 authoritative.
 
-Every surface tile is one arena allocation partitioned into sixteen contiguous 8x8-cell draw patches.
-Each patch also owns four separately addressable vertical skirts. The renderer submits a skirt only
-where that edge touches a different LOD owner, closing height disagreement without paying for internal
+Each surface level also derives an edit-aware, 2D-greedy water mask at the exact canonical sea Y.
+Water patches use the same CPU ownership bounds as terrain, but never inherit the lowered crack-hiding
+terrain underlay. Opaque terrain and translucent water use independent GPU arenas. A depth-only water
+prepass followed by a premultiplied-alpha color pass gives overlapping wave surfaces deterministic
+visibility without letting water cast solid shadows. The shader combines multi-directional procedural
+wave normals, Schlick Fresnel reflection, the shared sky/sun environment, distance absorption, HDR
+fog, and the same presentation transform as land.
+
+Every terrain surface tile is one opaque-arena allocation partitioned into sixteen contiguous
+8x8-cell draw patches; a non-empty water derivative uses the parallel water arena. Each terrain patch
+also owns four separately addressable vertical skirts. The renderer submits a skirt only where that
+edge touches a different LOD owner, closing height disagreement without paying for internal
 same-resolution walls.
 
 Coverage ownership changes at grid-snapped, half-open square boundaries aligned to every participating
@@ -145,9 +161,9 @@ the seed and generator version so an incompatible build cannot silently answer a
 - Never allocate or send one JavaScript object per input sample, voxel, face, or chunk.
 - Generate and mesh only dirty/resident chunks, with bounded work admitted each frame.
 - Mesh chunk boundaries using neighbor samples so hidden seam faces are not emitted.
-- Suballocate immutable chunk and surface-ring meshes from coalescing GPU arena pages, replacing only
-  the allocation whose source changes. Keep LOD patches as byte ranges within each tile allocation and
-  coalesce adjacent selected ranges into draw spans.
+- Suballocate immutable chunk and surface-ring meshes from separate coalescing opaque/water GPU arena
+  pages, replacing only the allocation whose source changes. Pack common patch bodies before optional
+  skirts and coalesce adjacent selected ranges into draw spans.
 - Frustum-cull chunks on CPU; add occlusion/indirect drawing only after GPU captures justify it.
 - Keep deterministic host benchmarks for generation, codec round-trips, meshing, and edit replay.
 - Expose lightweight browser frame and residency snapshots for end-to-end regression automation.
@@ -181,6 +197,11 @@ the seed and generator version so an incompatible build cannot silently answer a
 - Khronos PBR Neutral provides a bounded, hue-preserving reference display transform for linear HDR
   PBR output:
   <https://github.com/KhronosGroup/ToneMapping/tree/main/PBR_Neutral>
+- GPU Gems derives real-time water from summed directional waves, analytic surface derivatives, and
+  reflection/refraction rather than treating the surface as a flat alpha overlay:
+  <https://developer.nvidia.com/gpugems/gpugems/part-i-natural-effects/chapter-1-effective-water-simulation-physical-models>
+- WebGPU defines independent blend factors and depth-stencil state used by the water depth/color pair:
+  <https://www.w3.org/TR/webgpu/#blend-state>
 
 ## Deliberate non-goals for the conversion
 
