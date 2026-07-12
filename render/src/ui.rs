@@ -9,8 +9,7 @@ use std::collections::BTreeMap;
 const PANEL_INSET: f32 = 18.0;
 const PANEL_WIDTH: f32 = 360.0;
 const COMPACT_WIDTH: f32 = 292.0;
-const PANEL_HEIGHT: f32 = 528.0;
-const COMPACT_HEIGHT: f32 = 441.0;
+const BASE_FEATURE_COUNT: usize = 6;
 const HEADER_HEIGHT: f32 = 48.0;
 const PANEL_RADIUS: f32 = 18.0;
 const CONTENT_PAD: f32 = 14.0;
@@ -131,16 +130,18 @@ pub enum RendererFeature {
     FarTerrain,
     WaterSurface,
     TargetOutline,
+    MaterialSurfaceDetail,
 }
 
 impl RendererFeature {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::CascadedSunShadows,
         Self::VoxelAmbientOcclusion,
         Self::AtmosphericFog,
         Self::FarTerrain,
         Self::WaterSurface,
         Self::TargetOutline,
+        Self::MaterialSurfaceDetail,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -151,9 +152,14 @@ impl RendererFeature {
             Self::FarTerrain => "Far terrain",
             Self::WaterSurface => "Animated water surface",
             Self::TargetOutline => "Target outline",
+            Self::MaterialSurfaceDetail => "Material surface detail",
         }
     }
 }
+
+const FEATURE_COUNT: usize = RendererFeature::ALL.len();
+const PANEL_HEIGHT: f32 = 528.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 39.0;
+const COMPACT_HEIGHT: f32 = 441.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 34.0;
 
 const fn feature_index(feature: RendererFeature) -> usize {
     match feature {
@@ -163,6 +169,7 @@ const fn feature_index(feature: RendererFeature) -> usize {
         RendererFeature::FarTerrain => 3,
         RendererFeature::WaterSurface => 4,
         RendererFeature::TargetOutline => 5,
+        RendererFeature::MaterialSurfaceDetail => 6,
     }
 }
 
@@ -378,8 +385,8 @@ pub struct MissionControlUi {
     hovered: Option<UiTarget>,
     context_anchor: Option<[f32; 2]>,
     stats: LiveStats,
-    feature_enabled: [bool; 6],
-    feature_motion: [EasedValue; 6],
+    feature_enabled: [bool; FEATURE_COUNT],
+    feature_motion: [EasedValue; FEATURE_COUNT],
     open_motion: EasedValue,
     compact_motion: EasedValue,
     hover_motion: BTreeMap<UiTarget, EasedValue>,
@@ -395,8 +402,8 @@ impl Default for MissionControlUi {
             hovered: None,
             context_anchor: None,
             stats: LiveStats::default(),
-            feature_enabled: [true; 6],
-            feature_motion: [EasedValue::new(1.0); 6],
+            feature_enabled: [true; FEATURE_COUNT],
+            feature_motion: [EasedValue::new(1.0); FEATURE_COUNT],
             open_motion: EasedValue::new(0.0),
             compact_motion: EasedValue::new(0.0),
             hover_motion: BTreeMap::new(),
@@ -1388,6 +1395,28 @@ mod tests {
         let narrow = automatic.layout(Viewport::new(640.0, 720.0, 1.0));
         assert!(narrow.compact);
         assert!(!automatic.compact());
+    }
+
+    #[test]
+    fn every_feature_row_stays_inside_the_glass_panel() {
+        let ui = opened();
+        for viewport in [
+            Viewport::new(1_280.0, 720.0, 1.0),
+            Viewport::new(960.0, 640.0, 1.0),
+            Viewport::new(640.0, 720.0, 1.0),
+        ] {
+            let layout = ui.layout(viewport);
+            for feature in RendererFeature::ALL {
+                let row = layout.region(UiTarget::Feature(feature));
+                assert!(row.is_some());
+                if let Some(row) = row {
+                    assert!(row.x >= layout.panel.x);
+                    assert!(row.y >= layout.panel.y);
+                    assert!(row.x + row.width <= layout.panel.x + layout.panel.width);
+                    assert!(row.y + row.height <= layout.panel.y + layout.panel.height);
+                }
+            }
+        }
     }
 
     #[test]

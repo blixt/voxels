@@ -38,7 +38,7 @@ mod web {
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const EDIT_HISTORY_CAPACITY: usize = 64;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 6.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 7.0;
     const MAX_EDIT_TRACKERS: usize = 128;
     const COAST_WATER_REFERENCE: [i32; 2] = [18_016, 12_896];
     const EDIT_PROFILE_TERRAIN: [i32; 3] = [18_016, -12, 12_896];
@@ -1532,6 +1532,7 @@ mod web {
                         .total_evictions
                         .saturating_sub(engine.profile_start_evictions.get())
                         as f32,
+                    if render.material_detail { 1.0 } else { 0.0 },
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);

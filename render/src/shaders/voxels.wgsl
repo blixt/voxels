@@ -22,8 +22,13 @@ struct Frame {
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var shadow_map: texture_depth_2d_array;
 @group(0) @binding(2) var shadow_sampler: sampler_comparison;
+@group(0) @binding(3) var material_albedo: texture_2d_array<f32>;
+@group(0) @binding(4) var material_surface: texture_2d_array<f32>;
+@group(0) @binding(5) var material_sampler: sampler;
 @group(1) @binding(0) var opaque_scene: texture_2d<f32>;
 @group(1) @binding(1) var opaque_scene_sampler: sampler;
+
+override MATERIAL_DETAIL: u32 = 1u;
 
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
@@ -111,6 +116,90 @@ fn material_roughness(material: u32) -> f32 {
     case 11u: { return 0.58; }
     default: { return 0.86; }
   }
+}
+
+struct SurfaceBasis {
+  uv: vec2<f32>,
+  tangent: vec3<f32>,
+  bitangent: vec3<f32>,
+};
+
+struct SurfaceDetail {
+  albedo: vec3<f32>,
+  normal: vec3<f32>,
+  roughness: f32,
+};
+
+fn surface_basis(world: vec3<f32>, normal: vec3<f32>) -> SurfaceBasis {
+  var basis: SurfaceBasis;
+  if normal.x > 0.5 {
+    basis.uv = world.yz;
+    basis.tangent = vec3<f32>(0.0, 1.0, 0.0);
+    basis.bitangent = vec3<f32>(0.0, 0.0, 1.0);
+  } else if normal.x < -0.5 {
+    basis.uv = vec2<f32>(world.y, -world.z);
+    basis.tangent = vec3<f32>(0.0, 1.0, 0.0);
+    basis.bitangent = vec3<f32>(0.0, 0.0, -1.0);
+  } else if normal.y > 0.5 {
+    basis.uv = vec2<f32>(world.x, -world.z);
+    basis.tangent = vec3<f32>(1.0, 0.0, 0.0);
+    basis.bitangent = vec3<f32>(0.0, 0.0, -1.0);
+  } else if normal.y < -0.5 {
+    basis.uv = world.xz;
+    basis.tangent = vec3<f32>(1.0, 0.0, 0.0);
+    basis.bitangent = vec3<f32>(0.0, 0.0, 1.0);
+  } else if normal.z > 0.5 {
+    basis.uv = world.xy;
+    basis.tangent = vec3<f32>(1.0, 0.0, 0.0);
+    basis.bitangent = vec3<f32>(0.0, 1.0, 0.0);
+  } else {
+    basis.uv = vec2<f32>(-world.x, world.y);
+    basis.tangent = vec3<f32>(-1.0, 0.0, 0.0);
+    basis.bitangent = vec3<f32>(0.0, 1.0, 0.0);
+  }
+  return basis;
+}
+
+fn material_detail_scale(material: u32) -> f32 {
+  switch material {
+    case 4u, 12u: { return 0.38; }
+    case 8u: { return 0.72; }
+    case 9u, 10u: { return 0.82; }
+    default: { return 0.55; }
+  }
+}
+
+fn sample_surface_detail(world: vec3<f32>, geometric_normal: vec3<f32>, material: u32) -> SurfaceDetail {
+  var detail: SurfaceDetail;
+  detail.albedo = srgb_to_linear(material_color(material));
+  detail.normal = geometric_normal;
+  detail.roughness = material_roughness(material);
+  if MATERIAL_DETAIL != 0u {
+    let basis = surface_basis(world, geometric_normal);
+    let uv = basis.uv * material_detail_scale(material);
+    detail.albedo = textureSample(material_albedo, material_sampler, uv, i32(material)).rgb;
+    let packed_surface = textureSample(material_surface, material_sampler, uv, i32(material));
+    let averaged_normal = packed_surface.rgb * 2.0 - vec3<f32>(1.0);
+    let normal_length = clamp(length(averaged_normal), 0.001, 1.0);
+    let tangent_normal = averaged_normal / normal_length;
+    let distance_fade = 1.0 - smoothstep(42.0, 120.0, distance(world, frame.camera_time.xyz));
+    let faded_normal = normalize(vec3<f32>(
+      tangent_normal.xy * distance_fade,
+      max(tangent_normal.z, 0.08),
+    ));
+    detail.normal = normalize(
+      basis.tangent * faded_normal.x
+        + basis.bitangent * faded_normal.y
+        + geometric_normal * faded_normal.z,
+    );
+    let normal_variance = 1.0 - normal_length;
+    detail.roughness = sqrt(clamp(
+      packed_surface.a * packed_surface.a + normal_variance * 0.72,
+      0.01,
+      1.0,
+    ));
+  }
+  return detail;
 }
 
 fn material_macro_tint(material: u32, world: vec3<f32>) -> vec3<f32> {
@@ -326,32 +415,41 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
+  let material = input.material & 0xffffu;
+  // Sample before the non-uniform ownership discard so implicit texture derivatives stay in
+  // uniform fragment-quad control flow. The flat specialized pipeline removes these samples.
+  let surface_detail = sample_surface_detail(input.world, input.normal, material);
   if !owns_lod_surface(input.world, input.material) {
     discard;
   }
-  let material = input.material & 0xffffu;
   let sun = normalize(frame.sun_direction.xyz);
-  let diffuse = max(dot(input.normal, sun), 0.0);
+  let diffuse = max(dot(surface_detail.normal, sun), 0.0);
   let shadow = sun_visibility(input.world, input.normal);
-  let sky_visibility = input.normal.y * 0.5 + 0.5;
+  let sky_visibility = surface_detail.normal.y * 0.5 + 0.5;
   let cell = floor(input.world / frame.viewport_voxel.z);
-  let grain = mix(0.88, 1.12, hash31(cell + vec3<f32>(f32(material) * 3.1)));
-  let fine_grain = mix(0.96, 1.04, hash31(floor(input.world * 28.0)));
+  let flat_grain = mix(0.88, 1.12, hash31(cell + vec3<f32>(f32(material) * 3.1)));
+  let detail_grain = mix(0.96, 1.04, hash31(cell + vec3<f32>(f32(material) * 3.1)));
+  let grain = select(flat_grain, detail_grain, MATERIAL_DETAIL != 0u);
+  let fine_grain = select(
+    mix(0.96, 1.04, hash31(floor(input.world * 28.0))),
+    1.0,
+    MATERIAL_DETAIL != 0u,
+  );
   let ambient_occlusion = select(1.0, mix(0.52, 1.0, input.ao), frame.render_options.x > 0.5);
   let sky_irradiance = mix(frame.ground_atmosphere.rgb, frame.sky_horizon.rgb * 0.48, sky_visibility);
-  let bounce = frame.ground_atmosphere.rgb * max(-input.normal.y, 0.0) * 0.35;
+  let bounce = frame.ground_atmosphere.rgb * max(-surface_detail.normal.y, 0.0) * 0.35;
   let direct = frame.sun_radiance.rgb * diffuse * mix(0.16, 1.0, shadow) * 0.19;
-  let albedo = srgb_to_linear(material_color(material))
+  let albedo = surface_detail.albedo
     * material_macro_tint(material, input.world)
     * grain
     * fine_grain;
   let view_direction = normalize(frame.camera_time.xyz - input.world);
   let half_direction = normalize(sun + view_direction);
-  let roughness = material_roughness(material);
+  let roughness = surface_detail.roughness;
   let specular_power = mix(110.0, 5.0, roughness * roughness);
   let fresnel = 0.04 + 0.96 * pow(1.0 - max(dot(view_direction, half_direction), 0.0), 5.0);
   let specular = frame.sun_radiance.rgb
-    * pow(max(dot(input.normal, half_direction), 0.0), specular_power)
+    * pow(max(dot(surface_detail.normal, half_direction), 0.0), specular_power)
     * fresnel
     * (1.0 - roughness * 0.72)
     * mix(0.16, 1.0, shadow)

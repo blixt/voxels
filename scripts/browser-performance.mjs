@@ -49,12 +49,13 @@ const SNAPSHOT = {
   profileArenaCapacityHighMiB: 64,
   profileWasmHighMiB: 65,
   profileEvictions: 66,
-  schemaVersion: 67,
-  sampleCount: 68,
-  droppedSamples: 69,
+  materialDetail: 67,
+  schemaVersion: 68,
+  sampleCount: 69,
+  droppedSamples: 70,
 };
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 70;
+const FRAME_SAMPLE_START = 71;
 const EDIT_SAMPLE_WIDTH = 6;
 
 function percentile(values, fraction) {
@@ -126,6 +127,7 @@ function phaseSummary(captures) {
     },
     totalEvictions: latest[SNAPSHOT.totalEvictions],
     staleCompletions: latest[SNAPSHOT.staleCompletions],
+    materialDetail: latest[SNAPSHOT.materialDetail] === 1,
     loadLatencyFrames: {
       p95: latest[SNAPSHOT.loadP95Frames],
       max: latest[SNAPSHOT.loadMaxFrames],
@@ -271,6 +273,74 @@ async function sample(page, durationMs) {
   return captures;
 }
 
+async function setMaterialDetail(page, enabled, viewportWidth) {
+  const current = await page.evaluate(
+    (index) => globalThis.__VOXELS__.snapshot().then((snapshot) => snapshot[index] === 1),
+    SNAPSHOT.materialDetail,
+  );
+  if (current === enabled) return;
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(200);
+  // Material detail is the appended seventh Rust-owned feature row. The click targets the toggle,
+  // exercising the same canvas hit-testing path as a human rather than a JavaScript render option.
+  await page.mouse.click(viewportWidth - 57, 600);
+  await page.waitForFunction(
+    async ({ index, expected }) => {
+      const snapshot = await globalThis.__VOXELS__.snapshot();
+      return (snapshot[index] === 1) === expected;
+    },
+    { index: SNAPSHOT.materialDetail, expected: enabled },
+    { timeout: 5_000 },
+  );
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(800);
+}
+
+async function materialDetailProfile(page, viewportWidth) {
+  await setMaterialDetail(page, false, viewportWidth);
+  const off = phaseSummary(await sample(page, 5_000));
+  await setMaterialDetail(page, true, viewportWidth);
+  const on = phaseSummary(await sample(page, 5_000));
+  const delta = {
+    worldP95Ms: on.gpu.worldMs.p95 - off.gpu.worldMs.p95,
+    totalP95Ms: on.gpu.totalMs.p95 - off.gpu.totalMs.p95,
+    frameP95Ms: on.frameMs.p95 - off.frameMs.p95,
+    coreGpuMiB: on.coreGpuMiB - off.coreGpuMiB,
+  };
+  const invariantKeys = [
+    "residentChunks",
+    "quads",
+    "waterQuads",
+    "waterDrawCalls",
+    "drawCalls",
+    "meshArenaAllocatedMiB",
+    "meshArenaCapacityMiB",
+    "refractionCopyMiB",
+  ];
+  const changed = invariantKeys.filter((key) => on[key] !== off[key]);
+  const violations = [];
+  if (!off.gpu.available || !on.gpu.available) violations.push("GPU timestamps unavailable");
+  if (off.materialDetail || !on.materialDetail)
+    violations.push("Rust UI toggle state was not observed");
+  if (changed.length > 0)
+    violations.push(`geometry/resource invariants changed: ${changed.join(", ")}`);
+  if (delta.worldP95Ms > 0.5) violations.push("world GPU p95 increased by more than 0.50ms");
+  if (delta.totalP95Ms > 0.75) violations.push("active GPU p95 increased by more than 0.75ms");
+  if (off.frameMs.p95 > 12 || on.frameMs.p95 > 12) violations.push("frame p95 exceeded 12ms");
+  if (off.frameMs.above33_33ms > 0 || on.frameMs.above33_33ms > 0) {
+    violations.push("a paired profile frame exceeded 33.33ms");
+  }
+  if (off.droppedSamples > 0 || on.droppedSamples > 0)
+    violations.push("frame samples were dropped");
+  const result = { off, on, delta, invariantKeys };
+  if (violations.length > 0) {
+    throw new Error(
+      `material detail profile violations: ${violations.join(", ")}; ${JSON.stringify(result)}`,
+    );
+  }
+  return result;
+}
+
 async function sustainedProfile(page) {
   await page.evaluate(() => globalThis.__VOXELS__.profile(1));
   const captures = [];
@@ -357,7 +427,7 @@ async function waitForEngine(page) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
     lastSnapshot = snapshot;
     if (
-      snapshot[SNAPSHOT.schemaVersion] === 6 &&
+      snapshot[SNAPSHOT.schemaVersion] === 7 &&
       snapshot[SNAPSHOT.quads] > 0 &&
       snapshot[SNAPSHOT.residentChunks] > 0 &&
       snapshot[SNAPSHOT.pendingJobs] === 0
@@ -405,6 +475,7 @@ async function reserveEphemeralPort() {
 const viewport = { width: 1280, height: 720 };
 const sustained = process.argv.includes("--sustained");
 const edits = process.argv.includes("--edits");
+const materials = process.argv.includes("--materials");
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
@@ -448,6 +519,8 @@ try {
     scenarios = { edits: await editProfile(page) };
   } else if (sustained) {
     scenarios = { sustained: await sustainedProfile(page) };
+  } else if (materials) {
+    scenarios = { materials: await materialDetailProfile(page, viewport.width) };
   } else {
     const steady = phaseSummary(await sample(page, 4_000));
     await page.keyboard.down("KeyW");

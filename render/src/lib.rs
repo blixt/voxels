@@ -3,6 +3,7 @@
 mod arena;
 pub mod environment;
 pub mod lod;
+mod material_detail;
 pub mod renderer;
 pub mod shadow;
 pub mod ui;

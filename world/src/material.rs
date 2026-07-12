@@ -30,6 +30,22 @@ pub enum Material {
 
 impl Material {
     pub const SCHEMA_VERSION: u16 = 2;
+    pub const ALL: [Self; 14] = [
+        Self::Air,
+        Self::Grass,
+        Self::Dirt,
+        Self::Stone,
+        Self::Sand,
+        Self::Snow,
+        Self::Clay,
+        Self::Basalt,
+        Self::Wood,
+        Self::Leaves,
+        Self::Moss,
+        Self::Limestone,
+        Self::RedSand,
+        Self::Water,
+    ];
 
     pub fn from_id(id: u16) -> Option<Self> {
         Some(match id {
@@ -95,5 +111,13 @@ mod tests {
             Material::from_id(Material::Water.id()),
             Some(Material::Water)
         );
+    }
+
+    #[test]
+    fn stable_material_catalog_is_dense_and_id_ordered() {
+        for (id, material) in Material::ALL.into_iter().enumerate() {
+            assert_eq!(usize::from(material.id()), id);
+            assert_eq!(Material::from_id(id as u16), Some(material));
+        }
     }
 }

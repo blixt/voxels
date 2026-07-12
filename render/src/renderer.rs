@@ -1,6 +1,7 @@
 use crate::arena::{Allocation, ArenaAllocator};
 use crate::environment::OutdoorEnvironment;
 use crate::lod::GeometricLodFocus;
+use crate::material_detail::MaterialDetailGpu;
 use crate::shadow::{
     CASCADE_COUNT, DirectionalShadowCascades, DirectionalShadowConfig, aabb_visible_in_cascade,
     build_directional_shadow_cascades,
@@ -150,6 +151,7 @@ pub struct RenderDiagnostics {
     pub gpu_world_ms: Option<f32>,
     pub gpu_water_ms: Option<f32>,
     pub gpu_ui_ms: Option<f32>,
+    pub material_detail: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -368,12 +370,14 @@ pub struct Renderer {
     config: SurfaceConfiguration,
     sky_pipeline: RenderPipeline,
     voxel_pipeline: RenderPipeline,
+    voxel_flat_pipeline: RenderPipeline,
     water_pipeline: RenderPipeline,
     water_scene_layout: wgpu::BindGroupLayout,
     water_scene_bind_group: BindGroup,
     shadow_gpu: ShadowGpu,
     frame_buffer: Buffer,
     frame_bind_group: BindGroup,
+    material_detail: MaterialDetailGpu,
     chunks: BTreeMap<MeshKey, ChunkMesh>,
     water_chunks: BTreeMap<MeshKey, ChunkMesh>,
     arena: ArenaAllocator,
@@ -419,6 +423,7 @@ struct RenderOptions {
     far_terrain: bool,
     water: bool,
     target_outline: bool,
+    material_detail: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -444,6 +449,7 @@ impl Default for RenderOptions {
             far_terrain: true,
             water: true,
             target_outline: true,
+            material_detail: true,
         }
     }
 }
@@ -669,6 +675,7 @@ impl Renderer {
         let environment = OutdoorEnvironment::default().sanitized();
         let initial_camera = CameraState::default();
         let shadow_gpu = ShadowGpu::new(&device, &initial_camera, environment)?;
+        let material_detail = MaterialDetailGpu::new(&device, &queue);
         let shadow_cascades =
             directional_shadow_cascades(&config, &initial_camera, environment.sun_direction)?;
         let frame = frame_uniform(
@@ -718,6 +725,32 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -735,6 +768,20 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&shadow_gpu.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&material_detail.albedo_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(
+                        &material_detail.normal_roughness_view,
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&material_detail.sampler),
                 },
             ],
         });
@@ -769,6 +816,7 @@ impl Renderer {
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
+                fragment_constants: &[],
             },
         );
         let voxel_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/voxels.wgsl"));
@@ -790,6 +838,28 @@ impl Renderer {
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
+                fragment_constants: &[("MATERIAL_DETAIL", 1.0)],
+            },
+        );
+        let voxel_flat_pipeline = pipeline(
+            &device,
+            "flat voxel pipeline",
+            &pipeline_layout,
+            &voxel_shader,
+            SCENE_FORMAT,
+            &[Some(quad_layout())],
+            PipelineOptions {
+                fragment_entry: "fs_main",
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                fragment_constants: &[("MATERIAL_DETAIL", 0.0)],
             },
         );
         let water_pipeline = pipeline(
@@ -810,6 +880,7 @@ impl Renderer {
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
+                fragment_constants: &[],
             },
         );
 
@@ -824,12 +895,14 @@ impl Renderer {
             config,
             sky_pipeline,
             voxel_pipeline,
+            voxel_flat_pipeline,
             water_pipeline,
             water_scene_layout,
             water_scene_bind_group,
             shadow_gpu,
             frame_buffer,
             frame_bind_group,
+            material_detail,
             chunks: BTreeMap::new(),
             water_chunks: BTreeMap::new(),
             arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
@@ -999,6 +1072,7 @@ impl Renderer {
                 RendererFeature::FarTerrain => self.options.far_terrain = enabled,
                 RendererFeature::WaterSurface => self.options.water = enabled,
                 RendererFeature::TargetOutline => self.options.target_outline = enabled,
+                RendererFeature::MaterialSurfaceDetail => self.options.material_detail = enabled,
             },
             UiAction::ContextAction(ContextAction::ResetRendererFeatures) => {
                 for feature in RendererFeature::ALL {
@@ -1561,7 +1635,11 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
-            pass.set_pipeline(&self.voxel_pipeline);
+            pass.set_pipeline(if self.options.material_detail {
+                &self.voxel_pipeline
+            } else {
+                &self.voxel_flat_pipeline
+            });
             for span in &world_draw_list.spans {
                 let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
                     continue;
@@ -1657,6 +1735,7 @@ impl Renderer {
                 .saturating_add(water_arena.capacity_bytes)
                 .saturating_add(scene_pixels.saturating_mul(20))
                 .saturating_add(shadow_bytes)
+                .saturating_add(self.material_detail.bytes)
                 .saturating_add(if self.gpu_timer.is_some() {
                     GPU_TIMER_BUFFER_BYTES
                 } else {
@@ -1668,6 +1747,7 @@ impl Renderer {
             gpu_world_ms: gpu_timing.map(|timing| timing.world_ms),
             gpu_water_ms: gpu_timing.map(|timing| timing.water_ms),
             gpu_ui_ms: gpu_timing.map(|timing| timing.ui_ms),
+            material_detail: self.options.material_detail,
         };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2018,6 +2098,7 @@ struct PipelineOptions<'a> {
     blend: Option<wgpu::BlendState>,
     write_mask: wgpu::ColorWrites,
     depth_stencil: Option<wgpu::DepthStencilState>,
+    fragment_constants: &'a [(&'a str, f64)],
 }
 
 fn pipeline(
@@ -2046,7 +2127,10 @@ fn pipeline(
                 blend: options.blend,
                 write_mask: options.write_mask,
             })],
-            compilation_options: Default::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: options.fragment_constants,
+                ..Default::default()
+            },
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: options.depth_stencil,
