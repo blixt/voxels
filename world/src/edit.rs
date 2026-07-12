@@ -130,7 +130,7 @@ impl EditMap {
                         continue;
                     };
                     let origin = ChunkCoord::new(chunk_x, chunk_y, chunk_z).world_origin();
-                    for &[local_x, local_y, local_z] in overrides.keys() {
+                    for (&[local_x, local_y, local_z], &override_material) in overrides {
                         let coord = VoxelCoord::new(
                             origin[0] + local_x as i32,
                             origin[1] + local_y as i32,
@@ -148,7 +148,9 @@ impl EditMap {
                         let Some(feature_material) = feature.material_at(coord) else {
                             continue;
                         };
-                        if generator.sample(coord.x, coord.y, coord.z) == feature_material {
+                        if generator.sample(coord.x, coord.y, coord.z) == feature_material
+                            && override_material != feature_material
+                        {
                             return false;
                         }
                     }
@@ -371,6 +373,24 @@ mod tests {
         assert_eq!(edits.override_at(coord), None);
         assert!(edits.chunk_overrides.is_empty());
         assert!(edits.column_overrides.is_empty());
+    }
+
+    #[test]
+    fn redundant_durable_override_keeps_skyline_proxy_pristine() {
+        let generator = Generator::new(0x5eed);
+        let feature = generator
+            .nearest_skyline_feature(0, 0, crate::SkylineFeatureKind::Broadleaf, 128)
+            .expect("fixed catalog should contain a nearby broadleaf");
+        let coord = VoxelCoord::new(feature.anchor[0], feature.anchor[1] + 1, feature.anchor[2]);
+        let generated = generator.sample(coord.x, coord.y, coord.z);
+        assert_eq!(feature.material_at(coord), Some(generated));
+
+        let mut edits = EditMap::default();
+        edits.insert_override(coord, generated);
+
+        assert!(edits.skyline_feature_is_pristine(generator, feature));
+        edits.insert_override(coord, Material::Air);
+        assert!(!edits.skyline_feature_is_pristine(generator, feature));
     }
 
     #[test]
