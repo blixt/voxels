@@ -1,6 +1,8 @@
 use crate::ambient_occlusion::AmbientOcclusionGpu;
 use crate::arena::{Allocation, ArenaAllocator};
-use crate::environment::{DaylightPhase, OutdoorEnvironment, surface_region_label};
+use crate::environment::{
+    DaylightPhase, InteriorEnvironment, OutdoorEnvironment, surface_region_label,
+};
 use crate::lod::GeometricLodFocus;
 use crate::material_detail::MaterialDetailGpu;
 use crate::shadow::{
@@ -15,7 +17,7 @@ use bytemuck::{Pod, Zeroable};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use voxels_core::CameraState;
+use voxels_core::{CameraState, EnclosureSample};
 use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, ChunkCoord, FarTileCoord, MeshedChunk, Quad, RenderLayer,
     SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfaceQuad, SurfaceRegion, SurfaceTileCoord,
@@ -64,10 +66,12 @@ struct FrameUniform {
     ground_atmosphere: [f32; 4],
     fog_exposure: [f32; 4],
     medium: [f32; 4],
+    interior: [f32; 4],
 }
 
-const _: () = assert!(size_of::<FrameUniform>() == 560);
+const _: () = assert!(size_of::<FrameUniform>() == 576);
 const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 544);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 560);
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -161,6 +165,9 @@ pub struct RenderDiagnostics {
     pub daylight_phase: u8,
     pub surface_region: u8,
     pub cloud_coverage: f32,
+    pub enclosure: f32,
+    pub interior_exposure: f32,
+    pub cave_headlamp: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -458,8 +465,11 @@ pub struct Renderer {
     coast_teleport_requested: bool,
     underwater_teleport_requested: bool,
     route_teleport_requested: bool,
+    cave_teleport_requested: bool,
     landmark_teleport_requested: bool,
     underwater_blend: f32,
+    interior: InteriorEnvironment,
+    interior_target: InteriorEnvironment,
 }
 
 struct ShadowGpu {
@@ -482,6 +492,7 @@ struct RenderOptions {
     water: bool,
     target_outline: bool,
     material_detail: bool,
+    cave_headlamp: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -496,6 +507,8 @@ struct FrameState {
     options: RenderOptions,
     readiness: LodReadiness,
     environment: OutdoorEnvironment,
+    underwater_blend: f32,
+    interior: InteriorEnvironment,
 }
 
 impl Default for RenderOptions {
@@ -509,6 +522,7 @@ impl Default for RenderOptions {
             water: true,
             target_outline: true,
             material_detail: true,
+            cave_headlamp: true,
         }
     }
 }
@@ -757,9 +771,10 @@ impl Renderer {
                 options,
                 readiness: LodReadiness::default(),
                 environment,
+                underwater_blend: 0.0,
+                interior: InteriorEnvironment::default(),
             },
             &shadow_cascades,
-            0.0,
         );
         let frame_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("frame uniform"),
@@ -1079,8 +1094,11 @@ impl Renderer {
             coast_teleport_requested: false,
             underwater_teleport_requested: false,
             route_teleport_requested: false,
+            cave_teleport_requested: false,
             landmark_teleport_requested: false,
             underwater_blend: 0.0,
+            interior: InteriorEnvironment::default(),
+            interior_target: InteriorEnvironment::default(),
         })
     }
 
@@ -1146,6 +1164,10 @@ impl Renderer {
         self.ui.set_route_status(chapter_label, progress_percent);
     }
 
+    pub fn set_enclosure(&mut self, sample: EnclosureSample) {
+        self.interior_target = InteriorEnvironment::for_enclosure(sample);
+    }
+
     pub const fn daylight_phase(&self) -> DaylightPhase {
         self.daylight_phase
     }
@@ -1198,6 +1220,10 @@ impl Renderer {
 
     pub fn take_route_teleport_request(&mut self) -> bool {
         std::mem::take(&mut self.route_teleport_requested)
+    }
+
+    pub fn take_cave_teleport_request(&mut self) -> bool {
+        std::mem::take(&mut self.cave_teleport_requested)
     }
 
     pub fn take_landmark_teleport_request(&mut self) -> bool {
@@ -1256,6 +1282,7 @@ impl Renderer {
                 RendererFeature::WaterSurface => self.options.water = enabled,
                 RendererFeature::TargetOutline => self.options.target_outline = enabled,
                 RendererFeature::MaterialSurfaceDetail => self.options.material_detail = enabled,
+                RendererFeature::CaveHeadlamp => self.options.cave_headlamp = enabled,
             },
             UiAction::ContextAction(ContextAction::ResetRendererFeatures) => {
                 for feature in RendererFeature::ALL {
@@ -1283,6 +1310,9 @@ impl Renderer {
             }
             UiAction::ContextAction(ContextAction::FollowPilgrimRoad) => {
                 self.route_teleport_requested = true;
+            }
+            UiAction::ContextAction(ContextAction::VisitCinderVault) => {
+                self.cave_teleport_requested = true;
             }
             UiAction::ContextAction(ContextAction::VisitLandmark) => {
                 self.landmark_teleport_requested = true;
@@ -1676,6 +1706,22 @@ impl Renderer {
         if (target_underwater - self.underwater_blend).abs() < 0.000_5 {
             self.underwater_blend = target_underwater;
         }
+        let interior_seconds = if self.interior_target.enclosure > self.interior.enclosure {
+            0.25
+        } else {
+            0.45
+        };
+        let interior_response = 1.0 - (-dt.clamp(0.0, 0.1) / interior_seconds).exp();
+        let exposure_seconds =
+            if self.interior_target.exposure_multiplier > self.interior.exposure_multiplier {
+                2.5
+            } else {
+                0.45
+            };
+        let exposure_response = 1.0 - (-dt.clamp(0.0, 0.1) / exposure_seconds).exp();
+        self.interior =
+            self.interior
+                .lerp(self.interior_target, interior_response, exposure_response);
         let Ok(shadow_cascades) =
             directional_shadow_cascades(&self.config, camera, self.environment.sun_direction)
         else {
@@ -1699,9 +1745,10 @@ impl Renderer {
                 options: self.options,
                 readiness: self.lod_readiness(),
                 environment: self.environment,
+                underwater_blend: self.underwater_blend,
+                interior: self.interior,
             },
             &shadow_cascades,
-            self.underwater_blend,
         );
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
         let geometric_lod_focus = self.geometric_lod_focus;
@@ -2016,6 +2063,9 @@ impl Renderer {
             daylight_phase: self.daylight_phase as u8,
             surface_region: self.surface_region as u8,
             cloud_coverage: self.environment.cloud_coverage,
+            enclosure: self.interior.enclosure,
+            interior_exposure: self.interior.exposure_multiplier,
+            cave_headlamp: self.options.cave_headlamp && self.interior.headlamp_strength > 0.01,
         };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2196,12 +2246,13 @@ fn frame_uniform(
     target: Option<[i32; 3]>,
     state: FrameState,
     shadows: &DirectionalShadowCascades,
-    underwater_blend: f32,
 ) -> FrameUniform {
     let FrameState {
         options,
         readiness,
         environment,
+        underwater_blend,
+        interior,
     } = state;
     let view_projection = view_projection(config, camera);
     let camera_forward = camera.forward();
@@ -2282,6 +2333,16 @@ fn frame_uniform(
             fluid.eye_depth_metres.max(0.0),
             fluid.immersion.clamp(0.0, 1.0),
             fluid.surface_y_metres,
+        ],
+        interior: [
+            interior.enclosure,
+            interior.exposure_multiplier,
+            interior.fog_density,
+            if options.cave_headlamp {
+                interior.headlamp_strength
+            } else {
+                0.0
+            },
         ],
     }
 }

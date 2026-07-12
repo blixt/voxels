@@ -17,6 +17,7 @@ struct Frame {
   ground_atmosphere: vec4<f32>,
   fog_exposure: vec4<f32>,
   medium: vec4<f32>,
+  interior: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;

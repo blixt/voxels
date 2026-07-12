@@ -132,10 +132,11 @@ pub enum RendererFeature {
     WaterSurface,
     TargetOutline,
     MaterialSurfaceDetail,
+    CaveHeadlamp,
 }
 
 impl RendererFeature {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::CascadedSunShadows,
         Self::VoxelAmbientOcclusion,
         Self::ScreenSpaceAmbientOcclusion,
@@ -144,6 +145,7 @@ impl RendererFeature {
         Self::WaterSurface,
         Self::TargetOutline,
         Self::MaterialSurfaceDetail,
+        Self::CaveHeadlamp,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -156,6 +158,7 @@ impl RendererFeature {
             Self::WaterSurface => "Animated water surface",
             Self::TargetOutline => "Target outline",
             Self::MaterialSurfaceDetail => "Material surface detail",
+            Self::CaveHeadlamp => "Automatic cave headlamp",
         }
     }
 }
@@ -174,6 +177,7 @@ const fn feature_index(feature: RendererFeature) -> usize {
         RendererFeature::WaterSurface => 5,
         RendererFeature::TargetOutline => 6,
         RendererFeature::MaterialSurfaceDetail => 7,
+        RendererFeature::CaveHeadlamp => 8,
     }
 }
 
@@ -185,18 +189,20 @@ pub enum ContextAction {
     ToggleCompactTelemetry,
     CycleDaylight,
     FollowPilgrimRoad,
+    VisitCinderVault,
     VisitLandmark,
     CloseMissionControl,
 }
 
 impl ContextAction {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::TeleportToCoast,
         Self::DiveBelowSurface,
         Self::ResetRendererFeatures,
         Self::ToggleCompactTelemetry,
         Self::CycleDaylight,
         Self::FollowPilgrimRoad,
+        Self::VisitCinderVault,
         Self::VisitLandmark,
         Self::CloseMissionControl,
     ];
@@ -209,6 +215,7 @@ impl ContextAction {
             Self::ToggleCompactTelemetry => "Toggle compact telemetry",
             Self::CycleDaylight => "Cycle regional daylight",
             Self::FollowPilgrimRoad => "Follow pilgrim road",
+            Self::VisitCinderVault => "Visit Cinder Vault",
             Self::VisitLandmark => "Visit next landmark",
             Self::CloseMissionControl => "Close mission control",
         }
@@ -1602,6 +1609,7 @@ mod tests {
                 .iter()
                 .any(|run| run.text == "Follow pilgrim road")
         );
+        assert!(draw.text.iter().any(|run| run.text == "Visit Cinder Vault"));
         assert!(
             draw.text
                 .iter()

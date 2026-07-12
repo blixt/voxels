@@ -17,6 +17,7 @@ struct Frame {
   ground_atmosphere: vec4<f32>,
   fog_exposure: vec4<f32>,
   medium: vec4<f32>,
+  interior: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -445,7 +446,7 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   let sky_factor = pow(max(fog_view_direction.y, 0.0), 0.42);
   let fog_radiance = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, sky_factor);
   local_light = local_light * transmittance + fog_radiance * (1.0 - transmittance);
-  local_light = max(local_light * frame.fog_exposure.y, vec3<f32>(0.0));
+  local_light = max(local_light * frame.fog_exposure.y * frame.interior.y, vec3<f32>(0.0));
   let transmission_tint = mix(vec3<f32>(0.86, 0.97, 0.98), vec3<f32>(0.38, 0.72, 0.76), absorption);
   let transmitted = refracted_scene * transmission_tint + deep * absorption * 0.18;
   let transmission_weight = (1.0 - fresnel) * mix(0.86, 0.42, absorption);
@@ -515,9 +516,18 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let voxel_ambient_occlusion = select(1.0, mix(0.52, 1.0, input.ao), frame.render_options.x > 0.5);
   let spatial_ambient_occlusion = screen_space_ambient_visibility(input.position.xy, input.world);
   let ambient_occlusion = min(voxel_ambient_occlusion, spatial_ambient_occlusion);
-  let sky_irradiance = mix(frame.ground_atmosphere.rgb, frame.sky_horizon.rgb * 0.48, sky_visibility);
-  let bounce = frame.ground_atmosphere.rgb * max(-surface_detail.normal.y, 0.0) * 0.35;
-  let direct = frame.sun_radiance.rgb * diffuse * mix(0.16, 1.0, shadow) * 0.19;
+  let interior_ambient = mix(1.0, 0.05, frame.interior.x);
+  let sky_irradiance = mix(frame.ground_atmosphere.rgb, frame.sky_horizon.rgb * 0.48, sky_visibility)
+    * interior_ambient;
+  let bounce = frame.ground_atmosphere.rgb
+    * max(-surface_detail.normal.y, 0.0)
+    * 0.35
+    * interior_ambient;
+  let direct = frame.sun_radiance.rgb
+    * diffuse
+    * mix(0.02, 1.0, shadow)
+    * mix(1.0, 0.10, frame.interior.x)
+    * 0.19;
   let albedo = surface_detail.albedo
     * material_macro_tint(material, input.world)
     * grain
@@ -531,12 +541,23 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     * pow(max(dot(surface_detail.normal, half_direction), 0.0), specular_power)
     * fresnel
     * (1.0 - roughness * 0.72)
-    * mix(0.16, 1.0, shadow)
+    * mix(0.02, 1.0, shadow)
+    * mix(1.0, 0.10, frame.interior.x)
     * 0.16;
   var color = albedo * ((sky_irradiance + bounce) * ambient_occlusion + direct) + specular;
   if material == 9u {
     let leaf_scatter = pow(max(dot(-sun, view_direction), 0.0), 3.0) * (1.0 - shadow * 0.55);
     color += albedo * frame.sun_radiance.rgb * leaf_scatter * 0.035;
+  }
+  if frame.interior.w > 0.0001 {
+    let camera_to_surface = input.world - frame.camera_time.xyz;
+    let lamp_distance = length(camera_to_surface);
+    let lamp_ray = camera_to_surface / max(lamp_distance, 0.0001);
+    let cone = smoothstep(0.76, 0.93, dot(lamp_ray, normalize(frame.camera_forward.xyz)));
+    let range = 1.0 - smoothstep(2.0, 13.0, lamp_distance);
+    let incidence = max(dot(surface_detail.normal, -lamp_ray), 0.0);
+    let lamp = cone * range * range * (0.18 + incidence * 0.82) * frame.interior.w;
+    color += albedo * vec3<f32>(3.2, 2.65, 2.15) * lamp * 0.36;
   }
   if frame.medium.x > 0.0001 && input.normal.y > 0.35 {
     let phase_a = sin(input.world.x * 5.1 + frame.camera_time.w * 1.7)
@@ -580,10 +601,13 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let sun_amount = max(dot(fog_view_direction, sun), 0.0);
   fog_radiance += frame.sun_radiance.rgb * pow(sun_amount, 32.0) * 0.012;
   color = color * transmittance + fog_radiance * (1.0 - transmittance);
+  let cave_transmittance = exp(-distance_to_camera * frame.interior.z);
+  let cave_air = vec3<f32>(0.010, 0.014, 0.020);
+  color = mix(cave_air, color, cave_transmittance);
   let water_transmittance = exp(-vec3<f32>(0.36, 0.14, 0.07) * distance_to_camera);
   let water_scattering = srgb_to_linear(vec3<f32>(0.018, 0.20, 0.27));
   let underwater_color = color * water_transmittance
     + water_scattering * (vec3<f32>(1.0) - water_transmittance);
   color = mix(color, underwater_color, frame.medium.x);
-  return vec4<f32>(max(color * frame.fog_exposure.y, vec3<f32>(0.0)), 1.0);
+  return vec4<f32>(max(color * frame.fog_exposure.y * frame.interior.y, vec3<f32>(0.0)), 1.0);
 }

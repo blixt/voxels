@@ -58,12 +58,16 @@ const SNAPSHOT = {
   gpuAmbientOcclusionMs: 73,
   ambientOcclusionMiB: 74,
   depthPrepassDrawCalls: 75,
-  schemaVersion: 76,
-  sampleCount: 77,
-  droppedSamples: 78,
+  enclosure: 76,
+  interiorExposure: 77,
+  caveHeadlamp: 78,
+  enclosureProbeUs: 79,
+  schemaVersion: 80,
+  sampleCount: 81,
+  droppedSamples: 82,
 };
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 79;
+const FRAME_SAMPLE_START = 83;
 const EDIT_SAMPLE_WIDTH = 6;
 
 function percentile(values, fraction) {
@@ -145,6 +149,12 @@ function phaseSummary(captures) {
       daylightPhase: latest[SNAPSHOT.daylightPhase],
       surfaceRegion: latest[SNAPSHOT.surfaceRegion],
       cloudCoverage: latest[SNAPSHOT.cloudCoverage],
+    },
+    cave: {
+      enclosure: latest[SNAPSHOT.enclosure],
+      exposure: latest[SNAPSHOT.interiorExposure],
+      headlamp: latest[SNAPSHOT.caveHeadlamp] === 1,
+      probeUs: latest[SNAPSHOT.enclosureProbeUs],
     },
     loadLatencyFrames: {
       p95: latest[SNAPSHOT.loadP95Frames],
@@ -677,7 +687,7 @@ async function waitForEngine(page) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
     lastSnapshot = snapshot;
     if (
-      snapshot[SNAPSHOT.schemaVersion] === 9 &&
+      snapshot[SNAPSHOT.schemaVersion] === 10 &&
       snapshot[SNAPSHOT.quads] > 0 &&
       snapshot[SNAPSHOT.residentChunks] > 0 &&
       snapshot[SNAPSHOT.pendingJobs] === 0

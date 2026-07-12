@@ -17,6 +17,7 @@ struct Frame {
   ground_atmosphere: vec4<f32>,
   fog_exposure: vec4<f32>,
   medium: vec4<f32>,
+  interior: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -115,5 +116,5 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     snell_window,
   );
   color = mix(color, underwater_sky, frame.medium.x);
-  return vec4<f32>(max(color * frame.fog_exposure.y, vec3<f32>(0.0)), 1.0);
+  return vec4<f32>(max(color * frame.fog_exposure.y * frame.interior.y, vec3<f32>(0.0)), 1.0);
 }

@@ -12,8 +12,8 @@ mod web {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::rc::Rc;
     use voxels_core::{
-        CameraState, InputState, ProfileAutomation, ProfilePhase, VoxelHit, VoxelPhysics,
-        raycast_voxels,
+        CameraState, EnclosureSample, InputState, ProfileAutomation, ProfilePhase, VoxelHit,
+        VoxelPhysics, probe_enclosure, raycast_voxels,
     };
     use voxels_render::renderer::Renderer;
     use voxels_render::ui::LiveStats;
@@ -22,12 +22,13 @@ mod web {
         SurfaceRevisionCache,
     };
     use voxels_world::{
-        CHUNK_EDGE, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord, EditMap, Generator, Material,
-        MeshedChunk, SkylineFeature, SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord,
-        VOXEL_SIZE_METRES, VoxelCoord, first_pilgrim_road_length_voxels,
-        first_pilgrim_route_anchor, first_pilgrim_route_anchor_count,
-        generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, mesh_chunk,
-        pilgrim_chapter_at_distance, sample_first_pilgrim_road, surface_tiles_affected_by_voxel,
+        CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT, CINDER_VAULT_NODES, Chunk, ChunkCoord,
+        EditMap, Generator, Material, MeshedChunk, SkylineFeature, SkylineFeatureKind,
+        SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
+        first_pilgrim_road_length_voxels, first_pilgrim_route_anchor,
+        first_pilgrim_route_anchor_count, generate_edited_surface_tile_mesh,
+        generate_edited_water_tile_mesh, mesh_chunk, pilgrim_chapter_at_distance,
+        sample_cinder_vault, sample_first_pilgrim_road, surface_tiles_affected_by_voxel,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -40,8 +41,10 @@ mod web {
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const EDIT_HISTORY_CAPACITY: usize = 64;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 9.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 10.0;
     const MAX_EDIT_TRACKERS: usize = 128;
+    const ENCLOSURE_PROBE_INTERVAL_MS: f64 = 100.0;
+    const ENCLOSURE_PROBE_DISTANCE_METRES: f32 = 12.0;
     const COAST_WATER_REFERENCE: [i32; 2] = [18_016, 12_896];
     const EDIT_PROFILE_TERRAIN: [i32; 3] = [18_016, -12, 12_896];
     const EDIT_PROFILE_WATER: [i32; 3] = [18_016, 10, 12_896];
@@ -283,7 +286,11 @@ mod web {
         edit_superseded: Cell<u32>,
         edit_last_ms: Cell<f32>,
         edit_profile: Cell<EditProfile>,
+        enclosure: Cell<EnclosureSample>,
+        last_enclosure_probe: Cell<f64>,
+        enclosure_probe_microseconds: Cell<f32>,
         route_tour_index: Cell<u16>,
+        cave_tour_index: Cell<u8>,
         landmark_tour_index: Cell<u8>,
         profile: RefCell<ProfileAutomation>,
         profile_tracked_high: Cell<usize>,
@@ -476,6 +483,40 @@ mod web {
                 camera.yaw = pose.yaw;
                 camera.pitch = pose.pitch;
             }
+            if time - self.last_enclosure_probe.get() >= ENCLOSURE_PROBE_INTERVAL_MS {
+                let eye_voxel = (camera.position / VOXEL_SIZE_METRES).floor().as_ivec3();
+                let surface_height = self.generator.surface_height(eye_voxel.x, eye_voxel.z);
+                let underground = eye_voxel.y + 3 < surface_height
+                    || sample_cinder_vault(eye_voxel.x, eye_voxel.y, eye_voxel.z).is_some();
+                let probe_start = performance_now(performance.as_ref());
+                let sample = if underground {
+                    let edits = self.edits.borrow();
+                    let mut columns = BTreeMap::new();
+                    probe_enclosure(
+                        camera.position,
+                        ENCLOSURE_PROBE_DISTANCE_METRES,
+                        VOXEL_SIZE_METRES,
+                        |x, y, z| {
+                            let coord = VoxelCoord::new(x, y, z);
+                            edits
+                                .override_at(coord)
+                                .unwrap_or_else(|| {
+                                    columns
+                                        .entry((x, z))
+                                        .or_insert_with(|| self.generator.column(x, z))
+                                        .sample(y)
+                                })
+                                .occludes_ambient()
+                        },
+                    )
+                } else {
+                    EnclosureSample::OPEN
+                };
+                self.enclosure.set(sample);
+                self.last_enclosure_probe.set(time);
+                self.enclosure_probe_microseconds
+                    .set(((performance_now(performance.as_ref()) - probe_start) * 1_000.0) as f32);
+            }
             let simulation_ms = (performance_now(performance.as_ref()) - simulation_start) as f32;
             self.simulation_milliseconds.set(smoothed_ms(
                 self.simulation_milliseconds.get(),
@@ -493,7 +534,13 @@ mod web {
             let atmosphere_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
             let (atmosphere, region) = self.generator.atmosphere_sample(atmosphere_x, atmosphere_z);
             renderer.set_atmosphere(atmosphere, region);
-            if let Some(route) = sample_first_pilgrim_road(atmosphere_x, atmosphere_z) {
+            let eye_voxel_y = (camera.position.y / VOXEL_SIZE_METRES).floor() as i32;
+            let enclosure = self.enclosure.get();
+            renderer.set_enclosure(enclosure);
+            if sample_cinder_vault(atmosphere_x, eye_voxel_y, atmosphere_z).is_some() {
+                renderer
+                    .set_route_status("CINDER VAULT", (enclosure.enclosure * 100.0).round() as u8);
+            } else if let Some(route) = sample_first_pilgrim_road(atmosphere_x, atmosphere_z) {
                 let chapter = pilgrim_chapter_at_distance(route.distance_along_voxels);
                 let progress = (route.distance_along_voxels / first_pilgrim_road_length_voxels()
                     * 100.0)
@@ -961,7 +1008,57 @@ mod web {
             if self.renderer.borrow_mut().take_route_teleport_request() {
                 self.teleport_to_next_route_mark();
             }
+            if self.renderer.borrow_mut().take_cave_teleport_request() {
+                self.teleport_to_cinder_vault();
+            }
             self.renderer.borrow().ui_open()
+        }
+
+        fn teleport_to_cinder_vault(&self) {
+            let index = self.cave_tour_index.get() % 3;
+            self.cave_tour_index.set((index + 1) % 3);
+            let mut camera = match index {
+                0 => {
+                    let x = CINDER_VAULT.entrance[0] + 40;
+                    let z = CINDER_VAULT.entrance[2];
+                    let surface = self.generator.surface_sample(x, z);
+                    let mut camera = CameraState::spawn(glam::Vec3::new(
+                        (x as f32 + 0.5) * VOXEL_SIZE_METRES,
+                        (surface.height + 1) as f32 * VOXEL_SIZE_METRES
+                            + voxels_core::PLAYER_EYE_HEIGHT_METRES,
+                        (z as f32 + 0.5) * VOXEL_SIZE_METRES,
+                    ));
+                    camera.yaw = -std::f32::consts::FRAC_PI_2;
+                    camera.pitch = -0.08;
+                    camera
+                }
+                1 => {
+                    let node = CINDER_VAULT_NODES[2].center;
+                    let mut camera = CameraState::spawn(glam::Vec3::new(
+                        (node[0] as f32 + 0.5) * VOXEL_SIZE_METRES,
+                        (node[1] as f32 + 4.0) * VOXEL_SIZE_METRES,
+                        (node[2] as f32 + 0.5) * VOXEL_SIZE_METRES,
+                    ));
+                    camera.yaw = -2.36;
+                    camera.pitch = -0.10;
+                    camera
+                }
+                _ => {
+                    let node = CINDER_VAULT.chamber;
+                    let mut camera = CameraState::spawn(glam::Vec3::new(
+                        (node[0] as f32 + 0.5) * VOXEL_SIZE_METRES,
+                        (node[1] as f32 + 0.5) * VOXEL_SIZE_METRES,
+                        (node[2] as f32 + 0.5) * VOXEL_SIZE_METRES,
+                    ));
+                    camera.yaw = -2.13;
+                    camera.pitch = -0.08;
+                    camera
+                }
+            };
+            camera.velocity = glam::Vec3::ZERO;
+            *self.camera.borrow_mut() = camera;
+            self.input.borrow_mut().clear();
+            self.last_enclosure_probe.set(f64::NEG_INFINITY);
         }
 
         fn teleport_to_next_route_mark(&self) {
@@ -1612,6 +1709,10 @@ mod web {
                     render.gpu_ambient_occlusion_ms.unwrap_or(-1.0),
                     render.ambient_occlusion_bytes as f32 / (1024.0 * 1024.0),
                     render.depth_prepass_draw_calls as f32,
+                    render.enclosure,
+                    render.interior_exposure,
+                    if render.cave_headlamp { 1.0 } else { 0.0 },
+                    engine.enclosure_probe_microseconds.get(),
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
@@ -1764,7 +1865,11 @@ mod web {
             edit_superseded: Cell::new(0),
             edit_last_ms: Cell::new(0.0),
             edit_profile: Cell::new(EditProfile::default()),
+            enclosure: Cell::new(EnclosureSample::OPEN),
+            last_enclosure_probe: Cell::new(f64::NEG_INFINITY),
+            enclosure_probe_microseconds: Cell::new(0.0),
             route_tour_index: Cell::new(0),
+            cave_tour_index: Cell::new(0),
             landmark_tour_index: Cell::new(0),
             profile: RefCell::new(ProfileAutomation::default()),
             profile_tracked_high: Cell::new(0),

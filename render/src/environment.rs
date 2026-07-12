@@ -1,6 +1,7 @@
 //! Shared outdoor-lighting state used by sky, terrain, fog, and shadow projection.
 
 use glam::Vec3;
+use voxels_core::EnclosureSample;
 use voxels_world::{AtmosphereSample, SurfaceRegion};
 
 #[repr(u8)]
@@ -60,6 +61,60 @@ pub struct OutdoorEnvironment {
     pub exposure: f32,
     pub cloud_coverage: f32,
     pub star_visibility: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InteriorEnvironment {
+    pub enclosure: f32,
+    pub sky_visibility: f32,
+    pub exposure_multiplier: f32,
+    pub fog_density: f32,
+    pub headlamp_strength: f32,
+}
+
+impl Default for InteriorEnvironment {
+    fn default() -> Self {
+        Self {
+            enclosure: 0.0,
+            sky_visibility: 1.0,
+            exposure_multiplier: 1.0,
+            fog_density: 0.0,
+            headlamp_strength: 0.0,
+        }
+    }
+}
+
+impl InteriorEnvironment {
+    pub fn for_enclosure(sample: EnclosureSample) -> Self {
+        let enclosure = sample.enclosure.clamp(0.0, 1.0);
+        Self {
+            enclosure,
+            sky_visibility: sample.sky_visibility.clamp(0.0, 1.0),
+            exposure_multiplier: 1.0 + enclosure * 1.15,
+            fog_density: enclosure * 0.032,
+            headlamp_strength: ((enclosure - 0.32) / 0.68).clamp(0.0, 1.0),
+        }
+    }
+
+    pub fn lerp(self, target: Self, amount: f32, exposure_amount: f32) -> Self {
+        let amount = amount.clamp(0.0, 1.0);
+        let exposure_amount = exposure_amount.clamp(0.0, 1.0);
+        Self {
+            enclosure: scalar_lerp(self.enclosure, target.enclosure, amount),
+            sky_visibility: scalar_lerp(self.sky_visibility, target.sky_visibility, amount),
+            exposure_multiplier: scalar_lerp(
+                self.exposure_multiplier,
+                target.exposure_multiplier,
+                exposure_amount,
+            ),
+            fog_density: scalar_lerp(self.fog_density, target.fog_density, amount),
+            headlamp_strength: scalar_lerp(
+                self.headlamp_strength,
+                target.headlamp_strength,
+                amount,
+            ),
+        }
+    }
 }
 
 impl Default for OutdoorEnvironment {
@@ -378,6 +433,25 @@ mod tests {
         assert!(sixty_hz.sun_direction.dot(one_twenty_hz.sun_direction) > 0.9999);
         assert!((sixty_hz.fog_density - one_twenty_hz.fog_density).abs() < 0.0001);
         assert!((sixty_hz.cloud_coverage - one_twenty_hz.cloud_coverage).abs() < 0.0001);
+    }
+
+    #[test]
+    fn interior_environment_is_bounded_and_adapts_exposure_separately() {
+        let target = InteriorEnvironment::for_enclosure(EnclosureSample {
+            sky_visibility: 0.0,
+            enclosure: 1.0,
+            ceiling_distance_metres: 2.0,
+            escape_direction: Vec3::Y,
+            escaped_rays: 0,
+            ray_count: 9,
+        });
+        assert_eq!(target.enclosure, 1.0);
+        assert_eq!(target.sky_visibility, 0.0);
+        assert!(target.exposure_multiplier > 2.0);
+        assert_eq!(target.headlamp_strength, 1.0);
+        let advanced = InteriorEnvironment::default().lerp(target, 0.8, 0.1);
+        assert!(advanced.enclosure > 0.7);
+        assert!(advanced.exposure_multiplier < 1.2);
     }
 
     #[test]
