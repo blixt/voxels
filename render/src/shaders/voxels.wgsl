@@ -256,8 +256,8 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   let facing = clamp(dot(normal, view_direction), 0.0, 1.0);
   let fresnel = 0.02037 + 0.97963 * pow(1.0 - facing, 5.0);
   let reflection = reflected_environment(reflect(-view_direction, normal));
-  let deep = srgb_to_linear(vec3<f32>(0.025, 0.18, 0.24));
-  let shallow = srgb_to_linear(vec3<f32>(0.09, 0.39, 0.43));
+  let deep = srgb_to_linear(vec3<f32>(0.018, 0.14, 0.22));
+  let shallow = srgb_to_linear(vec3<f32>(0.075, 0.34, 0.41));
   let wave_light = sin(input.world.x * 2.7 + frame.camera_time.w * 0.9)
     * sin(input.world.z * 2.2 - frame.camera_time.w * 0.7) * 0.5 + 0.5;
   var color = mix(deep, shallow, 0.28 + wave_light * 0.18);
@@ -281,7 +281,11 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   let fog_radiance = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, sky_factor);
   color = color * transmittance + fog_radiance * (1.0 - transmittance);
   color = max(color * frame.fog_exposure.y, vec3<f32>(0.0));
-  let alpha = mix(0.68, 0.91, fresnel);
+  // Without a sampled opaque-depth buffer yet, distance is a conservative absorption proxy: it
+  // preserves nearby shallows while preventing distant seabed geometry from producing noisy
+  // transparent LOD bands. Fresnel still dominates at grazing angles.
+  let absorption = 1.0 - exp(-distance_to_camera * 0.055);
+  let alpha = mix(0.78, 0.97, max(fresnel, absorption));
   return vec4<f32>(color * alpha, alpha);
 }
 
