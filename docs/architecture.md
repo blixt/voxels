@@ -35,10 +35,11 @@ until benchmarks show generation or meshing is the frame-time bottleneck.
 ## World representation
 
 The live world is a sparse map of fixed-size cubic chunks. A chunk stores a compact material id per
-voxel and is the unit of generation, editing, persistence, remeshing, culling, and streaming. The
-authoritative near field keeps the required 10 cm voxel resolution and uses face-culling plus greedy
-rectangle merging. A column becomes render-ready only when all desired vertical chunks are resident,
-so a partially streamed stack cannot expose an open terrain slice.
+voxel and is the unit of generation, editing, remeshing, culling, and streaming; persistence stores
+generator identity plus sparse voxel overrides independently. The authoritative near field keeps the
+required 10 cm voxel resolution and uses face-culling plus greedy rectangle merging. A column becomes
+render-ready only when all desired vertical chunks are resident, so a partially streamed stack cannot
+expose an open terrain slice.
 
 The current generator builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
 detail, dune, and volcanic fields. Six dominant regional identities—verdant forest, wind-cut moor,
