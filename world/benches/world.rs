@@ -18,9 +18,9 @@ fn generation(criterion: &mut Criterion) {
     });
 
     let road_length = first_pilgrim_road_length_voxels();
-    let road = first_pilgrim_road_point_at_distance(road_length * 0.5)
-        .expect("authored road midpoint")
-        .0;
+    let Some((road, _)) = first_pilgrim_road_point_at_distance(road_length * 0.5) else {
+        return;
+    };
     let road_x = road[0].round() as i32;
     let road_z = road[1].round() as i32;
     let road_y = generator.surface_height(road_x, road_z);
@@ -34,9 +34,9 @@ fn route_surface_lod(criterion: &mut Criterion) {
     let generator = Generator::new(SEED);
     let edits = EditMap::default();
     let road_length = first_pilgrim_road_length_voxels();
-    let road = first_pilgrim_road_point_at_distance(road_length * 0.5)
-        .expect("authored road midpoint")
-        .0;
+    let Some((road, _)) = first_pilgrim_road_point_at_distance(road_length * 0.5) else {
+        return;
+    };
     let road = [road[0].round() as i32, road[1].round() as i32];
     let mut group = criterion.benchmark_group("pilgrim-road surface LOD");
     for level in [SurfaceLodLevel::Stride2, SurfaceLodLevel::Stride16] {

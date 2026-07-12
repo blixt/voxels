@@ -43,7 +43,7 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 
 The canonical world is generator identity plus sparse edits. Near meshes and four streamed surface LOD
 rings are derived caches; the rings sample at 0.2, 0.4, 0.8, and 1.6 m while the editable near field
-retains authoritative 10 cm voxels. Generator v8 shares one regional surface sample across canonical
+retains authoritative 10 cm voxels. Generator v10 shares one regional surface sample across canonical
 chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
 conditional skirts, and activates a newly streamed coverage set only when it is complete.
@@ -53,6 +53,9 @@ into clusters, rings, clearings, and procession lines with larger companion and 
 bounded edit-aware proxies preserve them across the surface rings. A deterministic Rust-generated
 material atlas adds world-anchored, mip-filtered albedo, micro-normal, and roughness structure without
 changing geometry, draw ownership, or durable voxel data.
+The First Pilgrim Road is a stable Rust polyline graded through those same canonical columns. Its
+10 cm paving, shoulders, cairns, waystones, and ruined arches remain editable, collidable, and
+continuous through every streamed LOD rather than becoming a renderer-only decal.
 See [docs/architecture.md](docs/architecture.md) for format, persistence, and research decisions.
 
 ## Controls
@@ -68,8 +71,8 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 - Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and context menu
   can toggle cascaded sun shadows, ambient occlusion, fog, far terrain, animated water, and target
   highlighting or material surface detail without a DOM UI layer. Its Rust-rendered more menu can
-  teleport to the coastal showcase or cycle through regional landmarks for repeatable graphics and
-  streaming checks.
+  teleport to the coastal showcase, follow the five marks of the pilgrim road, or cycle through
+  regional landmarks for repeatable graphics and streaming checks.
 
 ## Automation
 

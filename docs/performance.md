@@ -392,3 +392,47 @@ gates produced:
 The edit gate completed 40 canonical-plus-LOD remove/restore operations, returned to zero sparse edits,
 and recorded no superseded work or browser errors. The sustained rail drained every final job and mesh
 payload, so the larger hero silhouettes do not weaken bounded streaming or allocation reuse.
+
+## 2026-07-12: editable pilgrim road and route landmarks
+
+Generator v9 introduces one terrain-aware, 164.7 m route from the spawn forest through moor into the
+badlands. Generator v10 adds five route-first cairn, waystone, and ruined-arch identities. The same
+canonical column overlay owns paving, collision, water exclusion, sparse edits, and all four LODs;
+host tests walk the road at 10 cm intervals and prove dry passability, bounded cut/fill, chunk/region
+agreement, edit restoration, and cardinal LOD connectivity. Route landmark tests additionally cover
+stable cadence, ambient-placement precedence, canonical visibility, proxy suppression, and restoration
+at every LOD.
+
+Dedicated Criterion cases keep route cost visible beside the off-road reference:
+
+| Native release operation                   | Mean time |
+| ------------------------------------------ | --------: |
+| Existing off-road canonical 32-cubed chunk | 708.71 us |
+| Pilgrim-road canonical 32-cubed chunk      | 653.23 us |
+| Route midpoint stride-2 surface tile       | 186.45 us |
+| Route midpoint stride-16 surface tile      | 214.58 us |
+
+The outer tile covers substantially more physical terrain and route-adjacent feature cells; both LOD
+cases remain below 0.22 ms. The off-road reference stayed within Criterion's saved noise threshold.
+
+The current release browser gates at 1280x720 produced:
+
+| Integrated measurement                        |               Result |
+| --------------------------------------------- | -------------------: |
+| Steady / traversal / underwater frame p95     |   9.3 / 9.3 / 9.3 ms |
+| Traversal CPU / streaming p95                 |         5.8 / 3.0 ms |
+| Sustained frame p95 / p99 / max               | 9.1 / 10.0 / 10.4 ms |
+| Sustained CPU / streaming p95                 |         6.6 / 3.4 ms |
+| Sustained distance / evictions                |     1,080 m / 14,276 |
+| Final-20-second WASM / arena-capacity range   |            0 / 0 MiB |
+| Edit enqueue / full submitted convergence p95 |        3.0 / 30.4 ms |
+| Dropped samples / stale completions / errors  |            0 / 0 / 0 |
+
+The 40-operation edit profile restored the sparse map to zero rows with no superseded work. The OPFS
+gate completed 38 rapid reloads across three tabs, including four simultaneous reload rounds and a
+live follower edit, with zero persistence errors. Its fault-injection companion denied the first 20
+VFS acquisitions and recovered on call 21 with a canvas-only document and zero console errors.
+
+Visual release inspection used the Rust-rendered “Follow pilgrim road” context action to reconstruct
+the first ruined arch beside the paved bed. Mission Control, context menu, telemetry, crosshair, and
+startup controls remained WGPU draw data; the document body contained exactly one canvas.

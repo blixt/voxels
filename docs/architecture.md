@@ -40,7 +40,7 @@ authoritative near field keeps the required 10 cm voxel resolution and uses face
 rectangle merging. A column becomes render-ready only when all desired vertical chunks are resident,
 so a partially streamed stack cannot expose an open terrain slice.
 
-Generator v8 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
+Generator v10 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
 detail, dune, and volcanic fields. Six dominant regional identities—verdant forest, wind-cut moor,
 alpine, red badlands, pale dunes, and volcanic terrain—select surface ecology and geology, while their
 normalized weights blend height modifiers continuously across boundaries. Canonical generation, LOD
@@ -118,6 +118,22 @@ expand canonical/proxy radii within the existing ten-voxel conservative bound. T
 returns at most one feature per 96-voxel cell, so stable identity, fixed column storage, 24-quad proxy
 caps, editing, and LOD handoff remain unchanged. A fixed-seed checksum covers placement, archetype,
 anchor, height, orientation, variant, and prominence across positive and negative cells.
+
+Generator v9 adds the First Pilgrim Road as a versioned six-node polyline in canonical 10 cm
+coordinates. A single projection returns the nearest segment, tangent, signed lateral offset,
+cumulative distance, core coverage, and shoulder blend. The column generator first produces natural
+terrain and then applies that route exactly once, so canonical chunks, collision, edits, water,
+surface LOD, and random-access sampling cannot disagree. The 3.6 m bed is fully graded while a smooth
+shoulder reaches 5.4 m from center; host invariants limit longitudinal steps to the player's 30 cm
+step height and preserve a dry cardinal-connected sampled core at all four LOD strides.
+
+Generator v10 gives the route five stable `(route id, ordinal)` landmarks at 28.8 m cadence. Route
+cells take precedence over ambient placement and alternate sides while cycling editable cairns,
+waystones, and ruined arches. Their canonical analytic shapes use ordinary material voxels, and their
+bounded LOD proxies use the same pristine-edit suppression and anchor ownership as regional
+landmarks. The final segment deliberately retains a nearby badlands hoodoo as a destination
+silhouette. The Rust Mission Control context menu reconstructs these identities to tour the road;
+no route, teleport, or UI semantics cross into TypeScript.
 
 An edit invalidates every surface tile whose sampling footprint depends on that X/Z column. Resident
 geometry stays active while its replacement is generated and allocated, then the renderer switches
@@ -257,6 +273,10 @@ latency a user-visible, revision-backed measurement rather than a queue-length a
 - Deussen et al. model plant ecosystems as interacting spatial distributions rather than independent
   props, motivating region-scale composition instead of raising one global landmark probability:
   <https://doi.org/10.1145/280814.280898>
+- Galin et al. represent procedural roads as paths whose terrain-aware geometry, grading, and
+  roadside placement derive from one route rather than unrelated raster effects. The pilgrim road
+  adopts that single-authority principle while keeping a deliberately small host-testable polyline:
+  <https://perso.liris.cnrs.fr/eric.galin/Articles/2010-roads.pdf>
 - The Rust SQLite bindings and OPFS VFS expose the SQLite C API and sync-access-handle pool directly to
   `wasm32-unknown-unknown`:
   <https://docs.rs/sqlite-wasm-rs/0.5.5/sqlite_wasm_rs/>
