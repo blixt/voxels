@@ -310,7 +310,6 @@ pub enum SurfaceRole {
     FeatureRow,
     ToggleTrack,
     ToggleThumb,
-    Hover,
     ContextMenu,
     ContextRow,
 }

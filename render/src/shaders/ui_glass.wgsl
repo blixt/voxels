@@ -97,11 +97,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let color = mix(instance.border.rgb, instance.fill.rgb, ring);
     return vec4<f32>(color * alpha, alpha);
   }
-  if style < 0.5 {
-    let alpha = mask * instance.fill.a;
-    return vec4<f32>(instance.fill.rgb * alpha, alpha);
-  }
-
   let bevel = max(radius, instance.style.y);
   let epsilon = max(1.25 * instance.style.y, 1.0);
   let height_x = height_at(position + vec2<f32>(epsilon, 0.0), half_size, radius, bevel)
