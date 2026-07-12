@@ -20,6 +20,8 @@ The browser persistence stress test remains explicit because it launches a syste
 `vp run bench:world` runs native Criterion baselines for chunk generation, VXCH encode/decode, and
 greedy meshing. Reports are written under the ignored `target/criterion/` directory.
 `vp run bench:core` compares 120 dry and submerged fixed simulation steps.
+`vp run profile:browser` builds release WASM, serves it from an isolated origin, and records raw
+frame/CPU phase distributions for steady, traversal, and underwater scenarios in system Chrome.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture

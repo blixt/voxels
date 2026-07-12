@@ -71,6 +71,7 @@ function phaseSummary(captures) {
     pendingJobs: latest[SNAPSHOT.pendingJobs],
     quads: latest[SNAPSHOT.quads],
     waterQuads: latest[SNAPSHOT.waterQuads],
+    waterDrawCalls: latest[29],
     drawCalls: latest[SNAPSHOT.drawCalls],
     coreGpuMiB: latest[SNAPSHOT.coreGpuMiB],
     meshArenaAllocatedMiB: latest[SNAPSHOT.arenaAllocatedMiB],
@@ -220,6 +221,7 @@ try {
     JSON.stringify(
       {
         ok: true,
+        schemaVersion: 1,
         build: "release",
         viewport,
         startup: { settledMilliseconds },

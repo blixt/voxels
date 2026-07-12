@@ -130,7 +130,7 @@ canonical tree edit, and restoration when the edit returns to generated state.
 ## 2026-07-12: authoritative water and draw-range packing
 
 Generator v5 and material schema v2 add editable canonical Water, edit-aware water masks at all four
-surface levels, and a dedicated two-pass translucent renderer. A pristine stride-8 water tile first
+surface levels, and a dedicated refractive renderer. A pristine stride-8 water tile first
 measured 1.351 ms when every mask sample invoked the general 3D voxel sampler. Using the shared
 `SurfaceSample` for generated occupancy and consulting the sparse override index only at the sea cell
 reduced that work to 0.140 ms, an 89.6% reduction. The benchmark remains in `world/benches/world.rs`.
@@ -168,3 +168,43 @@ The same isolated browser sequence now performs a real pointer-locked removal in
 waits for the leader's live Rust edit map to reach the same revision before any reload. This covers the
 follower proxy, SQLite commit, committed-edit broadcast, and canonical/LOD invalidation path in addition
 to storage ownership handoff.
+
+## 2026-07-12: raw release frame profiling and bounded streaming
+
+`vp run profile:browser` now builds optimized WASM, serves `dist` from an isolated ephemeral origin,
+and drains raw Rust worker frame samples from a fixed 512-entry ring. The versioned snapshot keeps
+display interval separate from total worker CPU, simulation, streaming, and render-submission time;
+the harness reports p50/p95/p99/max and hitch counts without treating an exponentially smoothed UI
+number as a distribution.
+
+Measured in system Chrome at 1280x720 DPR 1 on the same Apple M3 Max, reducing canonical meshing
+admission from two chunks to one removed busy-frame overload without slowing the measured cold settle.
+
+| Release scenario                      |         Metric | Two meshes/frame | One mesh/frame |
+| ------------------------------------- | -------------: | ---------------: | -------------: |
+| Cold navigation to all queues settled |      wall time |           3.43 s |         3.13 s |
+| Traversal                             |      frame p95 |          16.6 ms |         9.6 ms |
+| Traversal                             | worker CPU p95 |          11.2 ms |         7.6 ms |
+| Traversal                             |  streaming p95 |           8.7 ms |         5.1 ms |
+| Underwater load                       |      frame p95 |          16.6 ms |         9.5 ms |
+| Underwater load                       | worker CPU p95 |          10.8 ms |         7.3 ms |
+| Underwater load                       |  streaming p95 |           8.3 ms |         4.7 ms |
+
+The next bottleneck was repeated analytic-tree discovery for all 1,156 columns in a chunk's 34x34
+meshing halo. `GeneratedRegion` now discovers intersecting features once, then builds authoritative
+column samplers from that shared set. Criterion measured canonical meshing at 1.177 ms, down from
+2.620 ms (55.1%), and ocean meshing at 0.871 ms, down from 2.316 ms (62.4%). Generator output is
+unchanged; host tests compare region sampling with random-access generation across negative space,
+tree-cell boundaries, and the ocean showcase.
+
+With that sampler in the integrated release build, traversal frame p95 remained 9.4 ms while worker
+CPU p95 fell to 5.6 ms and streaming p95 to 3.0 ms. Underwater frame p95 reached 9.1 ms, CPU p95
+5.3 ms, and streaming p95 2.6 ms. The traversal and underwater samples recorded no interval above
+16.67 ms and no dropped telemetry samples.
+
+The renderer now shades its procedural sky at the far depth after opaque terrain, allowing early
+depth rejection behind the world. Opaque refractive water writes color and depth in one pass rather
+than submitting identical geometry for separate depth and color passes. The measured underwater
+view kept 520 visible water quads and reduced total world draws from 509 to 430 while retaining the
+same 7.03 MiB full-resolution refraction copy. GPU timestamp queries remain future work, so these CPU
+and submission results deliberately make no claim about GPU pass time.
