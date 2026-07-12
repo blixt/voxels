@@ -501,3 +501,28 @@ The exact head also repeated the canvas and persistence release gates: 38 rapid 
 tabs completed with live edit synchronization and zero persistence errors, while 20 injected OPFS VFS
 acquisition failures recovered on call 21 with zero console errors. Both harnesses asserted that the
 document body contained exactly one canvas.
+
+## 2026-07-12: semantic regional heroes
+
+Generator v11 gives the composition director six region-specific hero forms instead of scaling the
+ordinary regional prop. Elder canopies, tor circles, needle gates, buried ribs, buried colonnades, and
+basalt crowns remain canonical 10 cm voxels. Their exact bounds drive chunk decoration and edit
+invalidation, while each LOD proxy remains capped at four boxes and 24 quads. Existing background and
+route anchors keep their established placement; only the one hero cell in each 8x8 composition area
+pays for the larger form.
+
+`vp run profile:heroes` advanced the Rust landmark catalog exclusively through canvas clicks and
+captured all six fixed views. At 1280x720 on the M3 Max / system Chrome, every three-second view held
+the 120 Hz cap with zero dropped samples, no frame above 16.67 ms, no stale completions, settled queues,
+and exact opaque/depth ownership. The worst frame p95 was 9.7 ms and the worst active GPU p95 was
+5.967 ms. The six views exercised 1.13–1.63 million visible quads, 353–420 draw calls, regional cloud
+lighting, water/refraction where present, and the full screen-space AO path without exceeding its
+7.5 ms active-GPU gate.
+
+Native Criterion means for the largest forest form were 300.77 us for a hero-intersecting canonical
+crown chunk, 152.01 us for its stride-2 tile, and 179.96 us for its stride-16 tile. The representative
+off-road and pilgrim-road chunks measured 716.96 and 669.67 us, remaining below 3% of the prior measured
+class and well under the 1 ms generation budget. Codec and greedy-mesh cases remained within noise.
+The first implementation put generalized hero anchor work on every candidate; the retained version
+restores cheap established anchors for ordinary forms and computes the clamped wider anchor only for
+the rare semantic hero.

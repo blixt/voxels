@@ -40,7 +40,7 @@ authoritative near field keeps the required 10 cm voxel resolution and uses face
 rectangle merging. A column becomes render-ready only when all desired vertical chunks are resident,
 so a partially streamed stack cannot expose an open terrain slice.
 
-Generator v10 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
+Generator v11 builds one reusable `SurfaceSample` per X/Z column from climate, continental, ridge,
 detail, dune, and volcanic fields. Six dominant regional identities—verdant forest, wind-cut moor,
 alpine, red badlands, pale dunes, and volcanic terrain—select surface ecology and geology, while their
 normalized weights blend height modifiers continuously across boundaries. Canonical generation, LOD
@@ -134,6 +134,17 @@ bounded LOD proxies use the same pristine-edit suppression and anchor ownership 
 landmarks. The final segment deliberately retains a nearby badlands hoodoo as a destination
 silhouette. The Rust Mission Control context menu reconstructs these identities to tour the road;
 no route, teleport, or UI semantics cross into TypeScript.
+
+Generator v11 replaces the composition layer's generic 50%-taller heroes with six append-only
+semantic identities: elder canopy, tor circle, needle gate, buried ribs, buried colonnade, and basalt
+crown. Each is an analytic ordinary-voxel form with an exact kind-specific bound. The one hero cell in
+each 76.8 m composition area may use an 18-voxel radius, while established background, companion, and
+route identities retain their previous anchors and smaller bounds. Disposable LOD representations use
+at most four boxes (24 quads), stay anchor-owned, and disappear when any canonical feature voxel is
+edited; restoring the generated material removes the sparse override and recreates the exact proxy.
+Ordinary candidates reject water before computing composition identity, so rare hero work does not
+inflate every column's hot path. The SQLite world record advances generator identity without dropping
+existing sparse edits.
 
 An edit invalidates every surface tile whose sampling footprint depends on that X/Z column. Resident
 geometry stays active while its replacement is generated and allocated, then the renderer switches

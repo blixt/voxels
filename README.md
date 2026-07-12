@@ -34,6 +34,9 @@ and blue hour, captures each phase, and gates identical geometry plus frame/GPU 
 `vp run profile:gtao` follows the Rust-owned pilgrim route to a dense badlands view, toggles
 screen-space contact AO through canvas hit-testing, captures the A/B, and gates exact geometry,
 resource residency, frame pacing, and depth-plus-AO GPU cost.
+`vp run profile:heroes` visits the six semantic regional heroes through the Rust canvas context menu,
+captures a deterministic contact sheet, and gates settled streaming, depth ownership, frame pacing,
+and GPU cost in every region.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture
@@ -48,14 +51,15 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 
 The canonical world is generator identity plus sparse edits. Near meshes and four streamed surface LOD
 rings are derived caches; the rings sample at 0.2, 0.4, 0.8, and 1.6 m while the editable near field
-retains authoritative 10 cm voxels. Generator v10 shares one regional surface sample across canonical
+retains authoritative 10 cm voxels. Generator v11 shares one regional surface sample across canonical
 chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
 conditional skirts, and activates a newly streamed coverage set only when it is complete.
-Analytic landmark identities add broadleaf trees, limestone tors, alpine needles, hoodoos, dune
-arches, and basalt columns as ordinary editable voxels. An 8x8-cell composition director arranges them
-into clusters, rings, clearings, and procession lines with larger companion and hero silhouettes, while
-bounded edit-aware proxies preserve them across the surface rings. A deterministic Rust-generated
+Analytic landmark identities add ordinary regional forms plus elder canopies, tor circles, needle
+gates, buried ribs, colonnades, and basalt crowns as ordinary editable voxels. An 8x8-cell composition
+director arranges backgrounds and companions into clusters, rings, clearings, and procession lines,
+then gives each macro cell one distinct semantic hero. Bounded edit-aware proxies preserve every form
+across the surface rings. A deterministic Rust-generated
 material atlas adds world-anchored, mip-filtered albedo, micro-normal, and roughness structure without
 changing geometry, draw ownership, or durable voxel data.
 The First Pilgrim Road is a stable Rust polyline graded through those same canonical columns. Its
