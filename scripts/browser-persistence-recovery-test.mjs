@@ -1,23 +1,9 @@
 import { chromium } from "playwright";
-import { createServer as createNetServer } from "node:net";
 import { createServer as createViteServer } from "vite-plus";
+import { chromeWebGpuLaunchOptions, reserveEphemeralPort } from "./browser-harness.mjs";
 
 const FIRST_OPEN_ATTEMPTS = 20;
 const failures = [];
-
-async function reserveEphemeralPort() {
-  const probe = createNetServer();
-  await new Promise((resolve, reject) => {
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", resolve);
-  });
-  const address = probe.address();
-  if (!address || typeof address === "string") throw new Error("could not reserve a TCP port");
-  await new Promise((resolve, reject) =>
-    probe.close((error) => (error ? reject(error) : resolve())),
-  );
-  return address.port;
-}
 
 const port = await reserveEphemeralPort();
 const server = await createViteServer({
@@ -30,17 +16,7 @@ try {
   const address = server.httpServer?.address();
   if (!address || typeof address === "string") throw new Error("Vite did not expose a TCP port");
 
-  browser = await chromium.launch({
-    channel: "chrome",
-    headless: false,
-    args: [
-      "--headless=new",
-      "--enable-unsafe-webgpu",
-      "--enable-features=WebGPU",
-      "--no-sandbox",
-      "--hide-scrollbars",
-    ],
-  });
+  browser = await chromium.launch(chromeWebGpuLaunchOptions());
   const context = await browser.newContext({ viewport: { width: 960, height: 640 } });
   const page = await context.newPage();
   let appWorker;

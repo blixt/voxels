@@ -1,6 +1,6 @@
-import { createServer as createNetServer } from "node:net";
 import { chromium } from "playwright";
 import { build, preview } from "vite-plus";
+import { chromeWebGpuLaunchOptions, reserveEphemeralPort } from "./browser-harness.mjs";
 
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed|landmark tour/i;
@@ -1268,20 +1268,6 @@ async function enterUnderwaterShowcase(page, viewportWidth) {
   await page.waitForTimeout(500);
 }
 
-async function reserveEphemeralPort() {
-  const probe = createNetServer();
-  await new Promise((resolve, reject) => {
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", resolve);
-  });
-  const address = probe.address();
-  if (!address || typeof address === "string") throw new Error("could not reserve a TCP port");
-  await new Promise((resolve, reject) =>
-    probe.close((error) => (error ? reject(error) : resolve())),
-  );
-  return address.port;
-}
-
 const viewport = { width: 1280, height: 720 };
 const sustained = process.argv.includes("--sustained");
 const edits = process.argv.includes("--edits");
@@ -1317,17 +1303,7 @@ try {
     logLevel: "warn",
     preview: { host: "127.0.0.1", port, strictPort: true },
   });
-  browser = await chromium.launch({
-    channel: "chrome",
-    headless: false,
-    args: [
-      "--headless=new",
-      "--enable-unsafe-webgpu",
-      "--enable-features=WebGPU",
-      "--no-sandbox",
-      "--hide-scrollbars",
-    ],
-  });
+  browser = await chromium.launch(chromeWebGpuLaunchOptions());
   const context = await browser.newContext({ viewport, deviceScaleFactor: 1 });
   const page = await context.newPage();
   observePageErrors(page);
