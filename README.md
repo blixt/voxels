@@ -29,6 +29,8 @@ canonical and LOD queue must drain.
 `vp run profile:edits` runs 40 Rust-owned terrain/water remove-and-restore operations and gates SQLite
 dispatch, canonical remesh, all four LOD replacements, submitted-frame convergence, and pristine
 restoration.
+`vp run profile:atmosphere` drives the Rust canvas context menu through dawn, clear day, golden hour,
+and blue hour, captures each phase, and gates identical geometry plus frame/GPU budgets.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture
@@ -72,7 +74,7 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
   can toggle cascaded sun shadows, ambient occlusion, fog, far terrain, animated water, and target
   highlighting or material surface detail without a DOM UI layer. Its Rust-rendered more menu can
   teleport to the coastal showcase, follow the five marks of the pilgrim road, or cycle through
-  regional landmarks for repeatable graphics and streaming checks.
+  regional landmarks and regional daylight phases for repeatable graphics and streaming checks.
 
 ## Automation
 

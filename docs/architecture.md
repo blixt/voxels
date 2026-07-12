@@ -158,9 +158,16 @@ same CPU geometric ownership as the color pass, and apply 3x3 comparison PCF onl
 The Rust mission-control toggle skips all
 three caster passes, while live diagnostics expose their draw-call cost.
 
-Outdoor lighting is one Rust-owned environment shared by shadow projection, sky radiance, voxel
-lighting, and aerial perspective. The world first renders in linear HDR to `Rgba16Float`; the present
-pass applies the Khronos PBR Neutral tone mapper and an sRGB transfer before the Rust UI is composited.
+Outdoor lighting is a continuously sampled Rust-owned environment shared by shadow projection, sky
+radiance, voxel lighting, cloud shadowing, and aerial perspective. The generator maps the same smooth
+regional weights used by terrain into normalized humidity, coldness, aerosol, cloudiness, horizon
+warmth, and haze fields. The shell samples those fields only at the camera—never in hot canonical or
+LOD column loops—and the renderer eases toward the target independently of display rate. Four
+Rust-owned phases (dawn, clear day, golden hour, and blue hour) change sun direction/radiance, fog,
+cloud cover, and stars without changing world geometry or adding browser UI state.
+
+The world first renders in linear HDR to `Rgba16Float`; the present pass applies the Khronos PBR
+Neutral tone mapper and an sRGB transfer before the Rust UI is composited.
 Refractive glass samples and maps that same HDR backdrop before mixing its display-space chrome, so a
 panel cannot expose a differently transformed copy of the world. Material base colors are converted
 from authored sRGB values, ambient occlusion attenuates indirect light rather than direct sunlight,
@@ -311,6 +318,18 @@ latency a user-visible, revision-backed measurement rather than a queue-length a
 - Toksvig's normal-map mip filtering uses averaged-normal shortening as a measure of unresolved normal
   variation instead of renormalizing away the information:
   <https://doi.org/10.1080/2151237X.2005.10129203>
+- Frostbite's sky/atmosphere/cloud course treats sky radiance, aerial perspective, cloud lighting,
+  and time of day as one coherent dynamic system rather than independent color overlays:
+  <https://www.ea.com/news/physically-based-sky-atmosphere-and-cloud-rendering>
+- Hillaire's production atmosphere technique provides the next physically based upgrade path when the
+  current analytic model is no longer sufficient for ground-to-space views:
+  <https://sebh.github.io/publications/egsr2020.pdf>
+- Bruneton's tested reference implementation documents precomputed multiple scattering, spectral to
+  luminance conversion, ozone, and configurable aerosol density profiles:
+  <https://ebruneton.github.io/precomputed_atmospheric_scattering/>
+- WGSL requires derivative built-ins such as `fwidth` to execute in uniform control flow; the planar
+  cloud layer therefore uses analytic edge softness inside its view-dependent branch:
+  <https://www.w3.org/TR/WGSL/#derivatives>
 
 ## Deliberate non-goals for the conversion
 

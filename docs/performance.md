@@ -436,3 +436,41 @@ VFS acquisitions and recovered on call 21 with a canvas-only document and zero c
 Visual release inspection used the Rust-rendered “Follow pilgrim road” context action to reconstruct
 the first ruined arch beside the paved bed. Mission Control, context menu, telemetry, crosshair, and
 startup controls remained WGPU draw data; the document body contained exactly one canvas.
+
+## 2026-07-12: continuous regional daylight
+
+The renderer no longer applies one static atmosphere to every region. The generator exposes six
+normalized continuous fields from its existing regional classifier, while the shell samples them at
+the camera and the renderer smooths toward the target with a frame-rate-independent response. Dawn,
+clear day, golden hour, and blue hour alter one shared sun/sky/fog/cloud environment; blue hour adds a
+sparse procedural star field. The sky and terrain evaluate the same world-anchored cloud field so
+cloud motion also modulates direct sunlight without adding a render pass, texture, draw, or allocation.
+
+`vp run profile:atmosphere` changes all four phases by opening the Rust Mission Control context menu
+and clicking the canvas row. At 1280x720 on the M3 Max / system Chrome, every four-second window held
+the 120 Hz cap with zero dropped samples and no frame over 16.67 ms:
+
+| Phase       | Frame p95 | World GPU p95 | Active-window GPU p95 | Cloud cover |
+| ----------- | --------: | ------------: | --------------------: | ----------: |
+| Golden hour |    9.2 ms |      1.607 ms |              5.574 ms |       0.586 |
+| Blue hour   |    9.7 ms |      0.961 ms |              2.899 ms |       0.574 |
+| Dawn        |    9.4 ms |      1.465 ms |              4.987 ms |       0.621 |
+| Clear day   |    9.5 ms |      0.900 ms |              2.945 ms |       0.609 |
+
+All phases retained 243 resident chunks, 107 visible chunks, 843,444 quads, 319 draws, 32 MiB arena
+capacity, and zero pending jobs. The profile stores one screenshot per phase under ignored `target/`
+output and rejects any geometry, residency, draw, allocation, or dropped-sample difference.
+
+The first implementation derived atmosphere for every `SurfaceSample`; Criterion immediately exposed
+2–13% regressions in surface-LOD cases. The retained design keeps regional classification shared but
+derives atmosphere only in the explicit camera sampler. Final native means were 704.98 us for an
+off-road canonical chunk, 652.94 us for the pilgrim-road chunk, 187.38 us for its stride-2 tile,
+215.32 us for its stride-16 tile, 122.67 us for edit-aware stride-8 water, and 160.99 us for the far
+surface tile. Criterion classified the canonical, water, far, codec, and meshing comparisons within
+noise; the route cases returned to their pre-atmosphere range.
+
+The browser boundary remains exactly one canvas. Crosshair, startup control help, atmosphere status,
+toggles, menus, hover states, and performance counters are Rust draw commands; fatal boot/worker errors
+go to the console. The persistence regression completed 38 rapid reloads across three tabs with live
+edit synchronization and zero persistence errors. Fault injection denied 20 consecutive OPFS VFS
+acquisitions, then recovered on call 21 with zero console errors.
