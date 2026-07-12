@@ -693,3 +693,10 @@ style. The sampler contract is host-tested as nearest magnification/minification
 anisotropy 1, while retaining the averaged mip chain for distance stability. An isolated headless
 release run held steady, traversal, and underwater frame p95 to 9.2 / 9.2 / 9.1 ms at 1280x720 with
 zero dropped samples or browser errors.
+
+The follow-up face-resolution gate quantizes both albedo and tangent normal/roughness lookup to three
+cells per 10 cm voxel axis, or 3.33 cm per visible block. A host test covers all three texel centers,
+exact and just-inside face boundaries, negative coordinates, nearest sampling, and the explicit-gradient
+WGSL path. `vp run profile:materials` kept material-off/on frame p95 identical at 9.2 ms, moved world
+GPU p95 by 0.239 ms, changed no geometry, residency, draws, or mesh allocation, and recorded zero
+dropped samples or browser errors in isolated headless Chrome.

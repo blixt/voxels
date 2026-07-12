@@ -252,7 +252,11 @@ not regress to a shimmering level-zero sample.
 
 Axis-aligned face bases derive planar coordinates from world position, so greedy quads never stretch
 detail and adjacent canonical chunks, surface LODs, skirts, and landmark proxies sample the same
-coordinates without new vertex attributes. Albedo mips average in linear space before sRGB encoding.
+coordinates without new vertex attributes. Before atlas lookup, those coordinates snap to three
+world-aligned cells per canonical voxel axis: every face therefore exposes exactly 3x3 blocks at
+3.33 cm spacing, including faces embedded in a larger greedy quad. Explicit texture gradients come
+from the unsnapped coordinates, retaining stable mip selection despite the piecewise-constant lookup.
+Albedo mips average in linear space before sRGB encoding.
 Normal mips retain the length of the averaged vector; the shader converts shortening into additional
 roughness before normalizing, suppressing distant specular sparkle. Detail normals affect lighting
 only—geometric normals remain authoritative for shadow bias, LOD ownership, targeting, and collision.

@@ -184,6 +184,18 @@ fn material_detail_scale(material: u32) -> f32 {
   }
 }
 
+const MATERIAL_TEXELS_PER_VOXEL: f32 = 3.0;
+
+fn pixelated_material_uv(surface_metres: vec2<f32>, material_scale: f32) -> vec2<f32> {
+  // Quantize in canonical world space before applying the material's atlas frequency. Greedy
+  // quads can span many voxels, so this preserves exactly 3x3 visible blocks on every 10 cm face
+  // without introducing per-face vertices or abandoning world-aligned material continuity.
+  let texels_per_metre = MATERIAL_TEXELS_PER_VOXEL / frame.viewport_voxel.z;
+  // Keep mathematically exact voxel boundaries stable when f32 interpolation lands one ULP low.
+  let world_texel = floor(surface_metres * texels_per_metre + vec2<f32>(0.0001));
+  return ((world_texel + vec2<f32>(0.5)) / texels_per_metre) * material_scale;
+}
+
 fn sample_surface_detail(world: vec3<f32>, geometric_normal: vec3<f32>, material: u32) -> SurfaceDetail {
   var detail: SurfaceDetail;
   detail.albedo = srgb_to_linear(material_color(material));
@@ -191,9 +203,29 @@ fn sample_surface_detail(world: vec3<f32>, geometric_normal: vec3<f32>, material
   detail.roughness = material_roughness(material);
   if MATERIAL_DETAIL != 0u {
     let basis = surface_basis(world, geometric_normal);
-    let uv = basis.uv * material_detail_scale(material);
-    detail.albedo = textureSample(material_albedo, material_sampler, uv, i32(material)).rgb;
-    let packed_surface = textureSample(material_surface, material_sampler, uv, i32(material));
+    let material_scale = material_detail_scale(material);
+    let continuous_uv = basis.uv * material_scale;
+    let uv = pixelated_material_uv(basis.uv, material_scale);
+    // Derive mip selection from the continuous coordinates. Derivatives of the quantized UV are
+    // zero inside a block and discontinuous at its edge, which would otherwise force unstable LOD.
+    let uv_dx = dpdx(continuous_uv);
+    let uv_dy = dpdy(continuous_uv);
+    detail.albedo = textureSampleGrad(
+      material_albedo,
+      material_sampler,
+      uv,
+      i32(material),
+      uv_dx,
+      uv_dy,
+    ).rgb;
+    let packed_surface = textureSampleGrad(
+      material_surface,
+      material_sampler,
+      uv,
+      i32(material),
+      uv_dx,
+      uv_dy,
+    );
     let averaged_normal = packed_surface.rgb * 2.0 - vec3<f32>(1.0);
     let normal_length = clamp(length(averaged_normal), 0.001, 1.0);
     let tangent_normal = averaged_normal / normal_length;

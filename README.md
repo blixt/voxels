@@ -71,8 +71,9 @@ gates, buried ribs, colonnades, and basalt crowns as ordinary editable voxels. A
 director arranges backgrounds and companions into clusters, rings, clearings, and procession lines,
 then gives each macro cell one distinct semantic hero. Bounded edit-aware proxies preserve every form
 across the surface rings. A deterministic Rust-generated
-material atlas adds world-anchored, nearest-sampled pixel albedo, micro-normal, and roughness structure
-with a distance-stable mip chain, without changing geometry, draw ownership, or durable voxel data.
+material atlas adds world-anchored pixel albedo, micro-normal, and roughness structure quantized to an
+exact 3x3 grid on every 10 cm voxel face (one block per 3.33 cm), with nearest sampling and a
+distance-stable mip chain, without changing geometry, draw ownership, or durable voxel data.
 The 753 m First Pilgrim Road is a stable Rust polyline graded through those same canonical columns.
 Its 10 cm paving, shoulders, 26 cairns/waystones/arches, five named chapters, and alpine Needle Gate
 destination remain editable, collidable, and continuous through every streamed LOD rather than

@@ -10,6 +10,9 @@ pub(crate) const MATERIAL_DETAIL_SIZE: u32 = 128;
 pub(crate) const MATERIAL_DETAIL_MIP_COUNT: u32 = MATERIAL_DETAIL_SIZE.ilog2() + 1;
 pub(crate) const MATERIAL_DETAIL_LAYER_COUNT: u32 = Material::ALL.len() as u32;
 
+#[cfg(test)]
+const MATERIAL_TEXELS_PER_VOXEL: i32 = 3;
+
 #[derive(Clone, Copy)]
 struct MaterialProfile {
     base_srgb: [f32; 3],
@@ -448,6 +451,38 @@ mod tests {
         assert_eq!(sampler.min_filter, FilterMode::Nearest);
         assert_eq!(sampler.mipmap_filter, MipmapFilterMode::Nearest);
         assert_eq!(sampler.anisotropy_clamp, 1);
+    }
+
+    #[test]
+    fn every_voxel_face_quantizes_to_exactly_three_world_aligned_texels() {
+        let texel_width = voxels_world::VOXEL_SIZE_METRES / MATERIAL_TEXELS_PER_VOXEL as f32;
+        assert!((texel_width - 1.0 / 30.0).abs() < f32::EPSILON);
+
+        for voxel in -8..=8 {
+            let start = voxel * MATERIAL_TEXELS_PER_VOXEL;
+            for texel in 0..MATERIAL_TEXELS_PER_VOXEL {
+                let centre_metres = (start + texel) as f32 * texel_width + texel_width * 0.5;
+                assert_eq!(material_texel_index(centre_metres), start + texel);
+            }
+            let next_face = (voxel + 1) as f32 * voxels_world::VOXEL_SIZE_METRES;
+            assert_eq!(
+                material_texel_index(next_face - texel_width * 0.01),
+                start + MATERIAL_TEXELS_PER_VOXEL - 1
+            );
+            assert_eq!(
+                material_texel_index(next_face),
+                start + MATERIAL_TEXELS_PER_VOXEL
+            );
+        }
+
+        let shader = include_str!("shaders/voxels.wgsl");
+        assert!(shader.contains("const MATERIAL_TEXELS_PER_VOXEL: f32 = 3.0;"));
+        assert!(shader.contains("textureSampleGrad"));
+    }
+
+    fn material_texel_index(world_metres: f32) -> i32 {
+        (world_metres * MATERIAL_TEXELS_PER_VOXEL as f32 / voxels_world::VOXEL_SIZE_METRES + 0.0001)
+            .floor() as i32
     }
 
     #[test]
