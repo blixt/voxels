@@ -1,5 +1,6 @@
 import "./style.css";
 import { watchDevicePixelRatio } from "./display.ts";
+import { PressedKeys } from "./input.ts";
 import {
   INPUT_CANCEL,
   INPUT_KEY_DOWN,
@@ -164,22 +165,10 @@ function start(canvas: HTMLCanvasElement): void {
     { passive: false },
   );
 
-  const keyCode = (code: string): number => {
-    const codes: Record<string, number> = {
-      KeyW: 1,
-      KeyA: 2,
-      KeyS: 3,
-      KeyD: 4,
-      Space: 5,
-      ShiftLeft: 6,
-      ShiftRight: 6,
-      F3: 8,
-    };
-    return codes[code] ?? 0;
-  };
-  const keySample = (event: KeyboardEvent, kind: number): InputSample => ({
+  const pressedKeys = new PressedKeys();
+  const keySample = (event: KeyboardEvent, kind: number, code: number): InputSample => ({
     kind,
-    code: keyCode(event.code),
+    code,
     buttons: 0,
     x: 0,
     y: 0,
@@ -188,18 +177,21 @@ function start(canvas: HTMLCanvasElement): void {
     flags: event.repeat ? 1 : 0,
   });
   window.addEventListener("keydown", (event) => {
-    if (keyCode(event.code) !== 0) {
+    const code = pressedKeys.keyDown(event.code);
+    if (code !== 0) {
       event.preventDefault();
       if (event.code === "F3" && document.pointerLockElement === canvas) {
         document.exitPointerLock();
       }
-      enqueue(keySample(event, INPUT_KEY_DOWN), true);
+      enqueue(keySample(event, INPUT_KEY_DOWN, code), true);
     }
   });
   window.addEventListener("keyup", (event) => {
-    if (keyCode(event.code) !== 0) enqueue(keySample(event, INPUT_KEY_UP), true);
+    const code = pressedKeys.keyUp(event.code);
+    if (code !== 0) enqueue(keySample(event, INPUT_KEY_UP, code), true);
   });
   const cancelInput = (): void => {
+    pressedKeys.clear();
     enqueue(
       {
         kind: INPUT_CANCEL,
