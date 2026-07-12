@@ -439,7 +439,6 @@ impl UiGpu {
         &mut self,
         device: &Device,
         queue: &Queue,
-        _format: TextureFormat,
         width: u32,
         height: u32,
         dpr: f32,

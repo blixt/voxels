@@ -66,7 +66,6 @@ pub struct OutdoorEnvironment {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InteriorEnvironment {
     pub enclosure: f32,
-    pub sky_visibility: f32,
     pub exposure_multiplier: f32,
     pub fog_density: f32,
     pub headlamp_strength: f32,
@@ -76,7 +75,6 @@ impl Default for InteriorEnvironment {
     fn default() -> Self {
         Self {
             enclosure: 0.0,
-            sky_visibility: 1.0,
             exposure_multiplier: 1.0,
             fog_density: 0.0,
             headlamp_strength: 0.0,
@@ -89,7 +87,6 @@ impl InteriorEnvironment {
         let enclosure = sample.enclosure.clamp(0.0, 1.0);
         Self {
             enclosure,
-            sky_visibility: sample.sky_visibility.clamp(0.0, 1.0),
             exposure_multiplier: 1.0 + enclosure * 1.15,
             fog_density: enclosure * 0.032,
             headlamp_strength: ((enclosure - 0.32) / 0.68).clamp(0.0, 1.0),
@@ -101,7 +98,6 @@ impl InteriorEnvironment {
         let exposure_amount = exposure_amount.clamp(0.0, 1.0);
         Self {
             enclosure: scalar_lerp(self.enclosure, target.enclosure, amount),
-            sky_visibility: scalar_lerp(self.sky_visibility, target.sky_visibility, amount),
             exposure_multiplier: scalar_lerp(
                 self.exposure_multiplier,
                 target.exposure_multiplier,
@@ -446,7 +442,6 @@ mod tests {
             ray_count: 9,
         });
         assert_eq!(target.enclosure, 1.0);
-        assert_eq!(target.sky_visibility, 0.0);
         assert!(target.exposure_multiplier > 2.0);
         assert_eq!(target.headlamp_strength, 1.0);
         let advanced = InteriorEnvironment::default().lerp(target, 0.8, 0.1);

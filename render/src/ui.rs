@@ -465,14 +465,6 @@ impl MissionControlUi {
         self.compact
     }
 
-    pub const fn reduced_motion(&self) -> bool {
-        self.reduced_motion
-    }
-
-    pub const fn hovered(&self) -> Option<UiTarget> {
-        self.hovered
-    }
-
     pub const fn context_menu_open(&self) -> bool {
         self.context_anchor.is_some()
     }

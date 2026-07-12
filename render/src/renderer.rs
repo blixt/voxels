@@ -1247,14 +1247,10 @@ impl Renderer {
         self.ambient_occlusion_gpu
             .resize(&self.device, &self.depth_view, width, height);
         self.dpr = valid_dpr(dpr);
-        if self.ui_gpu.resize(
-            &self.device,
-            &self.queue,
-            self.config.format,
-            width,
-            height,
-            self.dpr,
-        ) {
+        if self
+            .ui_gpu
+            .resize(&self.device, &self.queue, width, height, self.dpr)
+        {
             self.water_scene_bind_group = self
                 .ui_gpu
                 .refraction_bind_group(&self.device, &self.water_scene_layout);
@@ -1275,12 +1271,6 @@ impl Renderer {
 
     pub const fn set_target_voxel(&mut self, target: Option<[i32; 3]>) {
         self.target_voxel = target;
-    }
-
-    pub fn set_environment(&mut self, environment: OutdoorEnvironment) {
-        let environment = environment.sanitized();
-        self.environment = environment;
-        self.environment_target = environment;
     }
 
     pub fn set_atmosphere(&mut self, sample: AtmosphereSample, region: SurfaceRegion) {
