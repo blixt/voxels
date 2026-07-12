@@ -1948,7 +1948,8 @@ dependencies = [
 [[package]]
 name = "wgpu_text"
 version = "30.0.0"
-source = "git+https://github.com/Blatko1/wgpu_text?rev=3772c2fe7b79343db4ae20e1adf14f2342f96cd1#3772c2fe7b79343db4ae20e1adf14f2342f96cd1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92f10f47ff92dbe1c8ba868555e3b940cc698435f8437117a85565fa5b2eb39c"
 dependencies = [
  "bytemuck",
  "glyph_brush",
