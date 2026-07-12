@@ -401,6 +401,7 @@ pub struct Renderer {
     ui_text_error_reported: bool,
     coast_teleport_requested: bool,
     underwater_teleport_requested: bool,
+    route_teleport_requested: bool,
     landmark_teleport_requested: bool,
     underwater_blend: f32,
 }
@@ -926,6 +927,7 @@ impl Renderer {
             ui_text_error_reported: false,
             coast_teleport_requested: false,
             underwater_teleport_requested: false,
+            route_teleport_requested: false,
             landmark_teleport_requested: false,
             underwater_blend: 0.0,
         })
@@ -1020,6 +1022,10 @@ impl Renderer {
         std::mem::take(&mut self.underwater_teleport_requested)
     }
 
+    pub fn take_route_teleport_request(&mut self) -> bool {
+        std::mem::take(&mut self.route_teleport_requested)
+    }
+
     pub fn take_landmark_teleport_request(&mut self) -> bool {
         std::mem::take(&mut self.landmark_teleport_requested)
     }
@@ -1088,6 +1094,9 @@ impl Renderer {
             }
             UiAction::ContextAction(ContextAction::ToggleCompactTelemetry) => {
                 let _ = self.ui.set_compact(!self.ui.compact());
+            }
+            UiAction::ContextAction(ContextAction::FollowPilgrimRoad) => {
+                self.route_teleport_requested = true;
             }
             UiAction::ContextAction(ContextAction::VisitLandmark) => {
                 self.landmark_teleport_requested = true;

@@ -179,16 +179,18 @@ pub enum ContextAction {
     DiveBelowSurface,
     ResetRendererFeatures,
     ToggleCompactTelemetry,
+    FollowPilgrimRoad,
     VisitLandmark,
     CloseMissionControl,
 }
 
 impl ContextAction {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::TeleportToCoast,
         Self::DiveBelowSurface,
         Self::ResetRendererFeatures,
         Self::ToggleCompactTelemetry,
+        Self::FollowPilgrimRoad,
         Self::VisitLandmark,
         Self::CloseMissionControl,
     ];
@@ -199,6 +201,7 @@ impl ContextAction {
             Self::DiveBelowSurface => "Dive below the surface",
             Self::ResetRendererFeatures => "Reset renderer features",
             Self::ToggleCompactTelemetry => "Toggle compact telemetry",
+            Self::FollowPilgrimRoad => "Follow pilgrim road",
             Self::VisitLandmark => "Visit next landmark",
             Self::CloseMissionControl => "Close mission control",
         }
@@ -1526,6 +1529,11 @@ mod tests {
             draw.text
                 .iter()
                 .any(|run| run.text == "Visit next landmark")
+        );
+        assert!(
+            draw.text
+                .iter()
+                .any(|run| run.text == "Follow pilgrim road")
         );
         assert!(!draw.text.iter().any(|run| run.text == "CPU / GPU"));
     }

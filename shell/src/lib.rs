@@ -23,9 +23,10 @@ mod web {
     };
     use voxels_world::{
         CHUNK_EDGE, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord, EditMap, Generator, Material,
-        MeshedChunk, SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES,
-        VoxelCoord, generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, mesh_chunk,
-        surface_tiles_affected_by_voxel,
+        MeshedChunk, SkylineFeature, SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord,
+        VOXEL_SIZE_METRES, VoxelCoord, first_pilgrim_route_anchor,
+        first_pilgrim_route_anchor_count, generate_edited_surface_tile_mesh,
+        generate_edited_water_tile_mesh, mesh_chunk, surface_tiles_affected_by_voxel,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -281,6 +282,7 @@ mod web {
         edit_superseded: Cell<u32>,
         edit_last_ms: Cell<f32>,
         edit_profile: Cell<EditProfile>,
+        route_tour_index: Cell<u16>,
         landmark_tour_index: Cell<u8>,
         profile: RefCell<ProfileAutomation>,
         profile_tracked_high: Cell<usize>,
@@ -941,7 +943,47 @@ mod web {
             if self.renderer.borrow_mut().take_landmark_teleport_request() {
                 self.teleport_to_next_landmark();
             }
+            if self.renderer.borrow_mut().take_route_teleport_request() {
+                self.teleport_to_next_route_mark();
+            }
             self.renderer.borrow().ui_open()
+        }
+
+        fn teleport_to_next_route_mark(&self) {
+            let count = first_pilgrim_route_anchor_count();
+            if count == 0 {
+                web_sys::console::error_1(&JsValue::from_str(
+                    "pilgrim road has no authored route marks",
+                ));
+                return;
+            }
+            let ordinal = self.route_tour_index.get() % count;
+            self.route_tour_index.set((ordinal + 1) % count);
+            let Some(anchor) = first_pilgrim_route_anchor(ordinal) else {
+                web_sys::console::error_1(&JsValue::from_str(
+                    "pilgrim road route mark could not be reconstructed",
+                ));
+                return;
+            };
+            let Some(feature) = self
+                .generator
+                .skyline_features_anchored_in([
+                    [anchor.anchor[0], anchor.anchor[1]],
+                    [anchor.anchor[0] + 1, anchor.anchor[1] + 1],
+                ])
+                .into_iter()
+                .find(|feature| {
+                    feature
+                        .route_landmark
+                        .is_some_and(|landmark| landmark.ordinal == ordinal)
+                })
+            else {
+                web_sys::console::error_1(&JsValue::from_str(
+                    "pilgrim road route mark has no canonical landmark",
+                ));
+                return;
+            };
+            self.teleport_to_feature(feature);
         }
 
         fn teleport_to_next_landmark(&self) {
@@ -966,6 +1008,10 @@ mod web {
                 ));
                 return;
             };
+            self.teleport_to_feature(feature);
+        }
+
+        fn teleport_to_feature(&self, feature: SkylineFeature) {
             let [anchor_x, ground, anchor_z] = feature.anchor;
             let offsets = [[48, 36], [-48, 36], [48, -36], [-48, -36]];
             let [view_x, view_z, view_height] = offsets
@@ -1689,6 +1735,7 @@ mod web {
             edit_superseded: Cell::new(0),
             edit_last_ms: Cell::new(0.0),
             edit_profile: Cell::new(EditProfile::default()),
+            route_tour_index: Cell::new(0),
             landmark_tour_index: Cell::new(0),
             profile: RefCell::new(ProfileAutomation::default()),
             profile_tracked_high: Cell::new(0),

@@ -161,7 +161,7 @@ pub fn first_pilgrim_route_anchor(ordinal: u16) -> Option<RouteAnchor> {
             cell_min[1] + FEATURE_CELL_VOXELS - FEATURE_ANCHOR_MARGIN_VOXELS - 1,
         ),
     ];
-    let role = if ordinal % 3 == 0 {
+    let role = if ordinal.is_multiple_of(3) {
         RouteAnchorRole::RuinedArch
     } else if ordinal & 1 == 0 {
         RouteAnchorRole::Waystone
