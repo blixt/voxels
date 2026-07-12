@@ -22,7 +22,7 @@ describe("canvas-only browser shell", () => {
   });
 
   it("does not construct a JavaScript UI tree", () => {
-    for (const source of ["web/main.ts", "web/worker.ts", "web/protocol.ts"]) {
+    for (const source of ["web/display.ts", "web/main.ts", "web/worker.ts", "web/protocol.ts"]) {
       const contents = readFileSync(new URL(source, root), "utf8");
       for (const forbidden of [
         "createElement",

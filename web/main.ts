@@ -1,4 +1,5 @@
 import "./style.css";
+import { watchDevicePixelRatio } from "./display.ts";
 import {
   INPUT_CANCEL,
   INPUT_KEY_DOWN,
@@ -219,16 +220,27 @@ function start(canvas: HTMLCanvasElement): void {
     if (document.pointerLockElement !== canvas) cancelInput();
   });
 
-  const resize = new ResizeObserver(([entry]) => {
-    if (!entry) return;
+  const postResize = (cssWidth: number, cssHeight: number): void => {
     worker.postMessage({
       kind: "resize",
-      cssWidth: entry.contentRect.width,
-      cssHeight: entry.contentRect.height,
+      cssWidth,
+      cssHeight,
       dpr: window.devicePixelRatio || 1,
     });
+  };
+  const resize = new ResizeObserver(([entry]) => {
+    if (!entry) return;
+    postResize(entry.contentRect.width, entry.contentRect.height);
   });
   resize.observe(canvas);
+  const stopWatchingPixelRatio = watchDevicePixelRatio(
+    () => window.devicePixelRatio || 1,
+    (query) => window.matchMedia(query),
+    () => {
+      const bounds = canvas.getBoundingClientRect();
+      postResize(bounds.width, bounds.height);
+    },
+  );
   let destroyed = false;
   window.addEventListener("pagehide", (event) => {
     // A page entering the back-forward cache is frozen with its worker and must resume intact.
@@ -237,6 +249,7 @@ function start(canvas: HTMLCanvasElement): void {
     destroyed = true;
     flush();
     resize.disconnect();
+    stopWatchingPixelRatio();
     const error = new Error("Voxels page closed before the snapshot completed");
     for (const { reject } of snapshotResolvers.values()) reject(error);
     snapshotResolvers.clear();
