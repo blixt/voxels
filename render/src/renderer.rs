@@ -1240,13 +1240,27 @@ impl Renderer {
         if width == 0 || height == 0 {
             return;
         }
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
-        self.depth_view = depth_view(&self.device, width, height);
-        self.ambient_occlusion_gpu
-            .resize(&self.device, &self.depth_view, width, height);
-        self.dpr = valid_dpr(dpr);
+        let dpr = valid_dpr(dpr);
+        let (size_changed, dpr_changed) = resize_changes(
+            self.config.width,
+            self.config.height,
+            self.dpr,
+            width,
+            height,
+            dpr,
+        );
+        if !size_changed && !dpr_changed {
+            return;
+        }
+        if size_changed {
+            self.config.width = width;
+            self.config.height = height;
+            self.surface.configure(&self.device, &self.config);
+            self.depth_view = depth_view(&self.device, width, height);
+            self.ambient_occlusion_gpu
+                .resize(&self.device, &self.depth_view, width, height);
+        }
+        self.dpr = dpr;
         if self
             .ui_gpu
             .resize(&self.device, &self.queue, width, height, self.dpr)
@@ -2660,6 +2674,20 @@ fn valid_dpr(dpr: f32) -> f32 {
     }
 }
 
+fn resize_changes(
+    current_width: u32,
+    current_height: u32,
+    current_dpr: f32,
+    width: u32,
+    height: u32,
+    dpr: f32,
+) -> (bool, bool) {
+    (
+        current_width != width || current_height != height,
+        current_dpr != valid_dpr(dpr),
+    )
+}
+
 const fn refraction_copy_bytes(width: u32, height: u32, active: bool) -> u64 {
     if active {
         width as u64 * height as u64 * 8
@@ -2949,6 +2977,26 @@ mod tests {
     fn refraction_bandwidth_is_paid_only_for_visible_water() {
         assert_eq!(refraction_copy_bytes(1_280, 720, false), 0);
         assert_eq!(refraction_copy_bytes(1_280, 720, true), 7_372_800);
+    }
+
+    #[test]
+    fn identical_resizes_skip_gpu_resource_recreation() {
+        assert_eq!(
+            resize_changes(1_280, 720, 2.0, 1_280, 720, 2.0),
+            (false, false)
+        );
+        assert_eq!(
+            resize_changes(1_280, 720, 1.0, 1_280, 720, 0.0),
+            (false, false)
+        );
+        assert_eq!(
+            resize_changes(1_280, 720, 1.0, 1_280, 720, 2.0),
+            (false, true)
+        );
+        assert_eq!(
+            resize_changes(1_280, 720, 1.0, 1_281, 720, 1.0),
+            (true, false)
+        );
     }
 
     #[test]
