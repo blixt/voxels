@@ -71,6 +71,15 @@ async function enterUnderwaterShowcase(page) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
     lastSnapshot = snapshot;
     if (snapshot[31] > 0.5 && snapshot[33] === 1 && snapshot[34] === 1) {
+      // The water-surface toggle is visual only; authoritative fluid physics must remain active.
+      await page.mouse.click(902, 522);
+      await page.waitForTimeout(150);
+      const hiddenWater = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
+      if (hiddenWater[33] !== 1 || hiddenWater[34] !== 1) {
+        throw new Error("disabling water rendering incorrectly disabled fluid physics");
+      }
+      await page.mouse.click(902, 522);
+      await page.keyboard.press("F3");
       await page.waitForTimeout(500);
       return snapshot;
     }
@@ -155,6 +164,9 @@ try {
   await reloadRapidly(successor, 4);
   await enterUnderwaterShowcase(successor);
   await assertCanvasOnly(successor);
+  if (process.env.SCREENSHOT) {
+    await successor.screenshot({ path: process.env.SCREENSHOT });
+  }
 
   if (errors.length > 0) throw new Error(errors.join("\n"));
   console.log(
