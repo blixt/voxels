@@ -162,6 +162,7 @@ pub struct Renderer {
     dpr: f32,
     log_error: fn(&str),
     ui_text_error_reported: bool,
+    coast_teleport_requested: bool,
 }
 
 struct ShadowGpu {
@@ -609,6 +610,7 @@ impl Renderer {
             dpr: valid_dpr(dpr),
             log_error,
             ui_text_error_reported: false,
+            coast_teleport_requested: false,
         })
     }
 
@@ -676,6 +678,10 @@ impl Renderer {
         self.ui.open()
     }
 
+    pub fn take_coast_teleport_request(&mut self) -> bool {
+        std::mem::take(&mut self.coast_teleport_requested)
+    }
+
     pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
         self.ui.set_reduced_motion(reduced_motion);
     }
@@ -730,6 +736,9 @@ impl Renderer {
                     let _ = self.ui.set_feature(feature, true);
                 }
                 self.options = RenderOptions::default();
+            }
+            UiAction::ContextAction(ContextAction::TeleportToCoast) => {
+                self.coast_teleport_requested = true;
             }
             UiAction::ContextAction(ContextAction::ToggleCompactTelemetry) => {
                 let _ = self.ui.set_compact(!self.ui.compact());

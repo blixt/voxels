@@ -29,6 +29,7 @@ mod web {
     const SURFACE_RETAIN_MARGIN_TILES: i32 = 1;
     const SIMULATION_STEP_SECONDS: f32 = 1.0 / 120.0;
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
+    const COAST_WATER_REFERENCE: [i32; 2] = [18_016, 12_896];
     const STREAM_FRAME_BUDGET: FrameBudget = FrameBudget {
         generation: 2,
         meshing: 2,
@@ -499,7 +500,52 @@ mod web {
                     _ => {}
                 }
             }
+            if self.renderer.borrow_mut().take_coast_teleport_request() {
+                self.teleport_to_coast();
+            }
             self.renderer.borrow().ui_open()
+        }
+
+        fn teleport_to_coast(&self) {
+            let [water_x, water_z] = COAST_WATER_REFERENCE;
+            let mut coast = None;
+            'search: for radius in 1..=192 {
+                for x in water_x - radius..=water_x + radius {
+                    for z in [water_z - radius, water_z + radius] {
+                        let surface = self.generator.surface_sample(x, z);
+                        if surface.water_level.is_none() {
+                            coast = Some((x, z, surface.height));
+                            break 'search;
+                        }
+                    }
+                }
+                for z in water_z - radius + 1..water_z + radius {
+                    for x in [water_x - radius, water_x + radius] {
+                        let surface = self.generator.surface_sample(x, z);
+                        if surface.water_level.is_none() {
+                            coast = Some((x, z, surface.height));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            let Some((x, z, height)) = coast else {
+                web_sys::console::error_1(&JsValue::from_str("coast teleport anchor is invalid"));
+                return;
+            };
+            let mut camera = CameraState::spawn(glam::Vec3::new(
+                (x as f32 + 0.5) * VOXEL_SIZE_METRES,
+                (height + 1) as f32 * VOXEL_SIZE_METRES
+                    + voxels_core::PLAYER_EYE_HEIGHT_METRES
+                    + 0.02,
+                (z as f32 + 0.5) * VOXEL_SIZE_METRES,
+            ));
+            let look_x = (water_x - x) as f32;
+            let look_z = (water_z - z) as f32;
+            camera.yaw = look_x.atan2(-look_z);
+            camera.pitch = -0.12;
+            *self.camera.borrow_mut() = camera;
+            self.input.borrow_mut().clear();
         }
 
         fn edit_target(&self, buttons: u16) {

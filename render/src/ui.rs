@@ -168,6 +168,7 @@ const fn feature_index(feature: RendererFeature) -> usize {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ContextAction {
+    TeleportToCoast,
     ResetRendererFeatures,
     ToggleCompactTelemetry,
     HideFarTerrain,
@@ -175,7 +176,8 @@ pub enum ContextAction {
 }
 
 impl ContextAction {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
+        Self::TeleportToCoast,
         Self::ResetRendererFeatures,
         Self::ToggleCompactTelemetry,
         Self::HideFarTerrain,
@@ -184,6 +186,7 @@ impl ContextAction {
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::TeleportToCoast => "Teleport to the coast",
             Self::ResetRendererFeatures => "Reset renderer features",
             Self::ToggleCompactTelemetry => "Toggle compact telemetry",
             Self::HideFarTerrain => "Hide far terrain",
@@ -905,7 +908,7 @@ impl MissionControlUi {
                 &mut draw,
                 menu,
                 12.0,
-                PANEL_COLOR.with_alpha(opacity),
+                Color::new(0.025, 0.034, 0.052, 0.98).with_alpha(opacity),
                 PANEL_BORDER.with_alpha(opacity),
                 24.0,
                 SurfaceRole::ContextMenu,
@@ -920,9 +923,9 @@ impl MissionControlUi {
                     &mut draw,
                     rect,
                     7.0,
-                    CARD_COLOR
+                    Color::new(0.045, 0.060, 0.090, 0.97)
                         .mix(HOVER_COLOR, hover)
-                        .with_alpha(opacity * (0.55 + hover * 0.35)),
+                        .with_alpha(opacity),
                     PANEL_BORDER.with_alpha(opacity * hover),
                     8.0,
                     SurfaceRole::ContextRow,
@@ -1055,29 +1058,23 @@ impl MissionControlUi {
                     format!("{} / {}", stats.visible_chunks, stats.resident_chunks),
                 ),
                 (
-                    "QUADS W / DRAWS W",
+                    "QUADS / WATER",
                     format!(
-                        "{}({}) / {}({})+{}s",
+                        "{} / {}",
                         compact_count(u64::from(stats.quads)),
                         compact_count(u64::from(stats.water_quads)),
-                        stats.draw_calls,
-                        stats.water_draw_calls,
-                        stats.shadow_draw_calls
                     ),
                 ),
                 (
-                    "LOAD P95 / MAX",
-                    format!("{} / {} f", stats.load_p95_frames, stats.load_max_frames),
+                    "DRAWS / WATER",
+                    format!("{} / {}", stats.draw_calls, stats.water_draw_calls),
                 ),
                 (
-                    "REMESH P95 / MAX",
-                    format!(
-                        "{} / {} f",
-                        stats.remesh_p95_frames, stats.remesh_max_frames
-                    ),
+                    "LOAD / REMESH P95",
+                    format!("{} / {} f", stats.load_p95_frames, stats.remesh_p95_frames),
                 ),
                 (
-                    "JOBS / GPU CORE",
+                    "JOBS / GPU",
                     format!(
                         "{} / {}",
                         stats.pending_jobs,
@@ -1439,13 +1436,10 @@ mod tests {
                 .iter()
                 .filter(|surface| surface.role == SurfaceRole::ContextRow)
                 .count(),
-            4
+            ContextAction::ALL.len()
         );
-        assert!(
-            draw.text
-                .iter()
-                .any(|run| run.text == "123.4k(8.2k) / 132(12)+164s")
-        );
+        assert!(draw.text.iter().any(|run| run.text == "123.4k / 8.2k"));
+        assert!(draw.text.iter().any(|run| run.text == "132 / 12"));
         assert!(draw.text.iter().any(|run| run.text == "7 / 76.0 MiB"));
     }
 
