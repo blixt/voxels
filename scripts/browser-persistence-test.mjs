@@ -155,6 +155,38 @@ async function editFromFollowerAndWaitForLeader(follower, leader) {
   );
 }
 
+async function closeFollowerAndAssertFinalCamera(context, url, follower) {
+  // Wait until the follower has passed an idle periodic checkpoint, then change its pose and close
+  // well before the next one-second save. Teardown itself must hand this final camera to the leader.
+  await follower.waitForTimeout(1_200);
+  const before = await follower.evaluate(() => globalThis.__VOXELS__.snapshot());
+  await follower.locator("#app").click();
+  await follower.waitForFunction(() => document.pointerLockElement?.id === "app");
+  await follower.mouse.move(700, 160, { steps: 2 });
+  const final = await follower.evaluate(() => globalThis.__VOXELS__.snapshot());
+  assertSnapshotSchema(before);
+  assertSnapshotSchema(final);
+  if (Math.abs(final[3] - before[3]) < 0.1 || Math.abs(final[4] - before[4]) < 0.1) {
+    throw new Error(
+      `follower camera did not move before close: ${before.slice(0, 5)} -> ${final.slice(0, 5)}`,
+    );
+  }
+  await follower.close();
+
+  const replacement = await context.newPage();
+  watch("follower-replacement", replacement);
+  await replacement.goto(url, { waitUntil: "domcontentloaded" });
+  const restored = await waitForEngine(replacement);
+  for (let index = 0; index < 5; index += 1) {
+    if (Math.abs(restored[index] - final[index]) > 0.0001) {
+      throw new Error(
+        `follower final camera was not restored at ${index}: ${final.slice(0, 5)} -> ${restored.slice(0, 5)}`,
+      );
+    }
+  }
+  return replacement;
+}
+
 const port = await reserveEphemeralPort();
 const server = await createViteServer({
   server: { host: "127.0.0.1", port, strictPort: true },
@@ -183,12 +215,14 @@ try {
   // intentionally replaced before their async SQLite/WebGPU boot necessarily finishes.
   await reloadRapidly(leader, 12);
 
-  const follower = await context.newPage();
+  let follower = await context.newPage();
   watch("follower", follower);
   await follower.goto(url, { waitUntil: "domcontentloaded" });
   await waitForEngine(follower);
   await assertCanvasOnly(follower);
   await editFromFollowerAndWaitForLeader(follower, leader);
+  follower = await closeFollowerAndAssertFinalCamera(context, url, follower);
+  await assertCanvasOnly(follower);
 
   // Reload every live browsing context together. Exactly one replacement worker must win the Web
   // Lock while the others remain usable followers; no worker may race the exclusive SAH pool.
@@ -229,6 +263,7 @@ try {
       canvasOnly: true,
       underwater: true,
       liveEditSync: true,
+      followerFinalCamera: true,
       persistenceErrors: 0,
     }),
   );

@@ -42,9 +42,14 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
     case "destroy":
       disposed = true;
       pending.length = 0;
-      handle?.destroy();
-      handle = null;
-      scope.close();
+      {
+        const engine = handle;
+        handle = null;
+        void (async () => {
+          await engine?.destroy();
+          scope.close();
+        })();
+      }
       break;
   }
 }
@@ -59,7 +64,7 @@ async function boot(message: InitMessage): Promise<void> {
     message.reducedMotion,
   );
   if (disposed) {
-    engine.destroy();
+    await engine.destroy();
     return;
   }
   handle = engine;

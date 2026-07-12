@@ -1190,9 +1190,19 @@ mod web {
             }
         }
 
-        fn stop(&self) {
+        async fn stop(&self) {
+            self.prepare_stop();
+            let shutdown = self.store.borrow().shutdown();
+            shutdown.await;
+        }
+
+        fn stop_now(&self) {
+            self.prepare_stop();
+            self.store.borrow().shutdown_now();
+        }
+
+        fn prepare_stop(&self) {
             self.persist_camera_if_changed(&self.camera.borrow());
-            self.store.borrow().shutdown();
             self.stopped.set(true);
             let id = self.frame_id.replace(0);
             if id != 0 {
@@ -2105,16 +2115,18 @@ mod web {
             Float32Array::from(values.as_slice())
         }
 
-        pub fn destroy(&mut self) {
+        pub async fn destroy(&mut self) {
             if let Some(engine) = self.engine.take() {
-                engine.stop();
+                engine.stop().await;
             }
         }
     }
 
     impl Drop for EngineHandle {
         fn drop(&mut self) {
-            self.destroy();
+            if let Some(engine) = self.engine.take() {
+                engine.stop_now();
+            }
         }
     }
 

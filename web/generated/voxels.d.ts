@@ -4,7 +4,7 @@
 export class EngineHandle {
     private constructor();
     free(): void;
-    destroy(): void;
+    destroy(): Promise<void>;
     feed_input(bytes: Uint8Array): boolean;
     resize(css_width: number, css_height: number, dpr: number): void;
     set_reduced_motion(reduced_motion: boolean): void;
@@ -20,7 +20,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_enginehandle_free: (a: number, b: number) => void;
     readonly create_engine: (a: any, b: number, c: number, d: number, e: number) => any;
-    readonly enginehandle_destroy: (a: number) => void;
+    readonly enginehandle_destroy: (a: number) => any;
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => number;
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;
     readonly enginehandle_set_reduced_motion: (a: number, b: number) => void;

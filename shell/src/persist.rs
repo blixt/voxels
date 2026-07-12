@@ -198,8 +198,13 @@ impl Store {
         self.coordinator.leader.borrow().is_some()
     }
 
-    pub fn shutdown(&self) {
-        self.coordinator.shutdown();
+    pub fn shutdown(&self) -> impl std::future::Future<Output = ()> + 'static {
+        let coordinator = self.coordinator.clone();
+        async move { coordinator.shutdown().await }
+    }
+
+    pub fn shutdown_now(&self) {
+        self.coordinator.shutdown_now();
     }
 
     pub fn drain_remote_edits(&self) -> Result<Vec<(VoxelCoord, Option<Material>)>, JsValue> {
@@ -222,7 +227,7 @@ impl Store {
 
 impl Drop for Store {
     fn drop(&mut self) {
-        self.shutdown();
+        self.shutdown_now();
     }
 }
 
@@ -596,11 +601,27 @@ impl Coordinator {
         }
     }
 
-    fn shutdown(&self) {
+    async fn shutdown(self: &Rc<Self>) {
+        if self.closed.get() {
+            return;
+        }
+        for _ in 0..40 {
+            if !self.writing.get() && self.write_queue.borrow().is_empty() {
+                break;
+            }
+            let _ = JsFuture::from(timeout(10)).await;
+        }
+        self.shutdown_now();
+    }
+
+    fn shutdown_now(&self) {
+        if self.closed.get() {
+            return;
+        }
+        self.flush_queued_writes();
         if self.closed.replace(true) {
             return;
         }
-        self.write_queue.borrow_mut().clear();
         self.committed_edits.borrow_mut().clear();
         if let Some(abort) = self.queued_lock_abort.borrow_mut().take() {
             abort.abort();
@@ -622,6 +643,34 @@ impl Coordinator {
         self.channel.set_onmessage(None);
         self._on_message.borrow_mut().take();
         self.channel.close();
+    }
+
+    /// Hands writes that have not entered the async follower drain to the current owner before this
+    /// worker closes. BroadcastChannel clones a posted message synchronously, so the leader can
+    /// finish the write after the follower has released its own channel and worker.
+    fn flush_queued_writes(&self) {
+        let queued = std::mem::take(&mut *self.write_queue.borrow_mut());
+        if let Some(leader) = self.leader.borrow().clone() {
+            for operation in queued {
+                let result = leader.run(&operation);
+                if matches!(result, OperationResult::Ok)
+                    && let Operation::SaveEdit { coord, material } = operation
+                {
+                    self.post_edit_committed(self.tab_id, coord, material);
+                }
+                if let OperationResult::Error(error) = result {
+                    web_sys::console::error_1(&JsValue::from_str(&format!(
+                        "flush persistence write during shutdown: {error}"
+                    )));
+                }
+            }
+            return;
+        }
+        for operation in queued {
+            let id = self.next_request.get();
+            self.next_request.set(id.wrapping_add(1));
+            self.post_request(id, &operation);
+        }
     }
 }
 
