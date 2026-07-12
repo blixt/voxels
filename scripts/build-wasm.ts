@@ -115,13 +115,10 @@ export function buildWasm(release = false): void {
 }
 
 function publish(staging: string): void {
-  // wasm-bindgen emits explicit-resource-management syntax in its declaration. Vite+'s current
-  // type-aware lint worker does not load that lib even when tsc does, so omit the optional declaration
-  // until the toolchains agree. `free()` and our explicit `destroy()` remain typed.
   const declaration = join(staging, "voxels.d.ts");
   if (existsSync(declaration)) {
     const source = readFileSync(declaration, "utf8");
-    writeFileSync(declaration, source.replace("    [Symbol.dispose](): void;\n", ""));
+    writeFileSync(declaration, normalizeWasmDeclaration(source));
   }
   mkdirSync(OUT, { recursive: true });
   const next = readdirSync(staging).sort(
@@ -132,6 +129,22 @@ function publish(staging: string): void {
   for (const name of readdirSync(OUT)) {
     if (!keep.has(name)) rmSync(join(OUT, name), { recursive: true, force: true });
   }
+}
+
+export function normalizeWasmDeclaration(source: string): string {
+  // wasm-bindgen emits explicit-resource-management syntax that Vite+'s current type-aware lint
+  // worker does not load. `free()` and our explicit `destroy()` remain typed.
+  const supported = source.replace("    [Symbol.dispose](): void;\n", "");
+  // Debug and release builds expose different hashed closure trampolines in InitOutput. They are
+  // implementation details rather than callable application exports, so retaining them makes the
+  // one tracked declaration alternate between profiles without adding useful type information.
+  return supported
+    .split("\n")
+    .filter(
+      (line) =>
+        !(line.startsWith("    readonly wasm_bindgen_") && line.includes("___convert__closures")),
+    )
+    .join("\n");
 }
 
 function newestSource(path: string): number {

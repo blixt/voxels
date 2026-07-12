@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { strict as assert } from "node:assert";
 import { describe, it } from "vite-plus/test";
-import { RUST_INPUT_FILES, RUST_SOURCE_DIRS } from "./build-wasm.ts";
+import { normalizeWasmDeclaration, RUST_INPUT_FILES, RUST_SOURCE_DIRS } from "./build-wasm.ts";
 
 const root = new URL("../", import.meta.url);
 
@@ -22,5 +22,26 @@ describe("WASM build inputs", () => {
         `${crate}/Cargo.toml must invalidate the WASM build`,
       );
     }
+  });
+
+  it("removes profile-specific internals from the public declaration", () => {
+    const declaration = `export class EngineHandle {
+    [Symbol.dispose](): void;
+}
+export interface InitOutput {
+    readonly memory: WebAssembly.Memory;
+    readonly wasm_bindgen_debug___convert__closures_____invoke: () => void;
+    readonly enginehandle_destroy: (a: number) => void;
+}`;
+
+    assert.equal(
+      normalizeWasmDeclaration(declaration),
+      `export class EngineHandle {
+}
+export interface InitOutput {
+    readonly memory: WebAssembly.Memory;
+    readonly enginehandle_destroy: (a: number) => void;
+}`,
+    );
   });
 });
