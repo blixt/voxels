@@ -121,7 +121,9 @@ function start(canvas: HTMLCanvasElement): void {
   };
 
   canvas.addEventListener("pointerdown", (event) => {
-    canvas.setPointerCapture(event.pointerId);
+    if (event.pointerType !== "mouse") {
+      canvas.setPointerCapture(event.pointerId);
+    }
     if (uiCursorMode) {
       enqueue(point(event, INPUT_POINTER_DOWN), true);
       return;
