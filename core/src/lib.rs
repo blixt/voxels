@@ -373,7 +373,7 @@ impl CameraState {
         voxel_size: f32,
         mut sample_voxel: impl FnMut(i32, i32, i32) -> VoxelPhysics,
     ) {
-        if !voxel_size.is_finite() || voxel_size <= 0.0 {
+        if !dt.is_finite() || !voxel_size.is_finite() || voxel_size <= 0.0 {
             return;
         }
         let dt = dt.clamp(0.0, 0.05);
@@ -692,6 +692,27 @@ mod tests {
         camera.grounded = true;
         camera.update(&input, 1.0 / 60.0, 0.1, |_, y, _| solid_if(y < 0));
         assert!(camera.velocity.y < initial_velocity);
+    }
+
+    #[test]
+    fn non_finite_timesteps_do_not_poison_camera_state() {
+        for dt in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut camera = CameraState::default();
+            let before = camera;
+            let mut sampled = false;
+            camera.update(&InputState::default(), dt, 0.1, |_, _, _| {
+                sampled = true;
+                VoxelPhysics::EMPTY
+            });
+            assert_eq!(camera.position, before.position);
+            assert_eq!(camera.yaw, before.yaw);
+            assert_eq!(camera.pitch, before.pitch);
+            assert_eq!(camera.velocity, before.velocity);
+            assert_eq!(camera.grounded, before.grounded);
+            assert_eq!(camera.jump_was_down, before.jump_was_down);
+            assert_eq!(camera.fluid, before.fluid);
+            assert!(!sampled);
+        }
     }
 
     #[test]
