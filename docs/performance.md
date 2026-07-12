@@ -541,3 +541,32 @@ projection, 3.54 ns for cumulative-distance lookup, and 38.8–53.9 ns for the e
 lookup. The release browser profile then held steady, walking, and underwater frame p95 at 9.7, 9.5,
 and 9.2 ms with zero drops, errors, stale completions, or residual jobs. This establishes a measured
 route-sampling foundation before the authored path grows from 165 m to the planned 600 m class.
+
+## 2026-07-12: 753 m terrain-authored pilgrimage
+
+Generator v12 extends the road to 42 frozen nodes and 752.96 m. A deterministic Rust terrain search
+threads four distinct regions and terminates 11.9 m from the alpine Needle Gate. Exact canonical replay
+at 10 cm spacing proves dry paving, player-width clearance, no more than 30 cm cut or 20 cm fill, an
+8.84% maximum node grade, canonical/chunk/edit agreement, and one cardinal-connected road component at
+all four LOD strides. Landmark cadence expands from five to 26 stable route identities.
+
+The runtime index now switches routes above 16 segments to sorted sparse 25.6 m spatial bins. Bin
+memberships retain authored segment order, including shared-endpoint and self-crossing tie behavior.
+Route stations are precomputed in ordinal and feature-cell order. The exhaustive LOD validator now
+unions per-segment corridors instead of scanning the 22.4-million-column global rectangle. Host tests
+cover an additional synthetic 819.2 m/256-segment route and exact indexed-versus-reference sampling.
+
+The release browser remained at the 120 Hz cap after the extension:
+
+| Integrated measurement                       |             Result |
+| -------------------------------------------- | -----------------: |
+| Steady / traversal / underwater frame p95    | 9.9 / 8.8 / 9.9 ms |
+| Traversal CPU / streaming p95                |       5.7 / 3.1 ms |
+| Worst six-hero frame / active GPU p95        |     9.6 / 5.484 ms |
+| Dropped samples / stale completions / errors |          0 / 0 / 0 |
+
+The exact generator-v12 build also completed 38 rapid reloads across three tabs with live edit
+synchronization and zero persistence errors. Fault injection rejected 20 consecutive OPFS VFS
+acquisitions and recovered on call 21 with zero console errors. Both gates reasserted that the body
+contains exactly one canvas; crosshair, startup help, telemetry, statuses, menus, and toggles remained
+Rust/WGPU draw data.

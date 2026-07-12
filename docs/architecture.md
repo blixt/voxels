@@ -146,13 +146,22 @@ Ordinary candidates reject water before computing composition identity, so rare 
 inflate every column's hot path. The SQLite world record advances generator identity without dropping
 existing sparse edits.
 
+Generator v12 extends the First Pilgrim Road from 164.7 m to 753.0 m with 42 frozen canonical nodes.
+A deterministic terrain-aware Rust search crosses verdant forest, wind moor, volcanic terrain, and
+alpine country before terminating beside a Needle Gate. Exact 10 cm replay proves a dry player-width
+bed, no more than 30 cm cut or 20 cm fill, a maximum authored grade below 12%, and cardinal continuity
+on every surface-LOD lattice. The same cadence now yields 26 stable editable route landmarks. Their
+ordinal catalog and feature-cell lookup are immutable derived indices, so ambient feature generation
+does not rebuild or linearly scan every station.
+
 Authored routes are compiled once into immutable Rust segment records containing squared length,
-normalized tangent, cumulative distance, and a shoulder-expanded corridor bound. The global route
-bound rejects unrelated columns before touching the index; points inside that broad rectangle reject
-individual segments with scalar comparisons before projection or square root. Sampling preserves the
-earlier nearest-segment/tie behavior exactly, while cumulative-distance queries reuse stored lengths
-and station reconstruction retains identical rounded anchors. Segment identity is `u16`, leaving room
-for terrain-following 600 m routes without coupling route length to per-column arithmetic.
+normalized tangent, cumulative distance, and a shoulder-expanded corridor bound. Short routes retain
+an exact linear candidate order; longer routes compile into deterministic sparse 25.6 m bins with
+ascending segment memberships. The global route bound rejects unrelated columns before touching the
+index, while occupied-bin queries still apply the exact corridor test before projection or square
+root. Sampling preserves the earlier nearest-segment/tie behavior exactly, cumulative-distance queries
+use binary partitioning over stored lengths, and station reconstruction retains identical rounded
+anchors. Segment identity is `u16`, decoupling route length from per-column arithmetic.
 
 An edit invalidates every surface tile whose sampling footprint depends on that X/Z column. Resident
 geometry stays active while its replacement is generated and allocated, then the renderer switches

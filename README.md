@@ -51,7 +51,7 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 
 The canonical world is generator identity plus sparse edits. Near meshes and four streamed surface LOD
 rings are derived caches; the rings sample at 0.2, 0.4, 0.8, and 1.6 m while the editable near field
-retains authoritative 10 cm voxels. Generator v11 shares one regional surface sample across canonical
+retains authoritative 10 cm voxels. Generator v12 shares one regional surface sample across canonical
 chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
 conditional skirts, and activates a newly streamed coverage set only when it is complete.
@@ -62,9 +62,10 @@ then gives each macro cell one distinct semantic hero. Bounded edit-aware proxie
 across the surface rings. A deterministic Rust-generated
 material atlas adds world-anchored, mip-filtered albedo, micro-normal, and roughness structure without
 changing geometry, draw ownership, or durable voxel data.
-The First Pilgrim Road is a stable Rust polyline graded through those same canonical columns. Its
-10 cm paving, shoulders, cairns, waystones, and ruined arches remain editable, collidable, and
-continuous through every streamed LOD rather than becoming a renderer-only decal.
+The 753 m First Pilgrim Road is a stable Rust polyline graded through those same canonical columns.
+Its 10 cm paving, shoulders, 26 cairns/waystones/arches, and alpine Needle Gate destination remain
+editable, collidable, and continuous through every streamed LOD rather than becoming renderer-only
+decals.
 See [docs/architecture.md](docs/architecture.md) for format, persistence, and research decisions.
 
 ## Controls
@@ -80,7 +81,7 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 - Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and context menu
   can toggle cascaded sun shadows, voxel AO, screen-space contact AO, fog, far terrain, animated
   water, target highlighting, or material surface detail without a DOM UI layer. Its Rust-rendered
-  more menu can teleport to the coastal showcase, follow the five marks of the pilgrim road, or cycle
+  more menu can teleport to the coastal showcase, follow the 26 marks of the pilgrim road, or cycle
   through regional landmarks and regional daylight phases for repeatable graphics and streaming
   checks.
 
