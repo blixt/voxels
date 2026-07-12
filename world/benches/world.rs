@@ -2,12 +2,14 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::collections::BTreeMap;
 use voxels_world::codec::{decode_chunk, encode_chunk};
 use voxels_world::{
-    ChunkCoord, EditMap, FarTileCoord, Generator, Material, VoxelCoord, generate_far_tile,
-    generate_far_tile_with, mesh_chunk,
+    ChunkCoord, EditMap, FarTileCoord, Generator, Material, SurfaceLodLevel, SurfaceTileCoord,
+    VoxelCoord, generate_edited_water_tile_mesh, generate_far_tile, generate_far_tile_with,
+    mesh_chunk,
 };
 
 const SEED: u64 = 0x5eed_cafe;
 const COORD: ChunkCoord = ChunkCoord::new(2, 0, -3);
+const OCEAN_VOXEL: VoxelCoord = VoxelCoord::new(18_016, 10, 12_896);
 
 fn generation(criterion: &mut Criterion) {
     let generator = Generator::new(SEED);
@@ -51,6 +53,36 @@ fn meshing(criterion: &mut Criterion) {
     });
 }
 
+fn water_meshing(criterion: &mut Criterion) {
+    let generator = Generator::new(SEED);
+    let coord = OCEAN_VOXEL.chunk();
+    criterion.bench_function("greedy mesh generated ocean chunk", |bencher| {
+        bencher.iter_batched(
+            || generator.generate_chunk(coord),
+            |chunk| {
+                let mut columns = BTreeMap::new();
+                mesh_chunk(&chunk, |x, y, z| {
+                    columns
+                        .entry((x, z))
+                        .or_insert_with(|| generator.column(x, z))
+                        .sample(y)
+                })
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+fn water_surface_lod(criterion: &mut Criterion) {
+    let generator = Generator::new(SEED);
+    let edits = EditMap::default();
+    let coord =
+        SurfaceTileCoord::containing(SurfaceLodLevel::Stride8, OCEAN_VOXEL.x, OCEAN_VOXEL.z);
+    criterion.bench_function("generate edit-aware stride-8 water tile", |bencher| {
+        bencher.iter(|| generate_edited_water_tile_mesh(generator, &edits, coord));
+    });
+}
+
 fn far_surface(criterion: &mut Criterion) {
     let generator = Generator::new(SEED);
     criterion.bench_function("generate 25.6m far surface tile", |bencher| {
@@ -79,6 +111,8 @@ criterion_group!(
     generation,
     codec,
     meshing,
+    water_meshing,
+    water_surface_lod,
     far_surface,
     edited_far_surface
 );

@@ -53,7 +53,7 @@ pub fn mesh_chunk(
 ) -> MeshedChunk {
     let mut mesh = MeshedChunk::default();
     let origin = chunk.coord().world_origin();
-    let materials = build_material_halo(chunk, origin, &mut outside);
+    let occupancy = build_occupancy_halo(chunk, origin, &mut outside);
     let mut mask = vec![FaceKey::default(); CHUNK_EDGE * CHUNK_EDGE];
     for face in 0..6 {
         let (axis, u_axis, v_axis, step) = face_axes(face);
@@ -68,13 +68,13 @@ pub fn mesh_chunk(
                     }
                     let mut neighbor = [local[0] as i32, local[1] as i32, local[2] as i32];
                     neighbor[axis] += step;
-                    let neighbor_material = halo_material(&materials, neighbor);
-                    mask[u + v * CHUNK_EDGE] = if !face_visible(material, neighbor_material) {
+                    let neighbor_kind = halo_kind(&occupancy, neighbor);
+                    mask[u + v * CHUNK_EDGE] = if !face_visible(material, neighbor_kind) {
                         FaceKey::default()
                     } else {
                         FaceKey {
                             material,
-                            ao: face_ao(local, axis, u_axis, v_axis, step, &materials),
+                            ao: face_ao(local, axis, u_axis, v_axis, step, &occupancy),
                         }
                     };
                 }
@@ -130,13 +130,13 @@ pub fn mesh_chunk(
     mesh
 }
 
-fn build_material_halo(
+fn build_occupancy_halo(
     chunk: &Chunk,
     origin: [i32; 3],
     outside: &mut impl FnMut(i32, i32, i32) -> Material,
-) -> Vec<Material> {
+) -> Vec<u8> {
     const HALO_EDGE: usize = CHUNK_EDGE + 2;
-    let mut materials = vec![Material::Air; HALO_EDGE * HALO_EDGE * HALO_EDGE];
+    let mut occupancy = vec![0; HALO_EDGE * HALO_EDGE * HALO_EDGE];
     for y in -1..=CHUNK_EDGE as i32 {
         for z in -1..=CHUNK_EDGE as i32 {
             for x in -1..=CHUNK_EDGE as i32 {
@@ -151,18 +151,22 @@ fn build_material_halo(
                 let index = (x + 1) as usize
                     + (z + 1) as usize * HALO_EDGE
                     + (y + 1) as usize * HALO_EDGE * HALO_EDGE;
-                materials[index] = material;
+                occupancy[index] = match material.render_layer() {
+                    RenderLayer::Empty => 0,
+                    RenderLayer::Opaque => 1,
+                    RenderLayer::Translucent => 2,
+                };
             }
         }
     }
-    materials
+    occupancy
 }
 
-fn face_visible(material: Material, neighbor: Material) -> bool {
+fn face_visible(material: Material, neighbor_kind: u8) -> bool {
     if material == Material::Water {
-        neighbor == Material::Air
+        neighbor_kind == 0
     } else {
-        !neighbor.occludes_ambient()
+        neighbor_kind != 1
     }
 }
 
@@ -176,7 +180,7 @@ fn face_ao(
     u_axis: usize,
     v_axis: usize,
     step: i32,
-    materials: &[Material],
+    occupancy: &[u8],
 ) -> u8 {
     let mut base = local.map(|value| value as i32);
     base[axis] += step;
@@ -192,9 +196,9 @@ fn face_ao(
         side_v[v_axis] += dv;
         let mut diagonal = side_u;
         diagonal[v_axis] += dv;
-        let side_u = halo_solid(materials, side_u);
-        let side_v = halo_solid(materials, side_v);
-        let diagonal = halo_solid(materials, diagonal);
+        let side_u = halo_solid(occupancy, side_u);
+        let side_v = halo_solid(occupancy, side_v);
+        let diagonal = halo_solid(occupancy, diagonal);
         let ao = if side_u && side_v {
             0
         } else {
@@ -205,16 +209,16 @@ fn face_ao(
     packed
 }
 
-fn halo_material(materials: &[Material], local: [i32; 3]) -> Material {
+fn halo_kind(occupancy: &[u8], local: [i32; 3]) -> u8 {
     const HALO_EDGE: usize = CHUNK_EDGE + 2;
     let index = (local[0] + 1) as usize
         + (local[2] + 1) as usize * HALO_EDGE
         + (local[1] + 1) as usize * HALO_EDGE * HALO_EDGE;
-    materials[index]
+    occupancy[index]
 }
 
-fn halo_solid(materials: &[Material], local: [i32; 3]) -> bool {
-    halo_material(materials, local).occludes_ambient()
+fn halo_solid(occupancy: &[u8], local: [i32; 3]) -> bool {
+    halo_kind(occupancy, local) == 1
 }
 
 fn face_axes(face: u8) -> (usize, usize, usize, i32) {

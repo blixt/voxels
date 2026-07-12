@@ -391,7 +391,12 @@ pub fn generate_edited_water_tile_mesh(
     coord: SurfaceTileCoord,
 ) -> WaterTileMesh {
     generate_water_tile_mesh_with(coord, |x, z| {
-        edits.sample(generator, VoxelCoord::new(x, SEA_LEVEL_VOXELS, z)) == Material::Water
+        edits
+            .override_at(VoxelCoord::new(x, SEA_LEVEL_VOXELS, z))
+            .map_or_else(
+                || generator.surface_sample(x, z).water_level == Some(SEA_LEVEL_VOXELS),
+                |material| material == Material::Water,
+            )
     })
 }
 

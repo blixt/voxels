@@ -255,6 +255,20 @@ mod tests {
     }
 
     #[test]
+    fn generated_water_can_be_removed_and_restored_sparsely() {
+        let generator = Generator::new(0x5eed_cafe);
+        let coord = VoxelCoord::new(18_016, crate::SEA_LEVEL_VOXELS, 12_896);
+        assert_eq!(generator.sample(coord.x, coord.y, coord.z), Material::Water);
+        let mut edits = EditMap::default();
+        edits.set(generator, coord, Material::Air);
+        assert_eq!(edits.sample(generator, coord), Material::Air);
+        assert_eq!(edits.override_at(coord), Some(Material::Air));
+        edits.set(generator, coord, Material::Water);
+        assert_eq!(edits.sample(generator, coord), Material::Water);
+        assert!(edits.is_empty());
+    }
+
+    #[test]
     fn boundary_edit_invalidates_both_chunks() {
         let chunks = EditMap::affected_chunks(VoxelCoord::new(-1, 64, 31));
         assert_eq!(chunks.len(), 4);
