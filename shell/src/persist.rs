@@ -30,6 +30,7 @@ const VFS_RETRY_DELAY_MS: i32 = 150;
 
 const MSG_REQUEST: f64 = 0.0;
 const MSG_RESPONSE: f64 = 1.0;
+const MSG_EDIT_COMMITTED: f64 = 2.0;
 const RESULT_OK: f64 = 0.0;
 const RESULT_ERROR: f64 = 1.0;
 const RESULT_NO_CAMERA: f64 = 2.0;
@@ -127,6 +128,7 @@ struct Coordinator {
     next_request: Cell<u64>,
     pending: RefCell<HashMap<u64, Pending>>,
     write_queue: RefCell<VecDeque<Operation>>,
+    committed_edits: RefCell<VecDeque<(VoxelCoord, Option<u16>)>>,
     writing: Cell<bool>,
     closed: Cell<bool>,
     _on_message: RefCell<Option<MessageHandler>>,
@@ -192,6 +194,23 @@ impl Store {
     pub fn shutdown(&self) {
         self.coordinator.shutdown();
     }
+
+    pub fn drain_remote_edits(&self) -> Result<Vec<(VoxelCoord, Option<Material>)>, JsValue> {
+        self.coordinator
+            .committed_edits
+            .borrow_mut()
+            .drain(..)
+            .map(|(coord, material)| {
+                material.map_or(Ok((coord, None)), |id| {
+                    Material::from_id(id)
+                        .map(|material| (coord, Some(material)))
+                        .ok_or_else(|| {
+                            JsValue::from_str(&format!("unknown committed material {id}"))
+                        })
+                })
+            })
+            .collect()
+    }
 }
 
 impl Drop for Store {
@@ -213,6 +232,7 @@ impl Coordinator {
             next_request: Cell::new(0),
             pending: RefCell::new(HashMap::new()),
             write_queue: RefCell::new(VecDeque::new()),
+            committed_edits: RefCell::new(VecDeque::new()),
             writing: Cell::new(false),
             closed: Cell::new(false),
             _on_message: RefCell::new(None),
@@ -230,7 +250,13 @@ impl Coordinator {
                 return OperationResult::Error("persistence coordinator is closed".into());
             }
             if let Some(leader) = self.leader.borrow().clone() {
-                return leader.run(&operation);
+                let result = leader.run(&operation);
+                if matches!(result, OperationResult::Ok)
+                    && let Operation::SaveEdit { coord, material } = operation
+                {
+                    self.post_edit_committed(self.tab_id, coord, material);
+                }
+                return result;
             }
             let id = self.next_request.get();
             self.next_request.set(id.wrapping_add(1));
@@ -261,7 +287,13 @@ impl Coordinator {
             return Err(JsValue::from_str("persistence coordinator is closed"));
         }
         if let Some(leader) = self.leader.borrow().clone() {
-            return operation_result(leader.run(&operation));
+            let result = leader.run(&operation);
+            if matches!(result, OperationResult::Ok)
+                && let Operation::SaveEdit { coord, material } = operation
+            {
+                self.post_edit_committed(self.tab_id, coord, material);
+            }
+            return operation_result(result);
         }
 
         let mut queue = self.write_queue.borrow_mut();
@@ -342,6 +374,7 @@ impl Coordinator {
         match number(message, 0) {
             Some(MSG_REQUEST) => self.handle_request(message),
             Some(MSG_RESPONSE) => self.handle_response(message),
+            Some(MSG_EDIT_COMMITTED) => self.handle_edit_committed(message),
             _ => {}
         }
     }
@@ -358,8 +391,23 @@ impl Coordinator {
             return;
         };
         let result = if world_tag == self.world_tag {
-            decode_operation(message)
-                .map_or_else(OperationResult::Error, |operation| leader.run(&operation))
+            match decode_operation(message) {
+                Ok(operation) => {
+                    let result = leader.run(&operation);
+                    if matches!(result, OperationResult::Ok)
+                        && let Operation::SaveEdit { coord, material } = operation
+                    {
+                        // BroadcastChannel does not echo to this leader's channel object, so apply a
+                        // follower-originated commit to the leader engine explicitly as well.
+                        self.committed_edits
+                            .borrow_mut()
+                            .push_back((coord, material));
+                        self.post_edit_committed(from, coord, material);
+                    }
+                    result
+                }
+                Err(error) => OperationResult::Error(error),
+            }
         } else {
             OperationResult::Error("persistence leader belongs to a different world build".into())
         };
@@ -382,6 +430,25 @@ impl Coordinator {
         }
     }
 
+    fn handle_edit_committed(&self, message: &js_sys::Array) {
+        let (Some(origin), Some(world_tag)) = (number(message, 2), message.get(3).as_string())
+        else {
+            return;
+        };
+        if origin == self.tab_id || world_tag != self.world_tag {
+            return;
+        }
+        let Ok(coord) = decode_coord(message, 4) else {
+            return;
+        };
+        let Ok(material) = decode_optional_material(message, 7) else {
+            return;
+        };
+        self.committed_edits
+            .borrow_mut()
+            .push_back((coord, material));
+    }
+
     fn post_request(&self, id: u64, operation: &Operation) {
         let message = js_sys::Array::new();
         push_number(&message, MSG_REQUEST);
@@ -401,6 +468,24 @@ impl Coordinator {
         push_number(&message, to);
         encode_result(&message, result);
         let _ = self.channel.post_message(&message);
+    }
+
+    fn post_edit_committed(&self, origin: f64, coord: VoxelCoord, material: Option<u16>) {
+        let message = js_sys::Array::new();
+        push_number(&message, MSG_EDIT_COMMITTED);
+        push_number(&message, WIRE_VERSION);
+        push_number(&message, origin);
+        message.push(&JsValue::from_str(&self.world_tag));
+        push_number(&message, f64::from(coord.x));
+        push_number(&message, f64::from(coord.y));
+        push_number(&message, f64::from(coord.z));
+        push_number(&message, material.map_or(-1.0, f64::from));
+        if let Err(error) = self.channel.post_message(&message) {
+            web_sys::console::error_1(&JsValue::from_str(&format!(
+                "broadcast committed voxel edit: {}",
+                js_value_message(&error)
+            )));
+        }
     }
 
     async fn elect(self: &Rc<Self>) -> Result<(), JsValue> {
@@ -503,6 +588,7 @@ impl Coordinator {
             return;
         }
         self.write_queue.borrow_mut().clear();
+        self.committed_edits.borrow_mut().clear();
         if let Some(abort) = self.queued_lock_abort.borrow_mut().take() {
             abort.abort();
         }
@@ -708,25 +794,30 @@ fn decode_operation(message: &js_sys::Array) -> Result<Operation, String> {
             finite_f32(message, 9)?,
             finite_f32(message, 10)?,
         ])),
-        Some(OP_SAVE_EDIT) => {
-            let material = finite_number(message, 9)?;
-            let material = if material == -1.0 {
-                None
-            } else if material.fract() == 0.0 && (0.0..=f64::from(u16::MAX)).contains(&material) {
-                Some(material as u16)
-            } else {
-                return Err("invalid material id in persistence request".into());
-            };
-            Ok(Operation::SaveEdit {
-                coord: VoxelCoord::new(
-                    finite_i32(message, 6)?,
-                    finite_i32(message, 7)?,
-                    finite_i32(message, 8)?,
-                ),
-                material,
-            })
-        }
+        Some(OP_SAVE_EDIT) => Ok(Operation::SaveEdit {
+            coord: decode_coord(message, 6)?,
+            material: decode_optional_material(message, 9)?,
+        }),
         _ => Err("unknown persistence operation".into()),
+    }
+}
+
+fn decode_coord(message: &js_sys::Array, offset: u32) -> Result<VoxelCoord, String> {
+    Ok(VoxelCoord::new(
+        finite_i32(message, offset)?,
+        finite_i32(message, offset + 1)?,
+        finite_i32(message, offset + 2)?,
+    ))
+}
+
+fn decode_optional_material(message: &js_sys::Array, index: u32) -> Result<Option<u16>, String> {
+    let material = finite_number(message, index)?;
+    if material == -1.0 {
+        Ok(None)
+    } else if material.fract() == 0.0 && (0.0..=f64::from(u16::MAX)).contains(&material) {
+        Ok(Some(material as u16))
+    } else {
+        Err("invalid material id in persistence message".into())
     }
 }
 

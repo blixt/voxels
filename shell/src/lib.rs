@@ -118,6 +118,7 @@ mod web {
         }
 
         fn frame(&self, time: f64) {
+            self.apply_remote_edits();
             let last = self.last_time.replace(time);
             let dt = if last <= 0.0 {
                 1.0 / 60.0
@@ -660,15 +661,37 @@ mod web {
 
             let mut edits = self.edits.borrow_mut();
             edits.set(self.generator, target, material);
+            let durable = edits.override_at(target);
+            drop(edits);
+            if let Err(error) = self.store.borrow().save_edit(target, durable) {
+                web_sys::console::error_1(&error);
+            }
+            self.apply_durable_edit(target, durable);
+        }
+
+        fn apply_remote_edits(&self) {
+            let edits = match self.store.borrow().drain_remote_edits() {
+                Ok(edits) => edits,
+                Err(error) => {
+                    web_sys::console::error_1(&error);
+                    return;
+                }
+            };
+            for (coord, material) in edits {
+                self.apply_durable_edit(coord, material);
+            }
+        }
+
+        fn apply_durable_edit(&self, target: VoxelCoord, durable: Option<Material>) {
+            self.edits
+                .borrow_mut()
+                .replace_durable_override(target, durable);
+            let material =
+                durable.unwrap_or_else(|| self.generator.sample(target.x, target.y, target.z));
             if let Some(chunk) = self.chunks.borrow_mut().get_mut(&coord_key(target.chunk())) {
                 let [x, y, z] = target.local();
                 chunk.set(x, y, z, material);
             }
-            let durable = edits.override_at(target);
-            if let Err(error) = self.store.borrow().save_edit(target, durable) {
-                web_sys::console::error_1(&error);
-            }
-            drop(edits);
             let _ = self.scheduler.borrow_mut().mark_voxel_edited(target);
             let resident = self.surface_resident.borrow();
             let queue = self.surface_queue.borrow();
@@ -733,11 +756,12 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 35], |engine| {
+            let values = self.engine.as_ref().map_or([0.0; 39], |engine| {
                 let camera = engine.camera.borrow();
                 let fluid = camera.fluid_state();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let render = engine.renderer.borrow().diagnostics();
+                let target = engine.renderer.borrow().target_voxel();
                 let lod_tiles = engine.surface_lod_counts();
                 [
                     camera.position.x,
@@ -779,6 +803,10 @@ mod web {
                     fluid.eye_depth_metres,
                     if fluid.eyes_submerged { 1.0 } else { 0.0 },
                     if fluid.swimming { 1.0 } else { 0.0 },
+                    target.map_or(0.0, |coord| coord[0] as f32),
+                    target.map_or(0.0, |coord| coord[1] as f32),
+                    target.map_or(0.0, |coord| coord[2] as f32),
+                    if target.is_some() { 1.0 } else { 0.0 },
                 ]
             });
             Float32Array::from(values.as_slice())

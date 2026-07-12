@@ -90,6 +90,40 @@ async function enterUnderwaterShowcase(page) {
   );
 }
 
+async function editFromFollowerAndWaitForLeader(follower, leader) {
+  const before = await follower.evaluate(() => globalThis.__VOXELS__.snapshot());
+  await follower.locator("#app").click();
+  await follower.waitForFunction(() => document.pointerLockElement?.id === "app");
+  await follower.mouse.move(480, 620, { steps: 3 });
+  await follower.waitForTimeout(150);
+  const aimed = await follower.evaluate(() => globalThis.__VOXELS__.snapshot());
+  if (aimed[4] > -0.35) {
+    throw new Error(`pointer-lock look input was not delivered: ${before[4]} -> ${aimed[4]}`);
+  }
+  await follower.waitForFunction(
+    async () => (await globalThis.__VOXELS__.snapshot())[38] === 1,
+    null,
+    { timeout: 5_000 },
+  );
+  // Do not move back to screen centre before pressing: under pointer lock that movement is look input.
+  await follower.mouse.down();
+  await follower.mouse.up();
+  const deadline = Date.now() + 10_000;
+  let last = [];
+  while (Date.now() < deadline) {
+    const [origin, remote] = await Promise.all([
+      follower.evaluate(() => globalThis.__VOXELS__.snapshot()),
+      leader.evaluate(() => globalThis.__VOXELS__.snapshot()),
+    ]);
+    last = [origin[7], remote[7]];
+    if (origin[7] > before[7] && remote[7] === origin[7]) return origin[7];
+    await follower.waitForTimeout(100);
+  }
+  throw new Error(
+    `follower voxel edit did not converge in the live leader world: ${JSON.stringify(last)}`,
+  );
+}
+
 async function reserveEphemeralPort() {
   const probe = createNetServer();
   await new Promise((resolve, reject) => {
@@ -143,6 +177,7 @@ try {
   await follower.goto(url, { waitUntil: "domcontentloaded" });
   await waitForEngine(follower);
   await assertCanvasOnly(follower);
+  await editFromFollowerAndWaitForLeader(follower, leader);
 
   // The first reload hands ownership to the follower. The remaining reloads repeatedly dispose and
   // recreate queued lock requests while that tab keeps the single OPFS lease.
@@ -176,6 +211,7 @@ try {
       tabs: 3,
       canvasOnly: true,
       underwater: true,
+      liveEditSync: true,
       persistenceErrors: 0,
     }),
   );

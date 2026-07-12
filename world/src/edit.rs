@@ -68,6 +68,12 @@ impl EditMap {
         self.replace_override(coord, Some(material));
     }
 
+    /// Applies one already validated durable row/change notification. `None` means the row was
+    /// removed and the generator is authoritative again.
+    pub fn replace_durable_override(&mut self, coord: VoxelCoord, material: Option<Material>) {
+        self.replace_override(coord, material);
+    }
+
     pub fn override_at(&self, coord: VoxelCoord) -> Option<Material> {
         self.overrides.get(&coord).copied()
     }
@@ -322,6 +328,18 @@ mod tests {
             generator.sample(coord.x, coord.y, coord.z),
         );
         assert!(edits.is_empty());
+        assert!(edits.chunk_overrides.is_empty());
+        assert!(edits.column_overrides.is_empty());
+    }
+
+    #[test]
+    fn committed_remote_override_can_be_inserted_and_removed() {
+        let coord = VoxelCoord::new(7, 8, 9);
+        let mut edits = EditMap::default();
+        edits.replace_durable_override(coord, Some(Material::Clay));
+        assert_eq!(edits.override_at(coord), Some(Material::Clay));
+        edits.replace_durable_override(coord, None);
+        assert_eq!(edits.override_at(coord), None);
         assert!(edits.chunk_overrides.is_empty());
         assert!(edits.column_overrides.is_empty());
     }

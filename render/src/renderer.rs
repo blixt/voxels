@@ -719,6 +719,10 @@ impl Renderer {
         self.ui.open()
     }
 
+    pub const fn target_voxel(&self) -> Option<[i32; 3]> {
+        self.target_voxel
+    }
+
     pub fn take_coast_teleport_request(&mut self) -> bool {
         std::mem::take(&mut self.coast_teleport_requested)
     }
