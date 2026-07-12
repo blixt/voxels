@@ -1,7 +1,7 @@
 use crate::{CHUNK_EDGE, Chunk, ChunkCoord, Material};
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 5;
+pub const GENERATOR_VERSION: u32 = 6;
 pub const SEA_LEVEL_VOXELS: i32 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -307,7 +307,11 @@ impl Generator {
         let volcanic = ridge.powi(4) * 25.0 + (volcanic_field - 0.5) * 10.0;
         let moor = (0.5 - hills) * 4.0 + ridge * 2.0;
         let forest = (moisture - 0.5) * 4.0 + detail * 2.0;
-        let ocean_basin = smooth(((0.34 - continental) / 0.34).clamp(0.0, 1.0)) * 18.0;
+        // Continental noise becomes shelf, slope, then a genuinely navigable basin. The previous
+        // single 18-voxel subtraction produced water only about 60 cm deep even across enormous
+        // searches—visually an ocean, physically a puddle for a 1.78 m player.
+        let ocean = smooth(((0.44 - continental) / 0.44).clamp(0.0, 1.0));
+        let ocean_basin = ocean * 14.0 + ocean * ocean * 30.0;
         let height = (base
             + normalized[0] * forest
             + normalized[1] * moor
@@ -675,7 +679,11 @@ mod tests {
                 );
                 assert_eq!(
                     generator.sample_terrain_with_profile(x, sample.height + 1, z, profile),
-                    Material::Air
+                    if sample.height < SEA_LEVEL_VOXELS {
+                        Material::Water
+                    } else {
+                        Material::Air
+                    }
                 );
             }
         }
@@ -700,7 +708,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checksum, 0x05e5_581e_7f9a_7ff5);
+        assert_eq!(checksum, 0x39a3_a092_5fe2_08a1);
     }
 
     #[test]
@@ -719,6 +727,18 @@ mod tests {
         let chunk = generator.generate_chunk(chunk_coord);
         let local = VoxelCoord::new(x, SEA_LEVEL_VOXELS, z).local();
         assert_eq!(chunk.get(local[0], local[1], local[2]), Material::Water);
+    }
+
+    #[test]
+    fn ocean_bathymetry_contains_player_deep_navigable_water() {
+        let sample = Generator::new(0x5eed_cafe).surface_sample(18_016, 12_896);
+        let water_level = sample
+            .water_level
+            .expect("showcase basin should be flooded");
+        assert!(
+            water_level - sample.height >= 20,
+            "a full-height player needs at least two metres of canonical water"
+        );
     }
 
     #[test]
