@@ -2,8 +2,9 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use voxels_world::codec::{decode_chunk, encode_chunk};
 use voxels_world::{
     ChunkCoord, EditMap, FarTileCoord, Generator, Material, SurfaceLodLevel, SurfaceTileCoord,
-    VoxelCoord, generate_edited_water_tile_mesh, generate_far_tile, generate_far_tile_with,
-    mesh_chunk,
+    VoxelCoord, first_pilgrim_road_length_voxels, first_pilgrim_road_point_at_distance,
+    generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_far_tile,
+    generate_far_tile_with, mesh_chunk,
 };
 
 const SEED: u64 = 0x5eed_cafe;
@@ -15,6 +16,39 @@ fn generation(criterion: &mut Criterion) {
     criterion.bench_function("generate 32^3 chunk", |bencher| {
         bencher.iter(|| generator.generate_chunk(COORD));
     });
+
+    let road_length = first_pilgrim_road_length_voxels();
+    let road = first_pilgrim_road_point_at_distance(road_length * 0.5)
+        .expect("authored road midpoint")
+        .0;
+    let road_x = road[0].round() as i32;
+    let road_z = road[1].round() as i32;
+    let road_y = generator.surface_height(road_x, road_z);
+    let road_coord = VoxelCoord::new(road_x, road_y, road_z).chunk();
+    criterion.bench_function("generate 32^3 pilgrim-road chunk", |bencher| {
+        bencher.iter(|| generator.generate_chunk(road_coord));
+    });
+}
+
+fn route_surface_lod(criterion: &mut Criterion) {
+    let generator = Generator::new(SEED);
+    let edits = EditMap::default();
+    let road_length = first_pilgrim_road_length_voxels();
+    let road = first_pilgrim_road_point_at_distance(road_length * 0.5)
+        .expect("authored road midpoint")
+        .0;
+    let road = [road[0].round() as i32, road[1].round() as i32];
+    let mut group = criterion.benchmark_group("pilgrim-road surface LOD");
+    for level in [SurfaceLodLevel::Stride2, SurfaceLodLevel::Stride16] {
+        let coord = SurfaceTileCoord::containing(level, road[0], road[1]);
+        group.bench_function(
+            format!("stride-{} tile", level.stride_voxels()),
+            |bencher| {
+                bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
+            },
+        );
+    }
+    group.finish();
 }
 
 fn codec(criterion: &mut Criterion) {
@@ -100,6 +134,7 @@ fn edited_far_surface(criterion: &mut Criterion) {
 criterion_group!(
     world_benches,
     generation,
+    route_surface_lod,
     codec,
     meshing,
     water_meshing,
