@@ -29,6 +29,8 @@ canonical and LOD queue must drain.
 `vp run profile:edits` runs 40 Rust-owned terrain/water remove-and-restore operations and gates SQLite
 dispatch, canonical remesh, all four LOD replacements, submitted-frame convergence, and pristine
 restoration.
+`vp run profile:materials` toggles Rust-generated material detail through canvas hit-testing and gates
+identical geometry/residency plus the incremental frame and GPU cost.
 `vp run profile:atmosphere` drives the Rust canvas context menu through dawn, clear day, golden hour,
 and blue hour, captures each phase, and gates identical geometry plus frame/GPU budgets.
 `vp run profile:gtao` follows the Rust-owned pilgrim route to a dense badlands view, toggles
@@ -37,6 +39,8 @@ resource residency, frame pacing, and depth-plus-AO GPU cost.
 `vp run profile:heroes` visits the six semantic regional heroes through the Rust canvas context menu,
 captures a deterministic contact sheet, and gates settled streaming, depth ownership, frame pacing,
 and GPU cost in every region.
+`vp run profile:caves` tours the Cinder Vault approach, descent, and chamber and gates streaming,
+eye adaptation, enclosure probes, frame pacing, and GPU cost at every stop.
 `vp run profile:lights` isolates bounded voxel-emissive lighting from the cave headlamp, captures the
 Rust-toggle A/B, and gates active-light count, unchanged geometry/residency, frame pacing, and GPU cost.
 `vp run profile:portals` moves to the playable terrain directly above Cinder Vault and proves that its
@@ -62,7 +66,7 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 
 The canonical world is generator identity plus sparse edits. Near meshes and four streamed surface LOD
 rings are derived caches; the rings sample at 0.2, 0.4, 0.8, and 1.6 m while the editable near field
-retains authoritative 10 cm voxels. Generator v12 shares one regional surface sample across canonical
+retains authoritative 10 cm voxels. Generator v15 shares one regional surface sample across canonical
 chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
 conditional skirts, and activates a newly streamed coverage set only when it is complete.
