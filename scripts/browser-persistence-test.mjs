@@ -1,6 +1,11 @@
 import { chromium } from "playwright";
 import { createServer as createViteServer } from "vite-plus";
-import { chromeWebGpuLaunchOptions, reserveEphemeralPort } from "./browser-harness.mjs";
+import {
+  assertSnapshotSchema,
+  chromeWebGpuLaunchOptions,
+  reserveEphemeralPort,
+  SNAPSHOT,
+} from "./browser-harness.mjs";
 
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed|underwater teleport/i;
@@ -25,7 +30,8 @@ async function waitForEngine(page) {
   const deadline = Date.now() + 25_000;
   while (Date.now() < deadline) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
-    if (snapshot[6] > 0 && snapshot[8] > 0) return snapshot;
+    assertSnapshotSchema(snapshot);
+    if (snapshot[SNAPSHOT.quads] > 0 && snapshot[SNAPSHOT.residentChunks] > 0) return snapshot;
     await page.waitForTimeout(100);
   }
   throw new Error("engine did not render resident voxel geometry before the deadline");
@@ -80,12 +86,18 @@ async function enterUnderwaterShowcase(page) {
   while (Date.now() < deadline) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
     lastSnapshot = snapshot;
-    if (snapshot[31] > 0.5 && snapshot[33] === 1 && snapshot[34] === 1) {
+    assertSnapshotSchema(snapshot);
+    if (
+      snapshot[SNAPSHOT.immersion] > 0.5 &&
+      snapshot[SNAPSHOT.eyesSubmerged] === 1 &&
+      snapshot[SNAPSHOT.swimming] === 1
+    ) {
       // The water-surface toggle is visual only; authoritative fluid physics must remain active.
       await page.mouse.click(902, 522);
       await page.waitForTimeout(150);
       const hiddenWater = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
-      if (hiddenWater[33] !== 1 || hiddenWater[34] !== 1) {
+      assertSnapshotSchema(hiddenWater);
+      if (hiddenWater[SNAPSHOT.eyesSubmerged] !== 1 || hiddenWater[SNAPSHOT.swimming] !== 1) {
         throw new Error("disabling water rendering incorrectly disabled fluid physics");
       }
       await page.mouse.click(902, 522);
@@ -107,12 +119,16 @@ async function editFromFollowerAndWaitForLeader(follower, leader) {
   await follower.mouse.move(480, 620, { steps: 3 });
   await follower.waitForTimeout(150);
   const aimed = await follower.evaluate(() => globalThis.__VOXELS__.snapshot());
-  if (aimed[4] > -0.35) {
-    throw new Error(`pointer-lock look input was not delivered: ${before[4]} -> ${aimed[4]}`);
+  assertSnapshotSchema(before);
+  assertSnapshotSchema(aimed);
+  if (aimed[SNAPSHOT.pitch] > -0.35) {
+    throw new Error(
+      `pointer-lock look input was not delivered: ${before[SNAPSHOT.pitch]} -> ${aimed[SNAPSHOT.pitch]}`,
+    );
   }
   await follower.waitForFunction(
-    async () => (await globalThis.__VOXELS__.snapshot())[38] === 1,
-    null,
+    async (targetPresent) => (await globalThis.__VOXELS__.snapshot())[targetPresent] === 1,
+    SNAPSHOT.targetPresent,
     { timeout: 5_000 },
   );
   // Do not move back to screen centre before pressing: under pointer lock that movement is look input.
@@ -125,8 +141,15 @@ async function editFromFollowerAndWaitForLeader(follower, leader) {
       follower.evaluate(() => globalThis.__VOXELS__.snapshot()),
       leader.evaluate(() => globalThis.__VOXELS__.snapshot()),
     ]);
-    last = [origin[7], remote[7]];
-    if (origin[7] > before[7] && remote[7] === origin[7]) return origin[7];
+    assertSnapshotSchema(origin);
+    assertSnapshotSchema(remote);
+    last = [origin[SNAPSHOT.edits], remote[SNAPSHOT.edits]];
+    if (
+      origin[SNAPSHOT.edits] > before[SNAPSHOT.edits] &&
+      remote[SNAPSHOT.edits] === origin[SNAPSHOT.edits]
+    ) {
+      return origin[SNAPSHOT.edits];
+    }
     await follower.waitForTimeout(100);
   }
   throw new Error(

@@ -1,6 +1,11 @@
 import { chromium } from "playwright";
 import { createServer as createViteServer } from "vite-plus";
-import { chromeWebGpuLaunchOptions, reserveEphemeralPort } from "./browser-harness.mjs";
+import {
+  assertSnapshotSchema,
+  chromeWebGpuLaunchOptions,
+  reserveEphemeralPort,
+  SNAPSHOT,
+} from "./browser-harness.mjs";
 
 const FIRST_OPEN_ATTEMPTS = 20;
 const failures = [];
@@ -59,9 +64,19 @@ try {
   await page.waitForFunction(() => typeof globalThis.__VOXELS__?.snapshot === "function", null, {
     timeout: 20_000,
   });
-  await page.waitForFunction(async () => (await globalThis.__VOXELS__.snapshot())[6] > 0, null, {
-    timeout: 25_000,
-  });
+  const deadline = Date.now() + 25_000;
+  let rendered = false;
+  while (Date.now() < deadline) {
+    const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
+    assertSnapshotSchema(snapshot);
+    if (snapshot[SNAPSHOT.quads] > 0) {
+      rendered = true;
+      break;
+    }
+    await page.waitForTimeout(100);
+  }
+  if (!rendered)
+    throw new Error("engine did not render resident voxel geometry before the deadline");
   const probe = await appWorker?.evaluate(() => globalThis.__voxelsOpfsRecoveryProbe);
   const body = await page.evaluate(() =>
     Array.from(document.body.children, (node) => node.tagName),
