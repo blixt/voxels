@@ -31,6 +31,9 @@ dispatch, canonical remesh, all four LOD replacements, submitted-frame convergen
 restoration.
 `vp run profile:atmosphere` drives the Rust canvas context menu through dawn, clear day, golden hour,
 and blue hour, captures each phase, and gates identical geometry plus frame/GPU budgets.
+`vp run profile:gtao` follows the Rust-owned pilgrim route to a dense badlands view, toggles
+screen-space contact AO through canvas hit-testing, captures the A/B, and gates exact geometry,
+resource residency, frame pacing, and depth-plus-AO GPU cost.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture
@@ -71,10 +74,11 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 - Remove the targeted voxel with the left mouse button; place a grass voxel with the right mouse
   button. Sparse edits are saved transactionally in SQLite on OPFS.
 - Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and context menu
-  can toggle cascaded sun shadows, ambient occlusion, fog, far terrain, animated water, and target
-  highlighting or material surface detail without a DOM UI layer. Its Rust-rendered more menu can
-  teleport to the coastal showcase, follow the five marks of the pilgrim road, or cycle through
-  regional landmarks and regional daylight phases for repeatable graphics and streaming checks.
+  can toggle cascaded sun shadows, voxel AO, screen-space contact AO, fog, far terrain, animated
+  water, target highlighting, or material surface detail without a DOM UI layer. Its Rust-rendered
+  more menu can teleport to the coastal showcase, follow the five marks of the pilgrim road, or cycle
+  through regional landmarks and regional daylight phases for repeatable graphics and streaming
+  checks.
 
 ## Automation
 

@@ -150,6 +150,18 @@ and the diagonal at each face corner. Four 2-bit values participate in the greed
 renderer selects the lower-error triangle diagonal from opposing AO sums. A single 34³ occupancy halo
 makes visibility and AO sampling cache-local while preserving authoritative neighbor seams.
 
+Screen-space contact AO complements that stable voxel term with sub-voxel-scale horizon occlusion.
+When enabled, the renderer first replays the selected opaque draw list into the sampled
+`Depth32Float` scene depth. While geometric LOD ownership is unsettled the depth fragment entry point
+uses the same ownership rejection as the color pass; after coverage settles, a fragmentless pipeline
+keeps the prepass cheap. A half-resolution `Rg16Float` pass reconstructs view positions and geometric
+normals from depth, samples four rotated horizon slices, and stores visibility with view depth. A
+depth-aware 3x3 denoise preserves discontinuities, and the opaque color pass performs a bilateral
+upsample while loading the exact prepass depth. The combined AO attenuates only sky and ground bounce,
+never direct sunlight or dielectric highlights. There is deliberately no temporal history, so edits,
+teleports, and LOD replacement cannot leave ghost occlusion. The two half-resolution targets occupy
+1,843,200 bytes at 1280x720 and remain resident across the Rust Mission Control A/B toggle.
+
 Directional sunlight uses three stable cascaded shadow maps in a portable `Depth32Float` texture
 array. Practical logarithmic/uniform splits prioritize the editable near field; each frustum slice is
 enclosed in a quantized sphere and snapped to its own world-space texel grid to resist shimmer. Shadow
@@ -265,6 +277,13 @@ latency a user-visible, revision-backed measurement rather than a queue-length a
   <https://gpuweb.github.io/gpuweb/wgsl/#texturesamplecomparelevel-builtin>
 - The official WebGPU sample demonstrates depth-only shadow-map rendering and comparison sampling:
   <https://webgpu.github.io/webgpu-samples/?sample=shadowMapping>
+- Activision's practical GTAO formulation derives efficient horizon-based visibility and spatial
+  denoising suitable for a screen-space implementation:
+  <https://www.activision.com/cdn/research/Practical_Real_Time_Strategies_for_Accurate_Indirect_Occlusion_NEW%20VERSION_COLOR.pdf>
+- AMD CACAO and Intel XeGTAO provide modern production references for half-resolution operation,
+  depth-aware filtering, and implementation validation:
+  <https://gpuopen.com/fidelityfx-cacao/>
+  <https://github.com/GameTechDev/XeGTAO>
 - SQLite recommends `opfs-sahpool` when performance matters more than concurrent connections and notes
   that OPFS APIs are worker-only:
   <https://sqlite.org/wasm/doc/tip/persistence.md>

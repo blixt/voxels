@@ -474,3 +474,30 @@ toggles, menus, hover states, and performance counters are Rust draw commands; f
 go to the console. The persistence regression completed 38 rapid reloads across three tabs with live
 edit synchronization and zero persistence errors. Fault injection denied 20 consecutive OPFS VFS
 acquisitions, then recovered on call 21 with zero console errors.
+
+## 2026-07-12: spatial horizon ambient occlusion
+
+The Rust renderer now reconstructs screen-space contact occlusion from its own depth prepass and
+applies the depth-aware half-resolution result only to indirect light. The implementation has no
+temporal history and therefore adds no invalidation protocol for streaming replacements, edits, or
+teleports. Mission Control owns the toggle and live AO timing; the browser still owns no UI state.
+
+`vp run profile:gtao` followed all five pilgrim-road marks to a dense badlands and ruin view before
+measuring matched four-second windows at 1280x720 on the M3 Max / system Chrome:
+
+| Spatial AO | Frame p95 | Active GPU p95 | World GPU p95 | Depth p95 |   AO p95 |
+| ---------- | --------: | -------------: | ------------: | --------: | -------: |
+| Off        |    9.2 ms |       2.620 ms |      0.776 ms |  0.000 ms | 0.000 ms |
+| On         |    9.0 ms |       3.125 ms |      0.681 ms |  0.461 ms | 0.499 ms |
+
+Both windows held the 120 Hz cap for 677 samples with zero drops or errors. They retained identical
+243 resident chunks, 115 visible chunks, 1,382,838 quads, 333 opaque draws, arena allocation, and
+canonical edit memory. The AO depth replay issued exactly 333 draws when enabled and none when
+disabled. Its two `Rg16Float` targets consume 1.7578125 MiB at this viewport; the measured p95
+depth-plus-AO cost was 0.960 ms. Captured A/B frames showed stronger step, crease, and landmark-base
+contact without sky halos or attenuation of direct highlights.
+
+The exact head also repeated the canvas and persistence release gates: 38 rapid reloads across three
+tabs completed with live edit synchronization and zero persistence errors, while 20 injected OPFS VFS
+acquisition failures recovered on call 21 with zero console errors. Both harnesses asserted that the
+document body contained exactly one canvas.
