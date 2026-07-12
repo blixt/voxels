@@ -5,7 +5,9 @@ use voxels_world::{CHUNK_EDGE, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge}
 /// Half extents in canonical 10 cm voxels. Every boundary is a multiple of the patch span on both
 /// sides, so whole patches can change owner without overlap, holes, or fragment clipping.
 pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 4] = [96, 256, 512, 1_024];
-const LOD_BOUNDARY_SNAP: [i32; 4] = [32, 32, 64, 128];
+// The canonical boundary also snaps to the 96-voxel procedural-feature cell. A whole tree therefore
+// remains on one side of the canonical/proxy handoff instead of being clipped by a moving chunk cut.
+const LOD_BOUNDARY_SNAP: [i32; 4] = [96, 32, 64, 128];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LodOwner {
@@ -101,8 +103,14 @@ mod tests {
         let focus = GeometricLodFocus::snapped(117, -73);
         assert_eq!(
             focus.boundary_centres(),
-            [[128, -64], [128, -64], [128, -64], [128, -128]]
+            [[96, -96], [128, -64], [128, -64], [128, -128]]
         );
+        let canonical = focus.boundary_centres()[0];
+        for axis in canonical {
+            assert_eq!(axis.rem_euclid(96), 0);
+            assert_eq!((axis - LOD_BOUNDARY_HALF_EXTENTS[0]).rem_euclid(96), 0);
+            assert_eq!((axis + LOD_BOUNDARY_HALF_EXTENTS[0]).rem_euclid(96), 0);
+        }
         for index in 1..4 {
             let inner = focus.boundary_centres[index - 1];
             let outer = focus.boundary_centres[index];

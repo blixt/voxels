@@ -17,8 +17,8 @@ mod web {
     use voxels_runtime::{ChunkState, FrameBudget, StreamConfig, StreamScheduler};
     use voxels_world::{
         CHUNK_EDGE, Chunk, ChunkCoord, EditMap, Generator, Material, Quad, SurfaceLodLevel,
-        SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord, generate_surface_tile_mesh_with,
-        mesh_chunk, surface_tiles_affected_by_column,
+        SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord, generate_edited_surface_tile_mesh,
+        mesh_chunk, surface_tiles_affected_by_voxel,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -424,9 +424,7 @@ mod web {
                 return;
             };
             let edits = self.edits.borrow();
-            let mesh = generate_surface_tile_mesh_with(coord, |x, z| {
-                edits.surface_sample(self.generator, x, z)
-            });
+            let mesh = generate_edited_surface_tile_mesh(self.generator, &edits, coord);
             drop(edits);
             if self.renderer.borrow_mut().upload_surface_tile_mesh(&mesh) {
                 self.surface_resident.borrow_mut().insert(coord);
@@ -541,7 +539,7 @@ mod web {
             let mut dirty = self.surface_dirty.borrow_mut();
             for level in SurfaceLodLevel::ALL {
                 dirty.extend(
-                    surface_tiles_affected_by_column(level, target.x, target.z)
+                    surface_tiles_affected_by_voxel(self.generator, level, target)
                         .into_iter()
                         .filter(|coord| resident.contains(coord) || queue.contains(coord)),
                 );
