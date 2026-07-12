@@ -201,12 +201,12 @@ pub fn raycast_voxels(
         if step[axis] == 0 {
             continue;
         }
-        let boundary = if step[axis] > 0 {
-            voxel[axis] + 1
+        let boundary_voxel = if step[axis] > 0 {
+            voxel[axis].checked_add(1)?
         } else {
             voxel[axis]
-        } as f32
-            * voxel_size_metres;
+        };
+        let boundary = boundary_voxel as f32 * voxel_size_metres;
         maximum[axis] = (boundary - origin[axis]) / direction[axis];
         delta[axis] = voxel_size_metres / direction[axis].abs();
     }
@@ -224,7 +224,7 @@ pub fn raycast_voxels(
             return None;
         }
         let adjacent = voxel;
-        voxel[axis] += step[axis];
+        voxel[axis] = voxel[axis].checked_add(step[axis])?;
         let mut normal = [0; 3];
         normal[axis] = -step[axis];
         if is_solid(voxel.x, voxel.y, voxel.z) {
@@ -768,6 +768,22 @@ mod tests {
             None
         );
         assert_eq!(sampled_x, Some(i32::MAX));
+    }
+
+    #[test]
+    fn dda_returns_cleanly_at_grid_coordinate_limits() {
+        for (coordinate, direction) in [(i32::MAX, Vec3::X), (i32::MIN, -Vec3::X)] {
+            let origin = Vec3::new(coordinate as f32 * 0.1, 0.05, 0.05);
+            let mut samples = 0;
+            assert_eq!(
+                raycast_voxels(origin, direction, 0.2, 0.1, |_, _, _| {
+                    samples += 1;
+                    false
+                }),
+                None
+            );
+            assert_eq!(samples, 1);
+        }
     }
 
     #[test]
