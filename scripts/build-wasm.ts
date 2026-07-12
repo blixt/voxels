@@ -10,7 +10,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -66,15 +66,18 @@ function siblingLlvmAr(compiler: string): string | null {
 }
 
 function emitsWasm(compiler: string): boolean {
+  const probe = mkdtempSync(join(tmpdir(), "voxels-wasm-cc-"));
   try {
     execFileSync(
       compiler,
-      ["--target=wasm32-unknown-unknown", "-x", "c", "-c", "-o", "/dev/null", "-"],
+      ["--target=wasm32-unknown-unknown", "-x", "c", "-c", "-o", join(probe, "probe.o"), "-"],
       { input: "int probe(void){return 0;}", stdio: ["pipe", "ignore", "ignore"] },
     );
     return true;
   } catch {
     return false;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
   }
 }
 
