@@ -8,6 +8,8 @@ pub const ROUTE_TOKEN_SIDE_OFFSET_VOXELS: f32 = 32.0;
 const ROUTE_TOKEN_START_VOXELS: f32 = ROUTE_TOKEN_CADENCE_VOXELS * 0.5;
 const ROUTE_TOKEN_END_MARGIN_VOXELS: f32 = 96.0;
 const FEATURE_ANCHOR_MARGIN_VOXELS: i32 = 12;
+const ROUTE_BIN_EDGE_VOXELS: i32 = 256;
+const LINEAR_ROUTE_SEGMENT_LIMIT: usize = 16;
 pub const FIRST_PILGRIM_ROAD_BOUNDS: [[i32; 2]; 2] = [[-1_234, -6], [55, 1_249]];
 
 #[repr(u8)]
@@ -69,12 +71,27 @@ struct RouteSegment {
     corridor_max: [f32; 2],
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RouteBinKey {
+    x: i32,
+    z: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RouteBin {
+    key: RouteBinKey,
+    membership_start: usize,
+    membership_len: usize,
+}
+
 #[derive(Debug)]
 struct RouteIndex {
     route_id: RouteId,
     segments: Box<[RouteSegment]>,
     length: f32,
     bounds: [[i32; 2]; 2],
+    bins: Box<[RouteBin]>,
+    bin_segment_slots: Box<[u16]>,
 }
 
 impl RouteIndex {
@@ -123,17 +140,81 @@ impl RouteIndex {
             let max_z = nodes.iter().map(|node| node.z).max().unwrap_or(0) + shoulder + 1;
             [[min_x, min_z], [max_x, max_z]]
         };
+        let mut bins = Vec::new();
+        let mut bin_segment_slots = Vec::new();
+        if segments.len() <= LINEAR_ROUTE_SEGMENT_LIMIT {
+            bin_segment_slots
+                .extend((0..segments.len()).filter_map(|slot| u16::try_from(slot).ok()));
+        } else {
+            let mut memberships = Vec::new();
+            for (slot, segment) in segments.iter().enumerate() {
+                let Ok(slot) = u16::try_from(slot) else {
+                    break;
+                };
+                let segment_min = RouteBinKey {
+                    x: (segment.corridor_min[0].floor() as i32).div_euclid(ROUTE_BIN_EDGE_VOXELS),
+                    z: (segment.corridor_min[1].floor() as i32).div_euclid(ROUTE_BIN_EDGE_VOXELS),
+                };
+                let segment_max = RouteBinKey {
+                    x: (segment.corridor_max[0].floor() as i32).div_euclid(ROUTE_BIN_EDGE_VOXELS),
+                    z: (segment.corridor_max[1].floor() as i32).div_euclid(ROUTE_BIN_EDGE_VOXELS),
+                };
+                for bin_x in segment_min.x..=segment_max.x {
+                    for bin_z in segment_min.z..=segment_max.z {
+                        memberships.push((RouteBinKey { x: bin_x, z: bin_z }, slot));
+                    }
+                }
+            }
+            memberships.sort_unstable();
+            memberships.dedup();
+            let mut cursor = 0;
+            while cursor < memberships.len() {
+                let key = memberships[cursor].0;
+                let membership_start = bin_segment_slots.len();
+                while cursor < memberships.len() && memberships[cursor].0 == key {
+                    bin_segment_slots.push(memberships[cursor].1);
+                    cursor += 1;
+                }
+                bins.push(RouteBin {
+                    key,
+                    membership_start,
+                    membership_len: bin_segment_slots.len() - membership_start,
+                });
+            }
+        }
         Self {
             route_id,
             segments: segments.into_boxed_slice(),
             length: distance_before,
             bounds,
+            bins: bins.into_boxed_slice(),
+            bin_segment_slots: bin_segment_slots.into_boxed_slice(),
         }
+    }
+
+    fn segment_slots_at(&self, x: f32, z: f32) -> Option<&[u16]> {
+        if self.bins.is_empty() {
+            return Some(&self.bin_segment_slots);
+        }
+        let key = RouteBinKey {
+            x: (x.floor() as i32).div_euclid(ROUTE_BIN_EDGE_VOXELS),
+            z: (z.floor() as i32).div_euclid(ROUTE_BIN_EDGE_VOXELS),
+        };
+        let bin = self
+            .bins
+            .binary_search_by_key(&key, |candidate| candidate.key)
+            .ok()
+            .map(|index| self.bins[index])?;
+        Some(
+            &self.bin_segment_slots
+                [bin.membership_start..bin.membership_start + bin.membership_len],
+        )
     }
 
     fn sample(&self, x: f32, z: f32) -> Option<RouteSample> {
         let mut best: Option<(f32, RouteSample)> = None;
-        for segment in &self.segments {
+        for &slot in self.segment_slots_at(x, z)? {
+            let segment = &self.segments[usize::from(slot)];
             if x < segment.corridor_min[0]
                 || x > segment.corridor_max[0]
                 || z < segment.corridor_min[1]
@@ -168,11 +249,10 @@ impl RouteIndex {
 
     fn point_at_distance(&self, distance: f32) -> Option<([f32; 2], [f32; 2])> {
         let distance = distance.max(0.0);
-        if let Some(segment) = self
+        let segment_index = self
             .segments
-            .iter()
-            .find(|segment| distance <= segment.distance_before + segment.length)
-        {
+            .partition_point(|segment| segment.distance_before + segment.length < distance);
+        if let Some(segment) = self.segments.get(segment_index) {
             let along = distance - segment.distance_before;
             return Some((
                 [
@@ -551,6 +631,57 @@ mod tests {
             };
             assert_eq!(station(indexed), station(reference));
         }
+    }
+
+    #[test]
+    fn spatial_bins_keep_an_eight_hundred_metre_route_local() {
+        let nodes = (0..=256)
+            .map(|index| RouteNode {
+                x: index * 32,
+                y: 0,
+                z: 0,
+            })
+            .collect::<Vec<_>>();
+        let index = RouteIndex::new(RouteId::FirstPilgrimRoad, &nodes);
+        assert_eq!(index.segments.len(), 256);
+        assert!(index.bins.len() < 100);
+        let max_candidates = index
+            .bins
+            .iter()
+            .map(|bin| bin.membership_len)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_candidates <= 12,
+            "one spatial bin referenced {max_candidates} of 256 segments"
+        );
+        for bin in &index.bins {
+            let slots = &index.bin_segment_slots
+                [bin.membership_start..bin.membership_start + bin.membership_len];
+            assert!(slots.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+
+        for x in (0..=8_192).step_by(17) {
+            for z in [-54, 0, 54] {
+                assert_eq!(
+                    index.sample(x as f32, z as f32),
+                    sample_polyline_reference(
+                        RouteId::FirstPilgrimRoad,
+                        &nodes,
+                        x as f32,
+                        z as f32
+                    ),
+                    "long-route bin mismatch at ({x}, {z})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_routes_keep_the_exact_linear_candidate_order() {
+        let index = RouteIndex::new(RouteId::FirstPilgrimRoad, &FIRST_PILGRIM_ROAD_NODES);
+        assert!(index.bins.is_empty());
+        assert_eq!(index.bin_segment_slots.as_ref(), &[0, 1, 2, 3, 4]);
     }
 
     #[test]
