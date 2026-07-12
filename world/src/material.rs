@@ -7,6 +7,14 @@ pub enum RenderLayer {
     Translucent,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialEmission {
+    /// Linear-sRGB radiance tint consumed by host renderers.
+    pub color_linear: [f32; 3],
+    pub intensity: f32,
+    pub radius_metres: f32,
+}
+
 /// Stable ids written into durable chunk payloads. Existing values must never be reassigned.
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -98,6 +106,17 @@ impl Material {
     pub const fn is_fluid(self) -> bool {
         matches!(self, Self::Water)
     }
+
+    pub const fn emission(self) -> Option<MaterialEmission> {
+        match self {
+            Self::GlowCrystal => Some(MaterialEmission {
+                color_linear: [0.010, 0.477, 0.911],
+                intensity: 2.4,
+                radius_metres: 3.2,
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -126,5 +145,24 @@ mod tests {
             assert_eq!(usize::from(material.id()), id);
             assert_eq!(Material::from_id(id as u16), Some(material));
         }
+    }
+
+    #[test]
+    fn emissive_metadata_is_generic_bounded_and_linear() {
+        for material in Material::ALL {
+            let Some(emission) = material.emission() else {
+                continue;
+            };
+            assert!(
+                emission
+                    .color_linear
+                    .into_iter()
+                    .all(|channel| (0.0..=1.0).contains(&channel))
+            );
+            assert!((0.0..=8.0).contains(&emission.intensity));
+            assert!((0.1..=8.0).contains(&emission.radius_metres));
+        }
+        assert!(Material::GlowCrystal.emission().is_some());
+        assert!(Material::Basalt.emission().is_none());
     }
 }

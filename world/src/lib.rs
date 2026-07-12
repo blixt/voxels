@@ -42,8 +42,8 @@ pub use lod::{
     generate_surface_tile_mesh_with, generate_surface_tile_with, generate_water_tile_mesh_with,
     surface_tiles_affected_by_column, surface_tiles_affected_by_voxel,
 };
-pub use material::{Material, RenderLayer};
-pub use mesh::{MeshedChunk, Quad, mesh_chunk};
+pub use material::{Material, MaterialEmission, RenderLayer};
+pub use mesh::{EmissiveCluster, MeshedChunk, Quad, mesh_chunk};
 pub use route::{
     FIRST_PILGRIM_ROAD_BOUNDS, FIRST_PILGRIM_ROAD_NODES, ROUTE_CORE_HALF_WIDTH_VOXELS,
     ROUTE_SHOULDER_WIDTH_VOXELS, ROUTE_TOKEN_CADENCE_VOXELS, ROUTE_TOKEN_SIDE_OFFSET_VOXELS,

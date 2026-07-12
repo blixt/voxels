@@ -23,10 +23,23 @@ pub struct Quad {
 
 const _: () = assert!(size_of::<Quad>() == 10);
 
+/// One material-cluster light derived from canonical voxels during meshing. Position sums use
+/// half-voxel units (`2 * local + 1`), retaining exact deterministic centroids without floats.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct EmissiveCluster {
+    pub position_half_voxel_sum: [u32; 3],
+    pub voxel_count: u16,
+    pub material: u16,
+}
+
+const _: () = assert!(size_of::<EmissiveCluster>() == 16);
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MeshedChunk {
     pub opaque: Vec<Quad>,
     pub translucent: Vec<Quad>,
+    pub emissive_clusters: Vec<EmissiveCluster>,
 }
 
 impl MeshedChunk {
@@ -42,6 +55,7 @@ impl MeshedChunk {
         size_of::<Self>()
             + self.opaque.capacity() * size_of::<Quad>()
             + self.translucent.capacity() * size_of::<Quad>()
+            + self.emissive_clusters.capacity() * size_of::<EmissiveCluster>()
     }
 }
 
@@ -58,6 +72,34 @@ pub fn mesh_chunk(
     mut outside: impl FnMut(i32, i32, i32) -> Material,
 ) -> MeshedChunk {
     let mut mesh = MeshedChunk::default();
+    let mut emission_counts = [0u16; Material::ALL.len()];
+    let mut emission_sums = [[0u32; 3]; Material::ALL.len()];
+    for y in 0..CHUNK_EDGE {
+        for z in 0..CHUNK_EDGE {
+            for x in 0..CHUNK_EDGE {
+                let material = chunk.get(x, y, z);
+                if material.emission().is_none() {
+                    continue;
+                }
+                let index = usize::from(material.id());
+                emission_counts[index] = emission_counts[index].saturating_add(1);
+                for (axis, value) in [x, y, z].into_iter().enumerate() {
+                    emission_sums[index][axis] = emission_sums[index][axis]
+                        .saturating_add((value as u32).saturating_mul(2).saturating_add(1));
+                }
+            }
+        }
+    }
+    for material in Material::ALL {
+        let index = usize::from(material.id());
+        if emission_counts[index] > 0 {
+            mesh.emissive_clusters.push(EmissiveCluster {
+                position_half_voxel_sum: emission_sums[index],
+                voxel_count: emission_counts[index],
+                material: material.id(),
+            });
+        }
+    }
     let origin = chunk.coord().world_origin();
     let occupancy = build_occupancy_halo(chunk, origin, &mut outside);
     let mut mask = vec![FaceKey::default(); CHUNK_EDGE * CHUNK_EDGE];
@@ -274,6 +316,31 @@ mod tests {
         let chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Water);
         let mesh = mesh_chunk(&chunk, |_, _, _| Material::Air);
         assert!(mesh.retained_bytes() >= size_of::<MeshedChunk>() + 6 * size_of::<Quad>());
+    }
+
+    #[test]
+    fn emissive_voxels_form_one_deterministic_material_cluster_per_chunk() {
+        let mut chunk = Chunk::empty(ChunkCoord::new(-3, 2, 7));
+        chunk.set(2, 4, 6, Material::GlowCrystal);
+        chunk.set(6, 8, 10, Material::GlowCrystal);
+        chunk.set(12, 12, 12, Material::Basalt);
+        let mesh = mesh_chunk(&chunk, |_, _, _| Material::Air);
+        assert_eq!(
+            mesh.emissive_clusters,
+            vec![EmissiveCluster {
+                position_half_voxel_sum: [18, 26, 34],
+                voxel_count: 2,
+                material: Material::GlowCrystal.id(),
+            }]
+        );
+
+        chunk.set(2, 4, 6, Material::Air);
+        let edited = mesh_chunk(&chunk, |_, _, _| Material::Air);
+        assert_eq!(
+            edited.emissive_clusters[0].position_half_voxel_sum,
+            [13, 17, 21]
+        );
+        assert_eq!(edited.emissive_clusters[0].voxel_count, 1);
     }
 
     #[test]
