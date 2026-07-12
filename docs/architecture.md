@@ -142,6 +142,21 @@ and per-material roughness drives a compact dielectric highlight. Exponential he
 the same horizon/zenith radiance rendered by the procedural sky, which also includes a world-anchored
 three-octave cloud layer.
 
+Opaque materials use two deterministic Rust-generated `128x128x14` texture arrays with eight mip
+levels through `1x1`: sRGB albedo and unorm averaged tangent normal plus roughness. Stable material ids
+index array layers directly, including valid diagnostic Air and Water layers, while water rendering
+continues on its dedicated physical shader path. The complete derived atlas is 2,446,640 bytes and is
+regenerated at startup rather than persisted.
+
+Axis-aligned face bases derive planar coordinates from world position, so greedy quads never stretch
+detail and adjacent canonical chunks, surface LODs, skirts, and landmark proxies sample the same
+coordinates without new vertex attributes. Albedo mips average in linear space before sRGB encoding.
+Normal mips retain the length of the averaged vector; the shader converts shortening into additional
+roughness before normalizing, suppressing distant specular sparkle. Detail normals affect lighting
+only—geometric normals remain authoritative for shadow bias, LOD ownership, targeting, and collision.
+Two specialized voxel pipelines let the Rust Mission Control toggle choose a real zero-sample flat
+path without expanding the shared frame uniform or adding a per-fragment feature branch.
+
 The first persistent chunk format is versioned and little-endian:
 
 1. a small magic/version header and chunk coordinates;
@@ -247,6 +262,15 @@ latency a user-visible, revision-backed measurement rather than a queue-length a
 - WebGPU exposes optional pass-boundary timestamp queries; the renderer requests them only when the
   adapter advertises support and resolves results through a non-blocking readback ring:
   <https://gpuweb.github.io/gpuweb/#timestamp>
+- WGSL texture sampling uses fragment derivatives for implicit mip selection and supports homogeneous
+  2D texture arrays addressed by a separate array index:
+  <https://gpuweb.github.io/gpuweb/wgsl/#texturesample-builtin>
+- WebGPU defines repeated, filtered, mipmapped samplers and clamps requested anisotropy to the device's
+  supported maximum:
+  <https://gpuweb.github.io/gpuweb/#sampler-creation>
+- Toksvig's normal-map mip filtering uses averaged-normal shortening as a measure of unresolved normal
+  variation instead of renormalizing away the information:
+  <https://doi.org/10.1080/2151237X.2005.10129203>
 
 ## Deliberate non-goals for the conversion
 

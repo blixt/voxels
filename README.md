@@ -48,7 +48,9 @@ Grid-aligned Rust draw ownership selects whole surface patches, closes resolutio
 conditional skirts, and activates a newly streamed coverage set only when it is complete.
 Analytic landmark identities add broadleaf trees, limestone tors, alpine needles, hoodoos, dune
 arches, and basalt columns as ordinary editable voxels, with bounded edit-aware proxies preserving
-their silhouettes across the surface rings.
+their silhouettes across the surface rings. A deterministic Rust-generated material atlas adds
+world-anchored, mip-filtered albedo, micro-normal, and roughness structure without changing geometry,
+draw ownership, or durable voxel data.
 See [docs/architecture.md](docs/architecture.md) for format, persistence, and research decisions.
 
 ## Controls
@@ -63,8 +65,9 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
   button. Sparse edits are saved transactionally in SQLite on OPFS.
 - Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and context menu
   can toggle cascaded sun shadows, ambient occlusion, fog, far terrain, animated water, and target
-  highlighting without a DOM UI layer. Its Rust-rendered more menu can teleport to the coastal
-  showcase or cycle through regional landmarks for repeatable graphics and streaming checks.
+  highlighting or material surface detail without a DOM UI layer. Its Rust-rendered more menu can
+  teleport to the coastal showcase or cycle through regional landmarks for repeatable graphics and
+  streaming checks.
 
 ## Automation
 

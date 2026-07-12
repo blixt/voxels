@@ -263,14 +263,46 @@ Generator v7 generalizes the old broadleaf-only feature path into six region-spe
 archetypes. Canonical shapes remain ordinary 10 cm voxels and coarse representations stay packed into
 their owning surface patch with at most four proxy boxes. The native `generate 32^3 chunk` Criterion
 mean remained 709.12 us on the M3 Max, with no statistically significant change from its saved
-baseline. The release edit profile also restored all 40 terrain/water operations with 9.4 ms frame p95,
-3.1 ms SQLite/OPFS enqueue p95, and 29.7 ms full canonical-plus-LOD convergence p95.
+baseline. The release edit profile also restored all 40 terrain/water operations with 9.3 ms frame p95,
+2.6 ms SQLite/OPFS enqueue p95, and 29.4 ms full canonical-plus-LOD convergence p95.
 
 The first one-way sustained run reached denser landmark geometry late and grew the arena from 60 to
 68 MiB during the nominal plateau window. That exposed a flaw in the benchmark: different terrain was
 being mistaken for allocator growth. The rail now closes after exactly the 30-second warm-up lap and
 measures two repetitions of that same terrain. A flat measured capacity therefore demonstrates page
 reuse after eviction while retaining the original distance, streaming, and drain gates.
+
+## 2026-07-12: Rust-generated material surface detail
+
+The opaque world shader now samples deterministic Rust-generated albedo and normal/roughness arrays
+through world-anchored face coordinates. Eight explicitly generated mip levels preserve linear albedo
+energy and unresolved normal variance. A second specialized flat pipeline provides a true zero-sample
+comparison path, selected by the seventh Rust-rendered Mission Control toggle.
+
+`vp run profile:materials` opens the panel and changes that toggle through canvas hit-testing, then
+records five-second OFF and ON windows in one release browser session. It requires both observed states
+and identical geometry, residency, draw calls, arena allocations, water work, and refraction bandwidth.
+The final M3 Max / system Chrome run produced:
+
+| Material-detail measurement         |             OFF |              ON |       ON - OFF / gate |
+| ----------------------------------- | --------------: | --------------: | --------------------: |
+| World GPU p95                       |        1.222 ms |        1.443 ms |  +0.220 / at most 0.5 |
+| Active-window GPU p95               |        5.518 ms |        5.535 ms | +0.017 / at most 0.75 |
+| Frame p95                           |        9.500 ms |        9.700 ms |        +0.200 / 12 ms |
+| Draw calls / visible quads          |   319 / 865,905 |   319 / 865,905 |             unchanged |
+| Mesh allocation / capacity          | 26.425 / 32 MiB | 26.425 / 32 MiB |             unchanged |
+| Dropped samples / frames over 33 ms |           0 / 0 |           0 / 0 |                  zero |
+
+The two `128x128x14` eight-mip arrays occupy exactly 2,446,640 bytes (2.333 MiB), asserted by a stable
+host checksum and included in core GPU diagnostics. They add no mesh bytes, render pass, draw object,
+draw call, or refraction copy. Caching each periodic height layer before finite-difference normal
+generation reduced the atlas host-test runtime from about 1.05 to 0.68 seconds in the same debug test
+process; release browser settling was 3.273 seconds.
+
+Visual A/B inspection rejected the first regular grass-blade wave because it produced field-scale
+moiré despite passing the GPU gate. The retained profile uses lower-amplitude stochastic grass/moss
+structure, while stone, limestone, snow, wood, sand, and landmark materials retain more distinct
+weathered structure. Mip filtering and distance-faded normal strength keep the far field stable.
 
 ## 2026-07-12: sustained deterministic streaming rail
 
@@ -290,22 +322,23 @@ The corrected M3 Max / system Chrome run produced:
 | Sustained measurement                     |                Result |                     Gate |
 | ----------------------------------------- | --------------------: | -----------------------: |
 | Distance                                  |               1,080 m |         at least 1,000 m |
-| Canonical evictions                       |                14,287 |             at least 500 |
+| Canonical evictions                       |                14,289 |             at least 500 |
 | Tracked canonical high-water              |                   320 |              at most 320 |
 | Surface-resident high-water               |                   725 |              at most 896 |
 | Pending mesh high-water                   |                     1 |                at most 3 |
-| Frame p95 / p99 / max                     |  9.3 / 10.3 / 16.9 ms | 12 / 16.67 / no 33.33 ms |
-| Worker CPU p95 / p99                      |          6.4 / 7.0 ms |               7.5 ms p95 |
+| Frame p95 / p99 / max                     |  9.3 / 10.1 / 18.3 ms | 12 / 16.67 / no 33.33 ms |
+| Worker CPU p95 / p99                      |          6.5 / 7.0 ms |               7.5 ms p95 |
 | Streaming p95 / p99                       |          3.3 / 3.6 ms |               4.5 ms p95 |
-| GPU active-window p95 / p99 / max         | 6.88 / 7.57 / 7.63 ms |        recorded baseline |
-| Final-20-second WASM committed range      |             0.375 MiB |            at most 1 MiB |
+| GPU active-window p95 / p99 / max         | 5.44 / 5.87 / 6.02 ms |        recorded baseline |
+| Final-20-second WASM committed range      |                 0 MiB |            at most 1 MiB |
 | Final-20-second arena-capacity range      |                 0 MiB |         at most one page |
 | Dropped telemetry / stale completions     |                 0 / 0 |                     zero |
 | Final pending jobs / pending mesh payload |                 0 / 0 |                     zero |
 
-The rail reached 27.063 MiB committed WASM and 56 MiB of mesh-arena capacity. Those are high-water
-figures, not live payload claims. The active surface plus pending coverage union stayed below its
-conservative 896-tile bound, and the final focus activated only after every replacement queue drained.
+The rail reached 26.938 MiB committed WASM and 56 MiB of mesh-arena capacity with material detail
+enabled. Those are high-water figures, not live payload claims. The active surface plus pending
+coverage union stayed below its conservative 896-tile bound, and the final focus activated only after
+every replacement queue drained.
 
 ## 2026-07-12: submitted edit convergence
 
@@ -321,10 +354,10 @@ The M3 Max / system Chrome release run produced:
 | Edit measurement                      |         Result |                Gate |
 | ------------------------------------- | -------------: | ------------------: |
 | Operations / dropped / superseded     |     40 / 0 / 0 |      exactly 40/0/0 |
-| SQLite/OPFS dispatch p95 / max        |   3.0 / 3.2 ms |       8 / 25 ms max |
-| Canonical replacement p95 / max       | 30.3 / 30.9 ms |    100 / 200 ms max |
-| Full submitted LOD p95 / max          | 30.3 / 30.9 ms |    150 / 250 ms max |
-| Frame p95 / max                       |  9.3 / 10.3 ms | 16.67 / no 33.33 ms |
+| SQLite/OPFS dispatch p95 / max        |   2.6 / 2.9 ms |       8 / 25 ms max |
+| Canonical replacement p95 / max       | 29.4 / 29.6 ms |    100 / 200 ms max |
+| Full submitted LOD p95 / max          | 29.4 / 29.6 ms |    150 / 250 ms max |
+| Frame p95 / max                       |  9.3 / 10.4 ms | 16.67 / no 33.33 ms |
 | Final edits / trackers / mesh payload |      0 / 0 / 0 |                zero |
 
 The Mission Control panel receives the latest full convergence time and active tracker count through
