@@ -10,7 +10,7 @@ const PANEL_INSET: f32 = 18.0;
 const PANEL_WIDTH: f32 = 360.0;
 const COMPACT_WIDTH: f32 = 292.0;
 const BASE_FEATURE_COUNT: usize = 6;
-const HEADER_HEIGHT: f32 = 48.0;
+const HEADER_HEIGHT: f32 = 60.0;
 const PANEL_RADIUS: f32 = 18.0;
 const CONTENT_PAD: f32 = 14.0;
 const BUTTON_SIZE: f32 = 30.0;
@@ -161,8 +161,8 @@ impl RendererFeature {
 }
 
 const FEATURE_COUNT: usize = RendererFeature::ALL.len();
-const PANEL_HEIGHT: f32 = 528.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 39.0;
-const COMPACT_HEIGHT: f32 = 441.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 34.0;
+const PANEL_HEIGHT: f32 = 540.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 39.0;
+const COMPACT_HEIGHT: f32 = 453.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 34.0;
 
 const fn feature_index(feature: RendererFeature) -> usize {
     match feature {
@@ -404,6 +404,8 @@ pub struct MissionControlUi {
     toast_age: f32,
     daylight_label: &'static str,
     region_label: &'static str,
+    route_chapter_label: &'static str,
+    route_progress_percent: u8,
 }
 
 impl Default for MissionControlUi {
@@ -423,6 +425,8 @@ impl Default for MissionControlUi {
             toast_age: 0.0,
             daylight_label: "GOLDEN HOUR",
             region_label: "VERDANT FOREST",
+            route_chapter_label: "OFF PILGRIM ROAD",
+            route_progress_percent: 0,
         }
     }
 }
@@ -466,6 +470,11 @@ impl MissionControlUi {
     ) {
         self.daylight_label = daylight_label;
         self.region_label = region_label;
+    }
+
+    pub fn set_route_status(&mut self, chapter_label: &'static str, progress_percent: u8) {
+        self.route_chapter_label = chapter_label;
+        self.route_progress_percent = progress_percent.min(100);
     }
 
     pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
@@ -852,9 +861,20 @@ impl MissionControlUi {
         push_text(
             &mut draw,
             format!("{} / {}", self.daylight_label, self.region_label),
-            [layout.panel.x + CONTENT_PAD, layout.header.y + 33.0],
+            [layout.panel.x + CONTENT_PAD, layout.header.y + 31.0],
             8.5,
             TEXT_MUTED.with_alpha(opacity),
+            TextAlign::Left,
+        );
+        push_text(
+            &mut draw,
+            format!(
+                "{} / {}%",
+                self.route_chapter_label, self.route_progress_percent
+            ),
+            [layout.panel.x + CONTENT_PAD, layout.header.y + 44.0],
+            8.5,
+            ACCENT.with_alpha(opacity),
             TextAlign::Left,
         );
 
@@ -1503,6 +1523,7 @@ mod tests {
     fn draw_list_has_reusable_glass_text_cards_toggles_and_menu_rows() {
         let mut ui = opened();
         ui.set_reduced_motion(true);
+        ui.set_route_status("WINDCUT WAY", 47);
         ui.set_stats(LiveStats {
             frames_per_second: 59.8,
             frame_ms: 16.7,
@@ -1541,6 +1562,7 @@ mod tests {
                 .iter()
                 .any(|run| run.text == "GOLDEN HOUR / VERDANT FOREST")
         );
+        assert!(base.text.iter().any(|run| run.text == "WINDCUT WAY / 47%"));
 
         let _ = ui.open_context_menu_device([900.0, 80.0], viewport());
         let draw = ui.build_draw_list(viewport());

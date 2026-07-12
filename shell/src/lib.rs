@@ -24,9 +24,10 @@ mod web {
     use voxels_world::{
         CHUNK_EDGE, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord, EditMap, Generator, Material,
         MeshedChunk, SkylineFeature, SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord,
-        VOXEL_SIZE_METRES, VoxelCoord, first_pilgrim_route_anchor,
-        first_pilgrim_route_anchor_count, generate_edited_surface_tile_mesh,
-        generate_edited_water_tile_mesh, mesh_chunk, surface_tiles_affected_by_voxel,
+        VOXEL_SIZE_METRES, VoxelCoord, first_pilgrim_road_length_voxels,
+        first_pilgrim_route_anchor, first_pilgrim_route_anchor_count,
+        generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, mesh_chunk,
+        pilgrim_chapter_at_distance, sample_first_pilgrim_road, surface_tiles_affected_by_voxel,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -492,6 +493,15 @@ mod web {
             let atmosphere_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
             let (atmosphere, region) = self.generator.atmosphere_sample(atmosphere_x, atmosphere_z);
             renderer.set_atmosphere(atmosphere, region);
+            if let Some(route) = sample_first_pilgrim_road(atmosphere_x, atmosphere_z) {
+                let chapter = pilgrim_chapter_at_distance(route.distance_along_voxels);
+                let progress = (route.distance_along_voxels / first_pilgrim_road_length_voxels()
+                    * 100.0)
+                    .round() as u8;
+                renderer.set_route_status(chapter.id.label(), progress);
+            } else {
+                renderer.set_route_status("OFF PILGRIM ROAD", 0);
+            }
             let stream = self.scheduler.borrow().diagnostics();
             let render = renderer.diagnostics();
             let lod_tiles = self.surface_lod_counts();

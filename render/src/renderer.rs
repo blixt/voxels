@@ -1142,6 +1142,10 @@ impl Renderer {
             .set_environment_status(self.daylight_phase.label(), surface_region_label(region));
     }
 
+    pub fn set_route_status(&mut self, chapter_label: &'static str, progress_percent: u8) {
+        self.ui.set_route_status(chapter_label, progress_percent);
+    }
+
     pub const fn daylight_phase(&self) -> DaylightPhase {
         self.daylight_phase
     }
