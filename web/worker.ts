@@ -69,7 +69,6 @@ async function boot(message: InitMessage): Promise<void> {
   }
   handle = engine;
   for (const queued of pending.splice(0)) dispatch(queued);
-  scope.postMessage({ kind: "ready" });
 }
 
 scope.onmessage = (event) => {

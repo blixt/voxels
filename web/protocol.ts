@@ -55,7 +55,6 @@ export type ToWorker =
   | { kind: "destroy" };
 
 export type FromWorker =
-  | { kind: "ready" }
   | { kind: "uiMode"; cursor: boolean }
   | { kind: "error"; message: string }
   | { kind: "snapshot"; requestId: number; values: number[] };
