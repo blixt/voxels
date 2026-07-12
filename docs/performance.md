@@ -577,8 +577,8 @@ TypeScript geography state, draw pass, or persistent terrain data was introduced
 
 ## 2026-07-12: Cinder Vault vertical slice
 
-Generator v14 adds the connected Cinder Vault and four sparse material-14 crystal formations without
-weakening its 10 cm edit authority. Host validation proves more than 180 path samples retain a
+Generator v13 adds the connected Cinder Vault without weakening its 10 cm edit authority; generator
+v14 adds four sparse material-14 crystal formations. Host validation proves more than 180 path samples retain a
 7x7x18-voxel player-clear volume, floor steps stay within 30 cm, the chamber is dry, the sealed shell
 survives ambient cave noise, and random, chunk, region, edit, and versioned codec paths agree. The
 material-detail atlas grows from 14 to 15 deterministic layers and 2,621,400 derived bytes.

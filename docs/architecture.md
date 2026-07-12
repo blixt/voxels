@@ -154,15 +154,17 @@ on every surface-LOD lattice. The same cadence now yields 26 stable editable rou
 ordinal catalog and feature-cell lookup are immutable derived indices, so ambient feature generation
 does not rebuild or linearly scan every station.
 
-Generator v14 gives the atlas-defined Cinder Vault a final analytic CSG pass: seven ellipsoidal
+Generator v13 gives the atlas-defined Cinder Vault a final analytic CSG pass: seven ellipsoidal
 nodes and six anisotropic conduits form one dry, enterable route with a sealed Basalt shell. The pass
 runs after ambient features in chunk and cached-column generation, so unrelated procedural content
-cannot puncture or fill the authored void. Four supported crystal spires use append-only material 14
-and remain ordinary opaque 10 cm voxels for collision, greedy meshing, editing, SQLite persistence,
-and palette-codec round trips. Deep edits invalidate canonical chunks without rebuilding heightfield
-LODs. A portable nine-ray enclosure probe reads edited resident chunks first, then falls back to
+cannot puncture or fill the authored void. Deep edits invalidate canonical chunks without rebuilding
+heightfield LODs. A portable nine-ray enclosure probe reads edited resident chunks first, then falls back to
 canonical generation; Rust/WGPU uses the result for asymmetric eye adaptation, cave air,
 outdoor-light rejection, and an optional bounded headlamp.
+
+Generator v14 adds four supported crystal spires using append-only material 14. They remain ordinary
+opaque 10 cm voxels for collision, greedy meshing, editing, SQLite persistence, and palette-codec
+round trips; material schema v3 and the derived material atlas grow from 14 to 15 stable layers.
 
 Generator v15 reserves one append-only skyline identity for the Cinder Vault mouth. Four canonical
 Basalt volumes form two tapered sentinels around the diagonal entrance, and the identical 24-quad
