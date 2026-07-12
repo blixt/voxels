@@ -321,10 +321,19 @@ impl CameraState {
     }
 
     pub fn from_persisted(position: Vec3, yaw: f32, pitch: f32) -> Self {
+        let fallback = Self::default();
         Self {
-            position,
+            position: if position.is_finite() {
+                position
+            } else {
+                fallback.position
+            },
             yaw: normalized_yaw(yaw),
-            pitch: pitch.clamp(-1.5, 1.5),
+            pitch: if pitch.is_finite() {
+                pitch.clamp(-1.5, 1.5)
+            } else {
+                fallback.pitch
+            },
             velocity: Vec3::ZERO,
             grounded: false,
             jump_was_down: false,
@@ -689,6 +698,21 @@ mod tests {
 
         let turn = normalized_yaw(camera.yaw - before);
         assert!((turn - 0.0022).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn non_finite_persisted_pose_falls_back_to_a_valid_camera() {
+        let default = CameraState::default();
+        let restored = CameraState::from_persisted(
+            Vec3::new(f32::NAN, 42.0, f32::INFINITY),
+            f32::NEG_INFINITY,
+            f32::NAN,
+        );
+
+        assert_eq!(restored.position, default.position);
+        assert_eq!(restored.yaw, 0.0);
+        assert_eq!(restored.pitch, default.pitch);
+        assert!(restored.forward().is_finite());
     }
 
     #[test]
