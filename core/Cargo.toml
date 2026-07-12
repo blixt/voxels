@@ -15,3 +15,10 @@ name = "voxels_core"
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck", "serde"] }
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "simulation"
+harness = false

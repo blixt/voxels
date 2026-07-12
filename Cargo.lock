@@ -1624,6 +1624,7 @@ name = "voxels-core"
 version = "0.0.0"
 dependencies = [
  "bytemuck",
+ "criterion",
  "glam",
  "serde",
 ]
