@@ -3,7 +3,7 @@ import { createServer as createNetServer } from "node:net";
 import { createServer as createViteServer } from "vite-plus";
 
 const FAILURE =
-  /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed/i;
+  /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed|underwater teleport/i;
 const errors = [];
 
 function watch(name, page) {
@@ -55,6 +55,30 @@ async function reloadRapidly(page, count) {
   await page.waitForLoadState("domcontentloaded");
   await waitForEngine(page);
   await assertCanvasOnly(page);
+}
+
+async function enterUnderwaterShowcase(page) {
+  // Mission Control is canvas-rendered, so the harness deliberately exercises its stable Rust layout
+  // contract rather than locating DOM controls: F3, header "more", then the second context row.
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(100);
+  await page.mouse.click(877, 90);
+  await page.waitForTimeout(100);
+  await page.mouse.click(789, 168);
+  const deadline = Date.now() + 20_000;
+  let lastSnapshot = [];
+  while (Date.now() < deadline) {
+    const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
+    lastSnapshot = snapshot;
+    if (snapshot[31] > 0.5 && snapshot[33] === 1 && snapshot[34] === 1) {
+      await page.waitForTimeout(500);
+      return snapshot;
+    }
+    await page.waitForTimeout(100);
+  }
+  throw new Error(
+    `Rust underwater showcase did not enter a submerged swimming state: ${JSON.stringify(lastSnapshot.slice(0, 35))}`,
+  );
 }
 
 async function reserveEphemeralPort() {
@@ -129,10 +153,19 @@ try {
   await leader.close();
   await successor.waitForTimeout(250);
   await reloadRapidly(successor, 4);
+  await enterUnderwaterShowcase(successor);
+  await assertCanvasOnly(successor);
 
   if (errors.length > 0) throw new Error(errors.join("\n"));
   console.log(
-    JSON.stringify({ ok: true, reloads: 18, tabs: 3, canvasOnly: true, persistenceErrors: 0 }),
+    JSON.stringify({
+      ok: true,
+      reloads: 18,
+      tabs: 3,
+      canvasOnly: true,
+      underwater: true,
+      persistenceErrors: 0,
+    }),
   );
 } catch (error) {
   console.error(JSON.stringify({ ok: false, error: String(error), errors }, null, 2));

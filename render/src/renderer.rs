@@ -173,6 +173,7 @@ pub struct Renderer {
     log_error: fn(&str),
     ui_text_error_reported: bool,
     coast_teleport_requested: bool,
+    underwater_teleport_requested: bool,
     underwater_blend: f32,
 }
 
@@ -636,6 +637,7 @@ impl Renderer {
             log_error,
             ui_text_error_reported: false,
             coast_teleport_requested: false,
+            underwater_teleport_requested: false,
             underwater_blend: 0.0,
         })
     }
@@ -721,6 +723,10 @@ impl Renderer {
         std::mem::take(&mut self.coast_teleport_requested)
     }
 
+    pub fn take_underwater_teleport_request(&mut self) -> bool {
+        std::mem::take(&mut self.underwater_teleport_requested)
+    }
+
     pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
         self.ui.set_reduced_motion(reduced_motion);
     }
@@ -778,6 +784,9 @@ impl Renderer {
             }
             UiAction::ContextAction(ContextAction::TeleportToCoast) => {
                 self.coast_teleport_requested = true;
+            }
+            UiAction::ContextAction(ContextAction::DiveBelowSurface) => {
+                self.underwater_teleport_requested = true;
             }
             UiAction::ContextAction(ContextAction::ToggleCompactTelemetry) => {
                 let _ = self.ui.set_compact(!self.ui.compact());

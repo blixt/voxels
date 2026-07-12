@@ -517,6 +517,13 @@ mod web {
             if self.renderer.borrow_mut().take_coast_teleport_request() {
                 self.teleport_to_coast();
             }
+            if self
+                .renderer
+                .borrow_mut()
+                .take_underwater_teleport_request()
+            {
+                self.teleport_underwater();
+            }
             self.renderer.borrow().ui_open()
         }
 
@@ -558,6 +565,72 @@ mod web {
             let look_z = (water_z - z) as f32;
             camera.yaw = look_x.atan2(-look_z);
             camera.pitch = -0.12;
+            *self.camera.borrow_mut() = camera;
+            self.input.borrow_mut().clear();
+        }
+
+        fn teleport_underwater(&self) {
+            let [water_x, water_z] = COAST_WATER_REFERENCE;
+            let mut dive = None;
+            'search: for radius in 0..=256 {
+                for x in water_x - radius..=water_x + radius {
+                    for z in [water_z - radius, water_z + radius] {
+                        let surface = self.generator.surface_sample(x, z);
+                        if let Some(water_level) = surface.water_level {
+                            let seabed_top = (surface.height + 1) as f32 * VOXEL_SIZE_METRES;
+                            let eye_y = seabed_top + voxels_core::PLAYER_EYE_HEIGHT_METRES + 0.04;
+                            let water_top = (water_level + 1) as f32 * VOXEL_SIZE_METRES;
+                            if eye_y <= water_top - 0.12 {
+                                dive = Some((x, z, eye_y));
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+                for z in water_z - radius + 1..water_z + radius {
+                    for x in [water_x - radius, water_x + radius] {
+                        let surface = self.generator.surface_sample(x, z);
+                        if let Some(water_level) = surface.water_level {
+                            let seabed_top = (surface.height + 1) as f32 * VOXEL_SIZE_METRES;
+                            let eye_y = seabed_top + voxels_core::PLAYER_EYE_HEIGHT_METRES + 0.04;
+                            let water_top = (water_level + 1) as f32 * VOXEL_SIZE_METRES;
+                            if eye_y <= water_top - 0.12 {
+                                dive = Some((x, z, eye_y));
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+            }
+            let Some((x, z, eye_y)) = dive else {
+                web_sys::console::error_1(&JsValue::from_str(
+                    "underwater teleport could not find a player-deep ocean column",
+                ));
+                return;
+            };
+            let mut camera = CameraState::spawn(glam::Vec3::new(
+                (x as f32 + 0.5) * VOXEL_SIZE_METRES,
+                eye_y,
+                (z as f32 + 0.5) * VOXEL_SIZE_METRES,
+            ));
+            camera.yaw = 0.35;
+            camera.pitch = 0.18;
+            let edits = self.edits.borrow();
+            let mut generated_columns = BTreeMap::new();
+            camera.refresh_fluid_state(VOXEL_SIZE_METRES, |x, y, z| {
+                let coord = VoxelCoord::new(x, y, z);
+                let material = edits.override_at(coord).unwrap_or_else(|| {
+                    generated_columns
+                        .entry((x, z))
+                        .or_insert_with(|| self.generator.column(x, z))
+                        .sample(y)
+                });
+                VoxelPhysics {
+                    collidable: material.is_collidable(),
+                    fluid: material.is_fluid(),
+                }
+            });
+            drop(edits);
             *self.camera.borrow_mut() = camera;
             self.input.borrow_mut().clear();
         }
@@ -660,8 +733,9 @@ mod web {
         }
 
         pub fn snapshot(&self) -> Float32Array {
-            let values = self.engine.as_ref().map_or([0.0; 31], |engine| {
+            let values = self.engine.as_ref().map_or([0.0; 35], |engine| {
                 let camera = engine.camera.borrow();
+                let fluid = camera.fluid_state();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let render = engine.renderer.borrow().diagnostics();
                 let lod_tiles = engine.surface_lod_counts();
@@ -701,6 +775,10 @@ mod web {
                     render.water_quads as f32,
                     render.water_draw_calls as f32,
                     render.refraction_copy_bytes as f32 / (1024.0 * 1024.0),
+                    fluid.immersion,
+                    fluid.eye_depth_metres,
+                    if fluid.eyes_submerged { 1.0 } else { 0.0 },
+                    if fluid.swimming { 1.0 } else { 0.0 },
                 ]
             });
             Float32Array::from(values.as_slice())

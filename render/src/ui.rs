@@ -169,6 +169,7 @@ const fn feature_index(feature: RendererFeature) -> usize {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ContextAction {
     TeleportToCoast,
+    DiveBelowSurface,
     ResetRendererFeatures,
     ToggleCompactTelemetry,
     HideFarTerrain,
@@ -176,8 +177,9 @@ pub enum ContextAction {
 }
 
 impl ContextAction {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::TeleportToCoast,
+        Self::DiveBelowSurface,
         Self::ResetRendererFeatures,
         Self::ToggleCompactTelemetry,
         Self::HideFarTerrain,
@@ -187,6 +189,7 @@ impl ContextAction {
     pub const fn label(self) -> &'static str {
         match self {
             Self::TeleportToCoast => "Teleport to the coast",
+            Self::DiveBelowSurface => "Dive below the surface",
             Self::ResetRendererFeatures => "Reset renderer features",
             Self::ToggleCompactTelemetry => "Toggle compact telemetry",
             Self::HideFarTerrain => "Hide far terrain",
@@ -426,6 +429,9 @@ impl MissionControlUi {
     }
 
     pub fn set_stats(&mut self, stats: LiveStats) {
+        if stats.swimming && !self.stats.swimming {
+            self.toast_age = 0.0;
+        }
         self.stats = stats;
     }
 
@@ -1567,6 +1573,15 @@ mod tests {
     #[test]
     fn underwater_status_and_controls_are_rust_drawn() {
         let mut ui = MissionControlUi::default();
+        for _ in 0..500 {
+            ui.advance(1.0 / 60.0);
+        }
+        assert!(
+            ui.build_draw_list(viewport())
+                .glass
+                .iter()
+                .all(|surface| surface.role != SurfaceRole::Toast)
+        );
         ui.set_stats(LiveStats {
             frames_per_second: 60.0,
             water_immersion: 0.82,

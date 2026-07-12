@@ -80,8 +80,13 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let cloud_light = cloud_shadow + frame.sun_radiance.rgb * 0.085;
     color = mix(color, cloud_light, coverage * 0.62);
   }
-  let wave = sin(ray.x * 21.0 + frame.camera_time.w * 1.3)
-    * sin(ray.z * 17.0 - frame.camera_time.w * 0.9) * 0.025;
+  let interface_distance = max(
+    (frame.medium.w - frame.camera_time.y) / max(ray.y, 0.05),
+    0.0,
+  );
+  let interface_xz = frame.camera_time.xz + ray.xz * interface_distance;
+  let wave = sin(interface_xz.x * 3.1 + frame.camera_time.w * 1.3)
+    * sin(interface_xz.y * 2.7 - frame.camera_time.w * 0.9) * 0.025;
   let snell_window = smoothstep(0.61, 0.72, ray.y + wave);
   let path_to_surface = frame.medium.y / max(ray.y, 0.08);
   let water_transmittance = exp(-vec3<f32>(0.42, 0.16, 0.075) * path_to_surface);

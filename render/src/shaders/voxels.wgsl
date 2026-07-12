@@ -261,6 +261,9 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   }
   let facing = clamp(dot(normal, view_direction), 0.0, 1.0);
   var fresnel = 0.02037 + 0.97963 * pow(1.0 - facing, 5.0);
+  // Hide the discrete air/water eta switch behind reflection while the Rust medium state eases
+  // through the 10 cm surface boundary.
+  fresnel = max(fresnel, 1.0 - abs(frame.medium.x * 2.0 - 1.0));
   let reflection = reflected_environment(reflect(-view_direction, normal));
   let camera_to_surface = input.world - frame.camera_time.xyz;
   let distance_to_camera = length(camera_to_surface);
@@ -268,7 +271,7 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   // than a claim about physical water thickness.
   let absorption = 1.0 - exp(-distance_to_camera * 0.055);
   let base_uv = input.position.xy / frame.viewport_voxel.xy;
-  let below_surface = frame.camera_time.y < input.world.y - frame.viewport_voxel.z * 0.1;
+  let below_surface = frame.medium.x > 0.5;
   let refraction_ratio = select(1.0 / 1.333, 1.333, below_surface);
   var transmitted_ray = refract(-view_direction, normal, refraction_ratio);
   if dot(transmitted_ray, transmitted_ray) < 0.000001 {
@@ -372,7 +375,10 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     let phase_b = sin((input.world.x + input.world.z) * 8.7 - frame.camera_time.w * 2.1);
     let caustic = pow(clamp(phase_a * 0.55 + phase_b * 0.25 + 0.55, 0.0, 1.0), 5.0);
     let water_depth = max(frame.medium.w - input.world.y, 0.0);
-    let caustic_fade = exp(-water_depth * 0.32) * smoothstep(0.35, 0.9, input.normal.y);
+    let below_surface = smoothstep(0.0, 0.08, frame.medium.w - input.world.y);
+    let caustic_fade = exp(-water_depth * 0.32)
+      * below_surface
+      * smoothstep(0.35, 0.9, input.normal.y);
     color += frame.sun_radiance.rgb
       * vec3<f32>(0.36, 0.78, 0.84)
       * caustic
