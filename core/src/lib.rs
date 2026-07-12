@@ -21,6 +21,88 @@ const SWIM_ENTER_IMMERSION: f32 = 0.52;
 const SWIM_EXIT_IMMERSION: f32 = 0.25;
 const MAX_FLUID_SURFACE_SCAN_VOXELS: i32 = 256;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnclosureSample {
+    pub sky_visibility: f32,
+    pub enclosure: f32,
+    pub ceiling_distance_metres: f32,
+    pub escape_direction: Vec3,
+    pub escaped_rays: u8,
+    pub ray_count: u8,
+}
+
+impl Default for EnclosureSample {
+    fn default() -> Self {
+        Self::OPEN
+    }
+}
+
+impl EnclosureSample {
+    pub const OPEN: Self = Self {
+        sky_visibility: 1.0,
+        enclosure: 0.0,
+        ceiling_distance_metres: 12.0,
+        escape_direction: Vec3::Y,
+        escaped_rays: 9,
+        ray_count: 9,
+    };
+}
+
+/// Deterministic upper-hemisphere visibility probe for caves and player-made interiors. The caller
+/// supplies canonical occupancy, keeping this portable across browser, native, mobile, and console
+/// shells. Runtime grows with crossed 10 cm cells and is intended to be cached at a low frequency.
+pub fn probe_enclosure(
+    eye: Vec3,
+    max_distance_metres: f32,
+    voxel_size_metres: f32,
+    mut is_opaque: impl FnMut(i32, i32, i32) -> bool,
+) -> EnclosureSample {
+    const DIRECTIONS: [[f32; 3]; 9] = [
+        [0.0, 1.0, 0.0],
+        [0.694, 0.720, 0.0],
+        [0.491, 0.720, 0.491],
+        [0.0, 0.720, 0.694],
+        [-0.491, 0.720, 0.491],
+        [-0.694, 0.720, 0.0],
+        [-0.491, 0.720, -0.491],
+        [0.0, 0.720, -0.694],
+        [0.491, 0.720, -0.491],
+    ];
+    if max_distance_metres <= 0.0 || voxel_size_metres <= 0.0 {
+        return EnclosureSample::OPEN;
+    }
+    let mut escaped = 0u8;
+    let mut escape = Vec3::ZERO;
+    let mut ceiling = max_distance_metres;
+    for (index, direction) in DIRECTIONS.into_iter().enumerate() {
+        let direction = Vec3::from_array(direction).normalize();
+        let hit = raycast_voxels(
+            eye,
+            direction,
+            max_distance_metres,
+            voxel_size_metres,
+            &mut is_opaque,
+        );
+        if let Some(hit) = hit {
+            if index == 0 {
+                ceiling = hit.distance_metres;
+            }
+        } else {
+            escaped += 1;
+            escape += direction;
+        }
+    }
+    let sky_visibility = f32::from(escaped) / DIRECTIONS.len() as f32;
+    EnclosureSample {
+        sky_visibility,
+        enclosure: 1.0 - sky_visibility,
+        ceiling_distance_metres: ceiling,
+        escape_direction: escape.normalize_or(Vec3::Y),
+        escaped_rays: escaped,
+        ray_count: DIRECTIONS.len() as u8,
+    }
+}
+
 /// Host-independent physical meaning of one canonical voxel. `core` deliberately does not depend on
 /// the world's material registry; every shell maps its own authoritative material into these traits.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -599,6 +681,33 @@ mod tests {
                 == 4)
             .is_none()
         );
+    }
+
+    #[test]
+    fn enclosure_probe_distinguishes_open_sky_from_a_sealed_roof() {
+        let eye = Vec3::splat(0.05);
+        let open = probe_enclosure(eye, 12.0, 0.1, |_, _, _| false);
+        assert_eq!(open.escaped_rays, open.ray_count);
+        assert_eq!(open.sky_visibility, 1.0);
+        assert!(open.escape_direction.distance(Vec3::Y) < 0.0001);
+
+        let sealed = probe_enclosure(eye, 12.0, 0.1, |_, y, _| y >= 3);
+        assert_eq!(sealed.escaped_rays, 0);
+        assert_eq!(sealed.sky_visibility, 0.0);
+        assert_eq!(sealed.enclosure, 1.0);
+        assert!(sealed.ceiling_distance_metres < 0.31);
+    }
+
+    #[test]
+    fn enclosure_probe_points_toward_a_directional_mouth_and_tracks_edits() {
+        let eye = Vec3::splat(0.05);
+        let mouth = probe_enclosure(eye, 4.0, 0.1, |x, y, _| y >= 3 && x < 2);
+        assert!(mouth.escaped_rays > 0 && mouth.escaped_rays < mouth.ray_count);
+        assert!(mouth.escape_direction.x > 0.5);
+        assert!(mouth.enclosure > 0.0 && mouth.enclosure < 1.0);
+
+        let opened_roof = probe_enclosure(eye, 4.0, 0.1, |x, y, z| y >= 3 && !(x == 0 && z == 0));
+        assert!(opened_roof.sky_visibility > 0.0);
     }
 
     #[test]
