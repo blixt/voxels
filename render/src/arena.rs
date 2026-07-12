@@ -145,54 +145,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allocations_do_not_overlap_and_reuse_best_fit() {
+    fn allocations_do_not_overlap_and_reuse_best_fit() -> Result<(), &'static str> {
         let mut arena = ArenaAllocator::new(64, 8);
-        let Some(first) = arena.allocate(13) else {
-            return;
-        };
-        let Some(second) = arena.allocate(17) else {
-            return;
-        };
+        let first = arena.allocate(13).ok_or("first allocation failed")?;
+        let second = arena.allocate(17).ok_or("second allocation failed")?;
         assert_eq!((first.offset, first.size), (0, 16));
         assert_eq!((second.offset, second.size), (16, 24));
         assert!(arena.free(first));
-        let Some(reused) = arena.allocate(8) else {
-            return;
-        };
+        let reused = arena.allocate(8).ok_or("reused allocation failed")?;
         assert_eq!(reused.offset, 0);
         assert_ne!(reused.generation, first.generation);
+        Ok(())
     }
 
     #[test]
-    fn adjacent_ranges_coalesce_after_free() {
+    fn adjacent_ranges_coalesce_after_free() -> Result<(), &'static str> {
         let mut arena = ArenaAllocator::new(64, 4);
-        let Some(a) = arena.allocate(16) else { return };
-        let Some(b) = arena.allocate(16) else { return };
-        let Some(c) = arena.allocate(32) else { return };
+        let a = arena.allocate(16).ok_or("first allocation failed")?;
+        let b = arena.allocate(16).ok_or("second allocation failed")?;
+        let c = arena.allocate(32).ok_or("third allocation failed")?;
         assert!(arena.free(b));
         assert!(arena.free(a));
         assert!(arena.free(c));
-        let Some(whole_page) = arena.allocate(64) else {
-            return;
-        };
+        let whole_page = arena.allocate(64).ok_or("coalesced allocation failed")?;
         assert_eq!(
             (whole_page.page, whole_page.offset, whole_page.size),
             (0, 0, 64)
         );
+        Ok(())
     }
 
     #[test]
-    fn stale_handles_cannot_free_reused_storage() {
+    fn stale_handles_cannot_free_reused_storage() -> Result<(), &'static str> {
         let mut arena = ArenaAllocator::new(32, 4);
-        let Some(old) = arena.allocate(32) else {
-            return;
-        };
+        let old = arena.allocate(32).ok_or("initial allocation failed")?;
         assert!(arena.free(old));
-        let Some(current) = arena.allocate(32) else {
-            return;
-        };
+        let current = arena.allocate(32).ok_or("replacement allocation failed")?;
         assert!(!arena.free(old));
         assert!(arena.free(current));
         assert_eq!(arena.stats().allocated_bytes, 0);
+        Ok(())
     }
 }
