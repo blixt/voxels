@@ -146,8 +146,11 @@ pub struct Renderer {
     frame_buffer: Buffer,
     frame_bind_group: BindGroup,
     chunks: BTreeMap<MeshKey, ChunkMesh>,
+    water_chunks: BTreeMap<MeshKey, ChunkMesh>,
     arena: ArenaAllocator,
     arena_buffers: Vec<Buffer>,
+    water_arena: ArenaAllocator,
+    water_arena_buffers: Vec<Buffer>,
     depth_view: TextureView,
     time: f32,
     diagnostics: RenderDiagnostics,
@@ -594,8 +597,11 @@ impl Renderer {
             frame_buffer,
             frame_bind_group,
             chunks: BTreeMap::new(),
+            water_chunks: BTreeMap::new(),
             arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
             arena_buffers: Vec::new(),
+            water_arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
+            water_arena_buffers: Vec::new(),
             depth_view,
             time: 0.0,
             diagnostics: RenderDiagnostics::default(),
@@ -634,7 +640,11 @@ impl Renderer {
     }
 
     pub fn quad_count(&self) -> u32 {
-        self.chunks.values().map(|chunk| chunk.quad_count).sum()
+        self.chunks
+            .values()
+            .chain(self.water_chunks.values())
+            .map(|chunk| chunk.quad_count)
+            .sum()
     }
 
     pub const fn diagnostics(&self) -> RenderDiagnostics {
@@ -668,6 +678,11 @@ impl Renderer {
 
     pub fn set_chunk_column_active(&mut self, x: i32, z: i32, active: bool) {
         for (key, chunk) in &mut self.chunks {
+            if key.0 == 0 && key.1 == x && key.3 == z {
+                chunk.active = active;
+            }
+        }
+        for (key, chunk) in &mut self.water_chunks {
             if key.0 == 0 && key.1 == x && key.3 == z {
                 chunk.active = active;
             }
@@ -779,43 +794,52 @@ impl Renderer {
             material: u32::from(quad.material),
             ao: u32::from(quad.ao),
         };
-        let gpu_quads: Vec<_> = mesh
-            .opaque
-            .iter()
-            .chain(&mesh.translucent)
-            .map(convert)
-            .collect();
+        let opaque_quads: Vec<_> = mesh.opaque.iter().map(convert).collect();
+        let water_quads: Vec<_> = mesh.translucent.iter().map(convert).collect();
         let min = glam::Vec3::from_array(origin.map(|value| value as f32 * VOXEL_SIZE_METRES));
         let max = min + glam::Vec3::splat(CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
         let quad_bytes = size_of::<GpuQuad>() as u32;
-        let mut slices = Vec::with_capacity(2);
         let opaque_count = mesh.opaque.len() as u32;
-        if opaque_count > 0 {
-            slices.push(MeshSlice {
-                relative_offset: 0,
-                size: opaque_count * quad_bytes,
-                quad_count: opaque_count,
-                bounds_min: min,
-                bounds_max: max,
-                surface_bounds: None,
-                skirt_edge: None,
-                render_layer: RenderLayer::Opaque,
-            });
-        }
+        let opaque_uploaded = if opaque_count == 0 {
+            self.remove_opaque_mesh(key);
+            true
+        } else {
+            self.upload_mesh_sliced(
+                key,
+                &opaque_quads,
+                vec![MeshSlice {
+                    relative_offset: 0,
+                    size: opaque_count * quad_bytes,
+                    quad_count: opaque_count,
+                    bounds_min: min,
+                    bounds_max: max,
+                    surface_bounds: None,
+                    skirt_edge: None,
+                    render_layer: RenderLayer::Opaque,
+                }],
+            )
+        };
         let translucent_count = mesh.translucent.len() as u32;
-        if translucent_count > 0 {
-            slices.push(MeshSlice {
-                relative_offset: opaque_count * quad_bytes,
-                size: translucent_count * quad_bytes,
-                quad_count: translucent_count,
-                bounds_min: min,
-                bounds_max: max,
-                surface_bounds: None,
-                skirt_edge: None,
-                render_layer: RenderLayer::Translucent,
-            });
-        }
-        self.upload_mesh_sliced(key, &gpu_quads, slices)
+        let water_uploaded = if translucent_count == 0 {
+            self.remove_water_mesh(key);
+            true
+        } else {
+            self.upload_water_mesh_sliced(
+                key,
+                &water_quads,
+                vec![MeshSlice {
+                    relative_offset: 0,
+                    size: translucent_count * quad_bytes,
+                    quad_count: translucent_count,
+                    bounds_min: min,
+                    bounds_max: max,
+                    surface_bounds: None,
+                    skirt_edge: None,
+                    render_layer: RenderLayer::Translucent,
+                }],
+            )
+        };
+        opaque_uploaded && water_uploaded
     }
 
     pub fn upload_far_tile(&mut self, coord: FarTileCoord, quads: &[SurfaceQuad]) -> bool {
@@ -872,7 +896,7 @@ impl Renderer {
             return true;
         }
         let underlay_offset = FAR_UNDERLAY_OFFSET_METRES * (f32::from(coord.level.index()) + 1.0);
-        let mut gpu_quads: Vec<_> = tile
+        let gpu_quads: Vec<_> = tile
             .quads
             .iter()
             .map(|quad| GpuQuad {
@@ -892,26 +916,30 @@ impl Renderer {
                 ao: 0xff,
             })
             .collect();
-        gpu_quads.extend(water.quads.iter().map(|quad| GpuQuad {
-            origin: [
-                quad.origin[0] as f32 * VOXEL_SIZE_METRES,
-                quad.origin[1] as f32 * VOXEL_SIZE_METRES,
-                quad.origin[2] as f32 * VOXEL_SIZE_METRES,
-            ],
-            face: u32::from(quad.face),
-            extent: [
-                f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
-                f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
-            ],
-            material: u32::from(quad.material.id())
-                | FAR_MATERIAL_FLAG
-                | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
-            ao: 0xff,
-        }));
+        let water_gpu_quads: Vec<_> = water
+            .quads
+            .iter()
+            .map(|quad| GpuQuad {
+                origin: [
+                    quad.origin[0] as f32 * VOXEL_SIZE_METRES,
+                    quad.origin[1] as f32 * VOXEL_SIZE_METRES,
+                    quad.origin[2] as f32 * VOXEL_SIZE_METRES,
+                ],
+                face: u32::from(quad.face),
+                extent: [
+                    f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
+                    f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
+                ],
+                material: u32::from(quad.material.id())
+                    | FAR_MATERIAL_FLAG
+                    | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
+                ao: 0xff,
+            })
+            .collect();
         let stride = coord.stride_voxels();
         let [tile_x, tile_z] = coord.voxel_origin();
         let quad_bytes = size_of::<GpuQuad>() as u32;
-        let mut slices: Vec<_> = tile
+        let slices: Vec<_> = tile
             .patches
             .iter()
             .flat_map(|patch| {
@@ -957,43 +985,58 @@ impl Renderer {
                     })
             })
             .collect();
-        let water_byte_offset = tile.quads.len() as u32 * quad_bytes;
-        slices.extend(water.patches.iter().map(|patch| {
-            let [[min_x, min_z], [max_x, max_z]] = patch.cell_bounds;
-            let surface_bounds = SurfaceBounds {
-                min: [
-                    tile_x + i32::from(min_x) * stride,
-                    patch.bounds.min[1],
-                    tile_z + i32::from(min_z) * stride,
-                ],
-                max: [
-                    tile_x + i32::from(max_x) * stride,
-                    patch.bounds.max[1],
-                    tile_z + i32::from(max_z) * stride,
-                ],
-            };
-            MeshSlice {
-                relative_offset: water_byte_offset + patch.quad_range.start * quad_bytes,
-                size: (patch.quad_range.end - patch.quad_range.start) * quad_bytes,
-                quad_count: patch.quad_range.end - patch.quad_range.start,
-                bounds_min: glam::Vec3::from_array(
-                    patch
-                        .bounds
-                        .min
-                        .map(|value| value as f32 * VOXEL_SIZE_METRES),
-                ),
-                bounds_max: glam::Vec3::from_array(
-                    patch
-                        .bounds
-                        .max
-                        .map(|value| value as f32 * VOXEL_SIZE_METRES),
-                ),
-                surface_bounds: Some(surface_bounds),
-                skirt_edge: None,
-                render_layer: RenderLayer::Translucent,
-            }
-        }));
-        self.upload_mesh_sliced(key, &gpu_quads, slices)
+        let water_slices = water
+            .patches
+            .iter()
+            .map(|patch| {
+                let [[min_x, min_z], [max_x, max_z]] = patch.cell_bounds;
+                let surface_bounds = SurfaceBounds {
+                    min: [
+                        tile_x + i32::from(min_x) * stride,
+                        patch.bounds.min[1],
+                        tile_z + i32::from(min_z) * stride,
+                    ],
+                    max: [
+                        tile_x + i32::from(max_x) * stride,
+                        patch.bounds.max[1],
+                        tile_z + i32::from(max_z) * stride,
+                    ],
+                };
+                MeshSlice {
+                    relative_offset: patch.quad_range.start * quad_bytes,
+                    size: (patch.quad_range.end - patch.quad_range.start) * quad_bytes,
+                    quad_count: patch.quad_range.end - patch.quad_range.start,
+                    bounds_min: glam::Vec3::from_array(
+                        patch
+                            .bounds
+                            .min
+                            .map(|value| value as f32 * VOXEL_SIZE_METRES),
+                    ),
+                    bounds_max: glam::Vec3::from_array(
+                        patch
+                            .bounds
+                            .max
+                            .map(|value| value as f32 * VOXEL_SIZE_METRES),
+                    ),
+                    surface_bounds: Some(surface_bounds),
+                    skirt_edge: None,
+                    render_layer: RenderLayer::Translucent,
+                }
+            })
+            .collect();
+        let opaque_uploaded = if gpu_quads.is_empty() {
+            self.remove_opaque_mesh(key);
+            true
+        } else {
+            self.upload_mesh_sliced(key, &gpu_quads, slices)
+        };
+        let water_uploaded = if water_gpu_quads.is_empty() {
+            self.remove_water_mesh(key);
+            true
+        } else {
+            self.upload_water_mesh_sliced(key, &water_gpu_quads, water_slices)
+        };
+        opaque_uploaded && water_uploaded
     }
 
     fn upload_mesh(
@@ -1028,51 +1071,36 @@ impl Renderer {
         gpu_quads: &[GpuQuad],
         slices: Vec<MeshSlice>,
     ) -> bool {
-        let bytes = bytemuck::cast_slice(gpu_quads);
-        let Ok(byte_len) = u32::try_from(bytes.len()) else {
-            return false;
-        };
-        let Some(allocation) = self.arena.allocate(byte_len) else {
-            return false;
-        };
-        while self.arena_buffers.len() <= allocation.page as usize {
-            let page = self.arena_buffers.len() as u16;
-            let Some(capacity) = self.arena.page_capacity(page) else {
-                let _ = self.arena.free(allocation);
-                return false;
-            };
-            self.arena_buffers
-                .push(self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("voxel mesh arena page"),
-                    size: u64::from(capacity),
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
-        }
-        let Some(buffer) = self.arena_buffers.get(allocation.page as usize) else {
-            let _ = self.arena.free(allocation);
-            return false;
-        };
-        self.queue
-            .write_buffer(buffer, u64::from(allocation.offset), bytes);
-        let active = key.0 != 0
-            || self
-                .chunks
-                .get(&key)
-                .is_some_and(|existing| existing.active);
-        let old = self.chunks.insert(
+        upload_mesh_sliced_into(
+            &self.device,
+            &self.queue,
+            &mut self.arena,
+            &mut self.arena_buffers,
+            &mut self.chunks,
             key,
-            ChunkMesh {
-                allocation,
-                quad_count: gpu_quads.len() as u32,
-                slices,
-                active,
-            },
-        );
-        if let Some(old) = old {
-            let _ = self.arena.free(old.allocation);
-        }
-        true
+            gpu_quads,
+            slices,
+            "opaque voxel mesh arena page",
+        )
+    }
+
+    fn upload_water_mesh_sliced(
+        &mut self,
+        key: MeshKey,
+        gpu_quads: &[GpuQuad],
+        slices: Vec<MeshSlice>,
+    ) -> bool {
+        upload_mesh_sliced_into(
+            &self.device,
+            &self.queue,
+            &mut self.water_arena,
+            &mut self.water_arena_buffers,
+            &mut self.water_chunks,
+            key,
+            gpu_quads,
+            slices,
+            "water mesh arena page",
+        )
     }
 
     pub fn remove_chunk(&mut self, coord: ChunkCoord) {
@@ -1088,8 +1116,19 @@ impl Renderer {
     }
 
     fn remove_mesh(&mut self, key: MeshKey) {
+        self.remove_opaque_mesh(key);
+        self.remove_water_mesh(key);
+    }
+
+    fn remove_opaque_mesh(&mut self, key: MeshKey) {
         if let Some(chunk) = self.chunks.remove(&key) {
             let _ = self.arena.free(chunk.allocation);
+        }
+    }
+
+    fn remove_water_mesh(&mut self, key: MeshKey) {
+        if let Some(chunk) = self.water_chunks.remove(&key) {
+            let _ = self.water_arena.free(chunk.allocation);
         }
     }
 
@@ -1125,7 +1164,7 @@ impl Renderer {
         let geometric_lod_focus = self.geometric_lod_focus;
         let shadow_draw_lists: [DrawList; CASCADE_COUNT] = if self.options.shadows {
             std::array::from_fn(|cascade_index| {
-                self.collect_draw_list(|key, slice| {
+                self.collect_draw_list(&self.chunks, |key, slice| {
                     (key.0 == 0 || self.options.far_terrain)
                         && slice.render_layer == RenderLayer::Opaque
                         && slice_owned_by_lod(geometric_lod_focus, key, slice)
@@ -1139,13 +1178,13 @@ impl Renderer {
         } else {
             std::array::from_fn(|_| DrawList::default())
         };
-        let world_draw_list = self.collect_draw_list(|key, slice| {
+        let world_draw_list = self.collect_draw_list(&self.chunks, |key, slice| {
             (key.0 == 0 || self.options.far_terrain)
                 && slice.render_layer == RenderLayer::Opaque
                 && slice_owned_by_lod(geometric_lod_focus, key, slice)
                 && aabb_visible(slice.bounds_min, slice.bounds_max, view_projection)
         });
-        let water_draw_list = self.collect_draw_list(|key, slice| {
+        let water_draw_list = self.collect_draw_list(&self.water_chunks, |key, slice| {
             self.options.water
                 && (key.0 == 0 || self.options.far_terrain)
                 && slice.render_layer == RenderLayer::Translucent
@@ -1250,7 +1289,7 @@ impl Renderer {
             }
             pass.set_pipeline(&self.water_depth_pipeline);
             for span in &water_draw_list.spans {
-                let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
+                let Some(buffer) = self.water_arena_buffers.get(span.page as usize) else {
                     continue;
                 };
                 let start = u64::from(span.offset);
@@ -1260,7 +1299,7 @@ impl Renderer {
             }
             pass.set_pipeline(&self.water_pipeline);
             for span in &water_draw_list.spans {
-                let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
+                let Some(buffer) = self.water_arena_buffers.get(span.page as usize) else {
                     continue;
                 };
                 let start = u64::from(span.offset);
@@ -1269,6 +1308,7 @@ impl Renderer {
                 pass.draw(0..6, 0..span.quad_count);
             }
             let arena = self.arena.stats();
+            let water_arena = self.water_arena.stats();
             let scene_pixels = u64::from(self.config.width) * u64::from(self.config.height);
             let shadow_bytes = u64::from(DirectionalShadowConfig::default().shadow_map_resolution)
                 * u64::from(DirectionalShadowConfig::default().shadow_map_resolution)
@@ -1293,11 +1333,16 @@ impl Renderer {
                     .quad_count
                     .saturating_add(water_draw_list.quad_count),
                 water_quads: water_draw_list.quad_count,
-                arena_pages: arena.pages as u32,
-                arena_capacity_bytes: arena.capacity_bytes,
-                arena_allocated_bytes: arena.allocated_bytes,
+                arena_pages: arena.pages.saturating_add(water_arena.pages) as u32,
+                arena_capacity_bytes: arena
+                    .capacity_bytes
+                    .saturating_add(water_arena.capacity_bytes),
+                arena_allocated_bytes: arena
+                    .allocated_bytes
+                    .saturating_add(water_arena.allocated_bytes),
                 core_gpu_bytes: arena
                     .capacity_bytes
+                    .saturating_add(water_arena.capacity_bytes)
                     .saturating_add(scene_pixels.saturating_mul(12))
                     .saturating_add(shadow_bytes),
             };
@@ -1325,11 +1370,15 @@ impl Renderer {
         self.queue.present(frame);
     }
 
-    fn collect_draw_list(&self, mut include: impl FnMut(&MeshKey, &MeshSlice) -> bool) -> DrawList {
+    fn collect_draw_list(
+        &self,
+        chunks: &BTreeMap<MeshKey, ChunkMesh>,
+        mut include: impl FnMut(&MeshKey, &MeshSlice) -> bool,
+    ) -> DrawList {
         let mut items = Vec::new();
         let mut mesh_count = 0u32;
         let mut quad_count = 0u32;
-        for (key, chunk) in &self.chunks {
+        for (key, chunk) in chunks {
             if !chunk.active {
                 continue;
             }
@@ -1361,6 +1410,62 @@ impl Renderer {
             quad_count,
         }
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the helper borrows independent renderer-owned arena resources transactionally"
+)]
+fn upload_mesh_sliced_into(
+    device: &Device,
+    queue: &Queue,
+    arena: &mut ArenaAllocator,
+    arena_buffers: &mut Vec<Buffer>,
+    chunks: &mut BTreeMap<MeshKey, ChunkMesh>,
+    key: MeshKey,
+    gpu_quads: &[GpuQuad],
+    slices: Vec<MeshSlice>,
+    buffer_label: &'static str,
+) -> bool {
+    let bytes = bytemuck::cast_slice(gpu_quads);
+    let Ok(byte_len) = u32::try_from(bytes.len()) else {
+        return false;
+    };
+    let Some(allocation) = arena.allocate(byte_len) else {
+        return false;
+    };
+    while arena_buffers.len() <= allocation.page as usize {
+        let page = arena_buffers.len() as u16;
+        let Some(capacity) = arena.page_capacity(page) else {
+            let _ = arena.free(allocation);
+            return false;
+        };
+        arena_buffers.push(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(buffer_label),
+            size: u64::from(capacity),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+    let Some(buffer) = arena_buffers.get(allocation.page as usize) else {
+        let _ = arena.free(allocation);
+        return false;
+    };
+    queue.write_buffer(buffer, u64::from(allocation.offset), bytes);
+    let active = key.0 != 0 || chunks.get(&key).is_some_and(|existing| existing.active);
+    let old = chunks.insert(
+        key,
+        ChunkMesh {
+            allocation,
+            quad_count: gpu_quads.len() as u32,
+            slices,
+            active,
+        },
+    );
+    if let Some(old) = old {
+        let _ = arena.free(old.allocation);
+    }
+    true
 }
 
 fn slice_owned_by_lod(focus: Option<GeometricLodFocus>, key: &MeshKey, slice: &MeshSlice) -> bool {

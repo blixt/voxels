@@ -615,11 +615,27 @@ fn generate_surface_tile_mesh_with_options(
             }
             let quad_end = quads.len() as u32;
             let quad_range = quad_start..quad_end;
-            let skirt_ranges = std::array::from_fn(|edge_index| {
+            let skirt_ranges = std::array::from_fn(|_| quad_end..quad_end);
+            patches.push(SurfacePatch {
+                cell_bounds: [
+                    [cell_min_x as u8, cell_min_z as u8],
+                    [
+                        (cell_min_x + SURFACE_PATCH_EDGE_CELLS) as u8,
+                        (cell_min_z + SURFACE_PATCH_EDGE_CELLS) as u8,
+                    ],
+                ],
+                quad_range,
+                skirt_ranges,
+                bounds,
+            });
+        }
+    }
+    if transition_skirts {
+        for patch in &mut patches {
+            let cell_min_x = i32::from(patch.cell_bounds[0][0]);
+            let cell_min_z = i32::from(patch.cell_bounds[0][1]);
+            patch.skirt_ranges = std::array::from_fn(|edge_index| {
                 let skirt_start = quads.len() as u32;
-                if !transition_skirts {
-                    return skirt_start..skirt_start;
-                }
                 let patch_edge = SurfacePatchEdge::ALL[edge_index];
                 for edge_cell in 0..SURFACE_PATCH_EDGE_CELLS {
                     let (cell_x, cell_z, face) = match patch_edge {
@@ -658,18 +674,6 @@ fn generate_surface_tile_mesh_with_options(
                     });
                 }
                 skirt_start..quads.len() as u32
-            });
-            patches.push(SurfacePatch {
-                cell_bounds: [
-                    [cell_min_x as u8, cell_min_z as u8],
-                    [
-                        (cell_min_x + SURFACE_PATCH_EDGE_CELLS) as u8,
-                        (cell_min_z + SURFACE_PATCH_EDGE_CELLS) as u8,
-                    ],
-                ],
-                quad_range,
-                skirt_ranges,
-                bounds,
             });
         }
     }
@@ -1043,6 +1047,10 @@ mod tests {
                 }
             }
             next_start = patch.quad_range.end;
+        }
+        // Main patch shells are packed before optional transition skirts so the renderer can
+        // coalesce the overwhelmingly common non-skirt path into large instanced draws.
+        for patch in &mesh.patches {
             for edge in SurfacePatchEdge::ALL {
                 let range = &patch.skirt_ranges[edge.index()];
                 assert_eq!(range.start, next_start);
