@@ -11,7 +11,8 @@ pub mod mesh;
 pub use chunk::{CHUNK_EDGE, CHUNK_VOLUME, Chunk, ChunkCoord};
 pub use edit::{EditMap, VoxelCoord};
 pub use generation::{
-    GeneratedColumn, Generator, SkylineFeature, SkylineFeatureId, SurfaceRegion, SurfaceSample,
+    GENERATOR_VERSION, GeneratedColumn, Generator, SEA_LEVEL_VOXELS, SkylineFeature,
+    SkylineFeatureId, SurfaceRegion, SurfaceSample,
 };
 pub use lod::{
     FAR_STRIDE_VOXELS, FAR_TILE_EDGE_CELLS, FAR_TILE_SPAN_VOXELS, FarTileCoord,
@@ -22,8 +23,8 @@ pub use lod::{
     generate_surface_tile_mesh_with, generate_surface_tile_with, surface_tiles_affected_by_column,
     surface_tiles_affected_by_voxel,
 };
-pub use material::Material;
-pub use mesh::{Quad, mesh_chunk};
+pub use material::{Material, RenderLayer};
+pub use mesh::{MeshedChunk, Quad, mesh_chunk};
 
 /// One canonical voxel is a 10 cm cube. World-space simulation and rendering use metres.
 pub const VOXEL_SIZE_METRES: f32 = 0.1;

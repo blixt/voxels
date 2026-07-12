@@ -251,6 +251,17 @@ mod tests {
     }
 
     #[test]
+    fn water_material_round_trips_through_the_versioned_palette() {
+        let mut chunk = Chunk::empty(ChunkCoord::new(3, 0, -2));
+        chunk.set(4, 10, 7, Material::Water);
+        chunk.set(4, 9, 7, Material::Sand);
+        let encoded = encode_chunk(&chunk);
+        let decoded = decode_chunk(&encoded).expect("valid current-version Water payload");
+        assert_eq!(decoded, chunk);
+        assert_eq!(decoded.get(4, 10, 7), Material::Water);
+    }
+
+    #[test]
     fn generated_chunk_round_trips_through_palette_bits() {
         let chunk = Generator::new(42).generate_chunk(ChunkCoord::new(0, 0, 0));
         let encoded = encode_chunk(&chunk);

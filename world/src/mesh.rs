@@ -1,4 +1,4 @@
-use crate::{CHUNK_EDGE, Chunk, Material};
+use crate::{CHUNK_EDGE, Chunk, Material, RenderLayer};
 use bytemuck::{Pod, Zeroable};
 
 pub const FACE_POS_X: u8 = 0;
@@ -23,6 +23,22 @@ pub struct Quad {
 
 const _: () = assert!(size_of::<Quad>() == 10);
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MeshedChunk {
+    pub opaque: Vec<Quad>,
+    pub translucent: Vec<Quad>,
+}
+
+impl MeshedChunk {
+    pub fn total_quads(&self) -> usize {
+        self.opaque.len() + self.translucent.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.opaque.is_empty() && self.translucent.is_empty()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct FaceKey {
     material: Material,
@@ -31,10 +47,13 @@ struct FaceKey {
 
 /// Greedily merges coplanar visible faces with the same material. `outside` samples world coordinates
 /// beyond this chunk, preventing hidden seam faces when neighboring chunks are resident or generated.
-pub fn mesh_chunk(chunk: &Chunk, mut outside: impl FnMut(i32, i32, i32) -> Material) -> Vec<Quad> {
-    let mut quads = Vec::new();
+pub fn mesh_chunk(
+    chunk: &Chunk,
+    mut outside: impl FnMut(i32, i32, i32) -> Material,
+) -> MeshedChunk {
+    let mut mesh = MeshedChunk::default();
     let origin = chunk.coord().world_origin();
-    let occupancy = build_occupancy_halo(chunk, origin, &mut outside);
+    let materials = build_material_halo(chunk, origin, &mut outside);
     let mut mask = vec![FaceKey::default(); CHUNK_EDGE * CHUNK_EDGE];
     for face in 0..6 {
         let (axis, u_axis, v_axis, step) = face_axes(face);
@@ -43,18 +62,19 @@ pub fn mesh_chunk(chunk: &Chunk, mut outside: impl FnMut(i32, i32, i32) -> Mater
                 for u in 0..CHUNK_EDGE {
                     let local = compose(axis, u_axis, v_axis, slice, u, v);
                     let material = chunk.get(local[0], local[1], local[2]);
-                    if !material.is_solid() {
+                    if !material.is_renderable() {
                         mask[u + v * CHUNK_EDGE] = FaceKey::default();
                         continue;
                     }
                     let mut neighbor = [local[0] as i32, local[1] as i32, local[2] as i32];
                     neighbor[axis] += step;
-                    mask[u + v * CHUNK_EDGE] = if halo_solid(&occupancy, neighbor) {
+                    let neighbor_material = halo_material(&materials, neighbor);
+                    mask[u + v * CHUNK_EDGE] = if !face_visible(material, neighbor_material) {
                         FaceKey::default()
                     } else {
                         FaceKey {
                             material,
-                            ao: face_ao(local, axis, u_axis, v_axis, step, &occupancy),
+                            ao: face_ao(local, axis, u_axis, v_axis, step, &materials),
                         }
                     };
                 }
@@ -65,7 +85,7 @@ pub fn mesh_chunk(chunk: &Chunk, mut outside: impl FnMut(i32, i32, i32) -> Mater
                 let mut u = 0;
                 while u < CHUNK_EDGE {
                     let key = mask[u + v * CHUNK_EDGE];
-                    if !key.material.is_solid() {
+                    if !key.material.is_renderable() {
                         u += 1;
                         continue;
                     }
@@ -88,30 +108,35 @@ pub fn mesh_chunk(chunk: &Chunk, mut outside: impl FnMut(i32, i32, i32) -> Mater
                         }
                     }
                     let local = compose(axis, u_axis, v_axis, slice, u, v);
-                    quads.push(Quad {
+                    let quad = Quad {
                         origin: [local[0] as u8, local[1] as u8, local[2] as u8],
                         face,
                         extent: [width as u8, height as u8],
                         material: key.material.id(),
                         ao: key.ao,
                         _pad: 0,
-                    });
+                    };
+                    match key.material.render_layer() {
+                        RenderLayer::Opaque => mesh.opaque.push(quad),
+                        RenderLayer::Translucent => mesh.translucent.push(quad),
+                        RenderLayer::Empty => {}
+                    }
                     u += width;
                 }
                 v += 1;
             }
         }
     }
-    quads
+    mesh
 }
 
-fn build_occupancy_halo(
+fn build_material_halo(
     chunk: &Chunk,
     origin: [i32; 3],
     outside: &mut impl FnMut(i32, i32, i32) -> Material,
-) -> Vec<u8> {
+) -> Vec<Material> {
     const HALO_EDGE: usize = CHUNK_EDGE + 2;
-    let mut occupancy = vec![0; HALO_EDGE * HALO_EDGE * HALO_EDGE];
+    let mut materials = vec![Material::Air; HALO_EDGE * HALO_EDGE * HALO_EDGE];
     for y in -1..=CHUNK_EDGE as i32 {
         for z in -1..=CHUNK_EDGE as i32 {
             for x in -1..=CHUNK_EDGE as i32 {
@@ -126,11 +151,19 @@ fn build_occupancy_halo(
                 let index = (x + 1) as usize
                     + (z + 1) as usize * HALO_EDGE
                     + (y + 1) as usize * HALO_EDGE * HALO_EDGE;
-                occupancy[index] = u8::from(material.is_solid());
+                materials[index] = material;
             }
         }
     }
-    occupancy
+    materials
+}
+
+fn face_visible(material: Material, neighbor: Material) -> bool {
+    if material == Material::Water {
+        neighbor == Material::Air
+    } else {
+        !neighbor.occludes_ambient()
+    }
 }
 
 #[allow(
@@ -143,7 +176,7 @@ fn face_ao(
     u_axis: usize,
     v_axis: usize,
     step: i32,
-    occupancy: &[u8],
+    materials: &[Material],
 ) -> u8 {
     let mut base = local.map(|value| value as i32);
     base[axis] += step;
@@ -159,9 +192,9 @@ fn face_ao(
         side_v[v_axis] += dv;
         let mut diagonal = side_u;
         diagonal[v_axis] += dv;
-        let side_u = halo_solid(occupancy, side_u);
-        let side_v = halo_solid(occupancy, side_v);
-        let diagonal = halo_solid(occupancy, diagonal);
+        let side_u = halo_solid(materials, side_u);
+        let side_v = halo_solid(materials, side_v);
+        let diagonal = halo_solid(materials, diagonal);
         let ao = if side_u && side_v {
             0
         } else {
@@ -172,12 +205,16 @@ fn face_ao(
     packed
 }
 
-fn halo_solid(occupancy: &[u8], local: [i32; 3]) -> bool {
+fn halo_material(materials: &[Material], local: [i32; 3]) -> Material {
     const HALO_EDGE: usize = CHUNK_EDGE + 2;
     let index = (local[0] + 1) as usize
         + (local[2] + 1) as usize * HALO_EDGE
         + (local[1] + 1) as usize * HALO_EDGE * HALO_EDGE;
-    occupancy[index] != 0
+    materials[index]
+}
+
+fn halo_solid(materials: &[Material], local: [i32; 3]) -> bool {
+    halo_material(materials, local).occludes_ambient()
 }
 
 fn face_axes(face: u8) -> (usize, usize, usize, i32) {
@@ -215,7 +252,8 @@ mod tests {
     #[test]
     fn filled_chunk_merges_to_six_quads() {
         let chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Stone);
-        let quads = mesh_chunk(&chunk, |_, _, _| Material::Air);
+        let mesh = mesh_chunk(&chunk, |_, _, _| Material::Air);
+        let quads = mesh.opaque;
         assert_eq!(quads.len(), 6);
         assert!(quads.iter().all(|quad| quad.extent == [32, 32]));
         assert!(quads.iter().all(|quad| quad.ao == 0xff));
@@ -224,7 +262,7 @@ mod tests {
     #[test]
     fn solid_neighbor_suppresses_boundary_face() {
         let chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Stone);
-        let quads = mesh_chunk(&chunk, |x, _, _| {
+        let mesh = mesh_chunk(&chunk, |x, _, _| {
             if x == CHUNK_EDGE as i32 {
                 Material::Stone
             } else {
@@ -233,8 +271,8 @@ mod tests {
         });
         // Neighbor occupancy also changes AO along the four adjoining faces, conservatively
         // splitting their merge keys; the hidden positive-X face itself must still be absent.
-        assert!(quads.len() >= 5);
-        assert!(!quads.iter().any(|quad| quad.face == FACE_POS_X));
+        assert!(mesh.opaque.len() >= 5);
+        assert!(!mesh.opaque.iter().any(|quad| quad.face == FACE_POS_X));
     }
 
     #[test]
@@ -254,9 +292,50 @@ mod tests {
                 );
             }
         }
-        let quads = mesh_chunk(&chunk, |_, _, _| Material::Air);
-        let top = quads.iter().filter(|quad| quad.face == FACE_POS_Y).count();
+        let mesh = mesh_chunk(&chunk, |_, _, _| Material::Air);
+        let top = mesh
+            .opaque
+            .iter()
+            .filter(|quad| quad.face == FACE_POS_Y)
+            .count();
         assert_eq!(top, CHUNK_EDGE * CHUNK_EDGE);
+    }
+
+    #[test]
+    fn water_merges_as_renderable_non_occluding_geometry() {
+        let chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Water);
+        let mesh = mesh_chunk(&chunk, |_, _, _| Material::Air);
+        assert!(mesh.opaque.is_empty());
+        assert_eq!(mesh.translucent.len(), 6);
+        assert!(
+            mesh.translucent
+                .iter()
+                .all(|quad| quad.material == Material::Water.id())
+        );
+        assert!(mesh.translucent.iter().all(|quad| quad.extent == [32, 32]));
+    }
+
+    #[test]
+    fn opaque_bank_renders_against_water_without_a_duplicate_water_face() {
+        let mut chunk = Chunk::empty(ChunkCoord::new(0, 0, 0));
+        chunk.set(1, 1, 1, Material::Stone);
+        chunk.set(2, 1, 1, Material::Water);
+        let mesh = mesh_chunk(&chunk, |_, _, _| Material::Air);
+        assert!(mesh.opaque.iter().any(|quad| {
+            quad.origin == [1, 1, 1]
+                && quad.face == FACE_POS_X
+                && quad.material == Material::Stone.id()
+        }));
+        assert!(!mesh.translucent.iter().any(|quad| {
+            quad.origin == [2, 1, 1]
+                && quad.face == FACE_NEG_X
+                && quad.material == Material::Water.id()
+        }));
+        assert!(mesh.translucent.iter().any(|quad| {
+            quad.origin == [2, 1, 1]
+                && quad.face == FACE_POS_Y
+                && quad.material == Material::Water.id()
+        }));
     }
 
     #[test]
@@ -265,8 +344,8 @@ mod tests {
         chunk.set(1, 1, 1, Material::Stone);
         chunk.set(0, 2, 1, Material::Stone);
         chunk.set(1, 2, 0, Material::Stone);
-        let quads = mesh_chunk(&chunk, |_, _, _| Material::Air);
-        let target = quads.iter().find(|quad| {
+        let mesh = mesh_chunk(&chunk, |_, _, _| Material::Air);
+        let target = mesh.opaque.iter().find(|quad| {
             quad.face == FACE_POS_Y
                 && quad.origin == [1, 1, 1]
                 && quad.material == Material::Stone.id()

@@ -1,7 +1,8 @@
 use crate::{CHUNK_EDGE, Chunk, ChunkCoord, Material};
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 4;
+pub const GENERATOR_VERSION: u32 = 5;
+pub const SEA_LEVEL_VOXELS: i32 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
@@ -29,6 +30,7 @@ impl SurfaceRegion {
 pub struct SurfaceSample {
     pub height: i32,
     pub material: Material,
+    pub water_level: Option<i32>,
     pub region: SurfaceRegion,
     pub moisture: f32,
     pub temperature: f32,
@@ -126,13 +128,13 @@ impl GeneratedColumn {
         let terrain = self
             .generator
             .sample_terrain_with_profile(self.x, y, self.z, self.profile);
-        if terrain.is_solid() {
+        if terrain.is_collidable() {
             return terrain;
         }
         self.trees[..usize::from(self.tree_count)]
             .iter()
             .find_map(|tree| tree.material_at(crate::VoxelCoord::new(self.x, y, self.z)))
-            .unwrap_or(Material::Air)
+            .unwrap_or(terrain)
     }
 }
 
@@ -225,7 +227,11 @@ impl Generator {
         }
         let height = profile.height;
         if y > height {
-            return Material::Air;
+            return if height < SEA_LEVEL_VOXELS && y <= SEA_LEVEL_VOXELS {
+                Material::Water
+            } else {
+                Material::Air
+            };
         }
 
         // Broad caves only affect material well under the surface, leaving a stable walking crust.
@@ -301,16 +307,18 @@ impl Generator {
         let volcanic = ridge.powi(4) * 25.0 + (volcanic_field - 0.5) * 10.0;
         let moor = (0.5 - hills) * 4.0 + ridge * 2.0;
         let forest = (moisture - 0.5) * 4.0 + detail * 2.0;
+        let ocean_basin = smooth(((0.34 - continental) / 0.34).clamp(0.0, 1.0)) * 18.0;
         let height = (base
             + normalized[0] * forest
             + normalized[1] * moor
             + normalized[2] * alpine
             + normalized[3] * badlands
             + normalized[4] * dunes
-            + normalized[5] * volcanic)
+            + normalized[5] * volcanic
+            - ocean_basin)
             .round() as i32;
         let patch = self.value_2d(x, z, 42, 0x3f91);
-        let material = if height < 11 {
+        let material = if height < SEA_LEVEL_VOXELS + 3 {
             Material::Sand
         } else {
             match region {
@@ -380,6 +388,7 @@ impl Generator {
         SurfaceSample {
             height: profile.height,
             material: profile.material,
+            water_level: (profile.height < SEA_LEVEL_VOXELS).then_some(SEA_LEVEL_VOXELS),
             region: profile.region,
             moisture: profile.moisture,
             temperature: profile.temperature,
@@ -459,7 +468,7 @@ impl Generator {
                                 (world_y - origin[1]) as usize,
                                 (world_z - origin[2]) as usize,
                             ];
-                            if chunk.get(local[0], local[1], local[2]).is_solid() {
+                            if chunk.get(local[0], local[1], local[2]).is_collidable() {
                                 continue;
                             }
                             let material = feature
@@ -499,7 +508,7 @@ impl Generator {
     fn skyline_feature(self, cell_x: i32, cell_z: i32) -> Option<SkylineFeature> {
         let (anchor_x, anchor_z, height) = self.tree_anchor(cell_x, cell_z);
         let surface = self.surface_sample(anchor_x, anchor_z);
-        self.tree_grows_on(anchor_x, anchor_z, surface)
+        (surface.height >= SEA_LEVEL_VOXELS && self.tree_grows_on(anchor_x, anchor_z, surface))
             .then_some(SkylineFeature {
                 id: SkylineFeatureId { cell_x, cell_z },
                 anchor: [anchor_x, surface.height, anchor_z],
@@ -582,6 +591,20 @@ mod tests {
     use crate::VoxelCoord;
     use std::collections::BTreeSet;
 
+    fn flooded_column(generator: Generator) -> (i32, i32, SurfaceSample) {
+        let mut minimum = i32::MAX;
+        for z in (-12_000..=12_000).step_by(37) {
+            for x in (-12_000..=12_000).step_by(37) {
+                let sample = generator.surface_sample(x, z);
+                minimum = minimum.min(sample.height);
+                if sample.water_level.is_some() {
+                    return (x, z, sample);
+                }
+            }
+        }
+        panic!("fixed seed should generate a flooded coastal column; minimum was {minimum}");
+    }
+
     #[test]
     fn generation_is_deterministic_across_chunk_boundaries() {
         let generator = Generator::new(0x5eed);
@@ -644,7 +667,7 @@ mod tests {
             for x in (-12_000..=12_000).step_by(389) {
                 let sample = generator.surface_sample(x, z);
                 regions.insert(sample.region);
-                assert!(sample.material.is_solid());
+                assert!(sample.material.is_collidable());
                 let profile = generator.column_profile(x, z);
                 assert_eq!(
                     generator.sample_terrain_with_profile(x, sample.height, z, profile),
@@ -670,13 +693,40 @@ mod tests {
                     sample.height as i64 as u64,
                     u64::from(sample.material.id()),
                     sample.region as u64,
+                    sample.water_level.unwrap_or(i32::MIN) as i64 as u64,
                 ] {
                     checksum ^= value;
                     checksum = checksum.wrapping_mul(0x100_0000_01b3);
                 }
             }
         }
-        assert_eq!(checksum, 0x317e_c528_80b9_8a71);
+        assert_eq!(checksum, 0x05e5_581e_7f9a_7ff5);
+    }
+
+    #[test]
+    fn ocean_fills_only_above_low_terrain_through_the_versioned_sea_level() {
+        let generator = Generator::new(0x5eed_cafe);
+        let (x, z, sample) = flooded_column(generator);
+        assert!(sample.height < SEA_LEVEL_VOXELS);
+        assert_eq!(sample.water_level, Some(SEA_LEVEL_VOXELS));
+        assert_eq!(generator.sample(x, sample.height, z), sample.material);
+        assert_ne!(generator.sample(x, sample.height - 1, z), Material::Water);
+        assert_eq!(generator.sample(x, sample.height + 1, z), Material::Water);
+        assert_eq!(generator.sample(x, SEA_LEVEL_VOXELS, z), Material::Water);
+        assert_eq!(generator.sample(x, SEA_LEVEL_VOXELS + 1, z), Material::Air);
+
+        let chunk_coord = VoxelCoord::new(x, SEA_LEVEL_VOXELS, z).chunk();
+        let chunk = generator.generate_chunk(chunk_coord);
+        let local = VoxelCoord::new(x, SEA_LEVEL_VOXELS, z).local();
+        assert_eq!(chunk.get(local[0], local[1], local[2]), Material::Water);
+    }
+
+    #[test]
+    fn procedural_tree_anchors_stay_on_dry_land() {
+        let generator = Generator::new(0x5eed_cafe);
+        for feature in generator.skyline_features_anchored_in([[-4_096, -4_096], [4_096, 4_096]]) {
+            assert!(feature.anchor[1] >= SEA_LEVEL_VOXELS);
+        }
     }
 
     #[test]

@@ -151,12 +151,12 @@ impl EditMap {
         let highest_override = column
             .iter()
             .rev()
-            .find(|(_, material)| material.is_solid())
+            .find(|(_, material)| material.is_collidable())
             .map(|(&y, _)| y);
         let mut y = highest_override.map_or(generated.height, |value| value.max(generated.height));
         loop {
             let material = self.sample(generator, VoxelCoord::new(x, y, z));
-            if material.is_solid() || y <= -16 {
+            if material.is_collidable() || y <= -16 {
                 return (y, material);
             }
             y -= 1;
