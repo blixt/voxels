@@ -86,7 +86,6 @@ pub struct SurfaceSample {
     pub moisture: f32,
     pub temperature: f32,
     pub ridge: f32,
-    pub atmosphere: AtmosphereSample,
     pub route: Option<RouteSample>,
 }
 
@@ -103,7 +102,6 @@ struct ColumnProfile {
     ridge: f32,
     region: SurfaceRegion,
     material: Material,
-    atmosphere: AtmosphereSample,
     route: Option<RouteSample>,
 }
 
@@ -358,23 +356,14 @@ impl Generator {
         let volcanic_field = self.fractal_2d(x, z, 980, 3, 0x6d2b);
         let volcanic_core = smooth(((volcanic_field - 0.62) / 0.38).clamp(0.0, 1.0));
 
-        let weights = [
-            moisture * (1.0 - (temperature - 0.52).abs()) * (0.65 + local_biome * 0.35),
-            (1.0 - (moisture - 0.48).abs()) * (1.15 - temperature) * (1.0 - ridge * 0.35),
-            ridge * ridge * (0.62 + continental * 0.52) * (1.18 - temperature * 0.42),
-            (1.0 - moisture) * temperature * (0.42 + local_biome * 0.90),
-            (1.0 - moisture) * temperature * (1.25 - local_biome) * (1.12 - ridge * 0.50),
-            volcanic_core * (0.38 + ridge * 0.88) * (0.56 + local_biome),
-        ];
-        let (region_index, _) = weights
-            .iter()
-            .copied()
-            .enumerate()
-            .max_by(|(_, left), (_, right)| left.total_cmp(right))
-            .unwrap_or((0, 0.0));
-        let region = SurfaceRegion::ALL[region_index];
-        let weight_sum = weights.iter().sum::<f32>().max(0.0001);
-        let normalized = weights.map(|weight| weight / weight_sum);
+        let (region, normalized) = regional_profile(
+            moisture,
+            temperature,
+            local_biome,
+            continental,
+            ridge,
+            volcanic_core,
+        );
 
         let base = 8.0 + continental * 27.0 + hills * 11.0 + detail * 4.0 + ridge * ridge * 10.0;
         let alpine = ridge.powi(3) * 34.0 + continental * 7.0;
@@ -400,27 +389,6 @@ impl Generator {
             - ocean_basin)
             .round() as i32;
         let patch = self.value_2d(x, z, 42, 0x3f91);
-        let aerosol = (normalized[3] * 0.62
-            + normalized[4] * 0.30
-            + normalized[5] * 0.92
-            + (1.0 - moisture) * 0.12)
-            .clamp(0.0, 1.0);
-        let atmosphere = AtmosphereSample {
-            humidity: moisture.clamp(0.0, 1.0),
-            coldness: (1.0 - temperature).clamp(0.0, 1.0),
-            aerosol,
-            cloudiness: (moisture * 0.46
-                + normalized[0] * 0.12
-                + normalized[1] * 0.28
-                + normalized[5] * 0.18)
-                .clamp(0.0, 1.0),
-            horizon_warmth: (temperature * 0.34
-                + normalized[3] * 0.38
-                + normalized[4] * 0.30
-                + normalized[5] * 0.16)
-                .clamp(0.0, 1.0),
-            haze: (ocean * 0.24 + moisture * 0.20 + aerosol * 0.56).clamp(0.0, 1.0),
-        };
         let material = if height < SEA_LEVEL_VOXELS + 3 {
             Material::Sand
         } else {
@@ -479,7 +447,6 @@ impl Generator {
             ridge,
             region,
             material,
-            atmosphere,
             route: None,
         }
     }
@@ -527,9 +494,52 @@ impl Generator {
             moisture: profile.moisture,
             temperature: profile.temperature,
             ridge: profile.ridge,
-            atmosphere: profile.atmosphere,
             route: profile.route,
         }
+    }
+
+    /// Samples renderer-neutral regional atmosphere without adding its arithmetic to the hot
+    /// canonical and LOD column paths. The classification helper is shared with terrain, while the
+    /// renderer pays for the derived weather fields only at the camera position once per frame.
+    pub fn atmosphere_sample(self, x: i32, z: i32) -> (AtmosphereSample, SurfaceRegion) {
+        let moisture = self.value_2d(x, z, 1_200, 0x4f1b);
+        let temperature = self.value_2d(x, z, 1_900, 0xa18d);
+        let local_biome = self.value_2d(x, z, 260, 0x8b21);
+        let continental = self.fractal_2d(x, z, 1_800, 4, 0x71a9);
+        let ridge = 1.0 - (self.value_2d(x, z, 620, 0xc43b) * 2.0 - 1.0).abs();
+        let volcanic_field = self.fractal_2d(x, z, 980, 3, 0x6d2b);
+        let volcanic_core = smooth(((volcanic_field - 0.62) / 0.38).clamp(0.0, 1.0));
+        let (region, normalized) = regional_profile(
+            moisture,
+            temperature,
+            local_biome,
+            continental,
+            ridge,
+            volcanic_core,
+        );
+        let aerosol = (normalized[3] * 0.62
+            + normalized[4] * 0.30
+            + normalized[5] * 0.92
+            + (1.0 - moisture) * 0.12)
+            .clamp(0.0, 1.0);
+        let ocean = smooth(((0.44 - continental) / 0.44).clamp(0.0, 1.0));
+        let atmosphere = AtmosphereSample {
+            humidity: moisture.clamp(0.0, 1.0),
+            coldness: (1.0 - temperature).clamp(0.0, 1.0),
+            aerosol,
+            cloudiness: (moisture * 0.46
+                + normalized[0] * 0.12
+                + normalized[1] * 0.28
+                + normalized[5] * 0.18)
+                .clamp(0.0, 1.0),
+            horizon_warmth: (temperature * 0.34
+                + normalized[3] * 0.38
+                + normalized[4] * 0.30
+                + normalized[5] * 0.16)
+                .clamp(0.0, 1.0),
+            haze: (ocean * 0.24 + moisture * 0.20 + aerosol * 0.56).clamp(0.0, 1.0),
+        };
+        (atmosphere, region)
     }
 
     /// Enumerates each deterministic skyline feature whose anchor lies in the supplied half-open
@@ -889,6 +899,36 @@ impl Generator {
     }
 }
 
+#[inline(always)]
+fn regional_profile(
+    moisture: f32,
+    temperature: f32,
+    local_biome: f32,
+    continental: f32,
+    ridge: f32,
+    volcanic_core: f32,
+) -> (SurfaceRegion, [f32; 6]) {
+    let weights = [
+        moisture * (1.0 - (temperature - 0.52).abs()) * (0.65 + local_biome * 0.35),
+        (1.0 - (moisture - 0.48).abs()) * (1.15 - temperature) * (1.0 - ridge * 0.35),
+        ridge * ridge * (0.62 + continental * 0.52) * (1.18 - temperature * 0.42),
+        (1.0 - moisture) * temperature * (0.42 + local_biome * 0.90),
+        (1.0 - moisture) * temperature * (1.25 - local_biome) * (1.12 - ridge * 0.50),
+        volcanic_core * (0.38 + ridge * 0.88) * (0.56 + local_biome),
+    ];
+    let (region_index, _) = weights
+        .iter()
+        .copied()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+        .unwrap_or((0, 0.0));
+    let weight_sum = weights.iter().sum::<f32>().max(0.0001);
+    (
+        SurfaceRegion::ALL[region_index],
+        weights.map(|weight| weight / weight_sum),
+    )
+}
+
 fn smooth(value: f32) -> f32 {
     value * value * (3.0 - 2.0 * value)
 }
@@ -1020,12 +1060,11 @@ mod tests {
         let mut maximum_adjacent_delta = 0.0f32;
         for z in (-12_000..=12_000).step_by(389) {
             for x in (-12_000..=12_000).step_by(389) {
-                let sample = generator.surface_sample(x, z);
-                assert!(sample.atmosphere.is_finite_and_normalized());
-                representative[sample.region as usize].get_or_insert(sample.atmosphere);
-                let adjacent = generator.surface_sample(x + 1, z).atmosphere;
+                let (sample, region) = generator.atmosphere_sample(x, z);
+                assert!(sample.is_finite_and_normalized());
+                representative[region as usize].get_or_insert(sample);
+                let adjacent = generator.atmosphere_sample(x + 1, z).0;
                 maximum_adjacent_delta = sample
-                    .atmosphere
                     .components()
                     .into_iter()
                     .zip(adjacent.components())

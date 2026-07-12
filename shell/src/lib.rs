@@ -490,8 +490,8 @@ mod web {
             renderer.set_target_voxel(target);
             let atmosphere_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
             let atmosphere_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-            let atmosphere = self.generator.surface_sample(atmosphere_x, atmosphere_z);
-            renderer.set_atmosphere(atmosphere.atmosphere, atmosphere.region);
+            let (atmosphere, region) = self.generator.atmosphere_sample(atmosphere_x, atmosphere_z);
+            renderer.set_atmosphere(atmosphere, region);
             let stream = self.scheduler.borrow().diagnostics();
             let render = renderer.diagnostics();
             let lod_tiles = self.surface_lod_counts();
