@@ -71,7 +71,7 @@ function phaseSummary(captures) {
     pendingJobs: latest[SNAPSHOT.pendingJobs],
     quads: latest[SNAPSHOT.quads],
     waterQuads: latest[SNAPSHOT.waterQuads],
-    waterDrawCalls: latest[29],
+    waterDrawCalls: latest[SNAPSHOT.waterDrawCalls],
     drawCalls: latest[SNAPSHOT.drawCalls],
     coreGpuMiB: latest[SNAPSHOT.coreGpuMiB],
     meshArenaAllocatedMiB: latest[SNAPSHOT.arenaAllocatedMiB],
@@ -680,7 +680,11 @@ async function visitNextLandmark(page, viewportWidth) {
 
 async function visitCinderVault(page, viewportWidth) {
   const before = await capture(page);
-  const previousPosition = before.snapshot.slice(0, 3);
+  const previousPosition = [
+    before.snapshot[SNAPSHOT.cameraX],
+    before.snapshot[SNAPSHOT.cameraY],
+    before.snapshot[SNAPSHOT.cameraZ],
+  ];
   await page.keyboard.press("Escape");
   await page.keyboard.press("F3");
   await page.waitForTimeout(80);
@@ -691,14 +695,17 @@ async function visitCinderVault(page, viewportWidth) {
   await page.mouse.click(viewportWidth - 171, 338);
   await page.keyboard.press("F3");
   await page.waitForFunction(
-    async ({ previous }) => {
+    async ({ indices, previous }) => {
       const snapshot = await globalThis.__VOXELS__.snapshot();
-      const dx = snapshot[0] - previous[0];
-      const dy = snapshot[1] - previous[1];
-      const dz = snapshot[2] - previous[2];
+      const dx = snapshot[indices.x] - previous[0];
+      const dy = snapshot[indices.y] - previous[1];
+      const dz = snapshot[indices.z] - previous[2];
       return dx * dx + dy * dy + dz * dz > 1;
     },
-    { previous: previousPosition },
+    {
+      indices: { x: SNAPSHOT.cameraX, y: SNAPSHOT.cameraY, z: SNAPSHOT.cameraZ },
+      previous: previousPosition,
+    },
     { timeout: 5_000 },
   );
   // Let the new camera pose schedule its first streaming pass before checking for a drained queue.
@@ -1182,11 +1189,11 @@ async function enterUnderwaterShowcase(page, viewportWidth) {
   await page.waitForTimeout(100);
   await page.mouse.click(viewportWidth - 171, 168);
   await page.waitForFunction(
-    async () => {
+    async (indices) => {
       const snapshot = await globalThis.__VOXELS__.snapshot();
-      return snapshot[31] > 0.5 && snapshot[33] === 1;
+      return snapshot[indices.immersion] > 0.5 && snapshot[indices.eyesSubmerged] === 1;
     },
-    null,
+    { immersion: SNAPSHOT.immersion, eyesSubmerged: SNAPSHOT.eyesSubmerged },
     { timeout: 20_000 },
   );
   await page.keyboard.press("F3");

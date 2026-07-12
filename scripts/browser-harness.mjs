@@ -3,6 +3,9 @@ import { createServer as createNetServer } from "node:net";
 export const SNAPSHOT_SCHEMA_VERSION = 15;
 
 export const SNAPSHOT = Object.freeze({
+  cameraX: 0,
+  cameraY: 1,
+  cameraZ: 2,
   pitch: 4,
   quads: 6,
   edits: 7,
@@ -19,6 +22,7 @@ export const SNAPSHOT = Object.freeze({
   remeshP95Frames: 22,
   remeshMaxFrames: 23,
   waterQuads: 28,
+  waterDrawCalls: 29,
   refractionCopyMiB: 30,
   immersion: 31,
   eyesSubmerged: 33,
