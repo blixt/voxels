@@ -181,7 +181,20 @@ pub fn raycast_voxels(
             distance_metres: 0.0,
         });
     }
-    let step = direction.signum().as_ivec3();
+    let axis_step = |value: f32| {
+        if value > 0.0 {
+            1
+        } else if value < 0.0 {
+            -1
+        } else {
+            0
+        }
+    };
+    let step = glam::IVec3::new(
+        axis_step(direction.x),
+        axis_step(direction.y),
+        axis_step(direction.z),
+    );
     let mut maximum = Vec3::splat(f32::INFINITY);
     let mut delta = Vec3::splat(f32::INFINITY);
     for axis in 0..3 {
@@ -735,6 +748,26 @@ mod tests {
             );
             assert!(!sampled);
         }
+    }
+
+    #[test]
+    fn dda_does_not_step_or_overflow_zero_direction_axes() {
+        let extreme_x = i32::MAX as f32 * 0.1;
+        let mut sampled_x = None;
+        assert_eq!(
+            raycast_voxels(
+                Vec3::new(extreme_x, 0.05, 0.05),
+                Vec3::Y,
+                0.2,
+                0.1,
+                |x, _, _| {
+                    sampled_x = Some(x);
+                    false
+                },
+            ),
+            None
+        );
+        assert_eq!(sampled_x, Some(i32::MAX));
     }
 
     #[test]
