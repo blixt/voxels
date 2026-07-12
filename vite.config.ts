@@ -82,6 +82,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-performance.mjs --atmosphere",
         cache: false,
       },
+      "profile:gtao": {
+        command: "node scripts/browser-performance.mjs --gtao",
+        cache: false,
+      },
       "test:persistence-browser": {
         command: "node scripts/browser-persistence-test.mjs",
         cache: false,

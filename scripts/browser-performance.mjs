@@ -53,12 +53,17 @@ const SNAPSHOT = {
   daylightPhase: 68,
   surfaceRegion: 69,
   cloudCoverage: 70,
-  schemaVersion: 71,
-  sampleCount: 72,
-  droppedSamples: 73,
+  screenSpaceAmbientOcclusion: 71,
+  gpuDepthPrepassMs: 72,
+  gpuAmbientOcclusionMs: 73,
+  ambientOcclusionMiB: 74,
+  depthPrepassDrawCalls: 75,
+  schemaVersion: 76,
+  sampleCount: 77,
+  droppedSamples: 78,
 };
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 74;
+const FRAME_SAMPLE_START = 79;
 const EDIT_SAMPLE_WIDTH = 6;
 
 function percentile(values, fraction) {
@@ -109,6 +114,8 @@ function phaseSummary(captures) {
       shadowMs: gpuSamples.length > 0 ? summary(gpuColumn("shadow")) : null,
       worldMs: gpuSamples.length > 0 ? summary(gpuColumn("world")) : null,
       waterMs: gpuSamples.length > 0 ? summary(gpuColumn("water")) : null,
+      depthPrepassMs: gpuSamples.length > 0 ? summary(gpuColumn("depthPrepass")) : null,
+      ambientOcclusionMs: gpuSamples.length > 0 ? summary(gpuColumn("ambientOcclusion")) : null,
       uiMs: gpuSamples.length > 0 ? summary(gpuColumn("ui")) : null,
     },
     residentChunks: latest[SNAPSHOT.residentChunks],
@@ -131,6 +138,9 @@ function phaseSummary(captures) {
     totalEvictions: latest[SNAPSHOT.totalEvictions],
     staleCompletions: latest[SNAPSHOT.staleCompletions],
     materialDetail: latest[SNAPSHOT.materialDetail] === 1,
+    screenSpaceAmbientOcclusion: latest[SNAPSHOT.screenSpaceAmbientOcclusion] === 1,
+    ambientOcclusionMiB: latest[SNAPSHOT.ambientOcclusionMiB],
+    depthPrepassDrawCalls: latest[SNAPSHOT.depthPrepassDrawCalls],
     atmosphere: {
       daylightPhase: latest[SNAPSHOT.daylightPhase],
       surfaceRegion: latest[SNAPSHOT.surfaceRegion],
@@ -187,6 +197,8 @@ async function capture(page) {
             shadow: snapshot[SNAPSHOT.gpuShadowMs],
             world: snapshot[SNAPSHOT.gpuWorldMs],
             water: snapshot[SNAPSHOT.gpuWaterMs],
+            depthPrepass: snapshot[SNAPSHOT.gpuDepthPrepassMs],
+            ambientOcclusion: snapshot[SNAPSHOT.gpuAmbientOcclusionMs],
             ui: snapshot[SNAPSHOT.gpuUiMs],
           }
         : null,
@@ -289,9 +301,9 @@ async function setMaterialDetail(page, enabled, viewportWidth) {
   if (current === enabled) return;
   await page.keyboard.press("F3");
   await page.waitForTimeout(200);
-  // Material detail is the appended seventh Rust-owned feature row. The click targets the toggle,
+  // Material detail is the eighth Rust-owned feature row. The click targets the toggle,
   // exercising the same canvas hit-testing path as a human rather than a JavaScript render option.
-  await page.mouse.click(viewportWidth - 57, 600);
+  await page.mouse.click(viewportWidth - 57, 639);
   await page.waitForFunction(
     async ({ index, expected }) => {
       const snapshot = await globalThis.__VOXELS__.snapshot();
@@ -344,6 +356,110 @@ async function materialDetailProfile(page, viewportWidth) {
   if (violations.length > 0) {
     throw new Error(
       `material detail profile violations: ${violations.join(", ")}; ${JSON.stringify(result)}`,
+    );
+  }
+  return result;
+}
+
+async function setScreenSpaceAmbientOcclusion(page, enabled, viewportWidth) {
+  const current = await page.evaluate(
+    (index) => globalThis.__VOXELS__.snapshot().then((snapshot) => snapshot[index] === 1),
+    SNAPSHOT.screenSpaceAmbientOcclusion,
+  );
+  if (current === enabled) return;
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(200);
+  // The third Rust-owned feature row is screen-space contact AO. This deliberately exercises the
+  // same canvas hit-testing path as a human and does not expose a JavaScript renderer setter.
+  await page.mouse.click(viewportWidth - 57, 444);
+  await page.waitForFunction(
+    async ({ index, expected }) => {
+      const snapshot = await globalThis.__VOXELS__.snapshot();
+      return (snapshot[index] === 1) === expected;
+    },
+    { index: SNAPSHOT.screenSpaceAmbientOcclusion, expected: enabled },
+    { timeout: 5_000 },
+  );
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(800);
+}
+
+async function visitFinalRouteMark(page, viewportWidth) {
+  for (let ordinal = 0; ordinal < 5; ordinal += 1) {
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("F3");
+    await page.waitForTimeout(80);
+    await page.mouse.click(viewportWidth - 83, 90);
+    await page.waitForTimeout(80);
+    // The sixth context row follows the next canonical pilgrim-road landmark.
+    await page.mouse.click(viewportWidth - 171, 304);
+    await page.keyboard.press("F3");
+    await page.waitForTimeout(120);
+  }
+  await waitForEngine(page);
+  await page.waitForTimeout(800);
+}
+
+async function ambientOcclusionProfile(page, viewportWidth) {
+  await visitFinalRouteMark(page, viewportWidth);
+  await setScreenSpaceAmbientOcclusion(page, false, viewportWidth);
+  const off = phaseSummary(await sample(page, 5_000));
+  await page.screenshot({ path: "target/spatial-ao-off.png" });
+  await setScreenSpaceAmbientOcclusion(page, true, viewportWidth);
+  const on = phaseSummary(await sample(page, 5_000));
+  await page.screenshot({ path: "target/spatial-ao-on.png" });
+  const delta = {
+    frameP95Ms: on.frameMs.p95 - off.frameMs.p95,
+    worldP95Ms: on.gpu.worldMs.p95 - off.gpu.worldMs.p95,
+    totalP95Ms: on.gpu.totalMs.p95 - off.gpu.totalMs.p95,
+    coreGpuMiB: on.coreGpuMiB - off.coreGpuMiB,
+  };
+  const invariantKeys = [
+    "residentChunks",
+    "visibleChunks",
+    "quads",
+    "waterQuads",
+    "waterDrawCalls",
+    "drawCalls",
+    "meshArenaAllocatedMiB",
+    "meshArenaCapacityMiB",
+    "refractionCopyMiB",
+    "ambientOcclusionMiB",
+  ];
+  const changed = invariantKeys.filter((key) => on[key] !== off[key]);
+  const violations = [];
+  if (!off.gpu.available || !on.gpu.available) violations.push("GPU timestamps unavailable");
+  if (off.screenSpaceAmbientOcclusion || !on.screenSpaceAmbientOcclusion) {
+    violations.push("Rust UI AO toggle state was not observed");
+  }
+  if (off.depthPrepassDrawCalls !== 0) violations.push("disabled AO submitted a depth prepass");
+  if (on.depthPrepassDrawCalls !== on.drawCalls) {
+    violations.push("depth ownership draw count did not match the opaque scene");
+  }
+  if (off.gpu.depthPrepassMs.p95 !== 0 || off.gpu.ambientOcclusionMs.p95 !== 0) {
+    violations.push("disabled AO reported active GPU passes");
+  }
+  if (on.gpu.depthPrepassMs.p95 <= 0 || on.gpu.ambientOcclusionMs.p95 <= 0) {
+    violations.push("enabled AO did not report both GPU stages");
+  }
+  if (on.gpu.depthPrepassMs.p95 + on.gpu.ambientOcclusionMs.p95 > 1.75) {
+    violations.push("depth plus spatial AO GPU p95 exceeded 1.75ms");
+  }
+  if (on.gpu.totalMs.p95 > 7.5) violations.push("active GPU p95 exceeded 7.5ms");
+  if (delta.worldP95Ms > 0.4) violations.push("world GPU p95 increased by more than 0.4ms");
+  if (off.frameMs.p95 > 12 || on.frameMs.p95 > 12) violations.push("frame p95 exceeded 12ms");
+  if (off.frameMs.above16_67ms > 0 || on.frameMs.above16_67ms > 0) {
+    violations.push("paired AO profile missed the 120Hz frame gate");
+  }
+  if (off.droppedSamples > 0 || on.droppedSamples > 0) violations.push("frame samples dropped");
+  if (changed.length > 0) {
+    violations.push(`geometry/resource invariants changed: ${changed.join(", ")}`);
+  }
+  const result = { off, on, delta, invariantKeys };
+  if (violations.length > 0) {
+    throw new Error(
+      `spatial AO profile violations: ${violations.join(", ")}; ${JSON.stringify(result)}`,
     );
   }
   return result;
@@ -505,7 +621,7 @@ async function waitForEngine(page) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
     lastSnapshot = snapshot;
     if (
-      snapshot[SNAPSHOT.schemaVersion] === 8 &&
+      snapshot[SNAPSHOT.schemaVersion] === 9 &&
       snapshot[SNAPSHOT.quads] > 0 &&
       snapshot[SNAPSHOT.residentChunks] > 0 &&
       snapshot[SNAPSHOT.pendingJobs] === 0
@@ -555,6 +671,7 @@ const sustained = process.argv.includes("--sustained");
 const edits = process.argv.includes("--edits");
 const materials = process.argv.includes("--materials");
 const atmosphere = process.argv.includes("--atmosphere");
+const ambientOcclusion = process.argv.includes("--gtao");
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
@@ -602,6 +719,8 @@ try {
     scenarios = { materials: await materialDetailProfile(page, viewport.width) };
   } else if (atmosphere) {
     scenarios = { atmosphere: await atmosphereProfile(page, viewport.width) };
+  } else if (ambientOcclusion) {
+    scenarios = { ambientOcclusion: await ambientOcclusionProfile(page, viewport.width) };
   } else {
     const steady = phaseSummary(await sample(page, 4_000));
     await page.keyboard.down("KeyW");
