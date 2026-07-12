@@ -1,4 +1,4 @@
-use crate::{Material, VoxelCoord};
+use crate::{Material, RouteLandmarkId, VoxelCoord};
 
 pub const FEATURE_CELL_VOXELS: i32 = 96;
 pub const FEATURE_MAX_RADIUS_VOXELS: i32 = 10;
@@ -20,16 +20,30 @@ pub enum SkylineFeatureKind {
     BadlandsHoodoo = 3,
     DuneArch = 4,
     BasaltColumns = 5,
+    PilgrimCairn = 6,
+    RouteWaystone = 7,
+    RuinedArch = 8,
 }
 
 impl SkylineFeatureKind {
-    pub const ALL: [Self; 6] = [
+    pub const REGIONAL: [Self; 6] = [
         Self::Broadleaf,
         Self::MoorTor,
         Self::AlpineNeedle,
         Self::BadlandsHoodoo,
         Self::DuneArch,
         Self::BasaltColumns,
+    ];
+    pub const ALL: [Self; 9] = [
+        Self::Broadleaf,
+        Self::MoorTor,
+        Self::AlpineNeedle,
+        Self::BadlandsHoodoo,
+        Self::DuneArch,
+        Self::BasaltColumns,
+        Self::PilgrimCairn,
+        Self::RouteWaystone,
+        Self::RuinedArch,
     ];
 }
 
@@ -45,6 +59,7 @@ pub struct SkylineFeature {
     pub variant: u8,
     /// 0 = background, 1 = composition companion, 2 = composition hero.
     pub prominence: u8,
+    pub route_landmark: Option<RouteLandmarkId>,
 }
 
 impl SkylineFeature {
@@ -155,6 +170,49 @@ impl SkylineFeature {
                             && (dz - offset_z).abs() <= radius)
                             .then_some(Material::Basalt)
                     })
+            }
+            SkylineFeatureKind::PilgrimCairn => {
+                if !(1..=height).contains(&dy) {
+                    return None;
+                }
+                let radius = if dy <= 3 {
+                    4
+                } else if dy <= 6 {
+                    3
+                } else {
+                    2
+                };
+                (dx.abs().max(dz.abs()) <= radius && dx * dx + dz * dz <= radius * radius + radius)
+                    .then_some(if dy & 1 == 0 {
+                        Material::Stone
+                    } else {
+                        Material::Limestone
+                    })
+            }
+            SkylineFeatureKind::RouteWaystone => {
+                if !(1..=height).contains(&dy) {
+                    return None;
+                }
+                let plinth = dy <= 3 && dx.abs() <= 3 && dz.abs() <= 3;
+                let shaft = dy > 2 && dx.abs() <= 1 && dz.abs() <= 1;
+                let cap = dy >= height - 2 && dx.abs() <= 2 && dz.abs() <= 2;
+                (plinth || shaft || cap).then_some(Material::Limestone)
+            }
+            SkylineFeatureKind::RuinedArch => {
+                if !(1..=height).contains(&dy) {
+                    return None;
+                }
+                let [along, across] = self.oriented_offset(dx, dz);
+                let pillars = (6..=8).contains(&along.abs()) && across.abs() <= 2;
+                let lintel = dy >= height - 3 && along.abs() <= 8 && across.abs() <= 2;
+                let broken = along > 2
+                    && dy >= height - 1 - i32::from(self.variant & 1)
+                    && across.abs() <= 2;
+                ((pillars || lintel) && !broken).then_some(if dy >= height - 3 {
+                    Material::Stone
+                } else {
+                    Material::Limestone
+                })
             }
         }
     }

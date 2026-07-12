@@ -1,12 +1,13 @@
 use crate::{
     CHUNK_EDGE, COMPOSITION_EDGE_FEATURE_CELLS, Chunk, ChunkCoord, FEATURE_CELL_VOXELS,
     FEATURE_MAX_RADIUS_VOXELS, FIRST_PILGRIM_ROAD_NODES, FeatureComposition, Material,
-    ROUTE_CORE_HALF_WIDTH_VOXELS, RouteSample, SkylineFeature, SkylineFeatureId,
-    SkylineFeatureKind, sample_first_pilgrim_road,
+    ROUTE_CORE_HALF_WIDTH_VOXELS, RouteAnchor, RouteAnchorRole, RouteLandmarkId, RouteSample,
+    SkylineFeature, SkylineFeatureId, SkylineFeatureKind,
+    first_pilgrim_route_anchor_for_feature_cell, sample_first_pilgrim_road,
 };
 
 /// Generator version is part of world identity. Changing terrain semantics requires incrementing it.
-pub const GENERATOR_VERSION: u32 = 9;
+pub const GENERATOR_VERSION: u32 = 10;
 pub const SEA_LEVEL_VOXELS: i32 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -638,6 +639,9 @@ impl Generator {
     }
 
     fn skyline_feature(self, cell_x: i32, cell_z: i32) -> Option<SkylineFeature> {
+        if let Some(anchor) = first_pilgrim_route_anchor_for_feature_cell(cell_x, cell_z) {
+            return self.route_landmark_feature(anchor);
+        }
         let (anchor_x, anchor_z, hash) = self.feature_anchor(cell_x, cell_z);
         let surface = self.surface_sample(anchor_x, anchor_z);
         if surface.height < SEA_LEVEL_VOXELS || surface.water_level.is_some() {
@@ -664,6 +668,9 @@ impl Generator {
             SkylineFeatureKind::BadlandsHoodoo => 88,
             SkylineFeatureKind::DuneArch => 64,
             SkylineFeatureKind::BasaltColumns => 112,
+            SkylineFeatureKind::PilgrimCairn
+            | SkylineFeatureKind::RouteWaystone
+            | SkylineFeatureKind::RuinedArch => u8::MAX,
         };
         let composition = self.feature_composition(cell_x, cell_z);
         let influence = composition.influence(cell_x, cell_z);
@@ -685,6 +692,9 @@ impl Generator {
             SkylineFeatureKind::Broadleaf | SkylineFeatureKind::DuneArch => 0.86,
             SkylineFeatureKind::MoorTor | SkylineFeatureKind::BadlandsHoodoo => 0.94,
             SkylineFeatureKind::AlpineNeedle | SkylineFeatureKind::BasaltColumns => 1.0,
+            SkylineFeatureKind::PilgrimCairn
+            | SkylineFeatureKind::RouteWaystone
+            | SkylineFeatureKind::RuinedArch => 1.0,
         };
         if surface.ridge > maximum_ridge {
             return None;
@@ -696,6 +706,9 @@ impl Generator {
             SkylineFeatureKind::BadlandsHoodoo => 24 + ((hash >> 16) & 15) as i32,
             SkylineFeatureKind::DuneArch => 18 + ((hash >> 16) & 7) as i32,
             SkylineFeatureKind::BasaltColumns => 24 + ((hash >> 16) & 19) as i32,
+            SkylineFeatureKind::PilgrimCairn
+            | SkylineFeatureKind::RouteWaystone
+            | SkylineFeatureKind::RuinedArch => 0,
         };
         let height = base_height + base_height * i32::from(influence.prominence.min(2)) / 4;
         Some(SkylineFeature {
@@ -706,6 +719,42 @@ impl Generator {
             orientation: ((hash >> 32) & 3) as u8,
             variant: ((hash >> 36) & 3) as u8,
             prominence: influence.prominence,
+            route_landmark: None,
+        })
+    }
+
+    fn route_landmark_feature(self, route_anchor: RouteAnchor) -> Option<SkylineFeature> {
+        let [anchor_x, anchor_z] = route_anchor.anchor;
+        let surface = self.surface_sample(anchor_x, anchor_z);
+        if surface.water_level.is_some() || surface.height < SEA_LEVEL_VOXELS {
+            return None;
+        }
+        let (kind, height, prominence) = match route_anchor.role {
+            RouteAnchorRole::Cairn => (SkylineFeatureKind::PilgrimCairn, 11, 1),
+            RouteAnchorRole::Waystone => (SkylineFeatureKind::RouteWaystone, 27, 1),
+            RouteAnchorRole::RuinedArch => (SkylineFeatureKind::RuinedArch, 38, 2),
+        };
+        let route = sample_first_pilgrim_road(anchor_x, anchor_z)?;
+        let orientation = if route.tangent[0].abs() >= route.tangent[1].abs() {
+            1
+        } else {
+            0
+        };
+        Some(SkylineFeature {
+            id: SkylineFeatureId {
+                cell_x: route_anchor.feature_cell[0],
+                cell_z: route_anchor.feature_cell[1],
+            },
+            kind,
+            anchor: [anchor_x, surface.height, anchor_z],
+            trunk_top: surface.height + height + i32::from(route_anchor.ordinal & 3),
+            orientation,
+            variant: (route_anchor.ordinal & 3) as u8,
+            prominence,
+            route_landmark: Some(RouteLandmarkId {
+                route_id: route_anchor.route_id,
+                ordinal: route_anchor.ordinal,
+            }),
         })
     }
 
@@ -912,7 +961,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checksum, 0x31f1_c297_67d3_ee7d);
+        assert_eq!(checksum, 0x3d1c_bc5e_e75f_c0a6);
     }
 
     #[test]
@@ -973,6 +1022,101 @@ mod tests {
             generator.sample(x + 5, feature.trunk_top - 3, z),
             Material::Leaves
         );
+    }
+
+    #[test]
+    fn pilgrim_route_landmarks_override_ambient_placement_with_stable_identity() {
+        let generator = Generator::new(0x5eed_cafe);
+        let count = crate::first_pilgrim_route_anchor_count();
+        assert_eq!(count, 5);
+        let mut kinds = BTreeSet::new();
+
+        for ordinal in 0..count {
+            let anchor = crate::first_pilgrim_route_anchor(ordinal).unwrap();
+            let feature = generator
+                .skyline_feature(anchor.feature_cell[0], anchor.feature_cell[1])
+                .expect("every authored route token should own its feature cell");
+            let expected_kind = match anchor.role {
+                RouteAnchorRole::Cairn => SkylineFeatureKind::PilgrimCairn,
+                RouteAnchorRole::Waystone => SkylineFeatureKind::RouteWaystone,
+                RouteAnchorRole::RuinedArch => SkylineFeatureKind::RuinedArch,
+            };
+            assert_eq!(feature.kind, expected_kind);
+            assert_eq!(feature.anchor[0], anchor.anchor[0]);
+            assert_eq!(feature.anchor[2], anchor.anchor[1]);
+            assert_eq!(
+                feature.route_landmark,
+                Some(RouteLandmarkId {
+                    route_id: anchor.route_id,
+                    ordinal,
+                })
+            );
+            assert!(feature.prominence >= 1);
+            kinds.insert(feature.kind);
+
+            let [min, max] = feature.bounds();
+            let cell_min = [
+                anchor.feature_cell[0] * FEATURE_CELL_VOXELS,
+                anchor.feature_cell[1] * FEATURE_CELL_VOXELS,
+            ];
+            assert!(min[0] >= cell_min[0] && max[0] <= cell_min[0] + FEATURE_CELL_VOXELS);
+            assert!(min[2] >= cell_min[1] && max[2] <= cell_min[1] + FEATURE_CELL_VOXELS);
+
+            let [min, max] = feature.bounds();
+            let (voxel, material) = (min[1]..max[1])
+                .flat_map(|y| {
+                    (min[2]..max[2])
+                        .flat_map(move |z| (min[0]..max[0]).map(move |x| VoxelCoord::new(x, y, z)))
+                })
+                .find_map(|voxel| {
+                    feature.material_at(voxel).and_then(|material| {
+                        (generator.sample(voxel.x, voxel.y, voxel.z) == material)
+                            .then_some((voxel, material))
+                    })
+                })
+                .expect("the route landmark should contain visible canonical structure");
+            assert_eq!(generator.sample(voxel.x, voxel.y, voxel.z), material);
+            let chunk = generator.generate_chunk(voxel.chunk());
+            let local = voxel.local();
+            assert_eq!(chunk.get(local[0], local[1], local[2]), material);
+            let region = generator.region(voxel.x - 1, voxel.z - 1, 3, 3);
+            assert_eq!(region.sample(voxel.x, voxel.y, voxel.z), material);
+        }
+
+        assert_eq!(
+            kinds,
+            BTreeSet::from([
+                SkylineFeatureKind::PilgrimCairn,
+                SkylineFeatureKind::RouteWaystone,
+                SkylineFeatureKind::RuinedArch,
+            ])
+        );
+    }
+
+    #[test]
+    fn road_destination_retains_its_badlands_hoodoo_silhouette() {
+        let generator = Generator::new(0x5eed_cafe);
+        let destination = crate::FIRST_PILGRIM_ROAD_NODES.last().unwrap();
+        let nearby = generator.skyline_features_anchored_in([
+            [destination.x - 512, destination.z - 512],
+            [destination.x + 513, destination.z + 513],
+        ]);
+        let hoodoo = nearby
+            .iter()
+            .copied()
+            .filter(|feature| {
+                feature.kind == SkylineFeatureKind::BadlandsHoodoo
+                    && feature.route_landmark.is_none()
+            })
+            .min_by_key(|feature| {
+                let dx = feature.anchor[0] - destination.x;
+                let dz = feature.anchor[2] - destination.z;
+                dx * dx + dz * dz
+            })
+            .unwrap_or_else(|| panic!("destination catalog had no hoodoo: {nearby:?}"));
+        let dx = hoodoo.anchor[0] - destination.x;
+        let dz = hoodoo.anchor[2] - destination.z;
+        assert!(dx * dx + dz * dz <= 100 * 100);
     }
 
     #[test]
@@ -1085,13 +1229,13 @@ mod tests {
             crate::FeatureCompositionMode::ALL.into_iter().collect()
         );
         assert!(prominence_counts.into_iter().all(|count| count > 0));
-        assert_eq!(checksum, 0x8958_b81d_7fcb_ffb7);
+        assert_eq!(checksum, 0x251b_911c_980d_e284);
     }
 
     #[test]
     fn prominent_landmark_search_returns_composition_heroes() {
         let generator = Generator::new(0x5eed_cafe);
-        for kind in SkylineFeatureKind::ALL {
+        for kind in SkylineFeatureKind::REGIONAL {
             let feature = generator
                 .nearest_prominent_skyline_feature(0, 0, kind, 192)
                 .expect("the fixed catalog should contain a hero of every regional kind");

@@ -5,6 +5,7 @@ pub const ROUTE_SHOULDER_WIDTH_VOXELS: f32 = 54.0;
 pub const ROUTE_TOKEN_CADENCE_VOXELS: f32 = 288.0;
 pub const ROUTE_TOKEN_SIDE_OFFSET_VOXELS: f32 = 32.0;
 const ROUTE_TOKEN_START_VOXELS: f32 = ROUTE_TOKEN_CADENCE_VOXELS * 0.5;
+const ROUTE_TOKEN_END_MARGIN_VOXELS: f32 = 96.0;
 const FEATURE_ANCHOR_MARGIN_VOXELS: i32 = 12;
 pub const FIRST_PILGRIM_ROAD_BOUNDS: [[i32; 2]; 2] = [[-1_234, -6], [55, 1_249]];
 
@@ -81,6 +82,12 @@ pub enum RouteAnchorRole {
     RuinedArch = 2,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RouteLandmarkId {
+    pub route_id: RouteId,
+    pub ordinal: u16,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RouteAnchor {
     pub route_id: RouteId,
@@ -114,11 +121,13 @@ pub fn first_pilgrim_road_point_at_distance(distance: f32) -> Option<([f32; 2], 
 }
 
 pub fn first_pilgrim_route_anchor_count() -> u16 {
-    let usable = first_pilgrim_road_length_voxels() - ROUTE_TOKEN_START_VOXELS;
+    let usable = first_pilgrim_road_length_voxels()
+        - ROUTE_TOKEN_START_VOXELS
+        - ROUTE_TOKEN_END_MARGIN_VOXELS;
     if usable <= 0.0 {
         0
     } else {
-        (usable / ROUTE_TOKEN_CADENCE_VOXELS).ceil() as u16
+        (usable / ROUTE_TOKEN_CADENCE_VOXELS).floor() as u16 + 1
     }
 }
 
@@ -152,7 +161,7 @@ pub fn first_pilgrim_route_anchor(ordinal: u16) -> Option<RouteAnchor> {
             cell_min[1] + FEATURE_CELL_VOXELS - FEATURE_ANCHOR_MARGIN_VOXELS - 1,
         ),
     ];
-    let role = if ordinal % 6 == 0 {
+    let role = if ordinal % 3 == 0 {
         RouteAnchorRole::RuinedArch
     } else if ordinal & 1 == 0 {
         RouteAnchorRole::Waystone

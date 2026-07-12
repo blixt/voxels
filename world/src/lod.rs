@@ -860,6 +860,67 @@ fn append_skyline_proxy(
                 );
             }
         }
+        SkylineFeatureKind::PilgrimCairn => {
+            let layers = [
+                (
+                    ground + 1,
+                    (ground + 4).min(top + 1),
+                    4,
+                    Material::Limestone,
+                ),
+                (ground + 4, (ground + 7).min(top + 1), 3, Material::Stone),
+                (ground + 7, top + 1, 2, Material::Limestone),
+            ];
+            for &(min_y, max_y, radius, material) in &layers {
+                if min_y < max_y {
+                    append_box(
+                        quads,
+                        [anchor_x - radius, min_y, anchor_z - radius],
+                        [anchor_x + radius + 1, max_y, anchor_z + radius + 1],
+                        material,
+                    );
+                }
+            }
+        }
+        SkylineFeatureKind::RouteWaystone => {
+            append_box(
+                quads,
+                [anchor_x - 3, ground + 1, anchor_z - 3],
+                [anchor_x + 4, ground + 4, anchor_z + 4],
+                Material::Limestone,
+            );
+            append_box(
+                quads,
+                [anchor_x - 1, ground + 3, anchor_z - 1],
+                [anchor_x + 2, top - 1, anchor_z + 2],
+                Material::Limestone,
+            );
+            append_box(
+                quads,
+                [anchor_x - 2, top - 2, anchor_z - 2],
+                [anchor_x + 3, top + 1, anchor_z + 3],
+                Material::Stone,
+            );
+        }
+        SkylineFeatureKind::RuinedArch => {
+            let [axis_x, axis_z] = feature.oriented_offset(7, 0);
+            let [half_x, half_z] = [axis_x.abs() + 2, axis_z.abs() + 2];
+            for direction in [-1, 1] {
+                let [offset_x, offset_z] = feature.oriented_offset(direction * 7, 0);
+                append_box(
+                    quads,
+                    [anchor_x + offset_x - 2, ground + 1, anchor_z + offset_z - 2],
+                    [anchor_x + offset_x + 3, top + 1, anchor_z + offset_z + 3],
+                    Material::Limestone,
+                );
+            }
+            append_box(
+                quads,
+                [anchor_x - half_x, top - 3, anchor_z - half_z],
+                [anchor_x + half_x + 1, top + 1, anchor_z + half_z + 1],
+                Material::Stone,
+            );
+        }
     }
 }
 
@@ -964,6 +1025,7 @@ mod tests {
                 orientation: index as u8,
                 variant: (index % 4) as u8,
                 prominence: (index % 3) as u8,
+                route_landmark: None,
             };
             assert!(feature.material_at(VoxelCoord::new(32, 60, 32)).is_some());
             for level in SurfaceLodLevel::ALL {
@@ -1549,6 +1611,71 @@ mod tests {
             );
         }
         assert!(edits.is_empty());
+    }
+
+    #[test]
+    fn route_landmark_proxies_are_bounded_edit_aware_and_reversible_at_every_lod() {
+        let generator = Generator::new(0x5eed_cafe);
+        let features: Vec<_> = (0..crate::first_pilgrim_route_anchor_count())
+            .map(|ordinal| {
+                let anchor = crate::first_pilgrim_route_anchor(ordinal).unwrap();
+                generator
+                    .skyline_features_anchored_in([
+                        [anchor.anchor[0], anchor.anchor[1]],
+                        [anchor.anchor[0] + 1, anchor.anchor[1] + 1],
+                    ])
+                    .into_iter()
+                    .next()
+                    .expect("route landmark should be anchor-owned")
+            })
+            .collect();
+        assert_eq!(features.len(), 5);
+
+        for feature in features {
+            let [min, max] = feature.bounds();
+            let (target, material) = (min[1]..max[1])
+                .flat_map(|y| {
+                    (min[2]..max[2])
+                        .flat_map(move |z| (min[0]..max[0]).map(move |x| VoxelCoord::new(x, y, z)))
+                })
+                .find_map(|voxel| {
+                    feature.material_at(voxel).and_then(|material| {
+                        (generator.sample(voxel.x, voxel.y, voxel.z) == material)
+                            .then_some((voxel, material))
+                    })
+                })
+                .expect("route landmark should contain visible canonical structure");
+            assert_eq!(generator.sample(target.x, target.y, target.z), material);
+
+            for level in SurfaceLodLevel::ALL {
+                let mut direct_proxy = Vec::new();
+                append_skyline_proxy(&mut direct_proxy, level, feature);
+                assert!(!direct_proxy.is_empty());
+                assert!(direct_proxy.len() <= 24);
+
+                let coord =
+                    SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
+                let pristine =
+                    generate_edited_surface_tile_mesh(generator, &EditMap::default(), coord);
+                let mut edits = EditMap::default();
+                edits.set(generator, target, Material::Air);
+                let edited = generate_edited_surface_tile_mesh(generator, &edits, coord);
+                assert_eq!(
+                    pristine.quads.len() - edited.quads.len(),
+                    direct_proxy.len(),
+                    "{:?} proxy was not suppressed at {level:?}",
+                    feature.kind
+                );
+                assert!(surface_tiles_affected_by_voxel(generator, level, target).contains(&coord));
+
+                edits.set(generator, target, material);
+                assert!(edits.is_empty());
+                assert_eq!(
+                    generate_edited_surface_tile_mesh(generator, &edits, coord),
+                    pristine
+                );
+            }
+        }
     }
 
     #[test]
