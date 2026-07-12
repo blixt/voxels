@@ -1569,6 +1569,12 @@ mod web {
                 }
             };
             for (coord, material) in edits {
+                // The persistence leader echoes every commit in its authoritative order, including
+                // this tab's optimistic writes. A matching echo is free; a differing echo means an
+                // intervening remote write committed first and must be corrected locally.
+                if self.edits.borrow().override_at(coord) == material {
+                    continue;
+                }
                 let _ = self.apply_durable_edit(coord, material);
             }
         }

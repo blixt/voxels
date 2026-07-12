@@ -442,11 +442,11 @@ impl Coordinator {
     }
 
     fn handle_edit_committed(&self, message: &js_sys::Array) {
-        let (Some(origin), Some(world_tag)) = (number(message, 2), message.get(3).as_string())
+        let (Some(_origin), Some(world_tag)) = (number(message, 2), message.get(3).as_string())
         else {
             return;
         };
-        if origin == self.tab_id || world_tag != self.world_tag {
+        if world_tag != self.world_tag {
             return;
         }
         let Ok(coord) = decode_coord(message, 4) else {
