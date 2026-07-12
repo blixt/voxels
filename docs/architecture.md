@@ -154,6 +154,12 @@ on every surface-LOD lattice. The same cadence now yields 26 stable editable rou
 ordinal catalog and feature-cell lookup are immutable derived indices, so ambient feature generation
 does not rebuild or linearly scan every station.
 
+Atlas schema v1 adds append-only Rust discriminants for six destinations and five route chapters.
+Each destination freezes its canonical X/Z and route station, with tests reconstructing the authored
+point to within one 10 cm voxel. The shell projects the camera onto the same route index, chooses the
+chapter, and forwards only that Rust state to the renderer. Mission Control draws the chapter and
+whole-route percentage into its WGPU header; the browser receives no place names or UI model.
+
 Authored routes are compiled once into immutable Rust segment records containing squared length,
 normalized tangent, cumulative distance, and a shoulder-expanded corridor bound. Short routes retain
 an exact linear candidate order; longer routes compile into deterministic sparse 25.6 m bins with

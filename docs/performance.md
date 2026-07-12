@@ -570,3 +570,7 @@ synchronization and zero persistence errors. Fault injection rejected 20 consecu
 acquisitions and recovered on call 21 with zero console errors. Both gates reasserted that the body
 contains exactly one canvas; crosshair, startup help, telemetry, statuses, menus, and toggles remained
 Rust/WGPU draw data.
+
+Atlas schema v1 subsequently froze six destination and five chapter IDs. Mission Control renders the
+current Rust-projected chapter and whole-route percentage in the same WGPU header; no additional DOM,
+TypeScript geography state, draw pass, or persistent terrain data was introduced.

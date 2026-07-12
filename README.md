@@ -63,9 +63,9 @@ across the surface rings. A deterministic Rust-generated
 material atlas adds world-anchored, mip-filtered albedo, micro-normal, and roughness structure without
 changing geometry, draw ownership, or durable voxel data.
 The 753 m First Pilgrim Road is a stable Rust polyline graded through those same canonical columns.
-Its 10 cm paving, shoulders, 26 cairns/waystones/arches, and alpine Needle Gate destination remain
-editable, collidable, and continuous through every streamed LOD rather than becoming renderer-only
-decals.
+Its 10 cm paving, shoulders, 26 cairns/waystones/arches, five named chapters, and alpine Needle Gate
+destination remain editable, collidable, and continuous through every streamed LOD rather than
+becoming renderer-only decals. Mission Control derives chapter and progress status from the Rust atlas.
 See [docs/architecture.md](docs/architecture.md) for format, persistence, and research decisions.
 
 ## Controls
