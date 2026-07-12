@@ -286,6 +286,12 @@ rock, but the current punctual lights remain unshadowed at the receiver. Thin-wa
 source's finite radius is therefore still a known limitation; edit-aware portal/geodesic gating is the
 next tier rather than pretending this bounded DDA is full voxel global illumination.
 
+Portable cave topology starts with an allocation-free visibility graph capped at 16 cells and 32
+undirected portals. Portal openness is a 32-bit derived mask, and fixed-array Dijkstra queries return
+deterministic geodesic distance with stable cell-index tie breaking. Invalid endpoints, weights, and
+oversized definitions are rejected at construction. The graph persists nothing and names no cave;
+Cinder Vault will supply its exterior/node cells and edit-probed portals in the next integration step.
+
 Placement material is Rust state, selected through the canvas context menu and displayed in the Rust
 header. The browser still transmits only pointer input; right-click uses the selected material and the
 ordinary sparse-edit/SQLite/remesh path, so GlowCrystal is not a renderer-only decoration.

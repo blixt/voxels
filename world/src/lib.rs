@@ -12,6 +12,7 @@ pub mod lod;
 pub mod material;
 pub mod mesh;
 pub mod route;
+pub mod visibility;
 
 pub use cave::{
     CINDER_VAULT_BOUNDS, CINDER_VAULT_CRYSTALS, CINDER_VAULT_EDGES, CINDER_VAULT_MOUTH_ANCHOR_XZ,
@@ -51,6 +52,10 @@ pub use route::{
     first_pilgrim_road_length_voxels, first_pilgrim_road_point_at_distance,
     first_pilgrim_route_anchor, first_pilgrim_route_anchor_count,
     first_pilgrim_route_anchor_for_feature_cell, sample_first_pilgrim_road,
+};
+pub use visibility::{
+    MAX_VISIBILITY_CELLS, MAX_VISIBILITY_PORTALS, PortalState, VisibilityCellId, VisibilityGraph,
+    VisibilityGraphError, VisibilityPortal,
 };
 
 /// One canonical voxel is a 10 cm cube. World-space simulation and rendering use metres.

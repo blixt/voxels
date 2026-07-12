@@ -643,6 +643,11 @@ occluded or clipped candidates. CPU p95 remained 3.7 ms and render-submission p9
 proves that the shared DDA rejects rock before a target, accepts a target before the rock, and handles
 a zero-length segment without leaving the 10 cm grid contract.
 
+The follow-on portable visibility graph adds four host gates for deterministic geodesic routing,
+closed-portal disconnection and reopening, stable equal-cost paths, and hard definition capacities.
+It uses fixed arrays for 16 cells and 32 portals and performs no allocation per query; integration with
+Cinder's authored node/edge graph remains deliberately separate from the proven radial streamer.
+
 The material atlas simultaneously returned to nearest-neighbor sampling for the original pixelated
 style. The sampler contract is host-tested as nearest magnification/minification/mip selection with
 anisotropy 1, while retaining the averaged mip chain for distance stability. An isolated headless
