@@ -2018,7 +2018,8 @@ impl Renderer {
             &shadow_cascades,
         );
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
-        let geometric_lod_focus = self.geometric_lod_focus;
+        let geometric_lod_focus =
+            active_geometric_lod_focus(self.geometric_lod_focus, self.options.far_terrain);
         let shadow_draw_lists: [DrawList; CASCADE_COUNT] = if self.options.shadows {
             std::array::from_fn(|cascade_index| {
                 self.collect_draw_list(&self.chunks, |key, slice| {
@@ -2486,6 +2487,13 @@ fn slice_owned_by_lod(focus: Option<GeometricLodFocus>, key: &MeshKey, slice: &M
             |edge| focus.owns_surface_skirt(level, bounds, edge),
         )
     })
+}
+
+fn active_geometric_lod_focus(
+    focus: Option<GeometricLodFocus>,
+    far_terrain: bool,
+) -> Option<GeometricLodFocus> {
+    focus.filter(|_| far_terrain)
 }
 
 fn coalesce_draw_items(mut items: Vec<DrawItem>) -> Vec<DrawSpan> {
@@ -3200,6 +3208,24 @@ mod tests {
             Some(GeometricLodFocus::snapped(0, 0)),
             &(99, 0, 0, 0),
             &surface
+        ));
+    }
+
+    #[test]
+    fn disabling_far_terrain_keeps_resident_canonical_coverage() {
+        let settled = Some(GeometricLodFocus::snapped(0, 0));
+        let canonical = test_slice(None);
+        let outside_inner_cut = (0, 4, 0, 0);
+
+        assert!(!slice_owned_by_lod(
+            active_geometric_lod_focus(settled, true),
+            &outside_inner_cut,
+            &canonical
+        ));
+        assert!(slice_owned_by_lod(
+            active_geometric_lod_focus(settled, false),
+            &outside_inner_cut,
+            &canonical
         ));
     }
 }
