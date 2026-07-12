@@ -20,6 +20,7 @@ type TypedWorker = Omit<Worker, "onmessage" | "postMessage"> & {
 
 function start(canvas: HTMLCanvasElement): void {
   const fail = (message: string): void => {
+    canvas.classList.add("ui-cursor");
     console.error(`[voxels] ${message}`);
   };
   if (!window.isSecureContext && location.hostname !== "localhost") {
@@ -212,7 +213,11 @@ function start(canvas: HTMLCanvasElement): void {
   };
   window.addEventListener("blur", cancelInput);
   document.addEventListener("pointerlockchange", () => {
-    if (document.pointerLockElement !== canvas) cancelInput();
+    if (document.pointerLockElement === canvas) {
+      canvas.classList.toggle("ui-cursor", uiCursorMode);
+    } else {
+      cancelInput();
+    }
   });
 
   const postResize = (cssWidth: number, cssHeight: number): void => {
