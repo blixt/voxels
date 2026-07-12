@@ -7,6 +7,17 @@ import {
   RUST_SOURCE_DIRS,
 } from "./scripts/build-wasm.ts";
 
+interface RustInputWatcher {
+  on(event: "add" | "change" | "unlink", listener: (file: string) => void): unknown;
+}
+
+export function watchRustInputChanges(
+  watcher: RustInputWatcher,
+  listener: (file: string) => void,
+): void {
+  for (const event of ["add", "change", "unlink"] as const) watcher.on(event, listener);
+}
+
 function rustWasm(release: boolean): Plugin {
   const directories = RUST_SOURCE_DIRS.map((source) => path.resolve(source));
   const files = RUST_INPUT_FILES.map((source) => path.resolve(source));
@@ -22,7 +33,7 @@ function rustWasm(release: boolean): Plugin {
     },
     configureServer(server) {
       for (const input of [...directories, ...files]) server.watcher.add(input);
-      server.watcher.on("change", (file) => {
+      watchRustInputChanges(server.watcher, (file) => {
         if (!isInput(file)) return;
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => {
