@@ -10,6 +10,51 @@ use crate::{
 pub const GENERATOR_VERSION: u32 = 10;
 pub const SEA_LEVEL_VOXELS: i32 = 10;
 
+/// Renderer-neutral continuous atmosphere inputs derived from the same regional weights as terrain.
+/// Every component is normalized to `[0, 1]`; shells may map them to lighting and weather without
+/// duplicating world-generation classification.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AtmosphereSample {
+    pub humidity: f32,
+    pub coldness: f32,
+    pub aerosol: f32,
+    pub cloudiness: f32,
+    pub horizon_warmth: f32,
+    pub haze: f32,
+}
+
+impl AtmosphereSample {
+    pub const fn components(self) -> [f32; 6] {
+        [
+            self.humidity,
+            self.coldness,
+            self.aerosol,
+            self.cloudiness,
+            self.horizon_warmth,
+            self.haze,
+        ]
+    }
+
+    pub fn is_finite_and_normalized(self) -> bool {
+        self.components()
+            .into_iter()
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+    }
+
+    pub fn lerp(self, target: Self, amount: f32) -> Self {
+        let amount = amount.clamp(0.0, 1.0);
+        let blend = |from: f32, to: f32| from + (to - from) * amount;
+        Self {
+            humidity: blend(self.humidity, target.humidity),
+            coldness: blend(self.coldness, target.coldness),
+            aerosol: blend(self.aerosol, target.aerosol),
+            cloudiness: blend(self.cloudiness, target.cloudiness),
+            horizon_warmth: blend(self.horizon_warmth, target.horizon_warmth),
+            haze: blend(self.haze, target.haze),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum SurfaceRegion {
@@ -41,6 +86,7 @@ pub struct SurfaceSample {
     pub moisture: f32,
     pub temperature: f32,
     pub ridge: f32,
+    pub atmosphere: AtmosphereSample,
     pub route: Option<RouteSample>,
 }
 
@@ -57,6 +103,7 @@ struct ColumnProfile {
     ridge: f32,
     region: SurfaceRegion,
     material: Material,
+    atmosphere: AtmosphereSample,
     route: Option<RouteSample>,
 }
 
@@ -353,6 +400,27 @@ impl Generator {
             - ocean_basin)
             .round() as i32;
         let patch = self.value_2d(x, z, 42, 0x3f91);
+        let aerosol = (normalized[3] * 0.62
+            + normalized[4] * 0.30
+            + normalized[5] * 0.92
+            + (1.0 - moisture) * 0.12)
+            .clamp(0.0, 1.0);
+        let atmosphere = AtmosphereSample {
+            humidity: moisture.clamp(0.0, 1.0),
+            coldness: (1.0 - temperature).clamp(0.0, 1.0),
+            aerosol,
+            cloudiness: (moisture * 0.46
+                + normalized[0] * 0.12
+                + normalized[1] * 0.28
+                + normalized[5] * 0.18)
+                .clamp(0.0, 1.0),
+            horizon_warmth: (temperature * 0.34
+                + normalized[3] * 0.38
+                + normalized[4] * 0.30
+                + normalized[5] * 0.16)
+                .clamp(0.0, 1.0),
+            haze: (ocean * 0.24 + moisture * 0.20 + aerosol * 0.56).clamp(0.0, 1.0),
+        };
         let material = if height < SEA_LEVEL_VOXELS + 3 {
             Material::Sand
         } else {
@@ -411,6 +479,7 @@ impl Generator {
             ridge,
             region,
             material,
+            atmosphere,
             route: None,
         }
     }
@@ -458,6 +527,7 @@ impl Generator {
             moisture: profile.moisture,
             temperature: profile.temperature,
             ridge: profile.ridge,
+            atmosphere: profile.atmosphere,
             route: profile.route,
         }
     }
@@ -941,6 +1011,51 @@ mod tests {
             }
         }
         assert_eq!(regions, SurfaceRegion::ALL.into_iter().collect());
+    }
+
+    #[test]
+    fn continuous_atmosphere_is_normalized_smooth_and_regionally_distinct() {
+        let generator = Generator::new(0x5eed_cafe);
+        let mut representative: [Option<AtmosphereSample>; 6] = [None; 6];
+        let mut maximum_adjacent_delta = 0.0f32;
+        for z in (-12_000..=12_000).step_by(389) {
+            for x in (-12_000..=12_000).step_by(389) {
+                let sample = generator.surface_sample(x, z);
+                assert!(sample.atmosphere.is_finite_and_normalized());
+                representative[sample.region as usize].get_or_insert(sample.atmosphere);
+                let adjacent = generator.surface_sample(x + 1, z).atmosphere;
+                maximum_adjacent_delta = sample
+                    .atmosphere
+                    .components()
+                    .into_iter()
+                    .zip(adjacent.components())
+                    .fold(maximum_adjacent_delta, |maximum, (left, right)| {
+                        maximum.max((left - right).abs())
+                    });
+            }
+        }
+        assert!(
+            maximum_adjacent_delta < 0.025,
+            "one-voxel atmosphere jump reached {maximum_adjacent_delta}"
+        );
+        assert!(representative.iter().all(Option::is_some));
+        let representative = representative.map(Option::unwrap);
+        for left in 0..representative.len() {
+            for right in left + 1..representative.len() {
+                let distance: f32 = representative[left]
+                    .components()
+                    .into_iter()
+                    .zip(representative[right].components())
+                    .map(|(left, right)| (left - right).abs())
+                    .sum();
+                assert!(
+                    distance > 0.08,
+                    "region atmosphere fingerprints {left} and {right} nearly matched"
+                );
+            }
+        }
+        let midpoint = representative[0].lerp(representative[5], 0.5);
+        assert!(midpoint.is_finite_and_normalized());
     }
 
     #[test]
