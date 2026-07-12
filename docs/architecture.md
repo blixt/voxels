@@ -152,9 +152,12 @@ write payloads in aligned extents; that complexity is not justified before measu
 
 Multi-tab access is single-writer without excluding other tabs. A Web Lock elects one worker as the
 SQLite/SAH-pool owner; followers proxy typed camera/edit operations over a BroadcastChannel and queue
-for ownership when the leader closes. Follower requests retry across short handoff gaps, while SAH-pool
-installation retries through stale sync-access handles left briefly by rapid reloads. The wire includes
-the seed and generator version so an incompatible build cannot silently answer another world's request.
+for ownership when the leader closes. Follower writes pass through one ordered, coalescing Rust outbox,
+and follower requests tolerate a complete VFS retry window plus worker startup. Teardown closes SQLite,
+pauses the SAH-pool VFS to synchronously release its OPFS handles, and only then resolves the Web Lock;
+queued acquisitions are aborted and the BroadcastChannel is closed. A browser stress test exercises
+rapid reload and ownership handoff on an isolated origin. The wire includes the seed and generator
+version so an incompatible build cannot silently answer another world's request.
 
 ## Performance policy
 
@@ -180,6 +183,11 @@ the seed and generator version so an incompatible build cannot silently answer a
 - SQLite recommends `opfs-sahpool` when performance matters more than concurrent connections and notes
   that OPFS APIs are worker-only:
   <https://sqlite.org/wasm/doc/tip/persistence.md>
+- Web Locks are origin-scoped, available in workers, held for the lifetime of the callback promise, and
+  support aborting queued acquisition:
+  <https://www.w3.org/TR/web-locks/>
+- A synchronous OPFS access handle owns an exclusive file lock until it is closed:
+  <https://fs.spec.whatwg.org/#api-filesystemsyncaccesshandle-close>
 - The Rust SQLite bindings and OPFS VFS expose the SQLite C API and sync-access-handle pool directly to
   `wasm32-unknown-unknown`:
   <https://docs.rs/sqlite-wasm-rs/0.5.5/sqlite_wasm_rs/>

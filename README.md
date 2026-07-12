@@ -12,8 +12,11 @@ greedy meshing, rendering, and persistence boundary.
 4. Run TypeScript checks and tests with `vp check` and `vp test`.
 5. Run host/WASM Rust tests and Clippy with `vp run check:rust`.
 6. Build production WASM and assets with `vp build`; inspect them with `vp preview`.
+7. Stress isolated rapid-refresh and multi-tab OPFS handoff in Chrome with
+   `vp run test:persistence-browser`.
 
 `vp run verify` runs the complete TypeScript, Rust, test, lint, and production-build gate.
+The browser persistence stress test remains explicit because it launches a system Chrome instance.
 `vp run bench:world` runs native Criterion baselines for chunk generation, VXCH encode/decode, and
 greedy meshing. Reports are written under the ignored `target/criterion/` directory.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
