@@ -65,14 +65,15 @@ const SNAPSHOT = {
   localLightCandidates: 80,
   activeLocalLights: 81,
   clippedLocalLights: 82,
-  localLighting: 83,
-  placementMaterial: 84,
-  schemaVersion: 85,
-  sampleCount: 86,
-  droppedSamples: 87,
+  occludedLocalLights: 83,
+  localLighting: 84,
+  placementMaterial: 85,
+  schemaVersion: 86,
+  sampleCount: 87,
+  droppedSamples: 88,
 };
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 88;
+const FRAME_SAMPLE_START = 89;
 const EDIT_SAMPLE_WIDTH = 6;
 
 function percentile(values, fraction) {
@@ -165,6 +166,7 @@ function phaseSummary(captures) {
       candidates: latest[SNAPSHOT.localLightCandidates],
       active: latest[SNAPSHOT.activeLocalLights],
       clipped: latest[SNAPSHOT.clippedLocalLights],
+      occluded: latest[SNAPSHOT.occludedLocalLights],
       enabled: latest[SNAPSHOT.localLighting] === 1,
     },
     placementMaterial: latest[SNAPSHOT.placementMaterial],
@@ -632,6 +634,9 @@ async function caveProfile(page, viewportWidth) {
   if (chamber.localLights.clipped !== 0) {
     violations.push("chamber: natural authored lights exceeded the active budget");
   }
+  if (chamber.localLights.occluded !== 0) {
+    violations.push("chamber: connected authored lights were rejected by voxel visibility");
+  }
 
   if (violations.length > 0) {
     throw new Error(
@@ -723,6 +728,9 @@ async function localLightProfile(page, viewportWidth) {
     violations.push("resident light candidates changed across the render-only toggle");
   }
   if (on.localLights.clipped !== 0) violations.push("authored chamber lights were clipped");
+  if (on.localLights.occluded !== 0) {
+    violations.push("connected chamber lights were rejected by voxel visibility");
+  }
   if (changed.length > 0)
     violations.push(`geometry/resource invariants changed: ${changed.join(", ")}`);
   if (!off.gpu.available || !on.gpu.available) violations.push("GPU timestamps unavailable");
@@ -942,7 +950,7 @@ async function waitForEngine(page) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
     lastSnapshot = snapshot;
     if (
-      snapshot[SNAPSHOT.schemaVersion] === 12 &&
+      snapshot[SNAPSHOT.schemaVersion] === 13 &&
       snapshot[SNAPSHOT.quads] > 0 &&
       snapshot[SNAPSHOT.residentChunks] > 0 &&
       snapshot[SNAPSHOT.pendingJobs] === 0

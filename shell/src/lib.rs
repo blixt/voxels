@@ -6,14 +6,14 @@ mod persist;
 mod web {
     use crate::persist::Store;
     use bytemuck::{Pod, Zeroable};
-    use glam::Vec2;
+    use glam::{Vec2, Vec3};
     use js_sys::Float32Array;
     use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::rc::Rc;
     use voxels_core::{
         CameraState, EnclosureSample, InputState, ProfileAutomation, ProfilePhase, VoxelHit,
-        VoxelPhysics, probe_enclosure, raycast_voxels,
+        VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
     };
     use voxels_render::renderer::Renderer;
     use voxels_render::ui::LiveStats;
@@ -41,7 +41,7 @@ mod web {
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const EDIT_HISTORY_CAPACITY: usize = 64;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 12.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 13.0;
     const MAX_EDIT_TRACKERS: usize = 128;
     const ENCLOSURE_PROBE_INTERVAL_MS: f64 = 100.0;
     const ENCLOSURE_PROBE_DISTANCE_METRES: f32 = 12.0;
@@ -583,6 +583,9 @@ mod web {
                 self.surface_active_focus.set(self.surface_focus.get());
             }
             let render_start = performance_now(performance.as_ref());
+            let edits = self.edits.borrow();
+            let chunks = self.chunks.borrow();
+            let mut light_columns = BTreeMap::new();
             let submitted = renderer.render(
                 dt,
                 &camera,
@@ -626,7 +629,34 @@ mod web {
                     eyes_submerged: camera.fluid_state().eyes_submerged,
                     swimming: camera.fluid_state().swimming,
                 },
+                |position| {
+                    voxel_segment_is_clear(
+                        camera.position,
+                        Vec3::from_array(position),
+                        VOXEL_SIZE_METRES,
+                        |x, y, z| {
+                            let coord = VoxelCoord::new(x, y, z);
+                            let material = edits
+                                .override_at(coord)
+                                .or_else(|| {
+                                    chunks.get(&coord_key(coord.chunk())).map(|chunk| {
+                                        let [local_x, local_y, local_z] = coord.local();
+                                        chunk.get(local_x, local_y, local_z)
+                                    })
+                                })
+                                .unwrap_or_else(|| {
+                                    light_columns
+                                        .entry((x, z))
+                                        .or_insert_with(|| self.generator.column(x, z))
+                                        .sample(y)
+                                });
+                            material.occludes_ambient() && material.emission().is_none()
+                        },
+                    )
+                },
             );
+            drop(chunks);
+            drop(edits);
             let rendered = renderer.diagnostics();
             drop(renderer);
             self.update_edit_convergence(time, submitted);
@@ -1724,6 +1754,7 @@ mod web {
                     render.local_light_candidates as f32,
                     render.active_local_lights as f32,
                     render.clipped_local_lights as f32,
+                    render.occluded_local_lights as f32,
                     if render.local_lighting { 1.0 } else { 0.0 },
                     engine.renderer.borrow().placement_material().id() as f32,
                     SNAPSHOT_SCHEMA_VERSION,

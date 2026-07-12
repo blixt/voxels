@@ -266,8 +266,11 @@ formations. These records are disposable mesh data, not durable world state. A c
 changes only after its replacement GPU upload succeeds and is removed with the active canonical mesh,
 so geometry and lighting cannot disagree during remesh retries or eviction.
 
-The renderer ranks resident candidates by expected camera influence with a stable tie break and writes
-at most 16 lights to a fixed 528-byte uniform at frame binding 6. Each 32-byte light stores world-space
+The renderer ranks resident candidates by expected camera influence with a stable tie break, tests at
+most the strongest 32 against an exact 10 cm camera-to-emitter DDA, and writes at most 16 visible
+lights to a fixed 528-byte uniform at frame binding 6. The shell answers visibility from sparse edits,
+resident canonical chunks, and generated fallback columns; non-emissive opaque voxels block the
+segment while crystals in the same formation do not self-occlude. Each 32-byte light stores world-space
 position/radius and linear radiance/intensity; compile-time Rust layout assertions and WGSL's uniform
 [address-space layout rules](https://www.w3.org/TR/WGSL/#address-space-layout-constraints) keep the
 host and shader representations identical. The fragment path uses a finite-radius smooth window over
@@ -277,6 +280,11 @@ exposure. Mission Control can disable the pass without removing candidates, whil
 resident candidates, active lights, and budget clipping. This bounded forward path is intentionally
 the first tier; logarithmic-Z [clustered forward shading](https://diglib.eg.org/items/6342d4d6-5220-4376-a5c6-a153058f4a3c)
 remains the promotion seam if dense-emitter stress tests outgrow the fixed budget.
+
+Camera-to-source visibility prevents lights in disconnected caves from shining through intervening
+rock, but the current punctual lights remain unshadowed at the receiver. Thin-wall leakage inside a
+source's finite radius is therefore still a known limitation; edit-aware portal/geodesic gating is the
+next tier rather than pretending this bounded DDA is full voxel global illumination.
 
 Placement material is Rust state, selected through the canvas context menu and displayed in the Rust
 header. The browser still transmits only pointer input; right-click uses the selected material and the

@@ -34,6 +34,8 @@ use wgpu::{
 const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 const VIEW_DISTANCE_METRES: f32 = 220.0;
 const MAX_ACTIVE_LOCAL_LIGHTS: usize = 16;
+const MAX_LOCAL_LIGHT_VISIBILITY_TESTS: usize = 32;
+const _: () = assert!(MAX_LOCAL_LIGHT_VISIBILITY_TESTS >= MAX_ACTIVE_LOCAL_LIGHTS);
 const PLACEMENT_MATERIALS: [Material; 4] = [
     Material::Grass,
     Material::Stone,
@@ -206,6 +208,7 @@ pub struct RenderDiagnostics {
     pub local_light_candidates: u32,
     pub active_local_lights: u32,
     pub clipped_local_lights: u32,
+    pub occluded_local_lights: u32,
     pub local_lighting: bool,
 }
 
@@ -1781,13 +1784,19 @@ impl Renderer {
         }
     }
 
-    fn selected_local_lights(&self, camera: &CameraState) -> LocalLightUniform {
+    fn selected_local_lights(
+        &self,
+        camera: &CameraState,
+        mut is_visible: impl FnMut([f32; 3]) -> bool,
+    ) -> (LocalLightUniform, u32) {
         let mut uniform = LocalLightUniform::default();
         let enabled = self.options.local_lighting;
-        let mut ranked = [(f32::NEG_INFINITY, GpuLocalLight::default()); MAX_ACTIVE_LOCAL_LIGHTS];
-        let mut selected = 0usize;
+        let mut ranked =
+            [(f32::NEG_INFINITY, GpuLocalLight::default()); MAX_LOCAL_LIGHT_VISIBILITY_TESTS];
+        let mut ranked_count = 0usize;
         let mut candidates = 0u32;
-        let mut eligible = 0u32;
+        let mut in_range = 0u32;
+        let mut occluded = 0u32;
         for (key, lights) in &self.local_light_candidates {
             if !self.chunks.get(key).is_some_and(|chunk| chunk.active) {
                 continue;
@@ -1807,26 +1816,47 @@ impl Renderer {
                 if distance_squared > selection_radius * selection_radius {
                     continue;
                 }
-                eligible = eligible.saturating_add(1);
+                in_range = in_range.saturating_add(1);
                 let score = light.color_intensity[3] / distance_squared.max(0.15 * 0.15);
-                rank_local_light(&mut ranked, &mut selected, score, *light);
+                rank_local_light(&mut ranked, &mut ranked_count, score, *light);
             }
         }
-        for (destination, (_, light)) in uniform.lights.iter_mut().zip(ranked).take(selected) {
-            *destination = light;
+        let mut selected = 0usize;
+        for (_, light) in ranked.into_iter().take(ranked_count) {
+            if !is_visible([
+                light.position_radius[0],
+                light.position_radius[1],
+                light.position_radius[2],
+            ]) {
+                occluded = occluded.saturating_add(1);
+                continue;
+            }
+            uniform.lights[selected] = light;
+            selected += 1;
+            if selected == MAX_ACTIVE_LOCAL_LIGHTS {
+                break;
+            }
         }
         uniform.metadata = [
             selected as u32,
             candidates,
-            eligible.saturating_sub(selected as u32),
+            in_range
+                .saturating_sub(selected as u32)
+                .saturating_sub(occluded),
             u32::from(enabled),
         ];
-        uniform
+        (uniform, occluded)
     }
 
     /// Encodes and submits one frame, returning `false` when the surface could not be presented.
     #[must_use]
-    pub fn render(&mut self, dt: f32, camera: &CameraState, ui_stats: LiveStats) -> bool {
+    pub fn render(
+        &mut self,
+        dt: f32,
+        camera: &CameraState,
+        ui_stats: LiveStats,
+        local_light_visible: impl FnMut([f32; 3]) -> bool,
+    ) -> bool {
         self.time += dt.min(0.1);
         let environment_response = 1.0 - (-dt.clamp(0.0, 0.1) / 0.85).exp();
         self.environment = self
@@ -1873,7 +1903,8 @@ impl Renderer {
             (self.log_error)(&error);
             self.ui_text_error_reported = true;
         }
-        let local_lights = self.selected_local_lights(camera);
+        let (local_lights, occluded_local_lights) =
+            self.selected_local_lights(camera, local_light_visible);
         self.queue.write_buffer(
             &self.local_light_buffer,
             0,
@@ -2213,6 +2244,7 @@ impl Renderer {
             local_light_candidates: local_lights.metadata[1],
             active_local_lights: local_lights.metadata[0],
             clipped_local_lights: local_lights.metadata[2],
+            occluded_local_lights,
             local_lighting: self.options.local_lighting,
         };
         {
@@ -2427,8 +2459,8 @@ fn local_lights_for_mesh(origin: [i32; 3], mesh: &MeshedChunk) -> Vec<GpuLocalLi
         .collect()
 }
 
-fn rank_local_light(
-    ranked: &mut [(f32, GpuLocalLight); MAX_ACTIVE_LOCAL_LIGHTS],
+fn rank_local_light<const CAPACITY: usize>(
+    ranked: &mut [(f32, GpuLocalLight); CAPACITY],
     count: &mut usize,
     score: f32,
     light: GpuLocalLight,
@@ -2436,10 +2468,10 @@ fn rank_local_light(
     let insertion = (0..*count)
         .find(|index| score > ranked[*index].0)
         .unwrap_or(*count);
-    if insertion >= MAX_ACTIVE_LOCAL_LIGHTS {
+    if insertion >= CAPACITY {
         return;
     }
-    let new_count = (*count + 1).min(MAX_ACTIVE_LOCAL_LIGHTS);
+    let new_count = (*count + 1).min(CAPACITY);
     for index in (insertion + 1..new_count).rev() {
         ranked[index] = ranked[index - 1];
     }

@@ -215,6 +215,26 @@ pub fn raycast_voxels(
     }
 }
 
+/// Returns whether the segment between two metric world-space points crosses no occluding voxel.
+/// This shares the exact canonical-grid traversal used by picking, but deliberately stops at the
+/// target point instead of tracing an unbounded ray. Render hosts can use it for conservative light
+/// or portal visibility without coupling portable simulation to a world implementation.
+pub fn voxel_segment_is_clear(
+    origin: Vec3,
+    target: Vec3,
+    voxel_size_metres: f32,
+    is_occluder: impl FnMut(i32, i32, i32) -> bool,
+) -> bool {
+    if !voxel_size_metres.is_finite() || voxel_size_metres <= 0.0 {
+        return false;
+    }
+    let offset = target - origin;
+    let distance = offset.length();
+    distance.is_finite()
+        && (distance <= f32::EPSILON
+            || raycast_voxels(origin, offset, distance, voxel_size_metres, is_occluder).is_none())
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InputState {
     forward: bool,
@@ -681,6 +701,27 @@ mod tests {
                 == 4)
             .is_none()
         );
+    }
+
+    #[test]
+    fn voxel_segment_visibility_rejects_only_occluders_before_the_target() {
+        let origin = Vec3::new(0.05, 0.05, 0.05);
+        assert!(!voxel_segment_is_clear(
+            origin,
+            Vec3::new(0.85, 0.05, 0.05),
+            0.1,
+            |x, _, _| x == 4,
+        ));
+        assert!(voxel_segment_is_clear(
+            origin,
+            Vec3::new(0.35, 0.05, 0.05),
+            0.1,
+            |x, _, _| x == 4,
+        ));
+        assert!(voxel_segment_is_clear(origin, origin, 0.1, |_, _, _| true));
+        assert!(!voxel_segment_is_clear(origin, origin, 0.0, |_, _, _| {
+            false
+        }));
     }
 
     #[test]

@@ -626,8 +626,8 @@ windows through the Rust Mission Control toggle:
 | Cinder Vault chamber         | Local lights off | Local lights on |    Delta |
 | ---------------------------- | ---------------: | --------------: | -------: |
 | Frame p95                    |           8.9 ms |          8.9 ms |   0.0 ms |
-| World GPU p95                |         1.291 ms |        1.464 ms | 0.173 ms |
-| Active-window GPU p95        |         5.847 ms |        6.196 ms | 0.349 ms |
+| World GPU p95                |         1.154 ms |        1.298 ms | 0.144 ms |
+| Active-window GPU p95        |         5.657 ms |        5.937 ms | 0.281 ms |
 | Candidate / active / clipped |       10 / 0 / 0 |     10 / 10 / 0 |        — |
 
 Both phases retained identical chunks, geometry, draws, and mesh allocation with zero dropped samples.
@@ -635,6 +635,13 @@ The regular three-stop cave gate independently observed 0 active lights on the a
 then 10 in the chamber, with 8.5 / 9.1 / 9.1 ms frame p95 and no pending or stale work. Candidate
 selection remains visible while lighting is disabled, so the A/B proves a render-only cost rather than
 changing residency.
+
+The next exact-head run added authoritative camera-to-emitter DDA visibility, capped at 32 segment
+tests before the 16-light GPU budget. The chamber retained all 10 connected lights and reported zero
+occluded or clipped candidates. CPU p95 remained 3.7 ms and render-submission p95 moved from 3.2 to
+3.3 ms across the off/on windows; frame p95 remained 8.9 ms with zero drops. A portable host test
+proves that the shared DDA rejects rock before a target, accepts a target before the rock, and handles
+a zero-length segment without leaving the 10 cm grid contract.
 
 The material atlas simultaneously returned to nearest-neighbor sampling for the original pixelated
 style. The sampler contract is host-tested as nearest magnification/minification/mip selection with
