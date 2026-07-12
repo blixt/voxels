@@ -30,7 +30,7 @@ mod web {
     const SIMULATION_STEP_SECONDS: f32 = 1.0 / 120.0;
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 2.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 3.0;
     const COAST_WATER_REFERENCE: [i32; 2] = [18_016, 12_896];
     const STREAM_FRAME_BUDGET: FrameBudget = FrameBudget {
         generation: 2,
@@ -270,7 +270,7 @@ mod web {
                     },
                     frame_ms: self.frame_milliseconds.get(),
                     cpu_ms: self.cpu_milliseconds.get(),
-                    gpu_ms: None,
+                    gpu_ms: render.gpu_total_ms,
                     resident_chunks: usize_to_u32(
                         stream.resident + self.surface_resident.borrow().len(),
                     ),
@@ -900,6 +900,12 @@ mod web {
                     engine.simulation_milliseconds.get(),
                     engine.stream_milliseconds.get(),
                     engine.render_milliseconds.get(),
+                    render.gpu_sample_id as f32,
+                    render.gpu_total_ms.unwrap_or(-1.0),
+                    render.gpu_shadow_ms.unwrap_or(-1.0),
+                    render.gpu_world_ms.unwrap_or(-1.0),
+                    render.gpu_water_ms.unwrap_or(-1.0),
+                    render.gpu_ui_ms.unwrap_or(-1.0),
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);

@@ -206,5 +206,28 @@ The renderer now shades its procedural sky at the far depth after opaque terrain
 depth rejection behind the world. Opaque refractive water writes color and depth in one pass rather
 than submitting identical geometry for separate depth and color passes. The measured underwater
 view kept 520 visible water quads and reduced total world draws from 509 to 430 while retaining the
-same 7.03 MiB full-resolution refraction copy. GPU timestamp queries remain future work, so these CPU
-and submission results deliberately make no claim about GPU pass time.
+same 7.03 MiB full-resolution refraction copy. These CPU and submission results predate the GPU
+timestamp instrumentation below and therefore make no claim about GPU pass time.
+
+## 2026-07-12: asynchronous GPU pass timing
+
+The renderer now requests WebGPU's optional `timestamp-query` feature only when the adapter exposes
+it. Twelve pass-boundary timestamps attribute three shadow cascades, opaque world/sky, refractive
+water, and final present/Rust UI work. Results resolve into a four-buffer asynchronous readback ring;
+if every slot is still in flight, that frame simply skips measurement rather than polling or waiting.
+Unsupported adapters continue rendering and report GPU time as unavailable.
+
+System Chrome exposed timestamp queries on the Apple M3 Max. At 1280x720, 4-second release samples
+reported the following GPU active-window and individual-pass distributions:
+
+| Scenario         | Active window p50 / p95 | Shadows p50 / p95 | World p50 / p95 | Water p50 / p95 |   UI p50 / p95 |
+| ---------------- | ----------------------: | ----------------: | --------------: | --------------: | -------------: |
+| Settled forest   |          2.69 / 4.59 ms |    2.57 / 4.63 ms |  0.66 / 1.15 ms |        0 / 0 ms | 0.28 / 0.46 ms |
+| Traversal        |          2.52 / 4.17 ms |    2.34 / 3.97 ms |  0.66 / 0.99 ms |        0 / 0 ms | 0.28 / 0.36 ms |
+| Underwater coast |          1.22 / 2.87 ms |    0.99 / 2.69 ms |  0.37 / 0.63 ms |  0.24 / 0.37 ms | 0.20 / 0.37 ms |
+
+The active window is `max(active pass end) - min(active pass start)`. WebGPU implementations may
+overlap or reorder passes, so individual pass durations are not summed and the interval between world
+and water is not mislabeled as pure refraction-copy cost. The Rust Mission Control GPU field now shows
+the latest completed active-window sample; it remains an explicit unavailable value without adapter
+support.

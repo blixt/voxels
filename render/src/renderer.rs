@@ -11,7 +11,8 @@ use crate::ui::{
 use crate::ui_gpu::{SCENE_FORMAT, UiGpu, texture_sampler_layout};
 use bytemuck::{Pod, Zeroable};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use voxels_core::CameraState;
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, FarTileCoord, MeshedChunk, Quad, RenderLayer, SurfaceBounds,
@@ -20,9 +21,10 @@ use voxels_world::{
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
-    Backends, BindGroup, Buffer, CurrentSurfaceTexture, Device, DeviceDescriptor, Instance,
-    InstanceDescriptor, PowerPreference, PresentMode, Queue, RenderPipeline, RequestAdapterOptions,
-    Surface, SurfaceConfiguration, Texture, TextureFormat, TextureUsages, TextureView,
+    Backends, BindGroup, Buffer, CurrentSurfaceTexture, Device, DeviceDescriptor, Features,
+    Instance, InstanceDescriptor, PowerPreference, PresentMode, QuerySet, Queue, RenderPipeline,
+    RequestAdapterOptions, Surface, SurfaceConfiguration, Texture, TextureFormat, TextureUsages,
+    TextureView,
 };
 
 const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
@@ -31,6 +33,12 @@ const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 const FAR_MATERIAL_FLAG: u32 = 1 << 31;
 const SURFACE_LOD_SHIFT: u32 = 28;
 const FAR_UNDERLAY_OFFSET_METRES: f32 = 0.025;
+const GPU_QUERY_COUNT: u32 = 12;
+const GPU_QUERY_BUFFER_BYTES: u64 = GPU_QUERY_COUNT as u64 * size_of::<u64>() as u64;
+const GPU_RESOLVE_BUFFER_BYTES: u64 = 256;
+const GPU_READBACK_SLOTS: usize = 4;
+const GPU_TIMER_BUFFER_BYTES: u64 =
+    GPU_RESOLVE_BUFFER_BYTES + GPU_QUERY_BUFFER_BYTES * GPU_READBACK_SLOTS as u64;
 type MeshKey = (u8, i32, i32, i32);
 
 #[repr(C)]
@@ -136,6 +144,221 @@ pub struct RenderDiagnostics {
     pub arena_capacity_bytes: u64,
     pub arena_allocated_bytes: u64,
     pub core_gpu_bytes: u64,
+    pub gpu_sample_id: u32,
+    pub gpu_total_ms: Option<f32>,
+    pub gpu_shadow_ms: Option<f32>,
+    pub gpu_world_ms: Option<f32>,
+    pub gpu_water_ms: Option<f32>,
+    pub gpu_ui_ms: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct GpuTimingSample {
+    id: u32,
+    total_ms: f32,
+    shadow_ms: f32,
+    world_ms: f32,
+    water_ms: f32,
+    ui_ms: f32,
+}
+
+#[derive(Default)]
+struct GpuTimingState {
+    next_id: u32,
+    latest: Option<GpuTimingSample>,
+}
+
+struct GpuTimingSlot {
+    buffer: Buffer,
+    available: Arc<AtomicBool>,
+}
+
+struct GpuTimingFrame {
+    query_set: QuerySet,
+    slot: usize,
+    shadows: bool,
+    water: bool,
+}
+
+impl GpuTimingFrame {
+    fn pass(&self, first_query: u32) -> wgpu::RenderPassTimestampWrites<'_> {
+        wgpu::RenderPassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: Some(first_query),
+            end_of_pass_write_index: Some(first_query + 1),
+        }
+    }
+}
+
+struct GpuTimer {
+    query_set: QuerySet,
+    resolve_buffer: Buffer,
+    readback: [GpuTimingSlot; GPU_READBACK_SLOTS],
+    next_slot: usize,
+    timestamp_period: f32,
+    state: Arc<Mutex<GpuTimingState>>,
+}
+
+fn parse_gpu_timestamps(
+    timestamps: &[u64; GPU_QUERY_COUNT as usize],
+    timestamp_period: f32,
+    shadows: bool,
+    water: bool,
+) -> Option<GpuTimingSample> {
+    if !timestamp_period.is_finite() || timestamp_period <= 0.0 {
+        return None;
+    }
+    let elapsed_ms = |start: usize, end: usize| {
+        timestamps[end]
+            .checked_sub(timestamps[start])
+            .map(|ticks| ticks as f32 * timestamp_period / 1_000_000.0)
+            .filter(|milliseconds| milliseconds.is_finite())
+    };
+    let shadow_ms = if shadows {
+        elapsed_ms(0, 1)? + elapsed_ms(2, 3)? + elapsed_ms(4, 5)?
+    } else {
+        0.0
+    };
+    let world_ms = elapsed_ms(6, 7)?;
+    let water_ms = if water { elapsed_ms(8, 9)? } else { 0.0 };
+    let ui_ms = elapsed_ms(10, 11)?;
+    let mut first = timestamps[6].min(timestamps[10]);
+    let mut last = timestamps[7].max(timestamps[11]);
+    if shadows {
+        for (start, end) in [(0, 1), (2, 3), (4, 5)] {
+            first = first.min(timestamps[start]);
+            last = last.max(timestamps[end]);
+        }
+    }
+    if water {
+        first = first.min(timestamps[8]);
+        last = last.max(timestamps[9]);
+    }
+    let total_ms = last.checked_sub(first)? as f32 * timestamp_period / 1_000_000.0;
+    if total_ms > 1_000.0 {
+        return None;
+    }
+    Some(GpuTimingSample {
+        id: 0,
+        total_ms,
+        shadow_ms,
+        world_ms,
+        water_ms,
+        ui_ms,
+    })
+}
+
+impl GpuTimer {
+    fn new(device: &Device, queue: &Queue) -> Option<Self> {
+        let timestamp_period = queue.get_timestamp_period();
+        if !timestamp_period.is_finite() || timestamp_period <= 0.0 {
+            return None;
+        }
+        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("frame GPU timestamps"),
+            ty: wgpu::QueryType::Timestamp,
+            count: GPU_QUERY_COUNT,
+        });
+        let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("frame GPU timestamp resolve"),
+            size: GPU_RESOLVE_BUFFER_BYTES,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = std::array::from_fn(|_| GpuTimingSlot {
+            buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("frame GPU timestamp readback"),
+                size: GPU_QUERY_BUFFER_BYTES,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            available: Arc::new(AtomicBool::new(true)),
+        });
+        Some(Self {
+            query_set,
+            resolve_buffer,
+            readback,
+            next_slot: 0,
+            timestamp_period,
+            state: Arc::new(Mutex::new(GpuTimingState::default())),
+        })
+    }
+
+    fn begin_frame(&mut self, shadows: bool, water: bool) -> Option<GpuTimingFrame> {
+        for offset in 0..GPU_READBACK_SLOTS {
+            let slot = (self.next_slot + offset) % GPU_READBACK_SLOTS;
+            if self.readback[slot]
+                .available
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.next_slot = (slot + 1) % GPU_READBACK_SLOTS;
+                return Some(GpuTimingFrame {
+                    query_set: self.query_set.clone(),
+                    slot,
+                    shadows,
+                    water,
+                });
+            }
+        }
+        None
+    }
+
+    fn resolve(&self, encoder: &mut wgpu::CommandEncoder, frame: &GpuTimingFrame) {
+        encoder.resolve_query_set(
+            &frame.query_set,
+            0..GPU_QUERY_COUNT,
+            &self.resolve_buffer,
+            0,
+        );
+        encoder.copy_buffer_to_buffer(
+            &self.resolve_buffer,
+            0,
+            &self.readback[frame.slot].buffer,
+            0,
+            GPU_QUERY_BUFFER_BYTES,
+        );
+    }
+
+    fn schedule_readback(&self, encoder: &wgpu::CommandEncoder, frame: GpuTimingFrame) {
+        let slot = &self.readback[frame.slot];
+        let buffer = slot.buffer.clone();
+        let callback_buffer = buffer.clone();
+        let available = Arc::clone(&slot.available);
+        let state = Arc::clone(&self.state);
+        let period = self.timestamp_period;
+        encoder.map_buffer_on_submit(&buffer, wgpu::MapMode::Read, .., move |result| {
+            let sample = if result.is_ok() {
+                let mut parsed = None;
+                if let Ok(mapped) = callback_buffer.get_mapped_range(..) {
+                    let mut timestamps = [0u64; GPU_QUERY_COUNT as usize];
+                    for (timestamp, bytes) in timestamps.iter_mut().zip(mapped.chunks_exact(8)) {
+                        let mut raw = [0u8; 8];
+                        raw.copy_from_slice(bytes);
+                        *timestamp = u64::from_le_bytes(raw);
+                    }
+                    drop(mapped);
+                    parsed = parse_gpu_timestamps(&timestamps, period, frame.shadows, frame.water);
+                }
+                callback_buffer.unmap();
+                parsed
+            } else {
+                None
+            };
+            if let Some(mut sample) = sample
+                && let Ok(mut state) = state.lock()
+            {
+                state.next_id = state.next_id.wrapping_add(1).max(1);
+                sample.id = state.next_id;
+                state.latest = Some(sample);
+            }
+            available.store(true, Ordering::Release);
+        });
+    }
+
+    fn latest(&self) -> Option<GpuTimingSample> {
+        self.state.lock().ok().and_then(|state| state.latest)
+    }
 }
 
 pub struct Renderer {
@@ -160,6 +383,7 @@ pub struct Renderer {
     depth_view: TextureView,
     time: f32,
     diagnostics: RenderDiagnostics,
+    gpu_timer: Option<GpuTimer>,
     target_voxel: Option<[i32; 3]>,
     options: RenderOptions,
     environment: OutdoorEnvironment,
@@ -403,10 +627,16 @@ impl Renderer {
             })
             .await
             .map_err(|error| format!("request_adapter: {error:?}"))?;
+        let timestamp_queries = adapter.features().contains(Features::TIMESTAMP_QUERY);
+        let required_features = if timestamp_queries {
+            Features::TIMESTAMP_QUERY
+        } else {
+            Features::empty()
+        };
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor {
                 required_limits: wgpu::Limits::default(),
-                required_features: wgpu::Features::empty(),
+                required_features,
                 ..Default::default()
             })
             .await
@@ -430,6 +660,11 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let options = RenderOptions::default();
+        let gpu_timer = if timestamp_queries {
+            GpuTimer::new(&device, &queue)
+        } else {
+            None
+        };
         let environment = OutdoorEnvironment::default().sanitized();
         let initial_camera = CameraState::default();
         let shadow_gpu = ShadowGpu::new(&device, &initial_camera, environment)?;
@@ -603,6 +838,7 @@ impl Renderer {
             depth_view,
             time: 0.0,
             diagnostics: RenderDiagnostics::default(),
+            gpu_timer,
             target_voxel: None,
             options,
             environment,
@@ -1218,6 +1454,7 @@ impl Renderer {
                 && slice_owned_by_lod(geometric_lod_focus, key, slice)
                 && aabb_visible(slice.bounds_min, slice.bounds_max, view_projection)
         });
+        let refract_water = !water_draw_list.spans.is_empty();
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
         self.shadow_gpu.write_cascades(
@@ -1245,6 +1482,10 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
+        let gpu_frame = self
+            .gpu_timer
+            .as_mut()
+            .and_then(|timer| timer.begin_frame(self.options.shadows, refract_water));
         let mut shadow_draw_calls = 0;
         if self.options.shadows {
             for (cascade_index, draw_list) in shadow_draw_lists.iter().enumerate() {
@@ -1259,7 +1500,9 @@ impl Renderer {
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
+                    timestamp_writes: gpu_frame
+                        .as_ref()
+                        .map(|frame| frame.pass(cascade_index as u32 * 2)),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -1277,7 +1520,6 @@ impl Renderer {
                 }
             }
         }
-        let refract_water = !water_draw_list.spans.is_empty();
         {
             let scene_view = if refract_water {
                 self.ui_gpu.opaque_scene_view()
@@ -1307,7 +1549,7 @@ impl Renderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(6)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1348,7 +1590,7 @@ impl Renderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(8)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1372,6 +1614,7 @@ impl Renderer {
             * u64::from(DirectionalShadowConfig::default().shadow_map_resolution)
             * CASCADE_COUNT as u64
             * 4;
+        let gpu_timing = self.gpu_timer.as_ref().and_then(GpuTimer::latest);
         self.diagnostics = RenderDiagnostics {
             resident_chunks: self.chunks.len() as u32,
             visible_chunks: world_draw_list.mesh_count,
@@ -1406,7 +1649,18 @@ impl Renderer {
                 .capacity_bytes
                 .saturating_add(water_arena.capacity_bytes)
                 .saturating_add(scene_pixels.saturating_mul(20))
-                .saturating_add(shadow_bytes),
+                .saturating_add(shadow_bytes)
+                .saturating_add(if self.gpu_timer.is_some() {
+                    GPU_TIMER_BUFFER_BYTES
+                } else {
+                    0
+                }),
+            gpu_sample_id: gpu_timing.map_or(0, |timing| timing.id),
+            gpu_total_ms: gpu_timing.map(|timing| timing.total_ms),
+            gpu_shadow_ms: gpu_timing.map(|timing| timing.shadow_ms),
+            gpu_world_ms: gpu_timing.map(|timing| timing.world_ms),
+            gpu_water_ms: gpu_timing.map(|timing| timing.water_ms),
+            gpu_ui_ms: gpu_timing.map(|timing| timing.ui_ms),
         };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1421,11 +1675,17 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(10)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             self.ui_gpu.draw(&mut pass);
+        }
+        if let (Some(timer), Some(gpu_frame)) = (self.gpu_timer.as_ref(), gpu_frame.as_ref()) {
+            timer.resolve(&mut encoder, gpu_frame);
+        }
+        if let (Some(timer), Some(gpu_frame)) = (self.gpu_timer.as_ref(), gpu_frame) {
+            timer.schedule_readback(&encoder, gpu_frame);
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
@@ -1856,6 +2116,45 @@ mod tests {
     fn refraction_bandwidth_is_paid_only_for_visible_water() {
         assert_eq!(refraction_copy_bytes(1_280, 720, false), 0);
         assert_eq!(refraction_copy_bytes(1_280, 720, true), 7_372_800);
+    }
+
+    #[test]
+    fn gpu_timestamp_breakdown_uses_only_active_passes() {
+        let timestamps = [
+            1_000_000, 2_000_000, 2_100_000, 3_100_000, 3_200_000, 4_200_000, 4_500_000, 6_500_000,
+            7_000_000, 10_000_000, 10_500_000, 11_500_000,
+        ];
+        let timing = parse_gpu_timestamps(&timestamps, 1.0, true, true)
+            .unwrap_or_else(|| panic!("valid timestamps should parse"));
+        assert!((timing.total_ms - 10.5).abs() < f32::EPSILON);
+        assert!((timing.shadow_ms - 3.0).abs() < f32::EPSILON);
+        assert!((timing.world_ms - 2.0).abs() < f32::EPSILON);
+        assert!((timing.water_ms - 3.0).abs() < f32::EPSILON);
+        assert!((timing.ui_ms - 1.0).abs() < f32::EPSILON);
+
+        let mut skipped = timestamps;
+        skipped[0..6].copy_from_slice(&[90, 80, 70, 60, 50, 40]);
+        skipped[8..10].copy_from_slice(&[30, 20]);
+        let timing = parse_gpu_timestamps(&skipped, 1.0, false, false)
+            .unwrap_or_else(|| panic!("inactive timestamp pairs should be ignored"));
+        assert_eq!(timing.shadow_ms, 0.0);
+        assert_eq!(timing.water_ms, 0.0);
+    }
+
+    #[test]
+    fn gpu_timestamp_parser_rejects_invalid_or_implausible_samples() {
+        let mut timestamps = [0u64; GPU_QUERY_COUNT as usize];
+        for (index, timestamp) in timestamps.iter_mut().enumerate() {
+            *timestamp = index as u64 * 1_000_000;
+        }
+        assert!(parse_gpu_timestamps(&timestamps, 0.0, false, false).is_none());
+        timestamps[7] = timestamps[6] - 1;
+        assert!(parse_gpu_timestamps(&timestamps, 1.0, false, false).is_none());
+        timestamps[7] = timestamps[6] + 1;
+        timestamps[11] = timestamps[6] + 1_100_000_000;
+        assert!(parse_gpu_timestamps(&timestamps, 1.0, false, false).is_none());
+        assert_eq!(GPU_QUERY_BUFFER_BYTES, 96);
+        assert_eq!(GPU_RESOLVE_BUFFER_BYTES % 256, 0);
     }
 
     #[test]

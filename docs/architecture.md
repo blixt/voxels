@@ -229,6 +229,9 @@ collision therefore converge live instead of waiting for a reload.
   <https://developer.nvidia.com/gpugems/gpugems/part-i-natural-effects/chapter-1-effective-water-simulation-physical-models>
 - WebGPU defines the depth-stencil state used by the opaque water color pass:
   <https://gpuweb.github.io/gpuweb/#dictdef-gpudepthstencilstate>
+- WebGPU exposes optional pass-boundary timestamp queries; the renderer requests them only when the
+  adapter advertises support and resolves results through a non-blocking readback ring:
+  <https://gpuweb.github.io/gpuweb/#timestamp>
 
 ## Deliberate non-goals for the conversion
 

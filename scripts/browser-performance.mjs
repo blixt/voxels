@@ -26,12 +26,18 @@ const SNAPSHOT = {
   simulationMs: 41,
   streamMs: 42,
   renderMs: 43,
-  schemaVersion: 44,
-  sampleCount: 45,
-  droppedSamples: 46,
+  gpuSampleId: 44,
+  gpuTotalMs: 45,
+  gpuShadowMs: 46,
+  gpuWorldMs: 47,
+  gpuWaterMs: 48,
+  gpuUiMs: 49,
+  schemaVersion: 50,
+  sampleCount: 51,
+  droppedSamples: 52,
 };
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 47;
+const FRAME_SAMPLE_START = 53;
 
 function percentile(values, fraction) {
   if (values.length === 0) return 0;
@@ -52,8 +58,16 @@ function phaseSummary(captures) {
   const latest = captures.at(-1)?.snapshot;
   if (!latest) throw new Error("performance phase did not capture any samples");
   const samples = captures.flatMap((capture) => capture.samples);
+  const gpuSamples = Array.from(
+    new Map(
+      captures
+        .filter((capture) => capture.gpuSample)
+        .map((capture) => [capture.gpuSample.id, capture.gpuSample]),
+    ).values(),
+  );
   const column = (index) => samples.map((sample) => sample[index]);
   const frameIntervals = column(0);
+  const gpuColumn = (key) => gpuSamples.map((sample) => sample[key]);
   return {
     samples: samples.length,
     droppedSamples: captures.reduce((total, capture) => total + capture.dropped, 0),
@@ -66,6 +80,15 @@ function phaseSummary(captures) {
     simulationMs: summary(column(2)),
     streamingMs: summary(column(3)),
     renderSubmissionMs: summary(column(4)),
+    gpu: {
+      available: gpuSamples.length > 0,
+      samples: gpuSamples.length,
+      totalMs: gpuSamples.length > 0 ? summary(gpuColumn("total")) : null,
+      shadowMs: gpuSamples.length > 0 ? summary(gpuColumn("shadow")) : null,
+      worldMs: gpuSamples.length > 0 ? summary(gpuColumn("world")) : null,
+      waterMs: gpuSamples.length > 0 ? summary(gpuColumn("water")) : null,
+      uiMs: gpuSamples.length > 0 ? summary(gpuColumn("ui")) : null,
+    },
     residentChunks: latest[SNAPSHOT.residentChunks],
     visibleChunks: latest[SNAPSHOT.visibleChunks],
     pendingJobs: latest[SNAPSHOT.pendingJobs],
@@ -103,6 +126,17 @@ async function sample(page, durationMs) {
       snapshot,
       samples,
       dropped: snapshot[SNAPSHOT.droppedSamples],
+      gpuSample:
+        snapshot[SNAPSHOT.gpuSampleId] > 0
+          ? {
+              id: snapshot[SNAPSHOT.gpuSampleId],
+              total: snapshot[SNAPSHOT.gpuTotalMs],
+              shadow: snapshot[SNAPSHOT.gpuShadowMs],
+              world: snapshot[SNAPSHOT.gpuWorldMs],
+              water: snapshot[SNAPSHOT.gpuWaterMs],
+              ui: snapshot[SNAPSHOT.gpuUiMs],
+            }
+          : null,
     });
     await page.waitForTimeout(250);
   }
@@ -119,7 +153,7 @@ async function waitForEngine(page) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
     lastSnapshot = snapshot;
     if (
-      snapshot[SNAPSHOT.schemaVersion] === 2 &&
+      snapshot[SNAPSHOT.schemaVersion] === 3 &&
       snapshot[SNAPSHOT.quads] > 0 &&
       snapshot[SNAPSHOT.residentChunks] > 0 &&
       snapshot[SNAPSHOT.pendingJobs] === 0
