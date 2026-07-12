@@ -106,6 +106,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-performance.mjs --portal-edits",
         cache: false,
       },
+      "profile:portal-streaming": {
+        command: "node scripts/browser-performance.mjs --portal-streaming",
+        cache: false,
+      },
       "test:persistence-browser": {
         command: "node scripts/browser-persistence-test.mjs",
         cache: false,

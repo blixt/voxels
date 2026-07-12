@@ -291,6 +291,10 @@ pub struct LiveStats {
     pub portal_rejected_local_lights: u32,
     pub open_cinder_portals: u32,
     pub cinder_portal_revision: u32,
+    pub stream_interest_requested: u32,
+    pub stream_interest_desired: u32,
+    pub stream_interest_truncated: u32,
+    pub portal_active_chunks: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1222,15 +1226,23 @@ impl MissionControlUi {
                     ),
                 ),
                 (
-                    "LIGHTS / PORTALS",
+                    "LIGHTS / PORTALS / STREAM",
                     format!(
-                        "{}/{} · R{} P{} · {}/7 r{}",
+                        "{}/{} R{} P{} · {}/7 r{} · S{}/{} A{}{}",
                         stats.active_local_lights,
                         stats.local_light_candidates,
                         stats.occluded_local_lights,
                         stats.portal_rejected_local_lights,
                         stats.open_cinder_portals,
                         stats.cinder_portal_revision,
+                        stats.stream_interest_desired,
+                        stats.stream_interest_requested,
+                        stats.portal_active_chunks,
+                        if stats.stream_interest_truncated > 0 {
+                            "!"
+                        } else {
+                            ""
+                        },
                     ),
                 ),
             ]
@@ -1588,6 +1600,10 @@ mod tests {
             portal_rejected_local_lights: 3,
             open_cinder_portals: 6,
             cinder_portal_revision: 2,
+            stream_interest_requested: 80,
+            stream_interest_desired: 72,
+            stream_interest_truncated: 8,
+            portal_active_chunks: 68,
         });
         let base = ui.build_draw_list(viewport());
         assert!(base.text.iter().any(|run| run.text == "18 / 2 f / 31 ms"));
@@ -1597,7 +1613,7 @@ mod tests {
         assert!(
             base.text
                 .iter()
-                .any(|run| run.text == "6/10 · R1 P3 · 6/7 r2")
+                .any(|run| run.text == "6/10 R1 P3 · 6/7 r2 · S72/80 A68!")
         );
         assert!(
             base.text

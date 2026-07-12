@@ -313,6 +313,21 @@ the browser layer only opens an observer tab, requests snapshots, and reloads. B
 same mask from ordinary remote edits, and a fresh worker reconstructs it from SQLite/OPFS without a
 separate persisted topology cache.
 
+Portal-directed streaming remains secondary to the proven radial cylinder. Near Cinder Vault, the
+world crate derives conservative chunk AABBs (including a meshing halo) for every reachable node and
+open edge, sorts them by camera-relative priority, and exposes a fixed 192-coordinate plan with an
+explicit overflow bit. Far from the authored bounds the plan is empty. The runtime normalizes this
+interest deterministically, admits it only after primary coverage, and keeps primary plus secondary
+metadata under the existing 320-chunk ceiling. Requested, normalized, desired, truncated, active,
+and unreachable-active counts make both capacity layers observable.
+
+Fine meshes carry independent radial and portal activation bits. Radial columns activate only after
+their complete vertical coverage is resident; portal coordinates activate atomically by X/Z plan
+column. Closing a portal removes only portal ownership, so an overlapping radial mesh stays visible,
+while unreachable retained allocations stop drawing immediately without requiring a GPU re-upload.
+Replacement uploads preserve the reason mask. Retained resident chunks edited outside the current
+desired set are still allowed to finish remeshing, preventing a permanently queued transaction.
+
 Placement material is Rust state, selected through the canvas context menu and displayed in the Rust
 header. The browser still transmits only pointer input; right-click uses the selected material and the
 ordinary sparse-edit/SQLite/remesh path, so GlowCrystal is not a renderer-only decoration.

@@ -134,7 +134,28 @@ struct ChunkMesh {
     allocation: Allocation,
     quad_count: u32,
     slices: Vec<MeshSlice>,
-    active: bool,
+    activation_mask: u8,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChunkActivationReason {
+    Radial = 1,
+    Portal = 2,
+}
+
+impl ChunkMesh {
+    const fn active(&self) -> bool {
+        self.activation_mask != 0
+    }
+}
+
+const fn update_activation_mask(mask: u8, reason: ChunkActivationReason, active: bool) -> u8 {
+    if active {
+        mask | reason as u8
+    } else {
+        mask & !(reason as u8)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1269,16 +1290,18 @@ impl Renderer {
         }
     }
 
-    pub fn set_chunk_column_active(&mut self, x: i32, z: i32, active: bool) {
-        for (key, chunk) in &mut self.chunks {
-            if key.0 == 0 && key.1 == x && key.3 == z {
-                chunk.active = active;
-            }
-        }
-        for (key, chunk) in &mut self.water_chunks {
-            if key.0 == 0 && key.1 == x && key.3 == z {
-                chunk.active = active;
-            }
+    pub fn set_chunk_activation(
+        &mut self,
+        coord: ChunkCoord,
+        reason: ChunkActivationReason,
+        active: bool,
+    ) {
+        let key = (0, coord.x, coord.y, coord.z);
+        for chunks in [&mut self.chunks, &mut self.water_chunks] {
+            let Some(chunk) = chunks.get_mut(&key) else {
+                continue;
+            };
+            chunk.activation_mask = update_activation_mask(chunk.activation_mask, reason, active);
         }
     }
 
@@ -1809,7 +1832,7 @@ impl Renderer {
         let mut portal_rejected = 0u32;
         let mut visibility_tests = 0u32;
         for (key, lights) in &self.local_light_candidates {
-            if !self.chunks.get(key).is_some_and(|chunk| chunk.active) {
+            if !self.chunks.get(key).is_some_and(ChunkMesh::active) {
                 continue;
             }
             for light in lights {
@@ -2315,7 +2338,7 @@ impl Renderer {
         let mut mesh_count = 0u32;
         let mut quad_count = 0u32;
         for (key, chunk) in chunks {
-            if !chunk.active {
+            if !chunk.active() {
                 continue;
             }
             debug_assert_eq!(
@@ -2388,14 +2411,20 @@ fn upload_mesh_sliced_into(
         return false;
     };
     queue.write_buffer(buffer, u64::from(allocation.offset), bytes);
-    let active = key.0 != 0 || chunks.get(&key).is_some_and(|existing| existing.active);
+    let activation_mask = if key.0 != 0 {
+        u8::MAX
+    } else {
+        chunks
+            .get(&key)
+            .map_or(0, |existing| existing.activation_mask)
+    };
     let old = chunks.insert(
         key,
         ChunkMesh {
             allocation,
             quad_count: gpu_quads.len() as u32,
             slices,
-            active,
+            activation_mask,
         },
     );
     if let Some(old) = old {
@@ -2857,6 +2886,17 @@ fn preferred_format(formats: &[TextureFormat]) -> TextureFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn radial_and_portal_activation_reasons_do_not_disable_each_other() {
+        let radial = update_activation_mask(0, ChunkActivationReason::Radial, true);
+        let both = update_activation_mask(radial, ChunkActivationReason::Portal, true);
+        assert_ne!(both, 0);
+        let portal_only = update_activation_mask(both, ChunkActivationReason::Radial, false);
+        assert_ne!(portal_only, 0);
+        let inactive = update_activation_mask(portal_only, ChunkActivationReason::Portal, false);
+        assert_eq!(inactive, 0);
+    }
 
     fn test_slice(surface_bounds: Option<SurfaceBounds>) -> MeshSlice {
         MeshSlice {

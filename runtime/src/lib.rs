@@ -17,6 +17,7 @@ pub const CHUNK_EDGE_METRES: f32 = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
 
 const MAX_LOAD_RADIUS_CHUNKS: i32 = 64;
 const MAX_VERTICAL_RADIUS_CHUNKS: i32 = 32;
+pub const MAX_SECONDARY_INTEREST_CHUNKS: usize = 192;
 const LATENCY_HISTOGRAM_BUCKETS: usize = 256;
 
 type CoordKey = (i32, i32, i32);
@@ -155,6 +156,10 @@ pub struct StreamDiagnostics {
     pub frame: u64,
     pub tracked: usize,
     pub desired: usize,
+    pub secondary_interest_requested: usize,
+    pub secondary_interest_normalized: usize,
+    pub secondary_interest_desired: usize,
+    pub secondary_interest_truncated: usize,
     pub resident: usize,
     pub generation: StageCounts,
     pub meshing: StageCounts,
@@ -278,6 +283,9 @@ pub struct StreamScheduler {
     config: StreamConfig,
     focus: ChunkCoord,
     focus_initialized: bool,
+    secondary_interest: Vec<ChunkCoord>,
+    secondary_interest_requested: usize,
+    secondary_interest_capacity_truncated: usize,
     entries: BTreeMap<CoordKey, Entry>,
     evictions: Vec<EvictedChunk>,
     next_ticket_serial: u64,
@@ -315,6 +323,9 @@ impl StreamScheduler {
             config,
             focus: ChunkCoord::new(0, 0, 0),
             focus_initialized: false,
+            secondary_interest: Vec::new(),
+            secondary_interest_requested: 0,
+            secondary_interest_capacity_truncated: 0,
             entries: BTreeMap::new(),
             evictions: Vec::new(),
             next_ticket_serial: 1,
@@ -340,11 +351,26 @@ impl StreamScheduler {
     /// smaller than the configured cylinder. Previously tracked chunks survive inside the wider
     /// retention radius when spare capacity exists, preventing boundary thrash.
     pub fn update_focus(&mut self, focus: ChunkCoord) {
-        if self.focus_initialized && self.focus == focus {
+        self.update_focus_with_interest(focus, &[]);
+    }
+
+    /// Rebuilds the primary cylinder plus a bounded, deterministic set of secondary chunks.
+    /// Secondary interest is useful for semantic look-ahead such as connected cave cells. Primary
+    /// coverage always wins, and both sets share the same hard `max_tracked_chunks` ceiling.
+    pub fn update_focus_with_interest(&mut self, focus: ChunkCoord, interest: &[ChunkCoord]) {
+        let (secondary_interest, capacity_truncated) = normalized_interest(focus, interest);
+        if self.focus_initialized
+            && self.focus == focus
+            && self.secondary_interest == secondary_interest
+            && self.secondary_interest_requested == interest.len()
+        {
             return;
         }
         self.focus = focus;
         self.focus_initialized = true;
+        self.secondary_interest = secondary_interest;
+        self.secondary_interest_requested = interest.len();
+        self.secondary_interest_capacity_truncated = capacity_truncated;
         let desired = self.desired_coordinates(focus);
         let desired_keys: BTreeSet<_> = desired.iter().copied().map(coord_key).collect();
 
@@ -355,7 +381,7 @@ impl StreamScheduler {
         let outside_retention: Vec<_> = self
             .entries
             .values()
-            .filter(|entry| !inside_retention(self.config, focus, entry.coord))
+            .filter(|entry| !entry.desired && !inside_retention(self.config, focus, entry.coord))
             .map(|entry| coord_key(entry.coord))
             .collect();
         for key in outside_retention {
@@ -545,6 +571,23 @@ impl StreamScheduler {
             remesh_latency: self.remesh_latency.summary(0),
             ..StreamDiagnostics::default()
         };
+        diagnostics.secondary_interest_requested = self.secondary_interest_requested;
+        diagnostics.secondary_interest_normalized = self.secondary_interest.len();
+        diagnostics.secondary_interest_desired = self
+            .secondary_interest
+            .iter()
+            .filter(|coord| {
+                self.entries
+                    .get(&coord_key(**coord))
+                    .is_some_and(|entry| entry.desired)
+            })
+            .count();
+        diagnostics.secondary_interest_truncated =
+            self.secondary_interest_capacity_truncated.saturating_add(
+                diagnostics
+                    .secondary_interest_normalized
+                    .saturating_sub(diagnostics.secondary_interest_desired),
+            );
         for entry in self.entries.values() {
             diagnostics.desired += usize::from(entry.desired);
             diagnostics.initial_residency_latency.in_flight +=
@@ -589,14 +632,46 @@ impl StreamScheduler {
         }
         candidates.sort_by_key(|coord| priority(focus, *coord));
         candidates.truncate(self.config.max_tracked_chunks);
+        for coord in &self.secondary_interest {
+            if candidates.len() == self.config.max_tracked_chunks {
+                break;
+            }
+            if !candidates.contains(coord) {
+                candidates.push(*coord);
+            }
+        }
         candidates
+    }
+
+    /// True when every desired chunk in a rendered X/Z column has reached resident state.
+    pub fn desired_column_ready(&self, x: i32, z: i32) -> bool {
+        let mut found = false;
+        for entry in self
+            .entries
+            .values()
+            .filter(|entry| entry.desired && entry.coord.x == x && entry.coord.z == z)
+        {
+            found = true;
+            if entry.state != State::Resident {
+                return false;
+            }
+        }
+        found
+    }
+
+    /// Whether a column still owns at least one uploaded mesh, including a stale mesh retained
+    /// transactionally while a replacement is queued.
+    pub fn column_has_renderable_chunk(&self, x: i32, z: i32) -> bool {
+        self.entries
+            .values()
+            .any(|entry| entry.coord.x == x && entry.coord.z == z && entry.ever_resident)
     }
 
     fn start_stage(&mut self, stage: WorkStage, queued: State, budget: usize) -> Vec<WorkTicket> {
         let mut keys: Vec<_> = self
             .entries
             .iter()
-            .filter(|(_, entry)| entry.desired && entry.state == queued)
+            .filter(|(_, entry)| entry.state == queued && (entry.desired || entry.ever_resident))
             .map(|(key, _)| *key)
             .collect();
         keys.sort_by_key(|key| priority(self.focus, coord_from_key(*key)));
@@ -656,6 +731,33 @@ impl StreamScheduler {
             self.total_evictions = increment_nonzero(self.total_evictions);
         }
     }
+}
+
+fn normalized_interest(focus: ChunkCoord, interest: &[ChunkCoord]) -> (Vec<ChunkCoord>, usize) {
+    let mut normalized = Vec::with_capacity(interest.len().min(MAX_SECONDARY_INTEREST_CHUNKS));
+    let mut truncated = 0usize;
+    for coord in interest.iter().copied() {
+        if normalized.contains(&coord) {
+            continue;
+        }
+        if normalized.len() < MAX_SECONDARY_INTEREST_CHUNKS {
+            normalized.push(coord);
+            continue;
+        }
+        let farthest = normalized
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, candidate)| priority(focus, **candidate))
+            .map(|(index, _)| index);
+        if let Some(farthest) = farthest
+            && priority(focus, coord) < priority(focus, normalized[farthest])
+        {
+            normalized[farthest] = coord;
+        }
+        truncated = truncated.saturating_add(1);
+    }
+    normalized.sort_unstable_by_key(|coord| priority(focus, *coord));
+    (normalized, truncated)
 }
 
 const fn coord_key(coord: ChunkCoord) -> CoordKey {
@@ -804,6 +906,198 @@ mod tests {
         scheduler.update_focus(focus);
         assert_eq!(scheduler.diagnostics(), populated);
         assert!(scheduler.drain_evictions().is_empty());
+    }
+
+    #[test]
+    fn secondary_interest_uses_spare_capacity_and_stays_hard_bounded() {
+        let focus = ChunkCoord::new(0, 0, 0);
+        let nearest = ChunkCoord::new(8, 0, 0);
+        let farther = ChunkCoord::new(12, 0, 0);
+        let overflow = ChunkCoord::new(16, 0, 0);
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: 3,
+        });
+        scheduler.update_focus_with_interest(focus, &[overflow, farther, nearest, nearest]);
+
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.desired, 3);
+        assert_eq!(diagnostics.secondary_interest_requested, 4);
+        assert_eq!(diagnostics.secondary_interest_normalized, 3);
+        assert_eq!(diagnostics.secondary_interest_desired, 2);
+        assert_eq!(diagnostics.secondary_interest_truncated, 1);
+        assert!(
+            scheduler
+                .status(nearest)
+                .is_some_and(|status| status.desired)
+        );
+        assert!(
+            scheduler
+                .status(farther)
+                .is_some_and(|status| status.desired)
+        );
+        assert!(scheduler.status(overflow).is_none());
+    }
+
+    #[test]
+    fn secondary_interest_order_and_duplicates_do_not_change_ticket_order() {
+        let focus = ChunkCoord::new(0, 0, 0);
+        let a = ChunkCoord::new(8, 0, 0);
+        let b = ChunkCoord::new(-8, 0, 0);
+        let c = ChunkCoord::new(0, -2, 8);
+        let config = StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: 4,
+        };
+        let mut first = scheduler(config);
+        let mut second = scheduler(config);
+        first.update_focus_with_interest(focus, &[c, a, b, a]);
+        second.update_focus_with_interest(focus, &[b, c, a]);
+        let budget = FrameBudget {
+            generation: 4,
+            ..FrameBudget::default()
+        };
+        assert_eq!(first.schedule_frame(budget), second.schedule_frame(budget));
+    }
+
+    #[test]
+    fn secondary_interest_capacity_truncation_is_observable() {
+        let focus = ChunkCoord::new(0, 0, 0);
+        let interest: Vec<_> = (1..=MAX_SECONDARY_INTEREST_CHUNKS + 8)
+            .map(|x| ChunkCoord::new(x as i32, 0, 0))
+            .collect();
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: MAX_SECONDARY_INTEREST_CHUNKS + 1,
+        });
+        scheduler.update_focus_with_interest(focus, &interest);
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.secondary_interest_requested, interest.len());
+        assert_eq!(
+            diagnostics.secondary_interest_normalized,
+            MAX_SECONDARY_INTEREST_CHUNKS
+        );
+        assert_eq!(
+            diagnostics.secondary_interest_desired,
+            MAX_SECONDARY_INTEREST_CHUNKS
+        );
+        assert_eq!(diagnostics.secondary_interest_truncated, 8);
+    }
+
+    #[test]
+    fn changed_secondary_interest_evicts_old_lookahead_outside_retention() {
+        let focus = ChunkCoord::new(0, 0, 0);
+        let old = ChunkCoord::new(8, 0, 0);
+        let new = ChunkCoord::new(-8, 0, 0);
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: 2,
+        });
+        scheduler.update_focus_with_interest(focus, &[old]);
+        scheduler.update_focus_with_interest(focus, &[new]);
+
+        assert!(scheduler.status(old).is_none());
+        assert!(scheduler.status(new).is_some_and(|status| status.desired));
+        assert!(
+            scheduler
+                .drain_evictions()
+                .iter()
+                .any(|eviction| eviction.coord == old)
+        );
+    }
+
+    #[test]
+    fn desired_column_readiness_includes_secondary_vertical_chunks() {
+        let focus = ChunkCoord::new(0, 0, 0);
+        let lookahead = ChunkCoord::new(8, -2, 0);
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: 2,
+        });
+        scheduler.update_focus_with_interest(focus, &[lookahead]);
+        assert!(!scheduler.desired_column_ready(8, 0));
+
+        for _ in 0..3 {
+            let work = scheduler.schedule_frame(FrameBudget {
+                generation: 2,
+                meshing: 2,
+                upload: 2,
+            });
+            for ticket in work
+                .generation
+                .iter()
+                .chain(&work.meshing)
+                .chain(&work.upload)
+            {
+                let _ = scheduler.complete(*ticket);
+            }
+        }
+        assert!(scheduler.desired_column_ready(8, 0));
+        assert!(!scheduler.desired_column_ready(7, 0));
+    }
+
+    #[test]
+    fn edited_retained_resident_chunk_cannot_strand_remesh_work() {
+        let focus = ChunkCoord::new(0, 0, 0);
+        let retained = ChunkCoord::new(1, 0, 0);
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 2,
+            max_tracked_chunks: 2,
+        });
+        scheduler.update_focus_with_interest(focus, &[retained]);
+        advance_to_resident(&mut scheduler, focus);
+        advance_to_resident(&mut scheduler, retained);
+        scheduler.update_focus(focus);
+        assert!(
+            scheduler
+                .status(retained)
+                .is_some_and(|status| { !status.desired && status.state == ChunkState::Resident })
+        );
+
+        scheduler.mark_voxel_edited(VoxelCoord::new(CHUNK_EDGE as i32 + 8, 4, 4));
+        let meshing = scheduler.schedule_frame(FrameBudget {
+            meshing: 1,
+            ..FrameBudget::default()
+        });
+        assert_eq!(
+            meshing.meshing.first().map(|ticket| ticket.coord),
+            Some(retained)
+        );
+        assert_eq!(
+            scheduler.complete(meshing.meshing[0]),
+            CompletionStatus::Accepted
+        );
+        let upload = scheduler.schedule_frame(FrameBudget {
+            upload: 1,
+            ..FrameBudget::default()
+        });
+        assert_eq!(
+            upload.upload.first().map(|ticket| ticket.coord),
+            Some(retained)
+        );
+        assert_eq!(
+            scheduler.complete(upload.upload[0]),
+            CompletionStatus::Accepted
+        );
+        assert!(
+            scheduler
+                .status(retained)
+                .is_some_and(|status| { !status.desired && status.state == ChunkState::Resident })
+        );
+        assert_eq!(scheduler.diagnostics().meshing.queued, 0);
+        assert_eq!(scheduler.diagnostics().upload.queued, 0);
     }
 
     #[test]

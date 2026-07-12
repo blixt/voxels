@@ -15,7 +15,7 @@ mod web {
         CameraState, EnclosureSample, InputState, ProfileAutomation, ProfilePhase, VoxelHit,
         VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
     };
-    use voxels_render::renderer::{LocalLightVisibility, Renderer};
+    use voxels_render::renderer::{ChunkActivationReason, LocalLightVisibility, Renderer};
     use voxels_render::ui::LiveStats;
     use voxels_runtime::{
         ChunkState, FrameBudget, StreamConfig, StreamScheduler, SurfaceFocusAction,
@@ -23,15 +23,16 @@ mod web {
     };
     use voxels_world::{
         CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT, CINDER_VAULT_NODES, CINDER_VAULT_PORTAL_COUNT,
-        Chunk, ChunkCoord, EditMap, Generator, Material, MeshedChunk, PortalState, SkylineFeature,
-        SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
-        cinder_vault_portal_is_open, cinder_vault_portal_probe_voxel, cinder_vault_portal_state,
-        cinder_vault_portals_affected_by_voxel, cinder_vault_visibility_cell,
-        cinder_vault_visibility_graph, first_pilgrim_road_length_voxels,
-        first_pilgrim_route_anchor, first_pilgrim_route_anchor_count,
-        generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, mesh_chunk,
-        pilgrim_chapter_at_distance, sample_cinder_vault, sample_first_pilgrim_road,
-        surface_tiles_affected_by_voxel,
+        CaveStreamInterest, Chunk, ChunkCoord, EditMap, Generator, Material, MeshedChunk,
+        PortalState, SkylineFeature, SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord,
+        VOXEL_SIZE_METRES, VisibilityCellId, VoxelCoord, cinder_vault_portal_is_open,
+        cinder_vault_portal_probe_voxel, cinder_vault_portal_state,
+        cinder_vault_portals_affected_by_voxel, cinder_vault_stream_interest,
+        cinder_vault_visibility_cell, cinder_vault_visibility_graph,
+        first_pilgrim_road_length_voxels, first_pilgrim_route_anchor,
+        first_pilgrim_route_anchor_count, generate_edited_surface_tile_mesh,
+        generate_edited_water_tile_mesh, mesh_chunk, pilgrim_chapter_at_distance,
+        sample_cinder_vault, sample_first_pilgrim_road, surface_tiles_affected_by_voxel,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -44,7 +45,7 @@ mod web {
     const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 6;
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const EDIT_HISTORY_CAPACITY: usize = 64;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 14.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 15.0;
     const MAX_EDIT_TRACKERS: usize = 128;
     const ENCLOSURE_PROBE_INTERVAL_MS: f64 = 100.0;
     const ENCLOSURE_PROBE_DISTANCE_METRES: f32 = 12.0;
@@ -296,6 +297,10 @@ mod web {
         cinder_portal_state: Cell<PortalState>,
         cinder_portal_dirty: Cell<u8>,
         cinder_portal_revision: Cell<u32>,
+        cinder_stream_key: Cell<Option<(ChunkCoord, VisibilityCellId, u32)>>,
+        cinder_stream_interest: Cell<CaveStreamInterest>,
+        radial_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
+        portal_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         route_tour_index: Cell<u16>,
         cave_tour_index: Cell<u8>,
         landmark_tour_index: Cell<u8>,
@@ -707,6 +712,10 @@ mod web {
                         .get()
                         .open_count(CINDER_VAULT_PORTAL_COUNT),
                     cinder_portal_revision: self.cinder_portal_revision.get(),
+                    stream_interest_requested: usize_to_u32(stream.secondary_interest_requested),
+                    stream_interest_desired: usize_to_u32(stream.secondary_interest_desired),
+                    stream_interest_truncated: usize_to_u32(stream.secondary_interest_truncated),
+                    portal_active_chunks: usize_to_u32(self.portal_active_chunks.borrow().len()),
                 },
                 |position, maximum_geodesic_metres| {
                     let light_voxel = (Vec3::from_array(position) / VOXEL_SIZE_METRES)
@@ -825,11 +834,26 @@ mod web {
 
         fn stream_world(&self, camera: &CameraState) {
             let focus = world_to_chunk(camera.position);
+            let camera_voxel = (camera.position / VOXEL_SIZE_METRES).floor().as_ivec3();
+            let visibility_cell =
+                cinder_vault_visibility_cell(camera_voxel.x, camera_voxel.y, camera_voxel.z);
+            let stream_key = (focus, visibility_cell, self.cinder_portal_revision.get());
+            let interest_changed = self.cinder_stream_key.get() != Some(stream_key);
+            if interest_changed {
+                self.cinder_stream_interest
+                    .set(cinder_vault_stream_interest(
+                        [camera_voxel.x, camera_voxel.y, camera_voxel.z],
+                        self.cinder_portal_state.get(),
+                    ));
+                self.cinder_stream_key.set(Some(stream_key));
+            }
+            let interest = self.cinder_stream_interest.get();
             let work = {
                 let mut scheduler = self.scheduler.borrow_mut();
-                scheduler.update_focus(focus);
+                scheduler.update_focus_with_interest(focus, interest.as_slice());
                 scheduler.schedule_frame(STREAM_FRAME_BUDGET)
             };
+            let uploaded = !work.upload.is_empty();
 
             for ticket in work.generation {
                 let mut chunk = self.generator.generate_chunk(ticket.coord);
@@ -874,7 +898,6 @@ mod web {
                 };
                 if self.renderer.borrow_mut().upload_chunk(ticket.coord, &mesh) {
                     let _ = self.scheduler.borrow_mut().complete(ticket);
-                    self.update_render_ready_column(ticket.coord);
                 } else {
                     self.pending_meshes
                         .borrow_mut()
@@ -886,6 +909,7 @@ mod web {
                 }
             }
             let evictions = self.scheduler.borrow_mut().drain_evictions();
+            let evicted = !evictions.is_empty();
             if !evictions.is_empty() {
                 let mut chunks = self.chunks.borrow_mut();
                 let mut pending = self.pending_meshes.borrow_mut();
@@ -893,26 +917,114 @@ mod web {
                 for eviction in evictions {
                     chunks.remove(&coord_key(eviction.coord));
                     pending.remove(&coord_key(eviction.coord));
-                    renderer.set_chunk_column_active(eviction.coord.x, eviction.coord.z, false);
                     renderer.remove_chunk(eviction.coord);
                 }
+            }
+            if interest_changed || uploaded || evicted {
+                self.reconcile_chunk_activation(focus, interest);
             }
             self.stream_surface_lods(camera.position);
         }
 
-        fn update_render_ready_column(&self, coord: ChunkCoord) {
+        fn reconcile_chunk_activation(&self, focus: ChunkCoord, interest: CaveStreamInterest) {
             let scheduler = self.scheduler.borrow();
-            let focus = scheduler.focus();
-            let vertical = scheduler.config().vertical_radius_chunks;
-            let ready = (-vertical..=vertical).all(|dy| {
-                scheduler
-                    .status(ChunkCoord::new(coord.x, focus.y + dy, coord.z))
-                    .is_some_and(|status| status.desired && status.state == ChunkState::Resident)
-            });
+            let config = scheduler.config();
+            let mut radial = BTreeSet::new();
+            for dz in -config.load_radius_chunks..=config.load_radius_chunks {
+                for dx in -config.load_radius_chunks..=config.load_radius_chunks {
+                    if i64::from(dx) * i64::from(dx) + i64::from(dz) * i64::from(dz)
+                        > i64::from(config.load_radius_chunks)
+                            * i64::from(config.load_radius_chunks)
+                    {
+                        continue;
+                    }
+                    let Some(x) = focus.x.checked_add(dx) else {
+                        continue;
+                    };
+                    let Some(z) = focus.z.checked_add(dz) else {
+                        continue;
+                    };
+                    let column: Vec<_> = (-config.vertical_radius_chunks
+                        ..=config.vertical_radius_chunks)
+                        .filter_map(|dy| focus.y.checked_add(dy).map(|y| ChunkCoord::new(x, y, z)))
+                        .collect();
+                    if column.iter().all(|coord| {
+                        scheduler.status(*coord).is_some_and(|status| {
+                            status.desired && status.state == ChunkState::Resident
+                        })
+                    }) {
+                        radial.extend(column.into_iter().map(coord_key));
+                    }
+                }
+            }
+            // Preserve the old radial reason for retained resident meshes until the scheduler
+            // actually evicts them. This carries visible coverage across small focus moves while
+            // new columns become atomically ready, matching the retention hysteresis contract.
+            for key in self.radial_active_chunks.borrow().iter().copied() {
+                if scheduler
+                    .status(ChunkCoord::new(key.0, key.1, key.2))
+                    .is_some()
+                {
+                    radial.insert(key);
+                }
+            }
+
+            let mut portal_columns = BTreeMap::<(i32, i32), Vec<ChunkCoord>>::new();
+            for coord in interest.as_slice() {
+                if scheduler
+                    .status(*coord)
+                    .is_some_and(|status| status.desired)
+                {
+                    portal_columns
+                        .entry((coord.x, coord.z))
+                        .or_default()
+                        .push(*coord);
+                }
+            }
+            let mut portal = BTreeSet::new();
+            for coords in portal_columns.values() {
+                if coords.iter().all(|coord| {
+                    scheduler
+                        .status(*coord)
+                        .is_some_and(|status| status.state == ChunkState::Resident)
+                }) {
+                    portal.extend(coords.iter().copied().map(coord_key));
+                }
+            }
             drop(scheduler);
-            self.renderer
-                .borrow_mut()
-                .set_chunk_column_active(coord.x, coord.z, ready);
+            self.reconcile_activation_reason(
+                &self.radial_active_chunks,
+                radial,
+                ChunkActivationReason::Radial,
+            );
+            self.reconcile_activation_reason(
+                &self.portal_active_chunks,
+                portal,
+                ChunkActivationReason::Portal,
+            );
+        }
+
+        fn reconcile_activation_reason(
+            &self,
+            current: &RefCell<BTreeSet<(i32, i32, i32)>>,
+            next: BTreeSet<(i32, i32, i32)>,
+            reason: ChunkActivationReason,
+        ) {
+            let mut current = current.borrow_mut();
+            let removed: Vec<_> = current.difference(&next).copied().collect();
+            let added: Vec<_> = next.difference(&current).copied().collect();
+            *current = next;
+            drop(current);
+            if removed.is_empty() && added.is_empty() {
+                return;
+            }
+            let mut renderer = self.renderer.borrow_mut();
+            for (x, y, z) in removed {
+                renderer.set_chunk_activation(ChunkCoord::new(x, y, z), reason, false);
+            }
+            for (x, y, z) in added {
+                renderer.set_chunk_activation(ChunkCoord::new(x, y, z), reason, true);
+            }
         }
 
         fn surface_lod_counts(&self) -> [u32; 4] {
@@ -1805,6 +1917,20 @@ mod web {
                     .sum::<usize>();
                 let edit_logical_bytes = engine.edits.borrow().logical_bytes();
                 let profile = *engine.profile.borrow();
+                let stream_interest = engine.cinder_stream_interest.get();
+                let stream_interest_keys: BTreeSet<_> = stream_interest
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .map(coord_key)
+                    .collect();
+                let portal_active = engine.portal_active_chunks.borrow();
+                let portal_active_columns: BTreeSet<_> =
+                    portal_active.iter().map(|(x, _, z)| (*x, *z)).collect();
+                let unreachable_portal_active = portal_active
+                    .iter()
+                    .filter(|key| !stream_interest_keys.contains(key))
+                    .count();
                 values.extend_from_slice(&[
                     camera.position.x,
                     camera.position.y,
@@ -1914,6 +2040,18 @@ mod web {
                     engine.cinder_portal_revision.get() as f32,
                     if render.local_lighting { 1.0 } else { 0.0 },
                     engine.renderer.borrow().placement_material().id() as f32,
+                    diagnostics.secondary_interest_requested as f32,
+                    diagnostics.secondary_interest_normalized as f32,
+                    diagnostics.secondary_interest_desired as f32,
+                    diagnostics.secondary_interest_truncated as f32,
+                    if stream_interest.overflowed() {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    portal_active.len() as f32,
+                    portal_active_columns.len() as f32,
+                    unreachable_portal_active as f32,
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
@@ -2077,6 +2215,10 @@ mod web {
             cinder_portal_state: Cell::new(cinder_portal_state),
             cinder_portal_dirty: Cell::new(0),
             cinder_portal_revision: Cell::new(0),
+            cinder_stream_key: Cell::new(None),
+            cinder_stream_interest: Cell::new(CaveStreamInterest::empty()),
+            radial_active_chunks: RefCell::new(BTreeSet::new()),
+            portal_active_chunks: RefCell::new(BTreeSet::new()),
             route_tour_index: Cell::new(0),
             cave_tour_index: Cell::new(0),
             landmark_tour_index: Cell::new(0),

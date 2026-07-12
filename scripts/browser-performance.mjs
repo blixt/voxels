@@ -7,6 +7,7 @@ const FAILURE =
 const SNAPSHOT = {
   quads: 6,
   residentChunks: 8,
+  trackedChunks: 9,
   visibleChunks: 10,
   drawCalls: 11,
   arenaAllocatedMiB: 13,
@@ -72,12 +73,20 @@ const SNAPSHOT = {
   cinderPortalRevision: 87,
   localLighting: 88,
   placementMaterial: 89,
-  schemaVersion: 90,
-  sampleCount: 91,
-  droppedSamples: 92,
+  streamInterestRequested: 90,
+  streamInterestNormalized: 91,
+  streamInterestDesired: 92,
+  streamInterestTruncated: 93,
+  streamPlanOverflow: 94,
+  portalActiveChunks: 95,
+  portalActiveColumns: 96,
+  unreachablePortalActive: 97,
+  schemaVersion: 98,
+  sampleCount: 99,
+  droppedSamples: 100,
 };
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 93;
+const FRAME_SAMPLE_START = 101;
 const EDIT_SAMPLE_WIDTH = 6;
 
 function percentile(values, fraction) {
@@ -178,6 +187,16 @@ function phaseSummary(captures) {
     cinderPortals: {
       open: latest[SNAPSHOT.openCinderPortals],
       revision: latest[SNAPSHOT.cinderPortalRevision],
+    },
+    portalStreaming: {
+      requested: latest[SNAPSHOT.streamInterestRequested],
+      normalized: latest[SNAPSHOT.streamInterestNormalized],
+      desired: latest[SNAPSHOT.streamInterestDesired],
+      truncated: latest[SNAPSHOT.streamInterestTruncated],
+      planOverflow: latest[SNAPSHOT.streamPlanOverflow] === 1,
+      activeChunks: latest[SNAPSHOT.portalActiveChunks],
+      activeColumns: latest[SNAPSHOT.portalActiveColumns],
+      unreachableActive: latest[SNAPSHOT.unreachablePortalActive],
     },
     placementMaterial: latest[SNAPSHOT.placementMaterial],
     loadLatencyFrames: {
@@ -416,6 +435,126 @@ async function cavePortalEditPersistenceProfile(page, context) {
       persistedEdits: restoredReload.edit.currentEdits,
     },
   };
+}
+
+async function waitForPortalStreaming(page, label, expectedActive) {
+  return waitForSnapshot(
+    page,
+    label,
+    (next) => {
+      const snapshot = next.snapshot;
+      const requested = snapshot[SNAPSHOT.streamInterestRequested];
+      const desired = snapshot[SNAPSHOT.streamInterestDesired];
+      const active = snapshot[SNAPSHOT.portalActiveChunks];
+      return (
+        snapshot[SNAPSHOT.pendingJobs] === 0 &&
+        snapshot[SNAPSHOT.streamPlanOverflow] === 0 &&
+        snapshot[SNAPSHOT.streamInterestTruncated] === 0 &&
+        snapshot[SNAPSHOT.unreachablePortalActive] === 0 &&
+        requested === snapshot[SNAPSHOT.streamInterestNormalized] &&
+        desired === requested &&
+        active === desired &&
+        (expectedActive ? active > 0 : active === 0)
+      );
+    },
+    60_000,
+  );
+}
+
+async function cavePortalStreamingProfile(page, viewportWidth) {
+  const far = await waitForPortalStreaming(page, "far exterior portal streaming", false);
+
+  await visitCinderVault(page, viewportWidth);
+  const approach = await waitForPortalStreaming(page, "Cinder approach portal streaming", true);
+  await visitCinderVault(page, viewportWidth);
+  const descent = await waitForPortalStreaming(page, "Cinder descent portal streaming", true);
+  await visitCinderVault(page, viewportWidth);
+  const chamber = await waitForPortalStreaming(page, "Cinder chamber portal streaming", true);
+  await visitCinderVault(page, viewportWidth);
+  const overhead = await waitForPortalStreaming(page, "Cinder overhead portal streaming", true);
+
+  await page.evaluate(() => globalThis.__VOXELS__.profile(3));
+  const sealedOutside = await waitForSnapshot(
+    page,
+    "sealed exterior portal streaming",
+    (next) =>
+      next.edit.currentEdits === 25 &&
+      next.edit.inFlight === 0 &&
+      next.snapshot[SNAPSHOT.openCinderPortals] === 6 &&
+      next.snapshot[SNAPSHOT.streamInterestRequested] === 0 &&
+      next.snapshot[SNAPSHOT.portalActiveChunks] === 0 &&
+      next.snapshot[SNAPSHOT.unreachablePortalActive] === 0 &&
+      next.snapshot[SNAPSHOT.pendingJobs] === 0,
+    60_000,
+  );
+
+  for (let stop = 0; stop < 3; stop += 1) await visitCinderVault(page, viewportWidth);
+  const sealedInside = await waitForPortalStreaming(
+    page,
+    "sealed chamber internal portal streaming",
+    true,
+  );
+  await page.evaluate(() => globalThis.__VOXELS__.profile(4));
+  const restoredInside = await waitForSnapshot(
+    page,
+    "restored chamber portal streaming",
+    (next) =>
+      next.edit.currentEdits === 0 &&
+      next.edit.inFlight === 0 &&
+      next.snapshot[SNAPSHOT.openCinderPortals] === 7 &&
+      next.snapshot[SNAPSHOT.streamPlanOverflow] === 0 &&
+      next.snapshot[SNAPSHOT.streamInterestTruncated] === 0 &&
+      next.snapshot[SNAPSHOT.unreachablePortalActive] === 0 &&
+      next.snapshot[SNAPSHOT.portalActiveChunks] ===
+        next.snapshot[SNAPSHOT.streamInterestDesired] &&
+      next.snapshot[SNAPSHOT.streamInterestDesired] ===
+        next.snapshot[SNAPSHOT.streamInterestRequested] &&
+      next.snapshot[SNAPSHOT.pendingJobs] === 0,
+    60_000,
+  );
+
+  const snapshots = {
+    far: far.snapshot,
+    approach: approach.snapshot,
+    descent: descent.snapshot,
+    chamber: chamber.snapshot,
+    overhead: overhead.snapshot,
+    sealedOutside: sealedOutside.snapshot,
+    sealedInside: sealedInside.snapshot,
+    restoredInside: restoredInside.snapshot,
+  };
+  const summarize = (snapshot) => ({
+    tracked: snapshot[SNAPSHOT.trackedChunks],
+    requested: snapshot[SNAPSHOT.streamInterestRequested],
+    desired: snapshot[SNAPSHOT.streamInterestDesired],
+    activeChunks: snapshot[SNAPSHOT.portalActiveChunks],
+    activeColumns: snapshot[SNAPSHOT.portalActiveColumns],
+    openPortals: snapshot[SNAPSHOT.openCinderPortals],
+    revision: snapshot[SNAPSHOT.cinderPortalRevision],
+    truncated: snapshot[SNAPSHOT.streamInterestTruncated],
+    unreachableActive: snapshot[SNAPSHOT.unreachablePortalActive],
+  });
+  const result = Object.fromEntries(
+    Object.entries(snapshots).map(([name, snapshot]) => [name, summarize(snapshot)]),
+  );
+  const performance = phaseSummary(await sample(page, 4_000));
+  const violations = [];
+  for (const [name, phase] of Object.entries(result)) {
+    if (phase.tracked > 320) violations.push(`${name}: tracked chunk bound exceeded`);
+    if (phase.truncated !== 0) violations.push(`${name}: stream interest was truncated`);
+    if (phase.unreachableActive !== 0) {
+      violations.push(`${name}: unreachable portal chunks remained active`);
+    }
+  }
+  if (performance.frameMs.p95 > 12) violations.push("settled frame p95 exceeded 12ms");
+  if (performance.frameMs.above33_33ms > 0) violations.push("a settled frame exceeded 33.33ms");
+  if (performance.droppedSamples > 0) violations.push("settled frame samples were dropped");
+  if (violations.length > 0) {
+    throw new Error(
+      `portal streaming profile violations: ${violations.join(", ")}; ${JSON.stringify({ phases: result, performance })}`,
+    );
+  }
+  return { phases: result, performance };
 }
 
 async function sample(page, durationMs) {
@@ -1098,7 +1237,7 @@ async function waitForEngine(page) {
     const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
     lastSnapshot = snapshot;
     if (
-      snapshot[SNAPSHOT.schemaVersion] === 14 &&
+      snapshot[SNAPSHOT.schemaVersion] === 15 &&
       snapshot[SNAPSHOT.quads] > 0 &&
       snapshot[SNAPSHOT.residentChunks] > 0 &&
       snapshot[SNAPSHOT.pendingJobs] === 0
@@ -1154,6 +1293,7 @@ const caves = process.argv.includes("--caves");
 const localLights = process.argv.includes("--lights");
 const cavePortals = process.argv.includes("--portals");
 const cavePortalEdits = process.argv.includes("--portal-edits");
+const cavePortalStreaming = process.argv.includes("--portal-streaming");
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
@@ -1201,6 +1341,8 @@ try {
     scenarios = { edits: await editProfile(page) };
   } else if (cavePortalEdits) {
     scenarios = { cavePortalEdits: await cavePortalEditPersistenceProfile(page, context) };
+  } else if (cavePortalStreaming) {
+    scenarios = { cavePortalStreaming: await cavePortalStreamingProfile(page, viewport.width) };
   } else if (sustained) {
     scenarios = { sustained: await sustainedProfile(page) };
   } else if (materials) {

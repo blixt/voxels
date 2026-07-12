@@ -645,8 +645,8 @@ a zero-length segment without leaving the 10 cm grid contract.
 
 The follow-on portable visibility graph adds four host gates for deterministic geodesic routing,
 closed-portal disconnection and reopening, stable equal-cost paths, and hard definition capacities.
-It uses fixed arrays for 16 cells and 32 portals and performs no allocation per query; integration with
-Cinder's authored node/edge graph remains deliberately separate from the proven radial streamer.
+It uses fixed arrays for 16 cells and 32 portals and performs no allocation per query. Portal-directed
+streaming was integrated only after the lighting and durability gates were independently stable.
 
 Cinder topology v1 adds three more host gates over its eight cells and seven portals: all authored node
 centers classify stably and the 175-sample pristine evaluation leaves every portal open; closing one probe
@@ -671,6 +671,22 @@ tab from seven open portals to six. A fresh worker then hydrated all 25 sparse e
 six open portals at revision zero. Rust reverted the generated-air overrides, returned live state to
 seven portals, and a second reload hydrated zero edits and the pristine seven-portal mask. The isolated
 two-tab release run reported no OPFS, SQLite, worker, or WebGPU errors.
+
+`vp run profile:portal-streaming` then gates the topology as a bounded streaming input. Far from
+Cinder it requested and activated zero secondary chunks with 243 primary chunks tracked. Every open
+approach, descent, chamber, and overhead phase requested, admitted, and atomically activated all 73
+conservative cave chunks across 32 columns; tracking never exceeded 320, neither capacity layer
+truncated, the world plan never overflowed, and no unreachable chunk remained active. Sealing the
+mouth from outside dropped requested and active portal chunks to zero while keeping retained
+allocations harmless; entering the sealed chamber restored its 73-chunk connected interior plan.
+
+The final reopened chamber window measured 8.7 ms frame p95, 3.5 ms CPU p95, 0.1 ms streaming p95,
+3.1 ms render-submission p95, and 5.451 ms active-GPU p95 at 1280x720. It recorded no frames above
+16.67 ms, dropped samples, pending jobs, stale completions, truncation, or unreachable active chunks.
+Runtime host coverage now also proves deterministic interest ordering, observable capacity loss,
+same-focus interest replacement, atomic column readiness, and convergence of edits to retained
+undesired chunks. Renderer coverage proves radial and portal activation reasons cannot disable one
+another.
 
 The material atlas simultaneously returned to nearest-neighbor sampling for the original pixelated
 style. The sampler contract is host-tested as nearest magnification/minification/mip selection with

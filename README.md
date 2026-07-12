@@ -45,6 +45,9 @@ the sealed shell.
 `vp run profile:portal-edits` seals the vault mouth with 25 durable 10 cm basalt edits, observes the
 derived closure in a second isolated tab, reloads it from SQLite/OPFS, then restores and reloads the
 pristine opening.
+`vp run profile:portal-streaming` traverses open and sealed Cinder components and gates conservative
+portal-directed chunk look-ahead, exact activation ownership, the 320-chunk ceiling, zero truncation,
+and zero unreachable active geometry.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture

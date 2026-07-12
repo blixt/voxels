@@ -1,6 +1,6 @@
 use crate::{
-    CINDER_VAULT, CaveSystemId, Material, PortalState, VOXEL_SIZE_METRES, VisibilityCellId,
-    VisibilityGraph, VisibilityGraphError, VisibilityPortal,
+    CHUNK_EDGE, CINDER_VAULT, CaveSystemId, ChunkCoord, Material, PortalState, VOXEL_SIZE_METRES,
+    VisibilityCellId, VisibilityGraph, VisibilityGraphError, VisibilityPortal,
 };
 use std::sync::LazyLock;
 
@@ -13,6 +13,8 @@ pub const CINDER_VAULT_PORTAL_COUNT: usize = CINDER_VAULT_EDGES.len() + 1;
 pub const CINDER_VAULT_EXTERIOR_CELL: VisibilityCellId = VisibilityCellId::new(0);
 pub const CINDER_VAULT_PORTAL_OPEN_LANES: usize = 4;
 pub const CINDER_VAULT_PORTAL_PROBE_EDGE: i32 = 5;
+pub const CINDER_VAULT_STREAM_INTEREST_CAPACITY: usize = 192;
+pub const CINDER_VAULT_STREAM_ACTIVATION_MARGIN_VOXELS: i32 = 96;
 const CAVE_X_BIN_EDGE: i32 = 32;
 const CAVE_X_BIN_COUNT: usize = 8;
 
@@ -51,6 +53,66 @@ pub struct CavePortalProbe {
     pub center: [i32; 3],
     pub axis_u: [i32; 3],
     pub axis_v: [i32; 3],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CaveStreamInterest {
+    chunks: [ChunkCoord; CINDER_VAULT_STREAM_INTEREST_CAPACITY],
+    len: u8,
+    overflowed: bool,
+}
+
+impl CaveStreamInterest {
+    pub const fn empty() -> Self {
+        Self {
+            chunks: [ChunkCoord::new(0, 0, 0); CINDER_VAULT_STREAM_INTEREST_CAPACITY],
+            len: 0,
+            overflowed: false,
+        }
+    }
+
+    pub fn as_slice(&self) -> &[ChunkCoord] {
+        &self.chunks[..self.len as usize]
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub const fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    fn push_unique(&mut self, coord: ChunkCoord) {
+        if self.as_slice().contains(&coord) {
+            return;
+        }
+        if self.len() == CINDER_VAULT_STREAM_INTEREST_CAPACITY {
+            self.overflowed = true;
+            return;
+        }
+        self.chunks[self.len()] = coord;
+        self.len += 1;
+    }
+
+    fn sort_nearest(&mut self, focus: ChunkCoord) {
+        self.chunks[..self.len as usize].sort_unstable_by_key(|coord| {
+            let dx = i64::from(coord.x) - i64::from(focus.x);
+            let dy = i64::from(coord.y) - i64::from(focus.y);
+            let dz = i64::from(coord.z) - i64::from(focus.z);
+            (dx * dx + dz * dz + dy * dy * 4, coord.y, coord.z, coord.x)
+        });
+    }
+}
+
+impl Default for CaveStreamInterest {
+    fn default() -> Self {
+        Self::empty()
+    }
 }
 
 /// Sparse authored mineral cues remain ordinary voxels: they mesh, collide, edit, persist, and
@@ -195,6 +257,120 @@ pub fn cinder_vault_visibility_cell(x: i32, y: i32, z: i32) -> VisibilityCellId 
         .min_by_key(|(index, node)| (squared_distance(point, node.center), *index))
         .map_or(0, |(index, _)| index);
     VisibilityCellId::new(nearest as u8 + 1)
+}
+
+/// Returns bounded full-resolution look-ahead along the open authored cave spine.
+///
+/// The radial streamer remains authoritative around the camera. This secondary set only exists
+/// near Cinder Vault and follows cells reachable through the current edit-derived portal mask.
+pub fn cinder_vault_stream_interest(
+    camera_voxel: [i32; 3],
+    portal_state: PortalState,
+) -> CaveStreamInterest {
+    if !inside_expanded_cinder_bounds(camera_voxel) {
+        return CaveStreamInterest::empty();
+    }
+    let Ok(graph) = cinder_vault_visibility_graph() else {
+        return CaveStreamInterest::empty();
+    };
+    let from = cinder_vault_visibility_cell(camera_voxel[0], camera_voxel[1], camera_voxel[2]);
+    let mut reachable = [false; CINDER_VAULT_VISIBILITY_CELL_COUNT];
+    for (index, value) in reachable.iter_mut().enumerate() {
+        *value = graph
+            .shortest_open_distance(from, VisibilityCellId::new(index as u8), portal_state)
+            .is_some();
+    }
+
+    let mut interest = CaveStreamInterest::empty();
+    for (node_index, node) in CINDER_VAULT_NODES.iter().enumerate() {
+        if reachable[node_index + 1] {
+            let horizontal = (node.horizontal_radius * 13 + 9) / 10 + 1;
+            let vertical = (node.vertical_radius * 13 + 9) / 10 + 1;
+            push_voxel_bounds(
+                &mut interest,
+                [
+                    node.center[0] - horizontal,
+                    node.center[1] - vertical,
+                    node.center[2] - horizontal,
+                ],
+                [
+                    node.center[0] + horizontal,
+                    node.center[1] + vertical,
+                    node.center[2] + horizontal,
+                ],
+            );
+        }
+    }
+    if portal_state.is_open(0) && reachable[0] && reachable[1] {
+        let node = CINDER_VAULT_NODES[0];
+        let horizontal = (node.horizontal_radius * 13 + 9) / 10 + 1;
+        push_voxel_bounds(
+            &mut interest,
+            [
+                CINDER_VAULT.entrance[0].min(node.center[0]) - horizontal,
+                CINDER_VAULT.entrance[1].min(node.center[1]) - 1,
+                CINDER_VAULT.entrance[2].min(node.center[2]) - horizontal,
+            ],
+            [
+                CINDER_VAULT.entrance[0].max(node.center[0]) + horizontal,
+                CINDER_VAULT.entrance[1].max(node.center[1]) + 1,
+                CINDER_VAULT.entrance[2].max(node.center[2]) + horizontal,
+            ],
+        );
+    }
+    for (portal_index, edge) in CINDER_VAULT_EDGES.iter().enumerate() {
+        let from_cell = usize::from(edge.from) + 1;
+        let to_cell = usize::from(edge.to) + 1;
+        if portal_state.is_open(portal_index + 1) && reachable[from_cell] && reachable[to_cell] {
+            let horizontal = (edge.horizontal_radius * 13 + 9) / 10 + 1;
+            let vertical = (edge.vertical_radius * 13 + 9) / 10 + 1;
+            let from = CINDER_VAULT_NODES[usize::from(edge.from)].center;
+            let to = CINDER_VAULT_NODES[usize::from(edge.to)].center;
+            push_voxel_bounds(
+                &mut interest,
+                [
+                    from[0].min(to[0]) - horizontal,
+                    from[1].min(to[1]) - vertical,
+                    from[2].min(to[2]) - horizontal,
+                ],
+                [
+                    from[0].max(to[0]) + horizontal,
+                    from[1].max(to[1]) + vertical,
+                    from[2].max(to[2]) + horizontal,
+                ],
+            );
+        }
+    }
+    interest.sort_nearest(voxel_chunk(camera_voxel));
+    interest
+}
+
+fn inside_expanded_cinder_bounds(point: [i32; 3]) -> bool {
+    (0..3).all(|axis| {
+        point[axis] >= CINDER_VAULT_BOUNDS[0][axis] - CINDER_VAULT_STREAM_ACTIVATION_MARGIN_VOXELS
+            && point[axis]
+                < CINDER_VAULT_BOUNDS[1][axis] + CINDER_VAULT_STREAM_ACTIVATION_MARGIN_VOXELS
+    })
+}
+
+fn push_voxel_bounds(interest: &mut CaveStreamInterest, min: [i32; 3], max: [i32; 3]) {
+    let min = voxel_chunk(min);
+    let max = voxel_chunk(max);
+    for y in min.y..=max.y {
+        for z in min.z..=max.z {
+            for x in min.x..=max.x {
+                interest.push_unique(ChunkCoord::new(x, y, z));
+            }
+        }
+    }
+}
+
+const fn voxel_chunk(voxel: [i32; 3]) -> ChunkCoord {
+    ChunkCoord::new(
+        voxel[0].div_euclid(CHUNK_EDGE as i32),
+        voxel[1].div_euclid(CHUNK_EDGE as i32),
+        voxel[2].div_euclid(CHUNK_EDGE as i32),
+    )
 }
 
 pub fn cinder_vault_portal_probe(portal_index: usize) -> Option<CavePortalProbe> {
@@ -599,6 +775,65 @@ mod tests {
                 .occludes_ambient()
         });
         assert_eq!(restored, pristine);
+    }
+
+    #[test]
+    fn portal_stream_interest_is_local_bounded_and_follows_connectivity() {
+        let all_open = PortalState::all_open(CINDER_VAULT_PORTAL_COUNT);
+        assert!(cinder_vault_stream_interest([0, 0, 0], all_open).is_empty());
+
+        let exterior_above_chamber = [
+            CINDER_VAULT.chamber[0],
+            CINDER_VAULT_BOUNDS[1][1] + 1,
+            CINDER_VAULT.chamber[2],
+        ];
+        assert_eq!(
+            cinder_vault_visibility_cell(
+                exterior_above_chamber[0],
+                exterior_above_chamber[1],
+                exterior_above_chamber[2]
+            ),
+            CINDER_VAULT_EXTERIOR_CELL
+        );
+        let pristine = cinder_vault_stream_interest(exterior_above_chamber, all_open);
+        assert!(!pristine.is_empty());
+        assert!(!pristine.overflowed());
+        assert!(pristine.len() <= CINDER_VAULT_STREAM_INTEREST_CAPACITY);
+        let unique: std::collections::BTreeSet<_> = pristine
+            .as_slice()
+            .iter()
+            .map(|coord| (coord.x, coord.y, coord.z))
+            .collect();
+        assert_eq!(unique.len(), pristine.len());
+        let minimum = voxel_chunk(CINDER_VAULT_BOUNDS[0]);
+        let maximum = voxel_chunk(CINDER_VAULT_BOUNDS[1]);
+        assert!(pristine.as_slice().iter().all(|coord| {
+            (minimum.x - 1..=maximum.x + 1).contains(&coord.x)
+                && (minimum.y - 1..=maximum.y + 1).contains(&coord.y)
+                && (minimum.z - 1..=maximum.z + 1).contains(&coord.z)
+        }));
+        for node in CINDER_VAULT_NODES {
+            assert!(pristine.as_slice().contains(&voxel_chunk(node.center)));
+        }
+
+        let mut mouth_closed = all_open;
+        assert!(mouth_closed.set_open(0, false));
+        assert!(cinder_vault_stream_interest(exterior_above_chamber, mouth_closed).is_empty());
+        assert!(!cinder_vault_stream_interest(CINDER_VAULT.chamber, mouth_closed).is_empty());
+
+        let mut middle_closed = all_open;
+        assert!(middle_closed.set_open(4, false));
+        let upstream = cinder_vault_stream_interest(exterior_above_chamber, middle_closed);
+        assert!(
+            upstream
+                .as_slice()
+                .contains(&voxel_chunk(CINDER_VAULT_NODES[0].center))
+        );
+        assert!(
+            !upstream
+                .as_slice()
+                .contains(&voxel_chunk(CINDER_VAULT_NODES[6].center))
+        );
     }
 
     #[test]
