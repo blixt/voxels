@@ -513,7 +513,12 @@ impl CameraState {
         }
         let player_size = player_max - player_min;
         let player_volume = player_size.x * player_size.y * player_size.z;
-        let immersion = (fluid_volume / player_volume).clamp(0.0, 1.0);
+        let immersion =
+            if fluid_volume.is_finite() && player_volume.is_finite() && player_volume > 0.0 {
+                (fluid_volume / player_volume).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
         let eye_voxel = (self.position / voxel_size).floor().as_ivec3();
         let eyes_submerged = sample_voxel(eye_voxel.x, eye_voxel.y, eye_voxel.z).fluid;
         let surface_y_metres = if eyes_submerged {
@@ -522,7 +527,10 @@ impl CameraState {
                 if !sample_voxel(eye_voxel.x, first_air, eye_voxel.z).fluid {
                     break;
                 }
-                first_air += 1;
+                let Some(next) = first_air.checked_add(1) else {
+                    break;
+                };
+                first_air = next;
             }
             first_air as f32 * voxel_size
         } else if highest_surface.is_finite() {
@@ -899,6 +907,18 @@ mod tests {
         assert!((fluid.surface_y_metres - 1.8).abs() < 0.0001);
         assert!((fluid.eye_depth_metres - 0.18).abs() < 0.0001);
         assert!(fluid.swimming);
+    }
+
+    #[test]
+    fn fluid_surface_scan_stops_at_the_canonical_grid_limit() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, i32::MAX as f32, 0.0));
+        camera.refresh_fluid_state(1.0, |_, _, _| VoxelPhysics::FLUID);
+
+        let fluid = camera.fluid_state();
+        assert!(fluid.eyes_submerged);
+        assert!(fluid.surface_y_metres.is_finite());
+        assert!(fluid.eye_depth_metres.is_finite());
+        assert!((0.0..=1.0).contains(&fluid.immersion));
     }
 
     #[test]
