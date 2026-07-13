@@ -20,6 +20,13 @@ const MAX_VERTICAL_RADIUS_CHUNKS: i32 = 32;
 pub const MAX_SECONDARY_INTEREST_CHUNKS: usize = 192;
 const LATENCY_HISTOGRAM_BUCKETS: usize = 256;
 
+/// Returns whether `candidate` is the requested revision or a later one in the wrapping sequence.
+/// Revisions advance one step at a time and skip zero, so serial-number arithmetic keeps work that
+/// straddles `u64::MAX` ordered without mistaking a pre-wrap completion for current geometry.
+pub const fn revision_satisfies(candidate: u64, requested: u64) -> bool {
+    candidate == requested || candidate.wrapping_sub(requested) < (1u64 << 63)
+}
+
 type CoordKey = (i32, i32, i32);
 
 /// Limits for one scheduler instance. LOD tiers should use separate schedulers/configurations so
@@ -1320,6 +1327,15 @@ mod tests {
         assert_eq!(elapsed_frames(12, 19), 7);
         assert_eq!(elapsed_frames(u64::MAX, 1), 1);
         assert_eq!(elapsed_frames(u64::MAX - 2, 2), 4);
+    }
+
+    #[test]
+    fn revision_order_handles_the_nonzero_counter_wrap() {
+        assert!(revision_satisfies(7, 7));
+        assert!(revision_satisfies(8, 7));
+        assert!(!revision_satisfies(7, 8));
+        assert!(revision_satisfies(1, u64::MAX));
+        assert!(!revision_satisfies(u64::MAX, 1));
     }
 
     #[test]

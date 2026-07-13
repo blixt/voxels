@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::revision_satisfies;
 use voxels_world::SurfaceTileCoord;
 
 /// Revision relationship between one disposable surface tile and the authoritative edit overlay.
@@ -59,7 +60,9 @@ impl SurfaceRevisionCache {
 
     pub fn request(&mut self, coord: SurfaceTileCoord, revision: u64) {
         let requested = self.requested.entry(coord).or_insert(revision);
-        *requested = (*requested).max(revision);
+        if revision_satisfies(revision, *requested) {
+            *requested = revision;
+        }
     }
 
     pub fn requested_revision(&self, coord: SurfaceTileCoord) -> Option<u64> {
@@ -74,10 +77,12 @@ impl SurfaceRevisionCache {
         let requested = self.requested_revision(coord)?;
         Some(match self.resident_revision(coord) {
             None => SurfaceRevisionStatus::Missing { requested },
-            Some(resident) if resident < requested => SurfaceRevisionStatus::Stale {
-                resident,
-                requested,
-            },
+            Some(resident) if !revision_satisfies(resident, requested) => {
+                SurfaceRevisionStatus::Stale {
+                    resident,
+                    requested,
+                }
+            }
             Some(resident) => SurfaceRevisionStatus::Current { revision: resident },
         })
     }
@@ -87,10 +92,12 @@ impl SurfaceRevisionCache {
         let requested = self.ensure_requested(coord);
         match self.resident_revision(coord) {
             None => SurfaceFocusAction::Load { requested },
-            Some(resident) if resident < requested => SurfaceFocusAction::Replace {
-                resident,
-                requested,
-            },
+            Some(resident) if !revision_satisfies(resident, requested) => {
+                SurfaceFocusAction::Replace {
+                    resident,
+                    requested,
+                }
+            }
             Some(revision) => SurfaceFocusAction::Current { revision },
         }
     }
@@ -110,7 +117,10 @@ impl SurfaceRevisionCache {
     }
 
     pub fn accepts(&self, coord: SurfaceTileCoord, revision: u64) -> bool {
-        self.requested_revision(coord).unwrap_or(self.epoch) <= revision
+        revision_satisfies(
+            revision,
+            self.requested_revision(coord).unwrap_or(self.epoch),
+        )
     }
 
     /// Records a generated tile only if it still satisfies the newest request.
@@ -244,5 +254,26 @@ mod tests {
 
         assert!(cache.is_current(resident));
         assert_eq!(cache.status(abandoned), None);
+    }
+
+    #[test]
+    fn wrapped_revisions_reject_pre_wrap_completions() {
+        let mut cache = SurfaceRevisionCache::new();
+        let coord = tile(10);
+        cache.epoch = u64::MAX - 1;
+        let resident = cache.ensure_requested(coord);
+        assert!(cache.commit(coord, resident));
+
+        let final_pre_wrap = cache.begin_edit();
+        cache.request(coord, final_pre_wrap);
+        let wrapped = cache.begin_edit();
+        cache.request(coord, wrapped);
+
+        assert_eq!(wrapped, 1);
+        assert_eq!(cache.requested_revision(coord), Some(wrapped));
+        assert!(cache.is_stale(coord));
+        assert!(!cache.commit(coord, final_pre_wrap));
+        assert!(cache.commit(coord, wrapped));
+        assert!(cache.is_current(coord));
     }
 }

@@ -19,7 +19,7 @@ mod web {
     use voxels_render::ui::LiveStats;
     use voxels_runtime::{
         ChunkState, FrameBudget, StreamConfig, StreamScheduler, SurfaceFocusAction,
-        SurfaceRevisionCache,
+        SurfaceRevisionCache, revision_satisfies,
     };
     use voxels_world::{
         CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT, CINDER_VAULT_NODES, CINDER_VAULT_PORTAL_COUNT,
@@ -1784,7 +1784,7 @@ mod web {
                     scheduler.status(requirement.coord).is_none_or(|status| {
                         !status.desired
                             || (status.state == ChunkState::Resident
-                                && status.revision >= requirement.revision)
+                                && revision_satisfies(status.revision, requirement.revision))
                     })
                 });
                 if canonical_ready && tracker.canonical_ms.is_none() {
@@ -1793,7 +1793,7 @@ mod web {
                 let surface_ready = tracker.requirements.surface.iter().all(|requirement| {
                     surface_revisions
                         .resident_revision(requirement.coord)
-                        .is_some_and(|revision| revision >= requirement.revision)
+                        .is_some_and(|revision| revision_satisfies(revision, requirement.revision))
                         || !self.surface_tile_relevant(requirement.coord)
                 });
                 if canonical_ready && surface_ready {
