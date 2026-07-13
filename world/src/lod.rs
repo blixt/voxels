@@ -630,21 +630,31 @@ fn generate_surface_tile_mesh_with_options(
                     let x = offset_clamped(origin_x, cell_x * stride);
                     let z = offset_clamped(origin_z, cell_z * stride);
                     let (height, material) = sample(cell_x, cell_z);
-                    let skirt_depth = 128i32.max(stride * 8);
+                    let skirt_depth = i64::from(128i32.max(stride * 8));
+                    // `height` names the top occupied voxel, so its visible top plane is at
+                    // `height + 1`. Body side faces use the same convention. Ending a skirt at
+                    // `height` leaves one canonical voxel of the other owner visible at every LOD
+                    // handoff, which looks like a shifted strip (and can expose a different
+                    // material). Clamp only the disposable lower endpoint at the i32 world limit;
+                    // the half-open top plane may validly be one past i32::MAX.
+                    let skirt_top = i64::from(height) + 1;
+                    let skirt_bottom =
+                        (skirt_top - skirt_depth).clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+                    let skirt_height = (skirt_top - skirt_bottom) as u16;
                     let origin = match patch_edge {
-                        SurfacePatchEdge::NegativeX => [x, height - skirt_depth, z],
+                        SurfacePatchEdge::NegativeX => [x, skirt_bottom as i32, z],
                         SurfacePatchEdge::PositiveX => {
-                            [offset_clamped(x, stride - 1), height - skirt_depth, z]
+                            [offset_clamped(x, stride - 1), skirt_bottom as i32, z]
                         }
-                        SurfacePatchEdge::NegativeZ => [x, height - skirt_depth, z],
+                        SurfacePatchEdge::NegativeZ => [x, skirt_bottom as i32, z],
                         SurfacePatchEdge::PositiveZ => {
-                            [x, height - skirt_depth, offset_clamped(z, stride - 1)]
+                            [x, skirt_bottom as i32, offset_clamped(z, stride - 1)]
                         }
                     };
                     quads.push(SurfaceQuad {
                         origin,
                         face,
-                        extent: [stride as u16, skirt_depth as u16],
+                        extent: [stride as u16, skirt_height],
                         material,
                     });
                 }
@@ -1545,6 +1555,54 @@ mod tests {
             }
         }
         assert_eq!(next_start as usize, mesh.quads.len());
+    }
+
+    #[test]
+    fn transition_skirts_meet_the_sampled_top_plane_without_a_voxel_gap() {
+        for level in SurfaceLodLevel::ALL {
+            let stride = level.stride_voxels();
+            let mesh =
+                generate_surface_tile_mesh_with(SurfaceTileCoord::new(level, 0, 0), |x, z| {
+                    (x.div_euclid(11) - z.div_euclid(13), Material::Grass)
+                });
+            let [origin_x, origin_z] = mesh.coord.voxel_origin();
+            for patch in &mesh.patches {
+                for edge in SurfacePatchEdge::ALL {
+                    for skirt in patch.skirt_quads(&mesh, edge) {
+                        let cell_x = (skirt.origin[0] - origin_x).div_euclid(stride);
+                        let cell_z = (skirt.origin[2] - origin_z).div_euclid(stride);
+                        let sample_x = origin_x + cell_x * stride + stride / 2;
+                        let sample_z = origin_z + cell_z * stride + stride / 2;
+                        let sampled_height = sample_x.div_euclid(11) - sample_z.div_euclid(13);
+                        assert_eq!(
+                            i64::from(skirt.origin[1]) + i64::from(skirt.extent[1]),
+                            i64::from(sampled_height) + 1,
+                            "{level:?} {edge:?} skirt left a strip below its top face"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transition_skirts_keep_half_open_top_planes_at_vertical_world_limits() {
+        for height in [i32::MIN, i32::MAX] {
+            let mesh = generate_surface_tile_mesh_with(
+                SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
+                |_, _| (height, Material::Stone),
+            );
+            for patch in &mesh.patches {
+                for edge in SurfacePatchEdge::ALL {
+                    for skirt in patch.skirt_quads(&mesh, edge) {
+                        assert_eq!(
+                            i64::from(skirt.origin[1]) + i64::from(skirt.extent[1]),
+                            i64::from(height) + 1
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
