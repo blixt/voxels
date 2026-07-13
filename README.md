@@ -10,7 +10,7 @@ greedy meshing, rendering, and persistence boundary.
 2. Install managed Node, pnpm, and project dependencies with `vp install`.
 3. Start the app with `vp dev`.
 4. Run TypeScript checks and tests with `vp check` and `vp test`.
-5. Run host/WASM Rust tests and Clippy with `vp run check:rust`.
+5. Run host Rust tests and host/WASM Clippy with `vp run check:rust`.
 6. Build production WASM and assets with `vp build`; inspect them with `vp preview`.
 7. Stress isolated rapid-refresh and multi-tab OPFS handoff in Chrome with
    `vp run test:persistence-browser`.
