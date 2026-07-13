@@ -75,9 +75,9 @@ impl GeometricLodFocus {
         let centre_x = bounds.min[0] + (bounds.max[0] - bounds.min[0]) / 2;
         let centre_z = bounds.min[2] + (bounds.max[2] - bounds.min[2]) / 2;
         let neighbor = match edge {
-            SurfacePatchEdge::NegativeX => [bounds.min[0] - 1, centre_z],
+            SurfacePatchEdge::NegativeX => [bounds.min[0].saturating_sub(1), centre_z],
             SurfacePatchEdge::PositiveX => [bounds.max[0], centre_z],
-            SurfacePatchEdge::NegativeZ => [centre_x, bounds.min[2] - 1],
+            SurfacePatchEdge::NegativeZ => [centre_x, bounds.min[2].saturating_sub(1)],
             SurfacePatchEdge::PositiveZ => [centre_x, bounds.max[2]],
         };
         self.owner_at(neighbor[0], neighbor[1]) != LodOwner::Surface(level)
@@ -264,6 +264,26 @@ mod tests {
             SurfaceLodLevel::Stride2,
             wrong_level,
             SurfacePatchEdge::NegativeX
+        ));
+    }
+
+    #[test]
+    fn skirts_do_not_wrap_across_the_world_boundary() {
+        let focus = GeometricLodFocus::snapped(i32::MIN, i32::MIN);
+        let bounds = SurfaceBounds {
+            min: [i32::MIN, -64, i32::MIN],
+            max: [i32::MIN + 16, 128, i32::MIN + 16],
+        };
+
+        assert!(!focus.owns_surface_skirt(
+            SurfaceLodLevel::Stride2,
+            bounds,
+            SurfacePatchEdge::NegativeX,
+        ));
+        assert!(!focus.owns_surface_skirt(
+            SurfaceLodLevel::Stride2,
+            bounds,
+            SurfacePatchEdge::NegativeZ,
         ));
     }
 }
