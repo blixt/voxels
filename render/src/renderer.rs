@@ -1511,11 +1511,10 @@ impl Renderer {
         let max = min + glam::Vec3::splat(CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
         let quad_bytes = size_of::<GpuQuad>() as u32;
         let opaque_count = mesh.opaque.len() as u32;
-        let opaque_uploaded = if opaque_count == 0 {
-            self.remove_opaque_mesh(key);
-            true
+        let opaque_update = if opaque_count == 0 {
+            None
         } else {
-            self.upload_mesh_sliced(
+            let Some(prepared) = self.prepare_mesh_sliced(
                 key,
                 &opaque_quads,
                 vec![MeshSlice {
@@ -1528,14 +1527,16 @@ impl Renderer {
                     skirt_edge: None,
                     render_layer: RenderLayer::Opaque,
                 }],
-            )
+            ) else {
+                return false;
+            };
+            Some(prepared)
         };
         let translucent_count = mesh.translucent.len() as u32;
-        let water_uploaded = if translucent_count == 0 {
-            self.remove_water_mesh(key);
-            true
+        let water_update = if translucent_count == 0 {
+            None
         } else {
-            self.upload_water_mesh_sliced(
+            let Some(prepared) = self.prepare_water_mesh_sliced(
                 key,
                 &water_quads,
                 vec![MeshSlice {
@@ -1548,18 +1549,26 @@ impl Renderer {
                     skirt_edge: None,
                     render_layer: RenderLayer::Translucent,
                 }],
-            )
+            ) else {
+                discard_prepared_mesh(&mut self.arena, opaque_update);
+                return false;
+            };
+            Some(prepared)
         };
-        let uploaded = opaque_uploaded && water_uploaded;
-        if uploaded {
-            let lights = local_lights_for_mesh(origin, mesh);
-            if lights.is_empty() {
-                self.local_light_candidates.remove(&key);
-            } else {
-                self.local_light_candidates.insert(key, lights);
-            }
+        commit_prepared_mesh(&mut self.arena, &mut self.chunks, key, opaque_update);
+        commit_prepared_mesh(
+            &mut self.water_arena,
+            &mut self.water_chunks,
+            key,
+            water_update,
+        );
+        let lights = local_lights_for_mesh(origin, mesh);
+        if lights.is_empty() {
+            self.local_light_candidates.remove(&key);
+        } else {
+            self.local_light_candidates.insert(key, lights);
         }
-        uploaded
+        true
     }
 
     pub fn upload_surface_tile_meshes(
@@ -1683,35 +1692,47 @@ impl Renderer {
                 }
             })
             .collect();
-        let opaque_uploaded = if gpu_quads.is_empty() {
-            self.remove_opaque_mesh(key);
-            true
+        let opaque_update = if gpu_quads.is_empty() {
+            None
         } else {
-            self.upload_mesh_sliced(key, &gpu_quads, slices)
+            let Some(prepared) = self.prepare_mesh_sliced(key, &gpu_quads, slices) else {
+                return false;
+            };
+            Some(prepared)
         };
-        let water_uploaded = if water_gpu_quads.is_empty() {
-            self.remove_water_mesh(key);
-            true
+        let water_update = if water_gpu_quads.is_empty() {
+            None
         } else {
-            self.upload_water_mesh_sliced(key, &water_gpu_quads, water_slices)
+            let Some(prepared) =
+                self.prepare_water_mesh_sliced(key, &water_gpu_quads, water_slices)
+            else {
+                discard_prepared_mesh(&mut self.arena, opaque_update);
+                return false;
+            };
+            Some(prepared)
         };
-        opaque_uploaded && water_uploaded
+        commit_prepared_mesh(&mut self.arena, &mut self.chunks, key, opaque_update);
+        commit_prepared_mesh(
+            &mut self.water_arena,
+            &mut self.water_chunks,
+            key,
+            water_update,
+        );
+        true
     }
 
-    fn upload_mesh_sliced(
+    fn prepare_mesh_sliced(
         &mut self,
         key: MeshKey,
         gpu_quads: &[GpuQuad],
         slices: Vec<MeshSlice>,
-    ) -> bool {
+    ) -> Option<ChunkMesh> {
         let activation_mask = self.chunk_activations.upload_mask(key);
-        upload_mesh_sliced_into(
+        prepare_mesh_sliced_into(
             &self.device,
             &self.queue,
             &mut self.arena,
             &mut self.arena_buffers,
-            &mut self.chunks,
-            key,
             gpu_quads,
             slices,
             activation_mask,
@@ -1719,20 +1740,18 @@ impl Renderer {
         )
     }
 
-    fn upload_water_mesh_sliced(
+    fn prepare_water_mesh_sliced(
         &mut self,
         key: MeshKey,
         gpu_quads: &[GpuQuad],
         slices: Vec<MeshSlice>,
-    ) -> bool {
+    ) -> Option<ChunkMesh> {
         let activation_mask = self.chunk_activations.upload_mask(key);
-        upload_mesh_sliced_into(
+        prepare_mesh_sliced_into(
             &self.device,
             &self.queue,
             &mut self.water_arena,
             &mut self.water_arena_buffers,
-            &mut self.water_chunks,
-            key,
             gpu_quads,
             slices,
             activation_mask,
@@ -2335,30 +2354,26 @@ impl Renderer {
     clippy::too_many_arguments,
     reason = "the helper borrows independent renderer-owned arena resources transactionally"
 )]
-fn upload_mesh_sliced_into(
+fn prepare_mesh_sliced_into(
     device: &Device,
     queue: &Queue,
     arena: &mut ArenaAllocator,
     arena_buffers: &mut Vec<Buffer>,
-    chunks: &mut BTreeMap<MeshKey, ChunkMesh>,
-    key: MeshKey,
     gpu_quads: &[GpuQuad],
     slices: Vec<MeshSlice>,
     activation_mask: u8,
     buffer_label: &'static str,
-) -> bool {
+) -> Option<ChunkMesh> {
     let bytes = bytemuck::cast_slice(gpu_quads);
     let Ok(byte_len) = u32::try_from(bytes.len()) else {
-        return false;
+        return None;
     };
-    let Some(allocation) = arena.allocate(byte_len) else {
-        return false;
-    };
+    let allocation = arena.allocate(byte_len)?;
     while arena_buffers.len() <= allocation.page as usize {
         let page = arena_buffers.len() as u16;
         let Some(capacity) = arena.page_capacity(page) else {
             let _ = arena.free(allocation);
-            return false;
+            return None;
         };
         arena_buffers.push(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(buffer_label),
@@ -2369,22 +2384,37 @@ fn upload_mesh_sliced_into(
     }
     let Some(buffer) = arena_buffers.get(allocation.page as usize) else {
         let _ = arena.free(allocation);
-        return false;
+        return None;
     };
     queue.write_buffer(buffer, u64::from(allocation.offset), bytes);
-    let old = chunks.insert(
-        key,
-        ChunkMesh {
-            allocation,
-            quad_count: gpu_quads.len() as u32,
-            slices,
-            activation_mask,
-        },
-    );
+    Some(ChunkMesh {
+        allocation,
+        quad_count: gpu_quads.len() as u32,
+        slices,
+        activation_mask,
+    })
+}
+
+fn discard_prepared_mesh(arena: &mut ArenaAllocator, prepared: Option<ChunkMesh>) {
+    if let Some(prepared) = prepared {
+        let _ = arena.free(prepared.allocation);
+    }
+}
+
+fn commit_prepared_mesh(
+    arena: &mut ArenaAllocator,
+    chunks: &mut BTreeMap<MeshKey, ChunkMesh>,
+    key: MeshKey,
+    prepared: Option<ChunkMesh>,
+) {
+    let old = if let Some(prepared) = prepared {
+        chunks.insert(key, prepared)
+    } else {
+        chunks.remove(&key)
+    };
     if let Some(old) = old {
         let _ = arena.free(old.allocation);
     }
-    true
 }
 
 fn surface_patch_bounds(
@@ -2950,6 +2980,38 @@ mod tests {
         );
         assert!(activations.masks.is_empty());
         assert_eq!(activations.upload_mask((1, 0, 0, 0)), u8::MAX);
+    }
+
+    #[test]
+    fn failed_second_layer_keeps_resident_mesh_and_releases_prepared_storage() {
+        let key = (0, 1, 2, 3);
+        let mut arena = ArenaAllocator::new(128, 4);
+        let resident = arena.allocate(32).expect("resident allocation");
+        let prepared = arena.allocate(64).expect("prepared allocation");
+        let mut chunks = BTreeMap::from([(
+            key,
+            ChunkMesh {
+                allocation: resident,
+                quad_count: 1,
+                slices: Vec::new(),
+                activation_mask: u8::MAX,
+            },
+        )]);
+
+        discard_prepared_mesh(
+            &mut arena,
+            Some(ChunkMesh {
+                allocation: prepared,
+                quad_count: 2,
+                slices: Vec::new(),
+                activation_mask: u8::MAX,
+            }),
+        );
+
+        assert_eq!(chunks.get(&key).map(|mesh| mesh.allocation), Some(resident));
+        assert_eq!(arena.stats().allocated_bytes, u64::from(resident.size));
+        assert!(!arena.free(prepared));
+        assert!(arena.free(chunks.remove(&key).expect("resident mesh").allocation));
     }
 
     fn test_slice(surface_bounds: Option<SurfaceBounds>) -> MeshSlice {
