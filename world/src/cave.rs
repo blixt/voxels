@@ -537,6 +537,11 @@ pub fn cinder_vault_override(x: i32, y: i32, z: i32) -> Option<Material> {
 }
 
 pub fn cinder_vault_crystal_at(x: i32, y: i32, z: i32) -> bool {
+    let [[min_x, min_y, min_z], [max_x, max_y, max_z]] = CINDER_VAULT_BOUNDS;
+    if !(min_x..max_x).contains(&x) || !(min_y..max_y).contains(&y) || !(min_z..max_z).contains(&z)
+    {
+        return false;
+    }
     CINDER_VAULT_CRYSTALS.iter().any(|formation| {
         let dy = y - formation.base[1];
         if !(0..i32::from(formation.height)).contains(&dy) {
@@ -677,6 +682,24 @@ mod tests {
             let [x, y, z] = formation.base;
             let cell = cinder_vault_visibility_cell(x, y, z);
             assert!((1..=CINDER_VAULT_NODES.len()).contains(&cell.index()));
+        }
+    }
+
+    #[test]
+    fn crystal_queries_reject_extreme_world_coordinates_without_overflow() {
+        for axis in 0..3 {
+            for boundary in [i32::MIN, i32::MAX] {
+                let mut point = CINDER_VAULT_CRYSTALS[0].base;
+                point[axis] = boundary;
+                assert!(!cinder_vault_crystal_at(point[0], point[1], point[2]));
+            }
+        }
+        for formation in CINDER_VAULT_CRYSTALS {
+            assert!(cinder_vault_crystal_at(
+                formation.base[0],
+                formation.base[1],
+                formation.base[2]
+            ));
         }
     }
 
