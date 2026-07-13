@@ -35,6 +35,36 @@ export function rustTool(name: string): string {
   return existsSync(installed) ? installed : name;
 }
 
+export function validateWasmBindgenCliVersion(output: string, expected: string): void {
+  const installed = /^wasm-bindgen\s+(\S+)$/u.exec(output.trim())?.[1];
+  if (installed === expected) return;
+  const found = installed ? `found ${installed}` : "could not read the installed version";
+  throw new Error(
+    `wasm-bindgen-cli ${expected} is required (${found}); install it with ` +
+      `cargo install --locked wasm-bindgen-cli --version ${expected}`,
+  );
+}
+
+function wasmBindgenTool(): string {
+  const manifest = readFileSync(join(ROOT, "shell/Cargo.toml"), "utf8");
+  const expected = /^wasm-bindgen\s*=\s*"=([^"]+)"$/mu.exec(manifest)?.[1];
+  if (!expected) {
+    throw new Error("shell/Cargo.toml must pin wasm-bindgen to an exact version");
+  }
+  const command = rustTool("wasm-bindgen");
+  let output: string;
+  try {
+    output = execFileSync(command, ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch {
+    output = "";
+  }
+  validateWasmBindgenCliVersion(output, expected);
+  return command;
+}
+
 export function wasmCcEnv(): Record<string, string> {
   const override = process.env.CC_wasm32_unknown_unknown;
   if (override) {
@@ -95,6 +125,7 @@ function run(command: string, args: string[]): void {
 
 export function buildWasm(release = false): void {
   const profile = release ? "release" : "debug";
+  const wasmBindgen = wasmBindgenTool();
   const cargoArgs = ["build", "--target", TARGET, "-p", "voxels-shell"];
   if (release) cargoArgs.push("--release");
   run(rustTool("cargo"), cargoArgs);
@@ -102,7 +133,7 @@ export function buildWasm(release = false): void {
   mkdirSync(join(ROOT, "target"), { recursive: true });
   const staging = mkdtempSync(join(ROOT, "target/wasm-bindgen-"));
   try {
-    run(rustTool("wasm-bindgen"), [
+    run(wasmBindgen, [
       "--target",
       "web",
       "--out-dir",

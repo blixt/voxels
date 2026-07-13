@@ -1,7 +1,12 @@
 import { readFileSync } from "node:fs";
 import { strict as assert } from "node:assert";
 import { describe, it } from "vite-plus/test";
-import { normalizeWasmDeclaration, RUST_INPUT_FILES, RUST_SOURCE_DIRS } from "./build-wasm.ts";
+import {
+  normalizeWasmDeclaration,
+  RUST_INPUT_FILES,
+  RUST_SOURCE_DIRS,
+  validateWasmBindgenCliVersion,
+} from "./build-wasm.ts";
 
 const root = new URL("../", import.meta.url);
 
@@ -42,6 +47,18 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly enginehandle_destroy: (a: number) => void;
 }`,
+    );
+  });
+
+  it("rejects missing or mismatched wasm-bindgen CLI versions with an install command", () => {
+    assert.doesNotThrow(() => validateWasmBindgenCliVersion("wasm-bindgen 0.2.117\n", "0.2.117"));
+    assert.throws(
+      () => validateWasmBindgenCliVersion("wasm-bindgen 0.2.116\n", "0.2.117"),
+      /cargo install --locked wasm-bindgen-cli --version 0\.2\.117/,
+    );
+    assert.throws(
+      () => validateWasmBindgenCliVersion("", "0.2.117"),
+      /could not read the installed version/,
     );
   });
 });

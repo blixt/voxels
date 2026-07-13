@@ -6,15 +6,18 @@ greedy meshing, rendering, and persistence boundary.
 
 ## Workflow
 
-1. Install the Vite+ CLI from <https://viteplus.dev/>.
-2. Install managed Node, pnpm, and project dependencies with `vp install`.
-3. Start the app with `vp dev`.
-4. Run TypeScript checks and tests with `vp check` and `vp test`.
-5. Run host Rust tests and host/WASM Clippy with `vp run check:rust`.
-6. Build production WASM and assets with `vp build`; inspect them with `vp preview`.
-7. Stress isolated rapid-refresh and multi-tab OPFS handoff in Chrome with
+1. Install the Vite+ CLI from <https://viteplus.dev/> and Rust through
+   [rustup](https://rustup.rs/).
+2. Install the CLI version paired with the pinned Rust library using
+   `cargo install --locked wasm-bindgen-cli --version 0.2.117`.
+3. Install managed Node, pnpm, and project dependencies with `vp install`.
+4. Start the app with `vp dev`.
+5. Run TypeScript checks and tests with `vp check` and `vp test`.
+6. Run host Rust tests and host/WASM Clippy with `vp run check:rust`.
+7. Build production WASM and assets with `vp build`; inspect them with `vp preview`.
+8. Stress isolated rapid-refresh and multi-tab OPFS handoff in Chrome with
    `vp run test:persistence-browser`.
-8. Force a complete stale-lease retry cycle with `vp run test:persistence-recovery`.
+9. Force a complete stale-lease retry cycle with `vp run test:persistence-recovery`.
 
 `vp run verify` runs the complete TypeScript, Rust, test, lint, and production-build gate.
 The browser persistence stress test remains explicit because it launches a system Chrome instance.
