@@ -82,7 +82,24 @@ impl SurfaceTileCoord {
         self.level.tile_span_voxels()
     }
 
+    /// Whether this tile intersects the canonical grid from an aligned in-grid origin. A positive
+    /// boundary tile may extend one half-open endpoint beyond `i32::MAX`; generation clamps only
+    /// that disposable sampling halo while keeping every emitted voxel coordinate representable.
+    pub const fn is_world_representable(self) -> bool {
+        let span = self.voxel_span() as i64;
+        let origin_x = self.x as i64 * span;
+        let origin_z = self.z as i64 * span;
+        origin_x >= i32::MIN as i64
+            && origin_x <= i32::MAX as i64
+            && origin_z >= i32::MIN as i64
+            && origin_z <= i32::MAX as i64
+    }
+
     pub const fn voxel_origin(self) -> [i32; 2] {
+        assert!(
+            self.is_world_representable(),
+            "surface tile is outside the canonical voxel grid"
+        );
         let span = self.voxel_span();
         [self.x * span, self.z * span]
     }
@@ -91,7 +108,13 @@ impl SurfaceTileCoord {
     pub const fn voxel_bounds_xz(self) -> [[i32; 2]; 2] {
         let origin = self.voxel_origin();
         let span = self.voxel_span();
-        [origin, [origin[0] + span, origin[1] + span]]
+        [
+            origin,
+            [
+                origin[0].saturating_add(span),
+                origin[1].saturating_add(span),
+            ],
+        ]
     }
 }
 
@@ -259,18 +282,36 @@ pub fn surface_tiles_affected_by_column(
     let mut affected = Vec::with_capacity(3);
     affected.push(owner);
     if local_x < stride {
-        affected.push(SurfaceTileCoord::new(level, owner.x - 1, owner.z));
+        push_representable_tile(
+            &mut affected,
+            SurfaceTileCoord::new(level, owner.x - 1, owner.z),
+        );
     }
     if local_x >= span - stride {
-        affected.push(SurfaceTileCoord::new(level, owner.x + 1, owner.z));
+        push_representable_tile(
+            &mut affected,
+            SurfaceTileCoord::new(level, owner.x + 1, owner.z),
+        );
     }
     if local_z < stride {
-        affected.push(SurfaceTileCoord::new(level, owner.x, owner.z - 1));
+        push_representable_tile(
+            &mut affected,
+            SurfaceTileCoord::new(level, owner.x, owner.z - 1),
+        );
     }
     if local_z >= span - stride {
-        affected.push(SurfaceTileCoord::new(level, owner.x, owner.z + 1));
+        push_representable_tile(
+            &mut affected,
+            SurfaceTileCoord::new(level, owner.x, owner.z + 1),
+        );
     }
     affected
+}
+
+fn push_representable_tile(tiles: &mut Vec<SurfaceTileCoord>, coord: SurfaceTileCoord) {
+    if coord.is_world_representable() {
+        tiles.push(coord);
+    }
 }
 
 /// Returns every derived tile whose terrain shell or anchor-owned skyline proxy can change after
@@ -295,7 +336,7 @@ pub fn surface_tiles_affected_by_voxel(
             continue;
         }
         let owner = SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
-        if !affected.contains(&owner) {
+        if owner.is_world_representable() && !affected.contains(&owner) {
             affected.push(owner);
         }
     }
@@ -350,8 +391,8 @@ pub fn generate_water_tile_mesh_with(
     for cell_z in 0..SURFACE_TILE_EDGE_CELLS {
         for cell_x in 0..SURFACE_TILE_EDGE_CELLS {
             wet[cell_z as usize][cell_x as usize] = water_at(
-                origin_x + cell_x * stride + stride / 2,
-                origin_z + cell_z * stride + stride / 2,
+                offset_clamped(origin_x, cell_x * stride + stride / 2),
+                offset_clamped(origin_z, cell_z * stride + stride / 2),
             );
         }
     }
@@ -400,9 +441,9 @@ pub fn generate_water_tile_mesh_with(
                     }
                     let quad = SurfaceQuad {
                         origin: [
-                            origin_x + (cell_min_x + local_x) * stride,
+                            offset_clamped(origin_x, (cell_min_x + local_x) * stride),
                             SEA_LEVEL_VOXELS,
-                            origin_z + (cell_min_z + local_z) * stride,
+                            offset_clamped(origin_z, (cell_min_z + local_z) * stride),
                         ],
                         face: FACE_POS_Y,
                         extent: [(width * stride) as u16, (height * stride) as u16],
@@ -457,8 +498,8 @@ fn generate_surface_tile_mesh_with_options(
     for sample_z in -1..=edge {
         for sample_x in -1..=edge {
             samples.push(surface(
-                origin_x + sample_x * stride + stride / 2,
-                origin_z + sample_z * stride + stride / 2,
+                offset_clamped(origin_x, sample_x * stride + stride / 2),
+                offset_clamped(origin_z, sample_z * stride + stride / 2),
             ));
         }
     }
@@ -479,8 +520,8 @@ fn generate_surface_tile_mesh_with_options(
             let mut bounds = SurfaceBounds::empty();
             for cell_z in cell_min_z..cell_min_z + SURFACE_PATCH_EDGE_CELLS {
                 for cell_x in cell_min_x..cell_min_x + SURFACE_PATCH_EDGE_CELLS {
-                    let x = origin_x + cell_x * stride;
-                    let z = origin_z + cell_z * stride;
+                    let x = offset_clamped(origin_x, cell_x * stride);
+                    let z = offset_clamped(origin_z, cell_z * stride);
                     let (height, material) = sample(cell_x, cell_z);
                     let top = SurfaceQuad {
                         origin: [x, height, z],
@@ -503,9 +544,9 @@ fn generate_surface_tile_mesh_with_options(
                             continue;
                         }
                         let mut side_origin = match face {
-                            FACE_POS_X => [x + stride - 1, neighbor_height + 1, z],
+                            FACE_POS_X => [offset_clamped(x, stride - 1), neighbor_height + 1, z],
                             FACE_NEG_X => [x, neighbor_height + 1, z],
-                            FACE_POS_Z => [x, neighbor_height + 1, z + stride - 1],
+                            FACE_POS_Z => [x, neighbor_height + 1, offset_clamped(z, stride - 1)],
                             _ => [x, neighbor_height + 1, z],
                         };
                         let mut remaining = i64::from(height) - i64::from(neighbor_height);
@@ -527,10 +568,10 @@ fn generate_surface_tile_mesh_with_options(
                     }
                 }
             }
-            let patch_min_x = origin_x + cell_min_x * stride;
-            let patch_min_z = origin_z + cell_min_z * stride;
-            let patch_max_x = patch_min_x + SURFACE_PATCH_EDGE_CELLS * stride;
-            let patch_max_z = patch_min_z + SURFACE_PATCH_EDGE_CELLS * stride;
+            let patch_min_x = offset_clamped(origin_x, cell_min_x * stride);
+            let patch_min_z = offset_clamped(origin_z, cell_min_z * stride);
+            let patch_max_x = patch_min_x.saturating_add(SURFACE_PATCH_EDGE_CELLS * stride);
+            let patch_max_z = patch_min_z.saturating_add(SURFACE_PATCH_EDGE_CELLS * stride);
             for feature in skyline_features.iter().copied().filter(|feature| {
                 feature.anchor[0] >= patch_min_x
                     && feature.anchor[0] < patch_max_x
@@ -586,15 +627,19 @@ fn generate_surface_tile_mesh_with_options(
                             FACE_POS_Z,
                         ),
                     };
-                    let x = origin_x + cell_x * stride;
-                    let z = origin_z + cell_z * stride;
+                    let x = offset_clamped(origin_x, cell_x * stride);
+                    let z = offset_clamped(origin_z, cell_z * stride);
                     let (height, material) = sample(cell_x, cell_z);
                     let skirt_depth = 128i32.max(stride * 8);
                     let origin = match patch_edge {
                         SurfacePatchEdge::NegativeX => [x, height - skirt_depth, z],
-                        SurfacePatchEdge::PositiveX => [x + stride - 1, height - skirt_depth, z],
+                        SurfacePatchEdge::PositiveX => {
+                            [offset_clamped(x, stride - 1), height - skirt_depth, z]
+                        }
                         SurfacePatchEdge::NegativeZ => [x, height - skirt_depth, z],
-                        SurfacePatchEdge::PositiveZ => [x, height - skirt_depth, z + stride - 1],
+                        SurfacePatchEdge::PositiveZ => {
+                            [x, height - skirt_depth, offset_clamped(z, stride - 1)]
+                        }
                     };
                     quads.push(SurfaceQuad {
                         origin,
@@ -612,6 +657,10 @@ fn generate_surface_tile_mesh_with_options(
         quads,
         patches,
     }
+}
+
+fn offset_clamped(origin: i32, offset: i32) -> i32 {
+    (i64::from(origin) + i64::from(offset)).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
 fn pristine_skyline_features(
@@ -1061,6 +1110,7 @@ fn append_box(quads: &mut Vec<SurfaceQuad>, min: [i32; 3], max: [i32; 3], materi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::collections::{BTreeSet, VecDeque};
 
     fn nearby_skyline_feature(generator: Generator) -> SkylineFeature {
@@ -1239,6 +1289,39 @@ mod tests {
             surface_tiles_affected_by_column(level, -128, -128),
             [SurfaceTileCoord::new(level, -1, -1)]
         );
+    }
+
+    #[test]
+    fn world_boundary_tiles_clamp_halo_samples_and_invalidations() {
+        for level in SurfaceLodLevel::ALL {
+            for boundary in [i32::MIN, i32::MAX] {
+                for axis in 0..2 {
+                    let mut voxel = [7, 7];
+                    voxel[axis] = boundary;
+                    let coord = SurfaceTileCoord::containing(level, voxel[0], voxel[1]);
+                    assert!(coord.is_world_representable());
+
+                    let sampled_min = Cell::new([i32::MAX; 2]);
+                    let sampled_max = Cell::new([i32::MIN; 2]);
+                    let _ = generate_surface_tile_mesh_with(coord, |x, z| {
+                        sampled_min.set([sampled_min.get()[0].min(x), sampled_min.get()[1].min(z)]);
+                        sampled_max.set([sampled_max.get()[0].max(x), sampled_max.get()[1].max(z)]);
+                        (0, Material::Stone)
+                    });
+                    if boundary == i32::MIN {
+                        assert_eq!(sampled_min.get()[axis], boundary);
+                    } else {
+                        assert_eq!(sampled_max.get()[axis], boundary);
+                    }
+
+                    assert!(
+                        surface_tiles_affected_by_column(level, voxel[0], voxel[1])
+                            .into_iter()
+                            .all(SurfaceTileCoord::is_world_representable)
+                    );
+                }
+            }
+        }
     }
 
     #[test]

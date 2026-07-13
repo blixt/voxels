@@ -1060,11 +1060,14 @@ mod web {
                     let level_focus = focus[index];
                     for dz in -radius..=radius {
                         for dx in -radius..=radius {
-                            desired.insert(SurfaceTileCoord::new(
+                            let coord = SurfaceTileCoord::new(
                                 level,
                                 level_focus.x + dx,
                                 level_focus.z + dz,
-                            ));
+                            );
+                            if coord.is_world_representable() {
+                                desired.insert(coord);
+                            }
                         }
                     }
                 }
@@ -1737,8 +1740,9 @@ mod web {
         }
 
         fn surface_tile_relevant(&self, coord: SurfaceTileCoord) -> bool {
-            surface_tile_in_coverage(coord, self.surface_focus.get())
-                || surface_tile_in_coverage(coord, self.surface_active_focus.get())
+            coord.is_world_representable()
+                && (surface_tile_in_coverage(coord, self.surface_focus.get())
+                    || surface_tile_in_coverage(coord, self.surface_active_focus.get()))
         }
 
         fn surface_coverage_current(&self) -> bool {
@@ -1754,6 +1758,9 @@ mod web {
                     for dz in -radius..=radius {
                         for dx in -radius..=radius {
                             let coord = SurfaceTileCoord::new(level, center.x + dx, center.z + dz);
+                            if !coord.is_world_representable() {
+                                continue;
+                            }
                             if !resident.contains(&coord) || !revisions.is_current(coord) {
                                 return false;
                             }
