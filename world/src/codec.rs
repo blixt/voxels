@@ -119,6 +119,16 @@ pub fn decode_chunk(bytes: &[u8]) -> Result<Chunk, CodecError> {
     if read_u32(bytes, 32)? as usize != CHUNK_VOLUME {
         return Err(CodecError::InvalidHeader("unexpected voxel count"));
     }
+    let coord = ChunkCoord::new(
+        read_i32(bytes, 12)?,
+        read_i32(bytes, 16)?,
+        read_i32(bytes, 20)?,
+    );
+    if !coord.is_world_representable() {
+        return Err(CodecError::InvalidHeader(
+            "chunk coordinate outside voxel grid",
+        ));
+    }
     let palette_len = usize::from(read_u16(bytes, 36)?);
     if palette_len == 0 || palette_len > Material::ALL.len() {
         return Err(CodecError::InvalidHeader("invalid palette length"));
@@ -159,11 +169,6 @@ pub fn decode_chunk(bytes: &[u8]) -> Result<Chunk, CodecError> {
     if hash_voxels(&voxels).as_bytes() != expected_hash {
         return Err(CodecError::CorruptHash);
     }
-    let coord = ChunkCoord::new(
-        read_i32(bytes, 12)?,
-        read_i32(bytes, 16)?,
-        read_i32(bytes, 20)?,
-    );
     Chunk::from_voxels(coord, voxels).ok_or(CodecError::InvalidHeader("voxel count mismatch"))
 }
 
@@ -315,6 +320,20 @@ mod tests {
         assert_eq!(
             decode_chunk(&encoded),
             Err(CodecError::InvalidHeader("invalid palette length"))
+        );
+    }
+
+    #[test]
+    fn chunk_coordinates_outside_the_voxel_grid_are_rejected() {
+        let chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Stone);
+        let mut encoded = encode_chunk(&chunk);
+        let invalid = i32::MAX.div_euclid(CHUNK_EDGE as i32) + 1;
+        encoded[12..16].copy_from_slice(&invalid.to_le_bytes());
+        assert_eq!(
+            decode_chunk(&encoded),
+            Err(CodecError::InvalidHeader(
+                "chunk coordinate outside voxel grid"
+            ))
         );
     }
 }

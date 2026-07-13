@@ -878,11 +878,15 @@ mod web {
                 };
                 let edits = self.edits.borrow();
                 let origin = ticket.coord.world_origin();
+                let halo_min_x = origin[0].saturating_sub(1);
+                let halo_min_z = origin[2].saturating_sub(1);
+                let halo_max_x = origin[0].saturating_add(CHUNK_EDGE as i32);
+                let halo_max_z = origin[2].saturating_add(CHUNK_EDGE as i32);
                 let generated_region = self.generator.region(
-                    origin[0] - 1,
-                    origin[2] - 1,
-                    CHUNK_EDGE + 2,
-                    CHUNK_EDGE + 2,
+                    halo_min_x,
+                    halo_min_z,
+                    (i64::from(halo_max_x) - i64::from(halo_min_x) + 1) as usize,
+                    (i64::from(halo_max_z) - i64::from(halo_min_z) + 1) as usize,
                 );
                 let mesh = mesh_chunk(&chunk, |x, y, z| {
                     let coord = VoxelCoord::new(x, y, z);

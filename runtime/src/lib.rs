@@ -627,7 +627,10 @@ impl StreamScheduler {
                     else {
                         continue;
                     };
-                    candidates.push(ChunkCoord::new(x, y, z));
+                    let coord = ChunkCoord::new(x, y, z);
+                    if coord.is_world_representable() {
+                        candidates.push(coord);
+                    }
                 }
             }
         }
@@ -738,6 +741,9 @@ fn normalized_interest(focus: ChunkCoord, interest: &[ChunkCoord]) -> (Vec<Chunk
     let mut normalized = Vec::with_capacity(interest.len().min(MAX_SECONDARY_INTEREST_CHUNKS));
     let mut truncated = 0usize;
     for coord in interest.iter().copied() {
+        if !coord.is_world_representable() {
+            continue;
+        }
         if normalized.contains(&coord) {
             continue;
         }
@@ -870,6 +876,22 @@ mod tests {
         assert_eq!(VOXEL_SIZE_METRES, 0.1);
         assert_eq!(CHUNK_EDGE, 32);
         assert!((CHUNK_EDGE_METRES - 3.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn world_edge_focus_never_schedules_unrepresentable_chunks() {
+        let focus = VoxelCoord::new(i32::MAX, i32::MAX, i32::MAX).chunk();
+        let invalid = ChunkCoord::new(focus.x + 1, focus.y, focus.z);
+        let mut scheduler = scheduler(compact_config(32));
+        scheduler.update_focus_with_interest(focus, &[invalid]);
+
+        assert!(
+            scheduler
+                .entries
+                .values()
+                .all(|entry| entry.coord.is_world_representable())
+        );
+        assert_eq!(scheduler.diagnostics().secondary_interest_normalized, 0);
     }
 
     #[test]

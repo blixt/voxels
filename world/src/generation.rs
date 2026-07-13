@@ -302,16 +302,16 @@ impl Generator {
         let origin = chunk.coord().world_origin();
         let [[min_x, min_y, min_z], [max_x, max_y, max_z]] = CINDER_VAULT_BOUNDS;
         let chunk_max = [
-            origin[0] + CHUNK_EDGE as i32,
-            origin[1] + CHUNK_EDGE as i32,
-            origin[2] + CHUNK_EDGE as i32,
+            i64::from(origin[0]) + CHUNK_EDGE as i64,
+            i64::from(origin[1]) + CHUNK_EDGE as i64,
+            i64::from(origin[2]) + CHUNK_EDGE as i64,
         ];
         if origin[0] >= max_x
-            || chunk_max[0] <= min_x
+            || chunk_max[0] <= i64::from(min_x)
             || origin[1] >= max_y
-            || chunk_max[1] <= min_y
+            || chunk_max[1] <= i64::from(min_y)
             || origin[2] >= max_z
-            || chunk_max[2] <= min_z
+            || chunk_max[2] <= i64::from(min_z)
         {
             return;
         }
@@ -715,12 +715,21 @@ impl Generator {
 
     fn decorate_features(self, chunk: &mut Chunk) {
         let origin = chunk.coord().world_origin();
-        let max_x = origin[0] + CHUNK_EDGE as i32 - 1;
-        let max_z = origin[2] + CHUNK_EDGE as i32 - 1;
-        let min_cell_x = (origin[0] - FEATURE_MAX_XZ_OFFSET).div_euclid(FEATURE_CELL_VOXELS);
-        let max_cell_x = (max_x - FEATURE_MIN_XZ_OFFSET).div_euclid(FEATURE_CELL_VOXELS);
-        let min_cell_z = (origin[2] - FEATURE_MAX_XZ_OFFSET).div_euclid(FEATURE_CELL_VOXELS);
-        let max_cell_z = (max_z - FEATURE_MIN_XZ_OFFSET).div_euclid(FEATURE_CELL_VOXELS);
+        let local_max = CHUNK_EDGE as i32 - 1;
+        let max_x = origin[0] + local_max;
+        let max_z = origin[2] + local_max;
+        let min_cell_x = origin[0]
+            .saturating_sub(FEATURE_MAX_XZ_OFFSET)
+            .div_euclid(FEATURE_CELL_VOXELS);
+        let max_cell_x = max_x
+            .saturating_sub(FEATURE_MIN_XZ_OFFSET)
+            .div_euclid(FEATURE_CELL_VOXELS);
+        let min_cell_z = origin[2]
+            .saturating_sub(FEATURE_MAX_XZ_OFFSET)
+            .div_euclid(FEATURE_CELL_VOXELS);
+        let max_cell_z = max_z
+            .saturating_sub(FEATURE_MIN_XZ_OFFSET)
+            .div_euclid(FEATURE_CELL_VOXELS);
         for cell_z in min_cell_z..=max_cell_z {
             for cell_x in min_cell_x..=max_cell_x {
                 let Some(feature) = self.skyline_feature(cell_x, cell_z) else {
@@ -728,7 +737,7 @@ impl Generator {
                 };
                 let bounds = feature.bounds();
                 let min_y = bounds[0][1].max(origin[1]);
-                let max_y = (bounds[1][1] - 1).min(origin[1] + CHUNK_EDGE as i32 - 1);
+                let max_y = (bounds[1][1] - 1).min(origin[1] + local_max);
                 for world_y in min_y..=max_y {
                     for world_z in bounds[0][2].max(origin[2])..=(bounds[1][2] - 1).min(max_z) {
                         for world_x in bounds[0][0].max(origin[0])..=(bounds[1][0] - 1).min(max_x) {
@@ -1103,6 +1112,19 @@ mod tests {
         assert_eq!(left.get(31, 17, 9), generator.sample(-1, 17, 9));
         assert_eq!(right.get(0, 17, 9), generator.sample(0, 17, 9));
         assert_ne!(left.voxels(), right.voxels());
+    }
+
+    #[test]
+    fn boundary_chunks_generate_without_wrapping_the_voxel_grid() {
+        let generator = Generator::new(0x5eed);
+        for (voxel, local) in [(i32::MIN, 0), (i32::MAX, CHUNK_EDGE - 1)] {
+            let coord = VoxelCoord::new(voxel, 0, voxel).chunk();
+            let chunk = generator.generate_chunk(coord);
+            assert_eq!(
+                chunk.get(local, 0, local),
+                generator.sample(voxel, 0, voxel)
+            );
+        }
     }
 
     #[test]

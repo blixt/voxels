@@ -1563,8 +1563,7 @@ mod tests {
             let stride = level.stride_voxels();
             let span = level.tile_span_voxels();
             let surface = |x: i32, z: i32| (x.div_euclid(17) - z.div_euclid(29), Material::Grass);
-            let left =
-                generate_surface_tile_mesh_with(SurfaceTileCoord::new(level, 0, 0), surface);
+            let left = generate_surface_tile_mesh_with(SurfaceTileCoord::new(level, 0, 0), surface);
             let right =
                 generate_surface_tile_mesh_with(SurfaceTileCoord::new(level, 1, 0), surface);
             let forward =
@@ -1987,5 +1986,4 @@ mod tests {
             assert!(surface_tiles_affected_by_voxel(generator, &edits, level, target).is_empty());
         }
     }
-
 }

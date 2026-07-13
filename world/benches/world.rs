@@ -226,9 +226,12 @@ fn edited_far_surface(criterion: &mut Criterion) {
             Material::Stone,
         );
     }
-    criterion.bench_function("generate surface tile with 10k unrelated edits", |bencher| {
-        bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
-    });
+    criterion.bench_function(
+        "generate surface tile with 10k unrelated edits",
+        |bencher| {
+            bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
+        },
+    );
 }
 
 criterion_group!(

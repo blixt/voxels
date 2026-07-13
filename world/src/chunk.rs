@@ -13,11 +13,27 @@ pub struct ChunkCoord {
 }
 
 impl ChunkCoord {
+    const MIN_WORLD_AXIS: i32 = i32::MIN.div_euclid(CHUNK_EDGE as i32);
+    const MAX_WORLD_AXIS: i32 = i32::MAX.div_euclid(CHUNK_EDGE as i32);
+
     pub const fn new(x: i32, y: i32, z: i32) -> Self {
         Self { x, y, z }
     }
 
+    pub const fn is_world_representable(self) -> bool {
+        self.x >= Self::MIN_WORLD_AXIS
+            && self.x <= Self::MAX_WORLD_AXIS
+            && self.y >= Self::MIN_WORLD_AXIS
+            && self.y <= Self::MAX_WORLD_AXIS
+            && self.z >= Self::MIN_WORLD_AXIS
+            && self.z <= Self::MAX_WORLD_AXIS
+    }
+
     pub const fn world_origin(self) -> [i32; 3] {
+        assert!(
+            self.is_world_representable(),
+            "chunk coordinate is outside the canonical voxel grid"
+        );
         [
             self.x * CHUNK_EDGE as i32,
             self.y * CHUNK_EDGE as i32,
@@ -34,13 +50,17 @@ pub struct Chunk {
 
 impl Chunk {
     pub(crate) fn from_voxels(coord: ChunkCoord, voxels: Vec<Material>) -> Option<Self> {
-        (voxels.len() == CHUNK_VOLUME).then(|| Self {
+        (coord.is_world_representable() && voxels.len() == CHUNK_VOLUME).then(|| Self {
             coord,
             voxels: voxels.into_boxed_slice(),
         })
     }
 
     pub fn empty(coord: ChunkCoord) -> Self {
+        assert!(
+            coord.is_world_representable(),
+            "chunk coordinate is outside the canonical voxel grid"
+        );
         Self {
             coord,
             voxels: vec![Material::Air; CHUNK_VOLUME].into_boxed_slice(),
@@ -48,6 +68,10 @@ impl Chunk {
     }
 
     pub fn filled(coord: ChunkCoord, material: Material) -> Self {
+        assert!(
+            coord.is_world_representable(),
+            "chunk coordinate is outside the canonical voxel grid"
+        );
         Self {
             coord,
             voxels: vec![material; CHUNK_VOLUME].into_boxed_slice(),
@@ -93,6 +117,16 @@ mod tests {
         assert_eq!(chunk.get(31, 30, 29), Material::Snow);
         assert_eq!(chunk.get(30, 31, 29), Material::Air);
         assert_eq!(chunk.coord().world_origin(), [-64, 32, 96]);
+    }
+
+    #[test]
+    fn boundary_chunks_have_exact_representable_origins() {
+        let minimum = ChunkCoord::new(ChunkCoord::MIN_WORLD_AXIS, 0, 0);
+        let maximum = ChunkCoord::new(ChunkCoord::MAX_WORLD_AXIS, 0, 0);
+        assert_eq!(minimum.world_origin()[0], i32::MIN);
+        assert_eq!(maximum.world_origin()[0], i32::MAX - CHUNK_EDGE as i32 + 1);
+        assert!(!ChunkCoord::new(ChunkCoord::MIN_WORLD_AXIS - 1, 0, 0).is_world_representable());
+        assert!(!ChunkCoord::new(ChunkCoord::MAX_WORLD_AXIS + 1, 0, 0).is_world_representable());
     }
 
     #[test]

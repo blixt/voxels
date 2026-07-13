@@ -226,7 +226,17 @@ fn build_occupancy_halo(
                 let material = if inside {
                     chunk.get(x as usize, y as usize, z as usize)
                 } else {
-                    outside(origin[0] + x, origin[1] + y, origin[2] + z)
+                    let world = [
+                        origin[0].checked_add(x),
+                        origin[1].checked_add(y),
+                        origin[2].checked_add(z),
+                    ];
+                    match world {
+                        [Some(x), Some(y), Some(z)] => outside(x, y, z),
+                        // The canonical i32 voxel grid is finite. A missing halo cell beyond that
+                        // domain is empty space, not a wrapped sample from the opposite boundary.
+                        _ => Material::Air,
+                    }
                 };
                 let index = (x + 1) as usize
                     + (z + 1) as usize * HALO_EDGE
@@ -331,7 +341,7 @@ fn compose(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ChunkCoord;
+    use crate::{ChunkCoord, VoxelCoord};
 
     #[test]
     fn filled_chunk_merges_to_six_quads() {
@@ -437,6 +447,22 @@ mod tests {
                 .all(|quad| quad.material == Material::Water.id())
         );
         assert!(mesh.translucent.iter().all(|quad| quad.extent == [32, 32]));
+    }
+
+    #[test]
+    fn boundary_chunk_halos_do_not_wrap_to_the_opposite_world_edge() {
+        let minimum = VoxelCoord::new(i32::MIN, 0, 0).chunk();
+        let maximum = VoxelCoord::new(i32::MAX, 0, 0).chunk();
+        let minimum_mesh = mesh_chunk(&Chunk::filled(minimum, Material::Stone), |x, _, _| {
+            assert_ne!(x, i32::MAX);
+            Material::Air
+        });
+        let maximum_mesh = mesh_chunk(&Chunk::filled(maximum, Material::Stone), |x, _, _| {
+            assert_ne!(x, i32::MIN);
+            Material::Air
+        });
+        assert_eq!(minimum_mesh.opaque.len(), 6);
+        assert_eq!(maximum_mesh.opaque.len(), 6);
     }
 
     #[test]
