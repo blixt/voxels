@@ -591,20 +591,28 @@ fn generate_surface_tile_mesh_with_options(
                         if height <= neighbor_height {
                             continue;
                         }
-                        let side_origin = match face {
+                        let mut side_origin = match face {
                             FACE_POS_X => [x + stride - 1, neighbor_height + 1, z],
                             FACE_NEG_X => [x, neighbor_height + 1, z],
                             FACE_POS_Z => [x, neighbor_height + 1, z + stride - 1],
                             _ => [x, neighbor_height + 1, z],
                         };
-                        let side = SurfaceQuad {
-                            origin: side_origin,
-                            face,
-                            extent: [stride as u16, (height - neighbor_height) as u16],
-                            material,
-                        };
-                        bounds.include_quad(side);
-                        quads.push(side);
+                        let mut remaining = i64::from(height) - i64::from(neighbor_height);
+                        while remaining > 0 {
+                            let vertical_extent = remaining.min(i64::from(u16::MAX)) as u16;
+                            let side = SurfaceQuad {
+                                origin: side_origin,
+                                face,
+                                extent: [stride as u16, vertical_extent],
+                                material,
+                            };
+                            bounds.include_quad(side);
+                            quads.push(side);
+                            remaining -= i64::from(vertical_extent);
+                            if remaining > 0 {
+                                side_origin[1] += i32::from(vertical_extent);
+                            }
+                        }
                     }
                 }
             }
@@ -1427,6 +1435,39 @@ mod tests {
             assert_eq!(bounds.max[0], origin_x + coord.voxel_span());
             assert_eq!(bounds.min[2], origin_z);
             assert_eq!(bounds.max[2], origin_z + coord.voxel_span());
+        }
+    }
+
+    #[test]
+    fn tall_surface_sides_split_without_truncating_vertical_coverage() {
+        for (height, segments_per_face) in [(65_535, 1), (65_536, 2), (131_071, 3)] {
+            let tile = generate_surface_tile_mesh_with_options(
+                SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
+                |x, z| {
+                    let sampled_height = if x == 1 && z == 1 { height } else { 0 };
+                    (sampled_height, Material::Stone)
+                },
+                false,
+                &[],
+            );
+            let sides: Vec<_> = tile
+                .quads
+                .iter()
+                .filter(|quad| quad.face != FACE_POS_Y)
+                .collect();
+
+            assert_eq!(sides.len(), segments_per_face * 4);
+            assert!(sides.iter().all(|quad| quad.extent[1] > 0));
+            for face in [FACE_NEG_X, FACE_POS_X, FACE_NEG_Z, FACE_POS_Z] {
+                assert_eq!(
+                    sides
+                        .iter()
+                        .filter(|quad| quad.face == face)
+                        .map(|quad| u32::from(quad.extent[1]))
+                        .sum::<u32>(),
+                    height as u32
+                );
+            }
         }
     }
 
