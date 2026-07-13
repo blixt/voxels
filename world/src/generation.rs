@@ -232,10 +232,10 @@ impl Generator {
             min_x.saturating_add(i32::try_from(width.saturating_sub(1)).unwrap_or(i32::MAX));
         let max_z =
             min_z.saturating_add(i32::try_from(depth.saturating_sub(1)).unwrap_or(i32::MAX));
-        let min_cell_x = min_x.div_euclid(FEATURE_CELL_VOXELS) - 1;
-        let max_cell_x = max_x.div_euclid(FEATURE_CELL_VOXELS) + 1;
-        let min_cell_z = min_z.div_euclid(FEATURE_CELL_VOXELS) - 1;
-        let max_cell_z = max_z.div_euclid(FEATURE_CELL_VOXELS) + 1;
+        let min_cell_x = min_x.div_euclid(FEATURE_CELL_VOXELS);
+        let max_cell_x = max_x.div_euclid(FEATURE_CELL_VOXELS);
+        let min_cell_z = min_z.div_euclid(FEATURE_CELL_VOXELS);
+        let max_cell_z = max_z.div_euclid(FEATURE_CELL_VOXELS);
         let mut features = Vec::new();
         for cell_z in min_cell_z..=max_cell_z {
             for cell_x in min_cell_x..=max_cell_x {
@@ -600,18 +600,10 @@ impl Generator {
     pub fn skyline_features_at(self, coord: crate::VoxelCoord) -> Vec<SkylineFeature> {
         let cell_x = coord.x.div_euclid(FEATURE_CELL_VOXELS);
         let cell_z = coord.z.div_euclid(FEATURE_CELL_VOXELS);
-        let mut features = Vec::new();
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                let Some(feature) = self.skyline_feature(cell_x + dx, cell_z + dz) else {
-                    continue;
-                };
-                if feature.material_at(coord).is_some() {
-                    features.push(feature);
-                }
-            }
-        }
-        features
+        self.skyline_feature(cell_x, cell_z)
+            .filter(|feature| feature.material_at(coord).is_some())
+            .into_iter()
+            .collect()
     }
 
     /// Finds a deterministic landmark for Rust-owned exploration/debug controls without exposing
@@ -1339,6 +1331,10 @@ mod tests {
             .expect("fixed seed should produce a nearby broadleaf landmark");
         let [x, ground, z] = feature.anchor;
         assert_eq!(generator.sample(x, ground + 1, z), Material::Wood);
+        assert_eq!(
+            generator.skyline_features_at(VoxelCoord::new(x, ground + 1, z)),
+            vec![feature]
+        );
         assert_eq!(generator.sample(x, feature.trunk_top, z), Material::Wood);
         assert_eq!(
             generator.sample(x + 5, feature.trunk_top - 3, z),
