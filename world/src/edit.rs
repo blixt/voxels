@@ -244,7 +244,10 @@ impl EditMap {
                 }
                 let mut neighbor = [base.x, base.y, base.z];
                 neighbor[axis] += direction;
-                chunks.push(ChunkCoord::new(neighbor[0], neighbor[1], neighbor[2]));
+                let neighbor = ChunkCoord::new(neighbor[0], neighbor[1], neighbor[2]);
+                if neighbor.is_world_representable() {
+                    chunks.push(neighbor);
+                }
             }
         }
         chunks
@@ -295,6 +298,25 @@ mod tests {
         assert!(chunks.contains(&ChunkCoord::new(0, 2, 0)));
         assert!(chunks.contains(&ChunkCoord::new(-1, 1, 0)));
         assert!(chunks.contains(&ChunkCoord::new(-1, 2, 1)));
+    }
+
+    #[test]
+    fn world_boundary_edits_never_invalidate_unrepresentable_chunks() {
+        for axis in 0..3 {
+            for boundary in [i32::MIN, i32::MAX] {
+                let mut voxel = [7, 7, 7];
+                voxel[axis] = boundary;
+                let chunks =
+                    EditMap::affected_chunks(VoxelCoord::new(voxel[0], voxel[1], voxel[2]));
+
+                assert_eq!(chunks.len(), 1);
+                assert!(chunks[0].is_world_representable());
+                assert_eq!(
+                    chunks[0],
+                    VoxelCoord::new(voxel[0], voxel[1], voxel[2]).chunk()
+                );
+            }
+        }
     }
 
     #[test]
