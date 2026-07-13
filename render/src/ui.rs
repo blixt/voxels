@@ -422,7 +422,6 @@ pub struct MissionControlUi {
     feature_enabled: [bool; FEATURE_COUNT],
     feature_motion: [EasedValue; FEATURE_COUNT],
     open_motion: EasedValue,
-    compact_motion: EasedValue,
     hover_motion: BTreeMap<UiTarget, EasedValue>,
     toast_age: f32,
     daylight_label: &'static str,
@@ -444,7 +443,6 @@ impl Default for MissionControlUi {
             feature_enabled: [true; FEATURE_COUNT],
             feature_motion: [EasedValue::new(1.0); FEATURE_COUNT],
             open_motion: EasedValue::new(0.0),
-            compact_motion: EasedValue::new(0.0),
             hover_motion: BTreeMap::new(),
             toast_age: 0.0,
             daylight_label: "GOLDEN HOUR",
@@ -536,7 +534,6 @@ impl MissionControlUi {
             return UiAction::None;
         }
         self.compact = compact;
-        self.compact_motion.set(compact, self.reduced_motion);
         UiAction::CompactChanged(compact)
     }
 
@@ -571,7 +568,6 @@ impl MissionControlUi {
     pub fn advance(&mut self, dt: f32) {
         self.toast_age += dt.clamp(0.0, 0.1);
         self.open_motion.advance(dt, self.reduced_motion);
-        self.compact_motion.advance(dt, self.reduced_motion);
         for motion in &mut self.feature_motion {
             motion.advance(dt, self.reduced_motion);
         }
@@ -1291,7 +1287,6 @@ impl MissionControlUi {
 
     fn snap_motion(&mut self) {
         self.open_motion.advance(0.0, true);
-        self.compact_motion.advance(0.0, true);
         for motion in &mut self.feature_motion {
             motion.advance(0.0, true);
         }
