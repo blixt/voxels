@@ -8,6 +8,14 @@ import {
 
 describe("browser snapshot schema", () => {
   it("rejects stale layouts before interpreting named fields", () => {
+    expect([
+      SNAPSHOT.cameraX,
+      SNAPSHOT.cameraY,
+      SNAPSHOT.cameraZ,
+      SNAPSHOT.yaw,
+      SNAPSHOT.pitch,
+    ]).toEqual([0, 1, 2, 3, 4]);
+
     const current = [];
     current[SNAPSHOT.schemaVersion] = SNAPSHOT_SCHEMA_VERSION;
     expect(assertSnapshotSchema(current)).toBe(current);

@@ -6,6 +6,7 @@ export const SNAPSHOT = Object.freeze({
   cameraX: 0,
   cameraY: 1,
   cameraZ: 2,
+  yaw: 3,
   pitch: 4,
   quads: 6,
   edits: 7,

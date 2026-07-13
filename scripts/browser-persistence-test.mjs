@@ -156,6 +156,14 @@ async function editFromFollowerAndWaitForLeader(follower, leader) {
 }
 
 async function closeFollowerAndAssertFinalCamera(context, url, follower) {
+  const cameraFields = [
+    SNAPSHOT.cameraX,
+    SNAPSHOT.cameraY,
+    SNAPSHOT.cameraZ,
+    SNAPSHOT.yaw,
+    SNAPSHOT.pitch,
+  ];
+  const cameraValues = (snapshot) => JSON.stringify(cameraFields.map((index) => snapshot[index]));
   // Wait until the follower has passed an idle periodic checkpoint, then change its pose and close
   // well before the next one-second save. Teardown itself must hand this final camera to the leader.
   await follower.waitForTimeout(1_200);
@@ -166,9 +174,12 @@ async function closeFollowerAndAssertFinalCamera(context, url, follower) {
   const final = await follower.evaluate(() => globalThis.__VOXELS__.snapshot());
   assertSnapshotSchema(before);
   assertSnapshotSchema(final);
-  if (Math.abs(final[3] - before[3]) < 0.1 || Math.abs(final[4] - before[4]) < 0.1) {
+  if (
+    Math.abs(final[SNAPSHOT.yaw] - before[SNAPSHOT.yaw]) < 0.1 ||
+    Math.abs(final[SNAPSHOT.pitch] - before[SNAPSHOT.pitch]) < 0.1
+  ) {
     throw new Error(
-      `follower camera did not move before close: ${before.slice(0, 5)} -> ${final.slice(0, 5)}`,
+      `follower camera did not move before close: ${cameraValues(before)} -> ${cameraValues(final)}`,
     );
   }
   // Playwright's force-close may destroy a target without giving its worker a lifecycle turn.
@@ -184,10 +195,10 @@ async function closeFollowerAndAssertFinalCamera(context, url, follower) {
   watch("follower-replacement", replacement);
   await replacement.goto(url, { waitUntil: "domcontentloaded" });
   const restored = await waitForEngine(replacement);
-  for (let index = 0; index < 5; index += 1) {
+  for (const index of cameraFields) {
     if (Math.abs(restored[index] - final[index]) > 0.0001) {
       throw new Error(
-        `follower final camera was not restored at ${index}: ${final.slice(0, 5)} -> ${restored.slice(0, 5)}`,
+        `follower final camera was not restored at ${index}: ${cameraValues(final)} -> ${cameraValues(restored)}`,
       );
     }
   }
