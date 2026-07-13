@@ -60,14 +60,28 @@ impl EditMap {
             + self.overrides.len() * size_of::<(i32, Material)>()
     }
     pub fn sample(&self, generator: Generator, coord: VoxelCoord) -> Material {
-        self.overrides
-            .get(&coord)
-            .copied()
-            .unwrap_or_else(|| generator.sample(coord.x, coord.y, coord.z))
+        self.resolve_generated(coord, generator.sample(coord.x, coord.y, coord.z))
     }
 
     pub fn set(&mut self, generator: Generator, coord: VoxelCoord, material: Material) {
-        if generator.sample(coord.x, coord.y, coord.z) == material {
+        self.set_against_generated(coord, material, generator.sample(coord.x, coord.y, coord.z));
+    }
+
+    /// Resolves one authoritative source value against the sparse edit overlay. This is the
+    /// transport-safe form: callers can supply a value from a chunk, halo, or bounded sample block
+    /// without giving the edit journal a concrete generator.
+    pub fn resolve_generated(&self, coord: VoxelCoord, generated: Material) -> Material {
+        self.overrides.get(&coord).copied().unwrap_or(generated)
+    }
+
+    /// Stores only values that differ from an already obtained authoritative source value.
+    pub fn set_against_generated(
+        &mut self,
+        coord: VoxelCoord,
+        material: Material,
+        generated: Material,
+    ) {
+        if generated == material {
             self.replace_override(coord, None);
         } else {
             self.replace_override(coord, Some(material));
@@ -108,6 +122,30 @@ impl EditMap {
         }
     }
 
+    /// Captures pristine values for the sparse overrides that touch a generated chunk. Clients can
+    /// retain these few values for edit comparison and exact reversion without keeping a second
+    /// full pristine chunk cache or issuing a point source request later.
+    pub fn source_values_for_overrides(&self, chunk: &Chunk) -> Vec<(VoxelCoord, Material)> {
+        let coord = chunk.coord();
+        let Some(overrides) = self.chunk_overrides.get(&(coord.x, coord.y, coord.z)) else {
+            return Vec::new();
+        };
+        let origin = coord.world_origin();
+        overrides
+            .keys()
+            .map(|local| {
+                (
+                    VoxelCoord::new(
+                        origin[0] + local[0] as i32,
+                        origin[1] + local[1] as i32,
+                        origin[2] + local[2] as i32,
+                    ),
+                    chunk.get(local[0], local[1], local[2]),
+                )
+            })
+            .collect()
+    }
+
     /// Returns whether a disposable skyline proxy still represents pristine canonical feature
     /// voxels. The query walks only chunk-index buckets touched by the small analytic feature, so
     /// unrelated large edit journals do not affect surface-tile generation cost.
@@ -115,6 +153,17 @@ impl EditMap {
         &self,
         generator: Generator,
         feature: SkylineFeature,
+    ) -> bool {
+        self.skyline_feature_is_pristine_with(feature, |coord| {
+            generator.sample(coord.x, coord.y, coord.z)
+        })
+    }
+
+    /// Source-agnostic pristine check over the bounded feature coordinates touched by edits.
+    pub fn skyline_feature_is_pristine_with(
+        &self,
+        feature: SkylineFeature,
+        mut generated_at: impl FnMut(VoxelCoord) -> Material,
     ) -> bool {
         if self.overrides.is_empty() {
             return true;
@@ -148,7 +197,7 @@ impl EditMap {
                         let Some(feature_material) = feature.material_at(coord) else {
                             continue;
                         };
-                        if generator.sample(coord.x, coord.y, coord.z) == feature_material
+                        if generated_at(coord) == feature_material
                             && override_material != feature_material
                         {
                             return false;
@@ -164,18 +213,42 @@ impl EditMap {
     /// derived from generator + edits rather than silently becoming a second world authority.
     pub fn surface_sample(&self, generator: Generator, x: i32, z: i32) -> (i32, Material) {
         let generated = generator.surface_sample(x, z);
+        self.surface_sample_with(
+            x,
+            z,
+            (generated.height, generated.material),
+            i32::MIN,
+            |coord| generator.sample(coord.x, coord.y, coord.z),
+        )
+    }
+
+    /// Resolves one edited surface column from prepared source data and a bounded column sampler.
+    /// `generated_min_y` is the inclusive floor of the prepared product, preventing an accidental
+    /// scan outside the caller's authoritative data.
+    pub fn surface_sample_with(
+        &self,
+        x: i32,
+        z: i32,
+        generated_surface: (i32, Material),
+        generated_min_y: i32,
+        mut generated_at: impl FnMut(VoxelCoord) -> Material,
+    ) -> (i32, Material) {
         let Some(column) = self.column_overrides.get(&(x, z)) else {
-            return (generated.height, generated.material);
+            return generated_surface;
         };
         let highest_override = column
             .iter()
             .rev()
             .find(|(_, material)| material.is_collidable())
             .map(|(&y, _)| y);
-        let mut y = highest_override.map_or(generated.height, |value| value.max(generated.height));
+        let mut y =
+            highest_override.map_or(generated_surface.0, |value| value.max(generated_surface.0));
         loop {
-            let material = self.sample(generator, VoxelCoord::new(x, y, z));
-            if material.is_collidable() || y == i32::MIN {
+            let coord = VoxelCoord::new(x, y, z);
+            let material = self
+                .override_at(coord)
+                .unwrap_or_else(|| generated_at(coord));
+            if material.is_collidable() || y <= generated_min_y {
                 return (y, material);
             }
             y -= 1;
@@ -225,8 +298,9 @@ impl EditMap {
         }
     }
 
-    /// Chunks whose meshes can change after this voxel changes. A face on a chunk boundary also
-    /// invalidates the neighboring mesh so a removed or added block cannot leave a stale seam.
+    /// Chunks whose meshes can change after this voxel changes. The mesher samples a full one-voxel
+    /// shell for face visibility and ambient occlusion, so edge and corner edits invalidate the
+    /// Cartesian product of all touching chunk owners, not only face neighbors.
     pub fn affected_chunks(coord: VoxelCoord) -> Vec<ChunkCoord> {
         let edge = CHUNK_EDGE as i32;
         let local = [
@@ -235,18 +309,32 @@ impl EditMap {
             coord.z.rem_euclid(edge),
         ];
         let base = coord.chunk();
-        let mut chunks = vec![base];
-        for axis in 0..3 {
-            for direction in [-1, 1] {
-                let boundary = if direction < 0 { 0 } else { edge - 1 };
-                if local[axis] != boundary {
-                    continue;
-                }
-                let mut neighbor = [base.x, base.y, base.z];
-                neighbor[axis] += direction;
-                let neighbor = ChunkCoord::new(neighbor[0], neighbor[1], neighbor[2]);
-                if neighbor.is_world_representable() {
-                    chunks.push(neighbor);
+        let axis_offsets = local.map(|value| {
+            if value == 0 {
+                [0, -1]
+            } else if value == edge - 1 {
+                [0, 1]
+            } else {
+                [0, 0]
+            }
+        });
+        let mut chunks = Vec::with_capacity(8);
+        for x in axis_offsets[0] {
+            for y in axis_offsets[1] {
+                for z in axis_offsets[2] {
+                    let Some(x) = base.x.checked_add(x) else {
+                        continue;
+                    };
+                    let Some(y) = base.y.checked_add(y) else {
+                        continue;
+                    };
+                    let Some(z) = base.z.checked_add(z) else {
+                        continue;
+                    };
+                    let neighbor = ChunkCoord::new(x, y, z);
+                    if neighbor.is_world_representable() && !chunks.contains(&neighbor) {
+                        chunks.push(neighbor);
+                    }
                 }
             }
         }
@@ -277,6 +365,63 @@ mod tests {
     }
 
     #[test]
+    fn prepared_source_values_drive_sparse_comparison_and_resolution() {
+        let coord = VoxelCoord::new(-4, 30, 9);
+        let mut edits = EditMap::default();
+        edits.set_against_generated(coord, Material::Stone, Material::Air);
+        assert_eq!(
+            edits.resolve_generated(coord, Material::Air),
+            Material::Stone
+        );
+        edits.set_against_generated(coord, Material::Air, Material::Air);
+        assert!(edits.is_empty());
+    }
+
+    #[test]
+    fn pristine_chunk_values_are_captured_before_sparse_overrides_are_applied() {
+        let generator = Generator::new(0x5eed_cafe);
+        let coord = VoxelCoord::new(-33, 7, 65);
+        let chunk = generator.generate_chunk(coord.chunk());
+        let [x, y, z] = coord.local();
+        let pristine = chunk.get(x, y, z);
+        let replacement = if pristine == Material::Air {
+            Material::Stone
+        } else {
+            Material::Air
+        };
+        let mut edits = EditMap::default();
+        edits.insert_override(coord, replacement);
+
+        assert_eq!(
+            edits.source_values_for_overrides(&chunk),
+            vec![(coord, pristine)]
+        );
+        let mut edited = chunk;
+        edits.apply_to_chunk(&mut edited);
+        assert_eq!(edited.get(x, y, z), replacement);
+    }
+
+    #[test]
+    fn prepared_surface_sampling_is_lazy_and_stops_at_the_supplied_block_floor() {
+        let x = 4;
+        let z = -7;
+        let removed_surface = VoxelCoord::new(x, 10, z);
+        let mut edits = EditMap::default();
+        edits.replace_durable_override(removed_surface, Some(Material::Air));
+        let mut sampled = Vec::new();
+        let resolved = edits.surface_sample_with(x, z, (10, Material::Stone), 9, |coord| {
+            sampled.push(coord);
+            assert_ne!(
+                coord, removed_surface,
+                "override must win before source lookup"
+            );
+            Material::Stone
+        });
+        assert_eq!(resolved, (9, Material::Stone));
+        assert_eq!(sampled, vec![VoxelCoord::new(x, 9, z)]);
+    }
+
+    #[test]
     fn generated_water_can_be_removed_and_restored_sparsely() {
         let generator = Generator::new(0x5eed_cafe);
         let coord = VoxelCoord::new(18_016, crate::SEA_LEVEL_VOXELS, 12_896);
@@ -291,13 +436,16 @@ mod tests {
     }
 
     #[test]
-    fn boundary_edit_invalidates_both_chunks() {
+    fn corner_edit_invalidates_all_eight_chunks_sampled_for_ambient_occlusion() {
         let chunks = EditMap::affected_chunks(VoxelCoord::new(-1, 64, 31));
-        assert_eq!(chunks.len(), 4);
-        assert!(chunks.contains(&ChunkCoord::new(-1, 2, 0)));
-        assert!(chunks.contains(&ChunkCoord::new(0, 2, 0)));
-        assert!(chunks.contains(&ChunkCoord::new(-1, 1, 0)));
-        assert!(chunks.contains(&ChunkCoord::new(-1, 2, 1)));
+        assert_eq!(chunks.len(), 8);
+        for x in [-1, 0] {
+            for y in [1, 2] {
+                for z in [0, 1] {
+                    assert!(chunks.contains(&ChunkCoord::new(x, y, z)));
+                }
+            }
+        }
     }
 
     #[test]

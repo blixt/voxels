@@ -699,3 +699,63 @@ exact and just-inside face boundaries, negative coordinates, nearest sampling, a
 WGSL path. `vp run profile:materials` kept material-off/on frame p95 identical at 9.2 ms, moved world
 GPU p95 by 0.239 ms, changed no geometry, residency, draws, or mesh allocation, and recorded zero
 dropped samples or browser errors in isolated headless Chrome.
+
+## 2026-07-13: local world-source Phase 0 baseline
+
+Measured on an Apple M3 Max running macOS 26.5.2 with Rust 1.97.0. The working tree was based on
+commit `75c7140`; Criterion used 100 samples after its standard warm-up. The benchmark commands write
+only ignored artifacts under `target/criterion`; the browser profile uses a preview server on a
+reserved ephemeral port and does not open or reset an existing browser origin:
+
+```sh
+vp run bench:world
+vp run bench:runtime
+vp run profile:browser
+```
+
+| Portable operation                                             | Criterion mean |            Derived throughput |
+| -------------------------------------------------------------- | -------------: | ----------------------------: |
+| Generate one procedural-v16 32³ chunk                          |      718.33 us |                1,392 chunks/s |
+| Generate chunk plus deduplicated meshing halo                  |      1.0483 ms |                  954 chunks/s |
+| Generate two chunk-plus-halo products in one batch             |      2.0574 ms | 486 batches/s; 972 products/s |
+| Materialize the 6,536-cell meshing halo                        |      187.55 us |                 5,332 halos/s |
+| Generate one 25.6 m far-surface tile                           |      165.24 us |                 6,052 tiles/s |
+| Generate one edit-aware stride-8 water tile                    |      129.87 us |                 7,700 tiles/s |
+| Encode source-bound VXCH v2                                    |      412.70 us |                  151.44 MiB/s |
+| Decode and validate source-bound VXCH v2                       |      412.57 us |                  151.49 MiB/s |
+| Populate the 243-chunk cold scheduler interest set             |       22.51 us |                 44,434 sets/s |
+| Admit a mixed `{ generation: 2, meshing: 1, upload: 3 }` frame |       10.01 us |               99,900 frames/s |
+
+The exact mesher envelope is the complete local `[-1, 32]` cube with the `[0, 31]` core removed:
+6,536 unique material values, including AO edge and corner samples. Its logical payload is 13,072
+bytes at the current `u16` material width. Six unpadded 32x32 planes are therefore insufficient.
+At the settled 243-chunk browser working set, cores account for 15.188 MiB and halos add 3.029 MiB,
+for 18.217 MiB of logical canonical voxel data. The release WASM heap committed 24 MiB in the same
+steady-state capture.
+
+VXCH v2 keeps the existing palette and bit packing. Encoded sizes for ordinary surface, midpoint Pilgrim
+Road, water, Alpine Needle, and Cinder Vault representative chunks are respectively 8,304, 12,402,
+4,204, 8,302, and 8,304 bytes. The five codec-independent canonical voxel hashes live in
+`world/tests/procedural_v16_golden.rs`; codec v2 has a separate intentional envelope golden so a
+future envelope version cannot masquerade as a generator change.
+
+The isolated release browser reached its fully drained 243-chunk working set in 3.270 seconds. Steady,
+traversal, and underwater frame p95 were 9.6, 9.3, and 9.2 ms respectively, with no frame above
+16.67 ms, no dropped samples, no stale completions, and no browser errors. Traversal streaming work
+measured 4.1 ms p95 while the mixed frame-admission budget remained bounded.
+
+These are in-process baselines. The plan's 5% process-split threshold is intentionally not evaluated
+against codec microbenchmarks; warmed service throughput, daemon RSS, queue wait, and transport
+latency must be measured when the daemon exists.
+
+The completed Phase 1 in-process boundary was re-profiled after collision, enclosure, raycast, and
+light visibility stopped invoking the source from callbacks. Startup drained in 3.356 seconds;
+steady, traversal, and underwater frame p95 measured 9.1, 9.2, and 9.2 ms. All three windows recorded
+zero frames above 16.67 ms, zero dropped samples, zero stale completions, and zero browser errors.
+Steady committed WASM remained 24 MiB; the underwater window reached 27.875 MiB after traversal and
+the bounded teleport probes. Coast and underwater discovery use a bounded first-match surface-search
+product, avoiding both per-column requests and a temporary 513x513 sample-grid allocation.
+The 40-operation edit profile restored both fixtures exactly with zero remaining edits, in-flight
+work, superseded operations, dropped samples, pending jobs, or browser errors; full-convergence p95
+was 38.0 ms. The isolated two-tab portal gate sealed all 25 mouth voxels, observed six open portals
+before and after reload, then restored seven portals and zero persisted edits after a second reload.

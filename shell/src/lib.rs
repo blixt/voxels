@@ -48,16 +48,18 @@ mod web {
     };
     use voxels_world::{
         CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT, CINDER_VAULT_NODES, CINDER_VAULT_PORTAL_COUNT,
-        CaveStreamInterest, Chunk, ChunkCoord, EditMap, Generator, Material, MeshedChunk,
-        PortalState, SkylineFeature, SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord,
-        VOXEL_SIZE_METRES, VisibilityCellId, VoxelCoord, cinder_vault_portal_is_open,
+        CaveStreamInterest, Chunk, ChunkCoord, EditMap, Material, MeshedChunk, MeshingHalo,
+        PortalState, SkylineFeature, SkylineFeatureKind, SurfaceLodLevel, SurfaceSample,
+        SurfaceSampleBlockRequest, SurfaceSampleBlockSnapshot, SurfaceSearchHit, SurfaceSearchKind,
+        SurfaceSearchRequest, SurfaceTileCoord, VOXEL_SIZE_METRES, VisibilityCellId,
+        VoxelBlockRequest, VoxelBlockSnapshot, VoxelCoord, WorldProduct, WorldProductBatch,
+        WorldProductPriority, WorldProductRequest, WorldSourceEngine, cinder_vault_portal_is_open,
         cinder_vault_portal_probe_voxel, cinder_vault_portal_state,
         cinder_vault_portals_affected_by_voxel, cinder_vault_stream_interest,
         cinder_vault_visibility_cell, cinder_vault_visibility_graph,
         first_pilgrim_road_length_voxels, first_pilgrim_route_anchor,
-        first_pilgrim_route_anchor_count, generate_edited_surface_tile_mesh,
-        generate_edited_water_tile_mesh, mesh_chunk, pilgrim_chapter_at_distance,
-        sample_cinder_vault, sample_first_pilgrim_road, surface_tiles_affected_by_voxel,
+        first_pilgrim_route_anchor_count, mesh_chunk, pilgrim_chapter_at_distance,
+        procedural_world_source, sample_cinder_vault, sample_first_pilgrim_road,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -79,6 +81,11 @@ mod web {
     const EDIT_PROFILE_WATER: [i32; 3] = [18_016, 10, 12_896];
     const EDIT_PROFILE_OPERATIONS: u8 = 40;
     const CINDER_MOUTH_PROFILE_VOXELS: usize = 25;
+    const SURFACE_PROBE_BLOCK_EDGE: i32 = 64;
+    const MAX_SURFACE_PROBE_BLOCKS: usize = 64;
+    const CAMERA_PROBE_HORIZONTAL_RADIUS_VOXELS: i32 = 4;
+    const CAMERA_PROBE_BELOW_EYE_VOXELS: i32 = 20;
+    const CAMERA_PROBE_HEIGHT_VOXELS: u32 = 288;
     const STREAM_FRAME_BUDGET: FrameBudget = FrameBudget {
         generation: 2,
         meshing: 1,
@@ -86,6 +93,311 @@ mod web {
     };
 
     type FrameCallback = Closure<dyn FnMut(f64)>;
+
+    fn request_voxel_block(
+        source: &dyn WorldSourceEngine,
+        request: VoxelBlockRequest,
+    ) -> Result<VoxelBlockSnapshot, String> {
+        let batch = source
+            .generate_batch(WorldProductBatch {
+                priority: WorldProductPriority::CollisionCritical,
+                requests: vec![WorldProductRequest::VoxelBlock(request)],
+            })
+            .map_err(|error| error.to_string())?;
+        let expected_identity = source.identity().identity_hash();
+        if batch.source_identity_hash != expected_identity || batch.items.len() != 1 {
+            return Err("batch identity or item count mismatch".to_owned());
+        }
+        let Some(item) = batch.items.into_iter().next() else {
+            return Err("single-item batch lost its result".to_owned());
+        };
+        if item.request != WorldProductRequest::VoxelBlock(request) {
+            return Err("batch item key mismatch".to_owned());
+        }
+        let WorldProduct::VoxelBlock(block) = item.result.map_err(|error| error.to_string())?
+        else {
+            return Err("voxel block request returned the wrong product".to_owned());
+        };
+        if block.source_identity_hash != expected_identity || block.request != request {
+            return Err("voxel block identity or key mismatch".to_owned());
+        }
+        Ok(block)
+    }
+
+    fn request_voxels(
+        source: &dyn WorldSourceEngine,
+        coords: impl IntoIterator<Item = VoxelCoord>,
+    ) -> Result<BTreeMap<VoxelCoord, Material>, String> {
+        let coords: BTreeSet<_> = coords.into_iter().collect();
+        if coords.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let mut bounds = BTreeMap::<(i32, i32, i32), ([i32; 3], [i32; 3])>::new();
+        for coord in &coords {
+            bounds
+                .entry(coord_key(coord.chunk()))
+                .and_modify(|(min, max)| {
+                    min[0] = min[0].min(coord.x);
+                    min[1] = min[1].min(coord.y);
+                    min[2] = min[2].min(coord.z);
+                    max[0] = max[0].max(coord.x);
+                    max[1] = max[1].max(coord.y);
+                    max[2] = max[2].max(coord.z);
+                })
+                .or_insert((coord.as_array(), coord.as_array()));
+        }
+        let requests: Vec<_> = bounds
+            .into_values()
+            .map(|(min, max)| {
+                WorldProductRequest::VoxelBlock(VoxelBlockRequest {
+                    min: VoxelCoord::new(min[0], min[1], min[2]),
+                    sample_shape: [
+                        (i64::from(max[0]) - i64::from(min[0]) + 1) as u32,
+                        (i64::from(max[1]) - i64::from(min[1]) + 1) as u32,
+                        (i64::from(max[2]) - i64::from(min[2]) + 1) as u32,
+                    ],
+                })
+            })
+            .collect();
+        let batch = source
+            .generate_batch(WorldProductBatch {
+                priority: WorldProductPriority::CollisionCritical,
+                requests: requests.clone(),
+            })
+            .map_err(|error| error.to_string())?;
+        let expected_identity = source.identity().identity_hash();
+        if batch.source_identity_hash != expected_identity || batch.items.len() != requests.len() {
+            return Err("voxel batch identity or item count mismatch".to_owned());
+        }
+        let mut remaining: BTreeSet<_> = requests.into_iter().collect();
+        let mut blocks = Vec::with_capacity(batch.items.len());
+        for item in batch.items {
+            if !remaining.remove(&item.request) {
+                return Err("voxel batch returned a duplicate or unrequested key".to_owned());
+            }
+            let expected_request = match item.request {
+                WorldProductRequest::VoxelBlock(request) => request,
+                _ => return Err("voxel batch returned a non-voxel key".to_owned()),
+            };
+            let WorldProduct::VoxelBlock(block) = item.result.map_err(|error| error.to_string())?
+            else {
+                return Err("voxel batch request returned the wrong product".to_owned());
+            };
+            if block.source_identity_hash != expected_identity || block.request != expected_request
+            {
+                return Err("voxel block identity or key mismatch".to_owned());
+            }
+            blocks.push(block);
+        }
+        if !remaining.is_empty() {
+            return Err("voxel batch omitted a requested key".to_owned());
+        }
+        coords
+            .into_iter()
+            .map(|coord| {
+                blocks
+                    .iter()
+                    .find_map(|block| block.sample(coord))
+                    .map(|material| (coord, material))
+                    .ok_or_else(|| "voxel batch omitted a requested coordinate".to_owned())
+            })
+            .collect()
+    }
+
+    #[derive(Default)]
+    struct SurfaceBlockSet {
+        blocks: BTreeMap<[i32; 2], SurfaceSampleBlockSnapshot>,
+    }
+
+    impl SurfaceBlockSet {
+        fn sample(&self, x: i32, z: i32) -> Option<SurfaceSample> {
+            let origin = surface_probe_block_origin(x, z);
+            self.blocks.get(&origin)?.sample(x, z)
+        }
+    }
+
+    fn surface_probe_block_origin(x: i32, z: i32) -> [i32; 2] {
+        [
+            x.div_euclid(SURFACE_PROBE_BLOCK_EDGE) * SURFACE_PROBE_BLOCK_EDGE,
+            z.div_euclid(SURFACE_PROBE_BLOCK_EDGE) * SURFACE_PROBE_BLOCK_EDGE,
+        ]
+    }
+
+    fn surface_probe_request(origin: [i32; 2]) -> SurfaceSampleBlockRequest {
+        let remaining_x = i64::from(i32::MAX) - i64::from(origin[0]) + 1;
+        let remaining_z = i64::from(i32::MAX) - i64::from(origin[1]) + 1;
+        SurfaceSampleBlockRequest {
+            origin,
+            sample_shape: [
+                remaining_x.min(i64::from(SURFACE_PROBE_BLOCK_EDGE)) as u32,
+                remaining_z.min(i64::from(SURFACE_PROBE_BLOCK_EDGE)) as u32,
+            ],
+        }
+    }
+
+    fn request_surface_blocks(
+        source: &dyn WorldSourceEngine,
+        origins: impl IntoIterator<Item = [i32; 2]>,
+    ) -> Result<SurfaceBlockSet, String> {
+        let requests: Vec<_> = origins
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(surface_probe_request)
+            .map(WorldProductRequest::SurfaceSampleBlock)
+            .collect();
+        if requests.is_empty() {
+            return Ok(SurfaceBlockSet::default());
+        }
+        let batch = source
+            .generate_batch(WorldProductBatch {
+                priority: WorldProductPriority::CollisionCritical,
+                requests: requests.clone(),
+            })
+            .map_err(|error| error.to_string())?;
+        let expected_identity = source.identity().identity_hash();
+        if batch.source_identity_hash != expected_identity || batch.items.len() != requests.len() {
+            return Err("surface batch identity or item count mismatch".to_owned());
+        }
+        let mut remaining: BTreeSet<_> = requests.into_iter().collect();
+        let mut blocks = BTreeMap::new();
+        for item in batch.items {
+            if !remaining.remove(&item.request) {
+                return Err("surface batch returned a duplicate or unrequested key".to_owned());
+            }
+            let expected_request = match item.request {
+                WorldProductRequest::SurfaceSampleBlock(request) => request,
+                _ => return Err("surface batch returned a non-surface key".to_owned()),
+            };
+            let WorldProduct::SurfaceSampleBlock(block) =
+                item.result.map_err(|error| error.to_string())?
+            else {
+                return Err("surface batch request returned the wrong product".to_owned());
+            };
+            if block.source_identity_hash != expected_identity || block.request != expected_request
+            {
+                return Err("surface block identity or key mismatch".to_owned());
+            }
+            blocks.insert(block.request.origin, block);
+        }
+        if !remaining.is_empty() {
+            return Err("surface batch omitted a requested key".to_owned());
+        }
+        Ok(SurfaceBlockSet { blocks })
+    }
+
+    fn request_surface_samples(
+        source: &dyn WorldSourceEngine,
+        coords: impl IntoIterator<Item = [i32; 2]>,
+    ) -> Result<BTreeMap<[i32; 2], SurfaceSample>, String> {
+        let coords: BTreeSet<_> = coords.into_iter().collect();
+        let blocks = request_surface_blocks(
+            source,
+            coords
+                .iter()
+                .map(|coord| surface_probe_block_origin(coord[0], coord[1])),
+        )?;
+        coords
+            .into_iter()
+            .map(|coord| {
+                blocks
+                    .sample(coord[0], coord[1])
+                    .map(|sample| (coord, sample))
+                    .ok_or_else(|| "surface batch omitted a requested coordinate".to_owned())
+            })
+            .collect()
+    }
+
+    fn request_surface_search(
+        source: &dyn WorldSourceEngine,
+        request: SurfaceSearchRequest,
+    ) -> Result<Option<SurfaceSearchHit>, String> {
+        let batch = source
+            .generate_batch(WorldProductBatch {
+                priority: WorldProductPriority::CollisionCritical,
+                requests: vec![WorldProductRequest::SurfaceSearch(request)],
+            })
+            .map_err(|error| error.to_string())?;
+        let expected_identity = source.identity().identity_hash();
+        if batch.source_identity_hash != expected_identity || batch.items.len() != 1 {
+            return Err("surface search batch identity or item count mismatch".to_owned());
+        }
+        let Some(item) = batch.items.into_iter().next() else {
+            return Err("surface search batch lost its result".to_owned());
+        };
+        if item.request != WorldProductRequest::SurfaceSearch(request) {
+            return Err("surface search batch item key mismatch".to_owned());
+        }
+        let WorldProduct::SurfaceSearch(snapshot) =
+            item.result.map_err(|error| error.to_string())?
+        else {
+            return Err("surface search returned the wrong product".to_owned());
+        };
+        if snapshot.source_identity_hash != expected_identity || snapshot.request != request {
+            return Err("surface search identity or key mismatch".to_owned());
+        }
+        if let Some(hit) = snapshot.hit {
+            let radius = (i64::from(hit.coord[0]) - i64::from(request.origin[0]))
+                .abs()
+                .max((i64::from(hit.coord[1]) - i64::from(request.origin[1])).abs());
+            if radius < i64::from(request.min_radius) || radius > i64::from(request.max_radius) {
+                return Err("surface search hit is outside its requested annulus".to_owned());
+            }
+            let matches = match request.kind {
+                SurfaceSearchKind::DryLand => hit.sample.water_level.is_none(),
+                SurfaceSearchKind::WaterDepthAtLeast { depth_voxels } => {
+                    hit.sample.water_level.is_some_and(|water| {
+                        i64::from(water) - i64::from(hit.sample.height) >= i64::from(depth_voxels)
+                    })
+                }
+            };
+            if !matches {
+                return Err(
+                    "surface search hit does not satisfy its requested predicate".to_owned(),
+                );
+            }
+        }
+        Ok(snapshot.hit)
+    }
+
+    fn request_camera_probe_block(
+        source: &dyn WorldSourceEngine,
+        camera: CameraState,
+    ) -> Result<VoxelBlockSnapshot, String> {
+        let eye = (camera.position / VOXEL_SIZE_METRES).floor().as_ivec3();
+        let min_x = eye
+            .x
+            .checked_sub(CAMERA_PROBE_HORIZONTAL_RADIUS_VOXELS)
+            .ok_or_else(|| "camera probe underflowed X".to_owned())?;
+        let min_y = eye
+            .y
+            .checked_sub(CAMERA_PROBE_BELOW_EYE_VOXELS)
+            .ok_or_else(|| "camera probe underflowed Y".to_owned())?;
+        let min_z = eye
+            .z
+            .checked_sub(CAMERA_PROBE_HORIZONTAL_RADIUS_VOXELS)
+            .ok_or_else(|| "camera probe underflowed Z".to_owned())?;
+        request_voxel_block(
+            source,
+            VoxelBlockRequest {
+                min: VoxelCoord::new(min_x, min_y, min_z),
+                sample_shape: [
+                    (CAMERA_PROBE_HORIZONTAL_RADIUS_VOXELS * 2 + 1) as u32,
+                    CAMERA_PROBE_HEIGHT_VOXELS,
+                    (CAMERA_PROBE_HORIZONTAL_RADIUS_VOXELS * 2 + 1) as u32,
+                ],
+            },
+        )
+    }
+
+    fn resident_material(
+        chunks: &BTreeMap<(i32, i32, i32), Chunk>,
+        coord: VoxelCoord,
+    ) -> Option<Material> {
+        let chunk = chunks.get(&coord_key(coord.chunk()))?;
+        let [x, y, z] = coord.local();
+        Some(chunk.get(x, y, z))
+    }
 
     #[derive(Clone, Copy, Default)]
     struct FrameSample {
@@ -285,10 +597,12 @@ mod web {
         renderer: RefCell<Renderer>,
         camera: RefCell<CameraState>,
         input: RefCell<InputState>,
-        generator: Generator,
+        source: Box<dyn WorldSourceEngine>,
         edits: RefCell<EditMap>,
+        edit_source_materials: RefCell<BTreeMap<VoxelCoord, Material>>,
         scheduler: RefCell<StreamScheduler>,
         chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
+        chunk_halos: RefCell<BTreeMap<(i32, i32, i32), MeshingHalo>>,
         pending_meshes: RefCell<BTreeMap<(i32, i32, i32), MeshedChunk>>,
         surface_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
         surface_active_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
@@ -296,6 +610,7 @@ mod web {
         surface_revisions: RefCell<SurfaceRevisionCache>,
         surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
         surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
+        surface_probe_blocks: RefCell<BTreeMap<[i32; 2], SurfaceSampleBlockSnapshot>>,
         fine_initialized: Cell<bool>,
         store: RefCell<Store>,
         scope: DedicatedWorkerGlobalScope,
@@ -368,6 +683,42 @@ mod web {
             Ok(())
         }
 
+        fn cached_surface_sample(&self, x: i32, z: i32) -> Result<SurfaceSample, String> {
+            let origin = surface_probe_block_origin(x, z);
+            if let Some(sample) = self
+                .surface_probe_blocks
+                .borrow()
+                .get(&origin)
+                .and_then(|block| block.sample(x, z))
+            {
+                return Ok(sample);
+            }
+            let mut requested = request_surface_blocks(self.source.as_ref(), [origin])?;
+            let block = requested
+                .blocks
+                .remove(&origin)
+                .ok_or_else(|| "surface batch omitted the requested probe block".to_owned())?;
+            let sample = block
+                .sample(x, z)
+                .ok_or_else(|| "surface probe block omitted its requested coordinate".to_owned())?;
+            let mut cache = self.surface_probe_blocks.borrow_mut();
+            cache.insert(origin, block);
+            if cache.len() > MAX_SURFACE_PROBE_BLOCKS
+                && let Some(evict) = cache
+                    .keys()
+                    .copied()
+                    .filter(|candidate| *candidate != origin)
+                    .max_by_key(|candidate| {
+                        let dx = i64::from(candidate[0]) - i64::from(origin[0]);
+                        let dz = i64::from(candidate[1]) - i64::from(origin[1]);
+                        dx * dx + dz * dz
+                    })
+            {
+                cache.remove(&evict);
+            }
+            Ok(sample)
+        }
+
         fn start_profile(&self, profile_id: u32) -> bool {
             match profile_id {
                 1 => self.start_stream_profile(),
@@ -395,6 +746,7 @@ mod web {
             }
 
             let expected = sealed.then_some(Material::Basalt);
+            let mut probe_coords = Vec::with_capacity(CINDER_MOUTH_PROFILE_VOXELS);
             for sample_index in 0..CINDER_MOUTH_PROFILE_VOXELS {
                 let Some(voxel) = cinder_vault_portal_probe_voxel(0, sample_index) else {
                     log_gpu_error(
@@ -402,11 +754,22 @@ mod web {
                     );
                     return false;
                 };
-                let coord = voxel_coord(voxel);
+                probe_coords.push(voxel_coord(voxel));
+            }
+            let source_values =
+                match request_voxels(self.source.as_ref(), probe_coords.iter().copied()) {
+                    Ok(values) => values,
+                    Err(error) => {
+                        log_gpu_error(&format!(
+                            "Cinder mouth edit profile refused: source probe failed: {error}"
+                        ));
+                        return false;
+                    }
+                };
+            for &coord in &probe_coords {
                 let current = self.edits.borrow().override_at(coord);
                 let valid = if sealed {
-                    current.is_none()
-                        && self.generator.sample(coord.x, coord.y, coord.z) == Material::Air
+                    current.is_none() && source_values.get(&coord) == Some(&Material::Air)
                 } else {
                     current == Some(Material::Basalt)
                 };
@@ -417,13 +780,13 @@ mod web {
                     return false;
                 }
             }
+            self.edit_source_materials
+                .borrow_mut()
+                .extend(source_values);
 
-            for sample_index in 0..CINDER_MOUTH_PROFILE_VOXELS {
-                let Some(voxel) = cinder_vault_portal_probe_voxel(0, sample_index) else {
-                    return false;
-                };
+            for (sample_index, coord) in probe_coords.into_iter().enumerate() {
                 let _ = self.submit_local_edit(
-                    voxel_coord(voxel),
+                    coord,
                     expected,
                     3,
                     if sealed { 1 } else { 2 },
@@ -463,10 +826,17 @@ mod web {
             if !self.edit_trackers.borrow().is_empty() {
                 return self.refuse_edit_profile(3, "prior edits are still converging");
             }
-            if self.generator.sample(terrain.x, terrain.y, terrain.z) != Material::Sand {
+            let source_values = match request_voxels(self.source.as_ref(), [terrain, water]) {
+                Ok(values) => values,
+                Err(error) => {
+                    return self
+                        .refuse_edit_profile(4, &format!("fixture source probe failed: {error}"));
+                }
+            };
+            if source_values.get(&terrain) != Some(&Material::Sand) {
                 return self.refuse_edit_profile(4, "terrain fixture no longer resolves to sand");
             }
-            if self.generator.sample(water.x, water.y, water.z) != Material::Water {
+            if source_values.get(&water) != Some(&Material::Water) {
                 return self.refuse_edit_profile(5, "water fixture no longer resolves to water");
             }
             let edits = self.edits.borrow();
@@ -476,6 +846,9 @@ mod web {
             }
             let baseline_edits = edits.len();
             drop(edits);
+            self.edit_source_materials
+                .borrow_mut()
+                .extend(source_values);
 
             let mut camera = CameraState::spawn(glam::Vec3::new(
                 (EDIT_PROFILE_TERRAIN[0] as f32 + 0.5) * VOXEL_SIZE_METRES,
@@ -526,8 +899,7 @@ mod web {
             let mut camera = self.camera.borrow_mut();
             let profiling = self.profile.borrow().running();
             let edit_profiling = self.edit_profile.get().active();
-            let edits = self.edits.borrow();
-            let mut generated_columns = BTreeMap::new();
+            let chunks = self.chunks.borrow();
             let mut accumulator = (self.simulation_accumulator.get() + dt.min(0.1))
                 .min(SIMULATION_STEP_SECONDS * MAX_SIMULATION_STEPS_PER_FRAME as f32);
             let mut steps = 0;
@@ -541,12 +913,10 @@ mod web {
                         VOXEL_SIZE_METRES,
                         |x, y, z| {
                             let coord = VoxelCoord::new(x, y, z);
-                            let material = edits.override_at(coord).unwrap_or_else(|| {
-                                generated_columns
-                                    .entry((x, z))
-                                    .or_insert_with(|| self.generator.column(x, z))
-                                    .sample(y)
-                            });
+                            // Missing resident data is a conservative simulation boundary. Source
+                            // requests are admitted by the stream scheduler, never from callbacks.
+                            let material =
+                                resident_material(&chunks, coord).unwrap_or(Material::Stone);
                             VoxelPhysics {
                                 collidable: material.is_collidable(),
                                 fluid: material.is_fluid(),
@@ -558,63 +928,61 @@ mod web {
                 steps += 1;
             }
             self.simulation_accumulator.set(accumulator);
-            drop(edits);
+            drop(chunks);
             if profiling && let Some(pose) = self.profile.borrow().pose() {
                 let voxel_x = (pose.position_xz.x / VOXEL_SIZE_METRES).floor() as i32;
                 let voxel_z = (pose.position_xz.y / VOXEL_SIZE_METRES).floor() as i32;
-                let surface = self.generator.surface_sample(voxel_x, voxel_z);
-                let top = surface
-                    .water_level
-                    .unwrap_or(surface.height)
-                    .max(surface.height);
-                let position = glam::Vec3::new(
-                    pose.position_xz.x,
-                    (top + 1) as f32 * VOXEL_SIZE_METRES
-                        + voxels_core::PLAYER_EYE_HEIGHT_METRES
-                        + 0.8,
-                    pose.position_xz.y,
-                );
-                *camera = CameraState::spawn(position);
-                camera.yaw = pose.yaw;
-                camera.pitch = pose.pitch;
+                match self.cached_surface_sample(voxel_x, voxel_z) {
+                    Ok(surface) => {
+                        let top = surface
+                            .water_level
+                            .unwrap_or(surface.height)
+                            .max(surface.height);
+                        let position = glam::Vec3::new(
+                            pose.position_xz.x,
+                            (top + 1) as f32 * VOXEL_SIZE_METRES
+                                + voxels_core::PLAYER_EYE_HEIGHT_METRES
+                                + 0.8,
+                            pose.position_xz.y,
+                        );
+                        *camera = CameraState::spawn(position);
+                        camera.yaw = pose.yaw;
+                        camera.pitch = pose.pitch;
+                    }
+                    Err(error) => {
+                        log_gpu_error(&format!("streaming profile surface probe failed: {error}"))
+                    }
+                }
             }
             if time - self.last_enclosure_probe.get() >= ENCLOSURE_PROBE_INTERVAL_MS {
-                let eye_voxel = (camera.position / VOXEL_SIZE_METRES).floor().as_ivec3();
-                let surface_height = self.generator.surface_height(eye_voxel.x, eye_voxel.z);
-                let underground = eye_voxel.y + 3 < surface_height
-                    || sample_cinder_vault(eye_voxel.x, eye_voxel.y, eye_voxel.z).is_some();
                 let probe_start = performance_now(performance.as_ref());
-                let sample = if underground {
-                    let edits = self.edits.borrow();
-                    let chunks = self.chunks.borrow();
-                    let mut columns = BTreeMap::new();
-                    probe_enclosure(
-                        camera.position,
-                        ENCLOSURE_PROBE_DISTANCE_METRES,
-                        VOXEL_SIZE_METRES,
-                        |x, y, z| {
-                            let coord = VoxelCoord::new(x, y, z);
-                            edits
-                                .override_at(coord)
-                                .or_else(|| {
-                                    chunks.get(&coord_key(coord.chunk())).map(|chunk| {
-                                        let [local_x, local_y, local_z] = coord.local();
-                                        chunk.get(local_x, local_y, local_z)
-                                    })
-                                })
-                                .unwrap_or_else(|| {
-                                    columns
-                                        .entry((x, z))
-                                        .or_insert_with(|| self.generator.column(x, z))
-                                        .sample(y)
-                                })
-                                .occludes_ambient()
-                        },
-                    )
-                } else {
-                    EnclosureSample::OPEN
-                };
-                self.enclosure.set(sample);
+                let eye_voxel = (camera.position / VOXEL_SIZE_METRES).floor().as_ivec3();
+                let underground =
+                    self.cached_surface_sample(eye_voxel.x, eye_voxel.z)
+                        .map(|surface| {
+                            eye_voxel.y + 3 < surface.height
+                                || sample_cinder_vault(eye_voxel.x, eye_voxel.y, eye_voxel.z)
+                                    .is_some()
+                        });
+                match underground {
+                    Ok(true) => {
+                        let chunks = self.chunks.borrow();
+                        self.enclosure.set(probe_enclosure(
+                            camera.position,
+                            ENCLOSURE_PROBE_DISTANCE_METRES,
+                            VOXEL_SIZE_METRES,
+                            |x, y, z| {
+                                resident_material(&chunks, VoxelCoord::new(x, y, z))
+                                    .unwrap_or(Material::Stone)
+                                    .occludes_ambient()
+                            },
+                        ));
+                    }
+                    Ok(false) => self.enclosure.set(EnclosureSample::OPEN),
+                    Err(error) => log_gpu_error(&format!(
+                        "enclosure surface probe failed; retaining prior sample: {error}"
+                    )),
+                }
                 self.last_enclosure_probe.set(time);
                 self.enclosure_probe_microseconds
                     .set(((performance_now(performance.as_ref()) - probe_start) * 1_000.0) as f32);
@@ -634,7 +1002,7 @@ mod web {
             renderer.set_target_voxel(target);
             let atmosphere_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
             let atmosphere_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-            let (atmosphere, region) = self.generator.atmosphere_sample(atmosphere_x, atmosphere_z);
+            let (atmosphere, region) = self.source.atmosphere_sample(atmosphere_x, atmosphere_z);
             renderer.set_atmosphere(atmosphere, region);
             let eye_voxel_y = (camera.position.y / VOXEL_SIZE_METRES).floor() as i32;
             let enclosure = self.enclosure.get();
@@ -678,9 +1046,7 @@ mod web {
                 self.surface_active_focus.set(self.surface_focus.get());
             }
             let render_start = performance_now(performance.as_ref());
-            let edits = self.edits.borrow();
             let chunks = self.chunks.borrow();
-            let mut light_columns = BTreeMap::new();
             let camera_voxel = (camera.position / VOXEL_SIZE_METRES).floor().as_ivec3();
             let camera_visibility_cell =
                 cinder_vault_visibility_cell(camera_voxel.x, camera_voxel.y, camera_voxel.z);
@@ -769,20 +1135,8 @@ mod web {
                         VOXEL_SIZE_METRES,
                         |x, y, z| {
                             let coord = VoxelCoord::new(x, y, z);
-                            let material = edits
-                                .override_at(coord)
-                                .or_else(|| {
-                                    chunks.get(&coord_key(coord.chunk())).map(|chunk| {
-                                        let [local_x, local_y, local_z] = coord.local();
-                                        chunk.get(local_x, local_y, local_z)
-                                    })
-                                })
-                                .unwrap_or_else(|| {
-                                    light_columns
-                                        .entry((x, z))
-                                        .or_insert_with(|| self.generator.column(x, z))
-                                        .sample(y)
-                                });
+                            let material =
+                                resident_material(&chunks, coord).unwrap_or(Material::Stone);
                             material.occludes_ambient() && material.emission().is_none()
                         },
                     ) {
@@ -793,7 +1147,6 @@ mod web {
                 },
             );
             drop(chunks);
-            drop(edits);
             let rendered = renderer.diagnostics();
             drop(renderer);
             self.update_edit_convergence(time, submitted);
@@ -878,38 +1231,128 @@ mod web {
             };
             let uploaded = !work.upload.is_empty();
 
-            for ticket in work.generation {
-                let mut chunk = self.generator.generate_chunk(ticket.coord);
-                self.edits.borrow().apply_to_chunk(&mut chunk);
-                self.chunks
-                    .borrow_mut()
-                    .insert(coord_key(ticket.coord), chunk);
-                let _ = self.scheduler.borrow_mut().complete(ticket);
+            let generation_tickets = work.generation;
+            if !generation_tickets.is_empty() {
+                let generated = self.source.generate_batch(WorldProductBatch {
+                    priority: WorldProductPriority::VisibleChunk,
+                    requests: generation_tickets
+                        .iter()
+                        .map(|ticket| WorldProductRequest::ChunkWithHalo(ticket.coord))
+                        .collect(),
+                });
+                match generated {
+                    Ok(result)
+                        if result.source_identity_hash
+                            == self.source.identity().identity_hash() =>
+                    {
+                        let mut items = result.items;
+                        let requested = generation_tickets
+                            .iter()
+                            .map(|ticket| coord_key(ticket.coord))
+                            .collect::<BTreeSet<_>>();
+                        let mut returned = BTreeSet::new();
+                        let keys_valid = items.iter().all(|item| {
+                            let WorldProductRequest::ChunkWithHalo(coord) = item.request else {
+                                return false;
+                            };
+                            requested.contains(&coord_key(coord))
+                                && returned.insert(coord_key(coord))
+                        });
+                        if !keys_valid {
+                            for ticket in generation_tickets {
+                                let _ = self.scheduler.borrow_mut().retry(ticket);
+                            }
+                            web_sys::console::error_1(&JsValue::from_str(
+                                "world source returned duplicate or unrequested chunk keys",
+                            ));
+                        } else {
+                            for ticket in generation_tickets {
+                                let request = WorldProductRequest::ChunkWithHalo(ticket.coord);
+                                let Some(index) =
+                                    items.iter().position(|item| item.request == request)
+                                else {
+                                    let _ = self.scheduler.borrow_mut().retry(ticket);
+                                    continue;
+                                };
+                                let item = items.remove(index);
+                                let Ok(WorldProduct::Chunk(mut snapshot)) = item.result else {
+                                    let _ = self.scheduler.borrow_mut().retry(ticket);
+                                    continue;
+                                };
+                                let expected_identity = self.source.identity().identity_hash();
+                                if snapshot.source_identity_hash != expected_identity
+                                    || snapshot.chunk.coord() != ticket.coord
+                                    || snapshot.meshing_halo.coord() != ticket.coord
+                                {
+                                    let _ = self.scheduler.borrow_mut().retry(ticket);
+                                    continue;
+                                }
+                                let edits = self.edits.borrow();
+                                self.edit_source_materials
+                                    .borrow_mut()
+                                    .extend(edits.source_values_for_overrides(&snapshot.chunk));
+                                edits.apply_to_chunk(&mut snapshot.chunk);
+                                drop(edits);
+                                self.chunks
+                                    .borrow_mut()
+                                    .insert(coord_key(ticket.coord), snapshot.chunk);
+                                self.chunk_halos
+                                    .borrow_mut()
+                                    .insert(coord_key(ticket.coord), snapshot.meshing_halo);
+                                let _ = self.scheduler.borrow_mut().complete(ticket);
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        for ticket in generation_tickets {
+                            let _ = self.scheduler.borrow_mut().retry(ticket);
+                        }
+                        web_sys::console::error_1(&JsValue::from_str(
+                            "world source returned a mismatched identity",
+                        ));
+                    }
+                    Err(error) => {
+                        for ticket in generation_tickets {
+                            let _ = self.scheduler.borrow_mut().retry(ticket);
+                        }
+                        web_sys::console::error_1(&JsValue::from_str(&format!(
+                            "world source generation failed: {error}"
+                        )));
+                    }
+                }
             }
             for ticket in work.meshing {
                 let chunk = self.chunks.borrow().get(&coord_key(ticket.coord)).cloned();
                 let Some(chunk) = chunk else {
                     continue;
                 };
+                let halo = self
+                    .chunk_halos
+                    .borrow()
+                    .get(&coord_key(ticket.coord))
+                    .cloned();
+                let Some(halo) = halo else {
+                    let _ = self.scheduler.borrow_mut().retry(ticket);
+                    continue;
+                };
                 let edits = self.edits.borrow();
-                let origin = ticket.coord.world_origin();
-                let halo_min_x = origin[0].saturating_sub(1);
-                let halo_min_z = origin[2].saturating_sub(1);
-                let halo_max_x = origin[0].saturating_add(CHUNK_EDGE as i32);
-                let halo_max_z = origin[2].saturating_add(CHUNK_EDGE as i32);
-                let generated_region = self.generator.region(
-                    halo_min_x,
-                    halo_min_z,
-                    (i64::from(halo_max_x) - i64::from(halo_min_x) + 1) as usize,
-                    (i64::from(halo_max_z) - i64::from(halo_min_z) + 1) as usize,
-                );
+                let mut halo_contract_valid = true;
                 let mesh = mesh_chunk(&chunk, |x, y, z| {
                     let coord = VoxelCoord::new(x, y, z);
-                    edits
-                        .override_at(coord)
-                        .unwrap_or_else(|| generated_region.sample(x, y, z))
+                    let Some(generated) = halo.sample_world(x, y, z) else {
+                        halo_contract_valid = false;
+                        return Material::Stone;
+                    };
+                    edits.resolve_generated(coord, generated)
                 });
                 drop(edits);
+                if !halo_contract_valid {
+                    let _ = self.scheduler.borrow_mut().retry(ticket);
+                    web_sys::console::error_1(&JsValue::from_str(
+                        "world source meshing halo omitted a required shell coordinate",
+                    ));
+                    continue;
+                }
                 self.pending_meshes
                     .borrow_mut()
                     .insert(coord_key(ticket.coord), mesh);
@@ -939,10 +1382,12 @@ mod web {
             let evicted = !evictions.is_empty();
             if !evictions.is_empty() {
                 let mut chunks = self.chunks.borrow_mut();
+                let mut halos = self.chunk_halos.borrow_mut();
                 let mut pending = self.pending_meshes.borrow_mut();
                 let mut renderer = self.renderer.borrow_mut();
                 for eviction in evictions {
                     chunks.remove(&coord_key(eviction.coord));
+                    halos.remove(&coord_key(eviction.coord));
                     pending.remove(&coord_key(eviction.coord));
                     renderer.remove_chunk(eviction.coord);
                 }
@@ -1187,9 +1632,39 @@ mod web {
                     .requested_revision(coord)
                     .unwrap_or_else(|| revisions.epoch())
             };
-            let mesh = generate_edited_surface_tile_mesh(self.generator, &edits, coord);
-            let water = generate_edited_water_tile_mesh(self.generator, &edits, coord);
+            let snapshot = self.source.generate_edited_surface_tile(&edits, coord);
             drop(edits);
+            let snapshot = match snapshot {
+                Ok(snapshot)
+                    if snapshot.source_identity_hash == self.source.identity().identity_hash()
+                        && snapshot.terrain.coord == coord
+                        && snapshot.water.coord == coord =>
+                {
+                    snapshot
+                }
+                Ok(_) => {
+                    if dirty.is_some() {
+                        self.surface_dirty.borrow_mut().insert(coord);
+                    } else {
+                        self.surface_queue.borrow_mut().push_front(coord);
+                    }
+                    web_sys::console::error_1(&JsValue::from_str(
+                        "world source returned a mismatched edited surface product",
+                    ));
+                    return;
+                }
+                Err(error) => {
+                    if dirty.is_some() {
+                        self.surface_dirty.borrow_mut().insert(coord);
+                    } else {
+                        self.surface_queue.borrow_mut().push_front(coord);
+                    }
+                    web_sys::console::error_1(&JsValue::from_str(&format!(
+                        "world source edited surface generation failed: {error}"
+                    )));
+                    return;
+                }
+            };
             if !self.surface_revisions.borrow().accepts(coord, revision) {
                 if dirty.is_some() {
                     self.surface_dirty.borrow_mut().insert(coord);
@@ -1201,7 +1676,7 @@ mod web {
             if self
                 .renderer
                 .borrow_mut()
-                .upload_surface_tile_meshes(&mesh, &water)
+                .upload_surface_tile_meshes(&snapshot.terrain, &snapshot.water)
             {
                 self.surface_resident.borrow_mut().insert(coord);
                 let committed = self.surface_revisions.borrow_mut().commit(coord, revision);
@@ -1323,7 +1798,15 @@ mod web {
                 0 => {
                     let x = CINDER_VAULT.entrance[0] + 40;
                     let z = CINDER_VAULT.entrance[2];
-                    let surface = self.generator.surface_sample(x, z);
+                    let surface = match self.cached_surface_sample(x, z) {
+                        Ok(surface) => surface,
+                        Err(error) => {
+                            log_gpu_error(&format!(
+                                "Cinder Vault teleport surface probe failed: {error}"
+                            ));
+                            return;
+                        }
+                    };
                     let mut camera = CameraState::spawn(glam::Vec3::new(
                         (x as f32 + 0.5) * VOXEL_SIZE_METRES,
                         (surface.height + 1) as f32 * VOXEL_SIZE_METRES
@@ -1359,7 +1842,15 @@ mod web {
                 _ => {
                     let x = CINDER_VAULT.chamber[0];
                     let z = CINDER_VAULT.chamber[2];
-                    let surface = self.generator.surface_sample(x, z);
+                    let surface = match self.cached_surface_sample(x, z) {
+                        Ok(surface) => surface,
+                        Err(error) => {
+                            log_gpu_error(&format!(
+                                "Cinder Vault teleport surface probe failed: {error}"
+                            ));
+                            return;
+                        }
+                    };
                     let mut camera = CameraState::spawn(glam::Vec3::new(
                         (x as f32 + 0.5) * VOXEL_SIZE_METRES,
                         (surface.height + 1) as f32 * VOXEL_SIZE_METRES
@@ -1394,7 +1885,7 @@ mod web {
                 return;
             };
             let Some(feature) = self
-                .generator
+                .source
                 .skyline_features_anchored_in([
                     [anchor.anchor[0], anchor.anchor[1]],
                     [anchor.anchor[0] + 1, anchor.anchor[1] + 1],
@@ -1424,10 +1915,10 @@ mod web {
             let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
             let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
             let feature = if kind.is_semantic_hero() {
-                self.generator
+                self.source
                     .nearest_prominent_skyline_feature(voxel_x, voxel_z, kind, 192)
             } else {
-                self.generator
+                self.source
                     .nearest_skyline_feature(voxel_x, voxel_z, kind, 192)
             };
             let Some(feature) = feature else {
@@ -1442,13 +1933,25 @@ mod web {
         fn teleport_to_feature(&self, feature: SkylineFeature) {
             let [anchor_x, ground, anchor_z] = feature.anchor;
             let offsets = [[48, 36], [-48, 36], [48, -36], [-48, -36]];
-            let [view_x, view_z, view_height] = offsets
+            let view_coords: Vec<_> = offsets
                 .into_iter()
-                .find_map(|offset| {
+                .map(|offset| {
                     let offset = feature.oriented_offset(offset[0], offset[1]);
-                    let x = anchor_x + offset[0];
-                    let z = anchor_z + offset[1];
-                    let surface = self.generator.surface_sample(x, z);
+                    [anchor_x + offset[0], anchor_z + offset[1]]
+                })
+                .collect();
+            let samples =
+                match request_surface_samples(self.source.as_ref(), view_coords.iter().copied()) {
+                    Ok(samples) => samples,
+                    Err(error) => {
+                        log_gpu_error(&format!("landmark teleport surface probe failed: {error}"));
+                        return;
+                    }
+                };
+            let [view_x, view_z, view_height] = view_coords
+                .into_iter()
+                .find_map(|[x, z]| {
+                    let surface = samples.get(&[x, z])?;
                     surface
                         .water_level
                         .is_none()
@@ -1474,31 +1977,27 @@ mod web {
 
         fn teleport_to_coast(&self) {
             let [water_x, water_z] = COAST_WATER_REFERENCE;
-            let mut coast = None;
-            'search: for radius in 1..=192 {
-                for x in water_x - radius..=water_x + radius {
-                    for z in [water_z - radius, water_z + radius] {
-                        let surface = self.generator.surface_sample(x, z);
-                        if surface.water_level.is_none() {
-                            coast = Some((x, z, surface.height));
-                            break 'search;
-                        }
-                    }
+            let hit = match request_surface_search(
+                self.source.as_ref(),
+                SurfaceSearchRequest {
+                    origin: [water_x, water_z],
+                    min_radius: 1,
+                    max_radius: 192,
+                    kind: SurfaceSearchKind::DryLand,
+                },
+            ) {
+                Ok(Some(hit)) => hit,
+                Ok(None) => {
+                    log_gpu_error("coast teleport anchor is invalid");
+                    return;
                 }
-                for z in water_z - radius + 1..water_z + radius {
-                    for x in [water_x - radius, water_x + radius] {
-                        let surface = self.generator.surface_sample(x, z);
-                        if surface.water_level.is_none() {
-                            coast = Some((x, z, surface.height));
-                            break 'search;
-                        }
-                    }
+                Err(error) => {
+                    log_gpu_error(&format!("coast teleport surface search failed: {error}"));
+                    return;
                 }
-            }
-            let Some((x, z, height)) = coast else {
-                web_sys::console::error_1(&JsValue::from_str("coast teleport anchor is invalid"));
-                return;
             };
+            let [x, z] = hit.coord;
+            let height = hit.sample.height;
             let mut camera = CameraState::spawn(glam::Vec3::new(
                 (x as f32 + 0.5) * VOXEL_SIZE_METRES,
                 (height + 1) as f32 * VOXEL_SIZE_METRES
@@ -1516,43 +2015,31 @@ mod web {
 
         fn teleport_underwater(&self) {
             let [water_x, water_z] = COAST_WATER_REFERENCE;
-            let mut dive = None;
-            'search: for radius in 0..=256 {
-                for x in water_x - radius..=water_x + radius {
-                    for z in [water_z - radius, water_z + radius] {
-                        let surface = self.generator.surface_sample(x, z);
-                        if let Some(water_level) = surface.water_level {
-                            let seabed_top = (surface.height + 1) as f32 * VOXEL_SIZE_METRES;
-                            let eye_y = seabed_top + voxels_core::PLAYER_EYE_HEIGHT_METRES + 0.04;
-                            let water_top = (water_level + 1) as f32 * VOXEL_SIZE_METRES;
-                            if eye_y <= water_top - 0.12 {
-                                dive = Some((x, z, eye_y));
-                                break 'search;
-                            }
-                        }
-                    }
+            let hit = match request_surface_search(
+                self.source.as_ref(),
+                SurfaceSearchRequest {
+                    origin: [water_x, water_z],
+                    min_radius: 0,
+                    max_radius: 256,
+                    kind: SurfaceSearchKind::WaterDepthAtLeast { depth_voxels: 18 },
+                },
+            ) {
+                Ok(Some(hit)) => hit,
+                Ok(None) => {
+                    log_gpu_error("underwater teleport could not find a player-deep ocean column");
+                    return;
                 }
-                for z in water_z - radius + 1..water_z + radius {
-                    for x in [water_x - radius, water_x + radius] {
-                        let surface = self.generator.surface_sample(x, z);
-                        if let Some(water_level) = surface.water_level {
-                            let seabed_top = (surface.height + 1) as f32 * VOXEL_SIZE_METRES;
-                            let eye_y = seabed_top + voxels_core::PLAYER_EYE_HEIGHT_METRES + 0.04;
-                            let water_top = (water_level + 1) as f32 * VOXEL_SIZE_METRES;
-                            if eye_y <= water_top - 0.12 {
-                                dive = Some((x, z, eye_y));
-                                break 'search;
-                            }
-                        }
-                    }
+                Err(error) => {
+                    log_gpu_error(&format!(
+                        "underwater teleport surface search failed: {error}"
+                    ));
+                    return;
                 }
-            }
-            let Some((x, z, eye_y)) = dive else {
-                web_sys::console::error_1(&JsValue::from_str(
-                    "underwater teleport could not find a player-deep ocean column",
-                ));
-                return;
             };
+            let [x, z] = hit.coord;
+            let eye_y = (hit.sample.height + 1) as f32 * VOXEL_SIZE_METRES
+                + voxels_core::PLAYER_EYE_HEIGHT_METRES
+                + 0.04;
             let mut camera = CameraState::spawn(glam::Vec3::new(
                 (x as f32 + 0.5) * VOXEL_SIZE_METRES,
                 eye_y,
@@ -1560,15 +2047,21 @@ mod web {
             ));
             camera.yaw = 0.35;
             camera.pitch = 0.18;
+            let block = match request_camera_probe_block(self.source.as_ref(), camera) {
+                Ok(block) => block,
+                Err(error) => {
+                    log_gpu_error(&format!("underwater camera probe failed: {error}"));
+                    return;
+                }
+            };
             let edits = self.edits.borrow();
-            let mut generated_columns = BTreeMap::new();
+            let mut complete = true;
             camera.refresh_fluid_state(VOXEL_SIZE_METRES, |x, y, z| {
                 let coord = VoxelCoord::new(x, y, z);
-                let material = edits.override_at(coord).unwrap_or_else(|| {
-                    generated_columns
-                        .entry((x, z))
-                        .or_insert_with(|| self.generator.column(x, z))
-                        .sample(y)
+                let material = edits.override_at(coord).or_else(|| block.sample(coord));
+                let material = material.unwrap_or_else(|| {
+                    complete = false;
+                    Material::Stone
                 });
                 VoxelPhysics {
                     collidable: material.is_collidable(),
@@ -1576,6 +2069,10 @@ mod web {
                 }
             });
             drop(edits);
+            if !complete {
+                log_gpu_error("underwater camera probe omitted a required coordinate");
+                return;
+            }
             *self.camera.borrow_mut() = camera;
             self.input.borrow_mut().clear();
         }
@@ -1604,7 +2101,12 @@ mod web {
                 return;
             };
 
-            let generated = self.generator.sample(target.x, target.y, target.z);
+            let Some(generated) = self.source_material_for_edit(target) else {
+                log_gpu_error(
+                    "edit refused: authoritative source material is not prepared for the target",
+                );
+                return;
+            };
             let durable = (material != generated).then_some(material);
             let _ =
                 self.submit_local_edit(target, durable, 0, u8::from(material == Material::Air), 0);
@@ -1625,7 +2127,9 @@ mod web {
                 if self.edits.borrow().override_at(coord) == material {
                     continue;
                 }
-                let _ = self.apply_durable_edit(coord, material);
+                if let Err(error) = self.apply_durable_edit(coord, material) {
+                    log_gpu_error(&format!("remote edit could not be applied: {error}"));
+                }
             }
         }
 
@@ -1637,17 +2141,49 @@ mod web {
             let edits = self.edits.borrow();
             let mut state = self.cinder_portal_state.get();
             let mut changed = false;
+            let mut probe_coords = Vec::new();
             for portal_index in 0..u8::BITS as usize {
                 if dirty & (1 << portal_index) == 0 {
                     continue;
                 }
+                for sample_index in 0..CINDER_MOUTH_PROFILE_VOXELS {
+                    let Some(voxel) = cinder_vault_portal_probe_voxel(portal_index, sample_index)
+                    else {
+                        continue;
+                    };
+                    probe_coords.push(voxel_coord(voxel));
+                }
+            }
+            let source_values = match request_voxels(self.source.as_ref(), probe_coords) {
+                Ok(values) => values,
+                Err(error) => {
+                    self.cinder_portal_dirty
+                        .set(self.cinder_portal_dirty.get() | dirty);
+                    log_gpu_error(&format!("Cinder portal source batch failed: {error}"));
+                    return;
+                }
+            };
+            for portal_index in 0..u8::BITS as usize {
+                if dirty & (1 << portal_index) == 0 {
+                    continue;
+                }
+                let mut complete = true;
                 let Some(open) = cinder_vault_portal_is_open(portal_index, |x, y, z| {
-                    !edits
-                        .sample(self.generator, VoxelCoord::new(x, y, z))
-                        .occludes_ambient()
+                    let coord = VoxelCoord::new(x, y, z);
+                    let generated = source_values.get(&coord).copied().unwrap_or_else(|| {
+                        complete = false;
+                        Material::Stone
+                    });
+                    !edits.resolve_generated(coord, generated).occludes_ambient()
                 }) else {
                     continue;
                 };
+                if !complete {
+                    self.cinder_portal_dirty
+                        .set(self.cinder_portal_dirty.get() | dirty);
+                    log_gpu_error("Cinder portal batch omitted a probe coordinate");
+                    return;
+                }
                 changed |= state.is_open(portal_index) != open;
                 let _ = state.set_open(portal_index, open);
             }
@@ -1666,13 +2202,23 @@ mod web {
             operation: u8,
             ordinal: u8,
         ) -> [usize; 2] {
+            if let Err(error) = self.prepare_edit_source(target, durable) {
+                log_gpu_error(&format!("edit refused: {error}"));
+                return [0, 0];
+            }
             let performance = self.scope.performance();
             let started_ms = performance_now(performance.as_ref());
             if let Err(error) = self.store.borrow().save_edit(target, durable) {
                 web_sys::console::error_1(&error);
             }
             let enqueue_ms = (performance_now(performance.as_ref()) - started_ms) as f32;
-            let requirements = self.apply_durable_edit(target, durable);
+            let requirements = match self.apply_durable_edit(target, durable) {
+                Ok(requirements) => requirements,
+                Err(error) => {
+                    log_gpu_error(&format!("prepared edit could not be applied: {error}"));
+                    return [0, 0];
+                }
+            };
             let counts = [requirements.canonical.len(), requirements.surface.len()];
             let mut trackers = self.edit_trackers.borrow_mut();
             if let Some(index) = trackers.iter().position(|tracker| tracker.target == target) {
@@ -1698,11 +2244,64 @@ mod web {
             counts
         }
 
+        fn source_material_for_edit(&self, target: VoxelCoord) -> Option<Material> {
+            self.edit_source_materials
+                .borrow()
+                .get(&target)
+                .copied()
+                .or_else(|| {
+                    self.edits
+                        .borrow()
+                        .override_at(target)
+                        .is_none()
+                        .then(|| resident_material(&self.chunks.borrow(), target))
+                        .flatten()
+                })
+        }
+
+        fn prepare_edit_source(
+            &self,
+            target: VoxelCoord,
+            durable: Option<Material>,
+        ) -> Result<(), String> {
+            let previous = self.edits.borrow().override_at(target);
+            let resident = resident_material(&self.chunks.borrow(), target);
+            let cached = self.edit_source_materials.borrow().contains_key(&target);
+            if !cached && previous.is_some() && resident.is_some() {
+                return Err(
+                    "resident edited voxel has no retained authoritative source value".to_owned(),
+                );
+            }
+            if !cached
+                && previous.is_none()
+                && durable.is_some()
+                && let Some(source_material) = resident
+            {
+                self.edit_source_materials
+                    .borrow_mut()
+                    .insert(target, source_material);
+            }
+            Ok(())
+        }
+
         fn apply_durable_edit(
             &self,
             target: VoxelCoord,
             durable: Option<Material>,
-        ) -> EditRequirements {
+        ) -> Result<EditRequirements, String> {
+            self.prepare_edit_source(target, durable)?;
+            let previous = self.edits.borrow().override_at(target);
+            let resident_source = self
+                .edit_source_materials
+                .borrow()
+                .get(&target)
+                .copied()
+                .or_else(|| {
+                    previous
+                        .is_none()
+                        .then(|| resident_material(&self.chunks.borrow(), target))
+                        .flatten()
+                });
             let affected_portals =
                 cinder_vault_portals_affected_by_voxel(target.x, target.y, target.z);
             self.cinder_portal_dirty
@@ -1710,11 +2309,17 @@ mod web {
             self.edits
                 .borrow_mut()
                 .replace_durable_override(target, durable);
-            let material =
-                durable.unwrap_or_else(|| self.generator.sample(target.x, target.y, target.z));
-            if let Some(chunk) = self.chunks.borrow_mut().get_mut(&coord_key(target.chunk())) {
+            let mut chunks = self.chunks.borrow_mut();
+            if let Some(chunk) = chunks.get_mut(&coord_key(target.chunk())) {
+                let material = durable.or(resident_source).ok_or_else(|| {
+                    "resident edit restoration has no authoritative source value".to_owned()
+                })?;
                 let [x, y, z] = target.local();
                 chunk.set(x, y, z, material);
+            }
+            drop(chunks);
+            if durable.is_none() {
+                self.edit_source_materials.borrow_mut().remove(&target);
             }
             let canonical = {
                 let mut scheduler = self.scheduler.borrow_mut();
@@ -1738,7 +2343,9 @@ mod web {
             let mut dirty = self.surface_dirty.borrow_mut();
             let edits = self.edits.borrow();
             for level in SurfaceLodLevel::ALL {
-                for coord in surface_tiles_affected_by_voxel(self.generator, &edits, level, target)
+                for coord in self
+                    .source
+                    .surface_tiles_affected_by_voxel(&edits, level, target)
                 {
                     let relevant = self.surface_tile_relevant(coord);
                     if !relevant && !resident.contains(&coord) {
@@ -1751,7 +2358,7 @@ mod web {
                     }
                 }
             }
-            EditRequirements { canonical, surface }
+            Ok(EditRequirements { canonical, surface })
         }
 
         fn surface_tile_relevant(&self, coord: SurfaceTileCoord) -> bool {
@@ -1889,7 +2496,7 @@ mod web {
                 profile.next_operation + 1,
             );
             self.edit_profile.set(EditProfile {
-                phase: if counts == [3, 4] {
+                phase: if counts == [4, 4] {
                     EditProfilePhase::Running
                 } else {
                     EditProfilePhase::Failed
@@ -1900,26 +2507,29 @@ mod web {
         }
 
         fn raycast_target(&self, camera: &CameraState) -> Option<VoxelHit> {
-            let edits = self.edits.borrow();
+            let chunks = self.chunks.borrow();
             let camera_voxel = VoxelCoord::new(
                 (camera.position.x / VOXEL_SIZE_METRES).floor() as i32,
                 (camera.position.y / VOXEL_SIZE_METRES).floor() as i32,
                 (camera.position.z / VOXEL_SIZE_METRES).floor() as i32,
             );
             let mut skipping_origin_water =
-                edits.sample(self.generator, camera_voxel) == Material::Water;
+                resident_material(&chunks, camera_voxel) == Some(Material::Water);
             raycast_voxels(
                 camera.position,
                 camera.forward(),
                 5.0,
                 VOXEL_SIZE_METRES,
                 |x, y, z| {
-                    let material = edits.sample(self.generator, VoxelCoord::new(x, y, z));
-                    if skipping_origin_water && material == Material::Water {
+                    let coord = VoxelCoord::new(x, y, z);
+                    let material = resident_material(&chunks, coord);
+                    if skipping_origin_water && material == Some(Material::Water) {
                         false
                     } else {
                         skipping_origin_water = false;
-                        material.is_collidable() || material == Material::Water
+                        material.is_some_and(|material| {
+                            material.is_collidable() || material == Material::Water
+                        })
                     }
                 },
             )
@@ -1977,7 +2587,15 @@ mod web {
                     .chunks
                     .borrow()
                     .len()
-                    .saturating_mul(CHUNK_VOXEL_BYTES);
+                    .saturating_mul(CHUNK_VOXEL_BYTES)
+                    .saturating_add(
+                        engine
+                            .chunk_halos
+                            .borrow()
+                            .values()
+                            .map(MeshingHalo::logical_bytes)
+                            .sum::<usize>(),
+                    );
                 let pending_mesh_bytes = engine
                     .pending_meshes
                     .borrow()
@@ -2167,13 +2785,16 @@ mod web {
         console_error_panic_hook::set_once();
         let width = (css_width * dpr).round().max(1.0) as u32;
         let height = (css_height * dpr).round().max(1.0) as u32;
-        let generator = Generator::new(WORLD_SEED);
+        let source = procedural_world_source(WORLD_SEED);
         let mut store =
             Store::open(WORLD_SEED, voxels_world::generation::GENERATOR_VERSION).await?;
         let edits = store.load_edits()?;
         let spawn_z = 5.2;
         let spawn_voxel_z = (spawn_z / VOXEL_SIZE_METRES).floor() as i32;
-        let spawn_surface = generator.surface_sample(0, spawn_voxel_z);
+        let spawn_surface = request_surface_samples(source.as_ref(), [[0, spawn_voxel_z]])
+            .map_err(|error| JsValue::from_str(&format!("spawn surface probe: {error}")))?
+            .remove(&[0, spawn_voxel_z])
+            .ok_or_else(|| JsValue::from_str("spawn surface batch omitted its coordinate"))?;
         let spawn_top = spawn_surface
             .water_level
             .unwrap_or(spawn_surface.height)
@@ -2181,51 +2802,65 @@ mod web {
         let spawn_y = (spawn_top + 1) as f32 * VOXEL_SIZE_METRES
             + voxels_core::PLAYER_EYE_HEIGHT_METRES
             + 0.02;
+        let spawn_camera = CameraState::spawn(glam::Vec3::new(0.0, spawn_y, spawn_z));
         let mut persisted_camera = None;
-        let mut camera = store
-            .load_camera()?
-            .and_then(|(camera, canonical)| {
-                if !camera.position.is_finite()
-                    || !camera.yaw.is_finite()
-                    || !camera.pitch.is_finite()
-                {
-                    return None;
-                }
-                let mut generated_columns = BTreeMap::new();
-                let accepted = !camera.overlaps_collidable(VOXEL_SIZE_METRES, |x, y, z| {
-                    let coord = VoxelCoord::new(x, y, z);
-                    let material = edits.override_at(coord).unwrap_or_else(|| {
-                        generated_columns
-                            .entry((x, z))
-                            .or_insert_with(|| generator.column(x, z))
-                            .sample(y)
-                    });
-                    VoxelPhysics {
-                        collidable: material.is_collidable(),
-                        fluid: material.is_fluid(),
-                    }
-                });
-                if accepted && canonical {
-                    persisted_camera = Some(crate::camera_persistence_values(&camera));
-                }
-                accepted.then_some(camera)
-            })
-            .unwrap_or_else(|| CameraState::spawn(glam::Vec3::new(0.0, spawn_y, spawn_z)));
+        let mut camera = spawn_camera;
+        let mut camera_block = None;
+        if let Some((candidate, canonical)) = store.load_camera()?
+            && candidate.position.is_finite()
+            && candidate.yaw.is_finite()
+            && candidate.pitch.is_finite()
         {
-            let mut generated_columns = BTreeMap::new();
-            camera.refresh_fluid_state(VOXEL_SIZE_METRES, |x, y, z| {
-                let coord = VoxelCoord::new(x, y, z);
-                let material = edits.override_at(coord).unwrap_or_else(|| {
-                    generated_columns
-                        .entry((x, z))
-                        .or_insert_with(|| generator.column(x, z))
-                        .sample(y)
-                });
-                VoxelPhysics {
-                    collidable: material.is_collidable(),
-                    fluid: material.is_fluid(),
+            match request_camera_probe_block(source.as_ref(), candidate) {
+                Ok(block) => {
+                    let mut complete = true;
+                    let overlaps = candidate.overlaps_collidable(VOXEL_SIZE_METRES, |x, y, z| {
+                        let coord = VoxelCoord::new(x, y, z);
+                        let material = edits.override_at(coord).or_else(|| block.sample(coord));
+                        let material = material.unwrap_or_else(|| {
+                            complete = false;
+                            Material::Stone
+                        });
+                        VoxelPhysics {
+                            collidable: material.is_collidable(),
+                            fluid: material.is_fluid(),
+                        }
+                    });
+                    if complete && !overlaps {
+                        camera = candidate;
+                        camera_block = Some(block);
+                        if canonical {
+                            persisted_camera = Some(crate::camera_persistence_values(&candidate));
+                        }
+                    }
                 }
+                Err(error) => log_gpu_error(&format!(
+                    "persisted camera source probe failed; using spawn: {error}"
+                )),
+            }
+        }
+        let block = match camera_block {
+            Some(block) => block,
+            None => request_camera_probe_block(source.as_ref(), camera)
+                .map_err(|error| JsValue::from_str(&format!("spawn camera probe: {error}")))?,
+        };
+        let mut complete = true;
+        camera.refresh_fluid_state(VOXEL_SIZE_METRES, |x, y, z| {
+            let coord = VoxelCoord::new(x, y, z);
+            let material = edits.override_at(coord).or_else(|| block.sample(coord));
+            let material = material.unwrap_or_else(|| {
+                complete = false;
+                Material::Stone
             });
+            VoxelPhysics {
+                collidable: material.is_collidable(),
+                fluid: material.is_fluid(),
+            }
+        });
+        if !complete {
+            return Err(JsValue::from_str(
+                "camera source block omitted a required collision or fluid coordinate",
+            ));
         }
         let renderer = Renderer::new(
             wgpu::SurfaceTarget::OffscreenCanvas(canvas),
@@ -2245,20 +2880,40 @@ mod web {
             max_tracked_chunks: 320,
         })
         .map_err(|error| JsValue::from_str(&format!("stream configuration: {error:?}")))?;
+        let portal_coords = (0..CINDER_VAULT_PORTAL_COUNT)
+            .flat_map(|portal_index| {
+                (0..CINDER_MOUTH_PROFILE_VOXELS).filter_map(move |sample_index| {
+                    cinder_vault_portal_probe_voxel(portal_index, sample_index).map(voxel_coord)
+                })
+            })
+            .collect::<Vec<_>>();
+        let portal_samples = request_voxels(source.as_ref(), portal_coords)
+            .map_err(|error| JsValue::from_str(&format!("Cinder portal source batch: {error}")))?;
+        let mut portal_complete = true;
         let cinder_portal_state = cinder_vault_portal_state(|x, y, z| {
-            !edits
-                .sample(generator, VoxelCoord::new(x, y, z))
-                .occludes_ambient()
+            let coord = VoxelCoord::new(x, y, z);
+            let generated = portal_samples.get(&coord).copied().unwrap_or_else(|| {
+                portal_complete = false;
+                Material::Stone
+            });
+            !edits.resolve_generated(coord, generated).occludes_ambient()
         });
+        if !portal_complete {
+            return Err(JsValue::from_str(
+                "Cinder portal source batch omitted a probe coordinate",
+            ));
+        }
         let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
         let engine = Rc::new(Engine {
             renderer: RefCell::new(renderer),
             camera: RefCell::new(camera),
             input: RefCell::new(InputState::default()),
-            generator,
+            source,
             edits: RefCell::new(edits),
+            edit_source_materials: RefCell::new(BTreeMap::new()),
             scheduler: RefCell::new(scheduler),
             chunks: RefCell::new(BTreeMap::new()),
+            chunk_halos: RefCell::new(BTreeMap::new()),
             pending_meshes: RefCell::new(BTreeMap::new()),
             surface_focus: Cell::new(None),
             surface_active_focus: Cell::new(None),
@@ -2266,6 +2921,7 @@ mod web {
             surface_revisions: RefCell::new(SurfaceRevisionCache::new()),
             surface_queue: RefCell::new(VecDeque::new()),
             surface_dirty: RefCell::new(BTreeSet::new()),
+            surface_probe_blocks: RefCell::new(BTreeMap::new()),
             fine_initialized: Cell::new(false),
             store: RefCell::new(store),
             scope,

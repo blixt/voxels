@@ -13,3 +13,10 @@ name = "voxels_runtime"
 
 [dependencies]
 voxels-world = { path = "../world" }
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "streaming"
+harness = false

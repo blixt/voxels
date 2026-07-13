@@ -3,7 +3,8 @@ use std::hint::black_box;
 use voxels_world::codec::{decode_chunk, encode_chunk};
 use voxels_world::{
     CINDER_VAULT, CINDER_VAULT_MOUTH_ANCHOR_XZ, ChunkCoord, EditMap, Generator, Material,
-    SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
+    MeshingHalo, ProceduralWorldSource, SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord,
+    VoxelCoord, WorldProductBatch, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
     first_pilgrim_road_length_voxels, first_pilgrim_road_point_at_distance,
     first_pilgrim_route_anchor, first_pilgrim_route_anchor_for_feature_cell,
     generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_surface_tile_mesh,
@@ -36,6 +37,39 @@ fn generation(criterion: &mut Criterion) {
     let cave_coord = VoxelCoord::new(chamber[0], chamber[1], chamber[2]).chunk();
     criterion.bench_function("generate 32^3 Cinder Vault chunk", |bencher| {
         bencher.iter(|| generator.generate_chunk(cave_coord));
+    });
+}
+
+fn source_products(criterion: &mut Criterion) {
+    let source = ProceduralWorldSource::new(SEED);
+    criterion.bench_function("generate one chunk + 6,536-cell meshing halo", |bencher| {
+        bencher.iter(|| {
+            source.generate_batch(WorldProductBatch {
+                priority: WorldProductPriority::VisibleChunk,
+                requests: vec![WorldProductRequest::ChunkWithHalo(COORD)],
+            })
+        });
+    });
+
+    criterion.bench_function(
+        "generate two chunk + halo products as one batch",
+        |bencher| {
+            bencher.iter(|| {
+                source.generate_batch(WorldProductBatch {
+                    priority: WorldProductPriority::VisibleChunk,
+                    requests: vec![
+                        WorldProductRequest::ChunkWithHalo(COORD),
+                        WorldProductRequest::ChunkWithHalo(ChunkCoord::new(3, 0, -3)),
+                    ],
+                })
+            });
+        },
+    );
+
+    let origin = COORD.world_origin();
+    let region = Generator::new(SEED).region(origin[0] - 1, origin[2] - 1, 34, 34);
+    criterion.bench_function("materialize 6,536-cell meshing halo", |bencher| {
+        bencher.iter(|| MeshingHalo::from_sampler(COORD, |x, y, z| region.sample(x, y, z)));
     });
 }
 
@@ -139,17 +173,19 @@ fn route_queries(criterion: &mut Criterion) {
 }
 
 fn codec(criterion: &mut Criterion) {
+    let source = ProceduralWorldSource::new(SEED);
+    let identity = source.source_identity_hash();
     let chunk = Generator::new(SEED).generate_chunk(COORD);
-    let encoded = encode_chunk(&chunk);
+    let encoded = encode_chunk(&chunk, identity);
     let mut group = criterion.benchmark_group("VXCH palette codec");
     group.throughput(criterion::Throughput::Bytes(
         (chunk.voxels().len() * size_of::<u16>()) as u64,
     ));
     group.bench_function("encode", |bencher| {
-        bencher.iter(|| encode_chunk(&chunk));
+        bencher.iter(|| encode_chunk(&chunk, identity));
     });
     group.bench_function("decode", |bencher| {
-        bencher.iter(|| decode_chunk(&encoded));
+        bencher.iter(|| decode_chunk(&encoded, identity));
     });
     group.finish();
 }
@@ -237,6 +273,7 @@ fn edited_far_surface(criterion: &mut Criterion) {
 criterion_group!(
     world_benches,
     generation,
+    source_products,
     route_surface_lod,
     semantic_hero_generation,
     cave_mouth_surface_lod,

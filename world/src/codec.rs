@@ -1,14 +1,14 @@
 //! Versioned `VXCH` chunk codec: canonical palette + little-endian bit-packed palette indices.
 
-use crate::generation::GENERATOR_VERSION;
-use crate::{CHUNK_EDGE, CHUNK_VOLUME, Chunk, ChunkCoord, Material};
+use crate::{CHUNK_EDGE, CHUNK_VOLUME, Chunk, ChunkCoord, Material, WorldSourceIdentityHash};
 use std::fmt;
 
 const MAGIC: &[u8; 4] = b"VXCH";
-const FORMAT_VERSION: u16 = 1;
-const HEADER_LEN: u16 = 76;
+const FORMAT_VERSION: u16 = 2;
+const HEADER_LEN: u16 = 104;
 const ENCODING_UNIFORM: u8 = 0;
 const ENCODING_PALETTE: u8 = 1;
+const CONTENT_HASH_DOMAIN: &[u8] = b"voxels-vxch-content-v2\0";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CodecError {
@@ -16,6 +16,7 @@ pub enum CodecError {
     InvalidMagic,
     UnsupportedVersion(u16),
     InvalidHeader(&'static str),
+    SourceIdentityMismatch,
     UnknownMaterial(u16),
     CorruptHash,
 }
@@ -29,15 +30,16 @@ impl fmt::Display for CodecError {
                 write!(formatter, "unsupported VXCH version {version}")
             }
             Self::InvalidHeader(reason) => write!(formatter, "invalid VXCH header: {reason}"),
+            Self::SourceIdentityMismatch => formatter.write_str("VXCH source identity mismatch"),
             Self::UnknownMaterial(id) => write!(formatter, "unknown material id {id}"),
-            Self::CorruptHash => formatter.write_str("VXCH voxel hash mismatch"),
+            Self::CorruptHash => formatter.write_str("VXCH semantic content hash mismatch"),
         }
     }
 }
 
 impl std::error::Error for CodecError {}
 
-pub fn encode_chunk(chunk: &Chunk) -> Vec<u8> {
+pub fn encode_chunk(chunk: &Chunk, source_identity_hash: WorldSourceIdentityHash) -> Vec<u8> {
     let mut present = [false; Material::ALL.len()];
     for material in chunk.voxels() {
         present[usize::from(material.id())] = true;
@@ -58,8 +60,8 @@ pub fn encode_chunk(chunk: &Chunk) -> Vec<u8> {
     } else {
         pack_indices(chunk.voxels(), &palette_indices, bits)
     };
-    let hash = hash_voxels(chunk.voxels());
     let coord = chunk.coord();
+    let hash = content_hash(chunk, source_identity_hash);
     let mut encoded =
         Vec::with_capacity(usize::from(HEADER_LEN) + palette.len() * 2 + payload.len());
     encoded.extend_from_slice(MAGIC);
@@ -77,7 +79,7 @@ pub fn encode_chunk(chunk: &Chunk) -> Vec<u8> {
     encoded.extend_from_slice(&coord.z.to_le_bytes());
     encoded.extend_from_slice(&Material::SCHEMA_VERSION.to_le_bytes());
     encoded.extend_from_slice(&0u16.to_le_bytes());
-    encoded.extend_from_slice(&GENERATOR_VERSION.to_le_bytes());
+    encoded.extend_from_slice(source_identity_hash.as_bytes());
     encoded.extend_from_slice(&(CHUNK_VOLUME as u32).to_le_bytes());
     encoded.extend_from_slice(&(palette.len() as u16).to_le_bytes());
     encoded.push(bits);
@@ -92,8 +94,11 @@ pub fn encode_chunk(chunk: &Chunk) -> Vec<u8> {
     encoded
 }
 
-pub fn decode_chunk(bytes: &[u8]) -> Result<Chunk, CodecError> {
-    if bytes.len() < usize::from(HEADER_LEN) {
+pub fn decode_chunk(
+    bytes: &[u8],
+    expected_source_identity_hash: WorldSourceIdentityHash,
+) -> Result<Chunk, CodecError> {
+    if bytes.len() < 8 {
         return Err(CodecError::Truncated);
     }
     if &bytes[0..4] != MAGIC {
@@ -103,6 +108,9 @@ pub fn decode_chunk(bytes: &[u8]) -> Result<Chunk, CodecError> {
     if version != FORMAT_VERSION {
         return Err(CodecError::UnsupportedVersion(version));
     }
+    if bytes.len() < usize::from(HEADER_LEN) {
+        return Err(CodecError::Truncated);
+    }
     if read_u16(bytes, 6)? != HEADER_LEN {
         return Err(CodecError::InvalidHeader("unexpected header length"));
     }
@@ -110,13 +118,16 @@ pub fn decode_chunk(bytes: &[u8]) -> Result<Chunk, CodecError> {
         return Err(CodecError::InvalidHeader("unexpected chunk edge"));
     }
     let encoding = bytes[9];
+    if bytes[28..60] != expected_source_identity_hash.as_bytes()[..] {
+        return Err(CodecError::SourceIdentityMismatch);
+    }
+    if read_u16(bytes, 10)? != 0 || read_u16(bytes, 26)? != 0 || bytes[67] != 0 {
+        return Err(CodecError::InvalidHeader("reserved fields must be zero"));
+    }
     if read_u16(bytes, 24)? != Material::SCHEMA_VERSION {
         return Err(CodecError::InvalidHeader("material schema mismatch"));
     }
-    if read_u32(bytes, 28)? != GENERATOR_VERSION {
-        return Err(CodecError::InvalidHeader("generator version mismatch"));
-    }
-    if read_u32(bytes, 32)? as usize != CHUNK_VOLUME {
+    if read_u32(bytes, 60)? as usize != CHUNK_VOLUME {
         return Err(CodecError::InvalidHeader("unexpected voxel count"));
     }
     let coord = ChunkCoord::new(
@@ -129,12 +140,12 @@ pub fn decode_chunk(bytes: &[u8]) -> Result<Chunk, CodecError> {
             "chunk coordinate outside voxel grid",
         ));
     }
-    let palette_len = usize::from(read_u16(bytes, 36)?);
+    let palette_len = usize::from(read_u16(bytes, 64)?);
     if palette_len == 0 || palette_len > Material::ALL.len() {
         return Err(CodecError::InvalidHeader("invalid palette length"));
     }
-    let bits = bytes[38];
-    let payload_len = read_u32(bytes, 40)? as usize;
+    let bits = bytes[66];
+    let payload_len = read_u32(bytes, 68)? as usize;
     let expected_len = usize::from(HEADER_LEN)
         .checked_add(palette_len * 2)
         .and_then(|length| length.checked_add(payload_len))
@@ -165,11 +176,13 @@ pub fn decode_chunk(bytes: &[u8]) -> Result<Chunk, CodecError> {
         }
         _ => return Err(CodecError::InvalidHeader("invalid encoding parameters")),
     };
-    let expected_hash = &bytes[44..76];
-    if hash_voxels(&voxels).as_bytes() != expected_hash {
+    let chunk = Chunk::from_voxels(coord, voxels)
+        .ok_or(CodecError::InvalidHeader("voxel count mismatch"))?;
+    let expected_hash = &bytes[72..104];
+    if content_hash(&chunk, expected_source_identity_hash).as_bytes() != expected_hash {
         return Err(CodecError::CorruptHash);
     }
-    Chunk::from_voxels(coord, voxels).ok_or(CodecError::InvalidHeader("voxel count mismatch"))
+    Ok(chunk)
 }
 
 fn bits_for(palette_len: usize) -> u8 {
@@ -229,9 +242,16 @@ fn unpack_indices(
     Ok(voxels)
 }
 
-fn hash_voxels(voxels: &[Material]) -> blake3::Hash {
+fn content_hash(chunk: &Chunk, source_identity_hash: WorldSourceIdentityHash) -> blake3::Hash {
     let mut hasher = blake3::Hasher::new();
-    for material in voxels {
+    hasher.update(CONTENT_HASH_DOMAIN);
+    hasher.update(source_identity_hash.as_bytes());
+    let coord = chunk.coord();
+    hasher.update(&coord.x.to_le_bytes());
+    hasher.update(&coord.y.to_le_bytes());
+    hasher.update(&coord.z.to_le_bytes());
+    hasher.update(&Material::SCHEMA_VERSION.to_le_bytes());
+    for material in chunk.voxels() {
         hasher.update(&material.id().to_le_bytes());
     }
     hasher.finalize()
@@ -255,14 +275,41 @@ fn read_i32(bytes: &[u8], offset: usize) -> Result<i32, CodecError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Generator;
+    use crate::{
+        ProceduralWorldSource, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority,
+        WorldProductRequest, WorldSourceEngine, WorldSourceIdentity,
+    };
+
+    fn identity(seed: u64) -> WorldSourceIdentityHash {
+        WorldSourceIdentity::procedural_v16(seed).identity_hash()
+    }
+
+    fn generated_chunk(seed: u64, coord: ChunkCoord) -> (WorldSourceIdentityHash, Chunk) {
+        let source = ProceduralWorldSource::new(seed);
+        let identity = source.source_identity_hash();
+        let chunk = source
+            .generate_batch(WorldProductBatch {
+                priority: WorldProductPriority::VisibleChunk,
+                requests: vec![WorldProductRequest::ChunkWithHalo(coord)],
+            })
+            .expect("procedural chunk generation succeeds")
+            .items
+            .into_iter()
+            .find_map(|item| match item.result {
+                Ok(WorldProduct::Chunk(snapshot)) => Some(snapshot.chunk),
+                Ok(_) | Err(_) => None,
+            })
+            .expect("batch contains requested chunk");
+        (identity, chunk)
+    }
 
     #[test]
     fn uniform_chunk_round_trips_compactly() {
         let chunk = Chunk::filled(ChunkCoord::new(-4, 2, 9), Material::Basalt);
-        let encoded = encode_chunk(&chunk);
+        let identity = identity(7);
+        let encoded = encode_chunk(&chunk, identity);
         assert_eq!(encoded.len(), usize::from(HEADER_LEN) + 2);
-        assert_eq!(decode_chunk(&encoded), Ok(chunk));
+        assert_eq!(decode_chunk(&encoded, identity), Ok(chunk));
     }
 
     #[test]
@@ -270,8 +317,10 @@ mod tests {
         let mut chunk = Chunk::empty(ChunkCoord::new(3, 0, -2));
         chunk.set(4, 10, 7, Material::Water);
         chunk.set(4, 9, 7, Material::Sand);
-        let encoded = encode_chunk(&chunk);
-        let decoded = decode_chunk(&encoded).expect("valid current-version Water payload");
+        let identity = identity(7);
+        let encoded = encode_chunk(&chunk, identity);
+        let decoded =
+            decode_chunk(&encoded, identity).expect("valid current-version Water payload");
         assert_eq!(decoded, chunk);
         assert_eq!(decoded.get(4, 10, 7), Material::Water);
     }
@@ -280,8 +329,10 @@ mod tests {
     fn glow_crystal_round_trips_as_an_ordinary_opaque_voxel() {
         let mut chunk = Chunk::empty(ChunkCoord::new(-162, 0, 103));
         chunk.set(4, 10, 7, Material::GlowCrystal);
-        let encoded = encode_chunk(&chunk);
-        let decoded = decode_chunk(&encoded).expect("valid current-version crystal payload");
+        let identity = identity(7);
+        let encoded = encode_chunk(&chunk, identity);
+        let decoded =
+            decode_chunk(&encoded, identity).expect("valid current-version crystal payload");
         assert_eq!(decoded, chunk);
         assert_eq!(decoded.get(4, 10, 7), Material::GlowCrystal);
         assert_eq!(
@@ -292,33 +343,35 @@ mod tests {
 
     #[test]
     fn generated_chunk_round_trips_through_palette_bits() {
-        let chunk = Generator::new(42).generate_chunk(ChunkCoord::new(0, 0, 0));
-        let encoded = encode_chunk(&chunk);
+        let (identity, chunk) = generated_chunk(42, ChunkCoord::new(0, 0, 0));
+        let encoded = encode_chunk(&chunk, identity);
         assert_eq!(
             blake3::hash(&encoded).to_hex().to_string(),
-            "3058e51858df50e5a854a3144c8107c6ea94b870fcf80a6b72d45e6d5a9cac5b"
+            "ebee6a98d729a9a03dc75b682502cc43914759d4cd6615f53e5829c240aab7a4"
         );
+        assert_eq!(encoded.len(), 12_402);
         assert!(encoded.len() < CHUNK_VOLUME * size_of::<u16>());
-        assert_eq!(decode_chunk(&encoded), Ok(chunk));
+        assert_eq!(decode_chunk(&encoded, identity), Ok(chunk));
     }
 
     #[test]
     fn corruption_is_detected() {
-        let chunk = Generator::new(7).generate_chunk(ChunkCoord::new(1, 0, 1));
-        let mut encoded = encode_chunk(&chunk);
+        let (identity, chunk) = generated_chunk(7, ChunkCoord::new(1, 0, 1));
+        let mut encoded = encode_chunk(&chunk, identity);
         let last = encoded.len() - 1;
         encoded[last] ^= 0x40;
-        assert!(decode_chunk(&encoded).is_err());
+        assert!(decode_chunk(&encoded, identity).is_err());
     }
 
     #[test]
     fn malformed_lengths_are_rejected_before_allocation() {
         let chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Stone);
-        let mut encoded = encode_chunk(&chunk);
+        let identity = identity(7);
+        let mut encoded = encode_chunk(&chunk, identity);
         let impossible_palette_len = Material::ALL.len() as u16 + 1;
-        encoded[36..38].copy_from_slice(&impossible_palette_len.to_le_bytes());
+        encoded[64..66].copy_from_slice(&impossible_palette_len.to_le_bytes());
         assert_eq!(
-            decode_chunk(&encoded),
+            decode_chunk(&encoded, identity),
             Err(CodecError::InvalidHeader("invalid palette length"))
         );
     }
@@ -326,14 +379,93 @@ mod tests {
     #[test]
     fn chunk_coordinates_outside_the_voxel_grid_are_rejected() {
         let chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Stone);
-        let mut encoded = encode_chunk(&chunk);
+        let identity = identity(7);
+        let mut encoded = encode_chunk(&chunk, identity);
         let invalid = i32::MAX.div_euclid(CHUNK_EDGE as i32) + 1;
         encoded[12..16].copy_from_slice(&invalid.to_le_bytes());
         assert_eq!(
-            decode_chunk(&encoded),
+            decode_chunk(&encoded, identity),
             Err(CodecError::InvalidHeader(
                 "chunk coordinate outside voxel grid"
             ))
         );
+    }
+
+    #[test]
+    fn source_identity_mismatch_is_rejected_before_dynamic_lengths() {
+        let chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Stone);
+        let encoded_identity = identity(7);
+        let mut encoded = encode_chunk(&chunk, encoded_identity);
+        encoded[64..66].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert_eq!(
+            decode_chunk(&encoded, identity(8)),
+            Err(CodecError::SourceIdentityMismatch)
+        );
+    }
+
+    #[test]
+    fn source_identity_changes_the_envelope_for_identical_voxels() {
+        let chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Stone);
+        let first = encode_chunk(&chunk, identity(7));
+        let second = encode_chunk(&chunk, identity(8));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn coordinate_corruption_is_covered_by_the_content_hash() {
+        let chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Stone);
+        let identity = identity(7);
+        let mut encoded = encode_chunk(&chunk, identity);
+        encoded[12..16].copy_from_slice(&1_i32.to_le_bytes());
+        assert_eq!(
+            decode_chunk(&encoded, identity),
+            Err(CodecError::CorruptHash)
+        );
+    }
+
+    #[test]
+    fn every_material_id_round_trips_at_negative_coordinates() {
+        let coord = ChunkCoord::new(-1, -1, -1);
+        let mut chunk = Chunk::empty(coord);
+        for (index, material) in Material::ALL.into_iter().enumerate() {
+            chunk.set(index, 0, 0, material);
+        }
+        let identity = identity(7);
+        let encoded = encode_chunk(&chunk, identity);
+        assert_eq!(decode_chunk(&encoded, identity), Ok(chunk));
+    }
+
+    #[test]
+    fn material_schema_and_legacy_v1_envelopes_are_rejected() {
+        let chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Stone);
+        let identity = identity(7);
+        let mut wrong_schema = encode_chunk(&chunk, identity);
+        wrong_schema[24..26].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert_eq!(
+            decode_chunk(&wrong_schema, identity),
+            Err(CodecError::InvalidHeader("material schema mismatch"))
+        );
+
+        let mut legacy_version = vec![0; 78];
+        legacy_version[0..4].copy_from_slice(MAGIC);
+        legacy_version[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        legacy_version[6..8].copy_from_slice(&76_u16.to_le_bytes());
+        assert_eq!(
+            decode_chunk(&legacy_version, identity),
+            Err(CodecError::UnsupportedVersion(1))
+        );
+    }
+
+    #[test]
+    fn canonical_world_edge_chunks_round_trip() {
+        let identity = identity(7);
+        for coord in [
+            VoxelCoord::new(i32::MIN, 0, 0).chunk(),
+            VoxelCoord::new(i32::MAX, 0, 0).chunk(),
+        ] {
+            let chunk = Chunk::filled(coord, Material::Basalt);
+            let encoded = encode_chunk(&chunk, identity);
+            assert_eq!(decode_chunk(&encoded, identity), Ok(chunk));
+        }
     }
 }

@@ -342,6 +342,7 @@ fn compose(
 mod tests {
     use super::*;
     use crate::{ChunkCoord, VoxelCoord};
+    use std::collections::BTreeSet;
 
     #[test]
     fn filled_chunk_merges_to_six_quads() {
@@ -351,6 +352,38 @@ mod tests {
         assert_eq!(quads.len(), 6);
         assert!(quads.iter().all(|quad| quad.extent == [32, 32]));
         assert!(quads.iter().all(|quad| quad.ao == 0xff));
+    }
+
+    #[test]
+    fn mesher_requests_the_exact_deduplicated_one_voxel_shell() {
+        let coord = ChunkCoord::new(-2, 3, 4);
+        let origin = coord.world_origin();
+        let mut sampled = BTreeSet::new();
+        let _ = mesh_chunk(&Chunk::empty(coord), |x, y, z| {
+            assert!(
+                sampled.insert([x, y, z]),
+                "mesher sampled one halo voxel twice"
+            );
+            Material::Air
+        });
+
+        let mut expected = BTreeSet::new();
+        for y in -1..=CHUNK_EDGE as i32 {
+            for z in -1..=CHUNK_EDGE as i32 {
+                for x in -1..=CHUNK_EDGE as i32 {
+                    let inside = [x, y, z]
+                        .into_iter()
+                        .all(|value| value >= 0 && value < CHUNK_EDGE as i32);
+                    if !inside {
+                        expected.insert([origin[0] + x, origin[1] + y, origin[2] + z]);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(sampled, expected);
+        assert_eq!(sampled.len(), crate::MESHING_HALO_VOXELS);
+        assert_eq!(sampled.len(), 6_536);
     }
 
     #[test]

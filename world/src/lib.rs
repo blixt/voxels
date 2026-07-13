@@ -12,6 +12,7 @@ pub mod lod;
 pub mod material;
 pub mod mesh;
 pub mod route;
+pub mod source;
 pub mod visibility;
 
 pub use cave::{
@@ -57,6 +58,21 @@ pub use route::{
     first_pilgrim_road_length_voxels, first_pilgrim_road_point_at_distance,
     first_pilgrim_route_anchor, first_pilgrim_route_anchor_count,
     first_pilgrim_route_anchor_for_feature_cell, sample_first_pilgrim_road,
+};
+pub use source::{
+    ChunkSnapshot, MACRO_FIELD_SCHEMA_VERSION, MAX_MACRO_BLOCK_SAMPLES,
+    MAX_SURFACE_SAMPLE_BLOCK_SAMPLES, MAX_SURFACE_SEARCH_RADIUS, MAX_VOXEL_BLOCK_SAMPLES,
+    MAX_WORLD_PRODUCT_BATCH, MESHING_HALO_VOXELS, MacroBlock, MacroBlockBatch,
+    MacroBlockBatchResult, MacroBlockRequest, MacroCoordinateTransform, MacroTerrainSource,
+    MeshingHalo, ModelIdentity, PROCEDURAL_SAMPLER_VERSION, PROCEDURAL_SCHEDULER_VERSION,
+    ProceduralWorldSource, SourceDeviceRequirement, SurfaceSampleBlockRequest,
+    SurfaceSampleBlockSnapshot, SurfaceSearchHit, SurfaceSearchKind, SurfaceSearchRequest,
+    SurfaceSearchSnapshot, SurfaceTileSnapshot, VOXEL_COMPOSER_VERSION, VoxelBlockRequest,
+    VoxelBlockSnapshot, WORLD_SCHEMA_VERSION, WorldId, WorldManifest, WorldManifestError,
+    WorldManifestHash, WorldProduct, WorldProductBatch, WorldProductBatchItem,
+    WorldProductBatchResult, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
+    WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind,
+    procedural_world_source,
 };
 pub use visibility::{
     MAX_VISIBILITY_CELLS, MAX_VISIBILITY_PORTALS, PortalState, VisibilityCellId, VisibilityGraph,

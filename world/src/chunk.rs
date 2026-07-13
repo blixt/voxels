@@ -5,7 +5,7 @@ pub const CHUNK_EDGE: usize = 32;
 pub const CHUNK_VOLUME: usize = CHUNK_EDGE * CHUNK_EDGE * CHUNK_EDGE;
 pub const CHUNK_VOXEL_BYTES: usize = CHUNK_VOLUME * size_of::<Material>();
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct ChunkCoord {
     pub x: i32,
     pub y: i32,

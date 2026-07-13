@@ -509,6 +509,14 @@ impl Generator {
 
     pub fn surface_sample(self, x: i32, z: i32) -> SurfaceSample {
         let profile = self.column_profile(x, z);
+        Self::surface_sample_from_profile(profile)
+    }
+
+    pub(crate) fn natural_surface_sample(self, x: i32, z: i32) -> SurfaceSample {
+        Self::surface_sample_from_profile(self.natural_column_profile(x, z))
+    }
+
+    fn surface_sample_from_profile(profile: ColumnProfile) -> SurfaceSample {
         SurfaceSample {
             height: profile.height,
             material: profile.material,
