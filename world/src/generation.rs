@@ -108,16 +108,15 @@ struct ColumnProfile {
 }
 
 /// Reusable authoritative sampler for one X/Z column. Meshing a halo touches many Y values at the
-/// same horizontal coordinate, so retaining its regional fields and feature intersections avoids
-/// recomputing the full climate stack for every voxel.
+/// same horizontal coordinate, so retaining its regional fields and cell-local feature descriptor
+/// avoids recomputing the full climate stack for every voxel.
 #[derive(Clone, Debug)]
 pub struct GeneratedColumn {
     generator: Generator,
     x: i32,
     z: i32,
     profile: ColumnProfile,
-    features: [SkylineFeature; 9],
-    feature_count: u8,
+    feature: Option<SkylineFeature>,
     cinder_vault_candidate: bool,
 }
 
@@ -157,9 +156,8 @@ impl GeneratedColumn {
         if terrain.is_collidable() {
             return terrain;
         }
-        self.features[..usize::from(self.feature_count)]
-            .iter()
-            .find_map(|feature| feature.material_at(crate::VoxelCoord::new(self.x, y, self.z)))
+        self.feature
+            .and_then(|feature| feature.material_at(crate::VoxelCoord::new(self.x, y, self.z)))
             .unwrap_or(terrain)
     }
 }
@@ -214,32 +212,17 @@ impl Generator {
     }
 
     pub fn column(self, x: i32, z: i32) -> GeneratedColumn {
-        let mut features = [SkylineFeature::default(); 9];
-        let mut feature_count = 0u8;
         let cell_x = x.div_euclid(FEATURE_CELL_VOXELS);
         let cell_z = z.div_euclid(FEATURE_CELL_VOXELS);
-        for dz_cell in -1..=1 {
-            for dx_cell in -1..=1 {
-                let candidate_x = cell_x + dx_cell;
-                let candidate_z = cell_z + dz_cell;
-                let Some(feature) = self.skyline_feature(candidate_x, candidate_z) else {
-                    continue;
-                };
-                if !feature.contains_xz(x, z) {
-                    continue;
-                }
-                debug_assert!(usize::from(feature_count) < features.len());
-                features[usize::from(feature_count)] = feature;
-                feature_count += 1;
-            }
-        }
+        let feature = self
+            .skyline_feature(cell_x, cell_z)
+            .filter(|feature| feature.contains_xz(x, z));
         GeneratedColumn {
             generator: self,
             x,
             z,
             profile: self.column_profile(x, z),
-            features,
-            feature_count,
+            feature,
             cinder_vault_candidate: cinder_vault_column_candidate(x, z),
         }
     }
@@ -267,24 +250,16 @@ impl Generator {
             for local_x in 0..width {
                 let x = min_x.saturating_add(i32::try_from(local_x).unwrap_or(i32::MAX));
                 let z = min_z.saturating_add(i32::try_from(local_z).unwrap_or(i32::MAX));
-                let mut column_features = [SkylineFeature::default(); 9];
-                let mut feature_count = 0u8;
-                for feature in features
+                let feature = features
                     .iter()
                     .copied()
-                    .filter(|feature| feature.contains_xz(x, z))
-                {
-                    debug_assert!(usize::from(feature_count) < column_features.len());
-                    column_features[usize::from(feature_count)] = feature;
-                    feature_count += 1;
-                }
+                    .find(|feature| feature.contains_xz(x, z));
                 columns.push(GeneratedColumn {
                     generator: self,
                     x,
                     z,
                     profile: self.column_profile(x, z),
-                    features: column_features,
-                    feature_count,
+                    feature,
                     cinder_vault_candidate: cinder_vault_column_candidate(x, z),
                 });
             }
@@ -1089,6 +1064,7 @@ mod tests {
     use super::*;
     use crate::VoxelCoord;
     use std::collections::BTreeSet;
+    use std::mem::size_of;
 
     fn flooded_column(generator: Generator) -> (i32, i32, SurfaceSample) {
         let mut minimum = i32::MAX;
@@ -1147,6 +1123,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn cached_column_keeps_one_cell_local_feature_descriptor() {
+        assert!(
+            size_of::<GeneratedColumn>() <= 128,
+            "cached column grew to {} bytes",
+            size_of::<GeneratedColumn>()
+        );
     }
 
     #[test]
