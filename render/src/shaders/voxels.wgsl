@@ -585,6 +585,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let specular = frame.sun_radiance.rgb
     * pow(max(dot(surface_detail.normal, half_direction), 0.0), specular_power)
     * fresnel
+    * select(0.0, 1.0, diffuse > 0.0)
     * (1.0 - roughness * 0.72)
     * mix(0.02, 1.0, shadow)
     * mix(1.0, 0.10, frame.interior.x)
@@ -614,7 +615,10 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     let local_specular = pow(
       max(dot(surface_detail.normal, local_half), 0.0),
       specular_power
-    ) * local_fresnel * (1.0 - roughness * 0.72) * 0.08;
+    ) * local_fresnel
+      * select(0.0, 1.0, no_l > 0.0)
+      * (1.0 - roughness * 0.72)
+      * 0.08;
     color += radiance * (albedo * no_l * 0.3183099 + local_specular);
   }
   if material == 9u {
