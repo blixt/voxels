@@ -322,7 +322,6 @@ pub struct GlassSurface {
     pub radius: f32,
     pub fill: Color,
     pub border: Color,
-    pub blur_radius: f32,
     pub role: SurfaceRole,
 }
 
@@ -870,7 +869,6 @@ impl MissionControlUi {
             PANEL_RADIUS,
             PANEL_COLOR.with_alpha(opacity),
             PANEL_BORDER.with_alpha(opacity),
-            22.0,
             SurfaceRole::Panel,
         );
         push_surface(
@@ -879,7 +877,6 @@ impl MissionControlUi {
             PANEL_RADIUS,
             CARD_COLOR.with_alpha(opacity),
             PANEL_BORDER.with_alpha(opacity * 0.65),
-            12.0,
             SurfaceRole::Header,
         );
         push_text(
@@ -925,7 +922,6 @@ impl MissionControlUi {
                     8.0,
                     CARD_COLOR.mix(HOVER_COLOR, hover).with_alpha(opacity),
                     PANEL_BORDER.with_alpha(opacity * (0.45 + hover * 0.55)),
-                    8.0,
                     SurfaceRole::Button,
                 );
                 push_text(
@@ -947,7 +943,6 @@ impl MissionControlUi {
                 10.0,
                 CARD_COLOR.with_alpha(opacity),
                 PANEL_BORDER.with_alpha(opacity * 0.35),
-                8.0,
                 SurfaceRole::StatCard,
             );
             push_text(
@@ -999,7 +994,6 @@ impl MissionControlUi {
                     .mix(HOVER_COLOR, hover)
                     .with_alpha(opacity * (0.56 + hover * 0.30)),
                 PANEL_BORDER.with_alpha(opacity * hover * 0.8),
-                6.0,
                 SurfaceRole::FeatureRow,
             );
             push_text(
@@ -1023,7 +1017,6 @@ impl MissionControlUi {
                 12.0,
                 Color::new(0.025, 0.034, 0.052, 0.98).with_alpha(opacity),
                 PANEL_BORDER.with_alpha(opacity),
-                24.0,
                 SurfaceRole::ContextMenu,
             );
             for action in ContextAction::ALL {
@@ -1040,7 +1033,6 @@ impl MissionControlUi {
                         .mix(HOVER_COLOR, hover)
                         .with_alpha(opacity),
                     PANEL_BORDER.with_alpha(opacity * hover),
-                    8.0,
                     SurfaceRole::ContextRow,
                 );
                 push_text(
@@ -1063,7 +1055,6 @@ impl MissionControlUi {
             CHROME_HEIGHT * 0.5,
             PANEL_COLOR,
             PANEL_BORDER,
-            16.0,
             SurfaceRole::Brand,
         );
         let brand = if self.stats.eyes_submerged {
@@ -1094,7 +1085,6 @@ impl MissionControlUi {
                 CHROME_HEIGHT * 0.5,
                 PANEL_COLOR.with_alpha(toast_alpha),
                 PANEL_BORDER.with_alpha(toast_alpha),
-                16.0,
                 SurfaceRole::Toast,
             );
             push_text(
@@ -1120,7 +1110,6 @@ impl MissionControlUi {
             CHROME_HEIGHT * 0.5,
             PANEL_COLOR.mix(HOVER_COLOR, launcher_hover),
             PANEL_BORDER.mix(ACCENT, launcher_hover * 0.6),
-            16.0,
             SurfaceRole::Launcher,
         );
         let launcher = if self.stats.swimming {
@@ -1150,7 +1139,6 @@ impl MissionControlUi {
             6.0,
             Color::new(0.94, 0.98, 1.0, 0.88),
             Color::new(0.0, 0.0, 0.0, 0.56),
-            0.0,
             SurfaceRole::Crosshair,
         );
     }
@@ -1266,7 +1254,6 @@ impl MissionControlUi {
             9.0,
             TOGGLE_OFF.mix(ACCENT, value).with_alpha(opacity),
             PANEL_BORDER.with_alpha(opacity * 0.55),
-            5.0,
             SurfaceRole::ToggleTrack,
         );
         let thumb = Rect::new(track.x + 2.0 + value * 16.0, track.y + 2.0, 14.0, 14.0);
@@ -1276,7 +1263,6 @@ impl MissionControlUi {
             7.0,
             TEXT_PRIMARY.with_alpha(opacity),
             Color::new(1.0, 1.0, 1.0, 0.22 * opacity),
-            3.0,
             SurfaceRole::ToggleThumb,
         );
     }
@@ -1317,7 +1303,6 @@ fn push_surface(
     radius: f32,
     fill: Color,
     border: Color,
-    blur_radius: f32,
     role: SurfaceRole,
 ) {
     draw.glass.push(GlassSurface {
@@ -1325,7 +1310,6 @@ fn push_surface(
         radius,
         fill,
         border,
-        blur_radius,
         role,
     });
 }

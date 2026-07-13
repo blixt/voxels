@@ -189,12 +189,7 @@ impl GlassInstance {
                 surface.rect.width * dpr,
                 surface.rect.height * dpr,
             ],
-            viewport_radius: [
-                viewport[0],
-                viewport[1],
-                surface.radius * dpr,
-                surface.blur_radius * dpr,
-            ],
+            viewport_radius: [viewport[0], viewport[1], surface.radius * dpr, 0.0],
             fill: surface.fill.0,
             border: surface.border.0,
             style: [style, dpr, 0.0, 0.0],
