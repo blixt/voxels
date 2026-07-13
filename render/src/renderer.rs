@@ -1624,19 +1624,8 @@ impl Renderer {
             .patches
             .iter()
             .flat_map(|patch| {
-                let [[min_x, min_z], [max_x, max_z]] = patch.cell_bounds;
-                let surface_bounds = SurfaceBounds {
-                    min: [
-                        tile_x + i32::from(min_x) * stride,
-                        patch.bounds.min[1],
-                        tile_z + i32::from(min_z) * stride,
-                    ],
-                    max: [
-                        tile_x + i32::from(max_x) * stride,
-                        patch.bounds.max[1],
-                        tile_z + i32::from(max_z) * stride,
-                    ],
-                };
+                let surface_bounds =
+                    surface_patch_bounds([tile_x, tile_z], stride, patch.cell_bounds, patch.bounds);
                 std::iter::once((patch.quad_range.clone(), patch.bounds, None))
                     .chain(SurfacePatchEdge::ALL.into_iter().map(|edge| {
                         let range = patch.skirt_ranges[edge.index()].clone();
@@ -1670,19 +1659,8 @@ impl Renderer {
             .patches
             .iter()
             .map(|patch| {
-                let [[min_x, min_z], [max_x, max_z]] = patch.cell_bounds;
-                let surface_bounds = SurfaceBounds {
-                    min: [
-                        tile_x + i32::from(min_x) * stride,
-                        patch.bounds.min[1],
-                        tile_z + i32::from(min_z) * stride,
-                    ],
-                    max: [
-                        tile_x + i32::from(max_x) * stride,
-                        patch.bounds.max[1],
-                        tile_z + i32::from(max_z) * stride,
-                    ],
-                };
+                let surface_bounds =
+                    surface_patch_bounds([tile_x, tile_z], stride, patch.cell_bounds, patch.bounds);
                 MeshSlice {
                     relative_offset: patch.quad_range.start * quad_bytes,
                     size: (patch.quad_range.end - patch.quad_range.start) * quad_bytes,
@@ -2407,6 +2385,29 @@ fn upload_mesh_sliced_into(
         let _ = arena.free(old.allocation);
     }
     true
+}
+
+fn surface_patch_bounds(
+    tile_origin: [i32; 2],
+    stride: i32,
+    cell_bounds: [[u8; 2]; 2],
+    geometry_bounds: SurfaceBounds,
+) -> SurfaceBounds {
+    let [[min_x, min_z], [max_x, max_z]] = cell_bounds;
+    let offset =
+        |origin: i32, cell: u8| origin.saturating_add(i32::from(cell).saturating_mul(stride));
+    SurfaceBounds {
+        min: [
+            offset(tile_origin[0], min_x),
+            geometry_bounds.min[1],
+            offset(tile_origin[1], min_z),
+        ],
+        max: [
+            offset(tile_origin[0], max_x),
+            geometry_bounds.max[1],
+            offset(tile_origin[1], max_z),
+        ],
+    }
 }
 
 fn slice_owned_by_lod(focus: Option<GeometricLodFocus>, key: &MeshKey, slice: &MeshSlice) -> bool {
@@ -3208,6 +3209,25 @@ mod tests {
             &(SurfaceLodLevel::Stride8.index() + 1, 1, 0, 0),
             &slice
         ));
+    }
+
+    #[test]
+    fn surface_patch_coverage_stays_inside_the_positive_world_boundary() {
+        let coord = SurfaceTileCoord::containing(SurfaceLodLevel::Stride16, i32::MAX, i32::MAX);
+        let geometry_bounds = SurfaceBounds {
+            min: [i32::MAX - 127, -40, i32::MAX - 127],
+            max: [i32::MAX, 80, i32::MAX],
+        };
+
+        assert_eq!(
+            surface_patch_bounds(
+                coord.voxel_origin(),
+                coord.stride_voxels(),
+                [[24, 24], [32, 32]],
+                geometry_bounds,
+            ),
+            geometry_bounds
+        );
     }
 
     #[test]
