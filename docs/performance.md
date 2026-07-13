@@ -102,9 +102,8 @@ all surface queues are clean. This intentionally trades bounded transient reside
 handoff rather than showing half of a new ring.
 
 The portable release benchmarks remained within their noise thresholds after adding structured mesh
-generation: one canonical chunk measured 0.719 ms, greedy meshing measured 1.201 ms, and the legacy
-surface-shell API measured 0.168 ms. That compatibility API skips transition-skirt construction;
-runtime structured tiles construct skirts because they can select those ranges independently.
+generation: one canonical chunk measured 0.719 ms, greedy meshing measured 1.201 ms, and a structured
+surface tile measured 0.168 ms including independently selectable patch and transition-skirt ranges.
 
 Browser validation opened two simultaneous tabs against the same OPFS world and rapidly reloaded one
 tab several times. Both workers recovered to a rendered world through Web-Lock ownership handoff, and

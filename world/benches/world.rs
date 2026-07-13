@@ -2,12 +2,12 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use voxels_world::codec::{decode_chunk, encode_chunk};
 use voxels_world::{
-    CINDER_VAULT, CINDER_VAULT_MOUTH_ANCHOR_XZ, ChunkCoord, EditMap, FarTileCoord, Generator,
-    Material, SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
+    CINDER_VAULT, CINDER_VAULT_MOUTH_ANCHOR_XZ, ChunkCoord, EditMap, Generator, Material,
+    SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
     first_pilgrim_road_length_voxels, first_pilgrim_road_point_at_distance,
     first_pilgrim_route_anchor, first_pilgrim_route_anchor_for_feature_cell,
-    generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_far_tile,
-    generate_far_tile_with, mesh_chunk, sample_first_pilgrim_road,
+    generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_surface_tile_mesh,
+    mesh_chunk, sample_first_pilgrim_road,
 };
 
 const SEED: u64 = 0x5eed_cafe;
@@ -210,14 +210,15 @@ fn water_surface_lod(criterion: &mut Criterion) {
 
 fn far_surface(criterion: &mut Criterion) {
     let generator = Generator::new(SEED);
+    let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride8, 2, -3);
     criterion.bench_function("generate 25.6m far surface tile", |bencher| {
-        bencher.iter(|| generate_far_tile(generator, FarTileCoord::new(2, -3)));
+        bencher.iter(|| generate_surface_tile_mesh(generator, coord));
     });
 }
 
 fn edited_far_surface(criterion: &mut Criterion) {
     let generator = Generator::new(SEED);
-    let coord = FarTileCoord::new(2, -3);
+    let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride8, 2, -3);
     let mut edits = EditMap::default();
     for index in 0..10_000 {
         edits.insert_override(
@@ -225,9 +226,8 @@ fn edited_far_surface(criterion: &mut Criterion) {
             Material::Stone,
         );
     }
-    criterion.bench_function("generate far tile with 10k unrelated edits", |bencher| {
-        bencher
-            .iter(|| generate_far_tile_with(coord, |x, z| edits.surface_sample(generator, x, z)));
+    criterion.bench_function("generate surface tile with 10k unrelated edits", |bencher| {
+        bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
     });
 }
 

@@ -95,50 +95,6 @@ impl SurfaceTileCoord {
     }
 }
 
-/// The original far renderer used the stride-8 member of the generalized LOD family. Keep this
-/// small wrapper while shell and renderer migrate to level-aware keys.
-pub const FAR_STRIDE_VOXELS: i32 = SurfaceLodLevel::Stride8.stride_voxels();
-pub const FAR_TILE_EDGE_CELLS: i32 = SURFACE_TILE_EDGE_CELLS;
-pub const FAR_TILE_SPAN_VOXELS: i32 = SurfaceLodLevel::Stride8.tile_span_voxels();
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct FarTileCoord {
-    pub x: i32,
-    pub z: i32,
-}
-
-impl FarTileCoord {
-    pub const fn new(x: i32, z: i32) -> Self {
-        Self { x, z }
-    }
-
-    pub const fn voxel_origin(self) -> [i32; 2] {
-        [self.x * FAR_TILE_SPAN_VOXELS, self.z * FAR_TILE_SPAN_VOXELS]
-    }
-
-    pub const fn surface_coord(self) -> SurfaceTileCoord {
-        SurfaceTileCoord::new(SurfaceLodLevel::Stride8, self.x, self.z)
-    }
-}
-
-impl From<FarTileCoord> for SurfaceTileCoord {
-    fn from(coord: FarTileCoord) -> Self {
-        coord.surface_coord()
-    }
-}
-
-impl TryFrom<SurfaceTileCoord> for FarTileCoord {
-    type Error = SurfaceLodLevel;
-
-    fn try_from(coord: SurfaceTileCoord) -> Result<Self, Self::Error> {
-        if coord.level == SurfaceLodLevel::Stride8 {
-            Ok(Self::new(coord.x, coord.z))
-        } else {
-            Err(coord.level)
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SurfaceQuad {
     pub origin: [i32; 3],
@@ -346,35 +302,11 @@ pub fn surface_tiles_affected_by_voxel(
     affected
 }
 
-/// Builds a deterministic, surface-preserving coarse shell. Adjacent tiles sample the same global
-/// cell centers, and vertical transition quads close every height discontinuity, so independently
-/// streamed tiles cannot expose holes.
-pub fn generate_surface_tile(generator: Generator, coord: SurfaceTileCoord) -> Vec<SurfaceQuad> {
-    generate_edited_surface_tile(generator, &EditMap::default(), coord)
-}
-
 pub fn generate_surface_tile_mesh(
     generator: Generator,
     coord: SurfaceTileCoord,
 ) -> SurfaceTileMesh {
     generate_edited_surface_tile_mesh(generator, &EditMap::default(), coord)
-}
-
-/// Builds the compatibility vector form of an edit-aware surface tile. Transition skirts remain
-/// omitted because callers of the legacy API cannot select them per patch edge.
-pub fn generate_edited_surface_tile(
-    generator: Generator,
-    edits: &EditMap,
-    coord: SurfaceTileCoord,
-) -> Vec<SurfaceQuad> {
-    let features = pristine_skyline_features(generator, edits, coord);
-    generate_surface_tile_mesh_with_options(
-        coord,
-        |x, z| edits.surface_sample(generator, x, z),
-        false,
-        &features,
-    )
-    .into_surface_quads()
 }
 
 /// Builds terrain patches and anchor-owned skyline proxies from the same generator plus sparse
@@ -501,27 +433,6 @@ pub fn generate_water_tile_mesh_with(
         coord,
         quads,
         patches,
-    }
-}
-
-pub fn generate_surface_tile_with(
-    coord: SurfaceTileCoord,
-    surface: impl Fn(i32, i32) -> (i32, Material),
-) -> Vec<SurfaceQuad> {
-    generate_surface_tile_mesh_with_options(coord, surface, false, &[]).into_surface_quads()
-}
-
-impl SurfaceTileMesh {
-    /// Flattens only the main shell for compatibility with callers that cannot selectively draw
-    /// per-edge transition skirts.
-    pub fn into_surface_quads(self) -> Vec<SurfaceQuad> {
-        let mut surface = Vec::new();
-        for patch in &self.patches {
-            surface.extend_from_slice(
-                &self.quads[patch.quad_range.start as usize..patch.quad_range.end as usize],
-            );
-        }
-        surface
     }
 }
 
@@ -1147,17 +1058,6 @@ fn append_box(quads: &mut Vec<SurfaceQuad>, min: [i32; 3], max: [i32; 3], materi
     ]);
 }
 
-pub fn generate_far_tile(generator: Generator, coord: FarTileCoord) -> Vec<SurfaceQuad> {
-    generate_surface_tile(generator, coord.surface_coord())
-}
-
-pub fn generate_far_tile_with(
-    coord: FarTileCoord,
-    surface: impl Fn(i32, i32) -> (i32, Material),
-) -> Vec<SurfaceQuad> {
-    generate_surface_tile_with(coord.surface_coord(), surface)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1422,14 +1322,17 @@ mod tests {
     fn every_level_covers_exactly_its_canonical_span() {
         for level in SurfaceLodLevel::ALL {
             let coord = SurfaceTileCoord::new(level, -1, 2);
-            let tile = generate_surface_tile_with(coord, |x, z| {
+            let tile = generate_surface_tile_mesh_with(coord, |x, z| {
                 (x.div_euclid(31) + z.div_euclid(47), Material::Stone)
             });
             assert_eq!(
-                tile.iter().filter(|quad| quad.face == FACE_POS_Y).count(),
+                tile.quads
+                    .iter()
+                    .filter(|quad| quad.face == FACE_POS_Y)
+                    .count(),
                 (SURFACE_TILE_EDGE_CELLS * SURFACE_TILE_EDGE_CELLS) as usize
             );
-            let bounds = SurfaceBounds::from_quads(&tile).unwrap();
+            let bounds = SurfaceBounds::from_quads(&tile.quads).unwrap();
             let [origin_x, origin_z] = coord.voxel_origin();
             assert_eq!(bounds.min[0], origin_x);
             assert_eq!(bounds.max[0], origin_x + coord.voxel_span());
@@ -1581,20 +1484,6 @@ mod tests {
     }
 
     #[test]
-    fn vector_surface_apis_preserve_structured_quad_order() {
-        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride8, -1, 2);
-        let surface = |x: i32, z: i32| (x.div_euclid(17) - z.div_euclid(29), Material::Grass);
-        assert_eq!(
-            generate_surface_tile_with(coord, surface),
-            generate_surface_tile_mesh_with(coord, surface).into_surface_quads()
-        );
-        assert_eq!(
-            generate_surface_tile(Generator::new(42), coord),
-            generate_surface_tile_mesh(Generator::new(42), coord).into_surface_quads()
-        );
-    }
-
-    #[test]
     fn pilgrim_road_is_cardinal_connected_on_every_lod_sampling_lattice() {
         let generator = Generator::new(0x5eed_cafe);
         for level in SurfaceLodLevel::ALL {
@@ -1674,14 +1563,19 @@ mod tests {
             let stride = level.stride_voxels();
             let span = level.tile_span_voxels();
             let surface = |x: i32, z: i32| (x.div_euclid(17) - z.div_euclid(29), Material::Grass);
-            let left = generate_surface_tile_with(SurfaceTileCoord::new(level, 0, 0), surface);
-            let right = generate_surface_tile_with(SurfaceTileCoord::new(level, 1, 0), surface);
-            let forward = generate_surface_tile_with(SurfaceTileCoord::new(level, 0, 1), surface);
+            let left =
+                generate_surface_tile_mesh_with(SurfaceTileCoord::new(level, 0, 0), surface);
+            let right =
+                generate_surface_tile_mesh_with(SurfaceTileCoord::new(level, 1, 0), surface);
+            let forward =
+                generate_surface_tile_mesh_with(SurfaceTileCoord::new(level, 0, 1), surface);
             let left_edge: Vec<_> = left
+                .quads
                 .iter()
                 .filter(|quad| quad.face == FACE_POS_Y && quad.origin[0] == span - stride)
                 .collect();
             let right_edge: Vec<_> = right
+                .quads
                 .iter()
                 .filter(|quad| quad.face == FACE_POS_Y && quad.origin[0] == span)
                 .collect();
@@ -1695,10 +1589,12 @@ mod tests {
             }
 
             let back_edge: Vec<_> = left
+                .quads
                 .iter()
                 .filter(|quad| quad.face == FACE_POS_Y && quad.origin[2] == span - stride)
                 .collect();
             let forward_edge: Vec<_> = forward
+                .quads
                 .iter()
                 .filter(|quad| quad.face == FACE_POS_Y && quad.origin[2] == span)
                 .collect();
@@ -2092,17 +1988,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn far_api_remains_the_stride_eight_level() {
-        let far = FarTileCoord::new(-1, 2);
-        assert_eq!(far.voxel_origin(), [-256, 512]);
-        assert_eq!(
-            SurfaceTileCoord::from(far),
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride8, -1, 2)
-        );
-        assert_eq!(
-            generate_far_tile(Generator::new(7), far),
-            generate_surface_tile(Generator::new(7), far.surface_coord())
-        );
-    }
 }

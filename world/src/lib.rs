@@ -41,13 +41,11 @@ pub use generation::{
     SEA_LEVEL_VOXELS, SurfaceRegion, SurfaceSample,
 };
 pub use lod::{
-    FAR_STRIDE_VOXELS, FAR_TILE_EDGE_CELLS, FAR_TILE_SPAN_VOXELS, FarTileCoord,
     SURFACE_PATCH_EDGE_CELLS, SURFACE_PATCHES_PER_TILE_EDGE, SURFACE_TILE_EDGE_CELLS,
     SurfaceBounds, SurfaceLodLevel, SurfacePatch, SurfacePatchEdge, SurfaceQuad, SurfaceTileCoord,
-    SurfaceTileMesh, WaterPatch, WaterTileMesh, generate_edited_surface_tile,
-    generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_far_tile,
-    generate_far_tile_with, generate_surface_tile, generate_surface_tile_mesh,
-    generate_surface_tile_mesh_with, generate_surface_tile_with, generate_water_tile_mesh_with,
+    SurfaceTileMesh, WaterPatch, WaterTileMesh, generate_edited_surface_tile_mesh,
+    generate_edited_water_tile_mesh, generate_surface_tile_mesh, generate_surface_tile_mesh_with,
+    generate_water_tile_mesh_with,
     surface_tiles_affected_by_column, surface_tiles_affected_by_voxel,
 };
 pub use material::{Material, MaterialEmission, RenderLayer};
