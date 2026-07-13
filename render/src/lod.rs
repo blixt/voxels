@@ -35,12 +35,17 @@ impl GeometricLodFocus {
     }
 
     pub fn owner_at(self, voxel_x: i32, voxel_z: i32) -> LodOwner {
+        let voxel_x = i64::from(voxel_x);
+        let voxel_z = i64::from(voxel_z);
         for (index, half_extent) in LOD_BOUNDARY_HALF_EXTENTS.into_iter().enumerate() {
             let centre = self.boundary_centres[index];
-            if voxel_x >= centre[0] - half_extent
-                && voxel_x < centre[0] + half_extent
-                && voxel_z >= centre[1] - half_extent
-                && voxel_z < centre[1] + half_extent
+            let centre_x = i64::from(centre[0]);
+            let centre_z = i64::from(centre[1]);
+            let half_extent = i64::from(half_extent);
+            if voxel_x >= centre_x - half_extent
+                && voxel_x < centre_x + half_extent
+                && voxel_z >= centre_z - half_extent
+                && voxel_z < centre_z + half_extent
             {
                 return if index == 0 {
                     LodOwner::Canonical
@@ -85,13 +90,22 @@ impl GeometricLodFocus {
 }
 
 fn snap_nearest(value: i32, step: i32) -> i32 {
+    let value = i64::from(value);
+    let step = i64::from(step);
     let lower = value.div_euclid(step) * step;
     let upper = lower + step;
-    if value - lower < upper - value {
+    let minimum = i64::from(i32::MIN);
+    let maximum = i64::from(i32::MAX);
+    let lower_valid = (minimum..=maximum).contains(&lower);
+    let upper_valid = (minimum..=maximum).contains(&upper);
+    let snapped = if lower_valid && (!upper_valid || value - lower < upper - value) {
         lower
-    } else {
+    } else if upper_valid {
         upper
-    }
+    } else {
+        value
+    };
+    snapped as i32
 }
 
 #[cfg(test)]
@@ -119,6 +133,24 @@ mod tests {
                 LOD_BOUNDARY_HALF_EXTENTS[index - 1] + centre_delta
                     < LOD_BOUNDARY_HALF_EXTENTS[index]
             );
+        }
+    }
+
+    #[test]
+    fn boundary_focus_stays_grid_aligned_without_overflow() {
+        for boundary in [i32::MIN, i32::MAX] {
+            let focus = GeometricLodFocus::snapped(boundary, boundary);
+            for (index, centre) in focus.boundary_centres().into_iter().enumerate() {
+                let snap = LOD_BOUNDARY_SNAP[index];
+                assert_eq!(centre[0].rem_euclid(snap), 0);
+                assert_eq!(centre[1].rem_euclid(snap), 0);
+            }
+            for probe in [i32::MIN, i32::MAX] {
+                assert!(matches!(
+                    focus.owner_at(probe, probe),
+                    LodOwner::Canonical | LodOwner::Surface(_)
+                ));
+            }
         }
     }
 
