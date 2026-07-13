@@ -582,6 +582,7 @@ impl MissionControlUi {
 
     pub fn layout(&self, viewport: Viewport) -> UiLayout {
         let [viewport_width, viewport_height] = viewport.css_size();
+        let automatically_compact = viewport_width < AUTO_COMPACT_WIDTH;
         let compact = self.effective_compact(viewport);
         let requested_width = if compact { COMPACT_WIDTH } else { PANEL_WIDTH };
         let panel_width = requested_width.min((viewport_width - PANEL_INSET * 2.0).max(180.0));
@@ -663,11 +664,13 @@ impl MissionControlUi {
                 target: UiTarget::More,
                 rect: more,
             },
-            InteractiveRegion {
+        ]);
+        if !automatically_compact {
+            regions.push(InteractiveRegion {
                 target: UiTarget::Compact,
                 rect: compact_button,
-            },
-        ]);
+            });
+        }
 
         let stats_top = panel.y + HEADER_HEIGHT + 14.0;
         let stat_columns: usize = if compact { 2 } else { 3 };
@@ -1482,9 +1485,18 @@ mod tests {
         assert!(compact.panel.width < normal.panel.width);
 
         let automatic = opened();
-        let narrow = automatic.layout(Viewport::new(640.0, 720.0, 1.0));
+        let narrow_viewport = Viewport::new(640.0, 720.0, 1.0);
+        let narrow = automatic.layout(narrow_viewport);
         assert!(narrow.compact);
         assert!(!automatic.compact());
+        assert_eq!(narrow.region(UiTarget::Compact), None);
+        assert!(
+            !automatic
+                .build_draw_list(narrow_viewport)
+                .text
+                .iter()
+                .any(|run| run.text == ">")
+        );
     }
 
     #[test]
