@@ -140,7 +140,7 @@ struct Coordinator {
 
 pub struct Store {
     coordinator: Rc<Coordinator>,
-    initial_camera: Option<CameraState>,
+    initial_camera: Option<(CameraState, bool)>,
     initial_edits: Option<EditMap>,
 }
 
@@ -148,7 +148,7 @@ impl Store {
     pub async fn open(world_seed: u64, generator_version: u32) -> Result<Self, JsValue> {
         let coordinator = Coordinator::start(world_seed, generator_version).await?;
         let initial_camera = match coordinator.request(Operation::LoadCamera).await {
-            OperationResult::Camera(camera) => camera.map(camera_from_values),
+            OperationResult::Camera(camera) => camera.map(crate::camera_from_persisted_values),
             OperationResult::Error(error) => return Err(JsValue::from_str(&error)),
             _ => {
                 return Err(JsValue::from_str(
@@ -168,7 +168,7 @@ impl Store {
         })
     }
 
-    pub fn load_camera(&mut self) -> Result<Option<CameraState>, JsValue> {
+    pub fn load_camera(&mut self) -> Result<Option<(CameraState, bool)>, JsValue> {
         Ok(self.initial_camera.take())
     }
 
@@ -814,14 +814,6 @@ fn save_edit(connection: &Connection, coord: VoxelCoord, material: Option<u16>) 
     result
         .map(|_| OperationResult::Ok)
         .unwrap_or_else(|error| OperationResult::Error(format!("persist voxel edit: {error}")))
-}
-
-fn camera_from_values(values: [f32; 5]) -> CameraState {
-    CameraState::from_persisted(
-        glam::Vec3::new(values[0], values[1], values[2]),
-        values[3],
-        values[4],
-    )
 }
 
 fn edit_map_from_rows(rows: Vec<(VoxelCoord, u16)>) -> Result<EditMap, JsValue> {

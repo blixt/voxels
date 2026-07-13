@@ -1,5 +1,30 @@
 //! Browser/WASM leaf for Voxels. The worker owns the renderer, clock, input semantics, and persistence.
 
+#[cfg(any(target_arch = "wasm32", test))]
+use voxels_core::CameraState;
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn camera_persistence_values(camera: &CameraState) -> [f32; 5] {
+    [
+        camera.position.x,
+        camera.position.y,
+        camera.position.z,
+        camera.yaw,
+        camera.pitch,
+    ]
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn camera_from_persisted_values(values: [f32; 5]) -> (CameraState, bool) {
+    let camera = CameraState::from_persisted(
+        glam::Vec3::new(values[0], values[1], values[2]),
+        values[3],
+        values[4],
+    );
+    let canonical = camera_persistence_values(&camera) == values;
+    (camera, canonical)
+}
+
 #[cfg(target_arch = "wasm32")]
 mod persist;
 #[cfg(target_arch = "wasm32")]
@@ -252,16 +277,6 @@ mod web {
     const KIND_KEY_UP: u8 = 5;
     const KIND_CANCEL: u8 = 6;
 
-    fn camera_persistence_values(camera: &CameraState) -> [f32; 5] {
-        [
-            camera.position.x,
-            camera.position.y,
-            camera.position.z,
-            camera.yaw,
-            camera.pitch,
-        ]
-    }
-
     fn log_gpu_error(message: &str) {
         web_sys::console::error_1(&JsValue::from_str(message));
     }
@@ -322,7 +337,7 @@ mod web {
         profile_wasm_high: Cell<u64>,
         profile_start_evictions: Cell<u64>,
         last_persist: Cell<f64>,
-        last_persisted_camera: Cell<[f32; 5]>,
+        last_persisted_camera: Cell<Option<[f32; 5]>>,
         stopped: Cell<bool>,
     }
 
@@ -1219,12 +1234,12 @@ mod web {
         }
 
         fn persist_camera_if_changed(&self, camera: &CameraState) {
-            let values = camera_persistence_values(camera);
-            if self.last_persisted_camera.get() == values {
+            let values = crate::camera_persistence_values(camera);
+            if self.last_persisted_camera.get() == Some(values) {
                 return;
             }
             match self.store.borrow().save_camera(camera) {
-                Ok(()) => self.last_persisted_camera.set(values),
+                Ok(()) => self.last_persisted_camera.set(Some(values)),
                 Err(error) => web_sys::console::error_1(&error),
             }
         }
@@ -2166,17 +2181,18 @@ mod web {
         let spawn_y = (spawn_top + 1) as f32 * VOXEL_SIZE_METRES
             + voxels_core::PLAYER_EYE_HEIGHT_METRES
             + 0.02;
+        let mut persisted_camera = None;
         let mut camera = store
             .load_camera()?
-            .filter(|camera| {
+            .and_then(|(camera, canonical)| {
                 if !camera.position.is_finite()
                     || !camera.yaw.is_finite()
                     || !camera.pitch.is_finite()
                 {
-                    return false;
+                    return None;
                 }
                 let mut generated_columns = BTreeMap::new();
-                !camera.overlaps_collidable(VOXEL_SIZE_METRES, |x, y, z| {
+                let accepted = !camera.overlaps_collidable(VOXEL_SIZE_METRES, |x, y, z| {
                     let coord = VoxelCoord::new(x, y, z);
                     let material = edits.override_at(coord).unwrap_or_else(|| {
                         generated_columns
@@ -2188,7 +2204,11 @@ mod web {
                         collidable: material.is_collidable(),
                         fluid: material.is_fluid(),
                     }
-                })
+                });
+                if accepted && canonical {
+                    persisted_camera = Some(crate::camera_persistence_values(&camera));
+                }
+                accepted.then_some(camera)
             })
             .unwrap_or_else(|| CameraState::spawn(glam::Vec3::new(0.0, spawn_y, spawn_z)));
         {
@@ -2231,7 +2251,6 @@ mod web {
                 .occludes_ambient()
         });
         let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
-        let persisted_camera = camera_persistence_values(&camera);
         let engine = Rc::new(Engine {
             renderer: RefCell::new(renderer),
             camera: RefCell::new(camera),
@@ -2359,3 +2378,28 @@ mod web {
 
 #[cfg(target_arch = "wasm32")]
 pub use web::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_camera_values_report_when_recovery_changed_the_row() {
+        let valid = [12.0, 4.5, -8.0, 0.75, -0.4];
+        let (camera, canonical) = camera_from_persisted_values(valid);
+        assert!(canonical);
+        assert_eq!(camera_persistence_values(&camera), valid);
+
+        for recovered in [
+            [f32::NAN, 4.5, -8.0, 0.75, -0.4],
+            [12.0, 4.5, -8.0, 1.0e30, -0.4],
+            [12.0, 4.5, -8.0, 0.75, 4.0],
+        ] {
+            let (camera, canonical) = camera_from_persisted_values(recovered);
+            assert!(!canonical);
+            assert!(camera.position.is_finite());
+            assert!(camera.yaw.is_finite());
+            assert!(camera.pitch.is_finite());
+        }
+    }
+}
