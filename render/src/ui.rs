@@ -18,6 +18,7 @@ const BUTTON_GAP: f32 = 6.0;
 const CHROME_HEIGHT: f32 = 36.0;
 const BRAND_WIDTH: f32 = 178.0;
 const LAUNCHER_WIDTH: f32 = 222.0;
+const CHROME_STACK_GAP: f32 = 8.0;
 const PANEL_TOP: f32 = PANEL_INSET + CHROME_HEIGHT + 12.0;
 const CONTEXT_WIDTH: f32 = 206.0;
 const CONTEXT_ROW_HEIGHT: f32 = 34.0;
@@ -586,16 +587,27 @@ impl MissionControlUi {
         let compact = self.effective_compact(viewport);
         let requested_width = if compact { COMPACT_WIDTH } else { PANEL_WIDTH };
         let panel_width = requested_width.min((viewport_width - PANEL_INSET * 2.0).max(180.0));
+        let stacked_chrome = viewport_width < PANEL_INSET * 2.0 + BRAND_WIDTH + LAUNCHER_WIDTH;
+        let launcher_y = if stacked_chrome {
+            PANEL_INSET + CHROME_HEIGHT + CHROME_STACK_GAP
+        } else {
+            PANEL_INSET
+        };
+        let panel_top = if stacked_chrome {
+            launcher_y + CHROME_HEIGHT + 12.0
+        } else {
+            PANEL_TOP
+        };
         let panel_height = if compact {
             COMPACT_HEIGHT
         } else {
             PANEL_HEIGHT
         }
-        .min((viewport_height - PANEL_TOP - PANEL_INSET).max(HEADER_HEIGHT));
+        .min((viewport_height - panel_top - PANEL_INSET).max(HEADER_HEIGHT));
         let brand = Rect::new(PANEL_INSET, PANEL_INSET, BRAND_WIDTH, CHROME_HEIGHT);
         let launcher = Rect::new(
             (viewport_width - PANEL_INSET - LAUNCHER_WIDTH).max(0.0),
-            PANEL_INSET,
+            launcher_y,
             LAUNCHER_WIDTH.min(viewport_width.max(0.0)),
             CHROME_HEIGHT,
         );
@@ -615,7 +627,7 @@ impl MissionControlUi {
         );
         let panel = Rect::new(
             (viewport_width - panel_width - PANEL_INSET).max(0.0),
-            PANEL_TOP.min((viewport_height - HEADER_HEIGHT).max(0.0)),
+            panel_top.min((viewport_height - HEADER_HEIGHT).max(0.0)),
             panel_width,
             panel_height,
         );
@@ -1497,6 +1509,20 @@ mod tests {
                 .iter()
                 .any(|run| run.text == ">")
         );
+    }
+
+    #[test]
+    fn narrow_viewport_stacks_top_chrome_without_overlap() {
+        let viewport = Viewport::new(390.0, 844.0, 1.0);
+        let layout = opened().layout(viewport);
+
+        assert!(layout.brand.y + layout.brand.height < layout.launcher.y);
+        assert!(layout.launcher.y + layout.launcher.height < layout.panel.y);
+        for rect in [layout.brand, layout.launcher] {
+            assert!(rect.x >= 0.0 && rect.y >= 0.0);
+            assert!(rect.x + rect.width <= viewport.css_size()[0]);
+            assert!(rect.y + rect.height <= viewport.css_size()[1]);
+        }
     }
 
     #[test]
