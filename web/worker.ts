@@ -1,5 +1,6 @@
 import init, { create_engine, type EngineHandle } from "./generated/voxels.js";
 import type { FromWorker, InitMessage, ToWorker } from "./protocol.ts";
+import { disposeWorkerEngine } from "./worker-lifecycle.ts";
 
 const scope = self as unknown as {
   postMessage(message: FromWorker): void;
@@ -8,6 +9,7 @@ const scope = self as unknown as {
 };
 
 let handle: EngineHandle | null = null;
+let booting: Promise<EngineHandle> | null = null;
 let disposed = false;
 let cursorMode = false;
 const pending: Exclude<ToWorker, InitMessage>[] = [];
@@ -45,42 +47,49 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
       {
         const engine = handle;
         handle = null;
-        void (async () => {
-          await engine?.destroy();
-          scope.close();
-        })();
+        const pendingBoot = booting;
+        booting = null;
+        void disposeWorkerEngine(engine, pendingBoot, () => scope.close()).catch((error: unknown) =>
+          console.error(`[voxels] engine shutdown failed: ${String(error)}`),
+        );
       }
       break;
   }
 }
 
-async function boot(message: InitMessage): Promise<void> {
+async function boot(message: InitMessage): Promise<EngineHandle> {
   await init();
-  const engine = await create_engine(
+  return create_engine(
     message.canvas,
     message.cssWidth,
     message.cssHeight,
     message.dpr,
     message.reducedMotion,
   );
-  if (disposed) {
-    await engine.destroy();
-    return;
-  }
-  handle = engine;
-  for (const queued of pending.splice(0)) dispatch(queued);
 }
 
 scope.onmessage = (event) => {
   const message = event.data;
   if (disposed) return;
   if (message.kind === "init") {
-    void boot(message).catch((error: unknown) => {
-      disposed = true;
-      pending.length = 0;
-      scope.postMessage({ kind: "error", message: String(error) });
-      scope.close();
-    });
+    const request = boot(message);
+    booting = request;
+    void request
+      .then((engine) => {
+        if (booting === request) booting = null;
+        // Boot-time teardown awaits this same engine and owns its destruction.
+        if (disposed) return;
+        handle = engine;
+        for (const queued of pending.splice(0)) dispatch(queued);
+      })
+      .catch((error: unknown) => {
+        if (booting === request) booting = null;
+        if (disposed) return;
+        disposed = true;
+        pending.length = 0;
+        scope.postMessage({ kind: "error", message: String(error) });
+        scope.close();
+      });
   } else if (!handle && message.kind !== "destroy") {
     pending.push(message);
   } else {
