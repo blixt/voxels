@@ -128,7 +128,10 @@ impl SurfaceRevisionCache {
         if !self.accepts(coord, revision) {
             return false;
         }
-        let _ = self.ensure_requested(coord);
+        // A host may finish work at a revision newer than the one that originally requested it.
+        // Advance the request marker too, otherwise a later completion for the older request would
+        // still be accepted and could replace this newer resident tile.
+        self.request(coord, revision);
         self.resident.insert(coord, revision);
         true
     }
@@ -206,6 +209,19 @@ mod tests {
     }
 
     #[test]
+    fn newer_completion_advances_the_request_and_cannot_be_overwritten() {
+        let mut cache = SurfaceRevisionCache::new();
+        let coord = tile(11);
+        let requested = cache.ensure_requested(coord);
+        let newer = requested + 1;
+
+        assert!(cache.commit(coord, newer));
+        assert_eq!(cache.requested_revision(coord), Some(newer));
+        assert!(!cache.commit(coord, requested));
+        assert_eq!(cache.resident_revision(coord), Some(newer));
+    }
+
+    #[test]
     fn unrequested_tile_rejects_a_revision_older_than_the_current_epoch() {
         let mut cache = SurfaceRevisionCache::new();
         let coord = tile(9);
@@ -275,5 +291,18 @@ mod tests {
         assert!(!cache.commit(coord, final_pre_wrap));
         assert!(cache.commit(coord, wrapped));
         assert!(cache.is_current(coord));
+    }
+
+    #[test]
+    fn newer_wrapped_completion_cannot_be_overwritten_by_pre_wrap_work() {
+        let mut cache = SurfaceRevisionCache::new();
+        let coord = tile(12);
+        cache.epoch = u64::MAX;
+        let requested = cache.ensure_requested(coord);
+
+        assert!(cache.commit(coord, 1));
+        assert_eq!(cache.requested_revision(coord), Some(1));
+        assert!(!cache.commit(coord, requested));
+        assert_eq!(cache.resident_revision(coord), Some(1));
     }
 }
