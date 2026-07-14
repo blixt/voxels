@@ -1,6 +1,6 @@
 import { createServer as createNetServer } from "node:net";
 
-export const SNAPSHOT_SCHEMA_VERSION = 16;
+export const SNAPSHOT_SCHEMA_VERSION = 17;
 
 export const SNAPSHOT = Object.freeze({
   cameraX: 0,
@@ -88,9 +88,12 @@ export const SNAPSHOT = Object.freeze({
   portalActiveChunks: 95,
   portalActiveColumns: 96,
   unreachablePortalActive: 97,
-  schemaVersion: 98,
-  sampleCount: 99,
-  droppedSamples: 100,
+  remoteAvatars: 98,
+  avatarParts: 99,
+  avatarDrawCalls: 100,
+  schemaVersion: 101,
+  sampleCount: 102,
+  droppedSamples: 103,
 });
 
 export function assertSnapshotSchema(snapshot) {

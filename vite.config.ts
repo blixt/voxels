@@ -178,6 +178,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-performance.mjs --portals",
         cache: false,
       },
+      "test:multiplayer-browser": {
+        command: "node scripts/browser-multiplayer.mjs",
+        cache: false,
+      },
       "profile:portal-edits": {
         command: "node scripts/browser-performance.mjs --portal-edits",
         cache: false,

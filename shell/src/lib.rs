@@ -41,7 +41,6 @@ mod web {
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
-    use js_sys::Float32Array;
     use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::rc::Rc;
@@ -73,7 +72,7 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 16.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 17.0;
 
     #[derive(Clone, Copy, Debug)]
     struct EngineConfig {
@@ -460,9 +459,9 @@ mod web {
                         ));
                     }
                     Ok(false) => self.enclosure.set(EnclosureSample::OPEN),
-                    Err(error) => log_gpu_error(&format!(
-                        "enclosure surface probe failed; retaining prior sample: {error}"
-                    )),
+                    Err(error) => web_sys::console::warn_1(&JsValue::from_str(&format!(
+                        "enclosure surface probe deferred; retaining prior sample: {error}"
+                    ))),
                 }
                 self.last_enclosure_probe.set(time);
                 self.enclosure_probe_microseconds
@@ -1623,7 +1622,7 @@ mod web {
             }
         }
 
-        pub fn snapshot(&self) -> Float32Array {
+        pub fn snapshot(&self) -> Vec<f32> {
             let mut values = Vec::new();
             if let Some(engine) = self.engine.as_ref() {
                 let camera = engine.camera.borrow();
@@ -1788,11 +1787,14 @@ mod web {
                     portal_active.len() as f32,
                     portal_active_columns.len() as f32,
                     unreachable_portal_active as f32,
+                    render.remote_avatars as f32,
+                    render.avatar_parts as f32,
+                    render.avatar_draw_calls as f32,
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
             }
-            Float32Array::from(values.as_slice())
+            values
         }
 
         pub async fn destroy(&mut self) {

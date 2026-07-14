@@ -24,7 +24,7 @@ export interface InitOutput {
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => number;
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;
     readonly enginehandle_set_reduced_motion: (a: number, b: number) => void;
-    readonly enginehandle_snapshot: (a: number) => any;
+    readonly enginehandle_snapshot: (a: number) => [number, number];
     readonly enginehandle_start_profile: (a: number, b: number) => number;
     readonly rust_sqlite_wasm_abort: () => void;
     readonly rust_sqlite_wasm_assert_fail: (a: number, b: number, c: number, d: number) => void;

@@ -11,7 +11,7 @@ import {
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed|landmark tour/i;
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 101;
+const FRAME_SAMPLE_START = 104;
 
 function percentile(values, fraction) {
   if (values.length === 0) return 0;
