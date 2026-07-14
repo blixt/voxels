@@ -14,12 +14,12 @@ use std::task::{Context, Poll, Waker};
 use voxels_client_config::WorldTransportConfig;
 use voxels_runtime::{WorkStage, WorkTicket};
 use voxels_world::protocol::{
-    self, ChunkBatchRequest, ChunkBatchResult, OpenWorld, PlayerIdentity, SurfaceTileBatchRequest,
-    SurfaceTileBatchResult, WorldCapabilities, WorldOpened,
+    self, ChunkBatchRequest, ChunkBatchResult, EditCommand, EditCommit, OpenWorld, PlayerIdentity,
+    SurfaceTileBatchRequest, SurfaceTileBatchResult, WorldCapabilities, WorldOpened,
 };
 use voxels_world::{
-    ChunkCoord, ChunkSnapshot, SurfaceTileCoord, WorldManifestHash, WorldProductPriority,
-    WorldSourceError, WorldSourceIdentityHash,
+    ChunkCoord, ChunkSnapshot, Material, SurfaceTileCoord, VoxelCoord, WorldManifestHash,
+    WorldProductPriority, WorldSourceError, WorldSourceIdentityHash,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -102,6 +102,13 @@ pub struct RemoteSurfaceCompletion {
     pub request_id: RemoteRequestId,
     pub tickets: Vec<RemoteSurfaceTicket>,
     pub result: Result<SurfaceTileBatchResult, RemoteWorldError>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RemoteEditEvent {
+    Commit(EditCommit),
+    ResyncRequired { revision: u64 },
+    Rejected { operation_id: u64, message: String },
 }
 
 #[derive(Clone)]
@@ -249,6 +256,18 @@ impl RemoteWorldClient {
             .collect()
     }
 
+    pub fn submit_edit(
+        &self,
+        coord: VoxelCoord,
+        material: Option<Material>,
+    ) -> Result<RemoteRequestId, RemoteWorldError> {
+        self.inner.send_edit(coord, material)
+    }
+
+    pub fn drain_edit_events(&self) -> Vec<RemoteEditEvent> {
+        self.inner.edit_events.borrow_mut().drain(..).collect()
+    }
+
     pub fn close(&self) {
         self.inner.close();
     }
@@ -276,6 +295,8 @@ struct RemoteInner {
     pending: RefCell<BTreeMap<RemoteRequestId, PendingBatch>>,
     completions: RefCell<VecDeque<RemoteChunkCompletion>>,
     surface_completions: RefCell<VecDeque<RemoteSurfaceCompletion>>,
+    pending_edits: RefCell<BTreeMap<u64, EditCommand>>,
+    edit_events: RefCell<VecDeque<RemoteEditEvent>>,
     send_paused: Cell<bool>,
     reconnect_attempts: Cell<u32>,
     terminal_error: RefCell<Option<RemoteWorldError>>,
@@ -319,6 +340,8 @@ impl RemoteInner {
             pending: RefCell::new(BTreeMap::new()),
             completions: RefCell::new(VecDeque::new()),
             surface_completions: RefCell::new(VecDeque::new()),
+            pending_edits: RefCell::new(BTreeMap::new()),
+            edit_events: RefCell::new(VecDeque::new()),
             send_paused: Cell::new(false),
             reconnect_attempts: Cell::new(0),
             terminal_error: RefCell::new(None),
@@ -480,6 +503,10 @@ impl RemoteInner {
             self.handle_chunk_result(generation, &bytes);
         } else if kind == protocol::surface_tile_batch_result_kind() {
             self.handle_surface_result(generation, &bytes);
+        } else if kind == protocol::edit_commit_kind() {
+            self.handle_edit_commit(generation, &bytes);
+        } else if kind == protocol::resync_required_kind() {
+            self.handle_resync_required(generation, &bytes);
         } else if kind == protocol::error_kind() {
             self.handle_server_error(generation, &bytes);
         } else {
@@ -523,6 +550,9 @@ impl RemoteInner {
             || !opened
                 .capabilities
                 .contains(WorldCapabilities::PLAYER_PRESENCE)
+            || !opened
+                .capabilities
+                .contains(WorldCapabilities::SERVER_EDITS)
         {
             self.disconnect(
                 generation,
@@ -560,6 +590,30 @@ impl RemoteInner {
         self.state.set(RemoteConnectionState::Open);
         self.reconnect_attempts.set(0);
         self.send_paused.set(false);
+        let retry_frames = self
+            .pending_edits
+            .borrow()
+            .values()
+            .copied()
+            .map(protocol::encode_edit_command)
+            .collect::<Result<Vec<_>, _>>();
+        let retry_frames = match retry_frames {
+            Ok(frames) => frames,
+            Err(error) => {
+                self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()));
+                return;
+            }
+        };
+        let Some(socket) = self.socket.borrow().clone() else {
+            self.disconnect(generation, RemoteWorldError::NotOpen);
+            return;
+        };
+        for frame in retry_frames {
+            if let Err(error) = socket.send_with_u8_array(&frame) {
+                self.disconnect(generation, RemoteWorldError::Socket(js_reason(error)));
+                return;
+            }
+        }
         for waiter in self.open_waiters.borrow_mut().drain(..) {
             waiter.send(Ok(opened.clone()));
         }
@@ -647,6 +701,63 @@ impl RemoteInner {
         self.finish_surface_request(result.request_id, validation.map(|()| result));
     }
 
+    fn handle_edit_commit(self: &Rc<Self>, generation: u64, bytes: &[u8]) {
+        if self.state.get() != RemoteConnectionState::Open {
+            self.disconnect(
+                generation,
+                RemoteWorldError::Protocol("edit commit arrived before WorldOpened".to_owned()),
+            );
+            return;
+        }
+        let commit = match protocol::decode_edit_commit(bytes) {
+            Ok(commit) => commit,
+            Err(error) => {
+                self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()));
+                return;
+            }
+        };
+        let matches_pending = self
+            .pending_edits
+            .borrow()
+            .get(&commit.operation_id)
+            .is_some_and(|command| {
+                self.opened
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|opened| opened.connection_id == commit.editor_connection_id)
+                    && command.coord == commit.coord
+                    && command.material == commit.material
+            });
+        if matches_pending {
+            self.pending_edits.borrow_mut().remove(&commit.operation_id);
+        }
+        self.edit_events
+            .borrow_mut()
+            .push_back(RemoteEditEvent::Commit(commit));
+    }
+
+    fn handle_resync_required(self: &Rc<Self>, generation: u64, bytes: &[u8]) {
+        if self.state.get() != RemoteConnectionState::Open {
+            self.disconnect(
+                generation,
+                RemoteWorldError::Protocol("edit resync arrived before WorldOpened".to_owned()),
+            );
+            return;
+        }
+        let resync = match protocol::decode_resync_required(bytes) {
+            Ok(resync) => resync,
+            Err(error) => {
+                self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()));
+                return;
+            }
+        };
+        self.edit_events
+            .borrow_mut()
+            .push_back(RemoteEditEvent::ResyncRequired {
+                revision: resync.revision,
+            });
+    }
+
     fn handle_server_error(self: &Rc<Self>, generation: u64, bytes: &[u8]) {
         let (request_id, message) = match protocol::decode_error(bytes) {
             Ok(error) => error,
@@ -659,7 +770,50 @@ impl RemoteInner {
             self.disconnect(generation, RemoteWorldError::Server(message));
         } else if self.pending.borrow().contains_key(&request_id) {
             self.finish_pending_error(request_id, RemoteWorldError::Server(message));
+        } else if self
+            .pending_edits
+            .borrow_mut()
+            .remove(&request_id)
+            .is_some()
+        {
+            self.edit_events
+                .borrow_mut()
+                .push_back(RemoteEditEvent::Rejected {
+                    operation_id: request_id,
+                    message,
+                });
         }
+    }
+
+    fn send_edit(
+        self: &Rc<Self>,
+        coord: VoxelCoord,
+        material: Option<Material>,
+    ) -> Result<RemoteRequestId, RemoteWorldError> {
+        if self.state.get() != RemoteConnectionState::Open {
+            return Err(self.terminal_error().unwrap_or(RemoteWorldError::NotOpen));
+        }
+        let Some(socket) = self.socket.borrow().clone() else {
+            return Err(RemoteWorldError::NotOpen);
+        };
+        if socket.buffered_amount() >= self.config.buffered_amount_high_water_bytes {
+            return Err(RemoteWorldError::Backpressured);
+        }
+        let operation_id = self.allocate_request_id()?;
+        let command = EditCommand {
+            operation_id,
+            coord,
+            material,
+        };
+        let frame = protocol::encode_edit_command(command)
+            .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
+        socket
+            .send_with_u8_array(&frame)
+            .map_err(|error| RemoteWorldError::Socket(js_reason(error)))?;
+        self.pending_edits
+            .borrow_mut()
+            .insert(operation_id, command);
+        Ok(operation_id)
     }
 
     fn send_chunk_request(
@@ -805,7 +959,9 @@ impl RemoteInner {
         let start = self.next_request_id.get().max(1);
         let mut candidate = start;
         loop {
-            if !self.pending.borrow().contains_key(&candidate) {
+            if !self.pending.borrow().contains_key(&candidate)
+                && !self.pending_edits.borrow().contains_key(&candidate)
+            {
                 self.next_request_id.set(candidate.wrapping_add(1).max(1));
                 return Ok(candidate);
             }
@@ -959,6 +1115,7 @@ impl RemoteInner {
 
     fn fail_terminal(&self, error: RemoteWorldError) {
         self.state.set(RemoteConnectionState::Failed);
+        self.pending_edits.borrow_mut().clear();
         *self.terminal_error.borrow_mut() = Some(error.clone());
         for waiter in self.open_waiters.borrow_mut().drain(..) {
             waiter.send(Err(error.clone()));
@@ -986,6 +1143,8 @@ impl RemoteInner {
         }
         self.opened.borrow_mut().take();
         self.fail_pending(RemoteWorldError::Closed);
+        self.pending_edits.borrow_mut().clear();
+        self.edit_events.borrow_mut().clear();
         *self.terminal_error.borrow_mut() = Some(RemoteWorldError::Closed);
         for waiter in self.open_waiters.borrow_mut().drain(..) {
             waiter.send(Err(RemoteWorldError::Closed));

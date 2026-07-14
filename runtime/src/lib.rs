@@ -7,7 +7,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use voxels_world::{CHUNK_EDGE, ChunkCoord, EditMap, VOXEL_SIZE_METRES, VoxelCoord};
+use voxels_world::{
+    CHUNK_EDGE, ChunkCoord, EditMap, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
+};
 
 mod surface;
 pub use surface::{SurfaceFocusAction, SurfaceRevisionCache, SurfaceRevisionStatus};
@@ -27,6 +29,66 @@ const LATENCY_HISTOGRAM_BUCKETS: usize = 256;
 /// straddles `u64::MAX` ordered without mistaking a pre-wrap completion for current geometry.
 pub const fn revision_satisfies(candidate: u64, requested: u64) -> bool {
     candidate == requested || candidate.wrapping_sub(requested) < (1u64 << 63)
+}
+
+/// Client-side floors for server-authored edit products. Different world connections may finish
+/// concurrent commands out of global revision order, so voxel values and product floors advance
+/// independently and never regress when an older commit arrives later.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AuthoritativeEditRevisions {
+    voxels: BTreeMap<VoxelCoord, u64>,
+    chunks: BTreeMap<ChunkCoord, u64>,
+    surfaces: BTreeMap<SurfaceTileCoord, u64>,
+}
+
+impl AuthoritativeEditRevisions {
+    /// Records all invalidation floors and returns whether this commit owns the newest value for
+    /// its edited voxel. Callers still invalidate products for `false`: an older commit can name a
+    /// derived product that a newer same-voxel commit did not need to rebuild.
+    pub fn observe_commit(
+        &mut self,
+        coord: VoxelCoord,
+        revision: u64,
+        affected_chunks: &[ChunkCoord],
+        affected_surfaces: &[SurfaceTileCoord],
+    ) -> bool {
+        let apply_value = advance_revision(&mut self.voxels, coord, revision);
+        for &chunk in affected_chunks {
+            advance_revision(&mut self.chunks, chunk, revision);
+        }
+        for &surface in affected_surfaces {
+            advance_revision(&mut self.surfaces, surface, revision);
+        }
+        apply_value
+    }
+
+    pub fn chunk_floor(&self, coord: ChunkCoord) -> u64 {
+        self.chunks.get(&coord).copied().unwrap_or(1)
+    }
+
+    pub fn surface_floor(&self, coord: SurfaceTileCoord) -> u64 {
+        self.surfaces.get(&coord).copied().unwrap_or(1)
+    }
+
+    pub fn clear(&mut self) {
+        self.voxels.clear();
+        self.chunks.clear();
+        self.surfaces.clear();
+    }
+}
+
+fn advance_revision<K: Ord>(revisions: &mut BTreeMap<K, u64>, key: K, candidate: u64) -> bool {
+    match revisions.get_mut(&key) {
+        Some(current) if candidate != *current && revision_satisfies(candidate, *current) => {
+            *current = candidate;
+            true
+        }
+        Some(_) => false,
+        None => {
+            revisions.insert(key, candidate);
+            true
+        }
+    }
 }
 
 type CoordKey = (i32, i32, i32);
@@ -557,6 +619,28 @@ impl StreamScheduler {
                 | State::Uploading(_)
                 | State::Resident => State::QueuedMeshing,
             };
+        }
+        report
+    }
+
+    /// Invalidates every tracked canonical product after an incremental change-stream gap. Unlike
+    /// a normal edit, the missing coordinates are unknown, so every product must return to source
+    /// generation under a fresh ticket revision.
+    pub fn invalidate_all_generation(&mut self) -> DirtyReport {
+        let mut report = DirtyReport::default();
+        for entry in self.entries.values_mut() {
+            report.affected_chunks.push(entry.coord);
+            if let Some(ticket) = entry.state.ticket() {
+                report.invalidated_tickets.push(ticket);
+            }
+            if entry.state == State::Resident {
+                report.previously_resident.push(entry.coord);
+            }
+            if entry.ever_resident {
+                entry.remesh_started_frame = Some(self.frame);
+            }
+            entry.revision = increment_nonzero(entry.revision);
+            entry.state = State::QueuedGeneration;
         }
         report
     }
@@ -1364,6 +1448,31 @@ mod tests {
         assert!(!revision_satisfies(7, 8));
         assert!(revision_satisfies(1, u64::MAX));
         assert!(!revision_satisfies(u64::MAX, 1));
+    }
+
+    #[test]
+    fn authoritative_edit_floors_do_not_regress_on_out_of_order_commits() {
+        let voxel = VoxelCoord::new(7, 8, 9);
+        let chunk = voxel.chunk();
+        let surface =
+            SurfaceTileCoord::containing(voxels_world::SurfaceLodLevel::Stride16, voxel.x, voxel.z);
+        let mut revisions = AuthoritativeEditRevisions::default();
+
+        assert!(revisions.observe_commit(voxel, 12, &[chunk], &[surface]));
+        assert_eq!(revisions.chunk_floor(chunk), 12);
+        assert_eq!(revisions.surface_floor(surface), 12);
+
+        assert!(!revisions.observe_commit(voxel, 11, &[chunk], &[surface]));
+        assert_eq!(revisions.chunk_floor(chunk), 12);
+        assert_eq!(revisions.surface_floor(surface), 12);
+        assert!(!revisions.observe_commit(voxel, 12, &[chunk], &[surface]));
+
+        assert!(revisions.observe_commit(voxel, 13, &[chunk], &[surface]));
+        assert_eq!(revisions.chunk_floor(chunk), 13);
+        assert_eq!(revisions.surface_floor(surface), 13);
+        revisions.clear();
+        assert_eq!(revisions.chunk_floor(chunk), 1);
+        assert_eq!(revisions.surface_floor(surface), 1);
     }
 
     #[test]

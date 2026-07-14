@@ -36,8 +36,8 @@ mod web {
     use crate::persist::{PersistenceConfig, PersistencePlayer, PersistenceWorld, Store};
     use crate::presence_remote::RemotePresenceClient;
     use crate::remote::{
-        RemoteChunkCompletion, RemoteSurfaceCompletion, RemoteSurfaceTicket, RemoteWorldClient,
-        RemoteWorldError,
+        RemoteChunkCompletion, RemoteEditEvent, RemoteSurfaceCompletion, RemoteSurfaceTicket,
+        RemoteWorldClient, RemoteWorldError,
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
@@ -57,8 +57,8 @@ mod web {
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::LiveStats;
     use voxels_runtime::{
-        ChunkState, CompletionStatus, FrameBudget, StreamConfig, StreamScheduler,
-        SurfaceFocusAction, SurfaceRevisionCache, revision_satisfies,
+        AuthoritativeEditRevisions, ChunkState, CompletionStatus, FrameBudget, StreamConfig,
+        StreamScheduler, SurfaceFocusAction, SurfaceRevisionCache, revision_satisfies,
     };
     use voxels_world::protocol::{BrowserUserId, PlayerId, PlayerIdentity};
     use voxels_world::{
@@ -254,7 +254,7 @@ mod web {
         source_identity_hash: WorldSourceIdentityHash,
         remote_environment: (AtmosphereSample, SurfaceRegion),
         edits: RefCell<EditMap>,
-        edit_source_materials: RefCell<BTreeMap<VoxelCoord, Material>>,
+        edit_revisions: RefCell<AuthoritativeEditRevisions>,
         scheduler: RefCell<StreamScheduler>,
         chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
         chunk_halos: RefCell<BTreeMap<(i32, i32, i32), MeshingHalo>>,
@@ -263,6 +263,7 @@ mod web {
         surface_active_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_revisions: RefCell<SurfaceRevisionCache>,
+        surface_accepted_edit_revisions: RefCell<BTreeMap<SurfaceTileCoord, u64>>,
         surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
         surface_in_flight: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
@@ -369,7 +370,7 @@ mod web {
         fn frame(&self, time: f64) {
             let performance = self.scope.performance();
             let cpu_start = performance_now(performance.as_ref());
-            self.apply_remote_edits();
+            self.apply_server_edits();
             let last = self.last_time.replace(time);
             let dt = if last <= 0.0 {
                 1.0 / 60.0
@@ -704,17 +705,14 @@ mod web {
                     let _ = self.scheduler.borrow_mut().retry(ticket);
                     continue;
                 };
-                let edits = self.edits.borrow();
                 let mut halo_contract_valid = true;
                 let mesh = mesh_chunk(&chunk, |x, y, z| {
-                    let coord = VoxelCoord::new(x, y, z);
-                    let Some(generated) = halo.sample_world(x, y, z) else {
+                    let Some(material) = halo.sample_world(x, y, z) else {
                         halo_contract_valid = false;
                         return Material::Stone;
                     };
-                    edits.resolve_generated(coord, generated)
+                    material
                 });
-                drop(edits);
                 if !halo_contract_valid {
                     let _ = self.scheduler.borrow_mut().retry(ticket);
                     web_sys::console::error_1(&JsValue::from_str(
@@ -798,7 +796,9 @@ mod web {
                 };
                 let item = items.remove(index);
                 match item.result {
-                    Ok(snapshot) => self.accept_generated_chunk(ticket, snapshot),
+                    Ok(snapshot) => {
+                        self.accept_generated_chunk(ticket, item.edit_revision, snapshot)
+                    }
                     Err(voxels_world::WorldSourceError::SourceCoverageUnavailable) => {
                         // This source owns finite coverage. Leaving the exact scheduler capability
                         // in flight forms a conservative collision boundary without retry thrash;
@@ -824,12 +824,8 @@ mod web {
                 self.surface_in_flight.borrow_mut().remove(&ticket.coord);
             }
             let Ok(result) = completion.result else {
-                let resident = self.surface_resident.borrow();
-                let mut queue = self.surface_queue.borrow_mut();
                 for ticket in completion.tickets {
-                    if !resident.contains(&ticket.coord) {
-                        queue.push_front(ticket.coord);
-                    }
+                    self.enqueue_surface_front(ticket.coord);
                 }
                 return;
             };
@@ -840,10 +836,11 @@ mod web {
             let mut items = result.items;
             for ticket in completion.tickets {
                 let Some(index) = items.iter().position(|item| item.coord == ticket.coord) else {
-                    self.surface_queue.borrow_mut().push_front(ticket.coord);
+                    self.enqueue_surface_front(ticket.coord);
                     continue;
                 };
                 let item = items.remove(index);
+                let edit_revision = item.edit_revision;
                 let snapshot = match item.result {
                     Ok(snapshot) => snapshot,
                     Err(voxels_world::WorldSourceError::SourceCoverageUnavailable) => continue,
@@ -852,15 +849,18 @@ mod web {
                             "world service could not generate surface tile {:?}: {error}",
                             ticket.coord
                         ));
-                        self.surface_queue.borrow_mut().push_front(ticket.coord);
+                        self.enqueue_surface_front(ticket.coord);
                         continue;
                     }
                 };
-                if !self
-                    .surface_revisions
-                    .borrow()
-                    .accepts(ticket.coord, ticket.revision)
+                let server_floor = self.edit_revisions.borrow().surface_floor(ticket.coord);
+                if !revision_satisfies(edit_revision, server_floor)
+                    || !self
+                        .surface_revisions
+                        .borrow()
+                        .accepts(ticket.coord, ticket.revision)
                 {
+                    self.enqueue_surface_front(ticket.coord);
                     continue;
                 }
                 if self
@@ -874,17 +874,30 @@ mod web {
                         .borrow_mut()
                         .commit(ticket.coord, ticket.revision);
                     debug_assert!(committed, "uploaded remote surface revision became stale");
+                    self.surface_accepted_edit_revisions
+                        .borrow_mut()
+                        .insert(ticket.coord, edit_revision);
                     self.surface_dirty.borrow_mut().remove(&ticket.coord);
                 } else {
-                    self.surface_queue.borrow_mut().push_front(ticket.coord);
+                    self.enqueue_surface_front(ticket.coord);
                 }
             }
+        }
+
+        fn enqueue_surface_front(&self, coord: SurfaceTileCoord) {
+            if self.surface_in_flight.borrow().contains(&coord)
+                || self.surface_queue.borrow().contains(&coord)
+            {
+                return;
+            }
+            self.surface_queue.borrow_mut().push_front(coord);
         }
 
         fn accept_generated_chunk(
             &self,
             ticket: voxels_runtime::WorkTicket,
-            mut snapshot: voxels_world::ChunkSnapshot,
+            edit_revision: u64,
+            snapshot: voxels_world::ChunkSnapshot,
         ) {
             if snapshot.source_identity_hash != self.source_identity_hash()
                 || snapshot.chunk.coord() != ticket.coord
@@ -893,12 +906,11 @@ mod web {
                 let _ = self.scheduler.borrow_mut().retry(ticket);
                 return;
             }
-            let edits = self.edits.borrow();
-            self.edit_source_materials
-                .borrow_mut()
-                .extend(edits.source_values_for_overrides(&snapshot.chunk));
-            edits.apply_to_chunk(&mut snapshot.chunk);
-            drop(edits);
+            let server_floor = self.edit_revisions.borrow().chunk_floor(ticket.coord);
+            if !revision_satisfies(edit_revision, server_floor) {
+                let _ = self.scheduler.borrow_mut().retry(ticket);
+                return;
+            }
             // Network completions can arrive after focus/edit invalidation. The scheduler
             // capability is the admission check; stale bytes never attach to a newer revision.
             if self.scheduler.borrow_mut().complete(ticket) != CompletionStatus::Accepted {
@@ -1070,11 +1082,13 @@ mod web {
                 if !evicted.is_empty() {
                     let mut resident = self.surface_resident.borrow_mut();
                     let mut revisions = self.surface_revisions.borrow_mut();
+                    let mut accepted = self.surface_accepted_edit_revisions.borrow_mut();
                     let mut dirty = self.surface_dirty.borrow_mut();
                     let mut renderer = self.renderer.borrow_mut();
                     for coord in evicted {
                         resident.remove(&coord);
                         revisions.evict(coord);
+                        accepted.remove(&coord);
                         dirty.remove(&coord);
                         renderer.remove_surface_tile(coord);
                     }
@@ -1136,7 +1150,8 @@ mod web {
                     break;
                 };
                 if self.surface_in_flight.borrow().contains(&coord)
-                    || self.surface_resident.borrow().contains(&coord)
+                    || (self.surface_resident.borrow().contains(&coord)
+                        && !self.surface_dirty.borrow().contains(&coord))
                 {
                     continue;
                 }
@@ -1326,142 +1341,67 @@ mod web {
                 return;
             };
 
-            let Some(generated) = self.source_material_for_edit(target) else {
-                log_gpu_error(
-                    "edit refused: authoritative source material is not prepared for the target",
-                );
-                return;
-            };
-            let durable = (material != generated).then_some(material);
-            let _ = self.submit_local_edit(target, durable);
+            // The server owns sparse-source compaction. The browser submits the intended canonical
+            // material and never guesses whether an existing voxel came from source terrain or a
+            // prior player edit.
+            let _ = self.submit_local_edit(target, Some(material));
         }
 
-        fn apply_remote_edits(&self) {
-            let edits = match self.store.borrow().drain_remote_edits() {
-                Ok(edits) => edits,
-                Err(error) => {
-                    web_sys::console::error_1(&error);
-                    return;
-                }
-            };
-            for (coord, material) in edits {
-                // The persistence leader echoes every commit in its authoritative order, including
-                // this tab's optimistic writes. A matching echo is free; a differing echo means an
-                // intervening remote write committed first and must be corrected locally.
-                if self.edits.borrow().override_at(coord) == material {
-                    continue;
-                }
-                if let Err(error) = self.apply_durable_edit(coord, material) {
-                    log_gpu_error(&format!("remote edit could not be applied: {error}"));
+        fn apply_server_edits(&self) {
+            for event in self.remote.drain_edit_events() {
+                match event {
+                    RemoteEditEvent::Commit(commit) => {
+                        self.apply_durable_edit(
+                            commit.coord,
+                            commit.material,
+                            commit.revision,
+                            &commit.affected_chunks,
+                            &commit.affected_surface_tiles,
+                        );
+                    }
+                    RemoteEditEvent::ResyncRequired { revision } => {
+                        self.resynchronize_world_products(revision);
+                    }
+                    RemoteEditEvent::Rejected {
+                        operation_id,
+                        message,
+                    } => {
+                        log_gpu_error(&format!(
+                            "server rejected edit operation {operation_id}: {message}"
+                        ));
+                    }
                 }
             }
         }
 
         fn submit_local_edit(&self, target: VoxelCoord, durable: Option<Material>) -> [usize; 2] {
-            if let Err(error) = self.prepare_edit_source(target, durable) {
-                log_gpu_error(&format!("edit refused: {error}"));
-                return [0, 0];
-            }
-            let performance = self.scope.performance();
-            let started_ms = performance_now(performance.as_ref());
-            if let Err(error) = self.store.borrow().save_edit(target, durable) {
-                web_sys::console::error_1(&error);
-            }
-            let requirements = match self.apply_durable_edit(target, durable) {
-                Ok(requirements) => requirements,
+            match self.remote.submit_edit(target, durable) {
+                Ok(_) => [1, 0],
                 Err(error) => {
-                    log_gpu_error(&format!("prepared edit could not be applied: {error}"));
-                    return [0, 0];
+                    log_gpu_error(&format!("submit authoritative edit: {error}"));
+                    [0, 0]
                 }
-            };
-            let counts = [requirements.canonical.len(), requirements.surface.len()];
-            let mut trackers = self.edit_trackers.borrow_mut();
-            if let Some(index) = trackers.iter().position(|tracker| tracker.target == target) {
-                trackers.remove(index);
             }
-            if trackers.len() == self.config.max_edit_trackers {
-                trackers.pop_front();
-            }
-            trackers.push_back(EditTracker {
-                target,
-                started_ms,
-                requirements,
-            });
-            counts
-        }
-
-        fn source_material_for_edit(&self, target: VoxelCoord) -> Option<Material> {
-            self.edit_source_materials
-                .borrow()
-                .get(&target)
-                .copied()
-                .or_else(|| {
-                    self.edits
-                        .borrow()
-                        .override_at(target)
-                        .is_none()
-                        .then(|| resident_material(&self.chunks.borrow(), target))
-                        .flatten()
-                })
-        }
-
-        fn prepare_edit_source(
-            &self,
-            target: VoxelCoord,
-            durable: Option<Material>,
-        ) -> Result<(), String> {
-            let previous = self.edits.borrow().override_at(target);
-            let resident = resident_material(&self.chunks.borrow(), target);
-            let cached = self.edit_source_materials.borrow().contains_key(&target);
-            if !cached && previous.is_some() && resident.is_some() {
-                return Err(
-                    "resident edited voxel has no retained authoritative source value".to_owned(),
-                );
-            }
-            if !cached
-                && previous.is_none()
-                && durable.is_some()
-                && let Some(source_material) = resident
-            {
-                self.edit_source_materials
-                    .borrow_mut()
-                    .insert(target, source_material);
-            }
-            Ok(())
         }
 
         fn apply_durable_edit(
             &self,
             target: VoxelCoord,
             durable: Option<Material>,
-        ) -> Result<EditRequirements, String> {
-            self.prepare_edit_source(target, durable)?;
-            let previous = self.edits.borrow().override_at(target);
-            let resident_source = self
-                .edit_source_materials
-                .borrow()
-                .get(&target)
-                .copied()
-                .or_else(|| {
-                    previous
-                        .is_none()
-                        .then(|| resident_material(&self.chunks.borrow(), target))
-                        .flatten()
-                });
-            self.edits
-                .borrow_mut()
-                .replace_durable_override(target, durable);
-            let mut chunks = self.chunks.borrow_mut();
-            if let Some(chunk) = chunks.get_mut(&coord_key(target.chunk())) {
-                let material = durable.or(resident_source).ok_or_else(|| {
-                    "resident edit restoration has no authoritative source value".to_owned()
-                })?;
-                let [x, y, z] = target.local();
-                chunk.set(x, y, z, material);
-            }
-            drop(chunks);
-            if durable.is_none() {
-                self.edit_source_materials.borrow_mut().remove(&target);
+            server_revision: u64,
+            affected_chunks: &[ChunkCoord],
+            affected_surface_tiles: &[SurfaceTileCoord],
+        ) -> EditRequirements {
+            let apply_value = self.edit_revisions.borrow_mut().observe_commit(
+                target,
+                server_revision,
+                affected_chunks,
+                affected_surface_tiles,
+            );
+            if apply_value {
+                self.edits
+                    .borrow_mut()
+                    .replace_durable_override(target, durable);
             }
             let canonical = {
                 let mut scheduler = self.scheduler.borrow_mut();
@@ -1478,8 +1418,71 @@ mod web {
                     })
                     .collect()
             };
-            let surface = Vec::new();
-            Ok(EditRequirements { canonical, surface })
+            let surface_revision = if affected_surface_tiles.is_empty() {
+                self.surface_revisions.borrow().epoch()
+            } else {
+                self.surface_revisions.borrow_mut().begin_edit()
+            };
+            let mut surface = Vec::new();
+            for &coord in affected_surface_tiles {
+                if !self.surface_tile_relevant(coord)
+                    && !self.surface_resident.borrow().contains(&coord)
+                {
+                    continue;
+                }
+                self.surface_revisions
+                    .borrow_mut()
+                    .request(coord, surface_revision);
+                self.surface_dirty.borrow_mut().insert(coord);
+                self.enqueue_surface_front(coord);
+                surface.push(SurfaceRequirement {
+                    coord,
+                    revision: surface_revision,
+                });
+            }
+            let performance = self.scope.performance();
+            let started_ms = performance_now(performance.as_ref());
+            let requirements = EditRequirements { canonical, surface };
+            let mut trackers = self.edit_trackers.borrow_mut();
+            if let Some(index) = trackers.iter().position(|tracker| tracker.target == target) {
+                trackers.remove(index);
+            }
+            if trackers.len() == self.config.max_edit_trackers {
+                trackers.pop_front();
+            }
+            trackers.push_back(EditTracker {
+                target,
+                started_ms,
+                requirements: EditRequirements {
+                    canonical: requirements.canonical.clone(),
+                    surface: requirements.surface.clone(),
+                },
+            });
+            requirements
+        }
+
+        fn resynchronize_world_products(&self, revision: u64) {
+            log_gpu_error(&format!(
+                "edit stream overflowed at revision {revision}; reconciling retained world products"
+            ));
+            *self.edits.borrow_mut() = EditMap::default();
+            self.edit_revisions.borrow_mut().clear();
+            self.surface_accepted_edit_revisions.borrow_mut().clear();
+            self.scheduler.borrow_mut().invalidate_all_generation();
+            let replacement = self.surface_revisions.borrow_mut().begin_edit();
+            let retained = self
+                .surface_resident
+                .borrow()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>();
+            for coord in retained {
+                self.surface_revisions
+                    .borrow_mut()
+                    .request(coord, replacement);
+                self.surface_dirty.borrow_mut().insert(coord);
+                self.enqueue_surface_front(coord);
+            }
         }
 
         fn surface_tile_relevant(&self, coord: SurfaceTileCoord) -> bool {
@@ -1622,6 +1625,53 @@ mod web {
                     .borrow_mut()
                     .set_reduced_motion(reduced_motion);
             }
+        }
+
+        /// Deterministic browser-harness seam that submits through the same server-authoritative
+        /// path as pointer input. It does not mutate local world state optimistically.
+        pub fn submit_edit(&self, x: i32, y: i32, z: i32, material_id: u16) -> bool {
+            let Some(engine) = self.engine.as_ref() else {
+                return false;
+            };
+            let Some(material) = Material::from_id(material_id) else {
+                return false;
+            };
+            engine.submit_local_edit(VoxelCoord::new(x, y, z), Some(material))[0] == 1
+        }
+
+        /// Returns `[tile_x, tile_z, required_server_revision, accepted_server_revision,
+        /// resident, dirty]` for the tile containing one canonical voxel coordinate.
+        pub fn surface_edit_state(&self, stride: i32, x: i32, z: i32) -> Vec<f64> {
+            let Some(engine) = self.engine.as_ref() else {
+                return Vec::new();
+            };
+            let Some(level) = SurfaceLodLevel::from_stride_voxels(stride) else {
+                return Vec::new();
+            };
+            let coord = SurfaceTileCoord::containing(level, x, z);
+            let floor = engine.edit_revisions.borrow().surface_floor(coord);
+            let accepted = engine
+                .surface_accepted_edit_revisions
+                .borrow()
+                .get(&coord)
+                .copied()
+                .unwrap_or(0);
+            vec![
+                f64::from(coord.x),
+                f64::from(coord.z),
+                floor as f64,
+                accepted as f64,
+                if engine.surface_resident.borrow().contains(&coord) {
+                    1.0
+                } else {
+                    0.0
+                },
+                if engine.surface_dirty.borrow().contains(&coord) {
+                    1.0
+                } else {
+                    0.0
+                },
+            ]
         }
 
         pub fn snapshot(&self) -> Vec<f32> {
@@ -1951,7 +2001,7 @@ mod web {
             },
         )
         .await?;
-        let edits = store.load_edits()?;
+        let edits = EditMap::default();
         let spawn = opened.spawn;
         let spawn_surface = SurfaceSample {
             height: spawn.height,
@@ -2032,7 +2082,7 @@ mod web {
             source_identity_hash: opened.manifest.source_identity_hash(),
             remote_environment,
             edits: RefCell::new(edits),
-            edit_source_materials: RefCell::new(BTreeMap::new()),
+            edit_revisions: RefCell::new(AuthoritativeEditRevisions::default()),
             scheduler: RefCell::new(scheduler),
             chunks: RefCell::new(BTreeMap::new()),
             chunk_halos: RefCell::new(BTreeMap::new()),
@@ -2041,6 +2091,7 @@ mod web {
             surface_active_focus: Cell::new(None),
             surface_resident: RefCell::new(BTreeSet::new()),
             surface_revisions: RefCell::new(SurfaceRevisionCache::new()),
+            surface_accepted_edit_revisions: RefCell::new(BTreeMap::new()),
             surface_queue: RefCell::new(VecDeque::new()),
             surface_in_flight: RefCell::new(BTreeSet::new()),
             surface_dirty: RefCell::new(BTreeSet::new()),
