@@ -96,12 +96,12 @@ client.
 - The base stage uses the exact 58-component conditioning layout and the published `sigma=80` then
   `sigma=0.35` consistency passes. The decoder uses the first four latent bands and retains the
   fifth low-frequency band for signed-square-root elevation reconstruction.
-- The current finite experiment uses a uniform +400 m signed-square-root elevation control with an
-  elevation conditioning noise ratio of 0.05, while leaving climate controls at their training
-  means and published ratio 0.5. The global dataset mean is ocean-heavy, so this makes the finite
-  smoke tile exercise land generation without fabricating or offsetting the learned result. It
-  selects the highest-mean 4x4 coarse elevation window and then centres its 16x16 latent preview on
-  the highest learned low-frequency point. It performs the upstream
-  signed-square-root/Laplacian reconstruction in native Rust. Infinite overlap blending and the
-  upstream synthetic climate-map generator are intentionally still future fidelity work and are
-  part of the source identity when added.
+- The finite experiment uses coordinate-keyed, multi-octave continent and climate fields for the
+  five published coarse conditioning channels. This mirrors the role of upstream's synthetic map
+  without importing its Python, rasterio, or WorldClim preprocessing dependencies. Conditioning is
+  standardized with output channels `[0, 2, 3, 4, 5]`, matching upstream's elevation, temperature,
+  temperature seasonality, precipitation, and precipitation-variability mapping. The learned model
+  still owns the 30 m terrain. The provider selects the highest-mean 4x4 coarse land window and then
+  centres its 16x16 latent preview on the highest learned low-frequency point before performing the
+  signed-square-root/Laplacian reconstruction in native Rust. Infinite overlap blending remains
+  future work and is source-identity versioned when added.
