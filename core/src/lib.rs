@@ -292,9 +292,10 @@ impl InputState {
     }
 }
 
-/// The camera position is the player's eye position in metres. The collision capsule is approximated
-/// by an axis-aligned box because the world itself is axis-aligned and block edits need deterministic
-/// contact behavior.
+/// The camera position is the player's eye position in metres. Terrain collision uses a vertical
+/// cylinder: its round horizontal footprint avoids snagging the player on voxel corners, while its
+/// flat, voxel-aligned foot keeps stepping and block edits deterministic without a mesh-physics
+/// dependency.
 #[derive(Clone, Copy, Debug)]
 pub struct CameraState {
     pub position: Vec3,
@@ -370,20 +371,9 @@ impl CameraState {
     }
 
     pub fn intersects_voxel(self, voxel: [i32; 3], voxel_size: f32) -> bool {
-        let feet_y = self.position.y - PLAYER_EYE_HEIGHT_METRES;
-        let player_min = Vec3::new(
-            self.position.x - PLAYER_RADIUS_METRES,
-            feet_y,
-            self.position.z - PLAYER_RADIUS_METRES,
-        );
-        let player_max = Vec3::new(
-            self.position.x + PLAYER_RADIUS_METRES,
-            feet_y + PLAYER_HEIGHT_METRES,
-            self.position.z + PLAYER_RADIUS_METRES,
-        );
-        let voxel_min = Vec3::from_array(voxel.map(|value| value as f32 * voxel_size));
-        let voxel_max = voxel_min + Vec3::splat(voxel_size);
-        player_min.cmplt(voxel_max).all() && player_max.cmpgt(voxel_min).all()
+        voxel_size.is_finite()
+            && voxel_size > 0.0
+            && cylinder_intersects_voxel(self.position, voxel, voxel_size)
     }
 
     pub fn update(
@@ -486,9 +476,10 @@ impl CameraState {
             &mut sample_voxel,
         );
         if !self.grounded
-            && collides(
-                self.position - Vec3::Y * voxel_size * 0.08,
+            && has_ground_support(
+                self.position,
                 voxel_size,
+                voxel_size * 0.08,
                 &mut sample_voxel,
             )
         {
@@ -659,10 +650,80 @@ fn collides(
     let max = max - Vec3::splat(COLLISION_EPSILON);
     let min_voxel = (min / voxel_size).floor().as_ivec3();
     let max_voxel = (max / voxel_size).floor().as_ivec3();
-    for y in min_voxel.y..=max_voxel.y {
-        for z in min_voxel.z..=max_voxel.z {
-            for x in min_voxel.x..=max_voxel.x {
+    for z in min_voxel.z..=max_voxel.z {
+        for x in min_voxel.x..=max_voxel.x {
+            let voxel_min = Vec3::new(x as f32, 0.0, z as f32) * voxel_size;
+            let voxel_max = voxel_min + Vec3::splat(voxel_size);
+            if !horizontal_circle_overlaps_voxel(eye_position, voxel_min, voxel_max) {
+                continue;
+            }
+            for y in min_voxel.y..=max_voxel.y {
                 if sample_voxel(x, y, z).collidable {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn cylinder_intersects_voxel(eye_position: Vec3, voxel: [i32; 3], voxel_size: f32) -> bool {
+    let feet_y = eye_position.y - PLAYER_EYE_HEIGHT_METRES;
+    let head_y = feet_y + PLAYER_HEIGHT_METRES;
+    let voxel_min = Vec3::from_array(voxel.map(|value| value as f32 * voxel_size));
+    let voxel_max = voxel_min + Vec3::splat(voxel_size);
+    if feet_y >= voxel_max.y - COLLISION_EPSILON || head_y <= voxel_min.y + COLLISION_EPSILON {
+        return false;
+    }
+    horizontal_circle_overlaps_voxel(eye_position, voxel_min, voxel_max)
+}
+
+fn horizontal_circle_overlaps_voxel(eye_position: Vec3, voxel_min: Vec3, voxel_max: Vec3) -> bool {
+    let closest_x = eye_position.x.clamp(voxel_min.x, voxel_max.x);
+    let closest_z = eye_position.z.clamp(voxel_min.z, voxel_max.z);
+    let delta_x = eye_position.x - closest_x;
+    let delta_z = eye_position.z - closest_z;
+    let collision_radius = PLAYER_RADIUS_METRES - COLLISION_EPSILON;
+    delta_x * delta_x + delta_z * delta_z < collision_radius * collision_radius
+}
+
+fn has_ground_support(
+    eye_position: Vec3,
+    voxel_size: f32,
+    probe_distance: f32,
+    sample_voxel: &mut impl FnMut(i32, i32, i32) -> VoxelPhysics,
+) -> bool {
+    let feet_y = eye_position.y - PLAYER_EYE_HEIGHT_METRES;
+    let horizontal_min = Vec3::new(
+        eye_position.x - PLAYER_RADIUS_METRES,
+        0.0,
+        eye_position.z - PLAYER_RADIUS_METRES,
+    );
+    let horizontal_max = Vec3::new(
+        eye_position.x + PLAYER_RADIUS_METRES - COLLISION_EPSILON,
+        0.0,
+        eye_position.z + PLAYER_RADIUS_METRES - COLLISION_EPSILON,
+    );
+    let min_voxel = (horizontal_min / voxel_size).floor().as_ivec3();
+    let max_voxel = (horizontal_max / voxel_size).floor().as_ivec3();
+    let min_y = ((feet_y - probe_distance) / voxel_size)
+        .floor()
+        .clamp(i32::MIN as f32, i32::MAX as f32) as i32;
+    let min_y = min_y.saturating_sub(1);
+    let max_y = ((feet_y + COLLISION_EPSILON) / voxel_size).floor() as i32;
+    for z in min_voxel.z..=max_voxel.z {
+        for x in min_voxel.x..=max_voxel.x {
+            let voxel_min = Vec3::new(x as f32, 0.0, z as f32) * voxel_size;
+            let voxel_max = voxel_min + Vec3::splat(voxel_size);
+            if !horizontal_circle_overlaps_voxel(eye_position, voxel_min, voxel_max) {
+                continue;
+            }
+            for y in min_y..=max_y {
+                let surface_y = (y as f32 + 1.0) * voxel_size;
+                if surface_y >= feet_y - probe_distance - COLLISION_EPSILON
+                    && surface_y <= feet_y + COLLISION_EPSILON
+                    && sample_voxel(x, y, z).collidable
+                {
                     return true;
                 }
             }
@@ -755,6 +816,38 @@ mod tests {
             camera.update(&input, 1.0 / 60.0, 0.1, |x, y, _| solid_if(y < 0 || x >= 5));
         }
         assert!(camera.position.x <= 0.5 - PLAYER_RADIUS_METRES + 0.001);
+    }
+
+    #[test]
+    fn rounded_footprint_does_not_catch_on_empty_voxel_corners() {
+        let clear = CameraState::spawn(Vec3::new(-0.22, PLAYER_EYE_HEIGHT_METRES, -0.22));
+        assert!(!clear.intersects_voxel([0, 0, 0], 0.1));
+        assert!(!clear.overlaps_collidable(0.1, |x, y, z| { solid_if([x, y, z] == [0, 0, 0]) }));
+
+        let touching = CameraState::spawn(Vec3::new(-0.19, PLAYER_EYE_HEIGHT_METRES, -0.19));
+        assert!(touching.intersects_voxel([0, 0, 0], 0.1));
+        assert!(touching.overlaps_collidable(0.1, |x, y, z| { solid_if([x, y, z] == [0, 0, 0]) }));
+    }
+
+    #[test]
+    fn grounded_player_walks_over_a_ten_centimetre_bump_without_jumping() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
+        camera.grounded = true;
+        let mut input = InputState::default();
+        input.set_key(4, true);
+        for _ in 0..120 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |x, y, _| {
+                solid_if(y < 0 || (x >= 5 && y == 0))
+            });
+        }
+
+        assert!(camera.position.x > 1.0);
+        assert!(camera.grounded);
+        assert!(
+            (camera.position.y - PLAYER_EYE_HEIGHT_METRES - 0.1).abs() < 0.011,
+            "feet should settle on the bump: {:?}",
+            camera.position
+        );
     }
 
     #[test]
