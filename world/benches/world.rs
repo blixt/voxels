@@ -1,11 +1,14 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use voxels_world::codec::{decode_chunk, encode_chunk};
+use voxels_world::protocol::{
+    ChunkBatchItem, ChunkBatchResult, decode_chunk_batch_result, encode_chunk_batch_result,
+};
 use voxels_world::{
     CINDER_VAULT, CINDER_VAULT_MOUTH_ANCHOR_XZ, ChunkCoord, EditMap, Generator, Material,
     MeshingHalo, ProceduralWorldSource, SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord,
-    VoxelCoord, WorldProductBatch, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
-    first_pilgrim_road_length_voxels, first_pilgrim_road_point_at_distance,
+    VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority, WorldProductRequest,
+    WorldSourceEngine, first_pilgrim_road_length_voxels, first_pilgrim_road_point_at_distance,
     first_pilgrim_route_anchor, first_pilgrim_route_anchor_for_feature_cell,
     generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_surface_tile_mesh,
     mesh_chunk, sample_first_pilgrim_road,
@@ -186,6 +189,39 @@ fn codec(criterion: &mut Criterion) {
     });
     group.bench_function("decode", |bencher| {
         bencher.iter(|| decode_chunk(&encoded, identity));
+    });
+    group.finish();
+
+    let Ok(batch) = source.generate_batch(WorldProductBatch {
+        priority: WorldProductPriority::VisibleChunk,
+        requests: vec![WorldProductRequest::ChunkWithHalo(COORD)],
+    }) else {
+        return;
+    };
+    let Some(item) = batch.items.into_iter().next() else {
+        return;
+    };
+    let Ok(WorldProduct::Chunk(snapshot)) = item.result else {
+        return;
+    };
+    let response = ChunkBatchResult {
+        request_id: 1,
+        source_identity_hash: identity,
+        items: vec![ChunkBatchItem {
+            coord: COORD,
+            result: Ok(snapshot),
+        }],
+    };
+    let Ok(wire) = encode_chunk_batch_result(&response) else {
+        return;
+    };
+    let mut group = criterion.benchmark_group("VXWP chunk + halo envelope");
+    group.throughput(criterion::Throughput::Bytes(wire.len() as u64));
+    group.bench_function("encode", |bencher| {
+        bencher.iter(|| encode_chunk_batch_result(&response));
+    });
+    group.bench_function("decode", |bencher| {
+        bencher.iter(|| decode_chunk_batch_result(&wire));
     });
     group.finish();
 }

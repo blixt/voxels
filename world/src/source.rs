@@ -17,6 +17,8 @@ use std::fmt;
 pub const WORLD_SCHEMA_VERSION: u32 = 1;
 pub const MACRO_FIELD_SCHEMA_VERSION: u32 = 1;
 pub const VOXEL_COMPOSER_VERSION: u32 = 1;
+/// Source identity marker for providers that intentionally contain no authored atlas overlays.
+pub const NO_AUTHORED_CONTENT_VERSION: u32 = 0;
 pub const PROCEDURAL_SAMPLER_VERSION: u32 = 1;
 pub const PROCEDURAL_SCHEDULER_VERSION: u32 = 1;
 pub const MAX_WORLD_PRODUCT_BATCH: usize = 256;
@@ -319,9 +321,6 @@ impl WorldManifest {
         if self.source.voxel_composer_version != VOXEL_COMPOSER_VERSION {
             return Err(WorldManifestError::VoxelComposerVersionMismatch);
         }
-        if self.source.authored_content_version != ATLAS_VERSION {
-            return Err(WorldManifestError::AuthoredContentVersionMismatch);
-        }
         let transform = self.source.macro_coordinate_transform;
         if transform.horizontal_unit_millimetres == 0
             || !matches!(transform.x_axis_sign, -1 | 1)
@@ -331,11 +330,17 @@ impl WorldManifest {
         }
         match self.source.source_kind {
             WorldSourceKind::ProceduralV16 => {
+                if self.source.authored_content_version != ATLAS_VERSION {
+                    return Err(WorldManifestError::AuthoredContentVersionMismatch);
+                }
                 if self.source != WorldSourceIdentity::procedural_v16(self.seed) {
                     return Err(WorldManifestError::ProceduralSourceMismatch);
                 }
             }
             WorldSourceKind::TerrainDiffusion30m => {
+                if self.source.authored_content_version != NO_AUTHORED_CONTENT_VERSION {
+                    return Err(WorldManifestError::AuthoredContentVersionMismatch);
+                }
                 let Some(model) = self.source.model.as_ref() else {
                     return Err(WorldManifestError::TerrainDiffusionModelMissing);
                 };
@@ -398,6 +403,21 @@ pub struct ChunkSnapshot {
     pub meshing_halo: MeshingHalo,
 }
 
+impl ChunkSnapshot {
+    /// Checked construction seam used by sibling codecs and source adapters.
+    pub(crate) fn new(
+        source_identity_hash: WorldSourceIdentityHash,
+        chunk: Chunk,
+        meshing_halo: MeshingHalo,
+    ) -> Option<Self> {
+        (chunk.coord() == meshing_halo.coord()).then_some(Self {
+            source_identity_hash,
+            chunk,
+            meshing_halo,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SurfaceTileSnapshot {
     pub source_identity_hash: WorldSourceIdentityHash,
@@ -440,6 +460,8 @@ pub enum WorldSourceError {
     SearchRadiusTooLarge,
     EmptyMacroBlock,
     MacroBlockTooLarge,
+    MalformedMacroBlock,
+    SourceCoverageUnavailable,
 }
 
 impl fmt::Display for WorldSourceError {
@@ -470,6 +492,12 @@ impl fmt::Display for WorldSourceError {
             }
             Self::MacroBlockTooLarge => {
                 formatter.write_str("macro block exceeds its hard sample limit")
+            }
+            Self::MalformedMacroBlock => {
+                formatter.write_str("macro source returned a malformed or mismatched field block")
+            }
+            Self::SourceCoverageUnavailable => {
+                formatter.write_str("world product crosses unavailable macro-source coverage")
             }
         }
     }
@@ -537,6 +565,30 @@ pub struct VoxelBlockSnapshot {
 }
 
 impl VoxelBlockSnapshot {
+    /// Checked construction seam used by sibling codecs and source adapters.
+    pub(crate) fn from_materials(
+        source_identity_hash: WorldSourceIdentityHash,
+        request: VoxelBlockRequest,
+        materials: Vec<Material>,
+    ) -> Option<Self> {
+        let [width, height, depth] = request.sample_shape;
+        let sample_count = usize::try_from(width)
+            .ok()?
+            .checked_mul(usize::try_from(height).ok()?)?
+            .checked_mul(usize::try_from(depth).ok()?)?;
+        (sample_count > 0
+            && sample_count <= MAX_VOXEL_BLOCK_SAMPLES
+            && materials.len() == sample_count
+            && block_axis_is_representable(request.min.x, width)
+            && block_axis_is_representable(request.min.y, height)
+            && block_axis_is_representable(request.min.z, depth))
+        .then(|| Self {
+            source_identity_hash,
+            request,
+            materials: materials.into_boxed_slice(),
+        })
+    }
+
     pub fn materials(&self) -> &[Material] {
         &self.materials
     }
@@ -577,6 +629,28 @@ pub struct SurfaceSampleBlockSnapshot {
 }
 
 impl SurfaceSampleBlockSnapshot {
+    /// Checked construction seam used by sibling codecs and source adapters.
+    pub(crate) fn from_samples(
+        source_identity_hash: WorldSourceIdentityHash,
+        request: SurfaceSampleBlockRequest,
+        samples: Vec<SurfaceSample>,
+    ) -> Option<Self> {
+        let [width, depth] = request.sample_shape;
+        let sample_count = usize::try_from(width)
+            .ok()?
+            .checked_mul(usize::try_from(depth).ok()?)?;
+        (sample_count > 0
+            && sample_count <= MAX_SURFACE_SAMPLE_BLOCK_SAMPLES
+            && samples.len() == sample_count
+            && block_axis_is_representable(request.origin[0], width)
+            && block_axis_is_representable(request.origin[1], depth))
+        .then(|| Self {
+            source_identity_hash,
+            request,
+            samples: samples.into_boxed_slice(),
+        })
+    }
+
     pub fn samples(&self) -> &[SurfaceSample] {
         &self.samples
     }
@@ -676,6 +750,14 @@ pub struct MeshingHalo {
 }
 
 impl MeshingHalo {
+    /// Checked construction seam used by sibling codecs and source adapters.
+    pub(crate) fn from_voxels(coord: ChunkCoord, voxels: Vec<Material>) -> Option<Self> {
+        (coord.is_world_representable() && voxels.len() == MESHING_HALO_VOXELS).then(|| Self {
+            coord,
+            voxels: voxels.into_boxed_slice(),
+        })
+    }
+
     pub fn from_sampler(
         coord: ChunkCoord,
         mut sample: impl FnMut(i32, i32, i32) -> Material,
@@ -1186,6 +1268,7 @@ mod tests {
     fn terrain_diffusion_manifest() -> WorldManifest {
         let mut manifest = WorldManifest::procedural_v16(WorldId::from_bytes([7; 16]), 7);
         manifest.source.source_kind = WorldSourceKind::TerrainDiffusion30m;
+        manifest.source.authored_content_version = NO_AUTHORED_CONTENT_VERSION;
         manifest.source.model = Some(ModelIdentity {
             repository: "immutable/model".to_owned(),
             immutable_revision: "0123456789abcdef".to_owned(),

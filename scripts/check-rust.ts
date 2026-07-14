@@ -20,7 +20,10 @@ cargo([
   "-D",
   "warnings",
 ]);
-cargo(["clippy", "--workspace", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"], {
-  ...process.env,
-  ...wasmCcEnv(),
-});
+cargo(
+  ["clippy", "-p", "voxels-shell", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"],
+  {
+    ...process.env,
+    ...wasmCcEnv(),
+  },
+);

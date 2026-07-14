@@ -1,0 +1,37 @@
+# Versioned, server-owned world configuration. The browser client never reads this file.
+schema_version = 3
+world_id = "766f7865-6c73-406c-6f63-616c00000001"
+world_seed = 1592642302
+
+# Toggle only this value. Supported sources: "procedural-v16" and "terrain-diffusion-30m".
+source = "procedural-v16"
+
+[transport]
+# Native transport is deliberately loopback-only. Port 0 may be used by tests for an ephemeral port.
+listen = "127.0.0.1:9777"
+allowed_origins = ["http://127.0.0.1:5173", "http://localhost:5173"]
+# Replace with a random RFC WebSocket subprotocol token on each local installation.
+auth_subprotocol_token = "replace-with-a-random-local-token"
+max_frame_bytes = 16777216
+max_outbound_bytes_per_client = 33554432
+max_in_flight_batches = 16
+max_connections = 32
+global_queue_capacity = 128
+generation_workers = 8
+generation_workers_per_client = 2
+
+[spawn]
+# Must lie inside the selected source's valid coverage. Startup samples this exact coordinate.
+xz_voxels = [0, 0]
+
+[terrain_diffusion]
+# Omit model_cache to use ~/Library/Caches/voxels/terrain-diffusion on macOS.
+# A relative path is resolved from this file's directory.
+precision = "float16"
+# Canonical voxel X/Z coordinate of the finite 3.84 km tile's minimum corner. The checked-in
+# placement centers the tile on the configured spawn and leaves ample meshing-halo coverage.
+world_origin_voxels = [-19200, -19200]
+# Terrain Diffusion model-grid row/column used for spatial sampling and noise.
+model_origin = [0, 0]
+# Heightfield composer flood height for the learned terrain source.
+sea_level_voxels = 52

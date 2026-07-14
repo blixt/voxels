@@ -13,6 +13,7 @@ name = "voxels"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+voxels-client-config = { path = "../client-config" }
 voxels-core = { path = "../core" }
 voxels-render = { path = "../render" }
 voxels-runtime = { path = "../runtime" }
@@ -40,7 +41,12 @@ features = [
   "BroadcastChannel",
   "AbortController",
   "AbortSignal",
+  "BinaryType",
+  "CloseEvent",
+  "ErrorEvent",
+  "Event",
   "MessageEvent",
+  "WebSocket",
   "WorkerNavigator",
   "WorkerGlobalScope",
 ]

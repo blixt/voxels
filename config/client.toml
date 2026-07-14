@@ -1,0 +1,91 @@
+# Versioned client-owned configuration. World seed and provider selection belong to the server.
+schema_version = 3
+
+# The client knows only where canonical world products come from. The service chooses the
+# procedural or Terrain Diffusion provider in config/world-service.toml.
+[world]
+endpoint = "ws://127.0.0.1:9777/v1/world"
+subprotocol = "voxels.world.v1"
+auth_subprotocol_token = "replace-with-a-random-local-token"
+max_in_flight_batches = 8
+buffered_amount_high_water_bytes = 8388608
+buffered_amount_low_water_bytes = 2097152
+request_timeout_ms = 10000
+reconnect_initial_delay_ms = 250
+reconnect_max_delay_ms = 5000
+reconnect_attempt_limit = 30
+
+[runtime]
+fixed_step_seconds = 0.008333334
+max_steps_per_frame = 6
+persist_interval_ms = 1000
+max_edit_trackers = 128
+
+[streaming]
+load_radius_chunks = 5
+vertical_radius_chunks = 1
+retention_margin_chunks = 1
+max_tracked_chunks = 320
+max_secondary_interest_chunks = 192
+
+[streaming.frame_budget]
+generation = 2
+meshing = 1
+upload = 3
+
+# One radius for each surface LOD level: stride 2, 4, 8, and 16.
+[streaming.surface]
+load_radius_tiles = [4, 4, 4, 5]
+retention_margin_tiles = 1
+
+[rendering]
+view_distance_metres = 220.0
+daylight = "golden-hour"
+placement_material = "grass"
+
+[rendering.shadows]
+vertical_fov_radians = 1.1868238 # 68 degrees
+near_plane = 0.05
+far_plane = 220.0
+split_lambda = 0.65
+# Startup rejects values above 4096, above the selected GPU's 2D texture limit, or above the
+# renderer's bounded shadow-memory budget.
+shadow_map_resolution = 1024
+caster_depth_expansion = 64.0
+
+[rendering.features]
+cascaded_sun_shadows = true
+voxel_ambient_occlusion = true
+screen_space_ambient_occlusion = true
+atmospheric_fog = true
+far_terrain = true
+water_surface = true
+target_outline = true
+material_surface_detail = true
+cave_headlamp = true
+voxel_emissive_lights = true
+
+[rendering.mission_control]
+open = false
+compact = false
+
+[persistence]
+request_timeout_ms = 400
+request_retries = 30
+vfs_install_attempts = 20
+vfs_retry_delay_ms = 150
+
+[diagnostics]
+enclosure_probe_interval_ms = 100
+enclosure_probe_distance_metres = 12.0
+surface_probe_block_edge = 64
+max_surface_probe_blocks = 64
+camera_probe_horizontal_radius_voxels = 4
+camera_probe_below_eye_voxels = 20
+camera_probe_height_voxels = 288
+
+[profiling]
+speed_metres_per_second = 12.0
+warmup_seconds = 30.0
+measure_seconds = 60.0
+edit_operations = 40

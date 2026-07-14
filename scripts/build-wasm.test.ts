@@ -11,16 +11,31 @@ import {
 const root = new URL("../", import.meta.url);
 
 describe("WASM build inputs", () => {
-  it("tracks every Rust workspace crate", () => {
+  it("tracks every local crate in the browser shell dependency graph", () => {
     const manifest = readFileSync(new URL("Cargo.toml", root), "utf8");
     const members = manifest.match(/members\s*=\s*(\[[^\]]+\])/s)?.[1];
     assert.ok(members, "Cargo.toml must declare workspace members");
 
-    const crates = JSON.parse(members) as string[];
-    assert.deepEqual(
-      RUST_SOURCE_DIRS,
-      crates.map((crate) => `${crate}/src`),
-    );
+    const workspaceCrates = new Set([...members.matchAll(/"([^"]+)"/g)].map((match) => match[1]));
+    assert.ok(workspaceCrates.size > 0, "Cargo.toml workspace members must not be empty");
+
+    const reachable = new Set(["shell"]);
+    const pending = ["shell"];
+    while (pending.length > 0) {
+      const crate = pending.pop();
+      assert.ok(crate);
+      const crateManifest = readFileSync(new URL(`${crate}/Cargo.toml`, root), "utf8");
+      for (const match of crateManifest.matchAll(/path\s*=\s*"\.\.\/([^"]+)"/g)) {
+        const dependency = match[1];
+        assert.ok(dependency);
+        if (!workspaceCrates.has(dependency) || reachable.has(dependency)) continue;
+        reachable.add(dependency);
+        pending.push(dependency);
+      }
+    }
+
+    const crates = [...reachable].sort();
+    assert.deepEqual([...RUST_SOURCE_DIRS].sort(), crates.map((crate) => `${crate}/src`).sort());
     for (const crate of crates) {
       assert.ok(
         RUST_INPUT_FILES.includes(`${crate}/Cargo.toml`),

@@ -19,13 +19,15 @@ const OUT = join(ROOT, "web/generated");
 const TARGET = "wasm32-unknown-unknown";
 const CARGO_BIN = join(homedir(), ".cargo/bin");
 
-const RUST_WORKSPACE_CRATES = ["core", "world", "runtime", "render", "shell"] as const;
+// Only crates in the browser shell's dependency graph invalidate its WASM artifact. Native service
+// and Metal-provider edits must not trigger an unrelated browser rebuild during development.
+const RUST_WASM_CRATES = ["client-config", "core", "world", "runtime", "render", "shell"] as const;
 
-export const RUST_SOURCE_DIRS = RUST_WORKSPACE_CRATES.map((crate) => `${crate}/src`);
+export const RUST_SOURCE_DIRS = RUST_WASM_CRATES.map((crate) => `${crate}/src`);
 export const RUST_INPUT_FILES = [
   "Cargo.toml",
   "Cargo.lock",
-  ...RUST_WORKSPACE_CRATES.map((crate) => `${crate}/Cargo.toml`),
+  ...RUST_WASM_CRATES.map((crate) => `${crate}/Cargo.toml`),
   "rust-toolchain.toml",
   "scripts/build-wasm.ts",
 ];

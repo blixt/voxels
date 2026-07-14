@@ -9,8 +9,10 @@ pub mod edit;
 pub mod feature;
 pub mod generation;
 pub mod lod;
+pub mod macro_composer;
 pub mod material;
 pub mod mesh;
+pub mod protocol;
 pub mod route;
 pub mod source;
 pub mod visibility;
@@ -49,6 +51,7 @@ pub use lod::{
     generate_water_tile_mesh_with, surface_tiles_affected_by_column,
     surface_tiles_affected_by_voxel,
 };
+pub use macro_composer::HeightfieldWorldSource;
 pub use material::{Material, MaterialEmission, RenderLayer};
 pub use mesh::{EmissiveCluster, MeshedChunk, Quad, mesh_chunk};
 pub use route::{
@@ -64,12 +67,12 @@ pub use source::{
     MAX_SURFACE_SAMPLE_BLOCK_SAMPLES, MAX_SURFACE_SEARCH_RADIUS, MAX_VOXEL_BLOCK_SAMPLES,
     MAX_WORLD_PRODUCT_BATCH, MESHING_HALO_VOXELS, MacroBlock, MacroBlockBatch,
     MacroBlockBatchResult, MacroBlockRequest, MacroCoordinateTransform, MacroTerrainSource,
-    MeshingHalo, ModelIdentity, PROCEDURAL_SAMPLER_VERSION, PROCEDURAL_SCHEDULER_VERSION,
-    ProceduralWorldSource, SourceDeviceRequirement, SurfaceSampleBlockRequest,
-    SurfaceSampleBlockSnapshot, SurfaceSearchHit, SurfaceSearchKind, SurfaceSearchRequest,
-    SurfaceSearchSnapshot, SurfaceTileSnapshot, VOXEL_COMPOSER_VERSION, VoxelBlockRequest,
-    VoxelBlockSnapshot, WORLD_SCHEMA_VERSION, WorldId, WorldManifest, WorldManifestError,
-    WorldManifestHash, WorldProduct, WorldProductBatch, WorldProductBatchItem,
+    MeshingHalo, ModelIdentity, NO_AUTHORED_CONTENT_VERSION, PROCEDURAL_SAMPLER_VERSION,
+    PROCEDURAL_SCHEDULER_VERSION, ProceduralWorldSource, SourceDeviceRequirement,
+    SurfaceSampleBlockRequest, SurfaceSampleBlockSnapshot, SurfaceSearchHit, SurfaceSearchKind,
+    SurfaceSearchRequest, SurfaceSearchSnapshot, SurfaceTileSnapshot, VOXEL_COMPOSER_VERSION,
+    VoxelBlockRequest, VoxelBlockSnapshot, WORLD_SCHEMA_VERSION, WorldId, WorldManifest,
+    WorldManifestError, WorldManifestHash, WorldProduct, WorldProductBatch, WorldProductBatchItem,
     WorldProductBatchResult, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
     WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind,
     procedural_world_source,

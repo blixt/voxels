@@ -1,0 +1,35 @@
+[package]
+name = "voxels-world-service"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+terrain-metal = ["voxels-world-terrain-diffusion/metal"]
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+futures-util = { version = "0.3", features = ["sink"] }
+voxels-world = { path = "../world" }
+voxels-world-terrain-diffusion = { path = "../world-terrain-diffusion", default-features = false }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+toml = "0.9.8"
+uuid = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"
+
+[[bin]]
+name = "voxels-world-source"
+path = "src/bin/voxels-world-source.rs"
+required-features = ["terrain-metal"]
+
+[[bin]]
+name = "voxels-worldd"
+path = "src/bin/voxels-worldd.rs"

@@ -1,0 +1,17 @@
+{
+  "image_size": 512,
+  "in_channels": 5,
+  "out_channels": 5,
+  "model_channels": 192,
+  "model_channel_mults": [1, 2, 3, 4],
+  "layers_per_block": 3,
+  "emb_channels": null,
+  "noise_emb_dims": null,
+  "attn_resolutions": [8, 16],
+  "midblock_attention": true,
+  "concat_balance": 0.5,
+  "conditional_inputs": [["tensor", 58, 1.0]],
+  "encode_only": false,
+  "disable_out_gain": false,
+  "fourier_scale": "pos"
+}

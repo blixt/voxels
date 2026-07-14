@@ -1,0 +1,23 @@
+{
+  "image_size": 16,
+  "in_channels": 11,
+  "out_channels": 6,
+  "model_channels": 128,
+  "model_channel_mults": [1],
+  "layers_per_block": 2,
+  "emb_channels": null,
+  "noise_emb_dims": null,
+  "attn_resolutions": [],
+  "midblock_attention": false,
+  "concat_balance": 0.5,
+  "conditional_inputs": [
+    ["float", 64, 0.2],
+    ["float", 64, 0.2],
+    ["float", 64, 0.2],
+    ["float", 64, 0.2],
+    ["float", 64, 0.2]
+  ],
+  "encode_only": false,
+  "disable_out_gain": false,
+  "fourier_scale": "pos"
+}
