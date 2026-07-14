@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 9
+schema_version = 10
 
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
@@ -57,7 +57,6 @@ retention_margin_tiles = 1
 [rendering]
 view_distance_metres = 220.0
 daylight = "golden-hour"
-placement_material = "grass"
 
 [rendering.shadows]
 vertical_fov_radians = 1.1868238 # 68 degrees

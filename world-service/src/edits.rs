@@ -19,7 +19,7 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash,
 };
 
-const EDIT_SCHEMA_VERSION: i64 = 3;
+const EDIT_SCHEMA_VERSION: i64 = 4;
 const INITIAL_REVISION: u64 = 1;
 const DIG_EDGE_VOXELS: i32 = 5;
 const DIG_RADIUS_VOXELS: i32 = DIG_EDGE_VOXELS / 2;
@@ -30,7 +30,8 @@ pub(crate) struct EditAuthority {
     inner: Mutex<EditState>,
     subscribers: Mutex<HashMap<u64, EditSubscriber>>,
     queue_capacity: usize,
-    starting_units_per_material: u32,
+    #[cfg(test)]
+    test_starting_units_per_material: Option<u32>,
 }
 
 struct EditState {
@@ -109,7 +110,6 @@ impl EditAuthority {
         world_id: WorldId,
         source: &dyn WorldSourceEngine,
         queue_capacity: u16,
-        starting_units_per_material: u32,
     ) -> Result<Arc<Self>, EditAuthorityError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
@@ -125,7 +125,8 @@ impl EditAuthority {
             world_id,
             source,
             queue_capacity,
-            starting_units_per_material,
+            #[cfg(test)]
+            None,
         )
     }
 
@@ -133,7 +134,6 @@ impl EditAuthority {
         world_id: WorldId,
         source: &dyn WorldSourceEngine,
         queue_capacity: u16,
-        starting_units_per_material: u32,
     ) -> Result<Arc<Self>, EditAuthorityError> {
         let connection = Connection::open_in_memory().map_err(sql_error("open edit database"))?;
         Self::from_connection(
@@ -141,7 +141,51 @@ impl EditAuthority {
             world_id,
             source,
             queue_capacity,
-            starting_units_per_material,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    fn in_memory_with_inventory(
+        world_id: WorldId,
+        source: &dyn WorldSourceEngine,
+        queue_capacity: u16,
+        units_per_material: u32,
+    ) -> Result<Arc<Self>, EditAuthorityError> {
+        let connection = Connection::open_in_memory().map_err(sql_error("open edit database"))?;
+        Self::from_connection(
+            connection,
+            world_id,
+            source,
+            queue_capacity,
+            Some(units_per_material),
+        )
+    }
+
+    #[cfg(test)]
+    fn open_with_inventory(
+        path: &Path,
+        world_id: WorldId,
+        source: &dyn WorldSourceEngine,
+        queue_capacity: u16,
+        units_per_material: u32,
+    ) -> Result<Arc<Self>, EditAuthorityError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                EditAuthorityError(format!(
+                    "create edit database directory {}: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        let connection = Connection::open(path).map_err(sql_error("open edit database"))?;
+        Self::from_connection(
+            connection,
+            world_id,
+            source,
+            queue_capacity,
+            Some(units_per_material),
         )
     }
 
@@ -150,7 +194,7 @@ impl EditAuthority {
         world_id: WorldId,
         source: &dyn WorldSourceEngine,
         queue_capacity: u16,
-        starting_units_per_material: u32,
+        #[cfg(test)] test_starting_units_per_material: Option<u32>,
     ) -> Result<Arc<Self>, EditAuthorityError> {
         connection
             .execute_batch(
@@ -181,7 +225,8 @@ impl EditAuthority {
             }),
             subscribers: Mutex::new(HashMap::new()),
             queue_capacity: usize::from(queue_capacity),
-            starting_units_per_material,
+            #[cfg(test)]
+            test_starting_units_per_material,
         }))
     }
 
@@ -235,7 +280,12 @@ impl EditAuthority {
                 ],
             )
             .map_err(sql_error("insert player"))?;
-        let inventory = starting_inventory(self.starting_units_per_material);
+        #[cfg(test)]
+        let inventory = self
+            .test_starting_units_per_material
+            .map_or(MaterialInventory::EMPTY, starting_inventory);
+        #[cfg(not(test))]
+        let inventory = MaterialInventory::EMPTY;
         persist_inventory(&transaction, player_id, inventory)?;
         transaction
             .commit()
@@ -622,7 +672,7 @@ fn initialize_schema(
                         REFERENCES edit_operations(player_id, edit_session_id, operation_id)
                         ON DELETE CASCADE
                  ) WITHOUT ROWID;
-                 PRAGMA user_version = 3;",
+                 PRAGMA user_version = 4;",
             )
             .map_err(sql_error("create edit schema"))?;
         transaction
@@ -1230,6 +1280,7 @@ fn persist_inventory(
     Ok(())
 }
 
+#[cfg(test)]
 fn starting_inventory(units: u32) -> MaterialInventory {
     let mut counts = [u64::from(units); MATERIAL_INVENTORY_SLOTS];
     counts[usize::from(Material::Air.id())] = 0;
@@ -1433,9 +1484,67 @@ mod tests {
     }
 
     #[test]
+    fn new_players_can_place_only_materials_earned_by_digging() {
+        let source = ProceduralWorldSource::new(0xdecafbad);
+        let authority = EditAuthority::in_memory(world_id(30), &source, 8).unwrap();
+        let player = player_id(30);
+        let (opened, session) = admit_player(&authority, player, resume(1));
+        assert_eq!(opened.inventory, MaterialInventory::EMPTY);
+
+        let placement = VoxelCoord::new(0, 300, 0);
+        let rejected = authority
+            .apply(
+                &source,
+                player,
+                300,
+                place(1, session, placement, Material::Stone),
+            )
+            .unwrap_err();
+        assert!(rejected.to_string().contains("no 3 inventory"));
+
+        let dug = authority
+            .apply(
+                &source,
+                player,
+                300,
+                dig(2, session, VoxelCoord::new(0, -100, 0)),
+            )
+            .unwrap();
+        let earned = dug.commit.editor_inventory.unwrap();
+        let material = Material::ALL
+            .into_iter()
+            .find(|material| *material != Material::Air && earned.count(*material) > 0)
+            .expect("solid dig must earn at least one material");
+        let before_place = earned.count(material);
+
+        let placed = authority
+            .apply(&source, player, 300, place(3, session, placement, material))
+            .unwrap();
+        assert_eq!(
+            placed.commit.editor_inventory.unwrap().count(material),
+            before_place - 1
+        );
+        let never_earned = Material::ALL.into_iter().find(|candidate| {
+            *candidate != Material::Air && *candidate != material && earned.count(*candidate) == 0
+        });
+        if let Some(never_earned) = never_earned {
+            let error = authority
+                .apply(
+                    &source,
+                    player,
+                    300,
+                    place(4, session, VoxelCoord::new(1, 300, 0), never_earned),
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("inventory remains"));
+        }
+    }
+
+    #[test]
     fn solid_and_mixed_digs_yield_exact_material_histograms() {
         let source = ProceduralWorldSource::new(42);
-        let authority = EditAuthority::in_memory(world_id(1), &source, 8, 8).unwrap();
+        let authority =
+            EditAuthority::in_memory_with_inventory(world_id(1), &source, 8, 8).unwrap();
         let (opened, edit_session_id) = admit_player(&authority, player_id(2), resume(1));
         for material in Material::ALL {
             let expected = if material == Material::Air { 0 } else { 8 };
@@ -1530,7 +1639,8 @@ mod tests {
     #[test]
     fn placement_debits_inventory_and_rejects_air_occupied_and_out_of_stock() {
         let source = ProceduralWorldSource::new(7);
-        let authority = EditAuthority::in_memory(world_id(2), &source, 8, 1).unwrap();
+        let authority =
+            EditAuthority::in_memory_with_inventory(world_id(2), &source, 8, 1).unwrap();
         let (_opened, edit_session_id) = admit_player(&authority, player_id(3), resume(1));
         let first = VoxelCoord::new(0, 300, 0);
         let applied = authority
@@ -1742,7 +1852,8 @@ mod tests {
     #[test]
     fn place_occupied_dig_noop_and_replace_preserve_every_revision_invariant() {
         let source = ProceduralWorldSource::new(0x1234);
-        let authority = EditAuthority::in_memory(world_id(20), &source, 8, 2).unwrap();
+        let authority =
+            EditAuthority::in_memory_with_inventory(world_id(20), &source, 8, 2).unwrap();
         let (opened, session) = admit_player(&authority, player_id(20), resume(1));
         let target = VoxelCoord::new(-65, 300, 31);
 
@@ -1815,7 +1926,8 @@ mod tests {
     #[test]
     fn overlapping_digs_never_credit_the_same_voxel_twice() {
         let source = ProceduralWorldSource::new(0x5678);
-        let authority = EditAuthority::in_memory(world_id(21), &source, 8, 1).unwrap();
+        let authority =
+            EditAuthority::in_memory_with_inventory(world_id(21), &source, 8, 1).unwrap();
         let (opened, session) = admit_player(&authority, player_id(21), resume(1));
         let first = authority
             .apply(
@@ -1859,7 +1971,8 @@ mod tests {
     #[test]
     fn concurrent_players_contend_atomically_for_placement_and_overlapping_digs() {
         let source = Arc::new(ProceduralWorldSource::new(0x9abc));
-        let authority = EditAuthority::in_memory(world_id(22), source.as_ref(), 8, 2).unwrap();
+        let authority =
+            EditAuthority::in_memory_with_inventory(world_id(22), source.as_ref(), 8, 2).unwrap();
         let players = [player_id(22), player_id(23)];
         let sessions = players.map(|player| admit_player(&authority, player, resume(1)).1);
         let target = VoxelCoord::new(10, 300, -10);
@@ -1911,7 +2024,8 @@ mod tests {
 
         let dig_source = Arc::new(ProceduralWorldSource::new(0xdef0));
         let dig_authority =
-            EditAuthority::in_memory(world_id(23), dig_source.as_ref(), 8, 1).unwrap();
+            EditAuthority::in_memory_with_inventory(world_id(23), dig_source.as_ref(), 8, 1)
+                .unwrap();
         let dig_players = [player_id(24), player_id(25)];
         let dig_sessions =
             dig_players.map(|player| admit_player(&dig_authority, player, resume(1)).1);
@@ -1960,7 +2074,8 @@ mod tests {
     #[test]
     fn edit_sessions_allow_exact_old_retries_but_not_new_operations() {
         let source = ProceduralWorldSource::new(8);
-        let authority = EditAuthority::in_memory(world_id(3), &source, 8, 4).unwrap();
+        let authority =
+            EditAuthority::in_memory_with_inventory(world_id(3), &source, 8, 4).unwrap();
         let (_first, first_session) = admit_player(&authority, player_id(4), resume(1));
         let command = place(
             1,
@@ -2033,13 +2148,14 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "voxels-edit-authority-v3-{}-{unique}.sqlite3",
+            "voxels-edit-authority-v4-{}-{unique}.sqlite3",
             std::process::id()
         ));
         let player = player_id(5);
         let coord = VoxelCoord::new(-57, 300, 89);
         {
-            let authority = EditAuthority::open(&path, world_id(4), &source, 4, 2).unwrap();
+            let authority =
+                EditAuthority::open_with_inventory(&path, world_id(4), &source, 4, 2).unwrap();
             let (_opened, edit_session_id) = admit_player(&authority, player, resume(1));
             authority
                 .apply(
@@ -2058,7 +2174,8 @@ mod tests {
             authority.save_player_resume(player, stale).unwrap();
         }
         {
-            let reopened = EditAuthority::open(&path, world_id(4), &source, 4, 99).unwrap();
+            let reopened =
+                EditAuthority::open_with_inventory(&path, world_id(4), &source, 4, 99).unwrap();
             let player = reopened.load_player(player, resume(1)).unwrap();
             assert_eq!(player.inventory.count(Material::GlowCrystal), 1);
             assert_eq!(player.resume.revision, 7);
@@ -2078,11 +2195,11 @@ mod tests {
     fn previous_schema_is_rejected_without_migration() {
         let source = ProceduralWorldSource::new(17);
         let connection = Connection::open_in_memory().unwrap();
-        connection.pragma_update(None, "user_version", 2).unwrap();
-        let error = EditAuthority::from_connection(connection, world_id(6), &source, 4, 1)
+        connection.pragma_update(None, "user_version", 3).unwrap();
+        let error = EditAuthority::from_connection(connection, world_id(6), &source, 4, None)
             .err()
             .unwrap();
-        assert!(error.to_string().contains("schema 2; expected 3"));
+        assert!(error.to_string().contains("schema 3; expected 4"));
         assert!(
             error
                 .to_string()
@@ -2093,7 +2210,8 @@ mod tests {
     #[tokio::test]
     async fn observer_publication_omits_private_inventory() {
         let source = ProceduralWorldSource::new(23);
-        let authority = EditAuthority::in_memory(world_id(7), &source, 4, 2).unwrap();
+        let authority =
+            EditAuthority::in_memory_with_inventory(world_id(7), &source, 4, 2).unwrap();
         let (_opened, edit_session_id) = admit_player(&authority, player_id(8), resume(1));
         let applied = authority
             .apply(
@@ -2134,7 +2252,8 @@ mod tests {
     #[tokio::test]
     async fn overflow_discards_every_stale_commit_before_the_resync_boundary() {
         let source = ProceduralWorldSource::new(24);
-        let authority = EditAuthority::in_memory(world_id(8), &source, 1, 3).unwrap();
+        let authority =
+            EditAuthority::in_memory_with_inventory(world_id(8), &source, 1, 3).unwrap();
         let (_opened, session) = admit_player(&authority, player_id(9), resume(1));
         let mut subscription = authority.subscribe(90);
 

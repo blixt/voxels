@@ -30,7 +30,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 8;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 9;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
     0x76, 0x6f, 0x78, 0x65, 0x6c, 0x73, 0x40, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x01,
@@ -153,8 +153,6 @@ pub struct GameplayConfig {
     pub movement_slack_centimetres: u16,
     /// Maximum delayed-motion credit that can accumulate while pose packets are absent.
     pub movement_credit_window_ms: u16,
-    /// Initial quantity granted for every non-Air material when a player is first seen.
-    pub starting_units_per_material: u32,
 }
 
 impl Default for GameplayConfig {
@@ -167,7 +165,6 @@ impl Default for GameplayConfig {
             max_vertical_speed_centimetres_per_second: 1_200,
             movement_slack_centimetres: 100,
             movement_credit_window_ms: 500,
-            starting_units_per_material: 64,
         }
     }
 }
@@ -192,7 +189,7 @@ pub struct EditPersistenceConfig {
 impl Default for EditPersistenceConfig {
     fn default() -> Self {
         Self {
-            database: PathBuf::from("../tmp/world-state-v3.sqlite3"),
+            database: PathBuf::from("../tmp/world-state-v4.sqlite3"),
             change_queue_capacity: 256,
         }
     }
@@ -768,7 +765,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 8
+schema_version = 9
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -810,10 +807,9 @@ max_horizontal_speed_centimetres_per_second = 900
 max_vertical_speed_centimetres_per_second = 1200
 movement_slack_centimetres = 100
 movement_credit_window_ms = 500
-starting_units_per_material = 64
 
 [edits]
-database = "world-state-v3.sqlite3"
+database = "world-state-v4.sqlite3"
 change_queue_capacity = 256
 
 [spawn]
@@ -868,12 +864,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 8", "schema_version = 7");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 9", "schema_version = 8");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 8,
-                found: 7,
+                expected: 9,
+                found: 8,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");

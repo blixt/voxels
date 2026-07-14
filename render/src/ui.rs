@@ -491,6 +491,7 @@ pub struct MissionControlUi {
     region_label: &'static str,
     route_chapter_label: &'static str,
     route_progress_percent: u8,
+    placement_material_available: bool,
     placement_material_label: &'static str,
     placement_material_count: u64,
     inventory_summary: [String; 2],
@@ -528,7 +529,8 @@ impl MissionControlUi {
             region_label: "VERDANT FOREST",
             route_chapter_label: "OFF PILGRIM ROAD",
             route_progress_percent: 0,
-            placement_material_label: "GRASS",
+            placement_material_available: false,
+            placement_material_label: "",
             placement_material_count: 0,
             inventory_summary: [String::new(), String::new()],
         }
@@ -572,17 +574,14 @@ impl MissionControlUi {
         self.route_progress_percent = progress_percent.min(100);
     }
 
-    pub fn set_placement_material(&mut self, label: &'static str) {
-        self.placement_material_label = label;
-    }
-
     pub fn set_inventory(
         &mut self,
-        selected_label: &'static str,
+        selected_label: Option<&'static str>,
         selected_count: u64,
         summary: [String; 2],
     ) {
-        self.placement_material_label = selected_label;
+        self.placement_material_available = selected_label.is_some();
+        self.placement_material_label = selected_label.unwrap_or("");
         self.placement_material_count = selected_count;
         self.inventory_summary = summary;
     }
@@ -999,14 +998,20 @@ impl MissionControlUi {
             TEXT_MUTED.with_alpha(opacity),
             TextAlign::Left,
         );
+        let placement_status = if self.placement_material_available {
+            format!(
+                "PLACE {} ×{}",
+                self.placement_material_label,
+                compact_count(self.placement_material_count),
+            )
+        } else {
+            "INVENTORY EMPTY · DIG TO COLLECT".to_owned()
+        };
         push_text(
             &mut draw,
             format!(
-                "{} / {}%  ·  PLACE {} ×{}",
-                self.route_chapter_label,
-                self.route_progress_percent,
-                self.placement_material_label,
-                compact_count(self.placement_material_count),
+                "{} / {}%  ·  {}",
+                self.route_chapter_label, self.route_progress_percent, placement_status,
             ),
             [layout.panel.x + CONTENT_PAD, layout.header.y + 44.0],
             8.5,
@@ -1202,7 +1207,9 @@ impl MissionControlUi {
             PANEL_BORDER.mix(ACCENT, 0.45),
             SurfaceRole::Inventory,
         );
-        let inventory_label = if layout.inventory.width < INVENTORY_WIDTH {
+        let inventory_label = if !self.placement_material_available {
+            "EMPTY · DIG TO COLLECT".to_owned()
+        } else if layout.inventory.width < INVENTORY_WIDTH {
             format!(
                 "{} ×{}  ·  WHEEL",
                 self.placement_material_label,
@@ -1220,7 +1227,7 @@ impl MissionControlUi {
             inventory_label,
             layout.inventory.center(),
             10.0,
-            if self.placement_material_count == 0 {
+            if !self.placement_material_available || self.placement_material_count == 0 {
                 TEXT_MUTED
             } else {
                 ACCENT
@@ -1780,7 +1787,7 @@ mod tests {
         ui.set_reduced_motion(true);
         ui.set_route_status("WINDCUT WAY", 47);
         ui.set_inventory(
-            "GLOW CRYSTAL",
+            Some("GLOW CRYSTAL"),
             27,
             [
                 "GR 4 · DI 8 · ST 12 · SA 0 · SN 0 · CL 3 · BA 2".to_owned(),

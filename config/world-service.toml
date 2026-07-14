@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 8
+schema_version = 9
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -56,13 +56,11 @@ max_horizontal_speed_centimetres_per_second = 900
 max_vertical_speed_centimetres_per_second = 1200
 movement_slack_centimetres = 100
 movement_credit_window_ms = 500
-# New players can build immediately; later digging and placement credit/debit exact material units.
-starting_units_per_material = 64
 
 [edits]
 # Native server authority. This checked-in local path is ignored by git; deployments should point
 # it at durable storage. A saturated client queue receives an explicit resync marker.
-database = "../tmp/world-state-v3.sqlite3"
+database = "../tmp/world-state-v4.sqlite3"
 change_queue_capacity = 256
 
 [spawn]

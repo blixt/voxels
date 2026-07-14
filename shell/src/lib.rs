@@ -44,7 +44,7 @@ mod web {
     use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::rc::Rc;
-    use voxels_client_config::{ClientConfig, DaylightConfig, PlacementMaterialConfig};
+    use voxels_client_config::{ClientConfig, DaylightConfig};
     use voxels_core::{
         CameraState, EnclosureSample, InputState, ProfileAutomation, ProfileConfig, ProfilePhase,
         VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
@@ -75,7 +75,7 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 18.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 19.0;
 
     #[derive(Clone, Copy, Debug)]
     struct EngineConfig {
@@ -1370,7 +1370,6 @@ mod web {
 
         fn edit_target(&self, buttons: u16) {
             let camera = *self.camera.borrow();
-            let placement_material = self.renderer.borrow().placement_material();
             let hit = self.raycast_target(&camera);
             let Some(hit) = hit else {
                 return;
@@ -1387,6 +1386,13 @@ mod web {
                 if camera.intersects_voxel(hit.adjacent, VOXEL_SIZE_METRES) {
                     return;
                 }
+                let placement_material = { self.renderer.borrow().placement_material() };
+                let Some(placement_material) = placement_material else {
+                    self.renderer
+                        .borrow_mut()
+                        .show_gameplay_toast("Dig material before placing");
+                    return;
+                };
                 EditAction::Place {
                     coord: VoxelCoord::new(hit.adjacent[0], hit.adjacent[1], hit.adjacent[2]),
                     material: placement_material,
@@ -1958,7 +1964,12 @@ mod web {
                         .open_count(CINDER_VAULT_PORTAL_COUNT) as f32,
                     engine.cinder_portal_revision.get() as f32,
                     if render.local_lighting { 1.0 } else { 0.0 },
-                    engine.renderer.borrow().placement_material().id() as f32,
+                    engine
+                        .renderer
+                        .borrow()
+                        .placement_material()
+                        .unwrap_or(Material::Air)
+                        .id() as f32,
                     diagnostics.secondary_interest_requested as f32,
                     diagnostics.secondary_interest_normalized as f32,
                     diagnostics.secondary_interest_desired as f32,
@@ -2096,12 +2107,6 @@ mod web {
                 DaylightConfig::ClearDay => DaylightPhase::ClearDay,
                 DaylightConfig::GoldenHour => DaylightPhase::GoldenHour,
                 DaylightConfig::BlueHour => DaylightPhase::BlueHour,
-            },
-            initial_placement_material: match rendering.placement_material {
-                PlacementMaterialConfig::Grass => Material::Grass,
-                PlacementMaterialConfig::Stone => Material::Stone,
-                PlacementMaterialConfig::Basalt => Material::Basalt,
-                PlacementMaterialConfig::GlowCrystal => Material::GlowCrystal,
             },
         };
         let width = (css_width * dpr).round().max(1.0) as u32;

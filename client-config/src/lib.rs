@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 9;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 10;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -121,7 +121,6 @@ pub struct RenderingConfig {
     pub features: RendererFeatureConfig,
     pub mission_control: MissionControlConfig,
     pub daylight: DaylightConfig,
-    pub placement_material: PlacementMaterialConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -164,15 +163,6 @@ pub enum DaylightConfig {
     ClearDay,
     GoldenHour,
     BlueHour,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PlacementMaterialConfig {
-    Grass,
-    Stone,
-    Basalt,
-    GlowCrystal,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -725,7 +715,6 @@ mod tests {
                     compact: false,
                 },
                 daylight: DaylightConfig::GoldenHour,
-                placement_material: PlacementMaterialConfig::Grass,
             },
             persistence: PersistenceConfig {
                 request_timeout_ms: 400,
@@ -777,18 +766,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 9", "schema_version = 8");
+        let wrong_schema = fixture.replace("schema_version = 10", "schema_version = 9");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 8,
+                found: 9,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 9",
-            "schema_version = 9\nunknown_root = true",
+            "schema_version = 10",
+            "schema_version = 10\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),

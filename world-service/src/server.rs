@@ -80,13 +80,11 @@ impl WorldServer {
                 world.manifest.world_id,
                 source.as_ref(),
                 config.edits.change_queue_capacity,
-                config.gameplay.starting_units_per_material,
             ),
             None => EditAuthority::in_memory(
                 world.manifest.world_id,
                 source.as_ref(),
                 config.edits.change_queue_capacity,
-                config.gameplay.starting_units_per_material,
             ),
         }
         .map_err(|error| WorldServerError::Edits(error.to_string()))?;
@@ -2133,6 +2131,49 @@ mod tests {
             "the far-tier observer should see all builders but not the out-of-interest bystander"
         );
 
+        let dig_hits = (0..BUILDER_COUNT)
+            .map(|index| VoxelCoord::new(spawn.x + index as i32 * 6, spawn.height, spawn.z))
+            .collect::<Vec<_>>();
+        for (index, hit) in dig_hits.iter().copied().enumerate() {
+            worlds[index]
+                .send(ClientMessage::Binary(
+                    encode_edit_command(EditCommand {
+                        operation_id: 50 + index as u64,
+                        edit_session_id: opened[index].edit_session_id,
+                        action: voxels_world::protocol::EditAction::Dig {
+                            hit,
+                            face: voxels_world::protocol::VoxelFace::PositiveY,
+                        },
+                    })?
+                    .into(),
+                ))
+                .await?;
+        }
+
+        let mut builder_materials = vec![Material::Air; BUILDER_COUNT];
+        for (client_index, world) in worlds.iter_mut().take(OBSERVER_INDEX + 1).enumerate() {
+            for _ in 0..BUILDER_COUNT {
+                let (commit, _) = next_edit_commit(world).await?;
+                if client_index < BUILDER_COUNT && commit.operation_id == 50 + client_index as u64 {
+                    let inventory = commit
+                        .editor_inventory
+                        .ok_or("builder dig omitted private inventory")?;
+                    builder_materials[client_index] = Material::ALL
+                        .into_iter()
+                        .find(|material| {
+                            !matches!(material, Material::Air | Material::Water)
+                                && inventory.count(*material) > 0
+                        })
+                        .ok_or("builder dig earned no placeable solid material")?;
+                }
+            }
+        }
+        assert!(
+            builder_materials
+                .iter()
+                .all(|material| *material != Material::Air)
+        );
+
         let tower_base = spawn.water_level.unwrap_or(spawn.height).max(spawn.height) + 1;
         let tower = (0..BUILDER_COUNT)
             .map(|index| VoxelCoord::new(spawn.x, tower_base + index as i32, spawn.z))
@@ -2145,7 +2186,7 @@ mod tests {
                         edit_session_id: opened[index].edit_session_id,
                         action: voxels_world::protocol::EditAction::Place {
                             coord,
-                            material: Material::Wood,
+                            material: builder_materials[index],
                         },
                     })?
                     .into(),
@@ -2178,7 +2219,7 @@ mod tests {
                     .iter()
                     .map(|commit| commit.revision)
                     .collect::<Vec<_>>(),
-                vec![2, 3, 4, 5, 6]
+                vec![7, 8, 9, 10, 11]
             );
             let mut committed_coords = commits
                 .iter()
@@ -2206,7 +2247,7 @@ mod tests {
             edit_session_id: opened[0].edit_session_id,
             action: voxels_world::protocol::EditAction::Place {
                 coord: tower[0],
-                material: Material::Wood,
+                material: builder_materials[0],
             },
         };
         worlds[0]
@@ -2247,8 +2288,8 @@ mod tests {
             .await??,
         )?;
         assert_eq!(chunks.request_id, 900);
-        assert!(chunks.items.iter().all(|item| item.edit_revision == 6));
-        for coord in &tower {
+        assert!(chunks.items.iter().all(|item| item.edit_revision == 11));
+        for (coord, material) in tower.iter().zip(&builder_materials) {
             let snapshot = chunks
                 .items
                 .iter()
@@ -2256,7 +2297,7 @@ mod tests {
                 .and_then(|item| item.result.as_ref().ok())
                 .ok_or("observer did not receive the edited tower chunk")?;
             let [x, y, z] = coord.local();
-            assert_eq!(snapshot.chunk.get(x, y, z), Material::Wood);
+            assert_eq!(snapshot.chunk.get(x, y, z), *material);
         }
 
         let coarse_coord =
@@ -2291,7 +2332,7 @@ mod tests {
         let tower_top = *tower.last().unwrap();
         assert!(
             snapshot.terrain.quads.iter().any(|quad| {
-                quad.material == Material::Wood
+                quad.material == builder_materials[BUILDER_COUNT - 1]
                     && quad.origin[1] == tower_top.y
                     && quad.origin[0] <= tower_top.x
                     && tower_top.x < quad.origin[0] + i32::from(quad.extent[0])

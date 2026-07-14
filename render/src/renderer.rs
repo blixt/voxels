@@ -69,22 +69,18 @@ type MeshKey = (u8, i32, i32, i32);
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PlacementInventory {
     counts: [u64; Material::ALL.len()],
-    selected: Material,
+    selected: Option<Material>,
 }
 
 impl PlacementInventory {
-    fn new(selected: Material) -> Self {
+    fn new() -> Self {
         Self {
             counts: [0; Material::ALL.len()],
-            selected: if is_placeable_material(selected) {
-                selected
-            } else {
-                Material::Grass
-            },
+            selected: None,
         }
     }
 
-    const fn selected(&self) -> Material {
+    const fn selected(&self) -> Option<Material> {
         self.selected
     }
 
@@ -94,12 +90,13 @@ impl PlacementInventory {
 
     fn set_counts(&mut self, counts: [u64; Material::ALL.len()]) {
         self.counts = counts;
-        if self.count(self.selected) == 0
-            && let Some(material) = PLACEMENT_MATERIALS
-                .into_iter()
-                .find(|material| self.count(*material) > 0)
+        if self
+            .selected
+            .is_none_or(|material| self.count(material) == 0)
         {
-            self.selected = material;
+            self.selected = PLACEMENT_MATERIALS
+                .into_iter()
+                .find(|material| self.count(*material) > 0);
         }
     }
 
@@ -107,7 +104,7 @@ impl PlacementInventory {
         if !is_placeable_material(material) || self.count(material) == 0 {
             return false;
         }
-        self.selected = material;
+        self.selected = Some(material);
         true
     }
 
@@ -115,18 +112,26 @@ impl PlacementInventory {
         if direction == 0 {
             return false;
         }
-        let Some(current) = PLACEMENT_MATERIALS
-            .iter()
-            .position(|material| *material == self.selected)
-        else {
-            return false;
-        };
+        let current = self
+            .selected
+            .and_then(|selected| {
+                PLACEMENT_MATERIALS
+                    .iter()
+                    .position(|material| *material == selected)
+            })
+            .unwrap_or_else(|| {
+                if direction.is_positive() {
+                    PLACEMENT_MATERIALS.len() - 1
+                } else {
+                    0
+                }
+            });
         let step = direction.signum();
         for distance in 1..=PLACEMENT_MATERIALS.len() {
             let index = (current as i32 + step * distance as i32)
                 .rem_euclid(PLACEMENT_MATERIALS.len() as i32) as usize;
             let candidate = PLACEMENT_MATERIALS[index];
-            if candidate != self.selected && self.count(candidate) > 0 {
+            if Some(candidate) != self.selected && self.count(candidate) > 0 {
                 return self.select(candidate);
             }
         }
@@ -145,7 +150,6 @@ pub struct RendererConfig {
     pub view_distance_metres: f32,
     pub directional_shadows: DirectionalShadowConfig,
     pub initial_daylight_phase: DaylightPhase,
-    pub initial_placement_material: Material,
 }
 
 impl Default for RendererConfig {
@@ -156,7 +160,6 @@ impl Default for RendererConfig {
             view_distance_metres: 220.0,
             directional_shadows: DirectionalShadowConfig::default(),
             initial_daylight_phase: DaylightPhase::default(),
-            initial_placement_material: Material::Grass,
         }
     }
 }
@@ -1352,8 +1355,7 @@ impl Renderer {
         let ui_gpu = UiGpu::new(&device, format, config.width, config.height, dpr)?;
         let water_scene_bind_group = ui_gpu.refraction_bind_group(&device, &water_scene_layout);
 
-        let placement_inventory =
-            PlacementInventory::new(runtime_config.initial_placement_material);
+        let placement_inventory = PlacementInventory::new();
         let mut ui = MissionControlUi::new(runtime_config.mission_control, runtime_config.features);
         ui.set_environment_status(daylight_phase.label(), surface_region_label(surface_region));
         sync_inventory_ui(&mut ui, &placement_inventory);
@@ -1560,7 +1562,7 @@ impl Renderer {
         std::mem::take(&mut self.landmark_teleport_requested)
     }
 
-    pub const fn placement_material(&self) -> Material {
+    pub const fn placement_material(&self) -> Option<Material> {
         self.placement_inventory.selected()
     }
 
@@ -2861,8 +2863,8 @@ fn compact_inventory_count(value: u64) -> String {
 fn sync_inventory_ui(ui: &mut MissionControlUi, inventory: &PlacementInventory) {
     let selected = inventory.selected();
     ui.set_inventory(
-        placement_material_label(selected),
-        inventory.count(selected),
+        selected.map(placement_material_label),
+        selected.map_or(0, |material| inventory.count(material)),
         inventory_summary(inventory),
     );
 }
@@ -3300,16 +3302,18 @@ mod tests {
 
     #[test]
     fn placement_inventory_follows_authoritative_stock_and_skips_empty_materials() {
-        let mut inventory = PlacementInventory::new(Material::GlowCrystal);
+        let mut inventory = PlacementInventory::new();
+        assert_eq!(inventory.selected(), None);
+        assert!(!inventory.cycle(1));
         inventory.set_counts(counts(&[(Material::Dirt, 12), (Material::Water, 3)]));
-        assert_eq!(inventory.selected(), Material::Dirt);
+        assert_eq!(inventory.selected(), Some(Material::Dirt));
         assert_eq!(inventory.count(Material::Dirt), 12);
         assert!(!inventory.select(Material::Stone));
         assert!(!inventory.select(Material::Air));
         assert!(inventory.cycle(1));
-        assert_eq!(inventory.selected(), Material::Water);
+        assert_eq!(inventory.selected(), Some(Material::Water));
         assert!(inventory.cycle(-1));
-        assert_eq!(inventory.selected(), Material::Dirt);
+        assert_eq!(inventory.selected(), Some(Material::Dirt));
     }
 
     #[test]
@@ -3327,7 +3331,7 @@ mod tests {
                 .all(|material| PLACEMENT_MATERIALS.contains(&material))
         );
 
-        let mut inventory = PlacementInventory::new(Material::Grass);
+        let mut inventory = PlacementInventory::new();
         inventory.set_counts(std::array::from_fn(|index| index as u64));
         let summary = inventory_summary(&inventory).join(" / ");
         for material in PLACEMENT_MATERIALS {
