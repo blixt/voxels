@@ -68,14 +68,13 @@ pub(crate) enum PoseAdmission {
 }
 
 impl PresenceHub {
-    pub(crate) fn new(config: PresenceConfig) -> Arc<Self> {
+    pub(crate) fn new(config: PresenceConfig) -> Result<Arc<Self>, String> {
         let initial = PresenceSnapshot {
             snapshot_sequence: 1,
             server_time_ms: 1,
             players: Vec::new(),
         };
-        let initial = encode_presence_snapshot(&initial)
-            .expect("empty server presence snapshot is always valid");
+        let initial = encode_presence_snapshot(&initial).map_err(|error| error.to_string())?;
         let (latest_snapshot, _) = watch::channel(Arc::new(initial));
         let hub = Arc::new(Self {
             started: Instant::now(),
@@ -100,7 +99,7 @@ impl PresenceHub {
                 broadcaster.broadcast_once();
             }
         });
-        hub
+        Ok(hub)
     }
 
     fn lock(&self) -> MutexGuard<'_, PresenceInner> {
@@ -226,11 +225,10 @@ impl PresenceHub {
             );
         } else if pose.sample_server_time_ms > now.saturating_add(MAX_FUTURE_SAMPLE_MS) {
             return PoseAdmission::Invalid("player pose timestamp is too far in the future");
-        } else if now.saturating_sub(pose.sample_server_time_ms) > MAX_STALE_SAMPLE_MS {
-            return PoseAdmission::IgnoredStale;
-        } else if player
-            .pose
-            .is_some_and(|prior| pose.sample_server_time_ms <= prior.sample_server_time_ms)
+        } else if now.saturating_sub(pose.sample_server_time_ms) > MAX_STALE_SAMPLE_MS
+            || player
+                .pose
+                .is_some_and(|prior| pose.sample_server_time_ms <= prior.sample_server_time_ms)
         {
             return PoseAdmission::IgnoredStale;
         }
@@ -394,7 +392,8 @@ mod tests {
         let hub = PresenceHub::new(PresenceConfig {
             max_pose_updates_per_second: 120,
             ..PresenceConfig::default()
-        });
+        })
+        .expect("hub");
         let first_claim = hub.join(&identity(1)).expect("first player");
         let second_claim = hub.join(&identity(2)).expect("second player");
         assert_ne!(first_claim.connection_id, second_claim.connection_id);
@@ -436,7 +435,8 @@ mod tests {
         let hub = PresenceHub::new(PresenceConfig {
             max_pose_updates_per_second: 120,
             ..PresenceConfig::default()
-        });
+        })
+        .expect("hub");
         let claim = hub.join(&identity(1)).expect("player");
         let attachment = hub.attach(claim.session_id).expect("attach");
         assert_eq!(

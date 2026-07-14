@@ -71,7 +71,7 @@ impl WorldServer {
             config.transport.max_frame_bytes,
         ));
 
-        let presence = PresenceHub::new(config.presence);
+        let presence = PresenceHub::new(config.presence).map_err(WorldServerError::Presence)?;
         let state = Arc::new(ServerState {
             allowed_origins: config.transport.allowed_origins,
             auth_subprotocol_token: config.transport.auth_subprotocol_token,
@@ -132,6 +132,7 @@ pub enum WorldServerError {
     Source(WorldServiceSourceError),
     Spawn(WorldSourceError),
     InvalidSpawnProduct,
+    Presence(String),
     Manifest(WorldManifestError),
     Bind { address: SocketAddr, reason: String },
     Listener(String),
@@ -148,6 +149,7 @@ impl fmt::Display for WorldServerError {
             Self::InvalidSpawnProduct => {
                 formatter.write_str("world source returned a mismatched spawn surface product")
             }
+            Self::Presence(reason) => write!(formatter, "could not initialize presence: {reason}"),
             Self::Manifest(error) => write!(formatter, "invalid world manifest: {error}"),
             Self::Bind { address, reason } => {
                 write!(
