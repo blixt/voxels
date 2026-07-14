@@ -85,16 +85,16 @@ and six independent ephemeral BrowserContexts. Each context has separate local s
 receives an independently shaped 40 ms RTT, 50/10 Mbit/s link, and must negotiate a distinct browser
 user and player identity. Five builders and one observer start together. The observer then travels at
 least 120 m from the builders, beyond the configured 96 m mid-presence tier, and all six clients must
-still render the other five articulated avatars. Per-player `/v5/world` and `/v5/presence` stream and
+still render the other five articulated avatars. Per-player `/v6/world` and `/v6/presence` stream and
 VXWP byte counts are written to `target/multiplayer-browser/latest.json`; the far observer screenshot
 is `target/multiplayer-browser/observer-far-five.png`.
 
 This deliberately does not reuse the persistence browser test's same-profile BroadcastChannel. Such
 a test would make local OPFS edits look like networked edits and produce a false multiplayer result.
-The JSON currently records the collaborative-tower scenario as `skipped-unsupported`: VXWP v5 does
-not advertise `SERVER_EDITS`, and the browser has no deterministic hook that can submit an edit via a
-server-authoritative path or inspect a far surface-tile revision. Use the strict form to turn that
-known gap into a failing release gate:
+The JSON currently records the collaborative-tower scenario as `skipped-unsupported`: although VXWP
+v6 has a server-edit protocol, the browser has no deterministic hook that can submit an edit via that
+production path or inspect a far surface-tile revision. Use the strict form to turn that known gap
+into a failing release gate:
 
 ```sh
 vp run test:multiplayer-browser -- --require-tower

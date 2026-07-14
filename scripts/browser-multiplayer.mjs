@@ -18,7 +18,7 @@ import { createShapedLink } from "./network-benchmark-link.mjs";
 
 const RESULT_SCHEMA_VERSION = 2;
 const FIXTURE_VERSION = 2;
-const VXWP_VERSION = 5;
+const VXWP_VERSION = 6;
 const WORLD_PATH = `/v${VXWP_VERSION}/world`;
 const PRESENCE_PATH = `/v${VXWP_VERSION}/presence`;
 const EXPECTED_PLAYERS = 6;
@@ -380,7 +380,7 @@ async function main() {
     const collaborativeTower = {
       status: "skipped-unsupported",
       reason:
-        "The browser exposes snapshot, look, and streaming-profile hooks only; VXWP v5 does not advertise SERVER_EDITS, and isolated browser profiles intentionally cannot share OPFS edits.",
+        "The browser exposes snapshot, look, and streaming-profile hooks only; isolated browser profiles intentionally cannot share OPFS edits, and the current diagnostic API cannot submit or inspect VXWP v6 server edits.",
       requiredBrowserDiagnosticApi: [
         "submit one voxel edit through the production server-authoritative edit path and return operation plus world revision",
         "place a deterministic test camera while marking the next presence pose as a discontinuity",

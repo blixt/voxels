@@ -17,7 +17,7 @@ import { createShapedLink } from "./network-benchmark-link.mjs";
 
 const RESULT_SCHEMA_VERSION = 2;
 const FIXTURE_VERSION = 2;
-const VXWP_VERSION = 5;
+const VXWP_VERSION = 6;
 const WORLD_PATH = `/v${VXWP_VERSION}/world`;
 const PRESENCE_PATH = `/v${VXWP_VERSION}/presence`;
 const PREVIEW_HOST = "127.0.0.1";

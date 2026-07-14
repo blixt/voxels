@@ -21,6 +21,9 @@ export const VXWP_KIND_NAMES = Object.freeze({
   12: "presence_delta",
   13: "presence_ping",
   14: "presence_pong",
+  15: "edit_command",
+  16: "edit_commit",
+  17: "resync_required",
 });
 
 function blankDirection() {
