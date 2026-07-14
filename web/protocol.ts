@@ -71,6 +71,14 @@ export type ToWorker =
   | { kind: "destroy" };
 
 export type FromWorker =
+  | {
+      kind: "loading";
+      stage: "wasm" | "world" | "vicinity";
+      resident?: number;
+      required?: number;
+    }
+  | { kind: "ready" }
+  | { kind: "destroyed" }
   | { kind: "uiMode"; cursor: boolean }
   | { kind: "error"; message: string }
   | { kind: "snapshot"; requestId: number; values: number[] }

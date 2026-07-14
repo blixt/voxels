@@ -171,6 +171,19 @@ pub struct FrameWork {
     pub upload: Vec<WorkTicket>,
 }
 
+/// Collision-safe startup coverage around the current scheduler focus.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VicinityReadiness {
+    pub resident: usize,
+    pub required: usize,
+}
+
+impl VicinityReadiness {
+    pub const fn is_ready(self) -> bool {
+        self.required > 0 && self.resident == self.required
+    }
+}
+
 impl FrameWork {
     pub fn len(&self) -> usize {
         self.generation.len() + self.meshing.len() + self.upload.len()
@@ -684,6 +697,44 @@ impl StreamScheduler {
             })
     }
 
+    /// Reports uploaded canonical chunks inside a horizontal cylinder around the current focus.
+    /// The configured vertical span is included so the renderer can activate every counted X/Z
+    /// column atomically and collision never begins against missing data.
+    pub fn vicinity_readiness(&self, radius_chunks: i32) -> VicinityReadiness {
+        if !self.focus_initialized || radius_chunks < 0 {
+            return VicinityReadiness::default();
+        }
+        let radius = radius_chunks.min(self.config.load_radius_chunks);
+        let mut readiness = VicinityReadiness::default();
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                if i64::from(dx) * i64::from(dx) + i64::from(dz) * i64::from(dz)
+                    > i64::from(radius) * i64::from(radius)
+                {
+                    continue;
+                }
+                for dy in -self.config.vertical_radius_chunks..=self.config.vertical_radius_chunks {
+                    let (Some(x), Some(y), Some(z)) = (
+                        self.focus.x.checked_add(dx),
+                        self.focus.y.checked_add(dy),
+                        self.focus.z.checked_add(dz),
+                    ) else {
+                        continue;
+                    };
+                    let coord = ChunkCoord::new(x, y, z);
+                    if !coord.is_world_representable() {
+                        continue;
+                    }
+                    readiness.required += 1;
+                    readiness.resident += usize::from(self.status(coord).is_some_and(|status| {
+                        status.desired && status.state == ChunkState::Resident
+                    }));
+                }
+            }
+        }
+        readiness
+    }
+
     pub fn drain_evictions(&mut self) -> Vec<EvictedChunk> {
         std::mem::take(&mut self.evictions)
     }
@@ -912,7 +963,10 @@ fn priority(focus: ChunkCoord, coord: ChunkCoord) -> (i128, i128, i128, i32, i32
     let dy = i128::from(coord.y) - i128::from(focus.y);
     let dz = i128::from(coord.z) - i128::from(focus.z);
     (
-        dx * dx + dz * dz + dy * dy * 4,
+        // Complete nearby vertical columns before spreading across a horizontal slice. The
+        // renderer exposes columns atomically, so this produces useful collision/render coverage
+        // sooner without changing the final desired set.
+        dx * dx + dz * dz,
         dy.abs(),
         dx.abs() + dz.abs(),
         coord.y,
@@ -982,6 +1036,99 @@ mod tests {
                 assert_eq!(scheduler.complete(*ticket), CompletionStatus::Accepted);
             }
         }
+    }
+
+    #[test]
+    fn startup_vicinity_requires_complete_gpu_resident_columns() {
+        let focus = ChunkCoord::new(4, 7, -3);
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 2,
+            vertical_radius_chunks: 1,
+            retention_margin_chunks: 1,
+            max_tracked_chunks: 39,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
+        });
+        assert_eq!(
+            scheduler.vicinity_readiness(1),
+            VicinityReadiness::default()
+        );
+
+        scheduler.update_focus(focus);
+        assert_eq!(
+            scheduler.vicinity_readiness(1),
+            VicinityReadiness {
+                resident: 0,
+                required: 15,
+            }
+        );
+
+        let generation = scheduler.schedule_frame(FrameBudget {
+            generation: 3,
+            ..FrameBudget::default()
+        });
+        assert_eq!(generation.generation.len(), 3);
+        assert!(
+            generation
+                .generation
+                .iter()
+                .all(|ticket| ticket.coord.x == focus.x && ticket.coord.z == focus.z),
+            "the scheduler should finish the central column before spreading horizontally"
+        );
+        for ticket in generation.generation {
+            assert_eq!(scheduler.complete(ticket), CompletionStatus::Accepted);
+        }
+        let meshing = scheduler.schedule_frame(FrameBudget {
+            meshing: 3,
+            ..FrameBudget::default()
+        });
+        for ticket in meshing.meshing {
+            assert_eq!(scheduler.complete(ticket), CompletionStatus::Accepted);
+        }
+        let upload = scheduler.schedule_frame(FrameBudget {
+            upload: 3,
+            ..FrameBudget::default()
+        });
+        for ticket in upload.upload {
+            assert_eq!(scheduler.complete(ticket), CompletionStatus::Accepted);
+        }
+        assert_eq!(
+            scheduler.vicinity_readiness(1),
+            VicinityReadiness {
+                resident: 3,
+                required: 15,
+            }
+        );
+        assert!(!scheduler.vicinity_readiness(1).is_ready());
+
+        let generation = scheduler.schedule_frame(FrameBudget {
+            generation: usize::MAX,
+            ..FrameBudget::default()
+        });
+        for ticket in generation.generation {
+            assert_eq!(scheduler.complete(ticket), CompletionStatus::Accepted);
+        }
+        let meshing = scheduler.schedule_frame(FrameBudget {
+            meshing: usize::MAX,
+            ..FrameBudget::default()
+        });
+        for ticket in meshing.meshing {
+            assert_eq!(scheduler.complete(ticket), CompletionStatus::Accepted);
+        }
+        let upload = scheduler.schedule_frame(FrameBudget {
+            upload: usize::MAX,
+            ..FrameBudget::default()
+        });
+        for ticket in upload.upload {
+            assert_eq!(scheduler.complete(ticket), CompletionStatus::Accepted);
+        }
+        assert_eq!(
+            scheduler.vicinity_readiness(1),
+            VicinityReadiness {
+                resident: 15,
+                required: 15,
+            }
+        );
+        assert!(scheduler.vicinity_readiness(1).is_ready());
     }
 
     #[test]

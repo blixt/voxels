@@ -25,9 +25,31 @@ type TypedWorker = Omit<Worker, "onmessage" | "postMessage"> & {
   postMessage(message: ToWorker, transfer?: Transferable[]): void;
 };
 
+function showLoading(title: string, detail: string, progress = 0.08): void {
+  const body = document.body;
+  body.classList.add("loading");
+  body.classList.remove("load-failed");
+  body.setAttribute("aria-busy", "true");
+  body.setAttribute("data-loading-title", title);
+  body.setAttribute("data-loading-detail", detail);
+  body.style.setProperty("--loading-progress", `${Math.max(0, Math.min(1, progress)) * 100}%`);
+}
+
+function showReady(): void {
+  document.body.classList.remove("loading", "load-failed");
+  document.body.setAttribute("aria-busy", "false");
+  document.body.style.removeProperty("--loading-progress");
+}
+
+function showFailure(message: string): void {
+  showLoading("Voxels could not start", message, 1);
+  document.body.classList.add("load-failed");
+}
+
 async function start(canvas: HTMLCanvasElement): Promise<void> {
   const fail = (message: string): void => {
     canvas.classList.add("ui-cursor");
+    showFailure(message);
     console.error(`[voxels] ${message}`);
   };
   if (!window.isSecureContext && location.hostname !== "localhost") {
@@ -45,6 +67,7 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
 
   let configToml: string;
   let player: BrowserPlayerSession;
+  showLoading("Starting Voxels", "Loading client configuration…");
   try {
     [configToml, player] = await Promise.all([loadClientConfig(), resolveBrowserPlayerSession()]);
   } catch (error) {
@@ -57,6 +80,12 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     type: "module",
   }) as TypedWorker;
   let uiCursorMode = false;
+  let playable = false;
+  let shutdownPromise: Promise<void> | undefined;
+  let acknowledgeDestroyed: (() => void) | undefined;
+  const destroyed = new Promise<void>((resolve) => {
+    acknowledgeDestroyed = resolve;
+  });
   let nextSnapshotRequest = 1;
   const snapshotResolvers = new Map<
     number,
@@ -87,9 +116,7 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       playerUrl(name: string): string;
     };
   };
-  const failWorker = (message: string): void => {
-    fail(message);
-    worker.terminate();
+  const rejectPending = (message: string): void => {
     const error = new Error(message);
     for (const { reject } of snapshotResolvers.values()) reject(error);
     snapshotResolvers.clear();
@@ -99,6 +126,25 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     inventoryResolvers.clear();
     for (const { reject } of surfaceEditStateResolvers.values()) reject(error);
     surfaceEditStateResolvers.clear();
+  };
+  const shutdownWorker = (timeoutMs = 1_000): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    worker.postMessage({ kind: "destroy" });
+    shutdownPromise = Promise.race([
+      destroyed,
+      new Promise<void>((resolve) => window.setTimeout(resolve, timeoutMs)),
+    ]).finally(() => worker.terminate());
+    return shutdownPromise;
+  };
+  const failWorker = (message: string, abrupt = false): void => {
+    playable = false;
+    fail(message);
+    rejectPending(message);
+    if (abrupt) {
+      worker.terminate();
+    } else {
+      void shutdownWorker();
+    }
     delete debugGlobal.__VOXELS__;
   };
   debugGlobal.__VOXELS__ = {
@@ -157,7 +203,30 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     playerUrl: (name) => namedPlayerUrl(name).href,
   };
   worker.onmessage = (event) => {
-    if (event.data.kind === "uiMode") {
+    if (event.data.kind === "loading") {
+      if (event.data.stage === "wasm") {
+        showLoading("Starting native engine", "Loading the Rust/WebAssembly runtime…", 0.12);
+      } else if (event.data.stage === "world") {
+        showLoading("Connecting to world", "Opening the native world service and renderer…", 0.22);
+      } else {
+        const resident = event.data.resident ?? 0;
+        const required = event.data.required ?? 0;
+        const fraction = required > 0 ? resident / required : 0;
+        showLoading(
+          "Loading nearby world",
+          required > 0
+            ? `${resident} of ${required} collision-safe chunks ready`
+            : "Prioritizing the player vicinity…",
+          0.25 + fraction * 0.75,
+        );
+      }
+    } else if (event.data.kind === "ready") {
+      playable = true;
+      showReady();
+    } else if (event.data.kind === "destroyed") {
+      acknowledgeDestroyed?.();
+      acknowledgeDestroyed = undefined;
+    } else if (event.data.kind === "uiMode") {
       uiCursorMode = event.data.cursor;
       canvas.classList.toggle("ui-cursor", uiCursorMode);
       if (uiCursorMode && document.pointerLockElement === canvas) {
@@ -187,8 +256,14 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       ? `\n${event.filename}:${event.lineno || 0}:${event.colno || 0}`
       : "";
     const stack = event.error instanceof Error && event.error.stack ? `\n${event.error.stack}` : "";
-    failWorker(`${event.message || "The engine worker failed to load."}${location}${stack}`);
+    failWorker(`${event.message || "The engine worker failed to load."}${location}${stack}`, true);
   };
+
+  import.meta.hot?.on("vite:beforeFullReload", async () => {
+    playable = false;
+    showLoading("Reloading Voxels", "Saving local state and restarting the native engine…", 0.1);
+    await shutdownWorker();
+  });
 
   const offscreen = canvas.transferControlToOffscreen();
   const bounds = canvas.getBoundingClientRect();
@@ -218,6 +293,7 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     worker.postMessage({ kind: "input", buffer }, [buffer]);
   };
   const enqueue = (sample: InputSample, immediate = false): void => {
+    if (!playable && sample.kind !== INPUT_CANCEL) return;
     pending.push(sample);
     if (immediate) {
       flush();
@@ -245,6 +321,7 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
   };
 
   canvas.addEventListener("pointerdown", (event) => {
+    if (!playable) return;
     if (event.pointerType !== "mouse") {
       canvas.setPointerCapture(event.pointerId);
     }
@@ -376,27 +453,26 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     worker.postMessage({ kind: "reducedMotion", reduced: event.matches });
   };
   reducedMotion.addEventListener("change", handleReducedMotionChange);
-  let destroyed = false;
+  let pageClosing = false;
   window.addEventListener("pagehide", (event) => {
     // A page entering the back-forward cache is frozen with its worker and must resume intact.
     // A real navigation/reload gets one explicit worker turn to close SQLite and pause the OPFS VFS.
-    if (event.persisted || destroyed) return;
-    destroyed = true;
+    if (event.persisted || pageClosing) return;
+    pageClosing = true;
+    playable = false;
     flush();
     resize.disconnect();
     stopWatchingPixelRatio();
     reducedMotion.removeEventListener("change", handleReducedMotionChange);
-    const error = new Error("Voxels page closed before the snapshot completed");
-    for (const { reject } of snapshotResolvers.values()) reject(error);
-    snapshotResolvers.clear();
-    for (const { reject } of editResolvers.values()) reject(error);
-    editResolvers.clear();
-    for (const { reject } of surfaceEditStateResolvers.values()) reject(error);
-    surfaceEditStateResolvers.clear();
-    worker.postMessage({ kind: "destroy" });
+    rejectPending("Voxels page closed before the request completed");
+    void shutdownWorker();
     delete debugGlobal.__VOXELS__;
   });
 }
 
 const canvas = document.querySelector<HTMLCanvasElement>("#app");
-if (canvas) void start(canvas);
+if (canvas) {
+  void start(canvas);
+} else {
+  showFailure("The application canvas is missing.");
+}

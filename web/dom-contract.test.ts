@@ -7,13 +7,14 @@ const root = new URL("../", import.meta.url);
 describe("canvas-only browser shell", () => {
   it("keeps the canvas as the only rendered body element", () => {
     const html = readFileSync(new URL("index.html", root), "utf8");
-    const body = html.match(/<body>([\s\S]*?)<\/body>/i)?.[1];
+    const body = html.match(/<body(?:\s[^>]*)?>([\s\S]*?)<\/body>/i)?.[1];
     assert.ok(body, "index.html must have a body");
     const tags = Array.from(body.matchAll(/<([a-z][a-z0-9-]*)(?:\s|>)/gi), (match) =>
       match[1]?.toLowerCase(),
     );
     assert.deepEqual(tags, ["canvas"]);
     assert.match(body, /<canvas\s+id="app"[^>]*><\/canvas>/i);
+    assert.match(html, /<body[^>]*class="loading"[^>]*aria-busy="true"/i);
     assert.doesNotMatch(body, /<script/i);
     assert.match(
       html,

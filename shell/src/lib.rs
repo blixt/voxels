@@ -84,6 +84,7 @@ mod web {
         persist_interval_ms: f64,
         max_edit_trackers: usize,
         stream_frame_budget: FrameBudget,
+        startup_ready_radius_chunks: i32,
         surface_load_radius_tiles: [i32; 4],
         surface_retain_margin_tiles: i32,
         enclosure_probe_interval_ms: f64,
@@ -274,6 +275,7 @@ mod web {
         surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
         fine_initialized: Cell<bool>,
         all_lods_ready: Cell<bool>,
+        startup_ready: Cell<bool>,
         store: RefCell<Store>,
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
@@ -391,8 +393,12 @@ mod web {
             let chunks = self.chunks.borrow();
             let mut accumulator = (self.simulation_accumulator.get() + dt.min(0.1))
                 .min(self.config.fixed_step_seconds * self.config.max_steps_per_frame as f32);
+            if !self.startup_ready.get() {
+                accumulator = 0.0;
+            }
             let mut steps = 0;
-            while accumulator >= self.config.fixed_step_seconds
+            while self.startup_ready.get()
+                && accumulator >= self.config.fixed_step_seconds
                 && steps < self.config.max_steps_per_frame
             {
                 if profiling {
@@ -608,6 +614,15 @@ mod web {
                     }
                 },
             );
+            if submitted
+                && self
+                    .scheduler
+                    .borrow()
+                    .vicinity_readiness(self.config.startup_ready_radius_chunks)
+                    .is_ready()
+            {
+                self.startup_ready.set(true);
+            }
             drop(chunks);
             let rendered = renderer.diagnostics();
             drop(renderer);
@@ -680,25 +695,23 @@ mod web {
             };
             let uploaded = !work.upload.is_empty();
 
-            let generation_tickets = work.generation;
-            if !generation_tickets.is_empty()
-                && let Err(error) = self.remote.submit_chunk_batch(
-                    WorldProductPriority::VisibleChunk,
-                    generation_tickets.clone(),
-                )
-            {
-                for ticket in generation_tickets {
-                    let _ = self.scheduler.borrow_mut().retry(ticket);
-                }
-                if !matches!(
-                    error,
-                    RemoteWorldError::Backpressured
-                        | RemoteWorldError::RequestWindowFull
-                        | RemoteWorldError::NotOpen
-                ) {
-                    log_gpu_error(&format!("native world request failed: {error}"));
+            let mut startup_generation = Vec::new();
+            let mut background_generation = Vec::new();
+            for ticket in work.generation {
+                let dx = i64::from(ticket.coord.x) - i64::from(focus.x);
+                let dz = i64::from(ticket.coord.z) - i64::from(focus.z);
+                let radius = i64::from(self.config.startup_ready_radius_chunks);
+                if !self.startup_ready.get() && dx * dx + dz * dz <= radius * radius {
+                    startup_generation.push(ticket);
+                } else {
+                    background_generation.push(ticket);
                 }
             }
+            self.submit_generation_batch(
+                WorldProductPriority::CollisionCritical,
+                startup_generation,
+            );
+            self.submit_generation_batch(WorldProductPriority::VisibleChunk, background_generation);
             for ticket in work.meshing {
                 let chunk = self.chunks.borrow().get(&coord_key(ticket.coord)).cloned();
                 let Some(chunk) = chunk else {
@@ -771,6 +784,29 @@ mod web {
                 self.reconcile_chunk_activation(focus, interest);
             }
             self.stream_surface_lods(camera.position);
+        }
+
+        fn submit_generation_batch(
+            &self,
+            priority: WorldProductPriority,
+            tickets: Vec<voxels_runtime::WorkTicket>,
+        ) {
+            if tickets.is_empty() {
+                return;
+            }
+            if let Err(error) = self.remote.submit_chunk_batch(priority, tickets.clone()) {
+                for ticket in tickets {
+                    let _ = self.scheduler.borrow_mut().retry(ticket);
+                }
+                if !matches!(
+                    error,
+                    RemoteWorldError::Backpressured
+                        | RemoteWorldError::RequestWindowFull
+                        | RemoteWorldError::NotOpen
+                ) {
+                    log_gpu_error(&format!("native world request failed: {error}"));
+                }
+            }
         }
 
         fn drain_remote_generation(&self) {
@@ -1669,6 +1705,22 @@ mod web {
             }
         }
 
+        /// `[resident, required, playable]` for the browser's canvas-only startup surface.
+        pub fn startup_progress(&self) -> Vec<u32> {
+            let Some(engine) = self.engine.as_ref() else {
+                return vec![0, 0, 0];
+            };
+            let readiness = engine
+                .scheduler
+                .borrow()
+                .vicinity_readiness(engine.config.startup_ready_radius_chunks);
+            vec![
+                usize_to_u32(readiness.resident),
+                usize_to_u32(readiness.required),
+                u32::from(engine.startup_ready.get()),
+            ]
+        }
+
         /// Deterministic browser-harness seam that submits through the same server-authoritative
         /// path as pointer input. It does not mutate local world state optimistically.
         pub fn submit_edit(&self, x: i32, y: i32, z: i32, material_id: u16) -> bool {
@@ -2003,6 +2055,7 @@ mod web {
                 meshing: streaming.frame_budget.meshing as usize,
                 upload: streaming.frame_budget.upload as usize,
             },
+            startup_ready_radius_chunks: streaming.startup_ready_radius_chunks as i32,
             surface_load_radius_tiles: streaming
                 .surface
                 .load_radius_tiles
@@ -2152,6 +2205,7 @@ mod web {
             surface_dirty: RefCell::new(BTreeSet::new()),
             fine_initialized: Cell::new(false),
             all_lods_ready: Cell::new(false),
+            startup_ready: Cell::new(false),
             store: RefCell::new(store),
             scope,
             callback: RefCell::new(None),

@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 8;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 9;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -89,6 +89,8 @@ pub struct RuntimeConfig {
 pub struct StreamingConfig {
     pub load_radius_chunks: u32,
     pub vertical_radius_chunks: u32,
+    /// Horizontal radius that must be fully resident before gameplay input is enabled.
+    pub startup_ready_radius_chunks: u32,
     pub retention_margin_chunks: u32,
     pub max_tracked_chunks: u32,
     pub max_secondary_interest_chunks: u32,
@@ -259,6 +261,12 @@ impl ClientConfig {
             "streaming.vertical_radius_chunks",
             0,
             MAX_SIGNED_RUNTIME_INTEGER,
+        )?;
+        ensure_integer_range(
+            self.streaming.startup_ready_radius_chunks,
+            "streaming.startup_ready_radius_chunks",
+            0,
+            self.streaming.load_radius_chunks,
         )?;
         ensure_integer_range(
             self.streaming.retention_margin_chunks,
@@ -676,6 +684,7 @@ mod tests {
             streaming: StreamingConfig {
                 load_radius_chunks: 5,
                 vertical_radius_chunks: 1,
+                startup_ready_radius_chunks: 1,
                 retention_margin_chunks: 1,
                 max_tracked_chunks: 320,
                 max_secondary_interest_chunks: 192,
@@ -768,18 +777,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 8", "schema_version = 7");
+        let wrong_schema = fixture.replace("schema_version = 9", "schema_version = 8");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 7,
+                found: 8,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 8",
-            "schema_version = 8\nunknown_root = true",
+            "schema_version = 9",
+            "schema_version = 9\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
@@ -809,6 +818,11 @@ mod tests {
         let mut config = valid_config();
         config.streaming.load_radius_chunks = MAX_SIGNED_RUNTIME_INTEGER + 1;
         assert_invalid_field(&config, "streaming.load_radius_chunks");
+
+        let mut config = valid_config();
+        config.streaming.startup_ready_radius_chunks =
+            config.streaming.load_radius_chunks.saturating_add(1);
+        assert_invalid_field(&config, "streaming.startup_ready_radius_chunks");
 
         let mut config = valid_config();
         config.streaming.max_tracked_chunks = 1;

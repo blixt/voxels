@@ -8,7 +8,12 @@
     <title>Voxels</title>
     <script type="module" src="/web/main.ts"></script>
   </head>
-  <body>
+  <body
+    class="loading"
+    aria-busy="true"
+    data-loading-title="Starting Voxels"
+    data-loading-detail="Preparing the native engine…"
+  >
     <canvas id="app" aria-label="Procedural voxel world"></canvas>
   </body>
 </html>

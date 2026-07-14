@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 8
+schema_version = 9
 
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
@@ -37,6 +37,9 @@ max_edit_trackers = 128
 [streaming]
 load_radius_chunks = 5
 vertical_radius_chunks = 1
+# Gameplay starts once this complete horizontal radius, including the configured vertical span,
+# has reached GPU-resident state and the renderer has presented it at least once.
+startup_ready_radius_chunks = 1
 retention_margin_chunks = 1
 max_tracked_chunks = 320
 max_secondary_interest_chunks = 192

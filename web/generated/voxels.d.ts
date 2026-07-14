@@ -15,6 +15,10 @@ export class EngineHandle {
     snapshot(): Float32Array;
     start_profile(profile_id: number): boolean;
     /**
+     * `[resident, required, playable]` for the browser's canvas-only startup surface.
+     */
+    startup_progress(): Uint32Array;
+    /**
      * Deterministic browser-harness seam for the exact gameplay dig action. The server, not
      * this API, expands the hit voxel into the fixed 5x5x5 volume and validates reach.
      */
@@ -47,6 +51,7 @@ export interface InitOutput {
     readonly enginehandle_set_reduced_motion: (a: number, b: number) => void;
     readonly enginehandle_snapshot: (a: number) => [number, number];
     readonly enginehandle_start_profile: (a: number, b: number) => number;
+    readonly enginehandle_startup_progress: (a: number) => [number, number];
     readonly enginehandle_submit_dig: (a: number, b: number, c: number, d: number) => number;
     readonly enginehandle_submit_edit: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly enginehandle_surface_edit_state: (a: number, b: number, c: number, d: number) => [number, number];

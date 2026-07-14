@@ -12,22 +12,67 @@ let handle: EngineHandle | null = null;
 let booting: Promise<EngineHandle> | null = null;
 let disposed = false;
 let cursorMode = false;
+let readinessTimer: ReturnType<typeof setInterval> | undefined;
+let disposal: Promise<void> | null = null;
 const pending: Exclude<ToWorker, InitMessage>[] = [];
+
+function stopReadinessMonitor(): void {
+  if (readinessTimer !== undefined) clearInterval(readinessTimer);
+  readinessTimer = undefined;
+}
+
+function monitorReadiness(engine: EngineHandle): void {
+  let previous = "";
+  const update = (): void => {
+    if (disposed) return;
+    const [resident = 0, required = 0, playable = 0] = Array.from(engine.startup_progress());
+    const key = `${resident}/${required}/${playable}`;
+    if (key !== previous) {
+      previous = key;
+      scope.postMessage({ kind: "loading", stage: "vicinity", resident, required });
+    }
+    if (playable === 1) {
+      stopReadinessMonitor();
+      scope.postMessage({ kind: "ready" });
+    }
+  };
+  update();
+  if (!disposed && readinessTimer === undefined) readinessTimer = setInterval(update, 50);
+}
+
+function beginDisposal(): Promise<void> {
+  if (disposal) return disposal;
+  disposed = true;
+  stopReadinessMonitor();
+  pending.length = 0;
+  const engine = handle;
+  handle = null;
+  const pendingBoot = booting;
+  booting = null;
+  disposal = disposeWorkerEngine(engine, pendingBoot, () => {
+    scope.postMessage({ kind: "destroyed" });
+    scope.close();
+  });
+  void disposal.catch((error: unknown) =>
+    console.error(`[voxels] engine shutdown failed: ${String(error)}`),
+  );
+  return disposal;
+}
+
+function fail(message: string): void {
+  if (disposed) return;
+  scope.postMessage({ kind: "error", message });
+  void beginDisposal();
+}
 
 self.addEventListener("error", (event) => {
   if (disposed) return;
-  disposed = true;
-  pending.length = 0;
   const location = event.filename
     ? `\n${event.filename}:${event.lineno || 0}:${event.colno || 0}`
     : "";
   const stack = event.error instanceof Error && event.error.stack ? `\n${event.error.stack}` : "";
-  scope.postMessage({
-    kind: "error",
-    message: `${event.message || "Uncaught engine worker error"}${location}${stack}`,
-  });
+  fail(`${event.message || "Uncaught engine worker error"}${location}${stack}`);
   event.preventDefault();
-  scope.close();
 });
 
 function dispatch(message: Exclude<ToWorker, InitMessage>): void {
@@ -87,23 +132,15 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
       });
       break;
     case "destroy":
-      disposed = true;
-      pending.length = 0;
-      {
-        const engine = handle;
-        handle = null;
-        const pendingBoot = booting;
-        booting = null;
-        void disposeWorkerEngine(engine, pendingBoot, () => scope.close()).catch((error: unknown) =>
-          console.error(`[voxels] engine shutdown failed: ${String(error)}`),
-        );
-      }
+      void beginDisposal();
       break;
   }
 }
 
 async function boot(message: InitMessage): Promise<EngineHandle> {
+  scope.postMessage({ kind: "loading", stage: "wasm" });
   await init();
+  scope.postMessage({ kind: "loading", stage: "world" });
   return create_engine(
     message.canvas,
     message.cssWidth,
@@ -119,6 +156,10 @@ scope.onmessage = (event) => {
   const message = event.data;
   if (disposed) return;
   if (message.kind === "init") {
+    if (booting || handle) {
+      fail("engine worker received duplicate initialization");
+      return;
+    }
     const request = boot(message);
     booting = request;
     void request
@@ -128,14 +169,12 @@ scope.onmessage = (event) => {
         if (disposed) return;
         handle = engine;
         for (const queued of pending.splice(0)) dispatch(queued);
+        monitorReadiness(engine);
       })
       .catch((error: unknown) => {
         if (booting === request) booting = null;
         if (disposed) return;
-        disposed = true;
-        pending.length = 0;
-        scope.postMessage({ kind: "error", message: String(error) });
-        scope.close();
+        fail(String(error));
       });
   } else if (!handle && message.kind !== "destroy") {
     pending.push(message);
