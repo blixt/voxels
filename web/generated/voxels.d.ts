@@ -6,10 +6,19 @@ export class EngineHandle {
     free(): void;
     destroy(): Promise<void>;
     feed_input(bytes: Uint8Array): boolean;
+    /**
+     * `[inventory_revision, air, grass, ..., glow_crystal]` in stable material-ID order.
+     */
+    inventory(): Float64Array;
     resize(css_width: number, css_height: number, dpr: number): void;
     set_reduced_motion(reduced_motion: boolean): void;
     snapshot(): Float32Array;
     start_profile(profile_id: number): boolean;
+    /**
+     * Deterministic browser-harness seam for the exact gameplay dig action. The server, not
+     * this API, expands the hit voxel into the fixed 5x5x5 volume and validates reach.
+     */
+    submit_dig(x: number, y: number, z: number): boolean;
     /**
      * Deterministic browser-harness seam that submits through the same server-authoritative
      * path as pointer input. It does not mutate local world state optimistically.
@@ -33,10 +42,12 @@ export interface InitOutput {
     readonly create_engine: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => any;
     readonly enginehandle_destroy: (a: number) => any;
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => number;
+    readonly enginehandle_inventory: (a: number) => [number, number];
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;
     readonly enginehandle_set_reduced_motion: (a: number, b: number) => void;
     readonly enginehandle_snapshot: (a: number) => [number, number];
     readonly enginehandle_start_profile: (a: number, b: number) => number;
+    readonly enginehandle_submit_dig: (a: number, b: number, c: number, d: number) => number;
     readonly enginehandle_submit_edit: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly enginehandle_surface_edit_state: (a: number, b: number, c: number, d: number) => [number, number];
     readonly rust_sqlite_wasm_abort: () => void;

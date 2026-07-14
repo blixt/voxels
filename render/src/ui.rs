@@ -1242,15 +1242,14 @@ impl MissionControlUi {
                 PANEL_BORDER.with_alpha(toast_alpha),
                 SurfaceRole::Toast,
             );
-            let toast = self.gameplay_toast.as_deref().unwrap_or_else(|| {
-                if self.stats.swimming {
-                    "WASD SWIM  /  SPACE ASCEND  /  SHIFT DIVE  /  F3 CONTROLS"
-                } else if layout.toast.width < 500.0 {
-                    "WASD MOVE  /  SPACE JUMP  /  F3 CONTROLS"
-                } else {
-                    "CLICK TO LOOK  /  WASD MOVE  /  SPACE JUMP  /  LMB DIG 0.5 M CUBE  /  RMB PLACE  /  F3"
-                }
-            });
+            let default_toast = if self.stats.swimming {
+                "WASD SWIM  /  SPACE ASCEND  /  SHIFT DIVE  /  F3 CONTROLS"
+            } else if layout.toast.width < 500.0 {
+                "WASD MOVE  /  SPACE JUMP  /  F3 CONTROLS"
+            } else {
+                "CLICK TO LOOK  /  WASD MOVE  /  SPACE JUMP  /  LMB DIG 0.5 M CUBE  /  RMB PLACE  /  F3"
+            };
+            let toast = self.gameplay_toast.as_deref().unwrap_or(default_toast);
             push_text(
                 draw,
                 toast,

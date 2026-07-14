@@ -10,8 +10,8 @@ use voxels_core::{
     RemotePoseUpdate, RemotePresenceDelta, RemotePresenceTimeline,
 };
 use voxels_world::protocol::{
-    self, OpenPresence, PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING,
-    PlayerId, PlayerPoseUpdate, PresencePing, PresencePong, PresenceSessionId, WorldOpened,
+    self, OpenPresence, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING, PlayerId, PlayerPoseUpdate,
+    PresencePing, PresencePong, PresenceSessionId, WorldOpened,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -74,7 +74,6 @@ impl RemotePresenceClient {
             last_pose_send_ms: Cell::new(f64::NEG_INFINITY),
             last_ping_send_ms: Cell::new(f64::NEG_INFINITY),
             reconnect_after_ms: Cell::new(0.0),
-            discontinuity_pending: Cell::new(true),
             clock: Cell::new(ClockSync::default()),
             timeline: RefCell::new(timeline),
             last_error: RefCell::new(None),
@@ -108,10 +107,13 @@ impl RemotePresenceClient {
         camera: &CameraState,
         local_time_ms: f64,
         frame_delta_seconds: f32,
+        send_local_pose: bool,
     ) -> Vec<RemoteAvatarPose> {
         if self.inner.state.get() == PresenceConnectionState::Open {
             self.inner.maybe_send_ping(local_time_ms);
-            self.inner.maybe_send_pose(camera, local_time_ms);
+            if send_local_pose {
+                self.inner.maybe_send_pose(camera, local_time_ms);
+            }
         }
         let estimated_server_time = self.inner.clock.get().server_time(local_time_ms);
         self.inner
@@ -152,7 +154,6 @@ struct PresenceInner {
     last_pose_send_ms: Cell<f64>,
     last_ping_send_ms: Cell<f64>,
     reconnect_after_ms: Cell<f64>,
-    discontinuity_pending: Cell<bool>,
     clock: Cell<ClockSync>,
     timeline: RefCell<RemotePresenceTimeline>,
     last_error: RefCell<Option<String>>,
@@ -454,9 +455,6 @@ impl PresenceInner {
         if camera.fluid_state().swimming {
             flags |= PLAYER_POSE_SWIMMING;
         }
-        if self.discontinuity_pending.get() {
-            flags |= PLAYER_POSE_DISCONTINUITY;
-        }
         let sequence = self.next_pose_sequence.get().max(1);
         let clock = self.clock.get();
         let sample_server_time_ms = if clock.synchronized {
@@ -485,7 +483,6 @@ impl PresenceInner {
         }
         self.next_pose_sequence.set(sequence.wrapping_add(1).max(1));
         self.last_pose_send_ms.set(local_time_ms);
-        self.discontinuity_pending.set(false);
     }
 
     fn maybe_send_ping(&self, local_time_ms: f64) {
@@ -525,7 +522,6 @@ impl PresenceInner {
         self.session_id.set(Some(opened.presence_session_id));
         self.next_pose_sequence.set(1);
         self.next_ping_sequence.set(1);
-        self.discontinuity_pending.set(true);
         self.clock.set(ClockSync::default());
         self.timeline.borrow_mut().clear();
         self.state.set(PresenceConnectionState::WaitingToReconnect);

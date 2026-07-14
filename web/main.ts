@@ -13,6 +13,7 @@ import {
   INPUT_KEY_UP,
   INPUT_POINTER_DOWN,
   INPUT_POINTER_MOVE,
+  INPUT_WHEEL,
   packInput,
   type FromWorker,
   type InputSample,
@@ -65,6 +66,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     number,
     { resolve: (submitted: boolean) => void; reject: (reason: Error) => void }
   >();
+  const inventoryResolvers = new Map<
+    number,
+    { resolve: (values: number[]) => void; reject: (reason: Error) => void }
+  >();
   const surfaceEditStateResolvers = new Map<
     number,
     { resolve: (values: number[]) => void; reject: (reason: Error) => void }
@@ -75,6 +80,8 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       profile(profileId: number): void;
       look(deltaX: number, deltaY: number): void;
       submitEdit(x: number, y: number, z: number, materialId: number): Promise<boolean>;
+      submitDig(x: number, y: number, z: number): Promise<boolean>;
+      inventory(): Promise<number[]>;
       surfaceEditState(stride: number, x: number, z: number): Promise<number[]>;
       readonly player: BrowserPlayerSession;
       playerUrl(name: string): string;
@@ -88,6 +95,8 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     snapshotResolvers.clear();
     for (const { reject } of editResolvers.values()) reject(error);
     editResolvers.clear();
+    for (const { reject } of inventoryResolvers.values()) reject(error);
+    inventoryResolvers.clear();
     for (const { reject } of surfaceEditStateResolvers.values()) reject(error);
     surfaceEditStateResolvers.clear();
     delete debugGlobal.__VOXELS__;
@@ -123,6 +132,20 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
         editResolvers.set(requestId, { resolve, reject });
         worker.postMessage({ kind: "submitEdit", requestId, x, y, z, materialId });
       }),
+    submitDig: (x, y, z) =>
+      new Promise<boolean>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        editResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({ kind: "submitDig", requestId, x, y, z });
+      }),
+    inventory: () =>
+      new Promise<number[]>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        inventoryResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({ kind: "inventory", requestId });
+      }),
     surfaceEditState: (stride, x, z) =>
       new Promise<number[]>((resolve, reject) => {
         const requestId = nextSnapshotRequest;
@@ -148,6 +171,12 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     } else if (event.data.kind === "submitEdit") {
       editResolvers.get(event.data.requestId)?.resolve(event.data.submitted);
       editResolvers.delete(event.data.requestId);
+    } else if (event.data.kind === "submitDig") {
+      editResolvers.get(event.data.requestId)?.resolve(event.data.submitted);
+      editResolvers.delete(event.data.requestId);
+    } else if (event.data.kind === "inventory") {
+      inventoryResolvers.get(event.data.requestId)?.resolve(event.data.values);
+      inventoryResolvers.delete(event.data.requestId);
     } else if (event.data.kind === "surfaceEditState") {
       surfaceEditStateResolvers.get(event.data.requestId)?.resolve(event.data.values);
       surfaceEditStateResolvers.delete(event.data.requestId);
@@ -254,6 +283,20 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     "wheel",
     (event) => {
       event.preventDefault();
+      if (event.deltaY === 0) return;
+      enqueue(
+        {
+          kind: INPUT_WHEEL,
+          code: 0,
+          buttons: 0,
+          x: 0,
+          y: 0,
+          dx: 0,
+          dy: event.deltaY,
+          flags: 0,
+        },
+        true,
+      );
     },
     { passive: false },
   );

@@ -2,6 +2,7 @@ export const INPUT_RECORD_BYTES = 24;
 
 export const INPUT_POINTER_DOWN = 0;
 export const INPUT_POINTER_MOVE = 1;
+export const INPUT_WHEEL = 2;
 export const INPUT_KEY_DOWN = 4;
 export const INPUT_KEY_UP = 5;
 export const INPUT_CANCEL = 6;
@@ -64,6 +65,8 @@ export type ToWorker =
       z: number;
       materialId: number;
     }
+  | { kind: "submitDig"; requestId: number; x: number; y: number; z: number }
+  | { kind: "inventory"; requestId: number }
   | { kind: "surfaceEditState"; requestId: number; stride: number; x: number; z: number }
   | { kind: "destroy" };
 
@@ -72,4 +75,6 @@ export type FromWorker =
   | { kind: "error"; message: string }
   | { kind: "snapshot"; requestId: number; values: number[] }
   | { kind: "submitEdit"; requestId: number; submitted: boolean }
+  | { kind: "submitDig"; requestId: number; submitted: boolean }
+  | { kind: "inventory"; requestId: number; values: number[] }
   | { kind: "surfaceEditState"; requestId: number; values: number[] };

@@ -21,15 +21,12 @@ use web_sys::{AbortController, BroadcastChannel, DedicatedWorkerGlobalScope, Mes
 const SCHEMA_VERSION: i64 = 6;
 const CHANNEL_NAME: &str = "voxels-db-p6";
 const LOCK_NAME: &str = "voxels-db-p6-owner";
-const WIRE_VERSION: f64 = 3.0;
+const WIRE_VERSION: f64 = 4.0;
 const MSG_REQUEST: f64 = 0.0;
 const MSG_RESPONSE: f64 = 1.0;
 const RESULT_OK: f64 = 0.0;
 const RESULT_ERROR: f64 = 1.0;
-const RESULT_NO_CAMERA: f64 = 2.0;
-const RESULT_CAMERA: f64 = 3.0;
-const OP_LOAD_CAMERA: f64 = 0.0;
-const OP_SAVE_CAMERA: f64 = 1.0;
+const OP_SAVE_CAMERA: f64 = 0.0;
 
 type MessageHandler = Closure<dyn FnMut(MessageEvent)>;
 
@@ -79,9 +76,6 @@ impl PersistenceWorld {
 
 #[derive(Clone)]
 enum Operation {
-    LoadCamera {
-        player_id: PlayerId,
-    },
     SaveCamera {
         player_id: PlayerId,
         values: [f32; 5],
@@ -90,7 +84,6 @@ enum Operation {
 
 enum OperationResult {
     Ok,
-    Camera(Option<[f32; 5]>),
     Error(String),
 }
 
@@ -173,7 +166,6 @@ struct Coordinator {
 
 pub struct Store {
     coordinator: Rc<Coordinator>,
-    initial_camera: Option<(CameraState, bool)>,
 }
 
 impl Store {
@@ -182,29 +174,9 @@ impl Store {
         player: PersistencePlayer,
         config: PersistenceConfig,
     ) -> Result<Self, JsValue> {
-        let coordinator = Coordinator::start(world, player, config).await?;
-        let initial_camera = match coordinator
-            .request(Operation::LoadCamera {
-                player_id: player.player_id,
-            })
-            .await
-        {
-            OperationResult::Camera(camera) => camera.map(crate::camera_from_persisted_values),
-            OperationResult::Error(error) => return Err(JsValue::from_str(&error)),
-            _ => {
-                return Err(JsValue::from_str(
-                    "camera load returned an invalid response",
-                ));
-            }
-        };
         Ok(Self {
-            coordinator,
-            initial_camera,
+            coordinator: Coordinator::start(world, player, config).await?,
         })
-    }
-
-    pub fn load_camera(&mut self) -> Result<Option<(CameraState, bool)>, JsValue> {
-        Ok(self.initial_camera.take())
     }
 
     pub fn save_camera(&self, camera: &CameraState) -> Result<(), JsValue> {
@@ -314,21 +286,13 @@ impl Coordinator {
         }
 
         let mut queue = self.write_queue.borrow_mut();
-        match &operation {
-            Operation::SaveCamera { player_id, .. } => {
-                if let Some(pending) = queue
-                    .iter_mut()
-                    .rev()
-                    .find(|pending| {
-                        matches!(pending, Operation::SaveCamera { player_id: queued, .. } if queued == player_id)
-                    })
-                {
-                    *pending = operation;
-                } else {
-                    queue.push_back(operation);
-                }
-            }
-            _ => queue.push_back(operation),
+        let Operation::SaveCamera { player_id, .. } = &operation;
+        if let Some(pending) = queue.iter_mut().rev().find(|pending| {
+            matches!(pending, Operation::SaveCamera { player_id: queued, .. } if queued == player_id)
+        }) {
+            *pending = operation;
+        } else {
+            queue.push_back(operation);
         }
         drop(queue);
         self.start_write_drain();
@@ -672,29 +636,8 @@ async fn open_leader(
 
 fn run_operation(connection: &Connection, operation: &Operation) -> OperationResult {
     match operation {
-        Operation::LoadCamera { player_id } => load_camera(connection, *player_id),
         Operation::SaveCamera { player_id, values } => save_camera(connection, *player_id, *values),
     }
-}
-
-fn load_camera(connection: &Connection, player_id: PlayerId) -> OperationResult {
-    connection
-        .query_row(
-            "SELECT x, y, z, yaw, pitch FROM local_player_state WHERE player_id = ?1",
-            params![player_id.as_bytes().as_slice()],
-            |row| {
-                Ok([
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ])
-            },
-        )
-        .optional()
-        .map(OperationResult::Camera)
-        .unwrap_or_else(|error| OperationResult::Error(format!("load camera: {error}")))
 }
 
 fn save_camera(connection: &Connection, player_id: PlayerId, values: [f32; 5]) -> OperationResult {
@@ -719,10 +662,6 @@ fn save_camera(connection: &Connection, player_id: PlayerId, values: [f32; 5]) -
 
 fn encode_operation(message: &js_sys::Array, operation: &Operation) {
     match operation {
-        Operation::LoadCamera { player_id } => {
-            push_number(message, OP_LOAD_CAMERA);
-            message.push(&JsValue::from_str(&player_id.to_string()));
-        }
         Operation::SaveCamera { player_id, values } => {
             push_number(message, OP_SAVE_CAMERA);
             message.push(&JsValue::from_str(&player_id.to_string()));
@@ -735,9 +674,6 @@ fn encode_operation(message: &js_sys::Array, operation: &Operation) {
 
 fn decode_operation(message: &js_sys::Array) -> Result<Operation, String> {
     match number(message, 5) {
-        Some(OP_LOAD_CAMERA) => Ok(Operation::LoadCamera {
-            player_id: decode_player_id(message, 6)?,
-        }),
         Some(OP_SAVE_CAMERA) => Ok(Operation::SaveCamera {
             player_id: decode_player_id(message, 6)?,
             values: [
@@ -772,13 +708,6 @@ fn encode_result(message: &js_sys::Array, result: &OperationResult) {
             push_number(message, RESULT_ERROR);
             message.push(&JsValue::from_str(error));
         }
-        OperationResult::Camera(None) => push_number(message, RESULT_NO_CAMERA),
-        OperationResult::Camera(Some(values)) => {
-            push_number(message, RESULT_CAMERA);
-            for value in values {
-                push_number(message, f64::from(*value));
-            }
-        }
     }
 }
 
@@ -786,14 +715,6 @@ fn decode_result(message: &js_sys::Array) -> Option<OperationResult> {
     match number(message, 4)? {
         RESULT_OK => Some(OperationResult::Ok),
         RESULT_ERROR => Some(OperationResult::Error(message.get(5).as_string()?)),
-        RESULT_NO_CAMERA => Some(OperationResult::Camera(None)),
-        RESULT_CAMERA => Some(OperationResult::Camera(Some([
-            finite_f32(message, 5).ok()?,
-            finite_f32(message, 6).ok()?,
-            finite_f32(message, 7).ok()?,
-            finite_f32(message, 8).ok()?,
-            finite_f32(message, 9).ok()?,
-        ]))),
         _ => None,
     }
 }
@@ -802,9 +723,6 @@ fn operation_result(result: OperationResult) -> Result<(), JsValue> {
     match result {
         OperationResult::Ok => Ok(()),
         OperationResult::Error(error) => Err(JsValue::from_str(&error)),
-        _ => Err(JsValue::from_str(
-            "persistence write returned an invalid response",
-        )),
     }
 }
 

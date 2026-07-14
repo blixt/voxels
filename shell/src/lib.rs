@@ -60,7 +60,9 @@ mod web {
         AuthoritativeEditRevisions, ChunkState, CompletionStatus, FrameBudget, StreamConfig,
         StreamScheduler, SurfaceFocusAction, SurfaceRevisionCache, revision_satisfies,
     };
-    use voxels_world::protocol::{BrowserUserId, PlayerId, PlayerIdentity};
+    use voxels_world::protocol::{
+        BrowserUserId, EditAction, MaterialInventory, PlayerId, PlayerIdentity, VoxelMutation,
+    };
     use voxels_world::{
         AtmosphereSample, CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT_PORTAL_COUNT,
         CaveStreamInterest, Chunk, ChunkCoord, EditMap, Material, MeshedChunk, MeshingHalo,
@@ -236,6 +238,7 @@ mod web {
     const _: () = assert!(INPUT_RECORD_SIZE == 24);
     const KIND_POINTER_MOVE: u8 = 1;
     const KIND_POINTER_DOWN: u8 = 0;
+    const KIND_WHEEL: u8 = 2;
     const KIND_KEY_DOWN: u8 = 4;
     const KIND_KEY_UP: u8 = 5;
     const KIND_CANCEL: u8 = 6;
@@ -254,6 +257,7 @@ mod web {
         source_identity_hash: WorldSourceIdentityHash,
         remote_environment: (AtmosphereSample, SurfaceRegion),
         edits: RefCell<EditMap>,
+        inventory: Cell<MaterialInventory>,
         edit_revisions: RefCell<AuthoritativeEditRevisions>,
         scheduler: RefCell<StreamScheduler>,
         chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
@@ -479,7 +483,10 @@ mod web {
             if let Some(opened) = self.remote.world_opened() {
                 self.presence.ensure_session(&opened, time);
             }
-            let remote_avatars = self.presence.update(&camera, time, dt);
+            // The streaming profiler moves a synthetic camera outside gameplay simulation. It may
+            // stream/render that route, but it must never update authoritative player position or
+            // gain edit reach from benchmark-only motion.
+            let remote_avatars = self.presence.update(&camera, time, dt, !profiling);
             if let Some(error) = self.presence.take_error() {
                 log_gpu_error(&format!("player presence: {error}"));
             }
@@ -1251,6 +1258,13 @@ mod web {
                                 .look(Vec2::new(record.dx, record.dy));
                         }
                     }
+                    KIND_WHEEL => {
+                        let direction = if record.dy >= 0.0 { 1 } else { -1 };
+                        let _ = self
+                            .renderer
+                            .borrow_mut()
+                            .cycle_placement_material(direction);
+                    }
                     KIND_KEY_DOWN => {
                         if record.code == 8 {
                             self.renderer.borrow_mut().handle_ui_key(
@@ -1324,36 +1338,39 @@ mod web {
             let Some(hit) = hit else {
                 return;
             };
-            let (target, material) = if buttons & 1 != 0 {
-                (
-                    VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]),
-                    Material::Air,
-                )
+            let action = if buttons & 1 != 0 {
+                EditAction::Dig {
+                    hit: VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]),
+                }
             } else if buttons & 2 != 0 {
                 if camera.intersects_voxel(hit.adjacent, VOXEL_SIZE_METRES) {
                     return;
                 }
-                (
-                    VoxelCoord::new(hit.adjacent[0], hit.adjacent[1], hit.adjacent[2]),
-                    placement_material,
-                )
+                EditAction::Place {
+                    coord: VoxelCoord::new(hit.adjacent[0], hit.adjacent[1], hit.adjacent[2]),
+                    material: placement_material,
+                }
             } else {
                 return;
             };
 
-            // The server owns sparse-source compaction. The browser submits the intended canonical
-            // material and never guesses whether an existing voxel came from source terrain or a
-            // prior player edit.
-            let _ = self.submit_local_edit(target, Some(material));
+            // The server expands digging to the fixed half-metre cube and atomically owns material
+            // yield/debit. The browser never emits 125 independently raceable mutations.
+            let _ = self.submit_local_edit(action);
         }
 
         fn apply_server_edits(&self) {
             for event in self.remote.drain_edit_events() {
                 match event {
                     RemoteEditEvent::Commit(commit) => {
-                        self.apply_durable_edit(
-                            commit.coord,
-                            commit.material,
+                        if let Some(inventory) = commit.editor_inventory {
+                            self.inventory.set(inventory);
+                            self.renderer
+                                .borrow_mut()
+                                .set_inventory_counts(inventory.counts);
+                        }
+                        self.apply_durable_edits(
+                            &commit.mutations,
                             commit.revision,
                             &commit.affected_chunks,
                             &commit.affected_surface_tiles,
@@ -1369,13 +1386,14 @@ mod web {
                         log_gpu_error(&format!(
                             "server rejected edit operation {operation_id}: {message}"
                         ));
+                        self.renderer.borrow_mut().show_gameplay_toast(message);
                     }
                 }
             }
         }
 
-        fn submit_local_edit(&self, target: VoxelCoord, durable: Option<Material>) -> [usize; 2] {
-            match self.remote.submit_edit(target, durable) {
+        fn submit_local_edit(&self, action: EditAction) -> [usize; 2] {
+            match self.remote.submit_edit(action) {
                 Ok(_) => [1, 0],
                 Err(error) => {
                     log_gpu_error(&format!("submit authoritative edit: {error}"));
@@ -1384,28 +1402,37 @@ mod web {
             }
         }
 
-        fn apply_durable_edit(
+        fn apply_durable_edits(
             &self,
-            target: VoxelCoord,
-            durable: Option<Material>,
+            mutations: &[VoxelMutation],
             server_revision: u64,
             affected_chunks: &[ChunkCoord],
             affected_surface_tiles: &[SurfaceTileCoord],
         ) -> EditRequirements {
-            let apply_value = self.edit_revisions.borrow_mut().observe_commit(
-                target,
+            if mutations.is_empty() {
+                return EditRequirements::default();
+            }
+            let coords = mutations
+                .iter()
+                .map(|mutation| mutation.coord)
+                .collect::<Vec<_>>();
+            let apply_values = self.edit_revisions.borrow_mut().observe_commit_batch(
+                &coords,
                 server_revision,
                 affected_chunks,
                 affected_surface_tiles,
             );
-            if apply_value {
-                self.edits
-                    .borrow_mut()
-                    .replace_durable_override(target, durable);
+            {
+                let mut edits = self.edits.borrow_mut();
+                for (mutation, apply) in mutations.iter().zip(apply_values) {
+                    if apply {
+                        edits.replace_durable_override(mutation.coord, Some(mutation.material));
+                    }
+                }
             }
             let canonical = {
                 let mut scheduler = self.scheduler.borrow_mut();
-                let report = scheduler.mark_voxel_edited(target);
+                let report = scheduler.mark_voxels_edited(&coords);
                 report
                     .affected_chunks
                     .into_iter()
@@ -1444,6 +1471,7 @@ mod web {
             let started_ms = performance_now(performance.as_ref());
             let requirements = EditRequirements { canonical, surface };
             let mut trackers = self.edit_trackers.borrow_mut();
+            let target = mutations[0].coord;
             if let Some(index) = trackers.iter().position(|tracker| tracker.target == target) {
                 trackers.remove(index);
             }
@@ -1636,7 +1664,33 @@ mod web {
             let Some(material) = Material::from_id(material_id) else {
                 return false;
             };
-            engine.submit_local_edit(VoxelCoord::new(x, y, z), Some(material))[0] == 1
+            engine.submit_local_edit(EditAction::Place {
+                coord: VoxelCoord::new(x, y, z),
+                material,
+            })[0]
+                == 1
+        }
+
+        /// Deterministic browser-harness seam for the exact gameplay dig action. The server, not
+        /// this API, expands the hit voxel into the fixed 5x5x5 volume and validates reach.
+        pub fn submit_dig(&self, x: i32, y: i32, z: i32) -> bool {
+            self.engine.as_ref().is_some_and(|engine| {
+                engine.submit_local_edit(EditAction::Dig {
+                    hit: VoxelCoord::new(x, y, z),
+                })[0]
+                    == 1
+            })
+        }
+
+        /// `[inventory_revision, air, grass, ..., glow_crystal]` in stable material-ID order.
+        pub fn inventory(&self) -> Vec<f64> {
+            let Some(engine) = self.engine.as_ref() else {
+                return Vec::new();
+            };
+            let inventory = engine.inventory.get();
+            std::iter::once(inventory.revision as f64)
+                .chain(inventory.counts.into_iter().map(|count| count as f64))
+                .collect()
         }
 
         /// Returns `[tile_x, tile_z, required_server_revision, accepted_server_revision,
@@ -1995,7 +2049,7 @@ mod web {
             .manifest_hash()
             .map_err(|error| JsValue::from_str(&format!("native world manifest: {error}")))?;
         let persistence_world = PersistenceWorld::negotiated(manifest_hash);
-        let mut store = Store::open(
+        let store = Store::open(
             persistence_world,
             PersistencePlayer {
                 player_id: identity.player_id,
@@ -2010,40 +2064,17 @@ mod web {
         .await?;
         let edits = EditMap::default();
         let spawn = opened.spawn;
-        let spawn_surface = SurfaceSample {
-            height: spawn.height,
-            material: spawn.material,
-            water_level: spawn.water_level,
-            region: spawn.region,
-            moisture: spawn.moisture,
-            temperature: spawn.temperature,
-            ridge: spawn.ridge,
-            route: None,
-        };
-        let spawn_x = (spawn.x as f32 + 0.5) * VOXEL_SIZE_METRES;
-        let spawn_z = (spawn.z as f32 + 0.5) * VOXEL_SIZE_METRES;
-        let spawn_top = spawn_surface
-            .water_level
-            .unwrap_or(spawn_surface.height)
-            .max(spawn_surface.height);
-        let spawn_y = (spawn_top + 1) as f32 * VOXEL_SIZE_METRES
-            + voxels_core::PLAYER_EYE_HEIGHT_METRES
-            + 0.02;
-        let spawn_camera = CameraState::spawn(glam::Vec3::new(spawn_x, spawn_y, spawn_z));
-        let mut persisted_camera = None;
-        let mut camera = spawn_camera;
-        if let Some((candidate, canonical)) = store.load_camera()?
-            && candidate.position.is_finite()
-            && candidate.yaw.is_finite()
-            && candidate.pitch.is_finite()
-        {
-            // The database is namespaced by the negotiated manifest hash. Exact resident chunks
-            // become the runtime collision authority as streaming starts.
-            camera = candidate;
-            if canonical {
-                persisted_camera = Some(crate::camera_persistence_values(&candidate));
-            }
-        }
+        // Position and look direction now resume from server-owned player state. OPFS remains a
+        // local cache but can no longer turn a modified browser database into a teleport primitive.
+        let resume = opened.player_resume;
+        let (camera, _) = crate::camera_from_persisted_values([
+            resume.eye_position_metres[0],
+            resume.eye_position_metres[1],
+            resume.eye_position_metres[2],
+            resume.look_yaw_radians,
+            resume.look_pitch_radians,
+        ]);
+        let persisted_camera = Some(crate::camera_persistence_values(&camera));
         let presence =
             RemotePresenceClient::start(world_transport, client_config.multiplayer, &opened)
                 .map_err(|error| JsValue::from_str(&format!("connect player presence: {error}")))?;
@@ -2059,6 +2090,7 @@ mod web {
         .map_err(|error| JsValue::from_str(&error))?;
         let mut renderer = renderer;
         renderer.set_reduced_motion(reduced_motion);
+        renderer.set_inventory_counts(opened.inventory.counts);
         let scheduler = StreamScheduler::new(StreamConfig {
             load_radius_chunks: streaming.load_radius_chunks as i32,
             vertical_radius_chunks: streaming.vertical_radius_chunks as i32,
@@ -2089,6 +2121,7 @@ mod web {
             source_identity_hash: opened.manifest.source_identity_hash(),
             remote_environment,
             edits: RefCell::new(edits),
+            inventory: Cell::new(opened.inventory),
             edit_revisions: RefCell::new(AuthoritativeEditRevisions::default()),
             scheduler: RefCell::new(scheduler),
             chunks: RefCell::new(BTreeMap::new()),

@@ -76,9 +76,11 @@ impl PlacementInventory {
     fn new(selected: Material) -> Self {
         Self {
             counts: [0; Material::ALL.len()],
-            selected: is_placeable_material(selected)
-                .then_some(selected)
-                .unwrap_or(Material::Grass),
+            selected: if is_placeable_material(selected) {
+                selected
+            } else {
+                Material::Grass
+            },
         }
     }
 

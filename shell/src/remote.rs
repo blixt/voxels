@@ -14,12 +14,13 @@ use std::task::{Context, Poll, Waker};
 use voxels_client_config::WorldTransportConfig;
 use voxels_runtime::{WorkStage, WorkTicket};
 use voxels_world::protocol::{
-    self, ChunkBatchRequest, ChunkBatchResult, EditCommand, EditCommit, OpenWorld, PlayerIdentity,
-    SurfaceTileBatchRequest, SurfaceTileBatchResult, WorldCapabilities, WorldOpened,
+    self, ChunkBatchRequest, ChunkBatchResult, EditAction, EditCommand, EditCommit, OpenWorld,
+    PlayerIdentity, SurfaceTileBatchRequest, SurfaceTileBatchResult, WorldCapabilities,
+    WorldOpened,
 };
 use voxels_world::{
-    ChunkCoord, ChunkSnapshot, Material, SurfaceTileCoord, VoxelCoord, WorldManifestHash,
-    WorldProductPriority, WorldSourceError, WorldSourceIdentityHash,
+    ChunkCoord, ChunkSnapshot, SurfaceTileCoord, WorldManifestHash, WorldProductPriority,
+    WorldSourceError, WorldSourceIdentityHash,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -256,12 +257,8 @@ impl RemoteWorldClient {
             .collect()
     }
 
-    pub fn submit_edit(
-        &self,
-        coord: VoxelCoord,
-        material: Option<Material>,
-    ) -> Result<RemoteRequestId, RemoteWorldError> {
-        self.inner.send_edit(coord, material)
+    pub fn submit_edit(&self, action: EditAction) -> Result<RemoteRequestId, RemoteWorldError> {
+        self.inner.send_edit(action)
     }
 
     pub fn drain_edit_events(&self) -> Vec<RemoteEditEvent> {
@@ -725,8 +722,7 @@ impl RemoteInner {
                     .borrow()
                     .as_ref()
                     .is_some_and(|opened| opened.connection_id == commit.editor_connection_id)
-                    && command.coord == commit.coord
-                    && command.material == commit.material
+                    && command.edit_session_id == commit.edit_session_id
             });
         if matches_pending {
             self.pending_edits.borrow_mut().remove(&commit.operation_id);
@@ -785,11 +781,7 @@ impl RemoteInner {
         }
     }
 
-    fn send_edit(
-        self: &Rc<Self>,
-        coord: VoxelCoord,
-        material: Option<Material>,
-    ) -> Result<RemoteRequestId, RemoteWorldError> {
+    fn send_edit(self: &Rc<Self>, action: EditAction) -> Result<RemoteRequestId, RemoteWorldError> {
         if self.state.get() != RemoteConnectionState::Open {
             return Err(self.terminal_error().unwrap_or(RemoteWorldError::NotOpen));
         }
@@ -800,10 +792,16 @@ impl RemoteInner {
             return Err(RemoteWorldError::Backpressured);
         }
         let operation_id = self.allocate_request_id()?;
+        let edit_session_id = self
+            .opened
+            .borrow()
+            .as_ref()
+            .map(|opened| opened.edit_session_id)
+            .ok_or(RemoteWorldError::NotOpen)?;
         let command = EditCommand {
             operation_id,
-            coord,
-            material,
+            edit_session_id,
+            action,
         };
         let frame = protocol::encode_edit_command(command)
             .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;

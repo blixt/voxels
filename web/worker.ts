@@ -65,6 +65,20 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
           handle?.submit_edit(message.x, message.y, message.z, message.materialId) ?? false,
       });
       break;
+    case "submitDig":
+      scope.postMessage({
+        kind: "submitDig",
+        requestId: message.requestId,
+        submitted: handle?.submit_dig(message.x, message.y, message.z) ?? false,
+      });
+      break;
+    case "inventory":
+      scope.postMessage({
+        kind: "inventory",
+        requestId: message.requestId,
+        values: Array.from(handle?.inventory() ?? []),
+      });
+      break;
     case "surfaceEditState":
       scope.postMessage({
         kind: "surfaceEditState",
