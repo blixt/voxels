@@ -58,7 +58,7 @@ mod web {
     use voxels_render::ui::LiveStats;
     use voxels_runtime::{
         ChunkState, CompletionStatus, FrameBudget, StreamConfig, StreamScheduler,
-        SurfaceFocusAction, SurfaceRevisionCache, revision_satisfies,
+        SurfaceFocusAction, SurfaceRevisionCache, prioritize_surface_tiles, revision_satisfies,
     };
     use voxels_world::protocol::{BrowserUserId, PlayerId, PlayerIdentity};
     use voxels_world::{
@@ -264,6 +264,7 @@ mod web {
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_revisions: RefCell<SurfaceRevisionCache>,
         surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
+        surface_priority_yaw: Cell<f32>,
         surface_in_flight: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
         fine_initialized: Cell<bool>,
@@ -764,7 +765,7 @@ mod web {
             if uploaded || evicted {
                 self.reconcile_chunk_activation(focus, interest);
             }
-            self.stream_surface_lods(camera.position);
+            self.stream_surface_lods(camera);
         }
 
         fn drain_remote_generation(&self) {
@@ -1022,11 +1023,13 @@ mod web {
             counts
         }
 
-        fn stream_surface_lods(&self, position: glam::Vec3) {
+        fn stream_surface_lods(&self, camera: &CameraState) {
+            let position = camera.position;
             let focus = std::array::from_fn(|index| {
                 world_to_surface_tile(position, SurfaceLodLevel::ALL[index])
             });
-            if self.surface_focus.get() != Some(focus) {
+            let focus_changed = self.surface_focus.get() != Some(focus);
+            if focus_changed {
                 self.surface_focus.set(Some(focus));
                 let mut desired = BTreeSet::new();
                 for (index, level) in SurfaceLodLevel::ALL.into_iter().enumerate() {
@@ -1113,20 +1116,28 @@ mod web {
                 drop(dirty);
                 drop(revisions);
                 drop(resident);
-                candidates.sort_by_key(|coord| {
-                    let index = coord.level.index() as usize;
-                    let dx = coord.x - focus[index].x;
-                    let dz = coord.z - focus[index].z;
-                    (
-                        u8::MAX - coord.level.index(),
-                        dx * dx + dz * dz,
-                        coord.z,
-                        coord.x,
-                    )
-                });
+                prioritize_surface_tiles(
+                    &mut candidates,
+                    [camera.position.x, camera.position.z],
+                    camera.yaw,
+                    focus,
+                );
                 let mut queue = self.surface_queue.borrow_mut();
                 queue.clear();
                 queue.extend(candidates);
+            }
+
+            let priority_yaw = self.surface_priority_yaw.get();
+            let (sin_delta, cos_delta) = (camera.yaw - priority_yaw).sin_cos();
+            let yaw_delta = sin_delta.atan2(cos_delta).abs();
+            if focus_changed || !priority_yaw.is_finite() || yaw_delta > 0.01 {
+                prioritize_surface_tiles(
+                    self.surface_queue.borrow_mut().make_contiguous(),
+                    [camera.position.x, camera.position.z],
+                    camera.yaw,
+                    focus,
+                );
+                self.surface_priority_yaw.set(camera.yaw);
             }
 
             const REMOTE_SURFACE_BATCH: usize = 4;
@@ -2042,6 +2053,7 @@ mod web {
             surface_resident: RefCell::new(BTreeSet::new()),
             surface_revisions: RefCell::new(SurfaceRevisionCache::new()),
             surface_queue: RefCell::new(VecDeque::new()),
+            surface_priority_yaw: Cell::new(f32::NAN),
             surface_in_flight: RefCell::new(BTreeSet::new()),
             surface_dirty: RefCell::new(BTreeSet::new()),
             fine_initialized: Cell::new(false),

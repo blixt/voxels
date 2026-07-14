@@ -1,7 +1,49 @@
 use std::collections::BTreeMap;
 
 use crate::revision_satisfies;
-use voxels_world::SurfaceTileCoord;
+use voxels_world::{SurfaceTileCoord, VOXEL_SIZE_METRES};
+
+/// Orders unsent surface work for a view without dropping any requested coverage.
+///
+/// Tiles that intersect the forward camera half-space come before tiles wholly behind it. Within
+/// either group, coarse coverage remains first and distance breaks ties. This gives a heading
+/// change useful geometry sooner while preserving the clipmap's quality and eventual coverage.
+pub fn prioritize_surface_tiles(
+    tiles: &mut [SurfaceTileCoord],
+    camera_xz: [f32; 2],
+    camera_yaw: f32,
+    focus: [SurfaceTileCoord; 4],
+) {
+    tiles.sort_by_key(|coord| surface_priority_key(*coord, camera_xz, camera_yaw, focus));
+}
+
+fn surface_priority_key(
+    coord: SurfaceTileCoord,
+    camera_xz: [f32; 2],
+    camera_yaw: f32,
+    focus: [SurfaceTileCoord; 4],
+) -> (bool, u8, i64, i32, i32) {
+    let span_metres = coord.voxel_span() as f32 * VOXEL_SIZE_METRES;
+    let [origin_x, origin_z] = coord.voxel_origin();
+    let center_x = origin_x as f32 * VOXEL_SIZE_METRES + span_metres * 0.5;
+    let center_z = origin_z as f32 * VOXEL_SIZE_METRES + span_metres * 0.5;
+    let (sin_yaw, cos_yaw) = camera_yaw.sin_cos();
+    let forward_x = sin_yaw;
+    let forward_z = -cos_yaw;
+    let center_dot = (center_x - camera_xz[0]) * forward_x + (center_z - camera_xz[1]) * forward_z;
+    let projected_half_extent = span_metres * 0.5 * (forward_x.abs() + forward_z.abs());
+    let fully_behind_camera = center_dot + projected_half_extent <= 0.0;
+    let level_index = coord.level.index() as usize;
+    let dx = i64::from(coord.x) - i64::from(focus[level_index].x);
+    let dz = i64::from(coord.z) - i64::from(focus[level_index].z);
+    (
+        fully_behind_camera,
+        u8::MAX - coord.level.index(),
+        dx * dx + dz * dz,
+        coord.z,
+        coord.x,
+    )
+}
 
 /// Revision relationship between one disposable surface tile and the authoritative edit overlay.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -160,6 +202,23 @@ mod tests {
 
     fn tile(x: i32) -> SurfaceTileCoord {
         SurfaceTileCoord::new(SurfaceLodLevel::Stride4, x, 7)
+    }
+
+    #[test]
+    fn view_priority_puts_front_tiles_ahead_of_coarser_tiles_behind_camera() {
+        let focus = std::array::from_fn(|index| {
+            SurfaceTileCoord::containing(SurfaceLodLevel::ALL[index], 0, 0)
+        });
+        let front_coarse = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 0, -1);
+        let front_fine = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, -1);
+        let behind_coarse = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 0, 0);
+        let mut tiles = [behind_coarse, front_fine, front_coarse];
+
+        prioritize_surface_tiles(&mut tiles, [0.0, 0.0], 0.0, focus);
+        assert_eq!(tiles, [front_coarse, front_fine, behind_coarse]);
+
+        prioritize_surface_tiles(&mut tiles, [0.0, 0.0], std::f32::consts::PI, focus);
+        assert_eq!(tiles[0], behind_coarse);
     }
 
     #[test]

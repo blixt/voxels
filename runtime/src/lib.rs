@@ -10,7 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use voxels_world::{CHUNK_EDGE, ChunkCoord, EditMap, VOXEL_SIZE_METRES, VoxelCoord};
 
 mod surface;
-pub use surface::{SurfaceFocusAction, SurfaceRevisionCache, SurfaceRevisionStatus};
+pub use surface::{
+    SurfaceFocusAction, SurfaceRevisionCache, SurfaceRevisionStatus, prioritize_surface_tiles,
+};
 
 /// Physical edge length of a full-resolution chunk.
 pub const CHUNK_EDGE_METRES: f32 = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
