@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 9
+schema_version = 10
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -71,9 +71,12 @@ xz_voxels = [0, 0]
 # Omit model_cache to use ~/Library/Caches/voxels/terrain-diffusion on macOS.
 # A relative path is resolved from this file's directory.
 precision = "float16"
-# Canonical voxel X/Z coordinate of the finite 3.84 km tile's minimum corner. The checked-in
+# Canonical voxel X/Z coordinate of the finite 7.68 km tile's minimum corner. The checked-in
 # placement centers the tile on the configured spawn and leaves ample meshing-halo coverage.
-world_origin_voxels = [-19200, -19200]
+world_origin_voxels = [-38400, -38400]
+# Present each native 30 m model pixel across 60 m of world space. This keeps the model's full
+# elevation range while reducing 10 cm voxel stair-stepping and extends useful exploration range.
+horizontal_scale = 2
 # Terrain Diffusion model-grid row/column used for spatial sampling and noise.
 model_origin = [0, 0]
 # Heightfield composer flood height for the learned terrain source.

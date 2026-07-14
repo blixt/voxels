@@ -85,6 +85,7 @@ pub struct FullDetailTile {
 pub struct TerrainDiffusionMacroTileSource {
     identity: WorldSourceIdentity,
     origin_voxels: [i32; 2],
+    voxels_per_model_pixel: i64,
     coarse_origin: [i32; 2],
     coarse: CoarseTile,
     detail_model_origin: [i32; 2],
@@ -752,6 +753,7 @@ impl TerrainDiffusionMacroTileSource {
         Ok(Self {
             identity: runtime.source_identity()?,
             origin_voxels: runtime.config.world_origin_voxels,
+            voxels_per_model_pixel: 300 * i64::from(runtime.config.horizontal_scale),
             coarse_origin: runtime.config.model_origin,
             coarse: generated.coarse,
             detail_model_origin: generated.detail_model_origin,
@@ -768,10 +770,9 @@ impl TerrainDiffusionMacroTileSource {
     }
 
     fn sample(&self, world_x: i64, world_z: i64) -> Option<MacroSample> {
-        const VOXELS_PER_MODEL_PIXEL: i64 = 300;
         let local_x = world_x - i64::from(self.origin_voxels[0]);
         let local_z = world_z - i64::from(self.origin_voxels[1]);
-        let extent = self.detail.edge as i64 * VOXELS_PER_MODEL_PIXEL;
+        let extent = self.detail.edge as i64 * self.voxels_per_model_pixel;
         if self.detail.edge == 0
             || self.detail.elevation_metres.len() != self.detail.edge * self.detail.edge
             || local_x < 0
@@ -781,10 +782,12 @@ impl TerrainDiffusionMacroTileSource {
         {
             return None;
         }
-        let x = usize::try_from(local_x / VOXELS_PER_MODEL_PIXEL).ok()?;
-        let z = usize::try_from(local_z / VOXELS_PER_MODEL_PIXEL).ok()?;
-        let fraction_x = (local_x % VOXELS_PER_MODEL_PIXEL) as f32 / VOXELS_PER_MODEL_PIXEL as f32;
-        let fraction_z = (local_z % VOXELS_PER_MODEL_PIXEL) as f32 / VOXELS_PER_MODEL_PIXEL as f32;
+        let x = usize::try_from(local_x / self.voxels_per_model_pixel).ok()?;
+        let z = usize::try_from(local_z / self.voxels_per_model_pixel).ok()?;
+        let fraction_x =
+            (local_x % self.voxels_per_model_pixel) as f32 / self.voxels_per_model_pixel as f32;
+        let fraction_z =
+            (local_z % self.voxels_per_model_pixel) as f32 / self.voxels_per_model_pixel as f32;
         let right = (x + 1).min(self.detail.edge - 1);
         let bottom = (z + 1).min(self.detail.edge - 1);
         let elevation = |sample_x: usize, sample_z: usize| {
@@ -803,11 +806,14 @@ impl TerrainDiffusionMacroTileSource {
         let dz_left = bottom_left - top_left;
         let dz_right = bottom_right - top_right;
         let dz = dz_left + (dz_right - dz_left) * fraction_x;
-        let gradient = dx.hypot(dz) / self.detail.horizontal_resolution_metres as f32;
+        let horizontal_resolution_metres = self.detail.horizontal_resolution_metres as f32
+            * self.voxels_per_model_pixel as f32
+            / 300.0;
+        let gradient = dx.hypot(dz) / horizontal_resolution_metres;
         let ridge = (gradient / 1.5).clamp(0.0, 1.0);
 
-        let detail_x = local_x as f32 / VOXELS_PER_MODEL_PIXEL as f32;
-        let detail_z = local_z as f32 / VOXELS_PER_MODEL_PIXEL as f32;
+        let detail_x = local_x as f32 / self.voxels_per_model_pixel as f32;
+        let detail_z = local_z as f32 / self.voxels_per_model_pixel as f32;
         let coarse_elevation_root = self.sample_coarse_channel(0, detail_x, detail_z)?;
         let coarse_elevation = coarse_elevation_root.signum() * coarse_elevation_root.powi(2);
         let baseline_temperature = self.sample_coarse_channel(2, detail_x, detail_z)?;
@@ -1523,6 +1529,7 @@ mod tests {
         let source = TerrainDiffusionMacroTileSource {
             identity,
             origin_voxels: config.world_origin_voxels,
+            voxels_per_model_pixel: 600,
             coarse_origin: config.model_origin,
             coarse: CoarseTile {
                 channels: COARSE_SAMPLE_CHANNELS,
@@ -1546,10 +1553,10 @@ mod tests {
                     MacroBlockRequest {
                         origin: [600, -300],
                         sample_shape: [3, 1],
-                        stride_voxels: 300,
+                        stride_voxels: 600,
                     },
                     MacroBlockRequest {
-                        origin: [750, -150],
+                        origin: [900, 0],
                         sample_shape: [1, 1],
                         stride_voxels: 1,
                     },
@@ -1559,7 +1566,7 @@ mod tests {
         assert_eq!(result.blocks[0].elevation_voxels, vec![10.0, 20.0, 0.0]);
         assert_eq!(result.blocks[0].validity, vec![true, true, false]);
         assert_eq!(result.blocks[1].elevation_voxels, vec![25.0]);
-        assert!((result.blocks[1].ridge[0] - 0.049_69).abs() < 0.001);
+        assert!((result.blocks[1].ridge[0] - 0.024_85).abs() < 0.001);
         assert!(result.blocks[1].temperature[0] > 0.0);
         assert!(result.blocks[1].moisture[0] > 0.0);
         assert_eq!(

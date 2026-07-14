@@ -190,6 +190,23 @@ impl EditMap {
         snapshot
     }
 
+    /// Returns edited X/Z columns inside half-open bounds in deterministic order. Source-neutral
+    /// far-LOD composers use this sparse index to sample only columns that could need promotion to
+    /// a coarse cell instead of scanning the full tile at canonical resolution.
+    pub(crate) fn edited_column_coordinates_in(&self, bounds: [[i32; 2]; 2]) -> Vec<(i32, i32)> {
+        let [[min_x, min_z], [max_x, max_z]] = bounds;
+        let mut coordinates = Vec::new();
+        for (&(x, z), _) in self.column_overrides.range((min_x, i32::MIN)..) {
+            if x >= max_x {
+                break;
+            }
+            if (min_z..max_z).contains(&z) {
+                coordinates.push((x, z));
+            }
+        }
+        coordinates
+    }
+
     /// Conservative far-LOD additions within half-open X/Z bounds. Excavations remain represented
     /// by the regular center sample, while an off-center player-built silhouette cannot disappear
     /// merely because it missed the coarse sample point.

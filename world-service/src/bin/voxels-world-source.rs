@@ -30,14 +30,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source = loaded.build_world_source()?;
     let identity = source.identity();
     const SAMPLE_EDGE: i32 = 16;
-    const SAMPLE_SPACING_VOXELS: i32 = 2_400;
+    let sample_spacing_voxels = match loaded.config().source {
+        WorldSourceMode::ProceduralV16 => 2_400,
+        WorldSourceMode::TerrainDiffusion30m => {
+            2_400 * loaded.config().terrain_diffusion.horizontal_scale as i32
+        }
+    };
     let requests = (0..SAMPLE_EDGE)
         .flat_map(|z| {
             (0..SAMPLE_EDGE).map(move |x| {
                 WorldProductRequest::SurfaceSampleBlock(SurfaceSampleBlockRequest {
                     origin: [
-                        sample_origin[0] + x * SAMPLE_SPACING_VOXELS,
-                        sample_origin[1] + z * SAMPLE_SPACING_VOXELS,
+                        sample_origin[0] + x * sample_spacing_voxels,
+                        sample_origin[1] + z * sample_spacing_voxels,
                     ],
                     sample_shape: [1, 1],
                 })

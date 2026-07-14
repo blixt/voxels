@@ -64,8 +64,10 @@ change can be slower while Metal compiles kernels.
 `TerrainDiffusionMacroTileSource` implements the portable `world::MacroTerrainSource` trait. It
 owns only the generated canonical fields after inference, not Candle or Metal values, which makes
 the result suitable for an in-process call today and the planned binary world-service protocol
-later. One experimental tile covers 3.84 km square at 30 m per model pixel (300 canonical 10 cm
-voxels per pixel); samples beyond it are explicitly invalid rather than silently repeating.
+later. One experimental tile contains 3.84 km of native model coverage. The checked-in
+`horizontal_scale = 2` presents it across 7.68 km at 60 m per model pixel (600 canonical 10 cm
+voxels per pixel), matching the upstream game integration's recommended scale; samples beyond it
+are explicitly invalid rather than silently repeating.
 
 `world-service` loads the versioned [world source configuration](world-service-config.md) and
 constructs either this provider or `ProceduralWorldSource` behind that same trait. Provider
@@ -108,13 +110,14 @@ client.
   an aridity estimate before publishing normalized climate. Infinite overlap blending remains future
   work and is source-identity versioned when added.
 - The canonical composer adds a deterministic, source-identity-bound subgrid relief signal after
-  model inference. Its amplitude follows physical 30 m slope and stays below 22 m even on steep
+  model inference. Its amplitude follows physical presented slope and stays below 6 m even on steep
   terrain, so it breaks up 30 m bilinear planes without replacing the learned macro shape. Climate,
   altitude, slope, and coherent geology choose biome surfaces and shallow/deep strata. Chunks,
   collision blocks, edited surfaces, and far LODs all use the same composition function.
 
-For the checked-in seed, `terrain:detail` now measures 576–1,396 m (820 m relief) over the 3.84 km
-tile. `world:source-smoke` samples 256 positions across that tile; the current result spans three
+For the checked-in seed, `terrain:detail` measures 576–1,396 m (820 m relief) over the 3.84 km native
+model tile, presented across 7.68 km. `world:source-smoke` samples 256 positions across that tile;
+the current result spans three
 surface regions and Grass, Stone, and Limestone, with temperature, moisture, and physical ridge all
 non-constant. These are regression diagnostics rather than promises that every seed has the same
 histogram.

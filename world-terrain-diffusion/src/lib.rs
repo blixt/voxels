@@ -17,7 +17,7 @@ use voxels_world::{
 
 pub const MODEL_REPOSITORY: &str = "xandergos/terrain-diffusion-30m";
 pub const MODEL_REVISION: &str = "9ef8030cb805b433b98ec25c5dddefbac07a9e26";
-pub const IMPLEMENTATION_VERSION: u32 = 3;
+pub const IMPLEMENTATION_VERSION: u32 = 4;
 pub const SAMPLER_VERSION: u32 = 1;
 pub const SCHEDULER_VERSION: u32 = 1;
 pub const COARSE_WEIGHT_SHA256: &str =
@@ -53,6 +53,8 @@ pub struct TerrainDiffusionConfig {
     pub require_metal: bool,
     /// Canonical voxel X/Z coordinate where the generated finite macro tile is placed.
     pub world_origin_voxels: [i32; 2],
+    /// Horizontal presentation scale relative to the model's native 30 m sample spacing.
+    pub horizontal_scale: u32,
     /// Terrain Diffusion model-grid row/column used to key spatial sampling and noise.
     pub model_origin: [i32; 2],
 }
@@ -65,23 +67,30 @@ impl TerrainDiffusionConfig {
             precision: TerrainPrecision::Float16,
             require_metal: true,
             world_origin_voxels: [0, 0],
+            horizontal_scale: 2,
             model_origin: [0, 0],
         }
     }
 
     pub fn source_identity(&self) -> Result<WorldSourceIdentity, TerrainDiffusionError> {
         let mut configuration = Sha256::new();
-        configuration.update(b"voxels-terrain-diffusion-configuration-v4\0");
+        if !(1..=8).contains(&self.horizontal_scale) {
+            return Err(TerrainDiffusionError::InvalidHorizontalScale(
+                self.horizontal_scale,
+            ));
+        }
+        configuration.update(b"voxels-terrain-diffusion-configuration-v5\0");
         configuration.update(self.seed.to_le_bytes());
         configuration.update([self.precision as u8]);
         for coordinate in self.world_origin_voxels {
             configuration.update(coordinate.to_le_bytes());
         }
+        configuration.update(self.horizontal_scale.to_le_bytes());
         for coordinate in self.model_origin {
             configuration.update(coordinate.to_le_bytes());
         }
         configuration.update(
-            b"coordinate-keyed-fractal-continent-climate-v1;elevation-noise-ratio-0.05;highest-variance-positive-4x4-coarse;highest-variance-16x16-latent;spatial-coarse-climate-lapse-aridity;physical-gradient-ridge\0",
+            b"coordinate-keyed-fractal-continent-climate-v1;elevation-noise-ratio-0.05;highest-variance-positive-4x4-coarse;highest-variance-16x16-latent;spatial-coarse-climate-lapse-aridity;physical-gradient-ridge;configurable-horizontal-scale-v1\0",
         );
         configuration.update(128_u32.to_le_bytes());
         let configuration_hash: [u8; 32] = configuration.finalize().into();
@@ -106,7 +115,7 @@ impl TerrainDiffusionConfig {
             macro_field_schema_version: MACRO_FIELD_SCHEMA_VERSION,
             macro_coordinate_transform: MacroCoordinateTransform {
                 origin_voxels: self.world_origin_voxels.map(i64::from),
-                horizontal_unit_millimetres: 30_000,
+                horizontal_unit_millimetres: 30_000 * self.horizontal_scale,
                 x_axis_sign: 1,
                 z_axis_sign: 1,
             },
@@ -123,6 +132,7 @@ pub enum TerrainDiffusionError {
     MetalFeatureDisabled,
     MetalUnavailable(String),
     MissingModelFile(PathBuf),
+    InvalidHorizontalScale(u32),
     InvalidModelFile {
         path: PathBuf,
         reason: String,
@@ -147,6 +157,9 @@ impl fmt::Display for TerrainDiffusionError {
             Self::MetalUnavailable(reason) => write!(formatter, "Metal is unavailable: {reason}"),
             Self::MissingModelFile(path) => {
                 write!(formatter, "missing model file {}", path.display())
+            }
+            Self::InvalidHorizontalScale(scale) => {
+                write!(formatter, "horizontal scale {scale} is outside 1..=8")
             }
             Self::InvalidModelFile { path, reason } => {
                 write!(formatter, "invalid model file {}: {reason}", path.display())
@@ -284,6 +297,7 @@ mod tests {
         assert_eq!(config.precision, TerrainPrecision::Float16);
         assert_eq!(config.model_root, PathBuf::from("model"));
         assert_eq!(config.world_origin_voxels, [0, 0]);
+        assert_eq!(config.horizontal_scale, 2);
         assert_eq!(config.model_origin, [0, 0]);
     }
 
@@ -305,7 +319,7 @@ mod tests {
             identity
                 .macro_coordinate_transform
                 .horizontal_unit_millimetres,
-            30_000
+            60_000
         );
         let model = identity.model.expect("model identity");
         assert_eq!(model.repository, MODEL_REPOSITORY);
@@ -340,6 +354,20 @@ mod tests {
         assert_ne!(
             placed_identity.identity_hash(),
             sampled_identity.identity_hash()
+        );
+
+        let mut scaled = sampled;
+        scaled.horizontal_scale = 1;
+        let scaled_identity = scaled.source_identity().expect("scaled identity");
+        assert_ne!(
+            base_identity.configuration_hash,
+            scaled_identity.configuration_hash
+        );
+
+        scaled.horizontal_scale = 0;
+        assert_eq!(
+            scaled.source_identity(),
+            Err(TerrainDiffusionError::InvalidHorizontalScale(0))
         );
     }
 

@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 9
+schema_version = 10
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -78,7 +78,8 @@ xz_voxels = [0, 0]
 
 [terrain_diffusion]
 precision = "float16"
-world_origin_voxels = [-19200, -19200]
+world_origin_voxels = [-38400, -38400]
+horizontal_scale = 2
 model_origin = [0, 0]
 sea_level_voxels = 52
 # model_cache = "/an/optional/cache/root"
@@ -87,12 +88,14 @@ sea_level_voxels = 52
 `float16` is the high-performance default; `float32` is available for diagnostics. If
 `model_cache` is omitted on macOS, the service loads the immutable pinned revision from
 `~/Library/Caches/voxels/terrain-diffusion/<revision>`. A relative path is resolved relative to the
-configuration file, not the process working directory. The seed and precision participate in the
-source identity used by caches and future protocol negotiation.
+configuration file, not the process working directory. The seed, precision, and horizontal scale
+participate in the source identity used by caches and future protocol negotiation.
 
 `world_origin_voxels` is the canonical voxel X/Z coordinate of the finite generated tile's minimum
-corner. `[-19200, -19200]` centers the 3.84 km tile on the default `[0, 0]` spawn and leaves room for
-the exact one-voxel meshing halo around spawn. The server validates the actual spawn chunk at startup.
+corner. `horizontal_scale = 2` maps each native 30 m model pixel across 60 m of world space, following
+the upstream game integration's recommended scale while reducing 10 cm voxel stair-stepping.
+`[-38400, -38400]` therefore centers the 7.68 km tile on the default `[0, 0]` spawn and leaves room
+for the exact one-voxel meshing halo around spawn. The server validates the actual spawn chunk at startup.
 `model_origin` is the Terrain Diffusion model-grid row/column used to key spatial sampling and noise.
 They are deliberately separate: moving an unchanged tile in the game world is not the same operation
 as generating a different model-space tile. Both origins participate in the source identity, and

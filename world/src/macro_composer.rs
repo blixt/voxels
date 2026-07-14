@@ -8,16 +8,17 @@ use crate::{
     AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, ChunkSnapshot, EditMap,
     MACRO_FIELD_SCHEMA_VERSION, MAX_MACRO_BLOCK_SAMPLES, MAX_SURFACE_SAMPLE_BLOCK_SAMPLES,
     MAX_SURFACE_SEARCH_RADIUS, MAX_VOXEL_BLOCK_SAMPLES, MAX_WORLD_PRODUCT_BATCH, MacroBlock,
-    MacroBlockBatch, MacroBlockRequest, MacroTerrainSource, Material, MeshingHalo, SkylineFeature,
-    SkylineFeatureKind, SurfaceLodLevel, SurfaceRegion, SurfaceSample, SurfaceSampleBlockRequest,
-    SurfaceSampleBlockSnapshot, SurfaceSearchHit, SurfaceSearchKind, SurfaceSearchRequest,
-    SurfaceSearchSnapshot, SurfaceTileCoord, SurfaceTileSnapshot, VoxelBlockRequest,
-    VoxelBlockSnapshot, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductBatchItem,
-    WorldProductBatchResult, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
-    WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash,
-    generate_surface_tile_mesh_with, generate_water_tile_mesh_with,
+    MacroBlockBatch, MacroBlockRequest, MacroTerrainSource, Material, MeshingHalo,
+    SURFACE_TILE_EDGE_CELLS, SkylineFeature, SkylineFeatureKind, SurfaceLodLevel, SurfaceRegion,
+    SurfaceSample, SurfaceSampleBlockRequest, SurfaceSampleBlockSnapshot, SurfaceSearchHit,
+    SurfaceSearchKind, SurfaceSearchRequest, SurfaceSearchSnapshot, SurfaceTileCoord,
+    SurfaceTileSnapshot, VoxelBlockRequest, VoxelBlockSnapshot, VoxelCoord, WorldProduct,
+    WorldProductBatch, WorldProductBatchItem, WorldProductBatchResult, WorldProductPriority,
+    WorldProductRequest, WorldSourceEngine, WorldSourceError, WorldSourceIdentity,
+    WorldSourceIdentityHash, generate_surface_tile_mesh_with, generate_water_tile_mesh_with,
     surface_tiles_affected_by_column,
 };
+use std::collections::BTreeMap;
 
 const SURFACE_TILE_SAMPLE_EDGE: u32 = 34;
 
@@ -408,9 +409,16 @@ impl HeightfieldWorldSource {
                 }
             }
         }
+        let aliases = self.collidable_edit_aliases(edits, coord, priority)?;
         let terrain = generate_surface_tile_mesh_with(coord, |x, z| {
-            self.edited_surface(&region, edits, x, z)
-                .unwrap_or((i32::MIN, Material::Stone))
+            let sampled = self
+                .edited_surface(&region, edits, x, z)
+                .unwrap_or((i32::MIN, Material::Stone));
+            aliases
+                .get(&(x, z))
+                .copied()
+                .filter(|(height, _)| *height >= sampled.0)
+                .unwrap_or(sampled)
         });
         let water = generate_water_tile_mesh_with(coord, |x, z| {
             region.column(x, z).is_some_and(|column| {
@@ -426,6 +434,94 @@ impl HeightfieldWorldSource {
             terrain,
             water,
         })
+    }
+
+    fn collidable_edit_aliases(
+        &self,
+        edits: &EditMap,
+        coord: SurfaceTileCoord,
+        priority: WorldProductPriority,
+    ) -> Result<BTreeMap<(i32, i32), (i32, Material)>, WorldSourceError> {
+        let [origin_x, origin_z] = coord.voxel_origin();
+        let stride = coord.stride_voxels();
+        let halo_span = (SURFACE_TILE_EDGE_CELLS + 1).saturating_mul(stride);
+        let bounds = [
+            [
+                origin_x.saturating_sub(stride),
+                origin_z.saturating_sub(stride),
+            ],
+            [
+                origin_x.saturating_add(halo_span),
+                origin_z.saturating_add(halo_span),
+            ],
+        ];
+        let coordinates = edits.edited_column_coordinates_in(bounds);
+        let mut aliases = BTreeMap::new();
+        for coordinate_batch in coordinates.chunks(MAX_WORLD_PRODUCT_BATCH) {
+            let requests = coordinate_batch
+                .iter()
+                .map(|&(x, z)| MacroBlockRequest {
+                    origin: [x, z],
+                    sample_shape: [1, 1],
+                    stride_voxels: 1,
+                })
+                .collect::<Vec<_>>();
+            let result = self.source.request_blocks(MacroBlockBatch {
+                priority,
+                requests: requests.clone(),
+            })?;
+            if result.source_identity_hash != self.identity_hash
+                || result.blocks.len() != requests.len()
+            {
+                return Err(WorldSourceError::MalformedMacroBlock);
+            }
+            for (request, block) in requests.into_iter().zip(result.blocks) {
+                let grid = self.validate_block(request, block)?;
+                let [x, z] = request.origin;
+                let column = grid
+                    .column(x, z)
+                    .ok_or(WorldSourceError::MalformedMacroBlock)?;
+                let generated_surface = (
+                    column.height,
+                    surface_profile(column, self.sea_level_voxels).0,
+                );
+                let (height, material) =
+                    edits.surface_sample_with(x, z, generated_surface, i32::MIN, |voxel| {
+                        material_for_column(column, self.sea_level_voxels, voxel.y)
+                    });
+                if !material.is_collidable()
+                    || edits.override_at(VoxelCoord::new(x, height, z)) != Some(material)
+                {
+                    continue;
+                }
+                let cell_x = (i64::from(x) - i64::from(origin_x)).div_euclid(i64::from(stride));
+                let cell_z = (i64::from(z) - i64::from(origin_z)).div_euclid(i64::from(stride));
+                if !(-1..=i64::from(SURFACE_TILE_EDGE_CELLS)).contains(&cell_x)
+                    || !(-1..=i64::from(SURFACE_TILE_EDGE_CELLS)).contains(&cell_z)
+                {
+                    continue;
+                }
+                let sample_x =
+                    i64::from(origin_x) + cell_x * i64::from(stride) + i64::from(stride / 2);
+                let sample_z =
+                    i64::from(origin_z) + cell_z * i64::from(stride) + i64::from(stride / 2);
+                let Some((sample_x, sample_z)) = i32::try_from(sample_x)
+                    .ok()
+                    .zip(i32::try_from(sample_z).ok())
+                else {
+                    continue;
+                };
+                aliases
+                    .entry((sample_x, sample_z))
+                    .and_modify(|current: &mut (i32, Material)| {
+                        if height > current.0 {
+                            *current = (height, material);
+                        }
+                    })
+                    .or_insert((height, material));
+            }
+        }
+        Ok(aliases)
     }
 
     fn edited_surface(
@@ -749,7 +845,7 @@ fn micro_relief_voxels(seed: u64, x: i32, z: i32, ridge: f32) -> f32 {
     let broad = coherent_noise(seed ^ 0x6a09_e667, x, z, 600);
     let medium = coherent_noise(seed ^ 0xbb67_ae85, x, z, 170);
     let fine = coherent_noise(seed ^ 0x3c6e_f372, x, z, 55);
-    broad * (8.0 + ridge * 72.0) + medium * (3.0 + ridge * 22.0) + fine * (1.0 + ridge * 6.0)
+    broad * (3.0 + ridge * 18.0) + medium * (1.0 + ridge * 5.0) + fine * (0.25 + ridge * 1.5)
 }
 
 fn geology_signal(seed: u64, x: i32, z: i32) -> f32 {
@@ -1018,10 +1114,7 @@ mod tests {
             maximum - minimum
         };
         assert!(range(0.9) > range(0.0) * 3.0);
-        assert!(
-            range(0.9) < 220.0,
-            "micro relief must remain below 22 metres"
-        );
+        assert!(range(0.9) < 60.0, "micro relief must remain below 6 metres");
     }
 
     fn product(
@@ -1198,6 +1291,28 @@ mod tests {
             .generate_edited_surface_tile(&edits, coord)
             .expect("edited water tile");
         assert_ne!(drained.water, pristine.water);
+    }
+
+    #[test]
+    fn off_lattice_player_tower_is_promoted_into_every_coarse_surface_tile() {
+        let source = heightfield(FakeBehavior::Valid);
+        let mut edits = EditMap::default();
+        for y in 2..=45 {
+            edits.insert_override(VoxelCoord::new(1, y, 1), Material::Dirt);
+        }
+        for level in SurfaceLodLevel::ALL {
+            let coord = SurfaceTileCoord::new(level, 0, 0);
+            let pristine = source
+                .generate_edited_surface_tile(&EditMap::default(), coord)
+                .expect("pristine tile");
+            let built = source
+                .generate_edited_surface_tile(&edits, coord)
+                .expect("edited tile");
+            assert_ne!(
+                built.terrain, pristine.terrain,
+                "off-lattice tower vanished at {level:?}"
+            );
+        }
     }
 
     #[test]

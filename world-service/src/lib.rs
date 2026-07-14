@@ -30,7 +30,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 9;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 10;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
     0x76, 0x6f, 0x78, 0x65, 0x6c, 0x73, 0x40, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x01,
@@ -221,6 +221,8 @@ pub struct TerrainDiffusionProviderConfig {
     pub precision: TerrainModelPrecision,
     /// Canonical voxel X/Z coordinate where the finite generated tile is placed.
     pub world_origin_voxels: [i32; 2],
+    /// Horizontal presentation scale relative to the model's native 30 m sample spacing.
+    pub horizontal_scale: u32,
     /// Terrain Diffusion model-grid row/column used to key spatial sampling and noise.
     pub model_origin: [i32; 2],
     /// Flood height used by the fidelity-honest macro-heightfield voxel composer.
@@ -233,6 +235,7 @@ impl Default for TerrainDiffusionProviderConfig {
             model_cache: None,
             precision: TerrainModelPrecision::Float16,
             world_origin_voxels: [0, 0],
+            horizontal_scale: 2,
             model_origin: [0, 0],
             sea_level_voxels: SEA_LEVEL_VOXELS,
         }
@@ -324,6 +327,11 @@ impl WorldServiceConfig {
         {
             return Err(WorldServiceConfigError::InvalidConcurrency(
                 "max_outbound_bytes_per_client must fit at least one frame and stay at most 256 MiB",
+            ));
+        }
+        if !(1..=8).contains(&self.terrain_diffusion.horizontal_scale) {
+            return Err(WorldServiceConfigError::InvalidTerrainDiffusion(
+                "horizontal_scale must be in 1..=8",
             ));
         }
         if self.transport.max_in_flight_batches == 0
@@ -511,6 +519,7 @@ pub enum WorldServiceConfigError {
     InvalidPresence(&'static str),
     InvalidGameplay(&'static str),
     InvalidEdits(&'static str),
+    InvalidTerrainDiffusion(&'static str),
 }
 
 impl fmt::Display for WorldServiceConfigError {
@@ -562,6 +571,9 @@ impl fmt::Display for WorldServiceConfigError {
             }
             Self::InvalidEdits(reason) => {
                 write!(formatter, "invalid world-service edits: {reason}")
+            }
+            Self::InvalidTerrainDiffusion(reason) => {
+                write!(formatter, "invalid Terrain Diffusion config: {reason}")
             }
         }
     }
@@ -683,6 +695,7 @@ impl LoadedWorldServiceConfig {
             precision,
             require_metal: true,
             world_origin_voxels: self.config.terrain_diffusion.world_origin_voxels,
+            horizontal_scale: self.config.terrain_diffusion.horizontal_scale,
             model_origin: self.config.terrain_diffusion.model_origin,
         })?;
         Ok(Box::new(TerrainDiffusionMacroTileSource::generate(
@@ -765,7 +778,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 9
+schema_version = 10
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -818,6 +831,7 @@ xz_voxels = [0, 0]
 [terrain_diffusion]
 precision = "float16"
 world_origin_voxels = [1200, -900]
+horizontal_scale = 2
 model_origin = [-64, 128]
 sea_level_voxels = 52
 "#;
@@ -853,6 +867,7 @@ sea_level_voxels = 52
     fn toml_contract_parses_typed_terrain_origins() {
         let config = WorldServiceConfig::from_toml(CONFIG_TOML).expect("valid config");
         assert_eq!(config.terrain_diffusion.world_origin_voxels, [1_200, -900]);
+        assert_eq!(config.terrain_diffusion.horizontal_scale, 2);
         assert_eq!(config.terrain_diffusion.model_origin, [-64, 128]);
     }
 
@@ -864,12 +879,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 9", "schema_version = 8");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 10", "schema_version = 9");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 9,
-                found: 8,
+                expected: 10,
+                found: 9,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
@@ -893,6 +908,7 @@ sea_level_voxels = 52
             "interaction_reach_centimetres = 500\n",
             "xz_voxels = [0, 0]\n",
             "precision = \"float16\"\n",
+            "horizontal_scale = 2\n",
         ] {
             let incomplete = CONFIG_TOML.replace(missing, "");
             assert!(matches!(
@@ -931,6 +947,18 @@ sea_level_voxels = 52
         assert_eq!(
             config.validate(),
             Err(WorldServiceConfigError::InvalidAuthSubprotocolToken)
+        );
+    }
+
+    #[test]
+    fn terrain_diffusion_scale_is_bounded() {
+        let mut config = test_config(WorldSourceMode::TerrainDiffusion30m);
+        config.terrain_diffusion.horizontal_scale = 0;
+        assert_eq!(
+            config.validate(),
+            Err(WorldServiceConfigError::InvalidTerrainDiffusion(
+                "horizontal_scale must be in 1..=8"
+            ))
         );
     }
 

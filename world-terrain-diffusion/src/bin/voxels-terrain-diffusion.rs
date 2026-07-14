@@ -47,6 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         precision: TerrainPrecision::Float16,
         require_metal: true,
         world_origin_voxels: [0, 0],
+        horizontal_scale: 2,
         model_origin: [0, 0],
     };
     let runtime = if command == "detail-smoke" || command == "counterproof" {
