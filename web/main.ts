@@ -1,6 +1,7 @@
 import "./style.css";
 import { loadClientConfig } from "./client-config.ts";
 import { watchDevicePixelRatio } from "./display.ts";
+import { terminateAfterAcknowledgement } from "./hmr-lifecycle.ts";
 import { PressedKeys, requestPointerLockSafely } from "./input.ts";
 import {
   namedPlayerUrl,
@@ -130,10 +131,7 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
   const shutdownWorker = (timeoutMs = 1_000): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
     worker.postMessage({ kind: "destroy" });
-    shutdownPromise = Promise.race([
-      destroyed,
-      new Promise<void>((resolve) => window.setTimeout(resolve, timeoutMs)),
-    ]).finally(() => worker.terminate());
+    shutdownPromise = terminateAfterAcknowledgement(destroyed, () => worker.terminate(), timeoutMs);
     return shutdownPromise;
   };
   const failWorker = (message: string, abrupt = false): void => {
@@ -262,6 +260,11 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
   import.meta.hot?.on("vite:beforeFullReload", async () => {
     playable = false;
     showLoading("Reloading Voxels", "Saving local state and restarting the native engine…", 0.1);
+    await shutdownWorker();
+  });
+  import.meta.hot?.on("voxels:before-world-restart", async () => {
+    playable = false;
+    showLoading("Updating native world", "Saving player state before restarting the server…", 0.1);
     await shutdownWorker();
   });
 

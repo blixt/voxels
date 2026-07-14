@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
-import { watchRustInputChanges } from "./vite.config.ts";
+import {
+  isNativeWorldServiceInput,
+  pathBelongsTo,
+  watchRustInputChanges,
+  worldServiceListenAddress,
+} from "./vite.config.ts";
 import {
   worldServiceBuildCargoArgs,
   worldServiceCargoArgs,
@@ -51,5 +56,28 @@ describe("native world-service development command", () => {
       "--bin",
       "voxels-worldd",
     ]);
+  });
+
+  it("parses the supervised loopback listener from server config", () => {
+    expect(
+      worldServiceListenAddress(`
+[transport]
+listen = "127.0.0.1:9777"
+`),
+    ).toEqual({ host: "127.0.0.1", port: 9777 });
+    expect(worldServiceListenAddress('listen = "[::1]:4123"')).toEqual({
+      host: "::1",
+      port: 4123,
+    });
+    expect(() => worldServiceListenAddress('listen = "127.0.0.1:0"')).toThrow(
+      "invalid world-service transport.listen port",
+    );
+  });
+
+  it("matches watched inputs without confusing sibling path prefixes", () => {
+    expect(pathBelongsTo("/repo/world/src/lib.rs", "/repo/world/src")).toBe(true);
+    expect(pathBelongsTo("/repo/world/src-old/lib.rs", "/repo/world/src")).toBe(false);
+    expect(isNativeWorldServiceInput("world/src/source.rs")).toBe(true);
+    expect(isNativeWorldServiceInput("shell/src/lib.rs")).toBe(false);
   });
 });
