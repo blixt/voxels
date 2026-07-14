@@ -18,7 +18,7 @@ import { createShapedLink } from "./network-benchmark-link.mjs";
 
 const RESULT_SCHEMA_VERSION = 3;
 const FIXTURE_VERSION = 4;
-const VXWP_VERSION = 7;
+const VXWP_VERSION = 8;
 const WORLD_PATH = `/v${VXWP_VERSION}/world`;
 const PRESENCE_PATH = `/v${VXWP_VERSION}/presence`;
 const EXPECTED_PLAYERS = 6;
@@ -408,7 +408,17 @@ async function main() {
     // also prevents a timed-out cargo child from repeatedly abandoning the same profile build.
     execFileSync(
       rustTool("cargo"),
-      ["build", "--profile", "worldgen", "-p", "voxels-world-service", "--bin", "voxels-worldd"],
+      [
+        "build",
+        "--profile",
+        "worldgen",
+        "-p",
+        "voxels-world-service",
+        "--bin",
+        "voxels-worldd",
+        "--features",
+        "terrain-metal",
+      ],
       { stdio: "inherit" },
     );
     worldService = spawn(
@@ -421,6 +431,8 @@ async function main() {
         "voxels-world-service",
         "--bin",
         "voxels-worldd",
+        "--features",
+        "terrain-metal",
         "--",
         serviceConfigPath,
       ],
