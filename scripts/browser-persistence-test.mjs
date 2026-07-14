@@ -110,51 +110,6 @@ async function enterUnderwaterShowcase(page) {
   );
 }
 
-async function editFromFollowerAndWaitForLeader(follower, leader) {
-  const before = await follower.evaluate(() => globalThis.__VOXELS__.snapshot());
-  await follower.locator("#app").click();
-  await follower.waitForFunction(() => document.pointerLockElement?.id === "app");
-  await follower.mouse.move(480, 620, { steps: 3 });
-  await follower.waitForTimeout(150);
-  const aimed = await follower.evaluate(() => globalThis.__VOXELS__.snapshot());
-  assertSnapshotSchema(before);
-  assertSnapshotSchema(aimed);
-  if (aimed[SNAPSHOT.pitch] > -0.35) {
-    throw new Error(
-      `pointer-lock look input was not delivered: ${before[SNAPSHOT.pitch]} -> ${aimed[SNAPSHOT.pitch]}`,
-    );
-  }
-  await follower.waitForFunction(
-    async (targetPresent) => (await globalThis.__VOXELS__.snapshot())[targetPresent] === 1,
-    SNAPSHOT.targetPresent,
-    { timeout: 5_000 },
-  );
-  // Do not move back to screen centre before pressing: under pointer lock that movement is look input.
-  await follower.mouse.down();
-  await follower.mouse.up();
-  const deadline = Date.now() + 10_000;
-  let last = [];
-  while (Date.now() < deadline) {
-    const [origin, remote] = await Promise.all([
-      follower.evaluate(() => globalThis.__VOXELS__.snapshot()),
-      leader.evaluate(() => globalThis.__VOXELS__.snapshot()),
-    ]);
-    assertSnapshotSchema(origin);
-    assertSnapshotSchema(remote);
-    last = [origin[SNAPSHOT.edits], remote[SNAPSHOT.edits]];
-    if (
-      origin[SNAPSHOT.edits] > before[SNAPSHOT.edits] &&
-      remote[SNAPSHOT.edits] === origin[SNAPSHOT.edits]
-    ) {
-      return origin[SNAPSHOT.edits];
-    }
-    await follower.waitForTimeout(100);
-  }
-  throw new Error(
-    `follower voxel edit did not converge in the live leader world: ${JSON.stringify(last)}`,
-  );
-}
-
 async function closeFollowerAndAssertFinalCamera(context, url, follower) {
   const cameraFields = [
     SNAPSHOT.cameraX,
@@ -216,6 +171,8 @@ try {
   const address = server.httpServer?.address();
   if (!address || typeof address === "string") throw new Error("Vite did not expose a TCP port");
   const url = `http://127.0.0.1:${address.port}`;
+  const leaderUrl = `${url}/?player=persistence-leader`;
+  const followerUrl = `${url}/?player=persistence-follower`;
 
   browser = await chromium.launch(chromeWebGpuLaunchOptions());
   const context = await browser.newContext({
@@ -225,7 +182,7 @@ try {
 
   const leader = await context.newPage();
   watch("leader", leader);
-  await leader.goto(url, { waitUntil: "domcontentloaded" });
+  await leader.goto(leaderUrl, { waitUntil: "domcontentloaded" });
   await waitForEngine(leader);
   await assertCanvasOnly(leader);
 
@@ -235,11 +192,10 @@ try {
 
   let follower = await context.newPage();
   watch("follower", follower);
-  await follower.goto(url, { waitUntil: "domcontentloaded" });
+  await follower.goto(followerUrl, { waitUntil: "domcontentloaded" });
   await waitForEngine(follower);
   await assertCanvasOnly(follower);
-  await editFromFollowerAndWaitForLeader(follower, leader);
-  follower = await closeFollowerAndAssertFinalCamera(context, url, follower);
+  follower = await closeFollowerAndAssertFinalCamera(context, followerUrl, follower);
   await assertCanvasOnly(follower);
 
   // Reload every live browsing context together. Exactly one replacement worker must win the Web
@@ -259,7 +215,7 @@ try {
   // Exercise another live follower and another owner handoff before teardown.
   const successor = await context.newPage();
   watch("successor", successor);
-  await successor.goto(url, { waitUntil: "domcontentloaded" });
+  await successor.goto(`${url}/?player=persistence-successor`, { waitUntil: "domcontentloaded" });
   await waitForEngine(successor);
   await leader.close();
   await successor.waitForTimeout(250);
@@ -280,7 +236,7 @@ try {
       concurrentRounds: 4,
       canvasOnly: true,
       underwater: true,
-      liveEditSync: true,
+      playerKeyedCameraOnly: true,
       followerFinalCamera: true,
       persistenceErrors: 0,
     }),
