@@ -27,6 +27,12 @@ const EXPECTED_PARTS_PER_AVATAR = 13;
 const FAR_TIER_MINIMUM_METRES = 105;
 const OBSERVER_WALK_METRES = 120;
 const VIEWPORT = { width: 960, height: 540 };
+const FRAME_SAMPLE_WIDTH = 5;
+const FRAME_SAMPLE_START = 108;
+// Six unthrottled WebGPU clients intentionally contend on one local GPU and worker pool. This gate
+// catches a stall while leaving the exact p95 visible; it is not a per-device 60 fps rendering gate.
+const LOCAL_MULTI_CLIENT_FRAME_P95_LIMIT_MS = 67;
+const LOCAL_MULTI_CLIENT_FRAME_MAX_LIMIT_MS = 100;
 const OUTPUT_DIRECTORY = path.resolve("target/multiplayer-browser");
 const REQUIRE_TOWER = process.argv.includes("--require-tower");
 const FAILURE =
@@ -48,6 +54,26 @@ function sleep(milliseconds) {
 function rounded(value, digits = 1) {
   const scale = 10 ** digits;
   return Math.round(value * scale) / scale;
+}
+
+function percentile(values, fraction) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)];
+}
+
+function frameTimingSummary(values) {
+  const frameMs = [];
+  for (let index = 0; index < values[SNAPSHOT.sampleCount]; index += 1) {
+    frameMs.push(values[FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH]);
+  }
+  return {
+    samples: frameMs.length,
+    p95Ms: frameMs.length > 0 ? rounded(percentile(frameMs, 0.95), 3) : null,
+    maxMs: frameMs.length > 0 ? rounded(Math.max(...frameMs), 3) : null,
+    above33_33ms: frameMs.filter((value) => value > 33.33).length,
+    droppedSamples: values[SNAPSHOT.droppedSamples],
+  };
 }
 
 function observePage(page, label, errors) {
@@ -172,7 +198,7 @@ function pathBytes(stats, endpoint) {
   };
 }
 
-function playerSummary(player, current) {
+function playerSummary(player, current, frameTiming) {
   const network = player.link.snapshot();
   return {
     name: player.name,
@@ -186,7 +212,7 @@ function playerSummary(player, current) {
     ),
     remoteAvatars: current[SNAPSHOT.remoteAvatars],
     avatarParts: current[SNAPSHOT.avatarParts],
-    frameMs: rounded(current[SNAPSHOT.frameMs], 3),
+    frameTiming,
     world: pathBytes(network, WORLD_PATH),
     presence: pathBytes(network, PRESENCE_PATH),
     messages: network.messages,
@@ -196,9 +222,9 @@ function playerSummary(player, current) {
 function markdownReport(result) {
   const rows = result.players.map(
     (player) =>
-      `| ${player.name} | ${player.remoteAvatars} | ${player.distanceFromSpawnMetres.toFixed(1)} | ${player.world.downstream.toLocaleString("en-US")} | ${player.presence.upstream.toLocaleString("en-US")} | ${player.presence.downstream.toLocaleString("en-US")} |`,
+      `| ${player.name} | ${player.remoteAvatars} | ${player.distanceFromSpawnMetres.toFixed(1)} | ${player.frameTiming.p95Ms.toFixed(1)} | ${player.world.downstream.toLocaleString("en-US")} | ${player.presence.upstream.toLocaleString("en-US")} | ${player.presence.downstream.toLocaleString("en-US")} |`,
   );
-  return `# Six-user multiplayer browser smoke\n\nGenerated ${result.generatedAt}. Six isolated BrowserContexts used independent browser identities, OPFS state, and shaped 40 ms RTT links to one native world service.\n\n| Player | Remote avatars | Travel (m) | World down (bytes) | Presence up (bytes) | Presence down (bytes) |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\nAll five builders remained visible to the observer after the observer moved ${result.observer.distanceFromBuildersMetres.toFixed(1)} m away, inside the configured far presence tier.\n\nCollaborative tower gate: **${result.collaborativeTower.status}**. ${result.collaborativeTower.reason}\n`;
+  return `# Six-user multiplayer browser smoke\n\nGenerated ${result.generatedAt}. Six isolated BrowserContexts used independent browser identities, OPFS state, and shaped 40 ms RTT links to one native world service.\n\n| Player | Remote avatars | Travel (m) | Frame p95 (ms) | World down (bytes) | Presence up (bytes) | Presence down (bytes) |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\nAll five builders remained visible to the observer after the observer moved ${result.observer.distanceFromBuildersMetres.toFixed(1)} m away, inside the configured far presence tier.\n\nCollaborative tower gate: **${result.collaborativeTower.status}**. ${result.collaborativeTower.reason}\n`;
 }
 
 async function main() {
@@ -375,6 +401,26 @@ async function main() {
       );
     }
     await observer.page.screenshot({ path: path.join(OUTPUT_DIRECTORY, "observer-far-five.png") });
+    await observer.page.waitForTimeout(600);
+    const steadySnapshots = await Promise.all(players.map(({ page }) => snapshot(page)));
+    const frameTimings = steadySnapshots.map(frameTimingSummary);
+    const timingViolations = frameTimings.flatMap((timing, index) => {
+      const violations = [];
+      if (timing.samples === 0) violations.push("captured no steady-state frames");
+      if (timing.p95Ms > LOCAL_MULTI_CLIENT_FRAME_P95_LIMIT_MS) {
+        violations.push(`frame p95 was ${timing.p95Ms}ms`);
+      }
+      if (timing.maxMs > LOCAL_MULTI_CLIENT_FRAME_MAX_LIMIT_MS) {
+        violations.push(`worst frame was ${timing.maxMs}ms`);
+      }
+      if (timing.droppedSamples > 0) {
+        violations.push(`dropped ${timing.droppedSamples} frame-history samples`);
+      }
+      return violations.map((violation) => `${players[index].name}: ${violation}`);
+    });
+    if (timingViolations.length > 0) {
+      throw new Error(`steady-state frame gate failed: ${timingViolations.join(", ")}`);
+    }
     if (errors.length > 0) throw new Error(errors.join("\n"));
 
     const collaborativeTower = {
@@ -405,6 +451,8 @@ async function main() {
         link: LINK_PROFILE,
         observerWalkMetres: OBSERVER_WALK_METRES,
         farTierMinimumMetres: FAR_TIER_MINIMUM_METRES,
+        localMultiClientFrameP95LimitMs: LOCAL_MULTI_CLIENT_FRAME_P95_LIMIT_MS,
+        localMultiClientFrameMaxLimitMs: LOCAL_MULTI_CLIENT_FRAME_MAX_LIMIT_MS,
         storage: "independent ephemeral BrowserContext localStorage and OPFS",
       },
       initialRosterMs: rounded(initialRosterMs),
@@ -417,7 +465,7 @@ async function main() {
         travelMetres: builderTravelMetres.map((distance) => rounded(distance, 3)),
       },
       players: players.map((player, index) => ({
-        ...playerSummary(player, farRosters[index]),
+        ...playerSummary(player, steadySnapshots[index], frameTimings[index]),
         startupMs: rounded(player.startupMs),
       })),
       collaborativeTower,

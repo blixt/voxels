@@ -89,6 +89,12 @@ still render the other five articulated avatars. Per-player `/v6/world` and `/v6
 VXWP byte counts are written to `target/multiplayer-browser/latest.json`; the far observer screenshot
 is `target/multiplayer-browser/observer-far-five.png`.
 
+The harness also samples a steady-state frame-history window for every context. Because all six
+unthrottled WebGPU renderers contend on one local GPU and worker pool, this is a bounded-stall gate
+(67 ms p95 and 100 ms maximum), not a claim about each remote player's independent device. Exact
+p95, maximum, over-33.33 ms count, and dropped-history count remain in the JSON so local contention
+regressions are visible rather than hidden behind one final-frame sample.
+
 This deliberately does not reuse the persistence browser test's same-profile BroadcastChannel. Such
 a test would make local OPFS edits look like networked edits and produce a false multiplayer result.
 The JSON currently records the collaborative-tower scenario as `skipped-unsupported`: although VXWP
