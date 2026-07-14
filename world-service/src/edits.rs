@@ -23,6 +23,8 @@ const EDIT_SCHEMA_VERSION: i64 = 2;
 const INITIAL_REVISION: u64 = 1;
 const DIG_EDGE_VOXELS: i32 = 5;
 const DIG_RADIUS_VOXELS: i32 = DIG_EDGE_VOXELS / 2;
+const DIG_SAMPLE_SHAPE: [u32; 3] = [DIG_EDGE_VOXELS as u32; 3];
+const DIG_MAX_MUTATIONS: usize = DIG_EDGE_VOXELS.pow(3) as usize;
 
 pub(crate) struct EditAuthority {
     inner: Mutex<EditState>,
@@ -899,11 +901,22 @@ fn plan_action(
                     EditAuthorityError("dig volume exceeds world coordinates".to_owned())
                 })?,
             );
-            let snapshot = source_voxel_block(source, min, [5, 5, 5])?;
-            let mut mutations = Vec::with_capacity(125);
-            for x in min.x..=min.x + 4 {
-                for y in min.y..=min.y + 4 {
-                    for z in min.z..=min.z + 4 {
+            let max = VoxelCoord::new(
+                min.x.checked_add(DIG_EDGE_VOXELS - 1).ok_or_else(|| {
+                    EditAuthorityError("dig volume exceeds world coordinates".to_owned())
+                })?,
+                min.y.checked_add(DIG_EDGE_VOXELS - 1).ok_or_else(|| {
+                    EditAuthorityError("dig volume exceeds world coordinates".to_owned())
+                })?,
+                min.z.checked_add(DIG_EDGE_VOXELS - 1).ok_or_else(|| {
+                    EditAuthorityError("dig volume exceeds world coordinates".to_owned())
+                })?,
+            );
+            let snapshot = source_voxel_block(source, min, DIG_SAMPLE_SHAPE)?;
+            let mut mutations = Vec::with_capacity(DIG_MAX_MUTATIONS);
+            for x in min.x..=max.x {
+                for y in min.y..=max.y {
+                    for z in min.z..=max.z {
                         let coord = VoxelCoord::new(x, y, z);
                         let generated = snapshot.sample(coord).ok_or_else(|| {
                             EditAuthorityError("source omitted a requested dig voxel".to_owned())
@@ -1392,12 +1405,26 @@ mod tests {
             assert_eq!(opened.inventory.count(material), expected);
         }
 
+        let solid_hit = VoxelCoord::new(0, -100, 0);
+        let solid_min = VoxelCoord::new(-2, -102, -2);
+        let solid_source = source_voxel_block(&source, solid_min, DIG_SAMPLE_SHAPE).unwrap();
+        let mut expected_histogram = [0_u64; MATERIAL_INVENTORY_SLOTS];
+        for x in solid_min.x..solid_min.x + DIG_EDGE_VOXELS {
+            for y in solid_min.y..solid_min.y + DIG_EDGE_VOXELS {
+                for z in solid_min.z..solid_min.z + DIG_EDGE_VOXELS {
+                    let material = solid_source.sample(VoxelCoord::new(x, y, z)).unwrap();
+                    expected_histogram[usize::from(material.id())] += 1;
+                }
+            }
+        }
+        assert_eq!(expected_histogram[Material::Air.id() as usize], 0);
+
         let solid = authority
             .apply(
                 &source,
                 player_id(2),
                 22,
-                dig(1, edit_session_id, VoxelCoord::new(0, -100, 0)),
+                dig(1, edit_session_id, solid_hit),
             )
             .unwrap();
         assert!(solid.changed);
@@ -1416,15 +1443,16 @@ mod tests {
                 .all(|mutation| mutation.material == Material::Air)
         );
         let solid_inventory = solid.commit.editor_inventory.unwrap();
-        let gained = Material::ALL
-            .into_iter()
-            .map(|material| {
+        for material in Material::ALL {
+            assert_eq!(
                 solid_inventory
                     .count(material)
-                    .saturating_sub(opened.inventory.count(material))
-            })
-            .sum::<u64>();
-        assert_eq!(gained, 125);
+                    .saturating_sub(opened.inventory.count(material)),
+                expected_histogram[usize::from(material.id())],
+                "dig credited the wrong number of {} voxels",
+                material.id()
+            );
+        }
 
         let sky = VoxelCoord::new(50, 300, 50);
         let materials = [Material::Stone, Material::Wood, Material::Water];
@@ -1530,6 +1558,324 @@ mod tests {
                 .to_string()
                 .contains("Air cannot")
         );
+    }
+
+    #[test]
+    fn dig_geometry_matrix_is_exact_sorted_unique_and_chunk_complete() {
+        let source = ProceduralWorldSource::new(0xface);
+        let inventory = starting_inventory(1);
+        let boundary_locals = [0, 1, 2, 29, 30, 31];
+
+        for axis in 0..3 {
+            let chunk_bases = if axis == 1 { [-1_024, -992] } else { [-64, 0] };
+            for chunk_base in chunk_bases {
+                for local in boundary_locals {
+                    let mut hit = [7, -1_000, -11];
+                    hit[axis] = chunk_base + local;
+                    if axis == 1 {
+                        hit[0] = 7;
+                        hit[2] = -11;
+                    }
+                    let hit = VoxelCoord::new(hit[0], hit[1], hit[2]);
+                    let (mutations, after) = plan_action(
+                        &source,
+                        &EditMap::default(),
+                        inventory,
+                        EditAction::Dig { hit },
+                    )
+                    .unwrap();
+                    assert_eq!(mutations.len(), DIG_MAX_MUTATIONS, "hit {hit:?}");
+                    assert!(
+                        mutations
+                            .windows(2)
+                            .all(|pair| pair[0].coord < pair[1].coord),
+                        "dig mutations must be strictly sorted and unique for {hit:?}"
+                    );
+                    let min = VoxelCoord::new(
+                        hit.x - DIG_RADIUS_VOXELS,
+                        hit.y - DIG_RADIUS_VOXELS,
+                        hit.z - DIG_RADIUS_VOXELS,
+                    );
+                    let max = VoxelCoord::new(
+                        min.x + DIG_EDGE_VOXELS - 1,
+                        min.y + DIG_EDGE_VOXELS - 1,
+                        min.z + DIG_EDGE_VOXELS - 1,
+                    );
+                    let actual = mutations
+                        .iter()
+                        .map(|mutation| mutation.coord)
+                        .collect::<BTreeSet<_>>();
+                    let expected = (min.x..=max.x)
+                        .flat_map(|x| {
+                            (min.y..=max.y).flat_map(move |y| {
+                                (min.z..=max.z).map(move |z| VoxelCoord::new(x, y, z))
+                            })
+                        })
+                        .collect::<BTreeSet<_>>();
+                    assert_eq!(actual, expected, "wrong dig volume for {hit:?}");
+
+                    let affected = mutations
+                        .iter()
+                        .flat_map(|mutation| EditMap::affected_chunks(mutation.coord))
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    assert!(affected.len() <= MAX_EDIT_AFFECTED_CHUNKS);
+                    assert!(affected.windows(2).all(|pair| pair[0] < pair[1]));
+                    assert_eq!(
+                        Material::ALL
+                            .into_iter()
+                            .map(|material| {
+                                after
+                                    .count(material)
+                                    .saturating_sub(inventory.count(material))
+                            })
+                            .sum::<u64>(),
+                        DIG_MAX_MUTATIONS as u64
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dig_coordinate_extrema_fail_atomically_instead_of_wrapping() {
+        let source = ProceduralWorldSource::new(0xbeef);
+        for hit in [
+            VoxelCoord::new(i32::MIN + 1, -100, 0),
+            VoxelCoord::new(i32::MAX - 1, -100, 0),
+            VoxelCoord::new(0, i32::MIN + 1, 0),
+            VoxelCoord::new(0, i32::MAX - 1, 0),
+            VoxelCoord::new(0, -100, i32::MIN + 1),
+            VoxelCoord::new(0, -100, i32::MAX - 1),
+        ] {
+            let error = plan_action(
+                &source,
+                &EditMap::default(),
+                starting_inventory(1),
+                EditAction::Dig { hit },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("exceeds world coordinates"));
+        }
+    }
+
+    #[test]
+    fn place_occupied_dig_noop_and_replace_preserve_every_revision_invariant() {
+        let source = ProceduralWorldSource::new(0x1234);
+        let authority = EditAuthority::in_memory(world_id(20), &source, 8, 2).unwrap();
+        let (opened, session) = admit_player(&authority, player_id(20), resume(1));
+        let target = VoxelCoord::new(-65, 300, 31);
+
+        let placed = authority
+            .apply(
+                &source,
+                player_id(20),
+                20,
+                place(1, session, target, Material::Wood),
+            )
+            .unwrap();
+        assert_eq!(placed.commit.revision, 2);
+        assert_eq!(placed.commit.editor_inventory.unwrap().revision, 2);
+        assert_eq!(placed.commit.mutations.len(), 1);
+
+        let occupied = authority
+            .apply(
+                &source,
+                player_id(20),
+                20,
+                place(2, session, target, Material::Stone),
+            )
+            .unwrap_err();
+        assert!(occupied.to_string().contains("occupied"));
+        assert_eq!(authority.revision(), 2);
+
+        let dug = authority
+            .apply(&source, player_id(20), 20, dig(3, session, target))
+            .unwrap();
+        assert!(dug.changed);
+        assert_eq!(dug.commit.revision, 3);
+        assert_eq!(dug.commit.mutations.len(), 1);
+        let after_dig = dug.commit.editor_inventory.unwrap();
+        assert_eq!(after_dig.revision, 3);
+        assert_eq!(
+            after_dig.count(Material::Wood),
+            opened.inventory.count(Material::Wood)
+        );
+
+        let noop = authority
+            .apply(&source, player_id(20), 20, dig(4, session, target))
+            .unwrap();
+        assert!(!noop.changed);
+        assert_eq!(noop.commit.revision, 3);
+        assert!(noop.commit.mutations.is_empty());
+        assert!(noop.commit.affected_chunks.is_empty());
+        assert!(noop.commit.affected_surface_tiles.is_empty());
+        assert_eq!(noop.commit.editor_inventory, Some(after_dig));
+
+        let replaced = authority
+            .apply(
+                &source,
+                player_id(20),
+                20,
+                place(5, session, target, Material::Basalt),
+            )
+            .unwrap();
+        assert_eq!(replaced.commit.revision, 4);
+        assert_eq!(replaced.commit.editor_inventory.unwrap().revision, 4);
+        assert_eq!(
+            authority
+                .snapshot_chunks(&[target.chunk()])
+                .edits
+                .override_at(target),
+            Some(Material::Basalt)
+        );
+        assert_eq!(authority.revision(), 4);
+    }
+
+    #[test]
+    fn overlapping_digs_never_credit_the_same_voxel_twice() {
+        let source = ProceduralWorldSource::new(0x5678);
+        let authority = EditAuthority::in_memory(world_id(21), &source, 8, 1).unwrap();
+        let (opened, session) = admit_player(&authority, player_id(21), resume(1));
+        let first = authority
+            .apply(
+                &source,
+                player_id(21),
+                21,
+                dig(1, session, VoxelCoord::new(0, -100, 0)),
+            )
+            .unwrap();
+        let second = authority
+            .apply(
+                &source,
+                player_id(21),
+                21,
+                dig(2, session, VoxelCoord::new(3, -100, 0)),
+            )
+            .unwrap();
+        assert_eq!(first.commit.mutations.len(), 125);
+        assert_eq!(second.commit.mutations.len(), 75);
+        let first_coords = first
+            .commit
+            .mutations
+            .iter()
+            .map(|mutation| mutation.coord)
+            .collect::<BTreeSet<_>>();
+        let second_coords = second
+            .commit
+            .mutations
+            .iter()
+            .map(|mutation| mutation.coord)
+            .collect::<BTreeSet<_>>();
+        assert!(first_coords.is_disjoint(&second_coords));
+        let inventory = second.commit.editor_inventory.unwrap();
+        let gained = Material::ALL
+            .into_iter()
+            .map(|material| inventory.count(material) - opened.inventory.count(material))
+            .sum::<u64>();
+        assert_eq!(gained, 200);
+    }
+
+    #[test]
+    fn concurrent_players_contend_atomically_for_placement_and_overlapping_digs() {
+        let source = Arc::new(ProceduralWorldSource::new(0x9abc));
+        let authority = EditAuthority::in_memory(world_id(22), source.as_ref(), 8, 2).unwrap();
+        let players = [player_id(22), player_id(23)];
+        let sessions = players.map(|player| admit_player(&authority, player, resume(1)).1);
+        let target = VoxelCoord::new(10, 300, -10);
+
+        let placements = players
+            .into_iter()
+            .zip(sessions)
+            .enumerate()
+            .map(|(index, (player, session))| {
+                let source = Arc::clone(&source);
+                let authority = Arc::clone(&authority);
+                std::thread::spawn(move || {
+                    authority.apply(
+                        source.as_ref(),
+                        player,
+                        100 + index as u64,
+                        place(1, session, target, Material::Wood),
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(placements.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            placements
+                .iter()
+                .filter(|result| result
+                    .as_ref()
+                    .is_err_and(|error| error.to_string().contains("occupied")))
+                .count(),
+            1
+        );
+        let total_wood = players
+            .into_iter()
+            .map(|player| {
+                load_durable_player(&authority.lock().connection, player)
+                    .unwrap()
+                    .unwrap()
+                    .inventory
+                    .count(Material::Wood)
+            })
+            .sum::<u64>();
+        assert_eq!(
+            total_wood, 3,
+            "exactly one of four starting units was spent"
+        );
+
+        let dig_source = Arc::new(ProceduralWorldSource::new(0xdef0));
+        let dig_authority =
+            EditAuthority::in_memory(world_id(23), dig_source.as_ref(), 8, 1).unwrap();
+        let dig_players = [player_id(24), player_id(25)];
+        let dig_sessions =
+            dig_players.map(|player| admit_player(&dig_authority, player, resume(1)).1);
+        let digs = dig_players
+            .into_iter()
+            .zip(dig_sessions)
+            .enumerate()
+            .map(|(index, (player, session))| {
+                let source = Arc::clone(&dig_source);
+                let authority = Arc::clone(&dig_authority);
+                std::thread::spawn(move || {
+                    authority
+                        .apply(
+                            source.as_ref(),
+                            player,
+                            200 + index as u64,
+                            dig(1, session, VoxelCoord::new(index as i32 * 3, -100, 0)),
+                        )
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        let mut revisions = digs
+            .iter()
+            .map(|edit| edit.commit.revision)
+            .collect::<Vec<_>>();
+        revisions.sort_unstable();
+        assert_eq!(revisions, vec![2, 3]);
+        let sets = digs
+            .iter()
+            .map(|edit| {
+                edit.commit
+                    .mutations
+                    .iter()
+                    .map(|mutation| mutation.coord)
+                    .collect::<BTreeSet<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert!(sets[0].is_disjoint(&sets[1]));
+        assert_eq!(sets.iter().map(BTreeSet::len).sum::<usize>(), 200);
     }
 
     #[test]
