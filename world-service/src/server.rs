@@ -818,7 +818,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     edit_subscription_open = false;
                     continue;
                 };
-                if edit_subscription.overflowed.swap(false, Ordering::AcqRel) {
+                if edit_subscription.discard_stale_after_overflow() {
                     let resync = ResyncRequired {
                         revision: state.edits.revision(),
                     };
@@ -830,6 +830,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                         }
                         Err(_) => break,
                     }
+                    continue;
                 }
                 match encode_edit_commit(&commit) {
                     Ok(bytes) => {
@@ -994,8 +995,15 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     recipients.extend(state.presence.connections_near_voxel(mutation.coord));
                 }
             }
-            recipients.insert(player_claim.connection_id);
+            recipients.remove(&player_claim.connection_id);
             state.edits.publish(&applied.commit, &recipients);
+            let bytes = match encode_edit_commit(&applied.commit) {
+                Ok(bytes) => bytes,
+                Err(_) => break,
+            };
+            if send_control_frame(&outbound, bytes).await.is_err() {
+                break;
+            }
         } else if kind == cancel_kind() {
             match decode_cancel(&bytes) {
                 Ok(request_id) => {

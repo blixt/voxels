@@ -51,6 +51,23 @@ pub(crate) struct EditSubscription {
     pub(crate) overflowed: Arc<AtomicBool>,
 }
 
+impl EditSubscription {
+    /// Converts a bounded-queue gap into one clean resync boundary. The caller must suppress the
+    /// commit it already popped when this returns `true`; every older queued commit is discarded so
+    /// none can be delivered after the resync and become authoritative again.
+    pub(crate) fn discard_stale_after_overflow(&mut self) -> bool {
+        if !self.overflowed.swap(false, Ordering::AcqRel) {
+            return false;
+        }
+        loop {
+            while self.receiver.try_recv().is_ok() {}
+            if !self.overflowed.swap(false, Ordering::AcqRel) {
+                return true;
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct AppliedEdit {
     pub(crate) commit: EditCommit,
@@ -2050,6 +2067,57 @@ mod tests {
                 .editor_inventory
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn overflow_discards_every_stale_commit_before_the_resync_boundary() {
+        let source = ProceduralWorldSource::new(24);
+        let authority = EditAuthority::in_memory(world_id(8), &source, 1, 3).unwrap();
+        let (_opened, session) = admit_player(&authority, player_id(9), resume(1));
+        let mut subscription = authority.subscribe(90);
+
+        let first = authority
+            .apply(
+                &source,
+                player_id(9),
+                90,
+                place(1, session, VoxelCoord::new(0, 300, 0), Material::Stone),
+            )
+            .unwrap();
+        let second = authority
+            .apply(
+                &source,
+                player_id(9),
+                90,
+                place(2, session, VoxelCoord::new(1, 300, 0), Material::Stone),
+            )
+            .unwrap();
+        authority.publish(&first.commit, &BTreeSet::from([90]));
+        authority.publish(&second.commit, &BTreeSet::from([90]));
+
+        let popped_stale = subscription.receiver.recv().await.unwrap();
+        assert_eq!(popped_stale.revision, first.commit.revision);
+        assert!(subscription.discard_stale_after_overflow());
+        assert!(matches!(
+            subscription.receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        let third = authority
+            .apply(
+                &source,
+                player_id(9),
+                90,
+                place(3, session, VoxelCoord::new(2, 300, 0), Material::Stone),
+            )
+            .unwrap();
+        authority.publish(&third.commit, &BTreeSet::from([90]));
+        assert_eq!(
+            subscription.receiver.recv().await.unwrap().revision,
+            third.commit.revision,
+            "new commits after the resync boundary must still flow"
+        );
+        assert!(!subscription.discard_stale_after_overflow());
     }
 
     fn remove_sqlite_files(path: &Path) {

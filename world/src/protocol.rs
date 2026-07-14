@@ -1895,6 +1895,16 @@ fn validate_edit_commit(commit: &EditCommit) -> Result<(), ProtocolError> {
         ));
     }
     if commit
+        .mutations
+        .iter()
+        .flat_map(|mutation| crate::EditMap::affected_chunks(mutation.coord))
+        .any(|coord| !commit.affected_chunks.contains(&coord))
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "edit affected chunks omit a mutation halo",
+        ));
+    }
+    if commit
         .affected_chunks
         .iter()
         .any(|coord| !coord.is_world_representable())
@@ -3377,22 +3387,29 @@ mod tests {
 
         let mut counts = [0; MATERIAL_INVENTORY_SLOTS];
         counts[Material::Basalt.id() as usize] = 11;
+        let mutations = vec![
+            VoxelMutation {
+                coord,
+                material: Material::Basalt,
+            },
+            VoxelMutation {
+                coord: VoxelCoord::new(32, 64, -33),
+                material: Material::Basalt,
+            },
+        ];
+        let affected_chunks = mutations
+            .iter()
+            .flat_map(|mutation| crate::EditMap::affected_chunks(mutation.coord))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let commit = EditCommit {
             operation_id: command.operation_id,
             edit_session_id,
             editor_connection_id: 77,
             revision: 9,
-            mutations: vec![
-                VoxelMutation {
-                    coord,
-                    material: Material::Basalt,
-                },
-                VoxelMutation {
-                    coord: VoxelCoord::new(32, 64, -33),
-                    material: Material::Basalt,
-                },
-            ],
-            affected_chunks: vec![coord.chunk(), ChunkCoord::new(1, 2, -2)],
+            mutations,
+            affected_chunks,
             affected_surface_tiles: vec![
                 SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, -1),
                 SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 0, -1),
@@ -3472,6 +3489,28 @@ mod tests {
             ))
         );
 
+        let owners = commit
+            .mutations
+            .iter()
+            .map(|mutation| mutation.coord.chunk())
+            .collect::<BTreeSet<_>>();
+        let omitted_halo = commit
+            .affected_chunks
+            .iter()
+            .copied()
+            .find(|coord| !owners.contains(coord))
+            .expect("boundary mutation should require a non-owner halo chunk");
+        let mut incomplete_halo = commit.clone();
+        incomplete_halo
+            .affected_chunks
+            .retain(|coord| *coord != omitted_halo);
+        assert_eq!(
+            encode_edit_commit(&incomplete_halo),
+            Err(ProtocolError::InvalidPayload(
+                "edit affected chunks omit a mutation halo"
+            ))
+        );
+
         let mut malformed_dig = encode_edit_command(dig).expect("encode malformed dig");
         malformed_dig[FRAME_HEADER_BYTES + 18..FRAME_HEADER_BYTES + 20]
             .copy_from_slice(&Material::Stone.id().to_le_bytes());
@@ -3517,7 +3556,7 @@ mod tests {
         assert_eq!(mutations.len(), MAX_EDIT_MUTATIONS);
         let affected_chunks = mutations
             .iter()
-            .map(|mutation| mutation.coord.chunk())
+            .flat_map(|mutation| crate::EditMap::affected_chunks(mutation.coord))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
