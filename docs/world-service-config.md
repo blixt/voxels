@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 5
+schema_version = 6
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "procedural-v16"
@@ -38,16 +38,27 @@ auth_subprotocol_token = "replace-with-a-random-local-token"
 max_frame_bytes = 16777216
 max_outbound_bytes_per_client = 33554432
 max_in_flight_batches = 16
-max_connections = 32
-global_queue_capacity = 128
+max_connections = 512
+global_queue_capacity = 8192
 generation_workers = 8
 generation_workers_per_client = 2
 
 [presence]
 broadcast_interval_ms = 33
-max_players = 32
+max_players = 512
 max_pose_updates_per_second = 60
 teleport_distance_metres = 4
+spatial_cell_metres = 64
+interest_radius_metres = 256
+interest_hysteresis_metres = 32
+near_radius_metres = 32
+mid_radius_metres = 96
+near_update_interval_ms = 50
+mid_update_interval_ms = 100
+far_update_interval_ms = 250
+max_records_per_delta = 64
+prediction_error_centimetres = 25
+look_error_milliradians = 175
 
 [spawn]
 xz_voxels = [0, 0]
@@ -104,7 +115,12 @@ sufficient to switch between procedural and learned terrain. The transport bound
 connections and queued work, and the per-client worker cap prevents one connection from occupying
 the complete local generation pool.
 
-The presence section controls the independent low-latency roster stream. `broadcast_interval_ms`
-coalesces all accepted latest poses into complete snapshots; `max_players` and
-`max_pose_updates_per_second` bound memory and client work; `teleport_distance_metres` requires large
-motion to carry an explicit discontinuity instead of being interpolated through the terrain.
+The presence section controls the independent low-latency delta stream. `spatial_cell_metres`,
+`interest_radius_metres`, and `interest_hysteresis_metres` define receiver-specific interest without
+splitting the world: every player at the same location remains in the same authoritative simulation.
+The near/mid/far radii and intervals reduce freshness with distance. Prediction and look-error
+thresholds can promote a correction before its interval, while age always accumulates so a dense
+crowd cannot starve. `max_records_per_delta` is the hard per-receiver dense-region budget shared by
+enters and pose updates. `max_players` and `max_pose_updates_per_second` bound state and inbound work;
+`teleport_distance_metres` requires large motion to carry an explicit discontinuity instead of being
+interpolated through terrain.

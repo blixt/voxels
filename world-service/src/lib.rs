@@ -70,7 +70,7 @@ impl Default for LoopbackTransportConfig {
             max_outbound_bytes_per_client: 32 * 1024 * 1024,
             max_in_flight_batches: 16,
             max_connections: 512,
-            global_queue_capacity: 128,
+            global_queue_capacity: 8_192,
             generation_workers: 8,
             generation_workers_per_client: 2,
         }

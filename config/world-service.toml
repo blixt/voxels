@@ -16,7 +16,8 @@ max_frame_bytes = 16777216
 max_outbound_bytes_per_client = 33554432
 max_in_flight_batches = 16
 max_connections = 512
-global_queue_capacity = 128
+# Covers the worst-case negotiated request window for all 512 admitted world connections.
+global_queue_capacity = 8192
 generation_workers = 8
 generation_workers_per_client = 2
 
