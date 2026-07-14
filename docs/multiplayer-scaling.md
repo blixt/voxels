@@ -78,6 +78,35 @@ zero isolated entity bytes. The 512-player dense discovery bound is eight networ
 bytes per receiver (`48 + 64 * 60`), or about 118 KiB/s if saturated on every tick; ordinary near,
 mid, and far cadence plus prediction suppresses unchanged or predictable records.
 
+### Six independent browser users
+
+`vp run test:multiplayer-browser` owns its native service, preview server, temporary configuration,
+and six independent ephemeral BrowserContexts. Each context has separate local storage and OPFS data,
+receives an independently shaped 40 ms RTT, 50/10 Mbit/s link, and must negotiate a distinct browser
+user and player identity. Five builders and one observer start together. The observer then travels at
+least 120 m from the builders, beyond the configured 96 m mid-presence tier, and all six clients must
+still render the other five articulated avatars. Per-player `/v5/world` and `/v5/presence` stream and
+VXWP byte counts are written to `target/multiplayer-browser/latest.json`; the far observer screenshot
+is `target/multiplayer-browser/observer-far-five.png`.
+
+This deliberately does not reuse the persistence browser test's same-profile BroadcastChannel. Such
+a test would make local OPFS edits look like networked edits and produce a false multiplayer result.
+The JSON currently records the collaborative-tower scenario as `skipped-unsupported`: VXWP v5 does
+not advertise `SERVER_EDITS`, and the browser has no deterministic hook that can submit an edit via a
+server-authoritative path or inspect a far surface-tile revision. Use the strict form to turn that
+known gap into a failing release gate:
+
+```sh
+vp run test:multiplayer-browser -- --require-tower
+```
+
+Removing the skip requires a diagnostic API which still exercises production behavior: submit a
+voxel operation and receive its authoritative revision, place a deterministic camera while marking a
+presence discontinuity, and read a bounded voxel or surface-tile revision plus content hash. The
+tower assertion must compare the observer's far-LOD revision and rendered fingerprint, not merely the
+number of edit rows. Canonical chunks cover only the near field, so an edit-count assertion would not
+prove that a tower changes the distant silhouette.
+
 ## Capacity and backpressure
 
 The checked-in service admits 512 world sockets plus 512 independently bounded presence sockets.

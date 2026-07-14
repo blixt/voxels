@@ -17,6 +17,9 @@ import { createShapedLink } from "./network-benchmark-link.mjs";
 
 const RESULT_SCHEMA_VERSION = 2;
 const FIXTURE_VERSION = 2;
+const VXWP_VERSION = 5;
+const WORLD_PATH = `/v${VXWP_VERSION}/world`;
+const PRESENCE_PATH = `/v${VXWP_VERSION}/presence`;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
 const FRAME_SAMPLE_WIDTH = 5;
@@ -92,11 +95,11 @@ function frameTimingSummary(samples, droppedSamples) {
 }
 
 function byteSummary(stats) {
-  const world = stats.paths["/v5/world"] ?? {
+  const world = stats.paths[WORLD_PATH] ?? {
     upstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
     downstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
   };
-  const presence = stats.paths["/v5/presence"] ?? {
+  const presence = stats.paths[PRESENCE_PATH] ?? {
     upstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
     downstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
   };
@@ -457,10 +460,10 @@ async function main() {
   await writeFile(
     clientConfigPath,
     clientSource
-      .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${proxyPort}/v5/world"`)
+      .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${proxyPort}${WORLD_PATH}"`)
       .replace(
         /^presence_endpoint = .*$/m,
-        `presence_endpoint = "ws://127.0.0.1:${proxyPort}/v5/presence"`,
+        `presence_endpoint = "ws://127.0.0.1:${proxyPort}${PRESENCE_PATH}"`,
       ),
   );
   process.env.VOXELS_CLIENT_CONFIG_PATH = clientConfigPath;
@@ -615,7 +618,7 @@ async function main() {
       },
       protocol: {
         name: "VXWP",
-        version: 4,
+        version: VXWP_VERSION,
         resultCompression: { codec: "brotli", quality: 2, windowBits: 20 },
       },
       link: { ...profile, ...link.profile },
