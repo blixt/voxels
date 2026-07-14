@@ -111,6 +111,33 @@ impl EditMap {
         self.overrides.is_empty()
     }
 
+    /// Conservative far-LOD additions within half-open X/Z bounds. Excavations remain represented
+    /// by the regular center sample, while an off-center player-built silhouette cannot disappear
+    /// merely because it missed the coarse sample point.
+    pub(crate) fn collidable_edited_surface_columns_in(
+        &self,
+        generator: Generator,
+        bounds: [[i32; 2]; 2],
+    ) -> Vec<(i32, i32, i32, Material)> {
+        let [[min_x, min_z], [max_x, max_z]] = bounds;
+        let mut columns = Vec::new();
+        for (&(x, z), _) in self.column_overrides.range((min_x, i32::MIN)..) {
+            if x >= max_x {
+                break;
+            }
+            if z < min_z || z >= max_z {
+                continue;
+            }
+            let (height, material) = self.surface_sample(generator, x, z);
+            if material.is_collidable()
+                && self.override_at(VoxelCoord::new(x, height, z)) == Some(material)
+            {
+                columns.push((x, z, height, material));
+            }
+        }
+        columns
+    }
+
     pub fn apply_to_chunk(&self, chunk: &mut Chunk) {
         let coord = chunk.coord();
         let key = (coord.x, coord.y, coord.z);

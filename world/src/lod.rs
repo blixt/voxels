@@ -3,6 +3,7 @@ use crate::{
     EditMap, FEATURE_MAX_RADIUS_VOXELS, Generator, Material, SEA_LEVEL_VOXELS, SkylineFeature,
     SkylineFeatureKind, VoxelCoord,
 };
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 /// Every surface LOD tile contains the same number of cells. Increasing the level therefore
@@ -358,12 +359,83 @@ pub fn generate_edited_surface_tile_mesh(
     coord: SurfaceTileCoord,
 ) -> SurfaceTileMesh {
     let features = pristine_skyline_features(generator, edits, coord);
+    if edits.is_empty() {
+        return generate_surface_tile_mesh_with_options(
+            coord,
+            |x, z| edits.surface_sample(generator, x, z),
+            true,
+            &features,
+        );
+    }
+    let aliases = collidable_edit_aliases(generator, edits, coord);
     generate_surface_tile_mesh_with_options(
         coord,
-        |x, z| edits.surface_sample(generator, x, z),
+        |x, z| {
+            let sampled = edits.surface_sample(generator, x, z);
+            aliases
+                .get(&(x, z))
+                .copied()
+                .filter(|(height, _)| *height >= sampled.0)
+                .unwrap_or(sampled)
+        },
         true,
         &features,
     )
+}
+
+/// Bins sparse player-built surface columns into the same center-addressed cells sampled by the
+/// clipmap. A single off-center tower voxel therefore conservatively raises its whole coarse cell
+/// instead of disappearing between samples. Only the tile plus its one-cell transition halo is
+/// queried, and pristine tiles retain the exact old center-sampling path above.
+fn collidable_edit_aliases(
+    generator: Generator,
+    edits: &EditMap,
+    coord: SurfaceTileCoord,
+) -> BTreeMap<(i32, i32), (i32, Material)> {
+    let [origin_x, origin_z] = coord.voxel_origin();
+    let stride = coord.stride_voxels();
+    let halo_span = (SURFACE_TILE_EDGE_CELLS + 1).saturating_mul(stride);
+    let bounds = [
+        [
+            origin_x.saturating_sub(stride),
+            origin_z.saturating_sub(stride),
+        ],
+        [
+            origin_x.saturating_add(halo_span),
+            origin_z.saturating_add(halo_span),
+        ],
+    ];
+    let mut aliases = BTreeMap::new();
+    for (x, z, height, material) in edits.collidable_edited_surface_columns_in(generator, bounds) {
+        let cell_x = (i64::from(x) - i64::from(origin_x)).div_euclid(i64::from(stride));
+        let cell_z = (i64::from(z) - i64::from(origin_z)).div_euclid(i64::from(stride));
+        if !(-1..=i64::from(SURFACE_TILE_EDGE_CELLS)).contains(&cell_x)
+            || !(-1..=i64::from(SURFACE_TILE_EDGE_CELLS)).contains(&cell_z)
+        {
+            continue;
+        }
+        let sample_x = offset_clamped(
+            origin_x,
+            (cell_x as i32)
+                .saturating_mul(stride)
+                .saturating_add(stride / 2),
+        );
+        let sample_z = offset_clamped(
+            origin_z,
+            (cell_z as i32)
+                .saturating_mul(stride)
+                .saturating_add(stride / 2),
+        );
+        aliases
+            .entry((sample_x, sample_z))
+            .and_modify(|current: &mut (i32, Material)| {
+                if height > current.0 {
+                    *current = (height, material);
+                }
+            })
+            .or_insert((height, material));
+    }
+    aliases
 }
 
 pub fn generate_edited_water_tile_mesh(
@@ -1227,6 +1299,119 @@ mod tests {
                 && quad.origin[2] <= voxel_z
                 && voxel_z < quad.origin[2] + i32::from(quad.extent[1])
         })
+    }
+
+    fn highest_top_quad_at(
+        tile: &SurfaceTileMesh,
+        voxel_x: i32,
+        voxel_z: i32,
+    ) -> Option<SurfaceQuad> {
+        tile.quads
+            .iter()
+            .copied()
+            .filter(|quad| {
+                quad.face == FACE_POS_Y
+                    && quad.origin[0] <= voxel_x
+                    && voxel_x < quad.origin[0] + i32::from(quad.extent[0])
+                    && quad.origin[2] <= voxel_z
+                    && voxel_z < quad.origin[2] + i32::from(quad.extent[1])
+            })
+            .max_by_key(|quad| quad.origin[1])
+    }
+
+    #[test]
+    fn off_center_thin_tower_survives_every_surface_lod_and_reverts_exactly() {
+        let generator = Generator::new(0x5eed_cafe);
+        let target = VoxelCoord::new(16, 1_024, 16);
+        assert_eq!(
+            generator.sample(target.x, target.y, target.z),
+            Material::Air
+        );
+        let pristine = SurfaceLodLevel::ALL.map(|level| {
+            let coord = SurfaceTileCoord::containing(level, target.x, target.z);
+            (coord, generate_surface_tile_mesh(generator, coord))
+        });
+
+        let mut edits = EditMap::default();
+        edits.set(generator, target, Material::Stone);
+        for (level, (coord, _)) in SurfaceLodLevel::ALL.into_iter().zip(&pristine) {
+            let [origin_x, origin_z] = coord.voxel_origin();
+            let stride = level.stride_voxels();
+            let sample_x =
+                origin_x + (target.x - origin_x).div_euclid(stride) * stride + stride / 2;
+            let sample_z =
+                origin_z + (target.z - origin_z).div_euclid(stride) * stride + stride / 2;
+            assert_ne!([sample_x, sample_z], [target.x, target.z]);
+
+            let edited = generate_edited_surface_tile_mesh(generator, &edits, *coord);
+            let top = highest_top_quad_at(&edited, target.x, target.z)
+                .expect("the edited cell must retain a visible top");
+            assert_eq!(top.origin[1], target.y, "thin tower vanished at {level:?}");
+            assert_eq!(top.material, Material::Stone);
+        }
+
+        edits.set(generator, target, Material::Air);
+        assert!(edits.is_empty());
+        for (coord, expected) in pristine {
+            assert_eq!(
+                generate_edited_surface_tile_mesh(generator, &edits, coord),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn unaligned_three_point_two_metre_tower_survives_every_lod_then_removes_cleanly() {
+        let generator = Generator::new(0x5eed_cafe);
+        let tower_y = 1_024;
+        let tower_min = [1, 1];
+        let tower_max = [33, 33];
+        let pristine = SurfaceLodLevel::ALL.map(|level| {
+            let coord = SurfaceTileCoord::containing(level, tower_min[0], tower_min[1]);
+            assert_eq!(
+                coord,
+                SurfaceTileCoord::containing(level, tower_max[0] - 1, tower_max[1] - 1)
+            );
+            (coord, generate_surface_tile_mesh(generator, coord))
+        });
+
+        let mut edits = EditMap::default();
+        for z in tower_min[1]..tower_max[1] {
+            for x in tower_min[0]..tower_max[0] {
+                let target = VoxelCoord::new(x, tower_y, z);
+                assert_eq!(generator.sample(x, tower_y, z), Material::Air);
+                edits.set(generator, target, Material::Stone);
+            }
+        }
+        assert_eq!(edits.len(), 32 * 32);
+
+        for (level, (coord, _)) in SurfaceLodLevel::ALL.into_iter().zip(&pristine) {
+            let edited = generate_edited_surface_tile_mesh(generator, &edits, *coord);
+            for z in tower_min[1]..tower_max[1] {
+                for x in tower_min[0]..tower_max[0] {
+                    let top = highest_top_quad_at(&edited, x, z)
+                        .expect("the edited tower footprint must retain a visible top");
+                    assert_eq!(
+                        top.origin[1], tower_y,
+                        "3.2 m tower footprint vanished at {level:?} ({x}, {z})"
+                    );
+                    assert_eq!(top.material, Material::Stone);
+                }
+            }
+        }
+
+        for z in tower_min[1]..tower_max[1] {
+            for x in tower_min[0]..tower_max[0] {
+                edits.set(generator, VoxelCoord::new(x, tower_y, z), Material::Air);
+            }
+        }
+        assert!(edits.is_empty());
+        for (coord, expected) in pristine {
+            assert_eq!(
+                generate_edited_surface_tile_mesh(generator, &edits, coord),
+                expected
+            );
+        }
     }
 
     #[test]
