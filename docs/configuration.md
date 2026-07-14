@@ -24,7 +24,8 @@ an operator can tune a deployed client without rebuilding WASM. Reload the page 
 
 The file controls:
 
-- the authoritative world-service endpoint, authorization token, and client backpressure window;
+- the authoritative world and presence endpoints, authorization token, and backpressure windows;
+- pose cadence, clock synchronization, adaptive interpolation bounds, and extrapolation horizon;
 - fixed-step timing, catch-up limit, persistence cadence, and edit-tracker capacity;
 - chunk and surface-LOD load/retention radii, pipeline budgets, and interest capacity;
 - view/shadow settings;
@@ -46,9 +47,9 @@ but camera persistence is keyed by the opaque player ID. See
 ## World-service configuration
 
 `config/world-service.toml` controls the seed, the procedural/Terrain Diffusion provider toggle,
-and Terrain Diffusion deployment settings such as precision, model cache, model-space origin, and
-world placement. See [World service configuration](world-service-config.md) for commands and the
-complete server schema.
+presence roster cadence and admission bounds, and Terrain Diffusion deployment settings such as
+precision, model cache, model-space origin, and world placement. See
+[World service configuration](world-service-config.md) for commands and the complete server schema.
 
 The browser has no embedded world-generation mode. It always negotiates the same provider-neutral
 chunk and surface-LOD protocol with this service, so editing `source` and restarting the daemon is

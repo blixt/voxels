@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 4
+schema_version = 5
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "procedural-v16"
@@ -42,6 +42,12 @@ max_connections = 32
 global_queue_capacity = 128
 generation_workers = 8
 generation_workers_per_client = 2
+
+[presence]
+broadcast_interval_ms = 33
+max_players = 32
+max_pose_updates_per_second = 60
+teleport_distance_metres = 4
 
 [spawn]
 xz_voxels = [0, 0]
@@ -97,3 +103,8 @@ client never branches on provider selection; changing the daemon source and rest
 sufficient to switch between procedural and learned terrain. The transport bounds total accepted
 connections and queued work, and the per-client worker cap prevents one connection from occupying
 the complete local generation pool.
+
+The presence section controls the independent low-latency roster stream. `broadcast_interval_ms`
+coalesces all accepted latest poses into complete snapshots; `max_players` and
+`max_pose_updates_per_second` bound memory and client work; `teleport_distance_metres` requires large
+motion to carry an explicit discontinuity instead of being interpolated through the terrain.

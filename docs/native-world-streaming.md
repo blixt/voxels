@@ -7,11 +7,16 @@ provider therefore adds no provider branch, model dependency, or Metal API to th
 
 ## Why binary WebSocket first
 
-VXWP v2 uses the standard `WebSocket` API over loopback. This is the best first transport for
+VXWP v3 uses the standard `WebSocket` API over loopback. This is the best first transport for
 reliable chunk assets: it is mature, works in a dedicated worker, and requires neither an HTTP/3
 certificate setup nor WebRTC signaling. Axum's native Rust server disables Nagle delay, and the
 application bounds outstanding work so classic WebSocket's missing receive-side backpressure cannot
 create an unbounded producer.
+
+World products and player presence use separate WebSocket connections. Large reliable chunk frames
+therefore cannot head-of-line block the small latest-state pose stream. The world connection remains
+request/response and lossless; the presence sender skips an obsolete pose when its tiny
+`bufferedAmount` budget is full instead of building latency by queueing it.
 
 The important alternatives remain possible without changing the world-product contract:
 
@@ -34,13 +39,13 @@ The [W3C WebTransport specification][webtransport-spec] supports carrying the sa
 envelopes on a future reliable stream. Transport choice is deliberately below world identity,
 request correlation, and chunk codecs.
 
-## VXWP v2 contract
+## VXWP v3 contract
 
 Each WebSocket message contains exactly one little-endian VXWP envelope with `VXWP` magic, protocol
 version, message kind, request ID, payload length, and reserved fields. The format is code-versioned;
 Rust enum layout and Serde output are not wire formats.
 
-1. The browser upgrades `/v2/world`, offering `voxels.world.v2` and the configured local auth token,
+1. The browser upgrades `/v3/world`, offering `voxels.world.v3` and the configured local auth token,
    then sends `OpenWorld` with its maximum in-flight batch count and browser-local player claim.
 2. The daemon replies with `WorldOpened`: immutable world manifest, source identity/hash,
    capabilities, negotiated request window, echoed player claim, and spawn sample. The client
@@ -57,10 +62,23 @@ Rust enum layout and Serde output are not wire formats.
    coverage is complete.
 7. `Cancel` is best effort. Late, canceled, mismatched, or stale-revision responses are discarded;
    they cannot resurrect an evicted scheduler ticket.
+8. `WorldOpened` also returns a connection-scoped, random presence session token. The browser uses
+   it to open `/v3/presence` on a dedicated socket; a token cannot be reused by another world
+   connection.
+9. Browsers send bounded `PlayerPose` latest-state frames. The server validates monotonic sequence,
+   finite coordinates, update rate, and explicit teleport discontinuities, assigns a unique color,
+   then broadcasts one sorted complete roster. Missing roster entries remove players immediately.
+10. Presence ping/pong frames estimate the server clock with an NTP-style four-timestamp offset.
+    Receivers render a delayed server timeline, adapt its 67-200 ms interpolation buffer to jitter,
+    use clamped Hermite position interpolation and shortest-arc angles, extrapolate for at most
+    100 ms, then hold instead of letting an avatar run away. This follows the delayed timeline and
+    bounded extrapolation patterns described by [Gaffer on Games][snapshot-interpolation] and
+    [Unity Netcode][unity-interpolation], with clock-offset estimation derived from [NTP][ntp].
 
-The required capability set is `CANONICAL_CHUNKS | SURFACE_LOD`. Server-owned edits, environment
-queries, authored routes, and multiplayer simulation still need separate versioned products; the
-client never substitutes procedural answers for a remote learned world.
+The required capability set is `CANONICAL_CHUNKS | SURFACE_LOD | PLAYER_PRESENCE`. Server-owned
+edits, environment queries, authored routes, inventory, and authoritative multiplayer simulation
+still need separate versioned products; the client never substitutes procedural answers for a
+remote learned world.
 
 This is progressive at the product level, not an image-style byte-prefix codec: every coarser tile
 is a complete useful view and a finer tile is an independently cached replacement. A future `VXSP`
@@ -110,8 +128,9 @@ Copy it to both `config/client.toml` as `[world].auth_subprotocol_token` and
 
 ```toml
 [world]
-endpoint = "ws://127.0.0.1:9777/v2/world"
-subprotocol = "voxels.world.v2"
+endpoint = "ws://127.0.0.1:9777/v3/world"
+presence_endpoint = "ws://127.0.0.1:9777/v3/presence"
+subprotocol = "voxels.world.v3"
 auth_subprotocol_token = "the-same-random-local-token"
 ```
 
@@ -177,9 +196,25 @@ browser profile.
 Different browser profiles, private windows, hostnames, or ports have separate local storage and
 OPFS; cross-device state requires the future server-owned player store.
 
-This phase establishes identities and independent local positions, but does not replicate avatars,
-movement, inventory, or edits through the server yet. Those features must move simulation and state
-authority to the authenticated server instead of trusting browser-local values.
+The presence service now replicates positions, velocity, look direction, connection lifetime, and a
+server-assigned saturated color. Every receiver animates that state as a thin 13-cuboid figure in one
+instanced draw per pass: segmented arms and legs use distance-driven gait, following the same
+distance-over-time principle as [Unreal distance matching][distance-matching]; a same-color face
+nub makes head direction readable; and large look offsets pull the body around with hysteresis.
+These poses are still untrusted client claims. Collision, inventory, edits, respawn, and durable
+player state must move to an authenticated authoritative server before Internet multiplayer.
+
+To run the automated two-client release smoke test, keep only the world service on port 9777 running
+and leave port 5173 free, then run:
+
+```sh
+vp run test:multiplayer-browser
+```
+
+It launches two named clients in a temporary Chrome profile, requires both complete rosters to
+produce one remote avatar, walks Bob while Alice observes, rejects browser/WGPU/socket errors, and
+writes ignored screenshots under `target/multiplayer-browser/`. It never opens or resets a user's
+normal browser profile or OPFS world.
 
 ## Far-LOD transition policy and next step
 
@@ -210,3 +245,7 @@ produce. Out-of-coverage requests fail instead of tiling or falling back to proc
 [geometry-clipmaps]: https://developer.nvidia.com/gpugems/gpugems2/part-i-geometric-complexity/chapter-2-terrain-rendering-using-gpu-based-geometry
 [smooth-lod]: https://www.microsoft.com/en-us/research/publication/smooth-view-dependent-level-of-detail-control-and-its-application-to-terrain-rendering/
 [nanite]: https://dev.epicgames.com/documentation/en-us/unreal-engine/nanite-virtualized-geometry-in-unreal-engine
+[snapshot-interpolation]: https://gafferongames.com/post/snapshot_interpolation/
+[unity-interpolation]: https://docs.unity.cn/Packages/com.unity.netcode%401.5/manual/interpolation.html
+[ntp]: https://www.rfc-editor.org/info/rfc5905/
+[distance-matching]: https://dev.epicgames.com/documentation/unreal-engine/distance-matching-in-unreal-engine

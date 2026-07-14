@@ -18,6 +18,8 @@ streaming, and persistence while the native Rust world service owns generation.
 8. Stress isolated rapid-refresh and multi-tab OPFS handoff in Chrome with
    `vp run test:persistence-browser`.
 9. Force a complete stale-lease retry cycle with `vp run test:persistence-recovery`.
+10. With the world service running, launch two named release clients and verify remote-avatar
+    streaming, rendering, and movement in real Chrome with `vp run test:multiplayer-browser`.
 
 `vp run verify` runs the complete TypeScript, Rust, test, lint, and production-build gate.
 The browser persistence stress test remains explicit because it launches a system Chrome instance.
@@ -43,6 +45,8 @@ deployment, validation, and testing conventions for both files.
 Opening the bare development URL reuses the browser's default local player and last position. Open
 `/?player=alice` and `/?player=bob` in two windows to test distinct simultaneous players against the
 same daemon; see [Local players](docs/native-world-streaming.md#local-players-and-two-browser-testing).
+Each client renders the others as unique saturated-color articulated voxel figures with distance-
+driven gait, independent head look, body-follow hysteresis, shadows, depth, and contact AO.
 `vp run profile:browser` builds release WASM, serves it from an isolated origin, and records raw
 frame/CPU phase distributions for steady, traversal, and underwater scenarios in system Chrome.
 `vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step closed rail. One lap warms the exact
