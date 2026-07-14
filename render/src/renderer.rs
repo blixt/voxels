@@ -38,10 +38,20 @@ const MAX_SHADOW_ALLOCATION_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ACTIVE_LOCAL_LIGHTS: usize = 16;
 const MAX_LOCAL_LIGHT_VISIBILITY_TESTS: usize = 32;
 const _: () = assert!(MAX_LOCAL_LIGHT_VISIBILITY_TESTS >= MAX_ACTIVE_LOCAL_LIGHTS);
-const PLACEMENT_MATERIALS: [Material; 4] = [
+const PLACEMENT_MATERIALS: [Material; Material::ALL.len() - 1] = [
     Material::Grass,
+    Material::Dirt,
     Material::Stone,
+    Material::Sand,
+    Material::Snow,
+    Material::Clay,
     Material::Basalt,
+    Material::Wood,
+    Material::Leaves,
+    Material::Moss,
+    Material::Limestone,
+    Material::RedSand,
+    Material::Water,
     Material::GlowCrystal,
 ];
 const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
@@ -55,6 +65,72 @@ const GPU_READBACK_SLOTS: usize = 4;
 const GPU_TIMER_BUFFER_BYTES: u64 =
     GPU_RESOLVE_BUFFER_BYTES + GPU_QUERY_BUFFER_BYTES * GPU_READBACK_SLOTS as u64;
 type MeshKey = (u8, i32, i32, i32);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlacementInventory {
+    counts: [u64; Material::ALL.len()],
+    selected: Material,
+}
+
+impl PlacementInventory {
+    fn new(selected: Material) -> Self {
+        Self {
+            counts: [0; Material::ALL.len()],
+            selected: is_placeable_material(selected)
+                .then_some(selected)
+                .unwrap_or(Material::Grass),
+        }
+    }
+
+    const fn selected(&self) -> Material {
+        self.selected
+    }
+
+    fn count(&self, material: Material) -> u64 {
+        self.counts[usize::from(material.id())]
+    }
+
+    fn set_counts(&mut self, counts: [u64; Material::ALL.len()]) {
+        self.counts = counts;
+        if self.count(self.selected) == 0
+            && let Some(material) = PLACEMENT_MATERIALS
+                .into_iter()
+                .find(|material| self.count(*material) > 0)
+        {
+            self.selected = material;
+        }
+    }
+
+    fn select(&mut self, material: Material) -> bool {
+        if !is_placeable_material(material) || self.count(material) == 0 {
+            return false;
+        }
+        self.selected = material;
+        true
+    }
+
+    fn cycle(&mut self, direction: i32) -> bool {
+        if direction == 0 {
+            return false;
+        }
+        let Some(current) = PLACEMENT_MATERIALS
+            .iter()
+            .position(|material| *material == self.selected)
+        else {
+            return false;
+        };
+        let step = direction.signum();
+        for distance in 1..=PLACEMENT_MATERIALS.len() {
+            let index = (current as i32 + step * distance as i32)
+                .rem_euclid(PLACEMENT_MATERIALS.len() as i32) as usize;
+            let candidate = PLACEMENT_MATERIALS[index];
+            if candidate != self.selected && self.count(candidate) > 0 {
+                return self.select(candidate);
+            }
+        }
+        false
+    }
+}
 
 /// Host-provided renderer startup and reset configuration.
 ///
@@ -614,7 +690,7 @@ pub struct Renderer {
     underwater_blend: f32,
     interior: InteriorEnvironment,
     interior_target: InteriorEnvironment,
-    placement_material: Material,
+    placement_inventory: PlacementInventory,
     runtime_config: RendererConfig,
 }
 
@@ -1274,11 +1350,11 @@ impl Renderer {
         let ui_gpu = UiGpu::new(&device, format, config.width, config.height, dpr)?;
         let water_scene_bind_group = ui_gpu.refraction_bind_group(&device, &water_scene_layout);
 
+        let placement_inventory =
+            PlacementInventory::new(runtime_config.initial_placement_material);
         let mut ui = MissionControlUi::new(runtime_config.mission_control, runtime_config.features);
         ui.set_environment_status(daylight_phase.label(), surface_region_label(surface_region));
-        ui.set_placement_material(placement_material_label(
-            runtime_config.initial_placement_material,
-        ));
+        sync_inventory_ui(&mut ui, &placement_inventory);
         Ok(Self {
             surface,
             device,
@@ -1337,7 +1413,7 @@ impl Renderer {
             underwater_blend: 0.0,
             interior: InteriorEnvironment::default(),
             interior_target: InteriorEnvironment::default(),
-            placement_material: runtime_config.initial_placement_material,
+            placement_inventory,
             runtime_config,
         })
     }
@@ -1483,7 +1559,44 @@ impl Renderer {
     }
 
     pub const fn placement_material(&self) -> Material {
-        self.placement_material
+        self.placement_inventory.selected()
+    }
+
+    pub fn inventory_counts(&self) -> [u64; Material::ALL.len()] {
+        self.placement_inventory.counts
+    }
+
+    pub fn inventory_count(&self, material: Material) -> u64 {
+        self.placement_inventory.count(material)
+    }
+
+    /// Replaces the complete server-authored inventory snapshot. Selection follows the first
+    /// stocked material only when the current material has become unavailable.
+    pub fn set_inventory_counts(&mut self, counts: [u64; Material::ALL.len()]) {
+        self.placement_inventory.set_counts(counts);
+        sync_inventory_ui(&mut self.ui, &self.placement_inventory);
+    }
+
+    /// Selects a material only when the latest authoritative inventory says it is available.
+    pub fn set_placement_material(&mut self, material: Material) -> bool {
+        let selected = self.placement_inventory.select(material);
+        if selected {
+            sync_inventory_ui(&mut self.ui, &self.placement_inventory);
+        }
+        selected
+    }
+
+    /// Cycles in either direction, skipping every material whose authoritative count is zero.
+    pub fn cycle_placement_material(&mut self, direction: i32) -> bool {
+        let changed = self.placement_inventory.cycle(direction);
+        if changed {
+            sync_inventory_ui(&mut self.ui, &self.placement_inventory);
+        }
+        changed
+    }
+
+    pub fn show_gameplay_toast(&mut self, message: impl Into<String>) {
+        self.ui.show_gameplay_toast(message);
     }
 
     pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
@@ -1572,14 +1685,7 @@ impl Renderer {
                 self.landmark_teleport_requested = true;
             }
             UiAction::ContextAction(ContextAction::CyclePlacementMaterial) => {
-                let index = PLACEMENT_MATERIALS
-                    .iter()
-                    .position(|material| *material == self.placement_material)
-                    .unwrap_or(0);
-                self.placement_material =
-                    PLACEMENT_MATERIALS[(index + 1) % PLACEMENT_MATERIALS.len()];
-                self.ui
-                    .set_placement_material(placement_material_label(self.placement_material));
+                let _ = self.cycle_placement_material(1);
             }
             UiAction::ContextAction(ContextAction::CloseMissionControl) => {
                 let _ = self.ui.set_open(false);
@@ -2677,11 +2783,86 @@ fn coalesce_draw_items(mut items: Vec<DrawItem>) -> Vec<DrawSpan> {
 const fn placement_material_label(material: Material) -> &'static str {
     match material {
         Material::Grass => "GRASS",
+        Material::Dirt => "DIRT",
         Material::Stone => "STONE",
+        Material::Sand => "SAND",
+        Material::Snow => "SNOW",
+        Material::Clay => "CLAY",
         Material::Basalt => "BASALT",
+        Material::Wood => "WOOD",
+        Material::Leaves => "LEAVES",
+        Material::Moss => "MOSS",
+        Material::Limestone => "LIMESTONE",
+        Material::RedSand => "RED SAND",
+        Material::Water => "WATER",
         Material::GlowCrystal => "GLOW CRYSTAL",
-        _ => "VOXEL",
+        Material::Air => "AIR",
     }
+}
+
+const fn inventory_material_code(material: Material) -> &'static str {
+    match material {
+        Material::Air => "AI",
+        Material::Grass => "GR",
+        Material::Dirt => "DI",
+        Material::Stone => "ST",
+        Material::Sand => "SA",
+        Material::Snow => "SN",
+        Material::Clay => "CL",
+        Material::Basalt => "BA",
+        Material::Wood => "WO",
+        Material::Leaves => "LE",
+        Material::Moss => "MO",
+        Material::Limestone => "LI",
+        Material::RedSand => "RS",
+        Material::Water => "WA",
+        Material::GlowCrystal => "GL",
+    }
+}
+
+const fn is_placeable_material(material: Material) -> bool {
+    !matches!(material, Material::Air)
+}
+
+fn inventory_summary(inventory: &PlacementInventory) -> [String; 2] {
+    let half = PLACEMENT_MATERIALS.len().div_ceil(2);
+    std::array::from_fn(|line| {
+        let range = if line == 0 {
+            0..half
+        } else {
+            half..PLACEMENT_MATERIALS.len()
+        };
+        range
+            .map(|index| {
+                let material = PLACEMENT_MATERIALS[index];
+                format!(
+                    "{} {}",
+                    inventory_material_code(material),
+                    compact_inventory_count(inventory.count(material))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    })
+}
+
+fn compact_inventory_count(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}m", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+fn sync_inventory_ui(ui: &mut MissionControlUi, inventory: &PlacementInventory) {
+    let selected = inventory.selected();
+    ui.set_inventory(
+        placement_material_label(selected),
+        inventory.count(selected),
+        inventory_summary(inventory),
+    );
 }
 
 fn local_lights_for_mesh(origin: [i32; 3], mesh: &MeshedChunk) -> Vec<GpuLocalLight> {
@@ -3106,6 +3287,52 @@ fn preferred_format(formats: &[TextureFormat]) -> TextureFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn counts(entries: &[(Material, u64)]) -> [u64; Material::ALL.len()] {
+        let mut counts = [0; Material::ALL.len()];
+        for &(material, count) in entries {
+            counts[usize::from(material.id())] = count;
+        }
+        counts
+    }
+
+    #[test]
+    fn placement_inventory_follows_authoritative_stock_and_skips_empty_materials() {
+        let mut inventory = PlacementInventory::new(Material::GlowCrystal);
+        inventory.set_counts(counts(&[(Material::Dirt, 12), (Material::Water, 3)]));
+        assert_eq!(inventory.selected(), Material::Dirt);
+        assert_eq!(inventory.count(Material::Dirt), 12);
+        assert!(!inventory.select(Material::Stone));
+        assert!(!inventory.select(Material::Air));
+        assert!(inventory.cycle(1));
+        assert_eq!(inventory.selected(), Material::Water);
+        assert!(inventory.cycle(-1));
+        assert_eq!(inventory.selected(), Material::Dirt);
+    }
+
+    #[test]
+    fn every_non_air_material_is_placeable_and_visible_in_the_inventory_summary() {
+        assert_eq!(PLACEMENT_MATERIALS.len(), Material::ALL.len() - 1);
+        assert!(
+            PLACEMENT_MATERIALS
+                .iter()
+                .all(|material| *material != Material::Air)
+        );
+        assert!(
+            Material::ALL
+                .into_iter()
+                .filter(|material| *material != Material::Air)
+                .all(|material| PLACEMENT_MATERIALS.contains(&material))
+        );
+
+        let mut inventory = PlacementInventory::new(Material::Grass);
+        inventory.set_counts(std::array::from_fn(|index| index as u64));
+        let summary = inventory_summary(&inventory).join(" / ");
+        for material in PLACEMENT_MATERIALS {
+            assert!(summary.contains(inventory_material_code(material)));
+            assert_ne!(placement_material_label(material), "AIR");
+        }
+    }
 
     fn mixed_feature_baseline() -> RendererFeatureConfig {
         RendererFeatureConfig {

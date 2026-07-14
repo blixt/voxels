@@ -174,6 +174,7 @@ impl GlassInstance {
             SurfaceRole::ToggleThumb => 3.0,
             SurfaceRole::Brand
             | SurfaceRole::Launcher
+            | SurfaceRole::Inventory
             | SurfaceRole::Toast
             | SurfaceRole::Header
             | SurfaceRole::Button

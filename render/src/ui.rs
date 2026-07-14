@@ -10,7 +10,7 @@ const PANEL_INSET: f32 = 18.0;
 const PANEL_WIDTH: f32 = 360.0;
 const COMPACT_WIDTH: f32 = 292.0;
 const BASE_FEATURE_COUNT: usize = 6;
-const HEADER_HEIGHT: f32 = 60.0;
+const HEADER_HEIGHT: f32 = 78.0;
 const PANEL_RADIUS: f32 = 18.0;
 const CONTENT_PAD: f32 = 14.0;
 const BUTTON_SIZE: f32 = 30.0;
@@ -18,6 +18,7 @@ const BUTTON_GAP: f32 = 6.0;
 const CHROME_HEIGHT: f32 = 36.0;
 const BRAND_WIDTH: f32 = 178.0;
 const LAUNCHER_WIDTH: f32 = 222.0;
+const INVENTORY_WIDTH: f32 = 286.0;
 const CHROME_STACK_GAP: f32 = 8.0;
 const PANEL_TOP: f32 = PANEL_INSET + CHROME_HEIGHT + 12.0;
 const CONTEXT_WIDTH: f32 = 206.0;
@@ -227,8 +228,8 @@ pub struct MissionControlConfig {
 }
 
 const FEATURE_COUNT: usize = RendererFeature::ALL.len();
-const PANEL_HEIGHT: f32 = 540.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 39.0;
-const COMPACT_HEIGHT: f32 = 453.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 34.0;
+const PANEL_HEIGHT: f32 = 558.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 39.0;
+const COMPACT_HEIGHT: f32 = 471.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 34.0;
 
 const fn feature_index(feature: RendererFeature) -> usize {
     match feature {
@@ -361,6 +362,7 @@ pub struct LiveStats {
 pub enum SurfaceRole {
     Brand,
     Launcher,
+    Inventory,
     Toast,
     Crosshair,
     Panel,
@@ -417,6 +419,7 @@ pub struct InteractiveRegion {
 pub struct UiLayout {
     pub brand: Rect,
     pub launcher: Rect,
+    pub inventory: Rect,
     pub toast: Rect,
     pub crosshair: Rect,
     pub panel: Rect,
@@ -483,11 +486,14 @@ pub struct MissionControlUi {
     open_motion: EasedValue,
     hover_motion: BTreeMap<UiTarget, EasedValue>,
     toast_age: f32,
+    gameplay_toast: Option<String>,
     daylight_label: &'static str,
     region_label: &'static str,
     route_chapter_label: &'static str,
     route_progress_percent: u8,
     placement_material_label: &'static str,
+    placement_material_count: u64,
+    inventory_summary: [String; 2],
 }
 
 impl Default for MissionControlUi {
@@ -517,11 +523,14 @@ impl MissionControlUi {
             open_motion: EasedValue::new(f32::from(config.open)),
             hover_motion: BTreeMap::new(),
             toast_age: 0.0,
+            gameplay_toast: None,
             daylight_label: "GOLDEN HOUR",
             region_label: "VERDANT FOREST",
             route_chapter_label: "OFF PILGRIM ROAD",
             route_progress_percent: 0,
             placement_material_label: "GRASS",
+            placement_material_count: 0,
+            inventory_summary: [String::new(), String::new()],
         }
     }
 
@@ -543,6 +552,7 @@ impl MissionControlUi {
 
     pub fn set_stats(&mut self, stats: LiveStats) {
         if stats.swimming && !self.stats.swimming {
+            self.gameplay_toast = None;
             self.toast_age = 0.0;
         }
         self.stats = stats;
@@ -564,6 +574,22 @@ impl MissionControlUi {
 
     pub fn set_placement_material(&mut self, label: &'static str) {
         self.placement_material_label = label;
+    }
+
+    pub fn set_inventory(
+        &mut self,
+        selected_label: &'static str,
+        selected_count: u64,
+        summary: [String; 2],
+    ) {
+        self.placement_material_label = selected_label;
+        self.placement_material_count = selected_count;
+        self.inventory_summary = summary;
+    }
+
+    pub fn show_gameplay_toast(&mut self, message: impl Into<String>) {
+        self.gameplay_toast = Some(message.into());
+        self.toast_age = 0.0;
     }
 
     pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
@@ -686,6 +712,13 @@ impl MissionControlUi {
             (viewport_width - toast_width) * 0.5,
             (viewport_height - CHROME_HEIGHT - PANEL_INSET).max(0.0),
             toast_width,
+            CHROME_HEIGHT,
+        );
+        let inventory_width = INVENTORY_WIDTH.min((viewport_width - PANEL_INSET * 2.0).max(180.0));
+        let inventory = Rect::new(
+            (viewport_width - inventory_width) * 0.5,
+            (toast.y - CHROME_STACK_GAP - CHROME_HEIGHT).max(0.0),
+            inventory_width,
             CHROME_HEIGHT,
         );
         let crosshair = Rect::new(
@@ -819,6 +852,7 @@ impl MissionControlUi {
         UiLayout {
             brand,
             launcher,
+            inventory,
             toast,
             crosshair,
             panel,
@@ -968,16 +1002,33 @@ impl MissionControlUi {
         push_text(
             &mut draw,
             format!(
-                "{} / {}%  ·  PLACE {}",
+                "{} / {}%  ·  PLACE {} ×{}",
                 self.route_chapter_label,
                 self.route_progress_percent,
-                self.placement_material_label
+                self.placement_material_label,
+                compact_count(self.placement_material_count),
             ),
             [layout.panel.x + CONTENT_PAD, layout.header.y + 44.0],
             8.5,
             ACCENT.with_alpha(opacity),
             TextAlign::Left,
         );
+        for (index, summary) in self.inventory_summary.iter().enumerate() {
+            if summary.is_empty() {
+                continue;
+            }
+            push_text(
+                &mut draw,
+                summary,
+                [
+                    layout.panel.x + CONTENT_PAD,
+                    layout.header.y + 57.0 + index as f32 * 11.0,
+                ],
+                if layout.compact { 6.0 } else { 6.5 },
+                TEXT_MUTED.with_alpha(opacity),
+                TextAlign::Left,
+            );
+        }
 
         for (target, label) in [
             (UiTarget::Compact, if layout.compact { ">" } else { "<" }),
@@ -1143,6 +1194,40 @@ impl MissionControlUi {
             TextAlign::Center,
         );
 
+        push_surface(
+            draw,
+            layout.inventory,
+            CHROME_HEIGHT * 0.5,
+            PANEL_COLOR,
+            PANEL_BORDER.mix(ACCENT, 0.45),
+            SurfaceRole::Inventory,
+        );
+        let inventory_label = if layout.inventory.width < INVENTORY_WIDTH {
+            format!(
+                "{} ×{}  ·  WHEEL",
+                self.placement_material_label,
+                compact_count(self.placement_material_count),
+            )
+        } else {
+            format!(
+                "PLACE {} ×{}  ·  WHEEL TO CYCLE",
+                self.placement_material_label,
+                compact_count(self.placement_material_count),
+            )
+        };
+        push_text(
+            draw,
+            inventory_label,
+            layout.inventory.center(),
+            10.0,
+            if self.placement_material_count == 0 {
+                TEXT_MUTED
+            } else {
+                ACCENT
+            },
+            TextAlign::Center,
+        );
+
         let toast_alpha = if self.toast_age <= TOAST_HOLD_SECONDS {
             1.0
         } else {
@@ -1157,15 +1242,18 @@ impl MissionControlUi {
                 PANEL_BORDER.with_alpha(toast_alpha),
                 SurfaceRole::Toast,
             );
-            push_text(
-                draw,
+            let toast = self.gameplay_toast.as_deref().unwrap_or_else(|| {
                 if self.stats.swimming {
                     "WASD SWIM  /  SPACE ASCEND  /  SHIFT DIVE  /  F3 CONTROLS"
                 } else if layout.toast.width < 500.0 {
                     "WASD MOVE  /  SPACE JUMP  /  F3 CONTROLS"
                 } else {
-                    "CLICK TO LOOK  /  WASD MOVE  /  SPACE JUMP  /  LMB REMOVE  /  RMB PLACE  /  F3 CONTROLS"
-                },
+                    "CLICK TO LOOK  /  WASD MOVE  /  SPACE JUMP  /  LMB DIG 0.5 M CUBE  /  RMB PLACE  /  F3"
+                }
+            });
+            push_text(
+                draw,
+                toast,
                 layout.toast.center(),
                 9.5,
                 TEXT_PRIMARY.with_alpha(toast_alpha),
@@ -1692,7 +1780,14 @@ mod tests {
         let mut ui = opened();
         ui.set_reduced_motion(true);
         ui.set_route_status("WINDCUT WAY", 47);
-        ui.set_placement_material("GLOW CRYSTAL");
+        ui.set_inventory(
+            "GLOW CRYSTAL",
+            27,
+            [
+                "GR 4 · DI 8 · ST 12 · SA 0 · SN 0 · CL 3 · BA 2".to_owned(),
+                "WO 9 · LE 6 · MO 1 · LI 5 · RS 0 · WA 2 · GL 27".to_owned(),
+            ],
+        );
         ui.set_stats(LiveStats {
             frames_per_second: 59.8,
             frame_ms: 16.7,
@@ -1749,7 +1844,17 @@ mod tests {
         assert!(
             base.text
                 .iter()
-                .any(|run| run.text == "WINDCUT WAY / 47%  ·  PLACE GLOW CRYSTAL")
+                .any(|run| run.text == "WINDCUT WAY / 47%  ·  PLACE GLOW CRYSTAL ×27")
+        );
+        assert!(
+            base.text
+                .iter()
+                .any(|run| run.text == "GR 4 · DI 8 · ST 12 · SA 0 · SN 0 · CL 3 · BA 2")
+        );
+        assert!(
+            base.text
+                .iter()
+                .any(|run| run.text == "PLACE GLOW CRYSTAL ×27  ·  WHEEL TO CYCLE")
         );
 
         let _ = ui.open_context_menu_device([900.0, 80.0], viewport());
@@ -1837,6 +1942,13 @@ mod tests {
         assert_eq!(
             draw.glass
                 .iter()
+                .filter(|surface| surface.role == SurfaceRole::Inventory)
+                .count(),
+            1
+        );
+        assert_eq!(
+            draw.glass
+                .iter()
                 .filter(|surface| surface.role == SurfaceRole::Crosshair)
                 .count(),
             1
@@ -1893,6 +2005,31 @@ mod tests {
         let settled = ui.build_draw_list(viewport());
         assert!(
             settled
+                .glass
+                .iter()
+                .all(|surface| surface.role != SurfaceRole::Toast)
+        );
+    }
+
+    #[test]
+    fn gameplay_toast_replaces_controls_and_uses_the_same_bounded_lifetime() {
+        let mut ui = closed();
+        for _ in 0..500 {
+            ui.advance(1.0 / 60.0);
+        }
+        ui.show_gameplay_toast("Too far away to dig");
+        let visible = ui.build_draw_list(viewport());
+        assert!(
+            visible
+                .text
+                .iter()
+                .any(|run| run.text == "Too far away to dig")
+        );
+        for _ in 0..500 {
+            ui.advance(1.0 / 60.0);
+        }
+        assert!(
+            ui.build_draw_list(viewport())
                 .glass
                 .iter()
                 .all(|surface| surface.role != SurfaceRole::Toast)
