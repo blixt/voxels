@@ -1,6 +1,6 @@
 import { createServer as createNetServer } from "node:net";
 
-export const SNAPSHOT_SCHEMA_VERSION = 15;
+export const SNAPSHOT_SCHEMA_VERSION = 16;
 
 export const SNAPSHOT = Object.freeze({
   cameraX: 0,

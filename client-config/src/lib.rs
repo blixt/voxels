@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 3;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 4;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -22,9 +22,6 @@ const MAX_VIEW_DISTANCE_METRES: f32 = 100_000.0;
 const MAX_SHADOW_MAP_RESOLUTION: u32 = 4_096;
 const MAX_PERSISTENCE_RETRIES: u32 = 10_000;
 const MAX_PERSISTENCE_DELAY_MS: u32 = 3_600_000;
-const MAX_SURFACE_PROBE_BLOCK_EDGE: u32 = 256;
-const MAX_SURFACE_PROBE_CACHE_BLOCKS: u32 = 4_096;
-const MAX_CAMERA_PROBE_SAMPLES: u64 = 1_048_576;
 const MAX_WORLD_IN_FLIGHT_BATCHES: u32 = 256;
 const MAX_WORLD_BUFFERED_BYTES: u32 = 64 * 1024 * 1024;
 const MAX_WORLD_REQUEST_TIMEOUT_MS: u32 = 300_000;
@@ -175,11 +172,6 @@ pub struct PersistenceConfig {
 pub struct DiagnosticsConfig {
     pub enclosure_probe_interval_ms: u32,
     pub enclosure_probe_distance_metres: f32,
-    pub surface_probe_block_edge: u32,
-    pub max_surface_probe_blocks: u32,
-    pub camera_probe_horizontal_radius_voxels: u32,
-    pub camera_probe_below_eye_voxels: u32,
-    pub camera_probe_height_voxels: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -188,7 +180,6 @@ pub struct ProfilingConfig {
     pub speed_metres_per_second: f32,
     pub warmup_seconds: f32,
     pub measure_seconds: f32,
-    pub edit_operations: u8,
 }
 
 impl ClientConfig {
@@ -392,55 +383,12 @@ impl ClientConfig {
             MAX_VIEW_DISTANCE_METRES,
             false,
         )?;
-        ensure_integer_range(
-            self.diagnostics.surface_probe_block_edge,
-            "diagnostics.surface_probe_block_edge",
-            1,
-            MAX_SURFACE_PROBE_BLOCK_EDGE,
-        )?;
-        ensure_integer_range(
-            self.diagnostics.max_surface_probe_blocks,
-            "diagnostics.max_surface_probe_blocks",
-            1,
-            MAX_SURFACE_PROBE_CACHE_BLOCKS,
-        )?;
-        if self.diagnostics.camera_probe_height_voxels == 0 {
-            return invalid(
-                "diagnostics.camera_probe_height_voxels",
-                "must be greater than zero",
-            );
-        }
-        if self.diagnostics.camera_probe_below_eye_voxels
-            >= self.diagnostics.camera_probe_height_voxels
-        {
-            return invalid(
-                "diagnostics.camera_probe_below_eye_voxels",
-                "must be less than camera_probe_height_voxels",
-            );
-        }
-        let probe_width = u64::from(self.diagnostics.camera_probe_horizontal_radius_voxels)
-            .saturating_mul(2)
-            .saturating_add(1);
-        let probe_samples = probe_width
-            .saturating_mul(probe_width)
-            .saturating_mul(u64::from(self.diagnostics.camera_probe_height_voxels));
-        if probe_samples > MAX_CAMERA_PROBE_SAMPLES {
-            return invalid(
-                "diagnostics.camera_probe_horizontal_radius_voxels",
-                "camera probe volume exceeds the bounded source request limit",
-            );
-        }
-
         ensure_finite_positive(
             self.profiling.speed_metres_per_second,
             "profiling.speed_metres_per_second",
         )?;
         ensure_finite_positive(self.profiling.warmup_seconds, "profiling.warmup_seconds")?;
         ensure_finite_non_negative(self.profiling.measure_seconds, "profiling.measure_seconds")?;
-        if self.profiling.edit_operations == 0 {
-            return invalid("profiling.edit_operations", "must be greater than zero");
-        }
-
         Ok(())
     }
 }
@@ -696,17 +644,11 @@ mod tests {
             diagnostics: DiagnosticsConfig {
                 enclosure_probe_interval_ms: 100,
                 enclosure_probe_distance_metres: 12.0,
-                surface_probe_block_edge: 64,
-                max_surface_probe_blocks: 64,
-                camera_probe_horizontal_radius_voxels: 4,
-                camera_probe_below_eye_voxels: 20,
-                camera_probe_height_voxels: 288,
             },
             profiling: ProfilingConfig {
                 speed_metres_per_second: 12.0,
                 warmup_seconds: 30.0,
                 measure_seconds: 60.0,
-                edit_operations: 40,
             },
         }
     }
@@ -743,18 +685,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 3", "schema_version = 2");
+        let wrong_schema = fixture.replace("schema_version = 4", "schema_version = 3");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 2,
+                found: 3,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 3",
-            "schema_version = 3\nunknown_root = true",
+            "schema_version = 4",
+            "schema_version = 4\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
@@ -876,19 +818,6 @@ mod tests {
         assert_invalid_field(&config, "persistence.request_retries");
 
         let mut config = valid_config();
-        config.diagnostics.surface_probe_block_edge = 0;
-        assert_invalid_field(&config, "diagnostics.surface_probe_block_edge");
-
-        let mut config = valid_config();
-        config.diagnostics.camera_probe_below_eye_voxels =
-            config.diagnostics.camera_probe_height_voxels;
-        assert_invalid_field(&config, "diagnostics.camera_probe_below_eye_voxels");
-
-        let mut config = valid_config();
-        config.diagnostics.camera_probe_horizontal_radius_voxels = 1_000;
-        assert_invalid_field(&config, "diagnostics.camera_probe_horizontal_radius_voxels");
-
-        let mut config = valid_config();
         config.profiling.warmup_seconds = -1.0;
         assert_invalid_field(&config, "profiling.warmup_seconds");
 
@@ -907,9 +836,5 @@ mod tests {
         let mut config = valid_config();
         config.profiling.measure_seconds = 0.0;
         assert_eq!(config.validate(), Ok(()));
-
-        let mut config = valid_config();
-        config.profiling.edit_operations = 0;
-        assert_invalid_field(&config, "profiling.edit_operations");
     }
 }

@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 3
+schema_version = 4
 
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
@@ -78,14 +78,8 @@ vfs_retry_delay_ms = 150
 [diagnostics]
 enclosure_probe_interval_ms = 100
 enclosure_probe_distance_metres = 12.0
-surface_probe_block_edge = 64
-max_surface_probe_blocks = 64
-camera_probe_horizontal_radius_voxels = 4
-camera_probe_below_eye_voxels = 20
-camera_probe_height_voxels = 288
 
 [profiling]
 speed_metres_per_second = 12.0
 warmup_seconds = 30.0
 measure_seconds = 60.0
-edit_operations = 40

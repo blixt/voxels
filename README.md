@@ -48,9 +48,6 @@ frame/CPU phase distributions for steady, traversal, and underwater scenarios in
 `vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step closed rail. One lap warms the exact
 terrain used by two measured laps, making its arena-plateau gate prove allocation reuse before every
 canonical and LOD queue must drain.
-`vp run profile:edits` runs 40 Rust-owned terrain/water remove-and-restore operations and gates SQLite
-dispatch, canonical remesh, all four LOD replacements, submitted-frame convergence, and pristine
-restoration.
 `vp run profile:materials` toggles Rust-generated material detail through canvas hit-testing and gates
 identical geometry/residency plus the incremental frame and GPU cost.
 `vp run profile:atmosphere` drives the Rust canvas context menu through dawn, clear day, golden hour,

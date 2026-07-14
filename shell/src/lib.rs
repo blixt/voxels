@@ -70,8 +70,7 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const EDIT_HISTORY_CAPACITY: usize = 64;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 15.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 16.0;
 
     #[derive(Clone, Copy, Debug)]
     struct EngineConfig {
@@ -84,7 +83,6 @@ mod web {
         surface_retain_margin_tiles: i32,
         enclosure_probe_interval_ms: f64,
         enclosure_probe_distance_metres: f32,
-        edit_profile_operations: u8,
     }
 
     type FrameCallback = Closure<dyn FnMut(f64)>;
@@ -215,85 +213,8 @@ mod web {
 
     struct EditTracker {
         target: VoxelCoord,
-        ordinal: u8,
-        class: u8,
-        operation: u8,
         started_ms: f64,
-        enqueue_ms: f32,
-        canonical_ms: Option<f32>,
         requirements: EditRequirements,
-    }
-
-    #[derive(Clone, Copy, Default)]
-    struct EditSample {
-        ordinal: f32,
-        class: f32,
-        operation: f32,
-        enqueue_ms: f32,
-        canonical_ms: f32,
-        full_ms: f32,
-    }
-
-    struct EditHistory {
-        samples: [EditSample; EDIT_HISTORY_CAPACITY],
-        next: usize,
-        len: usize,
-        dropped: u32,
-    }
-
-    impl EditHistory {
-        fn new() -> Self {
-            Self {
-                samples: [EditSample::default(); EDIT_HISTORY_CAPACITY],
-                next: 0,
-                len: 0,
-                dropped: 0,
-            }
-        }
-
-        fn push(&mut self, sample: EditSample) {
-            self.samples[self.next] = sample;
-            self.next = (self.next + 1) % EDIT_HISTORY_CAPACITY;
-            if self.len < EDIT_HISTORY_CAPACITY {
-                self.len += 1;
-            } else {
-                self.dropped = self.dropped.saturating_add(1);
-            }
-        }
-
-        fn drain_into(&mut self, values: &mut Vec<f32>) {
-            values.push(self.len as f32);
-            values.push(self.dropped as f32);
-            let first = (self.next + EDIT_HISTORY_CAPACITY - self.len) % EDIT_HISTORY_CAPACITY;
-            for offset in 0..self.len {
-                let sample = self.samples[(first + offset) % EDIT_HISTORY_CAPACITY];
-                values.extend_from_slice(&[
-                    sample.ordinal,
-                    sample.class,
-                    sample.operation,
-                    sample.enqueue_ms,
-                    sample.canonical_ms,
-                    sample.full_ms,
-                ]);
-            }
-            self.len = 0;
-            self.dropped = 0;
-        }
-    }
-
-    #[repr(u8)]
-    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-    enum EditProfilePhase {
-        #[default]
-        Idle = 0,
-    }
-
-    #[derive(Clone, Copy, Debug, Default)]
-    struct EditProfile {
-        phase: EditProfilePhase,
-        next_operation: u8,
-        baseline_edits: usize,
-        restored: bool,
     }
 
     #[repr(C)]
@@ -356,11 +277,7 @@ mod web {
         render_milliseconds: Cell<f32>,
         frame_history: RefCell<FrameHistory>,
         edit_trackers: RefCell<VecDeque<EditTracker>>,
-        edit_history: RefCell<EditHistory>,
-        edit_completed: Cell<u32>,
-        edit_superseded: Cell<u32>,
         edit_last_ms: Cell<f32>,
-        edit_profile: Cell<EditProfile>,
         enclosure: Cell<EnclosureSample>,
         last_enclosure_probe: Cell<f64>,
         enclosure_probe_microseconds: Cell<f32>,
@@ -1402,8 +1319,7 @@ mod web {
                 return;
             };
             let durable = (material != generated).then_some(material);
-            let _ =
-                self.submit_local_edit(target, durable, 0, u8::from(material == Material::Air), 0);
+            let _ = self.submit_local_edit(target, durable);
         }
 
         fn apply_remote_edits(&self) {
@@ -1427,14 +1343,7 @@ mod web {
             }
         }
 
-        fn submit_local_edit(
-            &self,
-            target: VoxelCoord,
-            durable: Option<Material>,
-            class: u8,
-            operation: u8,
-            ordinal: u8,
-        ) -> [usize; 2] {
+        fn submit_local_edit(&self, target: VoxelCoord, durable: Option<Material>) -> [usize; 2] {
             if let Err(error) = self.prepare_edit_source(target, durable) {
                 log_gpu_error(&format!("edit refused: {error}"));
                 return [0, 0];
@@ -1444,7 +1353,6 @@ mod web {
             if let Err(error) = self.store.borrow().save_edit(target, durable) {
                 web_sys::console::error_1(&error);
             }
-            let enqueue_ms = (performance_now(performance.as_ref()) - started_ms) as f32;
             let requirements = match self.apply_durable_edit(target, durable) {
                 Ok(requirements) => requirements,
                 Err(error) => {
@@ -1456,22 +1364,13 @@ mod web {
             let mut trackers = self.edit_trackers.borrow_mut();
             if let Some(index) = trackers.iter().position(|tracker| tracker.target == target) {
                 trackers.remove(index);
-                self.edit_superseded
-                    .set(self.edit_superseded.get().saturating_add(1));
             }
             if trackers.len() == self.config.max_edit_trackers {
                 trackers.pop_front();
-                self.edit_superseded
-                    .set(self.edit_superseded.get().saturating_add(1));
             }
             trackers.push_back(EditTracker {
                 target,
-                ordinal,
-                class,
-                operation,
                 started_ms,
-                enqueue_ms,
-                canonical_ms: None,
                 requirements,
             });
             counts
@@ -1619,7 +1518,7 @@ mod web {
             let surface_revisions = self.surface_revisions.borrow();
             let mut trackers = self.edit_trackers.borrow_mut();
             let mut pending = VecDeque::with_capacity(trackers.len());
-            while let Some(mut tracker) = trackers.pop_front() {
+            while let Some(tracker) = trackers.pop_front() {
                 let canonical_ready = tracker.requirements.canonical.iter().all(|requirement| {
                     scheduler.status(requirement.coord).is_none_or(|status| {
                         !status.desired
@@ -1627,9 +1526,6 @@ mod web {
                                 && revision_satisfies(status.revision, requirement.revision))
                     })
                 });
-                if canonical_ready && tracker.canonical_ms.is_none() {
-                    tracker.canonical_ms = Some((now_ms - tracker.started_ms) as f32);
-                }
                 let surface_ready = tracker.requirements.surface.iter().all(|requirement| {
                     surface_revisions
                         .resident_revision(requirement.coord)
@@ -1638,17 +1534,7 @@ mod web {
                 });
                 if canonical_ready && surface_ready {
                     let full_ms = (now_ms - tracker.started_ms) as f32;
-                    self.edit_history.borrow_mut().push(EditSample {
-                        ordinal: f32::from(tracker.ordinal),
-                        class: f32::from(tracker.class),
-                        operation: f32::from(tracker.operation),
-                        enqueue_ms: tracker.enqueue_ms,
-                        canonical_ms: tracker.canonical_ms.unwrap_or_default(),
-                        full_ms,
-                    });
                     self.edit_last_ms.set(full_ms);
-                    self.edit_completed
-                        .set(self.edit_completed.get().saturating_add(1));
                 } else {
                     pending.push_back(tracker);
                 }
@@ -1892,19 +1778,6 @@ mod web {
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
-                let edit_profile = engine.edit_profile.get();
-                values.extend_from_slice(&[
-                    edit_profile.phase as u8 as f32,
-                    edit_profile.next_operation as f32,
-                    engine.config.edit_profile_operations as f32,
-                    if edit_profile.restored { 1.0 } else { 0.0 },
-                    edit_profile.baseline_edits as f32,
-                    engine.edits.borrow().len() as f32,
-                    engine.edit_trackers.borrow().len() as f32,
-                    engine.edit_completed.get() as f32,
-                    engine.edit_superseded.get() as f32,
-                ]);
-                engine.edit_history.borrow_mut().drain_into(&mut values);
             }
             Float32Array::from(values.as_slice())
         }
@@ -1982,7 +1855,6 @@ mod web {
             surface_retain_margin_tiles: streaming.surface.retention_margin_tiles as i32,
             enclosure_probe_interval_ms: f64::from(diagnostics.enclosure_probe_interval_ms),
             enclosure_probe_distance_metres: diagnostics.enclosure_probe_distance_metres,
-            edit_profile_operations: profiling.edit_operations,
         };
         let rendering = &client_config.rendering;
         let renderer_config = RendererConfig {
@@ -2153,11 +2025,7 @@ mod web {
             render_milliseconds: Cell::new(0.0),
             frame_history: RefCell::new(FrameHistory::new()),
             edit_trackers: RefCell::new(VecDeque::new()),
-            edit_history: RefCell::new(EditHistory::new()),
-            edit_completed: Cell::new(0),
-            edit_superseded: Cell::new(0),
             edit_last_ms: Cell::new(0.0),
-            edit_profile: Cell::new(EditProfile::default()),
             enclosure: Cell::new(EnclosureSample::OPEN),
             last_enclosure_probe: Cell::new(f64::NEG_INFINITY),
             enclosure_probe_microseconds: Cell::new(0.0),

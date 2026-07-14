@@ -22,7 +22,9 @@ describe("browser snapshot schema", () => {
 
     const stale = [];
     stale[SNAPSHOT.schemaVersion] = SNAPSHOT_SCHEMA_VERSION - 1;
-    expect(() => assertSnapshotSchema(stale)).toThrow(/snapshot schema 14 does not match 15/);
+    expect(() => assertSnapshotSchema(stale)).toThrow(
+      `snapshot schema ${SNAPSHOT_SCHEMA_VERSION - 1} does not match ${SNAPSHOT_SCHEMA_VERSION}`,
+    );
   });
 
   it("always rejects console errors and filters warnings narrowly", () => {

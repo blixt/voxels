@@ -150,10 +150,6 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-performance.mjs --sustained",
         cache: false,
       },
-      "profile:edits": {
-        command: "node scripts/browser-performance.mjs --edits",
-        cache: false,
-      },
       "profile:materials": {
         command: "node scripts/browser-performance.mjs --materials",
         cache: false,
