@@ -16,15 +16,16 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
 pub const MAX_SURFACE_TILES_PER_BATCH: usize = 32;
 pub const MAX_PLAYERS_PER_PRESENCE_DELTA: usize = 512;
 pub const MAX_PLAYER_NAME_BYTES: usize = 32;
+pub const MAX_EDIT_MUTATIONS: usize = 125;
 pub const MAX_EDIT_AFFECTED_CHUNKS: usize = 8;
-pub const MAX_EDIT_AFFECTED_SURFACE_TILES: usize = 32;
+pub const MAX_EDIT_AFFECTED_SURFACE_TILES: usize = 128;
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
@@ -127,6 +128,7 @@ macro_rules! opaque_uuid_id {
 opaque_uuid_id!(BrowserUserId);
 opaque_uuid_id!(PlayerId);
 opaque_uuid_id!(PresenceSessionId);
+opaque_uuid_id!(EditSessionId);
 
 /// Browser-local identity claim used until authenticated server accounts exist.
 ///
@@ -181,7 +183,44 @@ pub struct WorldOpened {
     pub identity: PlayerIdentity,
     pub connection_id: u64,
     pub presence_session_id: PresenceSessionId,
+    /// Server-issued namespace for durable, idempotent edit operation IDs.
+    pub edit_session_id: EditSessionId,
     pub spawn: SpawnPoint,
+    /// Authoritative camera state. New players receive a state derived from `spawn`; returning
+    /// players receive their last server-accepted state instead of choosing a client-side resume.
+    pub player_resume: PlayerResume,
+    pub inventory: MaterialInventory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlayerResume {
+    pub revision: u64,
+    pub eye_position_metres: [f32; 3],
+    pub look_yaw_radians: f32,
+    pub look_pitch_radians: f32,
+}
+
+pub const MATERIAL_INVENTORY_SLOTS: usize = Material::ALL.len();
+
+/// Dense authoritative material counts in stable [`Material::id`] order.
+///
+/// Air is retained as slot zero so the wire shape is exactly pinned to the material schema, but
+/// its count must remain zero because empty space is not an inventory item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaterialInventory {
+    pub revision: u64,
+    pub counts: [u64; MATERIAL_INVENTORY_SLOTS],
+}
+
+impl MaterialInventory {
+    pub const EMPTY: Self = Self {
+        revision: 1,
+        counts: [0; MATERIAL_INVENTORY_SLOTS],
+    };
+
+    pub const fn count(self, material: Material) -> u64 {
+        self.counts[material.id() as usize]
+    }
 }
 
 pub const PLAYER_POSE_GROUNDED: u16 = 1 << 0;
@@ -303,28 +342,49 @@ pub struct SurfaceTileBatchResult {
     pub items: Vec<SurfaceTileBatchItem>,
 }
 
-/// One idempotent sparse edit request. `None` removes an override and restores source authority.
+/// One idempotent server-authoritative gameplay edit.
 ///
-/// The operation ID is carried in the VXWP request-id header as well as the typed value returned by
-/// the decoder. Retrying an operation uses the same nonzero ID.
+/// The operation ID is scoped to the server-issued edit session and is also carried in the VXWP
+/// request-id header. Retrying an operation uses the same edit session and nonzero operation ID.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EditCommand {
     pub operation_id: u64,
-    pub coord: VoxelCoord,
-    pub material: Option<Material>,
+    pub edit_session_id: EditSessionId,
+    pub action: EditAction,
 }
 
-/// One durably ordered authoritative edit and every derived product key it invalidates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditAction {
+    /// Digs the fixed server-configured volume centered on the hit voxel. The client cannot choose
+    /// a mutation count or smuggle arbitrary coordinates into one operation.
+    Dig { hit: VoxelCoord },
+    Place {
+        coord: VoxelCoord,
+        material: Material,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VoxelMutation {
+    pub coord: VoxelCoord,
+    /// Exact authoritative value after the operation. Digging is represented by `Material::Air`.
+    pub material: Material,
+}
+
+/// One durably ordered atomic edit and every derived product key it invalidates.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EditCommit {
     pub operation_id: u64,
-    /// Connection that submitted this operation. Operation IDs are scoped to this connection.
+    pub edit_session_id: EditSessionId,
+    /// Connection that submitted this operation. Operation IDs are scoped to `edit_session_id`.
     pub editor_connection_id: u64,
     pub revision: u64,
-    pub coord: VoxelCoord,
-    pub material: Option<Material>,
+    /// Strictly coordinate-sorted, unique final voxel values committed at `revision`.
+    pub mutations: Vec<VoxelMutation>,
     pub affected_chunks: Vec<ChunkCoord>,
     pub affected_surface_tiles: Vec<SurfaceTileCoord>,
+    /// Present only on the editor's receipt. Observer commits intentionally omit private inventory.
+    pub editor_inventory: Option<MaterialInventory>,
 }
 
 /// The receiver's bounded change queue lost incremental state and all retained products must be
@@ -429,8 +489,11 @@ pub fn decode_open_world(bytes: &[u8]) -> Result<OpenWorld, ProtocolError> {
 pub fn encode_world_opened(opened: &WorldOpened) -> Vec<u8> {
     debug_assert!(opened.connection_id != 0);
     debug_assert!(!opened.presence_session_id.is_nil());
+    debug_assert!(!opened.edit_session_id.is_nil());
+    debug_assert!(validate_player_resume(&opened.player_resume).is_ok());
+    debug_assert!(validate_inventory(&opened.inventory).is_ok());
     let manifest = encode_manifest(&opened.manifest);
-    let mut payload = Vec::with_capacity(manifest.len() + 88);
+    let mut payload = Vec::with_capacity(manifest.len() + 260);
     push_u32(&mut payload, manifest.len() as u32);
     payload.extend_from_slice(&manifest);
     push_u64(&mut payload, opened.capabilities.bits());
@@ -440,6 +503,7 @@ pub fn encode_world_opened(opened: &WorldOpened) -> Vec<u8> {
     push_string(&mut payload, &opened.identity.player_name);
     push_u64(&mut payload, opened.connection_id);
     payload.extend_from_slice(opened.presence_session_id.as_bytes());
+    payload.extend_from_slice(opened.edit_session_id.as_bytes());
     push_i32(&mut payload, opened.spawn.x);
     push_i32(&mut payload, opened.spawn.z);
     push_i32(&mut payload, opened.spawn.height);
@@ -450,6 +514,8 @@ pub fn encode_world_opened(opened: &WorldOpened) -> Vec<u8> {
     push_f32(&mut payload, opened.spawn.moisture);
     push_f32(&mut payload, opened.spawn.temperature);
     push_f32(&mut payload, opened.spawn.ridge);
+    encode_player_resume(&mut payload, opened.player_resume);
+    encode_inventory(&mut payload, opened.inventory);
     encode_frame(KIND_WORLD_OPENED, 0, &payload)
 }
 
@@ -485,6 +551,10 @@ pub fn decode_world_opened(bytes: &[u8]) -> Result<WorldOpened, ProtocolError> {
     if presence_session_id.is_nil() {
         return Err(ProtocolError::InvalidPayload("presence session id is nil"));
     }
+    let edit_session_id = EditSessionId::from_bytes(cursor.array()?);
+    if edit_session_id.is_nil() {
+        return Err(ProtocolError::InvalidPayload("edit session id is nil"));
+    }
     let x = cursor.i32()?;
     let z = cursor.i32()?;
     let height = cursor.i32()?;
@@ -511,6 +581,8 @@ pub fn decode_world_opened(bytes: &[u8]) -> Result<WorldOpened, ProtocolError> {
             "spawn fields are not finite and normalized",
         ));
     }
+    let player_resume = decode_player_resume(&mut cursor)?;
+    let inventory = decode_inventory(&mut cursor)?;
     cursor.finish()?;
     Ok(WorldOpened {
         manifest,
@@ -519,6 +591,7 @@ pub fn decode_world_opened(bytes: &[u8]) -> Result<WorldOpened, ProtocolError> {
         identity,
         connection_id,
         presence_session_id,
+        edit_session_id,
         spawn: SpawnPoint {
             x,
             z,
@@ -530,6 +603,8 @@ pub fn decode_world_opened(bytes: &[u8]) -> Result<WorldOpened, ProtocolError> {
             temperature,
             ridge,
         },
+        player_resume,
+        inventory,
     })
 }
 
@@ -921,10 +996,27 @@ pub fn encode_edit_command(command: EditCommand) -> Result<Vec<u8>, ProtocolErro
             "edit operation id must be nonzero",
         ));
     }
-    validate_voxel_coord(command.coord)?;
-    let mut payload = Vec::with_capacity(16);
-    encode_voxel_coord(&mut payload, command.coord);
-    encode_optional_material(&mut payload, command.material);
+    if command.edit_session_id.is_nil() {
+        return Err(ProtocolError::InvalidPayload("edit session id is nil"));
+    }
+    let (kind, coord, material_id) = match command.action {
+        EditAction::Dig { hit } => (1, hit, 0),
+        EditAction::Place { coord, material } => {
+            if material == Material::Air {
+                return Err(ProtocolError::InvalidPayload(
+                    "cannot place air; use the dig action",
+                ));
+            }
+            (2, coord, material.id())
+        }
+    };
+    validate_voxel_coord(coord)?;
+    let mut payload = Vec::with_capacity(32);
+    payload.extend_from_slice(command.edit_session_id.as_bytes());
+    payload.push(kind);
+    payload.push(0);
+    push_u16(&mut payload, material_id);
+    encode_voxel_coord(&mut payload, coord);
     Ok(encode_frame(
         KIND_EDIT_COMMAND,
         command.operation_id,
@@ -941,32 +1033,73 @@ pub fn decode_edit_command(bytes: &[u8]) -> Result<EditCommand, ProtocolError> {
         ));
     }
     let mut cursor = Cursor::new(frame.payload);
+    let edit_session_id = EditSessionId::from_bytes(cursor.array()?);
+    if edit_session_id.is_nil() {
+        return Err(ProtocolError::InvalidPayload("edit session id is nil"));
+    }
+    let kind = cursor.u8()?;
+    if cursor.u8()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved edit action byte is nonzero",
+        ));
+    }
+    let material_id = cursor.u16()?;
     let coord = decode_voxel_coord(&mut cursor)?;
-    let material = decode_optional_material(&mut cursor)?;
     cursor.finish()?;
+    let action = match kind {
+        1 if material_id == 0 => EditAction::Dig { hit: coord },
+        1 => {
+            return Err(ProtocolError::InvalidPayload("dig action has a material"));
+        }
+        2 => {
+            let material = Material::from_id(material_id).ok_or(ProtocolError::UnknownEnum(
+                "material",
+                u64::from(material_id),
+            ))?;
+            if material == Material::Air {
+                return Err(ProtocolError::InvalidPayload(
+                    "cannot place air; use the dig action",
+                ));
+            }
+            EditAction::Place { coord, material }
+        }
+        _ => return Err(ProtocolError::UnknownEnum("edit action", u64::from(kind))),
+    };
     Ok(EditCommand {
         operation_id: frame.request_id,
-        coord,
-        material,
+        edit_session_id,
+        action,
     })
 }
 
 pub fn encode_edit_commit(commit: &EditCommit) -> Result<Vec<u8>, ProtocolError> {
     validate_edit_commit(commit)?;
     let mut payload = Vec::with_capacity(
-        32 + commit.affected_chunks.len() * 12 + commit.affected_surface_tiles.len() * 12,
+        40 + commit.mutations.len() * 16
+            + commit.affected_chunks.len() * 12
+            + commit.affected_surface_tiles.len() * 12
+            + commit.editor_inventory.is_some() as usize * (8 + MATERIAL_INVENTORY_SLOTS * 8),
     );
+    payload.extend_from_slice(commit.edit_session_id.as_bytes());
     push_u64(&mut payload, commit.editor_connection_id);
     push_u64(&mut payload, commit.revision);
-    encode_voxel_coord(&mut payload, commit.coord);
-    encode_optional_material(&mut payload, commit.material);
+    push_u16(&mut payload, commit.mutations.len() as u16);
     push_u16(&mut payload, commit.affected_chunks.len() as u16);
     push_u16(&mut payload, commit.affected_surface_tiles.len() as u16);
+    push_u16(&mut payload, u16::from(commit.editor_inventory.is_some()));
+    for mutation in &commit.mutations {
+        encode_voxel_coord(&mut payload, mutation.coord);
+        push_u16(&mut payload, mutation.material.id());
+        push_u16(&mut payload, 0);
+    }
     for coord in &commit.affected_chunks {
         push_chunk_coord(&mut payload, *coord);
     }
     for coord in &commit.affected_surface_tiles {
         encode_surface_coord(&mut payload, *coord);
+    }
+    if let Some(inventory) = commit.editor_inventory {
+        encode_inventory(&mut payload, inventory);
     }
     Ok(encode_frame(
         KIND_EDIT_COMMIT,
@@ -984,17 +1117,44 @@ pub fn decode_edit_commit(bytes: &[u8]) -> Result<EditCommit, ProtocolError> {
         ));
     }
     let mut cursor = Cursor::new(frame.payload);
+    let edit_session_id = EditSessionId::from_bytes(cursor.array()?);
+    if edit_session_id.is_nil() {
+        return Err(ProtocolError::InvalidPayload("edit session id is nil"));
+    }
     let editor_connection_id = cursor.u64()?;
     let revision = cursor.u64()?;
-    let coord = decode_voxel_coord(&mut cursor)?;
-    let material = decode_optional_material(&mut cursor)?;
+    let mutation_count = usize::from(cursor.u16()?);
     let chunk_count = usize::from(cursor.u16()?);
     let surface_count = usize::from(cursor.u16()?);
-    if chunk_count == 0 || chunk_count > MAX_EDIT_AFFECTED_CHUNKS {
+    let inventory_present = cursor.u16()?;
+    if mutation_count > MAX_EDIT_MUTATIONS {
+        return Err(ProtocolError::LimitExceeded("edit mutations"));
+    }
+    if chunk_count > MAX_EDIT_AFFECTED_CHUNKS {
         return Err(ProtocolError::LimitExceeded("edit affected chunks"));
     }
     if surface_count > MAX_EDIT_AFFECTED_SURFACE_TILES {
         return Err(ProtocolError::LimitExceeded("edit affected surface tiles"));
+    }
+    if inventory_present > 1 {
+        return Err(ProtocolError::InvalidPayload(
+            "invalid edit inventory presence flag",
+        ));
+    }
+    let mut mutations = Vec::with_capacity(mutation_count);
+    for _ in 0..mutation_count {
+        let coord = decode_voxel_coord(&mut cursor)?;
+        let material_id = cursor.u16()?;
+        let material = Material::from_id(material_id).ok_or(ProtocolError::UnknownEnum(
+            "material",
+            u64::from(material_id),
+        ))?;
+        if cursor.u16()? != 0 {
+            return Err(ProtocolError::InvalidPayload(
+                "reserved voxel mutation field is nonzero",
+            ));
+        }
+        mutations.push(VoxelMutation { coord, material });
     }
     let mut affected_chunks = Vec::with_capacity(chunk_count);
     for _ in 0..chunk_count {
@@ -1004,15 +1164,19 @@ pub fn decode_edit_commit(bytes: &[u8]) -> Result<EditCommit, ProtocolError> {
     for _ in 0..surface_count {
         affected_surface_tiles.push(decode_surface_coord(&mut cursor)?);
     }
+    let editor_inventory = (inventory_present == 1)
+        .then(|| decode_inventory(&mut cursor))
+        .transpose()?;
     cursor.finish()?;
     let commit = EditCommit {
         operation_id: frame.request_id,
+        edit_session_id,
         editor_connection_id,
         revision,
-        coord,
-        material,
+        mutations,
         affected_chunks,
         affected_surface_tiles,
+        editor_inventory,
     };
     validate_edit_commit(&commit)?;
     Ok(commit)
@@ -1461,6 +1625,84 @@ fn decode_player_pose_body(cursor: &mut Cursor<'_>) -> Result<PlayerPoseUpdate, 
     Ok(pose)
 }
 
+fn encode_player_resume(output: &mut Vec<u8>, resume: PlayerResume) {
+    push_u64(output, resume.revision);
+    for value in resume.eye_position_metres {
+        push_f32(output, value);
+    }
+    push_f32(output, resume.look_yaw_radians);
+    push_f32(output, resume.look_pitch_radians);
+}
+
+fn decode_player_resume(cursor: &mut Cursor<'_>) -> Result<PlayerResume, ProtocolError> {
+    let resume = PlayerResume {
+        revision: cursor.u64()?,
+        eye_position_metres: [cursor.f32()?, cursor.f32()?, cursor.f32()?],
+        look_yaw_radians: cursor.f32()?,
+        look_pitch_radians: cursor.f32()?,
+    };
+    validate_player_resume(&resume)?;
+    Ok(resume)
+}
+
+fn validate_player_resume(resume: &PlayerResume) -> Result<(), ProtocolError> {
+    if resume.revision == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "player resume revision is zero",
+        ));
+    }
+    let position_limit = (i32::MAX as f32 - 64.0) * VOXEL_SIZE_METRES;
+    if !resume
+        .eye_position_metres
+        .into_iter()
+        .all(|value| value.is_finite() && value.abs() <= position_limit)
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "player resume position is nonfinite or outside world bounds",
+        ));
+    }
+    if !resume.look_yaw_radians.is_finite()
+        || !(-std::f32::consts::PI..=std::f32::consts::PI).contains(&resume.look_yaw_radians)
+        || !resume.look_pitch_radians.is_finite()
+        || !(-1.5..=1.5).contains(&resume.look_pitch_radians)
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "player resume look angles are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn encode_inventory(output: &mut Vec<u8>, inventory: MaterialInventory) {
+    push_u64(output, inventory.revision);
+    for count in inventory.counts {
+        push_u64(output, count);
+    }
+}
+
+fn decode_inventory(cursor: &mut Cursor<'_>) -> Result<MaterialInventory, ProtocolError> {
+    let revision = cursor.u64()?;
+    let mut counts = [0; MATERIAL_INVENTORY_SLOTS];
+    for count in &mut counts {
+        *count = cursor.u64()?;
+    }
+    let inventory = MaterialInventory { revision, counts };
+    validate_inventory(&inventory)?;
+    Ok(inventory)
+}
+
+fn validate_inventory(inventory: &MaterialInventory) -> Result<(), ProtocolError> {
+    if inventory.revision == 0 {
+        return Err(ProtocolError::InvalidPayload("inventory revision is zero"));
+    }
+    if inventory.counts[Material::Air.id() as usize] != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "air inventory count is nonzero",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_player_pose(
     pose: &PlayerPoseUpdate,
     require_sample_time: bool,
@@ -1593,10 +1835,38 @@ fn validate_edit_commit(commit: &EditCommit) -> Result<(), ProtocolError> {
             "edit revision must be nonzero",
         ));
     }
-    validate_voxel_coord(commit.coord)?;
-    if commit.affected_chunks.is_empty() || commit.affected_chunks.len() > MAX_EDIT_AFFECTED_CHUNKS
+    if commit.edit_session_id.is_nil() {
+        return Err(ProtocolError::InvalidPayload("edit session id is nil"));
+    }
+    if commit.mutations.len() > MAX_EDIT_MUTATIONS {
+        return Err(ProtocolError::LimitExceeded("edit mutations"));
+    }
+    if !commit
+        .mutations
+        .windows(2)
+        .all(|pair| pair[0].coord < pair[1].coord)
     {
+        return Err(ProtocolError::InvalidPayload(
+            "edit mutations are not strictly coordinate-sorted",
+        ));
+    }
+    if commit
+        .mutations
+        .iter()
+        .any(|mutation| validate_voxel_coord(mutation.coord).is_err())
+    {
+        return Err(ProtocolError::InvalidPayload("invalid voxel coordinate"));
+    }
+    if commit.affected_chunks.len() > MAX_EDIT_AFFECTED_CHUNKS {
         return Err(ProtocolError::LimitExceeded("edit affected chunks"));
+    }
+    if (commit.mutations.is_empty()
+        && (!commit.affected_chunks.is_empty() || !commit.affected_surface_tiles.is_empty()))
+        || (!commit.mutations.is_empty() && commit.affected_chunks.is_empty())
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "no-op edit has affected products or changed edit omits them",
+        ));
     }
     if commit.affected_surface_tiles.len() > MAX_EDIT_AFFECTED_SURFACE_TILES {
         return Err(ProtocolError::LimitExceeded("edit affected surface tiles"));
@@ -1606,9 +1876,13 @@ fn validate_edit_commit(commit: &EditCommit) -> Result<(), ProtocolError> {
             "edit affected chunks are not strictly sorted",
         ));
     }
-    if !commit.affected_chunks.contains(&commit.coord.chunk()) {
+    if commit
+        .mutations
+        .iter()
+        .any(|mutation| !commit.affected_chunks.contains(&mutation.coord.chunk()))
+    {
         return Err(ProtocolError::InvalidPayload(
-            "edit affected chunks omit the edited chunk",
+            "edit affected chunks omit a mutated chunk",
         ));
     }
     if commit
@@ -1631,6 +1905,9 @@ fn validate_edit_commit(commit: &EditCommit) -> Result<(), ProtocolError> {
         return Err(ProtocolError::InvalidPayload(
             "invalid surface tile coordinate",
         ));
+    }
+    if let Some(inventory) = &commit.editor_inventory {
+        validate_inventory(inventory)?;
     }
     Ok(())
 }
@@ -1969,45 +2246,6 @@ fn validate_voxel_coord(coord: VoxelCoord) -> Result<(), ProtocolError> {
         return Err(ProtocolError::InvalidPayload("invalid voxel coordinate"));
     }
     Ok(())
-}
-
-fn encode_optional_material(output: &mut Vec<u8>, material: Option<Material>) {
-    match material {
-        Some(material) => {
-            push_u16(output, material.id());
-            output.push(1);
-        }
-        None => {
-            push_u16(output, 0);
-            output.push(0);
-        }
-    }
-    output.push(0);
-}
-
-fn decode_optional_material(cursor: &mut Cursor<'_>) -> Result<Option<Material>, ProtocolError> {
-    let material_id = cursor.u16()?;
-    let present = cursor.u8()?;
-    if cursor.u8()? != 0 {
-        return Err(ProtocolError::InvalidPayload(
-            "reserved edit material byte is nonzero",
-        ));
-    }
-    match present {
-        0 if material_id == 0 => Ok(None),
-        0 => Err(ProtocolError::InvalidPayload(
-            "absent edit material has a nonzero id",
-        )),
-        1 => Material::from_id(material_id)
-            .map(Some)
-            .ok_or(ProtocolError::UnknownEnum(
-                "material",
-                u64::from(material_id),
-            )),
-        _ => Err(ProtocolError::InvalidPayload(
-            "invalid edit material presence flag",
-        )),
-    }
 }
 
 fn decode_surface_coord(cursor: &mut Cursor<'_>) -> Result<SurfaceTileCoord, ProtocolError> {
@@ -2813,6 +3051,7 @@ mod tests {
             identity: player_identity(7, "default"),
             connection_id: 12,
             presence_session_id: PresenceSessionId::from_bytes([9; 16]),
+            edit_session_id: EditSessionId::from_bytes([10; 16]),
             spawn: SpawnPoint {
                 x: 0,
                 z: 52,
@@ -2823,6 +3062,21 @@ mod tests {
                 moisture: 0.7,
                 temperature: 0.6,
                 ridge: 0.2,
+            },
+            player_resume: PlayerResume {
+                revision: 3,
+                eye_position_metres: [0.05, 1.95, 5.25],
+                look_yaw_radians: 0.7,
+                look_pitch_radians: -0.1,
+            },
+            inventory: MaterialInventory {
+                revision: 4,
+                counts: {
+                    let mut counts = [0; MATERIAL_INVENTORY_SLOTS];
+                    counts[Material::Stone.id() as usize] = 27;
+                    counts[Material::Wood.id() as usize] = 8;
+                    counts
+                },
             },
         };
         assert_eq!(
@@ -2956,10 +3210,10 @@ mod tests {
         ));
 
         let mut prior_version = encode_player_pose(pose).expect("encode pose version fixture");
-        prior_version[4..6].copy_from_slice(&5_u16.to_le_bytes());
+        prior_version[4..6].copy_from_slice(&6_u16.to_le_bytes());
         assert_eq!(
             decode_player_pose(&prior_version),
-            Err(ProtocolError::UnsupportedVersion(5))
+            Err(ProtocolError::UnsupportedVersion(6))
         );
     }
 
@@ -3089,36 +3343,55 @@ mod tests {
     #[test]
     fn server_edit_frames_round_trip_and_reject_ambiguous_state() {
         let coord = VoxelCoord::new(31, 64, -33);
+        let edit_session_id = EditSessionId::from_bytes([17; 16]);
         let command = EditCommand {
             operation_id: 41,
-            coord,
-            material: Some(Material::Basalt),
+            edit_session_id,
+            action: EditAction::Place {
+                coord,
+                material: Material::Basalt,
+            },
         };
         let encoded_command = encode_edit_command(command).expect("encode edit command");
         assert_eq!(message_kind(&encoded_command), Ok(edit_command_kind()));
         assert_eq!(decode_edit_command(&encoded_command), Ok(command));
 
-        let restore = EditCommand {
+        let dig = EditCommand {
             operation_id: 42,
-            coord,
-            material: None,
+            edit_session_id,
+            action: EditAction::Dig { hit: coord },
         };
         assert_eq!(
-            decode_edit_command(&encode_edit_command(restore).expect("encode edit restore")),
-            Ok(restore)
+            decode_edit_command(&encode_edit_command(dig).expect("encode edit dig")),
+            Ok(dig)
         );
 
+        let mut counts = [0; MATERIAL_INVENTORY_SLOTS];
+        counts[Material::Basalt.id() as usize] = 11;
         let commit = EditCommit {
             operation_id: command.operation_id,
+            edit_session_id,
             editor_connection_id: 77,
             revision: 9,
-            coord,
-            material: command.material,
+            mutations: vec![
+                VoxelMutation {
+                    coord,
+                    material: Material::Basalt,
+                },
+                VoxelMutation {
+                    coord: VoxelCoord::new(32, 64, -33),
+                    material: Material::Basalt,
+                },
+            ],
             affected_chunks: vec![coord.chunk(), ChunkCoord::new(1, 2, -2)],
             affected_surface_tiles: vec![
                 SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, -1),
                 SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 0, -1),
             ],
+            editor_inventory: Some(MaterialInventory {
+                revision: 8,
+                counts,
+            }),
         };
         let encoded_commit = encode_edit_commit(&commit).expect("encode edit commit");
         assert_eq!(message_kind(&encoded_commit), Ok(edit_commit_kind()));
@@ -3156,6 +3429,13 @@ mod tests {
             ))
         );
 
+        let mut nil_session = command;
+        nil_session.edit_session_id = EditSessionId::from_bytes([0; 16]);
+        assert_eq!(
+            encode_edit_command(nil_session),
+            Err(ProtocolError::InvalidPayload("edit session id is nil"))
+        );
+
         let mut duplicate_chunk = commit.clone();
         duplicate_chunk.affected_chunks = vec![coord.chunk(), coord.chunk()];
         assert_eq!(
@@ -3165,22 +3445,42 @@ mod tests {
             ))
         );
 
-        let mut omitted_owner = commit;
+        let mut duplicate_mutation = commit.clone();
+        duplicate_mutation.mutations[1].coord = coord;
+        assert_eq!(
+            encode_edit_commit(&duplicate_mutation),
+            Err(ProtocolError::InvalidPayload(
+                "edit mutations are not strictly coordinate-sorted"
+            ))
+        );
+
+        let mut omitted_owner = commit.clone();
         omitted_owner.affected_chunks = vec![ChunkCoord::new(-4, 0, 7)];
         assert_eq!(
             encode_edit_commit(&omitted_owner),
             Err(ProtocolError::InvalidPayload(
-                "edit affected chunks omit the edited chunk"
+                "edit affected chunks omit a mutated chunk"
             ))
         );
 
-        let mut malformed_restore = encode_edit_command(restore).expect("encode malformed restore");
-        malformed_restore[FRAME_HEADER_BYTES + 12..FRAME_HEADER_BYTES + 14]
+        let mut malformed_dig = encode_edit_command(dig).expect("encode malformed dig");
+        malformed_dig[FRAME_HEADER_BYTES + 18..FRAME_HEADER_BYTES + 20]
             .copy_from_slice(&Material::Stone.id().to_le_bytes());
         assert_eq!(
-            decode_edit_command(&malformed_restore),
+            decode_edit_command(&malformed_dig),
+            Err(ProtocolError::InvalidPayload("dig action has a material"))
+        );
+
+        let mut air_inventory = commit;
+        air_inventory
+            .editor_inventory
+            .as_mut()
+            .expect("inventory")
+            .counts[Material::Air.id() as usize] = 1;
+        assert_eq!(
+            encode_edit_commit(&air_inventory),
             Err(ProtocolError::InvalidPayload(
-                "absent edit material has a nonzero id"
+                "air inventory count is nonzero"
             ))
         );
 
@@ -3189,6 +3489,51 @@ mod tests {
             Err(ProtocolError::InvalidPayload(
                 "resync revision must be nonzero"
             ))
+        );
+    }
+
+    #[test]
+    fn atomic_five_cube_commit_round_trips_at_protocol_limits() {
+        let mut mutations = Vec::with_capacity(MAX_EDIT_MUTATIONS);
+        for x in 30..35 {
+            for y in 62..67 {
+                for z in -34..-29 {
+                    mutations.push(VoxelMutation {
+                        coord: VoxelCoord::new(x, y, z),
+                        material: Material::Air,
+                    });
+                }
+            }
+        }
+        assert_eq!(mutations.len(), MAX_EDIT_MUTATIONS);
+        let affected_chunks = mutations
+            .iter()
+            .map(|mutation| mutation.coord.chunk())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(affected_chunks.len(), MAX_EDIT_AFFECTED_CHUNKS);
+        let commit = EditCommit {
+            operation_id: 99,
+            edit_session_id: EditSessionId::from_bytes([21; 16]),
+            editor_connection_id: 7,
+            revision: 12,
+            mutations,
+            affected_chunks,
+            affected_surface_tiles: Vec::new(),
+            editor_inventory: None,
+        };
+        let encoded = encode_edit_commit(&commit).expect("encode five-cube commit");
+        assert_eq!(decode_edit_commit(&encoded), Ok(commit.clone()));
+
+        let mut oversized = commit;
+        oversized.mutations.push(VoxelMutation {
+            coord: VoxelCoord::new(35, 62, -34),
+            material: Material::Air,
+        });
+        assert_eq!(
+            encode_edit_commit(&oversized),
+            Err(ProtocolError::LimitExceeded("edit mutations"))
         );
     }
 
