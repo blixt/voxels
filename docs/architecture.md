@@ -345,12 +345,14 @@ Placement material is Rust state, selected through the canvas context menu and d
 header. The browser still transmits only raw input records; right-click uses the selected material and the
 ordinary sparse-edit/SQLite/remesh path, so GlowCrystal is not a renderer-only decoration.
 
-The first persistent chunk format is versioned and little-endian:
+The current persistent chunk format, VXCH v2, is versioned and little-endian:
 
 1. a small magic/version header and chunk coordinates;
 2. a chunk-local palette of stable material ids;
 3. palette indices packed at `ceil(log2(palette length))` bits per voxel in Y-Z-X traversal order;
-4. an integrity hash over the decoded voxel materials.
+4. the expected world-source identity hash; and
+5. a semantic integrity hash over the source identity, chunk coordinates, material schema, and
+   decoded voxel materials.
 
 Palette + bit packing follows the useful part of modern Minecraft's paletted-container design while
 remaining independent of NBT and game-specific registries. Fixed chunks are intentionally preferred
@@ -373,7 +375,7 @@ future snapshot compaction. If profiling shows write amplification or database s
 constraint, the same codec can move snapshots into append-only region files while SQLite remains the
 transactional index. Region files would group a bounded X/Z tile, use a checksummed offset table, and
 write payloads in aligned extents. Optional block compression can be evaluated around those packed
-payloads then; neither region wrapping nor compression is part of VXCH v1.
+payloads then; neither region wrapping nor compression is part of VXCH v2.
 
 Multi-tab access is single-writer without excluding other tabs. A Web Lock elects one worker as the
 SQLite/SAH-pool owner; followers proxy typed camera/edit operations over a BroadcastChannel and queue
