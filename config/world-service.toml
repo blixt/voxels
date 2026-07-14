@@ -71,12 +71,12 @@ xz_voxels = [0, 0]
 # Omit model_cache to use ~/Library/Caches/voxels/terrain-diffusion on macOS.
 # A relative path is resolved from this file's directory.
 precision = "float16"
-# Canonical voxel X/Z coordinate of the finite 7.68 km tile's minimum corner. The checked-in
+# Canonical voxel X/Z coordinate of the finite 15.36 km tile's minimum corner. The checked-in
 # placement centers the tile on the configured spawn and leaves ample meshing-halo coverage.
-world_origin_voxels = [-38400, -38400]
-# Present each native 30 m model pixel across 60 m of world space. This keeps the model's full
-# elevation range while reducing 10 cm voxel stair-stepping and extends useful exploration range.
-horizontal_scale = 2
+world_origin_voxels = [-76800, -76800]
+# Preserve the model's physical 30 m horizontal spacing. Unlike Minecraft blocks, canonical voxels
+# already represent a fixed 10 cm, so stretching only the horizontal axes would flatten slopes.
+horizontal_scale = 1
 # Terrain Diffusion model-grid row/column used for spatial sampling and noise.
 model_origin = [0, 0]
 # Heightfield composer flood height for the learned terrain source.

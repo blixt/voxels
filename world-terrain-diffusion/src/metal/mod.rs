@@ -76,7 +76,7 @@ pub struct FullDetailTile {
     pub detail: DetailTile,
 }
 
-/// Finite native-Metal macro source produced by one complete model-chain experiment.
+/// Finite native-Metal macro source produced by one complete model-chain query.
 ///
 /// It is deliberately an owned canonical product: after generation it has no Candle or Metal
 /// types, so the same source can cross the planned local-process protocol. Expanding this into an
@@ -543,7 +543,7 @@ impl MetalTerrainDiffusion {
         })
     }
 
-    /// Exercises the complete published coarse -> base -> decoder model chain for one 128px tile.
+    /// Exercises the complete published coarse -> base -> decoder model chain for one 512px tile.
     ///
     /// The finite provider uses a coordinate-keyed synthetic continent and climate field, matching
     /// the upstream pipeline's role for synthetic Perlin conditioning. Learned stages still own
@@ -553,36 +553,19 @@ impl MetalTerrainDiffusion {
         origin: [i32; 2],
     ) -> Result<FullDetailTile, TerrainDiffusionError> {
         let (coarse, latent) = self.generate_coarse_and_latent(origin)?;
-        let detail_edge = 128;
+        // The base model already produces the full 64x64 latent window. Decoding only a selected
+        // 16x16 crop discarded fifteen sixteenths of the learned geography and reduced the world
+        // to the decoder's 128px training crop. The paper and upstream runtime query a 512px
+        // decoder window, which exposes the complete 15.36km region represented by this latent.
+        let detail_edge = 512;
         let latent_edge = detail_edge / LATENT_COMPRESSION;
-        let latent_pixels = LATENT_TILE_EDGE * LATENT_TILE_EDGE;
-        let [patch_z, patch_x] = highest_variance_patch(
-            &latent.values[4 * latent_pixels..5 * latent_pixels],
-            LATENT_TILE_EDGE,
-            latent_edge,
-            false,
-        );
-        let mut latent_patch = vec![0.0_f32; LATENT_CHANNELS * latent_edge * latent_edge];
-        for channel in 0..LATENT_CHANNELS {
-            for z in 0..latent_edge {
-                for x in 0..latent_edge {
-                    latent_patch[channel * latent_edge * latent_edge + z * latent_edge + x] =
-                        latent.values[channel * LATENT_TILE_EDGE * LATENT_TILE_EDGE
-                            + (patch_z + z) * LATENT_TILE_EDGE
-                            + patch_x
-                            + x];
-                }
-            }
-        }
+        debug_assert_eq!(latent_edge, LATENT_TILE_EDGE);
+        let [patch_z, patch_x] = [0, 0];
         let detail_origin = [
-            latent.origin[0]
-                .saturating_add(patch_z as i32)
-                .saturating_mul(LATENT_COMPRESSION as i32),
-            latent.origin[1]
-                .saturating_add(patch_x as i32)
-                .saturating_mul(LATENT_COMPRESSION as i32),
+            latent.origin[0].saturating_mul(LATENT_COMPRESSION as i32),
+            latent.origin[1].saturating_mul(LATENT_COMPRESSION as i32),
         ];
-        let detail = self.decode_detail_tile(detail_origin, detail_edge, &latent_patch)?;
+        let detail = self.decode_detail_tile(detail_origin, detail_edge, &latent.values)?;
         Ok(FullDetailTile {
             coarse,
             latent,
@@ -1506,13 +1489,6 @@ mod tests {
         values[14] = 2.0;
         values[15] = 2.0;
         assert_eq!(highest_average_patch(&values, 4, 2), [2, 2]);
-    }
-
-    #[test]
-    fn representative_detail_preview_selects_the_first_highest_variance_window() {
-        let mut values = vec![0.0; 64];
-        values[5 * 8 + 6] = 4.0;
-        assert_eq!(highest_variance_patch(&values, 8, 4, false), [2, 3]);
     }
 
     #[test]

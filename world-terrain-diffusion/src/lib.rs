@@ -17,7 +17,7 @@ use voxels_world::{
 
 pub const MODEL_REPOSITORY: &str = "xandergos/terrain-diffusion-30m";
 pub const MODEL_REVISION: &str = "9ef8030cb805b433b98ec25c5dddefbac07a9e26";
-pub const IMPLEMENTATION_VERSION: u32 = 4;
+pub const IMPLEMENTATION_VERSION: u32 = 5;
 pub const SAMPLER_VERSION: u32 = 1;
 pub const SCHEDULER_VERSION: u32 = 1;
 pub const COARSE_WEIGHT_SHA256: &str =
@@ -67,7 +67,7 @@ impl TerrainDiffusionConfig {
             precision: TerrainPrecision::Float16,
             require_metal: true,
             world_origin_voxels: [0, 0],
-            horizontal_scale: 2,
+            horizontal_scale: 1,
             model_origin: [0, 0],
         }
     }
@@ -79,7 +79,7 @@ impl TerrainDiffusionConfig {
                 self.horizontal_scale,
             ));
         }
-        configuration.update(b"voxels-terrain-diffusion-configuration-v5\0");
+        configuration.update(b"voxels-terrain-diffusion-configuration-v6\0");
         configuration.update(self.seed.to_le_bytes());
         configuration.update([self.precision as u8]);
         for coordinate in self.world_origin_voxels {
@@ -90,9 +90,9 @@ impl TerrainDiffusionConfig {
             configuration.update(coordinate.to_le_bytes());
         }
         configuration.update(
-            b"coordinate-keyed-fractal-continent-climate-v1;elevation-noise-ratio-0.05;highest-variance-positive-4x4-coarse;highest-variance-16x16-latent;spatial-coarse-climate-lapse-aridity;physical-gradient-ridge;configurable-horizontal-scale-v1\0",
+            b"coordinate-keyed-fractal-continent-climate-v1;elevation-noise-ratio-0.05;highest-variance-positive-4x4-coarse;full-64x64-latent;512x512-decoder;spatial-coarse-climate-lapse-aridity;physical-gradient-ridge;configurable-horizontal-scale-v1\0",
         );
-        configuration.update(128_u32.to_le_bytes());
+        configuration.update(512_u32.to_le_bytes());
         let configuration_hash: [u8; 32] = configuration.finalize().into();
         Ok(WorldSourceIdentity {
             source_kind: WorldSourceKind::TerrainDiffusion30m,
@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(config.precision, TerrainPrecision::Float16);
         assert_eq!(config.model_root, PathBuf::from("model"));
         assert_eq!(config.world_origin_voxels, [0, 0]);
-        assert_eq!(config.horizontal_scale, 2);
+        assert_eq!(config.horizontal_scale, 1);
         assert_eq!(config.model_origin, [0, 0]);
     }
 
@@ -319,7 +319,7 @@ mod tests {
             identity
                 .macro_coordinate_transform
                 .horizontal_unit_millimetres,
-            60_000
+            30_000
         );
         let model = identity.model.expect("model identity");
         assert_eq!(model.repository, MODEL_REPOSITORY);
@@ -357,7 +357,7 @@ mod tests {
         );
 
         let mut scaled = sampled;
-        scaled.horizontal_scale = 1;
+        scaled.horizontal_scale = 2;
         let scaled_identity = scaled.source_identity().expect("scaled identity");
         assert_ne!(
             base_identity.configuration_hash,

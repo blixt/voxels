@@ -48,26 +48,27 @@ unit) and FP16 model tensors by default. FP32 remains available as a diagnostic 
 `terrain:counterproof` verifies numerically that every learned stage responds to changed image
 conditioning. `terrain:smoke` runs the authentic 20-step coarse path on a 64x64 tile.
 `terrain:detail` loads all three models and runs a finite coarse -> two-pass base -> decoder chain,
-producing 128x128 elevation at the model's native 30 m spacing. `terrain:base` stops after the first
-two stages for independent attention-path validation. The 128-pixel decoder tile matches the
-training crop and is the lowest-latency useful detail tile; larger overlap-aware tiles can be added
-behind the same API.
+producing 512x512 elevation at the model's native 30 m spacing. `terrain:base` stops after the first
+two stages for independent attention-path validation. The 512-pixel decoder window matches the
+paper and upstream streaming runtime and consumes the complete 64x64 latent result instead of a
+hand-selected 16x16 crop. Overlap-aware neighboring windows can be added behind the same API.
 
-On the development M3 Max, an optimized fresh process with warm Metal shader caches measured 482 ms
-for coarse diffusion, 211 ms for the two base passes, and 112 ms for decoding. Model loading,
-postprocessing, and those learned stages took 1.04 seconds wall-clock in total. Maximum resident set
-size was 2.08 GB and peak process footprint was 3.04 GB. The first run after a shader or binary
-change can be slower while Metal compiles kernels.
+On the development M3 Max, an optimized fresh process with warm Metal shader caches measured 409 ms
+for coarse diffusion, 183 ms for the two base passes, and 1.55 seconds for the full 512px decoder.
+Including model loading and process startup took 4.85 seconds wall-clock. Maximum resident set size
+was 2.08 GB and peak process footprint was 6.11 GB. The first run after a shader or binary change can
+be slower while Metal compiles kernels.
 
 ## World-source boundary
 
 `TerrainDiffusionMacroTileSource` implements the portable `world::MacroTerrainSource` trait. It
 owns only the generated canonical fields after inference, not Candle or Metal values, which makes
 the result suitable for an in-process call today and the planned binary world-service protocol
-later. One experimental tile contains 3.84 km of native model coverage. The checked-in
-`horizontal_scale = 2` presents it across 7.68 km at 60 m per model pixel (600 canonical 10 cm
-voxels per pixel), matching the upstream game integration's recommended scale; samples beyond it
-are explicitly invalid rather than silently repeating.
+later. One experimental tile contains 15.36 km of native model coverage. The checked-in
+`horizontal_scale = 1` preserves the model's 30 m physical spacing (300 canonical 10 cm voxels per
+pixel); samples beyond it are explicitly invalid rather than silently repeating. Minecraft's
+recommended scale changes both horizontal and vertical metres per cubic block. Stretching only the
+horizontal axes in our fixed-10 cm world instead flattened the learned slopes.
 
 `world-service` loads the versioned [world source configuration](world-service-config.md) and
 constructs either this provider or `ProceduralWorldSource` behind that same trait. Provider
@@ -103,9 +104,9 @@ client.
   without importing its Python, rasterio, or WorldClim preprocessing dependencies. Conditioning is
   standardized with output channels `[0, 2, 3, 4, 5]`, matching upstream's elevation, temperature,
   temperature seasonality, precipitation, and precipitation-variability mapping. The learned model
-  still owns the 30 m terrain. The finite provider selects the highest-variance all-land 4x4 coarse
-  context and highest-variance 16x16 latent crop, avoiding the former maximum-seeking plateau bias,
-  before performing signed-square-root/Laplacian reconstruction in native Rust. Learned coarse
+  still owns the 30 m terrain. The finite provider selects a high-variance all-land 4x4 coarse
+  context, then preserves the complete 64x64 learned latent window before performing
+  signed-square-root/Laplacian reconstruction in native Rust. Learned coarse
   temperature and precipitation remain spatial fields; the adapter applies elevation lapse rate and
   an aridity estimate before publishing normalized climate. Infinite overlap blending remains future
   work and is source-identity versioned when added.
@@ -115,9 +116,8 @@ client.
   altitude, slope, and coherent geology choose biome surfaces and shallow/deep strata. Chunks,
   collision blocks, edited surfaces, and far LODs all use the same composition function.
 
-For the checked-in seed, `terrain:detail` measures 576–1,396 m (820 m relief) over the 3.84 km native
-model tile, presented across 7.68 km. `world:source-smoke` samples 256 positions across that tile;
-the current result spans three
-surface regions and Grass, Stone, and Limestone, with temperature, moisture, and physical ridge all
+For the checked-in seed, `terrain:detail` measures roughly 543–1,558 m over the 15.36 km native
+model tile. `world:source-smoke` samples 256 positions across that tile; the current result spans
+four surface regions and four material IDs, with temperature, moisture, and physical ridge all
 non-constant. These are regression diagnostics rather than promises that every seed has the same
 histogram.

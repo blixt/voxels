@@ -235,7 +235,7 @@ impl Default for TerrainDiffusionProviderConfig {
             model_cache: None,
             precision: TerrainModelPrecision::Float16,
             world_origin_voxels: [0, 0],
-            horizontal_scale: 2,
+            horizontal_scale: 1,
             model_origin: [0, 0],
             sea_level_voxels: SEA_LEVEL_VOXELS,
         }

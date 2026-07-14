@@ -242,8 +242,8 @@ the directly applicable parts of [Geometry Clipmaps][geometry-clipmaps], Hoppe's
 [Nanite geometry model][nanite]. Exact 10 cm voxels should remain gameplay authority while these
 cluster/page products remain disposable rendering caches.
 
-Terrain Diffusion currently yields one finite 128x128 height tile at 30 m native resolution. The
-checked-in `horizontal_scale = 2` presents each sample across 60 m, making the tile 7.68 km square,
+Terrain Diffusion currently yields one finite 512x512 height tile at 30 m native resolution. The
+checked-in `horizontal_scale = 1` preserves that spacing, making the tile 15.36 km square,
 with its minimum corner placed by `world_origin_voxels` (the checked-in value centers it on spawn).
 Heights are bilinearly sampled into canonical 10 cm columns. The canonical composer adds bounded,
 source-identity-bound subgrid relief, climate-classified surface materials, shallow soil, and
