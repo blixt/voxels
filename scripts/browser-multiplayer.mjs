@@ -16,8 +16,8 @@ import {
 import { rustTool } from "./build-wasm.ts";
 import { createShapedLink } from "./network-benchmark-link.mjs";
 
-const RESULT_SCHEMA_VERSION = 4;
-const FIXTURE_VERSION = 4;
+const RESULT_SCHEMA_VERSION = 3;
+const FIXTURE_VERSION = 3;
 const VXWP_VERSION = 6;
 const WORLD_PATH = `/v${VXWP_VERSION}/world`;
 const PRESENCE_PATH = `/v${VXWP_VERSION}/presence`;
@@ -26,18 +26,7 @@ const EXPECTED_REMOTE_PLAYERS = EXPECTED_PLAYERS - 1;
 const BUILDER_COUNT = EXPECTED_REMOTE_PLAYERS;
 const EXPECTED_PARTS_PER_AVATAR = 13;
 const FAR_TIER_MINIMUM_METRES = 105;
-const OBSERVER_INPUT_WALK_METRES = 5;
-const OBSERVER_RELOCATION_METRES = 120;
-const OBSERVER_RELOCATION_HEIGHT_METRES = 8;
-const OBSERVER_WALK_TIMEOUT_MS = 15_000;
-const OBSERVER_STALL_TIMEOUT_MS = 1_000;
-const OBSERVER_AVOIDANCE_OFFSETS = [
-  Math.PI / 3,
-  -Math.PI / 3,
-  (2 * Math.PI) / 3,
-  (-2 * Math.PI) / 3,
-];
-const MIN_BUILDER_TRAVEL_METRES = 0.2;
+const OBSERVER_WALK_METRES = 120;
 const PLAYER_EYE_HEIGHT_METRES = 1.62;
 const TOWER_MATERIAL_ID = 14;
 const VIEWPORT = { width: 960, height: 540 };
@@ -254,7 +243,10 @@ async function waitForEngine(page, label) {
   return waitFor(
     page,
     `${label} engine startup`,
-    (next) => next[SNAPSHOT.quads] > 0 && next[SNAPSHOT.residentChunks] > 0,
+    (next) =>
+      next[SNAPSHOT.quads] > 0 &&
+      next[SNAPSHOT.residentChunks] > 0 &&
+      next[SNAPSHOT.pendingJobs] === 0,
   );
 }
 
@@ -318,13 +310,11 @@ async function stopChild(child) {
 async function walkDistance(page, targetDistanceMetres) {
   const before = await snapshot(page);
   const started = performance.now();
+  await page.keyboard.down("ShiftLeft");
   await page.keyboard.down("KeyS");
   let after = before;
-  let bestDistanceMetres = 0;
-  let lastProgressAt = started;
-  let avoidanceTurns = 0;
   try {
-    while (performance.now() - started < OBSERVER_WALK_TIMEOUT_MS) {
+    while (performance.now() - started < 35_000) {
       await page.waitForTimeout(50);
       after = await snapshot(page);
       const distance = Math.hypot(
@@ -332,38 +322,10 @@ async function walkDistance(page, targetDistanceMetres) {
         after[SNAPSHOT.cameraZ] - before[SNAPSHOT.cameraZ],
       );
       if (distance >= targetDistanceMetres) break;
-      const now = performance.now();
-      if (distance >= bestDistanceMetres + 0.25) {
-        bestDistanceMetres = distance;
-        lastProgressAt = now;
-      } else if (now - lastProgressAt >= OBSERVER_STALL_TIMEOUT_MS) {
-        let outwardX = after[SNAPSHOT.cameraX] - before[SNAPSHOT.cameraX];
-        let outwardZ = after[SNAPSHOT.cameraZ] - before[SNAPSHOT.cameraZ];
-        const outwardLength = Math.hypot(outwardX, outwardZ);
-        if (outwardLength < 0.25) {
-          outwardX = -Math.sin(after[SNAPSHOT.yaw]);
-          outwardZ = Math.cos(after[SNAPSHOT.yaw]);
-        } else {
-          outwardX /= outwardLength;
-          outwardZ /= outwardLength;
-        }
-        const avoidanceOffset =
-          OBSERVER_AVOIDANCE_OFFSETS[avoidanceTurns % OBSERVER_AVOIDANCE_OFFSETS.length];
-        const desiredYaw = Math.atan2(-outwardX, outwardZ) + avoidanceOffset;
-        const yawDelta = Math.atan2(
-          Math.sin(desiredYaw - after[SNAPSHOT.yaw]),
-          Math.cos(desiredYaw - after[SNAPSHOT.yaw]),
-        );
-        await page.evaluate(
-          (movementX) => globalThis.__VOXELS__.look(movementX, 0),
-          yawDelta / 0.0022,
-        );
-        avoidanceTurns += 1;
-        lastProgressAt = now;
-      }
     }
   } finally {
     await page.keyboard.up("KeyS");
+    await page.keyboard.up("ShiftLeft");
   }
   const distanceMetres = Math.hypot(
     after[SNAPSHOT.cameraX] - before[SNAPSHOT.cameraX],
@@ -374,13 +336,7 @@ async function walkDistance(page, targetDistanceMetres) {
       `observer covered ${distanceMetres.toFixed(2)} of ${targetDistanceMetres} metres`,
     );
   }
-  return {
-    before,
-    after,
-    distanceMetres,
-    durationMs: performance.now() - started,
-    avoidanceTurns,
-  };
+  return { before, after, distanceMetres, durationMs: performance.now() - started };
 }
 
 function pathBytes(stats, endpoint) {
@@ -570,40 +526,13 @@ async function main() {
           builderBeforeMovement[index][SNAPSHOT.cameraZ],
       ),
     );
-    if (builderTravelMetres.some((distance) => distance < MIN_BUILDER_TRAVEL_METRES)) {
+    if (builderTravelMetres.some((distance) => distance < 0.5)) {
       throw new Error(
         `one or more builder movement fixtures stalled: ${JSON.stringify(builderTravelMetres)}`,
       );
     }
     const observer = players[0];
-    const observerWalk = await walkDistance(observer.page, OBSERVER_INPUT_WALK_METRES);
-    const walkedX = observerWalk.after[SNAPSHOT.cameraX] - observerWalk.before[SNAPSHOT.cameraX];
-    const walkedZ = observerWalk.after[SNAPSHOT.cameraZ] - observerWalk.before[SNAPSHOT.cameraZ];
-    const walkedLength = Math.hypot(walkedX, walkedZ);
-    const relocationTarget = {
-      x:
-        observerWalk.before[SNAPSHOT.cameraX] +
-        (walkedX / walkedLength) * OBSERVER_RELOCATION_METRES,
-      y: observerWalk.after[SNAPSHOT.cameraY] + OBSERVER_RELOCATION_HEIGHT_METRES,
-      z:
-        observerWalk.before[SNAPSHOT.cameraZ] +
-        (walkedZ / walkedLength) * OBSERVER_RELOCATION_METRES,
-    };
-    const relocated = await observer.page.evaluate(
-      ({ x, y, z }) => globalThis.__VOXELS__.relocateCamera(x, y, z),
-      relocationTarget,
-    );
-    if (!relocated) throw new Error("observer harness relocation was rejected");
-    const relocationSnapshot = await waitFor(
-      observer.page,
-      "observer far relocation",
-      (next) =>
-        Math.hypot(
-          next[SNAPSHOT.cameraX] - observerWalk.before[SNAPSHOT.cameraX],
-          next[SNAPSHOT.cameraZ] - observerWalk.before[SNAPSHOT.cameraZ],
-        ) >=
-        OBSERVER_RELOCATION_METRES - 0.5,
-    );
+    const observerWalk = await walkDistance(observer.page, OBSERVER_WALK_METRES);
     const farRosters = await Promise.all(players.map(waitForRoster));
     const builderCentroid = builders.reduce(
       (center, _builder, index) => {
@@ -629,7 +558,6 @@ async function main() {
       z: builderCentroid.z,
     });
     await observer.page.screenshot({ path: path.join(OUTPUT_DIRECTORY, "observer-far-five.png") });
-    await Promise.all(players.map(waitForSettledWorld));
     await observer.page.waitForTimeout(600);
     const steadySnapshots = await Promise.all(players.map(({ page }) => snapshot(page)));
     const frameTimings = steadySnapshots.map(frameTimingSummary);
@@ -652,6 +580,7 @@ async function main() {
     }
     if (errors.length > 0) throw new Error(errors.join("\n"));
 
+    await Promise.all(players.map(waitForSettledWorld));
     const towerVoxelCount = 100;
     const towerX = Math.floor(builderBeforeMovement[0][SNAPSHOT.cameraX] * 10);
     const towerZ = Math.floor(builderBeforeMovement[0][SNAPSHOT.cameraZ] * 10);
@@ -702,7 +631,7 @@ async function main() {
       towerX,
       towerZ,
     );
-    const towerProductConvergenceMs = performance.now() - towerStarted;
+    const towerConvergenceMs = performance.now() - towerStarted;
     const renderedTower = await waitFor(
       observer.page,
       "observer rendered far tower",
@@ -714,7 +643,6 @@ async function main() {
       },
       30_000,
     );
-    const towerPresentationConvergenceMs = performance.now() - towerStarted;
     const afterTowerScreenshot = await observer.page.screenshot({
       path: path.join(OUTPUT_DIRECTORY, "observer-far-five-tower.png"),
     });
@@ -751,13 +679,12 @@ async function main() {
     });
     const collaborativeTower = {
       status: "passed",
-      reason: `Five builders submitted ${towerVoxelCount} authoritative voxels; every client applied them and the observer accepted the revised stride-16 surface ${distanceFromBuildersMetres.toFixed(1)} m away in ${towerProductConvergenceMs.toFixed(1)} ms, then presented it in ${towerPresentationConvergenceMs.toFixed(1)} ms.`,
+      reason: `Five builders submitted ${towerVoxelCount} authoritative voxels; every client applied them and the observer accepted the revised stride-16 surface ${distanceFromBuildersMetres.toFixed(1)} m away in ${towerConvergenceMs.toFixed(1)} ms.`,
       voxelCount: towerVoxelCount,
       heightMetres: towerVoxelCount / 10,
       builders: BUILDER_COUNT,
       distanceMetres: rounded(distanceFromBuildersMetres, 3),
-      productConvergenceMs: rounded(towerProductConvergenceMs),
-      presentationConvergenceMs: rounded(towerPresentationConvergenceMs),
+      convergenceMs: rounded(towerConvergenceMs),
       observerSurface: {
         tile: observerSurfaceState.slice(0, 2),
         requiredRevision: observerSurfaceState[2],
@@ -796,8 +723,7 @@ async function main() {
         browserSnapshotSchema: SNAPSHOT_SCHEMA_VERSION,
         protocol: { name: "VXWP", version: VXWP_VERSION },
         link: LINK_PROFILE,
-        observerInputWalkMetres: OBSERVER_INPUT_WALK_METRES,
-        observerRelocationMetres: OBSERVER_RELOCATION_METRES,
+        observerWalkMetres: OBSERVER_WALK_METRES,
         farTierMinimumMetres: FAR_TIER_MINIMUM_METRES,
         localMultiClientFrameP95LimitMs: LOCAL_MULTI_CLIENT_FRAME_P95_LIMIT_MS,
         localMultiClientFrameMaxLimitMs: LOCAL_MULTI_CLIENT_FRAME_MAX_LIMIT_MS,
@@ -807,14 +733,6 @@ async function main() {
       observer: {
         walkDurationMs: rounded(observerWalk.durationMs),
         walkDistanceMetres: rounded(observerWalk.distanceMetres, 3),
-        walkAvoidanceTurns: observerWalk.avoidanceTurns,
-        relocationDistanceMetres: rounded(
-          Math.hypot(
-            relocationSnapshot[SNAPSHOT.cameraX] - observerWalk.before[SNAPSHOT.cameraX],
-            relocationSnapshot[SNAPSHOT.cameraZ] - observerWalk.before[SNAPSHOT.cameraZ],
-          ),
-          3,
-        ),
         distanceFromBuildersMetres: rounded(distanceFromBuildersMetres, 3),
       },
       builders: {

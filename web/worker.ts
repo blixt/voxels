@@ -57,13 +57,6 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
         values: Array.from(handle?.snapshot() ?? []),
       });
       break;
-    case "relocateCamera":
-      scope.postMessage({
-        kind: "relocateCamera",
-        requestId: message.requestId,
-        relocated: handle?.relocate_camera(message.x, message.y, message.z) ?? false,
-      });
-      break;
     case "submitEdit":
       scope.postMessage({
         kind: "submitEdit",
