@@ -65,6 +65,7 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     __VOXELS__?: {
       snapshot(): Promise<number[]>;
       profile(profileId: number): void;
+      look(deltaX: number, deltaY: number): void;
       readonly player: BrowserPlayerSession;
       playerUrl(name: string): string;
     };
@@ -86,6 +87,21 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
         worker.postMessage({ kind: "snapshot", requestId });
       }),
     profile: (profileId) => worker.postMessage({ kind: "profile", profileId }),
+    look: (deltaX, deltaY) => {
+      const buffer = packInput([
+        {
+          kind: INPUT_POINTER_MOVE,
+          code: 0,
+          buttons: 0,
+          x: 0,
+          y: 0,
+          dx: deltaX,
+          dy: deltaY,
+          flags: 0,
+        },
+      ]);
+      worker.postMessage({ kind: "input", buffer }, [buffer]);
+    },
     player,
     playerUrl: (name) => namedPlayerUrl(name).href,
   };

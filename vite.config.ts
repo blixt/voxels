@@ -12,7 +12,9 @@ interface RustInputWatcher {
   on(event: "add" | "change" | "unlink", listener: (file: string) => void): unknown;
 }
 
-const CLIENT_CONFIG_SOURCE = path.resolve("config/client.toml");
+const CLIENT_CONFIG_SOURCE = path.resolve(
+  process.env.VOXELS_CLIENT_CONFIG_PATH ?? "config/client.toml",
+);
 
 function clientConfig(emitBuildAsset: boolean): Plugin {
   return {
@@ -108,6 +110,14 @@ export default defineConfig(({ command, mode }) => ({
       },
       "bench:runtime": {
         command: "node scripts/bench-runtime.ts",
+        cache: false,
+      },
+      "bench:network": {
+        command: "node scripts/browser-network-benchmark.mjs",
+        cache: false,
+      },
+      "bench:network:compare": {
+        command: "node scripts/network-benchmark-compare.mjs",
         cache: false,
       },
       "terrain:fetch": {
