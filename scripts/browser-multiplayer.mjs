@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { cpus, platform, release, tmpdir } from "node:os";
@@ -17,8 +17,8 @@ import { rustTool } from "./build-wasm.ts";
 import { createShapedLink } from "./network-benchmark-link.mjs";
 
 const RESULT_SCHEMA_VERSION = 3;
-const FIXTURE_VERSION = 3;
-const VXWP_VERSION = 6;
+const FIXTURE_VERSION = 4;
+const VXWP_VERSION = 7;
 const WORLD_PATH = `/v${VXWP_VERSION}/world`;
 const PRESENCE_PATH = `/v${VXWP_VERSION}/presence`;
 const EXPECTED_PLAYERS = 6;
@@ -392,7 +392,7 @@ async function main() {
     serviceSource
       .replace(/^listen = .*$/m, `listen = "127.0.0.1:${backendPort}"`)
       .replace(/^allowed_origins = .*$/m, `allowed_origins = ["http://127.0.0.1:${previewPort}"]`)
-      .replace(/^database = .*$/m, 'database = "world-edits.sqlite3"'),
+      .replace(/^database = .*$/m, 'database = "world-state-v2.sqlite3"'),
   );
 
   let browser;
@@ -404,6 +404,13 @@ async function main() {
   const errors = [];
   try {
     await build({ logLevel: "warn" });
+    // Keep the readiness deadline about service startup, not an arbitrary clean Rust compile. This
+    // also prevents a timed-out cargo child from repeatedly abandoning the same profile build.
+    execFileSync(
+      rustTool("cargo"),
+      ["build", "--profile", "worldgen", "-p", "voxels-world-service", "--bin", "voxels-worldd"],
+      { stdio: "inherit" },
+    );
     worldService = spawn(
       rustTool("cargo"),
       [
@@ -581,7 +588,9 @@ async function main() {
     if (errors.length > 0) throw new Error(errors.join("\n"));
 
     await Promise.all(players.map(waitForSettledWorld));
-    const towerVoxelCount = 100;
+    // Four metres stays inside each ground-level builder's authoritative reach envelope. The old
+    // 10 m direct-submit tower was a useful LOD stressor but also an edit-distance exploit.
+    const towerVoxelCount = 40;
     const towerX = Math.floor(builderBeforeMovement[0][SNAPSHOT.cameraX] * 10);
     const towerZ = Math.floor(builderBeforeMovement[0][SNAPSHOT.cameraZ] * 10);
     const towerBaseY = Math.round(

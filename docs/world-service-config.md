@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 7
+schema_version = 8
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "procedural-v16"
@@ -48,7 +48,6 @@ generation_workers_per_client = 2
 broadcast_interval_ms = 33
 max_players = 512
 max_pose_updates_per_second = 60
-teleport_distance_metres = 4
 spatial_cell_metres = 64
 interest_radius_metres = 256
 interest_hysteresis_metres = 32
@@ -61,8 +60,18 @@ max_records_per_delta = 64
 prediction_error_centimetres = 25
 look_error_milliradians = 175
 
+[gameplay]
+interaction_reach_centimetres = 500
+interaction_latency_slack_centimetres = 100
+interaction_pose_max_age_ms = 1000
+max_horizontal_speed_centimetres_per_second = 900
+max_vertical_speed_centimetres_per_second = 1200
+movement_slack_centimetres = 100
+movement_credit_window_ms = 500
+starting_units_per_material = 64
+
 [edits]
-database = "../tmp/world-edits.sqlite3"
+database = "../tmp/world-state-v2.sqlite3"
 change_queue_capacity = 256
 
 [spawn]
@@ -122,11 +131,12 @@ the complete local generation pool. `product_cache_bytes` bounds an LRU of compr
 batch responses. Concurrent identical batches single-flight through one CPU/Metal generation and
 then receive independently request-ID-keyed copies of that response.
 
-`[edits].database` is the native authoritative sparse-edit SQLite file. Relative paths resolve from
-the service configuration, not the process working directory. Startup initializes only schema 1 and
+`[edits].database` is the native authoritative world/player SQLite file. Relative paths resolve from
+the service configuration, not the process working directory. Startup initializes only schema 2 and
 rejects another schema or a database bound to a different world/source manifest; there are no
-migrations or fallback authorities. `change_queue_capacity` bounds each interested client's commit
-queue. A saturated queue gets an explicit resync marker, after which it reloads retained products.
+migrations or fallback authorities. Schema 2 owns sparse voxel edits, player material inventories,
+idempotent edit sessions, and authoritative resume poses. The v2 filename leaves an old schema-1
+local world untouched. `change_queue_capacity` bounds each interested client's commit queue.
 
 The presence section controls the independent low-latency delta stream. `spatial_cell_metres`,
 `interest_radius_metres`, and `interest_hysteresis_metres` define receiver-specific interest without
@@ -134,6 +144,11 @@ splitting the world: every player at the same location remains in the same autho
 The near/mid/far radii and intervals reduce freshness with distance. Prediction and look-error
 thresholds can promote a correction before its interval, while age always accumulates so a dense
 crowd cannot starve. `max_records_per_delta` is the hard per-receiver dense-region budget shared by
-enters and pose updates. `max_players` and `max_pose_updates_per_second` bound state and inbound work;
-`teleport_distance_metres` requires large motion to carry an explicit discontinuity instead of being
-interpolated through terrain.
+enters and pose updates. `max_players` and `max_pose_updates_per_second` bound state and inbound work.
+
+The gameplay section is server-only authority. Interaction reach is 5 m with a hard 1 m allowance
+for ordinary ordering skew between the dedicated presence and world sockets; edits are rejected when
+the pose is stale. Horizontal and vertical token buckets replenish at their configured speeds and
+retain only bounded slack/window credit, so packet delay is tolerated without letting a client reuse
+a fixed teleport tolerance on every update. New players receive the configured count for every
+non-Air material; digging and placement then credit and debit exact canonical-voxel units.

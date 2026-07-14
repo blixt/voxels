@@ -1,6 +1,6 @@
 # Multiplayer scaling envelope
 
-VXWP v6 supports one unsharded authoritative world with up to 512 admitted player sessions. Spatial
+VXWP v7 supports one unsharded authoritative world with up to 512 admitted player sessions. Spatial
 interest management is an internal replication index, not a gameplay shard: every player inside the
 same location's 256 m interest radius can discover every other player there. Players beyond that
 radius contribute no entity records or bytes to one another's presence streams.
@@ -85,7 +85,7 @@ and six independent ephemeral BrowserContexts. Each context has separate local s
 receives an independently shaped 40 ms RTT, 50/10 Mbit/s link, and must negotiate a distinct browser
 user and player identity. Five builders and one observer start together. The observer then travels at
 least 120 m from the builders, beyond the configured 96 m mid-presence tier, and all six clients must
-still render the other five articulated avatars. Per-player `/v6/world` and `/v6/presence` stream and
+still render the other five articulated avatars. Per-player `/v7/world` and `/v7/presence` stream and
 VXWP byte counts are written to `target/multiplayer-browser/latest.json`; the far observer screenshot
 is `target/multiplayer-browser/observer-far-five.png`.
 
@@ -96,8 +96,8 @@ p95, maximum, over-33.33 ms count, and dropped-history count remain in the JSON 
 regressions are visible rather than hidden behind one final-frame sample.
 
 This deliberately does not reuse the persistence browser test's same-profile BroadcastChannel. The
-strict scenario uses five distinct world sockets to submit 100 voxels through the production server
-edit path while the sixth browser observes from about 120 m away. Every client must apply all 100
+strict scenario uses five distinct world sockets to submit 40 reachable voxels through the production
+server edit path while the sixth browser observes from about 120 m away. Every client must apply all 40
 commits, and the observer's resident stride-16 tile must advance to its required server revision and
 finish clean rather than remain dirty. A before/after pixel gate also requires a legible tall change
 around the aimed tower; revision bookkeeping alone cannot pass. Use the explicit strict form in
@@ -113,8 +113,9 @@ revision, pre/post GPU mesh fingerprints, pixel evidence, per-client frame healt
 mesh and proves the tower's top survives stride-16; the browser gate proves the real worker uploads
 that revised product and changes the rendered silhouette.
 
-On 2026-07-14 on an M3 Max with Chrome 150, the 10 m/100-voxel tower converged in the far observer in
-170.6 ms. After world coverage had settled, the observer received 99,979 world-stream bytes for
+As a pre-reach-enforcement baseline on 2026-07-14 on an M3 Max with Chrome 150, the old 10 m/
+100-voxel tower converged in the far observer in 170.6 ms. After world coverage had settled, the
+observer received 99,979 world-stream bytes for
 commits plus its replacement product; builders received 99,979-135,244 bytes and sent 1,166-1,248
 bytes while the observer sent 246 bytes.
 All six applied 100 edits, the observer's required and accepted surface revision matched, its tile
@@ -144,12 +145,14 @@ and per-region reservations are the next server-throughput step; they do not req
 
 ## Authority boundaries still to move
 
-Presence is server-relayed but movement is not cheat-safe yet: browsers author poses, and the server
-checks finite values, monotonic time/sequence, rate, velocity bounds, and explicit large jumps. A WAN
-game needs server-owned input simulation and authenticated identity.
+Browsers still simulate movement locally, but the server admits poses through bounded receipt-time
+horizontal/vertical movement credit; a client discontinuity bit cannot authorize a jump. Edits also
+require a fresh same-connection pose and bounded reach. A WAN game still needs server-owned input and
+collision simulation plus authenticated identity.
 
-Voxel edits are now native server authority: strict SQLite storage is bound to the world/source
-manifest, operations are idempotent per player, commits carry connection identity and global order,
+Voxel edits and per-material inventories are native server authority: strict SQLite schema 2 is bound
+to the world/source manifest, operations are idempotent per player/edit-session, and commits carry
+connection identity and global order,
 and local chunk/surface revisions prevent unrelated cache invalidation. The presence spatial index
 also acts as the inverse edit-interest subscription, so a player 1 km away receives zero commit bytes.
 Bounded per-client queues fail into an explicit full-product resync instead of silently dropping state.
