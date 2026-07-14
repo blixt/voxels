@@ -1,4 +1,5 @@
 import "./style.css";
+import { loadClientConfig } from "./client-config.ts";
 import { watchDevicePixelRatio } from "./display.ts";
 import { PressedKeys, requestPointerLockSafely } from "./input.ts";
 import {
@@ -18,7 +19,7 @@ type TypedWorker = Omit<Worker, "onmessage" | "postMessage"> & {
   postMessage(message: ToWorker, transfer?: Transferable[]): void;
 };
 
-function start(canvas: HTMLCanvasElement): void {
+async function start(canvas: HTMLCanvasElement): Promise<void> {
   const fail = (message: string): void => {
     canvas.classList.add("ui-cursor");
     console.error(`[voxels] ${message}`);
@@ -33,6 +34,14 @@ function start(canvas: HTMLCanvasElement): void {
   }
   if (typeof canvas.transferControlToOffscreen !== "function") {
     fail("This browser cannot transfer a canvas to the engine worker.");
+    return;
+  }
+
+  let configToml: string;
+  try {
+    configToml = await loadClientConfig();
+  } catch (error) {
+    fail(`Could not load client configuration.\n${String(error)}`);
     return;
   }
 
@@ -93,6 +102,7 @@ function start(canvas: HTMLCanvasElement): void {
       cssHeight: bounds.height,
       dpr: window.devicePixelRatio || 1,
       reducedMotion: reducedMotion.matches,
+      configToml,
     },
     [offscreen],
   );
@@ -269,4 +279,4 @@ function start(canvas: HTMLCanvasElement): void {
 }
 
 const canvas = document.querySelector<HTMLCanvasElement>("#app");
-if (canvas) start(canvas);
+if (canvas) void start(canvas);

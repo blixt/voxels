@@ -18,16 +18,11 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{AbortController, BroadcastChannel, DedicatedWorkerGlobalScope, MessageEvent};
 
-const DATABASE_NAME: &str = "voxels.db";
+const LEGACY_DATABASE_NAME: &str = "voxels.db";
 const SCHEMA_VERSION: i64 = 3;
 const CHANNEL_NAME: &str = "voxels-db-v1";
 const LOCK_NAME: &str = "voxels-db-owner";
 const WIRE_VERSION: f64 = 1.0;
-const REQUEST_TIMEOUT_MS: i32 = 400;
-const REQUEST_RETRIES: usize = 30;
-const VFS_INSTALL_ATTEMPTS: usize = 20;
-const VFS_RETRY_DELAY_MS: i32 = 150;
-
 const MSG_REQUEST: f64 = 0.0;
 const MSG_RESPONSE: f64 = 1.0;
 const MSG_EDIT_COMMITTED: f64 = 2.0;
@@ -42,6 +37,55 @@ const OP_SAVE_CAMERA: f64 = 2.0;
 const OP_SAVE_EDIT: f64 = 3.0;
 
 type MessageHandler = Closure<dyn FnMut(MessageEvent)>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PersistenceConfig {
+    pub request_timeout_ms: i32,
+    pub request_retries: usize,
+    pub vfs_install_attempts: usize,
+    pub vfs_retry_delay_ms: i32,
+}
+
+/// Complete namespace for one immutable world source.
+///
+/// The embedded procedural world retains its historical database name. Negotiated native worlds
+/// use the full manifest hash in both the origin-wide routing tag and database filename, so toggling
+/// providers cannot attach Terrain Diffusion edits or camera state to procedural terrain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistenceWorld {
+    tag: String,
+    database_name: String,
+    database_seed: u64,
+    database_version: u32,
+}
+
+impl PersistenceWorld {
+    pub fn embedded_procedural(seed: u64, generator_version: u32) -> Self {
+        Self {
+            tag: format!("{seed:016x}:{generator_version}"),
+            database_name: LEGACY_DATABASE_NAME.to_owned(),
+            database_seed: seed,
+            database_version: generator_version,
+        }
+    }
+
+    pub fn negotiated(manifest_hash: voxels_world::WorldManifestHash) -> Self {
+        let bytes = manifest_hash.as_bytes();
+        let mut seed_bytes = [0_u8; 8];
+        seed_bytes.copy_from_slice(&bytes[..8]);
+        let database_seed = u64::from_le_bytes(seed_bytes);
+        let mut version_bytes = [0_u8; 4];
+        version_bytes.copy_from_slice(&bytes[8..12]);
+        let database_version = u32::from_le_bytes(version_bytes);
+        let tag = format!("manifest:{manifest_hash}");
+        Self {
+            database_name: format!("voxels-{manifest_hash}.db"),
+            tag,
+            database_seed,
+            database_version,
+        }
+    }
+}
 
 #[derive(Clone)]
 enum Operation {
@@ -119,6 +163,7 @@ impl Drop for Leader {
 /// One origin-wide persistence coordinator. `leader` is populated exactly while this worker owns the
 /// Web Lock. The lock callback's unresolved promise keeps ownership alive until the worker disappears.
 struct Coordinator {
+    config: PersistenceConfig,
     tab_id: f64,
     world_tag: String,
     channel: BroadcastChannel,
@@ -134,8 +179,7 @@ struct Coordinator {
     closed: Cell<bool>,
     last_leader_error: RefCell<Option<String>>,
     _on_message: RefCell<Option<MessageHandler>>,
-    world_seed: u64,
-    generator_version: u32,
+    world: PersistenceWorld,
 }
 
 pub struct Store {
@@ -145,8 +189,8 @@ pub struct Store {
 }
 
 impl Store {
-    pub async fn open(world_seed: u64, generator_version: u32) -> Result<Self, JsValue> {
-        let coordinator = Coordinator::start(world_seed, generator_version).await?;
+    pub async fn open(world: PersistenceWorld, config: PersistenceConfig) -> Result<Self, JsValue> {
+        let coordinator = Coordinator::start(world, config).await?;
         let initial_camera = match coordinator.request(Operation::LoadCamera).await {
             OperationResult::Camera(camera) => camera.map(crate::camera_from_persisted_values),
             OperationResult::Error(error) => return Err(JsValue::from_str(&error)),
@@ -233,11 +277,15 @@ impl Drop for Store {
 }
 
 impl Coordinator {
-    async fn start(world_seed: u64, generator_version: u32) -> Result<Rc<Self>, JsValue> {
+    async fn start(
+        world: PersistenceWorld,
+        config: PersistenceConfig,
+    ) -> Result<Rc<Self>, JsValue> {
         let channel = BroadcastChannel::new(CHANNEL_NAME)?;
         let coordinator = Rc::new(Self {
+            config,
             tab_id: js_sys::Math::random() * 9_007_199_254_740_991.0,
-            world_tag: format!("{world_seed:016x}:{generator_version}"),
+            world_tag: world.tag.clone(),
             channel,
             leader: RefCell::new(None),
             leader_release: RefCell::new(None),
@@ -251,8 +299,7 @@ impl Coordinator {
             closed: Cell::new(false),
             last_leader_error: RefCell::new(None),
             _on_message: RefCell::new(None),
-            world_seed,
-            generator_version,
+            world,
         });
         coordinator.install_message_handler();
         coordinator.elect().await?;
@@ -260,7 +307,7 @@ impl Coordinator {
     }
 
     async fn request(self: &Rc<Self>, operation: Operation) -> OperationResult {
-        for _ in 0..REQUEST_RETRIES {
+        for _ in 0..self.config.request_retries {
             if self.closed.get() {
                 return OperationResult::Error("persistence coordinator is closed".into());
             }
@@ -285,8 +332,10 @@ impl Coordinator {
                 },
             );
             self.post_request(id, &operation);
-            let race =
-                js_sys::Promise::race(&js_sys::Array::of2(&promise, &timeout(REQUEST_TIMEOUT_MS)));
+            let race = js_sys::Promise::race(&js_sys::Array::of2(
+                &promise,
+                &timeout(self.config.request_timeout_ms),
+            ));
             let _ = JsFuture::from(race).await;
             self.pending.borrow_mut().remove(&id);
             let response = slot.borrow_mut().take();
@@ -535,7 +584,7 @@ impl Coordinator {
         let boot_probe = ready.is_some();
         let coordinator = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            match open_leader(coordinator.world_seed, coordinator.generator_version).await {
+            match open_leader(coordinator.world.clone(), coordinator.config).await {
                 Ok(leader) if !coordinator.closed.get() => {
                     coordinator.last_leader_error.borrow_mut().take();
                     *coordinator.leader.borrow_mut() = Some(Rc::new(leader));
@@ -683,9 +732,9 @@ impl Coordinator {
     }
 }
 
-async fn install_vfs() -> Result<OpfsSAHPoolUtil, JsValue> {
+async fn install_vfs(config: PersistenceConfig) -> Result<OpfsSAHPoolUtil, JsValue> {
     let mut last_error = String::new();
-    for attempt in 0..VFS_INSTALL_ATTEMPTS {
+    for attempt in 0..config.vfs_install_attempts {
         match install_opfs_sahpool::<sqlite_wasm_rs::WasmOsCallback>(
             &OpfsSAHPoolCfg::default(),
             true,
@@ -695,27 +744,31 @@ async fn install_vfs() -> Result<OpfsSAHPoolUtil, JsValue> {
             Ok(vfs) => return Ok(vfs),
             Err(error) => {
                 last_error = error.to_string();
-                if attempt + 1 < VFS_INSTALL_ATTEMPTS {
-                    JsFuture::from(timeout(VFS_RETRY_DELAY_MS)).await?;
+                if attempt + 1 < config.vfs_install_attempts {
+                    JsFuture::from(timeout(config.vfs_retry_delay_ms)).await?;
                 }
             }
         }
     }
     Err(JsValue::from_str(&format!(
-        "install OPFS SQLite VFS failed after {VFS_INSTALL_ATTEMPTS} attempts: {last_error}"
+        "install OPFS SQLite VFS failed after {} attempts: {last_error}",
+        config.vfs_install_attempts
     )))
 }
 
-async fn open_leader(world_seed: u64, generator_version: u32) -> Result<Leader, JsValue> {
-    let vfs = install_vfs().await?;
+async fn open_leader(
+    world: PersistenceWorld,
+    config: PersistenceConfig,
+) -> Result<Leader, JsValue> {
+    let vfs = install_vfs(config).await?;
     let connection = (|| {
-        let connection = Connection::open(DATABASE_NAME)
+        let connection = Connection::open(&world.database_name)
             .map_err(|error| js_error("open SQLite database", error))?;
         connection
             .execute_batch("PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")
             .map_err(|error| js_error("configure SQLite", error))?;
         migrate(&connection)?;
-        ensure_world(&connection, world_seed, generator_version)?;
+        ensure_world(&connection, world.database_seed, world.database_version)?;
         Ok(connection)
     })();
     match connection {

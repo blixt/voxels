@@ -65,6 +65,7 @@ async function boot(message: InitMessage): Promise<EngineHandle> {
     message.cssHeight,
     message.dpr,
     message.reducedMotion,
+    message.configToml,
   );
 }
 

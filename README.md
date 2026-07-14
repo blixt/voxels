@@ -1,8 +1,8 @@
 # Voxels
 
-A Rust-first procedural voxel world rendered with WGPU/WebGPU. The browser main thread captures input
-and transfers an `OffscreenCanvas`; a dedicated worker runs the Rust/WASM simulation, generation,
-greedy meshing, rendering, and persistence boundary.
+A Rust-first voxel world rendered with WGPU/WebGPU. The browser main thread captures input and
+transfers an `OffscreenCanvas`; a dedicated Rust/WASM worker runs simulation, meshing, rendering,
+streaming, and persistence while the native Rust world service owns generation.
 
 ## Workflow
 
@@ -11,7 +11,7 @@ greedy meshing, rendering, and persistence boundary.
 2. Install the CLI version paired with the pinned Rust library using
    `cargo install --locked wasm-bindgen-cli --version 0.2.117`.
 3. Install managed Node, pnpm, and project dependencies with `vp install`.
-4. Start the app with `vp dev`.
+4. Start `vp run world:serve` in one terminal and `vp dev` in another.
 5. Run TypeScript checks and tests with `vp check` and `vp test`.
 6. Run host Rust tests and host/WASM Clippy with `vp run check:rust`.
 7. Build production WASM and assets with `vp build`; inspect them with `vp preview`.
@@ -24,6 +24,22 @@ The browser persistence stress test remains explicit because it launches a syste
 `vp run bench:world` runs native Criterion baselines for chunk generation, VXCH encode/decode, and
 greedy meshing. Reports are written under the ignored `target/criterion/` directory.
 `vp run bench:core` compares 120 dry and submerged fixed simulation steps.
+`vp run terrain:fetch`, `vp run terrain:counterproof`, `vp run terrain:smoke`,
+`vp run terrain:base`, and `vp run terrain:detail` exercise the optional native Rust/Metal Terrain
+Diffusion provider on Apple silicon; see
+[the provider notes](docs/terrain-diffusion-metal.md).
+The server-owned [world source configuration](docs/world-service-config.md) selects procedural or
+Terrain Diffusion generation for the native service bootstrap without exposing the provider to
+clients. `vp run world:source-smoke` loads that TOML configuration and verifies the selected source
+with one macro-field request. `vp run world:serve` starts the procedural-capable loopback daemon;
+`vp run world:serve-metal` enables the native Metal Terrain Diffusion provider selected by the same
+file. The browser always consumes the daemon; switch experiences only by changing the server's
+`source` value and restarting it. See
+[Native world streaming](docs/native-world-streaming.md) for the matching endpoint/token settings,
+Chrome local-network permission, binary VXWP protocol, transport rationale, and exact run steps.
+Client runtime, streaming, rendering/Mission Control, persistence, diagnostics, and profiling
+defaults live in `config/client.toml`. See [Configuration](docs/configuration.md) for ownership,
+deployment, validation, and testing conventions for both files.
 `vp run profile:browser` builds release WASM, serves it from an isolated origin, and records raw
 frame/CPU phase distributions for steady, traversal, and underwater scenarios in system Chrome.
 `vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step closed rail. One lap warms the exact
@@ -59,11 +75,14 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 
 ## Architecture
 
+- `client-config/`: strict, versioned, host-testable client TOML schema and validation.
 - `core/`: portable player, input, physics, and game simulation.
-- `world/`: deterministic chunks, generation, palette/bit-packed codecs, and greedy meshing.
+- `world/`: deterministic chunks, generation, versioned transport codecs, surface LODs, and meshing.
 - `runtime/`: deterministic streaming priorities, budgets, revision tickets, eviction, and diagnostics.
 - `render/`: web-free WGPU resources, pipelines, shaders, and frame rendering.
 - `shell/`: WASM/browser worker leaf, packed input decoding, display clock, and persistence seam.
+- `world-service/`: bounded multi-client native server and source-neutral provider bootstrap.
+- `world-terrain-diffusion/`: optional native Rust/Metal learned macro-terrain provider.
 - `web/`: the single body canvas, normalized input transport, pointer lock, and worker boot only. All
   visible HUD, status, crosshair, controls, menus, and text are composed by Rust/WGPU.
 

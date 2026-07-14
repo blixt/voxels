@@ -12,6 +12,7 @@ use crate::shadow::{
 use crate::ui::{
     ContextAction, LiveStats, MissionControlUi, RendererFeature, UiAction, UiKey, Viewport,
 };
+pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
 use crate::ui_gpu::{SCENE_FORMAT, UiGpu, texture_sampler_layout};
 use bytemuck::{Pod, Zeroable};
 use std::collections::BTreeMap;
@@ -32,7 +33,7 @@ use wgpu::{
 };
 
 const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
-const VIEW_DISTANCE_METRES: f32 = 220.0;
+const MAX_SHADOW_ALLOCATION_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ACTIVE_LOCAL_LIGHTS: usize = 16;
 const MAX_LOCAL_LIGHT_VISIBILITY_TESTS: usize = 32;
 const _: () = assert!(MAX_LOCAL_LIGHT_VISIBILITY_TESTS >= MAX_ACTIVE_LOCAL_LIGHTS);
@@ -53,6 +54,33 @@ const GPU_READBACK_SLOTS: usize = 4;
 const GPU_TIMER_BUFFER_BYTES: u64 =
     GPU_RESOLVE_BUFFER_BYTES + GPU_QUERY_BUFFER_BYTES * GPU_READBACK_SLOTS as u64;
 type MeshKey = (u8, i32, i32, i32);
+
+/// Host-provided renderer startup and reset configuration.
+///
+/// This type deliberately contains no browser or serialization concerns. A shell may deserialize its
+/// own file format, validate it, and then construct this portable renderer-domain value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RendererConfig {
+    pub features: RendererFeatureConfig,
+    pub mission_control: MissionControlConfig,
+    pub view_distance_metres: f32,
+    pub directional_shadows: DirectionalShadowConfig,
+    pub initial_daylight_phase: DaylightPhase,
+    pub initial_placement_material: Material,
+}
+
+impl Default for RendererConfig {
+    fn default() -> Self {
+        Self {
+            features: RendererFeatureConfig::default(),
+            mission_control: MissionControlConfig::default(),
+            view_distance_metres: 220.0,
+            directional_shadows: DirectionalShadowConfig::default(),
+            initial_daylight_phase: DaylightPhase::default(),
+            initial_placement_material: Material::Grass,
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -577,6 +605,7 @@ pub struct Renderer {
     interior: InteriorEnvironment,
     interior_target: InteriorEnvironment,
     placement_material: Material,
+    runtime_config: RendererConfig,
 }
 
 struct ShadowGpu {
@@ -589,7 +618,7 @@ struct ShadowGpu {
     pipeline: RenderPipeline,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RenderOptions {
     shadows: bool,
     ambient_occlusion: bool,
@@ -619,21 +648,57 @@ struct FrameState {
     interior: InteriorEnvironment,
 }
 
-impl Default for RenderOptions {
-    fn default() -> Self {
+impl From<RendererFeatureConfig> for RenderOptions {
+    fn from(config: RendererFeatureConfig) -> Self {
         Self {
-            shadows: true,
-            ambient_occlusion: true,
-            screen_space_ambient_occlusion: true,
-            fog: true,
-            far_terrain: true,
-            water: true,
-            target_outline: true,
-            material_detail: true,
-            cave_headlamp: true,
-            local_lighting: true,
+            shadows: config.cascaded_sun_shadows,
+            ambient_occlusion: config.voxel_ambient_occlusion,
+            screen_space_ambient_occlusion: config.screen_space_ambient_occlusion,
+            fog: config.atmospheric_fog,
+            far_terrain: config.far_terrain,
+            water: config.water_surface,
+            target_outline: config.target_outline,
+            material_detail: config.material_surface_detail,
+            cave_headlamp: config.cave_headlamp,
+            local_lighting: config.voxel_emissive_lights,
         }
     }
+}
+
+fn reset_renderer_features(
+    ui: &mut MissionControlUi,
+    baseline: RendererFeatureConfig,
+) -> RenderOptions {
+    for feature in RendererFeature::ALL {
+        let _ = ui.set_feature(feature, baseline.enabled(feature));
+    }
+    baseline.into()
+}
+
+fn validate_shadow_allocation(
+    resolution: u32,
+    max_texture_dimension_2d: u32,
+) -> Result<(), String> {
+    if resolution == 0 {
+        return Err("shadow-map resolution must be greater than zero".to_owned());
+    }
+    if resolution > max_texture_dimension_2d {
+        return Err(format!(
+            "shadow-map resolution {resolution} exceeds the device limit {max_texture_dimension_2d}"
+        ));
+    }
+    let allocation_bytes = u64::from(resolution)
+        .checked_mul(u64::from(resolution))
+        .and_then(|texels| texels.checked_mul(CASCADE_COUNT as u64))
+        .and_then(|texels| texels.checked_mul(size_of::<f32>() as u64))
+        .ok_or_else(|| "shadow-map allocation size overflowed".to_owned())?;
+    if allocation_bytes > MAX_SHADOW_ALLOCATION_BYTES {
+        return Err(format!(
+            "shadow maps require {allocation_bytes} bytes, above the {}-byte safety budget",
+            MAX_SHADOW_ALLOCATION_BYTES
+        ));
+    }
+    Ok(())
 }
 
 impl ShadowGpu {
@@ -641,8 +706,9 @@ impl ShadowGpu {
         device: &Device,
         camera: &CameraState,
         environment: OutdoorEnvironment,
+        config: DirectionalShadowConfig,
+        options: RenderOptions,
     ) -> Result<Self, String> {
-        let config = DirectionalShadowConfig::default();
         let cascades =
             build_directional_shadow_cascades(camera, 1.0, -environment.sun_direction, config)
                 .map_err(|error| format!("build initial shadow cascades: {error:?}"))?;
@@ -700,13 +766,7 @@ impl ShadowGpu {
             }],
         });
         let initial_uniforms: [ShadowFrameUniform; CASCADE_COUNT] = std::array::from_fn(|index| {
-            shadow_frame_uniform(
-                &cascades,
-                index,
-                camera,
-                RenderOptions::default(),
-                LodReadiness::default(),
-            )
+            shadow_frame_uniform(&cascades, index, camera, options, LodReadiness::default())
         });
         let uniform_buffers = std::array::from_fn(|index| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -799,7 +859,13 @@ impl Renderer {
         height: u32,
         dpr: f32,
         log_error: fn(&str),
+        runtime_config: RendererConfig,
     ) -> Result<Self, String> {
+        if !runtime_config.view_distance_metres.is_finite()
+            || runtime_config.view_distance_metres <= 0.0
+        {
+            return Err("renderer view distance must be finite and positive".to_owned());
+        }
         let instance = Instance::new(InstanceDescriptor {
             backends: Backends::BROWSER_WEBGPU,
             ..InstanceDescriptor::new_without_display_handle()
@@ -830,6 +896,10 @@ impl Renderer {
             })
             .await
             .map_err(|error| format!("request_device: {error:?}"))?;
+        validate_shadow_allocation(
+            runtime_config.directional_shadows.shadow_map_resolution,
+            device.limits().max_texture_dimension_2d,
+        )?;
         device.on_uncaptured_error(Arc::new(move |error| {
             log_error(&format!("wgpu validation: {error}"));
         }));
@@ -848,7 +918,7 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        let options = RenderOptions::default();
+        let options = RenderOptions::from(runtime_config.features);
         let gpu_timer = if timestamp_queries {
             GpuTimer::new(&device, &queue)
         } else {
@@ -863,14 +933,24 @@ impl Renderer {
             haze: 0.38,
         };
         let surface_region = SurfaceRegion::VerdantForest;
-        let daylight_phase = DaylightPhase::default();
+        let daylight_phase = runtime_config.initial_daylight_phase;
         let environment =
             OutdoorEnvironment::for_atmosphere(atmosphere_sample, daylight_phase).sanitized();
         let initial_camera = CameraState::default();
-        let shadow_gpu = ShadowGpu::new(&device, &initial_camera, environment)?;
+        let shadow_gpu = ShadowGpu::new(
+            &device,
+            &initial_camera,
+            environment,
+            runtime_config.directional_shadows,
+            options,
+        )?;
         let material_detail = MaterialDetailGpu::new(&device, &queue);
-        let shadow_cascades =
-            directional_shadow_cascades(&config, &initial_camera, environment.sun_direction)?;
+        let shadow_cascades = directional_shadow_cascades(
+            &config,
+            &initial_camera,
+            environment.sun_direction,
+            runtime_config.directional_shadows,
+        )?;
         let frame = frame_uniform(
             &config,
             &initial_camera,
@@ -884,6 +964,7 @@ impl Renderer {
                 interior: InteriorEnvironment::default(),
             },
             &shadow_cascades,
+            runtime_config,
         );
         let frame_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("frame uniform"),
@@ -1174,8 +1255,11 @@ impl Renderer {
         let ui_gpu = UiGpu::new(&device, format, config.width, config.height, dpr)?;
         let water_scene_bind_group = ui_gpu.refraction_bind_group(&device, &water_scene_layout);
 
-        let mut ui = MissionControlUi::default();
+        let mut ui = MissionControlUi::new(runtime_config.mission_control, runtime_config.features);
         ui.set_environment_status(daylight_phase.label(), surface_region_label(surface_region));
+        ui.set_placement_material(placement_material_label(
+            runtime_config.initial_placement_material,
+        ));
         Ok(Self {
             surface,
             device,
@@ -1232,7 +1316,8 @@ impl Renderer {
             underwater_blend: 0.0,
             interior: InteriorEnvironment::default(),
             interior_target: InteriorEnvironment::default(),
-            placement_material: Material::Grass,
+            placement_material: runtime_config.initial_placement_material,
+            runtime_config,
         })
     }
 
@@ -1431,10 +1516,7 @@ impl Renderer {
                 RendererFeature::VoxelEmissiveLights => self.options.local_lighting = enabled,
             },
             UiAction::ContextAction(ContextAction::ResetRendererFeatures) => {
-                for feature in RendererFeature::ALL {
-                    let _ = self.ui.set_feature(feature, true);
-                }
-                self.options = RenderOptions::default();
+                self.options = reset_renderer_features(&mut self.ui, self.runtime_config.features);
             }
             UiAction::ContextAction(ContextAction::TeleportToCoast) => {
                 self.coast_teleport_requested = true;
@@ -1911,9 +1993,12 @@ impl Renderer {
         self.interior =
             self.interior
                 .lerp(self.interior_target, interior_response, exposure_response);
-        let Ok(shadow_cascades) =
-            directional_shadow_cascades(&self.config, camera, self.environment.sun_direction)
-        else {
+        let Ok(shadow_cascades) = directional_shadow_cascades(
+            &self.config,
+            camera,
+            self.environment.sun_direction,
+            self.runtime_config.directional_shadows,
+        ) else {
             return false;
         };
         self.ui.set_stats(ui_stats);
@@ -1949,6 +2034,7 @@ impl Renderer {
                 interior: self.interior,
             },
             &shadow_cascades,
+            self.runtime_config,
         );
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
         let geometric_lod_focus =
@@ -2204,10 +2290,12 @@ impl Renderer {
         let arena = self.arena.stats();
         let water_arena = self.water_arena.stats();
         let scene_pixels = u64::from(self.config.width) * u64::from(self.config.height);
-        let shadow_bytes = u64::from(DirectionalShadowConfig::default().shadow_map_resolution)
-            * u64::from(DirectionalShadowConfig::default().shadow_map_resolution)
-            * CASCADE_COUNT as u64
-            * 4;
+        let shadow_resolution = u64::from(
+            self.runtime_config
+                .directional_shadows
+                .shadow_map_resolution,
+        );
+        let shadow_bytes = shadow_resolution * shadow_resolution * CASCADE_COUNT as u64 * 4;
         let gpu_timing = self.gpu_timer.as_ref().and_then(GpuTimer::latest);
         self.diagnostics = RenderDiagnostics {
             resident_chunks: self.chunks.len() as u32,
@@ -2558,6 +2646,7 @@ fn frame_uniform(
     target: Option<[i32; 3]>,
     state: FrameState,
     shadows: &DirectionalShadowCascades,
+    renderer_config: RendererConfig,
 ) -> FrameUniform {
     let FrameState {
         options,
@@ -2582,7 +2671,7 @@ fn frame_uniform(
             config.width as f32,
             config.height as f32,
             VOXEL_SIZE_METRES,
-            VIEW_DISTANCE_METRES,
+            renderer_config.view_distance_metres,
         ],
         target_voxel: target.map_or([0.0; 4], |value| {
             [value[0] as f32, value[1] as f32, value[2] as f32, 1.0]
@@ -2619,7 +2708,7 @@ fn frame_uniform(
             shadows.cascades[0].texel_world_size,
             shadows.cascades[1].texel_world_size,
             shadows.cascades[2].texel_world_size,
-            1.0 / DirectionalShadowConfig::default().shadow_map_resolution as f32,
+            1.0 / renderer_config.directional_shadows.shadow_map_resolution as f32,
         ],
         shadow_view_projection: std::array::from_fn(|index| {
             shadows.cascades[index].clip_from_world.to_cols_array_2d()
@@ -2689,15 +2778,11 @@ fn directional_shadow_cascades(
     config: &SurfaceConfiguration,
     camera: &CameraState,
     sun_direction: glam::Vec3,
+    shadow_config: DirectionalShadowConfig,
 ) -> Result<DirectionalShadowCascades, String> {
     let aspect = config.width as f32 / config.height.max(1) as f32;
-    build_directional_shadow_cascades(
-        camera,
-        aspect,
-        -sun_direction,
-        DirectionalShadowConfig::default(),
-    )
-    .map_err(|error| format!("build shadow cascades: {error:?}"))
+    build_directional_shadow_cascades(camera, aspect, -sun_direction, shadow_config)
+        .map_err(|error| format!("build shadow cascades: {error:?}"))
 }
 
 fn bounded_frame_delta(dt: f32) -> f32 {
@@ -2926,6 +3011,61 @@ fn preferred_format(formats: &[TextureFormat]) -> TextureFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mixed_feature_baseline() -> RendererFeatureConfig {
+        RendererFeatureConfig {
+            cascaded_sun_shadows: false,
+            voxel_ambient_occlusion: true,
+            screen_space_ambient_occlusion: false,
+            atmospheric_fog: true,
+            far_terrain: false,
+            water_surface: true,
+            target_outline: false,
+            material_surface_detail: true,
+            cave_headlamp: false,
+            voxel_emissive_lights: true,
+        }
+    }
+
+    #[test]
+    fn configured_feature_baseline_drives_initial_options_and_reset() {
+        let baseline = mixed_feature_baseline();
+        let expected = RenderOptions::from(baseline);
+        assert_eq!(
+            expected,
+            RenderOptions {
+                shadows: false,
+                ambient_occlusion: true,
+                screen_space_ambient_occlusion: false,
+                fog: true,
+                far_terrain: false,
+                water: true,
+                target_outline: false,
+                material_detail: true,
+                cave_headlamp: false,
+                local_lighting: true,
+            }
+        );
+
+        let mut ui = MissionControlUi::new(MissionControlConfig::default(), baseline);
+        let _ = ui.set_feature(RendererFeature::CascadedSunShadows, true);
+        let _ = ui.set_feature(RendererFeature::AtmosphericFog, false);
+        let reset = reset_renderer_features(&mut ui, baseline);
+
+        assert_eq!(reset, expected);
+        for feature in RendererFeature::ALL {
+            assert_eq!(ui.feature_enabled(feature), baseline.enabled(feature));
+        }
+    }
+
+    #[test]
+    fn shadow_allocation_is_bounded_by_device_limits_and_memory_budget() {
+        assert_eq!(validate_shadow_allocation(1_024, 8_192), Ok(()));
+        assert_eq!(validate_shadow_allocation(4_096, 8_192), Ok(()));
+        assert!(validate_shadow_allocation(0, 8_192).is_err());
+        assert!(validate_shadow_allocation(4_096, 2_048).is_err());
+        assert!(validate_shadow_allocation(8_192, 16_384).is_err());
+    }
 
     #[test]
     fn surface_format_fallback_keeps_explicit_srgb_encoding_linear() {

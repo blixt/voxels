@@ -1,6 +1,6 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
-use voxels_runtime::{FrameBudget, StreamConfig, StreamScheduler};
+use voxels_runtime::{FrameBudget, MAX_SECONDARY_INTEREST_CHUNKS, StreamConfig, StreamScheduler};
 use voxels_world::ChunkCoord;
 
 const CONFIG: StreamConfig = StreamConfig {
@@ -8,6 +8,7 @@ const CONFIG: StreamConfig = StreamConfig {
     vertical_radius_chunks: 1,
     retention_margin_chunks: 1,
     max_tracked_chunks: 320,
+    max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
 };
 const BUDGET: FrameBudget = FrameBudget {
     generation: 2,

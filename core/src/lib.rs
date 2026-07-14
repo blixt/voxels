@@ -2,7 +2,7 @@
 
 mod profile;
 
-pub use profile::{ProfileAutomation, ProfilePhase, ProfilePose};
+pub use profile::{ProfileAutomation, ProfileConfig, ProfilePhase, ProfilePose};
 
 use glam::{Vec2, Vec3};
 

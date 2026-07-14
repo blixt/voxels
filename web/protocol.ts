@@ -43,6 +43,7 @@ export interface InitMessage {
   cssHeight: number;
   dpr: number;
   reducedMotion: boolean;
+  configToml: string;
 }
 
 export type ToWorker =

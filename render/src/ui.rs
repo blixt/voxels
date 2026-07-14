@@ -167,6 +167,65 @@ impl RendererFeature {
     }
 }
 
+/// Configured baseline for every renderer feature exposed by Mission Control.
+///
+/// The renderer and UI consume the same value so a toggle always describes actual renderer state,
+/// and "reset" means restore the host-provided baseline rather than enable every feature.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RendererFeatureConfig {
+    pub cascaded_sun_shadows: bool,
+    pub voxel_ambient_occlusion: bool,
+    pub screen_space_ambient_occlusion: bool,
+    pub atmospheric_fog: bool,
+    pub far_terrain: bool,
+    pub water_surface: bool,
+    pub target_outline: bool,
+    pub material_surface_detail: bool,
+    pub cave_headlamp: bool,
+    pub voxel_emissive_lights: bool,
+}
+
+impl RendererFeatureConfig {
+    pub const fn enabled(self, feature: RendererFeature) -> bool {
+        match feature {
+            RendererFeature::CascadedSunShadows => self.cascaded_sun_shadows,
+            RendererFeature::VoxelAmbientOcclusion => self.voxel_ambient_occlusion,
+            RendererFeature::ScreenSpaceAmbientOcclusion => self.screen_space_ambient_occlusion,
+            RendererFeature::AtmosphericFog => self.atmospheric_fog,
+            RendererFeature::FarTerrain => self.far_terrain,
+            RendererFeature::WaterSurface => self.water_surface,
+            RendererFeature::TargetOutline => self.target_outline,
+            RendererFeature::MaterialSurfaceDetail => self.material_surface_detail,
+            RendererFeature::CaveHeadlamp => self.cave_headlamp,
+            RendererFeature::VoxelEmissiveLights => self.voxel_emissive_lights,
+        }
+    }
+}
+
+impl Default for RendererFeatureConfig {
+    fn default() -> Self {
+        Self {
+            cascaded_sun_shadows: true,
+            voxel_ambient_occlusion: true,
+            screen_space_ambient_occlusion: true,
+            atmospheric_fog: true,
+            far_terrain: true,
+            water_surface: true,
+            target_outline: true,
+            material_surface_detail: true,
+            cave_headlamp: true,
+            voxel_emissive_lights: true,
+        }
+    }
+}
+
+/// Initial presentation state for the in-canvas Mission Control panel.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MissionControlConfig {
+    pub open: bool,
+    pub compact: bool,
+}
+
 const FEATURE_COUNT: usize = RendererFeature::ALL.len();
 const PANEL_HEIGHT: f32 = 540.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 39.0;
 const COMPACT_HEIGHT: f32 = 453.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 34.0;
@@ -433,16 +492,29 @@ pub struct MissionControlUi {
 
 impl Default for MissionControlUi {
     fn default() -> Self {
+        Self::new(
+            MissionControlConfig::default(),
+            RendererFeatureConfig::default(),
+        )
+    }
+}
+
+impl MissionControlUi {
+    pub fn new(config: MissionControlConfig, features: RendererFeatureConfig) -> Self {
+        let feature_enabled =
+            std::array::from_fn(|index| features.enabled(RendererFeature::ALL[index]));
+        let feature_motion =
+            std::array::from_fn(|index| EasedValue::new(f32::from(feature_enabled[index])));
         Self {
-            open: false,
-            compact: false,
+            open: config.open,
+            compact: config.compact,
             reduced_motion: false,
             hovered: None,
             context_anchor: None,
             stats: LiveStats::default(),
-            feature_enabled: [true; FEATURE_COUNT],
-            feature_motion: [EasedValue::new(1.0); FEATURE_COUNT],
-            open_motion: EasedValue::new(0.0),
+            feature_enabled,
+            feature_motion,
+            open_motion: EasedValue::new(f32::from(config.open)),
             hover_motion: BTreeMap::new(),
             toast_age: 0.0,
             daylight_label: "GOLDEN HOUR",
@@ -452,9 +524,7 @@ impl Default for MissionControlUi {
             placement_material_label: "GRASS",
         }
     }
-}
 
-impl MissionControlUi {
     pub const fn open(&self) -> bool {
         self.open
     }
@@ -1365,15 +1435,30 @@ mod tests {
         Viewport::new(1_280.0, 720.0, 1.0)
     }
 
+    fn test_ui(config: MissionControlConfig, features: RendererFeatureConfig) -> MissionControlUi {
+        MissionControlUi::new(config, features)
+    }
+
+    fn closed() -> MissionControlUi {
+        test_ui(
+            MissionControlConfig::default(),
+            RendererFeatureConfig::default(),
+        )
+    }
+
     fn opened() -> MissionControlUi {
-        let mut ui = MissionControlUi::default();
-        let _ = ui.set_open(true);
-        ui
+        test_ui(
+            MissionControlConfig {
+                open: true,
+                compact: false,
+            },
+            RendererFeatureConfig::default(),
+        )
     }
 
     #[test]
     fn f3_toggles_only_on_initial_key_down() {
-        let mut ui = MissionControlUi::default();
+        let mut ui = closed();
         assert_eq!(ui.handle_key(UiKey::Other, true, false), UiAction::None);
         assert_eq!(ui.handle_key(UiKey::F3, false, false), UiAction::None);
         assert_eq!(
@@ -1387,6 +1472,39 @@ mod tests {
             ui.handle_key(UiKey::F3, true, false),
             UiAction::PanelOpenChanged(false)
         );
+    }
+
+    #[test]
+    fn configured_panel_and_mixed_feature_state_are_applied_atomically() {
+        let features = RendererFeatureConfig {
+            cascaded_sun_shadows: false,
+            voxel_ambient_occlusion: true,
+            screen_space_ambient_occlusion: false,
+            atmospheric_fog: true,
+            far_terrain: false,
+            water_surface: true,
+            target_outline: false,
+            material_surface_detail: true,
+            cave_headlamp: false,
+            voxel_emissive_lights: true,
+        };
+        let ui = test_ui(
+            MissionControlConfig {
+                open: true,
+                compact: true,
+            },
+            features,
+        );
+
+        assert!(ui.open());
+        assert!(ui.compact());
+        for feature in RendererFeature::ALL {
+            assert_eq!(ui.feature_enabled(feature), features.enabled(feature));
+            assert_eq!(
+                ui.feature_eased_value(feature),
+                f32::from(features.enabled(feature))
+            );
+        }
     }
 
     #[test]
@@ -1453,7 +1571,7 @@ mod tests {
 
     #[test]
     fn reduced_motion_snaps_open_hover_and_toggle_values() {
-        let mut ui = MissionControlUi::default();
+        let mut ui = closed();
         ui.set_reduced_motion(true);
         let _ = ui.set_open(true);
         assert_eq!(ui.open_motion.value, 1.0);
@@ -1727,7 +1845,7 @@ mod tests {
 
     #[test]
     fn launcher_is_always_hit_testable_and_opens_the_panel() {
-        let mut ui = MissionControlUi::default();
+        let mut ui = closed();
         let viewport = viewport();
         let launcher = ui.layout(viewport).launcher;
         assert_eq!(
@@ -1761,7 +1879,7 @@ mod tests {
 
     #[test]
     fn controls_toast_is_rust_drawn_then_fades_away() {
-        let mut ui = MissionControlUi::default();
+        let mut ui = closed();
         let initial = ui.build_draw_list(viewport());
         assert!(
             initial
@@ -1783,7 +1901,7 @@ mod tests {
 
     #[test]
     fn crosshair_is_a_rust_drawn_circle() {
-        let ui = MissionControlUi::default();
+        let ui = closed();
         let draw = ui.build_draw_list(viewport());
         let crosshair = draw
             .glass
@@ -1797,7 +1915,7 @@ mod tests {
 
     #[test]
     fn underwater_status_and_controls_are_rust_drawn() {
-        let mut ui = MissionControlUi::default();
+        let mut ui = closed();
         for _ in 0..500 {
             ui.advance(1.0 / 60.0);
         }

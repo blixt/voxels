@@ -1,0 +1,82 @@
+# Configuration
+
+Voxels has two versioned TOML configuration files with deliberately separate ownership:
+
+- `config/client.toml` contains presentation, local streaming, persistence, diagnostics, and
+  profiling settings used by a game client.
+- `config/world-service.toml` contains world identity and provider settings owned by the world
+  service. Clients never read it and never branch on the selected provider.
+
+The schemas and their consuming subsystems reject unknown fields, malformed values, unsupported
+schema versions, and values outside bounded runtime ranges. Configuration is loaded and validated
+once during startup, then passed into subsystems as immutable typed Rust values. Runtime code does
+not read files or process environment variables on demand.
+
+## Client configuration
+
+The browser fetches `config/client.toml` before creating the engine worker and passes the unchanged
+text across the startup boundary. `voxels-client-config` deserializes and validates it in Rust. A
+bad or missing file prevents startup with a visible error instead of silently selecting defaults.
+
+The Vite development server reloads the page when the file changes. Production builds copy it to
+`dist/config/client.toml` as a separate deployment file rather than embedding it in JavaScript, so
+an operator can tune a deployed client without rebuilding WASM. Reload the page after changing it.
+
+The file controls:
+
+- the authoritative world-service endpoint, authorization token, and client backpressure window;
+- fixed-step timing, catch-up limit, persistence cadence, and edit-tracker capacity;
+- chunk and surface-LOD load/retention radii, pipeline budgets, and interest capacity;
+- view/shadow settings;
+- the initial daylight and placement material;
+- every feature toggle shown in Mission Control, plus its initial open/compact state;
+- persistence request/retry policy;
+- bounded diagnostic probe sizes and cadence;
+- automated profile speed, warmup/measurement durations, and edit count.
+
+Mission Control remains interactive. Its reset action restores the configured feature baseline,
+including a mixed on/off baseline, rather than a hard-coded all-enabled state.
+
+## World-service configuration
+
+`config/world-service.toml` controls the seed, the procedural/Terrain Diffusion provider toggle,
+and Terrain Diffusion deployment settings such as precision, model cache, model-space origin, and
+world placement. See [World service configuration](world-service-config.md) for commands and the
+complete server schema.
+
+The browser has no embedded world-generation mode. It always negotiates the same provider-neutral
+chunk and surface-LOD protocol with this service, so editing `source` and restarting the daemon is
+the only experience switch. Client persistence is namespaced by the negotiated immutable manifest,
+and reconnect refuses a changed manifest rather than mixing worlds.
+
+Provider selection is fail-closed. A Terrain Diffusion selection without the native Metal feature,
+Apple Metal, or the pinned verified model is an error; it never falls back to another world.
+
+## What is intentionally not configurable
+
+Configuration is for deployment and operational policy, not for values that define compatibility
+or memory safety. The following remain code-level invariants:
+
+- persisted schema and binary-format versions, magic bytes, wire tags, and hashes;
+- voxel/chunk dimensions, GPU buffer layouts, shader ABI values, and hard allocation ceilings;
+- authored world content, procedural-v16 generation formulas, landmarks, and route geometry;
+- pinned Terrain Diffusion repository revision, weight hashes, tensor topology, normalization, and
+  sampler/scheduler semantics.
+
+Changing those requires a versioned code/protocol migration rather than a TOML edit. Player physics
+also remains in portable `core` for now: it will become server-authoritative game-rule data when the
+simulation protocol exists, rather than being introduced as an untrusted client-local override.
+
+## Testing configuration-dependent code
+
+Tests do not mutate process-wide environment variables or rewrite production TOML strings.
+
+- Parser and loader contract tests read TOML and cover versioning, unknown fields, path resolution,
+  round trips, and validation failures.
+- Behavior tests construct typed config fixtures directly, changing only the field relevant to the
+  test.
+- TypeScript loader tests inject the file-fetch function and URL instead of replacing global
+  `fetch`.
+
+This keeps tests deterministic and parallel-safe while exercising the same typed configuration that
+production code receives.

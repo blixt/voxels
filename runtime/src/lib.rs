@@ -17,6 +17,8 @@ pub const CHUNK_EDGE_METRES: f32 = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
 
 const MAX_LOAD_RADIUS_CHUNKS: i32 = 64;
 const MAX_VERTICAL_RADIUS_CHUNKS: i32 = 32;
+/// Compile-time safety ceiling for secondary-interest normalization. Runtime configuration may
+/// choose a smaller active limit but cannot allocate beyond this bound.
 pub const MAX_SECONDARY_INTEREST_CHUNKS: usize = 192;
 const LATENCY_HISTOGRAM_BUCKETS: usize = 256;
 
@@ -37,6 +39,7 @@ pub struct StreamConfig {
     pub vertical_radius_chunks: i32,
     pub retention_margin_chunks: i32,
     pub max_tracked_chunks: usize,
+    pub max_secondary_interest_chunks: usize,
 }
 
 impl Default for StreamConfig {
@@ -46,6 +49,7 @@ impl Default for StreamConfig {
             vertical_radius_chunks: 1,
             retention_margin_chunks: 2,
             max_tracked_chunks: 1_024,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         }
     }
 }
@@ -55,6 +59,7 @@ pub enum ConfigError {
     NegativeRadius,
     RadiusTooLarge,
     EmptyCapacity,
+    SecondaryInterestTooLarge,
 }
 
 /// Maximum amount of new work that may enter each asynchronous stage during one frame.
@@ -325,6 +330,9 @@ impl StreamScheduler {
         if config.max_tracked_chunks == 0 {
             return Err(ConfigError::EmptyCapacity);
         }
+        if config.max_secondary_interest_chunks > MAX_SECONDARY_INTEREST_CHUNKS {
+            return Err(ConfigError::SecondaryInterestTooLarge);
+        }
 
         Ok(Self {
             config,
@@ -365,7 +373,8 @@ impl StreamScheduler {
     /// Secondary interest is useful for semantic look-ahead such as connected cave cells. Primary
     /// coverage always wins, and both sets share the same hard `max_tracked_chunks` ceiling.
     pub fn update_focus_with_interest(&mut self, focus: ChunkCoord, interest: &[ChunkCoord]) {
-        let (secondary_interest, capacity_truncated) = normalized_interest(focus, interest);
+        let (secondary_interest, capacity_truncated) =
+            normalized_interest(focus, interest, self.config.max_secondary_interest_chunks);
         if self.focus_initialized
             && self.focus == focus
             && self.secondary_interest == secondary_interest
@@ -744,8 +753,12 @@ impl StreamScheduler {
     }
 }
 
-fn normalized_interest(focus: ChunkCoord, interest: &[ChunkCoord]) -> (Vec<ChunkCoord>, usize) {
-    let mut normalized = Vec::with_capacity(interest.len().min(MAX_SECONDARY_INTEREST_CHUNKS));
+fn normalized_interest(
+    focus: ChunkCoord,
+    interest: &[ChunkCoord],
+    limit: usize,
+) -> (Vec<ChunkCoord>, usize) {
+    let mut normalized = Vec::with_capacity(interest.len().min(limit));
     let mut truncated = 0usize;
     for coord in interest.iter().copied() {
         if !coord.is_world_representable() {
@@ -754,7 +767,7 @@ fn normalized_interest(focus: ChunkCoord, interest: &[ChunkCoord]) -> (Vec<Chunk
         if normalized.contains(&coord) {
             continue;
         }
-        if normalized.len() < MAX_SECONDARY_INTEREST_CHUNKS {
+        if normalized.len() < limit {
             normalized.push(coord);
             continue;
         }
@@ -836,6 +849,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 1,
             max_tracked_chunks: capacity,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         }
     }
 
@@ -875,6 +889,14 @@ mod tests {
             })
             .err(),
             Some(ConfigError::EmptyCapacity)
+        );
+        assert_eq!(
+            StreamScheduler::new(StreamConfig {
+                max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS + 1,
+                ..StreamConfig::default()
+            })
+            .err(),
+            Some(ConfigError::SecondaryInterestTooLarge)
         );
     }
 
@@ -949,6 +971,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 0,
             max_tracked_chunks: 3,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
         scheduler.update_focus_with_interest(focus, &[overflow, farther, nearest, nearest]);
 
@@ -982,6 +1005,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 0,
             max_tracked_chunks: 4,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         };
         let mut first = scheduler(config);
         let mut second = scheduler(config);
@@ -997,26 +1021,22 @@ mod tests {
     #[test]
     fn secondary_interest_capacity_truncation_is_observable() {
         let focus = ChunkCoord::new(0, 0, 0);
-        let interest: Vec<_> = (1..=MAX_SECONDARY_INTEREST_CHUNKS + 8)
+        let configured_limit = 4;
+        let interest: Vec<_> = (1..=configured_limit + 8)
             .map(|x| ChunkCoord::new(x as i32, 0, 0))
             .collect();
         let mut scheduler = scheduler(StreamConfig {
             load_radius_chunks: 0,
             vertical_radius_chunks: 0,
             retention_margin_chunks: 0,
-            max_tracked_chunks: MAX_SECONDARY_INTEREST_CHUNKS + 1,
+            max_tracked_chunks: configured_limit + 1,
+            max_secondary_interest_chunks: configured_limit,
         });
         scheduler.update_focus_with_interest(focus, &interest);
         let diagnostics = scheduler.diagnostics();
         assert_eq!(diagnostics.secondary_interest_requested, interest.len());
-        assert_eq!(
-            diagnostics.secondary_interest_normalized,
-            MAX_SECONDARY_INTEREST_CHUNKS
-        );
-        assert_eq!(
-            diagnostics.secondary_interest_desired,
-            MAX_SECONDARY_INTEREST_CHUNKS
-        );
+        assert_eq!(diagnostics.secondary_interest_normalized, configured_limit);
+        assert_eq!(diagnostics.secondary_interest_desired, configured_limit);
         assert_eq!(diagnostics.secondary_interest_truncated, 8);
     }
 
@@ -1035,6 +1055,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 0,
             max_tracked_chunks: MAX_SECONDARY_INTEREST_CHUNKS + 1,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
 
         scheduler.update_focus_with_interest(focus, &with_duplicate);
@@ -1053,6 +1074,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 0,
             max_tracked_chunks: 2,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
         scheduler.update_focus_with_interest(focus, &[old]);
         scheduler.update_focus_with_interest(focus, &[new]);
@@ -1076,6 +1098,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 0,
             max_tracked_chunks: 2,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
         scheduler.update_focus_with_interest(focus, &[lookahead]);
         assert!(!scheduler.desired_column_ready(8, 0));
@@ -1108,6 +1131,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 2,
             max_tracked_chunks: 2,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
         scheduler.update_focus_with_interest(focus, &[retained]);
         advance_to_resident(&mut scheduler, focus);
@@ -1161,6 +1185,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 1,
             max_tracked_chunks: 1,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
         scheduler.update_focus(focus);
         advance_to_resident(&mut scheduler, focus);
@@ -1181,6 +1206,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 0,
             max_tracked_chunks: 1,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
         scheduler.update_focus(focus);
 
@@ -1214,6 +1240,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 0,
             max_tracked_chunks: 1,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
         scheduler.update_focus(coord);
         advance_to_resident(&mut scheduler, coord);
@@ -1264,6 +1291,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 0,
             max_tracked_chunks: 1,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
         scheduler.update_focus(coord);
         advance_to_resident(&mut scheduler, coord);
@@ -1345,6 +1373,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 0,
             max_tracked_chunks: 1,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
         let coord = ChunkCoord::new(0, 0, 0);
         scheduler.update_focus(coord);
@@ -1450,6 +1479,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 1,
             max_tracked_chunks: 2,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
         let origin = ChunkCoord::new(0, 0, 0);
         scheduler.update_focus(origin);
@@ -1473,6 +1503,7 @@ mod tests {
             vertical_radius_chunks: 1,
             retention_margin_chunks: 2,
             max_tracked_chunks: 17,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
         for x in [0, 1, 20, -20, i32::MAX, i32::MIN] {
             scheduler.update_focus(ChunkCoord::new(x, 0, -x.saturating_abs()));
@@ -1489,6 +1520,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 0,
             max_tracked_chunks: 1,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
         let origin = ChunkCoord::new(0, 0, 0);
         scheduler.update_focus(origin);
@@ -1513,6 +1545,7 @@ mod tests {
             vertical_radius_chunks: 0,
             retention_margin_chunks: 0,
             max_tracked_chunks: 1,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
         let coord = ChunkCoord::new(0, 0, 0);
         scheduler.update_focus(coord);

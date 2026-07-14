@@ -5,9 +5,10 @@ use voxels_world::{CHUNK_EDGE, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge}
 /// Half extents in canonical 10 cm voxels. Every boundary is a multiple of the patch span on both
 /// sides, so whole patches can change owner without overlap, holes, or fragment clipping.
 pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 4] = [96, 256, 512, 1_024];
-// The canonical boundary also snaps to the 96-voxel procedural-feature cell. A whole landmark stays
-// on one side of the canonical/proxy handoff instead of being clipped by a moving chunk cut.
-const LOD_BOUNDARY_SNAP: [i32; 4] = [96, 32, 64, 128];
+// Snap only as coarsely as both adjacent representations require. In particular, the near handoff
+// moves in one 3.2 m chunk rather than a 9.6 m feature cell, cutting its worst visible replacement
+// strip by two thirds while preserving whole-chunk and whole-patch ownership.
+const LOD_BOUNDARY_SNAP: [i32; 4] = [32, 32, 64, 128];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LodOwner {
@@ -117,13 +118,19 @@ mod tests {
         let focus = GeometricLodFocus::snapped(117, -73);
         assert_eq!(
             focus.boundary_centres(),
-            [[96, -96], [128, -64], [128, -64], [128, -128]]
+            [[128, -64], [128, -64], [128, -64], [128, -128]]
         );
         let canonical = focus.boundary_centres()[0];
         for axis in canonical {
-            assert_eq!(axis.rem_euclid(96), 0);
-            assert_eq!((axis - LOD_BOUNDARY_HALF_EXTENTS[0]).rem_euclid(96), 0);
-            assert_eq!((axis + LOD_BOUNDARY_HALF_EXTENTS[0]).rem_euclid(96), 0);
+            assert_eq!(axis.rem_euclid(CHUNK_EDGE as i32), 0);
+            assert_eq!(
+                (axis - LOD_BOUNDARY_HALF_EXTENTS[0]).rem_euclid(CHUNK_EDGE as i32),
+                0
+            );
+            assert_eq!(
+                (axis + LOD_BOUNDARY_HALF_EXTENTS[0]).rem_euclid(CHUNK_EDGE as i32),
+                0
+            );
         }
         for index in 1..4 {
             let inner = focus.boundary_centres[index - 1];

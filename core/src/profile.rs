@@ -1,10 +1,33 @@
 use glam::{Vec2, Vec3};
 
-pub const PROFILE_SPEED_METRES_PER_SECOND: f32 = 12.0;
-pub const PROFILE_WARMUP_SECONDS: f32 = 30.0;
-pub const PROFILE_MEASURE_SECONDS: f32 = 60.0;
-pub const PROFILE_TOTAL_SECONDS: f32 = PROFILE_WARMUP_SECONDS + PROFILE_MEASURE_SECONDS;
-pub const PROFILE_LOOP_METRES: f32 = PROFILE_SPEED_METRES_PER_SECOND * PROFILE_WARMUP_SECONDS;
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProfileConfig {
+    pub fixed_step_seconds: f32,
+    pub speed_metres_per_second: f32,
+    pub warmup_seconds: f32,
+    pub measure_seconds: f32,
+}
+
+impl Default for ProfileConfig {
+    fn default() -> Self {
+        Self {
+            fixed_step_seconds: 1.0 / 120.0,
+            speed_metres_per_second: 12.0,
+            warmup_seconds: 30.0,
+            measure_seconds: 60.0,
+        }
+    }
+}
+
+impl ProfileConfig {
+    fn total_seconds(self) -> f32 {
+        self.warmup_seconds + self.measure_seconds
+    }
+
+    fn loop_metres(self) -> f32 {
+        self.speed_metres_per_second * self.warmup_seconds
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -25,6 +48,7 @@ pub struct ProfilePose {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ProfileAutomation {
+    config: ProfileConfig,
     origin: Vec3,
     ticks: u64,
     phase: ProfilePhase,
@@ -33,6 +57,7 @@ pub struct ProfileAutomation {
 impl Default for ProfileAutomation {
     fn default() -> Self {
         Self {
+            config: ProfileConfig::default(),
             origin: Vec3::ZERO,
             ticks: 0,
             phase: ProfilePhase::Idle,
@@ -41,6 +66,18 @@ impl Default for ProfileAutomation {
 }
 
 impl ProfileAutomation {
+    pub fn with_config(config: ProfileConfig) -> Self {
+        debug_assert!(config.fixed_step_seconds.is_finite() && config.fixed_step_seconds > 0.0);
+        debug_assert!(config.speed_metres_per_second.is_finite());
+        debug_assert!(config.speed_metres_per_second > 0.0);
+        debug_assert!(config.warmup_seconds.is_finite() && config.warmup_seconds > 0.0);
+        debug_assert!(config.measure_seconds.is_finite() && config.measure_seconds >= 0.0);
+        Self {
+            config,
+            ..Self::default()
+        }
+    }
+
     pub fn start(&mut self, origin: Vec3) {
         self.origin = origin;
         self.ticks = 0;
@@ -51,9 +88,9 @@ impl ProfileAutomation {
         if matches!(self.phase, ProfilePhase::Warmup | ProfilePhase::Measured) {
             self.ticks = self.ticks.saturating_add(1);
             let elapsed = self.elapsed_seconds();
-            self.phase = if elapsed >= PROFILE_TOTAL_SECONDS {
+            self.phase = if elapsed >= self.config.total_seconds() {
                 ProfilePhase::Drain
-            } else if elapsed >= PROFILE_WARMUP_SECONDS {
+            } else if elapsed >= self.config.warmup_seconds {
                 ProfilePhase::Measured
             } else {
                 ProfilePhase::Warmup
@@ -72,22 +109,24 @@ impl ProfileAutomation {
     }
 
     pub fn elapsed_seconds(self) -> f32 {
-        self.ticks as f32 / 120.0
+        self.ticks as f32 * self.config.fixed_step_seconds
     }
 
     pub fn distance_metres(self) -> f32 {
-        self.elapsed_seconds().min(PROFILE_TOTAL_SECONDS) * PROFILE_SPEED_METRES_PER_SECOND
+        self.elapsed_seconds().min(self.config.total_seconds())
+            * self.config.speed_metres_per_second
     }
 
     pub fn pose(self) -> Option<ProfilePose> {
         if !matches!(self.phase, ProfilePhase::Warmup | ProfilePhase::Measured) {
             return None;
         }
-        // Warm the exact route measured by the allocator gate. The first 30-second lap discovers
-        // the route's geometry; the next two laps prove that evicting and reloading the same
-        // canonical/LOD working set reuses GPU pages instead of growing with distance travelled.
-        let radius = PROFILE_LOOP_METRES / std::f32::consts::TAU;
-        let angle = (self.distance_metres() % PROFILE_LOOP_METRES) / radius;
+        // Warm the exact route measured by the allocator gate. The configured warmup completes one
+        // lap and discovers its geometry; measurement then revisits the same canonical/LOD working
+        // set so allocator growth can be distinguished from page reuse.
+        let loop_metres = self.config.loop_metres();
+        let radius = loop_metres / std::f32::consts::TAU;
+        let angle = (self.distance_metres() % loop_metres) / radius;
         let offset = Vec2::new(radius * angle.sin(), radius * (1.0 - angle.cos()));
         let direction = Vec2::new(angle.cos(), angle.sin());
         Some(ProfilePose {
@@ -108,20 +147,26 @@ mod tests {
 
     #[test]
     fn deterministic_rail_warms_one_lap_then_measures_two_more() {
-        let mut profile = ProfileAutomation::default();
+        let config = ProfileConfig {
+            fixed_step_seconds: 0.25,
+            speed_metres_per_second: 12.0,
+            warmup_seconds: 2.0,
+            measure_seconds: 4.0,
+        };
+        let mut profile = ProfileAutomation::with_config(config);
         profile.start(Vec3::new(2.0, 3.0, -4.0));
         assert_eq!(profile.phase(), ProfilePhase::Warmup);
-        for _ in 0..(120 * 30) {
+        for _ in 0..8 {
             profile.advance_fixed_step();
         }
         assert_eq!(profile.phase(), ProfilePhase::Measured);
         let warm_pose = profile.pose().expect("measured lap has a pose");
         assert!((warm_pose.position_xz - Vec2::new(2.0, -4.0)).length() < 0.001);
-        for _ in 0..(120 * 60) {
+        for _ in 0..16 {
             profile.advance_fixed_step();
         }
         assert_eq!(profile.phase(), ProfilePhase::Drain);
-        assert!((profile.distance_metres() - 1_080.0).abs() < 0.01);
+        assert!((profile.distance_metres() - 72.0).abs() < 0.01);
         assert!(profile.pose().is_none());
         profile.complete_drain();
         assert_eq!(profile.phase(), ProfilePhase::Complete);
@@ -130,8 +175,14 @@ mod tests {
 
     #[test]
     fn rail_pose_is_stable_for_the_same_fixed_tick() {
-        let mut left = ProfileAutomation::default();
-        let mut right = ProfileAutomation::default();
+        let config = ProfileConfig {
+            fixed_step_seconds: 0.01,
+            speed_metres_per_second: 5.0,
+            warmup_seconds: 20.0,
+            measure_seconds: 20.0,
+        };
+        let mut left = ProfileAutomation::with_config(config);
+        let mut right = ProfileAutomation::with_config(config);
         left.start(Vec3::ZERO);
         right.start(Vec3::ZERO);
         for _ in 0..1_337 {
