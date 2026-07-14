@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Quat, Vec3};
 use voxels_core::{PLAYER_EYE_HEIGHT_METRES, RemoteAvatarPose};
 
-const PARTS_PER_AVATAR: usize = 12;
+const PARTS_PER_AVATAR: usize = 13;
 const MAX_AVATARS: usize = 64;
 const MAX_PARTS: usize = PARTS_PER_AVATAR * MAX_AVATARS;
 
@@ -301,7 +301,15 @@ fn append_avatar_parts(instances: &mut Vec<GpuAvatarPart>, avatar: &RemoteAvatar
     instances.push(part(
         head_center,
         head_rotation,
-        Vec3::new(0.15, 0.145, 0.14),
+        Vec3::new(0.13, 0.14, 0.115),
+        color,
+    ));
+    // A same-color face nub makes look direction readable from silhouette while preserving the
+    // avatar's deliberately simple single-color graphic language.
+    instances.push(part(
+        head_center + head_rotation * Vec3::new(0.0, -0.015, -0.14),
+        head_rotation,
+        Vec3::new(0.06, 0.035, 0.035),
         color,
     ));
 
@@ -410,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn articulated_avatar_has_exactly_twelve_finite_cuboids() {
+    fn articulated_avatar_has_exactly_thirteen_finite_cuboids() {
         let mut instances = Vec::new();
         append_avatar_parts(&mut instances, &avatar(), 1.0);
         assert_eq!(instances.len(), PARTS_PER_AVATAR);
@@ -447,5 +455,6 @@ mod tests {
         append_avatar_parts(&mut second, &looking, 0.0);
         assert_eq!(first[0].rotation, second[0].rotation);
         assert_ne!(first[1].rotation, second[1].rotation);
+        assert_ne!(first[2].rotation, second[2].rotation);
     }
 }

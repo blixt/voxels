@@ -104,6 +104,7 @@ struct PlayerTrack {
     color_index: u8,
     samples: VecDeque<TimedPose>,
     body_yaw_radians: Option<f32>,
+    body_following_look: bool,
     smoothed_speed: f32,
 }
 
@@ -236,6 +237,7 @@ impl PlayerTrack {
             color_index: pose.color_index,
             samples: VecDeque::new(),
             body_yaw_radians: None,
+            body_following_look: false,
             smoothed_speed: 0.0,
         };
         track.push(pose);
@@ -246,6 +248,7 @@ impl PlayerTrack {
         if pose.flags & REMOTE_POSE_DISCONTINUITY != 0 {
             self.samples.clear();
             self.body_yaw_radians = Some(pose.look_yaw_radians);
+            self.body_following_look = false;
         }
         if self.samples.back().is_some_and(|prior| {
             pose.sequence <= prior.pose.sequence
@@ -349,6 +352,11 @@ impl PlayerTrack {
             };
         }
         if look_delta.abs() > 0.96 {
+            self.body_following_look = true;
+        } else if look_delta.abs() < 0.56 {
+            self.body_following_look = false;
+        }
+        if self.body_following_look {
             target_body_yaw = sampled.look_yaw_radians - look_delta.signum() * 0.52;
         }
         let follow_rate = if moving { 9.0 } else { 4.5 };
@@ -567,5 +575,42 @@ mod tests {
         let one_forty_four = run(1.0 / 144.0);
         assert!(angle_delta(sixty.body_yaw_radians, one_forty_four.body_yaw_radians).abs() < 0.01);
         assert!(sixty.head_yaw_radians.abs() <= 1.13);
+    }
+
+    #[test]
+    fn stationary_large_look_turn_draws_the_body_in_then_settles() {
+        let mut timeline = fixed_timeline();
+        let mut initial = sample(1, 1_000, 0.0);
+        initial.linear_velocity_metres_per_second = Vec3::ZERO;
+        initial.look_yaw_radians = 0.0;
+        timeline.ingest_snapshot(
+            RemotePresenceSnapshot {
+                snapshot_sequence: 1,
+                server_time_ms: 1_000,
+                players: vec![initial],
+            },
+            1_000.0,
+        );
+        let initial_avatar = timeline.sample(1_100.0, 1.0 / 60.0)[0];
+        assert!(initial_avatar.body_yaw_radians.abs() < 0.001);
+
+        let mut looking = initial;
+        looking.sequence = 2;
+        looking.sample_server_time_ms = 1_100;
+        looking.look_yaw_radians = 1.5;
+        timeline.ingest_snapshot(
+            RemotePresenceSnapshot {
+                snapshot_sequence: 2,
+                server_time_ms: 1_100,
+                players: vec![looking],
+            },
+            1_100.0,
+        );
+        let mut avatar = timeline.sample(1_200.0, 1.0 / 60.0)[0];
+        for _ in 1..60 {
+            avatar = timeline.sample(1_200.0, 1.0 / 60.0)[0];
+        }
+        assert!((0.85..=1.05).contains(&avatar.body_yaw_radians));
+        assert!(avatar.head_yaw_radians.abs() <= 0.58);
     }
 }
