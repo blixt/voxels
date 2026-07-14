@@ -252,10 +252,6 @@ impl Store {
         })
     }
 
-    pub fn owns_persistence(&self) -> bool {
-        self.coordinator.leader.borrow().is_some()
-    }
-
     pub fn shutdown(&self) -> impl std::future::Future<Output = ()> + 'static {
         let coordinator = self.coordinator.clone();
         async move { coordinator.shutdown().await }
