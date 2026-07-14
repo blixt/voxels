@@ -2060,6 +2060,7 @@ mod tests {
 
         let mut observer_edit_bytes = 0;
         let mut observer_commits = Vec::new();
+        let mut first_edit_revision = None;
         for (index, world) in worlds.iter_mut().take(OBSERVER_INDEX + 1).enumerate() {
             let mut commits = Vec::new();
             for _ in 0..BUILDER_COUNT {
@@ -2069,6 +2070,12 @@ mod tests {
                     observer_commits.push(commit.clone());
                 }
                 commits.push(commit);
+            }
+            if index == 0 {
+                first_edit_revision = commits
+                    .iter()
+                    .find(|commit| commit.operation_id == 100)
+                    .map(|commit| commit.revision);
             }
             commits.sort_unstable_by_key(|commit| commit.revision);
             assert_eq!(
@@ -2110,7 +2117,7 @@ mod tests {
             ))
             .await?;
         let (retry_commit, _) = next_edit_commit(&mut worlds[0]).await?;
-        assert_eq!(retry_commit.revision, 2);
+        assert_eq!(Some(retry_commit.revision), first_edit_revision);
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(150),
