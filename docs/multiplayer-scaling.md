@@ -114,12 +114,13 @@ mesh and proves the tower's top survives stride-16; the browser gate proves the 
 that revised product and changes the rendered silhouette.
 
 On 2026-07-14 on an M3 Max with Chrome 150, the 10 m/100-voxel tower converged in the far observer in
-198.3 ms. The observer received 97,064 world-stream bytes for commits plus its replacement product;
-builders received 97,064-132,330 bytes and sent 1,166-1,248 bytes while the observer sent 246 bytes.
+170.6 ms. After world coverage had settled, the observer received 99,979 world-stream bytes for
+commits plus its replacement product; builders received 99,979-135,244 bytes and sent 1,166-1,248
+bytes while the observer sent 246 bytes.
 All six applied 100 edits, the observer's required and accepted surface revision matched, its tile
-finished resident and clean, and its active GPU fingerprint changed. The aimed screenshot contained
-125 materially changed pixels in a 34-pixel-tall silhouette, including 56 new cyan pixels. Steady
-six-client frame p95 was 33.3-41.4 ms with zero dropped history samples.
+finished resident and clean, and both its active GPU mesh and presented viewport fingerprints changed.
+The aimed screenshot contained 125 materially changed pixels in a 34-pixel-tall silhouette, including
+56 new cyan pixels. Steady six-client frame p95 was 42.1-50.1 ms with zero dropped history samples.
 
 ## Capacity and backpressure
 
