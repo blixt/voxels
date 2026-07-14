@@ -478,7 +478,7 @@ mod web {
             if let Some(opened) = self.remote.world_opened() {
                 self.presence.ensure_session(&opened, time);
             }
-            let _remote_avatars = self.presence.update(&camera, time, dt);
+            let remote_avatars = self.presence.update(&camera, time, dt);
             if let Some(error) = self.presence.take_error() {
                 log_gpu_error(&format!("player presence: {error}"));
             }
@@ -487,6 +487,7 @@ mod web {
                 .set(smoothed_ms(self.stream_milliseconds.get(), stream_ms));
             let target = self.raycast_target(&camera).map(|hit| hit.voxel);
             let mut renderer = self.renderer.borrow_mut();
+            renderer.set_remote_avatars(&remote_avatars);
             renderer.set_target_voxel(target);
             let (atmosphere, region) = self.remote_environment;
             renderer.set_atmosphere(atmosphere, region);

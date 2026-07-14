@@ -1,5 +1,6 @@
 use crate::ambient_occlusion::AmbientOcclusionGpu;
 use crate::arena::{Allocation, ArenaAllocator};
+use crate::avatar::AvatarGpu;
 use crate::environment::{
     DaylightPhase, InteriorEnvironment, OutdoorEnvironment, surface_region_label,
 };
@@ -18,7 +19,7 @@ use bytemuck::{Pod, Zeroable};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use voxels_core::{CameraState, EnclosureSample};
+use voxels_core::{CameraState, EnclosureSample, RemoteAvatarPose};
 use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, ChunkCoord, Material, MeshedChunk, Quad, RenderLayer,
     SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfaceRegion, SurfaceTileCoord,
@@ -292,6 +293,9 @@ pub struct RenderDiagnostics {
     pub portal_rejected_local_lights: u32,
     pub local_light_visibility_tests: u32,
     pub local_lighting: bool,
+    pub remote_avatars: u32,
+    pub avatar_parts: u32,
+    pub avatar_draw_calls: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -561,6 +565,8 @@ pub struct Renderer {
     voxel_ambient_occlusion_pipeline: RenderPipeline,
     voxel_ambient_occlusion_flat_pipeline: RenderPipeline,
     water_pipeline: RenderPipeline,
+    avatar_gpu: AvatarGpu,
+    remote_avatars: Vec<RemoteAvatarPose>,
     water_scene_layout: wgpu::BindGroupLayout,
     water_scene_bind_group: BindGroup,
     shadow_gpu: ShadowGpu,
@@ -609,6 +615,7 @@ pub struct Renderer {
 }
 
 struct ShadowGpu {
+    layout: wgpu::BindGroupLayout,
     _texture: Texture,
     sample_view: TextureView,
     sampler: wgpu::Sampler,
@@ -823,6 +830,7 @@ impl ShadowGpu {
             cache: None,
         });
         Ok(Self {
+            layout,
             _texture: texture,
             sample_view,
             sampler,
@@ -1089,6 +1097,13 @@ impl Renderer {
             config.width,
             config.height,
         );
+        let avatar_gpu = AvatarGpu::new(
+            &device,
+            &frame_layout,
+            &shadow_gpu.layout,
+            SCENE_FORMAT,
+            DEPTH_FORMAT,
+        );
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sky pipeline layout"),
             bind_group_layouts: &[Some(&frame_layout)],
@@ -1273,6 +1288,8 @@ impl Renderer {
             voxel_ambient_occlusion_pipeline,
             voxel_ambient_occlusion_flat_pipeline,
             water_pipeline,
+            avatar_gpu,
+            remote_avatars: Vec::new(),
             water_scene_layout,
             water_scene_bind_group,
             shadow_gpu,
@@ -1366,6 +1383,11 @@ impl Renderer {
 
     pub const fn diagnostics(&self) -> RenderDiagnostics {
         self.diagnostics
+    }
+
+    pub fn set_remote_avatars(&mut self, avatars: &[RemoteAvatarPose]) {
+        self.remote_avatars.clear();
+        self.remote_avatars.extend_from_slice(avatars);
     }
 
     pub const fn set_target_voxel(&mut self, target: Option<[i32; 3]>) {
@@ -2068,6 +2090,10 @@ impl Renderer {
                 && slice_owned_by_lod(geometric_lod_focus, key, slice)
                 && aabb_visible(slice.bounds_min, slice.bounds_max, view_projection)
         });
+        self.avatar_gpu
+            .prepare(&self.queue, &self.remote_avatars, self.time);
+        let avatar_instances = self.avatar_gpu.instance_count();
+        let has_avatars = avatar_instances != 0;
         let refract_water = !water_draw_list.spans.is_empty();
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -2137,6 +2163,10 @@ impl Renderer {
                     pass.draw(0..6, 0..span.quad_count);
                     shadow_draw_calls += 1;
                 }
+                if has_avatars {
+                    self.avatar_gpu.draw_shadow(&mut pass);
+                    shadow_draw_calls += 1;
+                }
             }
         }
         let mut depth_prepass_draw_calls = 0u32;
@@ -2171,6 +2201,10 @@ impl Renderer {
                     let end = start + u64::from(span.size);
                     pass.set_vertex_buffer(0, buffer.slice(start..end));
                     pass.draw(0..6, 0..span.quad_count);
+                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(1);
+                }
+                if has_avatars {
+                    self.avatar_gpu.draw_depth(&mut pass);
                     depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(1);
                 }
             }
@@ -2244,6 +2278,8 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(start..end));
                 pass.draw(0..6, 0..span.quad_count);
             }
+            self.avatar_gpu
+                .draw_scene(&mut pass, self.options.screen_space_ambient_occlusion);
             // Draw the fullscreen sky at the far plane after opaque geometry so early depth
             // rejection avoids running its procedural clouds behind terrain.
             pass.set_pipeline(&self.sky_pipeline);
@@ -2303,7 +2339,8 @@ impl Renderer {
             draw_calls: world_draw_list
                 .spans
                 .len()
-                .saturating_add(water_draw_list.spans.len()) as u32,
+                .saturating_add(water_draw_list.spans.len())
+                .saturating_add(usize::from(has_avatars)) as u32,
             water_draw_calls: water_draw_list.spans.len() as u32,
             shadow_draw_calls,
             shadow_cascades: if self.options.shadows {
@@ -2335,6 +2372,7 @@ impl Renderer {
                 .saturating_add(self.ambient_occlusion_gpu.bytes())
                 .saturating_add(self.material_detail.bytes)
                 .saturating_add(size_of::<LocalLightUniform>() as u64)
+                .saturating_add(self.avatar_gpu.buffer_bytes())
                 .saturating_add(if self.gpu_timer.is_some() {
                     GPU_TIMER_BUFFER_BYTES
                 } else {
@@ -2365,6 +2403,15 @@ impl Renderer {
             portal_rejected_local_lights,
             local_light_visibility_tests,
             local_lighting: self.options.local_lighting,
+            remote_avatars: self.avatar_gpu.avatar_count(),
+            avatar_parts: avatar_instances,
+            avatar_draw_calls: u32::from(has_avatars)
+                + u32::from(has_avatars && self.options.screen_space_ambient_occlusion)
+                + if has_avatars && self.options.shadows {
+                    CASCADE_COUNT as u32
+                } else {
+                    0
+                },
         };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

@@ -2,6 +2,7 @@
 
 mod ambient_occlusion;
 mod arena;
+mod avatar;
 pub mod environment;
 pub mod lod;
 mod material_detail;
