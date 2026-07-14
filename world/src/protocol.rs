@@ -7,8 +7,8 @@
 use crate::{
     ChunkCoord, ChunkSnapshot, Material, MeshingHalo, ModelIdentity, SourceDeviceRequirement,
     SurfaceBounds, SurfaceLodLevel, SurfacePatch, SurfaceQuad, SurfaceRegion, SurfaceTileCoord,
-    SurfaceTileMesh, SurfaceTileSnapshot, VOXEL_SIZE_METRES, WaterPatch, WaterTileMesh, WorldId,
-    WorldManifest, WorldProductPriority, WorldSourceError, WorldSourceIdentity,
+    SurfaceTileMesh, SurfaceTileSnapshot, VOXEL_SIZE_METRES, VoxelCoord, WaterPatch, WaterTileMesh,
+    WorldId, WorldManifest, WorldProductPriority, WorldSourceError, WorldSourceIdentity,
     WorldSourceIdentityHash, WorldSourceKind, codec,
 };
 use std::collections::BTreeSet;
@@ -16,13 +16,15 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
 pub const MAX_SURFACE_TILES_PER_BATCH: usize = 32;
 pub const MAX_PLAYERS_PER_PRESENCE_DELTA: usize = 512;
 pub const MAX_PLAYER_NAME_BYTES: usize = 32;
+pub const MAX_EDIT_AFFECTED_CHUNKS: usize = 8;
+pub const MAX_EDIT_AFFECTED_SURFACE_TILES: usize = 32;
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
@@ -42,6 +44,9 @@ const KIND_PLAYER_POSE: u16 = 11;
 const KIND_PRESENCE_DELTA: u16 = 12;
 const KIND_PRESENCE_PING: u16 = 13;
 const KIND_PRESENCE_PONG: u16 = 14;
+const KIND_EDIT_COMMAND: u16 = 15;
+const KIND_EDIT_COMMIT: u16 = 16;
+const KIND_RESYNC_REQUIRED: u16 = 17;
 const FLAG_NONE: u16 = 0;
 const RESERVED: u16 = 0;
 const RESULT_CODEC_BROTLI: u8 = 1;
@@ -262,6 +267,8 @@ pub struct ChunkBatchRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChunkBatchItem {
     pub coord: ChunkCoord,
+    /// Authoritative edit revision captured with this product. Zero denotes the pristine world.
+    pub edit_revision: u64,
     pub result: Result<ChunkSnapshot, WorldSourceError>,
 }
 
@@ -284,6 +291,8 @@ pub struct SurfaceTileBatchRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SurfaceTileBatchItem {
     pub coord: SurfaceTileCoord,
+    /// Authoritative edit revision captured with this derived product.
+    pub edit_revision: u64,
     pub result: Result<SurfaceTileSnapshot, WorldSourceError>,
 }
 
@@ -292,6 +301,35 @@ pub struct SurfaceTileBatchResult {
     pub request_id: u64,
     pub source_identity_hash: WorldSourceIdentityHash,
     pub items: Vec<SurfaceTileBatchItem>,
+}
+
+/// One idempotent sparse edit request. `None` removes an override and restores source authority.
+///
+/// The operation ID is carried in the VXWP request-id header as well as the typed value returned by
+/// the decoder. Retrying an operation uses the same nonzero ID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EditCommand {
+    pub operation_id: u64,
+    pub coord: VoxelCoord,
+    pub material: Option<Material>,
+}
+
+/// One durably ordered authoritative edit and every derived product key it invalidates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EditCommit {
+    pub operation_id: u64,
+    pub revision: u64,
+    pub coord: VoxelCoord,
+    pub material: Option<Material>,
+    pub affected_chunks: Vec<ChunkCoord>,
+    pub affected_surface_tiles: Vec<SurfaceTileCoord>,
+}
+
+/// The receiver's bounded change queue lost incremental state and all retained products must be
+/// reconciled against this authoritative revision before incremental commits resume.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResyncRequired {
+    pub revision: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -562,10 +600,22 @@ pub fn encode_chunk_batch_result(result: &ChunkBatchResult) -> Result<Vec<u8>, P
     payload.extend_from_slice(result.source_identity_hash.as_bytes());
     push_u16(&mut payload, result.items.len() as u16);
     push_u16(&mut payload, 0);
-    for item in &result.items {
+    for (index, item) in result.items.iter().enumerate() {
+        if !item.coord.is_world_representable() {
+            return Err(ProtocolError::InvalidPayload("invalid chunk coordinate"));
+        }
+        if result.items[..index]
+            .iter()
+            .any(|prior| prior.coord == item.coord)
+        {
+            return Err(ProtocolError::InvalidPayload(
+                "duplicate chunk result coordinate",
+            ));
+        }
         push_i32(&mut payload, item.coord.x);
         push_i32(&mut payload, item.coord.y);
         push_i32(&mut payload, item.coord.z);
+        push_u64(&mut payload, item.edit_revision);
         match &item.result {
             Ok(snapshot) => {
                 if snapshot.chunk.coord() != item.coord
@@ -613,6 +663,18 @@ pub fn decode_chunk_batch_result(bytes: &[u8]) -> Result<ChunkBatchResult, Proto
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
         let coord = ChunkCoord::new(cursor.i32()?, cursor.i32()?, cursor.i32()?);
+        if !coord.is_world_representable() {
+            return Err(ProtocolError::InvalidPayload("invalid chunk coordinate"));
+        }
+        if items
+            .iter()
+            .any(|item: &ChunkBatchItem| item.coord == coord)
+        {
+            return Err(ProtocolError::InvalidPayload(
+                "duplicate chunk result coordinate",
+            ));
+        }
+        let edit_revision = cursor.u64()?;
         let status = cursor.u16()?;
         if cursor.u16()? != 0 {
             return Err(ProtocolError::InvalidPayload(
@@ -633,7 +695,11 @@ pub fn decode_chunk_batch_result(bytes: &[u8]) -> Result<ChunkBatchResult, Proto
             }
             Err(decode_world_source_error(status)?)
         };
-        items.push(ChunkBatchItem { coord, result });
+        items.push(ChunkBatchItem {
+            coord,
+            edit_revision,
+            result,
+        });
     }
     cursor.finish()?;
     Ok(ChunkBatchResult {
@@ -738,8 +804,22 @@ pub fn encode_surface_tile_batch_result(
     payload.extend_from_slice(result.source_identity_hash.as_bytes());
     push_u16(&mut payload, result.items.len() as u16);
     push_u16(&mut payload, 0);
-    for item in &result.items {
+    for (index, item) in result.items.iter().enumerate() {
+        if !item.coord.is_world_representable() {
+            return Err(ProtocolError::InvalidPayload(
+                "invalid surface tile coordinate",
+            ));
+        }
+        if result.items[..index]
+            .iter()
+            .any(|prior| prior.coord == item.coord)
+        {
+            return Err(ProtocolError::InvalidPayload(
+                "duplicate surface result coordinate",
+            ));
+        }
         encode_surface_coord(&mut payload, item.coord);
+        push_u64(&mut payload, item.edit_revision);
         match &item.result {
             Ok(snapshot) => {
                 if snapshot.source_identity_hash != result.source_identity_hash
@@ -791,6 +871,15 @@ pub fn decode_surface_tile_batch_result(
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
         let coord = decode_surface_coord(&mut cursor)?;
+        if items
+            .iter()
+            .any(|item: &SurfaceTileBatchItem| item.coord == coord)
+        {
+            return Err(ProtocolError::InvalidPayload(
+                "duplicate surface result coordinate",
+            ));
+        }
+        let edit_revision = cursor.u64()?;
         let status = cursor.u16()?;
         if cursor.u16()? != 0 {
             return Err(ProtocolError::InvalidPayload(
@@ -810,7 +899,11 @@ pub fn decode_surface_tile_batch_result(
             }
             Err(decode_world_source_error(status)?)
         };
-        items.push(SurfaceTileBatchItem { coord, result });
+        items.push(SurfaceTileBatchItem {
+            coord,
+            edit_revision,
+            result,
+        });
     }
     cursor.finish()?;
     Ok(SurfaceTileBatchResult {
@@ -818,6 +911,136 @@ pub fn decode_surface_tile_batch_result(
         source_identity_hash,
         items,
     })
+}
+
+pub fn encode_edit_command(command: EditCommand) -> Result<Vec<u8>, ProtocolError> {
+    if command.operation_id == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "edit operation id must be nonzero",
+        ));
+    }
+    validate_voxel_coord(command.coord)?;
+    let mut payload = Vec::with_capacity(16);
+    encode_voxel_coord(&mut payload, command.coord);
+    encode_optional_material(&mut payload, command.material);
+    Ok(encode_frame(
+        KIND_EDIT_COMMAND,
+        command.operation_id,
+        &payload,
+    ))
+}
+
+pub fn decode_edit_command(bytes: &[u8]) -> Result<EditCommand, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_kind(&frame, KIND_EDIT_COMMAND)?;
+    if frame.request_id == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "edit operation id must be nonzero",
+        ));
+    }
+    let mut cursor = Cursor::new(frame.payload);
+    let coord = decode_voxel_coord(&mut cursor)?;
+    let material = decode_optional_material(&mut cursor)?;
+    cursor.finish()?;
+    Ok(EditCommand {
+        operation_id: frame.request_id,
+        coord,
+        material,
+    })
+}
+
+pub fn encode_edit_commit(commit: &EditCommit) -> Result<Vec<u8>, ProtocolError> {
+    validate_edit_commit(commit)?;
+    let mut payload = Vec::with_capacity(
+        24 + commit.affected_chunks.len() * 12 + commit.affected_surface_tiles.len() * 12,
+    );
+    push_u64(&mut payload, commit.revision);
+    encode_voxel_coord(&mut payload, commit.coord);
+    encode_optional_material(&mut payload, commit.material);
+    push_u16(&mut payload, commit.affected_chunks.len() as u16);
+    push_u16(&mut payload, commit.affected_surface_tiles.len() as u16);
+    for coord in &commit.affected_chunks {
+        push_chunk_coord(&mut payload, *coord);
+    }
+    for coord in &commit.affected_surface_tiles {
+        encode_surface_coord(&mut payload, *coord);
+    }
+    Ok(encode_frame(
+        KIND_EDIT_COMMIT,
+        commit.operation_id,
+        &payload,
+    ))
+}
+
+pub fn decode_edit_commit(bytes: &[u8]) -> Result<EditCommit, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_kind(&frame, KIND_EDIT_COMMIT)?;
+    if frame.request_id == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "edit operation id must be nonzero",
+        ));
+    }
+    let mut cursor = Cursor::new(frame.payload);
+    let revision = cursor.u64()?;
+    let coord = decode_voxel_coord(&mut cursor)?;
+    let material = decode_optional_material(&mut cursor)?;
+    let chunk_count = usize::from(cursor.u16()?);
+    let surface_count = usize::from(cursor.u16()?);
+    if chunk_count == 0 || chunk_count > MAX_EDIT_AFFECTED_CHUNKS {
+        return Err(ProtocolError::LimitExceeded("edit affected chunks"));
+    }
+    if surface_count > MAX_EDIT_AFFECTED_SURFACE_TILES {
+        return Err(ProtocolError::LimitExceeded("edit affected surface tiles"));
+    }
+    let mut affected_chunks = Vec::with_capacity(chunk_count);
+    for _ in 0..chunk_count {
+        affected_chunks.push(decode_chunk_coord(&mut cursor)?);
+    }
+    let mut affected_surface_tiles = Vec::with_capacity(surface_count);
+    for _ in 0..surface_count {
+        affected_surface_tiles.push(decode_surface_coord(&mut cursor)?);
+    }
+    cursor.finish()?;
+    let commit = EditCommit {
+        operation_id: frame.request_id,
+        revision,
+        coord,
+        material,
+        affected_chunks,
+        affected_surface_tiles,
+    };
+    validate_edit_commit(&commit)?;
+    Ok(commit)
+}
+
+pub fn encode_resync_required(resync: ResyncRequired) -> Result<Vec<u8>, ProtocolError> {
+    if resync.revision == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "resync revision must be nonzero",
+        ));
+    }
+    let mut payload = Vec::with_capacity(8);
+    push_u64(&mut payload, resync.revision);
+    Ok(encode_frame(KIND_RESYNC_REQUIRED, 0, &payload))
+}
+
+pub fn decode_resync_required(bytes: &[u8]) -> Result<ResyncRequired, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_kind(&frame, KIND_RESYNC_REQUIRED)?;
+    if frame.request_id != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "resync request id must be zero",
+        ));
+    }
+    let mut cursor = Cursor::new(frame.payload);
+    let revision = cursor.u64()?;
+    cursor.finish()?;
+    if revision == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "resync revision must be nonzero",
+        ));
+    }
+    Ok(ResyncRequired { revision })
 }
 
 pub fn encode_cancel(request_id: u64) -> Result<Vec<u8>, ProtocolError> {
@@ -1188,6 +1411,18 @@ pub const fn presence_pong_kind() -> u16 {
     KIND_PRESENCE_PONG
 }
 
+pub const fn edit_command_kind() -> u16 {
+    KIND_EDIT_COMMAND
+}
+
+pub const fn edit_commit_kind() -> u16 {
+    KIND_EDIT_COMMIT
+}
+
+pub const fn resync_required_kind() -> u16 {
+    KIND_RESYNC_REQUIRED
+}
+
 fn encode_player_pose_body(output: &mut Vec<u8>, pose: PlayerPoseUpdate) {
     push_u64(output, pose.sequence);
     push_u64(output, pose.sample_server_time_ms);
@@ -1335,6 +1570,63 @@ fn validate_presence_delta(delta: &PresenceDelta) -> Result<(), ProtocolError> {
         prior_leave = Some(*connection_id);
     }
     Ok(())
+}
+
+fn validate_edit_commit(commit: &EditCommit) -> Result<(), ProtocolError> {
+    if commit.operation_id == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "edit operation id must be nonzero",
+        ));
+    }
+    if commit.revision == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "edit revision must be nonzero",
+        ));
+    }
+    validate_voxel_coord(commit.coord)?;
+    if commit.affected_chunks.is_empty() || commit.affected_chunks.len() > MAX_EDIT_AFFECTED_CHUNKS
+    {
+        return Err(ProtocolError::LimitExceeded("edit affected chunks"));
+    }
+    if commit.affected_surface_tiles.len() > MAX_EDIT_AFFECTED_SURFACE_TILES {
+        return Err(ProtocolError::LimitExceeded("edit affected surface tiles"));
+    }
+    if !strictly_sorted(&commit.affected_chunks) {
+        return Err(ProtocolError::InvalidPayload(
+            "edit affected chunks are not strictly sorted",
+        ));
+    }
+    if !commit.affected_chunks.contains(&commit.coord.chunk()) {
+        return Err(ProtocolError::InvalidPayload(
+            "edit affected chunks omit the edited chunk",
+        ));
+    }
+    if commit
+        .affected_chunks
+        .iter()
+        .any(|coord| !coord.is_world_representable())
+    {
+        return Err(ProtocolError::InvalidPayload("invalid chunk coordinate"));
+    }
+    if !strictly_sorted(&commit.affected_surface_tiles) {
+        return Err(ProtocolError::InvalidPayload(
+            "edit affected surface tiles are not strictly sorted",
+        ));
+    }
+    if commit
+        .affected_surface_tiles
+        .iter()
+        .any(|coord| !coord.is_world_representable())
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "invalid surface tile coordinate",
+        ));
+    }
+    Ok(())
+}
+
+fn strictly_sorted<T: Ord>(values: &[T]) -> bool {
+    values.windows(2).all(|pair| pair[0] < pair[1])
 }
 
 fn validate_player_identity(identity: &PlayerIdentity) -> Result<(), ProtocolError> {
@@ -1634,6 +1926,78 @@ fn encode_surface_coord(output: &mut Vec<u8>, coord: SurfaceTileCoord) {
     output.extend_from_slice(&[0; 3]);
     push_i32(output, coord.x);
     push_i32(output, coord.z);
+}
+
+fn push_chunk_coord(output: &mut Vec<u8>, coord: ChunkCoord) {
+    push_i32(output, coord.x);
+    push_i32(output, coord.y);
+    push_i32(output, coord.z);
+}
+
+fn decode_chunk_coord(cursor: &mut Cursor<'_>) -> Result<ChunkCoord, ProtocolError> {
+    let coord = ChunkCoord::new(cursor.i32()?, cursor.i32()?, cursor.i32()?);
+    if !coord.is_world_representable() {
+        return Err(ProtocolError::InvalidPayload("invalid chunk coordinate"));
+    }
+    Ok(coord)
+}
+
+fn encode_voxel_coord(output: &mut Vec<u8>, coord: VoxelCoord) {
+    push_i32(output, coord.x);
+    push_i32(output, coord.y);
+    push_i32(output, coord.z);
+}
+
+fn decode_voxel_coord(cursor: &mut Cursor<'_>) -> Result<VoxelCoord, ProtocolError> {
+    let coord = VoxelCoord::new(cursor.i32()?, cursor.i32()?, cursor.i32()?);
+    validate_voxel_coord(coord)?;
+    Ok(coord)
+}
+
+fn validate_voxel_coord(coord: VoxelCoord) -> Result<(), ProtocolError> {
+    if !coord.chunk().is_world_representable() {
+        return Err(ProtocolError::InvalidPayload("invalid voxel coordinate"));
+    }
+    Ok(())
+}
+
+fn encode_optional_material(output: &mut Vec<u8>, material: Option<Material>) {
+    match material {
+        Some(material) => {
+            push_u16(output, material.id());
+            output.push(1);
+        }
+        None => {
+            push_u16(output, 0);
+            output.push(0);
+        }
+    }
+    output.push(0);
+}
+
+fn decode_optional_material(cursor: &mut Cursor<'_>) -> Result<Option<Material>, ProtocolError> {
+    let material_id = cursor.u16()?;
+    let present = cursor.u8()?;
+    if cursor.u8()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved edit material byte is nonzero",
+        ));
+    }
+    match present {
+        0 if material_id == 0 => Ok(None),
+        0 => Err(ProtocolError::InvalidPayload(
+            "absent edit material has a nonzero id",
+        )),
+        1 => Material::from_id(material_id)
+            .map(Some)
+            .ok_or(ProtocolError::UnknownEnum(
+                "material",
+                u64::from(material_id),
+            )),
+        _ => Err(ProtocolError::InvalidPayload(
+            "invalid edit material presence flag",
+        )),
+    }
 }
 
 fn decode_surface_coord(cursor: &mut Cursor<'_>) -> Result<SurfaceTileCoord, ProtocolError> {
@@ -2582,10 +2946,10 @@ mod tests {
         ));
 
         let mut prior_version = encode_player_pose(pose).expect("encode pose version fixture");
-        prior_version[4..6].copy_from_slice(&4_u16.to_le_bytes());
+        prior_version[4..6].copy_from_slice(&5_u16.to_le_bytes());
         assert_eq!(
             decode_player_pose(&prior_version),
-            Err(ProtocolError::UnsupportedVersion(4))
+            Err(ProtocolError::UnsupportedVersion(5))
         );
     }
 
@@ -2608,6 +2972,7 @@ mod tests {
             source_identity_hash: source.source_identity_hash(),
             items: vec![ChunkBatchItem {
                 coord,
+                edit_revision: 7,
                 result: Ok(snapshot),
             }],
         };
@@ -2669,6 +3034,7 @@ mod tests {
             source_identity_hash: source.source_identity_hash(),
             items: vec![SurfaceTileBatchItem {
                 coord,
+                edit_revision: 11,
                 result: Ok(snapshot),
             }],
         };
@@ -2708,6 +3074,102 @@ mod tests {
                 "surface patch range is out of bounds"
             ))
         ));
+    }
+
+    #[test]
+    fn server_edit_frames_round_trip_and_reject_ambiguous_state() {
+        let coord = VoxelCoord::new(31, 64, -33);
+        let command = EditCommand {
+            operation_id: 41,
+            coord,
+            material: Some(Material::Basalt),
+        };
+        let encoded_command = encode_edit_command(command).expect("encode edit command");
+        assert_eq!(message_kind(&encoded_command), Ok(edit_command_kind()));
+        assert_eq!(decode_edit_command(&encoded_command), Ok(command));
+
+        let restore = EditCommand {
+            operation_id: 42,
+            coord,
+            material: None,
+        };
+        assert_eq!(
+            decode_edit_command(&encode_edit_command(restore).expect("encode edit restore")),
+            Ok(restore)
+        );
+
+        let commit = EditCommit {
+            operation_id: command.operation_id,
+            revision: 9,
+            coord,
+            material: command.material,
+            affected_chunks: vec![coord.chunk(), ChunkCoord::new(1, 2, -2)],
+            affected_surface_tiles: vec![
+                SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, -1),
+                SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 0, -1),
+            ],
+        };
+        let encoded_commit = encode_edit_commit(&commit).expect("encode edit commit");
+        assert_eq!(message_kind(&encoded_commit), Ok(edit_commit_kind()));
+        assert_eq!(decode_edit_commit(&encoded_commit), Ok(commit.clone()));
+
+        let resync = ResyncRequired { revision: 12 };
+        let encoded_resync = encode_resync_required(resync).expect("encode resync");
+        assert_eq!(message_kind(&encoded_resync), Ok(resync_required_kind()));
+        assert_eq!(decode_resync_required(&encoded_resync), Ok(resync));
+
+        let mut zero_operation = command;
+        zero_operation.operation_id = 0;
+        assert_eq!(
+            encode_edit_command(zero_operation),
+            Err(ProtocolError::InvalidPayload(
+                "edit operation id must be nonzero"
+            ))
+        );
+
+        let mut zero_revision = commit.clone();
+        zero_revision.revision = 0;
+        assert_eq!(
+            encode_edit_commit(&zero_revision),
+            Err(ProtocolError::InvalidPayload(
+                "edit revision must be nonzero"
+            ))
+        );
+
+        let mut duplicate_chunk = commit.clone();
+        duplicate_chunk.affected_chunks = vec![coord.chunk(), coord.chunk()];
+        assert_eq!(
+            encode_edit_commit(&duplicate_chunk),
+            Err(ProtocolError::InvalidPayload(
+                "edit affected chunks are not strictly sorted"
+            ))
+        );
+
+        let mut omitted_owner = commit;
+        omitted_owner.affected_chunks = vec![ChunkCoord::new(-4, 0, 7)];
+        assert_eq!(
+            encode_edit_commit(&omitted_owner),
+            Err(ProtocolError::InvalidPayload(
+                "edit affected chunks omit the edited chunk"
+            ))
+        );
+
+        let mut malformed_restore = encode_edit_command(restore).expect("encode malformed restore");
+        malformed_restore[FRAME_HEADER_BYTES + 12..FRAME_HEADER_BYTES + 14]
+            .copy_from_slice(&Material::Stone.id().to_le_bytes());
+        assert_eq!(
+            decode_edit_command(&malformed_restore),
+            Err(ProtocolError::InvalidPayload(
+                "absent edit material has a nonzero id"
+            ))
+        );
+
+        assert_eq!(
+            encode_resync_required(ResyncRequired { revision: 0 }),
+            Err(ProtocolError::InvalidPayload(
+                "resync revision must be nonzero"
+            ))
+        );
     }
 
     #[test]
@@ -2766,12 +3228,24 @@ mod tests {
             source_identity_hash: WorldSourceIdentityHash::from_bytes([8; 32]),
             items: vec![ChunkBatchItem {
                 coord: ChunkCoord::new(1, -2, 3),
+                edit_revision: 13,
                 result: Err(WorldSourceError::SourceCoverageUnavailable),
             }],
         };
         assert_eq!(
             decode_chunk_batch_result(&encode_chunk_batch_result(&response).expect("encode")),
-            Ok(response)
+            Ok(response.clone())
+        );
+
+        let mut duplicate_result = response;
+        duplicate_result
+            .items
+            .push(duplicate_result.items[0].clone());
+        assert_eq!(
+            encode_chunk_batch_result(&duplicate_result),
+            Err(ProtocolError::InvalidPayload(
+                "duplicate chunk result coordinate"
+            ))
         );
     }
 }
