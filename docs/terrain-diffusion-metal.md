@@ -101,7 +101,20 @@ client.
   without importing its Python, rasterio, or WorldClim preprocessing dependencies. Conditioning is
   standardized with output channels `[0, 2, 3, 4, 5]`, matching upstream's elevation, temperature,
   temperature seasonality, precipitation, and precipitation-variability mapping. The learned model
-  still owns the 30 m terrain. The provider selects the highest-mean 4x4 coarse land window and then
-  centres its 16x16 latent preview on the highest learned low-frequency point before performing the
-  signed-square-root/Laplacian reconstruction in native Rust. Infinite overlap blending remains
-  future work and is source-identity versioned when added.
+  still owns the 30 m terrain. The finite provider selects the highest-variance all-land 4x4 coarse
+  context and highest-variance 16x16 latent crop, avoiding the former maximum-seeking plateau bias,
+  before performing signed-square-root/Laplacian reconstruction in native Rust. Learned coarse
+  temperature and precipitation remain spatial fields; the adapter applies elevation lapse rate and
+  an aridity estimate before publishing normalized climate. Infinite overlap blending remains future
+  work and is source-identity versioned when added.
+- The canonical composer adds a deterministic, source-identity-bound subgrid relief signal after
+  model inference. Its amplitude follows physical 30 m slope and stays below 22 m even on steep
+  terrain, so it breaks up 30 m bilinear planes without replacing the learned macro shape. Climate,
+  altitude, slope, and coherent geology choose biome surfaces and shallow/deep strata. Chunks,
+  collision blocks, edited surfaces, and far LODs all use the same composition function.
+
+For the checked-in seed, `terrain:detail` now measures 576–1,396 m (820 m relief) over the 3.84 km
+tile. `world:source-smoke` samples 256 positions across that tile; the current result spans three
+surface regions and Grass, Stone, and Limestone, with temperature, moisture, and physical ridge all
+non-constant. These are regression diagnostics rather than promises that every seed has the same
+histogram.

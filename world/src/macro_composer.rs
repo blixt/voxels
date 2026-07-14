@@ -1,9 +1,8 @@
-//! Experimental canonical heightfield composition over a [`MacroTerrainSource`].
+//! Canonical heightfield composition over a [`MacroTerrainSource`].
 //!
-//! This adapter intentionally materializes only the information the macro schema actually carries:
-//! learned or procedural elevation becomes solid stone, low terrain is flooded to one pinned sea
-//! level, and everything above is air. It does not invent caves, strata, vegetation, routes, or
-//! authored atlas content. The existing procedural-v16 engine remains the parity authority.
+//! The macro source owns elevation and climate. This adapter deterministically turns those fields
+//! into biome surfaces, shallow soil, geology, and bounded sub-30 m relief while preserving the
+//! learned macro shape. It does not invent caves, vegetation, routes, or authored atlas content.
 
 use crate::{
     AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, ChunkSnapshot, EditMap,
@@ -22,11 +21,13 @@ use crate::{
 
 const SURFACE_TILE_SAMPLE_EDGE: u32 = 34;
 
-/// Minimal, fidelity-honest field-to-voxel adapter used to exercise non-procedural macro sources.
+/// Deterministic field-to-voxel adapter for non-procedural macro sources.
 pub struct HeightfieldWorldSource {
     source: Box<dyn MacroTerrainSource>,
     identity: WorldSourceIdentity,
     identity_hash: WorldSourceIdentityHash,
+    composer_seed: u64,
+    add_subgrid_relief: bool,
     sea_level_voxels: i32,
 }
 
@@ -45,10 +46,21 @@ impl HeightfieldWorldSource {
             return Err(WorldSourceError::MalformedMacroBlock);
         }
         let identity_hash = identity.identity_hash();
+        let composer_seed = u64::from_le_bytes(
+            identity_hash.as_bytes()[..8]
+                .try_into()
+                .expect("identity hashes always contain eight seed bytes"),
+        );
+        let add_subgrid_relief = matches!(
+            identity.source_kind,
+            crate::WorldSourceKind::TerrainDiffusion30m
+        );
         Ok(Self {
             source,
             identity,
             identity_hash,
+            composer_seed,
+            add_subgrid_relief,
             sea_level_voxels,
         })
     }
@@ -147,7 +159,22 @@ impl HeightfieldWorldSource {
                 return Err(WorldSourceError::SourceCoverageUnavailable);
             }
             let elevation = block.elevation_voxels[index];
-            let height = f64::from(elevation).floor();
+            let sample_x = index % request.sample_shape[0] as usize;
+            let sample_z = index / request.sample_shape[0] as usize;
+            let world_x =
+                i64::from(request.origin[0]) + sample_x as i64 * i64::from(request.stride_voxels);
+            let world_z =
+                i64::from(request.origin[1]) + sample_z as i64 * i64::from(request.stride_voxels);
+            let world_x =
+                i32::try_from(world_x).map_err(|_| WorldSourceError::InvalidBlockCoordinate)?;
+            let world_z =
+                i32::try_from(world_z).map_err(|_| WorldSourceError::InvalidBlockCoordinate)?;
+            let relief = if self.add_subgrid_relief {
+                micro_relief_voxels(self.composer_seed, world_x, world_z, block.ridge[index])
+            } else {
+                0.0
+            };
+            let height = f64::from(elevation + relief).floor();
             if !elevation.is_finite()
                 || height < f64::from(i32::MIN)
                 || height > f64::from(i32::MAX)
@@ -162,6 +189,7 @@ impl HeightfieldWorldSource {
                 temperature: block.temperature[index],
                 moisture: block.moisture[index],
                 ridge: block.ridge[index],
+                geology: geology_signal(self.composer_seed, world_x, world_z),
             });
         }
         Ok(PreparedMacroGrid { request, columns })
@@ -410,8 +438,9 @@ impl HeightfieldWorldSource {
         let column = region
             .column(x, z)
             .ok_or(WorldSourceError::MalformedMacroBlock)?;
+        let surface_material = surface_profile(column, self.sea_level_voxels).0;
         Ok(
-            edits.surface_sample_with(x, z, (column.height, Material::Stone), i32::MIN, |coord| {
+            edits.surface_sample_with(x, z, (column.height, surface_material), i32::MIN, |coord| {
                 material_for_column(column, self.sea_level_voxels, coord.y)
             }),
         )
@@ -519,7 +548,7 @@ impl WorldSourceEngine for HeightfieldWorldSource {
                 horizon_warmth: column.temperature,
                 haze: column.moisture * 0.5,
             },
-            SurfaceRegion::Alpine,
+            surface_profile(&column, self.sea_level_voxels).1,
         )
     }
 
@@ -558,6 +587,7 @@ struct PreparedColumn {
     temperature: f32,
     moisture: f32,
     ridge: f32,
+    geology: f32,
 }
 
 struct PreparedMacroGrid {
@@ -597,7 +627,28 @@ impl PreparedMacroRegion {
 
 fn material_for_column(column: &PreparedColumn, sea_level_voxels: i32, y: i32) -> Material {
     if y <= column.height {
-        Material::Stone
+        let depth = column.height - y;
+        let (surface, region) = surface_profile(column, sea_level_voxels);
+        if depth == 0 {
+            return surface;
+        }
+        let soil_depth = 5 + (column.moisture * 7.0).round() as i32;
+        if depth <= soil_depth {
+            return match surface {
+                Material::Grass | Material::Moss | Material::Snow => Material::Dirt,
+                Material::Sand | Material::RedSand | Material::Clay => surface,
+                Material::Basalt | Material::Limestone => surface,
+                _ => Material::Stone,
+            };
+        }
+        let band = (y.div_euclid(48) + (column.geology * 4.0).round() as i32).rem_euclid(13);
+        if matches!(region, SurfaceRegion::Volcanic) || (column.geology < -0.58 && band < 5) {
+            Material::Basalt
+        } else if column.geology > 0.38 && band < 8 {
+            Material::Limestone
+        } else {
+            Material::Stone
+        }
     } else if y <= sea_level_voxels {
         Material::Water
     } else {
@@ -606,16 +657,139 @@ fn material_for_column(column: &PreparedColumn, sea_level_voxels: i32, y: i32) -
 }
 
 fn surface_sample(column: &PreparedColumn, sea_level_voxels: i32) -> SurfaceSample {
+    let (material, region) = surface_profile(column, sea_level_voxels);
     SurfaceSample {
         height: column.height,
-        material: Material::Stone,
+        material,
         water_level: (column.height < sea_level_voxels).then_some(sea_level_voxels),
-        region: SurfaceRegion::Alpine,
+        region,
         moisture: column.moisture,
         temperature: column.temperature,
         ridge: column.ridge,
         route: None,
     }
+}
+
+fn surface_profile(column: &PreparedColumn, sea_level_voxels: i32) -> (Material, SurfaceRegion) {
+    let region = if column.temperature < 0.28
+        || (column.ridge > 0.72 && column.temperature < 0.56)
+        || column.height > sea_level_voxels.saturating_add(12_000)
+    {
+        SurfaceRegion::Alpine
+    } else if column.temperature > 0.62 && column.moisture < 0.20 {
+        SurfaceRegion::RedBadlands
+    } else if column.temperature > 0.50 && column.moisture < 0.34 {
+        SurfaceRegion::PaleDunes
+    } else if column.ridge > 0.76 && column.geology < -0.18 {
+        SurfaceRegion::Volcanic
+    } else if column.moisture > 0.60 {
+        SurfaceRegion::VerdantForest
+    } else {
+        SurfaceRegion::WindMoor
+    };
+    let material = if column.height <= sea_level_voxels.saturating_add(3) {
+        if column.moisture > 0.62 || column.geology < -0.45 {
+            Material::Clay
+        } else {
+            Material::Sand
+        }
+    } else {
+        match region {
+            SurfaceRegion::VerdantForest => {
+                if column.moisture > 0.78 && column.geology > 0.12 {
+                    Material::Moss
+                } else {
+                    Material::Grass
+                }
+            }
+            SurfaceRegion::WindMoor => {
+                if column.ridge > 0.66 || column.geology > 0.56 {
+                    Material::Limestone
+                } else {
+                    Material::Grass
+                }
+            }
+            SurfaceRegion::Alpine => {
+                if column.temperature < 0.44 && column.ridge < 0.88 {
+                    Material::Snow
+                } else if column.geology > 0.34 {
+                    Material::Limestone
+                } else {
+                    Material::Stone
+                }
+            }
+            SurfaceRegion::RedBadlands => {
+                if column.geology > -0.20 {
+                    Material::RedSand
+                } else {
+                    Material::Clay
+                }
+            }
+            SurfaceRegion::PaleDunes => {
+                if column.geology > 0.62 {
+                    Material::Limestone
+                } else {
+                    Material::Sand
+                }
+            }
+            SurfaceRegion::Volcanic => {
+                if column.geology < 0.52 {
+                    Material::Basalt
+                } else {
+                    Material::RedSand
+                }
+            }
+        }
+    };
+    (material, region)
+}
+
+fn micro_relief_voxels(seed: u64, x: i32, z: i32, ridge: f32) -> f32 {
+    let ridge = ridge.clamp(0.0, 1.0).powf(1.35);
+    let broad = coherent_noise(seed ^ 0x6a09_e667, x, z, 600);
+    let medium = coherent_noise(seed ^ 0xbb67_ae85, x, z, 170);
+    let fine = coherent_noise(seed ^ 0x3c6e_f372, x, z, 55);
+    broad * (8.0 + ridge * 72.0) + medium * (3.0 + ridge * 22.0) + fine * (1.0 + ridge * 6.0)
+}
+
+fn geology_signal(seed: u64, x: i32, z: i32) -> f32 {
+    (coherent_noise(seed ^ 0xa54f_f53a, x, z, 1_800) * 0.68
+        + coherent_noise(seed ^ 0x510e_527f, x, z, 520) * 0.32)
+        .clamp(-1.0, 1.0)
+}
+
+fn coherent_noise(seed: u64, x: i32, z: i32, period: i32) -> f32 {
+    let cell_x = x.div_euclid(period);
+    let cell_z = z.div_euclid(period);
+    let fraction_x = x.rem_euclid(period) as f32 / period as f32;
+    let fraction_z = z.rem_euclid(period) as f32 / period as f32;
+    let weight_x = fraction_x * fraction_x * (3.0 - 2.0 * fraction_x);
+    let weight_z = fraction_z * fraction_z * (3.0 - 2.0 * fraction_z);
+    let upper = lerp_noise(
+        hash_noise(seed, cell_x, cell_z),
+        hash_noise(seed, cell_x + 1, cell_z),
+        weight_x,
+    );
+    let lower = lerp_noise(
+        hash_noise(seed, cell_x, cell_z + 1),
+        hash_noise(seed, cell_x + 1, cell_z + 1),
+        weight_x,
+    );
+    lerp_noise(upper, lower, weight_z)
+}
+
+fn hash_noise(seed: u64, x: i32, z: i32) -> f32 {
+    let mut value = seed
+        ^ (x as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (z as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^= value >> 31;
+    (value >> 40) as f32 * (2.0 / 16_777_215.0) - 1.0
+}
+
+fn lerp_noise(left: f32, right: f32, weight: f32) -> f32 {
+    left + (right - left) * weight
 }
 
 fn normalized(value: f32) -> bool {
@@ -764,6 +938,92 @@ mod tests {
             .expect("valid fake source identity")
     }
 
+    fn column(
+        height: i32,
+        temperature: f32,
+        moisture: f32,
+        ridge: f32,
+        geology: f32,
+    ) -> PreparedColumn {
+        PreparedColumn {
+            height,
+            temperature,
+            moisture,
+            ridge,
+            geology,
+        }
+    }
+
+    #[test]
+    fn climate_slope_and_geology_classify_distinct_surfaces_and_strata() {
+        let cases = [
+            (
+                column(100, 0.60, 0.82, 0.20, 0.25),
+                Material::Moss,
+                SurfaceRegion::VerdantForest,
+            ),
+            (
+                column(100, 0.20, 0.60, 0.50, 0.00),
+                Material::Snow,
+                SurfaceRegion::Alpine,
+            ),
+            (
+                column(100, 0.80, 0.10, 0.30, 0.00),
+                Material::RedSand,
+                SurfaceRegion::RedBadlands,
+            ),
+            (
+                column(100, 0.70, 0.30, 0.30, 0.00),
+                Material::Sand,
+                SurfaceRegion::PaleDunes,
+            ),
+            (
+                column(100, 0.58, 0.40, 0.90, -0.50),
+                Material::Basalt,
+                SurfaceRegion::Volcanic,
+            ),
+            (
+                column(100, 0.50, 0.45, 0.30, 0.70),
+                Material::Limestone,
+                SurfaceRegion::WindMoor,
+            ),
+        ];
+        for (column, material, region) in cases {
+            assert_eq!(surface_profile(&column, 0), (material, region));
+            assert_eq!(material_for_column(&column, 0, column.height), material);
+        }
+
+        let meadow = column(100, 0.60, 0.82, 0.20, 0.25);
+        assert_eq!(material_for_column(&meadow, 0, 99), Material::Dirt);
+        assert_eq!(material_for_column(&meadow, 0, 80), Material::Stone);
+        let lava_field = column(100, 0.58, 0.40, 0.90, -0.70);
+        assert_eq!(material_for_column(&lava_field, 0, 80), Material::Basalt);
+        let shore = column(1, 0.60, 0.82, 0.20, -0.60);
+        assert_eq!(surface_profile(&shore, 3).0, Material::Clay);
+    }
+
+    #[test]
+    fn subgrid_relief_is_continuous_deterministic_and_slope_sensitive() {
+        let seed = 0xfeed_beef;
+        let first = micro_relief_voxels(seed, -321, 654, 0.8);
+        assert_eq!(first, micro_relief_voxels(seed, -321, 654, 0.8));
+        assert!((first - micro_relief_voxels(seed, -320, 654, 0.8)).abs() < 4.0);
+
+        let range = |ridge| {
+            let values = (0..200)
+                .map(|step| micro_relief_voxels(seed, step * 7 - 500, step * 3 + 100, ridge))
+                .collect::<Vec<_>>();
+            let minimum = values.iter().copied().fold(f32::INFINITY, f32::min);
+            let maximum = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            maximum - minimum
+        };
+        assert!(range(0.9) > range(0.0) * 3.0);
+        assert!(
+            range(0.9) < 220.0,
+            "micro relief must remain below 22 metres"
+        );
+    }
+
     fn product(
         source: &HeightfieldWorldSource,
         request: WorldProductRequest,
@@ -782,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn all_products_share_one_floor_water_and_air_composition() {
+    fn all_products_share_one_biome_strata_water_and_air_composition() {
         let source = heightfield(FakeBehavior::Valid);
         let coord = ChunkCoord::new(0, 0, 0);
         let WorldProduct::Chunk(chunk) =
@@ -790,7 +1050,7 @@ mod tests {
         else {
             panic!("expected chunk product");
         };
-        assert_eq!(chunk.chunk.get(0, 1, 0), Material::Stone);
+        assert_eq!(chunk.chunk.get(0, 1, 0), Material::Clay);
         assert_eq!(chunk.chunk.get(0, 2, 0), Material::Water);
         assert_eq!(chunk.chunk.get(0, 3, 0), Material::Water);
         assert_eq!(chunk.chunk.get(0, 4, 0), Material::Air);
@@ -830,8 +1090,9 @@ mod tests {
         };
         let sample = samples.sample(-1, -1).expect("requested sample");
         assert_eq!(sample.height, 1);
-        assert_eq!(sample.material, Material::Stone);
+        assert_eq!(sample.material, Material::Clay);
         assert_eq!(sample.water_level, Some(3));
+        assert_eq!(sample.region, SurfaceRegion::Alpine);
         assert_eq!(sample.temperature, 0.25);
         assert_eq!(sample.moisture, 0.75);
         assert_eq!(sample.ridge, 0.5);

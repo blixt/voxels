@@ -71,6 +71,8 @@ pub struct FullDetailTile {
     pub coarse: CoarseTile,
     pub latent: LatentTile,
     pub latent_patch_origin: [usize; 2],
+    /// Terrain Diffusion 30 m-grid origin of the decoded detail tile (row, column).
+    pub detail_model_origin: [i32; 2],
     pub detail: DetailTile,
 }
 
@@ -83,9 +85,18 @@ pub struct FullDetailTile {
 pub struct TerrainDiffusionMacroTileSource {
     identity: WorldSourceIdentity,
     origin_voxels: [i32; 2],
+    coarse_origin: [i32; 2],
+    coarse: CoarseTile,
+    detail_model_origin: [i32; 2],
     detail: DetailTile,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MacroSample {
+    elevation_voxels: f32,
     temperature: f32,
     moisture: f32,
+    ridge: f32,
 }
 
 pub struct MetalTerrainDiffusion {
@@ -544,10 +555,11 @@ impl MetalTerrainDiffusion {
         let detail_edge = 128;
         let latent_edge = detail_edge / LATENT_COMPRESSION;
         let latent_pixels = LATENT_TILE_EDGE * LATENT_TILE_EDGE;
-        let [patch_z, patch_x] = patch_around_maximum(
+        let [patch_z, patch_x] = highest_variance_patch(
             &latent.values[4 * latent_pixels..5 * latent_pixels],
             LATENT_TILE_EDGE,
             latent_edge,
+            false,
         );
         let mut latent_patch = vec![0.0_f32; LATENT_CHANNELS * latent_edge * latent_edge];
         for channel in 0..LATENT_CHANNELS {
@@ -574,6 +586,7 @@ impl MetalTerrainDiffusion {
             coarse,
             latent,
             latent_patch_origin: [patch_z, patch_x],
+            detail_model_origin: detail_origin,
             detail,
         })
     }
@@ -736,17 +749,13 @@ impl MetalTerrainDiffusion {
 impl TerrainDiffusionMacroTileSource {
     pub fn generate(runtime: &MetalTerrainDiffusion) -> Result<Self, TerrainDiffusionError> {
         let generated = runtime.generate_full_detail_tile(runtime.config.model_origin)?;
-        let pixels = generated.coarse.edge * generated.coarse.edge;
-        let [coarse_z, coarse_x] = generated.latent.coarse_patch_origin;
-        let coarse_index = coarse_z * generated.coarse.edge + coarse_x;
-        let temperature_celsius = generated.coarse.values[2 * pixels + coarse_index];
-        let precipitation = generated.coarse.values[4 * pixels + coarse_index];
         Ok(Self {
             identity: runtime.source_identity()?,
             origin_voxels: runtime.config.world_origin_voxels,
+            coarse_origin: runtime.config.model_origin,
+            coarse: generated.coarse,
+            detail_model_origin: generated.detail_model_origin,
             detail: generated.detail,
-            temperature: ((temperature_celsius + 50.0) / 100.0).clamp(0.0, 1.0),
-            moisture: (precipitation / 3_000.0).clamp(0.0, 1.0),
         })
     }
 
@@ -758,7 +767,7 @@ impl TerrainDiffusionMacroTileSource {
         self.identity.identity_hash()
     }
 
-    fn sample(&self, world_x: i64, world_z: i64) -> Option<(f32, f32)> {
+    fn sample(&self, world_x: i64, world_z: i64) -> Option<MacroSample> {
         const VOXELS_PER_MODEL_PIXEL: i64 = 300;
         let local_x = world_x - i64::from(self.origin_voxels[0]);
         let local_z = world_z - i64::from(self.origin_voxels[1]);
@@ -794,8 +803,62 @@ impl TerrainDiffusionMacroTileSource {
         let dz_left = bottom_left - top_left;
         let dz_right = bottom_right - top_right;
         let dz = dz_left + (dz_right - dz_left) * fraction_x;
-        let ridge = ((dx.abs() + dz.abs()) / 1_000.0).clamp(0.0, 1.0);
-        Some((interpolated * 10.0, ridge))
+        let gradient = dx.hypot(dz) / self.detail.horizontal_resolution_metres as f32;
+        let ridge = (gradient / 1.5).clamp(0.0, 1.0);
+
+        let detail_x = local_x as f32 / VOXELS_PER_MODEL_PIXEL as f32;
+        let detail_z = local_z as f32 / VOXELS_PER_MODEL_PIXEL as f32;
+        let coarse_elevation_root = self.sample_coarse_channel(0, detail_x, detail_z)?;
+        let coarse_elevation = coarse_elevation_root.signum() * coarse_elevation_root.powi(2);
+        let baseline_temperature = self.sample_coarse_channel(2, detail_x, detail_z)?;
+        let precipitation = self.sample_coarse_channel(4, detail_x, detail_z)?.max(0.0);
+        let precipitation_variability = self.sample_coarse_channel(5, detail_x, detail_z)?;
+        let temperature_celsius = (baseline_temperature
+            - (interpolated.max(0.0) - coarse_elevation.max(0.0)) * 0.0065)
+            .clamp(-15.0, 38.0);
+        let effective_temperature = temperature_celsius.max(0.0);
+        let potential_evapotranspiration =
+            250.0 + 25.0 * effective_temperature + 0.7 * effective_temperature.powi(2);
+        let aridity = precipitation / potential_evapotranspiration.max(1.0);
+        let seasonality_penalty = 1.0 - 0.35 * (precipitation_variability / 100.0).clamp(0.0, 1.0);
+        let moisture = (aridity * seasonality_penalty / 1.5).clamp(0.0, 1.0);
+        Some(MacroSample {
+            elevation_voxels: interpolated * 10.0,
+            temperature: ((temperature_celsius + 15.0) / 53.0).clamp(0.0, 1.0),
+            moisture,
+            ridge,
+        })
+    }
+
+    fn sample_coarse_channel(&self, channel: usize, detail_x: f32, detail_z: f32) -> Option<f32> {
+        const DETAIL_PIXELS_PER_COARSE_PIXEL: f32 = 256.0;
+        if channel >= self.coarse.channels
+            || self.coarse.edge == 0
+            || self.coarse.values.len()
+                != self.coarse.channels * self.coarse.edge * self.coarse.edge
+        {
+            return None;
+        }
+        let model_x = self.detail_model_origin[1] as f32 + detail_x;
+        let model_z = self.detail_model_origin[0] as f32 + detail_z;
+        let x = model_x / DETAIL_PIXELS_PER_COARSE_PIXEL - self.coarse_origin[1] as f32;
+        let z = model_z / DETAIL_PIXELS_PER_COARSE_PIXEL - self.coarse_origin[0] as f32;
+        let x = x.clamp(0.0, (self.coarse.edge - 1) as f32);
+        let z = z.clamp(0.0, (self.coarse.edge - 1) as f32);
+        let left = x.floor() as usize;
+        let top = z.floor() as usize;
+        let right = (left + 1).min(self.coarse.edge - 1);
+        let bottom = (top + 1).min(self.coarse.edge - 1);
+        let fraction_x = x - left as f32;
+        let fraction_z = z - top as f32;
+        let offset = channel * self.coarse.edge * self.coarse.edge;
+        let sample = |sample_x: usize, sample_z: usize| {
+            self.coarse.values[offset + sample_z * self.coarse.edge + sample_x]
+        };
+        let upper = sample(left, top) + (sample(right, top) - sample(left, top)) * fraction_x;
+        let lower =
+            sample(left, bottom) + (sample(right, bottom) - sample(left, bottom)) * fraction_x;
+        Some(upper + (lower - upper) * fraction_z)
     }
 }
 
@@ -838,11 +901,11 @@ impl MacroTerrainSource for TerrainDiffusionMacroTileSource {
                         + i64::from(x) * i64::from(request.stride_voxels);
                     let world_z = i64::from(request.origin[1])
                         + i64::from(z) * i64::from(request.stride_voxels);
-                    if let Some((elevation, ridge_value)) = self.sample(world_x, world_z) {
-                        elevation_voxels.push(elevation);
-                        temperature.push(self.temperature);
-                        moisture.push(self.moisture);
-                        ridge.push(ridge_value);
+                    if let Some(sample) = self.sample(world_x, world_z) {
+                        elevation_voxels.push(sample.elevation_voxels);
+                        temperature.push(sample.temperature);
+                        moisture.push(sample.moisture);
+                        ridge.push(sample.ridge);
                         validity.push(true);
                     } else {
                         elevation_voxels.push(0.0);
@@ -1031,7 +1094,8 @@ fn lerp(left: f64, right: f64, weight: f64) -> f64 {
 }
 
 fn highest_land_patch(coarse: &CoarseTile) -> [usize; 2] {
-    highest_average_patch(&coarse.values[..coarse.edge * coarse.edge], coarse.edge, 4)
+    let elevation = &coarse.values[..coarse.edge * coarse.edge];
+    highest_variance_patch(elevation, coarse.edge, 4, true)
 }
 
 fn highest_average_patch(values: &[f32], edge: usize, patch_edge: usize) -> [usize; 2] {
@@ -1056,23 +1120,42 @@ fn highest_average_patch(values: &[f32], edge: usize, patch_edge: usize) -> [usi
     best_origin
 }
 
-fn patch_around_maximum(values: &[f32], edge: usize, patch_edge: usize) -> [usize; 2] {
+fn highest_variance_patch(
+    values: &[f32],
+    edge: usize,
+    patch_edge: usize,
+    require_positive: bool,
+) -> [usize; 2] {
     debug_assert!(patch_edge > 0 && patch_edge <= edge);
     debug_assert_eq!(values.len(), edge * edge);
-    let maximum_index = values
-        .iter()
-        .enumerate()
-        .max_by(|(_, left), (_, right)| left.total_cmp(right))
-        .map_or(0, |(index, _)| index);
-    let maximum = [maximum_index / edge, maximum_index % edge];
-    [
-        maximum[0]
-            .saturating_sub(patch_edge / 2)
-            .min(edge - patch_edge),
-        maximum[1]
-            .saturating_sub(patch_edge / 2)
-            .min(edge - patch_edge),
-    ]
+    let mut best_origin = None;
+    let mut best_variance = f64::NEG_INFINITY;
+    for z in 0..=edge - patch_edge {
+        for x in 0..=edge - patch_edge {
+            let mut count = 0.0;
+            let mut sum = 0.0;
+            let mut sum_of_squares = 0.0;
+            let mut valid = true;
+            for patch_z in 0..patch_edge {
+                for patch_x in 0..patch_edge {
+                    let value = values[(z + patch_z) * edge + x + patch_x];
+                    valid &= !require_positive || value > 0.0;
+                    count += 1.0;
+                    sum += f64::from(value);
+                    sum_of_squares += f64::from(value) * f64::from(value);
+                }
+            }
+            if !valid {
+                continue;
+            }
+            let variance = sum_of_squares / count - (sum / count).powi(2);
+            if variance > best_variance {
+                best_variance = variance;
+                best_origin = Some([z, x]);
+            }
+        }
+    }
+    best_origin.unwrap_or_else(|| highest_average_patch(values, edge, patch_edge))
 }
 
 fn base_conditioning(
@@ -1420,10 +1503,10 @@ mod tests {
     }
 
     #[test]
-    fn representative_detail_preview_centres_the_highest_low_frequency_point() {
+    fn representative_detail_preview_selects_the_first_highest_variance_window() {
         let mut values = vec![0.0; 64];
         values[5 * 8 + 6] = 4.0;
-        assert_eq!(patch_around_maximum(&values, 8, 4), [3, 4]);
+        assert_eq!(highest_variance_patch(&values, 8, 4, false), [2, 3]);
     }
 
     #[test]
@@ -1431,9 +1514,23 @@ mod tests {
         let mut config = TerrainDiffusionConfig::pinned("model", 7);
         config.world_origin_voxels = [600, -300];
         let identity = config.source_identity().expect("identity");
+        let mut coarse_values = vec![0.0; COARSE_SAMPLE_CHANNELS * 4];
+        coarse_values[..4].copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
+        coarse_values[2 * 4..3 * 4].copy_from_slice(&[18.0, 22.0, 10.0, 14.0]);
+        coarse_values[3 * 4..4 * 4].fill(300.0);
+        coarse_values[4 * 4..5 * 4].copy_from_slice(&[400.0, 800.0, 1_200.0, 1_600.0]);
+        coarse_values[5 * 4..6 * 4].fill(50.0);
         let source = TerrainDiffusionMacroTileSource {
             identity,
             origin_voxels: config.world_origin_voxels,
+            coarse_origin: config.model_origin,
+            coarse: CoarseTile {
+                channels: COARSE_SAMPLE_CHANNELS,
+                edge: 2,
+                values: coarse_values,
+                elapsed_seconds: 0.0,
+            },
+            detail_model_origin: [0, 0],
             detail: DetailTile {
                 edge: 2,
                 horizontal_resolution_metres: 30,
@@ -1441,8 +1538,6 @@ mod tests {
                 residual_sqrt_elevation: vec![0.0; 4],
                 elapsed_seconds: 0.0,
             },
-            temperature: 0.5,
-            moisture: 0.25,
         };
         let result = source
             .request_blocks(MacroBlockBatch {
@@ -1464,7 +1559,9 @@ mod tests {
         assert_eq!(result.blocks[0].elevation_voxels, vec![10.0, 20.0, 0.0]);
         assert_eq!(result.blocks[0].validity, vec![true, true, false]);
         assert_eq!(result.blocks[1].elevation_voxels, vec![25.0]);
-        assert_eq!(result.blocks[1].ridge, vec![0.003]);
+        assert!((result.blocks[1].ridge[0] - 0.049_69).abs() < 0.001);
+        assert!(result.blocks[1].temperature[0] > 0.0);
+        assert!(result.blocks[1].moisture[0] > 0.0);
         assert_eq!(
             result.blocks[0].coordinate_transform.origin_voxels,
             [600, -300]

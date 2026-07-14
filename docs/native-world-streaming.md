@@ -244,10 +244,11 @@ cluster/page products remain disposable rendering caches.
 
 Terrain Diffusion currently yields one finite 128x128 height tile at 30 m per sample: 3.84 km square,
 with its minimum corner placed by `world_origin_voxels` (the checked-in value centers it on spawn).
-Heights are bilinearly sampled into canonical 10 cm columns. The
-fidelity-honest composer creates stone, air, and sea-level water only; it does not invent caves,
-strata, vegetation, roads, landmarks, or procedural-v16 authored content that the model did not
-produce. Out-of-coverage requests fail instead of tiling or falling back to procedural terrain.
+Heights are bilinearly sampled into canonical 10 cm columns. The canonical composer adds bounded,
+source-identity-bound subgrid relief, climate-classified surface materials, shallow soil, and
+coherent stone/limestone/basalt strata. It still does not invent caves, vegetation, roads,
+landmarks, or procedural-v16 authored content that the model did not produce. Out-of-coverage
+requests fail instead of tiling or falling back to procedural terrain.
 
 [chrome-147]: https://developer.chrome.com/release-notes/147#local_network_access_lna
 [lna]: https://developer.chrome.com/blog/local-network-access

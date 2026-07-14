@@ -17,7 +17,7 @@ use voxels_world::{
 
 pub const MODEL_REPOSITORY: &str = "xandergos/terrain-diffusion-30m";
 pub const MODEL_REVISION: &str = "9ef8030cb805b433b98ec25c5dddefbac07a9e26";
-pub const IMPLEMENTATION_VERSION: u32 = 2;
+pub const IMPLEMENTATION_VERSION: u32 = 3;
 pub const SAMPLER_VERSION: u32 = 1;
 pub const SCHEDULER_VERSION: u32 = 1;
 pub const COARSE_WEIGHT_SHA256: &str =
@@ -71,7 +71,7 @@ impl TerrainDiffusionConfig {
 
     pub fn source_identity(&self) -> Result<WorldSourceIdentity, TerrainDiffusionError> {
         let mut configuration = Sha256::new();
-        configuration.update(b"voxels-terrain-diffusion-configuration-v3\0");
+        configuration.update(b"voxels-terrain-diffusion-configuration-v4\0");
         configuration.update(self.seed.to_le_bytes());
         configuration.update([self.precision as u8]);
         for coordinate in self.world_origin_voxels {
@@ -81,7 +81,7 @@ impl TerrainDiffusionConfig {
             configuration.update(coordinate.to_le_bytes());
         }
         configuration.update(
-            b"coordinate-keyed-fractal-continent-climate-v1;elevation-noise-ratio-0.05;highest-4x4-coarse;max-centred-16x16-latent\0",
+            b"coordinate-keyed-fractal-continent-climate-v1;elevation-noise-ratio-0.05;highest-variance-positive-4x4-coarse;highest-variance-16x16-latent;spatial-coarse-climate-lapse-aridity;physical-gradient-ridge\0",
         );
         configuration.update(128_u32.to_le_bytes());
         let configuration_hash: [u8; 32] = configuration.finalize().into();
