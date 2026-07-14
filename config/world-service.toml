@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 3
+schema_version = 4
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 

@@ -26,7 +26,7 @@ pub use server::{
     serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 3;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 4;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
     0x76, 0x6f, 0x78, 0x65, 0x6c, 0x73, 0x40, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x01,
@@ -34,7 +34,7 @@ const DEFAULT_WORLD_ID: [u8; 16] = [
 const MAX_CONFIGURED_IN_FLIGHT_BATCHES: u16 = 1_024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct LoopbackTransportConfig {
     pub listen: SocketAddr,
     pub allowed_origins: Vec<String>,
@@ -75,7 +75,7 @@ impl Default for LoopbackTransportConfig {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SpawnConfig {
     /// Canonical voxel X/Z coordinate sampled when constructing `WorldOpened`.
     pub xz_voxels: [i32; 2],
@@ -99,7 +99,7 @@ pub enum TerrainModelPrecision {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct TerrainDiffusionProviderConfig {
     /// Cache root containing the immutable model-revision directory. Relative paths are resolved
     /// from the directory containing the service configuration file.
@@ -132,11 +132,8 @@ pub struct WorldServiceConfig {
     pub world_id: Uuid,
     pub world_seed: u64,
     pub source: WorldSourceMode,
-    #[serde(default)]
     pub transport: LoopbackTransportConfig,
-    #[serde(default)]
     pub spawn: SpawnConfig,
-    #[serde(default)]
     pub terrain_diffusion: TerrainDiffusionProviderConfig,
 }
 
@@ -541,15 +538,31 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 3
+schema_version = 4
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
+
+[transport]
+listen = "127.0.0.1:9777"
+allowed_origins = ["http://127.0.0.1:5173"]
+auth_subprotocol_token = "test-token"
+max_frame_bytes = 16777216
+max_outbound_bytes_per_client = 33554432
+max_in_flight_batches = 16
+max_connections = 32
+global_queue_capacity = 128
+generation_workers = 8
+generation_workers_per_client = 2
+
+[spawn]
+xz_voxels = [0, 0]
 
 [terrain_diffusion]
 precision = "float16"
 world_origin_voxels = [1200, -900]
 model_origin = [-64, 128]
+sea_level_voxels = 52
 "#;
 
     fn test_config(source: WorldSourceMode) -> WorldServiceConfig {
@@ -594,12 +607,12 @@ model_origin = [-64, 128]
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 3", "schema_version = 2");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 4", "schema_version = 3");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 3,
-                found: 2,
+                expected: 4,
+                found: 3,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
@@ -615,6 +628,18 @@ model_origin = [-64, 128]
             WorldServiceConfig::from_toml(&wrong_origin_shape),
             Err(WorldServiceConfigError::Parse(_))
         ));
+
+        for missing in [
+            "max_connections = 32\n",
+            "xz_voxels = [0, 0]\n",
+            "precision = \"float16\"\n",
+        ] {
+            let incomplete = CONFIG_TOML.replace(missing, "");
+            assert!(matches!(
+                WorldServiceConfig::from_toml(&incomplete),
+                Err(WorldServiceConfigError::Parse(_))
+            ));
+        }
     }
 
     #[test]
