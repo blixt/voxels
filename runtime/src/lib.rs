@@ -52,14 +52,30 @@ impl AuthoritativeEditRevisions {
         affected_chunks: &[ChunkCoord],
         affected_surfaces: &[SurfaceTileCoord],
     ) -> bool {
-        let apply_value = advance_revision(&mut self.voxels, coord, revision);
+        self.observe_commit_batch(&[coord], revision, affected_chunks, affected_surfaces)[0]
+    }
+
+    /// Records one atomic multi-voxel commit without repeatedly advancing identical product
+    /// floors. The returned mask is parallel to `coords` and identifies values newer than the
+    /// client's current value for that coordinate.
+    pub fn observe_commit_batch(
+        &mut self,
+        coords: &[VoxelCoord],
+        revision: u64,
+        affected_chunks: &[ChunkCoord],
+        affected_surfaces: &[SurfaceTileCoord],
+    ) -> Vec<bool> {
+        let apply_values = coords
+            .iter()
+            .map(|&coord| advance_revision(&mut self.voxels, coord, revision))
+            .collect();
         for &chunk in affected_chunks {
             advance_revision(&mut self.chunks, chunk, revision);
         }
         for &surface in affected_surfaces {
             advance_revision(&mut self.surfaces, surface, revision);
         }
-        apply_value
+        apply_values
     }
 
     pub fn chunk_floor(&self, coord: ChunkCoord) -> u64 {
@@ -591,7 +607,19 @@ impl StreamScheduler {
     /// boundary neighbors retain generated voxel data when available; generation already in flight
     /// is restarted under a new revision.
     pub fn mark_voxel_edited(&mut self, voxel: VoxelCoord) -> DirtyReport {
-        let affected_chunks = EditMap::affected_chunks(voxel);
+        self.mark_voxels_edited(&[voxel])
+    }
+
+    /// Invalidates the union of chunks affected by one atomic multi-voxel edit. A chunk revision
+    /// advances once even when many adjacent voxels touch it, avoiding 125 redundant scheduler
+    /// transitions for a half-metre dig.
+    pub fn mark_voxels_edited(&mut self, voxels: &[VoxelCoord]) -> DirtyReport {
+        let affected_chunks = voxels
+            .iter()
+            .flat_map(|&voxel| EditMap::affected_chunks(voxel))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let mut report = DirtyReport {
             affected_chunks: affected_chunks.clone(),
             ..DirtyReport::default()
@@ -1473,6 +1501,51 @@ mod tests {
         revisions.clear();
         assert_eq!(revisions.chunk_floor(chunk), 1);
         assert_eq!(revisions.surface_floor(surface), 1);
+    }
+
+    #[test]
+    fn atomic_edit_batch_advances_each_value_and_shared_product_floor_once() {
+        let voxels = [VoxelCoord::new(31, 8, 7), VoxelCoord::new(32, 8, 7)];
+        let chunks = [ChunkCoord::new(0, 0, 0), ChunkCoord::new(1, 0, 0)];
+        let surface = SurfaceTileCoord::containing(
+            voxels_world::SurfaceLodLevel::Stride16,
+            voxels[0].x,
+            voxels[0].z,
+        );
+        let mut revisions = AuthoritativeEditRevisions::default();
+
+        assert_eq!(
+            revisions.observe_commit_batch(&voxels, 9, &chunks, &[surface]),
+            vec![true, true]
+        );
+        assert_eq!(
+            revisions.observe_commit_batch(&voxels, 9, &chunks, &[surface]),
+            vec![false, false]
+        );
+        assert_eq!(revisions.chunk_floor(chunks[0]), 9);
+        assert_eq!(revisions.chunk_floor(chunks[1]), 9);
+        assert_eq!(revisions.surface_floor(surface), 9);
+    }
+
+    #[test]
+    fn atomic_adjacent_edits_deduplicate_scheduler_chunk_invalidations() {
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 1,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: 9,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
+        });
+        scheduler.update_focus(ChunkCoord::new(0, 0, 0));
+        let report = scheduler.mark_voxels_edited(&[
+            VoxelCoord::new(30, 4, 4),
+            VoxelCoord::new(31, 4, 4),
+            VoxelCoord::new(32, 4, 4),
+        ]);
+        assert_eq!(
+            report.affected_chunks,
+            vec![ChunkCoord::new(0, 0, 0), ChunkCoord::new(1, 0, 0)]
+        );
     }
 
     #[test]
