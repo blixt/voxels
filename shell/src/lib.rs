@@ -1422,14 +1422,23 @@ mod web {
                 affected_chunks,
                 affected_surface_tiles,
             );
+            let accepted_mutations = mutations
+                .iter()
+                .copied()
+                .zip(apply_values)
+                .filter_map(|(mutation, apply)| apply.then_some(mutation))
+                .collect::<Vec<_>>();
             {
                 let mut edits = self.edits.borrow_mut();
-                for (mutation, apply) in mutations.iter().zip(apply_values) {
-                    if apply {
-                        edits.replace_durable_override(mutation.coord, Some(mutation.material));
-                    }
+                for mutation in &accepted_mutations {
+                    edits.replace_durable_override(mutation.coord, Some(mutation.material));
                 }
             }
+            voxels_world::apply_resident_mutations(
+                &mut self.chunks.borrow_mut(),
+                &mut self.chunk_halos.borrow_mut(),
+                &accepted_mutations,
+            );
             let canonical = {
                 let mut scheduler = self.scheduler.borrow_mut();
                 let report = scheduler.mark_voxels_edited(&coords);

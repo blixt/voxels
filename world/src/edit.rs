@@ -1,6 +1,6 @@
 use crate::{
-    CHUNK_EDGE, Chunk, ChunkCoord, FEATURE_MAX_RADIUS_VOXELS, Generator, Material, SkylineFeature,
-    SurfaceTileCoord,
+    CHUNK_EDGE, Chunk, ChunkCoord, FEATURE_MAX_RADIUS_VOXELS, Generator, Material, MeshingHalo,
+    SkylineFeature, SurfaceTileCoord,
 };
 use std::collections::BTreeMap;
 
@@ -448,6 +448,35 @@ impl EditMap {
     }
 }
 
+/// Applies an authoritative mutation batch to already resident canonical chunks and mesh halos.
+///
+/// A commit already contains final voxel values, so patching the bounded resident cache is both
+/// faster and more coherent than fetching the same chunks again. The owning chunk feeds physics and
+/// raycasts; every touched neighbor halo feeds remeshing across chunk faces, edges, and corners.
+pub fn apply_resident_mutations(
+    chunks: &mut BTreeMap<(i32, i32, i32), Chunk>,
+    halos: &mut BTreeMap<(i32, i32, i32), MeshingHalo>,
+    mutations: &[crate::protocol::VoxelMutation],
+) {
+    for mutation in mutations {
+        let owner = mutation.coord.chunk();
+        if let Some(chunk) = chunks.get_mut(&(owner.x, owner.y, owner.z)) {
+            let [x, y, z] = mutation.coord.local();
+            chunk.set(x, y, z, mutation.material);
+        }
+        for coord in EditMap::affected_chunks(mutation.coord) {
+            if let Some(halo) = halos.get_mut(&(coord.x, coord.y, coord.z)) {
+                halo.set_world(
+                    mutation.coord.x,
+                    mutation.coord.y,
+                    mutation.coord.z,
+                    mutation.material,
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,5 +710,136 @@ mod tests {
         assert!(one_row > empty);
         edits.replace_durable_override(coord, None);
         assert_eq!(edits.logical_bytes(), empty);
+    }
+
+    #[test]
+    fn authoritative_edits_patch_resident_core_and_every_boundary_halo() {
+        let target = VoxelCoord::new(31, 31, 31);
+        let affected = EditMap::affected_chunks(target);
+        assert_eq!(
+            affected.len(),
+            8,
+            "a corner edit must invalidate eight chunks"
+        );
+
+        let mut chunks = BTreeMap::new();
+        let mut halos = BTreeMap::new();
+        for coord in &affected {
+            chunks.insert(
+                (coord.x, coord.y, coord.z),
+                Chunk::filled(*coord, Material::Stone),
+            );
+            halos.insert(
+                (coord.x, coord.y, coord.z),
+                MeshingHalo::from_sampler(*coord, |_, _, _| Material::Stone),
+            );
+        }
+
+        apply_resident_mutations(
+            &mut chunks,
+            &mut halos,
+            &[crate::protocol::VoxelMutation {
+                coord: target,
+                material: Material::Air,
+            }],
+        );
+
+        let owner = target.chunk();
+        let [x, y, z] = target.local();
+        assert_eq!(
+            chunks[&(owner.x, owner.y, owner.z)].get(x, y, z),
+            Material::Air,
+            "physics and raycasts must see the authoritative value immediately"
+        );
+        for coord in affected {
+            let sampled =
+                halos[&(coord.x, coord.y, coord.z)].sample_world(target.x, target.y, target.z);
+            if coord == owner {
+                assert_eq!(sampled, None, "an owner's halo must exclude its core");
+            } else {
+                assert_eq!(
+                    sampled,
+                    Some(Material::Air),
+                    "every neighboring mesh halo must receive the boundary edit"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rapid_place_dig_and_cross_chunk_batches_leave_one_canonical_final_state() {
+        let coords = [
+            VoxelCoord::new(-1, 7, 31),
+            VoxelCoord::new(0, 7, 31),
+            VoxelCoord::new(31, 7, 31),
+            VoxelCoord::new(32, 7, 32),
+        ];
+        let resident_coords = coords
+            .iter()
+            .flat_map(|coord| EditMap::affected_chunks(*coord))
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut chunks = resident_coords
+            .iter()
+            .map(|coord| {
+                (
+                    (coord.x, coord.y, coord.z),
+                    Chunk::filled(*coord, Material::Air),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut halos = resident_coords
+            .iter()
+            .map(|coord| {
+                (
+                    (coord.x, coord.y, coord.z),
+                    MeshingHalo::from_sampler(*coord, |_, _, _| Material::Air),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let placed = coords
+            .iter()
+            .copied()
+            .map(|coord| crate::protocol::VoxelMutation {
+                coord,
+                material: Material::Basalt,
+            })
+            .collect::<Vec<_>>();
+        apply_resident_mutations(&mut chunks, &mut halos, &placed);
+        apply_resident_mutations(
+            &mut chunks,
+            &mut halos,
+            &[
+                crate::protocol::VoxelMutation {
+                    coord: coords[0],
+                    material: Material::Air,
+                },
+                crate::protocol::VoxelMutation {
+                    coord: coords[2],
+                    material: Material::GlowCrystal,
+                },
+            ],
+        );
+
+        let expected = [
+            Material::Air,
+            Material::Basalt,
+            Material::GlowCrystal,
+            Material::Basalt,
+        ];
+        for (coord, expected) in coords.into_iter().zip(expected) {
+            let owner = coord.chunk();
+            let [x, y, z] = coord.local();
+            assert_eq!(chunks[&(owner.x, owner.y, owner.z)].get(x, y, z), expected);
+            for affected in EditMap::affected_chunks(coord) {
+                if affected != owner {
+                    assert_eq!(
+                        halos[&(affected.x, affected.y, affected.z)]
+                            .sample_world(coord.x, coord.y, coord.z),
+                        Some(expected)
+                    );
+                }
+            }
+        }
     }
 }

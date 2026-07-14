@@ -806,6 +806,33 @@ impl MeshingHalo {
         meshing_halo_index(local).map(|index| self.voxels[index])
     }
 
+    /// Replaces one material in the shell when the coordinate belongs to this halo.
+    ///
+    /// Authoritative edit commits use this to keep resident near-world meshes coherent without a
+    /// redundant network round trip. Core coordinates deliberately return `false`; their owning
+    /// [`Chunk`] is the canonical resident storage for those voxels.
+    pub fn set_world(&mut self, x: i32, y: i32, z: i32, material: Material) -> bool {
+        let origin = self.coord.world_origin();
+        let local = [
+            i64::from(x) - i64::from(origin[0]),
+            i64::from(y) - i64::from(origin[1]),
+            i64::from(z) - i64::from(origin[2]),
+        ];
+        let (Ok(x), Ok(y), Ok(z)) = (
+            i32::try_from(local[0]),
+            i32::try_from(local[1]),
+            i32::try_from(local[2]),
+        ) else {
+            return false;
+        };
+        let local = [x, y, z];
+        let Some(index) = meshing_halo_index(local) else {
+            return false;
+        };
+        self.voxels[index] = material;
+        true
+    }
+
     pub fn sample_world(&self, x: i32, y: i32, z: i32) -> Option<Material> {
         let origin = self.coord.world_origin();
         let local = [
@@ -1485,7 +1512,7 @@ mod tests {
     fn meshing_halo_has_exact_shell_and_random_access() {
         let coord = ChunkCoord::new(-2, 3, 4);
         let origin = coord.world_origin();
-        let halo = MeshingHalo::from_sampler(coord, |x, y, z| {
+        let mut halo = MeshingHalo::from_sampler(coord, |x, y, z| {
             if (x ^ y ^ z) & 1 == 0 {
                 Material::Stone
             } else {
@@ -1526,6 +1553,18 @@ mod tests {
         }
         assert_eq!(halo.sample_local([0, 0, 0]), None);
         assert_eq!(halo.sample_local([-2, 0, 0]), None);
+
+        for local in [[-1, -1, -1], [32, 32, 32], [-1, 7, 19], [31, 32, 0]] {
+            let world = [
+                origin[0] + local[0],
+                origin[1] + local[1],
+                origin[2] + local[2],
+            ];
+            assert!(halo.set_world(world[0], world[1], world[2], Material::GlowCrystal));
+            assert_eq!(halo.sample_local(local), Some(Material::GlowCrystal));
+        }
+        assert!(!halo.set_world(origin[0], origin[1], origin[2], Material::GlowCrystal));
+        assert!(!halo.set_world(origin[0] - 2, origin[1], origin[2], Material::GlowCrystal));
 
         let mut indices = std::collections::BTreeSet::new();
         for y in -1..=CHUNK_EDGE as i32 {

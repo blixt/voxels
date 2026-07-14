@@ -34,7 +34,7 @@ pub use composition::{
     COMPOSITION_EDGE_FEATURE_CELLS, FeatureComposition, FeatureCompositionId,
     FeatureCompositionInfluence, FeatureCompositionMode, FeatureCompositionRole,
 };
-pub use edit::{EditMap, VoxelCoord};
+pub use edit::{EditMap, VoxelCoord, apply_resident_mutations};
 pub use feature::{
     FEATURE_CELL_VOXELS, FEATURE_MAX_RADIUS_VOXELS, SkylineFeature, SkylineFeatureId,
     SkylineFeatureKind,
