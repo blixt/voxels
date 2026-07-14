@@ -28,10 +28,13 @@ fn camera_from_persisted_values(values: [f32; 5]) -> (CameraState, bool) {
 #[cfg(target_arch = "wasm32")]
 mod persist;
 #[cfg(target_arch = "wasm32")]
+mod presence_remote;
+#[cfg(target_arch = "wasm32")]
 pub mod remote;
 #[cfg(target_arch = "wasm32")]
 mod web {
     use crate::persist::{PersistenceConfig, PersistencePlayer, PersistenceWorld, Store};
+    use crate::presence_remote::RemotePresenceClient;
     use crate::remote::{
         RemoteChunkCompletion, RemoteSurfaceCompletion, RemoteSurfaceTicket, RemoteWorldClient,
         RemoteWorldError,
@@ -248,6 +251,7 @@ mod web {
         camera: RefCell<CameraState>,
         input: RefCell<InputState>,
         remote: RemoteWorldClient,
+        presence: RemotePresenceClient,
         source_identity_hash: WorldSourceIdentityHash,
         remote_environment: (AtmosphereSample, SurfaceRegion),
         edits: RefCell<EditMap>,
@@ -471,6 +475,13 @@ mod web {
             ));
             let stream_start = performance_now(performance.as_ref());
             self.stream_world(&camera);
+            if let Some(opened) = self.remote.world_opened() {
+                self.presence.ensure_session(&opened, time);
+            }
+            let _remote_avatars = self.presence.update(&camera, time, dt);
+            if let Some(error) = self.presence.take_error() {
+                log_gpu_error(&format!("player presence: {error}"));
+            }
             let stream_ms = (performance_now(performance.as_ref()) - stream_start) as f32;
             self.stream_milliseconds
                 .set(smoothed_ms(self.stream_milliseconds.get(), stream_ms));
@@ -1176,6 +1187,7 @@ mod web {
 
         fn prepare_stop(&self) {
             self.persist_camera_if_changed(&self.camera.borrow());
+            self.presence.close();
             self.remote.close();
             self.stopped.set(true);
             let id = self.frame_id.replace(0);
@@ -1898,7 +1910,7 @@ mod web {
         };
         let width = (css_width * dpr).round().max(1.0) as u32;
         let height = (css_height * dpr).round().max(1.0) as u32;
-        let remote = RemoteWorldClient::connect(world_transport, identity.clone())
+        let remote = RemoteWorldClient::connect(world_transport.clone(), identity.clone())
             .await
             .map_err(|error| JsValue::from_str(&format!("connect world service: {error}")))?;
         let opened = remote
@@ -1958,6 +1970,9 @@ mod web {
                 persisted_camera = Some(crate::camera_persistence_values(&candidate));
             }
         }
+        let presence =
+            RemotePresenceClient::start(world_transport, client_config.multiplayer, &opened)
+                .map_err(|error| JsValue::from_str(&format!("connect player presence: {error}")))?;
         let renderer = Renderer::new(
             wgpu::SurfaceTarget::OffscreenCanvas(canvas),
             width,
@@ -1996,6 +2011,7 @@ mod web {
             camera: RefCell::new(camera),
             input: RefCell::new(InputState::default()),
             remote,
+            presence,
             source_identity_hash: opened.manifest.source_identity_hash(),
             remote_environment,
             edits: RefCell::new(edits),

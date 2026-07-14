@@ -521,11 +521,14 @@ impl RemoteInner {
             .capabilities
             .contains(WorldCapabilities::CANONICAL_CHUNKS)
             || !opened.capabilities.contains(WorldCapabilities::SURFACE_LOD)
+            || !opened
+                .capabilities
+                .contains(WorldCapabilities::PLAYER_PRESENCE)
         {
             self.disconnect(
                 generation,
                 RemoteWorldError::Protocol(
-                    "world service lacks canonical chunk or surface LOD capability".to_owned(),
+                    "world service lacks a required world or player-presence capability".to_owned(),
                 ),
             );
             return;

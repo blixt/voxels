@@ -1,0 +1,577 @@
+//! Dedicated browser-worker transport for latency-sensitive player presence.
+
+use glam::Vec3;
+use js_sys::{Array, ArrayBuffer, Uint8Array};
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use voxels_client_config::{MultiplayerConfig, WorldTransportConfig};
+use voxels_core::{
+    CameraState, PresenceInterpolationConfig, RemoteAvatarPose, RemotePlayerId, RemotePoseSample,
+    RemotePresenceSnapshot, RemotePresenceTimeline,
+};
+use voxels_world::protocol::{
+    self, OpenPresence, PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING,
+    PlayerId, PlayerPoseUpdate, PresencePing, PresencePong, PresenceSessionId, WorldOpened,
+};
+use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
+use web_sys::{
+    BinaryType, CloseEvent, ErrorEvent, Event, MessageEvent, WebSocket, WorkerGlobalScope,
+};
+
+const RECONNECT_DELAY_MS: f64 = 500.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresenceConnectionState {
+    Connecting,
+    Handshaking,
+    Open,
+    WaitingToReconnect,
+    Closed,
+}
+
+#[derive(Clone)]
+pub struct RemotePresenceClient {
+    inner: Rc<PresenceInner>,
+}
+
+impl RemotePresenceClient {
+    pub fn start(
+        transport: WorldTransportConfig,
+        config: MultiplayerConfig,
+        opened: &WorldOpened,
+    ) -> Result<Self, String> {
+        transport.validate().map_err(|error| error.to_string())?;
+        config.validate().map_err(|error| error.to_string())?;
+        if !opened
+            .capabilities
+            .contains(protocol::WorldCapabilities::PLAYER_PRESENCE)
+        {
+            return Err("world service lacks player-presence capability".to_owned());
+        }
+        let interpolation = PresenceInterpolationConfig {
+            initial_delay_ms: u16::try_from(config.interpolation_delay_ms)
+                .map_err(|_| "interpolation delay does not fit the client")?,
+            min_delay_ms: u16::try_from(config.min_interpolation_delay_ms)
+                .map_err(|_| "minimum interpolation delay does not fit the client")?,
+            max_delay_ms: u16::try_from(config.max_interpolation_delay_ms)
+                .map_err(|_| "maximum interpolation delay does not fit the client")?,
+            max_extrapolation_ms: u16::try_from(config.max_extrapolation_ms)
+                .map_err(|_| "extrapolation delay does not fit the client")?,
+        };
+        let timeline = RemotePresenceTimeline::new(interpolation)
+            .map_err(|error| format!("presence interpolation: {error}"))?;
+        let inner = Rc::new(PresenceInner {
+            transport,
+            config,
+            local_player_id: opened.identity.player_id,
+            state: Cell::new(PresenceConnectionState::WaitingToReconnect),
+            socket: RefCell::new(None),
+            handlers: RefCell::new(None),
+            generation: Cell::new(0),
+            connection_id: Cell::new(opened.connection_id),
+            session_id: Cell::new(Some(opened.presence_session_id)),
+            next_pose_sequence: Cell::new(1),
+            next_ping_sequence: Cell::new(1),
+            last_pose_send_ms: Cell::new(f64::NEG_INFINITY),
+            last_ping_send_ms: Cell::new(f64::NEG_INFINITY),
+            reconnect_after_ms: Cell::new(0.0),
+            discontinuity_pending: Cell::new(true),
+            clock: Cell::new(ClockSync::default()),
+            timeline: RefCell::new(timeline),
+            last_error: RefCell::new(None),
+        });
+        PresenceInner::open_socket(&inner)?;
+        Ok(Self { inner })
+    }
+
+    /// Rebinds after a world-socket reconnect and otherwise performs bounded presence reconnects.
+    pub fn ensure_session(&self, opened: &WorldOpened, local_time_ms: f64) {
+        if opened.connection_id != self.inner.connection_id.get()
+            || self.inner.session_id.get() != Some(opened.presence_session_id)
+        {
+            self.inner.replace_session(opened);
+        }
+        if self.inner.state.get() == PresenceConnectionState::WaitingToReconnect
+            && local_time_ms >= self.inner.reconnect_after_ms.get()
+            && let Err(error) = PresenceInner::open_socket(&self.inner)
+        {
+            *self.inner.last_error.borrow_mut() = Some(error);
+            self.inner
+                .reconnect_after_ms
+                .set(local_time_ms + RECONNECT_DELAY_MS);
+        }
+    }
+
+    /// Coalesces local pose transmission and clock sync on the render clock, then samples remote
+    /// players from the shared delayed server timeline.
+    pub fn update(
+        &self,
+        camera: &CameraState,
+        local_time_ms: f64,
+        frame_delta_seconds: f32,
+    ) -> Vec<RemoteAvatarPose> {
+        if self.inner.state.get() == PresenceConnectionState::Open {
+            self.inner.maybe_send_ping(local_time_ms);
+            self.inner.maybe_send_pose(camera, local_time_ms);
+        }
+        let estimated_server_time = self.inner.clock.get().server_time(local_time_ms);
+        self.inner
+            .timeline
+            .borrow_mut()
+            .sample(estimated_server_time, frame_delta_seconds)
+    }
+
+    pub fn take_error(&self) -> Option<String> {
+        self.inner.last_error.borrow_mut().take()
+    }
+
+    pub fn close(&self) {
+        self.inner.close();
+    }
+}
+
+impl Drop for RemotePresenceClient {
+    fn drop(&mut self) {
+        if Rc::strong_count(&self.inner) == 1 {
+            self.inner.close();
+        }
+    }
+}
+
+struct PresenceInner {
+    transport: WorldTransportConfig,
+    config: MultiplayerConfig,
+    local_player_id: PlayerId,
+    state: Cell<PresenceConnectionState>,
+    socket: RefCell<Option<WebSocket>>,
+    handlers: RefCell<Option<PresenceSocketHandlers>>,
+    generation: Cell<u64>,
+    connection_id: Cell<u64>,
+    session_id: Cell<Option<PresenceSessionId>>,
+    next_pose_sequence: Cell<u64>,
+    next_ping_sequence: Cell<u32>,
+    last_pose_send_ms: Cell<f64>,
+    last_ping_send_ms: Cell<f64>,
+    reconnect_after_ms: Cell<f64>,
+    discontinuity_pending: Cell<bool>,
+    clock: Cell<ClockSync>,
+    timeline: RefCell<RemotePresenceTimeline>,
+    last_error: RefCell<Option<String>>,
+}
+
+struct PresenceSocketHandlers {
+    _open: Closure<dyn FnMut(Event)>,
+    _message: Closure<dyn FnMut(MessageEvent)>,
+    _error: Closure<dyn FnMut(ErrorEvent)>,
+    _close: Closure<dyn FnMut(CloseEvent)>,
+}
+
+#[derive(Clone, Copy)]
+struct ClockSync {
+    offset_ms: f64,
+    best_round_trip_ms: f64,
+    synchronized: bool,
+}
+
+impl Default for ClockSync {
+    fn default() -> Self {
+        Self {
+            offset_ms: 0.0,
+            best_round_trip_ms: f64::INFINITY,
+            synchronized: false,
+        }
+    }
+}
+
+impl ClockSync {
+    fn server_time(self, local_time_ms: f64) -> f64 {
+        local_time_ms + self.offset_ms
+    }
+
+    fn observe_opened(&mut self, local_receive_ms: f64, server_time_ms: u64) {
+        self.offset_ms = server_time_ms as f64 - local_receive_ms;
+        self.synchronized = true;
+    }
+
+    fn observe_pong(&mut self, local_receive_ms: f64, pong: PresencePong) {
+        let local_send_ms = pong.client_send_time_ms as f64;
+        let server_processing_ms = pong
+            .server_send_time_ms
+            .saturating_sub(pong.server_receive_time_ms) as f64;
+        let round_trip_ms = (local_receive_ms - local_send_ms - server_processing_ms).max(0.0);
+        let measured_offset = ((pong.server_receive_time_ms as f64 - local_send_ms)
+            + (pong.server_send_time_ms as f64 - local_receive_ms))
+            * 0.5;
+        let preferred = round_trip_ms <= self.best_round_trip_ms + 5.0;
+        self.best_round_trip_ms = self.best_round_trip_ms.min(round_trip_ms);
+        let alpha = if !self.synchronized {
+            1.0
+        } else if preferred {
+            0.25
+        } else {
+            0.04
+        };
+        self.offset_ms += (measured_offset - self.offset_ms) * alpha;
+        self.synchronized = true;
+    }
+}
+
+impl PresenceInner {
+    fn open_socket(inner: &Rc<Self>) -> Result<(), String> {
+        if inner.state.get() == PresenceConnectionState::Closed {
+            return Err("presence client is closed".to_owned());
+        }
+        let Some(_session_id) = inner.session_id.get() else {
+            return Err("presence session is unavailable".to_owned());
+        };
+        inner.detach_socket(1001, "presence reconnect");
+        let protocols = Array::new();
+        protocols.push(&inner.transport.subprotocol.clone().into());
+        protocols.push(&inner.transport.auth_subprotocol_token.clone().into());
+        let socket = WebSocket::new_with_str_sequence(
+            &inner.transport.presence_endpoint,
+            protocols.as_ref(),
+        )
+        .map_err(js_reason)?;
+        socket.set_binary_type(BinaryType::Arraybuffer);
+        let generation = inner.generation.get().wrapping_add(1);
+        inner.generation.set(generation);
+        inner.state.set(PresenceConnectionState::Connecting);
+
+        let weak = Rc::downgrade(inner);
+        let open = Closure::new(move |_event: Event| {
+            if let Some(inner) = weak.upgrade() {
+                inner.handle_open(generation);
+            }
+        });
+        let weak = Rc::downgrade(inner);
+        let message = Closure::new(move |event: MessageEvent| {
+            if let Some(inner) = weak.upgrade() {
+                let data = event.data();
+                match data.dyn_into::<ArrayBuffer>() {
+                    Ok(buffer) => {
+                        inner.handle_message(generation, Uint8Array::new(&buffer).to_vec())
+                    }
+                    Err(_) => inner.disconnect(
+                        generation,
+                        "presence server sent a non-binary message".to_owned(),
+                    ),
+                }
+            }
+        });
+        let weak = Rc::downgrade(inner);
+        let error = Closure::new(move |event: ErrorEvent| {
+            if let Some(inner) = weak.upgrade() {
+                let reason = if event.message().is_empty() {
+                    "presence WebSocket error".to_owned()
+                } else {
+                    event.message()
+                };
+                inner.disconnect(generation, reason);
+            }
+        });
+        let weak = Rc::downgrade(inner);
+        let close = Closure::new(move |event: CloseEvent| {
+            if let Some(inner) = weak.upgrade() {
+                inner.disconnect(
+                    generation,
+                    format!("presence WebSocket closed with code {}", event.code()),
+                );
+            }
+        });
+        socket.set_onopen(Some(open.as_ref().unchecked_ref()));
+        socket.set_onmessage(Some(message.as_ref().unchecked_ref()));
+        socket.set_onerror(Some(error.as_ref().unchecked_ref()));
+        socket.set_onclose(Some(close.as_ref().unchecked_ref()));
+        *inner.socket.borrow_mut() = Some(socket);
+        *inner.handlers.borrow_mut() = Some(PresenceSocketHandlers {
+            _open: open,
+            _message: message,
+            _error: error,
+            _close: close,
+        });
+        Ok(())
+    }
+
+    fn handle_open(&self, generation: u64) {
+        if generation != self.generation.get()
+            || self.state.get() != PresenceConnectionState::Connecting
+        {
+            return;
+        }
+        let Some(socket) = self.socket.borrow().clone() else {
+            return;
+        };
+        if socket.protocol() != self.transport.subprotocol {
+            self.disconnect(
+                generation,
+                "presence server negotiated a different subprotocol".to_owned(),
+            );
+            return;
+        }
+        let Some(session_id) = self.session_id.get() else {
+            return;
+        };
+        let frame = match protocol::encode_open_presence(OpenPresence { session_id }) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.disconnect(generation, error.to_string());
+                return;
+            }
+        };
+        if let Err(error) = socket.send_with_u8_array(&frame) {
+            self.disconnect(generation, js_reason(error));
+            return;
+        }
+        self.state.set(PresenceConnectionState::Handshaking);
+    }
+
+    fn handle_message(&self, generation: u64, bytes: Vec<u8>) {
+        if generation != self.generation.get() {
+            return;
+        }
+        let kind = match protocol::message_kind(&bytes) {
+            Ok(kind) => kind,
+            Err(error) => {
+                self.disconnect(generation, error.to_string());
+                return;
+            }
+        };
+        if kind == protocol::presence_opened_kind() {
+            let opened = match protocol::decode_presence_opened(&bytes) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    self.disconnect(generation, error.to_string());
+                    return;
+                }
+            };
+            if self.state.get() != PresenceConnectionState::Handshaking
+                || opened.connection_id != self.connection_id.get()
+            {
+                self.disconnect(generation, "presence connection id mismatch".to_owned());
+                return;
+            }
+            let now = local_now_ms();
+            let mut clock = self.clock.get();
+            clock.observe_opened(now, opened.server_time_ms);
+            self.clock.set(clock);
+            self.state.set(PresenceConnectionState::Open);
+            self.last_ping_send_ms.set(f64::NEG_INFINITY);
+            self.last_pose_send_ms.set(f64::NEG_INFINITY);
+        } else if kind == protocol::presence_snapshot_kind() {
+            if self.state.get() != PresenceConnectionState::Open {
+                self.disconnect(
+                    generation,
+                    "presence snapshot arrived before handshake".to_owned(),
+                );
+                return;
+            }
+            let snapshot = match protocol::decode_presence_snapshot(&bytes) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    self.disconnect(generation, error.to_string());
+                    return;
+                }
+            };
+            let local_player_id = self.local_player_id;
+            let players = snapshot
+                .players
+                .into_iter()
+                .filter(|player| player.player_id != local_player_id)
+                .map(|player| RemotePoseSample {
+                    player_id: RemotePlayerId(*player.player_id.as_bytes()),
+                    connection_id: player.connection_id,
+                    color_index: player.color_index,
+                    sequence: player.pose.sequence,
+                    sample_server_time_ms: player.pose.sample_server_time_ms,
+                    eye_position_metres: Vec3::from_array(player.pose.eye_position_metres),
+                    linear_velocity_metres_per_second: Vec3::from_array(
+                        player.pose.linear_velocity_metres_per_second,
+                    ),
+                    look_yaw_radians: player.pose.look_yaw_radians,
+                    look_pitch_radians: player.pose.look_pitch_radians,
+                    flags: player.pose.flags,
+                })
+                .collect();
+            self.timeline.borrow_mut().ingest_snapshot(
+                RemotePresenceSnapshot {
+                    snapshot_sequence: snapshot.snapshot_sequence,
+                    server_time_ms: snapshot.server_time_ms,
+                    players,
+                },
+                local_now_ms(),
+            );
+        } else if kind == protocol::presence_pong_kind() {
+            let pong = match protocol::decode_presence_pong(&bytes) {
+                Ok(pong) => pong,
+                Err(error) => {
+                    self.disconnect(generation, error.to_string());
+                    return;
+                }
+            };
+            let mut clock = self.clock.get();
+            clock.observe_pong(local_now_ms(), pong);
+            self.clock.set(clock);
+        } else if kind == protocol::error_kind() {
+            let message = protocol::decode_error(&bytes)
+                .map(|(_, message)| message)
+                .unwrap_or_else(|error| error.to_string());
+            self.disconnect(generation, message);
+        } else {
+            self.disconnect(generation, "unexpected presence server message".to_owned());
+        }
+    }
+
+    fn maybe_send_pose(&self, camera: &CameraState, local_time_ms: f64) {
+        if local_time_ms - self.last_pose_send_ms.get()
+            < f64::from(self.config.pose_send_interval_ms)
+        {
+            return;
+        }
+        let Some(socket) = self.socket.borrow().clone() else {
+            return;
+        };
+        if socket.buffered_amount() >= self.config.buffered_amount_high_water_bytes {
+            return;
+        }
+        let mut flags = 0;
+        if camera.grounded {
+            flags |= PLAYER_POSE_GROUNDED;
+        }
+        if camera.fluid_state().swimming {
+            flags |= PLAYER_POSE_SWIMMING;
+        }
+        if self.discontinuity_pending.get() {
+            flags |= PLAYER_POSE_DISCONTINUITY;
+        }
+        let sequence = self.next_pose_sequence.get().max(1);
+        let clock = self.clock.get();
+        let sample_server_time_ms = if clock.synchronized {
+            finite_milliseconds(clock.server_time(local_time_ms))
+        } else {
+            0
+        };
+        let frame = match protocol::encode_player_pose(PlayerPoseUpdate {
+            sequence,
+            sample_server_time_ms,
+            eye_position_metres: camera.position.to_array(),
+            linear_velocity_metres_per_second: camera.velocity.to_array(),
+            look_yaw_radians: camera.yaw,
+            look_pitch_radians: camera.pitch,
+            flags,
+        }) {
+            Ok(frame) => frame,
+            Err(error) => {
+                *self.last_error.borrow_mut() = Some(error.to_string());
+                return;
+            }
+        };
+        if let Err(error) = socket.send_with_u8_array(&frame) {
+            self.disconnect(self.generation.get(), js_reason(error));
+            return;
+        }
+        self.next_pose_sequence.set(sequence.wrapping_add(1).max(1));
+        self.last_pose_send_ms.set(local_time_ms);
+        self.discontinuity_pending.set(false);
+    }
+
+    fn maybe_send_ping(&self, local_time_ms: f64) {
+        if local_time_ms - self.last_ping_send_ms.get()
+            < f64::from(self.config.clock_sync_interval_ms)
+        {
+            return;
+        }
+        let Some(socket) = self.socket.borrow().clone() else {
+            return;
+        };
+        if socket.buffered_amount() >= self.config.buffered_amount_high_water_bytes {
+            return;
+        }
+        let sequence = self.next_ping_sequence.get().max(1);
+        let frame = match protocol::encode_presence_ping(PresencePing {
+            sequence,
+            client_send_time_ms: finite_milliseconds(local_time_ms),
+        }) {
+            Ok(frame) => frame,
+            Err(error) => {
+                *self.last_error.borrow_mut() = Some(error.to_string());
+                return;
+            }
+        };
+        if let Err(error) = socket.send_with_u8_array(&frame) {
+            self.disconnect(self.generation.get(), js_reason(error));
+            return;
+        }
+        self.next_ping_sequence.set(sequence.wrapping_add(1).max(1));
+        self.last_ping_send_ms.set(local_time_ms);
+    }
+
+    fn replace_session(&self, opened: &WorldOpened) {
+        self.detach_socket(1001, "world session replaced");
+        self.connection_id.set(opened.connection_id);
+        self.session_id.set(Some(opened.presence_session_id));
+        self.next_pose_sequence.set(1);
+        self.next_ping_sequence.set(1);
+        self.discontinuity_pending.set(true);
+        self.clock.set(ClockSync::default());
+        self.timeline.borrow_mut().clear();
+        self.state.set(PresenceConnectionState::WaitingToReconnect);
+        self.reconnect_after_ms.set(0.0);
+    }
+
+    fn disconnect(&self, generation: u64, reason: String) {
+        if generation != self.generation.get()
+            || self.state.get() == PresenceConnectionState::Closed
+        {
+            return;
+        }
+        self.detach_socket(1011, "presence connection reset");
+        self.timeline.borrow_mut().clear();
+        self.state.set(PresenceConnectionState::WaitingToReconnect);
+        self.reconnect_after_ms
+            .set(local_now_ms() + RECONNECT_DELAY_MS);
+        *self.last_error.borrow_mut() = Some(reason);
+    }
+
+    fn detach_socket(&self, code: u16, reason: &str) {
+        if let Some(socket) = self.socket.borrow_mut().take() {
+            socket.set_onopen(None);
+            socket.set_onmessage(None);
+            socket.set_onerror(None);
+            socket.set_onclose(None);
+            let _ = socket.close_with_code_and_reason(code, reason);
+        }
+        self.handlers.borrow_mut().take();
+    }
+
+    fn close(&self) {
+        if self.state.replace(PresenceConnectionState::Closed) == PresenceConnectionState::Closed {
+            return;
+        }
+        self.generation.set(self.generation.get().wrapping_add(1));
+        self.detach_socket(1000, "presence client closed");
+        self.timeline.borrow_mut().clear();
+    }
+}
+
+fn local_now_ms() -> f64 {
+    let scope: WorkerGlobalScope = js_sys::global().unchecked_into();
+    scope
+        .performance()
+        .map_or(0.0, |performance| performance.now())
+}
+
+fn finite_milliseconds(value: f64) -> u64 {
+    if value.is_finite() {
+        value.round().clamp(1.0, u64::MAX as f64) as u64
+    } else {
+        1
+    }
+}
+
+fn js_reason(value: wasm_bindgen::JsValue) -> String {
+    value
+        .as_string()
+        .unwrap_or_else(|| "presence JavaScript exception".to_owned())
+}

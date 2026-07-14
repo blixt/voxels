@@ -485,7 +485,7 @@ impl WorldTransportConfig {
 }
 
 impl MultiplayerConfig {
-    fn validate(&self) -> Result<(), ClientConfigError> {
+    pub fn validate(&self) -> Result<(), ClientConfigError> {
         ensure_integer_range(
             self.pose_send_interval_ms,
             "multiplayer.pose_send_interval_ms",
