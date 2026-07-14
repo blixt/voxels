@@ -95,7 +95,7 @@ async function waitForRoster(player) {
     (next) =>
       next[SNAPSHOT.remoteAvatars] === EXPECTED_REMOTE_PLAYERS &&
       next[SNAPSHOT.avatarParts] === EXPECTED_REMOTE_PLAYERS * EXPECTED_PARTS_PER_AVATAR &&
-      next[SNAPSHOT.avatarDrawCalls] === 1,
+      next[SNAPSHOT.avatarDrawCalls] === EXPECTED_REMOTE_PLAYERS,
     30_000,
   );
 }
