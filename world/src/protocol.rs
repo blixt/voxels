@@ -14,11 +14,12 @@ use crate::{
 use std::fmt;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
 pub const MAX_SURFACE_TILES_PER_BATCH: usize = 32;
+pub const MAX_PLAYER_NAME_BYTES: usize = 32;
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
@@ -66,6 +67,78 @@ impl WorldCapabilities {
     }
 }
 
+macro_rules! opaque_uuid_id {
+    ($name:ident) => {
+        #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub struct $name([u8; 16]);
+
+        impl $name {
+            pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+                Self(bytes)
+            }
+
+            pub const fn as_bytes(&self) -> &[u8; 16] {
+                &self.0
+            }
+
+            pub fn from_uuid_str(value: &str) -> Option<Self> {
+                parse_uuid_bytes(value).map(Self)
+            }
+
+            pub fn is_nil(self) -> bool {
+                self.0 == [0; 16]
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                for (index, byte) in self.0.iter().enumerate() {
+                    if matches!(index, 4 | 6 | 8 | 10) {
+                        formatter.write_str("-")?;
+                    }
+                    write!(formatter, "{byte:02x}")?;
+                }
+                Ok(())
+            }
+        }
+    };
+}
+
+opaque_uuid_id!(BrowserUserId);
+opaque_uuid_id!(PlayerId);
+
+/// Browser-local identity claim used until authenticated server accounts exist.
+///
+/// The opaque IDs are durable keys; `player_name` is only a bounded local label. A remote server
+/// must authenticate the user and verify player ownership instead of trusting these client values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerIdentity {
+    pub browser_user_id: BrowserUserId,
+    pub player_id: PlayerId,
+    pub player_name: String,
+}
+
+impl PlayerIdentity {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.browser_user_id.is_nil() {
+            return Err("browser user id is nil");
+        }
+        if self.player_id.is_nil() {
+            return Err("player id is nil");
+        }
+        if !valid_player_name(&self.player_name) {
+            return Err("player name must be 1-32 lowercase ASCII letters, digits, '_' or '-'");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenWorld {
+    pub max_in_flight_batches: u16,
+    pub identity: PlayerIdentity,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpawnPoint {
     pub x: i32,
@@ -84,6 +157,7 @@ pub struct WorldOpened {
     pub manifest: WorldManifest,
     pub capabilities: WorldCapabilities,
     pub recommended_in_flight_batches: u16,
+    pub identity: PlayerIdentity,
     pub spawn: SpawnPoint,
 }
 
@@ -178,17 +252,45 @@ struct Frame<'a> {
     payload: &'a [u8],
 }
 
-pub fn encode_open_world(max_in_flight_batches: u16) -> Vec<u8> {
-    encode_frame(KIND_OPEN_WORLD, 0, &max_in_flight_batches.to_le_bytes())
+pub fn encode_open_world(open: &OpenWorld) -> Result<Vec<u8>, ProtocolError> {
+    if open.max_in_flight_batches == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "client requested a zero request window",
+        ));
+    }
+    validate_player_identity(&open.identity)?;
+    let mut payload = Vec::with_capacity(52 + open.identity.player_name.len());
+    push_u16(&mut payload, open.max_in_flight_batches);
+    payload.extend_from_slice(open.identity.browser_user_id.as_bytes());
+    payload.extend_from_slice(open.identity.player_id.as_bytes());
+    push_string(&mut payload, &open.identity.player_name);
+    Ok(encode_frame(KIND_OPEN_WORLD, 0, &payload))
 }
 
-pub fn decode_open_world(bytes: &[u8]) -> Result<u16, ProtocolError> {
+pub fn decode_open_world(bytes: &[u8]) -> Result<OpenWorld, ProtocolError> {
     let frame = decode_frame(bytes)?;
     expect_kind(&frame, KIND_OPEN_WORLD)?;
-    if frame.request_id != 0 || frame.payload.len() != 2 {
+    if frame.request_id != 0 {
         return Err(ProtocolError::InvalidPayload("invalid OpenWorld body"));
     }
-    read_u16(frame.payload, 0)
+    let mut cursor = Cursor::new(frame.payload);
+    let max_in_flight_batches = cursor.u16()?;
+    if max_in_flight_batches == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "client requested a zero request window",
+        ));
+    }
+    let identity = PlayerIdentity {
+        browser_user_id: BrowserUserId::from_bytes(cursor.array()?),
+        player_id: PlayerId::from_bytes(cursor.array()?),
+        player_name: cursor.string()?,
+    };
+    validate_player_identity(&identity)?;
+    cursor.finish()?;
+    Ok(OpenWorld {
+        max_in_flight_batches,
+        identity,
+    })
 }
 
 pub fn encode_world_opened(opened: &WorldOpened) -> Vec<u8> {
@@ -198,6 +300,9 @@ pub fn encode_world_opened(opened: &WorldOpened) -> Vec<u8> {
     payload.extend_from_slice(&manifest);
     push_u64(&mut payload, opened.capabilities.bits());
     push_u16(&mut payload, opened.recommended_in_flight_batches);
+    payload.extend_from_slice(opened.identity.browser_user_id.as_bytes());
+    payload.extend_from_slice(opened.identity.player_id.as_bytes());
+    push_string(&mut payload, &opened.identity.player_name);
     push_i32(&mut payload, opened.spawn.x);
     push_i32(&mut payload, opened.spawn.z);
     push_i32(&mut payload, opened.spawn.height);
@@ -229,6 +334,12 @@ pub fn decode_world_opened(bytes: &[u8]) -> Result<WorldOpened, ProtocolError> {
             "server recommended a zero request window",
         ));
     }
+    let identity = PlayerIdentity {
+        browser_user_id: BrowserUserId::from_bytes(cursor.array()?),
+        player_id: PlayerId::from_bytes(cursor.array()?),
+        player_name: cursor.string()?,
+    };
+    validate_player_identity(&identity)?;
     let x = cursor.i32()?;
     let z = cursor.i32()?;
     let height = cursor.i32()?;
@@ -260,6 +371,7 @@ pub fn decode_world_opened(bytes: &[u8]) -> Result<WorldOpened, ProtocolError> {
         manifest,
         capabilities,
         recommended_in_flight_batches,
+        identity,
         spawn: SpawnPoint {
             x,
             z,
@@ -674,6 +786,55 @@ pub const fn surface_tile_batch_kind() -> u16 {
 
 pub const fn surface_tile_batch_result_kind() -> u16 {
     KIND_SURFACE_TILE_BATCH_RESULT
+}
+
+fn validate_player_identity(identity: &PlayerIdentity) -> Result<(), ProtocolError> {
+    identity.validate().map_err(ProtocolError::InvalidPayload)
+}
+
+fn valid_player_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_PLAYER_NAME_BYTES
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
+        })
+}
+
+fn parse_uuid_bytes(value: &str) -> Option<[u8; 16]> {
+    if value.len() != 36 {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    if [8, 13, 18, 23]
+        .into_iter()
+        .any(|index| bytes[index] != b'-')
+    {
+        return None;
+    }
+    let mut parsed = [0_u8; 16];
+    let mut output = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            index += 1;
+            continue;
+        }
+        let high = hex_nibble(bytes[index])?;
+        let low = hex_nibble(bytes[index + 1])?;
+        parsed[output] = (high << 4) | low;
+        output += 1;
+        index += 2;
+    }
+    (output == parsed.len()).then_some(parsed)
+}
+
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn encode_frame(kind: u16, request_id: u64, payload: &[u8]) -> Vec<u8> {
@@ -1607,6 +1768,49 @@ mod tests {
         WorldSourceEngine,
     };
 
+    fn player_identity(seed: u8, player_name: &str) -> PlayerIdentity {
+        PlayerIdentity {
+            browser_user_id: BrowserUserId::from_bytes([seed; 16]),
+            player_id: PlayerId::from_bytes([seed.wrapping_add(1); 16]),
+            player_name: player_name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn open_world_identity_round_trips_and_rejects_unusable_claims() {
+        let open = OpenWorld {
+            max_in_flight_batches: 4,
+            identity: player_identity(1, "alice"),
+        };
+        assert_eq!(
+            decode_open_world(&encode_open_world(&open).expect("encode")),
+            Ok(open.clone())
+        );
+        assert_eq!(
+            BrowserUserId::from_uuid_str("00112233-4455-6677-8899-aabbccddeeff")
+                .map(|id| id.to_string()),
+            Some("00112233-4455-6677-8899-aabbccddeeff".to_owned())
+        );
+        assert!(BrowserUserId::from_uuid_str("not-a-uuid").is_none());
+
+        let mut invalid = open.clone();
+        invalid.identity.player_id = PlayerId::from_bytes([0; 16]);
+        assert!(matches!(
+            encode_open_world(&invalid),
+            Err(ProtocolError::InvalidPayload("player id is nil"))
+        ));
+        invalid.identity = player_identity(1, "Alice");
+        assert!(matches!(
+            encode_open_world(&invalid),
+            Err(ProtocolError::InvalidPayload(_))
+        ));
+        invalid.identity = player_identity(1, "a-player_name-that-is-far-too-long");
+        assert!(matches!(
+            encode_open_world(&invalid),
+            Err(ProtocolError::InvalidPayload(_))
+        ));
+    }
+
     #[test]
     fn world_opened_round_trip_is_manifest_validated() {
         let opened = WorldOpened {
@@ -1614,6 +1818,7 @@ mod tests {
             capabilities: WorldCapabilities::CANONICAL_CHUNKS
                 .union(WorldCapabilities::AUTHORED_ROUTES),
             recommended_in_flight_batches: 4,
+            identity: player_identity(7, "default"),
             spawn: SpawnPoint {
                 x: 0,
                 z: 52,
@@ -1730,11 +1935,15 @@ mod tests {
 
     #[test]
     fn malformed_and_oversized_frames_fail_closed() {
-        let mut open = encode_open_world(4);
+        let request = OpenWorld {
+            max_in_flight_batches: 4,
+            identity: player_identity(1, "default"),
+        };
+        let mut open = encode_open_world(&request).expect("encode");
         open[0] = b'B';
         assert_eq!(decode_open_world(&open), Err(ProtocolError::InvalidMagic));
 
-        let mut open = encode_open_world(4);
+        let mut open = encode_open_world(&request).expect("encode");
         open.extend_from_slice(&[0]);
         assert_eq!(
             decode_open_world(&open),

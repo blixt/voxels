@@ -12,14 +12,14 @@ export class EngineHandle {
     start_profile(profile_id: number): boolean;
 }
 
-export function create_engine(canvas: OffscreenCanvas, css_width: number, css_height: number, dpr: number, reduced_motion: boolean, config_toml: string): Promise<EngineHandle>;
+export function create_engine(canvas: OffscreenCanvas, css_width: number, css_height: number, dpr: number, reduced_motion: boolean, config_toml: string, player: Array<any>): Promise<EngineHandle>;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_enginehandle_free: (a: number, b: number) => void;
-    readonly create_engine: (a: any, b: number, c: number, d: number, e: number, f: number, g: number) => any;
+    readonly create_engine: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => any;
     readonly enginehandle_destroy: (a: number) => any;
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => number;
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;

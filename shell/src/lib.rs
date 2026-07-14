@@ -31,7 +31,7 @@ mod persist;
 pub mod remote;
 #[cfg(target_arch = "wasm32")]
 mod web {
-    use crate::persist::{PersistenceConfig, PersistenceWorld, Store};
+    use crate::persist::{PersistenceConfig, PersistencePlayer, PersistenceWorld, Store};
     use crate::remote::{
         RemoteChunkCompletion, RemoteSurfaceCompletion, RemoteSurfaceTicket, RemoteWorldClient,
         RemoteWorldError,
@@ -58,6 +58,7 @@ mod web {
         ChunkState, CompletionStatus, FrameBudget, StreamConfig, StreamScheduler,
         SurfaceFocusAction, SurfaceRevisionCache, revision_satisfies,
     };
+    use voxels_world::protocol::{BrowserUserId, PlayerId, PlayerIdentity};
     use voxels_world::{
         AtmosphereSample, CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT, CINDER_VAULT_NODES,
         CINDER_VAULT_PORTAL_COUNT, CaveStreamInterest, Chunk, ChunkCoord, EditMap, Material,
@@ -2313,7 +2314,7 @@ mod web {
 
         fn teleport_to_coast(&self) {
             if self.uses_native_world() {
-                log_gpu_error("surface search is not available in VXWP v1");
+                log_gpu_error("surface search is not available in VXWP v2");
                 return;
             }
             let [water_x, water_z] = COAST_WATER_REFERENCE;
@@ -2355,7 +2356,7 @@ mod web {
 
         fn teleport_underwater(&self) {
             if self.uses_native_world() {
-                log_gpu_error("surface search is not available in VXWP v1");
+                log_gpu_error("surface search is not available in VXWP v2");
                 return;
             }
             let [water_x, water_z] = COAST_WATER_REFERENCE;
@@ -3148,8 +3149,36 @@ mod web {
         dpr: f32,
         reduced_motion: bool,
         config_toml: String,
+        player: js_sys::Array,
     ) -> Result<EngineHandle, JsValue> {
         console_error_panic_hook::set_once();
+        if player.length() != 4 {
+            return Err(JsValue::from_str(
+                "player bootstrap must contain four strings",
+            ));
+        }
+        let player_string = |index: u32, name: &str| {
+            player.get(index).as_string().ok_or_else(|| {
+                JsValue::from_str(&format!("player bootstrap {name} is not a string"))
+            })
+        };
+        let browser_user_id = player_string(0, "browser user id")?;
+        let player_id = player_string(1, "player id")?;
+        let default_player_id = player_string(2, "default player id")?;
+        let player_name = player_string(3, "name")?;
+        let identity = PlayerIdentity {
+            browser_user_id: BrowserUserId::from_uuid_str(&browser_user_id)
+                .ok_or_else(|| JsValue::from_str("browser user id is not a UUID"))?,
+            player_id: PlayerId::from_uuid_str(&player_id)
+                .ok_or_else(|| JsValue::from_str("player id is not a UUID"))?,
+            player_name,
+        };
+        identity
+            .validate()
+            .map_err(|error| JsValue::from_str(&format!("player identity: {error}")))?;
+        let default_player_id = PlayerId::from_uuid_str(&default_player_id)
+            .filter(|player_id| !player_id.is_nil())
+            .ok_or_else(|| JsValue::from_str("default player id is not a non-nil UUID"))?;
         let client_config = ClientConfig::from_toml(&config_toml)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         let world_transport = client_config.world.clone();
@@ -3225,7 +3254,7 @@ mod web {
         let width = (css_width * dpr).round().max(1.0) as u32;
         let height = (css_height * dpr).round().max(1.0) as u32;
         let source = procedural_world_source(WORLD_SEED);
-        let remote = RemoteWorldClient::connect(world_transport)
+        let remote = RemoteWorldClient::connect(world_transport, identity.clone())
             .await
             .map_err(|error| JsValue::from_str(&format!("connect world service: {error}")))?;
         let opened = remote
@@ -3247,6 +3276,10 @@ mod web {
         };
         let mut store = Store::open(
             persistence_world,
+            PersistencePlayer {
+                player_id: identity.player_id,
+                legacy_default_player_id: default_player_id,
+            },
             PersistenceConfig {
                 request_timeout_ms: client_config.persistence.request_timeout_ms as i32,
                 request_retries: client_config.persistence.request_retries as usize,

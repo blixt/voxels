@@ -44,6 +44,10 @@ export interface InitMessage {
   dpr: number;
   reducedMotion: boolean;
   configToml: string;
+  browserUserId: string;
+  playerId: string;
+  defaultPlayerId: string;
+  playerName: string;
 }
 
 export type ToWorker =

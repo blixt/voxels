@@ -369,7 +369,8 @@ used by this VFS are dedicated-worker-only. Keeping the engine in a dedicated wo
 satisfies both rendering and storage constraints.
 
 SQLite stores structured, queryable state: schema version, world identity and generator version,
-player state, and sparse voxel overrides. Each override is an idempotent row keyed by world and voxel;
+browser-local player camera state, and sparse voxel overrides. Camera rows are keyed by opaque player
+ID while edits remain shared world state. Each override is an idempotent row keyed by world and voxel;
 restoring the generated material removes the row. Versioned palette/bit-packed chunk payloads exist for
 future snapshot compaction. If profiling shows write amplification or database size becoming a real
 constraint, the same codec can move snapshots into append-only region files while SQLite remains the
@@ -378,7 +379,8 @@ write payloads in aligned extents. Optional block compression can be evaluated a
 payloads then; neither region wrapping nor compression is part of VXCH v2.
 
 Multi-tab access is single-writer without excluding other tabs. A Web Lock elects one worker as the
-SQLite/SAH-pool owner; followers proxy typed camera/edit operations over a BroadcastChannel and queue
+SQLite/SAH-pool owner; followers proxy typed player-keyed camera and world-edit operations over a
+versioned BroadcastChannel and queue
 for ownership when the leader closes. Follower writes pass through one ordered, coalescing Rust outbox,
 and follower requests tolerate a complete VFS retry window plus worker startup. Teardown closes SQLite,
 pauses the SAH-pool VFS to synchronously release its OPFS handles, and only then resolves the Web Lock;

@@ -40,6 +40,9 @@ Chrome local-network permission, binary VXWP protocol, transport rationale, and 
 Client runtime, streaming, rendering/Mission Control, persistence, diagnostics, and profiling
 defaults live in `config/client.toml`. See [Configuration](docs/configuration.md) for ownership,
 deployment, validation, and testing conventions for both files.
+Opening the bare development URL reuses the browser's default local player and last position. Open
+`/?player=alice` and `/?player=bob` in two windows to test distinct simultaneous players against the
+same daemon; see [Local players](docs/native-world-streaming.md#local-players-and-two-browser-testing).
 `vp run profile:browser` builds release WASM, serves it from an isolated origin, and records raw
 frame/CPU phase distributions for steady, traversal, and underwater scenarios in system Chrome.
 `vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step closed rail. One lap warms the exact

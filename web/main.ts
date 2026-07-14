@@ -3,6 +3,11 @@ import { loadClientConfig } from "./client-config.ts";
 import { watchDevicePixelRatio } from "./display.ts";
 import { PressedKeys, requestPointerLockSafely } from "./input.ts";
 import {
+  namedPlayerUrl,
+  resolveBrowserPlayerSession,
+  type BrowserPlayerSession,
+} from "./local-player.ts";
+import {
   INPUT_CANCEL,
   INPUT_KEY_DOWN,
   INPUT_KEY_UP,
@@ -38,12 +43,14 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
   }
 
   let configToml: string;
+  let player: BrowserPlayerSession;
   try {
-    configToml = await loadClientConfig();
+    [configToml, player] = await Promise.all([loadClientConfig(), resolveBrowserPlayerSession()]);
   } catch (error) {
-    fail(`Could not load client configuration.\n${String(error)}`);
+    fail(`Could not load client configuration or local player.\n${String(error)}`);
     return;
   }
+  if (player.playerName !== "default") document.title = `Voxels · ${player.playerName}`;
 
   const worker = new Worker(new URL("./worker.ts", import.meta.url), {
     type: "module",
@@ -55,7 +62,12 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     { resolve: (values: number[]) => void; reject: (reason: Error) => void }
   >();
   const debugGlobal = globalThis as typeof globalThis & {
-    __VOXELS__?: { snapshot(): Promise<number[]>; profile(profileId: number): void };
+    __VOXELS__?: {
+      snapshot(): Promise<number[]>;
+      profile(profileId: number): void;
+      readonly player: BrowserPlayerSession;
+      playerUrl(name: string): string;
+    };
   };
   const failWorker = (message: string): void => {
     fail(message);
@@ -74,6 +86,8 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
         worker.postMessage({ kind: "snapshot", requestId });
       }),
     profile: (profileId) => worker.postMessage({ kind: "profile", profileId }),
+    player,
+    playerUrl: (name) => namedPlayerUrl(name).href,
   };
   worker.onmessage = (event) => {
     if (event.data.kind === "uiMode") {
@@ -103,6 +117,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       dpr: window.devicePixelRatio || 1,
       reducedMotion: reducedMotion.matches,
       configToml,
+      browserUserId: player.browserUserId,
+      playerId: player.playerId,
+      defaultPlayerId: player.defaultPlayerId,
+      playerName: player.playerName,
     },
     [offscreen],
   );

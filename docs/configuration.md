@@ -37,6 +37,12 @@ The file controls:
 Mission Control remains interactive. Its reset action restores the configured feature baseline,
 including a mixed on/off baseline, rather than a hard-coded all-enabled state.
 
+Player identity is intentionally not client configuration. The browser keeps a versioned local
+registry: `/` selects its stable default player, while `/?player=alice` selects or creates a named
+local player. All names under one browser profile share the deployment configuration and world edits,
+but camera persistence is keyed by the opaque player ID. See
+[Native world streaming](native-world-streaming.md#local-players-and-two-browser-testing).
+
 ## World-service configuration
 
 `config/world-service.toml` controls the seed, the procedural/Terrain Diffusion provider toggle,

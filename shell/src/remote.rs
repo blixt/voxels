@@ -14,8 +14,8 @@ use std::task::{Context, Poll, Waker};
 use voxels_client_config::WorldTransportConfig;
 use voxels_runtime::{WorkStage, WorkTicket};
 use voxels_world::protocol::{
-    self, ChunkBatchRequest, ChunkBatchResult, SurfaceTileBatchRequest, SurfaceTileBatchResult,
-    WorldCapabilities, WorldOpened,
+    self, ChunkBatchRequest, ChunkBatchResult, OpenWorld, PlayerIdentity, SurfaceTileBatchRequest,
+    SurfaceTileBatchResult, WorldCapabilities, WorldOpened,
 };
 use voxels_world::{
     ChunkCoord, ChunkSnapshot, SurfaceTileCoord, WorldManifestHash, WorldProductPriority,
@@ -113,19 +113,28 @@ pub struct RemoteWorldClient {
 
 impl RemoteWorldClient {
     /// Opens the socket and asynchronously completes the versioned `OpenWorld` handshake.
-    pub async fn connect(config: WorldTransportConfig) -> Result<Self, RemoteWorldError> {
-        let client = Self::start(config)?;
+    pub async fn connect(
+        config: WorldTransportConfig,
+        identity: PlayerIdentity,
+    ) -> Result<Self, RemoteWorldError> {
+        let client = Self::start(config, identity)?;
         client.wait_until_open().await?;
         Ok(client)
     }
 
     /// Starts connecting without awaiting the handshake. Use this when startup has other work to
     /// overlap, then await [`Self::wait_until_open`] before submitting products.
-    pub fn start(config: WorldTransportConfig) -> Result<Self, RemoteWorldError> {
+    pub fn start(
+        config: WorldTransportConfig,
+        identity: PlayerIdentity,
+    ) -> Result<Self, RemoteWorldError> {
         config
             .validate()
             .map_err(|error| RemoteWorldError::InvalidConfig(error.to_string()))?;
-        let inner = Rc::new(RemoteInner::new(config));
+        identity
+            .validate()
+            .map_err(|error| RemoteWorldError::InvalidConfig(error.to_owned()))?;
+        let inner = Rc::new(RemoteInner::new(config, identity));
         RemoteInner::open_socket(&inner)?;
         Ok(Self { inner })
     }
@@ -257,6 +266,7 @@ impl Drop for RemoteWorldClient {
 
 struct RemoteInner {
     config: WorldTransportConfig,
+    identity: PlayerIdentity,
     state: Cell<RemoteConnectionState>,
     socket: RefCell<Option<WebSocket>>,
     handlers: RefCell<Option<SocketHandlers>>,
@@ -296,9 +306,10 @@ struct SocketHandlers {
 }
 
 impl RemoteInner {
-    fn new(config: WorldTransportConfig) -> Self {
+    fn new(config: WorldTransportConfig, identity: PlayerIdentity) -> Self {
         Self {
             config,
+            identity,
             state: Cell::new(RemoteConnectionState::Connecting),
             socket: RefCell::new(None),
             handlers: RefCell::new(None),
@@ -431,7 +442,16 @@ impl RemoteInner {
             return;
         }
         let requested_window = u16::try_from(self.config.max_in_flight_batches).unwrap_or(u16::MAX);
-        let frame = protocol::encode_open_world(requested_window);
+        let frame = match protocol::encode_open_world(&OpenWorld {
+            max_in_flight_batches: requested_window,
+            identity: self.identity.clone(),
+        }) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()));
+                return;
+            }
+        };
         if let Err(error) = socket.send_with_u8_array(&frame) {
             self.disconnect(generation, RemoteWorldError::Socket(js_reason(error)));
             return;
@@ -488,6 +508,13 @@ impl RemoteInner {
         };
         if let Err(error) = opened.manifest.validate() {
             self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()));
+            return;
+        }
+        if opened.identity != self.identity {
+            self.disconnect(
+                generation,
+                RemoteWorldError::ResponseMismatch("server echoed a different player identity"),
+            );
             return;
         }
         if !opened

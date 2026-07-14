@@ -21,12 +21,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use voxels_world::protocol::{
-    ChunkBatchItem, ChunkBatchRequest, ChunkBatchResult, SpawnPoint, SurfaceTileBatchItem,
-    SurfaceTileBatchRequest, SurfaceTileBatchResult, WorldCapabilities, WorldOpened, cancel_kind,
-    chunk_batch_kind, decode_cancel, decode_chunk_batch, decode_open_world,
-    decode_surface_tile_batch, encode_chunk_batch_result, encode_error,
-    encode_surface_tile_batch_result, encode_world_opened, message_kind, open_world_kind,
-    surface_tile_batch_kind,
+    BrowserUserId, ChunkBatchItem, ChunkBatchRequest, ChunkBatchResult, PlayerId, PlayerIdentity,
+    SpawnPoint, SurfaceTileBatchItem, SurfaceTileBatchRequest, SurfaceTileBatchResult,
+    WorldCapabilities, WorldOpened, cancel_kind, chunk_batch_kind, decode_cancel,
+    decode_chunk_batch, decode_open_world, decode_surface_tile_batch, encode_chunk_batch_result,
+    encode_error, encode_surface_tile_batch_result, encode_world_opened, message_kind,
+    open_world_kind, surface_tile_batch_kind,
 };
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, Material, SurfaceSampleBlockRequest, WORLD_SCHEMA_VERSION,
@@ -34,8 +34,8 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v1/world";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v1";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v2/world";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v2";
 
 /// Prepared server state. Source construction and spawn coverage validation happen before bind.
 pub struct WorldServer {
@@ -54,7 +54,7 @@ impl WorldServer {
     ) -> Result<Self, WorldServerError> {
         config.validate()?;
         let source = Arc::<dyn WorldSourceEngine>::from(source);
-        let world_opened = prepare_world_opened(&config, source.as_ref())?;
+        let world = prepare_world(&config, source.as_ref())?;
         let capacity = usize::from(config.transport.global_queue_capacity);
         let (generation_tx, generation_rx) = mpsc::channel(capacity);
         let semaphore = Arc::new(Semaphore::new(usize::from(
@@ -77,7 +77,8 @@ impl WorldServer {
             connections: Arc::new(Semaphore::new(usize::from(
                 config.transport.max_connections,
             ))),
-            world_opened,
+            world,
+            active_players: Mutex::new(HashMap::new()),
             generation_tx,
         });
         let router = Router::new()
@@ -174,10 +175,10 @@ impl From<WorldManifestError> for WorldServerError {
     }
 }
 
-fn prepare_world_opened(
+fn prepare_world(
     config: &WorldServiceConfig,
     source: &dyn WorldSourceEngine,
-) -> Result<WorldOpened, WorldServerError> {
+) -> Result<WorldBootstrap, WorldServerError> {
     let spawn_request = SurfaceSampleBlockRequest {
         origin: config.spawn.xz_voxels,
         sample_shape: [1, 1],
@@ -222,10 +223,9 @@ fn prepare_world_opened(
         source: source.identity().clone(),
     };
     manifest.validate()?;
-    Ok(WorldOpened {
+    Ok(WorldBootstrap {
         manifest,
         capabilities: WorldCapabilities::CANONICAL_CHUNKS.union(WorldCapabilities::SURFACE_LOD),
-        recommended_in_flight_batches: config.transport.max_in_flight_batches,
         spawn: SpawnPoint {
             x: config.spawn.xz_voxels[0],
             z: config.spawn.xz_voxels[1],
@@ -238,6 +238,25 @@ fn prepare_world_opened(
             ridge: sample.ridge,
         },
     })
+}
+
+#[derive(Clone)]
+struct WorldBootstrap {
+    manifest: WorldManifest,
+    capabilities: WorldCapabilities,
+    spawn: SpawnPoint,
+}
+
+impl WorldBootstrap {
+    fn opened(&self, identity: PlayerIdentity, recommended_in_flight_batches: u16) -> WorldOpened {
+        WorldOpened {
+            manifest: self.manifest.clone(),
+            capabilities: self.capabilities,
+            recommended_in_flight_batches,
+            identity,
+            spawn: self.spawn,
+        }
+    }
 }
 
 fn validate_spawn_chunk(
@@ -294,8 +313,46 @@ struct ServerState {
     max_in_flight_batches: u16,
     generation_workers_per_client: u16,
     connections: Arc<Semaphore>,
-    world_opened: WorldOpened,
+    world: WorldBootstrap,
+    active_players: Mutex<HashMap<PlayerId, BrowserUserId>>,
     generation_tx: mpsc::Sender<GenerationJob>,
+}
+
+struct ActivePlayerClaim {
+    state: Arc<ServerState>,
+    player_id: PlayerId,
+    browser_user_id: BrowserUserId,
+}
+
+impl ActivePlayerClaim {
+    fn acquire(state: Arc<ServerState>, identity: &PlayerIdentity) -> Option<Self> {
+        let mut active = match state.active_players.lock() {
+            Ok(active) => active,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if active.contains_key(&identity.player_id) {
+            return None;
+        }
+        active.insert(identity.player_id, identity.browser_user_id);
+        drop(active);
+        Some(Self {
+            state,
+            player_id: identity.player_id,
+            browser_user_id: identity.browser_user_id,
+        })
+    }
+}
+
+impl Drop for ActivePlayerClaim {
+    fn drop(&mut self) {
+        let mut active = match self.state.active_players.lock() {
+            Ok(active) => active,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if active.get(&self.player_id) == Some(&self.browser_user_id) {
+            active.remove(&self.player_id);
+        }
+    }
 }
 
 async fn websocket_endpoint(
@@ -482,16 +539,8 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
             return;
         }
     };
-    let client_window = match decode_open_world(&first) {
-        Ok(window) if window > 0 => window,
-        Ok(_) => {
-            let _ = socket
-                .send(Message::Binary(
-                    encode_error(0, "OpenWorld request window must be nonzero").into(),
-                ))
-                .await;
-            return;
-        }
+    let open = match decode_open_world(&first) {
+        Ok(open) => open,
         Err(error) => {
             let _ = socket
                 .send(Message::Binary(encode_error(0, &error.to_string()).into()))
@@ -499,7 +548,15 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
             return;
         }
     };
-    let negotiated_window = client_window.min(state.max_in_flight_batches);
+    let Some(_player_claim) = ActivePlayerClaim::acquire(Arc::clone(&state), &open.identity) else {
+        let _ = socket
+            .send(Message::Binary(
+                encode_error(0, "player is already connected").into(),
+            ))
+            .await;
+        return;
+    };
+    let negotiated_window = open.max_in_flight_batches.min(state.max_in_flight_batches);
     let session = Arc::new(SessionRequests::new(
         negotiated_window,
         state.generation_workers_per_client,
@@ -513,8 +570,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
     let writer = tokio::spawn(write_frames(sink, outbound_rx, writer_session));
     let reader = tokio::spawn(read_frames(stream, inbound_tx, state.max_frame_bytes));
 
-    let mut opened = state.world_opened.clone();
-    opened.recommended_in_flight_batches = negotiated_window;
+    let opened = state.world.opened(open.identity, negotiated_window);
     if outbound
         .send(OutboundFrame {
             bytes: encode_world_opened(&opened),
@@ -920,7 +976,8 @@ mod tests {
     use tokio_tungstenite::tungstenite::protocol::Message as ClientMessage;
     use uuid::Uuid;
     use voxels_world::protocol::{
-        ChunkBatchRequest, SurfaceTileBatchRequest, decode_chunk_batch_result,
+        BrowserUserId, ChunkBatchRequest, OpenWorld, PlayerId, PlayerIdentity,
+        SurfaceTileBatchRequest, decode_chunk_batch_result, decode_error,
         decode_surface_tile_batch_result, decode_world_opened, encode_chunk_batch,
         encode_open_world, encode_surface_tile_batch,
     };
@@ -950,6 +1007,14 @@ mod tests {
                 xz_voxels: [13, -21],
             },
             terrain_diffusion: TerrainDiffusionProviderConfig::default(),
+        }
+    }
+
+    fn player_identity(user: u8, player: u8, name: &str) -> PlayerIdentity {
+        PlayerIdentity {
+            browser_user_id: BrowserUserId::from_bytes([user; 16]),
+            player_id: PlayerId::from_bytes([player; 16]),
+            player_name: name.to_owned(),
         }
     }
 
@@ -1012,21 +1077,29 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v1, test-local-token"),
+            HeaderValue::from_static("voxels.world.v2, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
             response.headers().get(SEC_WEBSOCKET_PROTOCOL),
             Some(&HeaderValue::from_static(WORLD_WEBSOCKET_PROTOCOL))
         );
+        let identity = player_identity(1, 2, "default");
         socket
-            .send(ClientMessage::Binary(encode_open_world(2).into()))
+            .send(ClientMessage::Binary(
+                encode_open_world(&OpenWorld {
+                    max_in_flight_batches: 2,
+                    identity: identity.clone(),
+                })?
+                .into(),
+            ))
             .await?;
         let opened_bytes = next_client_binary(&mut socket).await?;
         let opened = decode_world_opened(&opened_bytes)?;
         assert_eq!([opened.spawn.x, opened.spawn.z], config.spawn.xz_voxels);
         assert_eq!(opened.manifest.world_id, config.canonical_world_id());
         assert_eq!(opened.recommended_in_flight_batches, 2);
+        assert_eq!(opened.identity, identity);
         assert!(opened.capabilities.contains(WorldCapabilities::SURFACE_LOD));
 
         let batch = ChunkBatchRequest {
@@ -1061,8 +1134,21 @@ mod tests {
         )?;
         let server_task = tokio::spawn(server.serve(listener));
 
-        let (mut first, _) = connect_test_client(address).await?;
-        let (mut second, _) = connect_test_client(address).await?;
+        let first_identity = player_identity(1, 2, "alice");
+        let second_identity = player_identity(1, 3, "bob");
+        let (mut first, first_opened) =
+            connect_test_client(address, first_identity.clone()).await?;
+        let (mut second, second_opened) =
+            connect_test_client(address, second_identity.clone()).await?;
+        assert_eq!(first_opened.identity, first_identity.clone());
+        assert_eq!(second_opened.identity, second_identity);
+
+        let (mut duplicate, duplicate_response) =
+            connect_test_client_raw(address, first_identity).await?;
+        let (request_id, message) = decode_error(&duplicate_response)?;
+        assert_eq!(request_id, 0);
+        assert_eq!(message, "player is already connected");
+        duplicate.close(None).await?;
         let first_coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, -400, 200);
         let second_coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 700, -600);
         for (socket, coord) in [(&mut first, first_coord), (&mut second, second_coord)] {
@@ -1097,6 +1183,7 @@ mod tests {
 
     async fn connect_test_client(
         address: SocketAddr,
+        identity: PlayerIdentity,
     ) -> Result<
         (
             tokio_tungstenite::WebSocketStream<
@@ -1106,20 +1193,43 @@ mod tests {
         ),
         Box<dyn std::error::Error>,
     > {
+        let (socket, opened_bytes) = connect_test_client_raw(address, identity).await?;
+        let opened = decode_world_opened(&opened_bytes)?;
+        Ok((socket, opened))
+    }
+
+    async fn connect_test_client_raw(
+        address: SocketAddr,
+        identity: PlayerIdentity,
+    ) -> Result<
+        (
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Vec<u8>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
         let mut request = format!("ws://{address}{WORLD_WEBSOCKET_PATH}").into_client_request()?;
         request
             .headers_mut()
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v1, test-local-token"),
+            HeaderValue::from_static("voxels.world.v2, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
-            .send(ClientMessage::Binary(encode_open_world(2).into()))
+            .send(ClientMessage::Binary(
+                encode_open_world(&OpenWorld {
+                    max_in_flight_batches: 2,
+                    identity,
+                })?
+                .into(),
+            ))
             .await?;
-        let opened = decode_world_opened(&next_client_binary(&mut socket).await?)?;
-        Ok((socket, opened))
+        let response = next_client_binary(&mut socket).await?;
+        Ok((socket, response))
     }
 
     async fn next_client_binary<S>(

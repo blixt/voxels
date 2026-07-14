@@ -7,7 +7,7 @@ provider therefore adds no provider branch, model dependency, or Metal API to th
 
 ## Why binary WebSocket first
 
-VXWP v1 uses the standard `WebSocket` API over loopback. This is the best first transport for
+VXWP v2 uses the standard `WebSocket` API over loopback. This is the best first transport for
 reliable chunk assets: it is mature, works in a dedicated worker, and requires neither an HTTP/3
 certificate setup nor WebRTC signaling. Axum's native Rust server disables Nagle delay, and the
 application bounds outstanding work so classic WebSocket's missing receive-side backpressure cannot
@@ -34,17 +34,17 @@ The [W3C WebTransport specification][webtransport-spec] supports carrying the sa
 envelopes on a future reliable stream. Transport choice is deliberately below world identity,
 request correlation, and chunk codecs.
 
-## VXWP v1 contract
+## VXWP v2 contract
 
 Each WebSocket message contains exactly one little-endian VXWP envelope with `VXWP` magic, protocol
 version, message kind, request ID, payload length, and reserved fields. The format is code-versioned;
 Rust enum layout and Serde output are not wire formats.
 
-1. The browser upgrades `/v1/world`, offering `voxels.world.v1` and the configured local auth token,
-   then sends `OpenWorld` with its maximum in-flight batch count.
+1. The browser upgrades `/v2/world`, offering `voxels.world.v2` and the configured local auth token,
+   then sends `OpenWorld` with its maximum in-flight batch count and browser-local player claim.
 2. The daemon replies with `WorldOpened`: immutable world manifest, source identity/hash,
-   capabilities, negotiated request window, and spawn sample. The browser does not inspect the
-   provider type to choose generation behavior.
+   capabilities, negotiated request window, echoed player claim, and spawn sample. The client
+   rejects an identity mismatch and does not inspect the provider type to choose generation behavior.
 3. The browser first submits priority-tagged surface-tile batches in stride-16, stride-8, stride-4,
    then stride-2 order. Each result is independently renderable and cancellable, so useful horizon
    coverage arrives before exact near terrain.
@@ -72,9 +72,10 @@ exposing unstable intermediate diffusion states.
 ## Backpressure and security bounds
 
 The client and server negotiate the smaller in-flight batch count. Request identifiers and
-cancellation maps are scoped to each connection, while world identities and absolute product keys
-are connection-independent. Two clients can therefore use the same request ID at unrelated world
-locations without aliasing. The client stops admitting work
+cancellation maps are scoped to each connection, while world identities, player IDs, and absolute
+product keys are connection-independent. Two clients can therefore use the same request ID at
+unrelated world locations without aliasing. The daemon admits different players concurrently and
+rejects a second live connection claiming the same player ID. The client stops admitting work
 at that window, pauses sends above its high `bufferedAmount` watermark, resumes below the low
 watermark, times out requests, and reconnects with bounded backoff. The daemon independently limits
 frame bytes, accepted connections, admitted requests, the generation queue, global blocking jobs,
@@ -85,8 +86,9 @@ camera speed or server response latency.
 The daemon refuses non-loopback listeners, checks the browser `Origin`, and requires a random token
 as a second offered WebSocket subprotocol because browser WebSockets cannot set an authorization
 header. This token is a local cross-site request defense, not production authentication: it is
-present in client configuration. A future network deployment must use `wss://`, real credentials,
-authorization, quotas, and the same VXWP version negotiation.
+present in client configuration. Browser-generated user/player IDs are likewise untrusted local
+claims, not proof of identity. A future network deployment must use `wss://`, real credentials,
+server-validated player ownership, authorization, quotas, and the same VXWP version negotiation.
 
 Chrome 147 added [Local Network Access restrictions for WebSockets][chrome-147], so Chrome 150+
 prompts before a page may connect to loopback. Grant the prompt for the Vite origin. Local development
@@ -108,8 +110,8 @@ Copy it to both `config/client.toml` as `[world].auth_subprotocol_token` and
 
 ```toml
 [world]
-endpoint = "ws://127.0.0.1:9777/v1/world"
-subprotocol = "voxels.world.v1"
+endpoint = "ws://127.0.0.1:9777/v2/world"
+subprotocol = "voxels.world.v2"
 auth_subprotocol_token = "the-same-random-local-token"
 ```
 
@@ -151,6 +153,32 @@ vp dev
 Open `http://127.0.0.1:5173`, grant Chrome's local/loopback network permission when prompted, and
 play normally. To compare generators, change only `source` in `config/world-service.toml`, restart
 the matching daemon command, and reload. The client configuration does not change.
+
+## Local players and two-browser testing
+
+The bare URL selects the browser profile's automatic `default` player. A versioned local registry
+stores one random browser-user ID and one random player ID per name. The default player therefore
+returns to its own last camera location after reload without putting an ID in the URL.
+
+For two local players, keep the same server and Vite processes running and open:
+
+- `http://127.0.0.1:5173/?player=alice`
+- `http://127.0.0.1:5173/?player=bob`
+
+Names are lowercase local selectors, limited to 32 ASCII letters, digits, `_`, or `-`; they are not
+authentication or secrets. The registry is updated under a Web Lock, so simultaneous first opens
+cannot mint competing IDs. `window.__VOXELS__.player` exposes the selected IDs for diagnostics and
+`window.__VOXELS__.playerUrl("carol")` returns a correctly formed URL for another named player.
+
+Camera rows are keyed by player ID inside the manifest-specific database. The schema-3 singleton
+camera migrates only to the stable default player, even when a named player is opened first. Voxel
+edits remain world-scoped and are shared live between named players in the same browser profile.
+Different browser profiles, private windows, hostnames, or ports have separate local storage and
+OPFS; cross-device state requires the future server-owned player store.
+
+This phase establishes identities and independent local positions, but does not replicate avatars,
+movement, inventory, or edits through the server yet. Those features must move simulation and state
+authority to the authenticated server instead of trusting browser-local values.
 
 ## Far-LOD transition policy and next step
 

@@ -66,6 +66,7 @@ async function boot(message: InitMessage): Promise<EngineHandle> {
     message.dpr,
     message.reducedMotion,
     message.configToml,
+    [message.browserUserId, message.playerId, message.defaultPlayerId, message.playerName],
   );
 }
 

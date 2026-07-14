@@ -12,6 +12,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use voxels_core::CameraState;
+use voxels_world::protocol::PlayerId;
 use voxels_world::{EditMap, Material, VoxelCoord};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -19,10 +20,10 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{AbortController, BroadcastChannel, DedicatedWorkerGlobalScope, MessageEvent};
 
 const LEGACY_DATABASE_NAME: &str = "voxels.db";
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const CHANNEL_NAME: &str = "voxels-db-v1";
 const LOCK_NAME: &str = "voxels-db-owner";
-const WIRE_VERSION: f64 = 1.0;
+const WIRE_VERSION: f64 = 2.0;
 const MSG_REQUEST: f64 = 0.0;
 const MSG_RESPONSE: f64 = 1.0;
 const MSG_EDIT_COMMITTED: f64 = 2.0;
@@ -44,6 +45,13 @@ pub struct PersistenceConfig {
     pub request_retries: usize,
     pub vfs_install_attempts: usize,
     pub vfs_retry_delay_ms: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PersistencePlayer {
+    pub player_id: PlayerId,
+    /// Stable default player used only to preserve the legacy singleton camera during schema 4.
+    pub legacy_default_player_id: PlayerId,
 }
 
 /// Complete namespace for one immutable world source.
@@ -89,9 +97,14 @@ impl PersistenceWorld {
 
 #[derive(Clone)]
 enum Operation {
-    LoadCamera,
+    LoadCamera {
+        player_id: PlayerId,
+    },
     LoadEdits,
-    SaveCamera([f32; 5]),
+    SaveCamera {
+        player_id: PlayerId,
+        values: [f32; 5],
+    },
     SaveEdit {
         coord: VoxelCoord,
         material: Option<u16>,
@@ -180,6 +193,7 @@ struct Coordinator {
     last_leader_error: RefCell<Option<String>>,
     _on_message: RefCell<Option<MessageHandler>>,
     world: PersistenceWorld,
+    player: PersistencePlayer,
 }
 
 pub struct Store {
@@ -189,9 +203,18 @@ pub struct Store {
 }
 
 impl Store {
-    pub async fn open(world: PersistenceWorld, config: PersistenceConfig) -> Result<Self, JsValue> {
-        let coordinator = Coordinator::start(world, config).await?;
-        let initial_camera = match coordinator.request(Operation::LoadCamera).await {
+    pub async fn open(
+        world: PersistenceWorld,
+        player: PersistencePlayer,
+        config: PersistenceConfig,
+    ) -> Result<Self, JsValue> {
+        let coordinator = Coordinator::start(world, player, config).await?;
+        let initial_camera = match coordinator
+            .request(Operation::LoadCamera {
+                player_id: player.player_id,
+            })
+            .await
+        {
             OperationResult::Camera(camera) => camera.map(crate::camera_from_persisted_values),
             OperationResult::Error(error) => return Err(JsValue::from_str(&error)),
             _ => {
@@ -217,13 +240,16 @@ impl Store {
     }
 
     pub fn save_camera(&self, camera: &CameraState) -> Result<(), JsValue> {
-        self.coordinator.dispatch_write(Operation::SaveCamera([
-            camera.position.x,
-            camera.position.y,
-            camera.position.z,
-            camera.yaw,
-            camera.pitch,
-        ]))
+        self.coordinator.dispatch_write(Operation::SaveCamera {
+            player_id: self.coordinator.player.player_id,
+            values: [
+                camera.position.x,
+                camera.position.y,
+                camera.position.z,
+                camera.yaw,
+                camera.pitch,
+            ],
+        })
     }
 
     pub fn load_edits(&mut self) -> Result<EditMap, JsValue> {
@@ -279,6 +305,7 @@ impl Drop for Store {
 impl Coordinator {
     async fn start(
         world: PersistenceWorld,
+        player: PersistencePlayer,
         config: PersistenceConfig,
     ) -> Result<Rc<Self>, JsValue> {
         let channel = BroadcastChannel::new(CHANNEL_NAME)?;
@@ -300,6 +327,7 @@ impl Coordinator {
             last_leader_error: RefCell::new(None),
             _on_message: RefCell::new(None),
             world,
+            player,
         });
         coordinator.install_message_handler();
         coordinator.elect().await?;
@@ -365,11 +393,13 @@ impl Coordinator {
 
         let mut queue = self.write_queue.borrow_mut();
         match &operation {
-            Operation::SaveCamera(_) => {
+            Operation::SaveCamera { player_id, .. } => {
                 if let Some(pending) = queue
                     .iter_mut()
                     .rev()
-                    .find(|pending| matches!(pending, Operation::SaveCamera(_)))
+                    .find(|pending| {
+                        matches!(pending, Operation::SaveCamera { player_id: queued, .. } if queued == player_id)
+                    })
                 {
                     *pending = operation;
                 } else {
@@ -584,7 +614,13 @@ impl Coordinator {
         let boot_probe = ready.is_some();
         let coordinator = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            match open_leader(coordinator.world.clone(), coordinator.config).await {
+            match open_leader(
+                coordinator.world.clone(),
+                coordinator.player.legacy_default_player_id,
+                coordinator.config,
+            )
+            .await
+            {
                 Ok(leader) if !coordinator.closed.get() => {
                     coordinator.last_leader_error.borrow_mut().take();
                     *coordinator.leader.borrow_mut() = Some(Rc::new(leader));
@@ -758,6 +794,7 @@ async fn install_vfs(config: PersistenceConfig) -> Result<OpfsSAHPoolUtil, JsVal
 
 async fn open_leader(
     world: PersistenceWorld,
+    legacy_default_player_id: PlayerId,
     config: PersistenceConfig,
 ) -> Result<Leader, JsValue> {
     let vfs = install_vfs(config).await?;
@@ -767,7 +804,7 @@ async fn open_leader(
         connection
             .execute_batch("PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")
             .map_err(|error| js_error("configure SQLite", error))?;
-        migrate(&connection)?;
+        migrate(&connection, legacy_default_player_id)?;
         ensure_world(&connection, world.database_seed, world.database_version)?;
         Ok(connection)
     })();
@@ -786,18 +823,18 @@ async fn open_leader(
 
 fn run_operation(connection: &Connection, operation: &Operation) -> OperationResult {
     match operation {
-        Operation::LoadCamera => load_camera(connection),
+        Operation::LoadCamera { player_id } => load_camera(connection, *player_id),
         Operation::LoadEdits => load_edits(connection),
-        Operation::SaveCamera(values) => save_camera(connection, *values),
+        Operation::SaveCamera { player_id, values } => save_camera(connection, *player_id, *values),
         Operation::SaveEdit { coord, material } => save_edit(connection, *coord, *material),
     }
 }
 
-fn load_camera(connection: &Connection) -> OperationResult {
+fn load_camera(connection: &Connection, player_id: PlayerId) -> OperationResult {
     connection
         .query_row(
-            "SELECT x, y, z, yaw, pitch FROM camera WHERE id = 0",
-            [],
+            "SELECT x, y, z, yaw, pitch FROM local_player_state WHERE player_id = ?1",
+            params![player_id.as_bytes().as_slice()],
             |row| {
                 Ok([
                     row.get(0)?,
@@ -813,13 +850,21 @@ fn load_camera(connection: &Connection) -> OperationResult {
         .unwrap_or_else(|error| OperationResult::Error(format!("load camera: {error}")))
 }
 
-fn save_camera(connection: &Connection, values: [f32; 5]) -> OperationResult {
+fn save_camera(connection: &Connection, player_id: PlayerId, values: [f32; 5]) -> OperationResult {
     connection
         .execute(
-            "INSERT INTO camera (id, x, y, z, yaw, pitch) VALUES (0, ?1, ?2, ?3, ?4, ?5) \
-             ON CONFLICT(id) DO UPDATE SET x=excluded.x, y=excluded.y, z=excluded.z, \
-             yaw=excluded.yaw, pitch=excluded.pitch",
-            params![values[0], values[1], values[2], values[3], values[4]],
+            "INSERT INTO local_player_state (player_id, x, y, z, yaw, pitch) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(player_id) DO UPDATE SET x=excluded.x, y=excluded.y, z=excluded.z, \
+             yaw=excluded.yaw, pitch=excluded.pitch, updated_at=unixepoch()",
+            params![
+                player_id.as_bytes().as_slice(),
+                values[0],
+                values[1],
+                values[2],
+                values[3],
+                values[4]
+            ],
         )
         .map(|_| OperationResult::Ok)
         .unwrap_or_else(|error| OperationResult::Error(format!("save camera: {error}")))
@@ -881,10 +926,14 @@ fn edit_map_from_rows(rows: Vec<(VoxelCoord, u16)>) -> Result<EditMap, JsValue> 
 
 fn encode_operation(message: &js_sys::Array, operation: &Operation) {
     match operation {
-        Operation::LoadCamera => push_number(message, OP_LOAD_CAMERA),
+        Operation::LoadCamera { player_id } => {
+            push_number(message, OP_LOAD_CAMERA);
+            message.push(&JsValue::from_str(&player_id.to_string()));
+        }
         Operation::LoadEdits => push_number(message, OP_LOAD_EDITS),
-        Operation::SaveCamera(values) => {
+        Operation::SaveCamera { player_id, values } => {
             push_number(message, OP_SAVE_CAMERA);
+            message.push(&JsValue::from_str(&player_id.to_string()));
             for value in values {
                 push_number(message, f64::from(*value));
             }
@@ -901,21 +950,39 @@ fn encode_operation(message: &js_sys::Array, operation: &Operation) {
 
 fn decode_operation(message: &js_sys::Array) -> Result<Operation, String> {
     match number(message, 5) {
-        Some(OP_LOAD_CAMERA) => Ok(Operation::LoadCamera),
+        Some(OP_LOAD_CAMERA) => Ok(Operation::LoadCamera {
+            player_id: decode_player_id(message, 6)?,
+        }),
         Some(OP_LOAD_EDITS) => Ok(Operation::LoadEdits),
-        Some(OP_SAVE_CAMERA) => Ok(Operation::SaveCamera([
-            finite_f32(message, 6)?,
-            finite_f32(message, 7)?,
-            finite_f32(message, 8)?,
-            finite_f32(message, 9)?,
-            finite_f32(message, 10)?,
-        ])),
+        Some(OP_SAVE_CAMERA) => Ok(Operation::SaveCamera {
+            player_id: decode_player_id(message, 6)?,
+            values: [
+                finite_f32(message, 7)?,
+                finite_f32(message, 8)?,
+                finite_f32(message, 9)?,
+                finite_f32(message, 10)?,
+                finite_f32(message, 11)?,
+            ],
+        }),
         Some(OP_SAVE_EDIT) => Ok(Operation::SaveEdit {
             coord: decode_coord(message, 6)?,
             material: decode_optional_material(message, 9)?,
         }),
         _ => Err("unknown persistence operation".into()),
     }
+}
+
+fn decode_player_id(message: &js_sys::Array, index: u32) -> Result<PlayerId, String> {
+    let value = message
+        .get(index)
+        .as_string()
+        .ok_or_else(|| "missing player id in persistence message".to_owned())?;
+    let player_id = PlayerId::from_uuid_str(&value)
+        .ok_or_else(|| "invalid player id in persistence message".to_owned())?;
+    if player_id.is_nil() {
+        return Err("nil player id in persistence message".to_owned());
+    }
+    Ok(player_id)
 }
 
 fn decode_coord(message: &js_sys::Array, offset: u32) -> Result<VoxelCoord, String> {
@@ -1120,7 +1187,7 @@ fn js_value_message(value: &JsValue) -> String {
     value.as_string().unwrap_or_else(|| format!("{value:?}"))
 }
 
-fn migrate(connection: &Connection) -> Result<(), JsValue> {
+fn migrate(connection: &Connection, legacy_default_player_id: PlayerId) -> Result<(), JsValue> {
     let mut version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|error| js_error("read schema version", error))?;
@@ -1204,6 +1271,40 @@ fn migrate(connection: &Connection) -> Result<(), JsValue> {
                  COMMIT;",
             )
             .map_err(|error| js_error("apply schema migration 3", error))?;
+        version = 3;
+    }
+    if version == 3 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE local_player_state (
+                   player_id BLOB PRIMARY KEY CHECK (length(player_id) = 16),
+                   x REAL NOT NULL,
+                   y REAL NOT NULL,
+                   z REAL NOT NULL,
+                   yaw REAL NOT NULL,
+                   pitch REAL NOT NULL,
+                   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 ) WITHOUT ROWID;",
+            )
+            .map_err(|error| js_error("begin schema migration 4", error))?;
+        let result = (|| -> rusqlite::Result<()> {
+            connection.execute(
+                "INSERT INTO local_player_state (player_id, x, y, z, yaw, pitch) \
+                 SELECT ?1, x, y, z, yaw, pitch FROM camera WHERE id=0",
+                params![legacy_default_player_id.as_bytes().as_slice()],
+            )?;
+            connection.execute_batch(
+                "DROP TABLE camera;
+                 PRAGMA user_version=4;
+                 COMMIT;",
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = connection.execute_batch("ROLLBACK;");
+            return Err(js_error("apply schema migration 4", error));
+        }
     }
     Ok(())
 }
