@@ -72,7 +72,7 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 17.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 18.0;
 
     #[derive(Clone, Copy, Debug)]
     struct EngineConfig {
@@ -267,6 +267,7 @@ mod web {
         surface_in_flight: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
         fine_initialized: Cell<bool>,
+        all_lods_ready: Cell<bool>,
         store: RefCell<Store>,
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
@@ -510,6 +511,7 @@ mod web {
                 && self.surface_in_flight.borrow().is_empty()
                 && self.surface_dirty.borrow().is_empty()
                 && self.surface_coverage_current();
+            self.all_lods_ready.set(all_lods_ready);
             debug_assert!(
                 !all_lods_ready || self.surface_coverage_current(),
                 "surface coverage became ready with missing or stale revisions"
@@ -1683,9 +1685,13 @@ mod web {
                     render.arena_allocated_bytes as f32 / (1024.0 * 1024.0),
                     render.arena_capacity_bytes as f32 / (1024.0 * 1024.0),
                     (diagnostics.generation.queued
+                        + diagnostics.generation.in_flight
                         + diagnostics.meshing.queued
+                        + diagnostics.meshing.in_flight
                         + diagnostics.upload.queued
+                        + diagnostics.upload.in_flight
                         + engine.surface_queue.borrow().len()
+                        + engine.surface_in_flight.borrow().len()
                         + engine.surface_dirty.borrow().len()) as f32,
                     engine.surface_resident.borrow().len() as f32,
                     engine.frame_milliseconds.get(),
@@ -1790,6 +1796,14 @@ mod web {
                     render.remote_avatars as f32,
                     render.avatar_parts as f32,
                     render.avatar_draw_calls as f32,
+                    (render.viewport_fingerprint & 0x00ff_ffff) as f32,
+                    ((render.viewport_fingerprint >> 24) & 0x00ff_ffff) as f32,
+                    if engine.all_lods_ready.get() {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    engine.surface_in_flight.borrow().len() as f32,
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
@@ -2031,6 +2045,7 @@ mod web {
             surface_in_flight: RefCell::new(BTreeSet::new()),
             surface_dirty: RefCell::new(BTreeSet::new()),
             fine_initialized: Cell::new(false),
+            all_lods_ready: Cell::new(false),
             store: RefCell::new(store),
             scope,
             callback: RefCell::new(None),

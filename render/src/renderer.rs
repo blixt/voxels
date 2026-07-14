@@ -162,6 +162,7 @@ const _: () = assert!(size_of::<GpuQuad>() == 32);
 struct ChunkMesh {
     allocation: Allocation,
     quad_count: u32,
+    content_fingerprint: u64,
     slices: Vec<MeshSlice>,
     activation_mask: u8,
 }
@@ -251,6 +252,7 @@ struct DrawList {
     spans: Vec<DrawSpan>,
     mesh_count: u32,
     quad_count: u32,
+    fingerprint: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -263,6 +265,8 @@ pub struct RenderDiagnostics {
     pub shadow_cascades: u32,
     pub quads: u32,
     pub water_quads: u32,
+    /// Stable identity of the world geometry selected for the latest presented viewport.
+    pub viewport_fingerprint: u64,
     pub refraction_copy_bytes: u64,
     pub arena_pages: u32,
     pub arena_capacity_bytes: u64,
@@ -2352,6 +2356,10 @@ impl Renderer {
                 .quad_count
                 .saturating_add(water_draw_list.quad_count),
             water_quads: water_draw_list.quad_count,
+            viewport_fingerprint: fingerprint_value(
+                fingerprint_value(FINGERPRINT_OFFSET, world_draw_list.fingerprint),
+                water_draw_list.fingerprint,
+            ),
             refraction_copy_bytes: refraction_copy_bytes(
                 self.config.width,
                 self.config.height,
@@ -2451,6 +2459,7 @@ impl Renderer {
         let mut items = Vec::new();
         let mut mesh_count = 0u32;
         let mut quad_count = 0u32;
+        let mut fingerprint = FINGERPRINT_OFFSET;
         for (key, chunk) in chunks {
             if !chunk.active() {
                 continue;
@@ -2475,14 +2484,38 @@ impl Renderer {
             }
             if selected {
                 mesh_count = mesh_count.saturating_add(1);
+                fingerprint = fingerprint_value(fingerprint, u64::from(key.0));
+                fingerprint = fingerprint_value(fingerprint, key.1 as u32 as u64);
+                fingerprint = fingerprint_value(fingerprint, key.2 as u32 as u64);
+                fingerprint = fingerprint_value(fingerprint, key.3 as u32 as u64);
+                fingerprint = fingerprint_value(fingerprint, chunk.content_fingerprint);
             }
         }
         DrawList {
             spans: coalesce_draw_items(items),
             mesh_count,
             quad_count,
+            fingerprint,
         }
     }
+}
+
+const FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FINGERPRINT_PRIME: u64 = 0x100_0000_01b3;
+
+fn fingerprint_bytes(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(FINGERPRINT_OFFSET, |fingerprint, byte| {
+        (fingerprint ^ u64::from(*byte)).wrapping_mul(FINGERPRINT_PRIME)
+    })
+}
+
+fn fingerprint_value(fingerprint: u64, value: u64) -> u64 {
+    value
+        .to_le_bytes()
+        .iter()
+        .fold(fingerprint, |fingerprint, byte| {
+            (fingerprint ^ u64::from(*byte)).wrapping_mul(FINGERPRINT_PRIME)
+        })
 }
 
 #[allow(
@@ -2525,6 +2558,7 @@ fn prepare_mesh_sliced_into(
     Some(ChunkMesh {
         allocation,
         quad_count: gpu_quads.len() as u32,
+        content_fingerprint: fingerprint_bytes(bytes),
         slices,
         activation_mask,
     })
@@ -3180,6 +3214,7 @@ mod tests {
             ChunkMesh {
                 allocation: resident,
                 quad_count: 1,
+                content_fingerprint: 1,
                 slices: Vec::new(),
                 activation_mask: u8::MAX,
             },
@@ -3190,6 +3225,7 @@ mod tests {
             Some(ChunkMesh {
                 allocation: prepared,
                 quad_count: 2,
+                content_fingerprint: 2,
                 slices: Vec::new(),
                 activation_mask: u8::MAX,
             }),
