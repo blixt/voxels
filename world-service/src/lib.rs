@@ -51,6 +51,8 @@ pub struct LoopbackTransportConfig {
     pub max_connections: u16,
     /// Bounded process-wide queue shared by all clients.
     pub global_queue_capacity: u16,
+    /// LRU budget for immutable compressed world-product batch responses.
+    pub product_cache_bytes: usize,
     /// Maximum blocking generation batches executing across all clients.
     pub generation_workers: u16,
     /// Fairness guard: one connection cannot occupy the whole worker pool.
@@ -71,6 +73,7 @@ impl Default for LoopbackTransportConfig {
             max_in_flight_batches: 16,
             max_connections: 512,
             global_queue_capacity: 8_192,
+            product_cache_bytes: 256 * 1024 * 1024,
             generation_workers: 8,
             generation_workers_per_client: 2,
         }
@@ -279,6 +282,11 @@ impl WorldServiceConfig {
         if self.transport.global_queue_capacity < self.transport.max_in_flight_batches {
             return Err(WorldServiceConfigError::InvalidConcurrency(
                 "global_queue_capacity must cover one full client request window",
+            ));
+        }
+        if self.transport.product_cache_bytes > 1024 * 1024 * 1024 {
+            return Err(WorldServiceConfigError::InvalidConcurrency(
+                "product_cache_bytes must stay at most 1 GiB",
             ));
         }
         if self.transport.generation_workers == 0
@@ -670,6 +678,7 @@ max_outbound_bytes_per_client = 33554432
 max_in_flight_batches = 16
 max_connections = 512
 global_queue_capacity = 128
+product_cache_bytes = 268435456
 generation_workers = 8
 generation_workers_per_client = 2
 
@@ -766,6 +775,7 @@ sea_level_voxels = 52
 
         for missing in [
             "max_connections = 512\n",
+            "product_cache_bytes = 268435456\n",
             "broadcast_interval_ms = 33\n",
             "xz_voxels = [0, 0]\n",
             "precision = \"float16\"\n",

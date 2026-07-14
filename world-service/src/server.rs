@@ -14,7 +14,7 @@ use axum::routing::get;
 use axum::serve::ListenerExt;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,6 +69,7 @@ impl WorldServer {
             Arc::clone(&source),
             semaphore,
             config.transport.max_frame_bytes,
+            config.transport.product_cache_bytes,
         ));
 
         let presence = PresenceHub::new(config.presence).map_err(WorldServerError::Presence)?;
@@ -546,6 +547,7 @@ struct GenerationJob {
     tracked: TrackedRequest,
 }
 
+#[derive(Clone)]
 enum GenerationRequest {
     Chunks(ChunkBatchRequest),
     SurfaceTiles(SurfaceTileBatchRequest),
@@ -557,6 +559,82 @@ impl GenerationRequest {
             Self::Chunks(request) => request.request_id,
             Self::SurfaceTiles(request) => request.request_id,
         }
+    }
+
+    fn key(&self) -> GenerationKey {
+        match self {
+            Self::Chunks(request) => GenerationKey::Chunks {
+                priority: request.priority,
+                coords: request.coords.clone(),
+            },
+            Self::SurfaceTiles(request) => GenerationKey::SurfaceTiles {
+                priority: request.priority,
+                coords: request.coords.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum GenerationKey {
+    Chunks {
+        priority: WorldProductPriority,
+        coords: Vec<ChunkCoord>,
+    },
+    SurfaceTiles {
+        priority: WorldProductPriority,
+        coords: Vec<voxels_world::SurfaceTileCoord>,
+    },
+}
+
+struct GenerationCompletion {
+    key: GenerationKey,
+    result: Result<Vec<u8>, String>,
+}
+
+struct ResponseCache {
+    max_bytes: usize,
+    retained_bytes: usize,
+    entries: HashMap<GenerationKey, Arc<Vec<u8>>>,
+    lru: VecDeque<GenerationKey>,
+}
+
+impl ResponseCache {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            max_bytes,
+            retained_bytes: 0,
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, key: &GenerationKey) -> Option<Arc<Vec<u8>>> {
+        let value = Arc::clone(self.entries.get(key)?);
+        self.lru.retain(|candidate| candidate != key);
+        self.lru.push_back(key.clone());
+        Some(value)
+    }
+
+    fn insert(&mut self, key: GenerationKey, bytes: Arc<Vec<u8>>) {
+        if self.max_bytes == 0 || bytes.len() > self.max_bytes {
+            return;
+        }
+        if let Some(replaced) = self.entries.remove(&key) {
+            self.retained_bytes = self.retained_bytes.saturating_sub(replaced.len());
+            self.lru.retain(|candidate| candidate != &key);
+        }
+        while self.retained_bytes.saturating_add(bytes.len()) > self.max_bytes {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = self.entries.remove(&oldest) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(evicted.len());
+            }
+        }
+        self.retained_bytes = self.retained_bytes.saturating_add(bytes.len());
+        self.lru.push_back(key.clone());
+        self.entries.insert(key, bytes);
     }
 }
 
@@ -996,29 +1074,104 @@ async fn run_generation_dispatcher(
     source: Arc<dyn WorldSourceEngine>,
     semaphore: Arc<Semaphore>,
     max_frame_bytes: usize,
+    product_cache_bytes: usize,
 ) {
-    while let Some(job) = jobs.recv().await {
-        let source = Arc::clone(&source);
-        let semaphore = Arc::clone(&semaphore);
-        tokio::spawn(async move {
-            let session_semaphore = Arc::clone(&job.tracked.session.generation_permits);
-            let Ok(_session_permit) = session_semaphore.acquire_owned().await else {
-                job.tracked.finish();
-                return;
-            };
-            let Ok(permit) = semaphore.acquire_owned().await else {
-                job.tracked.finish();
-                return;
-            };
-            process_generation_job(job, source, permit, max_frame_bytes).await;
-        });
+    let (completion_tx, mut completions) = mpsc::unbounded_channel();
+    let mut in_flight = HashMap::<GenerationKey, Vec<GenerationJob>>::new();
+    let mut cache = ResponseCache::new(product_cache_bytes);
+    let mut jobs_open = true;
+    loop {
+        if !jobs_open && in_flight.is_empty() {
+            break;
+        }
+        tokio::select! {
+            job = jobs.recv(), if jobs_open => {
+                let Some(job) = job else {
+                    jobs_open = false;
+                    continue;
+                };
+                let key = job.request.key();
+                if let Some(bytes) = cache.get(&key) {
+                    tokio::spawn(deliver_generation_job(job, Ok(bytes), max_frame_bytes));
+                    continue;
+                }
+                if let Some(waiters) = in_flight.get_mut(&key) {
+                    waiters.push(job);
+                    continue;
+                }
+                let request = job.request.clone();
+                let session_semaphore = Arc::clone(&job.tracked.session.generation_permits);
+                in_flight.insert(key.clone(), vec![job]);
+                let source = Arc::clone(&source);
+                let semaphore = Arc::clone(&semaphore);
+                let completion_tx = completion_tx.clone();
+                tokio::spawn(async move {
+                    let result = generate_single_flight_response(
+                        request,
+                        source,
+                        session_semaphore,
+                        semaphore,
+                        max_frame_bytes,
+                    )
+                    .await;
+                    let _ = completion_tx.send(GenerationCompletion { key, result });
+                });
+            }
+            completion = completions.recv(), if !in_flight.is_empty() => {
+                let Some(completion) = completion else {
+                    break;
+                };
+                let Some(waiters) = in_flight.remove(&completion.key) else {
+                    continue;
+                };
+                let response = completion.result.map(Arc::new);
+                if let Ok(bytes) = &response {
+                    cache.insert(completion.key, Arc::clone(bytes));
+                }
+                for job in waiters {
+                    tokio::spawn(deliver_generation_job(
+                        job,
+                        response.clone(),
+                        max_frame_bytes,
+                    ));
+                }
+            }
+        }
     }
 }
 
-async fn process_generation_job(
-    job: GenerationJob,
+async fn generate_single_flight_response(
+    request: GenerationRequest,
     source: Arc<dyn WorldSourceEngine>,
-    _permit: OwnedSemaphorePermit,
+    session_semaphore: Arc<Semaphore>,
+    global_semaphore: Arc<Semaphore>,
+    max_frame_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let _session_permit = session_semaphore
+        .acquire_owned()
+        .await
+        .map_err(|_| "world session generation limiter stopped".to_owned())?;
+    let _global_permit = global_semaphore
+        .acquire_owned()
+        .await
+        .map_err(|_| "world generation limiter stopped".to_owned())?;
+    let generated = tokio::task::spawn_blocking(move || match request {
+        GenerationRequest::Chunks(request) => generate_chunk_result(source.as_ref(), request),
+        GenerationRequest::SurfaceTiles(request) => {
+            generate_surface_tile_result(source.as_ref(), request)
+        }
+    })
+    .await
+    .map_err(|_| "world generation task failed".to_owned())??;
+    if generated.len() > max_frame_bytes {
+        return Err("chunk result exceeds configured frame limit".to_owned());
+    }
+    Ok(generated)
+}
+
+async fn deliver_generation_job(
+    job: GenerationJob,
+    response: Result<Arc<Vec<u8>>, String>,
     max_frame_bytes: usize,
 ) {
     if job.tracked.is_cancelled() {
@@ -1026,23 +1179,14 @@ async fn process_generation_job(
         return;
     }
     let request_id = job.request.request_id();
-    let request = job.request;
-    let generated = tokio::task::spawn_blocking(move || match request {
-        GenerationRequest::Chunks(request) => generate_chunk_result(source.as_ref(), request),
-        GenerationRequest::SurfaceTiles(request) => {
-            generate_surface_tile_result(source.as_ref(), request)
+    let bytes = match response {
+        Ok(template) if template.len() <= max_frame_bytes => {
+            let mut bytes = template.as_ref().clone();
+            rewrite_frame_request_id(&mut bytes, request_id);
+            bytes
         }
-    })
-    .await;
-    if job.tracked.is_cancelled() {
-        job.tracked.finish();
-        return;
-    }
-    let bytes = match generated {
-        Ok(Ok(bytes)) if bytes.len() <= max_frame_bytes => bytes,
-        Ok(Ok(_)) => encode_error(request_id, "chunk result exceeds configured frame limit"),
-        Ok(Err(message)) => encode_error(request_id, &message),
-        Err(_) => encode_error(request_id, "world generation task failed"),
+        Ok(_) => encode_error(request_id, "chunk result exceeds configured frame limit"),
+        Err(message) => encode_error(request_id, &message),
     };
     let byte_count = match u32::try_from(bytes.len()) {
         Ok(count) => count,
@@ -1071,6 +1215,11 @@ async fn process_generation_job(
     {
         tracked.finish();
     }
+}
+
+fn rewrite_frame_request_id(bytes: &mut [u8], request_id: u64) {
+    debug_assert!(bytes.len() >= voxels_world::protocol::FRAME_HEADER_BYTES);
+    bytes[12..20].copy_from_slice(&request_id.to_le_bytes());
 }
 
 fn generate_surface_tile_result(
@@ -1167,6 +1316,7 @@ mod tests {
         WORLD_SERVICE_CONFIG_SCHEMA_VERSION, WorldSourceMode,
     };
     use futures_util::{SinkExt, StreamExt};
+    use std::sync::atomic::AtomicUsize;
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Error as ClientError;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -1185,6 +1335,88 @@ mod tests {
         ChunkCoord, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, WorldProductPriority,
     };
 
+    struct CountingSource {
+        inner: ProceduralWorldSource,
+        batch_calls: Arc<AtomicUsize>,
+    }
+
+    impl WorldSourceEngine for CountingSource {
+        fn identity(&self) -> &voxels_world::WorldSourceIdentity {
+            self.inner.identity()
+        }
+
+        fn generate_batch(
+            &self,
+            request: WorldProductBatch,
+        ) -> Result<voxels_world::WorldProductBatchResult, WorldSourceError> {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            self.batch_calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.generate_batch(request)
+        }
+
+        fn generate_edited_surface_tile(
+            &self,
+            edits: &voxels_world::EditMap,
+            coord: SurfaceTileCoord,
+        ) -> Result<voxels_world::SurfaceTileSnapshot, WorldSourceError> {
+            self.inner.generate_edited_surface_tile(edits, coord)
+        }
+
+        fn surface_tiles_affected_by_voxel(
+            &self,
+            edits: &voxels_world::EditMap,
+            level: SurfaceLodLevel,
+            coord: voxels_world::VoxelCoord,
+        ) -> Vec<SurfaceTileCoord> {
+            self.inner
+                .surface_tiles_affected_by_voxel(edits, level, coord)
+        }
+
+        fn atmosphere_sample(
+            &self,
+            x: i32,
+            z: i32,
+        ) -> (voxels_world::AtmosphereSample, voxels_world::SurfaceRegion) {
+            self.inner.atmosphere_sample(x, z)
+        }
+
+        fn skyline_features_anchored_in(
+            &self,
+            bounds: [[i32; 2]; 2],
+        ) -> Vec<voxels_world::SkylineFeature> {
+            self.inner.skyline_features_anchored_in(bounds)
+        }
+
+        fn skyline_features_at(
+            &self,
+            coord: voxels_world::VoxelCoord,
+        ) -> Vec<voxels_world::SkylineFeature> {
+            self.inner.skyline_features_at(coord)
+        }
+
+        fn nearest_skyline_feature(
+            &self,
+            x: i32,
+            z: i32,
+            kind: voxels_world::SkylineFeatureKind,
+            max_radius_cells: i32,
+        ) -> Option<voxels_world::SkylineFeature> {
+            self.inner
+                .nearest_skyline_feature(x, z, kind, max_radius_cells)
+        }
+
+        fn nearest_prominent_skyline_feature(
+            &self,
+            x: i32,
+            z: i32,
+            kind: voxels_world::SkylineFeatureKind,
+            max_radius_cells: i32,
+        ) -> Option<voxels_world::SkylineFeature> {
+            self.inner
+                .nearest_prominent_skyline_feature(x, z, kind, max_radius_cells)
+        }
+    }
+
     fn test_config() -> WorldServiceConfig {
         WorldServiceConfig {
             schema_version: WORLD_SERVICE_CONFIG_SCHEMA_VERSION,
@@ -1200,6 +1432,7 @@ mod tests {
                 max_in_flight_batches: 2,
                 max_connections: 4,
                 global_queue_capacity: 8,
+                product_cache_bytes: 4 * 1024 * 1024,
                 generation_workers: 4,
                 generation_workers_per_client: 2,
             },
@@ -1237,6 +1470,30 @@ mod tests {
             session.finish(7, &cancelled);
         }
         assert!(session.insert(7).is_ok());
+    }
+
+    #[test]
+    fn compressed_response_cache_is_byte_bounded_and_lru() {
+        fn key(x: i32) -> GenerationKey {
+            GenerationKey::Chunks {
+                priority: WorldProductPriority::VisibleChunk,
+                coords: vec![ChunkCoord::new(x, 0, 0)],
+            }
+        }
+
+        let mut cache = ResponseCache::new(11);
+        cache.insert(key(1), Arc::new(vec![1; 6]));
+        cache.insert(key(2), Arc::new(vec![2; 4]));
+        assert!(cache.get(&key(1)).is_some());
+        cache.insert(key(3), Arc::new(vec![3; 5]));
+        assert!(cache.get(&key(1)).is_some());
+        assert!(cache.get(&key(2)).is_none());
+        assert!(cache.get(&key(3)).is_some());
+        assert!(cache.retained_bytes <= cache.max_bytes);
+
+        cache.insert(key(4), Arc::new(vec![4; 12]));
+        assert!(cache.get(&key(4)).is_none());
+        assert!(cache.retained_bytes <= cache.max_bytes);
     }
 
     #[tokio::test]
@@ -1320,7 +1577,64 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert!(result.items[0].result.is_ok());
 
+        let cached_batch = ChunkBatchRequest {
+            request_id: 10,
+            ..batch
+        };
+        socket
+            .send(ClientMessage::Binary(
+                encode_chunk_batch(&cached_batch)?.into(),
+            ))
+            .await?;
+        let cached = decode_chunk_batch_result(&next_client_binary(&mut socket).await?)?;
+        assert_eq!(cached.request_id, cached_batch.request_id);
+        assert_eq!(cached.items, result.items);
+
         socket.close(None).await?;
+        server_task.abort();
+        let _ = server_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_identical_batches_single_flight_across_clients()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = test_config();
+        let listener = TcpListener::bind(config.transport.listen).await?;
+        let address = listener.local_addr()?;
+        let batch_calls = Arc::new(AtomicUsize::new(0));
+        let source = CountingSource {
+            inner: ProceduralWorldSource::new(config.world_seed),
+            batch_calls: Arc::clone(&batch_calls),
+        };
+        let server = WorldServer::new(config, Box::new(source))?;
+        batch_calls.store(0, Ordering::Relaxed);
+        let server_task = tokio::spawn(server.serve(listener));
+
+        let (mut first, _) = connect_test_client(address, player_identity(1, 2, "alice")).await?;
+        let (mut second, _) = connect_test_client(address, player_identity(1, 3, "bob")).await?;
+        let coords = vec![ChunkCoord::new(4, 0, -7), ChunkCoord::new(5, 0, -7)];
+        for (socket, request_id) in [(&mut first, 41), (&mut second, 99)] {
+            socket
+                .send(ClientMessage::Binary(
+                    encode_chunk_batch(&ChunkBatchRequest {
+                        request_id,
+                        priority: WorldProductPriority::VisibleChunk,
+                        coords: coords.clone(),
+                    })?
+                    .into(),
+                ))
+                .await?;
+        }
+        let first_result = decode_chunk_batch_result(&next_client_binary(&mut first).await?)?;
+        let second_result = decode_chunk_batch_result(&next_client_binary(&mut second).await?)?;
+        assert_eq!(first_result.request_id, 41);
+        assert_eq!(second_result.request_id, 99);
+        assert_eq!(first_result.items, second_result.items);
+        assert_eq!(batch_calls.load(Ordering::Relaxed), 1);
+
+        first.close(None).await?;
+        second.close(None).await?;
         server_task.abort();
         let _ = server_task.await;
         Ok(())

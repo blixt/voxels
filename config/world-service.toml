@@ -18,6 +18,8 @@ max_in_flight_batches = 16
 max_connections = 512
 # Covers the worst-case negotiated request window for all 512 admitted world connections.
 global_queue_capacity = 8192
+# Immutable encoded batches are shared across co-located clients and identical retries.
+product_cache_bytes = 268435456
 generation_workers = 8
 generation_workers_per_client = 2
 

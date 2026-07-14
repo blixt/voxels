@@ -86,11 +86,17 @@ connection. Each session can occupy at most two of the eight blocking generation
 has no per-socket outbound queue: a socket builds the newest delta at its next tick and awaits that
 single send, so a slow client cannot accumulate stale movement frames.
 
+Identical immutable chunk or surface batches use process-wide single-flight generation. Concurrent
+requesters join the first computation, and later requesters reuse its compressed VXWP response from
+a 256 MiB byte-bounded LRU while receiving their own request ID. This prevents a crowd spawning in
+one place from performing the same CPU or Metal work hundreds of times. The cache key includes
+product kind, priority, coordinate order, and the server's immutable source instance; server-owned
+edits must add chunk revision before edited products can enter this cache.
+
 The finite generation worker pool is still shared compute. Interest isolation guarantees zero
 cross-region presence candidates and entity bytes, but it cannot promise zero CPU contention while
-hundreds of clients simultaneously request distinct cold chunks. Product caching/single-flight and
-region-aware generation admission are the next server-throughput step; they do not require world
-sharding.
+hundreds of clients simultaneously request distinct cold chunks. Region-aware generation admission
+and per-region reservations are the next server-throughput step; they do not require world sharding.
 
 ## Authority boundaries still to move
 

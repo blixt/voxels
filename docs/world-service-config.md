@@ -40,6 +40,7 @@ max_outbound_bytes_per_client = 33554432
 max_in_flight_batches = 16
 max_connections = 512
 global_queue_capacity = 8192
+product_cache_bytes = 268435456
 generation_workers = 8
 generation_workers_per_client = 2
 
@@ -113,7 +114,9 @@ The browser always consumes the daemon's canonical chunk and progressive surface
 client never branches on provider selection; changing the daemon source and restarting it is
 sufficient to switch between procedural and learned terrain. The transport bounds total accepted
 connections and queued work, and the per-client worker cap prevents one connection from occupying
-the complete local generation pool.
+the complete local generation pool. `product_cache_bytes` bounds an LRU of compressed immutable
+batch responses. Concurrent identical batches single-flight through one CPU/Metal generation and
+then receive independently request-ID-keyed copies of that response.
 
 The presence section controls the independent low-latency delta stream. `spatial_cell_metres`,
 `interest_radius_metres`, and `interest_hysteresis_metres` define receiver-specific interest without
