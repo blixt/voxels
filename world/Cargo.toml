@@ -13,6 +13,7 @@ name = "voxels_world"
 
 [dependencies]
 blake3 = "1"
+brotli = "8.0.4"
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 

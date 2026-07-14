@@ -37,9 +37,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v3/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v3/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v3";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v4/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v4/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v4";
 
 /// Prepared server state. Source construction and spawn coverage validation happen before bind.
 pub struct WorldServer {
@@ -1271,7 +1271,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v3, test-local-token"),
+            HeaderValue::from_static("voxels.world.v4, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -1482,7 +1482,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v3, test-local-token"),
+            HeaderValue::from_static("voxels.world.v4, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -1517,7 +1517,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v3, test-local-token"),
+            HeaderValue::from_static("voxels.world.v4, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket

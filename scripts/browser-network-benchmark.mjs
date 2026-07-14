@@ -62,11 +62,11 @@ function rounded(value, digits = 1) {
 }
 
 function byteSummary(stats) {
-  const world = stats.paths["/v3/world"] ?? {
+  const world = stats.paths["/v4/world"] ?? {
     upstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
     downstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
   };
-  const presence = stats.paths["/v3/presence"] ?? {
+  const presence = stats.paths["/v4/presence"] ?? {
     upstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
     downstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
   };
@@ -357,10 +357,10 @@ async function main() {
   await writeFile(
     clientConfigPath,
     clientSource
-      .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${proxyPort}/v3/world"`)
+      .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${proxyPort}/v4/world"`)
       .replace(
         /^presence_endpoint = .*$/m,
-        `presence_endpoint = "ws://127.0.0.1:${proxyPort}/v3/presence"`,
+        `presence_endpoint = "ws://127.0.0.1:${proxyPort}/v4/presence"`,
       ),
   );
   process.env.VOXELS_CLIENT_CONFIG_PATH = clientConfigPath;

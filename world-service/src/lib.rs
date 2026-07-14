@@ -82,7 +82,7 @@ impl Default for LoopbackTransportConfig {
 pub struct PresenceConfig {
     /// Server roster cadence. Pose packets are coalesced into this latest complete snapshot.
     pub broadcast_interval_ms: u16,
-    /// Hard player bound for one world. The v3 wire format currently supports at most 64.
+    /// Hard player bound for one world. The v4 wire format currently supports at most 64.
     pub max_players: u16,
     /// Per-player inbound abuse bound. Clients normally send at 30 Hz.
     pub max_pose_updates_per_second: u16,

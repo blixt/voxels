@@ -13,9 +13,10 @@ use crate::{
 };
 use std::collections::BTreeSet;
 use std::fmt;
+use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -43,6 +44,11 @@ const KIND_PRESENCE_PING: u16 = 13;
 const KIND_PRESENCE_PONG: u16 = 14;
 const FLAG_NONE: u16 = 0;
 const RESERVED: u16 = 0;
+const RESULT_CODEC_BROTLI: u8 = 1;
+const RESULT_ENVELOPE_BYTES: usize = 8;
+const BROTLI_BUFFER_BYTES: usize = 4 * 1024;
+const BROTLI_QUALITY: u32 = 2;
+const BROTLI_WINDOW_BITS: u32 = 20;
 const HALO_HASH_DOMAIN: &[u8] = b"voxels-wire-halo-v1\0";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -287,6 +293,7 @@ pub enum ProtocolError {
     InvalidUtf8,
     UnknownEnum(&'static str, u64),
     LimitExceeded(&'static str),
+    Compression(&'static str),
     ChunkCodec(codec::CodecError),
 }
 
@@ -306,6 +313,7 @@ impl fmt::Display for ProtocolError {
             Self::InvalidUtf8 => formatter.write_str("invalid UTF-8 in VXWP payload"),
             Self::UnknownEnum(name, value) => write!(formatter, "unknown {name} value {value}"),
             Self::LimitExceeded(limit) => write!(formatter, "VXWP {limit} limit exceeded"),
+            Self::Compression(reason) => write!(formatter, "VXWP compression: {reason}"),
             Self::ChunkCodec(error) => write!(formatter, "VXWP chunk payload: {error}"),
         }
     }
@@ -569,9 +577,7 @@ pub fn encode_chunk_batch_result(result: &ChunkBatchResult) -> Result<Vec<u8>, P
             }
         }
     }
-    if payload.len() + FRAME_HEADER_BYTES > MAX_PROTOCOL_FRAME_BYTES {
-        return Err(ProtocolError::LimitExceeded("frame bytes"));
-    }
+    let payload = encode_result_payload(&payload)?;
     Ok(encode_frame(
         KIND_CHUNK_BATCH_RESULT,
         result.request_id,
@@ -585,7 +591,8 @@ pub fn decode_chunk_batch_result(bytes: &[u8]) -> Result<ChunkBatchResult, Proto
     if frame.request_id == 0 {
         return Err(ProtocolError::InvalidPayload("request id must be nonzero"));
     }
-    let mut cursor = Cursor::new(frame.payload);
+    let payload = decode_result_payload(frame.payload)?;
+    let mut cursor = Cursor::new(&payload);
     let source_identity_hash = WorldSourceIdentityHash::from_bytes(cursor.array()?);
     let count = usize::from(cursor.u16()?);
     if count == 0 || count > MAX_CHUNKS_PER_BATCH || cursor.u16()? != 0 {
@@ -744,9 +751,7 @@ pub fn encode_surface_tile_batch_result(
             }
         }
     }
-    if payload.len() + FRAME_HEADER_BYTES > MAX_PROTOCOL_FRAME_BYTES {
-        return Err(ProtocolError::LimitExceeded("frame bytes"));
-    }
+    let payload = encode_result_payload(&payload)?;
     Ok(encode_frame(
         KIND_SURFACE_TILE_BATCH_RESULT,
         result.request_id,
@@ -762,7 +767,8 @@ pub fn decode_surface_tile_batch_result(
     if frame.request_id == 0 {
         return Err(ProtocolError::InvalidPayload("request id must be nonzero"));
     }
-    let mut cursor = Cursor::new(frame.payload);
+    let payload = decode_result_payload(frame.payload)?;
+    let mut cursor = Cursor::new(&payload);
     let source_identity_hash = WorldSourceIdentityHash::from_bytes(cursor.array()?);
     let count = usize::from(cursor.u16()?);
     if count == 0 || count > MAX_SURFACE_TILES_PER_BATCH || cursor.u16()? != 0 {
@@ -1293,6 +1299,66 @@ const fn hex_nibble(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+fn encode_result_payload(uncompressed: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+    if uncompressed.is_empty() || uncompressed.len() + FRAME_HEADER_BYTES > MAX_PROTOCOL_FRAME_BYTES
+    {
+        return Err(ProtocolError::LimitExceeded("uncompressed result bytes"));
+    }
+    let uncompressed_len = u32::try_from(uncompressed.len())
+        .map_err(|_| ProtocolError::LimitExceeded("uncompressed result bytes"))?;
+    let params = brotli::enc::BrotliEncoderParams {
+        quality: BROTLI_QUALITY as i32,
+        lgwin: BROTLI_WINDOW_BITS as i32,
+        ..Default::default()
+    };
+    let mut input = uncompressed;
+    let mut compressed = Vec::new();
+    brotli::BrotliCompress(&mut input, &mut compressed, &params)
+        .map_err(|_| ProtocolError::Compression("could not encode result payload"))?;
+    let mut payload = Vec::with_capacity(RESULT_ENVELOPE_BYTES + compressed.len());
+    payload.push(RESULT_CODEC_BROTLI);
+    payload.extend_from_slice(&[0; 3]);
+    push_u32(&mut payload, uncompressed_len);
+    payload.extend_from_slice(&compressed);
+    if payload.len() + FRAME_HEADER_BYTES > MAX_PROTOCOL_FRAME_BYTES {
+        return Err(ProtocolError::LimitExceeded("compressed result bytes"));
+    }
+    Ok(payload)
+}
+
+fn decode_result_payload(payload: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+    if payload.len() <= RESULT_ENVELOPE_BYTES {
+        return Err(ProtocolError::Truncated);
+    }
+    if payload[0] != RESULT_CODEC_BROTLI {
+        return Err(ProtocolError::UnknownEnum(
+            "result compression codec",
+            u64::from(payload[0]),
+        ));
+    }
+    if payload[1..4] != [0; 3] {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved result compression bytes are nonzero",
+        ));
+    }
+    let uncompressed_len = read_u32(payload, 4)? as usize;
+    if uncompressed_len == 0 || uncompressed_len + FRAME_HEADER_BYTES > MAX_PROTOCOL_FRAME_BYTES {
+        return Err(ProtocolError::LimitExceeded("uncompressed result bytes"));
+    }
+    let mut decompressed = Vec::with_capacity(uncompressed_len);
+    let decoder = brotli::Decompressor::new(&payload[RESULT_ENVELOPE_BYTES..], BROTLI_BUFFER_BYTES);
+    decoder
+        .take((uncompressed_len + 1) as u64)
+        .read_to_end(&mut decompressed)
+        .map_err(|_| ProtocolError::Compression("could not decode result payload"))?;
+    if decompressed.len() != uncompressed_len {
+        return Err(ProtocolError::Compression(
+            "decoded result length differs from envelope",
+        ));
+    }
+    Ok(decompressed)
 }
 
 fn encode_frame(kind: u16, request_id: u64, payload: &[u8]) -> Vec<u8> {
@@ -2409,10 +2475,10 @@ mod tests {
         ));
 
         let mut prior_version = encode_player_pose(pose).expect("encode pose version fixture");
-        prior_version[4..6].copy_from_slice(&2_u16.to_le_bytes());
+        prior_version[4..6].copy_from_slice(&3_u16.to_le_bytes());
         assert_eq!(
             decode_player_pose(&prior_version),
-            Err(ProtocolError::UnsupportedVersion(2))
+            Err(ProtocolError::UnsupportedVersion(3))
         );
     }
 
@@ -2440,10 +2506,32 @@ mod tests {
         };
         let encoded = encode_chunk_batch_result(&response).expect("encode");
         assert!(
-            encoded.len() < 40_000,
-            "palette envelope should stay compact"
+            encoded.len() < 5_000,
+            "compressed result should stay compact"
         );
-        assert_eq!(decode_chunk_batch_result(&encoded), Ok(response));
+        assert_eq!(decode_chunk_batch_result(&encoded), Ok(response.clone()));
+
+        let mut unknown_codec = encoded.clone();
+        unknown_codec[FRAME_HEADER_BYTES] = 0xff;
+        assert_eq!(
+            decode_chunk_batch_result(&unknown_codec),
+            Err(ProtocolError::UnknownEnum("result compression codec", 0xff))
+        );
+
+        let mut oversized = encoded;
+        oversized[FRAME_HEADER_BYTES + 4..FRAME_HEADER_BYTES + 8]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            decode_chunk_batch_result(&oversized),
+            Err(ProtocolError::LimitExceeded("uncompressed result bytes"))
+        );
+
+        let mut truncated = encode_chunk_batch_result(&response).expect("encode truncated");
+        truncated.pop();
+        let truncated_payload_len =
+            u32::try_from(truncated.len() - FRAME_HEADER_BYTES).expect("test frame stays bounded");
+        truncated[20..24].copy_from_slice(&truncated_payload_len.to_le_bytes());
+        assert!(decode_chunk_batch_result(&truncated).is_err());
     }
 
     #[test]
@@ -2478,7 +2566,10 @@ mod tests {
             }],
         };
         let encoded = encode_surface_tile_batch_result(&response).expect("encode");
-        assert!(encoded.len() < MAX_PROTOCOL_FRAME_BYTES);
+        assert!(
+            encoded.len() < 50_000,
+            "compressed surface result should stay compact"
+        );
         assert_eq!(decode_surface_tile_batch_result(&encoded), Ok(response));
     }
 
