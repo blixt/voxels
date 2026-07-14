@@ -1640,7 +1640,8 @@ mod web {
         }
 
         /// Returns `[tile_x, tile_z, required_server_revision, accepted_server_revision,
-        /// resident, dirty]` for the tile containing one canonical voxel coordinate.
+        /// resident, dirty, fingerprint_low32, fingerprint_high32, quad_count, activation_mask]`
+        /// for the tile containing one canonical voxel coordinate.
         pub fn surface_edit_state(&self, stride: i32, x: i32, z: i32) -> Vec<f64> {
             let Some(engine) = self.engine.as_ref() else {
                 return Vec::new();
@@ -1656,6 +1657,8 @@ mod web {
                 .get(&coord)
                 .copied()
                 .unwrap_or(0);
+            let diagnostics = engine.renderer.borrow().surface_tile_diagnostics(coord);
+            let fingerprint = diagnostics.map_or(0, |value| value.0);
             vec![
                 f64::from(coord.x),
                 f64::from(coord.z),
@@ -1671,6 +1674,10 @@ mod web {
                 } else {
                     0.0
                 },
+                f64::from(fingerprint as u32),
+                f64::from((fingerprint >> 32) as u32),
+                f64::from(diagnostics.map_or(0, |value| value.1)),
+                f64::from(diagnostics.map_or(0, |value| value.2)),
             ]
         }
 

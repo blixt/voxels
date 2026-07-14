@@ -61,11 +61,21 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     number,
     { resolve: (values: number[]) => void; reject: (reason: Error) => void }
   >();
+  const editResolvers = new Map<
+    number,
+    { resolve: (submitted: boolean) => void; reject: (reason: Error) => void }
+  >();
+  const surfaceEditStateResolvers = new Map<
+    number,
+    { resolve: (values: number[]) => void; reject: (reason: Error) => void }
+  >();
   const debugGlobal = globalThis as typeof globalThis & {
     __VOXELS__?: {
       snapshot(): Promise<number[]>;
       profile(profileId: number): void;
       look(deltaX: number, deltaY: number): void;
+      submitEdit(x: number, y: number, z: number, materialId: number): Promise<boolean>;
+      surfaceEditState(stride: number, x: number, z: number): Promise<number[]>;
       readonly player: BrowserPlayerSession;
       playerUrl(name: string): string;
     };
@@ -76,6 +86,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     const error = new Error(message);
     for (const { reject } of snapshotResolvers.values()) reject(error);
     snapshotResolvers.clear();
+    for (const { reject } of editResolvers.values()) reject(error);
+    editResolvers.clear();
+    for (const { reject } of surfaceEditStateResolvers.values()) reject(error);
+    surfaceEditStateResolvers.clear();
     delete debugGlobal.__VOXELS__;
   };
   debugGlobal.__VOXELS__ = {
@@ -102,6 +116,20 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       ]);
       worker.postMessage({ kind: "input", buffer }, [buffer]);
     },
+    submitEdit: (x, y, z, materialId) =>
+      new Promise<boolean>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        editResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({ kind: "submitEdit", requestId, x, y, z, materialId });
+      }),
+    surfaceEditState: (stride, x, z) =>
+      new Promise<number[]>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        surfaceEditStateResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({ kind: "surfaceEditState", requestId, stride, x, z });
+      }),
     player,
     playerUrl: (name) => namedPlayerUrl(name).href,
   };
@@ -117,6 +145,12 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     } else if (event.data.kind === "snapshot") {
       snapshotResolvers.get(event.data.requestId)?.resolve(event.data.values);
       snapshotResolvers.delete(event.data.requestId);
+    } else if (event.data.kind === "submitEdit") {
+      editResolvers.get(event.data.requestId)?.resolve(event.data.submitted);
+      editResolvers.delete(event.data.requestId);
+    } else if (event.data.kind === "surfaceEditState") {
+      surfaceEditStateResolvers.get(event.data.requestId)?.resolve(event.data.values);
+      surfaceEditStateResolvers.delete(event.data.requestId);
     }
   };
   worker.onerror = (event) => {
@@ -312,6 +346,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     const error = new Error("Voxels page closed before the snapshot completed");
     for (const { reject } of snapshotResolvers.values()) reject(error);
     snapshotResolvers.clear();
+    for (const { reject } of editResolvers.values()) reject(error);
+    editResolvers.clear();
+    for (const { reject } of surfaceEditStateResolvers.values()) reject(error);
+    surfaceEditStateResolvers.clear();
     worker.postMessage({ kind: "destroy" });
     delete debugGlobal.__VOXELS__;
   });

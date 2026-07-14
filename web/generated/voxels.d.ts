@@ -10,6 +10,17 @@ export class EngineHandle {
     set_reduced_motion(reduced_motion: boolean): void;
     snapshot(): Float32Array;
     start_profile(profile_id: number): boolean;
+    /**
+     * Deterministic browser-harness seam that submits through the same server-authoritative
+     * path as pointer input. It does not mutate local world state optimistically.
+     */
+    submit_edit(x: number, y: number, z: number, material_id: number): boolean;
+    /**
+     * Returns `[tile_x, tile_z, required_server_revision, accepted_server_revision,
+     * resident, dirty, fingerprint_low32, fingerprint_high32, quad_count, activation_mask]`
+     * for the tile containing one canonical voxel coordinate.
+     */
+    surface_edit_state(stride: number, x: number, z: number): Float64Array;
 }
 
 export function create_engine(canvas: OffscreenCanvas, css_width: number, css_height: number, dpr: number, reduced_motion: boolean, config_toml: string, player: Array<any>): Promise<EngineHandle>;
@@ -26,6 +37,8 @@ export interface InitOutput {
     readonly enginehandle_set_reduced_motion: (a: number, b: number) => void;
     readonly enginehandle_snapshot: (a: number) => [number, number];
     readonly enginehandle_start_profile: (a: number, b: number) => number;
+    readonly enginehandle_submit_edit: (a: number, b: number, c: number, d: number, e: number) => number;
+    readonly enginehandle_surface_edit_state: (a: number, b: number, c: number, d: number) => [number, number];
     readonly rust_sqlite_wasm_abort: () => void;
     readonly rust_sqlite_wasm_assert_fail: (a: number, b: number, c: number, d: number) => void;
     readonly rust_sqlite_wasm_calloc: (a: number, b: number) => number;

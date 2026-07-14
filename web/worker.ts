@@ -57,6 +57,21 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
         values: Array.from(handle?.snapshot() ?? []),
       });
       break;
+    case "submitEdit":
+      scope.postMessage({
+        kind: "submitEdit",
+        requestId: message.requestId,
+        submitted:
+          handle?.submit_edit(message.x, message.y, message.z, message.materialId) ?? false,
+      });
+      break;
+    case "surfaceEditState":
+      scope.postMessage({
+        kind: "surfaceEditState",
+        requestId: message.requestId,
+        values: Array.from(handle?.surface_edit_state(message.stride, message.x, message.z) ?? []),
+      });
+      break;
     case "destroy":
       disposed = true;
       pending.length = 0;

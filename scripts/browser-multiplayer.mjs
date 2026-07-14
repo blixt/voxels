@@ -16,16 +16,19 @@ import {
 import { rustTool } from "./build-wasm.ts";
 import { createShapedLink } from "./network-benchmark-link.mjs";
 
-const RESULT_SCHEMA_VERSION = 2;
-const FIXTURE_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 3;
+const FIXTURE_VERSION = 3;
 const VXWP_VERSION = 6;
 const WORLD_PATH = `/v${VXWP_VERSION}/world`;
 const PRESENCE_PATH = `/v${VXWP_VERSION}/presence`;
 const EXPECTED_PLAYERS = 6;
 const EXPECTED_REMOTE_PLAYERS = EXPECTED_PLAYERS - 1;
+const BUILDER_COUNT = EXPECTED_REMOTE_PLAYERS;
 const EXPECTED_PARTS_PER_AVATAR = 13;
 const FAR_TIER_MINIMUM_METRES = 105;
 const OBSERVER_WALK_METRES = 120;
+const PLAYER_EYE_HEIGHT_METRES = 1.62;
+const TOWER_MATERIAL_ID = 14;
 const VIEWPORT = { width: 960, height: 540 };
 const FRAME_SAMPLE_WIDTH = 5;
 const FRAME_SAMPLE_START = 108;
@@ -87,6 +90,128 @@ function observePage(page, label, errors) {
 
 async function snapshot(page) {
   return assertSnapshotSchema(await page.evaluate(() => globalThis.__VOXELS__.snapshot()));
+}
+
+async function aimAt(page, targetMetres) {
+  const current = await snapshot(page);
+  const deltaX = targetMetres.x - current[SNAPSHOT.cameraX];
+  const deltaY = targetMetres.y - current[SNAPSHOT.cameraY];
+  const deltaZ = targetMetres.z - current[SNAPSHOT.cameraZ];
+  const horizontalDistance = Math.hypot(deltaX, deltaZ);
+  const desiredYaw = Math.atan2(deltaX, -deltaZ);
+  const desiredPitch = Math.atan2(deltaY, horizontalDistance);
+  const yawDelta = Math.atan2(
+    Math.sin(desiredYaw - current[SNAPSHOT.yaw]),
+    Math.cos(desiredYaw - current[SNAPSHOT.yaw]),
+  );
+  await page.evaluate(
+    ({ movementX, movementY }) => globalThis.__VOXELS__.look(movementX, movementY),
+    {
+      movementX: yawDelta / 0.0022,
+      movementY: (current[SNAPSHOT.pitch] - desiredPitch) / 0.0022,
+    },
+  );
+  await page.waitForTimeout(250);
+}
+
+async function analyzeTowerPixels(page, before, after) {
+  return page.evaluate(
+    async ({ beforeBase64, afterBase64 }) => {
+      const pixels = async (base64) => {
+        const response = await fetch(`data:image/png;base64,${base64}`);
+        const image = await createImageBitmap(await response.blob());
+        const canvas = new OffscreenCanvas(image.width, image.height);
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        context.drawImage(image, 0, 0);
+        return {
+          width: image.width,
+          height: image.height,
+          values: context.getImageData(0, 0, image.width, image.height).data,
+        };
+      };
+      const [baseline, edited] = await Promise.all([pixels(beforeBase64), pixels(afterBase64)]);
+      if (baseline.width !== edited.width || baseline.height !== edited.height) {
+        throw new Error("tower screenshots changed dimensions");
+      }
+      const minX = Math.floor(edited.width * 0.42);
+      const maxX = Math.ceil(edited.width * 0.58);
+      const minY = Math.floor(edited.height * 0.28);
+      const maxY = Math.ceil(edited.height * 0.72);
+      let visiblyChangedPixels = 0;
+      let newCyanPixels = 0;
+      let maximumChannelDelta = 0;
+      let changedMinX = maxX;
+      let changedMinY = maxY;
+      let changedMaxX = minX;
+      let changedMaxY = minY;
+      for (let y = minY; y < maxY; y += 1) {
+        for (let x = minX; x < maxX; x += 1) {
+          const offset = (y * edited.width + x) * 4;
+          const red = edited.values[offset];
+          const green = edited.values[offset + 1];
+          const blue = edited.values[offset + 2];
+          const baselineRed = baseline.values[offset];
+          const baselineGreen = baseline.values[offset + 1];
+          const baselineBlue = baseline.values[offset + 2];
+          const maximumDelta = Math.max(
+            Math.abs(red - baselineRed),
+            Math.abs(green - baselineGreen),
+            Math.abs(blue - baselineBlue),
+          );
+          maximumChannelDelta = Math.max(maximumChannelDelta, maximumDelta);
+          if (maximumDelta >= 24) {
+            visiblyChangedPixels += 1;
+            changedMinX = Math.min(changedMinX, x);
+            changedMinY = Math.min(changedMinY, y);
+            changedMaxX = Math.max(changedMaxX, x + 1);
+            changedMaxY = Math.max(changedMaxY, y + 1);
+          }
+          const cyan = blue >= 135 && blue - red >= 35 && green - red >= 18;
+          const baselineCyan =
+            baselineBlue >= 135 &&
+            baselineBlue - baselineRed >= 35 &&
+            baselineGreen - baselineRed >= 18;
+          if (cyan && !baselineCyan) newCyanPixels += 1;
+        }
+      }
+      return {
+        region: [minX, minY, maxX, maxY],
+        visiblyChangedPixels,
+        newCyanPixels,
+        maximumChannelDelta,
+        changedBounds:
+          visiblyChangedPixels > 0 ? [changedMinX, changedMinY, changedMaxX, changedMaxY] : null,
+      };
+    },
+    { beforeBase64: before.toString("base64"), afterBase64: after.toString("base64") },
+  );
+}
+
+async function surfaceEditState(page, stride, x, z) {
+  return page.evaluate(
+    ({ stride: requestedStride, x: voxelX, z: voxelZ }) =>
+      globalThis.__VOXELS__.surfaceEditState(requestedStride, voxelX, voxelZ),
+    { stride, x, z },
+  );
+}
+
+async function waitForSurfaceEditConvergence(page, stride, x, z, timeoutMs = 30_000) {
+  const deadline = performance.now() + timeoutMs;
+  let latest = [];
+  while (performance.now() < deadline) {
+    latest = await surfaceEditState(page, stride, x, z);
+    if (
+      latest.length === 10 &&
+      latest[2] > 1 &&
+      latest[3] === latest[2] &&
+      latest[4] === 1 &&
+      latest[5] === 0
+    ) {
+      return latest;
+    }
+    await page.waitForTimeout(50);
+  }
+  throw new Error(`far surface edit did not converge: ${JSON.stringify(latest)}`);
 }
 
 async function waitFor(page, label, predicate, timeoutMs = 90_000) {
@@ -240,7 +365,8 @@ async function main() {
     serviceConfigPath,
     serviceSource
       .replace(/^listen = .*$/m, `listen = "127.0.0.1:${backendPort}"`)
-      .replace(/^allowed_origins = .*$/m, `allowed_origins = ["http://127.0.0.1:${previewPort}"]`),
+      .replace(/^allowed_origins = .*$/m, `allowed_origins = ["http://127.0.0.1:${previewPort}"]`)
+      .replace(/^database = .*$/m, 'database = "world-edits.sqlite3"'),
   );
 
   let browser;
@@ -400,6 +526,11 @@ async function main() {
         `observer reached only ${distanceFromBuildersMetres.toFixed(2)}m from builders`,
       );
     }
+    await aimAt(observer.page, {
+      x: builderCentroid.x,
+      y: observerFar[SNAPSHOT.cameraY],
+      z: builderCentroid.z,
+    });
     await observer.page.screenshot({ path: path.join(OUTPUT_DIRECTORY, "observer-far-five.png") });
     await observer.page.waitForTimeout(600);
     const steadySnapshots = await Promise.all(players.map(({ page }) => snapshot(page)));
@@ -423,15 +554,112 @@ async function main() {
     }
     if (errors.length > 0) throw new Error(errors.join("\n"));
 
+    const towerVoxelCount = 100;
+    const towerX = Math.floor(builderBeforeMovement[0][SNAPSHOT.cameraX] * 10);
+    const towerZ = Math.floor(builderBeforeMovement[0][SNAPSHOT.cameraZ] * 10);
+    const towerBaseY = Math.round(
+      (builderBeforeMovement[0][SNAPSHOT.cameraY] - PLAYER_EYE_HEIGHT_METRES) * 10,
+    );
+    await aimAt(observer.page, {
+      x: towerX / 10,
+      y: (towerBaseY + towerVoxelCount / 2) / 10,
+      z: towerZ / 10,
+    });
+    const beforeTowerScreenshot = await observer.page.screenshot({
+      path: path.join(OUTPUT_DIRECTORY, "observer-far-tower-before.png"),
+    });
+    const beforeTowerNetwork = players.map((player) => player.link.snapshot());
+    const beforeTowerSurfaceState = await surfaceEditState(observer.page, 16, towerX, towerZ);
+    const towerStarted = performance.now();
+    const submissions = await Promise.all(
+      builders.flatMap((builder, builderIndex) =>
+        Array.from({ length: towerVoxelCount / BUILDER_COUNT }, (_unused, localIndex) => {
+          const y = towerBaseY + localIndex * BUILDER_COUNT + builderIndex;
+          return builder.page.evaluate(
+            ({ x, y: voxelY, z, materialId }) =>
+              globalThis.__VOXELS__.submitEdit(x, voxelY, z, materialId),
+            { x: towerX, y, z: towerZ, materialId: TOWER_MATERIAL_ID },
+          );
+        }),
+      ),
+    );
+    if (submissions.some((submitted) => !submitted)) {
+      throw new Error("one or more production edit submissions were backpressured or rejected");
+    }
+    const convergedClients = await Promise.all(
+      players.map((player) =>
+        waitFor(
+          player.page,
+          `${player.name} authoritative tower edits`,
+          (next) => next[SNAPSHOT.edits] === towerVoxelCount,
+          30_000,
+        ),
+      ),
+    );
+    const observerSurfaceState = await waitForSurfaceEditConvergence(
+      observer.page,
+      16,
+      towerX,
+      towerZ,
+    );
+    const towerConvergenceMs = performance.now() - towerStarted;
+    await observer.page.waitForTimeout(250);
+    const afterTowerScreenshot = await observer.page.screenshot({
+      path: path.join(OUTPUT_DIRECTORY, "observer-far-five-tower.png"),
+    });
+    const visualEvidence = await analyzeTowerPixels(
+      observer.page,
+      beforeTowerScreenshot,
+      afterTowerScreenshot,
+    );
+    const changedHeight = visualEvidence.changedBounds
+      ? visualEvidence.changedBounds[3] - visualEvidence.changedBounds[1]
+      : 0;
+    if (visualEvidence.visiblyChangedPixels < 50 || changedHeight < 20) {
+      throw new Error(
+        `distant tower was not visually legible: ${JSON.stringify({
+          visualEvidence,
+          beforeSurface: beforeTowerSurfaceState,
+          afterSurface: observerSurfaceState,
+        })}`,
+      );
+    }
+    const afterTowerNetwork = players.map((player) => player.link.snapshot());
+    const towerTraffic = players.map((player, index) => {
+      const beforeWorld = pathBytes(beforeTowerNetwork[index], WORLD_PATH);
+      const afterWorld = pathBytes(afterTowerNetwork[index], WORLD_PATH);
+      return {
+        name: player.name,
+        upstream: afterWorld.upstream - beforeWorld.upstream,
+        downstream: afterWorld.downstream - beforeWorld.downstream,
+      };
+    });
     const collaborativeTower = {
-      status: "skipped-unsupported",
-      reason:
-        "The browser exposes snapshot, look, and streaming-profile hooks only; isolated browser profiles intentionally cannot share OPFS edits, and the current diagnostic API cannot submit or inspect VXWP v6 server edits.",
-      requiredBrowserDiagnosticApi: [
-        "submit one voxel edit through the production server-authoritative edit path and return operation plus world revision",
-        "place a deterministic test camera while marking the next presence pose as a discontinuity",
-        "read a bounded voxel or surface-tile revision and content hash for convergence assertions",
-      ],
+      status: "passed",
+      reason: `Five builders submitted ${towerVoxelCount} authoritative voxels; every client applied them and the observer accepted the revised stride-16 surface ${distanceFromBuildersMetres.toFixed(1)} m away in ${towerConvergenceMs.toFixed(1)} ms.`,
+      voxelCount: towerVoxelCount,
+      heightMetres: towerVoxelCount / 10,
+      builders: BUILDER_COUNT,
+      distanceMetres: rounded(distanceFromBuildersMetres, 3),
+      convergenceMs: rounded(towerConvergenceMs),
+      observerSurface: {
+        tile: observerSurfaceState.slice(0, 2),
+        requiredRevision: observerSurfaceState[2],
+        acceptedRevision: observerSurfaceState[3],
+        resident: observerSurfaceState[4] === 1,
+        dirty: observerSurfaceState[5] === 1,
+        fingerprint: observerSurfaceState.slice(6, 8),
+        quadCount: observerSurfaceState[8],
+        activationMask: observerSurfaceState[9],
+      },
+      surfaceFingerprintChanged:
+        beforeTowerSurfaceState[6] !== observerSurfaceState[6] ||
+        beforeTowerSurfaceState[7] !== observerSurfaceState[7],
+      allClientsAppliedEdits: convergedClients.every(
+        (next) => next[SNAPSHOT.edits] === towerVoxelCount,
+      ),
+      visualEvidence,
+      traffic: towerTraffic,
     };
     const result = {
       schemaVersion: RESULT_SCHEMA_VERSION,
@@ -477,7 +705,7 @@ async function main() {
       writeFile(path.join(OUTPUT_DIRECTORY, "latest.md"), report),
     ]);
     process.stdout.write(`${report}\nJSON: ${path.join(OUTPUT_DIRECTORY, "latest.json")}\n`);
-    if (REQUIRE_TOWER) {
+    if (REQUIRE_TOWER && collaborativeTower.status !== "passed") {
       throw new Error(
         "collaborative tower gate was required but the current production browser/server edit path is unavailable",
       );

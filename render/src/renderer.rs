@@ -1877,6 +1877,20 @@ impl Renderer {
         self.remove_mesh((coord.level.index() + 1, coord.x, 0, coord.z));
     }
 
+    /// Browser-smoke diagnostics for proving that a revised remote surface product reached the
+    /// resident GPU mesh, rather than stopping at the stream scheduler's revision bookkeeping.
+    pub fn surface_tile_diagnostics(&self, coord: SurfaceTileCoord) -> Option<(u64, u32, u8)> {
+        self.chunks
+            .get(&(coord.level.index() + 1, coord.x, 0, coord.z))
+            .map(|mesh| {
+                (
+                    mesh.content_fingerprint,
+                    mesh.quad_count,
+                    mesh.activation_mask,
+                )
+            })
+    }
+
     fn remove_mesh(&mut self, key: MeshKey) {
         self.remove_opaque_mesh(key);
         self.remove_water_mesh(key);

@@ -56,9 +56,20 @@ export type ToWorker =
   | { kind: "reducedMotion"; reduced: boolean }
   | { kind: "profile"; profileId: number }
   | { kind: "snapshot"; requestId: number }
+  | {
+      kind: "submitEdit";
+      requestId: number;
+      x: number;
+      y: number;
+      z: number;
+      materialId: number;
+    }
+  | { kind: "surfaceEditState"; requestId: number; stride: number; x: number; z: number }
   | { kind: "destroy" };
 
 export type FromWorker =
   | { kind: "uiMode"; cursor: boolean }
   | { kind: "error"; message: string }
-  | { kind: "snapshot"; requestId: number; values: number[] };
+  | { kind: "snapshot"; requestId: number; values: number[] }
+  | { kind: "submitEdit"; requestId: number; submitted: boolean }
+  | { kind: "surfaceEditState"; requestId: number; values: number[] };
