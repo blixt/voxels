@@ -11,7 +11,7 @@ streaming, and persistence while the native Rust world service owns generation.
 2. Install the CLI version paired with the pinned Rust library using
    `cargo install --locked wasm-bindgen-cli --version 0.2.117`.
 3. Install managed Node, pnpm, and project dependencies with `vp install`.
-4. Start `vp run world:serve` in one terminal and `vp dev` in another.
+4. Run `vp dev`; it owns both the native world service and browser development server.
 5. Run TypeScript checks and tests with `vp check` and `vp test`.
 6. Run host Rust tests and host/WASM Clippy with `vp run check:rust`.
 7. Build production WASM and assets with `vp build`; inspect them with `vp preview`.
@@ -38,9 +38,10 @@ Diffusion provider on Apple silicon; see
 The server-owned [world source configuration](docs/world-service-config.md) defaults to native
 Terrain Diffusion/Metal generation and can select the procedural source without exposing that choice
 to clients. `vp run world:source-smoke` loads the TOML and verifies the selected source with one
-macro-field request. `vp run world:serve` enables the Metal-capable loopback daemon so either source
-can be selected by changing only the server's `source` value and restarting it. The browser always
-consumes the same canonical protocol. See
+macro-field request. `vp dev` starts and stops the Metal-capable daemon with Vite; `vp run
+world:serve` remains available for daemon-only diagnostics. Either source can be selected by changing
+only the server's `source` value and restarting development. The browser always consumes the same
+canonical protocol. See
 [Native world streaming](docs/native-world-streaming.md) for the matching endpoint/token settings,
 Chrome local-network permission, binary VXWP protocol, transport rationale, and exact run steps.
 Client runtime, streaming, rendering/Mission Control, persistence, diagnostics, and profiling

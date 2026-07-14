@@ -1,3 +1,4 @@
+import { type ChildProcess, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { defineConfig, type Plugin } from "vite-plus";
@@ -6,7 +7,9 @@ import {
   ensureWasmBuilt,
   RUST_INPUT_FILES,
   RUST_SOURCE_DIRS,
+  rustTool,
 } from "./scripts/build-wasm.ts";
+import { worldServiceBuildCargoArgs } from "./scripts/world-service-command.ts";
 
 interface RustInputWatcher {
   on(event: "add" | "change" | "unlink", listener: (file: string) => void): unknown;
@@ -84,9 +87,110 @@ function rustWasm(release: boolean): Plugin {
   };
 }
 
+function terminateProcessTree(child: ChildProcess): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    if (process.platform !== "win32" && child.pid !== undefined) {
+      process.kill(-child.pid, "SIGTERM");
+    } else {
+      child.kill("SIGTERM");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+function nativeWorldService(): Plugin {
+  let buildChild: ChildProcess | undefined;
+  let daemonChild: ChildProcess | undefined;
+  let stopping = false;
+  let failed = false;
+  return {
+    name: "voxels-native-world-service",
+    apply: "serve",
+    configureServer(server) {
+      let handleSignal: (() => void) | undefined;
+      const stop = (): void => {
+        if (stopping) return;
+        stopping = true;
+        if (handleSignal) {
+          process.off("SIGINT", handleSignal);
+          process.off("SIGTERM", handleSignal);
+        }
+        if (buildChild) terminateProcessTree(buildChild);
+        if (daemonChild) terminateProcessTree(daemonChild);
+        buildChild = undefined;
+        daemonChild = undefined;
+      };
+      const fail = (message: string): void => {
+        if (stopping || failed) return;
+        failed = true;
+        server.config.logger.error(message);
+        process.exitCode = 1;
+        void server.close();
+      };
+      handleSignal = (): void => {
+        stop();
+        void server.close().finally(() => process.exit(0));
+      };
+
+      server.httpServer?.once("close", stop);
+      process.once("SIGINT", handleSignal);
+      process.once("SIGTERM", handleSignal);
+      server.config.logger.info(
+        "[voxels-world-service] compiling native Terrain Diffusion/Metal daemon",
+      );
+      buildChild = spawn(rustTool("cargo"), worldServiceBuildCargoArgs({ metal: true }), {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: "inherit",
+        detached: process.platform !== "win32",
+      });
+      buildChild.once("error", (error) => {
+        fail(`[voxels-world-service] failed to compile: ${error.message}`);
+      });
+      buildChild.once("exit", (code, signal) => {
+        buildChild = undefined;
+        if (stopping || failed) return;
+        if (code !== 0) {
+          const reason = signal ? `signal ${signal}` : `status ${code ?? "unknown"}`;
+          fail(`[voxels-world-service] build exited with ${reason}`);
+          return;
+        }
+
+        const executable = path.resolve(
+          process.env.CARGO_TARGET_DIR ?? "target",
+          "worldgen",
+          process.platform === "win32" ? "voxels-worldd.exe" : "voxels-worldd",
+        );
+        server.config.logger.info("[voxels-world-service] starting native daemon");
+        daemonChild = spawn(executable, ["config/world-service.toml"], {
+          cwd: process.cwd(),
+          env: process.env,
+          stdio: "inherit",
+          detached: process.platform !== "win32",
+        });
+        daemonChild.once("error", (error) => {
+          fail(`[voxels-world-service] failed to start: ${error.message}`);
+        });
+        daemonChild.once("exit", (exitCode, exitSignal) => {
+          daemonChild = undefined;
+          if (stopping || failed) return;
+          const reason = exitSignal ? `signal ${exitSignal}` : `status ${exitCode ?? "unknown"}`;
+          fail(
+            `[voxels-world-service] exited with ${reason}; run vp run terrain:fetch if the pinned model is missing`,
+          );
+        });
+      });
+    },
+  };
+}
+
 export default defineConfig(({ command, mode }) => ({
   plugins:
-    mode === "test" ? [] : [clientConfig(command === "build"), rustWasm(command === "build")],
+    mode === "test"
+      ? []
+      : [clientConfig(command === "build"), rustWasm(command === "build"), nativeWorldService()],
   // A renderer failure belongs in the console. Vite's default HMR overlay appends a shadow-DOM
   // element over the canvas, which violates the engine's canvas-only host contract.
   server: { hmr: { overlay: false } },

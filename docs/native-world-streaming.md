@@ -162,10 +162,6 @@ source = "terrain-diffusion-30m"
 ```
 
 ```sh
-# Terminal 1
-vp run world:serve
-
-# Terminal 2
 vp dev
 ```
 
@@ -176,16 +172,14 @@ source = "procedural-v16"
 ```
 
 ```sh
-# Terminal 1
-vp run world:serve
-
-# Terminal 2
 vp dev
 ```
 
 Open `http://127.0.0.1:5173`, grant Chrome's local/loopback network permission when prompted, and
 play normally. To compare generators, change only `source` in `config/world-service.toml`, restart
-the daemon, and reload. The client configuration does not change.
+`vp dev`, and reload. Vite owns the native daemon lifecycle, so Ctrl-C stops both processes. The
+client configuration does not change. Use `vp run world:serve` only when testing the daemon without
+the browser development server.
 
 ## Local players and two-browser testing
 
