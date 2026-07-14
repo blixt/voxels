@@ -14,6 +14,22 @@ let disposed = false;
 let cursorMode = false;
 const pending: Exclude<ToWorker, InitMessage>[] = [];
 
+self.addEventListener("error", (event) => {
+  if (disposed) return;
+  disposed = true;
+  pending.length = 0;
+  const location = event.filename
+    ? `\n${event.filename}:${event.lineno || 0}:${event.colno || 0}`
+    : "";
+  const stack = event.error instanceof Error && event.error.stack ? `\n${event.error.stack}` : "";
+  scope.postMessage({
+    kind: "error",
+    message: `${event.message || "Uncaught engine worker error"}${location}${stack}`,
+  });
+  event.preventDefault();
+  scope.close();
+});
+
 function dispatch(message: Exclude<ToWorker, InitMessage>): void {
   switch (message.kind) {
     case "input":

@@ -103,7 +103,13 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       snapshotResolvers.delete(event.data.requestId);
     }
   };
-  worker.onerror = (event) => failWorker(event.message || "The engine worker failed to load.");
+  worker.onerror = (event) => {
+    const location = event.filename
+      ? `\n${event.filename}:${event.lineno || 0}:${event.colno || 0}`
+      : "";
+    const stack = event.error instanceof Error && event.error.stack ? `\n${event.error.stack}` : "";
+    failWorker(`${event.message || "The engine worker failed to load."}${location}${stack}`);
+  };
 
   const offscreen = canvas.transferControlToOffscreen();
   const bounds = canvas.getBoundingClientRect();

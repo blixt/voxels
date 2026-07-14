@@ -15,9 +15,7 @@ use voxels_world::protocol::{
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
-use web_sys::{
-    BinaryType, CloseEvent, ErrorEvent, Event, MessageEvent, WebSocket, WorkerGlobalScope,
-};
+use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket, WorkerGlobalScope};
 
 const RECONNECT_DELAY_MS: f64 = 500.0;
 
@@ -163,7 +161,7 @@ struct PresenceInner {
 struct PresenceSocketHandlers {
     _open: Closure<dyn FnMut(Event)>,
     _message: Closure<dyn FnMut(MessageEvent)>,
-    _error: Closure<dyn FnMut(ErrorEvent)>,
+    _error: Closure<dyn FnMut(Event)>,
     _close: Closure<dyn FnMut(CloseEvent)>,
 }
 
@@ -261,14 +259,9 @@ impl PresenceInner {
             }
         });
         let weak = Rc::downgrade(inner);
-        let error = Closure::new(move |event: ErrorEvent| {
+        let error = Closure::new(move |_event: Event| {
             if let Some(inner) = weak.upgrade() {
-                let reason = if event.message().is_empty() {
-                    "presence WebSocket error".to_owned()
-                } else {
-                    event.message()
-                };
-                inner.disconnect(generation, reason);
+                inner.disconnect(generation, "presence WebSocket error".to_owned());
             }
         });
         let weak = Rc::downgrade(inner);

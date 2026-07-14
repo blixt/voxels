@@ -91,14 +91,35 @@ fn cascade_shadow(world: vec3<f32>, normal: vec3<f32>, cascade: u32) -> f32 {
     return 1.0;
   }
   let depth_ref = projected.z - 0.00035;
-  var visibility = 0.0;
-  for (var y = -1; y <= 1; y += 1) {
-    for (var x = -1; x <= 1; x += 1) {
-      visibility += textureSampleCompareLevel(
-        shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(x, y),
-      );
-    }
-  }
+  // WebGPU requires every comparison-sampler offset to be a shader-creation-time constant.
+  // Spell out the compact 3x3 PCF kernel so Chrome, Metal, and native wgpu validate identically.
+  var visibility = textureSampleCompareLevel(
+    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(-1, -1),
+  );
+  visibility += textureSampleCompareLevel(
+    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(0, -1),
+  );
+  visibility += textureSampleCompareLevel(
+    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(1, -1),
+  );
+  visibility += textureSampleCompareLevel(
+    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(-1, 0),
+  );
+  visibility += textureSampleCompareLevel(
+    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(0, 0),
+  );
+  visibility += textureSampleCompareLevel(
+    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(1, 0),
+  );
+  visibility += textureSampleCompareLevel(
+    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(-1, 1),
+  );
+  visibility += textureSampleCompareLevel(
+    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(0, 1),
+  );
+  visibility += textureSampleCompareLevel(
+    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(1, 1),
+  );
   return visibility / 9.0;
 }
 

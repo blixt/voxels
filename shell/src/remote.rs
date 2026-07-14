@@ -23,9 +23,7 @@ use voxels_world::{
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
-use web_sys::{
-    BinaryType, CloseEvent, ErrorEvent, Event, MessageEvent, WebSocket, WorkerGlobalScope,
-};
+use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket, WorkerGlobalScope};
 
 pub type RemoteRequestId = u64;
 
@@ -301,7 +299,7 @@ enum ChunkDelivery {
 struct SocketHandlers {
     _open: Closure<dyn FnMut(Event)>,
     _message: Closure<dyn FnMut(MessageEvent)>,
-    _error: Closure<dyn FnMut(ErrorEvent)>,
+    _error: Closure<dyn FnMut(Event)>,
     _close: Closure<dyn FnMut(CloseEvent)>,
 }
 
@@ -369,14 +367,15 @@ impl RemoteInner {
             }
         });
         let weak = Rc::downgrade(inner);
-        let error = Closure::new(move |event: ErrorEvent| {
+        // WebSocket's `error` event is the base Event type and intentionally carries no details.
+        // Reading ErrorEvent.message through an unchecked cast traps in Chrome when a handshake is
+        // rejected, masking the actual reconnect path with a JS type error.
+        let error = Closure::new(move |_event: Event| {
             if let Some(inner) = weak.upgrade() {
-                let message = if event.message().is_empty() {
-                    "WebSocket error".to_owned()
-                } else {
-                    event.message()
-                };
-                inner.disconnect(generation, RemoteWorldError::Socket(message));
+                inner.disconnect(
+                    generation,
+                    RemoteWorldError::Socket("WebSocket error".to_owned()),
+                );
             }
         });
         let weak = Rc::downgrade(inner);
