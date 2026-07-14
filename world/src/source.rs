@@ -252,6 +252,10 @@ pub struct WorldManifest {
 pub enum WorldManifestError {
     WorldSchemaMismatch,
     MaterialSchemaMismatch,
+    MacroFieldSchemaMismatch,
+    VoxelComposerVersionMismatch,
+    AuthoredContentVersionMismatch,
+    InvalidMacroCoordinateTransform,
     ProceduralSourceMismatch,
     TerrainDiffusionModelMissing,
     TerrainDiffusionDeviceMismatch,
@@ -262,6 +266,16 @@ impl fmt::Display for WorldManifestError {
         match self {
             Self::WorldSchemaMismatch => formatter.write_str("unsupported world schema"),
             Self::MaterialSchemaMismatch => formatter.write_str("unsupported material schema"),
+            Self::MacroFieldSchemaMismatch => formatter.write_str("unsupported macro-field schema"),
+            Self::VoxelComposerVersionMismatch => {
+                formatter.write_str("unsupported voxel composer version")
+            }
+            Self::AuthoredContentVersionMismatch => {
+                formatter.write_str("unsupported authored content version")
+            }
+            Self::InvalidMacroCoordinateTransform => {
+                formatter.write_str("invalid macro coordinate transform")
+            }
             Self::ProceduralSourceMismatch => {
                 formatter.write_str("procedural source identity does not match the manifest seed")
             }
@@ -298,6 +312,22 @@ impl WorldManifest {
         }
         if self.material_schema_version != Material::SCHEMA_VERSION {
             return Err(WorldManifestError::MaterialSchemaMismatch);
+        }
+        if self.source.macro_field_schema_version != MACRO_FIELD_SCHEMA_VERSION {
+            return Err(WorldManifestError::MacroFieldSchemaMismatch);
+        }
+        if self.source.voxel_composer_version != VOXEL_COMPOSER_VERSION {
+            return Err(WorldManifestError::VoxelComposerVersionMismatch);
+        }
+        if self.source.authored_content_version != ATLAS_VERSION {
+            return Err(WorldManifestError::AuthoredContentVersionMismatch);
+        }
+        let transform = self.source.macro_coordinate_transform;
+        if transform.horizontal_unit_millimetres == 0
+            || !matches!(transform.x_axis_sign, -1 | 1)
+            || !matches!(transform.z_axis_sign, -1 | 1)
+        {
+            return Err(WorldManifestError::InvalidMacroCoordinateTransform);
         }
         match self.source.source_kind {
             WorldSourceKind::ProceduralV16 => {
@@ -1153,6 +1183,23 @@ impl MacroTerrainSource for ProceduralWorldSource {
 mod tests {
     use super::*;
 
+    fn terrain_diffusion_manifest() -> WorldManifest {
+        let mut manifest = WorldManifest::procedural_v16(WorldId::from_bytes([7; 16]), 7);
+        manifest.source.source_kind = WorldSourceKind::TerrainDiffusion30m;
+        manifest.source.model = Some(ModelIdentity {
+            repository: "immutable/model".to_owned(),
+            immutable_revision: "0123456789abcdef".to_owned(),
+            weight_hashes: vec![WorldSourceIdentityHash::from_bytes([3; 32])],
+        });
+        manifest.source.device_requirement = SourceDeviceRequirement::AppleMetal;
+        manifest
+    }
+
+    fn assert_manifest_error(manifest: &WorldManifest, error: WorldManifestError) {
+        assert_eq!(manifest.validate(), Err(error));
+        assert_eq!(manifest.manifest_hash(), Err(error));
+    }
+
     #[test]
     fn procedural_identity_is_stable_and_seed_sensitive() {
         let first = WorldSourceIdentity::procedural_v16(7);
@@ -1188,6 +1235,57 @@ mod tests {
             inconsistent.manifest_hash(),
             Err(WorldManifestError::ProceduralSourceMismatch)
         );
+    }
+
+    #[test]
+    fn manifests_reject_unsupported_shared_versions_and_invalid_coordinate_transforms() {
+        let valid = terrain_diffusion_manifest();
+        assert_eq!(valid.validate(), Ok(()));
+
+        let mut manifest = valid.clone();
+        manifest.source.macro_field_schema_version = MACRO_FIELD_SCHEMA_VERSION + 1;
+        assert_manifest_error(&manifest, WorldManifestError::MacroFieldSchemaMismatch);
+
+        let mut manifest = valid.clone();
+        manifest.source.voxel_composer_version = VOXEL_COMPOSER_VERSION + 1;
+        assert_manifest_error(&manifest, WorldManifestError::VoxelComposerVersionMismatch);
+
+        let mut manifest = valid.clone();
+        manifest.source.authored_content_version = ATLAS_VERSION + 1;
+        assert_manifest_error(
+            &manifest,
+            WorldManifestError::AuthoredContentVersionMismatch,
+        );
+
+        for transform in [
+            MacroCoordinateTransform {
+                horizontal_unit_millimetres: 0,
+                ..MacroCoordinateTransform::CANONICAL_VOXELS
+            },
+            MacroCoordinateTransform {
+                x_axis_sign: 0,
+                ..MacroCoordinateTransform::CANONICAL_VOXELS
+            },
+            MacroCoordinateTransform {
+                x_axis_sign: 2,
+                ..MacroCoordinateTransform::CANONICAL_VOXELS
+            },
+            MacroCoordinateTransform {
+                z_axis_sign: 0,
+                ..MacroCoordinateTransform::CANONICAL_VOXELS
+            },
+            MacroCoordinateTransform {
+                z_axis_sign: -2,
+                ..MacroCoordinateTransform::CANONICAL_VOXELS
+            },
+        ] {
+            let mut manifest = valid.clone();
+            manifest.source.macro_coordinate_transform = transform;
+            assert_manifest_error(
+                &manifest,
+                WorldManifestError::InvalidMacroCoordinateTransform,
+            );
+        }
     }
 
     #[test]
