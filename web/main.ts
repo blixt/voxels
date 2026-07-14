@@ -119,14 +119,13 @@ function start(canvas: HTMLCanvasElement): void {
       });
     }
   };
-  const point = (event: PointerEvent, kind: number): InputSample => {
-    const rect = canvas.getBoundingClientRect();
+  const point = (event: PointerEvent, kind: number, rect?: DOMRectReadOnly): InputSample => {
     return {
       kind,
       code: event.pointerType === "touch" ? 1 : event.pointerType === "pen" ? 2 : 0,
       buttons: event.buttons,
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top,
+      x: rect ? event.clientX - rect.left : 0,
+      y: rect ? event.clientY - rect.top : 0,
       dx: event.movementX,
       dy: event.movementY,
       flags: event.ctrlKey || event.metaKey ? 1 : 0,
@@ -138,7 +137,7 @@ function start(canvas: HTMLCanvasElement): void {
       canvas.setPointerCapture(event.pointerId);
     }
     if (uiCursorMode) {
-      enqueue(point(event, INPUT_POINTER_DOWN), true);
+      enqueue(point(event, INPUT_POINTER_DOWN, canvas.getBoundingClientRect()), true);
       return;
     }
     if (event.pointerType === "mouse" && document.pointerLockElement !== canvas) {
@@ -148,15 +147,21 @@ function start(canvas: HTMLCanvasElement): void {
       );
       return;
     }
-    enqueue(point(event, INPUT_POINTER_DOWN), true);
+    enqueue(point(event, INPUT_POINTER_DOWN, canvas.getBoundingClientRect()), true);
   });
   canvas.addEventListener("contextmenu", (event) => event.preventDefault());
   canvas.addEventListener("pointermove", (event) => {
     if (event.pointerType === "mouse" && document.pointerLockElement !== canvas && !uiCursorMode) {
       return;
     }
+    // Pointer-locked gameplay consumes only movement deltas. Read layout once for an unlocked UI
+    // event, rather than once per coalesced sample, and skip the DOM read entirely while looking.
+    const rect =
+      uiCursorMode || document.pointerLockElement !== canvas
+        ? canvas.getBoundingClientRect()
+        : undefined;
     for (const sample of event.getCoalescedEvents?.() ?? [event]) {
-      enqueue(point(sample, INPUT_POINTER_MOVE));
+      enqueue(point(sample, INPUT_POINTER_MOVE, rect));
     }
   });
   canvas.addEventListener("pointercancel", (event) => {
