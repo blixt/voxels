@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import {
-  compressionEstimates,
-  serializationMilliseconds,
-  testInternals,
-} from "./network-benchmark-link.mjs";
+import { serializationMilliseconds, testInternals } from "./network-benchmark-link.mjs";
 
 function maskedBinaryFrame(payload, mask = Buffer.from([0x12, 0x34, 0x56, 0x78])) {
   const length = payload.length;
@@ -24,6 +20,19 @@ describe("network benchmark link", () => {
     expect(serializationMilliseconds(6_250_000, 50)).toBe(1_000);
   });
 
+  it("shares one serialization budget across concurrent connections", () => {
+    const clock = new testInternals.SerializationClock();
+    const settings = {
+      enqueuedMs: 1_000,
+      oneWayLatencyMs: 20,
+      megabitsPerSecond: 10,
+    };
+    const first = clock.reserve(1_250_000, settings);
+    const second = clock.reserve(1_250_000, settings);
+    expect(first).toBe(2_020);
+    expect(second).toBe(3_020);
+  });
+
   it("parses masked WebSocket binary frames across arbitrary TCP boundaries", () => {
     const messages = [];
     const parser = new testInternals.WebSocketFrameParser((opcode, payload, frameBytes) => {
@@ -34,17 +43,5 @@ describe("network benchmark link", () => {
     parser.push(frame.subarray(3, 8));
     parser.push(frame.subarray(8));
     expect(messages).toEqual([{ opcode: 2, payload: "VXWP fixture", frameBytes: frame.length }]);
-  });
-
-  it("reports independent compression headroom without changing the captured payload", () => {
-    const payload = Buffer.alloc(64 * 1024, 7);
-    const estimates = compressionEstimates([{ kind: "surface_tile_batch_result", payload }]);
-    const result = estimates.surface_tile_batch_result;
-    expect(result.frames).toBe(1);
-    expect(result.rawBytes).toBe(payload.length);
-    expect(result.zstdLevel1Bytes).toBeLessThan(payload.length / 10);
-    expect(result.brotliQuality4Bytes).toBeLessThan(payload.length / 10);
-    expect(result.deflateLevel1Bytes).toBeLessThan(payload.length / 10);
-    expect(payload.every((byte) => byte === 7)).toBe(true);
   });
 });

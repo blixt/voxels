@@ -15,12 +15,18 @@ import {
 import { rustTool } from "./build-wasm.ts";
 import { createShapedLink } from "./network-benchmark-link.mjs";
 
-const RESULT_SCHEMA_VERSION = 1;
+const RESULT_SCHEMA_VERSION = 2;
+const FIXTURE_VERSION = 2;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
-const SAMPLE_INTERVAL_MS = 50;
+const FRAME_SAMPLE_WIDTH = 5;
+const FRAME_SAMPLE_START = 108;
+const SAMPLE_INTERVAL_MS = 16;
 const READY_STABLE_SAMPLES = 3;
 const SCENARIO_TIMEOUT_MS = 90_000;
+const RESIDENT_WALK_METRES = 2;
+const STREAMING_WALK_METRES = 35;
+const TURN_RADIANS = Math.PI;
 const OUTPUT_DIRECTORY = path.resolve("target/network-benchmark");
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|websocket|protocol|world service/i;
@@ -59,6 +65,30 @@ function percentile(values, fraction) {
 function rounded(value, digits = 1) {
   const scale = 10 ** digits;
   return Math.round(value * scale) / scale;
+}
+
+function numericSummary(values) {
+  if (values.length === 0) return { median: null, p95: null, max: null };
+  return {
+    median: rounded(percentile(values, 0.5)),
+    p95: rounded(percentile(values, 0.95)),
+    max: rounded(Math.max(...values)),
+  };
+}
+
+function frameTimingSummary(samples, droppedSamples) {
+  const column = (index) => samples.map((sample) => sample[index]);
+  const frameMs = column(0);
+  return {
+    samples: samples.length,
+    droppedSamples,
+    frameMs: {
+      ...numericSummary(frameMs),
+      above33_33ms: frameMs.filter((value) => value > 33.33).length,
+    },
+    cpuMs: numericSummary(column(1)),
+    streamingMs: numericSummary(column(3)),
+  };
 }
 
 function byteSummary(stats) {
@@ -114,8 +144,15 @@ async function waitForSnapshotApi(page) {
   });
 }
 
-async function snapshot(page) {
-  return assertSnapshotSchema(await page.evaluate(() => globalThis.__VOXELS__.snapshot()));
+async function captureSnapshot(page, frameState) {
+  const current = assertSnapshotSchema(await page.evaluate(() => globalThis.__VOXELS__.snapshot()));
+  const count = current[SNAPSHOT.sampleCount];
+  for (let index = 0; index < count; index += 1) {
+    const start = FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH;
+    frameState.samples.push(current.slice(start, start + FRAME_SAMPLE_WIDTH));
+  }
+  frameState.droppedSamples += current[SNAPSHOT.droppedSamples];
+  return current;
 }
 
 function observePage(page, label, errors) {
@@ -127,13 +164,14 @@ function observePage(page, label, errors) {
   });
 }
 
-async function turn(page, radians) {
-  const before = await snapshot(page);
+async function turn(page, radians, { capture, markMeasurementStart }) {
+  const before = await capture();
+  markMeasurementStart();
   await page.evaluate((movementX) => {
     globalThis.__VOXELS__.look(movementX, 0);
   }, radians / 0.0022);
   await page.waitForTimeout(80);
-  const after = await snapshot(page);
+  const after = await capture();
   const delta = Math.abs(
     Math.atan2(
       Math.sin(after[SNAPSHOT.yaw] - before[SNAPSHOT.yaw]),
@@ -146,31 +184,63 @@ async function turn(page, radians) {
   return { yawDeltaRadians: delta };
 }
 
-async function walk(page, durationMs, sprint = false, key = "KeyW") {
-  const before = await snapshot(page);
+async function walkDistance(
+  page,
+  targetDistanceMetres,
+  { capture, sprint = false, key = "KeyW", timeoutMs = 15_000 },
+) {
+  const before = await capture();
+  const started = performance.now();
   if (sprint) await page.keyboard.down("ShiftLeft");
   await page.keyboard.down(key);
-  await page.waitForTimeout(durationMs);
-  await page.keyboard.up(key);
-  if (sprint) await page.keyboard.up("ShiftLeft");
-  const after = await snapshot(page);
+  let after = before;
+  try {
+    while (performance.now() - started < timeoutMs) {
+      await page.waitForTimeout(25);
+      after = await capture();
+      const distance = Math.hypot(
+        after[SNAPSHOT.cameraX] - before[SNAPSHOT.cameraX],
+        after[SNAPSHOT.cameraZ] - before[SNAPSHOT.cameraZ],
+      );
+      if (distance >= targetDistanceMetres) break;
+    }
+  } finally {
+    await page.keyboard.up(key);
+    if (sprint) await page.keyboard.up("ShiftLeft");
+  }
+  const distanceMetres = Math.hypot(
+    after[SNAPSHOT.cameraX] - before[SNAPSHOT.cameraX],
+    after[SNAPSHOT.cameraZ] - before[SNAPSHOT.cameraZ],
+  );
+  if (distanceMetres < targetDistanceMetres) {
+    throw new Error(
+      `walk fixture covered ${distanceMetres.toFixed(2)} of ${targetDistanceMetres} metres`,
+    );
+  }
   return {
-    requestedDurationMs: durationMs,
-    distanceMetres: Math.hypot(
-      after[SNAPSHOT.cameraX] - before[SNAPSHOT.cameraX],
-      after[SNAPSHOT.cameraZ] - before[SNAPSHOT.cameraZ],
-    ),
+    requestedDistanceMetres: targetDistanceMetres,
+    actionDurationMs: rounded(performance.now() - started),
+    distanceMetres: rounded(distanceMetres, 3),
   };
 }
 
 async function runScenario({ name, page, link, action, errors, timeoutMs = SCENARIO_TIMEOUT_MS }) {
   link.reset();
   const started = performance.now();
+  const frameState = { samples: [], droppedSamples: 0 };
   let actionResult;
   let actionFinishedMs = null;
+  let markedMeasurementStartedMs = null;
   let actionError;
+  const actionContext = {
+    capture: () => captureSnapshot(page, frameState),
+    markMeasurementStart: () => {
+      markedMeasurementStartedMs ??= performance.now() - started;
+      return markedMeasurementStartedMs;
+    },
+  };
   const actionPromise = Promise.resolve()
-    .then(action)
+    .then(() => action(actionContext))
     .then((result) => {
       actionResult = result;
       actionFinishedMs = performance.now() - started;
@@ -186,7 +256,7 @@ async function runScenario({ name, page, link, action, errors, timeoutMs = SCENA
     await sleep(SAMPLE_INTERVAL_MS);
     let current;
     try {
-      current = await snapshot(page);
+      current = await captureSnapshot(page, frameState);
     } catch (error) {
       if (performance.now() - started < 30_000) continue;
       throw error;
@@ -203,12 +273,17 @@ async function runScenario({ name, page, link, action, errors, timeoutMs = SCENA
       allLodsReady: current[SNAPSHOT.allLodsReady] === 1,
       bytes: wire,
     });
+    const measurementStartedMs = markedMeasurementStartedMs ?? actionFinishedMs;
     const ready =
-      actionFinishedMs !== null &&
+      measurementStartedMs !== null &&
       current[SNAPSHOT.allLodsReady] === 1 &&
       current[SNAPSHOT.visibleChunks] > 0 &&
       current[SNAPSHOT.quads] > 0;
-    consecutiveReady = ready ? consecutiveReady + 1 : 0;
+    consecutiveReady = ready
+      ? consecutiveReady > 0 && sameSignature(samples.at(-2), samples.at(-1))
+        ? consecutiveReady + 1
+        : 1
+      : 0;
     if (consecutiveReady >= READY_STABLE_SAMPLES) break;
   }
   await actionPromise;
@@ -219,28 +294,31 @@ async function runScenario({ name, page, link, action, errors, timeoutMs = SCENA
     );
   }
   if (errors.length > 0) throw new Error(errors.join("\n"));
+  const measurementStartedMs = markedMeasurementStartedMs ?? actionFinishedMs;
   const final = samples.at(-1);
-  const informed = firstPermanentlyFinalSample(samples, actionFinishedMs);
+  const fullCoverage = samples.at(-READY_STABLE_SAMPLES);
+  const informed = firstPermanentlyFinalSample(samples, measurementStartedMs);
   const firstUseful = samples.find((sample) => sample.visibleChunks > 0 && sample.quads > 0);
-  const stats = link.finishStats();
+  const stats = link.snapshot();
   return {
     name,
     action: actionResult ?? {},
     actionFinishedMs: rounded(actionFinishedMs),
+    measurementStartedFromStartMs: rounded(measurementStartedMs),
     firstUsefulMs: firstUseful ? rounded(firstUseful.elapsedMs) : null,
-    viewportFullyInformedMs: rounded(informed.elapsedMs - actionFinishedMs),
+    viewportFullyInformedMs: rounded(informed.elapsedMs - measurementStartedMs),
     viewportFullyInformedFromStartMs: rounded(informed.elapsedMs),
-    fullCoverageSettledMs: rounded(final.elapsedMs - actionFinishedMs),
-    fullCoverageSettledFromStartMs: rounded(final.elapsedMs),
+    fullCoverageSettledMs: rounded(fullCoverage.elapsedMs - measurementStartedMs),
+    fullCoverageSettledFromStartMs: rounded(fullCoverage.elapsedMs),
     bytesAtViewportInformed: informed.bytes,
-    bytesAtFullCoverage: final.bytes,
+    bytesAtFullCoverage: fullCoverage.bytes,
     finalViewport: {
       signature: final.signature,
       visibleChunks: final.visibleChunks,
       quads: final.quads,
     },
     messages: stats.messages,
-    compression: stats.compression,
+    frameTiming: frameTimingSummary(frameState.samples, frameState.droppedSamples),
     sampleCount: samples.length,
   };
 }
@@ -282,8 +360,23 @@ function aggregateRuns(runs) {
     [...grouped.entries()].map(([name, scenarios]) => {
       const viewport = scenarios.map((scenario) => scenario.viewportFullyInformedMs);
       const coverage = scenarios.map((scenario) => scenario.fullCoverageSettledMs);
-      const bytes = scenarios.map((scenario) => scenario.bytesAtFullCoverage.total);
-      const down = scenarios.map((scenario) => scenario.bytesAtFullCoverage.downstream);
+      const viewportBytes = scenarios.map((scenario) => scenario.bytesAtViewportInformed.total);
+      const viewportWorldBytes = scenarios.map(
+        (scenario) => scenario.bytesAtViewportInformed.worldDownstream,
+      );
+      const coverageBytes = scenarios.map((scenario) => scenario.bytesAtFullCoverage.total);
+      const coverageWorldBytes = scenarios.map(
+        (scenario) => scenario.bytesAtFullCoverage.worldDownstream,
+      );
+      const frameP95 = scenarios
+        .map((scenario) => scenario.frameTiming.frameMs.p95)
+        .filter((value) => value !== null);
+      const frameMax = scenarios
+        .map((scenario) => scenario.frameTiming.frameMs.max)
+        .filter((value) => value !== null);
+      const streamingP95 = scenarios
+        .map((scenario) => scenario.frameTiming.streamingMs.p95)
+        .filter((value) => value !== null);
       return [
         name,
         {
@@ -297,10 +390,29 @@ function aggregateRuns(runs) {
           fullCoverageSettledMs: {
             median: rounded(percentile(coverage, 0.5)),
             p95: rounded(percentile(coverage, 0.95)),
+            max: rounded(Math.max(...coverage)),
           },
-          streamBytes: {
-            medianTotal: percentile(bytes, 0.5),
-            medianDownstream: percentile(down, 0.5),
+          bytesAtViewportInformed: {
+            medianTotal: percentile(viewportBytes, 0.5),
+            medianWorldDownstream: percentile(viewportWorldBytes, 0.5),
+          },
+          bytesAtFullCoverage: {
+            medianTotal: percentile(coverageBytes, 0.5),
+            medianWorldDownstream: percentile(coverageWorldBytes, 0.5),
+          },
+          frameTiming: {
+            medianP95Ms: rounded(percentile(frameP95, 0.5)),
+            maxMs: rounded(Math.max(...frameMax)),
+            streamingMedianP95Ms: rounded(percentile(streamingP95, 0.5)),
+            above33_33ms: scenarios.reduce(
+              (total, scenario) => total + scenario.frameTiming.frameMs.above33_33ms,
+              0,
+            ),
+            samples: scenarios.reduce((total, scenario) => total + scenario.frameTiming.samples, 0),
+            droppedSamples: scenarios.reduce(
+              (total, scenario) => total + scenario.frameTiming.droppedSamples,
+              0,
+            ),
           },
         },
       ];
@@ -311,29 +423,17 @@ function aggregateRuns(runs) {
 function markdownReport(result) {
   const rows = Object.entries(result.summary).map(([name, summary]) => {
     const viewport = summary.viewportFullyInformedMs;
-    return `| ${name} | ${viewport.median.toFixed(1)} | ${viewport.p95.toFixed(1)} | ${summary.fullCoverageSettledMs.median.toFixed(1)} | ${summary.streamBytes.medianTotal.toLocaleString("en-US")} | ${summary.streamBytes.medianDownstream.toLocaleString("en-US")} |`;
+    return `| ${name} | ${viewport.median.toFixed(1)} | ${viewport.max.toFixed(1)} | ${summary.fullCoverageSettledMs.median.toFixed(1)} | ${summary.bytesAtViewportInformed.medianWorldDownstream.toLocaleString("en-US")} | ${summary.bytesAtFullCoverage.medianTotal.toLocaleString("en-US")} |`;
   });
-  const compression = {};
-  for (const run of result.runs) {
-    for (const [kind, values] of Object.entries(run.compression)) {
-      compression[kind] ??= {
-        rawBytes: 0,
-        zstdLevel1Bytes: 0,
-        brotliQuality4Bytes: 0,
-        deflateLevel1Bytes: 0,
-      };
-      for (const field of Object.keys(compression[kind])) compression[kind][field] += values[field];
-    }
-  }
-  const compressionRows = Object.entries(compression).map(([kind, values]) => {
-    const ratio = values.rawBytes === 0 ? 0 : (1 - values.zstdLevel1Bytes / values.rawBytes) * 100;
-    return `| ${kind} | ${values.rawBytes.toLocaleString("en-US")} | ${values.zstdLevel1Bytes.toLocaleString("en-US")} | ${ratio.toFixed(1)}% | ${values.brotliQuality4Bytes.toLocaleString("en-US")} | ${values.deflateLevel1Bytes.toLocaleString("en-US")} |`;
+  const frameRows = Object.entries(result.summary).map(([name, summary]) => {
+    const frame = summary.frameTiming;
+    return `| ${name} | ${frame.medianP95Ms.toFixed(1)} | ${frame.maxMs.toFixed(1)} | ${frame.above33_33ms.toLocaleString("en-US")} / ${frame.samples.toLocaleString("en-US")} | ${frame.streamingMedianP95Ms.toFixed(1)} | ${frame.droppedSamples.toLocaleString("en-US")} |`;
   });
-  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\n| Scenario | Viewport informed median (ms) | p95 (ms) | Full coverage after action median (ms) | Total stream bytes | Downstream bytes |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” additionally requires every canonical and surface LOD queue and in-flight stage to settle.\n\n## Compression headroom\n\nThese are offline, independently compressed VXWP result messages; compression time is outside scenario timing.\n\n| Message | Current bytes | zstd level 1 | zstd reduction | Brotli q4 | Deflate level 1 |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${compressionRows.join("\n")}\n`;
+  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\n| Scenario | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
 }
 
 async function main() {
-  const repetitions = positiveInteger(argumentValue("runs", "3"), "runs");
+  const repetitions = positiveInteger(argumentValue("runs", "5"), "runs");
   const profile = { ...DEFAULT_PROFILE };
   const temporary = await mkdtemp(path.join(tmpdir(), "voxels-network-benchmark-"));
   const backendPort = await reserveEphemeralPort();
@@ -428,7 +528,8 @@ async function main() {
           errors,
           // Spawn faces -Z from the exact chunk boundary. Walking backward stays inside the
           // already-resident spawn chunk and is the control for unexpected world traffic.
-          action: () => walk(page, 500, false, "KeyS"),
+          action: (context) =>
+            walkDistance(page, RESIDENT_WALK_METRES, { ...context, key: "KeyS" }),
         }),
       );
       runs.push(
@@ -437,7 +538,7 @@ async function main() {
           page,
           link,
           errors,
-          action: () => turn(page, Math.PI),
+          action: (context) => turn(page, TURN_RADIANS, context),
         }),
       );
       runs.push(
@@ -446,7 +547,8 @@ async function main() {
           page,
           link,
           errors,
-          action: () => walk(page, 5_000, true),
+          action: (context) =>
+            walkDistance(page, STREAMING_WALK_METRES, { ...context, sprint: true }),
         }),
       );
       await context.close();
@@ -461,27 +563,25 @@ async function main() {
           page: pivotPage,
           link,
           errors: pivotErrors,
-          action: async () => {
+          action: async (context) => {
             await pivotPage.goto(
               `http://${PREVIEW_HOST}:${previewPort}/?player=network-pivot-${repetition + 1}`,
               { waitUntil: "domcontentloaded" },
             );
             await waitForSnapshotApi(pivotPage);
-            await pivotPage.waitForFunction(
-              ({ visible, quads, ready }) =>
-                globalThis.__VOXELS__
-                  .snapshot()
-                  .then(
-                    (values) => values[visible] > 0 && values[quads] > 0 && values[ready] === 0,
-                  ),
-              {
-                visible: SNAPSHOT.visibleChunks,
-                quads: SNAPSHOT.quads,
-                ready: SNAPSHOT.allLodsReady,
-              },
-              { timeout: 30_000 },
-            );
-            return turn(pivotPage, Math.PI);
+            const deadline = performance.now() + 30_000;
+            while (performance.now() < deadline) {
+              const current = await context.capture();
+              if (
+                current[SNAPSHOT.visibleChunks] > 0 &&
+                current[SNAPSHOT.quads] > 0 &&
+                current[SNAPSHOT.allLodsReady] === 0
+              ) {
+                return turn(pivotPage, TURN_RADIANS, context);
+              }
+              await pivotPage.waitForTimeout(SAMPLE_INTERVAL_MS);
+            }
+            throw new Error("turn-during-spawn fixture did not observe partial coverage");
           },
         }),
       );
@@ -504,7 +604,21 @@ async function main() {
         node: process.version,
       },
       browserSnapshotSchema: SNAPSHOT_SCHEMA_VERSION,
-      link: { ...profile, quantumBytes: link.profile.quantumBytes },
+      fixture: {
+        version: FIXTURE_VERSION,
+        viewport: VIEWPORT,
+        sampleIntervalMs: SAMPLE_INTERVAL_MS,
+        readyStableSamples: READY_STABLE_SAMPLES,
+        residentWalkMetres: RESIDENT_WALK_METRES,
+        streamingWalkMetres: STREAMING_WALK_METRES,
+        turnRadians: TURN_RADIANS,
+      },
+      protocol: {
+        name: "VXWP",
+        version: 4,
+        resultCompression: { codec: "brotli", quality: 2, windowBits: 20 },
+      },
+      link: { ...profile, ...link.profile },
       repetitions,
       scenarios: [
         "cold_spawn",

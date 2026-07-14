@@ -1,16 +1,10 @@
 import { createServer, connect } from "node:net";
-import {
-  brotliCompressSync,
-  constants as zlibConstants,
-  deflateRawSync,
-  zstdCompressSync,
-} from "node:zlib";
 
 const HTTP_HEADER_END = Buffer.from("\r\n\r\n");
 const MAX_HTTP_HEADER_BYTES = 64 * 1024;
 const VXWP_MAGIC = Buffer.from("VXWP");
 const DEFAULT_QUANTUM_BYTES = 16 * 1024;
-const DEFAULT_MAX_QUEUED_BYTES = 8 * 1024 * 1024;
+const QUEUE_BANDWIDTH_DELAY_PRODUCTS = 2;
 
 export const VXWP_KIND_NAMES = Object.freeze({
   1: "open_world",
@@ -39,7 +33,6 @@ function blankStats() {
     downstream: blankDirection(),
     paths: {},
     messages: {},
-    compressionPayloads: [],
   };
 }
 
@@ -194,9 +187,6 @@ class ConnectionInspector {
     stats.messages[key].payloadBytes += payload.length;
     increment(totals, "vxwpPayloadBytes", payload.length);
     increment(pathTotals, "vxwpPayloadBytes", payload.length);
-    if (direction === "downstream" && (kind === 4 || kind === 8)) {
-      stats.compressionPayloads.push({ kind: name, payload: Buffer.from(payload) });
-    }
   }
 }
 
@@ -205,11 +195,33 @@ export function serializationMilliseconds(bytes, megabitsPerSecond) {
   return (bytes * 8) / (megabitsPerSecond * 1_000);
 }
 
+function defaultQueueBytes(megabitsPerSecond, oneWayLatencyMs, quantumBytes) {
+  const roundTripSeconds = (oneWayLatencyMs * 2) / 1_000;
+  const bandwidthDelayProduct = (megabitsPerSecond * 1_000_000 * roundTripSeconds) / 8;
+  return Math.max(
+    quantumBytes * 2,
+    Math.ceil(bandwidthDelayProduct * QUEUE_BANDWIDTH_DELAY_PRODUCTS),
+  );
+}
+
+class SerializationClock {
+  constructor() {
+    this.nextFinishMs = 0;
+  }
+
+  reserve(bytes, { enqueuedMs, oneWayLatencyMs, megabitsPerSecond }) {
+    const readyMs = enqueuedMs + oneWayLatencyMs;
+    const startMs = Math.max(readyMs, this.nextFinishMs);
+    const finishMs = startMs + serializationMilliseconds(bytes, megabitsPerSecond);
+    this.nextFinishMs = finishMs;
+    return finishMs;
+  }
+}
+
 function shapeDirection(source, destination, inspector, direction, settings) {
   const queue = [];
   let queuedBytes = 0;
   let draining = false;
-  let nextFinishMs = 0;
 
   const drain = async () => {
     if (draining) return;
@@ -218,11 +230,7 @@ function shapeDirection(source, destination, inspector, direction, settings) {
       const item = queue.shift();
       queuedBytes -= item.bytes.length;
       if (source.isPaused() && queuedBytes < settings.maxQueuedBytes / 2) source.resume();
-      const readyMs = item.enqueuedMs + settings.oneWayLatencyMs;
-      const startMs = Math.max(readyMs, nextFinishMs, performance.now());
-      nextFinishMs =
-        startMs + serializationMilliseconds(item.bytes.length, settings.megabitsPerSecond);
-      const delay = nextFinishMs - performance.now();
+      const delay = item.deliverAtMs - performance.now();
       if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
       if (destination.destroyed) break;
       inspector.observe(direction, item.bytes);
@@ -236,7 +244,15 @@ function shapeDirection(source, destination, inspector, direction, settings) {
   source.on("data", (chunk) => {
     for (let offset = 0; offset < chunk.length; offset += settings.quantumBytes) {
       const bytes = Buffer.from(chunk.subarray(offset, offset + settings.quantumBytes));
-      queue.push({ bytes, enqueuedMs: performance.now() });
+      const enqueuedMs = performance.now();
+      queue.push({
+        bytes,
+        deliverAtMs: settings.clock.reserve(bytes.length, {
+          enqueuedMs,
+          oneWayLatencyMs: settings.oneWayLatencyMs,
+          megabitsPerSecond: settings.megabitsPerSecond,
+        }),
+      });
       queuedBytes += bytes.length;
     }
     if (queuedBytes >= settings.maxQueuedBytes) source.pause();
@@ -262,30 +278,6 @@ function clonedStats(stats) {
   };
 }
 
-export function compressionEstimates(payloads) {
-  const aggregate = {};
-  for (const { kind, payload } of payloads) {
-    aggregate[kind] ??= {
-      frames: 0,
-      rawBytes: 0,
-      zstdLevel1Bytes: 0,
-      brotliQuality4Bytes: 0,
-      deflateLevel1Bytes: 0,
-    };
-    const target = aggregate[kind];
-    target.frames += 1;
-    target.rawBytes += payload.length;
-    target.zstdLevel1Bytes += zstdCompressSync(payload, {
-      params: { [zlibConstants.ZSTD_c_compressionLevel]: 1 },
-    }).length;
-    target.brotliQuality4Bytes += brotliCompressSync(payload, {
-      params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 4 },
-    }).length;
-    target.deflateLevel1Bytes += deflateRawSync(payload, { level: 1 }).length;
-  }
-  return aggregate;
-}
-
 export async function createShapedLink({ listenPort, targetPort, profile }) {
   const statsRef = { current: blankStats() };
   const sockets = new Set();
@@ -294,7 +286,24 @@ export async function createShapedLink({ listenPort, targetPort, profile }) {
     upstreamMegabitsPerSecond: profile.upstreamMegabitsPerSecond,
     downstreamMegabitsPerSecond: profile.downstreamMegabitsPerSecond,
     quantumBytes: profile.quantumBytes ?? DEFAULT_QUANTUM_BYTES,
-    maxQueuedBytes: profile.maxQueuedBytes ?? DEFAULT_MAX_QUEUED_BYTES,
+  };
+  normalized.upstreamMaxQueuedBytes =
+    profile.upstreamMaxQueuedBytes ??
+    defaultQueueBytes(
+      normalized.upstreamMegabitsPerSecond,
+      normalized.oneWayLatencyMs,
+      normalized.quantumBytes,
+    );
+  normalized.downstreamMaxQueuedBytes =
+    profile.downstreamMaxQueuedBytes ??
+    defaultQueueBytes(
+      normalized.downstreamMegabitsPerSecond,
+      normalized.oneWayLatencyMs,
+      normalized.quantumBytes,
+    );
+  const clocks = {
+    upstream: new SerializationClock(),
+    downstream: new SerializationClock(),
   };
   const server = createServer((client) => {
     client.setNoDelay(true);
@@ -307,13 +316,15 @@ export async function createShapedLink({ listenPort, targetPort, profile }) {
       oneWayLatencyMs: normalized.oneWayLatencyMs,
       megabitsPerSecond: normalized.upstreamMegabitsPerSecond,
       quantumBytes: normalized.quantumBytes,
-      maxQueuedBytes: normalized.maxQueuedBytes,
+      maxQueuedBytes: normalized.upstreamMaxQueuedBytes,
+      clock: clocks.upstream,
     });
     shapeDirection(backend, client, inspector, "downstream", {
       oneWayLatencyMs: normalized.oneWayLatencyMs,
       megabitsPerSecond: normalized.downstreamMegabitsPerSecond,
       quantumBytes: normalized.quantumBytes,
-      maxQueuedBytes: normalized.maxQueuedBytes,
+      maxQueuedBytes: normalized.downstreamMaxQueuedBytes,
+      clock: clocks.downstream,
     });
     const forget = (socket) => sockets.delete(socket);
     client.on("close", () => forget(client));
@@ -328,10 +339,6 @@ export async function createShapedLink({ listenPort, targetPort, profile }) {
   return {
     profile: normalized,
     snapshot: () => clonedStats(statsRef.current),
-    finishStats: () => ({
-      ...clonedStats(statsRef.current),
-      compression: compressionEstimates(statsRef.current.compressionPayloads),
-    }),
     reset: () => {
       statsRef.current = blankStats();
     },
@@ -344,4 +351,4 @@ export async function createShapedLink({ listenPort, targetPort, profile }) {
   };
 }
 
-export const testInternals = Object.freeze({ WebSocketFrameParser });
+export const testInternals = Object.freeze({ SerializationClock, WebSocketFrameParser });

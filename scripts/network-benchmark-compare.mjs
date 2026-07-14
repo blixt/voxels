@@ -10,17 +10,28 @@ function metric(before, after) {
   return { before, after, delta, percent: percentage(delta, before) };
 }
 
+function requireSameFixture(baseline, candidate, field) {
+  if (JSON.stringify(baseline[field]) !== JSON.stringify(candidate[field])) {
+    throw new Error(`${field} mismatch`);
+  }
+}
+
 export function compareNetworkBenchmarks(baseline, candidate) {
   if (baseline.schemaVersion !== candidate.schemaVersion) {
     throw new Error(
       `result schema mismatch: ${baseline.schemaVersion} versus ${candidate.schemaVersion}`,
     );
   }
+  requireSameFixture(baseline, candidate, "browserSnapshotSchema");
+  requireSameFixture(baseline, candidate, "fixture");
+  requireSameFixture(baseline, candidate, "protocol");
   for (const field of [
     "roundTripLatencyMs",
     "downstreamMegabitsPerSecond",
     "upstreamMegabitsPerSecond",
     "quantumBytes",
+    "upstreamMaxQueuedBytes",
+    "downstreamMaxQueuedBytes",
   ]) {
     if (baseline.link[field] !== candidate.link[field]) {
       throw new Error(`link profile mismatch for ${field}`);
@@ -39,15 +50,22 @@ export function compareNetworkBenchmarks(baseline, candidate) {
             before.viewportFullyInformedMs.median,
             after.viewportFullyInformedMs.median,
           ),
-          viewportP95Ms: metric(
-            before.viewportFullyInformedMs.p95,
-            after.viewportFullyInformedMs.p95,
+          viewportMaxMs: metric(
+            before.viewportFullyInformedMs.max,
+            after.viewportFullyInformedMs.max,
           ),
           fullCoverageMedianMs: metric(
             before.fullCoverageSettledMs.median,
             after.fullCoverageSettledMs.median,
           ),
-          streamBytes: metric(before.streamBytes.medianTotal, after.streamBytes.medianTotal),
+          viewportWorldBytes: metric(
+            before.bytesAtViewportInformed.medianWorldDownstream,
+            after.bytesAtViewportInformed.medianWorldDownstream,
+          ),
+          fullCoverageBytes: metric(
+            before.bytesAtFullCoverage.medianTotal,
+            after.bytesAtFullCoverage.medianTotal,
+          ),
         },
       ];
     }),
@@ -66,9 +84,9 @@ function formatDelta(value, suffix = "") {
 export function comparisonMarkdown(baseline, candidate, comparison) {
   const rows = Object.entries(comparison).map(
     ([name, values]) =>
-      `| ${name} | ${formatDelta(values.viewportMedianMs, " ms")} | ${formatDelta(values.viewportP95Ms, " ms")} | ${formatDelta(values.fullCoverageMedianMs, " ms")} | ${formatDelta(values.streamBytes, " B")} |`,
+      `| ${name} | ${formatDelta(values.viewportMedianMs, " ms")} | ${formatDelta(values.viewportMaxMs, " ms")} | ${formatDelta(values.fullCoverageMedianMs, " ms")} | ${formatDelta(values.viewportWorldBytes, " B")} | ${formatDelta(values.fullCoverageBytes, " B")} |`,
   );
-  return `# Network benchmark comparison\n\nBaseline: \`${baseline.git.commit}\`  \nCandidate: \`${candidate.git.commit}\`\n\nNegative values are improvements; positive values are degradations.\n\n| Scenario | Viewport median | Viewport p95 | Full coverage median | Stream bytes |\n| --- | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n`;
+  return `# Network benchmark comparison\n\nBaseline: \`${baseline.git.commit}\`  \nCandidate: \`${candidate.git.commit}\`\n\nNegative values are improvements; positive values are degradations.\n\n| Scenario | Viewport median | Viewport max | Full coverage median | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n`;
 }
 
 async function main() {
