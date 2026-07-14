@@ -26,6 +26,11 @@ The browser persistence stress test remains explicit because it launches a syste
 `vp run bench:world` runs native Criterion baselines for chunk generation, VXCH encode/decode, and
 greedy meshing. Reports are written under the ignored `target/criterion/` directory.
 `vp run bench:core` compares 120 dry and submerged fixed simulation steps.
+`vp run bench:network` owns a temporary native world service, deterministic bidirectional WAN
+shaper, release preview, and isolated Chrome contexts; it reports viewport/full-coverage settling,
+stream bytes, message attribution, and offline compression headroom. Compare two JSON artifacts with
+`vp run bench:network:compare -- <baseline.json> <candidate.json>`; see
+[Remote world streaming benchmarks](docs/network-benchmark.md).
 `vp run terrain:fetch`, `vp run terrain:counterproof`, `vp run terrain:smoke`,
 `vp run terrain:base`, and `vp run terrain:detail` exercise the optional native Rust/Metal Terrain
 Diffusion provider on Apple silicon; see
