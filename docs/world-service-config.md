@@ -70,7 +70,7 @@ movement_slack_centimetres = 100
 movement_credit_window_ms = 500
 
 [edits]
-database = "../tmp/world-state-v4.sqlite3"
+database = "../tmp/world-state-v5.sqlite3"
 change_queue_capacity = 256
 
 [spawn]

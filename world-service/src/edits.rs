@@ -19,7 +19,7 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash,
 };
 
-const EDIT_SCHEMA_VERSION: i64 = 4;
+const EDIT_SCHEMA_VERSION: i64 = 5;
 const INITIAL_REVISION: u64 = 1;
 const DIG_EDGE_VOXELS: i32 = 5;
 const DIG_RADIUS_VOXELS: i32 = DIG_EDGE_VOXELS / 2;
@@ -672,7 +672,7 @@ fn initialize_schema(
                         REFERENCES edit_operations(player_id, edit_session_id, operation_id)
                         ON DELETE CASCADE
                  ) WITHOUT ROWID;
-                 PRAGMA user_version = 4;",
+                 PRAGMA user_version = 5;",
             )
             .map_err(sql_error("create edit schema"))?;
         transaction
@@ -2148,7 +2148,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "voxels-edit-authority-v4-{}-{unique}.sqlite3",
+            "voxels-edit-authority-v5-{}-{unique}.sqlite3",
             std::process::id()
         ));
         let player = player_id(5);
@@ -2195,11 +2195,11 @@ mod tests {
     fn previous_schema_is_rejected_without_migration() {
         let source = ProceduralWorldSource::new(17);
         let connection = Connection::open_in_memory().unwrap();
-        connection.pragma_update(None, "user_version", 3).unwrap();
+        connection.pragma_update(None, "user_version", 4).unwrap();
         let error = EditAuthority::from_connection(connection, world_id(6), &source, 4, None)
             .err()
             .unwrap();
-        assert!(error.to_string().contains("schema 3; expected 4"));
+        assert!(error.to_string().contains("schema 4; expected 5"));
         assert!(
             error
                 .to_string()

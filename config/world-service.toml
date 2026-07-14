@@ -60,7 +60,7 @@ movement_credit_window_ms = 500
 [edits]
 # Native server authority. This checked-in local path is ignored by git; deployments should point
 # it at durable storage. A saturated client queue receives an explicit resync marker.
-database = "../tmp/world-state-v4.sqlite3"
+database = "../tmp/world-state-v5.sqlite3"
 change_queue_capacity = 256
 
 [spawn]
