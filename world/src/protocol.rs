@@ -16,12 +16,12 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
 pub const MAX_SURFACE_TILES_PER_BATCH: usize = 32;
-pub const MAX_PLAYERS_PER_PRESENCE_SNAPSHOT: usize = 64;
+pub const MAX_PLAYERS_PER_PRESENCE_DELTA: usize = 512;
 pub const MAX_PLAYER_NAME_BYTES: usize = 32;
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
@@ -39,7 +39,7 @@ const KIND_SURFACE_TILE_BATCH_RESULT: u16 = 8;
 const KIND_OPEN_PRESENCE: u16 = 9;
 const KIND_PRESENCE_OPENED: u16 = 10;
 const KIND_PLAYER_POSE: u16 = 11;
-const KIND_PRESENCE_SNAPSHOT: u16 = 12;
+const KIND_PRESENCE_DELTA: u16 = 12;
 const KIND_PRESENCE_PING: u16 = 13;
 const KIND_PRESENCE_PONG: u16 = 14;
 const FLAG_NONE: u16 = 0;
@@ -215,15 +215,27 @@ pub struct PlayerPoseUpdate {
 pub struct PlayerPresenceState {
     pub player_id: PlayerId,
     pub connection_id: u64,
-    pub color_index: u8,
+    pub color_index: u16,
     pub pose: PlayerPoseUpdate,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlayerPresenceUpdate {
+    pub connection_id: u64,
+    pub pose: PlayerPoseUpdate,
+}
+
+/// One receiver-specific presence update. Entries establish identity, updates replace dynamic
+/// state for already-entered connections, and leaves explicitly retire connections. Omission means
+/// unchanged, which permits distance-cadenced and bandwidth-budgeted replication.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PresenceSnapshot {
-    pub snapshot_sequence: u64,
+pub struct PresenceDelta {
+    pub stream_sequence: u64,
     pub server_time_ms: u64,
-    pub players: Vec<PlayerPresenceState>,
+    pub visible_player_count: u16,
+    pub enters: Vec<PlayerPresenceState>,
+    pub updates: Vec<PlayerPresenceUpdate>,
+    pub leaves: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -853,7 +865,7 @@ pub fn encode_presence_opened(opened: PresenceOpened) -> Result<Vec<u8>, Protoco
         || opened.server_time_ms == 0
         || opened.broadcast_interval_ms == 0
         || opened.max_players == 0
-        || usize::from(opened.max_players) > MAX_PLAYERS_PER_PRESENCE_SNAPSHOT
+        || usize::from(opened.max_players) > MAX_PLAYERS_PER_PRESENCE_DELTA
     {
         return Err(ProtocolError::InvalidPayload("invalid PresenceOpened body"));
     }
@@ -887,7 +899,7 @@ pub fn decode_presence_opened(bytes: &[u8]) -> Result<PresenceOpened, ProtocolEr
         || opened.server_time_ms == 0
         || opened.broadcast_interval_ms == 0
         || opened.max_players == 0
-        || usize::from(opened.max_players) > MAX_PLAYERS_PER_PRESENCE_SNAPSHOT
+        || usize::from(opened.max_players) > MAX_PLAYERS_PER_PRESENCE_DELTA
     {
         return Err(ProtocolError::InvalidPayload("invalid PresenceOpened body"));
     }
@@ -912,79 +924,109 @@ pub fn decode_player_pose(bytes: &[u8]) -> Result<PlayerPoseUpdate, ProtocolErro
     Ok(pose)
 }
 
-pub fn encode_presence_snapshot(snapshot: &PresenceSnapshot) -> Result<Vec<u8>, ProtocolError> {
-    if snapshot.snapshot_sequence == 0 || snapshot.server_time_ms == 0 {
+pub fn encode_presence_delta(delta: &PresenceDelta) -> Result<Vec<u8>, ProtocolError> {
+    if delta.stream_sequence == 0 || delta.server_time_ms == 0 {
         return Err(ProtocolError::InvalidPayload(
-            "presence snapshot sequence or time is zero",
+            "presence delta sequence or time is zero",
         ));
     }
-    if snapshot.players.len() > MAX_PLAYERS_PER_PRESENCE_SNAPSHOT {
-        return Err(ProtocolError::LimitExceeded("presence snapshot players"));
+    if usize::from(delta.visible_player_count) > MAX_PLAYERS_PER_PRESENCE_DELTA
+        || delta.enters.len() > MAX_PLAYERS_PER_PRESENCE_DELTA
+        || delta.updates.len() > MAX_PLAYERS_PER_PRESENCE_DELTA
+        || delta.leaves.len() > MAX_PLAYERS_PER_PRESENCE_DELTA
+    {
+        return Err(ProtocolError::LimitExceeded("presence delta players"));
     }
-    validate_presence_players(&snapshot.players)?;
-    let mut payload = Vec::with_capacity(24 + snapshot.players.len() * 84);
-    push_u64(&mut payload, snapshot.snapshot_sequence);
-    push_u64(&mut payload, snapshot.server_time_ms);
-    push_u16(&mut payload, snapshot.players.len() as u16);
-    push_u16(&mut payload, 0);
-    push_u32(&mut payload, 0);
-    for player in &snapshot.players {
+    validate_presence_delta(delta)?;
+    let mut payload = Vec::with_capacity(
+        24 + delta.enters.len() * 80 + delta.updates.len() * 60 + delta.leaves.len() * 8,
+    );
+    push_u64(&mut payload, delta.stream_sequence);
+    push_u64(&mut payload, delta.server_time_ms);
+    push_u16(&mut payload, delta.visible_player_count);
+    push_u16(&mut payload, delta.enters.len() as u16);
+    push_u16(&mut payload, delta.updates.len() as u16);
+    push_u16(&mut payload, delta.leaves.len() as u16);
+    for player in &delta.enters {
         payload.extend_from_slice(player.player_id.as_bytes());
         push_u64(&mut payload, player.connection_id);
-        payload.push(player.color_index);
-        payload.push(0);
+        push_u16(&mut payload, player.color_index);
         push_u16(&mut payload, 0);
         encode_player_pose_body(&mut payload, player.pose);
     }
-    Ok(encode_frame(KIND_PRESENCE_SNAPSHOT, 0, &payload))
+    for update in &delta.updates {
+        push_u64(&mut payload, update.connection_id);
+        encode_player_pose_body(&mut payload, update.pose);
+    }
+    for connection_id in &delta.leaves {
+        push_u64(&mut payload, *connection_id);
+    }
+    Ok(encode_frame(KIND_PRESENCE_DELTA, 0, &payload))
 }
 
-pub fn decode_presence_snapshot(bytes: &[u8]) -> Result<PresenceSnapshot, ProtocolError> {
+pub fn decode_presence_delta(bytes: &[u8]) -> Result<PresenceDelta, ProtocolError> {
     let frame = decode_frame(bytes)?;
     expect_zero_request_id(&frame)?;
-    expect_kind(&frame, KIND_PRESENCE_SNAPSHOT)?;
+    expect_kind(&frame, KIND_PRESENCE_DELTA)?;
     let mut cursor = Cursor::new(frame.payload);
-    let snapshot_sequence = cursor.u64()?;
+    let stream_sequence = cursor.u64()?;
     let server_time_ms = cursor.u64()?;
-    let count = usize::from(cursor.u16()?);
-    if cursor.u16()? != 0 || cursor.u32()? != 0 {
+    let visible_player_count = cursor.u16()?;
+    let enter_count = usize::from(cursor.u16()?);
+    let update_count = usize::from(cursor.u16()?);
+    let leave_count = usize::from(cursor.u16()?);
+    if stream_sequence == 0 || server_time_ms == 0 {
         return Err(ProtocolError::InvalidPayload(
-            "reserved presence snapshot field is nonzero",
+            "presence delta sequence or time is zero",
         ));
     }
-    if snapshot_sequence == 0 || server_time_ms == 0 {
-        return Err(ProtocolError::InvalidPayload(
-            "presence snapshot sequence or time is zero",
-        ));
+    if usize::from(visible_player_count) > MAX_PLAYERS_PER_PRESENCE_DELTA
+        || enter_count > MAX_PLAYERS_PER_PRESENCE_DELTA
+        || update_count > MAX_PLAYERS_PER_PRESENCE_DELTA
+        || leave_count > MAX_PLAYERS_PER_PRESENCE_DELTA
+    {
+        return Err(ProtocolError::LimitExceeded("presence delta players"));
     }
-    if count > MAX_PLAYERS_PER_PRESENCE_SNAPSHOT {
-        return Err(ProtocolError::LimitExceeded("presence snapshot players"));
-    }
-    let mut players = Vec::with_capacity(count);
-    for _ in 0..count {
+    let mut enters = Vec::with_capacity(enter_count);
+    for _ in 0..enter_count {
         let player_id = PlayerId::from_bytes(cursor.array()?);
         let connection_id = cursor.u64()?;
-        let color_index = cursor.u8()?;
-        if cursor.u8()? != 0 || cursor.u16()? != 0 {
+        let color_index = cursor.u16()?;
+        if cursor.u16()? != 0 {
             return Err(ProtocolError::InvalidPayload(
                 "reserved player presence field is nonzero",
             ));
         }
         let pose = decode_player_pose_body(&mut cursor)?;
-        players.push(PlayerPresenceState {
+        enters.push(PlayerPresenceState {
             player_id,
             connection_id,
             color_index,
             pose,
         });
     }
+    let mut updates = Vec::with_capacity(update_count);
+    for _ in 0..update_count {
+        updates.push(PlayerPresenceUpdate {
+            connection_id: cursor.u64()?,
+            pose: decode_player_pose_body(&mut cursor)?,
+        });
+    }
+    let mut leaves = Vec::with_capacity(leave_count);
+    for _ in 0..leave_count {
+        leaves.push(cursor.u64()?);
+    }
     cursor.finish()?;
-    validate_presence_players(&players)?;
-    Ok(PresenceSnapshot {
-        snapshot_sequence,
+    let delta = PresenceDelta {
+        stream_sequence,
         server_time_ms,
-        players,
-    })
+        visible_player_count,
+        enters,
+        updates,
+        leaves,
+    };
+    validate_presence_delta(&delta)?;
+    Ok(delta)
 }
 
 pub fn encode_presence_ping(ping: PresencePing) -> Result<Vec<u8>, ProtocolError> {
@@ -1134,8 +1176,8 @@ pub const fn player_pose_kind() -> u16 {
     KIND_PLAYER_POSE
 }
 
-pub const fn presence_snapshot_kind() -> u16 {
-    KIND_PRESENCE_SNAPSHOT
+pub const fn presence_delta_kind() -> u16 {
+    KIND_PRESENCE_DELTA
 }
 
 pub const fn presence_ping_kind() -> u16 {
@@ -1227,6 +1269,7 @@ fn validate_player_pose(
 
 fn validate_presence_players(players: &[PlayerPresenceState]) -> Result<(), ProtocolError> {
     let mut prior_player = None;
+    let mut connections = BTreeSet::new();
     let mut colors = BTreeSet::new();
     for player in players {
         if player.player_id.is_nil() || player.connection_id == 0 {
@@ -1239,7 +1282,8 @@ fn validate_presence_players(players: &[PlayerPresenceState]) -> Result<(), Prot
                 "presence players are not strictly sorted",
             ));
         }
-        if usize::from(player.color_index) >= MAX_PLAYERS_PER_PRESENCE_SNAPSHOT
+        if !connections.insert(player.connection_id)
+            || usize::from(player.color_index) >= MAX_PLAYERS_PER_PRESENCE_DELTA
             || !colors.insert(player.color_index)
         {
             return Err(ProtocolError::InvalidPayload(
@@ -1248,6 +1292,47 @@ fn validate_presence_players(players: &[PlayerPresenceState]) -> Result<(), Prot
         }
         validate_player_pose(&player.pose, true)?;
         prior_player = Some(player.player_id);
+    }
+    Ok(())
+}
+
+fn validate_presence_delta(delta: &PresenceDelta) -> Result<(), ProtocolError> {
+    validate_presence_players(&delta.enters)?;
+    let entered = delta
+        .enters
+        .iter()
+        .map(|player| player.connection_id)
+        .collect::<BTreeSet<_>>();
+    let mut prior_update = None;
+    for update in &delta.updates {
+        if update.connection_id == 0
+            || entered.contains(&update.connection_id)
+            || prior_update.is_some_and(|prior| prior >= update.connection_id)
+        {
+            return Err(ProtocolError::InvalidPayload(
+                "presence updates are invalid, duplicated, or not strictly sorted",
+            ));
+        }
+        validate_player_pose(&update.pose, true)?;
+        prior_update = Some(update.connection_id);
+    }
+    let updated = delta
+        .updates
+        .iter()
+        .map(|update| update.connection_id)
+        .collect::<BTreeSet<_>>();
+    let mut prior_leave = None;
+    for connection_id in &delta.leaves {
+        if *connection_id == 0
+            || entered.contains(connection_id)
+            || updated.contains(connection_id)
+            || prior_leave.is_some_and(|prior| prior >= *connection_id)
+        {
+            return Err(ProtocolError::InvalidPayload(
+                "presence leaves are invalid, duplicated, or not strictly sorted",
+            ));
+        }
+        prior_leave = Some(*connection_id);
     }
     Ok(())
 }
@@ -2408,10 +2493,11 @@ mod tests {
             Ok(pose)
         );
 
-        let snapshot = PresenceSnapshot {
-            snapshot_sequence: 3,
+        let delta = PresenceDelta {
+            stream_sequence: 3,
             server_time_ms: 1_010,
-            players: vec![
+            visible_player_count: 2,
+            enters: vec![
                 PlayerPresenceState {
                     player_id: PlayerId::from_bytes([1; 16]),
                     connection_id: 7,
@@ -2433,12 +2519,33 @@ mod tests {
                     },
                 },
             ],
+            updates: Vec::new(),
+            leaves: Vec::new(),
         };
         assert_eq!(
-            decode_presence_snapshot(
-                &encode_presence_snapshot(&snapshot).expect("encode presence snapshot")
+            decode_presence_delta(&encode_presence_delta(&delta).expect("encode presence delta")),
+            Ok(delta.clone())
+        );
+
+        let update_delta = PresenceDelta {
+            stream_sequence: 4,
+            server_time_ms: 1_020,
+            visible_player_count: 1,
+            enters: Vec::new(),
+            updates: vec![PlayerPresenceUpdate {
+                connection_id: 7,
+                pose: PlayerPoseUpdate {
+                    sequence: 5,
+                    ..pose
+                },
+            }],
+            leaves: vec![8],
+        };
+        assert_eq!(
+            decode_presence_delta(
+                &encode_presence_delta(&update_delta).expect("encode update delta")
             ),
-            Ok(snapshot.clone())
+            Ok(update_delta)
         );
 
         let ping = PresencePing {
@@ -2467,18 +2574,18 @@ mod tests {
             Err(ProtocolError::InvalidPayload(_))
         ));
 
-        let mut duplicate_color = snapshot;
-        duplicate_color.players[1].color_index = duplicate_color.players[0].color_index;
+        let mut duplicate_color = delta;
+        duplicate_color.enters[1].color_index = duplicate_color.enters[0].color_index;
         assert!(matches!(
-            encode_presence_snapshot(&duplicate_color),
+            encode_presence_delta(&duplicate_color),
             Err(ProtocolError::InvalidPayload(_))
         ));
 
         let mut prior_version = encode_player_pose(pose).expect("encode pose version fixture");
-        prior_version[4..6].copy_from_slice(&3_u16.to_le_bytes());
+        prior_version[4..6].copy_from_slice(&4_u16.to_le_bytes());
         assert_eq!(
             decode_player_pose(&prior_version),
-            Err(ProtocolError::UnsupportedVersion(3))
+            Err(ProtocolError::UnsupportedVersion(4))
         );
     }
 

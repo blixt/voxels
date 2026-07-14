@@ -18,7 +18,7 @@ export const VXWP_KIND_NAMES = Object.freeze({
   9: "open_presence",
   10: "presence_opened",
   11: "player_pose",
-  12: "presence_snapshot",
+  12: "presence_delta",
   13: "presence_ping",
   14: "presence_pong",
 });

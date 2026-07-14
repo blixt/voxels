@@ -5,7 +5,7 @@ use glam::{Quat, Vec3};
 use voxels_core::{PLAYER_EYE_HEIGHT_METRES, RemoteAvatarPose};
 
 const PARTS_PER_AVATAR: usize = 13;
-const MAX_AVATARS: usize = 64;
+const MAX_AVATARS: usize = 512;
 const MAX_PARTS: usize = PARTS_PER_AVATAR * MAX_AVATARS;
 
 #[repr(C)]
@@ -372,7 +372,7 @@ fn part(center: Vec3, rotation: Quat, half: Vec3, color: Vec3) -> GpuAvatarPart 
     }
 }
 
-fn saturated_player_color(index: u8) -> Vec3 {
+fn saturated_player_color(index: u16) -> Vec3 {
     let hue = (f32::from(index) * 0.618_034 + 0.035).fract();
     hsv_to_rgb(hue, 0.78, 0.96)
 }
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn palette_is_bright_saturated_and_unique_for_the_server_limit() {
-        let colors = (0..MAX_AVATARS as u8)
+        let colors = (0..MAX_AVATARS as u16)
             .map(saturated_player_color)
             .collect::<Vec<_>>();
         for color in &colors {

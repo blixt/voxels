@@ -1,9 +1,9 @@
 //! Transport-neutral remote-player interpolation and animation state.
 //!
-//! Complete server rosters are sampled on a deliberately delayed server timeline. Each player has
-//! a small ordered pose history; rendering uses bounded Hermite interpolation, then at most a short
-//! velocity extrapolation. Animation is distance-driven so gait cadence does not depend on packet
-//! or display frequency.
+//! Receiver-specific server deltas are sampled on a deliberately delayed server timeline. Each
+//! player has a small ordered pose history; rendering uses bounded Hermite interpolation, then at
+//! most a short velocity extrapolation. Animation is distance-driven so gait cadence does not
+//! depend on packet or display frequency.
 
 use glam::Vec3;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -20,7 +20,7 @@ pub struct RemotePlayerId(pub [u8; 16]);
 pub struct RemotePoseSample {
     pub player_id: RemotePlayerId,
     pub connection_id: u64,
-    pub color_index: u8,
+    pub color_index: u16,
     pub sequence: u64,
     pub sample_server_time_ms: u64,
     pub eye_position_metres: Vec3,
@@ -31,17 +31,31 @@ pub struct RemotePoseSample {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RemotePresenceSnapshot {
-    pub snapshot_sequence: u64,
+pub struct RemotePoseUpdate {
+    pub connection_id: u64,
+    pub sequence: u64,
+    pub sample_server_time_ms: u64,
+    pub eye_position_metres: Vec3,
+    pub linear_velocity_metres_per_second: Vec3,
+    pub look_yaw_radians: f32,
+    pub look_pitch_radians: f32,
+    pub flags: u16,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemotePresenceDelta {
+    pub stream_sequence: u64,
     pub server_time_ms: u64,
-    pub players: Vec<RemotePoseSample>,
+    pub enters: Vec<RemotePoseSample>,
+    pub updates: Vec<RemotePoseUpdate>,
+    pub leaves: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RemoteAvatarPose {
     pub player_id: RemotePlayerId,
     pub connection_id: u64,
-    pub color_index: u8,
+    pub color_index: u16,
     pub eye_position_metres: Vec3,
     pub linear_velocity_metres_per_second: Vec3,
     pub look_yaw_radians: f32,
@@ -71,8 +85,8 @@ impl PresenceInterpolationConfig {
         {
             return Err("presence interpolation delays are inconsistent");
         }
-        if self.max_extrapolation_ms > 250 {
-            return Err("presence extrapolation exceeds the 250 ms safety bound");
+        if self.max_extrapolation_ms > 1_000 {
+            return Err("presence extrapolation exceeds the 1000 ms safety bound");
         }
         Ok(self)
     }
@@ -84,7 +98,7 @@ impl Default for PresenceInterpolationConfig {
             initial_delay_ms: 100,
             min_delay_ms: 67,
             max_delay_ms: 200,
-            max_extrapolation_ms: 100,
+            max_extrapolation_ms: 750,
         }
     }
 }
@@ -92,16 +106,17 @@ impl Default for PresenceInterpolationConfig {
 pub struct RemotePresenceTimeline {
     config: PresenceInterpolationConfig,
     tracks: BTreeMap<RemotePlayerId, PlayerTrack>,
-    latest_snapshot_sequence: u64,
-    prior_snapshot_server_time_ms: Option<u64>,
-    prior_snapshot_receive_time_ms: Option<f64>,
+    connections: BTreeMap<u64, RemotePlayerId>,
+    latest_stream_sequence: u64,
+    prior_delta_server_time_ms: Option<u64>,
+    prior_delta_receive_time_ms: Option<f64>,
     jitter_ms: f32,
     interpolation_delay_ms: f32,
 }
 
 struct PlayerTrack {
     connection_id: u64,
-    color_index: u8,
+    color_index: u16,
     samples: VecDeque<TimedPose>,
     body_yaw_radians: Option<f32>,
     body_following_look: bool,
@@ -131,9 +146,10 @@ impl RemotePresenceTimeline {
         Ok(Self {
             config,
             tracks: BTreeMap::new(),
-            latest_snapshot_sequence: 0,
-            prior_snapshot_server_time_ms: None,
-            prior_snapshot_receive_time_ms: None,
+            connections: BTreeMap::new(),
+            latest_stream_sequence: 0,
+            prior_delta_server_time_ms: None,
+            prior_delta_receive_time_ms: None,
             jitter_ms: 0.0,
             interpolation_delay_ms: f32::from(config.initial_delay_ms),
         })
@@ -141,9 +157,10 @@ impl RemotePresenceTimeline {
 
     pub fn clear(&mut self) {
         self.tracks.clear();
-        self.latest_snapshot_sequence = 0;
-        self.prior_snapshot_server_time_ms = None;
-        self.prior_snapshot_receive_time_ms = None;
+        self.connections.clear();
+        self.latest_stream_sequence = 0;
+        self.prior_delta_server_time_ms = None;
+        self.prior_delta_receive_time_ms = None;
         self.jitter_ms = 0.0;
         self.interpolation_delay_ms = f32::from(self.config.initial_delay_ms);
     }
@@ -152,24 +169,20 @@ impl RemotePresenceTimeline {
         self.interpolation_delay_ms
     }
 
-    /// Ingests one complete server roster. Missing players are removed immediately; old or
-    /// reordered snapshots cannot resurrect them.
-    pub fn ingest_snapshot(
-        &mut self,
-        snapshot: RemotePresenceSnapshot,
-        receive_time_ms: f64,
-    ) -> bool {
-        if snapshot.snapshot_sequence <= self.latest_snapshot_sequence
-            || snapshot.server_time_ms == 0
+    /// Ingests one receiver-specific server delta. Omitted players remain tracked; only explicit
+    /// leaves remove them, and old or reordered deltas cannot resurrect them.
+    pub fn ingest_delta(&mut self, delta: RemotePresenceDelta, receive_time_ms: f64) -> bool {
+        if delta.stream_sequence <= self.latest_stream_sequence
+            || delta.server_time_ms == 0
             || !receive_time_ms.is_finite()
         {
             return false;
         }
         if let (Some(prior_server), Some(prior_receive)) = (
-            self.prior_snapshot_server_time_ms,
-            self.prior_snapshot_receive_time_ms,
+            self.prior_delta_server_time_ms,
+            self.prior_delta_receive_time_ms,
         ) {
-            let server_delta = snapshot.server_time_ms.saturating_sub(prior_server) as f64;
+            let server_delta = delta.server_time_ms.saturating_sub(prior_server) as f64;
             let receive_delta = (receive_time_ms - prior_receive).max(0.0);
             let jitter_sample = (receive_delta - server_delta).abs().min(1_000.0) as f32;
             self.jitter_ms += (jitter_sample - self.jitter_ms) * 0.10;
@@ -179,14 +192,41 @@ impl RemotePresenceTimeline {
             );
             self.interpolation_delay_ms += (target - self.interpolation_delay_ms) * 0.08;
         }
-        self.latest_snapshot_sequence = snapshot.snapshot_sequence;
-        self.prior_snapshot_server_time_ms = Some(snapshot.server_time_ms);
-        self.prior_snapshot_receive_time_ms = Some(receive_time_ms);
+        self.latest_stream_sequence = delta.stream_sequence;
+        self.prior_delta_server_time_ms = Some(delta.server_time_ms);
+        self.prior_delta_receive_time_ms = Some(receive_time_ms);
 
-        let mut roster = BTreeSet::new();
-        for pose in snapshot.players {
-            if !valid_sample(&pose) || !roster.insert(pose.player_id) {
+        let mut leaves = BTreeSet::new();
+        for connection_id in delta.leaves {
+            if connection_id == 0 || !leaves.insert(connection_id) {
                 continue;
+            }
+            if let Some(player_id) = self.connections.remove(&connection_id) {
+                self.tracks.remove(&player_id);
+            }
+        }
+
+        let mut entered_players = BTreeSet::new();
+        let mut entered_connections = BTreeSet::new();
+        for pose in delta.enters {
+            if !valid_sample(&pose)
+                || !entered_players.insert(pose.player_id)
+                || !entered_connections.insert(pose.connection_id)
+            {
+                continue;
+            }
+            if let Some(old_player_id) = self.connections.insert(pose.connection_id, pose.player_id)
+                && old_player_id != pose.player_id
+            {
+                self.tracks.remove(&old_player_id);
+            }
+            if let Some(old_connection_id) = self
+                .tracks
+                .get(&pose.player_id)
+                .map(|track| track.connection_id)
+                && old_connection_id != pose.connection_id
+            {
+                self.connections.remove(&old_connection_id);
             }
             let track = self
                 .tracks
@@ -199,8 +239,19 @@ impl RemotePresenceTimeline {
             track.color_index = pose.color_index;
             track.push(pose);
         }
-        self.tracks
-            .retain(|player_id, _| roster.contains(player_id));
+
+        let mut updated_connections = BTreeSet::new();
+        for update in delta.updates {
+            if !valid_update(&update) || !updated_connections.insert(update.connection_id) {
+                continue;
+            }
+            let Some(player_id) = self.connections.get(&update.connection_id).copied() else {
+                continue;
+            };
+            if let Some(track) = self.tracks.get_mut(&player_id) {
+                track.push(update.with_identity(player_id, track.color_index));
+            }
+        }
         true
     }
 
@@ -398,6 +449,23 @@ impl SampledPose {
     }
 }
 
+impl RemotePoseUpdate {
+    fn with_identity(self, player_id: RemotePlayerId, color_index: u16) -> RemotePoseSample {
+        RemotePoseSample {
+            player_id,
+            connection_id: self.connection_id,
+            color_index,
+            sequence: self.sequence,
+            sample_server_time_ms: self.sample_server_time_ms,
+            eye_position_metres: self.eye_position_metres,
+            linear_velocity_metres_per_second: self.linear_velocity_metres_per_second,
+            look_yaw_radians: self.look_yaw_radians,
+            look_pitch_radians: self.look_pitch_radians,
+            flags: self.flags,
+        }
+    }
+}
+
 fn valid_sample(sample: &RemotePoseSample) -> bool {
     sample.connection_id != 0
         && sample.sequence != 0
@@ -406,6 +474,16 @@ fn valid_sample(sample: &RemotePoseSample) -> bool {
         && sample.linear_velocity_metres_per_second.is_finite()
         && sample.look_yaw_radians.is_finite()
         && sample.look_pitch_radians.is_finite()
+}
+
+fn valid_update(update: &RemotePoseUpdate) -> bool {
+    update.connection_id != 0
+        && update.sequence != 0
+        && update.sample_server_time_ms != 0
+        && update.eye_position_metres.is_finite()
+        && update.linear_velocity_metres_per_second.is_finite()
+        && update.look_yaw_radians.is_finite()
+        && update.look_pitch_radians.is_finite()
 }
 
 fn hermite_position(
@@ -465,25 +543,48 @@ mod tests {
         .expect("timeline")
     }
 
+    fn enter_delta(
+        stream_sequence: u64,
+        server_time_ms: u64,
+        pose: RemotePoseSample,
+    ) -> RemotePresenceDelta {
+        RemotePresenceDelta {
+            stream_sequence,
+            server_time_ms,
+            enters: vec![pose],
+            updates: Vec::new(),
+            leaves: Vec::new(),
+        }
+    }
+
+    fn update_delta(
+        stream_sequence: u64,
+        server_time_ms: u64,
+        pose: RemotePoseSample,
+    ) -> RemotePresenceDelta {
+        RemotePresenceDelta {
+            stream_sequence,
+            server_time_ms,
+            enters: Vec::new(),
+            updates: vec![RemotePoseUpdate {
+                connection_id: pose.connection_id,
+                sequence: pose.sequence,
+                sample_server_time_ms: pose.sample_server_time_ms,
+                eye_position_metres: pose.eye_position_metres,
+                linear_velocity_metres_per_second: pose.linear_velocity_metres_per_second,
+                look_yaw_radians: pose.look_yaw_radians,
+                look_pitch_radians: pose.look_pitch_radians,
+                flags: pose.flags,
+            }],
+            leaves: Vec::new(),
+        }
+    }
+
     #[test]
     fn delayed_timeline_interpolates_and_never_overshoots() {
         let mut timeline = fixed_timeline();
-        assert!(timeline.ingest_snapshot(
-            RemotePresenceSnapshot {
-                snapshot_sequence: 1,
-                server_time_ms: 1_000,
-                players: vec![sample(1, 1_000, 0.0)],
-            },
-            1_010.0,
-        ));
-        assert!(timeline.ingest_snapshot(
-            RemotePresenceSnapshot {
-                snapshot_sequence: 2,
-                server_time_ms: 1_100,
-                players: vec![sample(2, 1_100, 1.0)],
-            },
-            1_118.0,
-        ));
+        assert!(timeline.ingest_delta(enter_delta(1, 1_000, sample(1, 1_000, 0.0)), 1_010.0,));
+        assert!(timeline.ingest_delta(update_delta(2, 1_100, sample(2, 1_100, 1.0)), 1_118.0,));
         let midpoint = timeline.sample(1_150.0, 1.0 / 60.0);
         assert_eq!(midpoint.len(), 1);
         assert!((midpoint[0].eye_position_metres.x - 0.5).abs() < 0.001);
@@ -493,14 +594,7 @@ mod tests {
     #[test]
     fn extrapolation_stops_at_the_configured_horizon() {
         let mut timeline = fixed_timeline();
-        timeline.ingest_snapshot(
-            RemotePresenceSnapshot {
-                snapshot_sequence: 1,
-                server_time_ms: 1_000,
-                players: vec![sample(1, 1_000, 0.0)],
-            },
-            1_000.0,
-        );
+        timeline.ingest_delta(enter_delta(1, 1_000, sample(1, 1_000, 0.0)), 1_000.0);
         let at_horizon = timeline.sample(1_200.0, 1.0 / 60.0)[0];
         let well_after = timeline.sample(2_000.0, 1.0 / 60.0)[0];
         assert!((at_horizon.eye_position_metres.x - 1.0).abs() < 0.001);
@@ -512,39 +606,38 @@ mod tests {
     }
 
     #[test]
-    fn discontinuities_reset_history_and_complete_rosters_remove_players() {
+    fn discontinuities_reset_history_and_only_explicit_leaves_remove_players() {
         let mut timeline = fixed_timeline();
-        timeline.ingest_snapshot(
-            RemotePresenceSnapshot {
-                snapshot_sequence: 1,
-                server_time_ms: 1_000,
-                players: vec![sample(1, 1_000, 0.0)],
-            },
-            1_000.0,
-        );
+        timeline.ingest_delta(enter_delta(1, 1_000, sample(1, 1_000, 0.0)), 1_000.0);
         let mut teleported = sample(2, 1_050, 100.0);
         teleported.flags = REMOTE_POSE_DISCONTINUITY;
-        timeline.ingest_snapshot(
-            RemotePresenceSnapshot {
-                snapshot_sequence: 2,
-                server_time_ms: 1_050,
-                players: vec![teleported],
-            },
-            1_050.0,
-        );
+        timeline.ingest_delta(update_delta(2, 1_050, teleported), 1_050.0);
         assert_eq!(
             timeline.sample(1_100.0, 1.0 / 60.0)[0]
                 .eye_position_metres
                 .x,
             100.0
         );
-        timeline.ingest_snapshot(
-            RemotePresenceSnapshot {
-                snapshot_sequence: 3,
+        timeline.ingest_delta(
+            RemotePresenceDelta {
+                stream_sequence: 3,
                 server_time_ms: 1_100,
-                players: Vec::new(),
+                enters: Vec::new(),
+                updates: Vec::new(),
+                leaves: Vec::new(),
             },
             1_100.0,
+        );
+        assert_eq!(timeline.sample(1_200.0, 1.0 / 60.0).len(), 1);
+        timeline.ingest_delta(
+            RemotePresenceDelta {
+                stream_sequence: 4,
+                server_time_ms: 1_150,
+                enters: Vec::new(),
+                updates: Vec::new(),
+                leaves: vec![7],
+            },
+            1_150.0,
         );
         assert!(timeline.sample(1_200.0, 1.0 / 60.0).is_empty());
     }
@@ -556,14 +649,7 @@ mod tests {
             let mut pose = sample(1, 1_000, 0.0);
             pose.linear_velocity_metres_per_second = Vec3::ZERO;
             pose.look_yaw_radians = -2.8;
-            timeline.ingest_snapshot(
-                RemotePresenceSnapshot {
-                    snapshot_sequence: 1,
-                    server_time_ms: 1_000,
-                    players: vec![pose],
-                },
-                1_000.0,
-            );
+            timeline.ingest_delta(enter_delta(1, 1_000, pose), 1_000.0);
             let frames = (1.0 / frame_delta).round() as usize;
             let mut result = timeline.sample(1_100.0, frame_delta)[0];
             for _ in 1..frames {
@@ -583,14 +669,7 @@ mod tests {
         let mut initial = sample(1, 1_000, 0.0);
         initial.linear_velocity_metres_per_second = Vec3::ZERO;
         initial.look_yaw_radians = 0.0;
-        timeline.ingest_snapshot(
-            RemotePresenceSnapshot {
-                snapshot_sequence: 1,
-                server_time_ms: 1_000,
-                players: vec![initial],
-            },
-            1_000.0,
-        );
+        timeline.ingest_delta(enter_delta(1, 1_000, initial), 1_000.0);
         let initial_avatar = timeline.sample(1_100.0, 1.0 / 60.0)[0];
         assert!(initial_avatar.body_yaw_radians.abs() < 0.001);
 
@@ -598,14 +677,7 @@ mod tests {
         looking.sequence = 2;
         looking.sample_server_time_ms = 1_100;
         looking.look_yaw_radians = 1.5;
-        timeline.ingest_snapshot(
-            RemotePresenceSnapshot {
-                snapshot_sequence: 2,
-                server_time_ms: 1_100,
-                players: vec![looking],
-            },
-            1_100.0,
-        );
+        timeline.ingest_delta(update_delta(2, 1_100, looking), 1_100.0);
         let mut avatar = timeline.sample(1_200.0, 1.0 / 60.0)[0];
         for _ in 1..60 {
             avatar = timeline.sample(1_200.0, 1.0 / 60.0)[0];

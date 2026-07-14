@@ -1,20 +1,19 @@
-//! Server-authoritative player-presence registry.
+//! Server-authoritative player-presence registry and spatial replication scheduler.
 //!
 //! World-product WebSockets own player sessions. A second, small-frame presence WebSocket binds
-//! with the unguessable session token returned by `WorldOpened`. The hub retains only the latest
-//! accepted pose and publishes complete, coalesced rosters, so a slow receiver never accumulates
-//! stale movement packets.
+//! with the unguessable session token returned by `WorldOpened`. Authoritative records live in one
+//! world, while a spatial hash and receiver-local stream state make replication proportional to
+//! nearby relationships instead of the square of the global player count.
 
 use crate::PresenceConfig;
-use std::collections::{BTreeSet, HashMap};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
-use tokio::sync::watch;
-use tokio::time::{Duration, MissedTickBehavior};
 use uuid::Uuid;
 use voxels_world::protocol::{
     PLAYER_POSE_DISCONTINUITY, PlayerId, PlayerIdentity, PlayerPoseUpdate, PlayerPresenceState,
-    PresenceSessionId, PresenceSnapshot, encode_presence_snapshot,
+    PlayerPresenceUpdate, PresenceDelta, PresenceSessionId, encode_presence_delta,
 };
 
 const MAX_FUTURE_SAMPLE_MS: u64 = 250;
@@ -24,24 +23,60 @@ pub(crate) struct PresenceHub {
     started: Instant,
     config: PresenceConfig,
     inner: Mutex<PresenceInner>,
-    latest_snapshot: watch::Sender<Arc<Vec<u8>>>,
 }
 
 struct PresenceInner {
     next_connection_id: u64,
-    snapshot_sequence: u64,
     players: HashMap<PlayerId, PlayerSession>,
     sessions: HashMap<PresenceSessionId, PlayerId>,
+    cells: HashMap<SpatialCell, BTreeSet<PlayerId>>,
 }
 
 struct PlayerSession {
     connection_id: u64,
     session_id: PresenceSessionId,
-    color_index: u8,
+    color_index: u16,
     presence_attached: bool,
     pose: Option<PlayerPoseUpdate>,
     last_pose_receipt_ms: u64,
-    discontinuity_pending: bool,
+    last_discontinuity_sequence: u64,
+    cell: Option<SpatialCell>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SpatialCell {
+    x: i32,
+    z: i32,
+}
+
+#[derive(Clone, Copy)]
+struct Candidate {
+    state: PlayerPresenceState,
+    distance_squared: f32,
+    last_discontinuity_sequence: u64,
+}
+
+#[derive(Clone, Copy)]
+struct SentState {
+    connection_id: u64,
+    pose: PlayerPoseUpdate,
+    sent_at_ms: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct PresenceStreamState {
+    stream_sequence: u64,
+    sent_initial: bool,
+    known: BTreeMap<PlayerId, SentState>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingRecord {
+    candidate: Candidate,
+    enter: bool,
+    discontinuity: bool,
+    prediction_error: bool,
+    overdue_millis: u64,
 }
 
 pub(crate) struct WorldPresenceClaim {
@@ -69,37 +104,16 @@ pub(crate) enum PoseAdmission {
 
 impl PresenceHub {
     pub(crate) fn new(config: PresenceConfig) -> Result<Arc<Self>, String> {
-        let initial = PresenceSnapshot {
-            snapshot_sequence: 1,
-            server_time_ms: 1,
-            players: Vec::new(),
-        };
-        let initial = encode_presence_snapshot(&initial).map_err(|error| error.to_string())?;
-        let (latest_snapshot, _) = watch::channel(Arc::new(initial));
-        let hub = Arc::new(Self {
+        Ok(Arc::new(Self {
             started: Instant::now(),
             config,
             inner: Mutex::new(PresenceInner {
                 next_connection_id: 1,
-                snapshot_sequence: 1,
                 players: HashMap::new(),
                 sessions: HashMap::new(),
+                cells: HashMap::new(),
             }),
-            latest_snapshot,
-        });
-        let broadcaster = Arc::clone(&hub);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(u64::from(
-                broadcaster.config.broadcast_interval_ms,
-            )));
-            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                broadcaster.broadcast_once();
-            }
-        });
-        Ok(hub)
+        }))
     }
 
     fn lock(&self) -> MutexGuard<'_, PresenceInner> {
@@ -146,7 +160,8 @@ impl PresenceHub {
                 presence_attached: false,
                 pose: None,
                 last_pose_receipt_ms: 0,
-                discontinuity_pending: false,
+                last_discontinuity_sequence: 0,
+                cell: None,
             },
         );
         Some(WorldPresenceClaim {
@@ -176,21 +191,6 @@ impl PresenceHub {
         })
     }
 
-    pub(crate) fn subscribe(&self) -> watch::Receiver<Arc<Vec<u8>>> {
-        self.latest_snapshot.subscribe()
-    }
-
-    pub(crate) fn is_attached(&self, attachment: &PresenceAttachment) -> bool {
-        self.lock()
-            .players
-            .get(&attachment.player_id)
-            .is_some_and(|player| {
-                player.connection_id == attachment.connection_id
-                    && player.session_id == attachment.session_id
-                    && player.presence_attached
-            })
-    }
-
     pub(crate) fn accept_pose(
         &self,
         attachment: &PresenceAttachment,
@@ -200,101 +200,276 @@ impl PresenceHub {
         let min_interval_ms =
             1_000_u64.div_ceil(u64::from(self.config.max_pose_updates_per_second));
         let mut inner = self.lock();
-        let Some(player) = inner.players.get_mut(&attachment.player_id) else {
-            return PoseAdmission::SessionClosed;
-        };
-        if player.connection_id != attachment.connection_id
-            || player.session_id != attachment.session_id
-            || !player.presence_attached
-        {
-            return PoseAdmission::SessionClosed;
-        }
-        if pose.sequence <= player.pose.map_or(0, |prior| prior.sequence) {
-            return PoseAdmission::IgnoredStale;
-        }
-        if player.last_pose_receipt_ms != 0
-            && now.saturating_sub(player.last_pose_receipt_ms) < min_interval_ms
-        {
-            return PoseAdmission::IgnoredRateLimit;
-        }
-        if pose.sample_server_time_ms == 0 {
-            pose.sample_server_time_ms = now.max(
-                player
-                    .pose
-                    .map_or(1, |prior| prior.sample_server_time_ms.saturating_add(1)),
-            );
-        } else if pose.sample_server_time_ms > now.saturating_add(MAX_FUTURE_SAMPLE_MS) {
-            return PoseAdmission::Invalid("player pose timestamp is too far in the future");
-        } else if now.saturating_sub(pose.sample_server_time_ms) > MAX_STALE_SAMPLE_MS
-            || player
-                .pose
-                .is_some_and(|prior| pose.sample_server_time_ms <= prior.sample_server_time_ms)
-        {
-            return PoseAdmission::IgnoredStale;
-        }
-        if let Some(prior) = player.pose {
-            let distance_squared = pose
-                .eye_position_metres
-                .into_iter()
-                .zip(prior.eye_position_metres)
-                .map(|(next, prior)| {
-                    let delta = next - prior;
-                    delta * delta
-                })
-                .sum::<f32>();
-            let teleport = f32::from(self.config.teleport_distance_metres);
-            if distance_squared > teleport * teleport && pose.flags & PLAYER_POSE_DISCONTINUITY == 0
+        let (old_cell, new_cell) = {
+            let Some(player) = inner.players.get_mut(&attachment.player_id) else {
+                return PoseAdmission::SessionClosed;
+            };
+            if player.connection_id != attachment.connection_id
+                || player.session_id != attachment.session_id
+                || !player.presence_attached
             {
-                return PoseAdmission::Invalid(
-                    "large player position change lacks discontinuity flag",
-                );
+                return PoseAdmission::SessionClosed;
             }
-        }
-        player.discontinuity_pending |= pose.flags & PLAYER_POSE_DISCONTINUITY != 0;
-        if player.discontinuity_pending {
-            pose.flags |= PLAYER_POSE_DISCONTINUITY;
-        }
-        player.pose = Some(pose);
-        player.last_pose_receipt_ms = now;
+            if pose.sequence <= player.pose.map_or(0, |prior| prior.sequence) {
+                return PoseAdmission::IgnoredStale;
+            }
+            if player.last_pose_receipt_ms != 0
+                && now.saturating_sub(player.last_pose_receipt_ms) < min_interval_ms
+            {
+                return PoseAdmission::IgnoredRateLimit;
+            }
+            if pose.sample_server_time_ms == 0 {
+                pose.sample_server_time_ms = now.max(
+                    player
+                        .pose
+                        .map_or(1, |prior| prior.sample_server_time_ms.saturating_add(1)),
+                );
+            } else if pose.sample_server_time_ms > now.saturating_add(MAX_FUTURE_SAMPLE_MS) {
+                return PoseAdmission::Invalid("player pose timestamp is too far in the future");
+            } else if now.saturating_sub(pose.sample_server_time_ms) > MAX_STALE_SAMPLE_MS
+                || player
+                    .pose
+                    .is_some_and(|prior| pose.sample_server_time_ms <= prior.sample_server_time_ms)
+            {
+                return PoseAdmission::IgnoredStale;
+            }
+            if let Some(prior) = player.pose {
+                let distance_squared =
+                    squared_distance(pose.eye_position_metres, prior.eye_position_metres);
+                let teleport = f32::from(self.config.teleport_distance_metres);
+                if distance_squared > teleport * teleport
+                    && pose.flags & PLAYER_POSE_DISCONTINUITY == 0
+                {
+                    return PoseAdmission::Invalid(
+                        "large player position change lacks discontinuity flag",
+                    );
+                }
+            }
+            if pose.flags & PLAYER_POSE_DISCONTINUITY != 0 {
+                player.last_discontinuity_sequence = pose.sequence;
+            }
+            let old_cell = player.cell;
+            let new_cell = Some(cell_for_pose(pose, self.config.spatial_cell_metres));
+            player.pose = Some(pose);
+            player.last_pose_receipt_ms = now;
+            player.cell = new_cell;
+            (old_cell, new_cell)
+        };
+        move_cell_membership(&mut inner.cells, attachment.player_id, old_cell, new_cell);
         PoseAdmission::Accepted
     }
 
-    fn broadcast_once(&self) {
+    /// Builds at most one receiver-specific delta. The hub lock is held only while copying the
+    /// viewer's nearby immutable records; ranking and encoding happen after it is released.
+    pub(crate) fn build_delta(
+        &self,
+        attachment: &PresenceAttachment,
+        stream: &mut PresenceStreamState,
+    ) -> Result<Option<Vec<u8>>, String> {
         let now = self.now_ms();
-        let snapshot = {
-            let mut inner = self.lock();
-            inner.snapshot_sequence = inner.snapshot_sequence.wrapping_add(1).max(1);
-            let snapshot_sequence = inner.snapshot_sequence;
-            let mut players = inner
-                .players
-                .iter_mut()
-                .filter_map(|(player_id, player)| {
-                    if !player.presence_attached {
-                        return None;
-                    }
-                    let pose = player.pose?;
-                    player.discontinuity_pending = false;
-                    if let Some(stored) = player.pose.as_mut() {
-                        stored.flags &= !PLAYER_POSE_DISCONTINUITY;
-                    }
-                    Some(PlayerPresenceState {
-                        player_id: *player_id,
-                        connection_id: player.connection_id,
-                        color_index: player.color_index,
-                        pose,
-                    })
-                })
-                .collect::<Vec<_>>();
-            players.sort_unstable_by_key(|player| player.player_id);
-            PresenceSnapshot {
-                snapshot_sequence,
-                server_time_ms: now,
-                players,
+        let candidates = self.nearby_candidates(attachment, stream)?;
+        let visible_player_count = u16::try_from(candidates.len()).unwrap_or(u16::MAX);
+        let relevant = candidates
+            .iter()
+            .map(|candidate| (candidate.state.player_id, *candidate))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut leaves = Vec::new();
+        stream.known.retain(|player_id, sent| {
+            let keep = relevant
+                .get(player_id)
+                .is_some_and(|candidate| candidate.state.connection_id == sent.connection_id);
+            if !keep {
+                leaves.push(sent.connection_id);
             }
-        };
-        if let Ok(bytes) = encode_presence_snapshot(&snapshot) {
-            self.latest_snapshot.send_replace(Arc::new(bytes));
+            keep
+        });
+        leaves.sort_unstable();
+
+        let mut pending = Vec::new();
+        for candidate in candidates {
+            let Some(sent) = stream.known.get(&candidate.state.player_id).copied() else {
+                pending.push(PendingRecord {
+                    candidate,
+                    enter: true,
+                    discontinuity: true,
+                    prediction_error: true,
+                    overdue_millis: u64::MAX,
+                });
+                continue;
+            };
+            if candidate.state.pose.sequence <= sent.pose.sequence {
+                continue;
+            }
+            let interval = self.target_interval_ms(candidate.distance_squared);
+            let age = now.saturating_sub(sent.sent_at_ms);
+            let discontinuity = candidate.last_discontinuity_sequence > sent.pose.sequence;
+            let prediction_error = self.prediction_error(&candidate, sent.pose);
+            if discontinuity || prediction_error || age >= interval {
+                pending.push(PendingRecord {
+                    candidate,
+                    enter: false,
+                    discontinuity,
+                    prediction_error,
+                    overdue_millis: age.saturating_sub(interval),
+                });
+            }
         }
+        pending.sort_unstable_by(compare_pending);
+        pending.truncate(usize::from(self.config.max_records_per_delta));
+
+        let mut enters = Vec::new();
+        let mut updates = Vec::new();
+        for record in pending {
+            let mut state = record.candidate.state;
+            if record.discontinuity {
+                state.pose.flags |= PLAYER_POSE_DISCONTINUITY;
+            }
+            stream.known.insert(
+                state.player_id,
+                SentState {
+                    connection_id: state.connection_id,
+                    pose: state.pose,
+                    sent_at_ms: now,
+                },
+            );
+            if record.enter {
+                enters.push(state);
+            } else {
+                updates.push(PlayerPresenceUpdate {
+                    connection_id: state.connection_id,
+                    pose: state.pose,
+                });
+            }
+        }
+        enters.sort_unstable_by_key(|player| player.player_id);
+        updates.sort_unstable_by_key(|update| update.connection_id);
+
+        if stream.sent_initial && enters.is_empty() && updates.is_empty() && leaves.is_empty() {
+            return Ok(None);
+        }
+        stream.stream_sequence = stream.stream_sequence.wrapping_add(1).max(1);
+        stream.sent_initial = true;
+        encode_presence_delta(&PresenceDelta {
+            stream_sequence: stream.stream_sequence,
+            server_time_ms: now,
+            visible_player_count,
+            enters,
+            updates,
+            leaves,
+        })
+        .map(Some)
+        .map_err(|error| error.to_string())
+    }
+
+    fn nearby_candidates(
+        &self,
+        attachment: &PresenceAttachment,
+        stream: &PresenceStreamState,
+    ) -> Result<Vec<Candidate>, String> {
+        let inner = self.lock();
+        let viewer = inner
+            .players
+            .get(&attachment.player_id)
+            .filter(|player| {
+                player.connection_id == attachment.connection_id
+                    && player.session_id == attachment.session_id
+                    && player.presence_attached
+            })
+            .ok_or_else(|| "presence session closed".to_owned())?;
+        let Some(viewer_pose) = viewer.pose else {
+            return Ok(Vec::new());
+        };
+        let viewer_cell = cell_for_pose(viewer_pose, self.config.spatial_cell_metres);
+        let outer_radius = self
+            .config
+            .interest_radius_metres
+            .saturating_add(self.config.interest_hysteresis_metres);
+        let cell_size = i32::from(self.config.spatial_cell_metres);
+        let cell_radius = (i32::from(outer_radius) + cell_size - 1) / cell_size;
+        let mut candidates = Vec::new();
+        for cell_x in (viewer_cell.x - cell_radius)..=(viewer_cell.x + cell_radius) {
+            for cell_z in (viewer_cell.z - cell_radius)..=(viewer_cell.z + cell_radius) {
+                let Some(players) = inner.cells.get(&SpatialCell {
+                    x: cell_x,
+                    z: cell_z,
+                }) else {
+                    continue;
+                };
+                for player_id in players {
+                    if *player_id == attachment.player_id {
+                        continue;
+                    }
+                    let Some(player) = inner.players.get(player_id) else {
+                        continue;
+                    };
+                    let Some(pose) = player.pose.filter(|_| player.presence_attached) else {
+                        continue;
+                    };
+                    let dx = pose.eye_position_metres[0] - viewer_pose.eye_position_metres[0];
+                    let dz = pose.eye_position_metres[2] - viewer_pose.eye_position_metres[2];
+                    let distance_squared = dx.mul_add(dx, dz * dz);
+                    let radius = if stream.known.contains_key(player_id) {
+                        outer_radius
+                    } else {
+                        self.config.interest_radius_metres
+                    };
+                    if distance_squared > f32::from(radius).powi(2) {
+                        continue;
+                    }
+                    candidates.push(Candidate {
+                        state: PlayerPresenceState {
+                            player_id: *player_id,
+                            connection_id: player.connection_id,
+                            color_index: player.color_index,
+                            pose,
+                        },
+                        distance_squared,
+                        last_discontinuity_sequence: player.last_discontinuity_sequence,
+                    });
+                }
+            }
+        }
+        Ok(candidates)
+    }
+
+    fn target_interval_ms(&self, distance_squared: f32) -> u64 {
+        if distance_squared <= f32::from(self.config.near_radius_metres).powi(2) {
+            u64::from(self.config.near_update_interval_ms)
+        } else if distance_squared <= f32::from(self.config.mid_radius_metres).powi(2) {
+            u64::from(self.config.mid_update_interval_ms)
+        } else {
+            u64::from(self.config.far_update_interval_ms)
+        }
+    }
+
+    fn prediction_error(&self, candidate: &Candidate, sent: PlayerPoseUpdate) -> bool {
+        let elapsed_seconds = candidate
+            .state
+            .pose
+            .sample_server_time_ms
+            .saturating_sub(sent.sample_server_time_ms) as f32
+            / 1_000.0;
+        let predicted = std::array::from_fn(|axis| {
+            sent.eye_position_metres[axis]
+                + sent.linear_velocity_metres_per_second[axis] * elapsed_seconds
+        });
+        let distance_scale = 1.0
+            + candidate.distance_squared.sqrt()
+                / f32::from(self.config.interest_radius_metres.max(1));
+        let position_threshold =
+            f32::from(self.config.prediction_error_centimetres) * 0.01 * distance_scale;
+        if squared_distance(predicted, candidate.state.pose.eye_position_metres)
+            > position_threshold * position_threshold
+        {
+            return true;
+        }
+        let look_threshold =
+            f32::from(self.config.look_error_milliradians) * 0.001 * distance_scale;
+        angle_delta(sent.look_yaw_radians, candidate.state.pose.look_yaw_radians).abs()
+            > look_threshold
+            || (sent.look_pitch_radians - candidate.state.pose.look_pitch_radians).abs()
+                > look_threshold
     }
 
     fn leave_world(&self, player_id: PlayerId, connection_id: u64) {
@@ -306,8 +481,10 @@ impl PresenceHub {
             return;
         }
         let session_id = player.session_id;
+        let old_cell = player.cell;
         inner.players.remove(&player_id);
         inner.sessions.remove(&session_id);
+        move_cell_membership(&mut inner.cells, player_id, old_cell, None);
     }
 
     fn detach_presence(
@@ -317,14 +494,18 @@ impl PresenceHub {
         session_id: PresenceSessionId,
     ) {
         let mut inner = self.lock();
-        if let Some(player) = inner.players.get_mut(&player_id)
+        let old_cell = if let Some(player) = inner.players.get_mut(&player_id)
             && player.connection_id == connection_id
             && player.session_id == session_id
         {
             player.presence_attached = false;
             player.pose = None;
-            player.discontinuity_pending = false;
-        }
+            player.last_discontinuity_sequence = 0;
+            player.cell.take()
+        } else {
+            None
+        };
+        move_cell_membership(&mut inner.cells, player_id, old_cell, None);
     }
 }
 
@@ -345,7 +526,7 @@ fn choose_color(
     player_id: PlayerId,
     players: &HashMap<PlayerId, PlayerSession>,
     max_players: u16,
-) -> Option<u8> {
+) -> Option<u16> {
     let used = players
         .values()
         .map(|player| player.color_index)
@@ -358,28 +539,98 @@ fn choose_color(
         });
     let start = hash % u64::from(max_players);
     (0..max_players)
-        .map(|offset| ((start + u64::from(offset)) % u64::from(max_players)) as u8)
+        .map(|offset| ((start + u64::from(offset)) % u64::from(max_players)) as u16)
         .find(|candidate| !used.contains(candidate))
+}
+
+fn cell_for_pose(pose: PlayerPoseUpdate, cell_metres: u16) -> SpatialCell {
+    let size = f32::from(cell_metres);
+    SpatialCell {
+        x: (pose.eye_position_metres[0] / size).floor() as i32,
+        z: (pose.eye_position_metres[2] / size).floor() as i32,
+    }
+}
+
+fn move_cell_membership(
+    cells: &mut HashMap<SpatialCell, BTreeSet<PlayerId>>,
+    player_id: PlayerId,
+    old_cell: Option<SpatialCell>,
+    new_cell: Option<SpatialCell>,
+) {
+    if old_cell == new_cell {
+        return;
+    }
+    if let Some(old_cell) = old_cell {
+        let remove_cell = cells.get_mut(&old_cell).is_some_and(|players| {
+            players.remove(&player_id);
+            players.is_empty()
+        });
+        if remove_cell {
+            cells.remove(&old_cell);
+        }
+    }
+    if let Some(new_cell) = new_cell {
+        cells.entry(new_cell).or_default().insert(player_id);
+    }
+}
+
+fn compare_pending(left: &PendingRecord, right: &PendingRecord) -> Ordering {
+    right
+        .enter
+        .cmp(&left.enter)
+        .then_with(|| right.discontinuity.cmp(&left.discontinuity))
+        .then_with(|| right.overdue_millis.cmp(&left.overdue_millis))
+        .then_with(|| right.prediction_error.cmp(&left.prediction_error))
+        .then_with(|| {
+            left.candidate
+                .distance_squared
+                .total_cmp(&right.candidate.distance_squared)
+        })
+        .then_with(|| {
+            left.candidate
+                .state
+                .player_id
+                .cmp(&right.candidate.state.player_id)
+        })
+}
+
+fn squared_distance(first: [f32; 3], second: [f32; 3]) -> f32 {
+    first
+        .into_iter()
+        .zip(second)
+        .map(|(first, second)| {
+            let delta = first - second;
+            delta * delta
+        })
+        .sum()
+}
+
+fn angle_delta(from: f32, to: f32) -> f32 {
+    (to - from + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use voxels_world::protocol::{BrowserUserId, PLAYER_POSE_GROUNDED, decode_presence_snapshot};
+    use voxels_world::protocol::{BrowserUserId, PLAYER_POSE_GROUNDED, decode_presence_delta};
 
-    fn identity(seed: u8) -> PlayerIdentity {
+    fn identity(seed: u16) -> PlayerIdentity {
+        let mut bytes = [0_u8; 16];
+        bytes[..2].copy_from_slice(&seed.to_le_bytes());
+        let mut player = bytes;
+        player[15] = 1;
         PlayerIdentity {
-            browser_user_id: BrowserUserId::from_bytes([seed; 16]),
-            player_id: PlayerId::from_bytes([seed.wrapping_add(1); 16]),
+            browser_user_id: BrowserUserId::from_bytes(bytes),
+            player_id: PlayerId::from_bytes(player),
             player_name: format!("player-{seed}"),
         }
     }
 
-    fn pose(sequence: u64, x: f32) -> PlayerPoseUpdate {
+    fn pose(sequence: u64, x: f32, z: f32) -> PlayerPoseUpdate {
         PlayerPoseUpdate {
             sequence,
             sample_server_time_ms: 0,
-            eye_position_metres: [x, 1.62, 0.0],
+            eye_position_metres: [x, 1.62, z],
             linear_velocity_metres_per_second: [1.0, 0.0, 0.0],
             look_yaw_radians: 0.0,
             look_pitch_radians: 0.0,
@@ -387,77 +638,116 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn complete_snapshots_are_unique_coalesced_and_disconnect_safe() {
-        let hub = PresenceHub::new(PresenceConfig {
-            max_pose_updates_per_second: 120,
-            ..PresenceConfig::default()
-        })
-        .expect("hub");
-        let first_claim = hub.join(&identity(1)).expect("first player");
-        let second_claim = hub.join(&identity(2)).expect("second player");
-        assert_ne!(first_claim.connection_id, second_claim.connection_id);
-        let first = hub.attach(first_claim.session_id).expect("first attach");
-        let second = hub.attach(second_claim.session_id).expect("second attach");
-        assert_eq!(
-            hub.accept_pose(&first, pose(1, 0.0)),
-            PoseAdmission::Accepted
-        );
-        assert_eq!(
-            hub.accept_pose(&second, pose(1, 2.0)),
-            PoseAdmission::Accepted
-        );
-        assert_eq!(
-            hub.accept_pose(&first, pose(1, 3.0)),
-            PoseAdmission::IgnoredStale
-        );
-
-        hub.broadcast_once();
-        let bytes = hub.latest_snapshot.borrow().clone();
-        let snapshot = decode_presence_snapshot(bytes.as_ref()).expect("snapshot");
-        assert_eq!(snapshot.players.len(), 2);
-        assert_ne!(
-            snapshot.players[0].color_index,
-            snapshot.players[1].color_index
-        );
-
-        drop(second_claim);
-        assert!(!hub.is_attached(&second));
-        hub.broadcast_once();
-        let bytes = hub.latest_snapshot.borrow().clone();
-        let snapshot = decode_presence_snapshot(bytes.as_ref()).expect("snapshot after leave");
-        assert_eq!(snapshot.players.len(), 1);
-        assert_eq!(snapshot.players[0].connection_id, first_claim.connection_id);
-    }
-
-    #[tokio::test]
-    async fn large_motion_requires_a_discontinuity() {
-        let hub = PresenceHub::new(PresenceConfig {
-            max_pose_updates_per_second: 120,
-            ..PresenceConfig::default()
-        })
-        .expect("hub");
-        let claim = hub.join(&identity(1)).expect("player");
+    fn joined_at(
+        hub: &Arc<PresenceHub>,
+        seed: u16,
+        x: f32,
+        z: f32,
+    ) -> (WorldPresenceClaim, PresenceAttachment) {
+        let claim = hub.join(&identity(seed)).expect("join");
         let attachment = hub.attach(claim.session_id).expect("attach");
         assert_eq!(
-            hub.accept_pose(&attachment, pose(1, 0.0)),
+            hub.accept_pose(&attachment, pose(1, x, z)),
             PoseAdmission::Accepted
         );
-        // Avoid exercising the rate limiter in this focused semantic test.
-        hub.lock()
-            .players
-            .get_mut(&attachment.player_id)
-            .expect("player")
-            .last_pose_receipt_ms = 0;
-        assert!(matches!(
-            hub.accept_pose(&attachment, pose(2, 20.0)),
-            PoseAdmission::Invalid(_)
-        ));
-        let mut teleported = pose(2, 20.0);
-        teleported.flags |= PLAYER_POSE_DISCONTINUITY;
+        (claim, attachment)
+    }
+
+    #[test]
+    fn spatial_cells_floor_negative_coordinates() {
         assert_eq!(
-            hub.accept_pose(&attachment, teleported),
-            PoseAdmission::Accepted
+            cell_for_pose(pose(1, -0.1, -64.1), 64),
+            SpatialCell { x: -1, z: -2 }
+        );
+    }
+
+    #[test]
+    fn dense_region_progressively_enters_every_player_under_budget() {
+        let hub = PresenceHub::new(PresenceConfig {
+            max_players: 200,
+            max_records_per_delta: 17,
+            max_pose_updates_per_second: 120,
+            ..PresenceConfig::default()
+        })
+        .expect("hub");
+        let (_viewer_claim, viewer) = joined_at(&hub, 0, 0.0, 0.0);
+        let mut residents = Vec::new();
+        for seed in 1..200 {
+            residents.push(joined_at(&hub, seed, f32::from(seed % 10), 0.0));
+        }
+        let mut stream = PresenceStreamState::default();
+        let mut entered = BTreeSet::new();
+        for _ in 0..20 {
+            let bytes = hub
+                .build_delta(&viewer, &mut stream)
+                .expect("build")
+                .expect("dense delta");
+            let delta = decode_presence_delta(&bytes).expect("decode");
+            assert_eq!(delta.visible_player_count, 199);
+            assert!(delta.enters.len() + delta.updates.len() <= 17);
+            entered.extend(delta.enters.into_iter().map(|player| player.player_id));
+            if entered.len() == 199 {
+                break;
+            }
+        }
+        assert_eq!(entered.len(), 199);
+        assert_eq!(stream.known.len(), 199);
+        drop(residents);
+    }
+
+    #[test]
+    fn far_players_produce_no_candidates_or_followup_bytes() {
+        let hub = PresenceHub::new(PresenceConfig {
+            max_players: 128,
+            max_pose_updates_per_second: 120,
+            ..PresenceConfig::default()
+        })
+        .expect("hub");
+        let (_viewer_claim, viewer) = joined_at(&hub, 0, 0.0, 0.0);
+        let mut residents = Vec::new();
+        for seed in 1..128 {
+            residents.push(joined_at(&hub, seed, 10_000.0 + f32::from(seed), 10_000.0));
+        }
+        let mut stream = PresenceStreamState::default();
+        let initial = hub
+            .build_delta(&viewer, &mut stream)
+            .expect("build")
+            .expect("initial");
+        let initial = decode_presence_delta(&initial).expect("decode");
+        assert_eq!(initial.visible_player_count, 0);
+        assert!(initial.enters.is_empty());
+        assert!(
+            hub.build_delta(&viewer, &mut stream)
+                .expect("build")
+                .is_none()
+        );
+        drop(residents);
+    }
+
+    #[test]
+    fn disconnect_emits_an_explicit_leave() {
+        let hub = PresenceHub::new(PresenceConfig {
+            max_pose_updates_per_second: 120,
+            ..PresenceConfig::default()
+        })
+        .expect("hub");
+        let (_viewer_claim, viewer) = joined_at(&hub, 0, 0.0, 0.0);
+        let (other_claim, _other) = joined_at(&hub, 1, 2.0, 0.0);
+        let mut stream = PresenceStreamState::default();
+        let first = hub
+            .build_delta(&viewer, &mut stream)
+            .expect("build")
+            .expect("enter");
+        let first = decode_presence_delta(&first).expect("decode");
+        let connection_id = first.enters[0].connection_id;
+        drop(other_claim);
+        let leave = hub
+            .build_delta(&viewer, &mut stream)
+            .expect("build")
+            .expect("leave");
+        assert_eq!(
+            decode_presence_delta(&leave).expect("decode").leaves,
+            vec![connection_id]
         );
     }
 }

@@ -7,7 +7,7 @@ use std::rc::Rc;
 use voxels_client_config::{MultiplayerConfig, WorldTransportConfig};
 use voxels_core::{
     CameraState, PresenceInterpolationConfig, RemoteAvatarPose, RemotePlayerId, RemotePoseSample,
-    RemotePresenceSnapshot, RemotePresenceTimeline,
+    RemotePoseUpdate, RemotePresenceDelta, RemotePresenceTimeline,
 };
 use voxels_world::protocol::{
     self, OpenPresence, PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING,
@@ -352,24 +352,24 @@ impl PresenceInner {
             self.state.set(PresenceConnectionState::Open);
             self.last_ping_send_ms.set(f64::NEG_INFINITY);
             self.last_pose_send_ms.set(f64::NEG_INFINITY);
-        } else if kind == protocol::presence_snapshot_kind() {
+        } else if kind == protocol::presence_delta_kind() {
             if self.state.get() != PresenceConnectionState::Open {
                 self.disconnect(
                     generation,
-                    "presence snapshot arrived before handshake".to_owned(),
+                    "presence delta arrived before handshake".to_owned(),
                 );
                 return;
             }
-            let snapshot = match protocol::decode_presence_snapshot(&bytes) {
-                Ok(snapshot) => snapshot,
+            let delta = match protocol::decode_presence_delta(&bytes) {
+                Ok(delta) => delta,
                 Err(error) => {
                     self.disconnect(generation, error.to_string());
                     return;
                 }
             };
             let local_player_id = self.local_player_id;
-            let players = snapshot
-                .players
+            let enters = delta
+                .enters
                 .into_iter()
                 .filter(|player| player.player_id != local_player_id)
                 .map(|player| RemotePoseSample {
@@ -387,11 +387,30 @@ impl PresenceInner {
                     flags: player.pose.flags,
                 })
                 .collect();
-            self.timeline.borrow_mut().ingest_snapshot(
-                RemotePresenceSnapshot {
-                    snapshot_sequence: snapshot.snapshot_sequence,
-                    server_time_ms: snapshot.server_time_ms,
-                    players,
+            let updates = delta
+                .updates
+                .into_iter()
+                .filter(|update| update.connection_id != self.connection_id.get())
+                .map(|update| RemotePoseUpdate {
+                    connection_id: update.connection_id,
+                    sequence: update.pose.sequence,
+                    sample_server_time_ms: update.pose.sample_server_time_ms,
+                    eye_position_metres: Vec3::from_array(update.pose.eye_position_metres),
+                    linear_velocity_metres_per_second: Vec3::from_array(
+                        update.pose.linear_velocity_metres_per_second,
+                    ),
+                    look_yaw_radians: update.pose.look_yaw_radians,
+                    look_pitch_radians: update.pose.look_pitch_radians,
+                    flags: update.pose.flags,
+                })
+                .collect();
+            self.timeline.borrow_mut().ingest_delta(
+                RemotePresenceDelta {
+                    stream_sequence: delta.stream_sequence,
+                    server_time_ms: delta.server_time_ms,
+                    enters,
+                    updates,
+                    leaves: delta.leaves,
                 },
                 local_now_ms(),
             );

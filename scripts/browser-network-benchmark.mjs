@@ -92,11 +92,11 @@ function frameTimingSummary(samples, droppedSamples) {
 }
 
 function byteSummary(stats) {
-  const world = stats.paths["/v4/world"] ?? {
+  const world = stats.paths["/v5/world"] ?? {
     upstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
     downstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
   };
-  const presence = stats.paths["/v4/presence"] ?? {
+  const presence = stats.paths["/v5/presence"] ?? {
     upstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
     downstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
   };
@@ -457,10 +457,10 @@ async function main() {
   await writeFile(
     clientConfigPath,
     clientSource
-      .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${proxyPort}/v4/world"`)
+      .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${proxyPort}/v5/world"`)
       .replace(
         /^presence_endpoint = .*$/m,
-        `presence_endpoint = "ws://127.0.0.1:${proxyPort}/v4/presence"`,
+        `presence_endpoint = "ws://127.0.0.1:${proxyPort}/v5/presence"`,
       ),
   );
   process.env.VOXELS_CLIENT_CONFIG_PATH = clientConfigPath;

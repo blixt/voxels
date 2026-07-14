@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 5
+schema_version = 6
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -15,19 +15,32 @@ auth_subprotocol_token = "replace-with-a-random-local-token"
 max_frame_bytes = 16777216
 max_outbound_bytes_per_client = 33554432
 max_in_flight_batches = 16
-max_connections = 32
+max_connections = 512
 global_queue_capacity = 128
 generation_workers = 8
 generation_workers_per_client = 2
 
 [presence]
-# Full, coalesced rosters at about 30 Hz keep motion responsive without ever queueing stale poses.
+# Per-client spatial deltas tick at about 30 Hz; unchanged poses are omitted.
 broadcast_interval_ms = 33
-max_players = 32
+max_players = 512
 # Browsers normally send at 30 Hz; this higher ceiling permits modest timer catch-up without abuse.
 max_pose_updates_per_second = 60
 # Larger motion must be explicitly marked as a teleport/respawn discontinuity.
 teleport_distance_metres = 4
+# Internal interest management only; this remains one authoritative, unsharded world.
+spatial_cell_metres = 64
+interest_radius_metres = 256
+interest_hysteresis_metres = 32
+near_radius_metres = 32
+mid_radius_metres = 96
+near_update_interval_ms = 50
+mid_update_interval_ms = 100
+far_update_interval_ms = 250
+# Dense crowds degrade update freshness under a fixed receiver budget, never membership.
+max_records_per_delta = 64
+prediction_error_centimetres = 25
+look_error_milliradians = 175
 
 [spawn]
 # Must lie inside the selected source's valid coverage. Startup samples this exact coordinate.

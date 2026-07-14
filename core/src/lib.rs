@@ -5,7 +5,7 @@ mod profile;
 
 pub use presence::{
     PresenceInterpolationConfig, REMOTE_POSE_DISCONTINUITY, RemoteAvatarPose, RemotePlayerId,
-    RemotePoseSample, RemotePresenceSnapshot, RemotePresenceTimeline,
+    RemotePoseSample, RemotePoseUpdate, RemotePresenceDelta, RemotePresenceTimeline,
 };
 pub use profile::{ProfileAutomation, ProfileConfig, ProfilePhase, ProfilePose};
 

@@ -2,7 +2,7 @@
 
 use crate::{
     LoadedWorldServiceConfig, WorldServiceConfig, WorldServiceConfigError, WorldServiceSourceError,
-    presence::{PoseAdmission, PresenceHub},
+    presence::{PoseAdmission, PresenceHub, PresenceStreamState},
 };
 use axum::Router;
 use axum::extract::State;
@@ -37,9 +37,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v4/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v4/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v4";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v5/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v5/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v5";
 
 /// Prepared server state. Source construction and spawn coverage validation happen before bind.
 pub struct WorldServer {
@@ -794,15 +794,23 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
     if socket.send(Message::Binary(opened.into())).await.is_err() {
         return;
     }
-    let mut snapshots = state.presence.subscribe();
-    let initial_snapshot = snapshots.borrow().clone();
+    let mut stream = PresenceStreamState::default();
+    let initial_delta = match state.presence.build_delta(&attachment, &mut stream) {
+        Ok(Some(delta)) => delta,
+        Ok(None) | Err(_) => return,
+    };
     if socket
-        .send(Message::Binary(initial_snapshot.as_ref().clone().into()))
+        .send(Message::Binary(initial_delta.into()))
         .await
         .is_err()
     {
         return;
     }
+    let mut replication_tick = tokio::time::interval(tokio::time::Duration::from_millis(
+        u64::from(config.broadcast_interval_ms),
+    ));
+    replication_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    replication_tick.tick().await;
 
     loop {
         tokio::select! {
@@ -890,13 +898,15 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     break;
                 }
             }
-            changed = snapshots.changed() => {
-                if changed.is_err() || !state.presence.is_attached(&attachment) {
-                    break;
-                }
-                let bytes = snapshots.borrow_and_update().clone();
-                if socket.send(Message::Binary(bytes.as_ref().clone().into())).await.is_err() {
-                    break;
+            _ = replication_tick.tick() => {
+                match state.presence.build_delta(&attachment, &mut stream) {
+                    Ok(Some(bytes)) => {
+                        if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => break,
                 }
             }
         }
@@ -1165,11 +1175,11 @@ mod tests {
     use uuid::Uuid;
     use voxels_world::protocol::{
         BrowserUserId, ChunkBatchRequest, OpenPresence, OpenWorld, PLAYER_POSE_GROUNDED, PlayerId,
-        PlayerIdentity, PlayerPoseUpdate, PresenceOpened, PresenceSnapshot,
-        SurfaceTileBatchRequest, decode_chunk_batch_result, decode_error, decode_presence_opened,
-        decode_presence_snapshot, decode_surface_tile_batch_result, decode_world_opened,
-        encode_chunk_batch, encode_open_presence, encode_open_world, encode_player_pose,
-        encode_surface_tile_batch, presence_snapshot_kind,
+        PlayerIdentity, PlayerPoseUpdate, PresenceDelta, PresenceOpened, SurfaceTileBatchRequest,
+        decode_chunk_batch_result, decode_error, decode_presence_delta, decode_presence_opened,
+        decode_surface_tile_batch_result, decode_world_opened, encode_chunk_batch,
+        encode_open_presence, encode_open_world, encode_player_pose, encode_surface_tile_batch,
+        presence_delta_kind,
     };
     use voxels_world::{
         ChunkCoord, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, WorldProductPriority,
@@ -1271,7 +1281,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v4, test-local-token"),
+            HeaderValue::from_static("voxels.world.v5, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -1376,7 +1386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_presence_channels_receive_the_same_complete_roster_and_disconnect()
+    async fn two_presence_channels_receive_personalized_enters_and_explicit_disconnect()
     -> Result<(), Box<dyn std::error::Error>> {
         let config = test_config();
         let listener = TcpListener::bind(config.transport.listen).await?;
@@ -1424,20 +1434,24 @@ mod tests {
                 .await?;
         }
 
-        let first_roster = next_presence_roster(&mut first_presence, 2).await?;
-        let second_roster = next_presence_roster(&mut second_presence, 2).await?;
-        assert_eq!(first_roster.players, second_roster.players);
+        let first_delta = next_presence_delta(&mut first_presence, 1, 0).await?;
+        let second_delta = next_presence_delta(&mut second_presence, 1, 0).await?;
+        assert_eq!(
+            first_delta.enters[0].player_id,
+            second_opened.identity.player_id
+        );
+        assert_eq!(
+            second_delta.enters[0].player_id,
+            first_opened.identity.player_id
+        );
         assert_ne!(
-            first_roster.players[0].color_index,
-            first_roster.players[1].color_index
+            first_delta.enters[0].color_index,
+            second_delta.enters[0].color_index
         );
 
         first_world.close(None).await?;
-        let remaining = next_presence_roster(&mut second_presence, 1).await?;
-        assert_eq!(
-            remaining.players[0].player_id,
-            second_opened.identity.player_id
-        );
+        let remaining = next_presence_delta(&mut second_presence, 0, 1).await?;
+        assert_eq!(remaining.leaves, vec![first_opened.connection_id]);
 
         second_world.close(None).await?;
         first_presence.close(None).await?;
@@ -1482,7 +1496,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v4, test-local-token"),
+            HeaderValue::from_static("voxels.world.v5, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -1517,7 +1531,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v4, test-local-token"),
+            HeaderValue::from_static("voxels.world.v5, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -1529,20 +1543,21 @@ mod tests {
         Ok((socket, decode_presence_opened(&response)?))
     }
 
-    async fn next_presence_roster<S>(
+    async fn next_presence_delta<S>(
         socket: &mut tokio_tungstenite::WebSocketStream<S>,
-        player_count: usize,
-    ) -> Result<PresenceSnapshot, Box<dyn std::error::Error>>
+        enter_count: usize,
+        leave_count: usize,
+    ) -> Result<PresenceDelta, Box<dyn std::error::Error>>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let bytes = next_client_binary(socket).await?;
-                if message_kind(&bytes)? == presence_snapshot_kind() {
-                    let snapshot = decode_presence_snapshot(&bytes)?;
-                    if snapshot.players.len() == player_count {
-                        return Ok(snapshot);
+                if message_kind(&bytes)? == presence_delta_kind() {
+                    let delta = decode_presence_delta(&bytes)?;
+                    if delta.enters.len() == enter_count && delta.leaves.len() == leave_count {
+                        return Ok(delta);
                     }
                 }
             }

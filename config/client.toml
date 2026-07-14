@@ -1,12 +1,12 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 5
+schema_version = 6
 
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
 [world]
-endpoint = "ws://127.0.0.1:9777/v4/world"
-presence_endpoint = "ws://127.0.0.1:9777/v4/presence"
-subprotocol = "voxels.world.v4"
+endpoint = "ws://127.0.0.1:9777/v5/world"
+presence_endpoint = "ws://127.0.0.1:9777/v5/presence"
+subprotocol = "voxels.world.v5"
 auth_subprotocol_token = "replace-with-a-random-local-token"
 max_in_flight_batches = 8
 buffered_amount_high_water_bytes = 8388608
@@ -26,7 +26,7 @@ buffered_amount_high_water_bytes = 65536
 interpolation_delay_ms = 100
 min_interpolation_delay_ms = 67
 max_interpolation_delay_ms = 200
-max_extrapolation_ms = 100
+max_extrapolation_ms = 750
 
 [runtime]
 fixed_step_seconds = 0.008333334

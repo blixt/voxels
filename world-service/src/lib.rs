@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use voxels_world::protocol::{
-    FRAME_HEADER_BYTES, MAX_PLAYERS_PER_PRESENCE_SNAPSHOT, MAX_PROTOCOL_FRAME_BYTES,
+    FRAME_HEADER_BYTES, MAX_PLAYERS_PER_PRESENCE_DELTA, MAX_PROTOCOL_FRAME_BYTES,
 };
 use voxels_world::{
     HeightfieldWorldSource, MacroTerrainSource, ProceduralWorldSource, SEA_LEVEL_VOXELS, WorldId,
@@ -29,7 +29,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 5;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 6;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
     0x76, 0x6f, 0x78, 0x65, 0x6c, 0x73, 0x40, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x01,
@@ -69,7 +69,7 @@ impl Default for LoopbackTransportConfig {
             max_frame_bytes: MAX_PROTOCOL_FRAME_BYTES,
             max_outbound_bytes_per_client: 32 * 1024 * 1024,
             max_in_flight_batches: 16,
-            max_connections: 32,
+            max_connections: 512,
             global_queue_capacity: 128,
             generation_workers: 8,
             generation_workers_per_client: 2,
@@ -80,23 +80,51 @@ impl Default for LoopbackTransportConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PresenceConfig {
-    /// Server roster cadence. Pose packets are coalesced into this latest complete snapshot.
+    /// Per-connection replication scheduler cadence.
     pub broadcast_interval_ms: u16,
-    /// Hard player bound for one world. The v4 wire format currently supports at most 64.
+    /// Hard player bound for this single, unsharded world.
     pub max_players: u16,
     /// Per-player inbound abuse bound. Clients normally send at 30 Hz.
     pub max_pose_updates_per_second: u16,
     /// Larger position changes require the explicit discontinuity flag.
     pub teleport_distance_metres: u16,
+    /// Width and depth of a spatial-interest grid cell.
+    pub spatial_cell_metres: u16,
+    /// Players outside this horizontal radius do not enter a receiver's replication set.
+    pub interest_radius_metres: u16,
+    /// Extra radius retained for known players to avoid boundary enter/leave churn.
+    pub interest_hysteresis_metres: u16,
+    pub near_radius_metres: u16,
+    pub mid_radius_metres: u16,
+    pub near_update_interval_ms: u16,
+    pub mid_update_interval_ms: u16,
+    pub far_update_interval_ms: u16,
+    /// Hard dense-region budget shared by enters and dynamic pose updates in one delta.
+    pub max_records_per_delta: u16,
+    /// Send early when dead-reckoned position differs from authoritative state by this amount.
+    pub prediction_error_centimetres: u16,
+    /// Send early when predicted look direction differs by this many milliradians.
+    pub look_error_milliradians: u16,
 }
 
 impl Default for PresenceConfig {
     fn default() -> Self {
         Self {
             broadcast_interval_ms: 33,
-            max_players: 32,
+            max_players: 512,
             max_pose_updates_per_second: 60,
             teleport_distance_metres: 4,
+            spatial_cell_metres: 64,
+            interest_radius_metres: 256,
+            interest_hysteresis_metres: 32,
+            near_radius_metres: 32,
+            mid_radius_metres: 96,
+            near_update_interval_ms: 50,
+            mid_update_interval_ms: 100,
+            far_update_interval_ms: 250,
+            max_records_per_delta: 64,
+            prediction_error_centimetres: 25,
+            look_error_milliradians: 175,
         }
     }
 }
@@ -267,7 +295,7 @@ impl WorldServiceConfig {
             ));
         }
         if self.presence.max_players == 0
-            || usize::from(self.presence.max_players) > MAX_PLAYERS_PER_PRESENCE_SNAPSHOT
+            || usize::from(self.presence.max_players) > MAX_PLAYERS_PER_PRESENCE_DELTA
             || self.presence.max_players > self.transport.max_connections
         {
             return Err(WorldServiceConfigError::InvalidPresence(
@@ -282,6 +310,40 @@ impl WorldServiceConfig {
         if !(1..=64).contains(&self.presence.teleport_distance_metres) {
             return Err(WorldServiceConfigError::InvalidPresence(
                 "teleport_distance_metres must be in 1..=64",
+            ));
+        }
+        if !(8..=256).contains(&self.presence.spatial_cell_metres)
+            || self.presence.interest_radius_metres < self.presence.spatial_cell_metres
+            || self.presence.interest_radius_metres > 2_048
+            || self.presence.interest_hysteresis_metres > self.presence.interest_radius_metres
+        {
+            return Err(WorldServiceConfigError::InvalidPresence(
+                "presence spatial cell, interest radius, or hysteresis is invalid",
+            ));
+        }
+        if self.presence.near_radius_metres == 0
+            || self.presence.near_radius_metres > self.presence.mid_radius_metres
+            || self.presence.mid_radius_metres > self.presence.interest_radius_metres
+        {
+            return Err(WorldServiceConfigError::InvalidPresence(
+                "presence distance tiers must be ordered inside the interest radius",
+            ));
+        }
+        if self.presence.near_update_interval_ms < self.presence.broadcast_interval_ms
+            || self.presence.mid_update_interval_ms < self.presence.near_update_interval_ms
+            || self.presence.far_update_interval_ms < self.presence.mid_update_interval_ms
+            || self.presence.far_update_interval_ms > 2_000
+        {
+            return Err(WorldServiceConfigError::InvalidPresence(
+                "presence update intervals must be ordered and fit 16..=2000 ms",
+            ));
+        }
+        if self.presence.max_records_per_delta == 0
+            || self.presence.prediction_error_centimetres == 0
+            || self.presence.look_error_milliradians == 0
+        {
+            return Err(WorldServiceConfigError::InvalidPresence(
+                "presence delta budget and prediction-error thresholds must be nonzero",
             ));
         }
         Ok(())
@@ -594,7 +656,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 5
+schema_version = 6
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -606,16 +668,27 @@ auth_subprotocol_token = "test-token"
 max_frame_bytes = 16777216
 max_outbound_bytes_per_client = 33554432
 max_in_flight_batches = 16
-max_connections = 32
+max_connections = 512
 global_queue_capacity = 128
 generation_workers = 8
 generation_workers_per_client = 2
 
 [presence]
 broadcast_interval_ms = 33
-max_players = 32
+max_players = 512
 max_pose_updates_per_second = 60
 teleport_distance_metres = 4
+spatial_cell_metres = 64
+interest_radius_metres = 256
+interest_hysteresis_metres = 32
+near_radius_metres = 32
+mid_radius_metres = 96
+near_update_interval_ms = 50
+mid_update_interval_ms = 100
+far_update_interval_ms = 250
+max_records_per_delta = 64
+prediction_error_centimetres = 25
+look_error_milliradians = 175
 
 [spawn]
 xz_voxels = [0, 0]
@@ -669,12 +742,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 5", "schema_version = 4");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 6", "schema_version = 5");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 5,
-                found: 4,
+                expected: 6,
+                found: 5,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
@@ -692,7 +765,7 @@ sea_level_voxels = 52
         ));
 
         for missing in [
-            "max_connections = 32\n",
+            "max_connections = 512\n",
             "broadcast_interval_ms = 33\n",
             "xz_voxels = [0, 0]\n",
             "precision = \"float16\"\n",
