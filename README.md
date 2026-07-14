@@ -35,13 +35,12 @@ stream bytes, message attribution, and offline compression headroom. Compare two
 `vp run terrain:base`, and `vp run terrain:detail` exercise the optional native Rust/Metal Terrain
 Diffusion provider on Apple silicon; see
 [the provider notes](docs/terrain-diffusion-metal.md).
-The server-owned [world source configuration](docs/world-service-config.md) selects procedural or
-Terrain Diffusion generation for the native service bootstrap without exposing the provider to
-clients. `vp run world:source-smoke` loads that TOML configuration and verifies the selected source
-with one macro-field request. `vp run world:serve` starts the procedural-capable loopback daemon;
-`vp run world:serve-metal` enables the native Metal Terrain Diffusion provider selected by the same
-file. The browser always consumes the daemon; switch experiences only by changing the server's
-`source` value and restarting it. See
+The server-owned [world source configuration](docs/world-service-config.md) defaults to native
+Terrain Diffusion/Metal generation and can select the procedural source without exposing that choice
+to clients. `vp run world:source-smoke` loads the TOML and verifies the selected source with one
+macro-field request. `vp run world:serve` enables the Metal-capable loopback daemon so either source
+can be selected by changing only the server's `source` value and restarting it. The browser always
+consumes the same canonical protocol. See
 [Native world streaming](docs/native-world-streaming.md) for the matching endpoint/token settings,
 Chrome local-network permission, binary VXWP protocol, transport rationale, and exact run steps.
 Client runtime, streaming, rendering/Mission Control, persistence, diagnostics, and profiling

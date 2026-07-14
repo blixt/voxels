@@ -3,8 +3,9 @@ schema_version = 8
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
-# Toggle only this value. Supported sources: "procedural-v16" and "terrain-diffusion-30m".
-source = "procedural-v16"
+# Terrain Diffusion is the checked-in default. Set this to "procedural-v16" for the deterministic
+# authored generator; clients consume the same canonical protocol either way.
+source = "terrain-diffusion-30m"
 
 [transport]
 # Native transport is deliberately loopback-only. Port 0 may be used by tests for an ephemeral port.

@@ -78,11 +78,11 @@ canonical voxel X/Z space. Both are bound into `WorldSourceIdentity`, and the la
 the macro coordinate-transform origin, so moving or regenerating a tile cannot reuse an incompatible
 cache identity.
 
-This is not yet selected by the browser shell. The shell is WASM and cannot host this native Metal
-executor. The remaining production work is the already-planned local world service plus extraction
-of the canonical macro-field-to-voxel composer. Those steps turn the finite source into the game's
-full `WorldSourceEngine` without moving model code into the browser or changing persisted
-procedural-v16 worlds.
+This is the checked-in default source for the native world service. The WASM shell never hosts the
+Metal executor or branches on provider choice: the service composes learned macro fields into the
+same canonical chunks and progressive surface products consumed for procedural worlds. Set
+`source = "procedural-v16"` to compare the deterministic authored generator without changing the
+client.
 
 ## Fidelity and performance notes
 

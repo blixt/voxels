@@ -7,16 +7,16 @@ read this file and do not branch on the provider.
 
 ## Selecting a source
 
-Change this one line in `config/world-service.toml`:
-
-```toml
-source = "procedural-v16"
-```
-
-or:
+The checked-in default is:
 
 ```toml
 source = "terrain-diffusion-30m"
+```
+
+To use the deterministic authored generator instead, change only that field:
+
+```toml
+source = "procedural-v16"
 ```
 
 Restart the service after changing the file. Selection is intentionally fail-closed: choosing
@@ -29,7 +29,7 @@ The complete schema is:
 schema_version = 8
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
-source = "procedural-v16"
+source = "terrain-diffusion-30m"
 
 [transport]
 listen = "127.0.0.1:9777"

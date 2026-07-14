@@ -150,9 +150,26 @@ subprotocol = "voxels.world.v7"
 auth_subprotocol_token = "the-same-random-local-token"
 ```
 
-Ensure the Vite origin is in the server's `allowed_origins`. Then choose one server source.
+Ensure the Vite origin is in the server's `allowed_origins`. Terrain Diffusion is the checked-in
+default. Fetch the pinned model once, then start the Metal-capable daemon:
 
-For procedural-v16:
+```sh
+vp run terrain:fetch
+```
+
+```toml
+source = "terrain-diffusion-30m"
+```
+
+```sh
+# Terminal 1
+vp run world:serve
+
+# Terminal 2
+vp dev
+```
+
+To use procedural-v16 instead, change only the source field and restart the same daemon command:
 
 ```toml
 source = "procedural-v16"
@@ -166,28 +183,9 @@ vp run world:serve
 vp dev
 ```
 
-For Terrain Diffusion on Apple silicon, fetch the pinned model once, change the source, and run the
-Metal-enabled daemon:
-
-```sh
-vp run terrain:fetch
-```
-
-```toml
-source = "terrain-diffusion-30m"
-```
-
-```sh
-# Terminal 1
-vp run world:serve-metal
-
-# Terminal 2
-vp dev
-```
-
 Open `http://127.0.0.1:5173`, grant Chrome's local/loopback network permission when prompted, and
 play normally. To compare generators, change only `source` in `config/world-service.toml`, restart
-the matching daemon command, and reload. The client configuration does not change.
+the daemon, and reload. The client configuration does not change.
 
 ## Local players and two-browser testing
 

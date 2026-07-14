@@ -145,10 +145,6 @@ export default defineConfig(({ command, mode }) => ({
         cache: false,
       },
       "world:serve": {
-        command: "node scripts/world-service.ts",
-        cache: false,
-      },
-      "world:serve-metal": {
         command: "node scripts/world-service.ts --metal",
         cache: false,
       },
