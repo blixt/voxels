@@ -144,6 +144,10 @@ async function analyzeTowerPixels(page, before, after) {
       let changedMinY = maxY;
       let changedMaxX = minX;
       let changedMaxY = minY;
+      let cyanMinX = maxX;
+      let cyanMinY = maxY;
+      let cyanMaxX = minX;
+      let cyanMaxY = minY;
       for (let y = minY; y < maxY; y += 1) {
         for (let x = minX; x < maxX; x += 1) {
           const offset = (y * edited.width + x) * 4;
@@ -171,7 +175,13 @@ async function analyzeTowerPixels(page, before, after) {
             baselineBlue >= 135 &&
             baselineBlue - baselineRed >= 35 &&
             baselineGreen - baselineRed >= 18;
-          if (cyan && !baselineCyan) newCyanPixels += 1;
+          if (cyan && !baselineCyan) {
+            newCyanPixels += 1;
+            cyanMinX = Math.min(cyanMinX, x);
+            cyanMinY = Math.min(cyanMinY, y);
+            cyanMaxX = Math.max(cyanMaxX, x + 1);
+            cyanMaxY = Math.max(cyanMaxY, y + 1);
+          }
         }
       }
       return {
@@ -181,6 +191,7 @@ async function analyzeTowerPixels(page, before, after) {
         maximumChannelDelta,
         changedBounds:
           visiblyChangedPixels > 0 ? [changedMinX, changedMinY, changedMaxX, changedMaxY] : null,
+        newCyanBounds: newCyanPixels > 0 ? [cyanMinX, cyanMinY, cyanMaxX, cyanMaxY] : null,
       };
     },
     { beforeBase64: before.toString("base64"), afterBase64: after.toString("base64") },
@@ -249,6 +260,21 @@ async function waitForRoster(player) {
       next[SNAPSHOT.avatarDrawCalls] === EXPECTED_REMOTE_PLAYERS,
     30_000,
   );
+}
+
+async function waitForSettledWorld(player) {
+  return waitFor(
+    player.page,
+    `${player.name} settled world coverage`,
+    (next) =>
+      next[SNAPSHOT.allLodsReady] === 1 &&
+      next[SNAPSHOT.surfaceInFlight] === 0 &&
+      next[SNAPSHOT.pendingJobs] === 0,
+  );
+}
+
+function viewportFingerprint(values) {
+  return [values[SNAPSHOT.viewportFingerprintLow24], values[SNAPSHOT.viewportFingerprintHigh24]];
 }
 
 async function waitForPort(port, child, logs) {
@@ -554,6 +580,7 @@ async function main() {
     }
     if (errors.length > 0) throw new Error(errors.join("\n"));
 
+    await Promise.all(players.map(waitForSettledWorld));
     const towerVoxelCount = 100;
     const towerX = Math.floor(builderBeforeMovement[0][SNAPSHOT.cameraX] * 10);
     const towerZ = Math.floor(builderBeforeMovement[0][SNAPSHOT.cameraZ] * 10);
@@ -568,6 +595,8 @@ async function main() {
     const beforeTowerScreenshot = await observer.page.screenshot({
       path: path.join(OUTPUT_DIRECTORY, "observer-far-tower-before.png"),
     });
+    const beforeTowerSnapshot = await snapshot(observer.page);
+    const beforeViewportFingerprint = viewportFingerprint(beforeTowerSnapshot);
     const beforeTowerNetwork = players.map((player) => player.link.snapshot());
     const beforeTowerSurfaceState = await surfaceEditState(observer.page, 16, towerX, towerZ);
     const towerStarted = performance.now();
@@ -603,7 +632,17 @@ async function main() {
       towerZ,
     );
     const towerConvergenceMs = performance.now() - towerStarted;
-    await observer.page.waitForTimeout(250);
+    const renderedTower = await waitFor(
+      observer.page,
+      "observer rendered far tower",
+      (next) => {
+        const current = viewportFingerprint(next);
+        return (
+          current[0] !== beforeViewportFingerprint[0] || current[1] !== beforeViewportFingerprint[1]
+        );
+      },
+      30_000,
+    );
     const afterTowerScreenshot = await observer.page.screenshot({
       path: path.join(OUTPUT_DIRECTORY, "observer-far-five-tower.png"),
     });
@@ -615,7 +654,11 @@ async function main() {
     const changedHeight = visualEvidence.changedBounds
       ? visualEvidence.changedBounds[3] - visualEvidence.changedBounds[1]
       : 0;
-    if (visualEvidence.visiblyChangedPixels < 50 || changedHeight < 20) {
+    if (
+      visualEvidence.visiblyChangedPixels < 50 ||
+      changedHeight < 20 ||
+      visualEvidence.newCyanPixels < 24
+    ) {
       throw new Error(
         `distant tower was not visually legible: ${JSON.stringify({
           visualEvidence,
@@ -655,6 +698,9 @@ async function main() {
       surfaceFingerprintChanged:
         beforeTowerSurfaceState[6] !== observerSurfaceState[6] ||
         beforeTowerSurfaceState[7] !== observerSurfaceState[7],
+      viewportFingerprintChanged:
+        renderedTower[SNAPSHOT.viewportFingerprintLow24] !== beforeViewportFingerprint[0] ||
+        renderedTower[SNAPSHOT.viewportFingerprintHigh24] !== beforeViewportFingerprint[1],
       allClientsAppliedEdits: convergedClients.every(
         (next) => next[SNAPSHOT.edits] === towerVoxelCount,
       ),
