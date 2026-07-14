@@ -152,7 +152,9 @@ pub const PILGRIM_CHAPTERS: [RouteChapter; 5] = [
 ];
 
 pub fn pilgrim_chapter_at_distance(distance_voxels: f32) -> RouteChapter {
-    let distance = distance_voxels.clamp(0.0, first_pilgrim_road_length_voxels());
+    let distance = distance_voxels
+        .max(0.0)
+        .min(first_pilgrim_road_length_voxels());
     PILGRIM_CHAPTERS
         .iter()
         .copied()
@@ -198,5 +200,17 @@ mod tests {
             previous = chapter.id;
         }
         assert_eq!(previous, RouteChapterId::NeedleAscent);
+        assert_eq!(
+            pilgrim_chapter_at_distance(f32::NAN).id,
+            RouteChapterId::OldPilgrimRise
+        );
+        assert_eq!(
+            pilgrim_chapter_at_distance(f32::NEG_INFINITY).id,
+            RouteChapterId::OldPilgrimRise
+        );
+        assert_eq!(
+            pilgrim_chapter_at_distance(f32::INFINITY).id,
+            RouteChapterId::NeedleAscent
+        );
     }
 }
