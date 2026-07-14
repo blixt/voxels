@@ -7,7 +7,7 @@ provider therefore adds no provider branch, model dependency, or Metal API to th
 
 ## Why binary WebSocket first
 
-VXWP v5 uses the standard `WebSocket` API over loopback. This is the best first transport for
+VXWP v6 uses the standard `WebSocket` API over loopback. This is the best first transport for
 reliable chunk assets: it is mature, works in a dedicated worker, and requires neither an HTTP/3
 certificate setup nor WebRTC signaling. Axum's native Rust server disables Nagle delay, and the
 application bounds outstanding work so classic WebSocket's missing receive-side backpressure cannot
@@ -39,13 +39,13 @@ The [W3C WebTransport specification][webtransport-spec] supports carrying the sa
 envelopes on a future reliable stream. Transport choice is deliberately below world identity,
 request correlation, and chunk codecs.
 
-## VXWP v5 contract
+## VXWP v6 contract
 
 Each WebSocket message contains exactly one little-endian VXWP envelope with `VXWP` magic, protocol
 version, message kind, request ID, payload length, and reserved fields. The format is code-versioned;
 Rust enum layout and Serde output are not wire formats.
 
-1. The browser upgrades `/v5/world`, offering `voxels.world.v5` and the configured local auth token,
+1. The browser upgrades `/v6/world`, offering `voxels.world.v6` and the configured local auth token,
    then sends `OpenWorld` with its maximum in-flight batch count and browser-local player claim.
 2. The daemon replies with `WorldOpened`: immutable world manifest, source identity/hash,
    capabilities, negotiated request window, echoed player claim, and spawn sample. The client
@@ -61,13 +61,13 @@ Rust enum layout and Serde output are not wire formats.
    bounds, and transition-skirt records. The coarse parent remains resident until replacement
    coverage is complete.
 7. Every chunk or surface result body is independently Brotli-compressed at quality 2 with a 20-bit
-   window. Its mandatory v5 envelope declares the exact uncompressed length; the decoder rejects
+   window. Its mandatory v6 envelope declares the exact uncompressed length; the decoder rejects
    unknown codecs, nonzero reserved bytes, outputs above the 16 MiB frame bound, truncated streams,
    and streams producing even one byte beyond the declaration before semantic validation.
 8. `Cancel` is best effort. Late, canceled, mismatched, or stale-revision responses are discarded;
    they cannot resurrect an evicted scheduler ticket.
 9. `WorldOpened` also returns a connection-scoped, random presence session token. The browser uses
-   it to open `/v5/presence` on a dedicated socket; a token cannot be reused by another world
+   it to open `/v6/presence` on a dedicated socket; a token cannot be reused by another world
    connection.
 10. Browsers send bounded `PlayerPose` latest-state frames. The server validates monotonic sequence,
     finite coordinates, update rate, and explicit teleport discontinuities, assigns a unique color,
@@ -80,11 +80,18 @@ Rust enum layout and Serde output are not wire formats.
     750 ms, then hold instead of letting an avatar run away. This follows the delayed timeline and
     bounded extrapolation patterns described by [Gaffer on Games][snapshot-interpolation] and
     [Unity Netcode][unity-interpolation], with clock-offset estimation derived from [NTP][ntp].
+12. Sparse `EditCommand` operations are idempotent per player and carry a connection-scoped operation
+    ID. Durable `EditCommit` frames identify the editor connection, authoritative revision, exact
+    voxel value, and affected chunk/surface products. Chunk and surface responses carry their local
+    edit revision, closing the generation-versus-edit race without invalidating unrelated cache keys.
+13. Edit commits are fanned out only to presence connections whose 256 m interest area covers the
+    voxel. Per-client queues are bounded; overflow produces `ResyncRequired`, after which the browser
+    discards disposable products and reloads retained coverage from server truth.
 
-The required capability set is `CANONICAL_CHUNKS | SURFACE_LOD | PLAYER_PRESENCE`. Server-owned
-edits, environment queries, authored routes, inventory, and authoritative multiplayer simulation
-still need separate versioned products; the client never substitutes procedural answers for a
-remote learned world.
+The required capability set is
+`CANONICAL_CHUNKS | SURFACE_LOD | PLAYER_PRESENCE | SERVER_EDITS`. Environment queries, authored
+routes, inventory, and authoritative movement simulation still need separate versioned products;
+the client never substitutes procedural answers for a remote learned world.
 
 This is progressive at the product level, not an image-style byte-prefix codec: every coarser tile
 is a complete useful view and a finer tile is an independently cached replacement. A future `VXSP`
@@ -134,9 +141,9 @@ Copy it to both `config/client.toml` as `[world].auth_subprotocol_token` and
 
 ```toml
 [world]
-endpoint = "ws://127.0.0.1:9777/v5/world"
-presence_endpoint = "ws://127.0.0.1:9777/v5/presence"
-subprotocol = "voxels.world.v5"
+endpoint = "ws://127.0.0.1:9777/v6/world"
+presence_endpoint = "ws://127.0.0.1:9777/v6/presence"
+subprotocol = "voxels.world.v6"
 auth_subprotocol_token = "the-same-random-local-token"
 ```
 
@@ -195,32 +202,34 @@ authentication or secrets. The registry is updated under a Web Lock, so simultan
 cannot mint competing IDs. `window.__VOXELS__.player` exposes the selected IDs for diagnostics and
 `window.__VOXELS__.playerUrl("carol")` returns a correctly formed URL for another named player.
 
-Camera rows are keyed by player ID inside the manifest- and persistence-schema-specific database.
-The client initializes only the current schema and never imports, upgrades, or rewrites an older
-database. Voxel edits remain world-scoped and are shared live between named players in the same
-browser profile.
-Different browser profiles, private windows, hostnames, or ports have separate local storage and
-OPFS; cross-device state requires the future server-owned player store.
+Camera rows are keyed by player ID inside the manifest- and persistence-schema-specific browser
+database. The client initializes only the current schema and never imports, upgrades, or rewrites an
+older database. Voxel edits are not browser persistence: `voxels-worldd` commits them to its native
+SQLite authority and streams the same revisions to every interested browser profile. Different
+profiles still have separate local camera storage; durable player state beyond edits requires the
+future authenticated player store.
 
 The presence service now replicates positions, velocity, look direction, connection lifetime, and a
 server-assigned saturated color. Every receiver animates that state as a thin 13-cuboid figure in one
 instanced draw per pass: segmented arms and legs use distance-driven gait, following the same
 distance-over-time principle as [Unreal distance matching][distance-matching]; a same-color face
 nub makes head direction readable; and large look offsets pull the body around with hysteresis.
-These poses are still untrusted client claims. Collision, inventory, edits, respawn, and durable
-player state must move to an authenticated authoritative server before Internet multiplayer.
+These poses are still untrusted client claims. Collision, inventory, respawn, and durable player
+state must move to an authenticated authoritative server before Internet multiplayer.
 
-To run the automated two-client release smoke test, keep only the world service on port 9777 running
-and leave port 5173 free, then run:
+To run the automated six-client release smoke test, run:
 
 ```sh
 vp run test:multiplayer-browser
 ```
 
-It launches two named clients in a temporary Chrome profile, requires both presence streams to
-produce one remote avatar, walks Bob while Alice observes, rejects browser/WGPU/socket errors, and
-writes ignored screenshots under `target/multiplayer-browser/`. It never opens or resets a user's
-normal browser profile or OPFS world.
+It launches six independent browser contexts with shaped links and fresh identities, keeps five
+builders visible while an observer walks about 120 m away, then has all five builders submit a 10 m,
+100-voxel server-authoritative tower. The gate waits until every browser has applied all commits, the
+far observer has accepted and uploaded the revised stride-16 surface tile, and a before/after pixel
+comparison proves the aimed tower is visibly legible. It owns a temporary native edit database,
+rejects browser/WGPU/socket errors, and writes ignored metrics/screenshots under
+`target/multiplayer-browser/`; it never opens or resets a user's normal browser profile or OPFS world.
 
 ## Far-LOD transition policy and next step
 

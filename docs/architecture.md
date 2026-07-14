@@ -203,7 +203,7 @@ window is discarded because any later load samples the authoritative edit overla
 edits additionally invalidate the feature anchor's tile when generated geometry crosses a tile edge.
 Retained tiles just outside active coverage still record affected revisions without spending immediate
 remesh work. If focus returns before eviction, revision comparison marks the cached mesh stale and
-blocks coverage activation until its replacement is uploaded; this prevents multi-tab edits from
+blocks coverage activation until its replacement is uploaded; this prevents out-of-order server edits from
 reviving an old retained LOD mesh.
 
 Near meshes also bake the established four-level voxel ambient-occlusion term from two side samples
@@ -368,21 +368,15 @@ General OPFS handles are available on both windows and workers, but the synchron
 used by this VFS are dedicated-worker-only. Keeping the engine in a dedicated worker therefore
 satisfies both rendering and storage constraints.
 
-SQLite stores structured, queryable state: schema version, world identity and generator version,
-browser-local player camera state, and sparse voxel overrides. The database namespace includes the
-current persistence schema, and startup accepts only that exact schema; there are no upgrade or import
-paths. Camera rows are keyed by opaque player ID while edits remain shared world state. Each override is
-an idempotent row keyed by world and voxel;
-restoring the generated material removes the row. Versioned palette/bit-packed chunk payloads exist for
-future snapshot compaction. If profiling shows write amplification or database size becoming a real
-constraint, the same codec can move snapshots into append-only region files while SQLite remains the
-transactional index. Region files would group a bounded X/Z tile, use a checksummed offset table, and
-write payloads in aligned extents. Optional block compression can be evaluated around those packed
-payloads then; neither region wrapping nor compression is part of VXCH v2.
+Browser SQLite stores only schema/world identity and player-keyed local camera state. Its namespace
+includes the current persistence schema, and startup accepts only that exact schema; there are no
+upgrade or import paths. Sparse voxel overrides instead live in native SQLite owned by
+`voxels-worldd`, bound to the immutable world/source manifest. Idempotent edit operations advance
+global order plus local chunk/surface revisions, and browsers treat returned products as authority.
 
-Multi-tab access is single-writer without excluding other tabs. A Web Lock elects one worker as the
-SQLite/SAH-pool owner; followers proxy typed player-keyed camera and world-edit operations over a
-versioned BroadcastChannel and queue
+Multi-tab camera access is single-writer without excluding other tabs. A Web Lock elects one worker
+as the SQLite/SAH-pool owner; followers proxy typed player-keyed camera operations over a versioned
+BroadcastChannel and queue
 for ownership when the leader closes. Follower writes pass through one ordered, coalescing Rust outbox,
 and follower requests tolerate a complete VFS retry window plus worker startup. Teardown closes SQLite,
 pauses the SAH-pool VFS to synchronously release its OPFS handles, and only then resolves the Web Lock;
@@ -393,14 +387,7 @@ solo refresh bursts, concurrent multi-tab refreshes, ownership handoff, and a fo
 lease before successful reacquisition. The wire includes the seed and generator version so an
 incompatible build cannot silently answer another world's request.
 
-Committed sparse edits are also a Rust-to-Rust multi-tab replication unit. A follower applies its edit
-optimistically, the elected leader commits it, applies follower-originated commits to its own engine
-because BroadcastChannel does not self-echo, and broadcasts the durable override (including row
-removal) to every other follower. Each recipient updates `EditMap`, resident canonical data, remesh
-tickets, and affected LOD tiles through the same invalidation path as a local edit. Rendering and
-collision therefore converge live instead of waiting for a reload.
-
-Every local edit also captures the post-invalidation revision of each desired canonical chunk and a
+Every server edit captures the post-invalidation revision of each desired canonical chunk and a
 monotonic revision for every affected active or pending surface tile. The shell considers the edit
 converged only when those canonical chunks and LOD replacements are resident and the renderer confirms
 that the replacement frame reached WGPU submission. Focus eviction explicitly waives representations

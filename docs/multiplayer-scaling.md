@@ -1,17 +1,17 @@
 # Multiplayer scaling envelope
 
-VXWP v5 supports one unsharded authoritative world with up to 512 admitted player sessions. Spatial
+VXWP v6 supports one unsharded authoritative world with up to 512 admitted player sessions. Spatial
 interest management is an internal replication index, not a gameplay shard: every player inside the
 same location's 256 m interest radius can discover every other player there. Players beyond that
 radius contribute no entity records or bytes to one another's presence streams.
 
-## Why v5 replaced complete rosters
+## Why deltas replaced complete rosters
 
 The v4 server encoded every player every 33 ms and sent the complete roster to every connection.
 The exact frame size was `48 + 80 * players` bytes, making aggregate egress quadratic. At 500 players
 that design would send about 607 MB/s (4.85 Gbit/s) before WebSocket/TCP overhead.
 
-V5 hard-bumps the protocol and has no v4 decoder or endpoint. One receiver-specific `PresenceDelta`
+VXWP has no legacy roster decoder or endpoint. One receiver-specific `PresenceDelta`
 contains:
 
 - enter records: player ID, connection handle, color, and initial absolute pose (80 bytes);
@@ -95,23 +95,31 @@ unthrottled WebGPU renderers contend on one local GPU and worker pool, this is a
 p95, maximum, over-33.33 ms count, and dropped-history count remain in the JSON so local contention
 regressions are visible rather than hidden behind one final-frame sample.
 
-This deliberately does not reuse the persistence browser test's same-profile BroadcastChannel. Such
-a test would make local OPFS edits look like networked edits and produce a false multiplayer result.
-The JSON currently records the collaborative-tower scenario as `skipped-unsupported`: although VXWP
-v6 has a server-edit protocol, the browser has no deterministic hook that can submit an edit via that
-production path or inspect a far surface-tile revision. Use the strict form to turn that known gap
-into a failing release gate:
+This deliberately does not reuse the persistence browser test's same-profile BroadcastChannel. The
+strict scenario uses five distinct world sockets to submit 100 voxels through the production server
+edit path while the sixth browser observes from about 120 m away. Every client must apply all 100
+commits, and the observer's resident stride-16 tile must advance to its required server revision and
+finish clean rather than remain dirty. A before/after pixel gate also requires a legible tall change
+around the aimed tower; revision bookkeeping alone cannot pass. Use the explicit strict form in
+release checks:
 
 ```sh
 vp run test:multiplayer-browser -- --require-tower
 ```
 
-Removing the skip requires a diagnostic API which still exercises production behavior: submit a
-voxel operation and receive its authoritative revision, place a deterministic camera while marking a
-presence discontinuity, and read a bounded voxel or surface-tile revision plus content hash. The
-tower assertion must compare the observer's far-LOD revision and rendered fingerprint, not merely the
-number of edit rows. Canonical chunks cover only the near field, so an edit-count assertion would not
-prove that a tower changes the distant silhouette.
+The run records convergence time, edit-only world traffic, the observer's required/accepted surface
+revision, pre/post GPU mesh fingerprints, pixel evidence, per-client frame health, and screenshots in
+`target/multiplayer-browser/`. A separate native WebSocket regression decodes the resulting coarse
+mesh and proves the tower's top survives stride-16; the browser gate proves the real worker uploads
+that revised product and changes the rendered silhouette.
+
+On 2026-07-14 on an M3 Max with Chrome 150, the 10 m/100-voxel tower converged in the far observer in
+198.3 ms. The observer received 97,064 world-stream bytes for commits plus its replacement product;
+builders received 97,064-132,330 bytes and sent 1,166-1,248 bytes while the observer sent 246 bytes.
+All six applied 100 edits, the observer's required and accepted surface revision matched, its tile
+finished resident and clean, and its active GPU fingerprint changed. The aimed screenshot contained
+125 materially changed pixels in a 34-pixel-tall silhouette, including 56 new cyan pixels. Steady
+six-client frame p95 was 33.3-41.4 ms with zero dropped history samples.
 
 ## Capacity and backpressure
 
@@ -121,12 +129,12 @@ connection. Each session can occupy at most two of the eight blocking generation
 has no per-socket outbound queue: a socket builds the newest delta at its next tick and awaits that
 single send, so a slow client cannot accumulate stale movement frames.
 
-Identical immutable chunk or surface batches use process-wide single-flight generation. Concurrent
+Identical chunk or surface batches use process-wide single-flight generation. Concurrent
 requesters join the first computation, and later requesters reuse its compressed VXWP response from
 a 256 MiB byte-bounded LRU while receiving their own request ID. This prevents a crowd spawning in
 one place from performing the same CPU or Metal work hundreds of times. The cache key includes
-product kind, priority, coordinate order, and the server's immutable source instance; server-owned
-edits must add chunk revision before edited products can enter this cache.
+product kind, priority, coordinate order, source identity, and per-product edit revisions. An edit
+therefore invalidates only affected chunk/surface products; unrelated regions retain cache reuse.
 
 The finite generation worker pool is still shared compute. Interest isolation guarantees zero
 cross-region presence candidates and entity bytes, but it cannot promise zero CPU contention while
@@ -139,18 +147,13 @@ Presence is server-relayed but movement is not cheat-safe yet: browsers author p
 checks finite values, monotonic time/sequence, rate, velocity bounds, and explicit large jumps. A WAN
 game needs server-owned input simulation and authenticated identity.
 
-Voxel edits are also not network multiplayer yet. They remain world-scoped SQLite/OPFS state shared
-only among tabs in one browser profile, and the service deliberately does not advertise
-`SERVER_EDITS`. Enabling a second partial edit authority would be less correct than leaving this
-boundary explicit. The next atomic edit phase needs:
+Voxel edits are now native server authority: strict SQLite storage is bound to the world/source
+manifest, operations are idempotent per player, commits carry connection identity and global order,
+and local chunk/surface revisions prevent unrelated cache invalidation. The presence spatial index
+also acts as the inverse edit-interest subscription, so a player 1 km away receives zero commit bytes.
+Bounded per-client queues fail into an explicit full-product resync instead of silently dropping state.
 
-1. chunk-partitioned sparse edit state with monotonic per-chunk revisions;
-2. idempotent operation IDs and deterministic ordering for same-voxel conflicts;
-3. inverse chunk-interest subscriptions so distant clients receive zero edit work;
-4. bounded per-client commit queues with an explicit resync marker on overflow;
-5. revisioned chunk/surface responses that close the generation-versus-edit race; and
-6. native durable server storage before removing the current OPFS authority.
-
-Independent chunks can then commit concurrently while edits touching the same chunk serialize. That
-is internal state partitioning in one world, not sharding: everyone subscribed to a location sees the
-same ordered edits.
+The remaining WAN trust boundary is edit authorization and game rules. The local token and claimed
+player ID do not prove ownership, and the server currently accepts any representable material edit.
+Authenticated accounts, permissions, reach/rate checks, protected regions, moderation/audit policy,
+and server-owned movement must arrive together before exposing the service to the Internet.

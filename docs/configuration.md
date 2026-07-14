@@ -40,15 +40,16 @@ including a mixed on/off baseline, rather than a hard-coded all-enabled state.
 
 Player identity is intentionally not client configuration. The browser keeps a versioned local
 registry: `/` selects its stable default player, while `/?player=alice` selects or creates a named
-local player. All names under one browser profile share the deployment configuration and world edits,
-but camera persistence is keyed by the opaque player ID. See
+local player. All names under one browser profile share deployment configuration, while camera
+persistence is keyed by opaque player ID. World edits belong to the native service and are shared
+across every interested browser profile. See
 [Native world streaming](native-world-streaming.md#local-players-and-two-browser-testing).
 
 ## World-service configuration
 
 `config/world-service.toml` controls the seed, the procedural/Terrain Diffusion provider toggle,
-presence roster cadence and admission bounds, and Terrain Diffusion deployment settings such as
-precision, model cache, model-space origin, and world placement. See
+native edit database and commit-queue bound, presence cadence/admission bounds, and Terrain
+Diffusion deployment settings such as precision, model cache, model-space origin, and world placement. See
 [World service configuration](world-service-config.md) for commands and the complete server schema.
 
 The browser has no embedded world-generation mode. It always negotiates the same provider-neutral

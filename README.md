@@ -18,8 +18,8 @@ streaming, and persistence while the native Rust world service owns generation.
 8. Stress isolated rapid-refresh and multi-tab OPFS handoff in Chrome with
    `vp run test:persistence-browser`.
 9. Force a complete stale-lease retry cycle with `vp run test:persistence-recovery`.
-10. With the world service running, launch two named release clients and verify remote-avatar
-    streaming, rendering, and movement in real Chrome with `vp run test:multiplayer-browser`.
+10. Launch six isolated release clients with shaped links and verify avatars plus a five-builder
+    far-LOD tower in real Chrome with `vp run test:multiplayer-browser -- --require-tower`.
 
 `vp run verify` runs the complete TypeScript, Rust, test, lint, and production-build gate.
 The browser persistence stress test remains explicit because it launches a system Chrome instance.
@@ -125,7 +125,8 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 - Look with the mouse; <kbd>Esc</kbd> releases pointer lock.
 - Remove the targeted voxel with the left mouse button; place the Rust-selected material with the
   right mouse button. Cycle Grass, Stone, Basalt, and Glow Crystal from the Mission Control context
-  menu. Sparse edits are saved transactionally in SQLite on OPFS.
+  menu. Sparse edits are committed transactionally by the native world service and streamed to
+  every interested browser; browser OPFS stores only local player camera state.
 - Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and context menu
   can toggle cascaded sun shadows, voxel AO, screen-space contact AO, fog, far terrain, animated
   water, target highlighting, material surface detail, or voxel emissive lights without a DOM UI
@@ -139,4 +140,6 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 `window.__VOXELS__.snapshot()` returns a versioned numeric telemetry stream for browser automation.
 It contains camera, renderer, streaming, memory, water, GPU, sustained-profile, frame-history, and
 edit-convergence records. It is intentionally an automation hook rather than a second JavaScript game
-model; the browser owns no simulation or UI state.
+model; the browser owns no simulation or UI state. `submitEdit(...)` and `surfaceEditState(...)`
+exercise the production server-edit path and expose only bounded convergence state for multiplayer
+regression tests.

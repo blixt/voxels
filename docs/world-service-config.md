@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 6
+schema_version = 7
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "procedural-v16"
@@ -60,6 +60,10 @@ far_update_interval_ms = 250
 max_records_per_delta = 64
 prediction_error_centimetres = 25
 look_error_milliradians = 175
+
+[edits]
+database = "../tmp/world-edits.sqlite3"
+change_queue_capacity = 256
 
 [spawn]
 xz_voxels = [0, 0]
@@ -117,6 +121,12 @@ connections and queued work, and the per-client worker cap prevents one connecti
 the complete local generation pool. `product_cache_bytes` bounds an LRU of compressed immutable
 batch responses. Concurrent identical batches single-flight through one CPU/Metal generation and
 then receive independently request-ID-keyed copies of that response.
+
+`[edits].database` is the native authoritative sparse-edit SQLite file. Relative paths resolve from
+the service configuration, not the process working directory. Startup initializes only schema 1 and
+rejects another schema or a database bound to a different world/source manifest; there are no
+migrations or fallback authorities. `change_queue_capacity` bounds each interested client's commit
+queue. A saturated queue gets an explicit resync marker, after which it reloads retained products.
 
 The presence section controls the independent low-latency delta stream. `spatial_cell_metres`,
 `interest_radius_metres`, and `interest_hysteresis_metres` define receiver-specific interest without
