@@ -8,7 +8,9 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
-use voxels_world::protocol::{FRAME_HEADER_BYTES, MAX_PROTOCOL_FRAME_BYTES};
+use voxels_world::protocol::{
+    FRAME_HEADER_BYTES, MAX_PLAYERS_PER_PRESENCE_SNAPSHOT, MAX_PROTOCOL_FRAME_BYTES,
+};
 use voxels_world::{
     HeightfieldWorldSource, MacroTerrainSource, ProceduralWorldSource, SEA_LEVEL_VOXELS, WorldId,
     WorldSourceEngine, WorldSourceError,
@@ -19,14 +21,15 @@ use voxels_world_terrain_diffusion::{
     TerrainDiffusionConfig, TerrainPrecision, validate_model_root,
 };
 
+mod presence;
 pub mod server;
 
 pub use server::{
-    WORLD_WEBSOCKET_PATH, WORLD_WEBSOCKET_PROTOCOL, WorldServer, WorldServerError,
-    serve_loaded_config,
+    PRESENCE_WEBSOCKET_PATH, WORLD_WEBSOCKET_PATH, WORLD_WEBSOCKET_PROTOCOL, WorldServer,
+    WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 4;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 5;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
     0x76, 0x6f, 0x78, 0x65, 0x6c, 0x73, 0x40, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x01,
@@ -70,6 +73,30 @@ impl Default for LoopbackTransportConfig {
             global_queue_capacity: 128,
             generation_workers: 8,
             generation_workers_per_client: 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresenceConfig {
+    /// Server roster cadence. Pose packets are coalesced into this latest complete snapshot.
+    pub broadcast_interval_ms: u16,
+    /// Hard player bound for one world. The v3 wire format currently supports at most 64.
+    pub max_players: u16,
+    /// Per-player inbound abuse bound. Clients normally send at 30 Hz.
+    pub max_pose_updates_per_second: u16,
+    /// Larger position changes require the explicit discontinuity flag.
+    pub teleport_distance_metres: u16,
+}
+
+impl Default for PresenceConfig {
+    fn default() -> Self {
+        Self {
+            broadcast_interval_ms: 33,
+            max_players: 32,
+            max_pose_updates_per_second: 60,
+            teleport_distance_metres: 4,
         }
     }
 }
@@ -133,6 +160,7 @@ pub struct WorldServiceConfig {
     pub world_seed: u64,
     pub source: WorldSourceMode,
     pub transport: LoopbackTransportConfig,
+    pub presence: PresenceConfig,
     pub spawn: SpawnConfig,
     pub terrain_diffusion: TerrainDiffusionProviderConfig,
 }
@@ -145,6 +173,7 @@ impl Default for WorldServiceConfig {
             world_seed: 0x5eed_cafe,
             source: WorldSourceMode::ProceduralV16,
             transport: LoopbackTransportConfig::default(),
+            presence: PresenceConfig::default(),
             spawn: SpawnConfig::default(),
             terrain_diffusion: TerrainDiffusionProviderConfig::default(),
         }
@@ -232,6 +261,29 @@ impl WorldServiceConfig {
                 "generation worker limits must be nonzero and per-client must not exceed global",
             ));
         }
+        if !(16..=1_000).contains(&self.presence.broadcast_interval_ms) {
+            return Err(WorldServiceConfigError::InvalidPresence(
+                "broadcast_interval_ms must be in 16..=1000",
+            ));
+        }
+        if self.presence.max_players == 0
+            || usize::from(self.presence.max_players) > MAX_PLAYERS_PER_PRESENCE_SNAPSHOT
+            || self.presence.max_players > self.transport.max_connections
+        {
+            return Err(WorldServiceConfigError::InvalidPresence(
+                "max_players must be nonzero and fit both the protocol and connection limit",
+            ));
+        }
+        if !(1..=120).contains(&self.presence.max_pose_updates_per_second) {
+            return Err(WorldServiceConfigError::InvalidPresence(
+                "max_pose_updates_per_second must be in 1..=120",
+            ));
+        }
+        if !(1..=64).contains(&self.presence.teleport_distance_metres) {
+            return Err(WorldServiceConfigError::InvalidPresence(
+                "teleport_distance_metres must be in 1..=64",
+            ));
+        }
         Ok(())
     }
 
@@ -304,6 +356,7 @@ pub enum WorldServiceConfigError {
         found: u16,
     },
     InvalidConcurrency(&'static str),
+    InvalidPresence(&'static str),
 }
 
 impl fmt::Display for WorldServiceConfigError {
@@ -346,6 +399,9 @@ impl fmt::Display for WorldServiceConfigError {
             ),
             Self::InvalidConcurrency(reason) => {
                 write!(formatter, "invalid world-service concurrency: {reason}")
+            }
+            Self::InvalidPresence(reason) => {
+                write!(formatter, "invalid world-service presence: {reason}")
             }
         }
     }
@@ -538,7 +594,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 4
+schema_version = 5
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -554,6 +610,12 @@ max_connections = 32
 global_queue_capacity = 128
 generation_workers = 8
 generation_workers_per_client = 2
+
+[presence]
+broadcast_interval_ms = 33
+max_players = 32
+max_pose_updates_per_second = 60
+teleport_distance_metres = 4
 
 [spawn]
 xz_voxels = [0, 0]
@@ -607,12 +669,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 4", "schema_version = 3");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 5", "schema_version = 4");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 4,
-                found: 3,
+                expected: 5,
+                found: 4,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
@@ -631,6 +693,7 @@ sea_level_voxels = 52
 
         for missing in [
             "max_connections = 32\n",
+            "broadcast_interval_ms = 33\n",
             "xz_voxels = [0, 0]\n",
             "precision = \"float16\"\n",
         ] {

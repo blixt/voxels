@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 4
+schema_version = 5
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -19,6 +19,15 @@ max_connections = 32
 global_queue_capacity = 128
 generation_workers = 8
 generation_workers_per_client = 2
+
+[presence]
+# Full, coalesced rosters at about 30 Hz keep motion responsive without ever queueing stale poses.
+broadcast_interval_ms = 33
+max_players = 32
+# Browsers normally send at 30 Hz; this higher ceiling permits modest timer catch-up without abuse.
+max_pose_updates_per_second = 60
+# Larger motion must be explicitly marked as a teleport/respawn discontinuity.
+teleport_distance_metres = 4
 
 [spawn]
 # Must lie inside the selected source's valid coverage. Startup samples this exact coordinate.

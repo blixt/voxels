@@ -18,9 +18,9 @@ futures-util = { version = "0.3", features = ["sink"] }
 voxels-world = { path = "../world" }
 voxels-world-terrain-diffusion = { path = "../world-terrain-diffusion", default-features = false }
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.9.8"
-uuid = { version = "1", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"

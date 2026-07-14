@@ -2,6 +2,7 @@
 
 use crate::{
     LoadedWorldServiceConfig, WorldServiceConfig, WorldServiceConfigError, WorldServiceSourceError,
+    presence::{PoseAdmission, PresenceHub},
 };
 use axum::Router;
 use axum::extract::State;
@@ -21,12 +22,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use voxels_world::protocol::{
-    BrowserUserId, ChunkBatchItem, ChunkBatchRequest, ChunkBatchResult, PlayerId, PlayerIdentity,
-    SpawnPoint, SurfaceTileBatchItem, SurfaceTileBatchRequest, SurfaceTileBatchResult,
-    WorldCapabilities, WorldOpened, cancel_kind, chunk_batch_kind, decode_cancel,
-    decode_chunk_batch, decode_open_world, decode_surface_tile_batch, encode_chunk_batch_result,
-    encode_error, encode_surface_tile_batch_result, encode_world_opened, message_kind,
-    open_world_kind, surface_tile_batch_kind,
+    ChunkBatchItem, ChunkBatchRequest, ChunkBatchResult, PlayerIdentity, PresenceOpened,
+    PresencePong, PresenceSessionId, SpawnPoint, SurfaceTileBatchItem, SurfaceTileBatchRequest,
+    SurfaceTileBatchResult, WorldCapabilities, WorldOpened, cancel_kind, chunk_batch_kind,
+    decode_cancel, decode_chunk_batch, decode_open_presence, decode_open_world, decode_player_pose,
+    decode_presence_ping, decode_surface_tile_batch, encode_chunk_batch_result, encode_error,
+    encode_presence_opened, encode_presence_pong, encode_surface_tile_batch_result,
+    encode_world_opened, message_kind, open_presence_kind, open_world_kind, player_pose_kind,
+    presence_ping_kind, surface_tile_batch_kind,
 };
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, Material, SurfaceSampleBlockRequest, WORLD_SCHEMA_VERSION,
@@ -34,8 +37,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v2/world";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v2";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v3/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v3/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v3";
 
 /// Prepared server state. Source construction and spawn coverage validation happen before bind.
 pub struct WorldServer {
@@ -67,6 +71,7 @@ impl WorldServer {
             config.transport.max_frame_bytes,
         ));
 
+        let presence = PresenceHub::new(config.presence);
         let state = Arc::new(ServerState {
             allowed_origins: config.transport.allowed_origins,
             auth_subprotocol_token: config.transport.auth_subprotocol_token,
@@ -77,12 +82,16 @@ impl WorldServer {
             connections: Arc::new(Semaphore::new(usize::from(
                 config.transport.max_connections,
             ))),
+            presence_connections: Arc::new(Semaphore::new(usize::from(
+                config.transport.max_connections,
+            ))),
             world,
-            active_players: Mutex::new(HashMap::new()),
+            presence,
             generation_tx,
         });
         let router = Router::new()
-            .route(WORLD_WEBSOCKET_PATH, get(websocket_endpoint))
+            .route(WORLD_WEBSOCKET_PATH, get(world_websocket_endpoint))
+            .route(PRESENCE_WEBSOCKET_PATH, get(presence_websocket_endpoint))
             .with_state(state);
         Ok(Self { router })
     }
@@ -225,7 +234,9 @@ fn prepare_world(
     manifest.validate()?;
     Ok(WorldBootstrap {
         manifest,
-        capabilities: WorldCapabilities::CANONICAL_CHUNKS.union(WorldCapabilities::SURFACE_LOD),
+        capabilities: WorldCapabilities::CANONICAL_CHUNKS
+            .union(WorldCapabilities::SURFACE_LOD)
+            .union(WorldCapabilities::PLAYER_PRESENCE),
         spawn: SpawnPoint {
             x: config.spawn.xz_voxels[0],
             z: config.spawn.xz_voxels[1],
@@ -248,12 +259,20 @@ struct WorldBootstrap {
 }
 
 impl WorldBootstrap {
-    fn opened(&self, identity: PlayerIdentity, recommended_in_flight_batches: u16) -> WorldOpened {
+    fn opened(
+        &self,
+        identity: PlayerIdentity,
+        recommended_in_flight_batches: u16,
+        connection_id: u64,
+        presence_session_id: PresenceSessionId,
+    ) -> WorldOpened {
         WorldOpened {
             manifest: self.manifest.clone(),
             capabilities: self.capabilities,
             recommended_in_flight_batches,
             identity,
+            connection_id,
+            presence_session_id,
             spawn: self.spawn,
         }
     }
@@ -313,49 +332,13 @@ struct ServerState {
     max_in_flight_batches: u16,
     generation_workers_per_client: u16,
     connections: Arc<Semaphore>,
+    presence_connections: Arc<Semaphore>,
     world: WorldBootstrap,
-    active_players: Mutex<HashMap<PlayerId, BrowserUserId>>,
+    presence: Arc<PresenceHub>,
     generation_tx: mpsc::Sender<GenerationJob>,
 }
 
-struct ActivePlayerClaim {
-    state: Arc<ServerState>,
-    player_id: PlayerId,
-    browser_user_id: BrowserUserId,
-}
-
-impl ActivePlayerClaim {
-    fn acquire(state: Arc<ServerState>, identity: &PlayerIdentity) -> Option<Self> {
-        let mut active = match state.active_players.lock() {
-            Ok(active) => active,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if active.contains_key(&identity.player_id) {
-            return None;
-        }
-        active.insert(identity.player_id, identity.browser_user_id);
-        drop(active);
-        Some(Self {
-            state,
-            player_id: identity.player_id,
-            browser_user_id: identity.browser_user_id,
-        })
-    }
-}
-
-impl Drop for ActivePlayerClaim {
-    fn drop(&mut self) {
-        let mut active = match self.state.active_players.lock() {
-            Ok(active) => active,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if active.get(&self.player_id) == Some(&self.browser_user_id) {
-            active.remove(&self.player_id);
-        }
-    }
-}
-
-async fn websocket_endpoint(
+async fn world_websocket_endpoint(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     websocket: WebSocketUpgrade,
@@ -400,6 +383,53 @@ async fn websocket_endpoint(
             let _connection_permit = connection_permit;
             run_session(socket, state).await;
         })
+}
+
+async fn presence_websocket_endpoint(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    websocket: WebSocketUpgrade,
+) -> Response {
+    if !request_is_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "world-service authorization required",
+        )
+            .into_response();
+    }
+    let connection_permit = match Arc::clone(&state.presence_connections).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "world-service presence is at capacity",
+            )
+                .into_response();
+        }
+    };
+    let max_frame_bytes = state.max_frame_bytes;
+    websocket
+        .max_frame_size(max_frame_bytes)
+        .max_message_size(max_frame_bytes)
+        .protocols([WORLD_WEBSOCKET_PROTOCOL])
+        .on_upgrade(move |socket| async move {
+            let _connection_permit = connection_permit;
+            run_presence_session(socket, state).await;
+        })
+}
+
+fn request_is_authorized(state: &ServerState, headers: &HeaderMap) -> bool {
+    headers
+        .get(ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|origin| {
+            state
+                .allowed_origins
+                .iter()
+                .any(|allowed| allowed == origin)
+        })
+        && header_offers_protocol(headers, WORLD_WEBSOCKET_PROTOCOL)
+        && header_offers_protocol(headers, &state.auth_subprotocol_token)
 }
 
 fn header_offers_protocol(headers: &HeaderMap, expected: &str) -> bool {
@@ -548,7 +578,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
             return;
         }
     };
-    let Some(_player_claim) = ActivePlayerClaim::acquire(Arc::clone(&state), &open.identity) else {
+    let Some(player_claim) = state.presence.join(&open.identity) else {
         let _ = socket
             .send(Message::Binary(
                 encode_error(0, "player is already connected").into(),
@@ -570,7 +600,12 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
     let writer = tokio::spawn(write_frames(sink, outbound_rx, writer_session));
     let reader = tokio::spawn(read_frames(stream, inbound_tx, state.max_frame_bytes));
 
-    let opened = state.world.opened(open.identity, negotiated_window);
+    let opened = state.world.opened(
+        open.identity,
+        negotiated_window,
+        player_claim.connection_id,
+        player_claim.session_id,
+    );
     if outbound
         .send(OutboundFrame {
             bytes: encode_world_opened(&opened),
@@ -713,6 +748,157 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
     let _ = reader.await;
     drop(outbound);
     let _ = writer.await;
+}
+
+async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
+    let first = match next_socket_binary(&mut socket).await {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return,
+        Err(message) => {
+            let _ = socket
+                .send(Message::Binary(encode_error(0, message).into()))
+                .await;
+            return;
+        }
+    };
+    let open = match decode_open_presence(&first) {
+        Ok(open) => open,
+        Err(error) => {
+            let _ = socket
+                .send(Message::Binary(encode_error(0, &error.to_string()).into()))
+                .await;
+            return;
+        }
+    };
+    let Some(attachment) = state.presence.attach(open.session_id) else {
+        let _ = socket
+            .send(Message::Binary(
+                encode_error(0, "presence session is invalid or already attached").into(),
+            ))
+            .await;
+        return;
+    };
+    let config = state.presence.config();
+    let opened = PresenceOpened {
+        connection_id: attachment.connection_id,
+        server_time_ms: state.presence.now_ms(),
+        broadcast_interval_ms: config.broadcast_interval_ms,
+        max_players: config.max_players,
+    };
+    let opened = match encode_presence_opened(opened) {
+        Ok(opened) => opened,
+        Err(_) => return,
+    };
+    if socket.send(Message::Binary(opened.into())).await.is_err() {
+        return;
+    }
+    let mut snapshots = state.presence.subscribe();
+    let initial_snapshot = snapshots.borrow().clone();
+    if socket
+        .send(Message::Binary(initial_snapshot.as_ref().clone().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            message = socket.recv() => {
+                let bytes = match message {
+                    Some(Ok(Message::Binary(bytes))) if bytes.len() <= state.max_frame_bytes => {
+                        bytes.to_vec()
+                    }
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(Message::Binary(_))) => {
+                        let _ = socket.send(Message::Binary(
+                            encode_error(0, "VXWP frame exceeds configured limit").into(),
+                        )).await;
+                        break;
+                    }
+                    Some(Ok(Message::Text(_))) => {
+                        let _ = socket.send(Message::Binary(
+                            encode_error(0, "VXWP accepts binary messages only").into(),
+                        )).await;
+                        break;
+                    }
+                };
+                let kind = match message_kind(&bytes) {
+                    Ok(kind) => kind,
+                    Err(error) => {
+                        let _ = socket.send(Message::Binary(
+                            encode_error(0, &error.to_string()).into(),
+                        )).await;
+                        break;
+                    }
+                };
+                if kind == player_pose_kind() {
+                    let pose = match decode_player_pose(&bytes) {
+                        Ok(pose) => pose,
+                        Err(error) => {
+                            let _ = socket.send(Message::Binary(
+                                encode_error(0, &error.to_string()).into(),
+                            )).await;
+                            break;
+                        }
+                    };
+                    match state.presence.accept_pose(&attachment, pose) {
+                        PoseAdmission::Accepted
+                        | PoseAdmission::IgnoredStale
+                        | PoseAdmission::IgnoredRateLimit => {}
+                        PoseAdmission::SessionClosed => break,
+                        PoseAdmission::Invalid(message) => {
+                            let _ = socket.send(Message::Binary(encode_error(0, message).into())).await;
+                            break;
+                        }
+                    }
+                } else if kind == presence_ping_kind() {
+                    let ping = match decode_presence_ping(&bytes) {
+                        Ok(ping) => ping,
+                        Err(error) => {
+                            let _ = socket.send(Message::Binary(
+                                encode_error(0, &error.to_string()).into(),
+                            )).await;
+                            break;
+                        }
+                    };
+                    let receive_time = state.presence.now_ms();
+                    let pong = PresencePong {
+                        sequence: ping.sequence,
+                        client_send_time_ms: ping.client_send_time_ms,
+                        server_receive_time_ms: receive_time,
+                        server_send_time_ms: state.presence.now_ms().max(receive_time),
+                    };
+                    let Ok(pong) = encode_presence_pong(pong) else {
+                        break;
+                    };
+                    if socket.send(Message::Binary(pong.into())).await.is_err() {
+                        break;
+                    }
+                } else if kind == open_presence_kind() {
+                    let _ = socket.send(Message::Binary(
+                        encode_error(0, "presence session is already open").into(),
+                    )).await;
+                    break;
+                } else {
+                    let _ = socket.send(Message::Binary(
+                        encode_error(0, "unexpected presence message kind").into(),
+                    )).await;
+                    break;
+                }
+            }
+            changed = snapshots.changed() => {
+                if changed.is_err() || !state.presence.is_attached(&attachment) {
+                    break;
+                }
+                let bytes = snapshots.borrow_and_update().clone();
+                if socket.send(Message::Binary(bytes.as_ref().clone().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 enum InboundFrame {
@@ -965,7 +1151,7 @@ fn generate_chunk_result(
 mod tests {
     use super::*;
     use crate::{
-        LoopbackTransportConfig, SpawnConfig, TerrainDiffusionProviderConfig,
+        LoopbackTransportConfig, PresenceConfig, SpawnConfig, TerrainDiffusionProviderConfig,
         WORLD_SERVICE_CONFIG_SCHEMA_VERSION, WorldSourceMode,
     };
     use futures_util::{SinkExt, StreamExt};
@@ -976,10 +1162,12 @@ mod tests {
     use tokio_tungstenite::tungstenite::protocol::Message as ClientMessage;
     use uuid::Uuid;
     use voxels_world::protocol::{
-        BrowserUserId, ChunkBatchRequest, OpenWorld, PlayerId, PlayerIdentity,
-        SurfaceTileBatchRequest, decode_chunk_batch_result, decode_error,
-        decode_surface_tile_batch_result, decode_world_opened, encode_chunk_batch,
-        encode_open_world, encode_surface_tile_batch,
+        BrowserUserId, ChunkBatchRequest, OpenPresence, OpenWorld, PLAYER_POSE_GROUNDED, PlayerId,
+        PlayerIdentity, PlayerPoseUpdate, PresenceOpened, PresenceSnapshot,
+        SurfaceTileBatchRequest, decode_chunk_batch_result, decode_error, decode_presence_opened,
+        decode_presence_snapshot, decode_surface_tile_batch_result, decode_world_opened,
+        encode_chunk_batch, encode_open_presence, encode_open_world, encode_player_pose,
+        encode_surface_tile_batch, presence_snapshot_kind,
     };
     use voxels_world::{
         ChunkCoord, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, WorldProductPriority,
@@ -1002,6 +1190,10 @@ mod tests {
                 global_queue_capacity: 8,
                 generation_workers: 4,
                 generation_workers_per_client: 2,
+            },
+            presence: PresenceConfig {
+                max_players: 4,
+                ..PresenceConfig::default()
             },
             spawn: SpawnConfig {
                 xz_voxels: [13, -21],
@@ -1077,7 +1269,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v2, test-local-token"),
+            HeaderValue::from_static("voxels.world.v3, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -1181,6 +1373,78 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn two_presence_channels_receive_the_same_complete_roster_and_disconnect()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = test_config();
+        let listener = TcpListener::bind(config.transport.listen).await?;
+        let address = listener.local_addr()?;
+        let server = WorldServer::new(
+            config.clone(),
+            Box::new(ProceduralWorldSource::new(config.world_seed)),
+        )?;
+        let server_task = tokio::spawn(server.serve(listener));
+
+        let (mut first_world, first_opened) =
+            connect_test_client(address, player_identity(1, 2, "alice")).await?;
+        let (mut second_world, second_opened) =
+            connect_test_client(address, player_identity(1, 3, "bob")).await?;
+        let (mut first_presence, first_presence_opened) =
+            connect_test_presence(address, first_opened.presence_session_id).await?;
+        let (mut second_presence, second_presence_opened) =
+            connect_test_presence(address, second_opened.presence_session_id).await?;
+        assert_eq!(
+            first_presence_opened.connection_id,
+            first_opened.connection_id
+        );
+        assert_eq!(
+            second_presence_opened.connection_id,
+            second_opened.connection_id
+        );
+
+        for (socket, sequence, x) in [
+            (&mut first_presence, 1_u64, 1.0_f32),
+            (&mut second_presence, 1_u64, 3.0_f32),
+        ] {
+            socket
+                .send(ClientMessage::Binary(
+                    encode_player_pose(PlayerPoseUpdate {
+                        sequence,
+                        sample_server_time_ms: 0,
+                        eye_position_metres: [x, 1.62, 2.0],
+                        linear_velocity_metres_per_second: [1.0, 0.0, 0.0],
+                        look_yaw_radians: 0.25,
+                        look_pitch_radians: -0.1,
+                        flags: PLAYER_POSE_GROUNDED,
+                    })?
+                    .into(),
+                ))
+                .await?;
+        }
+
+        let first_roster = next_presence_roster(&mut first_presence, 2).await?;
+        let second_roster = next_presence_roster(&mut second_presence, 2).await?;
+        assert_eq!(first_roster.players, second_roster.players);
+        assert_ne!(
+            first_roster.players[0].color_index,
+            first_roster.players[1].color_index
+        );
+
+        first_world.close(None).await?;
+        let remaining = next_presence_roster(&mut second_presence, 1).await?;
+        assert_eq!(
+            remaining.players[0].player_id,
+            second_opened.identity.player_id
+        );
+
+        second_world.close(None).await?;
+        first_presence.close(None).await?;
+        second_presence.close(None).await?;
+        server_task.abort();
+        let _ = server_task.await;
+        Ok(())
+    }
+
     async fn connect_test_client(
         address: SocketAddr,
         identity: PlayerIdentity,
@@ -1216,7 +1480,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v2, test-local-token"),
+            HeaderValue::from_static("voxels.world.v3, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -1230,6 +1494,58 @@ mod tests {
             .await?;
         let response = next_client_binary(&mut socket).await?;
         Ok((socket, response))
+    }
+
+    async fn connect_test_presence(
+        address: SocketAddr,
+        session_id: PresenceSessionId,
+    ) -> Result<
+        (
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            PresenceOpened,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let mut request =
+            format!("ws://{address}{PRESENCE_WEBSOCKET_PATH}").into_client_request()?;
+        request
+            .headers_mut()
+            .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
+        request.headers_mut().insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("voxels.world.v3, test-local-token"),
+        );
+        let (mut socket, _) = connect_async(request).await?;
+        socket
+            .send(ClientMessage::Binary(
+                encode_open_presence(OpenPresence { session_id })?.into(),
+            ))
+            .await?;
+        let response = next_client_binary(&mut socket).await?;
+        Ok((socket, decode_presence_opened(&response)?))
+    }
+
+    async fn next_presence_roster<S>(
+        socket: &mut tokio_tungstenite::WebSocketStream<S>,
+        player_count: usize,
+    ) -> Result<PresenceSnapshot, Box<dyn std::error::Error>>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let bytes = next_client_binary(socket).await?;
+                if message_kind(&bytes)? == presence_snapshot_kind() {
+                    let snapshot = decode_presence_snapshot(&bytes)?;
+                    if snapshot.players.len() == player_count {
+                        return Ok(snapshot);
+                    }
+                }
+            }
+        })
+        .await?
     }
 
     async fn next_client_binary<S>(
