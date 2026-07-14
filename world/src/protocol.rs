@@ -7,18 +7,20 @@
 use crate::{
     ChunkCoord, ChunkSnapshot, Material, MeshingHalo, ModelIdentity, SourceDeviceRequirement,
     SurfaceBounds, SurfaceLodLevel, SurfacePatch, SurfaceQuad, SurfaceRegion, SurfaceTileCoord,
-    SurfaceTileMesh, SurfaceTileSnapshot, WaterPatch, WaterTileMesh, WorldId, WorldManifest,
-    WorldProductPriority, WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash,
-    WorldSourceKind, codec,
+    SurfaceTileMesh, SurfaceTileSnapshot, VOXEL_SIZE_METRES, WaterPatch, WaterTileMesh, WorldId,
+    WorldManifest, WorldProductPriority, WorldSourceError, WorldSourceIdentity,
+    WorldSourceIdentityHash, WorldSourceKind, codec,
 };
+use std::collections::BTreeSet;
 use std::fmt;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
 pub const MAX_SURFACE_TILES_PER_BATCH: usize = 32;
+pub const MAX_PLAYERS_PER_PRESENCE_SNAPSHOT: usize = 64;
 pub const MAX_PLAYER_NAME_BYTES: usize = 32;
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
@@ -33,6 +35,12 @@ const KIND_CANCEL: u16 = 5;
 const KIND_ERROR: u16 = 6;
 const KIND_SURFACE_TILE_BATCH: u16 = 7;
 const KIND_SURFACE_TILE_BATCH_RESULT: u16 = 8;
+const KIND_OPEN_PRESENCE: u16 = 9;
+const KIND_PRESENCE_OPENED: u16 = 10;
+const KIND_PLAYER_POSE: u16 = 11;
+const KIND_PRESENCE_SNAPSHOT: u16 = 12;
+const KIND_PRESENCE_PING: u16 = 13;
+const KIND_PRESENCE_PONG: u16 = 14;
 const FLAG_NONE: u16 = 0;
 const RESERVED: u16 = 0;
 const HALO_HASH_DOMAIN: &[u8] = b"voxels-wire-halo-v1\0";
@@ -49,6 +57,7 @@ impl WorldCapabilities {
     pub const SKYLINE_LANDMARKS: Self = Self(1 << 5);
     pub const AUTHORED_ROUTES: Self = Self(1 << 6);
     pub const CINDER_VAULT: Self = Self(1 << 7);
+    pub const PLAYER_PRESENCE: Self = Self(1 << 8);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -106,6 +115,7 @@ macro_rules! opaque_uuid_id {
 
 opaque_uuid_id!(BrowserUserId);
 opaque_uuid_id!(PlayerId);
+opaque_uuid_id!(PresenceSessionId);
 
 /// Browser-local identity claim used until authenticated server accounts exist.
 ///
@@ -158,7 +168,70 @@ pub struct WorldOpened {
     pub capabilities: WorldCapabilities,
     pub recommended_in_flight_batches: u16,
     pub identity: PlayerIdentity,
+    pub connection_id: u64,
+    pub presence_session_id: PresenceSessionId,
     pub spawn: SpawnPoint,
+}
+
+pub const PLAYER_POSE_GROUNDED: u16 = 1 << 0;
+pub const PLAYER_POSE_SWIMMING: u16 = 1 << 1;
+pub const PLAYER_POSE_DISCONTINUITY: u16 = 1 << 2;
+const PLAYER_POSE_FLAGS: u16 =
+    PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_DISCONTINUITY;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OpenPresence {
+    pub session_id: PresenceSessionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PresenceOpened {
+    pub connection_id: u64,
+    pub server_time_ms: u64,
+    pub broadcast_interval_ms: u16,
+    pub max_players: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlayerPoseUpdate {
+    pub sequence: u64,
+    /// Sender sample time mapped into the server monotonic clock. Zero asks the server to stamp
+    /// receipt time while the clock handshake is still converging.
+    pub sample_server_time_ms: u64,
+    pub eye_position_metres: [f32; 3],
+    pub linear_velocity_metres_per_second: [f32; 3],
+    pub look_yaw_radians: f32,
+    pub look_pitch_radians: f32,
+    pub flags: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlayerPresenceState {
+    pub player_id: PlayerId,
+    pub connection_id: u64,
+    pub color_index: u8,
+    pub pose: PlayerPoseUpdate,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresenceSnapshot {
+    pub snapshot_sequence: u64,
+    pub server_time_ms: u64,
+    pub players: Vec<PlayerPresenceState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PresencePing {
+    pub sequence: u32,
+    pub client_send_time_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PresencePong {
+    pub sequence: u32,
+    pub client_send_time_ms: u64,
+    pub server_receive_time_ms: u64,
+    pub server_send_time_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -294,8 +367,10 @@ pub fn decode_open_world(bytes: &[u8]) -> Result<OpenWorld, ProtocolError> {
 }
 
 pub fn encode_world_opened(opened: &WorldOpened) -> Vec<u8> {
+    debug_assert!(opened.connection_id != 0);
+    debug_assert!(!opened.presence_session_id.is_nil());
     let manifest = encode_manifest(&opened.manifest);
-    let mut payload = Vec::with_capacity(manifest.len() + 64);
+    let mut payload = Vec::with_capacity(manifest.len() + 88);
     push_u32(&mut payload, manifest.len() as u32);
     payload.extend_from_slice(&manifest);
     push_u64(&mut payload, opened.capabilities.bits());
@@ -303,6 +378,8 @@ pub fn encode_world_opened(opened: &WorldOpened) -> Vec<u8> {
     payload.extend_from_slice(opened.identity.browser_user_id.as_bytes());
     payload.extend_from_slice(opened.identity.player_id.as_bytes());
     push_string(&mut payload, &opened.identity.player_name);
+    push_u64(&mut payload, opened.connection_id);
+    payload.extend_from_slice(opened.presence_session_id.as_bytes());
     push_i32(&mut payload, opened.spawn.x);
     push_i32(&mut payload, opened.spawn.z);
     push_i32(&mut payload, opened.spawn.height);
@@ -340,6 +417,14 @@ pub fn decode_world_opened(bytes: &[u8]) -> Result<WorldOpened, ProtocolError> {
         player_name: cursor.string()?,
     };
     validate_player_identity(&identity)?;
+    let connection_id = cursor.u64()?;
+    if connection_id == 0 {
+        return Err(ProtocolError::InvalidPayload("world connection id is zero"));
+    }
+    let presence_session_id = PresenceSessionId::from_bytes(cursor.array()?);
+    if presence_session_id.is_nil() {
+        return Err(ProtocolError::InvalidPayload("presence session id is nil"));
+    }
     let x = cursor.i32()?;
     let z = cursor.i32()?;
     let height = cursor.i32()?;
@@ -372,6 +457,8 @@ pub fn decode_world_opened(bytes: &[u8]) -> Result<WorldOpened, ProtocolError> {
         capabilities,
         recommended_in_flight_batches,
         identity,
+        connection_id,
+        presence_session_id,
         spawn: SpawnPoint {
             x,
             z,
@@ -731,6 +818,247 @@ pub fn decode_cancel(bytes: &[u8]) -> Result<u64, ProtocolError> {
     Ok(frame.request_id)
 }
 
+pub fn encode_open_presence(open: OpenPresence) -> Result<Vec<u8>, ProtocolError> {
+    if open.session_id.is_nil() {
+        return Err(ProtocolError::InvalidPayload("presence session id is nil"));
+    }
+    Ok(encode_frame(
+        KIND_OPEN_PRESENCE,
+        0,
+        open.session_id.as_bytes(),
+    ))
+}
+
+pub fn decode_open_presence(bytes: &[u8]) -> Result<OpenPresence, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_zero_request_id(&frame)?;
+    expect_kind(&frame, KIND_OPEN_PRESENCE)?;
+    let mut cursor = Cursor::new(frame.payload);
+    let session_id = PresenceSessionId::from_bytes(cursor.array()?);
+    cursor.finish()?;
+    if session_id.is_nil() {
+        return Err(ProtocolError::InvalidPayload("presence session id is nil"));
+    }
+    Ok(OpenPresence { session_id })
+}
+
+pub fn encode_presence_opened(opened: PresenceOpened) -> Result<Vec<u8>, ProtocolError> {
+    if opened.connection_id == 0
+        || opened.server_time_ms == 0
+        || opened.broadcast_interval_ms == 0
+        || opened.max_players == 0
+        || usize::from(opened.max_players) > MAX_PLAYERS_PER_PRESENCE_SNAPSHOT
+    {
+        return Err(ProtocolError::InvalidPayload("invalid PresenceOpened body"));
+    }
+    let mut payload = Vec::with_capacity(24);
+    push_u64(&mut payload, opened.connection_id);
+    push_u64(&mut payload, opened.server_time_ms);
+    push_u16(&mut payload, opened.broadcast_interval_ms);
+    push_u16(&mut payload, opened.max_players);
+    push_u32(&mut payload, 0);
+    Ok(encode_frame(KIND_PRESENCE_OPENED, 0, &payload))
+}
+
+pub fn decode_presence_opened(bytes: &[u8]) -> Result<PresenceOpened, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_zero_request_id(&frame)?;
+    expect_kind(&frame, KIND_PRESENCE_OPENED)?;
+    let mut cursor = Cursor::new(frame.payload);
+    let opened = PresenceOpened {
+        connection_id: cursor.u64()?,
+        server_time_ms: cursor.u64()?,
+        broadcast_interval_ms: cursor.u16()?,
+        max_players: cursor.u16()?,
+    };
+    if cursor.u32()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved PresenceOpened field is nonzero",
+        ));
+    }
+    cursor.finish()?;
+    if opened.connection_id == 0
+        || opened.server_time_ms == 0
+        || opened.broadcast_interval_ms == 0
+        || opened.max_players == 0
+        || usize::from(opened.max_players) > MAX_PLAYERS_PER_PRESENCE_SNAPSHOT
+    {
+        return Err(ProtocolError::InvalidPayload("invalid PresenceOpened body"));
+    }
+    Ok(opened)
+}
+
+pub fn encode_player_pose(pose: PlayerPoseUpdate) -> Result<Vec<u8>, ProtocolError> {
+    validate_player_pose(&pose, false)?;
+    let mut payload = Vec::with_capacity(56);
+    encode_player_pose_body(&mut payload, pose);
+    Ok(encode_frame(KIND_PLAYER_POSE, 0, &payload))
+}
+
+pub fn decode_player_pose(bytes: &[u8]) -> Result<PlayerPoseUpdate, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_zero_request_id(&frame)?;
+    expect_kind(&frame, KIND_PLAYER_POSE)?;
+    let mut cursor = Cursor::new(frame.payload);
+    let pose = decode_player_pose_body(&mut cursor)?;
+    cursor.finish()?;
+    validate_player_pose(&pose, false)?;
+    Ok(pose)
+}
+
+pub fn encode_presence_snapshot(snapshot: &PresenceSnapshot) -> Result<Vec<u8>, ProtocolError> {
+    if snapshot.snapshot_sequence == 0 || snapshot.server_time_ms == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "presence snapshot sequence or time is zero",
+        ));
+    }
+    if snapshot.players.len() > MAX_PLAYERS_PER_PRESENCE_SNAPSHOT {
+        return Err(ProtocolError::LimitExceeded("presence snapshot players"));
+    }
+    validate_presence_players(&snapshot.players)?;
+    let mut payload = Vec::with_capacity(24 + snapshot.players.len() * 84);
+    push_u64(&mut payload, snapshot.snapshot_sequence);
+    push_u64(&mut payload, snapshot.server_time_ms);
+    push_u16(&mut payload, snapshot.players.len() as u16);
+    push_u16(&mut payload, 0);
+    push_u32(&mut payload, 0);
+    for player in &snapshot.players {
+        payload.extend_from_slice(player.player_id.as_bytes());
+        push_u64(&mut payload, player.connection_id);
+        payload.push(player.color_index);
+        payload.push(0);
+        push_u16(&mut payload, 0);
+        encode_player_pose_body(&mut payload, player.pose);
+    }
+    Ok(encode_frame(KIND_PRESENCE_SNAPSHOT, 0, &payload))
+}
+
+pub fn decode_presence_snapshot(bytes: &[u8]) -> Result<PresenceSnapshot, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_zero_request_id(&frame)?;
+    expect_kind(&frame, KIND_PRESENCE_SNAPSHOT)?;
+    let mut cursor = Cursor::new(frame.payload);
+    let snapshot_sequence = cursor.u64()?;
+    let server_time_ms = cursor.u64()?;
+    let count = usize::from(cursor.u16()?);
+    if cursor.u16()? != 0 || cursor.u32()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved presence snapshot field is nonzero",
+        ));
+    }
+    if snapshot_sequence == 0 || server_time_ms == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "presence snapshot sequence or time is zero",
+        ));
+    }
+    if count > MAX_PLAYERS_PER_PRESENCE_SNAPSHOT {
+        return Err(ProtocolError::LimitExceeded("presence snapshot players"));
+    }
+    let mut players = Vec::with_capacity(count);
+    for _ in 0..count {
+        let player_id = PlayerId::from_bytes(cursor.array()?);
+        let connection_id = cursor.u64()?;
+        let color_index = cursor.u8()?;
+        if cursor.u8()? != 0 || cursor.u16()? != 0 {
+            return Err(ProtocolError::InvalidPayload(
+                "reserved player presence field is nonzero",
+            ));
+        }
+        let pose = decode_player_pose_body(&mut cursor)?;
+        players.push(PlayerPresenceState {
+            player_id,
+            connection_id,
+            color_index,
+            pose,
+        });
+    }
+    cursor.finish()?;
+    validate_presence_players(&players)?;
+    Ok(PresenceSnapshot {
+        snapshot_sequence,
+        server_time_ms,
+        players,
+    })
+}
+
+pub fn encode_presence_ping(ping: PresencePing) -> Result<Vec<u8>, ProtocolError> {
+    if ping.sequence == 0 || ping.client_send_time_ms == 0 {
+        return Err(ProtocolError::InvalidPayload("invalid presence ping"));
+    }
+    let mut payload = Vec::with_capacity(16);
+    push_u32(&mut payload, ping.sequence);
+    push_u32(&mut payload, 0);
+    push_u64(&mut payload, ping.client_send_time_ms);
+    Ok(encode_frame(KIND_PRESENCE_PING, 0, &payload))
+}
+
+pub fn decode_presence_ping(bytes: &[u8]) -> Result<PresencePing, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_zero_request_id(&frame)?;
+    expect_kind(&frame, KIND_PRESENCE_PING)?;
+    let mut cursor = Cursor::new(frame.payload);
+    let sequence = cursor.u32()?;
+    if cursor.u32()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved presence ping field is nonzero",
+        ));
+    }
+    let client_send_time_ms = cursor.u64()?;
+    cursor.finish()?;
+    if sequence == 0 || client_send_time_ms == 0 {
+        return Err(ProtocolError::InvalidPayload("invalid presence ping"));
+    }
+    Ok(PresencePing {
+        sequence,
+        client_send_time_ms,
+    })
+}
+
+pub fn encode_presence_pong(pong: PresencePong) -> Result<Vec<u8>, ProtocolError> {
+    if pong.sequence == 0
+        || pong.client_send_time_ms == 0
+        || pong.server_receive_time_ms == 0
+        || pong.server_send_time_ms < pong.server_receive_time_ms
+    {
+        return Err(ProtocolError::InvalidPayload("invalid presence pong"));
+    }
+    let mut payload = Vec::with_capacity(32);
+    push_u32(&mut payload, pong.sequence);
+    push_u32(&mut payload, 0);
+    push_u64(&mut payload, pong.client_send_time_ms);
+    push_u64(&mut payload, pong.server_receive_time_ms);
+    push_u64(&mut payload, pong.server_send_time_ms);
+    Ok(encode_frame(KIND_PRESENCE_PONG, 0, &payload))
+}
+
+pub fn decode_presence_pong(bytes: &[u8]) -> Result<PresencePong, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_zero_request_id(&frame)?;
+    expect_kind(&frame, KIND_PRESENCE_PONG)?;
+    let mut cursor = Cursor::new(frame.payload);
+    let sequence = cursor.u32()?;
+    if cursor.u32()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved presence pong field is nonzero",
+        ));
+    }
+    let pong = PresencePong {
+        sequence,
+        client_send_time_ms: cursor.u64()?,
+        server_receive_time_ms: cursor.u64()?,
+        server_send_time_ms: cursor.u64()?,
+    };
+    cursor.finish()?;
+    if pong.sequence == 0
+        || pong.client_send_time_ms == 0
+        || pong.server_receive_time_ms == 0
+        || pong.server_send_time_ms < pong.server_receive_time_ms
+    {
+        return Err(ProtocolError::InvalidPayload("invalid presence pong"));
+    }
+    Ok(pong)
+}
+
 pub fn encode_error(request_id: u64, message: &str) -> Vec<u8> {
     let bytes = message.as_bytes();
     let len = bytes.len().min(u16::MAX as usize);
@@ -786,6 +1114,136 @@ pub const fn surface_tile_batch_kind() -> u16 {
 
 pub const fn surface_tile_batch_result_kind() -> u16 {
     KIND_SURFACE_TILE_BATCH_RESULT
+}
+
+pub const fn open_presence_kind() -> u16 {
+    KIND_OPEN_PRESENCE
+}
+
+pub const fn presence_opened_kind() -> u16 {
+    KIND_PRESENCE_OPENED
+}
+
+pub const fn player_pose_kind() -> u16 {
+    KIND_PLAYER_POSE
+}
+
+pub const fn presence_snapshot_kind() -> u16 {
+    KIND_PRESENCE_SNAPSHOT
+}
+
+pub const fn presence_ping_kind() -> u16 {
+    KIND_PRESENCE_PING
+}
+
+pub const fn presence_pong_kind() -> u16 {
+    KIND_PRESENCE_PONG
+}
+
+fn encode_player_pose_body(output: &mut Vec<u8>, pose: PlayerPoseUpdate) {
+    push_u64(output, pose.sequence);
+    push_u64(output, pose.sample_server_time_ms);
+    for value in pose.eye_position_metres {
+        push_f32(output, value);
+    }
+    for value in pose.linear_velocity_metres_per_second {
+        push_f32(output, value);
+    }
+    push_f32(output, pose.look_yaw_radians);
+    push_f32(output, pose.look_pitch_radians);
+    push_u16(output, pose.flags);
+    push_u16(output, 0);
+}
+
+fn decode_player_pose_body(cursor: &mut Cursor<'_>) -> Result<PlayerPoseUpdate, ProtocolError> {
+    let pose = PlayerPoseUpdate {
+        sequence: cursor.u64()?,
+        sample_server_time_ms: cursor.u64()?,
+        eye_position_metres: [cursor.f32()?, cursor.f32()?, cursor.f32()?],
+        linear_velocity_metres_per_second: [cursor.f32()?, cursor.f32()?, cursor.f32()?],
+        look_yaw_radians: cursor.f32()?,
+        look_pitch_radians: cursor.f32()?,
+        flags: cursor.u16()?,
+    };
+    if cursor.u16()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved player pose field is nonzero",
+        ));
+    }
+    Ok(pose)
+}
+
+fn validate_player_pose(
+    pose: &PlayerPoseUpdate,
+    require_sample_time: bool,
+) -> Result<(), ProtocolError> {
+    if pose.sequence == 0 || (require_sample_time && pose.sample_server_time_ms == 0) {
+        return Err(ProtocolError::InvalidPayload(
+            "player pose sequence or sample time is zero",
+        ));
+    }
+    let position_limit = (i32::MAX as f32 - 64.0) * VOXEL_SIZE_METRES;
+    if !pose
+        .eye_position_metres
+        .into_iter()
+        .all(|value| value.is_finite() && value.abs() <= position_limit)
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "player position is nonfinite or outside world bounds",
+        ));
+    }
+    let velocity_squared = pose
+        .linear_velocity_metres_per_second
+        .into_iter()
+        .map(|value| value * value)
+        .sum::<f32>();
+    if !velocity_squared.is_finite() || velocity_squared > 64.0 * 64.0 {
+        return Err(ProtocolError::InvalidPayload(
+            "player velocity is nonfinite or too large",
+        ));
+    }
+    if !pose.look_yaw_radians.is_finite()
+        || !(-std::f32::consts::PI..=std::f32::consts::PI).contains(&pose.look_yaw_radians)
+        || !pose.look_pitch_radians.is_finite()
+        || !(-1.5..=1.5).contains(&pose.look_pitch_radians)
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "player look angles are invalid",
+        ));
+    }
+    if pose.flags & !PLAYER_POSE_FLAGS != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "player pose has unknown flags",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_presence_players(players: &[PlayerPresenceState]) -> Result<(), ProtocolError> {
+    let mut prior_player = None;
+    let mut colors = BTreeSet::new();
+    for player in players {
+        if player.player_id.is_nil() || player.connection_id == 0 {
+            return Err(ProtocolError::InvalidPayload(
+                "presence player id or connection id is invalid",
+            ));
+        }
+        if prior_player.is_some_and(|prior| prior >= player.player_id) {
+            return Err(ProtocolError::InvalidPayload(
+                "presence players are not strictly sorted",
+            ));
+        }
+        if usize::from(player.color_index) >= MAX_PLAYERS_PER_PRESENCE_SNAPSHOT
+            || !colors.insert(player.color_index)
+        {
+            return Err(ProtocolError::InvalidPayload(
+                "presence player colors are invalid or duplicated",
+            ));
+        }
+        validate_player_pose(&player.pose, true)?;
+        prior_player = Some(player.player_id);
+    }
+    Ok(())
 }
 
 fn validate_player_identity(identity: &PlayerIdentity) -> Result<(), ProtocolError> {
@@ -889,6 +1347,15 @@ fn decode_frame(bytes: &[u8]) -> Result<Frame<'_>, ProtocolError> {
 fn expect_kind(frame: &Frame<'_>, expected: u16) -> Result<(), ProtocolError> {
     if frame.kind != expected {
         return Err(ProtocolError::UnexpectedMessageKind(frame.kind));
+    }
+    Ok(())
+}
+
+fn expect_zero_request_id(frame: &Frame<'_>) -> Result<(), ProtocolError> {
+    if frame.request_id != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "presence request id must be zero",
+        ));
     }
     Ok(())
 }
@@ -1819,6 +2286,8 @@ mod tests {
                 .union(WorldCapabilities::AUTHORED_ROUTES),
             recommended_in_flight_batches: 4,
             identity: player_identity(7, "default"),
+            connection_id: 12,
+            presence_session_id: PresenceSessionId::from_bytes([9; 16]),
             spawn: SpawnPoint {
                 x: 0,
                 z: 52,
@@ -1834,6 +2303,116 @@ mod tests {
         assert_eq!(
             decode_world_opened(&encode_world_opened(&opened)),
             Ok(opened)
+        );
+    }
+
+    #[test]
+    fn presence_frames_round_trip_and_reject_invalid_state() {
+        let session_id = PresenceSessionId::from_bytes([9; 16]);
+        let open = OpenPresence { session_id };
+        assert_eq!(
+            decode_open_presence(&encode_open_presence(open).expect("encode open presence")),
+            Ok(open)
+        );
+
+        let opened = PresenceOpened {
+            connection_id: 7,
+            server_time_ms: 1_000,
+            broadcast_interval_ms: 33,
+            max_players: 32,
+        };
+        assert_eq!(
+            decode_presence_opened(
+                &encode_presence_opened(opened).expect("encode presence opened")
+            ),
+            Ok(opened)
+        );
+
+        let pose = PlayerPoseUpdate {
+            sequence: 4,
+            sample_server_time_ms: 950,
+            eye_position_metres: [1.0, 2.0, 3.0],
+            linear_velocity_metres_per_second: [2.0, 0.0, -1.0],
+            look_yaw_radians: 0.7,
+            look_pitch_radians: -0.2,
+            flags: PLAYER_POSE_GROUNDED,
+        };
+        assert_eq!(
+            decode_player_pose(&encode_player_pose(pose).expect("encode pose")),
+            Ok(pose)
+        );
+
+        let snapshot = PresenceSnapshot {
+            snapshot_sequence: 3,
+            server_time_ms: 1_010,
+            players: vec![
+                PlayerPresenceState {
+                    player_id: PlayerId::from_bytes([1; 16]),
+                    connection_id: 7,
+                    color_index: 2,
+                    pose,
+                },
+                PlayerPresenceState {
+                    player_id: PlayerId::from_bytes([2; 16]),
+                    connection_id: 8,
+                    color_index: 5,
+                    pose: PlayerPoseUpdate {
+                        sequence: 8,
+                        sample_server_time_ms: 1_000,
+                        eye_position_metres: [-3.0, 1.7, 4.0],
+                        linear_velocity_metres_per_second: [0.0; 3],
+                        look_yaw_radians: -1.2,
+                        look_pitch_radians: 0.1,
+                        flags: PLAYER_POSE_GROUNDED | PLAYER_POSE_DISCONTINUITY,
+                    },
+                },
+            ],
+        };
+        assert_eq!(
+            decode_presence_snapshot(
+                &encode_presence_snapshot(&snapshot).expect("encode presence snapshot")
+            ),
+            Ok(snapshot.clone())
+        );
+
+        let ping = PresencePing {
+            sequence: 10,
+            client_send_time_ms: 500,
+        };
+        assert_eq!(
+            decode_presence_ping(&encode_presence_ping(ping).expect("encode ping")),
+            Ok(ping)
+        );
+        let pong = PresencePong {
+            sequence: ping.sequence,
+            client_send_time_ms: ping.client_send_time_ms,
+            server_receive_time_ms: 1_000,
+            server_send_time_ms: 1_001,
+        };
+        assert_eq!(
+            decode_presence_pong(&encode_presence_pong(pong).expect("encode pong")),
+            Ok(pong)
+        );
+
+        let mut invalid_pose = pose;
+        invalid_pose.eye_position_metres[0] = f32::NAN;
+        assert!(matches!(
+            encode_player_pose(invalid_pose),
+            Err(ProtocolError::InvalidPayload(_))
+        ));
+
+        let mut duplicate_color = snapshot;
+        duplicate_color.players[1].color_index = duplicate_color.players[0].color_index;
+        assert!(matches!(
+            encode_presence_snapshot(&duplicate_color),
+            Err(ProtocolError::InvalidPayload(_))
+        ));
+
+        let mut prior_version = encode_player_pose(pose).expect("encode pose version fixture");
+        prior_version[4..6].copy_from_slice(&2_u16.to_le_bytes());
+        assert_eq!(
+            decode_player_pose(&prior_version),
+            Err(ProtocolError::UnsupportedVersion(2))
         );
     }
 
