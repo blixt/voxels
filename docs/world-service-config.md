@@ -71,7 +71,7 @@ movement_credit_window_ms = 500
 starting_units_per_material = 64
 
 [edits]
-database = "../tmp/world-state-v2.sqlite3"
+database = "../tmp/world-state-v3.sqlite3"
 change_queue_capacity = 256
 
 [spawn]
@@ -132,11 +132,12 @@ batch responses. Concurrent identical batches single-flight through one CPU/Meta
 then receive independently request-ID-keyed copies of that response.
 
 `[edits].database` is the native authoritative world/player SQLite file. Relative paths resolve from
-the service configuration, not the process working directory. Startup initializes only schema 2 and
+the service configuration, not the process working directory. Startup initializes only schema 3 and
 rejects another schema or a database bound to a different world/source manifest; there are no
-migrations or fallback authorities. Schema 2 owns sparse voxel edits, player material inventories,
-idempotent edit sessions, and authoritative resume poses. The v2 filename leaves an old schema-1
-local world untouched. `change_queue_capacity` bounds each interested client's commit queue.
+migrations or fallback authorities. Schema 3 owns sparse voxel edits, face-oriented dig operations,
+player material inventories, idempotent edit sessions, and authoritative resume poses. The v3
+filename leaves an old schema-2 local world untouched. `change_queue_capacity` bounds each
+interested client's commit queue.
 
 The presence section controls the independent low-latency delta stream. `spatial_cell_metres`,
 `interest_radius_metres`, and `interest_hysteresis_metres` define receiver-specific interest without

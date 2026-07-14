@@ -16,7 +16,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -355,9 +355,9 @@ pub struct EditCommand {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EditAction {
-    /// Digs the fixed server-configured volume centered on the hit voxel. The client cannot choose
-    /// a mutation count or smuggle arbitrary coordinates into one operation.
-    Dig { hit: VoxelCoord },
+    /// Digs the fixed server-configured volume inward from the hit face. The client cannot choose a
+    /// mutation count or smuggle arbitrary coordinates into one operation.
+    Dig { hit: VoxelCoord, face: VoxelFace },
     Place {
         coord: VoxelCoord,
         material: Material,
@@ -367,8 +367,67 @@ pub enum EditAction {
 impl EditAction {
     pub const fn target(self) -> VoxelCoord {
         match self {
-            Self::Dig { hit } => hit,
+            Self::Dig { hit, .. } => hit,
             Self::Place { coord, .. } => coord,
+        }
+    }
+}
+
+/// Axis-aligned outward normal of the voxel face selected by an authoritative dig command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VoxelFace {
+    NegativeX,
+    PositiveX,
+    NegativeY,
+    PositiveY,
+    NegativeZ,
+    PositiveZ,
+}
+
+impl VoxelFace {
+    pub const fn normal(self) -> [i8; 3] {
+        match self {
+            Self::NegativeX => [-1, 0, 0],
+            Self::PositiveX => [1, 0, 0],
+            Self::NegativeY => [0, -1, 0],
+            Self::PositiveY => [0, 1, 0],
+            Self::NegativeZ => [0, 0, -1],
+            Self::PositiveZ => [0, 0, 1],
+        }
+    }
+
+    pub const fn id(self) -> u8 {
+        match self {
+            Self::NegativeX => 1,
+            Self::PositiveX => 2,
+            Self::NegativeY => 3,
+            Self::PositiveY => 4,
+            Self::NegativeZ => 5,
+            Self::PositiveZ => 6,
+        }
+    }
+
+    pub const fn from_id(id: u8) -> Option<Self> {
+        match id {
+            1 => Some(Self::NegativeX),
+            2 => Some(Self::PositiveX),
+            3 => Some(Self::NegativeY),
+            4 => Some(Self::PositiveY),
+            5 => Some(Self::NegativeZ),
+            6 => Some(Self::PositiveZ),
+            _ => None,
+        }
+    }
+
+    pub const fn from_normal(normal: [i32; 3]) -> Option<Self> {
+        match normal {
+            [-1, 0, 0] => Some(Self::NegativeX),
+            [1, 0, 0] => Some(Self::PositiveX),
+            [0, -1, 0] => Some(Self::NegativeY),
+            [0, 1, 0] => Some(Self::PositiveY),
+            [0, 0, -1] => Some(Self::NegativeZ),
+            [0, 0, 1] => Some(Self::PositiveZ),
+            _ => None,
         }
     }
 }
@@ -1008,22 +1067,22 @@ pub fn encode_edit_command(command: EditCommand) -> Result<Vec<u8>, ProtocolErro
     if command.edit_session_id.is_nil() {
         return Err(ProtocolError::InvalidPayload("edit session id is nil"));
     }
-    let (kind, coord, material_id) = match command.action {
-        EditAction::Dig { hit } => (1, hit, 0),
+    let (kind, argument, coord, material_id) = match command.action {
+        EditAction::Dig { hit, face } => (1, face.id(), hit, 0),
         EditAction::Place { coord, material } => {
             if material == Material::Air {
                 return Err(ProtocolError::InvalidPayload(
                     "cannot place air; use the dig action",
                 ));
             }
-            (2, coord, material.id())
+            (2, 0, coord, material.id())
         }
     };
     validate_voxel_coord(coord)?;
     let mut payload = Vec::with_capacity(32);
     payload.extend_from_slice(command.edit_session_id.as_bytes());
     payload.push(kind);
-    payload.push(0);
+    payload.push(argument);
     push_u16(&mut payload, material_id);
     encode_voxel_coord(&mut payload, coord);
     Ok(encode_frame(
@@ -1047,20 +1106,22 @@ pub fn decode_edit_command(bytes: &[u8]) -> Result<EditCommand, ProtocolError> {
         return Err(ProtocolError::InvalidPayload("edit session id is nil"));
     }
     let kind = cursor.u8()?;
-    if cursor.u8()? != 0 {
-        return Err(ProtocolError::InvalidPayload(
-            "reserved edit action byte is nonzero",
-        ));
-    }
+    let argument = cursor.u8()?;
     let material_id = cursor.u16()?;
     let coord = decode_voxel_coord(&mut cursor)?;
     cursor.finish()?;
     let action = match kind {
-        1 if material_id == 0 => EditAction::Dig { hit: coord },
+        1 if material_id == 0 => EditAction::Dig {
+            hit: coord,
+            face: VoxelFace::from_id(argument).ok_or(ProtocolError::UnknownEnum(
+                "voxel face",
+                u64::from(argument),
+            ))?,
+        },
         1 => {
             return Err(ProtocolError::InvalidPayload("dig action has a material"));
         }
-        2 => {
+        2 if argument == 0 => {
             let material = Material::from_id(material_id).ok_or(ProtocolError::UnknownEnum(
                 "material",
                 u64::from(material_id),
@@ -1071,6 +1132,11 @@ pub fn decode_edit_command(bytes: &[u8]) -> Result<EditCommand, ProtocolError> {
                 ));
             }
             EditAction::Place { coord, material }
+        }
+        2 => {
+            return Err(ProtocolError::InvalidPayload(
+                "placement action argument is nonzero",
+            ));
         }
         _ => return Err(ProtocolError::UnknownEnum("edit action", u64::from(kind))),
     };
@@ -3378,7 +3444,10 @@ mod tests {
         let dig = EditCommand {
             operation_id: 42,
             edit_session_id,
-            action: EditAction::Dig { hit: coord },
+            action: EditAction::Dig {
+                hit: coord,
+                face: VoxelFace::NegativeX,
+            },
         };
         assert_eq!(
             decode_edit_command(&encode_edit_command(dig).expect("encode edit dig")),
@@ -3517,6 +3586,13 @@ mod tests {
         assert_eq!(
             decode_edit_command(&malformed_dig),
             Err(ProtocolError::InvalidPayload("dig action has a material"))
+        );
+
+        let mut malformed_face = encode_edit_command(dig).expect("encode malformed dig face");
+        malformed_face[FRAME_HEADER_BYTES + 17] = 0;
+        assert_eq!(
+            decode_edit_command(&malformed_face),
+            Err(ProtocolError::UnknownEnum("voxel face", 0))
         );
 
         let mut air_inventory = commit;

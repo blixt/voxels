@@ -11,7 +11,7 @@ use uuid::Uuid;
 use voxels_world::protocol::{
     EditAction, EditCommand, EditCommit, EditSessionId, MATERIAL_INVENTORY_SLOTS,
     MAX_EDIT_AFFECTED_CHUNKS, MAX_EDIT_AFFECTED_SURFACE_TILES, MAX_EDIT_MUTATIONS,
-    MaterialInventory, PlayerId, PlayerResume, VoxelMutation,
+    MaterialInventory, PlayerId, PlayerResume, VoxelFace, VoxelMutation,
 };
 use voxels_world::{
     ChunkCoord, EditMap, Material, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES,
@@ -19,7 +19,7 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash,
 };
 
-const EDIT_SCHEMA_VERSION: i64 = 2;
+const EDIT_SCHEMA_VERSION: i64 = 3;
 const INITIAL_REVISION: u64 = 1;
 const DIG_EDGE_VOXELS: i32 = 5;
 const DIG_RADIUS_VOXELS: i32 = DIG_EDGE_VOXELS / 2;
@@ -576,7 +576,7 @@ fn initialize_schema(
                     x INTEGER NOT NULL,
                     y INTEGER NOT NULL,
                     z INTEGER NOT NULL,
-                    material INTEGER,
+                    argument INTEGER NOT NULL,
                     revision INTEGER NOT NULL CHECK(revision >= 1),
                     inventory_revision INTEGER NOT NULL CHECK(inventory_revision >= 1),
                     PRIMARY KEY (player_id, edit_session_id, operation_id),
@@ -622,7 +622,7 @@ fn initialize_schema(
                         REFERENCES edit_operations(player_id, edit_session_id, operation_id)
                         ON DELETE CASCADE
                  ) WITHOUT ROWID;
-                 PRAGMA user_version = 2;",
+                 PRAGMA user_version = 3;",
             )
             .map_err(sql_error("create edit schema"))?;
         transaction
@@ -786,24 +786,24 @@ fn load_operation(
     let key = OperationKey::new(player_id, edit_session_id, operation_id);
     let base = connection
         .query_row(
-            "SELECT action,x,y,z,material,revision FROM edit_operations
+            "SELECT action,x,y,z,argument,revision FROM edit_operations
              WHERE player_id=?1 AND edit_session_id=?2 AND operation_id=?3",
             params![key.player(), key.session(), key.operation()],
             |row| {
                 Ok((
                     row.get::<_, u8>(0)?,
                     VoxelCoord::new(row.get(1)?, row.get(2)?, row.get(3)?),
-                    row.get::<_, Option<u16>>(4)?,
+                    row.get::<_, u16>(4)?,
                     row.get::<_, i64>(5)?,
                 ))
             },
         )
         .optional()
         .map_err(sql_error("load edit operation"))?;
-    let Some((action, coord, material, revision)) = base else {
+    let Some((action, coord, argument, revision)) = base else {
         return Ok(None);
     };
-    let action = decode_action(action, coord, material)?;
+    let action = decode_action(action, coord, argument)?;
     let mutations = load_operation_mutations(connection, &key)?;
     let affected_chunks = load_operation_chunks(connection, &key)?;
     let affected_surface_tiles = load_operation_surfaces(connection, &key)?;
@@ -906,29 +906,13 @@ fn plan_action(
     action: EditAction,
 ) -> Result<(Vec<VoxelMutation>, MaterialInventory), EditAuthorityError> {
     match action {
-        EditAction::Dig { hit } => {
-            let min = VoxelCoord::new(
-                hit.x.checked_sub(DIG_RADIUS_VOXELS).ok_or_else(|| {
-                    EditAuthorityError("dig volume exceeds world coordinates".to_owned())
-                })?,
-                hit.y.checked_sub(DIG_RADIUS_VOXELS).ok_or_else(|| {
-                    EditAuthorityError("dig volume exceeds world coordinates".to_owned())
-                })?,
-                hit.z.checked_sub(DIG_RADIUS_VOXELS).ok_or_else(|| {
-                    EditAuthorityError("dig volume exceeds world coordinates".to_owned())
-                })?,
-            );
-            let max = VoxelCoord::new(
-                min.x.checked_add(DIG_EDGE_VOXELS - 1).ok_or_else(|| {
-                    EditAuthorityError("dig volume exceeds world coordinates".to_owned())
-                })?,
-                min.y.checked_add(DIG_EDGE_VOXELS - 1).ok_or_else(|| {
-                    EditAuthorityError("dig volume exceeds world coordinates".to_owned())
-                })?,
-                min.z.checked_add(DIG_EDGE_VOXELS - 1).ok_or_else(|| {
-                    EditAuthorityError("dig volume exceeds world coordinates".to_owned())
-                })?,
-            );
+        EditAction::Dig { hit, face } => {
+            let normal = face.normal();
+            let (min_x, max_x) = dig_axis_bounds(hit.x, normal[0])?;
+            let (min_y, max_y) = dig_axis_bounds(hit.y, normal[1])?;
+            let (min_z, max_z) = dig_axis_bounds(hit.z, normal[2])?;
+            let min = VoxelCoord::new(min_x, min_y, min_z);
+            let max = VoxelCoord::new(max_x, max_y, max_z);
             let snapshot = source_voxel_block(source, min, DIG_SAMPLE_SHAPE)?;
             let mut mutations = Vec::with_capacity(DIG_MAX_MUTATIONS);
             for x in min.x..=max.x {
@@ -978,6 +962,25 @@ fn plan_action(
             *slot -= 1;
             Ok((vec![VoxelMutation { coord, material }], inventory))
         }
+    }
+}
+
+fn dig_axis_bounds(value: i32, outward_normal: i8) -> Result<(i32, i32), EditAuthorityError> {
+    let error = || EditAuthorityError("dig volume exceeds world coordinates".to_owned());
+    match outward_normal {
+        -1 => Ok((
+            value,
+            value.checked_add(DIG_EDGE_VOXELS - 1).ok_or_else(error)?,
+        )),
+        0 => Ok((
+            value.checked_sub(DIG_RADIUS_VOXELS).ok_or_else(error)?,
+            value.checked_add(DIG_RADIUS_VOXELS).ok_or_else(error)?,
+        )),
+        1 => Ok((
+            value.checked_sub(DIG_EDGE_VOXELS - 1).ok_or_else(error)?,
+            value,
+        )),
+        _ => Err(EditAuthorityError("dig face normal is invalid".to_owned())),
     }
 }
 
@@ -1127,11 +1130,11 @@ fn persist_operation(
     affected_chunks: &[ChunkCoord],
     affected_surface_tiles: &[SurfaceTileCoord],
 ) -> Result<(), EditAuthorityError> {
-    let (action, coord, material) = encode_action(command.action);
+    let (action, coord, argument) = encode_action(command.action);
     transaction
         .execute(
             "INSERT INTO edit_operations(
-                player_id,edit_session_id,operation_id,action,x,y,z,material,revision,inventory_revision
+                player_id,edit_session_id,operation_id,action,x,y,z,argument,revision,inventory_revision
              ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
                 player_id.as_bytes().as_slice(),
@@ -1141,7 +1144,7 @@ fn persist_operation(
                 coord.x,
                 coord.y,
                 coord.z,
-                material,
+                argument,
                 to_sql_i64(revision, "operation revision")?,
                 to_sql_i64(inventory_revision, "operation inventory revision")?,
             ],
@@ -1264,22 +1267,30 @@ fn validate_resume(resume: PlayerResume) -> Result<(), EditAuthorityError> {
     Ok(())
 }
 
-fn encode_action(action: EditAction) -> (u8, VoxelCoord, Option<u16>) {
+fn encode_action(action: EditAction) -> (u8, VoxelCoord, u16) {
     match action {
-        EditAction::Dig { hit } => (1, hit, None),
-        EditAction::Place { coord, material } => (2, coord, Some(material.id())),
+        EditAction::Dig { hit, face } => (1, hit, u16::from(face.id())),
+        EditAction::Place { coord, material } => (2, coord, material.id()),
     }
 }
 
 fn decode_action(
     action: u8,
     coord: VoxelCoord,
-    material: Option<u16>,
+    argument: u16,
 ) -> Result<EditAction, EditAuthorityError> {
-    match (action, material) {
-        (1, None) => Ok(EditAction::Dig { hit: coord }),
-        (2, Some(material)) => {
-            let material = decode_material(material, "operation")?;
+    match action {
+        1 => {
+            let id = u8::try_from(argument).map_err(|_| {
+                EditAuthorityError(format!("unknown durable dig face id {argument}"))
+            })?;
+            let face = VoxelFace::from_id(id).ok_or_else(|| {
+                EditAuthorityError(format!("unknown durable dig face id {argument}"))
+            })?;
+            Ok(EditAction::Dig { hit: coord, face })
+        }
+        2 => {
+            let material = decode_material(argument, "operation")?;
             if material == Material::Air {
                 return Err(EditAuthorityError(
                     "durable placement operation contains Air".to_owned(),
@@ -1395,10 +1406,19 @@ mod tests {
     }
 
     fn dig(operation_id: u64, session: EditSessionId, hit: VoxelCoord) -> EditCommand {
+        dig_face(operation_id, session, hit, VoxelFace::PositiveY)
+    }
+
+    fn dig_face(
+        operation_id: u64,
+        session: EditSessionId,
+        hit: VoxelCoord,
+        face: VoxelFace,
+    ) -> EditCommand {
         EditCommand {
             operation_id,
             edit_session_id: session,
-            action: EditAction::Dig { hit },
+            action: EditAction::Dig { hit, face },
         }
     }
 
@@ -1423,7 +1443,7 @@ mod tests {
         }
 
         let solid_hit = VoxelCoord::new(0, -100, 0);
-        let solid_min = VoxelCoord::new(-2, -102, -2);
+        let solid_min = VoxelCoord::new(-2, -104, -2);
         let solid_source = source_voxel_block(&source, solid_min, DIG_SAMPLE_SHAPE).unwrap();
         let mut expected_histogram = [0_u64; MATERIAL_INVENTORY_SLOTS];
         for x in solid_min.x..solid_min.x + DIG_EDGE_VOXELS {
@@ -1598,7 +1618,10 @@ mod tests {
                         &source,
                         &EditMap::default(),
                         inventory,
-                        EditAction::Dig { hit },
+                        EditAction::Dig {
+                            hit,
+                            face: VoxelFace::PositiveY,
+                        },
                     )
                     .unwrap();
                     assert_eq!(mutations.len(), DIG_MAX_MUTATIONS, "hit {hit:?}");
@@ -1610,12 +1633,12 @@ mod tests {
                     );
                     let min = VoxelCoord::new(
                         hit.x - DIG_RADIUS_VOXELS,
-                        hit.y - DIG_RADIUS_VOXELS,
+                        hit.y - DIG_EDGE_VOXELS + 1,
                         hit.z - DIG_RADIUS_VOXELS,
                     );
                     let max = VoxelCoord::new(
                         min.x + DIG_EDGE_VOXELS - 1,
-                        min.y + DIG_EDGE_VOXELS - 1,
+                        hit.y,
                         min.z + DIG_EDGE_VOXELS - 1,
                     );
                     let actual = mutations
@@ -1656,21 +1679,60 @@ mod tests {
     }
 
     #[test]
+    fn every_dig_face_cuts_five_layers_inward_from_the_clicked_surface() {
+        let source = ProceduralWorldSource::new(0xf00d);
+        let hit = VoxelCoord::new(7, -1_000, -11);
+        for face in [
+            VoxelFace::NegativeX,
+            VoxelFace::PositiveX,
+            VoxelFace::NegativeY,
+            VoxelFace::PositiveY,
+            VoxelFace::NegativeZ,
+            VoxelFace::PositiveZ,
+        ] {
+            let (mutations, _) = plan_action(
+                &source,
+                &EditMap::default(),
+                starting_inventory(1),
+                EditAction::Dig { hit, face },
+            )
+            .unwrap();
+            assert_eq!(mutations.len(), DIG_MAX_MUTATIONS);
+            let normal = face.normal();
+            let values = mutations
+                .iter()
+                .map(|mutation| mutation.coord.as_array())
+                .collect::<Vec<_>>();
+            let hit = hit.as_array();
+            for axis in 0..3 {
+                let min = values.iter().map(|coord| coord[axis]).min().unwrap();
+                let max = values.iter().map(|coord| coord[axis]).max().unwrap();
+                match normal[axis] {
+                    -1 => assert_eq!((min, max), (hit[axis], hit[axis] + 4)),
+                    0 => assert_eq!((min, max), (hit[axis] - 2, hit[axis] + 2)),
+                    1 => assert_eq!((min, max), (hit[axis] - 4, hit[axis])),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn dig_coordinate_extrema_fail_atomically_instead_of_wrapping() {
         let source = ProceduralWorldSource::new(0xbeef);
-        for hit in [
-            VoxelCoord::new(i32::MIN + 1, -100, 0),
-            VoxelCoord::new(i32::MAX - 1, -100, 0),
-            VoxelCoord::new(0, i32::MIN + 1, 0),
-            VoxelCoord::new(0, i32::MAX - 1, 0),
-            VoxelCoord::new(0, -100, i32::MIN + 1),
-            VoxelCoord::new(0, -100, i32::MAX - 1),
+        for (hit, face) in [
+            (VoxelCoord::new(i32::MIN + 1, -100, 0), VoxelFace::PositiveY),
+            (VoxelCoord::new(i32::MAX - 1, -100, 0), VoxelFace::PositiveY),
+            (VoxelCoord::new(0, i32::MIN + 3, 0), VoxelFace::PositiveY),
+            (VoxelCoord::new(0, i32::MAX - 3, 0), VoxelFace::NegativeY),
+            (VoxelCoord::new(0, -100, i32::MIN + 1), VoxelFace::PositiveY),
+            (VoxelCoord::new(0, -100, i32::MAX - 1), VoxelFace::PositiveY),
         ] {
             let error = plan_action(
                 &source,
                 &EditMap::default(),
                 starting_inventory(1),
-                EditAction::Dig { hit },
+                EditAction::Dig { hit, face },
             )
             .unwrap_err();
             assert!(error.to_string().contains("exceeds world coordinates"));
@@ -1971,7 +2033,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "voxels-edit-authority-v2-{}-{unique}.sqlite3",
+            "voxels-edit-authority-v3-{}-{unique}.sqlite3",
             std::process::id()
         ));
         let player = player_id(5);
@@ -2013,14 +2075,14 @@ mod tests {
     }
 
     #[test]
-    fn schema_one_is_rejected_without_migration() {
+    fn previous_schema_is_rejected_without_migration() {
         let source = ProceduralWorldSource::new(17);
         let connection = Connection::open_in_memory().unwrap();
-        connection.pragma_update(None, "user_version", 1).unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
         let error = EditAuthority::from_connection(connection, world_id(6), &source, 4, 1)
             .err()
             .unwrap();
-        assert!(error.to_string().contains("schema 1; expected 2"));
+        assert!(error.to_string().contains("schema 2; expected 3"));
         assert!(
             error
                 .to_string()

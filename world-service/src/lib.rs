@@ -192,7 +192,7 @@ pub struct EditPersistenceConfig {
 impl Default for EditPersistenceConfig {
     fn default() -> Self {
         Self {
-            database: PathBuf::from("../tmp/world-state-v2.sqlite3"),
+            database: PathBuf::from("../tmp/world-state-v3.sqlite3"),
             change_queue_capacity: 256,
         }
     }
@@ -813,7 +813,7 @@ movement_credit_window_ms = 500
 starting_units_per_material = 64
 
 [edits]
-database = "world-state-v2.sqlite3"
+database = "world-state-v3.sqlite3"
 change_queue_capacity = 256
 
 [spawn]

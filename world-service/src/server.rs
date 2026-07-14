@@ -39,9 +39,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v7/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v7/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v7";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v8/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v8/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v8";
 const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 
 /// Prepared server state. Source construction and spawn coverage validation happen before bind.
@@ -1797,7 +1797,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v7, test-local-token"),
+            HeaderValue::from_static("voxels.world.v8, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -2312,6 +2312,246 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn digging_converges_editor_observer_inventory_chunks_halos_and_surface_lod()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = test_config();
+        config.transport.max_connections = 3;
+        config.presence.max_players = 3;
+        let listener = TcpListener::bind(config.transport.listen).await?;
+        let address = listener.local_addr()?;
+        let server = WorldServer::new(
+            config.clone(),
+            Box::new(ProceduralWorldSource::new(config.world_seed)),
+        )?;
+        let server_task = tokio::spawn(server.serve(listener));
+
+        let (mut editor_world, editor_opened) =
+            connect_test_client(address, player_identity(80, 80, "digger")).await?;
+        let (mut observer_world, observer_opened) =
+            connect_test_client(address, player_identity(81, 81, "observer")).await?;
+        let (mut editor_presence, _) =
+            connect_test_presence(address, editor_opened.presence_session_id).await?;
+        let (mut observer_presence, _) =
+            connect_test_presence(address, observer_opened.presence_session_id).await?;
+
+        for (socket, opened) in [
+            (&mut editor_presence, &editor_opened),
+            (&mut observer_presence, &observer_opened),
+        ] {
+            socket
+                .send(ClientMessage::Binary(
+                    encode_player_pose(PlayerPoseUpdate {
+                        sequence: 1,
+                        sample_server_time_ms: 0,
+                        eye_position_metres: opened.player_resume.eye_position_metres,
+                        linear_velocity_metres_per_second: [0.0, 0.0, 0.0],
+                        look_yaw_radians: 0.0,
+                        look_pitch_radians: 0.0,
+                        flags: PLAYER_POSE_GROUNDED,
+                    })?
+                    .into(),
+                ))
+                .await?;
+        }
+
+        let hit = VoxelCoord::new(
+            editor_opened.spawn.x,
+            editor_opened.spawn.height,
+            editor_opened.spawn.z,
+        );
+        let dig_coords = ((hit.x - 2)..=(hit.x + 2))
+            .flat_map(|x| {
+                ((hit.y - 4)..=hit.y).flat_map(move |y| {
+                    ((hit.z - 2)..=(hit.z + 2)).map(move |z| VoxelCoord::new(x, y, z))
+                })
+            })
+            .collect::<Vec<_>>();
+        let requested_chunks = dig_coords
+            .iter()
+            .flat_map(|coord| voxels_world::EditMap::affected_chunks(*coord))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert!(requested_chunks.len() <= voxels_world::protocol::MAX_EDIT_AFFECTED_CHUNKS);
+
+        observer_world
+            .send(ClientMessage::Binary(
+                encode_chunk_batch(&ChunkBatchRequest {
+                    request_id: 1_000,
+                    priority: WorldProductPriority::VisibleChunk,
+                    coords: requested_chunks.clone(),
+                })?
+                .into(),
+            ))
+            .await?;
+        let before = decode_chunk_batch_result(&next_client_binary(&mut observer_world).await?)?;
+        assert_eq!(before.request_id, 1_000);
+        assert!(before.items.iter().all(|item| item.edit_revision == 1));
+        let before_material = |coord: VoxelCoord| {
+            let item = before
+                .items
+                .iter()
+                .find(|item| item.coord == coord.chunk())
+                .expect("pre-dig batch omitted an owner chunk");
+            let chunk = &item
+                .result
+                .as_ref()
+                .expect("pre-dig chunk generation failed")
+                .chunk;
+            let [x, y, z] = coord.local();
+            chunk.get(x, y, z)
+        };
+        let expected_mutations = dig_coords
+            .iter()
+            .copied()
+            .filter(|coord| before_material(*coord) != Material::Air)
+            .collect::<Vec<_>>();
+        assert!(!expected_mutations.is_empty());
+        assert_eq!(
+            expected_mutations.len(),
+            dig_coords.len(),
+            "an exposed surface dig must cut all five layers inward"
+        );
+        let unrelated = VoxelCoord::new(hit.x + 3, hit.y, hit.z);
+        let unrelated_before = before_material(unrelated);
+
+        let command = EditCommand {
+            operation_id: 1,
+            edit_session_id: editor_opened.edit_session_id,
+            action: voxels_world::protocol::EditAction::Dig {
+                hit,
+                face: voxels_world::protocol::VoxelFace::PositiveY,
+            },
+        };
+        editor_world
+            .send(ClientMessage::Binary(encode_edit_command(command)?.into()))
+            .await?;
+        let (editor_commit, _) = next_edit_commit(&mut editor_world).await?;
+        let (observer_commit, _) = next_edit_commit(&mut observer_world).await?;
+        assert_eq!(
+            observer_commit,
+            EditCommit {
+                editor_inventory: None,
+                ..editor_commit.clone()
+            }
+        );
+        assert_eq!(
+            editor_commit
+                .mutations
+                .iter()
+                .map(|mutation| mutation.coord)
+                .collect::<Vec<_>>(),
+            expected_mutations
+        );
+        assert!(
+            editor_commit
+                .mutations
+                .iter()
+                .all(|mutation| mutation.material == Material::Air)
+        );
+        let expected_affected = editor_commit
+            .mutations
+            .iter()
+            .flat_map(|mutation| voxels_world::EditMap::affected_chunks(mutation.coord))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(editor_commit.affected_chunks, expected_affected);
+
+        let inventory = editor_commit.editor_inventory.expect("editor inventory");
+        assert_eq!(inventory.revision, editor_opened.inventory.revision + 1);
+        for material in Material::ALL {
+            let expected_gain = expected_mutations
+                .iter()
+                .filter(|coord| before_material(**coord) == material)
+                .count() as u64;
+            assert_eq!(
+                inventory.count(material),
+                editor_opened.inventory.count(material) + expected_gain,
+                "wrong authoritative inventory delta for material {}",
+                material.id()
+            );
+        }
+
+        observer_world
+            .send(ClientMessage::Binary(
+                encode_chunk_batch(&ChunkBatchRequest {
+                    request_id: 1_001,
+                    priority: WorldProductPriority::VisibleChunk,
+                    coords: requested_chunks,
+                })?
+                .into(),
+            ))
+            .await?;
+        let after = decode_chunk_batch_result(&next_client_binary(&mut observer_world).await?)?;
+        assert_eq!(after.request_id, 1_001);
+        for mutation in &editor_commit.mutations {
+            let owner = after
+                .items
+                .iter()
+                .find(|item| item.coord == mutation.coord.chunk())
+                .and_then(|item| item.result.as_ref().ok())
+                .expect("post-dig owner chunk");
+            let [x, y, z] = mutation.coord.local();
+            assert_eq!(owner.chunk.get(x, y, z), Material::Air);
+            for coord in voxels_world::EditMap::affected_chunks(mutation.coord) {
+                if coord == mutation.coord.chunk() {
+                    continue;
+                }
+                let neighbor = after
+                    .items
+                    .iter()
+                    .find(|item| item.coord == coord)
+                    .and_then(|item| item.result.as_ref().ok())
+                    .expect("post-dig halo neighbor");
+                assert_eq!(
+                    neighbor.meshing_halo.sample_world(
+                        mutation.coord.x,
+                        mutation.coord.y,
+                        mutation.coord.z
+                    ),
+                    Some(Material::Air)
+                );
+            }
+        }
+        let unrelated_item = after
+            .items
+            .iter()
+            .find(|item| item.coord == unrelated.chunk())
+            .and_then(|item| item.result.as_ref().ok())
+            .expect("post-dig unrelated owner");
+        let [x, y, z] = unrelated.local();
+        assert_eq!(unrelated_item.chunk.get(x, y, z), unrelated_before);
+
+        assert!(!editor_commit.affected_surface_tiles.is_empty());
+        let surface_coord = editor_commit.affected_surface_tiles[0];
+        observer_world
+            .send(ClientMessage::Binary(
+                encode_surface_tile_batch(&SurfaceTileBatchRequest {
+                    request_id: 1_002,
+                    priority: WorldProductPriority::VisibleSurface,
+                    coords: vec![surface_coord],
+                })?
+                .into(),
+            ))
+            .await?;
+        let surface =
+            decode_surface_tile_batch_result(&next_client_binary(&mut observer_world).await?)?;
+        assert_eq!(surface.request_id, 1_002);
+        assert_eq!(surface.items[0].coord, surface_coord);
+        assert_eq!(surface.items[0].edit_revision, editor_commit.revision);
+        assert!(surface.items[0].result.is_ok());
+
+        editor_world.close(None).await?;
+        observer_world.close(None).await?;
+        editor_presence.close(None).await?;
+        observer_presence.close(None).await?;
+        server_task.abort();
+        let _ = server_task.await;
+        Ok(())
+    }
+
     async fn connect_test_client(
         address: SocketAddr,
         identity: PlayerIdentity,
@@ -2347,7 +2587,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v7, test-local-token"),
+            HeaderValue::from_static("voxels.world.v8, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -2382,7 +2622,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v7, test-local-token"),
+            HeaderValue::from_static("voxels.world.v8, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket

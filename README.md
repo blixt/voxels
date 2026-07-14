@@ -123,10 +123,11 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 - In deep water, use <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to swim along the view direction,
   <kbd>Space</kbd> to ascend, and <kbd>Shift</kbd> to dive.
 - Look with the mouse; <kbd>Esc</kbd> releases pointer lock.
-- Remove the targeted voxel with the left mouse button; place the Rust-selected material with the
-  right mouse button. Cycle Grass, Stone, Basalt, and Glow Crystal from the Mission Control context
-  menu. Sparse edits are committed transactionally by the native world service and streamed to
-  every interested browser; browser OPFS stores only local player camera state.
+- Excavate a 0.5 m-wide cube inward from the targeted face with the left mouse button; place the
+  Rust-selected material with the right mouse button. Cycle Grass, Stone, Basalt, and Glow Crystal
+  from the Mission Control context menu. Sparse edits are committed transactionally by the native
+  world service and streamed to every interested browser; browser OPFS stores only local player
+  camera state.
 - Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and context menu
   can toggle cascaded sun shadows, voxel AO, screen-space contact AO, fog, far terrain, animated
   water, target highlighting, material surface detail, or voxel emissive lights without a DOM UI

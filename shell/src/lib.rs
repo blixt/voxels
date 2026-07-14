@@ -61,7 +61,8 @@ mod web {
         StreamScheduler, SurfaceFocusAction, SurfaceRevisionCache, revision_satisfies,
     };
     use voxels_world::protocol::{
-        BrowserUserId, EditAction, MaterialInventory, PlayerId, PlayerIdentity, VoxelMutation,
+        BrowserUserId, EditAction, MaterialInventory, PlayerId, PlayerIdentity, VoxelFace,
+        VoxelMutation,
     };
     use voxels_world::{
         AtmosphereSample, CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT_PORTAL_COUNT,
@@ -1339,8 +1340,12 @@ mod web {
                 return;
             };
             let action = if buttons & 1 != 0 {
+                let Some(face) = VoxelFace::from_normal(hit.normal) else {
+                    return;
+                };
                 EditAction::Dig {
                     hit: VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]),
+                    face,
                 }
             } else if buttons & 2 != 0 {
                 if camera.intersects_voxel(hit.adjacent, VOXEL_SIZE_METRES) {
@@ -1354,8 +1359,8 @@ mod web {
                 return;
             };
 
-            // The server expands digging to the fixed half-metre cube and atomically owns material
-            // yield/debit. The browser never emits 125 independently raceable mutations.
+            // The server expands the hit face to a fixed inward half-metre cube and atomically owns
+            // material yield/debit. The browser never emits 125 independently raceable mutations.
             let _ = self.submit_local_edit(action);
         }
 
@@ -1686,6 +1691,7 @@ mod web {
             self.engine.as_ref().is_some_and(|engine| {
                 engine.submit_local_edit(EditAction::Dig {
                     hit: VoxelCoord::new(x, y, z),
+                    face: VoxelFace::PositiveY,
                 })[0]
                     == 1
             })
