@@ -318,6 +318,8 @@ pub struct EditCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EditCommit {
     pub operation_id: u64,
+    /// Connection that submitted this operation. Operation IDs are scoped to this connection.
+    pub editor_connection_id: u64,
     pub revision: u64,
     pub coord: VoxelCoord,
     pub material: Option<Material>,
@@ -952,8 +954,9 @@ pub fn decode_edit_command(bytes: &[u8]) -> Result<EditCommand, ProtocolError> {
 pub fn encode_edit_commit(commit: &EditCommit) -> Result<Vec<u8>, ProtocolError> {
     validate_edit_commit(commit)?;
     let mut payload = Vec::with_capacity(
-        24 + commit.affected_chunks.len() * 12 + commit.affected_surface_tiles.len() * 12,
+        32 + commit.affected_chunks.len() * 12 + commit.affected_surface_tiles.len() * 12,
     );
+    push_u64(&mut payload, commit.editor_connection_id);
     push_u64(&mut payload, commit.revision);
     encode_voxel_coord(&mut payload, commit.coord);
     encode_optional_material(&mut payload, commit.material);
@@ -981,6 +984,7 @@ pub fn decode_edit_commit(bytes: &[u8]) -> Result<EditCommit, ProtocolError> {
         ));
     }
     let mut cursor = Cursor::new(frame.payload);
+    let editor_connection_id = cursor.u64()?;
     let revision = cursor.u64()?;
     let coord = decode_voxel_coord(&mut cursor)?;
     let material = decode_optional_material(&mut cursor)?;
@@ -1003,6 +1007,7 @@ pub fn decode_edit_commit(bytes: &[u8]) -> Result<EditCommit, ProtocolError> {
     cursor.finish()?;
     let commit = EditCommit {
         operation_id: frame.request_id,
+        editor_connection_id,
         revision,
         coord,
         material,
@@ -1576,6 +1581,11 @@ fn validate_edit_commit(commit: &EditCommit) -> Result<(), ProtocolError> {
     if commit.operation_id == 0 {
         return Err(ProtocolError::InvalidPayload(
             "edit operation id must be nonzero",
+        ));
+    }
+    if commit.editor_connection_id == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "edit connection id must be nonzero",
         ));
     }
     if commit.revision == 0 {
@@ -3100,6 +3110,7 @@ mod tests {
 
         let commit = EditCommit {
             operation_id: command.operation_id,
+            editor_connection_id: 77,
             revision: 9,
             coord,
             material: command.material,
@@ -3133,6 +3144,15 @@ mod tests {
             encode_edit_commit(&zero_revision),
             Err(ProtocolError::InvalidPayload(
                 "edit revision must be nonzero"
+            ))
+        );
+
+        let mut zero_connection = commit.clone();
+        zero_connection.editor_connection_id = 0;
+        assert_eq!(
+            encode_edit_commit(&zero_connection),
+            Err(ProtocolError::InvalidPayload(
+                "edit connection id must be nonzero"
             ))
         );
 

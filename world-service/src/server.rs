@@ -905,8 +905,9 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
             let authority = Arc::clone(&state.edits);
             let source = Arc::clone(&state.source);
             let player_id = player_claim.player_id();
+            let editor_connection_id = player_claim.connection_id;
             let applied = tokio::task::spawn_blocking(move || {
-                authority.apply(source.as_ref(), player_id, command)
+                authority.apply(source.as_ref(), player_id, editor_connection_id, command)
             })
             .await;
             let applied = match applied {

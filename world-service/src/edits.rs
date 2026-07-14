@@ -227,6 +227,7 @@ impl EditAuthority {
         &self,
         source: &dyn WorldSourceEngine,
         player_id: PlayerId,
+        editor_connection_id: u64,
         command: EditCommand,
     ) -> Result<AppliedEdit, EditAuthorityError> {
         let mut state = self.lock();
@@ -236,7 +237,13 @@ impl EditAuthority {
                     "edit operation id was reused with a different command".to_owned(),
                 ));
             }
-            let commit = current_commit(source, &state.edits, command, stored.revision);
+            let commit = current_commit(
+                source,
+                &state.edits,
+                editor_connection_id,
+                command,
+                stored.revision,
+            );
             return Ok(AppliedEdit {
                 commit,
                 changed: false,
@@ -255,7 +262,13 @@ impl EditAuthority {
                 .commit()
                 .map_err(sql_error("commit edit operation"))?;
             return Ok(AppliedEdit {
-                commit: current_commit(source, &state.edits, command, revision),
+                commit: current_commit(
+                    source,
+                    &state.edits,
+                    editor_connection_id,
+                    command,
+                    revision,
+                ),
                 changed: false,
             });
         }
@@ -291,6 +304,7 @@ impl EditAuthority {
         Ok(AppliedEdit {
             commit: EditCommit {
                 operation_id: command.operation_id,
+                editor_connection_id,
                 revision,
                 coord: command.coord,
                 material: command.material,
@@ -524,6 +538,7 @@ fn persist_operation(
 fn current_commit(
     source: &dyn WorldSourceEngine,
     edits: &EditMap,
+    editor_connection_id: u64,
     command: EditCommand,
     revision: u64,
 ) -> EditCommit {
@@ -531,6 +546,7 @@ fn current_commit(
     affected_chunks.sort_unstable();
     EditCommit {
         operation_id: command.operation_id,
+        editor_connection_id,
         revision,
         coord: command.coord,
         material: command.material,
@@ -593,7 +609,7 @@ mod tests {
         let unrelated = ChunkCoord::new(owner.x + 100, owner.y, owner.z);
         let edit = command(7, coord, Some(Material::Wood));
 
-        let applied = authority.apply(&source, player_id(2), edit).unwrap();
+        let applied = authority.apply(&source, player_id(2), 22, edit).unwrap();
         assert!(applied.changed);
         assert_eq!(applied.commit.revision, 2);
         assert!(applied.commit.affected_chunks.contains(&owner));
@@ -605,14 +621,16 @@ mod tests {
         let surface = authority.snapshot_surface(&applied.commit.affected_surface_tiles);
         assert!(surface.revisions.iter().all(|revision| *revision == 2));
 
-        let retried = authority.apply(&source, player_id(2), edit).unwrap();
+        let retried = authority.apply(&source, player_id(2), 23, edit).unwrap();
         assert!(!retried.changed);
         assert_eq!(retried.commit.revision, 2);
+        assert_eq!(retried.commit.editor_connection_id, 23);
         assert_eq!(authority.revision(), 2);
 
         let reused = authority.apply(
             &source,
             player_id(2),
+            22,
             command(7, coord, Some(Material::Stone)),
         );
         assert!(
@@ -644,6 +662,7 @@ mod tests {
                 .apply(
                     &source,
                     player_id(4),
+                    44,
                     command(11, coord, Some(Material::GlowCrystal)),
                 )
                 .unwrap();
@@ -679,14 +698,17 @@ mod tests {
         let authority = EditAuthority::in_memory(world_id(6), &source, 4).unwrap();
         let coord = VoxelCoord::new(1, 200, 1);
         let edit = command(15, coord, Some(Material::Wood));
-        authority.apply(&source, player_id(7), edit).unwrap();
+        authority.apply(&source, player_id(7), 77, edit).unwrap();
         authority
             .lock()
             .connection
             .execute("UPDATE edit_operations SET material=65535", [])
             .unwrap();
 
-        let error = authority.apply(&source, player_id(7), edit).err().unwrap();
+        let error = authority
+            .apply(&source, player_id(7), 77, edit)
+            .err()
+            .unwrap();
         assert!(
             error
                 .to_string()
