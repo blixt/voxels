@@ -70,8 +70,8 @@ Rust enum layout and Serde output are not wire formats.
    it to open `/v4/presence` on a dedicated socket; a token cannot be reused by another world
    connection.
 10. Browsers send bounded `PlayerPose` latest-state frames. The server validates monotonic sequence,
-   finite coordinates, update rate, and explicit teleport discontinuities, assigns a unique color,
-   then broadcasts one sorted complete roster. Missing roster entries remove players immediately.
+    finite coordinates, update rate, and explicit teleport discontinuities, assigns a unique color,
+    then broadcasts one sorted complete roster. Missing roster entries remove players immediately.
 11. Presence ping/pong frames estimate the server clock with an NTP-style four-timestamp offset.
     Receivers render a delayed server timeline, adapt its 67-200 ms interpolation buffer to jitter,
     use clamped Hermite position interpolation and shortest-arc angles, extrapolate for at most
