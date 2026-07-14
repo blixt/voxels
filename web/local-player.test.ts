@@ -45,7 +45,6 @@ describe("local browser players", () => {
     expect(first).toEqual({
       browserUserId: IDS[0],
       playerId: IDS[1],
-      defaultPlayerId: IDS[1],
       playerName: "default",
     });
     expect(second).toEqual(first);
@@ -67,7 +66,6 @@ describe("local browser players", () => {
 
     expect(alice.browserUserId).toBe(bob.browserUserId);
     expect(alice.playerId).not.toBe(bob.playerId);
-    expect(alice.playerId).not.toBe(alice.defaultPlayerId);
     expect(restoredAlice).toEqual(alice);
   });
 

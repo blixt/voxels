@@ -88,7 +88,7 @@ as a second offered WebSocket subprotocol because browser WebSockets cannot set 
 header. This token is a local cross-site request defense, not production authentication: it is
 present in client configuration. Browser-generated user/player IDs are likewise untrusted local
 claims, not proof of identity. A future network deployment must use `wss://`, real credentials,
-server-validated player ownership, authorization, quotas, and the same VXWP version negotiation.
+server-validated player ownership, authorization, quotas, and the same exact VXWP version checks.
 
 Chrome 147 added [Local Network Access restrictions for WebSockets][chrome-147], so Chrome 150+
 prompts before a page may connect to loopback. Grant the prompt for the Vite origin. Local development
@@ -170,9 +170,10 @@ authentication or secrets. The registry is updated under a Web Lock, so simultan
 cannot mint competing IDs. `window.__VOXELS__.player` exposes the selected IDs for diagnostics and
 `window.__VOXELS__.playerUrl("carol")` returns a correctly formed URL for another named player.
 
-Camera rows are keyed by player ID inside the manifest-specific database. The schema-3 singleton
-camera migrates only to the stable default player, even when a named player is opened first. Voxel
-edits remain world-scoped and are shared live between named players in the same browser profile.
+Camera rows are keyed by player ID inside the manifest- and persistence-schema-specific database.
+The client initializes only the current schema and never imports, upgrades, or rewrites an older
+database. Voxel edits remain world-scoped and are shared live between named players in the same
+browser profile.
 Different browser profiles, private windows, hostnames, or ports have separate local storage and
 OPFS; cross-device state requires the future server-owned player store.
 

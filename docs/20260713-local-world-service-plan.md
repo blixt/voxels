@@ -198,7 +198,7 @@ an unstable implementation-specific layout.
 
 Every request carries:
 
-- protocol version range;
+- exact protocol version;
 - request ID;
 - world UUID and expected source-identity hash;
 - optional known world revision;
@@ -215,7 +215,8 @@ Every response carries:
 
 Required logical messages:
 
-1. `Hello` / `Welcome`: negotiate versions and capabilities; return the manifest.
+1. `Hello` / `Welcome`: require the exact version, exchange current capabilities, and return the
+   manifest.
 2. `GetChunkBatch`: request coordinates and priority as one batch.
 3. `ChunkBatch`: return snapshots independently so partial completion is useful.
 4. `GetSurfaceTileBatch` / `SurfaceTileBatch`.
@@ -335,15 +336,9 @@ point terrain.
 The current procedural source can continue regenerating pristine chunks because it has strict integer
 determinism. Cache policy may differ by source without changing the protocol.
 
-For existing browser worlds, implement an explicit one-time migration:
-
-1. browser reads the legacy OPFS edit rows;
-2. sends them as an `ImportLegacyEdits` transaction against an empty matching world;
-3. server verifies seed and old generator identity;
-4. browser records the completed migration marker only after the server commits;
-5. retain the old database until a manual or delayed cleanup step.
-
-Never reset or overwrite OPFS data during development or tests.
+During early development, do not import or upgrade older browser worlds. A schema or authority change
+gets a new namespace and starts empty. Leave old OPFS files untouched so development and tests never
+reset or overwrite local data, but do not read them from the current build.
 
 ## Terrain Diffusion provider
 
@@ -451,7 +446,7 @@ parity and bounded queues.
 - Return edited chunks with meshing halos.
 - Move edit-aware surface and water products to the service.
 - Split camera persistence from edit persistence.
-- Implement safe legacy OPFS import.
+- Cut browser persistence to a fresh server-authority namespace.
 - Remove normal shell calls to `Generator`.
 
 Exit: stopping the daemon stops new world data; no hidden local generator or edit authority remains in
@@ -464,7 +459,7 @@ the game.
 - Add Unix-domain-socket conformance tests using the same messages.
 - Benchmark inline Unix-socket bulk transfer; add shared memory only if it materially improves an observed
   bottleneck.
-- Remove the migration feature flag after parity and recovery criteria pass.
+- Keep one exact protocol version and hard-fail every mismatch.
 
 Exit: all transports pass one conformance suite, and restart/reconnect cannot lose committed edits.
 
@@ -513,12 +508,12 @@ messages are unchanged.
 - Terrain Diffusion benchmarks must report cold model load, first tile, warm adjacent tile, random tile,
   peak unified memory, cache hit ratio, and Metal device time.
 
-### Failure and compatibility
+### Failure and version cuts
 
 - Kill and restart `worldd` during generation and during an edit transaction.
 - Disconnect/reconnect the browser and resume changes from its last revision.
 - Reject source identity, model hash, material schema, and protocol mismatches before accepting payloads.
-- Verify an older supported client ignores newly added protobuf fields.
+- Verify every non-current client version is rejected before any world product is exchanged.
 - Corrupt cached macro tiles and chunk payloads and prove they are rejected without touching authoritative
   edits.
 - Run every persistence test against explicit temporary databases and cache roots.

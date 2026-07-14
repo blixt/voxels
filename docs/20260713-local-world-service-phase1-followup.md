@@ -48,13 +48,13 @@ These are intentionally visible rather than hidden behind a point-sampling trans
    `world-client` admission; no simulation or render callback depends on completing such a miss.
 4. Edit-aware terrain/water surface generation and invalidation are source-neutral trait methods but
    still receive the browser-owned `EditMap`. They move behind the authoritative session in Phase 3.
-5. `EditMap` retains generator-taking compatibility methods for current world-unit tests. New
+5. `EditMap` retains generator-specific convenience methods for procedural world-unit tests. New
    service/client code must use the prepared-value APIs instead.
-6. Browser OPFS still identifies the legacy world by seed plus `GENERATOR_VERSION`. It was not
-   partially retagged with a world UUID or source hash because doing so without the planned explicit
-   import transaction could orphan or reinterpret existing edits.
+6. Browser OPFS still identifies the old phase-1 world by seed plus `GENERATOR_VERSION`. That design
+   is superseded: current builds use a manifest- and persistence-schema-derived namespace and never
+   import or upgrade the phase-1 database.
 7. Camera persistence and world edits remain combined in the browser `Store`; splitting them belongs
-   to the authority migration, after protocol and daemon counterproof exist.
+   to a hard authority cut after protocol and daemon counterproof exist.
 8. `MacroTerrainSource` now defines and tests versioned, bounded field blocks, but procedural-v16
    still reaches its existing internal composition pipeline directly. Before the Terrain Diffusion
    spike, extract one shared canonical composer that consumes these macro fields so providers cannot
@@ -65,4 +65,5 @@ These are intentionally visible rather than hidden behind a point-sampling trans
 The next change should add `world-protocol`, `world-client`, `world-service`, and `worldd` around the
 owned products already used by the game worker. Start read-only: negotiate a manifest, request chunk
 batches with cancellation and bounded queues, and compare sidecar snapshots against the in-process
-procedural path. Do not migrate OPFS edits until snapshot parity and reconnect behavior are proven.
+procedural path. Do not import OPFS edits; use a fresh versioned namespace after snapshot parity and
+reconnect behavior are proven.

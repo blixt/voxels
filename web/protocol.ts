@@ -46,7 +46,6 @@ export interface InitMessage {
   configToml: string;
   browserUserId: string;
   playerId: string;
-  defaultPlayerId: string;
   playerName: string;
 }
 

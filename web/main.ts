@@ -119,7 +119,6 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       configToml,
       browserUserId: player.browserUserId,
       playerId: player.playerId,
-      defaultPlayerId: player.defaultPlayerId,
       playerName: player.playerName,
     },
     [offscreen],

@@ -19,10 +19,9 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{AbortController, BroadcastChannel, DedicatedWorkerGlobalScope, MessageEvent};
 
-const LEGACY_DATABASE_NAME: &str = "voxels.db";
-const SCHEMA_VERSION: i64 = 4;
-const CHANNEL_NAME: &str = "voxels-db-v1";
-const LOCK_NAME: &str = "voxels-db-owner";
+const SCHEMA_VERSION: i64 = 5;
+const CHANNEL_NAME: &str = "voxels-db-p5";
+const LOCK_NAME: &str = "voxels-db-p5-owner";
 const WIRE_VERSION: f64 = 2.0;
 const MSG_REQUEST: f64 = 0.0;
 const MSG_RESPONSE: f64 = 1.0;
@@ -50,15 +49,12 @@ pub struct PersistenceConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PersistencePlayer {
     pub player_id: PlayerId,
-    /// Stable default player used only to preserve the legacy singleton camera during schema 4.
-    pub legacy_default_player_id: PlayerId,
 }
 
 /// Complete namespace for one immutable world source.
 ///
-/// The embedded procedural world retains its historical database name. Negotiated native worlds
-/// use the full manifest hash in both the origin-wide routing tag and database filename, so toggling
-/// providers cannot attach Terrain Diffusion edits or camera state to procedural terrain.
+/// The full manifest hash and current persistence schema define both the origin-wide routing tag and
+/// database filename, so incompatible builds and world providers never share local state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PersistenceWorld {
     tag: String,
@@ -68,15 +64,6 @@ pub struct PersistenceWorld {
 }
 
 impl PersistenceWorld {
-    pub fn embedded_procedural(seed: u64, generator_version: u32) -> Self {
-        Self {
-            tag: format!("{seed:016x}:{generator_version}"),
-            database_name: LEGACY_DATABASE_NAME.to_owned(),
-            database_seed: seed,
-            database_version: generator_version,
-        }
-    }
-
     pub fn negotiated(manifest_hash: voxels_world::WorldManifestHash) -> Self {
         let bytes = manifest_hash.as_bytes();
         let mut seed_bytes = [0_u8; 8];
@@ -85,9 +72,9 @@ impl PersistenceWorld {
         let mut version_bytes = [0_u8; 4];
         version_bytes.copy_from_slice(&bytes[8..12]);
         let database_version = u32::from_le_bytes(version_bytes);
-        let tag = format!("manifest:{manifest_hash}");
+        let tag = format!("p{SCHEMA_VERSION}:manifest:{manifest_hash}");
         Self {
-            database_name: format!("voxels-{manifest_hash}.db"),
+            database_name: format!("voxels-p{SCHEMA_VERSION}-{manifest_hash}.db"),
             tag,
             database_seed,
             database_version,
@@ -614,13 +601,7 @@ impl Coordinator {
         let boot_probe = ready.is_some();
         let coordinator = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            match open_leader(
-                coordinator.world.clone(),
-                coordinator.player.legacy_default_player_id,
-                coordinator.config,
-            )
-            .await
-            {
+            match open_leader(coordinator.world.clone(), coordinator.config).await {
                 Ok(leader) if !coordinator.closed.get() => {
                     coordinator.last_leader_error.borrow_mut().take();
                     *coordinator.leader.borrow_mut() = Some(Rc::new(leader));
@@ -794,7 +775,6 @@ async fn install_vfs(config: PersistenceConfig) -> Result<OpfsSAHPoolUtil, JsVal
 
 async fn open_leader(
     world: PersistenceWorld,
-    legacy_default_player_id: PlayerId,
     config: PersistenceConfig,
 ) -> Result<Leader, JsValue> {
     let vfs = install_vfs(config).await?;
@@ -804,7 +784,7 @@ async fn open_leader(
         connection
             .execute_batch("PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")
             .map_err(|error| js_error("configure SQLite", error))?;
-        migrate(&connection, legacy_default_player_id)?;
+        initialize_current_schema(&connection)?;
         ensure_world(&connection, world.database_seed, world.database_version)?;
         Ok(connection)
     })();
@@ -1187,13 +1167,13 @@ fn js_value_message(value: &JsValue) -> String {
     value.as_string().unwrap_or_else(|| format!("{value:?}"))
 }
 
-fn migrate(connection: &Connection, legacy_default_player_id: PlayerId) -> Result<(), JsValue> {
-    let mut version: i64 = connection
+fn initialize_current_schema(connection: &Connection) -> Result<(), JsValue> {
+    let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|error| js_error("read schema version", error))?;
-    if version > SCHEMA_VERSION {
+    if version != 0 && version != SCHEMA_VERSION {
         return Err(JsValue::from_str(&format!(
-            "local database schema {version} is newer than this build ({SCHEMA_VERSION})"
+            "local database schema {version} is unsupported; this build reads only schema {SCHEMA_VERSION}"
         )));
     }
     if version == 0 {
@@ -1206,77 +1186,6 @@ fn migrate(connection: &Connection, legacy_default_player_id: PlayerId) -> Resul
                    generator_version INTEGER NOT NULL,
                    created_at INTEGER NOT NULL DEFAULT (unixepoch())
                  );
-                 CREATE TABLE camera (
-                   id INTEGER PRIMARY KEY CHECK (id = 0),
-                   x REAL NOT NULL,
-                   y REAL NOT NULL,
-                   z REAL NOT NULL,
-                   yaw REAL NOT NULL,
-                   pitch REAL NOT NULL
-                 );
-                 CREATE TABLE chunks (
-                   world_id INTEGER NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
-                   x INTEGER NOT NULL,
-                   y INTEGER NOT NULL,
-                   z INTEGER NOT NULL,
-                   revision INTEGER NOT NULL,
-                   codec_version INTEGER NOT NULL,
-                   payload BLOB NOT NULL,
-                   content_hash BLOB NOT NULL CHECK (length(content_hash) = 32),
-                   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                   PRIMARY KEY (world_id, x, y, z)
-                 ) WITHOUT ROWID;
-                 CREATE TABLE voxel_edits (
-                   world_id INTEGER NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
-                   x INTEGER NOT NULL,
-                   y INTEGER NOT NULL,
-                   z INTEGER NOT NULL,
-                   material INTEGER NOT NULL,
-                   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                   PRIMARY KEY (world_id, x, y, z)
-                 ) WITHOUT ROWID;
-                 PRAGMA user_version=3;
-                 COMMIT;",
-            )
-            .map_err(|error| js_error("apply schema migration 1", error))?;
-        version = 3;
-    }
-    if version == 1 {
-        // Schema 1 stored positions in whole-voxel units. Schema 2 uses SI metres so that the
-        // 10 cm voxel resolution is explicit throughout simulation, rendering and persistence.
-        connection
-            .execute_batch(
-                "BEGIN IMMEDIATE;
-                 UPDATE camera SET x=x*0.1, y=y*0.1, z=z*0.1;
-                 PRAGMA user_version=2;
-                 COMMIT;",
-            )
-            .map_err(|error| js_error("apply schema migration 2", error))?;
-        version = 2;
-    }
-    if version == 2 {
-        connection
-            .execute_batch(
-                "BEGIN IMMEDIATE;
-                 CREATE TABLE voxel_edits (
-                   world_id INTEGER NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
-                   x INTEGER NOT NULL,
-                   y INTEGER NOT NULL,
-                   z INTEGER NOT NULL,
-                   material INTEGER NOT NULL,
-                   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                   PRIMARY KEY (world_id, x, y, z)
-                 ) WITHOUT ROWID;
-                 PRAGMA user_version=3;
-                 COMMIT;",
-            )
-            .map_err(|error| js_error("apply schema migration 3", error))?;
-        version = 3;
-    }
-    if version == 3 {
-        connection
-            .execute_batch(
-                "BEGIN IMMEDIATE;
                  CREATE TABLE local_player_state (
                    player_id BLOB PRIMARY KEY CHECK (length(player_id) = 16),
                    x REAL NOT NULL,
@@ -1285,26 +1194,20 @@ fn migrate(connection: &Connection, legacy_default_player_id: PlayerId) -> Resul
                    yaw REAL NOT NULL,
                    pitch REAL NOT NULL,
                    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-                 ) WITHOUT ROWID;",
-            )
-            .map_err(|error| js_error("begin schema migration 4", error))?;
-        let result = (|| -> rusqlite::Result<()> {
-            connection.execute(
-                "INSERT INTO local_player_state (player_id, x, y, z, yaw, pitch) \
-                 SELECT ?1, x, y, z, yaw, pitch FROM camera WHERE id=0",
-                params![legacy_default_player_id.as_bytes().as_slice()],
-            )?;
-            connection.execute_batch(
-                "DROP TABLE camera;
-                 PRAGMA user_version=4;
+                 ) WITHOUT ROWID;
+                 CREATE TABLE voxel_edits (
+                   world_id INTEGER NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+                   x INTEGER NOT NULL,
+                   y INTEGER NOT NULL,
+                   z INTEGER NOT NULL,
+                   material INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                   PRIMARY KEY (world_id, x, y, z)
+                 ) WITHOUT ROWID;
+                 PRAGMA user_version=5;
                  COMMIT;",
-            )?;
-            Ok(())
-        })();
-        if let Err(error) = result {
-            let _ = connection.execute_batch("ROLLBACK;");
-            return Err(js_error("apply schema migration 4", error));
-        }
+            )
+            .map_err(|error| js_error("initialize local database schema", error))?;
     }
     Ok(())
 }
@@ -1323,18 +1226,10 @@ fn ensure_world(
         .optional()
         .map_err(|error| js_error("load world identity", error))?;
     if let Some((seed, version)) = stored {
-        if seed.as_slice() != world_seed.to_le_bytes() || version > generator_version {
+        if seed.as_slice() != world_seed.to_le_bytes() || version != generator_version {
             return Err(JsValue::from_str(
                 "saved world identity does not match this generator build",
             ));
-        }
-        if version < generator_version {
-            connection
-                .execute(
-                    "UPDATE worlds SET generator_version=?1 WHERE id=0",
-                    params![generator_version],
-                )
-                .map_err(|error| js_error("advance world generator version", error))?;
         }
     } else {
         connection

@@ -3152,9 +3152,9 @@ mod web {
         player: js_sys::Array,
     ) -> Result<EngineHandle, JsValue> {
         console_error_panic_hook::set_once();
-        if player.length() != 4 {
+        if player.length() != 3 {
             return Err(JsValue::from_str(
-                "player bootstrap must contain four strings",
+                "player bootstrap must contain three strings",
             ));
         }
         let player_string = |index: u32, name: &str| {
@@ -3164,8 +3164,7 @@ mod web {
         };
         let browser_user_id = player_string(0, "browser user id")?;
         let player_id = player_string(1, "player id")?;
-        let default_player_id = player_string(2, "default player id")?;
-        let player_name = player_string(3, "name")?;
+        let player_name = player_string(2, "name")?;
         let identity = PlayerIdentity {
             browser_user_id: BrowserUserId::from_uuid_str(&browser_user_id)
                 .ok_or_else(|| JsValue::from_str("browser user id is not a UUID"))?,
@@ -3176,9 +3175,6 @@ mod web {
         identity
             .validate()
             .map_err(|error| JsValue::from_str(&format!("player identity: {error}")))?;
-        let default_player_id = PlayerId::from_uuid_str(&default_player_id)
-            .filter(|player_id| !player_id.is_nil())
-            .ok_or_else(|| JsValue::from_str("default player id is not a non-nil UUID"))?;
         let client_config = ClientConfig::from_toml(&config_toml)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         let world_transport = client_config.world.clone();
@@ -3260,25 +3256,17 @@ mod web {
         let opened = remote
             .world_opened()
             .ok_or_else(|| JsValue::from_str("world handshake completed without a manifest"))?;
+        let manifest_hash = opened
+            .manifest
+            .manifest_hash()
+            .map_err(|error| JsValue::from_str(&format!("native world manifest: {error}")))?;
+        let persistence_world = PersistenceWorld::negotiated(manifest_hash);
         let remote = Some(remote);
         let opened = Some(opened);
-        let persistence_world = if let Some(opened) = &opened {
-            let manifest_hash = opened
-                .manifest
-                .manifest_hash()
-                .map_err(|error| JsValue::from_str(&format!("native world manifest: {error}")))?;
-            PersistenceWorld::negotiated(manifest_hash)
-        } else {
-            PersistenceWorld::embedded_procedural(
-                WORLD_SEED,
-                voxels_world::generation::GENERATOR_VERSION,
-            )
-        };
         let mut store = Store::open(
             persistence_world,
             PersistencePlayer {
                 player_id: identity.player_id,
-                legacy_default_player_id: default_player_id,
             },
             PersistenceConfig {
                 request_timeout_ms: client_config.persistence.request_timeout_ms as i32,

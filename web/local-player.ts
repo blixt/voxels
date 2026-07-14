@@ -8,7 +8,6 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 export interface BrowserPlayerSession {
   browserUserId: string;
   playerId: string;
-  defaultPlayerId: string;
   playerName: string;
 }
 
@@ -70,13 +69,11 @@ export async function resolveBrowserPlayerSession(
         throw new Error(`Could not persist the local player registry: ${String(error)}`);
       }
     }
-    const defaultPlayerId = registry.players[DEFAULT_PLAYER_NAME];
-    if (defaultPlayerId === undefined)
+    if (registry.players[DEFAULT_PLAYER_NAME] === undefined)
       throw new Error("Local player registry has no default player.");
     return {
       browserUserId: registry.browserUserId,
       playerId,
-      defaultPlayerId,
       playerName,
     };
   });

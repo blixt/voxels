@@ -369,8 +369,10 @@ used by this VFS are dedicated-worker-only. Keeping the engine in a dedicated wo
 satisfies both rendering and storage constraints.
 
 SQLite stores structured, queryable state: schema version, world identity and generator version,
-browser-local player camera state, and sparse voxel overrides. Camera rows are keyed by opaque player
-ID while edits remain shared world state. Each override is an idempotent row keyed by world and voxel;
+browser-local player camera state, and sparse voxel overrides. The database namespace includes the
+current persistence schema, and startup accepts only that exact schema; there are no upgrade or import
+paths. Camera rows are keyed by opaque player ID while edits remain shared world state. Each override is
+an idempotent row keyed by world and voxel;
 restoring the generated material removes the row. Versioned palette/bit-packed chunk payloads exist for
 future snapshot compaction. If profiling shows write amplification or database size becoming a real
 constraint, the same codec can move snapshots into append-only region files while SQLite remains the

@@ -69,9 +69,11 @@ or memory safety. The following remain code-level invariants:
 - pinned Terrain Diffusion repository revision, weight hashes, tensor topology, normalization, and
   sampler/scheduler semantics.
 
-Changing those requires a versioned code/protocol migration rather than a TOML edit. Player physics
-also remains in portable `core` for now: it will become server-authoritative game-rule data when the
-simulation protocol exists, rather than being introduced as an untrusted client-local override.
+Changing those requires a hard version bump rather than a TOML edit. Development builds accept only
+their exact schema and protocol versions; they select a fresh versioned local namespace instead of
+migrating older data. Player physics also remains in portable `core` for now: it will become
+server-authoritative game-rule data when the simulation protocol exists, rather than being introduced
+as an untrusted client-local override.
 
 ## Testing configuration-dependent code
 
