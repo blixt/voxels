@@ -21,6 +21,7 @@ use voxels_world_terrain_diffusion::{
     TerrainDiffusionConfig, TerrainPrecision, validate_model_root,
 };
 
+mod edits;
 mod presence;
 pub mod server;
 
@@ -29,7 +30,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 6;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 7;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
     0x76, 0x6f, 0x78, 0x65, 0x6c, 0x73, 0x40, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x01,
@@ -139,6 +140,25 @@ pub struct SpawnConfig {
     pub xz_voxels: [i32; 2],
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditPersistenceConfig {
+    /// Native SQLite file containing the authoritative sparse edit journal. Relative paths are
+    /// resolved from the directory containing the service configuration file.
+    pub database: PathBuf,
+    /// Bounded per-client change queue. Overflow forces an explicit product resynchronization.
+    pub change_queue_capacity: u16,
+}
+
+impl Default for EditPersistenceConfig {
+    fn default() -> Self {
+        Self {
+            database: PathBuf::from("../tmp/world-edits.sqlite3"),
+            change_queue_capacity: 256,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub enum WorldSourceMode {
     #[default]
@@ -192,6 +212,7 @@ pub struct WorldServiceConfig {
     pub source: WorldSourceMode,
     pub transport: LoopbackTransportConfig,
     pub presence: PresenceConfig,
+    pub edits: EditPersistenceConfig,
     pub spawn: SpawnConfig,
     pub terrain_diffusion: TerrainDiffusionProviderConfig,
 }
@@ -205,6 +226,7 @@ impl Default for WorldServiceConfig {
             source: WorldSourceMode::ProceduralV16,
             transport: LoopbackTransportConfig::default(),
             presence: PresenceConfig::default(),
+            edits: EditPersistenceConfig::default(),
             spawn: SpawnConfig::default(),
             terrain_diffusion: TerrainDiffusionProviderConfig::default(),
         }
@@ -354,6 +376,16 @@ impl WorldServiceConfig {
                 "presence delta budget and prediction-error thresholds must be nonzero",
             ));
         }
+        if self.edits.database.as_os_str().is_empty() {
+            return Err(WorldServiceConfigError::InvalidEdits(
+                "edit database path must not be empty",
+            ));
+        }
+        if !(16..=4_096).contains(&self.edits.change_queue_capacity) {
+            return Err(WorldServiceConfigError::InvalidEdits(
+                "edit change_queue_capacity must be in 16..=4096",
+            ));
+        }
         Ok(())
     }
 
@@ -427,6 +459,7 @@ pub enum WorldServiceConfigError {
     },
     InvalidConcurrency(&'static str),
     InvalidPresence(&'static str),
+    InvalidEdits(&'static str),
 }
 
 impl fmt::Display for WorldServiceConfigError {
@@ -473,6 +506,9 @@ impl fmt::Display for WorldServiceConfigError {
             Self::InvalidPresence(reason) => {
                 write!(formatter, "invalid world-service presence: {reason}")
             }
+            Self::InvalidEdits(reason) => {
+                write!(formatter, "invalid world-service edits: {reason}")
+            }
         }
     }
 }
@@ -511,6 +547,17 @@ impl LoadedWorldServiceConfig {
 
     pub const fn config(&self) -> &WorldServiceConfig {
         &self.config
+    }
+
+    pub fn edit_database_path(&self) -> PathBuf {
+        if self.config.edits.database.is_absolute() {
+            self.config.edits.database.clone()
+        } else {
+            self.path.parent().map_or_else(
+                || self.config.edits.database.clone(),
+                |parent| parent.join(&self.config.edits.database),
+            )
+        }
     }
 
     pub fn terrain_model_root(&self) -> Result<PathBuf, WorldServiceSourceError> {
@@ -664,7 +711,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 6
+schema_version = 7
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -698,6 +745,10 @@ far_update_interval_ms = 250
 max_records_per_delta = 64
 prediction_error_centimetres = 25
 look_error_milliradians = 175
+
+[edits]
+database = "world-edits.sqlite3"
+change_queue_capacity = 256
 
 [spawn]
 xz_voxels = [0, 0]
@@ -751,12 +802,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 6", "schema_version = 5");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 7", "schema_version = 6");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 6,
-                found: 5,
+                expected: 7,
+                found: 6,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");

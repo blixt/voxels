@@ -2,6 +2,7 @@
 
 use crate::{
     LoadedWorldServiceConfig, WorldServiceConfig, WorldServiceConfigError, WorldServiceSourceError,
+    edits::{ChunkEditSnapshot, EditAuthority, SurfaceEditSnapshot},
     presence::{PoseAdmission, PresenceHub, PresenceStreamState},
 };
 use axum::Router;
@@ -14,7 +15,7 @@ use axum::routing::get;
 use axum::serve::ListenerExt;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,23 +24,24 @@ use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use voxels_world::protocol::{
     ChunkBatchItem, ChunkBatchRequest, ChunkBatchResult, PlayerIdentity, PresenceOpened,
-    PresencePong, PresenceSessionId, SpawnPoint, SurfaceTileBatchItem, SurfaceTileBatchRequest,
-    SurfaceTileBatchResult, WorldCapabilities, WorldOpened, cancel_kind, chunk_batch_kind,
-    decode_cancel, decode_chunk_batch, decode_open_presence, decode_open_world, decode_player_pose,
-    decode_presence_ping, decode_surface_tile_batch, encode_chunk_batch_result, encode_error,
-    encode_presence_opened, encode_presence_pong, encode_surface_tile_batch_result,
-    encode_world_opened, message_kind, open_presence_kind, open_world_kind, player_pose_kind,
-    presence_ping_kind, surface_tile_batch_kind,
+    PresencePong, PresenceSessionId, ResyncRequired, SpawnPoint, SurfaceTileBatchItem,
+    SurfaceTileBatchRequest, SurfaceTileBatchResult, WorldCapabilities, WorldOpened, cancel_kind,
+    chunk_batch_kind, decode_cancel, decode_chunk_batch, decode_edit_command, decode_open_presence,
+    decode_open_world, decode_player_pose, decode_presence_ping, decode_surface_tile_batch,
+    edit_command_kind, encode_chunk_batch_result, encode_edit_commit, encode_error,
+    encode_presence_opened, encode_presence_pong, encode_resync_required,
+    encode_surface_tile_batch_result, encode_world_opened, message_kind, open_presence_kind,
+    open_world_kind, player_pose_kind, presence_ping_kind, surface_tile_batch_kind,
 };
 use voxels_world::{
-    CHUNK_EDGE, ChunkCoord, Material, SurfaceSampleBlockRequest, WORLD_SCHEMA_VERSION,
+    CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest, WORLD_SCHEMA_VERSION,
     WorldManifest, WorldManifestError, WorldProduct, WorldProductBatch, WorldProductPriority,
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v5/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v5/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v5";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v6/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v6/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v6";
 
 /// Prepared server state. Source construction and spawn coverage validation happen before bind.
 pub struct WorldServer {
@@ -49,16 +51,42 @@ pub struct WorldServer {
 impl WorldServer {
     pub fn from_loaded_config(loaded: &LoadedWorldServiceConfig) -> Result<Self, WorldServerError> {
         let source = loaded.build_world_source()?;
-        Self::new(loaded.config().clone(), source)
+        Self::build(
+            loaded.config().clone(),
+            source,
+            Some(loaded.edit_database_path()),
+        )
     }
 
     pub fn new(
         config: WorldServiceConfig,
         source: Box<dyn WorldSourceEngine>,
     ) -> Result<Self, WorldServerError> {
+        Self::build(config, source, None)
+    }
+
+    fn build(
+        config: WorldServiceConfig,
+        source: Box<dyn WorldSourceEngine>,
+        edit_database: Option<std::path::PathBuf>,
+    ) -> Result<Self, WorldServerError> {
         config.validate()?;
         let source = Arc::<dyn WorldSourceEngine>::from(source);
         let world = prepare_world(&config, source.as_ref())?;
+        let edits = match edit_database {
+            Some(path) => EditAuthority::open(
+                &path,
+                world.manifest.world_id,
+                source.as_ref(),
+                config.edits.change_queue_capacity,
+            ),
+            None => EditAuthority::in_memory(
+                world.manifest.world_id,
+                source.as_ref(),
+                config.edits.change_queue_capacity,
+            ),
+        }
+        .map_err(|error| WorldServerError::Edits(error.to_string()))?;
         let capacity = usize::from(config.transport.global_queue_capacity);
         let (generation_tx, generation_rx) = mpsc::channel(capacity);
         let semaphore = Arc::new(Semaphore::new(usize::from(
@@ -88,6 +116,8 @@ impl WorldServer {
             ))),
             world,
             presence,
+            source,
+            edits,
             generation_tx,
         });
         let router = Router::new()
@@ -134,6 +164,7 @@ pub enum WorldServerError {
     Spawn(WorldSourceError),
     InvalidSpawnProduct,
     Presence(String),
+    Edits(String),
     Manifest(WorldManifestError),
     Bind { address: SocketAddr, reason: String },
     Listener(String),
@@ -151,6 +182,7 @@ impl fmt::Display for WorldServerError {
                 formatter.write_str("world source returned a mismatched spawn surface product")
             }
             Self::Presence(reason) => write!(formatter, "could not initialize presence: {reason}"),
+            Self::Edits(error) => write!(formatter, "could not initialize edit authority: {error}"),
             Self::Manifest(error) => write!(formatter, "invalid world manifest: {error}"),
             Self::Bind { address, reason } => {
                 write!(
@@ -239,6 +271,7 @@ fn prepare_world(
         manifest,
         capabilities: WorldCapabilities::CANONICAL_CHUNKS
             .union(WorldCapabilities::SURFACE_LOD)
+            .union(WorldCapabilities::SERVER_EDITS)
             .union(WorldCapabilities::PLAYER_PRESENCE),
         spawn: SpawnPoint {
             x: config.spawn.xz_voxels[0],
@@ -338,6 +371,8 @@ struct ServerState {
     presence_connections: Arc<Semaphore>,
     world: WorldBootstrap,
     presence: Arc<PresenceHub>,
+    source: Arc<dyn WorldSourceEngine>,
+    edits: Arc<EditAuthority>,
     generation_tx: mpsc::Sender<GenerationJob>,
 }
 
@@ -549,27 +584,45 @@ struct GenerationJob {
 
 #[derive(Clone)]
 enum GenerationRequest {
-    Chunks(ChunkBatchRequest),
-    SurfaceTiles(SurfaceTileBatchRequest),
+    Chunks {
+        request: ChunkBatchRequest,
+        snapshot: ChunkEditSnapshot,
+    },
+    SurfaceTiles {
+        request: SurfaceTileBatchRequest,
+        snapshot: SurfaceEditSnapshot,
+    },
 }
 
 impl GenerationRequest {
+    fn chunks(request: ChunkBatchRequest, edits: &EditAuthority) -> Self {
+        let snapshot = edits.snapshot_chunks(&request.coords);
+        Self::Chunks { request, snapshot }
+    }
+
+    fn surface_tiles(request: SurfaceTileBatchRequest, edits: &EditAuthority) -> Self {
+        let snapshot = edits.snapshot_surface(&request.coords);
+        Self::SurfaceTiles { request, snapshot }
+    }
+
     fn request_id(&self) -> u64 {
         match self {
-            Self::Chunks(request) => request.request_id,
-            Self::SurfaceTiles(request) => request.request_id,
+            Self::Chunks { request, .. } => request.request_id,
+            Self::SurfaceTiles { request, .. } => request.request_id,
         }
     }
 
     fn key(&self) -> GenerationKey {
         match self {
-            Self::Chunks(request) => GenerationKey::Chunks {
+            Self::Chunks { request, snapshot } => GenerationKey::Chunks {
                 priority: request.priority,
                 coords: request.coords.clone(),
+                revisions: snapshot.revisions.clone(),
             },
-            Self::SurfaceTiles(request) => GenerationKey::SurfaceTiles {
+            Self::SurfaceTiles { request, snapshot } => GenerationKey::SurfaceTiles {
                 priority: request.priority,
                 coords: request.coords.clone(),
+                revisions: snapshot.revisions.clone(),
             },
         }
     }
@@ -580,10 +633,12 @@ enum GenerationKey {
     Chunks {
         priority: WorldProductPriority,
         coords: Vec<ChunkCoord>,
+        revisions: Vec<u64>,
     },
     SurfaceTiles {
         priority: WorldProductPriority,
         coords: Vec<voxels_world::SurfaceTileCoord>,
+        revisions: Vec<u64>,
     },
 }
 
@@ -699,8 +754,42 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
         return;
     }
 
+    let mut edit_subscription = state.edits.subscribe(player_claim.connection_id);
+    let mut edit_subscription_open = true;
+
     loop {
-        let bytes = match inbound.recv().await {
+        let inbound_frame = tokio::select! {
+            edit = edit_subscription.receiver.recv(), if edit_subscription_open => {
+                let Some(commit) = edit else {
+                    edit_subscription_open = false;
+                    continue;
+                };
+                if edit_subscription.overflowed.swap(false, Ordering::AcqRel) {
+                    let resync = ResyncRequired {
+                        revision: state.edits.revision(),
+                    };
+                    match encode_resync_required(resync) {
+                        Ok(bytes) => {
+                            if send_control_frame(&outbound, bytes).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                match encode_edit_commit(&commit) {
+                    Ok(bytes) => {
+                        if send_control_frame(&outbound, bytes).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+                continue;
+            }
+            frame = inbound.recv() => frame,
+        };
+        let bytes = match inbound_frame {
             Some(InboundFrame::Binary(bytes)) => bytes,
             Some(InboundFrame::Rejected(message)) => {
                 let _ = send_control_error(&outbound, 0, message).await;
@@ -742,7 +831,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                 session: Arc::clone(&session),
             };
             let job = GenerationJob {
-                request: GenerationRequest::Chunks(request),
+                request: GenerationRequest::chunks(request, state.edits.as_ref()),
                 outbound: outbound.clone(),
                 tracked,
             };
@@ -787,7 +876,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                 session: Arc::clone(&session),
             };
             let job = GenerationJob {
-                request: GenerationRequest::SurfaceTiles(request),
+                request: GenerationRequest::surface_tiles(request, state.edits.as_ref()),
                 outbound: outbound.clone(),
                 tracked,
             };
@@ -805,6 +894,45 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     break;
                 }
             }
+        } else if kind == edit_command_kind() {
+            let command = match decode_edit_command(&bytes) {
+                Ok(command) => command,
+                Err(error) => {
+                    let _ = send_control_error(&outbound, 0, &error.to_string()).await;
+                    break;
+                }
+            };
+            let authority = Arc::clone(&state.edits);
+            let source = Arc::clone(&state.source);
+            let player_id = player_claim.player_id();
+            let applied = tokio::task::spawn_blocking(move || {
+                authority.apply(source.as_ref(), player_id, command)
+            })
+            .await;
+            let applied = match applied {
+                Ok(Ok(applied)) => applied,
+                Ok(Err(error)) => {
+                    let _ = send_control_error(&outbound, command.operation_id, &error.to_string())
+                        .await;
+                    continue;
+                }
+                Err(_) => {
+                    let _ = send_control_error(
+                        &outbound,
+                        command.operation_id,
+                        "edit authority task failed",
+                    )
+                    .await;
+                    break;
+                }
+            };
+            let mut recipients = if applied.changed {
+                state.presence.connections_near_voxel(command.coord)
+            } else {
+                BTreeSet::new()
+            };
+            recipients.insert(player_claim.connection_id);
+            state.edits.publish(&applied.commit, &recipients);
         } else if kind == cancel_kind() {
             match decode_cancel(&bytes) {
                 Ok(request_id) => {
@@ -823,6 +951,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
             break;
         }
     }
+    state.edits.unsubscribe(player_claim.connection_id);
     session.cancel_all();
     reader.abort();
     let _ = reader.await;
@@ -1044,6 +1173,19 @@ async fn send_control_error(
         .await
 }
 
+async fn send_control_frame(
+    outbound: &mpsc::Sender<OutboundFrame>,
+    bytes: Vec<u8>,
+) -> Result<(), mpsc::error::SendError<OutboundFrame>> {
+    outbound
+        .send(OutboundFrame {
+            bytes,
+            tracked: None,
+            _byte_permit: None,
+        })
+        .await
+}
+
 async fn write_frames(
     mut sink: SplitSink<WebSocket, Message>,
     mut outbound: mpsc::Receiver<OutboundFrame>,
@@ -1156,9 +1298,11 @@ async fn generate_single_flight_response(
         .await
         .map_err(|_| "world generation limiter stopped".to_owned())?;
     let generated = tokio::task::spawn_blocking(move || match request {
-        GenerationRequest::Chunks(request) => generate_chunk_result(source.as_ref(), request),
-        GenerationRequest::SurfaceTiles(request) => {
-            generate_surface_tile_result(source.as_ref(), request)
+        GenerationRequest::Chunks { request, snapshot } => {
+            generate_chunk_result(source.as_ref(), request, snapshot)
+        }
+        GenerationRequest::SurfaceTiles { request, snapshot } => {
+            generate_surface_tile_result(source.as_ref(), request, snapshot)
         }
     })
     .await
@@ -1225,41 +1369,62 @@ fn rewrite_frame_request_id(bytes: &mut [u8], request_id: u64) {
 fn generate_surface_tile_result(
     source: &dyn WorldSourceEngine,
     request: SurfaceTileBatchRequest,
+    snapshot: SurfaceEditSnapshot,
 ) -> Result<Vec<u8>, String> {
     let coords = request.coords.clone();
-    let result = source
-        .generate_batch(WorldProductBatch {
-            priority: request.priority,
-            requests: coords
-                .iter()
-                .copied()
-                .map(WorldProductRequest::SurfaceTile)
-                .collect(),
-        })
-        .map_err(|error| error.to_string())?;
-    if result.source_identity_hash != source.identity().identity_hash()
-        || result.items.len() != coords.len()
-    {
-        return Err("world source returned a mismatched surface tile batch".to_owned());
-    }
     let mut items = Vec::with_capacity(coords.len());
-    for (coord, item) in coords.into_iter().zip(result.items) {
-        if item.request != WorldProductRequest::SurfaceTile(coord) {
-            return Err("world source returned a mismatched surface tile key".to_owned());
+    if snapshot.edits.is_empty() {
+        let result = source
+            .generate_batch(WorldProductBatch {
+                priority: request.priority,
+                requests: coords
+                    .iter()
+                    .copied()
+                    .map(WorldProductRequest::SurfaceTile)
+                    .collect(),
+            })
+            .map_err(|error| error.to_string())?;
+        if result.source_identity_hash != source.identity().identity_hash()
+            || result.items.len() != coords.len()
+        {
+            return Err("world source returned a mismatched surface tile batch".to_owned());
         }
-        let item_result = match item.result {
-            Ok(WorldProduct::SurfaceTile(snapshot)) => Ok(snapshot),
-            Ok(_) => return Err("world source returned a non-surface product".to_owned()),
-            Err(error) => Err(error),
-        };
-        items.push(SurfaceTileBatchItem {
-            coord,
-            result: item_result,
-        });
+        for ((coord, edit_revision), item) in coords
+            .iter()
+            .copied()
+            .zip(snapshot.revisions.iter().copied())
+            .zip(result.items)
+        {
+            if item.request != WorldProductRequest::SurfaceTile(coord) {
+                return Err("world source returned a mismatched surface tile key".to_owned());
+            }
+            let item_result = match item.result {
+                Ok(WorldProduct::SurfaceTile(snapshot)) => Ok(snapshot),
+                Ok(_) => return Err("world source returned a non-surface product".to_owned()),
+                Err(error) => Err(error),
+            };
+            items.push(SurfaceTileBatchItem {
+                coord,
+                edit_revision,
+                result: item_result,
+            });
+        }
+    } else {
+        for (coord, edit_revision) in coords
+            .iter()
+            .copied()
+            .zip(snapshot.revisions.iter().copied())
+        {
+            items.push(SurfaceTileBatchItem {
+                coord,
+                edit_revision,
+                result: source.generate_edited_surface_tile(&snapshot.edits, coord),
+            });
+        }
     }
     encode_surface_tile_batch_result(&SurfaceTileBatchResult {
         request_id: request.request_id,
-        source_identity_hash: result.source_identity_hash,
+        source_identity_hash: source.identity().identity_hash(),
         items,
     })
     .map_err(|error| error.to_string())
@@ -1268,6 +1433,7 @@ fn generate_surface_tile_result(
 fn generate_chunk_result(
     source: &dyn WorldSourceEngine,
     request: ChunkBatchRequest,
+    snapshot: ChunkEditSnapshot,
 ) -> Result<Vec<u8>, String> {
     let coords = request.coords.clone();
     let result = source
@@ -1286,17 +1452,29 @@ fn generate_chunk_result(
         return Err("world source returned a mismatched chunk batch".to_owned());
     }
     let mut items = Vec::with_capacity(coords.len());
-    for (coord, item) in coords.into_iter().zip(result.items) {
+    for ((coord, edit_revision), item) in
+        coords.into_iter().zip(snapshot.revisions).zip(result.items)
+    {
         if item.request != WorldProductRequest::ChunkWithHalo(coord) {
             return Err("world source returned a mismatched chunk key".to_owned());
         }
         let item_result = match item.result {
-            Ok(WorldProduct::Chunk(chunk)) => Ok(chunk),
+            Ok(WorldProduct::Chunk(mut chunk)) => {
+                let pristine_halo = chunk.meshing_halo.clone();
+                snapshot.edits.apply_to_chunk(&mut chunk.chunk);
+                chunk.meshing_halo = MeshingHalo::from_sampler(coord, |x, y, z| {
+                    let voxel = voxels_world::VoxelCoord::new(x, y, z);
+                    let pristine = pristine_halo.sample_world(x, y, z).unwrap_or(Material::Air);
+                    snapshot.edits.resolve_generated(voxel, pristine)
+                });
+                Ok(chunk)
+            }
             Ok(_) => return Err("world source returned a non-chunk product".to_owned()),
             Err(error) => Err(error),
         };
         items.push(ChunkBatchItem {
             coord,
+            edit_revision,
             result: item_result,
         });
     }
@@ -1312,8 +1490,8 @@ fn generate_chunk_result(
 mod tests {
     use super::*;
     use crate::{
-        LoopbackTransportConfig, PresenceConfig, SpawnConfig, TerrainDiffusionProviderConfig,
-        WORLD_SERVICE_CONFIG_SCHEMA_VERSION, WorldSourceMode,
+        EditPersistenceConfig, LoopbackTransportConfig, PresenceConfig, SpawnConfig,
+        TerrainDiffusionProviderConfig, WORLD_SERVICE_CONFIG_SCHEMA_VERSION, WorldSourceMode,
     };
     use futures_util::{SinkExt, StreamExt};
     use std::sync::atomic::AtomicUsize;
@@ -1324,15 +1502,17 @@ mod tests {
     use tokio_tungstenite::tungstenite::protocol::Message as ClientMessage;
     use uuid::Uuid;
     use voxels_world::protocol::{
-        BrowserUserId, ChunkBatchRequest, OpenPresence, OpenWorld, PLAYER_POSE_GROUNDED, PlayerId,
-        PlayerIdentity, PlayerPoseUpdate, PresenceDelta, PresenceOpened, SurfaceTileBatchRequest,
-        decode_chunk_batch_result, decode_error, decode_presence_delta, decode_presence_opened,
-        decode_surface_tile_batch_result, decode_world_opened, encode_chunk_batch,
-        encode_open_presence, encode_open_world, encode_player_pose, encode_surface_tile_batch,
-        presence_delta_kind,
+        BrowserUserId, ChunkBatchRequest, EditCommand, EditCommit, OpenPresence, OpenWorld,
+        PLAYER_POSE_GROUNDED, PlayerId, PlayerIdentity, PlayerPoseUpdate, PresenceDelta,
+        PresenceOpened, SurfaceTileBatchRequest, decode_chunk_batch_result, decode_edit_commit,
+        decode_error, decode_presence_delta, decode_presence_opened,
+        decode_surface_tile_batch_result, decode_world_opened, edit_commit_kind,
+        encode_chunk_batch, encode_edit_command, encode_open_presence, encode_open_world,
+        encode_player_pose, encode_surface_tile_batch, presence_delta_kind,
     };
     use voxels_world::{
-        ChunkCoord, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, WorldProductPriority,
+        ChunkCoord, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
+        WorldProductPriority,
     };
 
     struct CountingSource {
@@ -1440,6 +1620,7 @@ mod tests {
                 max_players: 4,
                 ..PresenceConfig::default()
             },
+            edits: EditPersistenceConfig::default(),
             spawn: SpawnConfig {
                 xz_voxels: [13, -21],
             },
@@ -1478,6 +1659,7 @@ mod tests {
             GenerationKey::Chunks {
                 priority: WorldProductPriority::VisibleChunk,
                 coords: vec![ChunkCoord::new(x, 0, 0)],
+                revisions: vec![1],
             }
         }
 
@@ -1538,7 +1720,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v5, test-local-token"),
+            HeaderValue::from_static("voxels.world.v6, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -1775,6 +1957,255 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn five_builders_stream_a_far_lod_tower_only_to_interested_players()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const BUILDER_COUNT: usize = 5;
+        const OBSERVER_INDEX: usize = BUILDER_COUNT;
+        const FAR_INDEX: usize = BUILDER_COUNT + 1;
+
+        let mut config = test_config();
+        config.transport.max_connections = 8;
+        config.presence.max_players = 8;
+        let listener = TcpListener::bind(config.transport.listen).await?;
+        let address = listener.local_addr()?;
+        let server = WorldServer::new(
+            config.clone(),
+            Box::new(ProceduralWorldSource::new(config.world_seed)),
+        )?;
+        let server_task = tokio::spawn(server.serve(listener));
+
+        let mut worlds = Vec::new();
+        let mut presences = Vec::new();
+        let mut opened = Vec::new();
+        for index in 0..=FAR_INDEX {
+            let identity = player_identity(
+                40 + index as u8,
+                60 + index as u8,
+                if index < BUILDER_COUNT {
+                    match index {
+                        0 => "builder0",
+                        1 => "builder1",
+                        2 => "builder2",
+                        3 => "builder3",
+                        _ => "builder4",
+                    }
+                } else if index == OBSERVER_INDEX {
+                    "observer"
+                } else {
+                    "faraway"
+                },
+            );
+            let (world, world_opened) = connect_test_client(address, identity).await?;
+            let (presence, _) =
+                connect_test_presence(address, world_opened.presence_session_id).await?;
+            worlds.push(world);
+            presences.push(presence);
+            opened.push(world_opened);
+        }
+
+        let spawn = opened[0].spawn;
+        let tower_x_metres = spawn.x as f32 * 0.1;
+        let tower_z_metres = spawn.z as f32 * 0.1;
+        for (index, presence) in presences.iter_mut().enumerate() {
+            let x_offset = if index < BUILDER_COUNT {
+                index as f32 * 0.4
+            } else if index == OBSERVER_INDEX {
+                120.0
+            } else {
+                1_000.0
+            };
+            presence
+                .send(ClientMessage::Binary(
+                    encode_player_pose(PlayerPoseUpdate {
+                        sequence: 1,
+                        sample_server_time_ms: 0,
+                        eye_position_metres: [
+                            tower_x_metres + x_offset,
+                            spawn.height as f32 * 0.1 + 1.62,
+                            tower_z_metres,
+                        ],
+                        linear_velocity_metres_per_second: [0.0, 0.0, 0.0],
+                        look_yaw_radians: 0.0,
+                        look_pitch_radians: 0.0,
+                        flags: PLAYER_POSE_GROUNDED,
+                    })?
+                    .into(),
+                ))
+                .await?;
+        }
+        let observer_delta =
+            next_presence_delta(&mut presences[OBSERVER_INDEX], BUILDER_COUNT, 0).await?;
+        assert_eq!(
+            observer_delta.visible_player_count as usize, BUILDER_COUNT,
+            "the 120 m observer should see all builders but not the 1 km bystander"
+        );
+
+        let tower = (0..BUILDER_COUNT)
+            .map(|index| VoxelCoord::new(spawn.x, spawn.height + 1 + index as i32, spawn.z))
+            .collect::<Vec<_>>();
+        for (index, coord) in tower.iter().copied().enumerate() {
+            worlds[index]
+                .send(ClientMessage::Binary(
+                    encode_edit_command(EditCommand {
+                        operation_id: 100 + index as u64,
+                        coord,
+                        material: Some(Material::Wood),
+                    })?
+                    .into(),
+                ))
+                .await?;
+        }
+
+        let mut observer_edit_bytes = 0;
+        let mut observer_commits = Vec::new();
+        for (index, world) in worlds.iter_mut().take(OBSERVER_INDEX + 1).enumerate() {
+            let mut commits = Vec::new();
+            for _ in 0..BUILDER_COUNT {
+                let (commit, encoded_bytes) = next_edit_commit(world).await?;
+                if index == OBSERVER_INDEX {
+                    observer_edit_bytes += encoded_bytes;
+                    observer_commits.push(commit.clone());
+                }
+                commits.push(commit);
+            }
+            commits.sort_unstable_by_key(|commit| commit.revision);
+            assert_eq!(
+                commits
+                    .iter()
+                    .map(|commit| commit.revision)
+                    .collect::<Vec<_>>(),
+                vec![2, 3, 4, 5, 6]
+            );
+            let mut committed_coords = commits
+                .iter()
+                .map(|commit| commit.coord)
+                .collect::<Vec<_>>();
+            committed_coords.sort_unstable();
+            assert_eq!(committed_coords, tower);
+        }
+        assert!(
+            observer_edit_bytes < 16 * 1024,
+            "five sparse commits used {observer_edit_bytes} bytes"
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(150),
+                next_client_binary(&mut worlds[FAR_INDEX]),
+            )
+            .await
+            .is_err(),
+            "a player 1 km away received an unrelated edit frame"
+        );
+
+        let first_edit = EditCommand {
+            operation_id: 100,
+            coord: tower[0],
+            material: Some(Material::Wood),
+        };
+        worlds[0]
+            .send(ClientMessage::Binary(
+                encode_edit_command(first_edit)?.into(),
+            ))
+            .await?;
+        let (retry_commit, _) = next_edit_commit(&mut worlds[0]).await?;
+        assert_eq!(retry_commit.revision, 2);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(150),
+                next_client_binary(&mut worlds[OBSERVER_INDEX]),
+            )
+            .await
+            .is_err(),
+            "an idempotent retry was redundantly fanned out to the observer"
+        );
+
+        let mut chunk_coords = tower.iter().map(|coord| coord.chunk()).collect::<Vec<_>>();
+        chunk_coords.sort_unstable();
+        chunk_coords.dedup();
+        worlds[OBSERVER_INDEX]
+            .send(ClientMessage::Binary(
+                encode_chunk_batch(&ChunkBatchRequest {
+                    request_id: 900,
+                    priority: WorldProductPriority::VisibleChunk,
+                    coords: chunk_coords,
+                })?
+                .into(),
+            ))
+            .await?;
+        let chunks = decode_chunk_batch_result(
+            &tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                next_client_binary(&mut worlds[OBSERVER_INDEX]),
+            )
+            .await??,
+        )?;
+        assert_eq!(chunks.request_id, 900);
+        assert!(chunks.items.iter().all(|item| item.edit_revision == 6));
+        for coord in &tower {
+            let snapshot = chunks
+                .items
+                .iter()
+                .find(|item| item.coord == coord.chunk())
+                .and_then(|item| item.result.as_ref().ok())
+                .ok_or("observer did not receive the edited tower chunk")?;
+            let [x, y, z] = coord.local();
+            assert_eq!(snapshot.chunk.get(x, y, z), Material::Wood);
+        }
+
+        let coarse_coord =
+            SurfaceTileCoord::containing(SurfaceLodLevel::Stride16, tower[0].x, tower[0].z);
+        worlds[OBSERVER_INDEX]
+            .send(ClientMessage::Binary(
+                encode_surface_tile_batch(&SurfaceTileBatchRequest {
+                    request_id: 901,
+                    priority: WorldProductPriority::VisibleSurface,
+                    coords: vec![coarse_coord],
+                })?
+                .into(),
+            ))
+            .await?;
+        let surface = decode_surface_tile_batch_result(
+            &tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                next_client_binary(&mut worlds[OBSERVER_INDEX]),
+            )
+            .await??,
+        )?;
+        let item = surface.items.first().ok_or("missing coarse surface tile")?;
+        assert_eq!(item.coord, coarse_coord);
+        let expected_surface_revision = observer_commits
+            .iter()
+            .filter(|commit| commit.affected_surface_tiles.contains(&coarse_coord))
+            .map(|commit| commit.revision)
+            .max()
+            .ok_or("tower commits did not invalidate their coarse surface tile")?;
+        assert_eq!(item.edit_revision, expected_surface_revision);
+        let snapshot = item.result.as_ref().map_err(|error| error.to_string())?;
+        let tower_top = *tower.last().unwrap();
+        assert!(
+            snapshot.terrain.quads.iter().any(|quad| {
+                quad.material == Material::Wood
+                    && quad.origin[1] == tower_top.y
+                    && quad.origin[0] <= tower_top.x
+                    && tower_top.x < quad.origin[0] + i32::from(quad.extent[0])
+                    && quad.origin[2] <= tower_top.z
+                    && tower_top.z < quad.origin[2] + i32::from(quad.extent[1])
+            }),
+            "the five-player tower vanished from the 1.6 m coarse LOD seen at 120 m"
+        );
+
+        for world in &mut worlds {
+            world.close(None).await?;
+        }
+        for presence in &mut presences {
+            presence.close(None).await?;
+        }
+        server_task.abort();
+        let _ = server_task.await;
+        Ok(())
+    }
+
     async fn connect_test_client(
         address: SocketAddr,
         identity: PlayerIdentity,
@@ -1810,7 +2241,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v5, test-local-token"),
+            HeaderValue::from_static("voxels.world.v6, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -1845,7 +2276,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v5, test-local-token"),
+            HeaderValue::from_static("voxels.world.v6, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -1873,6 +2304,24 @@ mod tests {
                     if delta.enters.len() == enter_count && delta.leaves.len() == leave_count {
                         return Ok(delta);
                     }
+                }
+            }
+        })
+        .await?
+    }
+
+    async fn next_edit_commit<S>(
+        socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    ) -> Result<(EditCommit, usize), Box<dyn std::error::Error>>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let bytes = next_client_binary(socket).await?;
+                if message_kind(&bytes)? == edit_commit_kind() {
+                    let encoded_bytes = bytes.len();
+                    return Ok((decode_edit_commit(&bytes)?, encoded_bytes));
                 }
             }
         })

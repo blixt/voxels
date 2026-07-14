@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 6
+schema_version = 7
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -44,6 +44,12 @@ far_update_interval_ms = 250
 max_records_per_delta = 64
 prediction_error_centimetres = 25
 look_error_milliradians = 175
+
+[edits]
+# Native server authority. This checked-in local path is ignored by git; deployments should point
+# it at durable storage. A saturated client queue receives an explicit resync marker.
+database = "../tmp/world-edits.sqlite3"
+change_queue_capacity = 256
 
 [spawn]
 # Must lie inside the selected source's valid coverage. Startup samples this exact coordinate.

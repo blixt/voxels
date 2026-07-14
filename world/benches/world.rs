@@ -209,6 +209,7 @@ fn codec(criterion: &mut Criterion) {
         source_identity_hash: identity,
         items: vec![ChunkBatchItem {
             coord: COORD,
+            edit_revision: 1,
             result: Ok(snapshot),
         }],
     };

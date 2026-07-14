@@ -15,6 +15,7 @@ use voxels_world::protocol::{
     PLAYER_POSE_DISCONTINUITY, PlayerId, PlayerIdentity, PlayerPoseUpdate, PlayerPresenceState,
     PlayerPresenceUpdate, PresenceDelta, PresenceSessionId, encode_presence_delta,
 };
+use voxels_world::{VOXEL_SIZE_METRES, VoxelCoord};
 
 const MAX_FUTURE_SAMPLE_MS: u64 = 250;
 const MAX_STALE_SAMPLE_MS: u64 = 2_000;
@@ -131,6 +132,49 @@ impl PresenceHub {
 
     pub(crate) const fn config(&self) -> PresenceConfig {
         self.config
+    }
+
+    /// Returns only connections whose current horizontal interest area covers an edited voxel.
+    /// The existing spatial grid keeps one edit proportional to local players, not world population.
+    pub(crate) fn connections_near_voxel(&self, coord: VoxelCoord) -> BTreeSet<u64> {
+        let x = coord.x as f32 * VOXEL_SIZE_METRES;
+        let z = coord.z as f32 * VOXEL_SIZE_METRES;
+        let radius = f32::from(self.config.interest_radius_metres);
+        let size = f32::from(self.config.spatial_cell_metres);
+        let center = SpatialCell {
+            x: (x / size).floor() as i32,
+            z: (z / size).floor() as i32,
+        };
+        let cell_radius = (i32::from(self.config.interest_radius_metres)
+            + i32::from(self.config.spatial_cell_metres)
+            - 1)
+            / i32::from(self.config.spatial_cell_metres);
+        let mut connections = BTreeSet::new();
+        let inner = self.lock();
+        for cell_x in (center.x - cell_radius)..=(center.x + cell_radius) {
+            for cell_z in (center.z - cell_radius)..=(center.z + cell_radius) {
+                let Some(players) = inner.cells.get(&SpatialCell {
+                    x: cell_x,
+                    z: cell_z,
+                }) else {
+                    continue;
+                };
+                for player_id in players {
+                    let Some(player) = inner.players.get(player_id) else {
+                        continue;
+                    };
+                    let Some(pose) = player.pose.filter(|_| player.presence_attached) else {
+                        continue;
+                    };
+                    let dx = pose.eye_position_metres[0] - x;
+                    let dz = pose.eye_position_metres[2] - z;
+                    if dx.mul_add(dx, dz * dz) <= radius * radius {
+                        connections.insert(player.connection_id);
+                    }
+                }
+            }
+        }
+        connections
     }
 
     pub(crate) fn join(self: &Arc<Self>, identity: &PlayerIdentity) -> Option<WorldPresenceClaim> {
@@ -512,6 +556,12 @@ impl PresenceHub {
 impl Drop for WorldPresenceClaim {
     fn drop(&mut self) {
         self.hub.leave_world(self.player_id, self.connection_id);
+    }
+}
+
+impl WorldPresenceClaim {
+    pub(crate) const fn player_id(&self) -> PlayerId {
+        self.player_id
     }
 }
 

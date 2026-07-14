@@ -1,4 +1,7 @@
-use crate::{CHUNK_EDGE, Chunk, ChunkCoord, Generator, Material, SkylineFeature};
+use crate::{
+    CHUNK_EDGE, Chunk, ChunkCoord, FEATURE_MAX_RADIUS_VOXELS, Generator, Material, SkylineFeature,
+    SurfaceTileCoord,
+};
 use std::collections::BTreeMap;
 
 /// Integer address of one canonical 10 cm voxel.
@@ -109,6 +112,82 @@ impl EditMap {
 
     pub fn is_empty(&self) -> bool {
         self.overrides.is_empty()
+    }
+
+    /// Copies only edits that can affect the requested chunk cores or their one-voxel meshing
+    /// shells. Native generation workers use this bounded snapshot so unrelated regions never make
+    /// a hot chunk request clone the global edit journal.
+    pub fn snapshot_for_chunks(&self, coords: &[ChunkCoord]) -> Self {
+        let mut snapshot = Self::default();
+        for coord in coords {
+            for dz in -1..=1 {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let Some(x) = coord.x.checked_add(dx) else {
+                            continue;
+                        };
+                        let Some(y) = coord.y.checked_add(dy) else {
+                            continue;
+                        };
+                        let Some(z) = coord.z.checked_add(dz) else {
+                            continue;
+                        };
+                        let key = (x, y, z);
+                        let Some(overrides) = self.chunk_overrides.get(&key) else {
+                            continue;
+                        };
+                        let origin = ChunkCoord::new(x, y, z).world_origin();
+                        for (&local, &material) in overrides {
+                            let voxel = VoxelCoord::new(
+                                origin[0] + local[0] as i32,
+                                origin[1] + local[1] as i32,
+                                origin[2] + local[2] as i32,
+                            );
+                            if coords.iter().any(|requested| {
+                                let origin = requested.world_origin();
+                                voxel.x >= origin[0].saturating_sub(1)
+                                    && voxel.x <= origin[0].saturating_add(CHUNK_EDGE as i32)
+                                    && voxel.y >= origin[1].saturating_sub(1)
+                                    && voxel.y <= origin[1].saturating_add(CHUNK_EDGE as i32)
+                                    && voxel.z >= origin[2].saturating_sub(1)
+                                    && voxel.z <= origin[2].saturating_add(CHUNK_EDGE as i32)
+                            }) {
+                                snapshot.insert_override(voxel, material);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        snapshot
+    }
+
+    /// Copies the bounded horizontal edit neighborhood needed by surface tiles, including their
+    /// sampling shell and analytic skyline-feature radius.
+    pub fn snapshot_for_surface_tiles(&self, coords: &[SurfaceTileCoord]) -> Self {
+        let mut snapshot = Self::default();
+        for coord in coords {
+            let [[min_x, min_z], [max_x, max_z]] = coord.voxel_bounds_xz();
+            let margin = coord
+                .stride_voxels()
+                .saturating_add(FEATURE_MAX_RADIUS_VOXELS);
+            let min_x = min_x.saturating_sub(margin);
+            let min_z = min_z.saturating_sub(margin);
+            let max_x = max_x.saturating_add(margin);
+            let max_z = max_z.saturating_add(margin);
+            for (&(x, z), column) in self.column_overrides.range((min_x, i32::MIN)..) {
+                if x >= max_x {
+                    break;
+                }
+                if z < min_z || z >= max_z {
+                    continue;
+                }
+                for (&y, &material) in column {
+                    snapshot.insert_override(VoxelCoord::new(x, y, z), material);
+                }
+            }
+        }
+        snapshot
     }
 
     /// Conservative far-LOD additions within half-open X/Z bounds. Excavations remain represented
