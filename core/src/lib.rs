@@ -1,7 +1,12 @@
 //! Portable simulation and player state. GPU, world generation, and browser concerns live elsewhere.
 
+mod presence;
 mod profile;
 
+pub use presence::{
+    PresenceInterpolationConfig, REMOTE_POSE_DISCONTINUITY, RemoteAvatarPose, RemotePlayerId,
+    RemotePoseSample, RemotePresenceSnapshot, RemotePresenceTimeline,
+};
 pub use profile::{ProfileAutomation, ProfileConfig, ProfilePhase, ProfilePose};
 
 use glam::{Vec2, Vec3};
