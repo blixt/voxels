@@ -65,6 +65,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     number,
     { resolve: (submitted: boolean) => void; reject: (reason: Error) => void }
   >();
+  const relocationResolvers = new Map<
+    number,
+    { resolve: (relocated: boolean) => void; reject: (reason: Error) => void }
+  >();
   const surfaceEditStateResolvers = new Map<
     number,
     { resolve: (values: number[]) => void; reject: (reason: Error) => void }
@@ -74,6 +78,7 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       snapshot(): Promise<number[]>;
       profile(profileId: number): void;
       look(deltaX: number, deltaY: number): void;
+      relocateCamera(x: number, y: number, z: number): Promise<boolean>;
       submitEdit(x: number, y: number, z: number, materialId: number): Promise<boolean>;
       surfaceEditState(stride: number, x: number, z: number): Promise<number[]>;
       readonly player: BrowserPlayerSession;
@@ -88,6 +93,8 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     snapshotResolvers.clear();
     for (const { reject } of editResolvers.values()) reject(error);
     editResolvers.clear();
+    for (const { reject } of relocationResolvers.values()) reject(error);
+    relocationResolvers.clear();
     for (const { reject } of surfaceEditStateResolvers.values()) reject(error);
     surfaceEditStateResolvers.clear();
     delete debugGlobal.__VOXELS__;
@@ -116,6 +123,13 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       ]);
       worker.postMessage({ kind: "input", buffer }, [buffer]);
     },
+    relocateCamera: (x, y, z) =>
+      new Promise<boolean>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        relocationResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({ kind: "relocateCamera", requestId, x, y, z });
+      }),
     submitEdit: (x, y, z, materialId) =>
       new Promise<boolean>((resolve, reject) => {
         const requestId = nextSnapshotRequest;
@@ -148,6 +162,9 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     } else if (event.data.kind === "submitEdit") {
       editResolvers.get(event.data.requestId)?.resolve(event.data.submitted);
       editResolvers.delete(event.data.requestId);
+    } else if (event.data.kind === "relocateCamera") {
+      relocationResolvers.get(event.data.requestId)?.resolve(event.data.relocated);
+      relocationResolvers.delete(event.data.requestId);
     } else if (event.data.kind === "surfaceEditState") {
       surfaceEditStateResolvers.get(event.data.requestId)?.resolve(event.data.values);
       surfaceEditStateResolvers.delete(event.data.requestId);
@@ -348,6 +365,8 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     snapshotResolvers.clear();
     for (const { reject } of editResolvers.values()) reject(error);
     editResolvers.clear();
+    for (const { reject } of relocationResolvers.values()) reject(error);
+    relocationResolvers.clear();
     for (const { reject } of surfaceEditStateResolvers.values()) reject(error);
     surfaceEditStateResolvers.clear();
     worker.postMessage({ kind: "destroy" });

@@ -56,6 +56,7 @@ export type ToWorker =
   | { kind: "reducedMotion"; reduced: boolean }
   | { kind: "profile"; profileId: number }
   | { kind: "snapshot"; requestId: number }
+  | { kind: "relocateCamera"; requestId: number; x: number; y: number; z: number }
   | {
       kind: "submitEdit";
       requestId: number;
@@ -71,5 +72,6 @@ export type FromWorker =
   | { kind: "uiMode"; cursor: boolean }
   | { kind: "error"; message: string }
   | { kind: "snapshot"; requestId: number; values: number[] }
+  | { kind: "relocateCamera"; requestId: number; relocated: boolean }
   | { kind: "submitEdit"; requestId: number; submitted: boolean }
   | { kind: "surfaceEditState"; requestId: number; values: number[] };

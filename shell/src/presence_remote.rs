@@ -124,6 +124,10 @@ impl RemotePresenceClient {
         self.inner.last_error.borrow_mut().take()
     }
 
+    pub fn mark_discontinuity(&self) {
+        self.inner.discontinuity_pending.set(true);
+    }
+
     pub fn close(&self) {
         self.inner.close();
     }

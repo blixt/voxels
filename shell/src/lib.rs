@@ -1627,6 +1627,23 @@ mod web {
             }
         }
 
+        /// Browser-harness seam for setting up distant observation without making six local
+        /// fixed-step simulations spend minutes walking under shared-GPU contention. The next
+        /// production presence pose is explicitly marked as a discontinuity.
+        pub fn relocate_camera(&self, x: f32, y: f32, z: f32) -> bool {
+            if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+                return false;
+            }
+            let Some(engine) = self.engine.as_ref() else {
+                return false;
+            };
+            engine.input.borrow_mut().clear();
+            *engine.camera.borrow_mut() = CameraState::spawn(glam::Vec3::new(x, y, z));
+            engine.simulation_accumulator.set(0.0);
+            engine.presence.mark_discontinuity();
+            true
+        }
+
         /// Deterministic browser-harness seam that submits through the same server-authoritative
         /// path as pointer input. It does not mutate local world state optimistically.
         pub fn submit_edit(&self, x: i32, y: i32, z: i32, material_id: u16) -> bool {

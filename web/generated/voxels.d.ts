@@ -6,6 +6,12 @@ export class EngineHandle {
     free(): void;
     destroy(): Promise<void>;
     feed_input(bytes: Uint8Array): boolean;
+    /**
+     * Browser-harness seam for setting up distant observation without making six local
+     * fixed-step simulations spend minutes walking under shared-GPU contention. The next
+     * production presence pose is explicitly marked as a discontinuity.
+     */
+    relocate_camera(x: number, y: number, z: number): boolean;
     resize(css_width: number, css_height: number, dpr: number): void;
     set_reduced_motion(reduced_motion: boolean): void;
     snapshot(): Float32Array;
@@ -33,6 +39,7 @@ export interface InitOutput {
     readonly create_engine: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => any;
     readonly enginehandle_destroy: (a: number) => any;
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => number;
+    readonly enginehandle_relocate_camera: (a: number, b: number, c: number, d: number) => number;
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;
     readonly enginehandle_set_reduced_motion: (a: number, b: number) => void;
     readonly enginehandle_snapshot: (a: number) => [number, number];
