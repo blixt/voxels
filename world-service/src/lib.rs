@@ -30,7 +30,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 7;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 8;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
     0x76, 0x6f, 0x78, 0x65, 0x6c, 0x73, 0x40, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x01,
@@ -90,8 +90,6 @@ pub struct PresenceConfig {
     pub max_players: u16,
     /// Per-player inbound abuse bound. Clients normally send at 30 Hz.
     pub max_pose_updates_per_second: u16,
-    /// Larger position changes require the explicit discontinuity flag.
-    pub teleport_distance_metres: u16,
     /// Width and depth of a spatial-interest grid cell.
     pub spatial_cell_metres: u16,
     /// Players outside this horizontal radius do not enter a receiver's replication set.
@@ -117,7 +115,6 @@ impl Default for PresenceConfig {
             broadcast_interval_ms: 33,
             max_players: 512,
             max_pose_updates_per_second: 60,
-            teleport_distance_metres: 4,
             spatial_cell_metres: 64,
             interest_radius_metres: 256,
             interest_hysteresis_metres: 32,
@@ -129,6 +126,48 @@ impl Default for PresenceConfig {
             max_records_per_delta: 64,
             prediction_error_centimetres: 25,
             look_error_milliradians: 175,
+        }
+    }
+}
+
+/// Server-authoritative interaction and movement limits.
+///
+/// Distances and speeds use integer centimetres so configuration equality and TOML round trips do
+/// not depend on floating-point spelling. The presence service spends movement from bounded token
+/// buckets; a delayed packet can therefore cover a modest accumulated distance without letting a
+/// client add the fixed tolerance again on every pose.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GameplayConfig {
+    /// Maximum ray interaction distance before bounded latency tolerance is added.
+    pub interaction_reach_centimetres: u16,
+    /// Hard extra distance allowed for ordering skew between world and presence WebSockets.
+    pub interaction_latency_slack_centimetres: u16,
+    /// Edits require a recently received pose from the same connection.
+    pub interaction_pose_max_age_ms: u16,
+    /// Sustained horizontal movement budget.
+    pub max_horizontal_speed_centimetres_per_second: u16,
+    /// Sustained vertical movement budget, including jumps and falling.
+    pub max_vertical_speed_centimetres_per_second: u16,
+    /// Fixed movement credit that absorbs simulation and packet-timing jitter.
+    pub movement_slack_centimetres: u16,
+    /// Maximum delayed-motion credit that can accumulate while pose packets are absent.
+    pub movement_credit_window_ms: u16,
+    /// Initial quantity granted for every non-Air material when a player is first seen.
+    pub starting_units_per_material: u32,
+}
+
+impl Default for GameplayConfig {
+    fn default() -> Self {
+        Self {
+            interaction_reach_centimetres: 500,
+            interaction_latency_slack_centimetres: 100,
+            interaction_pose_max_age_ms: 1_000,
+            max_horizontal_speed_centimetres_per_second: 900,
+            max_vertical_speed_centimetres_per_second: 1_200,
+            movement_slack_centimetres: 100,
+            movement_credit_window_ms: 500,
+            starting_units_per_material: 64,
         }
     }
 }
@@ -153,7 +192,7 @@ pub struct EditPersistenceConfig {
 impl Default for EditPersistenceConfig {
     fn default() -> Self {
         Self {
-            database: PathBuf::from("../tmp/world-edits.sqlite3"),
+            database: PathBuf::from("../tmp/world-state-v2.sqlite3"),
             change_queue_capacity: 256,
         }
     }
@@ -212,6 +251,7 @@ pub struct WorldServiceConfig {
     pub source: WorldSourceMode,
     pub transport: LoopbackTransportConfig,
     pub presence: PresenceConfig,
+    pub gameplay: GameplayConfig,
     pub edits: EditPersistenceConfig,
     pub spawn: SpawnConfig,
     pub terrain_diffusion: TerrainDiffusionProviderConfig,
@@ -226,6 +266,7 @@ impl Default for WorldServiceConfig {
             source: WorldSourceMode::ProceduralV16,
             transport: LoopbackTransportConfig::default(),
             presence: PresenceConfig::default(),
+            gameplay: GameplayConfig::default(),
             edits: EditPersistenceConfig::default(),
             spawn: SpawnConfig::default(),
             terrain_diffusion: TerrainDiffusionProviderConfig::default(),
@@ -337,11 +378,6 @@ impl WorldServiceConfig {
                 "max_pose_updates_per_second must be in 1..=120",
             ));
         }
-        if !(1..=64).contains(&self.presence.teleport_distance_metres) {
-            return Err(WorldServiceConfigError::InvalidPresence(
-                "teleport_distance_metres must be in 1..=64",
-            ));
-        }
         if !(8..=256).contains(&self.presence.spatial_cell_metres)
             || self.presence.interest_radius_metres < self.presence.spatial_cell_metres
             || self.presence.interest_radius_metres > 2_048
@@ -374,6 +410,23 @@ impl WorldServiceConfig {
         {
             return Err(WorldServiceConfigError::InvalidPresence(
                 "presence delta budget and prediction-error thresholds must be nonzero",
+            ));
+        }
+        if !(100..=1_000).contains(&self.gameplay.interaction_reach_centimetres)
+            || self.gameplay.interaction_latency_slack_centimetres > 300
+            || !(100..=5_000).contains(&self.gameplay.interaction_pose_max_age_ms)
+        {
+            return Err(WorldServiceConfigError::InvalidGameplay(
+                "interaction reach, latency slack, or pose age is invalid",
+            ));
+        }
+        if !(100..=2_000).contains(&self.gameplay.max_horizontal_speed_centimetres_per_second)
+            || !(100..=5_000).contains(&self.gameplay.max_vertical_speed_centimetres_per_second)
+            || !(1..=300).contains(&self.gameplay.movement_slack_centimetres)
+            || !(100..=2_000).contains(&self.gameplay.movement_credit_window_ms)
+        {
+            return Err(WorldServiceConfigError::InvalidGameplay(
+                "movement speeds, slack, or credit window is invalid",
             ));
         }
         if self.edits.database.as_os_str().is_empty() {
@@ -459,6 +512,7 @@ pub enum WorldServiceConfigError {
     },
     InvalidConcurrency(&'static str),
     InvalidPresence(&'static str),
+    InvalidGameplay(&'static str),
     InvalidEdits(&'static str),
 }
 
@@ -505,6 +559,9 @@ impl fmt::Display for WorldServiceConfigError {
             }
             Self::InvalidPresence(reason) => {
                 write!(formatter, "invalid world-service presence: {reason}")
+            }
+            Self::InvalidGameplay(reason) => {
+                write!(formatter, "invalid world-service gameplay: {reason}")
             }
             Self::InvalidEdits(reason) => {
                 write!(formatter, "invalid world-service edits: {reason}")
@@ -711,7 +768,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 7
+schema_version = 8
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -733,7 +790,6 @@ generation_workers_per_client = 2
 broadcast_interval_ms = 33
 max_players = 512
 max_pose_updates_per_second = 60
-teleport_distance_metres = 4
 spatial_cell_metres = 64
 interest_radius_metres = 256
 interest_hysteresis_metres = 32
@@ -746,8 +802,18 @@ max_records_per_delta = 64
 prediction_error_centimetres = 25
 look_error_milliradians = 175
 
+[gameplay]
+interaction_reach_centimetres = 500
+interaction_latency_slack_centimetres = 100
+interaction_pose_max_age_ms = 1000
+max_horizontal_speed_centimetres_per_second = 900
+max_vertical_speed_centimetres_per_second = 1200
+movement_slack_centimetres = 100
+movement_credit_window_ms = 500
+starting_units_per_material = 64
+
 [edits]
-database = "world-edits.sqlite3"
+database = "world-state-v2.sqlite3"
 change_queue_capacity = 256
 
 [spawn]
@@ -802,12 +868,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 7", "schema_version = 6");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 8", "schema_version = 7");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 7,
-                found: 6,
+                expected: 8,
+                found: 7,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
@@ -828,6 +894,7 @@ sea_level_voxels = 52
             "max_connections = 512\n",
             "product_cache_bytes = 268435456\n",
             "broadcast_interval_ms = 33\n",
+            "interaction_reach_centimetres = 500\n",
             "xz_voxels = [0, 0]\n",
             "precision = \"float16\"\n",
         ] {

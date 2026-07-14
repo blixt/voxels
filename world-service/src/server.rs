@@ -2,7 +2,7 @@
 
 use crate::{
     LoadedWorldServiceConfig, WorldServiceConfig, WorldServiceConfigError, WorldServiceSourceError,
-    edits::{ChunkEditSnapshot, EditAuthority, SurfaceEditSnapshot},
+    edits::{ChunkEditSnapshot, EditAuthority, LoadedPlayer, SurfaceEditSnapshot},
     presence::{PoseAdmission, PresenceHub, PresenceStreamState},
 };
 use axum::Router;
@@ -23,8 +23,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use voxels_world::protocol::{
-    ChunkBatchItem, ChunkBatchRequest, ChunkBatchResult, PlayerIdentity, PresenceOpened,
-    PresencePong, PresenceSessionId, ResyncRequired, SpawnPoint, SurfaceTileBatchItem,
+    ChunkBatchItem, ChunkBatchRequest, ChunkBatchResult, EditSessionId, PlayerIdentity,
+    PlayerResume, PresenceOpened, PresencePong, ResyncRequired, SpawnPoint, SurfaceTileBatchItem,
     SurfaceTileBatchRequest, SurfaceTileBatchResult, WorldCapabilities, WorldOpened, cancel_kind,
     chunk_batch_kind, decode_cancel, decode_chunk_batch, decode_edit_command, decode_open_presence,
     decode_open_world, decode_player_pose, decode_presence_ping, decode_surface_tile_batch,
@@ -39,9 +39,10 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v6/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v6/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v6";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v7/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v7/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v7";
+const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 
 /// Prepared server state. Source construction and spawn coverage validation happen before bind.
 pub struct WorldServer {
@@ -79,11 +80,13 @@ impl WorldServer {
                 world.manifest.world_id,
                 source.as_ref(),
                 config.edits.change_queue_capacity,
+                config.gameplay.starting_units_per_material,
             ),
             None => EditAuthority::in_memory(
                 world.manifest.world_id,
                 source.as_ref(),
                 config.edits.change_queue_capacity,
+                config.gameplay.starting_units_per_material,
             ),
         }
         .map_err(|error| WorldServerError::Edits(error.to_string()))?;
@@ -100,7 +103,8 @@ impl WorldServer {
             config.transport.product_cache_bytes,
         ));
 
-        let presence = PresenceHub::new(config.presence).map_err(WorldServerError::Presence)?;
+        let presence = PresenceHub::new(config.presence, config.gameplay)
+            .map_err(WorldServerError::Presence)?;
         let state = Arc::new(ServerState {
             allowed_origins: config.transport.allowed_origins,
             auth_subprotocol_token: config.transport.auth_subprotocol_token,
@@ -299,17 +303,41 @@ impl WorldBootstrap {
         &self,
         identity: PlayerIdentity,
         recommended_in_flight_batches: u16,
-        connection_id: u64,
-        presence_session_id: PresenceSessionId,
+        player_claim: &crate::presence::WorldPresenceClaim,
+        edit_session_id: EditSessionId,
+        player: LoadedPlayer,
     ) -> WorldOpened {
         WorldOpened {
             manifest: self.manifest.clone(),
             capabilities: self.capabilities,
             recommended_in_flight_batches,
             identity,
-            connection_id,
-            presence_session_id,
+            connection_id: player_claim.connection_id,
+            presence_session_id: player_claim.session_id,
+            edit_session_id,
             spawn: self.spawn,
+            player_resume: player.resume,
+            inventory: player.inventory,
+        }
+    }
+
+    fn default_player_resume(&self) -> PlayerResume {
+        let top = self
+            .spawn
+            .water_level
+            .unwrap_or(self.spawn.height)
+            .max(self.spawn.height);
+        PlayerResume {
+            revision: 1,
+            eye_position_metres: [
+                (self.spawn.x as f32 + 0.5) * voxels_world::VOXEL_SIZE_METRES,
+                (top + 1) as f32 * voxels_world::VOXEL_SIZE_METRES
+                    + DEFAULT_PLAYER_EYE_HEIGHT_METRES
+                    + 0.02,
+                (self.spawn.z as f32 + 0.5) * voxels_world::VOXEL_SIZE_METRES,
+            ],
+            look_yaw_radians: 0.0,
+            look_pitch_radians: 0.0,
         }
     }
 }
@@ -713,13 +741,38 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
             return;
         }
     };
-    let Some(player_claim) = state.presence.join(&open.identity) else {
+    let loaded_player = match state
+        .edits
+        .load_player(open.identity.player_id, state.world.default_player_resume())
+    {
+        Ok(player) => player,
+        Err(error) => {
+            let _ = socket
+                .send(Message::Binary(
+                    encode_error(0, &format!("open player state: {error}")).into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let Some(player_claim) = state.presence.join(&open.identity, loaded_player.resume) else {
         let _ = socket
             .send(Message::Binary(
                 encode_error(0, "player is already connected").into(),
             ))
             .await;
         return;
+    };
+    let edit_session_id = match state.edits.begin_player_session(open.identity.player_id) {
+        Ok(edit_session_id) => edit_session_id,
+        Err(error) => {
+            let _ = socket
+                .send(Message::Binary(
+                    encode_error(0, &format!("begin player edit session: {error}")).into(),
+                ))
+                .await;
+            return;
+        }
     };
     let negotiated_window = open.max_in_flight_batches.min(state.max_in_flight_batches);
     let session = Arc::new(SessionRequests::new(
@@ -738,8 +791,9 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
     let opened = state.world.opened(
         open.identity,
         negotiated_window,
-        player_claim.connection_id,
-        player_claim.session_id,
+        &player_claim,
+        edit_session_id,
+        loaded_player,
     );
     if outbound
         .send(OutboundFrame {
@@ -902,6 +956,13 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     break;
                 }
             };
+            if let Err(message) = state
+                .presence
+                .authorize_interaction(player_claim.connection_id, command.action.target())
+            {
+                let _ = send_control_error(&outbound, command.operation_id, message).await;
+                continue;
+            }
             let authority = Arc::clone(&state.edits);
             let source = Arc::clone(&state.source);
             let player_id = player_claim.player_id();
@@ -927,11 +988,12 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     break;
                 }
             };
-            let mut recipients = if applied.changed {
-                state.presence.connections_near_voxel(command.coord)
-            } else {
-                BTreeSet::new()
-            };
+            let mut recipients = BTreeSet::new();
+            if applied.changed {
+                for mutation in &applied.commit.mutations {
+                    recipients.extend(state.presence.connections_near_voxel(mutation.coord));
+                }
+            }
             recipients.insert(player_claim.connection_id);
             state.edits.publish(&applied.commit, &recipients);
         } else if kind == cancel_kind() {
@@ -951,6 +1013,11 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
             let _ = send_control_error(&outbound, 0, "unexpected client message kind").await;
             break;
         }
+    }
+    if let Some(resume) = player_claim.latest_resume() {
+        let _ = state
+            .edits
+            .save_player_resume(player_claim.player_id(), resume);
     }
     state.edits.unsubscribe(player_claim.connection_id);
     session.cancel_all();
@@ -1505,8 +1572,8 @@ mod tests {
     use voxels_world::protocol::{
         BrowserUserId, ChunkBatchRequest, EditCommand, EditCommit, OpenPresence, OpenWorld,
         PLAYER_POSE_GROUNDED, PlayerId, PlayerIdentity, PlayerPoseUpdate, PresenceDelta,
-        PresenceOpened, SurfaceTileBatchRequest, decode_chunk_batch_result, decode_edit_commit,
-        decode_error, decode_presence_delta, decode_presence_opened,
+        PresenceOpened, PresenceSessionId, SurfaceTileBatchRequest, decode_chunk_batch_result,
+        decode_edit_commit, decode_error, decode_presence_delta, decode_presence_opened,
         decode_surface_tile_batch_result, decode_world_opened, edit_commit_kind,
         encode_chunk_batch, encode_edit_command, encode_open_presence, encode_open_world,
         encode_player_pose, encode_surface_tile_batch, presence_delta_kind,
@@ -1621,6 +1688,7 @@ mod tests {
                 max_players: 4,
                 ..PresenceConfig::default()
             },
+            gameplay: crate::GameplayConfig::default(),
             edits: EditPersistenceConfig::default(),
             spawn: SpawnConfig {
                 xz_voxels: [13, -21],
@@ -1721,7 +1789,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v6, test-local-token"),
+            HeaderValue::from_static("voxels.world.v7, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -1911,17 +1979,21 @@ mod tests {
             second_opened.connection_id
         );
 
-        for (socket, sequence, x) in [
-            (&mut first_presence, 1_u64, 1.0_f32),
-            (&mut second_presence, 1_u64, 3.0_f32),
+        let mut first_eye = first_opened.player_resume.eye_position_metres;
+        let mut second_eye = second_opened.player_resume.eye_position_metres;
+        first_eye[0] -= 0.25;
+        second_eye[0] += 0.25;
+        for (socket, sequence, eye) in [
+            (&mut first_presence, 1_u64, first_eye),
+            (&mut second_presence, 1_u64, second_eye),
         ] {
             socket
                 .send(ClientMessage::Binary(
                     encode_player_pose(PlayerPoseUpdate {
                         sequence,
                         sample_server_time_ms: 0,
-                        eye_position_metres: [x, 1.62, 2.0],
-                        linear_velocity_metres_per_second: [1.0, 0.0, 0.0],
+                        eye_position_metres: eye,
+                        linear_velocity_metres_per_second: [0.0, 0.0, 0.0],
                         look_yaw_radians: 0.25,
                         look_pitch_radians: -0.1,
                         flags: PLAYER_POSE_GROUNDED,
@@ -1968,6 +2040,14 @@ mod tests {
         let mut config = test_config();
         config.transport.max_connections = 8;
         config.presence.max_players = 8;
+        config.presence.spatial_cell_metres = 8;
+        config.presence.interest_radius_metres = 32;
+        config.presence.interest_hysteresis_metres = 4;
+        config.presence.near_radius_metres = 8;
+        config.presence.mid_radius_metres = 16;
+        config.gameplay.max_horizontal_speed_centimetres_per_second = 2_000;
+        config.gameplay.movement_slack_centimetres = 300;
+        config.gameplay.movement_credit_window_ms = 2_000;
         let listener = TcpListener::bind(config.transport.listen).await?;
         let address = listener.local_addr()?;
         let server = WorldServer::new(
@@ -2006,26 +2086,23 @@ mod tests {
         }
 
         let spawn = opened[0].spawn;
-        let tower_x_metres = spawn.x as f32 * 0.1;
-        let tower_z_metres = spawn.z as f32 * 0.1;
+        tokio::time::sleep(std::time::Duration::from_millis(2_000)).await;
         for (index, presence) in presences.iter_mut().enumerate() {
             let x_offset = if index < BUILDER_COUNT {
                 index as f32 * 0.4
             } else if index == OBSERVER_INDEX {
-                120.0
+                25.0
             } else {
-                1_000.0
+                -40.0
             };
+            let mut eye = opened[index].player_resume.eye_position_metres;
+            eye[0] += x_offset;
             presence
                 .send(ClientMessage::Binary(
                     encode_player_pose(PlayerPoseUpdate {
                         sequence: 1,
                         sample_server_time_ms: 0,
-                        eye_position_metres: [
-                            tower_x_metres + x_offset,
-                            spawn.height as f32 * 0.1 + 1.62,
-                            tower_z_metres,
-                        ],
+                        eye_position_metres: eye,
                         linear_velocity_metres_per_second: [0.0, 0.0, 0.0],
                         look_yaw_radians: 0.0,
                         look_pitch_radians: 0.0,
@@ -2035,23 +2112,33 @@ mod tests {
                 ))
                 .await?;
         }
+        let expected_builders = opened
+            .iter()
+            .take(BUILDER_COUNT)
+            .map(|opened| opened.connection_id)
+            .collect::<BTreeSet<_>>();
         let observer_delta =
-            next_presence_delta(&mut presences[OBSERVER_INDEX], BUILDER_COUNT, 0).await?;
+            wait_for_visible_connections(&mut presences[OBSERVER_INDEX], &expected_builders)
+                .await?;
         assert_eq!(
             observer_delta.visible_player_count as usize, BUILDER_COUNT,
-            "the 120 m observer should see all builders but not the 1 km bystander"
+            "the far-tier observer should see all builders but not the out-of-interest bystander"
         );
 
+        let tower_base = spawn.water_level.unwrap_or(spawn.height).max(spawn.height) + 1;
         let tower = (0..BUILDER_COUNT)
-            .map(|index| VoxelCoord::new(spawn.x, spawn.height + 1 + index as i32, spawn.z))
+            .map(|index| VoxelCoord::new(spawn.x, tower_base + index as i32, spawn.z))
             .collect::<Vec<_>>();
         for (index, coord) in tower.iter().copied().enumerate() {
             worlds[index]
                 .send(ClientMessage::Binary(
                     encode_edit_command(EditCommand {
                         operation_id: 100 + index as u64,
-                        coord,
-                        material: Some(Material::Wood),
+                        edit_session_id: opened[index].edit_session_id,
+                        action: voxels_world::protocol::EditAction::Place {
+                            coord,
+                            material: Material::Wood,
+                        },
                     })?
                     .into(),
                 ))
@@ -2087,7 +2174,7 @@ mod tests {
             );
             let mut committed_coords = commits
                 .iter()
-                .map(|commit| commit.coord)
+                .flat_map(|commit| commit.mutations.iter().map(|mutation| mutation.coord))
                 .collect::<Vec<_>>();
             committed_coords.sort_unstable();
             assert_eq!(committed_coords, tower);
@@ -2103,13 +2190,16 @@ mod tests {
             )
             .await
             .is_err(),
-            "a player 1 km away received an unrelated edit frame"
+            "an out-of-interest player received an unrelated edit frame"
         );
 
         let first_edit = EditCommand {
             operation_id: 100,
-            coord: tower[0],
-            material: Some(Material::Wood),
+            edit_session_id: opened[0].edit_session_id,
+            action: voxels_world::protocol::EditAction::Place {
+                coord: tower[0],
+                material: Material::Wood,
+            },
         };
         worlds[0]
             .send(ClientMessage::Binary(
@@ -2249,7 +2339,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v6, test-local-token"),
+            HeaderValue::from_static("voxels.world.v7, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -2284,7 +2374,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v6, test-local-token"),
+            HeaderValue::from_static("voxels.world.v7, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -2312,6 +2402,33 @@ mod tests {
                     if delta.enters.len() == enter_count && delta.leaves.len() == leave_count {
                         return Ok(delta);
                     }
+                }
+            }
+        })
+        .await?
+    }
+
+    async fn wait_for_visible_connections<S>(
+        socket: &mut tokio_tungstenite::WebSocketStream<S>,
+        expected: &BTreeSet<u64>,
+    ) -> Result<PresenceDelta, Box<dyn std::error::Error>>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut visible = BTreeSet::new();
+            loop {
+                let bytes = next_client_binary(socket).await?;
+                if message_kind(&bytes)? != presence_delta_kind() {
+                    continue;
+                }
+                let delta = decode_presence_delta(&bytes)?;
+                visible.extend(delta.enters.iter().map(|player| player.connection_id));
+                for connection_id in &delta.leaves {
+                    visible.remove(connection_id);
+                }
+                if &visible == expected {
+                    return Ok(delta);
                 }
             }
         })

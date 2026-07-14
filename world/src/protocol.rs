@@ -364,6 +364,15 @@ pub enum EditAction {
     },
 }
 
+impl EditAction {
+    pub const fn target(self) -> VoxelCoord {
+        match self {
+            Self::Dig { hit } => hit,
+            Self::Place { coord, .. } => coord,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VoxelMutation {
     pub coord: VoxelCoord,

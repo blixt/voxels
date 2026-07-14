@@ -5,15 +5,16 @@
 //! world, while a spatial hash and receiver-local stream state make replication proportional to
 //! nearby relationships instead of the square of the global player count.
 
-use crate::PresenceConfig;
+use crate::{GameplayConfig, PresenceConfig};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 use uuid::Uuid;
 use voxels_world::protocol::{
-    PLAYER_POSE_DISCONTINUITY, PlayerId, PlayerIdentity, PlayerPoseUpdate, PlayerPresenceState,
-    PlayerPresenceUpdate, PresenceDelta, PresenceSessionId, encode_presence_delta,
+    PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING, PlayerId,
+    PlayerIdentity, PlayerPoseUpdate, PlayerPresenceState, PlayerPresenceUpdate, PlayerResume,
+    PresenceDelta, PresenceSessionId, encode_presence_delta,
 };
 use voxels_world::{VOXEL_SIZE_METRES, VoxelCoord};
 
@@ -23,6 +24,7 @@ const MAX_STALE_SAMPLE_MS: u64 = 2_000;
 pub(crate) struct PresenceHub {
     started: Instant,
     config: PresenceConfig,
+    gameplay: GameplayConfig,
     inner: Mutex<PresenceInner>,
 }
 
@@ -30,6 +32,7 @@ struct PresenceInner {
     next_connection_id: u64,
     players: HashMap<PlayerId, PlayerSession>,
     sessions: HashMap<PresenceSessionId, PlayerId>,
+    connections: HashMap<u64, PlayerId>,
     cells: HashMap<SpatialCell, BTreeSet<PlayerId>>,
 }
 
@@ -39,8 +42,13 @@ struct PlayerSession {
     color_index: u16,
     presence_attached: bool,
     pose: Option<PlayerPoseUpdate>,
+    resume_revision: u64,
     last_pose_receipt_ms: u64,
     last_discontinuity_sequence: u64,
+    discontinuity_on_next_accept: bool,
+    horizontal_movement_credit_metres: f32,
+    vertical_movement_credit_metres: f32,
+    movement_credit_updated_ms: u64,
     cell: Option<SpatialCell>,
 }
 
@@ -104,14 +112,19 @@ pub(crate) enum PoseAdmission {
 }
 
 impl PresenceHub {
-    pub(crate) fn new(config: PresenceConfig) -> Result<Arc<Self>, String> {
+    pub(crate) fn new(
+        config: PresenceConfig,
+        gameplay: GameplayConfig,
+    ) -> Result<Arc<Self>, String> {
         Ok(Arc::new(Self {
             started: Instant::now(),
             config,
+            gameplay,
             inner: Mutex::new(PresenceInner {
                 next_connection_id: 1,
                 players: HashMap::new(),
                 sessions: HashMap::new(),
+                connections: HashMap::new(),
                 cells: HashMap::new(),
             }),
         }))
@@ -132,6 +145,74 @@ impl PresenceHub {
 
     pub(crate) const fn config(&self) -> PresenceConfig {
         self.config
+    }
+
+    /// Authorizes one canonical-voxel interaction against the same connection's latest accepted
+    /// pose. The fixed slack is a hard allowance for ordering skew between the world and presence
+    /// sockets; it does not grow with client-reported velocity or pose age.
+    pub(crate) fn authorize_interaction(
+        &self,
+        connection_id: u64,
+        target: VoxelCoord,
+    ) -> Result<(), &'static str> {
+        let now = self.now_ms();
+        let inner = self.lock();
+        let player_id = inner
+            .connections
+            .get(&connection_id)
+            .ok_or("player connection is not active")?;
+        let player = inner
+            .players
+            .get(player_id)
+            .ok_or("player connection is not active")?;
+        if player.connection_id != connection_id || !player.presence_attached {
+            return Err("player presence is not attached");
+        }
+        let pose = player.pose.ok_or("player pose is unavailable")?;
+        if player.last_pose_receipt_ms == 0
+            || now.saturating_sub(player.last_pose_receipt_ms)
+                > u64::from(self.gameplay.interaction_pose_max_age_ms)
+        {
+            return Err("player pose is stale");
+        }
+
+        let reach_metres = f64::from(
+            self.gameplay
+                .interaction_reach_centimetres
+                .saturating_add(self.gameplay.interaction_latency_slack_centimetres),
+        ) * 0.01;
+        let voxel_size = f64::from(VOXEL_SIZE_METRES);
+        let mut distance_squared = 0.0_f64;
+        for (axis, coordinate) in [target.x, target.y, target.z].into_iter().enumerate() {
+            let minimum = f64::from(coordinate) * voxel_size;
+            let maximum = minimum + voxel_size;
+            let eye = f64::from(pose.eye_position_metres[axis]);
+            let nearest = eye.clamp(minimum, maximum);
+            let delta = eye - nearest;
+            distance_squared += delta * delta;
+        }
+        if distance_squared > reach_metres * reach_metres {
+            return Err("interaction target is out of reach");
+        }
+        Ok(())
+    }
+
+    /// Returns the latest server-accepted camera state even while the presence socket is detached.
+    /// The world-session owner uses this value when durably closing or checkpointing the player.
+    pub(crate) fn latest_player_resume(&self, connection_id: u64) -> Option<PlayerResume> {
+        let inner = self.lock();
+        let player_id = inner.connections.get(&connection_id)?;
+        let player = inner.players.get(player_id)?;
+        if player.connection_id != connection_id {
+            return None;
+        }
+        let pose = player.pose?;
+        Some(PlayerResume {
+            revision: player.resume_revision,
+            eye_position_metres: pose.eye_position_metres,
+            look_yaw_radians: pose.look_yaw_radians,
+            look_pitch_radians: pose.look_pitch_radians,
+        })
     }
 
     /// Returns only connections whose current horizontal interest area covers an edited voxel.
@@ -177,7 +258,15 @@ impl PresenceHub {
         connections
     }
 
-    pub(crate) fn join(self: &Arc<Self>, identity: &PlayerIdentity) -> Option<WorldPresenceClaim> {
+    pub(crate) fn join(
+        self: &Arc<Self>,
+        identity: &PlayerIdentity,
+        resume: PlayerResume,
+    ) -> Option<WorldPresenceClaim> {
+        if !valid_resume(resume) {
+            return None;
+        }
+        let now = self.now_ms();
         let mut inner = self.lock();
         if inner.players.contains_key(&identity.player_id)
             || inner.players.len() >= usize::from(self.config.max_players)
@@ -195,6 +284,8 @@ impl PresenceHub {
         let color_index =
             choose_color(identity.player_id, &inner.players, self.config.max_players)?;
         inner.sessions.insert(session_id, identity.player_id);
+        inner.connections.insert(connection_id, identity.player_id);
+        let movement_slack = f32::from(self.gameplay.movement_slack_centimetres) * 0.01;
         inner.players.insert(
             identity.player_id,
             PlayerSession {
@@ -202,9 +293,22 @@ impl PresenceHub {
                 session_id,
                 color_index,
                 presence_attached: false,
-                pose: None,
+                pose: Some(PlayerPoseUpdate {
+                    sequence: 0,
+                    sample_server_time_ms: 0,
+                    eye_position_metres: resume.eye_position_metres,
+                    linear_velocity_metres_per_second: [0.0; 3],
+                    look_yaw_radians: resume.look_yaw_radians,
+                    look_pitch_radians: resume.look_pitch_radians,
+                    flags: 0,
+                }),
+                resume_revision: resume.revision,
                 last_pose_receipt_ms: 0,
                 last_discontinuity_sequence: 0,
+                discontinuity_on_next_accept: true,
+                horizontal_movement_credit_metres: movement_slack,
+                vertical_movement_credit_metres: movement_slack,
+                movement_credit_updated_ms: now,
                 cell: None,
             },
         );
@@ -227,6 +331,7 @@ impl PresenceHub {
             return None;
         }
         player.presence_attached = true;
+        player.discontinuity_on_next_accept = true;
         Some(PresenceAttachment {
             hub: Arc::clone(self),
             connection_id: player.connection_id,
@@ -243,6 +348,28 @@ impl PresenceHub {
         let now = self.now_ms();
         let min_interval_ms =
             1_000_u64.div_ceil(u64::from(self.config.max_pose_updates_per_second));
+        let horizontal_speed =
+            f32::from(self.gameplay.max_horizontal_speed_centimetres_per_second) * 0.01;
+        let vertical_speed =
+            f32::from(self.gameplay.max_vertical_speed_centimetres_per_second) * 0.01;
+        let movement_slack = f32::from(self.gameplay.movement_slack_centimetres) * 0.01;
+        let credit_window_seconds = f32::from(self.gameplay.movement_credit_window_ms) * 0.001;
+        let horizontal_credit_limit = movement_slack + horizontal_speed * credit_window_seconds;
+        let vertical_credit_limit = movement_slack + vertical_speed * credit_window_seconds;
+        if !valid_pose(pose) {
+            return PoseAdmission::Invalid("player pose fields are invalid");
+        }
+        let horizontal_velocity_squared = pose.linear_velocity_metres_per_second[0].mul_add(
+            pose.linear_velocity_metres_per_second[0],
+            pose.linear_velocity_metres_per_second[2] * pose.linear_velocity_metres_per_second[2],
+        );
+        if horizontal_velocity_squared > horizontal_speed * horizontal_speed
+            || pose.linear_velocity_metres_per_second[1].abs() > vertical_speed
+        {
+            return PoseAdmission::Invalid("player velocity exceeds the authoritative limit");
+        }
+        // Discontinuities are a server-authored presentation hint, never movement permission.
+        pose.flags &= !PLAYER_POSE_DISCONTINUITY;
         let mut inner = self.lock();
         let (old_cell, new_cell) = {
             let Some(player) = inner.players.get_mut(&attachment.player_id) else {
@@ -277,24 +404,46 @@ impl PresenceHub {
             {
                 return PoseAdmission::IgnoredStale;
             }
-            if let Some(prior) = player.pose {
-                let distance_squared =
-                    squared_distance(pose.eye_position_metres, prior.eye_position_metres);
-                let teleport = f32::from(self.config.teleport_distance_metres);
-                if distance_squared > teleport * teleport
-                    && pose.flags & PLAYER_POSE_DISCONTINUITY == 0
-                {
-                    return PoseAdmission::Invalid(
-                        "large player position change lacks discontinuity flag",
-                    );
-                }
+            let Some(prior) = player.pose else {
+                return PoseAdmission::SessionClosed;
+            };
+            let elapsed_ms = now.saturating_sub(player.movement_credit_updated_ms);
+            let elapsed_seconds = elapsed_ms as f32 * 0.001;
+            let horizontal_credit = replenish_movement_credit(
+                player.horizontal_movement_credit_metres,
+                horizontal_speed,
+                elapsed_seconds,
+                horizontal_credit_limit,
+            );
+            let vertical_credit = replenish_movement_credit(
+                player.vertical_movement_credit_metres,
+                vertical_speed,
+                elapsed_seconds,
+                vertical_credit_limit,
+            );
+            let dx = pose.eye_position_metres[0] - prior.eye_position_metres[0];
+            let dz = pose.eye_position_metres[2] - prior.eye_position_metres[2];
+            let horizontal_distance = dx.mul_add(dx, dz * dz).sqrt();
+            let vertical_distance =
+                (pose.eye_position_metres[1] - prior.eye_position_metres[1]).abs();
+            if horizontal_distance > horizontal_credit + f32::EPSILON {
+                return PoseAdmission::Invalid("player horizontal movement exceeded its budget");
             }
-            if pose.flags & PLAYER_POSE_DISCONTINUITY != 0 {
+            if vertical_distance > vertical_credit + f32::EPSILON {
+                return PoseAdmission::Invalid("player vertical movement exceeded its budget");
+            }
+            player.horizontal_movement_credit_metres =
+                (horizontal_credit - horizontal_distance).max(0.0);
+            player.vertical_movement_credit_metres = (vertical_credit - vertical_distance).max(0.0);
+            player.movement_credit_updated_ms = now;
+            if player.discontinuity_on_next_accept {
                 player.last_discontinuity_sequence = pose.sequence;
+                player.discontinuity_on_next_accept = false;
             }
             let old_cell = player.cell;
             let new_cell = Some(cell_for_pose(pose, self.config.spatial_cell_metres));
             player.pose = Some(pose);
+            player.resume_revision = player.resume_revision.saturating_add(1);
             player.last_pose_receipt_ms = now;
             player.cell = new_cell;
             (old_cell, new_cell)
@@ -528,6 +677,7 @@ impl PresenceHub {
         let old_cell = player.cell;
         inner.players.remove(&player_id);
         inner.sessions.remove(&session_id);
+        inner.connections.remove(&connection_id);
         move_cell_membership(&mut inner.cells, player_id, old_cell, None);
     }
 
@@ -543,8 +693,7 @@ impl PresenceHub {
             && player.session_id == session_id
         {
             player.presence_attached = false;
-            player.pose = None;
-            player.last_discontinuity_sequence = 0;
+            player.discontinuity_on_next_accept = true;
             player.cell.take()
         } else {
             None
@@ -562,6 +711,10 @@ impl Drop for WorldPresenceClaim {
 impl WorldPresenceClaim {
     pub(crate) const fn player_id(&self) -> PlayerId {
         self.player_id
+    }
+
+    pub(crate) fn latest_resume(&self) -> Option<PlayerResume> {
+        self.hub.latest_player_resume(self.connection_id)
     }
 }
 
@@ -655,6 +808,48 @@ fn squared_distance(first: [f32; 3], second: [f32; 3]) -> f32 {
         .sum()
 }
 
+fn replenish_movement_credit(
+    current_metres: f32,
+    speed_metres_per_second: f32,
+    elapsed_seconds: f32,
+    limit_metres: f32,
+) -> f32 {
+    (current_metres + speed_metres_per_second * elapsed_seconds).min(limit_metres)
+}
+
+fn valid_resume(resume: PlayerResume) -> bool {
+    resume.revision != 0
+        && valid_position(resume.eye_position_metres)
+        && valid_look(resume.look_yaw_radians, resume.look_pitch_radians)
+}
+
+fn valid_pose(pose: PlayerPoseUpdate) -> bool {
+    const CLIENT_FLAGS: u16 =
+        PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_DISCONTINUITY;
+    pose.sequence != 0
+        && valid_position(pose.eye_position_metres)
+        && pose
+            .linear_velocity_metres_per_second
+            .into_iter()
+            .all(f32::is_finite)
+        && valid_look(pose.look_yaw_radians, pose.look_pitch_radians)
+        && pose.flags & !CLIENT_FLAGS == 0
+}
+
+fn valid_position(position: [f32; 3]) -> bool {
+    let limit = (i32::MAX as f32 - 64.0) * VOXEL_SIZE_METRES;
+    position
+        .into_iter()
+        .all(|value| value.is_finite() && value.abs() <= limit)
+}
+
+fn valid_look(yaw: f32, pitch: f32) -> bool {
+    yaw.is_finite()
+        && (-std::f32::consts::PI..=std::f32::consts::PI).contains(&yaw)
+        && pitch.is_finite()
+        && (-1.5..=1.5).contains(&pitch)
+}
+
 fn angle_delta(from: f32, to: f32) -> f32 {
     (to - from + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
 }
@@ -688,13 +883,37 @@ mod tests {
         }
     }
 
+    fn resume(x: f32, y: f32, z: f32) -> PlayerResume {
+        PlayerResume {
+            revision: 1,
+            eye_position_metres: [x, y, z],
+            look_yaw_radians: 0.0,
+            look_pitch_radians: 0.0,
+        }
+    }
+
+    fn hub(config: PresenceConfig) -> Arc<PresenceHub> {
+        PresenceHub::new(config, GameplayConfig::default()).expect("hub")
+    }
+
+    fn security_hub(gameplay: GameplayConfig) -> Arc<PresenceHub> {
+        PresenceHub::new(
+            PresenceConfig {
+                max_pose_updates_per_second: 120,
+                ..PresenceConfig::default()
+            },
+            gameplay,
+        )
+        .expect("hub")
+    }
+
     fn joined_at(
         hub: &Arc<PresenceHub>,
         seed: u16,
         x: f32,
         z: f32,
     ) -> (WorldPresenceClaim, PresenceAttachment) {
-        let claim = hub.join(&identity(seed)).expect("join");
+        let claim = hub.join(&identity(seed), resume(x, 1.62, z)).expect("join");
         let attachment = hub.attach(claim.session_id).expect("attach");
         assert_eq!(
             hub.accept_pose(&attachment, pose(1, x, z)),
@@ -713,13 +932,12 @@ mod tests {
 
     #[test]
     fn five_hundred_twelve_player_dense_region_is_bounded_and_starvation_free() {
-        let hub = PresenceHub::new(PresenceConfig {
+        let hub = hub(PresenceConfig {
             max_players: 512,
             max_records_per_delta: 64,
             max_pose_updates_per_second: 120,
             ..PresenceConfig::default()
-        })
-        .expect("hub");
+        });
         let (_viewer_claim, viewer) = joined_at(&hub, 0, 0.0, 0.0);
         let mut residents = Vec::new();
         for seed in 1..512 {
@@ -759,12 +977,11 @@ mod tests {
 
     #[test]
     fn far_players_produce_no_candidates_or_followup_bytes() {
-        let hub = PresenceHub::new(PresenceConfig {
+        let hub = hub(PresenceConfig {
             max_players: 512,
             max_pose_updates_per_second: 120,
             ..PresenceConfig::default()
-        })
-        .expect("hub");
+        });
         let (_viewer_claim, viewer) = joined_at(&hub, 0, 0.0, 0.0);
         let mut residents = Vec::new();
         for seed in 1..512 {
@@ -789,11 +1006,10 @@ mod tests {
 
     #[test]
     fn disconnect_emits_an_explicit_leave() {
-        let hub = PresenceHub::new(PresenceConfig {
+        let hub = hub(PresenceConfig {
             max_pose_updates_per_second: 120,
             ..PresenceConfig::default()
-        })
-        .expect("hub");
+        });
         let (_viewer_claim, viewer) = joined_at(&hub, 0, 0.0, 0.0);
         let (other_claim, _other) = joined_at(&hub, 1, 2.0, 0.0);
         let mut stream = PresenceStreamState::default();
@@ -812,5 +1028,200 @@ mod tests {
             decode_presence_delta(&leave).expect("decode").leaves,
             vec![connection_id]
         );
+    }
+
+    #[test]
+    fn client_discontinuity_cannot_bypass_bounded_movement_credit() {
+        let hub = security_hub(GameplayConfig::default());
+        let claim = hub
+            .join(&identity(10), resume(0.0, 1.62, 0.0))
+            .expect("join");
+        let attachment = hub.attach(claim.session_id).expect("attach");
+        let mut initial = pose(1, 0.0, 0.0);
+        initial.flags |= PLAYER_POSE_DISCONTINUITY;
+        assert_eq!(
+            hub.accept_pose(&attachment, initial),
+            PoseAdmission::Accepted
+        );
+
+        {
+            let mut inner = hub.lock();
+            let player = inner
+                .players
+                .get_mut(&identity(10).player_id)
+                .expect("player");
+            assert_eq!(
+                player.pose.expect("pose").flags & PLAYER_POSE_DISCONTINUITY,
+                0
+            );
+            assert_eq!(player.last_discontinuity_sequence, 1);
+            player.last_pose_receipt_ms = 0;
+        }
+        let mut teleport = pose(2, 20.0, 0.0);
+        teleport.flags |= PLAYER_POSE_DISCONTINUITY;
+        assert_eq!(
+            hub.accept_pose(&attachment, teleport),
+            PoseAdmission::Invalid("player horizontal movement exceeded its budget")
+        );
+        let latest = hub
+            .latest_player_resume(claim.connection_id)
+            .expect("latest resume");
+        assert_eq!(latest.eye_position_metres, [0.0, 1.62, 0.0]);
+        assert_eq!(latest.revision, 2);
+    }
+
+    #[test]
+    fn movement_credit_replenishes_with_receipt_time_and_has_a_hard_window() {
+        let gameplay = GameplayConfig {
+            max_horizontal_speed_centimetres_per_second: 100,
+            max_vertical_speed_centimetres_per_second: 100,
+            movement_slack_centimetres: 1,
+            movement_credit_window_ms: 100,
+            ..GameplayConfig::default()
+        };
+        let hub = security_hub(gameplay);
+        let claim = hub
+            .join(&identity(11), resume(0.0, 1.62, 0.0))
+            .expect("join");
+        let attachment = hub.attach(claim.session_id).expect("attach");
+        assert_eq!(
+            hub.accept_pose(&attachment, pose(1, 0.0, 0.0)),
+            PoseAdmission::Accepted
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        assert_eq!(
+            hub.accept_pose(&attachment, pose(2, 0.025, 0.0)),
+            PoseAdmission::Accepted
+        );
+        assert!((replenish_movement_credit(0.0, 1.0, 10.0, 0.11) - 0.11).abs() < f32::EPSILON);
+        let credit_now = hub.now_ms();
+        {
+            let mut inner = hub.lock();
+            let player = inner
+                .players
+                .get_mut(&identity(11).player_id)
+                .expect("player");
+            player.last_pose_receipt_ms = 0;
+            player.movement_credit_updated_ms = credit_now;
+            player.horizontal_movement_credit_metres = 0.0;
+        }
+        assert_eq!(
+            hub.accept_pose(&attachment, pose(3, 0.2, 0.0)),
+            PoseAdmission::Invalid("player horizontal movement exceeded its budget")
+        );
+    }
+
+    #[test]
+    fn reported_velocity_is_bounded_independently_per_horizontal_and_vertical_axes() {
+        let hub = security_hub(GameplayConfig::default());
+        let claim = hub
+            .join(&identity(12), resume(0.0, 1.62, 0.0))
+            .expect("join");
+        let attachment = hub.attach(claim.session_id).expect("attach");
+
+        let mut horizontal = pose(1, 0.0, 0.0);
+        horizontal.linear_velocity_metres_per_second = [9.01, 0.0, 0.0];
+        assert_eq!(
+            hub.accept_pose(&attachment, horizontal),
+            PoseAdmission::Invalid("player velocity exceeds the authoritative limit")
+        );
+        let mut vertical = pose(1, 0.0, 0.0);
+        vertical.linear_velocity_metres_per_second = [0.0, -12.01, 0.0];
+        assert_eq!(
+            hub.accept_pose(&attachment, vertical),
+            PoseAdmission::Invalid("player velocity exceeds the authoritative limit")
+        );
+    }
+
+    #[test]
+    fn detach_retains_resume_and_next_accepted_pose_is_server_discontinuous() {
+        let hub = security_hub(GameplayConfig::default());
+        let claim = hub
+            .join(&identity(13), resume(3.0, 1.62, -2.0))
+            .expect("join");
+        let attachment = hub.attach(claim.session_id).expect("attach");
+        assert_eq!(
+            hub.accept_pose(&attachment, pose(1, 3.0, -2.0)),
+            PoseAdmission::Accepted
+        );
+        drop(attachment);
+        assert_eq!(
+            hub.latest_player_resume(claim.connection_id)
+                .expect("retained")
+                .eye_position_metres,
+            [3.0, 1.62, -2.0]
+        );
+        assert_eq!(
+            hub.authorize_interaction(claim.connection_id, VoxelCoord::new(30, 16, -20)),
+            Err("player presence is not attached")
+        );
+
+        let reattached = hub.attach(claim.session_id).expect("reattach");
+        {
+            let mut inner = hub.lock();
+            inner
+                .players
+                .get_mut(&identity(13).player_id)
+                .expect("player")
+                .last_pose_receipt_ms = 0;
+        }
+        assert_eq!(
+            hub.accept_pose(&reattached, pose(2, 3.0, -2.0)),
+            PoseAdmission::Accepted
+        );
+        let inner = hub.lock();
+        let player = inner.players.get(&identity(13).player_id).expect("player");
+        assert_eq!(player.last_discontinuity_sequence, 2);
+        assert_eq!(
+            player.pose.expect("pose").flags & PLAYER_POSE_DISCONTINUITY,
+            0
+        );
+    }
+
+    #[test]
+    fn interaction_authorization_requires_attached_fresh_pose_and_nearest_aabb_reach() {
+        let gameplay = GameplayConfig {
+            interaction_reach_centimetres: 500,
+            interaction_latency_slack_centimetres: 100,
+            interaction_pose_max_age_ms: 1,
+            ..GameplayConfig::default()
+        };
+        let hub = security_hub(gameplay);
+        let claim = hub
+            .join(&identity(14), resume(0.05, 1.65, 0.05))
+            .expect("join");
+        let attachment = hub.attach(claim.session_id).expect("attach");
+        let near = VoxelCoord::new(0, 16, -59);
+        assert_eq!(
+            hub.authorize_interaction(claim.connection_id, near),
+            Err("player pose is stale")
+        );
+        assert_eq!(
+            hub.accept_pose(&attachment, pose(1, 0.05, 0.05)),
+            PoseAdmission::Accepted
+        );
+        assert_eq!(hub.authorize_interaction(claim.connection_id, near), Ok(()));
+        assert_eq!(
+            hub.authorize_interaction(claim.connection_id, VoxelCoord::new(0, 16, -61)),
+            Err("interaction target is out of reach")
+        );
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        assert_eq!(
+            hub.authorize_interaction(claim.connection_id, near),
+            Err("player pose is stale")
+        );
+    }
+
+    #[test]
+    fn invalid_authoritative_resume_is_rejected_before_session_allocation() {
+        let hub = security_hub(GameplayConfig::default());
+        let mut invalid = resume(0.0, 1.62, 0.0);
+        invalid.revision = 0;
+        assert!(hub.join(&identity(15), invalid).is_none());
+        invalid.revision = 1;
+        invalid.eye_position_metres[0] = f32::NAN;
+        assert!(hub.join(&identity(15), invalid).is_none());
+        assert!(hub.lock().players.is_empty());
     }
 }
