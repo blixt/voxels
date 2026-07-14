@@ -66,6 +66,10 @@ function avatarSummary(values) {
   };
 }
 
+function angleDelta(from, to) {
+  return Math.atan2(Math.sin(to - from), Math.cos(to - from));
+}
+
 try {
   await build({ logLevel: "warn" });
   server = await preview({
@@ -105,14 +109,30 @@ try {
 
   await mkdir(SCREENSHOT_DIRECTORY, { recursive: true });
   await bob.keyboard.down("KeyW");
-  await bob.waitForTimeout(650);
+  await bob.waitForTimeout(350);
   await alice.screenshot({ path: `${SCREENSHOT_DIRECTORY}/alice-bob-walk-a.png` });
-  await bob.waitForTimeout(280);
+  await bob.waitForTimeout(250);
   await alice.screenshot({ path: `${SCREENSHOT_DIRECTORY}/alice-bob-walk-b.png` });
-  await bob.waitForTimeout(720);
+  await bob.waitForTimeout(250);
   await bob.keyboard.up("KeyW");
   await alice.waitForTimeout(180);
   await alice.screenshot({ path: `${SCREENSHOT_DIRECTORY}/alice-bob-stopped.png` });
+
+  const bobBeforeLook = await snapshot(bob);
+  await bob.mouse.click(VIEWPORT.width / 2, VIEWPORT.height / 2);
+  await bob.waitForTimeout(100);
+  await bob.mouse.move(VIEWPORT.width - 80, VIEWPORT.height / 2, { steps: 16 });
+  await bob.waitForTimeout(120);
+  await alice.screenshot({ path: `${SCREENSHOT_DIRECTORY}/alice-bob-head-look.png` });
+  await bob.waitForTimeout(850);
+  await alice.screenshot({ path: `${SCREENSHOT_DIRECTORY}/alice-bob-body-follow.png` });
+  const bobAfterLook = await snapshot(bob);
+  const bobLookTurned = Math.abs(
+    angleDelta(bobBeforeLook[SNAPSHOT.yaw], bobAfterLook[SNAPSHOT.yaw]),
+  );
+  if (bobLookTurned < 0.75) {
+    throw new Error(`bob look turned only ${bobLookTurned.toFixed(3)} radians`);
+  }
 
   const aliceAfterWalk = await waitFor(
     alice,
@@ -143,12 +163,15 @@ try {
         },
         movement: {
           bobTravelledMetres: bobTravelled,
+          bobLookTurnedRadians: bobLookTurned,
           aliceAfterWalk: avatarSummary(aliceAfterWalk),
         },
         screenshots: [
           `${SCREENSHOT_DIRECTORY}/alice-bob-walk-a.png`,
           `${SCREENSHOT_DIRECTORY}/alice-bob-walk-b.png`,
           `${SCREENSHOT_DIRECTORY}/alice-bob-stopped.png`,
+          `${SCREENSHOT_DIRECTORY}/alice-bob-head-look.png`,
+          `${SCREENSHOT_DIRECTORY}/alice-bob-body-follow.png`,
         ],
         errors: 0,
       },
