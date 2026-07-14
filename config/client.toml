@@ -1,11 +1,12 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 4
+schema_version = 5
 
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
 [world]
-endpoint = "ws://127.0.0.1:9777/v2/world"
-subprotocol = "voxels.world.v2"
+endpoint = "ws://127.0.0.1:9777/v3/world"
+presence_endpoint = "ws://127.0.0.1:9777/v3/presence"
+subprotocol = "voxels.world.v3"
 auth_subprotocol_token = "replace-with-a-random-local-token"
 max_in_flight_batches = 8
 buffered_amount_high_water_bytes = 8388608
@@ -14,6 +15,18 @@ request_timeout_ms = 10000
 reconnect_initial_delay_ms = 250
 reconnect_max_delay_ms = 5000
 reconnect_attempt_limit = 30
+
+[multiplayer]
+# Presence uses a dedicated small-frame WebSocket so world chunk payloads cannot block motion.
+pose_send_interval_ms = 33
+clock_sync_interval_ms = 1000
+# Pose packets are latest-state data: skip a send instead of queueing when this watermark is hit.
+buffered_amount_high_water_bytes = 65536
+# Adaptive receiver delay starts here and remains inside the declared min/max envelope.
+interpolation_delay_ms = 100
+min_interpolation_delay_ms = 67
+max_interpolation_delay_ms = 200
+max_extrapolation_ms = 100
 
 [runtime]
 fixed_step_seconds = 0.008333334

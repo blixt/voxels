@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 4;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 5;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -27,12 +27,14 @@ const MAX_WORLD_BUFFERED_BYTES: u32 = 64 * 1024 * 1024;
 const MAX_WORLD_REQUEST_TIMEOUT_MS: u32 = 300_000;
 const MAX_WORLD_RECONNECT_DELAY_MS: u32 = 60_000;
 const MAX_WORLD_RECONNECT_ATTEMPTS: u32 = 10_000;
+const MAX_PRESENCE_BUFFERED_BYTES: u32 = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
     pub schema_version: u32,
     pub world: WorldTransportConfig,
+    pub multiplayer: MultiplayerConfig,
     pub runtime: RuntimeConfig,
     pub streaming: StreamingConfig,
     pub rendering: RenderingConfig,
@@ -47,6 +49,7 @@ pub struct ClientConfig {
 #[serde(deny_unknown_fields)]
 pub struct WorldTransportConfig {
     pub endpoint: String,
+    pub presence_endpoint: String,
     pub subprotocol: String,
     /// Second WebSocket protocol token used as loopback authorization. It must match the native
     /// service's `transport.auth_subprotocol_token` and is never selected as the wire protocol.
@@ -58,6 +61,18 @@ pub struct WorldTransportConfig {
     pub reconnect_initial_delay_ms: u32,
     pub reconnect_max_delay_ms: u32,
     pub reconnect_attempt_limit: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MultiplayerConfig {
+    pub pose_send_interval_ms: u32,
+    pub clock_sync_interval_ms: u32,
+    pub buffered_amount_high_water_bytes: u32,
+    pub interpolation_delay_ms: u32,
+    pub min_interpolation_delay_ms: u32,
+    pub max_interpolation_delay_ms: u32,
+    pub max_extrapolation_ms: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -205,6 +220,7 @@ impl ClientConfig {
         }
 
         self.world.validate()?;
+        self.multiplayer.validate()?;
 
         ensure_finite_range(
             self.runtime.fixed_step_seconds,
@@ -395,11 +411,15 @@ impl ClientConfig {
 
 impl WorldTransportConfig {
     pub fn validate(&self) -> Result<(), ClientConfigError> {
-        if !(self.endpoint.starts_with("ws://") || self.endpoint.starts_with("wss://"))
-            || self.endpoint.chars().any(char::is_whitespace)
-        {
+        if !is_websocket_url(&self.endpoint) {
             return invalid(
                 "world.endpoint",
+                "must be an absolute ws:// or wss:// URL without whitespace",
+            );
+        }
+        if !is_websocket_url(&self.presence_endpoint) {
+            return invalid(
+                "world.presence_endpoint",
                 "must be an absolute ws:// or wss:// URL without whitespace",
             );
         }
@@ -459,6 +479,54 @@ impl WorldTransportConfig {
             "world.reconnect_attempt_limit",
             0,
             MAX_WORLD_RECONNECT_ATTEMPTS,
+        )?;
+        Ok(())
+    }
+}
+
+impl MultiplayerConfig {
+    fn validate(&self) -> Result<(), ClientConfigError> {
+        ensure_integer_range(
+            self.pose_send_interval_ms,
+            "multiplayer.pose_send_interval_ms",
+            16,
+            1_000,
+        )?;
+        ensure_integer_range(
+            self.clock_sync_interval_ms,
+            "multiplayer.clock_sync_interval_ms",
+            250,
+            60_000,
+        )?;
+        ensure_integer_range(
+            self.buffered_amount_high_water_bytes,
+            "multiplayer.buffered_amount_high_water_bytes",
+            1,
+            MAX_PRESENCE_BUFFERED_BYTES,
+        )?;
+        ensure_integer_range(
+            self.min_interpolation_delay_ms,
+            "multiplayer.min_interpolation_delay_ms",
+            1,
+            1_000,
+        )?;
+        ensure_integer_range(
+            self.interpolation_delay_ms,
+            "multiplayer.interpolation_delay_ms",
+            self.min_interpolation_delay_ms,
+            1_000,
+        )?;
+        ensure_integer_range(
+            self.max_interpolation_delay_ms,
+            "multiplayer.max_interpolation_delay_ms",
+            self.interpolation_delay_ms,
+            1_000,
+        )?;
+        ensure_integer_range(
+            self.max_extrapolation_ms,
+            "multiplayer.max_extrapolation_ms",
+            0,
+            250,
         )?;
         Ok(())
     }
@@ -563,6 +631,11 @@ fn is_websocket_protocol_token(value: &str) -> bool {
         })
 }
 
+fn is_websocket_url(value: &str) -> bool {
+    (value.starts_with("ws://") || value.starts_with("wss://"))
+        && !value.chars().any(char::is_whitespace)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,8 +646,9 @@ mod tests {
         ClientConfig {
             schema_version: CLIENT_CONFIG_SCHEMA_VERSION,
             world: WorldTransportConfig {
-                endpoint: "ws://127.0.0.1:9777/v2/world".to_owned(),
-                subprotocol: "voxels.world.v2".to_owned(),
+                endpoint: "ws://127.0.0.1:9777/v3/world".to_owned(),
+                presence_endpoint: "ws://127.0.0.1:9777/v3/presence".to_owned(),
+                subprotocol: "voxels.world.v3".to_owned(),
                 auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
                 max_in_flight_batches: 8,
                 buffered_amount_high_water_bytes: 8 * 1024 * 1024,
@@ -583,6 +657,15 @@ mod tests {
                 reconnect_initial_delay_ms: 250,
                 reconnect_max_delay_ms: 5_000,
                 reconnect_attempt_limit: 30,
+            },
+            multiplayer: MultiplayerConfig {
+                pose_send_interval_ms: 33,
+                clock_sync_interval_ms: 1_000,
+                buffered_amount_high_water_bytes: 65_536,
+                interpolation_delay_ms: 100,
+                min_interpolation_delay_ms: 67,
+                max_interpolation_delay_ms: 200,
+                max_extrapolation_ms: 100,
             },
             runtime: RuntimeConfig {
                 fixed_step_seconds: 1.0 / 120.0,
@@ -685,18 +768,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 4", "schema_version = 3");
+        let wrong_schema = fixture.replace("schema_version = 5", "schema_version = 4");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 3,
+                found: 4,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 4",
-            "schema_version = 4\nunknown_root = true",
+            "schema_version = 5",
+            "schema_version = 5\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
