@@ -336,7 +336,7 @@ struct DrawSpan {
     quad_count: u32,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Eq, PartialEq)]
 struct DrawList {
     spans: Vec<DrawSpan>,
     mesh_count: u32,
@@ -344,6 +344,66 @@ struct DrawList {
     fingerprint: u64,
     tested_slices: u32,
     selected_slices: u32,
+}
+
+#[derive(Debug)]
+struct DrawListBuilder {
+    items: Vec<DrawItem>,
+    mesh_count: u32,
+    quad_count: u32,
+    fingerprint: u64,
+    tested_slices: u32,
+    selected_slices: u32,
+}
+
+impl Default for DrawListBuilder {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            mesh_count: 0,
+            quad_count: 0,
+            fingerprint: FINGERPRINT_OFFSET,
+            tested_slices: 0,
+            selected_slices: 0,
+        }
+    }
+}
+
+impl DrawListBuilder {
+    fn test_slice(&mut self) {
+        self.tested_slices = self.tested_slices.saturating_add(1);
+    }
+
+    fn select_slice(&mut self, chunk: &ChunkMesh, slice: &MeshSlice) {
+        self.selected_slices = self.selected_slices.saturating_add(1);
+        self.items.push(DrawItem {
+            page: chunk.allocation.page,
+            offset: chunk.allocation.offset + slice.relative_offset,
+            size: slice.size,
+            quad_count: slice.quad_count,
+        });
+        self.quad_count = self.quad_count.saturating_add(slice.quad_count);
+    }
+
+    fn select_mesh(&mut self, key: MeshKey, chunk: &ChunkMesh) {
+        self.mesh_count = self.mesh_count.saturating_add(1);
+        self.fingerprint = fingerprint_value(self.fingerprint, u64::from(key.0));
+        self.fingerprint = fingerprint_value(self.fingerprint, key.1 as u32 as u64);
+        self.fingerprint = fingerprint_value(self.fingerprint, key.2 as u32 as u64);
+        self.fingerprint = fingerprint_value(self.fingerprint, key.3 as u32 as u64);
+        self.fingerprint = fingerprint_value(self.fingerprint, chunk.content_fingerprint);
+    }
+
+    fn finish(self) -> DrawList {
+        DrawList {
+            spans: coalesce_draw_items(self.items),
+            mesh_count: self.mesh_count,
+            quad_count: self.quad_count,
+            fingerprint: self.fingerprint,
+            tested_slices: self.tested_slices,
+            selected_slices: self.selected_slices,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -754,6 +814,7 @@ struct ShadowGpu {
     uniform_buffers: [Buffer; CASCADE_COUNT],
     bind_groups: [BindGroup; CASCADE_COUNT],
     pipeline: RenderPipeline,
+    settled_pipeline: RenderPipeline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -960,6 +1021,35 @@ impl ShadowGpu {
             multiview_mask: None,
             cache: None,
         });
+        // Once CPU geometric ownership is active and fine coverage is complete, the fragment
+        // shader's LOD/discard predicate is identically true. Omitting that stage preserves the
+        // exact depth result while allowing the GPU to use its fragmentless depth fast path.
+        let settled_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("settled shadow caster pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(quad_layout())],
+                compilation_options: Default::default(),
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Ok(Self {
             layout,
             _texture: texture,
@@ -969,6 +1059,7 @@ impl ShadowGpu {
             uniform_buffers,
             bind_groups,
             pipeline,
+            settled_pipeline,
         })
     }
 
@@ -2281,38 +2372,14 @@ impl Renderer {
         let cull_started = now_ms();
         let geometric_lod_focus =
             active_geometric_lod_focus(self.geometric_lod_focus, self.options.far_terrain);
-        let shadow_draw_lists: [DrawList; CASCADE_COUNT] = if self.options.shadows {
-            std::array::from_fn(|cascade_index| {
-                self.collect_draw_list(
-                    &self.chunks,
-                    |key, chunk| {
-                        (key.0 == 0 || self.options.far_terrain)
-                            && mesh_casts_directional_shadow(key)
-                            && shadow_clips[cascade_index]
-                                .contains_aabb(chunk.bounds_min, chunk.bounds_max)
-                    },
-                    |key, slice| {
-                        slice.render_layer == RenderLayer::Opaque
-                            && slice_owned_by_lod(geometric_lod_focus, key, slice)
-                            && shadow_clips[cascade_index]
-                                .contains_aabb(slice.bounds_min, slice.bounds_max)
-                    },
-                )
-            })
-        } else {
-            std::array::from_fn(|_| DrawList::default())
-        };
-        let world_draw_list = self.collect_draw_list(
+        let lod_readiness = self.lod_readiness();
+        let (shadow_draw_lists, world_draw_list) = collect_opaque_draw_lists(
             &self.chunks,
-            |key, chunk| {
-                (key.0 == 0 || self.options.far_terrain)
-                    && view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max)
-            },
-            |key, slice| {
-                slice.render_layer == RenderLayer::Opaque
-                    && slice_owned_by_lod(geometric_lod_focus, key, slice)
-                    && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
-            },
+            self.options.far_terrain,
+            self.options.shadows,
+            geometric_lod_focus,
+            view_clip,
+            shadow_clips,
         );
         let water_draw_list = self.collect_draw_list(
             &self.water_chunks,
@@ -2391,7 +2458,11 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(&self.shadow_gpu.pipeline);
+                pass.set_pipeline(if use_fragmentless_shadow_pipeline(lod_readiness) {
+                    &self.shadow_gpu.settled_pipeline
+                } else {
+                    &self.shadow_gpu.pipeline
+                });
                 pass.set_bind_group(0, &self.shadow_gpu.bind_groups[cascade_index], &[]);
                 for span in &draw_list.spans {
                     let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
@@ -2765,6 +2836,83 @@ impl Renderer {
     }
 }
 
+/// Builds the camera and three shadow selections in one resident-mesh traversal.
+///
+/// Geometric LOD ownership is independent of clip volume. Computing it once per opaque slice avoids
+/// repeating the most expensive culling predicate for the camera and every shadow cascade while
+/// preserving each list's independent clip tests, diagnostics, ordering, and fingerprint.
+fn collect_opaque_draw_lists(
+    chunks: &BTreeMap<MeshKey, ChunkMesh>,
+    far_terrain: bool,
+    shadows: bool,
+    geometric_lod_focus: Option<GeometricLodFocus>,
+    view_clip: AabbClipVolume,
+    shadow_clips: [AabbClipVolume; CASCADE_COUNT],
+) -> ([DrawList; CASCADE_COUNT], DrawList) {
+    let mut shadow_builders: [DrawListBuilder; CASCADE_COUNT] = Default::default();
+    let mut world_builder = DrawListBuilder::default();
+
+    for (key, chunk) in chunks {
+        if !chunk.active() || (key.0 != 0 && !far_terrain) {
+            continue;
+        }
+        let world_chunk_visible = view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max);
+        let shadow_chunk_visible: [bool; CASCADE_COUNT] = std::array::from_fn(|cascade_index| {
+            shadows
+                && mesh_casts_directional_shadow(key)
+                && shadow_clips[cascade_index].contains_aabb(chunk.bounds_min, chunk.bounds_max)
+        });
+        if !world_chunk_visible && !shadow_chunk_visible.into_iter().any(|visible| visible) {
+            continue;
+        }
+
+        let mut world_mesh_selected = false;
+        let mut shadow_mesh_selected = [false; CASCADE_COUNT];
+        for slice in &chunk.slices {
+            if world_chunk_visible {
+                world_builder.test_slice();
+            }
+            for cascade_index in 0..CASCADE_COUNT {
+                if shadow_chunk_visible[cascade_index] {
+                    shadow_builders[cascade_index].test_slice();
+                }
+            }
+            if slice.render_layer != RenderLayer::Opaque
+                || !slice_owned_by_lod(geometric_lod_focus, key, slice)
+            {
+                continue;
+            }
+            if world_chunk_visible && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max) {
+                world_builder.select_slice(chunk, slice);
+                world_mesh_selected = true;
+            }
+            for cascade_index in 0..CASCADE_COUNT {
+                if shadow_chunk_visible[cascade_index]
+                    && shadow_clips[cascade_index].contains_aabb(slice.bounds_min, slice.bounds_max)
+                {
+                    shadow_builders[cascade_index].select_slice(chunk, slice);
+                    shadow_mesh_selected[cascade_index] = true;
+                }
+            }
+        }
+        if world_mesh_selected {
+            world_builder.select_mesh(*key, chunk);
+        }
+        for cascade_index in 0..CASCADE_COUNT {
+            if shadow_mesh_selected[cascade_index] {
+                shadow_builders[cascade_index].select_mesh(*key, chunk);
+            }
+        }
+    }
+
+    let shadow_draw_lists = if shadows {
+        shadow_builders.map(DrawListBuilder::finish)
+    } else {
+        std::array::from_fn(|_| DrawList::default())
+    };
+    (shadow_draw_lists, world_builder.finish())
+}
+
 const FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FINGERPRINT_PRIME: u64 = 0x100_0000_01b3;
 
@@ -2988,6 +3136,13 @@ fn active_geometric_lod_focus(
     far_terrain: bool,
 ) -> Option<GeometricLodFocus> {
     focus.filter(|_| far_terrain)
+}
+
+const fn use_fragmentless_shadow_pipeline(readiness: LodReadiness) -> bool {
+    // The shadow shader first hides canonical vegetation until fine coverage is complete, then
+    // accepts every fragment when CPU geometric ownership is active. Both conditions are required
+    // before removing its fragment stage.
+    readiness.fine && readiness.geometric
 }
 
 fn coalesce_draw_items(mut items: Vec<DrawItem>) -> Vec<DrawSpan> {
@@ -3691,6 +3846,25 @@ mod tests {
     }
 
     #[test]
+    fn fragmentless_shadows_require_complete_fine_cpu_geometric_ownership() {
+        for fine in [false, true] {
+            for all in [false, true] {
+                for geometric in [false, true] {
+                    let readiness = LodReadiness {
+                        fine,
+                        all,
+                        geometric,
+                    };
+                    assert_eq!(
+                        use_fragmentless_shadow_pipeline(readiness),
+                        fine && geometric
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn surface_format_fallback_keeps_explicit_srgb_encoding_linear() {
         assert_eq!(
             preferred_format(&[
@@ -3990,6 +4164,127 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn reference_draw_list(
+        chunks: &BTreeMap<MeshKey, ChunkMesh>,
+        mut include_chunk: impl FnMut(&MeshKey, &ChunkMesh) -> bool,
+        mut include_slice: impl FnMut(&MeshKey, &MeshSlice) -> bool,
+    ) -> DrawList {
+        let mut builder = DrawListBuilder::default();
+        for (key, chunk) in chunks {
+            if !chunk.active() || !include_chunk(key, chunk) {
+                continue;
+            }
+            let mut selected = false;
+            for slice in &chunk.slices {
+                builder.test_slice();
+                if include_slice(key, slice) {
+                    builder.select_slice(chunk, slice);
+                    selected = true;
+                }
+            }
+            if selected {
+                builder.select_mesh(*key, chunk);
+            }
+        }
+        builder.finish()
+    }
+
+    #[test]
+    fn one_pass_opaque_lists_match_independent_camera_and_shadow_traversals() {
+        let canonical_key = (0, 0, 0, 0);
+        let surface_key = (SurfaceLodLevel::Stride2.index() + 1, 1, 0, 0);
+        let bounds_min = glam::Vec3::new(-0.5, 0.1, -0.5);
+        let bounds_max = glam::Vec3::new(0.5, 0.9, 0.5);
+        let canonical_slice = MeshSlice {
+            relative_offset: 0,
+            size: size_of::<GpuQuad>() as u32,
+            quad_count: 1,
+            bounds_min,
+            bounds_max,
+            surface_bounds: None,
+            skirt_edge: None,
+            render_layer: RenderLayer::Opaque,
+        };
+        let surface_slice = MeshSlice {
+            relative_offset: 0,
+            size: size_of::<GpuQuad>() as u32 * 2,
+            quad_count: 2,
+            bounds_min,
+            bounds_max,
+            surface_bounds: Some(SurfaceBounds {
+                min: [96, -20, 0],
+                max: [112, 80, 16],
+            }),
+            skirt_edge: None,
+            render_layer: RenderLayer::Opaque,
+        };
+        let mut arena = ArenaAllocator::new(256, 1);
+        let canonical_allocation = arena
+            .allocate(canonical_slice.size)
+            .expect("canonical test allocation");
+        let surface_allocation = arena
+            .allocate(surface_slice.size)
+            .expect("surface test allocation");
+        let chunks = BTreeMap::from([
+            (
+                canonical_key,
+                ChunkMesh {
+                    allocation: canonical_allocation,
+                    quad_count: canonical_slice.quad_count,
+                    content_fingerprint: 11,
+                    slices: vec![canonical_slice],
+                    bounds_min,
+                    bounds_max,
+                    activation_mask: u8::MAX,
+                },
+            ),
+            (
+                surface_key,
+                ChunkMesh {
+                    allocation: surface_allocation,
+                    quad_count: surface_slice.quad_count,
+                    content_fingerprint: 22,
+                    slices: vec![surface_slice],
+                    bounds_min,
+                    bounds_max,
+                    activation_mask: u8::MAX,
+                },
+            ),
+        ]);
+        let focus = Some(GeometricLodFocus::snapped(0, 0));
+        let view_clip = AabbClipVolume::new(glam::Mat4::IDENTITY);
+        let shadow_clips = [view_clip; CASCADE_COUNT];
+        let (actual_shadows, actual_world) =
+            collect_opaque_draw_lists(&chunks, true, true, focus, view_clip, shadow_clips);
+        let expected_world = reference_draw_list(
+            &chunks,
+            |_, chunk| view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max),
+            |key, slice| {
+                slice.render_layer == RenderLayer::Opaque
+                    && slice_owned_by_lod(focus, key, slice)
+                    && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
+            },
+        );
+        let expected_shadows = std::array::from_fn(|cascade_index| {
+            reference_draw_list(
+                &chunks,
+                |key, chunk| {
+                    mesh_casts_directional_shadow(key)
+                        && shadow_clips[cascade_index]
+                            .contains_aabb(chunk.bounds_min, chunk.bounds_max)
+                },
+                |key, slice| {
+                    slice.render_layer == RenderLayer::Opaque
+                        && slice_owned_by_lod(focus, key, slice)
+                        && shadow_clips[cascade_index]
+                            .contains_aabb(slice.bounds_min, slice.bounds_max)
+                },
+            )
+        });
+        assert_eq!(actual_world, expected_world);
+        assert_eq!(actual_shadows, expected_shadows);
     }
 
     #[test]
