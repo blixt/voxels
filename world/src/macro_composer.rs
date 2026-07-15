@@ -986,16 +986,8 @@ fn ecology_candidate(seed: u64, cell_x: i32, cell_z: i32) -> Option<EcologyCandi
         x: i32::try_from(origin_x + i64::from(offset_x)).ok()?,
         z: i32::try_from(origin_z + i64::from(offset_z)).ok()?,
         priority: ecology_hash(seed ^ 0x3c6e_f372_fe94_f82b, cell_x, cell_z),
-        occurrence: hash_unit(ecology_hash(
-            seed ^ 0xa54f_f53a_5f1d_36f1,
-            cell_x,
-            cell_z,
-        )),
-        species_draw: hash_unit(ecology_hash(
-            seed ^ 0x510e_527f_ade6_82d1,
-            cell_x,
-            cell_z,
-        )),
+        occurrence: hash_unit(ecology_hash(seed ^ 0xa54f_f53a_5f1d_36f1, cell_x, cell_z)),
+        species_draw: hash_unit(ecology_hash(seed ^ 0x510e_527f_ade6_82d1, cell_x, cell_z)),
         variation: (form & 7) as u8,
         orientation: (ecology_hash(seed ^ 0x9b05_688c_2b3e_6c1f, cell_x, cell_z) & 3) as u8,
         height_noise: ecology_hash(seed ^ 0x1f83_d9ab_fb41_bd6b, cell_x, cell_z) as u8,
@@ -1079,17 +1071,10 @@ fn ecology_tree(
             1_100,
         );
         let (succession_optimum, succession_width) = succession_niche(species);
-        let succession = unimodal_suitability(
-            structure.succession,
-            succession_optimum,
-            succession_width,
-        );
+        let succession =
+            unimodal_suitability(structure.succession, succession_optimum, succession_width);
         let community = (0.78 + (stand * 0.5 + 0.5) * 0.24) * (0.84 + succession * 0.16);
-        let score = (temperature.min(moisture)
-            * slope
-            * niche.prevalence
-            * substrate
-            * community)
+        let score = (temperature.min(moisture) * slope * niche.prevalence * substrate * community)
             .clamp(0.0, 1.0);
         scores[index] = score;
         if score > best_score {
@@ -1179,8 +1164,8 @@ fn ecology_structure(seed: u64, x: i32, z: i32) -> EcologyStructure {
 }
 
 fn offset_coordinate(coordinate: i32, offset: f32) -> i32 {
-    (i64::from(coordinate) + offset.round() as i64)
-        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    (i64::from(coordinate) + offset.round() as i64).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+        as i32
 }
 
 const fn tree_niche(species: TreeSpecies) -> TreeNiche {
@@ -1992,8 +1977,14 @@ mod tests {
                 }
             }
         }
-        assert!(accepted.len() < raw * 9 / 10, "spacing rejected too few candidates");
-        assert!(accepted.len() > raw / 2, "spacing rejected implausibly many candidates");
+        assert!(
+            accepted.len() < raw * 9 / 10,
+            "spacing rejected too few candidates"
+        );
+        assert!(
+            accepted.len() > raw / 2,
+            "spacing rejected implausibly many candidates"
+        );
         let minimum_squared = i64::from(ECOLOGY_MIN_TREE_SPACING_VOXELS).pow(2);
         for (&(cell_x, cell_z), candidate) in &accepted {
             for dz in -1..=1 {
@@ -2093,7 +2084,10 @@ mod tests {
         let sparse = counts[counts.len() / 10];
         let dense = counts[counts.len() * 9 / 10];
         assert!(sparse <= 6, "landscape lacked open areas: p10={sparse}");
-        assert!(dense >= 30, "landscape lacked forest interiors: p90={dense}");
+        assert!(
+            dense >= 30,
+            "landscape lacked forest interiors: p90={dense}"
+        );
         assert!(
             dense >= sparse.saturating_mul(5),
             "stand contrast collapsed: p10={sparse} p90={dense}"
@@ -2126,7 +2120,10 @@ mod tests {
         });
         let minimum = means.into_iter().fold(f64::INFINITY, f64::min);
         let maximum = means.into_iter().fold(f64::NEG_INFINITY, f64::max);
-        assert!(maximum - minimum < 6.0, "occurrence selected height: {means:?}");
+        assert!(
+            maximum - minimum < 6.0,
+            "occurrence selected height: {means:?}"
+        );
     }
 
     fn product(
