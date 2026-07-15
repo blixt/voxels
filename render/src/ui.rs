@@ -16,16 +16,13 @@ const PANEL_RADIUS: f32 = 18.0;
 const CONTENT_PAD: f32 = 14.0;
 const BUTTON_SIZE: f32 = 30.0;
 const BUTTON_GAP: f32 = 6.0;
-const COPY_BUTTON_WIDTH: f32 = 54.0;
+const ACTION_BUTTON_WIDTH: f32 = 40.0;
 const CHROME_HEIGHT: f32 = 36.0;
 const LAUNCHER_WIDTH: f32 = 222.0;
 const INVENTORY_WIDTH: f32 = 390.0;
 const INVENTORY_HEIGHT: f32 = 108.0;
 const CHROME_STACK_GAP: f32 = 8.0;
 const PANEL_TOP: f32 = PANEL_INSET + CHROME_HEIGHT + 12.0;
-const CONTEXT_WIDTH: f32 = 206.0;
-const CONTEXT_ROW_HEIGHT: f32 = 34.0;
-const CONTEXT_PAD: f32 = 6.0;
 const AUTO_COMPACT_WIDTH: f32 = 720.0;
 const MOTION_RATE: f32 = 18.0;
 const TOAST_HOLD_SECONDS: f32 = 5.0;
@@ -168,6 +165,21 @@ impl RendererFeature {
             Self::VoxelEmissiveLights => "Voxel emissive lights",
         }
     }
+
+    pub const fn compact_label(self) -> &'static str {
+        match self {
+            Self::CascadedSunShadows => "Sun shadow",
+            Self::VoxelAmbientOcclusion => "Voxel AO",
+            Self::ScreenSpaceAmbientOcclusion => "Contact AO",
+            Self::AtmosphericFog => "Fog",
+            Self::FarTerrain => "Far terrain",
+            Self::WaterSurface => "Water",
+            Self::TargetOutline => "Target",
+            Self::MaterialSurfaceDetail => "Surface detail",
+            Self::CaveHeadlamp => "Headlamp",
+            Self::VoxelEmissiveLights => "Voxel lights",
+        }
+    }
 }
 
 /// Configured baseline for every renderer feature exposed by Mission Control.
@@ -249,59 +261,15 @@ const fn feature_index(feature: RendererFeature) -> usize {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum ContextAction {
-    TeleportToCoast,
-    DiveBelowSurface,
-    ResetRendererFeatures,
-    ToggleCompactTelemetry,
-    CycleDaylight,
-    FollowPilgrimRoad,
-    VisitCinderVault,
-    VisitLandmark,
-    CyclePlacementMaterial,
-    CloseMissionControl,
-}
-
-impl ContextAction {
-    pub const ALL: [Self; 10] = [
-        Self::TeleportToCoast,
-        Self::DiveBelowSurface,
-        Self::ResetRendererFeatures,
-        Self::ToggleCompactTelemetry,
-        Self::CycleDaylight,
-        Self::FollowPilgrimRoad,
-        Self::VisitCinderVault,
-        Self::VisitLandmark,
-        Self::CyclePlacementMaterial,
-        Self::CloseMissionControl,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::TeleportToCoast => "Teleport to the coast",
-            Self::DiveBelowSurface => "Dive below the surface",
-            Self::ResetRendererFeatures => "Reset renderer features",
-            Self::ToggleCompactTelemetry => "Toggle compact telemetry",
-            Self::CycleDaylight => "Cycle regional daylight",
-            Self::FollowPilgrimRoad => "Follow pilgrim road",
-            Self::VisitCinderVault => "Visit Cinder Vault",
-            Self::VisitLandmark => "Visit next landmark",
-            Self::CyclePlacementMaterial => "Cycle placement material",
-            Self::CloseMissionControl => "Close mission control",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum UiTarget {
     Launcher,
     Header,
     CopyDiagnostics,
+    CycleDaylight,
+    ResetRendererFeatures,
     Close,
     Compact,
-    More,
     Feature(RendererFeature),
-    Context(ContextAction),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -314,12 +282,11 @@ pub enum UiKey {
 pub enum UiAction {
     None,
     CopyDiagnostics,
+    CycleDaylight,
+    ResetRendererFeatures,
     PanelOpenChanged(bool),
     CompactChanged(bool),
     FeatureChanged(RendererFeature, bool),
-    ContextMenuOpened,
-    ContextMenuClosed,
-    ContextAction(ContextAction),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -394,8 +361,6 @@ pub enum SurfaceRole {
     FeatureRow,
     ToggleTrack,
     ToggleThumb,
-    ContextMenu,
-    ContextRow,
 }
 
 /// Renderer-agnostic description of a translucent rounded surface.
@@ -449,7 +414,6 @@ pub struct UiLayout {
     pub compact: bool,
     pub regions: Vec<InteractiveRegion>,
     pub stat_cards: Vec<Rect>,
-    pub context_menu: Option<Rect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -508,7 +472,6 @@ pub struct MissionControlUi {
     compact: bool,
     reduced_motion: bool,
     hovered: Option<UiTarget>,
-    context_anchor: Option<[f32; 2]>,
     stats: LiveStats,
     feature_enabled: [bool; FEATURE_COUNT],
     feature_motion: [EasedValue; FEATURE_COUNT],
@@ -548,7 +511,6 @@ impl MissionControlUi {
             compact: config.compact,
             reduced_motion: false,
             hovered: None,
-            context_anchor: None,
             stats: LiveStats::default(),
             feature_enabled,
             feature_motion,
@@ -575,10 +537,6 @@ impl MissionControlUi {
 
     pub const fn compact(&self) -> bool {
         self.compact
-    }
-
-    pub const fn context_menu_open(&self) -> bool {
-        self.context_anchor.is_some()
     }
 
     pub const fn stats(&self) -> LiveStats {
@@ -643,7 +601,6 @@ impl MissionControlUi {
         self.open = open;
         self.open_motion.set(open, self.reduced_motion);
         if !open {
-            self.context_anchor = None;
             self.set_hover(None);
         }
         UiAction::PanelOpenChanged(open)
@@ -777,34 +734,42 @@ impl MissionControlUi {
             },
         ];
 
-        let button_y = header.y + (header.height - BUTTON_SIZE) * 0.5;
+        // Keep actions on the title row so environment and inventory status always have the full
+        // panel width below them. The previous vertically centred row overlapped both status lines.
+        let button_y = header.y + 7.0;
         let close = Rect::new(
             panel.x + panel.width - CONTENT_PAD - BUTTON_SIZE,
             button_y,
             BUTTON_SIZE,
             BUTTON_SIZE,
         );
-        let more = Rect::new(
-            close.x - BUTTON_GAP - BUTTON_SIZE,
+        let reset = Rect::new(
+            close.x - BUTTON_GAP - ACTION_BUTTON_WIDTH,
             button_y,
+            ACTION_BUTTON_WIDTH,
             BUTTON_SIZE,
+        );
+        let daylight = Rect::new(
+            reset.x - BUTTON_GAP - ACTION_BUTTON_WIDTH,
+            button_y,
+            ACTION_BUTTON_WIDTH,
             BUTTON_SIZE,
         );
         let compact_button = Rect::new(
-            more.x - BUTTON_GAP - BUTTON_SIZE,
+            daylight.x - BUTTON_GAP - BUTTON_SIZE,
             button_y,
             BUTTON_SIZE,
             BUTTON_SIZE,
         );
         let copy_right = if automatically_compact {
-            more.x
+            daylight.x
         } else {
             compact_button.x
         };
         let copy = Rect::new(
-            copy_right - BUTTON_GAP - COPY_BUTTON_WIDTH,
+            copy_right - BUTTON_GAP - ACTION_BUTTON_WIDTH,
             button_y,
-            COPY_BUTTON_WIDTH,
+            ACTION_BUTTON_WIDTH,
             BUTTON_SIZE,
         );
         regions.extend([
@@ -813,12 +778,16 @@ impl MissionControlUi {
                 rect: copy,
             },
             InteractiveRegion {
-                target: UiTarget::Close,
-                rect: close,
+                target: UiTarget::CycleDaylight,
+                rect: daylight,
             },
             InteractiveRegion {
-                target: UiTarget::More,
-                rect: more,
+                target: UiTarget::ResetRendererFeatures,
+                rect: reset,
+            },
+            InteractiveRegion {
+                target: UiTarget::Close,
+                rect: close,
             },
         ]);
         if !automatically_compact {
@@ -844,7 +813,8 @@ impl MissionControlUi {
         let stat_width = (panel.width - CONTENT_PAD * 2.0 - stat_gap * (stat_columns - 1) as f32)
             / stat_columns as f32;
         let stat_height = if compact { 44.0 } else { 50.0 };
-        let stat_count: usize = if compact { 6 } else { 8 };
+        let dense = compact || panel.height < 620.0;
+        let stat_count: usize = if dense { 6 } else { 8 };
         let stat_cards = (0..stat_count)
             .map(|index| {
                 let column = index % stat_columns;
@@ -860,13 +830,13 @@ impl MissionControlUi {
 
         let stats_rows = stat_count.div_ceil(stat_columns);
         let feature_top = stats_top + stats_rows as f32 * (stat_height + stat_gap) + 23.0;
-        let feature_columns: usize = if compact { 1 } else { 2 };
+        let feature_columns: usize = 2;
         let feature_rows = FEATURE_COUNT.div_ceil(feature_columns);
-        let feature_gap = if compact { 0.0 } else { 7.0 };
+        let feature_gap = 7.0;
         let feature_width =
             (panel.width - CONTENT_PAD * 2.0 - feature_gap * (feature_columns - 1) as f32)
                 / feature_columns as f32;
-        let nominal_feature_row_height: f32 = if compact { 34.0 } else { 38.0 };
+        let nominal_feature_row_height: f32 = 38.0;
         let available_feature_height =
             (panel.y + panel.height - CONTENT_PAD - feature_top).max(0.0);
         let feature_row_height = nominal_feature_row_height
@@ -886,29 +856,6 @@ impl MissionControlUi {
             });
         }
 
-        let context_menu = self.context_anchor.map(|anchor| {
-            let height = CONTEXT_PAD * 2.0 + CONTEXT_ROW_HEIGHT * ContextAction::ALL.len() as f32;
-            let x = anchor[0]
-                .min(viewport_width - CONTEXT_WIDTH - PANEL_INSET)
-                .max(PANEL_INSET.min(viewport_width - CONTEXT_WIDTH));
-            let y = anchor[1]
-                .min(viewport_height - height - PANEL_INSET)
-                .max(PANEL_INSET.min(viewport_height - height));
-            let menu = Rect::new(x, y, CONTEXT_WIDTH, height);
-            for (index, action) in ContextAction::ALL.into_iter().enumerate() {
-                regions.push(InteractiveRegion {
-                    target: UiTarget::Context(action),
-                    rect: Rect::new(
-                        menu.x + CONTEXT_PAD,
-                        menu.y + CONTEXT_PAD + index as f32 * CONTEXT_ROW_HEIGHT,
-                        menu.width - CONTEXT_PAD * 2.0,
-                        CONTEXT_ROW_HEIGHT,
-                    ),
-                });
-            }
-            menu
-        });
-
         UiLayout {
             launcher,
             inventory,
@@ -920,7 +867,6 @@ impl MissionControlUi {
             compact,
             regions,
             stat_cards,
-            context_menu,
         }
     }
 
@@ -931,16 +877,6 @@ impl MissionControlUi {
                 .regions
                 .iter()
                 .find(|region| region.target == UiTarget::Launcher && region.rect.contains(point))
-                .map(|region| region.target);
-        }
-        if layout.context_menu.is_some() {
-            return layout
-                .regions
-                .iter()
-                .rev()
-                .find(|region| {
-                    matches!(region.target, UiTarget::Context(_)) && region.rect.contains(point)
-                })
                 .map(|region| region.target);
         }
         layout
@@ -979,49 +915,16 @@ impl MissionControlUi {
         if !self.open {
             return UiAction::None;
         }
-        if self.context_anchor.is_some() {
-            return match self.hit_test_css(point, viewport) {
-                Some(UiTarget::Context(action)) => {
-                    self.context_anchor = None;
-                    self.set_hover(None);
-                    UiAction::ContextAction(action)
-                }
-                _ => {
-                    self.context_anchor = None;
-                    self.set_hover(None);
-                    UiAction::ContextMenuClosed
-                }
-            };
-        }
-
         match self.hit_test_css(point, viewport) {
             Some(UiTarget::Launcher) => self.toggle_open(),
             Some(UiTarget::CopyDiagnostics) => UiAction::CopyDiagnostics,
+            Some(UiTarget::CycleDaylight) => UiAction::CycleDaylight,
+            Some(UiTarget::ResetRendererFeatures) => UiAction::ResetRendererFeatures,
             Some(UiTarget::Close) => self.set_open(false),
             Some(UiTarget::Compact) => self.set_compact(!self.compact),
-            Some(UiTarget::More) => {
-                let layout = self.layout(viewport);
-                if let Some(rect) = layout.region(UiTarget::More) {
-                    self.context_anchor = Some([
-                        rect.x + rect.width - CONTEXT_WIDTH,
-                        rect.y + rect.height + 6.0,
-                    ]);
-                    UiAction::ContextMenuOpened
-                } else {
-                    UiAction::None
-                }
-            }
             Some(UiTarget::Feature(feature)) => self.toggle_feature(feature),
-            Some(UiTarget::Header | UiTarget::Context(_)) | None => UiAction::None,
+            Some(UiTarget::Header) | None => UiAction::None,
         }
-    }
-
-    pub fn open_context_menu_device(&mut self, point: [f32; 2], viewport: Viewport) -> UiAction {
-        if !self.open {
-            return UiAction::None;
-        }
-        self.context_anchor = Some(viewport.device_to_css(point));
-        UiAction::ContextMenuOpened
     }
 
     pub fn build_draw_list(&self, viewport: Viewport) -> UiDrawList {
@@ -1050,7 +953,11 @@ impl MissionControlUi {
         );
         push_text(
             &mut draw,
-            "VOXELS / MISSION CONTROL",
+            if layout.compact {
+                "MISSION CONTROL"
+            } else {
+                "VOXELS / MISSION CONTROL"
+            },
             [layout.panel.x + CONTENT_PAD, layout.header.y + 21.0],
             if layout.compact { 10.0 } else { 11.5 },
             TEXT_PRIMARY.with_alpha(opacity),
@@ -1075,20 +982,18 @@ impl MissionControlUi {
         };
         push_text(
             &mut draw,
-            format!(
-                "{} / {}%  ·  {}",
-                self.route_chapter_label, self.route_progress_percent, placement_status,
-            ),
+            placement_status,
             [layout.panel.x + CONTENT_PAD, layout.header.y + 66.0],
-            if layout.compact { 7.5 } else { 9.0 },
+            if layout.compact { 9.0 } else { 10.0 },
             ACCENT.with_alpha(opacity),
             TextAlign::Left,
         );
 
         for (target, label) in [
             (UiTarget::CopyDiagnostics, "COPY"),
+            (UiTarget::CycleDaylight, "TIME"),
+            (UiTarget::ResetRendererFeatures, "RESET"),
             (UiTarget::Compact, if layout.compact { ">" } else { "<" }),
-            (UiTarget::More, "..."),
             (UiTarget::Close, "x"),
         ] {
             if let Some(rect) = layout.region(target) {
@@ -1105,8 +1010,13 @@ impl MissionControlUi {
                     &mut draw,
                     label,
                     rect.center(),
-                    if target == UiTarget::CopyDiagnostics {
-                        9.0
+                    if matches!(
+                        target,
+                        UiTarget::CopyDiagnostics
+                            | UiTarget::CycleDaylight
+                            | UiTarget::ResetRendererFeatures
+                    ) {
+                        8.0
                     } else {
                         12.0
                     },
@@ -1118,7 +1028,7 @@ impl MissionControlUi {
 
         self.push_navigation(&mut draw, &layout, opacity);
 
-        let card_data = self.card_data(layout.compact);
+        let card_data = self.card_data(layout.compact, layout.stat_cards.len());
         for (rect, (label, value)) in layout.stat_cards.iter().copied().zip(card_data) {
             push_surface(
                 &mut draw,
@@ -1181,52 +1091,17 @@ impl MissionControlUi {
             );
             push_text(
                 &mut draw,
-                feature.label(),
+                if layout.compact {
+                    feature.compact_label()
+                } else {
+                    feature.label()
+                },
                 [rect.x + 10.0, rect.center()[1]],
-                if layout.compact { 10.5 } else { 11.5 },
+                if layout.compact { 9.5 } else { 11.5 },
                 TEXT_PRIMARY.with_alpha(opacity),
                 TextAlign::Left,
             );
             self.push_toggle(&mut draw, rect, feature, opacity);
-        }
-
-        if let Some(menu) = layout.context_menu {
-            // Glass and glyphs use separate GPU batches. Remove text anchored behind the modal
-            // surface so earlier panel labels cannot bleed through after the glass batch finishes.
-            draw.text.retain(|run| !menu.contains(run.position));
-            push_surface(
-                &mut draw,
-                menu,
-                12.0,
-                Color::new(0.025, 0.034, 0.052, 0.98).with_alpha(opacity),
-                PANEL_BORDER.with_alpha(opacity),
-                SurfaceRole::ContextMenu,
-            );
-            for action in ContextAction::ALL {
-                let target = UiTarget::Context(action);
-                let Some(rect) = layout.region(target) else {
-                    continue;
-                };
-                let hover = self.hover_eased_value(target);
-                push_surface(
-                    &mut draw,
-                    rect,
-                    7.0,
-                    Color::new(0.045, 0.060, 0.090, 0.97)
-                        .mix(HOVER_COLOR, hover)
-                        .with_alpha(opacity),
-                    PANEL_BORDER.with_alpha(opacity * hover),
-                    SurfaceRole::ContextRow,
-                );
-                push_text(
-                    &mut draw,
-                    action.label(),
-                    [rect.x + 10.0, rect.center()[1]],
-                    10.5,
-                    TEXT_PRIMARY.with_alpha(opacity),
-                    TextAlign::Left,
-                );
-            }
         }
         draw
     }
@@ -1316,7 +1191,11 @@ impl MissionControlUi {
     }
 
     fn push_chrome(&self, draw: &mut UiDrawList, layout: &UiLayout) {
-        self.push_inventory_wheel(draw, layout.inventory);
+        // The wheel is gameplay chrome, while its selected item is already summarized in the
+        // Mission Control header. Hiding it behind the modal prevents overlap on narrow screens.
+        if !self.open {
+            self.push_inventory_wheel(draw, layout.inventory);
+        }
 
         let toast_alpha = if self.toast_age <= TOAST_HOLD_SECONDS {
             1.0
@@ -1493,7 +1372,7 @@ impl MissionControlUi {
         );
     }
 
-    fn card_data(&self, compact: bool) -> Vec<(&'static str, String)> {
+    fn card_data(&self, compact: bool, card_count: usize) -> Vec<(&'static str, String)> {
         let stats = self.stats;
         if compact {
             vec![
@@ -1515,7 +1394,7 @@ impl MissionControlUi {
                 ("GPU MEMORY", compact_bytes(stats.core_gpu_bytes)),
             ]
         } else {
-            vec![
+            let mut cards = vec![
                 (
                     "FRAME RATE",
                     format!(
@@ -1547,30 +1426,35 @@ impl MissionControlUi {
                         stats.draw_calls,
                     ),
                 ),
-                (
+            ];
+            if card_count > 6 {
+                cards.push((
                     "LOD TILES 0 → 5",
                     stats
                         .lod_tiles
                         .map(u64::from)
                         .map(compact_count)
                         .join(" · "),
+                ));
+            }
+            cards.extend([(
+                "JOBS / EDITS",
+                format!(
+                    "{} pending · {} in flight",
+                    stats.pending_jobs, stats.edit_in_flight,
                 ),
-                (
-                    "JOBS / EDITS",
-                    format!(
-                        "{} pending · {} in flight",
-                        stats.pending_jobs, stats.edit_in_flight,
-                    ),
-                ),
-                (
+            )]);
+            if card_count > 6 {
+                cards.push((
                     "LATENCY P95",
                     format!(
                         "load {} f · remesh {} f",
                         stats.load_p95_frames, stats.remesh_p95_frames,
                     ),
-                ),
-                ("GPU MEMORY", compact_bytes(stats.core_gpu_bytes)),
-            ]
+                ));
+            }
+            cards.push(("GPU MEMORY", compact_bytes(stats.core_gpu_bytes)));
+            cards
         }
     }
 
@@ -2007,6 +1891,26 @@ mod tests {
     }
 
     #[test]
+    fn explicit_header_actions_are_hit_testable_without_a_secondary_menu() {
+        let viewport = viewport();
+        for (target, expected) in [
+            (UiTarget::CycleDaylight, UiAction::CycleDaylight),
+            (
+                UiTarget::ResetRendererFeatures,
+                UiAction::ResetRendererFeatures,
+            ),
+        ] {
+            let mut ui = opened();
+            let center = ui
+                .layout(viewport)
+                .region(target)
+                .expect("header action")
+                .center();
+            assert_eq!(ui.activate_css(center, viewport), expected);
+        }
+    }
+
+    #[test]
     fn desktop_layout_reserves_legible_navigation_and_two_column_cards() {
         let layout = opened().layout(viewport());
         assert_eq!(layout.panel.width, PANEL_WIDTH);
@@ -2022,8 +1926,9 @@ mod tests {
 
         let buttons = [
             UiTarget::CopyDiagnostics,
+            UiTarget::CycleDaylight,
+            UiTarget::ResetRendererFeatures,
             UiTarget::Compact,
-            UiTarget::More,
             UiTarget::Close,
         ]
         .map(|target| layout.region(target).expect("header action"));
@@ -2185,11 +2090,23 @@ mod tests {
         let layout = opened().layout(viewport);
 
         assert!(layout.launcher.y + layout.launcher.height < layout.panel.y);
-        for rect in [layout.launcher, layout.inventory] {
+        for rect in [
+            layout.launcher,
+            layout.inventory,
+            layout.panel,
+            layout.header,
+            layout.navigation,
+        ] {
             assert!(rect.x >= 0.0 && rect.y >= 0.0);
             assert!(rect.x + rect.width <= viewport.css_size()[0]);
             assert!(rect.y + rect.height <= viewport.css_size()[1]);
         }
+        assert!(layout.stat_cards.iter().all(|rect| {
+            rect.x >= layout.panel.x
+                && rect.y >= layout.panel.y
+                && rect.x + rect.width <= layout.panel.x + layout.panel.width
+                && rect.y + rect.height <= layout.panel.y + layout.panel.height
+        }));
     }
 
     #[test]
@@ -2209,51 +2126,14 @@ mod tests {
                     assert!(row.y >= layout.panel.y);
                     assert!(row.x + row.width <= layout.panel.x + layout.panel.width);
                     assert!(row.y + row.height <= layout.panel.y + layout.panel.height);
+                    assert!(row.height >= 24.0);
                 }
             }
         }
     }
 
     #[test]
-    fn context_menu_clamps_to_viewport_and_routes_rows() {
-        let mut ui = opened();
-        let viewport = viewport();
-        assert_eq!(
-            ui.open_context_menu_device([1_279.0, 719.0], viewport),
-            UiAction::ContextMenuOpened
-        );
-        let layout = ui.layout(viewport);
-        let menu = layout.context_menu;
-        assert!(menu.is_some());
-        if let Some(menu) = menu {
-            assert!(menu.x + menu.width <= viewport.css_size()[0]);
-            assert!(menu.y + menu.height <= viewport.css_size()[1]);
-        }
-        let action = ContextAction::ToggleCompactTelemetry;
-        let center = layout.region(UiTarget::Context(action)).map(Rect::center);
-        if let Some(center) = center {
-            assert_eq!(
-                ui.activate_css(center, viewport),
-                UiAction::ContextAction(action)
-            );
-        }
-        assert!(!ui.context_menu_open());
-    }
-
-    #[test]
-    fn clicking_outside_context_menu_dismisses_without_action() {
-        let mut ui = opened();
-        let viewport = viewport();
-        let _ = ui.open_context_menu_device([400.0, 300.0], viewport);
-        assert_eq!(
-            ui.activate_css([2.0, 2.0], viewport),
-            UiAction::ContextMenuClosed
-        );
-        assert!(!ui.context_menu_open());
-    }
-
-    #[test]
-    fn draw_list_has_reusable_glass_text_cards_toggles_and_menu_rows() {
+    fn draw_list_has_reusable_glass_text_cards_and_toggles() {
         let mut ui = opened();
         ui.set_reduced_motion(true);
         ui.set_route_status("WINDCUT WAY", 47);
@@ -2359,11 +2239,18 @@ mod tests {
         assert!(
             base.text
                 .iter()
-                .any(|run| run.text == "WINDCUT WAY / 47%  ·  PLACE GLOW CRYSTAL ×27")
+                .any(|run| run.text == "PLACE GLOW CRYSTAL ×27")
         );
-        assert!(base.text.iter().any(|run| run.text == "GLOW CRYSTAL"));
-        assert!(base.text.iter().any(|run| run.text == "27"));
-        let inventory_orbs = base
+        let _ = ui.set_open(false);
+        let inventory_draw = ui.build_draw_list(viewport());
+        assert!(
+            inventory_draw
+                .text
+                .iter()
+                .any(|run| run.text == "GLOW CRYSTAL")
+        );
+        assert!(inventory_draw.text.iter().any(|run| run.text == "27"));
+        let inventory_orbs = inventory_draw
             .glass
             .iter()
             .filter(|surface| surface.role == SurfaceRole::InventoryOrb)
@@ -2375,7 +2262,7 @@ mod tests {
                 .any(|surface| surface.rect.width == 50.0)
         );
 
-        let _ = ui.open_context_menu_device([900.0, 80.0], viewport());
+        let _ = ui.set_open(true);
         let draw = ui.build_draw_list(viewport());
         assert!(
             draw.glass
@@ -2396,34 +2283,9 @@ mod tests {
                 .count(),
             RendererFeature::ALL.len()
         );
-        assert_eq!(
-            draw.glass
-                .iter()
-                .filter(|surface| surface.role == SurfaceRole::ContextRow)
-                .count(),
-            ContextAction::ALL.len()
-        );
-        assert!(
-            draw.text
-                .iter()
-                .any(|run| run.text == "Visit next landmark")
-        );
-        assert!(
-            draw.text
-                .iter()
-                .any(|run| run.text == "Follow pilgrim road")
-        );
-        assert!(draw.text.iter().any(|run| run.text == "Visit Cinder Vault"));
-        assert!(
-            draw.text
-                .iter()
-                .any(|run| run.text == "Cycle regional daylight")
-        );
-        assert!(
-            draw.text
-                .iter()
-                .any(|run| run.text == "Cycle placement material")
-        );
+        assert!(draw.text.iter().any(|run| run.text == "COPY"));
+        assert!(draw.text.iter().any(|run| run.text == "TIME"));
+        assert!(draw.text.iter().any(|run| run.text == "RESET"));
         assert!(!draw.text.iter().any(|run| run.text == "CPU / GPU"));
     }
 

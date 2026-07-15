@@ -1476,11 +1476,15 @@ mod web {
                             self.touch_inventory_drag.set(None);
                         }
                         let was_open = self.renderer.borrow().ui_open();
-                        let is_open = self.renderer.borrow_mut().handle_ui_pointer_down(
-                            record.x,
-                            record.y,
-                            record.buttons & 2 != 0,
-                        );
+                        // Mission Control has no secondary-click behavior. Ignore right clicks
+                        // while it is open instead of turning them into accidental button presses.
+                        let is_open = if was_open && record.buttons & 2 != 0 {
+                            true
+                        } else {
+                            self.renderer
+                                .borrow_mut()
+                                .handle_ui_pointer_down(record.x, record.y)
+                        };
                         if !was_open && !is_open {
                             self.edit_target(record.buttons);
                         }
@@ -1552,46 +1556,7 @@ mod web {
                     _ => {}
                 }
             }
-            if self.renderer.borrow_mut().take_coast_teleport_request() {
-                self.teleport_to_coast();
-            }
-            if self
-                .renderer
-                .borrow_mut()
-                .take_underwater_teleport_request()
-            {
-                self.teleport_underwater();
-            }
-            if self.renderer.borrow_mut().take_landmark_teleport_request() {
-                self.teleport_to_next_landmark();
-            }
-            if self.renderer.borrow_mut().take_route_teleport_request() {
-                self.teleport_to_next_route_mark();
-            }
-            if self.renderer.borrow_mut().take_cave_teleport_request() {
-                self.teleport_to_cinder_vault();
-            }
             self.renderer.borrow().ui_open()
-        }
-
-        fn teleport_to_cinder_vault(&self) {
-            log_gpu_error("Cinder Vault is not advertised by the world service");
-        }
-
-        fn teleport_to_next_route_mark(&self) {
-            log_gpu_error("authored routes are not advertised by the world service");
-        }
-
-        fn teleport_to_next_landmark(&self) {
-            log_gpu_error("skyline landmarks are not advertised by the world service");
-        }
-
-        fn teleport_to_coast(&self) {
-            log_gpu_error("surface search is not available in VXWP v2");
-        }
-
-        fn teleport_underwater(&self) {
-            log_gpu_error("surface search is not available in VXWP v2");
         }
 
         fn edit_target(&self, buttons: u16) {

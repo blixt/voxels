@@ -171,7 +171,7 @@ impl GlassInstance {
         let style = match surface.role {
             SurfaceRole::Crosshair => 4.0,
             SurfaceRole::InventoryOrb => 5.0,
-            SurfaceRole::Panel | SurfaceRole::ContextMenu => 1.0,
+            SurfaceRole::Panel => 1.0,
             SurfaceRole::ToggleThumb => 3.0,
             SurfaceRole::Launcher
             | SurfaceRole::Inventory
@@ -181,8 +181,7 @@ impl GlassInstance {
             | SurfaceRole::Button
             | SurfaceRole::StatCard
             | SurfaceRole::FeatureRow
-            | SurfaceRole::ToggleTrack
-            | SurfaceRole::ContextRow => 2.0,
+            | SurfaceRole::ToggleTrack => 2.0,
         };
         Self {
             rect: [

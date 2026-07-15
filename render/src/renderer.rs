@@ -11,8 +11,7 @@ use crate::shadow::{
     build_directional_shadow_cascades,
 };
 use crate::ui::{
-    Color, ContextAction, InventoryItem, LiveStats, MissionControlUi, RendererFeature, UiAction,
-    UiKey, Viewport,
+    Color, InventoryItem, LiveStats, MissionControlUi, RendererFeature, UiAction, UiKey, Viewport,
 };
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
 use crate::ui_gpu::{SCENE_FORMAT, UiGpu, texture_sampler_layout};
@@ -849,11 +848,6 @@ pub struct Renderer {
     log_error: fn(&str),
     ui_text_error_reported: bool,
     diagnostics_copy_requested: bool,
-    coast_teleport_requested: bool,
-    underwater_teleport_requested: bool,
-    route_teleport_requested: bool,
-    cave_teleport_requested: bool,
-    landmark_teleport_requested: bool,
     underwater_blend: f32,
     interior: InteriorEnvironment,
     interior_target: InteriorEnvironment,
@@ -1610,11 +1604,6 @@ impl Renderer {
             log_error,
             ui_text_error_reported: false,
             diagnostics_copy_requested: false,
-            coast_teleport_requested: false,
-            underwater_teleport_requested: false,
-            route_teleport_requested: false,
-            cave_teleport_requested: false,
-            landmark_teleport_requested: false,
             underwater_blend: 0.0,
             interior: InteriorEnvironment::default(),
             interior_target: InteriorEnvironment::default(),
@@ -1787,26 +1776,6 @@ impl Renderer {
         self.target_voxel
     }
 
-    pub fn take_coast_teleport_request(&mut self) -> bool {
-        std::mem::take(&mut self.coast_teleport_requested)
-    }
-
-    pub fn take_underwater_teleport_request(&mut self) -> bool {
-        std::mem::take(&mut self.underwater_teleport_requested)
-    }
-
-    pub fn take_route_teleport_request(&mut self) -> bool {
-        std::mem::take(&mut self.route_teleport_requested)
-    }
-
-    pub fn take_cave_teleport_request(&mut self) -> bool {
-        std::mem::take(&mut self.cave_teleport_requested)
-    }
-
-    pub fn take_landmark_teleport_request(&mut self) -> bool {
-        std::mem::take(&mut self.landmark_teleport_requested)
-    }
-
     pub const fn placement_material(&self) -> Option<Material> {
         self.placement_inventory.selected()
     }
@@ -1877,14 +1846,10 @@ impl Renderer {
             .pointer_move_device([css_x * self.dpr, css_y * self.dpr], viewport)
     }
 
-    pub fn handle_ui_pointer_down(&mut self, css_x: f32, css_y: f32, secondary: bool) -> bool {
+    pub fn handle_ui_pointer_down(&mut self, css_x: f32, css_y: f32) -> bool {
         let viewport = self.ui_viewport();
         let point = [css_x * self.dpr, css_y * self.dpr];
-        let action = if secondary && self.ui.open() {
-            self.ui.open_context_menu_device(point, viewport)
-        } else {
-            self.ui.activate_device(point, viewport)
-        };
+        let action = self.ui.activate_device(point, viewport);
         self.apply_ui_action(action);
         self.ui.open()
     }
@@ -1907,6 +1872,18 @@ impl Renderer {
             UiAction::CopyDiagnostics => {
                 self.diagnostics_copy_requested = true;
             }
+            UiAction::CycleDaylight => {
+                self.daylight_phase = self.daylight_phase.next();
+                self.environment_target =
+                    OutdoorEnvironment::for_atmosphere(self.atmosphere_sample, self.daylight_phase);
+                self.ui.set_environment_status(
+                    self.daylight_phase.label(),
+                    surface_region_label(self.surface_region),
+                );
+            }
+            UiAction::ResetRendererFeatures => {
+                self.options = reset_renderer_features(&mut self.ui, self.runtime_config.features);
+            }
             UiAction::FeatureChanged(feature, enabled) => match feature {
                 RendererFeature::CascadedSunShadows => self.options.shadows = enabled,
                 RendererFeature::VoxelAmbientOcclusion => {
@@ -1923,47 +1900,7 @@ impl Renderer {
                 RendererFeature::CaveHeadlamp => self.options.cave_headlamp = enabled,
                 RendererFeature::VoxelEmissiveLights => self.options.local_lighting = enabled,
             },
-            UiAction::ContextAction(ContextAction::ResetRendererFeatures) => {
-                self.options = reset_renderer_features(&mut self.ui, self.runtime_config.features);
-            }
-            UiAction::ContextAction(ContextAction::TeleportToCoast) => {
-                self.coast_teleport_requested = true;
-            }
-            UiAction::ContextAction(ContextAction::DiveBelowSurface) => {
-                self.underwater_teleport_requested = true;
-            }
-            UiAction::ContextAction(ContextAction::ToggleCompactTelemetry) => {
-                let _ = self.ui.set_compact(!self.ui.compact());
-            }
-            UiAction::ContextAction(ContextAction::CycleDaylight) => {
-                self.daylight_phase = self.daylight_phase.next();
-                self.environment_target =
-                    OutdoorEnvironment::for_atmosphere(self.atmosphere_sample, self.daylight_phase);
-                self.ui.set_environment_status(
-                    self.daylight_phase.label(),
-                    surface_region_label(self.surface_region),
-                );
-            }
-            UiAction::ContextAction(ContextAction::FollowPilgrimRoad) => {
-                self.route_teleport_requested = true;
-            }
-            UiAction::ContextAction(ContextAction::VisitCinderVault) => {
-                self.cave_teleport_requested = true;
-            }
-            UiAction::ContextAction(ContextAction::VisitLandmark) => {
-                self.landmark_teleport_requested = true;
-            }
-            UiAction::ContextAction(ContextAction::CyclePlacementMaterial) => {
-                let _ = self.cycle_placement_material(1);
-            }
-            UiAction::ContextAction(ContextAction::CloseMissionControl) => {
-                let _ = self.ui.set_open(false);
-            }
-            UiAction::None
-            | UiAction::PanelOpenChanged(_)
-            | UiAction::CompactChanged(_)
-            | UiAction::ContextMenuOpened
-            | UiAction::ContextMenuClosed => {}
+            UiAction::None | UiAction::PanelOpenChanged(_) | UiAction::CompactChanged(_) => {}
         }
     }
 
