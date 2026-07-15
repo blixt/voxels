@@ -23,6 +23,8 @@ export async function prepareBrowserWorldFixture({
   prefix = "voxels-browser-world-",
   source = "procedural-v16",
   spawnVoxels,
+  cascadedShadows,
+  screenSpaceAmbientOcclusion,
 }) {
   if (!Number.isInteger(browserPort) || browserPort <= 0 || browserPort > 65_535) {
     throw new Error("browser fixture port must be in 1..=65535");
@@ -36,6 +38,15 @@ export async function prepareBrowserWorldFixture({
       ))
   ) {
     throw new Error("browser fixture spawnVoxels must contain two signed 32-bit integers");
+  }
+  if (cascadedShadows !== undefined && typeof cascadedShadows !== "boolean") {
+    throw new Error("browser fixture cascadedShadows must be boolean when provided");
+  }
+  if (
+    screenSpaceAmbientOcclusion !== undefined &&
+    typeof screenSpaceAmbientOcclusion !== "boolean"
+  ) {
+    throw new Error("browser fixture screenSpaceAmbientOcclusion must be boolean when provided");
   }
   const directory = await mkdtemp(path.join(tmpdir(), prefix));
   try {
@@ -73,7 +84,15 @@ export async function prepareBrowserWorldFixture({
             `presence_endpoint = "ws://127.0.0.1:${backendPort}${PRESENCE_PATH}"`,
           )
           .replace(/^subprotocol = .*$/m, `subprotocol = "${WORLD_SUBPROTOCOL}"`)
-          .replace(/^auth_subprotocol_token = .*$/m, `auth_subprotocol_token = "${authToken}"`),
+          .replace(/^auth_subprotocol_token = .*$/m, `auth_subprotocol_token = "${authToken}"`)
+          .replace(
+            /^cascaded_sun_shadows = .*$/m,
+            `cascaded_sun_shadows = ${cascadedShadows ?? true}`,
+          )
+          .replace(
+            /^screen_space_ambient_occlusion = .*$/m,
+            `screen_space_ambient_occlusion = ${screenSpaceAmbientOcclusion ?? true}`,
+          ),
       ),
     ]);
 
@@ -93,6 +112,8 @@ export async function prepareBrowserWorldFixture({
       serviceConfigPath,
       databasePath: path.join(directory, "world-state.sqlite3"),
       spawnVoxels: spawnVoxels ?? [0, 0],
+      cascadedShadows: cascadedShadows ?? true,
+      screenSpaceAmbientOcclusion: screenSpaceAmbientOcclusion ?? true,
       async cleanup() {
         if (cleaned) return;
         cleaned = true;

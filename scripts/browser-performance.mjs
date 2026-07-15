@@ -510,6 +510,31 @@ async function waitForEngine(page) {
   throw new Error(`release engine did not settle: ${JSON.stringify(lastSnapshot)}`);
 }
 
+async function setCameraLook(page, targetYaw, targetPitch) {
+  const sensitivity = 0.0022;
+  const current = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
+  const wrappedYawDelta = Math.atan2(
+    Math.sin(targetYaw - current[SNAPSHOT.yaw]),
+    Math.cos(targetYaw - current[SNAPSHOT.yaw]),
+  );
+  await page.evaluate(({ deltaX, deltaY }) => globalThis.__VOXELS__.look(deltaX, deltaY), {
+    deltaX: wrappedYawDelta / sensitivity,
+    deltaY: (current[SNAPSHOT.pitch] - targetPitch) / sensitivity,
+  });
+  await page.waitForFunction(
+    async ({ yaw, pitch, yawIndex, pitchIndex }) => {
+      const snapshot = await globalThis.__VOXELS__.snapshot();
+      const yawError = Math.atan2(
+        Math.sin(snapshot[yawIndex] - yaw),
+        Math.cos(snapshot[yawIndex] - yaw),
+      );
+      return Math.abs(yawError) < 0.001 && Math.abs(snapshot[pitchIndex] - pitch) < 0.001;
+    },
+    { yaw: targetYaw, pitch: targetPitch, yawIndex: SNAPSHOT.yaw, pitchIndex: SNAPSHOT.pitch },
+    { timeout: 5_000 },
+  );
+}
+
 const viewport = {
   width: Number.parseInt(process.env.VOXELS_PROFILE_WIDTH ?? "1280", 10),
   height: Number.parseInt(process.env.VOXELS_PROFILE_HEIGHT ?? "720", 10),
@@ -529,6 +554,7 @@ if (
 const sustained = process.argv.includes("--sustained");
 const materials = process.argv.includes("--materials");
 const atmosphere = process.argv.includes("--atmosphere");
+const stationary = process.argv.includes("--stationary");
 const worldSource = process.env.VOXELS_PROFILE_SOURCE ?? "procedural-v16";
 const spawnVoxels = (() => {
   const configured = process.env.VOXELS_PROFILE_SPAWN;
@@ -545,6 +571,32 @@ const spawnVoxels = (() => {
     throw new Error("VOXELS_PROFILE_SPAWN must be two comma-separated canonical voxel coordinates");
   }
   return values;
+})();
+const cameraLook = (() => {
+  const configured = process.env.VOXELS_PROFILE_LOOK;
+  if (configured === undefined) return undefined;
+  const values = configured.split(",").map((value) => Number(value.trim()));
+  if (
+    values.length !== 2 ||
+    !values.every(Number.isFinite) ||
+    values[1] < -Math.PI / 2 ||
+    values[1] > Math.PI / 2
+  ) {
+    throw new Error("VOXELS_PROFILE_LOOK must be finite comma-separated yaw,pitch radians");
+  }
+  return values;
+})();
+const cascadedShadows = (() => {
+  const configured = process.env.VOXELS_PROFILE_SHADOWS;
+  if (configured === undefined || configured === "on") return true;
+  if (configured === "off") return false;
+  throw new Error("VOXELS_PROFILE_SHADOWS must be on or off");
+})();
+const screenSpaceAmbientOcclusion = (() => {
+  const configured = process.env.VOXELS_PROFILE_SSAO;
+  if (configured === undefined || configured === "on") return true;
+  if (configured === "off") return false;
+  throw new Error("VOXELS_PROFILE_SSAO must be on or off");
 })();
 const buildProfile = process.env.VOXELS_PROFILE_BUILD ?? "release";
 if (!new Set(["debug", "wasm-dev", "release"]).has(buildProfile)) {
@@ -583,6 +635,8 @@ try {
     prefix: "voxels-browser-profile-",
     source: worldSource,
     spawnVoxels,
+    cascadedShadows,
+    screenSpaceAmbientOcclusion,
   });
   const { build, preview } = await import("vite-plus");
   await build({ logLevel: "warn" });
@@ -600,11 +654,14 @@ try {
   const navigationStarted = performance.now();
   await page.goto(`http://127.0.0.1:${port}`, { waitUntil: "domcontentloaded" });
   await waitForEngine(page);
+  if (cameraLook) await setCameraLook(page, cameraLook[0], cameraLook[1]);
   const settledMilliseconds = performance.now() - navigationStarted;
   if (traceEnabled) traceSession = await startChromiumTrace(context, page);
 
   let scenarios;
-  if (sustained) {
+  if (stationary) {
+    scenarios = { steady: phaseSummary(await sample(page, 4_000)) };
+  } else if (sustained) {
     scenarios = { sustained: await sustainedProfile(page) };
   } else if (materials) {
     scenarios = { materials: await materialDetailProfile(page, viewport.width) };
@@ -625,6 +682,7 @@ try {
   if (process.env.SCREENSHOT) {
     await page.screenshot({ path: process.env.SCREENSHOT });
   }
+  const finalSnapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
 
   if (errors.length > 0) throw new Error(errors.join("\n"));
   if (traceSession) {
@@ -633,12 +691,22 @@ try {
   }
   const result = {
     ok: true,
-    schemaVersion: 2,
+    schemaVersion: 3,
     commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
     dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "",
     build: buildProfile,
     worldSource,
     spawnVoxels: fixture.spawnVoxels,
+    requestedLook: cameraLook ?? null,
+    cascadedShadows,
+    screenSpaceAmbientOcclusion,
+    finalPose: {
+      x: finalSnapshot[SNAPSHOT.cameraX],
+      y: finalSnapshot[SNAPSHOT.cameraY],
+      z: finalSnapshot[SNAPSHOT.cameraZ],
+      yaw: finalSnapshot[SNAPSHOT.yaw],
+      pitch: finalSnapshot[SNAPSHOT.pitch],
+    },
     viewport: { ...viewport, deviceScaleFactor },
     browser: { version: browser.version() },
     startup: { settledMilliseconds },

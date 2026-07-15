@@ -11,6 +11,8 @@ describe("isolated browser world fixture", () => {
     const fixture = await prepareBrowserWorldFixture({
       browserPort: 41_234,
       spawnVoxels: [-12_800, 25_600],
+      cascadedShadows: false,
+      screenSpaceAmbientOcclusion: false,
     });
     try {
       const [client, service] = await Promise.all([
@@ -23,6 +25,8 @@ describe("isolated browser world fixture", () => {
       );
       expect(client).toContain(`subprotocol = "${WORLD_SUBPROTOCOL}"`);
       expect(client).toContain(`auth_subprotocol_token = "${fixture.authToken}"`);
+      expect(client).toContain("cascaded_sun_shadows = false");
+      expect(client).toContain("screen_space_ambient_occlusion = false");
       expect(service).toContain('source = "procedural-v16"');
       expect(service).toContain(`listen = "127.0.0.1:${fixture.backendPort}"`);
       expect(service).toContain('allowed_origins = ["http://127.0.0.1:41234"]');
@@ -30,6 +34,8 @@ describe("isolated browser world fixture", () => {
       expect(service).toContain('database = "world-state.sqlite3"');
       expect(service).toContain("xz_voxels = [-12800, 25600]");
       expect(fixture.spawnVoxels).toEqual([-12_800, 25_600]);
+      expect(fixture.cascadedShadows).toBe(false);
+      expect(fixture.screenSpaceAmbientOcclusion).toBe(false);
       expect(fixture.databasePath.startsWith(fixture.directory)).toBe(true);
       expect(process.env.VOXELS_CLIENT_CONFIG_PATH).toBe(fixture.clientConfigPath);
       expect(process.env.VOXELS_WORLD_SERVICE_CONFIG_PATH).toBe(fixture.serviceConfigPath);

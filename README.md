@@ -61,8 +61,10 @@ queries and authored locations.
 performance trace under `target/`. Set `VOXELS_PROFILE_BUILD=wasm-dev`,
 `VOXELS_PROFILE_SOURCE=terrain-diffusion-30m`, `VOXELS_PROFILE_DPR=2`,
 `VOXELS_PROFILE_SPAWN=-12800,25600`,
+`VOXELS_PROFILE_LOOK=2.07,-0.37`, `VOXELS_PROFILE_SHADOWS=off`, `VOXELS_PROFILE_SSAO=off`,
 `VOXELS_PROFILE_OUTPUT=target/render-profile/result.json`, or `VOXELS_PROFILE_TRACE_PATH=...` to
 reproduce a particular local configuration without touching an existing browser or its OPFS data.
+Pass `--stationary` to capture and measure that exact spawn/look pose without traversal.
 `vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step closed rail. One lap warms the exact
 terrain used by two measured laps, making its arena-plateau gate prove allocation reuse before every
 canonical and LOD queue must drain.
