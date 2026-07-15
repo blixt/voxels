@@ -59,6 +59,7 @@ const PLACEMENT_MATERIALS: [Material; Material::ALL.len() - 1] = [
 const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 const FAR_MATERIAL_FLAG: u32 = 1 << 31;
 const SURFACE_LOD_SHIFT: u32 = 27;
+const SURFACE_MACRO_NORMAL_FLAG: u32 = 1 << 24;
 const FAR_UNDERLAY_OFFSET_METRES: f32 = 0.025;
 const GPU_QUERY_COUNT: u32 = 18;
 const GPU_QUERY_BUFFER_BYTES: u64 = GPU_QUERY_COUNT as u64 * size_of::<u64>() as u64;
@@ -1825,10 +1826,12 @@ impl Renderer {
             return true;
         }
         let underlay_offset = FAR_UNDERLAY_OFFSET_METRES * (f32::from(coord.level.index()) + 1.0);
+        let macro_normals = surface_macro_normals(tile);
         let gpu_quads: Vec<_> = tile
             .quads
             .iter()
-            .map(|quad| GpuQuad {
+            .zip(macro_normals)
+            .map(|(quad, macro_normal)| GpuQuad {
                 origin: [
                     quad.origin[0] as f32 * VOXEL_SIZE_METRES,
                     quad.origin[1] as f32 * VOXEL_SIZE_METRES - underlay_offset,
@@ -1842,7 +1845,7 @@ impl Renderer {
                 material: u32::from(quad.material.id())
                     | FAR_MATERIAL_FLAG
                     | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
-                ao: 0xff,
+                ao: macro_normal,
             })
             .collect();
         let water_gpu_quads: Vec<_> = water
@@ -2732,6 +2735,83 @@ fn commit_prepared_mesh(
     }
 }
 
+fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
+    let stride = tile.coord.stride_voxels();
+    let span = tile.coord.voxel_span();
+    let [origin_x, origin_z] = tile.coord.voxel_origin();
+    let edge = voxels_world::SURFACE_TILE_EDGE_CELLS as usize;
+    let mut heights = vec![None::<(i32, usize)>; edge * edge];
+    for (quad_index, quad) in tile.quads.iter().enumerate() {
+        let local_x = i64::from(quad.origin[0]) - i64::from(origin_x);
+        let local_z = i64::from(quad.origin[2]) - i64::from(origin_z);
+        let is_base_top = quad.face == 2
+            && quad.extent == [stride as u16; 2]
+            && local_x >= 0
+            && local_z >= 0
+            && local_x < i64::from(span)
+            && local_z < i64::from(span)
+            && local_x % i64::from(stride) == 0
+            && local_z % i64::from(stride) == 0;
+        if is_base_top {
+            // Base terrain is emitted before skyline proxies. Retaining the first value prevents
+            // an aligned proxy cap from replacing the terrain sample underneath it.
+            let cell_x = (local_x / i64::from(stride)) as usize;
+            let cell_z = (local_z / i64::from(stride)) as usize;
+            let cell = cell_x + cell_z * edge;
+            if heights[cell].is_none() {
+                heights[cell] = Some((quad.origin[1], quad_index));
+            }
+        }
+    }
+
+    let mut packed = vec![0xff; tile.quads.len()];
+    let height_at = |x: usize, z: usize| heights[x + z * edge].map(|sample| sample.0);
+    for z in 0..edge {
+        for x in 0..edge {
+            let Some((height, quad_index)) = heights[x + z * edge] else {
+                continue;
+            };
+            let left = x.checked_sub(1).and_then(|x| height_at(x, z));
+            let right = (x + 1 < edge).then(|| height_at(x + 1, z)).flatten();
+            let back = z.checked_sub(1).and_then(|z| height_at(x, z));
+            let front = (z + 1 < edge).then(|| height_at(x, z + 1)).flatten();
+            let slope_x = sampled_surface_slope(height, left, right, stride);
+            let slope_z = sampled_surface_slope(height, back, front, stride);
+            let mut horizontal = glam::Vec2::new(slope_x, slope_z);
+            let horizontal_length = horizontal.length();
+            if horizontal_length > 1.25 {
+                horizontal *= 1.25 / horizontal_length;
+            }
+            let normal = glam::Vec3::new(-horizontal.x, 1.0, -horizontal.y).normalize();
+            let encode =
+                |component: f32| ((component.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u32;
+            let value = 0xff
+                | (encode(normal.x) << 8)
+                | (encode(normal.z) << 16)
+                | SURFACE_MACRO_NORMAL_FLAG;
+            packed[quad_index] = value;
+        }
+    }
+    packed
+}
+
+fn sampled_surface_slope(
+    center: i32,
+    negative: Option<i32>,
+    positive: Option<i32>,
+    stride: i32,
+) -> f32 {
+    let delta = |from: i32, to: i32, distance: i32| {
+        (i64::from(to) - i64::from(from)) as f32 / distance as f32
+    };
+    match (negative, positive) {
+        (Some(negative), Some(positive)) => delta(negative, positive, 2 * stride),
+        (Some(negative), None) => delta(negative, center, stride),
+        (None, Some(positive)) => delta(center, positive, stride),
+        (None, None) => 0.0,
+    }
+}
+
 fn surface_patch_bounds(
     tile_origin: [i32; 2],
     stride: i32,
@@ -3383,6 +3463,28 @@ mod tests {
             counts[usize::from(material.id())] = count;
         }
         counts
+    }
+
+    #[test]
+    fn distant_surface_normals_encode_macro_slope_without_growing_quads() {
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
+        let tile = voxels_world::generate_surface_tile_mesh_with(coord, |x, _| {
+            (x.div_euclid(2), Material::Grass)
+        });
+        let packed = surface_macro_normals(&tile);
+        let quad_index = tile
+            .quads
+            .iter()
+            .position(|quad| quad.origin == [2, 1, 0] && quad.face == 2)
+            .expect("interior terrain top exists");
+        let value = packed[quad_index];
+        assert_ne!(value & SURFACE_MACRO_NORMAL_FLAG, 0);
+        assert_eq!(value & 0xff, 0xff, "voxel AO remains fully visible");
+        let normal_x = ((value >> 8) & 255) as f32 * (2.0 / 255.0) - 1.0;
+        let normal_z = ((value >> 16) & 255) as f32 * (2.0 / 255.0) - 1.0;
+        assert!(normal_x < -0.40, "uphill +X must tilt the normal toward -X");
+        assert!(normal_z.abs() < 0.01);
+        assert_eq!(size_of::<GpuQuad>(), 32);
     }
 
     #[test]

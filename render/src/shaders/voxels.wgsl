@@ -65,6 +65,13 @@ fn corner_ao(packed: u32, corner: u32) -> f32 {
   return f32((packed >> (corner * 2u)) & 3u) / 3.0;
 }
 
+fn unpack_surface_macro_normal(packed: u32) -> vec3<f32> {
+  let x = f32((packed >> 8u) & 255u) * (2.0 / 255.0) - 1.0;
+  let z = f32((packed >> 16u) & 255u) * (2.0 / 255.0) - 1.0;
+  let y = sqrt(max(1.0 - x * x - z * z, 0.01));
+  return normalize(vec3<f32>(x, y, z));
+}
+
 @vertex
 fn vs_main(
   @builtin(vertex_index) vertex_index: u32,
@@ -86,6 +93,9 @@ fn vs_main(
     case 3u: { local = vec3<f32>(uv.x * extent.x, 0.0, uv.y * extent.y); normal.y = -1.0; }
     case 4u: { local = vec3<f32>(uv.x * extent.x, uv.y * extent.y, frame.viewport_voxel.z); normal.z = 1.0; }
     default: { local = vec3<f32>(uv.x * extent.x, uv.y * extent.y, 0.0); normal.z = -1.0; }
+  }
+  if face == 2u && (ao & 0x01000000u) != 0u {
+    normal = unpack_surface_macro_normal(ao);
   }
   let world = origin + local;
   var out: VertexOut;
