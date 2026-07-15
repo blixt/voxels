@@ -2104,7 +2104,7 @@ mod tests {
 
     #[test]
     fn ecology_random_channels_do_not_select_tree_height() {
-        let seed = 0xdec0_ded;
+        let seed = 0x0dec_0ded;
         let mut height_totals = [0_u64; 4];
         let mut bucket_counts = [0_u64; 4];
         for cell_z in -64..64 {
