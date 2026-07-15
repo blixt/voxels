@@ -933,3 +933,62 @@ held the 120 Hz frame budget:
 The dense run used `VOXELS_PROFILE_SPAWN=-6400,1280`; its six-second forward traversal also measured
 8.3 ms median, 9.7 ms p95, and no frame over 16.67 ms. Both profiler runs used isolated temporary
 server databases and did not touch the player's persisted world.
+
+## 2026-07-15: dense-scene renderer attribution and exact-output optimization
+
+A matched pair of clean, trace-enabled Chromium runs at the 316-tree dense spawn isolated the next
+costs without changing view distance, tree density, geometry, materials, lighting resolution, or LOD
+thresholds. Both runs used Chromium 150, 1280x720 at DPR 1, `wasm-dev`, Terrain Diffusion, and
+`VOXELS_PROFILE_SPAWN=-6400,1280`. The baseline trace is
+`target/render-profile/ecology-perf-dense-trace.json`; the optimized trace is
+`target/render-profile/ecology-perf-dense-final-trace.json`.
+
+The CPU profiler attributed the largest baseline leaf cost to geometric LOD ownership. The renderer
+walked the same resident opaque slices separately for the viewport and three shadow cascades, calling
+`GeometricLodFocus::owner_at` repeatedly even though ownership is clip-volume independent and the
+snapped focus usually remains unchanged for many frames. The baseline trace sampled `owner_at` 5,830
+times. A single shared opaque traversal now computes ownership once per slice for all four lists, and
+each immutable resident mesh caches those results until its snapped focus changes. The final trace
+sampled `owner_at` only five times during the measured interval. Exact-list counterproof compares
+every span, fingerprint, quad count, tested/selected count, and cascade result against independent
+reference traversals, repeats against the cache, and moves the focus to force a refresh.
+
+Dense tree geometry also exposed the GPU bottleneck: the open and dense scenes had 1.844 million and
+2.206 million quads respectively, while the dense directional-shadow pass was 40% more expensive in
+the baseline even though opaque world shading barely changed. Once fine coverage and CPU geometric
+ownership are both complete, the shadow fragment shader's discard predicate is identically true. A
+settled fragmentless depth pipeline now preserves the same vertex/depth work and depth values while
+allowing the Metal/WebGPU depth-only fast path; startup and incomplete LOD transitions retain the
+original predicate-bearing pipeline.
+
+| Dense settled metric | Baseline | Optimized | Change |
+| -------------------- | -------: | --------: | -----: |
+| Frame median / p95 | 8.3 / 9.2 ms | 8.3 / 9.3 ms | display-capped, no regression |
+| Total CPU median / p95 | 2.1 / 2.2 ms | 1.2 / 1.4 ms | -42.9% / -36.4% |
+| Render submission median / p95 | 1.9 / 2.0 ms | 1.0 / 1.1 ms | -47.4% / -45.0% |
+| Culling median / p95 | 1.5 / 1.6 ms | 0.6 / 0.7 ms | -60.0% / -56.3% |
+| Shadow pass median / p95 | 3.566 / 3.940 ms | 2.200 / 3.259 ms | -38.3% / -17.3% |
+| Frames over 16.67 ms | 0 | 0 | unchanged |
+| Selected slices | 11,128 | 11,128 | identical |
+| Resident quads | 2,205,653 | 2,205,653 | identical |
+
+Traversal retained 8.3 / 9.2 ms frame median/p95 and zero slow frames while CPU median fell from 2.2
+to 1.2 ms, render submission from 1.9 to 0.9 ms, and culling from 1.6 to 0.6 ms. Streaming therefore
+was not the settled-scene bottleneck; during movement its approximately 3.2 ms p95 CPU envelope is
+now the largest transient CPU component.
+
+The quad instance record was also losslessly reduced from 32 to 24 bytes. Extents remain their native
+16-bit voxel counts, face occupies three previously unused material bits, and the shader performs the
+same voxel-size conversion. Layout assertions and round-trip tests cover every face, near and far
+material flags, LOD bits, maximum extents, and AO. In the exact same dense viewport this reduced mesh
+arena allocation from 67.31 to 50.48 MiB (-25%), arena capacity from 72 to 56 MiB, and tracked core
+GPU memory from 106.24 to 90.24 MiB (-15.1%). The standalone Chrome run compiled the real WGSL and
+rendered the scene with unchanged geometry counts.
+
+GPU pass timestamps fluctuate independently across browser processes, and component histories can
+overlap the aggregate timestamp envelope, so the report does not infer a total-GPU percentage by
+summing passes. The repeatable conclusions are the direct shadow-pass reduction, exact geometry
+counterproof, lower CPU timers and profiler samples, lower buffer memory, and unchanged 120 Hz frame
+pacing. The next CPU cost is sorting/coalescing the selected draw items; eliminating it safely requires
+preserving arena order through allocation, replacement, edit, and eviction churn. Back-face culling is
+also deferred because the six procedural face orientations do not yet share consistent winding.
