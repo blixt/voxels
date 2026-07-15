@@ -41,6 +41,25 @@ impl GeometricLodFocus {
         }
     }
 
+    /// Advances only the innermost boundaries whose replacement coverage is ready.
+    ///
+    /// Keeping the remaining centres unchanged prevents a slow horizon tile from freezing the
+    /// nearby cut and also prevents several independently snapped rings from jumping together.
+    pub fn advanced_for_levels(
+        mut self,
+        voxel_x: i32,
+        voxel_z: i32,
+        ready_level_count: usize,
+        surface_level_count: usize,
+    ) -> Self {
+        assert!(ready_level_count > 0 && ready_level_count <= surface_level_count);
+        let target = Self::snapped_for_levels(voxel_x, voxel_z, surface_level_count);
+        self.boundary_centres[..ready_level_count]
+            .copy_from_slice(&target.boundary_centres[..ready_level_count]);
+        self.surface_level_count = surface_level_count as u8;
+        self
+    }
+
     pub const fn boundary_centres(self) -> [[i32; 2]; 6] {
         self.boundary_centres
     }
@@ -222,6 +241,25 @@ mod tests {
                 max: [2_304, 128, 256],
             }
         ));
+    }
+
+    #[test]
+    fn advancing_ready_prefix_does_not_move_slow_horizon_boundaries() {
+        let initial = GeometricLodFocus::snapped(0, 0);
+        let advanced = initial.advanced_for_levels(1_100, -900, 4, 6);
+        let expected = GeometricLodFocus::snapped(1_100, -900);
+        assert_eq!(
+            &advanced.boundary_centres()[..4],
+            &expected.boundary_centres()[..4]
+        );
+        assert_eq!(
+            &advanced.boundary_centres()[4..],
+            &initial.boundary_centres()[4..]
+        );
+        assert_eq!(
+            advanced.owner_at(100_000, 100_000),
+            LodOwner::Surface(SurfaceLodLevel::Stride64)
+        );
     }
 
     #[test]

@@ -1522,6 +1522,21 @@ impl Renderer {
         ));
     }
 
+    pub fn advance_geometric_lod_focus(
+        &mut self,
+        voxel_x: i32,
+        voxel_z: i32,
+        ready_level_count: usize,
+        surface_level_count: usize,
+    ) {
+        self.geometric_lod_focus = Some(self.geometric_lod_focus.map_or_else(
+            || GeometricLodFocus::snapped_for_levels(voxel_x, voxel_z, surface_level_count),
+            |focus| {
+                focus.advanced_for_levels(voxel_x, voxel_z, ready_level_count, surface_level_count)
+            },
+        ));
+    }
+
     pub const fn set_lod_coverage_ready(&mut self, fine_ready: bool, all_lods_ready: bool) {
         self.fine_coverage_ready = fine_ready;
         self.lod_coverage_ready = all_lods_ready;

@@ -82,6 +82,19 @@ fn camera_from_persisted_values(values: [f32; 5]) -> (CameraState, bool) {
     (camera, canonical)
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn advance_surface_focus(
+    active: Option<[voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT]>,
+    target: Option<[voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT]>,
+    ready_level_count: usize,
+) -> Option<[voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT]> {
+    assert!(ready_level_count <= voxels_world::SURFACE_LOD_LEVEL_COUNT);
+    let target = target?;
+    let mut next = active.unwrap_or(target);
+    next[..ready_level_count].copy_from_slice(&target[..ready_level_count]);
+    Some(next)
+}
+
 #[cfg(target_arch = "wasm32")]
 mod persist;
 #[cfg(target_arch = "wasm32")]
@@ -90,6 +103,7 @@ mod presence_remote;
 pub mod remote;
 #[cfg(target_arch = "wasm32")]
 mod web {
+    use crate::advance_surface_focus;
     use crate::persist::{PersistenceConfig, PersistencePlayer, PersistenceWorld, Store};
     use crate::presence_remote::RemotePresenceClient;
     use crate::remote::{
@@ -575,20 +589,9 @@ mod web {
             if fine_coverage_ready {
                 self.fine_initialized.set(true);
             }
-            let interactive_lods_ready =
-                fine_coverage_ready
-                    && !self.surface_dirty.borrow().iter().any(|coord| {
-                        usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
-                    })
-                    && !self.surface_in_flight.borrow().iter().any(|coord| {
-                        usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
-                    })
-                    && self.surface_coverage_current_through(INTERACTIVE_SURFACE_LOD_LEVELS);
-            let all_lods_ready = interactive_lods_ready
-                && self.surface_queue.borrow().is_empty()
-                && self.surface_in_flight.borrow().is_empty()
-                && self.surface_dirty.borrow().is_empty()
-                && self.surface_coverage_current();
+            let ready_surface_levels = self.ready_surface_level_prefix(fine_coverage_ready);
+            let interactive_lods_ready = ready_surface_levels >= INTERACTIVE_SURFACE_LOD_LEVELS;
+            let all_lods_ready = ready_surface_levels == SURFACE_LOD_LEVEL_COUNT;
             self.all_lods_ready.set(all_lods_ready);
             self.interactive_lods_ready.set(interactive_lods_ready);
             debug_assert!(
@@ -596,17 +599,28 @@ mod web {
                 "surface coverage became ready with missing or stale revisions"
             );
             renderer.set_lod_coverage_ready(self.fine_initialized.get(), all_lods_ready);
-            if all_lods_ready {
+            if ready_surface_levels > 0 {
                 let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
                 let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-                renderer.set_geometric_lod_focus(voxel_x, voxel_z, SURFACE_LOD_LEVEL_COUNT);
-                self.surface_active_focus.set(self.surface_focus.get());
-                self.full_lods_initialized.set(true);
-            } else if interactive_lods_ready && !self.full_lods_initialized.get() {
-                let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
-                let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-                renderer.set_geometric_lod_focus(voxel_x, voxel_z, INTERACTIVE_SURFACE_LOD_LEVELS);
-                self.surface_active_focus.set(self.surface_focus.get());
+                let active_surface_levels = if self.full_lods_initialized.get() || all_lods_ready {
+                    SURFACE_LOD_LEVEL_COUNT
+                } else {
+                    ready_surface_levels
+                };
+                renderer.advance_geometric_lod_focus(
+                    voxel_x,
+                    voxel_z,
+                    ready_surface_levels,
+                    active_surface_levels,
+                );
+                self.surface_active_focus.set(advance_surface_focus(
+                    self.surface_active_focus.get(),
+                    self.surface_focus.get(),
+                    ready_surface_levels,
+                ));
+                if all_lods_ready {
+                    self.full_lods_initialized.set(true);
+                }
             }
             let render_start = performance_now(performance.as_ref());
             let chunks = self.chunks.borrow();
@@ -1757,6 +1771,26 @@ mod web {
             self.surface_coverage_current_through(SURFACE_LOD_LEVEL_COUNT)
         }
 
+        fn ready_surface_level_prefix(&self, fine_coverage_ready: bool) -> usize {
+            if !fine_coverage_ready {
+                return 0;
+            }
+            let queue = self.surface_queue.borrow();
+            let in_flight = self.surface_in_flight.borrow();
+            let dirty = self.surface_dirty.borrow();
+            (1..=SURFACE_LOD_LEVEL_COUNT)
+                .rev()
+                .find(|&level_count| {
+                    let work_pending = queue
+                        .iter()
+                        .chain(in_flight.iter())
+                        .chain(dirty.iter())
+                        .any(|coord| usize::from(coord.level.index()) < level_count);
+                    !work_pending && self.surface_coverage_current_through(level_count)
+                })
+                .unwrap_or(0)
+        }
+
         fn surface_coverage_current_through(&self, level_count: usize) -> bool {
             if self.surface_focus.get().is_none() {
                 return false;
@@ -2554,6 +2588,25 @@ mod tests {
             assert!(camera.yaw.is_finite());
             assert!(camera.pitch.is_finite());
         }
+    }
+
+    #[test]
+    fn surface_focus_advances_only_the_resident_level_prefix() {
+        let focus = |offset: i32| {
+            std::array::from_fn(|index| {
+                voxels_world::SurfaceTileCoord::new(
+                    voxels_world::SurfaceLodLevel::ALL[index],
+                    offset + index as i32,
+                    offset - index as i32,
+                )
+            })
+        };
+        let active = focus(0);
+        let target = focus(100);
+        let advanced = advance_surface_focus(Some(active), Some(target), 4).expect("target focus");
+        assert_eq!(&advanced[..4], &target[..4]);
+        assert_eq!(&advanced[4..], &active[4..]);
+        assert_eq!(advance_surface_focus(Some(active), None, 4), None);
     }
 
     #[test]
