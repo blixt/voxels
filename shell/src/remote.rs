@@ -755,7 +755,7 @@ impl RemoteInner {
     }
 
     fn handle_server_error(self: &Rc<Self>, generation: u64, bytes: &[u8]) {
-        let (request_id, message) = match protocol::decode_error(bytes) {
+        let (request_id, mut message) = match protocol::decode_error(bytes) {
             Ok(error) => error,
             Err(error) => {
                 self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()));
@@ -766,19 +766,55 @@ impl RemoteInner {
             self.disconnect(generation, RemoteWorldError::Server(message));
         } else if self.pending.borrow().contains_key(&request_id) {
             self.finish_pending_error(request_id, RemoteWorldError::Server(message));
-        } else if self
-            .pending_edits
-            .borrow_mut()
-            .remove(&request_id)
-            .is_some()
-        {
-            self.edit_events
-                .borrow_mut()
-                .push_back(RemoteEditEvent::Rejected {
-                    operation_id: request_id,
-                    message,
-                });
+        } else {
+            let command = self.pending_edits.borrow_mut().remove(&request_id);
+            if let Some(command) = command {
+                if message == protocol::EDIT_SESSION_NOT_CURRENT {
+                    match self.reissue_edit_after_session_rotation(command) {
+                        Ok(true) => return,
+                        Ok(false) => {}
+                        Err(error) => {
+                            message = format!("{message}; automatic retry failed: {error}")
+                        }
+                    }
+                }
+                self.edit_events
+                    .borrow_mut()
+                    .push_back(RemoteEditEvent::Rejected {
+                        operation_id: request_id,
+                        message,
+                    });
+            }
         }
+    }
+
+    fn reissue_edit_after_session_rotation(
+        self: &Rc<Self>,
+        command: EditCommand,
+    ) -> Result<bool, RemoteWorldError> {
+        let Some(socket) = self.socket.borrow().clone() else {
+            return Err(RemoteWorldError::NotOpen);
+        };
+        let edit_session_id = self
+            .opened
+            .borrow()
+            .as_ref()
+            .map(|opened| opened.edit_session_id)
+            .ok_or(RemoteWorldError::NotOpen)?;
+        let operation_id = self.allocate_request_id()?;
+        let Some(reissued) = command.reissue_after_session_rotation(operation_id, edit_session_id)
+        else {
+            return Ok(false);
+        };
+        let frame = protocol::encode_edit_command(reissued)
+            .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
+        socket
+            .send_with_u8_array(&frame)
+            .map_err(|error| RemoteWorldError::Socket(js_reason(error)))?;
+        self.pending_edits
+            .borrow_mut()
+            .insert(operation_id, reissued);
+        Ok(true)
     }
 
     fn send_edit(self: &Rc<Self>, action: EditAction) -> Result<RemoteRequestId, RemoteWorldError> {

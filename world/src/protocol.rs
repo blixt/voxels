@@ -26,6 +26,7 @@ pub const MAX_PLAYER_NAME_BYTES: usize = 32;
 pub const MAX_EDIT_MUTATIONS: usize = 125;
 pub const MAX_EDIT_AFFECTED_CHUNKS: usize = 8;
 pub const MAX_EDIT_AFFECTED_SURFACE_TILES: usize = 128;
+pub const EDIT_SESSION_NOT_CURRENT: &str = "edit session is no longer current";
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
@@ -351,6 +352,25 @@ pub struct EditCommand {
     pub operation_id: u64,
     pub edit_session_id: EditSessionId,
     pub action: EditAction,
+}
+
+impl EditCommand {
+    /// Reissues an operation that the server explicitly proved was absent from a rotated session.
+    /// A stored old-session operation is answered idempotently instead and must never call this.
+    pub fn reissue_after_session_rotation(
+        self,
+        operation_id: u64,
+        edit_session_id: EditSessionId,
+    ) -> Option<Self> {
+        if self.edit_session_id == edit_session_id || operation_id == 0 {
+            return None;
+        }
+        Some(Self {
+            operation_id,
+            edit_session_id,
+            action: self.action,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3440,6 +3460,24 @@ mod tests {
         let encoded_command = encode_edit_command(command).expect("encode edit command");
         assert_eq!(message_kind(&encoded_command), Ok(edit_command_kind()));
         assert_eq!(decode_edit_command(&encoded_command), Ok(command));
+
+        let next_session = EditSessionId::from_bytes([18; 16]);
+        assert_eq!(
+            command.reissue_after_session_rotation(43, next_session),
+            Some(EditCommand {
+                operation_id: 43,
+                edit_session_id: next_session,
+                action: command.action,
+            })
+        );
+        assert_eq!(
+            command.reissue_after_session_rotation(43, edit_session_id),
+            None
+        );
+        assert_eq!(
+            command.reissue_after_session_rotation(0, next_session),
+            None
+        );
 
         let dig = EditCommand {
             operation_id: 42,

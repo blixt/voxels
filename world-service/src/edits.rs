@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use voxels_world::protocol::{
-    EditAction, EditCommand, EditCommit, EditSessionId, MATERIAL_INVENTORY_SLOTS,
-    MAX_EDIT_AFFECTED_CHUNKS, MAX_EDIT_AFFECTED_SURFACE_TILES, MAX_EDIT_MUTATIONS,
-    MaterialInventory, PlayerId, PlayerResume, VoxelFace, VoxelMutation,
+    EDIT_SESSION_NOT_CURRENT, EditAction, EditCommand, EditCommit, EditSessionId,
+    MATERIAL_INVENTORY_SLOTS, MAX_EDIT_AFFECTED_CHUNKS, MAX_EDIT_AFFECTED_SURFACE_TILES,
+    MAX_EDIT_MUTATIONS, MaterialInventory, PlayerId, PlayerResume, VoxelFace, VoxelMutation,
 };
 use voxels_world::{
     ChunkCoord, EditMap, Material, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES,
@@ -465,9 +465,7 @@ impl EditAuthority {
         let player = load_durable_player(&state.connection, player_id)?
             .ok_or_else(|| EditAuthorityError("edit player does not exist".to_owned()))?;
         if player.current_edit_session != Some(command.edit_session_id) {
-            return Err(EditAuthorityError(
-                "edit session is no longer current".to_owned(),
-            ));
+            return Err(EditAuthorityError(EDIT_SESSION_NOT_CURRENT.to_owned()));
         }
 
         let (mutations, inventory) =
@@ -2104,22 +2102,27 @@ mod tests {
         let retry = authority.apply(&source, player_id(4), 41, command).unwrap();
         assert!(!retry.changed);
         assert_eq!(retry.commit.revision, applied.commit.revision);
+        let lost_before_commit = place(
+            3,
+            first_session,
+            VoxelCoord::new(2, 300, 0),
+            Material::Stone,
+        );
+        assert_eq!(
+            authority
+                .apply(&source, player_id(4), 41, lost_before_commit)
+                .unwrap_err()
+                .to_string(),
+            EDIT_SESSION_NOT_CURRENT
+        );
+        let reissued = lost_before_commit
+            .reissue_after_session_rotation(4, second_session)
+            .expect("rotated session must reissue an absent operation");
         assert!(
             authority
-                .apply(
-                    &source,
-                    player_id(4),
-                    41,
-                    place(
-                        3,
-                        first_session,
-                        VoxelCoord::new(2, 300, 0),
-                        Material::Stone,
-                    ),
-                )
-                .unwrap_err()
-                .to_string()
-                .contains("no longer current")
+                .apply(&source, player_id(4), 41, reissued)
+                .expect("reissued operation")
+                .changed
         );
         assert!(
             authority
