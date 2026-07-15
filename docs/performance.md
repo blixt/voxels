@@ -804,11 +804,10 @@ as Candle and its numerical dependencies remain optimized. Both profiles occasio
 18-20 second first-process Metal pipeline/cache warm-up, which is reported separately rather than
 being attributed to Rust optimization.
 
-The browser remains unoptimized in development, so this change does not trade browser FPS for build
-speed. Retaining line tables for workspace crates while dropping full dependency debug information
-changed a clean WASM Cargo build only from 24.95 to 24.24 seconds, but reduced the raw artifact from
-78,238,645 to 29,119,948 bytes (-62.8%). `wasm-bindgen` fell from 0.53 to 0.47 seconds and peak RSS
-from 790 MB to 582 MB; its published WASM fell from 12,424,759 to 11,351,578 bytes.
+At this point the browser was still unoptimized in development. The rendering investigation below
+found that this was not an acceptable trade: it dominated the frame and hid the actual GPU profile.
+The subsequent `wasm-dev` profile retains incremental compilation and line tables while optimizing
+workspace code at level 2 and dependencies at level 3.
 
 The next credible build-graph optimization is to extract the stable macro-source identity/request
 types from the 18k-line `voxels-world` crate. The Metal provider would then avoid recompiling after
@@ -819,3 +818,66 @@ installed on this machine; Cargo's [build-cache documentation](https://doc.rust-
 describes it as a shared compiler cache. It could help clean builds and branch/worktree switches, but
 would not materially improve the already-incremental same-tree edit loop. Profile choices follow
 Cargo's [optimization, debug-info, LTO, and codegen-unit semantics](https://doc.rust-lang.org/cargo/reference/profiles.html).
+
+## 2026-07-15: standalone Chromium tracing and rendering regression
+
+The 7-8 FPS report traced primarily to the browser development artifact, not native Terrain
+Diffusion or Metal. `vp dev` had been publishing Cargo's optimization-level-0 WASM. A profile-ambiguous
+generated artifact could previously mask this after a release build, which made the regression appear
+intermittent. Browser builds now use explicit `debug`, `wasm-dev`, and `release` artifacts with a
+profile marker; normal development selects `wasm-dev` and production builds select `release`.
+An incremental renderer-and-shell WASM rebuild measured 4.33 seconds and a no-op build 0.14 seconds.
+
+The profiler now records a 512-frame CPU history and a separate 512-frame asynchronous GPU timestamp
+history keyed by frame ID. CPU samples include simulation, streaming, renderer culling, command
+encoding, queue submission, and otherwise-unattributed time. GPU samples include every shadow
+cascade, depth prepass, ambient occlusion, opaque world, water, and UI/present. The measured runs had
+roughly 90-99% GPU coverage and no telemetry drops, replacing the earlier latest-sample snapshot that
+could produce misleading percentiles.
+
+`vp run profile:chromium` launches its own Playwright Chromium process and isolated temporary world
+database, so it neither depends on browser MCP nor touches a player's tabs, sessions, OPFS world, or
+configured edit database. Chromium's CDP tracing captures renderer scheduling, V8 CPU samples,
+WebGPU/GPU, compositor, Viz, timeline, and user-timing categories around named steady and traversal
+regions. The JSON trace can be loaded directly into Chrome's Performance tooling or Perfetto.
+
+```sh
+VOXELS_PROFILE_BUILD=wasm-dev \
+VOXELS_PROFILE_SOURCE=terrain-diffusion-30m \
+VOXELS_PROFILE_DPR=2 \
+VOXELS_PROFILE_OUTPUT=target/render-profile/result.json \
+VOXELS_PROFILE_TRACE_PATH=target/render-profile/trace.json \
+vp run profile:chromium
+```
+
+At 1280x720 DPR 1 in Chromium 150 on the M3 Max, the old debug WASM measured 41.1 ms steady median,
+43.4 ms p95, 38.8 ms worker CPU median, and 34.8 ms renderer culling: about 24 FPS before additional
+real-browser load. The optimized development build returned the display median to 8.3 ms. The real
+default Terrain Diffusion source measured as follows after the renderer changes:
+
+| Terrain Diffusion scenario | Frame median / p95 | CPU median / p95 | Stream median / p95 | Render median / p95 | GPU median / p95 |
+| -------------------------- | -----------------: | ---------------: | ------------------: | ------------------: | ---------------: |
+| Settled                    |      8.3 / 16.6 ms |     4.8 / 6.7 ms |        0.1 / 0.2 ms |        4.2 / 6.1 ms |   4.26 / 5.95 ms |
+| Forward traversal          |      8.4 / 17.2 ms |    8.2 / 12.1 ms |        1.5 / 6.6 ms |        4.5 / 6.5 ms |   3.77 / 5.70 ms |
+
+The settled viewport contained 243 canonical chunks, 566 surface tiles, 1.91 million resident quads,
+and 470 draw calls. Increasing the framebuffer to 2560x1440 by setting DPR 2 retained an 8.3 ms
+steady median; GPU median was 6.19 ms and p95 10.68 ms. Pixel fill is therefore not the primary
+remaining bottleneck on this host. Directional shadows are the largest GPU pass, while traversal
+hitches are primarily bounded streaming work plus occasional browser/Metal scheduling outliers.
+
+The first fidelity-preserving renderer optimization adds one enclosing bound per resident mesh and
+rejects off-volume chunks before visiting their vertical slices. It then caches six clip planes per
+camera/shadow volume and uses the positive AABB vertex instead of transforming all eight corners for
+every test. Exact per-slice LOD and frustum tests remain authoritative. A host counterproof compares
+the cached-plane result against the prior corner implementation over 7,803 world bounds. In the
+settled procedural scene, tested slices fell from 181,594 to 82,844 (-54.4%) without changing the
+11,140 selected slices. Cached planes then reduced culling median from 3.8 to 3.3 ms and total render
+submission median from 4.3 to 3.8 ms.
+
+The next justified renderer work is GPU-driven or hierarchical draw selection rather than reducing
+terrain fidelity. The current CPU still rebuilds three shadow and world/water draw lists every frame,
+and WebGPU exposes only individual indirect draws rather than a standard multi-draw command. A
+Nanite-like meshlet hierarchy, projected-error selection, hierarchical depth occlusion, and render
+bundles for stable command sequences are credible directions, but each is materially larger than the
+exact broad-phase change and should be evaluated against these trace and geometry invariants first.

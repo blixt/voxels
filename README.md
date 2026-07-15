@@ -56,6 +56,11 @@ driven gait, independent head look, body-follow hysteresis, shadows, depth, and 
 frame/CPU phase distributions for steady and traversal scenarios in system Chrome. Provider-specific
 coast, route, landmark, and cave tours remain unavailable until the world protocol advertises those
 queries and authored locations.
+`vp run profile:chromium` runs the same isolated headless Chromium workload and also writes a CDP
+performance trace under `target/`. Set `VOXELS_PROFILE_BUILD=wasm-dev`,
+`VOXELS_PROFILE_SOURCE=terrain-diffusion-30m`, `VOXELS_PROFILE_DPR=2`,
+`VOXELS_PROFILE_OUTPUT=target/render-profile/result.json`, or `VOXELS_PROFILE_TRACE_PATH=...` to
+reproduce a particular local configuration without touching an existing browser or its OPFS data.
 `vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step closed rail. One lap warms the exact
 terrain used by two measured laps, making its arena-plateau gate prove allocation reuse before every
 canonical and LOD queue must drain.
