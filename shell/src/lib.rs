@@ -126,7 +126,7 @@ mod web {
         RendererConfig, RendererFeatureConfig,
     };
     use voxels_render::shadow::DirectionalShadowConfig;
-    use voxels_render::ui::LiveStats;
+    use voxels_render::ui::{LiveStats, NavigationTelemetry};
     use voxels_runtime::{
         AuthoritativeEditRevisions, ChunkState, CompletionStatus, FrameBudget, StreamConfig,
         StreamScheduler, SurfaceFocusAction, SurfaceRevisionCache, revision_satisfies,
@@ -645,11 +645,29 @@ mod web {
             }
             let render_start = performance_now(performance.as_ref());
             let chunks = self.chunks.borrow();
+            let eye_voxel = VoxelCoord::new(
+                (camera.position.x / VOXEL_SIZE_METRES).floor() as i32,
+                (camera.position.y / VOXEL_SIZE_METRES).floor() as i32,
+                (camera.position.z / VOXEL_SIZE_METRES).floor() as i32,
+            );
+            let eye_chunk = eye_voxel.chunk();
             let submitted = renderer.render(
                 frame_sequence,
                 dt,
                 &camera,
                 LiveStats {
+                    navigation: NavigationTelemetry {
+                        eye_position_metres: camera.position.to_array(),
+                        eye_voxel: eye_voxel.as_array(),
+                        eye_chunk: [eye_chunk.x, eye_chunk.y, eye_chunk.z],
+                        heading_degrees: camera.yaw.to_degrees().rem_euclid(360.0),
+                        pitch_degrees: camera.pitch.to_degrees(),
+                        horizontal_speed_metres_per_second: camera
+                            .velocity
+                            .x
+                            .hypot(camera.velocity.z),
+                        grounded: camera.grounded,
+                    },
                     frames_per_second: if self.frame_milliseconds.get() > 0.0 {
                         1_000.0 / self.frame_milliseconds.get()
                     } else {
@@ -1966,6 +1984,21 @@ mod web {
                 engine.feed_input(bytes)
             } else {
                 false
+            }
+        }
+
+        pub fn take_mission_control_copy(&self) -> Option<String> {
+            self.engine
+                .as_ref()
+                .and_then(|engine| engine.renderer.borrow_mut().take_diagnostics_copy())
+        }
+
+        pub fn report_mission_control_copy_result(&self, copied: bool) {
+            if let Some(engine) = self.engine.as_ref() {
+                engine
+                    .renderer
+                    .borrow_mut()
+                    .report_diagnostics_copy_result(copied);
             }
         }
 

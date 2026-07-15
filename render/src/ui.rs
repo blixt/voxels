@@ -4,17 +4,19 @@
 //! device pixels through [`Viewport::device_to_css`], but the state and resulting draw list contain
 //! no browser, WASM, WGPU, or resource-lifetime concerns.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::Write};
 
 const PANEL_INSET: f32 = 18.0;
-const PANEL_WIDTH: f32 = 360.0;
-const COMPACT_WIDTH: f32 = 292.0;
-const BASE_FEATURE_COUNT: usize = 6;
-const HEADER_HEIGHT: f32 = 78.0;
+const PANEL_WIDTH: f32 = 520.0;
+const COMPACT_WIDTH: f32 = 320.0;
+const HEADER_HEIGHT: f32 = 82.0;
+const NAVIGATION_HEIGHT: f32 = 92.0;
+const COMPACT_NAVIGATION_HEIGHT: f32 = 108.0;
 const PANEL_RADIUS: f32 = 18.0;
 const CONTENT_PAD: f32 = 14.0;
 const BUTTON_SIZE: f32 = 30.0;
 const BUTTON_GAP: f32 = 6.0;
+const COPY_BUTTON_WIDTH: f32 = 54.0;
 const CHROME_HEIGHT: f32 = 36.0;
 const LAUNCHER_WIDTH: f32 = 222.0;
 const INVENTORY_WIDTH: f32 = 390.0;
@@ -228,8 +230,8 @@ pub struct MissionControlConfig {
 }
 
 const FEATURE_COUNT: usize = RendererFeature::ALL.len();
-const PANEL_HEIGHT: f32 = 558.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 39.0;
-const COMPACT_HEIGHT: f32 = 471.0 + (FEATURE_COUNT - BASE_FEATURE_COUNT) as f32 * 34.0;
+const PANEL_HEIGHT: f32 = 680.0;
+const COMPACT_HEIGHT: f32 = 750.0;
 
 const fn feature_index(feature: RendererFeature) -> usize {
     match feature {
@@ -294,6 +296,7 @@ impl ContextAction {
 pub enum UiTarget {
     Launcher,
     Header,
+    CopyDiagnostics,
     Close,
     Compact,
     More,
@@ -310,6 +313,7 @@ pub enum UiKey {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiAction {
     None,
+    CopyDiagnostics,
     PanelOpenChanged(bool),
     CompactChanged(bool),
     FeatureChanged(RendererFeature, bool),
@@ -319,7 +323,24 @@ pub enum UiAction {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NavigationTelemetry {
+    /// Player eye position in metres.
+    pub eye_position_metres: [f32; 3],
+    /// Canonical 10 cm voxel containing the player eye position.
+    pub eye_voxel: [i32; 3],
+    /// Canonical chunk containing `eye_voxel`.
+    pub eye_chunk: [i32; 3],
+    /// Compass heading where 0 is north (-Z) and 90 is east (+X).
+    pub heading_degrees: f32,
+    /// Positive looks up and negative looks down.
+    pub pitch_degrees: f32,
+    pub horizontal_speed_metres_per_second: f32,
+    pub grounded: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LiveStats {
+    pub navigation: NavigationTelemetry,
     pub frames_per_second: f32,
     pub frame_ms: f32,
     pub cpu_ms: f32,
@@ -367,6 +388,7 @@ pub enum SurfaceRole {
     Crosshair,
     Panel,
     Header,
+    NavigationCard,
     Button,
     StatCard,
     FeatureRow,
@@ -423,6 +445,7 @@ pub struct UiLayout {
     pub crosshair: Rect,
     pub panel: Rect,
     pub header: Rect,
+    pub navigation: Rect,
     pub compact: bool,
     pub regions: Vec<InteractiveRegion>,
     pub stat_cards: Vec<Rect>,
@@ -773,7 +796,22 @@ impl MissionControlUi {
             BUTTON_SIZE,
             BUTTON_SIZE,
         );
+        let copy_right = if automatically_compact {
+            more.x
+        } else {
+            compact_button.x
+        };
+        let copy = Rect::new(
+            copy_right - BUTTON_GAP - COPY_BUTTON_WIDTH,
+            button_y,
+            COPY_BUTTON_WIDTH,
+            BUTTON_SIZE,
+        );
         regions.extend([
+            InteractiveRegion {
+                target: UiTarget::CopyDiagnostics,
+                rect: copy,
+            },
             InteractiveRegion {
                 target: UiTarget::Close,
                 rect: close,
@@ -790,13 +828,23 @@ impl MissionControlUi {
             });
         }
 
-        let stats_top = panel.y + HEADER_HEIGHT + 14.0;
-        let stat_columns: usize = if compact { 2 } else { 3 };
+        let navigation = Rect::new(
+            panel.x + CONTENT_PAD,
+            panel.y + HEADER_HEIGHT + 12.0,
+            panel.width - CONTENT_PAD * 2.0,
+            if compact {
+                COMPACT_NAVIGATION_HEIGHT
+            } else {
+                NAVIGATION_HEIGHT
+            },
+        );
+        let stats_top = navigation.y + navigation.height + 24.0;
+        let stat_columns: usize = 2;
         let stat_gap = 7.0;
         let stat_width = (panel.width - CONTENT_PAD * 2.0 - stat_gap * (stat_columns - 1) as f32)
             / stat_columns as f32;
-        let stat_height = if compact { 43.0 } else { 58.0 };
-        let stat_count: usize = if compact { 6 } else { 9 };
+        let stat_height = if compact { 44.0 } else { 50.0 };
+        let stat_count: usize = if compact { 6 } else { 8 };
         let stat_cards = (0..stat_count)
             .map(|index| {
                 let column = index % stat_columns;
@@ -812,19 +860,27 @@ impl MissionControlUi {
 
         let stats_rows = stat_count.div_ceil(stat_columns);
         let feature_top = stats_top + stats_rows as f32 * (stat_height + stat_gap) + 23.0;
-        let nominal_feature_row_height: f32 = if compact { 34.0 } else { 39.0 };
+        let feature_columns: usize = if compact { 1 } else { 2 };
+        let feature_rows = FEATURE_COUNT.div_ceil(feature_columns);
+        let feature_gap = if compact { 0.0 } else { 7.0 };
+        let feature_width =
+            (panel.width - CONTENT_PAD * 2.0 - feature_gap * (feature_columns - 1) as f32)
+                / feature_columns as f32;
+        let nominal_feature_row_height: f32 = if compact { 34.0 } else { 38.0 };
         let available_feature_height =
             (panel.y + panel.height - CONTENT_PAD - feature_top).max(0.0);
         let feature_row_height = nominal_feature_row_height
-            .min(available_feature_height / FEATURE_COUNT.max(1) as f32)
+            .min(available_feature_height / feature_rows.max(1) as f32)
             .max(1.0);
         for (index, feature) in RendererFeature::ALL.into_iter().enumerate() {
+            let column = index % feature_columns;
+            let row = index / feature_columns;
             regions.push(InteractiveRegion {
                 target: UiTarget::Feature(feature),
                 rect: Rect::new(
-                    panel.x + CONTENT_PAD,
-                    feature_top + index as f32 * feature_row_height,
-                    panel.width - CONTENT_PAD * 2.0,
+                    panel.x + CONTENT_PAD + column as f32 * (feature_width + feature_gap),
+                    feature_top + row as f32 * feature_row_height,
+                    feature_width,
                     feature_row_height,
                 ),
             });
@@ -860,6 +916,7 @@ impl MissionControlUi {
             crosshair,
             panel,
             header,
+            navigation,
             compact,
             regions,
             stat_cards,
@@ -939,6 +996,7 @@ impl MissionControlUi {
 
         match self.hit_test_css(point, viewport) {
             Some(UiTarget::Launcher) => self.toggle_open(),
+            Some(UiTarget::CopyDiagnostics) => UiAction::CopyDiagnostics,
             Some(UiTarget::Close) => self.set_open(false),
             Some(UiTarget::Compact) => self.set_compact(!self.compact),
             Some(UiTarget::More) => {
@@ -993,16 +1051,16 @@ impl MissionControlUi {
         push_text(
             &mut draw,
             "VOXELS / MISSION CONTROL",
-            [layout.panel.x + CONTENT_PAD, layout.header.y + 17.0],
-            if layout.compact { 10.5 } else { 11.5 },
+            [layout.panel.x + CONTENT_PAD, layout.header.y + 21.0],
+            if layout.compact { 10.0 } else { 11.5 },
             TEXT_PRIMARY.with_alpha(opacity),
             TextAlign::Left,
         );
         push_text(
             &mut draw,
             format!("{} / {}", self.daylight_label, self.region_label),
-            [layout.panel.x + CONTENT_PAD, layout.header.y + 31.0],
-            8.5,
+            [layout.panel.x + CONTENT_PAD, layout.header.y + 48.0],
+            if layout.compact { 8.0 } else { 9.0 },
             TEXT_MUTED.with_alpha(opacity),
             TextAlign::Left,
         );
@@ -1021,29 +1079,14 @@ impl MissionControlUi {
                 "{} / {}%  ·  {}",
                 self.route_chapter_label, self.route_progress_percent, placement_status,
             ),
-            [layout.panel.x + CONTENT_PAD, layout.header.y + 44.0],
-            8.5,
+            [layout.panel.x + CONTENT_PAD, layout.header.y + 66.0],
+            if layout.compact { 7.5 } else { 9.0 },
             ACCENT.with_alpha(opacity),
             TextAlign::Left,
         );
-        for (index, summary) in self.inventory_summary.iter().enumerate() {
-            if summary.is_empty() {
-                continue;
-            }
-            push_text(
-                &mut draw,
-                summary,
-                [
-                    layout.panel.x + CONTENT_PAD,
-                    layout.header.y + 57.0 + index as f32 * 11.0,
-                ],
-                if layout.compact { 6.0 } else { 6.5 },
-                TEXT_MUTED.with_alpha(opacity),
-                TextAlign::Left,
-            );
-        }
 
         for (target, label) in [
+            (UiTarget::CopyDiagnostics, "COPY"),
             (UiTarget::Compact, if layout.compact { ">" } else { "<" }),
             (UiTarget::More, "..."),
             (UiTarget::Close, "x"),
@@ -1062,12 +1105,18 @@ impl MissionControlUi {
                     &mut draw,
                     label,
                     rect.center(),
-                    12.0,
+                    if target == UiTarget::CopyDiagnostics {
+                        9.0
+                    } else {
+                        12.0
+                    },
                     TEXT_PRIMARY.with_alpha(opacity),
                     TextAlign::Center,
                 );
             }
         }
+
+        self.push_navigation(&mut draw, &layout, opacity);
 
         let card_data = self.card_data(layout.compact);
         for (rect, (label, value)) in layout.stat_cards.iter().copied().zip(card_data) {
@@ -1084,9 +1133,9 @@ impl MissionControlUi {
                 label,
                 [
                     rect.x + 9.0,
-                    rect.y + if layout.compact { 13.0 } else { 16.0 },
+                    rect.y + if layout.compact { 13.0 } else { 15.0 },
                 ],
-                9.0,
+                if layout.compact { 8.0 } else { 9.0 },
                 TEXT_MUTED.with_alpha(opacity),
                 TextAlign::Left,
             );
@@ -1095,9 +1144,9 @@ impl MissionControlUi {
                 value,
                 [
                     rect.x + 9.0,
-                    rect.y + if layout.compact { 30.0 } else { 40.0 },
+                    rect.y + if layout.compact { 31.0 } else { 36.0 },
                 ],
-                if layout.compact { 12.0 } else { 15.0 },
+                if layout.compact { 11.5 } else { 13.0 },
                 TEXT_PRIMARY.with_alpha(opacity),
                 TextAlign::Left,
             );
@@ -1180,6 +1229,90 @@ impl MissionControlUi {
             }
         }
         draw
+    }
+
+    fn push_navigation(&self, draw: &mut UiDrawList, layout: &UiLayout, opacity: f32) {
+        let navigation = self.stats.navigation;
+        push_surface(
+            draw,
+            layout.navigation,
+            12.0,
+            CARD_COLOR.with_alpha(opacity),
+            PANEL_BORDER.with_alpha(opacity * 0.55),
+            SurfaceRole::NavigationCard,
+        );
+        push_text(
+            draw,
+            "PLAYER NAVIGATION",
+            [layout.navigation.x + 11.0, layout.navigation.y + 16.0],
+            9.0,
+            TEXT_MUTED.with_alpha(opacity),
+            TextAlign::Left,
+        );
+        let [x, y, z] = navigation.eye_position_metres;
+        push_text(
+            draw,
+            format!("X {x:.2}   Y {y:.2}   Z {z:.2} m"),
+            [layout.navigation.x + 11.0, layout.navigation.y + 38.0],
+            if layout.compact { 13.0 } else { 16.0 },
+            TEXT_PRIMARY.with_alpha(opacity),
+            TextAlign::Left,
+        );
+        let [voxel_x, voxel_y, voxel_z] = navigation.eye_voxel;
+        let [chunk_x, chunk_y, chunk_z] = navigation.eye_chunk;
+        let movement = movement_label(self.stats);
+        let facing = format!(
+            "{} · {:.1}° · {} · {:.1} m/s",
+            heading_label(navigation.heading_degrees),
+            normalized_heading(navigation.heading_degrees),
+            pitch_label(navigation.pitch_degrees),
+            navigation.horizontal_speed_metres_per_second,
+        );
+        if layout.compact {
+            push_text(
+                draw,
+                format!("VOXEL {voxel_x} / {voxel_y} / {voxel_z}"),
+                [layout.navigation.x + 11.0, layout.navigation.y + 59.0],
+                9.0,
+                TEXT_MUTED.with_alpha(opacity),
+                TextAlign::Left,
+            );
+            push_text(
+                draw,
+                format!("CHUNK {chunk_x} / {chunk_y} / {chunk_z}"),
+                [layout.navigation.x + 11.0, layout.navigation.y + 76.0],
+                9.0,
+                TEXT_MUTED.with_alpha(opacity),
+                TextAlign::Left,
+            );
+            push_text(
+                draw,
+                format!("{facing} · {movement}"),
+                [layout.navigation.x + 11.0, layout.navigation.y + 96.0],
+                8.5,
+                ACCENT.with_alpha(opacity),
+                TextAlign::Left,
+            );
+        } else {
+            push_text(
+                draw,
+                format!(
+                    "VOXEL {voxel_x} / {voxel_y} / {voxel_z}   ·   CHUNK {chunk_x} / {chunk_y} / {chunk_z}"
+                ),
+                [layout.navigation.x + 11.0, layout.navigation.y + 59.0],
+                9.5,
+                TEXT_MUTED.with_alpha(opacity),
+                TextAlign::Left,
+            );
+            push_text(
+                draw,
+                format!("FACING {facing} · {movement}"),
+                [layout.navigation.x + 11.0, layout.navigation.y + 78.0],
+                9.5,
+                ACCENT.with_alpha(opacity),
+                TextAlign::Left,
+            );
+        }
     }
 
     fn push_chrome(&self, draw: &mut UiDrawList, layout: &UiLayout) {
@@ -1364,7 +1497,7 @@ impl MissionControlUi {
         let stats = self.stats;
         if compact {
             vec![
-                ("FPS", format!("{:.0}", stats.frames_per_second)),
+                ("FRAME RATE", format!("{:.0} FPS", stats.frames_per_second)),
                 ("FRAME", format!("{:.1} ms", stats.frame_ms)),
                 (
                     "CHUNKS",
@@ -1378,82 +1511,225 @@ impl MissionControlUi {
                         compact_count(u64::from(stats.water_quads))
                     ),
                 ),
-                ("LOAD P95", format!("{} f", stats.load_p95_frames)),
-                (
-                    "REMESH / EDIT",
-                    format!(
-                        "{} f / {:.0} ms",
-                        stats.remesh_p95_frames, stats.edit_last_ms
-                    ),
-                ),
+                ("PENDING JOBS", stats.pending_jobs.to_string()),
+                ("GPU MEMORY", compact_bytes(stats.core_gpu_bytes)),
             ]
         } else {
             vec![
-                ("FRAME", format!("{:.1} ms", stats.frame_ms)),
                 (
-                    "CPU / GPU / AO",
+                    "FRAME RATE",
                     format!(
-                        "{:.1} / {} / {}",
+                        "{:.0} FPS · {:.1} ms",
+                        stats.frames_per_second, stats.frame_ms
+                    ),
+                ),
+                (
+                    "FRAME COST",
+                    format!(
+                        "CPU {:.1} · GPU {} · AO {}",
                         stats.cpu_ms,
                         optional_ms(stats.gpu_ms),
                         optional_ms(stats.gpu_ambient_occlusion_ms)
                     ),
                 ),
-                ("FPS", format!("{:.0}", stats.frames_per_second)),
                 (
-                    "VISIBLE / RESIDENT",
-                    format!("{} / {}", stats.visible_chunks, stats.resident_chunks),
+                    "CHUNKS",
+                    format!(
+                        "{} visible · {} resident",
+                        stats.visible_chunks, stats.resident_chunks
+                    ),
                 ),
                 (
-                    "QUADS / WATER",
+                    "GEOMETRY",
                     format!(
-                        "{} / {}",
+                        "{} quads · {} draws",
                         compact_count(u64::from(stats.quads)),
-                        compact_count(u64::from(stats.water_quads)),
+                        stats.draw_calls,
                     ),
                 ),
                 (
-                    "DRAWS / WATER",
-                    format!("{} / {}", stats.draw_calls, stats.water_draw_calls),
+                    "LOD TILES 0 → 5",
+                    stats
+                        .lod_tiles
+                        .map(u64::from)
+                        .map(compact_count)
+                        .join(" · "),
                 ),
                 (
-                    "LOAD / REMESH / EDIT",
+                    "JOBS / EDITS",
                     format!(
-                        "{} / {} f / {:.0} ms",
-                        stats.load_p95_frames, stats.remesh_p95_frames, stats.edit_last_ms
+                        "{} pending · {} in flight",
+                        stats.pending_jobs, stats.edit_in_flight,
                     ),
                 ),
                 (
-                    "JOBS + EDITS / GPU",
+                    "LATENCY P95",
                     format!(
-                        "{} + {} / {}",
-                        stats.pending_jobs,
-                        stats.edit_in_flight,
-                        compact_bytes(stats.core_gpu_bytes)
+                        "load {} f · remesh {} f",
+                        stats.load_p95_frames, stats.remesh_p95_frames,
                     ),
                 ),
-                (
-                    "LIGHTS / PORTALS / STREAM",
-                    format!(
-                        "{}/{} R{} P{} · {}/7 r{} · S{}/{} A{}{}",
-                        stats.active_local_lights,
-                        stats.local_light_candidates,
-                        stats.occluded_local_lights,
-                        stats.portal_rejected_local_lights,
-                        stats.open_cinder_portals,
-                        stats.cinder_portal_revision,
-                        stats.stream_interest_desired,
-                        stats.stream_interest_requested,
-                        stats.portal_active_chunks,
-                        if stats.stream_interest_truncated > 0 {
-                            "!"
-                        } else {
-                            ""
-                        },
-                    ),
-                ),
+                ("GPU MEMORY", compact_bytes(stats.core_gpu_bytes)),
             ]
         }
+    }
+
+    /// Produces the full text snapshot behind the visible summary cards. The browser shell can
+    /// copy this string without teaching the portable renderer about clipboard APIs.
+    pub fn diagnostics_report(&self) -> String {
+        let stats = self.stats;
+        let navigation = stats.navigation;
+        let [x, y, z] = navigation.eye_position_metres;
+        let [voxel_x, voxel_y, voxel_z] = navigation.eye_voxel;
+        let [chunk_x, chunk_y, chunk_z] = navigation.eye_chunk;
+        let mut report = String::from("VOXELS / MISSION CONTROL\n\n");
+
+        let _ = writeln!(report, "NAVIGATION");
+        let _ = writeln!(report, "Eye position (m): X {x:.3}, Y {y:.3}, Z {z:.3}");
+        let _ = writeln!(
+            report,
+            "Eye voxel (10 cm): X {voxel_x}, Y {voxel_y}, Z {voxel_z}"
+        );
+        let _ = writeln!(report, "Chunk: X {chunk_x}, Y {chunk_y}, Z {chunk_z}");
+        let _ = writeln!(
+            report,
+            "Facing: {} ({:.2} deg), pitch {}, speed {:.2} m/s, {}",
+            heading_label(navigation.heading_degrees),
+            normalized_heading(navigation.heading_degrees),
+            pitch_label(navigation.pitch_degrees),
+            navigation.horizontal_speed_metres_per_second,
+            movement_label(stats).to_ascii_lowercase(),
+        );
+
+        let _ = writeln!(report, "\nWORLD");
+        let _ = writeln!(report, "Daylight: {}", self.daylight_label);
+        let _ = writeln!(report, "Region: {}", self.region_label);
+        let _ = writeln!(
+            report,
+            "Route: {} ({}%)",
+            self.route_chapter_label, self.route_progress_percent,
+        );
+        if self.placement_material_available {
+            let _ = writeln!(
+                report,
+                "Selected material: {} x{}",
+                self.placement_material_label, self.placement_material_count,
+            );
+        } else {
+            let _ = writeln!(report, "Selected material: none (inventory empty)");
+        }
+
+        let _ = writeln!(report, "\nPERFORMANCE");
+        let _ = writeln!(
+            report,
+            "Frame: {:.1} FPS, {:.2} ms total, {:.2} ms CPU, {} ms GPU, {} ms GPU AO",
+            stats.frames_per_second,
+            stats.frame_ms,
+            stats.cpu_ms,
+            optional_ms(stats.gpu_ms),
+            optional_ms(stats.gpu_ambient_occlusion_ms),
+        );
+        let _ = writeln!(
+            report,
+            "Core GPU memory: {}",
+            compact_bytes(stats.core_gpu_bytes)
+        );
+
+        let _ = writeln!(report, "\nGEOMETRY");
+        let _ = writeln!(
+            report,
+            "Chunks: {} visible, {} resident",
+            stats.visible_chunks, stats.resident_chunks,
+        );
+        let _ = writeln!(
+            report,
+            "Quads: {} world, {} water",
+            stats.quads, stats.water_quads,
+        );
+        let _ = writeln!(
+            report,
+            "Draw calls: {} world, {} water, {} shadow across {} cascades",
+            stats.draw_calls,
+            stats.water_draw_calls,
+            stats.shadow_draw_calls,
+            stats.shadow_cascades,
+        );
+        let _ = writeln!(
+            report,
+            "LOD tiles 0..5: {}",
+            stats.lod_tiles.map(|count| count.to_string()).join(", "),
+        );
+
+        let _ = writeln!(report, "\nSTREAMING / EDITS");
+        let _ = writeln!(report, "Pending jobs: {}", stats.pending_jobs);
+        let _ = writeln!(
+            report,
+            "Load latency: p95 {} frames, max {} frames",
+            stats.load_p95_frames, stats.load_max_frames,
+        );
+        let _ = writeln!(
+            report,
+            "Remesh latency: p95 {} frames, max {} frames",
+            stats.remesh_p95_frames, stats.remesh_max_frames,
+        );
+        let _ = writeln!(
+            report,
+            "Edits: {} in flight, last {:.2} ms",
+            stats.edit_in_flight, stats.edit_last_ms,
+        );
+        let _ = writeln!(
+            report,
+            "Interest: {} requested, {} desired, {} truncated, {} portal-active chunks",
+            stats.stream_interest_requested,
+            stats.stream_interest_desired,
+            stats.stream_interest_truncated,
+            stats.portal_active_chunks,
+        );
+
+        let _ = writeln!(report, "\nLIGHTS / PORTALS / WATER");
+        let _ = writeln!(
+            report,
+            "Local lights: {} active / {} candidates, {} occluded, {} portal-rejected",
+            stats.active_local_lights,
+            stats.local_light_candidates,
+            stats.occluded_local_lights,
+            stats.portal_rejected_local_lights,
+        );
+        let _ = writeln!(
+            report,
+            "Cinder portals: {} open, revision {}",
+            stats.open_cinder_portals, stats.cinder_portal_revision,
+        );
+        let _ = writeln!(
+            report,
+            "Water: {:.0}% immersed, eye depth {:.2} m, eyes submerged {}, swimming {}",
+            stats.water_immersion * 100.0,
+            stats.eye_depth_metres,
+            stats.eyes_submerged,
+            stats.swimming,
+        );
+
+        let _ = writeln!(report, "\nINVENTORY");
+        if self.inventory_summary.iter().all(String::is_empty) {
+            let _ = writeln!(report, "Empty");
+        } else {
+            for summary in &self.inventory_summary {
+                if !summary.is_empty() {
+                    let _ = writeln!(report, "{summary}");
+                }
+            }
+        }
+
+        let _ = writeln!(report, "\nRENDER FEATURES");
+        for feature in RendererFeature::ALL {
+            let state = if self.feature_enabled(feature) {
+                "on"
+            } else {
+                "off"
+            };
+            let _ = writeln!(report, "{}: {state}", feature.label());
+        }
+        report
     }
 
     fn push_toggle(
@@ -1574,6 +1850,43 @@ fn compact_bytes(value: u64) -> String {
     }
 }
 
+fn normalized_heading(heading_degrees: f32) -> f32 {
+    if heading_degrees.is_finite() {
+        heading_degrees.rem_euclid(360.0)
+    } else {
+        0.0
+    }
+}
+
+fn heading_label(heading_degrees: f32) -> &'static str {
+    const LABELS: [&str; 16] = [
+        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW",
+        "NW", "NNW",
+    ];
+    let index = ((normalized_heading(heading_degrees) + 11.25) / 22.5).floor() as usize % 16;
+    LABELS[index]
+}
+
+fn pitch_label(pitch_degrees: f32) -> String {
+    if !pitch_degrees.is_finite() || pitch_degrees.abs() < 0.05 {
+        "LEVEL".to_owned()
+    } else if pitch_degrees > 0.0 {
+        format!("{:.1}° UP", pitch_degrees.abs())
+    } else {
+        format!("{:.1}° DOWN", pitch_degrees.abs())
+    }
+}
+
+fn movement_label(stats: LiveStats) -> &'static str {
+    if stats.swimming {
+        "SWIMMING"
+    } else if stats.navigation.grounded {
+        "GROUNDED"
+    } else {
+        "AIRBORNE"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1674,6 +1987,112 @@ mod tests {
     }
 
     #[test]
+    fn copy_button_hit_testing_is_density_independent() {
+        let normal = viewport();
+        let retina = Viewport::new(2_560.0, 1_440.0, 2.0);
+        let copy = opened()
+            .layout(normal)
+            .region(UiTarget::CopyDiagnostics)
+            .expect("copy button");
+        let mut normal_ui = opened();
+        assert_eq!(
+            normal_ui.activate_css(copy.center(), normal),
+            UiAction::CopyDiagnostics,
+        );
+        let mut retina_ui = opened();
+        assert_eq!(
+            retina_ui.activate_device([copy.center()[0] * 2.0, copy.center()[1] * 2.0], retina,),
+            UiAction::CopyDiagnostics,
+        );
+    }
+
+    #[test]
+    fn desktop_layout_reserves_legible_navigation_and_two_column_cards() {
+        let layout = opened().layout(viewport());
+        assert_eq!(layout.panel.width, PANEL_WIDTH);
+        assert!(layout.navigation.y >= layout.header.y + layout.header.height);
+        assert_eq!(layout.stat_cards.len(), 8);
+        assert!(layout.stat_cards.iter().all(|card| card.width >= 235.0));
+        assert!(
+            layout
+                .stat_cards
+                .iter()
+                .all(|card| card.y >= layout.navigation.y + layout.navigation.height)
+        );
+
+        let buttons = [
+            UiTarget::CopyDiagnostics,
+            UiTarget::Compact,
+            UiTarget::More,
+            UiTarget::Close,
+        ]
+        .map(|target| layout.region(target).expect("header action"));
+        for (index, left) in buttons.iter().enumerate() {
+            for right in &buttons[index + 1..] {
+                assert!(left.x + left.width <= right.x || right.x + right.width <= left.x);
+            }
+        }
+    }
+
+    #[test]
+    fn heading_labels_wrap_and_change_at_half_sector_boundaries() {
+        assert_eq!(heading_label(0.0), "N");
+        assert_eq!(heading_label(11.24), "N");
+        assert_eq!(heading_label(11.25), "NNE");
+        assert_eq!(heading_label(90.0), "E");
+        assert_eq!(heading_label(118.9), "ESE");
+        assert_eq!(heading_label(-90.0), "W");
+        assert_eq!(heading_label(359.99), "N");
+        assert_eq!(heading_label(720.0), "N");
+    }
+
+    #[test]
+    fn diagnostics_report_includes_full_navigation_and_hidden_details() {
+        let mut ui = opened();
+        let _ = ui.set_feature(RendererFeature::FarTerrain, false);
+        ui.set_inventory(
+            Some("STONE"),
+            12,
+            ["STONE 12 · GRASS 4".to_owned(), String::new()],
+            Vec::new(),
+            None,
+        );
+        ui.set_stats(LiveStats {
+            navigation: NavigationTelemetry {
+                eye_position_metres: [-0.01, 12.345, -3.201],
+                eye_voxel: [-1, 123, -33],
+                eye_chunk: [-1, 3, -2],
+                heading_degrees: 270.0,
+                pitch_degrees: 12.5,
+                horizontal_speed_metres_per_second: 5.75,
+                grounded: false,
+            },
+            frames_per_second: 120.0,
+            frame_ms: 8.33,
+            cpu_ms: 1.25,
+            gpu_ms: Some(4.5),
+            lod_tiles: [75, 16, 8, 4, 2, 1],
+            shadow_draw_calls: 42,
+            shadow_cascades: 3,
+            stream_interest_requested: 80,
+            stream_interest_desired: 72,
+            stream_interest_truncated: 8,
+            ..LiveStats::default()
+        });
+
+        let report = ui.diagnostics_report();
+        assert!(report.contains("Eye position (m): X -0.010, Y 12.345, Z -3.201"));
+        assert!(report.contains("Eye voxel (10 cm): X -1, Y 123, Z -33"));
+        assert!(report.contains("Chunk: X -1, Y 3, Z -2"));
+        assert!(report.contains("Facing: W (270.00 deg), pitch 12.5° UP"));
+        assert!(report.contains("LOD tiles 0..5: 75, 16, 8, 4, 2, 1"));
+        assert!(report.contains("42 shadow across 3 cascades"));
+        assert!(report.contains("80 requested, 72 desired, 8 truncated"));
+        assert!(report.contains("STONE 12 · GRASS 4"));
+        assert!(report.contains("Far terrain: off"));
+    }
+
+    #[test]
     fn feature_rows_toggle_and_animate_without_changing_host_state_implicitly() {
         let mut ui = opened();
         let feature = RendererFeature::AtmosphericFog;
@@ -1738,7 +2157,7 @@ mod tests {
         let mut ui = opened();
         let normal = ui.layout(viewport());
         assert!(!normal.compact);
-        assert_eq!(normal.stat_cards.len(), 9);
+        assert_eq!(normal.stat_cards.len(), 8);
         let _ = ui.set_compact(true);
         let compact = ui.layout(viewport());
         assert!(compact.compact);
@@ -1860,6 +2279,15 @@ mod tests {
             Some(1),
         );
         ui.set_stats(LiveStats {
+            navigation: NavigationTelemetry {
+                eye_position_metres: [420.845, 153.34, -608.25],
+                eye_voxel: [4_208, 1_533, -6_083],
+                eye_chunk: [131, 47, -191],
+                heading_degrees: 118.9,
+                pitch_degrees: -21.3,
+                horizontal_speed_metres_per_second: 4.25,
+                grounded: true,
+            },
             frames_per_second: 59.8,
             frame_ms: 16.7,
             cpu_ms: 4.2,
@@ -1898,15 +2326,31 @@ mod tests {
             portal_active_chunks: 68,
         });
         let base = ui.build_draw_list(viewport());
-        assert!(base.text.iter().any(|run| run.text == "18 / 2 f / 31 ms"));
-        assert!(base.text.iter().any(|run| run.text == "7 + 1 / 76.0 MiB"));
-        assert!(base.text.iter().any(|run| run.text == "123.4k / 8.2k"));
-        assert!(base.text.iter().any(|run| run.text == "132 / 12"));
+        assert!(base.text.iter().any(|run| run.text == "60 FPS · 16.7 ms"));
         assert!(
             base.text
                 .iter()
-                .any(|run| run.text == "6/10 R1 P3 · 6/7 r2 · S72/80 A68!")
+                .any(|run| run.text == "123.4k quads · 132 draws")
         );
+        assert!(
+            base.text
+                .iter()
+                .any(|run| run.text == "7 pending · 1 in flight")
+        );
+        assert!(base.text.iter().any(|run| run.text == "76.0 MiB"));
+        assert!(
+            base.text
+                .iter()
+                .any(|run| run.text == "X 420.85   Y 153.34   Z -608.25 m")
+        );
+        assert!(
+            base.text.iter().any(|run| {
+                run.text == "VOXEL 4208 / 1533 / -6083   ·   CHUNK 131 / 47 / -191"
+            })
+        );
+        assert!(base.text.iter().any(|run| {
+            run.text == "FACING ESE · 118.9° · 21.3° DOWN · 4.2 m/s · GROUNDED"
+        }));
         assert!(
             base.text
                 .iter()
@@ -1916,11 +2360,6 @@ mod tests {
             base.text
                 .iter()
                 .any(|run| run.text == "WINDCUT WAY / 47%  ·  PLACE GLOW CRYSTAL ×27")
-        );
-        assert!(
-            base.text
-                .iter()
-                .any(|run| run.text == "GR 4 · DI 8 · ST 12 · SA 0 · SN 0 · CL 3 · BA 2")
         );
         assert!(base.text.iter().any(|run| run.text == "GLOW CRYSTAL"));
         assert!(base.text.iter().any(|run| run.text == "27"));
@@ -1948,7 +2387,7 @@ mod tests {
                 .iter()
                 .filter(|surface| surface.role == SurfaceRole::StatCard)
                 .count(),
-            9
+            8
         );
         assert_eq!(
             draw.glass

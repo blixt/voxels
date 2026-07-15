@@ -848,6 +848,7 @@ pub struct Renderer {
     dpr: f32,
     log_error: fn(&str),
     ui_text_error_reported: bool,
+    diagnostics_copy_requested: bool,
     coast_teleport_requested: bool,
     underwater_teleport_requested: bool,
     route_teleport_requested: bool,
@@ -1608,6 +1609,7 @@ impl Renderer {
             dpr: valid_dpr(dpr),
             log_error,
             ui_text_error_reported: false,
+            diagnostics_copy_requested: false,
             coast_teleport_requested: false,
             underwater_teleport_requested: false,
             route_teleport_requested: false,
@@ -1846,6 +1848,18 @@ impl Renderer {
         self.ui.show_gameplay_toast(message);
     }
 
+    pub fn take_diagnostics_copy(&mut self) -> Option<String> {
+        std::mem::take(&mut self.diagnostics_copy_requested).then(|| self.ui.diagnostics_report())
+    }
+
+    pub fn report_diagnostics_copy_result(&mut self, copied: bool) {
+        self.ui.show_gameplay_toast(if copied {
+            "MISSION CONTROL COPIED"
+        } else {
+            "COULD NOT COPY MISSION CONTROL"
+        });
+    }
+
     pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
         self.ui.set_reduced_motion(reduced_motion);
     }
@@ -1890,6 +1904,9 @@ impl Renderer {
 
     fn apply_ui_action(&mut self, action: UiAction) {
         match action {
+            UiAction::CopyDiagnostics => {
+                self.diagnostics_copy_requested = true;
+            }
             UiAction::FeatureChanged(feature, enabled) => match feature {
                 RendererFeature::CascadedSunShadows => self.options.shadows = enabled,
                 RendererFeature::VoxelAmbientOcclusion => {

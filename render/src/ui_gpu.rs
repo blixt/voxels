@@ -177,6 +177,7 @@ impl GlassInstance {
             | SurfaceRole::Inventory
             | SurfaceRole::Toast
             | SurfaceRole::Header
+            | SurfaceRole::NavigationCard
             | SurfaceRole::Button
             | SurfaceRole::StatCard
             | SurfaceRole::FeatureRow
