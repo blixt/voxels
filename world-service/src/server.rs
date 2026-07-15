@@ -23,15 +23,17 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use voxels_world::protocol::{
-    ChunkBatchItem, ChunkBatchRequest, ChunkBatchResult, EditSessionId, PlayerIdentity,
-    PlayerResume, PresenceOpened, PresencePong, ResyncRequired, SpawnPoint, SurfaceTileBatchItem,
-    SurfaceTileBatchRequest, SurfaceTileBatchResult, WorldCapabilities, WorldOpened, cancel_kind,
-    chunk_batch_kind, decode_cancel, decode_chunk_batch, decode_edit_command, decode_open_presence,
-    decode_open_world, decode_player_pose, decode_presence_ping, decode_surface_tile_batch,
-    edit_command_kind, encode_chunk_batch_result, encode_edit_commit, encode_error,
-    encode_presence_opened, encode_presence_pong, encode_resync_required,
-    encode_surface_tile_batch_result, encode_world_opened, message_kind, open_presence_kind,
-    open_world_kind, player_pose_kind, presence_ping_kind, surface_tile_batch_kind,
+    ChunkBatchItem, ChunkBatchRequest, EditSessionId, EncodedChunkBatchItem,
+    EncodedSurfaceTileBatchItem, PlayerIdentity, PlayerResume, PresenceOpened, PresencePong,
+    ResyncRequired, SpawnPoint, SurfaceTileBatchItem, SurfaceTileBatchRequest, WorldCapabilities,
+    WorldOpened, cancel_kind, chunk_batch_kind, decode_cancel, decode_chunk_batch,
+    decode_edit_command, decode_open_presence, decode_open_world, decode_player_pose,
+    decode_presence_ping, decode_surface_tile_batch, edit_command_kind, encode_chunk_batch_item,
+    encode_chunk_batch_result_from_items, encode_edit_commit, encode_error, encode_presence_opened,
+    encode_presence_pong, encode_resync_required, encode_surface_tile_batch_item,
+    encode_surface_tile_batch_result_from_items, encode_world_opened, message_kind,
+    open_presence_kind, open_world_kind, player_pose_kind, presence_ping_kind,
+    surface_tile_batch_kind,
 };
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest, WORLD_SCHEMA_VERSION,
@@ -647,58 +649,124 @@ impl GenerationRequest {
         }
     }
 
-    fn key(&self) -> GenerationKey {
+    fn product_keys(&self) -> Vec<ProductKey> {
         match self {
-            Self::Chunks { request, snapshot } => GenerationKey::Chunks {
-                coords: request.coords.clone(),
-                revisions: snapshot.revisions.clone(),
-            },
-            Self::SurfaceTiles { request, snapshot } => GenerationKey::SurfaceTiles {
-                coords: request.coords.clone(),
-                revisions: snapshot.revisions.clone(),
-            },
+            Self::Chunks { request, snapshot } => request
+                .coords
+                .iter()
+                .copied()
+                .zip(snapshot.revisions.iter().copied())
+                .map(|(coord, edit_revision)| ProductKey::Chunk {
+                    coord,
+                    edit_revision,
+                })
+                .collect(),
+            Self::SurfaceTiles { request, snapshot } => request
+                .coords
+                .iter()
+                .copied()
+                .zip(snapshot.revisions.iter().copied())
+                .map(|(coord, edit_revision)| ProductKey::SurfaceTile {
+                    coord,
+                    edit_revision,
+                })
+                .collect(),
         }
     }
 
-    fn flight_key(&self) -> GenerationFlightKey {
-        GenerationFlightKey {
-            product: self.key(),
-            priority: self.priority(),
+    fn select(&self, indices: &[usize]) -> Self {
+        match self {
+            Self::Chunks { request, snapshot } => Self::Chunks {
+                request: ChunkBatchRequest {
+                    request_id: request.request_id,
+                    priority: request.priority,
+                    coords: indices.iter().map(|&index| request.coords[index]).collect(),
+                },
+                snapshot: ChunkEditSnapshot {
+                    edits: snapshot.edits.clone(),
+                    revisions: indices
+                        .iter()
+                        .map(|&index| snapshot.revisions[index])
+                        .collect(),
+                },
+            },
+            Self::SurfaceTiles { request, snapshot } => Self::SurfaceTiles {
+                request: SurfaceTileBatchRequest {
+                    request_id: request.request_id,
+                    priority: request.priority,
+                    coords: indices.iter().map(|&index| request.coords[index]).collect(),
+                },
+                snapshot: SurfaceEditSnapshot {
+                    edits: snapshot.edits.clone(),
+                    revisions: indices
+                        .iter()
+                        .map(|&index| snapshot.revisions[index])
+                        .collect(),
+                },
+            },
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum GenerationKey {
-    Chunks {
-        coords: Vec<ChunkCoord>,
-        revisions: Vec<u64>,
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ProductKey {
+    Chunk {
+        coord: ChunkCoord,
+        edit_revision: u64,
     },
-    SurfaceTiles {
-        coords: Vec<voxels_world::SurfaceTileCoord>,
-        revisions: Vec<u64>,
+    SurfaceTile {
+        coord: voxels_world::SurfaceTileCoord,
+        edit_revision: u64,
     },
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct GenerationFlightKey {
-    product: GenerationKey,
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ProductFlightKey {
+    product: ProductKey,
     priority: WorldProductPriority,
 }
 
-struct GenerationCompletion {
-    key: GenerationFlightKey,
-    result: Result<Vec<u8>, String>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum EncodedProduct {
+    Chunk(EncodedChunkBatchItem),
+    SurfaceTile(EncodedSurfaceTileBatchItem),
 }
 
-struct ResponseCache {
+impl EncodedProduct {
+    fn key(&self) -> ProductKey {
+        match self {
+            Self::Chunk(item) => ProductKey::Chunk {
+                coord: item.coord(),
+                edit_revision: item.edit_revision(),
+            },
+            Self::SurfaceTile(item) => ProductKey::SurfaceTile {
+                coord: item.coord(),
+                edit_revision: item.edit_revision(),
+            },
+        }
+    }
+
+    fn encoded_len(&self) -> usize {
+        match self {
+            Self::Chunk(item) => item.encoded_len(),
+            Self::SurfaceTile(item) => item.encoded_len(),
+        }
+    }
+}
+
+struct ProductGenerationCompletion {
+    keys: Vec<ProductFlightKey>,
+    result: Result<Vec<EncodedProduct>, String>,
+}
+
+struct ProductCache {
     max_bytes: usize,
     retained_bytes: usize,
-    entries: HashMap<GenerationKey, Arc<Vec<u8>>>,
-    lru: VecDeque<GenerationKey>,
+    entries: HashMap<ProductKey, Arc<EncodedProduct>>,
+    lru: VecDeque<ProductKey>,
 }
 
-impl ResponseCache {
+impl ProductCache {
     fn new(max_bytes: usize) -> Self {
         Self {
             max_bytes,
@@ -708,32 +776,67 @@ impl ResponseCache {
         }
     }
 
-    fn get(&mut self, key: &GenerationKey) -> Option<Arc<Vec<u8>>> {
+    fn get(&mut self, key: &ProductKey) -> Option<Arc<EncodedProduct>> {
         let value = Arc::clone(self.entries.get(key)?);
         self.lru.retain(|candidate| candidate != key);
         self.lru.push_back(key.clone());
         Some(value)
     }
 
-    fn insert(&mut self, key: GenerationKey, bytes: Arc<Vec<u8>>) {
-        if self.max_bytes == 0 || bytes.len() > self.max_bytes {
+    fn insert(&mut self, key: ProductKey, product: Arc<EncodedProduct>) {
+        let encoded_len = product.encoded_len();
+        if self.max_bytes == 0 || encoded_len > self.max_bytes {
             return;
         }
         if let Some(replaced) = self.entries.remove(&key) {
-            self.retained_bytes = self.retained_bytes.saturating_sub(replaced.len());
+            self.retained_bytes = self.retained_bytes.saturating_sub(replaced.encoded_len());
             self.lru.retain(|candidate| candidate != &key);
         }
-        while self.retained_bytes.saturating_add(bytes.len()) > self.max_bytes {
+        while self.retained_bytes.saturating_add(encoded_len) > self.max_bytes {
             let Some(oldest) = self.lru.pop_front() else {
                 break;
             };
             if let Some(evicted) = self.entries.remove(&oldest) {
-                self.retained_bytes = self.retained_bytes.saturating_sub(evicted.len());
+                self.retained_bytes = self.retained_bytes.saturating_sub(evicted.encoded_len());
             }
         }
-        self.retained_bytes = self.retained_bytes.saturating_add(bytes.len());
+        self.retained_bytes = self.retained_bytes.saturating_add(encoded_len);
         self.lru.push_back(key.clone());
-        self.entries.insert(key, bytes);
+        self.entries.insert(key, product);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProductWaiter {
+    batch_id: u64,
+    item_index: usize,
+}
+
+struct PendingGenerationBatch {
+    job: GenerationJob,
+    items: Vec<Option<Result<Arc<EncodedProduct>, String>>>,
+    remaining: usize,
+}
+
+impl PendingGenerationBatch {
+    fn new(job: GenerationJob, item_count: usize) -> Self {
+        Self {
+            job,
+            items: vec![None; item_count],
+            remaining: item_count,
+        }
+    }
+
+    fn fill(&mut self, item_index: usize, result: Result<Arc<EncodedProduct>, String>) -> bool {
+        let slot = self
+            .items
+            .get_mut(item_index)
+            .expect("product waiter index belongs to its pending batch");
+        if slot.is_none() {
+            *slot = Some(result);
+            self.remaining -= 1;
+        }
+        self.remaining == 0
     }
 }
 
@@ -1312,8 +1415,11 @@ async fn run_generation_dispatcher(
     product_cache_bytes: usize,
 ) {
     let (completion_tx, mut completions) = mpsc::unbounded_channel();
-    let mut in_flight = HashMap::<GenerationFlightKey, Vec<GenerationJob>>::new();
-    let mut cache = ResponseCache::new(product_cache_bytes);
+    let source_identity_hash = source.identity().identity_hash();
+    let mut in_flight = HashMap::<ProductFlightKey, Vec<ProductWaiter>>::new();
+    let mut pending = HashMap::<u64, PendingGenerationBatch>::new();
+    let mut cache = ProductCache::new(product_cache_bytes);
+    let mut next_batch_id = 1_u64;
     let mut jobs_open = true;
     loop {
         if !jobs_open && in_flight.is_empty() {
@@ -1325,66 +1431,126 @@ async fn run_generation_dispatcher(
                     jobs_open = false;
                     continue;
                 };
-                let key = job.request.flight_key();
-                if let Some(bytes) = cache.get(&key.product) {
-                    tokio::spawn(deliver_generation_job(job, Ok(bytes), max_frame_bytes));
-                    continue;
-                }
-                if let Some(waiters) = in_flight.get_mut(&key) {
-                    waiters.push(job);
-                    continue;
-                }
-                let request = job.request.clone();
+                let product_keys = job.request.product_keys();
+                let priority = job.request.priority();
                 let session_semaphore = Arc::clone(&job.tracked.session.generation_permits);
-                in_flight.insert(key.clone(), vec![job]);
-                let source = Arc::clone(&source);
-                let semaphore = Arc::clone(&semaphore);
-                let prefetch_semaphore = Arc::clone(&prefetch_semaphore);
-                let completion_tx = completion_tx.clone();
-                tokio::spawn(async move {
-                    let result = generate_single_flight_response(
-                        request,
-                        source,
-                        session_semaphore,
-                        semaphore,
-                        prefetch_semaphore,
+                let batch_id = next_batch_id;
+                next_batch_id = next_batch_id
+                    .checked_add(1)
+                    .expect("generation batch id exhausted");
+                let mut batch = PendingGenerationBatch::new(job, product_keys.len());
+                let mut miss_indices = Vec::new();
+                let mut miss_keys = Vec::new();
+                for (item_index, product) in product_keys.into_iter().enumerate() {
+                    if let Some(cached) = cache.get(&product) {
+                        batch.fill(item_index, Ok(cached));
+                        continue;
+                    }
+                    let flight = ProductFlightKey { product, priority };
+                    let waiter = ProductWaiter { batch_id, item_index };
+                    if let Some(waiters) = in_flight.get_mut(&flight) {
+                        waiters.push(waiter);
+                    } else {
+                        in_flight.insert(flight, vec![waiter]);
+                        miss_indices.push(item_index);
+                        miss_keys.push(flight);
+                    }
+                }
+                if batch.remaining == 0 {
+                    spawn_generation_assembly(
+                        batch,
+                        source_identity_hash,
+                        Arc::clone(&semaphore),
                         max_frame_bytes,
-                    )
-                    .await;
-                    let _ = completion_tx.send(GenerationCompletion { key, result });
-                });
+                    );
+                    continue;
+                }
+                let miss_request = batch.job.request.select(&miss_indices);
+                pending.insert(batch_id, batch);
+                if !miss_indices.is_empty() {
+                    let source = Arc::clone(&source);
+                    let semaphore = Arc::clone(&semaphore);
+                    let prefetch_semaphore = Arc::clone(&prefetch_semaphore);
+                    let completion_tx = completion_tx.clone();
+                    tokio::spawn(async move {
+                        let result = generate_single_flight_products(
+                            miss_request,
+                            source,
+                            session_semaphore,
+                            semaphore,
+                            prefetch_semaphore,
+                        )
+                        .await;
+                        let _ = completion_tx.send(ProductGenerationCompletion {
+                            keys: miss_keys,
+                            result,
+                        });
+                    });
+                }
             }
             completion = completions.recv(), if !in_flight.is_empty() => {
                 let Some(completion) = completion else {
                     break;
                 };
-                let Some(waiters) = in_flight.remove(&completion.key) else {
-                    continue;
+                let results = match completion.result {
+                    Ok(products) if products.len() == completion.keys.len() => products
+                        .into_iter()
+                        .zip(completion.keys.iter())
+                        .map(|(product, expected)| {
+                            if product.key() == expected.product {
+                                Ok(product)
+                            } else {
+                                Err("world source returned a mismatched product key".to_owned())
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                    Ok(_) => vec![
+                        Err("world source returned a mismatched product count".to_owned());
+                        completion.keys.len()
+                    ],
+                    Err(message) => vec![Err(message); completion.keys.len()],
                 };
-                let response = completion.result.map(Arc::new);
-                if let Ok(bytes) = &response {
-                    cache.insert(completion.key.product, Arc::clone(bytes));
+                let mut ready = BTreeSet::new();
+                for (flight, result) in completion.keys.into_iter().zip(results) {
+                    let Some(waiters) = in_flight.remove(&flight) else {
+                        continue;
+                    };
+                    let result = result.map(Arc::new);
+                    if let Ok(product) = &result {
+                        cache.insert(flight.product, Arc::clone(product));
+                    }
+                    for waiter in waiters {
+                        let Some(batch) = pending.get_mut(&waiter.batch_id) else {
+                            continue;
+                        };
+                        if batch.fill(waiter.item_index, result.clone()) {
+                            ready.insert(waiter.batch_id);
+                        }
+                    }
                 }
-                for job in waiters {
-                    tokio::spawn(deliver_generation_job(
-                        job,
-                        response.clone(),
+                for batch_id in ready {
+                    let Some(batch) = pending.remove(&batch_id) else {
+                        continue;
+                    };
+                    spawn_generation_assembly(
+                        batch,
+                        source_identity_hash,
+                        Arc::clone(&semaphore),
                         max_frame_bytes,
-                    ));
+                    );
                 }
             }
         }
     }
 }
 
-async fn generate_single_flight_response(
+async fn generate_single_flight_products(
     request: GenerationRequest,
     source: Arc<dyn WorldSourceEngine>,
     session_semaphore: Arc<Semaphore>,
     global_semaphore: Arc<Semaphore>,
     prefetch_semaphore: Arc<Semaphore>,
-    max_frame_bytes: usize,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<EncodedProduct>, String> {
     let _prefetch_permit = if request.priority() == WorldProductPriority::Prefetch {
         Some(
             prefetch_semaphore
@@ -1403,25 +1569,124 @@ async fn generate_single_flight_response(
         .acquire_owned()
         .await
         .map_err(|_| "world generation limiter stopped".to_owned())?;
-    let generated = tokio::task::spawn_blocking(move || match request {
+    tokio::task::spawn_blocking(move || match request {
         GenerationRequest::Chunks { request, snapshot } => {
-            generate_chunk_result(source.as_ref(), request, snapshot)
+            generate_chunk_products(source.as_ref(), request, snapshot)
         }
         GenerationRequest::SurfaceTiles { request, snapshot } => {
-            generate_surface_tile_result(source.as_ref(), request, snapshot)
+            generate_surface_tile_products(source.as_ref(), request, snapshot)
         }
     })
     .await
-    .map_err(|_| "world generation task failed".to_owned())??;
-    if generated.len() > max_frame_bytes {
-        return Err("chunk result exceeds configured frame limit".to_owned());
+    .map_err(|_| "world generation task failed".to_owned())?
+}
+
+fn spawn_generation_assembly(
+    batch: PendingGenerationBatch,
+    source_identity_hash: voxels_world::WorldSourceIdentityHash,
+    global_semaphore: Arc<Semaphore>,
+    max_frame_bytes: usize,
+) {
+    tokio::spawn(async move {
+        assemble_and_deliver_generation_batch(
+            batch,
+            source_identity_hash,
+            global_semaphore,
+            max_frame_bytes,
+        )
+        .await;
+    });
+}
+
+async fn assemble_and_deliver_generation_batch(
+    batch: PendingGenerationBatch,
+    source_identity_hash: voxels_world::WorldSourceIdentityHash,
+    global_semaphore: Arc<Semaphore>,
+    max_frame_bytes: usize,
+) {
+    if batch.job.tracked.is_cancelled() {
+        batch.job.tracked.finish();
+        return;
     }
-    Ok(generated)
+    let session_semaphore = Arc::clone(&batch.job.tracked.session.generation_permits);
+    let session_permit = match session_semaphore.acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            batch.job.tracked.finish();
+            return;
+        }
+    };
+    let global_permit = match global_semaphore.acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            batch.job.tracked.finish();
+            return;
+        }
+    };
+    if batch.job.tracked.is_cancelled() {
+        batch.job.tracked.finish();
+        return;
+    }
+    let request = batch.job.request.clone();
+    let items = batch
+        .items
+        .into_iter()
+        .map(|item| item.expect("completed generation batch has every product"))
+        .collect::<Vec<_>>();
+    let response = tokio::task::spawn_blocking(move || {
+        let items = items.into_iter().collect::<Result<Vec<_>, _>>()?;
+        assemble_generation_response(&request, source_identity_hash, &items)
+    })
+    .await
+    .map_err(|_| "world response assembly task failed".to_owned())
+    .and_then(|result| result);
+    drop(global_permit);
+    drop(session_permit);
+    deliver_generation_job(batch.job, response, max_frame_bytes).await;
+}
+
+fn assemble_generation_response(
+    request: &GenerationRequest,
+    source_identity_hash: voxels_world::WorldSourceIdentityHash,
+    products: &[Arc<EncodedProduct>],
+) -> Result<Vec<u8>, String> {
+    match request {
+        GenerationRequest::Chunks { request, .. } => {
+            let items = products
+                .iter()
+                .map(|product| match product.as_ref() {
+                    EncodedProduct::Chunk(item) => Ok(item),
+                    EncodedProduct::SurfaceTile(_) => {
+                        Err("surface product cannot satisfy a chunk batch".to_owned())
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            encode_chunk_batch_result_from_items(request.request_id, source_identity_hash, items)
+                .map_err(|error| error.to_string())
+        }
+        GenerationRequest::SurfaceTiles { request, .. } => {
+            let items = products
+                .iter()
+                .map(|product| match product.as_ref() {
+                    EncodedProduct::SurfaceTile(item) => Ok(item),
+                    EncodedProduct::Chunk(_) => {
+                        Err("chunk product cannot satisfy a surface batch".to_owned())
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            encode_surface_tile_batch_result_from_items(
+                request.request_id,
+                source_identity_hash,
+                items,
+            )
+            .map_err(|error| error.to_string())
+        }
+    }
 }
 
 async fn deliver_generation_job(
     job: GenerationJob,
-    response: Result<Arc<Vec<u8>>, String>,
+    response: Result<Vec<u8>, String>,
     max_frame_bytes: usize,
 ) {
     if job.tracked.is_cancelled() {
@@ -1430,11 +1695,7 @@ async fn deliver_generation_job(
     }
     let request_id = job.request.request_id();
     let bytes = match response {
-        Ok(template) if template.len() <= max_frame_bytes => {
-            let mut bytes = template.as_ref().clone();
-            rewrite_frame_request_id(&mut bytes, request_id);
-            bytes
-        }
+        Ok(bytes) if bytes.len() <= max_frame_bytes => bytes,
         Ok(_) => encode_error(request_id, "chunk result exceeds configured frame limit"),
         Err(message) => encode_error(request_id, &message),
     };
@@ -1467,16 +1728,11 @@ async fn deliver_generation_job(
     }
 }
 
-fn rewrite_frame_request_id(bytes: &mut [u8], request_id: u64) {
-    debug_assert!(bytes.len() >= voxels_world::protocol::FRAME_HEADER_BYTES);
-    bytes[12..20].copy_from_slice(&request_id.to_le_bytes());
-}
-
-fn generate_surface_tile_result(
+fn generate_surface_tile_products(
     source: &dyn WorldSourceEngine,
     request: SurfaceTileBatchRequest,
     snapshot: SurfaceEditSnapshot,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<EncodedProduct>, String> {
     let coords = request.coords.clone();
     let mut items = Vec::with_capacity(coords.len());
     if snapshot.edits.is_empty() {
@@ -1528,19 +1784,22 @@ fn generate_surface_tile_result(
             });
         }
     }
-    encode_surface_tile_batch_result(&SurfaceTileBatchResult {
-        request_id: request.request_id,
-        source_identity_hash: source.identity().identity_hash(),
-        items,
-    })
-    .map_err(|error| error.to_string())
+    let source_identity_hash = source.identity().identity_hash();
+    items
+        .iter()
+        .map(|item| {
+            encode_surface_tile_batch_item(source_identity_hash, item)
+                .map(EncodedProduct::SurfaceTile)
+                .map_err(|error| error.to_string())
+        })
+        .collect()
 }
 
-fn generate_chunk_result(
+fn generate_chunk_products(
     source: &dyn WorldSourceEngine,
     request: ChunkBatchRequest,
     snapshot: ChunkEditSnapshot,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<EncodedProduct>, String> {
     let coords = request.coords.clone();
     let result = source
         .generate_batch(WorldProductBatch {
@@ -1584,12 +1843,14 @@ fn generate_chunk_result(
             result: item_result,
         });
     }
-    encode_chunk_batch_result(&ChunkBatchResult {
-        request_id: request.request_id,
-        source_identity_hash: result.source_identity_hash,
-        items,
-    })
-    .map_err(|error| error.to_string())
+    items
+        .iter()
+        .map(|item| {
+            encode_chunk_batch_item(result.source_identity_hash, item)
+                .map(EncodedProduct::Chunk)
+                .map_err(|error| error.to_string())
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1624,6 +1885,7 @@ mod tests {
     struct CountingSource {
         inner: ProceduralWorldSource,
         batch_calls: Arc<AtomicUsize>,
+        product_calls: Arc<Mutex<HashMap<WorldProductRequest, usize>>>,
     }
 
     impl WorldSourceEngine for CountingSource {
@@ -1637,6 +1899,14 @@ mod tests {
         ) -> Result<voxels_world::WorldProductBatchResult, WorldSourceError> {
             std::thread::sleep(std::time::Duration::from_millis(20));
             self.batch_calls.fetch_add(1, Ordering::Relaxed);
+            let mut product_calls = self
+                .product_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for product in &request.requests {
+                *product_calls.entry(*product).or_default() += 1;
+            }
+            drop(product_calls);
             self.inner.generate_batch(request)
         }
 
@@ -1761,27 +2031,39 @@ mod tests {
     }
 
     #[test]
-    fn compressed_response_cache_is_byte_bounded_and_lru() {
-        fn key(x: i32) -> GenerationKey {
-            GenerationKey::Chunks {
-                coords: vec![ChunkCoord::new(x, 0, 0)],
-                revisions: vec![1],
-            }
+    fn encoded_product_cache_is_byte_bounded_and_lru() {
+        fn product(x: i32) -> (ProductKey, Arc<EncodedProduct>) {
+            let source = ProceduralWorldSource::new(42);
+            let item = ChunkBatchItem {
+                coord: ChunkCoord::new(x, 0, 0),
+                edit_revision: 1,
+                result: Err(WorldSourceError::InvalidChunkCoordinate),
+            };
+            let product = Arc::new(EncodedProduct::Chunk(
+                encode_chunk_batch_item(source.source_identity_hash(), &item).expect("encode item"),
+            ));
+            (product.key(), product)
         }
 
-        let mut cache = ResponseCache::new(11);
-        cache.insert(key(1), Arc::new(vec![1; 6]));
-        cache.insert(key(2), Arc::new(vec![2; 4]));
-        assert!(cache.get(&key(1)).is_some());
-        cache.insert(key(3), Arc::new(vec![3; 5]));
-        assert!(cache.get(&key(1)).is_some());
-        assert!(cache.get(&key(2)).is_none());
-        assert!(cache.get(&key(3)).is_some());
+        let (key1, product1) = product(1);
+        let (key2, product2) = product(2);
+        let (key3, product3) = product(3);
+        let item_len = product1.encoded_len();
+        let mut cache = ProductCache::new(item_len * 2);
+        cache.insert(key1, product1);
+        cache.insert(key2, product2);
+        assert!(cache.get(&key1).is_some());
+        cache.insert(key3, product3);
+        assert!(cache.get(&key1).is_some());
+        assert!(cache.get(&key2).is_none());
+        assert!(cache.get(&key3).is_some());
         assert!(cache.retained_bytes <= cache.max_bytes);
 
-        cache.insert(key(4), Arc::new(vec![4; 12]));
-        assert!(cache.get(&key(4)).is_none());
-        assert!(cache.retained_bytes <= cache.max_bytes);
+        let (key4, product4) = product(4);
+        let mut undersized = ProductCache::new(item_len - 1);
+        undersized.insert(key4, product4);
+        assert!(undersized.get(&key4).is_none());
+        assert_eq!(undersized.retained_bytes, 0);
     }
 
     #[tokio::test]
@@ -1885,15 +2167,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_identical_batches_single_flight_across_clients()
+    async fn overlapping_batches_single_flight_each_product_across_clients()
     -> Result<(), Box<dyn std::error::Error>> {
         let config = test_config();
         let listener = TcpListener::bind(config.transport.listen).await?;
         let address = listener.local_addr()?;
         let batch_calls = Arc::new(AtomicUsize::new(0));
+        let product_calls = Arc::new(Mutex::new(HashMap::new()));
         let source = CountingSource {
             inner: ProceduralWorldSource::new(config.world_seed),
             batch_calls: Arc::clone(&batch_calls),
+            product_calls: Arc::clone(&product_calls),
         };
         let server = WorldServer::new(config, Box::new(source))?;
         batch_calls.store(0, Ordering::Relaxed);
@@ -1901,14 +2185,18 @@ mod tests {
 
         let (mut first, _) = connect_test_client(address, player_identity(1, 2, "alice")).await?;
         let (mut second, _) = connect_test_client(address, player_identity(1, 3, "bob")).await?;
-        let coords = vec![ChunkCoord::new(4, 0, -7), ChunkCoord::new(5, 0, -7)];
-        for (socket, request_id) in [(&mut first, 41), (&mut second, 99)] {
+        let a = ChunkCoord::new(4, 0, -7);
+        let b = ChunkCoord::new(5, 0, -7);
+        let c = ChunkCoord::new(6, 0, -7);
+        for (socket, request_id, coords) in
+            [(&mut first, 41, vec![a, b]), (&mut second, 99, vec![b, c])]
+        {
             socket
                 .send(ClientMessage::Binary(
                     encode_chunk_batch(&ChunkBatchRequest {
                         request_id,
                         priority: WorldProductPriority::VisibleChunk,
-                        coords: coords.clone(),
+                        coords,
                     })?
                     .into(),
                 ))
@@ -1918,23 +2206,127 @@ mod tests {
         let second_result = decode_chunk_batch_result(&next_client_binary(&mut second).await?)?;
         assert_eq!(first_result.request_id, 41);
         assert_eq!(second_result.request_id, 99);
-        assert_eq!(first_result.items, second_result.items);
-        assert_eq!(batch_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            first_result
+                .items
+                .iter()
+                .map(|item| item.coord)
+                .collect::<Vec<_>>(),
+            vec![a, b]
+        );
+        assert_eq!(
+            second_result
+                .items
+                .iter()
+                .map(|item| item.coord)
+                .collect::<Vec<_>>(),
+            vec![b, c]
+        );
+        assert_eq!(batch_calls.load(Ordering::Relaxed), 2);
+        let counts = product_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for coord in [a, b, c] {
+            assert_eq!(
+                counts.get(&WorldProductRequest::ChunkWithHalo(coord)),
+                Some(&1)
+            );
+        }
+        drop(counts);
 
         first
             .send(ClientMessage::Binary(
                 encode_chunk_batch(&ChunkBatchRequest {
                     request_id: 42,
                     priority: WorldProductPriority::Prefetch,
-                    coords,
+                    coords: vec![c, b, a],
                 })?
                 .into(),
             ))
             .await?;
         let cached = decode_chunk_batch_result(&next_client_binary(&mut first).await?)?;
         assert_eq!(cached.request_id, 42);
-        assert_eq!(cached.items, first_result.items);
-        assert_eq!(batch_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            cached
+                .items
+                .iter()
+                .map(|item| item.coord)
+                .collect::<Vec<_>>(),
+            vec![c, b, a]
+        );
+        assert_eq!(batch_calls.load(Ordering::Relaxed), 2);
+
+        let surface_a = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 20, -12);
+        let surface_b = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 21, -12);
+        let surface_c = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 22, -12);
+        for (socket, request_id, coords) in [
+            (&mut first, 43, vec![surface_a, surface_b]),
+            (&mut second, 100, vec![surface_b, surface_c]),
+        ] {
+            socket
+                .send(ClientMessage::Binary(
+                    encode_surface_tile_batch(&SurfaceTileBatchRequest {
+                        request_id,
+                        priority: WorldProductPriority::VisibleSurface,
+                        coords,
+                    })?
+                    .into(),
+                ))
+                .await?;
+        }
+        let first_surface =
+            decode_surface_tile_batch_result(&next_client_binary(&mut first).await?)?;
+        let second_surface =
+            decode_surface_tile_batch_result(&next_client_binary(&mut second).await?)?;
+        assert_eq!(
+            first_surface
+                .items
+                .iter()
+                .map(|item| item.coord)
+                .collect::<Vec<_>>(),
+            vec![surface_a, surface_b]
+        );
+        assert_eq!(
+            second_surface
+                .items
+                .iter()
+                .map(|item| item.coord)
+                .collect::<Vec<_>>(),
+            vec![surface_b, surface_c]
+        );
+        assert_eq!(batch_calls.load(Ordering::Relaxed), 4);
+        let counts = product_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for coord in [surface_a, surface_b, surface_c] {
+            assert_eq!(
+                counts.get(&WorldProductRequest::SurfaceTile(coord)),
+                Some(&1)
+            );
+        }
+        drop(counts);
+
+        first
+            .send(ClientMessage::Binary(
+                encode_surface_tile_batch(&SurfaceTileBatchRequest {
+                    request_id: 44,
+                    priority: WorldProductPriority::Prefetch,
+                    coords: vec![surface_c, surface_b, surface_a],
+                })?
+                .into(),
+            ))
+            .await?;
+        let cached_surface =
+            decode_surface_tile_batch_result(&next_client_binary(&mut first).await?)?;
+        assert_eq!(
+            cached_surface
+                .items
+                .iter()
+                .map(|item| item.coord)
+                .collect::<Vec<_>>(),
+            vec![surface_c, surface_b, surface_a]
+        );
+        assert_eq!(batch_calls.load(Ordering::Relaxed), 4);
 
         first.close(None).await?;
         second.close(None).await?;

@@ -141,9 +141,10 @@ The browser always consumes the daemon's canonical chunk and progressive surface
 client never branches on provider selection; changing the daemon source and restarting it is
 sufficient to switch between procedural and learned terrain. The transport bounds total accepted
 connections and queued work, and the per-client worker cap prevents one connection from occupying
-the complete local generation pool. `product_cache_bytes` bounds an LRU of compressed immutable
-batch responses. Concurrent identical batches single-flight through one CPU/Metal generation and
-then receive independently request-ID-keyed copies of that response.
+the complete local generation pool. `product_cache_bytes` bounds an LRU of validated encoded product
+items. Concurrent overlapping batches single-flight each chunk or surface tile through one CPU/Metal
+generation, then assemble their requested order into independently request-ID-keyed VXWP responses.
+Priority and batch shape affect scheduling, not cache identity.
 
 `[edits].database` is the native authoritative world/player SQLite file. Relative paths resolve from
 the service configuration, not the process working directory. The Rust service expands
