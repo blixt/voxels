@@ -410,9 +410,9 @@ gate completed 38 rapid reloads across three tabs, including four simultaneous r
 live follower edit, with zero persistence errors. Its fault-injection companion denied the first 20
 VFS acquisitions and recovered on call 21 with a canvas-only document and zero console errors.
 
-Visual release inspection used the Rust-rendered “Follow pilgrim road” context action to reconstruct
-the first ruined arch beside the paved bed. Mission Control, context menu, telemetry, crosshair, and
-startup controls remained WGPU draw data; the document body contained exactly one canvas.
+Visual release inspection reconstructed the first ruined arch beside the paved bed at its explicit
+profile spawn. Mission Control, telemetry, crosshair, and startup controls remained WGPU draw data;
+the document body contained exactly one canvas.
 
 ## 2026-07-12: continuous regional daylight
 
@@ -423,8 +423,8 @@ clear day, golden hour, and blue hour alter one shared sun/sky/fog/cloud environ
 sparse procedural star field. The sky and terrain evaluate the same world-anchored cloud field so
 cloud motion also modulates direct sunlight without adding a render pass, texture, draw, or allocation.
 
-`vp run profile:atmosphere` changes all four phases by opening the Rust Mission Control context menu
-and clicking the canvas row. At 1280x720 on the M3 Max / system Chrome, every four-second window held
+`vp run profile:atmosphere` changes all four phases through the explicit Rust Mission Control TIME
+action. At 1280x720 on the M3 Max / system Chrome, every four-second window held
 the 120 Hz cap with zero dropped samples and no frame over 16.67 ms:
 
 | Phase       | Frame p95 | World GPU p95 | Active-window GPU p95 | Cloud cover |

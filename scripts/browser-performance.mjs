@@ -346,11 +346,9 @@ async function cycleDaylight(page, viewportWidth, expectedPhase) {
   await page.keyboard.press("Escape");
   await page.keyboard.press("F3");
   await page.waitForTimeout(100);
-  await page.mouse.click(viewportWidth - 83, 90);
-  await page.waitForTimeout(100);
-  // The fifth Rust context row is "Cycle regional daylight". This intentionally exercises canvas
+  // TIME is an explicit Mission Control header action. This intentionally exercises Rust canvas
   // hit-testing rather than adding a browser-side debug setter for atmosphere state.
-  await page.mouse.click(viewportWidth - 171, 270);
+  await page.mouse.click(viewportWidth - 134, 88);
   await page.waitForFunction(
     async ({ index, expected }) => {
       const snapshot = await globalThis.__VOXELS__.snapshot();

@@ -70,7 +70,7 @@ terrain used by two measured laps, making its arena-plateau gate prove allocatio
 canonical and LOD queue must drain.
 `vp run profile:materials` toggles Rust-generated material detail through canvas hit-testing and gates
 identical geometry/residency plus the incremental frame and GPU cost.
-`vp run profile:atmosphere` drives the Rust canvas context menu through dawn, clear day, golden hour,
+`vp run profile:atmosphere` drives the Rust Mission Control daylight action through dawn, clear day, golden hour,
 and blue hour, captures each phase, and gates identical geometry plus frame/GPU budgets.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
@@ -118,17 +118,15 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
   <kbd>Space</kbd> to ascend, and <kbd>Shift</kbd> to dive.
 - Look with the mouse; <kbd>Esc</kbd> releases pointer lock.
 - Excavate a 0.5 m-wide cube inward from the targeted face with the left mouse button; place the
-  Rust-selected material with the right mouse button. Cycle Grass, Stone, Basalt, and Glow Crystal
-  from the Mission Control context menu. Sparse edits are committed transactionally by the native
+  Rust-selected material with the right mouse button. Cycle stocked materials with the mouse wheel
+  or inventory wheel. Sparse edits are committed transactionally by the native
   world service and streamed to every interested browser; browser OPFS stores only local player
   camera state.
-- Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and context menu
+- Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and controls
   can toggle cascaded sun shadows, voxel AO, screen-space contact AO, fog, far terrain, animated
   water, target highlighting, material surface detail, or voxel emissive lights without a DOM UI
-  layer. Its Rust-rendered
-  more menu can teleport to the coastal showcase, follow the 26 marks of the pilgrim road, or cycle
-  through regional landmarks and regional daylight phases for repeatable graphics and streaming
-  checks.
+  layer. Explicit header actions copy the complete diagnostic report, preview the next daylight
+  phase for repeatable graphics checks, or reset renderer features to the configured baseline.
 
 ## Automation
 

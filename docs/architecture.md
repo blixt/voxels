@@ -134,8 +134,8 @@ cells take precedence over ambient placement and alternate sides while cycling e
 waystones, and ruined arches. Their canonical analytic shapes use ordinary material voxels, and their
 bounded LOD proxies use the same pristine-edit suppression and anchor ownership as regional
 landmarks. The final segment deliberately retains a nearby badlands hoodoo as a destination
-silhouette. The Rust Mission Control context menu reconstructs these identities to tour the road;
-no route, teleport, or UI semantics cross into TypeScript.
+silhouette. Route and landmark identities remain world data; no route, teleport, or UI semantics
+cross into TypeScript.
 
 Generator v11 replaces the composition layer's generic 50%-taller heroes with six append-only
 semantic identities: elder canopy, tor circle, needle gate, buried ribs, buried colonnade, and basalt
@@ -341,8 +341,8 @@ while unreachable retained allocations stop drawing immediately without requirin
 Replacement uploads preserve the reason mask. Retained resident chunks edited outside the current
 desired set are still allowed to finish remeshing, preventing a permanently queued transaction.
 
-Placement material is Rust state, selected through the canvas context menu and displayed in the Rust
-header. The browser still transmits only raw input records; right-click uses the selected material and the
+Placement material is Rust state, selected through the inventory wheel and displayed in the Rust
+UI. The browser still transmits only raw input records; right-click uses the selected material and the
 ordinary sparse-edit/SQLite/remesh path, so GlowCrystal is not a renderer-only decoration.
 
 The current persistent chunk format, VXCH v2, is versioned and little-endian:
