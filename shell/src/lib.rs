@@ -95,8 +95,8 @@ mod web {
         StreamScheduler, SurfaceFocusAction, SurfaceRevisionCache, revision_satisfies,
     };
     use voxels_world::protocol::{
-        BrowserUserId, EditAction, MaterialInventory, PlayerId, PlayerIdentity, VoxelFace,
-        VoxelMutation,
+        BrowserUserId, DigVolume, EditAction, MaterialInventory, PlayerId, PlayerIdentity,
+        VoxelFace, VoxelMutation,
     };
     use voxels_world::{
         AtmosphereSample, CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT_PORTAL_COUNT,
@@ -539,10 +539,10 @@ mod web {
             let stream_ms = (performance_now(performance.as_ref()) - stream_start) as f32;
             self.stream_milliseconds
                 .set(smoothed_ms(self.stream_milliseconds.get(), stream_ms));
-            let target = self.raycast_target(&camera).map(|hit| hit.voxel);
+            let target = self.dig_target(&camera);
             let mut renderer = self.renderer.borrow_mut();
             renderer.set_remote_avatars(&remote_avatars);
-            renderer.set_target_voxel(target);
+            renderer.set_dig_target(target.map(|(hit, volume)| (hit.voxel, volume)));
             let (atmosphere, region) = self.remote_environment;
             renderer.set_atmosphere(atmosphere, region);
             let enclosure = self.enclosure.get();
@@ -1484,8 +1484,18 @@ mod web {
                 let Some(face) = VoxelFace::from_normal(hit.normal) else {
                     return;
                 };
+                let hit_coord = VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]);
+                let Some(volume) = DigVolume::for_hit_face(hit_coord, face) else {
+                    return;
+                };
+                if !self.dig_volume_resident(volume) {
+                    self.renderer
+                        .borrow_mut()
+                        .show_gameplay_toast("Loading edit area…");
+                    return;
+                }
                 EditAction::Dig {
-                    hit: VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]),
+                    hit: hit_coord,
                     face,
                 }
             } else if buttons & 2 != 0 {
@@ -1784,6 +1794,32 @@ mod web {
                     }
                 },
             )
+        }
+
+        fn dig_target(&self, camera: &CameraState) -> Option<(VoxelHit, DigVolume)> {
+            let hit = self.raycast_target(camera)?;
+            let face = VoxelFace::from_normal(hit.normal)?;
+            let volume = DigVolume::for_hit_face(
+                VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]),
+                face,
+            )?;
+            self.dig_volume_resident(volume).then_some((hit, volume))
+        }
+
+        fn dig_volume_resident(&self, volume: DigVolume) -> bool {
+            let minimum = volume.min.chunk();
+            let maximum = volume.max.chunk();
+            let chunks = self.chunks.borrow();
+            for z in minimum.z..=maximum.z {
+                for y in minimum.y..=maximum.y {
+                    for x in minimum.x..=maximum.x {
+                        if !chunks.contains_key(&(x, y, z)) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            true
         }
     }
 

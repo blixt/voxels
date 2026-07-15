@@ -384,6 +384,54 @@ pub enum EditAction {
     },
 }
 
+/// The authoritative half-metre dig cube. Bounds are inclusive canonical voxel coordinates and
+/// are shared by the server planner and client preview so the highlighted area cannot drift from
+/// the atomic edit.
+pub const DIG_EDGE_VOXELS: i32 = 5;
+pub const DIG_VOLUME_VOXELS: usize = DIG_EDGE_VOXELS.pow(3) as usize;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DigVolume {
+    pub min: VoxelCoord,
+    pub max: VoxelCoord,
+}
+
+impl DigVolume {
+    pub fn for_hit_face(hit: VoxelCoord, face: VoxelFace) -> Option<Self> {
+        let normal = face.normal();
+        let (min_x, max_x) = dig_axis_bounds(hit.x, normal[0])?;
+        let (min_y, max_y) = dig_axis_bounds(hit.y, normal[1])?;
+        let (min_z, max_z) = dig_axis_bounds(hit.z, normal[2])?;
+        Some(Self {
+            min: VoxelCoord::new(min_x, min_y, min_z),
+            max: VoxelCoord::new(max_x, max_y, max_z),
+        })
+    }
+
+    pub const fn sample_shape(self) -> [u32; 3] {
+        [DIG_EDGE_VOXELS as u32; 3]
+    }
+
+    pub const fn contains(self, coord: VoxelCoord) -> bool {
+        coord.x >= self.min.x
+            && coord.x <= self.max.x
+            && coord.y >= self.min.y
+            && coord.y <= self.max.y
+            && coord.z >= self.min.z
+            && coord.z <= self.max.z
+    }
+}
+
+fn dig_axis_bounds(value: i32, outward_normal: i8) -> Option<(i32, i32)> {
+    let radius = DIG_EDGE_VOXELS / 2;
+    match outward_normal {
+        -1 => Some((value, value.checked_add(DIG_EDGE_VOXELS - 1)?)),
+        0 => Some((value.checked_sub(radius)?, value.checked_add(radius)?)),
+        1 => Some((value.checked_sub(DIG_EDGE_VOXELS - 1)?, value)),
+        _ => None,
+    }
+}
+
 impl EditAction {
     pub const fn target(self) -> VoxelCoord {
         match self {
@@ -3111,6 +3159,56 @@ mod tests {
             player_id: PlayerId::from_bytes([seed.wrapping_add(1); 16]),
             player_name: player_name.to_owned(),
         }
+    }
+
+    #[test]
+    fn dig_volume_matches_the_exact_face_oriented_half_metre_cube() {
+        let hit = VoxelCoord::new(10, -20, 30);
+        for face in [
+            VoxelFace::NegativeX,
+            VoxelFace::PositiveX,
+            VoxelFace::NegativeY,
+            VoxelFace::PositiveY,
+            VoxelFace::NegativeZ,
+            VoxelFace::PositiveZ,
+        ] {
+            let volume = DigVolume::for_hit_face(hit, face).expect("bounded dig volume");
+            assert_eq!(volume.sample_shape(), [5, 5, 5]);
+            assert_eq!(volume.max.x - volume.min.x + 1, DIG_EDGE_VOXELS);
+            assert_eq!(volume.max.y - volume.min.y + 1, DIG_EDGE_VOXELS);
+            assert_eq!(volume.max.z - volume.min.z + 1, DIG_EDGE_VOXELS);
+            assert!(volume.contains(hit));
+
+            let normal = face.normal();
+            for axis in 0..3 {
+                let hit_axis = [hit.x, hit.y, hit.z][axis];
+                let minimum = [volume.min.x, volume.min.y, volume.min.z][axis];
+                let maximum = [volume.max.x, volume.max.y, volume.max.z][axis];
+                match normal[axis] {
+                    -1 => assert_eq!((minimum, maximum), (hit_axis, hit_axis + 4)),
+                    0 => assert_eq!((minimum, maximum), (hit_axis - 2, hit_axis + 2)),
+                    1 => assert_eq!((minimum, maximum), (hit_axis - 4, hit_axis)),
+                    _ => unreachable!(),
+                }
+            }
+        }
+        assert_eq!(DIG_VOLUME_VOXELS, 125);
+    }
+
+    #[test]
+    fn dig_volume_rejects_coordinate_overflow_atomically() {
+        assert!(
+            DigVolume::for_hit_face(VoxelCoord::new(i32::MAX, 0, 0), VoxelFace::NegativeX,)
+                .is_none()
+        );
+        assert!(
+            DigVolume::for_hit_face(VoxelCoord::new(i32::MIN, 0, 0), VoxelFace::PositiveX,)
+                .is_none()
+        );
+        assert!(
+            DigVolume::for_hit_face(VoxelCoord::new(i32::MAX, 0, 0), VoxelFace::PositiveY,)
+                .is_none()
+        );
     }
 
     #[test]

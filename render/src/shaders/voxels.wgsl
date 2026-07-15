@@ -4,6 +4,7 @@ struct Frame {
   camera_time: vec4<f32>,
   viewport_voxel: vec4<f32>,
   target_voxel: vec4<f32>,
+  target_voxel_max: vec4<f32>,
   render_options: vec4<f32>,
   lod_options: vec4<f32>,
   camera_forward: vec4<f32>,
@@ -670,7 +671,10 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   }
   let inside_position = input.world - input.normal * frame.viewport_voxel.z * 0.02;
   let voxel = floor(inside_position / frame.viewport_voxel.z);
-  let targeted = frame.render_options.w > 0.5 && frame.target_voxel.w > 0.5 && all(abs(voxel - frame.target_voxel.xyz) < vec3<f32>(0.1));
+  let targeted = frame.render_options.w > 0.5
+    && frame.target_voxel.w > 0.5
+    && all(voxel >= frame.target_voxel.xyz)
+    && all(voxel <= frame.target_voxel_max.xyz);
   if targeted {
     let coordinate = fract(input.world / frame.viewport_voxel.z + vec3<f32>(0.0001));
     var edge = 1.0;

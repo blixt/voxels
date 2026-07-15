@@ -8,10 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::mpsc;
 use uuid::Uuid;
+#[cfg(test)]
+use voxels_world::protocol::DIG_EDGE_VOXELS;
 use voxels_world::protocol::{
-    EDIT_SESSION_NOT_CURRENT, EditAction, EditCommand, EditCommit, EditSessionId,
-    MATERIAL_INVENTORY_SLOTS, MAX_EDIT_AFFECTED_CHUNKS, MAX_EDIT_AFFECTED_SURFACE_TILES,
-    MAX_EDIT_MUTATIONS, MaterialInventory, PlayerId, PlayerResume, VoxelFace, VoxelMutation,
+    DIG_VOLUME_VOXELS, DigVolume, EDIT_SESSION_NOT_CURRENT, EditAction, EditCommand, EditCommit,
+    EditSessionId, MATERIAL_INVENTORY_SLOTS, MAX_EDIT_AFFECTED_CHUNKS,
+    MAX_EDIT_AFFECTED_SURFACE_TILES, MAX_EDIT_MUTATIONS, MaterialInventory, PlayerId, PlayerResume,
+    VoxelFace, VoxelMutation,
 };
 use voxels_world::{
     ChunkCoord, EditMap, Material, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES,
@@ -22,10 +25,12 @@ use voxels_world::{
 use crate::EDIT_DATABASE_SCHEMA_VERSION;
 
 const INITIAL_REVISION: u64 = 1;
-const DIG_EDGE_VOXELS: i32 = 5;
+#[cfg(test)]
 const DIG_RADIUS_VOXELS: i32 = DIG_EDGE_VOXELS / 2;
+#[cfg(test)]
 const DIG_SAMPLE_SHAPE: [u32; 3] = [DIG_EDGE_VOXELS as u32; 3];
-const DIG_MAX_MUTATIONS: usize = DIG_EDGE_VOXELS.pow(3) as usize;
+#[cfg(test)]
+const DIG_MAX_MUTATIONS: usize = DIG_VOLUME_VOXELS;
 
 pub(crate) struct EditAuthority {
     inner: Mutex<EditState>,
@@ -958,17 +963,14 @@ fn plan_action(
 ) -> Result<(Vec<VoxelMutation>, MaterialInventory), EditAuthorityError> {
     match action {
         EditAction::Dig { hit, face } => {
-            let normal = face.normal();
-            let (min_x, max_x) = dig_axis_bounds(hit.x, normal[0])?;
-            let (min_y, max_y) = dig_axis_bounds(hit.y, normal[1])?;
-            let (min_z, max_z) = dig_axis_bounds(hit.z, normal[2])?;
-            let min = VoxelCoord::new(min_x, min_y, min_z);
-            let max = VoxelCoord::new(max_x, max_y, max_z);
-            let snapshot = source_voxel_block(source, min, DIG_SAMPLE_SHAPE)?;
-            let mut mutations = Vec::with_capacity(DIG_MAX_MUTATIONS);
-            for x in min.x..=max.x {
-                for y in min.y..=max.y {
-                    for z in min.z..=max.z {
+            let volume = DigVolume::for_hit_face(hit, face).ok_or_else(|| {
+                EditAuthorityError("dig volume exceeds world coordinates".to_owned())
+            })?;
+            let snapshot = source_voxel_block(source, volume.min, volume.sample_shape())?;
+            let mut mutations = Vec::with_capacity(DIG_VOLUME_VOXELS);
+            for x in volume.min.x..=volume.max.x {
+                for y in volume.min.y..=volume.max.y {
+                    for z in volume.min.z..=volume.max.z {
                         let coord = VoxelCoord::new(x, y, z);
                         let generated = snapshot.sample(coord).ok_or_else(|| {
                             EditAuthorityError("source omitted a requested dig voxel".to_owned())
@@ -1013,25 +1015,6 @@ fn plan_action(
             *slot -= 1;
             Ok((vec![VoxelMutation { coord, material }], inventory))
         }
-    }
-}
-
-fn dig_axis_bounds(value: i32, outward_normal: i8) -> Result<(i32, i32), EditAuthorityError> {
-    let error = || EditAuthorityError("dig volume exceeds world coordinates".to_owned());
-    match outward_normal {
-        -1 => Ok((
-            value,
-            value.checked_add(DIG_EDGE_VOXELS - 1).ok_or_else(error)?,
-        )),
-        0 => Ok((
-            value.checked_sub(DIG_RADIUS_VOXELS).ok_or_else(error)?,
-            value.checked_add(DIG_RADIUS_VOXELS).ok_or_else(error)?,
-        )),
-        1 => Ok((
-            value.checked_sub(DIG_EDGE_VOXELS - 1).ok_or_else(error)?,
-            value,
-        )),
-        _ => Err(EditAuthorityError("dig face normal is invalid".to_owned())),
     }
 }
 

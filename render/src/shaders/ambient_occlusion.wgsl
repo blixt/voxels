@@ -4,6 +4,7 @@ struct Frame {
   camera_time: vec4<f32>,
   viewport_voxel: vec4<f32>,
   target_voxel: vec4<f32>,
+  target_voxel_max: vec4<f32>,
   render_options: vec4<f32>,
   lod_options: vec4<f32>,
   camera_forward: vec4<f32>,

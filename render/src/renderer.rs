@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample, RemoteAvatarPose};
+use voxels_world::protocol::DigVolume;
 use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, ChunkCoord, Material, MeshedChunk, Quad, RenderLayer,
     SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfaceRegion, SurfaceTileCoord,
@@ -172,6 +173,7 @@ struct FrameUniform {
     camera_time: [f32; 4],
     viewport_voxel: [f32; 4],
     target_voxel: [f32; 4],
+    target_voxel_max: [f32; 4],
     render_options: [f32; 4],
     lod_options: [f32; 4],
     camera_forward: [f32; 4],
@@ -188,9 +190,9 @@ struct FrameUniform {
     interior: [f32; 4],
 }
 
-const _: () = assert!(size_of::<FrameUniform>() == 576);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 544);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 560);
+const _: () = assert!(size_of::<FrameUniform>() == 592);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 560);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 576);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
@@ -674,6 +676,7 @@ pub struct Renderer {
     diagnostics: RenderDiagnostics,
     gpu_timer: Option<GpuTimer>,
     target_voxel: Option<[i32; 3]>,
+    target_volume: Option<DigVolume>,
     options: RenderOptions,
     environment: OutdoorEnvironment,
     environment_target: OutdoorEnvironment,
@@ -1396,6 +1399,7 @@ impl Renderer {
             diagnostics: RenderDiagnostics::default(),
             gpu_timer,
             target_voxel: None,
+            target_volume: None,
             options,
             environment,
             environment_target: environment,
@@ -1475,8 +1479,9 @@ impl Renderer {
         self.remote_avatars.extend_from_slice(avatars);
     }
 
-    pub const fn set_target_voxel(&mut self, target: Option<[i32; 3]>) {
-        self.target_voxel = target;
+    pub fn set_dig_target(&mut self, target: Option<([i32; 3], DigVolume)>) {
+        self.target_voxel = target.map(|(hit, _)| hit);
+        self.target_volume = target.map(|(_, volume)| volume);
     }
 
     pub fn set_atmosphere(&mut self, sample: AtmosphereSample, region: SurfaceRegion) {
@@ -2185,7 +2190,7 @@ impl Renderer {
             &self.config,
             camera,
             self.time,
-            self.target_voxel,
+            self.target_volume,
             FrameState {
                 options: self.options,
                 readiness: self.lod_readiness(),
@@ -2938,7 +2943,7 @@ fn frame_uniform(
     config: &SurfaceConfiguration,
     camera: &CameraState,
     time: f32,
-    target: Option<[i32; 3]>,
+    target: Option<DigVolume>,
     state: FrameState,
     shadows: &DirectionalShadowCascades,
     renderer_config: RendererConfig,
@@ -2968,8 +2973,21 @@ fn frame_uniform(
             VOXEL_SIZE_METRES,
             renderer_config.view_distance_metres,
         ],
-        target_voxel: target.map_or([0.0; 4], |value| {
-            [value[0] as f32, value[1] as f32, value[2] as f32, 1.0]
+        target_voxel: target.map_or([0.0; 4], |volume| {
+            [
+                volume.min.x as f32,
+                volume.min.y as f32,
+                volume.min.z as f32,
+                1.0,
+            ]
+        }),
+        target_voxel_max: target.map_or([0.0; 4], |volume| {
+            [
+                volume.max.x as f32,
+                volume.max.y as f32,
+                volume.max.z as f32,
+                1.0,
+            ]
         }),
         render_options: [
             if options.ambient_occlusion { 1.0 } else { 0.0 },
