@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
+  browserWasmProfile,
   isNativeWorldServiceInput,
   pathBelongsTo,
   watchRustInputChanges,
@@ -89,5 +90,21 @@ listen = "127.0.0.1:9777"
     expect(pathBelongsTo("/repo/world/src-old/lib.rs", "/repo/world/src")).toBe(false);
     expect(isNativeWorldServiceInput("world/src/source.rs")).toBe(true);
     expect(isNativeWorldServiceInput("shell/src/lib.rs")).toBe(false);
+  });
+});
+
+describe("browser WASM build profile", () => {
+  it("uses optimized incremental WASM for play and release WASM for production builds", () => {
+    expect(browserWasmProfile("serve", undefined)).toBe("wasm-dev");
+    expect(browserWasmProfile("build", undefined)).toBe("release");
+  });
+
+  it("keeps explicit profiles available for controlled performance comparisons", () => {
+    expect(browserWasmProfile("serve", "debug")).toBe("debug");
+    expect(browserWasmProfile("build", "wasm-dev")).toBe("wasm-dev");
+    expect(browserWasmProfile("serve", "release")).toBe("release");
+    expect(() => browserWasmProfile("serve", "fast")).toThrow(
+      "expected debug, wasm-dev, or release",
+    );
   });
 });

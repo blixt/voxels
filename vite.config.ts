@@ -10,6 +10,7 @@ import {
   RUST_SOURCE_DIRS,
   rustTool,
 } from "./scripts/build-wasm.ts";
+import type { WasmBuildProfile } from "./scripts/build-wasm.ts";
 import { worldServiceBuildCargoArgs } from "./scripts/world-service-command.ts";
 import type { WorldServiceCargoProfile } from "./scripts/world-service-command.ts";
 
@@ -34,6 +35,21 @@ export function worldServiceDevelopmentProfile(
   if (configured === "worldgen" || configured === "worldgen-dev") return configured;
   throw new Error(
     `invalid VOXELS_WORLD_SERVICE_PROFILE ${configured}; expected worldgen-dev or worldgen`,
+  );
+}
+
+export function browserWasmProfile(
+  command: "build" | "serve",
+  configured = process.env.VOXELS_BROWSER_BUILD_PROFILE,
+): WasmBuildProfile {
+  if (configured === undefined || configured === "") {
+    return command === "build" ? "release" : "wasm-dev";
+  }
+  if (configured === "debug" || configured === "wasm-dev" || configured === "release") {
+    return configured;
+  }
+  throw new Error(
+    `invalid VOXELS_BROWSER_BUILD_PROFILE ${configured}; expected debug, wasm-dev, or release`,
   );
 }
 
@@ -114,7 +130,7 @@ export function watchRustInputChanges(
   for (const event of ["add", "change", "unlink"] as const) watcher.on(event, listener);
 }
 
-function rustWasm(release: boolean): Plugin {
+function rustWasm(profile: WasmBuildProfile): Plugin {
   const directories = RUST_SOURCE_DIRS.map((source) => path.resolve(source));
   const files = RUST_INPUT_FILES.map((source) => path.resolve(source));
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -130,8 +146,7 @@ function rustWasm(release: boolean): Plugin {
       if (pathBelongsTo(context.file, GENERATED_WASM_DIRECTORY)) return [];
     },
     buildStart() {
-      if (release) buildWasm(true);
-      else ensureWasmBuilt();
+      ensureWasmBuilt(profile);
     },
     configureServer(server) {
       for (const input of [...directories, ...files]) server.watcher.add(input);
@@ -144,7 +159,7 @@ function rustWasm(release: boolean): Plugin {
           const delegateReload = nativeReloadWillFollow;
           nativeReloadWillFollow = false;
           try {
-            buildWasm(false);
+            buildWasm(profile);
             sharedBrowserBuildReady = true;
             if (!delegateReload) {
               server.moduleGraph.invalidateAll();
@@ -471,7 +486,7 @@ export default defineConfig(({ command, mode }) => ({
       ? []
       : [
           clientConfig(command === "build"),
-          rustWasm(command === "build"),
+          rustWasm(browserWasmProfile(command)),
           canvasRuntimeReload(),
           nativeWorldService(),
         ],

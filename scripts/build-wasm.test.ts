@@ -6,11 +6,19 @@ import {
   RUST_INPUT_FILES,
   RUST_SOURCE_DIRS,
   validateWasmBindgenCliVersion,
+  wasmBuildIsCurrent,
 } from "./build-wasm.ts";
 
 const root = new URL("../", import.meta.url);
 
 describe("WASM build inputs", () => {
+  it("never reuses an artifact built with a different profile", () => {
+    assert.equal(wasmBuildIsCurrent("wasm-dev", "wasm-dev", 20, 10, true), true);
+    assert.equal(wasmBuildIsCurrent("release", "wasm-dev", 20, 10, true), false);
+    assert.equal(wasmBuildIsCurrent("wasm-dev", "wasm-dev", 10, 20, true), false);
+    assert.equal(wasmBuildIsCurrent("wasm-dev", "wasm-dev", 20, 10, false), false);
+  });
+
   it("tracks every local crate in the browser shell dependency graph", () => {
     const manifest = readFileSync(new URL("Cargo.toml", root), "utf8");
     const members = manifest.match(/members\s*=\s*(\[[^\]]+\])/s)?.[1];
@@ -59,8 +67,8 @@ export interface InitOutput {
       `export class EngineHandle {
 }
 export interface InitOutput {
-    readonly memory: WebAssembly.Memory;
     readonly enginehandle_destroy: (a: number) => void;
+    readonly memory: WebAssembly.Memory;
 }`,
     );
   });

@@ -18,6 +18,9 @@ const ROOT = process.cwd();
 const OUT = join(ROOT, "web/generated");
 const TARGET = "wasm32-unknown-unknown";
 const CARGO_BIN = join(homedir(), ".cargo/bin");
+const PROFILE_MARKER = "voxels-build-profile";
+
+export type WasmBuildProfile = "debug" | "wasm-dev" | "release";
 
 // Only crates in the browser shell's dependency graph invalidate its WASM artifact. Native service
 // and Metal-provider edits must not trigger an unrelated browser rebuild during development.
@@ -125,11 +128,10 @@ function run(command: string, args: string[]): void {
   });
 }
 
-export function buildWasm(release = false): void {
-  const profile = release ? "release" : "debug";
+export function buildWasm(profile: WasmBuildProfile = "wasm-dev"): void {
   const wasmBindgen = wasmBindgenTool();
   const cargoArgs = ["build", "--target", TARGET, "-p", "voxels-shell"];
-  if (release) cargoArgs.push("--release");
+  if (profile !== "debug") cargoArgs.push("--profile", profile);
   run(rustTool("cargo"), cargoArgs);
 
   mkdirSync(join(ROOT, "target"), { recursive: true });
@@ -144,6 +146,7 @@ export function buildWasm(release = false): void {
       "voxels",
       join(ROOT, "target", TARGET, profile, "voxels.wasm"),
     ]);
+    writeFileSync(join(staging, PROFILE_MARKER), `${profile}\n`);
     publish(staging);
   } finally {
     rmSync(staging, { recursive: true, force: true });
@@ -174,13 +177,29 @@ export function normalizeWasmDeclaration(source: string): string {
   // Debug and release builds expose different hashed closure trampolines in InitOutput. They are
   // implementation details rather than callable application exports, so retaining them makes the
   // one tracked declaration alternate between profiles without adding useful type information.
-  return supported
+  const filtered = supported
     .split("\n")
     .filter(
       (line) =>
         !(line.startsWith("    readonly wasm_bindgen_") && line.includes("___convert__closures")),
-    )
-    .join("\n");
+    );
+  const output: string[] = [];
+  let initOutput: string[] | undefined;
+  for (const line of filtered) {
+    if (line === "export interface InitOutput {") {
+      output.push(line);
+      initOutput = [];
+    } else if (initOutput && line === "}") {
+      output.push(...initOutput.toSorted(), line);
+      initOutput = undefined;
+    } else if (initOutput) {
+      initOutput.push(line);
+    } else {
+      output.push(line);
+    }
+  }
+  if (initOutput) output.push(...initOutput.toSorted());
+  return output.join("\n");
 }
 
 function newestSource(path: string): number {
@@ -195,16 +214,48 @@ function newestSource(path: string): number {
   return newest;
 }
 
-export function ensureWasmBuilt(): void {
+export function ensureWasmBuilt(profile: WasmBuildProfile = "wasm-dev"): void {
   const artifact = join(OUT, "voxels_bg.wasm");
   const built = existsSync(artifact) ? statSync(artifact).mtimeMs : 0;
+  const publishedProfile = existsSync(join(OUT, PROFILE_MARKER))
+    ? readFileSync(join(OUT, PROFILE_MARKER), "utf8").trim()
+    : "";
   const newest = Math.max(
     ...RUST_SOURCE_DIRS.map((path) => newestSource(join(ROOT, path))),
     ...RUST_INPUT_FILES.map((path) => newestSource(join(ROOT, path))),
   );
-  if (built < newest || !existsSync(join(OUT, "voxels.js"))) buildWasm(false);
+  if (
+    !wasmBuildIsCurrent(
+      publishedProfile,
+      profile,
+      built,
+      newest,
+      existsSync(join(OUT, "voxels.js")),
+    )
+  ) {
+    buildWasm(profile);
+  }
+}
+
+export function wasmBuildIsCurrent(
+  publishedProfile: string,
+  requestedProfile: WasmBuildProfile,
+  artifactModifiedMs: number,
+  newestInputModifiedMs: number,
+  hasJavaScriptGlue: boolean,
+): boolean {
+  return (
+    publishedProfile === requestedProfile &&
+    artifactModifiedMs >= newestInputModifiedMs &&
+    hasJavaScriptGlue
+  );
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  buildWasm(process.argv.includes("--release"));
+  const profile = process.argv.includes("--release")
+    ? "release"
+    : process.argv.includes("--debug")
+      ? "debug"
+      : "wasm-dev";
+  buildWasm(profile);
 }

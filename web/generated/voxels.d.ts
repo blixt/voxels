@@ -41,8 +41,16 @@ export function create_engine(canvas: OffscreenCanvas, css_width: number, css_he
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
-    readonly memory: WebAssembly.Memory;
+    readonly __externref_table_alloc: () => number;
+    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbg_enginehandle_free: (a: number, b: number) => void;
+    readonly __wbindgen_destroy_closure: (a: number, b: number) => void;
+    readonly __wbindgen_exn_store: (a: number) => void;
+    readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_start: () => void;
     readonly create_engine: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => any;
     readonly enginehandle_destroy: (a: number) => any;
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => number;
@@ -55,25 +63,17 @@ export interface InitOutput {
     readonly enginehandle_submit_dig: (a: number, b: number, c: number, d: number) => number;
     readonly enginehandle_submit_edit: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly enginehandle_surface_edit_state: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly memory: WebAssembly.Memory;
     readonly rust_sqlite_wasm_abort: () => void;
     readonly rust_sqlite_wasm_assert_fail: (a: number, b: number, c: number, d: number) => void;
     readonly rust_sqlite_wasm_calloc: (a: number, b: number) => number;
-    readonly rust_sqlite_wasm_malloc: (a: number) => number;
     readonly rust_sqlite_wasm_free: (a: number) => void;
     readonly rust_sqlite_wasm_getentropy: (a: number, b: number) => number;
     readonly rust_sqlite_wasm_localtime: (a: number) => number;
+    readonly rust_sqlite_wasm_malloc: (a: number) => number;
     readonly rust_sqlite_wasm_realloc: (a: number, b: number) => number;
     readonly sqlite3_os_end: () => number;
     readonly sqlite3_os_init: () => number;
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_exn_store: (a: number) => void;
-    readonly __externref_table_alloc: () => number;
-    readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
-    readonly __wbindgen_destroy_closure: (a: number, b: number) => void;
-    readonly __externref_table_dealloc: (a: number) => void;
-    readonly __wbindgen_start: () => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;
