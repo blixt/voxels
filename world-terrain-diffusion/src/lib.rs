@@ -296,17 +296,11 @@ mod metal;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use metal::{
     CoarseTile, DetailTile, FullDetailTile, LatentTile, MetalTerrainDiffusion,
-    TerrainDiffusionMacroTileSource, fetch_pinned_model,
+    TerrainDiffusionMacroTileSource,
 };
 
-#[cfg(not(all(target_os = "macos", feature = "metal")))]
-pub fn fetch_pinned_model(_cache_root: &Path) -> Result<PathBuf, TerrainDiffusionError> {
-    if cfg!(target_os = "macos") {
-        Err(TerrainDiffusionError::MetalFeatureDisabled)
-    } else {
-        Err(TerrainDiffusionError::UnsupportedPlatform)
-    }
-}
+#[cfg(all(target_os = "macos", feature = "metal", feature = "download"))]
+pub use metal::fetch_pinned_model;
 
 #[cfg(test)]
 mod tests {

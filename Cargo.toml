@@ -39,10 +39,40 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 
+# Retain useful source locations while avoiding full dependency debug information in local builds.
+# The latter does not help us debug workspace code and makes WASM binding/link steps needlessly large.
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = false
+
 # Native ML kernels benefit materially from optimizing for throughput instead of WASM size.
 [profile.worldgen]
 inherits = "release"
 opt-level = 3
+
+# `vp dev` rebuilds the native authority after edits to world/service/provider code. Keep third-party
+# numerical and networking crates optimized and cached, but compile frequently edited workspace crates
+# incrementally without whole-program LTO. Production diagnostics continue to use `worldgen` above.
+[profile.worldgen-dev]
+inherits = "dev"
+opt-level = 1
+debug = 1
+incremental = true
+codegen-units = 256
+
+[profile.worldgen-dev.package."*"]
+opt-level = 3
+debug = false
+
+# Chunk composition is CPU-heavy and runs concurrently for many clients. Optimizing just this hot
+# workspace crate recovers most runtime throughput without restoring whole-program LTO link times.
+[profile.worldgen-dev.package.voxels-world]
+opt-level = 3
+codegen-units = 4
+debug-assertions = false
+overflow-checks = false
 
 [profile.bench]
 debug = true

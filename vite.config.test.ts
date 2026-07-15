@@ -3,6 +3,7 @@ import {
   isNativeWorldServiceInput,
   pathBelongsTo,
   watchRustInputChanges,
+  worldServiceDevelopmentProfile,
   worldServiceListenAddress,
 } from "./vite.config.ts";
 import {
@@ -44,11 +45,11 @@ describe("native world-service development command", () => {
     ]);
   });
 
-  it("builds the optimized Metal-enabled daemon before Vite launches it directly", () => {
-    expect(worldServiceBuildCargoArgs({ metal: true })).toEqual([
+  it("builds the incremental Metal-enabled daemon before Vite launches it directly", () => {
+    expect(worldServiceBuildCargoArgs({ metal: true, profile: "worldgen-dev" })).toEqual([
       "build",
       "--profile",
-      "worldgen",
+      "worldgen-dev",
       "-p",
       "voxels-world-service",
       "--features",
@@ -56,6 +57,15 @@ describe("native world-service development command", () => {
       "--bin",
       "voxels-worldd",
     ]);
+  });
+
+  it("defaults Vite to the fast profile while allowing explicit optimized profiling", () => {
+    expect(worldServiceDevelopmentProfile(undefined)).toBe("worldgen-dev");
+    expect(worldServiceDevelopmentProfile("worldgen-dev")).toBe("worldgen-dev");
+    expect(worldServiceDevelopmentProfile("worldgen")).toBe("worldgen");
+    expect(() => worldServiceDevelopmentProfile("release")).toThrow(
+      "expected worldgen-dev or worldgen",
+    );
   });
 
   it("parses the supervised loopback listener from server config", () => {

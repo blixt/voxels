@@ -45,8 +45,11 @@ Set `VOXELS_TERRAIN_SEED` to an unsigned integer to reproduce or compare another
 the seed is part of `WorldSourceIdentity`.
 
 The `metal` Cargo feature is off by default, so the normal host and WASM builds do not compile or
-link an ML runtime. Native ML runs use the `worldgen` Cargo profile (`opt-level = 3`, LTO, one codegen
-unit) and FP16 model tensors by default. FP32 remains available as a diagnostic precision.
+link an ML runtime. Model fetching is a separate `download` feature used only by the diagnostic CLI;
+the world service only loads the configured pinned cache and therefore does not compile HTTP/TLS.
+Native diagnostic runs use the `worldgen` Cargo profile (`opt-level = 3`, LTO, one codegen unit) and
+FP16 model tensors by default. `vp dev` uses the incremental `worldgen-dev` profile while retaining
+optimized third-party numerical kernels. FP32 remains available as a diagnostic precision.
 
 `terrain:counterproof` verifies numerically that every learned stage responds to changed image
 conditioning. `terrain:smoke` runs the authentic 20-step coarse path on a 64x64 tile.

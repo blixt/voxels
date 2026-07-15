@@ -13,7 +13,8 @@ name = "voxels_world_terrain_diffusion"
 
 [features]
 default = []
-metal = ["dep:candle-core", "dep:candle-nn", "dep:reqwest", "dep:serde_json"]
+metal = ["dep:candle-core", "dep:candle-nn", "dep:serde_json"]
+download = ["metal", "dep:reqwest"]
 
 [dependencies]
 voxels-world = { path = "../world" }
@@ -32,4 +33,4 @@ serde_json = { version = "1", optional = true }
 [[bin]]
 name = "voxels-terrain-diffusion"
 path = "src/bin/voxels-terrain-diffusion.rs"
-required-features = ["metal"]
+required-features = ["metal", "download"]

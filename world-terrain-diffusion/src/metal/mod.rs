@@ -3,16 +3,17 @@ mod rng;
 mod scheduler;
 mod synthetic_map;
 
-use crate::{
-    MODEL_FILES, MODEL_REPOSITORY, MODEL_REVISION, TerrainDiffusionConfig, TerrainDiffusionError,
-    TerrainPrecision, validate_model_root,
-};
+#[cfg(feature = "download")]
+use crate::{MODEL_FILES, MODEL_REPOSITORY, MODEL_REVISION};
+use crate::{TerrainDiffusionConfig, TerrainDiffusionError, TerrainPrecision, validate_model_root};
 use candle_core::{DType, Device, Tensor};
 use model::{EdmUnet, EdmUnetConfig};
 use rng::gaussian_patch;
 use scheduler::DpmSolver;
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "download")]
+use std::path::PathBuf;
 use std::time::Instant;
 use synthetic_map::SyntheticMapStats;
 use voxels_world::{
@@ -1261,6 +1262,7 @@ fn reflect_index(mut index: i32, length: usize) -> usize {
     index as usize
 }
 
+#[cfg(feature = "download")]
 pub fn fetch_pinned_model(cache_root: &Path) -> Result<PathBuf, TerrainDiffusionError> {
     let root = cache_root.join(MODEL_REVISION);
     let client = reqwest::blocking::Client::builder()
@@ -1304,6 +1306,7 @@ pub fn fetch_pinned_model(cache_root: &Path) -> Result<PathBuf, TerrainDiffusion
     Ok(root)
 }
 
+#[cfg(feature = "download")]
 fn download_to_partial(
     client: &reqwest::blocking::Client,
     url: &str,

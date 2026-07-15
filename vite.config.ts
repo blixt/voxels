@@ -11,6 +11,7 @@ import {
   rustTool,
 } from "./scripts/build-wasm.ts";
 import { worldServiceBuildCargoArgs } from "./scripts/world-service-command.ts";
+import type { WorldServiceCargoProfile } from "./scripts/world-service-command.ts";
 
 interface RustInputWatcher {
   on(event: "add" | "change" | "unlink", listener: (file: string) => void): unknown;
@@ -25,6 +26,16 @@ const WORLD_SERVICE_CONFIG_SOURCE = path.resolve(
 const GENERATED_WASM_DIRECTORY = path.resolve("web/generated");
 const BROWSER_RUNTIME_DIRECTORY = path.resolve("web");
 let sharedBrowserBuildReady = true;
+
+export function worldServiceDevelopmentProfile(
+  configured = process.env.VOXELS_WORLD_SERVICE_PROFILE,
+): WorldServiceCargoProfile {
+  if (configured === undefined || configured === "") return "worldgen-dev";
+  if (configured === "worldgen" || configured === "worldgen-dev") return configured;
+  throw new Error(
+    `invalid VOXELS_WORLD_SERVICE_PROFILE ${configured}; expected worldgen-dev or worldgen`,
+  );
+}
 
 const NATIVE_WORLD_SERVICE_SOURCE_DIRS = [
   "world-service/src",
@@ -233,6 +244,7 @@ function childExitReason(code: number | null, signal: NodeJS.Signals | null): st
 }
 
 function nativeWorldService(): Plugin {
+  const profile = worldServiceDevelopmentProfile();
   let buildChild: ChildProcess | undefined;
   let daemonChild: ChildProcess | undefined;
   let stopping = false;
@@ -241,11 +253,15 @@ function nativeWorldService(): Plugin {
   let reloadRequested = false;
   let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   let crashAttempts = 0;
+  let finishInitialBuild: (() => Promise<void>) | undefined;
   return {
     name: "voxels-native-world-service",
     apply: (_config, environment) =>
       environment.command === "serve" && process.env.VOXELS_EXTERNAL_WORLD_SERVICE !== "1",
-    async configureServer(server) {
+    async buildStart() {
+      await finishInitialBuild?.();
+    },
+    configureServer(server) {
       let handleSignal: (() => void) | undefined;
       const nativeInputs = [
         ...NATIVE_WORLD_SERVICE_SOURCE_DIRS,
@@ -271,15 +287,19 @@ function nativeWorldService(): Plugin {
 
       const compile = (): Promise<boolean> => {
         server.config.logger.info(
-          "[voxels-world-service] compiling native Terrain Diffusion/Metal daemon",
+          `[voxels-world-service] compiling native Terrain Diffusion/Metal daemon (${profile})`,
         );
         return new Promise((resolve) => {
-          const child = spawn(rustTool("cargo"), worldServiceBuildCargoArgs({ metal: true }), {
-            cwd: process.cwd(),
-            env: process.env,
-            stdio: "inherit",
-            detached: process.platform !== "win32",
-          });
+          const child = spawn(
+            rustTool("cargo"),
+            worldServiceBuildCargoArgs({ metal: true, profile }),
+            {
+              cwd: process.cwd(),
+              env: process.env,
+              stdio: "inherit",
+              detached: process.platform !== "win32",
+            },
+          );
           buildChild = child;
           let settled = false;
           const finish = (success: boolean): void => {
@@ -312,7 +332,7 @@ function nativeWorldService(): Plugin {
       const launch = async (): Promise<void> => {
         const executable = path.resolve(
           process.env.CARGO_TARGET_DIR ?? "target",
-          "worldgen",
+          profile,
           process.platform === "win32" ? "voxels-worldd.exe" : "voxels-worldd",
         );
         server.config.logger.info("[voxels-world-service] starting native daemon");
@@ -350,19 +370,15 @@ function nativeWorldService(): Plugin {
         server.config.logger.info("[voxels-world-service] native daemon ready");
       };
 
-      const rebuild = async (reload: boolean, initial = false): Promise<boolean> => {
+      const rebuild = async (reload: boolean): Promise<boolean> => {
         if (stopping) return false;
         const compiled = await compile();
-        if (!compiled || stopping) {
-          if (initial) throw new Error("initial native world-service build failed");
-          return false;
-        }
+        if (!compiled || stopping) return false;
         if (!sharedBrowserBuildReady) {
           const error = new Error(
             "retaining the previous daemon because the matching browser WASM build failed",
           );
           server.config.logger.error(`[voxels-world-service] ${error.message}`);
-          if (initial) throw error;
           return false;
         }
         const previous = daemonChild;
@@ -381,7 +397,6 @@ function nativeWorldService(): Plugin {
           daemonChild = undefined;
           if (failedDaemon) await terminateProcessTree(failedDaemon);
           server.config.logger.error(`[voxels-world-service] ${String(error)}`);
-          if (initial) throw error;
           return false;
         }
         if (reload) {
@@ -433,7 +448,19 @@ function nativeWorldService(): Plugin {
         crashAttempts = 0;
         scheduleRebuild(true);
       });
-      await rebuild(false, true);
+      // Vite runs configureServer before buildStart. Start native compilation immediately, let the
+      // preceding Rust/WASM buildStart hook use the other cores, then launch only after both
+      // artifacts succeeded. The HTTP server does not listen until every buildStart hook completes.
+      const compiled = compile();
+      finishInitialBuild = async (): Promise<void> => {
+        if (!(await compiled) || stopping) {
+          throw new Error("initial native world-service build failed");
+        }
+        if (!sharedBrowserBuildReady) {
+          throw new Error("matching browser WASM build failed");
+        }
+        await launch();
+      };
     },
   };
 }

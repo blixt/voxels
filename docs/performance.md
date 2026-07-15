@@ -762,3 +762,60 @@ bytes, a cached 180-degree turn in 15.9 ms, and the streaming walk in 545.3 ms /
 scenarios had an 8.3 ms frame median, 8.9-9.3 ms p95, zero frames above 33.33 ms, and zero dropped
 samples. The prefetch batch change reduced the experimental cold full-settle result from 12.453 to
 3.595 seconds without moving the interactive-ready boundary.
+
+## 2026-07-15: incremental native development profile
+
+`vp dev` previously compiled the native world service with the production `worldgen` profile:
+optimization level 3 inherited full LTO and one codegen unit from `release`. That preserved maximum
+runtime throughput but made every service link a whole-program optimization pass over the Terrain
+Diffusion/Candle graph. Development now uses a separate `worldgen-dev` profile. Third-party
+dependencies stay optimized and cached, frequently edited workspace crates are incremental, and the
+CPU-hot `voxels-world` crate uses optimization level 3 with four codegen units but no LTO. The
+production `worldgen` profile is unchanged and remains available by starting Vite with
+`VOXELS_WORLD_SERVICE_PROFILE=worldgen vp dev`.
+
+Measurements used Rust 1.97.0 on the same M3 Max. Clean builds used new isolated
+`CARGO_TARGET_DIR` directories; representative rebuilds removed only the named packages from those
+disposable directories. No working target artifacts, browser storage, or world databases were reset.
+
+| Native daemon build scenario                         | `worldgen` | `worldgen-dev` | Change |
+| ---------------------------------------------------- | ---------: | -------------: | -----: |
+| Completely cold Metal-enabled daemon                 |    92.61 s |        52.98 s | -42.8% |
+| Rebuild world + provider + service, dependencies hot |    37.53 s |         5.31 s | -85.9% |
+| Rebuild service/link, dependencies hot               |    36.70 s |         3.34 s | -90.9% |
+| No-op build                                          |     0.17 s |         0.15 s |  noise |
+
+Vite also previously serialized the independent native and WASM cold builds. Starting both Cargo
+processes together, while still delaying daemon launch and the listening socket until both artifacts
+succeed, reduced the observed cold `vp dev` ready time from about 108 seconds to 78.953 seconds
+(-26.9%). The two builds briefly contend for Cargo's package-cache lock and CPU, so the result is not
+the sum of their isolated improvements, but it removes a full serial wait without weakening startup
+consistency.
+
+The normal server no longer enables Terrain Diffusion's HTTP downloader. The `download` feature is
+owned by the diagnostic CLI while `terrain-metal` only loads the configured pinned model cache. This
+removes `reqwest`, Rustls, URL/IDNA, and their transitive graph from daemon-only cold builds.
+
+Runtime measurements reject a superficially faster all-`opt-level=1` profile: it generated the
+representative 32^3 chunk in 999.15 us versus 545.87 us optimized, an 83% regression. Selectively
+optimizing `voxels-world` with four codegen units measured 551.04 us, only 0.95% slower. Warmed native
+Metal full-detail runs had 7.52 s optimized and 7.46 s development medians; that difference is noise,
+as Candle and its numerical dependencies remain optimized. Both profiles occasionally paid the same
+18-20 second first-process Metal pipeline/cache warm-up, which is reported separately rather than
+being attributed to Rust optimization.
+
+The browser remains unoptimized in development, so this change does not trade browser FPS for build
+speed. Retaining line tables for workspace crates while dropping full dependency debug information
+changed a clean WASM Cargo build only from 24.95 to 24.24 seconds, but reduced the raw artifact from
+78,238,645 to 29,119,948 bytes (-62.8%). `wasm-bindgen` fell from 0.53 to 0.47 seconds and peak RSS
+from 790 MB to 582 MB; its published WASM fell from 12,424,759 to 11,351,578 bytes.
+
+The next credible build-graph optimization is to extract the stable macro-source identity/request
+types from the 18k-line `voxels-world` crate. The Metal provider would then avoid recompiling after
+unrelated changes to composition, LOD, meshing, or codecs. A later protocol/generation/meshing split
+should be justified with Cargo timings first. A dynamic Rust plugin ABI is not warranted: it adds
+versioning and deployment complexity after removing the dominant LTO link cost. `sccache` is not
+installed on this machine; Cargo's [build-cache documentation](https://doc.rust-lang.org/cargo/reference/build-cache.html)
+describes it as a shared compiler cache. It could help clean builds and branch/worktree switches, but
+would not materially improve the already-incremental same-tree edit loop. Profile choices follow
+Cargo's [optimization, debug-info, LTO, and codegen-unit semantics](https://doc.rust-lang.org/cargo/reference/profiles.html).

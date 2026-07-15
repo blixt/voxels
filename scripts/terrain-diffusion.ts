@@ -25,7 +25,7 @@ execFileSync(
     "-p",
     "voxels-world-terrain-diffusion",
     "--features",
-    "metal",
+    "metal,download",
     "--bin",
     "voxels-terrain-diffusion",
     "--",
