@@ -21,6 +21,8 @@ export const SNAPSHOT = Object.freeze({
   pendingJobs: 15,
   surfaceTiles: 16,
   frameMs: 17,
+  shadowDrawCalls: 18,
+  shadowCascades: 19,
   loadP95Frames: 20,
   loadMaxFrames: 21,
   remeshP95Frames: 22,
