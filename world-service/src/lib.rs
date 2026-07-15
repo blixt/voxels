@@ -17,9 +17,7 @@ use voxels_world::{
 };
 use voxels_world_terrain_diffusion::{MODEL_REVISION, TerrainDiffusionError};
 #[cfg(all(feature = "terrain-metal", target_os = "macos"))]
-use voxels_world_terrain_diffusion::{
-    TerrainDiffusionConfig, TerrainPrecision,
-};
+use voxels_world_terrain_diffusion::{TerrainDiffusionConfig, TerrainPrecision};
 
 mod edits;
 mod presence;

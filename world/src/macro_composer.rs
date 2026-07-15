@@ -1119,10 +1119,7 @@ mod tests {
     #[test]
     fn deepest_voxel_below_a_high_provider_surface_uses_deep_geology() {
         let extreme = column(i32::MAX - 127, 0.5, 0.45, 0.4, 0.0);
-        assert_eq!(
-            material_for_column(&extreme, 0, i32::MIN),
-            Material::Stone
-        );
+        assert_eq!(material_for_column(&extreme, 0, i32::MIN), Material::Stone);
     }
 
     #[test]
