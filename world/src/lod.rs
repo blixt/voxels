@@ -1,7 +1,7 @@
 use crate::mesh::{FACE_NEG_X, FACE_NEG_Y, FACE_NEG_Z, FACE_POS_X, FACE_POS_Y, FACE_POS_Z};
 use crate::{
     EditMap, FEATURE_MAX_RADIUS_VOXELS, Generator, Material, SEA_LEVEL_VOXELS, SkylineFeature,
-    SkylineFeatureKind, VoxelCoord,
+    SkylineFeatureKind, TreeSpecies, VoxelCoord,
 };
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -570,6 +570,14 @@ pub fn generate_surface_tile_mesh_with(
     generate_surface_tile_mesh_with_options(coord, surface, true, &[])
 }
 
+pub fn generate_surface_tile_mesh_with_features(
+    coord: SurfaceTileCoord,
+    surface: impl Fn(i32, i32) -> (i32, Material),
+    skyline_features: &[SkylineFeature],
+) -> SurfaceTileMesh {
+    generate_surface_tile_mesh_with_options(coord, surface, true, skyline_features)
+}
+
 fn generate_surface_tile_mesh_with_options(
     coord: SurfaceTileCoord,
     surface: impl Fn(i32, i32) -> (i32, Material),
@@ -781,6 +789,10 @@ fn append_skyline_proxy(
     let radius_bonus = i32::from(feature.prominence.min(2));
     match feature.kind {
         SkylineFeatureKind::Broadleaf => {
+            if let Some(species) = feature.tree_species() {
+                append_ecology_tree_proxy(quads, level, feature, species);
+                return;
+            }
             append_box(
                 quads,
                 [anchor_x - 1, ground + 1, anchor_z - 1],
@@ -1159,6 +1171,106 @@ fn append_skyline_proxy(
     }
 }
 
+fn append_ecology_tree_proxy(
+    quads: &mut Vec<SurfaceQuad>,
+    level: SurfaceLodLevel,
+    feature: SkylineFeature,
+    species: TreeSpecies,
+) {
+    let [anchor_x, ground, anchor_z] = feature.anchor;
+    let top = feature.trunk_top;
+    let variation = i32::from(feature.tree_variation());
+    let [shift_x, shift_z] =
+        feature.oriented_offset(variation.rem_euclid(3) - 1, variation / 3 - 1);
+    let trunk_radius = i32::from(matches!(species, TreeSpecies::Oak | TreeSpecies::Beech));
+    if !matches!(level, SurfaceLodLevel::Stride32 | SurfaceLodLevel::Stride64) {
+        append_box(
+            quads,
+            [anchor_x - trunk_radius, ground + 1, anchor_z - trunk_radius],
+            [
+                anchor_x + trunk_radius + 1,
+                top + 1,
+                anchor_z + trunk_radius + 1,
+            ],
+            Material::Wood,
+        );
+    }
+
+    let centre_x = anchor_x + shift_x;
+    let centre_z = anchor_z + shift_z;
+    if species.is_conifer() {
+        let (maximum_radius, crown_start) = match species {
+            TreeSpecies::Pine => (6, ground + (top - ground) / 2),
+            TreeSpecies::Spruce | TreeSpecies::Fir => (8, ground + (top - ground) / 3),
+            TreeSpecies::Larch => (7, ground + (top - ground) * 2 / 5),
+            TreeSpecies::Juniper => (5, ground + (top - ground) / 5),
+            _ => unreachable!(),
+        };
+        if matches!(level, SurfaceLodLevel::Stride32 | SurfaceLodLevel::Stride64) {
+            append_box(
+                quads,
+                [
+                    centre_x - maximum_radius,
+                    crown_start,
+                    centre_z - maximum_radius,
+                ],
+                [
+                    centre_x + maximum_radius + 1,
+                    top + 3,
+                    centre_z + maximum_radius + 1,
+                ],
+                Material::Leaves,
+            );
+        } else {
+            let crown_height = top + 3 - crown_start;
+            for layer in 0..3 {
+                let min_y = crown_start + crown_height * layer / 3;
+                let max_y = crown_start + crown_height * (layer + 1) / 3;
+                let radius = (maximum_radius * (3 - layer) / 3).max(2);
+                append_box(
+                    quads,
+                    [centre_x - radius, min_y, centre_z - radius],
+                    [centre_x + radius + 1, max_y, centre_z + radius + 1],
+                    Material::Leaves,
+                );
+            }
+        }
+        return;
+    }
+
+    let layers: &[([i32; 2], [i32; 2])] = match species {
+        TreeSpecies::Oak => &[([top - 11, top - 3], [9, 8]), ([top - 3, top + 3], [7, 6])],
+        TreeSpecies::Beech => &[([top - 12, top - 3], [8, 7]), ([top - 3, top + 3], [6, 5])],
+        TreeSpecies::Birch => &[([top - 17, top - 5], [4, 4]), ([top - 5, top + 2], [3, 3])],
+        TreeSpecies::Aspen => &[([top - 19, top - 6], [5, 4]), ([top - 6, top + 2], [4, 3])],
+        TreeSpecies::Willow => &[([top - 15, top - 5], [10, 9]), ([top - 5, top + 3], [8, 8])],
+        TreeSpecies::Alder => &[([top - 13, top - 4], [6, 6]), ([top - 4, top + 2], [5, 5])],
+        TreeSpecies::Acacia => &[([top - 6, top + 3], [10, 8])],
+        _ => unreachable!(),
+    };
+    if matches!(level, SurfaceLodLevel::Stride32 | SurfaceLodLevel::Stride64) {
+        let min_y = layers[0].0[0];
+        let max_y = layers[layers.len() - 1].0[1];
+        let radius_x = layers.iter().map(|layer| layer.1[0]).max().unwrap_or(1);
+        let radius_z = layers.iter().map(|layer| layer.1[1]).max().unwrap_or(1);
+        append_box(
+            quads,
+            [centre_x - radius_x, min_y, centre_z - radius_z],
+            [centre_x + radius_x + 1, max_y, centre_z + radius_z + 1],
+            Material::Leaves,
+        );
+        return;
+    }
+    for &([min_y, max_y], [radius_x, radius_z]) in layers {
+        append_box(
+            quads,
+            [centre_x - radius_x, min_y, centre_z - radius_z],
+            [centre_x + radius_x + 1, max_y, centre_z + radius_z + 1],
+            Material::Leaves,
+        );
+    }
+}
+
 fn append_box(quads: &mut Vec<SurfaceQuad>, min: [i32; 3], max: [i32; 3], material: Material) {
     let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
     debug_assert!(
@@ -1268,6 +1380,39 @@ mod tests {
                 assert!(quads.len() <= 24, "{kind:?} emitted {} quads", quads.len());
                 assert!(quads.iter().all(|quad| quad.material.is_renderable()));
             }
+        }
+    }
+
+    #[test]
+    fn ecology_tree_proxies_keep_species_silhouettes_and_collapse_to_one_horizon_box() {
+        for species in TreeSpecies::ALL {
+            let feature = SkylineFeature {
+                id: crate::SkylineFeatureId::default(),
+                kind: SkylineFeatureKind::Broadleaf,
+                anchor: [0, 20, 0],
+                trunk_top: 100,
+                orientation: 2,
+                variant: species.encode_variant(5),
+                prominence: 0,
+                route_landmark: None,
+            };
+            let mut near = Vec::new();
+            append_skyline_proxy(&mut near, SurfaceLodLevel::Stride2, feature);
+            assert!(!near.is_empty(), "{species:?} lacked a near proxy");
+            assert!(near.len() <= 24, "{species:?} exceeded four proxy boxes");
+            assert!(near.iter().any(|quad| quad.material == Material::Wood));
+            assert!(near.iter().any(|quad| quad.material == Material::Leaves));
+
+            let mut horizon = Vec::new();
+            append_skyline_proxy(&mut horizon, SurfaceLodLevel::Stride64, feature);
+            assert_eq!(horizon.len(), 6, "{species:?} did not collapse to one box");
+            assert!(horizon.iter().all(|quad| quad.material == Material::Leaves));
+            let near_top = near.iter().map(|quad| quad_voxel_bounds(*quad).1[1]).max();
+            let horizon_top = horizon
+                .iter()
+                .map(|quad| quad_voxel_bounds(*quad).1[1])
+                .max();
+            assert_eq!(near_top, horizon_top, "{species:?} horizon height popped");
         }
     }
 

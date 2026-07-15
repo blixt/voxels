@@ -37,7 +37,7 @@ pub use composition::{
 pub use edit::{EditMap, VoxelCoord, apply_resident_mutations};
 pub use feature::{
     FEATURE_CELL_VOXELS, FEATURE_MAX_RADIUS_VOXELS, SkylineFeature, SkylineFeatureId,
-    SkylineFeatureKind,
+    SkylineFeatureKind, TreeSpecies,
 };
 pub use generation::{
     AtmosphereSample, GENERATOR_VERSION, GeneratedColumn, GeneratedRegion, Generator,
@@ -48,8 +48,9 @@ pub use lod::{
     SURFACE_TILE_EDGE_CELLS, SurfaceBounds, SurfaceLodLevel, SurfacePatch, SurfacePatchEdge,
     SurfaceQuad, SurfaceTileCoord, SurfaceTileMesh, WaterPatch, WaterTileMesh,
     generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_surface_tile_mesh,
-    generate_surface_tile_mesh_with, generate_water_tile_mesh_with,
-    surface_tiles_affected_by_column, surface_tiles_affected_by_voxel,
+    generate_surface_tile_mesh_with, generate_surface_tile_mesh_with_features,
+    generate_water_tile_mesh_with, surface_tiles_affected_by_column,
+    surface_tiles_affected_by_voxel,
 };
 pub use macro_composer::HeightfieldWorldSource;
 pub use material::{Material, MaterialEmission, RenderLayer};

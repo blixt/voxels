@@ -6,21 +6,25 @@
 
 use crate::{
     AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, ChunkSnapshot, EditMap,
-    MACRO_FIELD_SCHEMA_VERSION, MAX_MACRO_BLOCK_SAMPLES, MAX_SURFACE_SAMPLE_BLOCK_SAMPLES,
-    MAX_SURFACE_SEARCH_RADIUS, MAX_VOXEL_BLOCK_SAMPLES, MAX_WORLD_PRODUCT_BATCH, MacroBlock,
-    MacroBlockBatch, MacroBlockRequest, MacroTerrainSource, Material, MeshingHalo,
-    SURFACE_TILE_EDGE_CELLS, SkylineFeature, SkylineFeatureKind, SurfaceLodLevel, SurfaceRegion,
-    SurfaceSample, SurfaceSampleBlockRequest, SurfaceSampleBlockSnapshot, SurfaceSearchHit,
-    SurfaceSearchKind, SurfaceSearchRequest, SurfaceSearchSnapshot, SurfaceTileCoord,
-    SurfaceTileSnapshot, VoxelBlockRequest, VoxelBlockSnapshot, VoxelCoord, WorldProduct,
-    WorldProductBatch, WorldProductBatchItem, WorldProductBatchResult, WorldProductPriority,
-    WorldProductRequest, WorldSourceEngine, WorldSourceError, WorldSourceIdentity,
-    WorldSourceIdentityHash, generate_surface_tile_mesh_with, generate_water_tile_mesh_with,
+    FEATURE_MAX_RADIUS_VOXELS, MACRO_FIELD_SCHEMA_VERSION, MAX_MACRO_BLOCK_SAMPLES,
+    MAX_SURFACE_SAMPLE_BLOCK_SAMPLES, MAX_SURFACE_SEARCH_RADIUS, MAX_VOXEL_BLOCK_SAMPLES,
+    MAX_WORLD_PRODUCT_BATCH, MacroBlock, MacroBlockBatch, MacroBlockRequest, MacroTerrainSource,
+    Material, MeshingHalo, SURFACE_TILE_EDGE_CELLS, SkylineFeature, SkylineFeatureId,
+    SkylineFeatureKind, SurfaceLodLevel, SurfaceRegion, SurfaceSample, SurfaceSampleBlockRequest,
+    SurfaceSampleBlockSnapshot, SurfaceSearchHit, SurfaceSearchKind, SurfaceSearchRequest,
+    SurfaceSearchSnapshot, SurfaceTileCoord, SurfaceTileSnapshot, TreeSpecies, VoxelBlockRequest,
+    VoxelBlockSnapshot, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductBatchItem,
+    WorldProductBatchResult, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
+    WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash,
+    generate_surface_tile_mesh_with_features, generate_water_tile_mesh_with,
     surface_tiles_affected_by_column,
 };
 use std::collections::BTreeMap;
 
 const SURFACE_TILE_SAMPLE_EDGE: u32 = 34;
+const ECOLOGY_CELL_VOXELS: i32 = 96;
+const ECOLOGY_CELL_MARGIN_VOXELS: i32 = 16;
+const ECOLOGY_MIN_TREE_SPACING_VOXELS: i32 = 30;
 type SurfaceAliasMap = BTreeMap<(i32, i32), (i32, Material)>;
 
 /// Deterministic field-to-voxel adapter for non-procedural macro sources.
@@ -228,6 +232,19 @@ impl HeightfieldWorldSource {
         let depth = u32::try_from(i64::from(max_z) - i64::from(min_z) + 1)
             .map_err(|_| WorldSourceError::InvalidChunkCoordinate)?;
         let region = self.prepare_region(priority, [min_x, min_z], [width, depth], 1)?;
+        let features = self.ecology_features_anchored_in(
+            [
+                [
+                    min_x.saturating_sub(FEATURE_MAX_RADIUS_VOXELS),
+                    min_z.saturating_sub(FEATURE_MAX_RADIUS_VOXELS),
+                ],
+                [
+                    max_x.saturating_add(FEATURE_MAX_RADIUS_VOXELS + 1),
+                    max_z.saturating_add(FEATURE_MAX_RADIUS_VOXELS + 1),
+                ],
+            ],
+            priority,
+        )?;
 
         let mut chunk = Chunk::empty(coord);
         for y in 0..CHUNK_EDGE {
@@ -236,13 +253,15 @@ impl HeightfieldWorldSource {
                     let world_x = origin[0] + x as i32;
                     let world_y = origin[1] + y as i32;
                     let world_z = origin[2] + z as i32;
-                    let material = self.material_at(&region, world_x, world_y, world_z)?;
+                    let material = self
+                        .material_at_with_features(&region, &features, world_x, world_y, world_z)?;
                     chunk.set(x, y, z, material);
                 }
             }
         }
         let halo = MeshingHalo::from_sampler(coord, |x, y, z| {
-            self.material_at(&region, x, y, z).unwrap_or(Material::Air)
+            self.material_at_with_features(&region, &features, x, y, z)
+                .unwrap_or(Material::Air)
         });
         ChunkSnapshot::new(self.identity_hash, chunk, halo)
             .ok_or(WorldSourceError::MalformedMacroBlock)
@@ -261,6 +280,21 @@ impl HeightfieldWorldSource {
             1,
         )?;
         let [width, height, depth] = request.sample_shape;
+        let max_x = request.min.x.saturating_add(width as i32 - 1);
+        let max_z = request.min.z.saturating_add(depth as i32 - 1);
+        let features = self.ecology_features_anchored_in(
+            [
+                [
+                    request.min.x.saturating_sub(FEATURE_MAX_RADIUS_VOXELS),
+                    request.min.z.saturating_sub(FEATURE_MAX_RADIUS_VOXELS),
+                ],
+                [
+                    max_x.saturating_add(FEATURE_MAX_RADIUS_VOXELS + 1),
+                    max_z.saturating_add(FEATURE_MAX_RADIUS_VOXELS + 1),
+                ],
+            ],
+            priority,
+        )?;
         let sample_count = usize::try_from(width)
             .ok()
             .and_then(|width| {
@@ -278,8 +312,9 @@ impl HeightfieldWorldSource {
         for z in 0..depth {
             for y in 0..height {
                 for x in 0..width {
-                    materials.push(self.material_at(
+                    materials.push(self.material_at_with_features(
                         &region,
+                        &features,
                         request.min.x + x as i32,
                         request.min.y + y as i32,
                         request.min.z + z as i32,
@@ -424,16 +459,26 @@ impl HeightfieldWorldSource {
             }
         }
         let aliases = self.collidable_edit_aliases(edits, coord, priority)?;
-        let terrain = generate_surface_tile_mesh_with(coord, |x, z| {
-            let sampled = self
-                .edited_surface(&region, edits, x, z)
-                .unwrap_or((i32::MIN, Material::Stone));
-            aliases
-                .get(&(x, z))
-                .copied()
-                .filter(|(height, _)| *height >= sampled.0)
-                .unwrap_or(sampled)
+        let mut features = self.ecology_features_anchored_in(coord.voxel_bounds_xz(), priority)?;
+        features.retain(|feature| {
+            edits.skyline_feature_is_pristine_with(*feature, |coord| {
+                feature.material_at(coord).unwrap_or(Material::Air)
+            })
         });
+        let terrain = generate_surface_tile_mesh_with_features(
+            coord,
+            |x, z| {
+                let sampled = self
+                    .edited_surface(&region, edits, x, z)
+                    .unwrap_or((i32::MIN, Material::Stone));
+                aliases
+                    .get(&(x, z))
+                    .copied()
+                    .filter(|(height, _)| *height >= sampled.0)
+                    .unwrap_or(sampled)
+            },
+            &features,
+        );
         let water = generate_water_tile_mesh_with(coord, |x, z| {
             region.column(x, z).is_some_and(|column| {
                 edits
@@ -580,6 +625,78 @@ impl HeightfieldWorldSource {
             .ok_or(WorldSourceError::MalformedMacroBlock)?;
         Ok(material_for_column(column, self.sea_level_voxels, y))
     }
+
+    fn material_at_with_features(
+        &self,
+        region: &PreparedMacroRegion,
+        features: &[SkylineFeature],
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Result<Material, WorldSourceError> {
+        let terrain = self.material_at(region, x, y, z)?;
+        if terrain != Material::Air {
+            return Ok(terrain);
+        }
+        let coord = VoxelCoord::new(x, y, z);
+        Ok(features
+            .iter()
+            .copied()
+            .find_map(|feature| feature.material_at(coord))
+            .unwrap_or(Material::Air))
+    }
+
+    fn ecology_features_anchored_in(
+        &self,
+        bounds: [[i32; 2]; 2],
+        priority: WorldProductPriority,
+    ) -> Result<Vec<SkylineFeature>, WorldSourceError> {
+        if !self.add_subgrid_relief {
+            return Ok(Vec::new());
+        }
+        let candidates = ecology_candidates_in(self.composer_seed, bounds)?;
+        let mut features = Vec::new();
+        for candidate_batch in candidates.chunks(MAX_WORLD_PRODUCT_BATCH) {
+            let requests = candidate_batch
+                .iter()
+                .map(|candidate| MacroBlockRequest {
+                    origin: [candidate.x, candidate.z],
+                    sample_shape: [1, 1],
+                    stride_voxels: 1,
+                })
+                .collect::<Vec<_>>();
+            let result = self.source.request_blocks(MacroBlockBatch {
+                priority,
+                requests: requests.clone(),
+            })?;
+            if result.source_identity_hash != self.identity_hash
+                || result.blocks.len() != requests.len()
+            {
+                return Err(WorldSourceError::MalformedMacroBlock);
+            }
+            for ((candidate, request), block) in candidate_batch
+                .iter()
+                .copied()
+                .zip(requests)
+                .zip(result.blocks)
+            {
+                let grid = match self.validate_block(request, block) {
+                    Ok(grid) => grid,
+                    Err(WorldSourceError::SourceCoverageUnavailable) => continue,
+                    Err(error) => return Err(error),
+                };
+                let column = grid
+                    .column(candidate.x, candidate.z)
+                    .ok_or(WorldSourceError::MalformedMacroBlock)?;
+                if let Some(feature) =
+                    ecology_tree(self.composer_seed, self.sea_level_voxels, candidate, column)
+                {
+                    features.push(feature);
+                }
+            }
+        }
+        Ok(features)
+    }
 }
 
 impl WorldSourceEngine for HeightfieldWorldSource {
@@ -638,7 +755,17 @@ impl WorldSourceEngine for HeightfieldWorldSource {
         level: SurfaceLodLevel,
         coord: VoxelCoord,
     ) -> Vec<SurfaceTileCoord> {
-        surface_tiles_affected_by_column(level, coord.x, coord.z)
+        let mut affected = surface_tiles_affected_by_column(level, coord.x, coord.z);
+        for feature in self.skyline_features_at(coord) {
+            if feature.material_at(coord).is_none() {
+                continue;
+            }
+            let owner = SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
+            if owner.is_world_representable() && !affected.contains(&owner) {
+                affected.push(owner);
+            }
+        }
+        affected
     }
 
     fn atmosphere_sample(&self, x: i32, z: i32) -> (AtmosphereSample, SurfaceRegion) {
@@ -662,22 +789,61 @@ impl WorldSourceEngine for HeightfieldWorldSource {
         )
     }
 
-    fn skyline_features_anchored_in(&self, _bounds: [[i32; 2]; 2]) -> Vec<SkylineFeature> {
-        Vec::new()
+    fn skyline_features_anchored_in(&self, bounds: [[i32; 2]; 2]) -> Vec<SkylineFeature> {
+        self.ecology_features_anchored_in(bounds, WorldProductPriority::VisibleSurface)
+            .unwrap_or_default()
     }
 
-    fn skyline_features_at(&self, _coord: VoxelCoord) -> Vec<SkylineFeature> {
-        Vec::new()
+    fn skyline_features_at(&self, coord: VoxelCoord) -> Vec<SkylineFeature> {
+        self.ecology_features_anchored_in(
+            [
+                [
+                    coord.x.saturating_sub(FEATURE_MAX_RADIUS_VOXELS),
+                    coord.z.saturating_sub(FEATURE_MAX_RADIUS_VOXELS),
+                ],
+                [
+                    coord.x.saturating_add(FEATURE_MAX_RADIUS_VOXELS + 1),
+                    coord.z.saturating_add(FEATURE_MAX_RADIUS_VOXELS + 1),
+                ],
+            ],
+            WorldProductPriority::CollisionCritical,
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|feature| feature.material_at(coord).is_some())
+        .collect()
     }
 
     fn nearest_skyline_feature(
         &self,
-        _x: i32,
-        _z: i32,
-        _kind: SkylineFeatureKind,
-        _max_radius_cells: i32,
+        x: i32,
+        z: i32,
+        kind: SkylineFeatureKind,
+        max_radius_cells: i32,
     ) -> Option<SkylineFeature> {
-        None
+        if max_radius_cells < 0 {
+            return None;
+        }
+        let radius = i64::from(max_radius_cells) * i64::from(ECOLOGY_CELL_VOXELS);
+        let clamp = |value: i64| value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        self.ecology_features_anchored_in(
+            [
+                [clamp(i64::from(x) - radius), clamp(i64::from(z) - radius)],
+                [
+                    clamp(i64::from(x) + radius + 1),
+                    clamp(i64::from(z) + radius + 1),
+                ],
+            ],
+            WorldProductPriority::Prefetch,
+        )
+        .ok()?
+        .into_iter()
+        .filter(|feature| feature.kind == kind)
+        .min_by_key(|feature| {
+            let dx = i64::from(feature.anchor[0]) - i64::from(x);
+            let dz = i64::from(feature.anchor[2]) - i64::from(z);
+            dx * dx + dz * dz
+        })
     }
 
     fn nearest_prominent_skyline_feature(
@@ -699,6 +865,29 @@ struct PreparedColumn {
     ridge: f32,
     geology: f32,
     ecotone: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EcologyCandidate {
+    cell_x: i32,
+    cell_z: i32,
+    x: i32,
+    z: i32,
+    priority: u64,
+    occurrence: f32,
+    variation: u8,
+    orientation: u8,
+    height_noise: u8,
+}
+
+#[derive(Clone, Copy)]
+struct TreeNiche {
+    temperature: f32,
+    temperature_width: f32,
+    moisture: f32,
+    moisture_width: f32,
+    maximum_ridge: f32,
+    prevalence: f32,
 }
 
 struct PreparedMacroGrid {
@@ -734,6 +923,309 @@ impl PreparedMacroRegion {
     fn column(&self, x: i32, z: i32) -> Option<&PreparedColumn> {
         self.grids.iter().find_map(|grid| grid.column(x, z))
     }
+}
+
+fn ecology_candidates_in(
+    seed: u64,
+    bounds: [[i32; 2]; 2],
+) -> Result<Vec<EcologyCandidate>, WorldSourceError> {
+    let [[min_x, min_z], [max_x, max_z]] = bounds;
+    if min_x >= max_x || min_z >= max_z {
+        return Err(WorldSourceError::InvalidBlockCoordinate);
+    }
+    let first_cell_x = min_x.div_euclid(ECOLOGY_CELL_VOXELS);
+    let first_cell_z = min_z.div_euclid(ECOLOGY_CELL_VOXELS);
+    let last_cell_x = max_x.saturating_sub(1).div_euclid(ECOLOGY_CELL_VOXELS);
+    let last_cell_z = max_z.saturating_sub(1).div_euclid(ECOLOGY_CELL_VOXELS);
+    let cell_count = (i64::from(last_cell_x) - i64::from(first_cell_x) + 1)
+        .checked_mul(i64::from(last_cell_z) - i64::from(first_cell_z) + 1)
+        .ok_or(WorldSourceError::BlockTooLarge)?;
+    if cell_count > MAX_MACRO_BLOCK_SAMPLES as i64 {
+        return Err(WorldSourceError::BlockTooLarge);
+    }
+    let mut candidates = Vec::with_capacity(cell_count as usize);
+    for cell_z in first_cell_z..=last_cell_z {
+        for cell_x in first_cell_x..=last_cell_x {
+            let Some(candidate) = ecology_candidate(seed, cell_x, cell_z) else {
+                continue;
+            };
+            if candidate.x < min_x
+                || candidate.x >= max_x
+                || candidate.z < min_z
+                || candidate.z >= max_z
+                || !ecology_candidate_wins_spacing(seed, candidate)
+            {
+                continue;
+            }
+            candidates.push(candidate);
+        }
+    }
+    Ok(candidates)
+}
+
+fn ecology_candidate(seed: u64, cell_x: i32, cell_z: i32) -> Option<EcologyCandidate> {
+    let jitter_span = ECOLOGY_CELL_VOXELS - ECOLOGY_CELL_MARGIN_VOXELS * 2;
+    let placement = ecology_hash(seed ^ 0x6a09_e667_f3bc_c909, cell_x, cell_z);
+    let variation = ecology_hash(seed ^ 0xbb67_ae85_84ca_a73b, cell_x, cell_z);
+    let origin_x = i64::from(cell_x) * i64::from(ECOLOGY_CELL_VOXELS);
+    let origin_z = i64::from(cell_z) * i64::from(ECOLOGY_CELL_VOXELS);
+    let offset_x = ECOLOGY_CELL_MARGIN_VOXELS + (placement % jitter_span as u64) as i32;
+    let offset_z = ECOLOGY_CELL_MARGIN_VOXELS + ((placement >> 16) % jitter_span as u64) as i32;
+    Some(EcologyCandidate {
+        cell_x,
+        cell_z,
+        x: i32::try_from(origin_x + i64::from(offset_x)).ok()?,
+        z: i32::try_from(origin_z + i64::from(offset_z)).ok()?,
+        priority: ecology_hash(seed ^ 0x3c6e_f372_fe94_f82b, cell_x, cell_z),
+        occurrence: hash_unit(variation),
+        variation: ((variation >> 24) & 7) as u8,
+        orientation: ((variation >> 32) & 3) as u8,
+        height_noise: (variation >> 40) as u8,
+    })
+}
+
+fn ecology_candidate_wins_spacing(seed: u64, candidate: EcologyCandidate) -> bool {
+    let minimum_distance_squared = i64::from(ECOLOGY_MIN_TREE_SPACING_VOXELS).pow(2);
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            if dx == 0 && dz == 0 {
+                continue;
+            }
+            let Some(neighbor) = ecology_candidate(
+                seed,
+                candidate.cell_x.saturating_add(dx),
+                candidate.cell_z.saturating_add(dz),
+            ) else {
+                continue;
+            };
+            let delta_x = i64::from(neighbor.x) - i64::from(candidate.x);
+            let delta_z = i64::from(neighbor.z) - i64::from(candidate.z);
+            if delta_x * delta_x + delta_z * delta_z >= minimum_distance_squared {
+                continue;
+            }
+            if (neighbor.priority, neighbor.cell_x, neighbor.cell_z)
+                < (candidate.priority, candidate.cell_x, candidate.cell_z)
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn ecology_tree(
+    seed: u64,
+    sea_level_voxels: i32,
+    candidate: EcologyCandidate,
+    column: &PreparedColumn,
+) -> Option<SkylineFeature> {
+    if column.height <= sea_level_voxels.saturating_add(4) || column.ridge > 0.82 {
+        return None;
+    }
+    let (surface, region) = surface_profile(column, sea_level_voxels);
+    let mut best = None::<(TreeSpecies, f32)>;
+    for species in TreeSpecies::ALL {
+        let niche = tree_niche(species);
+        let temperature = unimodal_suitability(
+            column.temperature,
+            niche.temperature,
+            niche.temperature_width,
+        );
+        let moisture = unimodal_suitability(column.moisture, niche.moisture, niche.moisture_width);
+        let slope = smooth_fall(
+            column.ridge,
+            niche.maximum_ridge * 0.58,
+            niche.maximum_ridge,
+        );
+        let substrate = match surface {
+            Material::Grass | Material::Moss | Material::Clay => 1.0,
+            Material::Sand | Material::RedSand
+                if matches!(species, TreeSpecies::Acacia | TreeSpecies::Juniper) =>
+            {
+                0.78
+            }
+            Material::Stone | Material::Limestone | Material::Basalt
+                if matches!(species, TreeSpecies::Pine | TreeSpecies::Juniper) =>
+            {
+                0.42
+            }
+            _ => 0.08,
+        };
+        let stand = coherent_noise(
+            seed ^ 0x510e_527f_ade6_82d1 ^ (species as u64).wrapping_mul(0x9e37_79b9),
+            candidate.x,
+            candidate.z,
+            2_400,
+        );
+        let score = (temperature.min(moisture) * slope * niche.prevalence * substrate
+            + stand * 0.14)
+            .clamp(0.0, 1.0);
+        if best.is_none_or(|(_, best_score)| score > best_score) {
+            best = Some((species, score));
+        }
+    }
+    let (species, suitability) = best?;
+    let region_density = match region {
+        SurfaceRegion::VerdantForest => 0.15,
+        SurfaceRegion::WindMoor => 0.03,
+        SurfaceRegion::Alpine => -0.08,
+        SurfaceRegion::RedBadlands | SurfaceRegion::PaleDunes => -0.04,
+        SurfaceRegion::Volcanic => -0.12,
+    };
+    let density = (suitability * 0.68 + region_density).clamp(0.0, 0.84);
+    if suitability < 0.24 || candidate.occurrence > density {
+        return None;
+    }
+    let (minimum_height, height_span) = tree_height_range(species);
+    let height = minimum_height + i32::from(candidate.height_noise) % height_span;
+    Some(SkylineFeature {
+        id: SkylineFeatureId {
+            cell_x: candidate.cell_x,
+            cell_z: candidate.cell_z,
+        },
+        kind: SkylineFeatureKind::Broadleaf,
+        anchor: [candidate.x, column.height, candidate.z],
+        trunk_top: column.height.checked_add(height)?,
+        orientation: candidate.orientation,
+        variant: species.encode_variant(candidate.variation),
+        prominence: 0,
+        route_landmark: None,
+    })
+}
+
+const fn tree_niche(species: TreeSpecies) -> TreeNiche {
+    match species {
+        TreeSpecies::Oak => TreeNiche {
+            temperature: 0.62,
+            temperature_width: 0.34,
+            moisture: 0.62,
+            moisture_width: 0.38,
+            maximum_ridge: 0.62,
+            prevalence: 0.96,
+        },
+        TreeSpecies::Beech => TreeNiche {
+            temperature: 0.52,
+            temperature_width: 0.28,
+            moisture: 0.72,
+            moisture_width: 0.30,
+            maximum_ridge: 0.54,
+            prevalence: 0.90,
+        },
+        TreeSpecies::Birch => TreeNiche {
+            temperature: 0.40,
+            temperature_width: 0.36,
+            moisture: 0.60,
+            moisture_width: 0.36,
+            maximum_ridge: 0.68,
+            prevalence: 0.99,
+        },
+        TreeSpecies::Aspen => TreeNiche {
+            temperature: 0.47,
+            temperature_width: 0.34,
+            moisture: 0.54,
+            moisture_width: 0.36,
+            maximum_ridge: 0.64,
+            prevalence: 0.98,
+        },
+        TreeSpecies::Willow => TreeNiche {
+            temperature: 0.60,
+            temperature_width: 0.30,
+            moisture: 0.90,
+            moisture_width: 0.30,
+            maximum_ridge: 0.34,
+            prevalence: 0.82,
+        },
+        TreeSpecies::Alder => TreeNiche {
+            temperature: 0.52,
+            temperature_width: 0.34,
+            moisture: 0.82,
+            moisture_width: 0.32,
+            maximum_ridge: 0.42,
+            prevalence: 0.86,
+        },
+        TreeSpecies::Pine => TreeNiche {
+            temperature: 0.48,
+            temperature_width: 0.46,
+            moisture: 0.42,
+            moisture_width: 0.42,
+            maximum_ridge: 0.76,
+            prevalence: 0.92,
+        },
+        TreeSpecies::Spruce => TreeNiche {
+            temperature: 0.32,
+            temperature_width: 0.32,
+            moisture: 0.68,
+            moisture_width: 0.34,
+            maximum_ridge: 0.68,
+            prevalence: 0.90,
+        },
+        TreeSpecies::Fir => TreeNiche {
+            temperature: 0.38,
+            temperature_width: 0.32,
+            moisture: 0.76,
+            moisture_width: 0.30,
+            maximum_ridge: 0.62,
+            prevalence: 0.86,
+        },
+        TreeSpecies::Larch => TreeNiche {
+            temperature: 0.28,
+            temperature_width: 0.34,
+            moisture: 0.50,
+            moisture_width: 0.38,
+            maximum_ridge: 0.72,
+            prevalence: 0.98,
+        },
+        TreeSpecies::Juniper => TreeNiche {
+            temperature: 0.56,
+            temperature_width: 0.40,
+            moisture: 0.28,
+            moisture_width: 0.32,
+            maximum_ridge: 0.74,
+            prevalence: 0.70,
+        },
+        TreeSpecies::Acacia => TreeNiche {
+            temperature: 0.82,
+            temperature_width: 0.30,
+            moisture: 0.20,
+            moisture_width: 0.26,
+            maximum_ridge: 0.48,
+            prevalence: 0.74,
+        },
+    }
+}
+
+fn unimodal_suitability(value: f32, optimum: f32, width: f32) -> f32 {
+    smooth_fall((value - optimum).abs(), width * 0.58, width)
+}
+
+const fn tree_height_range(species: TreeSpecies) -> (i32, i32) {
+    match species {
+        TreeSpecies::Oak => (55, 19),
+        TreeSpecies::Beech => (62, 21),
+        TreeSpecies::Birch => (48, 18),
+        TreeSpecies::Aspen => (58, 22),
+        TreeSpecies::Willow => (42, 18),
+        TreeSpecies::Alder => (45, 19),
+        TreeSpecies::Pine => (70, 27),
+        TreeSpecies::Spruce => (76, 31),
+        TreeSpecies::Fir => (68, 29),
+        TreeSpecies::Larch => (65, 29),
+        TreeSpecies::Juniper => (24, 16),
+        TreeSpecies::Acacia => (38, 17),
+    }
+}
+
+fn ecology_hash(seed: u64, x: i32, z: i32) -> u64 {
+    let mut value = seed
+        ^ (x as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (z as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn hash_unit(value: u64) -> f32 {
+    (value >> 40) as f32 / 16_777_215.0
 }
 
 fn material_for_column(column: &PreparedColumn, sea_level_voxels: i32, y: i32) -> Material {
@@ -1065,6 +1557,9 @@ mod tests {
         identity: WorldSourceIdentity,
         behavior: FakeBehavior,
         elevation: f32,
+        temperature: f32,
+        moisture: f32,
+        ridge: f32,
     }
 
     impl FakeMacroSource {
@@ -1073,7 +1568,19 @@ mod tests {
                 identity: WorldSourceIdentity::procedural_v16(42),
                 behavior,
                 elevation,
+                temperature: 0.25,
+                moisture: 0.75,
+                ridge: 0.5,
             }
+        }
+
+        fn terrain_diffusion(elevation: f32, temperature: f32, moisture: f32, ridge: f32) -> Self {
+            let mut source = Self::new(FakeBehavior::Valid, elevation);
+            source.identity.source_kind = crate::WorldSourceKind::TerrainDiffusion30m;
+            source.temperature = temperature;
+            source.moisture = moisture;
+            source.ridge = ridge;
+            source
         }
     }
 
@@ -1099,9 +1606,9 @@ mod tests {
                     request,
                     coordinate_transform: MacroCoordinateTransform::CANONICAL_VOXELS,
                     elevation_voxels,
-                    temperature: vec![0.25; sample_count],
-                    moisture: vec![0.75; sample_count],
-                    ridge: vec![0.5; sample_count],
+                    temperature: vec![self.temperature; sample_count],
+                    moisture: vec![self.moisture; sample_count],
+                    ridge: vec![self.ridge; sample_count],
                     validity: vec![
                         !matches!(self.behavior, FakeBehavior::Unavailable);
                         sample_count
@@ -1123,6 +1630,14 @@ mod tests {
     fn heightfield(behavior: FakeBehavior) -> HeightfieldWorldSource {
         HeightfieldWorldSource::new(Box::new(FakeMacroSource::new(behavior, 1.75)), 3)
             .expect("valid fake source identity")
+    }
+
+    fn diffusion_heightfield() -> HeightfieldWorldSource {
+        HeightfieldWorldSource::new(
+            Box::new(FakeMacroSource::terrain_diffusion(12.0, 0.58, 0.62, 0.12)),
+            0,
+        )
+        .expect("valid Terrain Diffusion fake source")
     }
 
     fn column(
@@ -1263,6 +1778,109 @@ mod tests {
         exposed.ecotone = -1.0;
         assert_eq!(surface_region(&sheltered, 0), SurfaceRegion::VerdantForest);
         assert_eq!(surface_region(&exposed, 0), SurfaceRegion::WindMoor);
+    }
+
+    #[test]
+    fn diffusion_ecology_is_deterministic_canonical_lod_visible_and_edit_suppressed() {
+        let source = diffusion_heightfield();
+        let bounds = [[-2_048, -2_048], [2_048, 2_048]];
+        let features = source.skyline_features_anchored_in(bounds);
+        assert!(!features.is_empty());
+        assert_eq!(features, source.skyline_features_anchored_in(bounds));
+        assert!(
+            features
+                .iter()
+                .all(|feature| feature.tree_species().is_some())
+        );
+        assert!(
+            features
+                .iter()
+                .map(|feature| feature.tree_variation())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                >= 3
+        );
+
+        let feature = features[0];
+        let trunk = VoxelCoord::new(feature.anchor[0], feature.anchor[1] + 1, feature.anchor[2]);
+        let WorldProduct::Chunk(chunk) =
+            product(&source, WorldProductRequest::ChunkWithHalo(trunk.chunk()))
+                .expect("tree chunk is covered")
+        else {
+            panic!("expected canonical chunk");
+        };
+        assert_eq!(
+            chunk_material_at(&chunk, trunk.x, trunk.y, trunk.z),
+            Material::Wood
+        );
+
+        let level = SurfaceLodLevel::Stride2;
+        let owner = SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
+        let pristine = source
+            .generate_edited_surface_tile(&EditMap::default(), owner)
+            .expect("pristine ecology surface tile");
+        let pristine_wood = pristine
+            .terrain
+            .quads
+            .iter()
+            .filter(|quad| quad.material == Material::Wood)
+            .count();
+        assert!(pristine_wood > 0);
+
+        let mut edits = EditMap::default();
+        edits.insert_override(trunk, Material::Air);
+        let edited = source
+            .generate_edited_surface_tile(&edits, owner)
+            .expect("edited ecology surface tile");
+        let edited_wood = edited
+            .terrain
+            .quads
+            .iter()
+            .filter(|quad| quad.material == Material::Wood)
+            .count();
+        assert!(edited_wood < pristine_wood);
+        assert!(
+            source
+                .surface_tiles_affected_by_voxel(&edits, level, trunk)
+                .contains(&owner)
+        );
+    }
+
+    #[test]
+    fn climate_niches_can_select_at_least_ten_tree_species() {
+        let mut species = std::collections::BTreeSet::new();
+        for temperature_step in 0..=20 {
+            for moisture_step in 0..=20 {
+                let candidate = EcologyCandidate {
+                    cell_x: temperature_step,
+                    cell_z: moisture_step,
+                    x: temperature_step * 431 - 4_000,
+                    z: moisture_step * 379 - 4_000,
+                    priority: 0,
+                    occurrence: 0.0,
+                    variation: ((temperature_step + moisture_step) & 7) as u8,
+                    orientation: (temperature_step & 3) as u8,
+                    height_noise: 7,
+                };
+                let column = PreparedColumn {
+                    height: 100,
+                    temperature: temperature_step as f32 / 20.0,
+                    moisture: moisture_step as f32 / 20.0,
+                    ridge: 0.10,
+                    geology: 0.0,
+                    ecotone: 0.0,
+                };
+                if let Some(feature) = ecology_tree(0x5eed, 0, candidate, &column)
+                    && let Some(selected) = feature.tree_species()
+                {
+                    species.insert(selected);
+                }
+            }
+        }
+        assert!(
+            species.len() >= 10,
+            "climate catalogue collapsed to {species:?}"
+        );
     }
 
     fn product(

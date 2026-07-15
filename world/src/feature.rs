@@ -2,6 +2,64 @@ use crate::{Material, RouteLandmarkId, VoxelCoord};
 
 pub const FEATURE_CELL_VOXELS: i32 = 96;
 pub const FEATURE_MAX_RADIUS_VOXELS: i32 = 18;
+const ECOLOGY_TREE_VARIANT_FLAG: u8 = 0x80;
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum TreeSpecies {
+    Oak = 0,
+    Beech = 1,
+    Birch = 2,
+    Aspen = 3,
+    Willow = 4,
+    Alder = 5,
+    Pine = 6,
+    Spruce = 7,
+    Fir = 8,
+    Larch = 9,
+    Juniper = 10,
+    Acacia = 11,
+}
+
+impl TreeSpecies {
+    pub const ALL: [Self; 12] = [
+        Self::Oak,
+        Self::Beech,
+        Self::Birch,
+        Self::Aspen,
+        Self::Willow,
+        Self::Alder,
+        Self::Pine,
+        Self::Spruce,
+        Self::Fir,
+        Self::Larch,
+        Self::Juniper,
+        Self::Acacia,
+    ];
+
+    pub const fn encode_variant(self, variation: u8) -> u8 {
+        ECOLOGY_TREE_VARIANT_FLAG | (self as u8) << 3 | (variation & 7)
+    }
+
+    const fn decode_variant(variant: u8) -> Option<Self> {
+        if variant & ECOLOGY_TREE_VARIANT_FLAG == 0 {
+            return None;
+        }
+        let index = (variant >> 3) & 0x0f;
+        if index < Self::ALL.len() as u8 {
+            Some(Self::ALL[index as usize])
+        } else {
+            None
+        }
+    }
+
+    pub const fn is_conifer(self) -> bool {
+        matches!(
+            self,
+            Self::Pine | Self::Spruce | Self::Fir | Self::Larch | Self::Juniper
+        )
+    }
+}
 
 /// Stable procedural identity. The placement cell reconstructs the feature from generator identity.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -115,6 +173,22 @@ pub struct SkylineFeature {
 }
 
 impl SkylineFeature {
+    pub const fn tree_species(self) -> Option<TreeSpecies> {
+        if matches!(self.kind, SkylineFeatureKind::Broadleaf) {
+            TreeSpecies::decode_variant(self.variant)
+        } else {
+            None
+        }
+    }
+
+    pub const fn tree_variation(self) -> u8 {
+        if self.tree_species().is_some() {
+            self.variant & 7
+        } else {
+            self.variant
+        }
+    }
+
     pub const fn bounds(self) -> [[i32; 3]; 2] {
         let radius = self.kind.horizontal_radius_voxels();
         [
@@ -301,6 +375,9 @@ impl SkylineFeature {
     }
 
     fn broadleaf_material(self, dx: i32, dy: i32, dz: i32) -> Option<Material> {
+        if let Some(species) = self.tree_species() {
+            return self.ecology_tree_material(species, dx, dy, dz);
+        }
         let height = self.trunk_top - self.anchor[1];
         if (1..=height).contains(&dy) && dx.abs() <= 1 && dz.abs() <= 1 {
             return Some(Material::Wood);
@@ -314,6 +391,121 @@ impl SkylineFeature {
             && dz.abs() <= horizontal_radius
             && distance_squared <= 76 + i32::from(self.variant) * 2 + self.radius_bonus() * 12)
             .then_some(Material::Leaves)
+    }
+
+    fn ecology_tree_material(
+        self,
+        species: TreeSpecies,
+        dx: i32,
+        dy: i32,
+        dz: i32,
+    ) -> Option<Material> {
+        let height = self.trunk_top - self.anchor[1];
+        let variation = i32::from(self.tree_variation());
+        if !(1..=height + 2).contains(&dy) {
+            return None;
+        }
+        let trunk_radius = match species {
+            TreeSpecies::Oak | TreeSpecies::Beech if height >= 66 => 1,
+            TreeSpecies::Willow if height >= 52 => 1,
+            _ => 0,
+        };
+        if dy <= height && dx.abs() <= trunk_radius && dz.abs() <= trunk_radius {
+            return Some(Material::Wood);
+        }
+
+        let oriented = self.oriented_offset(dx, dz);
+        let branch_height = height * 2 / 3 + variation.rem_euclid(5) - 2;
+        let branch = match species {
+            TreeSpecies::Oak | TreeSpecies::Beech | TreeSpecies::Willow => {
+                (branch_height..=height - 3).contains(&dy)
+                    && ((oriented[0].abs() <= 6 && oriented[1].abs() <= 1)
+                        || (oriented[1].abs() <= 5 && oriented[0].abs() <= 1))
+            }
+            TreeSpecies::Acacia => {
+                (height - 9..=height - 3).contains(&dy)
+                    && oriented[0].abs() <= 6
+                    && oriented[1].abs() <= 1
+            }
+            _ => false,
+        };
+        if branch {
+            return Some(Material::Wood);
+        }
+
+        let shifted_x = dx - (variation.rem_euclid(3) - 1);
+        let shifted_z = dz - ((variation / 3).rem_euclid(3) - 1);
+        let leaves = match species {
+            TreeSpecies::Oak | TreeSpecies::Beech => {
+                let radius = if matches!(species, TreeSpecies::Oak) {
+                    9
+                } else {
+                    8
+                };
+                let crown_y = dy - (height - 5);
+                (-8..=5).contains(&crown_y)
+                    && shifted_x * shifted_x + shifted_z * shifted_z + crown_y * crown_y * 2
+                        <= radius * radius + variation * 2
+            }
+            TreeSpecies::Birch | TreeSpecies::Aspen | TreeSpecies::Alder => {
+                let (radius, half_height) = match species {
+                    TreeSpecies::Birch => (4, 13),
+                    TreeSpecies::Aspen => (5, 15),
+                    _ => (6, 10),
+                };
+                let crown_y = dy - (height - half_height / 2);
+                crown_y.abs() <= half_height / 2
+                    && shifted_x * shifted_x + shifted_z * shifted_z <= radius * radius
+                    && (shifted_x * 7 + shifted_z * 11 + dy + variation).rem_euclid(13) != 0
+            }
+            TreeSpecies::Willow => {
+                let crown_y = dy - (height - 7);
+                let horizontal = shifted_x * shifted_x + shifted_z * shifted_z;
+                let crown = (-7..=5).contains(&crown_y)
+                    && horizontal + crown_y * crown_y <= 88 + variation * 2;
+                let droop = (-16..=-5).contains(&crown_y)
+                    && (36..=92).contains(&horizontal)
+                    && (dx * 5 + dz * 3 + variation).rem_euclid(5) <= 1;
+                crown || droop
+            }
+            TreeSpecies::Pine
+            | TreeSpecies::Spruce
+            | TreeSpecies::Fir
+            | TreeSpecies::Larch
+            | TreeSpecies::Juniper => {
+                let crown_start = match species {
+                    TreeSpecies::Pine => height / 2,
+                    TreeSpecies::Spruce | TreeSpecies::Fir => height / 3,
+                    TreeSpecies::Larch => height * 2 / 5,
+                    TreeSpecies::Juniper => height / 5,
+                    _ => unreachable!(),
+                };
+                if dy < crown_start || dy > height + 2 {
+                    false
+                } else {
+                    let remaining = height + 2 - dy;
+                    let crown_height = height + 2 - crown_start;
+                    let maximum_radius = match species {
+                        TreeSpecies::Pine => 6,
+                        TreeSpecies::Spruce | TreeSpecies::Fir => 8,
+                        TreeSpecies::Larch => 7,
+                        TreeSpecies::Juniper => 5,
+                        _ => unreachable!(),
+                    };
+                    let radius = 1 + remaining * maximum_radius / crown_height.max(1);
+                    let whorl = (height - dy + variation).rem_euclid(6);
+                    let gap = if whorl >= 4 { 1 } else { 0 };
+                    shifted_x * shifted_x + shifted_z * shifted_z <= (radius - gap).max(1).pow(2)
+                }
+            }
+            TreeSpecies::Acacia => {
+                let crown_y = dy - (height - 2);
+                (-4..=3).contains(&crown_y)
+                    && shifted_x * shifted_x + shifted_z * shifted_z <= 92 + variation * 2
+                    && !(crown_y < -1 && shifted_x.abs().max(shifted_z.abs()) > 6)
+            }
+        };
+        leaves.then_some(Material::Leaves)
     }
 
     fn elder_canopy_material(self, dx: i32, dy: i32, dz: i32) -> Option<Material> {
@@ -462,6 +654,61 @@ impl SkylineFeature {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn every_ecology_species_has_multiple_bounded_canonical_variations() {
+        assert!(TreeSpecies::ALL.len() >= 10);
+        for species in TreeSpecies::ALL {
+            let mut shapes = BTreeSet::new();
+            for variation in [0, 3, 7] {
+                let feature = SkylineFeature {
+                    id: SkylineFeatureId::default(),
+                    kind: SkylineFeatureKind::Broadleaf,
+                    anchor: [0, 0, 0],
+                    trunk_top: 90,
+                    orientation: variation & 3,
+                    variant: species.encode_variant(variation),
+                    prominence: 0,
+                    route_landmark: None,
+                };
+                assert_eq!(feature.tree_species(), Some(species));
+                assert_eq!(feature.tree_variation(), variation);
+                let [min, max] = feature.bounds();
+                let mut wood = 0usize;
+                let mut leaves = 0usize;
+                let mut checksum = 0u64;
+                for y in min[1]..max[1] {
+                    for z in min[2]..max[2] {
+                        for x in min[0]..max[0] {
+                            let Some(material) = feature.material_at(VoxelCoord::new(x, y, z))
+                            else {
+                                continue;
+                            };
+                            wood += usize::from(material == Material::Wood);
+                            leaves += usize::from(material == Material::Leaves);
+                            checksum = checksum
+                                .wrapping_mul(0x100_0000_01b3)
+                                .wrapping_add((x as u32 as u64) << 32)
+                                .wrapping_add((y as u32 as u64) << 16)
+                                .wrapping_add(z as u32 as u64)
+                                .wrapping_add(u64::from(material.id()));
+                        }
+                    }
+                }
+                assert!(
+                    wood > 20,
+                    "{species:?} variation {variation} lacked a trunk"
+                );
+                assert!(
+                    leaves > 80,
+                    "{species:?} variation {variation} lacked a visible canopy"
+                );
+                shapes.insert(checksum);
+            }
+            assert_eq!(shapes.len(), 3, "{species:?} variations collapsed");
+        }
+    }
 
     #[test]
     fn semantic_hero_voxels_are_nonempty_and_inside_declared_bounds() {
