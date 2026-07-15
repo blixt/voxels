@@ -650,15 +650,20 @@ impl GenerationRequest {
     fn key(&self) -> GenerationKey {
         match self {
             Self::Chunks { request, snapshot } => GenerationKey::Chunks {
-                priority: request.priority,
                 coords: request.coords.clone(),
                 revisions: snapshot.revisions.clone(),
             },
             Self::SurfaceTiles { request, snapshot } => GenerationKey::SurfaceTiles {
-                priority: request.priority,
                 coords: request.coords.clone(),
                 revisions: snapshot.revisions.clone(),
             },
+        }
+    }
+
+    fn flight_key(&self) -> GenerationFlightKey {
+        GenerationFlightKey {
+            product: self.key(),
+            priority: self.priority(),
         }
     }
 }
@@ -666,19 +671,23 @@ impl GenerationRequest {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum GenerationKey {
     Chunks {
-        priority: WorldProductPriority,
         coords: Vec<ChunkCoord>,
         revisions: Vec<u64>,
     },
     SurfaceTiles {
-        priority: WorldProductPriority,
         coords: Vec<voxels_world::SurfaceTileCoord>,
         revisions: Vec<u64>,
     },
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct GenerationFlightKey {
+    product: GenerationKey,
+    priority: WorldProductPriority,
+}
+
 struct GenerationCompletion {
-    key: GenerationKey,
+    key: GenerationFlightKey,
     result: Result<Vec<u8>, String>,
 }
 
@@ -1303,7 +1312,7 @@ async fn run_generation_dispatcher(
     product_cache_bytes: usize,
 ) {
     let (completion_tx, mut completions) = mpsc::unbounded_channel();
-    let mut in_flight = HashMap::<GenerationKey, Vec<GenerationJob>>::new();
+    let mut in_flight = HashMap::<GenerationFlightKey, Vec<GenerationJob>>::new();
     let mut cache = ResponseCache::new(product_cache_bytes);
     let mut jobs_open = true;
     loop {
@@ -1316,8 +1325,8 @@ async fn run_generation_dispatcher(
                     jobs_open = false;
                     continue;
                 };
-                let key = job.request.key();
-                if let Some(bytes) = cache.get(&key) {
+                let key = job.request.flight_key();
+                if let Some(bytes) = cache.get(&key.product) {
                     tokio::spawn(deliver_generation_job(job, Ok(bytes), max_frame_bytes));
                     continue;
                 }
@@ -1354,7 +1363,7 @@ async fn run_generation_dispatcher(
                 };
                 let response = completion.result.map(Arc::new);
                 if let Ok(bytes) = &response {
-                    cache.insert(completion.key, Arc::clone(bytes));
+                    cache.insert(completion.key.product, Arc::clone(bytes));
                 }
                 for job in waiters {
                     tokio::spawn(deliver_generation_job(
@@ -1755,7 +1764,6 @@ mod tests {
     fn compressed_response_cache_is_byte_bounded_and_lru() {
         fn key(x: i32) -> GenerationKey {
             GenerationKey::Chunks {
-                priority: WorldProductPriority::VisibleChunk,
                 coords: vec![ChunkCoord::new(x, 0, 0)],
                 revisions: vec![1],
             }
@@ -1911,6 +1919,21 @@ mod tests {
         assert_eq!(first_result.request_id, 41);
         assert_eq!(second_result.request_id, 99);
         assert_eq!(first_result.items, second_result.items);
+        assert_eq!(batch_calls.load(Ordering::Relaxed), 1);
+
+        first
+            .send(ClientMessage::Binary(
+                encode_chunk_batch(&ChunkBatchRequest {
+                    request_id: 42,
+                    priority: WorldProductPriority::Prefetch,
+                    coords,
+                })?
+                .into(),
+            ))
+            .await?;
+        let cached = decode_chunk_batch_result(&next_client_binary(&mut first).await?)?;
+        assert_eq!(cached.request_id, 42);
+        assert_eq!(cached.items, first_result.items);
         assert_eq!(batch_calls.load(Ordering::Relaxed), 1);
 
         first.close(None).await?;
