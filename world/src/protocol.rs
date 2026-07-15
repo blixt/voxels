@@ -319,6 +319,33 @@ pub struct ChunkBatchResult {
     pub items: Vec<ChunkBatchItem>,
 }
 
+/// A validated chunk result item ready to be shared across response batches.
+///
+/// The bytes intentionally exclude the batch header and outer compression envelope. The world
+/// service can therefore cache this product by coordinate and edit revision, then preserve the
+/// existing VXWP batch wire format when assembling a client response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EncodedChunkBatchItem {
+    coord: ChunkCoord,
+    edit_revision: u64,
+    source_identity_hash: WorldSourceIdentityHash,
+    bytes: Vec<u8>,
+}
+
+impl EncodedChunkBatchItem {
+    pub fn coord(&self) -> ChunkCoord {
+        self.coord
+    }
+
+    pub fn edit_revision(&self) -> u64 {
+        self.edit_revision
+    }
+
+    pub fn encoded_len(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SurfaceTileBatchRequest {
     pub request_id: u64,
@@ -341,6 +368,29 @@ pub struct SurfaceTileBatchResult {
     pub request_id: u64,
     pub source_identity_hash: WorldSourceIdentityHash,
     pub items: Vec<SurfaceTileBatchItem>,
+}
+
+/// A validated surface result item ready to be shared across response batches.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EncodedSurfaceTileBatchItem {
+    coord: SurfaceTileCoord,
+    edit_revision: u64,
+    source_identity_hash: WorldSourceIdentityHash,
+    bytes: Vec<u8>,
+}
+
+impl EncodedSurfaceTileBatchItem {
+    pub fn coord(&self) -> SurfaceTileCoord {
+        self.coord
+    }
+
+    pub fn edit_revision(&self) -> u64 {
+        self.edit_revision
+    }
+
+    pub fn encoded_len(&self) -> usize {
+        self.bytes.len()
+    }
 }
 
 /// One idempotent server-authoritative gameplay edit.
@@ -809,55 +859,88 @@ pub fn encode_chunk_batch_result(result: &ChunkBatchResult) -> Result<Vec<u8>, P
     {
         return Err(ProtocolError::LimitExceeded("chunk result batch"));
     }
-    let mut payload = Vec::new();
-    payload.extend_from_slice(result.source_identity_hash.as_bytes());
-    push_u16(&mut payload, result.items.len() as u16);
-    push_u16(&mut payload, 0);
-    for (index, item) in result.items.iter().enumerate() {
-        if !item.coord.is_world_representable() {
-            return Err(ProtocolError::InvalidPayload("invalid chunk coordinate"));
+    let items = result
+        .items
+        .iter()
+        .map(|item| encode_chunk_batch_item(result.source_identity_hash, item))
+        .collect::<Result<Vec<_>, _>>()?;
+    encode_chunk_batch_result_from_items(
+        result.request_id,
+        result.source_identity_hash,
+        items.iter(),
+    )
+}
+
+pub fn encode_chunk_batch_item(
+    source_identity_hash: WorldSourceIdentityHash,
+    item: &ChunkBatchItem,
+) -> Result<EncodedChunkBatchItem, ProtocolError> {
+    if !item.coord.is_world_representable() {
+        return Err(ProtocolError::InvalidPayload("invalid chunk coordinate"));
+    }
+    let mut bytes = Vec::new();
+    push_i32(&mut bytes, item.coord.x);
+    push_i32(&mut bytes, item.coord.y);
+    push_i32(&mut bytes, item.coord.z);
+    push_u64(&mut bytes, item.edit_revision);
+    match &item.result {
+        Ok(snapshot) => {
+            if snapshot.chunk.coord() != item.coord
+                || snapshot.meshing_halo.coord() != item.coord
+                || snapshot.source_identity_hash != source_identity_hash
+            {
+                return Err(ProtocolError::InvalidPayload(
+                    "chunk result key or identity mismatch",
+                ));
+            }
+            push_u16(&mut bytes, 0);
+            push_u16(&mut bytes, 0);
+            let encoded = encode_chunk_snapshot(snapshot);
+            push_u32(&mut bytes, encoded.len() as u32);
+            bytes.extend_from_slice(&encoded);
         }
-        if result.items[..index]
-            .iter()
-            .any(|prior| prior.coord == item.coord)
-        {
+        Err(error) => {
+            push_u16(&mut bytes, encode_world_source_error(*error));
+            push_u16(&mut bytes, 0);
+            push_u32(&mut bytes, 0);
+        }
+    }
+    Ok(EncodedChunkBatchItem {
+        coord: item.coord,
+        edit_revision: item.edit_revision,
+        source_identity_hash,
+        bytes,
+    })
+}
+
+pub fn encode_chunk_batch_result_from_items<'a>(
+    request_id: u64,
+    source_identity_hash: WorldSourceIdentityHash,
+    items: impl IntoIterator<Item = &'a EncodedChunkBatchItem>,
+) -> Result<Vec<u8>, ProtocolError> {
+    let items = items.into_iter().collect::<Vec<_>>();
+    if request_id == 0 || items.is_empty() || items.len() > MAX_CHUNKS_PER_BATCH {
+        return Err(ProtocolError::LimitExceeded("chunk result batch"));
+    }
+    let mut payload = Vec::new();
+    payload.extend_from_slice(source_identity_hash.as_bytes());
+    push_u16(&mut payload, items.len() as u16);
+    push_u16(&mut payload, 0);
+    for (index, item) in items.iter().enumerate() {
+        if item.source_identity_hash != source_identity_hash {
+            return Err(ProtocolError::InvalidPayload(
+                "chunk result identity mismatch",
+            ));
+        }
+        if items[..index].iter().any(|prior| prior.coord == item.coord) {
             return Err(ProtocolError::InvalidPayload(
                 "duplicate chunk result coordinate",
             ));
         }
-        push_i32(&mut payload, item.coord.x);
-        push_i32(&mut payload, item.coord.y);
-        push_i32(&mut payload, item.coord.z);
-        push_u64(&mut payload, item.edit_revision);
-        match &item.result {
-            Ok(snapshot) => {
-                if snapshot.chunk.coord() != item.coord
-                    || snapshot.meshing_halo.coord() != item.coord
-                    || snapshot.source_identity_hash != result.source_identity_hash
-                {
-                    return Err(ProtocolError::InvalidPayload(
-                        "chunk result key or identity mismatch",
-                    ));
-                }
-                push_u16(&mut payload, 0);
-                push_u16(&mut payload, 0);
-                let encoded = encode_chunk_snapshot(snapshot);
-                push_u32(&mut payload, encoded.len() as u32);
-                payload.extend_from_slice(&encoded);
-            }
-            Err(error) => {
-                push_u16(&mut payload, encode_world_source_error(*error));
-                push_u16(&mut payload, 0);
-                push_u32(&mut payload, 0);
-            }
-        }
+        payload.extend_from_slice(&item.bytes);
     }
     let payload = encode_result_payload(&payload)?;
-    Ok(encode_frame(
-        KIND_CHUNK_BATCH_RESULT,
-        result.request_id,
-        &payload,
-    ))
+    Ok(encode_frame(KIND_CHUNK_BATCH_RESULT, request_id, &payload))
 }
 
 pub fn decode_chunk_batch_result(bytes: &[u8]) -> Result<ChunkBatchResult, ProtocolError> {
@@ -1013,53 +1096,90 @@ pub fn encode_surface_tile_batch_result(
     {
         return Err(ProtocolError::LimitExceeded("surface tile result batch"));
     }
+    let items = result
+        .items
+        .iter()
+        .map(|item| encode_surface_tile_batch_item(result.source_identity_hash, item))
+        .collect::<Result<Vec<_>, _>>()?;
+    encode_surface_tile_batch_result_from_items(
+        result.request_id,
+        result.source_identity_hash,
+        items.iter(),
+    )
+}
+
+pub fn encode_surface_tile_batch_item(
+    source_identity_hash: WorldSourceIdentityHash,
+    item: &SurfaceTileBatchItem,
+) -> Result<EncodedSurfaceTileBatchItem, ProtocolError> {
+    if !item.coord.is_world_representable() {
+        return Err(ProtocolError::InvalidPayload(
+            "invalid surface tile coordinate",
+        ));
+    }
+    let mut bytes = Vec::new();
+    encode_surface_coord(&mut bytes, item.coord);
+    push_u64(&mut bytes, item.edit_revision);
+    match &item.result {
+        Ok(snapshot) => {
+            if snapshot.source_identity_hash != source_identity_hash
+                || snapshot.terrain.coord != item.coord
+                || snapshot.water.coord != item.coord
+            {
+                return Err(ProtocolError::InvalidPayload(
+                    "surface result key or identity mismatch",
+                ));
+            }
+            push_u16(&mut bytes, 0);
+            push_u16(&mut bytes, 0);
+            let encoded = encode_surface_snapshot(snapshot)?;
+            push_u32(&mut bytes, encoded.len() as u32);
+            bytes.extend_from_slice(&encoded);
+        }
+        Err(error) => {
+            push_u16(&mut bytes, encode_world_source_error(*error));
+            push_u16(&mut bytes, 0);
+            push_u32(&mut bytes, 0);
+        }
+    }
+    Ok(EncodedSurfaceTileBatchItem {
+        coord: item.coord,
+        edit_revision: item.edit_revision,
+        source_identity_hash,
+        bytes,
+    })
+}
+
+pub fn encode_surface_tile_batch_result_from_items<'a>(
+    request_id: u64,
+    source_identity_hash: WorldSourceIdentityHash,
+    items: impl IntoIterator<Item = &'a EncodedSurfaceTileBatchItem>,
+) -> Result<Vec<u8>, ProtocolError> {
+    let items = items.into_iter().collect::<Vec<_>>();
+    if request_id == 0 || items.is_empty() || items.len() > MAX_SURFACE_TILES_PER_BATCH {
+        return Err(ProtocolError::LimitExceeded("surface tile result batch"));
+    }
     let mut payload = Vec::new();
-    payload.extend_from_slice(result.source_identity_hash.as_bytes());
-    push_u16(&mut payload, result.items.len() as u16);
+    payload.extend_from_slice(source_identity_hash.as_bytes());
+    push_u16(&mut payload, items.len() as u16);
     push_u16(&mut payload, 0);
-    for (index, item) in result.items.iter().enumerate() {
-        if !item.coord.is_world_representable() {
+    for (index, item) in items.iter().enumerate() {
+        if item.source_identity_hash != source_identity_hash {
             return Err(ProtocolError::InvalidPayload(
-                "invalid surface tile coordinate",
+                "surface result identity mismatch",
             ));
         }
-        if result.items[..index]
-            .iter()
-            .any(|prior| prior.coord == item.coord)
-        {
+        if items[..index].iter().any(|prior| prior.coord == item.coord) {
             return Err(ProtocolError::InvalidPayload(
                 "duplicate surface result coordinate",
             ));
         }
-        encode_surface_coord(&mut payload, item.coord);
-        push_u64(&mut payload, item.edit_revision);
-        match &item.result {
-            Ok(snapshot) => {
-                if snapshot.source_identity_hash != result.source_identity_hash
-                    || snapshot.terrain.coord != item.coord
-                    || snapshot.water.coord != item.coord
-                {
-                    return Err(ProtocolError::InvalidPayload(
-                        "surface result key or identity mismatch",
-                    ));
-                }
-                push_u16(&mut payload, 0);
-                push_u16(&mut payload, 0);
-                let encoded = encode_surface_snapshot(snapshot)?;
-                push_u32(&mut payload, encoded.len() as u32);
-                payload.extend_from_slice(&encoded);
-            }
-            Err(error) => {
-                push_u16(&mut payload, encode_world_source_error(*error));
-                push_u16(&mut payload, 0);
-                push_u32(&mut payload, 0);
-            }
-        }
+        payload.extend_from_slice(&item.bytes);
     }
     let payload = encode_result_payload(&payload)?;
     Ok(encode_frame(
         KIND_SURFACE_TILE_BATCH_RESULT,
-        result.request_id,
+        request_id,
         &payload,
     ))
 }
@@ -3446,6 +3566,18 @@ mod tests {
             }],
         };
         let encoded = encode_chunk_batch_result(&response).expect("encode");
+        let item = encode_chunk_batch_item(response.source_identity_hash, &response.items[0])
+            .expect("encode item");
+        assert_eq!(item.coord(), coord);
+        assert_eq!(item.edit_revision(), 7);
+        assert_eq!(
+            encode_chunk_batch_result_from_items(
+                response.request_id,
+                response.source_identity_hash,
+                [&item],
+            ),
+            Ok(encoded.clone())
+        );
         assert!(
             encoded.len() < 5_000,
             "compressed result should stay compact"
@@ -3508,6 +3640,19 @@ mod tests {
             }],
         };
         let encoded = encode_surface_tile_batch_result(&response).expect("encode");
+        let item =
+            encode_surface_tile_batch_item(response.source_identity_hash, &response.items[0])
+                .expect("encode item");
+        assert_eq!(item.coord(), coord);
+        assert_eq!(item.edit_revision(), 11);
+        assert_eq!(
+            encode_surface_tile_batch_result_from_items(
+                response.request_id,
+                response.source_identity_hash,
+                [&item],
+            ),
+            Ok(encoded.clone())
+        );
         assert!(
             encoded.len() < 50_000,
             "compressed surface result should stay compact"
