@@ -28,6 +28,14 @@ pub const DECODER_WEIGHT_SHA256: &str =
     "b6c7fa99f836ad75c514236c9529e18a68ea207ed59dd39fd1341fc9a8a03bcc";
 pub const SYNTHETIC_MAP_DATA_SHA256: &str =
     "4e17527829f22435745be8bbbf3427af1e73f7e7031a0e6c339f8edda2dc84bb";
+pub const ROOT_CONFIG_SHA256: &str =
+    "c60f0b74d89317e64cfc623fbfdd828f1b5b2e50aa75020ac4001103381853bd";
+pub const COARSE_CONFIG_SHA256: &str =
+    "3256a71d181dc3b10f7e44320920694b6aba1572ee5200872a503f89c8cbb3b4";
+pub const BASE_CONFIG_SHA256: &str =
+    "2400da3c7bed5dbc331a0cfabd3f4a5a3c5c977d4c4b3fb1037f4e285d320598";
+pub const DECODER_CONFIG_SHA256: &str =
+    "fc69e7c75bcc8b92d687306cb38cca2868a6034cdf73ddf7cfbf7078af6ac55e";
 
 pub const MODEL_FILES: [&str; 7] = [
     "config.json",
@@ -201,14 +209,18 @@ pub fn validate_model_root(root: &Path) -> Result<(), TerrainDiffusionError> {
         }
     }
     for (relative, expected) in [
+        ("config.json", ROOT_CONFIG_SHA256),
+        ("coarse_model/config.json", COARSE_CONFIG_SHA256),
         (
             "coarse_model/diffusion_pytorch_model.safetensors",
             COARSE_WEIGHT_SHA256,
         ),
+        ("base_model/config.json", BASE_CONFIG_SHA256),
         (
             "base_model/diffusion_pytorch_model.safetensors",
             BASE_WEIGHT_SHA256,
         ),
+        ("decoder_model/config.json", DECODER_CONFIG_SHA256),
         (
             "decoder_model/diffusion_pytorch_model.safetensors",
             DECODER_WEIGHT_SHA256,
@@ -398,5 +410,28 @@ mod tests {
             validate_model_root(&root),
             Err(TerrainDiffusionError::MissingModelFile(_))
         ));
+    }
+
+    #[test]
+    fn mutated_model_configuration_is_rejected() {
+        let root = std::env::temp_dir().join(format!(
+            "voxels-mutated-terrain-diffusion-model-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for relative in MODEL_FILES {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().expect("model file has a parent"))
+                .expect("create model fixture directory");
+            std::fs::write(path, []).expect("write model fixture");
+        }
+        std::fs::write(root.join("config.json"), b"{}\n").expect("mutate root config");
+
+        assert!(matches!(
+            validate_model_root(&root),
+            Err(TerrainDiffusionError::ModelHashMismatch { path, .. })
+                if path == root.join("config.json")
+        ));
+        std::fs::remove_dir_all(root).expect("remove model fixture");
     }
 }

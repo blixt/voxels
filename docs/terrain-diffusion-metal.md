@@ -19,6 +19,7 @@ The provider pins:
 
 - upstream model repository `xandergos/terrain-diffusion-30m`;
 - immutable Hugging Face revision `9ef8030cb805b433b98ec25c5dddefbac07a9e26`;
+- SHA-256 for the root pipeline configuration and every stage configuration;
 - SHA-256 for the coarse, base, and decoder safetensors;
 - SHA-256 for the bundled 64-knot ETOPO/WorldClim quantile tables;
 - sampler, scheduler, macro-field, coordinate, and voxel-composer versions in

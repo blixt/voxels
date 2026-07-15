@@ -141,6 +141,7 @@ impl MetalTerrainDiffusion {
                 "CPU fallback is forbidden for this provider".to_owned(),
             ));
         }
+        validate_model_root(&config.model_root)?;
         let device = Device::new_metal(0)
             .map_err(|error| TerrainDiffusionError::MetalUnavailable(error.to_string()))?;
         let dtype = match config.precision {

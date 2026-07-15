@@ -18,7 +18,7 @@ use voxels_world::{
 use voxels_world_terrain_diffusion::{MODEL_REVISION, TerrainDiffusionError};
 #[cfg(all(feature = "terrain-metal", target_os = "macos"))]
 use voxels_world_terrain_diffusion::{
-    TerrainDiffusionConfig, TerrainPrecision, validate_model_root,
+    TerrainDiffusionConfig, TerrainPrecision,
 };
 
 mod edits;
@@ -697,7 +697,6 @@ impl LoadedWorldServiceConfig {
         };
 
         let model_root = self.terrain_model_root()?;
-        validate_model_root(&model_root)?;
         let precision = match self.config.terrain_diffusion.precision {
             TerrainModelPrecision::Float16 => TerrainPrecision::Float16,
             TerrainModelPrecision::Float32 => TerrainPrecision::Float32,

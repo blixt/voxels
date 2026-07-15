@@ -115,8 +115,9 @@ existing world products.
 
 Both coordinate values must contain exactly two signed 32-bit integers. Unknown keys, malformed values,
 and unsupported `schema_version` values are rejected so configuration mistakes cannot silently alter
-a world. Model repository/revision, verified weight hashes, tensor shapes, normalization statistics,
-and sampler/scheduler semantics remain pinned provider invariants rather than deployment settings.
+a world. Model repository/revision, verified configuration and weight hashes, tensor shapes,
+normalization statistics, and sampler/scheduler semantics remain pinned provider invariants rather
+than deployment settings.
 
 ## Checking the configured provider
 
