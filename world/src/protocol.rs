@@ -2787,14 +2787,29 @@ fn validate_range(range: &std::ops::Range<u32>, quad_count: usize) -> Result<(),
 }
 
 fn validate_surface_mesh(mesh: &SurfaceTileMesh) -> Result<(), ProtocolError> {
-    if mesh.quads.len() > MAX_SURFACE_QUADS_PER_TILE
-        || mesh.patches.is_empty()
-        || mesh.patches.len() > MAX_SURFACE_PATCHES_PER_TILE
-    {
+    let patches_per_edge = crate::SURFACE_PATCHES_PER_TILE_EDGE as usize;
+    let expected_patch_count = patches_per_edge * patches_per_edge;
+    if mesh.quads.len() > MAX_SURFACE_QUADS_PER_TILE {
         return Err(ProtocolError::LimitExceeded("surface mesh geometry"));
     }
-    for patch in &mesh.patches {
+    if mesh.patches.len() != expected_patch_count {
+        return Err(ProtocolError::InvalidPayload(
+            "surface terrain must contain a complete patch grid",
+        ));
+    }
+    for (index, patch) in mesh.patches.iter().enumerate() {
         validate_cell_bounds(patch.cell_bounds)?;
+        let patch_x = index % patches_per_edge;
+        let patch_z = index / patches_per_edge;
+        let min_x = (patch_x as i32 * crate::SURFACE_PATCH_EDGE_CELLS) as u8;
+        let min_z = (patch_z as i32 * crate::SURFACE_PATCH_EDGE_CELLS) as u8;
+        let max_x = min_x + crate::SURFACE_PATCH_EDGE_CELLS as u8;
+        let max_z = min_z + crate::SURFACE_PATCH_EDGE_CELLS as u8;
+        if patch.cell_bounds != [[min_x, min_z], [max_x, max_z]] {
+            return Err(ProtocolError::InvalidPayload(
+                "surface terrain patch grid is incomplete or out of order",
+            ));
+        }
         validate_range(&patch.quad_range, mesh.quads.len())?;
         for range in &patch.skirt_ranges {
             validate_range(range, mesh.quads.len())?;
@@ -3688,6 +3703,24 @@ mod tests {
                 "surface patch range is out of bounds"
             ))
         ));
+
+        let mut missing_patch = snapshot.clone();
+        missing_patch.terrain.patches.pop();
+        assert_eq!(
+            encode_surface_snapshot(&missing_patch),
+            Err(ProtocolError::InvalidPayload(
+                "surface terrain must contain a complete patch grid"
+            ))
+        );
+
+        let mut out_of_order = snapshot;
+        out_of_order.terrain.patches.swap(0, 1);
+        assert_eq!(
+            encode_surface_snapshot(&out_of_order),
+            Err(ProtocolError::InvalidPayload(
+                "surface terrain patch grid is incomplete or out of order"
+            ))
+        );
     }
 
     #[test]
