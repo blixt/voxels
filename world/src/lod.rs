@@ -68,6 +68,17 @@ impl SurfaceLodLevel {
             _ => None,
         }
     }
+
+    pub const fn next_coarser(self) -> Option<Self> {
+        match self {
+            Self::Stride2 => Some(Self::Stride4),
+            Self::Stride4 => Some(Self::Stride8),
+            Self::Stride8 => Some(Self::Stride16),
+            Self::Stride16 => Some(Self::Stride32),
+            Self::Stride32 => Some(Self::Stride64),
+            Self::Stride64 => None,
+        }
+    }
 }
 
 /// A stable streamed-tile key. The LOD level is part of the identity even when two tiles share
@@ -130,6 +141,76 @@ impl SurfaceTileCoord {
                 origin[1].saturating_add(span),
             ],
         ]
+    }
+}
+
+/// A stable patch key in a level-wide grid. Unlike tile-local cell bounds, this identity remains
+/// meaningful across independently streamed tiles and lets the renderer derive the exact parent
+/// and children of a geometric refinement without extra protocol metadata.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SurfacePatchId {
+    pub level: SurfaceLodLevel,
+    pub x: i32,
+    pub z: i32,
+}
+
+impl SurfacePatchId {
+    pub const fn new(level: SurfaceLodLevel, x: i32, z: i32) -> Self {
+        Self { level, x, z }
+    }
+
+    pub fn from_tile_cell_min(coord: SurfaceTileCoord, cell_min: [u8; 2]) -> Option<Self> {
+        let patch_edge = u8::try_from(SURFACE_PATCH_EDGE_CELLS).ok()?;
+        let patches_per_tile = SURFACE_PATCHES_PER_TILE_EDGE;
+        if !coord.is_world_representable()
+            || cell_min[0] % patch_edge != 0
+            || cell_min[1] % patch_edge != 0
+            || i32::from(cell_min[0]) >= SURFACE_TILE_EDGE_CELLS
+            || i32::from(cell_min[1]) >= SURFACE_TILE_EDGE_CELLS
+        {
+            return None;
+        }
+        let tile_patch_x = coord.x.checked_mul(patches_per_tile)?;
+        let tile_patch_z = coord.z.checked_mul(patches_per_tile)?;
+        Some(Self::new(
+            coord.level,
+            tile_patch_x.checked_add(i32::from(cell_min[0] / patch_edge))?,
+            tile_patch_z.checked_add(i32::from(cell_min[1] / patch_edge))?,
+        ))
+    }
+
+    pub fn parent(self) -> Option<Self> {
+        Some(Self::new(
+            self.level.next_coarser()?,
+            self.x.div_euclid(2),
+            self.z.div_euclid(2),
+        ))
+    }
+
+    /// This patch's X/Z position inside its parent. Euclidean remainders keep the mapping stable
+    /// on both sides of the world origin.
+    pub fn parent_quadrant(self) -> Option<[u8; 2]> {
+        self.parent()?;
+        Some([self.x.rem_euclid(2) as u8, self.z.rem_euclid(2) as u8])
+    }
+
+    pub fn children(self) -> Option<[Self; 4]> {
+        let finer = match self.level {
+            SurfaceLodLevel::Stride2 => return None,
+            SurfaceLodLevel::Stride4 => SurfaceLodLevel::Stride2,
+            SurfaceLodLevel::Stride8 => SurfaceLodLevel::Stride4,
+            SurfaceLodLevel::Stride16 => SurfaceLodLevel::Stride8,
+            SurfaceLodLevel::Stride32 => SurfaceLodLevel::Stride16,
+            SurfaceLodLevel::Stride64 => SurfaceLodLevel::Stride32,
+        };
+        let x = self.x.checked_mul(2)?;
+        let z = self.z.checked_mul(2)?;
+        Some([
+            Self::new(finer, x, z),
+            Self::new(finer, x.checked_add(1)?, z),
+            Self::new(finer, x, z.checked_add(1)?),
+            Self::new(finer, x.checked_add(1)?, z.checked_add(1)?),
+        ])
     }
 }
 
@@ -1615,6 +1696,58 @@ mod tests {
         assert_eq!(
             SurfaceTileCoord::new(level, -1, 2).voxel_bounds_xz(),
             [[-128, 256], [0, 384]]
+        );
+    }
+
+    #[test]
+    fn patch_ids_are_unique_and_tile_grid_is_row_major() {
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride8, -3, 5);
+        let ids = (0..SURFACE_PATCHES_PER_TILE_EDGE)
+            .flat_map(|patch_z| {
+                (0..SURFACE_PATCHES_PER_TILE_EDGE).map(move |patch_x| {
+                    SurfacePatchId::from_tile_cell_min(
+                        coord,
+                        [
+                            (patch_x * SURFACE_PATCH_EDGE_CELLS) as u8,
+                            (patch_z * SURFACE_PATCH_EDGE_CELLS) as u8,
+                        ],
+                    )
+                    .expect("aligned tile patch")
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 16);
+        assert_eq!(ids.iter().copied().collect::<BTreeSet<_>>().len(), 16);
+        assert_eq!(ids[0], SurfacePatchId::new(coord.level, -12, 20));
+        assert_eq!(ids[3], SurfacePatchId::new(coord.level, -9, 20));
+        assert_eq!(ids[4], SurfacePatchId::new(coord.level, -12, 21));
+        assert_eq!(ids[15], SurfacePatchId::new(coord.level, -9, 23));
+        assert_eq!(SurfacePatchId::from_tile_cell_min(coord, [1, 0]), None);
+        assert_eq!(SurfacePatchId::from_tile_cell_min(coord, [32, 0]), None);
+    }
+
+    #[test]
+    fn patch_parents_use_euclidean_coordinates_across_world_origin() {
+        let children = [
+            SurfacePatchId::new(SurfaceLodLevel::Stride4, -2, -2),
+            SurfacePatchId::new(SurfaceLodLevel::Stride4, -1, -2),
+            SurfacePatchId::new(SurfaceLodLevel::Stride4, -2, -1),
+            SurfacePatchId::new(SurfaceLodLevel::Stride4, -1, -1),
+        ];
+        let parent = SurfacePatchId::new(SurfaceLodLevel::Stride8, -1, -1);
+        assert_eq!(children.map(SurfacePatchId::parent), [Some(parent); 4]);
+        assert_eq!(
+            children.map(SurfacePatchId::parent_quadrant),
+            [Some([0, 0]), Some([1, 0]), Some([0, 1]), Some([1, 1])]
+        );
+        assert_eq!(parent.children(), Some(children));
+        assert_eq!(
+            SurfacePatchId::new(SurfaceLodLevel::Stride64, -1, 0).parent(),
+            None
+        );
+        assert_eq!(
+            SurfacePatchId::new(SurfaceLodLevel::Stride2, 0, 0).children(),
+            None
         );
     }
 
