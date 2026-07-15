@@ -63,25 +63,6 @@ canonical and LOD queue must drain.
 identical geometry/residency plus the incremental frame and GPU cost.
 `vp run profile:atmosphere` drives the Rust canvas context menu through dawn, clear day, golden hour,
 and blue hour, captures each phase, and gates identical geometry plus frame/GPU budgets.
-`vp run profile:gtao` follows the Rust-owned pilgrim route to a dense badlands view, toggles
-screen-space contact AO through canvas hit-testing, captures the A/B, and gates exact geometry,
-resource residency, frame pacing, and depth-plus-AO GPU cost.
-`vp run profile:heroes` visits the six semantic regional heroes through the Rust canvas context menu,
-captures a deterministic contact sheet, and gates settled streaming, depth ownership, frame pacing,
-and GPU cost in every region.
-`vp run profile:caves` tours the Cinder Vault approach, descent, and chamber and gates streaming,
-eye adaptation, enclosure probes, frame pacing, and GPU cost at every stop.
-`vp run profile:lights` isolates bounded voxel-emissive lighting from the cave headlamp, captures the
-Rust-toggle A/B, and gates active-light count, unchanged geometry/residency, frame pacing, and GPU cost.
-`vp run profile:portals` moves to the playable terrain directly above Cinder Vault and proves that its
-resident chamber lights are rejected by Rust's edit-aware portal geodesic rather than leaking through
-the sealed shell.
-`vp run profile:portal-edits` seals the vault mouth with 25 durable 10 cm basalt edits, observes the
-derived closure in a second isolated tab, reloads it from SQLite/OPFS, then restores and reloads the
-pristine opening.
-`vp run profile:portal-streaming` traverses open and sealed Cinder components and gates conservative
-portal-directed chunk look-ahead, exact activation ownership, the 320-chunk ceiling, zero truncation,
-and zero unreachable active geometry.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture

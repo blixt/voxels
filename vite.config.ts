@@ -529,36 +529,8 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-performance.mjs --atmosphere",
         cache: false,
       },
-      "profile:gtao": {
-        command: "node scripts/browser-performance.mjs --gtao",
-        cache: false,
-      },
-      "profile:heroes": {
-        command: "node scripts/browser-performance.mjs --heroes",
-        cache: false,
-      },
-      "profile:caves": {
-        command: "node scripts/browser-performance.mjs --caves",
-        cache: false,
-      },
-      "profile:lights": {
-        command: "node scripts/browser-performance.mjs --lights",
-        cache: false,
-      },
-      "profile:portals": {
-        command: "node scripts/browser-performance.mjs --portals",
-        cache: false,
-      },
       "test:multiplayer-browser": {
         command: "node scripts/browser-multiplayer.mjs",
-        cache: false,
-      },
-      "profile:portal-edits": {
-        command: "node scripts/browser-performance.mjs --portal-edits",
-        cache: false,
-      },
-      "profile:portal-streaming": {
-        command: "node scripts/browser-performance.mjs --portal-streaming",
         cache: false,
       },
       "test:persistence-browser": {
