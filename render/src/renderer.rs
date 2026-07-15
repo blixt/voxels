@@ -17,7 +17,7 @@ use crate::ui::{
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
 use crate::ui_gpu::{SCENE_FORMAT, UiGpu, texture_sampler_layout};
 use bytemuck::{Pod, Zeroable};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample, RemoteAvatarPose};
@@ -65,6 +65,7 @@ const GPU_QUERY_COUNT: u32 = 18;
 const GPU_QUERY_BUFFER_BYTES: u64 = GPU_QUERY_COUNT as u64 * size_of::<u64>() as u64;
 const GPU_RESOLVE_BUFFER_BYTES: u64 = 256;
 const GPU_READBACK_SLOTS: usize = 4;
+const GPU_TIMING_HISTORY_CAPACITY: usize = 512;
 const GPU_TIMER_BUFFER_BYTES: u64 =
     GPU_RESOLVE_BUFFER_BYTES + GPU_QUERY_BUFFER_BYTES * GPU_READBACK_SLOTS as u64;
 type MeshKey = (u8, i32, i32, i32);
@@ -339,6 +340,8 @@ struct DrawList {
     mesh_count: u32,
     quad_count: u32,
     fingerprint: u64,
+    tested_slices: u32,
+    selected_slices: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -366,6 +369,14 @@ pub struct RenderDiagnostics {
     pub gpu_water_ms: Option<f32>,
     pub gpu_ambient_occlusion_ms: Option<f32>,
     pub gpu_ui_ms: Option<f32>,
+    pub cpu_cull_ms: f32,
+    pub cpu_encode_ms: f32,
+    pub cpu_submit_ms: f32,
+    pub draw_list_tested_slices: u32,
+    pub draw_list_selected_slices: u32,
+    pub surface_width: u32,
+    pub surface_height: u32,
+    pub dpr: f32,
     pub ambient_occlusion_bytes: u64,
     pub depth_prepass_draw_calls: u32,
     pub screen_space_ambient_occlusion: bool,
@@ -396,21 +407,29 @@ pub enum LocalLightVisibility {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct GpuTimingSample {
-    id: u32,
-    total_ms: f32,
-    shadow_ms: f32,
-    depth_prepass_ms: f32,
-    world_ms: f32,
-    water_ms: f32,
-    ambient_occlusion_ms: f32,
-    ui_ms: f32,
+pub struct GpuTimingSample {
+    pub frame_id: u32,
+    pub total_ms: f32,
+    pub shadow_ms: f32,
+    pub shadow_cascade_ms: [f32; CASCADE_COUNT],
+    pub depth_prepass_ms: f32,
+    pub world_ms: f32,
+    pub water_ms: f32,
+    pub ambient_occlusion_ms: f32,
+    pub ui_ms: f32,
+}
+
+#[derive(Debug, Default)]
+pub struct GpuTimingBatch {
+    pub samples: Vec<GpuTimingSample>,
+    pub dropped: u32,
 }
 
 #[derive(Default)]
 struct GpuTimingState {
-    next_id: u32,
     latest: Option<GpuTimingSample>,
+    history: VecDeque<GpuTimingSample>,
+    dropped: u32,
 }
 
 struct GpuTimingSlot {
@@ -421,6 +440,7 @@ struct GpuTimingSlot {
 struct GpuTimingFrame {
     query_set: QuerySet,
     slot: usize,
+    frame_id: u32,
     shadows: bool,
     water: bool,
     ambient_occlusion: bool,
@@ -461,11 +481,12 @@ fn parse_gpu_timestamps(
             .map(|ticks| ticks as f32 * timestamp_period / 1_000_000.0)
             .filter(|milliseconds| milliseconds.is_finite())
     };
-    let shadow_ms = if shadows {
-        elapsed_ms(0, 1)? + elapsed_ms(2, 3)? + elapsed_ms(4, 5)?
+    let shadow_cascade_ms = if shadows {
+        [elapsed_ms(0, 1)?, elapsed_ms(2, 3)?, elapsed_ms(4, 5)?]
     } else {
-        0.0
+        [0.0; CASCADE_COUNT]
     };
+    let shadow_ms = shadow_cascade_ms.into_iter().sum();
     let depth_prepass_ms = if ambient_occlusion {
         elapsed_ms(6, 7)?
     } else {
@@ -506,9 +527,10 @@ fn parse_gpu_timestamps(
         return None;
     }
     Some(GpuTimingSample {
-        id: 0,
+        frame_id: 0,
         total_ms,
         shadow_ms,
+        shadow_cascade_ms,
         depth_prepass_ms,
         world_ms,
         water_ms,
@@ -555,6 +577,7 @@ impl GpuTimer {
 
     fn begin_frame(
         &mut self,
+        frame_id: u32,
         shadows: bool,
         water: bool,
         ambient_occlusion: bool,
@@ -570,6 +593,7 @@ impl GpuTimer {
                 return Some(GpuTimingFrame {
                     query_set: self.query_set.clone(),
                     slot,
+                    frame_id,
                     shadows,
                     water,
                     ambient_occlusion,
@@ -629,9 +653,13 @@ impl GpuTimer {
             if let Some(mut sample) = sample
                 && let Ok(mut state) = state.lock()
             {
-                state.next_id = state.next_id.wrapping_add(1).max(1);
-                sample.id = state.next_id;
+                sample.frame_id = frame.frame_id;
                 state.latest = Some(sample);
+                if state.history.len() == GPU_TIMING_HISTORY_CAPACITY {
+                    state.history.pop_front();
+                    state.dropped = state.dropped.saturating_add(1);
+                }
+                state.history.push_back(sample);
             }
             available.store(true, Ordering::Release);
         });
@@ -639,6 +667,16 @@ impl GpuTimer {
 
     fn latest(&self) -> Option<GpuTimingSample> {
         self.state.lock().ok().and_then(|state| state.latest)
+    }
+
+    fn drain(&self) -> GpuTimingBatch {
+        let Ok(mut state) = self.state.lock() else {
+            return GpuTimingBatch::default();
+        };
+        GpuTimingBatch {
+            samples: state.history.drain(..).collect(),
+            dropped: std::mem::take(&mut state.dropped),
+        }
     }
 }
 
@@ -1476,6 +1514,12 @@ impl Renderer {
         self.diagnostics
     }
 
+    pub fn drain_gpu_timings(&mut self) -> GpuTimingBatch {
+        self.gpu_timer
+            .as_ref()
+            .map_or_else(GpuTimingBatch::default, GpuTimer::drain)
+    }
+
     pub fn set_remote_avatars(&mut self, avatars: &[RemoteAvatarPose]) {
         self.remote_avatars.clear();
         self.remote_avatars.extend_from_slice(avatars);
@@ -2144,10 +2188,12 @@ impl Renderer {
     #[must_use]
     pub fn render(
         &mut self,
+        frame_id: u32,
         dt: f32,
         camera: &CameraState,
         ui_stats: LiveStats,
         local_light_visibility: impl FnMut([f32; 3], f32) -> LocalLightVisibility,
+        mut now_ms: impl FnMut() -> f64,
     ) -> bool {
         let dt = bounded_frame_delta(dt);
         self.time += dt;
@@ -2226,6 +2272,7 @@ impl Renderer {
             self.runtime_config,
         );
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
+        let cull_started = now_ms();
         let geometric_lod_focus =
             active_geometric_lod_focus(self.geometric_lod_focus, self.options.far_terrain);
         let shadow_draw_lists: [DrawList; CASCADE_COUNT] = if self.options.shadows {
@@ -2258,6 +2305,8 @@ impl Renderer {
                 && slice_owned_by_lod(geometric_lod_focus, key, slice)
                 && aabb_visible(slice.bounds_min, slice.bounds_max, view_projection)
         });
+        let cpu_cull_ms = (now_ms() - cull_started).max(0.0) as f32;
+        let encode_started = now_ms();
         self.avatar_gpu
             .prepare(&self.queue, &self.remote_avatars, self.time);
         let avatar_instances = self.avatar_gpu.instance_count();
@@ -2294,6 +2343,7 @@ impl Renderer {
             });
         let gpu_frame = self.gpu_timer.as_mut().and_then(|timer| {
             timer.begin_frame(
+                frame_id,
                 self.options.shadows,
                 refract_water,
                 self.options.screen_space_ambient_occlusion,
@@ -2550,7 +2600,7 @@ impl Renderer {
                 } else {
                     0
                 }),
-            gpu_sample_id: gpu_timing.map_or(0, |timing| timing.id),
+            gpu_sample_id: gpu_timing.map_or(0, |timing| timing.frame_id),
             gpu_total_ms: gpu_timing.map(|timing| timing.total_ms),
             gpu_shadow_ms: gpu_timing.map(|timing| timing.shadow_ms),
             gpu_depth_prepass_ms: gpu_timing.map(|timing| timing.depth_prepass_ms),
@@ -2558,6 +2608,24 @@ impl Renderer {
             gpu_water_ms: gpu_timing.map(|timing| timing.water_ms),
             gpu_ambient_occlusion_ms: gpu_timing.map(|timing| timing.ambient_occlusion_ms),
             gpu_ui_ms: gpu_timing.map(|timing| timing.ui_ms),
+            cpu_cull_ms,
+            cpu_encode_ms: 0.0,
+            cpu_submit_ms: 0.0,
+            draw_list_tested_slices: shadow_draw_lists
+                .iter()
+                .map(|draw_list| draw_list.tested_slices)
+                .sum::<u32>()
+                .saturating_add(world_draw_list.tested_slices)
+                .saturating_add(water_draw_list.tested_slices),
+            draw_list_selected_slices: shadow_draw_lists
+                .iter()
+                .map(|draw_list| draw_list.selected_slices)
+                .sum::<u32>()
+                .saturating_add(world_draw_list.selected_slices)
+                .saturating_add(water_draw_list.selected_slices),
+            surface_width: self.config.width,
+            surface_height: self.config.height,
+            dpr: self.dpr,
             ambient_occlusion_bytes: self.ambient_occlusion_gpu.bytes(),
             depth_prepass_draw_calls,
             screen_space_ambient_occlusion: self.options.screen_space_ambient_occlusion,
@@ -2610,8 +2678,12 @@ impl Renderer {
         if let (Some(timer), Some(gpu_frame)) = (self.gpu_timer.as_ref(), gpu_frame) {
             timer.schedule_readback(&encoder, gpu_frame);
         }
-        self.queue.submit([encoder.finish()]);
+        let command_buffer = encoder.finish();
+        self.diagnostics.cpu_encode_ms = (now_ms() - encode_started).max(0.0) as f32;
+        let submit_started = now_ms();
+        self.queue.submit([command_buffer]);
         self.queue.present(frame);
+        self.diagnostics.cpu_submit_ms = (now_ms() - submit_started).max(0.0) as f32;
         true
     }
 
@@ -2624,6 +2696,8 @@ impl Renderer {
         let mut mesh_count = 0u32;
         let mut quad_count = 0u32;
         let mut fingerprint = FINGERPRINT_OFFSET;
+        let mut tested_slices = 0u32;
+        let mut selected_slices = 0u32;
         for (key, chunk) in chunks {
             if !chunk.active() {
                 continue;
@@ -2634,9 +2708,11 @@ impl Renderer {
             );
             let mut selected = false;
             for slice in &chunk.slices {
+                tested_slices = tested_slices.saturating_add(1);
                 if !include(key, slice) {
                     continue;
                 }
+                selected_slices = selected_slices.saturating_add(1);
                 items.push(DrawItem {
                     page: chunk.allocation.page,
                     offset: chunk.allocation.offset + slice.relative_offset,
@@ -2660,6 +2736,8 @@ impl Renderer {
             mesh_count,
             quad_count,
             fingerprint,
+            tested_slices,
+            selected_slices,
         }
     }
 }

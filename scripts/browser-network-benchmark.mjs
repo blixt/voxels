@@ -7,6 +7,8 @@ import { chromium } from "playwright";
 import {
   assertSnapshotSchema,
   chromeWebGpuLaunchOptions,
+  FRAME_SAMPLE_START,
+  FRAME_SAMPLE_WIDTH,
   isBrowserConsoleFailure,
   reserveEphemeralPort,
   SNAPSHOT,
@@ -21,8 +23,6 @@ const RESULT_SCHEMA_VERSION = 2;
 const FIXTURE_VERSION = 2;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
-const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 const SAMPLE_INTERVAL_MS = 16;
 const READY_STABLE_SAMPLES = 3;
 const SCENARIO_TIMEOUT_MS = 90_000;

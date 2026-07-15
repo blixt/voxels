@@ -147,7 +147,7 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 20.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 21.0;
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
 
     #[derive(Clone, Copy, Debug)]
@@ -224,6 +224,7 @@ mod web {
         simulation_ms: f32,
         stream_ms: f32,
         render_ms: f32,
+        frame_id: u32,
     }
 
     struct FrameHistory {
@@ -265,6 +266,7 @@ mod web {
                     sample.simulation_ms,
                     sample.stream_ms,
                     sample.render_ms,
+                    sample.frame_id as f32,
                 ]);
             }
             self.len = 0;
@@ -356,6 +358,7 @@ mod web {
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
         frame_id: Cell<i32>,
+        frame_sequence: Cell<u32>,
         last_time: Cell<f64>,
         simulation_accumulator: Cell<f32>,
         frame_milliseconds: Cell<f32>,
@@ -453,6 +456,8 @@ mod web {
         }
 
         fn frame(&self, time: f64) {
+            let frame_sequence = self.frame_sequence.get().wrapping_add(1).max(1);
+            self.frame_sequence.set(frame_sequence);
             let performance = self.scope.performance();
             let cpu_start = performance_now(performance.as_ref());
             self.apply_server_edits();
@@ -625,6 +630,7 @@ mod web {
             let render_start = performance_now(performance.as_ref());
             let chunks = self.chunks.borrow();
             let submitted = renderer.render(
+                frame_sequence,
                 dt,
                 &camera,
                 LiveStats {
@@ -697,6 +703,7 @@ mod web {
                         LocalLightVisibility::Occluded
                     }
                 },
+                || performance_now(performance.as_ref()),
             );
             if submitted
                 && self
@@ -761,6 +768,7 @@ mod web {
                 simulation_ms,
                 stream_ms,
                 render_ms,
+                frame_id: frame_sequence,
             });
             if let Err(error) = self.request_frame() {
                 web_sys::console::error_1(&error);
@@ -2239,9 +2247,35 @@ mod web {
                     },
                     lod_tiles[4] as f32,
                     lod_tiles[5] as f32,
+                    render.cpu_cull_ms,
+                    render.cpu_encode_ms,
+                    render.cpu_submit_ms,
+                    render.draw_list_tested_slices as f32,
+                    render.draw_list_selected_slices as f32,
+                    render.surface_width as f32,
+                    render.surface_height as f32,
+                    render.dpr,
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
+                let gpu_timings = engine.renderer.borrow_mut().drain_gpu_timings();
+                values.push(gpu_timings.samples.len() as f32);
+                values.push(gpu_timings.dropped as f32);
+                for sample in gpu_timings.samples {
+                    values.extend_from_slice(&[
+                        sample.frame_id as f32,
+                        sample.total_ms,
+                        sample.shadow_ms,
+                        sample.shadow_cascade_ms[0],
+                        sample.shadow_cascade_ms[1],
+                        sample.shadow_cascade_ms[2],
+                        sample.depth_prepass_ms,
+                        sample.ambient_occlusion_ms,
+                        sample.world_ms,
+                        sample.water_ms,
+                        sample.ui_ms,
+                    ]);
+                }
             }
             values
         }
@@ -2463,6 +2497,7 @@ mod web {
             scope,
             callback: RefCell::new(None),
             frame_id: Cell::new(0),
+            frame_sequence: Cell::new(0),
             last_time: Cell::new(0.0),
             simulation_accumulator: Cell::new(0.0),
             frame_milliseconds: Cell::new(0.0),

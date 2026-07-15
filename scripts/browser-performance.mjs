@@ -1,6 +1,13 @@
+import { execFileSync } from "node:child_process";
+import { mkdir, open, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { chromium } from "playwright";
 import {
   chromeWebGpuLaunchOptions,
+  FRAME_SAMPLE_START,
+  FRAME_SAMPLE_WIDTH,
+  gpuSampleStart,
+  GPU_SAMPLE_WIDTH,
   isBrowserConsoleFailure,
   reserveEphemeralPort,
   SNAPSHOT,
@@ -10,8 +17,6 @@ import { prepareBrowserWorldFixture, startBrowserWorldService } from "./browser-
 
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed/i;
-const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 
 function percentile(values, fraction) {
   if (values.length === 0) return 0;
@@ -34,13 +39,16 @@ function phaseSummary(captures) {
   const samples = captures.flatMap((capture) => capture.samples);
   const gpuSamples = Array.from(
     new Map(
-      captures
-        .filter((capture) => capture.gpuSample)
-        .map((capture) => [capture.gpuSample.id, capture.gpuSample]),
+      captures.flatMap((capture) => capture.gpuSamples).map((sample) => [sample.frameId, sample]),
     ).values(),
   );
   const column = (index) => samples.map((sample) => sample[index]);
   const frameIntervals = column(0);
+  const frameIds = new Set(samples.map((sample) => sample[5]));
+  const coveredGpuSamples = gpuSamples.filter((sample) => frameIds.has(sample.frameId));
+  const unattributedCpu = samples.map((sample) =>
+    Math.max(0, sample[1] - sample[2] - sample[3] - sample[4]),
+  );
   const gpuColumn = (key) => gpuSamples.map((sample) => sample[key]);
   return {
     samples: samples.length,
@@ -54,11 +62,22 @@ function phaseSummary(captures) {
     simulationMs: summary(column(2)),
     streamingMs: summary(column(3)),
     renderSubmissionMs: summary(column(4)),
+    unattributedCpuMs: summary(unattributedCpu),
     gpu: {
       available: gpuSamples.length > 0,
       samples: gpuSamples.length,
+      droppedSamples: captures.reduce((total, capture) => total + capture.gpuDropped, 0),
+      frameCoverage: frameIds.size > 0 ? coveredGpuSamples.length / frameIds.size : 0,
       totalMs: gpuSamples.length > 0 ? summary(gpuColumn("total")) : null,
       shadowMs: gpuSamples.length > 0 ? summary(gpuColumn("shadow")) : null,
+      shadowCascadeMs:
+        gpuSamples.length > 0
+          ? [
+              summary(gpuColumn("shadowCascade0")),
+              summary(gpuColumn("shadowCascade1")),
+              summary(gpuColumn("shadowCascade2")),
+            ]
+          : null,
       worldMs: gpuSamples.length > 0 ? summary(gpuColumn("world")) : null,
       waterMs: gpuSamples.length > 0 ? summary(gpuColumn("water")) : null,
       depthPrepassMs: gpuSamples.length > 0 ? summary(gpuColumn("depthPrepass")) : null,
@@ -79,6 +98,20 @@ function phaseSummary(captures) {
     waterQuads: latest[SNAPSHOT.waterQuads],
     waterDrawCalls: latest[SNAPSHOT.waterDrawCalls],
     drawCalls: latest[SNAPSHOT.drawCalls],
+    shadowDrawCalls: latest[SNAPSHOT.shadowDrawCalls],
+    renderCpu: {
+      cullMs: latest[SNAPSHOT.renderCullMs],
+      encodeMs: latest[SNAPSHOT.renderEncodeMs],
+      submitMs: latest[SNAPSHOT.renderSubmitMs],
+      testedSlices: latest[SNAPSHOT.drawListTestedSlices],
+      selectedSlices: latest[SNAPSHOT.drawListSelectedSlices],
+    },
+    framebuffer: {
+      width: latest[SNAPSHOT.surfaceWidth],
+      height: latest[SNAPSHOT.surfaceHeight],
+      devicePixelRatio: latest[SNAPSHOT.devicePixelRatio],
+      pixels: latest[SNAPSHOT.surfaceWidth] * latest[SNAPSHOT.surfaceHeight],
+    },
     coreGpuMiB: latest[SNAPSHOT.coreGpuMiB],
     meshArenaAllocatedMiB: latest[SNAPSHOT.arenaAllocatedMiB],
     meshArenaCapacityMiB: latest[SNAPSHOT.arenaCapacityMiB],
@@ -149,23 +182,33 @@ async function capture(page) {
     const start = FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH;
     samples.push(snapshot.slice(start, start + FRAME_SAMPLE_WIDTH));
   }
+  const gpuStart = gpuSampleStart(snapshot);
+  const gpuCount = snapshot[gpuStart] ?? 0;
+  const gpuDropped = snapshot[gpuStart + 1] ?? 0;
+  const gpuSamples = [];
+  for (let index = 0; index < gpuCount; index += 1) {
+    const start = gpuStart + 2 + index * GPU_SAMPLE_WIDTH;
+    const values = snapshot.slice(start, start + GPU_SAMPLE_WIDTH);
+    gpuSamples.push({
+      frameId: values[0],
+      total: values[1],
+      shadow: values[2],
+      shadowCascade0: values[3],
+      shadowCascade1: values[4],
+      shadowCascade2: values[5],
+      depthPrepass: values[6],
+      ambientOcclusion: values[7],
+      world: values[8],
+      water: values[9],
+      ui: values[10],
+    });
+  }
   return {
     snapshot,
     samples,
     dropped: snapshot[SNAPSHOT.droppedSamples],
-    gpuSample:
-      snapshot[SNAPSHOT.gpuSampleId] > 0
-        ? {
-            id: snapshot[SNAPSHOT.gpuSampleId],
-            total: snapshot[SNAPSHOT.gpuTotalMs],
-            shadow: snapshot[SNAPSHOT.gpuShadowMs],
-            world: snapshot[SNAPSHOT.gpuWorldMs],
-            water: snapshot[SNAPSHOT.gpuWaterMs],
-            depthPrepass: snapshot[SNAPSHOT.gpuDepthPrepassMs],
-            ambientOcclusion: snapshot[SNAPSHOT.gpuAmbientOcclusionMs],
-            ui: snapshot[SNAPSHOT.gpuUiMs],
-          }
-        : null,
+    gpuSamples,
+    gpuDropped,
   };
 }
 
@@ -177,6 +220,58 @@ async function sample(page, durationMs) {
     await page.waitForTimeout(250);
   }
   return captures;
+}
+
+async function mark(page, name) {
+  await page.evaluate((value) => performance.mark(value), name);
+}
+
+async function startChromiumTrace(context, page) {
+  const session = await context.newCDPSession(page);
+  await session.send("Performance.enable");
+  await session.send("Tracing.start", {
+    transferMode: "ReturnAsStream",
+    traceConfig: {
+      recordMode: "recordContinuously",
+      enableSampling: true,
+      includedCategories: [
+        "blink.user_timing",
+        "cc",
+        "devtools.timeline",
+        "disabled-by-default-devtools.timeline",
+        "disabled-by-default-v8.cpu_profiler",
+        "gpu",
+        "renderer.scheduler",
+        "toplevel",
+        "v8",
+        "viz",
+      ],
+    },
+  });
+  return session;
+}
+
+async function stopChromiumTrace(session, outputPath) {
+  const completed = new Promise((resolve) => session.once("Tracing.tracingComplete", resolve));
+  await session.send("Tracing.end");
+  const { stream } = await completed;
+  if (!stream) throw new Error("Chromium trace completed without a readable stream");
+  await mkdir(path.dirname(outputPath), { recursive: true });
+  const file = await open(outputPath, "w");
+  try {
+    while (true) {
+      const chunk = await session.send("IO.read", { handle: stream });
+      const bytes = chunk.base64Encoded ? Buffer.from(chunk.data, "base64") : chunk.data;
+      await file.write(bytes);
+      if (chunk.eof) break;
+    }
+  } finally {
+    await file.close();
+    await session.send("IO.close", { handle: stream });
+  }
+  const metrics = await session.send("Performance.getMetrics");
+  await session.detach();
+  return Object.fromEntries(metrics.metrics.map(({ name, value }) => [name, value]));
 }
 
 async function setMaterialDetail(page, enabled, viewportWidth) {
@@ -415,17 +510,47 @@ async function waitForEngine(page) {
   throw new Error(`release engine did not settle: ${JSON.stringify(lastSnapshot)}`);
 }
 
-const viewport = { width: 1280, height: 720 };
+const viewport = {
+  width: Number.parseInt(process.env.VOXELS_PROFILE_WIDTH ?? "1280", 10),
+  height: Number.parseInt(process.env.VOXELS_PROFILE_HEIGHT ?? "720", 10),
+};
+const deviceScaleFactor = Number.parseFloat(process.env.VOXELS_PROFILE_DPR ?? "1");
+if (
+  !Number.isInteger(viewport.width) ||
+  !Number.isInteger(viewport.height) ||
+  viewport.width < 320 ||
+  viewport.height < 240 ||
+  !Number.isFinite(deviceScaleFactor) ||
+  deviceScaleFactor < 0.5 ||
+  deviceScaleFactor > 4
+) {
+  throw new Error("profile viewport must be at least 320x240 with DPR in 0.5..=4");
+}
 const sustained = process.argv.includes("--sustained");
 const materials = process.argv.includes("--materials");
 const atmosphere = process.argv.includes("--atmosphere");
 const worldSource = process.env.VOXELS_PROFILE_SOURCE ?? "procedural-v16";
+const buildProfile = process.env.VOXELS_PROFILE_BUILD ?? "release";
+if (!new Set(["debug", "wasm-dev", "release"]).has(buildProfile)) {
+  throw new Error("VOXELS_PROFILE_BUILD must be debug, wasm-dev, or release");
+}
+process.env.VOXELS_BROWSER_BUILD_PROFILE = buildProfile;
+const traceEnabled = process.argv.includes("--trace") || process.env.VOXELS_PROFILE_TRACE === "1";
+const tracePath = path.resolve(
+  process.env.VOXELS_PROFILE_TRACE_PATH ??
+    `target/render-profile-${buildProfile}-${worldSource}-${viewport.width}x${viewport.height}-dpr${deviceScaleFactor}.json`,
+);
+const outputPath = process.env.VOXELS_PROFILE_OUTPUT
+  ? path.resolve(process.env.VOXELS_PROFILE_OUTPUT)
+  : undefined;
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
 let server;
 let fixture;
 let worldService;
+let traceSession;
+let traceMetrics;
 
 function observePageErrors(page) {
   page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
@@ -452,13 +577,14 @@ try {
     preview: { host: "127.0.0.1", port, strictPort: true },
   });
   browser = await chromium.launch(chromeWebGpuLaunchOptions());
-  const context = await browser.newContext({ viewport, deviceScaleFactor: 1 });
+  const context = await browser.newContext({ viewport, deviceScaleFactor });
   const page = await context.newPage();
   observePageErrors(page);
   const navigationStarted = performance.now();
   await page.goto(`http://127.0.0.1:${port}`, { waitUntil: "domcontentloaded" });
   await waitForEngine(page);
   const settledMilliseconds = performance.now() - navigationStarted;
+  if (traceEnabled) traceSession = await startChromiumTrace(context, page);
 
   let scenarios;
   if (sustained) {
@@ -468,11 +594,15 @@ try {
   } else if (atmosphere) {
     scenarios = { atmosphere: await atmosphereProfile(page, viewport.width) };
   } else {
+    await mark(page, "voxels:steady:start");
     const steady = phaseSummary(await sample(page, 4_000));
+    await mark(page, "voxels:steady:end");
+    await mark(page, "voxels:traversal:start");
     await page.keyboard.down("KeyW");
     const traversalSamples = await sample(page, 6_000);
     await page.keyboard.up("KeyW");
     const traversal = phaseSummary(traversalSamples);
+    await mark(page, "voxels:traversal:end");
     scenarios = { steady, traversal };
   }
   if (process.env.SCREENSHOT) {
@@ -480,26 +610,39 @@ try {
   }
 
   if (errors.length > 0) throw new Error(errors.join("\n"));
-  console.log(
-    JSON.stringify(
-      {
-        ok: true,
-        schemaVersion: 1,
-        build: "release",
-        worldSource,
-        viewport,
-        startup: { settledMilliseconds },
-        ...scenarios,
-        errors: 0,
-      },
-      null,
-      2,
-    ),
-  );
+  if (traceSession) {
+    traceMetrics = await stopChromiumTrace(traceSession, tracePath);
+    traceSession = undefined;
+  }
+  const result = {
+    ok: true,
+    schemaVersion: 2,
+    commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "",
+    build: buildProfile,
+    worldSource,
+    viewport: { ...viewport, deviceScaleFactor },
+    browser: { version: browser.version() },
+    startup: { settledMilliseconds },
+    ...scenarios,
+    trace: traceEnabled ? { path: tracePath, performanceMetrics: traceMetrics } : null,
+    errors: 0,
+  };
+  const json = `${JSON.stringify(result, null, 2)}\n`;
+  if (outputPath) {
+    await mkdir(path.dirname(outputPath), { recursive: true });
+    await writeFile(outputPath, json);
+  }
+  console.log(json);
 } catch (error) {
   console.error(JSON.stringify({ ok: false, error: String(error), errors }, null, 2));
   process.exitCode = 1;
 } finally {
+  if (traceSession) {
+    try {
+      await stopChromiumTrace(traceSession, tracePath);
+    } catch {}
+  }
   await browser?.close();
   await server?.close();
   await worldService?.close();

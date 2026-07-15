@@ -559,6 +559,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-performance.mjs",
         cache: false,
       },
+      "profile:chromium": {
+        command: "node scripts/browser-performance.mjs --trace",
+        cache: false,
+      },
       "profile:sustained": {
         command: "node scripts/browser-performance.mjs --sustained",
         cache: false,

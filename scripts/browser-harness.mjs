@@ -1,6 +1,8 @@
 import { createServer as createNetServer } from "node:net";
 
-export const SNAPSHOT_SCHEMA_VERSION = 20;
+export const SNAPSHOT_SCHEMA_VERSION = 21;
+export const FRAME_SAMPLE_WIDTH = 6;
+export const GPU_SAMPLE_WIDTH = 11;
 
 export const SNAPSHOT = Object.freeze({
   cameraX: 0,
@@ -99,10 +101,24 @@ export const SNAPSHOT = Object.freeze({
   interactiveLodsReady: 105,
   stride32Tiles: 106,
   stride64Tiles: 107,
-  schemaVersion: 108,
-  sampleCount: 109,
-  droppedSamples: 110,
+  renderCullMs: 108,
+  renderEncodeMs: 109,
+  renderSubmitMs: 110,
+  drawListTestedSlices: 111,
+  drawListSelectedSlices: 112,
+  surfaceWidth: 113,
+  surfaceHeight: 114,
+  devicePixelRatio: 115,
+  schemaVersion: 116,
+  sampleCount: 117,
+  droppedSamples: 118,
 });
+
+export const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
+
+export function gpuSampleStart(snapshot) {
+  return FRAME_SAMPLE_START + snapshot[SNAPSHOT.sampleCount] * FRAME_SAMPLE_WIDTH;
+}
 
 export function assertSnapshotSchema(snapshot) {
   const actual = snapshot[SNAPSHOT.schemaVersion];
