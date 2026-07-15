@@ -881,3 +881,55 @@ and WebGPU exposes only individual indirect draws rather than a standard multi-d
 Nanite-like meshlet hierarchy, projected-error selection, hierarchical depth occlusion, and render
 bundles for stable command sequences are credible directions, but each is materially larger than the
 exact broad-phase change and should be evaluated against these trace and geometry invariants first.
+
+## 2026-07-15: organic climate-driven forest stands
+
+The previous tree distribution was regular even when its hash output was random. It placed one
+candidate in the inner part of every 9.6 m cell, which capped density at roughly 108 candidates per
+hectare. Because candidates in neighboring cells could not get closer than 3.3 m, the nominal 3 m
+spacing test never rejected one. A hard surface-region density bonus and a hard best-species choice
+then made forest boundaries and species changes more categorical than the underlying climate.
+
+Composer version 7 uses 6.4 m full-cell jitter and deterministic priority thinning with an actual 3 m
+minimum spacing. Candidate placement, competition priority, occurrence, species, form, orientation,
+and height use independent hash streams. The habitat score remains driven by temperature, moisture,
+slope/ridge exposure, and surface substrate, but occurrence is modulated by a domain-warped hierarchy
+of approximately 510 m, 175 m, and 57 m canopy fields plus 76 m and 27 m gaps. A separate 260 m/68 m
+succession field favors pioneer, intermediate, and mature species in coherent neighborhoods. The
+locally strongest species occupies 78% of compatible selections; the remainder are weighted
+companions, producing recognizable mixed stands instead of either a monoculture or white-noise mix.
+
+This is an ecology-informed random-access model rather than a full forest simulator. The useful
+precedents are the successful use of habitat heterogeneity plus clustering in
+[inhomogeneous Thomas forest point processes](https://pubmed.ncbi.nlm.nih.gov/20640861/), the US
+Forest Service's combination of topographic wetness, curvature, solar radiation, and soil water in
+its [Integrated Moisture Index](https://research.fs.usda.gov/treesearch/21908), Whittaker's
+[continuous view of ecological gradients](https://onlinelibrary.wiley.com/doi/10.1111/j.1469-185X.1967.tb01419.x),
+and landscape models that combine succession with disturbance such as
+[LANDIS-II](https://research.fs.usda.gov/treesearch/19237). The implementation keeps those ideas
+locally evaluable, deterministic, tile-seam-free, and independent of generation order so it remains
+compatible with concurrent chunk streaming.
+
+Tests now prove active cross-cell spacing over 25,921 raw candidates, exact equality between tiled
+and monolithic queries across negative and positive coordinates, independent occurrence/height
+entropy, and preservation of canonical edits plus tree proxies at every surface LOD. Across 256
+synthetic equal-climate 128 m windows the tree counts were 0 minimum, 3 p10, 32 median, 249 p90, and
+315 maximum, with locally dominant but mixed stands. This isolates the spatial ecology from climate
+and proves that forest/open-land contrast is not merely a biome transition.
+
+`vp run world:ecology-survey` evaluates the configured native source directly. A 625-window survey
+of the checked-in Terrain Diffusion world measured 0 minimum, 2 p10, 89 median, 270 p90, and 316
+maximum trees per 128 m window. It found eight compatible tree species in the surveyed local climate
+and prints five dense origins that can be passed to `VOXELS_PROFILE_SPAWN=x,z`.
+
+At 1280x720 DPR 1 in Chromium 150 on the M3 Max, both an open spawn and a dense 316-tree-window spawn
+held the 120 Hz frame budget:
+
+| Terrain Diffusion scene | Resident quads | Draws | Frame median / p95 | GPU median / p95 | Frames over 16.67 ms |
+| ----------------------- | -------------: | ----: | -----------------: | ---------------: | -------------------: |
+| Open meadow             |      1,843,736 |   467 |       8.3 / 9.8 ms |   3.57 / 4.90 ms |                    0 |
+| Dense mixed forest      |      2,205,653 |   506 |       8.3 / 9.6 ms |   4.04 / 4.31 ms |                    0 |
+
+The dense run used `VOXELS_PROFILE_SPAWN=-6400,1280`; its six-second forward traversal also measured
+8.3 ms median, 9.7 ms p95, and no frame over 16.67 ms. Both profiler runs used isolated temporary
+server databases and did not touch the player's persisted world.
