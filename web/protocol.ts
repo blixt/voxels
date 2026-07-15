@@ -56,6 +56,7 @@ export type ToWorker =
   | { kind: "input"; buffer: ArrayBuffer }
   | { kind: "resize"; cssWidth: number; cssHeight: number; dpr: number }
   | { kind: "reducedMotion"; reduced: boolean }
+  | { kind: "missionControlCopyResult"; copied: boolean }
   | { kind: "profile"; profileId: number }
   | { kind: "snapshot"; requestId: number }
   | {
@@ -81,6 +82,7 @@ export type FromWorker =
   | { kind: "ready" }
   | { kind: "destroyed" }
   | { kind: "uiMode"; cursor: boolean }
+  | { kind: "copyMissionControl"; text: string }
   | { kind: "error"; message: string }
   | { kind: "snapshot"; requestId: number; values: number[] }
   | { kind: "submitEdit"; requestId: number; submitted: boolean }

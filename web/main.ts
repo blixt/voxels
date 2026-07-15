@@ -1,5 +1,6 @@
 import "./style.css";
 import { loadClientConfig } from "./client-config.ts";
+import { writeClipboardText } from "./clipboard.ts";
 import { watchDevicePixelRatio } from "./display.ts";
 import { terminateAfterAcknowledgement } from "./hmr-lifecycle.ts";
 import { PressedKeys, WheelAccumulator, requestPointerLockSafely } from "./input.ts";
@@ -231,6 +232,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       if (uiCursorMode && document.pointerLockElement === canvas) {
         document.exitPointerLock();
       }
+    } else if (event.data.kind === "copyMissionControl") {
+      void writeClipboardText(navigator.clipboard, event.data.text).then((copied) => {
+        worker.postMessage({ kind: "missionControlCopyResult", copied });
+      });
     } else if (event.data.kind === "error") {
       failWorker(`The Rust engine could not start.\n${event.data.message}`);
     } else if (event.data.kind === "snapshot") {

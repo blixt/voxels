@@ -84,6 +84,10 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
           cursorMode = next;
           scope.postMessage({ kind: "uiMode", cursor: next });
         }
+        const report = handle?.take_mission_control_copy();
+        if (report !== undefined) {
+          scope.postMessage({ kind: "copyMissionControl", text: report });
+        }
       }
       break;
     case "resize":
@@ -91,6 +95,9 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
       break;
     case "reducedMotion":
       handle?.set_reduced_motion(message.reduced);
+      break;
+    case "missionControlCopyResult":
+      handle?.report_mission_control_copy_result(message.copied);
       break;
     case "profile":
       handle?.start_profile(message.profileId);

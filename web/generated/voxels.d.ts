@@ -10,6 +10,7 @@ export class EngineHandle {
      * `[inventory_revision, air, grass, ..., glow_crystal]` in stable material-ID order.
      */
     inventory(): Float64Array;
+    report_mission_control_copy_result(copied: boolean): void;
     resize(css_width: number, css_height: number, dpr: number): void;
     set_reduced_motion(reduced_motion: boolean): void;
     snapshot(): Float32Array;
@@ -34,6 +35,7 @@ export class EngineHandle {
      * for the tile containing one canonical voxel coordinate.
      */
     surface_edit_state(stride: number, x: number, z: number): Float64Array;
+    take_mission_control_copy(): string | undefined;
 }
 
 export function create_engine(canvas: OffscreenCanvas, css_width: number, css_height: number, dpr: number, reduced_motion: boolean, config_toml: string, player: Array<any>): Promise<EngineHandle>;
@@ -55,6 +57,7 @@ export interface InitOutput {
     readonly enginehandle_destroy: (a: number) => any;
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => number;
     readonly enginehandle_inventory: (a: number) => [number, number];
+    readonly enginehandle_report_mission_control_copy_result: (a: number, b: number) => void;
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;
     readonly enginehandle_set_reduced_motion: (a: number, b: number) => void;
     readonly enginehandle_snapshot: (a: number) => [number, number];
@@ -63,6 +66,7 @@ export interface InitOutput {
     readonly enginehandle_submit_dig: (a: number, b: number, c: number, d: number) => number;
     readonly enginehandle_submit_edit: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly enginehandle_surface_edit_state: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly enginehandle_take_mission_control_copy: (a: number) => [number, number];
     readonly memory: WebAssembly.Memory;
     readonly rust_sqlite_wasm_abort: () => void;
     readonly rust_sqlite_wasm_assert_fail: (a: number, b: number, c: number, d: number) => void;
