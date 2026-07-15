@@ -62,6 +62,12 @@ const SURFACE_LOD_SHIFT: u32 = 27;
 const GPU_FACE_SHIFT: u32 = 16;
 const GPU_FACE_MASK: u32 = 0b111 << GPU_FACE_SHIFT;
 const SURFACE_MACRO_NORMAL_FLAG: u32 = 1 << 24;
+// Decimated height samples are not band-limited. Keeping their full derivative makes a one-voxel
+// clipmap snap turn unresolved relief into a false near-horizontal slope (and an almost black
+// valley at low sun angles). A conservative macro cue remains legible while staying stable across
+// adjacent LOD sampling phases.
+const SURFACE_MACRO_SLOPE_SCALE: f32 = 0.25;
+const SURFACE_MACRO_SLOPE_MAX: f32 = 0.5;
 const FAR_UNDERLAY_OFFSET_METRES: f32 = 0.025;
 const GPU_QUERY_COUNT: u32 = 18;
 const GPU_QUERY_BUFFER_BYTES: u64 = GPU_QUERY_COUNT as u64 * size_of::<u64>() as u64;
@@ -3207,11 +3213,10 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
             let front = (z + 1 < edge).then(|| height_at(x, z + 1)).flatten();
             let slope_x = sampled_surface_slope(height, left, right, stride);
             let slope_z = sampled_surface_slope(height, back, front, stride);
-            let mut horizontal = glam::Vec2::new(slope_x, slope_z);
-            let horizontal_length = horizontal.length();
-            if horizontal_length > 1.25 {
-                horizontal *= 1.25 / horizontal_length;
-            }
+            // A decimated height field can turn sub-cell relief into a much steeper apparent
+            // gradient when its sampling phase changes at an LOD handoff. Preserve the direction
+            // and broad slope cue while compressing that unstable high-frequency component.
+            let horizontal = stabilized_surface_gradient(glam::Vec2::new(slope_x, slope_z));
             let normal = glam::Vec3::new(-horizontal.x, 1.0, -horizontal.y).normalize();
             let encode =
                 |component: f32| ((component.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u32;
@@ -3223,6 +3228,15 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
         }
     }
     packed
+}
+
+fn stabilized_surface_gradient(mut gradient: glam::Vec2) -> glam::Vec2 {
+    gradient *= SURFACE_MACRO_SLOPE_SCALE;
+    let length = gradient.length();
+    if length > SURFACE_MACRO_SLOPE_MAX {
+        gradient *= SURFACE_MACRO_SLOPE_MAX / length;
+    }
+    gradient
 }
 
 fn sampled_surface_slope(
@@ -3928,9 +3942,23 @@ mod tests {
         assert_eq!(value & 0xff, 0xff, "voxel AO remains fully visible");
         let normal_x = ((value >> 8) & 255) as f32 * (2.0 / 255.0) - 1.0;
         let normal_z = ((value >> 16) & 255) as f32 * (2.0 / 255.0) - 1.0;
-        assert!(normal_x < -0.40, "uphill +X must tilt the normal toward -X");
+        assert!(
+            (-0.14..-0.10).contains(&normal_x),
+            "uphill +X must retain a gentle, stable tilt toward -X: {normal_x}"
+        );
         assert!(normal_z.abs() < 0.01);
         assert_eq!(size_of::<GpuQuad>(), 24);
+    }
+
+    #[test]
+    fn distant_surface_normals_bound_decimation_outliers() {
+        let gradient = stabilized_surface_gradient(glam::Vec2::new(80.0, -60.0));
+        assert!((gradient.length() - SURFACE_MACRO_SLOPE_MAX).abs() < 0.0001);
+        let normal = glam::Vec3::new(-gradient.x, 1.0, -gradient.y).normalize();
+        assert!(
+            normal.y >= 0.89,
+            "macro lighting must not turn unresolved relief into a near-horizontal face: {normal:?}"
+        );
     }
 
     #[test]
