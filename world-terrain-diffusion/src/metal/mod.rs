@@ -97,6 +97,11 @@ pub struct TerrainDiffusionMacroTileSource {
     coarse: CoarseTile,
     detail_model_origin: [i32; 2],
     detail: DetailTile,
+    /// Per-detail-sample terrain gradient, normalized to the macro composer's ridge range.
+    ///
+    /// Deriving this once at the sample vertices and interpolating it avoids the discontinuities
+    /// produced by differentiating each bilinear cell independently at request time.
+    slope: Vec<f32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -105,6 +110,30 @@ struct MacroSample {
     temperature: f32,
     moisture: f32,
     ridge: f32,
+}
+
+fn normalized_slope_field(detail: &DetailTile, metres_per_sample: f32) -> Vec<f32> {
+    let edge = detail.edge;
+    if edge == 0 || detail.elevation_metres.len() != edge * edge {
+        return Vec::new();
+    }
+    let sample = |x: usize, z: usize| detail.elevation_metres[z * edge + x];
+    let spacing = metres_per_sample.max(f32::EPSILON);
+    let mut slope = Vec::with_capacity(edge * edge);
+    for z in 0..edge {
+        let previous_z = z.saturating_sub(1);
+        let next_z = (z + 1).min(edge - 1);
+        let z_span = (next_z - previous_z).max(1) as f32 * spacing;
+        for x in 0..edge {
+            let previous_x = x.saturating_sub(1);
+            let next_x = (x + 1).min(edge - 1);
+            let x_span = (next_x - previous_x).max(1) as f32 * spacing;
+            let dx = (sample(next_x, z) - sample(previous_x, z)) / x_span;
+            let dz = (sample(x, next_z) - sample(x, previous_z)) / z_span;
+            slope.push((dx.hypot(dz) / 1.5).clamp(0.0, 1.0));
+        }
+    }
+    slope
 }
 
 pub struct MetalTerrainDiffusion {
@@ -755,6 +784,9 @@ impl MetalTerrainDiffusion {
 impl TerrainDiffusionMacroTileSource {
     pub fn generate(runtime: &MetalTerrainDiffusion) -> Result<Self, TerrainDiffusionError> {
         let generated = runtime.generate_full_detail_tile(runtime.config.latent_window)?;
+        let metres_per_sample = generated.detail.horizontal_resolution_metres as f32
+            * runtime.config.horizontal_scale as f32;
+        let slope = normalized_slope_field(&generated.detail, metres_per_sample);
         Ok(Self {
             identity: runtime.source_identity()?,
             origin_voxels: runtime.config.world_origin_voxels,
@@ -763,6 +795,7 @@ impl TerrainDiffusionMacroTileSource {
             coarse: generated.coarse,
             detail_model_origin: generated.detail_model_origin,
             detail: generated.detail,
+            slope,
         })
     }
 
@@ -780,6 +813,7 @@ impl TerrainDiffusionMacroTileSource {
         let extent = self.detail.edge as i64 * self.voxels_per_model_pixel;
         if self.detail.edge == 0
             || self.detail.elevation_metres.len() != self.detail.edge * self.detail.edge
+            || self.slope.len() != self.detail.edge * self.detail.edge
             || local_x < 0
             || local_z < 0
             || local_x >= extent
@@ -794,28 +828,27 @@ impl TerrainDiffusionMacroTileSource {
         let fraction_z =
             (local_z % self.voxels_per_model_pixel) as f32 / self.voxels_per_model_pixel as f32;
         let right = (x + 1).min(self.detail.edge - 1);
-        let bottom = (z + 1).min(self.detail.edge - 1);
+        let bottom_index = (z + 1).min(self.detail.edge - 1);
         let elevation = |sample_x: usize, sample_z: usize| {
             self.detail.elevation_metres[sample_z * self.detail.edge + sample_x]
         };
         let top_left = elevation(x, z);
         let top_right = elevation(right, z);
-        let bottom_left = elevation(x, bottom);
-        let bottom_right = elevation(right, bottom);
+        let bottom_left = elevation(x, bottom_index);
+        let bottom_right = elevation(right, bottom_index);
         let top = top_left + (top_right - top_left) * fraction_x;
         let bottom = bottom_left + (bottom_right - bottom_left) * fraction_x;
         let interpolated = top + (bottom - top) * fraction_z;
-        let dx_top = top_right - top_left;
-        let dx_bottom = bottom_right - bottom_left;
-        let dx = dx_top + (dx_bottom - dx_top) * fraction_z;
-        let dz_left = bottom_left - top_left;
-        let dz_right = bottom_right - top_right;
-        let dz = dz_left + (dz_right - dz_left) * fraction_x;
-        let horizontal_resolution_metres = self.detail.horizontal_resolution_metres as f32
-            * self.voxels_per_model_pixel as f32
-            / 300.0;
-        let gradient = dx.hypot(dz) / horizontal_resolution_metres;
-        let ridge = (gradient / 1.5).clamp(0.0, 1.0);
+        let slope =
+            |sample_x: usize, sample_z: usize| self.slope[sample_z * self.detail.edge + sample_x];
+        let slope_top_left = slope(x, z);
+        let slope_top_right = slope(right, z);
+        let slope_bottom_left = slope(x, bottom_index);
+        let slope_bottom_right = slope(right, bottom_index);
+        let slope_top = slope_top_left + (slope_top_right - slope_top_left) * fraction_x;
+        let slope_bottom =
+            slope_bottom_left + (slope_bottom_right - slope_bottom_left) * fraction_x;
+        let ridge = slope_top + (slope_bottom - slope_top) * fraction_z;
 
         let detail_x = local_x as f32 / self.voxels_per_model_pixel as f32;
         let detail_z = local_z as f32 / self.voxels_per_model_pixel as f32;
@@ -1347,6 +1380,14 @@ mod tests {
         coarse_values[3 * 4..4 * 4].fill(300.0);
         coarse_values[4 * 4..5 * 4].copy_from_slice(&[400.0, 800.0, 1_200.0, 1_600.0]);
         coarse_values[5 * 4..6 * 4].fill(50.0);
+        let detail = DetailTile {
+            edge: 2,
+            horizontal_resolution_metres: 30,
+            elevation_metres: vec![1.0, 2.0, 3.0, 4.0],
+            residual_sqrt_elevation: vec![0.0; 4],
+            elapsed_seconds: 0.0,
+        };
+        let slope = normalized_slope_field(&detail, 60.0);
         let source = TerrainDiffusionMacroTileSource {
             identity,
             origin_voxels: config.world_origin_voxels,
@@ -1360,13 +1401,8 @@ mod tests {
                 elapsed_seconds: 0.0,
             },
             detail_model_origin: [0, 0],
-            detail: DetailTile {
-                edge: 2,
-                horizontal_resolution_metres: 30,
-                elevation_metres: vec![1.0, 2.0, 3.0, 4.0],
-                residual_sqrt_elevation: vec![0.0; 4],
-                elapsed_seconds: 0.0,
-            },
+            detail,
+            slope,
         };
         let result = source
             .request_blocks(MacroBlockBatch {
