@@ -799,8 +799,17 @@ fn surface_profile(column: &PreparedColumn, sea_level_voxels: i32) -> (Material,
                 }
             }
             SurfaceRegion::WindMoor => {
-                if column.ridge > 0.66 || column.geology > 0.56 {
+                // Learned 30 m terrain carries important escarpments even when its regional
+                // climate occupies a narrow band. Expose coherent bedrock on those faces instead
+                // of painting an entire rugged tile with grass.
+                if column.ridge > 0.30 && column.geology < -0.30 {
+                    Material::Basalt
+                } else if (column.ridge > 0.30 && column.geology > 0.30)
+                    || (column.ridge > 0.18 && column.geology > 0.56)
+                {
                     Material::Limestone
+                } else if column.ridge > 0.30 {
+                    Material::Stone
                 } else {
                     Material::Grass
                 }
@@ -1081,6 +1090,16 @@ mod tests {
             (
                 column(100, 0.50, 0.45, 0.30, 0.70),
                 Material::Limestone,
+                SurfaceRegion::WindMoor,
+            ),
+            (
+                column(100, 0.50, 0.45, 0.40, 0.00),
+                Material::Stone,
+                SurfaceRegion::WindMoor,
+            ),
+            (
+                column(100, 0.50, 0.45, 0.40, -0.50),
+                Material::Basalt,
                 SurfaceRegion::WindMoor,
             ),
         ];
