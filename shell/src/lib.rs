@@ -1150,6 +1150,10 @@ mod web {
                 }
             }
             drop(scheduler);
+            let radial_ready_columns = radial
+                .iter()
+                .map(|&(x, _, z)| (x, z))
+                .collect::<BTreeSet<_>>();
             self.reconcile_activation_reason(
                 &self.radial_active_chunks,
                 radial,
@@ -1160,6 +1164,9 @@ mod web {
                 interaction,
                 ChunkActivationReason::Interaction,
             );
+            self.renderer
+                .borrow_mut()
+                .set_canonical_ready_columns(radial_ready_columns);
         }
 
         fn reconcile_activation_reason(

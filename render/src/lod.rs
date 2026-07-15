@@ -131,6 +131,7 @@ impl GeometricLodFocus {
 pub fn surface_patch_is_selected(
     focus: GeometricLodFocus,
     resident: &HashSet<SurfacePatchId>,
+    canonical_ready_columns: &HashSet<(i32, i32)>,
     patch: SurfacePatchId,
 ) -> bool {
     if !resident.contains(&patch) || refinement_blocked_by_ancestor(resident, patch) {
@@ -139,8 +140,22 @@ pub fn surface_patch_is_selected(
     let Some(center) = patch.voxel_center_xz() else {
         return false;
     };
-    let LodOwner::Surface(target_level) = focus.owner_at(center[0], center[1]) else {
-        return false;
+    let owner = focus.owner_at(center[0], center[1]);
+    if owner == LodOwner::Canonical {
+        let column = (
+            center[0].div_euclid(CHUNK_EDGE as i32),
+            center[1].div_euclid(CHUNK_EDGE as i32),
+        );
+        if canonical_ready_columns.contains(&column) {
+            return false;
+        }
+        return patch.level == SurfaceLodLevel::Stride2
+            || patch.children().is_none_or(|children| {
+                !children.into_iter().all(|child| resident.contains(&child))
+            });
+    }
+    let LodOwner::Surface(target_level) = owner else {
+        unreachable!();
     };
     match patch.level.index().cmp(&target_level.index()) {
         std::cmp::Ordering::Less => false,
@@ -154,10 +169,11 @@ pub fn surface_patch_is_selected(
 pub fn surface_patch_skirt_is_selected(
     focus: GeometricLodFocus,
     resident: &HashSet<SurfacePatchId>,
+    canonical_ready_columns: &HashSet<(i32, i32)>,
     patch: SurfacePatchId,
     edge: SurfacePatchEdge,
 ) -> bool {
-    if !surface_patch_is_selected(focus, resident, patch) {
+    if !surface_patch_is_selected(focus, resident, canonical_ready_columns, patch) {
         return false;
     }
     let delta = match edge {
@@ -169,7 +185,7 @@ pub fn surface_patch_skirt_is_selected(
     let Some(neighbor) = patch.neighbor(delta[0], delta[1]) else {
         return false;
     };
-    if surface_patch_is_selected(focus, resident, neighbor) {
+    if surface_patch_is_selected(focus, resident, canonical_ready_columns, neighbor) {
         return false;
     }
     if resident.contains(&neighbor) {
@@ -191,15 +207,18 @@ pub struct SurfacePatchSelection {
 }
 
 impl SurfacePatchSelection {
-    pub fn rebuild(&mut self, focus: GeometricLodFocus, resident: &HashSet<SurfacePatchId>) {
+    pub fn rebuild(
+        &mut self,
+        focus: GeometricLodFocus,
+        resident: &HashSet<SurfacePatchId>,
+        canonical_ready_columns: &HashSet<(i32, i32)>,
+    ) {
         self.patches.clear();
         self.skirts.clear();
-        self.patches.extend(
-            resident
-                .iter()
-                .copied()
-                .filter(|patch| surface_patch_is_selected(focus, resident, *patch)),
-        );
+        self.patches
+            .extend(resident.iter().copied().filter(|patch| {
+                surface_patch_is_selected(focus, resident, canonical_ready_columns, *patch)
+            }));
         for patch in self.patches.iter().copied() {
             for edge in SurfacePatchEdge::ALL {
                 let delta = match edge {
@@ -296,22 +315,34 @@ mod tests {
         );
 
         let partial = resident([parent, children[0], children[1], children[2]]);
-        assert!(surface_patch_is_selected(focus, &partial, parent));
-        assert!(
-            children
-                .into_iter()
-                .all(|child| !surface_patch_is_selected(focus, &partial, child))
-        );
+        assert!(surface_patch_is_selected(
+            focus,
+            &partial,
+            &HashSet::new(),
+            parent
+        ));
+        assert!(children.into_iter().all(|child| !surface_patch_is_selected(
+            focus,
+            &partial,
+            &HashSet::new(),
+            child
+        )));
 
         let complete = resident(std::iter::once(parent).chain(children));
-        assert!(!surface_patch_is_selected(focus, &complete, parent));
-        assert!(
-            children
-                .into_iter()
-                .all(|child| surface_patch_is_selected(focus, &complete, child))
-        );
+        assert!(!surface_patch_is_selected(
+            focus,
+            &complete,
+            &HashSet::new(),
+            parent
+        ));
+        assert!(children.into_iter().all(|child| surface_patch_is_selected(
+            focus,
+            &complete,
+            &HashSet::new(),
+            child
+        )));
         let mut selection = SurfacePatchSelection::default();
-        selection.rebuild(focus, &complete);
+        selection.rebuild(focus, &complete, &HashSet::new());
         assert_eq!(selection.patch_count(), 4);
         assert!(!selection.owns(parent, None));
         assert!(
@@ -330,12 +361,14 @@ mod tests {
         assert!(!surface_patch_skirt_is_selected(
             focus,
             &both,
+            &HashSet::new(),
             left,
             SurfacePatchEdge::PositiveX
         ));
         assert!(!surface_patch_skirt_is_selected(
             focus,
             &resident([left]),
+            &HashSet::new(),
             left,
             SurfacePatchEdge::PositiveX
         ));
@@ -344,6 +377,7 @@ mod tests {
         assert!(surface_patch_skirt_is_selected(
             focus,
             &resident([boundary]),
+            &HashSet::new(),
             boundary,
             SurfacePatchEdge::NegativeX
         ));
@@ -355,12 +389,37 @@ mod tests {
         let parent = SurfacePatchId::new(SurfaceLodLevel::Stride4, -5, 0);
         let children = parent.children().unwrap();
         let complete = resident(std::iter::once(parent).chain(children));
-        assert!(!surface_patch_is_selected(focus, &complete, parent));
+        assert!(!surface_patch_is_selected(
+            focus,
+            &complete,
+            &HashSet::new(),
+            parent
+        ));
         assert!(
             children
                 .into_iter()
                 .all(|child| child.parent() == Some(parent))
         );
+    }
+
+    #[test]
+    fn stride_two_surface_covers_canonical_columns_until_the_column_is_ready() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        let patch = SurfacePatchId::new(SurfaceLodLevel::Stride2, 0, 0);
+        let resident = resident([patch]);
+        assert_eq!(focus.owner_at(8, 8), LodOwner::Canonical);
+        assert!(surface_patch_is_selected(
+            focus,
+            &resident,
+            &HashSet::new(),
+            patch
+        ));
+        assert!(!surface_patch_is_selected(
+            focus,
+            &resident,
+            &HashSet::from([(0, 0)]),
+            patch
+        ));
     }
 
     #[test]

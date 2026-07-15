@@ -810,6 +810,7 @@ pub struct Renderer {
     chunks: BTreeMap<MeshKey, ChunkMesh>,
     water_chunks: BTreeMap<MeshKey, ChunkMesh>,
     surface_patch_residency: HashSet<SurfacePatchId>,
+    canonical_ready_columns: HashSet<(i32, i32)>,
     surface_patch_residency_revision: u64,
     surface_patch_selection: SurfacePatchSelection,
     surface_patch_selection_focus: Option<GeometricLodFocus>,
@@ -1569,6 +1570,7 @@ impl Renderer {
             chunks: BTreeMap::new(),
             water_chunks: BTreeMap::new(),
             surface_patch_residency: HashSet::new(),
+            canonical_ready_columns: HashSet::new(),
             surface_patch_residency_revision: 0,
             surface_patch_selection: SurfacePatchSelection::default(),
             surface_patch_selection_focus: None,
@@ -1754,6 +1756,19 @@ impl Renderer {
             };
             chunk.activation_mask = activation_mask;
         }
+    }
+
+    /// Replaces the canonical X/Z columns whose complete vertical chunk set is resident and
+    /// active. Incomplete columns keep their stride-two surface parent until the shell atomically
+    /// marks the column ready.
+    pub fn set_canonical_ready_columns(&mut self, columns: impl IntoIterator<Item = (i32, i32)>) {
+        let replacement = columns.into_iter().collect::<HashSet<_>>();
+        if replacement == self.canonical_ready_columns {
+            return;
+        }
+        self.canonical_ready_columns = replacement;
+        self.surface_patch_residency_revision =
+            self.surface_patch_residency_revision.wrapping_add(1);
     }
 
     pub const fn ui_open(&self) -> bool {
@@ -2263,8 +2278,11 @@ impl Renderer {
             return;
         }
         if let Some(focus) = focus {
-            self.surface_patch_selection
-                .rebuild(focus, &self.surface_patch_residency);
+            self.surface_patch_selection.rebuild(
+                focus,
+                &self.surface_patch_residency,
+                &self.canonical_ready_columns,
+            );
         } else {
             self.surface_patch_selection = SurfacePatchSelection::default();
         }
@@ -4459,7 +4477,7 @@ mod tests {
         let surface_patch_residency =
             HashSet::from([surface_slice.surface_patch_id.expect("surface patch id")]);
         let mut surface_patch_selection = SurfacePatchSelection::default();
-        surface_patch_selection.rebuild(focus.unwrap(), &surface_patch_residency);
+        surface_patch_selection.rebuild(focus.unwrap(), &surface_patch_residency, &HashSet::new());
         let view_clip = AabbClipVolume::new(glam::Mat4::IDENTITY);
         let shadow_clips = [view_clip; CASCADE_COUNT];
         let (actual_shadows, actual_world) = collect_opaque_draw_lists(
@@ -4519,7 +4537,11 @@ mod tests {
         );
 
         let moved_focus = Some(GeometricLodFocus::snapped(256, -192));
-        surface_patch_selection.rebuild(moved_focus.unwrap(), &surface_patch_residency);
+        surface_patch_selection.rebuild(
+            moved_focus.unwrap(),
+            &surface_patch_residency,
+            &HashSet::new(),
+        );
         let moved_world = collect_opaque_draw_lists(
             &mut chunks,
             Some(&surface_patch_selection),
