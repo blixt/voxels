@@ -1237,19 +1237,22 @@ mod web {
 
         async fn stop(&self) {
             self.prepare_stop();
+            let camera = *self.camera.borrow();
+            self.presence.close_after_final_pose(&camera).await;
+            self.remote.close();
             let shutdown = self.store.borrow().shutdown();
             shutdown.await;
         }
 
         fn stop_now(&self) {
             self.prepare_stop();
+            self.presence.close();
+            self.remote.close();
             self.store.borrow().shutdown_now();
         }
 
         fn prepare_stop(&self) {
             self.persist_camera_if_changed(&self.camera.borrow());
-            self.presence.close();
-            self.remote.close();
             self.stopped.set(true);
             let id = self.frame_id.replace(0);
             if id != 0 {

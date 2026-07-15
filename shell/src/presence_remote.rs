@@ -1,7 +1,7 @@
 //! Dedicated browser-worker transport for latency-sensitive player presence.
 
 use glam::Vec3;
-use js_sys::{Array, ArrayBuffer, Uint8Array};
+use js_sys::{Array, ArrayBuffer, Function, Promise, Uint8Array};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use voxels_client_config::{MultiplayerConfig, WorldTransportConfig};
@@ -15,9 +15,11 @@ use voxels_world::protocol::{
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
+use wasm_bindgen_futures::JsFuture;
 use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket, WorkerGlobalScope};
 
 const RECONNECT_DELAY_MS: f64 = 500.0;
+const GRACEFUL_CLOSE_TIMEOUT_MS: i32 = 250;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PresenceConnectionState {
@@ -77,6 +79,7 @@ impl RemotePresenceClient {
             clock: Cell::new(ClockSync::default()),
             timeline: RefCell::new(timeline),
             last_error: RefCell::new(None),
+            close_resolver: RefCell::new(None),
         });
         PresenceInner::open_socket(&inner)?;
         Ok(Self { inner })
@@ -129,6 +132,12 @@ impl RemotePresenceClient {
     pub fn close(&self) {
         self.inner.close();
     }
+
+    /// Sends the final camera after the normal pose-rate interval, then waits for the server to
+    /// acknowledge the WebSocket close before the owning world session is allowed to checkpoint.
+    pub async fn close_after_final_pose(&self, camera: &CameraState) {
+        self.inner.close_after_final_pose(camera).await;
+    }
 }
 
 impl Drop for RemotePresenceClient {
@@ -157,6 +166,7 @@ struct PresenceInner {
     clock: Cell<ClockSync>,
     timeline: RefCell<RemotePresenceTimeline>,
     last_error: RefCell<Option<String>>,
+    close_resolver: RefCell<Option<Function>>,
 }
 
 struct PresenceSocketHandlers {
@@ -268,10 +278,7 @@ impl PresenceInner {
         let weak = Rc::downgrade(inner);
         let close = Closure::new(move |event: CloseEvent| {
             if let Some(inner) = weak.upgrade() {
-                inner.disconnect(
-                    generation,
-                    format!("presence WebSocket closed with code {}", event.code()),
-                );
+                inner.handle_close(generation, event.code());
             }
         });
         socket.set_onopen(Some(open.as_ref().unchecked_ref()));
@@ -442,6 +449,10 @@ impl PresenceInner {
         {
             return;
         }
+        self.send_pose(camera, local_time_ms);
+    }
+
+    fn send_pose(&self, camera: &CameraState, local_time_ms: f64) {
         let Some(socket) = self.socket.borrow().clone() else {
             return;
         };
@@ -542,6 +553,22 @@ impl PresenceInner {
         *self.last_error.borrow_mut() = Some(reason);
     }
 
+    fn handle_close(&self, generation: u64, code: u16) {
+        if generation != self.generation.get() {
+            return;
+        }
+        if self.state.get() == PresenceConnectionState::Closed {
+            self.socket.borrow_mut().take();
+            self.handlers.borrow_mut().take();
+            self.resolve_close();
+        } else {
+            self.disconnect(
+                generation,
+                format!("presence WebSocket closed with code {code}"),
+            );
+        }
+    }
+
     fn detach_socket(&self, code: u16, reason: &str) {
         if let Some(socket) = self.socket.borrow_mut().take() {
             socket.set_onopen(None);
@@ -559,8 +586,74 @@ impl PresenceInner {
         }
         self.generation.set(self.generation.get().wrapping_add(1));
         self.detach_socket(1000, "presence client closed");
+        self.resolve_close();
         self.timeline.borrow_mut().clear();
     }
+
+    async fn close_after_final_pose(&self, camera: &CameraState) {
+        if self.state.get() != PresenceConnectionState::Open {
+            self.close();
+            return;
+        }
+        let delay_ms = final_pose_delay_ms(
+            local_now_ms(),
+            self.last_pose_send_ms.get(),
+            self.config.pose_send_interval_ms,
+        );
+        if delay_ms != 0 {
+            let _ = JsFuture::from(timeout(delay_ms)).await;
+        }
+        if self.state.get() != PresenceConnectionState::Open {
+            self.close();
+            return;
+        }
+        self.send_pose(camera, local_now_ms());
+        let (closed, resolve) = resolvable();
+        *self.close_resolver.borrow_mut() = Some(resolve);
+        self.state.set(PresenceConnectionState::Closed);
+        if let Some(socket) = self.socket.borrow().as_ref() {
+            let _ = socket.close_with_code_and_reason(1000, "presence client closed");
+        } else {
+            self.resolve_close();
+        }
+        let deadline = timeout(GRACEFUL_CLOSE_TIMEOUT_MS);
+        let _ = JsFuture::from(Promise::race(&Array::of2(&closed, &deadline))).await;
+        self.generation.set(self.generation.get().wrapping_add(1));
+        self.detach_socket(1000, "presence close timeout");
+        self.resolve_close();
+        self.timeline.borrow_mut().clear();
+    }
+
+    fn resolve_close(&self) {
+        if let Some(resolve) = self.close_resolver.borrow_mut().take() {
+            let _ = resolve.call0(&wasm_bindgen::JsValue::UNDEFINED);
+        }
+    }
+}
+
+fn final_pose_delay_ms(local_time_ms: f64, last_pose_send_ms: f64, interval_ms: u32) -> i32 {
+    let remaining = f64::from(interval_ms) - (local_time_ms - last_pose_send_ms);
+    remaining.ceil().clamp(0.0, f64::from(i32::MAX)) as i32
+}
+
+fn timeout(milliseconds: i32) -> Promise {
+    Promise::new(&mut |resolve, _reject| {
+        let scope: WorkerGlobalScope = js_sys::global().unchecked_into();
+        let _ = scope.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, milliseconds);
+    })
+}
+
+fn resolvable() -> (Promise, Function) {
+    let slot = Rc::new(RefCell::new(None));
+    let captured = Rc::clone(&slot);
+    let promise = Promise::new(&mut |resolve, _reject| {
+        *captured.borrow_mut() = Some(resolve);
+    });
+    let resolve = match slot.borrow_mut().take() {
+        Some(resolve) => resolve,
+        None => Function::new_no_args(""),
+    };
+    (promise, resolve)
 }
 
 fn local_now_ms() -> f64 {
@@ -582,4 +675,16 @@ fn js_reason(value: wasm_bindgen::JsValue) -> String {
     value
         .as_string()
         .unwrap_or_else(|| "presence JavaScript exception".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::final_pose_delay_ms;
+
+    #[test]
+    fn final_pose_waits_only_for_the_unsatisfied_send_interval() {
+        assert_eq!(final_pose_delay_ms(100.0, 90.0, 33), 23);
+        assert_eq!(final_pose_delay_ms(123.0, 90.0, 33), 0);
+        assert_eq!(final_pose_delay_ms(150.0, f64::NEG_INFINITY, 33), 0);
+    }
 }
