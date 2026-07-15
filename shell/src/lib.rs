@@ -712,39 +712,37 @@ mod web {
                 startup_generation,
             );
             self.submit_generation_batch(WorldProductPriority::VisibleChunk, background_generation);
-            for ticket in work.meshing {
-                let chunk = self.chunks.borrow().get(&coord_key(ticket.coord)).cloned();
-                let Some(chunk) = chunk else {
-                    continue;
-                };
-                let halo = self
-                    .chunk_halos
-                    .borrow()
-                    .get(&coord_key(ticket.coord))
-                    .cloned();
-                let Some(halo) = halo else {
-                    let _ = self.scheduler.borrow_mut().retry(ticket);
-                    continue;
-                };
-                let mut halo_contract_valid = true;
-                let mesh = mesh_chunk(&chunk, |x, y, z| {
-                    let Some(material) = halo.sample_world(x, y, z) else {
-                        halo_contract_valid = false;
-                        return Material::Stone;
+            {
+                let chunks = self.chunks.borrow();
+                let halos = self.chunk_halos.borrow();
+                for ticket in work.meshing {
+                    let Some(chunk) = chunks.get(&coord_key(ticket.coord)) else {
+                        continue;
                     };
-                    material
-                });
-                if !halo_contract_valid {
-                    let _ = self.scheduler.borrow_mut().retry(ticket);
-                    web_sys::console::error_1(&JsValue::from_str(
-                        "world source meshing halo omitted a required shell coordinate",
-                    ));
-                    continue;
+                    let Some(halo) = halos.get(&coord_key(ticket.coord)) else {
+                        let _ = self.scheduler.borrow_mut().retry(ticket);
+                        continue;
+                    };
+                    let mut halo_contract_valid = true;
+                    let mesh = mesh_chunk(chunk, |x, y, z| {
+                        let Some(material) = halo.sample_world(x, y, z) else {
+                            halo_contract_valid = false;
+                            return Material::Stone;
+                        };
+                        material
+                    });
+                    if !halo_contract_valid {
+                        let _ = self.scheduler.borrow_mut().retry(ticket);
+                        web_sys::console::error_1(&JsValue::from_str(
+                            "world source meshing halo omitted a required shell coordinate",
+                        ));
+                        continue;
+                    }
+                    self.pending_meshes
+                        .borrow_mut()
+                        .insert(coord_key(ticket.coord), mesh);
+                    let _ = self.scheduler.borrow_mut().complete(ticket);
                 }
-                self.pending_meshes
-                    .borrow_mut()
-                    .insert(coord_key(ticket.coord), mesh);
-                let _ = self.scheduler.borrow_mut().complete(ticket);
             }
             for ticket in work.upload {
                 let mesh = self
