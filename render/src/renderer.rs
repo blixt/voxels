@@ -11,7 +11,8 @@ use crate::shadow::{
     build_directional_shadow_cascades,
 };
 use crate::ui::{
-    ContextAction, LiveStats, MissionControlUi, RendererFeature, UiAction, UiKey, Viewport,
+    Color, ContextAction, InventoryItem, LiveStats, MissionControlUi, RendererFeature, UiAction,
+    UiKey, Viewport,
 };
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
 use crate::ui_gpu::{SCENE_FORMAT, UiGpu, texture_sampler_layout};
@@ -1647,6 +1648,11 @@ impl Renderer {
         self.ui.open()
     }
 
+    pub fn inventory_wheel_contains(&self, css_x: f32, css_y: f32) -> bool {
+        self.ui
+            .inventory_contains_css([css_x, css_y], self.ui_viewport())
+    }
+
     fn ui_viewport(&self) -> Viewport {
         Viewport::new(
             self.config.width as f32,
@@ -2870,6 +2876,27 @@ fn inventory_summary(inventory: &PlacementInventory) -> [String; 2] {
     })
 }
 
+const fn inventory_material_color(material: Material) -> Color {
+    let rgb = match material {
+        Material::Grass => [0.18, 0.42, 0.12],
+        Material::Dirt => [0.36, 0.20, 0.095],
+        Material::Stone => [0.34, 0.38, 0.43],
+        Material::Sand => [0.72, 0.53, 0.25],
+        Material::Snow => [0.76, 0.86, 0.91],
+        Material::Clay => [0.56, 0.25, 0.15],
+        Material::Basalt => [0.12, 0.15, 0.20],
+        Material::Wood => [0.31, 0.15, 0.055],
+        Material::Leaves => [0.08, 0.30, 0.10],
+        Material::Moss => [0.12, 0.32, 0.14],
+        Material::Limestone => [0.58, 0.55, 0.44],
+        Material::RedSand => [0.62, 0.20, 0.075],
+        Material::Water => [0.02, 0.22, 0.30],
+        Material::GlowCrystal => [0.12, 0.58, 0.78],
+        Material::Air => [1.0, 0.0, 1.0],
+    };
+    Color::new(rgb[0], rgb[1], rgb[2], 0.92)
+}
+
 fn compact_inventory_count(value: u64) -> String {
     if value >= 1_000_000 {
         format!("{:.1}m", value as f64 / 1_000_000.0)
@@ -2882,10 +2909,27 @@ fn compact_inventory_count(value: u64) -> String {
 
 fn sync_inventory_ui(ui: &mut MissionControlUi, inventory: &PlacementInventory) {
     let selected = inventory.selected();
+    let items = PLACEMENT_MATERIALS
+        .into_iter()
+        .filter(|material| inventory.count(*material) > 0)
+        .map(|material| InventoryItem {
+            label: placement_material_label(material),
+            count: inventory.count(material),
+            color: inventory_material_color(material),
+        })
+        .collect::<Vec<_>>();
+    let selected_index = selected.and_then(|selected| {
+        PLACEMENT_MATERIALS
+            .into_iter()
+            .filter(|material| inventory.count(*material) > 0)
+            .position(|material| material == selected)
+    });
     ui.set_inventory(
         selected.map(placement_material_label),
         selected.map_or(0, |material| inventory.count(material)),
         inventory_summary(inventory),
+        items,
+        selected_index,
     );
 }
 

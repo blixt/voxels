@@ -3,6 +3,7 @@ export const INPUT_RECORD_BYTES = 24;
 export const INPUT_POINTER_DOWN = 0;
 export const INPUT_POINTER_MOVE = 1;
 export const INPUT_WHEEL = 2;
+export const INPUT_POINTER_UP = 3;
 export const INPUT_KEY_DOWN = 4;
 export const INPUT_KEY_UP = 5;
 export const INPUT_CANCEL = 6;

@@ -16,9 +16,9 @@ const CONTENT_PAD: f32 = 14.0;
 const BUTTON_SIZE: f32 = 30.0;
 const BUTTON_GAP: f32 = 6.0;
 const CHROME_HEIGHT: f32 = 36.0;
-const BRAND_WIDTH: f32 = 178.0;
 const LAUNCHER_WIDTH: f32 = 222.0;
-const INVENTORY_WIDTH: f32 = 286.0;
+const INVENTORY_WIDTH: f32 = 390.0;
+const INVENTORY_HEIGHT: f32 = 108.0;
 const CHROME_STACK_GAP: f32 = 8.0;
 const PANEL_TOP: f32 = PANEL_INSET + CHROME_HEIGHT + 12.0;
 const CONTEXT_WIDTH: f32 = 206.0;
@@ -360,9 +360,9 @@ pub struct LiveStats {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SurfaceRole {
-    Brand,
     Launcher,
     Inventory,
+    InventoryOrb,
     Toast,
     Crosshair,
     Panel,
@@ -417,7 +417,6 @@ pub struct InteractiveRegion {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiLayout {
-    pub brand: Rect,
     pub launcher: Rect,
     pub inventory: Rect,
     pub toast: Rect,
@@ -428,6 +427,13 @@ pub struct UiLayout {
     pub regions: Vec<InteractiveRegion>,
     pub stat_cards: Vec<Rect>,
     pub context_menu: Option<Rect>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InventoryItem {
+    pub label: &'static str,
+    pub count: u64,
+    pub color: Color,
 }
 
 impl UiLayout {
@@ -495,6 +501,8 @@ pub struct MissionControlUi {
     placement_material_label: &'static str,
     placement_material_count: u64,
     inventory_summary: [String; 2],
+    inventory_items: Vec<InventoryItem>,
+    selected_inventory_index: Option<usize>,
 }
 
 impl Default for MissionControlUi {
@@ -533,6 +541,8 @@ impl MissionControlUi {
             placement_material_label: "",
             placement_material_count: 0,
             inventory_summary: [String::new(), String::new()],
+            inventory_items: Vec::new(),
+            selected_inventory_index: None,
         }
     }
 
@@ -579,11 +589,16 @@ impl MissionControlUi {
         selected_label: Option<&'static str>,
         selected_count: u64,
         summary: [String; 2],
+        items: Vec<InventoryItem>,
+        selected_index: Option<usize>,
     ) {
         self.placement_material_available = selected_label.is_some();
         self.placement_material_label = selected_label.unwrap_or("");
         self.placement_material_count = selected_count;
         self.inventory_summary = summary;
+        self.inventory_items = items;
+        self.selected_inventory_index =
+            selected_index.filter(|index| *index < self.inventory_items.len());
     }
 
     pub fn show_gameplay_toast(&mut self, message: impl Into<String>) {
@@ -681,24 +696,14 @@ impl MissionControlUi {
         let compact = self.effective_compact(viewport);
         let requested_width = if compact { COMPACT_WIDTH } else { PANEL_WIDTH };
         let panel_width = requested_width.min((viewport_width - PANEL_INSET * 2.0).max(180.0));
-        let stacked_chrome = viewport_width < PANEL_INSET * 2.0 + BRAND_WIDTH + LAUNCHER_WIDTH;
-        let launcher_y = if stacked_chrome {
-            PANEL_INSET + CHROME_HEIGHT + CHROME_STACK_GAP
-        } else {
-            PANEL_INSET
-        };
-        let panel_top = if stacked_chrome {
-            launcher_y + CHROME_HEIGHT + 12.0
-        } else {
-            PANEL_TOP
-        };
+        let launcher_y = PANEL_INSET;
+        let panel_top = PANEL_TOP;
         let panel_height = if compact {
             COMPACT_HEIGHT
         } else {
             PANEL_HEIGHT
         }
         .min((viewport_height - panel_top - PANEL_INSET).max(HEADER_HEIGHT));
-        let brand = Rect::new(PANEL_INSET, PANEL_INSET, BRAND_WIDTH, CHROME_HEIGHT);
         let launcher = Rect::new(
             (viewport_width - PANEL_INSET - LAUNCHER_WIDTH).max(0.0),
             launcher_y,
@@ -716,9 +721,9 @@ impl MissionControlUi {
         let inventory_width = INVENTORY_WIDTH.min((viewport_width - PANEL_INSET * 2.0).max(180.0));
         let inventory = Rect::new(
             (viewport_width - inventory_width) * 0.5,
-            (toast.y - CHROME_STACK_GAP - CHROME_HEIGHT).max(0.0),
+            (toast.y - CHROME_STACK_GAP - INVENTORY_HEIGHT).max(0.0),
             inventory_width,
-            CHROME_HEIGHT,
+            INVENTORY_HEIGHT,
         );
         let crosshair = Rect::new(
             crosshair_center[0] - 6.0,
@@ -849,7 +854,6 @@ impl MissionControlUi {
         });
 
         UiLayout {
-            brand,
             launcher,
             inventory,
             toast,
@@ -888,6 +892,10 @@ impl MissionControlUi {
             .rev()
             .find(|region| region.rect.contains(point))
             .map(|region| region.target)
+    }
+
+    pub fn inventory_contains_css(&self, point: [f32; 2], viewport: Viewport) -> bool {
+        self.layout(viewport).inventory.contains(point)
     }
 
     pub fn hit_test_device(&self, point: [f32; 2], viewport: Viewport) -> Option<UiTarget> {
@@ -1175,65 +1183,7 @@ impl MissionControlUi {
     }
 
     fn push_chrome(&self, draw: &mut UiDrawList, layout: &UiLayout) {
-        push_surface(
-            draw,
-            layout.brand,
-            CHROME_HEIGHT * 0.5,
-            PANEL_COLOR,
-            PANEL_BORDER,
-            SurfaceRole::Brand,
-        );
-        let brand = if self.stats.eyes_submerged {
-            format!("SUBMERGED / {:.1} M", self.stats.eye_depth_metres)
-        } else if self.stats.water_immersion > 0.01 {
-            format!("WATER / {:.0}%", self.stats.water_immersion * 100.0)
-        } else {
-            "VOXELS / 10 CM CUBES".into()
-        };
-        push_text(
-            draw,
-            brand,
-            layout.brand.center(),
-            10.5,
-            TEXT_PRIMARY,
-            TextAlign::Center,
-        );
-
-        push_surface(
-            draw,
-            layout.inventory,
-            CHROME_HEIGHT * 0.5,
-            PANEL_COLOR,
-            PANEL_BORDER.mix(ACCENT, 0.45),
-            SurfaceRole::Inventory,
-        );
-        let inventory_label = if !self.placement_material_available {
-            "EMPTY · DIG TO COLLECT".to_owned()
-        } else if layout.inventory.width < INVENTORY_WIDTH {
-            format!(
-                "{} ×{}  ·  WHEEL",
-                self.placement_material_label,
-                compact_count(self.placement_material_count),
-            )
-        } else {
-            format!(
-                "PLACE {} ×{}  ·  WHEEL TO CYCLE",
-                self.placement_material_label,
-                compact_count(self.placement_material_count),
-            )
-        };
-        push_text(
-            draw,
-            inventory_label,
-            layout.inventory.center(),
-            10.0,
-            if !self.placement_material_available || self.placement_material_count == 0 {
-                TEXT_MUTED
-            } else {
-                ACCENT
-            },
-            TextAlign::Center,
-        );
+        self.push_inventory_wheel(draw, layout.inventory);
 
         let toast_alpha = if self.toast_age <= TOAST_HOLD_SECONDS {
             1.0
@@ -1278,8 +1228,9 @@ impl MissionControlUi {
         );
         let launcher = if self.stats.swimming {
             format!(
-                "SWIMMING {:.0}%   F3   {:.0} FPS",
+                "SWIMMING {:.0}% · {:.1} M   F3   {:.0} FPS",
                 self.stats.water_immersion * 100.0,
+                self.stats.eye_depth_metres,
                 self.stats.frames_per_second
             )
         } else {
@@ -1304,6 +1255,108 @@ impl MissionControlUi {
             Color::new(0.94, 0.98, 1.0, 0.88),
             Color::new(0.0, 0.0, 0.0, 0.56),
             SurfaceRole::Crosshair,
+        );
+    }
+
+    fn push_inventory_wheel(&self, draw: &mut UiDrawList, rect: Rect) {
+        let Some(selected) = self
+            .selected_inventory_index
+            .filter(|index| *index < self.inventory_items.len())
+        else {
+            let prompt = Rect::new(rect.center()[0] - 94.0, rect.y + 26.0, 188.0, 34.0);
+            push_surface(
+                draw,
+                prompt,
+                17.0,
+                PANEL_COLOR,
+                PANEL_BORDER,
+                SurfaceRole::Inventory,
+            );
+            push_text(
+                draw,
+                "DIG TO COLLECT MATERIAL",
+                prompt.center(),
+                9.5,
+                TEXT_MUTED,
+                TextAlign::Center,
+            );
+            return;
+        };
+
+        let item_count = self.inventory_items.len();
+        let center_x = rect.center()[0];
+        let mut visible = Vec::<(i32, usize)>::new();
+        for offset in [0_i32, -1, 1, -2, 2] {
+            let index = (selected as i32 + offset).rem_euclid(item_count as i32) as usize;
+            if !visible.iter().any(|(_, existing)| *existing == index) {
+                visible.push((offset, index));
+            }
+            if visible.len() == item_count.min(5) {
+                break;
+            }
+        }
+        visible.sort_unstable_by_key(|(offset, _)| *offset);
+        for (offset, index) in visible {
+            let item = self.inventory_items[index];
+            let distance = offset.unsigned_abs() as f32;
+            let size = match offset.unsigned_abs() {
+                0 => 50.0,
+                1 => 38.0,
+                _ => 30.0,
+            };
+            let x_offset = match offset {
+                -2 => -116.0,
+                -1 => -66.0,
+                0 => 0.0,
+                1 => 66.0,
+                _ => 116.0,
+            };
+            let y_offset = match offset.unsigned_abs() {
+                0 => 0.0,
+                1 => 24.0,
+                _ => 43.0,
+            };
+            let orb = Rect::new(
+                center_x + x_offset - size * 0.5,
+                rect.y + y_offset,
+                size,
+                size,
+            );
+            let selected_item = offset == 0;
+            push_surface(
+                draw,
+                orb,
+                size * 0.5,
+                item.color
+                    .with_alpha(if selected_item { 0.96 } else { 0.72 }),
+                if selected_item {
+                    ACCENT
+                } else {
+                    PANEL_BORDER.with_alpha((1.0 - distance * 0.2).max(0.35))
+                },
+                SurfaceRole::InventoryOrb,
+            );
+            push_text(
+                draw,
+                compact_count(item.count),
+                [orb.center()[0], orb.y + orb.height + 8.0],
+                if selected_item { 10.0 } else { 8.5 },
+                if selected_item {
+                    TEXT_PRIMARY
+                } else {
+                    TEXT_MUTED
+                },
+                TextAlign::Center,
+            );
+        }
+        let selected_item = self.inventory_items[selected];
+        push_text(
+            draw,
+            selected_item.label,
+            [center_x, rect.y + rect.height - 7.0],
+            9.5,
+            ACCENT,
+            TextAlign::Center,
         );
     }
 
@@ -1708,13 +1761,12 @@ mod tests {
     }
 
     #[test]
-    fn narrow_viewport_stacks_top_chrome_without_overlap() {
+    fn narrow_viewport_keeps_launcher_and_panel_inside_the_viewport() {
         let viewport = Viewport::new(390.0, 844.0, 1.0);
         let layout = opened().layout(viewport);
 
-        assert!(layout.brand.y + layout.brand.height < layout.launcher.y);
         assert!(layout.launcher.y + layout.launcher.height < layout.panel.y);
-        for rect in [layout.brand, layout.launcher] {
+        for rect in [layout.launcher, layout.inventory] {
             assert!(rect.x >= 0.0 && rect.y >= 0.0);
             assert!(rect.x + rect.width <= viewport.css_size()[0]);
             assert!(rect.y + rect.height <= viewport.css_size()[1]);
@@ -1793,6 +1845,19 @@ mod tests {
                 "GR 4 · DI 8 · ST 12 · SA 0 · SN 0 · CL 3 · BA 2".to_owned(),
                 "WO 9 · LE 6 · MO 1 · LI 5 · RS 0 · WA 2 · GL 27".to_owned(),
             ],
+            vec![
+                InventoryItem {
+                    label: "STONE",
+                    count: 12,
+                    color: Color::new(0.34, 0.38, 0.43, 0.92),
+                },
+                InventoryItem {
+                    label: "GLOW CRYSTAL",
+                    count: 27,
+                    color: Color::new(0.12, 0.58, 0.78, 0.92),
+                },
+            ],
+            Some(1),
         );
         ui.set_stats(LiveStats {
             frames_per_second: 59.8,
@@ -1857,10 +1922,18 @@ mod tests {
                 .iter()
                 .any(|run| run.text == "GR 4 · DI 8 · ST 12 · SA 0 · SN 0 · CL 3 · BA 2")
         );
+        assert!(base.text.iter().any(|run| run.text == "GLOW CRYSTAL"));
+        assert!(base.text.iter().any(|run| run.text == "27"));
+        let inventory_orbs = base
+            .glass
+            .iter()
+            .filter(|surface| surface.role == SurfaceRole::InventoryOrb)
+            .collect::<Vec<_>>();
+        assert_eq!(inventory_orbs.len(), 2);
         assert!(
-            base.text
+            inventory_orbs
                 .iter()
-                .any(|run| run.text == "PLACE GLOW CRYSTAL ×27  ·  WHEEL TO CYCLE")
+                .any(|surface| surface.rect.width == 50.0)
         );
 
         let _ = ui.open_context_menu_device([900.0, 80.0], viewport());
@@ -1931,12 +2004,11 @@ mod tests {
                 .iter()
                 .any(|surface| surface.role == SurfaceRole::Panel)
         );
-        assert_eq!(
-            draw.glass
+        assert!(
+            !draw
+                .text
                 .iter()
-                .filter(|surface| surface.role == SurfaceRole::Brand)
-                .count(),
-            1
+                .any(|run| run.text == "VOXELS / 10 CM CUBES")
         );
         assert_eq!(
             draw.glass
@@ -1977,7 +2049,8 @@ mod tests {
         assert!(ui.open());
         let draw = ui.build_draw_list(viewport);
         assert!(
-            draw.text
+            !draw
+                .text
                 .iter()
                 .any(|run| run.text == "VOXELS / 10 CM CUBES")
         );
@@ -2077,7 +2150,6 @@ mod tests {
             ..LiveStats::default()
         });
         let draw = ui.build_draw_list(viewport());
-        assert!(draw.text.iter().any(|run| run.text == "SUBMERGED / 0.7 M"));
         assert!(
             draw.text
                 .iter()
@@ -2086,7 +2158,7 @@ mod tests {
         assert!(
             draw.text
                 .iter()
-                .any(|run| run.text.contains("SWIMMING 82%"))
+                .any(|run| run.text.contains("SWIMMING 82% · 0.7 M"))
         );
     }
 }

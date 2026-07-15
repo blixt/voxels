@@ -170,10 +170,10 @@ impl GlassInstance {
     fn from_surface(surface: &GlassSurface, viewport: [f32; 2], dpr: f32) -> Self {
         let style = match surface.role {
             SurfaceRole::Crosshair => 4.0,
+            SurfaceRole::InventoryOrb => 5.0,
             SurfaceRole::Panel | SurfaceRole::ContextMenu => 1.0,
             SurfaceRole::ToggleThumb => 3.0,
-            SurfaceRole::Brand
-            | SurfaceRole::Launcher
+            SurfaceRole::Launcher
             | SurfaceRole::Inventory
             | SurfaceRole::Toast
             | SurfaceRole::Header

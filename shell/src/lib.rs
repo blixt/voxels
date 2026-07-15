@@ -7,6 +7,29 @@ use voxels_core::CameraState;
 const INTERACTION_REACH_METRES: f32 = 5.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const INTERACTION_STREAM_MARGIN_METRES: f32 = 0.7;
+#[cfg(any(target_arch = "wasm32", test))]
+const INVENTORY_SWIPE_THRESHOLD_CSS_PIXELS: f32 = 34.0;
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn inventory_swipe(anchor: [f32; 2], current: [f32; 2]) -> Option<(i32, [f32; 2])> {
+    if !anchor.into_iter().chain(current).all(f32::is_finite) {
+        return None;
+    }
+    let delta_x = current[0] - anchor[0];
+    let delta_y = current[1] - anchor[1];
+    if delta_x.abs() < INVENTORY_SWIPE_THRESHOLD_CSS_PIXELS || delta_x.abs() <= delta_y.abs() * 1.15
+    {
+        return None;
+    }
+    let steps = (delta_x / INVENTORY_SWIPE_THRESHOLD_CSS_PIXELS).trunc() as i32;
+    Some((
+        -steps,
+        [
+            anchor[0] + steps as f32 * INVENTORY_SWIPE_THRESHOLD_CSS_PIXELS,
+            current[1],
+        ],
+    ))
+}
 
 /// Canonical chunks intersecting the current view/edit corridor. This bounded secondary interest
 /// keeps raycasts, collision, and rendering in agreement below the normal vertical residency span
@@ -277,6 +300,7 @@ mod web {
     const KIND_POINTER_MOVE: u8 = 1;
     const KIND_POINTER_DOWN: u8 = 0;
     const KIND_WHEEL: u8 = 2;
+    const KIND_POINTER_UP: u8 = 3;
     const KIND_KEY_DOWN: u8 = 4;
     const KIND_KEY_UP: u8 = 5;
     const KIND_CANCEL: u8 = 6;
@@ -337,6 +361,7 @@ mod web {
         radial_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         portal_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         interaction_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
+        touch_inventory_drag: Cell<Option<[f32; 2]>>,
         profile: RefCell<ProfileAutomation>,
         profile_tracked_high: Cell<usize>,
         profile_surface_high: Cell<usize>,
@@ -1380,6 +1405,18 @@ mod web {
                 let record = bytemuck::pod_read_unaligned::<InputRecord>(chunk);
                 match record.kind {
                     KIND_POINTER_DOWN => {
+                        if record.code == 1
+                            && self
+                                .renderer
+                                .borrow()
+                                .inventory_wheel_contains(record.x, record.y)
+                        {
+                            self.touch_inventory_drag.set(Some([record.x, record.y]));
+                            continue;
+                        }
+                        if record.code == 1 {
+                            self.touch_inventory_drag.set(None);
+                        }
                         let was_open = self.renderer.borrow().ui_open();
                         let is_open = self.renderer.borrow_mut().handle_ui_pointer_down(
                             record.x,
@@ -1391,6 +1428,23 @@ mod web {
                         }
                     }
                     KIND_POINTER_MOVE => {
+                        if record.code == 1
+                            && let Some(anchor) = self.touch_inventory_drag.get()
+                        {
+                            if let Some((steps, next_anchor)) =
+                                crate::inventory_swipe(anchor, [record.x, record.y])
+                            {
+                                self.touch_inventory_drag.set(Some(next_anchor));
+                                let direction = steps.signum();
+                                for _ in 0..steps.unsigned_abs() {
+                                    let _ = self
+                                        .renderer
+                                        .borrow_mut()
+                                        .cycle_placement_material(direction);
+                                }
+                            }
+                            continue;
+                        }
                         if self.renderer.borrow().ui_open() {
                             self.renderer
                                 .borrow_mut()
@@ -1407,6 +1461,11 @@ mod web {
                             .renderer
                             .borrow_mut()
                             .cycle_placement_material(direction);
+                    }
+                    KIND_POINTER_UP => {
+                        if record.code == 1 {
+                            self.touch_inventory_drag.set(None);
+                        }
                     }
                     KIND_KEY_DOWN => {
                         if record.code == 8 {
@@ -1428,7 +1487,10 @@ mod web {
                             self.input.borrow_mut().set_key(record.code, false);
                         }
                     }
-                    KIND_CANCEL => self.input.borrow_mut().clear(),
+                    KIND_CANCEL => {
+                        self.touch_inventory_drag.set(None);
+                        self.input.borrow_mut().clear();
+                    }
                     _ => {}
                 }
             }
@@ -2393,6 +2455,7 @@ mod web {
             radial_active_chunks: RefCell::new(BTreeSet::new()),
             portal_active_chunks: RefCell::new(BTreeSet::new()),
             interaction_active_chunks: RefCell::new(BTreeSet::new()),
+            touch_inventory_drag: Cell::new(None),
             profile: RefCell::new(ProfileAutomation::with_config(ProfileConfig {
                 fixed_step_seconds: engine_config.fixed_step_seconds,
                 speed_metres_per_second: profiling.speed_metres_per_second,
@@ -2526,5 +2589,24 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.contains(&voxels_world::ChunkCoord::new(-2, 0, -2)));
         assert!(first.iter().any(|coord| coord.y < 0));
+    }
+
+    #[test]
+    fn horizontal_inventory_swipes_are_thresholded_and_directional() {
+        assert_eq!(inventory_swipe([100.0, 500.0], [125.0, 503.0]), None);
+        assert_eq!(
+            inventory_swipe([100.0, 500.0], [66.0, 504.0]),
+            Some((1, [66.0, 504.0]))
+        );
+        assert_eq!(
+            inventory_swipe([100.0, 500.0], [170.0, 497.0]),
+            Some((-2, [168.0, 497.0]))
+        );
+    }
+
+    #[test]
+    fn vertical_or_invalid_touch_motion_does_not_turn_the_inventory() {
+        assert_eq!(inventory_swipe([100.0, 500.0], [140.0, 560.0]), None);
+        assert_eq!(inventory_swipe([f32::NAN, 500.0], [140.0, 500.0]), None);
     }
 }

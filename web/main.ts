@@ -2,7 +2,7 @@ import "./style.css";
 import { loadClientConfig } from "./client-config.ts";
 import { watchDevicePixelRatio } from "./display.ts";
 import { terminateAfterAcknowledgement } from "./hmr-lifecycle.ts";
-import { PressedKeys, requestPointerLockSafely } from "./input.ts";
+import { PressedKeys, WheelAccumulator, requestPointerLockSafely } from "./input.ts";
 import {
   namedPlayerUrl,
   resolveBrowserPlayerSession,
@@ -14,6 +14,7 @@ import {
   INPUT_KEY_UP,
   INPUT_POINTER_DOWN,
   INPUT_POINTER_MOVE,
+  INPUT_POINTER_UP,
   INPUT_WHEEL,
   packInput,
   type FromWorker,
@@ -359,24 +360,33 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
   canvas.addEventListener("pointercancel", (event) => {
     enqueue(point(event, INPUT_CANCEL), true);
   });
+  canvas.addEventListener("pointerup", (event) => {
+    enqueue(point(event, INPUT_POINTER_UP, canvas.getBoundingClientRect()), true);
+  });
+  const wheelAccumulator = new WheelAccumulator();
   canvas.addEventListener(
     "wheel",
     (event) => {
       event.preventDefault();
-      if (event.deltaY === 0) return;
-      enqueue(
-        {
-          kind: INPUT_WHEEL,
-          code: 0,
-          buttons: 0,
-          x: 0,
-          y: 0,
-          dx: 0,
-          dy: event.deltaY,
-          flags: 0,
-        },
-        true,
-      );
+      for (const direction of wheelAccumulator.consume(
+        event.deltaY,
+        event.deltaMode,
+        window.innerHeight,
+      )) {
+        enqueue(
+          {
+            kind: INPUT_WHEEL,
+            code: 0,
+            buttons: 0,
+            x: 0,
+            y: 0,
+            dx: 0,
+            dy: direction,
+            flags: 0,
+          },
+          true,
+        );
+      }
     },
     { passive: false },
   );

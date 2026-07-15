@@ -78,7 +78,12 @@ fn vs_main(
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   let instance = instances[input.instance_index];
   let size = instance.rect.zw;
-  let position = input.uv * size - size * 0.5;
+  let style = instance.style.x;
+  var position = input.uv * size - size * 0.5;
+  if style > 4.5 {
+    let voxel_uv = (floor(input.uv * 7.0) + vec2<f32>(0.5)) / 7.0;
+    position = voxel_uv * size - size * 0.5;
+  }
   let half_size = size * 0.5;
   let radius = min(instance.viewport_radius.z, min(half_size.x, half_size.y));
   let distance = rounded_rect_distance(position, half_size, radius);
@@ -88,8 +93,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     discard;
   }
 
-  let style = instance.style.x;
   if style > 3.5 {
+    if style > 4.5 {
+      let sphere = position / max(half_size, vec2<f32>(0.001));
+      let normal = normalize(vec3<f32>(sphere, sqrt(max(1.0 - dot(sphere, sphere), 0.0))));
+      let light = max(dot(normal, normalize(vec3<f32>(-0.45, -0.65, 1.0))), 0.0);
+      let shade = 0.48 + light * 0.72;
+      let cell = fract(input.uv * 7.0);
+      let seam = smoothstep(0.04, 0.12, min(min(cell.x, 1.0 - cell.x), min(cell.y, 1.0 - cell.y)));
+      let alpha = mask * instance.fill.a;
+      let color = instance.fill.rgb * shade * mix(0.72, 1.0, seam)
+        + instance.border.rgb * (1.0 - seam) * instance.border.a * 0.45;
+      return vec4<f32>(color * alpha, alpha);
+    }
     let dpr = instance.style.y;
     let ring = 1.0 - smoothstep(0.75 * dpr, 1.75 * dpr, abs(distance + 1.25 * dpr));
     let shadow = 1.0 - smoothstep(1.5 * dpr, 2.8 * dpr, abs(distance + 1.25 * dpr));

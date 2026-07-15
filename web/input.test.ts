@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { PressedKeys, keyCode, requestPointerLockSafely } from "./input.ts";
+import { PressedKeys, WheelAccumulator, keyCode, requestPointerLockSafely } from "./input.ts";
 
 describe("browser key state", () => {
   it("keeps aliased Shift input active until both physical keys are released", () => {
@@ -40,5 +40,29 @@ describe("browser key state", () => {
     );
 
     expect(reported).toBe(failure);
+  });
+});
+
+describe("inventory wheel normalization", () => {
+  it("accumulates high-resolution trackpad deltas before changing selection", () => {
+    const wheel = new WheelAccumulator();
+    expect(wheel.consume(20, 0, 800)).toEqual([]);
+    expect(wheel.consume(30, 0, 800)).toEqual([]);
+    expect(wheel.consume(50, 0, 800)).toEqual([1]);
+  });
+
+  it("normalizes line and page wheels and bounds one event", () => {
+    const wheel = new WheelAccumulator();
+    expect(wheel.consume(-3, 1, 800)).toEqual([-1]);
+    expect(wheel.consume(1, 2, 800)).toEqual([1, 1, 1, 1]);
+  });
+
+  it("drops stale momentum when the wheel reverses", () => {
+    const wheel = new WheelAccumulator();
+    expect(wheel.consume(70, 0, 800)).toEqual([]);
+    expect(wheel.consume(-20, 0, 800)).toEqual([]);
+    expect(wheel.consume(-80, 0, 800)).toEqual([-1]);
+    wheel.clear();
+    expect(wheel.consume(99, 0, 800)).toEqual([]);
   });
 });
