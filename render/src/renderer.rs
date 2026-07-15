@@ -3034,6 +3034,10 @@ fn collect_opaque_draw_lists(
             }
             for cascade_index in 0..CASCADE_COUNT {
                 if shadow_chunk_visible[cascade_index]
+                    // Transition skirts are synthetic crack-hiding curtains rather than terrain.
+                    // Letting their deep vertical faces cast directional shadows creates moving
+                    // shadow walls whenever a snapped LOD boundary advances with the camera.
+                    && slice.skirt_edge.is_none()
                     && shadow_clips[cascade_index].contains_aabb(slice.bounds_min, slice.bounds_max)
                 {
                     shadow_builders[cascade_index].select_slice(chunk, slice);
@@ -4434,12 +4438,19 @@ mod tests {
             skirt_edge: None,
             render_layer: RenderLayer::Opaque,
         };
+        let surface_skirt_slice = MeshSlice {
+            relative_offset: surface_slice.size,
+            size: size_of::<GpuQuad>() as u32,
+            quad_count: 1,
+            skirt_edge: Some(SurfacePatchEdge::NegativeX),
+            ..surface_slice
+        };
         let mut arena = ArenaAllocator::new(256, 1);
         let canonical_allocation = arena
             .allocate(canonical_slice.size)
             .expect("canonical test allocation");
         let surface_allocation = arena
-            .allocate(surface_slice.size)
+            .allocate(surface_slice.size + surface_skirt_slice.size)
             .expect("surface test allocation");
         let mut chunks = BTreeMap::from([
             (
@@ -4461,9 +4472,9 @@ mod tests {
                 surface_key,
                 ChunkMesh {
                     allocation: surface_allocation,
-                    quad_count: surface_slice.quad_count,
+                    quad_count: surface_slice.quad_count + surface_skirt_slice.quad_count,
                     content_fingerprint: 22,
-                    slices: vec![surface_slice],
+                    slices: vec![surface_slice, surface_skirt_slice],
                     lod_ownership_focus: None,
                     lod_residency_revision: 0,
                     lod_owned_slices: Vec::new(),
@@ -4510,6 +4521,7 @@ mod tests {
                 |key, slice| {
                     slice.render_layer == RenderLayer::Opaque
                         && slice_owned_by_lod(focus, Some(&surface_patch_selection), key, slice)
+                        && slice.skirt_edge.is_none()
                         && shadow_clips[cascade_index]
                             .contains_aabb(slice.bounds_min, slice.bounds_max)
                 },
@@ -4517,6 +4529,7 @@ mod tests {
         });
         assert_eq!(actual_world, expected_world);
         assert_eq!(actual_shadows, expected_shadows);
+        assert!(actual_world.quad_count > actual_shadows[0].quad_count);
 
         let cached_world = collect_opaque_draw_lists(
             &mut chunks,
