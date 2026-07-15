@@ -3201,6 +3201,7 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
     }
 
     let mut packed = vec![0xff; tile.quads.len()];
+    let mut cell_normals = vec![None::<u32>; edge * edge];
     let height_at = |x: usize, z: usize| heights[x + z * edge].map(|sample| sample.0);
     for z in 0..edge {
         for x in 0..edge {
@@ -3225,6 +3226,55 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
                 | (encode(normal.z) << 16)
                 | SURFACE_MACRO_NORMAL_FLAG;
             packed[quad_index] = value;
+            cell_normals[x + z * edge] = Some(value);
+        }
+    }
+
+    // Coarse height fields represent a smooth slope with flat tops separated by tall voxel walls.
+    // Give only those generated terrain-body walls the owning cell's bounded slope normal. This
+    // prevents distant hills from becoming black combs without adding geometry or accidentally
+    // smoothing canonical cliffs, skyline proxies, or disposable transition skirts.
+    for patch in &tile.patches {
+        for quad_index in patch.quad_range.start as usize..patch.quad_range.end as usize {
+            let quad = tile.quads[quad_index];
+            if quad.face == 2 || i32::from(quad.extent[0]) != stride {
+                continue;
+            }
+            let adjusted_x = i64::from(quad.origin[0])
+                - if quad.face == 0 {
+                    i64::from(stride - 1)
+                } else {
+                    0
+                };
+            let adjusted_z = i64::from(quad.origin[2])
+                - if quad.face == 4 {
+                    i64::from(stride - 1)
+                } else {
+                    0
+                };
+            let local_x = adjusted_x - i64::from(origin_x);
+            let local_z = adjusted_z - i64::from(origin_z);
+            if local_x < 0
+                || local_z < 0
+                || local_x >= i64::from(span)
+                || local_z >= i64::from(span)
+                || local_x % i64::from(stride) != 0
+                || local_z % i64::from(stride) != 0
+            {
+                continue;
+            }
+            let cell_x = (local_x / i64::from(stride)) as usize;
+            let cell_z = (local_z / i64::from(stride)) as usize;
+            let cell = cell_x + cell_z * edge;
+            let Some((height, _)) = heights[cell] else {
+                continue;
+            };
+            let quad_top = i64::from(quad.origin[1]) + i64::from(quad.extent[1]);
+            if quad_top == i64::from(height) + 1
+                && let Some(normal) = cell_normals[cell]
+            {
+                packed[quad_index] = normal;
+            }
         }
     }
     packed
@@ -3947,6 +3997,15 @@ mod tests {
             "uphill +X must retain a gentle, stable tilt toward -X: {normal_x}"
         );
         assert!(normal_z.abs() < 0.01);
+        let side_index = tile
+            .quads
+            .iter()
+            .position(|quad| quad.origin[0] == 2 && quad.origin[2] == 0 && quad.face == 1)
+            .expect("uphill cell has a generated negative-X terrain wall");
+        assert_eq!(
+            packed[side_index], value,
+            "terrain wall shares its cell's macro normal"
+        );
         assert_eq!(size_of::<GpuQuad>(), 24);
     }
 
