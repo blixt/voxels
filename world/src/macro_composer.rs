@@ -169,27 +169,42 @@ impl HeightfieldWorldSource {
                 i32::try_from(world_x).map_err(|_| WorldSourceError::InvalidBlockCoordinate)?;
             let world_z =
                 i32::try_from(world_z).map_err(|_| WorldSourceError::InvalidBlockCoordinate)?;
-            let relief = if self.add_subgrid_relief {
-                micro_relief_voxels(self.composer_seed, world_x, world_z, block.ridge[index])
-            } else {
-                0.0
-            };
-            let height = f64::from(elevation + relief).floor();
             if !elevation.is_finite()
-                || height < f64::from(i32::MIN)
-                || height > f64::from(i32::MAX)
                 || !normalized(block.temperature[index])
                 || !normalized(block.moisture[index])
                 || !normalized(block.ridge[index])
             {
                 return Err(WorldSourceError::MalformedMacroBlock);
             }
+            let ridge = block.ridge[index];
+            let relief = if self.add_subgrid_relief {
+                micro_relief_voxels(self.composer_seed, world_x, world_z, ridge)
+            } else {
+                0.0
+            };
+            let height = f64::from(elevation + relief).floor();
+            if height < f64::from(i32::MIN) || height > f64::from(i32::MAX) {
+                return Err(WorldSourceError::MalformedMacroBlock);
+            }
+            let (temperature, moisture, ecotone) = if self.add_subgrid_relief {
+                downscaled_climate(
+                    self.composer_seed,
+                    world_x,
+                    world_z,
+                    block.temperature[index],
+                    block.moisture[index],
+                    ridge,
+                )
+            } else {
+                (block.temperature[index], block.moisture[index], 0.0)
+            };
             columns.push(PreparedColumn {
                 height: height as i32,
-                temperature: block.temperature[index],
-                moisture: block.moisture[index],
-                ridge: block.ridge[index],
+                temperature,
+                moisture,
+                ridge,
                 geology: geology_signal(self.composer_seed, world_x, world_z),
+                ecotone,
             });
         }
         Ok(PreparedMacroGrid { request, columns })
@@ -683,6 +698,7 @@ struct PreparedColumn {
     moisture: f32,
     ridge: f32,
     geology: f32,
+    ecotone: f32,
 }
 
 struct PreparedMacroGrid {
@@ -766,22 +782,7 @@ fn surface_sample(column: &PreparedColumn, sea_level_voxels: i32) -> SurfaceSamp
 }
 
 fn surface_profile(column: &PreparedColumn, sea_level_voxels: i32) -> (Material, SurfaceRegion) {
-    let region = if column.temperature < 0.28
-        || (column.ridge > 0.72 && column.temperature < 0.56)
-        || column.height > sea_level_voxels.saturating_add(12_000)
-    {
-        SurfaceRegion::Alpine
-    } else if column.temperature > 0.62 && column.moisture < 0.20 {
-        SurfaceRegion::RedBadlands
-    } else if column.temperature > 0.50 && column.moisture < 0.34 {
-        SurfaceRegion::PaleDunes
-    } else if column.ridge > 0.76 && column.geology < -0.18 {
-        SurfaceRegion::Volcanic
-    } else if column.moisture > 0.60 {
-        SurfaceRegion::VerdantForest
-    } else {
-        SurfaceRegion::WindMoor
-    };
+    let region = surface_region(column, sea_level_voxels);
     let material = if column.height <= sea_level_voxels.saturating_add(3) {
         if column.moisture > 0.62 || column.geology < -0.45 {
             Material::Clay
@@ -791,24 +792,19 @@ fn surface_profile(column: &PreparedColumn, sea_level_voxels: i32) -> (Material,
     } else {
         match region {
             SurfaceRegion::VerdantForest => {
-                if column.moisture > 0.78 && column.geology > 0.12 {
+                if rock_exposure(column) > 0.72 {
+                    exposed_rock(column)
+                } else if column.moisture + column.ecotone * 0.08 > 0.72 && column.geology > 0.02 {
                     Material::Moss
                 } else {
                     Material::Grass
                 }
             }
             SurfaceRegion::WindMoor => {
-                // Learned 30 m terrain carries important escarpments even when its regional
-                // climate occupies a narrow band. Expose coherent bedrock on those faces instead
-                // of painting an entire rugged tile with grass.
-                if column.ridge > 0.30 && column.geology < -0.30 {
-                    Material::Basalt
-                } else if (column.ridge > 0.30 && column.geology > 0.30)
-                    || (column.ridge > 0.18 && column.geology > 0.56)
-                {
-                    Material::Limestone
-                } else if column.ridge > 0.30 {
-                    Material::Stone
+                if rock_exposure(column) > 0.56 {
+                    exposed_rock(column)
+                } else if column.moisture + column.ecotone * 0.06 > 0.68 {
+                    Material::Moss
                 } else {
                     Material::Grass
                 }
@@ -846,6 +842,93 @@ fn surface_profile(column: &PreparedColumn, sea_level_voxels: i32) -> (Material,
         }
     };
     (material, region)
+}
+
+fn surface_region(column: &PreparedColumn, sea_level_voxels: i32) -> SurfaceRegion {
+    let temperature = column.temperature;
+    let moisture = column.moisture;
+    let ridge = column.ridge;
+    let altitude = smooth_rise(
+        column.height.saturating_sub(sea_level_voxels) as f32,
+        9_000.0,
+        13_000.0,
+    );
+    let temperate = smooth_rise(temperature, 0.22, 0.42) * smooth_fall(temperature, 0.72, 0.92);
+    let cold = smooth_fall(temperature, 0.24, 0.42);
+    let dry = smooth_fall(moisture, 0.12, 0.40);
+    let hot = smooth_rise(temperature, 0.50, 0.78);
+
+    // These are overlapping ecological affinities rather than ordered thresholds. The learned
+    // climate remains the dominant signal, while continuous world-space variation bends broad
+    // boundaries into ecotones instead of exposing the source model's sampling lattice.
+    let scores = [
+        smooth_rise(moisture, 0.38, 0.68) * temperate * smooth_fall(ridge, 0.30, 0.72) * 1.24
+            + column.ecotone * 0.12,
+        0.43 + temperate * 0.18 + smooth_rise(moisture, 0.24, 0.52) * 0.10 - column.ecotone * 0.04,
+        cold * 1.36
+            + smooth_rise(ridge, 0.56, 0.92) * smooth_fall(temperature, 0.42, 0.68) * 0.76
+            + altitude * 1.40
+            - column.ecotone * 0.05,
+        hot * dry * 1.25 - column.ecotone * 0.08,
+        smooth_rise(temperature, 0.44, 0.68) * smooth_fall(moisture, 0.20, 0.48) * 0.96
+            + column.geology.max(0.0) * 0.08
+            + column.ecotone * 0.06,
+        smooth_rise(ridge, 0.50, 0.86) * smooth_fall(column.geology, -0.44, 0.10) * 1.38,
+    ];
+    let index = scores
+        .into_iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+        .map_or(1, |(index, _)| index);
+    SurfaceRegion::ALL[index]
+}
+
+fn rock_exposure(column: &PreparedColumn) -> f32 {
+    (smooth_rise(column.ridge, 0.12, 0.42) + column.geology.abs() * 0.10 + column.ecotone * 0.12)
+        .clamp(0.0, 1.0)
+}
+
+fn exposed_rock(column: &PreparedColumn) -> Material {
+    let composition = column.geology + column.ecotone * 0.10;
+    if composition < -0.28 {
+        Material::Basalt
+    } else if composition > 0.28 {
+        Material::Limestone
+    } else {
+        Material::Stone
+    }
+}
+
+fn smooth_rise(value: f32, start: f32, end: f32) -> f32 {
+    let normalized = ((value - start) / (end - start)).clamp(0.0, 1.0);
+    normalized * normalized * (3.0 - 2.0 * normalized)
+}
+
+fn smooth_fall(value: f32, start: f32, end: f32) -> f32 {
+    1.0 - smooth_rise(value, start, end)
+}
+
+fn downscaled_climate(
+    seed: u64,
+    x: i32,
+    z: i32,
+    temperature: f32,
+    moisture: f32,
+    ridge: f32,
+) -> (f32, f32, f32) {
+    // Terrain Diffusion climate is intentionally macro-scale (its climate grid is much coarser
+    // than the 30 m elevation product). Add bounded, seamless local variation as an ecological
+    // downscaling layer; never normalize a requested tile, so overlapping products stay exact.
+    let temperature_offset = coherent_noise(seed ^ 0x243f_6a88, x, z, 4_200) * 0.026
+        + coherent_noise(seed ^ 0x85a3_08d3, x, z, 1_100) * 0.014;
+    let drainage = coherent_noise(seed ^ 0x1319_8a2e, x, z, 3_200) * 0.72
+        + coherent_noise(seed ^ 0x0370_7344, x, z, 850) * 0.28;
+    let ecotone = (coherent_noise(seed ^ 0xa409_3822, x, z, 1_600) * 0.72
+        + coherent_noise(seed ^ 0x299f_31d0, x, z, 460) * 0.28)
+        .clamp(-1.0, 1.0);
+    let temperature = (temperature + temperature_offset - ridge * 0.018).clamp(0.0, 1.0);
+    let moisture = (moisture + drainage * 0.15 - ridge * 0.045).clamp(0.0, 1.0);
+    (temperature, moisture, ecotone)
 }
 
 fn micro_relief_voxels(seed: u64, x: i32, z: i32, ridge: f32) -> f32 {
@@ -1055,6 +1138,7 @@ mod tests {
             moisture,
             ridge,
             geology,
+            ecotone: 0.0,
         }
     }
 
@@ -1139,6 +1223,46 @@ mod tests {
         };
         assert!(range(0.9) > range(0.0) * 3.0);
         assert!(range(0.9) < 60.0, "micro relief must remain below 6 metres");
+    }
+
+    #[test]
+    fn climate_downscaling_is_seamless_bounded_and_preserves_macro_ordering() {
+        let seed = 0x0ddc_0ffe;
+        let left = downscaled_climate(seed, 3_199, -781, 0.58, 0.48, 0.22);
+        let right = downscaled_climate(seed, 3_200, -781, 0.58, 0.48, 0.22);
+        assert_eq!(
+            left,
+            downscaled_climate(seed, 3_199, -781, 0.58, 0.48, 0.22)
+        );
+        assert!((left.0 - right.0).abs() < 0.002);
+        assert!((left.1 - right.1).abs() < 0.002);
+        assert!((left.2 - right.2).abs() < 0.002);
+
+        let mut moisture_minimum = f32::INFINITY;
+        let mut moisture_maximum = f32::NEG_INFINITY;
+        for step in -40..=40 {
+            let x = step * 173;
+            let z = step * step * 11 - 7_000;
+            let local = downscaled_climate(seed, x, z, 0.58, 0.48, 0.22);
+            let dry = downscaled_climate(seed, x, z, 0.58, 0.28, 0.22);
+            assert!((0.0..=1.0).contains(&local.0));
+            assert!((0.0..=1.0).contains(&local.1));
+            assert!((-1.0..=1.0).contains(&local.2));
+            assert!(local.1 > dry.1);
+            moisture_minimum = moisture_minimum.min(local.1);
+            moisture_maximum = moisture_maximum.max(local.1);
+        }
+        assert!(moisture_maximum - moisture_minimum > 0.08);
+    }
+
+    #[test]
+    fn overlapping_affinities_form_an_ecotone_instead_of_a_straight_threshold() {
+        let mut sheltered = column(100, 0.58, 0.55, 0.20, 0.0);
+        sheltered.ecotone = 1.0;
+        let mut exposed = sheltered;
+        exposed.ecotone = -1.0;
+        assert_eq!(surface_region(&sheltered, 0), SurfaceRegion::VerdantForest);
+        assert_eq!(surface_region(&exposed, 0), SurfaceRegion::WindMoor);
     }
 
     fn product(
