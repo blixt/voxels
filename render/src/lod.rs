@@ -134,7 +134,7 @@ pub fn surface_patch_is_selected(
     canonical_ready_columns: &HashSet<(i32, i32)>,
     patch: SurfacePatchId,
 ) -> bool {
-    if !resident.contains(&patch) || refinement_blocked_by_ancestor(resident, patch) {
+    if !resident.contains(&patch) {
         return false;
     }
     let Some(center) = patch.voxel_center_xz() else {
@@ -149,6 +149,9 @@ pub fn surface_patch_is_selected(
         if canonical_ready_columns.contains(&column) {
             return false;
         }
+        if refinement_blocked_by_ancestor(resident, patch) {
+            return false;
+        }
         return patch.level == SurfaceLodLevel::Stride2
             || patch.children().is_none_or(|children| {
                 !children.into_iter().all(|child| resident.contains(&child))
@@ -157,8 +160,12 @@ pub fn surface_patch_is_selected(
     let LodOwner::Surface(target_level) = owner else {
         unreachable!();
     };
-    match patch.level.index().cmp(&target_level.index()) {
-        std::cmp::Ordering::Less => false,
+    let ordering = patch.level.index().cmp(&target_level.index());
+    if ordering == std::cmp::Ordering::Less || refinement_blocked_by_ancestor(resident, patch) {
+        return false;
+    }
+    match ordering {
+        std::cmp::Ordering::Less => unreachable!(),
         std::cmp::Ordering::Equal => true,
         std::cmp::Ordering::Greater => patch
             .children()
