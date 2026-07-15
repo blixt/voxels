@@ -4,6 +4,40 @@
 use voxels_core::CameraState;
 
 #[cfg(any(target_arch = "wasm32", test))]
+const INTERACTION_REACH_METRES: f32 = 5.0;
+#[cfg(any(target_arch = "wasm32", test))]
+const INTERACTION_STREAM_MARGIN_METRES: f32 = 0.7;
+
+/// Canonical chunks intersecting the current view/edit corridor. This bounded secondary interest
+/// keeps raycasts, collision, and rendering in agreement below the normal vertical residency span
+/// without multiplying the primary cylinder for every direction.
+#[cfg(any(target_arch = "wasm32", test))]
+fn interaction_stream_interest(camera: &CameraState) -> Vec<voxels_world::ChunkCoord> {
+    use std::collections::BTreeSet;
+    use voxels_world::{CHUNK_EDGE, ChunkCoord, VOXEL_SIZE_METRES};
+
+    let end = camera.position
+        + camera.forward() * (INTERACTION_REACH_METRES + INTERACTION_STREAM_MARGIN_METRES);
+    let minimum = camera.position.min(end) - glam::Vec3::splat(INTERACTION_STREAM_MARGIN_METRES);
+    let maximum = camera.position.max(end) + glam::Vec3::splat(INTERACTION_STREAM_MARGIN_METRES);
+    let chunk_size = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
+    let minimum = (minimum / chunk_size).floor().as_ivec3();
+    let maximum = (maximum / chunk_size).floor().as_ivec3();
+    let mut chunks = BTreeSet::new();
+    for z in minimum.z..=maximum.z {
+        for y in minimum.y..=maximum.y {
+            for x in minimum.x..=maximum.x {
+                let coord = ChunkCoord::new(x, y, z);
+                if coord.is_world_representable() {
+                    chunks.insert(coord);
+                }
+            }
+        }
+    }
+    chunks.into_iter().collect()
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn camera_persistence_values(camera: &CameraState) -> [f32; 5] {
     [
         camera.position.x,
@@ -302,6 +336,7 @@ mod web {
         cinder_stream_interest: Cell<CaveStreamInterest>,
         radial_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         portal_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
+        interaction_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         profile: RefCell<ProfileAutomation>,
         profile_tracked_high: Cell<usize>,
         profile_surface_high: Cell<usize>,
@@ -707,10 +742,10 @@ mod web {
         fn stream_world(&self, camera: &CameraState) {
             self.drain_remote_generation();
             let focus = world_to_chunk(camera.position);
-            let interest = CaveStreamInterest::empty();
+            let interest = crate::interaction_stream_interest(camera);
             let (focus_changed, work) = {
                 let mut scheduler = self.scheduler.borrow_mut();
-                let changed = scheduler.update_focus_with_interest(focus, interest.as_slice());
+                let changed = scheduler.update_focus_with_interest(focus, &interest);
                 (
                     changed,
                     scheduler.schedule_frame(self.config.stream_frame_budget),
@@ -718,21 +753,24 @@ mod web {
             };
             let mut uploaded = false;
 
-            let mut startup_generation = Vec::new();
+            let interest_keys: BTreeSet<_> = interest.iter().copied().map(coord_key).collect();
+            let mut collision_generation = Vec::new();
             let mut background_generation = Vec::new();
             for ticket in work.generation {
                 let dx = i64::from(ticket.coord.x) - i64::from(focus.x);
                 let dz = i64::from(ticket.coord.z) - i64::from(focus.z);
                 let radius = i64::from(self.config.startup_ready_radius_chunks);
-                if !self.startup_ready.get() && dx * dx + dz * dz <= radius * radius {
-                    startup_generation.push(ticket);
+                if interest_keys.contains(&coord_key(ticket.coord))
+                    || (!self.startup_ready.get() && dx * dx + dz * dz <= radius * radius)
+                {
+                    collision_generation.push(ticket);
                 } else {
                     background_generation.push(ticket);
                 }
             }
             self.submit_generation_batch(
                 WorldProductPriority::CollisionCritical,
-                startup_generation,
+                collision_generation,
             );
             self.submit_generation_batch(WorldProductPriority::VisibleChunk, background_generation);
             {
@@ -803,7 +841,7 @@ mod web {
                 }
             }
             if focus_changed || uploaded || evicted {
-                self.reconcile_chunk_activation(focus, interest);
+                self.reconcile_chunk_activation(focus, &interest);
             }
             self.stream_surface_lods(camera.position);
         }
@@ -994,7 +1032,7 @@ mod web {
                 .insert(coord_key(ticket.coord), snapshot.meshing_halo);
         }
 
-        fn reconcile_chunk_activation(&self, focus: ChunkCoord, interest: CaveStreamInterest) {
+        fn reconcile_chunk_activation(&self, focus: ChunkCoord, interest: &[ChunkCoord]) {
             let scheduler = self.scheduler.borrow();
             let config = scheduler.config();
             let mut radial = BTreeSet::new();
@@ -1037,26 +1075,26 @@ mod web {
                 }
             }
 
-            let mut portal_columns = BTreeMap::<(i32, i32), Vec<ChunkCoord>>::new();
-            for coord in interest.as_slice() {
+            let mut interaction_columns = BTreeMap::<(i32, i32), Vec<ChunkCoord>>::new();
+            for coord in interest {
                 if scheduler
                     .status(*coord)
                     .is_some_and(|status| status.desired)
                 {
-                    portal_columns
+                    interaction_columns
                         .entry((coord.x, coord.z))
                         .or_default()
                         .push(*coord);
                 }
             }
-            let mut portal = BTreeSet::new();
-            for coords in portal_columns.values() {
+            let mut interaction = BTreeSet::new();
+            for coords in interaction_columns.values() {
                 if coords.iter().all(|coord| {
                     scheduler
                         .status(*coord)
                         .is_some_and(|status| status.state == ChunkState::Resident)
                 }) {
-                    portal.extend(coords.iter().copied().map(coord_key));
+                    interaction.extend(coords.iter().copied().map(coord_key));
                 }
             }
             drop(scheduler);
@@ -1066,9 +1104,9 @@ mod web {
                 ChunkActivationReason::Radial,
             );
             self.reconcile_activation_reason(
-                &self.portal_active_chunks,
-                portal,
-                ChunkActivationReason::Portal,
+                &self.interaction_active_chunks,
+                interaction,
+                ChunkActivationReason::Interaction,
             );
         }
 
@@ -2318,6 +2356,7 @@ mod web {
             cinder_stream_interest: Cell::new(CaveStreamInterest::empty()),
             radial_active_chunks: RefCell::new(BTreeSet::new()),
             portal_active_chunks: RefCell::new(BTreeSet::new()),
+            interaction_active_chunks: RefCell::new(BTreeSet::new()),
             profile: RefCell::new(ProfileAutomation::with_config(ProfileConfig {
                 fixed_step_seconds: engine_config.fixed_step_seconds,
                 speed_metres_per_second: profiling.speed_metres_per_second,
@@ -2423,5 +2462,33 @@ mod tests {
             assert!(camera.yaw.is_finite());
             assert!(camera.pitch.is_finite());
         }
+    }
+
+    #[test]
+    fn interaction_interest_reaches_below_a_downward_edit_corridor() {
+        let mut camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
+        camera.pitch = -1.5;
+        let interest = interaction_stream_interest(&camera);
+
+        assert!(interest.contains(&voxels_world::ChunkCoord::new(0, 1, 0)));
+        assert!(
+            interest
+                .iter()
+                .any(|coord| coord.x == 0 && coord.y <= -1 && coord.z == 0)
+        );
+        assert!(interest.len() <= 36, "lookahead must stay tightly bounded");
+        assert!(interest.iter().all(|coord| coord.is_world_representable()));
+    }
+
+    #[test]
+    fn interaction_interest_is_stable_across_negative_chunk_boundaries() {
+        let mut camera = CameraState::spawn(glam::Vec3::new(-3.21, 0.05, -3.21));
+        camera.pitch = -1.5;
+        let first = interaction_stream_interest(&camera);
+        let second = interaction_stream_interest(&camera);
+
+        assert_eq!(first, second);
+        assert!(first.contains(&voxels_world::ChunkCoord::new(-2, 0, -2)));
+        assert!(first.iter().any(|coord| coord.y < 0));
     }
 }

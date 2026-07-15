@@ -253,6 +253,7 @@ struct ChunkMesh {
 pub enum ChunkActivationReason {
     Radial = 1,
     Portal = 2,
+    Interaction = 4,
 }
 
 impl ChunkMesh {
