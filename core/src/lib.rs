@@ -19,6 +19,7 @@ const SPRINT_MULTIPLIER: f32 = 1.55;
 const JUMP_SPEED: f32 = 5.6;
 const GRAVITY: f32 = 19.5;
 const STEP_HEIGHT: f32 = 0.35;
+const GROUND_FOLLOW_DISTANCE: f32 = 0.15;
 const COLLISION_EPSILON: f32 = 0.0001;
 const SWIM_SPEED: f32 = 3.2;
 const SWIM_RESPONSE: f32 = 5.5;
@@ -293,9 +294,8 @@ impl InputState {
 }
 
 /// The camera position is the player's eye position in metres. Terrain collision uses a vertical
-/// cylinder: its round horizontal footprint avoids snagging the player on voxel corners, while its
-/// flat, voxel-aligned foot keeps stepping and block edits deterministic without a mesh-physics
-/// dependency.
+/// capsule: its rounded foot rides continuously over small voxel ledges while its round horizontal
+/// footprint avoids snagging on corners. Collision stays deterministic and allocation-free.
 #[derive(Clone, Copy, Debug)]
 pub struct CameraState {
     pub position: Vec3,
@@ -373,7 +373,7 @@ impl CameraState {
     pub fn intersects_voxel(self, voxel: [i32; 3], voxel_size: f32) -> bool {
         voxel_size.is_finite()
             && voxel_size > 0.0
-            && cylinder_intersects_voxel(self.position, voxel, voxel_size)
+            && capsule_intersects_voxel(self.position, voxel, voxel_size)
     }
 
     pub fn update(
@@ -453,28 +453,32 @@ impl CameraState {
             horizontal_grounded = self.grounded;
         }
 
-        self.move_axis(
-            0,
-            self.velocity.x * dt,
-            voxel_size,
-            horizontal_grounded,
-            &mut sample_voxel,
-        );
-        self.move_axis(
-            2,
-            self.velocity.z * dt,
+        self.move_horizontal(
+            Vec2::new(self.velocity.x, self.velocity.z) * dt,
             voxel_size,
             horizontal_grounded,
             &mut sample_voxel,
         );
         self.grounded = false;
-        self.move_axis(
-            1,
-            self.velocity.y * dt,
-            voxel_size,
-            false,
-            &mut sample_voxel,
-        );
+        self.move_axis(1, self.velocity.y * dt, voxel_size, &mut sample_voxel);
+        if !was_swimming
+            && !self.grounded
+            && horizontal_grounded
+            && self.velocity.y <= 0.0
+            && let Some(snapped_y) = ground_follow_eye_y(
+                self.position,
+                voxel_size,
+                GROUND_FOLLOW_DISTANCE,
+                &mut sample_voxel,
+            )
+        {
+            let snapped = self.position.with_y(snapped_y);
+            if !collides(snapped, voxel_size, &mut sample_voxel) {
+                self.position = snapped;
+                self.grounded = true;
+                self.velocity.y = 0.0;
+            }
+        }
         if !self.grounded
             && has_ground_support(
                 self.position,
@@ -577,12 +581,77 @@ impl CameraState {
             || collides(self.position, voxel_size, &mut sample_voxel)
     }
 
+    fn move_horizontal(
+        &mut self,
+        distance: Vec2,
+        voxel_size: f32,
+        allow_step: bool,
+        sample_voxel: &mut impl FnMut(i32, i32, i32) -> VoxelPhysics,
+    ) {
+        if distance.length_squared() <= f32::EPSILON {
+            return;
+        }
+        let step_count = (distance.length() / (voxel_size * 0.45)).ceil().max(1.0) as u32;
+        let delta = distance / step_count as f32;
+        let mut blocked_x = false;
+        let mut blocked_z = false;
+        for _ in 0..step_count {
+            let origin = self.position;
+            let full = origin + Vec3::new(delta.x, 0.0, delta.y);
+            if let Some(resolved) =
+                resolve_horizontal_candidate(full, voxel_size, allow_step, sample_voxel)
+            {
+                self.position = resolved;
+                continue;
+            }
+
+            let x = (delta.x.abs() > f32::EPSILON)
+                .then(|| origin + Vec3::X * delta.x)
+                .and_then(|candidate| {
+                    resolve_horizontal_candidate(candidate, voxel_size, allow_step, sample_voxel)
+                });
+            let z = (delta.y.abs() > f32::EPSILON)
+                .then(|| origin + Vec3::Z * delta.y)
+                .and_then(|candidate| {
+                    resolve_horizontal_candidate(candidate, voxel_size, allow_step, sample_voxel)
+                });
+            match (x, z) {
+                (Some(x), Some(_)) if delta.x.abs() >= delta.y.abs() => {
+                    self.position = x;
+                    blocked_z = true;
+                }
+                (Some(_), Some(z)) => {
+                    self.position = z;
+                    blocked_x = true;
+                }
+                (Some(x), None) => {
+                    self.position = x;
+                    blocked_z = true;
+                }
+                (None, Some(z)) => {
+                    self.position = z;
+                    blocked_x = true;
+                }
+                (None, None) => {
+                    blocked_x |= delta.x.abs() > f32::EPSILON;
+                    blocked_z |= delta.y.abs() > f32::EPSILON;
+                    break;
+                }
+            }
+        }
+        if blocked_x {
+            self.velocity.x = 0.0;
+        }
+        if blocked_z {
+            self.velocity.z = 0.0;
+        }
+    }
+
     fn move_axis(
         &mut self,
         axis: usize,
         distance: f32,
         voxel_size: f32,
-        allow_step: bool,
         sample_voxel: &mut impl FnMut(i32, i32, i32) -> VoxelPhysics,
     ) {
         if distance.abs() <= f32::EPSILON {
@@ -597,17 +666,6 @@ impl CameraState {
                 self.position = candidate;
                 continue;
             }
-            if axis != 1 && allow_step {
-                let increments = (STEP_HEIGHT / voxel_size).floor() as u32;
-                let stepped = (1..=increments).find_map(|increment| {
-                    let raised = candidate + Vec3::Y * voxel_size * increment as f32;
-                    (!collides(raised, voxel_size, sample_voxel)).then_some(raised)
-                });
-                if let Some(raised) = stepped {
-                    self.position = raised;
-                    continue;
-                }
-            }
             self.velocity[axis] = 0.0;
             if axis == 1 && distance < 0.0 {
                 self.grounded = true;
@@ -615,6 +673,26 @@ impl CameraState {
             break;
         }
     }
+}
+
+fn resolve_horizontal_candidate(
+    candidate: Vec3,
+    voxel_size: f32,
+    allow_step: bool,
+    sample_voxel: &mut impl FnMut(i32, i32, i32) -> VoxelPhysics,
+) -> Option<Vec3> {
+    if !collides(candidate, voxel_size, sample_voxel) {
+        return Some(candidate);
+    }
+    if !allow_step {
+        return None;
+    }
+    let lift = required_step_lift(candidate, voxel_size, sample_voxel)?;
+    if !(0.0..=STEP_HEIGHT + COLLISION_EPSILON).contains(&lift) {
+        return None;
+    }
+    let raised = candidate + Vec3::Y * lift;
+    (!collides(raised, voxel_size, sample_voxel)).then_some(raised)
 }
 
 fn normalized_yaw(yaw: f32) -> f32 {
@@ -652,13 +730,10 @@ fn collides(
     let max_voxel = (max / voxel_size).floor().as_ivec3();
     for z in min_voxel.z..=max_voxel.z {
         for x in min_voxel.x..=max_voxel.x {
-            let voxel_min = Vec3::new(x as f32, 0.0, z as f32) * voxel_size;
-            let voxel_max = voxel_min + Vec3::splat(voxel_size);
-            if !horizontal_circle_overlaps_voxel(eye_position, voxel_min, voxel_max) {
-                continue;
-            }
             for y in min_voxel.y..=max_voxel.y {
-                if sample_voxel(x, y, z).collidable {
+                if sample_voxel(x, y, z).collidable
+                    && capsule_intersects_voxel(eye_position, [x, y, z], voxel_size)
+                {
                     return true;
                 }
             }
@@ -667,24 +742,121 @@ fn collides(
     false
 }
 
-fn cylinder_intersects_voxel(eye_position: Vec3, voxel: [i32; 3], voxel_size: f32) -> bool {
+fn capsule_intersects_voxel(eye_position: Vec3, voxel: [i32; 3], voxel_size: f32) -> bool {
+    let radius = PLAYER_RADIUS_METRES - COLLISION_EPSILON;
     let feet_y = eye_position.y - PLAYER_EYE_HEIGHT_METRES;
     let head_y = feet_y + PLAYER_HEIGHT_METRES;
     let voxel_min = Vec3::from_array(voxel.map(|value| value as f32 * voxel_size));
     let voxel_max = voxel_min + Vec3::splat(voxel_size);
-    if feet_y >= voxel_max.y - COLLISION_EPSILON || head_y <= voxel_min.y + COLLISION_EPSILON {
-        return false;
-    }
-    horizontal_circle_overlaps_voxel(eye_position, voxel_min, voxel_max)
+    let segment_min_y = feet_y + radius;
+    let segment_max_y = head_y - radius;
+    let horizontal_distance_squared =
+        horizontal_distance_squared_to_voxel(eye_position.x, eye_position.z, voxel_min, voxel_max);
+    let vertical_distance = if segment_max_y < voxel_min.y {
+        voxel_min.y - segment_max_y
+    } else if segment_min_y > voxel_max.y {
+        segment_min_y - voxel_max.y
+    } else {
+        0.0
+    };
+    horizontal_distance_squared + vertical_distance * vertical_distance < radius * radius
 }
 
 fn horizontal_circle_overlaps_voxel(eye_position: Vec3, voxel_min: Vec3, voxel_max: Vec3) -> bool {
-    let closest_x = eye_position.x.clamp(voxel_min.x, voxel_max.x);
-    let closest_z = eye_position.z.clamp(voxel_min.z, voxel_max.z);
-    let delta_x = eye_position.x - closest_x;
-    let delta_z = eye_position.z - closest_z;
     let collision_radius = PLAYER_RADIUS_METRES - COLLISION_EPSILON;
-    delta_x * delta_x + delta_z * delta_z < collision_radius * collision_radius
+    horizontal_distance_squared_to_voxel(eye_position.x, eye_position.z, voxel_min, voxel_max)
+        < collision_radius * collision_radius
+}
+
+fn horizontal_distance_squared_to_voxel(x: f32, z: f32, voxel_min: Vec3, voxel_max: Vec3) -> f32 {
+    let delta_x = x - x.clamp(voxel_min.x, voxel_max.x);
+    let delta_z = z - z.clamp(voxel_min.z, voxel_max.z);
+    delta_x * delta_x + delta_z * delta_z
+}
+
+fn required_step_lift(
+    eye_position: Vec3,
+    voxel_size: f32,
+    sample_voxel: &mut impl FnMut(i32, i32, i32) -> VoxelPhysics,
+) -> Option<f32> {
+    let (min, max) = player_bounds(eye_position);
+    let max = max - Vec3::splat(COLLISION_EPSILON);
+    let min_voxel = (min / voxel_size).floor().as_ivec3();
+    let max_voxel = (max / voxel_size).floor().as_ivec3();
+    let radius = PLAYER_RADIUS_METRES - COLLISION_EPSILON;
+    let segment_min_y = eye_position.y - PLAYER_EYE_HEIGHT_METRES + radius;
+    let mut lift = 0.0_f32;
+    let mut found = false;
+    for z in min_voxel.z..=max_voxel.z {
+        for x in min_voxel.x..=max_voxel.x {
+            for y in min_voxel.y..=max_voxel.y {
+                if !sample_voxel(x, y, z).collidable
+                    || !capsule_intersects_voxel(eye_position, [x, y, z], voxel_size)
+                {
+                    continue;
+                }
+                found = true;
+                let voxel_min = Vec3::new(x as f32, y as f32, z as f32) * voxel_size;
+                let voxel_max = voxel_min + Vec3::splat(voxel_size);
+                let horizontal_distance_squared = horizontal_distance_squared_to_voxel(
+                    eye_position.x,
+                    eye_position.z,
+                    voxel_min,
+                    voxel_max,
+                );
+                if horizontal_distance_squared >= radius * radius {
+                    continue;
+                }
+                let cap_reach = (radius * radius - horizontal_distance_squared).sqrt();
+                lift = lift.max(voxel_max.y + cap_reach - segment_min_y + COLLISION_EPSILON);
+            }
+        }
+    }
+    found.then_some(lift)
+}
+
+fn ground_follow_eye_y(
+    eye_position: Vec3,
+    voxel_size: f32,
+    maximum_drop: f32,
+    sample_voxel: &mut impl FnMut(i32, i32, i32) -> VoxelPhysics,
+) -> Option<f32> {
+    let radius = PLAYER_RADIUS_METRES - COLLISION_EPSILON;
+    let feet_y = eye_position.y - PLAYER_EYE_HEIGHT_METRES;
+    let horizontal_min = Vec3::new(eye_position.x - radius, 0.0, eye_position.z - radius);
+    let horizontal_max = Vec3::new(eye_position.x + radius, 0.0, eye_position.z + radius);
+    let min_voxel = (horizontal_min / voxel_size).floor().as_ivec3();
+    let max_voxel = (horizontal_max / voxel_size).floor().as_ivec3();
+    let min_y = ((feet_y - maximum_drop - radius) / voxel_size).floor() as i32;
+    let max_y = ((feet_y + COLLISION_EPSILON) / voxel_size).floor() as i32;
+    let mut highest = f32::NEG_INFINITY;
+    for z in min_voxel.z..=max_voxel.z {
+        for x in min_voxel.x..=max_voxel.x {
+            for y in min_y..=max_y {
+                if !sample_voxel(x, y, z).collidable {
+                    continue;
+                }
+                let voxel_min = Vec3::new(x as f32, y as f32, z as f32) * voxel_size;
+                let voxel_max = voxel_min + Vec3::splat(voxel_size);
+                let horizontal_distance_squared = horizontal_distance_squared_to_voxel(
+                    eye_position.x,
+                    eye_position.z,
+                    voxel_min,
+                    voxel_max,
+                );
+                if horizontal_distance_squared >= radius * radius {
+                    continue;
+                }
+                let cap_reach = (radius * radius - horizontal_distance_squared).sqrt();
+                let contact_eye_y = voxel_max.y + cap_reach - radius + PLAYER_EYE_HEIGHT_METRES;
+                let drop = eye_position.y - contact_eye_y;
+                if drop >= -COLLISION_EPSILON && drop <= maximum_drop + COLLISION_EPSILON {
+                    highest = highest.max(contact_eye_y);
+                }
+            }
+        }
+    }
+    highest.is_finite().then_some(highest)
 }
 
 fn has_ground_support(
@@ -824,7 +996,7 @@ mod tests {
         assert!(!clear.intersects_voxel([0, 0, 0], 0.1));
         assert!(!clear.overlaps_collidable(0.1, |x, y, z| { solid_if([x, y, z] == [0, 0, 0]) }));
 
-        let touching = CameraState::spawn(Vec3::new(-0.19, PLAYER_EYE_HEIGHT_METRES, -0.19));
+        let touching = CameraState::spawn(Vec3::new(-0.12, PLAYER_EYE_HEIGHT_METRES, -0.12));
         assert!(touching.intersects_voxel([0, 0, 0], 0.1));
         assert!(touching.overlaps_collidable(0.1, |x, y, z| { solid_if([x, y, z] == [0, 0, 0]) }));
     }
@@ -846,6 +1018,73 @@ mod tests {
         assert!(
             (camera.position.y - PLAYER_EYE_HEIGHT_METRES - 0.1).abs() < 0.011,
             "feet should settle on the bump: {:?}",
+            camera.position
+        );
+    }
+
+    #[test]
+    fn capsule_follows_a_ten_centimetre_dip_then_climbs_without_stalling() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES + 0.1, 0.0));
+        camera.grounded = true;
+        let mut input = InputState::default();
+        input.set_key(4, true);
+        let mut minimum_feet = f32::INFINITY;
+        let mut maximum_vertical_step = 0.0_f32;
+        let mut previous_y = camera.position.y;
+        for _ in 0..180 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |x, y, _| {
+                solid_if(y < 0 || (!(5..15).contains(&x) && y == 0))
+            });
+            minimum_feet = minimum_feet.min(camera.position.y - PLAYER_EYE_HEIGHT_METRES);
+            maximum_vertical_step =
+                maximum_vertical_step.max((camera.position.y - previous_y).abs());
+            previous_y = camera.position.y;
+        }
+
+        assert!(
+            camera.position.x > 2.0,
+            "controller stalled at a rolling ledge"
+        );
+        assert!(minimum_feet < 0.03, "rounded foot never followed the dip");
+        assert!(
+            maximum_vertical_step < 0.055,
+            "terrain following snapped by {maximum_vertical_step}m"
+        );
+    }
+
+    #[test]
+    fn diagonal_capsule_motion_climbs_a_convex_voxel_corner() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
+        camera.grounded = true;
+        camera.yaw = std::f32::consts::FRAC_PI_4;
+        let mut input = InputState::default();
+        input.set_key(1, true);
+        for _ in 0..180 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |x, y, z| {
+                solid_if(y < 0 || ((x >= 5 || z <= -5) && y == 0))
+            });
+        }
+
+        assert!(camera.position.x > 1.2, "position: {:?}", camera.position);
+        assert!(camera.position.z < -1.2, "position: {:?}", camera.position);
+        assert!(camera.grounded);
+    }
+
+    #[test]
+    fn low_ceiling_prevents_capsule_step_up() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
+        camera.grounded = true;
+        let mut input = InputState::default();
+        input.set_key(4, true);
+        for _ in 0..120 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |x, y, _| {
+                solid_if(y < 0 || (x >= 5 && y == 0) || y == 18)
+            });
+        }
+
+        assert!(
+            camera.position.x < 0.5,
+            "low ceiling allowed the player to clear the ledge: {:?}",
             camera.position
         );
     }
