@@ -2500,15 +2500,18 @@ impl Renderer {
         let geometric_lod_focus =
             active_geometric_lod_focus(self.geometric_lod_focus, self.options.far_terrain);
         let lod_readiness = self.lod_readiness();
-        let hierarchy_fallback = geometric_lod_focus.is_some() && !lod_readiness.all;
-        if hierarchy_fallback {
+        let resident_hierarchy = geometric_lod_focus.is_some();
+        if resident_hierarchy {
             self.refresh_surface_patch_selection(geometric_lod_focus);
         }
-        let surface_patch_selection = hierarchy_fallback.then_some(&self.surface_patch_selection);
+        // Queue readiness is not a proof that every fixed geometric owner is resident. Canonical
+        // columns can still replace atomically and retained surface tiles can be incomplete. Keep
+        // the cached resident hierarchy authoritative after settling as well as while streaming.
+        let surface_patch_selection = resident_hierarchy.then_some(&self.surface_patch_selection);
         let (shadow_draw_lists, world_draw_list) = collect_opaque_draw_lists(
             &mut self.chunks,
             surface_patch_selection,
-            if hierarchy_fallback {
+            if resident_hierarchy {
                 self.surface_patch_residency_revision
             } else {
                 u64::MAX
@@ -4614,6 +4617,34 @@ mod tests {
             None,
             &(SurfaceLodLevel::Stride4.index() + 1, 1, 0, 0),
             &stride_two_patch
+        ));
+    }
+
+    #[test]
+    fn resident_hierarchy_keeps_surface_cover_until_canonical_column_is_complete() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        let patch_id = SurfacePatchId::new(SurfaceLodLevel::Stride2, 0, 0);
+        let mut surface = test_slice(Some(SurfaceBounds {
+            min: [0, -20, 0],
+            max: [16, 80, 16],
+        }));
+        surface.surface_patch_id = Some(patch_id);
+        let resident = HashSet::from([patch_id]);
+        let mut selection = SurfacePatchSelection::default();
+        selection.rebuild(focus, &resident, &HashSet::new());
+        assert!(slice_owned_by_lod(
+            Some(focus),
+            Some(&selection),
+            &(SurfaceLodLevel::Stride2.index() + 1, 0, 0, 0),
+            &surface,
+        ));
+
+        selection.rebuild(focus, &resident, &HashSet::from([(0, 0)]));
+        assert!(!slice_owned_by_lod(
+            Some(focus),
+            Some(&selection),
+            &(SurfaceLodLevel::Stride2.index() + 1, 0, 0, 0),
+            &surface,
         ));
     }
 

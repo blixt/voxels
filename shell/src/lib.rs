@@ -217,6 +217,12 @@ mod web {
         })
     }
 
+    fn complete_canonical_columns(
+        complete_chunks: &BTreeSet<(i32, i32, i32)>,
+    ) -> BTreeSet<(i32, i32)> {
+        complete_chunks.iter().map(|&(x, _, z)| (x, z)).collect()
+    }
+
     #[derive(Clone, Copy, Default)]
     struct FrameSample {
         interval_ms: f32,
@@ -1115,6 +1121,10 @@ mod web {
                     }
                 }
             }
+            // Only the complete current columns above may replace their stride-two surface
+            // parents. Retained chunks below preserve draw coverage during hysteresis, but an
+            // arbitrary surviving Y slice is not an atomically complete canonical column.
+            let radial_ready_columns = complete_canonical_columns(&radial);
             // Preserve the old radial reason for retained resident meshes until the scheduler
             // actually evicts them. This carries visible coverage across small focus moves while
             // new columns become atomically ready, matching the retention hysteresis contract.
@@ -1150,10 +1160,6 @@ mod web {
                 }
             }
             drop(scheduler);
-            let radial_ready_columns = radial
-                .iter()
-                .map(|&(x, _, z)| (x, z))
-                .collect::<BTreeSet<_>>();
             self.reconcile_activation_reason(
                 &self.radial_active_chunks,
                 radial,
@@ -2692,6 +2698,19 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.contains(&voxels_world::ChunkCoord::new(-2, 0, -2)));
         assert!(first.iter().any(|coord| coord.y < 0));
+    }
+
+    #[test]
+    fn retained_partial_columns_do_not_replace_surface_cover() {
+        let complete_current = BTreeSet::from([(13, 4, -9), (13, 5, -9), (13, 6, -9)]);
+        let ready = complete_canonical_columns(&complete_current);
+        let mut active_with_retention = complete_current;
+        active_with_retention.extend([(14, 4, -9), (14, 5, -9)]);
+
+        assert!(ready.contains(&(13, -9)));
+        assert!(!ready.contains(&(14, -9)));
+        assert!(active_with_retention.contains(&(14, 4, -9)));
+        assert!(active_with_retention.contains(&(14, 5, -9)));
     }
 
     #[test]
