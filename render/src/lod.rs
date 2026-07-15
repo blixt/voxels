@@ -1,6 +1,7 @@
 //! Pure geometric ownership for nested block-surface LOD rings.
 
-use voxels_world::{CHUNK_EDGE, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge};
+use std::collections::BTreeSet;
+use voxels_world::{CHUNK_EDGE, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId};
 
 /// Half extents in canonical 10 cm voxels. Every boundary is a multiple of the patch span on both
 /// sides, so whole patches can change owner without overlap, holes, or fragment clipping.
@@ -124,6 +125,72 @@ impl GeometricLodFocus {
     }
 }
 
+/// Selects a resident surface hierarchy without ever exposing a partially loaded sibling group.
+/// A parent remains visible until all four immediate children are resident, then those children
+/// independently repeat the same rule toward the fixed geometric owner requested by `focus`.
+pub fn surface_patch_is_selected(
+    focus: GeometricLodFocus,
+    resident: &BTreeSet<SurfacePatchId>,
+    patch: SurfacePatchId,
+) -> bool {
+    if !resident.contains(&patch) || refinement_blocked_by_ancestor(resident, patch) {
+        return false;
+    }
+    let Some(center) = patch.voxel_center_xz() else {
+        return false;
+    };
+    let LodOwner::Surface(target_level) = focus.owner_at(center[0], center[1]) else {
+        return false;
+    };
+    match patch.level.index().cmp(&target_level.index()) {
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => true,
+        std::cmp::Ordering::Greater => patch
+            .children()
+            .is_none_or(|children| !children.into_iter().all(|child| resident.contains(&child))),
+    }
+}
+
+pub fn surface_patch_skirt_is_selected(
+    focus: GeometricLodFocus,
+    resident: &BTreeSet<SurfacePatchId>,
+    patch: SurfacePatchId,
+    edge: SurfacePatchEdge,
+) -> bool {
+    if !surface_patch_is_selected(focus, resident, patch) {
+        return false;
+    }
+    let delta = match edge {
+        SurfacePatchEdge::NegativeX => [-1, 0],
+        SurfacePatchEdge::PositiveX => [1, 0],
+        SurfacePatchEdge::NegativeZ => [0, -1],
+        SurfacePatchEdge::PositiveZ => [0, 1],
+    };
+    patch
+        .neighbor(delta[0], delta[1])
+        .is_none_or(|neighbor| !surface_patch_is_selected(focus, resident, neighbor))
+}
+
+fn refinement_blocked_by_ancestor(
+    resident: &BTreeSet<SurfacePatchId>,
+    patch: SurfacePatchId,
+) -> bool {
+    let mut descendant = patch;
+    while let Some(parent) = descendant.parent() {
+        if resident.contains(&parent)
+            && parent.children().is_some_and(|siblings| {
+                siblings
+                    .into_iter()
+                    .any(|sibling| !resident.contains(&sibling))
+            })
+        {
+            return true;
+        }
+        descendant = parent;
+    }
+    false
+}
+
 fn snap_nearest(value: i32, step: i32) -> i32 {
     let value = i64::from(value);
     let step = i64::from(step);
@@ -146,6 +213,72 @@ fn snap_nearest(value: i32, step: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resident(patches: impl IntoIterator<Item = SurfacePatchId>) -> BTreeSet<SurfacePatchId> {
+        patches.into_iter().collect()
+    }
+
+    #[test]
+    fn incomplete_child_groups_keep_the_parent_without_overlap() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        let parent = SurfacePatchId::new(SurfaceLodLevel::Stride4, 4, 0);
+        let children = parent.children().expect("finer children");
+        let parent_center = parent.voxel_center_xz().unwrap();
+        assert_eq!(
+            focus.owner_at(parent_center[0], parent_center[1]),
+            LodOwner::Surface(SurfaceLodLevel::Stride2)
+        );
+
+        let partial = resident([parent, children[0], children[1], children[2]]);
+        assert!(surface_patch_is_selected(focus, &partial, parent));
+        assert!(
+            children
+                .into_iter()
+                .all(|child| !surface_patch_is_selected(focus, &partial, child))
+        );
+
+        let complete = resident(std::iter::once(parent).chain(children));
+        assert!(!surface_patch_is_selected(focus, &complete, parent));
+        assert!(
+            children
+                .into_iter()
+                .all(|child| surface_patch_is_selected(focus, &complete, child))
+        );
+    }
+
+    #[test]
+    fn selected_patch_skirts_only_residency_boundaries() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        let left = SurfacePatchId::new(SurfaceLodLevel::Stride2, 7, 0);
+        let right = left.neighbor(1, 0).unwrap();
+        let both = resident([left, right]);
+        assert!(!surface_patch_skirt_is_selected(
+            focus,
+            &both,
+            left,
+            SurfacePatchEdge::PositiveX
+        ));
+        assert!(surface_patch_skirt_is_selected(
+            focus,
+            &resident([left]),
+            left,
+            SurfacePatchEdge::PositiveX
+        ));
+    }
+
+    #[test]
+    fn negative_child_groups_refine_with_euclidean_parent_identity() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        let parent = SurfacePatchId::new(SurfaceLodLevel::Stride4, -5, 0);
+        let children = parent.children().unwrap();
+        let complete = resident(std::iter::once(parent).chain(children));
+        assert!(!surface_patch_is_selected(focus, &complete, parent));
+        assert!(
+            children
+                .into_iter()
+                .all(|child| child.parent() == Some(parent))
+        );
+    }
 
     #[test]
     fn boundary_centres_are_grid_snapped_and_nested() {
