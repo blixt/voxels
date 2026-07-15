@@ -63,6 +63,42 @@ pub struct DirectionalShadowCascades {
     pub split_depths: [f32; CASCADE_COUNT],
 }
 
+/// Six clip-space half-planes cached for repeated conservative AABB tests.
+///
+/// Extracting the planes once avoids transforming all eight corners of every mesh slice. The
+/// positive-vertex test is mathematically equivalent to rejecting an AABB only when all its
+/// corners lie outside one clip plane.
+#[derive(Clone, Copy, Debug)]
+pub struct AabbClipVolume {
+    planes: [Vec4; 6],
+}
+
+impl AabbClipVolume {
+    pub fn new(clip_from_world: Mat4) -> Self {
+        let x = clip_from_world.row(0);
+        let y = clip_from_world.row(1);
+        let z = clip_from_world.row(2);
+        let w = clip_from_world.row(3);
+        Self {
+            planes: [w + x, w - x, w + y, w - y, z, w - z],
+        }
+    }
+
+    pub fn contains_aabb(self, minimum: Vec3, maximum: Vec3) -> bool {
+        if !minimum.is_finite() || !maximum.is_finite() || minimum.cmpgt(maximum).any() {
+            return false;
+        }
+        self.planes.iter().all(|plane| {
+            let positive = Vec3::new(
+                if plane.x >= 0.0 { maximum.x } else { minimum.x },
+                if plane.y >= 0.0 { maximum.y } else { minimum.y },
+                if plane.z >= 0.0 { maximum.z } else { minimum.z },
+            );
+            plane.truncate().dot(positive) + plane.w >= 0.0
+        })
+    }
+}
+
 /// Build three stable directional-shadow cascades for `camera` and a positive viewport `aspect`.
 pub fn build_directional_shadow_cascades(
     camera: &CameraState,
@@ -136,24 +172,7 @@ pub fn build_directional_shadow_cascades(
 
 /// Conservative clip-volume test for a world-space AABB against one shadow cascade.
 pub fn aabb_visible_in_cascade(cascade: &ShadowCascade, minimum: Vec3, maximum: Vec3) -> bool {
-    if !minimum.is_finite() || !maximum.is_finite() || minimum.cmpgt(maximum).any() {
-        return false;
-    }
-    let mut clips = [Vec4::ZERO; 8];
-    for (index, clip) in clips.iter_mut().enumerate() {
-        let corner = Vec3::new(
-            if index & 1 == 0 { minimum.x } else { maximum.x },
-            if index & 2 == 0 { minimum.y } else { maximum.y },
-            if index & 4 == 0 { minimum.z } else { maximum.z },
-        );
-        *clip = cascade.clip_from_world * corner.extend(1.0);
-    }
-    !clips.iter().all(|point| point.x < -point.w)
-        && !clips.iter().all(|point| point.x > point.w)
-        && !clips.iter().all(|point| point.y < -point.w)
-        && !clips.iter().all(|point| point.y > point.w)
-        && !clips.iter().all(|point| point.z < 0.0)
-        && !clips.iter().all(|point| point.z > point.w)
+    AabbClipVolume::new(cascade.clip_from_world).contains_aabb(minimum, maximum)
 }
 
 fn validate(
@@ -276,6 +295,23 @@ mod tests {
         for (left, right) in left.to_cols_array().into_iter().zip(right.to_cols_array()) {
             assert!((left - right).abs() <= epsilon, "{left} != {right}");
         }
+    }
+
+    fn corner_reference(clip_from_world: Mat4, minimum: Vec3, maximum: Vec3) -> bool {
+        let clips = std::array::from_fn::<_, 8, _>(|index| {
+            let corner = Vec3::new(
+                if index & 1 == 0 { minimum.x } else { maximum.x },
+                if index & 2 == 0 { minimum.y } else { maximum.y },
+                if index & 4 == 0 { minimum.z } else { maximum.z },
+            );
+            clip_from_world * corner.extend(1.0)
+        });
+        !clips.iter().all(|point| point.x < -point.w)
+            && !clips.iter().all(|point| point.x > point.w)
+            && !clips.iter().all(|point| point.y < -point.w)
+            && !clips.iter().all(|point| point.y > point.w)
+            && !clips.iter().all(|point| point.z < 0.0)
+            && !clips.iter().all(|point| point.z > point.w)
     }
 
     #[test]
@@ -409,6 +445,33 @@ mod tests {
             Vec3::splat(10_000.0),
             Vec3::splat(10_001.0),
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn cached_clip_planes_match_corner_reference_across_world_bounds()
+    -> Result<(), ShadowBuildError> {
+        let built = build(&CameraState::from_persisted(
+            Vec3::new(13.0, 8.0, -21.0),
+            0.73,
+            -0.31,
+        ))?;
+        for cascade in built.cascades {
+            let volume = AabbClipVolume::new(cascade.clip_from_world);
+            for x in -8..=8 {
+                for y in -3..=5 {
+                    for z in -8..=8 {
+                        let minimum = Vec3::new(x as f32 * 31.7, y as f32 * 19.3, z as f32 * 27.1);
+                        let maximum = minimum + Vec3::new(7.4, 12.6, 9.8);
+                        assert_eq!(
+                            volume.contains_aabb(minimum, maximum),
+                            corner_reference(cascade.clip_from_world, minimum, maximum),
+                            "bounds {minimum:?}..{maximum:?}",
+                        );
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

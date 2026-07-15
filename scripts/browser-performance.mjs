@@ -63,6 +63,13 @@ function phaseSummary(captures) {
     streamingMs: summary(column(3)),
     renderSubmissionMs: summary(column(4)),
     unattributedCpuMs: summary(unattributedCpu),
+    renderCpu: {
+      cullMs: summary(column(6)),
+      encodeMs: summary(column(7)),
+      submitMs: summary(column(8)),
+      testedSlices: summary(column(9)),
+      selectedSlices: summary(column(10)),
+    },
     gpu: {
       available: gpuSamples.length > 0,
       samples: gpuSamples.length,
@@ -99,13 +106,6 @@ function phaseSummary(captures) {
     waterDrawCalls: latest[SNAPSHOT.waterDrawCalls],
     drawCalls: latest[SNAPSHOT.drawCalls],
     shadowDrawCalls: latest[SNAPSHOT.shadowDrawCalls],
-    renderCpu: {
-      cullMs: latest[SNAPSHOT.renderCullMs],
-      encodeMs: latest[SNAPSHOT.renderEncodeMs],
-      submitMs: latest[SNAPSHOT.renderSubmitMs],
-      testedSlices: latest[SNAPSHOT.drawListTestedSlices],
-      selectedSlices: latest[SNAPSHOT.drawListSelectedSlices],
-    },
     framebuffer: {
       width: latest[SNAPSHOT.surfaceWidth],
       height: latest[SNAPSHOT.surfaceHeight],

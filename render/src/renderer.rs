@@ -7,7 +7,7 @@ use crate::environment::{
 use crate::lod::GeometricLodFocus;
 use crate::material_detail::MaterialDetailGpu;
 use crate::shadow::{
-    CASCADE_COUNT, DirectionalShadowCascades, DirectionalShadowConfig, aabb_visible_in_cascade,
+    AabbClipVolume, CASCADE_COUNT, DirectionalShadowCascades, DirectionalShadowConfig,
     build_directional_shadow_cascades,
 };
 use crate::ui::{
@@ -250,6 +250,8 @@ struct ChunkMesh {
     quad_count: u32,
     content_fingerprint: u64,
     slices: Vec<MeshSlice>,
+    bounds_min: glam::Vec3,
+    bounds_max: glam::Vec3,
     activation_mask: u8,
 }
 
@@ -2272,39 +2274,59 @@ impl Renderer {
             self.runtime_config,
         );
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
+        let view_clip = AabbClipVolume::new(view_projection);
+        let shadow_clips = shadow_cascades
+            .cascades
+            .map(|cascade| AabbClipVolume::new(cascade.clip_from_world));
         let cull_started = now_ms();
         let geometric_lod_focus =
             active_geometric_lod_focus(self.geometric_lod_focus, self.options.far_terrain);
         let shadow_draw_lists: [DrawList; CASCADE_COUNT] = if self.options.shadows {
             std::array::from_fn(|cascade_index| {
-                self.collect_draw_list(&self.chunks, |key, slice| {
-                    (key.0 == 0 || self.options.far_terrain)
-                        && mesh_casts_directional_shadow(key)
-                        && slice.render_layer == RenderLayer::Opaque
-                        && slice_owned_by_lod(geometric_lod_focus, key, slice)
-                        && aabb_visible_in_cascade(
-                            &shadow_cascades.cascades[cascade_index],
-                            slice.bounds_min,
-                            slice.bounds_max,
-                        )
-                })
+                self.collect_draw_list(
+                    &self.chunks,
+                    |key, chunk| {
+                        (key.0 == 0 || self.options.far_terrain)
+                            && mesh_casts_directional_shadow(key)
+                            && shadow_clips[cascade_index]
+                                .contains_aabb(chunk.bounds_min, chunk.bounds_max)
+                    },
+                    |key, slice| {
+                        slice.render_layer == RenderLayer::Opaque
+                            && slice_owned_by_lod(geometric_lod_focus, key, slice)
+                            && shadow_clips[cascade_index]
+                                .contains_aabb(slice.bounds_min, slice.bounds_max)
+                    },
+                )
             })
         } else {
             std::array::from_fn(|_| DrawList::default())
         };
-        let world_draw_list = self.collect_draw_list(&self.chunks, |key, slice| {
-            (key.0 == 0 || self.options.far_terrain)
-                && slice.render_layer == RenderLayer::Opaque
-                && slice_owned_by_lod(geometric_lod_focus, key, slice)
-                && aabb_visible(slice.bounds_min, slice.bounds_max, view_projection)
-        });
-        let water_draw_list = self.collect_draw_list(&self.water_chunks, |key, slice| {
-            self.options.water
-                && (key.0 == 0 || self.options.far_terrain)
-                && slice.render_layer == RenderLayer::Translucent
-                && slice_owned_by_lod(geometric_lod_focus, key, slice)
-                && aabb_visible(slice.bounds_min, slice.bounds_max, view_projection)
-        });
+        let world_draw_list = self.collect_draw_list(
+            &self.chunks,
+            |key, chunk| {
+                (key.0 == 0 || self.options.far_terrain)
+                    && view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max)
+            },
+            |key, slice| {
+                slice.render_layer == RenderLayer::Opaque
+                    && slice_owned_by_lod(geometric_lod_focus, key, slice)
+                    && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
+            },
+        );
+        let water_draw_list = self.collect_draw_list(
+            &self.water_chunks,
+            |key, chunk| {
+                self.options.water
+                    && (key.0 == 0 || self.options.far_terrain)
+                    && view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max)
+            },
+            |key, slice| {
+                slice.render_layer == RenderLayer::Translucent
+                    && slice_owned_by_lod(geometric_lod_focus, key, slice)
+                    && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
+            },
+        );
         let cpu_cull_ms = (now_ms() - cull_started).max(0.0) as f32;
         let encode_started = now_ms();
         self.avatar_gpu
@@ -2690,7 +2712,8 @@ impl Renderer {
     fn collect_draw_list(
         &self,
         chunks: &BTreeMap<MeshKey, ChunkMesh>,
-        mut include: impl FnMut(&MeshKey, &MeshSlice) -> bool,
+        mut include_chunk: impl FnMut(&MeshKey, &ChunkMesh) -> bool,
+        mut include_slice: impl FnMut(&MeshKey, &MeshSlice) -> bool,
     ) -> DrawList {
         let mut items = Vec::new();
         let mut mesh_count = 0u32;
@@ -2699,7 +2722,7 @@ impl Renderer {
         let mut tested_slices = 0u32;
         let mut selected_slices = 0u32;
         for (key, chunk) in chunks {
-            if !chunk.active() {
+            if !chunk.active() || !include_chunk(key, chunk) {
                 continue;
             }
             debug_assert_eq!(
@@ -2709,7 +2732,7 @@ impl Renderer {
             let mut selected = false;
             for slice in &chunk.slices {
                 tested_slices = tested_slices.saturating_add(1);
-                if !include(key, slice) {
+                if !include_slice(key, slice) {
                     continue;
                 }
                 selected_slices = selected_slices.saturating_add(1);
@@ -2774,6 +2797,14 @@ fn prepare_mesh_sliced_into(
     activation_mask: u8,
     buffer_label: &'static str,
 ) -> Option<ChunkMesh> {
+    let (mut bounds_min, mut bounds_max) = slices
+        .first()
+        .map(|slice| (slice.bounds_min, slice.bounds_max))
+        .unwrap_or((glam::Vec3::ZERO, glam::Vec3::ZERO));
+    for slice in slices.iter().skip(1) {
+        bounds_min = bounds_min.min(slice.bounds_min);
+        bounds_max = bounds_max.max(slice.bounds_max);
+    }
     let bytes = bytemuck::cast_slice(gpu_quads);
     let Ok(byte_len) = u32::try_from(bytes.len()) else {
         return None;
@@ -2802,6 +2833,8 @@ fn prepare_mesh_sliced_into(
         quad_count: gpu_quads.len() as u32,
         content_fingerprint: fingerprint_bytes(bytes),
         slices,
+        bounds_min,
+        bounds_max,
         activation_mask,
     })
 }
@@ -3370,24 +3403,6 @@ fn view_projection(
     projection * view
 }
 
-fn aabb_visible(min: glam::Vec3, max: glam::Vec3, view_projection: glam::Mat4) -> bool {
-    let mut clips = [glam::Vec4::ZERO; 8];
-    for (index, clip) in clips.iter_mut().enumerate() {
-        let corner = glam::Vec3::new(
-            if index & 1 == 0 { min.x } else { max.x },
-            if index & 2 == 0 { min.y } else { max.y },
-            if index & 4 == 0 { min.z } else { max.z },
-        );
-        *clip = view_projection * corner.extend(1.0);
-    }
-    !clips.iter().all(|value| value.x < -value.w)
-        && !clips.iter().all(|value| value.x > value.w)
-        && !clips.iter().all(|value| value.y < -value.w)
-        && !clips.iter().all(|value| value.y > value.w)
-        && !clips.iter().all(|value| value.z < 0.0)
-        && !clips.iter().all(|value| value.z > value.w)
-}
-
 struct PipelineOptions<'a> {
     fragment_entry: &'a str,
     blend: Option<wgpu::BlendState>,
@@ -3743,6 +3758,8 @@ mod tests {
                 quad_count: 1,
                 content_fingerprint: 1,
                 slices: Vec::new(),
+                bounds_min: glam::Vec3::ZERO,
+                bounds_max: glam::Vec3::ZERO,
                 activation_mask: u8::MAX,
             },
         )]);
@@ -3754,6 +3771,8 @@ mod tests {
                 quad_count: 2,
                 content_fingerprint: 2,
                 slices: Vec::new(),
+                bounds_min: glam::Vec3::ZERO,
+                bounds_max: glam::Vec3::ZERO,
                 activation_mask: u8::MAX,
             }),
         );
@@ -3914,9 +3933,10 @@ mod tests {
         let (front_min, front_max) = bounds(ChunkCoord::new(0, 0, -1));
         let (back_min, back_max) = bounds(ChunkCoord::new(0, 0, 2));
         let (far_min, far_max) = bounds(ChunkCoord::new(0, 0, -120));
-        assert!(aabb_visible(front_min, front_max, matrix));
-        assert!(!aabb_visible(back_min, back_max, matrix));
-        assert!(!aabb_visible(far_min, far_max, matrix));
+        let clip = AabbClipVolume::new(matrix);
+        assert!(clip.contains_aabb(front_min, front_max));
+        assert!(!clip.contains_aabb(back_min, back_max));
+        assert!(!clip.contains_aabb(far_min, far_max));
     }
 
     #[test]

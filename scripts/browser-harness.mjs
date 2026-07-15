@@ -1,7 +1,7 @@
 import { createServer as createNetServer } from "node:net";
 
-export const SNAPSHOT_SCHEMA_VERSION = 21;
-export const FRAME_SAMPLE_WIDTH = 6;
+export const SNAPSHOT_SCHEMA_VERSION = 22;
+export const FRAME_SAMPLE_WIDTH = 11;
 export const GPU_SAMPLE_WIDTH = 11;
 
 export const SNAPSHOT = Object.freeze({

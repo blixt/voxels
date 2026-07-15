@@ -147,7 +147,7 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 21.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 22.0;
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
 
     #[derive(Clone, Copy, Debug)]
@@ -225,6 +225,11 @@ mod web {
         stream_ms: f32,
         render_ms: f32,
         frame_id: u32,
+        render_cull_ms: f32,
+        render_encode_ms: f32,
+        render_submit_ms: f32,
+        tested_slices: u32,
+        selected_slices: u32,
     }
 
     struct FrameHistory {
@@ -267,6 +272,11 @@ mod web {
                     sample.stream_ms,
                     sample.render_ms,
                     sample.frame_id as f32,
+                    sample.render_cull_ms,
+                    sample.render_encode_ms,
+                    sample.render_submit_ms,
+                    sample.tested_slices as f32,
+                    sample.selected_slices as f32,
                 ]);
             }
             self.len = 0;
@@ -769,6 +779,11 @@ mod web {
                 stream_ms,
                 render_ms,
                 frame_id: frame_sequence,
+                render_cull_ms: rendered.cpu_cull_ms,
+                render_encode_ms: rendered.cpu_encode_ms,
+                render_submit_ms: rendered.cpu_submit_ms,
+                tested_slices: rendered.draw_list_tested_slices,
+                selected_slices: rendered.draw_list_selected_slices,
             });
             if let Err(error) = self.request_frame() {
                 web_sys::console::error_1(&error);
