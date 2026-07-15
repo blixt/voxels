@@ -13,7 +13,7 @@ use voxels_world::protocol::{
 };
 use voxels_world::{
     HeightfieldWorldSource, MacroTerrainSource, ProceduralWorldSource, SEA_LEVEL_VOXELS, WorldId,
-    WorldSourceEngine, WorldSourceError,
+    WorldSourceEngine, WorldSourceError, WorldSourceIdentityHash,
 };
 use voxels_world_terrain_diffusion::{MODEL_REVISION, TerrainDiffusionError};
 #[cfg(all(feature = "terrain-metal", target_os = "macos"))]
@@ -29,11 +29,15 @@ pub use server::{
 };
 
 pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 11;
+pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 5;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
     0x76, 0x6f, 0x78, 0x65, 0x6c, 0x73, 0x40, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x01,
 ];
 const MAX_CONFIGURED_IN_FLIGHT_BATCHES: u16 = 1_024;
+const EDIT_DATABASE_SCHEMA_TOKEN: &str = "{edit_schema}";
+const EDIT_DATABASE_WORLD_TOKEN: &str = "{world_id}";
+const EDIT_DATABASE_SOURCE_TOKEN: &str = "{source_hash}";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -178,7 +182,8 @@ pub struct SpawnConfig {
 #[serde(deny_unknown_fields)]
 pub struct EditPersistenceConfig {
     /// Native SQLite file containing the authoritative sparse edit journal. Relative paths are
-    /// resolved from the directory containing the service configuration file.
+    /// resolved from the directory containing the service configuration file. `{edit_schema}`,
+    /// `{world_id}`, and `{source_hash}` can scope development state to every compatibility input.
     pub database: PathBuf,
     /// Bounded per-client change queue. Overflow forces an explicit product resynchronization.
     pub change_queue_capacity: u16,
@@ -187,7 +192,9 @@ pub struct EditPersistenceConfig {
 impl Default for EditPersistenceConfig {
     fn default() -> Self {
         Self {
-            database: PathBuf::from("../tmp/world-state-v5.sqlite3"),
+            database: PathBuf::from(
+                "../tmp/world-state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3",
+            ),
             change_queue_capacity: 256,
         }
     }
@@ -626,14 +633,27 @@ impl LoadedWorldServiceConfig {
         &self.config
     }
 
-    pub fn edit_database_path(&self) -> PathBuf {
-        if self.config.edits.database.is_absolute() {
-            self.config.edits.database.clone()
+    pub fn edit_database_path(&self, source_hash: WorldSourceIdentityHash) -> PathBuf {
+        let configured = self.config.edits.database.to_str().map_or_else(
+            || self.config.edits.database.clone(),
+            |database| {
+                PathBuf::from(
+                    database
+                        .replace(
+                            EDIT_DATABASE_SCHEMA_TOKEN,
+                            &EDIT_DATABASE_SCHEMA_VERSION.to_string(),
+                        )
+                        .replace(EDIT_DATABASE_WORLD_TOKEN, &self.config.world_id.to_string())
+                        .replace(EDIT_DATABASE_SOURCE_TOKEN, &source_hash.to_string()),
+                )
+            },
+        );
+        if configured.is_absolute() {
+            configured
         } else {
-            self.path.parent().map_or_else(
-                || self.config.edits.database.clone(),
-                |parent| parent.join(&self.config.edits.database),
-            )
+            self.path
+                .parent()
+                .map_or_else(|| configured.clone(), |parent| parent.join(&configured))
         }
     }
 
@@ -833,7 +853,7 @@ movement_slack_centimetres = 100
 movement_credit_window_ms = 500
 
 [edits]
-database = "world-state-v5.sqlite3"
+database = "world-state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3"
 change_queue_capacity = 256
 
 [spawn]
@@ -1016,6 +1036,37 @@ sea_level_voxels = 52
         assert_eq!(
             loaded.terrain_model_root(),
             Ok(PathBuf::from("test-fixtures/voxels-config/models").join(MODEL_REVISION))
+        );
+    }
+
+    #[test]
+    fn edit_database_path_expands_compatibility_tokens_but_keeps_explicit_paths_strict() {
+        let source_hash = WorldSourceIdentityHash::from_bytes([0xab; 32]);
+        let mut config = test_config(WorldSourceMode::ProceduralV16);
+        config.edits.database =
+            PathBuf::from("state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3");
+        let expected_world_id = config.world_id.to_string();
+        let loaded = LoadedWorldServiceConfig::from_config(
+            config.clone(),
+            "test-fixtures/voxels-config/world-service.toml",
+        )
+        .expect("loaded config");
+        assert_eq!(
+            loaded.edit_database_path(source_hash),
+            PathBuf::from(format!(
+                "test-fixtures/voxels-config/state/schema-5/{expected_world_id}-{source_hash}.sqlite3"
+            ))
+        );
+
+        config.edits.database = PathBuf::from("persistent-world.sqlite3");
+        let loaded = LoadedWorldServiceConfig::from_config(
+            config,
+            "test-fixtures/voxels-config/world-service.toml",
+        )
+        .expect("loaded config");
+        assert_eq!(
+            loaded.edit_database_path(source_hash),
+            PathBuf::from("test-fixtures/voxels-config/persistent-world.sqlite3")
         );
     }
 

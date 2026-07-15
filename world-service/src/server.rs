@@ -53,11 +53,8 @@ pub struct WorldServer {
 impl WorldServer {
     pub fn from_loaded_config(loaded: &LoadedWorldServiceConfig) -> Result<Self, WorldServerError> {
         let source = loaded.build_world_source()?;
-        Self::build(
-            loaded.config().clone(),
-            source,
-            Some(loaded.edit_database_path()),
-        )
+        let edit_database = loaded.edit_database_path(source.identity().identity_hash());
+        Self::build(loaded.config().clone(), source, Some(edit_database))
     }
 
     pub fn new(

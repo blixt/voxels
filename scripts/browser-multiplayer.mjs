@@ -406,7 +406,7 @@ async function main() {
     serviceSource
       .replace(/^listen = .*$/m, `listen = "127.0.0.1:${backendPort}"`)
       .replace(/^allowed_origins = .*$/m, `allowed_origins = ["http://127.0.0.1:${previewPort}"]`)
-      .replace(/^database = .*$/m, 'database = "world-state-v5.sqlite3"'),
+      .replace(/^database = .*$/m, 'database = "world-state.sqlite3"'),
   );
 
   let browser;

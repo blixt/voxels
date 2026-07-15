@@ -59,8 +59,9 @@ movement_credit_window_ms = 500
 
 [edits]
 # Native server authority. This checked-in local path is ignored by git; deployments should point
-# it at durable storage. A saturated client queue receives an explicit resync marker.
-database = "../tmp/world-state-v5.sqlite3"
+# it at durable storage. Compatibility tokens make local iteration start fresh state after schema,
+# world, or source changes without deleting the previous world. Explicit paths remain strict.
+database = "../tmp/world-state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3"
 change_queue_capacity = 256
 
 [spawn]

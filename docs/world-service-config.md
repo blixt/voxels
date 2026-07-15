@@ -70,7 +70,7 @@ movement_slack_centimetres = 100
 movement_credit_window_ms = 500
 
 [edits]
-database = "../tmp/world-state-v5.sqlite3"
+database = "../tmp/world-state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3"
 change_queue_capacity = 256
 
 [spawn]
@@ -146,12 +146,15 @@ batch responses. Concurrent identical batches single-flight through one CPU/Meta
 then receive independently request-ID-keyed copies of that response.
 
 `[edits].database` is the native authoritative world/player SQLite file. Relative paths resolve from
-the service configuration, not the process working directory. Startup initializes only schema 5 and
-rejects another schema or a database bound to a different world/source manifest; there are no
-migrations or fallback authorities. Schema 5 owns sparse voxel edits, face-oriented dig operations,
-player material inventories, idempotent edit sessions, and authoritative resume poses. The v5
-filename leaves older local worlds untouched. `change_queue_capacity` bounds each interested
-client's commit queue.
+the service configuration, not the process working directory. The Rust service expands
+`{edit_schema}`, `{world_id}`, and `{source_hash}` before opening SQLite. The checked-in path uses all
+three, so changing a storage schema or any immutable world/source identity starts fresh local state
+and leaves the previous world untouched. This also prevents an old and new daemon from opening the
+same filename during hot reload. Paths without tokens are opened exactly as configured and remain
+strict: startup rejects another schema or a database bound to a different world/source manifest;
+there are no migrations or fallback authorities. Schema 5 owns sparse voxel edits, face-oriented dig
+operations, player material inventories, idempotent edit sessions, and authoritative resume poses.
+`change_queue_capacity` bounds each interested client's commit queue.
 
 The presence section controls the independent low-latency delta stream. `spatial_cell_metres`,
 `interest_radius_metres`, and `interest_hysteresis_metres` define receiver-specific interest without

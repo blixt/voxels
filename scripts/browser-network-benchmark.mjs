@@ -475,7 +475,7 @@ async function main() {
         /^allowed_origins = .*$/m,
         `allowed_origins = ["http://${PREVIEW_HOST}:${previewPort}"]`,
       )
-      .replace(/^database = .*$/m, 'database = "world-state-v5.sqlite3"'),
+      .replace(/^database = .*$/m, 'database = "world-state.sqlite3"'),
   );
   await writeFile(
     clientConfigPath,

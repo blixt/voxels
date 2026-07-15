@@ -19,7 +19,8 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash,
 };
 
-const EDIT_SCHEMA_VERSION: i64 = 5;
+use crate::EDIT_DATABASE_SCHEMA_VERSION;
+
 const INITIAL_REVISION: u64 = 1;
 const DIG_EDGE_VOXELS: i32 = 5;
 const DIG_RADIUS_VOXELS: i32 = DIG_EDGE_VOXELS / 2;
@@ -669,10 +670,12 @@ fn initialize_schema(
                     FOREIGN KEY (player_id, edit_session_id, operation_id)
                         REFERENCES edit_operations(player_id, edit_session_id, operation_id)
                         ON DELETE CASCADE
-                 ) WITHOUT ROWID;
-                 PRAGMA user_version = 5;",
+                 ) WITHOUT ROWID;",
             )
             .map_err(sql_error("create edit schema"))?;
+        transaction
+            .pragma_update(None, "user_version", EDIT_DATABASE_SCHEMA_VERSION)
+            .map_err(sql_error("write edit schema version"))?;
         transaction
             .execute(
                 "INSERT INTO metadata(singleton, world_id, source_hash, revision) VALUES(1, ?1, ?2, ?3)",
@@ -688,9 +691,9 @@ fn initialize_schema(
             .map_err(sql_error("commit edit schema"))?;
         return Ok(());
     }
-    if version != EDIT_SCHEMA_VERSION {
+    if version != EDIT_DATABASE_SCHEMA_VERSION {
         return Err(EditAuthorityError(format!(
-            "unsupported edit database schema {version}; expected {EDIT_SCHEMA_VERSION}; migrations are intentionally unsupported"
+            "unsupported edit database schema {version}; expected {EDIT_DATABASE_SCHEMA_VERSION}; migrations are intentionally unsupported"
         )));
     }
     let identity = connection
@@ -2208,6 +2211,22 @@ mod tests {
                 .to_string()
                 .contains("migrations are intentionally unsupported")
         );
+    }
+
+    #[test]
+    fn new_database_records_the_current_schema_version() {
+        let source = ProceduralWorldSource::new(17);
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialize_schema(
+            &mut connection,
+            world_id(6),
+            source.identity().identity_hash(),
+        )
+        .unwrap();
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, EDIT_DATABASE_SCHEMA_VERSION);
     }
 
     #[tokio::test]
