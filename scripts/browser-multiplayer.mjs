@@ -15,12 +15,11 @@ import {
 } from "./browser-harness.mjs";
 import { rustTool } from "./build-wasm.ts";
 import { createShapedLink } from "./network-benchmark-link.mjs";
+import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "./vxwp-contract.mjs";
+import { worldServiceBuildCargoArgs, worldServiceCargoArgs } from "./world-service-command.ts";
 
 const RESULT_SCHEMA_VERSION = 4;
 const FIXTURE_VERSION = 5;
-const VXWP_VERSION = 8;
-const WORLD_PATH = `/v${VXWP_VERSION}/world`;
-const PRESENCE_PATH = `/v${VXWP_VERSION}/presence`;
 const EXPECTED_PLAYERS = 6;
 const EXPECTED_REMOTE_PLAYERS = EXPECTED_PLAYERS - 1;
 const BUILDER_COUNT = EXPECTED_REMOTE_PLAYERS;
@@ -421,36 +420,12 @@ async function main() {
     await build({ logLevel: "warn" });
     // Keep the readiness deadline about service startup, not an arbitrary clean Rust compile. This
     // also prevents a timed-out cargo child from repeatedly abandoning the same profile build.
-    execFileSync(
-      rustTool("cargo"),
-      [
-        "build",
-        "--profile",
-        "worldgen",
-        "-p",
-        "voxels-world-service",
-        "--bin",
-        "voxels-worldd",
-        "--features",
-        "terrain-metal",
-      ],
-      { stdio: "inherit" },
-    );
+    execFileSync(rustTool("cargo"), worldServiceBuildCargoArgs({ metal: true }), {
+      stdio: "inherit",
+    });
     worldService = spawn(
       rustTool("cargo"),
-      [
-        "run",
-        "--profile",
-        "worldgen",
-        "-p",
-        "voxels-world-service",
-        "--bin",
-        "voxels-worldd",
-        "--features",
-        "terrain-metal",
-        "--",
-        serviceConfigPath,
-      ],
+      worldServiceCargoArgs({ metal: true, configPath: serviceConfigPath }),
       { stdio: ["ignore", "pipe", "pipe"] },
     );
     for (const stream of [worldService.stdout, worldService.stderr]) {

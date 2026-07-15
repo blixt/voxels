@@ -14,12 +14,11 @@ import {
 } from "./browser-harness.mjs";
 import { rustTool } from "./build-wasm.ts";
 import { createShapedLink } from "./network-benchmark-link.mjs";
+import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "./vxwp-contract.mjs";
+import { worldServiceCargoArgs } from "./world-service-command.ts";
 
 const RESULT_SCHEMA_VERSION = 2;
 const FIXTURE_VERSION = 2;
-const VXWP_VERSION = 6;
-const WORLD_PATH = `/v${VXWP_VERSION}/world`;
-const PRESENCE_PATH = `/v${VXWP_VERSION}/presence`;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
 const FRAME_SAMPLE_WIDTH = 5;
@@ -455,7 +454,8 @@ async function main() {
       .replace(
         /^allowed_origins = .*$/m,
         `allowed_origins = ["http://${PREVIEW_HOST}:${previewPort}"]`,
-      ),
+      )
+      .replace(/^database = .*$/m, 'database = "world-state-v5.sqlite3"'),
   );
   await writeFile(
     clientConfigPath,
@@ -478,17 +478,7 @@ async function main() {
     await build({ mode: "production" });
     worldService = spawn(
       rustTool("cargo"),
-      [
-        "run",
-        "--profile",
-        "worldgen",
-        "-p",
-        "voxels-world-service",
-        "--bin",
-        "voxels-worldd",
-        "--",
-        serviceConfigPath,
-      ],
+      worldServiceCargoArgs({ metal: true, configPath: serviceConfigPath }),
       { stdio: ["ignore", "pipe", "pipe"] },
     );
     for (const stream of [worldService.stdout, worldService.stderr]) {
