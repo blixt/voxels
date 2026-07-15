@@ -59,6 +59,8 @@ const PLACEMENT_MATERIALS: [Material; Material::ALL.len() - 1] = [
 const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 const FAR_MATERIAL_FLAG: u32 = 1 << 31;
 const SURFACE_LOD_SHIFT: u32 = 27;
+const GPU_FACE_SHIFT: u32 = 16;
+const GPU_FACE_MASK: u32 = 0b111 << GPU_FACE_SHIFT;
 const SURFACE_MACRO_NORMAL_FLAG: u32 = 1 << 24;
 const FAR_UNDERLAY_OFFSET_METRES: f32 = 0.025;
 const GPU_QUERY_COUNT: u32 = 18;
@@ -237,19 +239,29 @@ struct ShadowFrameUniform {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuQuad {
     origin: [f32; 3],
-    face: u32,
-    extent: [f32; 2],
-    material: u32,
+    extent_voxels: [u16; 2],
+    material_face: u32,
     ao: u32,
 }
 
-const _: () = assert!(size_of::<GpuQuad>() == 32);
+const _: () = assert!(size_of::<GpuQuad>() == 24);
+const _: () = assert!(std::mem::offset_of!(GpuQuad, extent_voxels) == 12);
+const _: () = assert!(std::mem::offset_of!(GpuQuad, material_face) == 16);
+const _: () = assert!(std::mem::offset_of!(GpuQuad, ao) == 20);
+
+fn pack_gpu_material_face(material: u32, face: u8) -> u32 {
+    debug_assert_eq!(material & GPU_FACE_MASK, 0);
+    debug_assert!(face <= 5);
+    material | (u32::from(face) << GPU_FACE_SHIFT)
+}
 
 struct ChunkMesh {
     allocation: Allocation,
     quad_count: u32,
     content_fingerprint: u64,
     slices: Vec<MeshSlice>,
+    lod_ownership_focus: Option<GeometricLodFocus>,
+    lod_owned_slices: Vec<bool>,
     bounds_min: glam::Vec3,
     bounds_max: glam::Vec3,
     activation_mask: u8,
@@ -264,6 +276,27 @@ pub enum ChunkActivationReason {
 }
 
 impl ChunkMesh {
+    fn refresh_lod_ownership(&mut self, key: &MeshKey, focus: Option<GeometricLodFocus>) {
+        let Some(focus) = focus else {
+            return;
+        };
+        if self.lod_ownership_focus == Some(focus)
+            && self.lod_owned_slices.len() == self.slices.len()
+        {
+            return;
+        }
+        self.lod_owned_slices = self
+            .slices
+            .iter()
+            .map(|slice| slice_owned_by_lod(Some(focus), key, slice))
+            .collect();
+        self.lod_ownership_focus = Some(focus);
+    }
+
+    fn lod_owns_slice(&self, focus: Option<GeometricLodFocus>, slice_index: usize) -> bool {
+        focus.is_none() || self.lod_owned_slices.get(slice_index) == Some(&true)
+    }
+
     const fn active(&self) -> bool {
         self.activation_mask != 0
     }
@@ -1889,12 +1922,8 @@ impl Renderer {
                 (origin[1] + i32::from(quad.origin[1])) as f32 * VOXEL_SIZE_METRES,
                 (origin[2] + i32::from(quad.origin[2])) as f32 * VOXEL_SIZE_METRES,
             ],
-            face: u32::from(quad.face),
-            extent: [
-                f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
-                f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
-            ],
-            material: u32::from(quad.material),
+            extent_voxels: quad.extent.map(u16::from),
+            material_face: pack_gpu_material_face(u32::from(quad.material), quad.face),
             ao: u32::from(quad.ao),
         };
         let opaque_quads: Vec<_> = mesh.opaque.iter().map(convert).collect();
@@ -1989,14 +2018,13 @@ impl Renderer {
                     quad.origin[1] as f32 * VOXEL_SIZE_METRES - underlay_offset,
                     quad.origin[2] as f32 * VOXEL_SIZE_METRES,
                 ],
-                face: u32::from(quad.face),
-                extent: [
-                    f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
-                    f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
-                ],
-                material: u32::from(quad.material.id())
-                    | FAR_MATERIAL_FLAG
-                    | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
+                extent_voxels: quad.extent,
+                material_face: pack_gpu_material_face(
+                    u32::from(quad.material.id())
+                        | FAR_MATERIAL_FLAG
+                        | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
+                    quad.face,
+                ),
                 ao: macro_normal,
             })
             .collect();
@@ -2009,14 +2037,13 @@ impl Renderer {
                     quad.origin[1] as f32 * VOXEL_SIZE_METRES,
                     quad.origin[2] as f32 * VOXEL_SIZE_METRES,
                 ],
-                face: u32::from(quad.face),
-                extent: [
-                    f32::from(quad.extent[0]) * VOXEL_SIZE_METRES,
-                    f32::from(quad.extent[1]) * VOXEL_SIZE_METRES,
-                ],
-                material: u32::from(quad.material.id())
-                    | FAR_MATERIAL_FLAG
-                    | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
+                extent_voxels: quad.extent,
+                material_face: pack_gpu_material_face(
+                    u32::from(quad.material.id())
+                        | FAR_MATERIAL_FLAG
+                        | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
+                    quad.face,
+                ),
                 ao: 0xff,
             })
             .collect();
@@ -2374,7 +2401,7 @@ impl Renderer {
             active_geometric_lod_focus(self.geometric_lod_focus, self.options.far_terrain);
         let lod_readiness = self.lod_readiness();
         let (shadow_draw_lists, world_draw_list) = collect_opaque_draw_lists(
-            &self.chunks,
+            &mut self.chunks,
             self.options.far_terrain,
             self.options.shadows,
             geometric_lod_focus,
@@ -2842,7 +2869,7 @@ impl Renderer {
 /// repeating the most expensive culling predicate for the camera and every shadow cascade while
 /// preserving each list's independent clip tests, diagnostics, ordering, and fingerprint.
 fn collect_opaque_draw_lists(
-    chunks: &BTreeMap<MeshKey, ChunkMesh>,
+    chunks: &mut BTreeMap<MeshKey, ChunkMesh>,
     far_terrain: bool,
     shadows: bool,
     geometric_lod_focus: Option<GeometricLodFocus>,
@@ -2865,10 +2892,11 @@ fn collect_opaque_draw_lists(
         if !world_chunk_visible && !shadow_chunk_visible.into_iter().any(|visible| visible) {
             continue;
         }
+        chunk.refresh_lod_ownership(key, geometric_lod_focus);
 
         let mut world_mesh_selected = false;
         let mut shadow_mesh_selected = [false; CASCADE_COUNT];
-        for slice in &chunk.slices {
+        for (slice_index, slice) in chunk.slices.iter().enumerate() {
             if world_chunk_visible {
                 world_builder.test_slice();
             }
@@ -2878,7 +2906,7 @@ fn collect_opaque_draw_lists(
                 }
             }
             if slice.render_layer != RenderLayer::Opaque
-                || !slice_owned_by_lod(geometric_lod_focus, key, slice)
+                || !chunk.lod_owns_slice(geometric_lod_focus, slice_index)
             {
                 continue;
             }
@@ -2981,6 +3009,8 @@ fn prepare_mesh_sliced_into(
         quad_count: gpu_quads.len() as u32,
         content_fingerprint: fingerprint_bytes(bytes),
         slices,
+        lod_ownership_focus: None,
+        lod_owned_slices: Vec::new(),
         bounds_min,
         bounds_max,
         activation_mask,
@@ -3671,7 +3701,8 @@ fn fragmentless_depth_pipeline(
 }
 
 fn quad_layout() -> wgpu::VertexBufferLayout<'static> {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32, 2 => Float32x2, 3 => Uint32, 4 => Uint32];
+    const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint16x2, 2 => Uint32, 3 => Uint32];
     wgpu::VertexBufferLayout {
         array_stride: size_of::<GpuQuad>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
@@ -3747,7 +3778,36 @@ mod tests {
         let normal_z = ((value >> 16) & 255) as f32 * (2.0 / 255.0) - 1.0;
         assert!(normal_x < -0.40, "uphill +X must tilt the normal toward -X");
         assert!(normal_z.abs() < 0.01);
-        assert_eq!(size_of::<GpuQuad>(), 32);
+        assert_eq!(size_of::<GpuQuad>(), 24);
+    }
+
+    #[test]
+    fn gpu_quad_packing_preserves_every_material_bit_face_and_extent() {
+        let materials = [
+            u32::from(Material::Grass.id()),
+            u32::from(Material::GlowCrystal.id()),
+            u32::from(Material::Water.id()) | FAR_MATERIAL_FLAG,
+            u32::from(Material::Stone.id())
+                | FAR_MATERIAL_FLAG
+                | (u32::from(SurfaceLodLevel::Stride16.index()) << SURFACE_LOD_SHIFT),
+        ];
+        for material in materials {
+            assert_eq!(material & GPU_FACE_MASK, 0);
+            for face in 0..=5 {
+                let packed = pack_gpu_material_face(material, face);
+                assert_eq!((packed & GPU_FACE_MASK) >> GPU_FACE_SHIFT, u32::from(face));
+                assert_eq!(packed & !GPU_FACE_MASK, material);
+            }
+        }
+        let quad = GpuQuad {
+            origin: [-123.5, 0.25, 8192.0],
+            extent_voxels: [u16::MAX, 1],
+            material_face: pack_gpu_material_face(materials[3], 5),
+            ao: u32::MAX,
+        };
+        let bytes = bytemuck::bytes_of(&quad);
+        assert_eq!(bytes.len(), 24);
+        assert_eq!(quad.extent_voxels, [u16::MAX, 1]);
     }
 
     #[test]
@@ -3932,6 +3992,8 @@ mod tests {
                 quad_count: 1,
                 content_fingerprint: 1,
                 slices: Vec::new(),
+                lod_ownership_focus: None,
+                lod_owned_slices: Vec::new(),
                 bounds_min: glam::Vec3::ZERO,
                 bounds_max: glam::Vec3::ZERO,
                 activation_mask: u8::MAX,
@@ -3945,6 +4007,8 @@ mod tests {
                 quad_count: 2,
                 content_fingerprint: 2,
                 slices: Vec::new(),
+                lod_ownership_focus: None,
+                lod_owned_slices: Vec::new(),
                 bounds_min: glam::Vec3::ZERO,
                 bounds_max: glam::Vec3::ZERO,
                 activation_mask: u8::MAX,
@@ -4227,7 +4291,7 @@ mod tests {
         let surface_allocation = arena
             .allocate(surface_slice.size)
             .expect("surface test allocation");
-        let chunks = BTreeMap::from([
+        let mut chunks = BTreeMap::from([
             (
                 canonical_key,
                 ChunkMesh {
@@ -4235,6 +4299,8 @@ mod tests {
                     quad_count: canonical_slice.quad_count,
                     content_fingerprint: 11,
                     slices: vec![canonical_slice],
+                    lod_ownership_focus: None,
+                    lod_owned_slices: Vec::new(),
                     bounds_min,
                     bounds_max,
                     activation_mask: u8::MAX,
@@ -4247,6 +4313,8 @@ mod tests {
                     quad_count: surface_slice.quad_count,
                     content_fingerprint: 22,
                     slices: vec![surface_slice],
+                    lod_ownership_focus: None,
+                    lod_owned_slices: Vec::new(),
                     bounds_min,
                     bounds_max,
                     activation_mask: u8::MAX,
@@ -4257,7 +4325,7 @@ mod tests {
         let view_clip = AabbClipVolume::new(glam::Mat4::IDENTITY);
         let shadow_clips = [view_clip; CASCADE_COUNT];
         let (actual_shadows, actual_world) =
-            collect_opaque_draw_lists(&chunks, true, true, focus, view_clip, shadow_clips);
+            collect_opaque_draw_lists(&mut chunks, true, true, focus, view_clip, shadow_clips);
         let expected_world = reference_draw_list(
             &chunks,
             |_, chunk| view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max),
@@ -4285,6 +4353,41 @@ mod tests {
         });
         assert_eq!(actual_world, expected_world);
         assert_eq!(actual_shadows, expected_shadows);
+
+        let cached_world =
+            collect_opaque_draw_lists(&mut chunks, true, true, focus, view_clip, shadow_clips).1;
+        assert_eq!(cached_world, expected_world);
+        assert!(
+            chunks
+                .values()
+                .all(|chunk| chunk.lod_ownership_focus == focus)
+        );
+
+        let moved_focus = Some(GeometricLodFocus::snapped(256, -192));
+        let moved_world = collect_opaque_draw_lists(
+            &mut chunks,
+            true,
+            true,
+            moved_focus,
+            view_clip,
+            shadow_clips,
+        )
+        .1;
+        let moved_expected = reference_draw_list(
+            &chunks,
+            |_, chunk| view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max),
+            |key, slice| {
+                slice.render_layer == RenderLayer::Opaque
+                    && slice_owned_by_lod(moved_focus, key, slice)
+                    && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
+            },
+        );
+        assert_eq!(moved_world, moved_expected);
+        assert!(
+            chunks
+                .values()
+                .all(|chunk| chunk.lod_ownership_focus == moved_focus)
+        );
     }
 
     #[test]

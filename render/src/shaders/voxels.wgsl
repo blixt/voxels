@@ -76,11 +76,13 @@ fn unpack_surface_macro_normal(packed: u32) -> vec3<f32> {
 fn vs_main(
   @builtin(vertex_index) vertex_index: u32,
   @location(0) origin: vec3<f32>,
-  @location(1) face: u32,
-  @location(2) extent: vec2<f32>,
-  @location(3) material: u32,
-  @location(4) ao: u32,
+  @location(1) extent_voxels: vec2<u32>,
+  @location(2) material_face: u32,
+  @location(3) ao: u32,
 ) -> VertexOut {
+  let face = (material_face >> 16u) & 7u;
+  let material = material_face & 0xfff8ffffu;
+  let extent = vec2<f32>(extent_voxels) * frame.viewport_voxel.z;
   let flip = corner_ao(ao, 0u) + corner_ao(ao, 2u) > corner_ao(ao, 1u) + corner_ao(ao, 3u);
   let corner = select(STANDARD_DIAGONAL[vertex_index], FLIPPED_DIAGONAL[vertex_index], flip);
   let uv = CORNERS[corner];

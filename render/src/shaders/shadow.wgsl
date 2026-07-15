@@ -24,10 +24,12 @@ const STANDARD_DIAGONAL = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
 fn vs_main(
   @builtin(vertex_index) vertex_index: u32,
   @location(0) origin: vec3<f32>,
-  @location(1) face: u32,
-  @location(2) extent: vec2<f32>,
-  @location(3) material: u32,
+  @location(1) extent_voxels: vec2<u32>,
+  @location(2) material_face: u32,
 ) -> VertexOut {
+  let face = (material_face >> 16u) & 7u;
+  let material = material_face & 0xfff8ffffu;
+  let extent = vec2<f32>(extent_voxels) * shadow_frame.camera_voxel.w;
   let uv = CORNERS[STANDARD_DIAGONAL[vertex_index]];
   var local = vec3<f32>(0.0);
   switch face {
