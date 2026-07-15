@@ -961,16 +961,16 @@ settled fragmentless depth pipeline now preserves the same vertex/depth work and
 allowing the Metal/WebGPU depth-only fast path; startup and incomplete LOD transitions retain the
 original predicate-bearing pipeline.
 
-| Dense settled metric | Baseline | Optimized | Change |
-| -------------------- | -------: | --------: | -----: |
-| Frame median / p95 | 8.3 / 9.2 ms | 8.3 / 9.3 ms | display-capped, no regression |
-| Total CPU median / p95 | 2.1 / 2.2 ms | 1.2 / 1.4 ms | -42.9% / -36.4% |
-| Render submission median / p95 | 1.9 / 2.0 ms | 1.0 / 1.1 ms | -47.4% / -45.0% |
-| Culling median / p95 | 1.5 / 1.6 ms | 0.6 / 0.7 ms | -60.0% / -56.3% |
-| Shadow pass median / p95 | 3.566 / 3.940 ms | 2.200 / 3.259 ms | -38.3% / -17.3% |
-| Frames over 16.67 ms | 0 | 0 | unchanged |
-| Selected slices | 11,128 | 11,128 | identical |
-| Resident quads | 2,205,653 | 2,205,653 | identical |
+| Dense settled metric           |         Baseline |        Optimized |                        Change |
+| ------------------------------ | ---------------: | ---------------: | ----------------------------: |
+| Frame median / p95             |     8.3 / 9.2 ms |     8.3 / 9.3 ms | display-capped, no regression |
+| Total CPU median / p95         |     2.1 / 2.2 ms |     1.2 / 1.4 ms |               -42.9% / -36.4% |
+| Render submission median / p95 |     1.9 / 2.0 ms |     1.0 / 1.1 ms |               -47.4% / -45.0% |
+| Culling median / p95           |     1.5 / 1.6 ms |     0.6 / 0.7 ms |               -60.0% / -56.3% |
+| Shadow pass median / p95       | 3.566 / 3.940 ms | 2.200 / 3.259 ms |               -38.3% / -17.3% |
+| Frames over 16.67 ms           |                0 |                0 |                     unchanged |
+| Selected slices                |           11,128 |           11,128 |                     identical |
+| Resident quads                 |        2,205,653 |        2,205,653 |                     identical |
 
 Traversal retained 8.3 / 9.2 ms frame median/p95 and zero slow frames while CPU median fell from 2.2
 to 1.2 ms, render submission from 1.9 to 0.9 ms, and culling from 1.6 to 0.6 ms. Streaming therefore
