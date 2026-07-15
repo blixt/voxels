@@ -701,7 +701,7 @@ mod tests {
                 features: RendererFeatureConfig {
                     cascaded_sun_shadows: true,
                     voxel_ambient_occlusion: true,
-                    screen_space_ambient_occlusion: true,
+                    screen_space_ambient_occlusion: false,
                     atmospheric_fog: true,
                     far_terrain: true,
                     water_surface: true,

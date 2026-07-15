@@ -72,7 +72,9 @@ caster_depth_expansion = 64.0
 [rendering.features]
 cascaded_sun_shadows = true
 voxel_ambient_occlusion = true
-screen_space_ambient_occlusion = true
+# Screen-space AO has no temporal/world-space history yet, so enabling it makes hill shading move
+# with camera rotation. Voxel AO plus stable sun shadows remain enabled by default.
+screen_space_ambient_occlusion = false
 atmospheric_fog = true
 far_terrain = true
 water_surface = true

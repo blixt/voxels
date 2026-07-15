@@ -1,8 +1,9 @@
 //! Pure cascaded directional-shadow projection math.
 //!
 //! The light direction points from the light toward the scene. Each cascade encloses one camera
-//! frustum slice in a square, texel-snapped orthographic projection. Only the receiver slice expands
-//! toward the light, keeping otherwise distant casters from destroying depth precision.
+//! camera-centred receiver sphere in a square, texel-snapped orthographic projection. The sphere
+//! makes both projection and cascade selection invariant under camera rotation, so turning cannot
+//! move a directional light across the terrain. Only the receiver volume expands toward the light.
 
 use glam::{Mat4, Vec3, Vec4};
 use voxels_core::CameraState;
@@ -58,7 +59,7 @@ pub struct ShadowCascade {
 #[derive(Clone, Copy, Debug)]
 pub struct DirectionalShadowCascades {
     pub cascades: [ShadowCascade; CASCADE_COUNT],
-    /// Far view-depth boundary of each cascade, ready for shader cascade selection.
+    /// Far radial-distance boundary of each cascade, ready for shader cascade selection.
     pub split_depths: [f32; CASCADE_COUNT],
 }
 
@@ -81,9 +82,6 @@ pub fn build_directional_shadow_cascades(
     };
     let light_right = light_forward.cross(reference_up).normalize();
     let light_up = light_right.cross(light_forward).normalize();
-    let camera_forward = camera.forward();
-    let camera_right = camera_forward.cross(Vec3::Y).normalize();
-    let camera_up = camera_right.cross(camera_forward).normalize();
     let tan_half_fov = (config.vertical_fov_radians * 0.5).tan();
     let expansion = config.caster_depth_expansion.clamp(0.0, config.far_plane);
 
@@ -94,46 +92,24 @@ pub fn build_directional_shadow_cascades(
             split_depths[index - 1]
         };
         let split_far = split_depths[index];
-        let corners = frustum_slice_corners(
-            camera.position,
-            camera_forward,
-            camera_right,
-            camera_up,
-            aspect,
-            tan_half_fov,
-            split_near,
-            split_far,
-        );
-
-        // A rotation-invariant sphere prevents tiny camera rotations from changing the projection
-        // scale. Quantizing it also avoids last-bit extent churn from trigonometric evaluation.
-        let slice_mid = (split_near + split_far) * 0.5;
+        // A camera-centred sphere encloses every possible orientation of this receiver slice. Its
+        // origin, scale, and depth span therefore stay unchanged while the player turns. This uses
+        // a little more map area than a tightly fitted frustum but avoids view-dependent shadow
+        // swimming and makes the split metric the same radial distance used by the shader.
         let far_half_height = tan_half_fov * split_far;
         let far_half_width = far_half_height * aspect;
-        let near_half_height = tan_half_fov * split_near;
-        let near_half_width = near_half_height * aspect;
-        let near_radius =
-            Vec3::new(near_half_width, near_half_height, split_near - slice_mid).length();
-        let far_radius = Vec3::new(far_half_width, far_half_height, split_far - slice_mid).length();
-        let quantized_radius = ((near_radius.max(far_radius) * 16.0).ceil() / 16.0).max(1.0 / 16.0);
+        let receiver_radius = Vec3::new(far_half_width, far_half_height, split_far).length();
+        let quantized_radius = ((receiver_radius * 16.0).ceil() / 16.0).max(1.0 / 16.0);
         // Snapping can move the projection center by half a texel. Reserve enough border for
         // that displacement so every receiver corner remains enclosed after the snap.
         let resolution = config.shadow_map_resolution as f32;
         let radius = quantized_radius / (1.0 - resolution.recip());
         let texel_world_size = radius * 2.0 / config.shadow_map_resolution as f32;
-        let slice_center = camera.position + camera_forward * slice_mid;
-        let center_x = snap(slice_center.dot(light_right), texel_world_size);
-        let center_y = snap(slice_center.dot(light_up), texel_world_size);
-
-        let mut minimum_depth = f32::INFINITY;
-        let mut maximum_depth = f32::NEG_INFINITY;
-        for corner in corners {
-            let depth = corner.dot(light_forward);
-            minimum_depth = minimum_depth.min(depth);
-            maximum_depth = maximum_depth.max(depth);
-        }
-        minimum_depth -= expansion;
-        let depth_span = (maximum_depth - minimum_depth).max(0.001);
+        let center_x = snap(camera.position.dot(light_right), texel_world_size);
+        let center_y = snap(camera.position.dot(light_up), texel_world_size);
+        let center_depth = camera.position.dot(light_forward);
+        let minimum_depth = center_depth - radius - expansion;
+        let depth_span = radius * 2.0 + expansion;
 
         ShadowCascade {
             clip_from_world: orthographic_light_matrix(
@@ -228,6 +204,7 @@ fn practical_splits(near: f32, far: f32, lambda: f32) -> [f32; CASCADE_COUNT] {
     clippy::too_many_arguments,
     reason = "the explicit frustum basis and slice parameters keep this helper independently testable"
 )]
+#[cfg(test)]
 fn frustum_slice_corners(
     position: Vec3,
     forward: Vec3,
@@ -379,6 +356,23 @@ mod tests {
             first.cascades[0].clip_from_world,
             second.cascades[0].clip_from_world
         );
+        Ok(())
+    }
+
+    #[test]
+    fn camera_rotation_does_not_move_directional_shadow_projections() -> Result<(), ShadowBuildError>
+    {
+        let position = Vec3::new(13.0, 8.0, -21.0);
+        let first = build(&CameraState::from_persisted(position, -2.4, -0.8))?;
+        let second = build(&CameraState::from_persisted(position, 1.7, 0.9))?;
+
+        for index in 0..CASCADE_COUNT {
+            assert_matrix_close(
+                first.cascades[index].clip_from_world,
+                second.cascades[index].clip_from_world,
+                1.0e-6,
+            );
+        }
         Ok(())
     }
 

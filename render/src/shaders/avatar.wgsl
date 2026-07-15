@@ -125,7 +125,7 @@ fn cascade_shadow(world: vec3<f32>, normal: vec3<f32>, cascade: u32) -> f32 {
 
 fn sun_visibility(world: vec3<f32>, normal: vec3<f32>) -> f32 {
   if frame.shadow_splits.w < 0.5 { return 1.0; }
-  let view_depth = max(dot(world - frame.camera_time.xyz, frame.camera_forward.xyz), 0.0);
+  let view_depth = distance(world, frame.camera_time.xyz);
   var cascade = 0u;
   if view_depth > frame.shadow_splits.x { cascade = 1u; }
   if view_depth > frame.shadow_splits.y { cascade = 2u; }
