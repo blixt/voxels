@@ -37,6 +37,7 @@ vp run terrain:counterproof
 vp run terrain:smoke
 vp run terrain:base
 vp run terrain:detail
+vp run terrain:survey
 ```
 
 Set `VOXELS_TERRAIN_SEED` to an unsigned integer to reproduce or compare another generated world;
@@ -50,7 +51,8 @@ unit) and FP16 model tensors by default. FP32 remains available as a diagnostic 
 conditioning. `terrain:smoke` runs the authentic 20-step coarse path on a 64x64 tile.
 `terrain:detail` loads all three models and runs a finite coarse -> two-pass base -> decoder chain,
 producing 512x512 elevation at the model's native 30 m spacing. `terrain:base` stops after the first
-two stages for independent attention-path validation. The 512-pixel decoder window matches the
+two stages for independent attention-path validation. `terrain:survey` compares coordinate-stable
+latent windows without changing the runtime selection. The 512-pixel decoder window matches the
 paper and upstream streaming runtime and consumes the complete 64x64 latent result instead of a
 hand-selected 16x16 crop. Overlap-aware neighboring windows can be added behind the same API.
 

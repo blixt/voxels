@@ -150,14 +150,15 @@ horizontal/vertical movement credit; a client discontinuity bit cannot authorize
 require a fresh same-connection pose and bounded reach. A WAN game still needs server-owned input and
 collision simulation plus authenticated identity.
 
-Voxel edits and per-material inventories are native server authority: strict SQLite schema 2 is bound
+Voxel edits and per-material inventories are native server authority: strict SQLite schema 5 is bound
 to the world/source manifest, operations are idempotent per player/edit-session, and commits carry
-connection identity and global order,
-and local chunk/surface revisions prevent unrelated cache invalidation. The presence spatial index
+connection identity and global order, while local chunk/surface revisions prevent unrelated cache
+invalidation. The presence spatial index
 also acts as the inverse edit-interest subscription, so a player 1 km away receives zero commit bytes.
 Bounded per-client queues fail into an explicit full-product resync instead of silently dropping state.
 
-The remaining WAN trust boundary is edit authorization and game rules. The local token and claimed
-player ID do not prove ownership, and the server currently accepts any representable material edit.
-Authenticated accounts, permissions, reach/rate checks, protected regions, moderation/audit policy,
-and server-owned movement must arrive together before exposing the service to the Internet.
+The remaining WAN trust boundary is authenticated ownership and world policy. The local token and
+claimed player ID do not prove ownership. Although the server accepts only typed dig/place actions
+and enforces fresh poses, bounded reach and movement, and material inventory, Internet deployment
+still needs authenticated accounts, permissions, protected regions, moderation/audit policy, and
+server-owned movement.

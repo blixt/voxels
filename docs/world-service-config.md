@@ -89,8 +89,9 @@ sea_level_voxels = 52
 `float16` is the high-performance default; `float32` is available for diagnostics. If
 `model_cache` is omitted on macOS, the service loads the immutable pinned revision from
 `~/Library/Caches/voxels/terrain-diffusion/<revision>`. A relative path is resolved relative to the
-configuration file, not the process working directory. The seed, precision, and horizontal scale
-participate in the source identity used by caches and future protocol negotiation.
+configuration file, not the process working directory. The seed, precision, horizontal scale,
+latent window, and quality histogram participate in the source identity used by caches and future
+protocol negotiation.
 
 `world_origin_voxels` is the canonical voxel X/Z coordinate of the finite generated tile's minimum
 corner. `horizontal_scale = 1` maps each native 30 m model pixel across 30 m of world space. This
@@ -144,12 +145,12 @@ batch responses. Concurrent identical batches single-flight through one CPU/Meta
 then receive independently request-ID-keyed copies of that response.
 
 `[edits].database` is the native authoritative world/player SQLite file. Relative paths resolve from
-the service configuration, not the process working directory. Startup initializes only schema 3 and
+the service configuration, not the process working directory. Startup initializes only schema 5 and
 rejects another schema or a database bound to a different world/source manifest; there are no
-migrations or fallback authorities. Schema 3 owns sparse voxel edits, face-oriented dig operations,
-player material inventories, idempotent edit sessions, and authoritative resume poses. The v3
-filename leaves an old schema-2 local world untouched. `change_queue_capacity` bounds each
-interested client's commit queue.
+migrations or fallback authorities. Schema 5 owns sparse voxel edits, face-oriented dig operations,
+player material inventories, idempotent edit sessions, and authoritative resume poses. The v5
+filename leaves older local worlds untouched. `change_queue_capacity` bounds each interested
+client's commit queue.
 
 The presence section controls the independent low-latency delta stream. `spatial_cell_metres`,
 `interest_radius_metres`, and `interest_hysteresis_metres` define receiver-specific interest without

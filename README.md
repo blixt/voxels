@@ -32,8 +32,8 @@ stream bytes, message attribution, and offline compression headroom. Compare two
 `vp run bench:network:compare -- <baseline.json> <candidate.json>`; see
 [Remote world streaming benchmarks](docs/network-benchmark.md).
 `vp run terrain:fetch`, `vp run terrain:counterproof`, `vp run terrain:smoke`,
-`vp run terrain:base`, and `vp run terrain:detail` exercise the optional native Rust/Metal Terrain
-Diffusion provider on Apple silicon; see
+`vp run terrain:base`, `vp run terrain:detail`, and `vp run terrain:survey` exercise the optional
+native Rust/Metal Terrain Diffusion provider on Apple silicon; see
 [the provider notes](docs/terrain-diffusion-metal.md).
 The server-owned [world source configuration](docs/world-service-config.md) defaults to native
 Terrain Diffusion/Metal generation and can select the procedural source without exposing that choice
