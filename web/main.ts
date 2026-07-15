@@ -336,7 +336,7 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     if (event.pointerType === "mouse" && document.pointerLockElement !== canvas) {
       void requestPointerLockSafely(
         () => canvas.requestPointerLock(),
-        (error) => fail(`Pointer lock request failed: ${String(error)}`),
+        (error) => console.warn(`[voxels] Pointer lock request failed; click to retry.`, error),
       );
       return;
     }
