@@ -517,29 +517,19 @@ mod web {
             }
             if time - self.last_enclosure_probe.get() >= self.config.enclosure_probe_interval_ms {
                 let probe_start = performance_now(performance.as_ref());
-                let eye_voxel = (camera.position / VOXEL_SIZE_METRES).floor().as_ivec3();
-                let underground = self
-                    .cached_surface_sample(eye_voxel.x, eye_voxel.z)
-                    .map(|surface| eye_voxel.y + 3 < surface.height);
-                match underground {
-                    Ok(true) => {
-                        let chunks = self.chunks.borrow();
-                        self.enclosure.set(probe_enclosure(
-                            camera.position,
-                            self.config.enclosure_probe_distance_metres,
-                            VOXEL_SIZE_METRES,
-                            |x, y, z| {
-                                resident_material(&chunks, VoxelCoord::new(x, y, z))
-                                    .unwrap_or(Material::Stone)
-                                    .occludes_ambient()
-                            },
-                        ));
-                    }
-                    Ok(false) => self.enclosure.set(EnclosureSample::OPEN),
-                    Err(error) => web_sys::console::warn_1(&JsValue::from_str(&format!(
-                        "enclosure surface probe deferred; retaining prior sample: {error}"
-                    ))),
-                }
+                let chunks = self.chunks.borrow();
+                self.enclosure.set(probe_enclosure(
+                    camera.position,
+                    self.config.enclosure_probe_distance_metres,
+                    VOXEL_SIZE_METRES,
+                    |x, y, z| {
+                        // Unloaded space cannot prove enclosure. Treating it as open avoids a
+                        // false cave transition at residency boundaries while nearby loaded walls
+                        // still darken freshly dug shafts before the camera crosses the surface.
+                        resident_material(&chunks, VoxelCoord::new(x, y, z))
+                            .is_some_and(Material::occludes_ambient)
+                    },
+                ));
                 self.last_enclosure_probe.set(time);
                 self.enclosure_probe_microseconds
                     .set(((performance_now(performance.as_ref()) - probe_start) * 1_000.0) as f32);
@@ -1664,6 +1654,9 @@ mod web {
                 &mut self.chunk_halos.borrow_mut(),
                 &accepted_mutations,
             );
+            if !accepted_mutations.is_empty() {
+                self.last_enclosure_probe.set(f64::NEG_INFINITY);
+            }
             let canonical = {
                 let mut scheduler = self.scheduler.borrow_mut();
                 let report = scheduler.mark_voxels_edited(&coords);
