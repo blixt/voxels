@@ -1,0 +1,39 @@
+import { readFile } from "node:fs/promises";
+import { describe, expect, it } from "vite-plus/test";
+import { prepareBrowserWorldFixture } from "./browser-world-fixture.mjs";
+import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./vxwp-contract.mjs";
+
+describe("isolated browser world fixture", () => {
+  it("binds matching temporary client and procedural server configuration", async () => {
+    const previousClient = process.env.VOXELS_CLIENT_CONFIG_PATH;
+    const previousService = process.env.VOXELS_WORLD_SERVICE_CONFIG_PATH;
+    const previousExternalService = process.env.VOXELS_EXTERNAL_WORLD_SERVICE;
+    const fixture = await prepareBrowserWorldFixture({ browserPort: 41_234 });
+    try {
+      const [client, service] = await Promise.all([
+        readFile(fixture.clientConfigPath, "utf8"),
+        readFile(fixture.serviceConfigPath, "utf8"),
+      ]);
+      expect(client).toContain(`endpoint = "ws://127.0.0.1:${fixture.backendPort}${WORLD_PATH}"`);
+      expect(client).toContain(
+        `presence_endpoint = "ws://127.0.0.1:${fixture.backendPort}${PRESENCE_PATH}"`,
+      );
+      expect(client).toContain(`subprotocol = "${WORLD_SUBPROTOCOL}"`);
+      expect(client).toContain(`auth_subprotocol_token = "${fixture.authToken}"`);
+      expect(service).toContain('source = "procedural-v16"');
+      expect(service).toContain(`listen = "127.0.0.1:${fixture.backendPort}"`);
+      expect(service).toContain('allowed_origins = ["http://127.0.0.1:41234"]');
+      expect(service).toContain(`auth_subprotocol_token = "${fixture.authToken}"`);
+      expect(service).toContain('database = "world-state.sqlite3"');
+      expect(fixture.databasePath.startsWith(fixture.directory)).toBe(true);
+      expect(process.env.VOXELS_CLIENT_CONFIG_PATH).toBe(fixture.clientConfigPath);
+      expect(process.env.VOXELS_WORLD_SERVICE_CONFIG_PATH).toBe(fixture.serviceConfigPath);
+      expect(process.env.VOXELS_EXTERNAL_WORLD_SERVICE).toBe("1");
+    } finally {
+      await fixture.cleanup();
+    }
+    expect(process.env.VOXELS_CLIENT_CONFIG_PATH).toBe(previousClient);
+    expect(process.env.VOXELS_WORLD_SERVICE_CONFIG_PATH).toBe(previousService);
+    expect(process.env.VOXELS_EXTERNAL_WORLD_SERVICE).toBe(previousExternalService);
+  });
+});

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   assertSnapshotSchema,
+  chromeWebGpuLaunchOptions,
   isBrowserConsoleFailure,
   SNAPSHOT,
   SNAPSHOT_SCHEMA_VERSION,
@@ -33,5 +34,11 @@ describe("browser snapshot schema", () => {
     expect(isBrowserConsoleFailure("warning", "WebGPU validation", warnings)).toBe(true);
     expect(isBrowserConsoleFailure("warning", "development hint", warnings)).toBe(false);
     expect(isBrowserConsoleFailure("log", "sqlite", warnings)).toBe(false);
+  });
+
+  it("pre-authorizes the hermetic loopback daemon in headless Chrome", () => {
+    expect(chromeWebGpuLaunchOptions().args).toContain(
+      "--disable-features=LocalNetworkAccessChecks",
+    );
   });
 });

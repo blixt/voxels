@@ -1,5 +1,4 @@
 import { chromium } from "playwright";
-import { build, preview } from "vite-plus";
 import {
   chromeWebGpuLaunchOptions,
   isBrowserConsoleFailure,
@@ -7,6 +6,7 @@ import {
   SNAPSHOT,
   SNAPSHOT_SCHEMA_VERSION,
 } from "./browser-harness.mjs";
+import { prepareBrowserWorldFixture, startBrowserWorldService } from "./browser-world-fixture.mjs";
 
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed|landmark tour/i;
@@ -1082,25 +1082,6 @@ async function waitForEngine(page) {
   throw new Error(`release engine did not settle: ${JSON.stringify(lastSnapshot)}`);
 }
 
-async function enterUnderwaterShowcase(page, viewportWidth) {
-  await page.keyboard.press("Escape");
-  await page.keyboard.press("F3");
-  await page.waitForTimeout(100);
-  await page.mouse.click(viewportWidth - 83, 90);
-  await page.waitForTimeout(100);
-  await page.mouse.click(viewportWidth - 171, 168);
-  await page.waitForFunction(
-    async (indices) => {
-      const snapshot = await globalThis.__VOXELS__.snapshot();
-      return snapshot[indices.immersion] > 0.5 && snapshot[indices.eyesSubmerged] === 1;
-    },
-    { immersion: SNAPSHOT.immersion, eyesSubmerged: SNAPSHOT.eyesSubmerged },
-    { timeout: 20_000 },
-  );
-  await page.keyboard.press("F3");
-  await page.waitForTimeout(500);
-}
-
 const viewport = { width: 1280, height: 720 };
 const sustained = process.argv.includes("--sustained");
 const materials = process.argv.includes("--materials");
@@ -1116,6 +1097,8 @@ const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
 let server;
+let fixture;
+let worldService;
 
 function observePageErrors(page) {
   page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
@@ -1127,7 +1110,13 @@ function observePageErrors(page) {
 }
 
 try {
+  fixture = await prepareBrowserWorldFixture({
+    browserPort: port,
+    prefix: "voxels-browser-profile-",
+  });
+  const { build, preview } = await import("vite-plus");
   await build({ logLevel: "warn" });
+  worldService = await startBrowserWorldService(fixture);
   server = await preview({
     logLevel: "warn",
     preview: { host: "127.0.0.1", port, strictPort: true },
@@ -1168,9 +1157,7 @@ try {
     const traversalSamples = await sample(page, 6_000);
     await page.keyboard.up("KeyW");
     const traversal = phaseSummary(traversalSamples);
-    await enterUnderwaterShowcase(page, viewport.width);
-    const underwater = phaseSummary(await sample(page, 4_000));
-    scenarios = { steady, traversal, underwater };
+    scenarios = { steady, traversal };
   }
   if (process.env.SCREENSHOT) {
     await page.screenshot({ path: process.env.SCREENSHOT });
@@ -1198,4 +1185,6 @@ try {
 } finally {
   await browser?.close();
   await server?.close();
+  await worldService?.close();
+  await fixture?.cleanup();
 }

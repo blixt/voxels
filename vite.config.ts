@@ -243,7 +243,8 @@ function nativeWorldService(): Plugin {
   let crashAttempts = 0;
   return {
     name: "voxels-native-world-service",
-    apply: "serve",
+    apply: (_config, environment) =>
+      environment.command === "serve" && process.env.VOXELS_EXTERNAL_WORLD_SERVICE !== "1",
     async configureServer(server) {
       let handleSignal: (() => void) | undefined;
       const nativeInputs = [

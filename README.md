@@ -53,7 +53,9 @@ same daemon; see [Local players](docs/native-world-streaming.md#local-players-an
 Each client renders the others as unique saturated-color articulated voxel figures with distance-
 driven gait, independent head look, body-follow hysteresis, shadows, depth, and contact AO.
 `vp run profile:browser` builds release WASM, serves it from an isolated origin, and records raw
-frame/CPU phase distributions for steady, traversal, and underwater scenarios in system Chrome.
+frame/CPU phase distributions for steady and traversal scenarios in system Chrome. Provider-specific
+coast, route, landmark, and cave tours remain unavailable until the world protocol advertises those
+queries and authored locations.
 `vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step closed rail. One lap warms the exact
 terrain used by two measured laps, making its arena-plateau gate prove allocation reuse before every
 canonical and LOD queue must drain.

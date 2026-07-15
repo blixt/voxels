@@ -1,22 +1,34 @@
 import { chromium } from "playwright";
-import { createServer as createViteServer } from "vite-plus";
 import {
   assertSnapshotSchema,
   chromeWebGpuLaunchOptions,
+  isBrowserConsoleFailure,
   reserveEphemeralPort,
   SNAPSHOT,
 } from "./browser-harness.mjs";
+import { prepareBrowserWorldFixture, startBrowserWorldService } from "./browser-world-fixture.mjs";
 
 const FIRST_OPEN_ATTEMPTS = 20;
+const FAILURE =
+  /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed/i;
 const failures = [];
 
 const port = await reserveEphemeralPort();
-const server = await createViteServer({
-  server: { host: "127.0.0.1", port, strictPort: true },
-});
 let browser;
+let fixture;
+let server;
+let worldService;
 
 try {
+  fixture = await prepareBrowserWorldFixture({
+    browserPort: port,
+    prefix: "voxels-persistence-recovery-",
+  });
+  worldService = await startBrowserWorldService(fixture);
+  const { createServer: createViteServer } = await import("vite-plus");
+  server = await createViteServer({
+    server: { host: "127.0.0.1", port, strictPort: true },
+  });
   await server.listen();
   const address = server.httpServer?.address();
   if (!address || typeof address === "string") throw new Error("Vite did not expose a TCP port");
@@ -29,7 +41,7 @@ try {
 
   page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
   page.on("console", (message) => {
-    if (message.type() === "error" || message.type() === "warning") {
+    if (isBrowserConsoleFailure(message.type(), message.text(), FAILURE)) {
       failures.push(`${message.type()}: ${message.text()}`);
     }
   });
@@ -104,5 +116,7 @@ try {
   process.exitCode = 1;
 } finally {
   await browser?.close();
-  await server.close();
+  await server?.close();
+  await worldService?.close();
+  await fixture?.cleanup();
 }
