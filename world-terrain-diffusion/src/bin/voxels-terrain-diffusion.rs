@@ -29,10 +29,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if command != "smoke"
         && command != "base-smoke"
         && command != "detail-smoke"
+        && command != "survey-smoke"
         && command != "counterproof"
     {
         return Err(format!(
-            "unknown command {command}; expected fetch, smoke, base-smoke, detail-smoke, or counterproof"
+            "unknown command {command}; expected fetch, smoke, base-smoke, detail-smoke, survey-smoke, or counterproof"
         )
         .into());
     }
@@ -41,6 +42,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|value| value.parse::<u64>())
         .transpose()?
         .unwrap_or(0x5eed_cafe);
+    let latent_window = std::env::var("VOXELS_TERRAIN_WINDOW")
+        .ok()
+        .map(|value| parse_coordinate_pair(&value))
+        .transpose()?
+        .unwrap_or([0, 0]);
     let config = TerrainDiffusionConfig {
         model_root,
         seed,
@@ -48,11 +54,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         require_metal: true,
         world_origin_voxels: [0, 0],
         horizontal_scale: 1,
-        model_origin: [0, 0],
+        latent_window,
+        quality_histogram: [0.0, 0.0, 0.0, 1.0, 1.5],
     };
     let runtime = if command == "detail-smoke" || command == "counterproof" {
         MetalTerrainDiffusion::load_full(config)?
-    } else if command == "base-smoke" {
+    } else if command == "base-smoke" || command == "survey-smoke" {
         MetalTerrainDiffusion::load_base(config)?
     } else {
         MetalTerrainDiffusion::load_coarse(config)?
@@ -113,7 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if command == "detail-smoke" {
-        let generated = runtime.generate_full_detail_tile([0, 0])?;
+        let generated = runtime.generate_full_detail_tile(latent_window)?;
         let coarse_pixels = generated.coarse.edge * generated.coarse.edge;
         let coarse_elevation = &generated.coarse.values[..coarse_pixels];
         let coarse_minimum = coarse_elevation
@@ -194,8 +201,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
+    if command == "survey-smoke" {
+        let radius = std::env::var("VOXELS_TERRAIN_SURVEY_RADIUS")
+            .ok()
+            .map(|value| value.parse::<i32>())
+            .transpose()?
+            .unwrap_or(2);
+        if !(0..=8).contains(&radius) {
+            return Err("VOXELS_TERRAIN_SURVEY_RADIUS must be in 0..=8".into());
+        }
+        let mut candidates = Vec::new();
+        let first_row = latent_window[0].saturating_sub(radius);
+        let last_row = latent_window[0].saturating_add(radius);
+        let first_column = latent_window[1].saturating_sub(radius);
+        let last_column = latent_window[1].saturating_add(radius);
+        for row in first_row..=last_row {
+            for column in first_column..=last_column {
+                let (coarse, latent) = runtime.generate_coarse_and_latent([row, column])?;
+                let pixels = latent.edge * latent.edge;
+                let low = &latent.values[4 * pixels..5 * pixels];
+                let mean =
+                    low.iter().map(|value| f64::from(*value)).sum::<f64>() / low.len() as f64;
+                let variance = low
+                    .iter()
+                    .map(|value| (f64::from(*value) - mean).powi(2))
+                    .sum::<f64>()
+                    / low.len() as f64;
+                let minimum = low.iter().copied().fold(f32::INFINITY, f32::min);
+                let maximum = low.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                candidates.push((
+                    variance.sqrt(),
+                    [row, column],
+                    minimum,
+                    maximum,
+                    coarse.elapsed_seconds,
+                    latent.elapsed_seconds,
+                ));
+            }
+        }
+        candidates.sort_by(|left, right| right.0.total_cmp(&left.0));
+        println!("device={}", runtime.device_description());
+        println!("precision={:?}", runtime.precision());
+        println!("seed={seed} center={latent_window:?} radius={radius}");
+        for (rank, (standard_deviation, window, minimum, maximum, coarse_s, latent_s)) in
+            candidates.into_iter().enumerate()
+        {
+            println!(
+                "rank={} latent_window={window:?} low_std={standard_deviation:.6} low_min={minimum:.6} low_max={maximum:.6} coarse_ms={:.3} latent_ms={:.3}",
+                rank + 1,
+                coarse_s * 1_000.0,
+                latent_s * 1_000.0,
+            );
+        }
+        return Ok(());
+    }
     if command == "base-smoke" {
-        let (coarse, latent) = runtime.generate_coarse_and_latent([0, 0])?;
+        let (coarse, latent) = runtime.generate_coarse_and_latent(latent_window)?;
         let minimum = latent.values.iter().copied().fold(f32::INFINITY, f32::min);
         let maximum = latent
             .values
@@ -255,4 +316,22 @@ fn default_cache() -> PathBuf {
         || PathBuf::from(".cache/terrain-diffusion"),
         |home| PathBuf::from(home).join("Library/Caches/voxels/terrain-diffusion"),
     )
+}
+
+fn parse_coordinate_pair(value: &str) -> Result<[i32; 2], Box<dyn std::error::Error>> {
+    let mut coordinates = value.split(',');
+    let row = coordinates
+        .next()
+        .ok_or("missing terrain-window row")?
+        .trim()
+        .parse()?;
+    let column = coordinates
+        .next()
+        .ok_or("missing terrain-window column")?
+        .trim()
+        .parse()?;
+    if coordinates.next().is_some() {
+        return Err("VOXELS_TERRAIN_WINDOW must contain exactly row,column".into());
+    }
+    Ok([row, column])
 }

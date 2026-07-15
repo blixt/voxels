@@ -17,7 +17,7 @@ use voxels_world::{
 
 pub const MODEL_REPOSITORY: &str = "xandergos/terrain-diffusion-30m";
 pub const MODEL_REVISION: &str = "9ef8030cb805b433b98ec25c5dddefbac07a9e26";
-pub const IMPLEMENTATION_VERSION: u32 = 5;
+pub const IMPLEMENTATION_VERSION: u32 = 6;
 pub const SAMPLER_VERSION: u32 = 1;
 pub const SCHEDULER_VERSION: u32 = 1;
 pub const COARSE_WEIGHT_SHA256: &str =
@@ -45,7 +45,7 @@ pub enum TerrainPrecision {
     Float16 = 2,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TerrainDiffusionConfig {
     pub model_root: PathBuf,
     pub seed: u64,
@@ -55,8 +55,10 @@ pub struct TerrainDiffusionConfig {
     pub world_origin_voxels: [i32; 2],
     /// Horizontal presentation scale relative to the model's native 30 m sample spacing.
     pub horizontal_scale: u32,
-    /// Terrain Diffusion model-grid row/column used to key spatial sampling and noise.
-    pub model_origin: [i32; 2],
+    /// Terrain Diffusion latent-window row/column. One step advances 7.68 km on the 30 m model.
+    pub latent_window: [i32; 2],
+    /// Five learned terrain-quality logits. `[0, 0, 0, 1, 1.5]` matches the showcase preset.
+    pub quality_histogram: [f32; 5],
 }
 
 impl TerrainDiffusionConfig {
@@ -68,7 +70,8 @@ impl TerrainDiffusionConfig {
             require_metal: true,
             world_origin_voxels: [0, 0],
             horizontal_scale: 1,
-            model_origin: [0, 0],
+            latent_window: [0, 0],
+            quality_histogram: [0.0, 0.0, 0.0, 1.0, 1.5],
         }
     }
 
@@ -79,18 +82,21 @@ impl TerrainDiffusionConfig {
                 self.horizontal_scale,
             ));
         }
-        configuration.update(b"voxels-terrain-diffusion-configuration-v6\0");
+        configuration.update(b"voxels-terrain-diffusion-configuration-v7\0");
         configuration.update(self.seed.to_le_bytes());
         configuration.update([self.precision as u8]);
         for coordinate in self.world_origin_voxels {
             configuration.update(coordinate.to_le_bytes());
         }
         configuration.update(self.horizontal_scale.to_le_bytes());
-        for coordinate in self.model_origin {
+        for coordinate in self.latent_window {
             configuration.update(coordinate.to_le_bytes());
         }
+        for value in self.quality_histogram {
+            configuration.update(value.to_bits().to_le_bytes());
+        }
         configuration.update(
-            b"coordinate-keyed-fractal-continent-climate-v1;elevation-noise-ratio-0.05;highest-variance-positive-4x4-coarse;full-64x64-latent;512x512-decoder;spatial-coarse-climate-lapse-aridity;physical-gradient-ridge;configurable-horizontal-scale-v1\0",
+            b"coordinate-keyed-fractal-continent-climate-v1;pinned-conditioning-noise-ratio-0.5;coordinate-aligned-centered-4x4-coarse;full-64x64-latent;512x512-decoder;spatial-coarse-climate-lapse-aridity;physical-gradient-ridge;configurable-horizontal-scale-v1\0",
         );
         configuration.update(512_u32.to_le_bytes());
         let configuration_hash: [u8; 32] = configuration.finalize().into();
@@ -298,7 +304,8 @@ mod tests {
         assert_eq!(config.model_root, PathBuf::from("model"));
         assert_eq!(config.world_origin_voxels, [0, 0]);
         assert_eq!(config.horizontal_scale, 1);
-        assert_eq!(config.model_origin, [0, 0]);
+        assert_eq!(config.latent_window, [0, 0]);
+        assert_eq!(config.quality_histogram, [0.0, 0.0, 0.0, 1.0, 1.5]);
     }
 
     #[test]
@@ -345,7 +352,7 @@ mod tests {
         );
 
         let mut sampled = base;
-        sampled.model_origin = [-64, 128];
+        sampled.latent_window = [-64, 128];
         let sampled_identity = sampled.source_identity().expect("sampled identity");
         assert_ne!(
             base_identity.configuration_hash,

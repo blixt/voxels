@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 10
+schema_version = 11
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -80,7 +80,8 @@ xz_voxels = [0, 0]
 precision = "float16"
 world_origin_voxels = [-76800, -76800]
 horizontal_scale = 1
-model_origin = [0, 0]
+latent_window = [0, 0]
+quality_histogram = [0.0, 0.0, 0.0, 1.0, 1.5]
 sea_level_voxels = 52
 # model_cache = "/an/optional/cache/root"
 ```
@@ -97,13 +98,18 @@ preserves physical slopes because canonical voxels have a fixed 10 cm size; Mine
 scale changes both axes through the size represented by one cubic block.
 `[-76800, -76800]` therefore centers the 15.36 km tile on the default `[0, 0]` spawn and leaves room
 for the exact one-voxel meshing halo around spawn. The server validates the actual spawn chunk at startup.
-`model_origin` is the Terrain Diffusion model-grid row/column used to key spatial sampling and noise.
-They are deliberately separate: moving an unchanged tile in the game world is not the same operation
-as generating a different model-space tile. Both origins participate in the source identity, and
-`world_origin_voxels` is also declared in the macro coordinate transform. Changing either value
-therefore creates a distinct cache/protocol identity instead of aliasing existing world products.
+`latent_window` is the Terrain Diffusion latent-window row/column used to key spatial sampling and
+noise. Each step advances 32 latent pixels, or 7.68 km for the 30 m checkpoint.
+`quality_histogram` is the five-bin learned terrain-quality conditioning vector. The checked-in
+`[0, 0, 0, 1, 1.5]` preset is the upstream showcase setting and favors the two highest-rated bins;
+all zeros selects the unsteered checkpoint default.
+Model sampling is deliberately separate from world placement: moving an unchanged tile in the game
+world is not the same operation as generating a different model-space tile. Both origins participate
+in the source identity, and `world_origin_voxels` is also declared in the macro coordinate transform.
+Changing either value therefore creates a distinct cache/protocol identity instead of aliasing
+existing world products.
 
-Both origin values must contain exactly two signed 32-bit integers. Unknown keys, malformed values,
+Both coordinate values must contain exactly two signed 32-bit integers. Unknown keys, malformed values,
 and unsupported `schema_version` values are rejected so configuration mistakes cannot silently alter
 a world. Model repository/revision, verified weight hashes, tensor shapes, normalization statistics,
 and sampler/scheduler semantics remain pinned provider invariants rather than deployment settings.

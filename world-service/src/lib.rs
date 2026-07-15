@@ -30,7 +30,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 10;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 11;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
     0x76, 0x6f, 0x78, 0x65, 0x6c, 0x73, 0x40, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x01,
@@ -212,7 +212,7 @@ pub enum TerrainModelPrecision {
     Float32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TerrainDiffusionProviderConfig {
     /// Cache root containing the immutable model-revision directory. Relative paths are resolved
@@ -223,8 +223,10 @@ pub struct TerrainDiffusionProviderConfig {
     pub world_origin_voxels: [i32; 2],
     /// Horizontal presentation scale relative to the model's native 30 m sample spacing.
     pub horizontal_scale: u32,
-    /// Terrain Diffusion model-grid row/column used to key spatial sampling and noise.
-    pub model_origin: [i32; 2],
+    /// Terrain Diffusion latent-window row/column. One step advances 7.68 km for the 30 m model.
+    pub latent_window: [i32; 2],
+    /// Five learned terrain-quality logits. The showcase preset favors the two highest bins.
+    pub quality_histogram: [f32; 5],
     /// Flood height used by the fidelity-honest macro-heightfield voxel composer.
     pub sea_level_voxels: i32,
 }
@@ -236,13 +238,14 @@ impl Default for TerrainDiffusionProviderConfig {
             precision: TerrainModelPrecision::Float16,
             world_origin_voxels: [0, 0],
             horizontal_scale: 1,
-            model_origin: [0, 0],
+            latent_window: [0, 0],
+            quality_histogram: [0.0, 0.0, 0.0, 1.0, 1.5],
             sea_level_voxels: SEA_LEVEL_VOXELS,
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorldServiceConfig {
     pub schema_version: u32,
@@ -332,6 +335,16 @@ impl WorldServiceConfig {
         if !(1..=8).contains(&self.terrain_diffusion.horizontal_scale) {
             return Err(WorldServiceConfigError::InvalidTerrainDiffusion(
                 "horizontal_scale must be in 1..=8",
+            ));
+        }
+        if self
+            .terrain_diffusion
+            .quality_histogram
+            .iter()
+            .any(|value| !value.is_finite() || !(-10.0..=10.0).contains(value))
+        {
+            return Err(WorldServiceConfigError::InvalidTerrainDiffusion(
+                "quality_histogram values must be finite and in -10..=10",
             ));
         }
         if self.transport.max_in_flight_batches == 0
@@ -582,7 +595,7 @@ impl fmt::Display for WorldServiceConfigError {
 impl std::error::Error for WorldServiceConfigError {}
 
 /// A validated configuration retaining its file location for relative-path resolution.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LoadedWorldServiceConfig {
     config: WorldServiceConfig,
     path: PathBuf,
@@ -696,7 +709,8 @@ impl LoadedWorldServiceConfig {
             require_metal: true,
             world_origin_voxels: self.config.terrain_diffusion.world_origin_voxels,
             horizontal_scale: self.config.terrain_diffusion.horizontal_scale,
-            model_origin: self.config.terrain_diffusion.model_origin,
+            latent_window: self.config.terrain_diffusion.latent_window,
+            quality_histogram: self.config.terrain_diffusion.quality_histogram,
         })?;
         Ok(Box::new(TerrainDiffusionMacroTileSource::generate(
             &runtime,
@@ -778,7 +792,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 10
+schema_version = 11
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -832,7 +846,8 @@ xz_voxels = [0, 0]
 precision = "float16"
 world_origin_voxels = [1200, -900]
 horizontal_scale = 2
-model_origin = [-64, 128]
+latent_window = [-64, 128]
+quality_histogram = [0.0, 0.0, 0.0, 1.0, 1.5]
 sea_level_voxels = 52
 "#;
 
@@ -868,7 +883,11 @@ sea_level_voxels = 52
         let config = WorldServiceConfig::from_toml(CONFIG_TOML).expect("valid config");
         assert_eq!(config.terrain_diffusion.world_origin_voxels, [1_200, -900]);
         assert_eq!(config.terrain_diffusion.horizontal_scale, 2);
-        assert_eq!(config.terrain_diffusion.model_origin, [-64, 128]);
+        assert_eq!(config.terrain_diffusion.latent_window, [-64, 128]);
+        assert_eq!(
+            config.terrain_diffusion.quality_histogram,
+            [0.0, 0.0, 0.0, 1.0, 1.5]
+        );
     }
 
     #[test]
@@ -879,12 +898,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 10", "schema_version = 9");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 11", "schema_version = 10");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 10,
-                found: 9,
+                expected: 11,
+                found: 10,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
@@ -909,6 +928,7 @@ sea_level_voxels = 52
             "xz_voxels = [0, 0]\n",
             "precision = \"float16\"\n",
             "horizontal_scale = 2\n",
+            "quality_histogram = [0.0, 0.0, 0.0, 1.0, 1.5]\n",
         ] {
             let incomplete = CONFIG_TOML.replace(missing, "");
             assert!(matches!(
@@ -958,6 +978,26 @@ sea_level_voxels = 52
             config.validate(),
             Err(WorldServiceConfigError::InvalidTerrainDiffusion(
                 "horizontal_scale must be in 1..=8"
+            ))
+        );
+    }
+
+    #[test]
+    fn terrain_diffusion_quality_histogram_is_finite_and_bounded() {
+        let mut config = test_config(WorldSourceMode::TerrainDiffusion30m);
+        config.terrain_diffusion.quality_histogram[2] = f32::NAN;
+        assert_eq!(
+            config.validate(),
+            Err(WorldServiceConfigError::InvalidTerrainDiffusion(
+                "quality_histogram values must be finite and in -10..=10"
+            ))
+        );
+
+        config.terrain_diffusion.quality_histogram[2] = 10.01;
+        assert_eq!(
+            config.validate(),
+            Err(WorldServiceConfigError::InvalidTerrainDiffusion(
+                "quality_histogram values must be finite and in -10..=10"
             ))
         );
     }

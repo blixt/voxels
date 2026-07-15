@@ -24,7 +24,10 @@ const COARSE_SAMPLE_CHANNELS: usize = 6;
 const COARSE_CONDITIONING_CHANNELS: usize = 5;
 const LATENT_CHANNELS: usize = 5;
 const LATENT_TILE_EDGE: usize = 64;
+const LATENT_TILE_STRIDE: i32 = 32;
 const LATENT_COMPRESSION: usize = 8;
+const COARSE_CONTEXT_EDGE: usize = 4;
+const COARSE_CONTEXT_MARGIN: i32 = ((TILE_EDGE - COARSE_CONTEXT_EDGE) / 2) as i32;
 const SIGMA_DATA: f64 = 0.5;
 const LOW_FREQUENCY_MEAN: f32 = -31.4;
 const LOW_FREQUENCY_STD: f32 = 38.6;
@@ -41,6 +44,8 @@ struct PipelineConfig {
 pub struct CoarseTile {
     pub channels: usize,
     pub edge: usize,
+    /// Top-left coordinate on the 7.68 km coarse grid.
+    pub origin: [i32; 2],
     pub values: Vec<f32>,
     pub elapsed_seconds: f64,
 }
@@ -243,6 +248,7 @@ impl MetalTerrainDiffusion {
         Ok(CoarseTile {
             channels: 6,
             edge: TILE_EDGE,
+            origin: [0, 0],
             values,
             elapsed_seconds: started.elapsed().as_secs_f64(),
         })
@@ -411,6 +417,7 @@ impl MetalTerrainDiffusion {
         Ok(CoarseTile {
             channels: COARSE_SAMPLE_CHANNELS,
             edge: TILE_EDGE,
+            origin,
             values,
             elapsed_seconds: started.elapsed().as_secs_f64(),
         })
@@ -434,7 +441,12 @@ impl MetalTerrainDiffusion {
             )));
         }
         let started = Instant::now();
-        let conditioning = base_conditioning(coarse_patch, self.config.seed, origin)?;
+        let conditioning = base_conditioning(
+            coarse_patch,
+            self.config.seed,
+            origin,
+            self.config.quality_histogram,
+        )?;
         let conditioning = Tensor::from_slice(&conditioning, (1, 58), &self.device)
             .and_then(|tensor| tensor.to_dtype(self.dtype))
             .map_err(inference_error)?;
@@ -577,37 +589,39 @@ impl MetalTerrainDiffusion {
 
     pub fn generate_coarse_and_latent(
         &self,
-        origin: [i32; 2],
+        latent_window: [i32; 2],
     ) -> Result<(CoarseTile, LatentTile), TerrainDiffusionError> {
+        // Upstream conditions latent window (i,j) on coarse [i-1..i+3, j-1..j+3]. Place that
+        // exact 4x4 context at the center of our one finite coarse inference window instead of
+        // searching the result for whichever patch happens to look most dramatic.
+        let coarse_context_origin = [
+            latent_window[0].saturating_sub(1),
+            latent_window[1].saturating_sub(1),
+        ];
+        let coarse_origin = [
+            coarse_context_origin[0].saturating_sub(COARSE_CONTEXT_MARGIN),
+            coarse_context_origin[1].saturating_sub(COARSE_CONTEXT_MARGIN),
+        ];
         let conditioning = synthetic_coarse_conditioning(
             self.config.seed,
-            origin,
+            coarse_origin,
             &self.pipeline.coarse_means,
             &self.pipeline.coarse_stds,
         );
-        let coarse =
-            self.generate_coarse_tile(origin, &conditioning, [0.05, 0.5, 0.5, 0.5, 0.5])?;
-        let [patch_z, patch_x] = highest_land_patch(&coarse);
-        let mut coarse_patch = vec![1.0_f32; 7 * 4 * 4];
+        let coarse = self.generate_coarse_tile(coarse_origin, &conditioning, [0.5; 5])?;
+        let [patch_z, patch_x] = [COARSE_CONTEXT_MARGIN as usize; 2];
+        let mut coarse_patch = vec![1.0_f32; 7 * COARSE_CONTEXT_EDGE * COARSE_CONTEXT_EDGE];
         for channel in 0..COARSE_SAMPLE_CHANNELS {
-            for z in 0..4 {
-                for x in 0..4 {
-                    coarse_patch[channel * 16 + z * 4 + x] = coarse.values
+            for z in 0..COARSE_CONTEXT_EDGE {
+                for x in 0..COARSE_CONTEXT_EDGE {
+                    coarse_patch[channel * 16 + z * COARSE_CONTEXT_EDGE + x] = coarse.values
                         [channel * TILE_EDGE * TILE_EDGE + (patch_z + z) * TILE_EDGE + patch_x + x];
                 }
             }
         }
-        // The upstream base graph requests a 4x4 coarse context at latent tile index - 1.
-        // Preserve that coordinate relation so independently requested spatial noise overlaps.
         let latent_origin = [
-            origin[0]
-                .saturating_add(patch_z as i32)
-                .saturating_add(1)
-                .saturating_mul(32),
-            origin[1]
-                .saturating_add(patch_x as i32)
-                .saturating_add(1)
-                .saturating_mul(32),
+            latent_window[0].saturating_mul(LATENT_TILE_STRIDE),
+            latent_window[1].saturating_mul(LATENT_TILE_STRIDE),
         ];
         let mut latent = self.generate_latent_tile(latent_origin, &coarse_patch)?;
         latent.coarse_patch_origin = [patch_z, patch_x];
@@ -732,12 +746,12 @@ impl MetalTerrainDiffusion {
 
 impl TerrainDiffusionMacroTileSource {
     pub fn generate(runtime: &MetalTerrainDiffusion) -> Result<Self, TerrainDiffusionError> {
-        let generated = runtime.generate_full_detail_tile(runtime.config.model_origin)?;
+        let generated = runtime.generate_full_detail_tile(runtime.config.latent_window)?;
         Ok(Self {
             identity: runtime.source_identity()?,
             origin_voxels: runtime.config.world_origin_voxels,
             voxels_per_model_pixel: 300 * i64::from(runtime.config.horizontal_scale),
-            coarse_origin: runtime.config.model_origin,
+            coarse_origin: generated.coarse.origin,
             coarse: generated.coarse,
             detail_model_origin: generated.detail_model_origin,
             detail: generated.detail,
@@ -1082,75 +1096,11 @@ fn lerp(left: f64, right: f64, weight: f64) -> f64 {
     left + (right - left) * weight
 }
 
-fn highest_land_patch(coarse: &CoarseTile) -> [usize; 2] {
-    let elevation = &coarse.values[..coarse.edge * coarse.edge];
-    highest_variance_patch(elevation, coarse.edge, 4, true)
-}
-
-fn highest_average_patch(values: &[f32], edge: usize, patch_edge: usize) -> [usize; 2] {
-    debug_assert!(patch_edge > 0 && patch_edge <= edge);
-    debug_assert_eq!(values.len(), edge * edge);
-    let mut best_origin = [0, 0];
-    let mut best_sum = f32::NEG_INFINITY;
-    for z in 0..=edge - patch_edge {
-        for x in 0..=edge - patch_edge {
-            let mut sum = 0.0;
-            for patch_z in 0..patch_edge {
-                for patch_x in 0..patch_edge {
-                    sum += values[(z + patch_z) * edge + x + patch_x];
-                }
-            }
-            if sum > best_sum {
-                best_sum = sum;
-                best_origin = [z, x];
-            }
-        }
-    }
-    best_origin
-}
-
-fn highest_variance_patch(
-    values: &[f32],
-    edge: usize,
-    patch_edge: usize,
-    require_positive: bool,
-) -> [usize; 2] {
-    debug_assert!(patch_edge > 0 && patch_edge <= edge);
-    debug_assert_eq!(values.len(), edge * edge);
-    let mut best_origin = None;
-    let mut best_variance = f64::NEG_INFINITY;
-    for z in 0..=edge - patch_edge {
-        for x in 0..=edge - patch_edge {
-            let mut count = 0.0;
-            let mut sum = 0.0;
-            let mut sum_of_squares = 0.0;
-            let mut valid = true;
-            for patch_z in 0..patch_edge {
-                for patch_x in 0..patch_edge {
-                    let value = values[(z + patch_z) * edge + x + patch_x];
-                    valid &= !require_positive || value > 0.0;
-                    count += 1.0;
-                    sum += f64::from(value);
-                    sum_of_squares += f64::from(value) * f64::from(value);
-                }
-            }
-            if !valid {
-                continue;
-            }
-            let variance = sum_of_squares / count - (sum / count).powi(2);
-            if variance > best_variance {
-                best_variance = variance;
-                best_origin = Some([z, x]);
-            }
-        }
-    }
-    best_origin.unwrap_or_else(|| highest_average_patch(values, edge, patch_edge))
-}
-
 fn base_conditioning(
     coarse_patch: &[f32],
     seed: u64,
     origin: [i32; 2],
+    quality_histogram: [f32; 5],
 ) -> Result<Vec<f32>, TerrainDiffusionError> {
     const MEANS: [f32; 7] = [14.99, 11.65, 15.87, 619.26, 833.12, 69.40, 0.66];
     const STDS: [f32; 7] = [21.72, 21.78, 10.40, 452.29, 738.09, 34.59, 0.47];
@@ -1210,7 +1160,7 @@ fn base_conditioning(
         &normalized[1],
         &climate,
         &normalized[6],
-        &[0.0; 5],
+        &quality_histogram,
         &[-3.0_f32.sqrt()],
     ];
     let total = groups.iter().map(|group| group.len()).sum::<usize>() as f32;
@@ -1445,7 +1395,8 @@ mod tests {
         for (channel, mean) in means.into_iter().enumerate() {
             patch[channel * 16..(channel + 1) * 16].fill(mean);
         }
-        let output = base_conditioning(&patch, 7, [0, 0]).expect("conditioning");
+        let output =
+            base_conditioning(&patch, 7, [0, 0], [0.0, 0.0, 0.0, 1.0, 1.5]).expect("conditioning");
         assert_eq!(output.len(), 58);
         assert!(output.iter().all(|value| value.is_finite()));
     }
@@ -1481,17 +1432,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn representative_preview_selects_the_highest_average_window() {
-        let mut values = vec![0.0; 16];
-        values[10] = 2.0;
-        values[11] = 2.0;
-        values[14] = 2.0;
-        values[15] = 2.0;
-        assert_eq!(highest_average_patch(&values, 4, 2), [2, 2]);
-    }
-
-    #[test]
     fn finite_macro_source_marks_samples_outside_its_owned_tile_invalid() {
         let mut config = TerrainDiffusionConfig::pinned("model", 7);
         config.world_origin_voxels = [600, -300];
@@ -1506,10 +1446,11 @@ mod tests {
             identity,
             origin_voxels: config.world_origin_voxels,
             voxels_per_model_pixel: 600,
-            coarse_origin: config.model_origin,
+            coarse_origin: config.latent_window,
             coarse: CoarseTile {
                 channels: COARSE_SAMPLE_CHANNELS,
                 edge: 2,
+                origin: config.latent_window,
                 values: coarse_values,
                 elapsed_seconds: 0.0,
             },

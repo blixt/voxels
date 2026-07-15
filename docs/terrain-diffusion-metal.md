@@ -75,11 +75,11 @@ constructs either this provider or `ProceduralWorldSource` behind that same trai
 selection, model paths, and precision remain server-only; clients consume identical canonical world
 products.
 
-The service configuration keeps two coordinate origins explicit. `model_origin` selects the
-coordinate-keyed model/noise sample, while `world_origin_voxels` places the resulting finite tile in
-canonical voxel X/Z space. Both are bound into `WorldSourceIdentity`, and the latter is published as
-the macro coordinate-transform origin, so moving or regenerating a tile cannot reuse an incompatible
-cache identity.
+The service configuration keeps model sampling and world placement explicit. `latent_window`
+selects a coordinate-keyed 15.36 km latent window on the paper's 7.68 km stride, while
+`world_origin_voxels` places the resulting finite tile in canonical voxel X/Z space. Both are bound
+into `WorldSourceIdentity`, and the latter is published as the macro coordinate-transform origin, so
+moving or regenerating a tile cannot reuse an incompatible cache identity.
 
 This is the checked-in default source for the native world service. The WASM shell never hosts the
 Metal executor or branches on provider choice: the service composes learned macro fields into the
@@ -100,13 +100,12 @@ client.
   `sigma=0.35` consistency passes. The decoder uses the first four latent bands and retains the
   fifth low-frequency band for signed-square-root elevation reconstruction.
 - The finite experiment uses coordinate-keyed, multi-octave continent and climate fields for the
-  five published coarse conditioning channels. This mirrors the role of upstream's synthetic map
-  without importing its Python, rasterio, or WorldClim preprocessing dependencies. Conditioning is
-  standardized with output channels `[0, 2, 3, 4, 5]`, matching upstream's elevation, temperature,
-  temperature seasonality, precipitation, and precipitation-variability mapping. The learned model
-  still owns the 30 m terrain. The finite provider selects a high-variance all-land 4x4 coarse
-  context, then preserves the complete 64x64 learned latent window before performing
-  signed-square-root/Laplacian reconstruction in native Rust. Learned coarse
+  five published coarse conditioning channels. Conditioning is standardized with output channels
+  `[0, 2, 3, 4, 5]`, matching upstream's elevation, temperature, temperature seasonality,
+  precipitation, and precipitation-variability mapping. The learned model still owns the 30 m
+  terrain. The provider directly maps `latent_window` to its centered 4x4 coarse context, uses the
+  checkpoint's `0.5` coarse conditioning SNR, and preserves the complete 64x64 learned latent window
+  before performing signed-square-root/Laplacian reconstruction in native Rust. Learned coarse
   temperature and precipitation remain spatial fields; the adapter applies elevation lapse rate and
   an aridity estimate before publishing normalized climate. Infinite overlap blending remains future
   work and is source-identity versioned when added.
@@ -116,8 +115,7 @@ client.
   altitude, slope, and coherent geology choose biome surfaces and shallow/deep strata. Chunks,
   collision blocks, edited surfaces, and far LODs all use the same composition function.
 
-For the checked-in seed, `terrain:detail` measures roughly 543–1,558 m over the 15.36 km native
-model tile. `world:source-smoke` samples 256 positions across that tile; the current result spans
-four surface regions and four material IDs, with temperature, moisture, and physical ridge all
-non-constant. These are regression diagnostics rather than promises that every seed has the same
+`terrain:survey` compares coordinate-stable latent windows without changing runtime selection.
+`world:source-smoke` samples the configured tile and reports its height, climate, ridge, region, and
+material ranges. These are regression diagnostics rather than promises that every seed has the same
 histogram.

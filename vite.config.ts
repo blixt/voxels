@@ -500,6 +500,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/terrain-diffusion.ts detail-smoke",
         cache: false,
       },
+      "terrain:survey": {
+        command: "node scripts/terrain-diffusion.ts survey-smoke",
+        cache: false,
+      },
       "world:source-smoke": {
         command: "node scripts/world-service.ts --source-smoke",
         cache: false,
