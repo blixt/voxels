@@ -10,6 +10,7 @@ pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 6] = [96, 256, 512, 1_024, 2_048, 4_0
 // moves in one 3.2 m chunk rather than a 9.6 m feature cell, cutting its worst visible replacement
 // strip by two thirds while preserving whole-chunk and whole-patch ownership.
 const LOD_BOUNDARY_SNAP: [i32; 6] = [32, 32, 64, 128, 256, 512];
+const LOD_SNAP_HYSTERESIS_DIVISOR: i32 = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LodOwner {
@@ -54,9 +55,14 @@ impl GeometricLodFocus {
         surface_level_count: usize,
     ) -> Self {
         assert!(ready_level_count > 0 && ready_level_count <= surface_level_count);
-        let target = Self::snapped_for_levels(voxel_x, voxel_z, surface_level_count);
-        self.boundary_centres[..ready_level_count]
-            .copy_from_slice(&target.boundary_centres[..ready_level_count]);
+        for (index, centre) in self.boundary_centres[..ready_level_count]
+            .iter_mut()
+            .enumerate()
+        {
+            let step = LOD_BOUNDARY_SNAP[index];
+            centre[0] = snap_with_hysteresis(voxel_x, centre[0], step);
+            centre[1] = snap_with_hysteresis(voxel_z, centre[1], step);
+        }
         self.surface_level_count = surface_level_count as u8;
         self
     }
@@ -302,6 +308,29 @@ fn snap_nearest(value: i32, step: i32) -> i32 {
     snapped as i32
 }
 
+fn snap_with_hysteresis(value: i32, current: i32, step: i32) -> i32 {
+    let target = snap_nearest(value, step);
+    let delta = i64::from(target) - i64::from(current);
+    if delta.unsigned_abs() != step as u64 {
+        return target;
+    }
+    let margin = i64::from((step / LOD_SNAP_HYSTERESIS_DIVISOR).max(1));
+    let half_step = i64::from(step / 2);
+    let value = i64::from(value);
+    let current = i64::from(current);
+    if delta > 0 {
+        if value < current + half_step + margin {
+            current as i32
+        } else {
+            target
+        }
+    } else if value > current - half_step - margin {
+        current as i32
+    } else {
+        target
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,6 +571,23 @@ mod tests {
             advanced.owner_at(100_000, 100_000),
             LodOwner::Surface(SurfaceLodLevel::Stride64)
         );
+    }
+
+    #[test]
+    fn advancing_focus_has_a_deadband_around_snap_thresholds() {
+        let upper = GeometricLodFocus::snapped(4_208, 0);
+        assert_eq!(upper.boundary_centres()[0][0], 4_224);
+        let held_upper = upper.advanced_for_levels(4_207, 0, 6, 6);
+        assert_eq!(held_upper.boundary_centres()[0][0], 4_224);
+        let moved_lower = held_upper.advanced_for_levels(4_203, 0, 6, 6);
+        assert_eq!(moved_lower.boundary_centres()[0][0], 4_192);
+
+        let lower = GeometricLodFocus::snapped(4_207, 0);
+        assert_eq!(lower.boundary_centres()[0][0], 4_192);
+        let held_lower = lower.advanced_for_levels(4_208, 0, 6, 6);
+        assert_eq!(held_lower.boundary_centres()[0][0], 4_192);
+        let moved_upper = held_lower.advanced_for_levels(4_213, 0, 6, 6);
+        assert_eq!(moved_upper.boundary_centres()[0][0], 4_224);
     }
 
     #[test]
