@@ -24,8 +24,8 @@ use voxels_core::{CameraState, EnclosureSample, RemoteAvatarPose};
 use voxels_world::protocol::DigVolume;
 use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, ChunkCoord, Material, MeshedChunk, Quad, RenderLayer,
-    SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfaceRegion, SurfaceTileCoord,
-    SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh,
+    SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId, SurfaceRegion,
+    SurfaceTileCoord, SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -349,6 +349,7 @@ struct MeshSlice {
     bounds_min: glam::Vec3,
     bounds_max: glam::Vec3,
     surface_bounds: Option<SurfaceBounds>,
+    surface_patch_id: Option<SurfacePatchId>,
     skirt_edge: Option<SurfacePatchEdge>,
     render_layer: RenderLayer,
 }
@@ -1945,6 +1946,7 @@ impl Renderer {
                     bounds_min: min,
                     bounds_max: max,
                     surface_bounds: None,
+                    surface_patch_id: None,
                     skirt_edge: None,
                     render_layer: RenderLayer::Opaque,
                 }],
@@ -1967,6 +1969,7 @@ impl Renderer {
                     bounds_min: min,
                     bounds_max: max,
                     surface_bounds: None,
+                    surface_patch_id: None,
                     skirt_edge: None,
                     render_layer: RenderLayer::Translucent,
                 }],
@@ -2054,6 +2057,11 @@ impl Renderer {
             .patches
             .iter()
             .flat_map(|patch| {
+                let patch_id = SurfacePatchId::from_tile_cell_min(
+                    coord,
+                    [patch.cell_bounds[0][0], patch.cell_bounds[0][1]],
+                )
+                .expect("validated surface terrain patch grid");
                 let surface_bounds =
                     surface_patch_bounds([tile_x, tile_z], stride, patch.cell_bounds, patch.bounds);
                 std::iter::once((patch.quad_range.clone(), patch.bounds, None))
@@ -2079,6 +2087,7 @@ impl Renderer {
                             bounds_min,
                             bounds_max,
                             surface_bounds: Some(surface_bounds),
+                            surface_patch_id: Some(patch_id),
                             skirt_edge,
                             render_layer: RenderLayer::Opaque,
                         }
@@ -2089,6 +2098,10 @@ impl Renderer {
             .patches
             .iter()
             .map(|patch| {
+                let patch_id = SurfacePatchId::from_tile_cell_min(
+                    coord,
+                    [patch.cell_bounds[0][0], patch.cell_bounds[0][1]],
+                );
                 let surface_bounds =
                     surface_patch_bounds([tile_x, tile_z], stride, patch.cell_bounds, patch.bounds);
                 MeshSlice {
@@ -2108,6 +2121,7 @@ impl Renderer {
                             .map(|value| value as f32 * VOXEL_SIZE_METRES),
                     ),
                     surface_bounds: Some(surface_bounds),
+                    surface_patch_id: patch_id,
                     skirt_edge: None,
                     render_layer: RenderLayer::Translucent,
                 }
@@ -3149,6 +3163,12 @@ fn slice_owned_by_lod(focus: Option<GeometricLodFocus>, key: &MeshKey, slice: &M
     let Some(level) = SurfaceLodLevel::ALL.get(usize::from(key.0 - 1)).copied() else {
         return false;
     };
+    if slice
+        .surface_patch_id
+        .is_some_and(|patch_id| patch_id.level != level)
+    {
+        return false;
+    }
     slice.surface_bounds.is_some_and(|bounds| {
         slice.skirt_edge.map_or_else(
             || focus.owns_surface_bounds(level, bounds),
@@ -4029,6 +4049,7 @@ mod tests {
             bounds_min: glam::Vec3::splat(-10_000.0),
             bounds_max: glam::Vec3::splat(10_000.0),
             surface_bounds,
+            surface_patch_id: None,
             skirt_edge: None,
             render_layer: RenderLayer::Opaque,
         }
@@ -4268,6 +4289,7 @@ mod tests {
             bounds_min,
             bounds_max,
             surface_bounds: None,
+            surface_patch_id: None,
             skirt_edge: None,
             render_layer: RenderLayer::Opaque,
         };
@@ -4281,6 +4303,7 @@ mod tests {
                 min: [96, -20, 0],
                 max: [112, 80, 16],
             }),
+            surface_patch_id: Some(SurfacePatchId::new(SurfaceLodLevel::Stride2, 6, 0)),
             skirt_edge: None,
             render_layer: RenderLayer::Opaque,
         };
