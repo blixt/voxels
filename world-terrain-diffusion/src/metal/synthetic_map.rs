@@ -199,7 +199,7 @@ fn single_perlin(seed: i32, x: f32, y: f32) -> f32 {
         gradient(seed, grid_x1, grid_y1, offset_x1, offset_y1),
         blend_x,
     );
-    lerp(top, bottom, blend_y) * 1.424_769_1
+    lerp(top, bottom, blend_y) * 1.424_769
 }
 
 fn fast_floor(value: f32) -> i32 {
