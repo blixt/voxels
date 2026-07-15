@@ -2,7 +2,8 @@
 //!
 //! The macro source owns elevation and climate. This adapter deterministically turns those fields
 //! into biome surfaces, shallow soil, geology, and bounded sub-30 m relief while preserving the
-//! learned macro shape. It does not invent caves, vegetation, routes, or authored atlas content.
+//! learned macro shape. It adds deterministic climate-driven vegetation, but does not invent caves,
+//! routes, or authored atlas content.
 
 use crate::{
     AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, ChunkSnapshot, EditMap,
@@ -22,8 +23,7 @@ use crate::{
 use std::collections::BTreeMap;
 
 const SURFACE_TILE_SAMPLE_EDGE: u32 = 34;
-const ECOLOGY_CELL_VOXELS: i32 = 96;
-const ECOLOGY_CELL_MARGIN_VOXELS: i32 = 16;
+const ECOLOGY_CELL_VOXELS: i32 = 64;
 const ECOLOGY_MIN_TREE_SPACING_VOXELS: i32 = 30;
 type SurfaceAliasMap = BTreeMap<(i32, i32), (i32, Material)>;
 
@@ -824,7 +824,7 @@ impl WorldSourceEngine for HeightfieldWorldSource {
         if max_radius_cells < 0 {
             return None;
         }
-        let radius = i64::from(max_radius_cells) * i64::from(ECOLOGY_CELL_VOXELS);
+        let radius = i64::from(max_radius_cells) * i64::from(crate::FEATURE_CELL_VOXELS);
         let clamp = |value: i64| value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
         self.ecology_features_anchored_in(
             [
@@ -875,9 +875,19 @@ struct EcologyCandidate {
     z: i32,
     priority: u64,
     occurrence: f32,
+    species_draw: f32,
     variation: u8,
     orientation: u8,
     height_noise: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EcologyStructure {
+    canopy: f32,
+    gap: f32,
+    succession: f32,
+    warped_x: i32,
+    warped_z: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -964,23 +974,31 @@ fn ecology_candidates_in(
 }
 
 fn ecology_candidate(seed: u64, cell_x: i32, cell_z: i32) -> Option<EcologyCandidate> {
-    let jitter_span = ECOLOGY_CELL_VOXELS - ECOLOGY_CELL_MARGIN_VOXELS * 2;
     let placement = ecology_hash(seed ^ 0x6a09_e667_f3bc_c909, cell_x, cell_z);
-    let variation = ecology_hash(seed ^ 0xbb67_ae85_84ca_a73b, cell_x, cell_z);
+    let form = ecology_hash(seed ^ 0xbb67_ae85_84ca_a73b, cell_x, cell_z);
     let origin_x = i64::from(cell_x) * i64::from(ECOLOGY_CELL_VOXELS);
     let origin_z = i64::from(cell_z) * i64::from(ECOLOGY_CELL_VOXELS);
-    let offset_x = ECOLOGY_CELL_MARGIN_VOXELS + (placement % jitter_span as u64) as i32;
-    let offset_z = ECOLOGY_CELL_MARGIN_VOXELS + ((placement >> 16) % jitter_span as u64) as i32;
+    let offset_x = (placement % ECOLOGY_CELL_VOXELS as u64) as i32;
+    let offset_z = ((placement >> 32) % ECOLOGY_CELL_VOXELS as u64) as i32;
     Some(EcologyCandidate {
         cell_x,
         cell_z,
         x: i32::try_from(origin_x + i64::from(offset_x)).ok()?,
         z: i32::try_from(origin_z + i64::from(offset_z)).ok()?,
         priority: ecology_hash(seed ^ 0x3c6e_f372_fe94_f82b, cell_x, cell_z),
-        occurrence: hash_unit(variation),
-        variation: ((variation >> 24) & 7) as u8,
-        orientation: ((variation >> 32) & 3) as u8,
-        height_noise: (variation >> 40) as u8,
+        occurrence: hash_unit(ecology_hash(
+            seed ^ 0xa54f_f53a_5f1d_36f1,
+            cell_x,
+            cell_z,
+        )),
+        species_draw: hash_unit(ecology_hash(
+            seed ^ 0x510e_527f_ade6_82d1,
+            cell_x,
+            cell_z,
+        )),
+        variation: (form & 7) as u8,
+        orientation: (ecology_hash(seed ^ 0x9b05_688c_2b3e_6c1f, cell_x, cell_z) & 3) as u8,
+        height_noise: ecology_hash(seed ^ 0x1f83_d9ab_fb41_bd6b, cell_x, cell_z) as u8,
     })
 }
 
@@ -1022,9 +1040,12 @@ fn ecology_tree(
     if column.height <= sea_level_voxels.saturating_add(4) || column.ridge > 0.82 {
         return None;
     }
-    let (surface, region) = surface_profile(column, sea_level_voxels);
-    let mut best = None::<(TreeSpecies, f32)>;
-    for species in TreeSpecies::ALL {
+    let (surface, _) = surface_profile(column, sea_level_voxels);
+    let structure = ecology_structure(seed, candidate.x, candidate.z);
+    let mut scores = [0.0; TreeSpecies::ALL.len()];
+    let mut best_index = 0;
+    let mut best_score = 0.0_f32;
+    for (index, species) in TreeSpecies::ALL.into_iter().enumerate() {
         let niche = tree_niche(species);
         let temperature = unimodal_suitability(
             column.temperature,
@@ -1053,29 +1074,36 @@ fn ecology_tree(
         };
         let stand = coherent_noise(
             seed ^ 0x510e_527f_ade6_82d1 ^ (species as u64).wrapping_mul(0x9e37_79b9),
-            candidate.x,
-            candidate.z,
-            2_400,
+            structure.warped_x,
+            structure.warped_z,
+            1_100,
         );
-        let score = (temperature.min(moisture) * slope * niche.prevalence * substrate
-            + stand * 0.14)
+        let (succession_optimum, succession_width) = succession_niche(species);
+        let succession = unimodal_suitability(
+            structure.succession,
+            succession_optimum,
+            succession_width,
+        );
+        let community = (0.78 + (stand * 0.5 + 0.5) * 0.24) * (0.84 + succession * 0.16);
+        let score = (temperature.min(moisture)
+            * slope
+            * niche.prevalence
+            * substrate
+            * community)
             .clamp(0.0, 1.0);
-        if best.is_none_or(|(_, best_score)| score > best_score) {
-            best = Some((species, score));
+        scores[index] = score;
+        if score > best_score {
+            best_index = index;
+            best_score = score;
         }
     }
-    let (species, suitability) = best?;
-    let region_density = match region {
-        SurfaceRegion::VerdantForest => 0.15,
-        SurfaceRegion::WindMoor => 0.03,
-        SurfaceRegion::Alpine => -0.08,
-        SurfaceRegion::RedBadlands | SurfaceRegion::PaleDunes => -0.04,
-        SurfaceRegion::Volcanic => -0.12,
-    };
-    let density = (suitability * 0.68 + region_density).clamp(0.0, 0.84);
-    if suitability < 0.24 || candidate.occurrence > density {
+    let effective_canopy = structure.canopy * (1.0 - structure.gap * 0.94);
+    let stand_density = smooth_rise(effective_canopy, 0.10, 0.82);
+    let density = (best_score * (0.012 + stand_density * 0.91)).clamp(0.0, 0.92);
+    if best_score < 0.24 || candidate.occurrence > density {
         return None;
     }
+    let species = ecology_species_choice(scores, best_index, candidate.species_draw);
     let (minimum_height, height_span) = tree_height_range(species);
     let height = minimum_height + i32::from(candidate.height_noise) % height_span;
     Some(SkylineFeature {
@@ -1091,6 +1119,68 @@ fn ecology_tree(
         prominence: 0,
         route_landmark: None,
     })
+}
+
+fn ecology_species_choice(
+    scores: [f32; TreeSpecies::ALL.len()],
+    best_index: usize,
+    draw: f32,
+) -> TreeSpecies {
+    if draw < 0.78 {
+        return TreeSpecies::ALL[best_index];
+    }
+    let minimum = scores[best_index] * 0.38;
+    let weights = scores.map(|score| (score - minimum).max(0.0).powi(2));
+    let total = weights.iter().sum::<f32>();
+    if total <= f32::EPSILON {
+        return TreeSpecies::ALL[best_index];
+    }
+    let mut target = ((draw - 0.78) / 0.22).clamp(0.0, 1.0) * total;
+    for (species, weight) in TreeSpecies::ALL.into_iter().zip(weights) {
+        target -= weight;
+        if target <= 0.0 {
+            return species;
+        }
+    }
+    TreeSpecies::ALL[best_index]
+}
+
+fn succession_niche(species: TreeSpecies) -> (f32, f32) {
+    match species {
+        TreeSpecies::Birch | TreeSpecies::Aspen => (0.18, 0.52),
+        TreeSpecies::Alder | TreeSpecies::Pine | TreeSpecies::Acacia => (0.32, 0.58),
+        TreeSpecies::Larch | TreeSpecies::Juniper | TreeSpecies::Willow => (0.48, 0.62),
+        TreeSpecies::Oak | TreeSpecies::Spruce => (0.68, 0.58),
+        TreeSpecies::Beech | TreeSpecies::Fir => (0.84, 0.50),
+    }
+}
+
+fn ecology_structure(seed: u64, x: i32, z: i32) -> EcologyStructure {
+    let warp_x = coherent_noise(seed ^ 0x428a_2f98, x, z, 5_300) * 720.0;
+    let warp_z = coherent_noise(seed ^ 0x7137_4491, x, z, 4_700) * 720.0;
+    let warped_x = offset_coordinate(x, warp_x);
+    let warped_z = offset_coordinate(z, warp_z);
+    let canopy_signal = coherent_noise(seed ^ 0xb5c0_fbcf, warped_x, warped_z, 5_100) * 0.56
+        + coherent_noise(seed ^ 0xe9b5_dba5, warped_x, warped_z, 1_750) * 0.30
+        + coherent_noise(seed ^ 0x3956_c25b, warped_x, warped_z, 570) * 0.14;
+    let canopy = smooth_rise(canopy_signal, -0.22, 0.30);
+    let gap_signal = coherent_noise(seed ^ 0x59f1_11f1, warped_x, warped_z, 760) * 0.68
+        + coherent_noise(seed ^ 0x923f_82a4, warped_x, warped_z, 270) * 0.32;
+    let gap = smooth_rise(gap_signal, 0.38, 0.72) * smooth_rise(canopy, 0.34, 0.74);
+    let succession_signal = coherent_noise(seed ^ 0xab1c_5ed5, warped_x, warped_z, 2_600) * 0.72
+        + coherent_noise(seed ^ 0xd807_aa98, warped_x, warped_z, 680) * 0.28;
+    EcologyStructure {
+        canopy,
+        gap,
+        succession: (succession_signal * 0.5 + 0.5).clamp(0.0, 1.0),
+        warped_x,
+        warped_z,
+    }
+}
+
+fn offset_coordinate(coordinate: i32, offset: f32) -> i32 {
+    (i64::from(coordinate) + offset.round() as i64)
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
 const fn tree_niche(species: TreeSpecies) -> TreeNiche {
@@ -1544,6 +1634,7 @@ mod tests {
         MESHING_HALO_VOXELS, MacroBlockBatchResult, MacroCoordinateTransform,
         WorldSourceIdentityHash,
     };
+    use std::collections::BTreeSet;
 
     #[derive(Clone, Copy)]
     enum FakeBehavior {
@@ -1814,36 +1905,39 @@ mod tests {
             Material::Wood
         );
 
-        let level = SurfaceLodLevel::Stride2;
-        let owner = SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
-        let pristine = source
-            .generate_edited_surface_tile(&EditMap::default(), owner)
-            .expect("pristine ecology surface tile");
-        let pristine_wood = pristine
-            .terrain
-            .quads
-            .iter()
-            .filter(|quad| quad.material == Material::Wood)
-            .count();
-        assert!(pristine_wood > 0);
-
         let mut edits = EditMap::default();
         edits.insert_override(trunk, Material::Air);
-        let edited = source
-            .generate_edited_surface_tile(&edits, owner)
-            .expect("edited ecology surface tile");
-        let edited_wood = edited
-            .terrain
-            .quads
-            .iter()
-            .filter(|quad| quad.material == Material::Wood)
-            .count();
-        assert!(edited_wood < pristine_wood);
-        assert!(
-            source
-                .surface_tiles_affected_by_voxel(&edits, level, trunk)
-                .contains(&owner)
-        );
+        for level in SurfaceLodLevel::ALL {
+            let owner = SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
+            let pristine = source
+                .generate_edited_surface_tile(&EditMap::default(), owner)
+                .expect("pristine ecology surface tile");
+            let pristine_tree_quads = pristine
+                .terrain
+                .quads
+                .iter()
+                .filter(|quad| matches!(quad.material, Material::Wood | Material::Leaves))
+                .count();
+            assert!(pristine_tree_quads > 0, "tree absent at {level:?}");
+            let edited = source
+                .generate_edited_surface_tile(&edits, owner)
+                .expect("edited ecology surface tile");
+            let edited_tree_quads = edited
+                .terrain
+                .quads
+                .iter()
+                .filter(|quad| matches!(quad.material, Material::Wood | Material::Leaves))
+                .count();
+            assert!(
+                edited_tree_quads < pristine_tree_quads,
+                "edit absent at {level:?}"
+            );
+            assert!(
+                source
+                    .surface_tiles_affected_by_voxel(&edits, level, trunk)
+                    .contains(&owner)
+            );
+        }
     }
 
     #[test]
@@ -1858,6 +1952,7 @@ mod tests {
                     z: moisture_step * 379 - 4_000,
                     priority: 0,
                     occurrence: 0.0,
+                    species_draw: 0.0,
                     variation: ((temperature_step + moisture_step) & 7) as u8,
                     orientation: (temperature_step & 3) as u8,
                     height_noise: 7,
@@ -1881,6 +1976,157 @@ mod tests {
             species.len() >= 10,
             "climate catalogue collapsed to {species:?}"
         );
+    }
+
+    #[test]
+    fn ecology_priority_thinning_is_active_and_enforces_cross_cell_spacing() {
+        let seed = 0x5eed_5eed;
+        let mut raw = 0;
+        let mut accepted = BTreeMap::new();
+        for cell_z in -80..=80 {
+            for cell_x in -80..=80 {
+                let candidate = ecology_candidate(seed, cell_x, cell_z).expect("bounded candidate");
+                raw += 1;
+                if ecology_candidate_wins_spacing(seed, candidate) {
+                    accepted.insert((cell_x, cell_z), candidate);
+                }
+            }
+        }
+        assert!(accepted.len() < raw * 9 / 10, "spacing rejected too few candidates");
+        assert!(accepted.len() > raw / 2, "spacing rejected implausibly many candidates");
+        let minimum_squared = i64::from(ECOLOGY_MIN_TREE_SPACING_VOXELS).pow(2);
+        for (&(cell_x, cell_z), candidate) in &accepted {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx, dz) <= (0, 0) {
+                        continue;
+                    }
+                    let Some(neighbor) = accepted.get(&(cell_x + dx, cell_z + dz)) else {
+                        continue;
+                    };
+                    let delta_x = i64::from(neighbor.x) - i64::from(candidate.x);
+                    let delta_z = i64::from(neighbor.z) - i64::from(candidate.z);
+                    assert!(delta_x * delta_x + delta_z * delta_z >= minimum_squared);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ecology_bounds_are_seamless_across_negative_and_positive_tiles() {
+        let seed = 0xa11c_e5eed;
+        let whole = ecology_candidates_in(seed, [[-4_317, -2_119], [5_083, 3_777]])
+            .expect("whole ecology bounds");
+        let mut tiled = Vec::new();
+        for min_z in [-2_119, 1137] {
+            let max_z = if min_z < 0 { 1137 } else { 3_777 };
+            for min_x in [-4_317, -731, 2_041] {
+                let max_x = match min_x {
+                    -4_317 => -731,
+                    -731 => 2_041,
+                    _ => 5_083,
+                };
+                tiled.extend(
+                    ecology_candidates_in(seed, [[min_x, min_z], [max_x, max_z]])
+                        .expect("tiled ecology bounds"),
+                );
+            }
+        }
+        let key = |candidate: &EcologyCandidate| {
+            (
+                candidate.cell_x,
+                candidate.cell_z,
+                candidate.x,
+                candidate.z,
+                candidate.priority,
+            )
+        };
+        assert_eq!(
+            whole.iter().map(key).collect::<BTreeSet<_>>(),
+            tiled.iter().map(key).collect::<BTreeSet<_>>()
+        );
+        assert_eq!(whole.len(), tiled.len());
+    }
+
+    #[test]
+    fn multiscale_ecology_contains_dense_stands_open_land_and_mixed_species() {
+        let seed = 0x0ddc_0ffe;
+        let climate = column(100, 0.56, 0.70, 0.16, 0.10);
+        let window_cells = 20;
+        let mut counts = Vec::<u32>::new();
+        let mut dense_species = BTreeSet::new();
+        let mut dominant_mixed_stands = 0;
+        for window_z in -8..8 {
+            for window_x in -8..8 {
+                let mut count = 0_u32;
+                let mut species = BTreeMap::<TreeSpecies, u32>::new();
+                for local_z in 0..window_cells {
+                    for local_x in 0..window_cells {
+                        let cell_x = window_x * window_cells + local_x;
+                        let cell_z = window_z * window_cells + local_z;
+                        let candidate = ecology_candidate(seed, cell_x, cell_z)
+                            .expect("bounded ecology candidate");
+                        if !ecology_candidate_wins_spacing(seed, candidate) {
+                            continue;
+                        }
+                        if let Some(feature) = ecology_tree(seed, 0, candidate, &climate) {
+                            count += 1;
+                            *species
+                                .entry(feature.tree_species().expect("ecology tree species"))
+                                .or_default() += 1;
+                        }
+                    }
+                }
+                if count >= 30 {
+                    dense_species.extend(species.keys().copied());
+                }
+                if count >= 100
+                    && species.len() >= 2
+                    && species.values().copied().max().unwrap_or_default() * 100 >= count * 55
+                {
+                    dominant_mixed_stands += 1;
+                }
+                counts.push(count);
+            }
+        }
+        counts.sort_unstable();
+        let sparse = counts[counts.len() / 10];
+        let dense = counts[counts.len() * 9 / 10];
+        assert!(sparse <= 6, "landscape lacked open areas: p10={sparse}");
+        assert!(dense >= 30, "landscape lacked forest interiors: p90={dense}");
+        assert!(
+            dense >= sparse.saturating_mul(5),
+            "stand contrast collapsed: p10={sparse} p90={dense}"
+        );
+        assert!(
+            dense_species.len() >= 4,
+            "dense stands collapsed to {dense_species:?}"
+        );
+        assert!(
+            dominant_mixed_stands >= 4,
+            "species lacked locally dominant but mixed stands"
+        );
+    }
+
+    #[test]
+    fn ecology_random_channels_do_not_select_tree_height() {
+        let seed = 0xdec0_ded;
+        let mut height_totals = [0_u64; 4];
+        let mut bucket_counts = [0_u64; 4];
+        for cell_z in -64..64 {
+            for cell_x in -64..64 {
+                let candidate = ecology_candidate(seed, cell_x, cell_z).expect("bounded candidate");
+                let bucket = (candidate.occurrence * 4.0).floor().min(3.0) as usize;
+                height_totals[bucket] += u64::from(candidate.height_noise);
+                bucket_counts[bucket] += 1;
+            }
+        }
+        let means = std::array::from_fn::<_, 4, _>(|index| {
+            height_totals[index] as f64 / bucket_counts[index] as f64
+        });
+        let minimum = means.into_iter().fold(f64::INFINITY, f64::min);
+        let maximum = means.into_iter().fold(f64::NEG_INFINITY, f64::max);
+        assert!(maximum - minimum < 6.0, "occurrence selected height: {means:?}");
     }
 
     fn product(
