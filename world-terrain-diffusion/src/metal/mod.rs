@@ -1,6 +1,7 @@
 mod model;
 mod rng;
 mod scheduler;
+mod synthetic_map;
 
 use crate::{
     MODEL_FILES, MODEL_REPOSITORY, MODEL_REVISION, TerrainDiffusionConfig, TerrainDiffusionError,
@@ -13,6 +14,7 @@ use scheduler::DpmSolver;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use synthetic_map::SyntheticMapStats;
 use voxels_world::{
     MACRO_FIELD_SCHEMA_VERSION, MAX_MACRO_BLOCK_SAMPLES, MAX_WORLD_PRODUCT_BATCH, MacroBlock,
     MacroBlockBatch, MacroBlockBatchResult, MacroTerrainSource, WorldSourceError,
@@ -112,6 +114,7 @@ pub struct MetalTerrainDiffusion {
     base: Option<EdmUnet>,
     decoder: Option<EdmUnet>,
     pipeline: PipelineConfig,
+    synthetic_map: SyntheticMapStats,
     config: TerrainDiffusionConfig,
 }
 
@@ -158,6 +161,8 @@ impl MetalTerrainDiffusion {
                     }
                 })
             })?;
+        let synthetic_map =
+            SyntheticMapStats::bundled().map_err(TerrainDiffusionError::Inference)?;
         let coarse = load_model(&config.model_root, "coarse_model", dtype, &device)?;
         let base = if include_base {
             Some(load_model(
@@ -186,6 +191,7 @@ impl MetalTerrainDiffusion {
             base,
             decoder,
             pipeline,
+            synthetic_map,
             config,
         })
     }
@@ -605,6 +611,7 @@ impl MetalTerrainDiffusion {
         let conditioning = synthetic_coarse_conditioning(
             self.config.seed,
             coarse_origin,
+            &self.synthetic_map,
             &self.pipeline.coarse_means,
             &self.pipeline.coarse_stds,
         );
@@ -976,124 +983,19 @@ fn linear_combination(
 fn synthetic_coarse_conditioning(
     seed: u64,
     origin: [i32; 2],
+    synthetic_map: &SyntheticMapStats,
     means: &[f32; COARSE_SAMPLE_CHANNELS],
     stds: &[f32; COARSE_SAMPLE_CHANNELS],
 ) -> Vec<f32> {
     let pixels = TILE_EDGE * TILE_EDGE;
-    let mut output = vec![0.0_f32; COARSE_CONDITIONING_CHANNELS * pixels];
-    for z in 0..TILE_EDGE {
-        for x in 0..TILE_EDGE {
-            let world_x = f64::from(origin[1]) + x as f64;
-            let world_z = f64::from(origin[0]) + z as f64;
-            let continental = fractal_value_noise(seed ^ 0x34ae_91d2, world_x, world_z, 28.0, 4);
-            let ridge_noise =
-                fractal_value_noise(seed ^ 0xc13f_a9a9, world_x + 173.0, world_z - 89.0, 11.0, 3);
-            let ridges = (1.0 - ridge_noise.abs()).clamp(0.0, 1.0).powi(3);
-            let land = smoothstep(-0.45, 0.55, continental);
-            let local_relief =
-                fractal_value_noise(seed ^ 0x7f4a_7c15, world_x - 41.0, world_z + 227.0, 6.0, 2);
-            let elevation_metres = -650.0
-                + (continental + 1.0) * 700.0
-                + ridges * land * 2_200.0
-                + local_relief * land * 180.0;
-            let signed_root_elevation = elevation_metres.signum() * elevation_metres.abs().sqrt();
-
-            let temperature_noise =
-                fractal_value_noise(seed ^ 0x9e37_79b9, world_x + 311.0, world_z + 97.0, 42.0, 2);
-            let precipitation_noise = fractal_value_noise(
-                seed ^ 0x6a09_e667,
-                world_x - 199.0,
-                world_z - 313.0,
-                24.0,
-                4,
-            );
-            let seasonality_noise =
-                fractal_value_noise(seed ^ 0xbb67_ae85, world_x + 61.0, world_z - 151.0, 30.0, 3);
-            let temperature_celsius = (21.0 + temperature_noise * 11.0
-                - elevation_metres.max(0.0) * 0.0065)
-                .clamp(-15.0, 38.0);
-            let temperature_seasonality =
-                (260.0 + seasonality_noise.abs() * 320.0).clamp(20.0, 900.0);
-            let precipitation = (1_050.0 + precipitation_noise * 900.0 + ridges * land * 450.0)
-                .clamp(50.0, 3_500.0);
-            let precipitation_variability =
-                (58.0 - precipitation_noise * 24.0 + seasonality_noise * 12.0).clamp(5.0, 120.0);
-            let raw = [
-                signed_root_elevation,
-                temperature_celsius,
-                temperature_seasonality,
-                precipitation,
-                precipitation_variability,
-            ];
-            let pixel = z * TILE_EDGE + x;
-            for (output_channel, value) in raw.into_iter().enumerate() {
-                let mean_index = CONDITIONING_OUTPUT_CHANNELS[output_channel];
-                output[output_channel * pixels + pixel] =
-                    (value as f32 - means[mean_index]) / stds[mean_index];
-            }
+    let mut output = synthetic_map.sample(seed, origin, TILE_EDGE);
+    for output_channel in 0..COARSE_CONDITIONING_CHANNELS {
+        let mean_index = CONDITIONING_OUTPUT_CHANNELS[output_channel];
+        for value in &mut output[output_channel * pixels..(output_channel + 1) * pixels] {
+            *value = (*value - means[mean_index]) / stds[mean_index];
         }
     }
     output
-}
-
-fn fractal_value_noise(seed: u64, x: f64, z: f64, base_period: f64, octaves: usize) -> f64 {
-    let mut sum = 0.0;
-    let mut amplitude = 1.0;
-    let mut amplitude_sum = 0.0;
-    let mut period = base_period;
-    for octave in 0..octaves {
-        sum +=
-            value_noise(seed.wrapping_add(octave as u64 * 0x9e37_79b9), x, z, period) * amplitude;
-        amplitude_sum += amplitude;
-        amplitude *= 0.5;
-        period *= 0.5;
-    }
-    sum / amplitude_sum
-}
-
-fn value_noise(seed: u64, x: f64, z: f64, period: f64) -> f64 {
-    let scaled_x = x / period;
-    let scaled_z = z / period;
-    let x0 = scaled_x.floor() as i64;
-    let z0 = scaled_z.floor() as i64;
-    let x_weight = smootherstep(scaled_x - x0 as f64);
-    let z_weight = smootherstep(scaled_z - z0 as f64);
-    let top = lerp(
-        lattice_noise(seed, x0, z0),
-        lattice_noise(seed, x0 + 1, z0),
-        x_weight,
-    );
-    let bottom = lerp(
-        lattice_noise(seed, x0, z0 + 1),
-        lattice_noise(seed, x0 + 1, z0 + 1),
-        x_weight,
-    );
-    lerp(top, bottom, z_weight)
-}
-
-fn lattice_noise(seed: u64, x: i64, z: i64) -> f64 {
-    let mut value = seed
-        ^ (x as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        ^ (z as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    value ^= value >> 31;
-    let unit = (value >> 11) as f64 * (1.0 / ((1_u64 << 53) as f64));
-    unit * 2.0 - 1.0
-}
-
-fn smootherstep(value: f64) -> f64 {
-    value * value * value * (value * (value * 6.0 - 15.0) + 10.0)
-}
-
-fn smoothstep(minimum: f64, maximum: f64, value: f64) -> f64 {
-    let normalized = ((value - minimum) / (maximum - minimum)).clamp(0.0, 1.0);
-    normalized * normalized * (3.0 - 2.0 * normalized)
-}
-
-fn lerp(left: f64, right: f64, weight: f64) -> f64 {
-    left + (right - left) * weight
 }
 
 fn base_conditioning(
@@ -1410,9 +1312,10 @@ mod tests {
     fn synthetic_coarse_conditioning_is_spatial_deterministic_and_multichannel() {
         let means = [-37.7, 1.14, 18.1, 332.8, 1_332.2, 52.7];
         let stds = [39.7, 1.77, 8.9, 321.8, 842.9, 31.1];
-        let first = synthetic_coarse_conditioning(7, [-12, 34], &means, &stds);
-        let repeated = synthetic_coarse_conditioning(7, [-12, 34], &means, &stds);
-        let shifted = synthetic_coarse_conditioning(7, [-11, 34], &means, &stds);
+        let synthetic_map = SyntheticMapStats::bundled().expect("synthetic map");
+        let first = synthetic_coarse_conditioning(7, [-12, 34], &synthetic_map, &means, &stds);
+        let repeated = synthetic_coarse_conditioning(7, [-12, 34], &synthetic_map, &means, &stds);
+        let shifted = synthetic_coarse_conditioning(7, [-11, 34], &synthetic_map, &means, &stds);
         assert_eq!(first, repeated);
         assert_ne!(first, shifted);
         assert_eq!(
@@ -1432,6 +1335,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn finite_macro_source_marks_samples_outside_its_owned_tile_invalid() {
         let mut config = TerrainDiffusionConfig::pinned("model", 7);
         config.world_origin_voxels = [600, -300];

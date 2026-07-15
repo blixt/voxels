@@ -238,7 +238,7 @@ impl Default for TerrainDiffusionProviderConfig {
             precision: TerrainModelPrecision::Float16,
             world_origin_voxels: [0, 0],
             horizontal_scale: 1,
-            latent_window: [0, 0],
+            latent_window: [-2, -1],
             quality_histogram: [0.0, 0.0, 0.0, 1.0, 1.5],
             sea_level_voxels: SEA_LEVEL_VOXELS,
         }

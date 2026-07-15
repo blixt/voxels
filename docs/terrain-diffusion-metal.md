@@ -20,6 +20,7 @@ The provider pins:
 - upstream model repository `xandergos/terrain-diffusion-30m`;
 - immutable Hugging Face revision `9ef8030cb805b433b98ec25c5dddefbac07a9e26`;
 - SHA-256 for the coarse, base, and decoder safetensors;
+- SHA-256 for the bundled 64-knot ETOPO/WorldClim quantile tables;
 - sampler, scheduler, macro-field, coordinate, and voxel-composer versions in
   `WorldSourceIdentity`.
 
@@ -99,11 +100,11 @@ client.
 - The base stage uses the exact 58-component conditioning layout and the published `sigma=80` then
   `sigma=0.35` consistency passes. The decoder uses the first four latent bands and retains the
   fifth low-frequency band for signed-square-root elevation reconstruction.
-- The finite experiment uses coordinate-keyed, multi-octave continent and climate fields for the
-  five published coarse conditioning channels. Conditioning is standardized with output channels
-  `[0, 2, 3, 4, 5]`, matching upstream's elevation, temperature, temperature seasonality,
-  precipitation, and precipitation-variability mapping. The learned model still owns the 30 m
-  terrain. The provider directly maps `latent_window` to its centered 4x4 coarse context, uses the
+- The finite experiment ports upstream's FastNoiseLite Perlin FBm and its quantile-matched
+  ETOPO/WorldClim prior for all five published conditioning channels. It retains upstream's lapse
+  rate, temperature-seasonality, precipitation-variability, and signed-square-root corrections,
+  then standardizes output channels `[0, 2, 3, 4, 5]`. The learned model still owns the 30 m terrain.
+  The provider directly maps `latent_window` to its centered 4x4 coarse context, uses the
   checkpoint's `0.5` coarse conditioning SNR, and preserves the complete 64x64 learned latent window
   before performing signed-square-root/Laplacian reconstruction in native Rust. Learned coarse
   temperature and precipitation remain spatial fields; the adapter applies elevation lapse rate and
@@ -115,7 +116,9 @@ client.
   altitude, slope, and coherent geology choose biome surfaces and shallow/deep strata. Chunks,
   collision blocks, edited surfaces, and far LODs all use the same composition function.
 
-`terrain:survey` compares coordinate-stable latent windows without changing runtime selection.
-`world:source-smoke` samples the configured tile and reports its height, climate, ridge, region, and
-material ranges. These are regression diagnostics rather than promises that every seed has the same
-histogram.
+`terrain:survey` compares coordinate-stable latent windows without changing runtime selection. The
+checked-in `[-2, -1]` window for seed `1592642302` is 88% land after decoding, places the centered
+spawn at roughly 132 m, and contains rugged fjord and plateau structure with about 115 m median
+relief per 960 m diagnostic block. `world:source-smoke` samples the configured tile and reports its
+height, climate, ridge, region, and material ranges. These are regression diagnostics rather than
+promises that every seed has the same histogram.

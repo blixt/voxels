@@ -78,7 +78,7 @@ world_origin_voxels = [-76800, -76800]
 # already represent a fixed 10 cm, so stretching only the horizontal axes would flatten slopes.
 horizontal_scale = 1
 # Coordinate-stable latent-window row/column. Each step moves 7.68 km in model space.
-latent_window = [0, 0]
+latent_window = [-2, -1]
 # Learned terrain-quality logits used by the paper's showcase generator. Higher final bins favor
 # sharper, more visually interesting terrain while preserving deterministic coordinate semantics.
 quality_histogram = [0.0, 0.0, 0.0, 1.0, 1.5]

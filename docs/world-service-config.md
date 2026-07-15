@@ -80,7 +80,7 @@ xz_voxels = [0, 0]
 precision = "float16"
 world_origin_voxels = [-76800, -76800]
 horizontal_scale = 1
-latent_window = [0, 0]
+latent_window = [-2, -1]
 quality_histogram = [0.0, 0.0, 0.0, 1.0, 1.5]
 sea_level_voxels = 52
 # model_cache = "/an/optional/cache/root"
@@ -100,6 +100,9 @@ scale changes both axes through the size represented by one cubic block.
 for the exact one-voxel meshing halo around spawn. The server validates the actual spawn chunk at startup.
 `latent_window` is the Terrain Diffusion latent-window row/column used to key spatial sampling and
 noise. Each step advances 32 latent pixels, or 7.68 km for the 30 m checkpoint.
+The checked-in `[-2, -1]` window is a fixed, reproducible showcase start for the checked-in seed: it
+puts the spawn on land amid the rugged fjord and plateau structure learned by the model. Runtime
+generation never searches for or substitutes a more dramatic window.
 `quality_histogram` is the five-bin learned terrain-quality conditioning vector. The checked-in
 `[0, 0, 0, 1, 1.5]` preset is the upstream showcase setting and favors the two highest-rated bins;
 all zeros selects the unsteered checkpoint default.

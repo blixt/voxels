@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .map(|value| parse_coordinate_pair(&value))
         .transpose()?
-        .unwrap_or([0, 0]);
+        .unwrap_or([-2, -1]);
     let config = TerrainDiffusionConfig {
         model_root,
         seed,
@@ -176,6 +176,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|value| f64::from(*value))
             .sum::<f64>()
             / generated.detail.elevation_metres.len() as f64;
+        let detail_edge = generated.detail.edge;
+        let detail_resolution = generated.detail.horizontal_resolution_metres as f32;
+        let mut ordered_elevation = generated.detail.elevation_metres.clone();
+        ordered_elevation.sort_by(f32::total_cmp);
+        let elevation_p05 = percentile(&ordered_elevation, 0.05);
+        let elevation_p50 = percentile(&ordered_elevation, 0.50);
+        let elevation_p95 = percentile(&ordered_elevation, 0.95);
+        let detail_land_fraction = ordered_elevation.partition_point(|value| *value <= 0.0) as f64;
+        let detail_land_fraction = 1.0 - detail_land_fraction / ordered_elevation.len() as f64;
+        let center_elevation =
+            generated.detail.elevation_metres[(detail_edge / 2) * detail_edge + detail_edge / 2];
+        let mut slopes = Vec::with_capacity((detail_edge - 2) * (detail_edge - 2));
+        for row in 1..detail_edge - 1 {
+            for column in 1..detail_edge - 1 {
+                let horizontal = (generated.detail.elevation_metres
+                    [row * detail_edge + column + 1]
+                    - generated.detail.elevation_metres[row * detail_edge + column - 1])
+                    / (2.0 * detail_resolution);
+                let vertical = (generated.detail.elevation_metres
+                    [(row + 1) * detail_edge + column]
+                    - generated.detail.elevation_metres[(row - 1) * detail_edge + column])
+                    / (2.0 * detail_resolution);
+                slopes.push(horizontal.hypot(vertical).atan().to_degrees());
+            }
+        }
+        slopes.sort_by(f32::total_cmp);
+        let mut kilometre_relief = Vec::new();
+        for block_row in (0..detail_edge).step_by(32) {
+            for block_column in (0..detail_edge).step_by(32) {
+                let mut block_minimum = f32::INFINITY;
+                let mut block_maximum = f32::NEG_INFINITY;
+                for row in block_row..(block_row + 32).min(detail_edge) {
+                    for column in block_column..(block_column + 32).min(detail_edge) {
+                        let value = generated.detail.elevation_metres[row * detail_edge + column];
+                        block_minimum = block_minimum.min(value);
+                        block_maximum = block_maximum.max(value);
+                    }
+                }
+                kilometre_relief.push(block_maximum - block_minimum);
+            }
+        }
+        kilometre_relief.sort_by(f32::total_cmp);
+        if let Some(path) = std::env::var_os("VOXELS_TERRAIN_PREVIEW") {
+            write_hillshade_preview(
+                PathBuf::from(path),
+                &generated.detail.elevation_metres,
+                detail_edge,
+                detail_resolution,
+            )?;
+        }
         println!("device={}", runtime.device_description());
         println!("precision={:?}", runtime.precision());
         println!("seed={seed}");
@@ -198,6 +248,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             generated.detail.edge,
             generated.detail.edge,
             generated.detail.horizontal_resolution_metres,
+        );
+        println!(
+            "detail_p05_m={elevation_p05:.3} detail_p50_m={elevation_p50:.3} detail_p95_m={elevation_p95:.3} center_m={center_elevation:.3} land_fraction={detail_land_fraction:.3}"
+        );
+        println!(
+            "slope_p50_degrees={:.3} slope_p90_degrees={:.3} relief_960m_p50={:.3} relief_960m_p90={:.3}",
+            percentile(&slopes, 0.50),
+            percentile(&slopes, 0.90),
+            percentile(&kilometre_relief, 0.50),
+            percentile(&kilometre_relief, 0.90),
         );
         return Ok(());
     }
@@ -229,11 +289,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     / low.len() as f64;
                 let minimum = low.iter().copied().fold(f32::INFINITY, f32::min);
                 let maximum = low.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let context_origin = latent.coarse_patch_origin;
+                let mut coarse_context_sum = 0.0_f64;
+                let mut coarse_context_land = 0_usize;
+                for context_row in 0..4 {
+                    for context_column in 0..4 {
+                        let value = coarse.values[(context_origin[0] + context_row) * coarse.edge
+                            + context_origin[1]
+                            + context_column];
+                        coarse_context_sum += f64::from(value);
+                        coarse_context_land += usize::from(value > 0.0);
+                    }
+                }
                 candidates.push((
                     variance.sqrt(),
                     [row, column],
                     minimum,
                     maximum,
+                    coarse_context_sum / 16.0,
+                    coarse_context_land as f64 / 16.0,
                     coarse.elapsed_seconds,
                     latent.elapsed_seconds,
                 ));
@@ -243,11 +317,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("device={}", runtime.device_description());
         println!("precision={:?}", runtime.precision());
         println!("seed={seed} center={latent_window:?} radius={radius}");
-        for (rank, (standard_deviation, window, minimum, maximum, coarse_s, latent_s)) in
-            candidates.into_iter().enumerate()
+        for (
+            rank,
+            (
+                standard_deviation,
+                window,
+                minimum,
+                maximum,
+                coarse_context_mean,
+                coarse_context_land,
+                coarse_s,
+                latent_s,
+            ),
+        ) in candidates.into_iter().enumerate()
         {
             println!(
-                "rank={} latent_window={window:?} low_std={standard_deviation:.6} low_min={minimum:.6} low_max={maximum:.6} coarse_ms={:.3} latent_ms={:.3}",
+                "rank={} latent_window={window:?} low_std={standard_deviation:.6} low_min={minimum:.6} low_max={maximum:.6} coarse_context_mean={coarse_context_mean:.3} coarse_context_land={coarse_context_land:.3} coarse_ms={:.3} latent_ms={:.3}",
                 rank + 1,
                 coarse_s * 1_000.0,
                 latent_s * 1_000.0,
@@ -334,4 +419,41 @@ fn parse_coordinate_pair(value: &str) -> Result<[i32; 2], Box<dyn std::error::Er
         return Err("VOXELS_TERRAIN_WINDOW must contain exactly row,column".into());
     }
     Ok([row, column])
+}
+
+fn percentile(sorted: &[f32], fraction: f32) -> f32 {
+    let position = fraction * (sorted.len() - 1) as f32;
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    sorted[lower] + position.fract() * (sorted[upper] - sorted[lower])
+}
+
+fn write_hillshade_preview(
+    path: PathBuf,
+    elevation: &[f32],
+    edge: usize,
+    resolution_metres: f32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = format!("P5\n{edge} {edge}\n255\n").into_bytes();
+    bytes.reserve(edge * edge);
+    let light = [-0.5_f32, 2.0_f32.sqrt() / 2.0, -0.5_f32];
+    for row in 0..edge {
+        for column in 0..edge {
+            let left = elevation[row * edge + column.saturating_sub(1)];
+            let right = elevation[row * edge + (column + 1).min(edge - 1)];
+            let top = elevation[row.saturating_sub(1) * edge + column];
+            let bottom = elevation[(row + 1).min(edge - 1) * edge + column];
+            let horizontal = (right - left) / (2.0 * resolution_metres);
+            let vertical = (bottom - top) / (2.0 * resolution_metres);
+            let inverse_length = (horizontal * horizontal + vertical * vertical + 1.0)
+                .sqrt()
+                .recip();
+            let illumination = ((-horizontal * light[0] + light[1] - vertical * light[2])
+                * inverse_length)
+                .clamp(0.0, 1.0);
+            bytes.push(((0.18 + illumination * 0.82) * 255.0).round() as u8);
+        }
+    }
+    std::fs::write(path, bytes)?;
+    Ok(())
 }

@@ -17,7 +17,7 @@ use voxels_world::{
 
 pub const MODEL_REPOSITORY: &str = "xandergos/terrain-diffusion-30m";
 pub const MODEL_REVISION: &str = "9ef8030cb805b433b98ec25c5dddefbac07a9e26";
-pub const IMPLEMENTATION_VERSION: u32 = 6;
+pub const IMPLEMENTATION_VERSION: u32 = 7;
 pub const SAMPLER_VERSION: u32 = 1;
 pub const SCHEDULER_VERSION: u32 = 1;
 pub const COARSE_WEIGHT_SHA256: &str =
@@ -26,6 +26,8 @@ pub const BASE_WEIGHT_SHA256: &str =
     "351d1b1a77cf32e15adc4f72ed5fd26d317340598329d35f5dce2ff6dbcce735";
 pub const DECODER_WEIGHT_SHA256: &str =
     "b6c7fa99f836ad75c514236c9529e18a68ea207ed59dd39fd1341fc9a8a03bcc";
+pub const SYNTHETIC_MAP_DATA_SHA256: &str =
+    "4e17527829f22435745be8bbbf3427af1e73f7e7031a0e6c339f8edda2dc84bb";
 
 pub const MODEL_FILES: [&str; 7] = [
     "config.json",
@@ -70,7 +72,7 @@ impl TerrainDiffusionConfig {
             require_metal: true,
             world_origin_voxels: [0, 0],
             horizontal_scale: 1,
-            latent_window: [0, 0],
+            latent_window: [-2, -1],
             quality_histogram: [0.0, 0.0, 0.0, 1.0, 1.5],
         }
     }
@@ -82,7 +84,7 @@ impl TerrainDiffusionConfig {
                 self.horizontal_scale,
             ));
         }
-        configuration.update(b"voxels-terrain-diffusion-configuration-v7\0");
+        configuration.update(b"voxels-terrain-diffusion-configuration-v8\0");
         configuration.update(self.seed.to_le_bytes());
         configuration.update([self.precision as u8]);
         for coordinate in self.world_origin_voxels {
@@ -96,8 +98,10 @@ impl TerrainDiffusionConfig {
             configuration.update(value.to_bits().to_le_bytes());
         }
         configuration.update(
-            b"coordinate-keyed-fractal-continent-climate-v1;pinned-conditioning-noise-ratio-0.5;coordinate-aligned-centered-4x4-coarse;full-64x64-latent;512x512-decoder;spatial-coarse-climate-lapse-aridity;physical-gradient-ridge;configurable-horizontal-scale-v1\0",
+            b"fastnoise-lite-perlin-fbm-quantile-matched-etopo-worldclim-v1;pinned-conditioning-noise-ratio-0.5;coordinate-aligned-centered-4x4-coarse;full-64x64-latent;512x512-decoder;spatial-coarse-climate-lapse-aridity;physical-gradient-ridge;configurable-horizontal-scale-v1\0",
         );
+        let synthetic_map_data_hash = parse_sha256(SYNTHETIC_MAP_DATA_SHA256)?;
+        configuration.update(synthetic_map_data_hash.as_bytes());
         configuration.update(512_u32.to_le_bytes());
         let configuration_hash: [u8; 32] = configuration.finalize().into();
         Ok(WorldSourceIdentity {
@@ -297,6 +301,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bundled_synthetic_map_data_matches_the_pinned_identity_hash() {
+        let actual = Sha256::digest(include_bytes!("../fixtures/pipeline-data.json"));
+        assert_eq!(format!("{actual:x}"), SYNTHETIC_MAP_DATA_SHA256);
+    }
+
+    #[test]
     fn pinned_configuration_requires_metal_and_fast_metal_precision_by_default() {
         let config = TerrainDiffusionConfig::pinned("model", 7);
         assert!(config.require_metal);
@@ -304,7 +314,7 @@ mod tests {
         assert_eq!(config.model_root, PathBuf::from("model"));
         assert_eq!(config.world_origin_voxels, [0, 0]);
         assert_eq!(config.horizontal_scale, 1);
-        assert_eq!(config.latent_window, [0, 0]);
+        assert_eq!(config.latent_window, [-2, -1]);
         assert_eq!(config.quality_histogram, [0.0, 0.0, 0.0, 1.0, 1.5]);
     }
 
