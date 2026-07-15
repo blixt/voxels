@@ -212,6 +212,36 @@ impl SurfacePatchId {
             Self::new(finer, x.checked_add(1)?, z.checked_add(1)?),
         ])
     }
+
+    pub const fn voxel_span(self) -> i32 {
+        self.level.stride_voxels() * SURFACE_PATCH_EDGE_CELLS
+    }
+
+    pub fn voxel_bounds_xz(self) -> Option<[[i32; 2]; 2]> {
+        let span = self.voxel_span();
+        let min_x = self.x.checked_mul(span)?;
+        let min_z = self.z.checked_mul(span)?;
+        Some([
+            [min_x, min_z],
+            [min_x.checked_add(span)?, min_z.checked_add(span)?],
+        ])
+    }
+
+    pub fn voxel_center_xz(self) -> Option<[i32; 2]> {
+        let bounds = self.voxel_bounds_xz()?;
+        Some([
+            bounds[0][0] + (bounds[1][0] - bounds[0][0]) / 2,
+            bounds[0][1] + (bounds[1][1] - bounds[0][1]) / 2,
+        ])
+    }
+
+    pub fn neighbor(self, delta_x: i32, delta_z: i32) -> Option<Self> {
+        Some(Self::new(
+            self.level,
+            self.x.checked_add(delta_x)?,
+            self.z.checked_add(delta_z)?,
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1749,6 +1779,11 @@ mod tests {
             SurfacePatchId::new(SurfaceLodLevel::Stride2, 0, 0).children(),
             None
         );
+
+        let negative = SurfacePatchId::new(SurfaceLodLevel::Stride4, -2, -1);
+        assert_eq!(negative.voxel_bounds_xz(), Some([[-64, -32], [-32, 0]]));
+        assert_eq!(negative.voxel_center_xz(), Some([-48, -16]));
+        assert_eq!(negative.neighbor(1, 0), Some(children[3]));
     }
 
     #[test]
