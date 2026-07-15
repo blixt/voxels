@@ -3235,8 +3235,13 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
     // prevents distant hills from becoming black combs without adding geometry or accidentally
     // smoothing canonical cliffs, skyline proxies, or disposable transition skirts.
     for patch in &tile.patches {
-        for quad_index in patch.quad_range.start as usize..patch.quad_range.end as usize {
-            let quad = tile.quads[quad_index];
+        let start = patch.quad_range.start as usize;
+        let end = patch.quad_range.end as usize;
+        for (quad, packed_normal) in tile.quads[start..end]
+            .iter()
+            .copied()
+            .zip(&mut packed[start..end])
+        {
             if quad.face == 2 || i32::from(quad.extent[0]) != stride {
                 continue;
             }
@@ -3273,7 +3278,7 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
             if quad_top == i64::from(height) + 1
                 && let Some(normal) = cell_normals[cell]
             {
-                packed[quad_index] = normal;
+                *packed_normal = normal;
             }
         }
     }
