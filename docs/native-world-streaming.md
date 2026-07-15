@@ -220,8 +220,9 @@ vp run test:multiplayer-browser
 ```
 
 It launches six independent browser contexts with shaped links and fresh identities, keeps five
-builders visible while an observer walks about 120 m away, then has all five builders submit a 4 m,
-40-voxel server-authoritative tower from within validated reach. The gate waits until every browser
+builders visible while an observer walks about 120 m away, then has each builder mine material and
+collectively place a 4.5 m column with a 1.7 m crossbar (77 authoritative voxels) from within
+validated reach. The gate waits until every browser
 has applied all commits, the far observer has accepted and uploaded the revised stride-16 surface
 tile, and a before/after pixel comparison proves the aimed tower is visibly legible. It owns a
 temporary native edit database, rejects browser/WGPU/socket errors, and writes ignored

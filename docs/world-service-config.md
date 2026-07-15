@@ -165,5 +165,5 @@ The gameplay section is server-only authority. Interaction reach is 5 m with a h
 for ordinary ordering skew between the dedicated presence and world sockets; edits are rejected when
 the pose is stale. Horizontal and vertical token buckets replenish at their configured speeds and
 retain only bounded slack/window credit, so packet delay is tolerated without letting a client reuse
-a fixed teleport tolerance on every update. New players receive the configured count for every
-non-Air material; digging and placement then credit and debit exact canonical-voxel units.
+a fixed teleport tolerance on every update. New players start with an empty inventory; digging
+credits the exact canonical materials removed, and placement debits those earned voxel units.

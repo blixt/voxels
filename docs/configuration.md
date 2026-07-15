@@ -29,11 +29,11 @@ The file controls:
 - fixed-step timing, catch-up limit, persistence cadence, and edit-tracker capacity;
 - chunk and surface-LOD load/retention radii, pipeline budgets, and interest capacity;
 - view/shadow settings;
-- the initial daylight and placement material;
+- the initial daylight;
 - every feature toggle shown in Mission Control, plus its initial open/compact state;
 - persistence request/retry policy;
 - bounded diagnostic probe sizes and cadence;
-- automated profile speed, warmup/measurement durations, and edit count.
+- automated profile speed and warmup/measurement durations.
 
 Mission Control remains interactive. Its reset action restores the configured feature baseline,
 including a mixed on/off baseline, rather than a hard-coded all-enabled state.
