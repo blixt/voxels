@@ -8,7 +8,10 @@ describe("isolated browser world fixture", () => {
     const previousClient = process.env.VOXELS_CLIENT_CONFIG_PATH;
     const previousService = process.env.VOXELS_WORLD_SERVICE_CONFIG_PATH;
     const previousExternalService = process.env.VOXELS_EXTERNAL_WORLD_SERVICE;
-    const fixture = await prepareBrowserWorldFixture({ browserPort: 41_234 });
+    const fixture = await prepareBrowserWorldFixture({
+      browserPort: 41_234,
+      spawnVoxels: [-12_800, 25_600],
+    });
     try {
       const [client, service] = await Promise.all([
         readFile(fixture.clientConfigPath, "utf8"),
@@ -25,6 +28,8 @@ describe("isolated browser world fixture", () => {
       expect(service).toContain('allowed_origins = ["http://127.0.0.1:41234"]');
       expect(service).toContain(`auth_subprotocol_token = "${fixture.authToken}"`);
       expect(service).toContain('database = "world-state.sqlite3"');
+      expect(service).toContain("xz_voxels = [-12800, 25600]");
+      expect(fixture.spawnVoxels).toEqual([-12_800, 25_600]);
       expect(fixture.databasePath.startsWith(fixture.directory)).toBe(true);
       expect(process.env.VOXELS_CLIENT_CONFIG_PATH).toBe(fixture.clientConfigPath);
       expect(process.env.VOXELS_WORLD_SERVICE_CONFIG_PATH).toBe(fixture.serviceConfigPath);

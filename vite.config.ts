@@ -551,6 +551,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/world-service.ts --source-smoke",
         cache: false,
       },
+      "world:ecology-survey": {
+        command: "node scripts/world-service.ts --ecology-survey",
+        cache: false,
+      },
       "world:serve": {
         command: "node scripts/world-service.ts --metal",
         cache: false,

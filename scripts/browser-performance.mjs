@@ -530,6 +530,22 @@ const sustained = process.argv.includes("--sustained");
 const materials = process.argv.includes("--materials");
 const atmosphere = process.argv.includes("--atmosphere");
 const worldSource = process.env.VOXELS_PROFILE_SOURCE ?? "procedural-v16";
+const spawnVoxels = (() => {
+  const configured = process.env.VOXELS_PROFILE_SPAWN;
+  if (configured === undefined) return undefined;
+  const parts = configured.split(",").map((value) => value.trim());
+  const values = parts.map(Number);
+  if (
+    parts.length !== 2 ||
+    !parts.every((value) => /^-?\d+$/.test(value)) ||
+    !values.every(
+      (value) => Number.isInteger(value) && value >= -2_147_483_648 && value <= 2_147_483_647,
+    )
+  ) {
+    throw new Error("VOXELS_PROFILE_SPAWN must be two comma-separated canonical voxel coordinates");
+  }
+  return values;
+})();
 const buildProfile = process.env.VOXELS_PROFILE_BUILD ?? "release";
 if (!new Set(["debug", "wasm-dev", "release"]).has(buildProfile)) {
   throw new Error("VOXELS_PROFILE_BUILD must be debug, wasm-dev, or release");
@@ -566,6 +582,7 @@ try {
     browserPort: port,
     prefix: "voxels-browser-profile-",
     source: worldSource,
+    spawnVoxels,
   });
   const { build, preview } = await import("vite-plus");
   await build({ logLevel: "warn" });
@@ -621,6 +638,7 @@ try {
     dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "",
     build: buildProfile,
     worldSource,
+    spawnVoxels: fixture.spawnVoxels,
     viewport: { ...viewport, deviceScaleFactor },
     browser: { version: browser.version() },
     startup: { settledMilliseconds },

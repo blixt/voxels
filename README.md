@@ -38,10 +38,11 @@ native Rust/Metal Terrain Diffusion provider on Apple silicon; see
 The server-owned [world source configuration](docs/world-service-config.md) defaults to native
 Terrain Diffusion/Metal generation and can select the procedural source without exposing that choice
 to clients. `vp run world:source-smoke` loads the TOML and verifies the selected source with one
-macro-field request. `vp dev` starts and stops the Metal-capable daemon with Vite; `vp run
-world:serve` remains available for daemon-only diagnostics. Either source can be selected by changing
-only the server's `source` value and restarting development. The browser always consumes the same
-canonical protocol. See
+macro-field request. `vp run world:ecology-survey` prints a 3.2 km deterministic forest-density map,
+tree-count percentiles, and the densest spawn coordinates. `vp dev` starts and stops the
+Metal-capable daemon with Vite; `vp run world:serve` remains available for daemon-only diagnostics.
+Either source can be selected by changing only the server's `source` value and restarting
+development. The browser always consumes the same canonical protocol. See
 [Native world streaming](docs/native-world-streaming.md) for the matching endpoint/token settings,
 Chrome local-network permission, binary VXWP protocol, transport rationale, and exact run steps.
 Client runtime, streaming, rendering/Mission Control, persistence, diagnostics, and profiling
@@ -59,6 +60,7 @@ queries and authored locations.
 `vp run profile:chromium` runs the same isolated headless Chromium workload and also writes a CDP
 performance trace under `target/`. Set `VOXELS_PROFILE_BUILD=wasm-dev`,
 `VOXELS_PROFILE_SOURCE=terrain-diffusion-30m`, `VOXELS_PROFILE_DPR=2`,
+`VOXELS_PROFILE_SPAWN=-12800,25600`,
 `VOXELS_PROFILE_OUTPUT=target/render-profile/result.json`, or `VOXELS_PROFILE_TRACE_PATH=...` to
 reproduce a particular local configuration without touching an existing browser or its OPFS data.
 `vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step closed rail. One lap warms the exact

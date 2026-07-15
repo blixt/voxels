@@ -22,9 +22,20 @@ export async function prepareBrowserWorldFixture({
   browserPort,
   prefix = "voxels-browser-world-",
   source = "procedural-v16",
+  spawnVoxels,
 }) {
   if (!Number.isInteger(browserPort) || browserPort <= 0 || browserPort > 65_535) {
     throw new Error("browser fixture port must be in 1..=65535");
+  }
+  if (
+    spawnVoxels !== undefined &&
+    (!Array.isArray(spawnVoxels) ||
+      spawnVoxels.length !== 2 ||
+      !spawnVoxels.every(
+        (value) => Number.isInteger(value) && value >= -2_147_483_648 && value <= 2_147_483_647,
+      ))
+  ) {
+    throw new Error("browser fixture spawnVoxels must contain two signed 32-bit integers");
   }
   const directory = await mkdtemp(path.join(tmpdir(), prefix));
   try {
@@ -47,7 +58,11 @@ export async function prepareBrowserWorldFixture({
             `allowed_origins = ["http://127.0.0.1:${browserPort}"]`,
           )
           .replace(/^auth_subprotocol_token = .*$/m, `auth_subprotocol_token = "${authToken}"`)
-          .replace(/^database = .*$/m, 'database = "world-state.sqlite3"'),
+          .replace(/^database = .*$/m, 'database = "world-state.sqlite3"')
+          .replace(
+            /^xz_voxels = .*$/m,
+            `xz_voxels = [${spawnVoxels?.[0] ?? 0}, ${spawnVoxels?.[1] ?? 0}]`,
+          ),
       ),
       writeFile(
         clientConfigPath,
@@ -77,6 +92,7 @@ export async function prepareBrowserWorldFixture({
       clientConfigPath,
       serviceConfigPath,
       databasePath: path.join(directory, "world-state.sqlite3"),
+      spawnVoxels: spawnVoxels ?? [0, 0],
       async cleanup() {
         if (cleaned) return;
         cleaned = true;
