@@ -21,6 +21,7 @@ use crate::{
 use std::collections::BTreeMap;
 
 const SURFACE_TILE_SAMPLE_EDGE: u32 = 34;
+type SurfaceAliasMap = BTreeMap<(i32, i32), (i32, Material)>;
 
 /// Deterministic field-to-voxel adapter for non-procedural macro sources.
 pub struct HeightfieldWorldSource {
@@ -47,11 +48,9 @@ impl HeightfieldWorldSource {
             return Err(WorldSourceError::MalformedMacroBlock);
         }
         let identity_hash = identity.identity_hash();
-        let composer_seed = u64::from_le_bytes(
-            identity_hash.as_bytes()[..8]
-                .try_into()
-                .expect("identity hashes always contain eight seed bytes"),
-        );
+        let mut composer_seed_bytes = [0_u8; 8];
+        composer_seed_bytes.copy_from_slice(&identity_hash.as_bytes()[..8]);
+        let composer_seed = u64::from_le_bytes(composer_seed_bytes);
         let add_subgrid_relief = matches!(
             identity.source_kind,
             crate::WorldSourceKind::TerrainDiffusion30m
@@ -441,7 +440,7 @@ impl HeightfieldWorldSource {
         edits: &EditMap,
         coord: SurfaceTileCoord,
         priority: WorldProductPriority,
-    ) -> Result<BTreeMap<(i32, i32), (i32, Material)>, WorldSourceError> {
+    ) -> Result<SurfaceAliasMap, WorldSourceError> {
         let [origin_x, origin_z] = coord.voxel_origin();
         let stride = coord.stride_voxels();
         let halo_span = (SURFACE_TILE_EDGE_CELLS + 1).saturating_mul(stride);
