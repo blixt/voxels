@@ -55,8 +55,20 @@ fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
 fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let uv = position.xy / frame.viewport_voxel.xy;
   let ndc = vec2<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0);
-  let far_position = frame.inverse_view_projection * vec4<f32>(ndc, 1.0, 1.0);
-  let ray = normalize(far_position.xyz / far_position.w - frame.camera_time.xyz);
+  // The sky is infinitely distant, so its view ray must depend on camera rotation but never camera
+  // translation. Reconstructing a world-space point from the translated inverse view-projection and
+  // subtracting the camera again caused visible cancellation jitter while walking, especially far
+  // from the world origin. This matches the renderer's fixed 68-degree vertical field of view.
+  let camera_forward = normalize(frame.camera_forward.xyz);
+  let camera_right = normalize(cross(camera_forward, vec3<f32>(0.0, 1.0, 0.0)));
+  let camera_up = normalize(cross(camera_right, camera_forward));
+  let vertical_half_fov_tangent = 0.6745085;
+  let aspect = frame.viewport_voxel.x / max(frame.viewport_voxel.y, 1.0);
+  let ray = normalize(
+    camera_forward
+      + camera_right * ndc.x * aspect * vertical_half_fov_tangent
+      + camera_up * ndc.y * vertical_half_fov_tangent,
+  );
   let sun_direction = normalize(frame.sun_direction.xyz);
   let elevation = clamp(ray.y * 0.5 + 0.5, 0.0, 1.0);
   let horizon = pow(1.0 - abs(ray.y), 5.0);
