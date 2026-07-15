@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 10;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 11;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -109,7 +109,7 @@ pub struct FrameBudgetConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SurfaceStreamingConfig {
-    pub load_radius_tiles: [u32; 4],
+    pub load_radius_tiles: [u32; 6],
     pub retention_margin_tiles: u32,
 }
 
@@ -644,9 +644,9 @@ mod tests {
         ClientConfig {
             schema_version: CLIENT_CONFIG_SCHEMA_VERSION,
             world: WorldTransportConfig {
-                endpoint: "ws://127.0.0.1:9777/v8/world".to_owned(),
-                presence_endpoint: "ws://127.0.0.1:9777/v8/presence".to_owned(),
-                subprotocol: "voxels.world.v8".to_owned(),
+                endpoint: "ws://127.0.0.1:9777/v9/world".to_owned(),
+                presence_endpoint: "ws://127.0.0.1:9777/v9/presence".to_owned(),
+                subprotocol: "voxels.world.v9".to_owned(),
                 auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
                 max_in_flight_batches: 8,
                 buffered_amount_high_water_bytes: 8 * 1024 * 1024,
@@ -684,12 +684,12 @@ mod tests {
                     upload: 3,
                 },
                 surface: SurfaceStreamingConfig {
-                    load_radius_tiles: [4, 4, 4, 5],
+                    load_radius_tiles: [4, 4, 4, 5, 4, 5],
                     retention_margin_tiles: 1,
                 },
             },
             rendering: RenderingConfig {
-                view_distance_metres: 220.0,
+                view_distance_metres: 1_000.0,
                 shadows: ShadowConfig {
                     vertical_fov_radians: 68.0_f32.to_radians(),
                     near_plane: 0.05,
@@ -766,18 +766,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 10", "schema_version = 9");
+        let wrong_schema = fixture.replace("schema_version = 11", "schema_version = 10");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 9,
+                found: 10,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 10",
-            "schema_version = 10\nunknown_root = true",
+            "schema_version = 11",
+            "schema_version = 11\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),

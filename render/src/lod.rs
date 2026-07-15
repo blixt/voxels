@@ -4,11 +4,11 @@ use voxels_world::{CHUNK_EDGE, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge}
 
 /// Half extents in canonical 10 cm voxels. Every boundary is a multiple of the patch span on both
 /// sides, so whole patches can change owner without overlap, holes, or fragment clipping.
-pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 4] = [96, 256, 512, 1_024];
+pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 6] = [96, 256, 512, 1_024, 2_048, 4_096];
 // Snap only as coarsely as both adjacent representations require. In particular, the near handoff
 // moves in one 3.2 m chunk rather than a 9.6 m feature cell, cutting its worst visible replacement
 // strip by two thirds while preserving whole-chunk and whole-patch ownership.
-const LOD_BOUNDARY_SNAP: [i32; 4] = [32, 32, 64, 128];
+const LOD_BOUNDARY_SNAP: [i32; 6] = [32, 32, 64, 128, 256, 512];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LodOwner {
@@ -18,27 +18,42 @@ pub enum LodOwner {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GeometricLodFocus {
-    boundary_centres: [[i32; 2]; 4],
+    boundary_centres: [[i32; 2]; 6],
+    surface_level_count: u8,
 }
 
 impl GeometricLodFocus {
     pub fn snapped(voxel_x: i32, voxel_z: i32) -> Self {
+        Self::snapped_for_levels(voxel_x, voxel_z, SurfaceLodLevel::ALL.len())
+    }
+
+    pub fn snapped_for_levels(voxel_x: i32, voxel_z: i32, surface_level_count: usize) -> Self {
+        assert!(
+            (1..=SurfaceLodLevel::ALL.len()).contains(&surface_level_count),
+            "geometric LOD focus must own at least one known surface level"
+        );
         Self {
             boundary_centres: std::array::from_fn(|index| {
                 let snap = LOD_BOUNDARY_SNAP[index];
                 [snap_nearest(voxel_x, snap), snap_nearest(voxel_z, snap)]
             }),
+            surface_level_count: surface_level_count as u8,
         }
     }
 
-    pub const fn boundary_centres(self) -> [[i32; 2]; 4] {
+    pub const fn boundary_centres(self) -> [[i32; 2]; 6] {
         self.boundary_centres
     }
 
     pub fn owner_at(self, voxel_x: i32, voxel_z: i32) -> LodOwner {
         let voxel_x = i64::from(voxel_x);
         let voxel_z = i64::from(voxel_z);
-        for (index, half_extent) in LOD_BOUNDARY_HALF_EXTENTS.into_iter().enumerate() {
+        let surface_level_count = usize::from(self.surface_level_count);
+        for (index, half_extent) in LOD_BOUNDARY_HALF_EXTENTS
+            .into_iter()
+            .take(surface_level_count)
+            .enumerate()
+        {
             let centre = self.boundary_centres[index];
             let centre_x = i64::from(centre[0]);
             let centre_z = i64::from(centre[1]);
@@ -55,7 +70,7 @@ impl GeometricLodFocus {
                 };
             }
         }
-        LodOwner::Surface(SurfaceLodLevel::Stride16)
+        LodOwner::Surface(SurfaceLodLevel::ALL[surface_level_count - 1])
     }
 
     pub fn owns_surface_bounds(self, level: SurfaceLodLevel, bounds: SurfaceBounds) -> bool {
@@ -118,7 +133,14 @@ mod tests {
         let focus = GeometricLodFocus::snapped(117, -73);
         assert_eq!(
             focus.boundary_centres(),
-            [[128, -64], [128, -64], [128, -64], [128, -128]]
+            [
+                [128, -64],
+                [128, -64],
+                [128, -64],
+                [128, -128],
+                [0, 0],
+                [0, 0],
+            ]
         );
         let canonical = focus.boundary_centres()[0];
         for axis in canonical {
@@ -132,7 +154,7 @@ mod tests {
                 0
             );
         }
-        for index in 1..4 {
+        for index in 1..SurfaceLodLevel::ALL.len() {
             let inner = focus.boundary_centres[index - 1];
             let outer = focus.boundary_centres[index];
             let centre_delta = (inner[0] - outer[0]).abs().max((inner[1] - outer[1]).abs());
@@ -170,12 +192,14 @@ mod tests {
             ([384, -64], LodOwner::Surface(SurfaceLodLevel::Stride4)),
             ([704, -64], LodOwner::Surface(SurfaceLodLevel::Stride8)),
             ([1_280, -64], LodOwner::Surface(SurfaceLodLevel::Stride16)),
+            ([2_560, -64], LodOwner::Surface(SurfaceLodLevel::Stride32)),
+            ([5_120, -64], LodOwner::Surface(SurfaceLodLevel::Stride64)),
         ];
         for (point, expected) in probes {
             assert_eq!(focus.owner_at(point[0], point[1]), expected);
         }
-        for z in (-1_600..=1_600).step_by(7) {
-            for x in (-1_600..=1_600).step_by(7) {
+        for z in (-7_000..=7_000).step_by(31) {
+            for x in (-7_000..=7_000).step_by(31) {
                 assert!(matches!(
                     focus.owner_at(x, z),
                     LodOwner::Canonical | LodOwner::Surface(_)
@@ -185,10 +209,26 @@ mod tests {
     }
 
     #[test]
+    fn interactive_focus_keeps_stride16_as_its_unbounded_outer_owner() {
+        let focus = GeometricLodFocus::snapped_for_levels(117, -73, 4);
+        assert_eq!(
+            focus.owner_at(100_000, 100_000),
+            LodOwner::Surface(SurfaceLodLevel::Stride16)
+        );
+        assert!(!focus.owns_surface_bounds(
+            SurfaceLodLevel::Stride32,
+            SurfaceBounds {
+                min: [2_048, -64, 0],
+                max: [2_304, 128, 256],
+            }
+        ));
+    }
+
+    #[test]
     fn aligned_patch_grids_never_straddle_their_ownership_boundaries() {
         let focus = GeometricLodFocus::snapped(117, -73);
-        let spans = [16, 32, 64, 128];
-        for (level, span) in SurfaceLodLevel::ALL.into_iter().zip(spans) {
+        for level in SurfaceLodLevel::ALL {
+            let span = level.stride_voxels() * voxels_world::SURFACE_PATCH_EDGE_CELLS;
             for patch_z in -48..=48 {
                 for patch_x in -48..=48 {
                     let min_x = patch_x * span;

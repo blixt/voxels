@@ -11,7 +11,7 @@ import { prepareBrowserWorldFixture, startBrowserWorldService } from "./browser-
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed/i;
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 108;
+const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 
 function percentile(values, fraction) {
   if (values.length === 0) return 0;
@@ -66,6 +66,13 @@ function phaseSummary(captures) {
       uiMs: gpuSamples.length > 0 ? summary(gpuColumn("ui")) : null,
     },
     residentChunks: latest[SNAPSHOT.residentChunks],
+    surfaceTiles: latest[SNAPSHOT.surfaceTiles],
+    horizonTiles: {
+      stride32: latest[SNAPSHOT.stride32Tiles],
+      stride64: latest[SNAPSHOT.stride64Tiles],
+    },
+    interactiveLodsReady: latest[SNAPSHOT.interactiveLodsReady] === 1,
+    allLodsReady: latest[SNAPSHOT.allLodsReady] === 1,
     visibleChunks: latest[SNAPSHOT.visibleChunks],
     pendingJobs: latest[SNAPSHOT.pendingJobs],
     quads: latest[SNAPSHOT.quads],
@@ -412,6 +419,7 @@ const viewport = { width: 1280, height: 720 };
 const sustained = process.argv.includes("--sustained");
 const materials = process.argv.includes("--materials");
 const atmosphere = process.argv.includes("--atmosphere");
+const worldSource = process.env.VOXELS_PROFILE_SOURCE ?? "procedural-v16";
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
@@ -432,10 +440,13 @@ try {
   fixture = await prepareBrowserWorldFixture({
     browserPort: port,
     prefix: "voxels-browser-profile-",
+    source: worldSource,
   });
   const { build, preview } = await import("vite-plus");
   await build({ logLevel: "warn" });
-  worldService = await startBrowserWorldService(fixture);
+  worldService = await startBrowserWorldService(fixture, {
+    metal: worldSource === "terrain-diffusion-30m",
+  });
   server = await preview({
     logLevel: "warn",
     preview: { host: "127.0.0.1", port, strictPort: true },
@@ -475,6 +486,7 @@ try {
         ok: true,
         schemaVersion: 1,
         build: "release",
+        worldSource,
         viewport,
         startup: { settledMilliseconds },
         ...scenarios,

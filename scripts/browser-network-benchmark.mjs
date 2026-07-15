@@ -22,7 +22,7 @@ const FIXTURE_VERSION = 2;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 108;
+const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 const SAMPLE_INTERVAL_MS = 16;
 const READY_STABLE_SAMPLES = 3;
 const SCENARIO_TIMEOUT_MS = 90_000;
@@ -272,6 +272,9 @@ async function runScenario({ name, page, link, action, errors, timeoutMs = SCENA
       quads: current[SNAPSHOT.quads],
       pendingJobs: current[SNAPSHOT.pendingJobs],
       surfaceInFlight: current[SNAPSHOT.surfaceInFlight],
+      interactiveLodsReady: current[SNAPSHOT.interactiveLodsReady] === 1,
+      stride32Tiles: current[SNAPSHOT.stride32Tiles],
+      stride64Tiles: current[SNAPSHOT.stride64Tiles],
       allLodsReady: current[SNAPSHOT.allLodsReady] === 1,
       bytes: wire,
     });
@@ -300,6 +303,9 @@ async function runScenario({ name, page, link, action, errors, timeoutMs = SCENA
   const final = samples.at(-1);
   const fullCoverage = samples.at(-READY_STABLE_SAMPLES);
   const informed = firstPermanentlyFinalSample(samples, measurementStartedMs);
+  const interactive = samples.find(
+    (sample) => sample.elapsedMs >= measurementStartedMs && sample.interactiveLodsReady,
+  );
   const firstUseful = samples.find((sample) => sample.visibleChunks > 0 && sample.quads > 0);
   const stats = link.snapshot();
   return {
@@ -308,11 +314,13 @@ async function runScenario({ name, page, link, action, errors, timeoutMs = SCENA
     actionFinishedMs: rounded(actionFinishedMs),
     measurementStartedFromStartMs: rounded(measurementStartedMs),
     firstUsefulMs: firstUseful ? rounded(firstUseful.elapsedMs) : null,
+    interactiveCoverageReadyMs: rounded(interactive.elapsedMs - measurementStartedMs),
     viewportFullyInformedMs: rounded(informed.elapsedMs - measurementStartedMs),
     viewportFullyInformedFromStartMs: rounded(informed.elapsedMs),
     fullCoverageSettledMs: rounded(fullCoverage.elapsedMs - measurementStartedMs),
     fullCoverageSettledFromStartMs: rounded(fullCoverage.elapsedMs),
     bytesAtViewportInformed: informed.bytes,
+    bytesAtInteractiveCoverage: interactive.bytes,
     bytesAtFullCoverage: fullCoverage.bytes,
     finalViewport: {
       signature: final.signature,
@@ -361,8 +369,12 @@ function aggregateRuns(runs) {
   return Object.fromEntries(
     [...grouped.entries()].map(([name, scenarios]) => {
       const viewport = scenarios.map((scenario) => scenario.viewportFullyInformedMs);
+      const interactive = scenarios.map((scenario) => scenario.interactiveCoverageReadyMs);
       const coverage = scenarios.map((scenario) => scenario.fullCoverageSettledMs);
       const viewportBytes = scenarios.map((scenario) => scenario.bytesAtViewportInformed.total);
+      const interactiveWorldBytes = scenarios.map(
+        (scenario) => scenario.bytesAtInteractiveCoverage.worldDownstream,
+      );
       const viewportWorldBytes = scenarios.map(
         (scenario) => scenario.bytesAtViewportInformed.worldDownstream,
       );
@@ -389,6 +401,11 @@ function aggregateRuns(runs) {
             min: rounded(Math.min(...viewport)),
             max: rounded(Math.max(...viewport)),
           },
+          interactiveCoverageReadyMs: {
+            median: rounded(percentile(interactive, 0.5)),
+            p95: rounded(percentile(interactive, 0.95)),
+            max: rounded(Math.max(...interactive)),
+          },
           fullCoverageSettledMs: {
             median: rounded(percentile(coverage, 0.5)),
             p95: rounded(percentile(coverage, 0.95)),
@@ -397,6 +414,9 @@ function aggregateRuns(runs) {
           bytesAtViewportInformed: {
             medianTotal: percentile(viewportBytes, 0.5),
             medianWorldDownstream: percentile(viewportWorldBytes, 0.5),
+          },
+          bytesAtInteractiveCoverage: {
+            medianWorldDownstream: percentile(interactiveWorldBytes, 0.5),
           },
           bytesAtFullCoverage: {
             medianTotal: percentile(coverageBytes, 0.5),
@@ -425,13 +445,13 @@ function aggregateRuns(runs) {
 function markdownReport(result) {
   const rows = Object.entries(result.summary).map(([name, summary]) => {
     const viewport = summary.viewportFullyInformedMs;
-    return `| ${name} | ${viewport.median.toFixed(1)} | ${viewport.max.toFixed(1)} | ${summary.fullCoverageSettledMs.median.toFixed(1)} | ${summary.bytesAtViewportInformed.medianWorldDownstream.toLocaleString("en-US")} | ${summary.bytesAtFullCoverage.medianTotal.toLocaleString("en-US")} |`;
+    return `| ${name} | ${summary.interactiveCoverageReadyMs.median.toFixed(1)} | ${viewport.median.toFixed(1)} | ${viewport.max.toFixed(1)} | ${summary.fullCoverageSettledMs.median.toFixed(1)} | ${summary.bytesAtInteractiveCoverage.medianWorldDownstream.toLocaleString("en-US")} | ${summary.bytesAtViewportInformed.medianWorldDownstream.toLocaleString("en-US")} | ${summary.bytesAtFullCoverage.medianTotal.toLocaleString("en-US")} |`;
   });
   const frameRows = Object.entries(result.summary).map(([name, summary]) => {
     const frame = summary.frameTiming;
     return `| ${name} | ${frame.medianP95Ms.toFixed(1)} | ${frame.maxMs.toFixed(1)} | ${frame.above33_33ms.toLocaleString("en-US")} / ${frame.samples.toLocaleString("en-US")} | ${frame.streamingMedianP95Ms.toFixed(1)} | ${frame.droppedSamples.toLocaleString("en-US")} |`;
   });
-  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\n| Scenario | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
+  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\n| Scenario | Interactive ready median (ms) | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at interactive | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Interactive ready” is when canonical terrain and the original four surface rings are complete; kilometre horizon prefetch starts only afterward. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
 }
 
 async function main() {

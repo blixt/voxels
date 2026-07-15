@@ -1,6 +1,6 @@
 import { createServer as createNetServer } from "node:net";
 
-export const SNAPSHOT_SCHEMA_VERSION = 19;
+export const SNAPSHOT_SCHEMA_VERSION = 20;
 
 export const SNAPSHOT = Object.freeze({
   cameraX: 0,
@@ -17,6 +17,7 @@ export const SNAPSHOT = Object.freeze({
   arenaAllocatedMiB: 13,
   arenaCapacityMiB: 14,
   pendingJobs: 15,
+  surfaceTiles: 16,
   frameMs: 17,
   loadP95Frames: 20,
   loadMaxFrames: 21,
@@ -95,9 +96,12 @@ export const SNAPSHOT = Object.freeze({
   viewportFingerprintHigh24: 102,
   allLodsReady: 103,
   surfaceInFlight: 104,
-  schemaVersion: 105,
-  sampleCount: 106,
-  droppedSamples: 107,
+  interactiveLodsReady: 105,
+  stride32Tiles: 106,
+  stride64Tiles: 107,
+  schemaVersion: 108,
+  sampleCount: 109,
+  droppedSamples: 110,
 });
 
 export function assertSnapshotSchema(snapshot) {

@@ -288,6 +288,14 @@ fn atmosphere_cloud_field(position: vec2<f32>) -> f32 {
   return broad + billows + detail;
 }
 
+fn atmospheric_path_length(distance_to_camera: f32) -> f32 {
+  // Preserve the authored near haze exactly, then compress only the horizon portion so elevated
+  // silhouettes remain legible without making low terrain look close or removing aerial depth.
+  let fog_knee = min(frame.viewport_voxel.w, 220.0);
+  return min(distance_to_camera, fog_knee)
+    + max(distance_to_camera - fog_knee, 0.0) * 0.2;
+}
+
 fn cloud_sun_visibility(world: vec3<f32>) -> f32 {
   let coverage_control = clamp(frame.fog_exposure.z, 0.0, 1.0);
   if coverage_control < 0.08 {
@@ -312,6 +320,8 @@ fn coarser_owns_boundary(distance_xz: f32, boundary: u32) -> bool {
     case 1u: { split = 23.5; }
     case 2u: { split = 48.0; }
     case 3u: { split = 96.0; }
+    case 4u: { split = 192.0; }
+    case 5u: { split = 384.0; }
     default: {}
   }
   return distance_xz >= split;
@@ -336,9 +346,9 @@ fn owns_lod_surface(world: vec3<f32>, packed_material: u32) -> bool {
   if !far_surface {
     return !coarser_owns_boundary(distance_xz, 0u);
   }
-  let level = (packed_material >> 28u) & 3u;
+  let level = (packed_material >> 27u) & 7u;
   var owns = coarser_owns_boundary(distance_xz, level);
-  if level < 3u {
+  if level < 5u {
     owns = owns && !coarser_owns_boundary(distance_xz, level + 1u);
   }
   return owns;
@@ -486,7 +496,8 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   let fog_view_direction = camera_to_surface / max(distance_to_camera, 0.0001);
   let average_height = max((input.world.y + frame.camera_time.y) * 0.5, 0.0);
   let height_density = exp(-average_height * frame.fog_exposure.x);
-  let optical_depth = distance_to_camera * frame.ground_atmosphere.w * height_density * frame.render_options.y;
+  let optical_depth = atmospheric_path_length(distance_to_camera)
+    * frame.ground_atmosphere.w * height_density * frame.render_options.y;
   let transmittance = exp(-optical_depth);
   let sky_factor = pow(max(fog_view_direction.y, 0.0), 0.42);
   let fog_radiance = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, sky_factor);
@@ -674,7 +685,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let fog_view_direction = camera_to_surface / max(distance_to_camera, 0.0001);
   let average_height = max((input.world.y + frame.camera_time.y) * 0.5, 0.0);
   let height_density = exp(-average_height * frame.fog_exposure.x);
-  let optical_depth = distance_to_camera * frame.ground_atmosphere.w * height_density * frame.render_options.y;
+  let optical_depth = atmospheric_path_length(distance_to_camera)
+    * frame.ground_atmosphere.w * height_density * frame.render_options.y;
   let transmittance = exp(-optical_depth);
   let sky_factor = pow(max(fog_view_direction.y, 0.0), 0.42);
   var fog_radiance = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, sky_factor);

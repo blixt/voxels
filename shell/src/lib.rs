@@ -67,15 +67,17 @@ mod web {
     use voxels_world::{
         AtmosphereSample, CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT_PORTAL_COUNT,
         CaveStreamInterest, Chunk, ChunkCoord, EditMap, Material, MeshedChunk, MeshingHalo,
-        PortalState, SurfaceLodLevel, SurfaceRegion, SurfaceSample, SurfaceTileCoord,
-        VOXEL_SIZE_METRES, VoxelCoord, WorldProductPriority, WorldSourceIdentityHash, mesh_chunk,
+        PortalState, SURFACE_LOD_LEVEL_COUNT, SurfaceLodLevel, SurfaceRegion, SurfaceSample,
+        SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord, WorldProductPriority,
+        WorldSourceIdentityHash, mesh_chunk,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 19.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 20.0;
+    const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
 
     #[derive(Clone, Copy, Debug)]
     struct EngineConfig {
@@ -85,7 +87,7 @@ mod web {
         max_edit_trackers: usize,
         stream_frame_budget: FrameBudget,
         startup_ready_radius_chunks: i32,
-        surface_load_radius_tiles: [i32; 4],
+        surface_load_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
         surface_retain_margin_tiles: i32,
         enclosure_probe_interval_ms: f64,
         enclosure_probe_distance_metres: f32,
@@ -265,8 +267,8 @@ mod web {
         chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
         chunk_halos: RefCell<BTreeMap<(i32, i32, i32), MeshingHalo>>,
         pending_meshes: RefCell<BTreeMap<(i32, i32, i32), MeshedChunk>>,
-        surface_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
-        surface_active_focus: Cell<Option<[SurfaceTileCoord; 4]>>,
+        surface_focus: Cell<Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>>,
+        surface_active_focus: Cell<Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_revisions: RefCell<SurfaceRevisionCache>,
         surface_accepted_edit_revisions: RefCell<BTreeMap<SurfaceTileCoord, u64>>,
@@ -275,6 +277,8 @@ mod web {
         surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
         fine_initialized: Cell<bool>,
         all_lods_ready: Cell<bool>,
+        interactive_lods_ready: Cell<bool>,
+        full_lods_initialized: Cell<bool>,
         startup_ready: Cell<bool>,
         store: RefCell<Store>,
         scope: DedicatedWorkerGlobalScope,
@@ -521,12 +525,22 @@ mod web {
             if fine_coverage_ready {
                 self.fine_initialized.set(true);
             }
-            let all_lods_ready = fine_coverage_ready
+            let interactive_lods_ready =
+                fine_coverage_ready
+                    && !self.surface_dirty.borrow().iter().any(|coord| {
+                        usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
+                    })
+                    && !self.surface_in_flight.borrow().iter().any(|coord| {
+                        usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
+                    })
+                    && self.surface_coverage_current_through(INTERACTIVE_SURFACE_LOD_LEVELS);
+            let all_lods_ready = interactive_lods_ready
                 && self.surface_queue.borrow().is_empty()
                 && self.surface_in_flight.borrow().is_empty()
                 && self.surface_dirty.borrow().is_empty()
                 && self.surface_coverage_current();
             self.all_lods_ready.set(all_lods_ready);
+            self.interactive_lods_ready.set(interactive_lods_ready);
             debug_assert!(
                 !all_lods_ready || self.surface_coverage_current(),
                 "surface coverage became ready with missing or stale revisions"
@@ -535,7 +549,13 @@ mod web {
             if all_lods_ready {
                 let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
                 let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-                renderer.set_geometric_lod_focus(voxel_x, voxel_z);
+                renderer.set_geometric_lod_focus(voxel_x, voxel_z, SURFACE_LOD_LEVEL_COUNT);
+                self.surface_active_focus.set(self.surface_focus.get());
+                self.full_lods_initialized.set(true);
+            } else if interactive_lods_ready && !self.full_lods_initialized.get() {
+                let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
+                let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
+                renderer.set_geometric_lod_focus(voxel_x, voxel_z, INTERACTIVE_SURFACE_LOD_LEVELS);
                 self.surface_active_focus.set(self.surface_focus.get());
             }
             let render_start = performance_now(performance.as_ref());
@@ -932,7 +952,11 @@ mod web {
             {
                 return;
             }
-            self.surface_queue.borrow_mut().push_front(coord);
+            if usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS {
+                self.surface_queue.borrow_mut().push_front(coord);
+            } else {
+                self.surface_queue.borrow_mut().push_back(coord);
+            }
         }
 
         fn accept_generated_chunk(
@@ -1067,8 +1091,8 @@ mod web {
             }
         }
 
-        fn surface_lod_counts(&self) -> [u32; 4] {
-            let mut counts = [0u32; 4];
+        fn surface_lod_counts(&self) -> [u32; SURFACE_LOD_LEVEL_COUNT] {
+            let mut counts = [0u32; SURFACE_LOD_LEVEL_COUNT];
             for coord in self.surface_resident.borrow().iter() {
                 let count = &mut counts[coord.level.index() as usize];
                 *count = count.saturating_add(1);
@@ -1174,6 +1198,7 @@ mod web {
                     let dx = coord.x - focus[index].x;
                     let dz = coord.z - focus[index].z;
                     (
+                        index >= INTERACTIVE_SURFACE_LOD_LEVELS,
                         u8::MAX - coord.level.index(),
                         dx * dx + dz * dz,
                         coord.z,
@@ -1185,9 +1210,19 @@ mod web {
                 queue.extend(candidates);
             }
 
-            const REMOTE_SURFACE_BATCH: usize = 4;
-            let mut tickets = Vec::with_capacity(REMOTE_SURFACE_BATCH);
-            while tickets.len() < REMOTE_SURFACE_BATCH {
+            const INTERACTIVE_SURFACE_BATCH: usize = 4;
+            const BACKGROUND_SURFACE_BATCH: usize = 16;
+            let mut tickets = Vec::with_capacity(BACKGROUND_SURFACE_BATCH);
+            let mut priority = WorldProductPriority::VisibleSurface;
+            loop {
+                let batch_limit = if priority == WorldProductPriority::Prefetch {
+                    BACKGROUND_SURFACE_BATCH
+                } else {
+                    INTERACTIVE_SURFACE_BATCH
+                };
+                if tickets.len() >= batch_limit {
+                    break;
+                }
                 let Some(coord) = self.surface_queue.borrow_mut().pop_front() else {
                     break;
                 };
@@ -1196,6 +1231,37 @@ mod web {
                         && !self.surface_dirty.borrow().contains(&coord))
                 {
                     continue;
+                }
+                let background = usize::from(coord.level.index()) >= INTERACTIVE_SURFACE_LOD_LEVELS;
+                if background {
+                    let background_in_flight =
+                        self.surface_in_flight.borrow().iter().any(|coord| {
+                            usize::from(coord.level.index()) >= INTERACTIVE_SURFACE_LOD_LEVELS
+                        });
+                    let diagnostics = self.scheduler.borrow().diagnostics();
+                    let fine_current = diagnostics.generation.queued == 0
+                        && diagnostics.generation.in_flight == 0
+                        && diagnostics.meshing.queued == 0
+                        && diagnostics.meshing.in_flight == 0
+                        && diagnostics.upload.queued == 0
+                        && diagnostics.upload.in_flight == 0;
+                    let interactive_current = self
+                        .surface_coverage_current_through(INTERACTIVE_SURFACE_LOD_LEVELS)
+                        && !self.surface_dirty.borrow().iter().any(|coord| {
+                            usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
+                        })
+                        && !self.surface_in_flight.borrow().iter().any(|coord| {
+                            usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
+                        });
+                    if (!tickets.is_empty() && priority != WorldProductPriority::Prefetch)
+                        || background_in_flight
+                        || !fine_current
+                        || !interactive_current
+                    {
+                        self.surface_queue.borrow_mut().push_front(coord);
+                        break;
+                    }
+                    priority = WorldProductPriority::Prefetch;
                 }
                 let revision = {
                     let revisions = self.surface_revisions.borrow();
@@ -1208,10 +1274,7 @@ mod web {
             if tickets.is_empty() {
                 return;
             }
-            match self
-                .remote
-                .submit_surface_batch(WorldProductPriority::VisibleSurface, tickets.clone())
-            {
+            match self.remote.submit_surface_batch(priority, tickets.clone()) {
                 Ok(_) => {
                     self.surface_in_flight
                         .borrow_mut()
@@ -1584,6 +1647,10 @@ mod web {
         }
 
         fn surface_coverage_current(&self) -> bool {
+            self.surface_coverage_current_through(SURFACE_LOD_LEVEL_COUNT)
+        }
+
+        fn surface_coverage_current_through(&self, level_count: usize) -> bool {
             if self.surface_focus.get().is_none() {
                 return false;
             }
@@ -1593,7 +1660,11 @@ mod web {
                 .into_iter()
                 .flatten()
             {
-                for (index, level) in SurfaceLodLevel::ALL.into_iter().enumerate() {
+                for (index, level) in SurfaceLodLevel::ALL
+                    .into_iter()
+                    .take(level_count)
+                    .enumerate()
+                {
                     let center = focus[index];
                     let radius = self.config.surface_load_radius_tiles[index];
                     for dz in -radius..=radius {
@@ -1994,6 +2065,13 @@ mod web {
                         0.0
                     },
                     engine.surface_in_flight.borrow().len() as f32,
+                    if engine.interactive_lods_ready.get() {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    lod_tiles[4] as f32,
+                    lod_tiles[5] as f32,
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
@@ -2211,6 +2289,8 @@ mod web {
             surface_dirty: RefCell::new(BTreeSet::new()),
             fine_initialized: Cell::new(false),
             all_lods_ready: Cell::new(false),
+            interactive_lods_ready: Cell::new(false),
+            full_lods_initialized: Cell::new(false),
             startup_ready: Cell::new(false),
             store: RefCell::new(store),
             scope,
@@ -2300,8 +2380,8 @@ mod web {
 
     fn surface_tile_in_coverage(
         coord: SurfaceTileCoord,
-        focus: Option<[SurfaceTileCoord; 4]>,
-        load_radius_tiles: [i32; 4],
+        focus: Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>,
+        load_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
     ) -> bool {
         let Some(focus) = focus else {
             return false;

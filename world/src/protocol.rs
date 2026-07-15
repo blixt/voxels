@@ -16,7 +16,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -30,7 +30,7 @@ pub const EDIT_SESSION_NOT_CURRENT: &str = "edit session is no longer current";
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
-const SURFACE_SNAPSHOT_VERSION: u16 = 1;
+const SURFACE_SNAPSHOT_VERSION: u16 = 2;
 
 const KIND_OPEN_WORLD: u16 = 1;
 const KIND_WORLD_OPENED: u16 = 2;
@@ -2905,6 +2905,8 @@ fn decode_surface_lod(value: u8) -> Result<SurfaceLodLevel, ProtocolError> {
         1 => SurfaceLodLevel::Stride4,
         2 => SurfaceLodLevel::Stride8,
         3 => SurfaceLodLevel::Stride16,
+        4 => SurfaceLodLevel::Stride32,
+        5 => SurfaceLodLevel::Stride64,
         _ => {
             return Err(ProtocolError::UnknownEnum(
                 "surface LOD level",
@@ -3378,10 +3380,10 @@ mod tests {
     #[test]
     fn surface_tile_round_trip_preserves_coarse_render_product() {
         let source = ProceduralWorldSource::new(42);
-        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, -1, 2);
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride64, -1, 2);
         let batch = source
             .generate_batch(WorldProductBatch {
-                priority: WorldProductPriority::VisibleSurface,
+                priority: WorldProductPriority::Prefetch,
                 requests: vec![WorldProductRequest::SurfaceTile(coord)],
             })
             .expect("batch");
@@ -3391,7 +3393,7 @@ mod tests {
         };
         let request = SurfaceTileBatchRequest {
             request_id: 10,
-            priority: WorldProductPriority::VisibleSurface,
+            priority: WorldProductPriority::Prefetch,
             coords: vec![coord],
         };
         assert_eq!(
@@ -3430,10 +3432,10 @@ mod tests {
             other => panic!("unexpected product: {other:?}"),
         };
         let mut encoded = encode_surface_snapshot(&snapshot).expect("encode");
-        encoded[4..6].copy_from_slice(&2_u16.to_le_bytes());
+        encoded[4..6].copy_from_slice(&3_u16.to_le_bytes());
         assert_eq!(
             decode_surface_snapshot(&encoded, coord, source.source_identity_hash()),
-            Err(ProtocolError::UnsupportedVersion(2))
+            Err(ProtocolError::UnsupportedVersion(3))
         );
 
         snapshot.terrain.patches[0].quad_range.end = u32::MAX;

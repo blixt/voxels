@@ -311,7 +311,9 @@ weathered structure. Mip filtering and distance-faded normal strength keep the f
 `vp run profile:sustained` starts one numeric debug command through the browser transport; all
 scenario timing and movement remain in portable Rust. The camera follows a fixed 120 Hz circular rail
 at 12 m/s: one 360 m lap warms the allocator, two identical laps measure it, and the cumulative 1.08 km
-run then stops and requires canonical and all four surface-LOD queues to drain. The harness runs against
+run then stops and requires canonical and all six surface-LOD queues to drain. The first four rings
+remain interactive; the 3.2 m and 6.4 m horizon rings are requested only after that set is complete.
+The harness runs against
 release WASM on an isolated ephemeral origin and enforces frame, memory, residency, and queue gates.
 
 The first run exposed unfinished, undesired chunks retained inside scheduler hysteresis. Such entries
@@ -735,3 +737,28 @@ The 40-operation edit profile restored both fixtures exactly with zero remaining
 work, superseded operations, dropped samples, pending jobs, or browser errors; full-convergence p95
 was 38.0 ms. The isolated two-tab portal gate sealed all 25 mouth voxels, observed six open portals
 before and after reload, then restored seven portals and zero persisted edits after a second reload.
+
+## 2026-07-15: one-kilometre horizon rings
+
+The default surface clipmap now adds stride-32 and stride-64 horizon rings after the four interactive
+rings. Their 3.2 m and 6.4 m cells raise guaranteed radial coverage from roughly 256 m to 1,024 m;
+the camera clips at 1,000 m while directional shadows remain capped at 220 m. The complete steady
+set contains 566 surface tiles: 81 stride-32 and 121 stride-64 tiles on top of the original 364.
+Horizon work waits for interactive coverage, uses `Prefetch` priority, occupies at most one request
+per client, and is globally worker-capped. Sixteen tiles share each background request so shaped RTT
+does not dominate settling.
+
+The actual Metal Terrain Diffusion provider settled locally in 2.568 seconds. At 1280x720, the
+release steady run measured 8.3 ms median / 9.2 ms p95 frame time, 5.63 ms total GPU p95, and 1.36 ms
+world GPU p95. Moving measured 8.3 / 9.8 ms frame time, 5.64 ms total GPU p95, and 1.63 ms world GPU
+p95. Neither window exceeded 16.67 ms or dropped a sample; the in-game counter held 120 FPS. The
+pinned model's detail smoke reports 114.6 m median and 159.1 m p90 relief over 960 m neighborhoods,
+so the new range retains meaningful mountain-scale silhouettes rather than only extending flat fog.
+
+On the standard 40 ms RTT, 50 Mbit/s down, 10 Mbit/s up shaped link, one cold run reached original
+interactive coverage in 2.361 seconds after 2.473 MB of world downstream data. The final kilometre
+viewport settled in 3.595 seconds at 5.430 MB. A resident walk settled in 48.5 ms with zero world
+bytes, a cached 180-degree turn in 15.9 ms, and the streaming walk in 545.3 ms / 468.9 KB. All five
+scenarios had an 8.3 ms frame median, 8.9-9.3 ms p95, zero frames above 33.33 ms, and zero dropped
+samples. The prefetch batch change reduced the experimental cold full-settle result from 12.453 to
+3.595 seconds without moving the interactive-ready boundary.

@@ -78,9 +78,11 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 - `web/`: the single body canvas, normalized input transport, pointer lock, and worker boot only. All
   visible HUD, status, crosshair, controls, menus, and text are composed by Rust/WGPU.
 
-The canonical world is generator identity plus sparse edits. Near meshes and four streamed surface LOD
-rings are derived caches; the rings sample at 0.2, 0.4, 0.8, and 1.6 m while the editable near field
-retains authoritative 10 cm voxels. The current generator shares one regional surface sample across canonical
+The canonical world is generator identity plus sparse edits. Near meshes and six streamed surface LOD
+rings are derived caches; the rings sample at 0.2, 0.4, 0.8, 1.6, 3.2, and 6.4 m while the editable
+near field retains authoritative 10 cm voxels. The two horizon-only rings are capped background
+prefetches and extend default coverage to 1 km without delaying the four interactive rings. The current
+generator shares one regional surface sample across canonical
 chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
 conditional skirts, and activates a newly streamed coverage set only when it is complete.
@@ -94,7 +96,7 @@ exact 3x3 grid on every 10 cm voxel face (one block per 3.33 cm), with nearest s
 distance-stable mip chain, without changing geometry, draw ownership, or durable voxel data.
 The 753 m First Pilgrim Road is a stable Rust polyline graded through those same canonical columns.
 Its 10 cm paving, shoulders, 26 cairns/waystones/arches, five named chapters, and alpine Needle Gate
-destination remain editable, collidable, and continuous through every streamed LOD rather than
+destination remain editable, collidable, and continuous through every interactive LOD rather than
 becoming renderer-only decals. Mission Control derives chapter and progress status from the Rust atlas.
 See [docs/architecture.md](docs/architecture.md) for format, persistence, and research decisions.
 

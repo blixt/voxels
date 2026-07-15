@@ -56,7 +56,7 @@ const PLACEMENT_MATERIALS: [Material; Material::ALL.len() - 1] = [
 ];
 const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 const FAR_MATERIAL_FLAG: u32 = 1 << 31;
-const SURFACE_LOD_SHIFT: u32 = 28;
+const SURFACE_LOD_SHIFT: u32 = 27;
 const FAR_UNDERLAY_OFFSET_METRES: f32 = 0.025;
 const GPU_QUERY_COUNT: u32 = 18;
 const GPU_QUERY_BUFFER_BYTES: u64 = GPU_QUERY_COUNT as u64 * size_of::<u64>() as u64;
@@ -157,7 +157,7 @@ impl Default for RendererConfig {
         Self {
             features: RendererFeatureConfig::default(),
             mission_control: MissionControlConfig::default(),
-            view_distance_metres: 220.0,
+            view_distance_metres: 1_000.0,
             directional_shadows: DirectionalShadowConfig::default(),
             initial_daylight_phase: DaylightPhase::default(),
         }
@@ -1501,8 +1501,17 @@ impl Renderer {
         self.daylight_phase
     }
 
-    pub fn set_geometric_lod_focus(&mut self, voxel_x: i32, voxel_z: i32) {
-        self.geometric_lod_focus = Some(GeometricLodFocus::snapped(voxel_x, voxel_z));
+    pub fn set_geometric_lod_focus(
+        &mut self,
+        voxel_x: i32,
+        voxel_z: i32,
+        surface_level_count: usize,
+    ) {
+        self.geometric_lod_focus = Some(GeometricLodFocus::snapped_for_levels(
+            voxel_x,
+            voxel_z,
+            surface_level_count,
+        ));
     }
 
     pub const fn set_lod_coverage_ready(&mut self, fine_ready: bool, all_lods_ready: bool) {
@@ -2193,6 +2202,7 @@ impl Renderer {
             std::array::from_fn(|cascade_index| {
                 self.collect_draw_list(&self.chunks, |key, slice| {
                     (key.0 == 0 || self.options.far_terrain)
+                        && mesh_casts_directional_shadow(key)
                         && slice.render_layer == RenderLayer::Opaque
                         && slice_owned_by_lod(geometric_lod_focus, key, slice)
                         && aabb_visible_in_cascade(
@@ -2751,6 +2761,10 @@ fn slice_owned_by_lod(focus: Option<GeometricLodFocus>, key: &MeshKey, slice: &M
     })
 }
 
+fn mesh_casts_directional_shadow(key: &MeshKey) -> bool {
+    key.0 == 0 || key.0 <= SurfaceLodLevel::Stride16.index() + 1
+}
+
 fn active_geometric_lod_focus(
     focus: Option<GeometricLodFocus>,
     far_terrain: bool,
@@ -2935,7 +2949,7 @@ fn frame_uniform(
         underwater_blend,
         interior,
     } = state;
-    let view_projection = view_projection(config, camera);
+    let view_projection = view_projection(config, camera, renderer_config.view_distance_metres);
     let camera_forward = camera.forward();
     let fluid = camera.fluid_state();
     FrameUniform {
@@ -3103,10 +3117,18 @@ const fn refraction_copy_bytes(width: u32, height: u32, active: bool) -> u64 {
     }
 }
 
-fn view_projection(config: &SurfaceConfiguration, camera: &CameraState) -> glam::Mat4 {
+fn view_projection(
+    config: &SurfaceConfiguration,
+    camera: &CameraState,
+    view_distance_metres: f32,
+) -> glam::Mat4 {
     let aspect = config.width as f32 / config.height.max(1) as f32;
-    let projection =
-        glam::camera::rh::proj::directx::perspective(68.0f32.to_radians(), aspect, 0.01, 320.0);
+    let projection = glam::camera::rh::proj::directx::perspective(
+        68.0f32.to_radians(),
+        aspect,
+        0.05,
+        view_distance_metres,
+    );
     let view =
         glam::camera::rh::view::look_to_mat4(camera.position, camera.forward(), glam::Vec3::Y);
     projection * view
@@ -3789,5 +3811,28 @@ mod tests {
             &outside_inner_cut,
             &canonical
         ));
+    }
+
+    #[test]
+    fn horizon_only_surface_levels_never_enter_directional_shadow_passes() {
+        assert!(mesh_casts_directional_shadow(&(0, 0, 0, 0)));
+        assert!(mesh_casts_directional_shadow(&(
+            SurfaceLodLevel::Stride16.index() + 1,
+            0,
+            0,
+            0,
+        )));
+        assert!(!mesh_casts_directional_shadow(&(
+            SurfaceLodLevel::Stride32.index() + 1,
+            0,
+            0,
+            0,
+        )));
+        assert!(!mesh_casts_directional_shadow(&(
+            SurfaceLodLevel::Stride64.index() + 1,
+            0,
+            0,
+            0,
+        )));
     }
 }

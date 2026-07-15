@@ -52,6 +52,8 @@ fn coarser_owns_boundary(distance_xz: f32, boundary: u32) -> bool {
     case 1u: { split = 23.5; }
     case 2u: { split = 48.0; }
     case 3u: { split = 96.0; }
+    case 4u: { split = 192.0; }
+    case 5u: { split = 384.0; }
     default: {}
   }
   return distance_xz >= split;
@@ -76,9 +78,9 @@ fn owns_lod_surface(world: vec3<f32>, packed_material: u32) -> bool {
   if !far_surface {
     return !coarser_owns_boundary(distance_xz, 0u);
   }
-  let level = (packed_material >> 28u) & 3u;
+  let level = (packed_material >> 27u) & 7u;
   var owns = coarser_owns_boundary(distance_xz, level);
-  if level < 3u {
+  if level < 5u {
     owns = owns && !coarser_owns_boundary(distance_xz, level + 1u);
   }
   return owns;

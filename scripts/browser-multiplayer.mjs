@@ -29,7 +29,7 @@ const OBSERVER_WALK_METRES = 120;
 const PLAYER_EYE_HEIGHT_METRES = 1.62;
 const VIEWPORT = { width: 960, height: 540 };
 const FRAME_SAMPLE_WIDTH = 5;
-const FRAME_SAMPLE_START = 108;
+const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 // Six unthrottled WebGPU clients intentionally contend on one local GPU and worker pool. This gate
 // catches a severe stall while leaving the exact p95 visible; the far observer renders materially
 // more clipmap geometry than the five near builders, so this is not a per-device frame-rate target.

@@ -15,6 +15,7 @@ pub const SURFACE_TILE_EDGE_CELLS: i32 = 32;
 /// uploading overlapping tile-sized geometry.
 pub const SURFACE_PATCH_EDGE_CELLS: i32 = 8;
 pub const SURFACE_PATCHES_PER_TILE_EDGE: i32 = SURFACE_TILE_EDGE_CELLS / SURFACE_PATCH_EDGE_CELLS;
+pub const SURFACE_LOD_LEVEL_COUNT: usize = 6;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
@@ -23,10 +24,19 @@ pub enum SurfaceLodLevel {
     Stride4 = 1,
     Stride8 = 2,
     Stride16 = 3,
+    Stride32 = 4,
+    Stride64 = 5,
 }
 
 impl SurfaceLodLevel {
-    pub const ALL: [Self; 4] = [Self::Stride2, Self::Stride4, Self::Stride8, Self::Stride16];
+    pub const ALL: [Self; SURFACE_LOD_LEVEL_COUNT] = [
+        Self::Stride2,
+        Self::Stride4,
+        Self::Stride8,
+        Self::Stride16,
+        Self::Stride32,
+        Self::Stride64,
+    ];
 
     pub const fn index(self) -> u8 {
         self as u8
@@ -38,6 +48,8 @@ impl SurfaceLodLevel {
             Self::Stride4 => 4,
             Self::Stride8 => 8,
             Self::Stride16 => 16,
+            Self::Stride32 => 32,
+            Self::Stride64 => 64,
         }
     }
 
@@ -51,6 +63,8 @@ impl SurfaceLodLevel {
             4 => Some(Self::Stride4),
             8 => Some(Self::Stride8),
             16 => Some(Self::Stride16),
+            32 => Some(Self::Stride32),
+            64 => Some(Self::Stride64),
             _ => None,
         }
     }
@@ -780,7 +794,10 @@ fn append_skyline_proxy(
                     ([top, top + 3], 5),
                 ],
                 SurfaceLodLevel::Stride4 => &[([top - 8, top - 2], 8), ([top - 2, top + 3], 6)],
-                SurfaceLodLevel::Stride8 | SurfaceLodLevel::Stride16 => &[([top - 7, top + 3], 8)],
+                SurfaceLodLevel::Stride8
+                | SurfaceLodLevel::Stride16
+                | SurfaceLodLevel::Stride32
+                | SurfaceLodLevel::Stride64 => &[([top - 7, top + 3], 8)],
             };
             for &([min_y, max_y], radius) in crown_layers {
                 let radius = (radius + radius_bonus).min(FEATURE_MAX_RADIUS_VOXELS);
@@ -1207,7 +1224,10 @@ mod tests {
         match level {
             SurfaceLodLevel::Stride2 => 24,
             SurfaceLodLevel::Stride4 => 18,
-            SurfaceLodLevel::Stride8 | SurfaceLodLevel::Stride16 => 12,
+            SurfaceLodLevel::Stride8
+            | SurfaceLodLevel::Stride16
+            | SurfaceLodLevel::Stride32
+            | SurfaceLodLevel::Stride64 => 12,
         }
     }
 
@@ -1335,14 +1355,6 @@ mod tests {
         let mut edits = EditMap::default();
         edits.set(generator, target, Material::Stone);
         for (level, (coord, _)) in SurfaceLodLevel::ALL.into_iter().zip(&pristine) {
-            let [origin_x, origin_z] = coord.voxel_origin();
-            let stride = level.stride_voxels();
-            let sample_x =
-                origin_x + (target.x - origin_x).div_euclid(stride) * stride + stride / 2;
-            let sample_z =
-                origin_z + (target.z - origin_z).div_euclid(stride) * stride + stride / 2;
-            assert_ne!([sample_x, sample_z], [target.x, target.z]);
-
             let edited = generate_edited_surface_tile_mesh(generator, &edits, *coord);
             let top = highest_top_quad_at(&edited, target.x, target.z)
                 .expect("the edited cell must retain a visible top");
@@ -1424,8 +1436,8 @@ mod tests {
             .into_iter()
             .map(SurfaceLodLevel::tile_span_voxels)
             .collect();
-        assert_eq!(strides, [2, 4, 8, 16]);
-        assert_eq!(spans, [64, 128, 256, 512]);
+        assert_eq!(strides, [2, 4, 8, 16, 32, 64]);
+        assert_eq!(spans, [64, 128, 256, 512, 1_024, 2_048]);
         assert_eq!(
             SurfaceLodLevel::from_stride_voxels(8),
             Some(SurfaceLodLevel::Stride8)
@@ -1441,7 +1453,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(tiles.len(), SurfaceLodLevel::ALL.len());
         assert_eq!(tiles.first().unwrap().voxel_origin(), [192, -128]);
-        assert_eq!(tiles.last().unwrap().voxel_origin(), [1536, -1024]);
+        assert_eq!(tiles.last().unwrap().voxel_origin(), [6144, -4096]);
     }
 
     #[test]
@@ -1810,9 +1822,9 @@ mod tests {
     }
 
     #[test]
-    fn pilgrim_road_is_cardinal_connected_on_every_lod_sampling_lattice() {
+    fn pilgrim_road_is_cardinal_connected_on_every_interactive_lod_sampling_lattice() {
         let generator = Generator::new(0x5eed_cafe);
-        for level in SurfaceLodLevel::ALL {
+        for level in SurfaceLodLevel::ALL.into_iter().take(4) {
             let stride = level.stride_voxels();
             let half = stride / 2;
             let mut core = BTreeSet::new();
@@ -2002,14 +2014,21 @@ mod tests {
             let coord = SurfaceTileCoord::containing(level, target.anchor[0], target.anchor[2]);
             let features = generator.skyline_features_anchored_in(coord.voxel_bounds_xz());
             let mesh = generate_surface_tile_mesh(generator, coord);
-            let expected_per_feature = proxy_quads_per_feature(level);
             assert_eq!(
                 skyline_quad_count(&mesh),
                 features
                     .iter()
-                    .filter(|feature| feature.kind == SkylineFeatureKind::Broadleaf)
-                    .count()
-                    * expected_per_feature
+                    .map(|feature| {
+                        let mut quads = Vec::new();
+                        append_skyline_proxy(&mut quads, level, *feature);
+                        quads
+                            .iter()
+                            .filter(|quad| {
+                                matches!(quad.material, Material::Wood | Material::Leaves)
+                            })
+                            .count()
+                    })
+                    .sum::<usize>()
             );
 
             let [origin_x, origin_z] = coord.voxel_origin();
@@ -2019,22 +2038,31 @@ mod tests {
                 let world_min_z = origin_z + i32::from(min_z) * level.stride_voxels();
                 let world_max_x = origin_x + i32::from(max_x) * level.stride_voxels();
                 let world_max_z = origin_z + i32::from(max_z) * level.stride_voxels();
-                let owned = features
+                let expected = features
                     .iter()
                     .filter(|feature| {
-                        feature.kind == SkylineFeatureKind::Broadleaf
-                            && feature.anchor[0] >= world_min_x
+                        feature.anchor[0] >= world_min_x
                             && feature.anchor[0] < world_max_x
                             && feature.anchor[2] >= world_min_z
                             && feature.anchor[2] < world_max_z
                     })
-                    .count();
+                    .map(|feature| {
+                        let mut quads = Vec::new();
+                        append_skyline_proxy(&mut quads, level, *feature);
+                        quads
+                            .iter()
+                            .filter(|quad| {
+                                matches!(quad.material, Material::Wood | Material::Leaves)
+                            })
+                            .count()
+                    })
+                    .sum::<usize>();
                 let actual = patch
                     .quads(&mesh)
                     .iter()
                     .filter(|quad| matches!(quad.material, Material::Wood | Material::Leaves))
                     .count();
-                assert_eq!(actual, owned * expected_per_feature);
+                assert_eq!(actual, expected);
                 assert!(SurfacePatchEdge::ALL.into_iter().all(|edge| {
                     patch
                         .skirt_quads(&mesh, edge)

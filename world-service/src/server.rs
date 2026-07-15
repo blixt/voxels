@@ -39,10 +39,11 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v8/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v8/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v8";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v9/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v9/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v9";
 const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
+const PREFETCH_WORKER_DIVISOR: usize = 4;
 
 /// Prepared server state. Source construction and spawn coverage validation happen before bind.
 pub struct WorldServer {
@@ -93,10 +94,14 @@ impl WorldServer {
         let semaphore = Arc::new(Semaphore::new(usize::from(
             config.transport.generation_workers,
         )));
+        let prefetch_workers =
+            (usize::from(config.transport.generation_workers) / PREFETCH_WORKER_DIVISOR).max(1);
+        let prefetch_semaphore = Arc::new(Semaphore::new(prefetch_workers));
         tokio::spawn(run_generation_dispatcher(
             generation_rx,
             Arc::clone(&source),
             semaphore,
+            prefetch_semaphore,
             config.transport.max_frame_bytes,
             config.transport.product_cache_bytes,
         ));
@@ -635,6 +640,13 @@ impl GenerationRequest {
         match self {
             Self::Chunks { request, .. } => request.request_id,
             Self::SurfaceTiles { request, .. } => request.request_id,
+        }
+    }
+
+    fn priority(&self) -> WorldProductPriority {
+        match self {
+            Self::Chunks { request, .. } => request.priority,
+            Self::SurfaceTiles { request, .. } => request.priority,
         }
     }
 
@@ -1289,6 +1301,7 @@ async fn run_generation_dispatcher(
     mut jobs: mpsc::Receiver<GenerationJob>,
     source: Arc<dyn WorldSourceEngine>,
     semaphore: Arc<Semaphore>,
+    prefetch_semaphore: Arc<Semaphore>,
     max_frame_bytes: usize,
     product_cache_bytes: usize,
 ) {
@@ -1320,6 +1333,7 @@ async fn run_generation_dispatcher(
                 in_flight.insert(key.clone(), vec![job]);
                 let source = Arc::clone(&source);
                 let semaphore = Arc::clone(&semaphore);
+                let prefetch_semaphore = Arc::clone(&prefetch_semaphore);
                 let completion_tx = completion_tx.clone();
                 tokio::spawn(async move {
                     let result = generate_single_flight_response(
@@ -1327,6 +1341,7 @@ async fn run_generation_dispatcher(
                         source,
                         session_semaphore,
                         semaphore,
+                        prefetch_semaphore,
                         max_frame_bytes,
                     )
                     .await;
@@ -1361,8 +1376,19 @@ async fn generate_single_flight_response(
     source: Arc<dyn WorldSourceEngine>,
     session_semaphore: Arc<Semaphore>,
     global_semaphore: Arc<Semaphore>,
+    prefetch_semaphore: Arc<Semaphore>,
     max_frame_bytes: usize,
 ) -> Result<Vec<u8>, String> {
+    let _prefetch_permit = if request.priority() == WorldProductPriority::Prefetch {
+        Some(
+            prefetch_semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| "world prefetch generation limiter stopped".to_owned())?,
+        )
+    } else {
+        None
+    };
     let _session_permit = session_semaphore
         .acquire_owned()
         .await
@@ -1795,7 +1821,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v8, test-local-token"),
+            HeaderValue::from_static("voxels.world.v9, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -2628,7 +2654,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v8, test-local-token"),
+            HeaderValue::from_static("voxels.world.v9, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -2663,7 +2689,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v8, test-local-token"),
+            HeaderValue::from_static("voxels.world.v9, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
