@@ -722,13 +722,13 @@ impl PreparedMacroRegion {
 
 fn material_for_column(column: &PreparedColumn, sea_level_voxels: i32, y: i32) -> Material {
     if y <= column.height {
-        let depth = column.height - y;
+        let depth = i64::from(column.height) - i64::from(y);
         let (surface, region) = surface_profile(column, sea_level_voxels);
         if depth == 0 {
             return surface;
         }
         let soil_depth = 5 + (column.moisture * 7.0).round() as i32;
-        if depth <= soil_depth {
+        if depth <= i64::from(soil_depth) {
             return match surface {
                 Material::Grass | Material::Moss | Material::Snow => Material::Dirt,
                 Material::Sand | Material::RedSand | Material::Clay => surface,
@@ -1114,6 +1114,15 @@ mod tests {
         assert_eq!(material_for_column(&lava_field, 0, 80), Material::Basalt);
         let shore = column(1, 0.60, 0.82, 0.20, -0.60);
         assert_eq!(surface_profile(&shore, 3).0, Material::Clay);
+    }
+
+    #[test]
+    fn deepest_voxel_below_a_high_provider_surface_uses_deep_geology() {
+        let extreme = column(i32::MAX - 127, 0.5, 0.45, 0.4, 0.0);
+        assert_eq!(
+            material_for_column(&extreme, 0, i32::MIN),
+            Material::Stone
+        );
     }
 
     #[test]
