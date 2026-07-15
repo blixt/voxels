@@ -4,7 +4,7 @@ use crate::avatar::AvatarGpu;
 use crate::environment::{
     DaylightPhase, InteriorEnvironment, OutdoorEnvironment, surface_region_label,
 };
-use crate::lod::GeometricLodFocus;
+use crate::lod::{GeometricLodFocus, SurfacePatchSelection};
 use crate::material_detail::MaterialDetailGpu;
 use crate::shadow::{
     AabbClipVolume, CASCADE_COUNT, DirectionalShadowCascades, DirectionalShadowConfig,
@@ -17,7 +17,7 @@ use crate::ui::{
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
 use crate::ui_gpu::{SCENE_FORMAT, UiGpu, texture_sampler_layout};
 use bytemuck::{Pod, Zeroable};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample, RemoteAvatarPose};
@@ -261,6 +261,7 @@ struct ChunkMesh {
     content_fingerprint: u64,
     slices: Vec<MeshSlice>,
     lod_ownership_focus: Option<GeometricLodFocus>,
+    lod_residency_revision: u64,
     lod_owned_slices: Vec<bool>,
     bounds_min: glam::Vec3,
     bounds_max: glam::Vec3,
@@ -276,11 +277,18 @@ pub enum ChunkActivationReason {
 }
 
 impl ChunkMesh {
-    fn refresh_lod_ownership(&mut self, key: &MeshKey, focus: Option<GeometricLodFocus>) {
+    fn refresh_lod_ownership(
+        &mut self,
+        key: &MeshKey,
+        focus: Option<GeometricLodFocus>,
+        surface_patch_selection: Option<&SurfacePatchSelection>,
+        residency_revision: u64,
+    ) {
         let Some(focus) = focus else {
             return;
         };
         if self.lod_ownership_focus == Some(focus)
+            && self.lod_residency_revision == residency_revision
             && self.lod_owned_slices.len() == self.slices.len()
         {
             return;
@@ -288,9 +296,10 @@ impl ChunkMesh {
         self.lod_owned_slices = self
             .slices
             .iter()
-            .map(|slice| slice_owned_by_lod(Some(focus), key, slice))
+            .map(|slice| slice_owned_by_lod(Some(focus), surface_patch_selection, key, slice))
             .collect();
         self.lod_ownership_focus = Some(focus);
+        self.lod_residency_revision = residency_revision;
     }
 
     fn lod_owns_slice(&self, focus: Option<GeometricLodFocus>, slice_index: usize) -> bool {
@@ -800,6 +809,11 @@ pub struct Renderer {
     material_detail: MaterialDetailGpu,
     chunks: BTreeMap<MeshKey, ChunkMesh>,
     water_chunks: BTreeMap<MeshKey, ChunkMesh>,
+    surface_patch_residency: HashSet<SurfacePatchId>,
+    surface_patch_residency_revision: u64,
+    surface_patch_selection: SurfacePatchSelection,
+    surface_patch_selection_focus: Option<GeometricLodFocus>,
+    surface_patch_selection_revision: u64,
     chunk_activations: ChunkActivations,
     local_light_candidates: BTreeMap<MeshKey, Vec<GpuLocalLight>>,
     arena: ArenaAllocator,
@@ -1554,6 +1568,11 @@ impl Renderer {
             material_detail,
             chunks: BTreeMap::new(),
             water_chunks: BTreeMap::new(),
+            surface_patch_residency: HashSet::new(),
+            surface_patch_residency_revision: 0,
+            surface_patch_selection: SurfacePatchSelection::default(),
+            surface_patch_selection_focus: None,
+            surface_patch_selection_revision: u64::MAX,
             chunk_activations: ChunkActivations::default(),
             local_light_candidates: BTreeMap::new(),
             arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
@@ -2009,6 +2028,16 @@ impl Renderer {
             self.remove_surface_tile(coord);
             return true;
         }
+        let resident_patch_ids = tile
+            .patches
+            .iter()
+            .filter_map(|patch| {
+                SurfacePatchId::from_tile_cell_min(
+                    coord,
+                    [patch.cell_bounds[0][0], patch.cell_bounds[0][1]],
+                )
+            })
+            .collect::<HashSet<_>>();
         let underlay_offset = FAR_UNDERLAY_OFFSET_METRES * (f32::from(coord.level.index()) + 1.0);
         let macro_normals = surface_macro_normals(tile);
         let gpu_quads: Vec<_> = tile
@@ -2153,6 +2182,7 @@ impl Renderer {
             key,
             water_update,
         );
+        self.replace_surface_patch_residency(coord, resident_patch_ids);
         true
     }
 
@@ -2202,6 +2232,44 @@ impl Renderer {
 
     pub fn remove_surface_tile(&mut self, coord: SurfaceTileCoord) {
         self.remove_mesh((coord.level.index() + 1, coord.x, 0, coord.z));
+        self.replace_surface_patch_residency(coord, HashSet::new());
+    }
+
+    fn replace_surface_patch_residency(
+        &mut self,
+        coord: SurfaceTileCoord,
+        replacement: HashSet<SurfacePatchId>,
+    ) {
+        let current = self
+            .surface_patch_residency
+            .iter()
+            .copied()
+            .filter(|patch| surface_patch_belongs_to_tile(*patch, coord))
+            .collect::<HashSet<_>>();
+        if current == replacement {
+            return;
+        }
+        self.surface_patch_residency
+            .retain(|patch| !surface_patch_belongs_to_tile(*patch, coord));
+        self.surface_patch_residency.extend(replacement);
+        self.surface_patch_residency_revision =
+            self.surface_patch_residency_revision.wrapping_add(1);
+    }
+
+    fn refresh_surface_patch_selection(&mut self, focus: Option<GeometricLodFocus>) {
+        if self.surface_patch_selection_focus == focus
+            && self.surface_patch_selection_revision == self.surface_patch_residency_revision
+        {
+            return;
+        }
+        if let Some(focus) = focus {
+            self.surface_patch_selection
+                .rebuild(focus, &self.surface_patch_residency);
+        } else {
+            self.surface_patch_selection = SurfacePatchSelection::default();
+        }
+        self.surface_patch_selection_focus = focus;
+        self.surface_patch_selection_revision = self.surface_patch_residency_revision;
     }
 
     /// Browser-smoke diagnostics for proving that a revised remote surface product reached the
@@ -2414,8 +2482,19 @@ impl Renderer {
         let geometric_lod_focus =
             active_geometric_lod_focus(self.geometric_lod_focus, self.options.far_terrain);
         let lod_readiness = self.lod_readiness();
+        let hierarchy_fallback = geometric_lod_focus.is_some() && !lod_readiness.all;
+        if hierarchy_fallback {
+            self.refresh_surface_patch_selection(geometric_lod_focus);
+        }
+        let surface_patch_selection = hierarchy_fallback.then_some(&self.surface_patch_selection);
         let (shadow_draw_lists, world_draw_list) = collect_opaque_draw_lists(
             &mut self.chunks,
+            surface_patch_selection,
+            if hierarchy_fallback {
+                self.surface_patch_residency_revision
+            } else {
+                u64::MAX
+            },
             self.options.far_terrain,
             self.options.shadows,
             geometric_lod_focus,
@@ -2431,7 +2510,7 @@ impl Renderer {
             },
             |key, slice| {
                 slice.render_layer == RenderLayer::Translucent
-                    && slice_owned_by_lod(geometric_lod_focus, key, slice)
+                    && slice_owned_by_lod(geometric_lod_focus, surface_patch_selection, key, slice)
                     && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             },
         );
@@ -2884,6 +2963,8 @@ impl Renderer {
 /// preserving each list's independent clip tests, diagnostics, ordering, and fingerprint.
 fn collect_opaque_draw_lists(
     chunks: &mut BTreeMap<MeshKey, ChunkMesh>,
+    surface_patch_selection: Option<&SurfacePatchSelection>,
+    residency_revision: u64,
     far_terrain: bool,
     shadows: bool,
     geometric_lod_focus: Option<GeometricLodFocus>,
@@ -2906,7 +2987,12 @@ fn collect_opaque_draw_lists(
         if !world_chunk_visible && !shadow_chunk_visible.into_iter().any(|visible| visible) {
             continue;
         }
-        chunk.refresh_lod_ownership(key, geometric_lod_focus);
+        chunk.refresh_lod_ownership(
+            key,
+            geometric_lod_focus,
+            surface_patch_selection,
+            residency_revision,
+        );
 
         let mut world_mesh_selected = false;
         let mut shadow_mesh_selected = [false; CASCADE_COUNT];
@@ -3024,6 +3110,7 @@ fn prepare_mesh_sliced_into(
         content_fingerprint: fingerprint_bytes(bytes),
         slices,
         lod_ownership_focus: None,
+        lod_residency_revision: 0,
         lod_owned_slices: Vec::new(),
         bounds_min,
         bounds_max,
@@ -3153,7 +3240,24 @@ fn surface_patch_bounds(
     }
 }
 
-fn slice_owned_by_lod(focus: Option<GeometricLodFocus>, key: &MeshKey, slice: &MeshSlice) -> bool {
+fn surface_patch_belongs_to_tile(patch: SurfacePatchId, tile: SurfaceTileCoord) -> bool {
+    patch.level == tile.level
+        && patch
+            .x
+            .div_euclid(voxels_world::SURFACE_PATCHES_PER_TILE_EDGE)
+            == tile.x
+        && patch
+            .z
+            .div_euclid(voxels_world::SURFACE_PATCHES_PER_TILE_EDGE)
+            == tile.z
+}
+
+fn slice_owned_by_lod(
+    focus: Option<GeometricLodFocus>,
+    surface_patch_selection: Option<&SurfacePatchSelection>,
+    key: &MeshKey,
+    slice: &MeshSlice,
+) -> bool {
     let Some(focus) = focus else {
         return true;
     };
@@ -3168,6 +3272,9 @@ fn slice_owned_by_lod(focus: Option<GeometricLodFocus>, key: &MeshKey, slice: &M
         .is_some_and(|patch_id| patch_id.level != level)
     {
         return false;
+    }
+    if let (Some(patch_id), Some(selection)) = (slice.surface_patch_id, surface_patch_selection) {
+        return selection.owns(patch_id, slice.skirt_edge);
     }
     slice.surface_bounds.is_some_and(|bounds| {
         slice.skirt_edge.map_or_else(
@@ -4013,6 +4120,7 @@ mod tests {
                 content_fingerprint: 1,
                 slices: Vec::new(),
                 lod_ownership_focus: None,
+                lod_residency_revision: 0,
                 lod_owned_slices: Vec::new(),
                 bounds_min: glam::Vec3::ZERO,
                 bounds_max: glam::Vec3::ZERO,
@@ -4028,6 +4136,7 @@ mod tests {
                 content_fingerprint: 2,
                 slices: Vec::new(),
                 lod_ownership_focus: None,
+                lod_residency_revision: 0,
                 lod_owned_slices: Vec::new(),
                 bounds_min: glam::Vec3::ZERO,
                 bounds_max: glam::Vec3::ZERO,
@@ -4323,6 +4432,7 @@ mod tests {
                     content_fingerprint: 11,
                     slices: vec![canonical_slice],
                     lod_ownership_focus: None,
+                    lod_residency_revision: 0,
                     lod_owned_slices: Vec::new(),
                     bounds_min,
                     bounds_max,
@@ -4337,6 +4447,7 @@ mod tests {
                     content_fingerprint: 22,
                     slices: vec![surface_slice],
                     lod_ownership_focus: None,
+                    lod_residency_revision: 0,
                     lod_owned_slices: Vec::new(),
                     bounds_min,
                     bounds_max,
@@ -4345,16 +4456,28 @@ mod tests {
             ),
         ]);
         let focus = Some(GeometricLodFocus::snapped(0, 0));
+        let surface_patch_residency =
+            HashSet::from([surface_slice.surface_patch_id.expect("surface patch id")]);
+        let mut surface_patch_selection = SurfacePatchSelection::default();
+        surface_patch_selection.rebuild(focus.unwrap(), &surface_patch_residency);
         let view_clip = AabbClipVolume::new(glam::Mat4::IDENTITY);
         let shadow_clips = [view_clip; CASCADE_COUNT];
-        let (actual_shadows, actual_world) =
-            collect_opaque_draw_lists(&mut chunks, true, true, focus, view_clip, shadow_clips);
+        let (actual_shadows, actual_world) = collect_opaque_draw_lists(
+            &mut chunks,
+            Some(&surface_patch_selection),
+            1,
+            true,
+            true,
+            focus,
+            view_clip,
+            shadow_clips,
+        );
         let expected_world = reference_draw_list(
             &chunks,
             |_, chunk| view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max),
             |key, slice| {
                 slice.render_layer == RenderLayer::Opaque
-                    && slice_owned_by_lod(focus, key, slice)
+                    && slice_owned_by_lod(focus, Some(&surface_patch_selection), key, slice)
                     && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             },
         );
@@ -4368,7 +4491,7 @@ mod tests {
                 },
                 |key, slice| {
                     slice.render_layer == RenderLayer::Opaque
-                        && slice_owned_by_lod(focus, key, slice)
+                        && slice_owned_by_lod(focus, Some(&surface_patch_selection), key, slice)
                         && shadow_clips[cascade_index]
                             .contains_aabb(slice.bounds_min, slice.bounds_max)
                 },
@@ -4377,8 +4500,17 @@ mod tests {
         assert_eq!(actual_world, expected_world);
         assert_eq!(actual_shadows, expected_shadows);
 
-        let cached_world =
-            collect_opaque_draw_lists(&mut chunks, true, true, focus, view_clip, shadow_clips).1;
+        let cached_world = collect_opaque_draw_lists(
+            &mut chunks,
+            Some(&surface_patch_selection),
+            1,
+            true,
+            true,
+            focus,
+            view_clip,
+            shadow_clips,
+        )
+        .1;
         assert_eq!(cached_world, expected_world);
         assert!(
             chunks
@@ -4387,8 +4519,11 @@ mod tests {
         );
 
         let moved_focus = Some(GeometricLodFocus::snapped(256, -192));
+        surface_patch_selection.rebuild(moved_focus.unwrap(), &surface_patch_residency);
         let moved_world = collect_opaque_draw_lists(
             &mut chunks,
+            Some(&surface_patch_selection),
+            1,
             true,
             true,
             moved_focus,
@@ -4401,7 +4536,7 @@ mod tests {
             |_, chunk| view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max),
             |key, slice| {
                 slice.render_layer == RenderLayer::Opaque
-                    && slice_owned_by_lod(moved_focus, key, slice)
+                    && slice_owned_by_lod(moved_focus, Some(&surface_patch_selection), key, slice)
                     && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             },
         );
@@ -4418,11 +4553,13 @@ mod tests {
         let focus = GeometricLodFocus::snapped(0, 0);
         assert!(slice_owned_by_lod(
             Some(focus),
+            None,
             &(0, 0, 0, 0),
             &test_slice(None)
         ));
         assert!(!slice_owned_by_lod(
             Some(focus),
+            None,
             &(0, 7, 0, 0),
             &test_slice(None)
         ));
@@ -4433,11 +4570,13 @@ mod tests {
         }));
         assert!(slice_owned_by_lod(
             Some(focus),
+            None,
             &(SurfaceLodLevel::Stride2.index() + 1, 1, 0, 0),
             &stride_two_patch
         ));
         assert!(!slice_owned_by_lod(
             Some(focus),
+            None,
             &(SurfaceLodLevel::Stride4.index() + 1, 1, 0, 0),
             &stride_two_patch
         ));
@@ -4454,11 +4593,13 @@ mod tests {
         assert!(slice.bounds_max.x > 9_000.0);
         assert!(slice_owned_by_lod(
             Some(focus),
+            None,
             &(SurfaceLodLevel::Stride4.index() + 1, 2, 0, 0),
             &slice
         ));
         assert!(!slice_owned_by_lod(
             Some(focus),
+            None,
             &(SurfaceLodLevel::Stride8.index() + 1, 1, 0, 0),
             &slice
         ));
@@ -4486,9 +4627,10 @@ mod tests {
     #[test]
     fn geometric_lod_falls_back_to_all_resident_meshes_until_ready() {
         let surface = test_slice(None);
-        assert!(slice_owned_by_lod(None, &(99, 0, 0, 0), &surface));
+        assert!(slice_owned_by_lod(None, None, &(99, 0, 0, 0), &surface));
         assert!(!slice_owned_by_lod(
             Some(GeometricLodFocus::snapped(0, 0)),
+            None,
             &(99, 0, 0, 0),
             &surface
         ));
@@ -4502,11 +4644,13 @@ mod tests {
 
         assert!(!slice_owned_by_lod(
             active_geometric_lod_focus(settled, true),
+            None,
             &outside_inner_cut,
             &canonical
         ));
         assert!(slice_owned_by_lod(
             active_geometric_lod_focus(settled, false),
+            None,
             &outside_inner_cut,
             &canonical
         ));

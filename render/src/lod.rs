@@ -1,6 +1,6 @@
 //! Pure geometric ownership for nested block-surface LOD rings.
 
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 use voxels_world::{CHUNK_EDGE, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId};
 
 /// Half extents in canonical 10 cm voxels. Every boundary is a multiple of the patch span on both
@@ -130,7 +130,7 @@ impl GeometricLodFocus {
 /// independently repeat the same rule toward the fixed geometric owner requested by `focus`.
 pub fn surface_patch_is_selected(
     focus: GeometricLodFocus,
-    resident: &BTreeSet<SurfacePatchId>,
+    resident: &HashSet<SurfacePatchId>,
     patch: SurfacePatchId,
 ) -> bool {
     if !resident.contains(&patch) || refinement_blocked_by_ancestor(resident, patch) {
@@ -153,7 +153,7 @@ pub fn surface_patch_is_selected(
 
 pub fn surface_patch_skirt_is_selected(
     focus: GeometricLodFocus,
-    resident: &BTreeSet<SurfacePatchId>,
+    resident: &HashSet<SurfacePatchId>,
     patch: SurfacePatchId,
     edge: SurfacePatchEdge,
 ) -> bool {
@@ -166,13 +166,79 @@ pub fn surface_patch_skirt_is_selected(
         SurfacePatchEdge::NegativeZ => [0, -1],
         SurfacePatchEdge::PositiveZ => [0, 1],
     };
-    patch
-        .neighbor(delta[0], delta[1])
-        .is_none_or(|neighbor| !surface_patch_is_selected(focus, resident, neighbor))
+    let Some(neighbor) = patch.neighbor(delta[0], delta[1]) else {
+        return false;
+    };
+    if surface_patch_is_selected(focus, resident, neighbor) {
+        return false;
+    }
+    if resident.contains(&neighbor) {
+        return true;
+    }
+    let Some(center) = neighbor.voxel_center_xz() else {
+        return false;
+    };
+    focus.owner_at(center[0], center[1]) != LodOwner::Surface(patch.level)
+}
+
+/// Cached result of hierarchy selection. Building it touches each resident patch once; draw-list
+/// construction then performs only constant-time membership checks instead of repeating ancestor
+/// walks for the main shell and four skirt slices of every patch.
+#[derive(Debug, Default)]
+pub struct SurfacePatchSelection {
+    patches: HashSet<SurfacePatchId>,
+    skirts: HashSet<(SurfacePatchId, u8)>,
+}
+
+impl SurfacePatchSelection {
+    pub fn rebuild(&mut self, focus: GeometricLodFocus, resident: &HashSet<SurfacePatchId>) {
+        self.patches.clear();
+        self.skirts.clear();
+        self.patches.extend(
+            resident
+                .iter()
+                .copied()
+                .filter(|patch| surface_patch_is_selected(focus, resident, *patch)),
+        );
+        for patch in self.patches.iter().copied() {
+            for edge in SurfacePatchEdge::ALL {
+                let delta = match edge {
+                    SurfacePatchEdge::NegativeX => [-1, 0],
+                    SurfacePatchEdge::PositiveX => [1, 0],
+                    SurfacePatchEdge::NegativeZ => [0, -1],
+                    SurfacePatchEdge::PositiveZ => [0, 1],
+                };
+                let Some(neighbor) = patch.neighbor(delta[0], delta[1]) else {
+                    continue;
+                };
+                if self.patches.contains(&neighbor) {
+                    continue;
+                }
+                let residency_boundary = resident.contains(&neighbor);
+                let resolution_boundary = neighbor.voxel_center_xz().is_some_and(|center| {
+                    focus.owner_at(center[0], center[1]) != LodOwner::Surface(patch.level)
+                });
+                if residency_boundary || resolution_boundary {
+                    self.skirts.insert((patch, edge.index() as u8));
+                }
+            }
+        }
+    }
+
+    pub fn owns(&self, patch: SurfacePatchId, skirt_edge: Option<SurfacePatchEdge>) -> bool {
+        skirt_edge.map_or_else(
+            || self.patches.contains(&patch),
+            |edge| self.skirts.contains(&(patch, edge.index() as u8)),
+        )
+    }
+
+    pub fn patch_count(&self) -> usize {
+        self.patches.len()
+    }
 }
 
 fn refinement_blocked_by_ancestor(
-    resident: &BTreeSet<SurfacePatchId>,
+    resident: &HashSet<SurfacePatchId>,
     patch: SurfacePatchId,
 ) -> bool {
     let mut descendant = patch;
@@ -214,7 +280,7 @@ fn snap_nearest(value: i32, step: i32) -> i32 {
 mod tests {
     use super::*;
 
-    fn resident(patches: impl IntoIterator<Item = SurfacePatchId>) -> BTreeSet<SurfacePatchId> {
+    fn resident(patches: impl IntoIterator<Item = SurfacePatchId>) -> HashSet<SurfacePatchId> {
         patches.into_iter().collect()
     }
 
@@ -244,10 +310,19 @@ mod tests {
                 .into_iter()
                 .all(|child| surface_patch_is_selected(focus, &complete, child))
         );
+        let mut selection = SurfacePatchSelection::default();
+        selection.rebuild(focus, &complete);
+        assert_eq!(selection.patch_count(), 4);
+        assert!(!selection.owns(parent, None));
+        assert!(
+            children
+                .into_iter()
+                .all(|child| selection.owns(child, None))
+        );
     }
 
     #[test]
-    fn selected_patch_skirts_only_residency_boundaries() {
+    fn selected_patch_skirts_only_resolution_or_residency_boundaries() {
         let focus = GeometricLodFocus::snapped(0, 0);
         let left = SurfacePatchId::new(SurfaceLodLevel::Stride2, 7, 0);
         let right = left.neighbor(1, 0).unwrap();
@@ -258,11 +333,19 @@ mod tests {
             left,
             SurfacePatchEdge::PositiveX
         ));
-        assert!(surface_patch_skirt_is_selected(
+        assert!(!surface_patch_skirt_is_selected(
             focus,
             &resident([left]),
             left,
             SurfacePatchEdge::PositiveX
+        ));
+
+        let boundary = SurfacePatchId::new(SurfaceLodLevel::Stride2, 6, 0);
+        assert!(surface_patch_skirt_is_selected(
+            focus,
+            &resident([boundary]),
+            boundary,
+            SurfacePatchEdge::NegativeX
         ));
     }
 
