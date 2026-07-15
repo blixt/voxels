@@ -708,12 +708,15 @@ mod web {
             self.drain_remote_generation();
             let focus = world_to_chunk(camera.position);
             let interest = CaveStreamInterest::empty();
-            let work = {
+            let (focus_changed, work) = {
                 let mut scheduler = self.scheduler.borrow_mut();
-                scheduler.update_focus_with_interest(focus, interest.as_slice());
-                scheduler.schedule_frame(self.config.stream_frame_budget)
+                let changed = scheduler.update_focus_with_interest(focus, interest.as_slice());
+                (
+                    changed,
+                    scheduler.schedule_frame(self.config.stream_frame_budget),
+                )
             };
-            let uploaded = !work.upload.is_empty();
+            let mut uploaded = false;
 
             let mut startup_generation = Vec::new();
             let mut background_generation = Vec::new();
@@ -774,6 +777,7 @@ mod web {
                 };
                 if self.renderer.borrow_mut().upload_chunk(ticket.coord, &mesh) {
                     let _ = self.scheduler.borrow_mut().complete(ticket);
+                    uploaded = true;
                 } else {
                     self.pending_meshes
                         .borrow_mut()
@@ -798,7 +802,7 @@ mod web {
                     renderer.remove_chunk(eviction.coord);
                 }
             }
-            if uploaded || evicted {
+            if focus_changed || uploaded || evicted {
                 self.reconcile_chunk_activation(focus, interest);
             }
             self.stream_surface_lods(camera.position);

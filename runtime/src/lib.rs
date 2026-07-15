@@ -456,14 +456,20 @@ impl StreamScheduler {
     /// Rebuilds the desired fine-chunk set around `focus`. Nearby chunks win when capacity is
     /// smaller than the configured cylinder. Previously tracked chunks survive inside the wider
     /// retention radius when spare capacity exists, preventing boundary thrash.
-    pub fn update_focus(&mut self, focus: ChunkCoord) {
-        self.update_focus_with_interest(focus, &[]);
+    pub fn update_focus(&mut self, focus: ChunkCoord) -> bool {
+        self.update_focus_with_interest(focus, &[])
     }
 
     /// Rebuilds the primary cylinder plus a bounded, deterministic set of secondary chunks.
     /// Secondary interest is useful for semantic look-ahead such as connected cave cells. Primary
     /// coverage always wins, and both sets share the same hard `max_tracked_chunks` ceiling.
-    pub fn update_focus_with_interest(&mut self, focus: ChunkCoord, interest: &[ChunkCoord]) {
+    /// Returns `true` when the desired set changed. Renderers use this to reconcile activation even
+    /// when every newly desired chunk was already resident inside the retention window.
+    pub fn update_focus_with_interest(
+        &mut self,
+        focus: ChunkCoord,
+        interest: &[ChunkCoord],
+    ) -> bool {
         let (secondary_interest, capacity_truncated) =
             normalized_interest(focus, interest, self.config.max_secondary_interest_chunks);
         if self.focus_initialized
@@ -472,7 +478,7 @@ impl StreamScheduler {
             && self.secondary_interest_requested == interest.len()
             && self.secondary_interest_capacity_truncated == capacity_truncated
         {
-            return;
+            return false;
         }
         self.focus = focus;
         self.focus_initialized = true;
@@ -535,6 +541,7 @@ impl StreamScheduler {
                 );
             }
         }
+        true
     }
 
     /// Starts at most the supplied number of jobs per stage. Work is stable-sorted by distance to
@@ -1345,6 +1352,33 @@ mod tests {
                 .drain_evictions()
                 .iter()
                 .any(|eviction| eviction.coord == old)
+        );
+    }
+
+    #[test]
+    fn focus_update_reports_desired_set_changes_even_when_chunks_are_retained() {
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 2,
+            max_tracked_chunks: 3,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
+        });
+        let origin = ChunkCoord::new(0, 0, 0);
+        let neighbor = ChunkCoord::new(1, 0, 0);
+
+        assert!(scheduler.update_focus(origin));
+        advance_to_resident(&mut scheduler, origin);
+        assert!(!scheduler.update_focus(origin));
+
+        assert!(scheduler.update_focus(neighbor));
+        advance_to_resident(&mut scheduler, neighbor);
+        assert!(scheduler.update_focus(origin));
+        assert!(scheduler.drain_evictions().is_empty());
+        assert!(
+            scheduler
+                .status(origin)
+                .is_some_and(|status| { status.desired && status.state == ChunkState::Resident })
         );
     }
 
