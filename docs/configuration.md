@@ -29,7 +29,6 @@ The file controls:
 - fixed-step timing, catch-up limit, and edit-tracker capacity;
 - chunk and surface-LOD load/retention radii, pipeline budgets, and interest capacity;
 - view/shadow settings;
-- the initial daylight;
 - every feature toggle shown in Mission Control, plus its initial open/compact state;
 - bounded diagnostic probe sizes and cadence;
 - automated profile speed and warmup/measurement durations.
@@ -47,7 +46,7 @@ browser profile. See
 ## World-service configuration
 
 `config/world-service.toml` controls the seed, the procedural/Terrain Diffusion provider toggle,
-native edit database and commit-queue bound, presence cadence/admission bounds, and Terrain
+the shared day/weather clock, native edit database and commit-queue bound, presence cadence/admission bounds, and Terrain
 Diffusion deployment settings such as precision, model cache, model-space origin, and world placement. See
 [World service configuration](world-service-config.md) for commands and the complete server schema.
 

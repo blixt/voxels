@@ -30,7 +30,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 11;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 12;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 5;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -180,6 +180,36 @@ pub struct SpawnConfig {
     pub xz_voxels: [i32; 2],
 }
 
+/// Restart-stable server authority for celestial time and the first weather layer.
+///
+/// `day_fraction_at_unix_epoch` makes an accelerated clock deterministic across daemon restarts.
+/// Set `day_length_seconds` to zero to hold an exact time for visual tests or authored events.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentConfig {
+    pub day_length_seconds: f32,
+    pub day_fraction_at_unix_epoch: f32,
+    pub cloud_offset_metres_at_unix_epoch: [f32; 2],
+    pub cloud_velocity_metres_per_second: [f32; 2],
+    pub cloud_coverage: f32,
+    pub weather_seed: u64,
+    pub weather_revision: u64,
+}
+
+impl Default for EnvironmentConfig {
+    fn default() -> Self {
+        Self {
+            day_length_seconds: 1_200.0,
+            day_fraction_at_unix_epoch: 0.72,
+            cloud_offset_metres_at_unix_epoch: [0.0, 0.0],
+            cloud_velocity_metres_per_second: [5.5, 1.6],
+            cloud_coverage: 0.46,
+            weather_seed: 0x57ea_7aed,
+            weather_revision: 1,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EditPersistenceConfig {
@@ -262,6 +292,7 @@ pub struct WorldServiceConfig {
     pub transport: LoopbackTransportConfig,
     pub presence: PresenceConfig,
     pub gameplay: GameplayConfig,
+    pub environment: EnvironmentConfig,
     pub edits: EditPersistenceConfig,
     pub spawn: SpawnConfig,
     pub terrain_diffusion: TerrainDiffusionProviderConfig,
@@ -277,6 +308,7 @@ impl Default for WorldServiceConfig {
             transport: LoopbackTransportConfig::default(),
             presence: PresenceConfig::default(),
             gameplay: GameplayConfig::default(),
+            environment: EnvironmentConfig::default(),
             edits: EditPersistenceConfig::default(),
             spawn: SpawnConfig::default(),
             terrain_diffusion: TerrainDiffusionProviderConfig::default(),
@@ -374,6 +406,29 @@ impl WorldServiceConfig {
         {
             return Err(WorldServiceConfigError::InvalidConcurrency(
                 "generation worker limits must be nonzero and per-client must not exceed global",
+            ));
+        }
+        if !self.environment.day_length_seconds.is_finite()
+            || !(0.0..=86_400.0).contains(&self.environment.day_length_seconds)
+            || !self.environment.day_fraction_at_unix_epoch.is_finite()
+            || !(0.0..1.0).contains(&self.environment.day_fraction_at_unix_epoch)
+            || !self
+                .environment
+                .cloud_offset_metres_at_unix_epoch
+                .into_iter()
+                .chain(self.environment.cloud_velocity_metres_per_second)
+                .all(|value| value.is_finite())
+            || self
+                .environment
+                .cloud_velocity_metres_per_second
+                .into_iter()
+                .any(|value| value.abs() > 100.0)
+            || !self.environment.cloud_coverage.is_finite()
+            || !(0.0..=1.0).contains(&self.environment.cloud_coverage)
+            || self.environment.weather_revision == 0
+        {
+            return Err(WorldServiceConfigError::InvalidEnvironment(
+                "day clock, cloud wind, coverage, and weather revision must be finite and bounded",
             ));
         }
         if !(16..=1_000).contains(&self.presence.broadcast_interval_ms) {
@@ -529,6 +584,7 @@ pub enum WorldServiceConfigError {
     InvalidConcurrency(&'static str),
     InvalidPresence(&'static str),
     InvalidGameplay(&'static str),
+    InvalidEnvironment(&'static str),
     InvalidEdits(&'static str),
     InvalidTerrainDiffusion(TerrainDiffusionError),
 }
@@ -579,6 +635,9 @@ impl fmt::Display for WorldServiceConfigError {
             }
             Self::InvalidGameplay(reason) => {
                 write!(formatter, "invalid world-service gameplay: {reason}")
+            }
+            Self::InvalidEnvironment(reason) => {
+                write!(formatter, "invalid world-service environment: {reason}")
             }
             Self::InvalidEdits(reason) => {
                 write!(formatter, "invalid world-service edits: {reason}")
@@ -802,7 +861,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 11
+schema_version = 12
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -844,6 +903,15 @@ max_horizontal_speed_centimetres_per_second = 900
 max_vertical_speed_centimetres_per_second = 1200
 movement_slack_centimetres = 100
 movement_credit_window_ms = 500
+
+[environment]
+day_length_seconds = 1200.0
+day_fraction_at_unix_epoch = 0.72
+cloud_offset_metres_at_unix_epoch = [0.0, 0.0]
+cloud_velocity_metres_per_second = [5.5, 1.6]
+cloud_coverage = 0.46
+weather_seed = 1474984685
+weather_revision = 1
 
 [edits]
 database = "world-state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3"
@@ -908,12 +976,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 11", "schema_version = 10");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 12", "schema_version = 11");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 11,
-                found: 10,
+                expected: 12,
+                found: 11,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");

@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 11
+schema_version = 12
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -69,6 +69,15 @@ max_vertical_speed_centimetres_per_second = 1200
 movement_slack_centimetres = 100
 movement_credit_window_ms = 500
 
+[environment]
+day_length_seconds = 1200.0
+day_fraction_at_unix_epoch = 0.72
+cloud_offset_metres_at_unix_epoch = [0.0, 0.0]
+cloud_velocity_metres_per_second = [5.5, 1.6]
+cloud_coverage = 0.46
+weather_seed = 1474984685
+weather_revision = 1
+
 [edits]
 database = "../tmp/world-state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3"
 change_queue_capacity = 256
@@ -85,6 +94,12 @@ quality_histogram = [0.0, 0.0, 0.0, 1.0, 1.5]
 sea_level_voxels = 52
 # model_cache = "/an/optional/cache/root"
 ```
+
+The environment anchor is evaluated against Unix time and then transmitted with the server's
+monotonic clock, so daemon restarts and multiple clients retain one sky. Set
+`day_length_seconds = 0` to freeze `day_fraction_at_unix_epoch` for visual testing. Cloud wind and
+coverage are the first server-authored weather state; later precipitation and storm fronts can
+advance through the same revisioned environment snapshot.
 
 `float16` is the high-performance default; `float32` is available for diagnostics. If
 `model_cache` is omitted on macOS, the service loads the immutable pinned revision from

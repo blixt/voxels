@@ -17,7 +17,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 11;
+pub const PROTOCOL_VERSION: u16 = 12;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -181,6 +181,7 @@ pub struct SpawnPoint {
 pub struct WorldOpened {
     pub manifest: WorldManifest,
     pub capabilities: WorldCapabilities,
+    pub environment: WorldEnvironmentSnapshot,
     pub recommended_in_flight_batches: u16,
     pub identity: PlayerIdentity,
     pub connection_id: u64,
@@ -192,6 +193,24 @@ pub struct WorldOpened {
     /// players receive their last server-accepted state instead of choosing a client-side resume.
     pub player_resume: PlayerResume,
     pub inventory: MaterialInventory,
+}
+
+/// Server-authored environment state sampled against the same monotonic clock used by presence.
+///
+/// Clients extrapolate the day fraction and cloud offset from `sample_server_time_ms`, so all
+/// players see one world clock without receiving per-frame environment messages. A future weather
+/// authority can replace the snapshot whenever `weather_revision` changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorldEnvironmentSnapshot {
+    pub sample_server_time_ms: u64,
+    pub day_fraction: f32,
+    /// Zero freezes the celestial clock at `day_fraction`.
+    pub day_length_seconds: f32,
+    pub cloud_offset_metres: [f32; 2],
+    pub cloud_velocity_metres_per_second: [f32; 2],
+    pub cloud_coverage: f32,
+    pub weather_seed: u64,
+    pub weather_revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -679,11 +698,13 @@ pub fn encode_world_opened(opened: &WorldOpened) -> Vec<u8> {
     debug_assert!(!opened.edit_session_id.is_nil());
     debug_assert!(validate_player_resume(&opened.player_resume).is_ok());
     debug_assert!(validate_inventory(&opened.inventory).is_ok());
+    debug_assert!(validate_world_environment(&opened.environment).is_ok());
     let manifest = encode_manifest(&opened.manifest);
-    let mut payload = Vec::with_capacity(manifest.len() + 260);
+    let mut payload = Vec::with_capacity(manifest.len() + 320);
     push_u32(&mut payload, manifest.len() as u32);
     payload.extend_from_slice(&manifest);
     push_u64(&mut payload, opened.capabilities.bits());
+    encode_world_environment(&mut payload, opened.environment);
     push_u16(&mut payload, opened.recommended_in_flight_batches);
     payload.extend_from_slice(opened.identity.browser_user_id.as_bytes());
     payload.extend_from_slice(opened.identity.player_id.as_bytes());
@@ -718,6 +739,7 @@ pub fn decode_world_opened(bytes: &[u8]) -> Result<WorldOpened, ProtocolError> {
     let manifest_len = cursor.u32()? as usize;
     let manifest = decode_manifest(cursor.bytes(manifest_len)?)?;
     let capabilities = WorldCapabilities::from_bits(cursor.u64()?);
+    let environment = decode_world_environment(&mut cursor)?;
     let recommended_in_flight_batches = cursor.u16()?;
     if recommended_in_flight_batches == 0 {
         return Err(ProtocolError::InvalidPayload(
@@ -774,6 +796,7 @@ pub fn decode_world_opened(bytes: &[u8]) -> Result<WorldOpened, ProtocolError> {
     Ok(WorldOpened {
         manifest,
         capabilities,
+        environment,
         recommended_in_flight_batches,
         identity,
         connection_id,
@@ -793,6 +816,70 @@ pub fn decode_world_opened(bytes: &[u8]) -> Result<WorldOpened, ProtocolError> {
         player_resume,
         inventory,
     })
+}
+
+fn encode_world_environment(payload: &mut Vec<u8>, environment: WorldEnvironmentSnapshot) {
+    push_u64(payload, environment.sample_server_time_ms);
+    push_f32(payload, environment.day_fraction);
+    push_f32(payload, environment.day_length_seconds);
+    for value in environment.cloud_offset_metres {
+        push_f32(payload, value);
+    }
+    for value in environment.cloud_velocity_metres_per_second {
+        push_f32(payload, value);
+    }
+    push_f32(payload, environment.cloud_coverage);
+    push_u32(payload, 0);
+    push_u64(payload, environment.weather_seed);
+    push_u64(payload, environment.weather_revision);
+}
+
+fn decode_world_environment(
+    cursor: &mut Cursor<'_>,
+) -> Result<WorldEnvironmentSnapshot, ProtocolError> {
+    let environment = WorldEnvironmentSnapshot {
+        sample_server_time_ms: cursor.u64()?,
+        day_fraction: cursor.f32()?,
+        day_length_seconds: cursor.f32()?,
+        cloud_offset_metres: [cursor.f32()?, cursor.f32()?],
+        cloud_velocity_metres_per_second: [cursor.f32()?, cursor.f32()?],
+        cloud_coverage: cursor.f32()?,
+        weather_seed: {
+            if cursor.u32()? != 0 {
+                return Err(ProtocolError::InvalidPayload(
+                    "reserved environment field is nonzero",
+                ));
+            }
+            cursor.u64()?
+        },
+        weather_revision: cursor.u64()?,
+    };
+    validate_world_environment(&environment)?;
+    Ok(environment)
+}
+
+fn validate_world_environment(
+    environment: &WorldEnvironmentSnapshot,
+) -> Result<(), ProtocolError> {
+    if environment.sample_server_time_ms == 0
+        || !environment.day_fraction.is_finite()
+        || !(0.0..1.0).contains(&environment.day_fraction)
+        || !environment.day_length_seconds.is_finite()
+        || environment.day_length_seconds < 0.0
+        || !environment
+            .cloud_offset_metres
+            .into_iter()
+            .chain(environment.cloud_velocity_metres_per_second)
+            .all(|value| value.is_finite())
+        || !environment.cloud_coverage.is_finite()
+        || !(0.0..=1.0).contains(&environment.cloud_coverage)
+        || environment.weather_revision == 0
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "invalid world environment snapshot",
+        ));
+    }
+    Ok(())
 }
 
 pub fn encode_chunk_batch(request: &ChunkBatchRequest) -> Result<Vec<u8>, ProtocolError> {
@@ -3420,6 +3507,16 @@ mod tests {
             manifest: WorldManifest::procedural_v16(WorldId::from_bytes([7; 16]), 42),
             capabilities: WorldCapabilities::CANONICAL_CHUNKS
                 .union(WorldCapabilities::AUTHORED_ROUTES),
+            environment: WorldEnvironmentSnapshot {
+                sample_server_time_ms: 12_345,
+                day_fraction: 0.625,
+                day_length_seconds: 1_200.0,
+                cloud_offset_metres: [412.5, 91.25],
+                cloud_velocity_metres_per_second: [5.5, 1.6],
+                cloud_coverage: 0.46,
+                weather_seed: 77,
+                weather_revision: 3,
+            },
             recommended_in_flight_batches: 4,
             identity: player_identity(7, "default"),
             connection_id: 12,

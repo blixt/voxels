@@ -1,7 +1,8 @@
 //! Bounded binary-WebSocket transport for canonical world products.
 
 use crate::{
-    LoadedWorldServiceConfig, WorldServiceConfig, WorldServiceConfigError, WorldServiceSourceError,
+    EnvironmentConfig, LoadedWorldServiceConfig, WorldServiceConfig, WorldServiceConfigError,
+    WorldServiceSourceError,
     edits::{ChunkEditSnapshot, EditAuthority, LoadedPlayer, SurfaceEditSnapshot},
     presence::{PoseAdmission, PresenceHub, PresenceStreamState},
 };
@@ -20,13 +21,15 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use voxels_world::protocol::{
     ChunkBatchItem, ChunkBatchRequest, EditSessionId, EncodedChunkBatchItem,
     EncodedSurfaceTileBatchItem, PlayerIdentity, PlayerResume, PresenceOpened, PresencePong,
     ResyncRequired, SpawnPoint, SurfaceTileBatchItem, SurfaceTileBatchRequest, WorldCapabilities,
-    WorldOpened, cancel_kind, chunk_batch_kind, decode_cancel, decode_chunk_batch,
+    WorldEnvironmentSnapshot, WorldOpened, cancel_kind, chunk_batch_kind, decode_cancel,
+    decode_chunk_batch,
     decode_edit_command, decode_open_presence, decode_open_world, decode_player_pose,
     decode_presence_ping, decode_surface_tile_batch, edit_command_kind, encode_chunk_batch_item,
     encode_chunk_batch_result_from_items, encode_edit_commit, encode_error, encode_presence_opened,
@@ -41,11 +44,12 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v11/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v11/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v11";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v12/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v12/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v12";
 const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 const PREFETCH_WORKER_DIVISOR: usize = 4;
+const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 
 /// Prepared server state. Source construction and spawn coverage validation happen before bind.
 pub struct WorldServer {
@@ -107,6 +111,7 @@ impl WorldServer {
 
         let presence = PresenceHub::new(config.presence, config.gameplay)
             .map_err(WorldServerError::Presence)?;
+        let environment = EnvironmentAuthority::new(config.environment, presence.now_ms());
         let state = Arc::new(ServerState {
             allowed_origins: config.transport.allowed_origins,
             auth_subprotocol_token: config.transport.auth_subprotocol_token,
@@ -121,6 +126,7 @@ impl WorldServer {
                 config.transport.max_connections,
             ))),
             world,
+            environment,
             presence,
             source,
             edits,
@@ -278,6 +284,7 @@ fn prepare_world(
         capabilities: WorldCapabilities::CANONICAL_CHUNKS
             .union(WorldCapabilities::SURFACE_LOD)
             .union(WorldCapabilities::SERVER_EDITS)
+            .union(WorldCapabilities::ENVIRONMENT)
             .union(WorldCapabilities::PLAYER_PRESENCE),
         spawn: SpawnPoint {
             x: config.spawn.xz_voxels[0],
@@ -308,10 +315,12 @@ impl WorldBootstrap {
         player_claim: &crate::presence::WorldPresenceClaim,
         edit_session_id: EditSessionId,
         player: LoadedPlayer,
+        environment: WorldEnvironmentSnapshot,
     ) -> WorldOpened {
         WorldOpened {
             manifest: self.manifest.clone(),
             capabilities: self.capabilities,
+            environment,
             recommended_in_flight_batches,
             identity,
             connection_id: player_claim.connection_id,
@@ -340,6 +349,54 @@ impl WorldBootstrap {
             ],
             look_yaw_radians: 0.0,
             look_pitch_radians: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EnvironmentAuthority {
+    config: EnvironmentConfig,
+    anchor_server_time_ms: u64,
+    anchor_unix_seconds: f64,
+}
+
+impl EnvironmentAuthority {
+    fn new(config: EnvironmentConfig, anchor_server_time_ms: u64) -> Self {
+        let anchor_unix_seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0.0, |duration| duration.as_secs_f64());
+        Self {
+            config,
+            anchor_server_time_ms,
+            anchor_unix_seconds,
+        }
+    }
+
+    fn snapshot(self, sample_server_time_ms: u64) -> WorldEnvironmentSnapshot {
+        let elapsed_seconds =
+            sample_server_time_ms.saturating_sub(self.anchor_server_time_ms) as f64 / 1_000.0;
+        let unix_seconds = self.anchor_unix_seconds + elapsed_seconds;
+        let day_fraction = if self.config.day_length_seconds > 0.0 {
+            (f64::from(self.config.day_fraction_at_unix_epoch)
+                + unix_seconds / f64::from(self.config.day_length_seconds))
+            .rem_euclid(1.0) as f32
+        } else {
+            self.config.day_fraction_at_unix_epoch
+        };
+        let cloud_offset_metres = std::array::from_fn(|axis| {
+            (f64::from(self.config.cloud_offset_metres_at_unix_epoch[axis])
+                + f64::from(self.config.cloud_velocity_metres_per_second[axis]) * unix_seconds)
+                .rem_euclid(CLOUD_PERIOD_METRES) as f32
+        });
+        WorldEnvironmentSnapshot {
+            sample_server_time_ms,
+            day_fraction,
+            day_length_seconds: self.config.day_length_seconds,
+            cloud_offset_metres,
+            cloud_velocity_metres_per_second: self.config.cloud_velocity_metres_per_second,
+            cloud_coverage: self.config.cloud_coverage,
+            weather_seed: self.config.weather_seed,
+            weather_revision: self.config.weather_revision,
         }
     }
 }
@@ -400,6 +457,7 @@ struct ServerState {
     connections: Arc<Semaphore>,
     presence_connections: Arc<Semaphore>,
     world: WorldBootstrap,
+    environment: EnvironmentAuthority,
     presence: Arc<PresenceHub>,
     source: Arc<dyn WorldSourceEngine>,
     edits: Arc<EditAuthority>,
@@ -906,12 +964,14 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
     let writer = tokio::spawn(write_frames(sink, outbound_rx, writer_session));
     let reader = tokio::spawn(read_frames(stream, inbound_tx, state.max_frame_bytes));
 
+    let environment_server_time_ms = state.presence.now_ms();
     let opened = state.world.opened(
         open.identity,
         negotiated_window,
         &player_claim,
         edit_session_id,
         loaded_player,
+        state.environment.snapshot(environment_server_time_ms),
     );
     if outbound
         .send(OutboundFrame {
@@ -2000,6 +2060,7 @@ mod tests {
                 ..PresenceConfig::default()
             },
             gameplay: crate::GameplayConfig::default(),
+            environment: crate::EnvironmentConfig::default(),
             edits: EditPersistenceConfig::default(),
             spawn: SpawnConfig {
                 xz_voxels: [13, -21],
@@ -2111,7 +2172,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v11, test-local-token"),
+            HeaderValue::from_static("voxels.world.v12, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -3071,7 +3132,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v11, test-local-token"),
+            HeaderValue::from_static("voxels.world.v12, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -3106,7 +3167,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v11, test-local-token"),
+            HeaderValue::from_static("voxels.world.v12, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket

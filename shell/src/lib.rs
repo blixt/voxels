@@ -106,7 +106,7 @@ mod web {
     use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::rc::Rc;
-    use voxels_client_config::{ClientConfig, DaylightConfig};
+    use voxels_client_config::ClientConfig;
     use voxels_core::{
         CameraState, EnclosureSample, InputState, ProfileAutomation, ProfileConfig, ProfilePhase,
         VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
@@ -2382,12 +2382,7 @@ mod web {
                 shadow_map_resolution: rendering.shadows.shadow_map_resolution,
                 caster_depth_expansion: rendering.shadows.caster_depth_expansion,
             },
-            initial_daylight_phase: match rendering.daylight {
-                DaylightConfig::Dawn => DaylightPhase::Dawn,
-                DaylightConfig::ClearDay => DaylightPhase::ClearDay,
-                DaylightConfig::GoldenHour => DaylightPhase::GoldenHour,
-                DaylightConfig::BlueHour => DaylightPhase::BlueHour,
-            },
+            initial_daylight_phase: DaylightPhase::default(),
         };
         let width = (css_width * dpr).round().max(1.0) as u32;
         let height = (css_height * dpr).round().max(1.0) as u32;

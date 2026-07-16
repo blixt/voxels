@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 12;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 13;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -116,7 +116,6 @@ pub struct RenderingConfig {
     pub shadows: ShadowConfig,
     pub features: RendererFeatureConfig,
     pub mission_control: MissionControlConfig,
-    pub daylight: DaylightConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -150,15 +149,6 @@ pub struct RendererFeatureConfig {
 pub struct MissionControlConfig {
     pub open: bool,
     pub compact: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DaylightConfig {
-    Dawn,
-    ClearDay,
-    GoldenHour,
-    BlueHour,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -600,9 +590,9 @@ mod tests {
         ClientConfig {
             schema_version: CLIENT_CONFIG_SCHEMA_VERSION,
             world: WorldTransportConfig {
-                endpoint: "ws://127.0.0.1:9777/v11/world".to_owned(),
-                presence_endpoint: "ws://127.0.0.1:9777/v11/presence".to_owned(),
-                subprotocol: "voxels.world.v11".to_owned(),
+                endpoint: "ws://127.0.0.1:9777/v12/world".to_owned(),
+                presence_endpoint: "ws://127.0.0.1:9777/v12/presence".to_owned(),
+                subprotocol: "voxels.world.v12".to_owned(),
                 auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
                 max_in_flight_batches: 8,
                 buffered_amount_high_water_bytes: 8 * 1024 * 1024,
@@ -669,7 +659,6 @@ mod tests {
                     open: false,
                     compact: false,
                 },
-                daylight: DaylightConfig::GoldenHour,
             },
             diagnostics: DiagnosticsConfig {
                 enclosure_probe_interval_ms: 100,
@@ -715,18 +704,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 12", "schema_version = 11");
+        let wrong_schema = fixture.replace("schema_version = 13", "schema_version = 12");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 11,
+                found: 12,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 12",
-            "schema_version = 12\nunknown_root = true",
+            "schema_version = 13",
+            "schema_version = 13\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
@@ -817,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn rendering_ranges_and_enum_spellings_are_validated() {
+    fn rendering_ranges_are_validated() {
         let mut config = valid_config();
         config.rendering.view_distance_metres = f32::INFINITY;
         assert_invalid_field(&config, "rendering.view_distance_metres");
@@ -838,12 +827,6 @@ mod tests {
         config.rendering.shadows.shadow_map_resolution = MAX_SHADOW_MAP_RESOLUTION + 1;
         assert_invalid_field(&config, "rendering.shadows.shadow_map_resolution");
 
-        let invalid_enum =
-            fixture_toml().replace("daylight = \"golden-hour\"", "daylight = \"midnight\"");
-        assert!(matches!(
-            ClientConfig::from_toml(&invalid_enum),
-            Err(ClientConfigError::Parse(_))
-        ));
     }
 
     #[test]
