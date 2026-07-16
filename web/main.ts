@@ -475,7 +475,7 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
   let pageClosing = false;
   window.addEventListener("pagehide", (event) => {
     // A page entering the back-forward cache is frozen with its worker and must resume intact.
-    // A real navigation/reload gets one explicit worker turn to close SQLite and pause the OPFS VFS.
+    // A real navigation/reload gets one explicit worker turn to close its native connections.
     if (event.persisted || pageClosing) return;
     pageClosing = true;
     playable = false;

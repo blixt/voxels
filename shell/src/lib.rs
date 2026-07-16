@@ -1,4 +1,4 @@
-//! Browser/WASM leaf for Voxels. The worker owns the renderer, clock, input semantics, and persistence.
+//! Browser/WASM leaf for Voxels. The worker owns the renderer, clock, and input semantics.
 
 #[cfg(any(target_arch = "wasm32", test))]
 use std::collections::BTreeSet;
@@ -63,25 +63,12 @@ fn interaction_stream_interest(camera: &CameraState) -> Vec<voxels_world::ChunkC
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn camera_persistence_values(camera: &CameraState) -> [f32; 5] {
-    [
-        camera.position.x,
-        camera.position.y,
-        camera.position.z,
-        camera.yaw,
-        camera.pitch,
-    ]
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn camera_from_persisted_values(values: [f32; 5]) -> (CameraState, bool) {
-    let camera = CameraState::from_persisted(
+fn camera_from_resume_values(values: [f32; 5]) -> CameraState {
+    CameraState::from_persisted(
         glam::Vec3::new(values[0], values[1], values[2]),
         values[3],
         values[4],
-    );
-    let canonical = camera_persistence_values(&camera) == values;
-    (camera, canonical)
+    )
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -103,14 +90,11 @@ fn complete_canonical_columns(complete_chunks: &BTreeSet<(i32, i32, i32)>) -> BT
 }
 
 #[cfg(target_arch = "wasm32")]
-mod persist;
-#[cfg(target_arch = "wasm32")]
 mod presence_remote;
 #[cfg(target_arch = "wasm32")]
 pub mod remote;
 #[cfg(target_arch = "wasm32")]
 mod web {
-    use crate::persist::{PersistenceConfig, PersistencePlayer, PersistenceWorld, Store};
     use crate::presence_remote::RemotePresenceClient;
     use crate::remote::{
         RemoteChunkCompletion, RemoteEditEvent, RemoteSurfaceCompletion, RemoteSurfaceTicket,
@@ -161,7 +145,6 @@ mod web {
     struct EngineConfig {
         fixed_step_seconds: f32,
         max_steps_per_frame: u32,
-        persist_interval_ms: f64,
         max_edit_trackers: usize,
         stream_frame_budget: FrameBudget,
         startup_ready_radius_chunks: i32,
@@ -371,7 +354,6 @@ mod web {
         interactive_lods_ready: Cell<bool>,
         full_lods_initialized: Cell<bool>,
         startup_ready: Cell<bool>,
-        store: RefCell<Store>,
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
         frame_id: Cell<i32>,
@@ -404,8 +386,6 @@ mod web {
         profile_arena_capacity_high: Cell<u64>,
         profile_wasm_high: Cell<u64>,
         profile_start_evictions: Cell<u64>,
-        last_persist: Cell<f64>,
-        last_persisted_camera: Cell<Option<[f32; 5]>>,
         stopped: Cell<bool>,
     }
 
@@ -790,10 +770,6 @@ mod web {
             let render_ms = (performance_now(performance.as_ref()) - render_start) as f32;
             self.render_milliseconds
                 .set(smoothed_ms(self.render_milliseconds.get(), render_ms));
-            if time - self.last_persist.get() >= self.config.persist_interval_ms {
-                self.persist_camera_if_changed(&camera);
-                self.last_persist.set(time);
-            }
             let cpu_ms = (performance_now(performance.as_ref()) - cpu_start) as f32;
             self.cpu_milliseconds
                 .set(smoothed_ms(self.cpu_milliseconds.get(), cpu_ms));
@@ -1427,36 +1403,21 @@ mod web {
             let camera = *self.camera.borrow();
             self.presence.close_after_final_pose(&camera).await;
             self.remote.close();
-            let shutdown = self.store.borrow().shutdown();
-            shutdown.await;
         }
 
         fn stop_now(&self) {
             self.prepare_stop();
             self.presence.close();
             self.remote.close();
-            self.store.borrow().shutdown_now();
         }
 
         fn prepare_stop(&self) {
-            self.persist_camera_if_changed(&self.camera.borrow());
             self.stopped.set(true);
             let id = self.frame_id.replace(0);
             if id != 0 {
                 let _ = self.scope.cancel_animation_frame(id);
             }
             self.callback.borrow_mut().take();
-        }
-
-        fn persist_camera_if_changed(&self, camera: &CameraState) {
-            let values = crate::camera_persistence_values(camera);
-            if self.last_persisted_camera.get() == Some(values) {
-                return;
-            }
-            match self.store.borrow().save_camera(camera) {
-                Ok(()) => self.last_persisted_camera.set(Some(values)),
-                Err(error) => web_sys::console::error_1(&error),
-            }
         }
 
         fn feed_input(&self, bytes: &[u8]) -> bool {
@@ -2379,7 +2340,6 @@ mod web {
         let engine_config = EngineConfig {
             fixed_step_seconds: runtime.fixed_step_seconds,
             max_steps_per_frame: runtime.max_steps_per_frame,
-            persist_interval_ms: f64::from(runtime.persist_interval_ms),
             max_edit_trackers: runtime.max_edit_trackers as usize,
             stream_frame_budget: FrameBudget {
                 generation: streaming.frame_budget.generation as usize,
@@ -2437,37 +2397,16 @@ mod web {
         let opened = remote
             .world_opened()
             .ok_or_else(|| JsValue::from_str("world handshake completed without a manifest"))?;
-        let manifest_hash = opened
-            .manifest
-            .manifest_hash()
-            .map_err(|error| JsValue::from_str(&format!("native world manifest: {error}")))?;
-        let persistence_world = PersistenceWorld::negotiated(manifest_hash);
-        let store = Store::open(
-            persistence_world,
-            PersistencePlayer {
-                player_id: identity.player_id,
-            },
-            PersistenceConfig {
-                request_timeout_ms: client_config.persistence.request_timeout_ms as i32,
-                request_retries: client_config.persistence.request_retries as usize,
-                vfs_install_attempts: client_config.persistence.vfs_install_attempts as usize,
-                vfs_retry_delay_ms: client_config.persistence.vfs_retry_delay_ms as i32,
-            },
-        )
-        .await?;
         let edits = EditMap::default();
         let spawn = opened.spawn;
-        // Position and look direction now resume from server-owned player state. OPFS remains a
-        // local cache but can no longer turn a modified browser database into a teleport primitive.
         let resume = opened.player_resume;
-        let (camera, _) = crate::camera_from_persisted_values([
+        let camera = crate::camera_from_resume_values([
             resume.eye_position_metres[0],
             resume.eye_position_metres[1],
             resume.eye_position_metres[2],
             resume.look_yaw_radians,
             resume.look_pitch_radians,
         ]);
-        let persisted_camera = Some(crate::camera_persistence_values(&camera));
         let presence =
             RemotePresenceClient::start(world_transport, client_config.multiplayer, &opened)
                 .map_err(|error| JsValue::from_str(&format!("connect player presence: {error}")))?;
@@ -2533,7 +2472,6 @@ mod web {
             interactive_lods_ready: Cell::new(false),
             full_lods_initialized: Cell::new(false),
             startup_ready: Cell::new(false),
-            store: RefCell::new(store),
             scope,
             callback: RefCell::new(None),
             frame_id: Cell::new(0),
@@ -2571,8 +2509,6 @@ mod web {
             profile_arena_capacity_high: Cell::new(0),
             profile_wasm_high: Cell::new(0),
             profile_start_evictions: Cell::new(0),
-            last_persist: Cell::new(0.0),
-            last_persisted_camera: Cell::new(persisted_camera),
             stopped: Cell::new(false),
         });
         engine.start()?;
@@ -2646,19 +2582,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn persisted_camera_values_report_when_recovery_changed_the_row() {
+    fn server_resume_values_are_sanitized_before_use() {
         let valid = [12.0, 4.5, -8.0, 0.75, -0.4];
-        let (camera, canonical) = camera_from_persisted_values(valid);
-        assert!(canonical);
-        assert_eq!(camera_persistence_values(&camera), valid);
+        let camera = camera_from_resume_values(valid);
+        assert_eq!(
+            [
+                camera.position.x,
+                camera.position.y,
+                camera.position.z,
+                camera.yaw,
+                camera.pitch,
+            ],
+            valid
+        );
 
         for recovered in [
             [f32::NAN, 4.5, -8.0, 0.75, -0.4],
             [12.0, 4.5, -8.0, 1.0e30, -0.4],
             [12.0, 4.5, -8.0, 0.75, 4.0],
         ] {
-            let (camera, canonical) = camera_from_persisted_values(recovered);
-            assert!(!canonical);
+            let camera = camera_from_resume_values(recovered);
             assert!(camera.position.is_finite());
             assert!(camera.yaw.is_finite());
             assert!(camera.pitch.is_finite());

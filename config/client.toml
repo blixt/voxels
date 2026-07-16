@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 11
+schema_version = 12
 
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
@@ -31,7 +31,6 @@ max_extrapolation_ms = 750
 [runtime]
 fixed_step_seconds = 0.008333334
 max_steps_per_frame = 6
-persist_interval_ms = 1000
 max_edit_trackers = 128
 
 [streaming]
@@ -86,12 +85,6 @@ voxel_emissive_lights = true
 [rendering.mission_control]
 open = false
 compact = false
-
-[persistence]
-request_timeout_ms = 400
-request_retries = 30
-vfs_install_attempts = 20
-vfs_retry_delay_ms = 150
 
 [diagnostics]
 enclosure_probe_interval_ms = 100

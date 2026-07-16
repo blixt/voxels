@@ -2,8 +2,8 @@
 
 Voxels has two versioned TOML configuration files with deliberately separate ownership:
 
-- `config/client.toml` contains presentation, local streaming, persistence, diagnostics, and
-  profiling settings used by a game client.
+- `config/client.toml` contains presentation, local streaming, diagnostics, and profiling settings
+  used by a game client.
 - `config/world-service.toml` contains world identity and provider settings owned by the world
   service. Clients never read it and never branch on the selected provider.
 
@@ -26,12 +26,11 @@ The file controls:
 
 - the authoritative world and presence endpoints, authorization token, and backpressure windows;
 - pose cadence, clock synchronization, adaptive interpolation bounds, and extrapolation horizon;
-- fixed-step timing, catch-up limit, persistence cadence, and edit-tracker capacity;
+- fixed-step timing, catch-up limit, and edit-tracker capacity;
 - chunk and surface-LOD load/retention radii, pipeline budgets, and interest capacity;
 - view/shadow settings;
 - the initial daylight;
 - every feature toggle shown in Mission Control, plus its initial open/compact state;
-- persistence request/retry policy;
 - bounded diagnostic probe sizes and cadence;
 - automated profile speed and warmup/measurement durations.
 
@@ -40,9 +39,9 @@ including a mixed on/off baseline, rather than a hard-coded all-enabled state.
 
 Player identity is intentionally not client configuration. The browser keeps a versioned local
 registry: `/` selects its stable default player, while `/?player=alice` selects or creates a named
-local player. All names under one browser profile share deployment configuration, while camera
-persistence is keyed by opaque player ID. World edits belong to the native service and are shared
-across every interested browser profile. See
+local player. All names under one browser profile share deployment configuration. Camera position,
+inventory, and world edits belong to the native service and are shared across every interested
+browser profile. See
 [Native world streaming](native-world-streaming.md#local-players-and-two-browser-testing).
 
 ## World-service configuration
@@ -54,8 +53,7 @@ Diffusion deployment settings such as precision, model cache, model-space origin
 
 The browser has no embedded world-generation mode. It always negotiates the same provider-neutral
 chunk and surface-LOD protocol with this service, so editing `source` and restarting the daemon is
-the only experience switch. Client persistence is namespaced by the negotiated immutable manifest,
-and reconnect refuses a changed manifest rather than mixing worlds.
+the only experience switch. Reconnect refuses a changed manifest rather than mixing worlds.
 
 Provider selection is fail-closed. A Terrain Diffusion selection without the native Metal feature,
 Apple Metal, or the pinned verified model is an error; it never falls back to another world.

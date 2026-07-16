@@ -20,7 +20,7 @@ rendering, persistence, and binary codecs live in Rust.
   lists; a two-pass WGPU backend presents the sampled world backdrop, refractive chrome, embedded-font
   glyphs, the controls toast, and crosshair. It names no web types so a native shell can reuse it.
 - `shell/` is the `wasm32-unknown-unknown` leaf. It owns the `wasm-bindgen` API, the transferred
-  `OffscreenCanvas`, worker animation clock, packed input decoding, and OPFS persistence.
+  `OffscreenCanvas`, worker animation clock, packed input decoding, and remote clients.
 - `web/` is the deliberately thin browser harness. Its only visible element is the canvas. Input is
   batched into fixed-size binary records and transferred to the worker; TypeScript only mirrors Rust's
   cursor/capture mode because pointer lock is a browser responsibility. Semantic actions, status, UI
@@ -364,30 +364,17 @@ assets, where their topology compression is a better fit.
 
 ## Persistence
 
-SQLite runs inside Rust/WASM through the native SQLite C API exposed by `sqlite-wasm-rs`. Its database
-lives in Origin Private File System storage through the `sqlite-wasm-vfs` sync-access-handle pool.
-General OPFS handles are available on both windows and workers, but the synchronous access handles
-used by this VFS are dedicated-worker-only. Keeping the engine in a dedicated worker therefore
-satisfies both rendering and storage constraints.
+Native SQLite owned by `voxels-worldd` is the sole durable gameplay authority. Its database is bound
+to the immutable world/source manifest and stores sparse voxel overrides, player inventory, accepted
+pose, and resume state. Idempotent edit operations advance global order plus local chunk/surface
+revisions, and browsers treat returned products as authority.
 
-Browser SQLite stores only schema/world identity and player-keyed local camera state. Its namespace
-includes the current persistence schema, and startup accepts only that exact schema; there are no
-upgrade or import paths. Sparse voxel overrides instead live in native SQLite owned by
-`voxels-worldd`, bound to the immutable world/source manifest. Idempotent edit operations advance
-global order plus local chunk/surface revisions, and browsers treat returned products as authority.
-
-Multi-tab camera access is single-writer without excluding other tabs. A Web Lock elects one worker
-as the SQLite/SAH-pool owner; followers proxy typed player-keyed camera operations over a versioned
-BroadcastChannel and queue
-for ownership when the leader closes. Follower writes pass through one ordered, coalescing Rust outbox,
-and follower requests tolerate a complete VFS retry window plus worker startup. Teardown closes SQLite,
-pauses the SAH-pool VFS to synchronously release its OPFS handles, and only then resolves the Web Lock;
-queued acquisitions are aborted and the BroadcastChannel is closed. A failed VFS acquisition is retained
-as recovery state rather than logged as an engine failure: the worker releases the Web Lock, re-elects,
-and reports the retained cause only if the complete request window is exhausted. Browser gates exercise
-solo refresh bursts, concurrent multi-tab refreshes, ownership handoff, and a forced 20-attempt stale
-lease before successful reacquisition. The wire includes the seed and generator version so an
-incompatible build cannot silently answer another world's request.
+The browser stores only a versioned local mapping from friendly player selectors to opaque IDs.
+That registry uses `localStorage` and a Web Lock to avoid simultaneous first-open races; it contains
+no camera, inventory, or world data. On startup the worker negotiates the manifest and receives the
+server-owned resume state. During play the presence channel continuously submits bounded poses, and
+clean shutdown sends one final pose before closing its sockets. Obsolete browser OPFS databases are
+left untouched but are no longer opened or written.
 
 Every server edit captures the post-invalidation revision of each desired canonical chunk and a
 monotonic revision for every affected active or pending surface tile. The shell considers the edit
@@ -425,14 +412,9 @@ latency a user-visible, revision-backed measurement rather than a queue-length a
   depth-aware filtering, and implementation validation:
   <https://gpuopen.com/fidelityfx-cacao/>
   <https://github.com/GameTechDev/XeGTAO>
-- SQLite recommends `opfs-sahpool` when performance matters more than concurrent connections and notes
-  that the synchronous OPFS APIs required by this VFS are worker-only:
-  <https://sqlite.org/wasm/doc/tip/persistence.md>
 - Web Locks are origin-scoped, available in workers, held for the lifetime of the callback promise, and
   support aborting queued acquisition:
   <https://www.w3.org/TR/web-locks/>
-- A synchronous OPFS access handle owns an exclusive file lock until it is closed:
-  <https://fs.spec.whatwg.org/#api-filesystemsyncaccesshandle-close>
 - Bridson's bounded Poisson-disk sampler is a useful blue-noise baseline for avoiding uniform-grid
   repetition; the composition director deliberately adds hierarchy and empty space above that local
   spacing problem:
@@ -444,10 +426,6 @@ latency a user-visible, revision-backed measurement rather than a queue-length a
   roadside placement derive from one route rather than unrelated raster effects. The pilgrim road
   adopts that single-authority principle while keeping a deliberately small host-testable polyline:
   <https://perso.liris.cnrs.fr/eric.galin/Articles/2010-roads.pdf>
-- The Rust SQLite bindings and OPFS VFS expose the SQLite C API and sync-access-handle pool directly to
-  `wasm32-unknown-unknown`:
-  <https://docs.rs/sqlite-wasm-rs/0.5.5/sqlite_wasm_rs/>
-  <https://docs.rs/sqlite-wasm-vfs/0.2.0/sqlite_wasm_vfs/>
 - Greedy meshing reduces exposed voxel faces into larger rectangles while keeping chunk-local rebuilds:
   <https://0fps.net/2012/06/30/meshing-in-a-minecraft-game/>
 - Minecraft's paletted chunk sections establish a practical precedent for local palettes plus packed

@@ -24,9 +24,6 @@ voxels-runtime = { path = "../runtime" }
 bytemuck = { version = "1", features = ["derive"] }
 console_error_panic_hook = "0.1"
 js-sys = "0.3"
-rusqlite = "=0.40.1"
-sqlite-wasm-rs = "0.5"
-sqlite-wasm-vfs = "0.2"
 wasm-bindgen = "=0.2.117"
 wasm-bindgen-futures = "0.4"
 wgpu = { version = "=30.0.0", default-features = false, features = ["webgpu", "wgsl"] }
@@ -38,17 +35,11 @@ features = [
   "DedicatedWorkerGlobalScope",
   "OffscreenCanvas",
   "Performance",
-  # SQLite's OPFS SAH pool is exclusive per origin. Web Locks elect one owning tab and
-  # BroadcastChannel lets every other tab proxy its typed persistence operations to that owner.
-  "BroadcastChannel",
-  "AbortController",
-  "AbortSignal",
   "BinaryType",
   "CloseEvent",
   "ErrorEvent",
   "Event",
   "MessageEvent",
   "WebSocket",
-  "WorkerNavigator",
   "WorkerGlobalScope",
 ]

@@ -1,6 +1,6 @@
 /**
- * Gives the Rust worker a bounded opportunity to close sockets and persistence before a Vite
- * reload, then guarantees that the old worker cannot survive into the replacement page.
+ * Gives the Rust worker a bounded opportunity to close sockets before a Vite reload, then
+ * guarantees that the old worker cannot survive into the replacement page.
  */
 export async function terminateAfterAcknowledgement(
   acknowledgement: Promise<void>,

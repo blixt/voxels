@@ -587,14 +587,6 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-multiplayer.mjs",
         cache: false,
       },
-      "test:persistence-browser": {
-        command: "node scripts/browser-persistence-test.mjs",
-        cache: false,
-      },
-      "test:persistence-recovery": {
-        command: "node scripts/browser-persistence-recovery-test.mjs",
-        cache: false,
-      },
       "check:rust": { command: "node scripts/check-rust.ts", cache: false },
       verify: {
         command: ["vp check", "vp test", "vp run check:rust", "vp build"],

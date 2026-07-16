@@ -68,16 +68,6 @@ export interface InitOutput {
     readonly enginehandle_surface_edit_state: (a: number, b: number, c: number, d: number) => [number, number];
     readonly enginehandle_take_mission_control_copy: (a: number) => [number, number];
     readonly memory: WebAssembly.Memory;
-    readonly rust_sqlite_wasm_abort: () => void;
-    readonly rust_sqlite_wasm_assert_fail: (a: number, b: number, c: number, d: number) => void;
-    readonly rust_sqlite_wasm_calloc: (a: number, b: number) => number;
-    readonly rust_sqlite_wasm_free: (a: number) => void;
-    readonly rust_sqlite_wasm_getentropy: (a: number, b: number) => number;
-    readonly rust_sqlite_wasm_localtime: (a: number) => number;
-    readonly rust_sqlite_wasm_malloc: (a: number) => number;
-    readonly rust_sqlite_wasm_realloc: (a: number, b: number) => number;
-    readonly sqlite3_os_end: () => number;
-    readonly sqlite3_os_init: () => number;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

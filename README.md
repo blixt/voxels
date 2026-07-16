@@ -2,7 +2,7 @@
 
 A Rust-first voxel world rendered with WGPU/WebGPU. The browser main thread captures input and
 transfers an `OffscreenCanvas`; a dedicated Rust/WASM worker runs simulation, meshing, rendering,
-streaming, and persistence while the native Rust world service owns generation.
+and streaming while the native Rust world service owns generation and durable world/player state.
 
 ## Workflow
 
@@ -15,14 +15,10 @@ streaming, and persistence while the native Rust world service owns generation.
 5. Run TypeScript checks and tests with `vp check` and `vp test`.
 6. Run host Rust tests and host/WASM Clippy with `vp run check:rust`.
 7. Build production WASM and assets with `vp build`; inspect them with `vp preview`.
-8. Stress isolated rapid-refresh and multi-tab OPFS handoff in Chrome with
-   `vp run test:persistence-browser`.
-9. Force a complete stale-lease retry cycle with `vp run test:persistence-recovery`.
-10. Launch six isolated release clients with shaped links and verify avatars plus a five-builder
-    far-LOD tower in real Chrome with `vp run test:multiplayer-browser -- --require-tower`.
+8. Launch six isolated release clients with shaped links and verify avatars plus a five-builder
+   far-LOD tower in real Chrome with `vp run test:multiplayer-browser -- --require-tower`.
 
 `vp run verify` runs the complete TypeScript, Rust, test, lint, and production-build gate.
-The browser persistence stress test remains explicit because it launches a system Chrome instance.
 `vp run bench:world` runs native Criterion baselines for chunk generation, VXCH encode/decode, and
 greedy meshing. Reports are written under the ignored `target/criterion/` directory.
 `vp run bench:core` compares 120 dry and submerged fixed simulation steps.
@@ -45,7 +41,7 @@ Either source can be selected by changing only the server's `source` value and r
 development. The browser always consumes the same canonical protocol. See
 [Native world streaming](docs/native-world-streaming.md) for the matching endpoint/token settings,
 Chrome local-network permission, binary VXWP protocol, transport rationale, and exact run steps.
-Client runtime, streaming, rendering/Mission Control, persistence, diagnostics, and profiling
+Client runtime, streaming, rendering/Mission Control, diagnostics, and profiling
 defaults live in `config/client.toml`. See [Configuration](docs/configuration.md) for ownership,
 deployment, validation, and testing conventions for both files.
 Opening the bare development URL reuses the browser's default local player and last position. Open
@@ -63,7 +59,7 @@ performance trace under `target/`. Set `VOXELS_PROFILE_BUILD=wasm-dev`,
 `VOXELS_PROFILE_SPAWN=-12800,25600`,
 `VOXELS_PROFILE_LOOK=2.07,-0.37`, `VOXELS_PROFILE_SHADOWS=off`, `VOXELS_PROFILE_SSAO=off`,
 `VOXELS_PROFILE_OUTPUT=target/render-profile/result.json`, or `VOXELS_PROFILE_TRACE_PATH=...` to
-reproduce a particular local configuration without touching an existing browser or its OPFS data.
+reproduce a particular local configuration without touching an existing browser profile or world.
 Pass `--stationary` to capture and measure that exact spawn/look pose without traversal.
 `vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step closed rail. One lap warms the exact
 terrain used by two measured laps, making its arena-plateau gate prove allocation reuse before every
@@ -81,7 +77,7 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 - `world/`: deterministic chunks, generation, versioned transport codecs, surface LODs, and meshing.
 - `runtime/`: deterministic streaming priorities, budgets, revision tickets, eviction, and diagnostics.
 - `render/`: web-free WGPU resources, pipelines, shaders, and frame rendering.
-- `shell/`: WASM/browser worker leaf, packed input decoding, display clock, and persistence seam.
+- `shell/`: WASM/browser worker leaf, packed input decoding, display clock, and remote clients.
 - `world-service/`: bounded multi-client native server and source-neutral provider bootstrap.
 - `world-terrain-diffusion/`: optional native Rust/Metal learned macro-terrain provider.
 - `web/`: the single body canvas, normalized input transport, pointer lock, and worker boot only. All
@@ -108,7 +104,7 @@ The 753 m First Pilgrim Road is a stable Rust polyline graded through those same
 Its 10 cm paving, shoulders, 26 cairns/waystones/arches, five named chapters, and alpine Needle Gate
 destination remain editable, collidable, and continuous through every interactive LOD rather than
 becoming renderer-only decals. Mission Control derives chapter and progress status from the Rust atlas.
-See [docs/architecture.md](docs/architecture.md) for format, persistence, and research decisions.
+See [docs/architecture.md](docs/architecture.md) for format, authority, and research decisions.
 
 ## Controls
 
@@ -121,8 +117,7 @@ See [docs/architecture.md](docs/architecture.md) for format, persistence, and re
 - Excavate a 0.5 m-wide cube inward from the targeted face with the left mouse button; place the
   Rust-selected material with the right mouse button. Cycle stocked materials with the mouse wheel
   or inventory wheel. Sparse edits are committed transactionally by the native
-  world service and streamed to every interested browser; browser OPFS stores only local player
-  camera state.
+  world service and streamed to every interested browser.
 - Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and controls
   can toggle cascaded sun shadows, voxel AO, screen-space contact AO, fog, far terrain, animated
   water, target highlighting, material surface detail, or voxel emissive lights without a DOM UI

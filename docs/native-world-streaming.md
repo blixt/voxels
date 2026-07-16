@@ -202,10 +202,10 @@ authentication or secrets. The registry is updated under a Web Lock, so simultan
 cannot mint competing IDs. `window.__VOXELS__.player` exposes the selected IDs for diagnostics and
 `window.__VOXELS__.playerUrl("carol")` returns a correctly formed URL for another named player.
 
-Browser camera rows remain a local cache and are never reset by tests, but the client no longer uses
-them as position authority. `voxels-worldd` persists last accepted pose, per-material inventory, and
-voxel edits in its manifest-bound native SQLite authority and streams the same revisions to every
-interested browser profile. Identity is still a local claim until authenticated accounts exist.
+`voxels-worldd` persists last accepted pose, per-material inventory, and voxel edits in its
+manifest-bound native SQLite authority and streams the same revisions to every interested browser
+profile. The browser stores only its local player-ID registry; identity is still a local claim until
+authenticated accounts exist.
 
 The presence service now replicates positions, velocity, look direction, connection lifetime, and a
 server-assigned saturated color. Every receiver animates that state as a thin 13-cuboid figure in one
@@ -230,7 +230,7 @@ has applied all commits, the far observer has accepted and uploaded the revised 
 tile, and a before/after pixel comparison proves the aimed tower is visibly legible. It owns a
 temporary native edit database, rejects browser/WGPU/socket errors, and writes ignored
 metrics/screenshots under
-`target/multiplayer-browser/`; it never opens or resets a user's normal browser profile or OPFS world.
+`target/multiplayer-browser/`; it never opens or resets a user's normal browser profile or world.
 
 ## Far-LOD transition policy and next step
 

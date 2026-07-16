@@ -8,11 +8,10 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 11;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 12;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
-const MAX_PERSIST_INTERVAL_MS: u32 = 3_600_000;
 const MAX_EDIT_TRACKERS: u32 = 65_536;
 const MAX_SIGNED_RUNTIME_INTEGER: u32 = i32::MAX as u32;
 const MAX_TRACKED_CHUNKS: u32 = 1_048_576;
@@ -20,8 +19,7 @@ const MAX_SURFACE_RADIUS_TILES: u32 = 64;
 const MAX_FRAME_STAGE_BUDGET: u32 = 65_536;
 const MAX_VIEW_DISTANCE_METRES: f32 = 100_000.0;
 const MAX_SHADOW_MAP_RESOLUTION: u32 = 4_096;
-const MAX_PERSISTENCE_RETRIES: u32 = 10_000;
-const MAX_PERSISTENCE_DELAY_MS: u32 = 3_600_000;
+const MAX_DIAGNOSTIC_INTERVAL_MS: u32 = 3_600_000;
 const MAX_WORLD_IN_FLIGHT_BATCHES: u32 = 256;
 const MAX_WORLD_BUFFERED_BYTES: u32 = 64 * 1024 * 1024;
 const MAX_WORLD_REQUEST_TIMEOUT_MS: u32 = 300_000;
@@ -38,7 +36,6 @@ pub struct ClientConfig {
     pub runtime: RuntimeConfig,
     pub streaming: StreamingConfig,
     pub rendering: RenderingConfig,
-    pub persistence: PersistenceConfig,
     pub diagnostics: DiagnosticsConfig,
     pub profiling: ProfilingConfig,
 }
@@ -80,7 +77,6 @@ pub struct MultiplayerConfig {
 pub struct RuntimeConfig {
     pub fixed_step_seconds: f32,
     pub max_steps_per_frame: u32,
-    pub persist_interval_ms: u32,
     pub max_edit_trackers: u32,
 }
 
@@ -165,15 +161,6 @@ pub enum DaylightConfig {
     BlueHour,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PersistenceConfig {
-    pub request_timeout_ms: u32,
-    pub request_retries: u32,
-    pub vfs_install_attempts: u32,
-    pub vfs_retry_delay_ms: u32,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticsConfig {
@@ -226,12 +213,6 @@ impl ClientConfig {
             "runtime.max_steps_per_frame",
             1,
             MAX_SIMULATION_STEPS_PER_FRAME,
-        )?;
-        ensure_integer_range(
-            self.runtime.persist_interval_ms,
-            "runtime.persist_interval_ms",
-            1,
-            MAX_PERSIST_INTERVAL_MS,
         )?;
         ensure_integer_range(
             self.runtime.max_edit_trackers,
@@ -359,36 +340,11 @@ impl ClientConfig {
             true,
         )?;
 
-        for (field, value) in [
-            (
-                "persistence.request_timeout_ms",
-                self.persistence.request_timeout_ms,
-            ),
-            (
-                "persistence.vfs_retry_delay_ms",
-                self.persistence.vfs_retry_delay_ms,
-            ),
-        ] {
-            ensure_integer_range(value, field, 1, MAX_PERSISTENCE_DELAY_MS)?;
-        }
-        ensure_integer_range(
-            self.persistence.request_retries,
-            "persistence.request_retries",
-            1,
-            MAX_PERSISTENCE_RETRIES,
-        )?;
-        ensure_integer_range(
-            self.persistence.vfs_install_attempts,
-            "persistence.vfs_install_attempts",
-            1,
-            MAX_PERSISTENCE_RETRIES,
-        )?;
-
         ensure_integer_range(
             self.diagnostics.enclosure_probe_interval_ms,
             "diagnostics.enclosure_probe_interval_ms",
             1,
-            MAX_PERSISTENCE_DELAY_MS,
+            MAX_DIAGNOSTIC_INTERVAL_MS,
         )?;
         ensure_finite_range(
             self.diagnostics.enclosure_probe_distance_metres,
@@ -668,7 +624,6 @@ mod tests {
             runtime: RuntimeConfig {
                 fixed_step_seconds: 1.0 / 120.0,
                 max_steps_per_frame: 6,
-                persist_interval_ms: 1_000,
                 max_edit_trackers: 128,
             },
             streaming: StreamingConfig {
@@ -716,12 +671,6 @@ mod tests {
                 },
                 daylight: DaylightConfig::GoldenHour,
             },
-            persistence: PersistenceConfig {
-                request_timeout_ms: 400,
-                request_retries: 30,
-                vfs_install_attempts: 20,
-                vfs_retry_delay_ms: 150,
-            },
             diagnostics: DiagnosticsConfig {
                 enclosure_probe_interval_ms: 100,
                 enclosure_probe_distance_metres: 12.0,
@@ -766,18 +715,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 11", "schema_version = 10");
+        let wrong_schema = fixture.replace("schema_version = 12", "schema_version = 11");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 10,
+                found: 11,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 11",
-            "schema_version = 11\nunknown_root = true",
+            "schema_version = 12",
+            "schema_version = 12\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
@@ -898,11 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn persistence_diagnostics_and_profiling_ranges_are_validated() {
-        let mut config = valid_config();
-        config.persistence.request_retries = 0;
-        assert_invalid_field(&config, "persistence.request_retries");
-
+    fn diagnostics_and_profiling_ranges_are_validated() {
         let mut config = valid_config();
         config.profiling.warmup_seconds = -1.0;
         assert_invalid_field(&config, "profiling.warmup_seconds");
