@@ -627,11 +627,8 @@ mod tests {
         ] {
             let mut edits = EditMap::default();
             edits.insert_override(coord, Material::Basalt);
-            let tile = SurfaceTileCoord::containing(
-                crate::SurfaceLodLevel::Stride64,
-                coord.x,
-                coord.z,
-            );
+            let tile =
+                SurfaceTileCoord::containing(crate::SurfaceLodLevel::Stride64, coord.x, coord.z);
 
             let snapshot = edits.snapshot_for_surface_tiles(&[tile]);
 

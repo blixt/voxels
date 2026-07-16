@@ -1,9 +1,9 @@
 //! Browser/WASM leaf for Voxels. The worker owns the renderer, clock, input semantics, and persistence.
 
 #[cfg(any(target_arch = "wasm32", test))]
-use voxels_core::CameraState;
-#[cfg(any(target_arch = "wasm32", test))]
 use std::collections::BTreeSet;
+#[cfg(any(target_arch = "wasm32", test))]
+use voxels_core::CameraState;
 
 #[cfg(any(target_arch = "wasm32", test))]
 const INTERACTION_REACH_METRES: f32 = 5.0;
@@ -98,9 +98,7 @@ fn advance_surface_focus(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn complete_canonical_columns(
-    complete_chunks: &BTreeSet<(i32, i32, i32)>,
-) -> BTreeSet<(i32, i32)> {
+fn complete_canonical_columns(complete_chunks: &BTreeSet<(i32, i32, i32)>) -> BTreeSet<(i32, i32)> {
     complete_chunks.iter().map(|&(x, _, z)| (x, z)).collect()
 }
 
@@ -112,13 +110,13 @@ mod presence_remote;
 pub mod remote;
 #[cfg(target_arch = "wasm32")]
 mod web {
-    use crate::{advance_surface_focus, complete_canonical_columns};
     use crate::persist::{PersistenceConfig, PersistencePlayer, PersistenceWorld, Store};
     use crate::presence_remote::RemotePresenceClient;
     use crate::remote::{
         RemoteChunkCompletion, RemoteEditEvent, RemoteSurfaceCompletion, RemoteSurfaceTicket,
         RemoteWorldClient, RemoteWorldError,
     };
+    use crate::{advance_surface_focus, complete_canonical_columns};
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
     use std::cell::{Cell, RefCell};
