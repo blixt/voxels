@@ -18,6 +18,7 @@ const OUTPUT_DIRECTORY = path.resolve(
   process.env.VOXELS_WEATHER_MOTION_OUTPUT ?? "target/weather-motion",
 );
 const WEATHER_CYCLE_SECONDS = 120;
+const CLOUD_LAYERING_ONLY = process.env.VOXELS_CLOUD_LAYERING_ONLY === "1";
 
 function wrappedFraction(value) {
   return ((value % 1) + 1) % 1;
@@ -282,6 +283,97 @@ async function analyzeCloudRotation(page, baselineFrames, rotatedFrames, returne
         }
         return { meanAbsoluteError: absolute / count, catastrophicFraction: catastrophic / count };
       }
+      function layeringMetrics(image) {
+        const x0 = Math.floor(image.width * 0.04);
+        const x1 = Math.floor(image.width * 0.78);
+        const y0 = Math.floor(image.height * 0.06);
+        const y1 = Math.floor(image.height * 0.68);
+        let horizontalCoherent = 0;
+        let horizontalTotal = 0;
+        for (let y = y0 + 2; y < y1 - 2; y += 2) {
+          let signed = 0;
+          let absolute = 0;
+          let samples = 0;
+          for (let x = x0; x < x1; x += 2) {
+            const curvature =
+              image.luma[x + (y - 2) * image.width] -
+              image.luma[x + y * image.width] * 2 +
+              image.luma[x + (y + 2) * image.width];
+            signed += curvature;
+            absolute += Math.abs(curvature);
+            samples += 1;
+          }
+          horizontalCoherent += Math.abs(signed / samples);
+          horizontalTotal += absolute / samples;
+        }
+        let verticalCoherent = 0;
+        let verticalTotal = 0;
+        for (let x = x0 + 2; x < x1 - 2; x += 2) {
+          let signed = 0;
+          let absolute = 0;
+          let samples = 0;
+          for (let y = y0; y < y1; y += 2) {
+            const curvature =
+              image.luma[x - 2 + y * image.width] -
+              image.luma[x + y * image.width] * 2 +
+              image.luma[x + 2 + y * image.width];
+            signed += curvature;
+            absolute += Math.abs(curvature);
+            samples += 1;
+          }
+          verticalCoherent += Math.abs(signed / samples);
+          verticalTotal += absolute / samples;
+        }
+        const rowMean = [];
+        for (let y = y0; y < y1; y += 1) {
+          let total = 0;
+          for (let x = x0; x < x1; x += 2) total += image.luma[x + y * image.width];
+          rowMean.push(total / Math.ceil((x1 - x0) / 2));
+        }
+        const residual = rowMean.map((value, index) => {
+          let local = 0;
+          let samples = 0;
+          for (
+            let neighbor = Math.max(0, index - 12);
+            neighbor <= Math.min(rowMean.length - 1, index + 12);
+            neighbor += 1
+          ) {
+            local += rowMean[neighbor];
+            samples += 1;
+          }
+          return value - local / samples;
+        });
+        let maximumAutocorrelation = -1;
+        let maximumAutocorrelationLagPixels = 0;
+        for (let lag = 4; lag <= 40; lag += 1) {
+          let product = 0;
+          let firstEnergy = 0;
+          let secondEnergy = 0;
+          for (let index = 0; index + lag < residual.length; index += 1) {
+            const first = residual[index];
+            const second = residual[index + lag];
+            product += first * second;
+            firstEnergy += first * first;
+            secondEnergy += second * second;
+          }
+          const correlation =
+            product / Math.max(Math.sqrt(firstEnergy * secondEnergy), 0.000001);
+          if (correlation > maximumAutocorrelation) {
+            maximumAutocorrelation = correlation;
+            maximumAutocorrelationLagPixels = lag;
+          }
+        }
+        const horizontalCoherence = horizontalCoherent / Math.max(horizontalTotal, 0.000001);
+        const verticalCoherence = verticalCoherent / Math.max(verticalTotal, 0.000001);
+        return {
+          roi: { x0, x1, y0, y1 },
+          horizontalCoherence,
+          verticalCoherence,
+          directionalExcess: horizontalCoherence / Math.max(verticalCoherence, 0.000001),
+          maximumRowAutocorrelation: maximumAutocorrelation,
+          maximumRowAutocorrelationLagPixels: maximumAutocorrelationLagPixels,
+        };
+      }
       const baseline = await medianLuma(baselineFrames);
       const rotated = await medianLuma(rotatedFrames);
       const returned = await medianLuma(returnedFrames);
@@ -350,6 +442,7 @@ async function analyzeCloudRotation(page, baselineFrames, rotatedFrames, returne
         }
       }
       return {
+        layering: layeringMetrics(baseline),
         rotation: {
           samples: count,
           weightedSamples: weightedCount,
@@ -386,8 +479,8 @@ try {
     screenSpaceAmbientOcclusion: true,
     dayLengthSeconds: 0,
     dayFractionAtUnixEpoch: 0.5,
-    weatherCycleSeconds: WEATHER_CYCLE_SECONDS,
-    weatherFractionAtUnixEpoch,
+    weatherCycleSeconds: CLOUD_LAYERING_ONLY ? 0 : WEATHER_CYCLE_SECONDS,
+    weatherFractionAtUnixEpoch: CLOUD_LAYERING_ONLY ? 0.32 : weatherFractionAtUnixEpoch,
     cloudVelocityMetresPerSecond: [0, 0],
   });
   const { build, preview } = await import("vite-plus");
@@ -423,31 +516,36 @@ try {
     rotated: rotatedCamera,
   });
 
-  await waitForWeatherFraction(page, 0.5);
-  await setCameraLook(page, 0.35, 0.05);
-  const rainFrames = await captureBurst(page, 10, 28, "rain");
-  const rain = await analyzeRainMotion(page, rainFrames);
+  let rain;
+  if (!CLOUD_LAYERING_ONLY) {
+    await waitForWeatherFraction(page, 0.5);
+    await setCameraLook(page, 0.35, 0.05);
+    const rainFrames = await captureBurst(page, 10, 28, "rain");
+    rain = await analyzeRainMotion(page, rainFrames);
+  }
   const finalSnapshot = assertSnapshotSchema(
     await page.evaluate(() => globalThis.__VOXELS__.snapshot()),
   );
 
-  const validRainPairs = rain.pairs.filter((pair) => pair.score >= 0.08);
+  const validRainPairs = rain?.pairs.filter((pair) => pair.score >= 0.08) ?? [];
   const downwardPairs = validRainPairs.filter((pair) => pair.dyPixels > 0);
   const rainMedianVelocity = median(validRainPairs.map((pair) => pair.velocityYPixelsPerSecond));
   const rainMedianAdvantage = median(validRainPairs.map((pair) => pair.positiveAdvantage));
   const violations = [];
-  if (validRainPairs.length < 6) violations.push("too few correlated rain frame pairs");
-  if (downwardPairs.length < Math.ceil(validRainPairs.length * 0.75)) {
-    violations.push("rain motion was not predominantly downward");
-  }
-  if (rainMedianVelocity < 80 || rainMedianVelocity > 2_500) {
-    violations.push(`rain vertical velocity was implausible: ${rainMedianVelocity}`);
-  }
-  if (rainMedianAdvantage < 0.01) {
-    violations.push("downward rain correlation did not beat upward correlation");
-  }
-  if (median(rain.occupied) < 0.0005 || median(rain.occupied) > 0.2) {
-    violations.push("rain signal occupancy was outside the useful regression range");
+  if (rain) {
+    if (validRainPairs.length < 6) violations.push("too few correlated rain frame pairs");
+    if (downwardPairs.length < Math.ceil(validRainPairs.length * 0.75)) {
+      violations.push("rain motion was not predominantly downward");
+    }
+    if (rainMedianVelocity < 80 || rainMedianVelocity > 2_500) {
+      violations.push(`rain vertical velocity was implausible: ${rainMedianVelocity}`);
+    }
+    if (rainMedianAdvantage < 0.01) {
+      violations.push("downward rain correlation did not beat upward correlation");
+    }
+    if (median(rain.occupied) < 0.0005 || median(rain.occupied) > 0.2) {
+      violations.push("rain signal occupancy was outside the useful regression range");
+    }
   }
   if (cloud.rotation.weightedSamples < cloud.rotation.samples * 0.03) {
     violations.push("cloud comparison did not contain enough visible detail");
@@ -469,6 +567,16 @@ try {
   if (cloud.returned.catastrophicFraction > 0.002) {
     violations.push("returned cloud view retained unstable pixels");
   }
+  if (CLOUD_LAYERING_ONLY && cloud.layering.directionalExcess > 0.93) {
+    violations.push(
+      `cloud horizontal layer excess was ${cloud.layering.directionalExcess}`,
+    );
+  }
+  if (CLOUD_LAYERING_ONLY && cloud.layering.maximumRowAutocorrelation > 0.36) {
+    violations.push(
+      `cloud row autocorrelation was ${cloud.layering.maximumRowAutocorrelation}`,
+    );
+  }
   if (
     finalSnapshot[SNAPSHOT.quads] !== settled[SNAPSHOT.quads] ||
     finalSnapshot[SNAPSHOT.residentChunks] !== settled[SNAPSHOT.residentChunks]
@@ -486,14 +594,16 @@ try {
       fraction: finalSnapshot[SNAPSHOT.weatherFraction],
       precipitation: finalSnapshot[SNAPSHOT.precipitation],
     },
-    rain: {
-      medianOccupiedFraction: median(rain.occupied),
-      validPairs: validRainPairs.length,
-      downwardPairs: downwardPairs.length,
-      medianVelocityYPixelsPerSecond: rainMedianVelocity,
-      medianPositiveCorrelationAdvantage: rainMedianAdvantage,
-      pairs: rain.pairs,
-    },
+    rain: rain
+      ? {
+          medianOccupiedFraction: median(rain.occupied),
+          validPairs: validRainPairs.length,
+          downwardPairs: downwardPairs.length,
+          medianVelocityYPixelsPerSecond: rainMedianVelocity,
+          medianPositiveCorrelationAdvantage: rainMedianAdvantage,
+          pairs: rain.pairs,
+        }
+      : null,
     cloud,
     geometry: {
       quads: finalSnapshot[SNAPSHOT.quads],

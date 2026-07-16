@@ -130,6 +130,21 @@ mod tests {
     }
 
     #[test]
+    fn cloud_raymarch_stratifies_and_reconstructs_bounded_samples() {
+        let clouds = include_str!("shaders/clouds.wgsl");
+        assert!(clouds.contains("fract(stable_sample_phase + f32(index) * 0.61803398875)"));
+        assert!(clouds.contains("f32(index) + stratified_sample_phase"));
+        assert!(clouds.contains("index < 24u"));
+        assert!(clouds.contains("let extra_capacity = min(6u"));
+        assert!(clouds.contains("index >= view_steps"));
+        assert!(clouds.contains("mix(sampled_density, previous_density, 0.32)"));
+        assert!(clouds.contains("cloud_height_profile(height, envelope)"));
+        assert!(clouds.contains("advected.y * 2.1"));
+        assert!(clouds.contains("ambient * ambient_visibility + direct"));
+        assert!(clouds.contains("mix(1.10, 0.86, powder)"));
+    }
+
+    #[test]
     fn precipitation_is_world_space_depth_tested_geometry_that_falls_downward() {
         let weather = include_str!("shaders/weather.wgsl");
         assert!(weather.contains("@builtin(instance_index) instance_index: u32"));

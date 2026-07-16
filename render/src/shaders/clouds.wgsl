@@ -43,14 +43,16 @@ fn camera_ray(position: vec2<f32>, viewport: vec2<f32>) -> vec3<f32> {
   );
 }
 
-fn cloud_height_profile(world_y: f32) -> f32 {
-  let height = clamp(
-    (world_y - clouds.layer.x) / max(clouds.layer.y - clouds.layer.x, 1.0),
-    0.0,
-    1.0,
-  );
-  let top_fade_start = mix(0.62, 0.82, clouds.shaping.w);
-  return smoothstep(0.0, 0.11, height) * (1.0 - smoothstep(top_fade_start, 1.0, height));
+fn cloud_height_profile(height: f32, local_growth: f32) -> f32 {
+  // Dense weather-field cores grow lower bases and taller crowns while their edges stay lifted
+  // and shallow. This preserves a physically recognizable condensation layer without turning the
+  // entire sky into one flat slab.
+  let storm_growth = mix(local_growth, 0.78, clouds.shaping.w * 0.55);
+  let base_start = mix(0.10, 0.0, storm_growth);
+  let base_end = base_start + mix(0.14, 0.07, storm_growth);
+  let top_fade_start = mix(0.50, 0.80, storm_growth);
+  return smoothstep(base_start, base_end, height)
+    * (1.0 - smoothstep(top_fade_start, 1.0, height));
 }
 
 fn cloud_noise_lod(scale: f32, filter_width_metres: f32) -> f32 {
@@ -58,10 +60,10 @@ fn cloud_noise_lod(scale: f32, filter_width_metres: f32) -> f32 {
 }
 
 fn cloud_density_world(world: vec3<f32>, filter_width_metres: f32) -> f32 {
-  let profile = cloud_height_profile(world.y);
-  if profile <= 0.0 {
+  if world.y <= clouds.layer.x || world.y >= clouds.layer.y {
     return 0.0;
   }
+  let height = (world.y - clouds.layer.x) / max(clouds.layer.y - clouds.layer.x, 1.0);
   let macro_field = atmosphere_cloud_field_world(
     world.xz,
     frame.environment_time.yz,
@@ -73,14 +75,22 @@ fn cloud_density_world(world: vec3<f32>, filter_width_metres: f32) -> f32 {
   if envelope <= 0.002 {
     return 0.0;
   }
+  let profile = cloud_height_profile(height, envelope);
+  if profile <= 0.0 {
+    return 0.0;
+  }
   let seed = vec3<f32>(
     fract(frame.environment_time.w * 0.1031),
     fract(frame.environment_time.w * 0.11369),
     fract(frame.environment_time.w * 0.13787),
   );
   let advected = vec3<f32>(world.x - frame.environment_time.y, world.y, world.z - frame.environment_time.z);
-  let base_uvw = fract(advected * clouds.shaping.x + seed);
-  let detail_uvw = fract(advected.zxy * clouds.shaping.y + seed.yzx + vec3<f32>(0.37, 0.11, 0.73));
+  let base_position = vec3<f32>(advected.x, advected.y * 2.1, advected.z);
+  let detail_position = vec3<f32>(advected.z, advected.x, advected.y * 1.45);
+  let base_uvw = fract(base_position * clouds.shaping.x + seed);
+  let detail_uvw = fract(
+    detail_position * clouds.shaping.y + seed.yzx + vec3<f32>(0.37, 0.11, 0.73),
+  );
   let shape_lod = cloud_noise_lod(clouds.shaping.x, filter_width_metres);
   let detail_lod = cloud_noise_lod(clouds.shaping.y, filter_width_metres);
   let shape = textureSampleLevel(cloud_noise, cloud_noise_sampler, base_uvw, shape_lod).r;
@@ -115,7 +125,9 @@ fn light_transmittance(
     optical_depth += cloud_density_world(sample_world, filter_width_metres) * step_length;
   }
   let direct = exp(-optical_depth * clouds.layer.w);
-  return max(direct, 0.70 * exp(-optical_depth * clouds.layer.w * 0.25));
+  // Approximate higher-order scattering without flattening every cloud interior to the same
+  // brightness. The floor keeps storm cores readable while retaining enough contrast for volume.
+  return max(direct, 0.52 * exp(-optical_depth * clouds.layer.w * 0.20));
 }
 
 @fragment
@@ -136,7 +148,12 @@ fn fs_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     return vec4<f32>(0.0);
   }
   let trace_length = trace_end - trace_start;
-  let step_length = trace_length / f32(max(clouds.quality.x, 1u));
+  // Long grazing rays expose the individual integration strata most strongly. Spend a bounded
+  // six extra samples only there; overhead rays retain the configured cost.
+  let grazing_quality = 1.0 - smoothstep(0.10, 0.38, abs(ray.y));
+  let extra_capacity = min(6u, 24u - min(clouds.quality.x, 24u));
+  let view_steps = clouds.quality.x + u32(round(grazing_quality * f32(extra_capacity)));
+  let step_length = trace_length / f32(max(view_steps, 1u));
   let entry_world = camera + ray * trace_start;
   let stable_sample_phase = mix(
     0.15,
@@ -156,21 +173,33 @@ fn fs_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let ambient = (
     mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, 0.62) * 0.72
       + frame.ground_atmosphere.rgb * 0.18
-    ) * mix(0.86, 0.42, clouds.shaping.w);
+  ) * mix(0.86, 0.42, clouds.shaping.w);
   var transmittance = 1.0;
   var radiance = vec3<f32>(0.0);
+  var previous_density = 0.0;
   for (var index = 0u; index < 24u; index += 1u) {
-    if index >= clouds.quality.x || transmittance < 0.02 {
+    if index >= view_steps || transmittance < 0.02 {
       break;
     }
-    let distance = trace_start + (f32(index) + stable_sample_phase) * step_length;
+    // A stable low-discrepancy rotation keeps every sample inside its own stratum while preventing
+    // the aligned planes that read as stacked, flat cloud layers at grazing view angles.
+    let stratified_sample_phase = mix(
+      0.12,
+      0.88,
+      fract(stable_sample_phase + f32(index) * 0.61803398875),
+    );
+    let distance = trace_start + (f32(index) + stratified_sample_phase) * step_length;
     if distance >= trace_end {
       break;
     }
     let world = camera + ray * distance;
     let pixel_footprint_metres = distance * 1.349017 / max(clouds.target_size.y, 1.0);
     let filter_width_metres = max(pixel_footprint_metres, step_length * 0.35);
-    let density = cloud_density_world(world, filter_width_metres);
+    let sampled_density = cloud_density_world(world, filter_width_metres);
+    // Reconstruct a short linear segment between adjacent strata instead of treating every point
+    // sample as a constant-density slab. This mixes the visible layers without extra noise reads.
+    let density = mix(sampled_density, previous_density, 0.32);
+    previous_density = sampled_density;
     if density <= 0.001 {
       continue;
     }
@@ -178,9 +207,12 @@ fn fs_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let height = clamp((world.y - clouds.layer.x) / max(clouds.layer.y - clouds.layer.x, 1.0), 0.0, 1.0);
     let base_darkening = mix(0.46, 1.0, smoothstep(0.0, 0.56, height));
     let direct = frame.key_light_radiance.rgb * phase * light_visibility * base_darkening;
-    let scattering = ambient + direct;
     let optical_depth = density * step_length * clouds.layer.w;
     let sample_alpha = 1.0 - exp(-optical_depth);
+    let ambient_visibility = mix(0.48, 1.0, sqrt(light_visibility));
+    let powder = 1.0 - exp(-optical_depth * 2.4);
+    let edge_to_core = mix(1.10, 0.86, powder);
+    let scattering = (ambient * ambient_visibility + direct) * edge_to_core;
     radiance += transmittance * scattering * sample_alpha;
     transmittance *= 1.0 - sample_alpha;
   }
