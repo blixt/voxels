@@ -168,32 +168,27 @@ struct SurfaceDetail {
 };
 
 fn surface_basis(world: vec3<f32>, normal: vec3<f32>) -> SurfaceBasis {
+  let n = normalize(normal);
+  let dominant_axis = abs(n);
   var basis: SurfaceBasis;
-  if normal.x > 0.5 {
-    basis.uv = world.yz;
-    basis.tangent = vec3<f32>(0.0, 1.0, 0.0);
-    basis.bitangent = vec3<f32>(0.0, 0.0, 1.0);
-  } else if normal.x < -0.5 {
-    basis.uv = vec2<f32>(world.y, -world.z);
-    basis.tangent = vec3<f32>(0.0, 1.0, 0.0);
-    basis.bitangent = vec3<f32>(0.0, 0.0, -1.0);
-  } else if normal.y > 0.5 {
-    basis.uv = vec2<f32>(world.x, -world.z);
-    basis.tangent = vec3<f32>(1.0, 0.0, 0.0);
-    basis.bitangent = vec3<f32>(0.0, 0.0, -1.0);
-  } else if normal.y < -0.5 {
-    basis.uv = world.xz;
-    basis.tangent = vec3<f32>(1.0, 0.0, 0.0);
-    basis.bitangent = vec3<f32>(0.0, 0.0, 1.0);
-  } else if normal.z > 0.5 {
-    basis.uv = world.xy;
-    basis.tangent = vec3<f32>(1.0, 0.0, 0.0);
-    basis.bitangent = vec3<f32>(0.0, 1.0, 0.0);
+  var tangent_seed = vec3<f32>(1.0, 0.0, 0.0);
+  if dominant_axis.x >= dominant_axis.y && dominant_axis.x >= dominant_axis.z {
+    basis.uv = select(vec2<f32>(world.y, -world.z), world.yz, n.x >= 0.0);
+    tangent_seed = vec3<f32>(0.0, 1.0, 0.0);
+  } else if dominant_axis.y >= dominant_axis.z {
+    basis.uv = select(world.xz, vec2<f32>(world.x, -world.z), n.y >= 0.0);
   } else {
-    basis.uv = vec2<f32>(-world.x, world.y);
-    basis.tangent = vec3<f32>(-1.0, 0.0, 0.0);
-    basis.bitangent = vec3<f32>(0.0, 1.0, 0.0);
+    basis.uv = select(vec2<f32>(-world.x, world.y), world.xy, n.z >= 0.0);
+    tangent_seed = select(
+      vec3<f32>(-1.0, 0.0, 0.0),
+      vec3<f32>(1.0, 0.0, 0.0),
+      n.z >= 0.0,
+    );
   }
+  // Smoothed distant-terrain normals are not axis aligned. Reproject the chosen world-aligned
+  // texture axis so tangent-space normal detail cannot skew or amplify lighting across LOD slopes.
+  basis.tangent = normalize(tangent_seed - n * dot(tangent_seed, n));
+  basis.bitangent = normalize(cross(n, basis.tangent));
   return basis;
 }
 
@@ -390,13 +385,89 @@ fn water_wave_normal(world: vec3<f32>) -> vec3<f32> {
   return normalize(vec3<f32>(-slope.x, 1.0, -slope.y));
 }
 
-fn reflected_environment(direction: vec3<f32>) -> vec3<f32> {
+fn environment_radiance(direction: vec3<f32>) -> vec3<f32> {
   let sky_height = pow(clamp(direction.y * 0.5 + 0.5, 0.0, 1.0), 0.58);
   var radiance = mix(frame.ground_atmosphere.rgb, frame.sky_zenith.rgb, sky_height);
   radiance = mix(radiance, frame.sky_horizon.rgb, exp(-abs(direction.y) * 5.5) * 0.46);
+  return radiance;
+}
+
+fn reflected_environment(direction: vec3<f32>) -> vec3<f32> {
+  var radiance = environment_radiance(direction);
   let sun = normalize(frame.sun_direction.xyz);
   radiance += frame.sun_radiance.rgb * pow(max(dot(direction, sun), 0.0), 420.0) * 0.72;
   return radiance;
+}
+
+const PI: f32 = 3.14159265359;
+const DIELECTRIC_F0: vec3<f32> = vec3<f32>(0.04);
+const MIN_PERCEPTUAL_ROUGHNESS: f32 = 0.089;
+
+fn pow5(value: f32) -> f32 {
+  let squared = value * value;
+  return squared * squared * value;
+}
+
+fn fresnel_schlick(cosine: f32, f0: vec3<f32>) -> vec3<f32> {
+  return f0 + (vec3<f32>(1.0) - f0) * pow5(1.0 - clamp(cosine, 0.0, 1.0));
+}
+
+fn fresnel_schlick_roughness(
+  no_v: f32,
+  f0: vec3<f32>,
+  perceptual_roughness: f32,
+) -> vec3<f32> {
+  let grazing = max(vec3<f32>(1.0 - perceptual_roughness), f0);
+  return f0 + (grazing - f0) * pow5(1.0 - clamp(no_v, 0.0, 1.0));
+}
+
+fn distribution_ggx(no_h: f32, alpha: f32) -> f32 {
+  let alpha_squared = alpha * alpha;
+  let denominator = (no_h * alpha_squared - no_h) * no_h + 1.0;
+  return alpha_squared / max(PI * denominator * denominator, 0.000001);
+}
+
+fn visibility_smith_ggx_correlated_fast(no_v: f32, no_l: f32, alpha: f32) -> f32 {
+  let visibility_v = no_l * (no_v * (1.0 - alpha) + alpha);
+  let visibility_l = no_v * (no_l * (1.0 - alpha) + alpha);
+  return 0.5 / max(visibility_v + visibility_l, 0.0001);
+}
+
+fn evaluate_direct_dielectric(
+  albedo: vec3<f32>,
+  perceptual_roughness: f32,
+  normal: vec3<f32>,
+  view_direction: vec3<f32>,
+  light_direction: vec3<f32>,
+) -> vec3<f32> {
+  let no_v = max(dot(normal, view_direction), 0.0001);
+  let no_l = max(dot(normal, light_direction), 0.0);
+  let half_sum = view_direction + light_direction;
+  let half_direction = half_sum * inverseSqrt(max(dot(half_sum, half_sum), 0.000001));
+  let no_h = max(dot(normal, half_direction), 0.0);
+  let lo_h = max(dot(light_direction, half_direction), 0.0);
+  let roughness = max(perceptual_roughness, MIN_PERCEPTUAL_ROUGHNESS);
+  let alpha = roughness * roughness;
+  let fresnel = fresnel_schlick(lo_h, DIELECTRIC_F0);
+  let distribution = distribution_ggx(no_h, alpha);
+  let visibility = visibility_smith_ggx_correlated_fast(no_v, no_l, alpha);
+  let diffuse = albedo * (vec3<f32>(1.0) - fresnel) / PI;
+  return (diffuse + distribution * visibility * fresnel) * no_l;
+}
+
+fn specular_ambient_visibility(no_v: f32, ambient_visibility: f32, roughness: f32) -> f32 {
+  // The full grazing-angle correction is only visible on smooth dielectrics. Avoid its two
+  // transcendental operations for the rough soil, rock, vegetation, wood, and snow that dominate
+  // outdoor pixels; in that range it converges to the ordinary ambient visibility.
+  if roughness >= 0.35 {
+    return ambient_visibility;
+  }
+  let exponent = exp2(-16.0 * roughness - 1.0);
+  return clamp(
+    pow(no_v + ambient_visibility, exponent) - 1.0 + ambient_visibility,
+    0.0,
+    1.0,
+  );
 }
 
 @fragment
@@ -521,7 +592,6 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let material = input.material & 0xffffu;
   let surface_detail = sample_surface_detail(input.world, input.normal, material);
   let sun = normalize(frame.sun_direction.xyz);
-  let diffuse = max(dot(surface_detail.normal, sun), 0.0);
   let shadow = sun_visibility(input.world, input.normal) * cloud_sun_visibility(input.world);
   let sky_visibility = surface_detail.normal.y * 0.5 + 0.5;
   let cell = floor(input.world / frame.viewport_voxel.z);
@@ -543,29 +613,48 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     * max(-surface_detail.normal.y, 0.0)
     * 0.35
     * interior_ambient;
-  let direct = frame.sun_radiance.rgb
-    * diffuse
-    * mix(0.02, 1.0, shadow)
-    * mix(1.0, 0.10, frame.interior.x)
-    * 0.19;
   let albedo = surface_detail.albedo
     * material_macro_tint(material, input.world)
     * grain
     * fine_grain;
   let view_direction = normalize(frame.camera_time.xyz - input.world);
-  let half_direction = normalize(sun + view_direction);
   let roughness = surface_detail.roughness;
-  let specular_power = mix(110.0, 5.0, roughness * roughness);
-  let fresnel = 0.04 + 0.96 * pow(1.0 - max(dot(view_direction, half_direction), 0.0), 5.0);
-  let specular = frame.sun_radiance.rgb
-    * pow(max(dot(surface_detail.normal, half_direction), 0.0), specular_power)
-    * fresnel
-    * select(0.0, 1.0, diffuse > 0.0)
-    * (1.0 - roughness * 0.72)
-    * mix(0.02, 1.0, shadow)
+  let no_v = max(dot(surface_detail.normal, view_direction), 0.0001);
+  let ambient_fresnel = fresnel_schlick_roughness(no_v, DIELECTRIC_F0, roughness);
+  let ambient_diffuse = albedo
+    * (vec3<f32>(1.0) - ambient_fresnel)
+    * (sky_irradiance + bounce)
+    * ambient_occlusion;
+  let reflection_direction = reflect(-view_direction, surface_detail.normal);
+  let reflection_radiance = environment_radiance(
+    mix(
+      reflection_direction,
+      surface_detail.normal,
+      roughness * roughness,
+    ),
+  );
+  let reflection_horizon = smoothstep(
+    -0.10,
+    0.15,
+    dot(reflection_direction, normalize(input.normal)),
+  );
+  let ambient_specular = reflection_radiance
+    * ambient_fresnel
+    * specular_ambient_visibility(no_v, ambient_occlusion, roughness)
+    * reflection_horizon
+    * interior_ambient;
+  let direct = frame.sun_radiance.rgb
+    * evaluate_direct_dielectric(
+      albedo,
+      roughness,
+      surface_detail.normal,
+      view_direction,
+      sun,
+    )
+    * shadow
     * mix(1.0, 0.10, frame.interior.x)
-    * 0.16;
-  var color = albedo * ((sky_irradiance + bounce) * ambient_occlusion + direct) + specular;
+    * 0.62;
+  var color = ambient_diffuse + ambient_specular + direct;
   for (var light_index = 0u; light_index < 16u; light_index += 1u) {
     if light_index >= local_light_uniform.metadata.x {
       break;
@@ -583,18 +672,13 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     let window = max(1.0 - normalized_squared * normalized_squared, 0.0);
     let attenuation = window * window / max(distance_squared, 0.15 * 0.15);
     let radiance = light.color_intensity.rgb * light.color_intensity.w * attenuation;
-    let no_l = max(dot(surface_detail.normal, light_direction), 0.0);
-    let local_half = normalize(light_direction + view_direction);
-    let local_fresnel = 0.04
-      + 0.96 * pow(1.0 - max(dot(view_direction, local_half), 0.0), 5.0);
-    let local_specular = pow(
-      max(dot(surface_detail.normal, local_half), 0.0),
-      specular_power
-    ) * local_fresnel
-      * select(0.0, 1.0, no_l > 0.0)
-      * (1.0 - roughness * 0.72)
-      * 0.08;
-    color += radiance * (albedo * no_l * 0.3183099 + local_specular);
+    color += radiance * evaluate_direct_dielectric(
+      albedo,
+      roughness,
+      surface_detail.normal,
+      view_direction,
+      light_direction,
+    );
   }
   if material == 9u {
     let leaf_scatter = pow(max(dot(-sun, view_direction), 0.0), 3.0) * (1.0 - shadow * 0.55);
