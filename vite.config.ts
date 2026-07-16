@@ -579,6 +579,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-performance.mjs --atmosphere",
         cache: false,
       },
+      "test:lod-browser": {
+        command: "node scripts/browser-lod-transition.mjs",
+        cache: false,
+      },
       "test:multiplayer-browser": {
         command: "node scripts/browser-multiplayer.mjs",
         cache: false,

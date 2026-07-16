@@ -165,8 +165,8 @@ impl SurfacePatchId {
         let patch_edge = u8::try_from(SURFACE_PATCH_EDGE_CELLS).ok()?;
         let patches_per_tile = SURFACE_PATCHES_PER_TILE_EDGE;
         if !coord.is_world_representable()
-            || cell_min[0] % patch_edge != 0
-            || cell_min[1] % patch_edge != 0
+            || !cell_min[0].is_multiple_of(patch_edge)
+            || !cell_min[1].is_multiple_of(patch_edge)
             || i32::from(cell_min[0]) >= SURFACE_TILE_EDGE_CELLS
             || i32::from(cell_min[1]) >= SURFACE_TILE_EDGE_CELLS
         {

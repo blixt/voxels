@@ -460,12 +460,17 @@ impl DrawListBuilder {
 
     fn select_slice(&mut self, chunk: &ChunkMesh, slice: &MeshSlice) {
         self.selected_slices = self.selected_slices.saturating_add(1);
+        let offset = chunk.allocation.offset + slice.relative_offset;
         self.items.push(DrawItem {
             page: chunk.allocation.page,
-            offset: chunk.allocation.offset + slice.relative_offset,
+            offset,
             size: slice.size,
             quad_count: slice.quad_count,
         });
+        self.fingerprint = fingerprint_value(self.fingerprint, u64::from(chunk.allocation.page));
+        self.fingerprint = fingerprint_value(self.fingerprint, u64::from(offset));
+        self.fingerprint = fingerprint_value(self.fingerprint, u64::from(slice.size));
+        self.fingerprint = fingerprint_value(self.fingerprint, u64::from(slice.quad_count));
         self.quad_count = self.quad_count.saturating_add(slice.quad_count);
     }
 
@@ -520,6 +525,10 @@ pub struct RenderDiagnostics {
     pub cpu_submit_ms: f32,
     pub draw_list_tested_slices: u32,
     pub draw_list_selected_slices: u32,
+    /// Number of exact resident-profile connector quads selected for the current LOD focus.
+    pub lod_transition_quads: u32,
+    /// Grid-snapped centres, in canonical voxels, for the six geometric LOD boundaries.
+    pub lod_boundary_centres: [[i32; 2]; 6],
     pub surface_width: u32,
     pub surface_height: u32,
     pub dpr: f32,
@@ -2109,43 +2118,46 @@ impl Renderer {
         let slices: Vec<_> = tile
             .patches
             .iter()
-            .flat_map(|patch| {
+            .filter_map(|patch| {
                 let patch_id = SurfacePatchId::from_tile_cell_min(
                     coord,
                     [patch.cell_bounds[0][0], patch.cell_bounds[0][1]],
-                )
-                .expect("validated surface terrain patch grid");
+                )?;
                 let surface_bounds =
                     surface_patch_bounds([tile_x, tile_z], stride, patch.cell_bounds, patch.bounds);
-                std::iter::once((patch.quad_range.clone(), patch.bounds, None))
-                    .chain(SurfacePatchEdge::ALL.into_iter().map(|edge| {
-                        let range = patch.edge_ranges[edge.index()].clone();
-                        let bounds = SurfaceBounds::from_quads(
-                            &tile.quads[range.start as usize..range.end as usize],
-                        )
-                        .unwrap_or(patch.bounds);
-                        (range, bounds, Some(edge))
-                    }))
-                    .map(move |(range, bounds, boundary_edge)| {
-                        let bounds_min = glam::Vec3::from_array(
-                            bounds.min.map(|value| value as f32 * VOXEL_SIZE_METRES),
-                        );
-                        let bounds_max = glam::Vec3::from_array(
-                            bounds.max.map(|value| value as f32 * VOXEL_SIZE_METRES),
-                        );
-                        MeshSlice {
-                            relative_offset: range.start * quad_bytes,
-                            size: (range.end - range.start) * quad_bytes,
-                            quad_count: range.end - range.start,
-                            bounds_min,
-                            bounds_max,
-                            surface_bounds: Some(surface_bounds),
-                            surface_patch_id: Some(patch_id),
-                            boundary_edge,
-                            render_layer: RenderLayer::Opaque,
-                        }
-                    })
+                Some(
+                    std::iter::once((patch.quad_range.clone(), patch.bounds, None))
+                        .chain(SurfacePatchEdge::ALL.into_iter().map(|edge| {
+                            let range = patch.edge_ranges[edge.index()].clone();
+                            let bounds = SurfaceBounds::from_quads(
+                                &tile.quads[range.start as usize..range.end as usize],
+                            )
+                            .unwrap_or(patch.bounds);
+                            (range, bounds, Some(edge))
+                        }))
+                        .filter(|(range, _, _)| range.start < range.end)
+                        .map(move |(range, bounds, boundary_edge)| {
+                            let bounds_min = glam::Vec3::from_array(
+                                bounds.min.map(|value| value as f32 * VOXEL_SIZE_METRES),
+                            );
+                            let bounds_max = glam::Vec3::from_array(
+                                bounds.max.map(|value| value as f32 * VOXEL_SIZE_METRES),
+                            );
+                            MeshSlice {
+                                relative_offset: range.start * quad_bytes,
+                                size: (range.end - range.start) * quad_bytes,
+                                quad_count: range.end - range.start,
+                                bounds_min,
+                                bounds_max,
+                                surface_bounds: Some(surface_bounds),
+                                surface_patch_id: Some(patch_id),
+                                boundary_edge,
+                                render_layer: RenderLayer::Opaque,
+                            }
+                        }),
+                )
             })
+            .flatten()
             .collect();
         let water_slices = water
             .patches
@@ -2930,6 +2942,12 @@ impl Renderer {
                 .sum::<u32>()
                 .saturating_add(world_draw_list.selected_slices)
                 .saturating_add(water_draw_list.selected_slices),
+            lod_transition_quads: self
+                .chunks
+                .get(&LOD_TRANSITION_MESH_KEY)
+                .map_or(0, |mesh| mesh.quad_count),
+            lod_boundary_centres: geometric_lod_focus
+                .map_or([[0; 2]; 6], GeometricLodFocus::boundary_centres),
             surface_width: self.config.width,
             surface_height: self.config.height,
             dpr: self.dpr,
@@ -3055,6 +3073,10 @@ impl Renderer {
 /// Geometric LOD ownership is independent of clip volume. Computing it once per opaque slice avoids
 /// repeating the most expensive culling predicate for the camera and every shadow cascade while
 /// preserving each list's independent clip tests, diagnostics, ordering, and fingerprint.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one traversal needs the independent camera, shadow, residency, and feature inputs"
+)]
 fn collect_opaque_draw_lists(
     chunks: &mut BTreeMap<MeshKey, ChunkMesh>,
     surface_patch_selection: Option<&SurfacePatchSelection>,
@@ -3163,10 +3185,17 @@ fn prepare_mesh_sliced_into(
     arena: &mut ArenaAllocator,
     arena_buffers: &mut Vec<Buffer>,
     gpu_quads: &[GpuQuad],
-    slices: Vec<MeshSlice>,
+    mut slices: Vec<MeshSlice>,
     activation_mask: u8,
     buffer_label: &'static str,
 ) -> Option<ChunkMesh> {
+    if gpu_quads.is_empty() {
+        return None;
+    }
+    slices.retain(|slice| slice.size > 0 && slice.quad_count > 0);
+    if slices.is_empty() {
+        return None;
+    }
     let (mut bounds_min, mut bounds_max) = slices
         .first()
         .map(|slice| (slice.bounds_min, slice.bounds_max))
@@ -3962,6 +3991,10 @@ fn rank_local_light<const CAPACITY: usize>(
     *count = new_count;
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the GPU frame contract combines camera, lighting, LOD, interaction, and config state"
+)]
 fn frame_uniform(
     config: &SurfaceConfiguration,
     camera: &CameraState,
@@ -5116,11 +5149,26 @@ mod tests {
                 },
             ),
         ]);
-        let focus = Some(GeometricLodFocus::snapped(0, 0));
+        let main_only = reference_draw_list(
+            &chunks,
+            |key, _| *key == surface_key,
+            |_, slice| slice.boundary_edge.is_none(),
+        );
+        let edge_only = reference_draw_list(
+            &chunks,
+            |key, _| *key == surface_key,
+            |_, slice| slice.boundary_edge.is_some(),
+        );
+        assert_ne!(
+            main_only.fingerprint, edge_only.fingerprint,
+            "viewport identity must include the selected submesh range"
+        );
+        let focus_value = GeometricLodFocus::snapped(0, 0);
+        let focus = Some(focus_value);
         let surface_patch_residency =
             HashSet::from([surface_slice.surface_patch_id.expect("surface patch id")]);
         let mut surface_patch_selection = SurfacePatchSelection::default();
-        surface_patch_selection.rebuild(focus.unwrap(), &surface_patch_residency, &HashSet::new());
+        surface_patch_selection.rebuild(focus_value, &surface_patch_residency, &HashSet::new());
         let view_clip = AabbClipVolume::new(glam::Mat4::IDENTITY);
         let shadow_clips = [view_clip; CASCADE_COUNT];
         let (actual_shadows, actual_world) = collect_opaque_draw_lists(
@@ -5180,9 +5228,10 @@ mod tests {
                 .all(|chunk| chunk.lod_ownership_focus == focus)
         );
 
-        let moved_focus = Some(GeometricLodFocus::snapped(256, -192));
+        let moved_focus_value = GeometricLodFocus::snapped(256, -192);
+        let moved_focus = Some(moved_focus_value);
         surface_patch_selection.rebuild(
-            moved_focus.unwrap(),
+            moved_focus_value,
             &surface_patch_residency,
             &HashSet::new(),
         );

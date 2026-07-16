@@ -1,6 +1,6 @@
 import { createServer as createNetServer } from "node:net";
 
-export const SNAPSHOT_SCHEMA_VERSION = 22;
+export const SNAPSHOT_SCHEMA_VERSION = 23;
 export const FRAME_SAMPLE_WIDTH = 11;
 export const GPU_SAMPLE_WIDTH = 11;
 
@@ -10,6 +10,7 @@ export const SNAPSHOT = Object.freeze({
   cameraZ: 2,
   yaw: 3,
   pitch: 4,
+  grounded: 5,
   quads: 6,
   edits: 7,
   residentChunks: 8,
@@ -111,9 +112,22 @@ export const SNAPSHOT = Object.freeze({
   surfaceWidth: 113,
   surfaceHeight: 114,
   devicePixelRatio: 115,
-  schemaVersion: 116,
-  sampleCount: 117,
-  droppedSamples: 118,
+  lodTransitionQuads: 116,
+  lodBoundary0X: 117,
+  lodBoundary0Z: 118,
+  lodBoundary1X: 119,
+  lodBoundary1Z: 120,
+  lodBoundary2X: 121,
+  lodBoundary2Z: 122,
+  lodBoundary3X: 123,
+  lodBoundary3Z: 124,
+  lodBoundary4X: 125,
+  lodBoundary4Z: 126,
+  lodBoundary5X: 127,
+  lodBoundary5Z: 128,
+  schemaVersion: 129,
+  sampleCount: 130,
+  droppedSamples: 131,
 });
 
 export const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;

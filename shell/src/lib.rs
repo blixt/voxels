@@ -147,7 +147,7 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 22.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 23.0;
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
 
     #[derive(Clone, Copy, Debug)]
@@ -2281,6 +2281,19 @@ mod web {
                     render.surface_width as f32,
                     render.surface_height as f32,
                     render.dpr,
+                    render.lod_transition_quads as f32,
+                    render.lod_boundary_centres[0][0] as f32,
+                    render.lod_boundary_centres[0][1] as f32,
+                    render.lod_boundary_centres[1][0] as f32,
+                    render.lod_boundary_centres[1][1] as f32,
+                    render.lod_boundary_centres[2][0] as f32,
+                    render.lod_boundary_centres[2][1] as f32,
+                    render.lod_boundary_centres[3][0] as f32,
+                    render.lod_boundary_centres[3][1] as f32,
+                    render.lod_boundary_centres[4][0] as f32,
+                    render.lod_boundary_centres[4][1] as f32,
+                    render.lod_boundary_centres[5][0] as f32,
+                    render.lod_boundary_centres[5][1] as f32,
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
