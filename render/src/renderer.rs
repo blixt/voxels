@@ -374,8 +374,15 @@ impl ChunkMesh {
         self.lod_residency_revision = residency_revision;
     }
 
-    fn lod_owns_slice(&self, focus: Option<GeometricLodFocus>, slice_index: usize) -> bool {
-        focus.is_none() || self.lod_owned_slices.get(slice_index) == Some(&true)
+    fn lod_owns_slice(
+        &self,
+        key: &MeshKey,
+        focus: Option<GeometricLodFocus>,
+        slice_index: usize,
+    ) -> bool {
+        focus.map_or(key.0 == 0, |_| {
+            self.lod_owned_slices.get(slice_index) == Some(&true)
+        })
     }
 
     const fn active(&self) -> bool {
@@ -3068,7 +3075,7 @@ fn collect_opaque_draw_lists(
                 }
             }
             if slice.render_layer != RenderLayer::Opaque
-                || !chunk.lod_owns_slice(geometric_lod_focus, slice_index)
+                || !chunk.lod_owns_slice(key, geometric_lod_focus, slice_index)
             {
                 continue;
             }
@@ -5312,6 +5319,23 @@ mod tests {
             &(99, 0, 0, 0),
             &surface
         ));
+
+        let mut arena = ArenaAllocator::new(256, 1);
+        let allocation = arena.allocate(surface.size).expect("test mesh allocation");
+        let chunk = ChunkMesh {
+            allocation,
+            quad_count: surface.quad_count,
+            content_fingerprint: 1,
+            slices: vec![surface],
+            lod_ownership_focus: None,
+            lod_residency_revision: 0,
+            lod_owned_slices: Vec::new(),
+            bounds_min: surface.bounds_min,
+            bounds_max: surface.bounds_max,
+            activation_mask: u8::MAX,
+        };
+        assert!(chunk.lod_owns_slice(&(0, 0, 0, 0), None, 0));
+        assert!(!chunk.lod_owns_slice(&(SurfaceLodLevel::Stride2.index() + 1, 0, 0, 0), None, 0));
     }
 
     #[test]
