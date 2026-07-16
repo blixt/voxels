@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 14
+schema_version = 15
 
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
@@ -65,6 +65,9 @@ split_lambda = 0.65
 # Startup rejects values above 4096, above the selected GPU's 2D texture limit, or above the
 # renderer's bounded shadow-memory budget.
 shadow_map_resolution = 1024
+# Snap the moving sun/moon basis to 1/32 degree. Direct light still moves continuously; only the
+# shadow projection is stabilized, with a worst-case angular discrepancy below 1/64 degree.
+direction_quantization_radians = 0.0005454154
 caster_depth_expansion = 64.0
 
 [rendering.volumetric_clouds]

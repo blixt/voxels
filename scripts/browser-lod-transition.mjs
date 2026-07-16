@@ -173,6 +173,7 @@ async function waitForCentreChange(page, initialCentres, outboundKey, timings) {
 }
 
 async function returnToPose(page, target, initialCentres, timings) {
+  const correctionHistory = [];
   const brake = async (duration) => {
     const keys = ["KeyW", "KeyS", "KeyA", "KeyD"];
     for (const key of keys) await page.keyboard.down(key);
@@ -188,10 +189,16 @@ async function returnToPose(page, target, initialCentres, timings) {
   };
   await brake(300);
   let latest = await readSnapshot(page, timings);
-  for (let correction = 0; correction < 40; correction += 1) {
+  for (let correction = 0; correction < 80; correction += 1) {
     const position = cameraPosition(latest);
     const distance = planarDistance(position, target);
-    if (distance <= 0.035) break;
+    correctionHistory.push({ correction, distance, position });
+    if (distance <= 0.008) {
+      await brake(200);
+      latest = await readSnapshot(page, timings);
+      if (planarDistance(cameraPosition(latest), target) <= 0.015) break;
+      continue;
+    }
     const yaw = latest[SNAPSHOT.yaw];
     const forward = [Math.sin(yaw), -Math.cos(yaw)];
     const right = [-forward[1], forward[0]];
@@ -210,21 +217,23 @@ async function returnToPose(page, target, initialCentres, timings) {
     )[0];
     await page.keyboard.down(key);
     try {
-      const deadline = Date.now() + Math.min(70, Math.max(16, distance * 120));
+      const deadline = Date.now() + Math.min(40, Math.max(8, distance * 80));
       while (Date.now() < deadline) {
         latest = await readSnapshot(page, timings);
-        await page.waitForTimeout(8);
+        await page.waitForTimeout(4);
       }
     } finally {
       await page.keyboard.up(key);
     }
-    await brake(80);
+    await brake(48);
     latest = await readSnapshot(page, timings);
   }
-  await brake(160);
-  latest = await readSnapshot(page, timings);
   const error = planarDistance(cameraPosition(latest), target);
-  if (error > 0.08) throw new Error(`could not return to camera pose; planar error ${error}m`);
+  if (error > 0.015) {
+    throw new Error(
+      `could not return to camera pose; planar error ${error}m; final corrections ${JSON.stringify(correctionHistory.slice(-8))}`,
+    );
+  }
   if (sameCentres(boundaryCentres(latest), initialCentres)) {
     throw new Error(
       `LOD focus returned to its initial state at the comparison pose: ${JSON.stringify(initialCentres)}`,
@@ -490,6 +499,11 @@ try {
     spawnVoxels: SPAWN,
     cascadedShadows: true,
     screenSpaceAmbientOcclusion: true,
+    dayLengthSeconds: 0,
+    dayFractionAtUnixEpoch: 0.5,
+    weatherCycleSeconds: 0,
+    weatherFractionAtUnixEpoch: 0.08,
+    cloudVelocityMetresPerSecond: [0, 0],
   });
   process.env.VOXELS_BROWSER_BUILD_PROFILE = process.env.VOXELS_LOD_TEST_BUILD ?? "release";
   const { build, preview } = await import("vite-plus");
@@ -585,7 +599,7 @@ try {
     const violations = [];
     // Ground height follows the returned X/Z position. A few centimetres on a steep voxel slope
     // can legitimately move Y farther, while the screenshots remain horizontally registered.
-    if (planarPoseErrorMetres > 0.08)
+    if (planarPoseErrorMetres > 0.015)
       violations.push("camera did not return to the same horizontal pose");
     if (image.relativeMeanLumaDelta > 0.04)
       violations.push("valley mean luminance changed by over 4%");

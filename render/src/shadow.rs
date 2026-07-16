@@ -19,6 +19,8 @@ pub struct DirectionalShadowConfig {
     /// Blend between uniform (`0`) and logarithmic (`1`) cascade splits.
     pub split_lambda: f32,
     pub shadow_map_resolution: u32,
+    /// Angular step used to stabilize the moving directional-light basis. Zero disables it.
+    pub direction_quantization_radians: f32,
     /// Distance added on the light-facing side of every receiver slice for off-slice casters.
     /// The builder clamps this to `far_plane`, making the expansion finite even for bad input.
     pub caster_depth_expansion: f32,
@@ -32,6 +34,7 @@ impl Default for DirectionalShadowConfig {
             far_plane: 220.0,
             split_lambda: 0.65,
             shadow_map_resolution: 1_024,
+            direction_quantization_radians: std::f32::consts::PI / 5_760.0,
             caster_depth_expansion: 64.0,
         }
     }
@@ -43,6 +46,7 @@ pub enum ShadowBuildError {
     InvalidFieldOfView,
     InvalidDepthRange,
     InvalidLightDirection,
+    InvalidDirectionQuantization,
     InvalidResolution,
 }
 
@@ -110,7 +114,8 @@ pub fn build_directional_shadow_cascades(
 
     let lambda = config.split_lambda.clamp(0.0, 1.0);
     let split_depths = practical_splits(config.near_plane, config.far_plane, lambda);
-    let light_forward = light_direction.normalize();
+    let light_forward =
+        quantized_light_direction(light_direction, config.direction_quantization_radians);
     let reference_up = if light_forward.dot(Vec3::Y).abs() > 0.98 {
         Vec3::Z
     } else {
@@ -200,6 +205,11 @@ fn validate(
     if !light_direction.is_finite() || light_direction.length_squared() <= f32::EPSILON {
         return Err(ShadowBuildError::InvalidLightDirection);
     }
+    if !config.direction_quantization_radians.is_finite()
+        || !(0.0..=std::f32::consts::PI / 180.0).contains(&config.direction_quantization_radians)
+    {
+        return Err(ShadowBuildError::InvalidDirectionQuantization);
+    }
     if config.shadow_map_resolution < 2 {
         return Err(ShadowBuildError::InvalidResolution);
     }
@@ -251,6 +261,22 @@ fn frustum_slice_corners(
 
 fn snap(value: f32, step: f32) -> f32 {
     (value / step).round() * step
+}
+
+fn quantized_light_direction(direction: Vec3, angular_step: f32) -> Vec3 {
+    let direction = direction.normalize();
+    if angular_step <= 0.0 {
+        return direction;
+    }
+    let elevation = snap(direction.y.clamp(-1.0, 1.0).asin(), angular_step);
+    let azimuth = snap(direction.z.atan2(direction.x), angular_step);
+    let horizontal = elevation.cos();
+    Vec3::new(
+        horizontal * azimuth.cos(),
+        elevation.sin(),
+        horizontal * azimuth.sin(),
+    )
+    .normalize()
 }
 
 #[allow(
@@ -402,6 +428,36 @@ mod tests {
         let first = build(&CameraState::from_persisted(position, -2.4, -0.8))?;
         let second = build(&CameraState::from_persisted(position, 1.7, 0.9))?;
 
+        for index in 0..CASCADE_COUNT {
+            assert_matrix_close(
+                first.cascades[index].clip_from_world,
+                second.cascades[index].clip_from_world,
+                1.0e-6,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sub_step_sun_motion_keeps_directional_shadow_projection_stable()
+    -> Result<(), ShadowBuildError> {
+        let config = DirectionalShadowConfig::default();
+        let step = config.direction_quantization_radians;
+        let direction = |azimuth: f32, elevation: f32| {
+            let horizontal = elevation.cos();
+            Vec3::new(
+                horizontal * azimuth.cos(),
+                elevation.sin(),
+                horizontal * azimuth.sin(),
+            )
+        };
+        let azimuth = step * 128.0;
+        let elevation = step * -1_400.0;
+        let first_light = direction(azimuth, elevation);
+        let second_light = direction(azimuth + step * 0.24, elevation - step * 0.24);
+        let camera = CameraState::from_persisted(Vec3::new(13.0, 8.0, -21.0), 0.73, -0.31);
+        let first = build_directional_shadow_cascades(&camera, ASPECT, first_light, config)?;
+        let second = build_directional_shadow_cascades(&camera, ASPECT, second_light, config)?;
         for index in 0..CASCADE_COUNT {
             assert_matrix_close(
                 first.cascades[index].clip_from_world,
