@@ -68,13 +68,14 @@ handles underside refraction and total internal reflection. Simulation values re
 unsmoothed. Rust/WGPU chrome reports immersion/depth and re-opens a Rust-rendered swim-help toast on
 entry. Disabling animated water changes rendering only, never authoritative fluid physics.
 
-Four independently streamable surface rings derive from the same generator and sparse edit overlay at
-0.2, 0.4, 0.8, and 1.6 m sampling strides. Each tile covers 32 samples per side and emits a top plus
-vertical transition faces down to lower neighbors, including samples across tile boundaries, so
-separately generated tiles form a closed shell without cracks. The coarsest ring extends beyond the
-220 m fog cutoff; missing finer rings temporarily reveal complete coarse underlays instead of a hole.
-All surface meshes remain disposable derivatives: the generator, 10 cm voxels, and sparse edits stay
-authoritative.
+Six independently streamable surface levels derive from the same generator and sparse edit overlay at
+0.2, 0.4, 0.8, 1.6, 3.2, and 6.4 m sampling strides. The first four are interactive rings; the two
+coarsest are horizon-only prefetches. Each tile covers 32 samples per side and emits a top plus
+vertical boundary faces down to lower neighbors, including samples across tile boundaries, so
+separately generated tiles form a closed shell. The outer levels extend beyond the 220 m shadow/fog
+detail range to the configured 1 km view distance; missing finer levels temporarily reveal complete
+coarse parents instead of a hole. All surface meshes remain disposable derivatives: the generator,
+10 cm voxels, and sparse edits stay authoritative.
 
 Each surface level also derives an edit-aware, 2D-greedy water mask at the exact canonical sea Y.
 Water patches use the same CPU ownership bounds as terrain, but never inherit the lowered crack-hiding
@@ -86,9 +87,10 @@ fog, and the same presentation transform as land.
 
 Every terrain surface tile is one opaque-arena allocation partitioned into sixteen contiguous
 8x8-cell draw patches; a non-empty water derivative uses the parallel water arena. Each terrain patch
-also owns four separately addressable vertical skirts. The renderer submits a skirt only where that
-edge touches a different LOD owner, closing height disagreement without paying for internal
-same-resolution walls.
+also owns four separately addressable boundary-face ranges. At a resolution handoff the renderer
+suppresses the coarse generic boundary face and emits an exact connector from the resident coarse and
+fine height profiles. Complete sibling activation and retained parents ensure the connector is never
+built against a missing representation.
 
 Coverage ownership changes at grid-snapped, half-open square boundaries aligned to every participating
 patch size. Rust selects whole canonical chunks and surface patches on the CPU, then uses the identical
@@ -260,8 +262,8 @@ neighboring texels and mip levels. The box-filtered mip chain remains in place s
 not regress to a shimmering level-zero sample.
 
 Axis-aligned face bases derive planar coordinates from world position, so greedy quads never stretch
-detail and adjacent canonical chunks, surface LODs, skirts, and landmark proxies sample the same
-coordinates without new vertex attributes. Before atlas lookup, those coordinates snap to three
+detail and adjacent canonical chunks, surface LODs, boundary connectors, and landmark proxies sample
+the same coordinates without new vertex attributes. Before atlas lookup, those coordinates snap to three
 world-aligned cells per canonical voxel axis: every face therefore exposes exactly 3x3 blocks at
 3.33 cm spacing, including faces embedded in a larger greedy quad. Explicit texture gradients come
 from the unsnapped coordinates, retaining stable mip selection despite the piecewise-constant lookup.
@@ -401,7 +403,8 @@ latency a user-visible, revision-backed measurement rather than a queue-length a
 - Mesh chunk boundaries using neighbor samples so hidden seam faces are not emitted.
 - Suballocate immutable chunk and surface-ring meshes from separate coalescing opaque/water GPU arena
   pages, replacing only the allocation whose source changes. Pack common patch bodies before optional
-  skirts and coalesce adjacent selected ranges into draw spans.
+  boundary-face ranges, generate active LOD connectors separately, and coalesce adjacent selected
+  ranges into draw spans.
 - Frustum-cull chunks on CPU; add occlusion/indirect drawing only after GPU captures justify it.
 - Keep deterministic host benchmarks for generation, codec round-trips, meshing, and edit replay.
 - Expose lightweight browser frame and residency snapshots for end-to-end regression automation.

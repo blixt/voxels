@@ -59,9 +59,11 @@ Rust enum layout and Serde output are not wire formats.
    and coordinate keys, and every decoded product is checked against the negotiated source identity.
 5. Each successful near item carries the existing palette/bit-packed VXCH chunk plus an exact,
    palette/bit-packed meshing halo. Both are integrity checked before meshing.
-6. Surface meshes use a separate `VXST` version-2 payload containing bounded terrain, water, patch,
-   bounds, and transition-skirt records. Interactive and horizon ownership activate at their own
-   complete-ring boundaries; the coarse parent remains resident until its replacement is complete.
+6. Surface meshes use a separate `VXST` v4 payload containing bounded terrain, water, patch
+   boundary-face ranges, and child/parent shading-height grids. Interactive and horizon ownership
+   activate at their own complete-level boundaries; the coarse parent remains resident until its
+   replacement is complete, and the renderer derives exact height-matched connectors from the two
+   resident profiles.
 7. Every chunk or surface result body is independently Brotli-compressed at quality 2 with a 20-bit
    window. Its mandatory v11 envelope declares the exact uncompressed length; the decoder rejects
    unknown codecs, nonzero reserved bytes, outputs above the 16 MiB frame bound, truncated streams,
@@ -235,7 +237,8 @@ metrics/screenshots under
 The streamed surface scheduler requests the coarsest levels first, retains old coverage through
 focus movement, and only activates a complete replacement set. The nearest geometric ownership snap
 is one 32-voxel chunk (3.2 m), reduced from the former 96-voxel jump that replaced conspicuous 9.6 m
-strips. Skirts remain crack protection; they are not treated as a substitute for smooth topology.
+strips. Exact resident connectors close height disagreement at active coarse/fine boundaries, while
+hysteretic ownership and shared parent normals reduce the remaining lighting and replacement pop.
 
 The next renderer format should carry conservative parent error and use projected screen-space error,
 hysteresis, dual-resident parent/child transition bands, and parent-compatible geomorphing. Those are

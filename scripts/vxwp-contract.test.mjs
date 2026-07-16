@@ -13,6 +13,7 @@ describe("VXWP script contract", () => {
     const protocolSource = readFileSync("world/src/protocol.rs", "utf8");
     const serverSource = readFileSync("world-service/src/server.rs", "utf8");
     const clientConfig = readFileSync("config/client.toml", "utf8");
+    const streamingDocs = readFileSync("docs/native-world-streaming.md", "utf8");
 
     expect(
       Number(
@@ -59,6 +60,23 @@ describe("VXWP script contract", () => {
     ).toBe(PRESENCE_PATH);
     expect(requiredMatch(clientConfig, /^subprotocol = "([^"]+)"$/mu, "client subprotocol")).toBe(
       WORLD_SUBPROTOCOL,
+    );
+    expect(
+      Number(
+        requiredMatch(
+          streamingDocs,
+          /Surface meshes use a separate `VXST` v(\d+) payload/u,
+          "documented surface snapshot version",
+        ),
+      ),
+    ).toBe(
+      Number(
+        requiredMatch(
+          protocolSource,
+          /const SURFACE_SNAPSHOT_VERSION: u16 = (\d+);/u,
+          "Rust surface snapshot version",
+        ),
+      ),
     );
   });
 });

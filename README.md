@@ -94,7 +94,8 @@ prefetches and extend default coverage to 1 km without delaying the four interac
 generator shares one regional surface sample across canonical
 chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
-conditional skirts, and activates a newly streamed coverage set only when it is complete.
+exact connectors built from the resident coarse and fine height profiles, and activates a newly
+streamed coverage set only when it is complete.
 Analytic landmark identities add ordinary regional forms plus elder canopies, tor circles, needle
 gates, buried ribs, colonnades, and basalt crowns as ordinary editable voxels. An 8x8-cell composition
 director arranges backgrounds and companions into clusters, rings, clearings, and procession lines,
