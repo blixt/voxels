@@ -183,18 +183,8 @@ fn pixelated_material_uv(surface_metres: vec2<f32>, material_scale: f32) -> vec2
 }
 
 fn sample_surface_detail(world: vec3<f32>, geometric_normal: vec3<f32>, material: u32) -> SurfaceDetail {
-  let base_mip = i32(textureNumLevels(material_albedo) - 1u);
   var detail: SurfaceDetail;
-  // The atlas is the sole render-side material definition. The flat debug mode reads its 1x1
-  // average instead of maintaining a second color/roughness table that can silently drift.
-  detail.albedo = textureLoad(material_albedo, vec2<i32>(0), i32(material), base_mip).rgb;
   detail.normal = geometric_normal;
-  detail.roughness = textureLoad(
-    material_surface,
-    vec2<i32>(0),
-    i32(material),
-    base_mip,
-  ).a;
   if MATERIAL_DETAIL != 0u {
     let basis = surface_basis(world, geometric_normal);
     let material_scale = material_detail_scale(material);
@@ -239,6 +229,17 @@ fn sample_surface_detail(world: vec3<f32>, geometric_normal: vec3<f32>, material
       0.01,
       1.0,
     ));
+  } else {
+    let base_mip = i32(textureNumLevels(material_albedo) - 1u);
+    // The atlas is the sole render-side material definition. The flat debug mode reads its 1x1
+    // average instead of maintaining a second color/roughness table that can silently drift.
+    detail.albedo = textureLoad(material_albedo, vec2<i32>(0), i32(material), base_mip).rgb;
+    detail.roughness = textureLoad(
+      material_surface,
+      vec2<i32>(0),
+      i32(material),
+      base_mip,
+    ).a;
   }
   return detail;
 }

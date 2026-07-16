@@ -41,6 +41,9 @@ fn evaluate_direct_dielectric(
 ) -> vec3<f32> {
   let no_v = max(dot(normal, view_direction), 0.0001);
   let no_l = max(dot(normal, light_direction), 0.0);
+  if no_l <= 0.0 {
+    return vec3<f32>(0.0);
+  }
   let half_sum = view_direction + light_direction;
   let half_direction = half_sum * inverseSqrt(max(dot(half_sum, half_sum), 0.000001));
   let no_h = max(dot(normal, half_direction), 0.0);
