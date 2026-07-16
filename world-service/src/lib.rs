@@ -15,7 +15,9 @@ use voxels_world::{
     HeightfieldWorldSource, MacroTerrainSource, ProceduralWorldSource, SEA_LEVEL_VOXELS, WorldId,
     WorldSourceEngine, WorldSourceError, WorldSourceIdentityHash,
 };
-use voxels_world_terrain_diffusion::{MODEL_REVISION, TerrainDiffusionError};
+use voxels_world_terrain_diffusion::{
+    MODEL_REVISION, TerrainDiffusionError, validate_terrain_generation_parameters,
+};
 #[cfg(all(feature = "terrain-metal", target_os = "macos"))]
 use voxels_world_terrain_diffusion::{TerrainDiffusionConfig, TerrainPrecision};
 
@@ -337,21 +339,12 @@ impl WorldServiceConfig {
                 "max_outbound_bytes_per_client must fit at least one frame and stay at most 256 MiB",
             ));
         }
-        if !(1..=8).contains(&self.terrain_diffusion.horizontal_scale) {
-            return Err(WorldServiceConfigError::InvalidTerrainDiffusion(
-                "horizontal_scale must be in 1..=8",
-            ));
-        }
-        if self
-            .terrain_diffusion
-            .quality_histogram
-            .iter()
-            .any(|value| !value.is_finite() || !(-10.0..=10.0).contains(value))
-        {
-            return Err(WorldServiceConfigError::InvalidTerrainDiffusion(
-                "quality_histogram values must be finite and in -10..=10",
-            ));
-        }
+        validate_terrain_generation_parameters(
+            self.terrain_diffusion.horizontal_scale,
+            self.terrain_diffusion.latent_window,
+            self.terrain_diffusion.quality_histogram,
+        )
+        .map_err(WorldServiceConfigError::InvalidTerrainDiffusion)?;
         if self.transport.max_in_flight_batches == 0
             || self.transport.max_in_flight_batches > MAX_CONFIGURED_IN_FLIGHT_BATCHES
         {
@@ -537,7 +530,7 @@ pub enum WorldServiceConfigError {
     InvalidPresence(&'static str),
     InvalidGameplay(&'static str),
     InvalidEdits(&'static str),
-    InvalidTerrainDiffusion(&'static str),
+    InvalidTerrainDiffusion(TerrainDiffusionError),
 }
 
 impl fmt::Display for WorldServiceConfigError {
@@ -994,7 +987,28 @@ sea_level_voxels = 52
         assert_eq!(
             config.validate(),
             Err(WorldServiceConfigError::InvalidTerrainDiffusion(
-                "horizontal_scale must be in 1..=8"
+                TerrainDiffusionError::InvalidHorizontalScale(0)
+            ))
+        );
+    }
+
+    #[test]
+    fn terrain_diffusion_latent_window_keeps_model_coordinates_representable() {
+        let mut config = test_config(WorldSourceMode::TerrainDiffusion30m);
+        for coordinate in [
+            voxels_world_terrain_diffusion::MIN_LATENT_WINDOW_COORDINATE,
+            voxels_world_terrain_diffusion::MAX_LATENT_WINDOW_COORDINATE,
+        ] {
+            config.terrain_diffusion.latent_window = [coordinate; 2];
+            config.validate().expect("boundary window is valid");
+        }
+
+        let coordinate = voxels_world_terrain_diffusion::MAX_LATENT_WINDOW_COORDINATE + 1;
+        config.terrain_diffusion.latent_window = [coordinate, 0];
+        assert_eq!(
+            config.validate(),
+            Err(WorldServiceConfigError::InvalidTerrainDiffusion(
+                TerrainDiffusionError::InvalidLatentWindow([coordinate, 0])
             ))
         );
     }
@@ -1006,7 +1020,7 @@ sea_level_voxels = 52
         assert_eq!(
             config.validate(),
             Err(WorldServiceConfigError::InvalidTerrainDiffusion(
-                "quality_histogram values must be finite and in -10..=10"
+                TerrainDiffusionError::InvalidQualityHistogram
             ))
         );
 
@@ -1014,7 +1028,7 @@ sea_level_voxels = 52
         assert_eq!(
             config.validate(),
             Err(WorldServiceConfigError::InvalidTerrainDiffusion(
-                "quality_histogram values must be finite and in -10..=10"
+                TerrainDiffusionError::InvalidQualityHistogram
             ))
         );
     }

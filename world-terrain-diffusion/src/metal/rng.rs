@@ -42,7 +42,7 @@ impl PortableNormal {
     }
 }
 
-fn spatial_seed(base: u64, tile_y: i32, tile_x: i32) -> u64 {
+fn spatial_seed(base: u64, tile_y: i64, tile_x: i64) -> u64 {
     base.wrapping_mul(SPATIAL_SEED_MULTIPLIER)
         .wrapping_add(u64::from(tile_y as u32))
         .wrapping_mul(SPATIAL_SEED_MULTIPLIER)
@@ -60,25 +60,38 @@ pub fn gaussian_patch(
     let [height, width] = shape;
     let [tile_height, tile_width] = noise_tile;
     let mut output = vec![0.0; channels * height * width];
-    let first_tile_y = origin[0].div_euclid(tile_height as i32);
-    let final_tile_y = (origin[0] + height as i32 - 1).div_euclid(tile_height as i32);
-    let first_tile_x = origin[1].div_euclid(tile_width as i32);
-    let final_tile_x = (origin[1] + width as i32 - 1).div_euclid(tile_width as i32);
+    assert!(
+        tile_height > 0 && tile_width > 0,
+        "noise tiles must be non-empty"
+    );
+    if height == 0 || width == 0 || channels == 0 {
+        return output;
+    }
+    let origin_y = i64::from(origin[0]);
+    let origin_x = i64::from(origin[1]);
+    let height_i64 = height as i64;
+    let width_i64 = width as i64;
+    let tile_height_i64 = tile_height as i64;
+    let tile_width_i64 = tile_width as i64;
+    let first_tile_y = origin_y.div_euclid(tile_height_i64);
+    let final_tile_y = (origin_y + height_i64 - 1).div_euclid(tile_height_i64);
+    let first_tile_x = origin_x.div_euclid(tile_width_i64);
+    let final_tile_x = (origin_x + width_i64 - 1).div_euclid(tile_width_i64);
     for tile_y in first_tile_y..=final_tile_y {
-        let tile_origin_y = tile_y * tile_height as i32;
+        let tile_origin_y = tile_y * tile_height_i64;
         for tile_x in first_tile_x..=final_tile_x {
-            let tile_origin_x = tile_x * tile_width as i32;
+            let tile_origin_x = tile_x * tile_width_i64;
             let mut tile = vec![0.0; channels * tile_height * tile_width];
             PortableNormal::new(spatial_seed(base_seed, tile_y, tile_x)).fill(&mut tile);
-            let overlap_y0 = origin[0].max(tile_origin_y);
-            let overlap_y1 = (origin[0] + height as i32).min(tile_origin_y + tile_height as i32);
-            let overlap_x0 = origin[1].max(tile_origin_x);
-            let overlap_x1 = (origin[1] + width as i32).min(tile_origin_x + tile_width as i32);
+            let overlap_y0 = origin_y.max(tile_origin_y);
+            let overlap_y1 = (origin_y + height_i64).min(tile_origin_y + tile_height_i64);
+            let overlap_x0 = origin_x.max(tile_origin_x);
+            let overlap_x1 = (origin_x + width_i64).min(tile_origin_x + tile_width_i64);
             for channel in 0..channels {
                 for world_y in overlap_y0..overlap_y1 {
                     for world_x in overlap_x0..overlap_x1 {
-                        let output_y = (world_y - origin[0]) as usize;
-                        let output_x = (world_x - origin[1]) as usize;
+                        let output_y = (world_y - origin_y) as usize;
+                        let output_x = (world_x - origin_x) as usize;
                         let tile_local_y = (world_y - tile_origin_y) as usize;
                         let tile_local_x = (world_x - tile_origin_x) as usize;
                         output[channel * height * width + output_y * width + output_x] = tile
@@ -129,6 +142,15 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn patches_can_reach_the_i32_coordinate_boundaries() {
+        for origin in [[i32::MIN, i32::MIN], [i32::MAX - 7, i32::MAX - 7]] {
+            let patch = gaussian_patch(7, origin, [8, 8], 1, [8, 8]);
+            assert_eq!(patch.len(), 64);
+            assert!(patch.iter().all(|value| value.is_finite()));
         }
     }
 }

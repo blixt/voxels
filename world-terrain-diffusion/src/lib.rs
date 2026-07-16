@@ -36,6 +36,10 @@ pub const BASE_CONFIG_SHA256: &str =
     "2400da3c7bed5dbc331a0cfabd3f4a5a3c5c977d4c4b3fb1037f4e285d320598";
 pub const DECODER_CONFIG_SHA256: &str =
     "fc69e7c75bcc8b92d687306cb38cca2868a6034cdf73ddf7cfbf7078af6ac55e";
+pub const MIN_LATENT_WINDOW_COORDINATE: i32 = i32::MIN / 256;
+pub const MAX_LATENT_WINDOW_COORDINATE: i32 = (i32::MAX - 511) / 256;
+pub const MIN_QUALITY_HISTOGRAM_LOGIT: f32 = -10.0;
+pub const MAX_QUALITY_HISTOGRAM_LOGIT: f32 = 10.0;
 
 pub const MODEL_FILES: [&str; 7] = [
     "config.json",
@@ -86,12 +90,8 @@ impl TerrainDiffusionConfig {
     }
 
     pub fn source_identity(&self) -> Result<WorldSourceIdentity, TerrainDiffusionError> {
+        self.validate()?;
         let mut configuration = Sha256::new();
-        if !(1..=8).contains(&self.horizontal_scale) {
-            return Err(TerrainDiffusionError::InvalidHorizontalScale(
-                self.horizontal_scale,
-            ));
-        }
         configuration.update(b"voxels-terrain-diffusion-configuration-v8\0");
         configuration.update(self.seed.to_le_bytes());
         configuration.update([self.precision as u8]);
@@ -142,6 +142,14 @@ impl TerrainDiffusionConfig {
             device_requirement: SourceDeviceRequirement::AppleMetal,
         })
     }
+
+    pub fn validate(&self) -> Result<(), TerrainDiffusionError> {
+        validate_terrain_generation_parameters(
+            self.horizontal_scale,
+            self.latent_window,
+            self.quality_histogram,
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -151,6 +159,8 @@ pub enum TerrainDiffusionError {
     MetalUnavailable(String),
     MissingModelFile(PathBuf),
     InvalidHorizontalScale(u32),
+    InvalidLatentWindow([i32; 2]),
+    InvalidQualityHistogram,
     InvalidModelFile {
         path: PathBuf,
         reason: String,
@@ -179,6 +189,14 @@ impl fmt::Display for TerrainDiffusionError {
             Self::InvalidHorizontalScale(scale) => {
                 write!(formatter, "horizontal scale {scale} is outside 1..=8")
             }
+            Self::InvalidLatentWindow(window) => write!(
+                formatter,
+                "latent window {window:?} has a coordinate outside {MIN_LATENT_WINDOW_COORDINATE}..={MAX_LATENT_WINDOW_COORDINATE}"
+            ),
+            Self::InvalidQualityHistogram => write!(
+                formatter,
+                "quality histogram values must be finite and in {MIN_QUALITY_HISTOGRAM_LOGIT}..={MAX_QUALITY_HISTOGRAM_LOGIT}"
+            ),
             Self::InvalidModelFile { path, reason } => {
                 write!(formatter, "invalid model file {}: {reason}", path.display())
             }
@@ -200,6 +218,30 @@ impl fmt::Display for TerrainDiffusionError {
 }
 
 impl std::error::Error for TerrainDiffusionError {}
+
+pub fn validate_terrain_generation_parameters(
+    horizontal_scale: u32,
+    latent_window: [i32; 2],
+    quality_histogram: [f32; 5],
+) -> Result<(), TerrainDiffusionError> {
+    if !(1..=8).contains(&horizontal_scale) {
+        return Err(TerrainDiffusionError::InvalidHorizontalScale(
+            horizontal_scale,
+        ));
+    }
+    if latent_window.iter().any(|coordinate| {
+        !(MIN_LATENT_WINDOW_COORDINATE..=MAX_LATENT_WINDOW_COORDINATE).contains(coordinate)
+    }) {
+        return Err(TerrainDiffusionError::InvalidLatentWindow(latent_window));
+    }
+    if quality_histogram.iter().any(|value| {
+        !value.is_finite()
+            || !(MIN_QUALITY_HISTOGRAM_LOGIT..=MAX_QUALITY_HISTOGRAM_LOGIT).contains(value)
+    }) {
+        return Err(TerrainDiffusionError::InvalidQualityHistogram);
+    }
+    Ok(())
+}
 
 pub fn validate_model_root(root: &Path) -> Result<(), TerrainDiffusionError> {
     for relative in MODEL_FILES {
@@ -392,6 +434,33 @@ mod tests {
             scaled.source_identity(),
             Err(TerrainDiffusionError::InvalidHorizontalScale(0))
         );
+    }
+
+    #[test]
+    fn generation_parameters_reject_invalid_windows_and_quality_logits() {
+        for coordinate in [MIN_LATENT_WINDOW_COORDINATE, MAX_LATENT_WINDOW_COORDINATE] {
+            validate_terrain_generation_parameters(1, [coordinate; 2], [0.0; 5])
+                .expect("boundary coordinate remains representable");
+        }
+
+        for coordinate in [
+            MIN_LATENT_WINDOW_COORDINATE - 1,
+            MAX_LATENT_WINDOW_COORDINATE + 1,
+        ] {
+            assert_eq!(
+                validate_terrain_generation_parameters(1, [coordinate, 0], [0.0; 5]),
+                Err(TerrainDiffusionError::InvalidLatentWindow([coordinate, 0]))
+            );
+        }
+
+        for value in [f32::NAN, MIN_QUALITY_HISTOGRAM_LOGIT - 0.01] {
+            let mut histogram = [0.0; 5];
+            histogram[2] = value;
+            assert_eq!(
+                validate_terrain_generation_parameters(1, [0; 2], histogram),
+                Err(TerrainDiffusionError::InvalidQualityHistogram)
+            );
+        }
     }
 
     #[test]

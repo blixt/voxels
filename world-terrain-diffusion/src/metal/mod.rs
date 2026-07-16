@@ -5,7 +5,10 @@ mod synthetic_map;
 
 #[cfg(feature = "download")]
 use crate::{MODEL_FILES, MODEL_REPOSITORY, MODEL_REVISION};
-use crate::{TerrainDiffusionConfig, TerrainDiffusionError, TerrainPrecision, validate_model_root};
+use crate::{
+    TerrainDiffusionConfig, TerrainDiffusionError, TerrainPrecision, validate_model_root,
+    validate_terrain_generation_parameters,
+};
 use candle_core::{DType, Device, Tensor};
 use model::{EdmUnet, EdmUnetConfig};
 use rng::gaussian_patch;
@@ -166,6 +169,7 @@ impl MetalTerrainDiffusion {
         include_base: bool,
         include_decoder: bool,
     ) -> Result<Self, TerrainDiffusionError> {
+        config.validate()?;
         if !config.require_metal {
             return Err(TerrainDiffusionError::MetalUnavailable(
                 "CPU fallback is forbidden for this provider".to_owned(),
@@ -611,8 +615,8 @@ impl MetalTerrainDiffusion {
         debug_assert_eq!(latent_edge, LATENT_TILE_EDGE);
         let [patch_z, patch_x] = [0, 0];
         let detail_origin = [
-            latent.origin[0].saturating_mul(LATENT_COMPRESSION as i32),
-            latent.origin[1].saturating_mul(LATENT_COMPRESSION as i32),
+            latent.origin[0] * LATENT_COMPRESSION as i32,
+            latent.origin[1] * LATENT_COMPRESSION as i32,
         ];
         let detail = self.decode_detail_tile(detail_origin, detail_edge, &latent.values)?;
         Ok(FullDetailTile {
@@ -628,16 +632,18 @@ impl MetalTerrainDiffusion {
         &self,
         latent_window: [i32; 2],
     ) -> Result<(CoarseTile, LatentTile), TerrainDiffusionError> {
+        validate_terrain_generation_parameters(
+            self.config.horizontal_scale,
+            latent_window,
+            self.config.quality_histogram,
+        )?;
         // Upstream conditions latent window (i,j) on coarse [i-1..i+3, j-1..j+3]. Place that
         // exact 4x4 context at the center of our one finite coarse inference window instead of
         // searching the result for whichever patch happens to look most dramatic.
-        let coarse_context_origin = [
-            latent_window[0].saturating_sub(1),
-            latent_window[1].saturating_sub(1),
-        ];
+        let coarse_context_origin = [latent_window[0] - 1, latent_window[1] - 1];
         let coarse_origin = [
-            coarse_context_origin[0].saturating_sub(COARSE_CONTEXT_MARGIN),
-            coarse_context_origin[1].saturating_sub(COARSE_CONTEXT_MARGIN),
+            coarse_context_origin[0] - COARSE_CONTEXT_MARGIN,
+            coarse_context_origin[1] - COARSE_CONTEXT_MARGIN,
         ];
         let conditioning = synthetic_coarse_conditioning(
             self.config.seed,
@@ -658,8 +664,8 @@ impl MetalTerrainDiffusion {
             }
         }
         let latent_origin = [
-            latent_window[0].saturating_mul(LATENT_TILE_STRIDE),
-            latent_window[1].saturating_mul(LATENT_TILE_STRIDE),
+            latent_window[0] * LATENT_TILE_STRIDE,
+            latent_window[1] * LATENT_TILE_STRIDE,
         ];
         let mut latent = self.generate_latent_tile(latent_origin, &coarse_patch)?;
         latent.coarse_patch_origin = [patch_z, patch_x];
