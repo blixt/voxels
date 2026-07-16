@@ -779,7 +779,7 @@ impl ProductCache {
     fn get(&mut self, key: &ProductKey) -> Option<Arc<EncodedProduct>> {
         let value = Arc::clone(self.entries.get(key)?);
         self.lru.retain(|candidate| candidate != key);
-        self.lru.push_back(key.clone());
+        self.lru.push_back(*key);
         Some(value)
     }
 
@@ -801,7 +801,7 @@ impl ProductCache {
             }
         }
         self.retained_bytes = self.retained_bytes.saturating_add(encoded_len);
-        self.lru.push_back(key.clone());
+        self.lru.push_back(key);
         self.entries.insert(key, product);
     }
 }
@@ -828,10 +828,9 @@ impl PendingGenerationBatch {
     }
 
     fn fill(&mut self, item_index: usize, result: Result<Arc<EncodedProduct>, String>) -> bool {
-        let slot = self
-            .items
-            .get_mut(item_index)
-            .expect("product waiter index belongs to its pending batch");
+        let Some(slot) = self.items.get_mut(item_index) else {
+            return false;
+        };
         if slot.is_none() {
             *slot = Some(result);
             self.remaining -= 1;
@@ -1435,9 +1434,7 @@ async fn run_generation_dispatcher(
                 let priority = job.request.priority();
                 let session_semaphore = Arc::clone(&job.tracked.session.generation_permits);
                 let batch_id = next_batch_id;
-                next_batch_id = next_batch_id
-                    .checked_add(1)
-                    .expect("generation batch id exhausted");
+                next_batch_id = next_batch_id.wrapping_add(1).max(1);
                 let mut batch = PendingGenerationBatch::new(job, product_keys.len());
                 let mut miss_indices = Vec::new();
                 let mut miss_keys = Vec::new();
@@ -1628,11 +1625,17 @@ async fn assemble_and_deliver_generation_batch(
         return;
     }
     let request = batch.job.request.clone();
-    let items = batch
-        .items
-        .into_iter()
-        .map(|item| item.expect("completed generation batch has every product"))
-        .collect::<Vec<_>>();
+    let Some(items) = batch.items.into_iter().collect::<Option<Vec<_>>>() else {
+        drop(global_permit);
+        drop(session_permit);
+        deliver_generation_job(
+            batch.job,
+            Err("completed generation batch is missing a product".to_owned()),
+            max_frame_bytes,
+        )
+        .await;
+        return;
+    };
     let response = tokio::task::spawn_blocking(move || {
         let items = items.into_iter().collect::<Result<Vec<_>, _>>()?;
         assemble_generation_response(&request, source_identity_hash, &items)
@@ -2223,16 +2226,17 @@ mod tests {
             vec![b, c]
         );
         assert_eq!(batch_calls.load(Ordering::Relaxed), 2);
-        let counts = product_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for coord in [a, b, c] {
-            assert_eq!(
-                counts.get(&WorldProductRequest::ChunkWithHalo(coord)),
-                Some(&1)
-            );
+        {
+            let counts = product_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for coord in [a, b, c] {
+                assert_eq!(
+                    counts.get(&WorldProductRequest::ChunkWithHalo(coord)),
+                    Some(&1)
+                );
+            }
         }
-        drop(counts);
 
         first
             .send(ClientMessage::Binary(
@@ -2295,16 +2299,17 @@ mod tests {
             vec![surface_b, surface_c]
         );
         assert_eq!(batch_calls.load(Ordering::Relaxed), 4);
-        let counts = product_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for coord in [surface_a, surface_b, surface_c] {
-            assert_eq!(
-                counts.get(&WorldProductRequest::SurfaceTile(coord)),
-                Some(&1)
-            );
+        {
+            let counts = product_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for coord in [surface_a, surface_b, surface_c] {
+                assert_eq!(
+                    counts.get(&WorldProductRequest::SurfaceTile(coord)),
+                    Some(&1)
+                );
+            }
         }
-        drop(counts);
 
         first
             .send(ClientMessage::Binary(
