@@ -7,6 +7,7 @@ use voxels_core::{PLAYER_EYE_HEIGHT_METRES, RemoteAvatarPose};
 const PARTS_PER_AVATAR: usize = 13;
 const MAX_AVATARS: usize = 512;
 const MAX_PARTS: usize = PARTS_PER_AVATAR * MAX_AVATARS;
+const AVATAR_PERCEPTUAL_ROUGHNESS: f32 = 0.72;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -55,7 +56,7 @@ impl AvatarGpu {
                 bind_group_layouts: &[Some(shadow_layout)],
                 immediate_size: 0,
             });
-        let shader = crate::shader::frame_shader(
+        let shader = crate::shader::frame_pbr_shader(
             device,
             "articulated avatar shader",
             include_str!("shaders/avatar.wgsl"),
@@ -372,7 +373,7 @@ fn part(center: Vec3, rotation: Quat, half: Vec3, color: Vec3) -> GpuAvatarPart 
         center_half_x: [center.x, center.y, center.z, half.x],
         rotation: rotation.to_array(),
         half_yz: [half.y, half.z, 0.0, 0.0],
-        color: [color.x, color.y, color.z, 0.72],
+        color: [color.x, color.y, color.z, AVATAR_PERCEPTUAL_ROUGHNESS],
     }
 }
 

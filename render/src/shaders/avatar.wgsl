@@ -60,6 +60,13 @@ fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
   return select(high, low, srgb <= vec3<f32>(0.04045));
 }
 
+fn environment_radiance(direction: vec3<f32>) -> vec3<f32> {
+  let sky_height = pow(clamp(direction.y * 0.5 + 0.5, 0.0, 1.0), 0.58);
+  var radiance = mix(frame.ground_atmosphere.rgb, frame.sky_zenith.rgb, sky_height);
+  radiance = mix(radiance, frame.sky_horizon.rgb, exp(-abs(direction.y) * 5.5) * 0.46);
+  return radiance;
+}
+
 fn cascade_shadow(world: vec3<f32>, normal: vec3<f32>, cascade: u32) -> f32 {
   let normal_offset = normal * (frame.viewport_voxel.z * 0.22 + frame.shadow_texel_sizes[cascade] * 0.6);
   let clip = frame.shadow_view_projection[cascade] * vec4<f32>(world + normal_offset, 1.0);
@@ -115,20 +122,27 @@ fn sun_visibility(world: vec3<f32>, normal: vec3<f32>) -> f32 {
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let albedo = srgb_to_linear(input.color.rgb);
   let sun = normalize(frame.sun_direction.xyz);
-  let diffuse = max(dot(input.normal, sun), 0.0);
   let shadow = sun_visibility(input.world, input.normal);
   let sky_visibility = input.normal.y * 0.5 + 0.5;
   let interior_ambient = mix(1.0, 0.06, frame.interior.x);
   let ambient = mix(frame.ground_atmosphere.rgb, frame.sky_horizon.rgb * 0.52, sky_visibility)
     * interior_ambient * 0.92;
-  let direct = frame.sun_radiance.rgb * diffuse * mix(0.03, 1.0, shadow)
-    * mix(1.0, 0.10, frame.interior.x) * 0.18;
   let view_direction = normalize(frame.camera_time.xyz - input.world);
-  let half_direction = normalize(sun + view_direction);
-  let specular = frame.sun_radiance.rgb
-    * pow(max(dot(input.normal, half_direction), 0.0), 18.0)
-    * input.color.a * mix(0.04, 1.0, shadow) * 0.055;
-  var color = albedo * (ambient + direct) + specular;
+  let roughness = clamp(input.color.a, MIN_PERCEPTUAL_ROUGHNESS, 1.0);
+  let no_v = max(dot(input.normal, view_direction), 0.0001);
+  let ambient_fresnel = fresnel_schlick_roughness(no_v, DIELECTRIC_F0, roughness);
+  let reflection_direction = reflect(-view_direction, input.normal);
+  let reflection_radiance = environment_radiance(
+    mix(reflection_direction, input.normal, roughness * roughness),
+  );
+  let ambient_diffuse = albedo * (vec3<f32>(1.0) - ambient_fresnel) * ambient;
+  let ambient_specular = reflection_radiance * ambient_fresnel * interior_ambient;
+  let direct = frame.sun_radiance.rgb
+    * evaluate_direct_dielectric(albedo, roughness, input.normal, view_direction, sun)
+    * shadow
+    * mix(1.0, 0.10, frame.interior.x)
+    * 0.60;
+  var color = ambient_diffuse + ambient_specular + direct;
   let camera_to_surface = input.world - frame.camera_time.xyz;
   let distance_to_camera = length(camera_to_surface);
   let fog_direction = camera_to_surface / max(distance_to_camera, 0.0001);

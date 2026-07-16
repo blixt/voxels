@@ -1456,7 +1456,7 @@ impl Renderer {
                 fragment_constants: &[],
             },
         );
-        let voxel_shader = crate::shader::frame_shader(
+        let voxel_shader = crate::shader::frame_pbr_shader(
             &device,
             "voxel shader",
             include_str!("shaders/voxels.wgsl"),

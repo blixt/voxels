@@ -1,15 +1,32 @@
 use std::borrow::Cow;
 
 const FRAME_SOURCE: &str = include_str!("shaders/frame.wgsl");
+const PBR_SOURCE: &str = include_str!("shaders/pbr.wgsl");
 
 pub(crate) fn frame_shader(
     device: &wgpu::Device,
     label: &'static str,
     source: &'static str,
 ) -> wgpu::ShaderModule {
+    shader_from_sources(device, label, &[FRAME_SOURCE, source])
+}
+
+pub(crate) fn frame_pbr_shader(
+    device: &wgpu::Device,
+    label: &'static str,
+    source: &'static str,
+) -> wgpu::ShaderModule {
+    shader_from_sources(device, label, &[FRAME_SOURCE, PBR_SOURCE, source])
+}
+
+fn shader_from_sources(
+    device: &wgpu::Device,
+    label: &'static str,
+    sources: &[&str],
+) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
-        source: wgpu::ShaderSource::Wgsl(Cow::Owned(format!("{FRAME_SOURCE}\n{source}"))),
+        source: wgpu::ShaderSource::Wgsl(Cow::Owned(sources.join("\n"))),
     })
 }
 
@@ -54,7 +71,6 @@ mod tests {
 
     #[test]
     fn voxel_shader_uses_one_energy_conserving_microfacet_model() {
-        let source = include_str!("shaders/voxels.wgsl");
         for required in [
             "fn fresnel_schlick(",
             "fn distribution_ggx(",
@@ -62,10 +78,15 @@ mod tests {
             "fn evaluate_direct_dielectric(",
             "fn specular_ambient_visibility(",
         ] {
-            assert!(source.contains(required), "missing {required}");
+            assert!(PBR_SOURCE.contains(required), "missing {required}");
         }
-        assert!(!source.contains("specular_power"));
-        assert_eq!(source.matches("fn evaluate_direct_dielectric(").count(), 1);
+        assert!(!PBR_SOURCE.contains("specular_power"));
+        assert_eq!(
+            PBR_SOURCE.matches("fn evaluate_direct_dielectric(").count(),
+            1
+        );
+        assert!(include_str!("shaders/voxels.wgsl").contains("evaluate_direct_dielectric("));
+        assert!(include_str!("shaders/avatar.wgsl").contains("evaluate_direct_dielectric("));
     }
 
     #[test]
