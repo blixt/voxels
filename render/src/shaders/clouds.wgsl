@@ -53,7 +53,11 @@ fn cloud_height_profile(world_y: f32) -> f32 {
   return smoothstep(0.0, 0.11, height) * (1.0 - smoothstep(top_fade_start, 1.0, height));
 }
 
-fn cloud_density_world(world: vec3<f32>) -> f32 {
+fn cloud_noise_lod(scale: f32, filter_width_metres: f32) -> f32 {
+  return clamp(log2(max(filter_width_metres * scale * 64.0, 1.0)), 0.0, 6.0);
+}
+
+fn cloud_density_world(world: vec3<f32>, filter_width_metres: f32) -> f32 {
   let profile = cloud_height_profile(world.y);
   if profile <= 0.0 {
     return 0.0;
@@ -77,8 +81,10 @@ fn cloud_density_world(world: vec3<f32>) -> f32 {
   let advected = vec3<f32>(world.x - frame.environment_time.y, world.y, world.z - frame.environment_time.z);
   let base_uvw = fract(advected * clouds.shaping.x + seed);
   let detail_uvw = fract(advected.zxy * clouds.shaping.y + seed.yzx + vec3<f32>(0.37, 0.11, 0.73));
-  let shape = textureSampleLevel(cloud_noise, cloud_noise_sampler, base_uvw, 0.0).r;
-  let erosion = textureSampleLevel(cloud_noise, cloud_noise_sampler, detail_uvw, 0.0).r;
+  let shape_lod = cloud_noise_lod(clouds.shaping.x, filter_width_metres);
+  let detail_lod = cloud_noise_lod(clouds.shaping.y, filter_width_metres);
+  let shape = textureSampleLevel(cloud_noise, cloud_noise_sampler, base_uvw, shape_lod).r;
+  let erosion = textureSampleLevel(cloud_noise, cloud_noise_sampler, detail_uvw, detail_lod).r;
   let threshold = mix(0.53, 0.39, clouds.shaping.w);
   let billow = shape * 0.72 + envelope * 0.48 - erosion * 0.16;
   let volume = smoothstep(threshold - 0.10, threshold + 0.12, billow);
@@ -91,17 +97,22 @@ fn henyey_greenstein(cos_angle: f32, eccentricity: f32) -> f32 {
     / max(4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * eccentricity * cos_angle, 1.5), 0.001);
 }
 
-fn light_transmittance(world: vec3<f32>, light_direction: vec3<f32>) -> f32 {
+fn light_transmittance(
+  world: vec3<f32>,
+  light_direction: vec3<f32>,
+  view_filter_width_metres: f32,
+) -> f32 {
   let vertical_distance = max(clouds.layer.y - world.y, 0.0);
   let distance_to_top = vertical_distance / max(abs(light_direction.y), 0.14);
   let step_length = distance_to_top / f32(max(clouds.quality.y, 1u));
   var optical_depth = 0.0;
+  let filter_width_metres = max(view_filter_width_metres, step_length * 0.35);
   for (var index = 0u; index < 4u; index += 1u) {
     if index >= clouds.quality.y {
       break;
     }
     let sample_world = world + light_direction * step_length * (f32(index) + 0.65);
-    optical_depth += cloud_density_world(sample_world) * step_length;
+    optical_depth += cloud_density_world(sample_world, filter_width_metres) * step_length;
   }
   let direct = exp(-optical_depth * clouds.layer.w);
   return max(direct, 0.70 * exp(-optical_depth * clouds.layer.w * 0.25));
@@ -126,10 +137,18 @@ fn fs_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   }
   let trace_length = trace_end - trace_start;
   let step_length = trace_length / f32(max(clouds.quality.x, 1u));
-  let jitter = atmosphere_hash21(
-    floor(position.xy) + vec2<f32>(frame.environment_time.w * 17.0, frame.environment_time.w * 31.0),
+  let entry_world = camera + ray * trace_start;
+  let stable_sample_phase = mix(
+    0.15,
+    0.85,
+    atmosphere_value_noise(
+      entry_world.xz * 0.12
+        + vec2<f32>(
+          fract(frame.environment_time.w * 0.173) * 4096.0,
+          fract(frame.environment_time.w * 0.197) * 4096.0,
+        ),
+    ),
   );
-  trace_start += jitter * step_length;
   let light_direction = normalize(frame.key_light_direction.xyz);
   let cos_angle = dot(ray, light_direction);
   let phase = henyey_greenstein(cos_angle, 0.62) * 0.82
@@ -144,16 +163,18 @@ fn fs_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     if index >= clouds.quality.x || transmittance < 0.02 {
       break;
     }
-    let distance = trace_start + (f32(index) + 0.5) * step_length;
+    let distance = trace_start + (f32(index) + stable_sample_phase) * step_length;
     if distance >= trace_end {
       break;
     }
     let world = camera + ray * distance;
-    let density = cloud_density_world(world);
+    let pixel_footprint_metres = distance * 1.349017 / max(clouds.target_size.y, 1.0);
+    let filter_width_metres = max(pixel_footprint_metres, step_length * 0.35);
+    let density = cloud_density_world(world, filter_width_metres);
     if density <= 0.001 {
       continue;
     }
-    let light_visibility = light_transmittance(world, light_direction);
+    let light_visibility = light_transmittance(world, light_direction, filter_width_metres);
     let height = clamp((world.y - clouds.layer.x) / max(clouds.layer.y - clouds.layer.x, 1.0), 0.0, 1.0);
     let base_darkening = mix(0.46, 1.0, smoothstep(0.0, 0.56, height));
     let direct = frame.key_light_radiance.rgb * phase * light_visibility * base_darkening;

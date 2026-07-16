@@ -20,6 +20,7 @@ use crate::environment::{OutdoorEnvironment, WorldEnvironmentState};
 
 const CLOUD_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 const NOISE_EDGE: u32 = 64;
+const NOISE_MIP_COUNT: u32 = NOISE_EDGE.ilog2() + 1;
 const HARD_MAX_VIEW_STEPS: u32 = 24;
 const HARD_MAX_LIGHT_STEPS: u32 = 4;
 
@@ -91,6 +92,10 @@ pub(crate) struct VolumetricCloudGpu {
 }
 
 impl VolumetricCloudGpu {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU construction needs the device resources, target formats, extent, and config"
+    )]
     pub(crate) fn new(
         device: &Device,
         queue: &Queue,
@@ -127,7 +132,7 @@ impl VolumetricCloudGpu {
             address_mode_w: AddressMode::Repeat,
             mag_filter: FilterMode::Linear,
             min_filter: FilterMode::Linear,
-            mipmap_filter: MipmapFilterMode::Nearest,
+            mipmap_filter: MipmapFilterMode::Linear,
             ..Default::default()
         });
         write_noise(queue, &noise, 0);
@@ -135,7 +140,12 @@ impl VolumetricCloudGpu {
             label: Some("volumetric cloud uniform"),
             contents: bytemuck::bytes_of(&CloudUniform {
                 target_size: target_size(width, height),
-                layer: [550.0, 1_800.0, config.max_distance_metres, config.extinction],
+                layer: [
+                    550.0,
+                    1_800.0,
+                    config.max_distance_metres,
+                    config.extinction,
+                ],
                 quality: [
                     config.view_steps,
                     config.light_steps,
@@ -258,15 +268,16 @@ impl VolumetricCloudGpu {
                 self.config.extinction,
             ],
             quality: [
-                ((10.0 + (self.config.view_steps.saturating_sub(10)) as f32
-                    * environment.cloud_density)
-                    .round() as u32)
-                    .clamp(8, self.config.view_steps),
-                if environment.cloud_density > 0.54 {
-                    self.config.light_steps
-                } else {
-                    1
-                },
+                view_step_count(
+                    self.config.view_steps,
+                    environment.cloud_density,
+                    environment.storminess,
+                ),
+                light_step_count(
+                    self.config.light_steps,
+                    environment.cloud_density,
+                    environment.storminess,
+                ),
                 u32::from(self.config.enabled),
                 0,
             ],
@@ -352,7 +363,7 @@ impl VolumetricCloudGpu {
 
     pub(crate) const fn bytes(&self) -> u64 {
         self.width as u64 * self.height as u64 * 8
-            + (NOISE_EDGE as u64 * NOISE_EDGE as u64 * NOISE_EDGE as u64)
+            + noise_mip_bytes()
             + size_of::<CloudUniform>() as u64
     }
 
@@ -367,6 +378,26 @@ impl VolumetricCloudGpu {
 
 fn finite_or(value: f32, fallback: f32) -> f32 {
     if value.is_finite() { value } else { fallback }
+}
+
+fn view_step_count(configured_steps: u32, cloud_density: f32, storminess: f32) -> u32 {
+    let density_steps = ((10.0
+        + (configured_steps.saturating_sub(10)) as f32 * cloud_density.clamp(0.0, 1.0))
+    .round() as u32)
+        .clamp(8, configured_steps);
+    if storminess > 0.75 {
+        density_steps.min(configured_steps.saturating_sub(3).max(8))
+    } else {
+        density_steps
+    }
+}
+
+fn light_step_count(configured_steps: u32, cloud_density: f32, storminess: f32) -> u32 {
+    if cloud_density <= 0.54 || storminess > 0.75 {
+        1
+    } else {
+        configured_steps
+    }
 }
 
 fn scaled_extent(value: u32, scale: f32) -> u32 {
@@ -416,7 +447,7 @@ fn noise_texture(device: &Device) -> Texture {
             height: NOISE_EDGE,
             depth_or_array_layers: NOISE_EDGE,
         },
-        mip_level_count: 1,
+        mip_level_count: NOISE_MIP_COUNT,
         sample_count: 1,
         dimension: TextureDimension::D3,
         format: TextureFormat::R8Unorm,
@@ -447,26 +478,90 @@ fn noise_bytes(seed: u64) -> Vec<u8> {
     bytes
 }
 
-fn write_noise(queue: &Queue, texture: &Texture, seed: u64) {
-    queue.write_texture(
-        TexelCopyTextureInfo {
-            texture,
-            mip_level: 0,
-            origin: Origin3d::ZERO,
-            aspect: TextureAspect::All,
-        },
-        &noise_bytes(seed),
-        TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(NOISE_EDGE),
-            rows_per_image: Some(NOISE_EDGE),
-        },
-        Extent3d {
-            width: NOISE_EDGE,
-            height: NOISE_EDGE,
-            depth_or_array_layers: NOISE_EDGE,
-        },
+fn downsample_noise(source: &[u8], source_edge: u32) -> Vec<u8> {
+    debug_assert!(source_edge > 1 && source_edge.is_power_of_two());
+    debug_assert_eq!(
+        source.len(),
+        (source_edge * source_edge * source_edge) as usize
     );
+    let target_edge = source_edge / 2;
+    let mut target = vec![0; (target_edge * target_edge * target_edge) as usize];
+    for z in 0..target_edge {
+        for y in 0..target_edge {
+            for x in 0..target_edge {
+                let mut sum = 0u32;
+                for dz in 0..2 {
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let source_x = x * 2 + dx;
+                            let source_y = y * 2 + dy;
+                            let source_z = z * 2 + dz;
+                            sum += u32::from(
+                                source[(source_x
+                                    + source_edge * (source_y + source_edge * source_z))
+                                    as usize],
+                            );
+                        }
+                    }
+                }
+                target[(x + target_edge * (y + target_edge * z)) as usize] = ((sum + 4) / 8) as u8;
+            }
+        }
+    }
+    target
+}
+
+fn noise_mips(seed: u64) -> Vec<(u32, Vec<u8>)> {
+    let mut edge = NOISE_EDGE;
+    let mut bytes = noise_bytes(seed);
+    let mut mips = Vec::with_capacity(NOISE_MIP_COUNT as usize);
+    loop {
+        if edge == 1 {
+            mips.push((edge, bytes));
+            break;
+        }
+        let next = downsample_noise(&bytes, edge);
+        mips.push((edge, bytes));
+        bytes = next;
+        edge /= 2;
+    }
+    mips
+}
+
+const fn noise_mip_bytes() -> u64 {
+    let mut edge = NOISE_EDGE as u64;
+    let mut bytes = 0;
+    loop {
+        bytes += edge * edge * edge;
+        if edge == 1 {
+            return bytes;
+        }
+        edge /= 2;
+    }
+}
+
+fn write_noise(queue: &Queue, texture: &Texture, seed: u64) {
+    for (mip_level, (edge, bytes)) in noise_mips(seed).into_iter().enumerate() {
+        queue.write_texture(
+            TexelCopyTextureInfo {
+                texture,
+                mip_level: mip_level as u32,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            &bytes,
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(edge),
+                rows_per_image: Some(edge),
+            },
+            Extent3d {
+                width: edge,
+                height: edge,
+                depth_or_array_layers: edge,
+            },
+        );
+    }
 }
 
 fn trace_layout(device: &Device) -> BindGroupLayout {
@@ -576,7 +671,10 @@ fn composite_bind_group(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the helper mirrors all render-pipeline state that differs between cloud passes"
+)]
 fn screen_pipeline(
     device: &Device,
     label: &str,
@@ -638,6 +736,25 @@ mod tests {
     }
 
     #[test]
+    fn noise_mips_cover_every_level_and_preserve_the_volume_mean() {
+        let mips = noise_mips(19);
+        assert_eq!(
+            mips.iter().map(|(edge, _)| *edge).collect::<Vec<_>>(),
+            vec![64, 32, 16, 8, 4, 2, 1]
+        );
+        assert_eq!(
+            mips.iter()
+                .map(|(_, bytes)| bytes.len() as u64)
+                .sum::<u64>(),
+            noise_mip_bytes()
+        );
+        let base_mean = mips[0].1.iter().map(|value| u64::from(*value)).sum::<u64>() as f64
+            / mips[0].1.len() as f64;
+        let final_value = f64::from(mips.last().expect("final noise mip exists").1[0]);
+        assert!((final_value - base_mean).abs() <= 1.0);
+    }
+
+    #[test]
     fn invalid_quality_falls_back_or_clamps_to_shader_limits() {
         let config = VolumetricCloudConfig {
             resolution_scale: f32::NAN,
@@ -653,5 +770,19 @@ mod tests {
         assert_eq!(config.light_steps, 1);
         assert_eq!(config.max_distance_metres, 14_000.0);
         assert_eq!(config.extinction, 0.0001);
+    }
+
+    #[test]
+    fn opaque_storms_use_three_fewer_view_steps() {
+        assert_eq!(view_step_count(14, 0.98, 0.0), 14);
+        assert_eq!(view_step_count(14, 0.98, 1.0), 11);
+        assert_eq!(view_step_count(8, 1.0, 1.0), 8);
+    }
+
+    #[test]
+    fn opaque_storms_skip_redundant_sun_shadow_probe() {
+        assert_eq!(light_step_count(2, 0.76, 0.0), 2);
+        assert_eq!(light_step_count(2, 0.98, 1.0), 1);
+        assert_eq!(light_step_count(2, 0.28, 0.0), 1);
     }
 }

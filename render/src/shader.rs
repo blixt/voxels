@@ -111,10 +111,24 @@ mod tests {
         }
         assert!(clouds.contains("macro_threshold - 0.08, macro_threshold + 0.08"));
         assert!(voxels.contains("threshold - 0.08, threshold + 0.08"));
-        assert!(clouds.contains("fn cloud_density_world(world: vec3<f32>)"));
+        assert!(
+            clouds.contains("fn cloud_density_world(world: vec3<f32>, filter_width_metres: f32)")
+        );
         assert!(clouds.contains("textureSampleLevel(cloud_noise"));
+        assert!(clouds.contains("cloud_noise_lod("));
+        assert!(!clouds.contains("trace_start += jitter"));
         assert!(clouds.contains("transmittance < 0.02"));
         assert!(!include_str!("shaders/sky.wgsl").contains("cloud_height = 480.0"));
+    }
+
+    #[test]
+    fn precipitation_is_world_space_depth_tested_geometry_that_falls_downward() {
+        let weather = include_str!("shaders/weather.wgsl");
+        assert!(weather.contains("@builtin(instance_index) instance_index: u32"));
+        assert!(weather.contains("frame.camera_time.y + 17.0 - age * PRECIPITATION_HEIGHT_METRES"));
+        assert!(weather.contains("frame.view_projection * vec4<f32>(world, 1.0)"));
+        assert!(!weather.contains("position.xy / frame.viewport_voxel.xy"));
+        assert!(!weather.contains("fn rain_layer("));
     }
 
     #[test]
