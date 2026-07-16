@@ -58,8 +58,11 @@ fn material_detail_sampler_descriptor() -> SamplerDescriptor<'static> {
         // Preserve the authored texel blocks. Linear magnification was smearing the procedural
         // atlas across 10 cm voxel faces and fighting the deliberately pixelated world style.
         mag_filter: FilterMode::Nearest,
-        min_filter: FilterMode::Nearest,
-        mipmap_filter: MipmapFilterMode::Nearest,
+        // Once a texel is smaller than a screen pixel, blend both within and between mip levels.
+        // This keeps the close pixel blocks crisp while preventing distant roughness and normals
+        // from stepping or shimmering as the camera moves.
+        min_filter: FilterMode::Linear,
+        mipmap_filter: MipmapFilterMode::Linear,
         anisotropy_clamp: 1,
         ..Default::default()
     }
@@ -294,20 +297,20 @@ fn encode_layer(layer: &LayerTexels, destination: &mut MipBytes) {
 fn material_profile(material: Material) -> MaterialProfile {
     match material {
         Material::Air => profile([0.5, 0.0, 0.5], [0.65, 0.0, 0.65], 1.0, 0.0, 0.0),
-        Material::Grass => profile([0.18, 0.42, 0.12], [0.24, 0.45, 0.10], 0.88, 0.08, 2.0),
-        Material::Dirt => profile([0.36, 0.20, 0.095], [0.24, 0.12, 0.055], 0.94, 0.08, 3.2),
-        Material::Stone => profile([0.34, 0.38, 0.43], [0.22, 0.25, 0.30], 0.70, 0.16, 5.4),
-        Material::Sand => profile([0.72, 0.53, 0.25], [0.88, 0.69, 0.34], 0.90, 0.06, 2.8),
-        Material::Snow => profile([0.76, 0.86, 0.91], [0.92, 0.96, 1.0], 0.48, 0.18, 2.2),
-        Material::Clay => profile([0.56, 0.25, 0.15], [0.68, 0.31, 0.18], 0.84, 0.08, 3.0),
-        Material::Basalt => profile([0.12, 0.15, 0.20], [0.20, 0.22, 0.25], 0.76, 0.13, 6.2),
-        Material::Wood => profile([0.31, 0.15, 0.055], [0.49, 0.25, 0.085], 0.82, 0.09, 5.8),
-        Material::Leaves => profile([0.08, 0.30, 0.10], [0.18, 0.42, 0.12], 0.68, 0.16, 4.5),
-        Material::Moss => profile([0.12, 0.32, 0.14], [0.18, 0.39, 0.15], 0.92, 0.07, 2.2),
-        Material::Limestone => profile([0.58, 0.55, 0.44], [0.73, 0.68, 0.53], 0.62, 0.15, 4.6),
-        Material::RedSand => profile([0.62, 0.20, 0.075], [0.78, 0.30, 0.10], 0.88, 0.08, 3.4),
+        Material::Grass => profile([0.18, 0.42, 0.12], [0.24, 0.45, 0.10], 0.90, 0.06, 1.8),
+        Material::Dirt => profile([0.36, 0.20, 0.095], [0.24, 0.12, 0.055], 0.96, 0.05, 2.5),
+        Material::Stone => profile([0.34, 0.38, 0.43], [0.22, 0.25, 0.30], 0.82, 0.10, 3.4),
+        Material::Sand => profile([0.58, 0.43, 0.24], [0.72, 0.56, 0.31], 0.95, 0.04, 2.0),
+        Material::Snow => profile([0.76, 0.86, 0.91], [0.92, 0.96, 1.0], 0.82, 0.10, 1.6),
+        Material::Clay => profile([0.56, 0.25, 0.15], [0.68, 0.31, 0.18], 0.90, 0.06, 2.5),
+        Material::Basalt => profile([0.12, 0.15, 0.20], [0.20, 0.22, 0.25], 0.84, 0.09, 4.0),
+        Material::Wood => profile([0.31, 0.15, 0.055], [0.49, 0.25, 0.085], 0.84, 0.07, 4.0),
+        Material::Leaves => profile([0.08, 0.30, 0.10], [0.18, 0.42, 0.12], 0.84, 0.10, 2.8),
+        Material::Moss => profile([0.12, 0.32, 0.14], [0.18, 0.39, 0.15], 0.97, 0.04, 1.8),
+        Material::Limestone => profile([0.58, 0.55, 0.44], [0.73, 0.68, 0.53], 0.82, 0.10, 3.1),
+        Material::RedSand => profile([0.58, 0.19, 0.075], [0.70, 0.27, 0.10], 0.94, 0.05, 2.4),
         Material::Water => profile([0.02, 0.22, 0.30], [0.04, 0.34, 0.40], 0.12, 0.04, 1.0),
-        Material::GlowCrystal => profile([0.12, 0.58, 0.78], [0.48, 0.94, 1.0], 0.24, 0.10, 7.0),
+        Material::GlowCrystal => profile([0.12, 0.58, 0.78], [0.48, 0.94, 1.0], 0.30, 0.08, 5.0),
     }
 }
 
@@ -433,7 +436,7 @@ mod tests {
         assert_eq!(first.mips, second.mips);
         assert_eq!(first.mips.len(), MATERIAL_DETAIL_MIP_COUNT as usize);
         assert_eq!(first.byte_len(), 2_621_400);
-        assert_eq!(atlas_checksum(&first), 0x625f_9fc3_9061_46ef);
+        assert_eq!(atlas_checksum(&first), 0xbf4f_305f_4694_6b25);
     }
 
     #[test]
@@ -445,12 +448,40 @@ mod tests {
     }
 
     #[test]
-    fn material_detail_sampling_preserves_pixel_edges() {
+    fn material_detail_sampling_preserves_close_pixels_and_filters_distance() {
         let sampler = material_detail_sampler_descriptor();
         assert_eq!(sampler.mag_filter, FilterMode::Nearest);
-        assert_eq!(sampler.min_filter, FilterMode::Nearest);
-        assert_eq!(sampler.mipmap_filter, MipmapFilterMode::Nearest);
+        assert_eq!(sampler.min_filter, FilterMode::Linear);
+        assert_eq!(sampler.mipmap_filter, MipmapFilterMode::Linear);
         assert_eq!(sampler.anisotropy_clamp, 1);
+    }
+
+    #[test]
+    fn aggregate_terrain_profiles_are_rough_dielectrics() {
+        for material in [
+            Material::Grass,
+            Material::Dirt,
+            Material::Stone,
+            Material::Sand,
+            Material::Snow,
+            Material::Clay,
+            Material::Basalt,
+            Material::Wood,
+            Material::Leaves,
+            Material::Moss,
+            Material::Limestone,
+            Material::RedSand,
+        ] {
+            let profile = material_profile(material);
+            assert!(
+                profile.roughness >= 0.80,
+                "{material:?} is implausibly glossy at {}",
+                profile.roughness
+            );
+            assert!(profile.roughness + profile.roughness_variation * 0.5 <= 1.0);
+        }
+        assert!(material_profile(Material::Water).roughness < 0.20);
+        assert!(material_profile(Material::GlowCrystal).roughness < 0.40);
     }
 
     #[test]

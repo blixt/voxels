@@ -118,41 +118,10 @@ fn vs_main(
   return out;
 }
 
-fn material_color(material: u32) -> vec3<f32> {
-  switch material {
-    case 1u: { return vec3<f32>(0.18, 0.42, 0.12); }
-    case 2u: { return vec3<f32>(0.36, 0.20, 0.095); }
-    case 3u: { return vec3<f32>(0.34, 0.38, 0.43); }
-    case 4u: { return vec3<f32>(0.72, 0.53, 0.25); }
-    case 5u: { return vec3<f32>(0.76, 0.86, 0.91); }
-    case 6u: { return vec3<f32>(0.56, 0.25, 0.15); }
-    case 7u: { return vec3<f32>(0.12, 0.15, 0.20); }
-    case 8u: { return vec3<f32>(0.31, 0.15, 0.055); }
-    case 9u: { return vec3<f32>(0.08, 0.30, 0.10); }
-    case 10u: { return vec3<f32>(0.12, 0.32, 0.14); }
-    case 11u: { return vec3<f32>(0.58, 0.55, 0.44); }
-    case 12u: { return vec3<f32>(0.62, 0.20, 0.075); }
-    case 14u: { return vec3<f32>(0.12, 0.58, 0.78); }
-    default: { return vec3<f32>(1.0, 0.0, 1.0); }
-  }
-}
-
 fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
   let low = srgb / 12.92;
   let high = pow((srgb + 0.055) / 1.055, vec3<f32>(2.4));
   return select(high, low, srgb <= vec3<f32>(0.04045));
-}
-
-fn material_roughness(material: u32) -> f32 {
-  switch material {
-    case 3u: { return 0.68; }
-    case 5u: { return 0.42; }
-    case 7u: { return 0.74; }
-    case 9u: { return 0.64; }
-    case 11u: { return 0.58; }
-    case 14u: { return 0.22; }
-    default: { return 0.86; }
-  }
 }
 
 struct SurfaceBasis {
@@ -214,10 +183,18 @@ fn pixelated_material_uv(surface_metres: vec2<f32>, material_scale: f32) -> vec2
 }
 
 fn sample_surface_detail(world: vec3<f32>, geometric_normal: vec3<f32>, material: u32) -> SurfaceDetail {
+  let base_mip = i32(textureNumLevels(material_albedo) - 1u);
   var detail: SurfaceDetail;
-  detail.albedo = srgb_to_linear(material_color(material));
+  // The atlas is the sole render-side material definition. The flat debug mode reads its 1x1
+  // average instead of maintaining a second color/roughness table that can silently drift.
+  detail.albedo = textureLoad(material_albedo, vec2<i32>(0), i32(material), base_mip).rgb;
   detail.normal = geometric_normal;
-  detail.roughness = material_roughness(material);
+  detail.roughness = textureLoad(
+    material_surface,
+    vec2<i32>(0),
+    i32(material),
+    base_mip,
+  ).a;
   if MATERIAL_DETAIL != 0u {
     let basis = surface_basis(world, geometric_normal);
     let material_scale = material_detail_scale(material);
