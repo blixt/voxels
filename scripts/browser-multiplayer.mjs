@@ -21,7 +21,7 @@ import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "./vxwp-contract.mjs";
 import { worldServiceBuildCargoArgs, worldServiceCargoArgs } from "./world-service-command.ts";
 
 const RESULT_SCHEMA_VERSION = 4;
-const FIXTURE_VERSION = 5;
+const FIXTURE_VERSION = 6;
 const EXPECTED_PLAYERS = 6;
 const EXPECTED_REMOTE_PLAYERS = EXPECTED_PLAYERS - 1;
 const BUILDER_COUNT = EXPECTED_REMOTE_PLAYERS;
@@ -270,8 +270,9 @@ async function waitForRoster(player) {
     `${player.name} six-player roster`,
     (next) =>
       next[SNAPSHOT.remoteAvatars] === EXPECTED_REMOTE_PLAYERS &&
-      next[SNAPSHOT.avatarParts] === EXPECTED_REMOTE_PLAYERS * EXPECTED_PARTS_PER_AVATAR &&
-      next[SNAPSHOT.avatarDrawCalls] === EXPECTED_REMOTE_PLAYERS,
+      // Draw calls are view-dependent because the renderer culls complete off-screen avatars.
+      // Roster membership and retained body parts are the provider-neutral connection invariant.
+      next[SNAPSHOT.avatarParts] === EXPECTED_REMOTE_PLAYERS * EXPECTED_PARTS_PER_AVATAR,
     30_000,
   );
 }
@@ -319,6 +320,21 @@ async function stopChild(child) {
     sleep(2_000).then(() => false),
   ]);
   if (!exited && child.exitCode === null) child.kill("SIGKILL");
+}
+
+async function settleCleanup(label, operation, timeoutMs = 5_000) {
+  const result = await Promise.race([
+    operation.then(
+      () => ({ completed: true, error: null }),
+      (error) => ({ completed: true, error }),
+    ),
+    sleep(timeoutMs).then(() => ({ completed: false, error: null })),
+  ]);
+  if (!result.completed) {
+    process.stderr.write(`cleanup timed out after ${timeoutMs}ms: ${label}\n`);
+  } else if (result.error) {
+    process.stderr.write(`cleanup failed: ${label}: ${String(result.error)}\n`);
+  }
 }
 
 async function walkDistance(page, targetDistanceMetres) {
@@ -835,10 +851,16 @@ async function main() {
       );
     }
   } finally {
-    await Promise.allSettled(contexts.map((context) => context.close()));
-    await browser?.close();
-    await Promise.allSettled(links.map((link) => link.close()));
-    await previewServer?.close();
+    await Promise.all(
+      contexts.map((context, index) =>
+        settleCleanup(`browser context ${index + 1}`, context.close()),
+      ),
+    );
+    if (browser) await settleCleanup("browser", browser.close());
+    await Promise.all(
+      links.map((link, index) => settleCleanup(`shaped link ${index + 1}`, link.close())),
+    );
+    if (previewServer) await settleCleanup("preview server", previewServer.close());
     await stopChild(worldService);
     await rm(temporary, { recursive: true, force: true });
   }
