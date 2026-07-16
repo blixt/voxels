@@ -37,3 +37,27 @@ cargo(
     ...wasmCcEnv(),
   },
 );
+if (process.platform === "darwin") {
+  cargo(["test", "-p", "voxels-world-terrain-diffusion", "--all-features"]);
+  cargo([
+    "clippy",
+    "-p",
+    "voxels-world-terrain-diffusion",
+    "--all-features",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings",
+  ]);
+  cargo([
+    "clippy",
+    "-p",
+    "voxels-world-service",
+    "--features",
+    "terrain-metal",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings",
+  ]);
+}
