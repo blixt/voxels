@@ -992,3 +992,40 @@ counterproof, lower CPU timers and profiler samples, lower buffer memory, and un
 pacing. The next CPU cost is sorting/coalescing the selected draw items; eliminating it safely requires
 preserving arena order through allocation, replacement, edit, and eviction churn. Back-face culling is
 also deferred because the six procedural face orientations do not yet share consistent winding.
+
+## 2026-07-16: synchronized weather and volumetric clouds
+
+The weather clock is now authoritative world state alongside the day/night clock. Clients derive the
+same continuous weather fraction from the server snapshot and local monotonic time, so reconnecting or
+joining from another browser does not restart the weather. The renderer continuously maps that clock
+through clear, cloudy, overcast, rain, storm, and clearing conditions. Weather changes sky radiance,
+direct and ambient light, directional-shadow strength, exposure, atmospheric fog, precipitation, and
+lightning without changing terrain geometry or residency.
+
+Clouds are a half-resolution depth-aware volumetric pass rather than a sky-plane texture. A bounded
+ray march samples deterministic repeatable 3D density, performs a short light march, and composites
+Beer-Lambert transmittance in front of the sky but behind opaque terrain. Terrain sunlight samples the
+same seeded large-scale coverage function, so cloud shapes and their moving illumination agree. Rain
+and snow use a separate full-resolution depth-aware pass, allowing precipitation to disappear inside
+enclosed caves while keeping cloud cost independent of the number of visible terrain chunks.
+
+`vp run profile:weather` freezes the sun at noon, moves through six weather anchors, captures each
+state, and asserts frame pacing, GPU budgets, half-resolution cloud rendering, weather response, and
+identical geometry/residency. The run below used Chromium 150 at 1280x720 DPR 1 on the M3 Max with
+14 view samples, two light samples, screen-space AO, cascaded shadows when weather permits them, and
+the isolated procedural benchmark fixture:
+
+| Weather  | Frame median / p95 | Total GPU median / p95 | Cloud GPU median / p95 | Precipitation GPU median / p95 |
+| -------- | -----------------: | ---------------------: | ---------------------: | -----------------------------: |
+| Clear    |       8.3 / 9.2 ms |         3.51 / 4.78 ms |         0.62 / 0.99 ms |                 0.00 / 0.00 ms |
+| Cloudy   |       8.3 / 9.2 ms |         3.53 / 4.76 ms |         0.74 / 1.16 ms |                 0.00 / 0.00 ms |
+| Overcast |       8.3 / 9.1 ms |         3.53 / 4.46 ms |         0.92 / 1.56 ms |                 0.00 / 0.00 ms |
+| Rain     |       8.3 / 9.3 ms |         3.59 / 5.13 ms |         0.83 / 1.30 ms |                 0.33 / 0.78 ms |
+| Storm    |       8.3 / 9.3 ms |         3.12 / 4.63 ms |         1.20 / 1.98 ms |                 0.53 / 0.94 ms |
+| Clearing |       8.3 / 9.2 ms |         3.99 / 4.92 ms |         0.87 / 1.44 ms |                 0.39 / 0.84 ms |
+
+All 640 sampled frames stayed below 16.67 ms. Every state retained exactly 243 resident chunks, 143
+visible chunks, 1,354,347 quads, a 36 MiB mesh arena, and zero pending jobs. The cloud pass rendered
+at 640x360 and the entire active GPU p95 stayed below 5.14 ms. This leaves meaningful headroom inside
+the 8.33 ms 120 Hz budget without using temporal reprojection; future quality work can spend that
+headroom on better cloud erosion or temporal accumulation while retaining the same measured gate.

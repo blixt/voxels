@@ -234,12 +234,16 @@ The Rust mission-control toggle skips all
 three caster passes, while live diagnostics expose their draw-call cost.
 
 Outdoor lighting is a continuously sampled Rust-owned environment shared by shadow projection, sky
-radiance, voxel lighting, cloud shadowing, and aerial perspective. The generator maps the same smooth
-regional weights used by terrain into normalized humidity, coldness, aerosol, cloudiness, horizon
-warmth, and haze fields. The shell samples those fields only at the camera—never in hot canonical or
-LOD column loops—and the renderer eases toward the target independently of display rate. Four
-Rust-owned phases (dawn, clear day, golden hour, and blue hour) change sun direction/radiance, fog,
-cloud cover, and stars without changing world geometry or adding browser UI state.
+radiance, voxel lighting, cloud shadowing, precipitation, and aerial perspective. The native service
+anchors both day and weather fractions to Unix time, sends one restart-stable snapshot, and lets every
+client extrapolate the same continuous clocks against synchronized server time. The generator maps
+the same smooth regional weights used by terrain into normalized humidity, coldness, aerosol,
+cloudiness, horizon warmth, and haze fields. The shell samples those fields only at the camera—never
+in hot canonical or LOD column loops—and the renderer eases toward the target independently of
+display rate. Day phases change the solar/lunar orbit and stars, while the weather timeline moves
+through clear, cloud, overcast, rain, storm, and clearing states that coherently alter direct light,
+shadow softness, sky radiance, fog, cloud density, precipitation, and cold-region snow without
+changing world geometry.
 
 The world first renders in linear HDR to `Rgba16Float`; the present pass applies the Khronos PBR
 Neutral tone mapper and an sRGB transfer before the Rust UI is composited.
@@ -247,8 +251,12 @@ Refractive glass samples and maps that same HDR backdrop before mixing its displ
 panel cannot expose a differently transformed copy of the world. Material base colors are converted
 from authored sRGB values, ambient occlusion attenuates indirect light rather than direct sunlight,
 and per-material roughness drives a compact dielectric highlight. Exponential height fog converges on
-the same horizon/zenith radiance rendered by the procedural sky, which also includes a world-anchored
-three-octave cloud layer.
+the same horizon/zenith radiance rendered by the procedural sky. Clouds use a bounded half-resolution
+`Rgba16Float` volumetric target, a deterministic repeated 3D noise volume, Beer-Lambert
+front-to-back integration, early transmittance termination, and two-sample light marching. A
+full-resolution depth-tested composite preserves exact terrain and tree silhouettes. Visible cloud
+density and terrain sunlight attenuation share one seeded, advected world-space coverage field, so
+cloud movement cannot drift away from its lighting.
 
 Opaque materials use two deterministic Rust-generated `128x128x15` texture arrays with eight mip
 levels through `1x1`: sRGB albedo and unorm averaged tangent normal plus roughness. Stable material ids
@@ -465,9 +473,9 @@ latency a user-visible, revision-backed measurement rather than a queue-length a
 - Bruneton's tested reference implementation documents precomputed multiple scattering, spectral to
   luminance conversion, ozone, and configurable aerosol density profiles:
   <https://ebruneton.github.io/precomputed_atmospheric_scattering/>
-- WGSL requires derivative built-ins such as `fwidth` to execute in uniform control flow; the planar
-  cloud layer therefore uses analytic edge softness inside its view-dependent branch:
-  <https://www.w3.org/TR/WGSL/#derivatives>
+- WebGPU 3D sampled textures and explicit `textureSampleLevel` calls keep the bounded cloud march
+  portable without derivative-sensitive control flow:
+  <https://www.w3.org/TR/WGSL/#texturesamplelevel-builtin>
 
 ## Deliberate non-goals for the conversion
 

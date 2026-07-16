@@ -69,6 +69,10 @@ identical geometry/residency plus the incremental frame and GPU cost.
 `vp run profile:atmosphere` accelerates the server-owned clock through midnight, dawn, noon,
 golden hour, and blue hour, captures each anchor, and gates shadow behavior, identical geometry,
 and frame/GPU budgets.
+`vp run profile:weather` freezes the sun at noon, advances the synchronized weather timeline through
+clear, cloudy, overcast, rain, storm, and clearing anchors, captures each state, and separately gates
+volumetric-cloud GPU cost, precipitation, lighting/fog response, geometry invariants, and 120 Hz
+frame pacing.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture

@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 12
+schema_version = 13
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -72,9 +72,13 @@ movement_credit_window_ms = 500
 [environment]
 day_length_seconds = 1200.0
 day_fraction_at_unix_epoch = 0.72
+weather_cycle_seconds = 900.0
+weather_fraction_at_unix_epoch = 0.08
 cloud_offset_metres_at_unix_epoch = [0.0, 0.0]
 cloud_velocity_metres_per_second = [5.5, 1.6]
-cloud_coverage = 0.46
+cloud_coverage = 0.24
+cloud_base_metres = 550.0
+cloud_top_metres = 1800.0
 weather_seed = 1474984685
 weather_revision = 1
 
@@ -98,8 +102,12 @@ sea_level_voxels = 52
 The environment anchor is evaluated against Unix time and then transmitted with the server's
 monotonic clock, so daemon restarts and multiple clients retain one sky. Set
 `day_length_seconds = 0` to freeze `day_fraction_at_unix_epoch` for visual testing. Cloud wind and
-coverage are the first server-authored weather state; later precipitation and storm fronts can
-advance through the same revisioned environment snapshot.
+the continuous weather timeline use the same clock contract. Set `weather_cycle_seconds = 0` to
+freeze `weather_fraction_at_unix_epoch`; otherwise the cycle moves continuously through clear,
+cloudy, overcast, rain, storm, and clearing conditions. Coverage is the clear-sky baseline, while
+the cloud base/top bound the volumetric layer. The derived weather drives sky color, sunlight,
+shadows, fog, cloud density, precipitation, and cold-region snow from one revisioned environment
+snapshot without per-frame network messages.
 
 `float16` is the high-performance default; `float32` is available for diagnostics. If
 `model_cache` is omitted on macOS, the service loads the immutable pinned revision from
