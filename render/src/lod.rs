@@ -182,7 +182,7 @@ pub fn surface_patch_is_selected(
     }
 }
 
-pub fn surface_patch_transition_is_selected(
+pub fn surface_patch_transition_is_candidate(
     focus: GeometricLodFocus,
     resident: &HashSet<SurfacePatchId>,
     canonical_ready_columns: &HashSet<(i32, i32)>,
@@ -191,16 +191,17 @@ pub fn surface_patch_transition_is_selected(
 ) -> bool {
     let mut selection = SurfacePatchSelection::default();
     selection.rebuild(focus, resident, canonical_ready_columns);
-    selection.owns(patch, Some(edge))
+    selection.is_transition_candidate(patch, edge)
 }
 
 /// Cached result of hierarchy selection. Building it touches each resident patch once; draw-list
 /// construction then performs only constant-time membership checks instead of repeating ancestor
-/// walks for the main shell and four transition slices of every patch.
+/// walks for every patch. Transition candidates are geometric adjacencies only: the renderer must
+/// prove and install their complete connector geometry before suppressing either source edge.
 #[derive(Debug, Default)]
 pub struct SurfacePatchSelection {
     patches: HashSet<SurfacePatchId>,
-    transitions: HashSet<(SurfacePatchId, u8)>,
+    transition_candidates: HashSet<(SurfacePatchId, u8)>,
 }
 
 impl SurfacePatchSelection {
@@ -211,7 +212,7 @@ impl SurfacePatchSelection {
         canonical_ready_columns: &HashSet<(i32, i32)>,
     ) {
         self.patches.clear();
-        self.transitions.clear();
+        self.transition_candidates.clear();
         self.patches
             .extend(resident.iter().copied().filter(|patch| {
                 surface_patch_is_selected(focus, resident, canonical_ready_columns, *patch)
@@ -236,30 +237,37 @@ impl SurfacePatchSelection {
                             ))
                     });
                 if borders_finer_surface || borders_ready_canonical {
-                    self.transitions.insert((patch, edge.index() as u8));
+                    self.transition_candidates
+                        .insert((patch, edge.index() as u8));
                 }
             }
         }
     }
 
-    pub fn owns(&self, patch: SurfacePatchId, transition_edge: Option<SurfacePatchEdge>) -> bool {
-        transition_edge.map_or_else(
-            || self.patches.contains(&patch),
-            |edge| self.transitions.contains(&(patch, edge.index() as u8)),
-        )
+    pub fn owns(&self, patch: SurfacePatchId) -> bool {
+        self.patches.contains(&patch)
     }
 
     pub fn patch_count(&self) -> usize {
         self.patches.len()
     }
 
-    pub fn transitions(&self) -> impl Iterator<Item = (SurfacePatchId, SurfacePatchEdge)> + '_ {
-        self.transitions.iter().filter_map(|(patch, edge)| {
-            SurfacePatchEdge::ALL
-                .get(usize::from(*edge))
-                .copied()
-                .map(|edge| (*patch, edge))
-        })
+    pub fn transition_candidates(
+        &self,
+    ) -> impl Iterator<Item = (SurfacePatchId, SurfacePatchEdge)> + '_ {
+        self.transition_candidates
+            .iter()
+            .filter_map(|(patch, edge)| {
+                SurfacePatchEdge::ALL
+                    .get(usize::from(*edge))
+                    .copied()
+                    .map(|edge| (*patch, edge))
+            })
+    }
+
+    pub fn is_transition_candidate(&self, patch: SurfacePatchId, edge: SurfacePatchEdge) -> bool {
+        self.transition_candidates
+            .contains(&(patch, edge.index() as u8))
     }
 
     pub fn selected_patch_at(&self, point: [i32; 2]) -> Option<SurfacePatchId> {
@@ -413,28 +421,24 @@ mod tests {
         let mut selection = SurfacePatchSelection::default();
         selection.rebuild(focus, &complete, &HashSet::new());
         assert_eq!(selection.patch_count(), 4);
-        assert!(!selection.owns(parent, None));
-        assert!(
-            children
-                .into_iter()
-                .all(|child| selection.owns(child, None))
-        );
+        assert!(!selection.owns(parent));
+        assert!(children.into_iter().all(|child| selection.owns(child)));
     }
 
     #[test]
-    fn selected_patch_transitions_only_resolution_or_residency_boundaries() {
+    fn selected_patch_transition_candidates_only_cross_resolution_or_residency_boundaries() {
         let focus = GeometricLodFocus::snapped(0, 0);
         let left = SurfacePatchId::new(SurfaceLodLevel::Stride2, 7, 0);
         let right = left.neighbor(1, 0).unwrap();
         let both = resident([left, right]);
-        assert!(!surface_patch_transition_is_selected(
+        assert!(!surface_patch_transition_is_candidate(
             focus,
             &both,
             &HashSet::new(),
             left,
             SurfacePatchEdge::PositiveX
         ));
-        assert!(!surface_patch_transition_is_selected(
+        assert!(!surface_patch_transition_is_candidate(
             focus,
             &resident([left]),
             &HashSet::new(),
@@ -443,7 +447,7 @@ mod tests {
         ));
 
         let boundary = SurfacePatchId::new(SurfaceLodLevel::Stride2, 6, 0);
-        assert!(surface_patch_transition_is_selected(
+        assert!(surface_patch_transition_is_candidate(
             focus,
             &resident([boundary]),
             &HashSet::from([(2, 0)]),

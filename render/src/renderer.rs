@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample, RemoteAvatarPose};
 use voxels_world::protocol::DigVolume;
 use voxels_world::{
-    AtmosphereSample, CHUNK_EDGE, ChunkCoord, Material, MeshedChunk, Quad, RenderLayer,
+    AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, Material, MeshedChunk, Quad, RenderLayer,
     SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId, SurfaceRegion,
     SurfaceTileCoord, SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh,
 };
@@ -264,6 +264,13 @@ struct SurfacePatchProfile {
     cells: Vec<Option<SurfaceCell>>,
 }
 
+#[derive(Default)]
+struct LodTransitionBuild {
+    quads: Vec<GpuQuad>,
+    exact_edges: HashSet<(SurfacePatchId, u8)>,
+    incomplete_edges: u32,
+}
+
 impl SurfacePatchProfile {
     fn sample_world(&self, x: i32, z: i32) -> Option<SurfaceCell> {
         let local_x = (i64::from(x) - i64::from(self.origin[0])).div_euclid(i64::from(self.stride));
@@ -296,6 +303,31 @@ fn pack_gpu_material_face(material: u32, face: u8) -> u32 {
     material | (u32::from(face) << GPU_FACE_SHIFT)
 }
 
+#[derive(Debug, Default)]
+struct LodDrawPlan {
+    patches: SurfacePatchSelection,
+    canonical_columns: HashSet<(i32, i32)>,
+    exact_transition_edges: HashSet<(SurfacePatchId, u8)>,
+    incomplete_transition_edges: u32,
+}
+
+impl LodDrawPlan {
+    fn owns_patch(&self, patch: SurfacePatchId) -> bool {
+        self.patches.owns(patch)
+    }
+
+    fn owns_canonical_column(&self, chunk_x: i32, chunk_z: i32) -> bool {
+        self.canonical_columns.contains(&(chunk_x, chunk_z))
+    }
+
+    fn owns_source_edge(&self, patch: SurfacePatchId, edge: SurfacePatchEdge) -> bool {
+        self.owns_patch(patch)
+            && !self
+                .exact_transition_edges
+                .contains(&(patch, edge.index() as u8))
+    }
+}
+
 struct ChunkMesh {
     allocation: Allocation,
     quad_count: u32,
@@ -322,7 +354,7 @@ impl ChunkMesh {
         &mut self,
         key: &MeshKey,
         focus: Option<GeometricLodFocus>,
-        surface_patch_selection: Option<&SurfacePatchSelection>,
+        lod_draw_plan: Option<&LodDrawPlan>,
         residency_revision: u64,
     ) {
         let Some(focus) = focus else {
@@ -337,7 +369,7 @@ impl ChunkMesh {
         self.lod_owned_slices = self
             .slices
             .iter()
-            .map(|slice| slice_owned_by_lod(Some(focus), surface_patch_selection, key, slice))
+            .map(|slice| slice_owned_by_lod(Some(focus), lod_draw_plan, key, slice))
             .collect();
         self.lod_ownership_focus = Some(focus);
         self.lod_residency_revision = residency_revision;
@@ -527,6 +559,9 @@ pub struct RenderDiagnostics {
     pub draw_list_selected_slices: u32,
     /// Number of exact resident-profile connector quads selected for the current LOD focus.
     pub lod_transition_quads: u32,
+    /// Candidate LOD edges still covered by their resident source edge because an exact connector
+    /// was not complete when the current draw plan was installed.
+    pub lod_incomplete_transition_edges: u32,
     /// Grid-snapped centres, in canonical voxels, for the six geometric LOD boundaries.
     pub lod_boundary_centres: [[i32; 2]; 6],
     pub surface_width: u32,
@@ -864,9 +899,9 @@ pub struct Renderer {
     surface_patch_residency: HashSet<SurfacePatchId>,
     canonical_ready_columns: HashSet<(i32, i32)>,
     surface_patch_residency_revision: u64,
-    surface_patch_selection: SurfacePatchSelection,
-    surface_patch_selection_focus: Option<GeometricLodFocus>,
-    surface_patch_selection_revision: u64,
+    lod_draw_plan: LodDrawPlan,
+    lod_draw_plan_focus: Option<GeometricLodFocus>,
+    lod_draw_plan_revision: u64,
     chunk_activations: ChunkActivations,
     local_light_candidates: BTreeMap<MeshKey, Vec<GpuLocalLight>>,
     arena: ArenaAllocator,
@@ -1623,9 +1658,9 @@ impl Renderer {
             surface_patch_residency: HashSet::new(),
             canonical_ready_columns: HashSet::new(),
             surface_patch_residency_revision: 0,
-            surface_patch_selection: SurfacePatchSelection::default(),
-            surface_patch_selection_focus: None,
-            surface_patch_selection_revision: u64::MAX,
+            lod_draw_plan: LodDrawPlan::default(),
+            lod_draw_plan_focus: None,
+            lod_draw_plan_revision: u64::MAX,
             chunk_activations: ChunkActivations::default(),
             local_light_candidates: BTreeMap::new(),
             arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
@@ -1954,14 +1989,20 @@ impl Renderer {
         }
     }
 
-    pub fn upload_chunk(&mut self, coord: ChunkCoord, mesh: &MeshedChunk) -> bool {
+    pub fn upload_chunk(&mut self, chunk: &Chunk, mesh: &MeshedChunk) -> bool {
+        let coord = chunk.coord();
         let key = (0, coord.x, coord.y, coord.z);
+        let surface_profile = canonical_chunk_profile(chunk);
         if mesh.is_empty() {
-            self.remove_canonical_surface_profile(coord);
+            self.canonical_surface_profiles
+                .entry((coord.x, coord.z))
+                .or_default()
+                .insert(coord.y, surface_profile);
+            self.surface_patch_residency_revision =
+                self.surface_patch_residency_revision.wrapping_add(1);
             self.remove_chunk_mesh(key);
             return true;
         }
-        let surface_profile = canonical_chunk_profile(coord, mesh);
         let origin = coord.world_origin();
         let convert = |quad: &Quad| GpuQuad {
             origin: [
@@ -2315,39 +2356,49 @@ impl Renderer {
             self.surface_patch_residency_revision.wrapping_add(1);
     }
 
-    fn refresh_surface_patch_selection(&mut self, focus: Option<GeometricLodFocus>) {
-        if self.surface_patch_selection_focus == focus
-            && self.surface_patch_selection_revision == self.surface_patch_residency_revision
+    fn refresh_lod_draw_plan(&mut self, focus: Option<GeometricLodFocus>) {
+        if self.lod_draw_plan_focus == focus
+            && self.lod_draw_plan_revision == self.surface_patch_residency_revision
         {
             return;
         }
+        let canonical_columns = complete_canonical_surface_columns(
+            &self.canonical_ready_columns,
+            &self.canonical_surface_profiles,
+        );
+        let mut patches = SurfacePatchSelection::default();
         if let Some(focus) = focus {
-            self.surface_patch_selection.rebuild(
-                focus,
-                &self.surface_patch_residency,
-                &self.canonical_ready_columns,
-            );
-        } else {
-            self.surface_patch_selection = SurfacePatchSelection::default();
+            patches.rebuild(focus, &self.surface_patch_residency, &canonical_columns);
         }
-        self.surface_patch_selection_focus = focus;
-        self.surface_patch_selection_revision = self.surface_patch_residency_revision;
-        self.rebuild_lod_transition_mesh();
-    }
-
-    fn rebuild_lod_transition_mesh(&mut self) {
-        let gpu_quads = build_lod_transition_quads(
-            &self.surface_patch_selection,
+        let mut transitions = build_lod_transitions(
+            &patches,
             &self.surface_patch_profiles,
             &self.canonical_surface_profiles,
         );
+        if !self.replace_lod_transition_mesh(&transitions.quads) {
+            transitions.incomplete_edges = transitions
+                .incomplete_edges
+                .saturating_add(transitions.exact_edges.len() as u32);
+            transitions.exact_edges.clear();
+        }
+        self.lod_draw_plan = LodDrawPlan {
+            patches,
+            canonical_columns,
+            exact_transition_edges: transitions.exact_edges,
+            incomplete_transition_edges: transitions.incomplete_edges,
+        };
+        self.lod_draw_plan_focus = focus;
+        self.lod_draw_plan_revision = self.surface_patch_residency_revision;
+    }
+
+    fn replace_lod_transition_mesh(&mut self, gpu_quads: &[GpuQuad]) -> bool {
         if gpu_quads.is_empty() {
             self.remove_opaque_mesh(LOD_TRANSITION_MESH_KEY);
-            return;
+            return true;
         }
-        let Some((bounds_min, bounds_max)) = gpu_quad_bounds(&gpu_quads) else {
+        let Some((bounds_min, bounds_max)) = gpu_quad_bounds(gpu_quads) else {
             self.remove_opaque_mesh(LOD_TRANSITION_MESH_KEY);
-            return;
+            return false;
         };
         let quad_count = gpu_quads.len() as u32;
         let slice = MeshSlice {
@@ -2362,9 +2413,10 @@ impl Renderer {
             render_layer: RenderLayer::Opaque,
         };
         let Some(prepared) =
-            self.prepare_mesh_sliced(LOD_TRANSITION_MESH_KEY, &gpu_quads, vec![slice])
+            self.prepare_mesh_sliced(LOD_TRANSITION_MESH_KEY, gpu_quads, vec![slice])
         else {
-            return;
+            self.remove_opaque_mesh(LOD_TRANSITION_MESH_KEY);
+            return false;
         };
         commit_prepared_mesh(
             &mut self.arena,
@@ -2372,6 +2424,7 @@ impl Renderer {
             LOD_TRANSITION_MESH_KEY,
             Some(prepared),
         );
+        true
     }
 
     /// Browser-smoke diagnostics for proving that a revised remote surface product reached the
@@ -2587,15 +2640,15 @@ impl Renderer {
         let lod_readiness = self.lod_readiness();
         let resident_hierarchy = geometric_lod_focus.is_some();
         if resident_hierarchy {
-            self.refresh_surface_patch_selection(geometric_lod_focus);
+            self.refresh_lod_draw_plan(geometric_lod_focus);
         }
         // Queue readiness is not a proof that every fixed geometric owner is resident. Canonical
         // columns can still replace atomically and retained surface tiles can be incomplete. Keep
         // the cached resident hierarchy authoritative after settling as well as while streaming.
-        let surface_patch_selection = resident_hierarchy.then_some(&self.surface_patch_selection);
+        let lod_draw_plan = resident_hierarchy.then_some(&self.lod_draw_plan);
         let (shadow_draw_lists, world_draw_list) = collect_opaque_draw_lists(
             &mut self.chunks,
-            surface_patch_selection,
+            lod_draw_plan,
             if resident_hierarchy {
                 self.surface_patch_residency_revision
             } else {
@@ -2616,7 +2669,7 @@ impl Renderer {
             },
             |key, slice| {
                 slice.render_layer == RenderLayer::Translucent
-                    && slice_owned_by_lod(geometric_lod_focus, surface_patch_selection, key, slice)
+                    && slice_owned_by_lod(geometric_lod_focus, lod_draw_plan, key, slice)
                     && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             },
         );
@@ -2946,6 +2999,7 @@ impl Renderer {
                 .chunks
                 .get(&LOD_TRANSITION_MESH_KEY)
                 .map_or(0, |mesh| mesh.quad_count),
+            lod_incomplete_transition_edges: self.lod_draw_plan.incomplete_transition_edges,
             lod_boundary_centres: geometric_lod_focus
                 .map_or([[0; 2]; 6], GeometricLodFocus::boundary_centres),
             surface_width: self.config.width,
@@ -3079,7 +3133,7 @@ impl Renderer {
 )]
 fn collect_opaque_draw_lists(
     chunks: &mut BTreeMap<MeshKey, ChunkMesh>,
-    surface_patch_selection: Option<&SurfacePatchSelection>,
+    lod_draw_plan: Option<&LodDrawPlan>,
     residency_revision: u64,
     far_terrain: bool,
     shadows: bool,
@@ -3103,12 +3157,7 @@ fn collect_opaque_draw_lists(
         if !world_chunk_visible && !shadow_chunk_visible.into_iter().any(|visible| visible) {
             continue;
         }
-        chunk.refresh_lod_ownership(
-            key,
-            geometric_lod_focus,
-            surface_patch_selection,
-            residency_revision,
-        );
+        chunk.refresh_lod_ownership(key, geometric_lod_focus, lod_draw_plan, residency_revision);
 
         let mut world_mesh_selected = false;
         let mut shadow_mesh_selected = [false; CASCADE_COUNT];
@@ -3462,36 +3511,62 @@ fn surface_patch_profiles(
         .collect()
 }
 
-fn canonical_chunk_profile(coord: ChunkCoord, mesh: &MeshedChunk) -> CanonicalChunkProfile {
+fn canonical_chunk_profile(chunk: &Chunk) -> CanonicalChunkProfile {
     let edge = CHUNK_EDGE;
-    let origin = coord.world_origin();
+    let origin = chunk.coord().world_origin();
     let mut cells = vec![None; edge * edge];
-    for quad in &mesh.opaque {
-        if quad.face != 2 {
-            continue;
-        }
-        let Some(material) = Material::from_id(quad.material) else {
-            continue;
-        };
-        let height = origin[1] + i32::from(quad.origin[1]);
-        for local_z in
-            usize::from(quad.origin[2])..usize::from(quad.origin[2]) + usize::from(quad.extent[1])
-        {
-            for local_x in usize::from(quad.origin[0])
-                ..usize::from(quad.origin[0]) + usize::from(quad.extent[0])
-            {
-                let cell = &mut cells[local_x + local_z * edge];
-                if cell.is_none_or(|current: SurfaceCell| height > current.height) {
-                    *cell = Some(SurfaceCell {
-                        height,
+    for local_z in 0..edge {
+        for local_x in 0..edge {
+            for local_y in (0..edge).rev() {
+                let material = chunk.get(local_x, local_y, local_z);
+                if material_belongs_to_surface_heightfield(material) {
+                    cells[local_x + local_z * edge] = Some(SurfaceCell {
+                        height: origin[1] + local_y as i32,
                         material,
                         macro_normal: 0xff,
                     });
+                    break;
                 }
             }
         }
     }
     CanonicalChunkProfile { cells }
+}
+
+const fn material_belongs_to_surface_heightfield(material: Material) -> bool {
+    matches!(
+        material,
+        Material::Grass
+            | Material::Dirt
+            | Material::Stone
+            | Material::Sand
+            | Material::Snow
+            | Material::Clay
+            | Material::Basalt
+            | Material::Moss
+            | Material::Limestone
+            | Material::RedSand
+    )
+}
+
+fn complete_canonical_surface_columns(
+    ready_columns: &HashSet<(i32, i32)>,
+    profiles: &CanonicalColumnProfiles,
+) -> HashSet<(i32, i32)> {
+    ready_columns
+        .iter()
+        .copied()
+        .filter(|column| {
+            let Some(column_profiles) = profiles.get(column) else {
+                return false;
+            };
+            (0..CHUNK_EDGE * CHUNK_EDGE).all(|cell| {
+                column_profiles
+                    .values()
+                    .any(|profile| profile.cells[cell].is_some())
+            })
+        })
+        .collect()
 }
 
 fn canonical_surface_sample(
@@ -3511,29 +3586,39 @@ fn canonical_surface_sample(
         .max_by_key(|sample| sample.height)
 }
 
-fn build_lod_transition_quads(
+fn build_lod_transitions(
     selection: &SurfacePatchSelection,
     surface_profiles: &HashMap<SurfacePatchId, SurfacePatchProfile>,
     canonical_profiles: &CanonicalColumnProfiles,
-) -> Vec<GpuQuad> {
-    let mut transitions = selection.transitions().collect::<Vec<_>>();
+) -> LodTransitionBuild {
+    let mut transitions = selection.transition_candidates().collect::<Vec<_>>();
     transitions.sort_unstable_by_key(|(patch, edge)| (*patch, edge.index()));
-    let mut quads = Vec::with_capacity(transitions.len() * 16);
+    let mut build = LodTransitionBuild {
+        quads: Vec::with_capacity(transitions.len() * 16),
+        ..LodTransitionBuild::default()
+    };
     for (patch, edge) in transitions {
         let Some(coarse) = surface_profiles.get(&patch) else {
+            build.incomplete_edges = build.incomplete_edges.saturating_add(1);
             continue;
         };
-        append_lod_transition(
-            &mut quads,
+        let mut edge_quads = Vec::with_capacity(16);
+        if append_lod_transition(
+            &mut edge_quads,
             selection,
             surface_profiles,
             canonical_profiles,
             patch,
             edge,
             coarse,
-        );
+        ) {
+            build.exact_edges.insert((patch, edge.index() as u8));
+            build.quads.extend(edge_quads);
+        } else {
+            build.incomplete_edges = build.incomplete_edges.saturating_add(1);
+        }
     }
-    quads
+    build
 }
 
 fn append_lod_transition(
@@ -3544,7 +3629,7 @@ fn append_lod_transition(
     patch: SurfacePatchId,
     edge: SurfacePatchEdge,
     coarse: &SurfacePatchProfile,
-) {
+) -> bool {
     let coarse_stride = coarse.stride;
     let fine_stride = coarse_stride / 2;
     let patch_span = patch.voxel_span();
@@ -3591,20 +3676,23 @@ fn append_lod_transition(
             ),
         };
         let Some(coarse_cell) = coarse.sample_world(coarse_x, coarse_z) else {
-            continue;
+            return false;
         };
         let fine_point = [fine_x, fine_z];
-        let fine_cell = selection
-            .selected_patch_at(fine_point)
-            .and_then(|fine_patch| surface_profiles.get(&fine_patch))
-            .and_then(|profile| profile.sample_world(fine_x, fine_z))
-            .or_else(|| {
-                (patch.level == SurfaceLodLevel::Stride2)
-                    .then(|| canonical_surface_sample(canonical_profiles, fine_x, fine_z))
-                    .flatten()
-            });
+        let fine_cell = if let Some(fine_patch) = selection.selected_patch_at(fine_point) {
+            if fine_patch.level.next_coarser() != Some(patch.level) {
+                return false;
+            }
+            surface_profiles
+                .get(&fine_patch)
+                .and_then(|profile| profile.sample_world(fine_x, fine_z))
+        } else if patch.level == SurfaceLodLevel::Stride2 {
+            canonical_surface_sample(canonical_profiles, fine_x, fine_z)
+        } else {
+            None
+        };
         let Some(fine_cell) = fine_cell else {
-            continue;
+            return false;
         };
         if coarse_cell.height == fine_cell.height {
             continue;
@@ -3649,6 +3737,7 @@ fn append_lod_transition(
             y = y.saturating_add(i32::from(vertical_extent));
         }
     }
+    true
 }
 
 fn gpu_quad_bounds(quads: &[GpuQuad]) -> Option<(glam::Vec3, glam::Vec3)> {
@@ -3735,7 +3824,7 @@ fn surface_patch_belongs_to_tile(patch: SurfacePatchId, tile: SurfaceTileCoord) 
 
 fn slice_owned_by_lod(
     focus: Option<GeometricLodFocus>,
-    surface_patch_selection: Option<&SurfacePatchSelection>,
+    lod_draw_plan: Option<&LodDrawPlan>,
     key: &MeshKey,
     slice: &MeshSlice,
 ) -> bool {
@@ -3746,7 +3835,12 @@ fn slice_owned_by_lod(
         return true;
     };
     if key.0 == 0 {
-        return focus.owns_canonical_chunk(key.1, key.3);
+        return lod_draw_plan.map_or_else(
+            || focus.owns_canonical_chunk(key.1, key.3),
+            |plan| {
+                focus.owns_canonical_chunk(key.1, key.3) && plan.owns_canonical_column(key.1, key.3)
+            },
+        );
     }
     let Some(level) = SurfaceLodLevel::ALL.get(usize::from(key.0 - 1)).copied() else {
         return false;
@@ -3757,10 +3851,10 @@ fn slice_owned_by_lod(
     {
         return false;
     }
-    if let (Some(patch_id), Some(selection)) = (slice.surface_patch_id, surface_patch_selection) {
+    if let (Some(patch_id), Some(plan)) = (slice.surface_patch_id, lod_draw_plan) {
         return slice.boundary_edge.map_or_else(
-            || selection.owns(patch_id, None),
-            |edge| selection.owns(patch_id, None) && !selection.owns(patch_id, Some(edge)),
+            || plan.owns_patch(patch_id),
+            |edge| plan.owns_source_edge(patch_id, edge),
         );
     }
     slice.surface_bounds.is_some_and(|bounds| {
@@ -4441,6 +4535,19 @@ mod tests {
     }
 
     #[test]
+    fn canonical_heightfield_profile_uses_ground_beneath_standalone_geometry() {
+        let mut chunk = Chunk::empty(ChunkCoord::new(4, 3, -2));
+        chunk.set(7, 5, 11, Material::Grass);
+        for y in 6..CHUNK_EDGE {
+            chunk.set(7, y, 11, Material::Wood);
+        }
+        let profile = canonical_chunk_profile(&chunk);
+        let sample = profile.cells[7 + 11 * CHUNK_EDGE].expect("terrain surface sample");
+        assert_eq!(sample.height, 3 * CHUNK_EDGE as i32 + 5);
+        assert_eq!(sample.material, Material::Grass);
+    }
+
+    #[test]
     fn active_lod_transition_exactly_joins_the_two_resident_height_profiles() {
         let focus = GeometricLodFocus::snapped(0, 0);
         let coarse = SurfacePatchId::new(SurfaceLodLevel::Stride4, 8, 0);
@@ -4449,16 +4556,18 @@ mod tests {
         let resident = HashSet::from([coarse, fine_low, fine_high]);
         let mut selection = SurfacePatchSelection::default();
         selection.rebuild(focus, &resident, &HashSet::new());
-        assert!(selection.owns(coarse, Some(SurfacePatchEdge::NegativeX)));
+        assert!(selection.is_transition_candidate(coarse, SurfacePatchEdge::NegativeX));
 
         let profiles = HashMap::from([
             (coarse, flat_patch_profile(coarse, 10)),
             (fine_low, flat_patch_profile(fine_low, 20)),
             (fine_high, flat_patch_profile(fine_high, 20)),
         ]);
-        let quads = build_lod_transition_quads(&selection, &profiles, &HashMap::new());
-        assert_eq!(quads.len(), 16);
-        for quad in &quads {
+        let transitions = build_lod_transitions(&selection, &profiles, &HashMap::new());
+        assert_eq!(transitions.incomplete_edges, 0);
+        assert_eq!(transitions.exact_edges.len(), 1);
+        assert_eq!(transitions.quads.len(), 16);
+        for quad in &transitions.quads {
             assert_eq!(quad.extent_voxels, [2, 10]);
             assert_eq!(quad.origin[0], 25.5);
             assert_eq!(quad.origin[1], 1.1);
@@ -4487,18 +4596,14 @@ mod tests {
             ..main
         };
         let key = (SurfaceLodLevel::Stride4.index() + 1, 0, 0, 0);
-        assert!(slice_owned_by_lod(
-            Some(focus),
-            Some(&selection),
-            &key,
-            &main
-        ));
-        assert!(!slice_owned_by_lod(
-            Some(focus),
-            Some(&selection),
-            &key,
-            &edge
-        ));
+        let plan = LodDrawPlan {
+            patches: selection,
+            canonical_columns: HashSet::new(),
+            exact_transition_edges: transitions.exact_edges,
+            incomplete_transition_edges: transitions.incomplete_edges,
+        };
+        assert!(slice_owned_by_lod(Some(focus), Some(&plan), &key, &main));
+        assert!(!slice_owned_by_lod(Some(focus), Some(&plan), &key, &edge));
     }
 
     #[test]
@@ -4515,9 +4620,11 @@ mod tests {
             (fine_low, flat_patch_profile(fine_low, 131_071)),
             (fine_high, flat_patch_profile(fine_high, 131_071)),
         ]);
-        let quads = build_lod_transition_quads(&selection, &profiles, &HashMap::new());
-        assert_eq!(quads.len(), 16 * 3);
-        for segments in quads.chunks_exact(3) {
+        let transitions = build_lod_transitions(&selection, &profiles, &HashMap::new());
+        assert_eq!(transitions.incomplete_edges, 0);
+        assert_eq!(transitions.exact_edges.len(), 1);
+        assert_eq!(transitions.quads.len(), 16 * 3);
+        for segments in transitions.quads.chunks_exact(3) {
             assert_eq!(
                 segments
                     .iter()
@@ -4526,6 +4633,71 @@ mod tests {
                 131_071
             );
         }
+    }
+
+    #[test]
+    fn incomplete_canonical_transition_keeps_the_resident_source_edge() {
+        let focus = GeometricLodFocus::snapped(4_194, 6_034);
+        let coarse = SurfacePatchId::new(SurfaceLodLevel::Stride2, 263, 384);
+        let edge = SurfacePatchEdge::NegativeZ;
+        let mut selection = SurfacePatchSelection::default();
+        selection.rebuild(
+            focus,
+            &HashSet::from([coarse]),
+            &HashSet::from([(131, 191)]),
+        );
+        assert!(selection.is_transition_candidate(coarse, edge));
+
+        let profiles = HashMap::from([(coarse, flat_patch_profile(coarse, 10))]);
+        let incomplete = build_lod_transitions(&selection, &profiles, &HashMap::new());
+        assert_eq!(incomplete.incomplete_edges, 1);
+        assert!(incomplete.exact_edges.is_empty());
+        assert!(incomplete.quads.is_empty());
+        let incomplete_plan = LodDrawPlan {
+            patches: selection,
+            canonical_columns: HashSet::new(),
+            exact_transition_edges: incomplete.exact_edges,
+            incomplete_transition_edges: incomplete.incomplete_edges,
+        };
+        assert!(
+            incomplete_plan.owns_source_edge(coarse, edge),
+            "a source edge remains authoritative until its whole replacement is available"
+        );
+
+        let mut canonical_cells = vec![None; CHUNK_EDGE * CHUNK_EDGE];
+        for local_x in 16..32 {
+            canonical_cells[local_x + 31 * CHUNK_EDGE] = Some(SurfaceCell {
+                height: 20,
+                material: Material::Grass,
+                macro_normal: 0xff,
+            });
+        }
+        let canonical_profiles = HashMap::from([(
+            (131, 191),
+            BTreeMap::from([(
+                0,
+                CanonicalChunkProfile {
+                    cells: canonical_cells,
+                },
+            )]),
+        )]);
+        let mut complete_selection = SurfacePatchSelection::default();
+        complete_selection.rebuild(
+            focus,
+            &HashSet::from([coarse]),
+            &HashSet::from([(131, 191)]),
+        );
+        let complete = build_lod_transitions(&complete_selection, &profiles, &canonical_profiles);
+        assert_eq!(complete.incomplete_edges, 0);
+        assert_eq!(complete.exact_edges.len(), 1);
+        assert_eq!(complete.quads.len(), 16);
+        let complete_plan = LodDrawPlan {
+            patches: complete_selection,
+            canonical_columns: HashSet::from([(131, 191)]),
+            exact_transition_edges: complete.exact_edges,
+            incomplete_transition_edges: complete.incomplete_edges,
+        };
+        assert!(!complete_plan.owns_source_edge(coarse, edge));
     }
 
     #[test]
@@ -5167,13 +5339,15 @@ mod tests {
         let focus = Some(focus_value);
         let surface_patch_residency =
             HashSet::from([surface_slice.surface_patch_id.expect("surface patch id")]);
-        let mut surface_patch_selection = SurfacePatchSelection::default();
-        surface_patch_selection.rebuild(focus_value, &surface_patch_residency, &HashSet::new());
+        let mut lod_draw_plan = LodDrawPlan::default();
+        lod_draw_plan
+            .patches
+            .rebuild(focus_value, &surface_patch_residency, &HashSet::new());
         let view_clip = AabbClipVolume::new(glam::Mat4::IDENTITY);
         let shadow_clips = [view_clip; CASCADE_COUNT];
         let (actual_shadows, actual_world) = collect_opaque_draw_lists(
             &mut chunks,
-            Some(&surface_patch_selection),
+            Some(&lod_draw_plan),
             1,
             true,
             true,
@@ -5186,7 +5360,7 @@ mod tests {
             |_, chunk| view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max),
             |key, slice| {
                 slice.render_layer == RenderLayer::Opaque
-                    && slice_owned_by_lod(focus, Some(&surface_patch_selection), key, slice)
+                    && slice_owned_by_lod(focus, Some(&lod_draw_plan), key, slice)
                     && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             },
         );
@@ -5200,7 +5374,7 @@ mod tests {
                 },
                 |key, slice| {
                     slice.render_layer == RenderLayer::Opaque
-                        && slice_owned_by_lod(focus, Some(&surface_patch_selection), key, slice)
+                        && slice_owned_by_lod(focus, Some(&lod_draw_plan), key, slice)
                         && shadow_clips[cascade_index]
                             .contains_aabb(slice.bounds_min, slice.bounds_max)
                 },
@@ -5212,7 +5386,7 @@ mod tests {
 
         let cached_world = collect_opaque_draw_lists(
             &mut chunks,
-            Some(&surface_patch_selection),
+            Some(&lod_draw_plan),
             1,
             true,
             true,
@@ -5230,14 +5404,12 @@ mod tests {
 
         let moved_focus_value = GeometricLodFocus::snapped(256, -192);
         let moved_focus = Some(moved_focus_value);
-        surface_patch_selection.rebuild(
-            moved_focus_value,
-            &surface_patch_residency,
-            &HashSet::new(),
-        );
+        lod_draw_plan
+            .patches
+            .rebuild(moved_focus_value, &surface_patch_residency, &HashSet::new());
         let moved_world = collect_opaque_draw_lists(
             &mut chunks,
-            Some(&surface_patch_selection),
+            Some(&lod_draw_plan),
             1,
             true,
             true,
@@ -5251,7 +5423,7 @@ mod tests {
             |_, chunk| view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max),
             |key, slice| {
                 slice.render_layer == RenderLayer::Opaque
-                    && slice_owned_by_lod(moved_focus, Some(&surface_patch_selection), key, slice)
+                    && slice_owned_by_lod(moved_focus, Some(&lod_draw_plan), key, slice)
                     && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             },
         );
@@ -5307,19 +5479,20 @@ mod tests {
         }));
         surface.surface_patch_id = Some(patch_id);
         let resident = HashSet::from([patch_id]);
-        let mut selection = SurfacePatchSelection::default();
-        selection.rebuild(focus, &resident, &HashSet::new());
+        let mut plan = LodDrawPlan::default();
+        plan.patches.rebuild(focus, &resident, &HashSet::new());
         assert!(slice_owned_by_lod(
             Some(focus),
-            Some(&selection),
+            Some(&plan),
             &(SurfaceLodLevel::Stride2.index() + 1, 0, 0, 0),
             &surface,
         ));
 
-        selection.rebuild(focus, &resident, &HashSet::from([(0, 0)]));
+        plan.patches
+            .rebuild(focus, &resident, &HashSet::from([(0, 0)]));
         assert!(!slice_owned_by_lod(
             Some(focus),
-            Some(&selection),
+            Some(&plan),
             &(SurfaceLodLevel::Stride2.index() + 1, 0, 0, 0),
             &surface,
         ));

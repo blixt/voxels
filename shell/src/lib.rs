@@ -866,7 +866,12 @@ mod web {
                 let Some(mesh) = mesh else {
                     continue;
                 };
-                if self.renderer.borrow_mut().upload_chunk(ticket.coord, &mesh) {
+                let uploaded_mesh = self
+                    .chunks
+                    .borrow()
+                    .get(&coord_key(ticket.coord))
+                    .is_some_and(|chunk| self.renderer.borrow_mut().upload_chunk(chunk, &mesh));
+                if uploaded_mesh {
                     let _ = self.scheduler.borrow_mut().complete(ticket);
                     uploaded = true;
                 } else {
