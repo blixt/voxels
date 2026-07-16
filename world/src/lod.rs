@@ -1394,99 +1394,108 @@ fn append_ecology_tree_proxy(
     quads: &mut Vec<SurfaceQuad>,
     level: SurfaceLodLevel,
     feature: SkylineFeature,
-    species: TreeSpecies,
+    _species: TreeSpecies,
 ) {
     let [anchor_x, ground, anchor_z] = feature.anchor;
     let top = feature.trunk_top;
-    let variation = i32::from(feature.tree_variation());
-    let [shift_x, shift_z] =
-        feature.oriented_offset(variation.rem_euclid(3) - 1, variation / 3 - 1);
-    let trunk_radius = i32::from(matches!(species, TreeSpecies::Oak | TreeSpecies::Beech));
-    if !matches!(level, SurfaceLodLevel::Stride32 | SurfaceLodLevel::Stride64) {
-        append_box(
-            quads,
-            [anchor_x - trunk_radius, ground + 1, anchor_z - trunk_radius],
-            [
-                anchor_x + trunk_radius + 1,
-                top + 1,
-                anchor_z + trunk_radius + 1,
-            ],
-            Material::Wood,
-        );
-    }
+    let trunk_radius = i32::from(
+        feature.material_at(VoxelCoord::new(anchor_x + 1, ground + 1, anchor_z))
+            == Some(Material::Wood),
+    );
+    // The trunk is cheap and carries a large part of a tree's recognizable silhouette. Removing
+    // it at an arbitrary terrain ring made horizon trees turn into floating canopy cuboids.
+    append_box(
+        quads,
+        [anchor_x - trunk_radius, ground + 1, anchor_z - trunk_radius],
+        [
+            anchor_x + trunk_radius + 1,
+            top + 1,
+            anchor_z + trunk_radius + 1,
+        ],
+        Material::Wood,
+    );
 
-    let centre_x = anchor_x + shift_x;
-    let centre_z = anchor_z + shift_z;
-    if species.is_conifer() {
-        let (maximum_radius, crown_start) = match species {
-            TreeSpecies::Pine => (6, ground + (top - ground) / 2),
-            TreeSpecies::Spruce | TreeSpecies::Fir => (8, ground + (top - ground) / 3),
-            TreeSpecies::Larch => (7, ground + (top - ground) * 2 / 5),
-            TreeSpecies::Juniper => (5, ground + (top - ground) / 5),
-            _ => unreachable!(),
-        };
-        if matches!(level, SurfaceLodLevel::Stride32 | SurfaceLodLevel::Stride64) {
-            append_box(
-                quads,
-                [
-                    centre_x - maximum_radius,
-                    crown_start,
-                    centre_z - maximum_radius,
-                ],
-                [
-                    centre_x + maximum_radius + 1,
-                    top + 3,
-                    centre_z + maximum_radius + 1,
-                ],
-                Material::Leaves,
-            );
-        } else {
-            let crown_height = top + 3 - crown_start;
-            for layer in 0..3 {
-                let min_y = crown_start + crown_height * layer / 3;
-                let max_y = crown_start + crown_height * (layer + 1) / 3;
-                let radius = (maximum_radius * (3 - layer) / 3).max(2);
-                append_box(
-                    quads,
-                    [centre_x - radius, min_y, centre_z - radius],
-                    [centre_x + radius + 1, max_y, centre_z + radius + 1],
-                    Material::Leaves,
-                );
+    // Every proxy level is now derived from the canonical procedural tree rather than from a
+    // second hand-authored silhouette. Vertical leaf slices are grouped into progressively larger
+    // bands; the union bounds preserve aggregate foliage area as detail is removed. This is the
+    // voxel-world equivalent of Nanite foliage's area-preserving aggregate representation.
+    let crown_band_count = match level {
+        SurfaceLodLevel::Stride2 => 7,
+        SurfaceLodLevel::Stride4 => 6,
+        SurfaceLodLevel::Stride8 => 5,
+        SurfaceLodLevel::Stride16 => 4,
+        SurfaceLodLevel::Stride32 => 3,
+        SurfaceLodLevel::Stride64 => 2,
+    };
+    let bounds = feature.bounds();
+    let mut slices = vec![
+        [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        (bounds[1][1] - bounds[0][1]) as usize
+    ];
+    let mut branch_min = [[i32::MAX; 3]; 2];
+    let mut branch_max = [[i32::MIN; 3]; 2];
+    for y in bounds[0][1]..bounds[1][1] {
+        let slice = &mut slices[(y - bounds[0][1]) as usize];
+        for z in bounds[0][2]..bounds[1][2] {
+            for x in bounds[0][0]..bounds[1][0] {
+                match feature.material_at(VoxelCoord::new(x, y, z)) {
+                    Some(Material::Leaves) => {
+                        slice[0] = slice[0].min(x);
+                        slice[1] = slice[1].min(z);
+                        slice[2] = slice[2].max(x + 1);
+                        slice[3] = slice[3].max(z + 1);
+                    }
+                    Some(Material::Wood)
+                        if (x - anchor_x).abs() > trunk_radius
+                            || (z - anchor_z).abs() > trunk_radius =>
+                    {
+                        let axis = usize::from((z - anchor_z).abs() > (x - anchor_x).abs());
+                        branch_min[axis][0] = branch_min[axis][0].min(x);
+                        branch_min[axis][1] = branch_min[axis][1].min(y);
+                        branch_min[axis][2] = branch_min[axis][2].min(z);
+                        branch_max[axis][0] = branch_max[axis][0].max(x + 1);
+                        branch_max[axis][1] = branch_max[axis][1].max(y + 1);
+                        branch_max[axis][2] = branch_max[axis][2].max(z + 1);
+                    }
+                    _ => {}
+                }
             }
         }
-        return;
     }
-
-    let layers: &[([i32; 2], [i32; 2])] = match species {
-        TreeSpecies::Oak => &[([top - 11, top - 3], [9, 8]), ([top - 3, top + 3], [7, 6])],
-        TreeSpecies::Beech => &[([top - 12, top - 3], [8, 7]), ([top - 3, top + 3], [6, 5])],
-        TreeSpecies::Birch => &[([top - 17, top - 5], [4, 4]), ([top - 5, top + 2], [3, 3])],
-        TreeSpecies::Aspen => &[([top - 19, top - 6], [5, 4]), ([top - 6, top + 2], [4, 3])],
-        TreeSpecies::Willow => &[([top - 15, top - 5], [10, 9]), ([top - 5, top + 3], [8, 8])],
-        TreeSpecies::Alder => &[([top - 13, top - 4], [6, 6]), ([top - 4, top + 2], [5, 5])],
-        TreeSpecies::Acacia => &[([top - 6, top + 3], [10, 8])],
-        _ => unreachable!(),
+    for axis in 0..2 {
+        if branch_min[axis][0] != i32::MAX {
+            append_box(quads, branch_min[axis], branch_max[axis], Material::Wood);
+        }
+    }
+    let Some(first_leaf) = slices.iter().position(|slice| slice[0] != i32::MAX) else {
+        return;
     };
-    if matches!(level, SurfaceLodLevel::Stride32 | SurfaceLodLevel::Stride64) {
-        let min_y = layers[0].0[0];
-        let max_y = layers[layers.len() - 1].0[1];
-        let radius_x = layers.iter().map(|layer| layer.1[0]).max().unwrap_or(1);
-        let radius_z = layers.iter().map(|layer| layer.1[1]).max().unwrap_or(1);
-        append_box(
-            quads,
-            [centre_x - radius_x, min_y, centre_z - radius_z],
-            [centre_x + radius_x + 1, max_y, centre_z + radius_z + 1],
-            Material::Leaves,
-        );
-        return;
-    }
-    for &([min_y, max_y], [radius_x, radius_z]) in layers {
-        append_box(
-            quads,
-            [centre_x - radius_x, min_y, centre_z - radius_z],
-            [centre_x + radius_x + 1, max_y, centre_z + radius_z + 1],
-            Material::Leaves,
-        );
+    let last_leaf = slices
+        .iter()
+        .rposition(|slice| slice[0] != i32::MAX)
+        .unwrap_or(first_leaf);
+    let crown_min_y = bounds[0][1] + first_leaf as i32;
+    let crown_max_y = bounds[0][1] + last_leaf as i32 + 1;
+    let crown_height = crown_max_y - crown_min_y;
+    for band in 0..crown_band_count {
+        let min_y = crown_min_y + crown_height * band / crown_band_count;
+        let max_y = crown_min_y + crown_height * (band + 1) / crown_band_count;
+        let mut leaf_min = [i32::MAX; 3];
+        let mut leaf_max = [i32::MIN; 3];
+        for y in min_y..max_y {
+            let slice = slices[(y - bounds[0][1]) as usize];
+            if slice[0] != i32::MAX {
+                leaf_min[0] = leaf_min[0].min(slice[0]);
+                leaf_min[1] = leaf_min[1].min(y);
+                leaf_min[2] = leaf_min[2].min(slice[1]);
+                leaf_max[0] = leaf_max[0].max(slice[2]);
+                leaf_max[1] = leaf_max[1].max(y + 1);
+                leaf_max[2] = leaf_max[2].max(slice[3]);
+            }
+        }
+        if leaf_min[0] != i32::MAX {
+            append_box(quads, leaf_min, leaf_max, Material::Leaves);
+        }
     }
 }
 
@@ -1551,17 +1560,6 @@ mod tests {
             .expect("fixed seed should place a nearby skyline feature")
     }
 
-    fn proxy_quads_per_feature(level: SurfaceLodLevel) -> usize {
-        match level {
-            SurfaceLodLevel::Stride2 => 24,
-            SurfaceLodLevel::Stride4 => 18,
-            SurfaceLodLevel::Stride8
-            | SurfaceLodLevel::Stride16
-            | SurfaceLodLevel::Stride32
-            | SurfaceLodLevel::Stride64 => 12,
-        }
-    }
-
     fn skyline_quad_count(mesh: &SurfaceTileMesh) -> usize {
         mesh.patches
             .iter()
@@ -1571,7 +1569,7 @@ mod tests {
     }
 
     #[test]
-    fn every_landmark_proxy_is_patch_packed_and_bounded_to_four_boxes() {
+    fn every_landmark_proxy_is_patch_packed_and_bounded() {
         for (index, kind) in SkylineFeatureKind::ALL.into_iter().enumerate() {
             let feature = SkylineFeature {
                 id: crate::SkylineFeatureId {
@@ -1596,14 +1594,14 @@ mod tests {
                 let mut quads = Vec::new();
                 append_skyline_proxy(&mut quads, level, feature);
                 assert!(!quads.is_empty());
-                assert!(quads.len() <= 24, "{kind:?} emitted {} quads", quads.len());
+                assert!(quads.len() <= 60, "{kind:?} emitted {} quads", quads.len());
                 assert!(quads.iter().all(|quad| quad.material.is_renderable()));
             }
         }
     }
 
     #[test]
-    fn ecology_tree_proxies_keep_species_silhouettes_and_collapse_to_one_horizon_box() {
+    fn ecology_tree_proxies_keep_species_silhouettes_and_horizon_trunks() {
         for species in TreeSpecies::ALL {
             let feature = SkylineFeature {
                 id: crate::SkylineFeatureId::default(),
@@ -1618,14 +1616,19 @@ mod tests {
             let mut near = Vec::new();
             append_skyline_proxy(&mut near, SurfaceLodLevel::Stride2, feature);
             assert!(!near.is_empty(), "{species:?} lacked a near proxy");
-            assert!(near.len() <= 24, "{species:?} exceeded four proxy boxes");
+            assert!(near.len() <= 60, "{species:?} exceeded ten proxy boxes");
             assert!(near.iter().any(|quad| quad.material == Material::Wood));
             assert!(near.iter().any(|quad| quad.material == Material::Leaves));
 
             let mut horizon = Vec::new();
             append_skyline_proxy(&mut horizon, SurfaceLodLevel::Stride64, feature);
-            assert_eq!(horizon.len(), 6, "{species:?} did not collapse to one box");
-            assert!(horizon.iter().all(|quad| quad.material == Material::Leaves));
+            assert!(
+                (18..=30).contains(&horizon.len()),
+                "{species:?} horizon proxy used {} quads",
+                horizon.len()
+            );
+            assert!(horizon.iter().any(|quad| quad.material == Material::Wood));
+            assert!(horizon.iter().any(|quad| quad.material == Material::Leaves));
             let near_top = near.iter().map(|quad| quad_voxel_bounds(*quad).1[1]).max();
             let horizon_top = horizon
                 .iter()
@@ -1633,6 +1636,136 @@ mod tests {
                 .max();
             assert_eq!(near_top, horizon_top, "{species:?} horizon height popped");
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum SilhouetteView {
+        AlongX,
+        AlongZ,
+    }
+
+    fn canonical_tree_silhouette(
+        feature: SkylineFeature,
+        view: SilhouetteView,
+    ) -> BTreeSet<(i32, i32)> {
+        let [min, max] = feature.bounds();
+        let mut silhouette = BTreeSet::new();
+        for y in min[1]..max[1] {
+            for z in min[2]..max[2] {
+                for x in min[0]..max[0] {
+                    if feature.material_at(VoxelCoord::new(x, y, z)).is_none() {
+                        continue;
+                    }
+                    let horizontal = match view {
+                        SilhouetteView::AlongX => z,
+                        SilhouetteView::AlongZ => x,
+                    };
+                    silhouette.insert((horizontal, y));
+                }
+            }
+        }
+        silhouette
+    }
+
+    fn proxy_tree_silhouette(
+        quads: &[SurfaceQuad],
+        view: SilhouetteView,
+    ) -> BTreeSet<(i32, i32)> {
+        let mut silhouette = BTreeSet::new();
+        for quad in quads {
+            let (min, max) = quad_voxel_bounds(*quad);
+            let (horizontal_min, horizontal_max) = match view {
+                SilhouetteView::AlongX => (min[2], max[2]),
+                SilhouetteView::AlongZ => (min[0], max[0]),
+            };
+            for y in min[1]..max[1] {
+                for horizontal in horizontal_min..horizontal_max {
+                    silhouette.insert((horizontal, y));
+                }
+            }
+        }
+        silhouette
+    }
+
+    fn silhouette_iou(
+        first: &BTreeSet<(i32, i32)>,
+        second: &BTreeSet<(i32, i32)>,
+    ) -> f32 {
+        let intersection = first.intersection(second).count();
+        let union = first.union(second).count();
+        intersection as f32 / union.max(1) as f32
+    }
+
+    fn silhouette_centroid(silhouette: &BTreeSet<(i32, i32)>) -> [f32; 2] {
+        let count = silhouette.len().max(1) as f32;
+        let (horizontal, vertical) = silhouette
+            .iter()
+            .fold((0_i64, 0_i64), |sum, &(horizontal, vertical)| {
+                (sum.0 + i64::from(horizontal), sum.1 + i64::from(vertical))
+            });
+        [horizontal as f32 / count, vertical as f32 / count]
+    }
+
+    #[test]
+    fn ecology_tree_proxy_hierarchy_has_measured_silhouette_continuity() {
+        let mut worst_near_iou = 1.0_f32;
+        let mut worst_adjacent_iou = 1.0_f32;
+        let mut worst_near_area_ratio = [f32::INFINITY, 0.0_f32];
+        let mut worst_centroid_shift = 0.0_f32;
+        for species in TreeSpecies::ALL {
+            for variation in 0..8 {
+                let feature = SkylineFeature {
+                    id: crate::SkylineFeatureId::default(),
+                    kind: SkylineFeatureKind::Broadleaf,
+                    anchor: [0, 20, 0],
+                    trunk_top: 100,
+                    orientation: variation & 3,
+                    variant: species.encode_variant(variation),
+                    prominence: 0,
+                    route_landmark: None,
+                };
+                for view in [SilhouetteView::AlongX, SilhouetteView::AlongZ] {
+                    let canonical = canonical_tree_silhouette(feature, view);
+                    let mut previous = canonical.clone();
+                    for level in SurfaceLodLevel::ALL {
+                        let mut quads = Vec::new();
+                        append_ecology_tree_proxy(&mut quads, level, feature, species);
+                        let proxy = proxy_tree_silhouette(&quads, view);
+                        let adjacent_iou = silhouette_iou(&previous, &proxy);
+                        worst_adjacent_iou = worst_adjacent_iou.min(adjacent_iou);
+                        if level == SurfaceLodLevel::Stride2 {
+                            let near_iou = silhouette_iou(&canonical, &proxy);
+                            worst_near_iou = worst_near_iou.min(near_iou);
+                            let area_ratio = proxy.len() as f32 / canonical.len().max(1) as f32;
+                            worst_near_area_ratio[0] = worst_near_area_ratio[0].min(area_ratio);
+                            worst_near_area_ratio[1] = worst_near_area_ratio[1].max(area_ratio);
+                        }
+                        let first = silhouette_centroid(&previous);
+                        let second = silhouette_centroid(&proxy);
+                        worst_centroid_shift = worst_centroid_shift
+                            .max((first[0] - second[0]).hypot(first[1] - second[1]));
+                        previous = proxy;
+                    }
+                }
+            }
+        }
+        assert!(
+            worst_near_iou >= 0.82,
+            "canonical-to-stride-2 silhouette IoU regressed to {worst_near_iou:.3}"
+        );
+        assert!(
+            worst_adjacent_iou >= 0.80,
+            "adjacent tree LOD silhouette IoU regressed to {worst_adjacent_iou:.3}"
+        );
+        assert!(
+            worst_near_area_ratio[0] >= 0.98 && worst_near_area_ratio[1] <= 1.25,
+            "near proxy area ratio escaped {:?}",
+            worst_near_area_ratio
+        );
+        assert!(
+            worst_centroid_shift <= 2.75,
+            "adjacent tree LOD centroid shifted {worst_centroid_shift:.2} voxels"
+        );
     }
 
     #[test]
@@ -1655,7 +1788,7 @@ mod tests {
                 let mut direct_proxy = Vec::new();
                 append_skyline_proxy(&mut direct_proxy, level, feature);
                 assert!(!direct_proxy.is_empty());
-                assert!(direct_proxy.len() <= 24);
+                assert!(direct_proxy.len() <= 60);
 
                 let mut edits = EditMap::default();
                 edits.set(generator, target, Material::Air);
@@ -2573,7 +2706,13 @@ mod tests {
             edits.set(generator, target, Material::Air);
             let edited =
                 skyline_quad_count(&generate_edited_surface_tile_mesh(generator, &edits, coord));
-            assert_eq!(pristine - edited, proxy_quads_per_feature(level));
+            let mut expected = Vec::new();
+            append_skyline_proxy(&mut expected, level, feature);
+            let expected = expected
+                .iter()
+                .filter(|quad| matches!(quad.material, Material::Wood | Material::Leaves))
+                .count();
+            assert_eq!(pristine - edited, expected);
             edits.set(generator, target, Material::Wood);
             assert_eq!(
                 skyline_quad_count(&generate_edited_surface_tile_mesh(generator, &edits, coord,)),
@@ -2624,7 +2763,7 @@ mod tests {
                 let mut direct_proxy = Vec::new();
                 append_skyline_proxy(&mut direct_proxy, level, feature);
                 assert!(!direct_proxy.is_empty());
-                assert!(direct_proxy.len() <= 24);
+                assert!(direct_proxy.len() <= 60);
 
                 let coord =
                     SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
