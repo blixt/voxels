@@ -356,8 +356,7 @@ async function analyzeCloudRotation(page, baselineFrames, rotatedFrames, returne
             firstEnergy += first * first;
             secondEnergy += second * second;
           }
-          const correlation =
-            product / Math.max(Math.sqrt(firstEnergy * secondEnergy), 0.000001);
+          const correlation = product / Math.max(Math.sqrt(firstEnergy * secondEnergy), 0.000001);
           if (correlation > maximumAutocorrelation) {
             maximumAutocorrelation = correlation;
             maximumAutocorrelationLagPixels = lag;
@@ -568,14 +567,10 @@ try {
     violations.push("returned cloud view retained unstable pixels");
   }
   if (CLOUD_LAYERING_ONLY && cloud.layering.directionalExcess > 0.93) {
-    violations.push(
-      `cloud horizontal layer excess was ${cloud.layering.directionalExcess}`,
-    );
+    violations.push(`cloud horizontal layer excess was ${cloud.layering.directionalExcess}`);
   }
   if (CLOUD_LAYERING_ONLY && cloud.layering.maximumRowAutocorrelation > 0.36) {
-    violations.push(
-      `cloud row autocorrelation was ${cloud.layering.maximumRowAutocorrelation}`,
-    );
+    violations.push(`cloud row autocorrelation was ${cloud.layering.maximumRowAutocorrelation}`);
   }
   if (
     finalSnapshot[SNAPSHOT.quads] !== settled[SNAPSHOT.quads] ||
