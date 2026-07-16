@@ -352,6 +352,7 @@ impl RemoteInner {
         ) {
             return Err(inner.terminal_error().unwrap_or(RemoteWorldError::Closed));
         }
+        inner.detach_socket(1001, "world reconnect");
         let protocols = Array::new();
         protocols.push(&inner.config.subprotocol.clone().into());
         protocols.push(&inner.config.auth_subprotocol_token.clone().into());
@@ -1099,9 +1100,7 @@ impl RemoteInner {
         {
             return;
         }
-        if let Some(socket) = self.socket.borrow_mut().take() {
-            let _ = socket.close_with_code_and_reason(1011, "world connection reset");
-        }
+        self.detach_socket(1011, "world connection reset");
         self.opened.borrow_mut().take();
         self.send_paused.set(false);
         self.fail_pending(error.clone());
@@ -1167,14 +1166,23 @@ impl RemoteInner {
         }
     }
 
+    fn detach_socket(&self, code: u16, reason: &str) {
+        if let Some(socket) = self.socket.borrow_mut().take() {
+            socket.set_onopen(None);
+            socket.set_onmessage(None);
+            socket.set_onerror(None);
+            socket.set_onclose(None);
+            let _ = socket.close_with_code_and_reason(code, reason);
+        }
+        self.handlers.borrow_mut().take();
+    }
+
     fn close(&self) {
         if self.state.replace(RemoteConnectionState::Closed) == RemoteConnectionState::Closed {
             return;
         }
         self.generation.set(self.generation.get().wrapping_add(1));
-        if let Some(socket) = self.socket.borrow_mut().take() {
-            let _ = socket.close_with_code_and_reason(1000, "client closed");
-        }
+        self.detach_socket(1000, "client closed");
         self.opened.borrow_mut().take();
         self.fail_pending(RemoteWorldError::Closed);
         self.pending_edits.borrow_mut().clear();
