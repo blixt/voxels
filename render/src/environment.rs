@@ -85,10 +85,16 @@ impl Default for InteriorEnvironment {
 impl InteriorEnvironment {
     pub fn for_enclosure(sample: EnclosureSample) -> Self {
         let enclosure = sample.enclosure.clamp(0.0, 1.0);
+        // Directional terrain probes can report a small enclosure beside a hill or tree even
+        // while the player is plainly outdoors. Applying cave extinction from the first non-zero
+        // sample makes distant terrain exponentially darken as that tiny value toggles. Reserve
+        // interior exposure and air extinction for meaningful enclosure, with a smooth entrance
+        // band so walking into an actual cave still adapts progressively.
+        let interior = smoothstep(0.28, 0.72, enclosure);
         Self {
             enclosure,
-            exposure_multiplier: 1.0 + enclosure * 1.15,
-            fog_density: enclosure * 0.032,
+            exposure_multiplier: 1.0 + interior * 1.15,
+            fog_density: interior * 0.032,
             headlamp_strength: ((enclosure - 0.32) / 0.68).clamp(0.0, 1.0),
         }
     }
@@ -111,6 +117,11 @@ impl InteriorEnvironment {
             ),
         }
     }
+}
+
+fn smoothstep(start: f32, end: f32, value: f32) -> f32 {
+    let normalized = ((value - start) / (end - start)).clamp(0.0, 1.0);
+    normalized * normalized * (3.0 - 2.0 * normalized)
 }
 
 impl Default for OutdoorEnvironment {
@@ -447,6 +458,22 @@ mod tests {
         let advanced = InteriorEnvironment::default().lerp(target, 0.8, 0.1);
         assert!(advanced.enclosure > 0.7);
         assert!(advanced.exposure_multiplier < 1.2);
+    }
+
+    #[test]
+    fn one_blocked_outdoor_probe_ray_does_not_create_global_cave_fog() {
+        let outdoors = InteriorEnvironment::for_enclosure(EnclosureSample {
+            sky_visibility: 8.0 / 9.0,
+            enclosure: 1.0 / 9.0,
+            ceiling_distance_metres: 12.0,
+            escape_direction: Vec3::Y,
+            escaped_rays: 8,
+            ray_count: 9,
+        });
+        assert_eq!(outdoors.enclosure, 1.0 / 9.0);
+        assert_eq!(outdoors.exposure_multiplier, 1.0);
+        assert_eq!(outdoors.fog_density, 0.0);
+        assert_eq!(outdoors.headlamp_strength, 0.0);
     }
 
     #[test]
