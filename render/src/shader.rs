@@ -94,6 +94,19 @@ mod tests {
     }
 
     #[test]
+    fn sky_and_terrain_share_one_seeded_world_space_cloud_field() {
+        let sky = include_str!("shaders/sky.wgsl");
+        let voxels = include_str!("shaders/voxels.wgsl");
+        assert!(FRAME_SOURCE.contains("weather_seed: f32"));
+        for source in [sky, voxels] {
+            assert_eq!(source.matches("atmosphere_cloud_field_world(").count(), 1);
+            assert!(source.contains("frame.environment_time.yz"));
+            assert!(source.contains("frame.environment_time.w"));
+            assert!(!source.contains("camera_time.w * 0.55"));
+        }
+    }
+
+    #[test]
     fn dielectric_fresnel_has_physical_endpoints() {
         let f0 = 0.04;
         assert!((fresnel_schlick(1.0, f0) - f0).abs() < f32::EPSILON);

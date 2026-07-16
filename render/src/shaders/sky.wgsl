@@ -40,11 +40,11 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let warm_horizon = vec3<f32>(1.0, 0.34, 0.12)
     * horizon * horizon_alignment * sun_visible * 0.48;
   let sun_amount = max(dot(ray, sun_direction), 0.0);
-  let sun_disc = smoothstep(0.99955, 0.99985, sun_amount) * sun_visible;
+  let sun_disc = smoothstep(0.99985, 0.99997, sun_amount) * sun_visible;
   let sun_glow = pow(sun_amount, 96.0) * 0.16 + pow(sun_amount, 12.0) * 0.022;
   let moon_amount = max(dot(ray, moon_direction), 0.0);
-  let moon_disc = smoothstep(0.99925, 0.99972, moon_amount) * moon_visible;
-  let moon_glow = pow(moon_amount, 72.0) * moon_visible * 0.025;
+  let moon_disc = smoothstep(0.99990, 0.99998, moon_amount) * moon_visible;
+  let moon_glow = pow(moon_amount, 320.0) * moon_visible * 0.018;
   let below_horizon = mix(frame.ground_atmosphere.rgb, base, smoothstep(0.0, 0.12, elevation));
   var color = below_horizon
     + warm_horizon
@@ -62,7 +62,11 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let cloud_height = 480.0;
     let distance_to_layer = (cloud_height - frame.camera_time.y) / ray.y;
     let cloud_world = frame.camera_time.xz + ray.xz * distance_to_layer;
-    let field = atmosphere_cloud_field_world(cloud_world, frame.environment_time.yz);
+    let field = atmosphere_cloud_field_world(
+      cloud_world,
+      frame.environment_time.yz,
+      frame.environment_time.w,
+    );
     let coverage_control = clamp(frame.fog_exposure.z, 0.0, 1.0);
     let threshold = mix(0.76, 0.49, coverage_control);
     // Keep this analytic rather than derivative-driven: the cloud layer is only evaluated for

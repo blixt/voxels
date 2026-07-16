@@ -89,6 +89,62 @@ fn complete_canonical_columns(complete_chunks: &BTreeSet<(i32, i32, i32)>) -> BT
     complete_chunks.iter().map(|&(x, _, z)| (x, z)).collect()
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DerivedWorldEnvironment {
+    day_fraction: f32,
+    cloud_offset_metres: [f32; 2],
+    cloud_velocity_metres_per_second: [f32; 2],
+    cloud_coverage: f32,
+    weather_seed: u64,
+    weather_revision: u64,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl DerivedWorldEnvironment {
+    fn into_render_state(self) -> voxels_render::environment::WorldEnvironmentState {
+        voxels_render::environment::WorldEnvironmentState {
+            day_fraction: self.day_fraction,
+            cloud_offset_metres: self.cloud_offset_metres,
+            cloud_velocity_metres_per_second: self.cloud_velocity_metres_per_second,
+            cloud_coverage: self.cloud_coverage,
+            weather_seed: self.weather_seed,
+            weather_revision: self.weather_revision,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn world_environment_at(
+    snapshot: voxels_world::protocol::WorldEnvironmentSnapshot,
+    server_time_ms: f64,
+) -> DerivedWorldEnvironment {
+    let elapsed_seconds = (server_time_ms - snapshot.sample_server_time_ms as f64) / 1_000.0;
+    let day_fraction = if snapshot.day_length_seconds > 0.0 {
+        (f64::from(snapshot.day_fraction)
+            + elapsed_seconds / f64::from(snapshot.day_length_seconds))
+        .rem_euclid(1.0) as f32
+    } else {
+        snapshot.day_fraction
+    };
+    let cloud_offset_metres = std::array::from_fn(|axis| {
+        (f64::from(snapshot.cloud_offset_metres[axis])
+            + f64::from(snapshot.cloud_velocity_metres_per_second[axis]) * elapsed_seconds)
+            .rem_euclid(CLOUD_PERIOD_METRES) as f32
+    });
+    DerivedWorldEnvironment {
+        day_fraction,
+        cloud_offset_metres,
+        cloud_velocity_metres_per_second: snapshot.cloud_velocity_metres_per_second,
+        cloud_coverage: snapshot.cloud_coverage,
+        weather_seed: snapshot.weather_seed,
+        weather_revision: snapshot.weather_revision,
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod presence_remote;
 #[cfg(target_arch = "wasm32")]
@@ -100,7 +156,7 @@ mod web {
         RemoteChunkCompletion, RemoteEditEvent, RemoteSurfaceCompletion, RemoteSurfaceTicket,
         RemoteWorldClient, RemoteWorldError,
     };
-    use crate::{advance_surface_focus, complete_canonical_columns};
+    use crate::{advance_surface_focus, complete_canonical_columns, world_environment_at};
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
     use std::cell::{Cell, RefCell};
@@ -111,7 +167,6 @@ mod web {
         CameraState, EnclosureSample, InputState, ProfileAutomation, ProfileConfig, ProfilePhase,
         VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
     };
-    use voxels_render::environment::WorldEnvironmentState;
     use voxels_render::renderer::{
         ChunkActivationReason, LocalLightVisibility, MissionControlConfig, Renderer,
         RendererConfig, RendererFeatureConfig,
@@ -140,35 +195,6 @@ mod web {
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const SNAPSHOT_SCHEMA_VERSION: f32 = 24.0;
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
-    const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
-
-    fn world_environment_at(
-        snapshot: WorldEnvironmentSnapshot,
-        server_time_ms: f64,
-    ) -> WorldEnvironmentState {
-        let elapsed_seconds = (server_time_ms - snapshot.sample_server_time_ms as f64) / 1_000.0;
-        let day_fraction = if snapshot.day_length_seconds > 0.0 {
-            (f64::from(snapshot.day_fraction)
-                + elapsed_seconds / f64::from(snapshot.day_length_seconds))
-            .rem_euclid(1.0) as f32
-        } else {
-            snapshot.day_fraction
-        };
-        let cloud_offset_metres = std::array::from_fn(|axis| {
-            (f64::from(snapshot.cloud_offset_metres[axis])
-                + f64::from(snapshot.cloud_velocity_metres_per_second[axis]) * elapsed_seconds)
-                .rem_euclid(CLOUD_PERIOD_METRES) as f32
-        });
-        WorldEnvironmentState {
-            day_fraction,
-            cloud_offset_metres,
-            cloud_velocity_metres_per_second: snapshot.cloud_velocity_metres_per_second,
-            cloud_coverage: snapshot.cloud_coverage,
-            weather_seed: snapshot.weather_seed,
-            weather_revision: snapshot.weather_revision,
-        }
-    }
-
     #[derive(Clone, Copy, Debug)]
     struct EngineConfig {
         fixed_step_seconds: f32,
@@ -604,10 +630,10 @@ mod web {
             renderer.set_remote_avatars(&remote_avatars);
             renderer.set_dig_target(target.map(|(hit, volume)| (hit.voxel, volume)));
             let server_time_ms = self.presence.estimated_server_time_ms(time);
-            renderer.set_world_environment(world_environment_at(
-                self.environment_snapshot.get(),
-                server_time_ms,
-            ));
+            renderer.set_world_environment(
+                world_environment_at(self.environment_snapshot.get(), server_time_ms)
+                    .into_render_state(),
+            );
             let (atmosphere, region) = self.remote_environment;
             renderer.set_atmosphere(atmosphere, region);
             let enclosure = self.enclosure.get();
@@ -2727,5 +2753,41 @@ mod tests {
     fn vertical_or_invalid_touch_motion_does_not_turn_the_inventory() {
         assert_eq!(inventory_swipe([100.0, 500.0], [140.0, 560.0]), None);
         assert_eq!(inventory_swipe([f32::NAN, 500.0], [140.0, 500.0]), None);
+    }
+
+    #[test]
+    fn synchronized_clients_derive_identical_world_time_and_cloud_offset() {
+        let snapshot = voxels_world::protocol::WorldEnvironmentSnapshot {
+            sample_server_time_ms: 5_000,
+            day_fraction: 0.25,
+            day_length_seconds: 100.0,
+            cloud_offset_metres: [10.0, 20.0],
+            cloud_velocity_metres_per_second: [4.0, -2.0],
+            cloud_coverage: 0.6,
+            weather_seed: 7,
+            weather_revision: 3,
+        };
+        let first = world_environment_at(snapshot, 30_000.0);
+        let second = world_environment_at(snapshot, 30_000.0);
+        assert_eq!(first, second);
+        assert!((first.day_fraction - 0.5).abs() < 1.0e-6);
+        assert_eq!(first.cloud_offset_metres, [110.0, 1_279_970.0]);
+    }
+
+    #[test]
+    fn hidden_tab_time_jump_catches_up_without_frame_delta_accumulation() {
+        let snapshot = voxels_world::protocol::WorldEnvironmentSnapshot {
+            sample_server_time_ms: 1_000,
+            day_fraction: 0.9,
+            day_length_seconds: 40.0,
+            cloud_offset_metres: [0.0, 0.0],
+            cloud_velocity_metres_per_second: [5.0, 2.0],
+            cloud_coverage: 0.4,
+            weather_seed: 1,
+            weather_revision: 1,
+        };
+        let resumed = world_environment_at(snapshot, 11_000.0);
+        assert!((resumed.day_fraction - 0.15).abs() < 1.0e-6);
+        assert_eq!(resumed.cloud_offset_metres, [50.0, 20.0]);
     }
 }

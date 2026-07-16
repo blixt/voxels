@@ -1049,6 +1049,30 @@ sea_level_voxels = 52
     }
 
     #[test]
+    fn environment_clock_and_weather_inputs_are_strictly_bounded() {
+        let mut config = WorldServiceConfig::default();
+        config.environment.day_fraction_at_unix_epoch = 1.0;
+        assert!(matches!(
+            config.validate(),
+            Err(WorldServiceConfigError::InvalidEnvironment(_))
+        ));
+
+        let mut config = WorldServiceConfig::default();
+        config.environment.cloud_velocity_metres_per_second = [f32::NAN, 0.0];
+        assert!(matches!(
+            config.validate(),
+            Err(WorldServiceConfigError::InvalidEnvironment(_))
+        ));
+
+        let mut config = WorldServiceConfig::default();
+        config.environment.weather_revision = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(WorldServiceConfigError::InvalidEnvironment(_))
+        ));
+    }
+
+    #[test]
     fn terrain_diffusion_scale_is_bounded() {
         let mut config = test_config(WorldSourceMode::TerrainDiffusion30m);
         config.terrain_diffusion.horizontal_scale = 0;

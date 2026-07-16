@@ -364,6 +364,14 @@ impl EnvironmentAuthority {
         let anchor_unix_seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0.0, |duration| duration.as_secs_f64());
+        Self::from_anchor(config, anchor_server_time_ms, anchor_unix_seconds)
+    }
+
+    fn from_anchor(
+        config: EnvironmentConfig,
+        anchor_server_time_ms: u64,
+        anchor_unix_seconds: f64,
+    ) -> Self {
         Self {
             config,
             anchor_server_time_ms,
@@ -2066,6 +2074,39 @@ mod tests {
             },
             terrain_diffusion: TerrainDiffusionProviderConfig::default(),
         }
+    }
+
+    #[test]
+    fn environment_authority_advances_sun_and_clouds_from_one_server_clock() {
+        let config = crate::EnvironmentConfig {
+            day_length_seconds: 100.0,
+            day_fraction_at_unix_epoch: 0.25,
+            cloud_offset_metres_at_unix_epoch: [10.0, 20.0],
+            cloud_velocity_metres_per_second: [4.0, -2.0],
+            cloud_coverage: 0.6,
+            weather_seed: 7,
+            weather_revision: 3,
+        };
+        let authority = EnvironmentAuthority::from_anchor(config, 1_000, 0.0);
+        let start = authority.snapshot(1_000);
+        let later = authority.snapshot(26_000);
+        assert!((start.day_fraction - 0.25).abs() < f32::EPSILON);
+        assert!((later.day_fraction - 0.5).abs() < 1.0e-6);
+        assert_eq!(start.cloud_offset_metres, [10.0, 20.0]);
+        assert_eq!(later.cloud_offset_metres, [110.0, 1_279_970.0]);
+        assert_eq!(later.weather_revision, 3);
+    }
+
+    #[test]
+    fn zero_day_length_freezes_the_configured_celestial_time() {
+        let config = crate::EnvironmentConfig {
+            day_length_seconds: 0.0,
+            day_fraction_at_unix_epoch: 0.73,
+            ..crate::EnvironmentConfig::default()
+        };
+        let authority = EnvironmentAuthority::from_anchor(config, 10, 500.0);
+        assert_eq!(authority.snapshot(10).day_fraction, 0.73);
+        assert_eq!(authority.snapshot(9_000_010).day_fraction, 0.73);
     }
 
     fn player_identity(user: u8, player: u8, name: &str) -> PlayerIdentity {

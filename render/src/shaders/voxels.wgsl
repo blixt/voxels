@@ -277,7 +277,11 @@ fn cloud_sun_visibility(world: vec3<f32>) -> f32 {
   let sun = normalize(frame.key_light_direction.xyz);
   let distance_to_layer = max(480.0 - world.y, 0.0) / max(sun.y, 0.12);
   let cloud_world = world.xz + sun.xz * distance_to_layer;
-  let field = atmosphere_cloud_field_world(cloud_world, frame.environment_time.yz);
+  let field = atmosphere_cloud_field_world(
+    cloud_world,
+    frame.environment_time.yz,
+    frame.environment_time.w,
+  );
   let threshold = mix(0.76, 0.49, coverage_control);
   let cloud = smoothstep(threshold - 0.055, threshold + 0.055, field);
   return mix(1.0, 0.54, cloud * coverage_control);

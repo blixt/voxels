@@ -47,8 +47,16 @@ fn atmosphere_value_noise(position: vec2<f32>) -> f32 {
   return mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y);
 }
 
-fn atmosphere_cloud_field_world(world_xz: vec2<f32>, cloud_offset_metres: vec2<f32>) -> f32 {
-  let position = (world_xz - cloud_offset_metres) * 0.0032;
+fn atmosphere_cloud_field_world(
+  world_xz: vec2<f32>,
+  cloud_offset_metres: vec2<f32>,
+  weather_seed: f32,
+) -> f32 {
+  let seed_offset = vec2<f32>(
+    fract(weather_seed * 0.1031),
+    fract(weather_seed * 0.11369),
+  ) * 4096.0;
+  let position = (world_xz - cloud_offset_metres) * 0.0032 + seed_offset;
   let broad = atmosphere_value_noise(position) * 0.58;
   let billows = atmosphere_value_noise(position * 2.03 + vec2<f32>(17.2, -9.1)) * 0.29;
   let detail = atmosphere_value_noise(position * 4.11 + vec2<f32>(-4.7, 23.4)) * 0.13;

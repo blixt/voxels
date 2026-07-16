@@ -4099,7 +4099,10 @@ fn frame_uniform(
             shadows.cascades[index].clip_from_world.to_cols_array_2d()
         }),
         key_light_direction: environment.key_light_direction.extend(0.0).to_array(),
-        key_light_radiance: environment.key_light_radiance.extend(0.0).to_array(),
+        key_light_radiance: environment
+            .key_light_radiance
+            .extend(environment.shadow_strength)
+            .to_array(),
         sun_direction: environment
             .sun_direction
             .extend(environment.sun_visibility)
@@ -4112,7 +4115,7 @@ fn frame_uniform(
             world_environment.day_fraction,
             world_environment.cloud_offset_metres[0],
             world_environment.cloud_offset_metres[1],
-            environment.shadow_strength,
+            (world_environment.weather_seed & 0x00ff_ffff) as f32,
         ],
         sky_horizon: environment.sky_horizon.extend(0.0).to_array(),
         sky_zenith: environment.sky_zenith.extend(0.0).to_array(),
