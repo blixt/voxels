@@ -195,8 +195,6 @@ export function chromeWebGpuLaunchOptions() {
     headless: false,
     args: [
       "--headless=new",
-      "--enable-unsafe-webgpu",
-      "--enable-features=WebGPU",
       // Hermetic browser tasks connect only to their own loopback daemon. Chrome 147+ otherwise
       // requires an interactive Local Network Access grant that headless workers cannot provide.
       "--disable-features=LocalNetworkAccessChecks",

@@ -41,4 +41,9 @@ describe("browser snapshot schema", () => {
       "--disable-features=LocalNetworkAccessChecks",
     );
   });
+
+  it("runs against normal WebGPU validation instead of unsafe shader extensions", () => {
+    expect(chromeWebGpuLaunchOptions().args).not.toContain("--enable-unsafe-webgpu");
+    expect(chromeWebGpuLaunchOptions().args).not.toContain("--enable-features=WebGPU");
+  });
 });
