@@ -238,7 +238,6 @@ const _: () = assert!(std::mem::offset_of!(LocalLightUniform, lights) == 16);
 struct ShadowFrameUniform {
     clip_from_world: [[f32; 4]; 4],
     camera_voxel: [f32; 4],
-    lod_options: [f32; 4],
 }
 
 #[repr(C)]
@@ -430,7 +429,6 @@ struct MeshSlice {
     quad_count: u32,
     bounds_min: glam::Vec3,
     bounds_max: glam::Vec3,
-    surface_bounds: Option<SurfaceBounds>,
     surface_patch_id: Option<SurfacePatchId>,
     boundary_edge: Option<SurfacePatchEdge>,
     render_layer: RenderLayer,
@@ -876,7 +874,6 @@ pub struct Renderer {
     queue: Queue,
     config: SurfaceConfiguration,
     sky_pipeline: RenderPipeline,
-    depth_prepass_pipeline: RenderPipeline,
     depth_prepass_fast_pipeline: RenderPipeline,
     voxel_pipeline: RenderPipeline,
     voxel_flat_pipeline: RenderPipeline,
@@ -922,8 +919,6 @@ pub struct Renderer {
     surface_region: SurfaceRegion,
     daylight_phase: DaylightPhase,
     geometric_lod_focus: Option<GeometricLodFocus>,
-    fine_coverage_ready: bool,
-    lod_coverage_ready: bool,
     ui: MissionControlUi,
     ui_gpu: UiGpu,
     dpr: f32,
@@ -946,7 +941,6 @@ struct ShadowGpu {
     uniform_buffers: [Buffer; CASCADE_COUNT],
     bind_groups: [BindGroup; CASCADE_COUNT],
     pipeline: RenderPipeline,
-    settled_pipeline: RenderPipeline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -963,17 +957,9 @@ struct RenderOptions {
     local_lighting: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct LodReadiness {
-    fine: bool,
-    all: bool,
-    geometric: bool,
-}
-
 #[derive(Clone, Copy, Debug)]
 struct FrameState {
     options: RenderOptions,
-    readiness: LodReadiness,
     environment: OutdoorEnvironment,
     underwater_blend: f32,
     interior: InteriorEnvironment,
@@ -1038,7 +1024,6 @@ impl ShadowGpu {
         camera: &CameraState,
         environment: OutdoorEnvironment,
         config: DirectionalShadowConfig,
-        options: RenderOptions,
     ) -> Result<Self, String> {
         let cascades =
             build_directional_shadow_cascades(camera, 1.0, -environment.sun_direction, config)
@@ -1087,7 +1072,7 @@ impl ShadowGpu {
             label: Some("shadow caster frame layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -1096,9 +1081,8 @@ impl ShadowGpu {
                 count: None,
             }],
         });
-        let initial_uniforms: [ShadowFrameUniform; CASCADE_COUNT] = std::array::from_fn(|index| {
-            shadow_frame_uniform(&cascades, index, camera, options, LodReadiness::default())
-        });
+        let initial_uniforms: [ShadowFrameUniform; CASCADE_COUNT] =
+            std::array::from_fn(|index| shadow_frame_uniform(&cascades, index, camera));
         let uniform_buffers = std::array::from_fn(|index| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("shadow caster frame uniform"),
@@ -1124,40 +1108,6 @@ impl ShadowGpu {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/shadow.wgsl"));
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shadow caster pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(quad_layout())],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.0,
-                    clamp: 0.0,
-                },
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        // Once CPU geometric ownership is active and fine coverage is complete, the fragment
-        // shader's LOD/discard predicate is identically true. Omitting that stage preserves the
-        // exact depth result while allowing the GPU to use its fragmentless depth fast path.
-        let settled_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("settled shadow caster pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -1191,7 +1141,6 @@ impl ShadowGpu {
             uniform_buffers,
             bind_groups,
             pipeline,
-            settled_pipeline,
         })
     }
 
@@ -1200,11 +1149,9 @@ impl ShadowGpu {
         queue: &Queue,
         cascades: &DirectionalShadowCascades,
         camera: &CameraState,
-        options: RenderOptions,
-        readiness: LodReadiness,
     ) {
         for index in 0..CASCADE_COUNT {
-            let uniform = shadow_frame_uniform(cascades, index, camera, options, readiness);
+            let uniform = shadow_frame_uniform(cascades, index, camera);
             queue.write_buffer(
                 &self.uniform_buffers[index],
                 0,
@@ -1304,7 +1251,6 @@ impl Renderer {
             &initial_camera,
             environment,
             runtime_config.directional_shadows,
-            options,
         )?;
         let material_detail = MaterialDetailGpu::new(&device, &queue);
         let shadow_cascades = directional_shadow_cascades(
@@ -1320,7 +1266,6 @@ impl Renderer {
             None,
             FrameState {
                 options,
-                readiness: LodReadiness::default(),
                 environment,
                 underwater_blend: 0.0,
                 interior: InteriorEnvironment::default(),
@@ -1504,15 +1449,9 @@ impl Renderer {
             },
         );
         let voxel_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/voxels.wgsl"));
-        let depth_prepass_pipeline = depth_only_pipeline(
-            &device,
-            "spatial AO depth ownership pipeline",
-            &sky_pipeline_layout,
-            &voxel_shader,
-        );
         let depth_prepass_fast_pipeline = fragmentless_depth_pipeline(
             &device,
-            "settled spatial AO depth pipeline",
+            "spatial AO depth pipeline",
             &sky_pipeline_layout,
             &voxel_shader,
         );
@@ -1635,7 +1574,6 @@ impl Renderer {
             queue,
             config,
             sky_pipeline,
-            depth_prepass_pipeline,
             depth_prepass_fast_pipeline,
             voxel_pipeline,
             voxel_flat_pipeline,
@@ -1681,8 +1619,6 @@ impl Renderer {
             surface_region,
             daylight_phase,
             geometric_lod_focus: None,
-            fine_coverage_ready: false,
-            lod_coverage_ready: false,
             ui,
             ui_gpu,
             dpr: valid_dpr(dpr),
@@ -1809,19 +1745,6 @@ impl Renderer {
                 focus.advanced_for_levels(voxel_x, voxel_z, ready_level_count, surface_level_count)
             },
         ));
-    }
-
-    pub const fn set_lod_coverage_ready(&mut self, fine_ready: bool, all_lods_ready: bool) {
-        self.fine_coverage_ready = fine_ready;
-        self.lod_coverage_ready = all_lods_ready;
-    }
-
-    const fn lod_readiness(&self) -> LodReadiness {
-        LodReadiness {
-            fine: self.fine_coverage_ready,
-            all: self.lod_coverage_ready,
-            geometric: self.geometric_lod_focus.is_some(),
-        }
     }
 
     pub fn set_chunk_activation(
@@ -2032,7 +1955,6 @@ impl Renderer {
                     quad_count: opaque_count,
                     bounds_min: min,
                     bounds_max: max,
-                    surface_bounds: None,
                     surface_patch_id: None,
                     boundary_edge: None,
                     render_layer: RenderLayer::Opaque,
@@ -2055,7 +1977,6 @@ impl Renderer {
                     quad_count: translucent_count,
                     bounds_min: min,
                     bounds_max: max,
-                    surface_bounds: None,
                     surface_patch_id: None,
                     boundary_edge: None,
                     render_layer: RenderLayer::Translucent,
@@ -2153,8 +2074,6 @@ impl Renderer {
                 ao: 0xff,
             })
             .collect();
-        let stride = coord.stride_voxels();
-        let [tile_x, tile_z] = coord.voxel_origin();
         let quad_bytes = size_of::<GpuQuad>() as u32;
         let slices: Vec<_> = tile
             .patches
@@ -2164,8 +2083,6 @@ impl Renderer {
                     coord,
                     [patch.cell_bounds[0][0], patch.cell_bounds[0][1]],
                 )?;
-                let surface_bounds =
-                    surface_patch_bounds([tile_x, tile_z], stride, patch.cell_bounds, patch.bounds);
                 Some(
                     std::iter::once((patch.quad_range.clone(), patch.bounds, None))
                         .chain(SurfacePatchEdge::ALL.into_iter().map(|edge| {
@@ -2190,7 +2107,6 @@ impl Renderer {
                                 quad_count: range.end - range.start,
                                 bounds_min,
                                 bounds_max,
-                                surface_bounds: Some(surface_bounds),
                                 surface_patch_id: Some(patch_id),
                                 boundary_edge,
                                 render_layer: RenderLayer::Opaque,
@@ -2208,8 +2124,6 @@ impl Renderer {
                     coord,
                     [patch.cell_bounds[0][0], patch.cell_bounds[0][1]],
                 );
-                let surface_bounds =
-                    surface_patch_bounds([tile_x, tile_z], stride, patch.cell_bounds, patch.bounds);
                 MeshSlice {
                     relative_offset: patch.quad_range.start * quad_bytes,
                     size: (patch.quad_range.end - patch.quad_range.start) * quad_bytes,
@@ -2226,7 +2140,6 @@ impl Renderer {
                             .max
                             .map(|value| value as f32 * VOXEL_SIZE_METRES),
                     ),
-                    surface_bounds: Some(surface_bounds),
                     surface_patch_id: patch_id,
                     boundary_edge: None,
                     render_layer: RenderLayer::Translucent,
@@ -2407,7 +2320,6 @@ impl Renderer {
             quad_count,
             bounds_min,
             bounds_max,
-            surface_bounds: None,
             surface_patch_id: None,
             boundary_edge: None,
             render_layer: RenderLayer::Opaque,
@@ -2620,7 +2532,6 @@ impl Renderer {
             self.target_volume,
             FrameState {
                 options: self.options,
-                readiness: self.lod_readiness(),
                 environment: self.environment,
                 underwater_blend: self.underwater_blend,
                 interior: self.interior,
@@ -2637,7 +2548,6 @@ impl Renderer {
         let cull_started = now_ms();
         let geometric_lod_focus =
             active_geometric_lod_focus(self.geometric_lod_focus, self.options.far_terrain);
-        let lod_readiness = self.lod_readiness();
         let resident_hierarchy = geometric_lod_focus.is_some();
         if resident_hierarchy {
             self.refresh_lod_draw_plan(geometric_lod_focus);
@@ -2683,13 +2593,8 @@ impl Renderer {
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
         if self.options.shadows {
-            self.shadow_gpu.write_cascades(
-                &self.queue,
-                &shadow_cascades,
-                camera,
-                self.options,
-                self.lod_readiness(),
-            );
+            self.shadow_gpu
+                .write_cascades(&self.queue, &shadow_cascades, camera);
         }
         let frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -2737,11 +2642,7 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(if use_fragmentless_shadow_pipeline(lod_readiness) {
-                    &self.shadow_gpu.settled_pipeline
-                } else {
-                    &self.shadow_gpu.pipeline
-                });
+                pass.set_pipeline(&self.shadow_gpu.pipeline);
                 pass.set_bind_group(0, &self.shadow_gpu.bind_groups[cascade_index], &[]);
                 for span in &draw_list.spans {
                     let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
@@ -2777,11 +2678,7 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(if self.lod_readiness().geometric {
-                    &self.depth_prepass_fast_pipeline
-                } else {
-                    &self.depth_prepass_pipeline
-                });
+                pass.set_pipeline(&self.depth_prepass_fast_pipeline);
                 pass.set_bind_group(0, &self.frame_bind_group, &[]);
                 for span in &world_draw_list.spans {
                     let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
@@ -3787,29 +3684,6 @@ fn sampled_surface_slope(
     }
 }
 
-fn surface_patch_bounds(
-    tile_origin: [i32; 2],
-    stride: i32,
-    cell_bounds: [[u8; 2]; 2],
-    geometry_bounds: SurfaceBounds,
-) -> SurfaceBounds {
-    let [[min_x, min_z], [max_x, max_z]] = cell_bounds;
-    let offset =
-        |origin: i32, cell: u8| origin.saturating_add(i32::from(cell).saturating_mul(stride));
-    SurfaceBounds {
-        min: [
-            offset(tile_origin[0], min_x),
-            geometry_bounds.min[1],
-            offset(tile_origin[1], min_z),
-        ],
-        max: [
-            offset(tile_origin[0], max_x),
-            geometry_bounds.max[1],
-            offset(tile_origin[1], max_z),
-        ],
-    }
-}
-
 fn surface_patch_belongs_to_tile(patch: SurfacePatchId, tile: SurfaceTileCoord) -> bool {
     patch.level == tile.level
         && patch
@@ -3828,44 +3702,32 @@ fn slice_owned_by_lod(
     key: &MeshKey,
     slice: &MeshSlice,
 ) -> bool {
+    let Some(focus) = focus else {
+        return key.0 == 0;
+    };
+    let Some(plan) = lod_draw_plan else {
+        return false;
+    };
     if *key == LOD_TRANSITION_MESH_KEY {
         return true;
     }
-    let Some(focus) = focus else {
-        return true;
-    };
     if key.0 == 0 {
-        return lod_draw_plan.map_or_else(
-            || focus.owns_canonical_chunk(key.1, key.3),
-            |plan| {
-                focus.owns_canonical_chunk(key.1, key.3) && plan.owns_canonical_column(key.1, key.3)
-            },
-        );
+        return focus.owns_canonical_chunk(key.1, key.3)
+            && plan.owns_canonical_column(key.1, key.3);
     }
     let Some(level) = SurfaceLodLevel::ALL.get(usize::from(key.0 - 1)).copied() else {
         return false;
     };
-    if slice
-        .surface_patch_id
-        .is_some_and(|patch_id| patch_id.level != level)
-    {
+    let Some(patch_id) = slice.surface_patch_id else {
+        return false;
+    };
+    if patch_id.level != level {
         return false;
     }
-    if let (Some(patch_id), Some(plan)) = (slice.surface_patch_id, lod_draw_plan) {
-        return slice.boundary_edge.map_or_else(
-            || plan.owns_patch(patch_id),
-            |edge| plan.owns_source_edge(patch_id, edge),
-        );
-    }
-    slice.surface_bounds.is_some_and(|bounds| {
-        slice.boundary_edge.map_or_else(
-            || focus.owns_surface_bounds(level, bounds),
-            |edge| {
-                focus.owns_surface_bounds(level, bounds)
-                    && !focus.owns_surface_transition(level, bounds, edge)
-            },
-        )
-    })
+    slice.boundary_edge.map_or_else(
+        || plan.owns_patch(patch_id),
+        |edge| plan.owns_source_edge(patch_id, edge),
+    )
 }
 
 fn mesh_casts_directional_shadow(key: &MeshKey) -> bool {
@@ -3877,13 +3739,6 @@ fn active_geometric_lod_focus(
     far_terrain: bool,
 ) -> Option<GeometricLodFocus> {
     focus.filter(|_| far_terrain)
-}
-
-const fn use_fragmentless_shadow_pipeline(readiness: LodReadiness) -> bool {
-    // The shadow shader first hides canonical vegetation until fine coverage is complete, then
-    // accepts every fragment when CPU geometric ownership is active. Both conditions are required
-    // before removing its fragment stage.
-    readiness.fine && readiness.geometric
 }
 
 fn coalesce_draw_items(mut items: Vec<DrawItem>) -> Vec<DrawSpan> {
@@ -4101,7 +3956,6 @@ fn frame_uniform(
 ) -> FrameUniform {
     let FrameState {
         options,
-        readiness,
         environment,
         underwater_blend,
         interior,
@@ -4147,12 +4001,7 @@ fn frame_uniform(
             if options.far_terrain { 1.0 } else { 0.0 },
             if options.target_outline { 1.0 } else { 0.0 },
         ],
-        lod_options: [
-            if readiness.fine { 1.0 } else { 0.0 },
-            if options.far_terrain { 1.0 } else { 0.0 },
-            if readiness.all { 1.0 } else { 0.0 },
-            if readiness.geometric { 1.0 } else { 0.0 },
-        ],
+        lod_options: [0.0, 0.0, 0.0, if lod_focus.is_some() { 1.0 } else { 0.0 }],
         lod_boundary_centres: std::array::from_fn(|pair| {
             let first = boundary_centres[pair * 2];
             let second = boundary_centres[pair * 2 + 1];
@@ -4227,8 +4076,6 @@ fn shadow_frame_uniform(
     shadows: &DirectionalShadowCascades,
     cascade_index: usize,
     camera: &CameraState,
-    options: RenderOptions,
-    readiness: LodReadiness,
 ) -> ShadowFrameUniform {
     ShadowFrameUniform {
         clip_from_world: shadows.cascades[cascade_index]
@@ -4239,12 +4086,6 @@ fn shadow_frame_uniform(
             camera.position.y,
             camera.position.z,
             VOXEL_SIZE_METRES,
-        ],
-        lod_options: [
-            if readiness.fine { 1.0 } else { 0.0 },
-            if options.far_terrain { 1.0 } else { 0.0 },
-            if readiness.all { 1.0 } else { 0.0 },
-            if readiness.geometric { 1.0 } else { 0.0 },
         ],
     }
 }
@@ -4356,41 +4197,6 @@ fn pipeline(
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: options.depth_stencil,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    })
-}
-
-fn depth_only_pipeline(
-    device: &Device,
-    label: &str,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-) -> RenderPipeline {
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("vs_main"),
-            buffers: &[Some(quad_layout())],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("fs_depth"),
-            targets: &[],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Less),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
@@ -4576,17 +4382,12 @@ mod tests {
             assert_eq!(quad.origin[1] + f32::from(quad.extent_voxels[1]) * 0.1, 2.1);
         }
 
-        let surface_bounds = SurfaceBounds {
-            min: [256, 0, 0],
-            max: [288, 32, 32],
-        };
         let main = MeshSlice {
             relative_offset: 0,
             size: size_of::<GpuQuad>() as u32,
             quad_count: 1,
             bounds_min: glam::Vec3::ZERO,
             bounds_max: glam::Vec3::ONE,
-            surface_bounds: Some(surface_bounds),
             surface_patch_id: Some(coarse),
             boundary_edge: None,
             render_layer: RenderLayer::Opaque,
@@ -4892,25 +4693,6 @@ mod tests {
     }
 
     #[test]
-    fn fragmentless_shadows_require_complete_fine_cpu_geometric_ownership() {
-        for fine in [false, true] {
-            for all in [false, true] {
-                for geometric in [false, true] {
-                    let readiness = LodReadiness {
-                        fine,
-                        all,
-                        geometric,
-                    };
-                    assert_eq!(
-                        use_fragmentless_shadow_pipeline(readiness),
-                        fine && geometric
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn surface_format_fallback_keeps_explicit_srgb_encoding_linear() {
         assert_eq!(
             preferred_format(&[
@@ -5009,14 +4791,13 @@ mod tests {
         assert!(arena.free(chunks.remove(&key).expect("resident mesh").allocation));
     }
 
-    fn test_slice(surface_bounds: Option<SurfaceBounds>) -> MeshSlice {
+    fn test_slice() -> MeshSlice {
         MeshSlice {
             relative_offset: 0,
             size: size_of::<GpuQuad>() as u32,
             quad_count: 1,
             bounds_min: glam::Vec3::splat(-10_000.0),
             bounds_max: glam::Vec3::splat(10_000.0),
-            surface_bounds,
             surface_patch_id: None,
             boundary_edge: None,
             render_layer: RenderLayer::Opaque,
@@ -5256,7 +5037,6 @@ mod tests {
             quad_count: 1,
             bounds_min,
             bounds_max,
-            surface_bounds: None,
             surface_patch_id: None,
             boundary_edge: None,
             render_layer: RenderLayer::Opaque,
@@ -5267,10 +5047,6 @@ mod tests {
             quad_count: 2,
             bounds_min,
             bounds_max,
-            surface_bounds: Some(SurfaceBounds {
-                min: [96, -20, 0],
-                max: [112, 80, 16],
-            }),
             surface_patch_id: Some(SurfacePatchId::new(SurfaceLodLevel::Stride2, 6, 0)),
             boundary_edge: None,
             render_layer: RenderLayer::Opaque,
@@ -5438,32 +5214,37 @@ mod tests {
     #[test]
     fn geometric_lod_selects_canonical_chunks_and_surface_patches_exclusively() {
         let focus = GeometricLodFocus::snapped(0, 0);
+        let patch_id = SurfacePatchId::new(SurfaceLodLevel::Stride2, 3, 0);
+        let resident = HashSet::from([patch_id]);
+        let mut plan = LodDrawPlan {
+            canonical_columns: HashSet::from([(0, 0)]),
+            ..Default::default()
+        };
+        plan.patches.rebuild(focus, &resident, &HashSet::new());
         assert!(slice_owned_by_lod(
             Some(focus),
-            None,
+            Some(&plan),
             &(0, 0, 0, 0),
-            &test_slice(None)
+            &test_slice()
         ));
         assert!(!slice_owned_by_lod(
             Some(focus),
-            None,
+            Some(&plan),
             &(0, 7, 0, 0),
-            &test_slice(None)
+            &test_slice()
         ));
 
-        let stride_two_patch = test_slice(Some(SurfaceBounds {
-            min: [96, -20, 0],
-            max: [112, 80, 16],
-        }));
+        let mut stride_two_patch = test_slice();
+        stride_two_patch.surface_patch_id = Some(patch_id);
         assert!(slice_owned_by_lod(
             Some(focus),
-            None,
+            Some(&plan),
             &(SurfaceLodLevel::Stride2.index() + 1, 1, 0, 0),
             &stride_two_patch
         ));
         assert!(!slice_owned_by_lod(
             Some(focus),
-            None,
+            Some(&plan),
             &(SurfaceLodLevel::Stride4.index() + 1, 1, 0, 0),
             &stride_two_patch
         ));
@@ -5473,10 +5254,7 @@ mod tests {
     fn resident_hierarchy_keeps_surface_cover_until_canonical_column_is_complete() {
         let focus = GeometricLodFocus::snapped(0, 0);
         let patch_id = SurfacePatchId::new(SurfaceLodLevel::Stride2, 0, 0);
-        let mut surface = test_slice(Some(SurfaceBounds {
-            min: [0, -20, 0],
-            max: [16, 80, 16],
-        }));
+        let mut surface = test_slice();
         surface.surface_patch_id = Some(patch_id);
         let resident = HashSet::from([patch_id]);
         let mut plan = LodDrawPlan::default();
@@ -5499,51 +5277,35 @@ mod tests {
     }
 
     #[test]
-    fn geometric_lod_uses_fixed_coverage_not_protruding_geometry_bounds() {
+    fn geometric_lod_uses_patch_identity_not_protruding_geometry_bounds() {
         let focus = GeometricLodFocus::snapped(0, 0);
-        let slice = test_slice(Some(SurfaceBounds {
-            min: [256, -500, 0],
-            max: [288, 500, 32],
-        }));
+        let patch_id = SurfacePatchId::new(SurfaceLodLevel::Stride4, 8, 0);
+        let mut slice = test_slice();
+        slice.surface_patch_id = Some(patch_id);
+        let resident = HashSet::from([patch_id]);
+        let mut plan = LodDrawPlan::default();
+        plan.patches.rebuild(focus, &resident, &HashSet::new());
         assert!(slice.bounds_min.x < -9_000.0);
         assert!(slice.bounds_max.x > 9_000.0);
         assert!(slice_owned_by_lod(
             Some(focus),
-            None,
+            Some(&plan),
             &(SurfaceLodLevel::Stride4.index() + 1, 2, 0, 0),
             &slice
         ));
         assert!(!slice_owned_by_lod(
             Some(focus),
-            None,
+            Some(&plan),
             &(SurfaceLodLevel::Stride8.index() + 1, 1, 0, 0),
             &slice
         ));
     }
 
     #[test]
-    fn surface_patch_coverage_stays_inside_the_positive_world_boundary() {
-        let coord = SurfaceTileCoord::containing(SurfaceLodLevel::Stride16, i32::MAX, i32::MAX);
-        let geometry_bounds = SurfaceBounds {
-            min: [i32::MAX - 127, -40, i32::MAX - 127],
-            max: [i32::MAX, 80, i32::MAX],
-        };
-
-        assert_eq!(
-            surface_patch_bounds(
-                coord.voxel_origin(),
-                coord.stride_voxels(),
-                [[24, 24], [32, 32]],
-                geometry_bounds,
-            ),
-            geometry_bounds
-        );
-    }
-
-    #[test]
-    fn geometric_lod_falls_back_to_all_resident_meshes_until_ready() {
-        let surface = test_slice(None);
-        assert!(slice_owned_by_lod(None, None, &(99, 0, 0, 0), &surface));
+    fn missing_hierarchy_plan_never_exposes_overlapping_surface_meshes() {
+        let surface = test_slice();
+        assert!(!slice_owned_by_lod(None, None, &(99, 0, 0, 0), &surface));
+        assert!(slice_owned_by_lod(None, None, &(0, 0, 0, 0), &surface));
         assert!(!slice_owned_by_lod(
             Some(GeometricLodFocus::snapped(0, 0)),
             None,
@@ -5555,12 +5317,13 @@ mod tests {
     #[test]
     fn disabling_far_terrain_keeps_resident_canonical_coverage() {
         let settled = Some(GeometricLodFocus::snapped(0, 0));
-        let canonical = test_slice(None);
+        let canonical = test_slice();
         let outside_inner_cut = (0, 4, 0, 0);
+        let plan = LodDrawPlan::default();
 
         assert!(!slice_owned_by_lod(
             active_geometric_lod_focus(settled, true),
-            None,
+            Some(&plan),
             &outside_inner_cut,
             &canonical
         ));

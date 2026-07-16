@@ -357,56 +357,6 @@ fn cloud_sun_visibility(world: vec3<f32>) -> f32 {
   return mix(1.0, 0.54, cloud * coverage_control);
 }
 
-fn coarser_owns_boundary(distance_xz: f32, boundary: u32) -> bool {
-  // Each split sits safely inside the guaranteed coverage of both adjacent rings. A continuous
-  // radial cut keeps ownership complementary without turning height disagreement into visible
-  // salt-and-pepper holes. The lower coarse mesh remains a crack-hiding underlay at the seam.
-  var split = 9.5;
-  switch boundary {
-    case 1u: { split = 23.5; }
-    case 2u: { split = 48.0; }
-    case 3u: { split = 96.0; }
-    case 4u: { split = 192.0; }
-    case 5u: { split = 384.0; }
-    default: {}
-  }
-  return distance_xz >= split;
-}
-
-fn owns_lod_surface(world: vec3<f32>, packed_material: u32) -> bool {
-  let far_surface = (packed_material & 0x80000000u) != 0u;
-  let material = packed_material & 0xffffu;
-  if !far_surface && frame.lod_options.x < 0.5 && (material == 8u || material == 9u) {
-    return false;
-  }
-  if frame.lod_options.w > 0.5 {
-    return true;
-  }
-  if frame.lod_options.z < 0.5 {
-    return true;
-  }
-  if !far_surface && frame.lod_options.y < 0.5 {
-    return true;
-  }
-  let distance_xz = distance(world.xz, frame.camera_time.xz);
-  if !far_surface {
-    return !coarser_owns_boundary(distance_xz, 0u);
-  }
-  let level = (packed_material >> 27u) & 7u;
-  var owns = coarser_owns_boundary(distance_xz, level);
-  if level < 5u {
-    owns = owns && !coarser_owns_boundary(distance_xz, level + 1u);
-  }
-  return owns;
-}
-
-@fragment
-fn fs_depth(input: VertexOut) {
-  if !owns_lod_surface(input.world, input.material) {
-    discard;
-  }
-}
-
 fn cascade_shadow(world: vec3<f32>, normal: vec3<f32>, cascade: u32) -> f32 {
   let texel_world_size = frame.shadow_texel_sizes[cascade];
   let normal_offset = normal * (frame.viewport_voxel.z * 0.24 + texel_world_size * 0.65);
@@ -475,9 +425,6 @@ fn reflected_environment(direction: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
-  if !owns_lod_surface(input.world, input.material) {
-    discard;
-  }
   let material = input.material & 0xffffu;
   if material != 13u {
     discard;
@@ -596,12 +543,7 @@ fn screen_space_ambient_visibility(pixel_position: vec2<f32>, world: vec3<f32>) 
 @fragment
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let material = input.material & 0xffffu;
-  // Sample before the non-uniform ownership discard so implicit texture derivatives stay in
-  // uniform fragment-quad control flow. The flat specialized pipeline removes these samples.
   let surface_detail = sample_surface_detail(input.world, input.normal, material);
-  if !owns_lod_surface(input.world, input.material) {
-    discard;
-  }
   let sun = normalize(frame.sun_direction.xyz);
   let diffuse = max(dot(surface_detail.normal, sun), 0.0);
   let shadow = sun_visibility(input.world, input.normal) * cloud_sun_visibility(input.world);

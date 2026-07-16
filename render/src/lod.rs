@@ -1,7 +1,9 @@
 //! Pure geometric ownership for nested block-surface LOD rings.
 
 use std::collections::HashSet;
-use voxels_world::{CHUNK_EDGE, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId};
+#[cfg(test)]
+use voxels_world::SurfaceBounds;
+use voxels_world::{CHUNK_EDGE, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId};
 
 /// Half extents in canonical 10 cm voxels. Every boundary is a multiple of the patch span on both
 /// sides, so whole patches can change owner without overlap, holes, or fragment clipping.
@@ -99,13 +101,15 @@ impl GeometricLodFocus {
         LodOwner::Surface(SurfaceLodLevel::ALL[surface_level_count - 1])
     }
 
-    pub fn owns_surface_bounds(self, level: SurfaceLodLevel, bounds: SurfaceBounds) -> bool {
+    #[cfg(test)]
+    fn owns_surface_bounds(self, level: SurfaceLodLevel, bounds: SurfaceBounds) -> bool {
         let centre_x = bounds.min[0] + (bounds.max[0] - bounds.min[0]) / 2;
         let centre_z = bounds.min[2] + (bounds.max[2] - bounds.min[2]) / 2;
         self.owner_at(centre_x, centre_z) == LodOwner::Surface(level)
     }
 
-    pub fn owns_surface_transition(
+    #[cfg(test)]
+    fn owns_surface_transition(
         self,
         level: SurfaceLodLevel,
         bounds: SurfaceBounds,

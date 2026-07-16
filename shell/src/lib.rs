@@ -349,7 +349,6 @@ mod web {
         surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
         surface_in_flight: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
-        fine_initialized: Cell<bool>,
         all_lods_ready: Cell<bool>,
         interactive_lods_ready: Cell<bool>,
         full_lods_initialized: Cell<bool>,
@@ -588,9 +587,6 @@ mod web {
                 && stream.meshing.in_flight == 0
                 && stream.upload.queued == 0
                 && stream.upload.in_flight == 0;
-            if fine_coverage_ready {
-                self.fine_initialized.set(true);
-            }
             let ready_surface_levels = self.ready_surface_level_prefix(fine_coverage_ready);
             let interactive_lods_ready = ready_surface_levels >= INTERACTIVE_SURFACE_LOD_LEVELS;
             let all_lods_ready = ready_surface_levels == SURFACE_LOD_LEVEL_COUNT;
@@ -600,7 +596,6 @@ mod web {
                 !all_lods_ready || self.surface_coverage_current(),
                 "surface coverage became ready with missing or stale revisions"
             );
-            renderer.set_lod_coverage_ready(self.fine_initialized.get(), all_lods_ready);
             if ready_surface_levels > 0 {
                 let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
                 let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
@@ -2472,7 +2467,6 @@ mod web {
             surface_queue: RefCell::new(VecDeque::new()),
             surface_in_flight: RefCell::new(BTreeSet::new()),
             surface_dirty: RefCell::new(BTreeSet::new()),
-            fine_initialized: Cell::new(false),
             all_lods_ready: Cell::new(false),
             interactive_lods_ready: Cell::new(false),
             full_lods_initialized: Cell::new(false),
