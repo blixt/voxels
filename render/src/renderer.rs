@@ -72,6 +72,7 @@ const SURFACE_MACRO_SLOPE_SCALE: f32 = 0.25;
 const SURFACE_MACRO_SLOPE_MAX: f32 = 0.5;
 const LOD_TRANSITION_MESH_KEY: MeshKey = (u8::MAX, 0, 0, 0);
 const GPU_QUERY_COUNT: u32 = 24;
+const PRECIPITATION_INSTANCE_COUNT: u32 = 48 * 48 * 2;
 const GPU_QUERY_BUFFER_BYTES: u64 = GPU_QUERY_COUNT as u64 * size_of::<u64>() as u64;
 const GPU_RESOLVE_BUFFER_BYTES: u64 = 256;
 const GPU_READBACK_SLOTS: usize = 4;
@@ -832,11 +833,7 @@ impl GpuTimer {
         })
     }
 
-    fn begin_frame(
-        &mut self,
-        frame_id: u32,
-        passes: GpuPassMask,
-    ) -> Option<GpuTimingFrame> {
+    fn begin_frame(&mut self, frame_id: u32, passes: GpuPassMask) -> Option<GpuTimingFrame> {
         for offset in 0..GPU_READBACK_SLOTS {
             let slot = (self.next_slot + offset) % GPU_READBACK_SLOTS;
             if self.readback[slot]
@@ -890,11 +887,7 @@ impl GpuTimer {
                         *timestamp = u64::from_le_bytes(raw);
                     }
                     drop(mapped);
-                    parsed = parse_gpu_timestamps(
-                        &timestamps,
-                        period,
-                        frame.passes,
-                    );
+                    parsed = parse_gpu_timestamps(&timestamps, period, frame.passes);
                 }
                 callback_buffer.unmap();
                 parsed
@@ -1550,7 +1543,13 @@ impl Renderer {
                 fragment_entry: "fs_main",
                 blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
-                depth_stencil: None,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
                 fragment_constants: &[],
             },
         );
@@ -1679,7 +1678,10 @@ impl Renderer {
         ui.set_environment_status(daylight_phase.label(), surface_region_label(surface_region));
         ui.set_world_clock(
             world_environment.day_fraction,
-            world_environment.weather(atmosphere_sample.coldness).kind.label(),
+            world_environment
+                .weather(atmosphere_sample.coldness)
+                .kind
+                .label(),
             environment.precipitation,
             environment.cloud_coverage,
             world_environment.cloud_velocity_metres_per_second,
@@ -2864,12 +2866,11 @@ impl Renderer {
             );
         }
         if clouds_active {
-            self.volumetric_cloud_gpu
-                .trace(
-                    &mut encoder,
-                    &self.frame_bind_group,
-                    gpu_frame.as_ref().map(|frame| frame.pass(12)),
-                );
+            self.volumetric_cloud_gpu.trace(
+                &mut encoder,
+                &self.frame_bind_group,
+                gpu_frame.as_ref().map(|frame| frame.pass(12)),
+            );
         }
         let opaque_scene_view = if refract_water {
             self.ui_gpu.opaque_scene_view()
@@ -2939,7 +2940,7 @@ impl Renderer {
                 &self.frame_bind_group,
                 opaque_scene_view,
                 &self.depth_view,
-                if refract_water {
+                if refract_water || weather_active {
                     wgpu::StoreOp::Store
                 } else {
                     wgpu::StoreOp::Discard
@@ -2964,7 +2965,11 @@ impl Renderer {
                     view: &self.depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Discard,
+                        store: if weather_active {
+                            wgpu::StoreOp::Store
+                        } else {
+                            wgpu::StoreOp::Discard
+                        },
                     }),
                     stencil_ops: None,
                 }),
@@ -2997,14 +3002,21 @@ impl Renderer {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(20)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.weather_pipeline);
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
-            pass.draw(0..3, 0..1);
+            pass.draw(0..6, 0..PRECIPITATION_INSTANCE_COUNT);
         }
         let arena = self.arena.stats();
         let water_arena = self.water_arena.stats();
