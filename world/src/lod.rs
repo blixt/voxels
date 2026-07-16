@@ -287,10 +287,10 @@ impl SurfacePatchEdge {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SurfacePatch {
     pub cell_bounds: [[u8; 2]; 2],
-    /// Main surface shell. Transition skirts are kept separately so the renderer can enable them
-    /// only where this patch touches another geometric LOD owner.
+    /// Main surface shell. Patch-edge body faces are kept separately so the renderer can replace
+    /// them with an exact height-matched connector at a geometric LOD boundary.
     pub quad_range: Range<u32>,
-    pub skirt_ranges: [Range<u32>; 4],
+    pub edge_ranges: [Range<u32>; 4],
     pub bounds: SurfaceBounds,
 }
 
@@ -299,12 +299,12 @@ impl SurfacePatch {
         &tile.quads[self.quad_range.start as usize..self.quad_range.end as usize]
     }
 
-    pub fn skirt_quads<'a>(
+    pub fn edge_quads<'a>(
         &self,
         tile: &'a SurfaceTileMesh,
         edge: SurfacePatchEdge,
     ) -> &'a [SurfaceQuad] {
-        let range = &self.skirt_ranges[edge.index()];
+        let range = &self.edge_ranges[edge.index()];
         &tile.quads[range.start as usize..range.end as usize]
     }
 }
@@ -692,7 +692,7 @@ pub fn generate_surface_tile_mesh_with_features(
 fn generate_surface_tile_mesh_with_options(
     coord: SurfaceTileCoord,
     surface: impl Fn(i32, i32) -> (i32, Material),
-    transition_skirts: bool,
+    patch_edges: bool,
     skyline_features: &[SkylineFeature],
 ) -> SurfaceTileMesh {
     let [origin_x, origin_z] = coord.voxel_origin();
@@ -744,6 +744,16 @@ fn generate_surface_tile_mesh_with_options(
                         (0, 1, FACE_POS_Z),
                     ];
                     for (dx, dz, face) in neighbors {
+                        let lies_on_patch_edge = match face {
+                            FACE_NEG_X => cell_x == cell_min_x,
+                            FACE_POS_X => cell_x == cell_min_x + SURFACE_PATCH_EDGE_CELLS - 1,
+                            FACE_NEG_Z => cell_z == cell_min_z,
+                            FACE_POS_Z => cell_z == cell_min_z + SURFACE_PATCH_EDGE_CELLS - 1,
+                            _ => false,
+                        };
+                        if lies_on_patch_edge && patch_edges {
+                            continue;
+                        }
                         let (neighbor_height, _) = sample(cell_x + dx, cell_z + dz);
                         if height <= neighbor_height {
                             continue;
@@ -791,7 +801,7 @@ fn generate_surface_tile_mesh_with_options(
             }
             let quad_end = quads.len() as u32;
             let quad_range = quad_start..quad_end;
-            let skirt_ranges = std::array::from_fn(|_| quad_end..quad_end);
+            let edge_ranges = std::array::from_fn(|_| quad_end..quad_end);
             patches.push(SurfacePatch {
                 cell_bounds: [
                     [cell_min_x as u8, cell_min_z as u8],
@@ -801,69 +811,29 @@ fn generate_surface_tile_mesh_with_options(
                     ],
                 ],
                 quad_range,
-                skirt_ranges,
+                edge_ranges,
                 bounds,
             });
         }
     }
-    if transition_skirts {
+    if patch_edges {
         for patch in &mut patches {
             let cell_min_x = i32::from(patch.cell_bounds[0][0]);
             let cell_min_z = i32::from(patch.cell_bounds[0][1]);
-            patch.skirt_ranges = std::array::from_fn(|edge_index| {
-                let skirt_start = quads.len() as u32;
-                let patch_edge = SurfacePatchEdge::ALL[edge_index];
-                for edge_cell in 0..SURFACE_PATCH_EDGE_CELLS {
-                    let (cell_x, cell_z, face) = match patch_edge {
-                        SurfacePatchEdge::NegativeX => {
-                            (cell_min_x, cell_min_z + edge_cell, FACE_NEG_X)
-                        }
-                        SurfacePatchEdge::PositiveX => (
-                            cell_min_x + SURFACE_PATCH_EDGE_CELLS - 1,
-                            cell_min_z + edge_cell,
-                            FACE_POS_X,
-                        ),
-                        SurfacePatchEdge::NegativeZ => {
-                            (cell_min_x + edge_cell, cell_min_z, FACE_NEG_Z)
-                        }
-                        SurfacePatchEdge::PositiveZ => (
-                            cell_min_x + edge_cell,
-                            cell_min_z + SURFACE_PATCH_EDGE_CELLS - 1,
-                            FACE_POS_Z,
-                        ),
-                    };
-                    let x = offset_clamped(origin_x, cell_x * stride);
-                    let z = offset_clamped(origin_z, cell_z * stride);
-                    let (height, material) = sample(cell_x, cell_z);
-                    let skirt_depth = i64::from(128i32.max(stride * 8));
-                    // `height` names the top occupied voxel, so its visible top plane is at
-                    // `height + 1`. Body side faces use the same convention. Ending a skirt at
-                    // `height` leaves one canonical voxel of the other owner visible at every LOD
-                    // handoff, which looks like a shifted strip (and can expose a different
-                    // material). Clamp only the disposable lower endpoint at the i32 world limit;
-                    // the half-open top plane may validly be one past i32::MAX.
-                    let skirt_top = i64::from(height) + 1;
-                    let skirt_bottom =
-                        (skirt_top - skirt_depth).clamp(i64::from(i32::MIN), i64::from(i32::MAX));
-                    let skirt_height = (skirt_top - skirt_bottom) as u16;
-                    let origin = match patch_edge {
-                        SurfacePatchEdge::NegativeX => [x, skirt_bottom as i32, z],
-                        SurfacePatchEdge::PositiveX => {
-                            [offset_clamped(x, stride - 1), skirt_bottom as i32, z]
-                        }
-                        SurfacePatchEdge::NegativeZ => [x, skirt_bottom as i32, z],
-                        SurfacePatchEdge::PositiveZ => {
-                            [x, skirt_bottom as i32, offset_clamped(z, stride - 1)]
-                        }
-                    };
-                    quads.push(SurfaceQuad {
-                        origin,
-                        face,
-                        extent: [stride as u16, skirt_height],
-                        material,
-                    });
+            patch.edge_ranges = std::array::from_fn(|edge_index| {
+                let edge_start = quads.len() as u32;
+                append_patch_edge_faces(
+                    &mut quads,
+                    SurfacePatchEdge::ALL[edge_index],
+                    [origin_x, origin_z],
+                    [cell_min_x, cell_min_z],
+                    stride,
+                    &sample,
+                );
+                for quad in &quads[edge_start as usize..] {
+                    patch.bounds.include_quad(*quad);
                 }
-                skirt_start..quads.len() as u32
+                edge_start..quads.len() as u32
             });
         }
     }
@@ -871,6 +841,76 @@ fn generate_surface_tile_mesh_with_options(
         coord,
         quads,
         patches,
+    }
+}
+
+fn append_patch_edge_faces(
+    quads: &mut Vec<SurfaceQuad>,
+    edge: SurfacePatchEdge,
+    tile_origin: [i32; 2],
+    patch_cell_min: [i32; 2],
+    stride: i32,
+    sample: &impl Fn(i32, i32) -> (i32, Material),
+) {
+    for edge_cell in 0..SURFACE_PATCH_EDGE_CELLS {
+        let (cell_x, cell_z, dx, dz, face) = match edge {
+            SurfacePatchEdge::NegativeX => (
+                patch_cell_min[0],
+                patch_cell_min[1] + edge_cell,
+                -1,
+                0,
+                FACE_NEG_X,
+            ),
+            SurfacePatchEdge::PositiveX => (
+                patch_cell_min[0] + SURFACE_PATCH_EDGE_CELLS - 1,
+                patch_cell_min[1] + edge_cell,
+                1,
+                0,
+                FACE_POS_X,
+            ),
+            SurfacePatchEdge::NegativeZ => (
+                patch_cell_min[0] + edge_cell,
+                patch_cell_min[1],
+                0,
+                -1,
+                FACE_NEG_Z,
+            ),
+            SurfacePatchEdge::PositiveZ => (
+                patch_cell_min[0] + edge_cell,
+                patch_cell_min[1] + SURFACE_PATCH_EDGE_CELLS - 1,
+                0,
+                1,
+                FACE_POS_Z,
+            ),
+        };
+        let (height, material) = sample(cell_x, cell_z);
+        let (neighbor_height, _) = sample(cell_x + dx, cell_z + dz);
+        if height <= neighbor_height {
+            continue;
+        }
+        let x = offset_clamped(tile_origin[0], cell_x * stride);
+        let z = offset_clamped(tile_origin[1], cell_z * stride);
+        let mut origin = match face {
+            FACE_POS_X => [offset_clamped(x, stride - 1), neighbor_height + 1, z],
+            FACE_NEG_X => [x, neighbor_height + 1, z],
+            FACE_POS_Z => [x, neighbor_height + 1, offset_clamped(z, stride - 1)],
+            FACE_NEG_Z => [x, neighbor_height + 1, z],
+            _ => unreachable!(),
+        };
+        let mut remaining = i64::from(height) - i64::from(neighbor_height);
+        while remaining > 0 {
+            let vertical_extent = remaining.min(i64::from(u16::MAX)) as u16;
+            quads.push(SurfaceQuad {
+                origin,
+                face,
+                extent: [stride as u16, vertical_extent],
+                material,
+            });
+            remaining -= i64::from(vertical_extent);
+            if remaining > 0 {
+                origin[1] = origin[1].saturating_add(i32::from(vertical_extent));
+            }
+        }
     }
 }
 
@@ -1935,7 +1975,14 @@ mod tests {
                     .count(),
                 (SURFACE_TILE_EDGE_CELLS * SURFACE_TILE_EDGE_CELLS) as usize
             );
-            let bounds = SurfaceBounds::from_quads(&tile.quads).unwrap();
+            let top_quads = tile
+                .patches
+                .iter()
+                .flat_map(|patch| patch.quads(&tile))
+                .filter(|quad| quad.face == FACE_POS_Y)
+                .copied()
+                .collect::<Vec<_>>();
+            let bounds = SurfaceBounds::from_quads(&top_quads).unwrap();
             let [origin_x, origin_z] = coord.voxel_origin();
             assert_eq!(bounds.min[0], origin_x);
             assert_eq!(bounds.max[0], origin_x + coord.voxel_span());
@@ -2033,11 +2080,21 @@ mod tests {
             assert_eq!(patch.quad_range.start, next_start);
             assert!(patch.quad_range.start < patch.quad_range.end);
             assert!(patch.quad_range.end as usize <= mesh.quads.len());
+            let patch_geometry = patch
+                .quads(&mesh)
+                .iter()
+                .chain(
+                    SurfacePatchEdge::ALL
+                        .iter()
+                        .flat_map(|edge| patch.edge_quads(&mesh, *edge)),
+                )
+                .copied()
+                .collect::<Vec<_>>();
             assert_eq!(
                 Some(patch.bounds),
-                SurfaceBounds::from_quads(patch.quads(&mesh))
+                SurfaceBounds::from_quads(&patch_geometry)
             );
-            for quad in patch.quads(&mesh) {
+            for quad in &patch_geometry {
                 let (quad_min, quad_max) = quad_voxel_bounds(*quad);
                 for axis in 0..3 {
                     assert!(patch.bounds.min[axis] <= quad_min[axis]);
@@ -2046,16 +2103,15 @@ mod tests {
             }
             next_start = patch.quad_range.end;
         }
-        // Main patch shells are packed before optional transition skirts so the renderer can
-        // coalesce the overwhelmingly common non-skirt path into large instanced draws.
+        // Main patch shells are packed before optional edge faces so the renderer can replace
+        // only the boundary plane that needs an exact cross-LOD connector.
         for patch in &mesh.patches {
             for edge in SurfacePatchEdge::ALL {
-                let range = &patch.skirt_ranges[edge.index()];
+                let range = &patch.edge_ranges[edge.index()];
                 assert_eq!(range.start, next_start);
-                assert_eq!(range.end - range.start, SURFACE_PATCH_EDGE_CELLS as u32);
-                let skirts = patch.skirt_quads(&mesh, edge);
-                assert_eq!(skirts.len(), SURFACE_PATCH_EDGE_CELLS as usize);
-                assert!(skirts.iter().all(|quad| match edge {
+                assert!(range.end - range.start <= SURFACE_PATCH_EDGE_CELLS as u32);
+                let edge_quads = patch.edge_quads(&mesh, edge);
+                assert!(edge_quads.iter().all(|quad| match edge {
                     SurfacePatchEdge::NegativeX => quad.face == FACE_NEG_X,
                     SurfacePatchEdge::PositiveX => quad.face == FACE_POS_X,
                     SurfacePatchEdge::NegativeZ => quad.face == FACE_NEG_Z,
@@ -2068,7 +2124,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_skirts_meet_the_sampled_top_plane_without_a_voxel_gap() {
+    fn patch_edge_faces_meet_the_sampled_top_plane_without_a_voxel_gap() {
         for level in SurfaceLodLevel::ALL {
             let stride = level.stride_voxels();
             let mesh =
@@ -2078,16 +2134,16 @@ mod tests {
             let [origin_x, origin_z] = mesh.coord.voxel_origin();
             for patch in &mesh.patches {
                 for edge in SurfacePatchEdge::ALL {
-                    for skirt in patch.skirt_quads(&mesh, edge) {
-                        let cell_x = (skirt.origin[0] - origin_x).div_euclid(stride);
-                        let cell_z = (skirt.origin[2] - origin_z).div_euclid(stride);
+                    for edge_quad in patch.edge_quads(&mesh, edge) {
+                        let cell_x = (edge_quad.origin[0] - origin_x).div_euclid(stride);
+                        let cell_z = (edge_quad.origin[2] - origin_z).div_euclid(stride);
                         let sample_x = origin_x + cell_x * stride + stride / 2;
                         let sample_z = origin_z + cell_z * stride + stride / 2;
                         let sampled_height = sample_x.div_euclid(11) - sample_z.div_euclid(13);
                         assert_eq!(
-                            i64::from(skirt.origin[1]) + i64::from(skirt.extent[1]),
+                            i64::from(edge_quad.origin[1]) + i64::from(edge_quad.extent[1]),
                             i64::from(sampled_height) + 1,
-                            "{level:?} {edge:?} skirt left a strip below its top face"
+                            "{level:?} {edge:?} edge face left a strip below its top face"
                         );
                     }
                 }
@@ -2096,22 +2152,27 @@ mod tests {
     }
 
     #[test]
-    fn transition_skirts_keep_half_open_top_planes_at_vertical_world_limits() {
-        for height in [i32::MIN, i32::MAX] {
-            let mesh = generate_surface_tile_mesh_with(
-                SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
-                |_, _| (height, Material::Stone),
+    fn patch_edge_faces_split_extreme_height_differences_without_holes() {
+        let mesh = generate_surface_tile_mesh_with(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
+            |x, _| (if x < 16 { 131_071 } else { 0 }, Material::Stone),
+        );
+        let patch = &mesh.patches[0];
+        let edge_quads = patch.edge_quads(&mesh, SurfacePatchEdge::PositiveX);
+        assert_eq!(edge_quads.len(), SURFACE_PATCH_EDGE_CELLS as usize * 3);
+        for segment in edge_quads.chunks_exact(3) {
+            assert_eq!(
+                segment
+                    .iter()
+                    .map(|quad| u32::from(quad.extent[1]))
+                    .sum::<u32>(),
+                131_071
             );
-            for patch in &mesh.patches {
-                for edge in SurfacePatchEdge::ALL {
-                    for skirt in patch.skirt_quads(&mesh, edge) {
-                        assert_eq!(
-                            i64::from(skirt.origin[1]) + i64::from(skirt.extent[1]),
-                            i64::from(height) + 1
-                        );
-                    }
-                }
-            }
+            assert_eq!(segment[0].origin[1], 1);
+            assert_eq!(
+                i64::from(segment[2].origin[1]) + i64::from(segment[2].extent[1]),
+                131_072
+            );
         }
     }
 
@@ -2378,7 +2439,7 @@ mod tests {
                 assert_eq!(actual, expected);
                 assert!(SurfacePatchEdge::ALL.into_iter().all(|edge| {
                     patch
-                        .skirt_quads(&mesh, edge)
+                        .edge_quads(&mesh, edge)
                         .iter()
                         .all(|quad| !matches!(quad.material, Material::Wood | Material::Leaves))
                 }));

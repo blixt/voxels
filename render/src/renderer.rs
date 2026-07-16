@@ -16,7 +16,7 @@ use crate::ui::{
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
 use crate::ui_gpu::{SCENE_FORMAT, UiGpu, texture_sampler_layout};
 use bytemuck::{Pod, Zeroable};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample, RemoteAvatarPose};
@@ -67,7 +67,7 @@ const SURFACE_MACRO_NORMAL_FLAG: u32 = 1 << 24;
 // adjacent LOD sampling phases.
 const SURFACE_MACRO_SLOPE_SCALE: f32 = 0.25;
 const SURFACE_MACRO_SLOPE_MAX: f32 = 0.5;
-const FAR_UNDERLAY_OFFSET_METRES: f32 = 0.025;
+const LOD_TRANSITION_MESH_KEY: MeshKey = (u8::MAX, 0, 0, 0);
 const GPU_QUERY_COUNT: u32 = 18;
 const GPU_QUERY_BUFFER_BYTES: u64 = GPU_QUERY_COUNT as u64 * size_of::<u64>() as u64;
 const GPU_RESOLVE_BUFFER_BYTES: u64 = 256;
@@ -249,6 +249,41 @@ struct GpuQuad {
     ao: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SurfaceCell {
+    height: i32,
+    material: Material,
+    macro_normal: u32,
+}
+
+#[derive(Clone, Debug)]
+struct SurfacePatchProfile {
+    origin: [i32; 2],
+    stride: i32,
+    cells: Vec<Option<SurfaceCell>>,
+}
+
+impl SurfacePatchProfile {
+    fn sample_world(&self, x: i32, z: i32) -> Option<SurfaceCell> {
+        let local_x = (i64::from(x) - i64::from(self.origin[0])).div_euclid(i64::from(self.stride));
+        let local_z = (i64::from(z) - i64::from(self.origin[1])).div_euclid(i64::from(self.stride));
+        if !(0..i64::from(voxels_world::SURFACE_PATCH_EDGE_CELLS)).contains(&local_x)
+            || !(0..i64::from(voxels_world::SURFACE_PATCH_EDGE_CELLS)).contains(&local_z)
+        {
+            return None;
+        }
+        let edge = voxels_world::SURFACE_PATCH_EDGE_CELLS as usize;
+        self.cells[local_x as usize + local_z as usize * edge]
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CanonicalChunkProfile {
+    cells: Vec<Option<SurfaceCell>>,
+}
+
+type CanonicalColumnProfiles = HashMap<(i32, i32), BTreeMap<i32, CanonicalChunkProfile>>;
+
 const _: () = assert!(size_of::<GpuQuad>() == 24);
 const _: () = assert!(std::mem::offset_of!(GpuQuad, extent_voxels) == 12);
 const _: () = assert!(std::mem::offset_of!(GpuQuad, material_face) == 16);
@@ -364,7 +399,7 @@ struct MeshSlice {
     bounds_max: glam::Vec3,
     surface_bounds: Option<SurfaceBounds>,
     surface_patch_id: Option<SurfacePatchId>,
-    skirt_edge: Option<SurfacePatchEdge>,
+    boundary_edge: Option<SurfacePatchEdge>,
     render_layer: RenderLayer,
 }
 
@@ -814,6 +849,8 @@ pub struct Renderer {
     material_detail: MaterialDetailGpu,
     chunks: BTreeMap<MeshKey, ChunkMesh>,
     water_chunks: BTreeMap<MeshKey, ChunkMesh>,
+    surface_patch_profiles: HashMap<SurfacePatchId, SurfacePatchProfile>,
+    canonical_surface_profiles: CanonicalColumnProfiles,
     surface_patch_residency: HashSet<SurfacePatchId>,
     canonical_ready_columns: HashSet<(i32, i32)>,
     surface_patch_residency_revision: u64,
@@ -1570,6 +1607,8 @@ impl Renderer {
             material_detail,
             chunks: BTreeMap::new(),
             water_chunks: BTreeMap::new(),
+            surface_patch_profiles: HashMap::new(),
+            canonical_surface_profiles: HashMap::new(),
             surface_patch_residency: HashSet::new(),
             canonical_ready_columns: HashSet::new(),
             surface_patch_residency_revision: 0,
@@ -1907,9 +1946,11 @@ impl Renderer {
     pub fn upload_chunk(&mut self, coord: ChunkCoord, mesh: &MeshedChunk) -> bool {
         let key = (0, coord.x, coord.y, coord.z);
         if mesh.is_empty() {
+            self.remove_canonical_surface_profile(coord);
             self.remove_chunk_mesh(key);
             return true;
         }
+        let surface_profile = canonical_chunk_profile(coord, mesh);
         let origin = coord.world_origin();
         let convert = |quad: &Quad| GpuQuad {
             origin: [
@@ -1941,7 +1982,7 @@ impl Renderer {
                     bounds_max: max,
                     surface_bounds: None,
                     surface_patch_id: None,
-                    skirt_edge: None,
+                    boundary_edge: None,
                     render_layer: RenderLayer::Opaque,
                 }],
             ) else {
@@ -1964,7 +2005,7 @@ impl Renderer {
                     bounds_max: max,
                     surface_bounds: None,
                     surface_patch_id: None,
-                    skirt_edge: None,
+                    boundary_edge: None,
                     render_layer: RenderLayer::Translucent,
                 }],
             ) else {
@@ -1980,6 +2021,12 @@ impl Renderer {
             key,
             water_update,
         );
+        self.canonical_surface_profiles
+            .entry((coord.x, coord.z))
+            .or_default()
+            .insert(coord.y, surface_profile);
+        self.surface_patch_residency_revision =
+            self.surface_patch_residency_revision.wrapping_add(1);
         let lights = local_lights_for_mesh(origin, mesh);
         if lights.is_empty() {
             self.local_light_candidates.remove(&key);
@@ -2013,8 +2060,8 @@ impl Renderer {
                 )
             })
             .collect::<HashSet<_>>();
-        let underlay_offset = FAR_UNDERLAY_OFFSET_METRES * (f32::from(coord.level.index()) + 1.0);
         let macro_normals = surface_macro_normals(tile);
+        let patch_profiles = surface_patch_profiles(tile, &macro_normals);
         let gpu_quads: Vec<_> = tile
             .quads
             .iter()
@@ -2022,7 +2069,7 @@ impl Renderer {
             .map(|(quad, macro_normal)| GpuQuad {
                 origin: [
                     quad.origin[0] as f32 * VOXEL_SIZE_METRES,
-                    quad.origin[1] as f32 * VOXEL_SIZE_METRES - underlay_offset,
+                    quad.origin[1] as f32 * VOXEL_SIZE_METRES,
                     quad.origin[2] as f32 * VOXEL_SIZE_METRES,
                 ],
                 extent_voxels: quad.extent,
@@ -2070,17 +2117,17 @@ impl Renderer {
                     surface_patch_bounds([tile_x, tile_z], stride, patch.cell_bounds, patch.bounds);
                 std::iter::once((patch.quad_range.clone(), patch.bounds, None))
                     .chain(SurfacePatchEdge::ALL.into_iter().map(|edge| {
-                        let range = patch.skirt_ranges[edge.index()].clone();
+                        let range = patch.edge_ranges[edge.index()].clone();
                         let bounds = SurfaceBounds::from_quads(
                             &tile.quads[range.start as usize..range.end as usize],
                         )
                         .unwrap_or(patch.bounds);
                         (range, bounds, Some(edge))
                     }))
-                    .map(move |(range, bounds, skirt_edge)| {
+                    .map(move |(range, bounds, boundary_edge)| {
                         let bounds_min = glam::Vec3::from_array(
                             bounds.min.map(|value| value as f32 * VOXEL_SIZE_METRES),
-                        ) - glam::Vec3::Y * underlay_offset;
+                        );
                         let bounds_max = glam::Vec3::from_array(
                             bounds.max.map(|value| value as f32 * VOXEL_SIZE_METRES),
                         );
@@ -2092,7 +2139,7 @@ impl Renderer {
                             bounds_max,
                             surface_bounds: Some(surface_bounds),
                             surface_patch_id: Some(patch_id),
-                            skirt_edge,
+                            boundary_edge,
                             render_layer: RenderLayer::Opaque,
                         }
                     })
@@ -2126,7 +2173,7 @@ impl Renderer {
                     ),
                     surface_bounds: Some(surface_bounds),
                     surface_patch_id: patch_id,
-                    skirt_edge: None,
+                    boundary_edge: None,
                     render_layer: RenderLayer::Translucent,
                 }
             })
@@ -2157,7 +2204,12 @@ impl Renderer {
             key,
             water_update,
         );
+        self.surface_patch_profiles
+            .retain(|patch, _| !surface_patch_belongs_to_tile(*patch, coord));
+        self.surface_patch_profiles.extend(patch_profiles);
         self.replace_surface_patch_residency(coord, resident_patch_ids);
+        self.surface_patch_residency_revision =
+            self.surface_patch_residency_revision.wrapping_add(1);
         true
     }
 
@@ -2201,13 +2253,31 @@ impl Renderer {
 
     pub fn remove_chunk(&mut self, coord: ChunkCoord) {
         let key = (0, coord.x, coord.y, coord.z);
+        self.remove_canonical_surface_profile(coord);
         self.remove_chunk_mesh(key);
         self.chunk_activations.remove(key);
     }
 
     pub fn remove_surface_tile(&mut self, coord: SurfaceTileCoord) {
         self.remove_mesh((coord.level.index() + 1, coord.x, 0, coord.z));
+        self.surface_patch_profiles
+            .retain(|patch, _| !surface_patch_belongs_to_tile(*patch, coord));
         self.replace_surface_patch_residency(coord, HashSet::new());
+    }
+
+    fn remove_canonical_surface_profile(&mut self, coord: ChunkCoord) {
+        let column = (coord.x, coord.z);
+        let mut remove_column = false;
+        if let Some(profiles) = self.canonical_surface_profiles.get_mut(&column) {
+            if profiles.remove(&coord.y).is_some() {
+                self.surface_patch_residency_revision =
+                    self.surface_patch_residency_revision.wrapping_add(1);
+            }
+            remove_column = profiles.is_empty();
+        }
+        if remove_column {
+            self.canonical_surface_profiles.remove(&column);
+        }
     }
 
     fn replace_surface_patch_residency(
@@ -2248,6 +2318,46 @@ impl Renderer {
         }
         self.surface_patch_selection_focus = focus;
         self.surface_patch_selection_revision = self.surface_patch_residency_revision;
+        self.rebuild_lod_transition_mesh();
+    }
+
+    fn rebuild_lod_transition_mesh(&mut self) {
+        let gpu_quads = build_lod_transition_quads(
+            &self.surface_patch_selection,
+            &self.surface_patch_profiles,
+            &self.canonical_surface_profiles,
+        );
+        if gpu_quads.is_empty() {
+            self.remove_opaque_mesh(LOD_TRANSITION_MESH_KEY);
+            return;
+        }
+        let Some((bounds_min, bounds_max)) = gpu_quad_bounds(&gpu_quads) else {
+            self.remove_opaque_mesh(LOD_TRANSITION_MESH_KEY);
+            return;
+        };
+        let quad_count = gpu_quads.len() as u32;
+        let slice = MeshSlice {
+            relative_offset: 0,
+            size: quad_count * size_of::<GpuQuad>() as u32,
+            quad_count,
+            bounds_min,
+            bounds_max,
+            surface_bounds: None,
+            surface_patch_id: None,
+            boundary_edge: None,
+            render_layer: RenderLayer::Opaque,
+        };
+        let Some(prepared) =
+            self.prepare_mesh_sliced(LOD_TRANSITION_MESH_KEY, &gpu_quads, vec![slice])
+        else {
+            return;
+        };
+        commit_prepared_mesh(
+            &mut self.arena,
+            &mut self.chunks,
+            LOD_TRANSITION_MESH_KEY,
+            Some(prepared),
+        );
     }
 
     /// Browser-smoke diagnostics for proving that a revised remote surface product reached the
@@ -2997,10 +3107,6 @@ fn collect_opaque_draw_lists(
             }
             for cascade_index in 0..CASCADE_COUNT {
                 if shadow_chunk_visible[cascade_index]
-                    // Transition skirts are synthetic crack-hiding curtains rather than terrain.
-                    // Letting their deep vertical faces cast directional shadows creates moving
-                    // shadow walls whenever a snapped LOD boundary advances with the camera.
-                    && slice.skirt_edge.is_none()
                     && shadow_clips[cascade_index].contains_aabb(slice.bounds_min, slice.bounds_max)
                 {
                     shadow_builders[cascade_index].select_slice(chunk, slice);
@@ -3187,56 +3293,312 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
     // Coarse height fields represent a smooth slope with flat tops separated by tall voxel walls.
     // Give only those generated terrain-body walls the owning cell's bounded slope normal. This
     // prevents distant hills from becoming black combs without adding geometry or accidentally
-    // smoothing canonical cliffs, skyline proxies, or disposable transition skirts.
+    // smoothing canonical cliffs or skyline proxies.
     for patch in &tile.patches {
-        let start = patch.quad_range.start as usize;
-        let end = patch.quad_range.end as usize;
-        for (quad, packed_normal) in tile.quads[start..end]
-            .iter()
-            .copied()
-            .zip(&mut packed[start..end])
-        {
-            if quad.face == 2 || i32::from(quad.extent[0]) != stride {
-                continue;
-            }
-            let adjusted_x = i64::from(quad.origin[0])
-                - if quad.face == 0 {
-                    i64::from(stride - 1)
-                } else {
-                    0
-                };
-            let adjusted_z = i64::from(quad.origin[2])
-                - if quad.face == 4 {
-                    i64::from(stride - 1)
-                } else {
-                    0
-                };
-            let local_x = adjusted_x - i64::from(origin_x);
-            let local_z = adjusted_z - i64::from(origin_z);
-            if local_x < 0
-                || local_z < 0
-                || local_x >= i64::from(span)
-                || local_z >= i64::from(span)
-                || local_x % i64::from(stride) != 0
-                || local_z % i64::from(stride) != 0
+        for range in std::iter::once(&patch.quad_range).chain(&patch.edge_ranges) {
+            let start = range.start as usize;
+            let end = range.end as usize;
+            for (quad, packed_normal) in tile.quads[start..end]
+                .iter()
+                .copied()
+                .zip(&mut packed[start..end])
             {
-                continue;
-            }
-            let cell_x = (local_x / i64::from(stride)) as usize;
-            let cell_z = (local_z / i64::from(stride)) as usize;
-            let cell = cell_x + cell_z * edge;
-            let Some((height, _)) = heights[cell] else {
-                continue;
-            };
-            let quad_top = i64::from(quad.origin[1]) + i64::from(quad.extent[1]);
-            if quad_top == i64::from(height) + 1
-                && let Some(normal) = cell_normals[cell]
-            {
-                *packed_normal = normal;
+                if quad.face == 2 || i32::from(quad.extent[0]) != stride {
+                    continue;
+                }
+                let adjusted_x = i64::from(quad.origin[0])
+                    - if quad.face == 0 {
+                        i64::from(stride - 1)
+                    } else {
+                        0
+                    };
+                let adjusted_z = i64::from(quad.origin[2])
+                    - if quad.face == 4 {
+                        i64::from(stride - 1)
+                    } else {
+                        0
+                    };
+                let local_x = adjusted_x - i64::from(origin_x);
+                let local_z = adjusted_z - i64::from(origin_z);
+                if local_x < 0
+                    || local_z < 0
+                    || local_x >= i64::from(span)
+                    || local_z >= i64::from(span)
+                    || local_x % i64::from(stride) != 0
+                    || local_z % i64::from(stride) != 0
+                {
+                    continue;
+                }
+                let cell_x = (local_x / i64::from(stride)) as usize;
+                let cell_z = (local_z / i64::from(stride)) as usize;
+                let cell = cell_x + cell_z * edge;
+                let Some((height, _)) = heights[cell] else {
+                    continue;
+                };
+                let quad_top = i64::from(quad.origin[1]) + i64::from(quad.extent[1]);
+                if quad_top == i64::from(height) + 1
+                    && let Some(normal) = cell_normals[cell]
+                {
+                    *packed_normal = normal;
+                }
             }
         }
     }
     packed
+}
+
+fn surface_patch_profiles(
+    tile: &SurfaceTileMesh,
+    macro_normals: &[u32],
+) -> Vec<(SurfacePatchId, SurfacePatchProfile)> {
+    let stride = tile.coord.stride_voxels();
+    let [tile_x, tile_z] = tile.coord.voxel_origin();
+    let edge = voxels_world::SURFACE_PATCH_EDGE_CELLS as usize;
+    tile.patches
+        .iter()
+        .filter_map(|patch| {
+            let patch_id = SurfacePatchId::from_tile_cell_min(
+                tile.coord,
+                [patch.cell_bounds[0][0], patch.cell_bounds[0][1]],
+            )?;
+            let origin = [
+                tile_x.saturating_add(i32::from(patch.cell_bounds[0][0]) * stride),
+                tile_z.saturating_add(i32::from(patch.cell_bounds[0][1]) * stride),
+            ];
+            let mut cells = vec![None; edge * edge];
+            for quad_index in patch.quad_range.clone() {
+                let index = quad_index as usize;
+                let quad = tile.quads[index];
+                if quad.face != 2 || quad.extent != [stride as u16; 2] {
+                    continue;
+                }
+                let local_x = (quad.origin[0] - origin[0]).div_euclid(stride);
+                let local_z = (quad.origin[2] - origin[1]).div_euclid(stride);
+                if !(0..edge as i32).contains(&local_x) || !(0..edge as i32).contains(&local_z) {
+                    continue;
+                }
+                cells[local_x as usize + local_z as usize * edge] = Some(SurfaceCell {
+                    height: quad.origin[1],
+                    material: quad.material,
+                    macro_normal: macro_normals[index],
+                });
+            }
+            Some((
+                patch_id,
+                SurfacePatchProfile {
+                    origin,
+                    stride,
+                    cells,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn canonical_chunk_profile(coord: ChunkCoord, mesh: &MeshedChunk) -> CanonicalChunkProfile {
+    let edge = CHUNK_EDGE;
+    let origin = coord.world_origin();
+    let mut cells = vec![None; edge * edge];
+    for quad in &mesh.opaque {
+        if quad.face != 2 {
+            continue;
+        }
+        let Some(material) = Material::from_id(quad.material) else {
+            continue;
+        };
+        let height = origin[1] + i32::from(quad.origin[1]);
+        for local_z in
+            usize::from(quad.origin[2])..usize::from(quad.origin[2]) + usize::from(quad.extent[1])
+        {
+            for local_x in usize::from(quad.origin[0])
+                ..usize::from(quad.origin[0]) + usize::from(quad.extent[0])
+            {
+                let cell = &mut cells[local_x + local_z * edge];
+                if cell.is_none_or(|current: SurfaceCell| height > current.height) {
+                    *cell = Some(SurfaceCell {
+                        height,
+                        material,
+                        macro_normal: 0xff,
+                    });
+                }
+            }
+        }
+    }
+    CanonicalChunkProfile { cells }
+}
+
+fn canonical_surface_sample(
+    profiles: &CanonicalColumnProfiles,
+    x: i32,
+    z: i32,
+) -> Option<SurfaceCell> {
+    let edge = CHUNK_EDGE as i32;
+    let chunk_x = x.div_euclid(edge);
+    let chunk_z = z.div_euclid(edge);
+    let local_x = x.rem_euclid(edge) as usize;
+    let local_z = z.rem_euclid(edge) as usize;
+    profiles
+        .get(&(chunk_x, chunk_z))?
+        .values()
+        .filter_map(|profile| profile.cells[local_x + local_z * CHUNK_EDGE])
+        .max_by_key(|sample| sample.height)
+}
+
+fn build_lod_transition_quads(
+    selection: &SurfacePatchSelection,
+    surface_profiles: &HashMap<SurfacePatchId, SurfacePatchProfile>,
+    canonical_profiles: &CanonicalColumnProfiles,
+) -> Vec<GpuQuad> {
+    let mut transitions = selection.transitions().collect::<Vec<_>>();
+    transitions.sort_unstable_by_key(|(patch, edge)| (*patch, edge.index()));
+    let mut quads = Vec::with_capacity(transitions.len() * 16);
+    for (patch, edge) in transitions {
+        let Some(coarse) = surface_profiles.get(&patch) else {
+            continue;
+        };
+        append_lod_transition(
+            &mut quads,
+            selection,
+            surface_profiles,
+            canonical_profiles,
+            patch,
+            edge,
+            coarse,
+        );
+    }
+    quads
+}
+
+fn append_lod_transition(
+    quads: &mut Vec<GpuQuad>,
+    selection: &SurfacePatchSelection,
+    surface_profiles: &HashMap<SurfacePatchId, SurfacePatchProfile>,
+    canonical_profiles: &CanonicalColumnProfiles,
+    patch: SurfacePatchId,
+    edge: SurfacePatchEdge,
+    coarse: &SurfacePatchProfile,
+) {
+    let coarse_stride = coarse.stride;
+    let fine_stride = coarse_stride / 2;
+    let patch_span = patch.voxel_span();
+    let fine_segments = voxels_world::SURFACE_PATCH_EDGE_CELLS * 2;
+    for fine_segment in 0..fine_segments {
+        let tangent = fine_segment * fine_stride;
+        let tangent_sample = tangent + fine_stride / 2;
+        let (coarse_x, coarse_z, fine_x, fine_z, outward_face, inward_face, boundary) = match edge {
+            SurfacePatchEdge::NegativeX => (
+                coarse.origin[0] + coarse_stride / 2,
+                coarse.origin[1] + tangent_sample,
+                coarse.origin[0] - fine_stride + fine_stride / 2,
+                coarse.origin[1] + tangent_sample,
+                1,
+                0,
+                [coarse.origin[0], coarse.origin[1] + tangent],
+            ),
+            SurfacePatchEdge::PositiveX => (
+                coarse.origin[0] + patch_span - coarse_stride / 2,
+                coarse.origin[1] + tangent_sample,
+                coarse.origin[0] + patch_span + fine_stride / 2,
+                coarse.origin[1] + tangent_sample,
+                0,
+                1,
+                [coarse.origin[0] + patch_span, coarse.origin[1] + tangent],
+            ),
+            SurfacePatchEdge::NegativeZ => (
+                coarse.origin[0] + tangent_sample,
+                coarse.origin[1] + coarse_stride / 2,
+                coarse.origin[0] + tangent_sample,
+                coarse.origin[1] - fine_stride + fine_stride / 2,
+                5,
+                4,
+                [coarse.origin[0] + tangent, coarse.origin[1]],
+            ),
+            SurfacePatchEdge::PositiveZ => (
+                coarse.origin[0] + tangent_sample,
+                coarse.origin[1] + patch_span - coarse_stride / 2,
+                coarse.origin[0] + tangent_sample,
+                coarse.origin[1] + patch_span + fine_stride / 2,
+                4,
+                5,
+                [coarse.origin[0] + tangent, coarse.origin[1] + patch_span],
+            ),
+        };
+        let Some(coarse_cell) = coarse.sample_world(coarse_x, coarse_z) else {
+            continue;
+        };
+        let fine_point = [fine_x, fine_z];
+        let fine_cell = selection
+            .selected_patch_at(fine_point)
+            .and_then(|fine_patch| surface_profiles.get(&fine_patch))
+            .and_then(|profile| profile.sample_world(fine_x, fine_z))
+            .or_else(|| {
+                (patch.level == SurfaceLodLevel::Stride2)
+                    .then(|| canonical_surface_sample(canonical_profiles, fine_x, fine_z))
+                    .flatten()
+            });
+        let Some(fine_cell) = fine_cell else {
+            continue;
+        };
+        if coarse_cell.height == fine_cell.height {
+            continue;
+        }
+        let (lower, upper, face, surface) = if coarse_cell.height > fine_cell.height {
+            (
+                fine_cell.height,
+                coarse_cell.height,
+                outward_face,
+                coarse_cell,
+            )
+        } else {
+            (coarse_cell.height, fine_cell.height, inward_face, fine_cell)
+        };
+        let mut remaining = i64::from(upper) - i64::from(lower);
+        let mut y = lower.saturating_add(1);
+        while remaining > 0 {
+            let vertical_extent = remaining.min(i64::from(u16::MAX)) as u16;
+            let origin_voxels = match face {
+                0 => [boundary[0].saturating_sub(1), y, boundary[1]],
+                1 => [boundary[0], y, boundary[1]],
+                4 => [boundary[0], y, boundary[1].saturating_sub(1)],
+                5 => [boundary[0], y, boundary[1]],
+                _ => unreachable!(),
+            };
+            quads.push(GpuQuad {
+                origin: origin_voxels.map(|value| value as f32 * VOXEL_SIZE_METRES),
+                extent_voxels: [fine_stride as u16, vertical_extent],
+                material_face: pack_gpu_material_face(
+                    u32::from(surface.material.id())
+                        | FAR_MATERIAL_FLAG
+                        | (u32::from(patch.level.index()) << SURFACE_LOD_SHIFT),
+                    face,
+                ),
+                ao: surface.macro_normal,
+            });
+            remaining -= i64::from(vertical_extent);
+            y = y.saturating_add(i32::from(vertical_extent));
+        }
+    }
+}
+
+fn gpu_quad_bounds(quads: &[GpuQuad]) -> Option<(glam::Vec3, glam::Vec3)> {
+    let mut minimum = glam::Vec3::splat(f32::INFINITY);
+    let mut maximum = glam::Vec3::splat(f32::NEG_INFINITY);
+    for quad in quads {
+        let face = (quad.material_face & GPU_FACE_MASK) >> GPU_FACE_SHIFT;
+        let extent = glam::Vec2::new(
+            f32::from(quad.extent_voxels[0]) * VOXEL_SIZE_METRES,
+            f32::from(quad.extent_voxels[1]) * VOXEL_SIZE_METRES,
+        );
+        let size = match face {
+            0 | 1 => glam::Vec3::new(VOXEL_SIZE_METRES, extent.y, extent.x),
+            2 | 3 => glam::Vec3::new(extent.x, VOXEL_SIZE_METRES, extent.y),
+            _ => glam::Vec3::new(extent.x, extent.y, VOXEL_SIZE_METRES),
+        };
+        let origin = glam::Vec3::from_array(quad.origin);
+        minimum = minimum.min(origin);
+        maximum = maximum.max(origin + size);
+    }
+    minimum.is_finite().then_some((minimum, maximum))
 }
 
 fn stabilized_surface_gradient(mut gradient: glam::Vec2) -> glam::Vec2 {
@@ -3306,6 +3668,9 @@ fn slice_owned_by_lod(
     key: &MeshKey,
     slice: &MeshSlice,
 ) -> bool {
+    if *key == LOD_TRANSITION_MESH_KEY {
+        return true;
+    }
     let Some(focus) = focus else {
         return true;
     };
@@ -3322,12 +3687,18 @@ fn slice_owned_by_lod(
         return false;
     }
     if let (Some(patch_id), Some(selection)) = (slice.surface_patch_id, surface_patch_selection) {
-        return selection.owns(patch_id, slice.skirt_edge);
+        return slice.boundary_edge.map_or_else(
+            || selection.owns(patch_id, None),
+            |edge| selection.owns(patch_id, None) && !selection.owns(patch_id, Some(edge)),
+        );
     }
     slice.surface_bounds.is_some_and(|bounds| {
-        slice.skirt_edge.map_or_else(
+        slice.boundary_edge.map_or_else(
             || focus.owns_surface_bounds(level, bounds),
-            |edge| focus.owns_surface_skirt(level, bounds, edge),
+            |edge| {
+                focus.owns_surface_bounds(level, bounds)
+                    && !focus.owns_surface_transition(level, bounds, edge)
+            },
         )
     })
 }
@@ -3926,6 +4297,21 @@ fn preferred_format(formats: &[TextureFormat]) -> TextureFormat {
 mod tests {
     use super::*;
 
+    fn flat_patch_profile(patch: SurfacePatchId, height: i32) -> SurfacePatchProfile {
+        SurfacePatchProfile {
+            origin: patch.voxel_bounds_xz().unwrap()[0],
+            stride: patch.level.stride_voxels(),
+            cells: vec![
+                Some(SurfaceCell {
+                    height,
+                    material: Material::Grass,
+                    macro_normal: 0xff | SURFACE_MACRO_NORMAL_FLAG,
+                });
+                (voxels_world::SURFACE_PATCH_EDGE_CELLS.pow(2)) as usize
+            ],
+        }
+    }
+
     fn counts(entries: &[(Material, u64)]) -> [u64; Material::ALL.len()] {
         let mut counts = [0; Material::ALL.len()];
         for &(material, count) in entries {
@@ -3966,6 +4352,94 @@ mod tests {
             "terrain wall shares its cell's macro normal"
         );
         assert_eq!(size_of::<GpuQuad>(), 24);
+    }
+
+    #[test]
+    fn active_lod_transition_exactly_joins_the_two_resident_height_profiles() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        let coarse = SurfacePatchId::new(SurfaceLodLevel::Stride4, 8, 0);
+        let fine_low = SurfacePatchId::new(SurfaceLodLevel::Stride2, 15, 0);
+        let fine_high = SurfacePatchId::new(SurfaceLodLevel::Stride2, 15, 1);
+        let resident = HashSet::from([coarse, fine_low, fine_high]);
+        let mut selection = SurfacePatchSelection::default();
+        selection.rebuild(focus, &resident, &HashSet::new());
+        assert!(selection.owns(coarse, Some(SurfacePatchEdge::NegativeX)));
+
+        let profiles = HashMap::from([
+            (coarse, flat_patch_profile(coarse, 10)),
+            (fine_low, flat_patch_profile(fine_low, 20)),
+            (fine_high, flat_patch_profile(fine_high, 20)),
+        ]);
+        let quads = build_lod_transition_quads(&selection, &profiles, &HashMap::new());
+        assert_eq!(quads.len(), 16);
+        for quad in &quads {
+            assert_eq!(quad.extent_voxels, [2, 10]);
+            assert_eq!(quad.origin[0], 25.5);
+            assert_eq!(quad.origin[1], 1.1);
+            assert_eq!(quad.material_face >> GPU_FACE_SHIFT & 7, 0);
+            assert_ne!(quad.ao & SURFACE_MACRO_NORMAL_FLAG, 0);
+            assert_eq!(quad.origin[1] + f32::from(quad.extent_voxels[1]) * 0.1, 2.1);
+        }
+
+        let surface_bounds = SurfaceBounds {
+            min: [256, 0, 0],
+            max: [288, 32, 32],
+        };
+        let main = MeshSlice {
+            relative_offset: 0,
+            size: size_of::<GpuQuad>() as u32,
+            quad_count: 1,
+            bounds_min: glam::Vec3::ZERO,
+            bounds_max: glam::Vec3::ONE,
+            surface_bounds: Some(surface_bounds),
+            surface_patch_id: Some(coarse),
+            boundary_edge: None,
+            render_layer: RenderLayer::Opaque,
+        };
+        let edge = MeshSlice {
+            boundary_edge: Some(SurfacePatchEdge::NegativeX),
+            ..main
+        };
+        let key = (SurfaceLodLevel::Stride4.index() + 1, 0, 0, 0);
+        assert!(slice_owned_by_lod(
+            Some(focus),
+            Some(&selection),
+            &key,
+            &main
+        ));
+        assert!(!slice_owned_by_lod(
+            Some(focus),
+            Some(&selection),
+            &key,
+            &edge
+        ));
+    }
+
+    #[test]
+    fn active_lod_transition_splits_unbounded_height_differences_without_a_hole() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        let coarse = SurfacePatchId::new(SurfaceLodLevel::Stride4, 8, 0);
+        let fine_low = SurfacePatchId::new(SurfaceLodLevel::Stride2, 15, 0);
+        let fine_high = SurfacePatchId::new(SurfaceLodLevel::Stride2, 15, 1);
+        let resident = HashSet::from([coarse, fine_low, fine_high]);
+        let mut selection = SurfacePatchSelection::default();
+        selection.rebuild(focus, &resident, &HashSet::new());
+        let profiles = HashMap::from([
+            (coarse, flat_patch_profile(coarse, 0)),
+            (fine_low, flat_patch_profile(fine_low, 131_071)),
+            (fine_high, flat_patch_profile(fine_high, 131_071)),
+        ]);
+        let quads = build_lod_transition_quads(&selection, &profiles, &HashMap::new());
+        assert_eq!(quads.len(), 16 * 3);
+        for segments in quads.chunks_exact(3) {
+            assert_eq!(
+                segments
+                    .iter()
+                    .map(|quad| u32::from(quad.extent_voxels[1]))
+                    .sum::<u32>(),
+                131_071
+            );
+        }
     }
 
     #[test]
@@ -4230,7 +4704,7 @@ mod tests {
             bounds_max: glam::Vec3::splat(10_000.0),
             surface_bounds,
             surface_patch_id: None,
-            skirt_edge: None,
+            boundary_edge: None,
             render_layer: RenderLayer::Opaque,
         }
     }
@@ -4470,7 +4944,7 @@ mod tests {
             bounds_max,
             surface_bounds: None,
             surface_patch_id: None,
-            skirt_edge: None,
+            boundary_edge: None,
             render_layer: RenderLayer::Opaque,
         };
         let surface_slice = MeshSlice {
@@ -4484,14 +4958,14 @@ mod tests {
                 max: [112, 80, 16],
             }),
             surface_patch_id: Some(SurfacePatchId::new(SurfaceLodLevel::Stride2, 6, 0)),
-            skirt_edge: None,
+            boundary_edge: None,
             render_layer: RenderLayer::Opaque,
         };
-        let surface_skirt_slice = MeshSlice {
+        let surface_edge_slice = MeshSlice {
             relative_offset: surface_slice.size,
             size: size_of::<GpuQuad>() as u32,
             quad_count: 1,
-            skirt_edge: Some(SurfacePatchEdge::NegativeX),
+            boundary_edge: Some(SurfacePatchEdge::NegativeX),
             ..surface_slice
         };
         let mut arena = ArenaAllocator::new(256, 1);
@@ -4499,7 +4973,7 @@ mod tests {
             .allocate(canonical_slice.size)
             .expect("canonical test allocation");
         let surface_allocation = arena
-            .allocate(surface_slice.size + surface_skirt_slice.size)
+            .allocate(surface_slice.size + surface_edge_slice.size)
             .expect("surface test allocation");
         let mut chunks = BTreeMap::from([
             (
@@ -4521,9 +4995,9 @@ mod tests {
                 surface_key,
                 ChunkMesh {
                     allocation: surface_allocation,
-                    quad_count: surface_slice.quad_count + surface_skirt_slice.quad_count,
+                    quad_count: surface_slice.quad_count + surface_edge_slice.quad_count,
                     content_fingerprint: 22,
-                    slices: vec![surface_slice, surface_skirt_slice],
+                    slices: vec![surface_slice, surface_edge_slice],
                     lod_ownership_focus: None,
                     lod_residency_revision: 0,
                     lod_owned_slices: Vec::new(),
@@ -4570,7 +5044,6 @@ mod tests {
                 |key, slice| {
                     slice.render_layer == RenderLayer::Opaque
                         && slice_owned_by_lod(focus, Some(&surface_patch_selection), key, slice)
-                        && slice.skirt_edge.is_none()
                         && shadow_clips[cascade_index]
                             .contains_aabb(slice.bounds_min, slice.bounds_max)
                 },
@@ -4578,7 +5051,7 @@ mod tests {
         });
         assert_eq!(actual_world, expected_world);
         assert_eq!(actual_shadows, expected_shadows);
-        assert!(actual_world.quad_count > actual_shadows[0].quad_count);
+        assert_eq!(actual_world.quad_count, actual_shadows[0].quad_count);
 
         let cached_world = collect_opaque_draw_lists(
             &mut chunks,

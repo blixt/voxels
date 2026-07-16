@@ -105,7 +105,7 @@ impl GeometricLodFocus {
         self.owner_at(centre_x, centre_z) == LodOwner::Surface(level)
     }
 
-    pub fn owns_surface_skirt(
+    pub fn owns_surface_transition(
         self,
         level: SurfaceLodLevel,
         bounds: SurfaceBounds,
@@ -122,7 +122,10 @@ impl GeometricLodFocus {
             SurfacePatchEdge::NegativeZ => [centre_x, bounds.min[2].saturating_sub(1)],
             SurfacePatchEdge::PositiveZ => [centre_x, bounds.max[2]],
         };
-        self.owner_at(neighbor[0], neighbor[1]) != LodOwner::Surface(level)
+        match self.owner_at(neighbor[0], neighbor[1]) {
+            LodOwner::Canonical => true,
+            LodOwner::Surface(neighbor_level) => neighbor_level.index() < level.index(),
+        }
     }
 
     pub fn owns_canonical_chunk(self, chunk_x: i32, chunk_z: i32) -> bool {
@@ -179,44 +182,25 @@ pub fn surface_patch_is_selected(
     }
 }
 
-pub fn surface_patch_skirt_is_selected(
+pub fn surface_patch_transition_is_selected(
     focus: GeometricLodFocus,
     resident: &HashSet<SurfacePatchId>,
     canonical_ready_columns: &HashSet<(i32, i32)>,
     patch: SurfacePatchId,
     edge: SurfacePatchEdge,
 ) -> bool {
-    if !surface_patch_is_selected(focus, resident, canonical_ready_columns, patch) {
-        return false;
-    }
-    let delta = match edge {
-        SurfacePatchEdge::NegativeX => [-1, 0],
-        SurfacePatchEdge::PositiveX => [1, 0],
-        SurfacePatchEdge::NegativeZ => [0, -1],
-        SurfacePatchEdge::PositiveZ => [0, 1],
-    };
-    let Some(neighbor) = patch.neighbor(delta[0], delta[1]) else {
-        return false;
-    };
-    if surface_patch_is_selected(focus, resident, canonical_ready_columns, neighbor) {
-        return false;
-    }
-    if resident.contains(&neighbor) {
-        return true;
-    }
-    let Some(center) = neighbor.voxel_center_xz() else {
-        return false;
-    };
-    focus.owner_at(center[0], center[1]) != LodOwner::Surface(patch.level)
+    let mut selection = SurfacePatchSelection::default();
+    selection.rebuild(focus, resident, canonical_ready_columns);
+    selection.owns(patch, Some(edge))
 }
 
 /// Cached result of hierarchy selection. Building it touches each resident patch once; draw-list
 /// construction then performs only constant-time membership checks instead of repeating ancestor
-/// walks for the main shell and four skirt slices of every patch.
+/// walks for the main shell and four transition slices of every patch.
 #[derive(Debug, Default)]
 pub struct SurfacePatchSelection {
     patches: HashSet<SurfacePatchId>,
-    skirts: HashSet<(SurfacePatchId, u8)>,
+    transitions: HashSet<(SurfacePatchId, u8)>,
 }
 
 impl SurfacePatchSelection {
@@ -227,46 +211,95 @@ impl SurfacePatchSelection {
         canonical_ready_columns: &HashSet<(i32, i32)>,
     ) {
         self.patches.clear();
-        self.skirts.clear();
+        self.transitions.clear();
         self.patches
             .extend(resident.iter().copied().filter(|patch| {
                 surface_patch_is_selected(focus, resident, canonical_ready_columns, *patch)
             }));
         for patch in self.patches.iter().copied() {
             for edge in SurfacePatchEdge::ALL {
-                let delta = match edge {
-                    SurfacePatchEdge::NegativeX => [-1, 0],
-                    SurfacePatchEdge::PositiveX => [1, 0],
-                    SurfacePatchEdge::NegativeZ => [0, -1],
-                    SurfacePatchEdge::PositiveZ => [0, 1],
-                };
-                let Some(neighbor) = patch.neighbor(delta[0], delta[1]) else {
+                let Some(neighbor_points) = points_across_patch_edge(patch, edge) else {
                     continue;
                 };
-                if self.patches.contains(&neighbor) {
-                    continue;
-                }
-                let residency_boundary = resident.contains(&neighbor);
-                let resolution_boundary = neighbor.voxel_center_xz().is_some_and(|center| {
-                    focus.owner_at(center[0], center[1]) != LodOwner::Surface(patch.level)
+                let selected_neighbors =
+                    neighbor_points.map(|point| selected_surface_patch_at(&self.patches, point));
+                let borders_finer_surface = selected_neighbors.iter().all(|neighbor| {
+                    neighbor.is_some_and(|neighbor| neighbor.level.index() < patch.level.index())
                 });
-                if residency_boundary || resolution_boundary {
-                    self.skirts.insert((patch, edge.index() as u8));
+                let borders_ready_canonical = patch.level == SurfaceLodLevel::Stride2
+                    && selected_neighbors.iter().all(Option::is_none)
+                    && neighbor_points.iter().all(|point| {
+                        focus.owner_at(point[0], point[1]) == LodOwner::Canonical
+                            && canonical_ready_columns.contains(&(
+                                point[0].div_euclid(CHUNK_EDGE as i32),
+                                point[1].div_euclid(CHUNK_EDGE as i32),
+                            ))
+                    });
+                if borders_finer_surface || borders_ready_canonical {
+                    self.transitions.insert((patch, edge.index() as u8));
                 }
             }
         }
     }
 
-    pub fn owns(&self, patch: SurfacePatchId, skirt_edge: Option<SurfacePatchEdge>) -> bool {
-        skirt_edge.map_or_else(
+    pub fn owns(&self, patch: SurfacePatchId, transition_edge: Option<SurfacePatchEdge>) -> bool {
+        transition_edge.map_or_else(
             || self.patches.contains(&patch),
-            |edge| self.skirts.contains(&(patch, edge.index() as u8)),
+            |edge| self.transitions.contains(&(patch, edge.index() as u8)),
         )
     }
 
     pub fn patch_count(&self) -> usize {
         self.patches.len()
     }
+
+    pub fn transitions(&self) -> impl Iterator<Item = (SurfacePatchId, SurfacePatchEdge)> + '_ {
+        self.transitions.iter().filter_map(|(patch, edge)| {
+            SurfacePatchEdge::ALL
+                .get(usize::from(*edge))
+                .copied()
+                .map(|edge| (*patch, edge))
+        })
+    }
+
+    pub fn selected_patch_at(&self, point: [i32; 2]) -> Option<SurfacePatchId> {
+        selected_surface_patch_at(&self.patches, point)
+    }
+}
+
+fn points_across_patch_edge(
+    patch: SurfacePatchId,
+    edge: SurfacePatchEdge,
+) -> Option<[[i32; 2]; 2]> {
+    let [[min_x, min_z], [max_x, max_z]] = patch.voxel_bounds_xz()?;
+    let quarter_x = min_x + (max_x - min_x) / 4;
+    let quarter_z = min_z + (max_z - min_z) / 4;
+    let three_quarter_x = max_x - (max_x - min_x) / 4;
+    let three_quarter_z = max_z - (max_z - min_z) / 4;
+    match edge {
+        SurfacePatchEdge::NegativeX => Some([
+            [min_x.checked_sub(1)?, quarter_z],
+            [min_x.checked_sub(1)?, three_quarter_z],
+        ]),
+        SurfacePatchEdge::PositiveX => Some([[max_x, quarter_z], [max_x, three_quarter_z]]),
+        SurfacePatchEdge::NegativeZ => Some([
+            [quarter_x, min_z.checked_sub(1)?],
+            [three_quarter_x, min_z.checked_sub(1)?],
+        ]),
+        SurfacePatchEdge::PositiveZ => Some([[quarter_x, max_z], [three_quarter_x, max_z]]),
+    }
+}
+
+fn selected_surface_patch_at(
+    selected: &HashSet<SurfacePatchId>,
+    point: [i32; 2],
+) -> Option<SurfacePatchId> {
+    SurfaceLodLevel::ALL.into_iter().find_map(|level| {
+        let span = level.stride_voxels() * voxels_world::SURFACE_PATCH_EDGE_CELLS;
+        let patch =
+            SurfacePatchId::new(level, point[0].div_euclid(span), point[1].div_euclid(span));
+        selected.contains(&patch).then_some(patch)
+    })
 }
 
 fn refinement_blocked_by_ancestor(
@@ -389,19 +422,19 @@ mod tests {
     }
 
     #[test]
-    fn selected_patch_skirts_only_resolution_or_residency_boundaries() {
+    fn selected_patch_transitions_only_resolution_or_residency_boundaries() {
         let focus = GeometricLodFocus::snapped(0, 0);
         let left = SurfacePatchId::new(SurfaceLodLevel::Stride2, 7, 0);
         let right = left.neighbor(1, 0).unwrap();
         let both = resident([left, right]);
-        assert!(!surface_patch_skirt_is_selected(
+        assert!(!surface_patch_transition_is_selected(
             focus,
             &both,
             &HashSet::new(),
             left,
             SurfacePatchEdge::PositiveX
         ));
-        assert!(!surface_patch_skirt_is_selected(
+        assert!(!surface_patch_transition_is_selected(
             focus,
             &resident([left]),
             &HashSet::new(),
@@ -410,10 +443,10 @@ mod tests {
         ));
 
         let boundary = SurfacePatchId::new(SurfaceLodLevel::Stride2, 6, 0);
-        assert!(surface_patch_skirt_is_selected(
+        assert!(surface_patch_transition_is_selected(
             focus,
             &resident([boundary]),
-            &HashSet::new(),
+            &HashSet::from([(2, 0)]),
             boundary,
             SurfacePatchEdge::NegativeX
         ));
@@ -642,13 +675,13 @@ mod tests {
     }
 
     #[test]
-    fn skirts_are_owned_only_on_resolution_boundaries() {
+    fn transitions_are_owned_only_on_resolution_boundaries() {
         let focus = GeometricLodFocus::snapped(0, 0);
         let interior = SurfaceBounds {
             min: [112, -64, 0],
             max: [128, 128, 16],
         };
-        assert!(!focus.owns_surface_skirt(
+        assert!(!focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,
             interior,
             SurfacePatchEdge::PositiveX
@@ -658,12 +691,12 @@ mod tests {
             min: [96, -64, 0],
             max: [112, 128, 16],
         };
-        assert!(focus.owns_surface_skirt(
+        assert!(focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,
             canonical_boundary,
             SurfacePatchEdge::NegativeX
         ));
-        assert!(!focus.owns_surface_skirt(
+        assert!(!focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,
             canonical_boundary,
             SurfacePatchEdge::PositiveX
@@ -673,7 +706,7 @@ mod tests {
             min: [256, -64, 0],
             max: [288, 128, 32],
         };
-        assert!(!focus.owns_surface_skirt(
+        assert!(!focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,
             wrong_level,
             SurfacePatchEdge::NegativeX
@@ -681,19 +714,19 @@ mod tests {
     }
 
     #[test]
-    fn skirts_do_not_wrap_across_the_world_boundary() {
+    fn transitions_do_not_wrap_across_the_world_boundary() {
         let focus = GeometricLodFocus::snapped(i32::MIN, i32::MIN);
         let bounds = SurfaceBounds {
             min: [i32::MIN, -64, i32::MIN],
             max: [i32::MIN + 16, 128, i32::MIN + 16],
         };
 
-        assert!(!focus.owns_surface_skirt(
+        assert!(!focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,
             bounds,
             SurfacePatchEdge::NegativeX,
         ));
-        assert!(!focus.owns_surface_skirt(
+        assert!(!focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,
             bounds,
             SurfacePatchEdge::NegativeZ,

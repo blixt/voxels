@@ -16,7 +16,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 10;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -30,7 +30,7 @@ pub const EDIT_SESSION_NOT_CURRENT: &str = "edit session is no longer current";
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
-const SURFACE_SNAPSHOT_VERSION: u16 = 2;
+const SURFACE_SNAPSHOT_VERSION: u16 = 3;
 
 const KIND_OPEN_WORLD: u16 = 1;
 const KIND_WORLD_OPENED: u16 = 2;
@@ -2594,7 +2594,7 @@ fn encode_surface_mesh(output: &mut Vec<u8>, mesh: &SurfaceTileMesh) {
             patch.cell_bounds[1][1],
         ]);
         encode_range(output, &patch.quad_range);
-        for range in &patch.skirt_ranges {
+        for range in &patch.edge_ranges {
             encode_range(output, range);
         }
         encode_surface_bounds(output, patch.bounds);
@@ -2622,7 +2622,7 @@ fn decode_surface_mesh(
     for _ in 0..patch_count {
         let cell_bounds = [[cursor.u8()?, cursor.u8()?], [cursor.u8()?, cursor.u8()?]];
         let quad_range = decode_range(cursor)?;
-        let skirt_ranges = [
+        let edge_ranges = [
             decode_range(cursor)?,
             decode_range(cursor)?,
             decode_range(cursor)?,
@@ -2632,7 +2632,7 @@ fn decode_surface_mesh(
         patches.push(SurfacePatch {
             cell_bounds,
             quad_range,
-            skirt_ranges,
+            edge_ranges,
             bounds,
         });
     }
@@ -2811,7 +2811,7 @@ fn validate_surface_mesh(mesh: &SurfaceTileMesh) -> Result<(), ProtocolError> {
             ));
         }
         validate_range(&patch.quad_range, mesh.quads.len())?;
-        for range in &patch.skirt_ranges {
+        for range in &patch.edge_ranges {
             validate_range(range, mesh.quads.len())?;
         }
         if (0..3).any(|axis| patch.bounds.min[axis] >= patch.bounds.max[axis]) {
@@ -3690,10 +3690,10 @@ mod tests {
             other => panic!("unexpected product: {other:?}"),
         };
         let mut encoded = encode_surface_snapshot(&snapshot).expect("encode");
-        encoded[4..6].copy_from_slice(&3_u16.to_le_bytes());
+        encoded[4..6].copy_from_slice(&4_u16.to_le_bytes());
         assert_eq!(
             decode_surface_snapshot(&encoded, coord, source.source_identity_hash()),
-            Err(ProtocolError::UnsupportedVersion(3))
+            Err(ProtocolError::UnsupportedVersion(4))
         );
 
         snapshot.terrain.patches[0].quad_range.end = u32::MAX;
