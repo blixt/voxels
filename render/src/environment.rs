@@ -7,6 +7,7 @@ use voxels_world::{AtmosphereSample, SurfaceRegion};
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DaylightPhase {
+    Night,
     Dawn,
     ClearDay,
     #[default]
@@ -15,23 +16,56 @@ pub enum DaylightPhase {
 }
 
 impl DaylightPhase {
-    pub const ALL: [Self; 4] = [Self::Dawn, Self::ClearDay, Self::GoldenHour, Self::BlueHour];
+    pub const ALL: [Self; 5] = [
+        Self::Night,
+        Self::Dawn,
+        Self::ClearDay,
+        Self::GoldenHour,
+        Self::BlueHour,
+    ];
 
     pub const fn next(self) -> Self {
         match self {
+            Self::Night => Self::Dawn,
             Self::Dawn => Self::ClearDay,
             Self::ClearDay => Self::GoldenHour,
             Self::GoldenHour => Self::BlueHour,
-            Self::BlueHour => Self::Dawn,
+            Self::BlueHour => Self::Night,
         }
     }
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Night => "NIGHT",
             Self::Dawn => "DAWN",
             Self::ClearDay => "CLEAR DAY",
             Self::GoldenHour => "GOLDEN HOUR",
             Self::BlueHour => "BLUE HOUR",
+        }
+    }
+
+    pub const fn anchor_day_fraction(self) -> f32 {
+        match self {
+            Self::Night => 0.0,
+            Self::Dawn => 0.235,
+            Self::ClearDay => 0.5,
+            Self::GoldenHour => 0.72,
+            Self::BlueHour => 0.80,
+        }
+    }
+
+    pub fn for_day_fraction(day_fraction: f32) -> Self {
+        let day_fraction = day_fraction.rem_euclid(1.0);
+        if !(0.18..0.84).contains(&day_fraction) {
+            Self::Night
+        } else if day_fraction < 0.29 {
+            Self::Dawn
+        } else if day_fraction < 0.66 {
+            Self::ClearDay
+        } else if day_fraction < 0.77 {
+            Self::GoldenHour
+        } else {
+            Self::BlueHour
         }
     }
 }
@@ -51,8 +85,13 @@ pub const fn surface_region_label(region: SurfaceRegion) -> &'static str {
 /// from quietly drifting to different suns or horizon colors as rendering evolves.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OutdoorEnvironment {
+    pub key_light_direction: Vec3,
+    pub key_light_radiance: Vec3,
     pub sun_direction: Vec3,
-    pub sun_radiance: Vec3,
+    pub moon_direction: Vec3,
+    pub sun_visibility: f32,
+    pub moon_visibility: f32,
+    pub shadow_strength: f32,
     pub sky_horizon: Vec3,
     pub sky_zenith: Vec3,
     pub ground_irradiance: Vec3,
@@ -61,6 +100,60 @@ pub struct OutdoorEnvironment {
     pub exposure: f32,
     pub cloud_coverage: f32,
     pub star_visibility: f32,
+}
+
+/// Dynamic, server-authored environment values evaluated for one render frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorldEnvironmentState {
+    pub day_fraction: f32,
+    pub cloud_offset_metres: [f32; 2],
+    pub cloud_velocity_metres_per_second: [f32; 2],
+    pub cloud_coverage: f32,
+    pub weather_seed: u64,
+    pub weather_revision: u64,
+}
+
+impl Default for WorldEnvironmentState {
+    fn default() -> Self {
+        Self {
+            day_fraction: DaylightPhase::GoldenHour.anchor_day_fraction(),
+            cloud_offset_metres: [0.0; 2],
+            cloud_velocity_metres_per_second: [0.0; 2],
+            cloud_coverage: 0.42,
+            weather_seed: 0,
+            weather_revision: 1,
+        }
+    }
+}
+
+impl WorldEnvironmentState {
+    pub fn sanitized(self) -> Self {
+        let fallback = Self::default();
+        Self {
+            day_fraction: if self.day_fraction.is_finite() {
+                self.day_fraction.rem_euclid(1.0)
+            } else {
+                fallback.day_fraction
+            },
+            cloud_offset_metres: std::array::from_fn(|axis| {
+                if self.cloud_offset_metres[axis].is_finite() {
+                    self.cloud_offset_metres[axis]
+                } else {
+                    fallback.cloud_offset_metres[axis]
+                }
+            }),
+            cloud_velocity_metres_per_second: std::array::from_fn(|axis| {
+                if self.cloud_velocity_metres_per_second[axis].is_finite() {
+                    self.cloud_velocity_metres_per_second[axis]
+                } else {
+                    fallback.cloud_velocity_metres_per_second[axis]
+                }
+            }),
+            cloud_coverage: finite_unit_scalar(self.cloud_coverage, fallback.cloud_coverage),
+            weather_seed: self.weather_seed,
+            weather_revision: self.weather_revision.max(1),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -126,9 +219,25 @@ fn smoothstep(start: f32, end: f32, value: f32) -> f32 {
 
 impl Default for OutdoorEnvironment {
     fn default() -> Self {
+        Self::for_world_time(
+            AtmosphereSample::default(),
+            DaylightPhase::GoldenHour.anchor_day_fraction(),
+            0.42,
+        )
+    }
+}
+
+impl OutdoorEnvironment {
+    fn fallback() -> Self {
+        let sun_direction = Vec3::new(0.48, 0.72, 0.35).normalize();
         Self {
-            sun_direction: Vec3::new(0.48, 0.72, 0.35).normalize(),
-            sun_radiance: Vec3::new(4.8, 4.25, 3.55),
+            key_light_direction: sun_direction,
+            key_light_radiance: Vec3::new(4.8, 4.25, 3.55),
+            sun_direction,
+            moon_direction: -sun_direction,
+            sun_visibility: 1.0,
+            moon_visibility: 0.0,
+            shadow_strength: 1.0,
             sky_horizon: Vec3::new(0.58, 0.72, 0.88),
             sky_zenith: Vec3::new(0.055, 0.20, 0.56),
             ground_irradiance: Vec3::new(0.16, 0.19, 0.16),
@@ -139,56 +248,86 @@ impl Default for OutdoorEnvironment {
             star_visibility: 0.0,
         }
     }
-}
 
-impl OutdoorEnvironment {
     pub fn for_atmosphere(sample: AtmosphereSample, phase: DaylightPhase) -> Self {
-        let mut environment = match phase {
-            DaylightPhase::Dawn => Self {
-                sun_direction: Vec3::new(-0.74, 0.24, 0.43).normalize(),
-                sun_radiance: Vec3::new(6.0, 3.05, 1.55),
-                sky_horizon: Vec3::new(0.72, 0.39, 0.28),
-                sky_zenith: Vec3::new(0.045, 0.11, 0.31),
-                ground_irradiance: Vec3::new(0.14, 0.13, 0.12),
-                fog_density: 0.014,
-                fog_height_falloff: 0.070,
-                exposure: 0.98,
-                cloud_coverage: 0.44,
-                star_visibility: 0.08,
-            },
-            DaylightPhase::ClearDay => Self::default(),
-            DaylightPhase::GoldenHour => Self {
-                sun_direction: Vec3::new(0.79, 0.38, 0.28).normalize(),
-                sun_radiance: Vec3::new(6.1, 4.05, 2.35),
-                sky_horizon: Vec3::new(0.70, 0.52, 0.39),
-                sky_zenith: Vec3::new(0.045, 0.15, 0.43),
-                ground_irradiance: Vec3::new(0.18, 0.17, 0.13),
-                fog_density: 0.013,
-                fog_height_falloff: 0.068,
-                exposure: 0.98,
-                cloud_coverage: 0.38,
-                star_visibility: 0.0,
-            },
-            DaylightPhase::BlueHour => Self {
-                sun_direction: Vec3::new(-0.70, 0.18, -0.46).normalize(),
-                sun_radiance: Vec3::new(1.45, 1.65, 2.35),
-                sky_horizon: Vec3::new(0.18, 0.24, 0.38),
-                sky_zenith: Vec3::new(0.012, 0.038, 0.13),
-                ground_irradiance: Vec3::new(0.052, 0.066, 0.10),
-                fog_density: 0.017,
-                fog_height_falloff: 0.062,
-                exposure: 1.10,
-                cloud_coverage: 0.36,
-                star_visibility: 0.62,
-            },
+        Self::for_world_time(sample, phase.anchor_day_fraction(), sample.cloudiness)
+    }
+
+    pub fn for_world_time(
+        sample: AtmosphereSample,
+        day_fraction: f32,
+        weather_cloud_coverage: f32,
+    ) -> Self {
+        let day_fraction = if day_fraction.is_finite() {
+            day_fraction.rem_euclid(1.0)
+        } else {
+            0.5
+        };
+        let orbit = std::f32::consts::TAU * (day_fraction - 0.25);
+        // A small northward declination keeps noon shadows legible instead of putting the sun
+        // directly overhead, while the analytic orbit remains continuous through midnight.
+        let sun_direction =
+            Vec3::new(orbit.cos() * 0.86, orbit.sin(), orbit.cos() * 0.51 + 0.22).normalize();
+        let moon_direction = (-sun_direction + Vec3::new(0.10, 0.0, -0.06)).normalize();
+        let solar_elevation = sun_direction.y;
+        let daylight = smoothstep(-0.10, 0.16, solar_elevation);
+        let direct_sun = smoothstep(-0.015, 0.10, solar_elevation);
+        let night = 1.0 - smoothstep(-0.20, -0.02, solar_elevation);
+        let moon_visibility = night * smoothstep(0.03, 0.20, moon_direction.y);
+        let horizon_band = 1.0 - smoothstep(0.02, 0.42, solar_elevation.abs());
+        let sunset = smoothstep(0.5, 0.8, day_fraction);
+        let warm_color = Vec3::new(6.4, 2.65, 1.15).lerp(Vec3::new(6.8, 3.45, 1.55), sunset);
+        let daylight_color = warm_color.lerp(
+            Vec3::new(4.9, 4.45, 3.85),
+            smoothstep(0.08, 0.72, solar_elevation),
+        );
+        let sun_radiance = daylight_color * direct_sun;
+        let moon_radiance = Vec3::new(0.10, 0.14, 0.24) * moon_visibility;
+        let (key_light_direction, key_light_radiance, shadow_strength) = if direct_sun > 0.025 {
+            (
+                sun_direction,
+                sun_radiance,
+                smoothstep(0.035, 0.14, solar_elevation),
+            )
+        } else {
+            (moon_direction, moon_radiance, 0.0)
+        };
+        let warm_horizon = Vec3::new(0.78, 0.31, 0.14).lerp(Vec3::new(0.86, 0.48, 0.24), sunset);
+        let night_horizon = Vec3::new(0.010, 0.016, 0.036);
+        let night_zenith = Vec3::new(0.0015, 0.004, 0.018);
+        let day_horizon = Vec3::new(0.58, 0.72, 0.88);
+        let day_zenith = Vec3::new(0.055, 0.20, 0.56);
+        let twilight_amount = horizon_band * smoothstep(-0.16, 0.10, solar_elevation);
+        let mut environment = Self {
+            key_light_direction,
+            key_light_radiance,
+            sun_direction,
+            moon_direction,
+            sun_visibility: direct_sun,
+            moon_visibility,
+            shadow_strength,
+            sky_horizon: night_horizon
+                .lerp(day_horizon, daylight)
+                .lerp(warm_horizon, twilight_amount * 0.62),
+            sky_zenith: night_zenith
+                .lerp(day_zenith, daylight)
+                .lerp(Vec3::new(0.018, 0.036, 0.10), twilight_amount * 0.38),
+            ground_irradiance: Vec3::new(0.010, 0.014, 0.028)
+                .lerp(Vec3::new(0.16, 0.19, 0.16), daylight)
+                .lerp(Vec3::new(0.18, 0.105, 0.065), twilight_amount * 0.34),
+            fog_density: scalar_lerp(0.018, 0.012, daylight),
+            fog_height_falloff: scalar_lerp(0.058, 0.075, daylight),
+            exposure: scalar_lerp(1.42, 1.0, daylight),
+            cloud_coverage: weather_cloud_coverage.clamp(0.0, 1.0),
+            star_visibility: night,
         };
         let humidity = sample.humidity.clamp(0.0, 1.0);
         let coldness = sample.coldness.clamp(0.0, 1.0);
         let aerosol = sample.aerosol.clamp(0.0, 1.0);
         let haze = sample.haze.clamp(0.0, 1.0);
         let warmth = sample.horizon_warmth.clamp(0.0, 1.0);
-        environment.cloud_coverage = (environment.cloud_coverage * 0.58
-            + sample.cloudiness.clamp(0.0, 1.0) * 0.66)
+        environment.cloud_coverage = (environment.cloud_coverage * 0.72
+            + sample.cloudiness.clamp(0.0, 1.0) * 0.28)
             .clamp(0.08, 0.94);
         environment.fog_density *= 0.62 + haze * 1.16 + humidity * 0.22;
         environment.fog_height_falloff *= 1.12 - humidity * 0.30 + aerosol * 0.16;
@@ -208,21 +347,32 @@ impl OutdoorEnvironment {
             .lerp(Vec3::new(0.11, 0.19, 0.13), humidity * 0.22)
             .lerp(Vec3::new(0.10, 0.14, 0.22), coldness * 0.18)
             .lerp(Vec3::new(0.12, 0.105, 0.09), aerosol * 0.24);
-        environment.sun_radiance *= 1.0 - environment.cloud_coverage * 0.18 - aerosol * 0.16;
+        environment.key_light_radiance *= 1.0 - environment.cloud_coverage * 0.18 - aerosol * 0.16;
         environment.star_visibility *= 1.0 - environment.cloud_coverage * 0.78;
         environment.sanitized()
     }
 
     pub fn lerp(self, target: Self, amount: f32) -> Self {
         let amount = amount.clamp(0.0, 1.0);
-        let direction = self.sun_direction.lerp(target.sun_direction, amount);
+        let key_direction = self
+            .key_light_direction
+            .lerp(target.key_light_direction, amount);
+        let sun_direction = self.sun_direction.lerp(target.sun_direction, amount);
+        let moon_direction = self.moon_direction.lerp(target.moon_direction, amount);
         Self {
-            sun_direction: if direction.length_squared() > 0.0001 {
-                direction.normalize()
+            key_light_direction: if key_direction.length_squared() > 0.0001 {
+                key_direction.normalize()
             } else {
-                target.sun_direction
+                target.key_light_direction
             },
-            sun_radiance: self.sun_radiance.lerp(target.sun_radiance, amount),
+            key_light_radiance: self
+                .key_light_radiance
+                .lerp(target.key_light_radiance, amount),
+            sun_direction: normalized_or(sun_direction, target.sun_direction),
+            moon_direction: normalized_or(moon_direction, target.moon_direction),
+            sun_visibility: scalar_lerp(self.sun_visibility, target.sun_visibility, amount),
+            moon_visibility: scalar_lerp(self.moon_visibility, target.moon_visibility, amount),
+            shadow_strength: scalar_lerp(self.shadow_strength, target.shadow_strength, amount),
             sky_horizon: self.sky_horizon.lerp(target.sky_horizon, amount),
             sky_zenith: self.sky_zenith.lerp(target.sky_zenith, amount),
             ground_irradiance: self
@@ -242,16 +392,21 @@ impl OutdoorEnvironment {
     }
 
     pub fn sanitized(self) -> Self {
-        let fallback = Self::default();
-        let direction =
-            if self.sun_direction.is_finite() && self.sun_direction.length_squared() > 0.0 {
-                self.sun_direction.normalize()
-            } else {
-                fallback.sun_direction
-            };
+        let fallback = Self::fallback();
         Self {
-            sun_direction: direction,
-            sun_radiance: finite_non_negative(self.sun_radiance, fallback.sun_radiance),
+            key_light_direction: normalized_or(
+                self.key_light_direction,
+                fallback.key_light_direction,
+            ),
+            key_light_radiance: finite_non_negative(
+                self.key_light_radiance,
+                fallback.key_light_radiance,
+            ),
+            sun_direction: normalized_or(self.sun_direction, fallback.sun_direction),
+            moon_direction: normalized_or(self.moon_direction, fallback.moon_direction),
+            sun_visibility: finite_unit_scalar(self.sun_visibility, fallback.sun_visibility),
+            moon_visibility: finite_unit_scalar(self.moon_visibility, fallback.moon_visibility),
+            shadow_strength: finite_unit_scalar(self.shadow_strength, fallback.shadow_strength),
             sky_horizon: finite_non_negative(self.sky_horizon, fallback.sky_horizon),
             sky_zenith: finite_non_negative(self.sky_zenith, fallback.sky_zenith),
             ground_irradiance: finite_non_negative(
@@ -267,6 +422,14 @@ impl OutdoorEnvironment {
             cloud_coverage: finite_unit_scalar(self.cloud_coverage, fallback.cloud_coverage),
             star_visibility: finite_unit_scalar(self.star_visibility, fallback.star_visibility),
         }
+    }
+}
+
+fn normalized_or(value: Vec3, fallback: Vec3) -> Vec3 {
+    if value.is_finite() && value.length_squared() > 0.0 {
+        value.normalize()
+    } else {
+        fallback
     }
 }
 
@@ -325,9 +488,10 @@ mod tests {
     #[test]
     fn default_daylight_is_finite_normalized_and_positive() {
         let environment = OutdoorEnvironment::default().sanitized();
+        assert!((environment.key_light_direction.length() - 1.0).abs() < 1.0e-6);
         assert!((environment.sun_direction.length() - 1.0).abs() < 1.0e-6);
         assert!(environment.sun_direction.y > 0.0);
-        assert!(environment.sun_radiance.min_element() > 0.0);
+        assert!(environment.key_light_radiance.min_element() > 0.0);
         assert!(environment.sky_horizon.min_element() >= 0.0);
         assert!(environment.sky_zenith.min_element() >= 0.0);
         assert!(environment.fog_density > 0.0);
@@ -337,8 +501,13 @@ mod tests {
     #[test]
     fn invalid_parameters_fall_back_without_nan_reaching_the_gpu() {
         let environment = OutdoorEnvironment {
+            key_light_direction: Vec3::ZERO,
+            key_light_radiance: Vec3::splat(f32::NAN),
             sun_direction: Vec3::ZERO,
-            sun_radiance: Vec3::splat(f32::NAN),
+            moon_direction: Vec3::splat(f32::NAN),
+            sun_visibility: f32::NAN,
+            moon_visibility: -1.0,
+            shadow_strength: 4.0,
             sky_horizon: Vec3::splat(-1.0),
             sky_zenith: Vec3::splat(f32::INFINITY),
             ground_irradiance: Vec3::splat(-2.0),
@@ -349,8 +518,10 @@ mod tests {
             star_visibility: 4.0,
         }
         .sanitized();
+        assert!(environment.key_light_direction.is_finite());
         assert!(environment.sun_direction.is_finite());
-        assert!(environment.sun_radiance.is_finite());
+        assert!(environment.moon_direction.is_finite());
+        assert!(environment.key_light_radiance.is_finite());
         assert_eq!(environment.sky_horizon, Vec3::ZERO);
         assert!(environment.sky_zenith.is_finite());
         assert_eq!(environment.ground_irradiance, Vec3::ZERO);
@@ -391,21 +562,25 @@ mod tests {
         ];
         let mut fingerprints = std::collections::BTreeSet::new();
         for phase in DaylightPhase::ALL {
-            assert_eq!(phase.next().next().next().next(), phase);
+            assert_eq!(
+                (0..DaylightPhase::ALL.len()).fold(phase, |value, _| value.next()),
+                phase
+            );
             for sample in samples {
                 let environment = OutdoorEnvironment::for_atmosphere(sample, phase);
                 assert!(environment.sun_direction.is_finite());
                 assert!((environment.sun_direction.length() - 1.0).abs() < 1.0e-5);
-                assert!(environment.sun_direction.y > 0.0);
                 assert!(environment.fog_density > 0.0);
                 assert!((0.0..=1.0).contains(&environment.cloud_coverage));
                 assert!((0.0..=1.0).contains(&environment.star_visibility));
                 fingerprints.insert([
-                    (environment.sun_radiance.x * 100.0).round() as i32,
+                    (environment.key_light_radiance.x * 100.0).round() as i32,
                     (environment.sky_horizon.x * 100.0).round() as i32,
                     (environment.sky_zenith.z * 100.0).round() as i32,
                     (environment.fog_density * 10_000.0).round() as i32,
                     (environment.cloud_coverage * 100.0).round() as i32,
+                    (environment.star_visibility * 100.0).round() as i32,
+                    (environment.sun_direction.y * 100.0).round() as i32,
                 ]);
             }
         }
@@ -437,9 +612,42 @@ mod tests {
         };
         let sixty_hz = advance(start, 1.0 / 60.0, 60);
         let one_twenty_hz = advance(start, 1.0 / 120.0, 120);
-        assert!(sixty_hz.sun_direction.dot(one_twenty_hz.sun_direction) > 0.9999);
+        assert!(
+            sixty_hz
+                .key_light_direction
+                .dot(one_twenty_hz.key_light_direction)
+                > 0.9999
+        );
         assert!((sixty_hz.fog_density - one_twenty_hz.fog_density).abs() < 0.0001);
         assert!((sixty_hz.cloud_coverage - one_twenty_hz.cloud_coverage).abs() < 0.0001);
+    }
+
+    #[test]
+    fn full_day_orbit_is_continuous_periodic_and_has_a_real_night() {
+        let sample = AtmosphereSample::default();
+        let midnight = OutdoorEnvironment::for_world_time(sample, 0.0, 0.4);
+        let wrapped = OutdoorEnvironment::for_world_time(sample, 1.0, 0.4);
+        let noon = OutdoorEnvironment::for_world_time(sample, 0.5, 0.4);
+        assert!(midnight.sun_direction.y < 0.0);
+        assert!(noon.sun_direction.y > 0.9);
+        assert!(midnight.star_visibility > 0.5);
+        assert!(noon.star_visibility < 0.01);
+        assert!(midnight.sun_direction.dot(wrapped.sun_direction) > 0.999_999);
+        assert!((midnight.sky_zenith - wrapped.sky_zenith).length() < 1.0e-5);
+
+        let before = OutdoorEnvironment::for_world_time(sample, 0.9999, 0.4);
+        let after = OutdoorEnvironment::for_world_time(sample, 0.0001, 0.4);
+        assert!(before.sun_direction.dot(after.sun_direction) > 0.999_99);
+        assert!((before.sky_horizon - after.sky_horizon).length() < 0.002);
+
+        for minute in 0..1_440 {
+            let environment =
+                OutdoorEnvironment::for_world_time(sample, minute as f32 / 1_440.0, 0.4);
+            assert!(environment.key_light_direction.is_finite());
+            assert!((environment.key_light_direction.length() - 1.0).abs() < 1.0e-5);
+            assert!(environment.key_light_radiance.min_element() >= 0.0);
+            assert!((0.0..=1.0).contains(&environment.shadow_strength));
+        }
     }
 
     #[test]

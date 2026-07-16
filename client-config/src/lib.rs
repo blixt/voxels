@@ -826,7 +826,6 @@ mod tests {
         let mut config = valid_config();
         config.rendering.shadows.shadow_map_resolution = MAX_SHADOW_MAP_RESOLUTION + 1;
         assert_invalid_field(&config, "rendering.shadows.shadow_map_resolution");
-
     }
 
     #[test]

@@ -261,28 +261,6 @@ fn hash31(position: vec3<f32>) -> f32 {
   return fract(sin(value) * 43758.5453);
 }
 
-fn atmosphere_hash21(position: vec2<f32>) -> f32 {
-  return fract(sin(dot(position, vec2<f32>(127.1, 311.7))) * 43758.5453);
-}
-
-fn atmosphere_value_noise(position: vec2<f32>) -> f32 {
-  let cell = floor(position);
-  let fraction = fract(position);
-  let blend = fraction * fraction * (3.0 - 2.0 * fraction);
-  let a = atmosphere_hash21(cell);
-  let b = atmosphere_hash21(cell + vec2<f32>(1.0, 0.0));
-  let c = atmosphere_hash21(cell + vec2<f32>(0.0, 1.0));
-  let d = atmosphere_hash21(cell + vec2<f32>(1.0, 1.0));
-  return mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y);
-}
-
-fn atmosphere_cloud_field(position: vec2<f32>) -> f32 {
-  let broad = atmosphere_value_noise(position) * 0.58;
-  let billows = atmosphere_value_noise(position * 2.03 + vec2<f32>(17.2, -9.1)) * 0.29;
-  let detail = atmosphere_value_noise(position * 4.11 + vec2<f32>(-4.7, 23.4)) * 0.13;
-  return broad + billows + detail;
-}
-
 fn atmospheric_path_length(distance_to_camera: f32) -> f32 {
   // Preserve the authored near haze exactly, then compress only the horizon portion so elevated
   // silhouettes remain legible without making low terrain look close or removing aerial depth.
@@ -296,11 +274,10 @@ fn cloud_sun_visibility(world: vec3<f32>) -> f32 {
   if coverage_control < 0.08 {
     return 1.0;
   }
-  let sun = normalize(frame.sun_direction.xyz);
+  let sun = normalize(frame.key_light_direction.xyz);
   let distance_to_layer = max(480.0 - world.y, 0.0) / max(sun.y, 0.12);
   let cloud_world = world.xz + sun.xz * distance_to_layer;
-  let wind = vec2<f32>(frame.camera_time.w * 0.55, frame.camera_time.w * 0.16);
-  let field = atmosphere_cloud_field(cloud_world * 0.0032 + wind * 0.001);
+  let field = atmosphere_cloud_field_world(cloud_world, frame.environment_time.yz);
   let threshold = mix(0.76, 0.49, coverage_control);
   let cloud = smoothstep(threshold - 0.055, threshold + 0.055, field);
   return mix(1.0, 0.54, cloud * coverage_control);
@@ -372,8 +349,8 @@ fn environment_radiance(direction: vec3<f32>) -> vec3<f32> {
 
 fn reflected_environment(direction: vec3<f32>) -> vec3<f32> {
   var radiance = environment_radiance(direction);
-  let sun = normalize(frame.sun_direction.xyz);
-  radiance += frame.sun_radiance.rgb * pow(max(dot(direction, sun), 0.0), 420.0) * 0.72;
+  let sun = normalize(frame.key_light_direction.xyz);
+  radiance += frame.key_light_radiance.rgb * pow(max(dot(direction, sun), 0.0), 420.0) * 0.72;
   return radiance;
 }
 
@@ -432,10 +409,10 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
     * sin(input.world.z * 2.2 - frame.camera_time.w * 0.7) * 0.5 + 0.5;
   var local_light = mix(deep, shallow, 0.28 + wave_light * 0.18);
   local_light = mix(local_light, reflection, clamp(fresnel * 0.88 + 0.08, 0.0, 0.92));
-  let sun = normalize(frame.sun_direction.xyz);
+  let sun = normalize(frame.key_light_direction.xyz);
   let half_direction = normalize(sun + view_direction);
   let visibility = sun_visibility(input.world, normal) * cloud_sun_visibility(input.world);
-  local_light += frame.sun_radiance.rgb
+  local_light += frame.key_light_radiance.rgb
     * pow(max(dot(normal, half_direction), 0.0), 260.0)
     * mix(0.18, 1.0, visibility)
     * 0.34;
@@ -498,7 +475,7 @@ fn screen_space_ambient_visibility(pixel_position: vec2<f32>, world: vec3<f32>) 
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let material = input.material & 0xffffu;
   let surface_detail = sample_surface_detail(input.world, input.normal, material);
-  let sun = normalize(frame.sun_direction.xyz);
+  let sun = normalize(frame.key_light_direction.xyz);
   let shadow = sun_visibility(input.world, input.normal) * cloud_sun_visibility(input.world);
   let sky_visibility = surface_detail.normal.y * 0.5 + 0.5;
   let cell = floor(input.world / frame.viewport_voxel.z);
@@ -550,7 +527,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     * specular_ambient_visibility(no_v, ambient_occlusion, roughness)
     * reflection_horizon
     * interior_ambient;
-  let direct = frame.sun_radiance.rgb
+  let direct = frame.key_light_radiance.rgb
     * evaluate_direct_dielectric(
       albedo,
       roughness,
@@ -589,7 +566,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   }
   if material == 9u {
     let leaf_scatter = pow(max(dot(-sun, view_direction), 0.0), 3.0) * (1.0 - shadow * 0.55);
-    color += albedo * frame.sun_radiance.rgb * leaf_scatter * 0.035;
+    color += albedo * frame.key_light_radiance.rgb * leaf_scatter * 0.035;
   }
   if material == 14u {
     let crystal_pulse = 0.86 + sin(input.world.y * 9.0 + input.world.x * 3.0) * 0.08;
@@ -615,7 +592,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     let caustic_fade = exp(-water_depth * 0.32)
       * below_surface
       * smoothstep(0.35, 0.9, input.normal.y);
-    color += frame.sun_radiance.rgb
+    color += frame.key_light_radiance.rgb
       * vec3<f32>(0.36, 0.78, 0.84)
       * caustic
       * caustic_fade
@@ -649,7 +626,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let sky_factor = pow(max(fog_view_direction.y, 0.0), 0.42);
   var fog_radiance = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, sky_factor);
   let sun_amount = max(dot(fog_view_direction, sun), 0.0);
-  fog_radiance += frame.sun_radiance.rgb * pow(sun_amount, 32.0) * 0.012;
+  fog_radiance += frame.key_light_radiance.rgb * pow(sun_amount, 32.0) * 0.012;
   color = color * transmittance + fog_radiance * (1.0 - transmittance);
   let cave_transmittance = exp(-distance_to_camera * frame.interior.z);
   let cave_air = vec3<f32>(0.010, 0.014, 0.020);

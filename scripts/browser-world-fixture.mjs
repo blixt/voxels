@@ -25,6 +25,9 @@ export async function prepareBrowserWorldFixture({
   spawnVoxels,
   cascadedShadows,
   screenSpaceAmbientOcclusion,
+  dayLengthSeconds,
+  dayFractionAtUnixEpoch,
+  cloudVelocityMetresPerSecond,
 }) {
   if (!Number.isInteger(browserPort) || browserPort <= 0 || browserPort > 65_535) {
     throw new Error("browser fixture port must be in 1..=65535");
@@ -48,6 +51,30 @@ export async function prepareBrowserWorldFixture({
   ) {
     throw new Error("browser fixture screenSpaceAmbientOcclusion must be boolean when provided");
   }
+  if (
+    dayLengthSeconds !== undefined &&
+    (!Number.isFinite(dayLengthSeconds) || dayLengthSeconds < 0 || dayLengthSeconds > 86_400)
+  ) {
+    throw new Error("browser fixture dayLengthSeconds must be finite and in 0..=86400");
+  }
+  if (
+    dayFractionAtUnixEpoch !== undefined &&
+    (!Number.isFinite(dayFractionAtUnixEpoch) ||
+      dayFractionAtUnixEpoch < 0 ||
+      dayFractionAtUnixEpoch >= 1)
+  ) {
+    throw new Error("browser fixture dayFractionAtUnixEpoch must be finite and in 0..<1");
+  }
+  if (
+    cloudVelocityMetresPerSecond !== undefined &&
+    (!Array.isArray(cloudVelocityMetresPerSecond) ||
+      cloudVelocityMetresPerSecond.length !== 2 ||
+      !cloudVelocityMetresPerSecond.every(
+        (value) => Number.isFinite(value) && Math.abs(value) <= 100,
+      ))
+  ) {
+    throw new Error("browser fixture cloud velocity must contain two values in -100..=100");
+  }
   const directory = await mkdtemp(path.join(tmpdir(), prefix));
   try {
     const backendPort = await reserveEphemeralPort();
@@ -70,6 +97,18 @@ export async function prepareBrowserWorldFixture({
           )
           .replace(/^auth_subprotocol_token = .*$/m, `auth_subprotocol_token = "${authToken}"`)
           .replace(/^database = .*$/m, 'database = "world-state.sqlite3"')
+          .replace(
+            /^day_length_seconds = .*$/m,
+            `day_length_seconds = ${dayLengthSeconds ?? 1_200}`,
+          )
+          .replace(
+            /^day_fraction_at_unix_epoch = .*$/m,
+            `day_fraction_at_unix_epoch = ${dayFractionAtUnixEpoch ?? 0.72}`,
+          )
+          .replace(
+            /^cloud_velocity_metres_per_second = .*$/m,
+            `cloud_velocity_metres_per_second = [${(cloudVelocityMetresPerSecond ?? [5.5, 1.6]).join(", ")}]`,
+          )
           .replace(
             /^xz_voxels = .*$/m,
             `xz_voxels = [${spawnVoxels?.[0] ?? 0}, ${spawnVoxels?.[1] ?? 0}]`,
@@ -114,6 +153,9 @@ export async function prepareBrowserWorldFixture({
       spawnVoxels: spawnVoxels ?? [0, 0],
       cascadedShadows: cascadedShadows ?? true,
       screenSpaceAmbientOcclusion: screenSpaceAmbientOcclusion ?? true,
+      dayLengthSeconds: dayLengthSeconds ?? 1_200,
+      dayFractionAtUnixEpoch: dayFractionAtUnixEpoch ?? 0.72,
+      cloudVelocityMetresPerSecond: cloudVelocityMetresPerSecond ?? [5.5, 1.6],
       async cleanup() {
         if (cleaned) return;
         cleaned = true;

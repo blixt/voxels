@@ -39,6 +39,7 @@ mod tests {
     fn shared_frame_source_matches_the_host_uniform_order() {
         let fields = FRAME_SOURCE
             .lines()
+            .take_while(|line| line.trim() != "};")
             .filter_map(|line| line.trim().split_once(':').map(|(name, _)| name))
             .collect::<Vec<_>>();
         assert_eq!(
@@ -57,8 +58,11 @@ mod tests {
                 "shadow_splits",
                 "shadow_texel_sizes",
                 "shadow_view_projection",
+                "key_light_direction",
+                "key_light_radiance",
                 "sun_direction",
-                "sun_radiance",
+                "moon_direction",
+                "environment_time",
                 "sky_horizon",
                 "sky_zenith",
                 "ground_atmosphere",

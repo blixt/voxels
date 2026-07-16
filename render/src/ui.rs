@@ -265,7 +265,6 @@ pub enum UiTarget {
     Launcher,
     Header,
     CopyDiagnostics,
-    CycleDaylight,
     ResetRendererFeatures,
     Close,
     Compact,
@@ -282,7 +281,6 @@ pub enum UiKey {
 pub enum UiAction {
     None,
     CopyDiagnostics,
-    CycleDaylight,
     ResetRendererFeatures,
     PanelOpenChanged(bool),
     CompactChanged(bool),
@@ -480,6 +478,8 @@ pub struct MissionControlUi {
     toast_age: f32,
     gameplay_toast: Option<String>,
     daylight_label: &'static str,
+    world_time_label: String,
+    weather_label: String,
     region_label: &'static str,
     route_chapter_label: &'static str,
     route_progress_percent: u8,
@@ -519,6 +519,8 @@ impl MissionControlUi {
             toast_age: 0.0,
             gameplay_toast: None,
             daylight_label: "GOLDEN HOUR",
+            world_time_label: "17:17".to_owned(),
+            weather_label: "WIND 0.0, 0.0 M/S · WEATHER R1".to_owned(),
             region_label: "VERDANT FOREST",
             route_chapter_label: "OFF PILGRIM ROAD",
             route_progress_percent: 0,
@@ -558,6 +560,22 @@ impl MissionControlUi {
     ) {
         self.daylight_label = daylight_label;
         self.region_label = region_label;
+    }
+
+    pub fn set_world_clock(
+        &mut self,
+        day_fraction: f32,
+        cloud_velocity_metres_per_second: [f32; 2],
+        weather_revision: u64,
+    ) {
+        let total_minutes = (day_fraction.rem_euclid(1.0) * 1_440.0).round() as u32 % 1_440;
+        self.world_time_label = format!("{:02}:{:02}", total_minutes / 60, total_minutes % 60);
+        self.weather_label = format!(
+            "WIND {:.1}, {:.1} M/S · WEATHER R{}",
+            cloud_velocity_metres_per_second[0],
+            cloud_velocity_metres_per_second[1],
+            weather_revision,
+        );
     }
 
     pub fn set_route_status(&mut self, chapter_label: &'static str, progress_percent: u8) {
@@ -749,20 +767,14 @@ impl MissionControlUi {
             ACTION_BUTTON_WIDTH,
             BUTTON_SIZE,
         );
-        let daylight = Rect::new(
-            reset.x - BUTTON_GAP - ACTION_BUTTON_WIDTH,
-            button_y,
-            ACTION_BUTTON_WIDTH,
-            BUTTON_SIZE,
-        );
         let compact_button = Rect::new(
-            daylight.x - BUTTON_GAP - BUTTON_SIZE,
+            reset.x - BUTTON_GAP - BUTTON_SIZE,
             button_y,
             BUTTON_SIZE,
             BUTTON_SIZE,
         );
         let copy_right = if automatically_compact {
-            daylight.x
+            reset.x
         } else {
             compact_button.x
         };
@@ -776,10 +788,6 @@ impl MissionControlUi {
             InteractiveRegion {
                 target: UiTarget::CopyDiagnostics,
                 rect: copy,
-            },
-            InteractiveRegion {
-                target: UiTarget::CycleDaylight,
-                rect: daylight,
             },
             InteractiveRegion {
                 target: UiTarget::ResetRendererFeatures,
@@ -918,7 +926,6 @@ impl MissionControlUi {
         match self.hit_test_css(point, viewport) {
             Some(UiTarget::Launcher) => self.toggle_open(),
             Some(UiTarget::CopyDiagnostics) => UiAction::CopyDiagnostics,
-            Some(UiTarget::CycleDaylight) => UiAction::CycleDaylight,
             Some(UiTarget::ResetRendererFeatures) => UiAction::ResetRendererFeatures,
             Some(UiTarget::Close) => self.set_open(false),
             Some(UiTarget::Compact) => self.set_compact(!self.compact),
@@ -965,7 +972,10 @@ impl MissionControlUi {
         );
         push_text(
             &mut draw,
-            format!("{} / {}", self.daylight_label, self.region_label),
+            format!(
+                "{} · {} / {}",
+                self.world_time_label, self.daylight_label, self.region_label
+            ),
             [layout.panel.x + CONTENT_PAD, layout.header.y + 48.0],
             if layout.compact { 8.0 } else { 9.0 },
             TEXT_MUTED.with_alpha(opacity),
@@ -991,7 +1001,6 @@ impl MissionControlUi {
 
         for (target, label) in [
             (UiTarget::CopyDiagnostics, "COPY"),
-            (UiTarget::CycleDaylight, "TIME"),
             (UiTarget::ResetRendererFeatures, "RESET"),
             (UiTarget::Compact, if layout.compact { ">" } else { "<" }),
             (UiTarget::Close, "x"),
@@ -1012,9 +1021,7 @@ impl MissionControlUi {
                     rect.center(),
                     if matches!(
                         target,
-                        UiTarget::CopyDiagnostics
-                            | UiTarget::CycleDaylight
-                            | UiTarget::ResetRendererFeatures
+                        UiTarget::CopyDiagnostics | UiTarget::ResetRendererFeatures
                     ) {
                         8.0
                     } else {
@@ -1486,7 +1493,12 @@ impl MissionControlUi {
         );
 
         let _ = writeln!(report, "\nWORLD");
-        let _ = writeln!(report, "Daylight: {}", self.daylight_label);
+        let _ = writeln!(
+            report,
+            "Time: {} ({})",
+            self.world_time_label, self.daylight_label
+        );
+        let _ = writeln!(report, "Weather: {}", self.weather_label);
         let _ = writeln!(report, "Region: {}", self.region_label);
         let _ = writeln!(
             report,
@@ -1893,13 +1905,10 @@ mod tests {
     #[test]
     fn explicit_header_actions_are_hit_testable_without_a_secondary_menu() {
         let viewport = viewport();
-        for (target, expected) in [
-            (UiTarget::CycleDaylight, UiAction::CycleDaylight),
-            (
-                UiTarget::ResetRendererFeatures,
-                UiAction::ResetRendererFeatures,
-            ),
-        ] {
+        for (target, expected) in [(
+            UiTarget::ResetRendererFeatures,
+            UiAction::ResetRendererFeatures,
+        )] {
             let mut ui = opened();
             let center = ui
                 .layout(viewport)
@@ -1926,7 +1935,6 @@ mod tests {
 
         let buttons = [
             UiTarget::CopyDiagnostics,
-            UiTarget::CycleDaylight,
             UiTarget::ResetRendererFeatures,
             UiTarget::Compact,
             UiTarget::Close,
@@ -2234,7 +2242,7 @@ mod tests {
         assert!(
             base.text
                 .iter()
-                .any(|run| run.text == "GOLDEN HOUR / VERDANT FOREST")
+                .any(|run| run.text == "17:17 · GOLDEN HOUR / VERDANT FOREST")
         );
         assert!(
             base.text
@@ -2284,7 +2292,6 @@ mod tests {
             RendererFeature::ALL.len()
         );
         assert!(draw.text.iter().any(|run| run.text == "COPY"));
-        assert!(draw.text.iter().any(|run| run.text == "TIME"));
         assert!(draw.text.iter().any(|run| run.text == "RESET"));
         assert!(!draw.text.iter().any(|run| run.text == "CPU / GPU"));
     }

@@ -121,7 +121,7 @@ fn sun_visibility(world: vec3<f32>, normal: vec3<f32>) -> f32 {
 @fragment
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let albedo = srgb_to_linear(input.color.rgb);
-  let sun = normalize(frame.sun_direction.xyz);
+  let sun = normalize(frame.key_light_direction.xyz);
   let shadow = sun_visibility(input.world, input.normal);
   let sky_visibility = input.normal.y * 0.5 + 0.5;
   let interior_ambient = mix(1.0, 0.06, frame.interior.x);
@@ -137,7 +137,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   );
   let ambient_diffuse = albedo * (vec3<f32>(1.0) - ambient_fresnel) * ambient;
   let ambient_specular = reflection_radiance * ambient_fresnel * interior_ambient;
-  let direct = frame.sun_radiance.rgb
+  let direct = frame.key_light_radiance.rgb
     * evaluate_direct_dielectric(albedo, roughness, input.normal, view_direction, sun)
     * shadow
     * mix(1.0, 0.10, frame.interior.x)

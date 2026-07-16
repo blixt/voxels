@@ -111,7 +111,7 @@ mod web {
         CameraState, EnclosureSample, InputState, ProfileAutomation, ProfileConfig, ProfilePhase,
         VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
     };
-    use voxels_render::environment::DaylightPhase;
+    use voxels_render::environment::WorldEnvironmentState;
     use voxels_render::renderer::{
         ChunkActivationReason, LocalLightVisibility, MissionControlConfig, Renderer,
         RendererConfig, RendererFeatureConfig,
@@ -124,7 +124,7 @@ mod web {
     };
     use voxels_world::protocol::{
         BrowserUserId, DigVolume, EditAction, MaterialInventory, PlayerId, PlayerIdentity,
-        VoxelFace, VoxelMutation,
+        VoxelFace, VoxelMutation, WorldEnvironmentSnapshot,
     };
     use voxels_world::{
         AtmosphereSample, CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT_PORTAL_COUNT,
@@ -138,8 +138,36 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 23.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 24.0;
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
+    const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
+
+    fn world_environment_at(
+        snapshot: WorldEnvironmentSnapshot,
+        server_time_ms: f64,
+    ) -> WorldEnvironmentState {
+        let elapsed_seconds = (server_time_ms - snapshot.sample_server_time_ms as f64) / 1_000.0;
+        let day_fraction = if snapshot.day_length_seconds > 0.0 {
+            (f64::from(snapshot.day_fraction)
+                + elapsed_seconds / f64::from(snapshot.day_length_seconds))
+            .rem_euclid(1.0) as f32
+        } else {
+            snapshot.day_fraction
+        };
+        let cloud_offset_metres = std::array::from_fn(|axis| {
+            (f64::from(snapshot.cloud_offset_metres[axis])
+                + f64::from(snapshot.cloud_velocity_metres_per_second[axis]) * elapsed_seconds)
+                .rem_euclid(CLOUD_PERIOD_METRES) as f32
+        });
+        WorldEnvironmentState {
+            day_fraction,
+            cloud_offset_metres,
+            cloud_velocity_metres_per_second: snapshot.cloud_velocity_metres_per_second,
+            cloud_coverage: snapshot.cloud_coverage,
+            weather_seed: snapshot.weather_seed,
+            weather_revision: snapshot.weather_revision,
+        }
+    }
 
     #[derive(Clone, Copy, Debug)]
     struct EngineConfig {
@@ -332,6 +360,7 @@ mod web {
         input: RefCell<InputState>,
         remote: RemoteWorldClient,
         presence: RemotePresenceClient,
+        environment_snapshot: Cell<WorldEnvironmentSnapshot>,
         source_identity_hash: WorldSourceIdentityHash,
         remote_environment: (AtmosphereSample, SurfaceRegion),
         edits: RefCell<EditMap>,
@@ -558,6 +587,7 @@ mod web {
             self.stream_world(&camera);
             if let Some(opened) = self.remote.world_opened() {
                 self.presence.ensure_session(&opened, time);
+                self.environment_snapshot.set(opened.environment);
             }
             // The streaming profiler moves a synthetic camera outside gameplay simulation. It may
             // stream/render that route, but it must never update authoritative player position or
@@ -573,6 +603,11 @@ mod web {
             let mut renderer = self.renderer.borrow_mut();
             renderer.set_remote_avatars(&remote_avatars);
             renderer.set_dig_target(target.map(|(hit, volume)| (hit.voxel, volume)));
+            let server_time_ms = self.presence.estimated_server_time_ms(time);
+            renderer.set_world_environment(world_environment_at(
+                self.environment_snapshot.get(),
+                server_time_ms,
+            ));
             let (atmosphere, region) = self.remote_environment;
             renderer.set_atmosphere(atmosphere, region);
             let enclosure = self.enclosure.get();
@@ -2256,6 +2291,19 @@ mod web {
                     render.lod_boundary_centres[4][1] as f32,
                     render.lod_boundary_centres[5][0] as f32,
                     render.lod_boundary_centres[5][1] as f32,
+                    render.day_fraction,
+                    render.sun_direction[0],
+                    render.sun_direction[1],
+                    render.sun_direction[2],
+                    render.moon_direction[0],
+                    render.moon_direction[1],
+                    render.moon_direction[2],
+                    render.shadow_strength,
+                    render.cloud_offset_metres[0],
+                    render.cloud_offset_metres[1],
+                    render.cloud_velocity_metres_per_second[0],
+                    render.cloud_velocity_metres_per_second[1],
+                    render.weather_revision as f32,
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
@@ -2382,7 +2430,6 @@ mod web {
                 shadow_map_resolution: rendering.shadows.shadow_map_resolution,
                 caster_depth_expansion: rendering.shadows.caster_depth_expansion,
             },
-            initial_daylight_phase: DaylightPhase::default(),
         };
         let width = (css_width * dpr).round().max(1.0) as u32;
         let height = (css_height * dpr).round().max(1.0) as u32;
@@ -2445,6 +2492,7 @@ mod web {
             input: RefCell::new(InputState::default()),
             remote,
             presence,
+            environment_snapshot: Cell::new(opened.environment),
             source_identity_hash: opened.manifest.source_identity_hash(),
             remote_environment,
             edits: RefCell::new(edits),

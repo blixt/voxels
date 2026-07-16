@@ -858,9 +858,7 @@ fn decode_world_environment(
     Ok(environment)
 }
 
-fn validate_world_environment(
-    environment: &WorldEnvironmentSnapshot,
-) -> Result<(), ProtocolError> {
+fn validate_world_environment(environment: &WorldEnvironmentSnapshot) -> Result<(), ProtocolError> {
     if environment.sample_server_time_ms == 0
         || !environment.day_fraction.is_finite()
         || !(0.0..1.0).contains(&environment.day_fraction)

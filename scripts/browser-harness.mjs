@@ -1,6 +1,6 @@
 import { createServer as createNetServer } from "node:net";
 
-export const SNAPSHOT_SCHEMA_VERSION = 23;
+export const SNAPSHOT_SCHEMA_VERSION = 24;
 export const FRAME_SAMPLE_WIDTH = 11;
 export const GPU_SAMPLE_WIDTH = 11;
 
@@ -125,9 +125,22 @@ export const SNAPSHOT = Object.freeze({
   lodBoundary4Z: 126,
   lodBoundary5X: 127,
   lodBoundary5Z: 128,
-  schemaVersion: 129,
-  sampleCount: 130,
-  droppedSamples: 131,
+  dayFraction: 129,
+  sunDirectionX: 130,
+  sunDirectionY: 131,
+  sunDirectionZ: 132,
+  moonDirectionX: 133,
+  moonDirectionY: 134,
+  moonDirectionZ: 135,
+  shadowStrength: 136,
+  cloudOffsetX: 137,
+  cloudOffsetZ: 138,
+  cloudVelocityX: 139,
+  cloudVelocityZ: 140,
+  weatherRevision: 141,
+  schemaVersion: 142,
+  sampleCount: 143,
+  droppedSamples: 144,
 });
 
 export const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;

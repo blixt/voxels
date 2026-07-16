@@ -130,8 +130,23 @@ function phaseSummary(captures) {
     depthPrepassDrawCalls: latest[SNAPSHOT.depthPrepassDrawCalls],
     atmosphere: {
       daylightPhase: latest[SNAPSHOT.daylightPhase],
+      dayFraction: latest[SNAPSHOT.dayFraction],
+      sunDirection: [
+        latest[SNAPSHOT.sunDirectionX],
+        latest[SNAPSHOT.sunDirectionY],
+        latest[SNAPSHOT.sunDirectionZ],
+      ],
+      moonDirection: [
+        latest[SNAPSHOT.moonDirectionX],
+        latest[SNAPSHOT.moonDirectionY],
+        latest[SNAPSHOT.moonDirectionZ],
+      ],
+      shadowStrength: latest[SNAPSHOT.shadowStrength],
       surfaceRegion: latest[SNAPSHOT.surfaceRegion],
       cloudCoverage: latest[SNAPSHOT.cloudCoverage],
+      cloudOffset: [latest[SNAPSHOT.cloudOffsetX], latest[SNAPSHOT.cloudOffsetZ]],
+      cloudVelocity: [latest[SNAPSHOT.cloudVelocityX], latest[SNAPSHOT.cloudVelocityZ]],
+      weatherRevision: latest[SNAPSHOT.weatherRevision],
     },
     cave: {
       enclosure: latest[SNAPSHOT.enclosure],
@@ -342,41 +357,36 @@ async function materialDetailProfile(page, viewportWidth) {
   return result;
 }
 
-async function cycleDaylight(page, viewportWidth, expectedPhase) {
-  await page.keyboard.press("Escape");
-  await page.keyboard.press("F3");
-  await page.waitForTimeout(100);
-  // TIME is an explicit Mission Control header action. This intentionally exercises Rust canvas
-  // hit-testing rather than adding a browser-side debug setter for atmosphere state.
-  await page.mouse.click(viewportWidth - 134, 88);
+async function waitForDayFraction(page, target) {
   await page.waitForFunction(
-    async ({ index, expected }) => {
+    async ({ index, targetFraction }) => {
       const snapshot = await globalThis.__VOXELS__.snapshot();
-      return snapshot[index] === expected;
+      const distance = Math.abs(snapshot[index] - targetFraction);
+      return Math.min(distance, 1 - distance) <= 0.012;
     },
-    { index: SNAPSHOT.daylightPhase, expected: expectedPhase },
-    { timeout: 5_000 },
+    { index: SNAPSHOT.dayFraction, targetFraction: target },
+    { timeout: 60_000, polling: 50 },
   );
-  await page.keyboard.press("F3");
-  await page.waitForTimeout(1_200);
 }
 
-async function atmosphereProfile(page, viewportWidth) {
-  const names = ["dawn", "clearDay", "goldenHour", "blueHour"];
+async function atmosphereProfile(page) {
+  const anchors = [
+    ["midnight", 0.0],
+    ["dawn", 0.235],
+    ["noon", 0.5],
+    ["goldenHour", 0.72],
+    ["blueHour", 0.8],
+  ];
   const phases = {};
-  for (let captured = 0; captured < names.length; captured += 1) {
-    const before = await capture(page);
-    const phase = before.snapshot[SNAPSHOT.daylightPhase];
-    phases[names[phase]] = phaseSummary(await sample(page, 4_000));
-    await page.screenshot({ path: `target/atmosphere-${names[phase]}.png` });
-    if (captured + 1 < names.length) {
-      await cycleDaylight(page, viewportWidth, (phase + 1) % names.length);
-    }
+  for (const [name, dayFraction] of anchors) {
+    await waitForDayFraction(page, dayFraction);
+    await page.screenshot({ path: `target/atmosphere-${name}.png` });
+    phases[name] = phaseSummary(await sample(page, 800));
   }
 
   const values = Object.values(phases);
   const violations = [];
-  if (values.length !== names.length) violations.push("did not observe all four daylight phases");
+  if (values.length !== anchors.length) violations.push("did not observe every day-cycle anchor");
   const reference = values[0];
   for (const [name, phase] of Object.entries(phases)) {
     if (phase.frameMs.p95 > 12 || phase.frameMs.above16_67ms > 0) {
@@ -395,12 +405,23 @@ async function atmosphereProfile(page, viewportWidth) {
       reference &&
       (phase.quads !== reference.quads ||
         phase.visibleChunks !== reference.visibleChunks ||
-        phase.drawCalls !== reference.drawCalls ||
         phase.meshArenaCapacityMiB !== reference.meshArenaCapacityMiB)
     ) {
       violations.push(`${name} changed geometry or mesh residency`);
     }
     if (phase.droppedSamples > 0) violations.push(`${name} dropped frame samples`);
+  }
+  if (phases.midnight.atmosphere.sunDirection[1] >= 0) {
+    violations.push("midnight sun did not move below the horizon");
+  }
+  if (phases.noon.atmosphere.sunDirection[1] <= 0.9) {
+    violations.push("noon sun did not reach its high arc");
+  }
+  if (phases.midnight.shadowCascades !== 0 || phases.midnight.shadowDrawCalls !== 0) {
+    violations.push("midnight still rendered directional shadow cascades");
+  }
+  if (phases.noon.shadowCascades === 0 || phases.noon.shadowDrawCalls === 0) {
+    violations.push("noon did not render directional shadow cascades");
   }
   if (violations.length > 0) {
     throw new Error(
@@ -635,6 +656,7 @@ try {
     spawnVoxels,
     cascadedShadows,
     screenSpaceAmbientOcclusion,
+    dayLengthSeconds: atmosphere ? 48 : undefined,
   });
   const { build, preview } = await import("vite-plus");
   await build({ logLevel: "warn" });
@@ -664,7 +686,7 @@ try {
   } else if (materials) {
     scenarios = { materials: await materialDetailProfile(page, viewport.width) };
   } else if (atmosphere) {
-    scenarios = { atmosphere: await atmosphereProfile(page, viewport.width) };
+    scenarios = { atmosphere: await atmosphereProfile(page) };
   } else {
     await mark(page, "voxels:steady:start");
     const steady = phaseSummary(await sample(page, 4_000));

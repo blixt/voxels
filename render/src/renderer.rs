@@ -2,7 +2,8 @@ use crate::ambient_occlusion::AmbientOcclusionGpu;
 use crate::arena::{Allocation, ArenaAllocator};
 use crate::avatar::AvatarGpu;
 use crate::environment::{
-    DaylightPhase, InteriorEnvironment, OutdoorEnvironment, surface_region_label,
+    DaylightPhase, InteriorEnvironment, OutdoorEnvironment, WorldEnvironmentState,
+    surface_region_label,
 };
 use crate::lod::{GeometricLodFocus, SurfacePatchSelection};
 use crate::material_detail::MaterialDetailGpu;
@@ -160,7 +161,6 @@ pub struct RendererConfig {
     pub mission_control: MissionControlConfig,
     pub view_distance_metres: f32,
     pub directional_shadows: DirectionalShadowConfig,
-    pub initial_daylight_phase: DaylightPhase,
 }
 
 impl Default for RendererConfig {
@@ -170,7 +170,6 @@ impl Default for RendererConfig {
             mission_control: MissionControlConfig::default(),
             view_distance_metres: 1_000.0,
             directional_shadows: DirectionalShadowConfig::default(),
-            initial_daylight_phase: DaylightPhase::default(),
         }
     }
 }
@@ -191,8 +190,11 @@ struct FrameUniform {
     shadow_splits: [f32; 4],
     shadow_texel_sizes: [f32; 4],
     shadow_view_projection: [[[f32; 4]; 4]; CASCADE_COUNT],
+    key_light_direction: [f32; 4],
+    key_light_radiance: [f32; 4],
     sun_direction: [f32; 4],
-    sun_radiance: [f32; 4],
+    moon_direction: [f32; 4],
+    environment_time: [f32; 4],
     sky_horizon: [f32; 4],
     sky_zenith: [f32; 4],
     ground_atmosphere: [f32; 4],
@@ -201,9 +203,9 @@ struct FrameUniform {
     interior: [f32; 4],
 }
 
-const _: () = assert!(size_of::<FrameUniform>() == 640);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 608);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 624);
+const _: () = assert!(size_of::<FrameUniform>() == 688);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 656);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 672);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
@@ -577,8 +579,15 @@ pub struct RenderDiagnostics {
     pub screen_space_ambient_occlusion: bool,
     pub material_detail: bool,
     pub daylight_phase: u8,
+    pub day_fraction: f32,
+    pub sun_direction: [f32; 3],
+    pub moon_direction: [f32; 3],
+    pub shadow_strength: f32,
     pub surface_region: u8,
     pub cloud_coverage: f32,
+    pub cloud_offset_metres: [f32; 2],
+    pub cloud_velocity_metres_per_second: [f32; 2],
+    pub weather_revision: u64,
     pub enclosure: f32,
     pub interior_exposure: f32,
     pub cave_headlamp: bool,
@@ -921,7 +930,7 @@ pub struct Renderer {
     target_volume: Option<DigVolume>,
     options: RenderOptions,
     environment: OutdoorEnvironment,
-    environment_target: OutdoorEnvironment,
+    world_environment: WorldEnvironmentState,
     atmosphere_sample: AtmosphereSample,
     surface_region: SurfaceRegion,
     daylight_phase: DaylightPhase,
@@ -968,6 +977,7 @@ struct RenderOptions {
 struct FrameState {
     options: RenderOptions,
     environment: OutdoorEnvironment,
+    world_environment: WorldEnvironmentState,
     underwater_blend: f32,
     interior: InteriorEnvironment,
 }
@@ -1032,9 +1042,13 @@ impl ShadowGpu {
         environment: OutdoorEnvironment,
         config: DirectionalShadowConfig,
     ) -> Result<Self, String> {
-        let cascades =
-            build_directional_shadow_cascades(camera, 1.0, -environment.sun_direction, config)
-                .map_err(|error| format!("build initial shadow cascades: {error:?}"))?;
+        let cascades = build_directional_shadow_cascades(
+            camera,
+            1.0,
+            -environment.key_light_direction,
+            config,
+        )
+        .map_err(|error| format!("build initial shadow cascades: {error:?}"))?;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("sun shadow cascade array"),
             size: wgpu::Extent3d {
@@ -1249,9 +1263,13 @@ impl Renderer {
             haze: 0.38,
         };
         let surface_region = SurfaceRegion::VerdantForest;
-        let daylight_phase = runtime_config.initial_daylight_phase;
-        let environment =
-            OutdoorEnvironment::for_atmosphere(atmosphere_sample, daylight_phase).sanitized();
+        let world_environment = WorldEnvironmentState::default();
+        let daylight_phase = DaylightPhase::for_day_fraction(world_environment.day_fraction);
+        let environment = OutdoorEnvironment::for_world_time(
+            atmosphere_sample,
+            world_environment.day_fraction,
+            world_environment.cloud_coverage,
+        );
         let initial_camera = CameraState::default();
         let shadow_gpu = ShadowGpu::new(
             &device,
@@ -1263,7 +1281,7 @@ impl Renderer {
         let shadow_cascades = directional_shadow_cascades(
             &config,
             &initial_camera,
-            environment.sun_direction,
+            environment.key_light_direction,
             runtime_config.directional_shadows,
         )?;
         let frame = frame_uniform(
@@ -1274,6 +1292,7 @@ impl Renderer {
             FrameState {
                 options,
                 environment,
+                world_environment,
                 underwater_blend: 0.0,
                 interior: InteriorEnvironment::default(),
             },
@@ -1579,6 +1598,11 @@ impl Renderer {
         let placement_inventory = PlacementInventory::new();
         let mut ui = MissionControlUi::new(runtime_config.mission_control, runtime_config.features);
         ui.set_environment_status(daylight_phase.label(), surface_region_label(surface_region));
+        ui.set_world_clock(
+            world_environment.day_fraction,
+            world_environment.cloud_velocity_metres_per_second,
+            world_environment.weather_revision,
+        );
         sync_inventory_ui(&mut ui, &placement_inventory);
         Ok(Self {
             surface,
@@ -1626,7 +1650,7 @@ impl Renderer {
             target_volume: None,
             options,
             environment,
-            environment_target: environment,
+            world_environment,
             atmosphere_sample,
             surface_region,
             daylight_phase,
@@ -1714,9 +1738,33 @@ impl Renderer {
         }
         self.atmosphere_sample = sample;
         self.surface_region = region;
-        self.environment_target = OutdoorEnvironment::for_atmosphere(sample, self.daylight_phase);
+        self.environment = OutdoorEnvironment::for_world_time(
+            sample,
+            self.world_environment.day_fraction,
+            self.world_environment.cloud_coverage,
+        );
         self.ui
             .set_environment_status(self.daylight_phase.label(), surface_region_label(region));
+    }
+
+    pub fn set_world_environment(&mut self, state: WorldEnvironmentState) {
+        let state = state.sanitized();
+        self.world_environment = state;
+        self.daylight_phase = DaylightPhase::for_day_fraction(state.day_fraction);
+        self.environment = OutdoorEnvironment::for_world_time(
+            self.atmosphere_sample,
+            state.day_fraction,
+            state.cloud_coverage,
+        );
+        self.ui.set_environment_status(
+            self.daylight_phase.label(),
+            surface_region_label(self.surface_region),
+        );
+        self.ui.set_world_clock(
+            state.day_fraction,
+            state.cloud_velocity_metres_per_second,
+            state.weather_revision,
+        );
     }
 
     pub fn set_route_status(&mut self, chapter_label: &'static str, progress_percent: u8) {
@@ -1891,15 +1939,6 @@ impl Renderer {
         match action {
             UiAction::CopyDiagnostics => {
                 self.diagnostics_copy_requested = true;
-            }
-            UiAction::CycleDaylight => {
-                self.daylight_phase = self.daylight_phase.next();
-                self.environment_target =
-                    OutdoorEnvironment::for_atmosphere(self.atmosphere_sample, self.daylight_phase);
-                self.ui.set_environment_status(
-                    self.daylight_phase.label(),
-                    surface_region_label(self.surface_region),
-                );
             }
             UiAction::ResetRendererFeatures => {
                 self.options = reset_renderer_features(&mut self.ui, self.runtime_config.features);
@@ -2478,10 +2517,9 @@ impl Renderer {
     ) -> bool {
         let dt = bounded_frame_delta(dt);
         self.time += dt;
-        let environment_response = 1.0 - (-dt / 0.85).exp();
-        self.environment = self
-            .environment
-            .lerp(self.environment_target, environment_response);
+        let shadows_active = self.options.shadows && self.environment.shadow_strength > 0.01;
+        let mut frame_options = self.options;
+        frame_options.shadows = shadows_active;
         let target_underwater = f32::from(camera.fluid_state().eyes_submerged);
         let response_seconds = if target_underwater > self.underwater_blend {
             0.12
@@ -2512,7 +2550,7 @@ impl Renderer {
         let Ok(shadow_cascades) = directional_shadow_cascades(
             &self.config,
             camera,
-            self.environment.sun_direction,
+            self.environment.key_light_direction,
             self.runtime_config.directional_shadows,
         ) else {
             return false;
@@ -2543,8 +2581,9 @@ impl Renderer {
             self.time,
             self.target_volume,
             FrameState {
-                options: self.options,
+                options: frame_options,
                 environment: self.environment,
+                world_environment: self.world_environment,
                 underwater_blend: self.underwater_blend,
                 interior: self.interior,
             },
@@ -2577,7 +2616,7 @@ impl Renderer {
                 u64::MAX
             },
             self.options.far_terrain,
-            self.options.shadows,
+            shadows_active,
             geometric_lod_focus,
             view_clip,
             shadow_clips,
@@ -2604,7 +2643,7 @@ impl Renderer {
         let refract_water = !water_draw_list.spans.is_empty();
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
-        if self.options.shadows {
+        if shadows_active {
             self.shadow_gpu
                 .write_cascades(&self.queue, &shadow_cascades, camera);
         }
@@ -2629,13 +2668,13 @@ impl Renderer {
         let gpu_frame = self.gpu_timer.as_mut().and_then(|timer| {
             timer.begin_frame(
                 frame_id,
-                self.options.shadows,
+                shadows_active,
                 refract_water,
                 self.options.screen_space_ambient_occlusion,
             )
         });
         let mut shadow_draw_calls = 0;
-        if self.options.shadows {
+        if shadows_active {
             for (cascade_index, draw_list) in shadow_draw_lists.iter().enumerate() {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("sun shadow cascade pass"),
@@ -2842,7 +2881,7 @@ impl Renderer {
                 .saturating_add(usize::from(has_avatars)) as u32,
             water_draw_calls: water_draw_list.spans.len() as u32,
             shadow_draw_calls,
-            shadow_cascades: if self.options.shadows {
+            shadow_cascades: if shadows_active {
                 CASCADE_COUNT as u32
             } else {
                 0
@@ -2919,8 +2958,17 @@ impl Renderer {
             screen_space_ambient_occlusion: self.options.screen_space_ambient_occlusion,
             material_detail: self.options.material_detail,
             daylight_phase: self.daylight_phase as u8,
+            day_fraction: self.world_environment.day_fraction,
+            sun_direction: self.environment.sun_direction.to_array(),
+            moon_direction: self.environment.moon_direction.to_array(),
+            shadow_strength: self.environment.shadow_strength,
             surface_region: self.surface_region as u8,
             cloud_coverage: self.environment.cloud_coverage,
+            cloud_offset_metres: self.world_environment.cloud_offset_metres,
+            cloud_velocity_metres_per_second: self
+                .world_environment
+                .cloud_velocity_metres_per_second,
+            weather_revision: self.world_environment.weather_revision,
             enclosure: self.interior.enclosure,
             interior_exposure: self.interior.exposure_multiplier,
             cave_headlamp: self.options.cave_headlamp && self.interior.headlamp_strength > 0.01,
@@ -2935,7 +2983,7 @@ impl Renderer {
             avatar_parts: avatar_instances,
             avatar_draw_calls: u32::from(has_avatars)
                 + u32::from(has_avatars && self.options.screen_space_ambient_occlusion)
-                + if has_avatars && self.options.shadows {
+                + if has_avatars && shadows_active {
                     CASCADE_COUNT as u32
                 } else {
                     0
@@ -3969,6 +4017,7 @@ fn frame_uniform(
     let FrameState {
         options,
         environment,
+        world_environment,
         underwater_blend,
         interior,
     } = state;
@@ -4049,8 +4098,22 @@ fn frame_uniform(
         shadow_view_projection: std::array::from_fn(|index| {
             shadows.cascades[index].clip_from_world.to_cols_array_2d()
         }),
-        sun_direction: environment.sun_direction.extend(0.0).to_array(),
-        sun_radiance: environment.sun_radiance.extend(0.0).to_array(),
+        key_light_direction: environment.key_light_direction.extend(0.0).to_array(),
+        key_light_radiance: environment.key_light_radiance.extend(0.0).to_array(),
+        sun_direction: environment
+            .sun_direction
+            .extend(environment.sun_visibility)
+            .to_array(),
+        moon_direction: environment
+            .moon_direction
+            .extend(environment.moon_visibility)
+            .to_array(),
+        environment_time: [
+            world_environment.day_fraction,
+            world_environment.cloud_offset_metres[0],
+            world_environment.cloud_offset_metres[1],
+            environment.shadow_strength,
+        ],
         sky_horizon: environment.sky_horizon.extend(0.0).to_array(),
         sky_zenith: environment.sky_zenith.extend(0.0).to_array(),
         ground_atmosphere: [

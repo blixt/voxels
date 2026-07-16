@@ -66,8 +66,9 @@ terrain used by two measured laps, making its arena-plateau gate prove allocatio
 canonical and LOD queue must drain.
 `vp run profile:materials` toggles Rust-generated material detail through canvas hit-testing and gates
 identical geometry/residency plus the incremental frame and GPU cost.
-`vp run profile:atmosphere` drives the Rust Mission Control daylight action through dawn, clear day, golden hour,
-and blue hour, captures each phase, and gates identical geometry plus frame/GPU budgets.
+`vp run profile:atmosphere` accelerates the server-owned clock through midnight, dawn, noon,
+golden hour, and blue hour, captures each anchor, and gates shadow behavior, identical geometry,
+and frame/GPU budgets.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture
@@ -121,8 +122,8 @@ See [docs/architecture.md](docs/architecture.md) for format, authority, and rese
 - Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and controls
   can toggle cascaded sun shadows, voxel AO, screen-space contact AO, fog, far terrain, animated
   water, target highlighting, material surface detail, or voxel emissive lights without a DOM UI
-  layer. Explicit header actions copy the complete diagnostic report, preview the next daylight
-  phase for repeatable graphics checks, or reset renderer features to the configured baseline.
+  layer. Explicit header actions copy the complete diagnostic report or reset renderer features to
+  the configured baseline. World time and weather remain server-authoritative for every client.
 
 ## Automation
 

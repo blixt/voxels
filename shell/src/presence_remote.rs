@@ -61,6 +61,8 @@ impl RemotePresenceClient {
         };
         let timeline = RemotePresenceTimeline::new(interpolation)
             .map_err(|error| format!("presence interpolation: {error}"))?;
+        let mut clock = ClockSync::default();
+        clock.observe_opened(local_now_ms(), opened.environment.sample_server_time_ms);
         let inner = Rc::new(PresenceInner {
             transport,
             config,
@@ -76,7 +78,7 @@ impl RemotePresenceClient {
             last_pose_send_ms: Cell::new(f64::NEG_INFINITY),
             last_ping_send_ms: Cell::new(f64::NEG_INFINITY),
             reconnect_after_ms: Cell::new(0.0),
-            clock: Cell::new(ClockSync::default()),
+            clock: Cell::new(clock),
             timeline: RefCell::new(timeline),
             last_error: RefCell::new(None),
             close_resolver: RefCell::new(None),
@@ -127,6 +129,10 @@ impl RemotePresenceClient {
 
     pub fn take_error(&self) -> Option<String> {
         self.inner.last_error.borrow_mut().take()
+    }
+
+    pub fn estimated_server_time_ms(&self, local_time_ms: f64) -> f64 {
+        self.inner.clock.get().server_time(local_time_ms)
     }
 
     pub fn close(&self) {

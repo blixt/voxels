@@ -1,27 +1,5 @@
 @group(0) @binding(0) var<uniform> frame: Frame;
 
-fn hash21(position: vec2<f32>) -> f32 {
-  return fract(sin(dot(position, vec2<f32>(127.1, 311.7))) * 43758.5453);
-}
-
-fn value_noise(position: vec2<f32>) -> f32 {
-  let cell = floor(position);
-  let fraction = fract(position);
-  let blend = fraction * fraction * (3.0 - 2.0 * fraction);
-  let a = hash21(cell);
-  let b = hash21(cell + vec2<f32>(1.0, 0.0));
-  let c = hash21(cell + vec2<f32>(0.0, 1.0));
-  let d = hash21(cell + vec2<f32>(1.0, 1.0));
-  return mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y);
-}
-
-fn cloud_field(position: vec2<f32>) -> f32 {
-  let broad = value_noise(position) * 0.58;
-  let billows = value_noise(position * 2.03 + vec2<f32>(17.2, -9.1)) * 0.29;
-  let detail = value_noise(position * 4.11 + vec2<f32>(-4.7, 23.4)) * 0.13;
-  return broad + billows + detail;
-}
-
 @vertex
 fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
   let x = f32((index << 1u) & 2u);
@@ -48,21 +26,35 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
       + camera_up * ndc.y * vertical_half_fov_tangent,
   );
   let sun_direction = normalize(frame.sun_direction.xyz);
+  let moon_direction = normalize(frame.moon_direction.xyz);
+  let key_light_direction = normalize(frame.key_light_direction.xyz);
   let elevation = clamp(ray.y * 0.5 + 0.5, 0.0, 1.0);
   let horizon = pow(1.0 - abs(ray.y), 5.0);
   let rayleigh = pow(max(ray.y, 0.0), 0.42);
   let base = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, rayleigh);
-  let warm_horizon = frame.sun_radiance.rgb * vec3<f32>(1.0, 0.48, 0.24) * horizon * 0.018;
+  let sun_azimuth = normalize(sun_direction.xz + vec2<f32>(0.0001));
+  let ray_azimuth = normalize(ray.xz + vec2<f32>(0.0001));
+  let horizon_alignment = pow(max(dot(ray_azimuth, sun_azimuth), 0.0), 3.0);
+  let sun_visible = frame.sun_direction.w * smoothstep(-0.025, 0.025, sun_direction.y);
+  let moon_visible = frame.moon_direction.w * smoothstep(-0.01, 0.04, moon_direction.y);
+  let warm_horizon = vec3<f32>(1.0, 0.34, 0.12)
+    * horizon * horizon_alignment * sun_visible * 0.48;
   let sun_amount = max(dot(ray, sun_direction), 0.0);
-  let sun_disc = smoothstep(0.99955, 0.99985, sun_amount);
+  let sun_disc = smoothstep(0.99955, 0.99985, sun_amount) * sun_visible;
   let sun_glow = pow(sun_amount, 96.0) * 0.16 + pow(sun_amount, 12.0) * 0.022;
+  let moon_amount = max(dot(ray, moon_direction), 0.0);
+  let moon_disc = smoothstep(0.99925, 0.99972, moon_amount) * moon_visible;
+  let moon_glow = pow(moon_amount, 72.0) * moon_visible * 0.025;
   let below_horizon = mix(frame.ground_atmosphere.rgb, base, smoothstep(0.0, 0.12, elevation));
-  var color = below_horizon + warm_horizon + frame.sun_radiance.rgb * (sun_disc * 1.15 + sun_glow);
+  var color = below_horizon
+    + warm_horizon
+    + vec3<f32>(5.8, 4.6, 3.4) * (sun_disc * 1.15 + sun_glow * sun_visible)
+    + vec3<f32>(0.42, 0.50, 0.68) * (moon_disc * 0.82 + moon_glow);
   let star_coordinates = ray.xz / max(ray.y + 1.08, 0.08);
   let star_cell = floor(star_coordinates * 420.0);
-  let star_seed = hash21(star_cell);
+  let star_seed = atmosphere_hash21(star_cell);
   let star = smoothstep(0.9968, 0.9995, star_seed)
-    * mix(0.35, 1.0, hash21(star_cell + vec2<f32>(19.0, 47.0)))
+    * mix(0.35, 1.0, atmosphere_hash21(star_cell + vec2<f32>(19.0, 47.0)))
     * smoothstep(0.04, 0.32, ray.y)
     * frame.fog_exposure.w;
   color += mix(vec3<f32>(0.48, 0.62, 1.0), vec3<f32>(1.0, 0.82, 0.58), star_seed) * star * 1.8;
@@ -70,8 +62,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let cloud_height = 480.0;
     let distance_to_layer = (cloud_height - frame.camera_time.y) / ray.y;
     let cloud_world = frame.camera_time.xz + ray.xz * distance_to_layer;
-    let wind = vec2<f32>(frame.camera_time.w * 0.55, frame.camera_time.w * 0.16);
-    let field = cloud_field(cloud_world * 0.0032 + wind * 0.001);
+    let field = atmosphere_cloud_field_world(cloud_world, frame.environment_time.yz);
     let coverage_control = clamp(frame.fog_exposure.z, 0.0, 1.0);
     let threshold = mix(0.76, 0.49, coverage_control);
     // Keep this analytic rather than derivative-driven: the cloud layer is only evaluated for
@@ -79,9 +70,9 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let softness = mix(0.052, 0.035, smoothstep(0.02, 0.28, ray.y));
     let coverage = smoothstep(threshold - softness, threshold + softness, field)
       * smoothstep(0.015, 0.12, ray.y)
-      * (1.0 - smoothstep(0.94, 0.995, sun_amount));
-    let cloud_shadow = vec3<f32>(0.16, 0.20, 0.27);
-    let cloud_light = cloud_shadow + frame.sun_radiance.rgb * 0.085;
+      * (1.0 - smoothstep(0.94, 0.995, max(sun_amount * sun_visible, moon_amount * moon_visible)));
+    let cloud_shadow = mix(frame.sky_horizon.rgb * 0.24, frame.sky_zenith.rgb * 0.62, elevation);
+    let cloud_light = cloud_shadow + frame.key_light_radiance.rgb * 0.085;
     color = mix(color, cloud_light, coverage * mix(0.34, 0.78, coverage_control));
   }
   let interface_distance = max(
@@ -97,8 +88,8 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let water_scattering = vec3<f32>(0.010, 0.105, 0.145);
   let window_color = color * water_transmittance
     + water_scattering * (vec3<f32>(1.0) - water_transmittance);
-  let overhead_glow = frame.sun_radiance.rgb
-    * pow(max(dot(ray, sun_direction), 0.0), 18.0)
+  let overhead_glow = frame.key_light_radiance.rgb
+    * pow(max(dot(ray, key_light_direction), 0.0), 18.0)
     * 0.012;
   let underwater_sky = mix(
     water_scattering * mix(0.34, 1.0, max(ray.y, 0.0)) + overhead_glow,
