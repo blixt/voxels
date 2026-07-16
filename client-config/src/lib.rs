@@ -644,9 +644,9 @@ mod tests {
         ClientConfig {
             schema_version: CLIENT_CONFIG_SCHEMA_VERSION,
             world: WorldTransportConfig {
-                endpoint: "ws://127.0.0.1:9777/v9/world".to_owned(),
-                presence_endpoint: "ws://127.0.0.1:9777/v9/presence".to_owned(),
-                subprotocol: "voxels.world.v9".to_owned(),
+                endpoint: "ws://127.0.0.1:9777/v11/world".to_owned(),
+                presence_endpoint: "ws://127.0.0.1:9777/v11/presence".to_owned(),
+                subprotocol: "voxels.world.v11".to_owned(),
                 auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
                 max_in_flight_batches: 8,
                 buffered_amount_high_water_bytes: 8 * 1024 * 1024,
