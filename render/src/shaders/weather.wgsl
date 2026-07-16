@@ -96,10 +96,12 @@ fn vs_main(
   );
   if snow == 1u {
     let flutter_phase = random_shape * 6.2831853 + frame.camera_time.w * mix(1.1, 2.4, random_x);
-    world.xz += wind * age_seconds * 0.34
+    let horizontal_offset = wind * age_seconds * 0.34
       + vec2<f32>(sin(flutter_phase), cos(flutter_phase * 0.83)) * mix(0.18, 0.52, random_z);
+    world = world + vec3<f32>(horizontal_offset.x, 0.0, horizontal_offset.y);
   } else {
-    world.xz += wind * age_seconds * 0.52;
+    let horizontal_offset = wind * age_seconds * 0.52;
+    world = world + vec3<f32>(horizontal_offset.x, 0.0, horizontal_offset.y);
   }
 
   let radial_distance = length(world.xz - frame.camera_time.xz);

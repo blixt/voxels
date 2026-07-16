@@ -127,6 +127,8 @@ mod tests {
         assert!(weather.contains("@builtin(instance_index) instance_index: u32"));
         assert!(weather.contains("frame.camera_time.y + 17.0 - age * PRECIPITATION_HEIGHT_METRES"));
         assert!(weather.contains("frame.view_projection * vec4<f32>(world, 1.0)"));
+        assert!(!weather.contains("world.xz +="));
+        assert!(!weather.contains("world.xz ="));
         assert!(!weather.contains("position.xy / frame.viewport_voxel.xy"));
         assert!(!weather.contains("fn rain_layer("));
     }

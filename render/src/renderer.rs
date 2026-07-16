@@ -1527,6 +1527,7 @@ impl Renderer {
                 fragment_constants: &[],
             },
         );
+        let weather_pipeline_error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let weather_shader = crate::shader::frame_shader(
             &device,
             "precipitation weather shader",
@@ -1553,6 +1554,9 @@ impl Renderer {
                 fragment_constants: &[],
             },
         );
+        if let Some(error) = weather_pipeline_error_scope.pop().await {
+            return Err(format!("create precipitation weather pipeline: {error}"));
+        }
         let voxel_shader = crate::shader::frame_pbr_shader(
             &device,
             "voxel shader",
@@ -2992,7 +2996,7 @@ impl Renderer {
         }
         if weather_active {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("screen-space precipitation pass"),
+                label: Some("world-space precipitation pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: self.ui_gpu.scene_view(),
                     resolve_target: None,
