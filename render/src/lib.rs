@@ -7,6 +7,7 @@ pub mod environment;
 pub mod lod;
 mod material_detail;
 pub mod renderer;
+mod shader;
 pub mod shadow;
 pub mod ui;
 mod ui_gpu;

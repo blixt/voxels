@@ -43,8 +43,11 @@ impl AmbientOcclusionGpu {
         let depth_layout = depth_layout(device);
         let denoise_layout = ao_layout(device, "spatial AO denoise layout", 1);
         let sample_layout = ao_layout(device, "spatial AO world sample layout", 0);
-        let shader =
-            device.create_shader_module(wgpu::include_wgsl!("shaders/ambient_occlusion.wgsl"));
+        let shader = crate::shader::frame_shader(
+            device,
+            "spatial ambient occlusion shader",
+            include_str!("shaders/ambient_occlusion.wgsl"),
+        );
         let evaluate_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("spatial AO evaluate pipeline layout"),
             bind_group_layouts: &[Some(frame_layout), Some(&depth_layout)],

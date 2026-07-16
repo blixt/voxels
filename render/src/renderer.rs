@@ -1433,7 +1433,8 @@ impl Renderer {
                 bind_group_layouts: &[Some(&frame_layout), Some(&water_scene_layout)],
                 immediate_size: 0,
             });
-        let sky_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/sky.wgsl"));
+        let sky_shader =
+            crate::shader::frame_shader(&device, "sky shader", include_str!("shaders/sky.wgsl"));
         let sky_pipeline = pipeline(
             &device,
             "sky pipeline",
@@ -1455,7 +1456,11 @@ impl Renderer {
                 fragment_constants: &[],
             },
         );
-        let voxel_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/voxels.wgsl"));
+        let voxel_shader = crate::shader::frame_shader(
+            &device,
+            "voxel shader",
+            include_str!("shaders/voxels.wgsl"),
+        );
         let depth_prepass_fast_pipeline = fragmentless_depth_pipeline(
             &device,
             "spatial AO depth pipeline",

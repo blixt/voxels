@@ -55,7 +55,11 @@ impl AvatarGpu {
                 bind_group_layouts: &[Some(shadow_layout)],
                 immediate_size: 0,
             });
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/avatar.wgsl"));
+        let shader = crate::shader::frame_shader(
+            device,
+            "articulated avatar shader",
+            include_str!("shaders/avatar.wgsl"),
+        );
         let shadow_shader =
             device.create_shader_module(wgpu::include_wgsl!("shaders/avatar_shadow.wgsl"));
         let scene_pipeline = avatar_scene_pipeline(

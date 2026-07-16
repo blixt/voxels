@@ -1,26 +1,3 @@
-struct Frame {
-  view_projection: mat4x4<f32>,
-  inverse_view_projection: mat4x4<f32>,
-  camera_time: vec4<f32>,
-  viewport_voxel: vec4<f32>,
-  target_voxel: vec4<f32>,
-  target_voxel_max: vec4<f32>,
-  render_options: vec4<f32>,
-  lod_options: vec4<f32>,
-  camera_forward: vec4<f32>,
-  shadow_splits: vec4<f32>,
-  shadow_texel_sizes: vec4<f32>,
-  shadow_view_projection: array<mat4x4<f32>, 3>,
-  sun_direction: vec4<f32>,
-  sun_radiance: vec4<f32>,
-  sky_horizon: vec4<f32>,
-  sky_zenith: vec4<f32>,
-  ground_atmosphere: vec4<f32>,
-  fog_exposure: vec4<f32>,
-  medium: vec4<f32>,
-  interior: vec4<f32>,
-};
-
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var shadow_map: texture_depth_2d_array;
 @group(0) @binding(2) var shadow_sampler: sampler_comparison;
