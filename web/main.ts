@@ -423,6 +423,7 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
   });
   const cancelInput = (): void => {
     pressedKeys.clear();
+    wheelAccumulator.clear();
     enqueue(
       {
         kind: INPUT_CANCEL,
