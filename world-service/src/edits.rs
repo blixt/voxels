@@ -474,8 +474,16 @@ impl EditAuthority {
             return Err(EditAuthorityError(EDIT_SESSION_NOT_CURRENT.to_owned()));
         }
 
-        let (mutations, inventory) =
-            plan_action(source, &state.edits, player.inventory, command.action)?;
+        let PlannedAction {
+            mutations,
+            durable_overrides,
+            inventory,
+        } = plan_action(source, &state.edits, player.inventory, command.action)?;
+        if mutations.len() != durable_overrides.len() {
+            return Err(EditAuthorityError(
+                "edit plan has mismatched durable outcomes".to_owned(),
+            ));
+        }
         let changed = !mutations.is_empty();
         let revision = if changed {
             state
@@ -497,8 +505,8 @@ impl EditAuthority {
         };
 
         let mut next_edits = state.edits.clone();
-        for mutation in &mutations {
-            next_edits.replace_durable_override(mutation.coord, Some(mutation.material));
+        for (mutation, durable_override) in mutations.iter().zip(&durable_overrides) {
+            next_edits.replace_durable_override(mutation.coord, *durable_override);
         }
         let (affected_chunks, affected_surface_tiles) = if changed {
             affected_products(source, &state.edits, &next_edits, &mutations)?
@@ -523,6 +531,7 @@ impl EditAuthority {
             revision,
             inventory,
             &mutations,
+            &durable_overrides,
             &affected_chunks,
             &affected_surface_tiles,
         )?;
@@ -955,12 +964,19 @@ fn load_operation_surfaces(
     .collect()
 }
 
+#[derive(Debug)]
+struct PlannedAction {
+    mutations: Vec<VoxelMutation>,
+    durable_overrides: Vec<Option<Material>>,
+    inventory: MaterialInventory,
+}
+
 fn plan_action(
     source: &dyn WorldSourceEngine,
     edits: &EditMap,
     mut inventory: MaterialInventory,
     action: EditAction,
-) -> Result<(Vec<VoxelMutation>, MaterialInventory), EditAuthorityError> {
+) -> Result<PlannedAction, EditAuthorityError> {
     match action {
         EditAction::Dig { hit, face } => {
             let volume = DigVolume::for_hit_face(hit, face).ok_or_else(|| {
@@ -968,6 +984,7 @@ fn plan_action(
             })?;
             let snapshot = source_voxel_block(source, volume.min, volume.sample_shape())?;
             let mut mutations = Vec::with_capacity(DIG_VOLUME_VOXELS);
+            let mut durable_overrides = Vec::with_capacity(DIG_VOLUME_VOXELS);
             for x in volume.min.x..=volume.max.x {
                 for y in volume.min.y..=volume.max.y {
                     for z in volume.min.z..=volume.max.z {
@@ -987,10 +1004,16 @@ fn plan_action(
                             coord,
                             material: Material::Air,
                         });
+                        durable_overrides
+                            .push((generated != Material::Air).then_some(Material::Air));
                     }
                 }
             }
-            Ok((mutations, inventory))
+            Ok(PlannedAction {
+                mutations,
+                durable_overrides,
+                inventory,
+            })
         }
         EditAction::Place { coord, material } => {
             if material == Material::Air {
@@ -1013,7 +1036,11 @@ fn plan_action(
                 )));
             }
             *slot -= 1;
-            Ok((vec![VoxelMutation { coord, material }], inventory))
+            Ok(PlannedAction {
+                mutations: vec![VoxelMutation { coord, material }],
+                durable_overrides: vec![(material != generated).then_some(material)],
+                inventory,
+            })
         }
     }
 }
@@ -1095,6 +1122,7 @@ fn persist_action(
     revision: u64,
     inventory: MaterialInventory,
     mutations: &[VoxelMutation],
+    durable_overrides: &[Option<Material>],
     affected_chunks: &[ChunkCoord],
     affected_surface_tiles: &[SurfaceTileCoord],
 ) -> Result<(), EditAuthorityError> {
@@ -1102,21 +1130,30 @@ fn persist_action(
         .transaction()
         .map_err(sql_error("begin edit transaction"))?;
     if !mutations.is_empty() {
-        for mutation in mutations {
-            transaction
-                .execute(
-                    "INSERT INTO voxel_edits(x,y,z,material,revision) VALUES(?1,?2,?3,?4,?5)
-                     ON CONFLICT(x,y,z) DO UPDATE SET
-                        material=excluded.material, revision=excluded.revision",
-                    params![
-                        mutation.coord.x,
-                        mutation.coord.y,
-                        mutation.coord.z,
-                        mutation.material.id(),
-                        to_sql_i64(revision, "edit revision")?,
-                    ],
-                )
-                .map_err(sql_error("persist voxel mutation"))?;
+        for (mutation, durable_override) in mutations.iter().zip(durable_overrides) {
+            if let Some(material) = durable_override {
+                transaction
+                    .execute(
+                        "INSERT INTO voxel_edits(x,y,z,material,revision) VALUES(?1,?2,?3,?4,?5)
+                         ON CONFLICT(x,y,z) DO UPDATE SET
+                            material=excluded.material, revision=excluded.revision",
+                        params![
+                            mutation.coord.x,
+                            mutation.coord.y,
+                            mutation.coord.z,
+                            material.id(),
+                            to_sql_i64(revision, "edit revision")?,
+                        ],
+                    )
+                    .map_err(sql_error("persist voxel mutation"))?;
+            } else {
+                transaction
+                    .execute(
+                        "DELETE FROM voxel_edits WHERE x=?1 AND y=?2 AND z=?3",
+                        params![mutation.coord.x, mutation.coord.y, mutation.coord.z],
+                    )
+                    .map_err(sql_error("delete pristine voxel mutation"))?;
+            }
         }
         transaction
             .execute(
@@ -1621,6 +1658,58 @@ mod tests {
     }
 
     #[test]
+    fn digging_a_placed_block_restores_pristine_air_without_a_tombstone() {
+        let source = ProceduralWorldSource::new(43);
+        let authority =
+            EditAuthority::in_memory_with_inventory(world_id(31), &source, 8, 1).unwrap();
+        let player = player_id(31);
+        let (_opened, session) = admit_player(&authority, player, resume(1));
+        let coord = VoxelCoord::new(0, 300, 0);
+        assert_eq!(
+            source_voxel_block(&source, coord, [1, 1, 1])
+                .unwrap()
+                .sample(coord),
+            Some(Material::Air)
+        );
+
+        authority
+            .apply(
+                &source,
+                player,
+                31,
+                place(1, session, coord, Material::Stone),
+            )
+            .unwrap();
+        let dug = authority
+            .apply(
+                &source,
+                player,
+                31,
+                dig(2, session, VoxelCoord::new(2, 300, 0)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            dug.commit.mutations,
+            vec![VoxelMutation {
+                coord,
+                material: Material::Air,
+            }]
+        );
+        let state = authority.lock();
+        assert_eq!(state.edits.override_at(coord), None);
+        let rows: i64 = state
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM voxel_edits WHERE x=?1 AND y=?2 AND z=?3",
+                params![coord.x, coord.y, coord.z],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
     fn placement_debits_inventory_and_rejects_air_occupied_and_out_of_stock() {
         let source = ProceduralWorldSource::new(7);
         let authority =
@@ -1708,7 +1797,11 @@ mod tests {
                         hit[2] = -11;
                     }
                     let hit = VoxelCoord::new(hit[0], hit[1], hit[2]);
-                    let (mutations, after) = plan_action(
+                    let PlannedAction {
+                        mutations,
+                        inventory: after,
+                        ..
+                    } = plan_action(
                         &source,
                         &EditMap::default(),
                         inventory,
@@ -1784,7 +1877,7 @@ mod tests {
             VoxelFace::NegativeZ,
             VoxelFace::PositiveZ,
         ] {
-            let (mutations, _) = plan_action(
+            let PlannedAction { mutations, .. } = plan_action(
                 &source,
                 &EditMap::default(),
                 starting_inventory(1),
