@@ -122,6 +122,14 @@ mod tests {
     }
 
     #[test]
+    fn distant_voxel_walls_fade_to_macro_lighting_instead_of_switching_normals() {
+        let voxels = include_str!("shaders/voxels.wgsl");
+        assert!(voxels.contains("fn surface_wall_macro_blend("));
+        assert!(voxels.contains("smoothstep(0.0, 48.0, distance_from_near_field) * 0.82"));
+        assert!(voxels.contains("face == 2u"));
+    }
+
+    #[test]
     fn precipitation_is_world_space_depth_tested_geometry_that_falls_downward() {
         let weather = include_str!("shaders/weather.wgsl");
         assert!(weather.contains("@builtin(instance_index) instance_index: u32"));

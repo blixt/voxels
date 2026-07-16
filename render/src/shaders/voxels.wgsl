@@ -78,6 +78,15 @@ fn surface_parent_normal_blend(world: vec3<f32>, material: u32) -> f32 {
   return 1.0 - smoothstep(0.0, width, inside);
 }
 
+fn surface_wall_macro_blend(world: vec3<f32>) -> f32 {
+  // The canonical square reaches 9.6m along its axes and 13.6m at its corners. Start close enough
+  // that every first coarse wall still uses almost exactly its voxel-face normal, then converge
+  // toward the bounded terrain slope over the next LOD rings. Camera distance keeps this lighting
+  // invariant when the snapped ownership hierarchy moves around a stationary world point.
+  let distance_from_near_field = max(distance(world.xz, frame.camera_time.xz) - 8.0, 0.0);
+  return smoothstep(0.0, 48.0, distance_from_near_field) * 0.82;
+}
+
 @vertex
 fn vs_main(
   @builtin(vertex_index) vertex_index: u32,
@@ -107,7 +116,14 @@ fn vs_main(
   if surface_macro_normal {
     let own_normal = unpack_surface_macro_normal(ao, false);
     let parent_normal = unpack_surface_macro_normal(ao, true);
-    normal = normalize(mix(own_normal, parent_normal, surface_parent_normal_blend(world, material)));
+    let terrain_normal = normalize(
+      mix(own_normal, parent_normal, surface_parent_normal_blend(world, material)),
+    );
+    normal = select(
+      normalize(mix(normal, terrain_normal, surface_wall_macro_blend(world))),
+      terrain_normal,
+      face == 2u,
+    );
   }
   var out: VertexOut;
   out.position = frame.view_projection * vec4<f32>(world, 1.0);
