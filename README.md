@@ -73,6 +73,8 @@ and frame/GPU budgets.
 clear, cloudy, overcast, rain, storm, and clearing anchors, captures each state, and separately gates
 volumetric-cloud GPU cost, precipitation, lighting/fog response, geometry invariants, and 120 Hz
 frame pacing.
+`vp run test:weather-motion-browser` verifies that projected rain moves downward and that cloud
+lighting/density remain stable when the camera rotates away and returns.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture
