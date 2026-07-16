@@ -583,6 +583,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-lod-transition.mjs",
         cache: false,
       },
+      "test:lod-watertight-browser": {
+        command: "node scripts/browser-lod-transition.mjs --watertight",
+        cache: false,
+      },
       "test:multiplayer-browser": {
         command: "node scripts/browser-multiplayer.mjs",
         cache: false,
