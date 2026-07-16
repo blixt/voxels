@@ -13,14 +13,16 @@ name = "voxels"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-voxels-client-config = { path = "../client-config" }
 voxels-core = { path = "../core" }
+voxels-world = { path = "../world" }
+glam = "0.33"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+voxels-client-config = { path = "../client-config" }
 voxels-render = { path = "../render" }
 voxels-runtime = { path = "../runtime" }
-voxels-world = { path = "../world" }
 bytemuck = { version = "1", features = ["derive"] }
 console_error_panic_hook = "0.1"
-glam = "0.33"
 js-sys = "0.3"
 rusqlite = "=0.40.1"
 sqlite-wasm-rs = "0.5"
@@ -29,7 +31,7 @@ wasm-bindgen = "=0.2.117"
 wasm-bindgen-futures = "0.4"
 wgpu = { version = "=30.0.0", default-features = false, features = ["webgpu", "wgsl"] }
 
-[dependencies.web-sys]
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
 version = "0.3"
 features = [
   "console",

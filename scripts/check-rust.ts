@@ -9,7 +9,7 @@ function cargo(args: string[], env = process.env): void {
 }
 
 cargo(["fmt", "--all", "--", "--check"]);
-cargo(["test", "--workspace", "--exclude", "voxels-shell"]);
+cargo(["test", "--workspace"]);
 cargo([
   "clippy",
   "--workspace",
@@ -21,7 +21,17 @@ cargo([
   "warnings",
 ]);
 cargo(
-  ["clippy", "-p", "voxels-shell", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"],
+  [
+    "clippy",
+    "-p",
+    "voxels-shell",
+    "--target",
+    "wasm32-unknown-unknown",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings",
+  ],
   {
     ...process.env,
     ...wasmCcEnv(),

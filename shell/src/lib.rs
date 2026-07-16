@@ -2,6 +2,8 @@
 
 #[cfg(any(target_arch = "wasm32", test))]
 use voxels_core::CameraState;
+#[cfg(any(target_arch = "wasm32", test))]
+use std::collections::BTreeSet;
 
 #[cfg(any(target_arch = "wasm32", test))]
 const INTERACTION_REACH_METRES: f32 = 5.0;
@@ -95,6 +97,13 @@ fn advance_surface_focus(
     Some(next)
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn complete_canonical_columns(
+    complete_chunks: &BTreeSet<(i32, i32, i32)>,
+) -> BTreeSet<(i32, i32)> {
+    complete_chunks.iter().map(|&(x, _, z)| (x, z)).collect()
+}
+
 #[cfg(target_arch = "wasm32")]
 mod persist;
 #[cfg(target_arch = "wasm32")]
@@ -103,7 +112,7 @@ mod presence_remote;
 pub mod remote;
 #[cfg(target_arch = "wasm32")]
 mod web {
-    use crate::advance_surface_focus;
+    use crate::{advance_surface_focus, complete_canonical_columns};
     use crate::persist::{PersistenceConfig, PersistencePlayer, PersistenceWorld, Store};
     use crate::presence_remote::RemotePresenceClient;
     use crate::remote::{
@@ -215,12 +224,6 @@ mod web {
             ridge: 0.0,
             route: None,
         })
-    }
-
-    fn complete_canonical_columns(
-        complete_chunks: &BTreeSet<(i32, i32, i32)>,
-    ) -> BTreeSet<(i32, i32)> {
-        complete_chunks.iter().map(|&(x, _, z)| (x, z)).collect()
     }
 
     #[derive(Clone, Copy, Default)]
