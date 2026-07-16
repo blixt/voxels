@@ -30,7 +30,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 12;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 13;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 5;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -189,9 +189,13 @@ pub struct SpawnConfig {
 pub struct EnvironmentConfig {
     pub day_length_seconds: f32,
     pub day_fraction_at_unix_epoch: f32,
+    pub weather_cycle_seconds: f32,
+    pub weather_fraction_at_unix_epoch: f32,
     pub cloud_offset_metres_at_unix_epoch: [f32; 2],
     pub cloud_velocity_metres_per_second: [f32; 2],
     pub cloud_coverage: f32,
+    pub cloud_base_metres: f32,
+    pub cloud_top_metres: f32,
     pub weather_seed: u64,
     pub weather_revision: u64,
 }
@@ -201,9 +205,13 @@ impl Default for EnvironmentConfig {
         Self {
             day_length_seconds: 1_200.0,
             day_fraction_at_unix_epoch: 0.72,
+            weather_cycle_seconds: 900.0,
+            weather_fraction_at_unix_epoch: 0.08,
             cloud_offset_metres_at_unix_epoch: [0.0, 0.0],
             cloud_velocity_metres_per_second: [5.5, 1.6],
-            cloud_coverage: 0.46,
+            cloud_coverage: 0.24,
+            cloud_base_metres: 550.0,
+            cloud_top_metres: 1_800.0,
             weather_seed: 0x57ea_7aed,
             weather_revision: 1,
         }
@@ -412,6 +420,10 @@ impl WorldServiceConfig {
             || !(0.0..=86_400.0).contains(&self.environment.day_length_seconds)
             || !self.environment.day_fraction_at_unix_epoch.is_finite()
             || !(0.0..1.0).contains(&self.environment.day_fraction_at_unix_epoch)
+            || !self.environment.weather_cycle_seconds.is_finite()
+            || !(0.0..=86_400.0).contains(&self.environment.weather_cycle_seconds)
+            || !self.environment.weather_fraction_at_unix_epoch.is_finite()
+            || !(0.0..1.0).contains(&self.environment.weather_fraction_at_unix_epoch)
             || !self
                 .environment
                 .cloud_offset_metres_at_unix_epoch
@@ -425,10 +437,15 @@ impl WorldServiceConfig {
                 .any(|value| value.abs() > 100.0)
             || !self.environment.cloud_coverage.is_finite()
             || !(0.0..=1.0).contains(&self.environment.cloud_coverage)
+            || !self.environment.cloud_base_metres.is_finite()
+            || !(100.0..=5_000.0).contains(&self.environment.cloud_base_metres)
+            || !self.environment.cloud_top_metres.is_finite()
+            || self.environment.cloud_top_metres <= self.environment.cloud_base_metres
+            || self.environment.cloud_top_metres > 10_000.0
             || self.environment.weather_revision == 0
         {
             return Err(WorldServiceConfigError::InvalidEnvironment(
-                "day clock, cloud wind, coverage, and weather revision must be finite and bounded",
+                "day and weather clocks, cloud layer, wind, coverage, and revision must be finite and bounded",
             ));
         }
         if !(16..=1_000).contains(&self.presence.broadcast_interval_ms) {
@@ -861,7 +878,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 12
+schema_version = 13
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -907,9 +924,13 @@ movement_credit_window_ms = 500
 [environment]
 day_length_seconds = 1200.0
 day_fraction_at_unix_epoch = 0.72
+weather_cycle_seconds = 900.0
+weather_fraction_at_unix_epoch = 0.08
 cloud_offset_metres_at_unix_epoch = [0.0, 0.0]
 cloud_velocity_metres_per_second = [5.5, 1.6]
-cloud_coverage = 0.46
+cloud_coverage = 0.24
+cloud_base_metres = 550.0
+cloud_top_metres = 1800.0
 weather_seed = 1474984685
 weather_revision = 1
 
@@ -976,12 +997,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 12", "schema_version = 11");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 13", "schema_version = 12");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 12,
-                found: 11,
+                expected: 13,
+                found: 12,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");

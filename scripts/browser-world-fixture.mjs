@@ -27,7 +27,12 @@ export async function prepareBrowserWorldFixture({
   screenSpaceAmbientOcclusion,
   dayLengthSeconds,
   dayFractionAtUnixEpoch,
+  weatherCycleSeconds,
+  weatherFractionAtUnixEpoch,
   cloudVelocityMetresPerSecond,
+  cloudCoverage,
+  cloudBaseMetres,
+  cloudTopMetres,
 }) {
   if (!Number.isInteger(browserPort) || browserPort <= 0 || browserPort > 65_535) {
     throw new Error("browser fixture port must be in 1..=65535");
@@ -75,6 +80,40 @@ export async function prepareBrowserWorldFixture({
   ) {
     throw new Error("browser fixture cloud velocity must contain two values in -100..=100");
   }
+  if (
+    weatherCycleSeconds !== undefined &&
+    (!Number.isFinite(weatherCycleSeconds) ||
+      weatherCycleSeconds < 0 ||
+      weatherCycleSeconds > 86_400)
+  ) {
+    throw new Error("browser fixture weatherCycleSeconds must be finite and in 0..=86400");
+  }
+  if (
+    weatherFractionAtUnixEpoch !== undefined &&
+    (!Number.isFinite(weatherFractionAtUnixEpoch) ||
+      weatherFractionAtUnixEpoch < 0 ||
+      weatherFractionAtUnixEpoch >= 1)
+  ) {
+    throw new Error("browser fixture weatherFractionAtUnixEpoch must be finite and in 0..<1");
+  }
+  if (
+    cloudCoverage !== undefined &&
+    (!Number.isFinite(cloudCoverage) || cloudCoverage < 0 || cloudCoverage > 1)
+  ) {
+    throw new Error("browser fixture cloudCoverage must be finite and in 0..=1");
+  }
+  const resolvedCloudBaseMetres = cloudBaseMetres ?? 550;
+  const resolvedCloudTopMetres = cloudTopMetres ?? 1_800;
+  if (
+    !Number.isFinite(resolvedCloudBaseMetres) ||
+    resolvedCloudBaseMetres < 100 ||
+    resolvedCloudBaseMetres > 5_000 ||
+    !Number.isFinite(resolvedCloudTopMetres) ||
+    resolvedCloudTopMetres <= resolvedCloudBaseMetres ||
+    resolvedCloudTopMetres > 10_000
+  ) {
+    throw new Error("browser fixture cloud layer must have 100..=5000m base below a <=10000m top");
+  }
   const directory = await mkdtemp(path.join(tmpdir(), prefix));
   try {
     const backendPort = await reserveEphemeralPort();
@@ -106,9 +145,20 @@ export async function prepareBrowserWorldFixture({
             `day_fraction_at_unix_epoch = ${dayFractionAtUnixEpoch ?? 0.72}`,
           )
           .replace(
+            /^weather_cycle_seconds = .*$/m,
+            `weather_cycle_seconds = ${weatherCycleSeconds ?? 900}`,
+          )
+          .replace(
+            /^weather_fraction_at_unix_epoch = .*$/m,
+            `weather_fraction_at_unix_epoch = ${weatherFractionAtUnixEpoch ?? 0.08}`,
+          )
+          .replace(
             /^cloud_velocity_metres_per_second = .*$/m,
             `cloud_velocity_metres_per_second = [${(cloudVelocityMetresPerSecond ?? [5.5, 1.6]).join(", ")}]`,
           )
+          .replace(/^cloud_coverage = .*$/m, `cloud_coverage = ${cloudCoverage ?? 0.24}`)
+          .replace(/^cloud_base_metres = .*$/m, `cloud_base_metres = ${resolvedCloudBaseMetres}`)
+          .replace(/^cloud_top_metres = .*$/m, `cloud_top_metres = ${resolvedCloudTopMetres}`)
           .replace(
             /^xz_voxels = .*$/m,
             `xz_voxels = [${spawnVoxels?.[0] ?? 0}, ${spawnVoxels?.[1] ?? 0}]`,
@@ -155,7 +205,12 @@ export async function prepareBrowserWorldFixture({
       screenSpaceAmbientOcclusion: screenSpaceAmbientOcclusion ?? true,
       dayLengthSeconds: dayLengthSeconds ?? 1_200,
       dayFractionAtUnixEpoch: dayFractionAtUnixEpoch ?? 0.72,
+      weatherCycleSeconds: weatherCycleSeconds ?? 900,
+      weatherFractionAtUnixEpoch: weatherFractionAtUnixEpoch ?? 0.08,
       cloudVelocityMetresPerSecond: cloudVelocityMetresPerSecond ?? [5.5, 1.6],
+      cloudCoverage: cloudCoverage ?? 0.24,
+      cloudBaseMetres: resolvedCloudBaseMetres,
+      cloudTopMetres: resolvedCloudTopMetres,
       async cleanup() {
         if (cleaned) return;
         cleaned = true;

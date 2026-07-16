@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 13;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 14;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -114,8 +114,20 @@ pub struct SurfaceStreamingConfig {
 pub struct RenderingConfig {
     pub view_distance_metres: f32,
     pub shadows: ShadowConfig,
+    pub volumetric_clouds: VolumetricCloudConfig,
     pub features: RendererFeatureConfig,
     pub mission_control: MissionControlConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VolumetricCloudConfig {
+    pub enabled: bool,
+    pub resolution_scale: f32,
+    pub view_steps: u32,
+    pub light_steps: u32,
+    pub max_distance_metres: f32,
+    pub extinction: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -327,6 +339,40 @@ impl ClientConfig {
             "rendering.shadows.caster_depth_expansion",
             0.0,
             shadows.far_plane,
+            true,
+        )?;
+        let clouds = self.rendering.volumetric_clouds;
+        ensure_finite_range(
+            clouds.resolution_scale,
+            "rendering.volumetric_clouds.resolution_scale",
+            0.25,
+            1.0,
+            true,
+        )?;
+        ensure_integer_range(
+            clouds.view_steps,
+            "rendering.volumetric_clouds.view_steps",
+            4,
+            24,
+        )?;
+        ensure_integer_range(
+            clouds.light_steps,
+            "rendering.volumetric_clouds.light_steps",
+            1,
+            4,
+        )?;
+        ensure_finite_range(
+            clouds.max_distance_metres,
+            "rendering.volumetric_clouds.max_distance_metres",
+            1_000.0,
+            40_000.0,
+            true,
+        )?;
+        ensure_finite_range(
+            clouds.extinction,
+            "rendering.volumetric_clouds.extinction",
+            0.0001,
+            0.1,
             true,
         )?;
 
@@ -590,9 +636,9 @@ mod tests {
         ClientConfig {
             schema_version: CLIENT_CONFIG_SCHEMA_VERSION,
             world: WorldTransportConfig {
-                endpoint: "ws://127.0.0.1:9777/v12/world".to_owned(),
-                presence_endpoint: "ws://127.0.0.1:9777/v12/presence".to_owned(),
-                subprotocol: "voxels.world.v12".to_owned(),
+                endpoint: "ws://127.0.0.1:9777/v13/world".to_owned(),
+                presence_endpoint: "ws://127.0.0.1:9777/v13/presence".to_owned(),
+                subprotocol: "voxels.world.v13".to_owned(),
                 auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
                 max_in_flight_batches: 8,
                 buffered_amount_high_water_bytes: 8 * 1024 * 1024,
@@ -642,6 +688,14 @@ mod tests {
                     split_lambda: 0.65,
                     shadow_map_resolution: 1_024,
                     caster_depth_expansion: 64.0,
+                },
+                volumetric_clouds: VolumetricCloudConfig {
+                    enabled: true,
+                    resolution_scale: 0.5,
+                    view_steps: 14,
+                    light_steps: 2,
+                    max_distance_metres: 14_000.0,
+                    extinction: 0.006,
                 },
                 features: RendererFeatureConfig {
                     cascaded_sun_shadows: true,
@@ -704,18 +758,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 13", "schema_version = 12");
+        let wrong_schema = fixture.replace("schema_version = 14", "schema_version = 13");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 12,
+                found: 13,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 13",
-            "schema_version = 13\nunknown_root = true",
+            "schema_version = 14",
+            "schema_version = 14\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
@@ -826,6 +880,14 @@ mod tests {
         let mut config = valid_config();
         config.rendering.shadows.shadow_map_resolution = MAX_SHADOW_MAP_RESOLUTION + 1;
         assert_invalid_field(&config, "rendering.shadows.shadow_map_resolution");
+
+        let mut config = valid_config();
+        config.rendering.volumetric_clouds.resolution_scale = 0.1;
+        assert_invalid_field(&config, "rendering.volumetric_clouds.resolution_scale");
+
+        let mut config = valid_config();
+        config.rendering.volumetric_clouds.view_steps = 25;
+        assert_invalid_field(&config, "rendering.volumetric_clouds.view_steps");
     }
 
     #[test]

@@ -43,9 +43,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v12/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v12/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v12";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v13/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v13/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v13";
 const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
@@ -390,6 +390,13 @@ impl EnvironmentAuthority {
         } else {
             self.config.day_fraction_at_unix_epoch
         };
+        let weather_fraction = if self.config.weather_cycle_seconds > 0.0 {
+            (f64::from(self.config.weather_fraction_at_unix_epoch)
+                + unix_seconds / f64::from(self.config.weather_cycle_seconds))
+            .rem_euclid(1.0) as f32
+        } else {
+            self.config.weather_fraction_at_unix_epoch
+        };
         let cloud_offset_metres = std::array::from_fn(|axis| {
             (f64::from(self.config.cloud_offset_metres_at_unix_epoch[axis])
                 + f64::from(self.config.cloud_velocity_metres_per_second[axis]) * unix_seconds)
@@ -399,9 +406,13 @@ impl EnvironmentAuthority {
             sample_server_time_ms,
             day_fraction,
             day_length_seconds: self.config.day_length_seconds,
+            weather_fraction,
+            weather_cycle_seconds: self.config.weather_cycle_seconds,
             cloud_offset_metres,
             cloud_velocity_metres_per_second: self.config.cloud_velocity_metres_per_second,
             cloud_coverage: self.config.cloud_coverage,
+            cloud_base_metres: self.config.cloud_base_metres,
+            cloud_top_metres: self.config.cloud_top_metres,
             weather_seed: self.config.weather_seed,
             weather_revision: self.config.weather_revision,
         }
@@ -2081,9 +2092,13 @@ mod tests {
         let config = crate::EnvironmentConfig {
             day_length_seconds: 100.0,
             day_fraction_at_unix_epoch: 0.25,
+            weather_cycle_seconds: 200.0,
+            weather_fraction_at_unix_epoch: 0.1,
             cloud_offset_metres_at_unix_epoch: [10.0, 20.0],
             cloud_velocity_metres_per_second: [4.0, -2.0],
             cloud_coverage: 0.6,
+            cloud_base_metres: 420.0,
+            cloud_top_metres: 780.0,
             weather_seed: 7,
             weather_revision: 3,
         };
@@ -2092,21 +2107,27 @@ mod tests {
         let later = authority.snapshot(26_000);
         assert!((start.day_fraction - 0.25).abs() < f32::EPSILON);
         assert!((later.day_fraction - 0.5).abs() < 1.0e-6);
+        assert!((start.weather_fraction - 0.1).abs() < f32::EPSILON);
+        assert!((later.weather_fraction - 0.225).abs() < 1.0e-6);
         assert_eq!(start.cloud_offset_metres, [10.0, 20.0]);
         assert_eq!(later.cloud_offset_metres, [110.0, 1_279_970.0]);
         assert_eq!(later.weather_revision, 3);
     }
 
     #[test]
-    fn zero_day_length_freezes_the_configured_celestial_time() {
+    fn zero_cycle_lengths_freeze_the_configured_environment_time() {
         let config = crate::EnvironmentConfig {
             day_length_seconds: 0.0,
             day_fraction_at_unix_epoch: 0.73,
+            weather_cycle_seconds: 0.0,
+            weather_fraction_at_unix_epoch: 0.68,
             ..crate::EnvironmentConfig::default()
         };
         let authority = EnvironmentAuthority::from_anchor(config, 10, 500.0);
         assert_eq!(authority.snapshot(10).day_fraction, 0.73);
         assert_eq!(authority.snapshot(9_000_010).day_fraction, 0.73);
+        assert_eq!(authority.snapshot(10).weather_fraction, 0.68);
+        assert_eq!(authority.snapshot(9_000_010).weather_fraction, 0.68);
     }
 
     fn player_identity(user: u8, player: u8, name: &str) -> PlayerIdentity {
@@ -2212,7 +2233,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v12, test-local-token"),
+            HeaderValue::from_static("voxels.world.v13, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -3172,7 +3193,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v12, test-local-token"),
+            HeaderValue::from_static("voxels.world.v13, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -3207,7 +3228,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v12, test-local-token"),
+            HeaderValue::from_static("voxels.world.v13, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket

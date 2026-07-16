@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 12
+schema_version = 13
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -63,10 +63,14 @@ movement_credit_window_ms = 500
 # restarts and every client extrapolates it from the server's synchronized monotonic clock.
 day_length_seconds = 1200.0
 day_fraction_at_unix_epoch = 0.72
+weather_cycle_seconds = 900.0
+weather_fraction_at_unix_epoch = 0.08
 # World-space cloud advection is shared by the visible sky layer and its terrain shadows.
 cloud_offset_metres_at_unix_epoch = [0.0, 0.0]
 cloud_velocity_metres_per_second = [5.5, 1.6]
-cloud_coverage = 0.46
+cloud_coverage = 0.24
+cloud_base_metres = 550.0
+cloud_top_metres = 1800.0
 weather_seed = 1474984685
 weather_revision = 1
 

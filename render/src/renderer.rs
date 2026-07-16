@@ -1,6 +1,8 @@
 use crate::ambient_occlusion::AmbientOcclusionGpu;
 use crate::arena::{Allocation, ArenaAllocator};
 use crate::avatar::AvatarGpu;
+pub use crate::clouds::VolumetricCloudConfig;
+use crate::clouds::VolumetricCloudGpu;
 use crate::environment::{
     DaylightPhase, InteriorEnvironment, OutdoorEnvironment, WorldEnvironmentState,
     surface_region_label,
@@ -69,7 +71,7 @@ const SURFACE_MACRO_NORMAL_FLAG: u32 = 1 << 28;
 const SURFACE_MACRO_SLOPE_SCALE: f32 = 0.25;
 const SURFACE_MACRO_SLOPE_MAX: f32 = 0.5;
 const LOD_TRANSITION_MESH_KEY: MeshKey = (u8::MAX, 0, 0, 0);
-const GPU_QUERY_COUNT: u32 = 18;
+const GPU_QUERY_COUNT: u32 = 24;
 const GPU_QUERY_BUFFER_BYTES: u64 = GPU_QUERY_COUNT as u64 * size_of::<u64>() as u64;
 const GPU_RESOLVE_BUFFER_BYTES: u64 = 256;
 const GPU_READBACK_SLOTS: usize = 4;
@@ -161,6 +163,7 @@ pub struct RendererConfig {
     pub mission_control: MissionControlConfig,
     pub view_distance_metres: f32,
     pub directional_shadows: DirectionalShadowConfig,
+    pub volumetric_clouds: VolumetricCloudConfig,
 }
 
 impl Default for RendererConfig {
@@ -170,6 +173,7 @@ impl Default for RendererConfig {
             mission_control: MissionControlConfig::default(),
             view_distance_metres: 1_000.0,
             directional_shadows: DirectionalShadowConfig::default(),
+            volumetric_clouds: VolumetricCloudConfig::default(),
         }
     }
 }
@@ -199,13 +203,17 @@ struct FrameUniform {
     sky_zenith: [f32; 4],
     ground_atmosphere: [f32; 4],
     fog_exposure: [f32; 4],
+    weather: [f32; 4],
+    cloud_layer: [f32; 4],
     medium: [f32; 4],
     interior: [f32; 4],
 }
 
-const _: () = assert!(size_of::<FrameUniform>() == 688);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 656);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 672);
+const _: () = assert!(size_of::<FrameUniform>() == 720);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, weather) == 656);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, cloud_layer) == 672);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 688);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 704);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
@@ -558,6 +566,8 @@ pub struct RenderDiagnostics {
     pub gpu_world_ms: Option<f32>,
     pub gpu_water_ms: Option<f32>,
     pub gpu_ambient_occlusion_ms: Option<f32>,
+    pub gpu_cloud_ms: Option<f32>,
+    pub gpu_weather_ms: Option<f32>,
     pub gpu_ui_ms: Option<f32>,
     pub cpu_cull_ms: f32,
     pub cpu_encode_ms: f32,
@@ -585,8 +595,20 @@ pub struct RenderDiagnostics {
     pub shadow_strength: f32,
     pub surface_region: u8,
     pub cloud_coverage: f32,
+    pub cloud_density: f32,
+    pub cloud_base_metres: f32,
+    pub cloud_top_metres: f32,
     pub cloud_offset_metres: [f32; 2],
     pub cloud_velocity_metres_per_second: [f32; 2],
+    pub cloud_render_resolution: [u32; 2],
+    pub cloud_steps: [u32; 2],
+    pub weather_kind: u8,
+    pub weather_fraction: f32,
+    pub precipitation: f32,
+    pub storminess: f32,
+    pub lightning: f32,
+    pub fog_density: f32,
+    pub outdoor_exposure: f32,
     pub weather_revision: u64,
     pub enclosure: f32,
     pub interior_exposure: f32,
@@ -620,6 +642,8 @@ pub struct GpuTimingSample {
     pub world_ms: f32,
     pub water_ms: f32,
     pub ambient_occlusion_ms: f32,
+    pub cloud_ms: f32,
+    pub weather_ms: f32,
     pub ui_ms: f32,
 }
 
@@ -645,9 +669,16 @@ struct GpuTimingFrame {
     query_set: QuerySet,
     slot: usize,
     frame_id: u32,
+    passes: GpuPassMask,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct GpuPassMask {
     shadows: bool,
     water: bool,
     ambient_occlusion: bool,
+    clouds: bool,
+    weather: bool,
 }
 
 impl GpuTimingFrame {
@@ -672,9 +703,7 @@ struct GpuTimer {
 fn parse_gpu_timestamps(
     timestamps: &[u64; GPU_QUERY_COUNT as usize],
     timestamp_period: f32,
-    shadows: bool,
-    water: bool,
-    ambient_occlusion: bool,
+    passes: GpuPassMask,
 ) -> Option<GpuTimingSample> {
     if !timestamp_period.is_finite() || timestamp_period <= 0.0 {
         return None;
@@ -685,38 +714,60 @@ fn parse_gpu_timestamps(
             .map(|ticks| ticks as f32 * timestamp_period / 1_000_000.0)
             .filter(|milliseconds| milliseconds.is_finite())
     };
-    let shadow_cascade_ms = if shadows {
+    let shadow_cascade_ms = if passes.shadows {
         [elapsed_ms(0, 1)?, elapsed_ms(2, 3)?, elapsed_ms(4, 5)?]
     } else {
         [0.0; CASCADE_COUNT]
     };
     let shadow_ms = shadow_cascade_ms.into_iter().sum();
-    let depth_prepass_ms = if ambient_occlusion {
+    let depth_prepass_ms = if passes.ambient_occlusion {
         elapsed_ms(6, 7)?
     } else {
         0.0
     };
-    let world_ms = elapsed_ms(12, 13)?;
-    let water_ms = if water { elapsed_ms(14, 15)? } else { 0.0 };
-    let ambient_occlusion_ms = if ambient_occlusion {
+    let cloud_ms = if passes.clouds {
+        elapsed_ms(12, 13)? + elapsed_ms(16, 17)?
+    } else {
+        0.0
+    };
+    let world_ms = elapsed_ms(14, 15)?;
+    let water_ms = if passes.water {
+        elapsed_ms(18, 19)?
+    } else {
+        0.0
+    };
+    let weather_ms = if passes.weather {
+        elapsed_ms(20, 21)?
+    } else {
+        0.0
+    };
+    let ambient_occlusion_ms = if passes.ambient_occlusion {
         elapsed_ms(8, 9)? + elapsed_ms(10, 11)?
     } else {
         0.0
     };
-    let ui_ms = elapsed_ms(16, 17)?;
-    let mut first = timestamps[12].min(timestamps[16]);
-    let mut last = timestamps[13].max(timestamps[17]);
-    if shadows {
+    let ui_ms = elapsed_ms(22, 23)?;
+    let mut first = timestamps[14].min(timestamps[22]);
+    let mut last = timestamps[15].max(timestamps[23]);
+    if passes.shadows {
         for (start, end) in [(0, 1), (2, 3), (4, 5)] {
             first = first.min(timestamps[start]);
             last = last.max(timestamps[end]);
         }
     }
-    if water {
-        first = first.min(timestamps[14]);
-        last = last.max(timestamps[15]);
+    if passes.clouds {
+        first = first.min(timestamps[12]).min(timestamps[16]);
+        last = last.max(timestamps[13]).max(timestamps[17]);
     }
-    if ambient_occlusion {
+    if passes.water {
+        first = first.min(timestamps[18]);
+        last = last.max(timestamps[19]);
+    }
+    if passes.weather {
+        first = first.min(timestamps[20]);
+        last = last.max(timestamps[21]);
+    }
+    if passes.ambient_occlusion {
         first = first
             .min(timestamps[6])
             .min(timestamps[8])
@@ -739,6 +790,8 @@ fn parse_gpu_timestamps(
         world_ms,
         water_ms,
         ambient_occlusion_ms,
+        cloud_ms,
+        weather_ms,
         ui_ms,
     })
 }
@@ -782,9 +835,7 @@ impl GpuTimer {
     fn begin_frame(
         &mut self,
         frame_id: u32,
-        shadows: bool,
-        water: bool,
-        ambient_occlusion: bool,
+        passes: GpuPassMask,
     ) -> Option<GpuTimingFrame> {
         for offset in 0..GPU_READBACK_SLOTS {
             let slot = (self.next_slot + offset) % GPU_READBACK_SLOTS;
@@ -798,9 +849,7 @@ impl GpuTimer {
                     query_set: self.query_set.clone(),
                     slot,
                     frame_id,
-                    shadows,
-                    water,
-                    ambient_occlusion,
+                    passes,
                 });
             }
         }
@@ -844,9 +893,7 @@ impl GpuTimer {
                     parsed = parse_gpu_timestamps(
                         &timestamps,
                         period,
-                        frame.shadows,
-                        frame.water,
-                        frame.ambient_occlusion,
+                        frame.passes,
                     );
                 }
                 callback_buffer.unmap();
@@ -896,6 +943,7 @@ pub struct Renderer {
     voxel_ambient_occlusion_pipeline: RenderPipeline,
     voxel_ambient_occlusion_flat_pipeline: RenderPipeline,
     water_pipeline: RenderPipeline,
+    weather_pipeline: RenderPipeline,
     avatar_gpu: AvatarGpu,
     remote_avatars: Vec<RemoteAvatarPose>,
     water_scene_layout: wgpu::BindGroupLayout,
@@ -923,6 +971,7 @@ pub struct Renderer {
     water_arena_buffers: Vec<Buffer>,
     depth_view: TextureView,
     ambient_occlusion_gpu: AmbientOcclusionGpu,
+    volumetric_cloud_gpu: VolumetricCloudGpu,
     time: f32,
     diagnostics: RenderDiagnostics,
     gpu_timer: Option<GpuTimer>,
@@ -1268,7 +1317,7 @@ impl Renderer {
         let environment = OutdoorEnvironment::for_world_time(
             atmosphere_sample,
             world_environment.day_fraction,
-            world_environment.cloud_coverage,
+            world_environment.weather(atmosphere_sample.coldness),
         );
         let initial_camera = CameraState::default();
         let shadow_gpu = ShadowGpu::new(
@@ -1423,6 +1472,16 @@ impl Renderer {
             config.width,
             config.height,
         );
+        let volumetric_cloud_gpu = VolumetricCloudGpu::new(
+            &device,
+            &queue,
+            &frame_layout,
+            SCENE_FORMAT,
+            DEPTH_FORMAT,
+            config.width,
+            config.height,
+            runtime_config.volumetric_clouds,
+        );
         let avatar_gpu = AvatarGpu::new(
             &device,
             &frame_layout,
@@ -1472,6 +1531,26 @@ impl Renderer {
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
+                fragment_constants: &[],
+            },
+        );
+        let weather_shader = crate::shader::frame_shader(
+            &device,
+            "precipitation weather shader",
+            include_str!("shaders/weather.wgsl"),
+        );
+        let weather_pipeline = pipeline(
+            &device,
+            "precipitation weather pipeline",
+            &sky_pipeline_layout,
+            &weather_shader,
+            SCENE_FORMAT,
+            &[],
+            PipelineOptions {
+                fragment_entry: "fs_main",
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+                depth_stencil: None,
                 fragment_constants: &[],
             },
         );
@@ -1600,6 +1679,9 @@ impl Renderer {
         ui.set_environment_status(daylight_phase.label(), surface_region_label(surface_region));
         ui.set_world_clock(
             world_environment.day_fraction,
+            world_environment.weather(atmosphere_sample.coldness).kind.label(),
+            environment.precipitation,
+            environment.cloud_coverage,
             world_environment.cloud_velocity_metres_per_second,
             world_environment.weather_revision,
         );
@@ -1616,6 +1698,7 @@ impl Renderer {
             voxel_ambient_occlusion_pipeline,
             voxel_ambient_occlusion_flat_pipeline,
             water_pipeline,
+            weather_pipeline,
             avatar_gpu,
             remote_avatars: Vec::new(),
             water_scene_layout,
@@ -1643,6 +1726,7 @@ impl Renderer {
             water_arena_buffers: Vec::new(),
             depth_view,
             ambient_occlusion_gpu,
+            volumetric_cloud_gpu,
             time: 0.0,
             diagnostics: RenderDiagnostics::default(),
             gpu_timer,
@@ -1692,6 +1776,8 @@ impl Renderer {
             self.depth_view = depth_view(&self.device, width, height);
             self.ambient_occlusion_gpu
                 .resize(&self.device, &self.depth_view, width, height);
+            self.volumetric_cloud_gpu
+                .resize(&self.device, width, height);
         }
         self.dpr = dpr;
         if self
@@ -1741,10 +1827,19 @@ impl Renderer {
         self.environment = OutdoorEnvironment::for_world_time(
             sample,
             self.world_environment.day_fraction,
-            self.world_environment.cloud_coverage,
+            self.world_environment.weather(sample.coldness),
         );
         self.ui
             .set_environment_status(self.daylight_phase.label(), surface_region_label(region));
+        let weather = self.world_environment.weather(sample.coldness);
+        self.ui.set_world_clock(
+            self.world_environment.day_fraction,
+            weather.kind.label(),
+            self.environment.precipitation,
+            self.environment.cloud_coverage,
+            self.world_environment.cloud_velocity_metres_per_second,
+            self.world_environment.weather_revision,
+        );
     }
 
     pub fn set_world_environment(&mut self, state: WorldEnvironmentState) {
@@ -1754,7 +1849,7 @@ impl Renderer {
         self.environment = OutdoorEnvironment::for_world_time(
             self.atmosphere_sample,
             state.day_fraction,
-            state.cloud_coverage,
+            state.weather(self.atmosphere_sample.coldness),
         );
         self.ui.set_environment_status(
             self.daylight_phase.label(),
@@ -1762,6 +1857,9 @@ impl Renderer {
         );
         self.ui.set_world_clock(
             state.day_fraction,
+            state.weather(self.atmosphere_sample.coldness).kind.label(),
+            self.environment.precipitation,
+            self.environment.cloud_coverage,
             state.cloud_velocity_metres_per_second,
             state.weather_revision,
         );
@@ -2641,8 +2739,12 @@ impl Renderer {
         let avatar_instances = self.avatar_gpu.instance_count();
         let has_avatars = avatar_instances != 0;
         let refract_water = !water_draw_list.spans.is_empty();
+        let clouds_active = self.volumetric_cloud_gpu.enabled();
+        let weather_active = self.environment.precipitation > 0.002;
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
+        self.volumetric_cloud_gpu
+            .update(&self.queue, self.world_environment, self.environment);
         if shadows_active {
             self.shadow_gpu
                 .write_cascades(&self.queue, &shadow_cascades, camera);
@@ -2668,9 +2770,13 @@ impl Renderer {
         let gpu_frame = self.gpu_timer.as_mut().and_then(|timer| {
             timer.begin_frame(
                 frame_id,
-                shadows_active,
-                refract_water,
-                self.options.screen_space_ambient_occlusion,
+                GpuPassMask {
+                    shadows: shadows_active,
+                    water: refract_water,
+                    ambient_occlusion: self.options.screen_space_ambient_occlusion,
+                    clouds: clouds_active,
+                    weather: weather_active,
+                },
             )
         });
         let mut shadow_draw_calls = 0;
@@ -2757,16 +2863,24 @@ impl Renderer {
                 gpu_frame.as_ref().map(|frame| frame.pass(10)),
             );
         }
+        if clouds_active {
+            self.volumetric_cloud_gpu
+                .trace(
+                    &mut encoder,
+                    &self.frame_bind_group,
+                    gpu_frame.as_ref().map(|frame| frame.pass(12)),
+                );
+        }
+        let opaque_scene_view = if refract_water {
+            self.ui_gpu.opaque_scene_view()
+        } else {
+            self.ui_gpu.scene_view()
+        };
         {
-            let scene_view = if refract_water {
-                self.ui_gpu.opaque_scene_view()
-            } else {
-                self.ui_gpu.scene_view()
-            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("opaque world pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: scene_view,
+                    view: opaque_scene_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -2782,15 +2896,11 @@ impl Renderer {
                         } else {
                             wgpu::LoadOp::Clear(1.0)
                         },
-                        store: if refract_water {
-                            wgpu::StoreOp::Store
-                        } else {
-                            wgpu::StoreOp::Discard
-                        },
+                        store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(12)),
+                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(14)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -2823,6 +2933,20 @@ impl Renderer {
             pass.set_pipeline(&self.sky_pipeline);
             pass.draw(0..3, 0..1);
         }
+        if clouds_active {
+            self.volumetric_cloud_gpu.composite(
+                &mut encoder,
+                &self.frame_bind_group,
+                opaque_scene_view,
+                &self.depth_view,
+                if refract_water {
+                    wgpu::StoreOp::Store
+                } else {
+                    wgpu::StoreOp::Discard
+                },
+                gpu_frame.as_ref().map(|frame| frame.pass(16)),
+            );
+        }
         if refract_water {
             self.ui_gpu.copy_opaque_to_scene(&mut encoder);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2844,7 +2968,7 @@ impl Renderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(14)),
+                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(18)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -2860,6 +2984,27 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(start..end));
                 pass.draw(0..6, 0..span.quad_count);
             }
+        }
+        if weather_active {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("screen-space precipitation pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: self.ui_gpu.scene_view(),
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(20)),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.weather_pipeline);
+            pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            pass.draw(0..3, 0..1);
         }
         let arena = self.arena.stats();
         let water_arena = self.water_arena.stats();
@@ -2912,6 +3057,7 @@ impl Renderer {
                 .saturating_add(scene_pixels.saturating_mul(20))
                 .saturating_add(shadow_bytes)
                 .saturating_add(self.ambient_occlusion_gpu.bytes())
+                .saturating_add(self.volumetric_cloud_gpu.bytes())
                 .saturating_add(self.material_detail.bytes)
                 .saturating_add(size_of::<LocalLightUniform>() as u64)
                 .saturating_add(self.avatar_gpu.buffer_bytes())
@@ -2927,6 +3073,8 @@ impl Renderer {
             gpu_world_ms: gpu_timing.map(|timing| timing.world_ms),
             gpu_water_ms: gpu_timing.map(|timing| timing.water_ms),
             gpu_ambient_occlusion_ms: gpu_timing.map(|timing| timing.ambient_occlusion_ms),
+            gpu_cloud_ms: gpu_timing.map(|timing| timing.cloud_ms),
+            gpu_weather_ms: gpu_timing.map(|timing| timing.weather_ms),
             gpu_ui_ms: gpu_timing.map(|timing| timing.ui_ms),
             cpu_cull_ms,
             cpu_encode_ms: 0.0,
@@ -2964,10 +3112,25 @@ impl Renderer {
             shadow_strength: self.environment.shadow_strength,
             surface_region: self.surface_region as u8,
             cloud_coverage: self.environment.cloud_coverage,
+            cloud_density: self.environment.cloud_density,
+            cloud_base_metres: self.world_environment.cloud_base_metres,
+            cloud_top_metres: self.world_environment.cloud_top_metres,
             cloud_offset_metres: self.world_environment.cloud_offset_metres,
             cloud_velocity_metres_per_second: self
                 .world_environment
                 .cloud_velocity_metres_per_second,
+            cloud_render_resolution: self.volumetric_cloud_gpu.resolution(),
+            cloud_steps: self.volumetric_cloud_gpu.quality(),
+            weather_kind: self
+                .world_environment
+                .weather(self.atmosphere_sample.coldness)
+                .kind as u8,
+            weather_fraction: self.world_environment.weather_fraction,
+            precipitation: self.environment.precipitation,
+            storminess: self.environment.storminess,
+            lightning: self.environment.lightning,
+            fog_density: self.environment.fog_density,
+            outdoor_exposure: self.environment.exposure,
             weather_revision: self.world_environment.weather_revision,
             enclosure: self.interior.enclosure,
             interior_exposure: self.interior.exposure_multiplier,
@@ -3002,7 +3165,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(16)),
+                timestamp_writes: gpu_frame.as_ref().map(|frame| frame.pass(22)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -4131,6 +4294,18 @@ fn frame_uniform(
             environment.cloud_coverage,
             environment.star_visibility,
         ],
+        weather: [
+            environment.precipitation,
+            environment.storminess,
+            environment.cloud_density,
+            environment.snow,
+        ],
+        cloud_layer: [
+            world_environment.cloud_base_metres,
+            world_environment.cloud_top_metres,
+            world_environment.cloud_velocity_metres_per_second[0],
+            world_environment.cloud_velocity_metres_per_second[1],
+        ],
         medium: [
             underwater_blend.clamp(0.0, 1.0),
             fluid.eye_depth_metres.max(0.0),
@@ -4963,28 +5138,41 @@ mod tests {
         let timestamps = [
             1_000_000, 2_000_000, 2_100_000, 3_100_000, 3_200_000, 4_200_000, 4_500_000, 6_500_000,
             6_700_000, 7_700_000, 7_900_000, 8_400_000, 8_600_000, 10_600_000, 10_800_000,
-            13_800_000, 14_000_000, 15_000_000,
+            12_800_000, 13_000_000, 13_400_000, 13_600_000, 16_600_000, 16_800_000, 17_100_000,
+            17_300_000, 18_300_000,
         ];
-        let timing = parse_gpu_timestamps(&timestamps, 1.0, true, true, true)
+        let active = GpuPassMask {
+            shadows: true,
+            water: true,
+            ambient_occlusion: true,
+            clouds: true,
+            weather: true,
+        };
+        let timing = parse_gpu_timestamps(&timestamps, 1.0, active)
             .unwrap_or_else(|| panic!("valid timestamps should parse"));
-        assert!((timing.total_ms - 14.0).abs() < f32::EPSILON);
+        assert!((timing.total_ms - 17.3).abs() < f32::EPSILON);
         assert!((timing.shadow_ms - 3.0).abs() < f32::EPSILON);
         assert!((timing.depth_prepass_ms - 2.0).abs() < f32::EPSILON);
         assert!((timing.ambient_occlusion_ms - 1.5).abs() < f32::EPSILON);
         assert!((timing.world_ms - 2.0).abs() < f32::EPSILON);
         assert!((timing.water_ms - 3.0).abs() < f32::EPSILON);
+        assert!((timing.cloud_ms - 2.4).abs() < f32::EPSILON);
+        assert!((timing.weather_ms - 0.3).abs() < f32::EPSILON);
         assert!((timing.ui_ms - 1.0).abs() < f32::EPSILON);
 
         let mut skipped = timestamps;
         skipped[0..6].copy_from_slice(&[90, 80, 70, 60, 50, 40]);
         skipped[6..12].copy_from_slice(&[39, 38, 37, 36, 35, 34]);
-        skipped[14..16].copy_from_slice(&[30, 20]);
-        let timing = parse_gpu_timestamps(&skipped, 1.0, false, false, false)
+        skipped[12..14].copy_from_slice(&[33, 32]);
+        skipped[16..22].copy_from_slice(&[31, 30, 29, 28, 27, 26]);
+        let timing = parse_gpu_timestamps(&skipped, 1.0, GpuPassMask::default())
             .unwrap_or_else(|| panic!("inactive timestamp pairs should be ignored"));
         assert_eq!(timing.shadow_ms, 0.0);
         assert_eq!(timing.depth_prepass_ms, 0.0);
         assert_eq!(timing.ambient_occlusion_ms, 0.0);
         assert_eq!(timing.water_ms, 0.0);
+        assert_eq!(timing.cloud_ms, 0.0);
+        assert_eq!(timing.weather_ms, 0.0);
     }
 
     #[test]
@@ -4993,13 +5181,13 @@ mod tests {
         for (index, timestamp) in timestamps.iter_mut().enumerate() {
             *timestamp = index as u64 * 1_000_000;
         }
-        assert!(parse_gpu_timestamps(&timestamps, 0.0, false, false, false).is_none());
-        timestamps[13] = timestamps[12] - 1;
-        assert!(parse_gpu_timestamps(&timestamps, 1.0, false, false, false).is_none());
-        timestamps[13] = timestamps[12] + 1;
-        timestamps[17] = timestamps[12] + 1_100_000_000;
-        assert!(parse_gpu_timestamps(&timestamps, 1.0, false, false, false).is_none());
-        assert_eq!(GPU_QUERY_BUFFER_BYTES, 144);
+        assert!(parse_gpu_timestamps(&timestamps, 0.0, GpuPassMask::default()).is_none());
+        timestamps[15] = timestamps[14] - 1;
+        assert!(parse_gpu_timestamps(&timestamps, 1.0, GpuPassMask::default()).is_none());
+        timestamps[15] = timestamps[14] + 1;
+        timestamps[23] = timestamps[14] + 1_100_000_000;
+        assert!(parse_gpu_timestamps(&timestamps, 1.0, GpuPassMask::default()).is_none());
+        assert_eq!(GPU_QUERY_BUFFER_BYTES, 192);
         assert_eq!(GPU_RESOLVE_BUFFER_BYTES % 256, 0);
     }
 

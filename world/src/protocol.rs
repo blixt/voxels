@@ -17,7 +17,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 12;
+pub const PROTOCOL_VERSION: u16 = 13;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -206,9 +206,15 @@ pub struct WorldEnvironmentSnapshot {
     pub day_fraction: f32,
     /// Zero freezes the celestial clock at `day_fraction`.
     pub day_length_seconds: f32,
+    pub weather_fraction: f32,
+    /// Zero freezes the weather timeline at `weather_fraction`.
+    pub weather_cycle_seconds: f32,
     pub cloud_offset_metres: [f32; 2],
     pub cloud_velocity_metres_per_second: [f32; 2],
+    /// Minimum clear-sky coverage before the weather cycle adds overcast.
     pub cloud_coverage: f32,
+    pub cloud_base_metres: f32,
+    pub cloud_top_metres: f32,
     pub weather_seed: u64,
     pub weather_revision: u64,
 }
@@ -822,6 +828,8 @@ fn encode_world_environment(payload: &mut Vec<u8>, environment: WorldEnvironment
     push_u64(payload, environment.sample_server_time_ms);
     push_f32(payload, environment.day_fraction);
     push_f32(payload, environment.day_length_seconds);
+    push_f32(payload, environment.weather_fraction);
+    push_f32(payload, environment.weather_cycle_seconds);
     for value in environment.cloud_offset_metres {
         push_f32(payload, value);
     }
@@ -829,7 +837,8 @@ fn encode_world_environment(payload: &mut Vec<u8>, environment: WorldEnvironment
         push_f32(payload, value);
     }
     push_f32(payload, environment.cloud_coverage);
-    push_u32(payload, 0);
+    push_f32(payload, environment.cloud_base_metres);
+    push_f32(payload, environment.cloud_top_metres);
     push_u64(payload, environment.weather_seed);
     push_u64(payload, environment.weather_revision);
 }
@@ -841,17 +850,14 @@ fn decode_world_environment(
         sample_server_time_ms: cursor.u64()?,
         day_fraction: cursor.f32()?,
         day_length_seconds: cursor.f32()?,
+        weather_fraction: cursor.f32()?,
+        weather_cycle_seconds: cursor.f32()?,
         cloud_offset_metres: [cursor.f32()?, cursor.f32()?],
         cloud_velocity_metres_per_second: [cursor.f32()?, cursor.f32()?],
         cloud_coverage: cursor.f32()?,
-        weather_seed: {
-            if cursor.u32()? != 0 {
-                return Err(ProtocolError::InvalidPayload(
-                    "reserved environment field is nonzero",
-                ));
-            }
-            cursor.u64()?
-        },
+        cloud_base_metres: cursor.f32()?,
+        cloud_top_metres: cursor.f32()?,
+        weather_seed: cursor.u64()?,
         weather_revision: cursor.u64()?,
     };
     validate_world_environment(&environment)?;
@@ -864,6 +870,10 @@ fn validate_world_environment(environment: &WorldEnvironmentSnapshot) -> Result<
         || !(0.0..1.0).contains(&environment.day_fraction)
         || !environment.day_length_seconds.is_finite()
         || environment.day_length_seconds < 0.0
+        || !environment.weather_fraction.is_finite()
+        || !(0.0..1.0).contains(&environment.weather_fraction)
+        || !environment.weather_cycle_seconds.is_finite()
+        || environment.weather_cycle_seconds < 0.0
         || !environment
             .cloud_offset_metres
             .into_iter()
@@ -871,6 +881,10 @@ fn validate_world_environment(environment: &WorldEnvironmentSnapshot) -> Result<
             .all(|value| value.is_finite())
         || !environment.cloud_coverage.is_finite()
         || !(0.0..=1.0).contains(&environment.cloud_coverage)
+        || !environment.cloud_base_metres.is_finite()
+        || environment.cloud_base_metres < 0.0
+        || !environment.cloud_top_metres.is_finite()
+        || environment.cloud_top_metres <= environment.cloud_base_metres
         || environment.weather_revision == 0
     {
         return Err(ProtocolError::InvalidPayload(
@@ -3509,9 +3523,13 @@ mod tests {
                 sample_server_time_ms: 12_345,
                 day_fraction: 0.625,
                 day_length_seconds: 1_200.0,
+                weather_fraction: 0.68,
+                weather_cycle_seconds: 900.0,
                 cloud_offset_metres: [412.5, 91.25],
                 cloud_velocity_metres_per_second: [5.5, 1.6],
-                cloud_coverage: 0.46,
+                cloud_coverage: 0.24,
+                cloud_base_metres: 420.0,
+                cloud_top_metres: 780.0,
                 weather_seed: 77,
                 weather_revision: 3,
             },

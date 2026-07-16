@@ -67,6 +67,8 @@ mod tests {
                 "sky_zenith",
                 "ground_atmosphere",
                 "fog_exposure",
+                "weather",
+                "cloud_layer",
                 "medium",
                 "interior",
             ]
@@ -94,16 +96,25 @@ mod tests {
     }
 
     #[test]
-    fn sky_and_terrain_share_one_seeded_world_space_cloud_field() {
-        let sky = include_str!("shaders/sky.wgsl");
+    fn volumetric_clouds_and_terrain_share_one_seeded_world_space_weather_field() {
+        let clouds = include_str!("shaders/clouds.wgsl");
         let voxels = include_str!("shaders/voxels.wgsl");
-        assert!(FRAME_SOURCE.contains("weather_seed: f32"));
-        for source in [sky, voxels] {
+        assert!(FRAME_SOURCE.contains("environment_time: vec4<f32>"));
+        assert!(FRAME_SOURCE.contains("weather: vec4<f32>"));
+        assert!(FRAME_SOURCE.contains("cloud_layer: vec4<f32>"));
+        for source in [clouds, voxels] {
             assert_eq!(source.matches("atmosphere_cloud_field_world(").count(), 1);
             assert!(source.contains("frame.environment_time.yz"));
             assert!(source.contains("frame.environment_time.w"));
+            assert!(source.contains("mix(0.84, 0.45, coverage"));
             assert!(!source.contains("camera_time.w * 0.55"));
         }
+        assert!(clouds.contains("macro_threshold - 0.08, macro_threshold + 0.08"));
+        assert!(voxels.contains("threshold - 0.08, threshold + 0.08"));
+        assert!(clouds.contains("fn cloud_density_world(world: vec3<f32>)"));
+        assert!(clouds.contains("textureSampleLevel(cloud_noise"));
+        assert!(clouds.contains("transmittance < 0.02"));
+        assert!(!include_str!("shaders/sky.wgsl").contains("cloud_height = 480.0"));
     }
 
     #[test]

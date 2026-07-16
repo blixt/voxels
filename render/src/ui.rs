@@ -520,7 +520,7 @@ impl MissionControlUi {
             gameplay_toast: None,
             daylight_label: "GOLDEN HOUR",
             world_time_label: "17:17".to_owned(),
-            weather_label: "WIND 0.0, 0.0 M/S · WEATHER R1".to_owned(),
+            weather_label: "CLEAR · CLOUDS 24% · WIND 0.0, 0.0 M/S · R1".to_owned(),
             region_label: "VERDANT FOREST",
             route_chapter_label: "OFF PILGRIM ROAD",
             route_progress_percent: 0,
@@ -565,13 +565,19 @@ impl MissionControlUi {
     pub fn set_world_clock(
         &mut self,
         day_fraction: f32,
+        weather_label: &'static str,
+        precipitation: f32,
+        cloud_coverage: f32,
         cloud_velocity_metres_per_second: [f32; 2],
         weather_revision: u64,
     ) {
         let total_minutes = (day_fraction.rem_euclid(1.0) * 1_440.0).round() as u32 % 1_440;
         self.world_time_label = format!("{:02}:{:02}", total_minutes / 60, total_minutes % 60);
         self.weather_label = format!(
-            "WIND {:.1}, {:.1} M/S · WEATHER R{}",
+            "{} {:.0}% · CLOUDS {:.0}% · WIND {:.1}, {:.1} M/S · R{}",
+            weather_label,
+            precipitation.clamp(0.0, 1.0) * 100.0,
+            cloud_coverage.clamp(0.0, 1.0) * 100.0,
             cloud_velocity_metres_per_second[0],
             cloud_velocity_metres_per_second[1],
             weather_revision,

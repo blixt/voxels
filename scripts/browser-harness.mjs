@@ -1,8 +1,8 @@
 import { createServer as createNetServer } from "node:net";
 
-export const SNAPSHOT_SCHEMA_VERSION = 24;
+export const SNAPSHOT_SCHEMA_VERSION = 25;
 export const FRAME_SAMPLE_WIDTH = 11;
-export const GPU_SAMPLE_WIDTH = 11;
+export const GPU_SAMPLE_WIDTH = 13;
 
 export const SNAPSHOT = Object.freeze({
   cameraX: 0,
@@ -138,9 +138,23 @@ export const SNAPSHOT = Object.freeze({
   cloudVelocityX: 139,
   cloudVelocityZ: 140,
   weatherRevision: 141,
-  schemaVersion: 142,
-  sampleCount: 143,
-  droppedSamples: 144,
+  weatherKind: 142,
+  weatherFraction: 143,
+  precipitation: 144,
+  storminess: 145,
+  lightning: 146,
+  cloudDensity: 147,
+  cloudBaseMetres: 148,
+  cloudTopMetres: 149,
+  cloudRenderWidth: 150,
+  cloudRenderHeight: 151,
+  cloudViewSteps: 152,
+  cloudLightSteps: 153,
+  fogDensity: 154,
+  outdoorExposure: 155,
+  schemaVersion: 156,
+  sampleCount: 157,
+  droppedSamples: 158,
 });
 
 export const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;

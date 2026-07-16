@@ -58,27 +58,6 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     * smoothstep(0.04, 0.32, ray.y)
     * frame.fog_exposure.w;
   color += mix(vec3<f32>(0.48, 0.62, 1.0), vec3<f32>(1.0, 0.82, 0.58), star_seed) * star * 1.8;
-  if ray.y > 0.015 {
-    let cloud_height = 480.0;
-    let distance_to_layer = (cloud_height - frame.camera_time.y) / ray.y;
-    let cloud_world = frame.camera_time.xz + ray.xz * distance_to_layer;
-    let field = atmosphere_cloud_field_world(
-      cloud_world,
-      frame.environment_time.yz,
-      frame.environment_time.w,
-    );
-    let coverage_control = clamp(frame.fog_exposure.z, 0.0, 1.0);
-    let threshold = mix(0.76, 0.49, coverage_control);
-    // Keep this analytic rather than derivative-driven: the cloud layer is only evaluated for
-    // upward rays, while WGSL derivatives must execute in uniform control flow.
-    let softness = mix(0.052, 0.035, smoothstep(0.02, 0.28, ray.y));
-    let coverage = smoothstep(threshold - softness, threshold + softness, field)
-      * smoothstep(0.015, 0.12, ray.y)
-      * (1.0 - smoothstep(0.94, 0.995, max(sun_amount * sun_visible, moon_amount * moon_visible)));
-    let cloud_shadow = mix(frame.sky_horizon.rgb * 0.24, frame.sky_zenith.rgb * 0.62, elevation);
-    let cloud_light = cloud_shadow + frame.key_light_radiance.rgb * 0.085;
-    color = mix(color, cloud_light, coverage * mix(0.34, 0.78, coverage_control));
-  }
   let interface_distance = max(
     (frame.medium.w - frame.camera_time.y) / max(ray.y, 0.05),
     0.0,

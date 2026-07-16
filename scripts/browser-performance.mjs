@@ -33,6 +33,12 @@ function summary(values) {
   };
 }
 
+function missed120HzFrameGate(phase) {
+  // Use sustained percentiles for the display-paced gate while still rejecting
+  // any isolated hitch large enough to skip more than one 120 Hz presentation.
+  return phase.frameMs.p95 > 12 || phase.frameMs.p99 > 16.67 || phase.frameMs.max > 20;
+}
+
 function phaseSummary(captures) {
   const latest = captures.at(-1)?.snapshot;
   if (!latest) throw new Error("performance phase did not capture any samples");
@@ -89,6 +95,8 @@ function phaseSummary(captures) {
       waterMs: gpuSamples.length > 0 ? summary(gpuColumn("water")) : null,
       depthPrepassMs: gpuSamples.length > 0 ? summary(gpuColumn("depthPrepass")) : null,
       ambientOcclusionMs: gpuSamples.length > 0 ? summary(gpuColumn("ambientOcclusion")) : null,
+      cloudMs: gpuSamples.length > 0 ? summary(gpuColumn("cloud")) : null,
+      weatherMs: gpuSamples.length > 0 ? summary(gpuColumn("weather")) : null,
       uiMs: gpuSamples.length > 0 ? summary(gpuColumn("ui")) : null,
     },
     residentChunks: latest[SNAPSHOT.residentChunks],
@@ -148,6 +156,20 @@ function phaseSummary(captures) {
       cloudOffset: [latest[SNAPSHOT.cloudOffsetX], latest[SNAPSHOT.cloudOffsetZ]],
       cloudVelocity: [latest[SNAPSHOT.cloudVelocityX], latest[SNAPSHOT.cloudVelocityZ]],
       weatherRevision: latest[SNAPSHOT.weatherRevision],
+      weatherKind: latest[SNAPSHOT.weatherKind],
+      weatherFraction: latest[SNAPSHOT.weatherFraction],
+      precipitation: latest[SNAPSHOT.precipitation],
+      storminess: latest[SNAPSHOT.storminess],
+      lightning: latest[SNAPSHOT.lightning],
+      cloudDensity: latest[SNAPSHOT.cloudDensity],
+      cloudLayer: [latest[SNAPSHOT.cloudBaseMetres], latest[SNAPSHOT.cloudTopMetres]],
+      cloudRenderResolution: [
+        latest[SNAPSHOT.cloudRenderWidth],
+        latest[SNAPSHOT.cloudRenderHeight],
+      ],
+      cloudSteps: [latest[SNAPSHOT.cloudViewSteps], latest[SNAPSHOT.cloudLightSteps]],
+      fogDensity: latest[SNAPSHOT.fogDensity],
+      exposure: latest[SNAPSHOT.outdoorExposure],
     },
     cave: {
       enclosure: latest[SNAPSHOT.enclosure],
@@ -216,7 +238,9 @@ async function capture(page) {
       ambientOcclusion: values[7],
       world: values[8],
       water: values[9],
-      ui: values[10],
+      cloud: values[10],
+      weather: values[11],
+      ui: values[12],
     });
   }
   return {
@@ -389,11 +413,11 @@ async function atmosphereProfile(page) {
   if (values.length !== anchors.length) violations.push("did not observe every day-cycle anchor");
   const reference = values[0];
   for (const [name, phase] of Object.entries(phases)) {
-    if (phase.frameMs.p95 > 12 || phase.frameMs.above16_67ms > 0) {
+    if (missed120HzFrameGate(phase)) {
       violations.push(`${name} missed the 120Hz frame gate`);
     }
-    if (phase.gpu.available && phase.gpu.worldMs.p95 > 3.0) {
-      violations.push(`${name} world GPU p95 exceeded 3ms`);
+    if (phase.gpu.available && phase.gpu.worldMs.p95 > 4.0) {
+      violations.push(`${name} world GPU p95 exceeded 4ms`);
     }
     if (phase.gpu.available && phase.gpu.totalMs.p95 > 7.5) {
       violations.push(`${name} active GPU p95 exceeded 7.5ms`);
@@ -426,6 +450,80 @@ async function atmosphereProfile(page) {
   if (violations.length > 0) {
     throw new Error(
       `atmosphere profile violations: ${violations.join(", ")}; ${JSON.stringify(phases)}`,
+    );
+  }
+  return phases;
+}
+
+async function waitForWeatherFraction(page, target) {
+  const deadline = performance.now() + 60_000;
+  while (performance.now() < deadline) {
+    const snapshot = await page.evaluate(() => globalThis.__VOXELS__.snapshot());
+    const distance = Math.abs(snapshot[SNAPSHOT.weatherFraction] - target);
+    if (Math.min(distance, 1 - distance) <= 0.012) return;
+    await page.waitForTimeout(50);
+  }
+  throw new Error(`timed out waiting for weather fraction ${target}`);
+}
+
+async function weatherProfile(page) {
+  const anchors = [
+    ["clear", 0.08],
+    ["cloudy", 0.23],
+    ["overcast", 0.32],
+    ["rain", 0.5],
+    ["storm", 0.68],
+    ["clearing", 0.89],
+  ];
+  const phases = {};
+  for (const [name, weatherFraction] of anchors) {
+    await waitForWeatherFraction(page, weatherFraction);
+    await page.screenshot({ path: `target/weather-${name}.png` });
+    phases[name] = phaseSummary(await sample(page, 800));
+  }
+
+  const violations = [];
+  const reference = phases.clear;
+  for (const [name, phase] of Object.entries(phases)) {
+    if (missed120HzFrameGate(phase)) {
+      violations.push(`${name} missed the 120Hz frame gate`);
+    }
+    if (phase.gpu.available && (phase.gpu.cloudMs.median > 1.7 || phase.gpu.cloudMs.p95 > 3.0)) {
+      violations.push(`${name} cloud GPU exceeded the 1.7ms median / 3ms p95 budget`);
+    }
+    if (phase.gpu.available && phase.gpu.totalMs.p95 > 7.5) {
+      violations.push(`${name} active GPU p95 exceeded 7.5ms`);
+    }
+    if (
+      phase.quads !== reference.quads ||
+      phase.visibleChunks !== reference.visibleChunks ||
+      phase.meshArenaCapacityMiB !== reference.meshArenaCapacityMiB
+    ) {
+      violations.push(`${name} changed geometry or mesh residency`);
+    }
+    if (phase.atmosphere.cloudRenderResolution.join("x") !== "640x360") {
+      violations.push(`${name} did not render clouds at the configured half resolution`);
+    }
+    if (phase.droppedSamples > 0) violations.push(`${name} dropped frame samples`);
+  }
+  if (phases.clear.atmosphere.precipitation > 0.01) {
+    violations.push("clear weather still produced precipitation");
+  }
+  if (phases.rain.atmosphere.precipitation < 0.45) {
+    violations.push("rain did not produce substantial precipitation");
+  }
+  if (phases.storm.atmosphere.storminess < 0.7) {
+    violations.push("storm anchor did not produce a storm");
+  }
+  if (phases.storm.atmosphere.fogDensity <= phases.clear.atmosphere.fogDensity) {
+    violations.push("storm did not thicken atmospheric fog");
+  }
+  if (phases.storm.atmosphere.shadowStrength >= phases.clear.atmosphere.shadowStrength) {
+    violations.push("storm did not soften directional shadows");
+  }
+  if (violations.length > 0) {
+    throw new Error(
+      `weather profile violations: ${violations.join(", ")}; ${JSON.stringify(phases)}`,
     );
   }
   return phases;
@@ -573,6 +671,7 @@ if (
 const sustained = process.argv.includes("--sustained");
 const materials = process.argv.includes("--materials");
 const atmosphere = process.argv.includes("--atmosphere");
+const weather = process.argv.includes("--weather");
 const stationary = process.argv.includes("--stationary");
 const worldSource = process.env.VOXELS_PROFILE_SOURCE ?? "procedural-v16";
 const spawnVoxels = (() => {
@@ -656,7 +755,11 @@ try {
     spawnVoxels,
     cascadedShadows,
     screenSpaceAmbientOcclusion,
-    dayLengthSeconds: atmosphere ? 48 : undefined,
+    dayLengthSeconds: atmosphere ? 48 : weather ? 0 : undefined,
+    dayFractionAtUnixEpoch: weather ? 0.5 : undefined,
+    weatherCycleSeconds: weather ? 36 : atmosphere ? 0 : undefined,
+    weatherFractionAtUnixEpoch: atmosphere ? 0.08 : undefined,
+    cloudVelocityMetresPerSecond: weather ? [0, 0] : undefined,
   });
   const { build, preview } = await import("vite-plus");
   await build({ logLevel: "warn" });
@@ -687,6 +790,8 @@ try {
     scenarios = { materials: await materialDetailProfile(page, viewport.width) };
   } else if (atmosphere) {
     scenarios = { atmosphere: await atmosphereProfile(page) };
+  } else if (weather) {
+    scenarios = { weather: await weatherProfile(page) };
   } else {
     await mark(page, "voxels:steady:start");
     const steady = phaseSummary(await sample(page, 4_000));

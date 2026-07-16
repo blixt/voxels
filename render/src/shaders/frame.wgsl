@@ -21,6 +21,8 @@ struct Frame {
   sky_zenith: vec4<f32>,
   ground_atmosphere: vec4<f32>,
   fog_exposure: vec4<f32>,
+  weather: vec4<f32>,
+  cloud_layer: vec4<f32>,
   medium: vec4<f32>,
   interior: vec4<f32>,
 };
@@ -56,7 +58,7 @@ fn atmosphere_cloud_field_world(
     fract(weather_seed * 0.1031),
     fract(weather_seed * 0.11369),
   ) * 4096.0;
-  let position = (world_xz - cloud_offset_metres) * 0.0032 + seed_offset;
+  let position = (world_xz - cloud_offset_metres) * 0.00065 + seed_offset;
   let broad = atmosphere_value_noise(position) * 0.58;
   let billows = atmosphere_value_noise(position * 2.03 + vec2<f32>(17.2, -9.1)) * 0.29;
   let detail = atmosphere_value_noise(position * 4.11 + vec2<f32>(-4.7, 23.4)) * 0.13;

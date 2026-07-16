@@ -81,6 +81,110 @@ pub const fn surface_region_label(region: SurfaceRegion) -> &'static str {
     }
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WeatherKind {
+    #[default]
+    Clear,
+    Cloudy,
+    Overcast,
+    Rain,
+    Storm,
+    Snow,
+}
+
+impl WeatherKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Clear => "CLEAR",
+            Self::Cloudy => "CLOUDY",
+            Self::Overcast => "OVERCAST",
+            Self::Rain => "RAIN",
+            Self::Storm => "STORM",
+            Self::Snow => "SNOW",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WeatherState {
+    pub kind: WeatherKind,
+    pub coverage: f32,
+    pub density: f32,
+    pub precipitation: f32,
+    pub storminess: f32,
+    pub lightning: f32,
+    pub snow: f32,
+}
+
+impl WeatherState {
+    pub fn for_cycle(
+        fraction: f32,
+        baseline_coverage: f32,
+        cycle_seconds: f32,
+        weather_seed: u64,
+        coldness: f32,
+    ) -> Self {
+        let fraction = if fraction.is_finite() {
+            fraction.rem_euclid(1.0)
+        } else {
+            0.0
+        };
+        let overcast = smoothstep(0.16, 0.36, fraction) * (1.0 - smoothstep(0.84, 0.98, fraction));
+        let rain = smoothstep(0.34, 0.48, fraction) * (1.0 - smoothstep(0.78, 0.91, fraction));
+        let storm = smoothstep(0.56, 0.66, fraction) * (1.0 - smoothstep(0.72, 0.84, fraction));
+        let precipitation = rain * scalar_lerp(0.58, 1.0, storm);
+        let coverage = scalar_lerp(baseline_coverage.clamp(0.0, 1.0), 0.88, overcast)
+            .max(scalar_lerp(0.0, 0.98, storm))
+            .clamp(0.0, 1.0);
+        let density = (0.28 + overcast * 0.48 + storm * 0.22).clamp(0.0, 1.0);
+        let lightning = lightning_flash(fraction, cycle_seconds, weather_seed) * storm;
+        let snow = precipitation * smoothstep(0.58, 0.78, coldness);
+        let kind = if storm > 0.48 {
+            WeatherKind::Storm
+        } else if precipitation > 0.12 && coldness > 0.62 {
+            WeatherKind::Snow
+        } else if precipitation > 0.12 {
+            WeatherKind::Rain
+        } else if overcast > 0.72 {
+            WeatherKind::Overcast
+        } else if coverage > baseline_coverage + 0.12 {
+            WeatherKind::Cloudy
+        } else {
+            WeatherKind::Clear
+        };
+        Self {
+            kind,
+            coverage,
+            density,
+            precipitation,
+            storminess: storm,
+            lightning,
+            snow,
+        }
+    }
+}
+
+fn lightning_flash(weather_fraction: f32, weather_cycle_seconds: f32, weather_seed: u64) -> f32 {
+    if !weather_cycle_seconds.is_finite() || weather_cycle_seconds <= 0.0 {
+        return 0.0;
+    }
+    let weather_seconds = weather_fraction * weather_cycle_seconds;
+    let cell = (weather_seconds / 7.0).floor() as u64;
+    let mut value = weather_seed ^ cell.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^= value >> 31;
+    let trigger = (value >> 40) as f32 / ((1u32 << 24) - 1) as f32;
+    if trigger < 0.91 {
+        return 0.0;
+    }
+    let local = (weather_seconds / 7.0).fract();
+    (-local * 34.0).exp() + 0.42 * (-(local - 0.16).abs() * 72.0).exp()
+}
+
 /// Rust-owned daylight parameters. Keeping this outside WGSL prevents the sky and world pipelines
 /// from quietly drifting to different suns or horizon colors as rendering evolves.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -99,6 +203,11 @@ pub struct OutdoorEnvironment {
     pub fog_height_falloff: f32,
     pub exposure: f32,
     pub cloud_coverage: f32,
+    pub cloud_density: f32,
+    pub precipitation: f32,
+    pub storminess: f32,
+    pub lightning: f32,
+    pub snow: f32,
     pub star_visibility: f32,
 }
 
@@ -106,9 +215,13 @@ pub struct OutdoorEnvironment {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldEnvironmentState {
     pub day_fraction: f32,
+    pub weather_fraction: f32,
+    pub weather_cycle_seconds: f32,
     pub cloud_offset_metres: [f32; 2],
     pub cloud_velocity_metres_per_second: [f32; 2],
     pub cloud_coverage: f32,
+    pub cloud_base_metres: f32,
+    pub cloud_top_metres: f32,
     pub weather_seed: u64,
     pub weather_revision: u64,
 }
@@ -117,9 +230,13 @@ impl Default for WorldEnvironmentState {
     fn default() -> Self {
         Self {
             day_fraction: DaylightPhase::GoldenHour.anchor_day_fraction(),
+            weather_fraction: 0.08,
+            weather_cycle_seconds: 900.0,
             cloud_offset_metres: [0.0; 2],
             cloud_velocity_metres_per_second: [0.0; 2],
-            cloud_coverage: 0.42,
+            cloud_coverage: 0.24,
+            cloud_base_metres: 550.0,
+            cloud_top_metres: 1_800.0,
             weather_seed: 0,
             weather_revision: 1,
         }
@@ -129,11 +246,26 @@ impl Default for WorldEnvironmentState {
 impl WorldEnvironmentState {
     pub fn sanitized(self) -> Self {
         let fallback = Self::default();
+        let cloud_base_metres =
+            finite_positive_scalar(self.cloud_base_metres, fallback.cloud_base_metres);
+        let cloud_top_metres =
+            finite_positive_scalar(self.cloud_top_metres, fallback.cloud_top_metres)
+                .max(cloud_base_metres + 1.0);
         Self {
             day_fraction: if self.day_fraction.is_finite() {
                 self.day_fraction.rem_euclid(1.0)
             } else {
                 fallback.day_fraction
+            },
+            weather_fraction: if self.weather_fraction.is_finite() {
+                self.weather_fraction.rem_euclid(1.0)
+            } else {
+                fallback.weather_fraction
+            },
+            weather_cycle_seconds: if self.weather_cycle_seconds.is_finite() {
+                self.weather_cycle_seconds.max(0.0)
+            } else {
+                fallback.weather_cycle_seconds
             },
             cloud_offset_metres: std::array::from_fn(|axis| {
                 if self.cloud_offset_metres[axis].is_finite() {
@@ -150,9 +282,21 @@ impl WorldEnvironmentState {
                 }
             }),
             cloud_coverage: finite_unit_scalar(self.cloud_coverage, fallback.cloud_coverage),
+            cloud_base_metres,
+            cloud_top_metres,
             weather_seed: self.weather_seed,
             weather_revision: self.weather_revision.max(1),
         }
+    }
+
+    pub fn weather(self, coldness: f32) -> WeatherState {
+        WeatherState::for_cycle(
+            self.weather_fraction,
+            self.cloud_coverage,
+            self.weather_cycle_seconds,
+            self.weather_seed,
+            coldness,
+        )
     }
 }
 
@@ -222,7 +366,7 @@ impl Default for OutdoorEnvironment {
         Self::for_world_time(
             AtmosphereSample::default(),
             DaylightPhase::GoldenHour.anchor_day_fraction(),
-            0.42,
+            WeatherState::for_cycle(0.08, 0.24, 900.0, 0, 0.32),
         )
     }
 }
@@ -245,18 +389,27 @@ impl OutdoorEnvironment {
             fog_height_falloff: 0.075,
             exposure: 1.0,
             cloud_coverage: 0.42,
+            cloud_density: 0.42,
+            precipitation: 0.0,
+            storminess: 0.0,
+            lightning: 0.0,
+            snow: 0.0,
             star_visibility: 0.0,
         }
     }
 
     pub fn for_atmosphere(sample: AtmosphereSample, phase: DaylightPhase) -> Self {
-        Self::for_world_time(sample, phase.anchor_day_fraction(), sample.cloudiness)
+        Self::for_world_time(
+            sample,
+            phase.anchor_day_fraction(),
+            WeatherState::for_cycle(0.08, sample.cloudiness, 900.0, 0, sample.coldness),
+        )
     }
 
     pub fn for_world_time(
         sample: AtmosphereSample,
         day_fraction: f32,
-        weather_cloud_coverage: f32,
+        weather: WeatherState,
     ) -> Self {
         let day_fraction = if day_fraction.is_finite() {
             day_fraction.rem_euclid(1.0)
@@ -318,7 +471,12 @@ impl OutdoorEnvironment {
             fog_density: scalar_lerp(0.018, 0.012, daylight),
             fog_height_falloff: scalar_lerp(0.058, 0.075, daylight),
             exposure: scalar_lerp(1.42, 1.0, daylight),
-            cloud_coverage: weather_cloud_coverage.clamp(0.0, 1.0),
+            cloud_coverage: weather.coverage,
+            cloud_density: weather.density,
+            precipitation: weather.precipitation,
+            storminess: weather.storminess,
+            lightning: weather.lightning,
+            snow: weather.snow,
             star_visibility: night,
         };
         let humidity = sample.humidity.clamp(0.0, 1.0);
@@ -326,8 +484,8 @@ impl OutdoorEnvironment {
         let aerosol = sample.aerosol.clamp(0.0, 1.0);
         let haze = sample.haze.clamp(0.0, 1.0);
         let warmth = sample.horizon_warmth.clamp(0.0, 1.0);
-        environment.cloud_coverage = (environment.cloud_coverage * 0.72
-            + sample.cloudiness.clamp(0.0, 1.0) * 0.28)
+        environment.cloud_coverage = (environment.cloud_coverage * 0.95
+            + sample.cloudiness.clamp(0.0, 1.0) * 0.05)
             .clamp(0.08, 0.94);
         environment.fog_density *= 0.62 + haze * 1.16 + humidity * 0.22;
         environment.fog_height_falloff *= 1.12 - humidity * 0.30 + aerosol * 0.16;
@@ -347,8 +505,32 @@ impl OutdoorEnvironment {
             .lerp(Vec3::new(0.11, 0.19, 0.13), humidity * 0.22)
             .lerp(Vec3::new(0.10, 0.14, 0.22), coldness * 0.18)
             .lerp(Vec3::new(0.12, 0.105, 0.09), aerosol * 0.24);
-        environment.key_light_radiance *= 1.0 - environment.cloud_coverage * 0.18 - aerosol * 0.16;
-        environment.star_visibility *= 1.0 - environment.cloud_coverage * 0.78;
+        let storm_tint = Vec3::new(0.18, 0.22, 0.29);
+        environment.sky_horizon = environment
+            .sky_horizon
+            .lerp(storm_tint * 1.24, weather.storminess * 0.72);
+        environment.sky_zenith = environment
+            .sky_zenith
+            .lerp(storm_tint * 0.54, weather.storminess * 0.78);
+        environment.ground_irradiance = environment
+            .ground_irradiance
+            .lerp(Vec3::new(0.065, 0.075, 0.09), weather.storminess * 0.74);
+        let direct_transmittance = (-environment.cloud_coverage * 0.42
+            - weather.density * 0.34
+            - weather.storminess * 1.18
+            - aerosol * 0.16)
+            .exp();
+        environment.key_light_radiance *= direct_transmittance;
+        environment.key_light_radiance += Vec3::splat(weather.lightning * 8.0);
+        environment.sky_horizon += Vec3::new(0.46, 0.58, 0.82) * weather.lightning * 1.8;
+        environment.sky_zenith += Vec3::new(0.30, 0.38, 0.62) * weather.lightning * 1.2;
+        environment.shadow_strength *=
+            (1.0 - weather.precipitation * 0.68 - weather.storminess * 0.58).max(0.0);
+        environment.fog_density *= 1.0 + weather.precipitation * 1.65 + weather.storminess * 1.25;
+        environment.fog_height_falloff *= 1.0 - weather.precipitation * 0.24;
+        environment.exposure *= 1.0 + weather.storminess * 0.12;
+        environment.star_visibility *=
+            (1.0 - environment.cloud_coverage * 0.78) * (1.0 - weather.storminess);
         environment.sanitized()
     }
 
@@ -386,6 +568,11 @@ impl OutdoorEnvironment {
             ),
             exposure: scalar_lerp(self.exposure, target.exposure, amount),
             cloud_coverage: scalar_lerp(self.cloud_coverage, target.cloud_coverage, amount),
+            cloud_density: scalar_lerp(self.cloud_density, target.cloud_density, amount),
+            precipitation: scalar_lerp(self.precipitation, target.precipitation, amount),
+            storminess: scalar_lerp(self.storminess, target.storminess, amount),
+            lightning: scalar_lerp(self.lightning, target.lightning, amount),
+            snow: scalar_lerp(self.snow, target.snow, amount),
             star_visibility: scalar_lerp(self.star_visibility, target.star_visibility, amount),
         }
         .sanitized()
@@ -420,6 +607,11 @@ impl OutdoorEnvironment {
             ),
             exposure: finite_non_negative_scalar(self.exposure, fallback.exposure),
             cloud_coverage: finite_unit_scalar(self.cloud_coverage, fallback.cloud_coverage),
+            cloud_density: finite_unit_scalar(self.cloud_density, fallback.cloud_density),
+            precipitation: finite_unit_scalar(self.precipitation, fallback.precipitation),
+            storminess: finite_unit_scalar(self.storminess, fallback.storminess),
+            lightning: finite_non_negative_scalar(self.lightning, fallback.lightning),
+            snow: finite_unit_scalar(self.snow, fallback.snow),
             star_visibility: finite_unit_scalar(self.star_visibility, fallback.star_visibility),
         }
     }
@@ -448,6 +640,14 @@ fn finite_non_negative(value: Vec3, fallback: Vec3) -> Vec3 {
 fn finite_non_negative_scalar(value: f32, fallback: f32) -> f32 {
     if value.is_finite() {
         value.max(0.0)
+    } else {
+        fallback
+    }
+}
+
+fn finite_positive_scalar(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        value
     } else {
         fallback
     }
@@ -515,6 +715,11 @@ mod tests {
             fog_height_falloff: -1.0,
             exposure: f32::INFINITY,
             cloud_coverage: f32::NAN,
+            cloud_density: f32::NAN,
+            precipitation: -1.0,
+            storminess: 4.0,
+            lightning: f32::NAN,
+            snow: f32::NAN,
             star_visibility: 4.0,
         }
         .sanitized();
@@ -625,9 +830,10 @@ mod tests {
     #[test]
     fn full_day_orbit_is_continuous_periodic_and_has_a_real_night() {
         let sample = AtmosphereSample::default();
-        let midnight = OutdoorEnvironment::for_world_time(sample, 0.0, 0.4);
-        let wrapped = OutdoorEnvironment::for_world_time(sample, 1.0, 0.4);
-        let noon = OutdoorEnvironment::for_world_time(sample, 0.5, 0.4);
+        let weather = WeatherState::for_cycle(0.08, 0.4, 900.0, 7, sample.coldness);
+        let midnight = OutdoorEnvironment::for_world_time(sample, 0.0, weather);
+        let wrapped = OutdoorEnvironment::for_world_time(sample, 1.0, weather);
+        let noon = OutdoorEnvironment::for_world_time(sample, 0.5, weather);
         assert!(midnight.sun_direction.y < 0.0);
         assert!(noon.sun_direction.y > 0.9);
         assert!(midnight.star_visibility > 0.5);
@@ -635,19 +841,73 @@ mod tests {
         assert!(midnight.sun_direction.dot(wrapped.sun_direction) > 0.999_999);
         assert!((midnight.sky_zenith - wrapped.sky_zenith).length() < 1.0e-5);
 
-        let before = OutdoorEnvironment::for_world_time(sample, 0.9999, 0.4);
-        let after = OutdoorEnvironment::for_world_time(sample, 0.0001, 0.4);
+        let before = OutdoorEnvironment::for_world_time(sample, 0.9999, weather);
+        let after = OutdoorEnvironment::for_world_time(sample, 0.0001, weather);
         assert!(before.sun_direction.dot(after.sun_direction) > 0.999_99);
         assert!((before.sky_horizon - after.sky_horizon).length() < 0.002);
 
         for minute in 0..1_440 {
             let environment =
-                OutdoorEnvironment::for_world_time(sample, minute as f32 / 1_440.0, 0.4);
+                OutdoorEnvironment::for_world_time(sample, minute as f32 / 1_440.0, weather);
             assert!(environment.key_light_direction.is_finite());
             assert!((environment.key_light_direction.length() - 1.0).abs() < 1.0e-5);
             assert!(environment.key_light_radiance.min_element() >= 0.0);
             assert!((0.0..=1.0).contains(&environment.shadow_strength));
         }
+    }
+
+    #[test]
+    fn weather_cycle_progresses_continuously_from_clear_through_storm_and_clearing() {
+        let clear = WeatherState::for_cycle(0.08, 0.24, 0.0, 7, 0.25);
+        let cloudy = WeatherState::for_cycle(0.23, 0.24, 0.0, 7, 0.25);
+        let overcast = WeatherState::for_cycle(0.32, 0.24, 0.0, 7, 0.25);
+        let rain = WeatherState::for_cycle(0.50, 0.24, 0.0, 7, 0.25);
+        let storm = WeatherState::for_cycle(0.68, 0.24, 0.0, 7, 0.25);
+        let clearing = WeatherState::for_cycle(0.89, 0.24, 0.0, 7, 0.25);
+        assert_eq!(clear.kind, WeatherKind::Clear);
+        assert_eq!(cloudy.kind, WeatherKind::Cloudy);
+        assert_eq!(overcast.kind, WeatherKind::Overcast);
+        assert_eq!(rain.kind, WeatherKind::Rain);
+        assert_eq!(storm.kind, WeatherKind::Storm);
+        assert!(clearing.coverage < storm.coverage);
+        assert!(clear.precipitation < 0.01);
+        assert!(rain.precipitation > 0.5);
+        assert!(storm.storminess > 0.7);
+        assert_eq!(
+            WeatherState::for_cycle(1.08, 0.24, 0.0, 7, 0.25),
+            clear
+        );
+    }
+
+    #[test]
+    fn severe_weather_softens_sunlight_and_thickens_air_without_changing_geometry_inputs() {
+        let sample = AtmosphereSample::default();
+        let clear = OutdoorEnvironment::for_world_time(
+            sample,
+            0.5,
+            WeatherState::for_cycle(0.08, 0.24, 0.0, 7, sample.coldness),
+        );
+        let storm = OutdoorEnvironment::for_world_time(
+            sample,
+            0.5,
+            WeatherState::for_cycle(0.68, 0.24, 0.0, 7, sample.coldness),
+        );
+        assert!(storm.key_light_radiance.length() < clear.key_light_radiance.length());
+        assert!(storm.shadow_strength < clear.shadow_strength);
+        assert!(storm.fog_density > clear.fog_density);
+        assert!(storm.cloud_coverage > clear.cloud_coverage);
+        assert!(storm.precipitation > clear.precipitation);
+    }
+
+    #[test]
+    fn cold_precipitation_becomes_snow_without_changing_weather_intensity() {
+        let rain = WeatherState::for_cycle(0.50, 0.24, 0.0, 7, 0.2);
+        let snow = WeatherState::for_cycle(0.50, 0.24, 0.0, 7, 0.9);
+        assert_eq!(rain.kind, WeatherKind::Rain);
+        assert_eq!(snow.kind, WeatherKind::Snow);
+        assert_eq!(rain.precipitation, snow.precipitation);
+        assert!(rain.snow < 0.01);
+        assert!(snow.snow > 0.8 * snow.precipitation);
     }
 
     #[test]

@@ -96,9 +96,13 @@ const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DerivedWorldEnvironment {
     day_fraction: f32,
+    weather_fraction: f32,
+    weather_cycle_seconds: f32,
     cloud_offset_metres: [f32; 2],
     cloud_velocity_metres_per_second: [f32; 2],
     cloud_coverage: f32,
+    cloud_base_metres: f32,
+    cloud_top_metres: f32,
     weather_seed: u64,
     weather_revision: u64,
 }
@@ -108,9 +112,13 @@ impl DerivedWorldEnvironment {
     fn into_render_state(self) -> voxels_render::environment::WorldEnvironmentState {
         voxels_render::environment::WorldEnvironmentState {
             day_fraction: self.day_fraction,
+            weather_fraction: self.weather_fraction,
+            weather_cycle_seconds: self.weather_cycle_seconds,
             cloud_offset_metres: self.cloud_offset_metres,
             cloud_velocity_metres_per_second: self.cloud_velocity_metres_per_second,
             cloud_coverage: self.cloud_coverage,
+            cloud_base_metres: self.cloud_base_metres,
+            cloud_top_metres: self.cloud_top_metres,
             weather_seed: self.weather_seed,
             weather_revision: self.weather_revision,
         }
@@ -130,6 +138,13 @@ fn world_environment_at(
     } else {
         snapshot.day_fraction
     };
+    let weather_fraction = if snapshot.weather_cycle_seconds > 0.0 {
+        (f64::from(snapshot.weather_fraction)
+            + elapsed_seconds / f64::from(snapshot.weather_cycle_seconds))
+        .rem_euclid(1.0) as f32
+    } else {
+        snapshot.weather_fraction
+    };
     let cloud_offset_metres = std::array::from_fn(|axis| {
         (f64::from(snapshot.cloud_offset_metres[axis])
             + f64::from(snapshot.cloud_velocity_metres_per_second[axis]) * elapsed_seconds)
@@ -137,9 +152,13 @@ fn world_environment_at(
     });
     DerivedWorldEnvironment {
         day_fraction,
+        weather_fraction,
+        weather_cycle_seconds: snapshot.weather_cycle_seconds,
         cloud_offset_metres,
         cloud_velocity_metres_per_second: snapshot.cloud_velocity_metres_per_second,
         cloud_coverage: snapshot.cloud_coverage,
+        cloud_base_metres: snapshot.cloud_base_metres,
+        cloud_top_metres: snapshot.cloud_top_metres,
         weather_seed: snapshot.weather_seed,
         weather_revision: snapshot.weather_revision,
     }
@@ -169,7 +188,7 @@ mod web {
     };
     use voxels_render::renderer::{
         ChunkActivationReason, LocalLightVisibility, MissionControlConfig, Renderer,
-        RendererConfig, RendererFeatureConfig,
+        RendererConfig, RendererFeatureConfig, VolumetricCloudConfig,
     };
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
@@ -193,7 +212,7 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 24.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 25.0;
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
     #[derive(Clone, Copy, Debug)]
     struct EngineConfig {
@@ -2330,6 +2349,20 @@ mod web {
                     render.cloud_velocity_metres_per_second[0],
                     render.cloud_velocity_metres_per_second[1],
                     render.weather_revision as f32,
+                    render.weather_kind as f32,
+                    render.weather_fraction,
+                    render.precipitation,
+                    render.storminess,
+                    render.lightning,
+                    render.cloud_density,
+                    render.cloud_base_metres,
+                    render.cloud_top_metres,
+                    render.cloud_render_resolution[0] as f32,
+                    render.cloud_render_resolution[1] as f32,
+                    render.cloud_steps[0] as f32,
+                    render.cloud_steps[1] as f32,
+                    render.fog_density,
+                    render.outdoor_exposure,
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
@@ -2348,6 +2381,8 @@ mod web {
                         sample.ambient_occlusion_ms,
                         sample.world_ms,
                         sample.water_ms,
+                        sample.cloud_ms,
+                        sample.weather_ms,
                         sample.ui_ms,
                     ]);
                 }
@@ -2455,6 +2490,14 @@ mod web {
                 split_lambda: rendering.shadows.split_lambda,
                 shadow_map_resolution: rendering.shadows.shadow_map_resolution,
                 caster_depth_expansion: rendering.shadows.caster_depth_expansion,
+            },
+            volumetric_clouds: VolumetricCloudConfig {
+                enabled: rendering.volumetric_clouds.enabled,
+                resolution_scale: rendering.volumetric_clouds.resolution_scale,
+                view_steps: rendering.volumetric_clouds.view_steps,
+                light_steps: rendering.volumetric_clouds.light_steps,
+                max_distance_metres: rendering.volumetric_clouds.max_distance_metres,
+                extinction: rendering.volumetric_clouds.extinction,
             },
         };
         let width = (css_width * dpr).round().max(1.0) as u32;
@@ -2761,9 +2804,13 @@ mod tests {
             sample_server_time_ms: 5_000,
             day_fraction: 0.25,
             day_length_seconds: 100.0,
+            weather_fraction: 0.1,
+            weather_cycle_seconds: 200.0,
             cloud_offset_metres: [10.0, 20.0],
             cloud_velocity_metres_per_second: [4.0, -2.0],
             cloud_coverage: 0.6,
+            cloud_base_metres: 420.0,
+            cloud_top_metres: 780.0,
             weather_seed: 7,
             weather_revision: 3,
         };
@@ -2771,6 +2818,7 @@ mod tests {
         let second = world_environment_at(snapshot, 30_000.0);
         assert_eq!(first, second);
         assert!((first.day_fraction - 0.5).abs() < 1.0e-6);
+        assert!((first.weather_fraction - 0.225).abs() < 1.0e-6);
         assert_eq!(first.cloud_offset_metres, [110.0, 1_279_970.0]);
     }
 
@@ -2780,14 +2828,19 @@ mod tests {
             sample_server_time_ms: 1_000,
             day_fraction: 0.9,
             day_length_seconds: 40.0,
+            weather_fraction: 0.68,
+            weather_cycle_seconds: 0.0,
             cloud_offset_metres: [0.0, 0.0],
             cloud_velocity_metres_per_second: [5.0, 2.0],
             cloud_coverage: 0.4,
+            cloud_base_metres: 420.0,
+            cloud_top_metres: 780.0,
             weather_seed: 1,
             weather_revision: 1,
         };
         let resumed = world_environment_at(snapshot, 11_000.0);
         assert!((resumed.day_fraction - 0.15).abs() < 1.0e-6);
+        assert_eq!(resumed.weather_fraction, 0.68);
         assert_eq!(resumed.cloud_offset_metres, [50.0, 20.0]);
     }
 }

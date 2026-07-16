@@ -275,16 +275,17 @@ fn cloud_sun_visibility(world: vec3<f32>) -> f32 {
     return 1.0;
   }
   let sun = normalize(frame.key_light_direction.xyz);
-  let distance_to_layer = max(480.0 - world.y, 0.0) / max(sun.y, 0.12);
+  let cloud_height = mix(frame.cloud_layer.x, frame.cloud_layer.y, 0.46);
+  let distance_to_layer = max(cloud_height - world.y, 0.0) / max(sun.y, 0.12);
   let cloud_world = world.xz + sun.xz * distance_to_layer;
   let field = atmosphere_cloud_field_world(
     cloud_world,
     frame.environment_time.yz,
     frame.environment_time.w,
   );
-  let threshold = mix(0.76, 0.49, coverage_control);
-  let cloud = smoothstep(threshold - 0.055, threshold + 0.055, field);
-  return mix(1.0, 0.54, cloud * coverage_control);
+  let threshold = mix(0.84, 0.45, coverage_control);
+  let cloud = smoothstep(threshold - 0.08, threshold + 0.08, field);
+  return mix(1.0, mix(0.62, 0.40, frame.weather.y), cloud * coverage_control);
 }
 
 fn cascade_shadow(world: vec3<f32>, normal: vec3<f32>, cascade: u32) -> f32 {

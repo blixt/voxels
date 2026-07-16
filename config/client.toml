@@ -1,12 +1,12 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 13
+schema_version = 14
 
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
 [world]
-endpoint = "ws://127.0.0.1:9777/v12/world"
-presence_endpoint = "ws://127.0.0.1:9777/v12/presence"
-subprotocol = "voxels.world.v12"
+endpoint = "ws://127.0.0.1:9777/v13/world"
+presence_endpoint = "ws://127.0.0.1:9777/v13/presence"
+subprotocol = "voxels.world.v13"
 auth_subprotocol_token = "replace-with-a-random-local-token"
 max_in_flight_batches = 8
 buffered_amount_high_water_bytes = 8388608
@@ -66,6 +66,14 @@ split_lambda = 0.65
 # renderer's bounded shadow-memory budget.
 shadow_map_resolution = 1024
 caster_depth_expansion = 64.0
+
+[rendering.volumetric_clouds]
+enabled = true
+resolution_scale = 0.5
+view_steps = 14
+light_steps = 2
+max_distance_metres = 14000.0
+extinction = 0.006
 
 [rendering.features]
 cascaded_sun_shadows = true
