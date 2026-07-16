@@ -873,10 +873,7 @@ mod tests {
         assert!(clear.precipitation < 0.01);
         assert!(rain.precipitation > 0.5);
         assert!(storm.storminess > 0.7);
-        assert_eq!(
-            WeatherState::for_cycle(1.08, 0.24, 0.0, 7, 0.25),
-            clear
-        );
+        assert_eq!(WeatherState::for_cycle(1.08, 0.24, 0.0, 7, 0.25), clear);
     }
 
     #[test]

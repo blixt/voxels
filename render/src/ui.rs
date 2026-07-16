@@ -1911,18 +1911,16 @@ mod tests {
     #[test]
     fn explicit_header_actions_are_hit_testable_without_a_secondary_menu() {
         let viewport = viewport();
-        for (target, expected) in [(
-            UiTarget::ResetRendererFeatures,
-            UiAction::ResetRendererFeatures,
-        )] {
-            let mut ui = opened();
-            let center = ui
-                .layout(viewport)
-                .region(target)
-                .expect("header action")
-                .center();
-            assert_eq!(ui.activate_css(center, viewport), expected);
-        }
+        let mut ui = opened();
+        let center = ui
+            .layout(viewport)
+            .region(UiTarget::ResetRendererFeatures)
+            .expect("header action")
+            .center();
+        assert_eq!(
+            ui.activate_css(center, viewport),
+            UiAction::ResetRendererFeatures
+        );
     }
 
     #[test]
