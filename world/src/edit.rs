@@ -167,19 +167,19 @@ impl EditMap {
     pub fn snapshot_for_surface_tiles(&self, coords: &[SurfaceTileCoord]) -> Self {
         let mut snapshot = Self::default();
         for coord in coords {
-            let [[min_x, min_z], [max_x, max_z]] = coord.voxel_bounds_xz();
-            let margin = coord
-                .stride_voxels()
-                .saturating_add(FEATURE_MAX_RADIUS_VOXELS);
-            let min_x = min_x.saturating_sub(margin);
-            let min_z = min_z.saturating_sub(margin);
-            let max_x = max_x.saturating_add(margin);
-            let max_z = max_z.saturating_add(margin);
-            for (&(x, z), column) in self.column_overrides.range((min_x, i32::MIN)..) {
-                if x >= max_x {
+            let [origin_x, origin_z] = coord.voxel_origin();
+            let span = i64::from(coord.voxel_span());
+            let margin = i64::from(coord.stride_voxels() + FEATURE_MAX_RADIUS_VOXELS);
+            let min_x = i64::from(origin_x) - margin;
+            let min_z = i64::from(origin_z) - margin;
+            let max_x = i64::from(origin_x) + span + margin;
+            let max_z = i64::from(origin_z) + span + margin;
+            let range_min_x = min_x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            for (&(x, z), column) in self.column_overrides.range((range_min_x, i32::MIN)..) {
+                if i64::from(x) >= max_x {
                     break;
                 }
-                if z < min_z || z >= max_z {
+                if i64::from(z) < min_z || i64::from(z) >= max_z {
                     continue;
                 }
                 for (&y, &material) in column {
@@ -616,6 +616,26 @@ mod tests {
                     VoxelCoord::new(voxel[0], voxel[1], voxel[2]).chunk()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn surface_snapshots_include_positive_world_boundary_edits() {
+        for coord in [
+            VoxelCoord::new(i32::MAX, 17, 7),
+            VoxelCoord::new(7, 17, i32::MAX),
+        ] {
+            let mut edits = EditMap::default();
+            edits.insert_override(coord, Material::Basalt);
+            let tile = SurfaceTileCoord::containing(
+                crate::SurfaceLodLevel::Stride64,
+                coord.x,
+                coord.z,
+            );
+
+            let snapshot = edits.snapshot_for_surface_tiles(&[tile]);
+
+            assert_eq!(snapshot.override_at(coord), Some(Material::Basalt));
         }
     }
 
