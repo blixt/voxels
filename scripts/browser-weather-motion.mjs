@@ -151,7 +151,10 @@ async function analyzeRainMotion(page, frames) {
     const signals = lumaFrames.map((luma) => {
       const signal = new Float32Array(luma.length);
       for (let index = 0; index < luma.length; index += 1) {
-        signal[index] = Math.max(luma[index] - background[index] - 0.012, 0);
+        // Rain may either brighten a dark surface or attenuate a bright sky. Measuring only
+        // positive luminance changes made the motion gate blind to physically tinted streaks
+        // and allowed unrelated highlights to dominate the correlation.
+        signal[index] = Math.max(Math.abs(luma[index] - background[index]) - 0.012, 0);
       }
       return signal;
     });
@@ -526,14 +529,20 @@ try {
     await page.evaluate(() => globalThis.__VOXELS__.snapshot()),
   );
 
-  const validRainPairs = rain?.pairs.filter((pair) => pair.score >= 0.08) ?? [];
-  const downwardPairs = validRainPairs.filter((pair) => pair.dyPixels > 0);
-  const rainMedianVelocity = median(validRainPairs.map((pair) => pair.velocityYPixelsPerSecond));
-  const rainMedianAdvantage = median(validRainPairs.map((pair) => pair.positiveAdvantage));
+  const correlatedRainPairs = rain?.pairs.filter((pair) => pair.score >= 0.08) ?? [];
+  // The analysis samples every fourth pixel. Displacements below one sampled interval per
+  // ordinary frame are indistinguishable from stationary background correlation, so they do
+  // not carry directional evidence.
+  const rainMotionPairs = correlatedRainPairs.filter(
+    (pair) => Math.abs(pair.velocityYPixelsPerSecond) >= 80,
+  );
+  const downwardPairs = rainMotionPairs.filter((pair) => pair.dyPixels > 0);
+  const rainMedianVelocity = median(rainMotionPairs.map((pair) => pair.velocityYPixelsPerSecond));
+  const rainMedianAdvantage = median(rainMotionPairs.map((pair) => pair.positiveAdvantage));
   const violations = [];
   if (rain) {
-    if (validRainPairs.length < 6) violations.push("too few correlated rain frame pairs");
-    if (downwardPairs.length < Math.ceil(validRainPairs.length * 0.75)) {
+    if (rainMotionPairs.length < 4) violations.push("too few measurable rain motion pairs");
+    if (downwardPairs.length < Math.ceil(rainMotionPairs.length * 0.75)) {
       violations.push("rain motion was not predominantly downward");
     }
     if (rainMedianVelocity < 80 || rainMedianVelocity > 2_500) {
@@ -592,7 +601,8 @@ try {
     rain: rain
       ? {
           medianOccupiedFraction: median(rain.occupied),
-          validPairs: validRainPairs.length,
+          correlatedPairs: correlatedRainPairs.length,
+          motionPairs: rainMotionPairs.length,
           downwardPairs: downwardPairs.length,
           medianVelocityYPixelsPerSecond: rainMedianVelocity,
           medianPositiveCorrelationAdvantage: rainMedianAdvantage,

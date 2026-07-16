@@ -95,6 +95,7 @@ const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DerivedWorldEnvironment {
+    server_time_seconds: f32,
     day_fraction: f32,
     weather_fraction: f32,
     weather_cycle_seconds: f32,
@@ -111,6 +112,7 @@ struct DerivedWorldEnvironment {
 impl DerivedWorldEnvironment {
     fn into_render_state(self) -> voxels_render::environment::WorldEnvironmentState {
         voxels_render::environment::WorldEnvironmentState {
+            server_time_seconds: self.server_time_seconds,
             day_fraction: self.day_fraction,
             weather_fraction: self.weather_fraction,
             weather_cycle_seconds: self.weather_cycle_seconds,
@@ -151,6 +153,7 @@ fn world_environment_at(
             .rem_euclid(CLOUD_PERIOD_METRES) as f32
     });
     DerivedWorldEnvironment {
+        server_time_seconds: (server_time_ms * 0.001).max(0.0) as f32,
         day_fraction,
         weather_fraction,
         weather_cycle_seconds: snapshot.weather_cycle_seconds,
@@ -2818,6 +2821,7 @@ mod tests {
         let first = world_environment_at(snapshot, 30_000.0);
         let second = world_environment_at(snapshot, 30_000.0);
         assert_eq!(first, second);
+        assert_eq!(first.server_time_seconds, 30.0);
         assert!((first.day_fraction - 0.5).abs() < 1.0e-6);
         assert!((first.weather_fraction - 0.225).abs() < 1.0e-6);
         assert_eq!(first.cloud_offset_metres, [110.0, 1_279_970.0]);
@@ -2840,6 +2844,7 @@ mod tests {
             weather_revision: 1,
         };
         let resumed = world_environment_at(snapshot, 11_000.0);
+        assert_eq!(resumed.server_time_seconds, 11.0);
         assert!((resumed.day_fraction - 0.15).abs() < 1.0e-6);
         assert_eq!(resumed.weather_fraction, 0.68);
         assert_eq!(resumed.cloud_offset_metres, [50.0, 20.0]);

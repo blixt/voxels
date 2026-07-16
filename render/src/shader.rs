@@ -63,6 +63,7 @@ mod tests {
                 "sun_direction",
                 "moon_direction",
                 "environment_time",
+                "atmosphere_motion",
                 "sky_horizon",
                 "sky_zenith",
                 "ground_atmosphere",
@@ -148,12 +149,35 @@ mod tests {
     fn precipitation_is_world_space_depth_tested_geometry_that_falls_downward() {
         let weather = include_str!("shaders/weather.wgsl");
         assert!(weather.contains("@builtin(instance_index) instance_index: u32"));
-        assert!(weather.contains("frame.camera_time.y + 17.0 - age * PRECIPITATION_HEIGHT_METRES"));
+        assert!(weather.contains("let server_time = frame.atmosphere_motion.x"));
+        assert!(weather.contains("let vertical_phase = fract("));
+        assert!(weather.contains("let vertical_cell = round((frame.camera_time.y - vertical_phase)"));
+        assert!(weather.contains("velocity - frame.atmosphere_motion.yzw"));
+        assert!(!weather.contains("frame.camera_time.w / fall_duration"));
+        assert!(!weather.contains("frame.camera_time.y +"));
         assert!(weather.contains("frame.view_projection * vec4<f32>(world, 1.0)"));
         assert!(!weather.contains("world.xz +="));
         assert!(!weather.contains("world.xz ="));
         assert!(!weather.contains("position.xy / frame.viewport_voxel.xy"));
         assert!(!weather.contains("fn rain_layer("));
+    }
+
+    #[test]
+    fn precipitation_vertical_lattice_is_camera_invariant_within_a_world_cell() {
+        const HEIGHT: f32 = 32.0;
+        fn world_y(initial_phase: f32, server_time: f32, fall_duration: f32, camera_y: f32) -> f32 {
+            let vertical_phase =
+                (initial_phase - server_time / fall_duration).rem_euclid(1.0) * HEIGHT;
+            vertical_phase + ((camera_y - vertical_phase) / HEIGHT).round() * HEIGHT
+        }
+
+        let first_client = world_y(0.37, 42.0, 2.8, 73.0);
+        let second_client = world_y(0.37, 42.0, 2.8, 78.0);
+        assert_eq!(first_client, second_client);
+
+        let one_frame_later = world_y(0.37, 42.01, 2.8, 73.0);
+        let expected_fall = HEIGHT / 2.8 * 0.01;
+        assert!(((first_client - one_frame_later) - expected_fall).abs() < 1.0e-4);
     }
 
     #[test]

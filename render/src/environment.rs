@@ -214,6 +214,7 @@ pub struct OutdoorEnvironment {
 /// Dynamic, server-authored environment values evaluated for one render frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldEnvironmentState {
+    pub server_time_seconds: f32,
     pub day_fraction: f32,
     pub weather_fraction: f32,
     pub weather_cycle_seconds: f32,
@@ -229,6 +230,7 @@ pub struct WorldEnvironmentState {
 impl Default for WorldEnvironmentState {
     fn default() -> Self {
         Self {
+            server_time_seconds: 0.0,
             day_fraction: DaylightPhase::GoldenHour.anchor_day_fraction(),
             weather_fraction: 0.08,
             weather_cycle_seconds: 900.0,
@@ -252,6 +254,11 @@ impl WorldEnvironmentState {
             finite_positive_scalar(self.cloud_top_metres, fallback.cloud_top_metres)
                 .max(cloud_base_metres + 1.0);
         Self {
+            server_time_seconds: if self.server_time_seconds.is_finite() {
+                self.server_time_seconds.max(0.0)
+            } else {
+                fallback.server_time_seconds
+            },
             day_fraction: if self.day_fraction.is_finite() {
                 self.day_fraction.rem_euclid(1.0)
             } else {

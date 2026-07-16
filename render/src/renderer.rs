@@ -200,6 +200,7 @@ struct FrameUniform {
     sun_direction: [f32; 4],
     moon_direction: [f32; 4],
     environment_time: [f32; 4],
+    atmosphere_motion: [f32; 4],
     sky_horizon: [f32; 4],
     sky_zenith: [f32; 4],
     ground_atmosphere: [f32; 4],
@@ -210,11 +211,11 @@ struct FrameUniform {
     interior: [f32; 4],
 }
 
-const _: () = assert!(size_of::<FrameUniform>() == 720);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, weather) == 656);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, cloud_layer) == 672);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 688);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 704);
+const _: () = assert!(size_of::<FrameUniform>() == 736);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, weather) == 672);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, cloud_layer) == 688);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 704);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 720);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
@@ -4295,6 +4296,12 @@ fn frame_uniform(
             world_environment.cloud_offset_metres[0],
             world_environment.cloud_offset_metres[1],
             (world_environment.weather_seed & 0x00ff_ffff) as f32,
+        ],
+        atmosphere_motion: [
+            world_environment.server_time_seconds,
+            camera.velocity.x,
+            camera.velocity.y,
+            camera.velocity.z,
         ],
         sky_horizon: environment.sky_horizon.extend(0.0).to_array(),
         sky_zenith: environment.sky_zenith.extend(0.0).to_array(),

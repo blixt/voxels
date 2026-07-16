@@ -17,6 +17,7 @@ struct Frame {
   sun_direction: vec4<f32>,
   moon_direction: vec4<f32>,
   environment_time: vec4<f32>,
+  atmosphere_motion: vec4<f32>,
   sky_horizon: vec4<f32>,
   sky_zenith: vec4<f32>,
   ground_atmosphere: vec4<f32>,
