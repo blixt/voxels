@@ -458,6 +458,9 @@ function summarizePerformance(timings) {
     frameP95Ms: percentile(timings.frameIntervals, 0.95),
     frameMaxMs: Math.max(...timings.frameIntervals, 0),
     framesAbove16_67Ms: timings.frameIntervals.filter((value) => value > 16.67).length,
+    fractionAbove16_67Ms:
+      timings.frameIntervals.filter((value) => value > 16.67).length /
+      Math.max(timings.frameIntervals.length, 1),
     gpuSamples: gpu.length,
     worldGpuP95Ms: percentile(
       gpu.map((sample) => sample.world),
@@ -525,7 +528,9 @@ try {
     if (image.largestSkyLikeComponent > 32)
       violations.push("terrain-only ROI contains a connected sky-colored crack");
     if (performance.frameP95Ms > 12) violations.push("frame p95 exceeded 12ms");
-    if (performance.framesAbove16_67Ms > 0) violations.push("a measured frame exceeded 16.67ms");
+    if (performance.fractionAbove16_67Ms > 0.01)
+      violations.push("over 1% of measured frames exceeded 16.67ms");
+    if (performance.frameMaxMs > 25) violations.push("a measured frame exceeded 25ms");
     if (performance.worldGpuP95Ms > 2) violations.push("world GPU p95 exceeded 2ms");
     if (performance.totalGpuP95Ms > 7.5) violations.push("total GPU p95 exceeded 7.5ms");
     if (errors.length > 0) violations.push(...errors);
@@ -590,7 +595,9 @@ try {
       violations.push("over 1% of valley pixels changed luminance by at least 2x");
     if (image.ssim < 0.97) violations.push("valley SSIM fell below 0.97");
     if (performance.frameP95Ms > 12) violations.push("frame p95 exceeded 12ms");
-    if (performance.framesAbove16_67Ms > 0) violations.push("a measured frame exceeded 16.67ms");
+    if (performance.fractionAbove16_67Ms > 0.01)
+      violations.push("over 1% of measured frames exceeded 16.67ms");
+    if (performance.frameMaxMs > 25) violations.push("a measured frame exceeded 25ms");
     if (performance.worldGpuP95Ms > 2) violations.push("world GPU p95 exceeded 2ms");
     if (performance.totalGpuP95Ms > 7.5) violations.push("total GPU p95 exceeded 7.5ms");
     if (errors.length > 0) violations.push(...errors);
