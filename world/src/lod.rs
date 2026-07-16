@@ -16,6 +16,8 @@ pub const SURFACE_TILE_EDGE_CELLS: i32 = 32;
 pub const SURFACE_PATCH_EDGE_CELLS: i32 = 8;
 pub const SURFACE_PATCHES_PER_TILE_EDGE: i32 = SURFACE_TILE_EDGE_CELLS / SURFACE_PATCH_EDGE_CELLS;
 pub const SURFACE_LOD_LEVEL_COUNT: usize = 6;
+pub const SURFACE_SHADING_EDGE_SAMPLES: usize = 34;
+pub const SURFACE_PARENT_SHADING_EDGE_SAMPLES: usize = 18;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
@@ -316,6 +318,16 @@ pub struct SurfaceTileMesh {
     pub coord: SurfaceTileCoord,
     pub quads: Vec<SurfaceQuad>,
     pub patches: Vec<SurfacePatch>,
+    /// View-independent height samples used to keep lighting continuous across streamed tile and
+    /// LOD boundaries. `heights` retains the tile's one-cell halo; `parent_heights` covers the
+    /// same footprint on the next-coarser lattice and is empty only for the outermost level.
+    pub shading: SurfaceShading,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SurfaceShading {
+    pub heights: Vec<i32>,
+    pub parent_heights: Vec<i32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -484,25 +496,27 @@ pub fn generate_edited_surface_tile_mesh(
     coord: SurfaceTileCoord,
 ) -> SurfaceTileMesh {
     let features = pristine_skyline_features(generator, edits, coord);
+    let shading_surface = |x, z| edits.surface_sample(generator, x, z);
     if edits.is_empty() {
+        let surface = |x, z| edits.surface_sample(generator, x, z);
         return generate_surface_tile_mesh_with_options(
-            coord,
-            |x, z| edits.surface_sample(generator, x, z),
-            true,
-            &features,
+            coord, &surface, None, None, true, &features,
         );
     }
     let aliases = collidable_edit_aliases(generator, edits, coord);
+    let surface = |x, z| {
+        let sampled = edits.surface_sample(generator, x, z);
+        aliases
+            .get(&(x, z))
+            .copied()
+            .filter(|(height, _)| *height >= sampled.0)
+            .unwrap_or(sampled)
+    };
     generate_surface_tile_mesh_with_options(
         coord,
-        |x, z| {
-            let sampled = edits.surface_sample(generator, x, z);
-            aliases
-                .get(&(x, z))
-                .copied()
-                .filter(|(height, _)| *height >= sampled.0)
-                .unwrap_or(sampled)
-        },
+        &surface,
+        Some(&shading_surface),
+        Some(&shading_surface),
         true,
         &features,
     )
@@ -678,7 +692,7 @@ pub fn generate_surface_tile_mesh_with(
     coord: SurfaceTileCoord,
     surface: impl Fn(i32, i32) -> (i32, Material),
 ) -> SurfaceTileMesh {
-    generate_surface_tile_mesh_with_options(coord, surface, true, &[])
+    generate_surface_tile_mesh_with_options(coord, &surface, None, None, true, &[])
 }
 
 pub fn generate_surface_tile_mesh_with_features(
@@ -686,12 +700,31 @@ pub fn generate_surface_tile_mesh_with_features(
     surface: impl Fn(i32, i32) -> (i32, Material),
     skyline_features: &[SkylineFeature],
 ) -> SurfaceTileMesh {
-    generate_surface_tile_mesh_with_options(coord, surface, true, skyline_features)
+    generate_surface_tile_mesh_with_options(coord, &surface, None, None, true, skyline_features)
+}
+
+pub fn generate_surface_tile_mesh_with_features_and_shading(
+    coord: SurfaceTileCoord,
+    surface: impl Fn(i32, i32) -> (i32, Material),
+    shading_surface: impl Fn(i32, i32) -> (i32, Material),
+    parent_shading_surface: impl Fn(i32, i32) -> (i32, Material),
+    skyline_features: &[SkylineFeature],
+) -> SurfaceTileMesh {
+    generate_surface_tile_mesh_with_options(
+        coord,
+        &surface,
+        Some(&shading_surface),
+        Some(&parent_shading_surface),
+        true,
+        skyline_features,
+    )
 }
 
 fn generate_surface_tile_mesh_with_options(
     coord: SurfaceTileCoord,
-    surface: impl Fn(i32, i32) -> (i32, Material),
+    surface: &dyn Fn(i32, i32) -> (i32, Material),
+    shading_surface: Option<&dyn Fn(i32, i32) -> (i32, Material)>,
+    parent_shading_surface: Option<&dyn Fn(i32, i32) -> (i32, Material)>,
     patch_edges: bool,
     skyline_features: &[SkylineFeature],
 ) -> SurfaceTileMesh {
@@ -837,10 +870,45 @@ fn generate_surface_tile_mesh_with_options(
             });
         }
     }
+    let shading_surface = shading_surface.unwrap_or(surface);
+    let heights = if std::ptr::eq(shading_surface, surface) {
+        samples.iter().map(|sample| sample.0).collect()
+    } else {
+        (-1..=edge)
+            .flat_map(|sample_z| {
+                (-1..=edge).map(move |sample_x| {
+                    shading_surface(
+                        offset_clamped(origin_x, sample_x * stride + stride / 2),
+                        offset_clamped(origin_z, sample_z * stride + stride / 2),
+                    )
+                    .0
+                })
+            })
+            .collect()
+    };
+    let parent_heights = coord.level.next_coarser().map_or_else(Vec::new, |_| {
+        let parent_stride = stride * 2;
+        let parent_surface = parent_shading_surface.unwrap_or(shading_surface);
+        (-1..=(SURFACE_TILE_EDGE_CELLS / 2))
+            .flat_map(|sample_z| {
+                (-1..=(SURFACE_TILE_EDGE_CELLS / 2)).map(move |sample_x| {
+                    parent_surface(
+                        offset_clamped(origin_x, sample_x * parent_stride + parent_stride / 2),
+                        offset_clamped(origin_z, sample_z * parent_stride + parent_stride / 2),
+                    )
+                    .0
+                })
+            })
+            .collect()
+    });
     SurfaceTileMesh {
         coord,
         quads,
         patches,
+        shading: SurfaceShading {
+            heights,
+            parent_heights,
+        },
     }
 }
 
@@ -1994,12 +2062,15 @@ mod tests {
     #[test]
     fn tall_surface_sides_split_without_truncating_vertical_coverage() {
         for (height, segments_per_face) in [(65_535, 1), (65_536, 2), (131_071, 3)] {
+            let surface = |x, z| {
+                let sampled_height = if x == 1 && z == 1 { height } else { 0 };
+                (sampled_height, Material::Stone)
+            };
             let tile = generate_surface_tile_mesh_with_options(
                 SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
-                |x, z| {
-                    let sampled_height = if x == 1 && z == 1 { height } else { 0 };
-                    (sampled_height, Material::Stone)
-                },
+                &surface,
+                None,
+                None,
                 false,
                 &[],
             );

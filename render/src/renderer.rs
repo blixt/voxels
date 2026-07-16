@@ -60,7 +60,7 @@ const FAR_MATERIAL_FLAG: u32 = 1 << 31;
 const SURFACE_LOD_SHIFT: u32 = 27;
 const GPU_FACE_SHIFT: u32 = 16;
 const GPU_FACE_MASK: u32 = 0b111 << GPU_FACE_SHIFT;
-const SURFACE_MACRO_NORMAL_FLAG: u32 = 1 << 24;
+const SURFACE_MACRO_NORMAL_FLAG: u32 = 1 << 28;
 // Decimated height samples are not band-limited. Keeping their full derivative makes a one-voxel
 // clipmap snap turn unresolved relief into a false near-horizontal slope (and an almost black
 // valley at low sun angles). A conservative macro cue remains legible while staying stable across
@@ -186,6 +186,7 @@ struct FrameUniform {
     target_voxel_max: [f32; 4],
     render_options: [f32; 4],
     lod_options: [f32; 4],
+    lod_boundary_centres: [[f32; 4]; 3],
     camera_forward: [f32; 4],
     shadow_splits: [f32; 4],
     shadow_texel_sizes: [f32; 4],
@@ -200,9 +201,9 @@ struct FrameUniform {
     interior: [f32; 4],
 }
 
-const _: () = assert!(size_of::<FrameUniform>() == 592);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 560);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 576);
+const _: () = assert!(size_of::<FrameUniform>() == 640);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 608);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 624);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
@@ -1281,6 +1282,7 @@ impl Renderer {
                 interior: InteriorEnvironment::default(),
             },
             &shadow_cascades,
+            None,
             runtime_config,
         );
         let frame_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2559,6 +2561,7 @@ impl Renderer {
                 interior: self.interior,
             },
             &shadow_cascades,
+            self.geometric_lod_focus,
             self.runtime_config,
         );
         let view_projection = glam::Mat4::from_cols_array_2d(&uniform.view_projection);
@@ -3262,29 +3265,30 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
 
     let mut packed = vec![0xff; tile.quads.len()];
     let mut cell_normals = vec![None::<u32>; edge * edge];
-    let height_at = |x: usize, z: usize| heights[x + z * edge].map(|sample| sample.0);
     for z in 0..edge {
         for x in 0..edge {
-            let Some((height, quad_index)) = heights[x + z * edge] else {
+            let Some((_, quad_index)) = heights[x + z * edge] else {
                 continue;
             };
-            let left = x.checked_sub(1).and_then(|x| height_at(x, z));
-            let right = (x + 1 < edge).then(|| height_at(x + 1, z)).flatten();
-            let back = z.checked_sub(1).and_then(|z| height_at(x, z));
-            let front = (z + 1 < edge).then(|| height_at(x, z + 1)).flatten();
-            let slope_x = sampled_surface_slope(height, left, right, stride);
-            let slope_z = sampled_surface_slope(height, back, front, stride);
-            // A decimated height field can turn sub-cell relief into a much steeper apparent
-            // gradient when its sampling phase changes at an LOD handoff. Preserve the direction
-            // and broad slope cue while compressing that unstable high-frequency component.
-            let horizontal = stabilized_surface_gradient(glam::Vec2::new(slope_x, slope_z));
-            let normal = glam::Vec3::new(-horizontal.x, 1.0, -horizontal.y).normalize();
-            let encode =
-                |component: f32| ((component.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u32;
-            let value = 0xff
-                | (encode(normal.x) << 8)
-                | (encode(normal.z) << 16)
-                | SURFACE_MACRO_NORMAL_FLAG;
+            let normal = sampled_shading_normal(
+                &tile.shading.heights,
+                voxels_world::SURFACE_SHADING_EDGE_SAMPLES,
+                x + 1,
+                z + 1,
+                stride,
+            );
+            let parent_normal = if tile.shading.parent_heights.is_empty() {
+                normal
+            } else {
+                sampled_shading_normal(
+                    &tile.shading.parent_heights,
+                    voxels_world::SURFACE_PARENT_SHADING_EDGE_SAMPLES,
+                    x / 2 + 1,
+                    z / 2 + 1,
+                    stride * 2,
+                )
+            };
+            let value = pack_surface_macro_normals(normal, parent_normal);
             packed[quad_index] = value;
             cell_normals[x + z * edge] = Some(value);
         }
@@ -3345,6 +3349,40 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
         }
     }
     packed
+}
+
+fn sampled_shading_normal(
+    heights: &[i32],
+    edge: usize,
+    x: usize,
+    z: usize,
+    stride: i32,
+) -> glam::Vec3 {
+    debug_assert!(x > 0 && x + 1 < edge && z > 0 && z + 1 < edge);
+    let height = |x: usize, z: usize| heights[x + z * edge];
+    let slope_x = sampled_surface_slope(
+        height(x, z),
+        Some(height(x - 1, z)),
+        Some(height(x + 1, z)),
+        stride,
+    );
+    let slope_z = sampled_surface_slope(
+        height(x, z),
+        Some(height(x, z - 1)),
+        Some(height(x, z + 1)),
+        stride,
+    );
+    let horizontal = stabilized_surface_gradient(glam::Vec2::new(slope_x, slope_z));
+    glam::Vec3::new(-horizontal.x, 1.0, -horizontal.y).normalize()
+}
+
+fn pack_surface_macro_normals(normal: glam::Vec3, parent: glam::Vec3) -> u32 {
+    let encode = |component: f32| ((component.clamp(-1.0, 1.0) * 0.5 + 0.5) * 127.0).round() as u32;
+    encode(normal.x)
+        | (encode(normal.z) << 7)
+        | (encode(parent.x) << 14)
+        | (encode(parent.z) << 21)
+        | SURFACE_MACRO_NORMAL_FLAG
 }
 
 fn surface_patch_profiles(
@@ -3572,7 +3610,11 @@ fn append_lod_transition(
                         | (u32::from(patch.level.index()) << SURFACE_LOD_SHIFT),
                     face,
                 ),
-                ao: surface.macro_normal,
+                // The connector belongs to the coarse patch and meets the finer surface at the
+                // exact point where the finer parent normal equals this coarse normal. It is a
+                // proxy for unresolved terrain between the two sampling lattices, so lighting it
+                // with the shared terrain normal avoids exposing an artificial vertical wall.
+                ao: coarse_cell.macro_normal,
             });
             remaining -= i64::from(vertical_extent);
             y = y.saturating_add(i32::from(vertical_extent));
@@ -3927,6 +3969,7 @@ fn frame_uniform(
     target: Option<DigVolume>,
     state: FrameState,
     shadows: &DirectionalShadowCascades,
+    lod_focus: Option<GeometricLodFocus>,
     renderer_config: RendererConfig,
 ) -> FrameUniform {
     let FrameState {
@@ -3939,6 +3982,7 @@ fn frame_uniform(
     let view_projection = view_projection(config, camera, renderer_config.view_distance_metres);
     let camera_forward = camera.forward();
     let fluid = camera.fluid_state();
+    let boundary_centres = lod_focus.map_or([[0; 2]; 6], GeometricLodFocus::boundary_centres);
     FrameUniform {
         view_projection: view_projection.to_cols_array_2d(),
         inverse_view_projection: view_projection.inverse().to_cols_array_2d(),
@@ -3982,6 +4026,16 @@ fn frame_uniform(
             if readiness.all { 1.0 } else { 0.0 },
             if readiness.geometric { 1.0 } else { 0.0 },
         ],
+        lod_boundary_centres: std::array::from_fn(|pair| {
+            let first = boundary_centres[pair * 2];
+            let second = boundary_centres[pair * 2 + 1];
+            [
+                first[0] as f32 * VOXEL_SIZE_METRES,
+                first[1] as f32 * VOXEL_SIZE_METRES,
+                second[0] as f32 * VOXEL_SIZE_METRES,
+                second[1] as f32 * VOXEL_SIZE_METRES,
+            ]
+        }),
         camera_forward: [
             camera_forward.x,
             camera_forward.y,
@@ -4305,7 +4359,7 @@ mod tests {
                 Some(SurfaceCell {
                     height,
                     material: Material::Grass,
-                    macro_normal: 0xff | SURFACE_MACRO_NORMAL_FLAG,
+                    macro_normal: pack_surface_macro_normals(glam::Vec3::Y, glam::Vec3::Y),
                 });
                 (voxels_world::SURFACE_PATCH_EDGE_CELLS.pow(2)) as usize
             ],
@@ -4334,9 +4388,8 @@ mod tests {
             .expect("interior terrain top exists");
         let value = packed[quad_index];
         assert_ne!(value & SURFACE_MACRO_NORMAL_FLAG, 0);
-        assert_eq!(value & 0xff, 0xff, "voxel AO remains fully visible");
-        let normal_x = ((value >> 8) & 255) as f32 * (2.0 / 255.0) - 1.0;
-        let normal_z = ((value >> 16) & 255) as f32 * (2.0 / 255.0) - 1.0;
+        let normal_x = (value & 127) as f32 * (2.0 / 127.0) - 1.0;
+        let normal_z = ((value >> 7) & 127) as f32 * (2.0 / 127.0) - 1.0;
         assert!(
             (-0.14..-0.10).contains(&normal_x),
             "uphill +X must retain a gentle, stable tilt toward -X: {normal_x}"
@@ -4451,6 +4504,62 @@ mod tests {
             normal.y >= 0.89,
             "macro lighting must not turn unresolved relief into a near-horizontal face: {normal:?}"
         );
+    }
+
+    #[test]
+    fn every_child_parent_normal_bit_matches_the_parent_tiles_own_normal() {
+        let surface = |x: i32, z: i32| {
+            (
+                x.div_euclid(7) + z.div_euclid(11) + (x * x + z * z).rem_euclid(17),
+                Material::Stone,
+            )
+        };
+        for child_level in SurfaceLodLevel::ALL.into_iter().take(5) {
+            let parent_level = child_level.next_coarser().unwrap();
+            let child_coord = SurfaceTileCoord::new(child_level, 0, 0);
+            let parent_coord = SurfaceTileCoord::new(parent_level, 0, 0);
+            let child = voxels_world::generate_surface_tile_mesh_with(child_coord, surface);
+            let parent = voxels_world::generate_surface_tile_mesh_with(parent_coord, surface);
+            let child_normals = surface_macro_normals(&child);
+            let parent_normals = surface_macro_normals(&parent);
+            let child_stride = child_level.stride_voxels();
+            let parent_stride = parent_level.stride_voxels();
+            for z in 0..voxels_world::SURFACE_TILE_EDGE_CELLS {
+                for x in 0..voxels_world::SURFACE_TILE_EDGE_CELLS {
+                    let child_origin = [x * child_stride, z * child_stride];
+                    let child_quad = child
+                        .quads
+                        .iter()
+                        .position(|quad| {
+                            quad.face == 2
+                                && quad.origin[0] == child_origin[0]
+                                && quad.origin[2] == child_origin[1]
+                                && quad.extent == [child_stride as u16; 2]
+                        })
+                        .unwrap();
+                    let parent_origin = [
+                        child_origin[0].div_euclid(parent_stride) * parent_stride,
+                        child_origin[1].div_euclid(parent_stride) * parent_stride,
+                    ];
+                    let parent_quad = parent
+                        .quads
+                        .iter()
+                        .position(|quad| {
+                            quad.face == 2
+                                && quad.origin[0] == parent_origin[0]
+                                && quad.origin[2] == parent_origin[1]
+                                && quad.extent == [parent_stride as u16; 2]
+                        })
+                        .unwrap();
+                    let child_parent = (child_normals[child_quad] >> 14) & 0x3fff;
+                    let parent_own = parent_normals[parent_quad] & 0x3fff;
+                    assert_eq!(
+                        child_parent, parent_own,
+                        "{child_level:?} child ({x}, {z}) disagrees with {parent_level:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

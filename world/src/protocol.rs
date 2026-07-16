@@ -5,18 +5,19 @@
 //! product codecs. Rust enum layout and serde output are deliberately not part of the contract.
 
 use crate::{
-    ChunkCoord, ChunkSnapshot, Material, MeshingHalo, ModelIdentity, SourceDeviceRequirement,
-    SurfaceBounds, SurfaceLodLevel, SurfacePatch, SurfaceQuad, SurfaceRegion, SurfaceTileCoord,
-    SurfaceTileMesh, SurfaceTileSnapshot, VOXEL_SIZE_METRES, VoxelCoord, WaterPatch, WaterTileMesh,
-    WorldId, WorldManifest, WorldProductPriority, WorldSourceError, WorldSourceIdentity,
-    WorldSourceIdentityHash, WorldSourceKind, codec,
+    ChunkCoord, ChunkSnapshot, Material, MeshingHalo, ModelIdentity,
+    SURFACE_PARENT_SHADING_EDGE_SAMPLES, SURFACE_SHADING_EDGE_SAMPLES, SourceDeviceRequirement,
+    SurfaceBounds, SurfaceLodLevel, SurfacePatch, SurfaceQuad, SurfaceRegion, SurfaceShading,
+    SurfaceTileCoord, SurfaceTileMesh, SurfaceTileSnapshot, VOXEL_SIZE_METRES, VoxelCoord,
+    WaterPatch, WaterTileMesh, WorldId, WorldManifest, WorldProductPriority, WorldSourceError,
+    WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, codec,
 };
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 11;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -30,7 +31,7 @@ pub const EDIT_SESSION_NOT_CURRENT: &str = "edit session is no longer current";
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
-const SURFACE_SNAPSHOT_VERSION: u16 = 3;
+const SURFACE_SNAPSHOT_VERSION: u16 = 4;
 
 const KIND_OPEN_WORLD: u16 = 1;
 const KIND_WORLD_OPENED: u16 = 2;
@@ -2599,6 +2600,12 @@ fn encode_surface_mesh(output: &mut Vec<u8>, mesh: &SurfaceTileMesh) {
         }
         encode_surface_bounds(output, patch.bounds);
     }
+    for height in &mesh.shading.heights {
+        push_i32(output, *height);
+    }
+    for height in &mesh.shading.parent_heights {
+        push_i32(output, *height);
+    }
 }
 
 fn decode_surface_mesh(
@@ -2636,10 +2643,24 @@ fn decode_surface_mesh(
             bounds,
         });
     }
+    let heights = (0..SURFACE_SHADING_EDGE_SAMPLES.pow(2))
+        .map(|_| cursor.i32())
+        .collect::<Result<Vec<_>, _>>()?;
+    let parent_heights = if coord.level.next_coarser().is_some() {
+        (0..SURFACE_PARENT_SHADING_EDGE_SAMPLES.pow(2))
+            .map(|_| cursor.i32())
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
     let mesh = SurfaceTileMesh {
         coord,
         quads,
         patches,
+        shading: SurfaceShading {
+            heights,
+            parent_heights,
+        },
     };
     validate_surface_mesh(&mesh)?;
     Ok(mesh)
@@ -2791,6 +2812,18 @@ fn validate_surface_mesh(mesh: &SurfaceTileMesh) -> Result<(), ProtocolError> {
     let expected_patch_count = patches_per_edge * patches_per_edge;
     if mesh.quads.len() > MAX_SURFACE_QUADS_PER_TILE {
         return Err(ProtocolError::LimitExceeded("surface mesh geometry"));
+    }
+    let expected_parent_heights = if mesh.coord.level.next_coarser().is_some() {
+        SURFACE_PARENT_SHADING_EDGE_SAMPLES.pow(2)
+    } else {
+        0
+    };
+    if mesh.shading.heights.len() != SURFACE_SHADING_EDGE_SAMPLES.pow(2)
+        || mesh.shading.parent_heights.len() != expected_parent_heights
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "surface shading grid has an invalid shape",
+        ));
     }
     if mesh.patches.len() != expected_patch_count {
         return Err(ProtocolError::InvalidPayload(
@@ -3690,10 +3723,10 @@ mod tests {
             other => panic!("unexpected product: {other:?}"),
         };
         let mut encoded = encode_surface_snapshot(&snapshot).expect("encode");
-        encoded[4..6].copy_from_slice(&4_u16.to_le_bytes());
+        encoded[4..6].copy_from_slice(&5_u16.to_le_bytes());
         assert_eq!(
             decode_surface_snapshot(&encoded, coord, source.source_identity_hash()),
-            Err(ProtocolError::UnsupportedVersion(4))
+            Err(ProtocolError::UnsupportedVersion(5))
         );
 
         snapshot.terrain.patches[0].quad_range.end = u32::MAX;

@@ -17,7 +17,7 @@ use crate::{
     VoxelBlockSnapshot, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductBatchItem,
     WorldProductBatchResult, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
     WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash,
-    generate_surface_tile_mesh_with_features, generate_water_tile_mesh_with,
+    generate_surface_tile_mesh_with_features_and_shading, generate_water_tile_mesh_with,
     surface_tiles_affected_by_column,
 };
 use std::collections::BTreeMap;
@@ -458,6 +458,38 @@ impl HeightfieldWorldSource {
                 }
             }
         }
+        let parent_region = if coord.level.next_coarser().is_some() {
+            let parent_stride = stride
+                .checked_mul(2)
+                .ok_or(WorldSourceError::SourceCoverageUnavailable)?;
+            let parent_origin = [
+                origin_x
+                    .checked_sub(stride)
+                    .ok_or(WorldSourceError::SourceCoverageUnavailable)?,
+                origin_z
+                    .checked_sub(stride)
+                    .ok_or(WorldSourceError::SourceCoverageUnavailable)?,
+            ];
+            let region =
+                self.prepare_region(priority, parent_origin, [18; 2], parent_stride as u32)?;
+            for sample_z in 0..18 {
+                for sample_x in 0..18 {
+                    let x = i64::from(parent_origin[0])
+                        + i64::from(sample_x) * i64::from(parent_stride);
+                    let z = i64::from(parent_origin[1])
+                        + i64::from(sample_z) * i64::from(parent_stride);
+                    let Some((x, z)) = i32::try_from(x).ok().zip(i32::try_from(z).ok()) else {
+                        return Err(WorldSourceError::SourceCoverageUnavailable);
+                    };
+                    if region.column(x, z).is_none() {
+                        return Err(WorldSourceError::MalformedMacroBlock);
+                    }
+                }
+            }
+            Some(region)
+        } else {
+            None
+        };
         let aliases = self.collidable_edit_aliases(edits, coord, priority)?;
         let mut features = self.ecology_features_anchored_in(coord.voxel_bounds_xz(), priority)?;
         features.retain(|feature| {
@@ -465,7 +497,7 @@ impl HeightfieldWorldSource {
                 feature.material_at(coord).unwrap_or(Material::Air)
             })
         });
-        let terrain = generate_surface_tile_mesh_with_features(
+        let terrain = generate_surface_tile_mesh_with_features_and_shading(
             coord,
             |x, z| {
                 let sampled = self
@@ -476,6 +508,16 @@ impl HeightfieldWorldSource {
                     .copied()
                     .filter(|(height, _)| *height >= sampled.0)
                     .unwrap_or(sampled)
+            },
+            |x, z| {
+                self.edited_surface(&region, edits, x, z)
+                    .unwrap_or((i32::MIN, Material::Stone))
+            },
+            |x, z| {
+                parent_region
+                    .as_ref()
+                    .and_then(|region| self.edited_surface(region, edits, x, z).ok())
+                    .unwrap_or((i32::MIN, Material::Stone))
             },
             &features,
         );

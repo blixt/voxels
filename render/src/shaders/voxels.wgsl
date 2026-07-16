@@ -7,6 +7,7 @@ struct Frame {
   target_voxel_max: vec4<f32>,
   render_options: vec4<f32>,
   lod_options: vec4<f32>,
+  lod_boundary_centres: array<vec4<f32>, 3>,
   camera_forward: vec4<f32>,
   shadow_splits: vec4<f32>,
   shadow_texel_sizes: vec4<f32>,
@@ -65,11 +66,40 @@ fn corner_ao(packed: u32, corner: u32) -> f32 {
   return f32((packed >> (corner * 2u)) & 3u) / 3.0;
 }
 
-fn unpack_surface_macro_normal(packed: u32) -> vec3<f32> {
-  let x = f32((packed >> 8u) & 255u) * (2.0 / 255.0) - 1.0;
-  let z = f32((packed >> 16u) & 255u) * (2.0 / 255.0) - 1.0;
+fn unpack_surface_macro_normal(packed: u32, parent: bool) -> vec3<f32> {
+  let shift = select(vec2<u32>(0u, 7u), vec2<u32>(14u, 21u), parent);
+  let x = f32((packed >> shift.x) & 127u) * (2.0 / 127.0) - 1.0;
+  let z = f32((packed >> shift.y) & 127u) * (2.0 / 127.0) - 1.0;
   let y = sqrt(max(1.0 - x * x - z * z, 0.01));
   return normalize(vec3<f32>(x, y, z));
+}
+
+fn lod_boundary_center(boundary: u32) -> vec2<f32> {
+  let packed = frame.lod_boundary_centres[boundary / 2u];
+  return select(packed.xy, packed.zw, (boundary & 1u) != 0u);
+}
+
+fn surface_parent_normal_blend(world: vec3<f32>, material: u32) -> f32 {
+  if frame.lod_options.w < 0.5 || (material & 0x80000000u) == 0u {
+    return 0.0;
+  }
+  let level = (material >> 27u) & 7u;
+  if level >= 5u {
+    return 0.0;
+  }
+  let boundary = level + 1u;
+  var half_extent = 25.6;
+  switch boundary {
+    case 2u: { half_extent = 51.2; }
+    case 3u: { half_extent = 102.4; }
+    case 4u: { half_extent = 204.8; }
+    case 5u: { half_extent = 409.6; }
+    default: {}
+  }
+  let delta = abs(world.xz - lod_boundary_center(boundary));
+  let inside = half_extent - max(delta.x, delta.y);
+  let width = max(3.2, half_extent * 0.025);
+  return 1.0 - smoothstep(0.0, width, inside);
 }
 
 @vertex
@@ -96,16 +126,19 @@ fn vs_main(
     case 4u: { local = vec3<f32>(uv.x * extent.x, uv.y * extent.y, frame.viewport_voxel.z); normal.z = 1.0; }
     default: { local = vec3<f32>(uv.x * extent.x, uv.y * extent.y, 0.0); normal.z = -1.0; }
   }
-  if (ao & 0x01000000u) != 0u {
-    normal = unpack_surface_macro_normal(ao);
-  }
   let world = origin + local;
+  let surface_macro_normal = (ao & 0x10000000u) != 0u;
+  if surface_macro_normal {
+    let own_normal = unpack_surface_macro_normal(ao, false);
+    let parent_normal = unpack_surface_macro_normal(ao, true);
+    normal = normalize(mix(own_normal, parent_normal, surface_parent_normal_blend(world, material)));
+  }
   var out: VertexOut;
   out.position = frame.view_projection * vec4<f32>(world, 1.0);
   out.world = world;
   out.normal = normal;
   out.material = material;
-  out.ao = corner_ao(ao, corner);
+  out.ao = select(corner_ao(ao, corner), 1.0, surface_macro_normal);
   return out;
 }
 
