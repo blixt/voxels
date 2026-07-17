@@ -69,7 +69,11 @@ fn terrain_horizon_lighting(
   light_direction: vec3<f32>,
 ) -> vec2<f32> {
   let horizon_slopes = array<f32, 4>(0.0, 0.10510424, 0.2867454, 0.70020753);
-  let sector_accessibility = array<f32, 4>(1.0, 0.9890738, 0.923798, 0.6710101);
+  // A four-sector, two-bit profile is deliberately compact, but treating each representative
+  // angle as an infinitesimal cardinal ray makes all unrepresented diagonal sky look open. These
+  // values integrate a conservative angular interval around each code instead, restoring broad
+  // valley/ridge definition without screen-space samples or high-frequency crevice darkening.
+  let sector_accessibility = array<f32, 4>(1.0, 0.85, 0.60, 0.32);
   var slopes = array<f32, 4>();
   var sky_accessibility = vec2<f32>(0.0);
   for (var direction = 0u; direction < 4u; direction += 1u) {
@@ -101,7 +105,7 @@ fn terrain_horizon_lighting(
     light_slope,
   );
   let sky_visibility = mix(sky_accessibility.x, sky_accessibility.y, parent_blend);
-  return vec2<f32>(key_visibility, mix(1.0, sky_visibility, 0.72));
+  return vec2<f32>(key_visibility, mix(1.0, sky_visibility, 0.82));
 }
 
 fn lod_boundary_center(boundary: u32) -> vec2<f32> {

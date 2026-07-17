@@ -181,12 +181,14 @@ mod tests {
                 horizon + 4.0_f32.to_radians(),
                 elevation,
             );
-            let accessibility = decoded
-                .into_iter()
-                .map(|angle| angle.cos().powi(2))
+            let sector_accessibility = [1.0_f32, 0.85, 0.60, 0.32];
+            let accessibility = (0..4)
+                .map(|direction| {
+                    sector_accessibility[usize::from((profile >> (direction * 2)) & 3)]
+                })
                 .sum::<f32>()
                 * 0.25;
-            [key, 1.0 + (accessibility - 1.0) * 0.72]
+            [key, 1.0 + (accessibility - 1.0) * 0.82]
         }
 
         // East has a 35-degree ridge while the other three sectors are open. Parent matches own.
@@ -210,7 +212,7 @@ mod tests {
             "a high key light clears the same ridge: {high:?}"
         );
         assert!(
-            (0.90..1.0).contains(&east[1]),
+            (0.82..0.90).contains(&east[1]),
             "one blocked sector softly reduces sky access"
         );
 
