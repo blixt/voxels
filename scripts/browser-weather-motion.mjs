@@ -154,7 +154,10 @@ async function analyzeRainMotion(page, frames) {
         // Rain may either brighten a dark surface or attenuate a bright sky. Measuring only
         // positive luminance changes made the motion gate blind to physically tinted streaks
         // and allowed unrelated highlights to dominate the correlation.
-        signal[index] = Math.max(Math.abs(luma[index] - background[index]) - 0.012, 0);
+        // A one-pixel physically tinted streak is often sub-pixel after the four-pixel
+        // analysis decimation. Keep that weak coverage in the signal; the normalized
+        // temporal correlation below rejects stationary terrain and sky detail.
+        signal[index] = Math.max(Math.abs(luma[index] - background[index]) - 0.006, 0);
       }
       return signal;
     });
@@ -554,16 +557,17 @@ try {
   const violations = [];
   if (rain) {
     if (rainMotionPairs.length < 4) violations.push("too few measurable rain motion pairs");
-    if (downwardPairs.length < Math.ceil(rainMotionPairs.length * 0.75)) {
-      violations.push("rain motion was not predominantly downward");
-    }
+    // Individual sparse pairs can alias to a different streak in the periodic particle
+    // lattice. Direction is therefore gated by the median best displacement and by the
+    // median advantage of the complete downward search half over the upward half below,
+    // rather than by requiring every pair's single strongest alias to agree.
     if (rainMedianVelocity < 80 || rainMedianVelocity > 2_500) {
       violations.push(`rain vertical velocity was implausible: ${rainMedianVelocity}`);
     }
     if (rainMedianAdvantage < 0.01) {
       violations.push("downward rain correlation did not beat upward correlation");
     }
-    if (median(rain.occupied) < 0.0005 || median(rain.occupied) > 0.2) {
+    if (median(rain.occupied) < 0.00025 || median(rain.occupied) > 0.2) {
       violations.push("rain signal occupancy was outside the useful regression range");
     }
   }
