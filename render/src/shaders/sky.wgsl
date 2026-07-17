@@ -13,9 +13,13 @@ fn moon_surface_radiance(
   sun_direction: vec3<f32>,
   visibility: f32,
 ) -> vec3<f32> {
-  // A fixed orbital normal keeps the texture orientation celestial rather than camera-relative.
-  // It is perpendicular to the world's analytic solar orbit and avoids a basis flip at zenith.
-  let orbital_normal = normalize(vec3<f32>(-0.51, 0.0, 0.86));
+  // The equatorial north pole anchors lunar texture to the synchronized celestial sphere. It
+  // remains stable under camera rotation and transports continuously across either world pole.
+  let orbital_normal = normalize(vec3<f32>(
+    frame.equatorial_east.z,
+    frame.equatorial_up.z,
+    -frame.equatorial_north.z,
+  ));
   let moon_right = normalize(cross(orbital_normal, moon_direction));
   let moon_up = normalize(cross(moon_direction, moon_right));
   let apparent_radius = 0.01414;
@@ -36,16 +40,82 @@ fn moon_surface_radiance(
     moon_right * cell_local.x + moon_up * cell_local.y - moon_direction * cell_depth,
   );
 
-  // This is genuine sphere/sun illumination. The present orbit yields an almost-full moon, but
-  // decoupling the server-authored lunar orbit from the sun automatically produces phases.
+  // Genuine sphere/sun illumination makes phases emerge from the independent lunar orbit.
   let sunlight = max(dot(facet_normal, sun_direction), 0.0);
-  let phase_light = 0.055 + sunlight * 0.945;
+  let phase_light = 0.012 + sunlight * 0.988;
   let fine = atmosphere_hash21(cell + vec2<f32>(43.0, 17.0));
   let coarse = atmosphere_hash21(floor(texture_uv * 4.0) + vec2<f32>(113.0, 71.0));
   let maria = select(1.0, 0.68, coarse < 0.27);
   let crater = select(1.0, 0.72, fine < 0.16);
   let albedo = mix(0.78, 1.10, fine) * maria * crater;
   return vec3<f32>(0.48, 0.54, 0.68) * albedo * phase_light * coverage;
+}
+
+fn octahedral_encode(direction: vec3<f32>) -> vec2<f32> {
+  var encoded = direction.xy
+    / max(abs(direction.x) + abs(direction.y) + abs(direction.z), 0.00001);
+  if direction.z < 0.0 {
+    let signs = vec2<f32>(
+      select(-1.0, 1.0, encoded.x >= 0.0),
+      select(-1.0, 1.0, encoded.y >= 0.0),
+    );
+    encoded = (vec2<f32>(1.0) - abs(encoded.yx)) * signs;
+  }
+  return encoded * 0.5 + 0.5;
+}
+
+fn celestial_star_radiance(ray: vec3<f32>, moon_disc: f32) -> vec3<f32> {
+  let visibility = smoothstep(0.01, 0.20, ray.y)
+    * frame.fog_exposure.w
+    * (1.0 - moon_disc);
+  if visibility <= 0.001 {
+    return vec3<f32>(0.0);
+  }
+  // Convert the local world ray into one shared equatorial catalog. The basis changes with
+  // synchronized sidereal time and observer location; the catalog itself never follows camera
+  // translation or orientation.
+  let celestial_ray = normalize(
+    frame.equatorial_east.xyz * ray.x
+      + frame.equatorial_up.xyz * ray.y
+      - frame.equatorial_north.xyz * ray.z,
+  );
+  let grid = 640.0;
+  let coordinates = octahedral_encode(celestial_ray) * grid;
+  let cell = floor(coordinates);
+  let catalog_seed = frame.equatorial_north.w;
+  let seeded_cell = cell + vec2<f32>(
+    fract(catalog_seed * 0.0000137) * 3072.0,
+    fract(catalog_seed * 0.0000211) * 3072.0,
+  );
+  let identity = atmosphere_hash21(seeded_cell);
+  // Fewer than one percent of catalog cells contain a star. Reject the others before evaluating
+  // sub-cell placement, color, magnitude, and twinkle hashes.
+  if identity <= 0.9935 {
+    return vec3<f32>(0.0);
+  }
+  let offset = vec2<f32>(
+    atmosphere_hash21(seeded_cell + vec2<f32>(19.0, 47.0)),
+    atmosphere_hash21(seeded_cell + vec2<f32>(73.0, 11.0)),
+  );
+  let distance_to_star = length(fract(coordinates) - offset);
+  let point = 1.0 - smoothstep(0.035, 0.145, distance_to_star);
+  let candidate = smoothstep(0.9935, 0.9997, identity);
+  let magnitude = mix(
+    0.28,
+    1.0,
+    atmosphere_hash21(seeded_cell + vec2<f32>(131.0, 89.0)),
+  );
+  let twinkle_identity = atmosphere_hash21(seeded_cell + vec2<f32>(211.0, 157.0));
+  let twinkle = 0.88 + 0.12 * sin(
+    6.2831853 * (frame.equatorial_east.w * mix(0.72, 1.37, twinkle_identity)
+      + twinkle_identity),
+  );
+  let color = mix(
+    vec3<f32>(0.48, 0.62, 1.0),
+    vec3<f32>(1.0, 0.82, 0.58),
+    identity,
+  );
+  return color * point * candidate * magnitude * twinkle * visibility * 1.8;
 }
 
 @fragment
@@ -85,7 +155,8 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let sun_glow = pow(sun_amount, 96.0) * 0.16 + pow(sun_amount, 12.0) * 0.022;
   let moon_amount = max(dot(ray, moon_direction), 0.0);
   let moon_disc = smoothstep(0.99990, 0.99998, moon_amount) * moon_visible;
-  let moon_glow = pow(moon_amount, 320.0) * moon_visible * 0.018;
+  let moon_glow = pow(moon_amount, 320.0)
+    * moon_visible * frame.equatorial_up.w * 0.018;
   let moon_surface = moon_surface_radiance(ray, moon_direction, sun_direction, moon_visible);
   let below_horizon = mix(frame.ground_atmosphere.rgb, base, smoothstep(0.0, 0.12, elevation));
   var color = below_horizon
@@ -93,15 +164,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     + vec3<f32>(5.8, 4.6, 3.4) * (sun_disc * 1.15 + sun_glow * sun_visible)
     + moon_surface
     + vec3<f32>(0.42, 0.50, 0.68) * moon_glow;
-  let star_coordinates = ray.xz / max(ray.y + 1.08, 0.08);
-  let star_cell = floor(star_coordinates * 420.0);
-  let star_seed = atmosphere_hash21(star_cell);
-  let star = smoothstep(0.9968, 0.9995, star_seed)
-    * mix(0.35, 1.0, atmosphere_hash21(star_cell + vec2<f32>(19.0, 47.0)))
-    * smoothstep(0.04, 0.32, ray.y)
-    * frame.fog_exposure.w
-    * (1.0 - moon_disc);
-  color += mix(vec3<f32>(0.48, 0.62, 1.0), vec3<f32>(1.0, 0.82, 0.58), star_seed) * star * 1.8;
+  color += celestial_star_radiance(ray, moon_disc);
   let interface_distance = max(
     (frame.medium.w - frame.camera_time.y) / max(ray.y, 0.05),
     0.0,

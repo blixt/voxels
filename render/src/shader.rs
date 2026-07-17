@@ -62,6 +62,9 @@ mod tests {
                 "key_light_radiance",
                 "sun_direction",
                 "moon_direction",
+                "equatorial_east",
+                "equatorial_up",
+                "equatorial_north",
                 "environment_time",
                 "atmosphere_motion",
                 "sky_horizon",
@@ -296,9 +299,25 @@ mod tests {
         assert!(sky.contains("let cell_count = 8.0"));
         assert!(sky.contains("let facet_normal = normalize("));
         assert!(sky.contains("max(dot(facet_normal, sun_direction), 0.0)"));
-        assert!(sky.contains("let phase_light = 0.055 + sunlight * 0.945"));
+        assert!(sky.contains("let phase_light = 0.012 + sunlight * 0.988"));
+        assert!(sky.contains("frame.equatorial_up.w"));
         assert!(sky.contains("* (1.0 - moon_disc)"));
         assert!(!sky.contains("moon_disc * 0.82"));
+    }
+
+    #[test]
+    fn stars_use_the_synchronized_equatorial_catalog_and_bounded_twinkle() {
+        let sky = include_str!("shaders/sky.wgsl");
+        assert!(sky.contains("fn octahedral_encode("));
+        assert!(sky.contains("fn celestial_star_radiance("));
+        assert!(sky.contains("frame.equatorial_east.xyz * ray.x"));
+        assert!(sky.contains("- frame.equatorial_north.xyz * ray.z"));
+        assert!(sky.contains("frame.equatorial_east.w * mix(0.72, 1.37"));
+        assert!(sky.contains("let twinkle = 0.88 + 0.12 * sin("));
+        assert!(sky.contains("if visibility <= 0.001"));
+        assert!(sky.contains("if identity <= 0.9935"));
+        assert!(!sky.contains("ray.xz / max(ray.y + 1.08"));
+        assert!(!sky.contains("star_coordinates = ray.xz"));
     }
 
     #[test]

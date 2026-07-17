@@ -252,7 +252,7 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 26.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 27.0;
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
     #[derive(Clone, Copy, Debug)]
     struct EngineConfig {
@@ -2424,6 +2424,15 @@ mod web {
                     render.lod_boundary_centres[5][0] as f32,
                     render.lod_boundary_centres[5][1] as f32,
                     render.day_fraction,
+                    render.local_solar_day_fraction,
+                    render.year_fraction,
+                    render.moon_orbit_fraction,
+                    render.twinkle_phase,
+                    render.latitude_degrees,
+                    render.longitude_degrees,
+                    render.local_sidereal_angle_radians,
+                    render.moon_illuminated_fraction,
+                    render.celestial_revision as f32,
                     render.sun_direction[0],
                     render.sun_direction[1],
                     render.sun_direction[2],
@@ -2932,6 +2941,15 @@ mod tests {
         assert!(
             (first.year_fraction - (82.5_f64 / 365.242_2).rem_euclid(1.0) as f32).abs() < 1.0e-6
         );
+        assert!(
+            (first.moon_orbit_fraction
+                - (82.5_f64 / 27.321_661 + 0.17).rem_euclid(1.0) as f32)
+                .abs()
+                < 1.0e-6
+        );
+        assert!((first.twinkle_phase - (82.5_f64 * 37.0).rem_euclid(1.0) as f32).abs() < 1.0e-6);
+        assert_eq!(first.celestial_seed, 0x57a2_5eed);
+        assert_eq!(first.celestial_revision, 2);
         assert!((first.weather_fraction - 0.225).abs() < 1.0e-6);
         assert_eq!(first.cloud_offset_metres, [110.0, 1_279_970.0]);
     }

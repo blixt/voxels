@@ -2,7 +2,7 @@
 
 use glam::Vec3;
 use voxels_core::EnclosureSample;
-use voxels_world::{AtmosphereSample, SurfaceRegion};
+use voxels_world::{AtmosphereSample, CelestialModel, CelestialObservation, SurfaceRegion};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -66,6 +66,20 @@ impl DaylightPhase {
             Self::GoldenHour
         } else {
             Self::BlueHour
+        }
+    }
+
+    pub fn for_solar_position(solar_elevation: f32, solar_hour_angle_radians: f64) -> Self {
+        if solar_elevation < -0.12 {
+            Self::Night
+        } else if solar_hour_angle_radians < 0.0 && solar_elevation < 0.22 {
+            Self::Dawn
+        } else if solar_hour_angle_radians >= 0.0 && solar_elevation < -0.02 {
+            Self::BlueHour
+        } else if solar_hour_angle_radians >= 0.0 && solar_elevation < 0.30 {
+            Self::GoldenHour
+        } else {
+            Self::ClearDay
         }
     }
 }
@@ -430,6 +444,22 @@ impl WorldEnvironmentState {
             coldness,
         )
     }
+
+    pub fn celestial_observation(self, world_xz_metres: [f64; 2]) -> CelestialObservation {
+        let state = self.sanitized();
+        CelestialModel {
+            planet_circumference_metres: f64::from(state.planet_circumference_metres),
+            axial_tilt_radians: f64::from(state.axial_tilt_radians),
+            moon_orbit_inclination_radians: f64::from(state.moon_orbit_inclination_radians),
+        }
+        .observe(
+            world_xz_metres,
+            f64::from(state.day_fraction),
+            f64::from(state.year_fraction),
+            f64::from(state.moon_orbit_fraction),
+        )
+        .expect("sanitized celestial state and finite camera coordinates")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -495,9 +525,10 @@ fn smoothstep(start: f32, end: f32, value: f32) -> f32 {
 
 impl Default for OutdoorEnvironment {
     fn default() -> Self {
-        Self::for_world_time(
+        let state = WorldEnvironmentState::default();
+        Self::for_celestial(
             AtmosphereSample::default(),
-            DaylightPhase::GoldenHour.anchor_day_fraction(),
+            state.celestial_observation([0.0, 0.0]),
             WeatherState::for_cycle(0.08, 0.24, 900.0, 0, 0.32),
         )
     }
@@ -531,34 +562,32 @@ impl OutdoorEnvironment {
     }
 
     pub fn for_atmosphere(sample: AtmosphereSample, phase: DaylightPhase) -> Self {
-        Self::for_world_time(
+        let state = WorldEnvironmentState {
+            day_fraction: phase.anchor_day_fraction(),
+            ..WorldEnvironmentState::default()
+        };
+        Self::for_celestial(
             sample,
-            phase.anchor_day_fraction(),
+            state.celestial_observation([0.0, 0.0]),
             WeatherState::for_cycle(0.08, sample.cloudiness, 900.0, 0, sample.coldness),
         )
     }
 
-    pub fn for_world_time(
+    pub fn for_celestial(
         sample: AtmosphereSample,
-        day_fraction: f32,
+        celestial: CelestialObservation,
         weather: WeatherState,
     ) -> Self {
-        let day_fraction = if day_fraction.is_finite() {
-            day_fraction.rem_euclid(1.0)
-        } else {
-            0.5
-        };
-        let orbit = std::f32::consts::TAU * (day_fraction - 0.25);
-        // A small northward declination keeps noon shadows legible instead of putting the sun
-        // directly overhead, while the analytic orbit remains continuous through midnight.
-        let sun_direction =
-            Vec3::new(orbit.cos() * 0.86, orbit.sin(), orbit.cos() * 0.51 + 0.22).normalize();
-        let moon_direction = (-sun_direction + Vec3::new(0.10, 0.0, -0.06)).normalize();
+        let day_fraction = celestial.local_solar_day_fraction as f32;
+        let sun_direction = Vec3::from_array(celestial.sun_direction);
+        let moon_direction = Vec3::from_array(celestial.moon_direction);
         let solar_elevation = sun_direction.y;
         let daylight = smoothstep(-0.10, 0.16, solar_elevation);
         let direct_sun = smoothstep(-0.015, 0.10, solar_elevation);
         let night = 1.0 - smoothstep(-0.20, -0.02, solar_elevation);
-        let moon_visibility = night * smoothstep(0.03, 0.20, moon_direction.y);
+        let moon_horizon_visibility = smoothstep(-0.01, 0.08, moon_direction.y);
+        let moon_day_contrast = scalar_lerp(1.0, 0.20, daylight);
+        let moon_visibility = moon_horizon_visibility * moon_day_contrast;
         let horizon_band = 1.0 - smoothstep(0.02, 0.42, solar_elevation.abs());
         let sunset = smoothstep(0.5, 0.8, day_fraction);
         let warm_color = Vec3::new(6.4, 2.65, 1.15).lerp(Vec3::new(6.8, 3.45, 1.55), sunset);
@@ -567,7 +596,8 @@ impl OutdoorEnvironment {
             smoothstep(0.08, 0.72, solar_elevation),
         );
         let sun_radiance = daylight_color * direct_sun;
-        let moon_radiance = Vec3::new(0.10, 0.14, 0.24) * moon_visibility;
+        let moon_radiance =
+            Vec3::new(0.10, 0.14, 0.24) * moon_visibility * celestial.moon_illuminated_fraction;
         let (key_light_direction, key_light_radiance, shadow_strength) = if direct_sun > 0.025 {
             (
                 sun_direction,
@@ -817,6 +847,19 @@ pub fn pbr_neutral(color_in: Vec3) -> Vec3 {
 mod tests {
     use super::*;
 
+    fn equatorial_environment(
+        sample: AtmosphereSample,
+        day_fraction: f32,
+        weather: WeatherState,
+    ) -> OutdoorEnvironment {
+        let state = WorldEnvironmentState {
+            day_fraction,
+            year_fraction: 0.0,
+            ..WorldEnvironmentState::default()
+        };
+        OutdoorEnvironment::for_celestial(sample, state.celestial_observation([0.0, 0.0]), weather)
+    }
+
     #[test]
     fn default_daylight_is_finite_normalized_and_positive() {
         let environment = OutdoorEnvironment::default().sanitized();
@@ -963,9 +1006,9 @@ mod tests {
     fn full_day_orbit_is_continuous_periodic_and_has_a_real_night() {
         let sample = AtmosphereSample::default();
         let weather = WeatherState::for_cycle(0.08, 0.4, 900.0, 7, sample.coldness);
-        let midnight = OutdoorEnvironment::for_world_time(sample, 0.0, weather);
-        let wrapped = OutdoorEnvironment::for_world_time(sample, 1.0, weather);
-        let noon = OutdoorEnvironment::for_world_time(sample, 0.5, weather);
+        let midnight = equatorial_environment(sample, 0.0, weather);
+        let wrapped = equatorial_environment(sample, 1.0, weather);
+        let noon = equatorial_environment(sample, 0.5, weather);
         assert!(midnight.sun_direction.y < 0.0);
         assert!(noon.sun_direction.y > 0.9);
         assert!(midnight.star_visibility > 0.5);
@@ -973,14 +1016,13 @@ mod tests {
         assert!(midnight.sun_direction.dot(wrapped.sun_direction) > 0.999_999);
         assert!((midnight.sky_zenith - wrapped.sky_zenith).length() < 1.0e-5);
 
-        let before = OutdoorEnvironment::for_world_time(sample, 0.9999, weather);
-        let after = OutdoorEnvironment::for_world_time(sample, 0.0001, weather);
+        let before = equatorial_environment(sample, 0.9999, weather);
+        let after = equatorial_environment(sample, 0.0001, weather);
         assert!(before.sun_direction.dot(after.sun_direction) > 0.999_99);
         assert!((before.sky_horizon - after.sky_horizon).length() < 0.002);
 
         for minute in 0..1_440 {
-            let environment =
-                OutdoorEnvironment::for_world_time(sample, minute as f32 / 1_440.0, weather);
+            let environment = equatorial_environment(sample, minute as f32 / 1_440.0, weather);
             assert!(environment.key_light_direction.is_finite());
             assert!((environment.key_light_direction.length() - 1.0).abs() < 1.0e-5);
             assert!(environment.key_light_radiance.min_element() >= 0.0);
@@ -1022,6 +1064,7 @@ mod tests {
             cloud_top_metres: 1_800.0,
             weather_seed: 77,
             weather_revision: 4,
+            ..WorldEnvironmentState::default()
         };
         let effective = DebugEnvironmentOverride {
             day_fraction: Some(DaylightPhase::GoldenHour.anchor_day_fraction()),
@@ -1050,12 +1093,12 @@ mod tests {
     #[test]
     fn severe_weather_softens_sunlight_and_thickens_air_without_changing_geometry_inputs() {
         let sample = AtmosphereSample::default();
-        let clear = OutdoorEnvironment::for_world_time(
+        let clear = equatorial_environment(
             sample,
             0.5,
             WeatherState::for_cycle(0.08, 0.24, 0.0, 7, sample.coldness),
         );
-        let storm = OutdoorEnvironment::for_world_time(
+        let storm = equatorial_environment(
             sample,
             0.5,
             WeatherState::for_cycle(0.68, 0.24, 0.0, 7, sample.coldness),

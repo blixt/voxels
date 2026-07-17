@@ -26,7 +26,16 @@ export async function prepareBrowserWorldFixture({
   cascadedShadows,
   screenSpaceAmbientOcclusion,
   dayLengthSeconds,
+  worldDayNumberAtUnixEpoch,
   dayFractionAtUnixEpoch,
+  daysPerYear,
+  moonSiderealOrbitDays,
+  moonOrbitPhaseAtWorldEpoch,
+  planetCircumferenceMetres,
+  axialTiltDegrees,
+  moonOrbitInclinationDegrees,
+  celestialSeed,
+  celestialRevision,
   weatherCycleSeconds,
   weatherFractionAtUnixEpoch,
   cloudVelocityMetresPerSecond,
@@ -63,12 +72,72 @@ export async function prepareBrowserWorldFixture({
     throw new Error("browser fixture dayLengthSeconds must be finite and in 0..=86400");
   }
   if (
+    worldDayNumberAtUnixEpoch !== undefined &&
+    (!Number.isSafeInteger(worldDayNumberAtUnixEpoch) ||
+      Math.abs(worldDayNumberAtUnixEpoch) > 1_000_000_000)
+  ) {
+    throw new Error("browser fixture world day number must be a safe integer in +/-1e9");
+  }
+  if (
     dayFractionAtUnixEpoch !== undefined &&
     (!Number.isFinite(dayFractionAtUnixEpoch) ||
       dayFractionAtUnixEpoch < 0 ||
       dayFractionAtUnixEpoch >= 1)
   ) {
     throw new Error("browser fixture dayFractionAtUnixEpoch must be finite and in 0..<1");
+  }
+  if (
+    daysPerYear !== undefined &&
+    (!Number.isFinite(daysPerYear) || daysPerYear < 4 || daysPerYear > 4_096)
+  ) {
+    throw new Error("browser fixture daysPerYear must be finite and in 4..=4096");
+  }
+  const resolvedDaysPerYear = daysPerYear ?? 365.2422;
+  if (
+    moonSiderealOrbitDays !== undefined &&
+    (!Number.isFinite(moonSiderealOrbitDays) ||
+      moonSiderealOrbitDays < 0.25 ||
+      moonSiderealOrbitDays > resolvedDaysPerYear)
+  ) {
+    throw new Error("browser fixture lunar orbit must be in 0.25..=daysPerYear");
+  }
+  if (
+    moonOrbitPhaseAtWorldEpoch !== undefined &&
+    (!Number.isFinite(moonOrbitPhaseAtWorldEpoch) ||
+      moonOrbitPhaseAtWorldEpoch < 0 ||
+      moonOrbitPhaseAtWorldEpoch >= 1)
+  ) {
+    throw new Error("browser fixture lunar epoch phase must be finite and in 0..<1");
+  }
+  if (
+    planetCircumferenceMetres !== undefined &&
+    (!Number.isFinite(planetCircumferenceMetres) ||
+      planetCircumferenceMetres < 100_000 ||
+      planetCircumferenceMetres > 100_000_000)
+  ) {
+    throw new Error("browser fixture planet circumference must be in 100km..=100000km");
+  }
+  if (
+    axialTiltDegrees !== undefined &&
+    (!Number.isFinite(axialTiltDegrees) || axialTiltDegrees < 0 || axialTiltDegrees > 45)
+  ) {
+    throw new Error("browser fixture axial tilt must be finite and in 0..=45 degrees");
+  }
+  if (
+    moonOrbitInclinationDegrees !== undefined &&
+    (!Number.isFinite(moonOrbitInclinationDegrees) ||
+      moonOrbitInclinationDegrees < 0 ||
+      moonOrbitInclinationDegrees > 30)
+  ) {
+    throw new Error("browser fixture lunar inclination must be finite and in 0..=30 degrees");
+  }
+  for (const [name, value] of [
+    ["celestialSeed", celestialSeed],
+    ["celestialRevision", celestialRevision],
+  ]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
+      throw new Error(`browser fixture ${name} must be a positive safe integer`);
+    }
   }
   if (
     cloudVelocityMetresPerSecond !== undefined &&
@@ -141,9 +210,36 @@ export async function prepareBrowserWorldFixture({
             `day_length_seconds = ${dayLengthSeconds ?? 1_200}`,
           )
           .replace(
+            /^world_day_number_at_unix_epoch = .*$/m,
+            `world_day_number_at_unix_epoch = ${worldDayNumberAtUnixEpoch ?? 0}`,
+          )
+          .replace(
             /^day_fraction_at_unix_epoch = .*$/m,
             `day_fraction_at_unix_epoch = ${dayFractionAtUnixEpoch ?? 0.72}`,
           )
+          .replace(/^days_per_year = .*$/m, `days_per_year = ${resolvedDaysPerYear}`)
+          .replace(
+            /^moon_sidereal_orbit_days = .*$/m,
+            `moon_sidereal_orbit_days = ${moonSiderealOrbitDays ?? 27.321661}`,
+          )
+          .replace(
+            /^moon_orbit_phase_at_world_epoch = .*$/m,
+            `moon_orbit_phase_at_world_epoch = ${moonOrbitPhaseAtWorldEpoch ?? 0}`,
+          )
+          .replace(
+            /^planet_circumference_metres = .*$/m,
+            `planet_circumference_metres = ${planetCircumferenceMetres ?? 40_075_016}`,
+          )
+          .replace(
+            /^axial_tilt_degrees = .*$/m,
+            `axial_tilt_degrees = ${axialTiltDegrees ?? 23.4393}`,
+          )
+          .replace(
+            /^moon_orbit_inclination_degrees = .*$/m,
+            `moon_orbit_inclination_degrees = ${moonOrbitInclinationDegrees ?? 5.145}`,
+          )
+          .replace(/^celestial_seed = .*$/m, `celestial_seed = ${celestialSeed ?? 1_470_258_925}`)
+          .replace(/^celestial_revision = .*$/m, `celestial_revision = ${celestialRevision ?? 1}`)
           .replace(
             /^weather_cycle_seconds = .*$/m,
             `weather_cycle_seconds = ${weatherCycleSeconds ?? 900}`,
@@ -204,7 +300,16 @@ export async function prepareBrowserWorldFixture({
       cascadedShadows: cascadedShadows ?? true,
       screenSpaceAmbientOcclusion: screenSpaceAmbientOcclusion ?? true,
       dayLengthSeconds: dayLengthSeconds ?? 1_200,
+      worldDayNumberAtUnixEpoch: worldDayNumberAtUnixEpoch ?? 0,
       dayFractionAtUnixEpoch: dayFractionAtUnixEpoch ?? 0.72,
+      daysPerYear: resolvedDaysPerYear,
+      moonSiderealOrbitDays: moonSiderealOrbitDays ?? 27.321661,
+      moonOrbitPhaseAtWorldEpoch: moonOrbitPhaseAtWorldEpoch ?? 0,
+      planetCircumferenceMetres: planetCircumferenceMetres ?? 40_075_016,
+      axialTiltDegrees: axialTiltDegrees ?? 23.4393,
+      moonOrbitInclinationDegrees: moonOrbitInclinationDegrees ?? 5.145,
+      celestialSeed: celestialSeed ?? 1_470_258_925,
+      celestialRevision: celestialRevision ?? 1,
       weatherCycleSeconds: weatherCycleSeconds ?? 900,
       weatherFractionAtUnixEpoch: weatherFractionAtUnixEpoch ?? 0.08,
       cloudVelocityMetresPerSecond: cloudVelocityMetresPerSecond ?? [5.5, 1.6],

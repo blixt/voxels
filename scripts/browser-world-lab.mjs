@@ -65,7 +65,9 @@ try {
     prefix: "voxels-world-lab-",
     source: "procedural-v16",
     dayLengthSeconds: 0,
+    worldDayNumberAtUnixEpoch: 0,
     dayFractionAtUnixEpoch: 0.5,
+    moonOrbitPhaseAtWorldEpoch: 0.5,
     weatherCycleSeconds: 0,
     weatherFractionAtUnixEpoch: 0.08,
   });
@@ -87,6 +89,25 @@ try {
   });
   await page.goto(`http://127.0.0.1:${port}`, { waitUntil: "domcontentloaded" });
   const settled = await waitForEngine(page);
+  const expectedYearFraction = 0.5 / fixture.daysPerYear;
+  const expectedMoonOrbitFraction =
+    (0.5 / fixture.moonSiderealOrbitDays + fixture.moonOrbitPhaseAtWorldEpoch) % 1;
+  const expectedTwinklePhase = (0.5 * 37) % 1;
+  if (
+    !near(settled[SNAPSHOT.localSolarDayFraction], 0.5) ||
+    !near(settled[SNAPSHOT.yearFraction], expectedYearFraction, 0.00001) ||
+    !near(settled[SNAPSHOT.moonOrbitFraction], expectedMoonOrbitFraction, 0.00001) ||
+    !near(settled[SNAPSHOT.twinklePhase], expectedTwinklePhase, 0.00001) ||
+    !near(settled[SNAPSHOT.latitudeDegrees], 0, 0.01) ||
+    !near(settled[SNAPSHOT.longitudeDegrees], 0, 0.01) ||
+    Math.abs(settled[SNAPSHOT.localSiderealAngleRadians]) > 0.02 ||
+    settled[SNAPSHOT.moonIlluminatedFraction] < 0.99 ||
+    settled[SNAPSHOT.celestialRevision] !== 1 ||
+    settled[SNAPSHOT.sunDirectionY] < 0.999 ||
+    settled[SNAPSHOT.moonDirectionY] > -0.99
+  ) {
+    throw new Error(`synchronized celestial anchor is incorrect: ${JSON.stringify(settled)}`);
+  }
 
   await page.keyboard.press("F3");
   await page.waitForTimeout(250);
@@ -99,7 +120,11 @@ try {
   const overridden = await waitForSnapshot(
     page,
     (snapshot) =>
-      near(snapshot[SNAPSHOT.dayFraction], 0.72) && near(snapshot[SNAPSHOT.weatherFraction], 0.68),
+      near(snapshot[SNAPSHOT.dayFraction], 0.72) &&
+      near(snapshot[SNAPSHOT.localSolarDayFraction], 0.72) &&
+      snapshot[SNAPSHOT.sunDirectionX] < -0.95 &&
+      near(snapshot[SNAPSHOT.twinklePhase], expectedTwinklePhase, 0.00001) &&
+      near(snapshot[SNAPSHOT.weatherFraction], 0.68),
     "time/weather override did not reach the renderer",
   );
 
@@ -146,11 +171,29 @@ try {
     browser: browser.version(),
     settled: {
       dayFraction: settled[SNAPSHOT.dayFraction],
+      localSolarDayFraction: settled[SNAPSHOT.localSolarDayFraction],
+      yearFraction: settled[SNAPSHOT.yearFraction],
+      moonOrbitFraction: settled[SNAPSHOT.moonOrbitFraction],
+      moonIlluminatedFraction: settled[SNAPSHOT.moonIlluminatedFraction],
+      latitudeDegrees: settled[SNAPSHOT.latitudeDegrees],
+      longitudeDegrees: settled[SNAPSHOT.longitudeDegrees],
+      sunDirection: [
+        settled[SNAPSHOT.sunDirectionX],
+        settled[SNAPSHOT.sunDirectionY],
+        settled[SNAPSHOT.sunDirectionZ],
+      ],
+      moonDirection: [
+        settled[SNAPSHOT.moonDirectionX],
+        settled[SNAPSHOT.moonDirectionY],
+        settled[SNAPSHOT.moonDirectionZ],
+      ],
       weatherFraction: settled[SNAPSHOT.weatherFraction],
       residentChunks: settled[SNAPSHOT.residentChunks],
     },
     overridden: {
       dayFraction: overridden[SNAPSHOT.dayFraction],
+      localSolarDayFraction: overridden[SNAPSHOT.localSolarDayFraction],
+      sunDirectionX: overridden[SNAPSHOT.sunDirectionX],
       weatherFraction: overridden[SNAPSHOT.weatherFraction],
     },
     creativeFlight: {

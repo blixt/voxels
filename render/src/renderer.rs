@@ -23,9 +23,9 @@ use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample, RemoteAvatarPose};
 use voxels_world::protocol::DigVolume;
 use voxels_world::{
-    AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, Material, MeshedChunk, Quad, RenderLayer,
-    SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId, SurfaceRegion,
-    SurfaceTileCoord, SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh,
+    AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, Material, MeshedChunk,
+    Quad, RenderLayer, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId,
+    SurfaceRegion, SurfaceTileCoord, SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -204,6 +204,9 @@ struct FrameUniform {
     key_light_radiance: [f32; 4],
     sun_direction: [f32; 4],
     moon_direction: [f32; 4],
+    equatorial_east: [f32; 4],
+    equatorial_up: [f32; 4],
+    equatorial_north: [f32; 4],
     environment_time: [f32; 4],
     atmosphere_motion: [f32; 4],
     sky_horizon: [f32; 4],
@@ -216,11 +219,11 @@ struct FrameUniform {
     interior: [f32; 4],
 }
 
-const _: () = assert!(size_of::<FrameUniform>() == 736);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, weather) == 672);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, cloud_layer) == 688);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 704);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 720);
+const _: () = assert!(size_of::<FrameUniform>() == 784);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, weather) == 720);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, cloud_layer) == 736);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 752);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 768);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
@@ -608,9 +611,20 @@ pub struct RenderDiagnostics {
     pub screen_space_ambient_occlusion: bool,
     pub material_detail: bool,
     pub daylight_phase: u8,
+    /// Prime-meridian fraction authored by the server clock.
     pub day_fraction: f32,
+    /// Observer-local apparent solar fraction after longitude and pole transport.
+    pub local_solar_day_fraction: f32,
+    pub year_fraction: f32,
+    pub moon_orbit_fraction: f32,
+    pub twinkle_phase: f32,
+    pub latitude_degrees: f32,
+    pub longitude_degrees: f32,
+    pub local_sidereal_angle_radians: f32,
     pub sun_direction: [f32; 3],
     pub moon_direction: [f32; 3],
+    pub moon_illuminated_fraction: f32,
+    pub celestial_revision: u64,
     pub shadow_strength: f32,
     pub surface_region: u8,
     pub cloud_coverage: f32,
@@ -993,6 +1007,8 @@ pub struct Renderer {
     server_world_environment: WorldEnvironmentState,
     debug_environment_override: DebugEnvironmentOverride,
     world_environment: WorldEnvironmentState,
+    observer_world_xz_metres: [f64; 2],
+    celestial_observation: CelestialObservation,
     atmosphere_sample: AtmosphereSample,
     surface_region: SurfaceRegion,
     daylight_phase: DaylightPhase,
@@ -1046,6 +1062,7 @@ struct FrameState {
     options: RenderOptions,
     environment: OutdoorEnvironment,
     world_environment: WorldEnvironmentState,
+    celestial_observation: CelestialObservation,
     underwater_blend: f32,
     interior: InteriorEnvironment,
 }
@@ -1322,13 +1339,22 @@ impl Renderer {
         };
         let surface_region = SurfaceRegion::VerdantForest;
         let world_environment = WorldEnvironmentState::default();
-        let daylight_phase = DaylightPhase::for_day_fraction(world_environment.day_fraction);
-        let environment = OutdoorEnvironment::for_world_time(
+        let initial_camera = CameraState::default();
+        let observer_world_xz_metres = [
+            f64::from(initial_camera.position.x),
+            f64::from(initial_camera.position.z),
+        ];
+        let celestial_observation =
+            world_environment.celestial_observation(observer_world_xz_metres);
+        let daylight_phase = DaylightPhase::for_solar_position(
+            celestial_observation.sun_direction[1],
+            celestial_observation.solar_hour_angle_radians,
+        );
+        let environment = OutdoorEnvironment::for_celestial(
             atmosphere_sample,
-            world_environment.day_fraction,
+            celestial_observation,
             world_environment.weather(atmosphere_sample.coldness),
         );
-        let initial_camera = CameraState::default();
         let shadow_gpu = ShadowGpu::new(
             &device,
             &initial_camera,
@@ -1351,6 +1377,7 @@ impl Renderer {
                 options,
                 environment,
                 world_environment,
+                celestial_observation,
                 underwater_blend: 0.0,
                 interior: InteriorEnvironment::default(),
             },
@@ -1697,7 +1724,7 @@ impl Renderer {
         let mut ui = MissionControlUi::new(runtime_config.mission_control);
         ui.set_environment_status(daylight_phase.label(), surface_region_label(surface_region));
         ui.set_world_clock(
-            world_environment.day_fraction,
+            celestial_observation.local_solar_day_fraction as f32,
             world_environment
                 .weather(atmosphere_sample.coldness)
                 .kind
@@ -1759,6 +1786,8 @@ impl Renderer {
             server_world_environment: world_environment,
             debug_environment_override: DebugEnvironmentOverride::default(),
             world_environment,
+            observer_world_xz_metres,
+            celestial_observation,
             atmosphere_sample,
             surface_region,
             daylight_phase,
@@ -1849,12 +1878,13 @@ impl Renderer {
         }
         self.atmosphere_sample = sample;
         self.surface_region = region;
-        self.refresh_effective_environment();
     }
 
     pub fn set_world_environment(&mut self, state: WorldEnvironmentState) {
         self.server_world_environment = state.sanitized();
-        self.refresh_effective_environment();
+        self.world_environment = self
+            .debug_environment_override
+            .apply(self.server_world_environment);
     }
 
     fn refresh_effective_environment(&mut self) {
@@ -1862,16 +1892,23 @@ impl Renderer {
             .debug_environment_override
             .apply(self.server_world_environment);
         self.world_environment = state;
-        self.daylight_phase = DaylightPhase::for_day_fraction(state.day_fraction);
+        self.celestial_observation = state.celestial_observation(self.observer_world_xz_metres);
+        self.daylight_phase = DaylightPhase::for_solar_position(
+            self.celestial_observation.sun_direction[1],
+            self.celestial_observation.solar_hour_angle_radians,
+        );
         let weather = state.weather(self.atmosphere_sample.coldness);
-        self.environment =
-            OutdoorEnvironment::for_world_time(self.atmosphere_sample, state.day_fraction, weather);
+        self.environment = OutdoorEnvironment::for_celestial(
+            self.atmosphere_sample,
+            self.celestial_observation,
+            weather,
+        );
         self.ui.set_environment_status(
             self.daylight_phase.label(),
             surface_region_label(self.surface_region),
         );
         self.ui.set_world_clock(
-            state.day_fraction,
+            self.celestial_observation.local_solar_day_fraction as f32,
             weather.kind.label(),
             self.environment.precipitation,
             self.environment.cloud_coverage,
@@ -2641,6 +2678,9 @@ impl Renderer {
     ) -> bool {
         let dt = bounded_frame_delta(dt);
         self.time += dt;
+        self.observer_world_xz_metres =
+            [f64::from(camera.position.x), f64::from(camera.position.z)];
+        self.refresh_effective_environment();
         let shadows_active = self.options.shadows && self.environment.shadow_strength > 0.01;
         let mut frame_options = self.options;
         frame_options.shadows = shadows_active;
@@ -2708,6 +2748,7 @@ impl Renderer {
                 options: frame_options,
                 environment: self.environment,
                 world_environment: self.world_environment,
+                celestial_observation: self.celestial_observation,
                 underwater_blend: self.underwater_blend,
                 interior: self.interior,
             },
@@ -3143,8 +3184,26 @@ impl Renderer {
             material_detail: self.options.material_detail,
             daylight_phase: self.daylight_phase as u8,
             day_fraction: self.world_environment.day_fraction,
+            local_solar_day_fraction: self.celestial_observation.local_solar_day_fraction as f32,
+            year_fraction: self.world_environment.year_fraction,
+            moon_orbit_fraction: self.world_environment.moon_orbit_fraction,
+            twinkle_phase: self.world_environment.twinkle_phase,
+            latitude_degrees: self
+                .celestial_observation
+                .coordinates
+                .latitude_radians
+                .to_degrees() as f32,
+            longitude_degrees: self
+                .celestial_observation
+                .coordinates
+                .longitude_radians
+                .to_degrees() as f32,
+            local_sidereal_angle_radians: self.celestial_observation.local_sidereal_angle_radians
+                as f32,
             sun_direction: self.environment.sun_direction.to_array(),
             moon_direction: self.environment.moon_direction.to_array(),
+            moon_illuminated_fraction: self.celestial_observation.moon_illuminated_fraction,
+            celestial_revision: self.world_environment.celestial_revision,
             shadow_strength: self.environment.shadow_strength,
             surface_region: self.surface_region as u8,
             cloud_coverage: self.environment.cloud_coverage,
@@ -4325,6 +4384,7 @@ fn frame_uniform(
         options,
         environment,
         world_environment,
+        celestial_observation,
         underwater_blend,
         interior,
     } = state;
@@ -4418,6 +4478,24 @@ fn frame_uniform(
             .moon_direction
             .extend(environment.moon_visibility)
             .to_array(),
+        equatorial_east: [
+            celestial_observation.equatorial_east[0],
+            celestial_observation.equatorial_east[1],
+            celestial_observation.equatorial_east[2],
+            world_environment.twinkle_phase,
+        ],
+        equatorial_up: [
+            celestial_observation.equatorial_up[0],
+            celestial_observation.equatorial_up[1],
+            celestial_observation.equatorial_up[2],
+            celestial_observation.moon_illuminated_fraction,
+        ],
+        equatorial_north: [
+            celestial_observation.equatorial_north[0],
+            celestial_observation.equatorial_north[1],
+            celestial_observation.equatorial_north[2],
+            (world_environment.celestial_seed & 0x00ff_ffff) as f32,
+        ],
         environment_time: [
             world_environment.day_fraction,
             world_environment.cloud_offset_metres[0],

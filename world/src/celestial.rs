@@ -92,6 +92,12 @@ impl CelestialModel {
             solar_hour_angle,
             sun_declination,
         );
+        let canonical_solar_hour_angle = solar_hour_angle
+            + if coordinates.meridian_angle_radians.cos() < 0.0 {
+                PI
+            } else {
+                0.0
+            };
 
         let lunar_ecliptic_longitude = TAU * moon_orbit_fraction;
         let lunar_ecliptic_latitude =
@@ -128,10 +134,10 @@ impl CelestialModel {
 
         Some(CelestialObservation {
             coordinates,
-            local_solar_day_fraction: (solar_hour_angle / TAU + 0.5).rem_euclid(1.0),
+            local_solar_day_fraction: (canonical_solar_hour_angle / TAU + 0.5).rem_euclid(1.0),
             year_fraction,
             moon_orbit_fraction,
-            solar_hour_angle_radians: wrap_signed_radians(solar_hour_angle),
+            solar_hour_angle_radians: wrap_signed_radians(canonical_solar_hour_angle),
             local_sidereal_angle_radians: local_sidereal_angle,
             sun_direction: to_f32(sun_direction),
             moon_direction: to_f32(moon_direction),
@@ -270,6 +276,13 @@ mod tests {
         assert!((south.latitude_radians + PI * 0.5).abs() < 1.0e-12);
         assert!(repeated.latitude_radians.abs() < 1.0e-12);
         assert!(repeated.longitude_radians.abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn reflected_equator_reports_the_opposite_local_solar_time() {
+        let antipode = observation([0.0, -EARTH_CIRCUMFERENCE * 0.5], 0.5, 0.0, 0.0);
+        assert!(antipode.local_solar_day_fraction.abs() < 1.0e-12);
+        assert!(antipode.sun_direction[1] < -0.999);
     }
 
     #[test]

@@ -2124,11 +2124,16 @@ mod tests {
         let authority = EnvironmentAuthority::from_anchor(config, 1_000, 0.0);
         let start = authority.snapshot(1_000);
         let later = authority.snapshot(26_000);
+        let next_day = authority.snapshot(126_000);
         assert!((start.day_fraction - 0.25).abs() < f32::EPSILON);
         assert!((later.day_fraction - 0.5).abs() < 1.0e-6);
         assert_eq!(start.world_day_number, 0);
         assert_eq!(later.world_day_number, 0);
+        assert_eq!(next_day.world_day_number, 1);
+        assert!((next_day.day_fraction - 0.5).abs() < 1.0e-6);
         assert_eq!(later.days_per_year, 365.242_2);
+        assert_eq!(later.moon_sidereal_orbit_days, 27.321_661);
+        assert_eq!(later.celestial_revision, 1);
         assert!((start.weather_fraction - 0.1).abs() < f32::EPSILON);
         assert!((later.weather_fraction - 0.225).abs() < 1.0e-6);
         assert_eq!(start.cloud_offset_metres, [10.0, 20.0]);
