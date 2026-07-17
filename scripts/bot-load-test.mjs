@@ -86,9 +86,9 @@ function parseArguments(values) {
   }
   if (
     options.counts.length === 0 ||
-    options.counts.some((count) => !Number.isInteger(count) || count < 1 || count > 512)
+    options.counts.some((count) => !Number.isInteger(count) || count < 1 || count > 1_024)
   ) {
-    throw new Error("--counts must contain integers in 1..=512");
+    throw new Error("--counts must contain integers in 1..=1024");
   }
   if (
     !Number.isFinite(options.durationSeconds) ||

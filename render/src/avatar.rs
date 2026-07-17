@@ -5,7 +5,7 @@ use glam::{Quat, Vec3};
 use voxels_core::{PLAYER_EYE_HEIGHT_METRES, REMOTE_POSE_FLYING, RemoteAvatarPose};
 
 const PARTS_PER_AVATAR: usize = 13;
-const MAX_AVATARS: usize = 512;
+const MAX_AVATARS: usize = 1_024;
 const MAX_PARTS: usize = PARTS_PER_AVATAR * MAX_AVATARS;
 const AVATAR_PERCEPTUAL_ROUGHNESS: f32 = 0.72;
 

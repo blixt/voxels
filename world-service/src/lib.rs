@@ -76,8 +76,8 @@ impl Default for LoopbackTransportConfig {
             max_frame_bytes: MAX_PROTOCOL_FRAME_BYTES,
             max_outbound_bytes_per_client: 32 * 1024 * 1024,
             max_in_flight_batches: 16,
-            max_connections: 512,
-            global_queue_capacity: 8_192,
+            max_connections: 1_024,
+            global_queue_capacity: 16_384,
             product_cache_bytes: 256 * 1024 * 1024,
             generation_workers: 8,
             generation_workers_per_client: 2,
@@ -117,7 +117,7 @@ impl Default for PresenceConfig {
     fn default() -> Self {
         Self {
             broadcast_interval_ms: 33,
-            max_players: 512,
+            max_players: 1_024,
             max_pose_updates_per_second: 60,
             spatial_cell_metres: 64,
             interest_radius_metres: 256,

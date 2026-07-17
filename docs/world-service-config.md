@@ -38,7 +38,7 @@ auth_subprotocol_token = "replace-with-a-random-local-token"
 max_frame_bytes = 16777216
 max_outbound_bytes_per_client = 33554432
 max_in_flight_batches = 16
-max_connections = 512
+max_connections = 1024
 global_queue_capacity = 8192
 product_cache_bytes = 268435456
 generation_workers = 8
@@ -46,7 +46,7 @@ generation_workers_per_client = 2
 
 [presence]
 broadcast_interval_ms = 33
-max_players = 512
+max_players = 1024
 max_pose_updates_per_second = 60
 spatial_cell_metres = 64
 interest_radius_metres = 256

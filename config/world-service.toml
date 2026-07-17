@@ -16,9 +16,9 @@ auth_subprotocol_token = "replace-with-a-random-local-token"
 max_frame_bytes = 16777216
 max_outbound_bytes_per_client = 33554432
 max_in_flight_batches = 16
-max_connections = 512
-# Covers the worst-case negotiated request window for all 512 admitted world connections.
-global_queue_capacity = 8192
+max_connections = 1024
+# Covers the worst-case negotiated request window for all 1024 admitted world connections.
+global_queue_capacity = 16384
 # Immutable encoded batches are shared across co-located clients and identical retries.
 product_cache_bytes = 268435456
 generation_workers = 8
@@ -27,7 +27,7 @@ generation_workers_per_client = 2
 [presence]
 # Per-client spatial deltas tick at about 30 Hz; unchanged poses are omitted.
 broadcast_interval_ms = 33
-max_players = 512
+max_players = 1024
 # Browsers normally send at 30 Hz; this higher ceiling permits modest timer catch-up without abuse.
 max_pose_updates_per_second = 60
 # Internal interest management only; this remains one authoritative, unsharded world.

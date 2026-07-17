@@ -53,8 +53,8 @@ pub struct BotRunConfig {
 
 impl BotRunConfig {
     fn validate(&self) -> Result<()> {
-        if self.bots == 0 || self.bots > 512 {
-            bail!("bot count must be in 1..=512");
+        if self.bots == 0 || self.bots > 1_024 {
+            bail!("bot count must be in 1..=1024");
         }
         if !self.duration_seconds.is_finite()
             || self.duration_seconds < 1.0

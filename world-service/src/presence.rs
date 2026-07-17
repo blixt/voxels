@@ -974,16 +974,16 @@ mod tests {
     }
 
     #[test]
-    fn five_hundred_twelve_player_dense_region_is_bounded_and_starvation_free() {
+    fn one_thousand_player_dense_region_is_bounded_and_starvation_free() {
         let hub = hub(PresenceConfig {
-            max_players: 512,
+            max_players: 1_024,
             max_records_per_delta: 64,
             max_pose_updates_per_second: 120,
             ..PresenceConfig::default()
         });
         let (_viewer_claim, viewer) = joined_at(&hub, 0, 0.0, 0.0);
         let mut residents = Vec::new();
-        for seed in 1..512 {
+        for seed in 1..1_000 {
             residents.push(joined_at(&hub, seed, f32::from(seed % 10), 0.0));
         }
         let mut stream = PresenceStreamState::default();
@@ -991,7 +991,7 @@ mod tests {
         let started = Instant::now();
         let mut wire_bytes = 0;
         let mut delta_count = 0;
-        for _ in 0..16 {
+        for _ in 0..32 {
             let bytes = hub
                 .build_delta(&viewer, &mut stream)
                 .expect("build")
@@ -999,20 +999,20 @@ mod tests {
             wire_bytes += bytes.len();
             delta_count += 1;
             let delta = decode_presence_delta(&bytes).expect("decode");
-            assert_eq!(delta.visible_player_count, 511);
+            assert_eq!(delta.visible_player_count, 999);
             assert!(delta.enters.len() + delta.updates.len() <= 64);
             entered.extend(delta.enters.into_iter().map(|player| player.player_id));
-            if entered.len() == 511 {
+            if entered.len() == 999 {
                 break;
             }
         }
         let elapsed = started.elapsed();
-        assert_eq!(delta_count, 8);
-        assert_eq!(wire_bytes, 41_264);
-        assert_eq!(entered.len(), 511);
-        assert_eq!(stream.known.len(), 511);
+        assert_eq!(delta_count, 16);
+        assert_eq!(wire_bytes, 80_688);
+        assert_eq!(entered.len(), 999);
+        assert_eq!(stream.known.len(), 999);
         eprintln!(
-            "presence-scale dense=512 deltas={delta_count} bytes={wire_bytes} build_us={}",
+            "presence-scale dense=1000 deltas={delta_count} bytes={wire_bytes} build_us={}",
             elapsed.as_micros()
         );
         drop(residents);
@@ -1021,13 +1021,13 @@ mod tests {
     #[test]
     fn far_players_produce_no_candidates_or_followup_bytes() {
         let hub = hub(PresenceConfig {
-            max_players: 512,
+            max_players: 1_024,
             max_pose_updates_per_second: 120,
             ..PresenceConfig::default()
         });
         let (_viewer_claim, viewer) = joined_at(&hub, 0, 0.0, 0.0);
         let mut residents = Vec::new();
-        for seed in 1..512 {
+        for seed in 1..1_000 {
             residents.push(joined_at(&hub, seed, 10_000.0 + f32::from(seed), 10_000.0));
         }
         let mut stream = PresenceStreamState::default();
@@ -1043,7 +1043,7 @@ mod tests {
                 .expect("build")
                 .is_none()
         );
-        eprintln!("presence-scale isolated=512 observer_entity_bytes=0");
+        eprintln!("presence-scale isolated=1000 observer_entity_bytes=0");
         drop(residents);
     }
 

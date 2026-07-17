@@ -18,12 +18,12 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 16;
+pub const PROTOCOL_VERSION: u16 = 17;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
 pub const MAX_SURFACE_TILES_PER_BATCH: usize = 32;
-pub const MAX_PLAYERS_PER_PRESENCE_DELTA: usize = 512;
+pub const MAX_PLAYERS_PER_PRESENCE_DELTA: usize = 1_024;
 pub const MAX_PLAYER_NAME_BYTES: usize = 32;
 pub const MAX_EDIT_MUTATIONS: usize = 125;
 pub const MAX_EDIT_AFFECTED_CHUNKS: usize = 8;
