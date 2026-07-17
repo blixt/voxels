@@ -397,7 +397,7 @@ export async function startBrowserWorldService(
       throw new Error(`world service exited before readiness:\n${logs.join("")}`);
     }
     if (await portAcceptsConnections(fixture.backendPort)) {
-      return { child, close: () => stopProcessTree(child) };
+      return { child, logs, close: () => stopProcessTree(child) };
     }
     await new Promise((resolve) => setTimeout(resolve, 75));
   }

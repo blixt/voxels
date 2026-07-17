@@ -26,7 +26,7 @@ import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./vxwp-contract.mj
 import { worldServiceBuildCargoArgs } from "./world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const RESULT_SCHEMA_VERSION = 3;
+const RESULT_SCHEMA_VERSION = 4;
 const OUTPUT_DIRECTORY = path.resolve("target/harness/bots");
 const SAMPLE_INTERVAL_MS = 250;
 const OBSERVER_SAMPLE_INTERVAL_MS = 500;
@@ -175,6 +175,52 @@ async function databaseContents(databasePath) {
   `;
   const { stdout } = await execFileAsync("sqlite3", ["-json", databasePath, query]);
   return JSON.parse(stdout)[0] ?? null;
+}
+
+function requiredConfigInteger(toml, key) {
+  const match = toml.match(new RegExp(`^${key} = ([0-9]+)$`, "mu"));
+  if (match === null) throw new Error(`missing integer ${key} in world-service config`);
+  return Number(match[1]);
+}
+
+function messageBytes(report, kind) {
+  return report.traffic.receivedByKind?.[String(kind)]?.payloadBytes ?? 0;
+}
+
+function summarizeTrafficBudget(report, serviceConfig) {
+  const bytesPerSecond = requiredConfigInteger(
+    serviceConfig,
+    "outbound_bandwidth_bytes_per_second",
+  );
+  const burstBytes = requiredConfigInteger(serviceConfig, "outbound_bandwidth_burst_bytes");
+  const seconds = report.wallTimeMs / 1_000;
+  const receivedBytes = report.reports.map((client) => client.traffic.receivedPayloadBytes);
+  const bitsPerSecond = receivedBytes.map((bytes) => (bytes * 8) / seconds);
+  const envelopeBytes = report.reports.map(
+    (client) =>
+      bytesPerSecond * seconds +
+      Math.max(burstBytes, client.traffic.maxReceivedFrameBytes ?? 0) +
+      1_024,
+  );
+  const overBudgetClients = report.reports.filter(
+    (client, index) => client.traffic.receivedPayloadBytes > envelopeBytes[index],
+  ).length;
+  return {
+    bytesPerSecond,
+    burstBytes,
+    perClientReceivedBytes: numericSummary(receivedBytes),
+    perClientBitsPerSecond: numericSummary(bitsPerSecond),
+    envelopeBytes: numericSummary(envelopeBytes),
+    overBudgetClients,
+    payloadByClass: {
+      presenceBytes: report.reports.reduce((sum, client) => sum + messageBytes(client, 16), 0),
+      editBytes: report.reports.reduce((sum, client) => sum + messageBytes(client, 12), 0),
+      visibleWorldBytes: report.reports.reduce(
+        (sum, client) => sum + messageBytes(client, 4) + messageBytes(client, 8),
+        0,
+      ),
+    },
+  };
 }
 
 async function collectSamples({ servicePid, botPid, databasePath, done }) {
@@ -343,7 +389,17 @@ async function runPopulation({
   const started = performance.now();
   const observerPromise = collectObserverSamples(observer, count, started, done);
   try {
-    await waitForChild(bot, `bots (${count})`, logs);
+    try {
+      await waitForChild(bot, `bots (${count})`, logs);
+    } catch (error) {
+      const serviceLogs = service.logs?.join("") ?? "";
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}${
+          serviceLogs.length > 0 ? `\nworld service:\n${serviceLogs}` : ""
+        }`,
+        { cause: error },
+      );
+    }
   } finally {
     done.value = true;
   }
@@ -351,12 +407,14 @@ async function runPopulation({
   const samples = await samplesPromise;
   const observerReport = await observerPromise;
   const report = JSON.parse(await readFile(reportPath, "utf8"));
+  const serviceConfig = await readFile(fixture.serviceConfigPath, "utf8");
   const after = await databaseFiles(fixture.databasePath);
   const contents = await databaseContents(fixture.databasePath);
   return {
     count,
     wallTimeMs,
     botReport: report,
+    trafficBudget: summarizeTrafficBudget(report, serviceConfig),
     process: {
       service: summarizeProcess(samples.service),
       bots: summarizeProcess(samples.bots),
@@ -373,7 +431,7 @@ function markdownReport(result) {
     "",
     `Mode: **${result.options.mode}** · layout: **${result.options.layout}** · duration: **${result.options.durationSeconds}s per population** · source: **${result.options.source}**`,
     "",
-    "| Bots | Server CPU p95 | Server RSS peak | Bot CPU p95 | TCP down/up | VXWP down/up | DB growth | Edits accepted | Mutations | Chunk p95 | Edit p95 | Visible | Roster ready | Observer LOD | Observer frame p95 |",
+    "| Bots | Server CPU p95 | Server RSS peak | Bot CPU p95 | TCP down/up | VXWP down/up | DB growth | Edits accepted/conflicts | Mutations | Chunk p95 | Edit p95 | Visible | Roster ready | Observer LOD | Observer frame p95 |",
     "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ];
   for (const stage of result.stages) {
@@ -405,7 +463,7 @@ function markdownReport(result) {
             ? `interactive ${stage.observer.interactiveWorldReadyMs.toFixed(0)} ms`
             : `partial ${stage.observer.finalWorld?.residentChunks ?? 0} resident`;
     lines.push(
-      `| ${stage.count} | ${stage.process.service.cpuPercent.p95.toFixed(1)}% | ${stage.process.service.rssMiB.max.toFixed(1)} MiB | ${stage.process.bots.cpuPercent.p95.toFixed(1)}% | ${(stage.network.downstream.streamBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.streamBytes / 1_048_576).toFixed(2)} MiB | ${(stage.network.downstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} MiB | ${(stage.database.deltaBytes / 1_024).toFixed(1)} KiB | ${bot.editsAccepted} | ${bot.mutationsCommitted} | ${chunkP95.toFixed(1)} ms | ${editP95.toFixed(1)} ms | ${bot.maxVisiblePlayers} | ${rosterReady} | ${observerLod} | ${observerFrame} |`,
+      `| ${stage.count} | ${stage.process.service.cpuPercent.p95.toFixed(1)}% | ${stage.process.service.rssMiB.max.toFixed(1)} MiB | ${stage.process.bots.cpuPercent.p95.toFixed(1)}% | ${(stage.network.downstream.streamBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.streamBytes / 1_048_576).toFixed(2)} MiB | ${(stage.network.downstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} MiB | ${(stage.database.deltaBytes / 1_024).toFixed(1)} KiB | ${bot.editsAccepted}/${bot.editConflicts} | ${bot.mutationsCommitted} | ${chunkP95.toFixed(1)} ms | ${editP95.toFixed(1)} ms | ${bot.maxVisiblePlayers} | ${rosterReady} | ${observerLod} | ${observerFrame} |`,
     );
   }
   lines.push(
@@ -413,7 +471,18 @@ function markdownReport(result) {
     "Generated terrain is deterministic and RAM-cached, not persisted. Explorer traffic therefore increases CPU and bandwidth; durable disk growth comes from player resumes, inventories, idempotent operation history, and sparse voxel edits.",
     "",
     "CPU percentages use `ps` semantics (100% is one fully occupied logical core). Stream bytes include HTTP upgrades and WebSocket framing; VXWP bytes are binary protocol payloads.",
+    "",
+    "## Per-client traffic budgets",
+    "",
+    "| Bots | Sustained cap | Burst | Client down p95/max | Presence | Edits | Visible world | Envelope violations |",
+    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   );
+  for (const stage of result.stages) {
+    const budget = stage.trafficBudget;
+    lines.push(
+      `| ${stage.count} | ${((budget.bytesPerSecond * 8) / 1_000_000).toFixed(3)} Mbit/s | ${(budget.burstBytes / 1_024).toFixed(0)} KiB | ${(budget.perClientBitsPerSecond.p95 / 1_000_000).toFixed(3)} / ${(budget.perClientBitsPerSecond.max / 1_000_000).toFixed(3)} Mbit/s | ${(budget.payloadByClass.presenceBytes / 1_048_576).toFixed(2)} MiB | ${(budget.payloadByClass.editBytes / 1_048_576).toFixed(2)} MiB | ${(budget.payloadByClass.visibleWorldBytes / 1_048_576).toFixed(2)} MiB | ${budget.overBudgetClients} |`,
+    );
+  }
   if (result.violations.length > 0) {
     lines.push("", "## Violations", "", ...result.violations.map((violation) => `- ${violation}`));
   }
@@ -433,7 +502,16 @@ function stageViolations(stage, browserEnabled) {
       `${stage.count} bots: native clients saw ${stage.botReport.maxVisiblePlayers}, expected ${expectedVisible}`,
     );
   }
+  const incompleteRosters = stage.botReport.reports.filter(
+    (report) => report.maxVisiblePlayers !== expectedVisible,
+  ).length;
+  if (incompleteRosters > 0) {
+    violations.push(
+      `${stage.count} bots: ${incompleteRosters} clients did not receive the complete ${expectedVisible}-peer roster`,
+    );
+  }
   const rejected = stage.botReport.editsRejected;
+  const expectedConflicts = stage.botReport.editConflicts ?? 0;
   const resyncs = stage.botReport.reports.reduce((sum, report) => sum + report.resyncs, 0);
   const protocolErrors = stage.botReport.reports.reduce(
     (sum, report) => sum + report.protocolErrors,
@@ -442,7 +520,11 @@ function stageViolations(stage, browserEnabled) {
   const nativeErrors = [
     ...new Set(stage.botReport.reports.flatMap((report) => report.errorSamples)),
   ];
-  if (rejected > 0) violations.push(`${stage.count} bots: ${rejected} edits were rejected`);
+  if (rejected > expectedConflicts) {
+    violations.push(
+      `${stage.count} bots: ${rejected - expectedConflicts} unexpected edits were rejected`,
+    );
+  }
   if (resyncs > 0) violations.push(`${stage.count} bots: ${resyncs} clients required resync`);
   if (protocolErrors > 0) {
     violations.push(`${stage.count} bots: ${protocolErrors} protocol errors were received`);
@@ -450,6 +532,11 @@ function stageViolations(stage, browserEnabled) {
   if (nativeErrors.length > 0) {
     violations.push(
       `${stage.count} bots: native client errors: ${nativeErrors.slice(0, 3).join("; ")}`,
+    );
+  }
+  if (stage.trafficBudget.overBudgetClients > 0) {
+    violations.push(
+      `${stage.count} bots: ${stage.trafficBudget.overBudgetClients} clients exceeded the configured payload envelope`,
     );
   }
   if (stage.observer !== null) {

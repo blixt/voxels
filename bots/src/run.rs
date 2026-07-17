@@ -28,7 +28,7 @@ use voxels_world::{
     WorldProductPriority,
 };
 
-const REPORT_SCHEMA_VERSION: u32 = 1;
+const REPORT_SCHEMA_VERSION: u32 = 2;
 const SIMULATION_HZ: u64 = 60;
 const POSE_HZ: u64 = 30;
 const PING_INTERVAL: Duration = Duration::from_secs(1);
@@ -76,6 +76,8 @@ pub struct TrafficCounters {
     pub received_payload_bytes: u64,
     pub sent_frames: u64,
     pub received_frames: u64,
+    pub max_sent_frame_bytes: u64,
+    pub max_received_frame_bytes: u64,
     pub sent_by_kind: BTreeMap<u16, MessageTraffic>,
     pub received_by_kind: BTreeMap<u16, MessageTraffic>,
 }
@@ -92,6 +94,7 @@ impl TrafficCounters {
         Self::record(
             &mut self.sent_payload_bytes,
             &mut self.sent_frames,
+            &mut self.max_sent_frame_bytes,
             &mut self.sent_by_kind,
             bytes,
         )
@@ -101,6 +104,7 @@ impl TrafficCounters {
         Self::record(
             &mut self.received_payload_bytes,
             &mut self.received_frames,
+            &mut self.max_received_frame_bytes,
             &mut self.received_by_kind,
             bytes,
         )
@@ -109,12 +113,14 @@ impl TrafficCounters {
     fn record(
         bytes_total: &mut u64,
         frames_total: &mut u64,
+        max_frame_bytes: &mut u64,
         by_kind: &mut BTreeMap<u16, MessageTraffic>,
         bytes: &[u8],
     ) -> Result<()> {
         let kind = message_kind(bytes)?;
         *bytes_total = bytes_total.saturating_add(bytes.len() as u64);
         *frames_total = frames_total.saturating_add(1);
+        *max_frame_bytes = (*max_frame_bytes).max(bytes.len() as u64);
         let entry = by_kind.entry(kind).or_default();
         entry.frames = entry.frames.saturating_add(1);
         entry.payload_bytes = entry.payload_bytes.saturating_add(bytes.len() as u64);
@@ -130,6 +136,10 @@ impl TrafficCounters {
             .saturating_add(other.received_payload_bytes);
         self.sent_frames = self.sent_frames.saturating_add(other.sent_frames);
         self.received_frames = self.received_frames.saturating_add(other.received_frames);
+        self.max_sent_frame_bytes = self.max_sent_frame_bytes.max(other.max_sent_frame_bytes);
+        self.max_received_frame_bytes = self
+            .max_received_frame_bytes
+            .max(other.max_received_frame_bytes);
         merge_traffic_map(&mut self.sent_by_kind, &other.sent_by_kind);
         merge_traffic_map(&mut self.received_by_kind, &other.received_by_kind);
     }
@@ -172,6 +182,7 @@ pub struct BotReport {
     pub edits_submitted: u64,
     pub edits_accepted: u64,
     pub edits_rejected: u64,
+    pub edit_conflicts: u64,
     pub edits_observed: u64,
     pub no_op_edits: u64,
     pub mutations_committed: u64,
@@ -200,6 +211,7 @@ pub struct BotRunReport {
     pub edits_submitted: u64,
     pub edits_accepted: u64,
     pub edits_rejected: u64,
+    pub edit_conflicts: u64,
     pub mutations_committed: u64,
     pub copied_actions: u64,
     pub max_visible_players: u16,
@@ -269,6 +281,7 @@ struct BotReportAccumulator {
     edits_submitted: u64,
     edits_accepted: u64,
     edits_rejected: u64,
+    edit_conflicts: u64,
     edits_observed: u64,
     no_op_edits: u64,
     mutations_committed: u64,
@@ -413,8 +426,14 @@ impl BotRuntime {
         while Instant::now() < self.end {
             tokio::select! {
                 _ = simulation.tick() => self.simulation_tick().await?,
-                message = self.world.next() => self.handle_world_message(message).await?,
-                message = self.presence.next() => self.handle_presence_message(message).await?,
+                message = self.world.next() => self
+                    .handle_world_message(message)
+                    .await
+                    .context("world stream")?,
+                message = self.presence.next() => self
+                    .handle_presence_message(message)
+                    .await
+                    .context("presence stream")?,
             }
         }
         self.send_pose().await?;
@@ -539,7 +558,9 @@ impl BotRuntime {
         let request_id = self.allocate_request_id();
         let bytes = encode_chunk_batch(&ChunkBatchRequest {
             request_id,
-            priority: WorldProductPriority::VisibleChunk,
+            // This 3x3x3 neighborhood is the bot's collision and startup-ready set, matching the
+            // browser scheduler rather than treating immediately walkable terrain as background.
+            priority: WorldProductPriority::CollisionCritical,
             coords,
         })?;
         self.traffic.sent(&bytes)?;
@@ -671,16 +692,23 @@ impl BotRuntime {
             }
         } else if kind == error_kind() {
             let (request_id, message) = decode_error(bytes)?;
-            self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
+            let mut expected_edit_conflict = false;
             if let Some(pending) = self.pending_edits.remove(&request_id) {
                 self.report.edits_rejected = self.report.edits_rejected.saturating_add(1);
+                if message == "placement target is occupied" {
+                    self.report.edit_conflicts = self.report.edit_conflicts.saturating_add(1);
+                    expected_edit_conflict = true;
+                }
                 self.report
                     .edit_latency_ms
                     .push(pending.submitted.elapsed().as_secs_f64() * 1_000.0);
             }
             self.pending_chunks.remove(&request_id);
             self.pending_surfaces.remove(&request_id);
-            self.record_error(format!("request {request_id}: {message}"));
+            if !expected_edit_conflict {
+                self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
+                self.record_error(format!("request {request_id}: {message}"));
+            }
         } else if kind == resync_required_kind() {
             let _ = decode_resync_required(bytes)?;
             self.report.resyncs = self.report.resyncs.saturating_add(1);
@@ -805,6 +833,7 @@ impl BotRuntime {
             edits_submitted: self.report.edits_submitted,
             edits_accepted: self.report.edits_accepted,
             edits_rejected: self.report.edits_rejected,
+            edit_conflicts: self.report.edit_conflicts,
             edits_observed: self.report.edits_observed,
             no_op_edits: self.report.no_op_edits,
             mutations_committed: self.report.mutations_committed,
@@ -922,6 +951,7 @@ fn aggregate_report(
     let mut edits_submitted = 0_u64;
     let mut edits_accepted = 0_u64;
     let mut edits_rejected = 0_u64;
+    let mut edit_conflicts = 0_u64;
     let mut mutations_committed = 0_u64;
     let mut copied_actions = 0_u64;
     let mut max_visible_players = 0_u16;
@@ -938,6 +968,7 @@ fn aggregate_report(
         edits_submitted = edits_submitted.saturating_add(report.edits_submitted);
         edits_accepted = edits_accepted.saturating_add(report.edits_accepted);
         edits_rejected = edits_rejected.saturating_add(report.edits_rejected);
+        edit_conflicts = edit_conflicts.saturating_add(report.edit_conflicts);
         mutations_committed = mutations_committed.saturating_add(report.mutations_committed);
         copied_actions = copied_actions.saturating_add(report.copied_actions);
         max_visible_players = max_visible_players.max(report.max_visible_players);
@@ -955,6 +986,7 @@ fn aggregate_report(
         edits_submitted,
         edits_accepted,
         edits_rejected,
+        edit_conflicts,
         mutations_committed,
         copied_actions,
         max_visible_players,
@@ -1036,6 +1068,7 @@ mod tests {
         second.sent(&bytes)?;
         first.merge(&second);
         assert_eq!(first.sent_frames, 2);
+        assert_eq!(first.max_sent_frame_bytes, bytes.len() as u64);
         assert_eq!(
             first
                 .sent_by_kind
