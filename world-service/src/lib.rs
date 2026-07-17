@@ -12,8 +12,8 @@ use voxels_world::protocol::{
     FRAME_HEADER_BYTES, MAX_PLAYERS_PER_PRESENCE_DELTA, MAX_PROTOCOL_FRAME_BYTES,
 };
 use voxels_world::{
-    HeightfieldWorldSource, MacroTerrainSource, ProceduralWorldSource, SEA_LEVEL_VOXELS, WorldId,
-    WorldSourceEngine, WorldSourceError, WorldSourceIdentityHash,
+    HeightfieldWorldSource, MacroTerrainSource, Material, ProceduralWorldSource, SEA_LEVEL_VOXELS,
+    WorldId, WorldSourceEngine, WorldSourceError, WorldSourceIdentityHash,
 };
 use voxels_world_terrain_diffusion::{
     MODEL_REVISION, TerrainDiffusionError, validate_terrain_generation_parameters,
@@ -31,8 +31,8 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 18;
-pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 5;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 19;
+pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 6;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
     0x76, 0x6f, 0x78, 0x65, 0x6c, 0x73, 0x40, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x01,
@@ -197,11 +197,31 @@ impl Default for GameplayConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnConfig {
     /// Canonical voxel X/Z coordinate sampled when constructing `WorldOpened`.
     pub xz_voxels: [i32; 2],
+    /// Height added above the highest source surface under the pillar footprint.
+    pub pillar_height_voxels: u16,
+    /// Circular pillar radius around `xz_voxels`, including the centre voxel.
+    pub pillar_radius_voxels: u8,
+    /// Horizontal radius in which all player-authored digging and placement is rejected.
+    pub protection_radius_voxels: u16,
+    /// Collidable material used for the server-authored pillar.
+    pub pillar_material: Material,
+}
+
+impl Default for SpawnConfig {
+    fn default() -> Self {
+        Self {
+            xz_voxels: [0, 0],
+            pillar_height_voxels: 40,
+            pillar_radius_voxels: 3,
+            protection_radius_voxels: 64,
+            pillar_material: Material::Stone,
+        }
+    }
 }
 
 /// Restart-stable server authority for celestial time and the first weather layer.
@@ -623,6 +643,18 @@ impl WorldServiceConfig {
                 "movement speeds, slack, or credit window is invalid",
             ));
         }
+        if self.spawn.pillar_height_voxels == 0
+            || self.spawn.pillar_height_voxels > 1_000
+            || self.spawn.pillar_radius_voxels == 0
+            || self.spawn.pillar_radius_voxels > 32
+            || self.spawn.protection_radius_voxels < u16::from(self.spawn.pillar_radius_voxels)
+            || self.spawn.protection_radius_voxels > 10_000
+            || !self.spawn.pillar_material.is_collidable()
+        {
+            return Err(WorldServiceConfigError::InvalidSpawn(
+                "pillar height/radius, protection radius, or material is invalid",
+            ));
+        }
         if self.edits.database.as_os_str().is_empty() {
             return Err(WorldServiceConfigError::InvalidEdits(
                 "edit database path must not be empty",
@@ -707,6 +739,7 @@ pub enum WorldServiceConfigError {
     InvalidConcurrency(&'static str),
     InvalidPresence(&'static str),
     InvalidGameplay(&'static str),
+    InvalidSpawn(&'static str),
     InvalidEnvironment(&'static str),
     InvalidEdits(&'static str),
     InvalidTerrainDiffusion(TerrainDiffusionError),
@@ -758,6 +791,9 @@ impl fmt::Display for WorldServiceConfigError {
             }
             Self::InvalidGameplay(reason) => {
                 write!(formatter, "invalid world-service gameplay: {reason}")
+            }
+            Self::InvalidSpawn(reason) => {
+                write!(formatter, "invalid world-service spawn: {reason}")
             }
             Self::InvalidEnvironment(reason) => {
                 write!(formatter, "invalid world-service environment: {reason}")
@@ -984,7 +1020,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 18
+schema_version = 19
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -1062,6 +1098,10 @@ change_queue_capacity = 256
 
 [spawn]
 xz_voxels = [0, 0]
+pillar_height_voxels = 40
+pillar_radius_voxels = 3
+protection_radius_voxels = 64
+pillar_material = "Stone"
 
 [terrain_diffusion]
 precision = "float16"
@@ -1119,12 +1159,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 18", "schema_version = 17");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 19", "schema_version = 18");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 18,
-                found: 17,
+                expected: 19,
+                found: 18,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
@@ -1324,7 +1364,7 @@ sea_level_voxels = 52
         assert_eq!(
             loaded.edit_database_path(source_hash),
             PathBuf::from(format!(
-                "test-fixtures/voxels-config/state/schema-5/{expected_world_id}-{source_hash}.sqlite3"
+                "test-fixtures/voxels-config/state/schema-6/{expected_world_id}-{source_hash}.sqlite3"
             ))
         );
 

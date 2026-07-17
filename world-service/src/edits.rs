@@ -34,10 +34,53 @@ const DIG_MAX_MUTATIONS: usize = DIG_VOLUME_VOXELS;
 
 pub(crate) struct EditAuthority {
     inner: Mutex<EditState>,
+    protected_spawn: Mutex<Option<ProtectedSpawn>>,
     subscribers: Mutex<HashMap<u64, EditSubscriber>>,
     queue_capacity: usize,
     #[cfg(test)]
     test_starting_units_per_material: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProtectedSpawn {
+    centre_xz: [i32; 2],
+    radius_voxels: u16,
+    overrides: Vec<VoxelMutation>,
+}
+
+impl ProtectedSpawn {
+    pub(crate) fn new(
+        centre_xz: [i32; 2],
+        radius_voxels: u16,
+        overrides: Vec<VoxelMutation>,
+    ) -> Self {
+        Self {
+            centre_xz,
+            radius_voxels,
+            overrides,
+        }
+    }
+
+    fn contains(&self, coord: VoxelCoord) -> bool {
+        let dx = i64::from(coord.x) - i64::from(self.centre_xz[0]);
+        let dz = i64::from(coord.z) - i64::from(self.centre_xz[1]);
+        let radius = i64::from(self.radius_voxels);
+        dx * dx + dz * dz <= radius * radius
+    }
+
+    fn intersects(&self, action: EditAction) -> bool {
+        match action {
+            EditAction::Place { coord, .. } => self.contains(coord),
+            EditAction::Dig { hit, face } => {
+                DigVolume::for_hit_face(hit, face).is_some_and(|volume| {
+                    (volume.min.x..=volume.max.x).any(|x| {
+                        (volume.min.z..=volume.max.z)
+                            .any(|z| self.contains(VoxelCoord::new(x, volume.min.y, z)))
+                    })
+                })
+            }
+        }
+    }
 }
 
 struct EditState {
@@ -229,6 +272,7 @@ impl EditAuthority {
                 chunk_revisions,
                 surface_revisions,
             }),
+            protected_spawn: Mutex::new(None),
             subscribers: Mutex::new(HashMap::new()),
             queue_capacity: usize::from(queue_capacity),
             #[cfg(test)]
@@ -248,6 +292,28 @@ impl EditAuthority {
             Ok(inner) => inner,
             Err(poisoned) => poisoned.into_inner(),
         }
+    }
+
+    fn lock_protected_spawn(&self) -> MutexGuard<'_, Option<ProtectedSpawn>> {
+        match self.protected_spawn.lock() {
+            Ok(inner) => inner,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Installs deterministic server-authored spawn geometry before the authority is shared with
+    /// any connection. It remains separate from durable player edits and is rebuilt from config on
+    /// every start.
+    pub(crate) fn install_protected_spawn(&self, spawn: ProtectedSpawn) {
+        {
+            let mut state = self.lock();
+            for mutation in &spawn.overrides {
+                state
+                    .edits
+                    .insert_override(mutation.coord, mutation.material);
+            }
+        }
+        *self.lock_protected_spawn() = Some(spawn);
     }
 
     /// Loads or initializes one durable player without changing its active edit session. Presence
@@ -448,6 +514,15 @@ impl EditAuthority {
         editor_connection_id: u64,
         command: EditCommand,
     ) -> Result<AppliedEdit, EditAuthorityError> {
+        if self
+            .lock_protected_spawn()
+            .as_ref()
+            .is_some_and(|spawn| spawn.intersects(command.action))
+        {
+            return Err(EditAuthorityError(
+                "the starting area is protected from world edits".to_owned(),
+            ));
+        }
         let mut state = self.lock();
         if let Some(stored) = load_operation(
             &state.connection,
@@ -1505,6 +1580,54 @@ mod tests {
     }
 
     #[test]
+    fn protected_spawn_geometry_is_authoritative_and_rejects_intersecting_edits() {
+        let source = ProceduralWorldSource::new(0x5afe);
+        let authority = EditAuthority::in_memory(world_id(29), &source, 8).unwrap();
+        let pillar = VoxelCoord::new(0, 300, 0);
+        authority.install_protected_spawn(ProtectedSpawn::new(
+            [0, 0],
+            4,
+            vec![VoxelMutation {
+                coord: pillar,
+                material: Material::Stone,
+            }],
+        ));
+        assert_eq!(
+            authority
+                .snapshot_chunks(&[pillar.chunk()])
+                .edits
+                .override_at(pillar),
+            Some(Material::Stone)
+        );
+
+        let player = player_id(29);
+        let (_, session) = admit_player(&authority, player, resume(1));
+        for command in [
+            place(1, session, VoxelCoord::new(0, 900, 0), Material::Stone),
+            dig(2, session, VoxelCoord::new(6, -100, 0)),
+        ] {
+            assert_eq!(
+                authority
+                    .apply(&source, player, 29, command)
+                    .unwrap_err()
+                    .to_string(),
+                "the starting area is protected from world edits"
+            );
+        }
+        assert!(
+            authority
+                .apply(
+                    &source,
+                    player,
+                    29,
+                    dig(3, session, VoxelCoord::new(7, -100, 0)),
+                )
+                .expect("a dig volume wholly outside the protected radius")
+                .changed
+        );
+    }
+
+    #[test]
     fn new_players_can_place_only_materials_earned_by_digging() {
         let source = ProceduralWorldSource::new(0xdecafbad);
         let authority = EditAuthority::in_memory(world_id(30), &source, 8).unwrap();
@@ -2277,11 +2400,11 @@ mod tests {
     fn previous_schema_is_rejected_without_migration() {
         let source = ProceduralWorldSource::new(17);
         let connection = Connection::open_in_memory().unwrap();
-        connection.pragma_update(None, "user_version", 4).unwrap();
+        connection.pragma_update(None, "user_version", 5).unwrap();
         let error = EditAuthority::from_connection(connection, world_id(6), &source, 4, None)
             .err()
             .unwrap();
-        assert!(error.to_string().contains("schema 4; expected 5"));
+        assert!(error.to_string().contains("schema 5; expected 6"));
         assert!(
             error
                 .to_string()

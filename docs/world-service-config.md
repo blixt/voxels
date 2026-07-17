@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 18
+schema_version = 19
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -104,6 +104,10 @@ change_queue_capacity = 256
 
 [spawn]
 xz_voxels = [0, 0]
+pillar_height_voxels = 40
+pillar_radius_voxels = 3
+protection_radius_voxels = 64
+pillar_material = "Stone"
 
 [terrain_diffusion]
 precision = "float16"

@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 18
+schema_version = 19
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -107,8 +107,14 @@ database = "../tmp/world-state/schema-{edit_schema}/{world_id}-{source_hash}.sql
 change_queue_capacity = 256
 
 [spawn]
-# Must lie inside the selected source's valid coverage. Startup samples this exact coordinate.
+# Must lie inside the selected source's valid coverage. New players begin on a server-authored
+# 4-metre stone pillar whose footprint appears in canonical chunks and far-surface products.
 xz_voxels = [0, 0]
+pillar_height_voxels = 40
+pillar_radius_voxels = 3
+# Protect 6.4 metres around the pillar from both digging and placement.
+protection_radius_voxels = 64
+pillar_material = "Stone"
 
 [terrain_diffusion]
 # Omit model_cache to use ~/Library/Caches/voxels/terrain-diffusion on macOS.

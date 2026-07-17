@@ -3,7 +3,7 @@
 use crate::{
     EnvironmentConfig, LoadedWorldServiceConfig, WorldServiceConfig, WorldServiceConfigError,
     WorldServiceSourceError,
-    edits::{ChunkEditSnapshot, EditAuthority, LoadedPlayer, SurfaceEditSnapshot},
+    edits::{ChunkEditSnapshot, EditAuthority, LoadedPlayer, ProtectedSpawn, SurfaceEditSnapshot},
     presence::{PoseAdmission, PresenceHub, PresenceStreamState},
     traffic::{ClientTrafficRegistry, ClientTrafficShaper, TrafficPriority},
 };
@@ -29,15 +29,15 @@ use voxels_world::protocol::{
     ChunkBatchItem, ChunkBatchRequest, EditSessionId, EncodedChunkBatchItem,
     EncodedSurfaceTileBatchItem, FRAME_FRAGMENT_OVERHEAD_BYTES, PlayerIdentity, PlayerResume,
     PresenceOpened, PresencePong, ResyncRequired, SpawnPoint, SurfaceTileBatchItem,
-    SurfaceTileBatchRequest, WorldCapabilities, WorldEnvironmentSnapshot, WorldOpened, cancel_kind,
-    chunk_batch_kind, decode_cancel, decode_chunk_batch, decode_edit_command, decode_open_presence,
-    decode_open_world, decode_player_pose, decode_presence_ping, decode_surface_tile_batch,
-    edit_command_kind, encode_chunk_batch_item, encode_chunk_batch_result_from_items,
-    encode_edit_commit, encode_error, encode_frame_fragment, encode_presence_opened,
-    encode_presence_pong, encode_resync_required, encode_surface_tile_batch_item,
-    encode_surface_tile_batch_result_from_items, encode_world_opened, message_kind,
-    message_request_id, open_presence_kind, open_world_kind, player_pose_kind, presence_ping_kind,
-    surface_tile_batch_kind,
+    SurfaceTileBatchRequest, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
+    WorldOpened, cancel_kind, chunk_batch_kind, decode_cancel, decode_chunk_batch,
+    decode_edit_command, decode_open_presence, decode_open_world, decode_player_pose,
+    decode_presence_ping, decode_surface_tile_batch, edit_command_kind, encode_chunk_batch_item,
+    encode_chunk_batch_result_from_items, encode_edit_commit, encode_error, encode_frame_fragment,
+    encode_presence_opened, encode_presence_pong, encode_resync_required,
+    encode_surface_tile_batch_item, encode_surface_tile_batch_result_from_items,
+    encode_world_opened, message_kind, message_request_id, open_presence_kind, open_world_kind,
+    player_pose_kind, presence_ping_kind, surface_tile_batch_kind,
 };
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest, WORLD_SCHEMA_VERSION,
@@ -93,6 +93,7 @@ impl WorldServer {
             ),
         }
         .map_err(|error| WorldServerError::Edits(error.to_string()))?;
+        edits.install_protected_spawn(world.protected_spawn.clone());
         let capacity = usize::from(config.transport.global_queue_capacity);
         let (generation_tx, generation_rx) = mpsc::channel(capacity);
         let semaphore = Arc::new(Semaphore::new(usize::from(
@@ -246,9 +247,21 @@ fn prepare_world(
     config: &WorldServiceConfig,
     source: &dyn WorldSourceEngine,
 ) -> Result<WorldBootstrap, WorldServerError> {
+    let pillar_radius = i32::from(config.spawn.pillar_radius_voxels);
+    let sample_edge = u32::from(config.spawn.pillar_radius_voxels)
+        .checked_mul(2)
+        .and_then(|edge| edge.checked_add(1))
+        .ok_or(WorldServerError::InvalidSpawnProduct)?;
     let spawn_request = SurfaceSampleBlockRequest {
-        origin: config.spawn.xz_voxels,
-        sample_shape: [1, 1],
+        origin: [
+            config.spawn.xz_voxels[0]
+                .checked_sub(pillar_radius)
+                .ok_or(WorldServerError::InvalidSpawnProduct)?,
+            config.spawn.xz_voxels[1]
+                .checked_sub(pillar_radius)
+                .ok_or(WorldServerError::InvalidSpawnProduct)?,
+        ],
+        sample_shape: [sample_edge, sample_edge],
     };
     let result = source
         .generate_batch(WorldProductBatch {
@@ -277,11 +290,57 @@ fn prepare_world(
         return Err(WorldServerError::InvalidSpawnProduct);
     }
     let sample = block
-        .samples()
-        .first()
-        .copied()
+        .sample(config.spawn.xz_voxels[0], config.spawn.xz_voxels[1])
         .ok_or(WorldServerError::InvalidSpawnProduct)?;
-    validate_spawn_chunk(config, source, sample.height, sample.water_level)?;
+    let pillar_base = block
+        .samples()
+        .iter()
+        .map(|sample| {
+            sample
+                .water_level
+                .unwrap_or(sample.height)
+                .max(sample.height)
+        })
+        .max()
+        .ok_or(WorldServerError::InvalidSpawnProduct)?;
+    let pillar_top = pillar_base
+        .checked_add(i32::from(config.spawn.pillar_height_voxels))
+        .ok_or(WorldServerError::InvalidSpawnProduct)?;
+    let mut pillar_overrides = Vec::new();
+    for z in spawn_request.origin[1]
+        ..spawn_request.origin[1]
+            .checked_add(
+                i32::try_from(sample_edge).map_err(|_| WorldServerError::InvalidSpawnProduct)?,
+            )
+            .ok_or(WorldServerError::InvalidSpawnProduct)?
+    {
+        for x in spawn_request.origin[0]
+            ..spawn_request.origin[0]
+                .checked_add(
+                    i32::try_from(sample_edge)
+                        .map_err(|_| WorldServerError::InvalidSpawnProduct)?,
+                )
+                .ok_or(WorldServerError::InvalidSpawnProduct)?
+        {
+            let dx = i64::from(x) - i64::from(config.spawn.xz_voxels[0]);
+            let dz = i64::from(z) - i64::from(config.spawn.xz_voxels[1]);
+            if dx * dx + dz * dz > i64::from(pillar_radius) * i64::from(pillar_radius) {
+                continue;
+            }
+            let column = block
+                .sample(x, z)
+                .ok_or(WorldServerError::InvalidSpawnProduct)?;
+            let first_y = column
+                .height
+                .checked_add(1)
+                .ok_or(WorldServerError::InvalidSpawnProduct)?;
+            pillar_overrides.extend((first_y..=pillar_top).map(|y| VoxelMutation {
+                coord: voxels_world::VoxelCoord::new(x, y, z),
+                material: config.spawn.pillar_material,
+            }));
+        }
+    }
+    validate_spawn_chunk(config, source, pillar_top, None)?;
     let manifest = WorldManifest {
         world_id: config.canonical_world_id(),
         seed: config.world_seed,
@@ -306,14 +365,19 @@ fn prepare_world(
         spawn: SpawnPoint {
             x: config.spawn.xz_voxels[0],
             z: config.spawn.xz_voxels[1],
-            height: sample.height,
+            height: pillar_top,
             water_level: sample.water_level,
-            material: sample.material,
+            material: config.spawn.pillar_material,
             region: sample.region,
             moisture: sample.moisture,
             temperature: sample.temperature,
             ridge: sample.ridge,
         },
+        protected_spawn: ProtectedSpawn::new(
+            config.spawn.xz_voxels,
+            config.spawn.protection_radius_voxels,
+            pillar_overrides,
+        ),
     })
 }
 
@@ -322,6 +386,7 @@ struct WorldBootstrap {
     manifest: WorldManifest,
     capabilities: WorldCapabilities,
     spawn: SpawnPoint,
+    protected_spawn: ProtectedSpawn,
 }
 
 impl WorldBootstrap {
@@ -2595,6 +2660,10 @@ mod tests {
             edits: EditPersistenceConfig::default(),
             spawn: SpawnConfig {
                 xz_voxels: [13, -21],
+                pillar_height_voxels: 1,
+                pillar_radius_voxels: 1,
+                protection_radius_voxels: 1,
+                ..SpawnConfig::default()
             },
             terrain_diffusion: TerrainDiffusionProviderConfig::default(),
         }
@@ -2779,11 +2848,16 @@ mod tests {
         assert_eq!(opened.recommended_in_flight_batches, 2);
         assert_eq!(opened.identity, identity);
         assert!(opened.capabilities.contains(WorldCapabilities::SURFACE_LOD));
+        let spawn_top = VoxelCoord::new(opened.spawn.x, opened.spawn.height, opened.spawn.z);
+        let expected_eye_y = (opened.spawn.height + 1) as f32 * voxels_world::VOXEL_SIZE_METRES
+            + DEFAULT_PLAYER_EYE_HEIGHT_METRES
+            + 0.02;
+        assert!((opened.player_resume.eye_position_metres[1] - expected_eye_y).abs() < 0.000_1);
 
         let batch = ChunkBatchRequest {
             request_id: 9,
             priority: WorldProductPriority::VisibleChunk,
-            coords: vec![ChunkCoord::new(0, 0, 0)],
+            coords: vec![spawn_top.chunk()],
         };
         socket
             .send(ClientMessage::Binary(encode_chunk_batch(&batch)?.into()))
@@ -2793,6 +2867,9 @@ mod tests {
         assert_eq!(result.request_id, batch.request_id);
         assert_eq!(result.items.len(), 1);
         assert!(result.items[0].result.is_ok());
+        let chunk = &result.items[0].result.as_ref().unwrap().chunk;
+        let [x, y, z] = spawn_top.local();
+        assert_eq!(chunk.get(x, y, z), config.spawn.pillar_material);
 
         let cached_batch = ChunkBatchRequest {
             request_id: 10,
@@ -3219,7 +3296,7 @@ mod tests {
         );
 
         let dig_hits = (0..BUILDER_COUNT)
-            .map(|index| VoxelCoord::new(spawn.x + index as i32 * 6, spawn.height, spawn.z))
+            .map(|index| VoxelCoord::new(spawn.x + 4 + index as i32 * 6, spawn.height - 1, spawn.z))
             .collect::<Vec<_>>();
         for (index, hit) in dig_hits.iter().copied().enumerate() {
             worlds[index]
@@ -3263,7 +3340,7 @@ mod tests {
 
         let tower_base = spawn.water_level.unwrap_or(spawn.height).max(spawn.height) + 1;
         let tower = (0..BUILDER_COUNT)
-            .map(|index| VoxelCoord::new(spawn.x, tower_base + index as i32, spawn.z))
+            .map(|index| VoxelCoord::new(spawn.x + 4, tower_base + index as i32, spawn.z))
             .collect::<Vec<_>>();
         for (index, coord) in tower.iter().copied().enumerate() {
             worlds[index]
@@ -3484,8 +3561,8 @@ mod tests {
         }
 
         let hit = VoxelCoord::new(
-            editor_opened.spawn.x,
-            editor_opened.spawn.height,
+            editor_opened.spawn.x + 4,
+            editor_opened.spawn.height - 1,
             editor_opened.spawn.z,
         );
         let dig_coords = ((hit.x - 2)..=(hit.x + 2))
