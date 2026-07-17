@@ -26,7 +26,7 @@ import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./vxwp-contract.mj
 import { worldServiceBuildCargoArgs } from "./world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const RESULT_SCHEMA_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 3;
 const OUTPUT_DIRECTORY = path.resolve("target/harness/bots");
 const SAMPLE_INTERVAL_MS = 250;
 const OBSERVER_SAMPLE_INTERVAL_MS = 500;
@@ -199,14 +199,28 @@ async function collectObserverSamples(observer, expectedBots, started, done) {
   if (observer === null) return null;
   const samples = [];
   const frameMilliseconds = [];
-  let settledMs = null;
+  let rosterReadyMs = null;
+  let interactiveWorldReadyMs = null;
+  let fullWorldReadyMs = null;
   while (!done.value) {
     const values = assertSnapshotSchema(
       await observer.page.evaluate(() => globalThis.__VOXELS__.snapshot()),
     );
     const remoteAvatars = values[SNAPSHOT.remoteAvatars];
-    if (settledMs === null && remoteAvatars === expectedBots) {
-      settledMs = performance.now() - started;
+    const elapsedMs = performance.now() - started;
+    if (rosterReadyMs === null && remoteAvatars === expectedBots) {
+      rosterReadyMs = elapsedMs;
+    }
+    if (interactiveWorldReadyMs === null && values[SNAPSHOT.interactiveLodsReady] === 1) {
+      interactiveWorldReadyMs = elapsedMs;
+    }
+    if (
+      fullWorldReadyMs === null &&
+      values[SNAPSHOT.allLodsReady] === 1 &&
+      values[SNAPSHOT.surfaceInFlight] === 0 &&
+      values[SNAPSHOT.pendingJobs] === 0
+    ) {
+      fullWorldReadyMs = elapsedMs;
     }
     for (let index = 0; index < values[SNAPSHOT.sampleCount]; index += 1) {
       frameMilliseconds.push(values[FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH]);
@@ -221,13 +235,21 @@ async function collectObserverSamples(observer, expectedBots, started, done) {
       gpuTotalMs: values[SNAPSHOT.gpuTotalMs],
       wasmCommittedMiB: values[SNAPSHOT.wasmCommittedMiB],
       coreGpuMiB: values[SNAPSHOT.coreGpuMiB],
+      residentChunks: values[SNAPSHOT.residentChunks],
       visibleChunks: values[SNAPSHOT.visibleChunks],
       drawCalls: values[SNAPSHOT.drawCalls],
+      pendingJobs: values[SNAPSHOT.pendingJobs],
+      surfaceInFlight: values[SNAPSHOT.surfaceInFlight],
+      interactiveLodsReady: values[SNAPSHOT.interactiveLodsReady] === 1,
+      allLodsReady: values[SNAPSHOT.allLodsReady] === 1,
     });
     await observer.page.waitForTimeout(OBSERVER_SAMPLE_INTERVAL_MS);
   }
+  const final = samples.at(-1);
   return {
-    settledMs,
+    rosterReadyMs,
+    interactiveWorldReadyMs,
+    fullWorldReadyMs,
     maxRemoteAvatars: Math.max(0, ...samples.map((sample) => sample.remoteAvatars)),
     frameMs: numericSummary(frameMilliseconds),
     cpuMs: numericSummary(samples.map((sample) => sample.cpuMs)),
@@ -236,6 +258,17 @@ async function collectObserverSamples(observer, expectedBots, started, done) {
     ),
     wasmCommittedMiB: numericSummary(samples.map((sample) => sample.wasmCommittedMiB)),
     coreGpuMiB: numericSummary(samples.map((sample) => sample.coreGpuMiB)),
+    finalWorld:
+      final === undefined
+        ? null
+        : {
+            residentChunks: final.residentChunks,
+            visibleChunks: final.visibleChunks,
+            pendingJobs: final.pendingJobs,
+            surfaceInFlight: final.surfaceInFlight,
+            interactiveLodsReady: final.interactiveLodsReady,
+            allLodsReady: final.allLodsReady,
+          },
     samples,
     errors: [...observer.errors],
   };
@@ -340,8 +373,8 @@ function markdownReport(result) {
     "",
     `Mode: **${result.options.mode}** · layout: **${result.options.layout}** · duration: **${result.options.durationSeconds}s per population** · source: **${result.options.source}**`,
     "",
-    "| Bots | Server CPU p95 | Server RSS peak | Bot CPU p95 | TCP down/up | VXWP down/up | DB growth | Edits accepted | Mutations | Chunk p95 | Edit p95 | Visible | Observer frame p95 |",
-    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| Bots | Server CPU p95 | Server RSS peak | Bot CPU p95 | TCP down/up | VXWP down/up | DB growth | Edits accepted | Mutations | Chunk p95 | Edit p95 | Visible | Roster ready | Observer LOD | Observer frame p95 |",
+    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ];
   for (const stage of result.stages) {
     const bot = stage.botReport;
@@ -357,8 +390,22 @@ function markdownReport(result) {
     ).p95;
     const observerFrame =
       stage.observer === null ? "off" : `${stage.observer.frameMs.p95.toFixed(1)} ms`;
+    const rosterReady =
+      stage.observer === null
+        ? "off"
+        : stage.observer.rosterReadyMs === null
+          ? "missing"
+          : `${stage.observer.rosterReadyMs.toFixed(0)} ms`;
+    const observerLod =
+      stage.observer === null
+        ? "off"
+        : stage.observer.fullWorldReadyMs !== null
+          ? `full ${stage.observer.fullWorldReadyMs.toFixed(0)} ms`
+          : stage.observer.interactiveWorldReadyMs !== null
+            ? `interactive ${stage.observer.interactiveWorldReadyMs.toFixed(0)} ms`
+            : `partial ${stage.observer.finalWorld?.residentChunks ?? 0} resident`;
     lines.push(
-      `| ${stage.count} | ${stage.process.service.cpuPercent.p95.toFixed(1)}% | ${stage.process.service.rssMiB.max.toFixed(1)} MiB | ${stage.process.bots.cpuPercent.p95.toFixed(1)}% | ${(stage.network.downstream.streamBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.streamBytes / 1_048_576).toFixed(2)} MiB | ${(stage.network.downstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} MiB | ${(stage.database.deltaBytes / 1_024).toFixed(1)} KiB | ${bot.editsAccepted} | ${bot.mutationsCommitted} | ${chunkP95.toFixed(1)} ms | ${editP95.toFixed(1)} ms | ${bot.maxVisiblePlayers} | ${observerFrame} |`,
+      `| ${stage.count} | ${stage.process.service.cpuPercent.p95.toFixed(1)}% | ${stage.process.service.rssMiB.max.toFixed(1)} MiB | ${stage.process.bots.cpuPercent.p95.toFixed(1)}% | ${(stage.network.downstream.streamBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.streamBytes / 1_048_576).toFixed(2)} MiB | ${(stage.network.downstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} MiB | ${(stage.database.deltaBytes / 1_024).toFixed(1)} KiB | ${bot.editsAccepted} | ${bot.mutationsCommitted} | ${chunkP95.toFixed(1)} ms | ${editP95.toFixed(1)} ms | ${bot.maxVisiblePlayers} | ${rosterReady} | ${observerLod} | ${observerFrame} |`,
     );
   }
   lines.push(
@@ -391,7 +438,7 @@ function stageViolations(stage, browserEnabled) {
   if (rejected > 0) violations.push(`${stage.count} bots: ${rejected} edits were rejected`);
   if (resyncs > 0) violations.push(`${stage.count} bots: ${resyncs} clients required resync`);
   if (stage.observer !== null) {
-    if (stage.observer.settledMs === null || stage.observer.maxRemoteAvatars !== stage.count) {
+    if (stage.observer.rosterReadyMs === null || stage.observer.maxRemoteAvatars !== stage.count) {
       violations.push(
         `${stage.count} bots: browser observed at most ${stage.observer.maxRemoteAvatars} avatars`,
       );
