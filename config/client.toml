@@ -1,12 +1,17 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 15
+schema_version = 16
+
+[developer]
+# Enables local-only time/weather visualization overrides and server-authorized creative flight.
+# These controls never change the shared world environment or grant inventory materials.
+controls_enabled = true
 
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
 [world]
-endpoint = "ws://127.0.0.1:9777/v14/world"
-presence_endpoint = "ws://127.0.0.1:9777/v14/presence"
-subprotocol = "voxels.world.v14"
+endpoint = "ws://127.0.0.1:9777/v15/world"
+presence_endpoint = "ws://127.0.0.1:9777/v15/presence"
+subprotocol = "voxels.world.v15"
 auth_subprotocol_token = "replace-with-a-random-local-token"
 max_in_flight_batches = 8
 buffered_amount_high_water_bytes = 8388608

@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 use uuid::Uuid;
 use voxels_world::protocol::{
-    PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING, PlayerId,
-    PlayerIdentity, PlayerPoseUpdate, PlayerPresenceState, PlayerPresenceUpdate, PlayerResume,
-    PresenceDelta, PresenceSessionId, encode_presence_delta,
+    PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_FLYING, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING,
+    PlayerId, PlayerIdentity, PlayerPoseUpdate, PlayerPresenceState, PlayerPresenceUpdate,
+    PlayerResume, PresenceDelta, PresenceSessionId, encode_presence_delta,
 };
 use voxels_world::{VOXEL_SIZE_METRES, VoxelCoord};
 
@@ -358,6 +358,9 @@ impl PresenceHub {
         let vertical_credit_limit = movement_slack + vertical_speed * credit_window_seconds;
         if !valid_pose(pose) {
             return PoseAdmission::Invalid("player pose fields are invalid");
+        }
+        if pose.flags & PLAYER_POSE_FLYING != 0 && !self.gameplay.allow_creative_flight {
+            return PoseAdmission::Invalid("creative flight is not enabled for this world");
         }
         let horizontal_velocity_squared = pose.linear_velocity_metres_per_second[0].mul_add(
             pose.linear_velocity_metres_per_second[0],
@@ -825,7 +828,10 @@ fn valid_resume(resume: PlayerResume) -> bool {
 
 fn valid_pose(pose: PlayerPoseUpdate) -> bool {
     const CLIENT_FLAGS: u16 =
-        PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_DISCONTINUITY;
+        PLAYER_POSE_GROUNDED
+            | PLAYER_POSE_SWIMMING
+            | PLAYER_POSE_DISCONTINUITY
+            | PLAYER_POSE_FLYING;
     pose.sequence != 0
         && valid_position(pose.eye_position_metres)
         && pose
@@ -1130,6 +1136,44 @@ mod tests {
         vertical.linear_velocity_metres_per_second = [0.0, -12.01, 0.0];
         assert_eq!(
             hub.accept_pose(&attachment, vertical),
+            PoseAdmission::Invalid("player velocity exceeds the authoritative limit")
+        );
+    }
+
+    #[test]
+    fn creative_flight_requires_world_authority_and_keeps_movement_limits() {
+        let disabled = security_hub(GameplayConfig::default());
+        let disabled_claim = disabled
+            .join(&identity(21), resume(0.0, 1.62, 0.0))
+            .expect("join");
+        let disabled_attachment = disabled
+            .attach(disabled_claim.session_id)
+            .expect("attach");
+        let mut flying = pose(1, 0.0, 0.0);
+        flying.flags = PLAYER_POSE_FLYING;
+        assert_eq!(
+            disabled.accept_pose(&disabled_attachment, flying),
+            PoseAdmission::Invalid("creative flight is not enabled for this world")
+        );
+
+        let enabled = security_hub(GameplayConfig {
+            allow_creative_flight: true,
+            ..GameplayConfig::default()
+        });
+        let enabled_claim = enabled
+            .join(&identity(22), resume(0.0, 1.62, 0.0))
+            .expect("join");
+        let enabled_attachment = enabled.attach(enabled_claim.session_id).expect("attach");
+        assert_eq!(
+            enabled.accept_pose(&enabled_attachment, flying),
+            PoseAdmission::Accepted
+        );
+
+        let mut too_fast = pose(2, 0.0, 0.0);
+        too_fast.flags = PLAYER_POSE_FLYING;
+        too_fast.linear_velocity_metres_per_second = [9.01, 0.0, 0.0];
+        assert_eq!(
+            enabled.accept_pose(&enabled_attachment, too_fast),
             PoseAdmission::Invalid("player velocity exceeds the authoritative limit")
         );
     }

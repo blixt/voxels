@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 14;
+pub const PROTOCOL_VERSION: u16 = 15;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -73,6 +73,8 @@ impl WorldCapabilities {
     pub const AUTHORED_ROUTES: Self = Self(1 << 6);
     pub const CINDER_VAULT: Self = Self(1 << 7);
     pub const PLAYER_PRESENCE: Self = Self(1 << 8);
+    /// The server permits bounded, collision-aware creative flight for this world connection.
+    pub const CREATIVE_FLIGHT: Self = Self(1 << 9);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -254,8 +256,9 @@ impl MaterialInventory {
 pub const PLAYER_POSE_GROUNDED: u16 = 1 << 0;
 pub const PLAYER_POSE_SWIMMING: u16 = 1 << 1;
 pub const PLAYER_POSE_DISCONTINUITY: u16 = 1 << 2;
+pub const PLAYER_POSE_FLYING: u16 = 1 << 3;
 const PLAYER_POSE_FLAGS: u16 =
-    PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_DISCONTINUITY;
+    PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_DISCONTINUITY | PLAYER_POSE_FLYING;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpenPresence {
@@ -3536,7 +3539,8 @@ mod tests {
         let opened = WorldOpened {
             manifest: WorldManifest::procedural_v16(WorldId::from_bytes([7; 16]), 42),
             capabilities: WorldCapabilities::CANONICAL_CHUNKS
-                .union(WorldCapabilities::AUTHORED_ROUTES),
+                .union(WorldCapabilities::AUTHORED_ROUTES)
+                .union(WorldCapabilities::CREATIVE_FLIGHT),
             environment: WorldEnvironmentSnapshot {
                 sample_server_time_ms: 12_345,
                 day_fraction: 0.625,
@@ -3618,7 +3622,7 @@ mod tests {
             linear_velocity_metres_per_second: [2.0, 0.0, -1.0],
             look_yaw_radians: 0.7,
             look_pitch_radians: -0.2,
-            flags: PLAYER_POSE_GROUNDED,
+            flags: PLAYER_POSE_FLYING,
         };
         assert_eq!(
             decode_player_pose(&encode_player_pose(pose).expect("encode pose")),

@@ -30,7 +30,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 13;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 14;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 5;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -143,6 +143,9 @@ impl Default for PresenceConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GameplayConfig {
+    /// Advertise and accept the bounded creative-flight pose flag. This is intended for authored
+    /// development worlds; movement credit and velocity limits remain authoritative.
+    pub allow_creative_flight: bool,
     /// Maximum ray interaction distance before bounded latency tolerance is added.
     pub interaction_reach_centimetres: u16,
     /// Hard extra distance allowed for ordering skew between world and presence WebSockets.
@@ -162,6 +165,7 @@ pub struct GameplayConfig {
 impl Default for GameplayConfig {
     fn default() -> Self {
         Self {
+            allow_creative_flight: false,
             interaction_reach_centimetres: 500,
             interaction_latency_slack_centimetres: 100,
             interaction_pose_max_age_ms: 1_000,
@@ -878,7 +882,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 13
+schema_version = 14
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -913,6 +917,7 @@ prediction_error_centimetres = 25
 look_error_milliradians = 175
 
 [gameplay]
+allow_creative_flight = false
 interaction_reach_centimetres = 500
 interaction_latency_slack_centimetres = 100
 interaction_pose_max_age_ms = 1000
@@ -997,12 +1002,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 13", "schema_version = 12");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 14", "schema_version = 13");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 13,
-                found: 12,
+                expected: 14,
+                found: 13,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");

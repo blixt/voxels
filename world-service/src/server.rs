@@ -43,9 +43,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v14/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v14/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v14";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v15/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v15/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v15";
 const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
@@ -278,13 +278,19 @@ fn prepare_world(
         source: source.identity().clone(),
     };
     manifest.validate()?;
+    let capabilities = WorldCapabilities::CANONICAL_CHUNKS
+        .union(WorldCapabilities::SURFACE_LOD)
+        .union(WorldCapabilities::SERVER_EDITS)
+        .union(WorldCapabilities::ENVIRONMENT)
+        .union(WorldCapabilities::PLAYER_PRESENCE);
+    let capabilities = if config.gameplay.allow_creative_flight {
+        capabilities.union(WorldCapabilities::CREATIVE_FLIGHT)
+    } else {
+        capabilities
+    };
     Ok(WorldBootstrap {
         manifest,
-        capabilities: WorldCapabilities::CANONICAL_CHUNKS
-            .union(WorldCapabilities::SURFACE_LOD)
-            .union(WorldCapabilities::SERVER_EDITS)
-            .union(WorldCapabilities::ENVIRONMENT)
-            .union(WorldCapabilities::PLAYER_PRESENCE),
+        capabilities,
         spawn: SpawnPoint {
             x: config.spawn.xz_voxels[0],
             z: config.spawn.xz_voxels[1],
@@ -2233,7 +2239,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v14, test-local-token"),
+            HeaderValue::from_static("voxels.world.v15, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -3193,7 +3199,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v14, test-local-token"),
+            HeaderValue::from_static("voxels.world.v15, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -3228,7 +3234,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v14, test-local-token"),
+            HeaderValue::from_static("voxels.world.v15, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket

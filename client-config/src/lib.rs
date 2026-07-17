@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 15;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 16;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -31,6 +31,7 @@ const MAX_PRESENCE_BUFFERED_BYTES: u32 = 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
     pub schema_version: u32,
+    pub developer: DeveloperConfig,
     pub world: WorldTransportConfig,
     pub multiplayer: MultiplayerConfig,
     pub runtime: RuntimeConfig,
@@ -38,6 +39,14 @@ pub struct ClientConfig {
     pub rendering: RenderingConfig,
     pub diagnostics: DiagnosticsConfig,
     pub profiling: ProfilingConfig,
+}
+
+/// Client-side developer affordances. Server-advertised capabilities remain the authority for
+/// actions such as creative flight; this flag only decides whether the local UI may request them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeveloperConfig {
+    pub controls_enabled: bool,
 }
 
 /// How the client reaches the authoritative world service. Provider selection deliberately is not
@@ -643,10 +652,13 @@ mod tests {
     fn valid_config() -> ClientConfig {
         ClientConfig {
             schema_version: CLIENT_CONFIG_SCHEMA_VERSION,
+            developer: DeveloperConfig {
+                controls_enabled: true,
+            },
             world: WorldTransportConfig {
-                endpoint: "ws://127.0.0.1:9777/v14/world".to_owned(),
-                presence_endpoint: "ws://127.0.0.1:9777/v14/presence".to_owned(),
-                subprotocol: "voxels.world.v14".to_owned(),
+                endpoint: "ws://127.0.0.1:9777/v15/world".to_owned(),
+                presence_endpoint: "ws://127.0.0.1:9777/v15/presence".to_owned(),
+                subprotocol: "voxels.world.v15".to_owned(),
                 auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
                 max_in_flight_batches: 8,
                 buffered_amount_high_water_bytes: 8 * 1024 * 1024,
@@ -767,18 +779,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 15", "schema_version = 14");
+        let wrong_schema = fixture.replace("schema_version = 16", "schema_version = 15");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 14,
+                found: 15,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 15",
-            "schema_version = 15\nunknown_root = true",
+            "schema_version = 16",
+            "schema_version = 16\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),

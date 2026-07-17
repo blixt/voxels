@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 13
+schema_version = 14
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -61,6 +61,7 @@ prediction_error_centimetres = 25
 look_error_milliradians = 175
 
 [gameplay]
+allow_creative_flight = true
 interaction_reach_centimetres = 500
 interaction_latency_slack_centimetres = 100
 interaction_pose_max_age_ms = 1000
@@ -108,6 +109,10 @@ cloudy, overcast, rain, storm, and clearing conditions. Coverage is the clear-sk
 the cloud base/top bound the volumetric layer. The derived weather drives sky color, sunlight,
 shadows, fog, cloud density, precipitation, and cold-region snow from one revisioned environment
 snapshot without per-frame network messages.
+
+`allow_creative_flight` advertises a world capability and accepts the corresponding player-pose
+flag. Flight remains subject to the same horizontal/vertical speed and movement-credit budgets;
+disabling it removes the capability and rejects flying poses.
 
 `float16` is the high-performance default; `float32` is available for diagnostics. If
 `model_cache` is omitted on macOS, the service loads the immutable pinned revision from

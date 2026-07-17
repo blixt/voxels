@@ -6,12 +6,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use voxels_client_config::{MultiplayerConfig, WorldTransportConfig};
 use voxels_core::{
-    CameraState, PresenceInterpolationConfig, RemoteAvatarPose, RemotePlayerId, RemotePoseSample,
-    RemotePoseUpdate, RemotePresenceDelta, RemotePresenceTimeline,
+    CameraState, LocomotionMode, PresenceInterpolationConfig, RemoteAvatarPose, RemotePlayerId,
+    RemotePoseSample, RemotePoseUpdate, RemotePresenceDelta, RemotePresenceTimeline,
 };
 use voxels_world::protocol::{
-    self, OpenPresence, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING, PlayerId, PlayerPoseUpdate,
-    PresencePing, PresencePong, PresenceSessionId, WorldOpened,
+    self, OpenPresence, PLAYER_POSE_FLYING, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING, PlayerId,
+    PlayerPoseUpdate, PresencePing, PresencePong, PresenceSessionId, WorldOpened,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -471,6 +471,9 @@ impl PresenceInner {
         }
         if camera.fluid_state().swimming {
             flags |= PLAYER_POSE_SWIMMING;
+        }
+        if camera.locomotion() == LocomotionMode::CreativeFlight {
+            flags |= PLAYER_POSE_FLYING;
         }
         let sequence = self.next_pose_sequence.get().max(1);
         let clock = self.clock.get();
