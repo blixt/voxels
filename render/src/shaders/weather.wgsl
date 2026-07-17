@@ -134,7 +134,9 @@ fn vs_main(
     let head_ndc = head_clip.xy / head_clip.w;
     let focal_pixels = frame.viewport_voxel.y / 1.349017;
     let physical_size = mix(0.045, 0.13, random_shape);
-    let radius_pixels = clamp(physical_size * focal_pixels / max(view_depth, 0.1), 0.55, 5.0);
+    let projected_radius_pixels = physical_size * focal_pixels / max(view_depth, 0.1);
+    let resolved_coverage = smoothstep(0.85, 1.35, projected_radius_pixels);
+    let radius_pixels = clamp(projected_radius_pixels, 0.85, 5.0);
     let local = vec2<f32>(coordinates.x, coordinates.y * 2.0 - 1.0);
     let angle = output.flake_phase;
     let rotated = vec2<f32>(
@@ -149,7 +151,10 @@ fn vs_main(
     );
     output.local = local;
     let snow_color = mix(vec3<f32>(0.72, 0.80, 0.90), vec3<f32>(0.94, 0.97, 1.0), random_x);
-    output.tint_alpha = vec4<f32>(snow_color, alpha * mix(0.34, 0.72, frame.weather.y));
+    output.tint_alpha = vec4<f32>(
+      snow_color,
+      alpha * resolved_coverage * mix(0.34, 0.72, frame.weather.y),
+    );
     return output;
   }
 
@@ -164,6 +169,7 @@ fn vs_main(
   let head_ndc = head_clip.xy / head_clip.w;
   let tail_ndc = tail_clip.xy / tail_clip.w;
   let segment_pixels = (head_ndc - tail_ndc) * frame.viewport_voxel.xy * 0.5;
+  let resolved_coverage = smoothstep(1.5, 3.0, length(segment_pixels));
   let perpendicular = normalize(vec2<f32>(-segment_pixels.y, segment_pixels.x) + vec2<f32>(0.0001, 0.0));
   let width_pixels = clamp(mix(0.32, 0.92, random_x) * 6.0 / sqrt(max(view_depth, 1.0)), 0.34, 1.08);
   let endpoint_clip = mix(tail_clip, head_clip, coordinates.y);
@@ -181,7 +187,10 @@ fn vs_main(
     vec3<f32>(0.68, 0.76, 0.84),
     frame.weather.y * 0.42 + backlight * 0.28,
   );
-  output.tint_alpha = vec4<f32>(rain_color, alpha * mix(0.22, 0.48, frame.weather.y));
+  output.tint_alpha = vec4<f32>(
+    rain_color,
+    alpha * resolved_coverage * mix(0.22, 0.48, frame.weather.y),
+  );
   return output;
 }
 

@@ -289,10 +289,23 @@ mod tests {
         assert!(!weather.contains("frame.camera_time.w / fall_duration"));
         assert!(!weather.contains("frame.camera_time.y +"));
         assert!(weather.contains("frame.view_projection * vec4<f32>(world, 1.0)"));
+        assert!(weather.contains("smoothstep(0.85, 1.35, projected_radius_pixels)"));
+        assert!(weather.contains("smoothstep(1.5, 3.0, length(segment_pixels))"));
         assert!(!weather.contains("world.xz +="));
         assert!(!weather.contains("world.xz ="));
         assert!(!weather.contains("position.xy / frame.viewport_voxel.xy"));
         assert!(!weather.contains("fn rain_layer("));
+    }
+
+    #[test]
+    fn voxel_and_shadow_vertices_convert_shared_integer_corners_only_once() {
+        let voxels = include_str!("shaders/voxels.wgsl");
+        let shadows = include_str!("shaders/shadow.wgsl");
+        for shader in [voxels, shadows] {
+            assert!(shader.contains("@location(0) origin: vec3<i32>"));
+            assert!(shader.contains("vec3<f32>(origin + local)"));
+            assert!(!shader.contains("let world = origin + local"));
+        }
     }
 
     #[test]

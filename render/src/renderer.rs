@@ -265,7 +265,7 @@ const _: () = assert!(size_of::<ShadowFrameUniform>() == 80);
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuQuad {
-    origin: [f32; 3],
+    origin: [i32; 3],
     extent_voxels: [u16; 2],
     material_face: u32,
     ao: u32,
@@ -2149,9 +2149,9 @@ impl Renderer {
         let origin = coord.world_origin();
         let convert = |quad: &Quad| GpuQuad {
             origin: [
-                (origin[0] + i32::from(quad.origin[0])) as f32 * VOXEL_SIZE_METRES,
-                (origin[1] + i32::from(quad.origin[1])) as f32 * VOXEL_SIZE_METRES,
-                (origin[2] + i32::from(quad.origin[2])) as f32 * VOXEL_SIZE_METRES,
+                origin[0] + i32::from(quad.origin[0]),
+                origin[1] + i32::from(quad.origin[1]),
+                origin[2] + i32::from(quad.origin[2]),
             ],
             extent_voxels: quad.extent.map(u16::from),
             material_face: pack_gpu_material_face(u32::from(quad.material), quad.face),
@@ -2262,11 +2262,7 @@ impl Renderer {
             .zip(macro_normals)
             .zip(horizon_profiles)
             .map(|((quad, macro_normal), horizon_profile)| GpuQuad {
-                origin: [
-                    quad.origin[0] as f32 * VOXEL_SIZE_METRES,
-                    quad.origin[1] as f32 * VOXEL_SIZE_METRES,
-                    quad.origin[2] as f32 * VOXEL_SIZE_METRES,
-                ],
+                origin: quad.origin,
                 extent_voxels: quad.extent,
                 material_face: pack_surface_horizon_material(
                     pack_gpu_material_face(
@@ -2284,11 +2280,7 @@ impl Renderer {
             .quads
             .iter()
             .map(|quad| GpuQuad {
-                origin: [
-                    quad.origin[0] as f32 * VOXEL_SIZE_METRES,
-                    quad.origin[1] as f32 * VOXEL_SIZE_METRES,
-                    quad.origin[2] as f32 * VOXEL_SIZE_METRES,
-                ],
+                origin: quad.origin,
                 extent_voxels: quad.extent,
                 material_face: pack_gpu_material_face(
                     u32::from(quad.material.id())
@@ -4061,7 +4053,7 @@ fn append_lod_transition(
                 _ => unreachable!(),
             };
             quads.push(GpuQuad {
-                origin: origin_voxels.map(|value| value as f32 * VOXEL_SIZE_METRES),
+                origin: origin_voxels,
                 extent_voxels: [fine_stride as u16, vertical_extent],
                 material_face: pack_surface_horizon_material(
                     pack_gpu_material_face(
@@ -4099,7 +4091,8 @@ fn gpu_quad_bounds(quads: &[GpuQuad]) -> Option<(glam::Vec3, glam::Vec3)> {
             2 | 3 => glam::Vec3::new(extent.x, VOXEL_SIZE_METRES, extent.y),
             _ => glam::Vec3::new(extent.x, extent.y, VOXEL_SIZE_METRES),
         };
-        let origin = glam::Vec3::from_array(quad.origin);
+        let origin =
+            glam::Vec3::from_array(quad.origin.map(|value| value as f32 * VOXEL_SIZE_METRES));
         minimum = minimum.min(origin);
         maximum = maximum.max(origin + size);
     }
@@ -4738,7 +4731,7 @@ fn fragmentless_depth_pipeline(
 
 fn quad_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint16x2, 2 => Uint32, 3 => Uint32];
+        wgpu::vertex_attr_array![0 => Sint32x3, 1 => Uint16x2, 2 => Uint32, 3 => Uint32];
     wgpu::VertexBufferLayout {
         array_stride: size_of::<GpuQuad>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
@@ -4938,11 +4931,11 @@ mod tests {
         assert_eq!(transitions.quads.len(), 16);
         for quad in &transitions.quads {
             assert_eq!(quad.extent_voxels, [2, 10]);
-            assert_eq!(quad.origin[0], 25.5);
-            assert_eq!(quad.origin[1], 1.1);
+            assert_eq!(quad.origin[0], 255);
+            assert_eq!(quad.origin[1], 11);
             assert_eq!(quad.material_face >> GPU_FACE_SHIFT & 7, 0);
             assert_ne!(quad.ao & SURFACE_MACRO_NORMAL_FLAG, 0);
-            assert_eq!(quad.origin[1] + f32::from(quad.extent_voxels[1]) * 0.1, 2.1);
+            assert_eq!(quad.origin[1] + i32::from(quad.extent_voxels[1]), 21,);
         }
 
         let main = MeshSlice {
@@ -5158,7 +5151,7 @@ mod tests {
             }
         }
         let quad = GpuQuad {
-            origin: [-123.5, 0.25, 8192.0],
+            origin: [-1_235, 3, 81_920],
             extent_voxels: [u16::MAX, 1],
             material_face: pack_gpu_material_face(materials[3], 5),
             ao: u32::MAX,
@@ -5166,6 +5159,28 @@ mod tests {
         let bytes = bytemuck::bytes_of(&quad);
         assert_eq!(bytes.len(), 24);
         assert_eq!(quad.extent_voxels, [u16::MAX, 1]);
+    }
+
+    #[test]
+    fn adjacent_gpu_quads_convert_the_same_integer_corner_to_identical_float_bits() {
+        for origin in (-20_000..=20_000).step_by(97) {
+            for extent in [1_u16, 2, 4, 8, 16, 32, 64, 255] {
+                let left = GpuQuad {
+                    origin: [origin, -31, 47],
+                    extent_voxels: [extent, 1],
+                    material_face: pack_gpu_material_face(u32::from(Material::Grass.id()), 2),
+                    ao: 0,
+                };
+                let right = GpuQuad {
+                    origin: [origin + i32::from(extent), -31, 47],
+                    ..left
+                };
+                let left_endpoint =
+                    (left.origin[0] + i32::from(left.extent_voxels[0])) as f32 * VOXEL_SIZE_METRES;
+                let right_origin = right.origin[0] as f32 * VOXEL_SIZE_METRES;
+                assert_eq!(left_endpoint.to_bits(), right_origin.to_bits());
+            }
+        }
     }
 
     #[test]

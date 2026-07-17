@@ -30,11 +30,11 @@ struct VertexOut {
   @location(4) @interpolate(flat) terrain_lighting: vec2<f32>,
 };
 
-const CORNERS = array<vec2<f32>, 4>(
-  vec2<f32>(0.0, 0.0),
-  vec2<f32>(1.0, 0.0),
-  vec2<f32>(1.0, 1.0),
-  vec2<f32>(0.0, 1.0),
+const CORNERS = array<vec2<i32>, 4>(
+  vec2<i32>(0, 0),
+  vec2<i32>(1, 0),
+  vec2<i32>(1, 1),
+  vec2<i32>(0, 1),
 );
 const STANDARD_DIAGONAL = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
 const FLIPPED_DIAGONAL = array<u32, 6>(0u, 1u, 3u, 1u, 2u, 3u);
@@ -160,28 +160,28 @@ fn surface_wall_macro_blend(world: vec3<f32>) -> f32 {
 @vertex
 fn vs_main(
   @builtin(vertex_index) vertex_index: u32,
-  @location(0) origin: vec3<f32>,
+  @location(0) origin: vec3<i32>,
   @location(1) extent_voxels: vec2<u32>,
   @location(2) material_face: u32,
   @location(3) ao: u32,
 ) -> VertexOut {
   let face = (material_face >> 16u) & 7u;
   let material = material_face & 0xfff8ffffu;
-  let extent = vec2<f32>(extent_voxels) * frame.viewport_voxel.z;
+  let extent = vec2<i32>(extent_voxels);
   let flip = corner_ao(ao, 0u) + corner_ao(ao, 2u) > corner_ao(ao, 1u) + corner_ao(ao, 3u);
   let corner = select(STANDARD_DIAGONAL[vertex_index], FLIPPED_DIAGONAL[vertex_index], flip);
   let uv = CORNERS[corner];
-  var local = vec3<f32>(0.0);
+  var local = vec3<i32>(0);
   var normal = vec3<f32>(0.0);
   switch face {
-    case 0u: { local = vec3<f32>(frame.viewport_voxel.z, uv.y * extent.y, uv.x * extent.x); normal.x = 1.0; }
-    case 1u: { local = vec3<f32>(0.0, uv.y * extent.y, uv.x * extent.x); normal.x = -1.0; }
-    case 2u: { local = vec3<f32>(uv.x * extent.x, frame.viewport_voxel.z, uv.y * extent.y); normal.y = 1.0; }
-    case 3u: { local = vec3<f32>(uv.x * extent.x, 0.0, uv.y * extent.y); normal.y = -1.0; }
-    case 4u: { local = vec3<f32>(uv.x * extent.x, uv.y * extent.y, frame.viewport_voxel.z); normal.z = 1.0; }
-    default: { local = vec3<f32>(uv.x * extent.x, uv.y * extent.y, 0.0); normal.z = -1.0; }
+    case 0u: { local = vec3<i32>(1, uv.y * extent.y, uv.x * extent.x); normal.x = 1.0; }
+    case 1u: { local = vec3<i32>(0, uv.y * extent.y, uv.x * extent.x); normal.x = -1.0; }
+    case 2u: { local = vec3<i32>(uv.x * extent.x, 1, uv.y * extent.y); normal.y = 1.0; }
+    case 3u: { local = vec3<i32>(uv.x * extent.x, 0, uv.y * extent.y); normal.y = -1.0; }
+    case 4u: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 1); normal.z = 1.0; }
+    default: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0); normal.z = -1.0; }
   }
-  let world = origin + local;
+  let world = vec3<f32>(origin + local) * frame.viewport_voxel.z;
   let surface_macro_normal = (ao & 0x01000000u) != 0u;
   var terrain_lighting = vec2<f32>(1.0);
   if surface_macro_normal {
