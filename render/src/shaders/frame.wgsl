@@ -50,17 +50,17 @@ fn atmosphere_value_noise(position: vec2<f32>) -> f32 {
   return mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y);
 }
 
-fn atmosphere_periodic_gradient(hash: f32) -> vec2<f32> {
-  switch u32(floor(hash * 8.0)) {
-    case 0u: { return vec2<f32>(1.0, 0.0); }
-    case 1u: { return vec2<f32>(0.70710678, 0.70710678); }
-    case 2u: { return vec2<f32>(0.0, 1.0); }
-    case 3u: { return vec2<f32>(-0.70710678, 0.70710678); }
-    case 4u: { return vec2<f32>(-1.0, 0.0); }
-    case 5u: { return vec2<f32>(-0.70710678, -0.70710678); }
-    case 6u: { return vec2<f32>(0.0, -1.0); }
-    default: { return vec2<f32>(0.70710678, -0.70710678); }
-  }
+fn atmosphere_branchless_gradient(hash: f32) -> vec2<f32> {
+  let index = u32(floor(hash * 8.0));
+  let magnitude = select(1.0, 0.70710678, (index & 1u) == 1u);
+  let x_zero = index == 2u || index == 6u;
+  let y_zero = index == 0u || index == 4u;
+  let x_sign = select(-1.0, 1.0, index <= 1u || index == 7u);
+  let y_sign = select(-1.0, 1.0, index <= 3u);
+  return vec2<f32>(
+    select(magnitude * x_sign, 0.0, x_zero),
+    select(magnitude * y_sign, 0.0, y_zero),
+  );
 }
 
 fn atmosphere_periodic_gradient_noise(position: vec2<f32>, period: f32) -> f32 {
@@ -71,10 +71,10 @@ fn atmosphere_periodic_gradient_noise(position: vec2<f32>, period: f32) -> f32 {
   let next_x = vec2<f32>(wrapped.x + 1.0 - select(0.0, period, wrapped.x + 1.0 >= period), wrapped.y);
   let next_y = vec2<f32>(wrapped.x, wrapped.y + 1.0 - select(0.0, period, wrapped.y + 1.0 >= period));
   let next_xy = vec2<f32>(next_x.x, next_y.y);
-  let a = dot(atmosphere_periodic_gradient(atmosphere_hash21(wrapped)), fraction);
-  let b = dot(atmosphere_periodic_gradient(atmosphere_hash21(next_x)), fraction - vec2<f32>(1.0, 0.0));
-  let c = dot(atmosphere_periodic_gradient(atmosphere_hash21(next_y)), fraction - vec2<f32>(0.0, 1.0));
-  let d = dot(atmosphere_periodic_gradient(atmosphere_hash21(next_xy)), fraction - vec2<f32>(1.0, 1.0));
+  let a = dot(atmosphere_branchless_gradient(atmosphere_hash21(wrapped)), fraction);
+  let b = dot(atmosphere_branchless_gradient(atmosphere_hash21(next_x)), fraction - vec2<f32>(1.0, 0.0));
+  let c = dot(atmosphere_branchless_gradient(atmosphere_hash21(next_y)), fraction - vec2<f32>(0.0, 1.0));
+  let d = dot(atmosphere_branchless_gradient(atmosphere_hash21(next_xy)), fraction - vec2<f32>(1.0, 1.0));
   return clamp(0.5 + mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y) * 0.70710678, 0.0, 1.0);
 }
 

@@ -388,7 +388,7 @@ fn view_step_count(configured_steps: u32, cloud_density: f32, storminess: f32) -
     .round() as u32)
         .clamp(8, configured_steps);
     if storminess > 0.75 {
-        density_steps.min(configured_steps.saturating_sub(3).max(8))
+        density_steps.min(configured_steps.saturating_sub(5).max(8))
     } else {
         density_steps
     }
@@ -775,9 +775,9 @@ mod tests {
     }
 
     #[test]
-    fn opaque_storms_use_three_fewer_view_steps() {
+    fn opaque_storms_use_five_fewer_view_steps() {
         assert_eq!(view_step_count(14, 0.98, 0.0), 14);
-        assert_eq!(view_step_count(14, 0.98, 1.0), 11);
+        assert_eq!(view_step_count(14, 0.98, 1.0), 9);
         assert_eq!(view_step_count(8, 1.0, 1.0), 8);
     }
 

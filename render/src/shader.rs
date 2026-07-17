@@ -105,8 +105,10 @@ mod tests {
         assert!(FRAME_SOURCE.contains("cloud_layer: vec4<f32>"));
         assert!(FRAME_SOURCE.contains("position = (world_xz - cloud_offset_metres) * 0.0008"));
         assert!(FRAME_SOURCE.contains("periodic_gradient_noise"));
+        assert!(FRAME_SOURCE.contains("fn atmosphere_branchless_gradient("));
         assert!(FRAME_SOURCE.contains("position * 2.0"));
         assert!(FRAME_SOURCE.contains("position * 4.0"));
+        assert!(!FRAME_SOURCE.contains("switch u32(floor(hash * 8.0))"));
         assert!(!FRAME_SOURCE.contains("position * 2.03"));
         assert!(!FRAME_SOURCE.contains("position * 4.11"));
         for source in [clouds, voxels] {
