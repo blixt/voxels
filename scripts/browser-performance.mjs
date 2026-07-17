@@ -716,6 +716,24 @@ const screenSpaceAmbientOcclusion = (() => {
   if (configured === "off") return false;
   throw new Error("VOXELS_PROFILE_SSAO must be on or off");
 })();
+const fixedDayFraction = (() => {
+  const configured = process.env.VOXELS_PROFILE_DAY_FRACTION;
+  if (configured === undefined) return undefined;
+  const value = Number(configured);
+  if (!Number.isFinite(value) || value < 0 || value >= 1) {
+    throw new Error("VOXELS_PROFILE_DAY_FRACTION must be finite in 0..<1");
+  }
+  return value;
+})();
+const fixedWeatherFraction = (() => {
+  const configured = process.env.VOXELS_PROFILE_WEATHER_FRACTION;
+  if (configured === undefined) return undefined;
+  const value = Number(configured);
+  if (!Number.isFinite(value) || value < 0 || value >= 1) {
+    throw new Error("VOXELS_PROFILE_WEATHER_FRACTION must be finite in 0..<1");
+  }
+  return value;
+})();
 const buildProfile = process.env.VOXELS_PROFILE_BUILD ?? "release";
 if (!new Set(["debug", "wasm-dev", "release"]).has(buildProfile)) {
   throw new Error("VOXELS_PROFILE_BUILD must be debug, wasm-dev, or release");
@@ -755,11 +773,14 @@ try {
     spawnVoxels,
     cascadedShadows,
     screenSpaceAmbientOcclusion,
-    dayLengthSeconds: atmosphere ? 48 : weather ? 0 : undefined,
-    dayFractionAtUnixEpoch: weather ? 0.5 : undefined,
-    weatherCycleSeconds: weather ? 36 : atmosphere ? 0 : undefined,
-    weatherFractionAtUnixEpoch: atmosphere ? 0.08 : undefined,
-    cloudVelocityMetresPerSecond: weather ? [0, 0] : undefined,
+    dayLengthSeconds:
+      fixedDayFraction === undefined ? (atmosphere ? 48 : weather ? 0 : undefined) : 0,
+    dayFractionAtUnixEpoch: fixedDayFraction ?? (weather ? 0.5 : undefined),
+    weatherCycleSeconds:
+      fixedWeatherFraction === undefined ? (weather ? 36 : atmosphere ? 0 : undefined) : 0,
+    weatherFractionAtUnixEpoch: fixedWeatherFraction ?? (atmosphere ? 0.08 : undefined),
+    cloudVelocityMetresPerSecond:
+      fixedWeatherFraction === undefined && !weather ? undefined : [0, 0],
   });
   const { build, preview } = await import("vite-plus");
   await build({ logLevel: "warn" });
@@ -825,6 +846,8 @@ try {
     requestedLook: cameraLook ?? null,
     cascadedShadows,
     screenSpaceAmbientOcclusion,
+    fixedDayFraction: fixedDayFraction ?? null,
+    fixedWeatherFraction: fixedWeatherFraction ?? null,
     finalPose: {
       x: finalSnapshot[SNAPSHOT.cameraX],
       y: finalSnapshot[SNAPSHOT.cameraY],
