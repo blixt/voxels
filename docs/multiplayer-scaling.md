@@ -72,11 +72,11 @@ PATH="$HOME/.cargo/bin:$PATH" cargo test --release -p voxels-world-service prese
 
 On 2026-07-17 on an Apple M3 Max (16 CPU cores), the checked-in tests measured:
 
-| Scenario                                                              |                                              Result |
-| --------------------------------------------------------------------- | --------------------------------------------------: |
-| 1,000 players at one location; one observer discovers 999 peers          |                       16 deltas, 80,688 bytes total |
-| Scheduler query, ranking, validation, and encoding for those 16 deltas   |                                      2.543 ms total |
-| One observer plus 999 players outside its interest cells                 | 0 entity bytes after the initial empty stream frame |
+| Scenario                                                               |                                              Result |
+| ---------------------------------------------------------------------- | --------------------------------------------------: |
+| 1,000 players at one location; one observer discovers 999 peers        |                       16 deltas, 80,688 bytes total |
+| Scheduler query, ranking, validation, and encoding for those 16 deltas |                                      2.543 ms total |
+| One observer plus 999 players outside its interest cells               | 0 entity bytes after the initial empty stream frame |
 
 Timing is a local diagnostic, not a CI threshold. The durable regressions assert the record budget,
 complete dense membership, exact wire bytes, negative-cell behavior, explicit disconnect leaves, and

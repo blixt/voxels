@@ -29,17 +29,17 @@ vp run bench:bots -- --counts=1000 --duration=3 --no-browser \
   --service-profile=worldgen --bot-profile=worldgen
 ```
 
-| Metric | Unshaped | Final shaped | Change |
-| --- | ---: | ---: | ---: |
-| Aggregate downstream VXWP | 366.44 MiB | 337.80 MiB | -7.8% |
-| Server CPU p95 | 387.1% | 414.6% | +7.1% |
-| Server RSS peak | 633.7 MiB | 849.5 MiB | +34.1% |
-| Collision/startup chunk p95 | 2,850.6 ms | 2,056.3 ms | -27.9% |
-| Chunk results received | 15,039 | 30,687 | +104.1% |
-| Edit p95 | 339.5 ms | 658.9 ms | +94.1% |
-| Accepted edits | 398 | 411 | +3.3% |
+| Metric                      |      Unshaped |  Final shaped |    Change |
+| --------------------------- | ------------: | ------------: | --------: |
+| Aggregate downstream VXWP   |    366.44 MiB |    337.80 MiB |     -7.8% |
+| Server CPU p95              |        387.1% |        414.6% |     +7.1% |
+| Server RSS peak             |     633.7 MiB |     849.5 MiB |    +34.1% |
+| Collision/startup chunk p95 |    2,850.6 ms |    2,056.3 ms |    -27.9% |
+| Chunk results received      |        15,039 |        30,687 |   +104.1% |
+| Edit p95                    |      339.5 ms |      658.9 ms |    +94.1% |
+| Accepted edits              |           398 |           411 |     +3.3% |
 | Complete per-client rosters | 1,000 / 1,000 | 1,000 / 1,000 | unchanged |
-| Resyncs / protocol errors | 0 / 0 | 0 / 0 | unchanged |
+| Resyncs / protocol errors   |         0 / 0 |         0 / 0 | unchanged |
 
 The three-second sample is dominated by startup credit, so it demonstrates prioritization more than
 the sustained rate ceiling. CPU and memory did not improve at 1,000: the shaped run completed more
@@ -57,24 +57,24 @@ vp run bench:bots -- --counts=1000 --duration=10 --no-browser \
   --service-profile=worldgen --bot-profile=worldgen
 ```
 
-| Metric | Result |
-| --- | ---: |
-| Connected clients | 1,000 |
-| Visible peers per client | 999 |
-| Server CPU p95 | 484.1% |
-| Server RSS peak | 1,267.3 MiB |
-| Bot-driver CPU p95 | 530.1% |
-| Aggregate downstream VXWP | 975.73 MiB |
-| Per-client downstream p95 / max | 0.810 / 0.814 Mbit/s |
-| Configured sustained cap / burst | 0.786 Mbit/s / 64 KiB |
-| Budget-envelope violations | 0 |
-| Presence / edits / visible world | 590.48 / 359.69 / 23.69 MiB |
-| Accepted edits / expected occupied conflicts | 4,671 / 121 |
-| Mutations | 42,539 |
-| Collision/startup chunk p95 | 2,840.0 ms |
-| Edit p95 | 744.5 ms |
-| Resyncs / protocol errors / disconnects | 0 / 0 / 0 |
-| Database growth | 9,139.6 KiB |
+| Metric                                       |                      Result |
+| -------------------------------------------- | --------------------------: |
+| Connected clients                            |                       1,000 |
+| Visible peers per client                     |                         999 |
+| Server CPU p95                               |                      484.1% |
+| Server RSS peak                              |                 1,267.3 MiB |
+| Bot-driver CPU p95                           |                      530.1% |
+| Aggregate downstream VXWP                    |                  975.73 MiB |
+| Per-client downstream p95 / max              |        0.810 / 0.814 Mbit/s |
+| Configured sustained cap / burst             |       0.786 Mbit/s / 64 KiB |
+| Budget-envelope violations                   |                           0 |
+| Presence / edits / visible world             | 590.48 / 359.69 / 23.69 MiB |
+| Accepted edits / expected occupied conflicts |                 4,671 / 121 |
+| Mutations                                    |                      42,539 |
+| Collision/startup chunk p95                  |                  2,840.0 ms |
+| Edit p95                                     |                    744.5 ms |
+| Resyncs / protocol errors / disconnects      |                   0 / 0 / 0 |
+| Database growth                              |                 9,139.6 KiB |
 
 The observed short-window rate can exceed 0.786 Mbit/s because the contract deliberately includes
 64 KiB of startup credit. The harness checks each client against
