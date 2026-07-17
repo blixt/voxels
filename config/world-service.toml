@@ -17,8 +17,8 @@ max_frame_bytes = 16777216
 # Memory bound for completed world products waiting behind a slow client.
 max_queued_outbound_bytes_per_client = 33554432
 # One shared token bucket covers both sockets belonging to a player. Critical control traffic
-# preempts; interactive state, visible world products, and prefetch share remaining capacity with
-# decreasing weights so no active class can permanently starve another.
+# preempts; collision/startup data, authoritative changes, realtime presence, visible products, and
+# prefetch share remaining capacity with decreasing weights so no active class permanently starves.
 outbound_bandwidth_bytes_per_second = 98304
 outbound_bandwidth_burst_bytes = 65536
 max_in_flight_batches = 16

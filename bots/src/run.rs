@@ -727,7 +727,10 @@ impl BotRuntime {
         };
         match message? {
             Message::Binary(bytes) => self.handle_presence_binary(&bytes),
-            Message::Close(frame) => bail!("presence socket closed early: {frame:?}"),
+            Message::Close(frame) => bail!(
+                "presence socket closed early: {frame:?}; recent errors: {:?}",
+                self.report.error_samples
+            ),
             _ => Ok(()),
         }
     }

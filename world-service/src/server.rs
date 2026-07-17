@@ -15,7 +15,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::serve::ListenerExt;
-use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::stream::{FuturesUnordered, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
@@ -1069,7 +1069,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                 }
                 match encode_edit_commit(&commit) {
                     Ok(bytes) => {
-                        if send_frame(&outbound, bytes, TrafficPriority::Interactive)
+                        if send_frame(&outbound, bytes, TrafficPriority::WorldChange)
                             .await
                             .is_err()
                         {
@@ -1337,7 +1337,7 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
     if send_presence_frame(
         &mut socket,
         &traffic,
-        TrafficPriority::Interactive,
+        TrafficPriority::RealtimePresence,
         initial_delta,
     )
     .await
@@ -1345,9 +1345,11 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
     {
         return;
     }
-    let (sink, mut source) = socket.split();
+    let (sink, source) = socket.split();
     let (outbound, outbound_rx) = mpsc::channel(8);
+    let (inbound_tx, mut inbound) = mpsc::channel(128);
     let (shutdown, shutdown_rx) = watch::channel(false);
+    let reader = tokio::spawn(read_frames(source, inbound_tx, state.max_frame_bytes));
     let writer = tokio::spawn(write_presence_frames(
         sink,
         outbound_rx,
@@ -1364,30 +1366,19 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
     let mut peer_closed = false;
     loop {
         tokio::select! {
-            message = source.next() => {
+            message = inbound.recv() => {
                 let bytes = match message {
-                    Some(Ok(Message::Binary(bytes))) if bytes.len() <= state.max_frame_bytes => {
-                        bytes.to_vec()
+                    Some(InboundFrame::Binary(bytes)) => bytes,
+                    Some(InboundFrame::Rejected(message)) => {
+                        let _ = queue_presence_frame(
+                            &outbound,
+                            TrafficPriority::Critical,
+                            encode_error(0, message),
+                        ).await;
+                        break;
                     }
-                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                    None => {
                         peer_closed = true;
-                        break;
-                    }
-                    Some(Ok(Message::Binary(_))) => {
-                        let _ = queue_presence_frame(
-                            &outbound,
-                            TrafficPriority::Critical,
-                            encode_error(0, "VXWP frame exceeds configured limit"),
-                        ).await;
-                        break;
-                    }
-                    Some(Ok(Message::Text(_))) => {
-                        let _ = queue_presence_frame(
-                            &outbound,
-                            TrafficPriority::Critical,
-                            encode_error(0, "VXWP accepts binary messages only"),
-                        ).await;
                         break;
                     }
                 };
@@ -1418,7 +1409,14 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
                         PoseAdmission::Accepted
                         | PoseAdmission::IgnoredStale
                         | PoseAdmission::IgnoredRateLimit => {}
-                        PoseAdmission::SessionClosed => break,
+                        PoseAdmission::SessionClosed => {
+                            let _ = queue_presence_frame(
+                                &outbound,
+                                TrafficPriority::Critical,
+                                encode_error(0, "presence session closed"),
+                            ).await;
+                            break;
+                        }
                         PoseAdmission::Invalid(message) => {
                             let _ = queue_presence_frame(
                                 &outbound,
@@ -1479,14 +1477,21 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     Ok(Some(bytes)) => {
                         if outbound.send(PresenceOutboundFrame {
                             bytes,
-                            priority: TrafficPriority::Interactive,
+                            priority: TrafficPriority::RealtimePresence,
                             _delta_permit: Some(delta_permit),
                         }).await.is_err() {
                             break;
                         }
                     }
                     Ok(None) => drop(delta_permit),
-                    Err(_) => break,
+                    Err(error) => {
+                        let _ = queue_presence_frame(
+                            &outbound,
+                            TrafficPriority::Critical,
+                            encode_error(0, &error),
+                        ).await;
+                        break;
+                    }
                 }
             }
         }
@@ -1495,6 +1500,8 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
     if peer_closed {
         let _ = shutdown.send(true);
     }
+    reader.abort();
+    let _ = reader.await;
     let _ = writer.await;
 }
 
@@ -1580,7 +1587,18 @@ async fn write_frames(
         while let Ok(frame) = outbound.try_recv() {
             queues[frame.priority.index()].push_back(frame);
         }
-        let Some(frame) = queues.iter_mut().find_map(VecDeque::pop_front) else {
+        for queue in &mut queues {
+            while queue
+                .front()
+                .and_then(|frame| frame.tracked.as_ref())
+                .is_some_and(TrackedRequest::is_cancelled)
+            {
+                if let Some(tracked) = queue.pop_front().and_then(|frame| frame.tracked) {
+                    tracked.finish();
+                }
+            }
+        }
+        if queues.iter().all(VecDeque::is_empty) {
             if !outbound_open {
                 break;
             }
@@ -1594,23 +1612,37 @@ async fn write_frames(
                     continue;
                 }
             }
-        };
-        let cancelled = frame
-            .tracked
-            .as_ref()
-            .is_some_and(TrackedRequest::is_cancelled);
-        if cancelled {
-            if let Some(tracked) = frame.tracked {
-                tracked.finish();
-            }
-            continue;
         }
 
-        let permit = traffic.acquire(frame.priority, frame.bytes.len());
-        tokio::pin!(permit);
+        let mut permits = FuturesUnordered::new();
+        let contended = queues.iter().filter(|queue| !queue.is_empty()).count() > 1;
+        for priority in TrafficPriority::ALL {
+            if let Some(frame) = queues[priority.index()].front() {
+                permits.push(acquire_traffic(
+                    Arc::clone(&traffic),
+                    priority,
+                    frame.bytes.len(),
+                    contended,
+                ));
+            }
+        }
         loop {
             tokio::select! {
-                () = &mut permit => {
+                Some(priority) = permits.next() => {
+                    let frame = queues[priority.index()]
+                        .pop_front()
+                        .expect("traffic permit must correspond to one queued frame");
+                    drop(permits);
+                    if frame
+                        .tracked
+                        .as_ref()
+                        .is_some_and(TrackedRequest::is_cancelled)
+                    {
+                        if let Some(tracked) = frame.tracked {
+                            tracked.finish();
+                        }
+                        continue 'writer;
+                    }
                     let send_result = sink.send(Message::Binary(frame.bytes.into())).await;
                     if let Some(tracked) = frame.tracked {
                         tracked.finish();
@@ -1622,13 +1654,23 @@ async fn write_frames(
                 }
                 incoming = outbound.recv(), if outbound_open => {
                     match incoming {
-                        Some(incoming) if incoming.priority < frame.priority => {
-                            queues[frame.priority.index()].push_front(frame);
-                            queues[incoming.priority.index()].push_front(incoming);
-                            continue 'writer;
-                        }
                         Some(incoming) => {
-                            queues[incoming.priority.index()].push_back(incoming);
+                            let priority = incoming.priority;
+                            let queue = &mut queues[priority.index()];
+                            let was_empty = queue.is_empty();
+                            queue.push_back(incoming);
+                            if was_empty {
+                                let bytes = queue
+                                    .front()
+                                    .map(|frame| frame.bytes.len())
+                                    .unwrap_or_default();
+                                permits.push(acquire_traffic(
+                                    Arc::clone(&traffic),
+                                    priority,
+                                    bytes,
+                                    true,
+                                ));
+                            }
                         }
                         None => {
                             outbound_open = false;
@@ -1639,6 +1681,20 @@ async fn write_frames(
         }
     }
     session.cancel_all();
+}
+
+async fn acquire_traffic(
+    traffic: Arc<ClientTrafficShaper>,
+    priority: TrafficPriority,
+    bytes: usize,
+    contended: bool,
+) -> TrafficPriority {
+    if contended {
+        traffic.acquire_contended(priority, bytes).await;
+    } else {
+        traffic.acquire(priority, bytes).await;
+    }
+    priority
 }
 
 async fn send_presence_frame(
@@ -1681,7 +1737,7 @@ async fn write_presence_frames(
         while let Ok(frame) = outbound.try_recv() {
             queues[frame.priority.index()].push_back(frame);
         }
-        let Some(frame) = queues.iter_mut().find_map(VecDeque::pop_front) else {
+        if queues.iter().all(VecDeque::is_empty) {
             if !outbound_open {
                 break;
             }
@@ -1702,10 +1758,20 @@ async fn write_presence_frames(
                 }
             }
             continue;
-        };
+        }
 
-        let permit = traffic.acquire(frame.priority, frame.bytes.len());
-        tokio::pin!(permit);
+        let mut permits = FuturesUnordered::new();
+        let contended = queues.iter().filter(|queue| !queue.is_empty()).count() > 1;
+        for priority in TrafficPriority::ALL {
+            if let Some(frame) = queues[priority.index()].front() {
+                permits.push(acquire_traffic(
+                    Arc::clone(&traffic),
+                    priority,
+                    frame.bytes.len(),
+                    contended,
+                ));
+            }
+        }
         loop {
             tokio::select! {
                 biased;
@@ -1714,7 +1780,11 @@ async fn write_presence_frames(
                         break 'writer;
                     }
                 }
-                () = &mut permit => {
+                Some(priority) = permits.next() => {
+                    let frame = queues[priority.index()]
+                        .pop_front()
+                        .expect("traffic permit must correspond to one queued presence frame");
+                    drop(permits);
                     if sink.send(Message::Binary(frame.bytes.into())).await.is_err() {
                         break 'writer;
                     }
@@ -1722,13 +1792,23 @@ async fn write_presence_frames(
                 }
                 incoming = outbound.recv(), if outbound_open => {
                     match incoming {
-                        Some(incoming) if incoming.priority < frame.priority => {
-                            queues[frame.priority.index()].push_front(frame);
-                            queues[incoming.priority.index()].push_front(incoming);
-                            continue 'writer;
-                        }
                         Some(incoming) => {
-                            queues[incoming.priority.index()].push_back(incoming);
+                            let priority = incoming.priority;
+                            let queue = &mut queues[priority.index()];
+                            let was_empty = queue.is_empty();
+                            queue.push_back(incoming);
+                            if was_empty {
+                                let bytes = queue
+                                    .front()
+                                    .map(|frame| frame.bytes.len())
+                                    .unwrap_or_default();
+                                permits.push(acquire_traffic(
+                                    Arc::clone(&traffic),
+                                    priority,
+                                    bytes,
+                                    true,
+                                ));
+                            }
                         }
                         None => outbound_open = false,
                     }
@@ -2068,7 +2148,7 @@ async fn deliver_generation_job(
 
 fn traffic_priority(priority: WorldProductPriority) -> TrafficPriority {
     match priority {
-        WorldProductPriority::CollisionCritical => TrafficPriority::Interactive,
+        WorldProductPriority::CollisionCritical => TrafficPriority::Collision,
         WorldProductPriority::VisibleChunk
         | WorldProductPriority::VisibleSurface
         | WorldProductPriority::ReplacementSurface => TrafficPriority::VisibleWorld,

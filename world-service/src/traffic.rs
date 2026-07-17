@@ -6,14 +6,24 @@ use tokio::time::{Duration, Instant};
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum TrafficPriority {
     Critical = 0,
-    Interactive = 1,
-    VisibleWorld = 2,
-    BackgroundWorld = 3,
+    Collision = 1,
+    WorldChange = 2,
+    RealtimePresence = 3,
+    VisibleWorld = 4,
+    BackgroundWorld = 5,
 }
 
 impl TrafficPriority {
-    pub(crate) const COUNT: usize = 4;
-    const WEIGHTS: [f64; Self::COUNT] = [f64::INFINITY, 7.0, 3.0, 0.5];
+    pub(crate) const COUNT: usize = 6;
+    pub(crate) const ALL: [Self; Self::COUNT] = [
+        Self::Critical,
+        Self::Collision,
+        Self::WorldChange,
+        Self::RealtimePresence,
+        Self::VisibleWorld,
+        Self::BackgroundWorld,
+    ];
+    const WEIGHTS: [f64; Self::COUNT] = [f64::INFINITY, 16.0, 12.0, 5.0, 3.0, 0.5];
 
     pub(crate) const fn index(self) -> usize {
         self as usize
@@ -124,6 +134,17 @@ impl ClientTrafficShaper {
                 state.consume(priority, bytes);
                 return;
             }
+        }
+        self.acquire_contended(priority, bytes).await;
+    }
+
+    pub(crate) async fn acquire_contended(
+        self: &Arc<Self>,
+        priority: TrafficPriority,
+        bytes: usize,
+    ) {
+        if bytes == 0 {
+            return;
         }
         let mut waiter = TrafficWaiter::new(Arc::clone(self), priority);
         loop {
@@ -261,7 +282,9 @@ impl TrafficState {
 
     fn selected_weighted_priority(&self) -> Option<TrafficPriority> {
         [
-            TrafficPriority::Interactive,
+            TrafficPriority::Collision,
+            TrafficPriority::WorldChange,
+            TrafficPriority::RealtimePresence,
             TrafficPriority::VisibleWorld,
             TrafficPriority::BackgroundWorld,
         ]
@@ -285,7 +308,7 @@ mod tests {
         let mut state = TrafficState {
             tokens: 100.0,
             last_refill: now,
-            waiters: [1, 0, 0, 0],
+            waiters: [1, 0, 0, 0, 0, 0],
             virtual_service: [0.0; TrafficPriority::COUNT],
         };
         assert!(state.can_send(TrafficPriority::Critical, 250, 100.0));
@@ -301,7 +324,7 @@ mod tests {
         let state = TrafficState {
             tokens: 100.0,
             last_refill: now,
-            waiters: [1, 0, 0, 1],
+            waiters: [1, 0, 0, 0, 0, 1],
             virtual_service: [0.0; TrafficPriority::COUNT],
         };
         assert!(!state.can_send(TrafficPriority::BackgroundWorld, 10, 100.0));
@@ -314,14 +337,24 @@ mod tests {
         let mut state = TrafficState {
             tokens: 10_000.0,
             last_refill: now,
-            waiters: [0, 1, 1, 1],
+            waiters: [0, 1, 1, 1, 1, 1],
             virtual_service: [0.0; TrafficPriority::COUNT],
         };
         assert_eq!(
             state.selected_weighted_priority(),
-            Some(TrafficPriority::Interactive)
+            Some(TrafficPriority::Collision)
         );
-        state.consume(TrafficPriority::Interactive, 700);
+        state.consume(TrafficPriority::Collision, 1_600);
+        assert_eq!(
+            state.selected_weighted_priority(),
+            Some(TrafficPriority::WorldChange)
+        );
+        state.consume(TrafficPriority::WorldChange, 1_200);
+        assert_eq!(
+            state.selected_weighted_priority(),
+            Some(TrafficPriority::RealtimePresence)
+        );
+        state.consume(TrafficPriority::RealtimePresence, 500);
         assert_eq!(
             state.selected_weighted_priority(),
             Some(TrafficPriority::VisibleWorld)
@@ -334,7 +367,7 @@ mod tests {
         state.consume(TrafficPriority::BackgroundWorld, 50);
         assert_eq!(
             state.selected_weighted_priority(),
-            Some(TrafficPriority::Interactive)
+            Some(TrafficPriority::Collision)
         );
     }
 

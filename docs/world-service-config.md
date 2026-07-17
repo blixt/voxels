@@ -115,9 +115,9 @@ sea_level_voxels = 52
 world and presence WebSockets. `outbound_bandwidth_burst_bytes` supplies startup credit. Frames are
 never split merely to satisfy the bucket: if one encoded frame is larger than the burst it is sent
 whole, and its full byte debt delays later traffic. Control and authoritative acknowledgements
-preempt other traffic. Interactive presence, edits and collision products, visible terrain, and
-prefetch then use weighted, work-conserving service; an idle class gives its capacity to active
-classes.
+preempt other traffic. Collision/startup data, authoritative world changes, realtime presence,
+visible terrain, and prefetch then use weighted, work-conserving service; an idle class gives its
+capacity to active classes.
 
 `max_queued_outbound_bytes_per_client` is a separate memory-safety bound on completed world
 products. It is not a rate limit.
