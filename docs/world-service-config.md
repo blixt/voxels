@@ -233,7 +233,7 @@ three, so changing a storage schema or any immutable world/source identity start
 and leaves the previous world untouched. This also prevents an old and new daemon from opening the
 same filename during hot reload. Paths without tokens are opened exactly as configured and remain
 strict: startup rejects another schema or a database bound to a different world/source manifest;
-there are no migrations or fallback authorities. Schema 5 owns sparse voxel edits, face-oriented dig
+there are no migrations or fallback authorities. Schema 7 owns sparse voxel edits, spherical dig
 operations, player material inventories, idempotent edit sessions, and authoritative resume poses.
 `change_queue_capacity` bounds each interested client's commit queue.
 

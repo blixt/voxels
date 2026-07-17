@@ -100,6 +100,16 @@ mod tests {
     }
 
     #[test]
+    fn dig_outline_uses_the_authoritative_spherical_stencil() {
+        let voxels = include_str!("shaders/voxels.wgsl");
+        assert!(voxels.contains("let target_center ="));
+        assert!(voxels.contains("let target_diameter = frame.target_voxel_max.w;"));
+        assert!(voxels.contains(
+            "dot(target_delta, target_delta) * 4.0 <= target_diameter * target_diameter"
+        ));
+    }
+
+    #[test]
     fn volumetric_clouds_and_terrain_share_one_seeded_world_space_weather_field() {
         let clouds = include_str!("shaders/clouds.wgsl");
         let voxels = include_str!("shaders/voxels.wgsl");

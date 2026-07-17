@@ -128,7 +128,7 @@ See [docs/architecture.md](docs/architecture.md) for format, authority, and rese
 - In deep water, use <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to swim along the view direction,
   <kbd>Space</kbd> to ascend, and <kbd>Shift</kbd> to dive.
 - Look with the mouse; <kbd>Esc</kbd> releases pointer lock.
-- Excavate a 0.5 m-wide cube inward from the targeted face with the left mouse button; place the
+- Excavate a 0.5 m-wide sphere around the targeted voxel with the left mouse button; place the
   Rust-selected material with the right mouse button. Cycle stocked materials with the mouse wheel
   or inventory wheel. Sparse edits are committed transactionally by the native
   world service and streamed to every interested browser.

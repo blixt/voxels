@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::f32::consts::{PI, TAU};
-use voxels_world::protocol::{EditAction, VoxelFace};
+use voxels_world::protocol::EditAction;
 use voxels_world::{Material, VOXEL_SIZE_METRES, VoxelCoord};
 
 const DECISION_INTERVAL_SECONDS: f32 = 0.5;
@@ -234,7 +234,6 @@ fn downward_dig(eye: [f32; 3], index: usize, extra_depth_voxels: i32) -> EditAct
             position.y - 17 - extra_depth_voxels,
             position.z + offset_z,
         ),
-        face: VoxelFace::PositiveY,
     }
 }
 
@@ -247,7 +246,6 @@ fn tower_site_dig(eye: [f32; 3], index: usize) -> EditAction {
             position.y - 17,
             position.z + offset_z,
         ),
-        face: VoxelFace::NegativeY,
     }
 }
 
@@ -259,18 +257,7 @@ fn forward_dig(eye: [f32; 3], yaw: f32, distance_voxels: i32) -> EditAction {
         position.y - 9,
         position.z + (direction[1] * distance_voxels as f32).round() as i32,
     );
-    let face = if direction[0].abs() > direction[1].abs() {
-        if direction[0] >= 0.0 {
-            VoxelFace::NegativeX
-        } else {
-            VoxelFace::PositiveX
-        }
-    } else if direction[1] >= 0.0 {
-        VoxelFace::NegativeZ
-    } else {
-        VoxelFace::PositiveZ
-    };
-    EditAction::Dig { hit, face }
+    EditAction::Dig { hit }
 }
 
 fn copied_action(
@@ -281,7 +268,7 @@ fn copied_action(
 ) -> Option<EditAction> {
     let follower = metres_to_voxel(follower_eye);
     match observed.action {
-        EditAction::Dig { face, .. } => {
+        EditAction::Dig { .. } => {
             let [offset_x, offset_z] = worksite_offset(index);
             Some(EditAction::Dig {
                 hit: VoxelCoord::new(
@@ -289,7 +276,6 @@ fn copied_action(
                     follower.y - 17,
                     follower.z + offset_z,
                 ),
-                face,
             })
         }
         EditAction::Place { .. } => {
@@ -375,29 +361,20 @@ mod tests {
         let mut state = BehaviorState::new(BehaviorKind::Digger, BotLayout::Mixed, 1, 7);
         let mut sample = context();
         let first = state.plan(sample);
-        assert!(matches!(
-            first.edit,
-            Some(EditAction::Dig {
-                face: VoxelFace::PositiveY,
-                ..
-            })
-        ));
+        let Some(EditAction::Dig { hit: first_hit }) = first.edit else {
+            panic!("digger must begin by digging down");
+        };
         for step in 2..=7 {
             sample.elapsed_seconds = step as f32 * DECISION_INTERVAL_SECONDS;
             let _ = state.plan(sample);
         }
         sample.elapsed_seconds += DECISION_INTERVAL_SECONDS;
         let later = state.plan(sample);
-        assert!(matches!(
-            later.edit,
-            Some(EditAction::Dig {
-                face: VoxelFace::NegativeX
-                    | VoxelFace::PositiveX
-                    | VoxelFace::NegativeZ
-                    | VoxelFace::PositiveZ,
-                ..
-            })
-        ));
+        let Some(EditAction::Dig { hit: later_hit }) = later.edit else {
+            panic!("digger must alternate to a horizontal tunnel");
+        };
+        assert_eq!(later_hit.y, first_hit.y + 8);
+        assert_ne!([later_hit.x, later_hit.z], [first_hit.x, first_hit.z]);
     }
 
     #[test]
@@ -431,7 +408,6 @@ mod tests {
             serial: 5,
             action: EditAction::Dig {
                 hit: VoxelCoord::new(80, 20, -30),
-                face: VoxelFace::PositiveY,
             },
         });
         let copied = state.plan(sample);

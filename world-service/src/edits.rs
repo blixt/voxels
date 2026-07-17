@@ -9,12 +9,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 #[cfg(test)]
-use voxels_world::protocol::DIG_EDGE_VOXELS;
+use voxels_world::protocol::DIG_DIAMETER_VOXELS;
 use voxels_world::protocol::{
     DIG_VOLUME_VOXELS, DigVolume, EDIT_SESSION_NOT_CURRENT, EditAction, EditCommand, EditCommit,
     EditSessionId, MATERIAL_INVENTORY_SLOTS, MAX_EDIT_AFFECTED_CHUNKS,
     MAX_EDIT_AFFECTED_SURFACE_TILES, MAX_EDIT_MUTATIONS, MaterialInventory, PlayerId, PlayerResume,
-    VoxelFace, VoxelMutation,
+    VoxelMutation,
 };
 use voxels_world::{
     ChunkCoord, EditMap, Material, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES,
@@ -26,9 +26,7 @@ use crate::EDIT_DATABASE_SCHEMA_VERSION;
 
 const INITIAL_REVISION: u64 = 1;
 #[cfg(test)]
-const DIG_RADIUS_VOXELS: i32 = DIG_EDGE_VOXELS / 2;
-#[cfg(test)]
-const DIG_SAMPLE_SHAPE: [u32; 3] = [DIG_EDGE_VOXELS as u32; 3];
+const DIG_SAMPLE_SHAPE: [u32; 3] = [DIG_DIAMETER_VOXELS as u32; 3];
 #[cfg(test)]
 const DIG_MAX_MUTATIONS: usize = DIG_VOLUME_VOXELS;
 
@@ -71,14 +69,8 @@ impl ProtectedSpawn {
     fn intersects(&self, action: EditAction) -> bool {
         match action {
             EditAction::Place { coord, .. } => self.contains(coord),
-            EditAction::Dig { hit, face } => {
-                DigVolume::for_hit_face(hit, face).is_some_and(|volume| {
-                    (volume.min.x..=volume.max.x).any(|x| {
-                        (volume.min.z..=volume.max.z)
-                            .any(|z| self.contains(VoxelCoord::new(x, volume.min.y, z)))
-                    })
-                })
-            }
+            EditAction::Dig { hit } => DigVolume::for_hit(hit)
+                .is_some_and(|volume| volume.coordinates().any(|coord| self.contains(coord))),
         }
     }
 }
@@ -1053,8 +1045,8 @@ fn plan_action(
     action: EditAction,
 ) -> Result<PlannedAction, EditAuthorityError> {
     match action {
-        EditAction::Dig { hit, face } => {
-            let volume = DigVolume::for_hit_face(hit, face).ok_or_else(|| {
+        EditAction::Dig { hit } => {
+            let volume = DigVolume::for_hit(hit).ok_or_else(|| {
                 EditAuthorityError("dig volume exceeds world coordinates".to_owned())
             })?;
             let snapshot = source_voxel_block(source, volume.min, volume.sample_shape())?;
@@ -1064,6 +1056,9 @@ fn plan_action(
                 for y in volume.min.y..=volume.max.y {
                     for z in volume.min.z..=volume.max.z {
                         let coord = VoxelCoord::new(x, y, z);
+                        if !volume.contains(coord) {
+                            continue;
+                        }
                         let generated = snapshot.sample(coord).ok_or_else(|| {
                             EditAuthorityError("source omitted a requested dig voxel".to_owned())
                         })?;
@@ -1416,7 +1411,7 @@ fn validate_resume(resume: PlayerResume) -> Result<(), EditAuthorityError> {
 
 fn encode_action(action: EditAction) -> (u8, VoxelCoord, u16) {
     match action {
-        EditAction::Dig { hit, face } => (1, hit, u16::from(face.id())),
+        EditAction::Dig { hit } => (1, hit, 0),
         EditAction::Place { coord, material } => (2, coord, material.id()),
     }
 }
@@ -1427,15 +1422,10 @@ fn decode_action(
     argument: u16,
 ) -> Result<EditAction, EditAuthorityError> {
     match action {
-        1 => {
-            let id = u8::try_from(argument).map_err(|_| {
-                EditAuthorityError(format!("unknown durable dig face id {argument}"))
-            })?;
-            let face = VoxelFace::from_id(id).ok_or_else(|| {
-                EditAuthorityError(format!("unknown durable dig face id {argument}"))
-            })?;
-            Ok(EditAction::Dig { hit: coord, face })
-        }
+        1 if argument == 0 => Ok(EditAction::Dig { hit: coord }),
+        1 => Err(EditAuthorityError(
+            "durable dig operation has a nonzero argument".to_owned(),
+        )),
         2 => {
             let material = decode_material(argument, "operation")?;
             if material == Material::Air {
@@ -1553,19 +1543,10 @@ mod tests {
     }
 
     fn dig(operation_id: u64, session: EditSessionId, hit: VoxelCoord) -> EditCommand {
-        dig_face(operation_id, session, hit, VoxelFace::PositiveY)
-    }
-
-    fn dig_face(
-        operation_id: u64,
-        session: EditSessionId,
-        hit: VoxelCoord,
-        face: VoxelFace,
-    ) -> EditCommand {
         EditCommand {
             operation_id,
             edit_session_id: session,
-            action: EditAction::Dig { hit, face },
+            action: EditAction::Dig { hit },
         }
     }
 
@@ -1696,16 +1677,12 @@ mod tests {
         }
 
         let solid_hit = VoxelCoord::new(0, -100, 0);
-        let solid_min = VoxelCoord::new(-2, -104, -2);
-        let solid_source = source_voxel_block(&source, solid_min, DIG_SAMPLE_SHAPE).unwrap();
+        let solid_volume = DigVolume::for_hit(solid_hit).unwrap();
+        let solid_source = source_voxel_block(&source, solid_volume.min, DIG_SAMPLE_SHAPE).unwrap();
         let mut expected_histogram = [0_u64; MATERIAL_INVENTORY_SLOTS];
-        for x in solid_min.x..solid_min.x + DIG_EDGE_VOXELS {
-            for y in solid_min.y..solid_min.y + DIG_EDGE_VOXELS {
-                for z in solid_min.z..solid_min.z + DIG_EDGE_VOXELS {
-                    let material = solid_source.sample(VoxelCoord::new(x, y, z)).unwrap();
-                    expected_histogram[usize::from(material.id())] += 1;
-                }
-            }
+        for coord in solid_volume.coordinates() {
+            let material = solid_source.sample(coord).unwrap();
+            expected_histogram[usize::from(material.id())] += 1;
         }
         assert_eq!(expected_histogram[Material::Air.id() as usize], 0);
 
@@ -1723,8 +1700,8 @@ mod tests {
             solid.commit.editor_inventory.unwrap().revision,
             opened.inventory.revision + 1
         );
-        assert_eq!(solid.commit.mutations.len(), 125);
-        assert!(solid.commit.mutations.len() <= 125);
+        assert_eq!(solid.commit.mutations.len(), DIG_VOLUME_VOXELS);
+        assert!(solid.commit.mutations.len() <= MAX_EDIT_MUTATIONS);
         assert!(
             solid
                 .commit
@@ -1928,10 +1905,7 @@ mod tests {
                         &source,
                         &EditMap::default(),
                         inventory,
-                        EditAction::Dig {
-                            hit,
-                            face: VoxelFace::PositiveY,
-                        },
+                        EditAction::Dig { hit },
                     )
                     .unwrap();
                     assert_eq!(mutations.len(), DIG_MAX_MUTATIONS, "hit {hit:?}");
@@ -1941,27 +1915,12 @@ mod tests {
                             .all(|pair| pair[0].coord < pair[1].coord),
                         "dig mutations must be strictly sorted and unique for {hit:?}"
                     );
-                    let min = VoxelCoord::new(
-                        hit.x - DIG_RADIUS_VOXELS,
-                        hit.y - DIG_EDGE_VOXELS + 1,
-                        hit.z - DIG_RADIUS_VOXELS,
-                    );
-                    let max = VoxelCoord::new(
-                        min.x + DIG_EDGE_VOXELS - 1,
-                        hit.y,
-                        min.z + DIG_EDGE_VOXELS - 1,
-                    );
+                    let volume = DigVolume::for_hit(hit).unwrap();
                     let actual = mutations
                         .iter()
                         .map(|mutation| mutation.coord)
                         .collect::<BTreeSet<_>>();
-                    let expected = (min.x..=max.x)
-                        .flat_map(|x| {
-                            (min.y..=max.y).flat_map(move |y| {
-                                (min.z..=max.z).map(move |z| VoxelCoord::new(x, y, z))
-                            })
-                        })
-                        .collect::<BTreeSet<_>>();
+                    let expected = volume.coordinates().collect::<BTreeSet<_>>();
                     assert_eq!(actual, expected, "wrong dig volume for {hit:?}");
 
                     let affected = mutations
@@ -1989,60 +1948,46 @@ mod tests {
     }
 
     #[test]
-    fn every_dig_face_cuts_five_layers_inward_from_the_clicked_surface() {
+    fn dig_planner_centres_the_sphere_on_the_pointed_voxel() {
         let source = ProceduralWorldSource::new(0xf00d);
         let hit = VoxelCoord::new(7, -1_000, -11);
-        for face in [
-            VoxelFace::NegativeX,
-            VoxelFace::PositiveX,
-            VoxelFace::NegativeY,
-            VoxelFace::PositiveY,
-            VoxelFace::NegativeZ,
-            VoxelFace::PositiveZ,
-        ] {
-            let PlannedAction { mutations, .. } = plan_action(
-                &source,
-                &EditMap::default(),
-                starting_inventory(1),
-                EditAction::Dig { hit, face },
-            )
-            .unwrap();
-            assert_eq!(mutations.len(), DIG_MAX_MUTATIONS);
-            let normal = face.normal();
-            let values = mutations
-                .iter()
-                .map(|mutation| mutation.coord.as_array())
-                .collect::<Vec<_>>();
-            let hit = hit.as_array();
-            for axis in 0..3 {
-                let min = values.iter().map(|coord| coord[axis]).min().unwrap();
-                let max = values.iter().map(|coord| coord[axis]).max().unwrap();
-                match normal[axis] {
-                    -1 => assert_eq!((min, max), (hit[axis], hit[axis] + 4)),
-                    0 => assert_eq!((min, max), (hit[axis] - 2, hit[axis] + 2)),
-                    1 => assert_eq!((min, max), (hit[axis] - 4, hit[axis])),
-                    _ => unreachable!(),
-                }
-            }
-        }
+        let PlannedAction { mutations, .. } = plan_action(
+            &source,
+            &EditMap::default(),
+            starting_inventory(1),
+            EditAction::Dig { hit },
+        )
+        .unwrap();
+        let actual = mutations
+            .iter()
+            .map(|mutation| mutation.coord)
+            .collect::<BTreeSet<_>>();
+        let expected = DigVolume::for_hit(hit)
+            .unwrap()
+            .coordinates()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        assert!(actual.contains(&hit));
+        assert!(actual.contains(&VoxelCoord::new(hit.x + 2, hit.y + 1, hit.z + 1)));
+        assert!(!actual.contains(&VoxelCoord::new(hit.x + 2, hit.y + 2, hit.z)));
     }
 
     #[test]
     fn dig_coordinate_extrema_fail_atomically_instead_of_wrapping() {
         let source = ProceduralWorldSource::new(0xbeef);
-        for (hit, face) in [
-            (VoxelCoord::new(i32::MIN + 1, -100, 0), VoxelFace::PositiveY),
-            (VoxelCoord::new(i32::MAX - 1, -100, 0), VoxelFace::PositiveY),
-            (VoxelCoord::new(0, i32::MIN + 3, 0), VoxelFace::PositiveY),
-            (VoxelCoord::new(0, i32::MAX - 3, 0), VoxelFace::NegativeY),
-            (VoxelCoord::new(0, -100, i32::MIN + 1), VoxelFace::PositiveY),
-            (VoxelCoord::new(0, -100, i32::MAX - 1), VoxelFace::PositiveY),
+        for hit in [
+            VoxelCoord::new(i32::MIN + 1, -100, 0),
+            VoxelCoord::new(i32::MAX - 1, -100, 0),
+            VoxelCoord::new(0, i32::MIN + 1, 0),
+            VoxelCoord::new(0, i32::MAX - 1, 0),
+            VoxelCoord::new(0, -100, i32::MIN + 1),
+            VoxelCoord::new(0, -100, i32::MAX - 1),
         ] {
             let error = plan_action(
                 &source,
                 &EditMap::default(),
                 starting_inventory(1),
-                EditAction::Dig { hit, face },
+                EditAction::Dig { hit },
             )
             .unwrap_err();
             assert!(error.to_string().contains("exceeds world coordinates"));
@@ -2145,8 +2090,11 @@ mod tests {
                 dig(2, session, VoxelCoord::new(3, -100, 0)),
             )
             .unwrap();
-        assert_eq!(first.commit.mutations.len(), 125);
-        assert_eq!(second.commit.mutations.len(), 75);
+        assert_eq!(first.commit.mutations.len(), DIG_VOLUME_VOXELS);
+        assert!(
+            second.commit.mutations.len() < DIG_VOLUME_VOXELS,
+            "the overlapping part must already be air"
+        );
         let first_coords = first
             .commit
             .mutations
@@ -2165,7 +2113,7 @@ mod tests {
             .into_iter()
             .map(|material| inventory.count(material) - opened.inventory.count(material))
             .sum::<u64>();
-        assert_eq!(gained, 200);
+        assert_eq!(gained as usize, first_coords.len() + second_coords.len());
     }
 
     #[test]
@@ -2268,7 +2216,14 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(sets[0].is_disjoint(&sets[1]));
-        assert_eq!(sets.iter().map(BTreeSet::len).sum::<usize>(), 200);
+        let expected_union = [VoxelCoord::new(0, -100, 0), VoxelCoord::new(3, -100, 0)]
+            .into_iter()
+            .flat_map(|hit| DigVolume::for_hit(hit).unwrap().coordinates())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            sets.iter().map(BTreeSet::len).sum::<usize>(),
+            expected_union.len()
+        );
     }
 
     #[test]
@@ -2400,11 +2355,11 @@ mod tests {
     fn previous_schema_is_rejected_without_migration() {
         let source = ProceduralWorldSource::new(17);
         let connection = Connection::open_in_memory().unwrap();
-        connection.pragma_update(None, "user_version", 5).unwrap();
+        connection.pragma_update(None, "user_version", 6).unwrap();
         let error = EditAuthority::from_connection(connection, world_id(6), &source, 4, None)
             .err()
             .unwrap();
-        assert!(error.to_string().contains("schema 5; expected 6"));
+        assert!(error.to_string().contains("schema 6; expected 7"));
         assert!(
             error
                 .to_string()

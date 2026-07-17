@@ -238,7 +238,7 @@ mod web {
     };
     use voxels_world::protocol::{
         BrowserUserId, DigVolume, EditAction, MaterialInventory, PlayerId, PlayerIdentity,
-        VoxelFace, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
+        VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
     };
     use voxels_world::{
         AtmosphereSample, CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT_PORTAL_COUNT,
@@ -1709,11 +1709,8 @@ mod web {
                 return;
             };
             let action = if buttons & 1 != 0 {
-                let Some(face) = VoxelFace::from_normal(hit.normal) else {
-                    return;
-                };
                 let hit_coord = VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]);
-                let Some(volume) = DigVolume::for_hit_face(hit_coord, face) else {
+                let Some(volume) = DigVolume::for_hit(hit_coord) else {
                     return;
                 };
                 if !self.dig_volume_resident(volume) {
@@ -1722,10 +1719,7 @@ mod web {
                         .show_gameplay_toast("Loading edit area…");
                     return;
                 }
-                EditAction::Dig {
-                    hit: hit_coord,
-                    face,
-                }
+                EditAction::Dig { hit: hit_coord }
             } else if buttons & 2 != 0 {
                 if camera.intersects_voxel(hit.adjacent, VOXEL_SIZE_METRES) {
                     return;
@@ -1745,8 +1739,9 @@ mod web {
                 return;
             };
 
-            // The server expands the hit face to a fixed inward half-metre cube and atomically owns
-            // material yield/debit. The browser never emits 125 independently raceable mutations.
+            // The server expands the hit voxel to the shared half-metre spherical stencil and
+            // atomically owns material yield/debit. The browser never emits independently raceable
+            // voxel mutations.
             let _ = self.submit_local_edit(action);
         }
 
@@ -2049,11 +2044,8 @@ mod web {
 
         fn dig_target(&self, camera: &CameraState) -> Option<(VoxelHit, DigVolume)> {
             let hit = self.raycast_target(camera)?;
-            let face = VoxelFace::from_normal(hit.normal)?;
-            let volume = DigVolume::for_hit_face(
-                VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]),
-                face,
-            )?;
+            let volume =
+                DigVolume::for_hit(VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]))?;
             self.dig_volume_resident(volume).then_some((hit, volume))
         }
 
@@ -2160,12 +2152,11 @@ mod web {
         }
 
         /// Deterministic browser-harness seam for the exact gameplay dig action. The server, not
-        /// this API, expands the hit voxel into the fixed 5x5x5 volume and validates reach.
+        /// this API, expands the hit voxel into the fixed half-metre sphere and validates reach.
         pub fn submit_dig(&self, x: i32, y: i32, z: i32) -> bool {
             self.engine.as_ref().is_some_and(|engine| {
                 engine.submit_local_edit(EditAction::Dig {
                     hit: VoxelCoord::new(x, y, z),
-                    face: VoxelFace::PositiveY,
                 })[0]
                     == 1
             })

@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample, RemoteAvatarPose};
-use voxels_world::protocol::DigVolume;
+use voxels_world::protocol::{DIG_DIAMETER_VOXELS, DigVolume};
 use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, Material, MeshedChunk,
     Quad, RenderLayer, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId,
@@ -4435,7 +4435,7 @@ fn frame_uniform(
                 volume.max.x as f32,
                 volume.max.y as f32,
                 volume.max.z as f32,
-                1.0,
+                DIG_DIAMETER_VOXELS as f32,
             ]
         }),
         render_options: [

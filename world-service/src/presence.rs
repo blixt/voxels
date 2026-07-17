@@ -216,7 +216,7 @@ impl PresenceHub {
     }
 
     /// Returns the union of connections whose current horizontal interest area covers any edited
-    /// voxel. A half-metre dig supplies 125 mutations but only 25 distinct X/Z centers; collect
+    /// voxel. A half-metre dig supplies many mutations but few distinct X/Z centers; collect
     /// their spatial cells first so the global presence registry is locked and scanned once.
     pub(crate) fn connections_near_voxels(
         &self,

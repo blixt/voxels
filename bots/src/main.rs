@@ -32,7 +32,7 @@ fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Cli> {
     let mut world_url = None;
     let mut presence_url = None;
     let mut origin = "http://127.0.0.1:5173".to_owned();
-    let mut subprotocol = "voxels.world.v20".to_owned();
+    let mut subprotocol = "voxels.world.v21".to_owned();
     let mut auth_token = None;
     let mut bots = 4_usize;
     let mut duration_seconds = 10.0_f64;
@@ -88,8 +88,8 @@ mod tests {
     #[test]
     fn cli_parses_reproducible_run_configuration() -> Result<()> {
         let cli = parse_args([
-            "--world-url=ws://127.0.0.1:9777/v20/world".to_owned(),
-            "--presence-url=ws://127.0.0.1:9777/v20/presence".to_owned(),
+            "--world-url=ws://127.0.0.1:9777/v21/world".to_owned(),
+            "--presence-url=ws://127.0.0.1:9777/v21/presence".to_owned(),
             "--auth-token=secret".to_owned(),
             "--bots=64".to_owned(),
             "--duration-seconds=30".to_owned(),

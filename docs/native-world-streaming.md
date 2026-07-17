@@ -7,7 +7,7 @@ provider therefore adds no provider branch, model dependency, or Metal API to th
 
 ## Why binary WebSocket first
 
-VXWP v20 uses the standard `WebSocket` API over loopback. This is the best first transport for
+VXWP v21 uses the standard `WebSocket` API over loopback. This is the best first transport for
 reliable chunk assets: it is mature, works in a dedicated worker, and requires neither an HTTP/3
 certificate setup nor WebRTC signaling. Axum's native Rust server disables Nagle delay, and the
 application bounds outstanding work so classic WebSocket's missing receive-side backpressure cannot
@@ -39,13 +39,13 @@ The [W3C WebTransport specification][webtransport-spec] supports carrying the sa
 envelopes on a future reliable stream. Transport choice is deliberately below world identity,
 request correlation, and chunk codecs.
 
-## VXWP v20 contract
+## VXWP v21 contract
 
 Each WebSocket message contains exactly one little-endian VXWP envelope with `VXWP` magic, protocol
 version, message kind, request ID, payload length, and reserved fields. The format is code-versioned;
 Rust enum layout and Serde output are not wire formats.
 
-1. The browser upgrades `/v20/world`, offering `voxels.world.v20` and the configured local auth token,
+1. The browser upgrades `/v21/world`, offering `voxels.world.v21` and the configured local auth token,
    then sends `OpenWorld` with its maximum in-flight batch count and browser-local player claim.
 2. The daemon replies with `WorldOpened`: immutable world manifest, source identity/hash,
    capabilities, negotiated request window, echoed player claim, spawn sample, authoritative resume
@@ -65,13 +65,13 @@ Rust enum layout and Serde output are not wire formats.
    coarse parent remains resident until its replacement is complete, and the renderer derives exact
    height-matched connectors and lighting morphs from the two resident profiles.
 7. Every chunk or surface result body is independently Brotli-compressed at quality 2 with a 20-bit
-   window. Its mandatory v20 envelope declares the exact uncompressed length; the decoder rejects
+   window. Its mandatory v21 envelope declares the exact uncompressed length; the decoder rejects
    unknown codecs, nonzero reserved bytes, outputs above the 16 MiB frame bound, truncated streams,
    and streams producing even one byte beyond the declaration before semantic validation.
 8. `Cancel` is best effort. Late, canceled, mismatched, or stale-revision responses are discarded;
    they cannot resurrect an evicted scheduler ticket.
 9. `WorldOpened` also returns a connection-scoped, random presence session token. The browser uses
-   it to open `/v20/presence` on a dedicated socket; a token cannot be reused by another world
+   it to open `/v21/presence` on a dedicated socket; a token cannot be reused by another world
    connection.
 10. Browsers send bounded `PlayerPose` latest-state frames. The server validates monotonic sequence,
     finite coordinates, update rate, reported velocity, and receipt-time horizontal/vertical movement
@@ -95,8 +95,8 @@ Rust enum layout and Serde output are not wire formats.
     bounded extrapolation patterns described by [Gaffer on Games][snapshot-interpolation] and
     [Unity Netcode][unity-interpolation], with clock-offset estimation derived from [NTP][ntp].
 12. `EditCommand` carries a typed `Dig` or `Place` action plus the server-issued edit-session ID.
-    The server expands one dig hit and its selected face to a fixed 5x5x5 canonical-voxel cube cut
-    inward from the surface, credits every removed material, and atomically commits at most 125 exact
+    The server expands one dig hit to a fixed 0.5 m canonical-voxel sphere centred on the target,
+    credits every removed material, and atomically commits at most 81 exact
     voxel values. Placement changes one voxel and consumes one selected material only when the
     destination is empty. Inventory, mutations, idempotency records, and product revisions share one
     SQLite transaction.
@@ -158,9 +158,9 @@ Copy it to both `config/client.toml` as `[world].auth_subprotocol_token` and
 
 ```toml
 [world]
-endpoint = "ws://127.0.0.1:9777/v20/world"
-presence_endpoint = "ws://127.0.0.1:9777/v20/presence"
-subprotocol = "voxels.world.v20"
+endpoint = "ws://127.0.0.1:9777/v21/world"
+presence_endpoint = "ws://127.0.0.1:9777/v21/presence"
+subprotocol = "voxels.world.v21"
 auth_subprotocol_token = "the-same-random-local-token"
 ```
 

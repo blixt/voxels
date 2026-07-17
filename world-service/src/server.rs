@@ -25,6 +25,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
+#[cfg(test)]
+use voxels_world::protocol::DigVolume;
 use voxels_world::protocol::{
     ChunkBatchItem, ChunkBatchRequest, EditSessionId, EncodedChunkBatchItem,
     EncodedSurfaceTileBatchItem, FRAME_FRAGMENT_OVERHEAD_BYTES, PlayerIdentity, PlayerResume,
@@ -45,9 +47,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v20/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v20/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v20";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v21/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v21/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v21";
 const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
@@ -2829,7 +2831,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v20, test-local-token"),
+            HeaderValue::from_static("voxels.world.v21, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -3310,10 +3312,7 @@ mod tests {
                     encode_edit_command(EditCommand {
                         operation_id: 50 + index as u64,
                         edit_session_id: opened[index].edit_session_id,
-                        action: voxels_world::protocol::EditAction::Dig {
-                            hit,
-                            face: voxels_world::protocol::VoxelFace::PositiveY,
-                        },
+                        action: voxels_world::protocol::EditAction::Dig { hit },
                     })?
                     .into(),
                 ))
@@ -3571,12 +3570,9 @@ mod tests {
             editor_opened.spawn.height - 1,
             editor_opened.spawn.z,
         );
-        let dig_coords = ((hit.x - 2)..=(hit.x + 2))
-            .flat_map(|x| {
-                ((hit.y - 4)..=hit.y).flat_map(move |y| {
-                    ((hit.z - 2)..=(hit.z + 2)).map(move |z| VoxelCoord::new(x, y, z))
-                })
-            })
+        let dig_coords = DigVolume::for_hit(hit)
+            .expect("bounded server test dig")
+            .coordinates()
             .collect::<Vec<_>>();
         let requested_chunks = dig_coords
             .iter()
@@ -3619,21 +3615,14 @@ mod tests {
             .filter(|coord| before_material(*coord) != Material::Air)
             .collect::<Vec<_>>();
         assert!(!expected_mutations.is_empty());
-        assert_eq!(
-            expected_mutations.len(),
-            dig_coords.len(),
-            "an exposed surface dig must cut all five layers inward"
-        );
+        assert!(expected_mutations.len() < dig_coords.len());
         let unrelated = VoxelCoord::new(hit.x + 3, hit.y, hit.z);
         let unrelated_before = before_material(unrelated);
 
         let command = EditCommand {
             operation_id: 1,
             edit_session_id: editor_opened.edit_session_id,
-            action: voxels_world::protocol::EditAction::Dig {
-                hit,
-                face: voxels_world::protocol::VoxelFace::PositiveY,
-            },
+            action: voxels_world::protocol::EditAction::Dig { hit },
         };
         editor_world
             .send(ClientMessage::Binary(encode_edit_command(command)?.into()))
@@ -3798,7 +3787,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v20, test-local-token"),
+            HeaderValue::from_static("voxels.world.v21, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -3833,7 +3822,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v20, test-local-token"),
+            HeaderValue::from_static("voxels.world.v21, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket

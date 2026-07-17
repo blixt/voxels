@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 20;
+pub const PROTOCOL_VERSION: u16 = 21;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -496,20 +496,20 @@ impl EditCommand {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EditAction {
-    /// Digs the fixed server-configured volume inward from the hit face. The client cannot choose a
-    /// mutation count or smuggle arbitrary coordinates into one operation.
-    Dig { hit: VoxelCoord, face: VoxelFace },
+    /// Digs the fixed spherical stencil centred on the pointed voxel. The client cannot choose a
+    /// radius, mutation count, or arbitrary coordinate list.
+    Dig { hit: VoxelCoord },
     Place {
         coord: VoxelCoord,
         material: Material,
     },
 }
 
-/// The authoritative half-metre dig cube. Bounds are inclusive canonical voxel coordinates and
-/// are shared by the server planner and client preview so the highlighted area cannot drift from
-/// the atomic edit.
-pub const DIG_EDGE_VOXELS: i32 = 5;
-pub const DIG_VOLUME_VOXELS: usize = DIG_EDGE_VOXELS.pow(3) as usize;
+/// Diameter of the authoritative half-metre dig sphere's voxel-centre stencil.
+pub const DIG_DIAMETER_VOXELS: i32 = 5;
+pub const DIG_RADIUS_VOXELS: i32 = DIG_DIAMETER_VOXELS / 2;
+/// Exact lattice points whose voxel centres lie inside a 2.5-voxel Euclidean radius.
+pub const DIG_VOLUME_VOXELS: usize = dig_volume_voxel_count();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DigVolume {
@@ -518,39 +518,79 @@ pub struct DigVolume {
 }
 
 impl DigVolume {
-    pub fn for_hit_face(hit: VoxelCoord, face: VoxelFace) -> Option<Self> {
-        let normal = face.normal();
-        let (min_x, max_x) = dig_axis_bounds(hit.x, normal[0])?;
-        let (min_y, max_y) = dig_axis_bounds(hit.y, normal[1])?;
-        let (min_z, max_z) = dig_axis_bounds(hit.z, normal[2])?;
+    pub fn for_hit(hit: VoxelCoord) -> Option<Self> {
         Some(Self {
-            min: VoxelCoord::new(min_x, min_y, min_z),
-            max: VoxelCoord::new(max_x, max_y, max_z),
+            min: VoxelCoord::new(
+                hit.x.checked_sub(DIG_RADIUS_VOXELS)?,
+                hit.y.checked_sub(DIG_RADIUS_VOXELS)?,
+                hit.z.checked_sub(DIG_RADIUS_VOXELS)?,
+            ),
+            max: VoxelCoord::new(
+                hit.x.checked_add(DIG_RADIUS_VOXELS)?,
+                hit.y.checked_add(DIG_RADIUS_VOXELS)?,
+                hit.z.checked_add(DIG_RADIUS_VOXELS)?,
+            ),
         })
     }
 
     pub const fn sample_shape(self) -> [u32; 3] {
-        [DIG_EDGE_VOXELS as u32; 3]
+        [DIG_DIAMETER_VOXELS as u32; 3]
     }
 
     pub const fn contains(self, coord: VoxelCoord) -> bool {
-        coord.x >= self.min.x
+        if !(coord.x >= self.min.x
             && coord.x <= self.max.x
             && coord.y >= self.min.y
             && coord.y <= self.max.y
             && coord.z >= self.min.z
-            && coord.z <= self.max.z
+            && coord.z <= self.max.z)
+        {
+            return false;
+        }
+        let centre = self.centre();
+        let dx = coord.x as i64 - centre.x as i64;
+        let dy = coord.y as i64 - centre.y as i64;
+        let dz = coord.z as i64 - centre.z as i64;
+        4 * (dx * dx + dy * dy + dz * dz) <= (DIG_DIAMETER_VOXELS * DIG_DIAMETER_VOXELS) as i64
+    }
+
+    pub const fn centre(self) -> VoxelCoord {
+        VoxelCoord::new(
+            self.min.x + DIG_RADIUS_VOXELS,
+            self.min.y + DIG_RADIUS_VOXELS,
+            self.min.z + DIG_RADIUS_VOXELS,
+        )
+    }
+
+    pub fn coordinates(self) -> impl Iterator<Item = VoxelCoord> {
+        (self.min.x..=self.max.x)
+            .flat_map(move |x| {
+                (self.min.y..=self.max.y).flat_map(move |y| {
+                    (self.min.z..=self.max.z).map(move |z| VoxelCoord::new(x, y, z))
+                })
+            })
+            .filter(move |&coord| self.contains(coord))
     }
 }
 
-fn dig_axis_bounds(value: i32, outward_normal: i8) -> Option<(i32, i32)> {
-    let radius = DIG_EDGE_VOXELS / 2;
-    match outward_normal {
-        -1 => Some((value, value.checked_add(DIG_EDGE_VOXELS - 1)?)),
-        0 => Some((value.checked_sub(radius)?, value.checked_add(radius)?)),
-        1 => Some((value.checked_sub(DIG_EDGE_VOXELS - 1)?, value)),
-        _ => None,
+const fn dig_volume_voxel_count() -> usize {
+    let mut count = 0;
+    let mut x = -DIG_RADIUS_VOXELS;
+    while x <= DIG_RADIUS_VOXELS {
+        let mut y = -DIG_RADIUS_VOXELS;
+        while y <= DIG_RADIUS_VOXELS {
+            let mut z = -DIG_RADIUS_VOXELS;
+            while z <= DIG_RADIUS_VOXELS {
+                if 4 * (x * x + y * y + z * z) <= DIG_DIAMETER_VOXELS * DIG_DIAMETER_VOXELS {
+                    count += 1;
+                }
+                z += 1;
+            }
+            y += 1;
+        }
+        x += 1;
     }
+    count
 }
 
 impl EditAction {
@@ -1434,7 +1474,7 @@ pub fn encode_edit_command(command: EditCommand) -> Result<Vec<u8>, ProtocolErro
         return Err(ProtocolError::InvalidPayload("edit session id is nil"));
     }
     let (kind, argument, coord, material_id) = match command.action {
-        EditAction::Dig { hit, face } => (1, face.id(), hit, 0),
+        EditAction::Dig { hit } => (1, 0, hit, 0),
         EditAction::Place { coord, material } => {
             if material == Material::Air {
                 return Err(ProtocolError::InvalidPayload(
@@ -1477,15 +1517,11 @@ pub fn decode_edit_command(bytes: &[u8]) -> Result<EditCommand, ProtocolError> {
     let coord = decode_voxel_coord(&mut cursor)?;
     cursor.finish()?;
     let action = match kind {
-        1 if material_id == 0 => EditAction::Dig {
-            hit: coord,
-            face: VoxelFace::from_id(argument).ok_or(ProtocolError::UnknownEnum(
-                "voxel face",
-                u64::from(argument),
-            ))?,
-        },
+        1 if argument == 0 && material_id == 0 => EditAction::Dig { hit: coord },
         1 => {
-            return Err(ProtocolError::InvalidPayload("dig action has a material"));
+            return Err(ProtocolError::InvalidPayload(
+                "dig action has a nonzero argument or material",
+            ));
         }
         2 if argument == 0 => {
             let material = Material::from_id(material_id).ok_or(ProtocolError::UnknownEnum(
@@ -3667,53 +3703,37 @@ mod tests {
     }
 
     #[test]
-    fn dig_volume_matches_the_exact_face_oriented_half_metre_cube() {
+    fn dig_volume_is_an_exact_symmetric_half_metre_sphere() {
         let hit = VoxelCoord::new(10, -20, 30);
-        for face in [
-            VoxelFace::NegativeX,
-            VoxelFace::PositiveX,
-            VoxelFace::NegativeY,
-            VoxelFace::PositiveY,
-            VoxelFace::NegativeZ,
-            VoxelFace::PositiveZ,
-        ] {
-            let volume = DigVolume::for_hit_face(hit, face).expect("bounded dig volume");
-            assert_eq!(volume.sample_shape(), [5, 5, 5]);
-            assert_eq!(volume.max.x - volume.min.x + 1, DIG_EDGE_VOXELS);
-            assert_eq!(volume.max.y - volume.min.y + 1, DIG_EDGE_VOXELS);
-            assert_eq!(volume.max.z - volume.min.z + 1, DIG_EDGE_VOXELS);
-            assert!(volume.contains(hit));
+        let volume = DigVolume::for_hit(hit).expect("bounded dig volume");
+        assert_eq!(volume.sample_shape(), [5, 5, 5]);
+        assert_eq!(volume.min, VoxelCoord::new(8, -22, 28));
+        assert_eq!(volume.max, VoxelCoord::new(12, -18, 32));
+        assert_eq!(volume.centre(), hit);
+        assert!(volume.contains(hit));
+        assert!(volume.contains(VoxelCoord::new(12, -19, 31)));
+        assert!(!volume.contains(VoxelCoord::new(12, -18, 30)));
+        assert!(!volume.contains(VoxelCoord::new(12, -18, 32)));
 
-            let normal = face.normal();
-            for axis in 0..3 {
-                let hit_axis = [hit.x, hit.y, hit.z][axis];
-                let minimum = [volume.min.x, volume.min.y, volume.min.z][axis];
-                let maximum = [volume.max.x, volume.max.y, volume.max.z][axis];
-                match normal[axis] {
-                    -1 => assert_eq!((minimum, maximum), (hit_axis, hit_axis + 4)),
-                    0 => assert_eq!((minimum, maximum), (hit_axis - 2, hit_axis + 2)),
-                    1 => assert_eq!((minimum, maximum), (hit_axis - 4, hit_axis)),
-                    _ => unreachable!(),
-                }
-            }
+        let coordinates = volume.coordinates().collect::<BTreeSet<_>>();
+        assert_eq!(coordinates.len(), DIG_VOLUME_VOXELS);
+        for coord in &coordinates {
+            let opposite = VoxelCoord::new(
+                hit.x * 2 - coord.x,
+                hit.y * 2 - coord.y,
+                hit.z * 2 - coord.z,
+            );
+            assert!(coordinates.contains(&opposite));
         }
-        assert_eq!(DIG_VOLUME_VOXELS, 125);
+        assert_eq!(DIG_VOLUME_VOXELS, 81);
     }
 
     #[test]
     fn dig_volume_rejects_coordinate_overflow_atomically() {
-        assert!(
-            DigVolume::for_hit_face(VoxelCoord::new(i32::MAX, 0, 0), VoxelFace::NegativeX,)
-                .is_none()
-        );
-        assert!(
-            DigVolume::for_hit_face(VoxelCoord::new(i32::MIN, 0, 0), VoxelFace::PositiveX,)
-                .is_none()
-        );
-        assert!(
-            DigVolume::for_hit_face(VoxelCoord::new(i32::MAX, 0, 0), VoxelFace::PositiveY,)
-                .is_none()
-        );
+        assert!(DigVolume::for_hit(VoxelCoord::new(i32::MAX, 0, 0)).is_none());
+        assert!(DigVolume::for_hit(VoxelCoord::new(i32::MIN, 0, 0)).is_none());
+        assert!(DigVolume::for_hit(VoxelCoord::new(0, i32::MAX, 0)).is_none());
+        assert!(DigVolume::for_hit(VoxelCoord::new(0, 0, i32::MIN)).is_none());
     }
 
     #[test]
@@ -4208,10 +4228,7 @@ mod tests {
         let dig = EditCommand {
             operation_id: 42,
             edit_session_id,
-            action: EditAction::Dig {
-                hit: coord,
-                face: VoxelFace::NegativeX,
-            },
+            action: EditAction::Dig { hit: coord },
         };
         assert_eq!(
             decode_edit_command(&encode_edit_command(dig).expect("encode edit dig")),
@@ -4349,14 +4366,19 @@ mod tests {
             .copy_from_slice(&Material::Stone.id().to_le_bytes());
         assert_eq!(
             decode_edit_command(&malformed_dig),
-            Err(ProtocolError::InvalidPayload("dig action has a material"))
+            Err(ProtocolError::InvalidPayload(
+                "dig action has a nonzero argument or material"
+            ))
         );
 
-        let mut malformed_face = encode_edit_command(dig).expect("encode malformed dig face");
-        malformed_face[FRAME_HEADER_BYTES + 17] = 0;
+        let mut malformed_argument =
+            encode_edit_command(dig).expect("encode malformed dig argument");
+        malformed_argument[FRAME_HEADER_BYTES + 17] = 1;
         assert_eq!(
-            decode_edit_command(&malformed_face),
-            Err(ProtocolError::UnknownEnum("voxel face", 0))
+            decode_edit_command(&malformed_argument),
+            Err(ProtocolError::InvalidPayload(
+                "dig action has a nonzero argument or material"
+            ))
         );
 
         let mut air_inventory = commit;
@@ -4381,7 +4403,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_five_cube_commit_round_trips_at_protocol_limits() {
+    fn maximum_atomic_commit_round_trips_at_protocol_limits() {
         let mut mutations = Vec::with_capacity(MAX_EDIT_MUTATIONS);
         for x in 30..35 {
             for y in 62..67 {
@@ -4411,7 +4433,7 @@ mod tests {
             affected_surface_tiles: Vec::new(),
             editor_inventory: None,
         };
-        let encoded = encode_edit_commit(&commit).expect("encode five-cube commit");
+        let encoded = encode_edit_commit(&commit).expect("encode maximum commit");
         assert_eq!(decode_edit_commit(&encoded), Ok(commit.clone()));
 
         let mut oversized = commit;
