@@ -57,6 +57,8 @@ class WebSocketFrameParser {
     this.buffer = Buffer.alloc(0);
     this.fragmentOpcode = null;
     this.fragments = [];
+    this.fragmentFrameBytes = 0;
+    this.fragmentFrameCount = 0;
     this.onMessage = onMessage;
   }
 
@@ -108,12 +110,18 @@ class WebSocketFrameParser {
     if (opcode === 0x0) {
       if (this.fragmentOpcode === null) throw new Error("unexpected continuation frame");
       this.fragments.push(payload);
+      this.fragmentFrameBytes += frameLength;
+      this.fragmentFrameCount += 1;
       if (final) {
         const complete = Buffer.concat(this.fragments);
         const completeOpcode = this.fragmentOpcode;
+        const completeFrameBytes = this.fragmentFrameBytes;
+        const completeFrameCount = this.fragmentFrameCount;
         this.fragmentOpcode = null;
         this.fragments = [];
-        this.onMessage(completeOpcode, complete, frameLength);
+        this.fragmentFrameBytes = 0;
+        this.fragmentFrameCount = 0;
+        this.onMessage(completeOpcode, complete, completeFrameBytes, completeFrameCount);
       }
       return;
     }
@@ -122,9 +130,11 @@ class WebSocketFrameParser {
       if (this.fragmentOpcode !== null) throw new Error("nested fragmented WebSocket message");
       this.fragmentOpcode = opcode;
       this.fragments = [payload];
+      this.fragmentFrameBytes = frameLength;
+      this.fragmentFrameCount = 1;
       return;
     }
-    this.onMessage(opcode, payload, frameLength);
+    this.onMessage(opcode, payload, frameLength, 1);
   }
 }
 
@@ -135,11 +145,11 @@ class ConnectionInspector {
     this.upgraded = { upstream: false, downstream: false };
     this.http = { upstream: Buffer.alloc(0), downstream: Buffer.alloc(0) };
     this.parsers = {
-      upstream: new WebSocketFrameParser((opcode, payload, frameLength) =>
-        this.onMessage("upstream", opcode, payload, frameLength),
+      upstream: new WebSocketFrameParser((opcode, payload, frameBytes, frameCount) =>
+        this.onMessage("upstream", opcode, payload, frameBytes, frameCount),
       ),
-      downstream: new WebSocketFrameParser((opcode, payload, frameLength) =>
-        this.onMessage("downstream", opcode, payload, frameLength),
+      downstream: new WebSocketFrameParser((opcode, payload, frameBytes, frameCount) =>
+        this.onMessage("downstream", opcode, payload, frameBytes, frameCount),
       ),
     };
   }
@@ -173,14 +183,14 @@ class ConnectionInspector {
       this.parsers[direction].push(buffered.subarray(headerLength));
   }
 
-  onMessage(direction, opcode, payload, frameLength) {
+  onMessage(direction, opcode, payload, frameBytes, frameCount) {
     const stats = this.statsRef.current;
     const totals = stats[direction];
     const pathTotals = directionFor(stats, direction, this.path);
-    increment(totals, "frames", 1);
-    increment(totals, "websocketFrameBytes", frameLength);
-    increment(pathTotals, "frames", 1);
-    increment(pathTotals, "websocketFrameBytes", frameLength);
+    increment(totals, "frames", frameCount);
+    increment(totals, "websocketFrameBytes", frameBytes);
+    increment(pathTotals, "frames", frameCount);
+    increment(pathTotals, "websocketFrameBytes", frameBytes);
     if (opcode !== 0x2 || payload.length < 24 || !payload.subarray(0, 4).equals(VXWP_MAGIC)) return;
     const kind = payload.readUInt16LE(6);
     const name = VXWP_KIND_NAMES[kind] ?? `kind_${kind}`;
