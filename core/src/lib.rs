@@ -19,6 +19,9 @@ const WALK_SPEED: f32 = 4.6;
 const SPRINT_MULTIPLIER: f32 = 1.55;
 const CREATIVE_FLIGHT_SPEED: f32 = 8.0;
 const CREATIVE_FLIGHT_RESPONSE: f32 = 10.0;
+const GLIDER_FORWARD_SPEED: f32 = 8.4;
+const GLIDER_ACCELERATION: f32 = 12.0;
+const GLIDER_TERMINAL_DESCENT_SPEED: f32 = 2.2;
 const JUMP_SPEED: f32 = 5.6;
 const GRAVITY: f32 = 19.5;
 const STEP_HEIGHT: f32 = 0.35;
@@ -285,6 +288,7 @@ pub struct InputState {
 pub enum LocomotionMode {
     #[default]
     Walking,
+    Gliding,
     CreativeFlight,
 }
 
@@ -317,6 +321,7 @@ pub struct CameraState {
     pub velocity: Vec3,
     pub grounded: bool,
     locomotion: LocomotionMode,
+    gliding_available: bool,
     jump_was_down: bool,
     fluid: FluidState,
 }
@@ -336,6 +341,7 @@ impl CameraState {
             velocity: Vec3::ZERO,
             grounded: false,
             locomotion: LocomotionMode::Walking,
+            gliding_available: false,
             jump_was_down: false,
             fluid: FluidState::default(),
         }
@@ -358,6 +364,7 @@ impl CameraState {
             velocity: Vec3::ZERO,
             grounded: false,
             locomotion: LocomotionMode::Walking,
+            gliding_available: false,
             jump_was_down: false,
             fluid: FluidState::default(),
         }
@@ -390,14 +397,34 @@ impl CameraState {
         self.locomotion
     }
 
+    pub const fn gliding_available(self) -> bool {
+        self.gliding_available
+    }
+
+    pub fn set_gliding_available(&mut self, available: bool) {
+        self.gliding_available = available;
+        if !available && self.locomotion == LocomotionMode::Gliding {
+            self.locomotion = LocomotionMode::Walking;
+        }
+    }
+
     pub fn set_locomotion(&mut self, locomotion: LocomotionMode) {
+        let locomotion = if locomotion == LocomotionMode::Gliding && !self.gliding_available {
+            LocomotionMode::Walking
+        } else {
+            locomotion
+        };
         if self.locomotion == locomotion {
             return;
         }
+        let creative_transition = self.locomotion == LocomotionMode::CreativeFlight
+            || locomotion == LocomotionMode::CreativeFlight;
         self.locomotion = locomotion;
         self.grounded = false;
         self.jump_was_down = false;
-        self.velocity.y = 0.0;
+        if creative_transition {
+            self.velocity.y = 0.0;
+        }
     }
 
     pub fn intersects_voxel(self, voxel: [i32; 3], voxel_size: f32) -> bool {
@@ -455,6 +482,9 @@ impl CameraState {
             return;
         }
         let was_swimming = self.fluid.swimming;
+        if was_swimming && self.locomotion == LocomotionMode::Gliding {
+            self.locomotion = LocomotionMode::Walking;
+        }
         let horizontal_grounded;
         if was_swimming {
             let forward = self.forward();
@@ -504,19 +534,41 @@ impl CameraState {
             if input.left {
                 wish -= right;
             }
-            let speed = WALK_SPEED * if input.sprint { SPRINT_MULTIPLIER } else { 1.0 };
-            let target = wish.normalize_or_zero() * speed;
-            let response = 1.0 - (-(if self.grounded { 18.0 } else { 5.0 }) * dt).exp();
-            self.velocity.x += (target.x - self.velocity.x) * response;
-            self.velocity.z += (target.z - self.velocity.z) * response;
 
             let jump_pressed = input.jump && !self.jump_was_down;
             self.jump_was_down = input.jump;
             if self.grounded && jump_pressed {
                 self.velocity.y = JUMP_SPEED;
                 self.grounded = false;
+                self.locomotion = LocomotionMode::Walking;
+            } else if !self.grounded && jump_pressed && self.gliding_available {
+                self.locomotion = if self.locomotion == LocomotionMode::Gliding {
+                    LocomotionMode::Walking
+                } else {
+                    LocomotionMode::Gliding
+                };
             }
-            self.velocity.y -= GRAVITY * dt;
+
+            if self.locomotion == LocomotionMode::Gliding {
+                let direction = if wish.length_squared() > f32::EPSILON {
+                    wish.normalize()
+                } else {
+                    forward
+                };
+                let target = direction * GLIDER_FORWARD_SPEED;
+                let acceleration = GLIDER_ACCELERATION * dt;
+                self.velocity.x += (target.x - self.velocity.x).clamp(-acceleration, acceleration);
+                self.velocity.z += (target.z - self.velocity.z).clamp(-acceleration, acceleration);
+                let target_y = -GLIDER_TERMINAL_DESCENT_SPEED;
+                self.velocity.y += (target_y - self.velocity.y).clamp(-acceleration, acceleration);
+            } else {
+                let speed = WALK_SPEED * if input.sprint { SPRINT_MULTIPLIER } else { 1.0 };
+                let target = wish.normalize_or_zero() * speed;
+                let response = 1.0 - (-(if self.grounded { 18.0 } else { 5.0 }) * dt).exp();
+                self.velocity.x += (target.x - self.velocity.x) * response;
+                self.velocity.z += (target.z - self.velocity.z) * response;
+                self.velocity.y -= GRAVITY * dt;
+            }
             horizontal_grounded = self.grounded;
         }
 
@@ -557,7 +609,13 @@ impl CameraState {
             self.grounded = true;
             self.velocity.y = self.velocity.y.max(0.0);
         }
+        if self.grounded && self.locomotion == LocomotionMode::Gliding {
+            self.locomotion = LocomotionMode::Walking;
+        }
         self.refresh_fluid_state(voxel_size, &mut sample_voxel);
+        if self.fluid.swimming && self.locomotion == LocomotionMode::Gliding {
+            self.locomotion = LocomotionMode::Walking;
+        }
     }
 
     /// Refresh derived fluid state without advancing movement, used after restoring or teleporting a
@@ -1213,6 +1271,75 @@ mod tests {
     }
 
     #[test]
+    fn fresh_airborne_space_press_deploys_and_retracts_the_glider() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, 12.0, 0.0));
+        camera.set_gliding_available(true);
+        camera.velocity = Vec3::new(0.0, -8.0, 0.0);
+        let mut input = InputState::default();
+        input.set_key(5, true);
+        camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        assert_eq!(camera.locomotion(), LocomotionMode::Gliding);
+
+        input.set_key(5, false);
+        for _ in 0..240 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        }
+        assert!(
+            (-2.21..=-2.19).contains(&camera.velocity.y),
+            "glider should converge on its bounded descent speed: {}",
+            camera.velocity.y
+        );
+        assert!(
+            camera.velocity.z < -8.3,
+            "a deployed glider should build forward airspeed"
+        );
+
+        input.set_key(5, true);
+        camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        assert_eq!(camera.locomotion(), LocomotionMode::Walking);
+        let descent_before = camera.velocity.y;
+        input.set_key(5, false);
+        camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        assert!(camera.velocity.y < descent_before);
+    }
+
+    #[test]
+    fn gliding_requires_authority_and_landing_or_water_cancels_it() {
+        let mut unavailable = CameraState::spawn(Vec3::new(0.0, 8.0, 0.0));
+        let mut input = InputState::default();
+        input.set_key(5, true);
+        unavailable.update(&input, 1.0 / 60.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        assert_eq!(unavailable.locomotion(), LocomotionMode::Walking);
+
+        let mut landing = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES + 0.4, 0.0));
+        landing.set_gliding_available(true);
+        landing.set_locomotion(LocomotionMode::Gliding);
+        landing.velocity.y = -2.2;
+        for _ in 0..60 {
+            landing.update(&InputState::default(), 1.0 / 120.0, 0.1, |_, y, _| {
+                solid_if(y < 0)
+            });
+        }
+        assert!(landing.grounded);
+        assert_eq!(landing.locomotion(), LocomotionMode::Walking);
+
+        let mut swimming = CameraState::spawn(Vec3::new(0.05, PLAYER_EYE_HEIGHT_METRES, 0.05));
+        swimming.set_gliding_available(true);
+        swimming.set_locomotion(LocomotionMode::Gliding);
+        swimming.refresh_fluid_state(0.1, |_, y, _| VoxelPhysics {
+            collidable: false,
+            fluid: y <= 20,
+        });
+        swimming.update(&InputState::default(), 1.0 / 120.0, 0.1, |_, y, _| {
+            VoxelPhysics {
+                collidable: false,
+                fluid: y <= 20,
+            }
+        });
+        assert_eq!(swimming.locomotion(), LocomotionMode::Walking);
+    }
+
+    #[test]
     fn non_finite_timesteps_do_not_poison_camera_state() {
         for dt in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             let mut camera = CameraState::default();
@@ -1227,6 +1354,8 @@ mod tests {
             assert_eq!(camera.pitch, before.pitch);
             assert_eq!(camera.velocity, before.velocity);
             assert_eq!(camera.grounded, before.grounded);
+            assert_eq!(camera.locomotion, before.locomotion);
+            assert_eq!(camera.gliding_available, before.gliding_available);
             assert_eq!(camera.jump_was_down, before.jump_was_down);
             assert_eq!(camera.fluid, before.fluid);
             assert!(!sampled);
