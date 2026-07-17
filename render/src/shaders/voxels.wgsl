@@ -110,8 +110,8 @@ fn terrain_horizon_lighting(
   // sun-facing ground, but let broad away-facing slopes receive less of that directional lobe.
   // The light's horizontal magnitude naturally removes this cue when it is near the zenith.
   let directional_sky_visibility = clamp(
-    1.0 + dot(terrain_normal.xz, light_direction.xz) * 0.42,
-    0.82,
+    1.0 + dot(terrain_normal.xz, light_direction.xz) * 1.1,
+    0.75,
     1.0,
   );
   return vec2<f32>(

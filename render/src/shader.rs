@@ -189,8 +189,8 @@ mod tests {
                 .sum::<f32>()
                 * 0.25;
             let directional_sky = (1.0
-                + (terrain_normal.x * light.x + terrain_normal.z * light.z) * 0.42)
-                .clamp(0.82, 1.0);
+                + (terrain_normal.x * light.x + terrain_normal.z * light.z) * 1.1)
+                .clamp(0.75, 1.0);
             [key, (1.0 + (accessibility - 1.0) * 0.82) * directional_sky]
         }
 
@@ -222,7 +222,7 @@ mod tests {
         let away_facing = lighting(0, low_east, Vec3::new(-0.35, 1.0, 0.0).normalize());
         assert_eq!(sun_facing[1], 1.0);
         assert!(
-            away_facing[1] < 0.88,
+            away_facing[1] < 0.80,
             "broad away-facing slopes receive less directional sky fill: {away_facing:?}",
         );
 
