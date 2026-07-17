@@ -29,12 +29,16 @@ The file controls:
 - fixed-step timing, catch-up limit, and edit-tracker capacity;
 - chunk and surface-LOD load/retention radii, pipeline budgets, and interest capacity;
 - view/shadow settings;
-- every feature toggle shown in Mission Control, plus its initial open/compact state;
+- the fixed rendering feature baseline and the World Lab's initial open state;
+- whether local developer controls expose time/weather visualization overrides and the
+  server-authorized creative-flight request;
 - bounded diagnostic probe sizes and cadence;
 - automated profile speed and warmup/measurement durations.
 
-Mission Control remains interactive. Its reset action restores the configured feature baseline,
-including a mixed on/off baseline, rather than a hard-coded all-enabled state.
+The World Lab deliberately does not expose ordinary renderer feature toggles. It keeps operational
+rendering policy in the file and reserves the in-game surface for useful play/debug controls: local
+time and weather previews plus creative flight when both client developer controls and the server's
+gameplay capability allow it. Time/weather previews do not mutate the shared environment.
 
 Player identity is intentionally not client configuration. The browser keeps a versioned local
 registry: `/` selects its stable default player, while `/?player=alice` selects or creates a named

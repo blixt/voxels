@@ -4,8 +4,9 @@ mod presence;
 mod profile;
 
 pub use presence::{
-    PresenceInterpolationConfig, REMOTE_POSE_DISCONTINUITY, RemoteAvatarPose, RemotePlayerId,
-    RemotePoseSample, RemotePoseUpdate, RemotePresenceDelta, RemotePresenceTimeline,
+    PresenceInterpolationConfig, REMOTE_POSE_DISCONTINUITY, REMOTE_POSE_FLYING, RemoteAvatarPose,
+    RemotePlayerId, RemotePoseSample, RemotePoseUpdate, RemotePresenceDelta,
+    RemotePresenceTimeline,
 };
 pub use profile::{ProfileAutomation, ProfileConfig, ProfilePhase, ProfilePose};
 

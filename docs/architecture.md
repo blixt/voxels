@@ -279,8 +279,8 @@ Albedo mips average in linear space before sRGB encoding.
 Normal mips retain the length of the averaged vector; the shader converts shortening into additional
 roughness before normalizing, suppressing distant specular sparkle. Detail normals affect lighting
 only—geometric normals remain authoritative for shadow bias, LOD ownership, targeting, and collision.
-Two specialized voxel pipelines let the Rust Mission Control toggle choose a real zero-sample flat
-path without expanding the shared frame uniform or adding a per-fragment feature branch.
+Two specialized voxel pipelines let the configured material-detail policy choose a real zero-sample
+flat path without expanding the shared frame uniform or adding a per-fragment feature branch.
 
 Emissive materials also derive bounded local-light candidates during greedy meshing. Only exposed
 emissive voxels participate; deterministic material-separated `8x8x8` voxel bins retain a half-voxel
@@ -299,8 +299,9 @@ position/radius and linear radiance/intensity; compile-time Rust layout assertio
 host and shader representations identical. The fragment path uses a finite-radius smooth window over
 inverse-square attenuation following [Filament's punctual-light model](https://google.github.io/filament/Filament.md.html#lighting/directlighting/punctuallights/attenuationfunction).
 Crystal self-emission remains separate, and the light contribution is accumulated before cave fog and
-exposure. Mission Control can disable the pass without removing candidates, while diagnostics report
-resident candidates, active lights, and budget clipping. This bounded forward path is intentionally
+exposure. The configured rendering policy can disable the pass without removing candidates, while
+World Lab diagnostics report resident candidates, active lights, and budget clipping. This bounded
+forward path is intentionally
 the first tier; logarithmic-Z [clustered forward shading](https://diglib.eg.org/items/6342d4d6-5220-4376-a5c6-a153058f4a3c)
 remains the promotion seam if dense-emitter stress tests outgrow the fixed budget.
 

@@ -106,6 +106,75 @@ impl WeatherKind {
     }
 }
 
+/// Stable authored points on the continuous weather curve used by local developer controls. The
+/// presets change presentation only; cloud advection, seed, and revision remain server-authored.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum WeatherPreset {
+    Clear,
+    Cloudy,
+    Overcast,
+    Rain,
+    Storm,
+}
+
+impl WeatherPreset {
+    pub const ALL: [Self; 5] = [
+        Self::Clear,
+        Self::Cloudy,
+        Self::Overcast,
+        Self::Rain,
+        Self::Storm,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Clear => "CLEAR",
+            Self::Cloudy => "CLOUDY",
+            Self::Overcast => "OVERCAST",
+            Self::Rain => "RAIN",
+            Self::Storm => "STORM",
+        }
+    }
+
+    pub const fn anchor_weather_fraction(self) -> f32 {
+        match self {
+            Self::Clear => 0.08,
+            Self::Cloudy => 0.23,
+            Self::Overcast => 0.32,
+            Self::Rain => 0.50,
+            Self::Storm => 0.68,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DebugEnvironmentOverride {
+    pub day_fraction: Option<f32>,
+    pub weather_fraction: Option<f32>,
+}
+
+impl DebugEnvironmentOverride {
+    pub const fn active(self) -> bool {
+        self.day_fraction.is_some() || self.weather_fraction.is_some()
+    }
+
+    pub fn apply(self, server: WorldEnvironmentState) -> WorldEnvironmentState {
+        WorldEnvironmentState {
+            day_fraction: self
+                .day_fraction
+                .filter(|value| value.is_finite())
+                .map_or(server.day_fraction, |value| value.rem_euclid(1.0)),
+            weather_fraction: self
+                .weather_fraction
+                .filter(|value| value.is_finite())
+                .map_or(server.weather_fraction, |value| value.rem_euclid(1.0)),
+            ..server
+        }
+        .sanitized()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WeatherState {
     pub kind: WeatherKind,
@@ -881,6 +950,45 @@ mod tests {
         assert!(rain.precipitation > 0.5);
         assert!(storm.storminess > 0.7);
         assert_eq!(WeatherState::for_cycle(1.08, 0.24, 0.0, 7, 0.25), clear);
+    }
+
+    #[test]
+    fn debug_override_changes_only_selected_fractions() {
+        let server = WorldEnvironmentState {
+            server_time_seconds: 91.0,
+            day_fraction: 0.14,
+            weather_fraction: 0.81,
+            weather_cycle_seconds: 900.0,
+            cloud_offset_metres: [321.0, -88.0],
+            cloud_velocity_metres_per_second: [5.5, 1.6],
+            cloud_coverage: 0.24,
+            cloud_base_metres: 550.0,
+            cloud_top_metres: 1_800.0,
+            weather_seed: 77,
+            weather_revision: 4,
+        };
+        let effective = DebugEnvironmentOverride {
+            day_fraction: Some(DaylightPhase::GoldenHour.anchor_day_fraction()),
+            weather_fraction: Some(WeatherPreset::Storm.anchor_weather_fraction()),
+        }
+        .apply(server);
+        assert_eq!(effective.server_time_seconds, server.server_time_seconds);
+        assert_eq!(effective.cloud_offset_metres, server.cloud_offset_metres);
+        assert_eq!(
+            effective.cloud_velocity_metres_per_second,
+            server.cloud_velocity_metres_per_second
+        );
+        assert_eq!(effective.weather_seed, server.weather_seed);
+        assert_eq!(effective.weather_revision, server.weather_revision);
+        assert_eq!(
+            effective.day_fraction,
+            DaylightPhase::GoldenHour.anchor_day_fraction()
+        );
+        assert_eq!(
+            effective.weather_fraction,
+            WeatherPreset::Storm.anchor_weather_fraction()
+        );
+        assert_eq!(DebugEnvironmentOverride::default().apply(server), server);
     }
 
     #[test]

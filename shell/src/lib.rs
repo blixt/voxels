@@ -186,11 +186,12 @@ mod web {
     use std::rc::Rc;
     use voxels_client_config::ClientConfig;
     use voxels_core::{
-        CameraState, EnclosureSample, InputState, ProfileAutomation, ProfileConfig, ProfilePhase,
-        VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
+        CameraState, EnclosureSample, InputState, LocomotionMode, ProfileAutomation, ProfileConfig,
+        ProfilePhase, VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels,
+        voxel_segment_is_clear,
     };
     use voxels_render::renderer::{
-        ChunkActivationReason, LocalLightVisibility, MissionControlConfig, Renderer,
+        ChunkActivationReason, HostUiAction, LocalLightVisibility, MissionControlConfig, Renderer,
         RendererConfig, RendererFeatureConfig, VolumetricCloudConfig,
     };
     use voxels_render::shadow::DirectionalShadowConfig;
@@ -201,7 +202,7 @@ mod web {
     };
     use voxels_world::protocol::{
         BrowserUserId, DigVolume, EditAction, MaterialInventory, PlayerId, PlayerIdentity,
-        VoxelFace, VoxelMutation, WorldEnvironmentSnapshot,
+        VoxelFace, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
     };
     use voxels_world::{
         AtmosphereSample, CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT_PORTAL_COUNT,
@@ -215,10 +216,11 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 25.0;
+    const SNAPSHOT_SCHEMA_VERSION: f32 = 26.0;
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
     #[derive(Clone, Copy, Debug)]
     struct EngineConfig {
+        developer_controls_enabled: bool,
         fixed_step_seconds: f32,
         max_steps_per_frame: u32,
         max_edit_trackers: usize,
@@ -544,7 +546,12 @@ mod web {
             self.frame_milliseconds
                 .set(smoothed_ms(self.frame_milliseconds.get(), frame_ms));
             let simulation_start = performance_now(performance.as_ref());
+            let creative_flight_available = self.creative_flight_available();
             let mut camera = self.camera.borrow_mut();
+            if !creative_flight_available && camera.locomotion() == LocomotionMode::CreativeFlight {
+                camera.set_locomotion(LocomotionMode::Walking);
+                self.input.borrow_mut().clear();
+            }
             let profiling = self.profile.borrow().running();
             let chunks = self.chunks.borrow();
             let mut accumulator = (self.simulation_accumulator.get() + dt.min(0.1))
@@ -649,6 +656,9 @@ mod web {
                 .set(smoothed_ms(self.stream_milliseconds.get(), stream_ms));
             let target = self.dig_target(&camera);
             let mut renderer = self.renderer.borrow_mut();
+            renderer.set_creative_flight_available(creative_flight_available);
+            renderer
+                .set_creative_flight_active(camera.locomotion() == LocomotionMode::CreativeFlight);
             renderer.set_remote_avatars(&remote_avatars);
             renderer.set_dig_target(target.map(|(hit, volume)| (hit.voxel, volume)));
             let server_time_ms = self.presence.estimated_server_time_ms(time);
@@ -726,6 +736,7 @@ mod web {
                             .x
                             .hypot(camera.velocity.z),
                         grounded: camera.grounded,
+                        creative_flight: camera.locomotion() == LocomotionMode::CreativeFlight,
                     },
                     frames_per_second: if self.frame_milliseconds.get() > 0.0 {
                         1_000.0 / self.frame_milliseconds.get()
@@ -1503,6 +1514,32 @@ mod web {
             self.callback.borrow_mut().take();
         }
 
+        fn creative_flight_available(&self) -> bool {
+            self.config.developer_controls_enabled
+                && self.remote.world_opened().is_some_and(|opened| {
+                    opened
+                        .capabilities
+                        .contains(WorldCapabilities::CREATIVE_FLIGHT)
+                })
+        }
+
+        fn apply_renderer_host_ui_action(&self) {
+            let action = self.renderer.borrow_mut().take_host_ui_action();
+            let Some(HostUiAction::CreativeFlightRequested(requested)) = action else {
+                return;
+            };
+            let active = requested && self.creative_flight_available();
+            self.input.borrow_mut().clear();
+            self.camera.borrow_mut().set_locomotion(if active {
+                LocomotionMode::CreativeFlight
+            } else {
+                LocomotionMode::Walking
+            });
+            self.renderer
+                .borrow_mut()
+                .set_creative_flight_active(active);
+        }
+
         fn feed_input(&self, bytes: &[u8]) -> bool {
             for chunk in bytes.chunks_exact(INPUT_RECORD_SIZE) {
                 let record = bytemuck::pod_read_unaligned::<InputRecord>(chunk);
@@ -1530,6 +1567,10 @@ mod web {
                                 .borrow_mut()
                                 .handle_ui_pointer_down(record.x, record.y)
                         };
+                        self.apply_renderer_host_ui_action();
+                        if !was_open && is_open {
+                            self.input.borrow_mut().clear();
+                        }
                         if !was_open && !is_open {
                             self.edit_target(record.buttons);
                         }
@@ -1563,6 +1604,9 @@ mod web {
                         }
                     }
                     KIND_WHEEL => {
+                        if self.renderer.borrow().ui_open() {
+                            continue;
+                        }
                         let direction = if record.dy >= 0.0 { 1 } else { -1 };
                         let _ = self
                             .renderer
@@ -1576,12 +1620,16 @@ mod web {
                     }
                     KIND_KEY_DOWN => {
                         if record.code == 8 {
-                            self.renderer.borrow_mut().handle_ui_key(
+                            let was_open = self.renderer.borrow().ui_open();
+                            let is_open = self.renderer.borrow_mut().handle_ui_key(
                                 record.code,
                                 true,
                                 record.flags & 1 != 0,
                             );
-                        } else {
+                            if !was_open && is_open {
+                                self.input.borrow_mut().clear();
+                            }
+                        } else if !self.renderer.borrow().ui_open() {
                             self.input.borrow_mut().set_key(record.code, true);
                         }
                     }
@@ -2366,6 +2414,11 @@ mod web {
                     render.cloud_steps[1] as f32,
                     render.fog_density,
                     render.outdoor_exposure,
+                    if camera.locomotion() == LocomotionMode::CreativeFlight {
+                        1.0
+                    } else {
+                        0.0
+                    },
                     SNAPSHOT_SCHEMA_VERSION,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
@@ -2444,12 +2497,14 @@ mod web {
             .map_err(|error| JsValue::from_str(&format!("player identity: {error}")))?;
         let client_config = ClientConfig::from_toml(&config_toml)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let developer_controls_enabled = client_config.developer.controls_enabled;
         let world_transport = client_config.world.clone();
         let runtime = client_config.runtime;
         let streaming = &client_config.streaming;
         let diagnostics = client_config.diagnostics;
         let profiling = client_config.profiling;
         let engine_config = EngineConfig {
+            developer_controls_enabled,
             fixed_step_seconds: runtime.fixed_step_seconds,
             max_steps_per_frame: runtime.max_steps_per_frame,
             max_edit_trackers: runtime.max_edit_trackers as usize,
@@ -2468,7 +2523,7 @@ mod web {
             enclosure_probe_distance_metres: diagnostics.enclosure_probe_distance_metres,
         };
         let rendering = &client_config.rendering;
-        let renderer_config = RendererConfig {
+        let mut renderer_config = RendererConfig {
             features: RendererFeatureConfig {
                 cascaded_sun_shadows: rendering.features.cascaded_sun_shadows,
                 voxel_ambient_occlusion: rendering.features.voxel_ambient_occlusion,
@@ -2483,7 +2538,8 @@ mod web {
             },
             mission_control: MissionControlConfig {
                 open: rendering.mission_control.open,
-                compact: rendering.mission_control.compact,
+                developer_controls: developer_controls_enabled,
+                creative_flight_available: false,
             },
             view_distance_metres: rendering.view_distance_metres,
             directional_shadows: DirectionalShadowConfig {
@@ -2512,6 +2568,10 @@ mod web {
         let opened = remote
             .world_opened()
             .ok_or_else(|| JsValue::from_str("world handshake completed without a manifest"))?;
+        renderer_config.mission_control.creative_flight_available = developer_controls_enabled
+            && opened
+                .capabilities
+                .contains(WorldCapabilities::CREATIVE_FLIGHT);
         let edits = EditMap::default();
         let spawn = opened.spawn;
         let resume = opened.player_resume;

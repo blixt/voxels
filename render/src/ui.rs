@@ -4,21 +4,22 @@
 //! device pixels through [`Viewport::device_to_css`], but the state and resulting draw list contain
 //! no browser, WASM, WGPU, or resource-lifetime concerns.
 
+use crate::environment::{DaylightPhase, WeatherPreset};
 use std::{collections::BTreeMap, fmt::Write};
 
 const PANEL_INSET: f32 = 18.0;
-const PANEL_WIDTH: f32 = 520.0;
-const COMPACT_WIDTH: f32 = 320.0;
-const HEADER_HEIGHT: f32 = 82.0;
+const PANEL_WIDTH: f32 = 500.0;
+const COMPACT_WIDTH: f32 = 340.0;
+const HEADER_HEIGHT: f32 = 76.0;
 const NAVIGATION_HEIGHT: f32 = 92.0;
 const COMPACT_NAVIGATION_HEIGHT: f32 = 108.0;
-const PANEL_RADIUS: f32 = 18.0;
-const CONTENT_PAD: f32 = 14.0;
-const BUTTON_SIZE: f32 = 30.0;
-const BUTTON_GAP: f32 = 6.0;
-const ACTION_BUTTON_WIDTH: f32 = 40.0;
-const CHROME_HEIGHT: f32 = 36.0;
-const LAUNCHER_WIDTH: f32 = 222.0;
+const PANEL_RADIUS: f32 = 24.0;
+const CONTENT_PAD: f32 = 16.0;
+const BUTTON_SIZE: f32 = 40.0;
+const BUTTON_GAP: f32 = 8.0;
+const ACTION_BUTTON_WIDTH: f32 = 86.0;
+const CHROME_HEIGHT: f32 = 44.0;
+const LAUNCHER_WIDTH: f32 = 246.0;
 const INVENTORY_WIDTH: f32 = 390.0;
 const INVENTORY_HEIGHT: f32 = 108.0;
 const CHROME_STACK_GAP: f32 = 8.0;
@@ -28,14 +29,15 @@ const MOTION_RATE: f32 = 18.0;
 const TOAST_HOLD_SECONDS: f32 = 5.0;
 const TOAST_FADE_SECONDS: f32 = 1.5;
 
-const PANEL_COLOR: Color = Color::new(0.055, 0.070, 0.105, 0.88);
-const PANEL_BORDER: Color = Color::new(0.52, 0.66, 0.88, 0.28);
-const CARD_COLOR: Color = Color::new(0.080, 0.100, 0.145, 0.72);
-const HOVER_COLOR: Color = Color::new(0.34, 0.62, 0.94, 0.20);
-const TEXT_PRIMARY: Color = Color::new(0.94, 0.96, 1.0, 1.0);
-const TEXT_MUTED: Color = Color::new(0.62, 0.69, 0.80, 1.0);
-const ACCENT: Color = Color::new(0.28, 0.76, 0.96, 1.0);
-const TOGGLE_OFF: Color = Color::new(0.16, 0.19, 0.25, 0.96);
+const PANEL_COLOR: Color = Color::new(0.036, 0.043, 0.064, 0.91);
+const PANEL_BORDER: Color = Color::new(0.88, 0.91, 1.0, 0.18);
+const CARD_COLOR: Color = Color::new(0.072, 0.078, 0.105, 0.78);
+const HOVER_COLOR: Color = Color::new(0.98, 0.77, 0.29, 0.20);
+const TEXT_PRIMARY: Color = Color::new(0.975, 0.965, 0.93, 1.0);
+const TEXT_MUTED: Color = Color::new(0.66, 0.68, 0.74, 1.0);
+const ACCENT: Color = Color::new(0.98, 0.78, 0.31, 1.0);
+const SUCCESS: Color = Color::new(0.42, 0.88, 0.63, 1.0);
+const TOGGLE_OFF: Color = Color::new(0.13, 0.14, 0.18, 0.96);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Color(pub [f32; 4]);
@@ -123,69 +125,9 @@ impl Viewport {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum RendererFeature {
-    CascadedSunShadows,
-    VoxelAmbientOcclusion,
-    ScreenSpaceAmbientOcclusion,
-    AtmosphericFog,
-    FarTerrain,
-    WaterSurface,
-    TargetOutline,
-    MaterialSurfaceDetail,
-    CaveHeadlamp,
-    VoxelEmissiveLights,
-}
-
-impl RendererFeature {
-    pub const ALL: [Self; 10] = [
-        Self::CascadedSunShadows,
-        Self::VoxelAmbientOcclusion,
-        Self::ScreenSpaceAmbientOcclusion,
-        Self::AtmosphericFog,
-        Self::FarTerrain,
-        Self::WaterSurface,
-        Self::TargetOutline,
-        Self::MaterialSurfaceDetail,
-        Self::CaveHeadlamp,
-        Self::VoxelEmissiveLights,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::CascadedSunShadows => "Cascaded sun shadows",
-            Self::VoxelAmbientOcclusion => "Voxel ambient occlusion",
-            Self::ScreenSpaceAmbientOcclusion => "Screen-space contact AO",
-            Self::AtmosphericFog => "Atmospheric fog",
-            Self::FarTerrain => "Far terrain",
-            Self::WaterSurface => "Animated water surface",
-            Self::TargetOutline => "Target outline",
-            Self::MaterialSurfaceDetail => "Material surface detail",
-            Self::CaveHeadlamp => "Automatic cave headlamp",
-            Self::VoxelEmissiveLights => "Voxel emissive lights",
-        }
-    }
-
-    pub const fn compact_label(self) -> &'static str {
-        match self {
-            Self::CascadedSunShadows => "Sun shadow",
-            Self::VoxelAmbientOcclusion => "Voxel AO",
-            Self::ScreenSpaceAmbientOcclusion => "Contact AO",
-            Self::AtmosphericFog => "Fog",
-            Self::FarTerrain => "Far terrain",
-            Self::WaterSurface => "Water",
-            Self::TargetOutline => "Target",
-            Self::MaterialSurfaceDetail => "Surface detail",
-            Self::CaveHeadlamp => "Headlamp",
-            Self::VoxelEmissiveLights => "Voxel lights",
-        }
-    }
-}
-
-/// Configured baseline for every renderer feature exposed by Mission Control.
-///
-/// The renderer and UI consume the same value so a toggle always describes actual renderer state,
-/// and "reset" means restore the host-provided baseline rather than enable every feature.
+/// Configured renderer feature baseline. Mission Control intentionally does not expose these as
+/// casual toggles; stable visual features belong in configuration, while the panel focuses on
+/// playful world controls and useful live information.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RendererFeatureConfig {
     pub cascaded_sun_shadows: bool,
@@ -198,23 +140,6 @@ pub struct RendererFeatureConfig {
     pub material_surface_detail: bool,
     pub cave_headlamp: bool,
     pub voxel_emissive_lights: bool,
-}
-
-impl RendererFeatureConfig {
-    pub const fn enabled(self, feature: RendererFeature) -> bool {
-        match feature {
-            RendererFeature::CascadedSunShadows => self.cascaded_sun_shadows,
-            RendererFeature::VoxelAmbientOcclusion => self.voxel_ambient_occlusion,
-            RendererFeature::ScreenSpaceAmbientOcclusion => self.screen_space_ambient_occlusion,
-            RendererFeature::AtmosphericFog => self.atmospheric_fog,
-            RendererFeature::FarTerrain => self.far_terrain,
-            RendererFeature::WaterSurface => self.water_surface,
-            RendererFeature::TargetOutline => self.target_outline,
-            RendererFeature::MaterialSurfaceDetail => self.material_surface_detail,
-            RendererFeature::CaveHeadlamp => self.cave_headlamp,
-            RendererFeature::VoxelEmissiveLights => self.voxel_emissive_lights,
-        }
-    }
 }
 
 impl Default for RendererFeatureConfig {
@@ -238,25 +163,98 @@ impl Default for RendererFeatureConfig {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MissionControlConfig {
     pub open: bool,
-    pub compact: bool,
+    pub developer_controls: bool,
+    pub creative_flight_available: bool,
 }
 
-const FEATURE_COUNT: usize = RendererFeature::ALL.len();
-const PANEL_HEIGHT: f32 = 680.0;
-const COMPACT_HEIGHT: f32 = 750.0;
+const PANEL_HEIGHT: f32 = 632.0;
+const COMPACT_HEIGHT: f32 = 650.0;
 
-const fn feature_index(feature: RendererFeature) -> usize {
-    match feature {
-        RendererFeature::CascadedSunShadows => 0,
-        RendererFeature::VoxelAmbientOcclusion => 1,
-        RendererFeature::ScreenSpaceAmbientOcclusion => 2,
-        RendererFeature::AtmosphericFog => 3,
-        RendererFeature::FarTerrain => 4,
-        RendererFeature::WaterSurface => 5,
-        RendererFeature::TargetOutline => 6,
-        RendererFeature::MaterialSurfaceDetail => 7,
-        RendererFeature::CaveHeadlamp => 8,
-        RendererFeature::VoxelEmissiveLights => 9,
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub enum TimeControl {
+    #[default]
+    FollowServer,
+    Dawn,
+    Noon,
+    GoldenHour,
+    BlueHour,
+    Night,
+}
+
+impl TimeControl {
+    pub const ALL: [Self; 6] = [
+        Self::FollowServer,
+        Self::Dawn,
+        Self::Noon,
+        Self::GoldenHour,
+        Self::BlueHour,
+        Self::Night,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FollowServer => "LIVE",
+            Self::Dawn => "DAWN",
+            Self::Noon => "NOON",
+            Self::GoldenHour => "GOLDEN",
+            Self::BlueHour => "BLUE",
+            Self::Night => "NIGHT",
+        }
+    }
+
+    pub const fn day_fraction(self) -> Option<f32> {
+        match self {
+            Self::FollowServer => None,
+            Self::Dawn => Some(DaylightPhase::Dawn.anchor_day_fraction()),
+            Self::Noon => Some(DaylightPhase::ClearDay.anchor_day_fraction()),
+            Self::GoldenHour => Some(DaylightPhase::GoldenHour.anchor_day_fraction()),
+            Self::BlueHour => Some(DaylightPhase::BlueHour.anchor_day_fraction()),
+            Self::Night => Some(DaylightPhase::Night.anchor_day_fraction()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub enum WeatherControl {
+    #[default]
+    FollowServer,
+    Clear,
+    Cloudy,
+    Overcast,
+    Rain,
+    Storm,
+}
+
+impl WeatherControl {
+    pub const ALL: [Self; 6] = [
+        Self::FollowServer,
+        Self::Clear,
+        Self::Cloudy,
+        Self::Overcast,
+        Self::Rain,
+        Self::Storm,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FollowServer => "LIVE",
+            Self::Clear => "CLEAR",
+            Self::Cloudy => "CLOUDY",
+            Self::Overcast => "OVERCAST",
+            Self::Rain => "RAIN",
+            Self::Storm => "STORM",
+        }
+    }
+
+    pub const fn preset(self) -> Option<WeatherPreset> {
+        match self {
+            Self::FollowServer => None,
+            Self::Clear => Some(WeatherPreset::Clear),
+            Self::Cloudy => Some(WeatherPreset::Cloudy),
+            Self::Overcast => Some(WeatherPreset::Overcast),
+            Self::Rain => Some(WeatherPreset::Rain),
+            Self::Storm => Some(WeatherPreset::Storm),
+        }
     }
 }
 
@@ -265,10 +263,10 @@ pub enum UiTarget {
     Launcher,
     Header,
     CopyDiagnostics,
-    ResetRendererFeatures,
     Close,
-    Compact,
-    Feature(RendererFeature),
+    Time(TimeControl),
+    Weather(WeatherControl),
+    CreativeFlight,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -281,10 +279,41 @@ pub enum UiKey {
 pub enum UiAction {
     None,
     CopyDiagnostics,
-    ResetRendererFeatures,
     PanelOpenChanged(bool),
-    CompactChanged(bool),
-    FeatureChanged(RendererFeature, bool),
+    TimeChanged(TimeControl),
+    WeatherChanged(WeatherControl),
+    CreativeFlightRequested(bool),
+}
+
+trait SegmentValue<T> {
+    fn segment_value(self) -> T;
+    fn segment_label(self) -> &'static str;
+}
+
+impl SegmentValue<TimeControl> for UiTarget {
+    fn segment_value(self) -> TimeControl {
+        match self {
+            Self::Time(value) => value,
+            _ => TimeControl::FollowServer,
+        }
+    }
+
+    fn segment_label(self) -> &'static str {
+        <Self as SegmentValue<TimeControl>>::segment_value(self).label()
+    }
+}
+
+impl SegmentValue<WeatherControl> for UiTarget {
+    fn segment_value(self) -> WeatherControl {
+        match self {
+            Self::Weather(value) => value,
+            _ => WeatherControl::FollowServer,
+        }
+    }
+
+    fn segment_label(self) -> &'static str {
+        <Self as SegmentValue<WeatherControl>>::segment_value(self).label()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -301,6 +330,7 @@ pub struct NavigationTelemetry {
     pub pitch_degrees: f32,
     pub horizontal_speed_metres_per_second: f32,
     pub grounded: bool,
+    pub creative_flight: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -353,10 +383,13 @@ pub enum SurfaceRole {
     Crosshair,
     Panel,
     Header,
+    WorldCard,
+    Segment,
+    AuthorityBadge,
+    MovementCard,
     NavigationCard,
     Button,
     StatCard,
-    FeatureRow,
     ToggleTrack,
     ToggleThumb,
 }
@@ -408,6 +441,8 @@ pub struct UiLayout {
     pub crosshair: Rect,
     pub panel: Rect,
     pub header: Rect,
+    pub world_card: Rect,
+    pub movement_card: Rect,
     pub navigation: Rect,
     pub compact: bool,
     pub regions: Vec<InteractiveRegion>,
@@ -464,16 +499,20 @@ impl EasedValue {
     }
 }
 
-/// Owns developer-surface state while leaving renderer features and actions under host control.
+/// Owns presentation and transient local selections. Semantic actions are emitted to the renderer
+/// or shell and confirmed state is fed back explicitly.
 pub struct MissionControlUi {
     open: bool,
-    compact: bool,
+    developer_controls: bool,
+    creative_flight_available: bool,
+    creative_flight_active: bool,
+    time_control: TimeControl,
+    weather_control: WeatherControl,
     reduced_motion: bool,
     hovered: Option<UiTarget>,
     stats: LiveStats,
-    feature_enabled: [bool; FEATURE_COUNT],
-    feature_motion: [EasedValue; FEATURE_COUNT],
     open_motion: EasedValue,
+    flight_motion: EasedValue,
     hover_motion: BTreeMap<UiTarget, EasedValue>,
     toast_age: f32,
     gameplay_toast: Option<String>,
@@ -493,28 +532,24 @@ pub struct MissionControlUi {
 
 impl Default for MissionControlUi {
     fn default() -> Self {
-        Self::new(
-            MissionControlConfig::default(),
-            RendererFeatureConfig::default(),
-        )
+        Self::new(MissionControlConfig::default())
     }
 }
 
 impl MissionControlUi {
-    pub fn new(config: MissionControlConfig, features: RendererFeatureConfig) -> Self {
-        let feature_enabled =
-            std::array::from_fn(|index| features.enabled(RendererFeature::ALL[index]));
-        let feature_motion =
-            std::array::from_fn(|index| EasedValue::new(f32::from(feature_enabled[index])));
+    pub fn new(config: MissionControlConfig) -> Self {
         Self {
             open: config.open,
-            compact: config.compact,
+            developer_controls: config.developer_controls,
+            creative_flight_available: config.creative_flight_available,
+            creative_flight_active: false,
+            time_control: TimeControl::FollowServer,
+            weather_control: WeatherControl::FollowServer,
             reduced_motion: false,
             hovered: None,
             stats: LiveStats::default(),
-            feature_enabled,
-            feature_motion,
             open_motion: EasedValue::new(f32::from(config.open)),
+            flight_motion: EasedValue::new(0.0),
             hover_motion: BTreeMap::new(),
             toast_age: 0.0,
             gameplay_toast: None,
@@ -537,10 +572,6 @@ impl MissionControlUi {
         self.open
     }
 
-    pub const fn compact(&self) -> bool {
-        self.compact
-    }
-
     pub const fn stats(&self) -> LiveStats {
         self.stats
     }
@@ -551,6 +582,27 @@ impl MissionControlUi {
             self.toast_age = 0.0;
         }
         self.stats = stats;
+    }
+
+    pub fn set_creative_flight_active(&mut self, active: bool) {
+        let active = active && self.creative_flight_available;
+        self.creative_flight_active = active;
+        self.flight_motion.set(active, self.reduced_motion);
+    }
+
+    pub fn set_creative_flight_available(&mut self, available: bool) {
+        self.creative_flight_available = available;
+        if !available {
+            self.set_creative_flight_active(false);
+        }
+    }
+
+    pub const fn time_control(&self) -> TimeControl {
+        self.time_control
+    }
+
+    pub const fn weather_control(&self) -> WeatherControl {
+        self.weather_control
     }
 
     pub fn set_environment_status(
@@ -643,36 +695,6 @@ impl MissionControlUi {
         }
     }
 
-    pub fn set_compact(&mut self, compact: bool) -> UiAction {
-        if self.compact == compact {
-            return UiAction::None;
-        }
-        self.compact = compact;
-        UiAction::CompactChanged(compact)
-    }
-
-    pub const fn feature_enabled(&self, feature: RendererFeature) -> bool {
-        self.feature_enabled[feature_index(feature)]
-    }
-
-    pub fn set_feature(&mut self, feature: RendererFeature, enabled: bool) -> UiAction {
-        let index = feature_index(feature);
-        if self.feature_enabled[index] == enabled {
-            return UiAction::None;
-        }
-        self.feature_enabled[index] = enabled;
-        self.feature_motion[index].set(enabled, self.reduced_motion);
-        UiAction::FeatureChanged(feature, enabled)
-    }
-
-    pub fn toggle_feature(&mut self, feature: RendererFeature) -> UiAction {
-        self.set_feature(feature, !self.feature_enabled(feature))
-    }
-
-    pub fn feature_eased_value(&self, feature: RendererFeature) -> f32 {
-        self.feature_motion[feature_index(feature)].value
-    }
-
     pub fn hover_eased_value(&self, target: UiTarget) -> f32 {
         self.hover_motion
             .get(&target)
@@ -682,21 +704,18 @@ impl MissionControlUi {
     pub fn advance(&mut self, dt: f32) {
         self.toast_age += dt.clamp(0.0, 0.1);
         self.open_motion.advance(dt, self.reduced_motion);
-        for motion in &mut self.feature_motion {
-            motion.advance(dt, self.reduced_motion);
-        }
+        self.flight_motion.advance(dt, self.reduced_motion);
         for motion in self.hover_motion.values_mut() {
             motion.advance(dt, self.reduced_motion);
         }
     }
 
     pub fn effective_compact(&self, viewport: Viewport) -> bool {
-        self.compact || viewport.css_size()[0] < AUTO_COMPACT_WIDTH
+        viewport.css_size()[0] < AUTO_COMPACT_WIDTH
     }
 
     pub fn layout(&self, viewport: Viewport) -> UiLayout {
         let [viewport_width, viewport_height] = viewport.css_size();
-        let automatically_compact = viewport_width < AUTO_COMPACT_WIDTH;
         let compact = self.effective_compact(viewport);
         let requested_width = if compact { COMPACT_WIDTH } else { PANEL_WIDTH };
         let panel_width = requested_width.min((viewport_width - PANEL_INSET * 2.0).max(180.0));
@@ -758,34 +777,15 @@ impl MissionControlUi {
             },
         ];
 
-        // Keep actions on the title row so environment and inventory status always have the full
-        // panel width below them. The previous vertically centred row overlapped both status lines.
-        let button_y = header.y + 7.0;
+        let button_y = header.y + 12.0;
         let close = Rect::new(
             panel.x + panel.width - CONTENT_PAD - BUTTON_SIZE,
             button_y,
             BUTTON_SIZE,
             BUTTON_SIZE,
         );
-        let reset = Rect::new(
-            close.x - BUTTON_GAP - ACTION_BUTTON_WIDTH,
-            button_y,
-            ACTION_BUTTON_WIDTH,
-            BUTTON_SIZE,
-        );
-        let compact_button = Rect::new(
-            reset.x - BUTTON_GAP - BUTTON_SIZE,
-            button_y,
-            BUTTON_SIZE,
-            BUTTON_SIZE,
-        );
-        let copy_right = if automatically_compact {
-            reset.x
-        } else {
-            compact_button.x
-        };
         let copy = Rect::new(
-            copy_right - BUTTON_GAP - ACTION_BUTTON_WIDTH,
+            close.x - BUTTON_GAP - ACTION_BUTTON_WIDTH,
             button_y,
             ACTION_BUTTON_WIDTH,
             BUTTON_SIZE,
@@ -796,39 +796,88 @@ impl MissionControlUi {
                 rect: copy,
             },
             InteractiveRegion {
-                target: UiTarget::ResetRendererFeatures,
-                rect: reset,
-            },
-            InteractiveRegion {
                 target: UiTarget::Close,
                 rect: close,
             },
         ]);
-        if !automatically_compact {
+
+        let world_card = Rect::new(
+            panel.x + CONTENT_PAD,
+            panel.y + HEADER_HEIGHT + 10.0,
+            panel.width - CONTENT_PAD * 2.0,
+            if compact { 184.0 } else { 154.0 },
+        );
+        let chip_columns = if compact { 3 } else { 6 };
+        let chip_gap = 6.0;
+        let chip_width =
+            (world_card.width - 20.0 - chip_gap * (chip_columns - 1) as f32) / chip_columns as f32;
+        let chip_height = if compact { 28.0 } else { 34.0 };
+        let time_top = world_card.y + 30.0;
+        for (index, control) in TimeControl::ALL.into_iter().enumerate() {
+            let column = index % chip_columns;
+            let row = index / chip_columns;
             regions.push(InteractiveRegion {
-                target: UiTarget::Compact,
-                rect: compact_button,
+                target: UiTarget::Time(control),
+                rect: Rect::new(
+                    world_card.x + 10.0 + column as f32 * (chip_width + chip_gap),
+                    time_top + row as f32 * (chip_height + 5.0),
+                    chip_width,
+                    chip_height,
+                ),
+            });
+        }
+        let time_rows = TimeControl::ALL.len().div_ceil(chip_columns);
+        let weather_top = time_top + time_rows as f32 * (chip_height + 5.0) + 24.0;
+        for (index, control) in WeatherControl::ALL.into_iter().enumerate() {
+            let column = index % chip_columns;
+            let row = index / chip_columns;
+            regions.push(InteractiveRegion {
+                target: UiTarget::Weather(control),
+                rect: Rect::new(
+                    world_card.x + 10.0 + column as f32 * (chip_width + chip_gap),
+                    weather_top + row as f32 * (chip_height + 5.0),
+                    chip_width,
+                    chip_height,
+                ),
             });
         }
 
+        let movement_card = Rect::new(
+            world_card.x,
+            world_card.y + world_card.height + 10.0,
+            world_card.width,
+            60.0,
+        );
+        if self.developer_controls && self.creative_flight_available {
+            regions.push(InteractiveRegion {
+                target: UiTarget::CreativeFlight,
+                rect: movement_card,
+            });
+        }
         let navigation = Rect::new(
-            panel.x + CONTENT_PAD,
-            panel.y + HEADER_HEIGHT + 12.0,
-            panel.width - CONTENT_PAD * 2.0,
+            world_card.x,
+            movement_card.y + movement_card.height + 10.0,
+            world_card.width,
             if compact {
                 COMPACT_NAVIGATION_HEIGHT
             } else {
                 NAVIGATION_HEIGHT
             },
         );
-        let stats_top = navigation.y + navigation.height + 24.0;
+        let stats_top = navigation.y + navigation.height + 16.0;
         let stat_columns: usize = 2;
-        let stat_gap = 7.0;
+        let stat_gap = 8.0;
         let stat_width = (panel.width - CONTENT_PAD * 2.0 - stat_gap * (stat_columns - 1) as f32)
             / stat_columns as f32;
-        let stat_height = if compact { 44.0 } else { 50.0 };
-        let dense = compact || panel.height < 620.0;
-        let stat_count: usize = if dense { 6 } else { 8 };
+        let stat_height = 48.0;
+        let available_stats = (panel.y + panel.height - CONTENT_PAD - stats_top).max(0.0);
+        let stat_count = if available_stats >= stat_height * 2.0 + stat_gap {
+            4
+        } else if available_stats >= stat_height {
+            2
+        } else {
+            0
+        };
         let stat_cards = (0..stat_count)
             .map(|index| {
                 let column = index % stat_columns;
@@ -842,34 +891,6 @@ impl MissionControlUi {
             })
             .collect::<Vec<_>>();
 
-        let stats_rows = stat_count.div_ceil(stat_columns);
-        let feature_top = stats_top + stats_rows as f32 * (stat_height + stat_gap) + 23.0;
-        let feature_columns: usize = 2;
-        let feature_rows = FEATURE_COUNT.div_ceil(feature_columns);
-        let feature_gap = 7.0;
-        let feature_width =
-            (panel.width - CONTENT_PAD * 2.0 - feature_gap * (feature_columns - 1) as f32)
-                / feature_columns as f32;
-        let nominal_feature_row_height: f32 = 38.0;
-        let available_feature_height =
-            (panel.y + panel.height - CONTENT_PAD - feature_top).max(0.0);
-        let feature_row_height = nominal_feature_row_height
-            .min(available_feature_height / feature_rows.max(1) as f32)
-            .max(1.0);
-        for (index, feature) in RendererFeature::ALL.into_iter().enumerate() {
-            let column = index % feature_columns;
-            let row = index / feature_columns;
-            regions.push(InteractiveRegion {
-                target: UiTarget::Feature(feature),
-                rect: Rect::new(
-                    panel.x + CONTENT_PAD + column as f32 * (feature_width + feature_gap),
-                    feature_top + row as f32 * feature_row_height,
-                    feature_width,
-                    feature_row_height,
-                ),
-            });
-        }
-
         UiLayout {
             launcher,
             inventory,
@@ -877,6 +898,8 @@ impl MissionControlUi {
             crosshair,
             panel,
             header,
+            world_card,
+            movement_card,
             navigation,
             compact,
             regions,
@@ -932,10 +955,23 @@ impl MissionControlUi {
         match self.hit_test_css(point, viewport) {
             Some(UiTarget::Launcher) => self.toggle_open(),
             Some(UiTarget::CopyDiagnostics) => UiAction::CopyDiagnostics,
-            Some(UiTarget::ResetRendererFeatures) => UiAction::ResetRendererFeatures,
             Some(UiTarget::Close) => self.set_open(false),
-            Some(UiTarget::Compact) => self.set_compact(!self.compact),
-            Some(UiTarget::Feature(feature)) => self.toggle_feature(feature),
+            Some(UiTarget::Time(control)) if self.developer_controls => {
+                self.time_control = control;
+                UiAction::TimeChanged(control)
+            }
+            Some(UiTarget::Weather(control)) if self.developer_controls => {
+                self.weather_control = control;
+                UiAction::WeatherChanged(control)
+            }
+            Some(UiTarget::CreativeFlight)
+                if self.developer_controls && self.creative_flight_available =>
+            {
+                UiAction::CreativeFlightRequested(!self.creative_flight_active)
+            }
+            Some(UiTarget::Time(_))
+            | Some(UiTarget::Weather(_))
+            | Some(UiTarget::CreativeFlight) => UiAction::None,
             Some(UiTarget::Header) | None => UiAction::None,
         }
     }
@@ -967,49 +1003,30 @@ impl MissionControlUi {
         push_text(
             &mut draw,
             if layout.compact {
-                "MISSION CONTROL"
+                "WORLD LAB"
             } else {
-                "VOXELS / MISSION CONTROL"
+                "VOXELS / WORLD LAB"
             },
-            [layout.panel.x + CONTENT_PAD, layout.header.y + 21.0],
-            if layout.compact { 10.0 } else { 11.5 },
+            [layout.panel.x + CONTENT_PAD, layout.header.y + 24.0],
+            if layout.compact { 11.0 } else { 13.0 },
             TEXT_PRIMARY.with_alpha(opacity),
             TextAlign::Left,
         );
         push_text(
             &mut draw,
             format!(
-                "{} · {} / {}",
+                "{} · {} · {}",
                 self.world_time_label, self.daylight_label, self.region_label
             ),
-            [layout.panel.x + CONTENT_PAD, layout.header.y + 48.0],
+            [layout.panel.x + CONTENT_PAD, layout.header.y + 51.0],
             if layout.compact { 8.0 } else { 9.0 },
             TEXT_MUTED.with_alpha(opacity),
             TextAlign::Left,
         );
-        let placement_status = if self.placement_material_available {
-            format!(
-                "PLACE {} ×{}",
-                self.placement_material_label,
-                compact_count(self.placement_material_count),
-            )
-        } else {
-            "INVENTORY EMPTY · DIG TO COLLECT".to_owned()
-        };
-        push_text(
-            &mut draw,
-            placement_status,
-            [layout.panel.x + CONTENT_PAD, layout.header.y + 66.0],
-            if layout.compact { 9.0 } else { 10.0 },
-            ACCENT.with_alpha(opacity),
-            TextAlign::Left,
-        );
 
         for (target, label) in [
-            (UiTarget::CopyDiagnostics, "COPY"),
-            (UiTarget::ResetRendererFeatures, "RESET"),
-            (UiTarget::Compact, if layout.compact { ">" } else { "<" }),
-            (UiTarget::Close, "x"),
+            (UiTarget::CopyDiagnostics, "COPY INFO"),
+            (UiTarget::Close, "×"),
         ] {
             if let Some(rect) = layout.region(target) {
                 let hover = self.hover_eased_value(target);
@@ -1025,13 +1042,10 @@ impl MissionControlUi {
                     &mut draw,
                     label,
                     rect.center(),
-                    if matches!(
-                        target,
-                        UiTarget::CopyDiagnostics | UiTarget::ResetRendererFeatures
-                    ) {
-                        8.0
+                    if target == UiTarget::CopyDiagnostics {
+                        8.5
                     } else {
-                        12.0
+                        17.0
                     },
                     TEXT_PRIMARY.with_alpha(opacity),
                     TextAlign::Center,
@@ -1039,6 +1053,8 @@ impl MissionControlUi {
             }
         }
 
+        self.push_world_controls(&mut draw, &layout, opacity);
+        self.push_movement_control(&mut draw, &layout, opacity);
         self.push_navigation(&mut draw, &layout, opacity);
 
         let card_data = self.card_data(layout.compact, layout.stat_cards.len());
@@ -1075,48 +1091,198 @@ impl MissionControlUi {
             );
         }
 
-        let first_feature_y = layout
-            .region(UiTarget::Feature(RendererFeature::CascadedSunShadows))
-            .map_or(layout.header.y + HEADER_HEIGHT, |rect| rect.y);
+        draw
+    }
+
+    fn push_world_controls(&self, draw: &mut UiDrawList, layout: &UiLayout, opacity: f32) {
+        push_surface(
+            draw,
+            layout.world_card,
+            16.0,
+            CARD_COLOR.with_alpha(opacity),
+            PANEL_BORDER.with_alpha(opacity * 0.45),
+            SurfaceRole::WorldCard,
+        );
+        let overridden = self.time_control != TimeControl::FollowServer
+            || self.weather_control != WeatherControl::FollowServer;
+        let badge = Rect::new(
+            layout.world_card.x + layout.world_card.width - 108.0,
+            layout.world_card.y + 10.0,
+            98.0,
+            20.0,
+        );
+        push_surface(
+            draw,
+            badge,
+            10.0,
+            if overridden { ACCENT } else { SUCCESS }.with_alpha(opacity * 0.18),
+            if overridden { ACCENT } else { SUCCESS }.with_alpha(opacity * 0.72),
+            SurfaceRole::AuthorityBadge,
+        );
         push_text(
-            &mut draw,
-            "RENDER FEATURES",
-            [layout.panel.x + CONTENT_PAD, first_feature_y - 11.0],
-            9.0,
+            draw,
+            if overridden {
+                "LOCAL OVERRIDE"
+            } else {
+                "SERVER SYNC"
+            },
+            badge.center(),
+            7.5,
+            if overridden { ACCENT } else { SUCCESS }.with_alpha(opacity),
+            TextAlign::Center,
+        );
+        push_text(
+            draw,
+            "TIME OF DAY",
+            [layout.world_card.x + 10.0, layout.world_card.y + 18.0],
+            8.5,
             TEXT_MUTED.with_alpha(opacity),
             TextAlign::Left,
         );
-        for feature in RendererFeature::ALL {
-            let target = UiTarget::Feature(feature);
+        self.push_segments(
+            draw,
+            layout,
+            TimeControl::ALL.map(UiTarget::Time),
+            self.time_control,
+            opacity,
+        );
+        let first_weather = layout
+            .region(UiTarget::Weather(WeatherControl::FollowServer))
+            .map_or(layout.world_card.y + 100.0, |rect| rect.y);
+        push_text(
+            draw,
+            "WEATHER",
+            [layout.world_card.x + 10.0, first_weather - 12.0],
+            8.5,
+            TEXT_MUTED.with_alpha(opacity),
+            TextAlign::Left,
+        );
+        self.push_segments(
+            draw,
+            layout,
+            WeatherControl::ALL.map(UiTarget::Weather),
+            self.weather_control,
+            opacity,
+        );
+    }
+
+    fn push_segments<T: Copy + Eq>(
+        &self,
+        draw: &mut UiDrawList,
+        layout: &UiLayout,
+        targets: [UiTarget; 6],
+        selected: T,
+        opacity: f32,
+    ) where
+        UiTarget: SegmentValue<T>,
+    {
+        for target in targets {
             let Some(rect) = layout.region(target) else {
                 continue;
             };
             let hover = self.hover_eased_value(target);
+            let active = target.segment_value() == selected;
+            let accent = if matches!(
+                target,
+                UiTarget::Time(TimeControl::FollowServer)
+                    | UiTarget::Weather(WeatherControl::FollowServer)
+            ) {
+                SUCCESS
+            } else {
+                ACCENT
+            };
             push_surface(
-                &mut draw,
+                draw,
                 rect,
-                8.0,
-                CARD_COLOR
-                    .mix(HOVER_COLOR, hover)
-                    .with_alpha(opacity * (0.56 + hover * 0.30)),
-                PANEL_BORDER.with_alpha(opacity * hover * 0.8),
-                SurfaceRole::FeatureRow,
+                rect.height * 0.5,
+                if active {
+                    accent.with_alpha(opacity * 0.22)
+                } else {
+                    CARD_COLOR
+                        .mix(HOVER_COLOR, hover)
+                        .with_alpha(opacity * 0.62)
+                },
+                if active { accent } else { PANEL_BORDER }
+                    .with_alpha(opacity * (if active { 0.88 } else { 0.34 + hover * 0.5 })),
+                SurfaceRole::Segment,
             );
             push_text(
-                &mut draw,
-                if layout.compact {
-                    feature.compact_label()
-                } else {
-                    feature.label()
-                },
-                [rect.x + 10.0, rect.center()[1]],
-                if layout.compact { 9.5 } else { 11.5 },
-                TEXT_PRIMARY.with_alpha(opacity),
-                TextAlign::Left,
+                draw,
+                target.segment_label(),
+                rect.center(),
+                if layout.compact { 8.0 } else { 8.5 },
+                if active { accent } else { TEXT_PRIMARY }.with_alpha(
+                    opacity
+                        * if self.developer_controls || active {
+                            1.0
+                        } else {
+                            0.45
+                        },
+                ),
+                TextAlign::Center,
             );
-            self.push_toggle(&mut draw, rect, feature, opacity);
         }
-        draw
+    }
+
+    fn push_movement_control(&self, draw: &mut UiDrawList, layout: &UiLayout, opacity: f32) {
+        let target = UiTarget::CreativeFlight;
+        let hover = self.hover_eased_value(target);
+        push_surface(
+            draw,
+            layout.movement_card,
+            16.0,
+            CARD_COLOR.mix(HOVER_COLOR, hover).with_alpha(opacity),
+            PANEL_BORDER.with_alpha(opacity * (0.38 + hover * 0.42)),
+            SurfaceRole::MovementCard,
+        );
+        push_text(
+            draw,
+            "CREATIVE FLIGHT",
+            [layout.movement_card.x + 12.0, layout.movement_card.y + 20.0],
+            10.0,
+            TEXT_PRIMARY.with_alpha(opacity),
+            TextAlign::Left,
+        );
+        let note = if !self.developer_controls {
+            "Developer controls disabled in client config"
+        } else if !self.creative_flight_available {
+            "This world does not authorize flight"
+        } else if self.creative_flight_active {
+            "WASD move · Space rise · Shift descend"
+        } else {
+            "Collision-aware flight · inventory unchanged"
+        };
+        push_text(
+            draw,
+            note,
+            [layout.movement_card.x + 12.0, layout.movement_card.y + 42.0],
+            if layout.compact { 8.0 } else { 8.5 },
+            TEXT_MUTED.with_alpha(opacity),
+            TextAlign::Left,
+        );
+        let track = Rect::new(
+            layout.movement_card.x + layout.movement_card.width - 52.0,
+            layout.movement_card.center()[1] - 11.0,
+            40.0,
+            22.0,
+        );
+        let value = self.flight_motion.value.clamp(0.0, 1.0);
+        push_surface(
+            draw,
+            track,
+            11.0,
+            TOGGLE_OFF.mix(ACCENT, value).with_alpha(opacity),
+            PANEL_BORDER.with_alpha(opacity * 0.55),
+            SurfaceRole::ToggleTrack,
+        );
+        push_surface(
+            draw,
+            Rect::new(track.x + 3.0 + value * 18.0, track.y + 3.0, 16.0, 16.0),
+            8.0,
+            TEXT_PRIMARY.with_alpha(opacity),
+            Color::new(1.0, 1.0, 1.0, 0.2 * opacity),
+            SurfaceRole::ToggleThumb,
+        );
     }
 
     fn push_navigation(&self, draw: &mut UiDrawList, layout: &UiLayout, opacity: f32) {
@@ -1225,11 +1391,13 @@ impl MissionControlUi {
                 SurfaceRole::Toast,
             );
             let default_toast = if self.stats.swimming {
-                "WASD SWIM  /  SPACE ASCEND  /  SHIFT DIVE  /  F3 CONTROLS"
+                "WASD SWIM  ·  SPACE RISE  ·  SHIFT DIVE  ·  F3 WORLD LAB"
+            } else if self.stats.navigation.creative_flight {
+                "WASD FLY  ·  SPACE RISE  ·  SHIFT DESCEND  ·  F3 WORLD LAB"
             } else if layout.toast.width < 500.0 {
-                "WASD MOVE  /  SPACE JUMP  /  F3 CONTROLS"
+                "WASD MOVE  ·  SPACE JUMP  ·  F3 WORLD LAB"
             } else {
-                "CLICK TO LOOK  /  WASD MOVE  /  SPACE JUMP  /  LMB DIG 0.5 M CUBE  /  RMB PLACE  /  F3"
+                "CLICK TO LOOK  ·  WASD MOVE  ·  SPACE JUMP  ·  LMB DIG  ·  RMB PLACE  ·  F3 WORLD LAB"
             };
             let toast = self.gameplay_toast.as_deref().unwrap_or(default_toast);
             push_text(
@@ -1251,17 +1419,22 @@ impl MissionControlUi {
             PANEL_BORDER.mix(ACCENT, launcher_hover * 0.6),
             SurfaceRole::Launcher,
         );
-        let launcher = if self.stats.swimming {
+        let launcher = if self.stats.navigation.creative_flight {
             format!(
-                "SWIMMING {:.0}% · {:.1} M   F3   {:.0} FPS",
+                "FLYING  ·  {}  ·  {:.0} FPS",
+                self.world_time_label, self.stats.frames_per_second
+            )
+        } else if self.stats.swimming {
+            format!(
+                "SWIMMING {:.0}%  ·  {:.1} M  ·  {:.0} FPS",
                 self.stats.water_immersion * 100.0,
                 self.stats.eye_depth_metres,
                 self.stats.frames_per_second
             )
         } else {
             format!(
-                "MISSION CONTROL   F3   {:.0} FPS",
-                self.stats.frames_per_second
+                "{}  ·  {}  ·  {:.0} FPS",
+                self.world_time_label, self.daylight_label, self.stats.frames_per_second
             )
         };
         push_text(
@@ -1479,7 +1652,7 @@ impl MissionControlUi {
         let [x, y, z] = navigation.eye_position_metres;
         let [voxel_x, voxel_y, voxel_z] = navigation.eye_voxel;
         let [chunk_x, chunk_y, chunk_z] = navigation.eye_chunk;
-        let mut report = String::from("VOXELS / MISSION CONTROL\n\n");
+        let mut report = String::from("VOXELS / WORLD LAB\n\n");
 
         let _ = writeln!(report, "NAVIGATION");
         let _ = writeln!(report, "Eye position (m): X {x:.3}, Y {y:.3}, Z {z:.3}");
@@ -1497,6 +1670,7 @@ impl MissionControlUi {
             navigation.horizontal_speed_metres_per_second,
             movement_label(stats).to_ascii_lowercase(),
         );
+        let _ = writeln!(report, "Creative flight: {}", navigation.creative_flight);
 
         let _ = writeln!(report, "\nWORLD");
         let _ = writeln!(
@@ -1505,6 +1679,24 @@ impl MissionControlUi {
             self.world_time_label, self.daylight_label
         );
         let _ = writeln!(report, "Weather: {}", self.weather_label);
+        let _ = writeln!(
+            report,
+            "Time authority: {}",
+            if self.time_control == TimeControl::FollowServer {
+                "server"
+            } else {
+                "local debug override"
+            }
+        );
+        let _ = writeln!(
+            report,
+            "Weather authority: {}",
+            if self.weather_control == WeatherControl::FollowServer {
+                "server"
+            } else {
+                "local debug override"
+            }
+        );
         let _ = writeln!(report, "Region: {}", self.region_label);
         let _ = writeln!(
             report,
@@ -1622,44 +1814,7 @@ impl MissionControlUi {
             }
         }
 
-        let _ = writeln!(report, "\nRENDER FEATURES");
-        for feature in RendererFeature::ALL {
-            let state = if self.feature_enabled(feature) {
-                "on"
-            } else {
-                "off"
-            };
-            let _ = writeln!(report, "{}: {state}", feature.label());
-        }
         report
-    }
-
-    fn push_toggle(
-        &self,
-        draw: &mut UiDrawList,
-        row: Rect,
-        feature: RendererFeature,
-        opacity: f32,
-    ) {
-        let value = self.feature_eased_value(feature).clamp(0.0, 1.0);
-        let track = Rect::new(row.x + row.width - 42.0, row.center()[1] - 9.0, 34.0, 18.0);
-        push_surface(
-            draw,
-            track,
-            9.0,
-            TOGGLE_OFF.mix(ACCENT, value).with_alpha(opacity),
-            PANEL_BORDER.with_alpha(opacity * 0.55),
-            SurfaceRole::ToggleTrack,
-        );
-        let thumb = Rect::new(track.x + 2.0 + value * 16.0, track.y + 2.0, 14.0, 14.0);
-        push_surface(
-            draw,
-            thumb,
-            7.0,
-            TEXT_PRIMARY.with_alpha(opacity),
-            Color::new(1.0, 1.0, 1.0, 0.22 * opacity),
-            SurfaceRole::ToggleThumb,
-        );
     }
 
     fn set_hover(&mut self, target: Option<UiTarget>) {
@@ -1683,9 +1838,7 @@ impl MissionControlUi {
 
     fn snap_motion(&mut self) {
         self.open_motion.advance(0.0, true);
-        for motion in &mut self.feature_motion {
-            motion.advance(0.0, true);
-        }
+        self.flight_motion.advance(0.0, true);
         for motion in self.hover_motion.values_mut() {
             motion.advance(0.0, true);
         }
@@ -1780,7 +1933,9 @@ fn pitch_label(pitch_degrees: f32) -> String {
 }
 
 fn movement_label(stats: LiveStats) -> &'static str {
-    if stats.swimming {
+    if stats.navigation.creative_flight {
+        "FLYING"
+    } else if stats.swimming {
         "SWIMMING"
     } else if stats.navigation.grounded {
         "GROUNDED"
@@ -1793,43 +1948,32 @@ fn movement_label(stats: LiveStats) -> &'static str {
 mod tests {
     use super::*;
 
-    fn viewport() -> Viewport {
-        Viewport::new(1_280.0, 720.0, 1.0)
+    fn viewport(width: f32, height: f32) -> Viewport {
+        Viewport::new(width, height, 1.0)
     }
 
-    fn test_ui(config: MissionControlConfig, features: RendererFeatureConfig) -> MissionControlUi {
-        MissionControlUi::new(config, features)
+    fn enabled(open: bool) -> MissionControlUi {
+        MissionControlUi::new(MissionControlConfig {
+            open,
+            developer_controls: true,
+            creative_flight_available: true,
+        })
     }
 
-    fn closed() -> MissionControlUi {
-        test_ui(
-            MissionControlConfig::default(),
-            RendererFeatureConfig::default(),
-        )
-    }
-
-    fn opened() -> MissionControlUi {
-        test_ui(
-            MissionControlConfig {
-                open: true,
-                compact: false,
-            },
-            RendererFeatureConfig::default(),
-        )
+    fn activate(ui: &mut MissionControlUi, target: UiTarget, viewport: Viewport) -> UiAction {
+        let rect = ui.layout(viewport).region(target).expect("target region");
+        ui.activate_css(rect.center(), viewport)
     }
 
     #[test]
-    fn f3_toggles_only_on_initial_key_down() {
-        let mut ui = closed();
+    fn f3_toggles_once_per_initial_key_down() {
+        let mut ui = enabled(false);
         assert_eq!(ui.handle_key(UiKey::Other, true, false), UiAction::None);
-        assert_eq!(ui.handle_key(UiKey::F3, false, false), UiAction::None);
         assert_eq!(
             ui.handle_key(UiKey::F3, true, false),
             UiAction::PanelOpenChanged(true)
         );
-        assert!(ui.open());
         assert_eq!(ui.handle_key(UiKey::F3, true, true), UiAction::None);
-        assert!(ui.open());
         assert_eq!(
             ui.handle_key(UiKey::F3, true, false),
             UiAction::PanelOpenChanged(false)
@@ -1837,640 +1981,216 @@ mod tests {
     }
 
     #[test]
-    fn configured_panel_and_mixed_feature_state_are_applied_atomically() {
-        let features = RendererFeatureConfig {
-            cascaded_sun_shadows: false,
-            voxel_ambient_occlusion: true,
-            screen_space_ambient_occlusion: false,
-            atmospheric_fog: true,
-            far_terrain: false,
-            water_surface: true,
-            target_outline: false,
-            material_surface_detail: true,
-            cave_headlamp: false,
-            voxel_emissive_lights: true,
-        };
-        let ui = test_ui(
-            MissionControlConfig {
-                open: true,
-                compact: true,
-            },
-            features,
-        );
-
-        assert!(ui.open());
-        assert!(ui.compact());
-        for feature in RendererFeature::ALL {
-            assert_eq!(ui.feature_enabled(feature), features.enabled(feature));
-            assert_eq!(
-                ui.feature_eased_value(feature),
-                f32::from(features.enabled(feature))
-            );
-        }
-    }
-
-    #[test]
-    fn device_pixel_hit_testing_matches_css_pixels_at_any_density() {
-        let ui = opened();
-        let normal = viewport();
-        let retina = Viewport::new(2_560.0, 1_440.0, 2.0);
-        let close = ui.layout(normal).region(UiTarget::Close);
-        assert!(close.is_some());
-        if let Some(close) = close {
-            assert_eq!(
-                ui.hit_test_css(close.center(), normal),
-                Some(UiTarget::Close)
-            );
-            assert_eq!(
-                ui.hit_test_device([close.center()[0] * 2.0, close.center()[1] * 2.0], retina),
-                Some(UiTarget::Close)
-            );
-        }
-    }
-
-    #[test]
-    fn copy_button_hit_testing_is_density_independent() {
-        let normal = viewport();
-        let retina = Viewport::new(2_560.0, 1_440.0, 2.0);
-        let copy = opened()
-            .layout(normal)
-            .region(UiTarget::CopyDiagnostics)
-            .expect("copy button");
-        let mut normal_ui = opened();
-        assert_eq!(
-            normal_ui.activate_css(copy.center(), normal),
-            UiAction::CopyDiagnostics,
-        );
-        let mut retina_ui = opened();
-        assert_eq!(
-            retina_ui.activate_device([copy.center()[0] * 2.0, copy.center()[1] * 2.0], retina,),
-            UiAction::CopyDiagnostics,
-        );
-    }
-
-    #[test]
-    fn explicit_header_actions_are_hit_testable_without_a_secondary_menu() {
-        let viewport = viewport();
-        let mut ui = opened();
-        let center = ui
-            .layout(viewport)
-            .region(UiTarget::ResetRendererFeatures)
-            .expect("header action")
-            .center();
-        assert_eq!(
-            ui.activate_css(center, viewport),
-            UiAction::ResetRendererFeatures
-        );
-    }
-
-    #[test]
-    fn desktop_layout_reserves_legible_navigation_and_two_column_cards() {
-        let layout = opened().layout(viewport());
-        assert_eq!(layout.panel.width, PANEL_WIDTH);
-        assert!(layout.navigation.y >= layout.header.y + layout.header.height);
-        assert_eq!(layout.stat_cards.len(), 8);
-        assert!(layout.stat_cards.iter().all(|card| card.width >= 235.0));
-        assert!(
-            layout
-                .stat_cards
-                .iter()
-                .all(|card| card.y >= layout.navigation.y + layout.navigation.height)
-        );
-
-        let buttons = [
-            UiTarget::CopyDiagnostics,
-            UiTarget::ResetRendererFeatures,
-            UiTarget::Compact,
-            UiTarget::Close,
-        ]
-        .map(|target| layout.region(target).expect("header action"));
-        for (index, left) in buttons.iter().enumerate() {
-            for right in &buttons[index + 1..] {
-                assert!(left.x + left.width <= right.x || right.x + right.width <= left.x);
-            }
-        }
-    }
-
-    #[test]
-    fn heading_labels_wrap_and_change_at_half_sector_boundaries() {
-        assert_eq!(heading_label(0.0), "N");
-        assert_eq!(heading_label(11.24), "N");
-        assert_eq!(heading_label(11.25), "NNE");
-        assert_eq!(heading_label(90.0), "E");
-        assert_eq!(heading_label(118.9), "ESE");
-        assert_eq!(heading_label(-90.0), "W");
-        assert_eq!(heading_label(359.99), "N");
-        assert_eq!(heading_label(720.0), "N");
-    }
-
-    #[test]
-    fn diagnostics_report_includes_full_navigation_and_hidden_details() {
-        let mut ui = opened();
-        let _ = ui.set_feature(RendererFeature::FarTerrain, false);
-        ui.set_inventory(
-            Some("STONE"),
-            12,
-            ["STONE 12 · GRASS 4".to_owned(), String::new()],
-            Vec::new(),
-            None,
-        );
-        ui.set_stats(LiveStats {
-            navigation: NavigationTelemetry {
-                eye_position_metres: [-0.01, 12.345, -3.201],
-                eye_voxel: [-1, 123, -33],
-                eye_chunk: [-1, 3, -2],
-                heading_degrees: 270.0,
-                pitch_degrees: 12.5,
-                horizontal_speed_metres_per_second: 5.75,
-                grounded: false,
-            },
-            frames_per_second: 120.0,
-            frame_ms: 8.33,
-            cpu_ms: 1.25,
-            gpu_ms: Some(4.5),
-            lod_tiles: [75, 16, 8, 4, 2, 1],
-            shadow_draw_calls: 42,
-            shadow_cascades: 3,
-            stream_interest_requested: 80,
-            stream_interest_desired: 72,
-            stream_interest_truncated: 8,
-            ..LiveStats::default()
-        });
-
-        let report = ui.diagnostics_report();
-        assert!(report.contains("Eye position (m): X -0.010, Y 12.345, Z -3.201"));
-        assert!(report.contains("Eye voxel (10 cm): X -1, Y 123, Z -33"));
-        assert!(report.contains("Chunk: X -1, Y 3, Z -2"));
-        assert!(report.contains("Facing: W (270.00 deg), pitch 12.5° UP"));
-        assert!(report.contains("LOD tiles 0..5: 75, 16, 8, 4, 2, 1"));
-        assert!(report.contains("42 shadow across 3 cascades"));
-        assert!(report.contains("80 requested, 72 desired, 8 truncated"));
-        assert!(report.contains("STONE 12 · GRASS 4"));
-        assert!(report.contains("Far terrain: off"));
-    }
-
-    #[test]
-    fn feature_rows_toggle_and_animate_without_changing_host_state_implicitly() {
-        let mut ui = opened();
-        let feature = RendererFeature::AtmosphericFog;
-        assert!(ui.feature_enabled(feature));
-        assert_eq!(
-            ui.toggle_feature(feature),
-            UiAction::FeatureChanged(feature, false)
-        );
-        assert!(!ui.feature_enabled(feature));
-        assert_eq!(ui.feature_eased_value(feature), 1.0);
-        ui.advance(1.0 / 60.0);
-        assert!(ui.feature_eased_value(feature) > 0.0);
-        assert!(ui.feature_eased_value(feature) < 1.0);
-        for _ in 0..60 {
-            ui.advance(1.0 / 60.0);
-        }
-        assert_eq!(ui.feature_eased_value(feature), 0.0);
-    }
-
-    #[test]
-    fn hover_fades_between_shape_matched_regions() {
-        let mut ui = opened();
-        let ambient_occlusion = UiTarget::Feature(RendererFeature::VoxelAmbientOcclusion);
-        let fog = UiTarget::Feature(RendererFeature::AtmosphericFog);
-        let layout = ui.layout(viewport());
-        let ambient_occlusion_center = layout.region(ambient_occlusion).map(Rect::center);
-        let fog_center = layout.region(fog).map(Rect::center);
-        assert!(ambient_occlusion_center.is_some() && fog_center.is_some());
-        if let (Some(ambient_occlusion_center), Some(fog_center)) =
-            (ambient_occlusion_center, fog_center)
-        {
-            assert!(ui.pointer_move_device(ambient_occlusion_center, viewport()));
-            ui.advance(1.0 / 60.0);
-            let entered = ui.hover_eased_value(ambient_occlusion);
-            assert!(entered > 0.0 && entered < 1.0);
-            assert!(ui.pointer_move_device(fog_center, viewport()));
-            ui.advance(1.0 / 60.0);
-            assert!(ui.hover_eased_value(ambient_occlusion) < entered);
-            assert!(ui.hover_eased_value(fog) > 0.0);
-        }
-    }
-
-    #[test]
-    fn reduced_motion_snaps_open_hover_and_toggle_values() {
-        let mut ui = closed();
-        ui.set_reduced_motion(true);
-        let _ = ui.set_open(true);
-        assert_eq!(ui.open_motion.value, 1.0);
-        let ambient_occlusion = RendererFeature::VoxelAmbientOcclusion;
-        let _ = ui.set_feature(ambient_occlusion, false);
-        assert_eq!(ui.feature_eased_value(ambient_occlusion), 0.0);
-        let target = UiTarget::Feature(ambient_occlusion);
-        let center = ui.layout(viewport()).region(target).map(Rect::center);
-        if let Some(center) = center {
-            let _ = ui.pointer_move_device(center, viewport());
-            assert_eq!(ui.hover_eased_value(target), 1.0);
-        }
-    }
-
-    #[test]
-    fn compact_mode_reflows_cards_and_is_automatic_on_narrow_viewports() {
-        let mut ui = opened();
-        let normal = ui.layout(viewport());
-        assert!(!normal.compact);
-        assert_eq!(normal.stat_cards.len(), 8);
-        let _ = ui.set_compact(true);
-        let compact = ui.layout(viewport());
-        assert!(compact.compact);
-        assert_eq!(compact.stat_cards.len(), 6);
-        assert!(compact.panel.width < normal.panel.width);
-
-        let automatic = opened();
-        let narrow_viewport = Viewport::new(640.0, 720.0, 1.0);
-        let narrow = automatic.layout(narrow_viewport);
-        assert!(narrow.compact);
-        assert!(!automatic.compact());
-        assert_eq!(narrow.region(UiTarget::Compact), None);
-        assert!(
-            !automatic
-                .build_draw_list(narrow_viewport)
-                .text
-                .iter()
-                .any(|run| run.text == ">")
-        );
-    }
-
-    #[test]
-    fn narrow_viewport_keeps_launcher_and_panel_inside_the_viewport() {
-        let viewport = Viewport::new(390.0, 844.0, 1.0);
-        let layout = opened().layout(viewport);
-
-        assert!(layout.launcher.y + layout.launcher.height < layout.panel.y);
-        for rect in [
-            layout.launcher,
-            layout.inventory,
-            layout.panel,
-            layout.header,
-            layout.navigation,
-        ] {
-            assert!(rect.x >= 0.0 && rect.y >= 0.0);
-            assert!(rect.x + rect.width <= viewport.css_size()[0]);
-            assert!(rect.y + rect.height <= viewport.css_size()[1]);
-        }
-        assert!(layout.stat_cards.iter().all(|rect| {
-            rect.x >= layout.panel.x
-                && rect.y >= layout.panel.y
-                && rect.x + rect.width <= layout.panel.x + layout.panel.width
-                && rect.y + rect.height <= layout.panel.y + layout.panel.height
-        }));
-    }
-
-    #[test]
-    fn every_feature_row_stays_inside_the_glass_panel() {
-        let ui = opened();
+    fn world_lab_layout_uses_one_source_for_paint_and_hits() {
         for viewport in [
-            Viewport::new(1_280.0, 720.0, 1.0),
-            Viewport::new(960.0, 640.0, 1.0),
-            Viewport::new(640.0, 720.0, 1.0),
+            viewport(1_280.0, 720.0),
+            viewport(640.0, 720.0),
+            viewport(390.0, 844.0),
+            viewport(844.0, 600.0),
         ] {
+            let ui = enabled(true);
             let layout = ui.layout(viewport);
-            for feature in RendererFeature::ALL {
-                let row = layout.region(UiTarget::Feature(feature));
-                assert!(row.is_some());
-                if let Some(row) = row {
-                    assert!(row.x >= layout.panel.x);
-                    assert!(row.y >= layout.panel.y);
-                    assert!(row.x + row.width <= layout.panel.x + layout.panel.width);
-                    assert!(row.y + row.height <= layout.panel.y + layout.panel.height);
-                    assert!(row.height >= 24.0);
+            let panel = layout.panel;
+            for region in &layout.regions {
+                if region.target == UiTarget::Launcher {
+                    continue;
                 }
+                assert!(region.rect.x >= panel.x - 0.01);
+                assert!(region.rect.y >= panel.y - 0.01);
+                assert!(region.rect.x + region.rect.width <= panel.x + panel.width + 0.01);
+                assert!(region.rect.y + region.rect.height <= panel.y + panel.height + 0.01);
+                assert!(region.rect.width >= 28.0);
+                assert!(region.rect.height >= 20.0);
+                assert_eq!(
+                    ui.hit_test_css(region.rect.center(), viewport),
+                    Some(region.target)
+                );
             }
+            assert!(layout.world_card.y >= layout.header.y + layout.header.height);
+            assert!(layout.movement_card.y >= layout.world_card.y + layout.world_card.height);
+            assert!(layout.navigation.y >= layout.movement_card.y + layout.movement_card.height);
         }
     }
 
     #[test]
-    fn draw_list_has_reusable_glass_text_cards_and_toggles() {
-        let mut ui = opened();
-        ui.set_reduced_motion(true);
-        ui.set_route_status("WINDCUT WAY", 47);
-        ui.set_inventory(
-            Some("GLOW CRYSTAL"),
-            27,
-            [
-                "GR 4 · DI 8 · ST 12 · SA 0 · SN 0 · CL 3 · BA 2".to_owned(),
-                "WO 9 · LE 6 · MO 1 · LI 5 · RS 0 · WA 2 · GL 27".to_owned(),
-            ],
-            vec![
-                InventoryItem {
-                    label: "STONE",
-                    count: 12,
-                    color: Color::new(0.34, 0.38, 0.43, 0.92),
-                },
-                InventoryItem {
-                    label: "GLOW CRYSTAL",
-                    count: 27,
-                    color: Color::new(0.12, 0.58, 0.78, 0.92),
-                },
-            ],
-            Some(1),
+    fn time_weather_and_flight_emit_typed_actions() {
+        let viewport = viewport(1_280.0, 720.0);
+        let mut ui = enabled(true);
+        assert_eq!(
+            activate(&mut ui, UiTarget::Time(TimeControl::GoldenHour), viewport),
+            UiAction::TimeChanged(TimeControl::GoldenHour)
         );
-        ui.set_stats(LiveStats {
-            navigation: NavigationTelemetry {
-                eye_position_metres: [420.845, 153.34, -608.25],
-                eye_voxel: [4_208, 1_533, -6_083],
-                eye_chunk: [131, 47, -191],
-                heading_degrees: 118.9,
-                pitch_degrees: -21.3,
-                horizontal_speed_metres_per_second: 4.25,
-                grounded: true,
-            },
-            frames_per_second: 59.8,
-            frame_ms: 16.7,
-            cpu_ms: 4.2,
-            gpu_ms: Some(7.8),
-            gpu_ambient_occlusion_ms: Some(1.2),
-            resident_chunks: 481,
-            visible_chunks: 132,
-            quads: 123_400,
-            water_quads: 8_200,
-            draw_calls: 132,
-            water_draw_calls: 12,
-            shadow_draw_calls: 164,
-            shadow_cascades: 3,
-            load_p95_frames: 18,
-            load_max_frames: 31,
-            remesh_p95_frames: 2,
-            remesh_max_frames: 4,
-            edit_last_ms: 31.2,
-            edit_in_flight: 1,
-            lod_tiles: [49, 49, 49, 81, 49, 81],
-            pending_jobs: 7,
-            core_gpu_bytes: 76 * 1_048_576,
-            water_immersion: 0.0,
-            eye_depth_metres: 0.0,
-            eyes_submerged: false,
-            swimming: false,
-            local_light_candidates: 10,
-            active_local_lights: 6,
-            occluded_local_lights: 1,
-            portal_rejected_local_lights: 3,
-            open_cinder_portals: 6,
-            cinder_portal_revision: 2,
-            stream_interest_requested: 80,
-            stream_interest_desired: 72,
-            stream_interest_truncated: 8,
-            portal_active_chunks: 68,
+        assert_eq!(ui.time_control(), TimeControl::GoldenHour);
+        assert_eq!(
+            activate(&mut ui, UiTarget::Weather(WeatherControl::Storm), viewport),
+            UiAction::WeatherChanged(WeatherControl::Storm)
+        );
+        assert_eq!(ui.weather_control(), WeatherControl::Storm);
+        assert_eq!(
+            activate(&mut ui, UiTarget::CreativeFlight, viewport),
+            UiAction::CreativeFlightRequested(true)
+        );
+        assert!(!ui.creative_flight_active);
+        ui.set_creative_flight_active(true);
+        assert_eq!(
+            activate(&mut ui, UiTarget::CreativeFlight, viewport),
+            UiAction::CreativeFlightRequested(false)
+        );
+        assert_eq!(
+            activate(&mut ui, UiTarget::Time(TimeControl::FollowServer), viewport),
+            UiAction::TimeChanged(TimeControl::FollowServer)
+        );
+    }
+
+    #[test]
+    fn unavailable_developer_controls_are_visible_but_inert() {
+        let viewport = viewport(1_280.0, 720.0);
+        let mut ui = MissionControlUi::new(MissionControlConfig {
+            open: true,
+            developer_controls: false,
+            creative_flight_available: false,
         });
-        let base = ui.build_draw_list(viewport());
-        assert!(base.text.iter().any(|run| run.text == "60 FPS · 16.7 ms"));
-        assert!(
-            base.text
-                .iter()
-                .any(|run| run.text == "123.4k quads · 132 draws")
-        );
-        assert!(
-            base.text
-                .iter()
-                .any(|run| run.text == "7 pending · 1 in flight")
-        );
-        assert!(base.text.iter().any(|run| run.text == "76.0 MiB"));
-        assert!(
-            base.text
-                .iter()
-                .any(|run| run.text == "X 420.85   Y 153.34   Z -608.25 m")
-        );
-        assert!(
-            base.text.iter().any(|run| {
-                run.text == "VOXEL 4208 / 1533 / -6083   ·   CHUNK 131 / 47 / -191"
-            })
-        );
-        assert!(base.text.iter().any(|run| {
-            run.text == "FACING ESE · 118.9° · 21.3° DOWN · 4.2 m/s · GROUNDED"
-        }));
-        assert!(
-            base.text
-                .iter()
-                .any(|run| run.text == "17:17 · GOLDEN HOUR / VERDANT FOREST")
-        );
-        assert!(
-            base.text
-                .iter()
-                .any(|run| run.text == "PLACE GLOW CRYSTAL ×27")
-        );
-        let _ = ui.set_open(false);
-        let inventory_draw = ui.build_draw_list(viewport());
-        assert!(
-            inventory_draw
-                .text
-                .iter()
-                .any(|run| run.text == "GLOW CRYSTAL")
-        );
-        assert!(inventory_draw.text.iter().any(|run| run.text == "27"));
-        let inventory_orbs = inventory_draw
-            .glass
-            .iter()
-            .filter(|surface| surface.role == SurfaceRole::InventoryOrb)
-            .collect::<Vec<_>>();
-        assert_eq!(inventory_orbs.len(), 2);
-        assert!(
-            inventory_orbs
-                .iter()
-                .any(|surface| surface.rect.width == 50.0)
-        );
-
-        let _ = ui.set_open(true);
-        let draw = ui.build_draw_list(viewport());
-        assert!(
-            draw.glass
-                .iter()
-                .any(|surface| surface.role == SurfaceRole::Panel)
+        assert_eq!(
+            activate(&mut ui, UiTarget::Time(TimeControl::Night), viewport),
+            UiAction::None
         );
         assert_eq!(
-            draw.glass
-                .iter()
-                .filter(|surface| surface.role == SurfaceRole::StatCard)
-                .count(),
-            8
+            activate(&mut ui, UiTarget::Weather(WeatherControl::Rain), viewport),
+            UiAction::None
         );
-        assert_eq!(
-            draw.glass
-                .iter()
-                .filter(|surface| surface.role == SurfaceRole::ToggleTrack)
-                .count(),
-            RendererFeature::ALL.len()
-        );
-        assert!(draw.text.iter().any(|run| run.text == "COPY"));
-        assert!(draw.text.iter().any(|run| run.text == "RESET"));
-        assert!(!draw.text.iter().any(|run| run.text == "CPU / GPU"));
+        assert_eq!(ui.layout(viewport).region(UiTarget::CreativeFlight), None);
+        assert_eq!(ui.time_control(), TimeControl::FollowServer);
+        assert_eq!(ui.weather_control(), WeatherControl::FollowServer);
     }
 
     #[test]
-    fn closed_panel_keeps_chrome_but_removes_panel_after_easing_out() {
-        let mut ui = opened();
-        ui.advance(1.0);
-        let _ = ui.set_open(false);
-        assert_eq!(ui.hit_test_css([1_000.0, 30.0], viewport()), None);
-        for _ in 0..60 {
-            ui.advance(1.0 / 60.0);
-        }
-        let draw = ui.build_draw_list(viewport());
-        assert!(
-            !draw
-                .glass
-                .iter()
-                .any(|surface| surface.role == SurfaceRole::Panel)
-        );
-        assert!(
-            !draw
-                .text
-                .iter()
-                .any(|run| run.text == "VOXELS / 10 CM CUBES")
-        );
-        assert_eq!(
-            draw.glass
-                .iter()
-                .filter(|surface| surface.role == SurfaceRole::Launcher)
-                .count(),
-            1
-        );
-        assert_eq!(
-            draw.glass
-                .iter()
-                .filter(|surface| surface.role == SurfaceRole::Inventory)
-                .count(),
-            1
-        );
-        assert_eq!(
-            draw.glass
-                .iter()
-                .filter(|surface| surface.role == SurfaceRole::Crosshair)
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn launcher_is_always_hit_testable_and_opens_the_panel() {
-        let mut ui = closed();
-        let viewport = viewport();
-        let launcher = ui.layout(viewport).launcher;
-        assert_eq!(
-            ui.hit_test_css(launcher.center(), viewport),
-            Some(UiTarget::Launcher)
-        );
-        assert_eq!(
-            ui.activate_css(launcher.center(), viewport),
-            UiAction::PanelOpenChanged(true)
-        );
-        assert!(ui.open());
+    fn draw_list_prioritizes_world_controls_and_has_no_renderer_feature_grid() {
+        let viewport = viewport(1_280.0, 720.0);
+        let mut ui = enabled(true);
+        ui.set_world_clock(0.72, "STORM", 0.9, 0.95, [5.5, 1.6], 4);
+        ui.set_creative_flight_active(true);
         let draw = ui.build_draw_list(viewport);
         assert!(
+            draw.glass
+                .iter()
+                .any(|surface| surface.role == SurfaceRole::WorldCard)
+        );
+        assert!(
+            draw.glass
+                .iter()
+                .any(|surface| surface.role == SurfaceRole::MovementCard)
+        );
+        assert_eq!(
+            draw.glass
+                .iter()
+                .filter(|surface| surface.role == SurfaceRole::Segment)
+                .count(),
+            TimeControl::ALL.len() + WeatherControl::ALL.len()
+        );
+        assert!(draw.text.iter().any(|run| run.text == "TIME OF DAY"));
+        assert!(draw.text.iter().any(|run| run.text == "WEATHER"));
+        assert!(draw.text.iter().any(|run| run.text.contains("Space rise")));
+        assert!(!draw.text.iter().any(|run| run.text == "RENDER FEATURES"));
+    }
+
+    #[test]
+    fn authority_badge_and_diagnostics_follow_override_state() {
+        let viewport = viewport(1_280.0, 720.0);
+        let mut ui = enabled(true);
+        assert!(
+            ui.build_draw_list(viewport)
+                .text
+                .iter()
+                .any(|run| run.text == "SERVER SYNC")
+        );
+        let _ = activate(&mut ui, UiTarget::Time(TimeControl::Night), viewport);
+        let _ = activate(&mut ui, UiTarget::Weather(WeatherControl::Rain), viewport);
+        assert!(
+            ui.build_draw_list(viewport)
+                .text
+                .iter()
+                .any(|run| run.text == "LOCAL OVERRIDE")
+        );
+        let report = ui.diagnostics_report();
+        assert!(report.contains("Time authority: local debug override"));
+        assert!(report.contains("Weather authority: local debug override"));
+        assert!(!report.contains("RENDER FEATURES"));
+    }
+
+    #[test]
+    fn player_chrome_remains_minimal_and_inventory_aware() {
+        let viewport = viewport(1_280.0, 720.0);
+        let mut ui = enabled(false);
+        ui.set_stats(LiveStats {
+            frames_per_second: 120.0,
+            ..LiveStats::default()
+        });
+        ui.set_inventory(
+            Some("GRASS"),
+            264,
+            ["GRASS ×264".to_owned(), String::new()],
+            vec![InventoryItem {
+                label: "GRASS",
+                count: 264,
+                color: Color::new(0.2, 0.7, 0.3, 1.0),
+            }],
+            Some(0),
+        );
+        let draw = ui.build_draw_list(viewport);
+        assert!(
+            draw.glass
+                .iter()
+                .any(|surface| surface.role == SurfaceRole::Launcher)
+        );
+        assert!(
+            draw.glass
+                .iter()
+                .any(|surface| surface.role == SurfaceRole::InventoryOrb)
+        );
+        assert!(
+            draw.glass
+                .iter()
+                .any(|surface| surface.role == SurfaceRole::Crosshair)
+        );
+        assert!(draw.text.iter().any(|run| run.text.contains("120 FPS")));
+        assert!(
             !draw
                 .text
                 .iter()
-                .any(|run| run.text == "VOXELS / 10 CM CUBES")
-        );
-        assert!(
-            draw.text
-                .iter()
-                .any(|run| run.text.contains("MISSION CONTROL   F3"))
+                .any(|run| run.text.contains("MISSION CONTROL"))
         );
     }
 
     #[test]
-    fn invalid_scale_factor_falls_back_to_one() {
-        let viewport = Viewport::new(800.0, 600.0, 0.0);
-        assert_eq!(viewport.scale_factor, 1.0);
-        assert_eq!(viewport.device_to_css([20.0, 30.0]), [20.0, 30.0]);
-    }
-
-    #[test]
-    fn controls_toast_is_rust_drawn_then_fades_away() {
-        let mut ui = closed();
-        let initial = ui.build_draw_list(viewport());
-        assert!(
-            initial
-                .glass
-                .iter()
-                .any(|surface| surface.role == SurfaceRole::Toast)
-        );
-        for _ in 0..500 {
-            ui.advance(1.0 / 60.0);
-        }
-        let settled = ui.build_draw_list(viewport());
-        assert!(
-            settled
-                .glass
-                .iter()
-                .all(|surface| surface.role != SurfaceRole::Toast)
-        );
-    }
-
-    #[test]
-    fn gameplay_toast_replaces_controls_and_uses_the_same_bounded_lifetime() {
-        let mut ui = closed();
-        for _ in 0..500 {
-            ui.advance(1.0 / 60.0);
-        }
-        ui.show_gameplay_toast("Too far away to dig");
-        let visible = ui.build_draw_list(viewport());
-        assert!(
-            visible
-                .text
-                .iter()
-                .any(|run| run.text == "Too far away to dig")
-        );
-        for _ in 0..500 {
-            ui.advance(1.0 / 60.0);
-        }
-        assert!(
-            ui.build_draw_list(viewport())
-                .glass
-                .iter()
-                .all(|surface| surface.role != SurfaceRole::Toast)
-        );
-    }
-
-    #[test]
-    fn crosshair_is_a_rust_drawn_circle() {
-        let ui = closed();
-        let draw = ui.build_draw_list(viewport());
-        let crosshair = draw
-            .glass
-            .iter()
-            .find(|surface| surface.role == SurfaceRole::Crosshair)
-            .expect("Rust UI must always emit the crosshair");
-        assert_eq!(crosshair.rect.width, crosshair.rect.height);
-        assert_eq!(crosshair.radius, crosshair.rect.width * 0.5);
-        assert!(crosshair.fill.0[3] > 0.0);
-    }
-
-    #[test]
-    fn underwater_status_and_controls_are_rust_drawn() {
-        let mut ui = closed();
-        for _ in 0..500 {
-            ui.advance(1.0 / 60.0);
-        }
-        assert!(
-            ui.build_draw_list(viewport())
-                .glass
-                .iter()
-                .all(|surface| surface.role != SurfaceRole::Toast)
-        );
+    fn flight_and_swimming_help_are_state_specific() {
+        let viewport = viewport(1_280.0, 720.0);
+        let mut ui = enabled(false);
         ui.set_stats(LiveStats {
+            navigation: NavigationTelemetry {
+                creative_flight: true,
+                ..NavigationTelemetry::default()
+            },
             frames_per_second: 60.0,
-            water_immersion: 0.82,
-            eye_depth_metres: 0.7,
-            eyes_submerged: true,
-            swimming: true,
             ..LiveStats::default()
         });
-        let draw = ui.build_draw_list(viewport());
         assert!(
-            draw.text
+            ui.build_draw_list(viewport)
+                .text
                 .iter()
-                .any(|run| run.text.contains("SPACE ASCEND") && run.text.contains("SHIFT DIVE"))
+                .any(|run| run.text.contains("SPACE RISE") && run.text.contains("SHIFT DESCEND"))
         );
+        ui.set_stats(LiveStats {
+            swimming: true,
+            water_immersion: 0.82,
+            eye_depth_metres: 0.7,
+            ..LiveStats::default()
+        });
+        ui.show_gameplay_toast("Swimming controls");
         assert!(
-            draw.text
+            ui.build_draw_list(viewport)
+                .text
                 .iter()
-                .any(|run| run.text.contains("SWIMMING 82% · 0.7 M"))
+                .any(|run| run.text.contains("Swimming controls"))
         );
     }
 }

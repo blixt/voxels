@@ -41,7 +41,7 @@ Either source can be selected by changing only the server's `source` value and r
 development. The browser always consumes the same canonical protocol. See
 [Native world streaming](docs/native-world-streaming.md) for the matching endpoint/token settings,
 Chrome local-network permission, binary VXWP protocol, transport rationale, and exact run steps.
-Client runtime, streaming, rendering/Mission Control, diagnostics, and profiling
+Client runtime, streaming, rendering/World Lab, diagnostics, and profiling
 defaults live in `config/client.toml`. See [Configuration](docs/configuration.md) for ownership,
 deployment, validation, and testing conventions for both files.
 Opening the bare development URL reuses the browser's default local player and last position. Open
@@ -125,11 +125,12 @@ See [docs/architecture.md](docs/architecture.md) for format, authority, and rese
   Rust-selected material with the right mouse button. Cycle stocked materials with the mouse wheel
   or inventory wheel. Sparse edits are committed transactionally by the native
   world service and streamed to every interested browser.
-- Press <kbd>F3</kbd> for the Rust-rendered Mission Control panel. Its live counters and controls
-  can toggle cascaded sun shadows, voxel AO, screen-space contact AO, fog, far terrain, animated
-  water, target highlighting, material surface detail, or voxel emissive lights without a DOM UI
-  layer. Explicit header actions copy the complete diagnostic report or reset renderer features to
-  the configured baseline. World time and weather remain server-authoritative for every client.
+- Press <kbd>F3</kbd> for the Rust-rendered World Lab. It keeps the useful navigation and performance
+  readout, copies a complete diagnostic report, and—when developer controls are enabled—can preview
+  time-of-day and weather locally without mutating the shared server clock. Creative flight is
+  collision-aware and only activates when the server advertises that gameplay capability; use
+  <kbd>Space</kbd> to rise and <kbd>Shift</kbd> to descend. Renderer policy stays in
+  `config/client.toml` instead of filling the play UI with operational toggles.
 
 ## Automation
 

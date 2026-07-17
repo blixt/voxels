@@ -99,7 +99,6 @@ voxel_emissive_lights = true
 
 [rendering.mission_control]
 open = false
-compact = false
 
 [diagnostics]
 enclosure_probe_interval_ms = 100

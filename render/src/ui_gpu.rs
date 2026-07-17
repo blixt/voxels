@@ -180,7 +180,10 @@ impl GlassInstance {
             | SurfaceRole::NavigationCard
             | SurfaceRole::Button
             | SurfaceRole::StatCard
-            | SurfaceRole::FeatureRow
+            | SurfaceRole::WorldCard
+            | SurfaceRole::Segment
+            | SurfaceRole::AuthorityBadge
+            | SurfaceRole::MovementCard
             | SurfaceRole::ToggleTrack => 2.0,
         };
         Self {

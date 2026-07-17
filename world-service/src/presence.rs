@@ -827,11 +827,10 @@ fn valid_resume(resume: PlayerResume) -> bool {
 }
 
 fn valid_pose(pose: PlayerPoseUpdate) -> bool {
-    const CLIENT_FLAGS: u16 =
-        PLAYER_POSE_GROUNDED
-            | PLAYER_POSE_SWIMMING
-            | PLAYER_POSE_DISCONTINUITY
-            | PLAYER_POSE_FLYING;
+    const CLIENT_FLAGS: u16 = PLAYER_POSE_GROUNDED
+        | PLAYER_POSE_SWIMMING
+        | PLAYER_POSE_DISCONTINUITY
+        | PLAYER_POSE_FLYING;
     pose.sequence != 0
         && valid_position(pose.eye_position_metres)
         && pose
@@ -1146,9 +1145,7 @@ mod tests {
         let disabled_claim = disabled
             .join(&identity(21), resume(0.0, 1.62, 0.0))
             .expect("join");
-        let disabled_attachment = disabled
-            .attach(disabled_claim.session_id)
-            .expect("attach");
+        let disabled_attachment = disabled.attach(disabled_claim.session_id).expect("attach");
         let mut flying = pose(1, 0.0, 0.0);
         flying.flags = PLAYER_POSE_FLYING;
         assert_eq!(

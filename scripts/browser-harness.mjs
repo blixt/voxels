@@ -1,6 +1,6 @@
 import { createServer as createNetServer } from "node:net";
 
-export const SNAPSHOT_SCHEMA_VERSION = 25;
+export const SNAPSHOT_SCHEMA_VERSION = 26;
 export const FRAME_SAMPLE_WIDTH = 11;
 export const GPU_SAMPLE_WIDTH = 13;
 
@@ -152,9 +152,10 @@ export const SNAPSHOT = Object.freeze({
   cloudLightSteps: 153,
   fogDensity: 154,
   outdoorExposure: 155,
-  schemaVersion: 156,
-  sampleCount: 157,
-  droppedSamples: 158,
+  creativeFlightActive: 156,
+  schemaVersion: 157,
+  sampleCount: 158,
+  droppedSamples: 159,
 });
 
 export const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;

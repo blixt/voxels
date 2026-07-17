@@ -4,8 +4,8 @@ use crate::avatar::AvatarGpu;
 pub use crate::clouds::VolumetricCloudConfig;
 use crate::clouds::VolumetricCloudGpu;
 use crate::environment::{
-    DaylightPhase, InteriorEnvironment, OutdoorEnvironment, WorldEnvironmentState,
-    surface_region_label,
+    DaylightPhase, DebugEnvironmentOverride, InteriorEnvironment, OutdoorEnvironment,
+    WorldEnvironmentState, surface_region_label,
 };
 use crate::lod::{GeometricLodFocus, SurfacePatchSelection};
 use crate::material_detail::MaterialDetailGpu;
@@ -13,9 +13,7 @@ use crate::shadow::{
     AabbClipVolume, CASCADE_COUNT, DirectionalShadowCascades, DirectionalShadowConfig,
     build_directional_shadow_cascades,
 };
-use crate::ui::{
-    Color, InventoryItem, LiveStats, MissionControlUi, RendererFeature, UiAction, UiKey, Viewport,
-};
+use crate::ui::{Color, InventoryItem, LiveStats, MissionControlUi, UiAction, UiKey, Viewport};
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
 use crate::ui_gpu::{SCENE_FORMAT, UiGpu, texture_sampler_layout};
 use bytemuck::{Pod, Zeroable};
@@ -992,6 +990,8 @@ pub struct Renderer {
     target_volume: Option<DigVolume>,
     options: RenderOptions,
     environment: OutdoorEnvironment,
+    server_world_environment: WorldEnvironmentState,
+    debug_environment_override: DebugEnvironmentOverride,
     world_environment: WorldEnvironmentState,
     atmosphere_sample: AtmosphereSample,
     surface_region: SurfaceRegion,
@@ -1003,11 +1003,17 @@ pub struct Renderer {
     log_error: fn(&str),
     ui_text_error_reported: bool,
     diagnostics_copy_requested: bool,
+    host_ui_action: Option<HostUiAction>,
     underwater_blend: f32,
     interior: InteriorEnvironment,
     interior_target: InteriorEnvironment,
     placement_inventory: PlacementInventory,
     runtime_config: RendererConfig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostUiAction {
+    CreativeFlightRequested(bool),
 }
 
 struct ShadowGpu {
@@ -1059,16 +1065,6 @@ impl From<RendererFeatureConfig> for RenderOptions {
             local_lighting: config.voxel_emissive_lights,
         }
     }
-}
-
-fn reset_renderer_features(
-    ui: &mut MissionControlUi,
-    baseline: RendererFeatureConfig,
-) -> RenderOptions {
-    for feature in RendererFeature::ALL {
-        let _ = ui.set_feature(feature, baseline.enabled(feature));
-    }
-    baseline.into()
 }
 
 fn validate_shadow_allocation(
@@ -1698,7 +1694,7 @@ impl Renderer {
         let water_scene_bind_group = ui_gpu.refraction_bind_group(&device, &water_scene_layout);
 
         let placement_inventory = PlacementInventory::new();
-        let mut ui = MissionControlUi::new(runtime_config.mission_control, runtime_config.features);
+        let mut ui = MissionControlUi::new(runtime_config.mission_control);
         ui.set_environment_status(daylight_phase.label(), surface_region_label(surface_region));
         ui.set_world_clock(
             world_environment.day_fraction,
@@ -1760,6 +1756,8 @@ impl Renderer {
             target_volume: None,
             options,
             environment,
+            server_world_environment: world_environment,
+            debug_environment_override: DebugEnvironmentOverride::default(),
             world_environment,
             atmosphere_sample,
             surface_region,
@@ -1771,6 +1769,7 @@ impl Renderer {
             log_error,
             ui_text_error_reported: false,
             diagnostics_copy_requested: false,
+            host_ui_action: None,
             underwater_blend: 0.0,
             interior: InteriorEnvironment::default(),
             interior_target: InteriorEnvironment::default(),
@@ -1850,40 +1849,30 @@ impl Renderer {
         }
         self.atmosphere_sample = sample;
         self.surface_region = region;
-        self.environment = OutdoorEnvironment::for_world_time(
-            sample,
-            self.world_environment.day_fraction,
-            self.world_environment.weather(sample.coldness),
-        );
-        self.ui
-            .set_environment_status(self.daylight_phase.label(), surface_region_label(region));
-        let weather = self.world_environment.weather(sample.coldness);
-        self.ui.set_world_clock(
-            self.world_environment.day_fraction,
-            weather.kind.label(),
-            self.environment.precipitation,
-            self.environment.cloud_coverage,
-            self.world_environment.cloud_velocity_metres_per_second,
-            self.world_environment.weather_revision,
-        );
+        self.refresh_effective_environment();
     }
 
     pub fn set_world_environment(&mut self, state: WorldEnvironmentState) {
-        let state = state.sanitized();
+        self.server_world_environment = state.sanitized();
+        self.refresh_effective_environment();
+    }
+
+    fn refresh_effective_environment(&mut self) {
+        let state = self
+            .debug_environment_override
+            .apply(self.server_world_environment);
         self.world_environment = state;
         self.daylight_phase = DaylightPhase::for_day_fraction(state.day_fraction);
-        self.environment = OutdoorEnvironment::for_world_time(
-            self.atmosphere_sample,
-            state.day_fraction,
-            state.weather(self.atmosphere_sample.coldness),
-        );
+        let weather = state.weather(self.atmosphere_sample.coldness);
+        self.environment =
+            OutdoorEnvironment::for_world_time(self.atmosphere_sample, state.day_fraction, weather);
         self.ui.set_environment_status(
             self.daylight_phase.label(),
             surface_region_label(self.surface_region),
         );
         self.ui.set_world_clock(
             state.day_fraction,
-            state.weather(self.atmosphere_sample.coldness).kind.label(),
+            weather.kind.label(),
             self.environment.precipitation,
             self.environment.cloud_coverage,
             state.cloud_velocity_metres_per_second,
@@ -2064,27 +2053,33 @@ impl Renderer {
             UiAction::CopyDiagnostics => {
                 self.diagnostics_copy_requested = true;
             }
-            UiAction::ResetRendererFeatures => {
-                self.options = reset_renderer_features(&mut self.ui, self.runtime_config.features);
+            UiAction::TimeChanged(control) => {
+                self.debug_environment_override.day_fraction = control.day_fraction();
+                self.refresh_effective_environment();
             }
-            UiAction::FeatureChanged(feature, enabled) => match feature {
-                RendererFeature::CascadedSunShadows => self.options.shadows = enabled,
-                RendererFeature::VoxelAmbientOcclusion => {
-                    self.options.ambient_occlusion = enabled;
-                }
-                RendererFeature::ScreenSpaceAmbientOcclusion => {
-                    self.options.screen_space_ambient_occlusion = enabled;
-                }
-                RendererFeature::AtmosphericFog => self.options.fog = enabled,
-                RendererFeature::FarTerrain => self.options.far_terrain = enabled,
-                RendererFeature::WaterSurface => self.options.water = enabled,
-                RendererFeature::TargetOutline => self.options.target_outline = enabled,
-                RendererFeature::MaterialSurfaceDetail => self.options.material_detail = enabled,
-                RendererFeature::CaveHeadlamp => self.options.cave_headlamp = enabled,
-                RendererFeature::VoxelEmissiveLights => self.options.local_lighting = enabled,
-            },
-            UiAction::None | UiAction::PanelOpenChanged(_) | UiAction::CompactChanged(_) => {}
+            UiAction::WeatherChanged(control) => {
+                self.debug_environment_override.weather_fraction = control
+                    .preset()
+                    .map(|preset| preset.anchor_weather_fraction());
+                self.refresh_effective_environment();
+            }
+            UiAction::CreativeFlightRequested(active) => {
+                self.host_ui_action = Some(HostUiAction::CreativeFlightRequested(active));
+            }
+            UiAction::None | UiAction::PanelOpenChanged(_) => {}
         }
+    }
+
+    pub fn take_host_ui_action(&mut self) -> Option<HostUiAction> {
+        self.host_ui_action.take()
+    }
+
+    pub fn set_creative_flight_active(&mut self, active: bool) {
+        self.ui.set_creative_flight_active(active);
+    }
+
+    pub fn set_creative_flight_available(&mut self, available: bool) {
+        self.ui.set_creative_flight_available(available);
     }
 
     pub fn upload_chunk(&mut self, chunk: &Chunk, mesh: &MeshedChunk) -> bool {
@@ -5129,7 +5124,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_feature_baseline_drives_initial_options_and_reset() {
+    fn configured_feature_baseline_drives_initial_options() {
         let baseline = mixed_feature_baseline();
         let expected = RenderOptions::from(baseline);
         assert_eq!(
@@ -5147,16 +5142,6 @@ mod tests {
                 local_lighting: true,
             }
         );
-
-        let mut ui = MissionControlUi::new(MissionControlConfig::default(), baseline);
-        let _ = ui.set_feature(RendererFeature::CascadedSunShadows, true);
-        let _ = ui.set_feature(RendererFeature::AtmosphericFog, false);
-        let reset = reset_renderer_features(&mut ui, baseline);
-
-        assert_eq!(reset, expected);
-        for feature in RendererFeature::ALL {
-            assert_eq!(ui.feature_enabled(feature), baseline.enabled(feature));
-        }
     }
 
     #[test]

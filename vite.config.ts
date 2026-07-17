@@ -587,6 +587,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-weather-motion.mjs",
         cache: false,
       },
+      "test:world-lab-browser": {
+        command: "node scripts/browser-world-lab.mjs",
+        cache: false,
+      },
       "test:lod-browser": {
         command: "node scripts/browser-lod-transition.mjs",
         cache: false,

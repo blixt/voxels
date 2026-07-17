@@ -170,7 +170,6 @@ pub struct RendererFeatureConfig {
 #[serde(deny_unknown_fields)]
 pub struct MissionControlConfig {
     pub open: bool,
-    pub compact: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -730,10 +729,7 @@ mod tests {
                     cave_headlamp: true,
                     voxel_emissive_lights: true,
                 },
-                mission_control: MissionControlConfig {
-                    open: false,
-                    compact: false,
-                },
+                mission_control: MissionControlConfig { open: false },
             },
             diagnostics: DiagnosticsConfig {
                 enclosure_probe_interval_ms: 100,
