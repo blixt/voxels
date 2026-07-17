@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, delimiter as pathDelimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = process.cwd();
@@ -38,6 +38,14 @@ export const RUST_INPUT_FILES = [
 export function rustTool(name: string): string {
   const installed = join(CARGO_BIN, name);
   return existsSync(installed) ? installed : name;
+}
+
+export function prependPathEntry(
+  entry: string,
+  currentPath = process.env.PATH ?? "",
+  delimiter = pathDelimiter,
+): string {
+  return currentPath === "" ? entry : `${entry}${delimiter}${currentPath}`;
 }
 
 export function validateWasmBindgenCliVersion(output: string, expected: string): void {
@@ -122,7 +130,7 @@ function run(command: string, args: string[]): void {
     stdio: "inherit",
     env: {
       ...process.env,
-      PATH: `${CARGO_BIN}:${process.env.PATH ?? ""}`,
+      PATH: prependPathEntry(CARGO_BIN),
       ...wasmCcEnv(),
     },
   });

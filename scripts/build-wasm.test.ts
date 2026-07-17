@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "vite-plus/test";
 import {
   normalizeWasmDeclaration,
+  prependPathEntry,
   RUST_INPUT_FILES,
   RUST_SOURCE_DIRS,
   validateWasmBindgenCliVersion,
@@ -83,5 +84,13 @@ export interface InitOutput {
       () => validateWasmBindgenCliVersion("", "0.2.117"),
       /could not read the installed version/,
     );
+  });
+
+  it("prepends executable paths with the host separator and no empty entry", () => {
+    assert.equal(
+      prependPathEntry("C:\\cargo\\bin", "C:\\Windows", ";"),
+      "C:\\cargo\\bin;C:\\Windows",
+    );
+    assert.equal(prependPathEntry("/cargo/bin", "", ":"), "/cargo/bin");
   });
 });
