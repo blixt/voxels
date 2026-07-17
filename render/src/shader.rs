@@ -103,6 +103,12 @@ mod tests {
         assert!(FRAME_SOURCE.contains("environment_time: vec4<f32>"));
         assert!(FRAME_SOURCE.contains("weather: vec4<f32>"));
         assert!(FRAME_SOURCE.contains("cloud_layer: vec4<f32>"));
+        assert!(FRAME_SOURCE.contains("position = (world_xz - cloud_offset_metres) * 0.0008"));
+        assert!(FRAME_SOURCE.contains("periodic_gradient_noise"));
+        assert!(FRAME_SOURCE.contains("position * 2.0"));
+        assert!(FRAME_SOURCE.contains("position * 4.0"));
+        assert!(!FRAME_SOURCE.contains("position * 2.03"));
+        assert!(!FRAME_SOURCE.contains("position * 4.11"));
         for source in [clouds, voxels] {
             assert_eq!(source.matches("atmosphere_cloud_field_world(").count(), 1);
             assert!(source.contains("frame.environment_time.yz"));
@@ -120,6 +126,11 @@ mod tests {
         assert!(!clouds.contains("trace_start += jitter"));
         assert!(clouds.contains("transmittance < 0.02"));
         assert!(!include_str!("shaders/sky.wgsl").contains("cloud_height = 480.0"));
+
+        let base_cells = 1_280_000.0_f32 * 0.0008;
+        assert_eq!(base_cells, 1_024.0);
+        assert_eq!(base_cells * 2.0, 2_048.0);
+        assert_eq!(base_cells * 4.0, 4_096.0);
     }
 
     #[test]
@@ -139,10 +150,13 @@ mod tests {
         assert!(clouds.contains("let extra_capacity = min(6u"));
         assert!(clouds.contains("index >= view_steps"));
         assert!(clouds.contains("mix(sampled_density, previous_density, 0.32)"));
-        assert!(clouds.contains("cloud_height_profile(height, envelope)"));
+        assert!(clouds.contains("cloud_height_profile(shaped_height, local_growth)"));
+        assert!(clouds.contains("let height_warp ="));
+        assert!(clouds.contains("let crown_taper ="));
         assert!(clouds.contains("advected.y * 2.1"));
         assert!(clouds.contains("ambient * ambient_visibility + direct"));
         assert!(clouds.contains("mix(1.10, 0.86, powder)"));
+        assert!(clouds.contains("let reconstructed_alpha = smoothstep("));
     }
 
     #[test]

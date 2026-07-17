@@ -50,6 +50,34 @@ fn atmosphere_value_noise(position: vec2<f32>) -> f32 {
   return mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y);
 }
 
+fn atmosphere_periodic_gradient(hash: f32) -> vec2<f32> {
+  switch u32(floor(hash * 8.0)) {
+    case 0u: { return vec2<f32>(1.0, 0.0); }
+    case 1u: { return vec2<f32>(0.70710678, 0.70710678); }
+    case 2u: { return vec2<f32>(0.0, 1.0); }
+    case 3u: { return vec2<f32>(-0.70710678, 0.70710678); }
+    case 4u: { return vec2<f32>(-1.0, 0.0); }
+    case 5u: { return vec2<f32>(-0.70710678, -0.70710678); }
+    case 6u: { return vec2<f32>(0.0, -1.0); }
+    default: { return vec2<f32>(0.70710678, -0.70710678); }
+  }
+}
+
+fn atmosphere_periodic_gradient_noise(position: vec2<f32>, period: f32) -> f32 {
+  let cell = floor(position);
+  let fraction = fract(position);
+  let blend = fraction * fraction * fraction * (fraction * (fraction * 6.0 - 15.0) + 10.0);
+  let wrapped = cell - floor(cell / period) * period;
+  let next_x = vec2<f32>(wrapped.x + 1.0 - select(0.0, period, wrapped.x + 1.0 >= period), wrapped.y);
+  let next_y = vec2<f32>(wrapped.x, wrapped.y + 1.0 - select(0.0, period, wrapped.y + 1.0 >= period));
+  let next_xy = vec2<f32>(next_x.x, next_y.y);
+  let a = dot(atmosphere_periodic_gradient(atmosphere_hash21(wrapped)), fraction);
+  let b = dot(atmosphere_periodic_gradient(atmosphere_hash21(next_x)), fraction - vec2<f32>(1.0, 0.0));
+  let c = dot(atmosphere_periodic_gradient(atmosphere_hash21(next_y)), fraction - vec2<f32>(0.0, 1.0));
+  let d = dot(atmosphere_periodic_gradient(atmosphere_hash21(next_xy)), fraction - vec2<f32>(1.0, 1.0));
+  return clamp(0.5 + mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y) * 0.70710678, 0.0, 1.0);
+}
+
 fn atmosphere_cloud_field_world(
   world_xz: vec2<f32>,
   cloud_offset_metres: vec2<f32>,
@@ -58,10 +86,18 @@ fn atmosphere_cloud_field_world(
   let seed_offset = vec2<f32>(
     fract(weather_seed * 0.1031),
     fract(weather_seed * 0.11369),
-  ) * 4096.0;
-  let position = (world_xz - cloud_offset_metres) * 0.00065 + seed_offset;
-  let broad = atmosphere_value_noise(position) * 0.58;
-  let billows = atmosphere_value_noise(position * 2.03 + vec2<f32>(17.2, -9.1)) * 0.29;
-  let detail = atmosphere_value_noise(position * 4.11 + vec2<f32>(-4.7, 23.4)) * 0.13;
+  );
+  // 1,280 km is exactly 1,024 base cells. Integer-frequency octaves therefore wrap at
+  // 1,024/2,048/4,096 cells with no discontinuity when the server bounds cloud advection.
+  let position = (world_xz - cloud_offset_metres) * 0.0008;
+  let broad = atmosphere_periodic_gradient_noise(position + seed_offset * 1024.0, 1024.0) * 0.58;
+  let billows = atmosphere_periodic_gradient_noise(
+    position * 2.0 + seed_offset * 2048.0 + vec2<f32>(17.2, -9.1),
+    2048.0,
+  ) * 0.29;
+  let detail = atmosphere_periodic_gradient_noise(
+    position * 4.0 + seed_offset * 4096.0 + vec2<f32>(-4.7, 23.4),
+    4096.0,
+  ) * 0.13;
   return broad + billows + detail;
 }

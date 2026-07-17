@@ -152,7 +152,7 @@ impl VolumetricCloudGpu {
                     u32::from(config.enabled),
                     0,
                 ],
-                shaping: [1.0 / 4_800.0, 1.0 / 1_200.0, 0.4, 0.0],
+                shaping: [1.0 / 5_000.0, 1.0 / 1_250.0, 0.4, 0.0],
             }),
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         });
@@ -282,8 +282,10 @@ impl VolumetricCloudGpu {
                 0,
             ],
             shaping: [
-                1.0 / 4_800.0,
-                1.0 / 1_200.0,
+                // The periodic 64-texel volume repeats every 320/80 km. Both divide the
+                // server's 1,280 km cloud-offset period exactly, so a wrapped offset cannot pop.
+                1.0 / 5_000.0,
+                1.0 / 1_250.0,
                 environment.cloud_density,
                 environment.storminess,
             ],
@@ -784,5 +786,16 @@ mod tests {
         assert_eq!(light_step_count(2, 0.76, 0.0), 2);
         assert_eq!(light_step_count(2, 0.98, 1.0), 1);
         assert_eq!(light_step_count(2, 0.28, 0.0), 1);
+    }
+
+    #[test]
+    fn every_cloud_noise_scale_exactly_divides_the_world_advection_period() {
+        const CLOUD_OFFSET_PERIOD_METRES: f32 = 1_280_000.0;
+        let noise_edge = NOISE_EDGE as f32;
+        for metres_per_texel in [5_000.0, 1_250.0] {
+            let volume_period = metres_per_texel * noise_edge;
+            let repetitions = CLOUD_OFFSET_PERIOD_METRES / volume_period;
+            assert_eq!(repetitions, repetitions.round());
+        }
     }
 }

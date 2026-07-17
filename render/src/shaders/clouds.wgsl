@@ -45,12 +45,12 @@ fn camera_ray(position: vec2<f32>, viewport: vec2<f32>) -> vec3<f32> {
 
 fn cloud_height_profile(height: f32, local_growth: f32) -> f32 {
   // Dense weather-field cores grow lower bases and taller crowns while their edges stay lifted
-  // and shallow. This preserves a physically recognizable condensation layer without turning the
-  // entire sky into one flat slab.
+  // and shallow. Using the unthresholded weather field here gives neighboring cloud cells
+  // different vertical extents rather than turning every occupied column into the same pillar.
   let storm_growth = mix(local_growth, 0.78, clouds.shaping.w * 0.55);
   let base_start = mix(0.10, 0.0, storm_growth);
   let base_end = base_start + mix(0.14, 0.07, storm_growth);
-  let top_fade_start = mix(0.50, 0.80, storm_growth);
+  let top_fade_start = mix(0.38, 0.82, pow(storm_growth, 0.72));
   return smoothstep(base_start, base_end, height)
     * (1.0 - smoothstep(top_fade_start, 1.0, height));
 }
@@ -75,10 +75,6 @@ fn cloud_density_world(world: vec3<f32>, filter_width_metres: f32) -> f32 {
   if envelope <= 0.002 {
     return 0.0;
   }
-  let profile = cloud_height_profile(height, envelope);
-  if profile <= 0.0 {
-    return 0.0;
-  }
   let seed = vec3<f32>(
     fract(frame.environment_time.w * 0.1031),
     fract(frame.environment_time.w * 0.11369),
@@ -95,9 +91,21 @@ fn cloud_density_world(world: vec3<f32>, filter_width_metres: f32) -> f32 {
   let detail_lod = cloud_noise_lod(clouds.shaping.y, filter_width_metres);
   let shape = textureSampleLevel(cloud_noise, cloud_noise_sampler, base_uvw, shape_lod).r;
   let erosion = textureSampleLevel(cloud_noise, cloud_noise_sampler, detail_uvw, detail_lod).r;
+  // Deterministic vertical warping interleaves adjacent integration strata. It reuses the two
+  // density samples already paid for, so the effect adds arithmetic but no texture fetches.
+  let height_warp = (shape - 0.5) * 0.11 + (erosion - 0.5) * 0.05;
+  let shaped_height = clamp(height + height_warp, 0.0, 1.0);
+  let local_growth = smoothstep(macro_threshold - 0.04, 0.92, macro_field);
+  let profile = cloud_height_profile(shaped_height, local_growth);
+  if profile <= 0.0 {
+    return 0.0;
+  }
   let threshold = mix(0.53, 0.39, clouds.shaping.w);
   let billow = shape * 0.72 + envelope * 0.48 - erosion * 0.16;
-  let volume = smoothstep(threshold - 0.10, threshold + 0.12, billow);
+  // Erode upper cells progressively so tall formations narrow into crowns instead of extruding
+  // the same footprint through the whole layer.
+  let crown_taper = pow(smoothstep(0.48, 1.0, shaped_height), 2.0) * mix(0.18, 0.07, local_growth);
+  let volume = smoothstep(threshold - 0.10, threshold + 0.12, billow - crown_taper);
   return volume * envelope * profile * clouds.shaping.z;
 }
 
@@ -228,5 +236,9 @@ fn fs_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 fn fs_composite(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let uv = position.xy / frame.viewport_voxel.xy;
   let cloud = textureSampleLevel(cloud_target, cloud_target_sampler, uv, 0.0);
-  return cloud * (1.0 - frame.medium.x);
+  // Preserve premultiplied radiance while tightening only the softest part of half-resolution
+  // coverage. This removes the oversized blurred base cells without inventing screen-space noise.
+  let reconstructed_alpha = smoothstep(0.035, 0.965, cloud.a);
+  let radiance_scale = reconstructed_alpha / max(cloud.a, 0.0001);
+  return vec4<f32>(cloud.rgb * radiance_scale, reconstructed_alpha) * (1.0 - frame.medium.x);
 }

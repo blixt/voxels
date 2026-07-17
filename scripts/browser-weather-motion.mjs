@@ -348,6 +348,7 @@ async function analyzeCloudRotation(page, baselineFrames, rotatedFrames, returne
         });
         let maximumAutocorrelation = -1;
         let maximumAutocorrelationLagPixels = 0;
+        const rowAutocorrelations = [];
         for (let lag = 4; lag <= 40; lag += 1) {
           let product = 0;
           let firstEnergy = 0;
@@ -360,11 +361,21 @@ async function analyzeCloudRotation(page, baselineFrames, rotatedFrames, returne
             secondEnergy += second * second;
           }
           const correlation = product / Math.max(Math.sqrt(firstEnergy * secondEnergy), 0.000001);
+          rowAutocorrelations.push({ lag, correlation });
           if (correlation > maximumAutocorrelation) {
             maximumAutocorrelation = correlation;
             maximumAutocorrelationLagPixels = lag;
           }
         }
+        // A repeated integration shelf creates a narrow correlation spike. A large natural cloud
+        // creates a broad hill across neighboring lags, so raw maximum correlation incorrectly
+        // penalizes coherent morphology. Peak prominence separates those two cases.
+        const offPeakCorrelations = rowAutocorrelations
+          .filter(({ lag }) => Math.abs(lag - maximumAutocorrelationLagPixels) >= 3)
+          .map(({ correlation }) => correlation)
+          .sort((left, right) => left - right);
+        const offPeakReference =
+          offPeakCorrelations[Math.floor((offPeakCorrelations.length - 1) * 0.9)] ?? 0;
         const horizontalCoherence = horizontalCoherent / Math.max(horizontalTotal, 0.000001);
         const verticalCoherence = verticalCoherent / Math.max(verticalTotal, 0.000001);
         return {
@@ -374,6 +385,7 @@ async function analyzeCloudRotation(page, baselineFrames, rotatedFrames, returne
           directionalExcess: horizontalCoherence / Math.max(verticalCoherence, 0.000001),
           maximumRowAutocorrelation: maximumAutocorrelation,
           maximumRowAutocorrelationLagPixels: maximumAutocorrelationLagPixels,
+          maximumRowAutocorrelationProminence: maximumAutocorrelation - offPeakReference,
         };
       }
       const baseline = await medianLuma(baselineFrames);
@@ -578,8 +590,10 @@ try {
   if (CLOUD_LAYERING_ONLY && cloud.layering.directionalExcess > 0.93) {
     violations.push(`cloud horizontal layer excess was ${cloud.layering.directionalExcess}`);
   }
-  if (CLOUD_LAYERING_ONLY && cloud.layering.maximumRowAutocorrelation > 0.36) {
-    violations.push(`cloud row autocorrelation was ${cloud.layering.maximumRowAutocorrelation}`);
+  if (CLOUD_LAYERING_ONLY && cloud.layering.maximumRowAutocorrelationProminence > 0.25) {
+    violations.push(
+      `cloud row autocorrelation prominence was ${cloud.layering.maximumRowAutocorrelationProminence}`,
+    );
   }
   if (
     finalSnapshot[SNAPSHOT.quads] !== settled[SNAPSHOT.quads] ||
