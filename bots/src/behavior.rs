@@ -33,7 +33,6 @@ pub enum BotLayout {
 pub struct BehaviorContext {
     pub elapsed_seconds: f32,
     pub eye_position_metres: [f32; 3],
-    pub spawn_height_voxels: i32,
     pub placeable_material: Option<Material>,
     pub leader_pose: Option<LeaderPose>,
     pub leader_action: Option<ObservedAction>,
@@ -158,16 +157,16 @@ impl BehaviorState {
             None
         } else if let Some(material) = context.placeable_material {
             let position = metres_to_voxel(context.eye_position_metres);
-            let x_offset = (self.index as i32 % 5) - 2;
+            let [offset_x, offset_z] = worksite_offset(self.index);
             let coord = VoxelCoord::new(
-                position.x + x_offset,
-                context.spawn_height_voxels + self.tower_height,
-                position.z,
+                position.x + offset_x,
+                position.y - 18 + self.tower_height,
+                position.z + offset_z,
             );
             self.tower_height = (self.tower_height + 1).min(36);
             Some(EditAction::Place { coord, material })
         } else {
-            Some(downward_dig(context.eye_position_metres, self.index, 0))
+            Some(tower_site_dig(context.eye_position_metres, self.index))
         };
         BehaviorIntent {
             yaw_radians: yaw,
@@ -236,6 +235,19 @@ fn downward_dig(eye: [f32; 3], index: usize, extra_depth_voxels: i32) -> EditAct
             position.z + offset_z,
         ),
         face: VoxelFace::PositiveY,
+    }
+}
+
+fn tower_site_dig(eye: [f32; 3], index: usize) -> EditAction {
+    let position = metres_to_voxel(eye);
+    let [offset_x, offset_z] = worksite_offset(index);
+    EditAction::Dig {
+        hit: VoxelCoord::new(
+            position.x + offset_x,
+            position.y - 17,
+            position.z + offset_z,
+        ),
+        face: VoxelFace::NegativeY,
     }
 }
 
@@ -332,7 +344,6 @@ mod tests {
         BehaviorContext {
             elapsed_seconds: 1.0,
             eye_position_metres: [2.0, 4.0, -3.0],
-            spawn_height_voxels: 20,
             placeable_material: None,
             leader_pose: None,
             leader_action: None,

@@ -26,7 +26,7 @@ import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./vxwp-contract.mj
 import { worldServiceBuildCargoArgs } from "./world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const RESULT_SCHEMA_VERSION = 1;
+const RESULT_SCHEMA_VERSION = 2;
 const OUTPUT_DIRECTORY = path.resolve("target/harness/bots");
 const SAMPLE_INTERVAL_MS = 250;
 const OBSERVER_SAMPLE_INTERVAL_MS = 500;
@@ -53,6 +53,7 @@ function parseArguments(values) {
     browser: true,
   };
   for (const argument of values) {
+    if (argument === "--") continue;
     if (argument === "--growth") {
       options.mode = "growth";
       continue;
@@ -366,17 +367,53 @@ function markdownReport(result) {
     "",
     "CPU percentages use `ps` semantics (100% is one fully occupied logical core). Stream bytes include HTTP upgrades and WebSocket framing; VXWP bytes are binary protocol payloads.",
   );
+  if (result.violations.length > 0) {
+    lines.push("", "## Violations", "", ...result.violations.map((violation) => `- ${violation}`));
+  }
   return `${lines.join("\n")}\n`;
+}
+
+function stageViolations(stage, browserEnabled) {
+  const violations = [];
+  const expectedVisible = browserEnabled ? stage.count : stage.count - 1;
+  if (stage.botReport.connectionCount !== stage.count) {
+    violations.push(
+      `${stage.count} bots: only ${stage.botReport.connectionCount} protocol clients connected`,
+    );
+  }
+  if (stage.botReport.maxVisiblePlayers !== expectedVisible) {
+    violations.push(
+      `${stage.count} bots: native clients saw ${stage.botReport.maxVisiblePlayers}, expected ${expectedVisible}`,
+    );
+  }
+  const rejected = stage.botReport.editsRejected;
+  const resyncs = stage.botReport.reports.reduce((sum, report) => sum + report.resyncs, 0);
+  if (rejected > 0) violations.push(`${stage.count} bots: ${rejected} edits were rejected`);
+  if (resyncs > 0) violations.push(`${stage.count} bots: ${resyncs} clients required resync`);
+  if (stage.observer !== null) {
+    if (stage.observer.settledMs === null || stage.observer.maxRemoteAvatars !== stage.count) {
+      violations.push(
+        `${stage.count} bots: browser observed at most ${stage.observer.maxRemoteAvatars} avatars`,
+      );
+    }
+    for (const error of stage.observer.errors) {
+      violations.push(`${stage.count} bots: browser ${error}`);
+    }
+  }
+  return violations;
 }
 
 async function startObserver(browser, previewPort, fixture, proxyPort) {
   const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1 });
   const page = await context.newPage();
   const errors = [];
-  page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
+  const recordError = (message) => {
+    if (errors.length < 32 && !errors.includes(message)) errors.push(message);
+  };
+  page.on("pageerror", (error) => recordError(`pageerror: ${error.message}`));
   page.on("console", (message) => {
     if (isBrowserConsoleFailure(message.type(), message.text(), BROWSER_FAILURE)) {
-      errors.push(`${message.type()}: ${message.text()}`);
+      recordError(`${message.type()}: ${message.text()}`);
     }
   });
   const clientConfig = (await readFile(fixture.clientConfigPath, "utf8"))
@@ -441,6 +478,7 @@ async function main() {
     },
     options,
     stages: [],
+    violations: [],
   };
   let growthFixture;
   let growthService;
@@ -513,6 +551,9 @@ async function main() {
           runIndex,
           observer,
         });
+        const violations = stageViolations(stage, options.browser);
+        stage.violations = violations;
+        result.violations.push(...violations);
         result.stages.push(stage);
         if (observer !== null && runIndex === options.counts.length - 1) {
           await mkdir(OUTPUT_DIRECTORY, { recursive: true });
@@ -539,6 +580,9 @@ async function main() {
   const markdown = markdownReport(result);
   await writeHarnessReport(OUTPUT_DIRECTORY, result, markdown);
   process.stdout.write(`${markdown}\nJSON: ${path.join(OUTPUT_DIRECTORY, "latest.json")}\n`);
+  if (result.violations.length > 0) {
+    throw new Error(`bot load harness found ${result.violations.length} violation(s)`);
+  }
 }
 
 await main();

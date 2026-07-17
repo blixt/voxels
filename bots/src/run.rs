@@ -224,7 +224,6 @@ struct BotRuntime {
     presence: BotSocket,
     connection_id: u64,
     edit_session_id: voxels_world::protocol::EditSessionId,
-    spawn_height_voxels: i32,
     camera: CameraState,
     inventory: MaterialInventory,
     traffic: TrafficCounters,
@@ -374,7 +373,6 @@ impl BotRuntime {
             presence: connection.presence,
             connection_id: connection.opened.connection_id,
             edit_session_id: connection.opened.edit_session_id,
-            spawn_height_voxels: connection.opened.spawn.height,
             camera,
             inventory: connection.opened.inventory,
             traffic: connection.traffic,
@@ -436,7 +434,6 @@ impl BotRuntime {
         let intent = self.behavior.plan(BehaviorContext {
             elapsed_seconds: now.duration_since(self.start).as_secs_f32(),
             eye_position_metres: self.camera.position.to_array(),
-            spawn_height_voxels: self.spawn_height_voxels,
             placeable_material: first_placeable(self.inventory),
             leader_pose: self.leader_pose,
             leader_action,
