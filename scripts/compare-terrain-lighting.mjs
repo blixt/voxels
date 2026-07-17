@@ -83,7 +83,13 @@ try {
         blockP90: sorted[Math.floor(sorted.length * 0.9)],
         blockP90P10:
           sorted[Math.floor(sorted.length * 0.9)] - sorted[Math.floor(sorted.length * 0.1)],
+        blockP90ToP10:
+          sorted[Math.floor(sorted.length * 0.9)] /
+          Math.max(sorted[Math.floor(sorted.length * 0.1)], 0.000_001),
         coarseGradientRms: gradientRms,
+        coarseGradientRelativeRms:
+          gradientRms /
+          Math.max(sorted.reduce((sum, value) => sum + value, 0) / sorted.length, 0.000_001),
       };
     };
     const referenceMetrics = summarize(first);
@@ -94,7 +100,10 @@ try {
       candidate: candidateMetrics,
       ratios: {
         blockP90P10: candidateMetrics.blockP90P10 / referenceMetrics.blockP90P10,
+        blockP90ToP10: candidateMetrics.blockP90ToP10 / referenceMetrics.blockP90ToP10,
         coarseGradientRms: candidateMetrics.coarseGradientRms / referenceMetrics.coarseGradientRms,
+        coarseGradientRelativeRms:
+          candidateMetrics.coarseGradientRelativeRms / referenceMetrics.coarseGradientRelativeRms,
       },
     };
   }, images);
