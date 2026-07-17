@@ -37,10 +37,16 @@ export function compareNetworkBenchmarks(baseline, candidate) {
       throw new Error(`link profile mismatch for ${field}`);
     }
   }
-  const commonScenarios = Object.keys(baseline.summary).filter((name) => candidate.summary[name]);
-  if (commonScenarios.length === 0) throw new Error("benchmark results have no common scenarios");
+  const baselineScenarios = Object.keys(baseline.summary).toSorted();
+  const candidateScenarios = Object.keys(candidate.summary).toSorted();
+  if (JSON.stringify(baselineScenarios) !== JSON.stringify(candidateScenarios)) {
+    throw new Error(
+      `scenario set mismatch: ${baselineScenarios.join(", ")} versus ${candidateScenarios.join(", ")}`,
+    );
+  }
+  if (baselineScenarios.length === 0) throw new Error("benchmark results have no scenarios");
   return Object.fromEntries(
-    commonScenarios.map((name) => {
+    baselineScenarios.map((name) => {
       const before = baseline.summary[name];
       const after = candidate.summary[name];
       return [

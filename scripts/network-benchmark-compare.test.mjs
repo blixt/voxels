@@ -56,4 +56,19 @@ describe("network benchmark comparison", () => {
       "fixture mismatch",
     );
   });
+
+  it("rejects incomplete or expanded scenario sets", () => {
+    const baseline = result(1_000, 1_500, 10_000);
+    const missing = result(800, 1_600, 8_000);
+    missing.summary.resident_walk = structuredClone(missing.summary.cold_spawn);
+    expect(() => compareNetworkBenchmarks(missing, baseline)).toThrow(
+      "scenario set mismatch: cold_spawn, resident_walk versus cold_spawn",
+    );
+
+    const expanded = result(800, 1_600, 8_000);
+    expanded.summary.streaming_walk = structuredClone(expanded.summary.cold_spawn);
+    expect(() => compareNetworkBenchmarks(baseline, expanded)).toThrow(
+      "scenario set mismatch: cold_spawn versus cold_spawn, streaming_walk",
+    );
+  });
 });
