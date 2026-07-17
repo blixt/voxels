@@ -435,8 +435,23 @@ function stageViolations(stage, browserEnabled) {
   }
   const rejected = stage.botReport.editsRejected;
   const resyncs = stage.botReport.reports.reduce((sum, report) => sum + report.resyncs, 0);
+  const protocolErrors = stage.botReport.reports.reduce(
+    (sum, report) => sum + report.protocolErrors,
+    0,
+  );
+  const nativeErrors = [
+    ...new Set(stage.botReport.reports.flatMap((report) => report.errorSamples)),
+  ];
   if (rejected > 0) violations.push(`${stage.count} bots: ${rejected} edits were rejected`);
   if (resyncs > 0) violations.push(`${stage.count} bots: ${resyncs} clients required resync`);
+  if (protocolErrors > 0) {
+    violations.push(`${stage.count} bots: ${protocolErrors} protocol errors were received`);
+  }
+  if (nativeErrors.length > 0) {
+    violations.push(
+      `${stage.count} bots: native client errors: ${nativeErrors.slice(0, 3).join("; ")}`,
+    );
+  }
   if (stage.observer !== null) {
     if (stage.observer.rosterReadyMs === null || stage.observer.maxRemoteAvatars !== stage.count) {
       violations.push(
