@@ -19,8 +19,8 @@ pub struct DirectionalShadowConfig {
     /// Blend between uniform (`0`) and logarithmic (`1`) cascade splits.
     pub split_lambda: f32,
     pub shadow_map_resolution: u32,
-    /// Angular step used to stabilize the moving directional-light basis. Zero disables it.
-    pub direction_quantization_radians: f32,
+    /// Geodesic angular motion required before the retained light basis is updated.
+    pub direction_update_threshold_radians: f32,
     /// Distance added on the light-facing side of every receiver slice for off-slice casters.
     /// The builder clamps this to `far_plane`, making the expansion finite even for bad input.
     pub caster_depth_expansion: f32,
@@ -34,7 +34,7 @@ impl Default for DirectionalShadowConfig {
             far_plane: 220.0,
             split_lambda: 0.65,
             shadow_map_resolution: 1_024,
-            direction_quantization_radians: std::f32::consts::PI / 5_760.0,
+            direction_update_threshold_radians: std::f32::consts::PI / 1_440.0,
             caster_depth_expansion: 64.0,
         }
     }
@@ -65,6 +65,79 @@ pub struct DirectionalShadowCascades {
     pub cascades: [ShadowCascade; CASCADE_COUNT],
     /// Far radial-distance boundary of each cascade, ready for shader cascade selection.
     pub split_depths: [f32; CASCADE_COUNT],
+}
+
+/// Retained orthonormal light-space orientation used by every shadow cascade.
+#[derive(Clone, Copy, Debug)]
+pub struct DirectionalShadowBasis {
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
+}
+
+impl DirectionalShadowBasis {
+    fn from_direction(direction: Vec3) -> Result<Self, ShadowBuildError> {
+        if !direction.is_finite() || direction.length_squared() <= f32::EPSILON {
+            return Err(ShadowBuildError::InvalidLightDirection);
+        }
+        let forward = direction.normalize();
+        let reference_up = if forward.dot(Vec3::Y).abs() > 0.98 {
+            Vec3::Z
+        } else {
+            Vec3::Y
+        };
+        let right = forward.cross(reference_up).normalize();
+        let up = right.cross(forward).normalize();
+        Ok(Self { forward, right, up })
+    }
+
+    pub const fn forward(self) -> Vec3 {
+        self.forward
+    }
+}
+
+/// Holds a shadow basis until its light direction has moved far enough to affect projection.
+#[derive(Clone, Copy, Debug)]
+pub struct ShadowDirectionTracker {
+    basis: DirectionalShadowBasis,
+    update_threshold_radians: f32,
+}
+
+impl ShadowDirectionTracker {
+    pub fn new(direction: Vec3, update_threshold_radians: f32) -> Result<Self, ShadowBuildError> {
+        validate_direction_threshold(update_threshold_radians)?;
+        Ok(Self {
+            basis: DirectionalShadowBasis::from_direction(direction)?,
+            update_threshold_radians,
+        })
+    }
+
+    pub fn update(&mut self, direction: Vec3) -> Result<bool, ShadowBuildError> {
+        if !direction.is_finite() || direction.length_squared() <= f32::EPSILON {
+            return Err(ShadowBuildError::InvalidLightDirection);
+        }
+        let forward = direction.normalize();
+        let angular_motion = self.basis.forward.dot(forward).clamp(-1.0, 1.0).acos();
+        if angular_motion <= self.update_threshold_radians {
+            return Ok(false);
+        }
+
+        // Parallel transport the retained X axis into the new light plane. This keeps orientation
+        // continuous through an overhead sun instead of reselecting a global reference axis.
+        let projected_right = self.basis.right - forward * self.basis.right.dot(forward);
+        self.basis = if projected_right.length_squared() > 0.0001 {
+            let right = projected_right.normalize();
+            let up = right.cross(forward).normalize();
+            DirectionalShadowBasis { forward, right, up }
+        } else {
+            DirectionalShadowBasis::from_direction(forward)?
+        };
+        Ok(true)
+    }
+
+    pub const fn basis(self) -> DirectionalShadowBasis {
+        self.basis
+    }
 }
 
 /// Six clip-space half-planes cached for repeated conservative AABB tests.
@@ -107,22 +180,16 @@ impl AabbClipVolume {
 pub fn build_directional_shadow_cascades(
     camera: &CameraState,
     aspect: f32,
-    light_direction: Vec3,
+    light_basis: DirectionalShadowBasis,
     config: DirectionalShadowConfig,
 ) -> Result<DirectionalShadowCascades, ShadowBuildError> {
-    validate(aspect, light_direction, config)?;
+    validate(aspect, config)?;
 
     let lambda = config.split_lambda.clamp(0.0, 1.0);
     let split_depths = practical_splits(config.near_plane, config.far_plane, lambda);
-    let light_forward =
-        quantized_light_direction(light_direction, config.direction_quantization_radians);
-    let reference_up = if light_forward.dot(Vec3::Y).abs() > 0.98 {
-        Vec3::Z
-    } else {
-        Vec3::Y
-    };
-    let light_right = light_forward.cross(reference_up).normalize();
-    let light_up = light_right.cross(light_forward).normalize();
+    let light_forward = light_basis.forward;
+    let light_right = light_basis.right;
+    let light_up = light_basis.up;
     let tan_half_fov = (config.vertical_fov_radians * 0.5).tan();
     let expansion = config.caster_depth_expansion.clamp(0.0, config.far_plane);
 
@@ -180,11 +247,7 @@ pub fn aabb_visible_in_cascade(cascade: &ShadowCascade, minimum: Vec3, maximum: 
     AabbClipVolume::new(cascade.clip_from_world).contains_aabb(minimum, maximum)
 }
 
-fn validate(
-    aspect: f32,
-    light_direction: Vec3,
-    config: DirectionalShadowConfig,
-) -> Result<(), ShadowBuildError> {
+fn validate(aspect: f32, config: DirectionalShadowConfig) -> Result<(), ShadowBuildError> {
     if !aspect.is_finite() || aspect <= 0.0 {
         return Err(ShadowBuildError::InvalidAspect);
     }
@@ -202,16 +265,16 @@ fn validate(
     {
         return Err(ShadowBuildError::InvalidDepthRange);
     }
-    if !light_direction.is_finite() || light_direction.length_squared() <= f32::EPSILON {
-        return Err(ShadowBuildError::InvalidLightDirection);
-    }
-    if !config.direction_quantization_radians.is_finite()
-        || !(0.0..=std::f32::consts::PI / 180.0).contains(&config.direction_quantization_radians)
-    {
-        return Err(ShadowBuildError::InvalidDirectionQuantization);
-    }
+    validate_direction_threshold(config.direction_update_threshold_radians)?;
     if config.shadow_map_resolution < 2 {
         return Err(ShadowBuildError::InvalidResolution);
+    }
+    Ok(())
+}
+
+fn validate_direction_threshold(value: f32) -> Result<(), ShadowBuildError> {
+    if !value.is_finite() || !(0.0..=std::f32::consts::PI / 180.0).contains(&value) {
+        return Err(ShadowBuildError::InvalidDirectionQuantization);
     }
     Ok(())
 }
@@ -263,22 +326,6 @@ fn snap(value: f32, step: f32) -> f32 {
     (value / step).round() * step
 }
 
-fn quantized_light_direction(direction: Vec3, angular_step: f32) -> Vec3 {
-    let direction = direction.normalize();
-    if angular_step <= 0.0 {
-        return direction;
-    }
-    let elevation = snap(direction.y.clamp(-1.0, 1.0).asin(), angular_step);
-    let azimuth = snap(direction.z.atan2(direction.x), angular_step);
-    let horizontal = elevation.cos();
-    Vec3::new(
-        horizontal * azimuth.cos(),
-        elevation.sin(),
-        horizontal * azimuth.sin(),
-    )
-    .normalize()
-}
-
 #[allow(
     clippy::too_many_arguments,
     reason = "keeping the orthographic basis and bounds explicit makes matrix conventions clear"
@@ -314,7 +361,21 @@ mod tests {
     const LIGHT: Vec3 = Vec3::new(0.0, -1.0, -1.0);
 
     fn build(camera: &CameraState) -> Result<DirectionalShadowCascades, ShadowBuildError> {
-        build_directional_shadow_cascades(camera, ASPECT, LIGHT, DirectionalShadowConfig::default())
+        build_directional_shadow_cascades(
+            camera,
+            ASPECT,
+            DirectionalShadowBasis::from_direction(LIGHT)?,
+            DirectionalShadowConfig::default(),
+        )
+    }
+
+    fn direction(azimuth: f32, elevation: f32) -> Vec3 {
+        let horizontal = elevation.cos();
+        Vec3::new(
+            horizontal * azimuth.cos(),
+            elevation.sin(),
+            horizontal * azimuth.sin(),
+        )
     }
 
     fn assert_matrix_close(left: Mat4, right: Mat4, epsilon: f32) {
@@ -355,7 +416,12 @@ mod tests {
     fn every_frustum_slice_corner_is_inside_its_cascade() -> Result<(), ShadowBuildError> {
         let camera = CameraState::from_persisted(Vec3::new(13.0, 8.0, -21.0), 0.73, -0.31);
         let config = DirectionalShadowConfig::default();
-        let built = build_directional_shadow_cascades(&camera, ASPECT, LIGHT, config)?;
+        let built = build_directional_shadow_cascades(
+            &camera,
+            ASPECT,
+            DirectionalShadowBasis::from_direction(LIGHT)?,
+            config,
+        )?;
         let forward = camera.forward();
         let right = forward.cross(Vec3::Y).normalize();
         let up = right.cross(forward).normalize();
@@ -439,32 +505,69 @@ mod tests {
     }
 
     #[test]
-    fn sub_step_sun_motion_keeps_directional_shadow_projection_stable()
+    fn retained_direction_rejects_threshold_noise_and_commits_after_crossing()
     -> Result<(), ShadowBuildError> {
         let config = DirectionalShadowConfig::default();
-        let step = config.direction_quantization_radians;
-        let direction = |azimuth: f32, elevation: f32| {
-            let horizontal = elevation.cos();
-            Vec3::new(
-                horizontal * azimuth.cos(),
-                elevation.sin(),
-                horizontal * azimuth.sin(),
-            )
-        };
-        let azimuth = step * 128.0;
-        let elevation = step * -1_400.0;
-        let first_light = direction(azimuth, elevation);
-        let second_light = direction(azimuth + step * 0.24, elevation - step * 0.24);
+        let threshold = config.direction_update_threshold_radians;
+        let initial = direction(0.4, -0.7);
+        let mut tracker = ShadowDirectionTracker::new(initial, threshold)?;
+        let initial_basis = tracker.basis();
+        for sign in [-1.0, 1.0, -1.0, 1.0] {
+            assert!(!tracker.update(direction(0.4 + sign * threshold * 0.9, -0.7))?);
+            assert_eq!(tracker.basis().forward, initial_basis.forward);
+            assert_eq!(tracker.basis().right, initial_basis.right);
+        }
+        assert!(tracker.update(direction(0.4 + threshold * 2.0, -0.7))?);
+        assert_ne!(tracker.basis().forward, initial_basis.forward);
+        Ok(())
+    }
+
+    #[test]
+    fn held_direction_keeps_projection_bit_identical() -> Result<(), ShadowBuildError> {
+        let config = DirectionalShadowConfig::default();
+        let threshold = config.direction_update_threshold_radians;
+        let initial = direction(0.4, -0.7);
+        let mut tracker = ShadowDirectionTracker::new(initial, threshold)?;
         let camera = CameraState::from_persisted(Vec3::new(13.0, 8.0, -21.0), 0.73, -0.31);
-        let first = build_directional_shadow_cascades(&camera, ASPECT, first_light, config)?;
-        let second = build_directional_shadow_cascades(&camera, ASPECT, second_light, config)?;
+        let first = build_directional_shadow_cascades(&camera, ASPECT, tracker.basis(), config)?;
+        assert!(!tracker.update(direction(0.4 + threshold * 0.9, -0.7))?);
+        let second = build_directional_shadow_cascades(&camera, ASPECT, tracker.basis(), config)?;
         for index in 0..CASCADE_COUNT {
-            assert_matrix_close(
+            assert_eq!(
                 first.cascades[index].clip_from_world,
                 second.cascades[index].clip_from_world,
-                1.0e-6,
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn default_solar_motion_updates_only_two_or_three_times_per_second()
+    -> Result<(), ShadowBuildError> {
+        let config = DirectionalShadowConfig::default();
+        let mut tracker =
+            ShadowDirectionTracker::new(Vec3::X, config.direction_update_threshold_radians)?;
+        let mut updates = 0;
+        const FRAMES: u32 = 120 * 10;
+        for frame in 1..=FRAMES {
+            let angle = std::f32::consts::TAU * frame as f32 / (1_200.0 * 120.0);
+            updates += usize::from(tracker.update(Vec3::new(angle.cos(), angle.sin(), 0.0))?);
+        }
+        assert!(
+            (20..=25).contains(&updates),
+            "unexpected ten-second update count {updates}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn transported_basis_stays_continuous_through_overhead_sun() -> Result<(), ShadowBuildError> {
+        let mut tracker = ShadowDirectionTracker::new(direction(0.2, 78.0_f32.to_radians()), 0.0)?;
+        let before = tracker.basis();
+        assert!(tracker.update(direction(0.2, 79.0_f32.to_radians()))?);
+        let after = tracker.basis();
+        assert!(before.right.dot(after.right) > 0.9999);
+        assert!(before.up.dot(after.up) > 0.999);
         Ok(())
     }
 
@@ -475,7 +578,7 @@ mod tests {
             let built = build_directional_shadow_cascades(
                 &camera,
                 aspect,
-                Vec3::new(0.001, -1.0, 0.001),
+                DirectionalShadowBasis::from_direction(Vec3::new(0.001, -1.0, 0.001))?,
                 DirectionalShadowConfig::default(),
             )?;
             assert!(built.cascades.iter().all(|cascade| {

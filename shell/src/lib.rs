@@ -2593,7 +2593,9 @@ mod web {
                 far_plane: rendering.shadows.far_plane,
                 split_lambda: rendering.shadows.split_lambda,
                 shadow_map_resolution: rendering.shadows.shadow_map_resolution,
-                direction_quantization_radians: rendering.shadows.direction_quantization_radians,
+                direction_update_threshold_radians: rendering
+                    .shadows
+                    .direction_update_threshold_radians,
                 caster_depth_expansion: rendering.shadows.caster_depth_expansion,
             },
             volumetric_clouds: VolumetricCloudConfig {

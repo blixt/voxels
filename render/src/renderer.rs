@@ -10,8 +10,8 @@ use crate::environment::{
 use crate::lod::{GeometricLodFocus, SurfacePatchSelection};
 use crate::material_detail::MaterialDetailGpu;
 use crate::shadow::{
-    AabbClipVolume, CASCADE_COUNT, DirectionalShadowCascades, DirectionalShadowConfig,
-    build_directional_shadow_cascades,
+    AabbClipVolume, CASCADE_COUNT, DirectionalShadowBasis, DirectionalShadowCascades,
+    DirectionalShadowConfig, ShadowDirectionTracker, build_directional_shadow_cascades,
 };
 use crate::ui::{Color, InventoryItem, LiveStats, MissionControlUi, UiAction, UiKey, Viewport};
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
@@ -976,6 +976,7 @@ pub struct Renderer {
     water_scene_layout: wgpu::BindGroupLayout,
     water_scene_bind_group: BindGroup,
     shadow_gpu: ShadowGpu,
+    shadow_direction: ShadowDirectionTracker,
     frame_buffer: Buffer,
     frame_bind_group: BindGroup,
     local_light_buffer: Buffer,
@@ -1116,16 +1117,11 @@ impl ShadowGpu {
     fn new(
         device: &Device,
         camera: &CameraState,
-        environment: OutdoorEnvironment,
+        light_basis: DirectionalShadowBasis,
         config: DirectionalShadowConfig,
     ) -> Result<Self, String> {
-        let cascades = build_directional_shadow_cascades(
-            camera,
-            1.0,
-            -environment.key_light_direction,
-            config,
-        )
-        .map_err(|error| format!("build initial shadow cascades: {error:?}"))?;
+        let cascades = build_directional_shadow_cascades(camera, 1.0, light_basis, config)
+            .map_err(|error| format!("build initial shadow cascades: {error:?}"))?;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("sun shadow cascade array"),
             size: wgpu::Extent3d {
@@ -1358,17 +1354,24 @@ impl Renderer {
             celestial_observation,
             world_environment.weather(atmosphere_sample.coldness),
         );
+        let shadow_direction = ShadowDirectionTracker::new(
+            -environment.key_light_direction,
+            runtime_config
+                .directional_shadows
+                .direction_update_threshold_radians,
+        )
+        .map_err(|error| format!("initialize retained shadow direction: {error:?}"))?;
         let shadow_gpu = ShadowGpu::new(
             &device,
             &initial_camera,
-            environment,
+            shadow_direction.basis(),
             runtime_config.directional_shadows,
         )?;
         let material_detail = MaterialDetailGpu::new(&device, &queue);
         let shadow_cascades = directional_shadow_cascades(
             &config,
             &initial_camera,
-            environment.key_light_direction,
+            shadow_direction.basis(),
             runtime_config.directional_shadows,
         )?;
         let frame = frame_uniform(
@@ -1756,6 +1759,7 @@ impl Renderer {
             water_scene_layout,
             water_scene_bind_group,
             shadow_gpu,
+            shadow_direction,
             frame_buffer,
             frame_bind_group,
             local_light_buffer,
@@ -2722,10 +2726,17 @@ impl Renderer {
         self.interior =
             self.interior
                 .lerp(self.interior_target, interior_response, exposure_response);
+        if self
+            .shadow_direction
+            .update(-self.environment.key_light_direction)
+            .is_err()
+        {
+            return false;
+        }
         let Ok(shadow_cascades) = directional_shadow_cascades(
             &self.config,
             camera,
-            self.environment.key_light_direction,
+            self.shadow_direction.basis(),
             self.runtime_config.directional_shadows,
         ) else {
             return false;
@@ -4585,11 +4596,11 @@ fn shadow_frame_uniform(
 fn directional_shadow_cascades(
     config: &SurfaceConfiguration,
     camera: &CameraState,
-    sun_direction: glam::Vec3,
+    light_basis: DirectionalShadowBasis,
     shadow_config: DirectionalShadowConfig,
 ) -> Result<DirectionalShadowCascades, String> {
     let aspect = config.width as f32 / config.height.max(1) as f32;
-    build_directional_shadow_cascades(camera, aspect, -sun_direction, shadow_config)
+    build_directional_shadow_cascades(camera, aspect, light_basis, shadow_config)
         .map_err(|error| format!("build shadow cascades: {error:?}"))
 }
 

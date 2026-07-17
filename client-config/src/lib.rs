@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 16;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 17;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -147,7 +147,7 @@ pub struct ShadowConfig {
     pub far_plane: f32,
     pub split_lambda: f32,
     pub shadow_map_resolution: u32,
-    pub direction_quantization_radians: f32,
+    pub direction_update_threshold_radians: f32,
     pub caster_depth_expansion: f32,
 }
 
@@ -344,8 +344,8 @@ impl ClientConfig {
             MAX_SHADOW_MAP_RESOLUTION,
         )?;
         ensure_finite_range(
-            shadows.direction_quantization_radians,
-            "rendering.shadows.direction_quantization_radians",
+            shadows.direction_update_threshold_radians,
+            "rendering.shadows.direction_update_threshold_radians",
             0.0,
             std::f32::consts::PI / 180.0,
             true,
@@ -706,7 +706,7 @@ mod tests {
                     far_plane: 220.0,
                     split_lambda: 0.65,
                     shadow_map_resolution: 1_024,
-                    direction_quantization_radians: std::f32::consts::PI / 5_760.0,
+                    direction_update_threshold_radians: std::f32::consts::PI / 1_440.0,
                     caster_depth_expansion: 64.0,
                 },
                 volumetric_clouds: VolumetricCloudConfig {
@@ -775,18 +775,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 16", "schema_version = 15");
+        let wrong_schema = fixture.replace("schema_version = 17", "schema_version = 16");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 15,
+                found: 16,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 16",
-            "schema_version = 16\nunknown_root = true",
+            "schema_version = 17",
+            "schema_version = 17\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
