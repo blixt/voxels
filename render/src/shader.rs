@@ -197,6 +197,18 @@ mod tests {
     }
 
     #[test]
+    fn moon_uses_phase_ready_sphere_lighting_and_bounded_apparent_facets() {
+        let sky = include_str!("shaders/sky.wgsl");
+        assert!(sky.contains("fn moon_surface_radiance("));
+        assert!(sky.contains("let cell_count = 8.0"));
+        assert!(sky.contains("let facet_normal = normalize("));
+        assert!(sky.contains("max(dot(facet_normal, sun_direction), 0.0)"));
+        assert!(sky.contains("let phase_light = 0.055 + sunlight * 0.945"));
+        assert!(sky.contains("* (1.0 - moon_disc)"));
+        assert!(!sky.contains("moon_disc * 0.82"));
+    }
+
+    #[test]
     fn dielectric_fresnel_has_physical_endpoints() {
         let f0 = 0.04;
         assert!((fresnel_schlick(1.0, f0) - f0).abs() < f32::EPSILON);
