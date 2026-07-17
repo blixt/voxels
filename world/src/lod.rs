@@ -1430,10 +1430,8 @@ fn append_ecology_tree_proxy(
         SurfaceLodLevel::Stride64 => 2,
     };
     let bounds = feature.bounds();
-    let mut slices = vec![
-        [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
-        (bounds[1][1] - bounds[0][1]) as usize
-    ];
+    let mut slices =
+        vec![[i32::MAX, i32::MAX, i32::MIN, i32::MIN]; (bounds[1][1] - bounds[0][1]) as usize];
     let mut branch_min = [[i32::MAX; 3]; 2];
     let mut branch_max = [[i32::MIN; 3]; 2];
     for y in bounds[0][1]..bounds[1][1] {
@@ -1673,10 +1671,7 @@ mod tests {
         silhouette
     }
 
-    fn proxy_tree_silhouette(
-        quads: &[SurfaceQuad],
-        view: SilhouetteView,
-    ) -> BTreeSet<(i32, i32)> {
+    fn proxy_tree_silhouette(quads: &[SurfaceQuad], view: SilhouetteView) -> BTreeSet<(i32, i32)> {
         let mut silhouette = BTreeSet::new();
         for quad in quads {
             let (min, max) = quad_voxel_bounds(*quad);
@@ -1693,10 +1688,7 @@ mod tests {
         silhouette
     }
 
-    fn silhouette_iou(
-        first: &BTreeSet<(i32, i32)>,
-        second: &BTreeSet<(i32, i32)>,
-    ) -> f32 {
+    fn silhouette_iou(first: &BTreeSet<(i32, i32)>, second: &BTreeSet<(i32, i32)>) -> f32 {
         let intersection = first.intersection(second).count();
         let union = first.union(second).count();
         intersection as f32 / union.max(1) as f32
@@ -1704,11 +1696,12 @@ mod tests {
 
     fn silhouette_centroid(silhouette: &BTreeSet<(i32, i32)>) -> [f32; 2] {
         let count = silhouette.len().max(1) as f32;
-        let (horizontal, vertical) = silhouette
-            .iter()
-            .fold((0_i64, 0_i64), |sum, &(horizontal, vertical)| {
-                (sum.0 + i64::from(horizontal), sum.1 + i64::from(vertical))
-            });
+        let (horizontal, vertical) =
+            silhouette
+                .iter()
+                .fold((0_i64, 0_i64), |sum, &(horizontal, vertical)| {
+                    (sum.0 + i64::from(horizontal), sum.1 + i64::from(vertical))
+                });
         [horizontal as f32 / count, vertical as f32 / count]
     }
 

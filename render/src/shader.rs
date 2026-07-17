@@ -167,7 +167,9 @@ mod tests {
         assert!(weather.contains("@builtin(instance_index) instance_index: u32"));
         assert!(weather.contains("let server_time = frame.atmosphere_motion.x"));
         assert!(weather.contains("let vertical_phase = fract("));
-        assert!(weather.contains("let vertical_cell = round((frame.camera_time.y - vertical_phase)"));
+        assert!(
+            weather.contains("let vertical_cell = round((frame.camera_time.y - vertical_phase)")
+        );
         assert!(weather.contains("velocity - frame.atmosphere_motion.yzw"));
         assert!(!weather.contains("frame.camera_time.w / fall_duration"));
         assert!(!weather.contains("frame.camera_time.y +"));
