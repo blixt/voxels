@@ -34,6 +34,7 @@ const POSE_HZ: u64 = 30;
 const PING_INTERVAL: Duration = Duration::from_secs(1);
 const SURFACE_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 const CHUNK_CACHE_CAPACITY: usize = 96;
+const MAX_TOWER_COLUMN_SCAN_VOXELS: i32 = 48;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -472,7 +473,9 @@ impl BotRuntime {
             if intent.copied_leader_action {
                 self.report.copied_actions = self.report.copied_actions.saturating_add(1);
             }
-            self.send_edit(action).await?;
+            if let Some(action) = prepare_edit(&self.cache, action) {
+                self.send_edit(action).await?;
+            }
         }
         Ok(())
     }
@@ -853,6 +856,24 @@ fn first_placeable(inventory: MaterialInventory) -> Option<Material> {
     })
 }
 
+fn prepare_edit(cache: &ChunkCache, action: EditAction) -> Option<EditAction> {
+    let EditAction::Place {
+        mut coord,
+        material,
+    } = action
+    else {
+        return Some(action);
+    };
+    for _ in 0..=MAX_TOWER_COLUMN_SCAN_VOXELS {
+        match cache.material(coord) {
+            Some(Material::Air) => return Some(EditAction::Place { coord, material }),
+            Some(_) => coord.y = coord.y.saturating_add(1),
+            None => return None,
+        }
+    }
+    None
+}
+
 fn position_voxel(position: Vec3) -> VoxelCoord {
     VoxelCoord::new(
         (position.x / VOXEL_SIZE_METRES).floor() as i32,
@@ -971,6 +992,7 @@ const fn splitmix64(mut value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use voxels_world::{CHUNK_EDGE, Chunk};
 
     #[test]
     fn stable_roster_has_valid_unique_ids_and_expected_leaders() {
@@ -1022,5 +1044,41 @@ mod tests {
             Some(2)
         );
         Ok(())
+    }
+
+    #[test]
+    fn placement_advances_to_the_first_authoritative_empty_voxel() {
+        let mut cache = ChunkCache::new(1);
+        let mut chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Air);
+        for y in 0..4 {
+            chunk.set(2, y, 3, Material::Stone);
+        }
+        cache.insert(chunk);
+        let prepared = prepare_edit(
+            &cache,
+            EditAction::Place {
+                coord: VoxelCoord::new(2, 0, 3),
+                material: Material::Dirt,
+            },
+        );
+        assert_eq!(
+            prepared,
+            Some(EditAction::Place {
+                coord: VoxelCoord::new(2, 4, 3),
+                material: Material::Dirt,
+            })
+        );
+
+        let missing = VoxelCoord::new(CHUNK_EDGE as i32, 0, 0);
+        assert_eq!(
+            prepare_edit(
+                &cache,
+                EditAction::Place {
+                    coord: missing,
+                    material: Material::Dirt,
+                }
+            ),
+            None
+        );
     }
 }

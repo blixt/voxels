@@ -37,14 +37,15 @@ impl ChunkCache {
         }
     }
 
+    pub fn material(&self, coord: VoxelCoord) -> Option<Material> {
+        self.chunks.get(&coord.chunk()).map(|chunk| {
+            let [x, y, z] = coord.local();
+            chunk.get(x, y, z)
+        })
+    }
+
     pub fn physics(&self, coord: VoxelCoord) -> VoxelPhysics {
-        let material = self
-            .chunks
-            .get(&coord.chunk())
-            .map_or(Material::Stone, |chunk| {
-                let [x, y, z] = coord.local();
-                chunk.get(x, y, z)
-            });
+        let material = self.material(coord).unwrap_or(Material::Stone);
         VoxelPhysics {
             collidable: material.is_collidable(),
             fluid: material.is_fluid(),
@@ -63,8 +64,10 @@ mod tests {
         let changed = VoxelCoord::new(3, 4, 5);
         cache.apply(changed, Material::Air);
         assert!(!cache.physics(changed).collidable);
+        assert_eq!(cache.material(changed), Some(Material::Air));
         cache.insert(Chunk::filled(ChunkCoord::new(1, 0, 0), Material::Stone));
         assert!(cache.physics(changed).collidable);
+        assert_eq!(cache.material(changed), None);
         assert_eq!(cache.chunks.len(), 1);
     }
 }
