@@ -66,6 +66,7 @@ fn decoded_horizon_code(profile: u32, direction: u32, parent: bool) -> u32 {
 fn terrain_horizon_lighting(
   profile: u32,
   parent_blend: f32,
+  terrain_normal: vec3<f32>,
   light_direction: vec3<f32>,
 ) -> vec2<f32> {
   let horizon_slopes = array<f32, 4>(0.0, 0.10510424, 0.2867454, 0.70020753);
@@ -105,7 +106,18 @@ fn terrain_horizon_lighting(
     light_slope,
   );
   let sky_visibility = mix(sky_accessibility.x, sky_accessibility.y, parent_blend);
-  return vec2<f32>(key_visibility, mix(1.0, sky_visibility, 0.82));
+  // Clear-sky radiance is anisotropic around the key light. Preserve full fill on flat and
+  // sun-facing ground, but let broad away-facing slopes receive less of that directional lobe.
+  // The light's horizontal magnitude naturally removes this cue when it is near the zenith.
+  let directional_sky_visibility = clamp(
+    1.0 + dot(terrain_normal.xz, light_direction.xz) * 0.42,
+    0.82,
+    1.0,
+  );
+  return vec2<f32>(
+    key_visibility,
+    mix(1.0, sky_visibility, 0.82) * directional_sky_visibility,
+  );
 }
 
 fn lod_boundary_center(boundary: u32) -> vec2<f32> {
@@ -187,6 +199,7 @@ fn vs_main(
     let resolved_horizon_lighting = terrain_horizon_lighting(
       unpack_surface_horizon_profile(material, ao),
       parent_blend,
+      terrain_normal,
       normalize(frame.key_light_direction.xyz),
     );
     // Canonical 10cm chunks do not carry a streamed horizon profile. Fade the macro term in over

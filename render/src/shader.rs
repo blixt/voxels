@@ -149,7 +149,7 @@ mod tests {
             let amount = ((value - low) / (high - low)).clamp(0.0, 1.0);
             amount * amount * (3.0 - 2.0 * amount)
         }
-        fn lighting(profile: u16, light: Vec3) -> [f32; 2] {
+        fn lighting(profile: u16, light: Vec3, terrain_normal: Vec3) -> [f32; 2] {
             let angles = [
                 0.0_f32,
                 6.0_f32.to_radians(),
@@ -188,7 +188,10 @@ mod tests {
                 })
                 .sum::<f32>()
                 * 0.25;
-            [key, 1.0 + (accessibility - 1.0) * 0.82]
+            let directional_sky = (1.0
+                + (terrain_normal.x * light.x + terrain_normal.z * light.z) * 0.42)
+                .clamp(0.82, 1.0);
+            [key, (1.0 + (accessibility - 1.0) * 0.82) * directional_sky]
         }
 
         // East has a 35-degree ridge while the other three sectors are open. Parent matches own.
@@ -196,9 +199,9 @@ mod tests {
         let low_east = Vec3::new(1.0, 10.0_f32.to_radians().tan(), 0.0).normalize();
         let low_west = Vec3::new(-1.0, 10.0_f32.to_radians().tan(), 0.0).normalize();
         let high_east = Vec3::new(1.0, 60.0_f32.to_radians().tan(), 0.0).normalize();
-        let east = lighting(profile, low_east);
-        let west = lighting(profile, low_west);
-        let high = lighting(profile, high_east);
+        let east = lighting(profile, low_east, Vec3::Y);
+        let west = lighting(profile, low_west, Vec3::Y);
+        let high = lighting(profile, high_east, Vec3::Y);
         assert!(
             east[0] < 0.01,
             "low east light is below the encoded ridge: {east:?}"
@@ -214,6 +217,13 @@ mod tests {
         assert!(
             (0.82..0.90).contains(&east[1]),
             "one blocked sector softly reduces sky access"
+        );
+        let sun_facing = lighting(0, low_east, Vec3::new(0.35, 1.0, 0.0).normalize());
+        let away_facing = lighting(0, low_east, Vec3::new(-0.35, 1.0, 0.0).normalize());
+        assert_eq!(sun_facing[1], 1.0);
+        assert!(
+            away_facing[1] < 0.88,
+            "broad away-facing slopes receive less directional sky fill: {away_facing:?}",
         );
 
         let voxels = include_str!("shaders/voxels.wgsl");
