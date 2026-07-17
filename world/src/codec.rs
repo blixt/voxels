@@ -160,7 +160,16 @@ pub fn decode_chunk(
     let mut cursor = usize::from(HEADER_LEN);
     for _ in 0..palette_len {
         let id = read_u16(bytes, cursor)?;
-        palette.push(Material::from_id(id).ok_or(CodecError::UnknownMaterial(id))?);
+        let material = Material::from_id(id).ok_or(CodecError::UnknownMaterial(id))?;
+        if palette
+            .last()
+            .is_some_and(|prior: &Material| prior.id() >= id)
+        {
+            return Err(CodecError::InvalidHeader(
+                "palette material ids must be strictly increasing",
+            ));
+        }
+        palette.push(material);
         cursor += 2;
     }
     let voxels = match encoding {
@@ -373,6 +382,27 @@ mod tests {
         assert_eq!(
             decode_chunk(&encoded, identity),
             Err(CodecError::InvalidHeader("invalid palette length"))
+        );
+    }
+
+    #[test]
+    fn reordered_palette_is_rejected_even_when_indices_preserve_voxels() {
+        let mut chunk = Chunk::empty(ChunkCoord::new(0, 0, 0));
+        chunk.set(0, 0, 0, Material::Stone);
+        let identity = identity(7);
+        let mut encoded = encode_chunk(&chunk, identity);
+        assert_eq!(read_u16(&encoded, 64), Ok(2));
+        assert_eq!(encoded[66], 1);
+
+        encoded[104..108].rotate_left(2);
+        for byte in &mut encoded[108..] {
+            *byte ^= u8::MAX;
+        }
+        assert_eq!(
+            decode_chunk(&encoded, identity),
+            Err(CodecError::InvalidHeader(
+                "palette material ids must be strictly increasing"
+            ))
         );
     }
 

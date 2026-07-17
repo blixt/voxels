@@ -3121,9 +3121,17 @@ fn decode_halo(
     let mut palette = Vec::with_capacity(palette_len);
     for _ in 0..palette_len {
         let id = cursor.u16()?;
-        palette.push(
-            Material::from_id(id).ok_or(ProtocolError::UnknownEnum("material", u64::from(id)))?,
-        );
+        let material =
+            Material::from_id(id).ok_or(ProtocolError::UnknownEnum("material", u64::from(id)))?;
+        if palette
+            .last()
+            .is_some_and(|prior: &Material| prior.id() >= id)
+        {
+            return Err(ProtocolError::InvalidPayload(
+                "halo palette material ids must be strictly increasing",
+            ));
+        }
+        palette.push(material);
     }
     let materials = unpack_materials(cursor.bytes(packed_len)?, &palette, bits, count)?;
     cursor.finish()?;
@@ -3839,6 +3847,28 @@ mod tests {
             u32::try_from(truncated.len() - FRAME_HEADER_BYTES).expect("test frame stays bounded");
         truncated[20..24].copy_from_slice(&truncated_payload_len.to_le_bytes());
         assert!(decode_chunk_batch_result(&truncated).is_err());
+    }
+
+    #[test]
+    fn reordered_halo_palette_is_rejected_even_when_indices_preserve_voxels() {
+        let coord = ChunkCoord::new(0, 0, 0);
+        let identity = WorldSourceIdentity::procedural_v16(42).identity_hash();
+        let mut materials = vec![Material::Air; crate::MESHING_HALO_VOXELS];
+        materials[0] = Material::Stone;
+        let mut encoded = encode_halo(&materials, coord, identity);
+        assert_eq!(read_u16(&encoded, 4), Ok(2));
+        assert_eq!(encoded[6], 1);
+
+        encoded[44..48].rotate_left(2);
+        for byte in &mut encoded[48..] {
+            *byte ^= u8::MAX;
+        }
+        assert_eq!(
+            decode_halo(&encoded, coord, identity),
+            Err(ProtocolError::InvalidPayload(
+                "halo palette material ids must be strictly increasing"
+            ))
+        );
     }
 
     #[test]
