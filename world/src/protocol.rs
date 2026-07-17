@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 15;
+pub const PROTOCOL_VERSION: u16 = 16;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -206,9 +206,18 @@ pub struct WorldOpened {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldEnvironmentSnapshot {
     pub sample_server_time_ms: u64,
+    pub world_day_number: i64,
     pub day_fraction: f32,
     /// Zero freezes the celestial clock at `day_fraction`.
     pub day_length_seconds: f32,
+    pub days_per_year: f32,
+    pub moon_sidereal_orbit_days: f32,
+    pub moon_orbit_phase_at_world_epoch: f32,
+    pub planet_circumference_metres: f32,
+    pub axial_tilt_radians: f32,
+    pub moon_orbit_inclination_radians: f32,
+    pub celestial_seed: u64,
+    pub celestial_revision: u64,
     pub weather_fraction: f32,
     /// Zero freezes the weather timeline at `weather_fraction`.
     pub weather_cycle_seconds: f32,
@@ -830,8 +839,17 @@ pub fn decode_world_opened(bytes: &[u8]) -> Result<WorldOpened, ProtocolError> {
 
 fn encode_world_environment(payload: &mut Vec<u8>, environment: WorldEnvironmentSnapshot) {
     push_u64(payload, environment.sample_server_time_ms);
+    push_i64(payload, environment.world_day_number);
     push_f32(payload, environment.day_fraction);
     push_f32(payload, environment.day_length_seconds);
+    push_f32(payload, environment.days_per_year);
+    push_f32(payload, environment.moon_sidereal_orbit_days);
+    push_f32(payload, environment.moon_orbit_phase_at_world_epoch);
+    push_f32(payload, environment.planet_circumference_metres);
+    push_f32(payload, environment.axial_tilt_radians);
+    push_f32(payload, environment.moon_orbit_inclination_radians);
+    push_u64(payload, environment.celestial_seed);
+    push_u64(payload, environment.celestial_revision);
     push_f32(payload, environment.weather_fraction);
     push_f32(payload, environment.weather_cycle_seconds);
     for value in environment.cloud_offset_metres {
@@ -852,8 +870,17 @@ fn decode_world_environment(
 ) -> Result<WorldEnvironmentSnapshot, ProtocolError> {
     let environment = WorldEnvironmentSnapshot {
         sample_server_time_ms: cursor.u64()?,
+        world_day_number: cursor.i64()?,
         day_fraction: cursor.f32()?,
         day_length_seconds: cursor.f32()?,
+        days_per_year: cursor.f32()?,
+        moon_sidereal_orbit_days: cursor.f32()?,
+        moon_orbit_phase_at_world_epoch: cursor.f32()?,
+        planet_circumference_metres: cursor.f32()?,
+        axial_tilt_radians: cursor.f32()?,
+        moon_orbit_inclination_radians: cursor.f32()?,
+        celestial_seed: cursor.u64()?,
+        celestial_revision: cursor.u64()?,
         weather_fraction: cursor.f32()?,
         weather_cycle_seconds: cursor.f32()?,
         cloud_offset_metres: [cursor.f32()?, cursor.f32()?],
@@ -873,7 +900,22 @@ fn validate_world_environment(environment: &WorldEnvironmentSnapshot) -> Result<
         || !environment.day_fraction.is_finite()
         || !(0.0..1.0).contains(&environment.day_fraction)
         || !environment.day_length_seconds.is_finite()
-        || environment.day_length_seconds < 0.0
+        || !(0.0..=86_400.0).contains(&environment.day_length_seconds)
+        || environment.world_day_number.unsigned_abs() > 1_000_000_000
+        || !environment.days_per_year.is_finite()
+        || !(4.0..=4_096.0).contains(&environment.days_per_year)
+        || !environment.moon_sidereal_orbit_days.is_finite()
+        || !(0.25..=environment.days_per_year).contains(&environment.moon_sidereal_orbit_days)
+        || !environment.moon_orbit_phase_at_world_epoch.is_finite()
+        || !(0.0..1.0).contains(&environment.moon_orbit_phase_at_world_epoch)
+        || !environment.planet_circumference_metres.is_finite()
+        || !(100_000.0..=100_000_000.0).contains(&environment.planet_circumference_metres)
+        || !environment.axial_tilt_radians.is_finite()
+        || !(0.0..=std::f32::consts::FRAC_PI_4).contains(&environment.axial_tilt_radians)
+        || !environment.moon_orbit_inclination_radians.is_finite()
+        || !(0.0..=std::f32::consts::FRAC_PI_6)
+            .contains(&environment.moon_orbit_inclination_radians)
+        || environment.celestial_revision == 0
         || !environment.weather_fraction.is_finite()
         || !(0.0..1.0).contains(&environment.weather_fraction)
         || !environment.weather_cycle_seconds.is_finite()
@@ -3543,8 +3585,17 @@ mod tests {
                 .union(WorldCapabilities::CREATIVE_FLIGHT),
             environment: WorldEnvironmentSnapshot {
                 sample_server_time_ms: 12_345,
+                world_day_number: 82,
                 day_fraction: 0.625,
                 day_length_seconds: 1_200.0,
+                days_per_year: 365.242_2,
+                moon_sidereal_orbit_days: 27.321_661,
+                moon_orbit_phase_at_world_epoch: 0.17,
+                planet_circumference_metres: 40_075_016.0,
+                axial_tilt_radians: 23.439_3_f32.to_radians(),
+                moon_orbit_inclination_radians: 5.145_f32.to_radians(),
+                celestial_seed: 0x57a2_5eed,
+                celestial_revision: 2,
                 weather_fraction: 0.68,
                 weather_cycle_seconds: 900.0,
                 cloud_offset_metres: [412.5, 91.25],

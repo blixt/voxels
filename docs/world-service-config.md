@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 14
+schema_version = 15
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -72,7 +72,16 @@ movement_credit_window_ms = 500
 
 [environment]
 day_length_seconds = 1200.0
+world_day_number_at_unix_epoch = 0
 day_fraction_at_unix_epoch = 0.72
+days_per_year = 365.2422
+moon_sidereal_orbit_days = 27.321661
+moon_orbit_phase_at_world_epoch = 0.0
+planet_circumference_metres = 40075016.0
+axial_tilt_degrees = 23.4393
+moon_orbit_inclination_degrees = 5.145
+celestial_seed = 1470258925
+celestial_revision = 1
 weather_cycle_seconds = 900.0
 weather_fraction_at_unix_epoch = 0.08
 cloud_offset_metres_at_unix_epoch = [0.0, 0.0]
@@ -100,10 +109,14 @@ sea_level_voxels = 52
 # model_cache = "/an/optional/cache/root"
 ```
 
-The environment anchor is evaluated against Unix time and then transmitted with the server's
-monotonic clock, so daemon restarts and multiple clients retain one sky. Set
-`day_length_seconds = 0` to freeze `day_fraction_at_unix_epoch` for visual testing. Cloud wind and
-the continuous weather timeline use the same clock contract. Set `weather_cycle_seconds = 0` to
+The absolute world-day anchor is evaluated against Unix time and then transmitted with the server's
+monotonic clock, so daemon restarts and multiple clients retain one sky. Year, lunar orbit, local
+solar time, and sidereal star rotation all derive from that one clock. Set `day_length_seconds = 0`
+to freeze the entire celestial clock for visual testing. The plane maps only its observer frame onto
+the configured spherical circumference: `(0, 0)` is the equator, north is `-Z`, east is `+X`, and
+continuing through either pole smoothly returns toward the opposite equator. Terrain itself never
+wraps. Cloud wind and the continuous weather timeline use the same clock contract. Set
+`weather_cycle_seconds = 0` to
 freeze `weather_fraction_at_unix_epoch`; otherwise the cycle moves continuously through clear,
 cloudy, overcast, rain, storm, and clearing conditions. Coverage is the clear-sky baseline, while
 the cloud base/top bound the volumetric layer. The derived weather drives sky color, sunlight,

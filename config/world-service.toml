@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 14
+schema_version = 15
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -65,7 +65,19 @@ movement_credit_window_ms = 500
 # for deterministic screenshots or authored events. The Unix-epoch anchor survives daemon/HMR
 # restarts and every client extrapolates it from the server's synchronized monotonic clock.
 day_length_seconds = 1200.0
+world_day_number_at_unix_epoch = 0
 day_fraction_at_unix_epoch = 0.72
+# One familiar 365.2422-day year lasts about 5.1 real days at the accelerated day length.
+days_per_year = 365.2422
+moon_sidereal_orbit_days = 27.321661
+moon_orbit_phase_at_world_epoch = 0.0
+# The planar world is the universal cover of this Earth-sized celestial sphere. Terrain does not
+# wrap; only latitude, longitude, seasons, and the transported sky frame repeat.
+planet_circumference_metres = 40075016.0
+axial_tilt_degrees = 23.4393
+moon_orbit_inclination_degrees = 5.145
+celestial_seed = 1470258925
+celestial_revision = 1
 weather_cycle_seconds = 900.0
 weather_fraction_at_unix_epoch = 0.08
 # World-space cloud advection is shared by the visible sky layer and its terrain shadows.

@@ -96,7 +96,16 @@ const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DerivedWorldEnvironment {
     server_time_seconds: f32,
+    world_days: f64,
     day_fraction: f32,
+    year_fraction: f32,
+    moon_orbit_fraction: f32,
+    twinkle_phase: f32,
+    planet_circumference_metres: f32,
+    axial_tilt_radians: f32,
+    moon_orbit_inclination_radians: f32,
+    celestial_seed: u64,
+    celestial_revision: u64,
     weather_fraction: f32,
     weather_cycle_seconds: f32,
     cloud_offset_metres: [f32; 2],
@@ -113,7 +122,16 @@ impl DerivedWorldEnvironment {
     fn into_render_state(self) -> voxels_render::environment::WorldEnvironmentState {
         voxels_render::environment::WorldEnvironmentState {
             server_time_seconds: self.server_time_seconds,
+            world_days: self.world_days,
             day_fraction: self.day_fraction,
+            year_fraction: self.year_fraction,
+            moon_orbit_fraction: self.moon_orbit_fraction,
+            twinkle_phase: self.twinkle_phase,
+            planet_circumference_metres: self.planet_circumference_metres,
+            axial_tilt_radians: self.axial_tilt_radians,
+            moon_orbit_inclination_radians: self.moon_orbit_inclination_radians,
+            celestial_seed: self.celestial_seed,
+            celestial_revision: self.celestial_revision,
             weather_fraction: self.weather_fraction,
             weather_cycle_seconds: self.weather_cycle_seconds,
             cloud_offset_metres: self.cloud_offset_metres,
@@ -133,13 +151,22 @@ fn world_environment_at(
     server_time_ms: f64,
 ) -> DerivedWorldEnvironment {
     let elapsed_seconds = (server_time_ms - snapshot.sample_server_time_ms as f64) / 1_000.0;
-    let day_fraction = if snapshot.day_length_seconds > 0.0 {
-        (f64::from(snapshot.day_fraction)
-            + elapsed_seconds / f64::from(snapshot.day_length_seconds))
-        .rem_euclid(1.0) as f32
+    let world_days = if snapshot.day_length_seconds > 0.0 {
+        snapshot.world_day_number as f64
+            + f64::from(snapshot.day_fraction)
+            + elapsed_seconds / f64::from(snapshot.day_length_seconds)
     } else {
-        snapshot.day_fraction
+        snapshot.world_day_number as f64 + f64::from(snapshot.day_fraction)
     };
+    let day_fraction = world_days.rem_euclid(1.0) as f32;
+    let year_fraction = (world_days.rem_euclid(f64::from(snapshot.days_per_year))
+        / f64::from(snapshot.days_per_year)) as f32;
+    let moon_orbit_fraction = (world_days / f64::from(snapshot.moon_sidereal_orbit_days)
+        + f64::from(snapshot.moon_orbit_phase_at_world_epoch))
+    .rem_euclid(1.0) as f32;
+    // Thirty-seven decorrelated twinkle cycles per world day remain restart-stable and freeze with
+    // the authoritative celestial clock.
+    let twinkle_phase = (world_days * 37.0).rem_euclid(1.0) as f32;
     let weather_fraction = if snapshot.weather_cycle_seconds > 0.0 {
         (f64::from(snapshot.weather_fraction)
             + elapsed_seconds / f64::from(snapshot.weather_cycle_seconds))
@@ -154,7 +181,16 @@ fn world_environment_at(
     });
     DerivedWorldEnvironment {
         server_time_seconds: (server_time_ms * 0.001).max(0.0) as f32,
+        world_days,
         day_fraction,
+        year_fraction,
+        moon_orbit_fraction,
+        twinkle_phase,
+        planet_circumference_metres: snapshot.planet_circumference_metres,
+        axial_tilt_radians: snapshot.axial_tilt_radians,
+        moon_orbit_inclination_radians: snapshot.moon_orbit_inclination_radians,
+        celestial_seed: snapshot.celestial_seed,
+        celestial_revision: snapshot.celestial_revision,
         weather_fraction,
         weather_cycle_seconds: snapshot.weather_cycle_seconds,
         cloud_offset_metres,
@@ -2866,8 +2902,17 @@ mod tests {
     fn synchronized_clients_derive_identical_world_time_and_cloud_offset() {
         let snapshot = voxels_world::protocol::WorldEnvironmentSnapshot {
             sample_server_time_ms: 5_000,
+            world_day_number: 82,
             day_fraction: 0.25,
             day_length_seconds: 100.0,
+            days_per_year: 365.242_2,
+            moon_sidereal_orbit_days: 27.321_661,
+            moon_orbit_phase_at_world_epoch: 0.17,
+            planet_circumference_metres: 40_075_016.0,
+            axial_tilt_radians: 23.439_3_f32.to_radians(),
+            moon_orbit_inclination_radians: 5.145_f32.to_radians(),
+            celestial_seed: 0x57a2_5eed,
+            celestial_revision: 2,
             weather_fraction: 0.1,
             weather_cycle_seconds: 200.0,
             cloud_offset_metres: [10.0, 20.0],
@@ -2883,6 +2928,10 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.server_time_seconds, 30.0);
         assert!((first.day_fraction - 0.5).abs() < 1.0e-6);
+        assert!((first.world_days - 82.5).abs() < 1.0e-9);
+        assert!(
+            (first.year_fraction - (82.5_f64 / 365.242_2).rem_euclid(1.0) as f32).abs() < 1.0e-6
+        );
         assert!((first.weather_fraction - 0.225).abs() < 1.0e-6);
         assert_eq!(first.cloud_offset_metres, [110.0, 1_279_970.0]);
     }
@@ -2891,8 +2940,17 @@ mod tests {
     fn hidden_tab_time_jump_catches_up_without_frame_delta_accumulation() {
         let snapshot = voxels_world::protocol::WorldEnvironmentSnapshot {
             sample_server_time_ms: 1_000,
+            world_day_number: 9,
             day_fraction: 0.9,
             day_length_seconds: 40.0,
+            days_per_year: 365.242_2,
+            moon_sidereal_orbit_days: 27.321_661,
+            moon_orbit_phase_at_world_epoch: 0.17,
+            planet_circumference_metres: 40_075_016.0,
+            axial_tilt_radians: 23.439_3_f32.to_radians(),
+            moon_orbit_inclination_radians: 5.145_f32.to_radians(),
+            celestial_seed: 0x57a2_5eed,
+            celestial_revision: 2,
             weather_fraction: 0.68,
             weather_cycle_seconds: 0.0,
             cloud_offset_metres: [0.0, 0.0],
@@ -2906,6 +2964,7 @@ mod tests {
         let resumed = world_environment_at(snapshot, 11_000.0);
         assert_eq!(resumed.server_time_seconds, 11.0);
         assert!((resumed.day_fraction - 0.15).abs() < 1.0e-6);
+        assert!((resumed.world_days - 10.15).abs() < 1.0e-6);
         assert_eq!(resumed.weather_fraction, 0.68);
         assert_eq!(resumed.cloud_offset_metres, [50.0, 20.0]);
     }

@@ -30,7 +30,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 14;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 15;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 5;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -192,7 +192,16 @@ pub struct SpawnConfig {
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentConfig {
     pub day_length_seconds: f32,
+    pub world_day_number_at_unix_epoch: i64,
     pub day_fraction_at_unix_epoch: f32,
+    pub days_per_year: f32,
+    pub moon_sidereal_orbit_days: f32,
+    pub moon_orbit_phase_at_world_epoch: f32,
+    pub planet_circumference_metres: f32,
+    pub axial_tilt_degrees: f32,
+    pub moon_orbit_inclination_degrees: f32,
+    pub celestial_seed: u64,
+    pub celestial_revision: u64,
     pub weather_cycle_seconds: f32,
     pub weather_fraction_at_unix_epoch: f32,
     pub cloud_offset_metres_at_unix_epoch: [f32; 2],
@@ -208,7 +217,16 @@ impl Default for EnvironmentConfig {
     fn default() -> Self {
         Self {
             day_length_seconds: 1_200.0,
+            world_day_number_at_unix_epoch: 0,
             day_fraction_at_unix_epoch: 0.72,
+            days_per_year: 365.242_2,
+            moon_sidereal_orbit_days: 27.321_661,
+            moon_orbit_phase_at_world_epoch: 0.0,
+            planet_circumference_metres: 40_075_016.0,
+            axial_tilt_degrees: 23.439_3,
+            moon_orbit_inclination_degrees: 5.145,
+            celestial_seed: 0x57a2_5eed,
+            celestial_revision: 1,
             weather_cycle_seconds: 900.0,
             weather_fraction_at_unix_epoch: 0.08,
             cloud_offset_metres_at_unix_epoch: [0.0, 0.0],
@@ -424,6 +442,25 @@ impl WorldServiceConfig {
             || !(0.0..=86_400.0).contains(&self.environment.day_length_seconds)
             || !self.environment.day_fraction_at_unix_epoch.is_finite()
             || !(0.0..1.0).contains(&self.environment.day_fraction_at_unix_epoch)
+            || self
+                .environment
+                .world_day_number_at_unix_epoch
+                .unsigned_abs()
+                > 1_000_000_000
+            || !self.environment.days_per_year.is_finite()
+            || !(4.0..=4_096.0).contains(&self.environment.days_per_year)
+            || !self.environment.moon_sidereal_orbit_days.is_finite()
+            || !(0.25..=self.environment.days_per_year)
+                .contains(&self.environment.moon_sidereal_orbit_days)
+            || !self.environment.moon_orbit_phase_at_world_epoch.is_finite()
+            || !(0.0..1.0).contains(&self.environment.moon_orbit_phase_at_world_epoch)
+            || !self.environment.planet_circumference_metres.is_finite()
+            || !(100_000.0..=100_000_000.0).contains(&self.environment.planet_circumference_metres)
+            || !self.environment.axial_tilt_degrees.is_finite()
+            || !(0.0..=45.0).contains(&self.environment.axial_tilt_degrees)
+            || !self.environment.moon_orbit_inclination_degrees.is_finite()
+            || !(0.0..=30.0).contains(&self.environment.moon_orbit_inclination_degrees)
+            || self.environment.celestial_revision == 0
             || !self.environment.weather_cycle_seconds.is_finite()
             || !(0.0..=86_400.0).contains(&self.environment.weather_cycle_seconds)
             || !self.environment.weather_fraction_at_unix_epoch.is_finite()
@@ -449,7 +486,7 @@ impl WorldServiceConfig {
             || self.environment.weather_revision == 0
         {
             return Err(WorldServiceConfigError::InvalidEnvironment(
-                "day and weather clocks, cloud layer, wind, coverage, and revision must be finite and bounded",
+                "celestial and weather clocks, planetary mapping, cloud layer, wind, coverage, and revisions must be finite and bounded",
             ));
         }
         if !(16..=1_000).contains(&self.presence.broadcast_interval_ms) {
@@ -882,7 +919,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 14
+schema_version = 15
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -928,7 +965,16 @@ movement_credit_window_ms = 500
 
 [environment]
 day_length_seconds = 1200.0
+world_day_number_at_unix_epoch = 0
 day_fraction_at_unix_epoch = 0.72
+days_per_year = 365.2422
+moon_sidereal_orbit_days = 27.321661
+moon_orbit_phase_at_world_epoch = 0.0
+planet_circumference_metres = 40075016.0
+axial_tilt_degrees = 23.4393
+moon_orbit_inclination_degrees = 5.145
+celestial_seed = 1470258925
+celestial_revision = 1
 weather_cycle_seconds = 900.0
 weather_fraction_at_unix_epoch = 0.08
 cloud_offset_metres_at_unix_epoch = [0.0, 0.0]
@@ -1002,12 +1048,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 14", "schema_version = 13");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 15", "schema_version = 14");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 14,
-                found: 13,
+                expected: 15,
+                found: 14,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
@@ -1029,6 +1075,7 @@ sea_level_voxels = 52
             "product_cache_bytes = 268435456\n",
             "broadcast_interval_ms = 33\n",
             "interaction_reach_centimetres = 500\n",
+            "planet_circumference_metres = 40075016.0\n",
             "xz_voxels = [0, 0]\n",
             "precision = \"float16\"\n",
             "horizontal_scale = 2\n",
@@ -1092,6 +1139,20 @@ sea_level_voxels = 52
 
         let mut config = WorldServiceConfig::default();
         config.environment.weather_revision = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(WorldServiceConfigError::InvalidEnvironment(_))
+        ));
+
+        let mut config = WorldServiceConfig::default();
+        config.environment.planet_circumference_metres = 0.0;
+        assert!(matches!(
+            config.validate(),
+            Err(WorldServiceConfigError::InvalidEnvironment(_))
+        ));
+
+        let mut config = WorldServiceConfig::default();
+        config.environment.celestial_revision = 0;
         assert!(matches!(
             config.validate(),
             Err(WorldServiceConfigError::InvalidEnvironment(_))

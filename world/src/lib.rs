@@ -2,6 +2,7 @@
 
 pub mod atlas;
 pub mod cave;
+pub mod celestial;
 pub mod chunk;
 pub mod codec;
 pub mod composition;
@@ -29,6 +30,7 @@ pub use cave::{
     cinder_vault_portals_affected_by_voxel, cinder_vault_stream_interest,
     cinder_vault_visibility_cell, cinder_vault_visibility_graph, sample_cinder_vault,
 };
+pub use celestial::{CelestialModel, CelestialObservation, PlanetaryCoordinates};
 pub use chunk::{CHUNK_EDGE, CHUNK_VOLUME, CHUNK_VOXEL_BYTES, Chunk, ChunkCoord};
 pub use composition::{
     COMPOSITION_EDGE_FEATURE_CELLS, FeatureComposition, FeatureCompositionId,

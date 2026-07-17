@@ -284,7 +284,16 @@ pub struct OutdoorEnvironment {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldEnvironmentState {
     pub server_time_seconds: f32,
+    pub world_days: f64,
     pub day_fraction: f32,
+    pub year_fraction: f32,
+    pub moon_orbit_fraction: f32,
+    pub twinkle_phase: f32,
+    pub planet_circumference_metres: f32,
+    pub axial_tilt_radians: f32,
+    pub moon_orbit_inclination_radians: f32,
+    pub celestial_seed: u64,
+    pub celestial_revision: u64,
     pub weather_fraction: f32,
     pub weather_cycle_seconds: f32,
     pub cloud_offset_metres: [f32; 2],
@@ -300,7 +309,16 @@ impl Default for WorldEnvironmentState {
     fn default() -> Self {
         Self {
             server_time_seconds: 0.0,
+            world_days: 0.72,
             day_fraction: DaylightPhase::GoldenHour.anchor_day_fraction(),
+            year_fraction: 0.0,
+            moon_orbit_fraction: 0.5,
+            twinkle_phase: 0.0,
+            planet_circumference_metres: 40_075_016.0,
+            axial_tilt_radians: 23.439_3_f32.to_radians(),
+            moon_orbit_inclination_radians: 5.145_f32.to_radians(),
+            celestial_seed: 0x57a2_5eed,
+            celestial_revision: 1,
             weather_fraction: 0.08,
             weather_cycle_seconds: 900.0,
             cloud_offset_metres: [0.0; 2],
@@ -328,11 +346,49 @@ impl WorldEnvironmentState {
             } else {
                 fallback.server_time_seconds
             },
+            world_days: if self.world_days.is_finite() {
+                self.world_days
+            } else {
+                fallback.world_days
+            },
             day_fraction: if self.day_fraction.is_finite() {
                 self.day_fraction.rem_euclid(1.0)
             } else {
                 fallback.day_fraction
             },
+            year_fraction: if self.year_fraction.is_finite() {
+                self.year_fraction.rem_euclid(1.0)
+            } else {
+                fallback.year_fraction
+            },
+            moon_orbit_fraction: if self.moon_orbit_fraction.is_finite() {
+                self.moon_orbit_fraction.rem_euclid(1.0)
+            } else {
+                fallback.moon_orbit_fraction
+            },
+            twinkle_phase: if self.twinkle_phase.is_finite() {
+                self.twinkle_phase.rem_euclid(1.0)
+            } else {
+                fallback.twinkle_phase
+            },
+            planet_circumference_metres: finite_positive_scalar(
+                self.planet_circumference_metres,
+                fallback.planet_circumference_metres,
+            ),
+            axial_tilt_radians: if self.axial_tilt_radians.is_finite() {
+                self.axial_tilt_radians
+                    .clamp(0.0, std::f32::consts::FRAC_PI_4)
+            } else {
+                fallback.axial_tilt_radians
+            },
+            moon_orbit_inclination_radians: if self.moon_orbit_inclination_radians.is_finite() {
+                self.moon_orbit_inclination_radians
+                    .clamp(0.0, std::f32::consts::FRAC_PI_6)
+            } else {
+                fallback.moon_orbit_inclination_radians
+            },
+            celestial_seed: self.celestial_seed,
+            celestial_revision: self.celestial_revision.max(1),
             weather_fraction: if self.weather_fraction.is_finite() {
                 self.weather_fraction.rem_euclid(1.0)
             } else {
