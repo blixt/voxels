@@ -186,6 +186,7 @@ struct PresenceSocketHandlers {
 struct ClockSync {
     offset_ms: f64,
     best_round_trip_ms: f64,
+    latest_round_trip_ms: u32,
     synchronized: bool,
 }
 
@@ -194,6 +195,7 @@ impl Default for ClockSync {
         Self {
             offset_ms: 0.0,
             best_round_trip_ms: f64::INFINITY,
+            latest_round_trip_ms: 0,
             synchronized: false,
         }
     }
@@ -215,6 +217,7 @@ impl ClockSync {
             .server_send_time_ms
             .saturating_sub(pong.server_receive_time_ms) as f64;
         let round_trip_ms = (local_receive_ms - local_send_ms - server_processing_ms).max(0.0);
+        self.latest_round_trip_ms = round_trip_ms.round().clamp(1.0, u32::MAX as f64) as u32;
         let measured_offset = ((pong.server_receive_time_ms as f64 - local_send_ms)
             + (pong.server_send_time_ms as f64 - local_receive_ms))
             * 0.5;
@@ -520,6 +523,7 @@ impl PresenceInner {
         let sequence = self.next_ping_sequence.get().max(1);
         let frame = match protocol::encode_presence_ping(PresencePing {
             sequence,
+            observed_round_trip_ms: self.clock.get().latest_round_trip_ms,
             client_send_time_ms: finite_milliseconds(local_time_ms),
         }) {
             Ok(frame) => frame,

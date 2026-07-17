@@ -28,7 +28,7 @@ use voxels_world::{
     WorldProductPriority,
 };
 
-const REPORT_SCHEMA_VERSION: u32 = 2;
+const REPORT_SCHEMA_VERSION: u32 = 3;
 const SIMULATION_HZ: u64 = 60;
 const POSE_HZ: u64 = 30;
 const PING_INTERVAL: Duration = Duration::from_secs(1);
@@ -171,6 +171,8 @@ pub struct BotReport {
     pub presence_leaves: u64,
     pub pings: u64,
     pub ping_latency: LatencySummary,
+    pub final_outbound_rate_bytes_per_second: u32,
+    pub max_outbound_rate_bytes_per_second: u32,
     pub chunk_batches_sent: u64,
     pub chunk_results: u64,
     pub unique_chunks_requested: usize,
@@ -252,6 +254,9 @@ struct BotRuntime {
     next_request_id: u64,
     pose_sequence: u64,
     ping_sequence: u32,
+    latest_round_trip_ms: u32,
+    latest_outbound_rate_bytes_per_second: u32,
+    max_outbound_rate_bytes_per_second: u32,
     next_pose: Instant,
     next_ping: Instant,
     next_surface: Instant,
@@ -402,6 +407,9 @@ impl BotRuntime {
             next_request_id: 1,
             pose_sequence: 0,
             ping_sequence: 0,
+            latest_round_trip_ms: 0,
+            latest_outbound_rate_bytes_per_second: 0,
+            max_outbound_rate_bytes_per_second: 0,
             next_pose: now,
             next_ping: now + PING_INTERVAL,
             next_surface: now,
@@ -528,6 +536,7 @@ impl BotRuntime {
         self.ping_sequence = self.ping_sequence.saturating_add(1).max(1);
         let bytes = encode_presence_ping(PresencePing {
             sequence: self.ping_sequence,
+            observed_round_trip_ms: self.latest_round_trip_ms,
             client_send_time_ms: elapsed_milliseconds(self.start),
         })?;
         self.traffic.sent(&bytes)?;
@@ -783,10 +792,19 @@ impl BotRuntime {
             }
         } else if kind == presence_pong_kind() {
             let pong = decode_presence_pong(bytes)?;
+            self.latest_outbound_rate_bytes_per_second = pong.outbound_rate_bytes_per_second;
+            self.max_outbound_rate_bytes_per_second = self
+                .max_outbound_rate_bytes_per_second
+                .max(pong.outbound_rate_bytes_per_second);
             if let Some(started) = self.pending_pings.remove(&pong.sequence) {
-                self.report
-                    .ping_latency_ms
-                    .push(started.elapsed().as_secs_f64() * 1_000.0);
+                let server_processing_ms =
+                    pong.server_send_time_ms
+                        .saturating_sub(pong.server_receive_time_ms) as f64;
+                let round_trip_ms =
+                    (started.elapsed().as_secs_f64() * 1_000.0 - server_processing_ms).max(0.0);
+                self.latest_round_trip_ms =
+                    round_trip_ms.round().clamp(1.0, u32::MAX as f64) as u32;
+                self.report.ping_latency_ms.push(round_trip_ms);
             }
         } else if kind == error_kind() {
             let (_, message) = decode_error(bytes)?;
@@ -825,6 +843,8 @@ impl BotRuntime {
             presence_leaves: self.report.presence_leaves,
             pings: self.report.pings,
             ping_latency: summarize_latencies(&self.report.ping_latency_ms),
+            final_outbound_rate_bytes_per_second: self.latest_outbound_rate_bytes_per_second,
+            max_outbound_rate_bytes_per_second: self.max_outbound_rate_bytes_per_second,
             chunk_batches_sent: self.report.chunk_batches_sent,
             chunk_results: self.report.chunk_results,
             unique_chunks_requested: self.requested_chunks.len(),

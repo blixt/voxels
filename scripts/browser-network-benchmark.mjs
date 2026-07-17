@@ -19,7 +19,7 @@ import { createShapedLink } from "./network-benchmark-link.mjs";
 import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "./vxwp-contract.mjs";
 import { worldServiceCargoArgs } from "./world-service-command.ts";
 
-const RESULT_SCHEMA_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 3;
 const FIXTURE_VERSION = 2;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
@@ -51,6 +51,12 @@ function argumentValue(name, fallback) {
 function positiveInteger(value, name) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be positive`);
+  return parsed;
+}
+
+function positiveNumber(value, name) {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${name} must be positive`);
   return parsed;
 }
 
@@ -327,6 +333,18 @@ async function runScenario({ name, page, link, action, errors, timeoutMs = SCENA
       visibleChunks: final.visibleChunks,
       quads: final.quads,
     },
+    linkPressure: {
+      upstream: {
+        peakQueuedBytes: stats.upstream.peakQueuedBytes,
+        peakQueueDelayMs: rounded(stats.upstream.peakQueueDelayMs, 3),
+        backpressurePauses: stats.upstream.backpressurePauses,
+      },
+      downstream: {
+        peakQueuedBytes: stats.downstream.peakQueuedBytes,
+        peakQueueDelayMs: rounded(stats.downstream.peakQueueDelayMs, 3),
+        backpressurePauses: stats.downstream.backpressurePauses,
+      },
+    },
     messages: stats.messages,
     frameTiming: frameTimingSummary(frameState.samples, frameState.droppedSamples),
     sampleCount: samples.length,
@@ -391,6 +409,12 @@ function aggregateRuns(runs) {
       const streamingP95 = scenarios
         .map((scenario) => scenario.frameTiming.streamingMs.p95)
         .filter((value) => value !== null);
+      const downstreamQueueDelay = scenarios.map(
+        (scenario) => scenario.linkPressure.downstream.peakQueueDelayMs,
+      );
+      const downstreamQueuedBytes = scenarios.map(
+        (scenario) => scenario.linkPressure.downstream.peakQueuedBytes,
+      );
       return [
         name,
         {
@@ -436,6 +460,20 @@ function aggregateRuns(runs) {
               0,
             ),
           },
+          linkPressure: {
+            downstreamPeakQueueDelayMs: {
+              median: rounded(percentile(downstreamQueueDelay, 0.5), 3),
+              max: rounded(Math.max(...downstreamQueueDelay), 3),
+            },
+            downstreamPeakQueuedBytes: {
+              median: percentile(downstreamQueuedBytes, 0.5),
+              max: Math.max(...downstreamQueuedBytes),
+            },
+            downstreamBackpressurePauses: scenarios.reduce(
+              (total, scenario) => total + scenario.linkPressure.downstream.backpressurePauses,
+              0,
+            ),
+          },
         },
       ];
     }),
@@ -451,12 +489,33 @@ function markdownReport(result) {
     const frame = summary.frameTiming;
     return `| ${name} | ${frame.medianP95Ms.toFixed(1)} | ${frame.maxMs.toFixed(1)} | ${frame.above33_33ms.toLocaleString("en-US")} / ${frame.samples.toLocaleString("en-US")} | ${frame.streamingMedianP95Ms.toFixed(1)} | ${frame.droppedSamples.toLocaleString("en-US")} |`;
   });
-  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\n| Scenario | Interactive ready median (ms) | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at interactive | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Interactive ready” is when canonical terrain and the original four surface rings are complete; kilometre horizon prefetch starts only afterward. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
+  const pressureRows = Object.entries(result.summary).map(([name, summary]) => {
+    const pressure = summary.linkPressure;
+    return `| ${name} | ${pressure.downstreamPeakQueueDelayMs.median.toFixed(3)} / ${pressure.downstreamPeakQueueDelayMs.max.toFixed(3)} | ${pressure.downstreamPeakQueuedBytes.median.toLocaleString("en-US")} / ${pressure.downstreamPeakQueuedBytes.max.toLocaleString("en-US")} | ${pressure.downstreamBackpressurePauses.toLocaleString("en-US")} |`;
+  });
+  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\n| Scenario | Interactive ready median (ms) | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at interactive | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Interactive ready” is when canonical terrain and the original four surface rings are complete; kilometre horizon prefetch starts only afterward. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Link pressure\n\n| Scenario | Downstream peak queue delay median/max (ms) | Downstream peak queued median/max (bytes) | Source pauses |\n| --- | ---: | ---: | ---: |\n${pressureRows.join("\n")}\n\nQueue delay excludes configured propagation and each pacing quantum's own serialization. A source pause means the proxy's bounded queue applied TCP backpressure.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
 }
 
 async function main() {
   const repetitions = positiveInteger(argumentValue("runs", "5"), "runs");
-  const profile = { ...DEFAULT_PROFILE };
+  const roundTripLatencyMs = positiveNumber(
+    argumentValue("rtt-ms", String(DEFAULT_PROFILE.roundTripLatencyMs)),
+    "rtt-ms",
+  );
+  const profile = {
+    ...DEFAULT_PROFILE,
+    name: argumentValue("profile", DEFAULT_PROFILE.name),
+    roundTripLatencyMs,
+    oneWayLatencyMs: roundTripLatencyMs / 2,
+    downstreamMegabitsPerSecond: positiveNumber(
+      argumentValue("downstream-mbps", String(DEFAULT_PROFILE.downstreamMegabitsPerSecond)),
+      "downstream-mbps",
+    ),
+    upstreamMegabitsPerSecond: positiveNumber(
+      argumentValue("upstream-mbps", String(DEFAULT_PROFILE.upstreamMegabitsPerSecond)),
+      "upstream-mbps",
+    ),
+  };
   const temporary = await mkdtemp(path.join(tmpdir(), "voxels-network-benchmark-"));
   const backendPort = await reserveEphemeralPort();
   const proxyPort = await reserveEphemeralPort();

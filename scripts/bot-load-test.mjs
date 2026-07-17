@@ -188,17 +188,23 @@ function messageBytes(report, kind) {
 }
 
 function summarizeTrafficBudget(report, serviceConfig) {
-  const bytesPerSecond = requiredConfigInteger(
+  const floorBytesPerSecond = requiredConfigInteger(
     serviceConfig,
-    "outbound_bandwidth_bytes_per_second",
+    "outbound_bandwidth_floor_bytes_per_second",
+  );
+  const ceilingBytesPerSecond = requiredConfigInteger(
+    serviceConfig,
+    "outbound_bandwidth_ceiling_bytes_per_second",
   );
   const burstBytes = requiredConfigInteger(serviceConfig, "outbound_bandwidth_burst_bytes");
+  const queueDelayTargetMs = requiredConfigInteger(serviceConfig, "outbound_queue_delay_target_ms");
+  const feedbackTimeoutMs = requiredConfigInteger(serviceConfig, "outbound_feedback_timeout_ms");
   const seconds = report.wallTimeMs / 1_000;
   const receivedBytes = report.reports.map((client) => client.traffic.receivedPayloadBytes);
   const bitsPerSecond = receivedBytes.map((bytes) => (bytes * 8) / seconds);
   const envelopeBytes = report.reports.map(
     (client) =>
-      bytesPerSecond * seconds +
+      ceilingBytesPerSecond * seconds +
       Math.max(burstBytes, client.traffic.maxReceivedFrameBytes ?? 0) +
       1_024,
   );
@@ -206,10 +212,19 @@ function summarizeTrafficBudget(report, serviceConfig) {
     (client, index) => client.traffic.receivedPayloadBytes > envelopeBytes[index],
   ).length;
   return {
-    bytesPerSecond,
+    floorBytesPerSecond,
+    ceilingBytesPerSecond,
     burstBytes,
+    queueDelayTargetMs,
+    feedbackTimeoutMs,
     perClientReceivedBytes: numericSummary(receivedBytes),
     perClientBitsPerSecond: numericSummary(bitsPerSecond),
+    selectedRateBytesPerSecond: numericSummary(
+      report.reports.map((client) => client.finalOutboundRateBytesPerSecond),
+    ),
+    peakSelectedRateBytesPerSecond: numericSummary(
+      report.reports.map((client) => client.maxOutboundRateBytesPerSecond),
+    ),
     envelopeBytes: numericSummary(envelopeBytes),
     overBudgetClients,
     payloadByClass: {
@@ -474,13 +489,13 @@ function markdownReport(result) {
     "",
     "## Per-client traffic budgets",
     "",
-    "| Bots | Sustained cap | Burst | Client down p95/max | Presence | Edits | Visible world | Envelope violations |",
-    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| Bots | Adaptive floor/ceiling | Selected p95/max | Queue target | Burst | Client down p95/max | Presence | Edits | Visible world | Ceiling violations |",
+    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   );
   for (const stage of result.stages) {
     const budget = stage.trafficBudget;
     lines.push(
-      `| ${stage.count} | ${((budget.bytesPerSecond * 8) / 1_000_000).toFixed(3)} Mbit/s | ${(budget.burstBytes / 1_024).toFixed(0)} KiB | ${(budget.perClientBitsPerSecond.p95 / 1_000_000).toFixed(3)} / ${(budget.perClientBitsPerSecond.max / 1_000_000).toFixed(3)} Mbit/s | ${(budget.payloadByClass.presenceBytes / 1_048_576).toFixed(2)} MiB | ${(budget.payloadByClass.editBytes / 1_048_576).toFixed(2)} MiB | ${(budget.payloadByClass.visibleWorldBytes / 1_048_576).toFixed(2)} MiB | ${budget.overBudgetClients} |`,
+      `| ${stage.count} | ${((budget.floorBytesPerSecond * 8) / 1_000_000).toFixed(3)} / ${((budget.ceilingBytesPerSecond * 8) / 1_000_000).toFixed(3)} Mbit/s | ${((budget.selectedRateBytesPerSecond.p95 * 8) / 1_000_000).toFixed(3)} / ${((budget.peakSelectedRateBytesPerSecond.max * 8) / 1_000_000).toFixed(3)} Mbit/s | ${budget.queueDelayTargetMs} ms | ${(budget.burstBytes / 1_024).toFixed(0)} KiB | ${(budget.perClientBitsPerSecond.p95 / 1_000_000).toFixed(3)} / ${(budget.perClientBitsPerSecond.max / 1_000_000).toFixed(3)} Mbit/s | ${(budget.payloadByClass.presenceBytes / 1_048_576).toFixed(2)} MiB | ${(budget.payloadByClass.editBytes / 1_048_576).toFixed(2)} MiB | ${(budget.payloadByClass.visibleWorldBytes / 1_048_576).toFixed(2)} MiB | ${budget.overBudgetClients} |`,
     );
   }
   if (result.violations.length > 0) {

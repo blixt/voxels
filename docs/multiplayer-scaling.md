@@ -1,6 +1,6 @@
 # Multiplayer scaling envelope
 
-VXWP v17 supports one unsharded authoritative world with up to 1,024 admitted player sessions. Spatial
+VXWP v18 supports one unsharded authoritative world with up to 1,024 admitted player sessions. Spatial
 interest management is an internal replication index, not a gameplay shard: every player inside the
 same location's 256 m interest radius can discover every other player there. Players beyond that
 radius contribute no entity records or bytes to one another's presence streams.
@@ -92,7 +92,7 @@ and six independent ephemeral BrowserContexts. Each context has separate local s
 receives an independently shaped 40 ms RTT, 50/10 Mbit/s link, and must negotiate a distinct browser
 user and player identity. Five builders and one observer start together. The observer then travels at
 least 120 m from the builders, beyond the configured 96 m mid-presence tier, and all six clients must
-still render the other five articulated avatars. Per-player `/v17/world` and `/v17/presence` stream and
+still render the other five articulated avatars. Per-player `/v18/world` and `/v18/presence` stream and
 VXWP byte counts are written to `target/multiplayer-browser/latest.json`; the far observer screenshot
 is `target/multiplayer-browser/observer-far-five.png`.
 
@@ -134,9 +134,12 @@ The aimed screenshot contained 125 materially changed pixels in a 34-pixel-tall 
 
 The checked-in service admits 512 world sockets plus 512 independently bounded presence sockets.
 The world request queue holds 8,192 jobs, exactly one negotiated 16-request window per admitted world
-connection. Each session can occupy at most two of the eight blocking generation workers. Presence
-has no per-socket outbound queue: a socket builds the newest delta at its next tick and awaits that
-single send, so a slow client cannot accumulate stale movement frames.
+connection. Each session can occupy at most two of the eight blocking generation workers. The world
+and presence sockets share one priority scheduler and one adaptive byte budget. Receiver-reported
+RTT unlocks bandwidth above the configured safe floor only while queued demand exists; excess RTT
+cuts the rate quickly and missing feedback returns it to the floor. Presence has no per-socket
+outbound queue: a socket builds the newest delta at its next tick and awaits that single send, so a
+slow client cannot accumulate stale movement frames.
 
 Individual chunks and surface tiles use process-wide single-flight generation. Overlapping batches
 join the first computation per product, and later requesters reuse validated encoded items from a

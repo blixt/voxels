@@ -31,7 +31,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 16;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 17;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 5;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -52,10 +52,16 @@ pub struct LoopbackTransportConfig {
     pub max_frame_bytes: usize,
     /// Maximum encoded world-product bytes retained while a client socket is backpressured.
     pub max_queued_outbound_bytes_per_client: usize,
-    /// Sustained combined VXWP payload budget across one player's world and presence sockets.
-    pub outbound_bandwidth_bytes_per_second: usize,
+    /// Safe combined VXWP payload floor across one player's world and presence sockets.
+    pub outbound_bandwidth_floor_bytes_per_second: usize,
+    /// Maximum rate receiver latency feedback may unlock for a healthy connection.
+    pub outbound_bandwidth_ceiling_bytes_per_second: usize,
     /// Initial and maximum token-bucket credit. A single larger frame is sent whole and repaid.
     pub outbound_bandwidth_burst_bytes: usize,
+    /// Maximum receiver-observed RTT growth tolerated before the adaptive rate is reduced.
+    pub outbound_queue_delay_target_ms: u16,
+    /// Return to the safe floor when receiver latency feedback is absent for this long.
+    pub outbound_feedback_timeout_ms: u16,
     /// Per-connection request window negotiated with each browser.
     pub max_in_flight_batches: u16,
     /// Hard process-wide connection bound. Each accepted WebSocket holds one permit.
@@ -81,8 +87,11 @@ impl Default for LoopbackTransportConfig {
             auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
             max_frame_bytes: MAX_PROTOCOL_FRAME_BYTES,
             max_queued_outbound_bytes_per_client: 32 * 1024 * 1024,
-            outbound_bandwidth_bytes_per_second: 96 * 1024,
+            outbound_bandwidth_floor_bytes_per_second: 96 * 1024,
+            outbound_bandwidth_ceiling_bytes_per_second: 4 * 1024 * 1024,
             outbound_bandwidth_burst_bytes: 64 * 1024,
+            outbound_queue_delay_target_ms: 25,
+            outbound_feedback_timeout_ms: 3_000,
             max_in_flight_batches: 16,
             max_connections: 1_024,
             global_queue_capacity: 16_384,
@@ -410,10 +419,18 @@ impl WorldServiceConfig {
             ));
         }
         if !(32 * 1024..=16 * 1024 * 1024)
-            .contains(&self.transport.outbound_bandwidth_bytes_per_second)
+            .contains(&self.transport.outbound_bandwidth_floor_bytes_per_second)
         {
             return Err(WorldServiceConfigError::InvalidConcurrency(
-                "outbound_bandwidth_bytes_per_second must stay in 32 KiB/s..=16 MiB/s",
+                "outbound_bandwidth_floor_bytes_per_second must stay in 32 KiB/s..=16 MiB/s",
+            ));
+        }
+        if self.transport.outbound_bandwidth_ceiling_bytes_per_second
+            < self.transport.outbound_bandwidth_floor_bytes_per_second
+            || self.transport.outbound_bandwidth_ceiling_bytes_per_second > 16 * 1024 * 1024
+        {
+            return Err(WorldServiceConfigError::InvalidConcurrency(
+                "outbound_bandwidth_ceiling_bytes_per_second must be at least the floor and at most 16 MiB/s",
             ));
         }
         if !(FRAME_HEADER_BYTES..=64 * 1024 * 1024)
@@ -421,6 +438,22 @@ impl WorldServiceConfig {
         {
             return Err(WorldServiceConfigError::InvalidConcurrency(
                 "outbound_bandwidth_burst_bytes must stay between one header and 64 MiB",
+            ));
+        }
+        if !(5..=500).contains(&self.transport.outbound_queue_delay_target_ms) {
+            return Err(WorldServiceConfigError::InvalidConcurrency(
+                "outbound_queue_delay_target_ms must stay in 5..=500",
+            ));
+        }
+        if self.transport.outbound_feedback_timeout_ms
+            < self
+                .transport
+                .outbound_queue_delay_target_ms
+                .saturating_mul(4)
+            || self.transport.outbound_feedback_timeout_ms > 60_000
+        {
+            return Err(WorldServiceConfigError::InvalidConcurrency(
+                "outbound_feedback_timeout_ms must be at least four queue-delay targets and at most 60000",
             ));
         }
         validate_terrain_generation_parameters(
@@ -941,7 +974,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 16
+schema_version = 17
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -952,8 +985,11 @@ allowed_origins = ["http://127.0.0.1:5173"]
 auth_subprotocol_token = "test-token"
 max_frame_bytes = 16777216
 max_queued_outbound_bytes_per_client = 33554432
-outbound_bandwidth_bytes_per_second = 98304
+outbound_bandwidth_floor_bytes_per_second = 98304
+outbound_bandwidth_ceiling_bytes_per_second = 4194304
 outbound_bandwidth_burst_bytes = 65536
+outbound_queue_delay_target_ms = 25
+outbound_feedback_timeout_ms = 3000
 max_in_flight_batches = 16
 max_connections = 512
 global_queue_capacity = 128
@@ -1072,12 +1108,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 16", "schema_version = 15");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 17", "schema_version = 16");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 16,
-                found: 15,
+                expected: 17,
+                found: 16,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
@@ -1095,8 +1131,11 @@ sea_level_voxels = 52
         ));
 
         for missing in [
-            "outbound_bandwidth_bytes_per_second = 98304\n",
+            "outbound_bandwidth_floor_bytes_per_second = 98304\n",
+            "outbound_bandwidth_ceiling_bytes_per_second = 4194304\n",
             "outbound_bandwidth_burst_bytes = 65536\n",
+            "outbound_queue_delay_target_ms = 25\n",
+            "outbound_feedback_timeout_ms = 3000\n",
             "max_connections = 512\n",
             "product_cache_bytes = 268435456\n",
             "broadcast_interval_ms = 33\n",

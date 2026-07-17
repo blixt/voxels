@@ -62,10 +62,15 @@ The generated versioned JSON and Markdown live under ignored `target/network-ben
 ```sh
 vp run bench:network
 vp run bench:network -- --runs=1
+vp run bench:network -- --runs=1 --profile=constrained --rtt-ms=80 \
+  --downstream-mbps=2 --upstream-mbps=1
 vp run bench:network:compare -- target/network-benchmark/before.json \
   target/network-benchmark/after.json
 ```
 
+The runner also records peak user-space queue delay after removing propagation and one pacing
+quantum's own serialization, peak queued bytes, and every time its bounded queue pauses the TCP
+source. These distinguish useful throughput from a faster sender that merely creates bufferbloat.
 The comparison command refuses different result schemas, browser snapshot schemas, fixtures,
 protocols, or link profiles. It reports signed median, max, full-coverage, viewport-byte, and
 full-coverage-byte deltas; negative is an improvement and positive is a degradation. Five samples

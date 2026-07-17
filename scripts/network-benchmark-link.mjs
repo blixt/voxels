@@ -27,7 +27,15 @@ export const VXWP_KIND_NAMES = Object.freeze({
 });
 
 function blankDirection() {
-  return { streamBytes: 0, websocketFrameBytes: 0, vxwpPayloadBytes: 0, frames: 0 };
+  return {
+    streamBytes: 0,
+    websocketFrameBytes: 0,
+    vxwpPayloadBytes: 0,
+    frames: 0,
+    peakQueuedBytes: 0,
+    peakQueueDelayMs: 0,
+    backpressurePauses: 0,
+  };
 }
 
 function blankStats() {
@@ -201,6 +209,20 @@ class ConnectionInspector {
     increment(totals, "vxwpPayloadBytes", payload.length);
     increment(pathTotals, "vxwpPayloadBytes", payload.length);
   }
+
+  observeQueue(direction, queuedBytes, queueDelayMs) {
+    const stats = this.statsRef.current;
+    for (const totals of [stats[direction], directionFor(stats, direction, this.path)]) {
+      totals.peakQueuedBytes = Math.max(totals.peakQueuedBytes, queuedBytes);
+      totals.peakQueueDelayMs = Math.max(totals.peakQueueDelayMs, queueDelayMs);
+    }
+  }
+
+  observeBackpressure(direction) {
+    const stats = this.statsRef.current;
+    increment(stats[direction], "backpressurePauses", 1);
+    increment(directionFor(stats, direction, this.path), "backpressurePauses", 1);
+  }
 }
 
 export function serializationMilliseconds(bytes, megabitsPerSecond) {
@@ -267,8 +289,19 @@ function shapeDirection(source, destination, inspector, direction, settings) {
         }),
       });
       queuedBytes += bytes.length;
+      const queueDelayMs = Math.max(
+        0,
+        queue.at(-1).deliverAtMs -
+          enqueuedMs -
+          settings.oneWayLatencyMs -
+          serializationMilliseconds(bytes.length, settings.megabitsPerSecond),
+      );
+      inspector.observeQueue(direction, queuedBytes, queueDelayMs);
     }
-    if (queuedBytes >= settings.maxQueuedBytes) source.pause();
+    if (queuedBytes >= settings.maxQueuedBytes) {
+      source.pause();
+      inspector.observeBackpressure(direction);
+    }
     void drain();
   });
   source.on("end", () => destination.end());

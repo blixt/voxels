@@ -103,8 +103,8 @@ Each stage records:
 
 - daemon and bot-driver CPU, RSS, virtual memory, and thread distributions;
 - delivered TCP stream bytes, WebSocket frame bytes, exact VXWP payloads, paths, and message kinds;
-- per-client sustained/burst payload envelopes, p95/max rates, envelope violations, and bandwidth
-  split among presence, edits, and visible world products;
+- per-client adaptive floor/ceiling and burst payload envelopes, p95/max rates, ceiling violations,
+  queue-delay targets, and bandwidth split among presence, edits, and visible world products;
 - ping, chunk, surface, and edit latency distributions;
 - connected/visible players, pose traffic, edit acceptance, mutations, copies, resyncs, and errors;
 - SQLite main/WAL/SHM bytes over time plus players, inventories, live edits, operation history,

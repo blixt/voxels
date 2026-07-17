@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 17;
+pub const PROTOCOL_VERSION: u16 = 18;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -325,12 +325,16 @@ pub struct PresenceDelta {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PresencePing {
     pub sequence: u32,
+    /// The previous pong's receiver-observed RTT, or zero before the first pong arrives.
+    pub observed_round_trip_ms: u32,
     pub client_send_time_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PresencePong {
     pub sequence: u32,
+    /// Current shared world/presence application pacing rate selected by the server.
+    pub outbound_rate_bytes_per_second: u32,
     pub client_send_time_ms: u64,
     pub server_receive_time_ms: u64,
     pub server_send_time_ms: u64,
@@ -1836,7 +1840,7 @@ pub fn encode_presence_ping(ping: PresencePing) -> Result<Vec<u8>, ProtocolError
     }
     let mut payload = Vec::with_capacity(16);
     push_u32(&mut payload, ping.sequence);
-    push_u32(&mut payload, 0);
+    push_u32(&mut payload, ping.observed_round_trip_ms);
     push_u64(&mut payload, ping.client_send_time_ms);
     Ok(encode_frame(KIND_PRESENCE_PING, 0, &payload))
 }
@@ -1847,11 +1851,7 @@ pub fn decode_presence_ping(bytes: &[u8]) -> Result<PresencePing, ProtocolError>
     expect_kind(&frame, KIND_PRESENCE_PING)?;
     let mut cursor = Cursor::new(frame.payload);
     let sequence = cursor.u32()?;
-    if cursor.u32()? != 0 {
-        return Err(ProtocolError::InvalidPayload(
-            "reserved presence ping field is nonzero",
-        ));
-    }
+    let observed_round_trip_ms = cursor.u32()?;
     let client_send_time_ms = cursor.u64()?;
     cursor.finish()?;
     if sequence == 0 || client_send_time_ms == 0 {
@@ -1859,12 +1859,14 @@ pub fn decode_presence_ping(bytes: &[u8]) -> Result<PresencePing, ProtocolError>
     }
     Ok(PresencePing {
         sequence,
+        observed_round_trip_ms,
         client_send_time_ms,
     })
 }
 
 pub fn encode_presence_pong(pong: PresencePong) -> Result<Vec<u8>, ProtocolError> {
     if pong.sequence == 0
+        || pong.outbound_rate_bytes_per_second == 0
         || pong.client_send_time_ms == 0
         || pong.server_receive_time_ms == 0
         || pong.server_send_time_ms < pong.server_receive_time_ms
@@ -1873,7 +1875,7 @@ pub fn encode_presence_pong(pong: PresencePong) -> Result<Vec<u8>, ProtocolError
     }
     let mut payload = Vec::with_capacity(32);
     push_u32(&mut payload, pong.sequence);
-    push_u32(&mut payload, 0);
+    push_u32(&mut payload, pong.outbound_rate_bytes_per_second);
     push_u64(&mut payload, pong.client_send_time_ms);
     push_u64(&mut payload, pong.server_receive_time_ms);
     push_u64(&mut payload, pong.server_send_time_ms);
@@ -1886,19 +1888,17 @@ pub fn decode_presence_pong(bytes: &[u8]) -> Result<PresencePong, ProtocolError>
     expect_kind(&frame, KIND_PRESENCE_PONG)?;
     let mut cursor = Cursor::new(frame.payload);
     let sequence = cursor.u32()?;
-    if cursor.u32()? != 0 {
-        return Err(ProtocolError::InvalidPayload(
-            "reserved presence pong field is nonzero",
-        ));
-    }
+    let outbound_rate_bytes_per_second = cursor.u32()?;
     let pong = PresencePong {
         sequence,
+        outbound_rate_bytes_per_second,
         client_send_time_ms: cursor.u64()?,
         server_receive_time_ms: cursor.u64()?,
         server_send_time_ms: cursor.u64()?,
     };
     cursor.finish()?;
     if pong.sequence == 0
+        || pong.outbound_rate_bytes_per_second == 0
         || pong.client_send_time_ms == 0
         || pong.server_receive_time_ms == 0
         || pong.server_send_time_ms < pong.server_receive_time_ms
@@ -3745,6 +3745,7 @@ mod tests {
 
         let ping = PresencePing {
             sequence: 10,
+            observed_round_trip_ms: 43,
             client_send_time_ms: 500,
         };
         assert_eq!(
@@ -3753,6 +3754,7 @@ mod tests {
         );
         let pong = PresencePong {
             sequence: ping.sequence,
+            outbound_rate_bytes_per_second: 786_432,
             client_send_time_ms: ping.client_send_time_ms,
             server_receive_time_ms: 1_000,
             server_send_time_ms: 1_001,

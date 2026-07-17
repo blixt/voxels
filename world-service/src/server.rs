@@ -22,7 +22,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use voxels_world::protocol::{
@@ -44,9 +44,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v17/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v17/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v17";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v18/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v18/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v18";
 const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
@@ -128,8 +128,11 @@ impl WorldServer {
                 config.transport.max_connections,
             ))),
             traffic: ClientTrafficRegistry::new(
-                config.transport.outbound_bandwidth_bytes_per_second,
+                config.transport.outbound_bandwidth_floor_bytes_per_second,
+                config.transport.outbound_bandwidth_ceiling_bytes_per_second,
                 config.transport.outbound_bandwidth_burst_bytes,
+                Duration::from_millis(u64::from(config.transport.outbound_queue_delay_target_ms)),
+                Duration::from_millis(u64::from(config.transport.outbound_feedback_timeout_ms)),
             ),
             world,
             environment,
@@ -1438,9 +1441,18 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
                             break;
                         }
                     };
+                    if ping.observed_round_trip_ms > 0 {
+                        traffic.observe_round_trip(Duration::from_millis(u64::from(
+                            ping.observed_round_trip_ms,
+                        )));
+                    }
                     let receive_time = state.presence.now_ms();
                     let pong = PresencePong {
                         sequence: ping.sequence,
+                        outbound_rate_bytes_per_second: u32::try_from(
+                            traffic.current_rate_bytes_per_second(),
+                        )
+                        .unwrap_or(u32::MAX),
                         client_send_time_ms: ping.client_send_time_ms,
                         server_receive_time_ms: receive_time,
                         server_send_time_ms: state.presence.now_ms().max(receive_time),
@@ -2413,8 +2425,11 @@ mod tests {
                 auth_subprotocol_token: "test-local-token".to_owned(),
                 max_frame_bytes: voxels_world::protocol::MAX_PROTOCOL_FRAME_BYTES,
                 max_queued_outbound_bytes_per_client: 32 * 1024 * 1024,
-                outbound_bandwidth_bytes_per_second: 96 * 1024,
+                outbound_bandwidth_floor_bytes_per_second: 96 * 1024,
+                outbound_bandwidth_ceiling_bytes_per_second: 4 * 1024 * 1024,
                 outbound_bandwidth_burst_bytes: 64 * 1024,
+                outbound_queue_delay_target_ms: 25,
+                outbound_feedback_timeout_ms: 3_000,
                 max_in_flight_batches: 2,
                 max_connections: 4,
                 global_queue_capacity: 8,
@@ -2591,7 +2606,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v17, test-local-token"),
+            HeaderValue::from_static("voxels.world.v18, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -3551,7 +3566,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v17, test-local-token"),
+            HeaderValue::from_static("voxels.world.v18, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -3586,7 +3601,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v17, test-local-token"),
+            HeaderValue::from_static("voxels.world.v18, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket

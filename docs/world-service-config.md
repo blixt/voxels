@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 16
+schema_version = 17
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -37,8 +37,11 @@ allowed_origins = ["http://127.0.0.1:5173", "http://localhost:5173"]
 auth_subprotocol_token = "replace-with-a-random-local-token"
 max_frame_bytes = 16777216
 max_queued_outbound_bytes_per_client = 33554432
-outbound_bandwidth_bytes_per_second = 98304
+outbound_bandwidth_floor_bytes_per_second = 98304
+outbound_bandwidth_ceiling_bytes_per_second = 4194304
 outbound_bandwidth_burst_bytes = 65536
+outbound_queue_delay_target_ms = 25
+outbound_feedback_timeout_ms = 3000
 max_in_flight_batches = 16
 max_connections = 1024
 global_queue_capacity = 16384
@@ -111,13 +114,23 @@ sea_level_voxels = 52
 # model_cache = "/an/optional/cache/root"
 ```
 
-`outbound_bandwidth_bytes_per_second` is one sustained VXWP payload limit shared by a player's
-world and presence WebSockets. `outbound_bandwidth_burst_bytes` supplies startup credit. Frames are
-never split merely to satisfy the bucket: if one encoded frame is larger than the burst it is sent
-whole, and its full byte debt delays later traffic. Control and authoritative acknowledgements
-preempt other traffic. Collision/startup data, authoritative world changes, realtime presence,
-visible terrain, and prefetch then use weighted, work-conserving service; an idle class gives its
-capacity to active classes.
+`outbound_bandwidth_floor_bytes_per_second` is the safe VXWP payload rate shared by a player's world
+and presence WebSockets. When the receiver reports end-to-end RTT and the connection has queued
+demand, the server may double that rate during initial capacity discovery up to
+`outbound_bandwidth_ceiling_bytes_per_second`. After the first congestion signal, recovery uses
+smaller 25% probes. It compares the latest RTT with the minimum observed RTT for that session;
+growth beyond `outbound_queue_delay_target_ms` halves the rate immediately.
+Missing feedback for `outbound_feedback_timeout_ms` restores the floor and clears the learned path
+baseline. This delay-based application controller does not replace TCP congestion control: it keeps
+our own offered load from maintaining a standing queue above TCP while allowing healthy links to use
+more bandwidth.
+
+`outbound_bandwidth_burst_bytes` supplies startup credit. Frames are never split merely to satisfy
+the bucket: if one encoded frame is larger than the burst it is sent whole, and its full byte debt
+delays later traffic. Control and authoritative acknowledgements preempt other traffic.
+Collision/startup data, authoritative world changes, realtime presence, visible terrain, and
+prefetch then use weighted, work-conserving service; an idle class gives its capacity to active
+classes.
 
 `max_queued_outbound_bytes_per_client` is a separate memory-safety bound on completed world
 products. It is not a rate limit.
