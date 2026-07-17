@@ -5,6 +5,7 @@ use crate::{
     WorldServiceSourceError,
     edits::{ChunkEditSnapshot, EditAuthority, LoadedPlayer, SurfaceEditSnapshot},
     presence::{PoseAdmission, PresenceHub, PresenceStreamState},
+    traffic::{ClientTrafficRegistry, ClientTrafficShaper, TrafficPriority},
 };
 use axum::Router;
 use axum::extract::State;
@@ -23,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use voxels_world::protocol::{
     ChunkBatchItem, ChunkBatchRequest, EditSessionId, EncodedChunkBatchItem,
     EncodedSurfaceTileBatchItem, PlayerIdentity, PlayerResume, PresenceOpened, PresencePong,
@@ -115,7 +116,9 @@ impl WorldServer {
             allowed_origins: config.transport.allowed_origins,
             auth_subprotocol_token: config.transport.auth_subprotocol_token,
             max_frame_bytes: config.transport.max_frame_bytes,
-            max_outbound_bytes_per_client: config.transport.max_outbound_bytes_per_client,
+            max_queued_outbound_bytes_per_client: config
+                .transport
+                .max_queued_outbound_bytes_per_client,
             max_in_flight_batches: config.transport.max_in_flight_batches,
             generation_workers_per_client: config.transport.generation_workers_per_client,
             connections: Arc::new(Semaphore::new(usize::from(
@@ -124,6 +127,10 @@ impl WorldServer {
             presence_connections: Arc::new(Semaphore::new(usize::from(
                 config.transport.max_connections,
             ))),
+            traffic: ClientTrafficRegistry::new(
+                config.transport.outbound_bandwidth_bytes_per_second,
+                config.transport.outbound_bandwidth_burst_bytes,
+            ),
             world,
             environment,
             presence,
@@ -487,11 +494,12 @@ struct ServerState {
     allowed_origins: Vec<String>,
     auth_subprotocol_token: String,
     max_frame_bytes: usize,
-    max_outbound_bytes_per_client: usize,
+    max_queued_outbound_bytes_per_client: usize,
     max_in_flight_batches: u16,
     generation_workers_per_client: u16,
     connections: Arc<Semaphore>,
     presence_connections: Arc<Semaphore>,
+    traffic: Arc<ClientTrafficRegistry>,
     world: WorldBootstrap,
     environment: EnvironmentAuthority,
     presence: Arc<PresenceHub>,
@@ -696,8 +704,15 @@ impl TrackedRequest {
 
 struct OutboundFrame {
     bytes: Vec<u8>,
+    priority: TrafficPriority,
     tracked: Option<TrackedRequest>,
     _byte_permit: Option<OwnedSemaphorePermit>,
+}
+
+struct PresenceOutboundFrame {
+    bytes: Vec<u8>,
+    priority: TrafficPriority,
+    _delta_permit: Option<OwnedSemaphorePermit>,
 }
 
 struct GenerationJob {
@@ -987,17 +1002,19 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
         }
     };
     let negotiated_window = open.max_in_flight_batches.min(state.max_in_flight_batches);
+    let traffic_registration = state.traffic.register(player_claim.connection_id);
+    let traffic = traffic_registration.shaper();
     let session = Arc::new(SessionRequests::new(
         negotiated_window,
         state.generation_workers_per_client,
-        state.max_outbound_bytes_per_client,
+        state.max_queued_outbound_bytes_per_client,
     ));
     let (sink, stream) = socket.split();
     let outbound_capacity = usize::from(state.max_in_flight_batches).saturating_add(2);
     let (outbound, outbound_rx) = mpsc::channel(outbound_capacity);
     let (inbound_tx, mut inbound) = mpsc::channel(outbound_capacity);
     let writer_session = Arc::clone(&session);
-    let writer = tokio::spawn(write_frames(sink, outbound_rx, writer_session));
+    let writer = tokio::spawn(write_frames(sink, outbound_rx, writer_session, traffic));
     let reader = tokio::spawn(read_frames(stream, inbound_tx, state.max_frame_bytes));
 
     let environment_server_time_ms = state.presence.now_ms();
@@ -1012,6 +1029,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
     if outbound
         .send(OutboundFrame {
             bytes: encode_world_opened(&opened),
+            priority: TrafficPriority::Critical,
             tracked: None,
             _byte_permit: None,
         })
@@ -1038,7 +1056,10 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     };
                     match encode_resync_required(resync) {
                         Ok(bytes) => {
-                            if send_control_frame(&outbound, bytes).await.is_err() {
+                            if send_frame(&outbound, bytes, TrafficPriority::Critical)
+                                .await
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -1048,7 +1069,10 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                 }
                 match encode_edit_commit(&commit) {
                     Ok(bytes) => {
-                        if send_control_frame(&outbound, bytes).await.is_err() {
+                        if send_frame(&outbound, bytes, TrafficPriority::Interactive)
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -1215,7 +1239,10 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                 Ok(bytes) => bytes,
                 Err(_) => break,
             };
-            if send_control_frame(&outbound, bytes).await.is_err() {
+            if send_frame(&outbound, bytes, TrafficPriority::Critical)
+                .await
+                .is_err()
+            {
                 break;
             }
         } else if kind == cancel_kind() {
@@ -1277,6 +1304,14 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
             .await;
         return;
     };
+    let Some(traffic) = state.traffic.get(attachment.connection_id) else {
+        let _ = socket
+            .send(Message::Binary(
+                encode_error(0, "world traffic session is no longer active").into(),
+            ))
+            .await;
+        return;
+    };
     let config = state.presence.config();
     let opened = PresenceOpened {
         connection_id: attachment.connection_id,
@@ -1288,7 +1323,10 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
         Ok(opened) => opened,
         Err(_) => return,
     };
-    if socket.send(Message::Binary(opened.into())).await.is_err() {
+    if send_presence_frame(&mut socket, &traffic, TrafficPriority::Critical, opened)
+        .await
+        .is_err()
+    {
         return;
     }
     let mut stream = PresenceStreamState::default();
@@ -1296,47 +1334,71 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
         Ok(Some(delta)) => delta,
         Ok(None) | Err(_) => return,
     };
-    if socket
-        .send(Message::Binary(initial_delta.into()))
-        .await
-        .is_err()
+    if send_presence_frame(
+        &mut socket,
+        &traffic,
+        TrafficPriority::Interactive,
+        initial_delta,
+    )
+    .await
+    .is_err()
     {
         return;
     }
+    let (sink, mut source) = socket.split();
+    let (outbound, outbound_rx) = mpsc::channel(8);
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let writer = tokio::spawn(write_presence_frames(
+        sink,
+        outbound_rx,
+        Arc::clone(&traffic),
+        shutdown_rx,
+    ));
+    let delta_slot = Arc::new(Semaphore::new(1));
     let mut replication_tick = tokio::time::interval(tokio::time::Duration::from_millis(
         u64::from(config.broadcast_interval_ms),
     ));
     replication_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     replication_tick.tick().await;
 
+    let mut peer_closed = false;
     loop {
         tokio::select! {
-            message = socket.recv() => {
+            message = source.next() => {
                 let bytes = match message {
                     Some(Ok(Message::Binary(bytes))) if bytes.len() <= state.max_frame_bytes => {
                         bytes.to_vec()
                     }
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                        peer_closed = true;
+                        break;
+                    }
                     Some(Ok(Message::Binary(_))) => {
-                        let _ = socket.send(Message::Binary(
-                            encode_error(0, "VXWP frame exceeds configured limit").into(),
-                        )).await;
+                        let _ = queue_presence_frame(
+                            &outbound,
+                            TrafficPriority::Critical,
+                            encode_error(0, "VXWP frame exceeds configured limit"),
+                        ).await;
                         break;
                     }
                     Some(Ok(Message::Text(_))) => {
-                        let _ = socket.send(Message::Binary(
-                            encode_error(0, "VXWP accepts binary messages only").into(),
-                        )).await;
+                        let _ = queue_presence_frame(
+                            &outbound,
+                            TrafficPriority::Critical,
+                            encode_error(0, "VXWP accepts binary messages only"),
+                        ).await;
                         break;
                     }
                 };
                 let kind = match message_kind(&bytes) {
                     Ok(kind) => kind,
                     Err(error) => {
-                        let _ = socket.send(Message::Binary(
-                            encode_error(0, &error.to_string()).into(),
-                        )).await;
+                        let _ = queue_presence_frame(
+                            &outbound,
+                            TrafficPriority::Critical,
+                            encode_error(0, &error.to_string()),
+                        ).await;
                         break;
                     }
                 };
@@ -1344,9 +1406,11 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     let pose = match decode_player_pose(&bytes) {
                         Ok(pose) => pose,
                         Err(error) => {
-                            let _ = socket.send(Message::Binary(
-                                encode_error(0, &error.to_string()).into(),
-                            )).await;
+                            let _ = queue_presence_frame(
+                                &outbound,
+                                TrafficPriority::Critical,
+                                encode_error(0, &error.to_string()),
+                            ).await;
                             break;
                         }
                     };
@@ -1356,7 +1420,11 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
                         | PoseAdmission::IgnoredRateLimit => {}
                         PoseAdmission::SessionClosed => break,
                         PoseAdmission::Invalid(message) => {
-                            let _ = socket.send(Message::Binary(encode_error(0, message).into())).await;
+                            let _ = queue_presence_frame(
+                                &outbound,
+                                TrafficPriority::Critical,
+                                encode_error(0, message),
+                            ).await;
                             break;
                         }
                     }
@@ -1364,9 +1432,11 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     let ping = match decode_presence_ping(&bytes) {
                         Ok(ping) => ping,
                         Err(error) => {
-                            let _ = socket.send(Message::Binary(
-                                encode_error(0, &error.to_string()).into(),
-                            )).await;
+                            let _ = queue_presence_frame(
+                                &outbound,
+                                TrafficPriority::Critical,
+                                encode_error(0, &error.to_string()),
+                            ).await;
                             break;
                         }
                     };
@@ -1380,34 +1450,52 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     let Ok(pong) = encode_presence_pong(pong) else {
                         break;
                     };
-                    if socket.send(Message::Binary(pong.into())).await.is_err() {
+                    if queue_presence_frame(&outbound, TrafficPriority::Critical, pong)
+                        .await
+                        .is_err() {
                         break;
                     }
                 } else if kind == open_presence_kind() {
-                    let _ = socket.send(Message::Binary(
-                        encode_error(0, "presence session is already open").into(),
-                    )).await;
+                    let _ = queue_presence_frame(
+                        &outbound,
+                        TrafficPriority::Critical,
+                        encode_error(0, "presence session is already open"),
+                    ).await;
                     break;
                 } else {
-                    let _ = socket.send(Message::Binary(
-                        encode_error(0, "unexpected presence message kind").into(),
-                    )).await;
+                    let _ = queue_presence_frame(
+                        &outbound,
+                        TrafficPriority::Critical,
+                        encode_error(0, "unexpected presence message kind"),
+                    ).await;
                     break;
                 }
             }
             _ = replication_tick.tick() => {
+                let Ok(delta_permit) = Arc::clone(&delta_slot).try_acquire_owned() else {
+                    continue;
+                };
                 match state.presence.build_delta(&attachment, &mut stream) {
                     Ok(Some(bytes)) => {
-                        if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                        if outbound.send(PresenceOutboundFrame {
+                            bytes,
+                            priority: TrafficPriority::Interactive,
+                            _delta_permit: Some(delta_permit),
+                        }).await.is_err() {
                             break;
                         }
                     }
-                    Ok(None) => {}
+                    Ok(None) => drop(delta_permit),
                     Err(_) => break,
                 }
             }
         }
     }
+    drop(outbound);
+    if peer_closed {
+        let _ = shutdown.send(true);
+    }
+    let _ = writer.await;
 }
 
 enum InboundFrame {
@@ -1457,19 +1545,22 @@ async fn send_control_error(
     outbound
         .send(OutboundFrame {
             bytes: encode_error(request_id, message),
+            priority: TrafficPriority::Critical,
             tracked: None,
             _byte_permit: None,
         })
         .await
 }
 
-async fn send_control_frame(
+async fn send_frame(
     outbound: &mpsc::Sender<OutboundFrame>,
     bytes: Vec<u8>,
+    priority: TrafficPriority,
 ) -> Result<(), mpsc::error::SendError<OutboundFrame>> {
     outbound
         .send(OutboundFrame {
             bytes,
+            priority,
             tracked: None,
             _byte_permit: None,
         })
@@ -1480,25 +1571,172 @@ async fn write_frames(
     mut sink: SplitSink<WebSocket, Message>,
     mut outbound: mpsc::Receiver<OutboundFrame>,
     session: Arc<SessionRequests>,
+    traffic: Arc<ClientTrafficShaper>,
 ) {
-    while let Some(frame) = outbound.recv().await {
+    let mut queues: [VecDeque<OutboundFrame>; TrafficPriority::COUNT] =
+        std::array::from_fn(|_| VecDeque::new());
+    let mut outbound_open = true;
+    'writer: loop {
+        while let Ok(frame) = outbound.try_recv() {
+            queues[frame.priority.index()].push_back(frame);
+        }
+        let Some(frame) = queues.iter_mut().find_map(VecDeque::pop_front) else {
+            if !outbound_open {
+                break;
+            }
+            match outbound.recv().await {
+                Some(frame) => {
+                    queues[frame.priority.index()].push_back(frame);
+                    continue;
+                }
+                None => {
+                    outbound_open = false;
+                    continue;
+                }
+            }
+        };
         let cancelled = frame
             .tracked
             .as_ref()
             .is_some_and(TrackedRequest::is_cancelled);
-        let send_result = if cancelled {
-            Ok(())
-        } else {
-            sink.send(Message::Binary(frame.bytes.into())).await
-        };
-        if let Some(tracked) = frame.tracked {
-            tracked.finish();
+        if cancelled {
+            if let Some(tracked) = frame.tracked {
+                tracked.finish();
+            }
+            continue;
         }
-        if send_result.is_err() {
-            break;
+
+        let permit = traffic.acquire(frame.priority, frame.bytes.len());
+        tokio::pin!(permit);
+        loop {
+            tokio::select! {
+                () = &mut permit => {
+                    let send_result = sink.send(Message::Binary(frame.bytes.into())).await;
+                    if let Some(tracked) = frame.tracked {
+                        tracked.finish();
+                    }
+                    if send_result.is_err() {
+                        break 'writer;
+                    }
+                    continue 'writer;
+                }
+                incoming = outbound.recv(), if outbound_open => {
+                    match incoming {
+                        Some(incoming) if incoming.priority < frame.priority => {
+                            queues[frame.priority.index()].push_front(frame);
+                            queues[incoming.priority.index()].push_front(incoming);
+                            continue 'writer;
+                        }
+                        Some(incoming) => {
+                            queues[incoming.priority.index()].push_back(incoming);
+                        }
+                        None => {
+                            outbound_open = false;
+                        }
+                    }
+                }
+            }
         }
     }
     session.cancel_all();
+}
+
+async fn send_presence_frame(
+    socket: &mut WebSocket,
+    traffic: &Arc<ClientTrafficShaper>,
+    priority: TrafficPriority,
+    bytes: Vec<u8>,
+) -> Result<(), axum::Error> {
+    traffic.acquire(priority, bytes.len()).await;
+    socket.send(Message::Binary(bytes.into())).await
+}
+
+async fn queue_presence_frame(
+    outbound: &mpsc::Sender<PresenceOutboundFrame>,
+    priority: TrafficPriority,
+    bytes: Vec<u8>,
+) -> Result<(), mpsc::error::SendError<PresenceOutboundFrame>> {
+    outbound
+        .send(PresenceOutboundFrame {
+            bytes,
+            priority,
+            _delta_permit: None,
+        })
+        .await
+}
+
+async fn write_presence_frames(
+    mut sink: SplitSink<WebSocket, Message>,
+    mut outbound: mpsc::Receiver<PresenceOutboundFrame>,
+    traffic: Arc<ClientTrafficShaper>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut queues: [VecDeque<PresenceOutboundFrame>; TrafficPriority::COUNT] =
+        std::array::from_fn(|_| VecDeque::new());
+    let mut outbound_open = true;
+    'writer: loop {
+        if *shutdown.borrow() {
+            break;
+        }
+        while let Ok(frame) = outbound.try_recv() {
+            queues[frame.priority.index()].push_back(frame);
+        }
+        let Some(frame) = queues.iter_mut().find_map(VecDeque::pop_front) else {
+            if !outbound_open {
+                break;
+            }
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_ok() && *shutdown.borrow() {
+                        break;
+                    }
+                }
+                incoming = outbound.recv() => {
+                    match incoming {
+                        Some(incoming) => {
+                            queues[incoming.priority.index()].push_back(incoming);
+                        }
+                        None => outbound_open = false,
+                    }
+                }
+            }
+            continue;
+        };
+
+        let permit = traffic.acquire(frame.priority, frame.bytes.len());
+        tokio::pin!(permit);
+        loop {
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_ok() && *shutdown.borrow() {
+                        break 'writer;
+                    }
+                }
+                () = &mut permit => {
+                    if sink.send(Message::Binary(frame.bytes.into())).await.is_err() {
+                        break 'writer;
+                    }
+                    continue 'writer;
+                }
+                incoming = outbound.recv(), if outbound_open => {
+                    match incoming {
+                        Some(incoming) if incoming.priority < frame.priority => {
+                            queues[frame.priority.index()].push_front(frame);
+                            queues[incoming.priority.index()].push_front(incoming);
+                            continue 'writer;
+                        }
+                        Some(incoming) => {
+                            queues[incoming.priority.index()].push_back(incoming);
+                        }
+                        None => outbound_open = false,
+                    }
+                }
+            }
+        }
+    }
+    let _ = sink.close().await;
 }
 
 async fn run_generation_dispatcher(
@@ -1817,6 +2055,7 @@ async fn deliver_generation_job(
     };
     let frame = OutboundFrame {
         bytes,
+        priority: traffic_priority(job.request.priority()),
         tracked: Some(job.tracked),
         _byte_permit: Some(byte_permit),
     };
@@ -1824,6 +2063,16 @@ async fn deliver_generation_job(
         && let Some(tracked) = error.0.tracked
     {
         tracked.finish();
+    }
+}
+
+fn traffic_priority(priority: WorldProductPriority) -> TrafficPriority {
+    match priority {
+        WorldProductPriority::CollisionCritical => TrafficPriority::Interactive,
+        WorldProductPriority::VisibleChunk
+        | WorldProductPriority::VisibleSurface
+        | WorldProductPriority::ReplacementSurface => TrafficPriority::VisibleWorld,
+        WorldProductPriority::Prefetch => TrafficPriority::BackgroundWorld,
     }
 }
 
@@ -2083,7 +2332,9 @@ mod tests {
                 allowed_origins: vec!["http://test.local".to_owned()],
                 auth_subprotocol_token: "test-local-token".to_owned(),
                 max_frame_bytes: voxels_world::protocol::MAX_PROTOCOL_FRAME_BYTES,
-                max_outbound_bytes_per_client: 32 * 1024 * 1024,
+                max_queued_outbound_bytes_per_client: 32 * 1024 * 1024,
+                outbound_bandwidth_bytes_per_second: 96 * 1024,
+                outbound_bandwidth_burst_bytes: 64 * 1024,
                 max_in_flight_batches: 2,
                 max_connections: 4,
                 global_queue_capacity: 8,

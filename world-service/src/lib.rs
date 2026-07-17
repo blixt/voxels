@@ -24,13 +24,14 @@ use voxels_world_terrain_diffusion::{TerrainDiffusionConfig, TerrainPrecision};
 mod edits;
 mod presence;
 pub mod server;
+mod traffic;
 
 pub use server::{
     PRESENCE_WEBSOCKET_PATH, WORLD_WEBSOCKET_PATH, WORLD_WEBSOCKET_PROTOCOL, WorldServer,
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 15;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 16;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 5;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -49,7 +50,12 @@ pub struct LoopbackTransportConfig {
     /// Offered as a second `Sec-WebSocket-Protocol` value so it is not placed in a URL or log.
     pub auth_subprotocol_token: String,
     pub max_frame_bytes: usize,
-    pub max_outbound_bytes_per_client: usize,
+    /// Maximum encoded world-product bytes retained while a client socket is backpressured.
+    pub max_queued_outbound_bytes_per_client: usize,
+    /// Sustained combined VXWP payload budget across one player's world and presence sockets.
+    pub outbound_bandwidth_bytes_per_second: usize,
+    /// Initial and maximum token-bucket credit. A single larger frame is sent whole and repaid.
+    pub outbound_bandwidth_burst_bytes: usize,
     /// Per-connection request window negotiated with each browser.
     pub max_in_flight_batches: u16,
     /// Hard process-wide connection bound. Each accepted WebSocket holds one permit.
@@ -74,7 +80,9 @@ impl Default for LoopbackTransportConfig {
             ],
             auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
             max_frame_bytes: MAX_PROTOCOL_FRAME_BYTES,
-            max_outbound_bytes_per_client: 32 * 1024 * 1024,
+            max_queued_outbound_bytes_per_client: 32 * 1024 * 1024,
+            outbound_bandwidth_bytes_per_second: 96 * 1024,
+            outbound_bandwidth_burst_bytes: 64 * 1024,
             max_in_flight_batches: 16,
             max_connections: 1_024,
             global_queue_capacity: 16_384,
@@ -394,11 +402,25 @@ impl WorldServiceConfig {
                 found: self.transport.max_frame_bytes,
             });
         }
-        if self.transport.max_outbound_bytes_per_client < self.transport.max_frame_bytes
-            || self.transport.max_outbound_bytes_per_client > 256 * 1024 * 1024
+        if self.transport.max_queued_outbound_bytes_per_client < self.transport.max_frame_bytes
+            || self.transport.max_queued_outbound_bytes_per_client > 256 * 1024 * 1024
         {
             return Err(WorldServiceConfigError::InvalidConcurrency(
-                "max_outbound_bytes_per_client must fit at least one frame and stay at most 256 MiB",
+                "max_queued_outbound_bytes_per_client must fit at least one frame and stay at most 256 MiB",
+            ));
+        }
+        if !(32 * 1024..=16 * 1024 * 1024)
+            .contains(&self.transport.outbound_bandwidth_bytes_per_second)
+        {
+            return Err(WorldServiceConfigError::InvalidConcurrency(
+                "outbound_bandwidth_bytes_per_second must stay in 32 KiB/s..=16 MiB/s",
+            ));
+        }
+        if !(FRAME_HEADER_BYTES..=64 * 1024 * 1024)
+            .contains(&self.transport.outbound_bandwidth_burst_bytes)
+        {
+            return Err(WorldServiceConfigError::InvalidConcurrency(
+                "outbound_bandwidth_burst_bytes must stay between one header and 64 MiB",
             ));
         }
         validate_terrain_generation_parameters(
@@ -919,7 +941,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 15
+schema_version = 16
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -929,7 +951,9 @@ listen = "127.0.0.1:9777"
 allowed_origins = ["http://127.0.0.1:5173"]
 auth_subprotocol_token = "test-token"
 max_frame_bytes = 16777216
-max_outbound_bytes_per_client = 33554432
+max_queued_outbound_bytes_per_client = 33554432
+outbound_bandwidth_bytes_per_second = 98304
+outbound_bandwidth_burst_bytes = 65536
 max_in_flight_batches = 16
 max_connections = 512
 global_queue_capacity = 128
@@ -1048,12 +1072,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 15", "schema_version = 14");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 16", "schema_version = 15");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 15,
-                found: 14,
+                expected: 16,
+                found: 15,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
@@ -1071,6 +1095,8 @@ sea_level_voxels = 52
         ));
 
         for missing in [
+            "outbound_bandwidth_bytes_per_second = 98304\n",
+            "outbound_bandwidth_burst_bytes = 65536\n",
             "max_connections = 512\n",
             "product_cache_bytes = 268435456\n",
             "broadcast_interval_ms = 33\n",

@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 15
+schema_version = 16
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -14,7 +14,13 @@ allowed_origins = ["http://127.0.0.1:5173", "http://localhost:5173"]
 # Replace with a random RFC WebSocket subprotocol token on each local installation.
 auth_subprotocol_token = "replace-with-a-random-local-token"
 max_frame_bytes = 16777216
-max_outbound_bytes_per_client = 33554432
+# Memory bound for completed world products waiting behind a slow client.
+max_queued_outbound_bytes_per_client = 33554432
+# One shared token bucket covers both sockets belonging to a player. Critical control traffic
+# preempts; interactive state, visible world products, and prefetch share remaining capacity with
+# decreasing weights so no active class can permanently starve another.
+outbound_bandwidth_bytes_per_second = 98304
+outbound_bandwidth_burst_bytes = 65536
 max_in_flight_batches = 16
 max_connections = 1024
 # Covers the worst-case negotiated request window for all 1024 admitted world connections.

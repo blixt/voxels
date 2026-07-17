@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 15
+schema_version = 16
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -36,10 +36,12 @@ listen = "127.0.0.1:9777"
 allowed_origins = ["http://127.0.0.1:5173", "http://localhost:5173"]
 auth_subprotocol_token = "replace-with-a-random-local-token"
 max_frame_bytes = 16777216
-max_outbound_bytes_per_client = 33554432
+max_queued_outbound_bytes_per_client = 33554432
+outbound_bandwidth_bytes_per_second = 98304
+outbound_bandwidth_burst_bytes = 65536
 max_in_flight_batches = 16
 max_connections = 1024
-global_queue_capacity = 8192
+global_queue_capacity = 16384
 product_cache_bytes = 268435456
 generation_workers = 8
 generation_workers_per_client = 2
@@ -108,6 +110,17 @@ quality_histogram = [0.0, 0.0, 0.0, 1.0, 1.5]
 sea_level_voxels = 52
 # model_cache = "/an/optional/cache/root"
 ```
+
+`outbound_bandwidth_bytes_per_second` is one sustained VXWP payload limit shared by a player's
+world and presence WebSockets. `outbound_bandwidth_burst_bytes` supplies startup credit. Frames are
+never split merely to satisfy the bucket: if one encoded frame is larger than the burst it is sent
+whole, and its full byte debt delays later traffic. Control and authoritative acknowledgements
+preempt other traffic. Interactive presence, edits and collision products, visible terrain, and
+prefetch then use weighted, work-conserving service; an idle class gives its capacity to active
+classes.
+
+`max_queued_outbound_bytes_per_client` is a separate memory-safety bound on completed world
+products. It is not a rate limit.
 
 The absolute world-day anchor is evaluated against Unix time and then transmitted with the server's
 monotonic clock, so daemon restarts and multiple clients retain one sky. Year, lunar orbit, local
