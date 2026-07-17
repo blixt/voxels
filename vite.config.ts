@@ -64,6 +64,7 @@ const NATIVE_WORLD_SERVICE_INPUT_FILES = [
   "rust-toolchain.toml",
   "world-service/Cargo.toml",
   "world-terrain-diffusion/Cargo.toml",
+  "world-terrain-diffusion/fixtures/pipeline-data.json",
   "world/Cargo.toml",
   WORLD_SERVICE_CONFIG_SOURCE,
 ].map((source) => path.resolve(source));

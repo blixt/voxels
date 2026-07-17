@@ -89,6 +89,9 @@ listen = "127.0.0.1:9777"
     expect(pathBelongsTo("/repo/world/src/lib.rs", "/repo/world/src")).toBe(true);
     expect(pathBelongsTo("/repo/world/src-old/lib.rs", "/repo/world/src")).toBe(false);
     expect(isNativeWorldServiceInput("world/src/source.rs")).toBe(true);
+    expect(isNativeWorldServiceInput("world-terrain-diffusion/fixtures/pipeline-data.json")).toBe(
+      true,
+    );
     expect(isNativeWorldServiceInput("shell/src/lib.rs")).toBe(false);
   });
 });
