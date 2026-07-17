@@ -1,7 +1,6 @@
 struct ShadowFrame {
   clip_from_world: mat4x4<f32>,
   camera_voxel: vec4<f32>,
-  lod_options: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> shadow_frame: ShadowFrame;

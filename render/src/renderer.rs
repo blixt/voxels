@@ -260,6 +260,8 @@ struct ShadowFrameUniform {
     camera_voxel: [f32; 4],
 }
 
+const _: () = assert!(size_of::<ShadowFrameUniform>() == 80);
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuQuad {
