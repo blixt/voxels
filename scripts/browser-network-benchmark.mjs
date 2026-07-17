@@ -17,7 +17,7 @@ import {
 import { rustTool } from "./build-wasm.ts";
 import { createShapedLink } from "./network-benchmark-link.mjs";
 import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "./vxwp-contract.mjs";
-import { worldServiceCargoArgs } from "./world-service-command.ts";
+import { worldServiceBuildCargoArgs, worldServiceCargoArgs } from "./world-service-command.ts";
 
 const RESULT_SCHEMA_VERSION = 3;
 const FIXTURE_VERSION = 2;
@@ -555,6 +555,11 @@ async function main() {
   try {
     const { build, preview } = await import("vite-plus");
     await build({ mode: "production" });
+    // Keep readiness about daemon startup rather than compilation. In particular, a feature-set
+    // change can otherwise outlive the readiness deadline and leave no benchmark result.
+    execFileSync(rustTool("cargo"), worldServiceBuildCargoArgs({ metal: true }), {
+      stdio: "inherit",
+    });
     worldService = spawn(
       rustTool("cargo"),
       worldServiceCargoArgs({ metal: true, configPath: serviceConfigPath }),

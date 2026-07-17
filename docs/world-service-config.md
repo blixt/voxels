@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 17
+schema_version = 18
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -42,6 +42,7 @@ outbound_bandwidth_ceiling_bytes_per_second = 4194304
 outbound_bandwidth_burst_bytes = 65536
 outbound_queue_delay_target_ms = 25
 outbound_feedback_timeout_ms = 3000
+outbound_max_frame_fragment_bytes = 32768
 max_in_flight_batches = 16
 max_connections = 1024
 global_queue_capacity = 16384
@@ -116,18 +117,25 @@ sea_level_voxels = 52
 
 `outbound_bandwidth_floor_bytes_per_second` is the safe VXWP payload rate shared by a player's world
 and presence WebSockets. When the receiver reports end-to-end RTT and the connection has queued
-demand, the server may double that rate during initial capacity discovery up to
-`outbound_bandwidth_ceiling_bytes_per_second`. After the first congestion signal, recovery uses
-smaller 25% probes. It compares the latest RTT with the minimum observed RTT for that session;
-growth beyond `outbound_queue_delay_target_ms` halves the rate immediately.
+demand, the server may raise that rate in 15% probes up to
+`outbound_bandwidth_ceiling_bytes_per_second`. It compares the latest RTT with the minimum observed
+RTT for that session; excess delay or a rising-latency trend beyond the target halves the rate.
 Missing feedback for `outbound_feedback_timeout_ms` restores the floor and clears the learned path
 baseline. This delay-based application controller does not replace TCP congestion control: it keeps
 our own offered load from maintaining a standing queue above TCP while allowing healthy links to use
 more bandwidth.
 
-`outbound_bandwidth_burst_bytes` supplies startup credit. Frames are never split merely to satisfy
-the bucket: if one encoded frame is larger than the burst it is sent whole, and its full byte debt
-delays later traffic. Control and authoritative acknowledgements preempt other traffic.
+World-product frames larger than `outbound_max_frame_fragment_bytes` are transmitted as strict VXWP
+fragments. The actual fragment size is the smaller of that cap and the bytes the current selected
+rate can send within `outbound_queue_delay_target_ms`, with an 8 KiB lower bound. Each fragment is an
+independent priority-scheduler unit; latency-sensitive control, collision, edit, and presence traffic
+can therefore preempt a large terrain response between fragments. The client accepts only bounded,
+contiguous fragments and validates the reconstructed VXWP frame and request identity before decode.
+
+`outbound_bandwidth_burst_bytes` caps startup credit. The effective credit is also bounded to one
+selected-rate queue-delay target, subject to the 8 KiB pacing minimum. A frame larger than that
+effective credit is sent whole once the credit is available, and its full byte debt delays later
+traffic. Control and authoritative acknowledgements preempt other traffic.
 Collision/startup data, authoritative world changes, realtime presence, visible terrain, and
 prefetch then use weighted, work-conserving service; an idle class gives its capacity to active
 classes.

@@ -231,7 +231,8 @@ function summarizeTrafficBudget(report, serviceConfig) {
       presenceBytes: report.reports.reduce((sum, client) => sum + messageBytes(client, 16), 0),
       editBytes: report.reports.reduce((sum, client) => sum + messageBytes(client, 12), 0),
       visibleWorldBytes: report.reports.reduce(
-        (sum, client) => sum + messageBytes(client, 4) + messageBytes(client, 8),
+        (sum, client) =>
+          sum + messageBytes(client, 4) + messageBytes(client, 8) + messageBytes(client, 18),
         0,
       ),
     },

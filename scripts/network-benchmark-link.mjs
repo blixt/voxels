@@ -24,6 +24,7 @@ export const VXWP_KIND_NAMES = Object.freeze({
   15: "edit_command",
   16: "edit_commit",
   17: "resync_required",
+  18: "frame_fragment",
 });
 
 function blankDirection() {
@@ -203,9 +204,36 @@ class ConnectionInspector {
     const kind = payload.readUInt16LE(6);
     const name = VXWP_KIND_NAMES[kind] ?? `kind_${kind}`;
     const key = `${direction}:${name}`;
-    stats.messages[key] ??= { direction, kind, name, frames: 0, payloadBytes: 0 };
+    stats.messages[key] ??= {
+      direction,
+      kind,
+      name,
+      frames: 0,
+      payloadBytes: 0,
+      maxPayloadBytes: 0,
+    };
     stats.messages[key].frames += 1;
     stats.messages[key].payloadBytes += payload.length;
+    stats.messages[key].maxPayloadBytes = Math.max(
+      stats.messages[key].maxPayloadBytes,
+      payload.length,
+    );
+    if (direction === "upstream" && kind === 13 && payload.length === 40) {
+      const roundTripMs = payload.readUInt32LE(28);
+      stats.messages[key].lastObservedRoundTripMs = roundTripMs;
+      stats.messages[key].maxObservedRoundTripMs = Math.max(
+        stats.messages[key].maxObservedRoundTripMs ?? 0,
+        roundTripMs,
+      );
+    }
+    if (direction === "downstream" && kind === 14 && payload.length === 56) {
+      const rate = payload.readUInt32LE(28);
+      stats.messages[key].lastOutboundRateBytesPerSecond = rate;
+      stats.messages[key].maxOutboundRateBytesPerSecond = Math.max(
+        stats.messages[key].maxOutboundRateBytesPerSecond ?? 0,
+        rate,
+      );
+    }
     increment(totals, "vxwpPayloadBytes", payload.length);
     increment(pathTotals, "vxwpPayloadBytes", payload.length);
   }

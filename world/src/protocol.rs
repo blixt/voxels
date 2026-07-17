@@ -13,12 +13,12 @@ use crate::{
     WorldManifest, WorldProductPriority, WorldSourceError, WorldSourceIdentity,
     WorldSourceIdentityHash, WorldSourceKind, codec,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 18;
+pub const PROTOCOL_VERSION: u16 = 19;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -28,6 +28,9 @@ pub const MAX_PLAYER_NAME_BYTES: usize = 32;
 pub const MAX_EDIT_MUTATIONS: usize = 125;
 pub const MAX_EDIT_AFFECTED_CHUNKS: usize = 8;
 pub const MAX_EDIT_AFFECTED_SURFACE_TILES: usize = 128;
+pub const FRAME_FRAGMENT_OVERHEAD_BYTES: usize = FRAME_HEADER_BYTES + 8;
+pub const MAX_FRAME_FRAGMENT_DATA_BYTES: usize =
+    MAX_PROTOCOL_FRAME_BYTES - FRAME_FRAGMENT_OVERHEAD_BYTES;
 pub const EDIT_SESSION_NOT_CURRENT: &str = "edit session is no longer current";
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
@@ -51,6 +54,7 @@ const KIND_PRESENCE_PONG: u16 = 14;
 const KIND_EDIT_COMMAND: u16 = 15;
 const KIND_EDIT_COMMIT: u16 = 16;
 const KIND_RESYNC_REQUIRED: u16 = 17;
+const KIND_FRAME_FRAGMENT: u16 = 18;
 const FLAG_NONE: u16 = 0;
 const RESERVED: u16 = 0;
 const RESULT_CODEC_BROTLI: u8 = 1;
@@ -338,6 +342,24 @@ pub struct PresencePong {
     pub client_send_time_ms: u64,
     pub server_receive_time_ms: u64,
     pub server_send_time_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrameFragment {
+    pub transfer_id: u64,
+    pub total_bytes: u32,
+    pub offset: u32,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Default)]
+pub struct FrameReassembler {
+    transfers: BTreeMap<u64, PartialFrame>,
+}
+
+struct PartialFrame {
+    total_bytes: usize,
+    bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1908,6 +1930,131 @@ pub fn decode_presence_pong(bytes: &[u8]) -> Result<PresencePong, ProtocolError>
     Ok(pong)
 }
 
+pub fn encode_frame_fragment(
+    transfer_id: u64,
+    total_bytes: usize,
+    offset: usize,
+    bytes: &[u8],
+) -> Result<Vec<u8>, ProtocolError> {
+    let total_bytes =
+        u32::try_from(total_bytes).map_err(|_| ProtocolError::LimitExceeded("fragmented frame"))?;
+    let offset =
+        u32::try_from(offset).map_err(|_| ProtocolError::LimitExceeded("fragment offset"))?;
+    validate_frame_fragment_fields(
+        transfer_id,
+        total_bytes,
+        offset,
+        bytes.len(),
+    )?;
+    let mut payload = Vec::with_capacity(8 + bytes.len());
+    push_u32(&mut payload, total_bytes);
+    push_u32(&mut payload, offset);
+    payload.extend_from_slice(bytes);
+    Ok(encode_frame(KIND_FRAME_FRAGMENT, transfer_id, &payload))
+}
+
+pub fn decode_frame_fragment(bytes: &[u8]) -> Result<FrameFragment, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_kind(&frame, KIND_FRAME_FRAGMENT)?;
+    let mut cursor = Cursor::new(frame.payload);
+    let fragment = FrameFragment {
+        transfer_id: frame.request_id,
+        total_bytes: cursor.u32()?,
+        offset: cursor.u32()?,
+        bytes: cursor.bytes(cursor.remaining())?.to_vec(),
+    };
+    cursor.finish()?;
+    validate_frame_fragment(&fragment)?;
+    Ok(fragment)
+}
+
+fn validate_frame_fragment(fragment: &FrameFragment) -> Result<(), ProtocolError> {
+    validate_frame_fragment_fields(
+        fragment.transfer_id,
+        fragment.total_bytes,
+        fragment.offset,
+        fragment.bytes.len(),
+    )
+}
+
+fn validate_frame_fragment_fields(
+    transfer_id: u64,
+    total_bytes: u32,
+    offset: u32,
+    fragment_bytes: usize,
+) -> Result<(), ProtocolError> {
+    let total_bytes = total_bytes as usize;
+    let offset = offset as usize;
+    if transfer_id == 0
+        || !(FRAME_HEADER_BYTES..=MAX_PROTOCOL_FRAME_BYTES).contains(&total_bytes)
+        || fragment_bytes == 0
+        || fragment_bytes > MAX_FRAME_FRAGMENT_DATA_BYTES
+        || offset >= total_bytes
+        || offset
+            .checked_add(fragment_bytes)
+            .is_none_or(|end| end > total_bytes)
+    {
+        return Err(ProtocolError::InvalidPayload("invalid frame fragment"));
+    }
+    Ok(())
+}
+
+impl FrameReassembler {
+    pub fn accept(&mut self, bytes: &[u8]) -> Result<Option<Vec<u8>>, ProtocolError> {
+        const MAX_ACTIVE_TRANSFERS: usize = 32;
+
+        let fragment = decode_frame_fragment(bytes)?;
+        let transfer_id = fragment.transfer_id;
+        let total_bytes = fragment.total_bytes as usize;
+        let offset = fragment.offset as usize;
+        if offset == 0 {
+            if self.transfers.contains_key(&transfer_id) {
+                return Err(ProtocolError::InvalidPayload(
+                    "duplicate frame fragment start",
+                ));
+            }
+            if self.transfers.len() >= MAX_ACTIVE_TRANSFERS {
+                return Err(ProtocolError::LimitExceeded("concurrent fragmented frames"));
+            }
+            self.transfers.insert(
+                transfer_id,
+                PartialFrame {
+                    total_bytes,
+                    bytes: Vec::with_capacity(total_bytes),
+                },
+            );
+        }
+        let Some(partial) = self.transfers.get_mut(&transfer_id) else {
+            return Err(ProtocolError::InvalidPayload("frame fragment has no start"));
+        };
+        if partial.total_bytes != total_bytes || partial.bytes.len() != offset {
+            return Err(ProtocolError::InvalidPayload(
+                "frame fragments are not contiguous",
+            ));
+        }
+        partial.bytes.extend_from_slice(&fragment.bytes);
+        if partial.bytes.len() < partial.total_bytes {
+            return Ok(None);
+        }
+        let completed = self
+            .transfers
+            .remove(&transfer_id)
+            .expect("completed fragmented frame must remain registered")
+            .bytes;
+        let frame = decode_frame(&completed)?;
+        if frame.kind == KIND_FRAME_FRAGMENT || frame.request_id != transfer_id {
+            return Err(ProtocolError::InvalidPayload(
+                "fragmented frame identity mismatch",
+            ));
+        }
+        Ok(Some(completed))
+    }
+
+    pub fn clear(&mut self) {
+        self.transfers.clear();
+    }
+}
+
 pub fn encode_error(request_id: u64, message: &str) -> Vec<u8> {
     let bytes = message.as_bytes();
     let len = bytes.len().min(u16::MAX as usize);
@@ -1931,6 +2078,10 @@ pub fn decode_error(bytes: &[u8]) -> Result<(u64, String), ProtocolError> {
 
 pub fn message_kind(bytes: &[u8]) -> Result<u16, ProtocolError> {
     Ok(decode_frame(bytes)?.kind)
+}
+
+pub fn message_request_id(bytes: &[u8]) -> Result<u64, ProtocolError> {
+    Ok(decode_frame(bytes)?.request_id)
 }
 
 pub const fn open_world_kind() -> u16 {
@@ -1999,6 +2150,10 @@ pub const fn edit_commit_kind() -> u16 {
 
 pub const fn resync_required_kind() -> u16 {
     KIND_RESYNC_REQUIRED
+}
+
+pub const fn frame_fragment_kind() -> u16 {
+    KIND_FRAME_FRAGMENT
 }
 
 fn encode_player_pose_body(output: &mut Vec<u8>, pose: PlayerPoseUpdate) {
@@ -3413,6 +3568,10 @@ impl<'a> Cursor<'a> {
         Self { bytes, position: 0 }
     }
 
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.position)
+    }
+
     fn bytes(&mut self, count: usize) -> Result<&'a [u8], ProtocolError> {
         let end = self
             .position
@@ -3784,6 +3943,27 @@ mod tests {
             decode_player_pose(&prior_version),
             Err(ProtocolError::UnsupportedVersion(6))
         );
+    }
+
+    #[test]
+    fn fragmented_frames_reassemble_strictly_across_interleaved_transfers() {
+        let first = encode_frame(KIND_ERROR, 71, &vec![0x71; 9_000]);
+        let second = encode_frame(KIND_ERROR, 72, &vec![0x72; 5_000]);
+        let first_a = encode_frame_fragment(71, first.len(), 0, &first[..3_000]).unwrap();
+        let first_b = encode_frame_fragment(71, first.len(), 3_000, &first[3_000..]).unwrap();
+        let second_a = encode_frame_fragment(72, second.len(), 0, &second[..2_000]).unwrap();
+        let second_b = encode_frame_fragment(72, second.len(), 2_000, &second[2_000..]).unwrap();
+        let mut reassembler = FrameReassembler::default();
+        assert_eq!(reassembler.accept(&first_a), Ok(None));
+        assert_eq!(reassembler.accept(&second_a), Ok(None));
+        assert_eq!(reassembler.accept(&second_b), Ok(Some(second)));
+        assert_eq!(reassembler.accept(&first_b), Ok(Some(first)));
+
+        let orphan = encode_frame_fragment(73, 100, 10, &[1; 10]).unwrap();
+        assert!(matches!(
+            FrameReassembler::default().accept(&orphan),
+            Err(ProtocolError::InvalidPayload("frame fragment has no start"))
+        ));
     }
 
     #[test]

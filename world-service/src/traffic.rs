@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use tokio::sync::Notify;
 use tokio::time::{Duration, Instant};
 
+const MIN_PACING_QUANTUM_BYTES: usize = 8 * 1024;
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum TrafficPriority {
     Critical = 0,
@@ -36,6 +38,7 @@ pub(crate) struct ClientTrafficShaper {
     burst_bytes: f64,
     queue_delay_target: Duration,
     feedback_timeout: Duration,
+    max_frame_fragment_bytes: usize,
     state: Mutex<TrafficState>,
     changed: Notify,
 }
@@ -46,6 +49,7 @@ pub(crate) struct ClientTrafficRegistry {
     burst_bytes: usize,
     queue_delay_target: Duration,
     feedback_timeout: Duration,
+    max_frame_fragment_bytes: usize,
     clients: Mutex<HashMap<u64, Weak<ClientTrafficShaper>>>,
 }
 
@@ -60,9 +64,9 @@ struct TrafficState {
     last_refill: Instant,
     current_bytes_per_second: f64,
     minimum_round_trip: Option<Duration>,
+    previous_round_trip: Option<Duration>,
     last_feedback: Option<Instant>,
     rate_limited_since_feedback: bool,
-    startup: bool,
     waiters: [usize; TrafficPriority::COUNT],
     virtual_service: [f64; TrafficPriority::COUNT],
 }
@@ -74,6 +78,7 @@ impl ClientTrafficRegistry {
         burst_bytes: usize,
         queue_delay_target: Duration,
         feedback_timeout: Duration,
+        max_frame_fragment_bytes: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             floor_bytes_per_second,
@@ -81,6 +86,7 @@ impl ClientTrafficRegistry {
             burst_bytes,
             queue_delay_target,
             feedback_timeout,
+            max_frame_fragment_bytes,
             clients: Mutex::new(HashMap::new()),
         })
     }
@@ -92,6 +98,7 @@ impl ClientTrafficRegistry {
             self.burst_bytes,
             self.queue_delay_target,
             self.feedback_timeout,
+            self.max_frame_fragment_bytes,
         );
         self.lock().insert(connection_id, Arc::downgrade(&shaper));
         ClientTrafficRegistration {
@@ -139,21 +146,28 @@ impl ClientTrafficShaper {
         burst_bytes: usize,
         queue_delay_target: Duration,
         feedback_timeout: Duration,
+        max_frame_fragment_bytes: usize,
     ) -> Arc<Self> {
+        let initial_burst_bytes = effective_burst_bytes(
+            floor_bytes_per_second as f64,
+            burst_bytes as f64,
+            queue_delay_target,
+        );
         Arc::new(Self {
             floor_bytes_per_second: floor_bytes_per_second as f64,
             ceiling_bytes_per_second: ceiling_bytes_per_second as f64,
             burst_bytes: burst_bytes as f64,
             queue_delay_target,
             feedback_timeout,
+            max_frame_fragment_bytes,
             state: Mutex::new(TrafficState {
-                tokens: burst_bytes as f64,
+                tokens: initial_burst_bytes,
                 last_refill: Instant::now(),
                 current_bytes_per_second: floor_bytes_per_second as f64,
                 minimum_round_trip: None,
+                previous_round_trip: None,
                 last_feedback: None,
                 rate_limited_since_feedback: false,
-                startup: true,
                 waiters: [0; TrafficPriority::COUNT],
                 virtual_service: [0.0; TrafficPriority::COUNT],
             }),
@@ -167,14 +181,15 @@ impl ClientTrafficShaper {
         }
         {
             let mut state = self.lock();
-            state.prepare(
+            let effective_burst_bytes = state.prepare(
                 Instant::now(),
                 self.floor_bytes_per_second,
                 self.burst_bytes,
+                self.queue_delay_target,
                 self.feedback_timeout,
             );
             if state.waiters.iter().all(|count| *count == 0)
-                && state.has_tokens(bytes, self.burst_bytes)
+                && state.has_tokens(bytes, effective_burst_bytes)
             {
                 state.consume(priority, bytes);
                 return;
@@ -197,14 +212,15 @@ impl ClientTrafficShaper {
             let notified = self.changed.notified();
             let delay = {
                 let mut state = self.lock();
-                state.prepare(
+                let effective_burst_bytes = state.prepare(
                     Instant::now(),
                     self.floor_bytes_per_second,
                     self.burst_bytes,
+                    self.queue_delay_target,
                     self.feedback_timeout,
                 );
                 state.rate_limited_since_feedback = true;
-                if state.can_send(priority, bytes, self.burst_bytes) {
+                if state.can_send(priority, bytes, effective_burst_bytes) {
                     state.consume(priority, bytes);
                     waiter.complete(&mut state);
                     if state.waiters.iter().any(|count| *count > 0) {
@@ -216,7 +232,7 @@ impl ClientTrafficShaper {
                     priority,
                     bytes,
                     state.current_bytes_per_second,
-                    self.burst_bytes,
+                    effective_burst_bytes,
                 )
             };
             tokio::select! {
@@ -229,8 +245,8 @@ impl ClientTrafficShaper {
     /// Applies receiver-observed end-to-end latency to the application pacing rate.
     ///
     /// TCP remains responsible for congestion control. This controller prevents the application
-    /// from persistently filling transport and network buffers above it: demand may double the
-    /// rate after a low-delay sample, while one sample above the standing-queue target halves it.
+    /// from persistently filling transport and network buffers above it: demand may raise the rate
+    /// after a low-delay sample, while one sample above the standing-queue target halves it.
     pub(crate) fn observe_round_trip(&self, round_trip: Duration) {
         if round_trip.is_zero() {
             return;
@@ -241,25 +257,40 @@ impl ClientTrafficShaper {
             now,
             self.floor_bytes_per_second,
             self.burst_bytes,
+            self.queue_delay_target,
             self.feedback_timeout,
         );
+        let previous_round_trip = state.previous_round_trip;
+        let had_baseline = state.minimum_round_trip.is_some();
         let minimum = state
             .minimum_round_trip
             .map_or(round_trip, |minimum| minimum.min(round_trip));
         state.minimum_round_trip = Some(minimum);
         let queue_delay = round_trip.saturating_sub(minimum);
+        let latency_is_rising = previous_round_trip.is_some_and(|previous| {
+            round_trip.saturating_sub(previous) > self.queue_delay_target / 2
+        });
         let previous_rate = state.current_bytes_per_second;
-        if queue_delay > self.queue_delay_target {
+        let currently_backlogged = state.waiters.iter().any(|count| *count > 0);
+        if queue_delay > self.queue_delay_target || latency_is_rising {
             state.current_bytes_per_second =
                 (state.current_bytes_per_second * 0.5).max(self.floor_bytes_per_second);
-            state.startup = false;
-        } else if state.rate_limited_since_feedback && queue_delay <= self.queue_delay_target / 4 {
-            let gain = if state.startup { 2.0 } else { 1.25 };
+        } else if had_baseline
+            && state.rate_limited_since_feedback
+            && currently_backlogged
+            && queue_delay <= self.queue_delay_target / 4
+        {
             state.current_bytes_per_second =
-                (state.current_bytes_per_second * gain).min(self.ceiling_bytes_per_second);
+                (state.current_bytes_per_second * 1.15).min(self.ceiling_bytes_per_second);
         }
+        state.previous_round_trip = Some(round_trip);
         state.last_feedback = Some(now);
         state.rate_limited_since_feedback = false;
+        state.tokens = state.tokens.min(effective_burst_bytes(
+            state.current_bytes_per_second,
+            self.burst_bytes,
+            self.queue_delay_target,
+        ));
         let rate_changed = previous_rate != state.current_bytes_per_second;
         drop(state);
         if rate_changed {
@@ -274,12 +305,35 @@ impl ClientTrafficShaper {
             .clamp(0.0, usize::MAX as f64) as usize
     }
 
+    pub(crate) fn frame_fragment_bytes(&self, frame_bytes: usize) -> Option<usize> {
+        if frame_bytes <= self.max_frame_fragment_bytes {
+            return None;
+        }
+        let rate = self.lock().current_bytes_per_second;
+        let delay_budget_bytes = (rate * self.queue_delay_target.as_secs_f64()).floor() as usize;
+        Some(
+            delay_budget_bytes
+                .max(MIN_PACING_QUANTUM_BYTES)
+                .min(self.max_frame_fragment_bytes),
+        )
+    }
+
     fn lock(&self) -> MutexGuard<'_, TrafficState> {
         match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
+}
+
+fn effective_burst_bytes(
+    bytes_per_second: f64,
+    configured_burst_bytes: f64,
+    queue_delay_target: Duration,
+) -> f64 {
+    configured_burst_bytes.min(
+        (bytes_per_second * queue_delay_target.as_secs_f64()).max(MIN_PACING_QUANTUM_BYTES as f64),
+    )
 }
 
 struct TrafficWaiter {
@@ -336,19 +390,26 @@ impl TrafficState {
         now: Instant,
         floor_bytes_per_second: f64,
         burst_bytes: f64,
+        queue_delay_target: Duration,
         feedback_timeout: Duration,
-    ) {
-        self.refill(now, self.current_bytes_per_second, burst_bytes);
+    ) -> f64 {
         if self
             .last_feedback
             .is_some_and(|last| now.saturating_duration_since(last) > feedback_timeout)
         {
             self.current_bytes_per_second = floor_bytes_per_second;
             self.minimum_round_trip = None;
+            self.previous_round_trip = None;
             self.last_feedback = None;
             self.rate_limited_since_feedback = false;
-            self.startup = true;
         }
+        let effective_burst_bytes = effective_burst_bytes(
+            self.current_bytes_per_second,
+            burst_bytes,
+            queue_delay_target,
+        );
+        self.refill(now, self.current_bytes_per_second, effective_burst_bytes);
+        effective_burst_bytes
     }
 
     fn refill(&mut self, now: Instant, bytes_per_second: f64, burst_bytes: f64) {
@@ -435,9 +496,9 @@ mod tests {
             last_refill: now,
             current_bytes_per_second: 100.0,
             minimum_round_trip: None,
+            previous_round_trip: None,
             last_feedback: None,
             rate_limited_since_feedback: false,
-            startup: true,
             waiters: [1, 0, 0, 0, 0, 0],
             virtual_service: [0.0; TrafficPriority::COUNT],
         };
@@ -456,9 +517,9 @@ mod tests {
             last_refill: now,
             current_bytes_per_second: 100.0,
             minimum_round_trip: None,
+            previous_round_trip: None,
             last_feedback: None,
             rate_limited_since_feedback: false,
-            startup: true,
             waiters: [1, 0, 0, 0, 0, 1],
             virtual_service: [0.0; TrafficPriority::COUNT],
         };
@@ -474,9 +535,9 @@ mod tests {
             last_refill: now,
             current_bytes_per_second: 10_000.0,
             minimum_round_trip: None,
+            previous_round_trip: None,
             last_feedback: None,
             rate_limited_since_feedback: false,
-            startup: true,
             waiters: [0, 1, 1, 1, 1, 1],
             virtual_service: [0.0; TrafficPriority::COUNT],
         };
@@ -519,9 +580,9 @@ mod tests {
             last_refill: now,
             current_bytes_per_second: 100.0,
             minimum_round_trip: None,
+            previous_round_trip: None,
             last_feedback: None,
             rate_limited_since_feedback: false,
-            startup: true,
             waiters: [0; TrafficPriority::COUNT],
             virtual_service: [0.0; TrafficPriority::COUNT],
         };
@@ -537,12 +598,17 @@ mod tests {
             100,
             Duration::from_millis(20),
             Duration::from_secs(3),
+            32 * 1024,
         );
         shaper.observe_round_trip(Duration::from_millis(40));
         assert_eq!(shaper.current_rate_bytes_per_second(), 100);
-        shaper.lock().rate_limited_since_feedback = true;
+        {
+            let mut state = shaper.lock();
+            state.rate_limited_since_feedback = true;
+            state.waiters[TrafficPriority::BackgroundWorld.index()] = 1;
+        }
         shaper.observe_round_trip(Duration::from_millis(42));
-        assert_eq!(shaper.current_rate_bytes_per_second(), 200);
+        assert_eq!(shaper.current_rate_bytes_per_second(), 115);
     }
 
     #[test]
@@ -553,6 +619,7 @@ mod tests {
             100,
             Duration::from_millis(20),
             Duration::from_secs(3),
+            32 * 1024,
         );
         shaper.observe_round_trip(Duration::from_millis(40));
         {
@@ -572,6 +639,7 @@ mod tests {
             100,
             Duration::from_millis(20),
             Duration::from_secs(3),
+            32 * 1024,
         );
         {
             let mut state = shaper.lock();
@@ -582,11 +650,63 @@ mod tests {
                 Instant::now(),
                 shaper.floor_bytes_per_second,
                 shaper.burst_bytes,
+                shaper.queue_delay_target,
                 shaper.feedback_timeout,
             );
         }
         let state = shaper.lock();
         assert_eq!(state.current_bytes_per_second, 100.0);
         assert_eq!(state.minimum_round_trip, None);
+        assert_eq!(state.previous_round_trip, None);
+    }
+
+    #[test]
+    fn rising_latency_cuts_rate_even_when_the_first_baseline_was_queued() {
+        let shaper = ClientTrafficShaper::new(
+            100,
+            800,
+            100,
+            Duration::from_millis(20),
+            Duration::from_secs(3),
+            32 * 1024,
+        );
+        shaper.observe_round_trip(Duration::from_millis(100));
+        {
+            let mut state = shaper.lock();
+            state.current_bytes_per_second = 400.0;
+            state.rate_limited_since_feedback = true;
+            state.waiters[TrafficPriority::BackgroundWorld.index()] = 1;
+        }
+        shaper.observe_round_trip(Duration::from_millis(116));
+        assert_eq!(shaper.current_rate_bytes_per_second(), 200);
+    }
+
+    #[test]
+    fn pacing_burst_never_exceeds_one_queue_delay_target() {
+        let shaper = ClientTrafficShaper::new(
+            10_000,
+            80_000,
+            100_000,
+            Duration::from_millis(200),
+            Duration::from_secs(3),
+            32 * 1024,
+        );
+        assert_eq!(shaper.lock().tokens, 8_192.0);
+        {
+            let mut state = shaper.lock();
+            state.current_bytes_per_second = 80_000.0;
+            state.tokens = 100_000.0;
+            state.rate_limited_since_feedback = true;
+        }
+        shaper.observe_round_trip(Duration::from_millis(40));
+        assert_eq!(shaper.lock().tokens, 16_000.0);
+        {
+            let mut state = shaper.lock();
+            state.minimum_round_trip = Some(Duration::from_millis(40));
+            state.tokens = 100_000.0;
+        }
+        shaper.observe_round_trip(Duration::from_millis(260));
+        assert_eq!(shaper.current_rate_bytes_per_second(), 40_000);
+        assert_eq!(shaper.lock().tokens, 8_192.0);
     }
 }

@@ -31,7 +31,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 17;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 18;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 5;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -62,6 +62,8 @@ pub struct LoopbackTransportConfig {
     pub outbound_queue_delay_target_ms: u16,
     /// Return to the safe floor when receiver latency feedback is absent for this long.
     pub outbound_feedback_timeout_ms: u16,
+    /// Frames above this size are split into pacing-aware VXWP fragments.
+    pub outbound_max_frame_fragment_bytes: usize,
     /// Per-connection request window negotiated with each browser.
     pub max_in_flight_batches: u16,
     /// Hard process-wide connection bound. Each accepted WebSocket holds one permit.
@@ -92,6 +94,7 @@ impl Default for LoopbackTransportConfig {
             outbound_bandwidth_burst_bytes: 64 * 1024,
             outbound_queue_delay_target_ms: 25,
             outbound_feedback_timeout_ms: 3_000,
+            outbound_max_frame_fragment_bytes: 32 * 1024,
             max_in_flight_batches: 16,
             max_connections: 1_024,
             global_queue_capacity: 16_384,
@@ -454,6 +457,13 @@ impl WorldServiceConfig {
         {
             return Err(WorldServiceConfigError::InvalidConcurrency(
                 "outbound_feedback_timeout_ms must be at least four queue-delay targets and at most 60000",
+            ));
+        }
+        if !(8 * 1024..=voxels_world::protocol::MAX_FRAME_FRAGMENT_DATA_BYTES)
+            .contains(&self.transport.outbound_max_frame_fragment_bytes)
+        {
+            return Err(WorldServiceConfigError::InvalidConcurrency(
+                "outbound_max_frame_fragment_bytes must stay in 8 KiB..=the VXWP fragment limit",
             ));
         }
         validate_terrain_generation_parameters(
@@ -974,7 +984,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 17
+schema_version = 18
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -990,6 +1000,7 @@ outbound_bandwidth_ceiling_bytes_per_second = 4194304
 outbound_bandwidth_burst_bytes = 65536
 outbound_queue_delay_target_ms = 25
 outbound_feedback_timeout_ms = 3000
+outbound_max_frame_fragment_bytes = 32768
 max_in_flight_batches = 16
 max_connections = 512
 global_queue_capacity = 128
@@ -1108,12 +1119,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 17", "schema_version = 16");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 18", "schema_version = 17");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 17,
-                found: 16,
+                expected: 18,
+                found: 17,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
@@ -1136,6 +1147,7 @@ sea_level_voxels = 52
             "outbound_bandwidth_burst_bytes = 65536\n",
             "outbound_queue_delay_target_ms = 25\n",
             "outbound_feedback_timeout_ms = 3000\n",
+            "outbound_max_frame_fragment_bytes = 32768\n",
             "max_connections = 512\n",
             "product_cache_bytes = 268435456\n",
             "broadcast_interval_ms = 33\n",

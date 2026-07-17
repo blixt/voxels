@@ -1443,7 +1443,8 @@ mod web {
             }
 
             const INTERACTIVE_SURFACE_BATCH: usize = 4;
-            const BACKGROUND_SURFACE_BATCH: usize = 16;
+            const BACKGROUND_SURFACE_BATCH: usize = 2;
+            const BACKGROUND_SURFACE_BATCHES_IN_FLIGHT: usize = 4;
             let mut tickets = Vec::with_capacity(BACKGROUND_SURFACE_BATCH);
             let mut priority = WorldProductPriority::VisibleSurface;
             loop {
@@ -1466,10 +1467,15 @@ mod web {
                 }
                 let background = usize::from(coord.level.index()) >= INTERACTIVE_SURFACE_LOD_LEVELS;
                 if background {
-                    let background_in_flight =
-                        self.surface_in_flight.borrow().iter().any(|coord| {
+                    let background_at_capacity = self
+                        .surface_in_flight
+                        .borrow()
+                        .iter()
+                        .filter(|coord| {
                             usize::from(coord.level.index()) >= INTERACTIVE_SURFACE_LOD_LEVELS
-                        });
+                        })
+                        .count()
+                        >= BACKGROUND_SURFACE_BATCH * BACKGROUND_SURFACE_BATCHES_IN_FLIGHT;
                     let diagnostics = self.scheduler.borrow().diagnostics();
                     let fine_current = diagnostics.generation.queued == 0
                         && diagnostics.generation.in_flight == 0
@@ -1486,7 +1492,7 @@ mod web {
                             usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
                         });
                     if (!tickets.is_empty() && priority != WorldProductPriority::Prefetch)
-                        || background_in_flight
+                        || background_at_capacity
                         || !fine_current
                         || !interactive_current
                     {

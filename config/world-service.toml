@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 17
+schema_version = 18
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -24,6 +24,7 @@ outbound_bandwidth_ceiling_bytes_per_second = 4194304
 outbound_bandwidth_burst_bytes = 65536
 outbound_queue_delay_target_ms = 25
 outbound_feedback_timeout_ms = 3000
+outbound_max_frame_fragment_bytes = 32768
 max_in_flight_batches = 16
 max_connections = 1024
 # Covers the worst-case negotiated request window for all 1024 admitted world connections.

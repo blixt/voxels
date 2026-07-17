@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use voxels_core::{CameraState, InputState};
 use voxels_world::protocol::{
-    BrowserUserId, ChunkBatchRequest, EditAction, EditCommand, MaterialInventory,
+    BrowserUserId, ChunkBatchRequest, EditAction, EditCommand, FrameReassembler, MaterialInventory,
     PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING, PlayerId, PlayerIdentity, PlayerPoseUpdate,
     PresencePing, SurfaceTileBatchRequest, chunk_batch_result_kind, decode_chunk_batch_result,
     decode_edit_commit, decode_error, decode_presence_delta, decode_presence_pong,
@@ -243,6 +243,7 @@ struct BotRuntime {
     inventory: MaterialInventory,
     traffic: TrafficCounters,
     cache: ChunkCache,
+    frame_reassembler: FrameReassembler,
     requested_chunks: HashSet<ChunkCoord>,
     requested_surfaces: HashSet<SurfaceTileCoord>,
     pending_chunks: HashMap<u64, Instant>,
@@ -396,6 +397,7 @@ impl BotRuntime {
             inventory: connection.opened.inventory,
             traffic: connection.traffic,
             cache: ChunkCache::new(CHUNK_CACHE_CAPACITY),
+            frame_reassembler: FrameReassembler::default(),
             requested_chunks: HashSet::new(),
             requested_surfaces: HashSet::new(),
             pending_chunks: HashMap::new(),
@@ -637,6 +639,17 @@ impl BotRuntime {
 
     async fn handle_world_binary(&mut self, bytes: &[u8]) -> Result<()> {
         self.traffic.received(bytes)?;
+        let kind = message_kind(bytes)?;
+        if kind == voxels_world::protocol::frame_fragment_kind() {
+            if let Some(completed) = self.frame_reassembler.accept(bytes)? {
+                self.handle_world_payload(&completed).await?;
+            }
+            return Ok(());
+        }
+        self.handle_world_payload(bytes).await
+    }
+
+    async fn handle_world_payload(&mut self, bytes: &[u8]) -> Result<()> {
         let kind = message_kind(bytes)?;
         if kind == chunk_batch_result_kind() {
             let result = decode_chunk_batch_result(bytes)?;

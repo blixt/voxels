@@ -27,16 +27,17 @@ use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use voxels_world::protocol::{
     ChunkBatchItem, ChunkBatchRequest, EditSessionId, EncodedChunkBatchItem,
-    EncodedSurfaceTileBatchItem, PlayerIdentity, PlayerResume, PresenceOpened, PresencePong,
-    ResyncRequired, SpawnPoint, SurfaceTileBatchItem, SurfaceTileBatchRequest, WorldCapabilities,
-    WorldEnvironmentSnapshot, WorldOpened, cancel_kind, chunk_batch_kind, decode_cancel,
-    decode_chunk_batch, decode_edit_command, decode_open_presence, decode_open_world,
-    decode_player_pose, decode_presence_ping, decode_surface_tile_batch, edit_command_kind,
-    encode_chunk_batch_item, encode_chunk_batch_result_from_items, encode_edit_commit,
-    encode_error, encode_presence_opened, encode_presence_pong, encode_resync_required,
-    encode_surface_tile_batch_item, encode_surface_tile_batch_result_from_items,
-    encode_world_opened, message_kind, open_presence_kind, open_world_kind, player_pose_kind,
-    presence_ping_kind, surface_tile_batch_kind,
+    EncodedSurfaceTileBatchItem, FRAME_FRAGMENT_OVERHEAD_BYTES, PlayerIdentity, PlayerResume,
+    PresenceOpened, PresencePong, ResyncRequired, SpawnPoint, SurfaceTileBatchItem,
+    SurfaceTileBatchRequest, WorldCapabilities, WorldEnvironmentSnapshot, WorldOpened, cancel_kind,
+    chunk_batch_kind, decode_cancel, decode_chunk_batch, decode_edit_command, decode_open_presence,
+    decode_open_world, decode_player_pose, decode_presence_ping, decode_surface_tile_batch,
+    edit_command_kind, encode_chunk_batch_item, encode_chunk_batch_result_from_items,
+    encode_edit_commit, encode_error, encode_frame_fragment, encode_presence_opened,
+    encode_presence_pong, encode_resync_required, encode_surface_tile_batch_item,
+    encode_surface_tile_batch_result_from_items, encode_world_opened, message_kind,
+    message_request_id, open_presence_kind, open_world_kind, player_pose_kind, presence_ping_kind,
+    surface_tile_batch_kind,
 };
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest, WORLD_SCHEMA_VERSION,
@@ -44,9 +45,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v18/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v18/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v18";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v19/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v19/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v19";
 const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
@@ -133,6 +134,7 @@ impl WorldServer {
                 config.transport.outbound_bandwidth_burst_bytes,
                 Duration::from_millis(u64::from(config.transport.outbound_queue_delay_target_ms)),
                 Duration::from_millis(u64::from(config.transport.outbound_feedback_timeout_ms)),
+                config.transport.outbound_max_frame_fragment_bytes,
             ),
             world,
             environment,
@@ -707,9 +709,52 @@ impl TrackedRequest {
 
 struct OutboundFrame {
     bytes: Vec<u8>,
+    offset: usize,
     priority: TrafficPriority,
     tracked: Option<TrackedRequest>,
     _byte_permit: Option<OwnedSemaphorePermit>,
+}
+
+impl OutboundFrame {
+    fn fragment_bytes(&self, traffic: &ClientTrafficShaper) -> Option<usize> {
+        let fragmentable = self.offset > 0
+            || message_request_id(&self.bytes).is_ok_and(|request_id| request_id != 0);
+        fragmentable
+            .then(|| traffic.frame_fragment_bytes(self.bytes.len()))
+            .flatten()
+    }
+
+    fn next_wire_bytes(&self, fragment_bytes: Option<usize>) -> usize {
+        fragment_bytes.map_or(self.bytes.len(), |fragment_bytes| {
+            self.bytes
+                .len()
+                .saturating_sub(self.offset)
+                .min(fragment_bytes)
+                + FRAME_FRAGMENT_OVERHEAD_BYTES
+        })
+    }
+
+    fn take_next_wire(
+        &mut self,
+        fragment_bytes: Option<usize>,
+    ) -> Result<(Vec<u8>, bool), voxels_world::protocol::ProtocolError> {
+        let Some(fragment_bytes) = fragment_bytes else {
+            return Ok((std::mem::take(&mut self.bytes), true));
+        };
+        let transfer_id = message_request_id(&self.bytes)?;
+        let end = self
+            .offset
+            .saturating_add(fragment_bytes)
+            .min(self.bytes.len());
+        let wire = encode_frame_fragment(
+            transfer_id,
+            self.bytes.len(),
+            self.offset,
+            &self.bytes[self.offset..end],
+        )?;
+        self.offset = end;
+        Ok((wire, self.offset == self.bytes.len()))
+    }
 }
 
 struct PresenceOutboundFrame {
@@ -1032,6 +1077,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
     if outbound
         .send(OutboundFrame {
             bytes: encode_world_opened(&opened),
+            offset: 0,
             priority: TrafficPriority::Critical,
             tracked: None,
             _byte_permit: None,
@@ -1564,6 +1610,7 @@ async fn send_control_error(
     outbound
         .send(OutboundFrame {
             bytes: encode_error(request_id, message),
+            offset: 0,
             priority: TrafficPriority::Critical,
             tracked: None,
             _byte_permit: None,
@@ -1579,6 +1626,7 @@ async fn send_frame(
     outbound
         .send(OutboundFrame {
             bytes,
+            offset: 0,
             priority,
             tracked: None,
             _byte_permit: None,
@@ -1630,18 +1678,21 @@ async fn write_frames(
         let contended = queues.iter().filter(|queue| !queue.is_empty()).count() > 1;
         for priority in TrafficPriority::ALL {
             if let Some(frame) = queues[priority.index()].front() {
-                permits.push(acquire_traffic(
+                let fragment_bytes = frame.fragment_bytes(&traffic);
+                permits.push(acquire_world_traffic(
                     Arc::clone(&traffic),
                     priority,
-                    frame.bytes.len(),
+                    frame.next_wire_bytes(fragment_bytes),
+                    fragment_bytes,
                     contended,
                 ));
             }
         }
         loop {
             tokio::select! {
-                Some(priority) = permits.next() => {
-                    let frame = queues[priority.index()]
+                Some(permit) = permits.next() => {
+                    let priority = permit.priority;
+                    let mut frame = queues[priority.index()]
                         .pop_front()
                         .expect("traffic permit must correspond to one queued frame");
                     drop(permits);
@@ -1655,12 +1706,27 @@ async fn write_frames(
                         }
                         continue 'writer;
                     }
-                    let send_result = sink.send(Message::Binary(frame.bytes.into())).await;
-                    if let Some(tracked) = frame.tracked {
-                        tracked.finish();
-                    }
-                    if send_result.is_err() {
+                    let (wire, complete) = match frame.take_next_wire(permit.fragment_bytes) {
+                        Ok(next) => next,
+                        Err(_) => {
+                            if let Some(tracked) = frame.tracked {
+                                tracked.finish();
+                            }
+                            break 'writer;
+                        }
+                    };
+                    if sink.send(Message::Binary(wire.into())).await.is_err() {
+                        if let Some(tracked) = frame.tracked {
+                            tracked.finish();
+                        }
                         break 'writer;
+                    }
+                    if complete {
+                        if let Some(tracked) = frame.tracked {
+                            tracked.finish();
+                        }
+                    } else {
+                        queues[priority.index()].push_front(frame);
                     }
                     continue 'writer;
                 }
@@ -1672,14 +1738,15 @@ async fn write_frames(
                             let was_empty = queue.is_empty();
                             queue.push_back(incoming);
                             if was_empty {
-                                let bytes = queue
+                                let frame = queue
                                     .front()
-                                    .map(|frame| frame.bytes.len())
-                                    .unwrap_or_default();
-                                permits.push(acquire_traffic(
+                                    .expect("newly nonempty traffic queue must have a frame");
+                                let fragment_bytes = frame.fragment_bytes(&traffic);
+                                permits.push(acquire_world_traffic(
                                     Arc::clone(&traffic),
                                     priority,
-                                    bytes,
+                                    frame.next_wire_bytes(fragment_bytes),
+                                    fragment_bytes,
                                     true,
                                 ));
                             }
@@ -1693,6 +1760,29 @@ async fn write_frames(
         }
     }
     session.cancel_all();
+}
+
+struct WorldTrafficPermit {
+    priority: TrafficPriority,
+    fragment_bytes: Option<usize>,
+}
+
+async fn acquire_world_traffic(
+    traffic: Arc<ClientTrafficShaper>,
+    priority: TrafficPriority,
+    bytes: usize,
+    fragment_bytes: Option<usize>,
+    contended: bool,
+) -> WorldTrafficPermit {
+    if contended {
+        traffic.acquire_contended(priority, bytes).await;
+    } else {
+        traffic.acquire(priority, bytes).await;
+    }
+    WorldTrafficPermit {
+        priority,
+        fragment_bytes,
+    }
 }
 
 async fn acquire_traffic(
@@ -2147,6 +2237,7 @@ async fn deliver_generation_job(
     };
     let frame = OutboundFrame {
         bytes,
+        offset: 0,
         priority: traffic_priority(job.request.priority()),
         tracked: Some(job.tracked),
         _byte_permit: Some(byte_permit),
@@ -2430,6 +2521,8 @@ mod tests {
                 outbound_bandwidth_burst_bytes: 64 * 1024,
                 outbound_queue_delay_target_ms: 25,
                 outbound_feedback_timeout_ms: 3_000,
+                outbound_max_frame_fragment_bytes:
+                    voxels_world::protocol::MAX_FRAME_FRAGMENT_DATA_BYTES,
                 max_in_flight_batches: 2,
                 max_connections: 4,
                 global_queue_capacity: 8,
@@ -2606,7 +2699,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v18, test-local-token"),
+            HeaderValue::from_static("voxels.world.v19, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -3566,7 +3659,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v18, test-local-token"),
+            HeaderValue::from_static("voxels.world.v19, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -3601,7 +3694,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v18, test-local-token"),
+            HeaderValue::from_static("voxels.world.v19, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket

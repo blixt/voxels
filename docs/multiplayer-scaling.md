@@ -1,6 +1,6 @@
 # Multiplayer scaling envelope
 
-VXWP v18 supports one unsharded authoritative world with up to 1,024 admitted player sessions. Spatial
+VXWP v19 supports one unsharded authoritative world with up to 1,024 admitted player sessions. Spatial
 interest management is an internal replication index, not a gameplay shard: every player inside the
 same location's 256 m interest radius can discover every other player there. Players beyond that
 radius contribute no entity records or bytes to one another's presence streams.
@@ -63,6 +63,8 @@ streaming, digging, building, following, process sampling, exact per-client wire
 growth, and an optional Chromium observer at up to 1,000 clients. See the
 [2026-07-17 bot load baseline](20260717-bot-load-report.md) and the
 [1,000-player traffic-shaping report](20260717-1000-player-traffic-report.md) for measured results.
+The [adaptive backpressure report](20260717-adaptive-backpressure-report.md) records the shaped-link
+controller tradeoffs and exact browser artifacts.
 
 Run the focused optimized probe with:
 
@@ -92,7 +94,7 @@ and six independent ephemeral BrowserContexts. Each context has separate local s
 receives an independently shaped 40 ms RTT, 50/10 Mbit/s link, and must negotiate a distinct browser
 user and player identity. Five builders and one observer start together. The observer then travels at
 least 120 m from the builders, beyond the configured 96 m mid-presence tier, and all six clients must
-still render the other five articulated avatars. Per-player `/v18/world` and `/v18/presence` stream and
+still render the other five articulated avatars. Per-player `/v19/world` and `/v19/presence` stream and
 VXWP byte counts are written to `target/multiplayer-browser/latest.json`; the far observer screenshot
 is `target/multiplayer-browser/observer-far-five.png`.
 
@@ -137,7 +139,9 @@ The world request queue holds 8,192 jobs, exactly one negotiated 16-request wind
 connection. Each session can occupy at most two of the eight blocking generation workers. The world
 and presence sockets share one priority scheduler and one adaptive byte budget. Receiver-reported
 RTT unlocks bandwidth above the configured safe floor only while queued demand exists; excess RTT
-cuts the rate quickly and missing feedback returns it to the floor. Presence has no per-socket
+cuts the rate quickly and missing feedback returns it to the floor. Rate-aware VXWP fragmentation
+turns large world products into bounded scheduling units so critical traffic can preempt bulk
+terrain before a whole WebSocket message enters transport buffers. Presence has no per-socket
 outbound queue: a socket builds the newest delta at its next tick and awaits that single send, so a
 slow client cannot accumulate stale movement frames.
 

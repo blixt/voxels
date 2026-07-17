@@ -14,9 +14,9 @@ use std::task::{Context, Poll, Waker};
 use voxels_client_config::WorldTransportConfig;
 use voxels_runtime::{WorkStage, WorkTicket};
 use voxels_world::protocol::{
-    self, ChunkBatchRequest, ChunkBatchResult, EditAction, EditCommand, EditCommit, OpenWorld,
-    PlayerIdentity, SurfaceTileBatchRequest, SurfaceTileBatchResult, WorldCapabilities,
-    WorldOpened,
+    self, ChunkBatchRequest, ChunkBatchResult, EditAction, EditCommand, EditCommit,
+    FrameReassembler, OpenWorld, PlayerIdentity, SurfaceTileBatchRequest, SurfaceTileBatchResult,
+    WorldCapabilities, WorldOpened,
 };
 use voxels_world::{
     ChunkCoord, ChunkSnapshot, SurfaceTileCoord, WorldManifestHash, WorldProductPriority,
@@ -294,6 +294,7 @@ struct RemoteInner {
     surface_completions: RefCell<VecDeque<RemoteSurfaceCompletion>>,
     pending_edits: RefCell<BTreeMap<u64, EditCommand>>,
     edit_events: RefCell<VecDeque<RemoteEditEvent>>,
+    frame_reassembler: RefCell<FrameReassembler>,
     send_paused: Cell<bool>,
     reconnect_attempts: Cell<u32>,
     terminal_error: RefCell<Option<RemoteWorldError>>,
@@ -339,6 +340,7 @@ impl RemoteInner {
             surface_completions: RefCell::new(VecDeque::new()),
             pending_edits: RefCell::new(BTreeMap::new()),
             edit_events: RefCell::new(VecDeque::new()),
+            frame_reassembler: RefCell::new(FrameReassembler::default()),
             send_paused: Cell::new(false),
             reconnect_attempts: Cell::new(0),
             terminal_error: RefCell::new(None),
@@ -495,7 +497,16 @@ impl RemoteInner {
                 return;
             }
         };
-        if kind == protocol::world_opened_kind() {
+        if kind == protocol::frame_fragment_kind() {
+            let completed = self.frame_reassembler.borrow_mut().accept(&bytes);
+            match completed {
+                Ok(Some(completed)) => self.handle_message(generation, completed),
+                Ok(None) => {}
+                Err(error) => {
+                    self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()))
+                }
+            }
+        } else if kind == protocol::world_opened_kind() {
             self.handle_world_opened(generation, &bytes);
         } else if kind == protocol::chunk_batch_result_kind() {
             self.handle_chunk_result(generation, &bytes);
@@ -1175,6 +1186,7 @@ impl RemoteInner {
             let _ = socket.close_with_code_and_reason(code, reason);
         }
         self.handlers.borrow_mut().take();
+        self.frame_reassembler.borrow_mut().clear();
     }
 
     fn close(&self) {
