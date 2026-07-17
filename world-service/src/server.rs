@@ -1205,9 +1205,9 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
             };
             let mut recipients = BTreeSet::new();
             if applied.changed {
-                for mutation in &applied.commit.mutations {
-                    recipients.extend(state.presence.connections_near_voxel(mutation.coord));
-                }
+                recipients = state.presence.connections_near_voxels(
+                    applied.commit.mutations.iter().map(|item| item.coord),
+                );
             }
             recipients.remove(&player_claim.connection_id);
             state.edits.publish(&applied.commit, &recipients);

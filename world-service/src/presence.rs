@@ -52,7 +52,7 @@ struct PlayerSession {
     cell: Option<SpatialCell>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct SpatialCell {
     x: i32,
     z: i32,
@@ -215,47 +215,64 @@ impl PresenceHub {
         })
     }
 
-    /// Returns only connections whose current horizontal interest area covers an edited voxel.
-    /// The existing spatial grid keeps one edit proportional to local players, not world population.
-    pub(crate) fn connections_near_voxel(&self, coord: VoxelCoord) -> BTreeSet<u64> {
-        let x = coord.x as f32 * VOXEL_SIZE_METRES;
-        let z = coord.z as f32 * VOXEL_SIZE_METRES;
+    /// Returns the union of connections whose current horizontal interest area covers any edited
+    /// voxel. A half-metre dig supplies 125 mutations but only 25 distinct X/Z centers; collect
+    /// their spatial cells first so the global presence registry is locked and scanned once.
+    pub(crate) fn connections_near_voxels(
+        &self,
+        coords: impl IntoIterator<Item = VoxelCoord>,
+    ) -> BTreeSet<u64> {
+        let xz_voxels = coords
+            .into_iter()
+            .map(|coord| (coord.x, coord.z))
+            .collect::<BTreeSet<_>>();
+        if xz_voxels.is_empty() {
+            return BTreeSet::new();
+        }
         let radius = f32::from(self.config.interest_radius_metres);
         let size = f32::from(self.config.spatial_cell_metres);
-        let center = SpatialCell {
-            x: (x / size).floor() as i32,
-            z: (z / size).floor() as i32,
-        };
         let cell_radius = (i32::from(self.config.interest_radius_metres)
             + i32::from(self.config.spatial_cell_metres)
             - 1)
             / i32::from(self.config.spatial_cell_metres);
-        let mut connections = BTreeSet::new();
-        let inner = self.lock();
-        for cell_x in (center.x - cell_radius)..=(center.x + cell_radius) {
-            for cell_z in (center.z - cell_radius)..=(center.z + cell_radius) {
-                let Some(players) = inner.cells.get(&SpatialCell {
-                    x: cell_x,
-                    z: cell_z,
-                }) else {
-                    continue;
-                };
-                for player_id in players {
-                    let Some(player) = inner.players.get(player_id) else {
-                        continue;
-                    };
-                    let Some(pose) = player.pose.filter(|_| player.presence_attached) else {
-                        continue;
-                    };
-                    let dx = pose.eye_position_metres[0] - x;
-                    let dz = pose.eye_position_metres[2] - z;
-                    if dx.mul_add(dx, dz * dz) <= radius * radius {
-                        connections.insert(player.connection_id);
-                    }
+        let mut cells = BTreeSet::new();
+        for (x, z) in &xz_voxels {
+            let center = SpatialCell {
+                x: (*x as f32 * VOXEL_SIZE_METRES / size).floor() as i32,
+                z: (*z as f32 * VOXEL_SIZE_METRES / size).floor() as i32,
+            };
+            for cell_x in (center.x - cell_radius)..=(center.x + cell_radius) {
+                for cell_z in (center.z - cell_radius)..=(center.z + cell_radius) {
+                    cells.insert(SpatialCell {
+                        x: cell_x,
+                        z: cell_z,
+                    });
                 }
             }
         }
-        connections
+        let inner = self.lock();
+        let mut candidate_players = BTreeSet::new();
+        for cell in cells {
+            if let Some(players) = inner.cells.get(&cell) {
+                candidate_players.extend(players);
+            }
+        }
+        let radius_squared = radius * radius;
+        candidate_players
+            .into_iter()
+            .filter_map(|player_id| inner.players.get(player_id))
+            .filter_map(|player| {
+                let pose = player.pose.filter(|_| player.presence_attached)?;
+                xz_voxels
+                    .iter()
+                    .any(|(x, z)| {
+                        let dx = pose.eye_position_metres[0] - *x as f32 * VOXEL_SIZE_METRES;
+                        let dz = pose.eye_position_metres[2] - *z as f32 * VOXEL_SIZE_METRES;
+                        dx.mul_add(dx, dz * dz) <= radius_squared
+                    })
+                    .then_some(player.connection_id)
+            })
+            .collect()
     }
 
     pub(crate) fn join(
@@ -932,6 +949,27 @@ mod tests {
         assert_eq!(
             cell_for_pose(pose(1, -0.1, -64.1), 64),
             SpatialCell { x: -1, z: -2 }
+        );
+    }
+
+    #[test]
+    fn edit_interest_batches_voxels_into_one_exact_recipient_union() {
+        let hub = hub(PresenceConfig {
+            spatial_cell_metres: 4,
+            interest_radius_metres: 5,
+            ..PresenceConfig::default()
+        });
+        let (first_claim, _first) = joined_at(&hub, 1, 0.0, 0.0);
+        let (second_claim, _second) = joined_at(&hub, 2, 30.0, 0.0);
+        let (_far_claim, _far) = joined_at(&hub, 3, 60.0, 0.0);
+        let recipients = hub.connections_near_voxels([
+            VoxelCoord::new(0, 10, 0),
+            VoxelCoord::new(0, 11, 0),
+            VoxelCoord::new(300, 10, 0),
+        ]);
+        assert_eq!(
+            recipients,
+            BTreeSet::from([first_claim.connection_id, second_claim.connection_id])
         );
     }
 
