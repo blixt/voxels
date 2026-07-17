@@ -144,6 +144,85 @@ mod tests {
     }
 
     #[test]
+    fn terrain_horizon_lighting_tracks_key_direction_and_preserves_sky_access() {
+        fn smoothstep(low: f32, high: f32, value: f32) -> f32 {
+            let amount = ((value - low) / (high - low)).clamp(0.0, 1.0);
+            amount * amount * (3.0 - 2.0 * amount)
+        }
+        fn lighting(profile: u16, light: Vec3) -> [f32; 2] {
+            let angles = [
+                0.0_f32,
+                6.0_f32.to_radians(),
+                16.0_f32.to_radians(),
+                35.0_f32.to_radians(),
+            ];
+            let decoded = std::array::from_fn::<_, 4, _>(|direction| {
+                angles[usize::from((profile >> (direction * 2)) & 3)]
+            });
+            let horizontal = glam::Vec2::new(light.x, light.z).abs();
+            let x_horizon = if light.x >= 0.0 {
+                decoded[0]
+            } else {
+                decoded[1]
+            };
+            let z_horizon = if light.z >= 0.0 {
+                decoded[3]
+            } else {
+                decoded[2]
+            };
+            let horizon = (x_horizon * horizontal.x + z_horizon * horizontal.y)
+                / (horizontal.x + horizontal.y).max(0.0001);
+            let elevation = light
+                .y
+                .max(0.0)
+                .atan2(glam::Vec2::new(light.x, light.z).length().max(0.0001));
+            let key = smoothstep(
+                horizon - 4.0_f32.to_radians(),
+                horizon + 4.0_f32.to_radians(),
+                elevation,
+            );
+            let accessibility = decoded
+                .into_iter()
+                .map(|angle| angle.cos().powi(2))
+                .sum::<f32>()
+                * 0.25;
+            [key, 1.0 + (accessibility - 1.0) * 0.72]
+        }
+
+        // East has a 35-degree ridge while the other three sectors are open. Parent matches own.
+        let profile = 3_u16 | (3_u16 << 8);
+        let low_east = Vec3::new(1.0, 10.0_f32.to_radians().tan(), 0.0).normalize();
+        let low_west = Vec3::new(-1.0, 10.0_f32.to_radians().tan(), 0.0).normalize();
+        let high_east = Vec3::new(1.0, 60.0_f32.to_radians().tan(), 0.0).normalize();
+        let east = lighting(profile, low_east);
+        let west = lighting(profile, low_west);
+        let high = lighting(profile, high_east);
+        assert!(
+            east[0] < 0.01,
+            "low east light is below the encoded ridge: {east:?}"
+        );
+        assert!(
+            west[0] > 0.99,
+            "turning the key light reveals the open west sky: {west:?}"
+        );
+        assert!(
+            high[0] > 0.99,
+            "a high key light clears the same ridge: {high:?}"
+        );
+        assert!(
+            (0.90..1.0).contains(&east[1]),
+            "one blocked sector softly reduces sky access"
+        );
+
+        let voxels = include_str!("shaders/voxels.wgsl");
+        assert!(voxels.contains("fn unpack_surface_horizon_profile("));
+        assert!(voxels.contains("fn terrain_horizon_lighting("));
+        assert!(voxels.contains("normalize(frame.key_light_direction.xyz)"));
+        assert!(voxels.contains("* input.terrain_lighting.x"));
+        assert!(voxels.contains("* input.terrain_lighting.y"));
+    }
+
+    #[test]
     fn cloud_raymarch_stratifies_and_reconstructs_bounded_samples() {
         let clouds = include_str!("shaders/clouds.wgsl");
         assert!(clouds.contains("fract(stable_sample_phase + f32(index) * 0.61803398875)"));

@@ -27,6 +27,7 @@ struct VertexOut {
   @location(1) normal: vec3<f32>,
   @location(2) @interpolate(flat) material: u32,
   @location(3) ao: f32,
+  @location(4) @interpolate(flat) terrain_lighting: vec2<f32>,
 };
 
 const CORNERS = array<vec2<f32>, 4>(
@@ -43,11 +44,64 @@ fn corner_ao(packed: u32, corner: u32) -> f32 {
 }
 
 fn unpack_surface_macro_normal(packed: u32, parent: bool) -> vec3<f32> {
-  let shift = select(vec2<u32>(0u, 7u), vec2<u32>(14u, 21u), parent);
-  let x = f32((packed >> shift.x) & 127u) * (2.0 / 127.0) - 1.0;
-  let z = f32((packed >> shift.y) & 127u) * (2.0 / 127.0) - 1.0;
+  let shift = select(vec2<u32>(0u, 6u), vec2<u32>(12u, 18u), parent);
+  let x = f32((packed >> shift.x) & 63u) * (2.0 / 63.0) - 1.0;
+  let z = f32((packed >> shift.y) & 63u) * (2.0 / 63.0) - 1.0;
   let y = sqrt(max(1.0 - x * x - z * z, 0.01));
   return normalize(vec3<f32>(x, y, z));
+}
+
+fn unpack_surface_horizon_profile(material: u32, ao: u32) -> u32 {
+  let low = (material >> 19u) & 255u;
+  let middle = ((material >> 30u) & 1u) << 8u;
+  let high = ((ao >> 25u) & 127u) << 9u;
+  return low | middle | high;
+}
+
+fn decoded_horizon_code(profile: u32, direction: u32, parent: bool) -> u32 {
+  let parent_shift = select(0u, 8u, parent);
+  return (profile >> (parent_shift + direction * 2u)) & 3u;
+}
+
+fn terrain_horizon_lighting(
+  profile: u32,
+  parent_blend: f32,
+  light_direction: vec3<f32>,
+) -> vec2<f32> {
+  let horizon_slopes = array<f32, 4>(0.0, 0.10510424, 0.2867454, 0.70020753);
+  let sector_accessibility = array<f32, 4>(1.0, 0.9890738, 0.923798, 0.6710101);
+  var slopes = array<f32, 4>();
+  var sky_accessibility = vec2<f32>(0.0);
+  for (var direction = 0u; direction < 4u; direction += 1u) {
+    let own_code = decoded_horizon_code(profile, direction, false);
+    let parent_code = decoded_horizon_code(profile, direction, true);
+    slopes[direction] = mix(
+      horizon_slopes[own_code],
+      horizon_slopes[parent_code],
+      parent_blend,
+    );
+    sky_accessibility += vec2<f32>(
+      sector_accessibility[own_code],
+      sector_accessibility[parent_code],
+    );
+  }
+  sky_accessibility *= 0.25;
+  let horizontal = abs(light_direction.xz);
+  let x_horizon = select(slopes[1], slopes[0], light_direction.x >= 0.0);
+  let z_horizon = select(slopes[2], slopes[3], light_direction.z >= 0.0);
+  let horizon_slope = dot(vec2<f32>(x_horizon, z_horizon), horizontal)
+    / max(horizontal.x + horizontal.y, 0.0001);
+  let light_slope = max(light_direction.y, 0.0) / max(length(light_direction.xz), 0.0001);
+  // tan(a +/- 4deg) is locally tan(a) +/- 0.07 * sec(a)^2. This slope-space form avoids
+  // transcendental work per vertex while retaining the same broad angular penumbra.
+  let horizon_softness = 0.07 * (1.0 + horizon_slope * horizon_slope);
+  let key_visibility = smoothstep(
+    horizon_slope - horizon_softness,
+    horizon_slope + horizon_softness,
+    light_slope,
+  );
+  let sky_visibility = mix(sky_accessibility.x, sky_accessibility.y, parent_blend);
+  return vec2<f32>(key_visibility, mix(1.0, sky_visibility, 0.72));
 }
 
 fn lod_boundary_center(boundary: u32) -> vec2<f32> {
@@ -112,18 +166,30 @@ fn vs_main(
     default: { local = vec3<f32>(uv.x * extent.x, uv.y * extent.y, 0.0); normal.z = -1.0; }
   }
   let world = origin + local;
-  let surface_macro_normal = (ao & 0x10000000u) != 0u;
+  let surface_macro_normal = (ao & 0x01000000u) != 0u;
+  var terrain_lighting = vec2<f32>(1.0);
   if surface_macro_normal {
     let own_normal = unpack_surface_macro_normal(ao, false);
     let parent_normal = unpack_surface_macro_normal(ao, true);
+    let parent_blend = surface_parent_normal_blend(world, material);
     let terrain_normal = normalize(
-      mix(own_normal, parent_normal, surface_parent_normal_blend(world, material)),
+      mix(own_normal, parent_normal, parent_blend),
     );
     normal = select(
       normalize(mix(normal, terrain_normal, surface_wall_macro_blend(world))),
       terrain_normal,
       face == 2u,
     );
+    let resolved_horizon_lighting = terrain_horizon_lighting(
+      unpack_surface_horizon_profile(material, ao),
+      parent_blend,
+      normalize(frame.key_light_direction.xyz),
+    );
+    // Canonical 10cm chunks do not carry a streamed horizon profile. Fade the macro term in over
+    // a broad world-distance band so their handoff to Stride2 cannot move a dark contour with the
+    // ownership ring. Beyond 32m every coarse level receives the full landscape lighting cue.
+    let horizon_strength = smoothstep(8.0, 32.0, distance(world.xz, frame.camera_time.xz));
+    terrain_lighting = mix(vec2<f32>(1.0), resolved_horizon_lighting, horizon_strength);
   }
   var out: VertexOut;
   out.position = frame.view_projection * vec4<f32>(world, 1.0);
@@ -131,6 +197,7 @@ fn vs_main(
   out.normal = normal;
   out.material = material;
   out.ao = select(corner_ao(ao, corner), 1.0, surface_macro_normal);
+  out.terrain_lighting = terrain_lighting;
   return out;
 }
 
@@ -497,7 +564,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let material = input.material & 0xffffu;
   let surface_detail = sample_surface_detail(input.world, input.normal, material);
   let sun = normalize(frame.key_light_direction.xyz);
-  let shadow = sun_visibility(input.world, input.normal) * cloud_sun_visibility(input.world);
+  let shadow = sun_visibility(input.world, input.normal)
+    * cloud_sun_visibility(input.world)
+    * input.terrain_lighting.x;
   let sky_visibility = surface_detail.normal.y * 0.5 + 0.5;
   let cell = floor(input.world / frame.viewport_voxel.z);
   let flat_grain = mix(0.88, 1.12, hash31(cell + vec3<f32>(f32(material) * 3.1)));
@@ -510,7 +579,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   );
   let voxel_ambient_occlusion = select(1.0, mix(0.52, 1.0, input.ao), frame.render_options.x > 0.5);
   let spatial_ambient_occlusion = screen_space_ambient_visibility(input.position.xy, input.world);
-  let ambient_occlusion = min(voxel_ambient_occlusion, spatial_ambient_occlusion);
+  let ambient_occlusion = min(voxel_ambient_occlusion, spatial_ambient_occlusion)
+    * input.terrain_lighting.y;
   let interior_ambient = mix(1.0, 0.05, frame.interior.x);
   let sky_irradiance = mix(frame.ground_atmosphere.rgb, frame.sky_horizon.rgb * 0.48, sky_visibility)
     * interior_ambient;
