@@ -1344,8 +1344,9 @@ impl Renderer {
             f64::from(initial_camera.position.x),
             f64::from(initial_camera.position.z),
         ];
-        let celestial_observation =
-            world_environment.celestial_observation(observer_world_xz_metres);
+        let celestial_observation = world_environment
+            .celestial_observation(observer_world_xz_metres)
+            .ok_or_else(|| "initial celestial observation is invalid".to_owned())?;
         let daylight_phase = DaylightPhase::for_solar_position(
             celestial_observation.sun_direction[1],
             celestial_observation.solar_hour_angle_radians,
@@ -1887,12 +1888,17 @@ impl Renderer {
             .apply(self.server_world_environment);
     }
 
-    fn refresh_effective_environment(&mut self) {
+    fn refresh_effective_environment(&mut self) -> bool {
         let state = self
             .debug_environment_override
             .apply(self.server_world_environment);
         self.world_environment = state;
-        self.celestial_observation = state.celestial_observation(self.observer_world_xz_metres);
+        let Some(celestial_observation) =
+            state.celestial_observation(self.observer_world_xz_metres)
+        else {
+            return false;
+        };
+        self.celestial_observation = celestial_observation;
         self.daylight_phase = DaylightPhase::for_solar_position(
             self.celestial_observation.sun_direction[1],
             self.celestial_observation.solar_hour_angle_radians,
@@ -1915,6 +1921,7 @@ impl Renderer {
             state.cloud_velocity_metres_per_second,
             state.weather_revision,
         );
+        true
     }
 
     pub fn set_route_status(&mut self, chapter_label: &'static str, progress_percent: u8) {
@@ -2092,13 +2099,13 @@ impl Renderer {
             }
             UiAction::TimeChanged(control) => {
                 self.debug_environment_override.day_fraction = control.day_fraction();
-                self.refresh_effective_environment();
+                _ = self.refresh_effective_environment();
             }
             UiAction::WeatherChanged(control) => {
                 self.debug_environment_override.weather_fraction = control
                     .preset()
                     .map(|preset| preset.anchor_weather_fraction());
-                self.refresh_effective_environment();
+                _ = self.refresh_effective_environment();
             }
             UiAction::CreativeFlightRequested(active) => {
                 self.host_ui_action = Some(HostUiAction::CreativeFlightRequested(active));
@@ -2680,7 +2687,9 @@ impl Renderer {
         self.time += dt;
         self.observer_world_xz_metres =
             [f64::from(camera.position.x), f64::from(camera.position.z)];
-        self.refresh_effective_environment();
+        if !self.refresh_effective_environment() {
+            return false;
+        }
         let shadows_active = self.options.shadows && self.environment.shadow_strength > 0.01;
         let mut frame_options = self.options;
         frame_options.shadows = shadows_active;

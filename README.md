@@ -132,6 +132,11 @@ See [docs/architecture.md](docs/architecture.md) for format, authority, and rese
   <kbd>Space</kbd> to rise and <kbd>Shift</kbd> to descend. Renderer policy stays in
   `config/client.toml` instead of filling the play UI with operational toggles.
 
+The shared server clock drives a familiar full year: seasonal sun paths, lunar phases, a rotating
+sidereal star field, and subtle deterministic twinkle are identical for every client. World
+coordinate `(0, 0)` is the celestial equator; moving `-Z` travels north and `+X` east across a
+repeating spherical observer frame while the editable terrain itself remains infinite and unwrapped.
+
 ## Automation
 
 `window.__VOXELS__.snapshot()` returns a versioned numeric telemetry stream for browser automation.

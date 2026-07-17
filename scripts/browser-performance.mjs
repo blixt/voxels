@@ -140,6 +140,15 @@ function phaseSummary(captures) {
     atmosphere: {
       daylightPhase: latest[SNAPSHOT.daylightPhase],
       dayFraction: latest[SNAPSHOT.dayFraction],
+      localSolarDayFraction: latest[SNAPSHOT.localSolarDayFraction],
+      yearFraction: latest[SNAPSHOT.yearFraction],
+      moonOrbitFraction: latest[SNAPSHOT.moonOrbitFraction],
+      twinklePhase: latest[SNAPSHOT.twinklePhase],
+      latitudeDegrees: latest[SNAPSHOT.latitudeDegrees],
+      longitudeDegrees: latest[SNAPSHOT.longitudeDegrees],
+      localSiderealAngleRadians: latest[SNAPSHOT.localSiderealAngleRadians],
+      moonIlluminatedFraction: latest[SNAPSHOT.moonIlluminatedFraction],
+      celestialRevision: latest[SNAPSHOT.celestialRevision],
       sunDirection: [
         latest[SNAPSHOT.sunDirectionX],
         latest[SNAPSHOT.sunDirectionY],
@@ -424,6 +433,31 @@ async function atmosphereProfile(page) {
     }
     if (phase.atmosphere.cloudCoverage < 0.08 || phase.atmosphere.cloudCoverage > 0.94) {
       violations.push(`${name} cloud coverage escaped its normalized visual range`);
+    }
+    if (
+      !Number.isFinite(phase.atmosphere.localSolarDayFraction) ||
+      phase.atmosphere.localSolarDayFraction < 0 ||
+      phase.atmosphere.localSolarDayFraction >= 1 ||
+      !Number.isFinite(phase.atmosphere.yearFraction) ||
+      phase.atmosphere.yearFraction < 0 ||
+      phase.atmosphere.yearFraction >= 1 ||
+      !Number.isFinite(phase.atmosphere.moonOrbitFraction) ||
+      phase.atmosphere.moonOrbitFraction < 0 ||
+      phase.atmosphere.moonOrbitFraction >= 1 ||
+      !Number.isFinite(phase.atmosphere.moonIlluminatedFraction) ||
+      phase.atmosphere.moonIlluminatedFraction < 0 ||
+      phase.atmosphere.moonIlluminatedFraction > 1
+    ) {
+      violations.push(`${name} celestial telemetry escaped its normalized range`);
+    }
+    for (const [body, direction] of [
+      ["sun", phase.atmosphere.sunDirection],
+      ["moon", phase.atmosphere.moonDirection],
+    ]) {
+      const length = Math.hypot(...direction);
+      if (!Number.isFinite(length) || Math.abs(length - 1) > 0.001) {
+        violations.push(`${name} ${body} direction was not normalized`);
+      }
     }
     if (
       reference &&

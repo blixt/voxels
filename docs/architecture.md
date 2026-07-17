@@ -235,15 +235,19 @@ three caster passes, while live diagnostics expose their draw-call cost.
 
 Outdoor lighting is a continuously sampled Rust-owned environment shared by shadow projection, sky
 radiance, voxel lighting, cloud shadowing, precipitation, and aerial perspective. The native service
-anchors both day and weather fractions to Unix time, sends one restart-stable snapshot, and lets every
-client extrapolate the same continuous clocks against synchronized server time. The generator maps
-the same smooth regional weights used by terrain into normalized humidity, coldness, aerosol,
-cloudiness, horizon warmth, and haze fields. The shell samples those fields only at the camera—never
-in hot canonical or LOD column loops—and the renderer eases toward the target independently of
-display rate. Day phases change the solar/lunar orbit and stars, while the weather timeline moves
-through clear, cloud, overcast, rain, storm, and clearing states that coherently alter direct light,
-shadow softness, sky radiance, fog, cloud density, precipitation, and cold-region snow without
-changing world geometry.
+anchors an absolute world-day plus weather fraction to Unix time, sends one restart-stable snapshot,
+and lets every client extrapolate the same continuous clocks against synchronized server time. One
+planetary model derives the seasonal sun, independent inclined lunar orbit and phases, sidereal star
+basis, and deterministic bounded twinkle; lighting, shadows, the moon disc, and sky therefore cannot
+drift onto separate clocks. The infinite terrain plane acts as a universal cover of the configured
+sphere: `+X` is east, `-Z` is north, and the observer frame transports continuously across repeating
+poles without wrapping any terrain. The generator maps the same smooth regional weights used by
+terrain into normalized humidity, coldness, aerosol, cloudiness, horizon warmth, and haze fields. The
+shell samples those fields only at the camera—never in hot canonical or LOD column loops—and the
+renderer eases toward the target independently of display rate. The weather timeline moves through
+clear, cloud, overcast, rain, storm, and clearing states that coherently alter direct light, shadow
+softness, sky radiance, fog, cloud density, precipitation, and cold-region snow without changing
+world geometry.
 
 The world first renders in linear HDR to `Rgba16Float`; the present pass applies the Khronos PBR
 Neutral tone mapper and an sRGB transfer before the Rust UI is composited.

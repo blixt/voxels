@@ -445,7 +445,7 @@ impl WorldEnvironmentState {
         )
     }
 
-    pub fn celestial_observation(self, world_xz_metres: [f64; 2]) -> CelestialObservation {
+    pub fn celestial_observation(self, world_xz_metres: [f64; 2]) -> Option<CelestialObservation> {
         let state = self.sanitized();
         CelestialModel {
             planet_circumference_metres: f64::from(state.planet_circumference_metres),
@@ -458,7 +458,6 @@ impl WorldEnvironmentState {
             f64::from(state.year_fraction),
             f64::from(state.moon_orbit_fraction),
         )
-        .expect("sanitized celestial state and finite camera coordinates")
     }
 }
 
@@ -526,9 +525,12 @@ fn smoothstep(start: f32, end: f32, value: f32) -> f32 {
 impl Default for OutdoorEnvironment {
     fn default() -> Self {
         let state = WorldEnvironmentState::default();
+        let Some(celestial) = state.celestial_observation([0.0, 0.0]) else {
+            return Self::fallback();
+        };
         Self::for_celestial(
             AtmosphereSample::default(),
-            state.celestial_observation([0.0, 0.0]),
+            celestial,
             WeatherState::for_cycle(0.08, 0.24, 900.0, 0, 0.32),
         )
     }
@@ -566,9 +568,12 @@ impl OutdoorEnvironment {
             day_fraction: phase.anchor_day_fraction(),
             ..WorldEnvironmentState::default()
         };
+        let Some(celestial) = state.celestial_observation([0.0, 0.0]) else {
+            return Self::fallback();
+        };
         Self::for_celestial(
             sample,
-            state.celestial_observation([0.0, 0.0]),
+            celestial,
             WeatherState::for_cycle(0.08, sample.cloudiness, 900.0, 0, sample.coldness),
         )
     }
@@ -857,7 +862,10 @@ mod tests {
             year_fraction: 0.0,
             ..WorldEnvironmentState::default()
         };
-        OutdoorEnvironment::for_celestial(sample, state.celestial_observation([0.0, 0.0]), weather)
+        let Some(celestial) = state.celestial_observation([0.0, 0.0]) else {
+            panic!("test celestial state must be valid");
+        };
+        OutdoorEnvironment::for_celestial(sample, celestial, weather)
     }
 
     #[test]

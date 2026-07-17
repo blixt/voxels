@@ -2942,8 +2942,7 @@ mod tests {
             (first.year_fraction - (82.5_f64 / 365.242_2).rem_euclid(1.0) as f32).abs() < 1.0e-6
         );
         assert!(
-            (first.moon_orbit_fraction
-                - (82.5_f64 / 27.321_661 + 0.17).rem_euclid(1.0) as f32)
+            (first.moon_orbit_fraction - (82.5_f64 / 27.321_661 + 0.17).rem_euclid(1.0) as f32)
                 .abs()
                 < 1.0e-6
         );
