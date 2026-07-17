@@ -75,7 +75,7 @@ const SURFACE_HORIZON_AO_SHIFT: u32 = 25;
 // clipmap snap turn unresolved relief into a false near-horizontal slope (and an almost black
 // valley at low sun angles). A conservative macro cue remains legible while staying stable across
 // adjacent LOD sampling phases.
-const SURFACE_MACRO_SLOPE_SCALE: f32 = 0.25;
+const SURFACE_MACRO_SLOPE_SCALE: f32 = 0.40;
 const SURFACE_MACRO_SLOPE_MAX: f32 = 0.5;
 const LOD_TRANSITION_MESH_KEY: MeshKey = (u8::MAX, 0, 0, 0);
 const GPU_QUERY_COUNT: u32 = 24;
@@ -4733,7 +4733,7 @@ mod tests {
         let normal_x = (value & 63) as f32 * (2.0 / 63.0) - 1.0;
         let normal_z = ((value >> 6) & 63) as f32 * (2.0 / 63.0) - 1.0;
         assert!(
-            (-0.14..-0.10).contains(&normal_x),
+            (-0.23..-0.18).contains(&normal_x),
             "uphill +X must retain a gentle, stable tilt toward -X: {normal_x}"
         );
         assert!(normal_z.abs() < 0.02);
