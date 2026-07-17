@@ -59,9 +59,10 @@ Valve likewise documents snapshot rate limits, interpolation, and bounded extrap
 
 The canonical command map, including native bot populations and browser gates, is
 [Testing and performance](testing.md). `vp run bench:bots` adds real VXWP movement, terrain
-streaming, digging, building, following, process sampling, exact wire accounting, SQLite growth, and
-one Chromium observer at 4/8/16/32/64 clients. See the
-[2026-07-17 bot load baseline](20260717-bot-load-report.md) for measured results.
+streaming, digging, building, following, process sampling, exact per-client wire budgets, SQLite
+growth, and an optional Chromium observer at up to 1,000 clients. See the
+[2026-07-17 bot load baseline](20260717-bot-load-report.md) and the
+[1,000-player traffic-shaping report](20260717-1000-player-traffic-report.md) for measured results.
 
 Run the focused optimized probe with:
 
@@ -69,13 +70,13 @@ Run the focused optimized probe with:
 PATH="$HOME/.cargo/bin:$PATH" cargo test --release -p voxels-world-service presence::tests:: -- --nocapture
 ```
 
-On 2026-07-14 on an Apple M3 Max (16 CPU cores), the checked-in tests measured:
+On 2026-07-17 on an Apple M3 Max (16 CPU cores), the checked-in tests measured:
 
 | Scenario                                                              |                                              Result |
 | --------------------------------------------------------------------- | --------------------------------------------------: |
-| 512 players at one location; one observer discovers 511 peers         |                        8 deltas, 41,264 bytes total |
-| Scheduler query, ranking, validation, and encoding for those 8 deltas |                                      1.401 ms total |
-| One observer plus 511 players outside its interest cells              | 0 entity bytes after the initial empty stream frame |
+| 1,000 players at one location; one observer discovers 999 peers          |                       16 deltas, 80,688 bytes total |
+| Scheduler query, ranking, validation, and encoding for those 16 deltas   |                                      2.543 ms total |
+| One observer plus 999 players outside its interest cells                 | 0 entity bytes after the initial empty stream frame |
 
 Timing is a local diagnostic, not a CI threshold. The durable regressions assert the record budget,
 complete dense membership, exact wire bytes, negative-cell behavior, explicit disconnect leaves, and

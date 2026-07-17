@@ -81,6 +81,8 @@ The normal capacity curve uses a fresh isolated world service and database for e
 vp run bench:bots
 vp run bench:bots -- --counts=16,32,64 --duration=30
 vp run bench:bots -- --counts=64 --layout=dense
+vp run bench:bots -- --counts=256,512,1000 --duration=10 --no-browser \
+  --service-profile=worldgen --bot-profile=worldgen
 ```
 
 Use growth mode to retain one temporary database and daemon across successive waves. Stable bot
@@ -101,6 +103,8 @@ Each stage records:
 
 - daemon and bot-driver CPU, RSS, virtual memory, and thread distributions;
 - delivered TCP stream bytes, WebSocket frame bytes, exact VXWP payloads, paths, and message kinds;
+- per-client sustained/burst payload envelopes, p95/max rates, envelope violations, and bandwidth
+  split among presence, edits, and visible world products;
 - ping, chunk, surface, and edit latency distributions;
 - connected/visible players, pose traffic, edit acceptance, mutations, copies, resyncs, and errors;
 - SQLite main/WAL/SHM bytes over time plus players, inventories, live edits, operation history,
@@ -108,9 +112,11 @@ Each stage records:
 - browser avatar readiness, interactive/full LOD readiness, final terrain coverage, frame history,
   CPU/GPU timing, WASM memory, GPU memory, and console/WebGPU failures.
 
-The harness fails on missing clients or avatars, rejected edits, resyncs, protocol errors, or browser
-errors. A partial observer world is reported explicitly rather than allowing a low frame time with
-less rendered geometry to look like a performance improvement.
+The harness fails on missing clients or avatars, unexpected edit rejection, resyncs, protocol
+errors, per-client budget violations, or browser errors. Expected authoritative placement conflicts
+in a dense shared worksite are counted separately rather than mislabeled as protocol failures. A
+partial observer world is reported explicitly rather than allowing a low frame time with less
+rendered geometry to look like a performance improvement.
 
 Timestamped JSON and Markdown plus `latest.json`, `latest.md`, and the last observer screenshot are
 written to `target/harness/bots/`. Preserve a timestamped JSON file when comparing a change; `latest`
